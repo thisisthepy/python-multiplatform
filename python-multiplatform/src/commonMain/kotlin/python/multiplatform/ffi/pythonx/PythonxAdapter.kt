@@ -1539,6 +1539,16 @@ object PythonxAdapter {
             _MODULES.append(module)
             module.__getattr__ = _module_getattr(module, kotlin_package)
             module.__dir__ = _module_dir(kotlin_package)
+            # `PythonProxySource` may have written a positional function for a name this layer can
+            # serve better -- it knows arity and nothing else, while this knows parameter names,
+            # defaults and where `${'$'}composer` sits. A name in `__dict__` beats `__getattr__`, so the
+            # positional one has to go rather than merely be outvoted. It marks its own, so nothing
+            # a consumer put there by hand is touched.
+            for _name in [
+                _n for _n, _v in list(module.__dict__.items())
+                if getattr(_v, '_pm_positional', False) and kotlin_name_for(kotlin_package, _n)
+            ]:
+                del module.__dict__[_name]
             return module
 
 
