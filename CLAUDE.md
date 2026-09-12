@@ -432,6 +432,27 @@ grep 하면 그 거부를 못 본다 — 그러면 머지된 줄 알고 **옛 �
   즉 `--effort` 를 붙일 수 있는 것은 `gemini-3.6-flash` 처럼 접미사 없는 이름뿐이다.
   **어느 쪽이든 즉시 종료되므로, 배경 실행이면 아무 일도 안 하고 성공처럼 보인다.**
 - 실행 후 로그 앞부분을 반드시 확인한다. 인자 오류는 즉시 종료되는데, 배경 실행이면 성공처럼 보인다.
+- **`--dangerously-skip-permissions` 는 헤드리스에서 이제 필수다.** 없으면 도구가
+  `command` 권한을 요구하는 순간 자동 거부되고, agy 는 아무 일도 하지 않은 채 끝난다.
+  2026-09-13 실측 — 문서 동기화 작업을 보냈더니 worktree 가 그대로였고 출력은 이것뿐이었다:
+
+  ```
+  jetski: no output produced — a tool required the "command" permission that
+  headless mode cannot prompt for, so it was auto-denied.
+  ```
+
+  **이 실패는 종료 코드로 잡히지 않는다.** `echo "AGY_EXIT=$?"` 를 붙여도 그 줄이 로그에
+  나타나지 않았다 — 즉 배경 실행이면 "완료"로 보이고 산출물만 없다. 위의 "로그 앞부분을
+  확인한다" 가 이 경우에는 부족하다: **worktree 의 `git status --short` 를 직접 봐야 한다.**
+
+  읽을 디렉터리도 같이 줘야 한다:
+
+  ```bash
+  agy -p "..." --model <model> --print-timeout 40m \
+      --dangerously-skip-permissions \
+      --add-dir <worktree> --add-dir <필요한 venv 등>
+  ```
+
 - **사용량 한도는 Gemini 계열과 Claude 계열이 별도로 집계된다.** 한쪽이
   `Individual quota reached` 로 막혀도 다른 쪽은 그대로 쓸 수 있으니, 작업을 멈추지 말고 남은 계열로 계속 진행한다.
 
