@@ -165,11 +165,17 @@ Gradle 출력을 `| tail`, `| grep`, `| head` 로 넘긴 뒤 종료 코드를 �
 | 현재 세션의 `Agent` 도구 | `Agent(model=..., run_in_background)` | 구현 · 조사. **알림이 돌아오므로 폴링이 필요한 작업에 맞다** |
 | `agy` | `agy -p "..." --model ...` | 구현 · 조사. 배경 프로세스라 인터럽트에 강하다 |
 
-**2번 계정(`~/.claude-alt`)은 더 이상 쓰지 않는다.** 구독이 끝나
-`Your organization has disabled Claude subscription access for Claude Code` 로 즉시 거절된다
-(2026-08-24 확인, `.claude.json` 의 `billingType: none` / `seatTier: None`). 되살리려 하지 마라.
-그 계정을 전제로 쓰여 있던 환경변수 정리 절차와 "로그인 안 됨" 오진 진단은 함께 삭제했다 —
-살아 있지 않은 수단의 운용법은 다음 사람을 잘못된 곳으로 보낸다.
+**2번 계정은 살아 있다 (2026-09-13 실측).** 래퍼가 둘 있다:
+
+    claude-sub   ~/.claude-alt 를 CLAUDE_CONFIG_DIR 로 쓰는 claude
+    agy-sub      /Volumes/macMini/agy-alt-home 를 HOME 으로 쓰는 agy
+
+둘 다 토큰·설정·대화 기록이 메인과 완전히 분리되어 있고, **한도도 따로 잡힌다.**
+
+이 문서에는 오래 "구독이 끝나 즉시 거절되니 되살리려 하지 마라"고 적혀 있었다(2026-08-24).
+그 진단은 2026-09-13 에 틀린 것으로 확인됐다. 그날 실제로 나온 것은 구독 거절이 아니라
+`Failed to authenticate: OAuth session expired and could not be refreshed` 였다 — **세션 만료이지
+구독 만료가 아니다.** 재로그인 후 정상 동작한다. 증상이 다르면 진단도 다시 해야 한다.
 
 ### `agy` 와 `Agent` 도구를 둘 다 적극적으로 쓴다
 
@@ -194,6 +200,21 @@ Gradle 출력을 `| tail`, `| grep`, `| head` 로 넘긴 뒤 종료 코드를 �
 
 **남은 사용량이 많은 쪽을 먼저 쓴다.** 한도는 모델 계열별로 따로 집계되므로, 배분 전에 각 수단에
 짧은 프롬프트를 보내 살아 있는지 확인하고 막힌 쪽은 건너뛴다. 한쪽이 막혀도 멈추지 않는다.
+
+### worktree 를 만들면 벤더 트리부터 세운다
+
+`git worktree add` 로 만든 새 worktree 에는 `torchnative/src/main/torch/` 가 **없다.** 그 상태로
+게이트를 돌리면 100 개 넘게 실패하고 전부 `torch._C has no _aten_implemented` 다 — 즉
+**게이트가 통째로 무의미해진다.** 2026-09-13 에 두 회차(ANE 디코드, Vulkan)가 그 위에서 자기
+작업을 판정했다. 한쪽은 "새 실패 0" 이라고 보고했는데 119 개가 이미 실패 중이라 새 실패가
+묻혀 있었고, 다른 쪽은 그 실패를 "빌드 순서 탓" 이라고 설명으로 넘겼다. 둘 다 틀렸다.
+
+    작업을 배분하기 **전에**, 조율 세션이 worktree 마다 돌린다:
+        PYTHON=/Volumes/macMini/caches/spike-venv/bin/python bash vendor/vendor_torch.sh
+        PYTHON=/Volumes/macMini/caches/spike-venv/bin/python bash vendor/install_shim.sh
+
+에이전트에게 맡기지 마라 — 권한 분류기가 막는 경우가 있고, 그러면 규칙을 지키는 에이전트는
+멈춰서 보고하고 안 지키는 에이전트는 우회한다. 둘 다 원하는 결과가 아니다.
 
 ### 서브 에이전트는 반드시 별도 프로세스로 띄운다
 
@@ -453,8 +474,30 @@ grep 하면 그 거부를 못 본다 — 그러면 머지된 줄 알고 **옛 �
       --add-dir <worktree> --add-dir <필요한 venv 등>
   ```
 
-- **사용량 한도는 Gemini 계열과 Claude 계열이 별도로 집계된다.** 한쪽이
-  `Individual quota reached` 로 막혀도 다른 쪽은 그대로 쓸 수 있으니, 작업을 멈추지 말고 남은 계열로 계속 진행한다.
+- **한도를 말하기 전에 `agy -p "/usage"` 로 실제 잔량을 조회한다.** 서브커맨드가 아니라
+  **슬래시 명령**이다 (`agy usage` 는 `unexpected argument` 로 거절된다). 출력은 이 모양이다:
+
+  ```
+  Gemini Models            Weekly Limit Remaining      65%   2026-09-19T17:17:10Z
+  Gemini Models            Five Hour Limit Remaining    0%   2026-09-13T21:25:17Z
+  Claude and GPT models    Weekly Limit Remaining      33%   2026-09-19T17:48:31Z
+  Claude and GPT models    Five Hour Limit Remaining    0%   2026-09-13T21:24:52Z
+  ```
+
+  **창이 둘이다 — 주간과 5시간.** 계열별로 따로 집계되는 것도 맞지만(리셋 시각이 각각 다르다),
+  실제로 막는 것은 대개 **5시간 창**이다. 위 예시가 그 상태다: 주간은 65% / 33% 남았는데
+  5시간 창이 양쪽 다 0% 라 아무것도 안 돈다. 주간 잔량만 보고 "여유 있다"고 판단하면 틀린다.
+
+  **`Individual quota reached` 를 보고 원인을 추측하지 마라.** 2026-09-13 에 같은 메시지를 두고
+  "총량 소진" 과 "동시 실행 수 제한" 두 가지로 연달아 오진했고, 둘 다 틀렸다. 실제로는
+  5시간 창이 0% 였다. **오진의 대가가 크다** — 살아 있는 계정을 죽은 것으로 보고해 몇 시간치
+  처리량을 그냥 버리거나, 반대로 죽은 쪽에 계속 회차를 던지게 된다.
+
+      막혔다 → 먼저 `agy -p "/usage"` → 어느 창이 0% 인지, 언제 리셋인지 확인 → 그 다음에 판단
+
+- **계정마다 따로 조회한다.** `agy` 와 `agy-sub` 는 별도 계정이라 잔량이 완전히 다르다.
+  같은 시각 실측: 메인은 5시간 창 0%/0%, 서브는 82%/100%. **한쪽이 막혀도 다른 쪽은 멀쩡하다.**
+  `claude` 와 `claude-sub` 도 마찬가지이므로, 막힌 수단을 건너뛰고 남은 수단으로 계속 진행한다.
 
 ### 헤드리스 에이전트에게 배경 실행을 시키지 마라
 
