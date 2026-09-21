@@ -50,3 +50,6 @@ wasm-experiment/.gradle/
 wasm-experiment/kotlin-js-store/
 wasm-experiment/native/probeA.*
 wasm-experiment/native/probeB.*
+
+# subagent worktrees live inside the repo
+.worktrees/
