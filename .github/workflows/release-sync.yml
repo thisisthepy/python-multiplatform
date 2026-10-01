@@ -1,7 +1,8 @@
 name: Release sync
 
-# Every push to develop refreshes the `release` branch (develop minus the
-# Markdown files that must not reach main) and keeps one release -> main PR open.
+# `release` is generated here, not maintained: every push to develop rebuilds it
+# as one commit on top of that develop commit (develop minus the Markdown files
+# that must not reach main), force-pushes it, and keeps one release -> main PR open.
 on:
   push:
     branches: [develop]
@@ -26,12 +27,16 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git fetch origin release:refs/remotes/origin/release || true
+          # Not used as a base (release is regenerated); the script reads the
+          # remote sha itself for --force-with-lease.
           bash tools/release/sync-release.sh --source "${GITHUB_SHA}" --push
 
       - name: Open or update PR release -> main
         env:
-          GH_TOKEN: ${{ github.token }}
+          # PRs created with GITHUB_TOKEN do not trigger other workflows, so the
+          # main-source-guard check would never run on this PR. Set the optional
+          # secret RELEASE_PR_TOKEN (PAT or app token) to make it run.
+          GH_TOKEN: ${{ secrets.RELEASE_PR_TOKEN || github.token }}
         run: |
           set -eu
           if ! git rev-parse -q --verify refs/heads/release >/dev/null; then exit 0; fi

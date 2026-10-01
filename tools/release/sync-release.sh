@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# Sync the release branch from a source ref (default: develop).
+# Regenerate the release branch from a source ref (default: develop).
+# release is CI-generated and disposable: exactly one commit on top of the
+# source commit, rebuilt every run; existing release branches are ignored.
 #
 # release tree = source tree minus Markdown files that must not reach main:
 #   (a) every *.md at the repository root except README.md
 #   (b) every *.md directly inside docs/  (docs/<sub>/... is untouched)
-# Everything else is kept. One linear commit per sync; no-op if tree unchanged.
+# Everything else is kept. Always one generated commit (parent = source);
+# no-op only if target already has that tree and that parent.
 # Uses plumbing + a private index file: the caller's working tree, index and
 # HEAD are never touched.
 #
@@ -21,7 +24,7 @@ while [ $# -gt 0 ]; do
     --target) TARGET="$2"; shift 2 ;;
     --push)   PUSH=1; shift ;;
     --dry-run) DRY=1; shift ;;
-    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -69,33 +72,30 @@ if [ "$(git symbolic-ref -q HEAD || true)" = "refs/heads/$TARGET" ]; then
   die "'$TARGET' is checked out here; switch away first"
 fi
 
-# Current release head: local, else origin's.
-base=""
-if base="$(git rev-parse -q --verify "refs/heads/$TARGET^{commit}" 2>/dev/null)"; then :
-elif base="$(git rev-parse -q --verify "refs/remotes/origin/$TARGET^{commit}" 2>/dev/null)"; then :
-else base=""; fi
+# release is a generated, disposable branch: always exactly one commit on top of
+# the source commit. Any existing local/remote release (possibly stale, from an
+# older workflow) is NOT used as a base; it is only compared for the no-op case.
+old_local=""
+old_local="$(git rev-parse -q --verify "refs/heads/$TARGET^{commit}" 2>/dev/null)" || old_local=""
 
-if [ -z "$base" ]; then
-  if [ "$new_tree" = "$(git rev-parse "$src_commit^{tree}")" ]; then
-    new_commit="$src_commit"
-  else
-    new_commit="$(git commit-tree "$new_tree" -p "$src_commit" -m "Release: sync from $SOURCE $short")"
-  fi
-  git update-ref "refs/heads/$TARGET" "$new_commit"
-  echo "created $TARGET at $(git rev-parse --short "$new_commit")"
+# No-op only if the existing target has exactly this tree AND this parent.
+if [ -n "$old_local" ] \
+   && [ "$(git rev-parse "$old_local^{tree}")" = "$new_tree" ] \
+   && [ "$(git rev-parse -q --verify "$old_local^" 2>/dev/null || true)" = "$src_commit" ]; then
+  echo "no changes: $TARGET already regenerated from $short"
+  new_commit="$old_local"
 else
-  if [ "$new_tree" = "$(git rev-parse "$base^{tree}")" ]; then
-    echo "no changes: $TARGET already up to date"
-    new_commit="$base"
-    # make sure the local branch exists when only origin had it
-    git rev-parse -q --verify "refs/heads/$TARGET" >/dev/null || git update-ref "refs/heads/$TARGET" "$base"
-  else
-    new_commit="$(git commit-tree "$new_tree" -p "$base" -m "Release: sync from $SOURCE $short")"
-    git update-ref "refs/heads/$TARGET" "$new_commit"
-    echo "$TARGET -> $(git rev-parse --short "$new_commit")"
-  fi
+  new_commit="$(git commit-tree "$new_tree" -p "$src_commit" -m "Release: sync from $SOURCE $short")"
+  git update-ref "refs/heads/$TARGET" "$new_commit"
+  echo "$TARGET -> $(git rev-parse --short "$new_commit") (parent $short)"
 fi
 
 if [ "$PUSH" -eq 1 ]; then
-  git push origin "refs/heads/$TARGET:refs/heads/$TARGET"
+  # release is rewritten from scratch on every run, so a plain push would be
+  # rejected as non-fast-forward. --force-with-lease pinned to the remote sha we
+  # observed overwrites only that exact state: if someone else moved release in
+  # the meantime we fail instead of clobbering. Without a remote release there
+  # is nothing to lose, so an empty expectation (must not exist) is used.
+  old_remote="$(git ls-remote origin "refs/heads/$TARGET" | cut -f1)"
+  git push --force-with-lease="refs/heads/$TARGET:$old_remote" origin "$new_commit:refs/heads/$TARGET"
 fi
