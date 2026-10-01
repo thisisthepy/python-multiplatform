@@ -4,9 +4,13 @@ Kotlin/Wasm reaching CPython 3.14 built for `wasm32-emscripten`, through `@WasmI
 **shared linear memory**. Not a JavaScript bridge: there is no JS frame in either the call path or
 the data path.
 
-Everything below is measured. `wasm-experiment/` reproduces the measurements and
-`docs/wasm-design.md` records how they were arrived at, including the several conclusions that were
-wrong before they were run.
+Everything below is measured. The standalone `wasm-experiment/` that first took the measurements
+was retired into this source set and `tools/wasm/` (it remains in git history: `git log --
+wasm-experiment`); `docs/wasm-design.md` records how they were arrived at, including the several
+conclusions that were wrong before they were run. The two claims the rest of this file stands on
+that only the experiment used to prove -- the shared memory surviving growth, and the interpreter
+carrying the `pyemscripten_2026_0` ABI -- are now `wasmJsTest/.../emscripten/WasmSharedMemoryGrowthTest`
+and `WasmInterpreterAbiTest`.
 
 ## Never call `withScopedMemoryAllocator`
 
@@ -428,10 +432,13 @@ overrides the probe list in `build.gradle.kts`. `karma.config.d/cpython.js` serv
 karma — `webpackCopy` for the glue (the bundle's directory is a fresh temp path every run) and a
 proxy for the document-relative stdlib zip.
 
-Needs a CPython Emscripten build; `-PwasmPythonDir=` or `PMP_PYTHON_DIR` override the default at
-`/Volumes/macMini/wasm-build/cpython314-abi/...`. The task **skips with a message** rather than
-failing when it is absent. `build-cpython-abi.sh` in that directory reproduces the build; it matches
-`pyemscripten_2026_0` (PEP 783) closely enough to load a compiled PyPI wheel.
+Needs a CPython Emscripten build. The default location is `<repo>/.caches/wasm-runtime`, which
+`./gradlew :python-multiplatform:buildWasmPython` (that is, `tools/wasm/build-cpython.sh`) fills;
+`-PwasmPythonDir=` or `PMP_PYTHON_DIR` override it. The task **skips with a message** rather than
+failing when it is absent. The script matches `pyemscripten_2026_0` (PEP 783) closely enough to load
+a compiled PyPI wheel, and its `verify` step checks the stdlib zip as well as `python.wasm` -- the
+zip the old out-of-repo build shipped predated its own patches, so under this library the
+interpreter reported `PYEMSCRIPTEN_PLATFORM_VERSION = None`.
 
 **An unpacked `python-multiplatform-wasm-runtime` zip works just as well, and that is what CI is
 wired to use.** What the tests need is not the CPython build tree but the five files

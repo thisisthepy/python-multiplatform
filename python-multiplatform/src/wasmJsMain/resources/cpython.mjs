@@ -193,7 +193,7 @@ function browserSettings() {
 
 const M = await EmscriptenModule(IS_NODE ? await nodeSettings() : browserSettings());
 
-// Deliberately NOT calling Py_InitializeEx here. `wasm-experiment/` brought the interpreter up
+// Deliberately NOT calling Py_InitializeEx here. The former `wasm-experiment/` brought the interpreter up
 // from JS because it was testing the call and memory path rather than who types the first call;
 // this has to test the library's own bring-up, so `Python3.initialize()` on the Kotlin side issues
 // `Py_Initialize` as a direct wasm call like any other.
@@ -546,7 +546,7 @@ export const PyCFunction_NewEx = bind("PyCFunction_NewEx");
 //      indices, and calling one means `table.get(i)(...)`.
 //
 // Neither is on a hot path. After registration, CPython calls Kotlin through `call_indirect` with
-// no JS frame at all -- 3.1 ns, measured in `wasm-experiment/` (Tests E and F).
+// no JS frame at all -- 3.1 ns, measured in the former `wasm-experiment/` (Tests E and F).
 //
 // A funcref is a funcref whatever instance produced it, which is why (1) works across two
 // independently instantiated modules.

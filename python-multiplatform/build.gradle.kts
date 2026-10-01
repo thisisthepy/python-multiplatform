@@ -895,7 +895,7 @@ kotlin {
     // What makes this target able to reach CPython at all is that Kotlin 2.4.20-Beta2 *imports* its
     // linear memory (`intrinsics.memory`) instead of defining one. Emscripten's memory is handed in
     // there, so a `PyObject*` is an address Kotlin can dereference directly. See docs/wasm-design.md
-    // and `wasm-experiment/`.
+    // and src/wasmJsMain/README.md.
     @OptIn(org.jetbrains.kotlin.gradle.targets.js.dsl.ExperimentalWasmDsl::class)
     wasmJs {
         nodejs()
@@ -1776,16 +1776,35 @@ listOf("Arm64" to "arm64-v8a", "X64" to "x86_64").forEach { (targetSuffix, abi) 
 // Ordering comes free from ES modules: the import-object module imports `cpython.mjs`, which has a
 // top-level `await`, so Emscripten is fully instantiated before the import object is built.
 //
-// The CPython build itself is not produced here. It is `/Volumes/macMini/wasm-build/
-// build-cpython-abi.sh` -- CPython 3.14.2 matched to `pyemscripten_2026_0` (PEP 783), relinked with
-// `wasmExports,wasmMemory` added to `-sEXPORTED_RUNTIME_METHODS`. Without those two the 8287 wasm
-// exports are present in the binary but unreachable from JS, so there is nothing to hand
-// `@WasmImport`; neither appears in PEP 783's ABI-sensitive list.
+// The CPython build itself is produced by `tools/wasm/build-cpython.sh` (also reachable as the
+// `buildWasmPython` task below) -- CPython 3.14.2 matched to `pyemscripten_2026_0` (PEP 783),
+// relinked with `wasmExports,wasmMemory` added to `-sEXPORTED_RUNTIME_METHODS`. Without those two the
+// 8287 wasm exports are present in the binary but unreachable from JS, so there is nothing to hand
+// `@WasmImport`; neither appears in PEP 783's ABI-sensitive list. Unlike every other platform's
+// CPython this is a build, not a download: no distributor ships a python.wasm with those exports.
+//
+// The script stages `python.wasm`, `python.mjs` and the stdlib zip into `<repo>/.caches/wasm-runtime`
+// -- the same three files an unpacked `python-multiplatform-wasm-runtime` zip holds -- and that is
+// the default here. It used to be an absolute path outside the repository; when that directory was
+// moved, every wasm task on every checkout silently skipped.
 // =================================================================================================
 
 val wasmPythonDir: String = (project.findProperty("wasmPythonDir")?.toString()
     ?: System.getenv("PMP_PYTHON_DIR")
-    ?: "/Volumes/macMini/wasm-build/cpython314-abi/cross-build/wasm32-emscripten/build/python")
+    ?: rootProject.layout.projectDirectory.dir(".caches/wasm-runtime").asFile.absolutePath)
+
+/**
+ * Builds the CPython Emscripten runtime into `.caches/` and stages it at the default
+ * [wasmPythonDir]. Long (a full CPython cross build) and needs network the first time (emsdk 5.0.3
+ * and the CPython 3.14.2 checkout), so nothing depends on it: the wasm tasks keep their
+ * skip-with-a-message contract when it has not been run.
+ */
+val buildWasmPython by tasks.registering(Exec::class) {
+    group = "python"
+    description = "Builds CPython 3.14.2 for wasm32-emscripten (pyemscripten_2026_0) into .caches/"
+    val script = rootProject.layout.projectDirectory.file("tools/wasm/build-cpython.sh").asFile
+    commandLine("bash", script.absolutePath, "all")
+}
 
 /**
  * The generated `cpython-config.mjs` that `cpython.mjs` imports.
@@ -1844,8 +1863,8 @@ fun Task.wasmRuntimePresent(marker: File): Boolean {
     if (marker.isFile) return true
     val remedy = "Unpack the published runtime " +
         "(io.github.thisisthepy:python-multiplatform-wasm-runtime:$libraryVersion) and point " +
-        "-PwasmPythonDir / PMP_PYTHON_DIR at it, or build one with " +
-        "/Volumes/macMini/wasm-build/build-cpython-abi.sh."
+        "-PwasmPythonDir / PMP_PYTHON_DIR at it, or build one into the default location with " +
+        "./gradlew :python-multiplatform:buildWasmPython (tools/wasm/build-cpython.sh)."
     val what = "$name: no CPython Emscripten build at ${marker.parentFile} " +
         "(looked for ${marker.name})."
     if (requireWasmRuntime) {

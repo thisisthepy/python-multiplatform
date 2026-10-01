@@ -1,0 +1,25 @@
+{
+  "name": "react-native-bench",
+  "version": "0.1.0",
+  "description": "Boundary-cost benchmark TurboModule: the JS <-> native crossing, priced against baselines measured in the same run.",
+  "main": "src/index.ts",
+  "private": true,
+  "files": [
+    "src",
+    "android",
+    "ios",
+    "react-native-bench.podspec"
+  ],
+  "peerDependencies": {
+    "react": "*",
+    "react-native": "*"
+  },
+  "codegenConfig": {
+    "name": "RNBenchSpec",
+    "type": "modules",
+    "jsSrcsDir": "src",
+    "android": {
+      "javaPackageName": "com.rnbench.bench"
+    }
+  }
+}

@@ -1,0 +1,38 @@
+// No `buildscript` block on purpose. This module is included in the app's build, so AGP, the
+// Kotlin plugin and the React Native plugin are already on the root project's classpath with
+// versions the app chose. Declaring them again here resolves against an empty repository list and
+// fails with "Could not find com.android.tools.build:gradle:" -- no version, because there is none
+// to inherit.
+
+apply plugin: "com.android.library"
+apply plugin: "org.jetbrains.kotlin.android"
+// Runs codegen for this library from ../package.json's codegenConfig and puts the generated
+// NativeBenchSpec on the compile classpath.
+apply plugin: "com.facebook.react"
+
+android {
+    namespace "com.rnbench.bench"
+    compileSdk rootProject.ext.has("compileSdkVersion") ? rootProject.ext.compileSdkVersion : 36
+
+    defaultConfig {
+        minSdk rootProject.ext.has("minSdkVersion") ? rootProject.ext.minSdkVersion : 24
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlin {
+        jvmToolchain(17)
+    }
+}
+
+repositories {
+    google()
+    mavenCentral()
+}
+
+dependencies {
+    implementation "com.facebook.react:react-android"
+}

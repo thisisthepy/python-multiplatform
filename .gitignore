@@ -45,11 +45,12 @@ google-services.json
 
 # Android Profiling
 *.hprof
-wasm-experiment/build/
-wasm-experiment/.gradle/
-wasm-experiment/kotlin-js-store/
-wasm-experiment/native/probeA.*
-wasm-experiment/native/probeB.*
 
 # subagent worktrees live inside the repo
 .worktrees/
+
+# repo-local caches: emsdk, the CPython wasm build and its staged runtime (tools/wasm/build-cpython.sh)
+.caches/
+
+# scratch space for agents and scripts; delete when done
+.tmp/
