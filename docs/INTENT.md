@@ -27,8 +27,8 @@ CPython interpreter inside a Kotlin Multiplatform application so that:
 3. **The same code runs on every target** a Kotlin Multiplatform app ships to: desktop JVM, Android,
    iOS, Android native, and the web (wasm, experimental).
 
-The CPython version moved on from 3.13 (the build pins 3.14.x today and plans free-threaded builds
-from 3.15t); the intent — embed **CPython itself**, not a re-implementation — is unchanged.
+The CPython version moved on from 3.13 (the build pins 3.14.x today and offers opt-in free-threaded 3.14t builds
+on desktop only); the intent — embed **CPython itself**, not a re-implementation — is unchanged.
 
 ## 2. Principles
 

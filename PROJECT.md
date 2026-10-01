@@ -84,8 +84,8 @@ Kotlin Multiplatform 에 CPython 을 임베딩해 **Kotlin 과 Python 이 서로
   KSP 업콜 테이블과 프록시(클래스·프로퍼티·companion·`suspend`·취소), jar 아티팩트 워커, Python 에서
   Compose 렌더(데스크톱), Android 부트스트랩, GraalVM 네이티브 이미지 업콜(데스크톱, 수동 검증).
 - **부분**: iOS·androidNative·wasm 의 업콜과 수명 검증, klib 워커(스캐너만), `.pyi` 스텁, GIL 해제,
-  free-threaded 전체 스위트, Linux/Windows.
-- **계획**: free-threaded 3.15t + `abi3t`, Android/iOS/wasm 의 Compose, 네이티브 이미지 검증 자동화.
+  Linux/Windows, free-threaded 는 desktop 한정·옵트인(3.14t, `-PpythonFreeThreaded=true`, 236 테스트 0 실패 — ROADMAP §9).
+- **계획**: Android/iOS 의 free-threaded(프리빌트 없음), Android/iOS/wasm 의 Compose, 네이티브 이미지 검증 자동화.
 
 ## 6. 큰 결정들
 
@@ -96,7 +96,7 @@ Kotlin Multiplatform 에 CPython 을 임베딩해 **Kotlin 과 Python 이 서로
 | 바인더는 **Kotlin 네임스페이스를 다른 이름으로 내보내지 않는다** | 사용자 규정. `androidx.*` 는 원본 Kotlin, `pythonx.*` 는 pythonx-compose 의 실제 패키지 |
 | 노출은 **블랙리스트** (`@PythonInternal`) | 화이트리스트는 붙이기를 잊으면 조용히 사라진다 |
 | 병렬성은 **free-threading**, 멀티 인터프리터 아님 | 인터프리터별 GIL 은 C 확장이 `Py_mod_multiple_interpreters` 를 선언해야 import 된다 |
-| free-threading 은 **3.15t 부터** | 3.13/3.14 free-threaded 빌드에는 Limited API 가 없다. `abi3t`(PEP 803)가 3.15 부터다 |
+| free-threading 은 **desktop 한정 옵트인** (3.14t, 기본 `pythonFreeThreaded=false`) | 3.14t 가 desktop 에서 `-PpythonFreeThreaded=true` 로 동작한다(236 테스트 0 실패, ROADMAP §9). free-threaded 프리빌트는 desktop 에만 있고 Android/iOS 에는 없다. `Py_LIMITED_API` 를 정의하지 않으므로 `abi3t` 는 막는 요인이 아니다 |
 | Desktop 은 **`invokeExact` 만** | `invoke` 는 호출마다 박싱한다 |
 | PanamaPort **미사용** | 라이선스(GPLv2+CE)와 ART 내부 구조 의존 |
 | LLVM JIT **불필요** | 시그니처에 구조체 값 전달·가변인자가 0개다 |

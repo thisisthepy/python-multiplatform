@@ -49,12 +49,12 @@ build caches, model weights, `node_modules`) into every worktree is how 86 workt
 |---|---|
 | `work/<topic>` | You. All work happens here. |
 | `develop` | Merged into from work branches after verification. Never commit to it directly. |
-| `release` | **Automation only.** Kept in sync from `develop` with the main-only file layout. |
+| `release` | **CI only.** Not a standing branch: CI regenerates it from every push to `develop`, in the main-only file layout, and opens the PR into `main`. It may not exist. Never write to it. |
 | `main` | **Pull request from `release` only.** Never push or merge to it directly. |
 
 `main` carries a reduced layout: of the Markdown files, only `README.md` stays at the repository
 root, and `docs/` keeps only its subdirectories (no Markdown files directly under `docs/`).
-`tools/release/sync-release.sh` produces that layout; do not hand-edit `release` or `main`.
+CI runs `tools/release/sync-release.sh` (`.github/workflows/release-sync.yml`) to produce that layout; do not hand-edit `release` or `main`.
 
 ## 5. Intent → Spec → Test → Code
 
@@ -181,7 +181,7 @@ around one.
    them to force uniformity.
 7. **Exposure is a blacklist.** Every `public` declaration is registered; `@PythonInternal` opts out.
    A whitelist (`@PythonAPI`) was rejected.
-8. **Parallelism comes from free-threaded CPython (3.15t+),** not from sub-interpreters.
+8. **Parallelism comes from free-threaded CPython (3.14t works on desktop with `-PpythonFreeThreaded=true`; default is GIL; see ROADMAP §9),** not from sub-interpreters.
 9. **Do not add PanamaPort as a dependency** (licence and dependence on ART internals).
 
 ## 13. Upcalls must work in a GraalVM native image

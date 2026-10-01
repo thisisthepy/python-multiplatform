@@ -207,9 +207,11 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 - **T-1** GIL builds: Kotlin threads attach a thread state and serialise on the GIL. `Status: partial`
   (see C-4).
 - **T-2** Free-threaded builds selected with `-PpythonFreeThreaded=true` download a different CPython
-  asset. `Status: partial` — `GP/PythonHomeStagingTest.kt`, `PM/desktopTest/.../FreeThreadedGCGateTest.kt`,
-  `VersionsTest.kt`; no record of the whole suite passing free-threaded. Free-threading with the
-  Stable ABI (`abi3t`) is `planned` from CPython 3.15t.
+  asset. `Status: partial` (desktop only, opt-in; default is `pythonFreeThreaded=false` in `gradle.properties`)
+  — `GP/PythonHomeStagingTest.kt`, `PM/desktopTest/.../FreeThreadedGCGateTest.kt`, `VersionsTest.kt`.
+  3.14t runs the whole desktop suite with `-PpythonFreeThreaded=true` (236 tests, 0 failures; ROADMAP §9).
+  Only desktop has free-threaded prebuilts; Android and iOS do not. `Py_LIMITED_API` is not defined, so
+  `abi3t` is not a blocker.
 
 ## 8. Measurement
 
@@ -223,7 +225,8 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 
 ## 9. Planned
 
-- **N-1** Sub-interpreter-free parallelism on free-threaded 3.15t with `abi3t`. `Status: planned`.
+- **N-1** Sub-interpreter-free parallelism on free-threaded CPython on every platform (today desktop only,
+  opt-in 3.14t; see T-2 and ROADMAP §9). `Status: partial`.
 - **N-2** Compose through Python on Android, iOS and wasm. `Status: planned`.
 - **N-3** Binding Kotlin/Native klib declarations at run time (B-2). `Status: planned`.
 - **N-4** Linux and Windows desktop runs in CI (P-2). `Status: planned`.
