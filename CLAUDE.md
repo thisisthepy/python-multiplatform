@@ -128,6 +128,39 @@ Gradle 출력을 `| tail`, `| grep`, `| head` 로 넘긴 뒤 종료 코드를 �
     **무엇을 왜 하려는지 말하고 기다린다.** 조사·측정·보고와, 지시받은 레포 안에서 검증된 작업을
     착지시키는 것은 그대로 진행한다.
 
+### 6. 이 저장소 밖에 파일을 만들지 않는다
+
+**작업이 만드는 모든 것은 `/Volumes/macMini/thisisthepy/PythonMultiplatform` 안에 둔다.**
+worktree, 에이전트 프롬프트, 로그, 측정 결과, 실험 프로젝트, 스크래치 파일 전부다.
+
+2026-08 에 이 규칙이 없어서 이 세션이 저장소 밖에 이런 것들을 만들었다 —
+`/Volumes/macMini/worktrees/` (worktree 86개, 267 GB), `/Volumes/macMini/prompts/`,
+`/Volumes/macMini/rn-benchmark/`, `/Volumes/macMini/wasm-build/`, `/tmp/run-*.log` 수십 개.
+아무도 그 위치를 관리하지 않았고, 다른 프로젝트 세션과 같은 디렉터리를 공유하게 됐고,
+결국 사용자가 손으로 전부 저장소 안으로 옮겼다.
+
+    worktree        .worktrees/<이름>          (gitignore 됨)
+    벤치마크        benchmarks/
+    실험 프로젝트    experiments/
+    도구·규칙 문서   tools/
+    임시 파일        세션 스크래치 디렉터리, 끝나면 지운다
+
+**쓰기 전에 경로를 확인한다.** 절대 경로가 이 저장소 루트로 시작하지 않으면 멈춘다.
+예외는 셋뿐이다:
+
+- 사용자가 그 경로를 명시적으로 지시한 경우
+- 세션 스크래치 디렉터리 (세션이 끝나면 버려지는 임시 공간)
+- 빌드 도구가 스스로 관리하는 캐시 (`~/.gradle`, `~/.konan`) — 단, 이 캐시의 **위치를 바꾸거나
+  링크를 다시 거는 것**은 다른 프로젝트에도 영향이 가므로 사용자에게 먼저 묻는다
+
+**다른 저장소(toolchain, pypackpack, pythonx-compose 등)에 쓰는 것도 이 규칙의 예외가 아니다.**
+그 저장소에서 작업하라는 지시를 받은 경우에만 쓴다. 이 저장소의 작업을 위해 다른 저장소에
+파일을 두지 않는다.
+
+**에이전트 프롬프트에도 이 규칙을 넣는다.** 에이전트는 기본값으로 `/tmp` 와 홈 디렉터리에 쓴다.
+"이 worktree 밖에 아무것도 만들지 마라, 임시 파일은 worktree 안의 gitignore 된 곳에 둬라"를
+프롬프트에 명시한다.
+
 ## 작업 환경 (2026-08 이후)
 
 ### 워크스페이스는 외장 SSD 에 있다
@@ -135,7 +168,7 @@ Gradle 출력을 `| tail`, `| grep`, `| head` 로 넘긴 뒤 종료 코드를 �
 ```
 저장소        /Volumes/macMini/thisisthepy/PythonMultiplatform
 참고 프로젝트  /Volumes/macMini/thisisthepy/compose-graal-hello   GraalVM 네이티브 이미지 참조
-캐시          /Volumes/macMini/caches/{.gradle,.konan,emsdk}     홈에서 심볼릭 링크
+캐시          ~/.gradle, ~/.konan                                 위치는 사용자가 관리 (§6 — 링크를 다시 걸지 말 것)
 ```
 
 **내부 SSD 는 여유가 거의 없다.** 옮길 수 있는 것은 전부 `/Volumes/macMini` 로 옮기고 심볼릭 링크를
@@ -268,7 +301,7 @@ RAM          16 GB
 다른 세션이 디스크가 없어 막혀서 알게 됐다). 그중 대부분은 소스가 아니라 **각 worktree 가 따로 만든
 `build/`** 다 — 표본에서 worktree 크기의 53~74% 였다.
 
-    find /Volumes/macMini/worktrees -maxdepth 3 -type d -name build -not -path '*/build/*' -print0       | xargs -0 -n 20 rm -rf
+    find .worktrees -maxdepth 3 -type d -name build -not -path '*/build/*' -print0       | xargs -0 -n 20 rm -rf
 
 이것만으로 **159 GB 가 회수**됐고(4 GB → 164 GB), 소스·git 상태·브랜치는 그대로 남는다.
 지우기 전에 확인할 것:
@@ -282,7 +315,7 @@ RAM          16 GB
 worktree 자체를 지우는 것은 그다음 단계다. 브랜치가 develop 에 머지돼 있으면 잃을 것이 없지만,
 `build/` 삭제만으로 대개 충분하다.
 
-**worktree 는 반드시 외장에 만든다** (`/Volumes/macMini/worktrees/<이름>`). 내부 SSD 에 만들면 금방 찬다.
+**worktree 는 이 저장소의 `.worktrees/<이름>` 에 만든다** (§6). 저장소 자체가 외장 SSD 에 있으므로 내부 SSD 를 차지하지 않는다. `.worktrees/` 는 gitignore 돼 있다.
 
 계정을 늘리면 **띄울 수 있는 에이전트 수가 늘어나는 것이 아니라, 띄울 수 있는 둘을 더 안정적으로
 채울 수 있게 된다.**
