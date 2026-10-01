@@ -11,7 +11,7 @@ package fixture.artifact
  * is not about jars: `pythonBindings.role.set("app")` makes this module the aggregator, and an
  * aggregator with no source declarations of its own emits an **empty** `FunctionTable`. That
  * compiles and passes, and it quietly stops the fixture from demonstrating the one property
- * `docs/ecosystem.md` §5b actually rests on -- that KSP's producer and the artefact walker's land in
+ * `docs/design/ecosystem.md` §5b actually rests on -- that KSP's producer and the artefact walker's land in
  * one `UpcallTable` under one Python namespace. `WalkedKlibArtifactPythonImportTest
  * .kspAndTheKlibWalkerShareOnePythonNamespace` is that demonstration, and it needs this to exist.
  */

@@ -16,7 +16,7 @@ import python.native.ffi.toNativePointer
 import python.native.ffi.toRawValue
 
 /**
- * The delivery half of `docs/upcall-async-design.md`: how the outcome of a Kotlin coroutine that
+ * The delivery half of `docs/design/upcall-async-design.md`: how the outcome of a Kotlin coroutine that
  * could not finish inside the C frame reaches the Python code waiting for it.
  *
  * [PendingCall] is the half that starts the coroutine and parks its outcome; this is the half that
@@ -146,7 +146,7 @@ internal object AsyncUpcall {
     /**
      * Gives Python a way to tell [call] it has been abandoned, and returns the handle that costs.
      *
-     * `docs/upcall-async-design.md` §9.3 could only offer cancellation observed *at completion*,
+     * `docs/design/upcall-async-design.md` §9.3 could only offer cancellation observed *at completion*,
      * because nothing carried the identity of a running [PendingCall] across to Python. This is the
      * thing it said was missing: a [HandleTable] handle rides on the `Future` -- captured by the
      * done callback `_pm_watch` attaches, not stored as an attribute, so nothing depends on whether

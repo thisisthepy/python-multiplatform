@@ -46,7 +46,7 @@ fun String.shout(): String = uppercase() + "!"
 
 /** Never reaches the table: a `suspend` function's JVM shape takes a trailing `Continuation`
  * parameter, which [boundaryTypeOf] declines -- but this pins that the walker's *metadata* layer
- * also recognises and skips it explicitly, per CLAUDE.md's "제외한 것은 조용히 빠뜨리지 마라". */
+ * also recognises and skips it explicitly, per AGENTS.md's "제외한 것은 조용히 빠뜨리지 마라". */
 suspend fun neverBound(): Int = 1
 
 /** `internal` is JVM-`public` (Kotlin does not always mangle a top-level `internal` name), so only
@@ -88,7 +88,7 @@ fun Meters.tagged(): String = "meters"
  *
  * This used to be *the* declined witness: `resolveKotlinType` refused it because Kotlin's built-in
  * `Function0` has no class file to name, and `DeclarationModelTest` used it for the other half of
- * `docs/pyi-generation-design.md` §2.2's third property. It binds now, so the declined witness moved
+ * `docs/design/pyi-generation-design.md` §2.2's third property. It binds now, so the declined witness moved
  * to [withSuspendCallback] and this one records the positive: a declaration that **invokes** what it
  * is handed, which is what `:ksp-fixtures:artifact` exercises against `kotlin.system.measureTimeMillis`
  * for real.

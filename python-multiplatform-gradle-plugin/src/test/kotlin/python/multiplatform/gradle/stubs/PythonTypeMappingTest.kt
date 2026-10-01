@@ -6,7 +6,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 
 /**
- * `docs/pyi-generation-design.md` §3.1's table, one row per test where the row carries a decision
+ * `docs/design/pyi-generation-design.md` §3.1's table, one row per test where the row carries a decision
  * and grouped where it does not.
  *
  * The mapping is from the **declared Kotlin type** (`KotlinTypeModel`), not from a `TypeTag` and not

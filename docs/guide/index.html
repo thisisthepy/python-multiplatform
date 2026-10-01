@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Home · python-multiplatform</title>
+<meta name="description" content="Real CPython inside Kotlin Multiplatform: Kotlin calls Python, Python calls Kotlin, on every target.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&amp;family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/site.js"></script>
+</head>
+<body>
+<span hidden data-title-en="Home · python-multiplatform" data-title-ko="홈 · python-multiplatform"></span>
+<header class="site-header">
+  <div class="wrap bar">
+    <a class="brand" href="index.html"><svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="2" width="9" height="9" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="13" width="9" height="9" rx="2.5" fill="var(--accent)"/><path d="M11 6.5h4.5a2 2 0 0 1 2 2V13M13 17.5H8.5a2 2 0 0 1-2-2V11" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round"/></svg><span translate="no">python-multiplatform</span></a>
+    <button class="tool menu-toggle" id="menu-toggle" aria-expanded="false" aria-controls="site-nav"><span data-lang="en">Menu</span><span data-lang="ko">메뉴</span></button>
+    <nav class="nav" id="site-nav" aria-label="Primary">
+      <a href="index.html" aria-current="page"><span data-lang="en">Home</span><span data-lang="ko">홈</span></a>
+      <a href="getting-started.html"><span data-lang="en">Get started</span><span data-lang="ko">시작하기</span></a>
+      <a href="concepts.html"><span data-lang="en">Concepts</span><span data-lang="ko">개념</span></a>
+      <a href="guides.html"><span data-lang="en">Guides</span><span data-lang="ko">가이드</span></a>
+      <a href="ecosystem.html"><span data-lang="en">Ecosystem</span><span data-lang="ko">생태계</span></a>
+      <a href="status.html"><span data-lang="en">Status &amp; FAQ</span><span data-lang="ko">상태 · FAQ</span></a>
+    </nav>
+    <div class="tools">
+      <button class="tool" id="lang-toggle" type="button">한국어</button>
+      <button class="tool" id="theme-toggle" type="button" aria-label="Toggle colour theme">☀</button>
+    </div>
+  </div>
+</header>
+
+<section class="hero"><div class="wrap">
+  <div class="eyebrow"><span data-lang="en">Kotlin Multiplatform × CPython</span><span data-lang="ko">Kotlin Multiplatform × CPython</span></div>
+  <h1><span data-lang="en">Real CPython inside Kotlin — each language calls the other, on every target.</span><span data-lang="ko">Kotlin 안의 진짜 CPython — 두 언어가 서로를, 모든 타깃에서 부른다.</span></h1>
+  <p class="lead"><span data-lang="en">python-multiplatform embeds the CPython interpreter itself in a Kotlin Multiplatform app. Kotlin sees Python as typed Kotlin objects; Python sees Kotlin classes as ordinary Python.</span><span data-lang="ko">python-multiplatform 은 CPython 인터프리터 그 자체를 Kotlin Multiplatform 앱에 임베딩한다. Kotlin 에게 Python 은 타입이 있는 Kotlin 객체이고, Python 에게 Kotlin 클래스는 평범한 Python 이다.</span></p>
+  <div class="cta">
+    <a class="btn primary" href="getting-started.html"><span data-lang="en">Get started</span><span data-lang="ko">시작하기</span></a>
+    <a class="btn" href="concepts.html"><span data-lang="en">How it works</span><span data-lang="ko">동작 원리</span></a>
+    <a class="btn" href="https://github.com/thisisthepy/python-multiplatform">GitHub</a>
+  </div>
+</div></section>
+<main><div class="wrap">
+  <div class="prose">
+    <figure class="diagram">
+<svg viewBox="0 0 880 300" role="img" aria-labelledby="dg-t">
+  <title id="dg-t">Kotlin and CPython in one process: downcalls through the Stable ABI, upcalls through one generated table</title>
+  <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="d-arrow"/></marker></defs>
+  <rect class="d-box" x="10" y="20" width="360" height="260" rx="14"/>
+  <text class="d-label" x="34" y="52" translate="no">Kotlin</text>
+  <rect class="d-box" x="34" y="72" width="312" height="52" rx="9"/>
+  <text class="d-label" x="50" y="96" translate="no">PyObject · PyList · PyDict</text><text class="d-sub" x="50" y="114" data-lang="en">typed object model</text><text class="d-sub" x="50" y="114" data-lang="ko">타입이 있는 객체 모델</text>
+  <rect class="d-box" x="34" y="140" width="312" height="52" rx="9"/>
+  <text class="d-label" x="50" y="164" translate="no">EmbedAPI</text><text class="d-sub" x="50" y="182" translate="no">~330 expect fun · Stable ABI</text>
+  <rect class="d-box accent" x="34" y="208" width="312" height="52" rx="9"/>
+  <text class="d-label" x="50" y="232" data-lang="en">Generated function table</text><text class="d-label" x="50" y="232" data-lang="ko">생성된 함수 테이블</text><text class="d-sub" x="50" y="250" data-lang="en">KSP · Gradle artifact walker</text><text class="d-sub" x="50" y="250" data-lang="ko">KSP · Gradle 아티팩트 워커</text>
+  <rect class="d-box" x="510" y="20" width="360" height="260" rx="14"/>
+  <text class="d-label" x="534" y="52" translate="no">CPython</text>
+  <rect class="d-box" x="534" y="72" width="312" height="52" rx="9"/>
+  <text class="d-label" x="550" y="96" data-lang="en">Interpreter + C extensions</text><text class="d-label" x="550" y="96" data-lang="ko">인터프리터 + C 확장</text><text class="d-sub" x="550" y="114" data-lang="en">the real CPython</text><text class="d-sub" x="550" y="114" data-lang="ko">진짜 CPython</text>
+  <rect class="d-box" x="534" y="208" width="312" height="52" rx="9"/>
+  <text class="d-label" x="550" y="232" data-lang="en">Proxies: Greeter(...), Modifier</text><text class="d-label" x="550" y="232" data-lang="ko">프록시: Greeter(...), Modifier</text><text class="d-sub" x="550" y="250" data-lang="en">ordinary Python</text><text class="d-sub" x="550" y="250" data-lang="ko">평범한 Python</text>
+  <path class="d-line" d="M346 166 H 440 V 98 H 532" marker-end="url(#ah)"/>
+  <text class="d-tag" x="384" y="90" data-lang="en">downcall</text><text class="d-tag" x="384" y="90" data-lang="ko">다운콜</text>
+  <path class="d-line" d="M534 234 H 348" marker-end="url(#ah)"/>
+  <text class="d-tag" x="396" y="226" data-lang="en">upcall · 1 entry</text><text class="d-tag" x="396" y="226" data-lang="ko">업콜 · 진입점 1개</text>
+</svg>
+<figcaption><span data-lang="en">One process, two runtimes. Behind each platform's single entry point, every platform uses the same generated table.</span><span data-lang="ko">한 프로세스, 두 런타임. 플랫폼마다 진입점은 하나이고, 그 뒤에서는 모든 플랫폼이 같은 생성 테이블을 쓴다.</span></figcaption>
+</figure>
+    <h2><span data-lang="en">Philosophy</span><span data-lang="ko">철학</span></h2>
+  </div>
+  <ol class="principles">
+    <li><div><strong><span data-lang="en">The real interpreter, not an imitation</span><span data-lang="ko">흉내가 아니라 진짜 인터프리터</span></strong><span class="d"><span data-lang="en">CPython itself is embedded, so C extensions and the whole Python ecosystem keep working.</span><span data-lang="ko">CPython 그 자체를 임베딩하므로 C 확장과 Python 생태계 전체가 그대로 동작한다.</span></span></div></li>
+    <li><div><strong><span data-lang="en">Each language stays itself</span><span data-lang="ko">각 언어는 자기 모습 그대로</span></strong><span class="d"><span data-lang="en">A <code>PyList</code> is a Kotlin <code>MutableList</code>; a Kotlin class is constructed with <code>Greeter('Kotlin')</code>; an extension function is a method on its receiver.</span><span data-lang="ko"><code>PyList</code> 는 Kotlin 의 <code>MutableList</code> 이고, Kotlin 클래스는 <code>Greeter('Kotlin')</code> 으로 생성하며, 확장 함수는 수신 객체의 메서드다.</span></span></div></li>
+    <li><div><strong><span data-lang="en">Built ahead of time, works in a closed world</span><span data-lang="ko">미리 생성하므로 닫힌 세계에서도 동작</span></strong><span class="d"><span data-lang="en">No runtime reflection. A function table generated at build time is why upcalls work on Kotlin/Native and in GraalVM native images — an upcall that passes only on the JVM is not done.</span><span data-lang="ko">런타임 리플렉션을 쓰지 않는다. 빌드 타임에 생성한 함수 테이블 덕분에 업콜이 Kotlin/Native 와 GraalVM 네이티브 이미지에서도 동작한다 — JVM 에서만 통과하는 업콜은 완료가 아니다.</span></span></div></li>
+    <li><div><strong><span data-lang="en">Names are never rewritten</span><span data-lang="ko">이름은 바꾸지 않는다</span></strong><span class="d"><span data-lang="en">A Kotlin package is imported in Python under its own name. Pythonic layers such as <code>pythonx</code> are real Python packages built on top, in their own repository.</span><span data-lang="ko">Kotlin 패키지는 Python 에서 자기 이름 그대로 import 된다. <code>pythonx</code> 같은 파이써닉 계층은 그 위에 세운 실제 Python 패키지이며, 자기 저장소에 있다.</span></span></div></li>
+    <li><div><strong><span data-lang="en">Every crossing is measured</span><span data-lang="ko">모든 경계 통과는 측정한다</span></strong><span class="d"><span data-lang="en">Each boundary mechanism ships with overhead tests; the cost table is rendered from real runs on every target.</span><span data-lang="ko">경계 메커니즘마다 오버헤드 테스트가 함께 있고, 비용 표는 모든 타깃의 실제 실행에서 렌더링된다.</span></span></div></li>
+  </ol>
+  <div class="prose">
+    <h2><span data-lang="en">Read next</span><span data-lang="ko">다음 읽을거리</span></h2>
+  </div>
+  <div class="grid">
+    <a class="card" href="getting-started.html"><h3><span data-lang="en">Get started</span><span data-lang="ko">시작하기</span></h3><p><span data-lang="en">Build from source and run the sample.</span><span data-lang="ko">소스에서 빌드하고 샘플을 실행한다.</span></p></a>
+    <a class="card" href="guide-python-to-kotlin.html"><h3><span data-lang="en">Call Kotlin from Python</span><span data-lang="ko">Python 에서 Kotlin 부르기</span></h3><p><span data-lang="en">Classes, properties, <code>suspend</code>.</span><span data-lang="ko">클래스, 프로퍼티, <code>suspend</code>.</span></p></a>
+    <a class="card" href="status.html"><h3><span data-lang="en">Status</span><span data-lang="ko">상태</span></h3><p><span data-lang="en">What works today, honestly.</span><span data-lang="ko">지금 무엇이 되는지, 정직하게.</span></p></a>
+  </div>
+  <div class="prose">
+    <h2 id="contributing"><span data-lang="en">Contributing</span><span data-lang="ko">기여하기</span></h2>
+    <p><span data-lang="en">The project runs on intent-based, spec-driven, test-driven development. The intent bounds the specification; the specification drives the tests; tests are written first and seen to fail before code is written.</span><span data-lang="ko">이 프로젝트는 의도 기반 스펙 주도 개발과 테스트 주도 개발로 운영한다. 의도가 스펙의 경계를 정하고, 스펙이 테스트를 이끌며, 테스트를 먼저 쓰고 실패하는 것을 확인한 뒤 코드를 쓴다.</span></p>
+    <ol>
+      <li><span data-lang="en">Check that the change serves the project's intent (<code>docs/INTENT.md</code> on the <code>develop</code> branch).</span><span data-lang="ko">변경이 프로젝트의 의도(<code>develop</code> 브랜치의 <code>docs/INTENT.md</code>)에 맞는지 확인한다.</span></li>
+      <li><span data-lang="en">Describe the behaviour in the specification (<code>docs/SPEC.md</code>), marked <code>planned</code>.</span><span data-lang="ko">동작을 스펙(<code>docs/SPEC.md</code>)에 <code>planned</code> 로 적는다.</span></li>
+      <li><span data-lang="en">Write the test, run it, and include the red output in the pull request.</span><span data-lang="ko">테스트를 쓰고 돌려서, 빨간 출력을 풀 리퀘스트에 함께 올린다.</span></li>
+      <li><span data-lang="en">Implement; include the androidNative compile and each <code>ksp-fixtures</code> module, run separately, in your verification.</span><span data-lang="ko">구현한다. 검증에는 androidNative 컴파일과 <code>ksp-fixtures</code> 모듈 각각(따로 실행)을 포함한다.</span></li>
+    </ol>
+    <p><span data-lang="en">Work on a <code>work/&lt;topic&gt;</code> branch and open the pull request against <code>develop</code>.</span><span data-lang="ko"><code>work/&lt;topic&gt;</code> 브랜치에서 작업하고 <code>develop</code> 을 대상으로 풀 리퀘스트를 연다.</span></p>
+  </div>
+</div></main>
+<footer class="site-footer">
+  <div class="wrap">
+    <span><span data-lang="en">MIT licensed.</span><span data-lang="ko">MIT 라이선스.</span> <span translate="no">© 2024 thisisthepy</span></span>
+    <span><a href="https://github.com/thisisthepy/python-multiplatform">GitHub</a> · <a href="https://github.com/thisisthepy/python-multiplatform/blob/develop/docs/locale/README_ko.md"><span data-lang="en">Korean README</span><span data-lang="ko">한국어 README</span></a></span>
+  </div>
+</footer>
+</body>
+</html>

@@ -17,7 +17,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * The half of cancellation `docs/upcall-async-design.md` §9.3 left undone: **early notice**.
+ * The half of cancellation `docs/design/upcall-async-design.md` §9.3 left undone: **early notice**.
  *
  * §9.3 established what cooperative cancellation can and cannot be here. `PendingCall.cancel()` is
  * a flag a body reaches through `ensureActive()`; it cannot stop a coroutine, because the

@@ -31,7 +31,7 @@ package python.multiplatform.reflection
  *     installGeneratedUpcallTable()
  *
  * `expect`/`actual` rather than an interface plus a runtime registry because the reference chain
- * has to stay *static*: `docs/upcall-table-design.md` keeps every fragment reachable to the
+ * has to stay *static*: `docs/design/upcall-table-design.md` keeps every fragment reachable to the
  * Kotlin/Native linker by referencing it explicitly, with no `ServiceLoader` and no
  * `@EagerInitialization`. A generated object that nothing names is dead code the linker is free to
  * drop. The generated `actual` is that name, and it is generated rather than written by hand

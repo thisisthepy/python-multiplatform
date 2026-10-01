@@ -51,7 +51,7 @@ dependencies {
     // through `PythonBindingsPlugin.setKspArg`.
     runtimeOnly("com.google.devtools.ksp:symbol-processing-gradle-plugin:${libs.versions.ksp.get()}")
 
-    // The artefact walker (`docs/ecosystem.md` §5b's second producer) reads compiled class files
+    // The artefact walker (`docs/design/ecosystem.md` §5b's second producer) reads compiled class files
     // out of the jars the build resolves. ASM is a *plugin* dependency and deliberately not a
     // library one: nothing at runtime reads bytecode, and the walk happens once, at build time.
     //

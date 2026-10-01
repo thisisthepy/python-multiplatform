@@ -15,7 +15,7 @@ import python.multiplatform.gradle.model.KotlinTypeModel
 import java.io.File
 
 /**
- * `docs/ecosystem.md` §5b's second producer, adapted for Kotlin/Native klibs -- ROADMAP §16e.
+ * `docs/design/ecosystem.md` §5b's second producer, adapted for Kotlin/Native klibs -- ROADMAP §16e.
  *
  * JVM uses ASM (plus `kotlin-metadata-jvm` for the payload `@Metadata` carries). A klib needs
  * neither: `LibraryAbiReader` decodes the ABI protobuf directly into Kotlin-typed declarations --
@@ -56,7 +56,7 @@ import java.io.File
  *
  * [scanKlib] returns the bindings, [scanKlibDeclarations] returns one [DeclarationModel] per
  * declaration *including the declined ones*, and both are `.map`s over the same [Candidate] list --
- * `docs/pyi-generation-design.md` §2.2's "one representation, produced by the scanner, consumed by
+ * `docs/design/pyi-generation-design.md` §2.2's "one representation, produced by the scanner, consumed by
  * two renderers", which [ArtifactScanner] already satisfies and which this file used not to: it
  * dropped a declaration at a `filter` before anything could record that it had been seen. That is why
  * everything this walker declines is now declined *with a reason* instead of by disappearing, and why
@@ -136,7 +136,7 @@ import java.io.File
 internal object KlibScanner {
 
     /**
-     * `docs/pyi-generation-design.md` §3.6's name rule depends on this: a composable keeps its
+     * `docs/design/pyi-generation-design.md` §3.6's name rule depends on this: a composable keeps its
      * PascalCase spelling where every other function becomes snake_case.
      *
      * Read here for the same reason [ArtifactScanner.isComposable] reads it off ASM -- carried in the
@@ -220,7 +220,7 @@ internal object KlibScanner {
      * `null` -- the declaration vanishing entirely rather than being declined -- only when its
      * signature has no name a stub could write: a type *parameter* (`fun <T> f(t: T)`), a dynamic or
      * error type. That is [ArtifactScanner.declarationModelOf]'s own rule and
-     * `docs/pyi-generation-design.md` §3.1's last row: `BindingPolicy` rejects generic declarations
+     * `docs/design/pyi-generation-design.md` §3.1's last row: `BindingPolicy` rejects generic declarations
      * and stubbing what cannot even be spelled would be a lie, so there is nothing to record.
      *
      * `internal`, not `private`: no real klib available to this module's tests binds a declaration

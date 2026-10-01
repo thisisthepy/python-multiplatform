@@ -19,7 +19,7 @@ import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 /**
- * The half of `docs/upcall-async-design.md` that every candidate shares: starting a Kotlin
+ * The half of `docs/design/upcall-async-design.md` that every candidate shares: starting a Kotlin
  * coroutine from a frame that must return synchronously, and parking its outcome somewhere the
  * boundary can address later.
  *

@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bind a prebuilt library · python-multiplatform</title>
+<meta name="description" content="Real CPython inside Kotlin Multiplatform: Kotlin calls Python, Python calls Kotlin, on every target.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&amp;family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/site.js"></script>
+</head>
+<body>
+<span hidden data-title-en="Bind a prebuilt library · python-multiplatform" data-title-ko="빌드된 라이브러리 바인딩 · python-multiplatform"></span>
+<header class="site-header">
+  <div class="wrap bar">
+    <a class="brand" href="index.html"><svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="2" width="9" height="9" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="13" width="9" height="9" rx="2.5" fill="var(--accent)"/><path d="M11 6.5h4.5a2 2 0 0 1 2 2V13M13 17.5H8.5a2 2 0 0 1-2-2V11" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round"/></svg><span translate="no">python-multiplatform</span></a>
+    <button class="tool menu-toggle" id="menu-toggle" aria-expanded="false" aria-controls="site-nav"><span data-lang="en">Menu</span><span data-lang="ko">메뉴</span></button>
+    <nav class="nav" id="site-nav" aria-label="Primary">
+      <a href="index.html"><span data-lang="en">Home</span><span data-lang="ko">홈</span></a>
+      <a href="getting-started.html"><span data-lang="en">Get started</span><span data-lang="ko">시작하기</span></a>
+      <a href="concepts.html"><span data-lang="en">Concepts</span><span data-lang="ko">개념</span></a>
+      <a href="guides.html" aria-current="page"><span data-lang="en">Guides</span><span data-lang="ko">가이드</span></a>
+      <a href="ecosystem.html"><span data-lang="en">Ecosystem</span><span data-lang="ko">생태계</span></a>
+      <a href="status.html"><span data-lang="en">Status &amp; FAQ</span><span data-lang="ko">상태 · FAQ</span></a>
+    </nav>
+    <div class="tools">
+      <button class="tool" id="lang-toggle" type="button">한국어</button>
+      <button class="tool" id="theme-toggle" type="button" aria-label="Toggle colour theme">☀</button>
+    </div>
+  </div>
+</header>
+<div class="page-head"><div class="wrap">
+  <div class="eyebrow"><span data-lang="en">Guide</span><span data-lang="ko">가이드</span></div>
+  <h1><span data-lang="en">Bind a prebuilt library</span><span data-lang="ko">빌드된 라이브러리 바인딩</span></h1>
+  <p><span data-lang="en">The Gradle plugin walks jars you depend on and generates the same kind of table KSP generates for your sources.</span><span data-lang="ko">Gradle 플러그인이 의존하는 jar 를 훑어, KSP 가 내 소스에 대해 만드는 것과 같은 종류의 테이블을 생성한다.</span></p>
+</div></div>
+<main><div class="wrap"><div class="prose">
+  <h2><span class="num">01</span><span data-lang="en">Apply the plugin</span><span data-lang="ko">플러그인 적용</span></h2>
+  <pre translate="no"><code class="language-kotlin">plugins {
+    id(&quot;io.github.thisisthepy.python.multiplatform.bindings&quot;) version &quot;&lt;version&gt;&quot;
+}</code></pre>
+  <p><span data-lang="en">The walker reads Kotlin metadata with ASM, generates Kotlin source for every reachable declaration, and lets <code>kotlinc</code> compile it. It never looks up JVM methods by name: value-class name mangling makes that impossible in principle.</span><span data-lang="ko">워커는 ASM 으로 Kotlin 메타데이터를 읽고, 닿을 수 있는 모든 선언에 대해 Kotlin 소스를 생성해 <code>kotlinc</code> 가 컴파일하게 한다. JVM 메서드를 이름으로 찾지 않는다. 값 클래스 이름 맹글링 때문에 그것은 원리적으로 불가능하다.</span></p>
+  <h2><span class="num">02</span><span data-lang="en">What you get</span><span data-lang="ko">얻는 것</span></h2>
+  <ul>
+    <li><span data-lang="en">Default arguments can be omitted from Python.</span><span data-lang="ko">Python 에서 기본 인자를 생략할 수 있다.</span></li>
+    <li><span data-lang="en">Value classes round-trip; allow-listed ones such as <code>Dp</code> accept a raw number.</span><span data-lang="ko">값 클래스가 왕복한다. <code>Dp</code> 처럼 허용 목록에 있는 것은 숫자를 그대로 받는다.</span></li>
+    <li><span data-lang="en">Python callables can fill Kotlin function parameters (value-returning slots are not supported yet).</span><span data-lang="ko">Python 호출 가능 객체로 Kotlin 함수 파라미터를 채울 수 있다 (값을 돌려주는 슬롯은 아직 미지원).</span></li>
+    <li><span data-lang="en"><code>@Composable</code> functions can be called from Python inside a composition; clicks reach Kotlin callbacks and redraw.</span><span data-lang="ko"><code>@Composable</code> 함수를 컴포지션 안에서 Python 으로 부를 수 있다. 클릭이 Kotlin 콜백에 닿고 다시 그려진다.</span></li>
+    <li><span data-lang="en"><code>.pyi</code> stubs so an editor sees the surface (partial).</span><span data-lang="ko">에디터가 표면을 보도록 <code>.pyi</code> 스텁 생성 (부분).</span></li>
+  </ul>
+  <div class="note"><p><span data-lang="en">Compose from Python is verified on desktop only. Kotlin/Native klibs are scanned but not bound yet.</span><span data-lang="ko">Python 에서의 Compose 는 데스크톱에서만 검증되었다. Kotlin/Native klib 은 스캔만 되고 아직 바인딩되지 않는다.</span></p></div>
+  <p class="muted"><span data-lang="en">Specification: B-1 to B-7. Tests: <code>ArtifactScannerTest</code>, <code>WalkedArtifactPythonImportTest</code>, <code>ComposableRenderTest</code>.</span><span data-lang="ko">스펙: B-1 ~ B-7. 테스트: <code>ArtifactScannerTest</code>, <code>WalkedArtifactPythonImportTest</code>, <code>ComposableRenderTest</code>.</span></p>
+  <div class="pager"><a href="guide-python-to-kotlin.html">← <span data-lang="en">Use Kotlin from Python</span><span data-lang="ko">Python 에서 Kotlin 쓰기</span></a><a href="guide-platforms.html"><span data-lang="en">Set up each platform</span><span data-lang="ko">플랫폼별 준비</span> →</a></div>
+</div></div></main>
+<footer class="site-footer">
+  <div class="wrap">
+    <span><span data-lang="en">MIT licensed.</span><span data-lang="ko">MIT 라이선스.</span> <span translate="no">© 2024 thisisthepy</span></span>
+    <span><a href="https://github.com/thisisthepy/python-multiplatform">GitHub</a> · <a href="https://github.com/thisisthepy/python-multiplatform/blob/develop/docs/locale/README_ko.md"><span data-lang="en">Korean README</span><span data-lang="ko">한국어 README</span></a></span>
+  </div>
+</footer>
+</body>
+</html>

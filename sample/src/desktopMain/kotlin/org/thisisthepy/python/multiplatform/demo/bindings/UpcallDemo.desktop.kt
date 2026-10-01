@@ -11,7 +11,7 @@ private const val PY_EVAL_INPUT: Int = 258
 /**
  * Resolve once, invoke many. Both handles are computed here and live on in `__main__`, so every
  * call afterwards passes an integer and never a string again -- which is the whole argument of
- * `docs/upcall-design.md` (a selector is fast because it is interned, not because a table
+ * `docs/design/upcall-design.md` (a selector is fast because it is interned, not because a table
  * exists).
  *
  * `ctypes` stands in for the generated proxy type a finished binder would install. Two stub

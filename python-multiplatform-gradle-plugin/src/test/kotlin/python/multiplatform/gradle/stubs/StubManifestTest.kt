@@ -5,7 +5,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 
 /**
- * `docs/pyi-generation-design.md` §5.3: `androidx.` -> `pythonx.` is the default rule, deviations
+ * `docs/design/pyi-generation-design.md` §5.3: `androidx.` -> `pythonx.` is the default rule, deviations
  * come from a manifest, and **the manifest belongs to the Python package** rather than to this
  * plugin.
  *

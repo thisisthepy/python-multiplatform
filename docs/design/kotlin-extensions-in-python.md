@@ -22,7 +22,7 @@ in place with what replaced it, because the old measurement is why the replaceme
 | §3, the metadata-kind (`k=1`) gate | open problem | closed by `15fc5a62`, 25 minutes after this file was committed |
 | §3/§6, the type gate | open problem | closed by `f455ef41`; `TypeTag.OBJECT` was never the missing piece (§3.2) |
 | §3.1/§6, overload dispatch | unsolved, costing 33 of 130 `Modifier` names | rule chosen and implemented (`ArtifactScanner.disambiguateOverloads`); §3.1 records it |
-| §4.2, the `Modifier` metaclass | proposed | **measured not to work**, at run time *and* in mypy. See `docs/pyi-generation-design.md` §4.3–§4.4 |
+| §4.2, the `Modifier` metaclass | proposed | **measured not to work**, at run time *and* in mypy. See `docs/design/pyi-generation-design.md` §4.3–§4.4 |
 
 Still true and untouched: all of §2 except the one column, §4.1, §4.3, §4.4, §4.6, §5, and two of
 §6's five open items.
@@ -115,7 +115,7 @@ Metadata arity excludes the synthetic parameters; the JVM descriptor does not.
 | `foundation.layout.Row` | `Row` | no | 4 | **7** | 6 |
 
 **The last column is what this document first recorded, and every one of its nine rows was one
-low.** `docs/pythonx-adapter-design.md` §5.2 found this by re-counting with `javap -p`; the count
+low.** `docs/design/pythonx-adapter-design.md` §5.2 found this by re-counting with `javap -p`; the count
 has since been reproduced a third time, independently, against the same 1.6.11 jars. What was
 missed is **`$default`**. The trailing JVM parameters of `Button` are `Composer, int, int` and of
 `Text-fLXpl1I` are `Composer, int, int, int` — `$composer`, one or two `$changed` masks, and a
@@ -383,7 +383,7 @@ the same table key.
 
 The dispatcher §4.4 asks for is still wanted and still cannot live here — `UpcallTable` is keyed by
 name and `ExposedCallable` carries one fixed arity, so one name reaches one signature by
-construction. It belongs in `pythonx` (`docs/pythonx-adapter-design.md` §4.1) and selects among
+construction. It belongs in `pythonx` (`docs/design/pythonx-adapter-design.md` §4.1) and selects among
 these names. This layer's job is to make that choice *possible*, not to make it.
 
 ### 3.2 Re-measured at `958c0082`: 314
@@ -484,7 +484,7 @@ class Modifier(metaclass=_ModifierMeta):
 `m.padding(16)` resolves on the instance; `def f(m: Modifier)` still names a type. All three
 spellings work, and the generated `.pyi` can state all three (§4.5).
 
-> **"All three spellings work" was not measured, and it is false.** `docs/pyi-generation-design.md`
+> **"All three spellings work" was not measured, and it is false.** `docs/design/pyi-generation-design.md`
 > §4.3 ran it, in CPython 3.13 and in mypy 2.3.0, and the metaclass loses in both.
 >
 > **At run time**, `Modifier.padding` is the *instance* method, not the metaclass one. That is
@@ -505,7 +505,7 @@ spellings work, and the generated `.pyi` can state all three (§4.5).
 > What resolves it is to stop making the stub mirror the runtime mechanism. Pick a runtime that
 > works (either of the two above) and declare each operation in the stub as a **class attribute whose
 > type is a Protocol with an overloaded `__call__`** — `padding: ClassVar[_Modifier_padding]` — which
-> checks clean for all three spellings. `docs/pyi-generation-design.md` §4.4 adopts that and measured
+> checks clean for all three spellings. `docs/design/pyi-generation-design.md` §4.4 adopts that and measured
 > it against mypy; PyCharm is listed there as unverified. The *observation* this section is built on
 > is untouched — `Modifier$Companion`
 > implements `androidx.compose.ui.Modifier`, so one name really can serve as both the type and the
@@ -572,16 +572,16 @@ getting it wrong is a silent visual defect, not an exception.
 
 ### 4.5 `.pyi`
 
-Generation belongs to the Gradle plugin (`docs/ecosystem.md` §5b), and it reads the same metadata
+Generation belongs to the Gradle plugin (`docs/design/ecosystem.md` §5b), and it reads the same metadata
 as the binder, so the stub and the binding cannot drift. Extension-as-method appears as an ordinary
 method, and the metaclass of §4.2 is expressible:
 
 > **The stub below is the one that was measured to fail.** mypy resolves `Modifier.padding` to the
 > instance method and rejects every class-object call; see §4.2's note and
-> `docs/pyi-generation-design.md` §4.3. It is kept here because the three bullets that follow it are
+> `docs/design/pyi-generation-design.md` §4.3. It is kept here because the three bullets that follow it are
 > about `@overload`, `Dp | float` and defaults, and all three survive unchanged into the shape that
 > does work — `padding: ClassVar[_Modifier_padding]` where `_Modifier_padding` is a Protocol whose
-> `__call__` carries exactly these overloads (`docs/pyi-generation-design.md` §4.4). What changes is
+> `__call__` carries exactly these overloads (`docs/design/pyi-generation-design.md` §4.4). What changes is
 > where the overloads are written, not which overloads there are.
 
 ```python
@@ -613,7 +613,7 @@ Three things follow from the measurements:
 ### 4.6 `@Composable` needs no new machinery here
 
 Two measurements settle this. First, the extension and composable problems barely intersect: 1 of
-500 (§2.6). Second, `docs/ecosystem.md` §5b already decided that a composable's synthetic
+500 (§2.6). Second, `docs/design/ecosystem.md` §5b already decided that a composable's synthetic
 parameters are threaded as ordinary values by the Python adapter. Nothing in extension-as-method
 disturbs that, because a `Modifier` extension is not composable and a composable is not a
 `Modifier` extension.
@@ -631,8 +631,8 @@ indistinguishable from an ordinary trailing `int` unless you already know the Ko
 Two things this paragraph did not yet know. **`$default` is the third synthetic**, and Compose
 carries it as a *declared* trailing parameter rather than emitting a `Button$default` bridge — so
 "call the synthetic to omit an argument" is not available for a composable at all
-(`docs/pythonx-adapter-design.md` §4.5). And **the generated Kotlin cannot pass the composer
-explicitly**: `docs/pythonx-adapter-design.md` §5.3 finds that Kotlin source can neither call a
+(`docs/design/pythonx-adapter-design.md` §4.5). And **the generated Kotlin cannot pass the composer
+explicitly**: `docs/design/pythonx-adapter-design.md` §5.3 finds that Kotlin source can neither call a
 `@Composable` from a non-`@Composable` lambda nor name `$composer`/`$changed`/`$default`, which are
 not parameters of the Kotlin declaration. That is a property of this generator, not of Compose, and
 it is why composables remain blocked while the `Modifier` chain of §3.2 runs.
@@ -649,7 +649,7 @@ Kotlin side, and 3 taking raw `Float` sizes.
 That shim also invented API. `Card(modifier=…, corner_radius=20, color=…)` in `UI.ipynb` is not
 Compose — `material3.Card` has no `corner_radius` parameter in either of its overloads (§2.3). The
 shim absorbed shape and colour into flat keyword arguments per component, by hand, which is exactly
-the per-function wrapping `docs/ecosystem.md` §5b rules out.
+the per-function wrapping `docs/design/ecosystem.md` §5b rules out.
 
 The modifier chain was never built. `pythonx/compose/ui/modifier.py` lines 20–22 probe
 `ButtonKt.__dict__` for a key starting `"Button-"` — a name-based lookup, which §2.3 shows cannot
@@ -669,14 +669,14 @@ happened.
   implicit receiver, so `Modifier.weight(1f)` cannot work as written; the scope has to be passed
   into the content callable and the call spelled against it. No shape has been chosen. The walker
   still declines them explicitly — `ArtifactScanner`'s `KotlinClassMetadata.Class` arm filters
-  extensions out, so nothing arrives half-bound — and `docs/pyi-generation-design.md` §4.5 adds the
+  extensions out, so nothing arrives half-bound — and `docs/design/pyi-generation-design.md` §4.5 adds the
   consequence for stubs: they **must not** be stubbed as plain methods on `Modifier`, because a stub
   that says `Modifier.weight(1.0)` checks is a stub promising a call the runtime cannot make.
 - **Overload dispatch.** *Moved, not closed.* The "drop ambiguous names" rule that cost 33 of 130
   `Modifier` names is gone; §3.1 records the rule that replaced it and why nothing arbitrates. What
   remains open is the half this layer cannot host: a Python-side dispatcher that inspects argument
   count and type, selecting among `padding__Dp` / `padding__Dp_Dp` / `padding__PaddingValues`. It
-  lives in `pythonx` (`docs/pythonx-adapter-design.md` §4.1) and still interacts with §4.4 exactly as
+  lives in `pythonx` (`docs/design/pythonx-adapter-design.md` §4.1) and still interacts with §4.4 exactly as
   described — if the raw `16` is what selects the `Dp` overload, then raw-primitive acceptance is
   also overload resolution.
 - **The type gate.** *Closed*, by `f455ef41`. `Shape`, `Brush` and `PaddingValues` bind now, and the
@@ -693,12 +693,12 @@ happened.
   `OBJECT`-returning KSP entry already — but it is now on the Compose path.
 - **Whether the allowlist of §4.4 should be data or code**, and where a downstream consumer adds to
   it for a library this repository has never seen. *Still open; a candidate answer exists.*
-  `docs/pyi-generation-design.md` §5.3 proposes it fall out of the package mapping — the same
+  `docs/design/pyi-generation-design.md` §5.3 proposes it fall out of the package mapping — the same
   manifest the Python package already owns. Nothing in the plugin implements an allowlist yet:
   `grep -rn allowlist` over the Kotlin sources finds nothing, so §4.4's rules are decided and not
   built.
 - **klib.** *Still open, and untouched.* Everything here is JVM, and §3.2's 314 is still JVM only.
-  `docs/ecosystem.md` §5b records that `LibraryAbiReader` exposes extension receivers and unerased
+  `docs/design/ecosystem.md` §5b records that `LibraryAbiReader` exposes extension receivers and unerased
   types from klibs, which suggests the same design carries to iOS and androidNative, but no Compose
-  klib has been read yet — `docs/pyi-generation-design.md` §2.3 still lists the klib producer as
+  klib has been read yet — `docs/design/pyi-generation-design.md` §2.3 still lists the klib producer as
   "not implemented".

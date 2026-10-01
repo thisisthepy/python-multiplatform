@@ -13,7 +13,7 @@ import com.google.devtools.ksp.symbol.Visibility
 
 private const val PYTHON_INTERNAL_ANNOTATION = "python.multiplatform.reflection.PythonInternal"
 
-/** `docs/binding-policy.md`: what the generator is allowed to expose, decided from the
+/** `docs/design/binding-policy.md`: what the generator is allowed to expose, decided from the
  * declaration alone -- no classpath resolution needed beyond what KSP already gives a symbol. */
 object BindingPolicy {
 
@@ -28,7 +28,7 @@ object BindingPolicy {
             // Cheap check first (`shortName`, no resolution); only resolve the annotation type
             // when the name plausibly matches, since resolving every annotation on every
             // declaration would be the expensive path `getSymbolsWithAnnotation` was rejected
-            // for avoiding (docs/upcall-table-design.md §2, "Discovery key").
+            // for avoiding (docs/design/upcall-table-design.md §2, "Discovery key").
             shortName == "PythonInternal" &&
                 annotation.annotationType.resolve().declaration.qualifiedName?.asString() == PYTHON_INTERNAL_ANNOTATION
         }
@@ -58,7 +58,7 @@ object BindingPolicy {
      * - **`ENUM_ENTRY`** -- not a type of its own to Python, but one value of its enum; exposed
      *   as a `STATIC_GETTER` on the enum instead.
      * - **companion objects** -- folded into their owner's entries under the owner's name
-     *   (`docs/binding-policy.md`: "companion 객체 자체를 따로 노출할 필요는 없다").
+     *   (`docs/design/binding-policy.md`: "companion 객체 자체를 따로 노출할 필요는 없다").
      * - **generic declarations** -- see [hasRenderableSignature].
      */
     fun isExposedClass(classDeclaration: KSClassDeclaration, excludePackages: List<String>): Boolean {
@@ -99,7 +99,7 @@ object BindingPolicy {
     /**
      * `copy` and `componentN` on a `data class`.
      *
-     * `docs/binding-policy.md` lists compiler-generated members as not exposed, and this is the
+     * `docs/design/binding-policy.md` lists compiler-generated members as not exposed, and this is the
      * subset KSP actually reports -- observed, not assumed: a generated fragment for
      * `data class Point(val x: Long, val y: Long)` carried `Point.copy`, `Point.component1` and
      * `Point.component2`, but no `equals`, `hashCode` or `toString`. `componentN` has no meaning
@@ -157,7 +157,7 @@ object BindingPolicy {
 
     /**
      * Whether this declaration needs the asynchronous calling convention
-     * (`docs/upcall-async-design.md`).
+     * (`docs/design/upcall-async-design.md`).
      *
      * `suspend` used to be a rejection here, and silently: a C callback slot has to hand back a
      * `PyObject *` before it returns and a suspension has nothing to hand back, so until there was
@@ -185,7 +185,7 @@ object BindingPolicy {
     /**
      * A `@Composable` in the consumer's **own source**, which KSP cannot bind and must not try to.
      *
-     * `docs/ecosystem.md` §4 item 1 states the reason: a generated entry is a lambda over
+     * `docs/design/ecosystem.md` §4 item 1 states the reason: a generated entry is a lambda over
      * `Array<Any?>`, and a `@Composable` may only be invoked from a `@Composable` context, so the
      * generated call does not compile. That is not hypothetical -- putting one hand-written
      * composable in a module carrying this processor produced exactly
@@ -219,7 +219,7 @@ object BindingPolicy {
      * `Box` is "One type argument expected". Both were observed as compile failures of generated
      * code, not as anything the processor itself could detect.
      *
-     * This is wider than `docs/binding-policy.md` records -- that excluded only
+     * This is wider than `docs/design/binding-policy.md` records -- that excluded only
      * `inline` + `reified`, the subset where the type is erased. Erasing to `Box<*>` instead was
      * rejected: the receiver would still not satisfy a member declared over `T`.
      */
@@ -233,7 +233,7 @@ object BindingPolicy {
      * [FragmentScanner] can tell "not exposed because of shape" (private, `@PythonInternal`, ...)
      * apart from "not exposed because a type in the signature has no callable entry" and warn only
      * on the latter -- the former is ordinary and silent by design, the latter is the failure mode
-     * `docs/upcall-async-design.md` §2.1 measured as a classifier that compiles and checkcasts but
+     * `docs/design/upcall-async-design.md` §2.1 measured as a classifier that compiles and checkcasts but
      * has nothing behind it.
      */
     fun hasExposableTypes(function: KSFunctionDeclaration): Boolean =

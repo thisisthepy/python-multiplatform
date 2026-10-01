@@ -15,7 +15,7 @@ import kotlin.test.fail
  *
  * For the *build*, headers and runtime cannot disagree: `build.gradle.kts` derives both the
  * `cinterop` include path and the linked library from the one `pythonVersion`/`libVersion` pair,
- * out of a single checksum-verified extraction (`docs/ecosystem.md`, "Version check (2026-08-17)").
+ * out of a single checksum-verified extraction (`docs/design/ecosystem.md`, "Version check (2026-08-17)").
  * `build.gradle.kts` never references `src/nativeInterop/cinterop/include` at all -- only
  * `.../cinterop/license` and `.../cinterop/lib`.
  *

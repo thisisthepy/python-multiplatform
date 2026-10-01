@@ -49,7 +49,7 @@ fun KSTypeReference.toShape(): TypeShape = resolve().toShape()
  * (`kotlin.coroutines.SuspendFunctionN`) is compiler-synthesized, not something this
  * compilation's KSP scan ever visits as source. It gets no `ReflectedClass`, so `invoke` has no
  * table entry -- the generated cast (`args[0] as kotlin.coroutines.SuspendFunction1<...>`)
- * compiles and the runtime checkcast passes regardless (`docs/upcall-async-design.md` §2.1,
+ * compiles and the runtime checkcast passes regardless (`docs/design/upcall-async-design.md` §2.1,
  * `GeneratedSuspendTest`), so nothing downstream catches this. What would cross is a handle
  * Python can hold and hand back and nothing else.
  *
@@ -85,7 +85,7 @@ fun isExposableType(typeRef: KSTypeReference): Boolean = isExposableType(typeRef
  * Whether [type] is [python.multiplatform.ffi.PyObject] or one of its subclasses (`PyInt`,
  * `PyList`, ... every wrapper the object model exposes). A field of this type is a Python
  * reference the Kotlin object holds, and `tp_traverse` must see it -- see
- * `docs/object-lifetime.md`'s "Cycle collection is part of the table's job".
+ * `docs/design/object-lifetime.md`'s "Cycle collection is part of the table's job".
  */
 fun isPyObjectType(type: KSType): Boolean {
     val declaration = type.declaration

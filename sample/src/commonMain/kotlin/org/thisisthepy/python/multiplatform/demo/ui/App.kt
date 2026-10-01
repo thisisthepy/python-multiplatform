@@ -175,7 +175,7 @@ private fun AwaitSection() {
     DemoCard("7 — await over a suspend fun") {
         // Neither button below may run on wasmJs: PythonDemo.awaitFastPath() and
         // PythonDemo.awaitSuspending() both reach `import asyncio`, which traps this wasm
-        // instance rather than raising (docs/upcall-async-design.md §9.5) -- there would be no
+        // instance rather than raising (docs/design/upcall-async-design.md §9.5) -- there would be no
         // process left to show an error in. Gated here, before either is ever called, rather than
         // inside them: this is the one section the boundary itself cannot recover from.
         if (currentPlatform.platformType == PlatformType.Wasm) {

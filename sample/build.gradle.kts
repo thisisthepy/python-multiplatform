@@ -195,7 +195,7 @@ fun patchWasmOutputForCPython(dir: File, modulePrefix: String) {
     } else if (!text.contains("memory: $ns.wasmMemory")) {
         throw GradleException(
             "${importObject.name} has no `intrinsics.memory` placeholder to replace and is not " +
-                "already patched. See docs/wasm-design.md's integration step."
+                "already patched. See docs/platforms/wasm-design.md's integration step."
         )
     }
 

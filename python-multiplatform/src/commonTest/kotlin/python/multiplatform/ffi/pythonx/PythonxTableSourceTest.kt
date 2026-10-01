@@ -40,7 +40,7 @@ class PythonxTableSourceTest {
         kind = CallableKind.FUNCTION,
     ) { 7L }
 
-    /** One row per entry, and every field `docs/pythonx-adapter-design.md` §2.4 asked for. */
+    /** One row per entry, and every field `docs/design/pythonx-adapter-design.md` §2.4 asked for. */
     @Test
     fun aWalkedExtensionRendersAsOneRowCarryingItsWholeDeclaration() {
         assertEquals(
@@ -103,7 +103,7 @@ class PythonxTableSourceTest {
     /**
      * The layer's whole claim about itself, as a grep: **it names no Kotlin declaration.**
      *
-     * `docs/pythonx-adapter-design.md` §7 says the count of per-component files is the symptom to
+     * `docs/design/pythonx-adapter-design.md` §7 says the count of per-component files is the symptom to
      * watch for, and this is that check one level finer -- a `Text`, a `Button` or a `padding` in
      * the hand-written source would mean a rule had been written as a special case. The two
      * package prefixes in the seeded map are the deliberate exception and are asserted to be the

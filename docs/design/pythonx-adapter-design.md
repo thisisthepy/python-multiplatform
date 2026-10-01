@@ -5,7 +5,7 @@ and the one that mattered most — `pythonx/compose/ui/modifier.py` — is a cop
 in which `padding()` composes nothing and `fill_max_size()` returns `self`. The chain was never
 built. That is the cost this document exists to remove.
 
-`docs/ecosystem.md` §5b already decided the shape: `pythonx.*` is ours, `androidx.*` is the original
+`docs/design/ecosystem.md` §5b already decided the shape: `pythonx.*` is ours, `androidx.*` is the original
 Kotlin, the wrapping happens in Python, and the layer *adapts generically* rather than enumerating.
 This file works out what "generically" has to mean given what the runtime actually offers today, and
 names the places where it does not offer enough.
@@ -21,7 +21,7 @@ Sources read for this document:
                          python-multiplatform/src/commonMain/kotlin/python/multiplatform/ffi/upcall/UpcallTrampoline.kt
                          python-multiplatform/src/commonMain/kotlin/python/multiplatform/reflection/{ExposedCallable,ReflectedClass,ObjectReference}.kt
                          python-multiplatform-gradle-plugin/src/main/kotlin/python/multiplatform/gradle/artifact/{ArtifactScanner,ArtifactRendering,JvmDescriptors,KotlinMetadata}.kt
-                         docs/ecosystem.md §5b, docs/kotlin-extensions-in-python.md
+                         docs/design/ecosystem.md §5b, docs/design/kotlin-extensions-in-python.md
     pythonx-compose      UI.ipynb (all 57 cells), pythonx/compose/runtime/__init__.py,
                          pythonx/compose/material3/{buttons,cards,text}.py, pythonx/compose/ui/{__init__,modifier,alignment}.py,
                          pythonx/compose/layout/{__init__,arrangement}.py, pythonx/compose/wrapper/__init__.py
@@ -39,7 +39,7 @@ Two conventions coexist in `pythonx-compose`, and they disagree.
 `on_click`, `content_padding`, `interaction_source`, five times over — the five button variants are
 five copies of one 60-line body differing only in the name they look up.
 
-**The notebook is not that code.** `docs/ecosystem.md` §3 established that `UI.ipynb` runs against
+**The notebook is not that code.** `docs/design/ecosystem.md` §3 established that `UI.ipynb` runs against
 PyREPL's hand-written Kotlin shim, and the parameter names confirm it independently: the notebook
 writes `onclick`, the library writes `on_click`. **The library wins**; see §3's naming decision.
 
@@ -84,7 +84,7 @@ Entry names come from the producers as Kotlin fully-qualified names — `Artifac
 builds `"$owner.${function.kotlinName}"`, where `owner` is the *package* for a file facade or
 multi-file part. So `androidx.compose.material3.Text` is the name a bound Compose composable would
 carry, and `import androidx.compose.material3` is what it makes importable. That is
-`docs/ecosystem.md` §5b's "a Kotlin FQN means the original Kotlin", already implemented.
+`docs/design/ecosystem.md` §5b's "a Kotlin FQN means the original Kotlin", already implemented.
 
 ### 2.2 Judged — what the `pythonx` prefix adds: nothing, and that is the point
 
@@ -99,7 +99,7 @@ reachable at the moment `pythonx` asks. Which is §2.3.
 
 `PythonProxySource.install()` is eager and whole-table: `render` walks every entry, emits one
 `_pm_h_N = _pm_lookup(...)` and one `def` per entry, and the caller `exec`s the lot. For the fixture
-tables this repository has, that is right. For Compose it is not: `docs/kotlin-extensions-in-python.md`
+tables this repository has, that is right. For Compose it is not: `docs/design/kotlin-extensions-in-python.md`
 §2.1 counts 1,411 public top-level functions in the desktop corpus alone, and §2.6 counts 500 public
 top-level composables. Every one would be a `_pm_resolve` string lookup and a Python function object
 built before the first frame renders. (The install cost has **not** been measured — `GeneratedProxyCostTest`
@@ -166,7 +166,7 @@ the Kotlin sources; the only hits are benchmarks reading `sys.path` as a test fi
 Candidates, none chosen and none tried:
 
 - `pypackpack`'s `bundle` type `resource`, which its SPEC defines as the handoff format to this
-  repository — and which `docs/ecosystem.md` §4 item 5 records as a three-line placeholder.
+  repository — and which `docs/design/ecosystem.md` §4 item 5 records as a three-line placeholder.
 - Freezing `pythonx` into the CPython trees the way the stdlib already is.
 - Embedding the source as Kotlin string constants and `exec`ing it, i.e. the route
   `PythonProxySource` took, applied to hand-written code. This works everywhere today and is
@@ -387,7 +387,7 @@ ComposableWrapper(self.content, args, self.composer, 1)
 
 `ComposableWrapper` is `io.github.thisisthepy.pycomposeui.RuntimeKt.composableWrapper` — a
 hand-written Kotlin function that takes a `ComposableLambda`, the argument list, a `Composer` **as an
-ordinary value**, and a `changed` int. That is the shape `docs/ecosystem.md` §5b describes as "the
+ordinary value**, and a `changed` int. That is the shape `docs/design/ecosystem.md` §5b describes as "the
 Python wrapper passes the composer as a value".
 
 So the 2024 design has exactly one composer for the whole application, set once, and every composable
@@ -424,7 +424,7 @@ Reproduce with:
     unzip -o -q "$GRADLE_CACHE/.../material3-desktop-1.6.11.jar" 'androidx/compose/material3/ButtonKt.class'
     javap -p androidx/compose/material3/ButtonKt.class
 
-### 5.3 Read — the contradiction inside `docs/ecosystem.md`
+### 5.3 Read — the contradiction inside `docs/design/ecosystem.md`
 
 §4 item 1 says: *"`@Composable` cannot be an exposed callable … a generated entry for a widget would
 not compile … This is the smallest and most blocking item."*
@@ -482,7 +482,7 @@ pass the composer as a value exactly as §5b says.
    would recompose on every frame regardless of whether anything changed.** This is a performance
    property, measurable, and it should be measured before the shape is adopted.
 
-Until (1) is answered, `docs/ecosystem.md` §4 item 1 remains the blocking item it says it is, and
+Until (1) is answered, `docs/design/ecosystem.md` §4 item 1 remains the blocking item it says it is, and
 §5b's paragraph asserting otherwise should be treated as unresolved rather than as settled.
 
 ### 5.5 Judged — arity is where the real risk sits, and it is not a collision risk
@@ -557,7 +557,7 @@ and its 2^n cost apply to the sentinel mechanism and are untouched; a composable
 `:ksp-fixtures:compose`'s `PythonComposition`. It names no composable and takes no
 composable-specific parameter — it registers `currentComposer` as an ordinary object handle, pushes
 it onto `pythonx`'s stack and runs the Python body — so it is O(1) in the number of bound
-composables, unlike 2024's wrapper-per-widget. `docs/ecosystem.md` §5b's "the Python wrapper passes
+composables, unlike 2024's wrapper-per-widget. `docs/design/ecosystem.md` §5b's "the Python wrapper passes
 the composer as a value" survives intact; §4 item 1's "this is the smallest and most blocking item"
 is closed.
 
@@ -572,7 +572,7 @@ exercise the second `$default` word, which the arithmetic writes and nothing has
 
 ## 6. Open — the lifetime of a Python callable across recomposition
 
-`docs/ecosystem.md` records this as unverified. This section says what "verify" means, because the
+`docs/design/ecosystem.md` records this as unverified. This section says what "verify" means, because the
 mechanism turns out to be half-present already.
 
 **Read — a Python callable can already cross into Kotlin.** `UpcallTrampoline.toKotlinObject` handles
@@ -598,11 +598,11 @@ this repository has measured separately and never together:
    came back.
 2. **The GIL on the release path.** `Py_DecRef` requires the GIL. `onForgotten` runs on whatever
    thread Compose is applying changes on. Whether that thread holds the GIL — and if not, whether the
-   decref can be queued to one that does — is not answered anywhere in `docs/object-lifetime.md` or
-   `docs/gil-parking-investigation.md` for this direction.
+   decref can be queued to one that does — is not answered anywhere in `docs/design/object-lifetime.md` or
+   `docs/investigations/gil-parking-investigation.md` for this direction.
 3. **Re-entrancy.** The call is Kotlin composition → Python callable → Kotlin composable → Python
    `content` lambda. The GIL is held across a Kotlin composition that may itself block or hop
-   threads. `docs/gil-parking-investigation.md` exists because this repository has already been bitten
+   threads. `docs/investigations/gil-parking-investigation.md` exists because this repository has already been bitten
    by GIL parking; this is a new place to be bitten.
 4. **Identity across recomposition.** A Python `lambda` is a new object every time the enclosing
    Python function runs, so `equals` is false and Compose cannot skip. Combined with §5.4 item 4, the
@@ -715,7 +715,7 @@ awaitPointerEvent() }`, which is ordinary Kotlin the compiler already knows how 
 machine for. Nothing about Python has to suspend at all if the loop that suspends is hand-written
 Kotlin and Python is only ever asked a synchronous question at each iteration — exactly the shape
 `PythonCallables.PythonFunction` already crosses for every *other* `Function0..Function5` slot in this
-codebase (`docs/pythonx-adapter-design.md` §4.2's `content=`, among others).
+codebase (`docs/design/pythonx-adapter-design.md` §4.2's `content=`, among others).
 
 That is `fixture.compose.pythonPointerInput` (`ksp-fixtures/compose/src/desktopMain/kotlin/fixture/
 compose/PythonPointerInput.kt`): a hand-written, ordinarily-compiled `suspend` Kotlin function —

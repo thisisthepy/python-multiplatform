@@ -25,7 +25,7 @@ import kotlin.test.assertTrue
  *
  * `AsyncUpcallDeliveryTest` is `desktopTest` because delivery needs a second thread: the upcall has
  * to arrive from inside a coroutine while a Kotlin thread resolves the `Future`. That shape is not
- * portable. What is portable is the half of `docs/upcall-async-design.md` §5 that the doc calls the
+ * portable. What is portable is the half of `docs/design/upcall-async-design.md` §5 that the doc calls the
  * fast path -- `suspend` is a signature, not a promise to suspend, and a body that never reaches a
  * suspension point must cross **without asyncio being involved at all**.
  *

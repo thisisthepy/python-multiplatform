@@ -19,7 +19,7 @@ private const val METHODDEF_SIZE = 16
 
 /**
  * The wasmJs half of the upcall boundary: [invokeMethod] is what CPython calls, reached the way
- * `docs/upcall-design.md` names for this target and ROADMAP §11 already measured --
+ * `docs/design/upcall-design.md` names for this target and ROADMAP §11 already measured --
  * `@WasmExport` plus `Table.set`, 3.1 ns/call through `call_indirect`. Everything past `self`/`args`
  * is [UpcallTrampoline], which is `commonMain` and knows nothing about wasm.
  *
@@ -31,7 +31,7 @@ private const val METHODDEF_SIZE = 16
  * ### One export is enough for the whole bootstrap
  *
  * This used to publish nothing into Python at all: only a *bound* callable crossed, and
- * `docs/upcall-async-design.md` §12.4 recorded that `_pm_resolve`/`_pm_invoke`/`_pm_release`/
+ * `docs/design/upcall-async-design.md` §12.4 recorded that `_pm_resolve`/`_pm_invoke`/`_pm_release`/
  * `_pm_cancel` would each need a **new `@WasmExport`**, which -- being honoured only in the
  * application's own compilation -- the library could never add. The consequence was that
  * `PythonProxySource.install()` refused on this target and no generated proxy existed here.
@@ -52,7 +52,7 @@ private const val METHODDEF_SIZE = 16
  * before.
  *
  * **What this does not buy** is the async half. `import asyncio` traps this wasm instance rather
- * than raising (`AsyncUpcallPortabilityTest`, `docs/upcall-async-design.md` §9.5), so a proxy whose
+ * than raising (`AsyncUpcallPortabilityTest`, `docs/design/upcall-async-design.md` §9.5), so a proxy whose
  * Kotlin body genuinely suspends still cannot be awaited here. The synchronous surface --
  * constructors, methods, properties, statics -- is what became reachable.
  *
@@ -108,7 +108,7 @@ object UpcallEntry {
      * `_pm_resolve(name) -> handle`, `METH_VARARGS`, accepting **`str` or `bytes`**.
      *
      * Both spellings, for the reason `nativeMain`'s `pmResolveMethod` records and the ART shim
-     * learned the hard way (`docs/upcall-async-design.md` §13.2): `PythonProxySource`'s `_pm_lookup`
+     * learned the hard way (`docs/design/upcall-async-design.md` §13.2): `PythonProxySource`'s `_pm_lookup`
      * has to send `bytes` because desktop reaches its resolver through
      * `ctypes.CFUNCTYPE(c_long, c_char_p)`, which refuses a `str` outright -- while a `PyMethodDef`
      * host called by hand writes `str`. Costs one failed `PyUnicode_AsUTF8` per name, at install

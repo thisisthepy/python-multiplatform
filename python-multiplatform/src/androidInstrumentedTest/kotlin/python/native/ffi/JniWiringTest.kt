@@ -84,7 +84,7 @@ class JniWiringTest {
     /**
      * `PyList_GetItemRawF` is the @FastNative twin added so the per-element call of bulk list
      * iteration follows the device axis instead of being pinned to @CriticalNative (see
-     * `docs/jni-call-convention-audit.md`). It is a second registration of the same CPython
+     * `docs/investigations/jni-call-convention-audit.md`). It is a second registration of the same CPython
      * function, so the two must be indistinguishable at every index.
      *
      * This is a wiring check, not a benchmark. Two ways to get it wrong are both caught here: a

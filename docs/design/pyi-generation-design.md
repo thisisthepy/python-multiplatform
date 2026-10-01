@@ -1,6 +1,6 @@
 # Generating `.pyi` — the reference implementation, the input, and what a stub can actually say
 
-`pythonx` adapts Kotlin generically rather than wrapping function by function (`docs/ecosystem.md`
+`pythonx` adapts Kotlin generically rather than wrapping function by function (`docs/design/ecosystem.md`
 §5b): a module `__getattr__` finds the corresponding binding, adapts it once and caches it. Nothing
 an editor can see is ever enumerated. `.pyi` is what pays that back — the stubs carry the fully
 enumerated Pythonic surface the adapter will produce, so an IDE sees everything while the runtime
@@ -23,7 +23,7 @@ chosen over are named. Where a claim could not be checked it says so rather than
 | what | where | what it settled |
 |---|---|---|
 | PyREPL's generator | `/Volumes/macMini/PyREPL/app/build.gradle.kts` (627 lines, HEAD `899c6bf`, 2024-09-01, remote `github.com/thisisthepy/PyREPL`) | §1 in full |
-| toolchain's mutated copy | `/Volumes/macMini/thisisthepy/toolchain/toolchain/src/main/kotlin/org/thisisthepy/python/multiplatform/toolchain/dependency/lang/kotlin/meta/createMetaClass.kt` (248), `meta/MetaPackageBuildTask.kt` (64), `kotlin/decompileKotlinMeta.kt` (145) | §1.3 — and it corrects `docs/ecosystem.md` |
+| toolchain's mutated copy | `/Volumes/macMini/thisisthepy/toolchain/toolchain/src/main/kotlin/org/thisisthepy/python/multiplatform/toolchain/dependency/lang/kotlin/meta/createMetaClass.kt` (248), `meta/MetaPackageBuildTask.kt` (64), `kotlin/decompileKotlinMeta.kt` (145) | §1.3 — and it corrects `docs/design/ecosystem.md` |
 | the artefact walker | `python-multiplatform-gradle-plugin/src/main/kotlin/python/multiplatform/gradle/artifact/{ArtifactScanner,KotlinMetadata,ArtifactRendering,JvmDescriptors,PythonArtifactBindingsTask}.kt` | §2 |
 | the KSP producer | `python-multiplatform-ksp/src/main/kotlin/python/multiplatform/ksp/{FragmentScanner,Model,TypeShape,KsAdapters}.kt` | §2 |
 | the runtime proxy renderer | `python-multiplatform/src/commonMain/kotlin/python/multiplatform/ffi/upcall/PythonProxySource.kt` | §2.2, §6 |
@@ -52,7 +52,7 @@ the repository, and no repository file other than this one was touched). Eight c
   pyright (no `node` on this machine). This matters more than usual, because the IDE a user of this
   stack is in is most likely IntelliJ or Android Studio. **Marked as needing verification
   throughout, and not asserted.**
-- **klib.** Everything here is the JVM path. `docs/ecosystem.md` §5b records that
+- **klib.** Everything here is the JVM path. `docs/design/ecosystem.md` §5b records that
   `LibraryAbiReader` returns Kotlin qualified names, extension-receiver flags and unerased types
   from a klib, which is the same information §2 says a stub needs — but no klib was read for this
   document.
@@ -121,13 +121,13 @@ Collisions between `commonMain` and a platform source set are handled by `checkF
 (line 525): find `__init__.pyi` paths present in both trees, rename **both** to
 `_<Class>.pyi` and `_<Class>_<target>.pyi`, and write a new `__init__.pyi` that re-exports both with
 `from ._X import *`. `findCommonDir` and `reCreateFile` split on the literal `"\\__init__.pyi"`, so
-**this path is Windows-only** and silently does nothing on macOS or Linux — `docs/ecosystem.md`
+**this path is Windows-only** and silently does nothing on macOS or Linux — `docs/design/ecosystem.md`
 already flagged the separators; what is added here is that the failure is silent rather than an
 error.
 
-### 1.3 The two lineages — and a correction to `docs/ecosystem.md`
+### 1.3 The two lineages — and a correction to `docs/design/ecosystem.md`
 
-`docs/ecosystem.md` §2 says `dba17dd` "extracted PyREPL's meta-generation" into `createMetaClass.kt`
+`docs/design/ecosystem.md` §2 says `dba17dd` "extracted PyREPL's meta-generation" into `createMetaClass.kt`
 and that `toolchain`'s copy is "the same code mutated into a *runtime* generator". The extraction is
 right; the implied direction is not.
 
@@ -162,7 +162,7 @@ this repository's `KotlinMetadata.kt` acted on, two years later.
 | `...` bodies | **keep** | a stub never has to compile or run |
 | `def f(self, *args, **kwargs)` | **reject** | it is the whole of what makes these stubs useless for anything but name completion. Parameters are the point (§3) |
 | JNI-ish type map (`jint`, `jlong`) | **reject** | not Python types; a checker infers nothing from them |
-| drop names containing `-` | **reject** | `docs/kotlin-extensions-in-python.md` §2.2: it discards 52 of the 177 chainable `Modifier` extensions, and metadata supplies the real name |
+| drop names containing `-` | **reject** | `docs/design/kotlin-extensions-in-python.md` §2.2: it discards 52 of the 177 chainable `Modifier` extensions, and metadata supplies the real name |
 | `class StringsKt:` for a file facade | **reject** | there is no `StringsKt` in the Kotlin namespace; a top-level function must be a module-level `def` |
 | commonMain/platform overlap → rename + re-export | **keep the idea, rewrite** | the shape is right and the implementation is Windows-only and silent (§1.2) |
 | `prepareKotlinIdeaImport` dependency | **keep** | §6.2 |
@@ -236,11 +236,11 @@ its underlying `KotlinTypeModel` plus the two visibility booleans `ValueClassInf
 
 Three properties this buys, each of which is a defect in the current shape:
 
-1. **The two renderers cannot drift.** `docs/kotlin-extensions-in-python.md` §4.5 requires this and
+1. **The two renderers cannot drift.** `docs/design/kotlin-extensions-in-python.md` §4.5 requires this and
    the current code cannot deliver it: a `.pyi` written from `ArtifactCallable` would state
    `padding(a0: float)` while the binding calls `Modifier.padding(Dp(...))`.
 2. **Overloads survive to where they are needed.** The binder drops an ambiguous name because it
-   cannot dispatch (`ROADMAP.md` §16c: `Assert.assertEquals` has eight). A stub *can* state all of
+   cannot dispatch (`docs/roadmap/ROADMAP.md` §16c: `Assert.assertEquals` has eight). A stub *can* state all of
    them (§3.6, measured). Those are different decisions and today they are the same line of code.
 3. **What is declined stays visible.** A model entry can be marked "not bound, reason X" and still
    be stubbed — or deliberately not stubbed, which is the honest choice when the runtime cannot call
@@ -253,7 +253,7 @@ Three properties this buys, each of which is a defect in the current shape:
 | generate `.pyi` from the runtime `UpcallTable` (mirroring `PythonProxySource`) | the table holds `ExposedCallable`, i.e. tags and arity. Every parameter would be `a0, a1, a2` with no type. It is also the wrong time: `PythonProxySource` renders at run time *because* the installed set is only known then, and a stub has to exist before anything runs |
 | widen `CallableEntryModel` / `ArtifactCallable` in place | puts fields on the hot path that its renderer must ignore, and does not fix the KSP/ASM asymmetry (`kind` and `isSuspend` on one, `imports` on the other) |
 | a second scan, independent of the binder's | two readers of the same jars that can disagree — precisely the failure `PythonProxySource` §"Where this is generated" refuses ("a second generator that can disagree with the first") |
-| emit `.pyi` from KSP as well as from the plugin | KSP does not see third-party artefacts at all, which is the entire reason the artefact walker exists (`docs/ecosystem.md` §5b). The plugin sees both |
+| emit `.pyi` from KSP as well as from the plugin | KSP does not see third-party artefacts at all, which is the entire reason the artefact walker exists (`docs/design/ecosystem.md` §5b). The plugin sees both |
 
 ### 2.3 What each producer has to supply
 
@@ -262,7 +262,7 @@ Three properties this buys, each of which is a defect in the current shape:
 | KSP | `KSFunctionDeclaration` gives names, defaults (`KSValueParameter.hasDefault`), nullability, type arguments, annotations | nothing new read — only *kept*. `KsAdapters.renderWithArguments` already walks type arguments |
 | artefact walker | `KmFunction` gives `valueParameters[].name`, `.declaresDefaultValue`, `KmType.isNullable`, `.arguments`, `receiverParameterType`; `ValueClassInfo` gives the rest | nothing new read — only *kept*. `functionsOf` currently throws away `KmValueParameter` and keeps `.type` |
 | Java classes in a walked jar (no `@Metadata`) | JVM descriptors only | **no Kotlin types, no parameter names, no nullability.** §3.2 |
-| klib | not implemented | `LibraryAbiReader`, per `docs/ecosystem.md` §5b — unverified here |
+| klib | not implemented | `LibraryAbiReader`, per `docs/design/ecosystem.md` §5b — unverified here |
 
 That the first two need **no new reading** is the strongest argument for this shape: the information
 is being fetched and then dropped, one function before it would be used.
@@ -332,7 +332,7 @@ annotations` is not needed in a `.pyi` for the same reason.
 
 ### 3.4 Value classes — how the allowlist shows up
 
-`docs/kotlin-extensions-in-python.md` §4.4 decided this and measured why a machine rule fails: the
+`docs/design/kotlin-extensions-in-python.md` §4.4 decided this and measured why a machine rule fails: the
 rule "coerce iff the value class has a public constructor taking exactly its underlying type"
 selects 36 of 111 and **admits `Color`**, whose public `ULong` constructor stores while the factory
 a Kotlin author actually writes (`Color(Int)`) shifts by 32. Whether a wrapper packs is a semantic
@@ -361,7 +361,7 @@ call (`"expected TextUnit; write sp(16)"`). mypy's own message names the type bu
 Judged: accept it. The runtime raises the full message; the stub gets the user to the runtime less
 often.
 
-**Where the allowlist lives** is `docs/kotlin-extensions-in-python.md` §6's open question, and §5.3
+**Where the allowlist lives** is `docs/design/kotlin-extensions-in-python.md` §6's open question, and §5.3
 here proposes an answer that falls out of the package mapping: the same manifest.
 
 ### 3.5 Function types, and Compose's `content`
@@ -380,14 +380,14 @@ Two things the stub should do and one it should not:
   `@Composable () -> Unit` and a `() -> Unit` are the same Python `Callable[[], None]`. Kotlin's
   restriction — a composable lambda may only be invoked in a composable context — has no Python
   counterpart, and inventing a distinct alias would give a checker a rule it cannot enforce.
-  `docs/ecosystem.md` §5b already decided the composer is threaded as an ordinary value.
+  `docs/design/ecosystem.md` §5b already decided the composer is threaded as an ordinary value.
 - **Do not stub the synthetic parameters.** `$composer` and `$changed` are in the JVM descriptor and
-  are not in `KmFunction`. `docs/kotlin-extensions-in-python.md` §4.6: metadata arity is the correct
+  are not in `KmFunction`. `docs/design/kotlin-extensions-in-python.md` §4.6: metadata arity is the correct
   source, and any code deriving arity from the descriptor is wrong for all 500 composables.
 
 ### 3.6 Overloads
 
-Python has `@overload`, and `docs/kotlin-extensions-in-python.md` §4.5 already calls it mandatory:
+Python has `@overload`, and `docs/design/kotlin-extensions-in-python.md` §4.5 already calls it mandatory:
 33 of `Modifier`'s 130 names carry more than one, and they are the load-bearing ones
 (`padding`, `size`, `background`, `border`, `clickable`, …).
 
@@ -421,7 +421,7 @@ arity-ascending.** In the run above, arity-ascending put `all: Dp` before `horiz
 `p(8)` selected `all` — the right answer, but only because of the order. Two further consequences:
 
 - The stub's order must be **the same order the Python-side dispatcher resolves in**. If the runtime
-  dispatcher (`docs/kotlin-extensions-in-python.md` §6, unsolved) picks differently, the stub lies
+  dispatcher (`docs/design/kotlin-extensions-in-python.md` §6, unsolved) picks differently, the stub lies
   about which Kotlin function runs. The two orders must come from one place in the generator.
 - **Defaults are emitted as `= ...`.** 254 of 435 `Modifier` extension parameters declare one and
   metadata carries `declaresDefaultValue` but not the *value*. `= ...` is the correct stub spelling
@@ -438,7 +438,7 @@ Kotlin parameter names go through the same snake_case conversion as everything e
 This is the section the Compose surface turns on: 604 public top-level extension functions over 136
 receivers, and 177 chainable ones on `Modifier` alone.
 
-### 4.1 Placement (unchanged from `docs/kotlin-extensions-in-python.md` §4.1)
+### 4.1 Placement (unchanged from `docs/design/kotlin-extensions-in-python.md` §4.1)
 
 | receiver | count | placement |
 |---|---|---|
@@ -452,7 +452,7 @@ Nothing measured here disturbs that. Chaining is free because each of the 177 re
 
 ### 4.2 The proposal under test
 
-`docs/kotlin-extensions-in-python.md` §4.2 and §4.5 propose that `Modifier` be one class whose class
+`docs/design/kotlin-extensions-in-python.md` §4.2 and §4.5 propose that `Modifier` be one class whose class
 object also behaves like an instance, via a metaclass, so that `Modifier.padding(16)`,
 `m.padding(16)` and `def f(m: Modifier)` all work:
 
@@ -596,7 +596,7 @@ Verify before implementing.
 
 74 public member extensions on `Modifier` (`RowScope.weight`, `ColumnScope.align`,
 `BoxScope.matchParentSize`) need a dispatch receiver Kotlin supplies implicitly from the enclosing
-lambda. `docs/kotlin-extensions-in-python.md` §6 records that no shape has been chosen. Nothing here
+lambda. `docs/design/kotlin-extensions-in-python.md` §6 records that no shape has been chosen. Nothing here
 changes that, and **they must not be stubbed as if they were plain methods on `Modifier`** — a stub
 that says `Modifier.weight(1.0)` checks is a stub that promises a call the runtime cannot make.
 
@@ -659,7 +659,7 @@ So: a data file inside the Python distribution — e.g. `pythonx/compose/pythonx
 
 The plugin reads it from the resolved Python package and emits `pythonx.*` stubs accordingly; with
 no manifest it emits only the Kotlin-FQN stubs. This also gives
-`docs/kotlin-extensions-in-python.md` §6's open question ("whether the allowlist should be data or
+`docs/design/kotlin-extensions-in-python.md` §6's open question ("whether the allowlist should be data or
 code, and where a downstream consumer adds to it") a location: the same manifest, in the same
 package, next to the code whose surface it describes.
 
@@ -742,7 +742,7 @@ each. Its implementation splits on `"\\__init__.pyi"` and so does nothing outsid
 must use `File.separator` — or better, operate on `Path` objects and never on path strings, which is
 what made the bug invisible.
 
-`docs/ecosystem.md` §5b's `JClass`/`KClass`/`ObjcClass` rule bears on this: a target that has no JVM
+`docs/design/ecosystem.md` §5b's `JClass`/`KClass`/`ObjcClass` rule bears on this: a target that has no JVM
 has no `JClass` and says so. The stubs must reproduce that per source set rather than emitting a
 union that promises every platform's surface everywhere.
 
@@ -762,7 +762,7 @@ union that promises every platform's surface everywhere.
   33 multi-overload `Modifier` names is unknown — it needs the scan to be run.
 - **Stub order vs dispatcher order.** §3.6: the `@overload` order and the Python-side dispatcher's
   resolution order must come from one place. The dispatcher does not exist
-  (`docs/kotlin-extensions-in-python.md` §6).
+  (`docs/design/kotlin-extensions-in-python.md` §6).
 - **What to stub for a `TypeTag.OBJECT` return.** `PythonProxySource`'s KDoc records that such a
   value crosses as a bare handle integer, not as an instance of the class rendered for it. A stub
   saying `-> Modifier` would then be wrong for exactly the chaining case §4.1 depends on. Needs the

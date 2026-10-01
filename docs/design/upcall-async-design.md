@@ -1,6 +1,6 @@
 # 비동기 업콜 설계 — Python 이 Kotlin 의 `suspend` 를 부를 수 있는가
 
-`docs/upcall-design.md` 가 만든 업콜 경로는 다섯 플랫폼에 다 붙었지만, **노출할 수 있는 것은
+`docs/design/upcall-design.md` 가 만든 업콜 경로는 다섯 플랫폼에 다 붙었지만, **노출할 수 있는 것은
 일반 함수뿐이다.** 이 문서는 왜 그런지, 무엇을 대신 할 수 있는지, 후보 중 무엇을 골랐는지,
 그리고 지금 무엇까지 구현되어 있는지를 정리한다.
 
@@ -16,7 +16,7 @@
       → 중간에 suspend 하면 반환할 것이 없다
 
 `runBlocking` 은 해결이 아니다. 그 스레드를 다시 붙잡는 것이므로 얻는 것이 없고, **Android 에서는
-특히 나쁘다** — 업콜이 도착한 스레드는 CPython 이 만든 pthread 이고(`docs/upcall-design.md`
+특히 나쁘다** — 업콜이 도착한 스레드는 CPython 이 만든 pthread 이고(`docs/design/upcall-design.md`
 "Android's boundary runs the other way round"), 그것을 막으면 답을 기다리는 인터프리터 쪽이 함께
 멈춘다. 즉 자기가 기다리는 대상을 자기가 막는 형태가 된다.
 
@@ -181,7 +181,7 @@ Kotlin 이 `Future` 를 만들어 Python 이벤트 루프에 넘기고, 완료 �
 | (C) asyncio | 성립한다. 단 루프가 JS 에 양보해야 하므로 재래식 selector 루프로는 부족하다 |
 
 이것은 전부 추론이다. 이 워크스페이스에서 wasm 은 컴파일 검증만 하고 있고
-(`docs/wasm-design.md` §"Still open"), 실행 경로를 만들지 않았다.
+(`docs/platforms/wasm-design.md` §"Still open"), 실행 경로를 만들지 않았다.
 
 ---
 
@@ -353,7 +353,7 @@ Kotlin 이 `Future` 를 만들어 Python 이벤트 루프에 넘기고, 완료 �
 마이크로태스크로만 온다. 그런데 Python 이벤트 루프는 같은 스레드에서 `run_until_complete` 안에
 있고, 재래식 selector 루프는 JS 에 제어를 돌려주지 않는다. 그러면 Kotlin 의 재개가 루프 뒤에
 줄을 서고, 루프는 그 재개를 기다린다 — (A) 를 기각한 것과 같은 형태의 교착이다. 이것은
-**추론이다.** 이 워크스페이스에 wasm 실행 경로가 없어(`docs/wasm-design.md` "Still open")
+**추론이다.** 이 워크스페이스에 wasm 실행 경로가 없어(`docs/platforms/wasm-design.md` "Still open")
 확인할 수 없었고, 확인하지 않은 것을 확인했다고 적지 않는다.
 
 ### 8.6 이번 범위에서 뺀 것 — **§9 가 앞의 둘을 채웠다**
@@ -650,7 +650,7 @@ no-op** 이고, 슬롯이 이미 남에게 재발급된 뒤라도 세대가 어�
   > 않았다 — §7.1 이 (B) 의 완료 스레드에 대해 남겨 둔 질문이 여기에도 그대로 남는다.
 
   androidNative 는 여전히 컴파일만이다 — 실행하려면 에뮬레이터가 필요하고, 이번 회차에는 다른
-  작업이 쓰고 있어 쓰지 않았다(`CLAUDE.md` 의 규정). Android(JVM/ART)·iOS 실기기는 여전히 미확인.
+  작업이 쓰고 있어 쓰지 않았다(`AGENTS.md` 의 규정). Android(JVM/ART)·iOS 실기기는 여전히 미확인.
 - **루프가 죽은 채로 남은 핸들.** Kotlin 쪽 `finally` 해제가 그것을 막도록 되어 있지만, 그 경우를
   일부러 만들어 관측하지는 않았다.
 
@@ -663,7 +663,7 @@ no-op** 이고, 슬롯이 이미 남에게 재발급된 뒤라도 세대가 어�
 
 ### 11.1 iOS 에 `asyncio` 가 있는가 — 측정, 그리고 기존 문서의 유추는 틀렸다
 
-`docs/upcall-design.md` §"Can Python call an address at all?" 는 "이 프로젝트의 iOS
+`docs/design/upcall-design.md` §"Can Python call an address at all?" 는 "이 프로젝트의 iOS
 `Python.framework` 는 `_ctypes` 도, `lib-dynload` 도 없다"고 적었고, §4·§8.5 는 그 문장에 기대어
 iOS 의 `asyncio` 가능성을 유추만 했다(직접 확인은 하지 않았다). 그 유추는 **성립하지 않는다** —
 "`Python.framework` 가 `lib-dynload` 를 안 담고 있다"는 진술 자체는 맞지만, 그것이 가리키는 대상은

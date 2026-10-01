@@ -22,7 +22,7 @@ import kotlin.test.assertTrue
 /**
  * `AsyncUpcallDeliveryTest` (`desktopTest`) pinned that candidate (C)/(B) delivery works, but its
  * completing thread is a `java.util.concurrent`/`java.lang.Thread` -- unavailable outside the JVM
- * targets, which is why that file never moved. `docs/upcall-async-design.md` §10.6 records the
+ * targets, which is why that file never moved. `docs/design/upcall-async-design.md` §10.6 records the
  * gap this closes: the delivery path itself is `commonMain` with no `expect`/`actual`, so every
  * target compiles the same source, but only desktop had ever been measured to *run* it.
  *

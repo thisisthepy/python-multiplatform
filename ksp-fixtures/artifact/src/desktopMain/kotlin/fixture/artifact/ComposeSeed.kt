@@ -16,8 +16,8 @@ import androidx.compose.ui.unit.dp
  *
  * A `Modifier` chain has to start somewhere, and the thing it starts from is `Modifier` the
  * *expression* -- `androidx.compose.ui.Modifier.Companion`, an object instance
- * (`docs/kotlin-extensions-in-python.md` §4.2). The artefact walker binds **functions**, so a
- * companion's instance is not something it can hand out; `docs/ecosystem.md` §5b's next step (a
+ * (`docs/design/kotlin-extensions-in-python.md` §4.2). The artefact walker binds **functions**, so a
+ * companion's instance is not something it can hand out; `docs/design/ecosystem.md` §5b's next step (a
  * `ReflectedClass` and a receiver handle) is where that will come from. Until it does, the empty
  * modifier is one function of our own -- and everything after it is Compose's own code, reached
  * through the walker under Compose's own name.
@@ -63,7 +63,7 @@ fun equalsPaddingThenSize(modifier: Modifier, pad: Double, size: Double): Boolea
  * | comparison | the default it reaches | why Python could not have faked it |
  * |---|---|---|
  * | [equalsFillMaxWidth] | `fraction = 1f` | a body that passed `0f` into the omitted slot builds a different `FillElement`, and [equalsFillMaxWidthFraction] is the control that says so |
- * | [equalsWrapContentSize] | `align = Alignment.Center` | `Alignment` crosses as a `TypeTag.OBJECT` handle and **no bound declaration anywhere produces one**, so if the default were not reached there would be nothing to put in the slot at all. This is `docs/pythonx-adapter-design.md` §4.5's argument in a single function |
+ * | [equalsWrapContentSize] | `align = Alignment.Center` | `Alignment` crosses as a `TypeTag.OBJECT` handle and **no bound declaration anywhere produces one**, so if the default were not reached there would be nothing to put in the slot at all. This is `docs/design/pythonx-adapter-design.md` §4.5's argument in a single function |
  * | [equalsVerticalPadding] | `start`, `top` and `end` | the argument that *is* written sits in the middle of the list, which §4.5's arity-prefix candidate cannot express |
  */
 fun equalsFillMaxWidth(modifier: Modifier): Boolean = modifier == Modifier.fillMaxWidth()

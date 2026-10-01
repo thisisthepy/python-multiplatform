@@ -24,7 +24,7 @@
 > just the four functions it happens to list. What remains is the pointer-only surface, and the
 > reachability reasoning for that still holds.
 >
-> See ROADMAP §2 for the current numbers and `docs/marshalling-design.md` for the per-argument
+> See ROADMAP §2 for the current numbers and `docs/design/marshalling-design.md` for the per-argument
 > intern/scratch rule the migration followed.
 
 This report analyzes the reachability of the 304 unregistered functions in the Android JNI surface (`bindings.kt`). An unregistered function relies on name-based `@CName` linking which on Android leads to arguments arriving shifted, Kotlin `String`s being passed incorrectly, and `java.lang.Long` boxing issues. Hitting any of these functions is a latent `SIGSEGV` or similar crash.

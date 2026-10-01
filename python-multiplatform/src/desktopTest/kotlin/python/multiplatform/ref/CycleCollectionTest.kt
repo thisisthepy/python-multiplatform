@@ -362,7 +362,7 @@ class CycleCollectionTest {
      * then gives back exactly 100. So the invariant this test asserts does hold on both builds;
      * free-threaded it is simply not *observable* until a collection has run, which is why one is
      * taken on either side of the instantiation loop below. See
-     * `docs/gc-scheduling-investigation.md`.
+     * `docs/investigations/gc-scheduling-investigation.md`.
      *
      * The "rises while alive" assertion is not decoration: it is what proves the probe reads a
      * real refcount, so that the "returns afterwards" assertion cannot pass vacuously on a
@@ -641,7 +641,7 @@ class CycleCollectionTest {
      * `subtype_dealloc`, which untracks the instance *before* delegating to the base's
      * `tp_dealloc` -- and [ProxyTypeFactory.tp_dealloc] untracks again, unconditionally. Whether
      * that second untrack is safe decides whether the generated proxy classes can ever subclass
-     * this type, which is what `ROADMAP.md` §7 records as the open question blocking real cycle
+     * this type, which is what `docs/roadmap/ROADMAP.md` §7 records as the open question blocking real cycle
      * collection.
      *
      * The answer is yes, and CPython says so in the header this repository vendors:
