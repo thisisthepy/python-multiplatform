@@ -8,7 +8,7 @@ import python.multiplatform.gradle.model.KotlinTypeModel
  * @param typingImports names from `typing` (`Callable`, `Iterable`, `Never`, `Any`).
  * @param referencedClasses Kotlin qualified names of classes whose own stub this expression points
  *   at. The emitting module has to declare or import each one, and a stub that references a class
- *   nobody stubs is `docs/pyi-generation-design.md` §3.1's last-but-one row -- "a promise the runtime
+ *   nobody stubs is `docs/design/pyi-generation-design.md` §3.1's last-but-one row -- "a promise the runtime
  *   does not yet keep".
  */
 internal data class PythonType(
@@ -39,7 +39,7 @@ internal fun pythonClassPathOf(qualifiedName: String): String = qualifiedName.sp
     .ifEmpty { PythonNames.typeName(qualifiedName.substringAfterLast('.')) }
 
 /**
- * `docs/pyi-generation-design.md` §3.1's table.
+ * `docs/design/pyi-generation-design.md` §3.1's table.
  *
  * The input is the **declared Kotlin type**, never a `TypeTag`: §2.2's argument is that a tag says
  * how a value marshals and a stub has to say what it is. `Dp` and `Float` are both `TypeTag.FLOAT`

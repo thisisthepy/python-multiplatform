@@ -96,7 +96,7 @@ actual inline fun PyErr_Print() = python.native.ffi.bindings.PyErr_PrintN()
 actual inline fun PyErr_WriteUnraisable(obj: NativePointer) = python.native.ffi.bindings.PyErr_WriteUnraisableN(obj.toPlatformPointer())
 actual inline fun PyErr_DisplayException(exc: NativePointer) = python.native.ffi.bindings.PyErr_DisplayExceptionN(exc.toPlatformPointer())
 // Exception messages are arbitrary content, not repeated identifiers, so they take the
-// thread-local scratch rather than the intern cache -- see docs/marshalling-design.md.
+// thread-local scratch rather than the intern cache -- see docs/design/marshalling-design.md.
 actual inline fun PyErr_SetString(type: NativePointer, message: String) =
     python.native.ffi.bindings.PyErr_SetStringN(type.toPlatformPointer(), encodeScratchUtf8(message))
 actual inline fun PyErr_SetObject(type: NativePointer, value: NativePointer) = python.native.ffi.bindings.PyErr_SetObjectN(type.toPlatformPointer(), value.toPlatformPointer())

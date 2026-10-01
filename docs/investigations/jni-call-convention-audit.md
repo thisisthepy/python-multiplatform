@@ -210,7 +210,7 @@ only a way for it to stay correct.
 
 Section 2 argues its eight promotions are worth taking because `@CriticalNative` costs "~45ns on
 API 26-31, only ~2-4ns on API 34+". That is backwards. Measured here, net of the Kotlin floor
-(`docs/downcall-design.md`, `androidMain/README.md`), the *change* a promotion buys is:
+(`docs/design/downcall-design.md`, `androidMain/README.md`), the *change* a promotion buys is:
 
 | API | ordinary → `@FastNative` | ordinary → `@CriticalNative` |
 |---|---|---|

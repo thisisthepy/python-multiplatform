@@ -18,7 +18,7 @@ import java.io.File
 import java.util.jar.JarFile
 
 /**
- * `docs/ecosystem.md` §5b's second producer: bindings taken out of the artefacts a build resolves,
+ * `docs/design/ecosystem.md` §5b's second producer: bindings taken out of the artefacts a build resolves,
  * rather than out of the source it compiles.
  *
  * ### Why this exists at all
@@ -68,7 +68,7 @@ import java.util.jar.JarFile
  *
  * ### What it takes to reach Compose, and what each piece was worth
  *
- * `docs/kotlin-extensions-in-python.md` §3 measured this walker binding **zero** declarations from
+ * `docs/design/kotlin-extensions-in-python.md` §3 measured this walker binding **zero** declarations from
  * all 19 Compose Multiplatform desktop jars, and identified three separate rules each of which
  * produced that zero on its own. All three are now gone, and the measurement that replaced it --
  * `ArtifactScannerTest.composeModifierExtensionsSurviveBothGates`, over the same jars -- is
@@ -121,15 +121,15 @@ import java.util.jar.JarFile
  * function's own JVM shape puts the (unboxed) instance in JVM parameter position 0 with **no**
  * declared Kotlin parameter to account for it, which the arity check in [scanClassNode] catches as a
  * mismatch. Only a class's plain statics (`@JvmStatic`, a Java `static`) and package-level top-level
- * declarations are bound; instance dispatch is `docs/ecosystem.md` §5b's next step, same as before.
+ * declarations are bound; instance dispatch is `docs/design/ecosystem.md` §5b's next step, same as before.
  * `suspend` is declined explicitly via `@Metadata` rather than relying on [boundaryTypeOf] rejecting
- * its `Continuation` parameter, per CLAUDE.md's "제외한 것을 조용히 빠뜨리지 마라".
+ * its `Continuation` parameter, per AGENTS.md's "제외한 것을 조용히 빠뜨리지 마라".
  */
 /**
  * One declaration, seen by both consumers of a walk at the moment it is read.
  *
  * [callable] is `null` exactly when the binder declined it, and [declaration] says why. Keeping them
- * together up to the end of the walk is what makes `docs/pyi-generation-design.md` §2.2's "the two
+ * together up to the end of the walk is what makes `docs/design/pyi-generation-design.md` §2.2's "the two
  * renderers cannot drift" a property of the code rather than a convention.
  *
  * **Top-level, not nested in [ArtifactScanner], because there are two producers.** [KlibScanner]
@@ -188,7 +188,7 @@ internal object ArtifactScanner {
         scan(target, includePrefixes, classpath).mapNotNull { it.callable }.sortedBy { it.name }
 
     /**
-     * The same walk, with the half `docs/pyi-generation-design.md` §2.2 asks for kept: one
+     * The same walk, with the half `docs/design/pyi-generation-design.md` §2.2 asks for kept: one
      * [DeclarationModel] per public declaration this walker considered, **including the ones it
      * declined**, each carrying the table key the binder gave it or the reason there is none.
      *
@@ -220,7 +220,7 @@ internal object ArtifactScanner {
         }
         // Both passes are over the whole walk rather than per class, and for the same reason: an
         // overload set is a property of a *package*, and Kotlin lets one live in two files.
-        // `docs/kotlin-extensions-in-python.md` §2.5 counts 11 such pairs in Compose alone -- two
+        // `docs/design/kotlin-extensions-in-python.md` §2.5 counts 11 such pairs in Compose alone -- two
         // file facades, two `ClassNode`s, one Kotlin name -- which a per-class grouping cannot see.
         // It would have emitted them twice under one table key, and it would have generated calls
         // that do not compile (see [applyDefaultOmission]).
@@ -401,12 +401,12 @@ internal object ArtifactScanner {
      * What changed is that there is now a third option between "arbitrate" and "drop". The old rule
      * predates `@Metadata`: with only JVM descriptors there was no *Kotlin* parameter type to name an
      * overload by, and 108 mangled JVM names are ambiguous within their own class
-     * (`docs/kotlin-extensions-in-python.md` §2.3), so the JVM name could not do it either. Metadata
+     * (`docs/design/kotlin-extensions-in-python.md` §2.3), so the JVM name could not do it either. Metadata
      * supplies the declared Kotlin types, so the overloads can be **told apart** rather than
      * arbitrated between.
      *
      * The price of not doing so was measured: **33 of `Modifier`'s 130 names**
-     * (`docs/kotlin-extensions-in-python.md` §3.1), and the casualty list is the API's centre of
+     * (`docs/design/kotlin-extensions-in-python.md` §3.1), and the casualty list is the API's centre of
      * gravity -- `padding`, `size`, `background`, `border`, `clickable`, `width`, `height`. For
      * `padding` specifically, the *only* unmangled overload is the `PaddingValues` one nobody wants,
      * so "keep whichever the descriptor-era filter happened to leave" was also the worst answer.
@@ -433,7 +433,7 @@ internal object ArtifactScanner {
      * enforces exactly, so one name reaches one signature by construction; and
      * `PythonProxySource.renderOne` publishes an entry by `setattr`ing its *leaf* name onto a module,
      * so two entries sharing a leaf would silently overwrite each other. A dispatcher therefore lives
-     * in `pythonx` (`docs/pythonx-adapter-design.md` §4.1) and selects among these names -- which is
+     * in `pythonx` (`docs/design/pythonx-adapter-design.md` §4.1) and selects among these names -- which is
      * why they have to exist and be distinguishable, and why `ExposedCallable` now carries
      * `paramNames` and `paramTypeNames` for it to select on. This layer's job is to make the choice
      * *possible*, not to make it.
@@ -445,7 +445,7 @@ internal object ArtifactScanner {
             { it.overloadSuffix(includeReceiver = true, qualified = true) },
         )
         // A candidate the binder already declined has no name to be ambiguous about; it passes
-        // through so that `docs/pyi-generation-design.md` §2.2's "what is declined stays visible"
+        // through so that `docs/design/pyi-generation-design.md` §2.2's "what is declined stays visible"
         // survives this stage too.
         val (bound, declined) = candidates.partition { it.callable != null }
 
@@ -478,7 +478,7 @@ internal object ArtifactScanner {
      * The receiver is *not* included by default even though it is `paramTypeNames` slot 0: including
      * it always would spell every `Modifier` extension `padding__Modifier_Dp`, and the receiver is
      * the one parameter a reader already knows from where the name is attached
-     * (`docs/kotlin-extensions-in-python.md` §4.1). It joins only when it is what separates the
+     * (`docs/design/kotlin-extensions-in-python.md` §4.1). It joins only when it is what separates the
      * group.
      */
     private fun ArtifactCallable.overloadSuffix(includeReceiver: Boolean, qualified: Boolean): String {
@@ -528,7 +528,7 @@ internal object ArtifactScanner {
                     // A `suspend` declaration's JVM shape carries a trailing `Continuation`, so its
                     // descriptor never matches the one metadata records and it would fall out here
                     // anyway. Looked up by Kotlin name instead so that it is declined *explicitly*
-                    // and reaches the model flagged -- CLAUDE.md's "제외한 것을 조용히 빠뜨리지 마라".
+                    // and reaches the model flagged -- AGENTS.md's "제외한 것을 조용히 빠뜨리지 마라".
                     ?: return@mapNotNull functions
                         .firstOrNull { it.isSuspend && it.jvmSignature.name == method.name }
                         ?.let { suspending ->
@@ -576,7 +576,7 @@ internal object ArtifactScanner {
      * function. `owner` here is the **package**, not the class (contrast [kotlinCandidates]'s own
      * `owner`, which for this same [ownerNode] is the class): a constructor is not a static member of
      * its class, it is the name a caller writes in the class's place, so it publishes the way a
-     * top-level function does -- see `docs/pyi-generation-design.md` §2.2's `DeclarationModel.owner`
+     * top-level function does -- see `docs/design/pyi-generation-design.md` §2.2's `DeclarationModel.owner`
      * KDoc for why that distinction is what selects the `sys.modules` entry a binding lands on.
      *
      * `<init>` is filtered out of [kotlinCandidates] by that function's own `ACC_STATIC` check (a
@@ -801,7 +801,7 @@ internal object ArtifactScanner {
      * because `androidx.compose.runtime.Composable` is declared
      * `@Retention(AnnotationRetention.BINARY)`. `RuntimeInvisible*` is exactly what ASM puts in
      * `invisibleAnnotations`, so the old predicate answered `false` for **every real composable**,
-     * and `DeclarationModel.isComposable` -- which drives `docs/pyi-generation-design.md` §3.6's
+     * and `DeclarationModel.isComposable` -- which drives `docs/design/pyi-generation-design.md` §3.6's
      * PascalCase rule -- was dead. Nothing caught it because the only composables reaching it were
      * being declined anyway, and a declined entry's flag is not asserted anywhere.
      *
@@ -829,7 +829,7 @@ internal object ArtifactScanner {
      *
      * ### Why the synthetic parameters are exposed rather than hidden
      *
-     * `docs/pythonx-adapter-design.md` §4.5 rejected every way of *hiding* them, and each rejection
+     * `docs/design/pythonx-adapter-design.md` §4.5 rejected every way of *hiding* them, and each rejection
      * still stands: an arity-prefix entry cannot express "pass `text`, skip `modifier`", presence
      * branching costs 2^15 call expressions for `Text`, `Text$default` does not exist, and a
      * generated wrapper cannot restate defaults metadata never carries. What none of those noticed is
@@ -848,7 +848,7 @@ internal object ArtifactScanner {
      * This used to decline one outright, on the stated grounds that "Compose's `$changed` slots count
      * receivers and its `$default` bits are assigned over value parameters, so a receiver shifts one
      * numbering and not the other. Nothing here has measured which." It is measured now, out of the
-     * callee, the way `docs/pythonx-adapter-design.md` §5.2 measured the mask in the first place --
+     * callee, the way `docs/design/pythonx-adapter-design.md` §5.2 measured the mask in the first place --
      * `javap -c androidx/compose/material3/NavigationBarKt`, whose `NavigationBarItem` is
      * `RowScope.NavigationBarItem(selected, onClick, icon, modifier = …, …)`:
      *
@@ -1397,7 +1397,7 @@ internal object ArtifactScanner {
      * The declared shape of one Kotlin function, independent of whether the boundary can carry it.
      *
      * `null` when some part of the signature has no name a stub could write -- a type *parameter*, a
-     * flexible type. `docs/pyi-generation-design.md` §3.1's last row and §7: `BindingPolicy` rejects
+     * flexible type. `docs/design/pyi-generation-design.md` §3.1's last row and §7: `BindingPolicy` rejects
      * generic declarations, and stubbing what cannot be called would be a lie.
      */
     private fun declarationModelOf(
@@ -1455,7 +1455,7 @@ internal object ArtifactScanner {
         val returnType = resolveKotlinType(function.returnType, classpath, BoundaryDirection.RETURN)
             ?: return declined("no boundary type for return ${kotlinClassifierNameOf(function.returnType) ?: function.returnType.classifier}")
         // Declared, not marshalled: a `Dp` parameter's tag is FLOAT and its declared name is
-        // `androidx.compose.ui.unit.Dp`. `docs/pythonx-adapter-design.md` §2.4 row 4. A function slot
+        // `androidx.compose.ui.unit.Dp`. `docs/design/pythonx-adapter-design.md` §2.4 row 4. A function slot
         // is the one exception and is the reason [functionSlotTypeName] exists: its declared name
         // alone (`kotlin.Function1`) says neither what the lambda is invoked with nor what it must
         // give back, and `pythonx` needs both to build a wrapper at all.
@@ -1490,7 +1490,7 @@ internal object ArtifactScanner {
         // The all-present body, and **only** that one, is decided here. Which arguments may be left
         // out cannot be: it depends on what else carries this Kotlin name, and an overload set is a
         // property of a package that one file does not see (this object's KDoc, and
-        // `docs/kotlin-extensions-in-python.md` §2.5's 11 split pairs). [applyDefaultOmission] runs
+        // `docs/design/kotlin-extensions-in-python.md` §2.5's 11 split pairs). [applyDefaultOmission] runs
         // over the finished walk and fills this in.
         val callable = ArtifactCallable(
             name = qualifiedName,
@@ -1577,7 +1577,7 @@ internal object ArtifactScanner {
      * and six others), so 64 is well clear of the corpus while bounding an artefact nobody has
      * measured.
      *
-     * `docs/pythonx-adapter-design.md` §4.5 rejects presence branching outright on "2^15 branches for
+     * `docs/design/pythonx-adapter-design.md` §4.5 rejects presence branching outright on "2^15 branches for
      * `Text`". That objection is to an unbounded version of it and, separately, to a case that is not
      * in the table: `Text` is a `@Composable`, and the arity check in [kotlinCandidates] declines
      * every composable for the synthetic `$composer`/`$changed` parameters its JVM signature carries.
@@ -1667,7 +1667,7 @@ internal object ArtifactScanner {
                 declaration = candidate.declaration.copy(
                     // Kept in step one consumer further out: `PyiRendering` writes `= ...` from this
                     // field, and a stub promising an omission the binding refuses would type-check at
-                    // the call site and fail at run time -- `docs/pyi-generation-design.md` §3.2's
+                    // the call site and fail at run time -- `docs/design/pyi-generation-design.md` §3.2's
                     // rule about parameter names, applied to their defaults.
                     parameters = candidate.declaration.parameters.mapIndexed { index, parameter ->
                         parameter.copy(declaresDefault = plan.valueIndices[index] in omittableNow)
@@ -1814,7 +1814,7 @@ internal object ArtifactScanner {
                 owner = owner,
                 ownerIsClass = true,
                 receiver = null,
-                // `docs/pyi-generation-design.md` §3.2: the names are genuinely absent, and a wrong
+                // `docs/design/pyi-generation-design.md` §3.2: the names are genuinely absent, and a wrong
                 // keyword name is worse than no keyword name because it type-checks at the call site
                 // and fails at run time.
                 parameters = paramTypeNames.mapIndexed { index, name ->

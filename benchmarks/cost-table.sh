@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# The one command that cuts docs/cost-table.md.
+# The one command that cuts docs/investigations/cost-table.md.
 #
 #     ./benchmarks/cost-table.sh                    # all six targets, once each, then render
 #     ./benchmarks/cost-table.sh --runs 3           # three runs each, rendered as min-max

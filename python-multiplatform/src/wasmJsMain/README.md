@@ -6,7 +6,7 @@ the data path.
 
 Everything below is measured. The standalone `wasm-experiment/` that first took the measurements
 was retired into this source set and `tools/wasm/` (it remains in git history: `git log --
-wasm-experiment`); `docs/wasm-design.md` records how they were arrived at, including the several
+wasm-experiment`); `docs/platforms/wasm-design.md` records how they were arrived at, including the several
 conclusions that were wrong before they were run. The two claims the rest of this file stands on
 that only the experiment used to prove -- the shared memory surviving growth, and the interpreter
 carrying the `pyemscripten_2026_0` ABI -- are now `wasmJsTest/.../emscripten/WasmSharedMemoryGrowthTest`
@@ -55,7 +55,7 @@ hits `Py_FatalError: thread state ... must be current when releasing` → `abort
 `unreachable` opcode. What you see reported is `RuntimeError: unreachable`, three hops from the
 cause, and the wasm suite dies as *"process exited unexpectedly"* rather than as a red test.
 
-It cost this repo two sections of `docs/upcall-async-design.md` (§9.5, §14.4) to misdiagnose as
+It cost this repo two sections of `docs/design/upcall-async-design.md` (§9.5, §14.4) to misdiagnose as
 "wasm cannot do `asyncio`". It could not do `asyncio` because `selectors.py` calls
 `select.poll().poll(0)` at import time to pick its `DefaultSelector` — which is also why `import
 select` was fine and `import selectors` was not. §15 has the measurement.

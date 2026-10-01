@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Use Kotlin from Python · python-multiplatform</title>
+<meta name="description" content="Real CPython inside Kotlin Multiplatform: Kotlin calls Python, Python calls Kotlin, on every target.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&amp;family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/site.js"></script>
+</head>
+<body>
+<span hidden data-title-en="Use Kotlin from Python · python-multiplatform" data-title-ko="Python 에서 Kotlin 쓰기 · python-multiplatform"></span>
+<header class="site-header">
+  <div class="wrap bar">
+    <a class="brand" href="index.html"><svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="2" width="9" height="9" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="13" width="9" height="9" rx="2.5" fill="var(--accent)"/><path d="M11 6.5h4.5a2 2 0 0 1 2 2V13M13 17.5H8.5a2 2 0 0 1-2-2V11" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round"/></svg><span translate="no">python-multiplatform</span></a>
+    <button class="tool menu-toggle" id="menu-toggle" aria-expanded="false" aria-controls="site-nav"><span data-lang="en">Menu</span><span data-lang="ko">메뉴</span></button>
+    <nav class="nav" id="site-nav" aria-label="Primary">
+      <a href="index.html"><span data-lang="en">Home</span><span data-lang="ko">홈</span></a>
+      <a href="getting-started.html"><span data-lang="en">Get started</span><span data-lang="ko">시작하기</span></a>
+      <a href="concepts.html"><span data-lang="en">Concepts</span><span data-lang="ko">개념</span></a>
+      <a href="guides.html" aria-current="page"><span data-lang="en">Guides</span><span data-lang="ko">가이드</span></a>
+      <a href="ecosystem.html"><span data-lang="en">Ecosystem</span><span data-lang="ko">생태계</span></a>
+      <a href="status.html"><span data-lang="en">Status &amp; FAQ</span><span data-lang="ko">상태 · FAQ</span></a>
+    </nav>
+    <div class="tools">
+      <button class="tool" id="lang-toggle" type="button">한국어</button>
+      <button class="tool" id="theme-toggle" type="button" aria-label="Toggle colour theme">☀</button>
+    </div>
+  </div>
+</header>
+<div class="page-head"><div class="wrap">
+  <div class="eyebrow"><span data-lang="en">Guide</span><span data-lang="ko">가이드</span></div>
+  <h1><span data-lang="en">Use Kotlin from Python</span><span data-lang="ko">Python 에서 Kotlin 쓰기</span></h1>
+  <p><span data-lang="en">Write a Kotlin class; import it from Python under its Kotlin package name.</span><span data-lang="ko">Kotlin 클래스를 쓰고, Python 에서 그 Kotlin 패키지 이름으로 import 한다.</span></p>
+</div></div>
+<main><div class="wrap"><div class="prose">
+  <h2><span class="num">01</span><span data-lang="en">Write Kotlin</span><span data-lang="ko">Kotlin 작성</span></h2>
+  <p><span data-lang="en">Every <code>public</code> declaration is exposed. Annotate with <code>@PythonInternal</code> to keep one out.</span><span data-lang="ko">모든 <code>public</code> 선언이 노출된다. 빼고 싶으면 <code>@PythonInternal</code> 을 붙인다.</span></p>
+  <pre translate="no"><code class="language-kotlin">package org.thisisthepy.python.multiplatform.demo.bindings
+
+class Greeter(subject: String) {
+    var subject: String = subject
+    var greetings: Long = 0
+        private set
+
+    fun greet(times: Long): String { /* ... */ }
+    suspend fun greetNow(times: Long): String = greet(times)
+}</code></pre>
+  <h2><span class="num">02</span><span data-lang="en">Write Python</span><span data-lang="ko">Python 작성</span></h2>
+  <pre translate="no"><code class="language-python">from org.thisisthepy.python.multiplatform.demo.bindings import Greeter
+
+g = Greeter(&#x27;Kotlin&#x27;)    # constructs the Kotlin object
+g.greet(2)               # calls the Kotlin method
+g.subject = &#x27;Python&#x27;     # property setter
+g.greetings = 99         # AttributeError: the Kotlin setter is private
+
+async def main():
+    return await g.greetNow(1)   # a Kotlin suspend fun, awaited</code></pre>
+  <p><span data-lang="en">Constructors, methods, properties, companion members and object declarations all work. A property with a <code>private set</code> is read-only from Python. Annotation classes and generic declarations are not exposed.</span><span data-lang="ko">생성자, 메서드, 프로퍼티, companion 멤버, object 선언이 모두 동작한다. <code>private set</code> 인 프로퍼티는 Python 에서 읽기 전용이다. 애노테이션 클래스와 제네릭 선언은 노출되지 않는다.</span></p>
+  <h2><span class="num">03</span><span data-lang="en">Suspend functions</span><span data-lang="ko">suspend 함수</span></h2>
+  <p><span data-lang="en">A <code>suspend fun</code> is awaitable. If it never suspends it completes immediately; if it does, it is resumed from a Kotlin thread, and cancelling the Python future cancels the coroutine. On wasm, which has no threads, only the synchronous surface is available.</span><span data-lang="ko"><code>suspend fun</code> 은 await 할 수 있다. 중단하지 않으면 바로 끝나고, 중단하면 Kotlin 스레드에서 재개되며, Python future 를 취소하면 코루틴도 취소된다. 스레드가 없는 wasm 에서는 동기 표면만 쓸 수 있다.</span></p>
+  <h2><span class="num">04</span><span data-lang="en">Extension functions</span><span data-lang="ko">확장 함수</span></h2>
+  <p><span data-lang="en">A Kotlin extension function appears in Python as a method on its receiver, so chains read naturally: <code>Modifier.padding(16).size(24)</code>.</span><span data-lang="ko">Kotlin 확장 함수는 Python 에서 수신 객체의 메서드로 보인다. 그래서 체인이 자연스럽게 읽힌다: <code>Modifier.padding(16).size(24)</code>.</span></p>
+  <div class="note"><p><span data-lang="en">Status: partial. Asserted through the adapter and the artifact walker; not yet for KSP-generated proxies.</span><span data-lang="ko">상태: 부분. 어댑터와 아티팩트 워커로는 검증되었고, KSP 생성 프록시는 아직이다.</span></p></div>
+  <h2><span class="num">05</span><span data-lang="en">Native images</span><span data-lang="ko">네이티브 이미지</span></h2>
+  <p><span data-lang="en">Because the table is generated, nothing needs reflection registration: the sample's upcalls run in a GraalVM native image built with Liberica NIK.</span><span data-lang="ko">테이블을 생성하므로 리플렉션 등록이 필요 없다. 샘플의 업콜은 Liberica NIK 로 만든 GraalVM 네이티브 이미지에서 동작한다.</span></p>
+  <p class="muted"><span data-lang="en">Specification: U-1 to U-7. Tests: <code>UpcallEntryTest</code>, <code>PythonProxyInstallTest</code>, <code>GeneratedDeclarationKindsTest</code>, <code>AsyncUpcallDeliveryTest</code>.</span><span data-lang="ko">스펙: U-1 ~ U-7. 테스트: <code>UpcallEntryTest</code>, <code>PythonProxyInstallTest</code>, <code>GeneratedDeclarationKindsTest</code>, <code>AsyncUpcallDeliveryTest</code>.</span></p>
+  <div class="pager"><a href="guide-kotlin-to-python.html">← <span data-lang="en">Use Python from Kotlin</span><span data-lang="ko">Kotlin 에서 Python 쓰기</span></a><a href="guide-binding-libraries.html"><span data-lang="en">Bind a prebuilt library</span><span data-lang="ko">빌드된 라이브러리 바인딩</span> →</a></div>
+</div></div></main>
+<footer class="site-footer">
+  <div class="wrap">
+    <span><span data-lang="en">MIT licensed.</span><span data-lang="ko">MIT 라이선스.</span> <span translate="no">© 2024 thisisthepy</span></span>
+    <span><a href="https://github.com/thisisthepy/python-multiplatform">GitHub</a> · <a href="https://github.com/thisisthepy/python-multiplatform/blob/develop/docs/locale/README_ko.md"><span data-lang="en">Korean README</span><span data-lang="ko">한국어 README</span></a></span>
+  </div>
+</footer>
+</body>
+</html>

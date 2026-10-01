@@ -201,7 +201,7 @@ object ComposeShapedFragment : FunctionTableFragment {
             calls += "zIndex"
             receiver.plus("zIndex(${dp(args[0])})")
         },
-        // A packed value class. `docs/kotlin-extensions-in-python.md` §2.4: raw 16 decodes as
+        // A packed value class. `docs/design/kotlin-extensions-in-python.md` §2.4: raw 16 decodes as
         // `TextUnit.Unspecified`, silently. Nothing binds such a parameter today (TextUnit's
         // constructor is INTERNAL, so `resolveKotlinType` declines it), so this entry is
         // hypothetical -- it exists so the Python side's refusal has something to refuse.

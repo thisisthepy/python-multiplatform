@@ -20,7 +20,7 @@ import python.multiplatform.gradle.artifact.scanKlibIsolated
 import javax.inject.Inject
 
 /**
- * `docs/pyi-generation-design.md`'s generator: `.pyi` stubs for the surface the bindings expose.
+ * `docs/design/pyi-generation-design.md`'s generator: `.pyi` stubs for the surface the bindings expose.
  *
  * ### Why this is a Gradle task at all
  *

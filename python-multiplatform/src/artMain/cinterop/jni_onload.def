@@ -419,7 +419,7 @@ jlong pylistsize_normal(JNIEnv *env, jclass clazz, jlong l) { return PyList_Size
 /*
  * @FastNative counterparts of the migrated functions.
  *
- * Measurement (see docs/downcall-design.md) shows @CriticalNative is effectively free up to
+ * Measurement (see docs/design/downcall-design.md) shows @CriticalNative is effectively free up to
  * API 33 and collapses at 34, while @FastNative is the reverse. Both are registered so the
  * Kotlin side can pick per API level. @FastNative keeps JNIEnv and jclass, so these need the
  * leading parameters that the critical registrations must not have.
@@ -783,7 +783,7 @@ static jlong f_PyType_GetModuleN(JNIEnv *e, jclass c, jlong type) { return PyTyp
  * ===========================================================================
  *
  * The 14 ABI shapes every CPython Stable ABI function collapses into (see
- * docs/downcall-design.md and jvmMain/.../ShapeDowncalls.kt). The target function's address
+ * docs/design/downcall-design.md and jvmMain/.../ShapeDowncalls.kt). The target function's address
  * arrives as the leading `fn` argument and is called indirectly.
  *
  * These used to reach the `@CName` trampolines in `nativeMain/.../EmbedAPI.native.kt` by name,

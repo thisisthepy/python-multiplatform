@@ -880,7 +880,7 @@ val generateWasmProxyExports = tasks.register<GenerateWasmProxyExportsTask>("gen
 kotlin {
     // ROADMAP §10. The target is a leaf directly under `commonMain` -- deliberately not under an
     // intermediate source set, because `EmbedAPI.kt`'s `expect inline fun`s crash the compiler when
-    // combined with an intermediate `expect`/`actual` (see docs/architecture.md).
+    // combined with an intermediate `expect`/`actual` (see docs/design/architecture.md).
     //
     // `nodejs()` carries the suite: the tests have to drive a real CPython Emscripten build, and
     // Node can load `python.wasm` off the filesystem with no webpack step to fight.
@@ -894,7 +894,7 @@ kotlin {
     //
     // What makes this target able to reach CPython at all is that Kotlin 2.4.20-Beta2 *imports* its
     // linear memory (`intrinsics.memory`) instead of defining one. Emscripten's memory is handed in
-    // there, so a `PyObject*` is an address Kotlin can dereference directly. See docs/wasm-design.md
+    // there, so a `PyObject*` is an address Kotlin can dereference directly. See docs/platforms/wasm-design.md
     // and src/wasmJsMain/README.md.
     @OptIn(org.jetbrains.kotlin.gradle.targets.js.dsl.ExperimentalWasmDsl::class)
     wasmJs {
@@ -1340,7 +1340,7 @@ tasks.withType<org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeSimu
 // build machine, `KotlinNativeSimulatorTest` for simctl. An Android device is neither, so the
 // whole of `commonTest` compiled for this target on every build and had never once been executed.
 //
-// That gap is visible in docs/upcall-design.md: the five-platform upcall table has an empty
+// That gap is visible in docs/design/upcall-design.md: the five-platform upcall table has an empty
 // androidNative row, and `537c1a0b` says it was left empty rather than estimated. It is also the
 // exact situation ROADMAP §11b was in for Android/ART, where attaching the suite to a target that
 // had only ever compiled it surfaced two real defects in the first twelve tests.
@@ -1360,7 +1360,7 @@ tasks.withType<org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeSimu
 //   4. **Results in the same shape as every other target.** The Kotlin/Native runner's TeamCity
 //      logger is the only machine-readable output it has, so its service messages are parsed back
 //      into JUnit XML under `build/test-results/androidNative<Abi>Test/`. That is the directory
-//      CLAUDE.md says to count, and counting it is only trustworthy if a *crashed* run is
+//      AGENTS.md says to count, and counting it is only trustworthy if a *crashed* run is
 //      distinguishable from a clean one -- so a `testStarted` with no `testFinished` is written
 //      out as a failure naming the exit code, rather than silently dropped. A native suite that
 //      dies takes the rest of the run with it, and the difference between "212 passed" and "212
@@ -1671,7 +1671,7 @@ listOf("Arm64" to "arm64-v8a", "X64" to "x86_64").forEach { (targetSuffix, abi) 
             val binary = testBinary
             if (!binary.isFile) throw GradleException("Test binary not found at $binary")
 
-            // CLAUDE.md: results are counted out of this directory, and a crashed run that leaves
+            // AGENTS.md: results are counted out of this directory, and a crashed run that leaves
             // the previous run's XML behind gets counted as the previous run.
             resultsRoot.get().asFile.deleteRecursively()
 
@@ -2021,7 +2021,7 @@ fun patchKotlinWasmOutputForCPython(dir: File, modulePrefix: String, logger: org
             throw GradleException(
                 "${importObject.name} has no `intrinsics.memory` placeholder to replace. Kotlin used " +
                     "to emit `new WebAssembly.Memory({ initial: 0 })` there; if that changed, " +
-                    "docs/wasm-design.md's integration step needs revisiting."
+                    "docs/platforms/wasm-design.md's integration step needs revisiting."
             )
         }
     } else {

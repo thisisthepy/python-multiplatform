@@ -467,7 +467,7 @@ only from `allocate()`, has not been checked and decides whether the safe half i
 None of this changes that a WasmGC reference cannot be stored in linear memory — that is a
 spec-level guarantee, not a maturity gap, so CPython can never hold a Kotlin object pointer in a
 `PyObject` field. The answer there remains an index into a Kotlin-side table, which is what
-`docs/object-lifetime.md` already specifies for Python→Kotlin. Kotlin/Wasm even blesses the
+`docs/design/object-lifetime.md` already specifies for Python→Kotlin. Kotlin/Wasm even blesses the
 mechanism: `JsReference<T>` passes a Kotlin object as an opaque reference.
 
 ### What this changes
@@ -670,7 +670,7 @@ path; with option 1 it is close to iOS.
 
 - **Linear memory is strictly unused.** The probe was expanded to include large `ByteArray` allocations (10MB), large object graphs (100,000 items), `Uint8Array` JS ArrayBuffer bridges, and coroutines (`kotlinx.coroutines.GlobalScope.launch`). **None of them touched linear memory.** The page count stayed exactly at 0 until `withScopedMemoryAllocator` was explicitly called. This confirms that a shared linear memory design is perfectly safe and won't be corrupted by normal Kotlin runtime behavior.
 - **JS trampoline cost is ~2.7x.** A microbenchmark running 10,000,000 iterations found a direct `@WasmImport` call took ~48.7 ms, while routing the call through a JS trampoline took ~132.9 ms (2.73x slower). This shows the JS boundary imposes measurable overhead, but since we eliminate copying overhead for strings and data, this cost is a worthwhile tradeoff to achieve the shared memory model.
-- **Unbounded Memory bug.** Kotlin's compiler emits `WasmLimits(0, null)`, causing Emscripten to reject the imported memory. This is confirmed to be the only blocker. A draft YouTrack issue has been written to `docs/wasm-youtrack-issue.md` requesting a compiler flag (or a default Wasm32 ceiling) to fix this.
+- **Unbounded Memory bug.** Kotlin's compiler emits `WasmLimits(0, null)`, causing Emscripten to reject the imported memory. This is confirmed to be the only blocker. A draft YouTrack issue has been written to `docs/platforms/wasm-youtrack-issue.md` requesting a compiler flag (or a default Wasm32 ceiling) to fix this.
 
 ### Still open
 

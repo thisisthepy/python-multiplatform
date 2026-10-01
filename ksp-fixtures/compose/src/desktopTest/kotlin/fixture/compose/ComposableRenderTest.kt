@@ -343,7 +343,7 @@ class ComposableRenderTest {
     }
 
     /**
-     * **`docs/pythonx-adapter-design.md` §6 item 1, executed:** when Compose drops the slot, the
+     * **`docs/design/pythonx-adapter-design.md` §6 item 1, executed:** when Compose drops the slot, the
      * Python callable comes back.
      *
      * `sys.getrefcount` is the measurement and the callable is held in a Python global, so the only

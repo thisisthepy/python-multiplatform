@@ -273,7 +273,7 @@ class UpcallTableTest {
     fun traverseEnumeratesThePythonReferencesHeldByTheKotlinObject() {
         // Step 1 of CPython's cycle algorithm: tp_traverse must see through the handle into
         // the Kotlin object's PyObject-typed fields, or the cycle never collects. See
-        // docs/object-lifetime.md.
+        // docs/design/object-lifetime.md.
         UpcallTable.install(listOf(TestAppFragment))
         val holder = RefHolder(first = 0xAAAA, second = 0xBBBB)
         val ref = HandleTable.register(holder)

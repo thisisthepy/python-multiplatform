@@ -125,7 +125,7 @@ class UpcallBoundaryCostTest {
          * Convergence needed 40 000 calls cold and 70 000 warm on desktop, and 70 000 on wasm; the
          * warm side is slower to settle, so it sets the requirement. 100 000 is that 70 000 with
          * margin, and it is checked rather than assumed -- see the equality this file's figures are
-         * required to hold in `docs/upcall-design.md`, where the same rows are quoted from a full
+         * required to hold in `docs/design/upcall-design.md`, where the same rows are quoted from a full
          * suite, from a suite with the proxy cost test short-circuited, and from a `--tests`-filtered
          * run of this class alone.
          *

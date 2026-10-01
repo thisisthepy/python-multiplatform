@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Use Python from Kotlin · python-multiplatform</title>
+<meta name="description" content="Real CPython inside Kotlin Multiplatform: Kotlin calls Python, Python calls Kotlin, on every target.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&amp;family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/site.js"></script>
+</head>
+<body>
+<span hidden data-title-en="Use Python from Kotlin · python-multiplatform" data-title-ko="Kotlin 에서 Python 쓰기 · python-multiplatform"></span>
+<header class="site-header">
+  <div class="wrap bar">
+    <a class="brand" href="index.html"><svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="2" width="9" height="9" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="13" width="9" height="9" rx="2.5" fill="var(--accent)"/><path d="M11 6.5h4.5a2 2 0 0 1 2 2V13M13 17.5H8.5a2 2 0 0 1-2-2V11" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round"/></svg><span translate="no">python-multiplatform</span></a>
+    <button class="tool menu-toggle" id="menu-toggle" aria-expanded="false" aria-controls="site-nav"><span data-lang="en">Menu</span><span data-lang="ko">메뉴</span></button>
+    <nav class="nav" id="site-nav" aria-label="Primary">
+      <a href="index.html"><span data-lang="en">Home</span><span data-lang="ko">홈</span></a>
+      <a href="getting-started.html"><span data-lang="en">Get started</span><span data-lang="ko">시작하기</span></a>
+      <a href="concepts.html"><span data-lang="en">Concepts</span><span data-lang="ko">개념</span></a>
+      <a href="guides.html" aria-current="page"><span data-lang="en">Guides</span><span data-lang="ko">가이드</span></a>
+      <a href="ecosystem.html"><span data-lang="en">Ecosystem</span><span data-lang="ko">생태계</span></a>
+      <a href="status.html"><span data-lang="en">Status &amp; FAQ</span><span data-lang="ko">상태 · FAQ</span></a>
+    </nav>
+    <div class="tools">
+      <button class="tool" id="lang-toggle" type="button">한국어</button>
+      <button class="tool" id="theme-toggle" type="button" aria-label="Toggle colour theme">☀</button>
+    </div>
+  </div>
+</header>
+<div class="page-head"><div class="wrap">
+  <div class="eyebrow"><span data-lang="en">Guide</span><span data-lang="ko">가이드</span></div>
+  <h1><span data-lang="en">Use Python from Kotlin</span><span data-lang="ko">Kotlin 에서 Python 쓰기</span></h1>
+  <p><span data-lang="en">Start CPython, move values across, and treat Python errors as Kotlin exceptions.</span><span data-lang="ko">CPython 을 시작하고, 값을 건네고, Python 오류를 Kotlin 예외로 다룬다.</span></p>
+</div></div>
+<main><div class="wrap"><div class="prose">
+  <h2><span class="num">01</span><span data-lang="en">Start the interpreter</span><span data-lang="ko">인터프리터 시작</span></h2>
+  <p><span data-lang="en"><code>Python3.initialize()</code> is idempotent. On Android, call <code>PythonBootstrap.initialize(context)</code> instead (see platform setup).</span><span data-lang="ko"><code>Python3.initialize()</code> 는 여러 번 불러도 된다. Android 에서는 대신 <code>PythonBootstrap.initialize(context)</code> 를 부른다 (플랫폼별 준비 참고).</span></p>
+  <pre translate="no"><code class="language-kotlin">import python.multiplatform.ffi.PyObject
+import python.multiplatform.ffi.Python3
+import python.multiplatform.ffi.types.basic.PyInt
+import python.multiplatform.ffi.types.collections.PyList
+
+fun main() {
+    Python3.initialize()
+
+    val numbers = PyList.fromList(listOf(2L, 3L, 5L, 7L, 11L).map { PyInt.from(it) })
+    Python3.import(&quot;__main__&quot;).setAttr(&quot;kotlin_numbers&quot;, numbers)
+
+    val globals = Python3.import(&quot;__main__&quot;).dict
+    val result: PyObject = Python3.eval(&quot;sum(kotlin_numbers) * 2&quot;, 258, globals, globals)
+    println(&quot;${result.Type.name}: $result&quot;)   // int: 56
+}</code></pre>
+  <h2><span class="num">02</span><span data-lang="en">Statements and expressions</span><span data-lang="ko">문장과 식</span></h2>
+  <p><span data-lang="en"><code>Python3.exec(source)</code> runs statements; <code>Python3.eval(expr, mode, globals, locals)</code> returns a <code>PyObject</code>; <code>Python3.import(name)</code> returns a <code>PyModule</code>.</span><span data-lang="ko"><code>Python3.exec(source)</code> 는 문장을 실행하고, <code>Python3.eval(expr, mode, globals, locals)</code> 는 <code>PyObject</code> 를 돌려주며, <code>Python3.import(name)</code> 은 <code>PyModule</code> 을 돌려준다.</span></p>
+  <h2><span class="num">03</span><span data-lang="en">Collections are Kotlin collections</span><span data-lang="ko">컬렉션은 Kotlin 컬렉션이다</span></h2>
+  <p><span data-lang="en"><code>PyList</code> implements <code>MutableList</code>, <code>PyDict</code> implements <code>MutableMap</code>, <code>PySet</code> implements <code>MutableSet</code>, <code>PyTuple</code> implements <code>List</code>. Build them with <code>fromList</code>, <code>fromMap</code>, <code>fromSet</code>.</span><span data-lang="ko"><code>PyList</code> 는 <code>MutableList</code>, <code>PyDict</code> 는 <code>MutableMap</code>, <code>PySet</code> 은 <code>MutableSet</code>, <code>PyTuple</code> 은 <code>List</code> 를 구현한다. <code>fromList</code>, <code>fromMap</code>, <code>fromSet</code> 으로 만든다.</span></p>
+  <h2><span class="num">04</span><span data-lang="en">Errors</span><span data-lang="ko">오류</span></h2>
+  <p><span data-lang="en">A Python exception raised by <code>exec</code> or <code>eval</code> is thrown as <code>PyException</code>, carrying the real exception type and message. <code>exec</code> is built on <code>PyRun_String</code> rather than <code>PyRun_SimpleString</code>, which would print and clear the error before Kotlin could see it.</span><span data-lang="ko"><code>exec</code> 나 <code>eval</code> 에서 일어난 Python 예외는 실제 예외 타입과 메시지를 담은 <code>PyException</code> 으로 던져진다. <code>exec</code> 는 <code>PyRun_SimpleString</code> 이 아니라 <code>PyRun_String</code> 위에 있다 — 앞의 것은 Kotlin 이 보기 전에 오류를 출력하고 지워 버린다.</span></p>
+  <p class="muted"><span data-lang="en">Specification: L-1, O-1 to O-7. Tests: <code>Python3Test</code>, <code>PyListTest</code>, <code>PyExceptionTest</code>.</span><span data-lang="ko">스펙: L-1, O-1 ~ O-7. 테스트: <code>Python3Test</code>, <code>PyListTest</code>, <code>PyExceptionTest</code>.</span></p>
+  <div class="pager"><a href="guides.html">← <span data-lang="en">Guides</span><span data-lang="ko">가이드</span></a><a href="guide-python-to-kotlin.html"><span data-lang="en">Use Kotlin from Python</span><span data-lang="ko">Python 에서 Kotlin 쓰기</span> →</a></div>
+</div></div></main>
+<footer class="site-footer">
+  <div class="wrap">
+    <span><span data-lang="en">MIT licensed.</span><span data-lang="ko">MIT 라이선스.</span> <span translate="no">© 2024 thisisthepy</span></span>
+    <span><a href="https://github.com/thisisthepy/python-multiplatform">GitHub</a> · <a href="https://github.com/thisisthepy/python-multiplatform/blob/develop/docs/locale/README_ko.md"><span data-lang="en">Korean README</span><span data-lang="ko">한국어 README</span></a></span>
+  </div>
+</footer>
+</body>
+</html>

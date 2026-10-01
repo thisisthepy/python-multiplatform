@@ -10,7 +10,7 @@ import kotlin.coroutines.startCoroutine
  * One Kotlin coroutine started from a frame that had to return without it, and the place its
  * outcome waits until something asks for it.
  *
- * This is the half of `docs/upcall-async-design.md` that all three candidate conventions share.
+ * This is the half of `docs/design/upcall-async-design.md` that all three candidate conventions share.
  * The problem the doc states is structural: CPython calls a C function pointer, that C frame has
  * to hand back a `PyObject *` before it returns, and a suspension has nothing to hand back.
  * `runBlocking` "solves" it by re-seizing the very thread that would have been freed -- on Android
@@ -117,7 +117,7 @@ class PendingCall private constructor() : CoroutineContext.Element {
      *
      * Resuming a continuation twice is undefined, so there is no back door either. Forcible
      * cancellation is what a `Job` tree is *for*, and building one is `kotlinx.coroutines`'
-     * job; `docs/upcall-async-design.md` §6 states the no-dependency rule this obeys.
+     * job; `docs/design/upcall-async-design.md` §6 states the no-dependency rule this obeys.
      *
      * ### What it is
      *

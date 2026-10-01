@@ -144,7 +144,7 @@ class GeneratedTableTest {
 
     @Test
     fun aClassWithPyObjectFieldsGetsAGeneratedTraverseThatVisitsTheirRawPointers() {
-        // docs/object-lifetime.md's "Cycle collection is part of the table's job": the generator
+        // docs/design/object-lifetime.md's "Cycle collection is part of the table's job": the generator
         // must find PyObject-typed fields on RefHolder and emit a traverse function that visits
         // their pointer value, with no reflection at runtime.
         assertTrue(ClassLookup.require("fixture.library.RefHolder").hasTraverse)

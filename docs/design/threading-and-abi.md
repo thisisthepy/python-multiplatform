@@ -1,5 +1,11 @@
 # Threading model and Stable ABI
 
+> **Note (2026-10):** the conclusion below, "free-threading starts at 3.15t", is superseded. It dates from
+> 2026-08-10. `docs/roadmap/ROADMAP.md` §9 (2026-08-12) corrects it: 3.14t works on desktop with
+> `-PpythonFreeThreaded=true` (236 tests, 0 failures); the default stays `pythonFreeThreaded=false`; only
+> desktop has free-threaded prebuilts; `Py_LIMITED_API` is not defined, so `abi3t` is not a blocker. The
+> reasoning is kept as history.
+
 ## Decision
 
 Parallelism will come from **free-threaded CPython**, not from per-interpreter GIL sub-interpreters.
@@ -12,8 +18,8 @@ they depend on:
 | `python3.X` (GIL) | Kotlin threads each attach a thread state and serialise on the GIL |
 | `python3.Xt` (free-threaded) | Each Kotlin thread talks to its own free-running Python thread |
 
-**Free-threading is supported from 3.15t onwards only.** Earlier versions are GIL-only, for the
-reason set out below.
+**Free-threading was originally planned from 3.15t onwards only** (superseded: see the note above; 3.14t
+works on desktop, opt-in). The reasoning for that gate is set out below.
 
 ## Why not per-interpreter GIL
 
@@ -49,7 +55,7 @@ extension to implement multi-phase init and declare `Py_mod_multiple_interpreter
 do not simply fail to import. That would cost exactly the Python libraries this project exists to
 share, in return for parallelism.
 
-## Why 3.15t and not 3.14t
+## Why 3.15t and not 3.14t (historical; superseded by ROADMAP §9)
 
 Free-threaded builds **do not support the Limited API or the Stable ABI** in 3.13 or 3.14. All ~330
 bindings here target the Stable ABI, so a free-threaded 3.14 build cannot be used without abandoning
@@ -68,7 +74,7 @@ and the Stable ABI coexist.
 | `PyObject` / `PyVarObject` become incomplete types; no field access | **Compatible.** Verified: `PyObject` appears only as `CPointer<PyObject>` and is never dereferenced. The only `.pointed` uses in the tree are commented-out `JNIEnv` code in `JniExport.kt`. |
 | Extensions may not embed `PyObject` in their own structs | Compatible — nothing does. |
 | `PyModExport` hook (PEP 793) instead of static `PyModuleDef` | Not yet relevant. We embed CPython rather than building an extension module. **It becomes relevant for the upcall work**, where Kotlin classes are exposed to Python. |
-| No backwards compatibility with 3.14 or earlier | Accepted; free-threading is gated to 3.15t. |
+| No backwards compatibility with 3.14 or earlier | Was accepted at the time; no longer applies, 3.14t is used on desktop (ROADMAP §9). |
 
 ## PEP 809 may collapse the two flavours into one
 
@@ -103,7 +109,7 @@ Desktop free-threaded builds exist today, including 3.15 release candidates. **M
 enabling free-threading before mobile artefacts appear would split the threading model across
 platforms — and with it the object-lifetime and thread-state design layered on top.
 
-Switching the default requires all three of:
+Switching the default (originally) required all three of the following; ROADMAP §9 shows 1 is not needed for 3.14t on desktop, while 2 still holds:
 
 1. CPython 3.15 final, for `abi3t`
 2. Free-threaded mobile artefacts from python.org and Python-Apple-support

@@ -27,7 +27,7 @@ import kotlin.test.assertTrue
  *
  * ### What was leaking, measured rather than argued
  *
- * `docs/kotlin-extensions-in-python.md` §3.2 assembles `Modifier.padding(16.dp).size(24.dp)` from
+ * `docs/design/kotlin-extensions-in-python.md` §3.2 assembles `Modifier.padding(16.dp).size(24.dp)` from
  * Python out of Compose's own jars. Every link of that chain is a `CallableKind.FUNCTION` returning
  * `TypeTag.OBJECT`, so [UpcallTrampoline.marshalResult] registered a root and handed Python a bare
  * integer -- and an integer has nothing to hang a finaliser off. §6's "Handle ownership" records the
@@ -362,7 +362,7 @@ class OwnedResultLifetimeTest {
             println(
                 "\n--- Owned object results: ${currentPlatform.name} --- " +
                     "no proxies are installable on this target, so nothing owns a result here; " +
-                    "see docs/upcall-async-design.md 12.4\n",
+                    "see docs/design/upcall-async-design.md 12.4\n",
             )
             return@withInterpreter
         }

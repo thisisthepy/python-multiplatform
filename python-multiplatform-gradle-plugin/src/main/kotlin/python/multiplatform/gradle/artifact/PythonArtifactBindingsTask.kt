@@ -19,7 +19,7 @@ import javax.inject.Inject
  * Walks the jars a configuration resolves and writes one `FunctionTableFragment` per artefact that
  * contributed something, plus the `ArtifactTable` that lists them.
  *
- * `docs/ecosystem.md` §5b: KSP reads the consumer's own source, this reads everything the build
+ * `docs/design/ecosystem.md` §5b: KSP reads the consumer's own source, this reads everything the build
  * resolves. The two emit the same shape into the same `UpcallTable`; see [renderArtifactTableSource]
  * for why they keep separate aggregators.
  *
@@ -140,7 +140,7 @@ abstract class PythonArtifactBindingsTask : DefaultTask() {
                     renderArtifactFragmentSource(ArtifactFragment(objectName, "artifact:$coordinate", entries)),
                 )
                 // The `.class` half of the same fragment, and emitted from the same `entries` list
-                // for the same reason `docs/pyi-generation-design.md` §2.2 gives for the declaration
+                // for the same reason `docs/design/pyi-generation-design.md` §2.2 gives for the declaration
                 // models: two walks that can disagree are worse than one walk with two outputs.
                 val thunks = thunkSpecsOf(entries)
                 if (thunks.isNotEmpty()) {

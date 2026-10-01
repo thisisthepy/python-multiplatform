@@ -20,7 +20,7 @@ import python.multiplatform.ffi.types.basic.PyFloat
  * `androidx.compose.material.pullrefresh.PullRefreshKt.pullRefresh(Modifier,
  * onPull: (Float) -> Float, onRelease: suspend (Float) -> Float, enabled: Boolean)`.
  *
- * `docs/pythonx-adapter-design.md` §9.4 identifies this overload as requiring a **real nested-scroll
+ * `docs/design/pythonx-adapter-design.md` §9.4 identifies this overload as requiring a **real nested-scroll
  * parent/child tree**: `onPull`/`onRelease` are fired by `NestedScrollConnection` callbacks from a
  * scrollable descendant's pre-scroll/pre-fling reports, not by pointer events the modifier's own
  * body awaits directly. This function is that harness.

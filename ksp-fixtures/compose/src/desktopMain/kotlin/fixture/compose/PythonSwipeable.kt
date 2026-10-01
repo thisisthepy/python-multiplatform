@@ -12,7 +12,7 @@ import python.multiplatform.ffi.types.basic.PyString
 
 /**
  * `Modifier.swipeable` (`androidx.compose.material.SwipeableKt.swipeable-pPrIpRY`), declined for the same
- * reason `anchoredDraggable` is (`docs/pythonx-adapter-design.md` §9.2, §9.5): its type parameter `T` --
+ * reason `anchoredDraggable` is (`docs/design/pythonx-adapter-design.md` §9.2, §9.5): its type parameter `T` --
  * here on both `SwipeableState<T>` and the `anchors: Map<Float, T>` parameter -- has no name a cast could
  * spell. Fixed the same way: one wrapper per concrete `T`. `String` was chosen for the same reason
  * `anchoredDraggable`'s wrapper chose it -- the states a swipe moves between are discrete identifiers a

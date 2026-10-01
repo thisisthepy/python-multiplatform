@@ -186,7 +186,7 @@ boundary went from **52 to 6**, and of those six none is a defect:
   *(Done — see below. It is `ffiSymbolRawN(name: Long)` now, and the shape vocabulary went with it.)*
 
 The 42 functions migrated in this pass are listed with their per-argument intern/scratch
-judgement in `docs/marshalling-design.md`. Every symbol they bind was checked to exist in the
+judgement in `docs/design/marshalling-design.md`. Every symbol they bind was checked to exist in the
 shipped `libpython3.14.so` before registering (`llvm-nm -D --defined-only`), and the linked
 `libmultiplatform_python3.14.so` has no unresolved `Py*` symbol.
 
@@ -228,7 +228,7 @@ covered the whole reachable surface, so what remained was landmines only. The ch
 returns `true` for `PyDict_Clear`, `PyObject_Type` and `PyList_Append`, which were registered in
 the previous pass, so the procedure does find reachable functions when they exist.
 
-`docs/android-unregistered-surface.md` is kept for the call-graph traces, but its counts and its
+`docs/investigations/android-unregistered-surface.md` is kept for the call-graph traces, but its counts and its
 "71 reachable" framing are historical.
 
 The shape vocabulary went with it. The 14 `downcall_*` trampolines and `ffiSymbolRaw` used to reach
@@ -291,7 +291,7 @@ hundred still carry the original wiring.
 
 ## 3. Classify the remaining functions leaf vs re-entrant
 
-**Closed.** The classification is in `docs/jni-call-convention-audit.md`; the decision procedure a
+**Closed.** The classification is in `docs/investigations/jni-call-convention-audit.md`; the decision procedure a
 new call site has to pass is in `androidMain/README.md`.
 
 `@CriticalNative` and `@FastNative` both stop the collector for the call, and `@CriticalNative`
@@ -359,7 +359,7 @@ now bases a generated class on `_PmGcObject`, which subclasses `_pm_proxy_base`
 set. Production proxies are instances of the traversable type; see §7's account (the paragraph
 after `CycleCollectionTest.aPythonSubclassOfTheProxyTypeSurvivesBeingUntrackedTwice`) and §14b
 item 5. Cycles that close entirely on the Kotlin side (no Python-side edge for `tp_traverse` to
-report) are the part that remains open — `docs/object-lifetime.md` has it.
+report) are the part that remains open — `docs/design/object-lifetime.md` has it.
 
 **The third — the exception window — was not structural, and is closed.** "A raw pointer leaks
 if an exception lands between the C call returning it and the wrapper taking ownership"
@@ -442,7 +442,7 @@ removed by `0fae961a`. Probes exist (`asmGetAttr`, `asmListToArray`, `asmExec`) 
 benchmarked, but the production path does not use composition anywhere.
 
 Composed operations belong in the FFI layer as `expect`/`actual`, not in the object model —
-`PyObject` must not reference `bindings` (see `docs/architecture.md`). Restoring composition
+`PyObject` must not reference `bindings` (see `docs/design/architecture.md`). Restoring composition
 therefore does **not** require reopening `PyObject` as `expect`/`actual`.
 
 `Python3.exec` was measured too, and it contradicts the reasoning above:
@@ -602,7 +602,7 @@ PYTHON: UPCALL_OK / PROXY_OK
 19 entries became 41 because `ExposedToPython.kt` grew; the exposure policy still refuses
 `@PythonInternal` with `-1` under the closed world, which is the part that had to hold. The
 procedure, including the toolchain path and why `JAVA_HOME` must stay on JDK 21 while native-image
-runs on 25, is in `docs/graal-native-image-verification.md`.
+runs on 25, is in `docs/platforms/graal-native-image-verification.md`.
 
 Python builds a function pointer with `ctypes`, resolves a Kotlin declaration by name through
 `HandleTable`, and calls back into Kotlin — inside a closed world where runtime reflection is
@@ -794,7 +794,7 @@ registration is gone.
 **Was:** entirely unimplemented — `ClassLookup.kt`, `ObjectReference.kt` and `ReflectedClass.kt`
 held 1–3 lines each, and this was README's only unchecked box.
 
-Design is settled in `docs/upcall-design.md`: build-time generated function table (runtime
+Design is settled in `docs/design/upcall-design.md`: build-time generated function table (runtime
 reflection is impossible on Kotlin/Native and under GraalVM's closed world), blacklist exposure
 (all `public`, minus an opt-out annotation), name resolved once with the handle cached in the
 Python proxy's instance data, KSP running in user modules too.
@@ -806,7 +806,7 @@ generate fragments into a well-known package; the app module's KSP finds them wi
 `ksp-fixtures/` compiles and runs, discovering fragments across a module boundary. Two caveats
 carried over: `.klib` discovery on a Native target is inferred rather than tested, and
 `getDeclarationsFromPackage` is `@KspExperimental`, so keep that step swappable. See
-`docs/upcall-table-design.md`.
+`docs/design/upcall-table-design.md`.
 
 **The generator exists now.** `python-multiplatform-ksp/` is the shipped KSP processor (library
 role emits a fragment, app role emits a fragment for itself then aggregates every `Fragment_*`
@@ -816,7 +816,7 @@ runs `UpcallTableTest`'s exact scenarios — constructor/method/getter/setter th
 field detection — against a table KSP generated rather than a hand-written fragment. `.klib`
 discovery is no longer inferred: the same pair on `androidNativeArm64` found the library's
 fragment from its compiled `.klib` and linked a real test binary (compiled and linked only, not
-run — no device in this workspace). See `docs/upcall-table-design.md` for the full account,
+run — no device in this workspace). See `docs/design/upcall-table-design.md` for the full account,
 including the one place the doc's own sketch was wrong (fragments must be `public`, not
 `internal` — Kotlin enforces `internal` per module, and the app module compiling generated code
 that references a library's fragment is a different module even inside one Gradle build).
@@ -827,7 +827,7 @@ static linking. 200 synthetic exposed functions cost ≈1.84 KB/entry in a strip
 `androidNativeArm64` binary (368,640 bytes total) — a floor, since the synthetic functions were
 trivial one-liners and a real function's body adds its own size on top. Whether that floor plus a
 real library's bodies is acceptable is a product judgement the measurement informs but does not
-settle. See `docs/upcall-table-design.md` §4.
+settle. See `docs/design/upcall-table-design.md` §4.
 
 **The declaration surface is now the whole one, and what is left out is left out on purpose.**
 Companion members and `object` members become receiver-less entries under the *owner's* name
@@ -861,7 +861,7 @@ then marks every file that maps to it dirty. `ALL_FILES` on the aggregator stays
 narrower form buys nothing measurable and its safety under a classpath-only change was never
 established. The only route to real incrementality is per-file fragments (one isolating output per
 source file), which changes fragment naming, `UpcallTable`'s per-module idempotency and duplicate
-detection — a design change, not a tweak. Recorded in `docs/upcall-table-design.md` §11.5.
+detection — a design change, not a tweak. Recorded in `docs/design/upcall-table-design.md` §11.5.
 
 **Cycle collection: the generator's half is done, and so — separately — is the slot-wiring half.**
 `tp_traverse` on the Python proxy must reach through the handle into the Kotlin object's
@@ -889,7 +889,7 @@ publishes into `__main__` (`ProxyTypeFactory.kt:23`, and the per-platform `actua
 `nativeMain/.../ProxyTypeFactory.kt:345`, `wasmJsMain/.../ProxyTypeFactory.kt:311`) — see §14b
 item 5 for the full account, including the `subtype_dealloc` double-untrack test. Cycles that close
 on the Kotlin side (the handle table holding weakly) are separately still untouched, as
-`docs/object-lifetime.md` already recorded.
+`docs/design/object-lifetime.md` already recorded.
 
 Cost is not yet measured. The table lookup is an array index and is not the expense; the
 boundary is. Note that iOS and androidNative have no boundary here at all — Python and Kotlin
@@ -904,7 +904,7 @@ now is too: `toKotlin`, `toKotlinOrNull` and `toPython` are implemented, no TODO
 simulator (111 tests).
 
 **Closed for the lazy path too.** The per-type lifetime rule this section named as the last
-missing piece is written — `docs/object-lifetime.md`, "Conversion caching, and where it stops",
+missing piece is written — `docs/design/object-lifetime.md`, "Conversion caching, and where it stops",
 one row per source type, derived from what each conversion actually returns rather than from what
 the type looks like — and the cache is implemented against it:
 
@@ -1021,7 +1021,7 @@ all along.
 and is fixed by the checkpoint below. `CycleCollectionTest` was the second, and it was written off
 twice — first as a premise the runtime does not honour, then as a queued-decrement problem a
 checkpoint would flush. Both were wrong, and it is fixed; see below and
-`docs/gc-scheduling-investigation.md`.
+`docs/investigations/gc-scheduling-investigation.md`.
 
 ### The flag did nothing at all until three silent defects were fixed
 
@@ -1213,7 +1213,7 @@ does read inside a `PyObject`, and it is the one place that would have to change
 property of using a direct probe, not of the invariant; counting through `sys.getrefcount` would
 also work, at the price of the argument's own temporary reference.
 
-The full trace, with the header dumps, is in `docs/gc-scheduling-investigation.md`. That document
+The full trace, with the header dumps, is in `docs/investigations/gc-scheduling-investigation.md`. That document
 also records the half of this that is **not** free-threading-specific: `_Py_ScheduleGC` only sets
 `_PY_GC_SCHEDULED_BIT`, so a pure C API embedder never runs the cyclic collector on *either* build.
 
@@ -1418,7 +1418,7 @@ the simulator slice name and `lib-arm64`, which is correct for the arm64 host bu
 **There is no JS bridge, and the interpreter is running.** Every framing this section previously
 carried — that Kotlin/Wasm cannot reach C, that the data path must be copied through JS, that
 direct calls and shared memory cannot be had together — is disproved by running code.
-`wasm-experiment/` reproduces all of it; `docs/wasm-design.md` has the detail.
+`wasm-experiment/` reproduces all of it; `docs/platforms/wasm-design.md` has the detail.
 
 **Test D — Kotlin/Wasm against CPython 3.14.2, built here for `wasm32-emscripten`:**
 
@@ -2125,7 +2125,7 @@ is the actual state of the Android object model, and that is the point of doing 
   `<archive>.sigstore` in-process with `dev.sigstore:sigstore-java`, pinning the release manager's
   Fulcio SAN and OIDC issuer — both Android tarballs, and from 3.15 the iOS XCframework. The claim
   this entry rested on, that Sigstore verification needs an external CLI and is therefore
-  unreasonable inside Gradle, was false; `docs/python-version-acquisition.md` §5 is corrected.
+  unreasonable inside Gradle, was false; `docs/platforms/python-version-acquisition.md` §5 is corrected.
   Three things worth keeping:
   - **The identity is a version→signer map, not a constant.** 3.14/3.15 are `hugo@python.org` via
     GitHub; 3.12/3.13 are `thomas@python.org` via Google. A constant would keep passing on the
@@ -2410,7 +2410,7 @@ and, since the AGP bump below, the same four sections on Android — observed on
 Twenty-two rather than desktop's nineteen because the Android compilation also scans
 `MainActivity`; the module name is the same one, since it is one module now.
 
-Section 3's parenthesis is out of date as of `docs/upcall-async-design.md` §13: ART does have a
+Section 3's parenthesis is out of date as of `docs/design/upcall-async-design.md` §13: ART does have a
 boundary shim, the two C gaps in it are closed, and that section now reads
 `handle 4294967327 -> 0  ·  with args -> presses x3 = 0` from a call **Python** makes through
 `_pm_resolve`/`_pm_invoke`. Sections 5-7 run on both emulators as well.
@@ -2475,7 +2475,7 @@ Py_InitializeEx -> Py_InitializeFromConfig -> init_interp_main
 ```
 
 That is the `encodings` import, parked in `open()` on a directory under `/Volumes/`. This repo's
-workspace is on an external SSD (see CLAUDE.md), so the documented recipe reaches a path a
+workspace is on an external SSD (see AGENTS.md), so the documented recipe reaches a path a
 sandboxed simulator *app* cannot open, while a simctl-spawned *test* binary can. Note what the
 symptom is not: the failure this section and `iosMain/README.md` both warn about is
 `Fatal Python error: Failed to import encodings module`, an abort. A hang looks like "the app
@@ -2523,7 +2523,7 @@ sample limitation, not a platform one.
 The two count differences are both benign and neither is a defect: 42 vs 41 table entries and 519 vs
 509 generated lines follow from the per-target source sets KSP scans (`iosMain` has
 `MainViewController.kt`, `desktopMain` has `main.kt` and `NativeImageMain.kt`) — the *proxy class*
-count, which is what the generated module is actually judged on, is 1 on both. `docs/upcall-async-design.md`
+count, which is what the generated module is actually judged on, is 1 on both. `docs/design/upcall-async-design.md`
 §13.5 records `466 lines, 2 proxy classes` for Android; that measurement is older than these two and
 was not re-taken here, so the difference is not evidence of anything yet.
 
@@ -2708,7 +2708,7 @@ exception when the Kotlin side raises: `python.native.ffi.UpcallArgumentsTest`, 
 whole path from inside the interpreter, and `UpcallTrampolineTest` (commonTest, so it compiles for
 every target) which drives the marshaller directly. Desktop: 233 tests, 0 failed.
 
-Three things the work settled, each recorded in `docs/upcall-design.md`:
+Three things the work settled, each recorded in `docs/design/upcall-design.md`:
 
 - **One shape, not a family.** Argument passing needed exactly one new C shape,
   `(long, long) -> long`. Arity and types ride in the tuple and in the table entry, never in the C
@@ -2738,9 +2738,9 @@ each.** Nothing new broke — unlike §11b, where attaching this suite to ART fo
 it at the 2nd test and again at the 12th — and the reason is that `nativeMain` was already being
 exercised by the iOS simulator. What had never been executed was `artMain` and the androidNative
 `cinterop` bindings, and those came up clean. The empty androidNative row in
-`docs/upcall-design.md`'s five-platform upcall table is filled in from those runs.
+`docs/design/upcall-design.md`'s five-platform upcall table is filled in from those runs.
 
-It is *not* the `@CName` + `ctypes.CDLL(None)` route this document and `docs/upcall-design.md`
+It is *not* the `@CName` + `ctypes.CDLL(None)` route this document and `docs/design/upcall-design.md`
 both predicted, and the reason is two independent measurements rather than a preference:
 
 - `@CName` symbols are exported from the androidNative `.so` (`T` in `nm -D`) and **are not
@@ -2770,13 +2770,13 @@ what a `PyMethodDef` slot needs. The boundary is inverted instead, exactly as th
 pthread ART has never seen — attaches and detaches rather than silently returning `NULL`.
 `RegisterNatives` survives only for the one cold `upcallPublish(long)` that installs the bootstrap.
 `UpcallEntryTest` (`androidInstrumentedTest`) is green on `pmp_api26` and `pmp_api36`, 251 tests
-each, 0 failed; `docs/upcall-design.md`'s "Android's boundary runs the other way round" has the rest.
+each, 0 failed; `docs/design/upcall-design.md`'s "Android's boundary runs the other way round" has the rest.
 
 ~~**What is still open.** wasm — a `@WasmExport` plus `Table.set` (3.1 ns, measured in §11).
-Per-platform detail is in `docs/upcall-design.md`'s "What each platform still owes".~~ **Closed.**
+Per-platform detail is in `docs/design/upcall-design.md`'s "What each platform still owes".~~ **Closed.**
 wasm's general upcall entry (`UpcallEntry.kt`, `wasmJsMain/kotlin/python/native/ffi/`) publishes
 five `PyCFunction` objects over the one `@WasmExport`/`Table.set` shape this note describes, and
-`docs/upcall-design.md:207` now marks that row "already proven" rather than owed. The generated
+`docs/design/upcall-design.md:207` now marks that row "already proven" rather than owed. The generated
 proxy type that would let Python write `obj.method(x)` instead of going through `_pm_bind` is §7's
 remaining half.
 
@@ -2792,7 +2792,7 @@ running the code — it exists so the state doesn't have to be reassembled by re
 
 Numbers rot the moment someone adds a test, so what matters here is the *recipe*: clean the
 target's `build/test-results/` directory first (a crashed run leaves the previous run's XML behind
-and a naive count reports the old, larger number as if it were current — see CLAUDE.md), run the
+and a naive count reports the old, larger number as if it were current — see AGENTS.md), run the
 task with output redirected to a file so the exit code is real, then sum the `tests`/`failures`/
 `skipped` attributes off every `<testsuite>` root under the result directory. All of the JVM and
 Native targets share that shape; Android's instrumented target does not (below).
@@ -2841,7 +2841,7 @@ has found something stale.
 **`ksp-fixtures:artifact` is in that list for a reason.** It was red on `develop` for days because
 the verification set in use was plugin + app + compose, and two failures sat behind that gap: a
 pinned list that `e2d75100` outdated, and a stub-shape canary that `ac8e4708` outdated. All three
-fixture modules are the set; CLAUDE.md now says so.
+fixture modules are the set; AGENTS.md now says so.
 
 **Sibling repositories, same pass:** `toolchain` 98 + `tcl` 9, `pypackpack` `packpack` 135 +
 `cli` 26, `pythonx-compose` 71 — all 0 failures.
@@ -2888,7 +2888,7 @@ what is blocking it and what the next concrete step is.
 
 1. **`autoDrainInterval`'s default on the GIL build.** *(Requested explicitly for this audit.)*
    Not actually blocked on anything technical — the evidence is in §9 and
-   `docs/gc-scheduling-investigation.md` §6-§7, and a decision has already been implemented in code
+   `docs/investigations/gc-scheduling-investigation.md` §6-§7, and a decision has already been implemented in code
    (`Python3.kt`: `if (BuildConfig.pythonFreeThreaded) 32 else 0`). What is open is whether "off"
    is the right *default* to ship, not whether the mechanism works. The case for leaving it off:
    turning it on lets a `__del__`/weakref callback/pending call run inside a `withGIL` scope exit
@@ -2902,7 +2902,7 @@ what is blocking it and what the next concrete step is.
    side effect" and "leak cycles silently by default" is what remains.
    **(b) next step:** decide, and if the answer changes, it is a one-line change at
    `Python3.kt`'s `autoDrainInterval` declaration — the reasoning to cite either way is already
-   written on that property's KDoc and in `docs/gc-scheduling-investigation.md` §6.
+   written on that property's KDoc and in `docs/investigations/gc-scheduling-investigation.md` §6.
 
 2. **CI has never run.** *(Requested explicitly for this audit.)* Four workflow files exist
    (`.github/workflows/{desktop,ios,android-native,wasm}.yml`) but `gh api
@@ -2965,10 +2965,10 @@ what is blocking it and what the next concrete step is.
    strong reference by construction (`HandleTable.kt:25`, "this table leaks by construction... a
    strong entry here is a[nother reference in the cycle]"), so a cycle that runs entirely through
    Kotlin objects (no Python-side edge for `tp_traverse` to report) is still not collectible.
-   `docs/object-lifetime.md` has the mechanism and names the hard parts.
+   `docs/design/object-lifetime.md` has the mechanism and names the hard parts.
 
 6. **`PyValue`'s lazy conversion path.** (§7b) **Closed.** The per-type lifetime rule this item
-   asked for is written (`docs/object-lifetime.md`, "Conversion caching, and where it stops"), the
+   asked for is written (`docs/design/object-lifetime.md`, "Conversion caching, and where it stops"), the
    cache is implemented against it and enforced by `isIndependentOfPythonMemory`, and
    `PyValueLazyConversionTest` covers the path `ConversionTest` never touched. Refusing `bytes`
    outright rather than converting it to a `ByteArray` copy is the one piece of the type table
@@ -3855,7 +3855,7 @@ not sitting at.
 
 ## 16. Bindings from resolved artefacts — the second producer, punched through on one path
 
-`docs/ecosystem.md` §5b settles that bindings are produced at build time by **two** producers, split
+`docs/design/ecosystem.md` §5b settles that bindings are produced at build time by **two** producers, split
 by what they look at:
 
     KSP                the consumer's own source — declarations it can see being compiled
@@ -3978,7 +3978,7 @@ reader this section says it needed, and it now has one.
 
 **Whether those bindings actually draw anything was audited component by component
 (`8813d8f1`, `1363b445`, `c6f73da2`, 2026-08-18), against 27 components downstream that had been
-zero-byte stubs.** Verified against `M3ProofRenderTest.kt` and `docs/pythonx-adapter-design.md` §10
+zero-byte stubs.** Verified against `M3ProofRenderTest.kt` and `docs/design/pythonx-adapter-design.md` §10
 (both updated by the same round) rather than the commit messages alone: 24 of the 27 render
 correctly, in three batches — ten (`horizontalDividerDrawsALine...` through
 `tabRowComposesItsTabsAnd...`), ten more (`checkboxRendersItsChecked...` through
@@ -3998,7 +3998,7 @@ not declined by any filter — they are simply absent from the walked table, bec
 does not collect class constructors, which is a scanner gap rather than a property of either type.
 
 **Of the three Compose modifiers declined for an unspellable generic type parameter
-(`docs/pythonx-adapter-design.md` §9.4: `swipeable`, `modifierLocalProvider`, `anchoredDraggable` —
+(`docs/design/pythonx-adapter-design.md` §9.4: `swipeable`, `modifierLocalProvider`, `anchoredDraggable` —
 `SwipeableState<T>`, `ProvidableModifierLocal<T>`, `AnchoredDraggableState<T>`), two are now bound.**
 Verified by reading the wrappers, not just the design doc: `fixture.compose
 .pythonAnchoredDraggableString` (`ksp-fixtures/compose/.../PythonAnchoredDraggable.kt`, `8d4fd6a4`) and
@@ -4156,7 +4156,7 @@ Not verified, and each is a real next step rather than a caveat:
    cannot declare `pmp_invoke` on a consumer's behalf — every wasmJs consumer must still write the
    three-line delegating export `wasmJsTest/UpcallExports.kt` shows, or `UpcallEntry.publish` throws
    `IllegalStateException` at the `pmpRegisterUpcall` call inside `publishToGlobals()`. This is
-   structural (`docs/upcall-async-design.md` §12.4's finding still holds for the export itself, even
+   structural (`docs/design/upcall-async-design.md` §12.4's finding still holds for the export itself, even
    though the *bootstrap* it blocked is no longer the gap) and not something a future revision of
    this entry can close without changing what `@WasmExport` means.
 

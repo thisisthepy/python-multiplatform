@@ -8,7 +8,7 @@ import kotlin.test.Test
 import kotlin.test.assertTrue
 
 /**
- * Pins the mechanism behind `docs/gc-scheduling-investigation.md` §8: why an eval-loop checkpoint
+ * Pins the mechanism behind `docs/investigations/gc-scheduling-investigation.md` §8: why an eval-loop checkpoint
  * that demonstrably runs reclaims nothing on the free-threaded build, when the same checkpoint --
  * or three of them -- suffices with the global lock.
  *

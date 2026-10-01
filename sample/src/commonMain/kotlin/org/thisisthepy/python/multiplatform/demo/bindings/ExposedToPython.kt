@@ -12,7 +12,7 @@ import kotlin.coroutines.suspendCoroutine
  * over these sources at build time; every public declaration it finds becomes an entry in the
  * generated `python.multiplatform.generated.FunctionTable`, which [installGeneratedUpcallTable]
  * hands to [python.multiplatform.reflection.UpcallTable]. Exposure is a blacklist (ROADMAP §7,
- * `docs/binding-policy.md`): being `public` is all it takes, and opting *out* is what needs an
+ * `docs/design/binding-policy.md`): being `public` is all it takes, and opting *out* is what needs an
  * annotation.
  *
  * The Python-visible name of an entry is its Kotlin qualified name, which is why

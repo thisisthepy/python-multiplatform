@@ -7,7 +7,7 @@ import kotlin.jvm.JvmInline
  * How a value is marshalled across the boundary. The trampoline reads these, never the Kotlin
  * type, because there is no runtime type to read on Kotlin/Native.
  *
- * `docs/upcall-table-design.md` lists five (`INT`, `FLOAT`, `STRING`, `BYTES`, `OBJECT`);
+ * `docs/design/upcall-table-design.md` lists five (`INT`, `FLOAT`, `STRING`, `BYTES`, `OBJECT`);
  * [BOOLEAN] and [UNIT] are here because Python's `bool` is a distinct type and because a
  * function returning `Unit` must marshal to `None` rather than to an object handle.
  */
@@ -30,7 +30,7 @@ enum class TypeTag {
  * Every CPython callback convention passes the relevant object as an argument -- `self` for
  * methods, `type` for `tp_new`, the closure for getters -- which is why a handful of shared
  * trampolines can serve an unbounded number of Kotlin targets and no runtime code generation is
- * needed. See `docs/upcall-design.md`.
+ * needed. See `docs/design/upcall-design.md`.
  */
 enum class CallableKind(val hasReceiver: Boolean) {
     /** Top-level or companion function. `args` is exactly the declared parameters. */
@@ -98,7 +98,7 @@ class ExposedCallable(
      * [paramTypes] and [returnType] describe the declaration as written -- the continuation
      * parameter the Kotlin compiler adds is not here, and [returnType] is the value the coroutine
      * will eventually produce, not the `PendingCall`. That is what lets
-     * `docs/upcall-async-design.md` §5's fast path marshal a body that never suspended exactly as
+     * `docs/design/upcall-async-design.md` §5's fast path marshal a body that never suspended exactly as
      * a synchronous entry would.
      */
     val isSuspend: Boolean = false,
@@ -106,7 +106,7 @@ class ExposedCallable(
      * The Kotlin declaration's parameter names, in [paramTypes] order, or empty when the producer
      * did not supply them.
      *
-     * `docs/pythonx-adapter-design.md` §2.4 is the reason this exists: mapping a Python keyword
+     * `docs/design/pythonx-adapter-design.md` §2.4 is the reason this exists: mapping a Python keyword
      * argument onto a positional slot needs names, and neither side of the boundary had them --
      * "this is not a `pythonx` design choice, it is arithmetic." Both producers can read them
      * (`KmValueParameter.name` for the walker, KSP's own parameter list for the processor), so the
@@ -127,7 +127,7 @@ class ExposedCallable(
      *
      * [paramTypes] says how a value is *marshalled*, which is deliberately lossy: a `Dp` parameter is
      * a [TypeTag.FLOAT] because the generated Kotlin wraps the raw number back up into a `Dp` on the
-     * way in (`docs/pythonx-adapter-design.md` §4.4). That is correct for calling and useless for
+     * way in (`docs/design/pythonx-adapter-design.md` §4.4). That is correct for calling and useless for
      * describing -- a Python adapter cannot tell `Dp` from `Float`, and a `.pyi` generator cannot
      * name the type it is meant to stub. This is the declaration as written.
      */
@@ -143,7 +143,7 @@ class ExposedCallable(
      * [arity], whereas an extension's receiver is an ordinary argument that is. Both are "there is a
      * receiver"; only this one means "and it is already in `args[0]` and counted".
      *
-     * `docs/kotlin-extensions-in-python.md` §4.1 -- an extension becomes a method on its receiver's
+     * `docs/design/kotlin-extensions-in-python.md` §4.1 -- an extension becomes a method on its receiver's
      * proxy -- has no input without this and [receiverTypeName].
      */
     val isExtension: Boolean = false,
@@ -155,7 +155,7 @@ class ExposedCallable(
      *
      * **A flag, and nothing acts on it yet.** Every entry this repository generates passes every
      * argument explicitly; there is no route from here to a call that omits one.
-     * `docs/pythonx-adapter-design.md` §4.5 names four candidates and a measured reason each may not
+     * `docs/design/pythonx-adapter-design.md` §4.5 names four candidates and a measured reason each may not
      * work -- notably that Compose carries a composable's `$default` mask as a *declared* trailing
      * parameter and emits no `fn$default` bridge at all, so "call the synthetic" is not available.
      * The flag is carried because metadata has it and because a stub that marks 254 of `Modifier`'s
@@ -197,7 +197,7 @@ class ExposedCallable(
  * A resolved entry in [UpcallTable] -- the thing the Python proxy caches so that no call after
  * the first one passes a string.
  *
- * `docs/upcall-design.md` takes this from ObjC: a selector is fast because it is an interned
+ * `docs/design/upcall-design.md` takes this from ObjC: a selector is fast because it is an interned
  * pointer, not because a table exists. The equivalent here is that the name is resolved once
  * and this integer is what crosses afterwards.
  *

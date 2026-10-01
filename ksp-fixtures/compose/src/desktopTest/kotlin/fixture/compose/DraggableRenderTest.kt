@@ -20,7 +20,7 @@ import kotlin.test.assertTrue
 
 /**
  * **A real drag gesture reaches Python through `Modifier.draggable`'s suspend slots** -- one of the
- * three `docs/pythonx-adapter-design.md` §9.2 judges "the same suspend-lambda shape as `pointerInput`"
+ * three `docs/design/pythonx-adapter-design.md` §9.2 judges "the same suspend-lambda shape as `pointerInput`"
  * without attempting. `fixture.compose.pythonDraggable` (`PythonDraggable.kt`) is the same technique
  * §9.1 already proved for `pointerInput`, applied to `draggable`'s three callback slots: a real
  * `DraggableState` and two real `suspend CoroutineScope.(...) -> Unit` lambdas, hand-written and

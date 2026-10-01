@@ -139,7 +139,7 @@ Native Image 는 **FFM 다운콜을 빌드 타임에 등록**해야 한다. `ref
 여기서도 shape 14종이 유리하다 — `Feature` 하나에서 `registerForDowncall` 을 14번 부르면 끝난다.
 임의 시그니처를 런타임에 만드는 구조였다면 애초에 불가능하다.
 
-우선순위는 낮다. 상세는 [`android-ffm-design.md`](android-ffm-design.md).
+우선순위는 낮다. 상세는 [`android-ffm-design.md`](../platforms/android-ffm-design.md).
 
 ## 스레드 상태
 
@@ -653,7 +653,7 @@ prices the Android upcall attach. Both are upcall-side and already covered by `u
 compile — on three of the six this pass: desktop, the iOS simulator, and wasmJs (see Validation
 below). `iosX64Test` has no practical run path on Apple Silicon and nobody targets it; the
 Android/ART and androidNative rows need a connected device or emulator, which this pass did not
-have available (CLAUDE.md's "에뮬레이터는 쓰지 마라" for this task).
+have available (AGENTS.md's "에뮬레이터는 쓰지 마라" for this task).
 
 ### A shared table, picked to match the upcall table's columns
 
@@ -683,7 +683,7 @@ into one — not a bare `PyUnicode_FromString`).
 > **Four of this table's seven rows are quotes from another document and one column of it is
 > superseded (below), which is what happens to a table assembled by hand.** The same four columns,
 > cut for all six targets in one run with their conditions attached, are in
-> [`cost-table.md`](cost-table.md): `./benchmarks/cost-table.sh --runs 3` on a quiet machine fills
+> [`cost-table.md`](../investigations/cost-table.md): `./benchmarks/cost-table.sh --runs 3` on a quiet machine fills
 > it. It draws the first three columns from the same `measureDowncalls()` rows this table does and
 > the fourth from the same `BenchmarkTest` row, so it is this table's recipe automated, not a
 > different measurement.
@@ -698,7 +698,7 @@ into one — not a bare `PyUnicode_FromString`).
 | *Android API 26* (ART)† | *(no prior measurement)* | *(no prior measurement)* | *1253.41–1295.79 ns* | *1404.00–1485.24 ns* |
 | *Android API 36* (ART)† | *(no prior measurement)* | *(no prior measurement)* | *804.27–838.60 ns* | *1013.04–1197.93 ns* |
 
-**Source for rows 1–4, 6–7:** `docs/cost-table.md` (commit `958c0082b294`), `UpcallBoundaryCostTest` columns 1–3 with warmup 100,000, min–max over 3 runs per target. Column 4 (`PyUnicode_FromString, 8 chars`) from `BenchmarkTest` same source, warmup 100,000.
+**Source for rows 1–4, 6–7:** `docs/investigations/cost-table.md` (commit `958c0082b294`), `UpcallBoundaryCostTest` columns 1–3 with warmup 100,000, min–max over 3 runs per target. Column 4 (`PyUnicode_FromString, 8 chars`) from `BenchmarkTest` same source, warmup 100,000.
 
 † Rows 1, 2, 3, 4 and 6–7: Directly from cost-table.md. The Android/ART rows (6–7) record both upcall and downcall in the cost-table measurement, fixing the prior "not recorded" state.
 

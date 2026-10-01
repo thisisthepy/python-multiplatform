@@ -23,7 +23,7 @@ import python.native.ffi.bindings.malloc
  * static data. So CPython allocates and Kotlin only dereferences. [allocUtf8] goes through
  * CPython's own `malloc` for that reason.
  *
- * See docs/wasm-design.md and this source set's README for the measurements.
+ * See docs/platforms/wasm-design.md and this source set's README for the measurements.
  */
 object Wasm {
 

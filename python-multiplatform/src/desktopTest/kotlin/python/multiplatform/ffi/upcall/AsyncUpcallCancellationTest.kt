@@ -17,7 +17,7 @@ import kotlin.test.assertTrue
 
 /**
  * What happens when the Python side gives up on a call that Kotlin is still running --
- * `docs/upcall-async-design.md` §8.6's first open question, which that section deliberately refused
+ * `docs/design/upcall-async-design.md` §8.6's first open question, which that section deliberately refused
  * to answer because it had not been measured.
  *
  * The shape of the problem is that the two halves of a suspended call are owned by different

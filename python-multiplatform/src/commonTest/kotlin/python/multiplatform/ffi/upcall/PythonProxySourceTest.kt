@@ -71,7 +71,7 @@ class PythonProxySourceTest {
         assertContains(source, "if hasattr(_pm_r, '__await__'):")
         assertContains(source, "return await _pm_r")
         // The whole point of the conditional await: an already-complete call must reach the caller
-        // as its value, not wrapped in anything. `docs/upcall-async-design.md` §5.
+        // as its value, not wrapped in anything. `docs/design/upcall-async-design.md` §5.
         assertContains(source, "return _pm_r")
     }
 
@@ -598,7 +598,7 @@ class PythonProxySourceTest {
     fun anObjectResultWhoseTypeTheProducerNamedIsHandedToPythonInsideSomethingThatOwnsIt() {
         // The leak this closes: a `TypeTag.OBJECT` result crosses as a `HandleTable` integer, and an
         // integer has nothing to hang a finaliser off, so every one of them was the caller's to
-        // release by hand. `docs/kotlin-extensions-in-python.md` §6 records the consequence for the
+        // release by hand. `docs/design/kotlin-extensions-in-python.md` §6 records the consequence for the
         // Compose chain -- one handle per intermediate link -- and `OwnedResultLifetimeTest` counts
         // it. The owner is a Python object, which is the only thing a `__del__` can live on.
         val source = PythonProxySource.render(listOf(objectEntry("p.seed")))

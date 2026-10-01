@@ -16,7 +16,7 @@ import kotlin.test.assertEquals
  * `FunctionTableFragment` -> `UpcallTable` -> `PythonProxySource` -> `from junit.runner.Version
  * import id`.
  *
- * `docs/ecosystem.md` §5b settles that the Python surface is an *import statement*, not a resolve
+ * `docs/design/ecosystem.md` §5b settles that the Python surface is an *import statement*, not a resolve
  * call, and that a Kotlin fully-qualified name means the original code rather than a wrapper of ours
  * wearing its name. This is that claim, for a third-party binary artefact: `junit.runner.Version` is
  * JUnit's own package path, and `id()` answers `"4.13.2"` -- a string that exists nowhere except

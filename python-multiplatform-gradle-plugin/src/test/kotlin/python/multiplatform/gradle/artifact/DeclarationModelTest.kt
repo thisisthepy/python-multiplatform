@@ -8,7 +8,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * `docs/pyi-generation-design.md` §2.2's model, taken out of the same walk that produces the
+ * `docs/design/pyi-generation-design.md` §2.2's model, taken out of the same walk that produces the
  * bindings.
  *
  * ### Why this is a third representation and not a widened `ArtifactCallable`

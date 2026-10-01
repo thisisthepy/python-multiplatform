@@ -18,7 +18,7 @@ import platform.posix.pthread_tVar
 /**
  * A bare `pthread_create`, not anything Kotlin-level (`Worker`, a dispatcher, ...).
  *
- * That is deliberate. `docs/upcall-async-design.md` §7.1 and §10.6 leave one question open on
+ * That is deliberate. `docs/design/upcall-async-design.md` §7.1 and §10.6 leave one question open on
  * every target but desktop: does async delivery work when the completing thread is one the
  * Kotlin/Native runtime has never attached to on its own? A `Worker` launders that question --
  * it is Kotlin/Native's own thread machinery, already known to interoperate with the runtime. A

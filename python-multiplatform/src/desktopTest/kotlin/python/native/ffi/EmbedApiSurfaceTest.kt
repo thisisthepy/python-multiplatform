@@ -12,7 +12,7 @@ import kotlin.test.fail
  *
  * ## Why this is a test and not a paragraph in a document
  *
- * `docs/ecosystem.md` §5c recorded "335 `expect` against 315 desktop `actual`, 20 unaccounted for"
+ * `docs/design/ecosystem.md` §5c recorded "335 `expect` against 315 desktop `actual`, 20 unaccounted for"
  * and left it open. That number came from `grep -c`, and `grep` cannot see comments. Kotlin block
  * comments **nest**, so `EmbedAPI.kt` opened one doc-comment at line 28 that ran to line 249 and
  * swallowed a superseded first draft of Sections 1 and 2 -- twenty `expect` declarations that no
@@ -94,7 +94,7 @@ class EmbedApiSurfaceTest {
      * Which source sets contribute `actual` declarations to each compiled target.
      *
      * `nativeMain` is shared by iOS and androidNative, which is why both appear: checking only one
-     * of them has let the other go missing before (`CLAUDE.md`, "검증에 androidNative 컴파일을 포함한다").
+     * of them has let the other go missing before (`AGENTS.md`, "검증에 androidNative 컴파일을 포함한다").
      */
     private val platforms: Map<String, List<String>> = mapOf(
         "desktop" to listOf("jvmMain", "desktopMain"),
@@ -197,7 +197,7 @@ class EmbedApiSurfaceTest {
             "these `expect`/`actual` declarations exist only inside a commented-out region. Kotlin " +
                 "block comments nest, so a `/**` opened above a section swallows everything down to " +
                 "the matching `*/` and `grep` still reports the declarations as present -- which is " +
-                "exactly how docs/ecosystem.md §5c came to report a 20-declaration gap that was not " +
+                "exactly how docs/design/ecosystem.md §5c came to report a 20-declaration gap that was not " +
                 "there. Delete them or revive them; leaving them is the failure mode.\n" +
                 stranded.entries.joinToString("\n") { (f, n) -> "  $f: $n" }
         )

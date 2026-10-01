@@ -29,7 +29,7 @@ class Counter(var count: Long = 0) {
 }
 
 /** Holds Python references directly, the way a real exposed class would -- exercises the
- * generator's `tp_traverse` field-detection path (docs/object-lifetime.md). */
+ * generator's `tp_traverse` field-detection path (docs/design/object-lifetime.md). */
 class RefHolder(var primary: PyObject?, var secondary: PyObject?)
 
 /**

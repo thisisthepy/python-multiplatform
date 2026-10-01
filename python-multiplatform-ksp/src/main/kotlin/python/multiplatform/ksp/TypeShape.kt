@@ -1,7 +1,7 @@
 package python.multiplatform.ksp
 
 /**
- * The boundary's five-plus-two marshalling categories (`docs/upcall-table-design.md` §1,
+ * The boundary's five-plus-two marshalling categories (`docs/design/upcall-table-design.md` §1,
  * `python.multiplatform.reflection.TypeTag`). Kept as a processor-local copy rather than a
  * dependency on the runtime module's enum so this file has no KSP or runtime import and its
  * mapping logic is plain-JVM-testable.

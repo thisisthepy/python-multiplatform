@@ -1,7 +1,7 @@
 # Upcall Table Design: Fragment Generation, Collection, and Tree Shaking
 
 This document resolves the two open questions from
-[`upcall-design.md`](upcall-design.md) and ROADMAP.md §7:
+[`upcall-design.md`](upcall-design.md) and docs/roadmap/ROADMAP.md §7:
 
 1. How do per-module function-table fragments find each other at runtime,
    given that Kotlin/Native has no `ServiceLoader` and no useful reflection?

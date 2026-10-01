@@ -6,7 +6,7 @@ import com.google.devtools.ksp.symbol.KSClassDeclaration
 
 /**
  * How the app-role processor finds every `Fragment_*` object -- its own dependencies' and its
- * own. `docs/upcall-table-design.md` §3: the only working implementation today goes through
+ * own. `docs/design/upcall-table-design.md` §3: the only working implementation today goes through
  * `Resolver.getDeclarationsFromPackage`, which is `@KspExperimental`. This interface is the
  * seam the doc asks for: if that API changes, only [PackageScanFragmentDiscovery] below needs
  * to change, not [python.multiplatform.ksp.AppProcessor] or anything downstream of it.
@@ -19,7 +19,7 @@ interface FragmentDiscovery {
 
 /**
  * The only implementation today. Queries the well-known package on the classpath (JAR on JVM,
- * `.klib` metadata on Kotlin/Native -- `docs/upcall-table-design.md` §2's "Platform uniformity"
+ * `.klib` metadata on Kotlin/Native -- `docs/design/upcall-table-design.md` §2's "Platform uniformity"
  * table), which is why this discovers fragments compiled by other modules without those modules
  * publishing anything beyond their ordinary build artifact.
  */

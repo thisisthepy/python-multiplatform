@@ -51,7 +51,7 @@ class GeneratedDeclarationKindsTest {
 
     @Test
     fun companionMembersAreReachableUnderTheOwningClassNameWithNoReceiver() {
-        // docs/binding-policy.md: "companion object 멤버 -> 클래스의 정적 메서드처럼 노출".
+        // docs/design/binding-policy.md: "companion object 멤버 -> 클래스의 정적 메서드처럼 노출".
         // Python calls WithCompanion.create(7), not WithCompanion.Companion.create(7).
         val create = UpcallTable.resolve("fixture.library.WithCompanion.create")
         assertEquals(CallableKind.FUNCTION, kindOf("fixture.library.WithCompanion.create"))
@@ -210,7 +210,7 @@ class GeneratedDeclarationKindsTest {
     @Test
     fun compilerGeneratedDataClassMembersAreNotExposed() {
         // KSP does report `copy` and `componentN` for a data class (it does not report `equals`,
-        // `hashCode` or `toString`); docs/binding-policy.md excludes compiler-generated members.
+        // `hashCode` or `toString`); docs/design/binding-policy.md excludes compiler-generated members.
         assertNotNull(ClassLookup.find("fixture.library.Point"))
         assertTrue(UpcallTable.resolve("fixture.library.Point.x").isValid)
         assertFalse(UpcallTable.resolve("fixture.library.Point.copy").isValid)

@@ -3,7 +3,7 @@ package python.multiplatform.gradle.stubs
 /**
  * The naming rule, forwards and backwards.
  *
- * `docs/pyi-generation-design.md` §3.6: types, objects and composables are PascalCase; functions,
+ * `docs/design/pyi-generation-design.md` §3.6: types, objects and composables are PascalCase; functions,
  * methods and parameters are snake_case, which `pythonx-compose`'s `text.py` already does by hand
  * (`font_size` -> `fontSize`, `letter_spacing` -> `letterSpacing`, and 14 more).
  *

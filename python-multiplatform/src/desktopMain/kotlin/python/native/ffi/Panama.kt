@@ -6,7 +6,7 @@ import java.lang.invoke.MethodType
 
 /**
  * The three CPython Stable ABI return kinds relevant to the shape vocabulary: no value,
- * a `long`-sized integer/pointer, or a `double`. See `docs/downcall-design.md`.
+ * a `long`-sized integer/pointer, or a `double`. See `docs/design/downcall-design.md`.
  */
 internal enum class ReturnKind { VOID, LONG, DOUBLE }
 

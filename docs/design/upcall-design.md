@@ -386,7 +386,7 @@ runs on every target.
 
 > **This table is hand-cut and is a record of the round it was taken in.** The same rows, taken by
 > a harness that runs all six targets from one command and writes the conditions next to the
-> numbers, are in [`cost-table.md`](cost-table.md) — re-cut with
+> numbers, are in [`cost-table.md`](../investigations/cost-table.md) — re-cut with
 > `./benchmarks/cost-table.sh --runs 3` on a quiet machine. Prefer that one when the two disagree:
 > it records the commit, the warmup, the load average and the device identity of its own cut, and
 > this one cannot, because those were transcribed by hand and only partly.
@@ -401,7 +401,7 @@ runs on every target.
 | **Android ART** (`pmp_api36`, arm64) | 995.61–1154.10 ns ‡ | 804.27–838.60 ns | 1100.87–1167.17 ns | 1.18–1.43x | 1.10–1.29x |
 | **Android ART** (`pmp_api26`, arm64) | 1196.52–1272.28 ns ‡ | 1253.41–1295.79 ns | 1800.86–1863.97 ns | 0.92–1.01x | 1.05–1.18x |
 
-_For rows 1–4 and 6–7: Source is `docs/cost-table.md` (commit `958c0082b294`), `UpcallBoundaryCostTest` with warmup 100,000, min–max over 3 runs per target (except desktop, wasmJs, iosSimulatorArm64 and androidNativeArm64 cut from cut-hostless, artApi36 from cut-api36, artApi26 from cut-api26 — see that document's "Conditions" table for per-cut details)._
+_For rows 1–4 and 6–7: Source is `docs/investigations/cost-table.md` (commit `958c0082b294`), `UpcallBoundaryCostTest` with warmup 100,000, min–max over 3 runs per target (except desktop, wasmJs, iosSimulatorArm64 and androidNativeArm64 cut from cut-hostless, artApi36 from cut-api36, artApi26 from cut-api26 — see that document's "Conditions" table for per-cut details)._
 
 **Prior values (warmup 3,000):** desktop 510–560 ns, wasmJs 290–304 ns, iOS simulator 2266–2301 ns, androidNative pmp_api36 3228–3275 ns, androidNative pmp_api26 3234–3310 ns, ART pmp_api36 944–1063 ns, ART pmp_api26 1146–1233 ns.
 
@@ -908,7 +908,7 @@ unchanged; what was wrong is the assumption that a second entry point needs a se
 fresh object per call, so one exported pointer already backs arbitrarily many distinct Python
 callables — which is exactly what `UpcallEntry.bind` had been doing with a `CallableHandle` all
 along. Putting an op code where the handle would sit turns the same pointer into a dispatcher, and
-all five names land with no new export. `docs/upcall-async-design.md` §14 has the measurement.
+all five names land with no new export. `docs/design/upcall-async-design.md` §14 has the measurement.
 
 wasmJs now fills the sync rows of this table for real: module function +17 ns (1.05x), instance
 method +18 ns (1.05x), property read +17 ns (1.06x), constructor +351 ns (1.48x), against a boundary
@@ -1015,4 +1015,4 @@ cycles" instead of solving it.
 
 Full mechanism, and the three parts that remain hard — traverse running during collection,
 `tp_clear` having to mutate Kotlin state, and cycles that close on the Kotlin side — are in
-`docs/object-lifetime.md`.
+`docs/design/object-lifetime.md`.
