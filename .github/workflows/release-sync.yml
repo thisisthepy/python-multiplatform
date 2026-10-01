@@ -1,0 +1,48 @@
+name: Release sync
+
+# Every push to develop refreshes the `release` branch (develop minus the
+# Markdown files that must not reach main) and keeps one release -> main PR open.
+on:
+  push:
+    branches: [develop]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync release branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin release:refs/remotes/origin/release || true
+          bash tools/release/sync-release.sh --source "${GITHUB_SHA}" --push
+
+      - name: Open or update PR release -> main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          if ! git rev-parse -q --verify refs/heads/release >/dev/null; then exit 0; fi
+          if [ "$(git rev-parse release^{tree})" = "$(git rev-parse origin/main^{tree} 2>/dev/null || true)" ]; then
+            echo "release already equals main; nothing to PR"; exit 0
+          fi
+          title="Release: merge release into main"
+          body="Automated sync of \`develop\` (${GITHUB_SHA::7}) into \`release\`. Markdown outside README.md and docs/ subfolders is removed by tools/release/sync-release.sh."
+          existing="$(gh pr list --head release --base main --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh pr edit "$existing" --title "$title" --body "$body"
+          else
+            gh pr create --head release --base main --title "$title" --body "$body"
+          fi
