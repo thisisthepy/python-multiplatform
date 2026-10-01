@@ -349,29 +349,6 @@ object PythonProxySource {
             return _m
 
 
-        def _pm_bind(_module_name, _leaf, _function):
-            # The adapter wins a contested name, and this is where it is conceded.
-            #
-            # Both layers put names into the module for a Kotlin package: this one renders a
-            # positional function (`a0..a6`) that knows nothing but arity, and `pythonx` serves the
-            # same declaration through a module `__getattr__` that knows parameter names, defaults
-            # and the `${'$'}composer` slot. A name written into `__dict__` beats a `__getattr__`, so
-            # writing this one unconditionally hid the better of the two -- and only sometimes,
-            # depending on which test had run first, because a module outlives an install.
-            #
-            # Skipped only when the adapter can actually serve the name. If `pythonx` is absent, or
-            # does not know this declaration, the positional function is the only thing there is.
-            _adapter = _pm_sys.modules.get('pythonx')
-            if _adapter is not None:
-                _kotlin_package = getattr(_pm_module(_module_name), '_pythonx_kotlin_package', None)
-                _resolver = getattr(_adapter, 'kotlin_name_for', None)
-                if _kotlin_package is not None and _resolver is not None:
-                    if _resolver(_kotlin_package, _leaf) is not None:
-                        return
-            _function._pm_positional = True
-            setattr(_pm_module(_module_name), _leaf, _function)
-
-
         def _pm_lookup(_name):
             # NOT `_pm_bind`, which is what this used to be called. Three of the five bootstraps
             # publish a `_pm_bind` of their own meaning handle -> callable, and defining this over
@@ -963,7 +940,7 @@ object PythonProxySource {
             |
             |$function.__name__ = ${leaf.quoted()}
             |$function.__qualname__ = ${entry.name.quoted()}
-            |_pm_bind(${module.quoted()}, ${leaf.quoted()}, $function)
+            |setattr(_pm_module(${module.quoted()}), ${leaf.quoted()}, $function)
         """.trimMargin()
     }
 
