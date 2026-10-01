@@ -6,7 +6,7 @@ import kotlin.test.assertEquals
 /**
  * Where the walker's output joins KSP's, and why it is a second list rather than a longer first one.
  *
- * `docs/ecosystem.md` §5b: both producers run at build time under the same applied plugin, and both
+ * `docs/design/ecosystem.md` §5b: both producers run at build time under the same applied plugin, and both
  * emit `FunctionTableFragment`s into the one `UpcallTable`. The question this pins is only *who
  * assembles the list*.
  *

@@ -259,7 +259,7 @@ internal fun resolveKotlinBoundary(
         // its module rather than declining outright: `kotlin.time.Duration` and
         // `androidx.compose.ui.unit.TextUnit` still cannot be *built from a raw number* -- which is
         // the whole of what an `internal` constructor forbids and what
-        // `docs/kotlin-extensions-in-python.md` §4.4 insists on -- but an instance that came out of
+        // `docs/design/kotlin-extensions-in-python.md` §4.4 insists on -- but an instance that came out of
         // Kotlin can still be carried back into Kotlin, which is what a handle is for.
         if (underlying != null && usable) {
             return ResolvedBoundary(
@@ -307,7 +307,7 @@ internal const val VALUE_CLASS_UNBOX_METHOD = "unbox-impl"
  *
  * ### Why the walker answers this and `pythonx` cannot
  *
- * `docs/kotlin-extensions-in-python.md`'s coercion compares an owned value's declared type name with
+ * `docs/design/kotlin-extensions-in-python.md`'s coercion compares an owned value's declared type name with
  * the slot's for equality, so `BitmapPainter` is refused where a `Painter` is wanted. Python holds
  * *names*: a handle is an integer, `TypeTag.OBJECT` says nothing about what it points at, and the
  * five targets have no shared reflection to ask (agent-rules §12 -- dynamic binding is a retired
@@ -362,7 +362,7 @@ internal fun ArtifactClasspath.nameablePublicSupertypesOf(kotlinInternalName: St
 private const val JAVA_LANG_OBJECT = "java/lang/Object"
 
 /**
- * The object-handle boundary type: `docs/kotlin-extensions-in-python.md` §6's "type gate", and the
+ * The object-handle boundary type: `docs/design/kotlin-extensions-in-python.md` §6's "type gate", and the
  * second of the two things that independently held Compose at zero.
  *
  * ### What crosses
@@ -398,7 +398,7 @@ private const val JAVA_LANG_OBJECT = "java/lang/Object"
  *   the caller must pass it to `_pm_release`.
  *
  * A chained `Modifier.padding(...).size(...)` therefore leaks one handle per intermediate link until
- * the Python surface of `docs/kotlin-extensions-in-python.md` §4.1 exists to own them. That is a
+ * the Python surface of `docs/design/kotlin-extensions-in-python.md` §4.1 exists to own them. That is a
  * known, bounded cost of this step and not a defect introduced by it -- the same is already true of
  * every `OBJECT`-returning KSP entry -- but it is the reason this KDoc says so rather than leaving it
  * to be discovered.
@@ -522,7 +522,7 @@ internal data class ResolvedFunction(
     /**
      * Carried rather than filtered out at the source, because the two consumers of this want
      * different things from it: the binder declines a `suspend` declaration outright, and the stub
-     * model records it as declined-because-suspend (`docs/pyi-generation-design.md` §3.1 -- "declined
+     * model records it as declined-because-suspend (`docs/design/pyi-generation-design.md` §3.1 -- "declined
      * by both producers; must not be stubbed"). Dropping it here would make the second indistinguishable
      * from a declaration that was never declared.
      */
@@ -624,7 +624,7 @@ private fun resolvedFunctionOrNull(function: KmFunction): ResolvedFunction? {
 }
 
 /**
- * The declared Kotlin type as `docs/pyi-generation-design.md` §2.2's model wants it -- qualified
+ * The declared Kotlin type as `docs/design/pyi-generation-design.md` §2.2's model wants it -- qualified
  * name, nullability, type arguments, and value-class identity -- or `null` when the classifier is
  * something no stub can name (a type *parameter*, a flexible type).
  *

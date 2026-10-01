@@ -54,7 +54,7 @@ import python.native.ffi.NativePointer
  * on the conversion path goes through it, and a value it rejects is returned
  * but re-converted on the next call instead of kept. The full per-type table
  * -- including the types that are refused outright, and why -- is in
- * `docs/object-lifetime.md`. Case by case, for everything [pyObjectToNative]
+ * `docs/design/object-lifetime.md`. Case by case, for everything [pyObjectToNative]
  * can produce:
  *
  * - `int`/`float`/`bool` -> Kotlin `Long`/`Double`/`Boolean`.
@@ -254,7 +254,7 @@ interface PyProxy<T> {
  * This is the class doc's lifetime rule written as code rather than prose, so
  * that a conversion added later cannot quietly acquire a cache it is not
  * entitled to. The full per-type table, and what each branch of
- * [pyObjectToNative] actually returns, is in `docs/object-lifetime.md`.
+ * [pyObjectToNative] actually returns, is in `docs/design/object-lifetime.md`.
  *
  * `true` for the values that walk copies out of CPython -- `Long`, `Double`,
  * `Boolean`, `String`, and containers built recursively out of those. `false`

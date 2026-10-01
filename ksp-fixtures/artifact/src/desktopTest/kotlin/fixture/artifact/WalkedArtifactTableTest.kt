@@ -81,7 +81,7 @@ class WalkedArtifactTableTest {
         // see `kotlinPackageNameOverrideOf`. It is here because that is now read.
         assertTrue("kotlin.text.get" in names, "the @JvmPackageName case is missing")
 
-        // Compose. `docs/kotlin-extensions-in-python.md` §3 measured **zero** declarations bound
+        // Compose. `docs/design/kotlin-extensions-in-python.md` §3 measured **zero** declarations bound
         // from this package; `WalkedArtifactComposeModifierTest` calls two of these from Python.
         val layout = names.filter { it.startsWith("androidx.compose.foundation.layout.") }
         assertTrue(layout.size >= 60, "expected androidx.compose.foundation.layout to bind; got $layout")

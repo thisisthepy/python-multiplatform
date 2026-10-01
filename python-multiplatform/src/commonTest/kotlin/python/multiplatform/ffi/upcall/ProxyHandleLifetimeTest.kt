@@ -34,7 +34,7 @@ import kotlin.test.assertTrue
  *
  * Every assertion here checks `baseline + N` **and** `baseline`. Checking only the second would
  * pass just as well if the constructor had stopped registering anything at all, which is a
- * different bug wearing the same green tick -- `docs/object-lifetime.md` and this repository's
+ * different bug wearing the same green tick -- `docs/design/object-lifetime.md` and this repository's
  * early-cancellation work both record that lesson already. The `baseline + N` assertion is what
  * says the root was really taken, and it is the reason a regression that silently stopped rooting
  * receivers would fail here rather than look like an improvement.
@@ -235,7 +235,7 @@ class ProxyHandleLifetimeTest {
             println(
                 "\n--- Proxy handle lifetime: ${currentPlatform.name} --- " +
                     "no proxies are installable on this target, so no proxy lifetime exists to " +
-                    "assert; see docs/upcall-async-design.md 12.4\n",
+                    "assert; see docs/design/upcall-async-design.md 12.4\n",
             )
             return@withInterpreter
         }

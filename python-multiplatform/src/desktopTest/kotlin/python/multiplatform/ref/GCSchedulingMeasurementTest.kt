@@ -7,7 +7,7 @@ import kotlin.test.Test
 import kotlin.test.assertTrue
 
 /**
- * Pins ROADMAP §9 / `docs/gc-scheduling-investigation.md` §1 and §7 on the **default (GIL)**
+ * Pins ROADMAP §9 / `docs/investigations/gc-scheduling-investigation.md` §1 and §7 on the **default (GIL)**
  * build specifically: `_PY_GC_SCHEDULED_BIT` is read only by the eval-loop checkpoint, on both
  * builds, so an embedder that never runs Python bytecode never runs the cyclic collector either
  * -- with or without free threading. `autoDrainInterval` is saved and restored around each test;
@@ -17,7 +17,7 @@ import kotlin.test.assertTrue
  * fires but does not reliably reclaim: under this heavy single-thread, C-API-only workload the
  * residue swings between the GIL build's ~1,970 and the full ~20,000, run to run, so only the GIL
  * build gets a bound here. That swing is not a mystery any more -- it tracks the *JVM's* memory
- * footprint, see `docs/gc-scheduling-investigation.md` §8d and [FreeThreadedGCGateTest], which
+ * footprint, see `docs/investigations/gc-scheduling-investigation.md` §8d and [FreeThreadedGCGateTest], which
  * does bound the free-threaded case once the responsible gate is opened. What *is* asserted on
  * both builds is that the residue is ordinary collectable cyclic garbage -- see
  * [assertResidueIsOrdinaryCollectableGarbage] and the KDoc on [measureCyclicGarbageWithAutoDrain].
@@ -192,7 +192,7 @@ class GCSchedulingMeasurementTest {
      *
      * ### Why no bound is asserted free-threaded
      *
-     * That difference is root-caused in `docs/gc-scheduling-investigation.md` §8d: free-threaded,
+     * That difference is root-caused in `docs/investigations/gc-scheduling-investigation.md` §8d: free-threaded,
      * `_Py_RunGC` re-asks `gc_should_collect` after the checkpoint has read the scheduled bit, and
      * `gc_should_collect_mem_usage` (`Python/gc_free_threading.c:2080`) gates generation 0 on
      * whether the **whole process's** memory footprint has grown by more than a tenth since the
@@ -237,7 +237,7 @@ class GCSchedulingMeasurementTest {
                 // 32 that is thousands of checkpoints over 10,000 rounds, each one able to run the
                 // scheduled collection. The residue should be bounded by roughly one interval's
                 // worth of not-yet-collected garbage, nowhere near the ~20,000 objects interval 0
-                // leaves. See `docs/gc-scheduling-investigation.md` §7 -- measured here at 1,970.
+                // leaves. See `docs/investigations/gc-scheduling-investigation.md` §7 -- measured here at 1,970.
                 val upperBound = cyclesCreated * objectsPerCycle / 2
                 assertTrue(
                     delta < upperBound,

@@ -19,7 +19,7 @@ import kotlin.test.assertTrue
 
 /**
  * **A real pointer event reaches a Python callback through `Modifier.dragAndDropSource`'s suspend
- * slot** -- the second of the three `docs/pythonx-adapter-design.md` §9.2 judges reachable by
+ * slot** -- the second of the three `docs/design/pythonx-adapter-design.md` §9.2 judges reachable by
  * `pointerInput`'s technique without attempting. `PythonDragAndDropSource.kt`'s KDoc has the reason
  * this one is not merely analogous: disassembling `DragAndDropSourceNode`'s constructor shows it
  * delegates the *same* `SuspendingPointerInputModifierNode` `Modifier.pointerInput` itself delegates

@@ -3,7 +3,7 @@
  * walked at build time by `KlibScanner`, installed into the same `UpcallTable` KSP's own fragments
  * go into.
  *
- * `:ksp-fixtures:artifact` is `docs/ecosystem.md` §5b's second producer over a **jar** -- this is
+ * `:ksp-fixtures:artifact` is `docs/design/ecosystem.md` §5b's second producer over a **jar** -- this is
  * the same producer over a **klib**, ROADMAP §16e's "investigated, not implemented" half. One target
  * only, and it is `androidNativeArm64` rather than `desktop`: a jar is what a JVM target resolves, a
  * klib is what a Kotlin/Native target resolves, and `PythonArtifactBindingsTask

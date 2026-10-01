@@ -83,7 +83,7 @@ object bindings {
     // ---- @FastNative twins of the migrated functions ----
     //
     // ART fast-paths @CriticalNative up to API 33 and @FastNative from 34 onward; each is
-    // roughly 20x the other on the wrong side of that line (docs/downcall-design.md). Both
+    // roughly 20x the other on the wrong side of that line (docs/design/downcall-design.md). Both
     // are declared so EmbedAPI.android.kt can select per device. @FastNative still receives
     // JNIEnv and jclass, hence the separate C wrappers in jni_onload.def.
     @JvmStatic @dalvik.annotation.optimization.FastNative external fun Py_InitializeF()
@@ -123,8 +123,8 @@ object bindings {
     // Both conventions, selected by `preferFastNative` like every other pair here. This one was
     // @CriticalNative-only until the audit follow-up, which made it the single declaration that
     // ignored the device axis -- and it is the per-element call of bulk list iteration, so on API
-    // 34+ it was paying 24-44 ns per element where @FastNative pays 2-4. See docs/downcall-design.md
-    // and docs/jni-call-convention-audit.md.
+    // 34+ it was paying 24-44 ns per element where @FastNative pays 2-4. See docs/design/downcall-design.md
+    // and docs/investigations/jni-call-convention-audit.md.
     @JvmStatic @dalvik.annotation.optimization.CriticalNative external fun PyList_GetItemRaw(list: Long, i: Long): Long
     @JvmStatic @dalvik.annotation.optimization.FastNative external fun PyList_GetItemRawF(list: Long, i: Long): Long
     // Python3.exec composed into one crossing -- see jni_onload.def.
@@ -157,7 +157,7 @@ object bindings {
      * Measured, not guessed: @CriticalNative is at or below the timing floor from API 26
      * through 33 and costs ~24ns on 34 and ~44ns on API 36 hardware, while @FastNative is
      * ~24-39ns through API 31 and ~2ns from 33 on. Both are cheap at 33, so the threshold is
-     * placed where being off by one costs the least. See docs/downcall-design.md.
+     * placed where being off by one costs the least. See docs/design/downcall-design.md.
      *
      * Read once into a static final so the JIT folds the branch at each call site.
      */
@@ -589,7 +589,7 @@ object bindings {
 
 
     //**************************************************
-    // Shape vocabulary (see docs/downcall-design.md and jvmMain/.../ShapeDowncalls.kt).
+    // Shape vocabulary (see docs/design/downcall-design.md and jvmMain/.../ShapeDowncalls.kt).
     //
     // Unlike every other declaration in this file (one native method per CPython function),
     // these 14 are reused across all ~330 CPython functions of a given shape -- the target

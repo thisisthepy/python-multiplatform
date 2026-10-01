@@ -4,7 +4,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 
 /**
- * `docs/pyi-generation-design.md` §3.6 and the naming rule it inherits: types, objects and
+ * `docs/design/pyi-generation-design.md` §3.6 and the naming rule it inherits: types, objects and
  * composables are PascalCase; functions, methods and parameters are snake_case.
  *
  * The half that is not obvious, and the reason this file exists rather than one `assertEquals` per
@@ -74,7 +74,7 @@ class PythonNameConventionsTest {
         assertEquals("foo_bar", PythonNames.kotlinNameOf("foo__bar"))
     }
 
-    /** Parameters go through the same rule as functions -- `docs/pyi-generation-design.md` §3.6's
+    /** Parameters go through the same rule as functions -- `docs/design/pyi-generation-design.md` §3.6's
      * last paragraph, which `pythonx-compose`'s `text.py` already does by hand. */
     @Test
     fun parameterNamesUseTheSameRule() {

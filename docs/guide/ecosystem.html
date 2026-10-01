@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ecosystem · python-multiplatform</title>
+<meta name="description" content="Real CPython inside Kotlin Multiplatform: Kotlin calls Python, Python calls Kotlin, on every target.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&amp;family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/site.js"></script>
+</head>
+<body>
+<span hidden data-title-en="Ecosystem · python-multiplatform" data-title-ko="생태계 · python-multiplatform"></span>
+<header class="site-header">
+  <div class="wrap bar">
+    <a class="brand" href="index.html"><svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="2" width="9" height="9" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="13" width="9" height="9" rx="2.5" fill="var(--accent)"/><path d="M11 6.5h4.5a2 2 0 0 1 2 2V13M13 17.5H8.5a2 2 0 0 1-2-2V11" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round"/></svg><span translate="no">python-multiplatform</span></a>
+    <button class="tool menu-toggle" id="menu-toggle" aria-expanded="false" aria-controls="site-nav"><span data-lang="en">Menu</span><span data-lang="ko">메뉴</span></button>
+    <nav class="nav" id="site-nav" aria-label="Primary">
+      <a href="index.html"><span data-lang="en">Home</span><span data-lang="ko">홈</span></a>
+      <a href="getting-started.html"><span data-lang="en">Get started</span><span data-lang="ko">시작하기</span></a>
+      <a href="concepts.html"><span data-lang="en">Concepts</span><span data-lang="ko">개념</span></a>
+      <a href="guides.html"><span data-lang="en">Guides</span><span data-lang="ko">가이드</span></a>
+      <a href="ecosystem.html" aria-current="page"><span data-lang="en">Ecosystem</span><span data-lang="ko">생태계</span></a>
+      <a href="status.html"><span data-lang="en">Status &amp; FAQ</span><span data-lang="ko">상태 · FAQ</span></a>
+    </nav>
+    <div class="tools">
+      <button class="tool" id="lang-toggle" type="button">한국어</button>
+      <button class="tool" id="theme-toggle" type="button" aria-label="Toggle colour theme">☀</button>
+    </div>
+  </div>
+</header>
+<div class="page-head"><div class="wrap">
+  <div class="eyebrow"><span data-lang="en">Ecosystem</span><span data-lang="ko">생태계</span></div>
+  <h1><span data-lang="en">One boundary, several projects</span><span data-lang="ko">하나의 경계, 여러 프로젝트</span></h1>
+  <p><span data-lang="en">python-multiplatform owns the language boundary. The repositories around it build on it.</span><span data-lang="ko">python-multiplatform 은 언어 경계를 맡는다. 주변 저장소들이 그 위에 선다.</span></p>
+</div></div>
+<main><div class="wrap">
+  <div class="grid">
+    <a class="card" href="https://github.com/thisisthepy/python-multiplatform"><h3 translate="no">python-multiplatform</h3><p><span data-lang="en">The language boundary: embedded CPython, object model, upcalls. You are here.</span><span data-lang="ko">언어 경계: 임베딩된 CPython, 객체 모델, 업콜. 지금 보는 곳.</span></p></a>
+    <a class="card" href="https://github.com/thisisthepy/pythonx-compose"><h3 translate="no">pythonx-compose</h3><p><span data-lang="en">Real Python packages that import the Compose modules and make them Pythonic.</span><span data-lang="ko">Compose 모듈을 가져와 파이써닉하게 만드는 실제 Python 패키지.</span></p></a>
+    <a class="card" href="https://github.com/thisisthepy/toolchain"><h3 translate="no">toolchain</h3><p><span data-lang="en">The Gradle vocabulary for building Python apps.</span><span data-lang="ko">Python 앱 빌드를 위한 Gradle 어휘.</span></p></a>
+    <a class="card" href="https://github.com/thisisthepy/pypackpack"><h3 translate="no">pypackpack</h3><p><span data-lang="en">Python acquisition, dependency resolution, cross-compilation and bundling.</span><span data-lang="ko">Python 취득, 의존성 해석, 교차 컴파일, 번들링.</span></p></a>
+    <a class="card" href="https://github.com/thisisthepy/torchnative"><h3 translate="no">torchnative</h3><p><span data-lang="en">The real PyTorch ecosystem on device.</span><span data-lang="ko">기기 위의 진짜 PyTorch 생태계.</span></p></a>
+    <a class="card" href="https://github.com/LogitAI/Gemstone"><h3 translate="no">Gemstone</h3><p><span data-lang="en">An independent project planning to adopt python-multiplatform.</span><span data-lang="ko">python-multiplatform 채택을 계획 중인 독립 프로젝트.</span></p></a>
+  </div>
+  <div class="prose"><p class="muted"><span data-lang="en">Division of labour: pypackpack does the work, toolchain speaks Gradle, python-multiplatform owns the language boundary.</span><span data-lang="ko">역할 분담: pypackpack 이 일을 하고, toolchain 이 Gradle 을 말하며, python-multiplatform 이 언어 경계를 맡는다.</span></p></div>
+</div></main>
+<footer class="site-footer">
+  <div class="wrap">
+    <span><span data-lang="en">MIT licensed.</span><span data-lang="ko">MIT 라이선스.</span> <span translate="no">© 2024 thisisthepy</span></span>
+    <span><a href="https://github.com/thisisthepy/python-multiplatform">GitHub</a> · <a href="https://github.com/thisisthepy/python-multiplatform/blob/develop/docs/locale/README_ko.md"><span data-lang="en">Korean README</span><span data-lang="ko">한국어 README</span></a></span>
+  </div>
+</footer>
+</body>
+</html>

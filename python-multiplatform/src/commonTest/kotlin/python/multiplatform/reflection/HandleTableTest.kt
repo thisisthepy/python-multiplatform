@@ -17,7 +17,7 @@ private class Holder(val tag: String)
  * The Python -> Kotlin half of lifetime: Python cannot hold a Kotlin object reference at all
  * (invisible to the JVM GC, a raw pointer on Kotlin/Native, unstorable in linear memory on
  * WASM), so it holds an integer and [HandleTable] holds the object. See
- * `docs/object-lifetime.md`.
+ * `docs/design/object-lifetime.md`.
  *
  * The table is therefore a GC root and leaks by construction until something releases. These
  * tests pin the release path, which is the only thing standing between this design and a leak,

@@ -6,7 +6,7 @@ import python.multiplatform.ffi.PyObject
 import python.multiplatform.ffi.types.basic.PyFloat
 
 /**
- * `Modifier.contextMenuOpenDetector` -- `docs/pythonx-adapter-design.md` §9's final declined declaration.
+ * `Modifier.contextMenuOpenDetector` -- `docs/design/pythonx-adapter-design.md` §9's final declined declaration.
  *
  * It declined because its `key` parameter is typed `Any?`, and `resolveKotlinType` has no boundary type
  * for a bare `kotlin.Any` parameter (no hint of which `TypeTag` an arbitrary Python value crossing there

@@ -1,6 +1,6 @@
 # GraalVM Native Image Upcall Verification
 
-`CLAUDE.md` states the condition this document answers: *"JVM 에서만 통과하는 업콜은 완료가 아니다."*
+`AGENTS.md` states the condition this document answers: *"JVM 에서만 통과하는 업콜은 완료가 아니다."*
 The §7 design chose a build-time generated table precisely because runtime reflection is impossible
 under GraalVM's closed-world assumption, and that choice is only confirmed by building the image.
 

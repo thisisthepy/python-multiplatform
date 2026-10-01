@@ -10,7 +10,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * The two stub products of `docs/pyi-generation-design.md` §5.3, rendered from one model.
+ * The two stub products of `docs/design/pyi-generation-design.md` §5.3, rendered from one model.
  *
  * | product | namespace | what it describes |
  * |---|---|---|
@@ -20,7 +20,7 @@ import kotlin.test.assertTrue
  * The split in what the *types* say is not decoration. `PythonProxySource.renderOne` emits
  * `def _pm_f_7(a0, a1)` and `UpcallTrampoline` marshals a `Dp` parameter as a raw float and a
  * `Modifier` return as a `HandleTable` integer -- so the Kotlin-FQN stub says `float` and `int`,
- * which is what that module actually accepts and returns. `docs/pyi-generation-design.md` §7 lists
+ * which is what that module actually accepts and returns. `docs/design/pyi-generation-design.md` §7 lists
  * the handle-to-proxy wrapping as not yet done; the Pythonic product is the surface that *will*
  * have it, and it is a separate product precisely so that the first one does not have to lie.
  *

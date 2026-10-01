@@ -47,7 +47,7 @@ include(":ksp-fixtures:app")
 // KSP/AGP minimum-version wall of ROADMAP §13 stayed invisible to them while it broke every
 // Android consumer of the bindings plugin.
 include(":ksp-fixtures:android")
-// The fixture for the *other* binding producer: `docs/ecosystem.md` §5b's artefact walker, which
+// The fixture for the *other* binding producer: `docs/design/ecosystem.md` §5b's artefact walker, which
 // reads the jars the build resolves rather than the source it compiles. `:library` and `:app` cover
 // KSP only, so nothing here exercised a third-party binary until this module existed.
 include(":ksp-fixtures:artifact")

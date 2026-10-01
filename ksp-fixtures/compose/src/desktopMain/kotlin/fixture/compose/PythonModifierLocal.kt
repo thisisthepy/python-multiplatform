@@ -10,7 +10,7 @@ import python.multiplatform.ffi.types.basic.PyString
 
 /**
  * `Modifier.modifierLocalProvider`, declined for having a generic type parameter `T` that Python cannot spell
- * (`docs/pythonx-adapter-design.md` §9.2). The fix is to provide a wrapper for a concrete type.
+ * (`docs/design/pythonx-adapter-design.md` §9.2). The fix is to provide a wrapper for a concrete type.
  *
  * We choose `String` as the concrete type for `T`.
  *

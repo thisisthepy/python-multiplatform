@@ -141,7 +141,7 @@ Cython 은 착지용 디딤돌이지 종착지가 아니다.
 이 플랫폼에서만 가능한 이점이다.
 
 현재 Kotlin ↔ Python 호출은 `PyObject` 를 거친다. 실측 비용은 다운콜 데스크톱 약 260 ns,
-업콜 데스크톱 약 550 ns, iOS 시뮬레이터 약 1.6 µs / 2.3 µs 다 (`docs/cost-table.md` 계열 측정).
+업콜 데스크톱 약 550 ns, iOS 시뮬레이터 약 1.6 µs / 2.3 µs 다 (`docs/investigations/cost-table.md` 계열 측정).
 
 그런데 **Kotlin 쪽 타입은 스텁 생성기(`PythonStubsTask`)가 이미 안다.** `compiled` 코드가 Kotlin 을
 부를 때 양쪽 타입이 컴파일 타임에 확정되면, `PyObject` 마샬링을 건너뛰고 **C ABI 로 직접 호출하는
@@ -204,7 +204,7 @@ TypedPython 은 그래서 자체 텐서 런타임을 만들지 않고 **torch op
 | 4 | 커널 하나 | 융합 softmax 를 Vulkan · Metal 양쪽에서 upstream 과 수치 일치 | torchnative 착지 승인 |
 | 5 | 커널 컴파일러 일반화 | SIMT 서브셋 전체, 이후 타일 | 4 |
 
-각 단계는 CLAUDE.md §3 의 TDD 와 측정 테스트 규정을 따른다. 특히 3 은 경계 비용 감소를, 4 는
+각 단계는 AGENTS.md §5·§14 의 TDD 와 측정 테스트 규정을 따른다. 특히 3 은 경계 비용 감소를, 4 는
 upstream 대비 수치 오차를 기준선으로 박아 둔다.
 
 ## 7. 위험

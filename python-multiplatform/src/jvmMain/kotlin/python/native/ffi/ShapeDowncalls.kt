@@ -3,7 +3,7 @@ package python.native.ffi
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Shape vocabulary for CPython Stable ABI downcalls (see `docs/downcall-design.md`).
+ * Shape vocabulary for CPython Stable ABI downcalls (see `docs/design/downcall-design.md`).
  *
  * A census of the ~330 `expect` declarations in `commonMain/.../EmbedAPI.kt` shows they
  * collapse into exactly 14 distinct ABI shapes: integer, pointer, and string arguments

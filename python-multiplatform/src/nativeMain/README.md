@@ -24,7 +24,7 @@ call, not a runtime transition. The upcall cost that shapes the JVM design does 
 `ctypes.CDLL(None)` route the design doc predicted, because neither half of that survives on iOS:
 the `Python.framework` here has no `_ctypes` (no `lib-dynload` at all), and a `@CName` alias is
 never emitted into a Kotlin/Native framework or test executable — only into the androidNative
-`.so`. Measurements are in `docs/upcall-design.md`.
+`.so`. Measurements are in `docs/design/upcall-design.md`.
 
 So an entry point that Python must be able to call needs a `PyMethodDef` with a `staticCFunction`
 in `ml_meth`. Two rules come with that, and both have crashed this repo before:

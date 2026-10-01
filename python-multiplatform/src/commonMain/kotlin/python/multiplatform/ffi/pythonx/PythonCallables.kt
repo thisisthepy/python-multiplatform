@@ -15,7 +15,7 @@ import python.multiplatform.reflection.TypeTag
 /**
  * The other direction: **a Python callable arriving at a Kotlin function-typed parameter.**
  *
- * `docs/pythonx-adapter-design.md` §6 opens by saying the mechanism is half present already --
+ * `docs/design/pythonx-adapter-design.md` §6 opens by saying the mechanism is half present already --
  * `UpcallTrampoline.toKotlinObject` wraps anything Python sends that is not an integer handle as a
  * `PyObject`, so a `lambda:` does reach Kotlin with a reference of its own. What it reaches is a
  * `PyObject`, and every container composable's `content` slot wants a `kotlin.jvm.functions.FunctionN`.
@@ -57,14 +57,14 @@ import python.multiplatform.reflection.TypeTag
  *
  * | holder | why not |
  * |---|---|
- * | the `PyObject`'s own cleaner | it fires when the *Kotlin* wrapper is collected, which is whenever the collector gets round to it and never on a target without one. `docs/object-lifetime.md`'s point exactly |
+ * | the `PyObject`'s own cleaner | it fires when the *Kotlin* wrapper is collected, which is whenever the collector gets round to it and never on a target without one. `docs/design/object-lifetime.md`'s point exactly |
  * | `HandleTable` | a strong root nothing gives back: the handle reaches Kotlin as a slot value and is never handed to Python, so there is no `__del__` to hang the release off (`HandleTable`'s own KDoc: "this table leaks by construction") |
  * | the composition **pass** | ends long before Compose stops calling the content |
  * | **[PythonCallableScope]** | lives exactly as long as the composition, because a Compose-side `RememberObserver` closes it in `onForgotten` |
  *
  * So this file owns the first three quarters of that -- creating, holding and releasing -- and the
  * one Compose type involved, `RememberObserver`, stays in the module that has Compose
- * (`:ksp-fixtures:compose`'s `PythonComposition`). `docs/pythonx-adapter-design.md` §6 item 1 names
+ * (`:ksp-fixtures:compose`'s `PythonComposition`). `docs/design/pythonx-adapter-design.md` §6 item 1 names
  * `onForgotten` as "the one that fails silently and should be tested first"; the seam is here and the
  * test is there.
  *

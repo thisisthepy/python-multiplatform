@@ -10,7 +10,7 @@ import python.multiplatform.ffi.types.basic.PyString
 
 /**
  * `Modifier.dragAndDropSource`, reached the same way `pythonPointerInput` reaches
- * `Modifier.pointerInput` (`docs/pythonx-adapter-design.md` §9.1) -- confirmed to be the *same*
+ * `Modifier.pointerInput` (`docs/design/pythonx-adapter-design.md` §9.1) -- confirmed to be the *same*
  * underlying mechanism, not just the same declared shape, by disassembling
  * `DragAndDropSourceNode`'s constructor (no sources jar for this Compose version): it `delegate`s a
  * `SuspendingPointerInputFilterKt.SuspendingPointerInputModifierNode(dragAndDropSourceHandler)` --

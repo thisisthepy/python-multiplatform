@@ -11,7 +11,7 @@ import kotlin.test.assertTrue
  * The artefact walker against two real jars: `junit:junit:4.13.2` (Java) and `kotlin-stdlib`
  * (Kotlin).
  *
- * `docs/ecosystem.md` §5b names two producers of bindings, split by *what they look at* -- KSP sees
+ * `docs/design/ecosystem.md` §5b names two producers of bindings, split by *what they look at* -- KSP sees
  * the consumer's own source, the artefact walker sees everything the build resolves. This is the
  * second one, and a jar the test never compiled is the only honest input for it.
  *
@@ -302,7 +302,7 @@ class ArtifactScannerTest {
         )
     }
 
-    /** `suspend` is declined explicitly, from `@Metadata`, per CLAUDE.md's "제외한 것을 조용히
+    /** `suspend` is declined explicitly, from `@Metadata`, per AGENTS.md's "제외한 것을 조용히
      * 빠뜨리지 마라" -- not merely absent as a side effect of [boundaryTypeOf] rejecting a
      * `Continuation` parameter it never even has to see. */
     @Test
@@ -345,7 +345,7 @@ class ArtifactScannerTest {
     /**
      * An ordinary class -- not a primitive, not a value class -- in return position.
      *
-     * `docs/kotlin-extensions-in-python.md` §6 lists this as the second of the two gates that
+     * `docs/design/kotlin-extensions-in-python.md` §6 lists this as the second of the two gates that
      * independently zero Compose: "Binding a parameter typed `Shape`, `Brush` or `PaddingValues`
      * needs an object-handle boundary type that `boundaryTypeOf` does not have." It does not need a
      * *marshaller*: `python.multiplatform.reflection.TypeTag.OBJECT` and
@@ -377,7 +377,7 @@ class ArtifactScannerTest {
             "{ args -> (fixture.artifactvalueclass.ropeLength((args[0] as fixture.artifactvalueclass.Rope))) }",
             ropeLength.lambdaBody,
         )
-        // The declared type survives beside the tag: `docs/pythonx-adapter-design.md` §2.4 row 4.
+        // The declared type survives beside the tag: `docs/design/pythonx-adapter-design.md` §2.4 row 4.
         assertEquals(listOf("fixture.artifactvalueclass.Rope"), ropeLength.paramTypeNames)
         assertEquals(listOf("rope"), ropeLength.paramNames)
         assertEquals(listOf(false), ropeLength.paramHasDefault)
@@ -386,7 +386,7 @@ class ArtifactScannerTest {
     /**
      * `Modifier.padding(Dp): Modifier`'s exact shape with types this module compiles: an extension
      * whose receiver and return are the same ordinary class. This is the one that makes chaining
-     * work -- `docs/kotlin-extensions-in-python.md` §4.1 -- because the handle that comes back is
+     * work -- `docs/design/kotlin-extensions-in-python.md` §4.1 -- because the handle that comes back is
      * the same kind of thing the next call takes.
      */
     @Test
@@ -413,7 +413,7 @@ class ArtifactScannerTest {
      * A class's own public primary constructor, bound the same way a top-level function is:
      * `Rope(Double): Rope`'s shape, and [Rope]'s own KDoc records why this used to be entirely
      * absent -- `ArtifactScanner.kotlinCandidates`'s `ACC_STATIC` filter drops `<init>` along with
-     * every instance method, and nothing else ever picked it back up. `docs/pythonx-adapter-design.md`
+     * every instance method, and nothing else ever picked it back up. `docs/design/pythonx-adapter-design.md`
      * §10 names `Typography`/`Shapes` as the real-world casualty: not declined, simply never scanned.
      */
     @Test
@@ -494,7 +494,7 @@ class ArtifactScannerTest {
 
     /**
      * Overloads are **kept, under names that say which one they are** -- the rule
-     * `docs/kotlin-extensions-in-python.md` §3.1 and §6 left open.
+     * `docs/design/kotlin-extensions-in-python.md` §3.1 and §6 left open.
      *
      * The old rule dropped a name outright when more than one binding would carry it, on the
      * reasoning that a sort order picking `org.junit.Assert.assertEquals(double, double)` is a wrong
@@ -537,7 +537,7 @@ class ArtifactScannerTest {
      * kotlin-stdlib) are found the same way rather than pinned as a path.
      *
      * **The baseline this replaces was zero**, and it was zero for two independent reasons
-     * (`docs/kotlin-extensions-in-python.md` §3): the metadata-kind gate, closed by `15fc5a62`, and
+     * (`docs/design/kotlin-extensions-in-python.md` §3): the metadata-kind gate, closed by `15fc5a62`, and
      * the type gate, closed here. `Modifier.padding(Dp): Modifier` has `Modifier` as both its
      * receiver and its return, and `Modifier` is an ordinary interface -- neither a primitive nor a
      * value class -- so before an object-handle boundary type existed there was nothing for
@@ -547,7 +547,7 @@ class ArtifactScannerTest {
      * Compose 1.6.11's own API surface, and a Compose bump that adds a `Modifier` extension must not
      * fail this. What the floors pin is that the two gates are open, which is the fact under test.
      *
-     * `docs/ecosystem.md` §5b's own target (calling a composable) is out of scope here on purpose --
+     * `docs/design/ecosystem.md` §5b's own target (calling a composable) is out of scope here on purpose --
      * this counts declarations, and `:ksp-fixtures:artifact` is where a call is actually made.
      */
     @Test
@@ -602,7 +602,7 @@ class ArtifactScannerTest {
                 modifierExtensions.map { it.name },
         )
 
-        // The names `docs/kotlin-extensions-in-python.md` §3.1 lists as the casualties of the old
+        // The names `docs/design/kotlin-extensions-in-python.md` §3.1 lists as the casualties of the old
         // drop-ambiguous-overloads rule, spelled the way the new rule spells them.
         val layoutNames = ArtifactScanner
             .scanJar(layoutJar, includePrefixes = listOf("androidx.compose.foundation.layout"), classpath = classpath)
@@ -668,7 +668,7 @@ class ArtifactScannerTest {
     }
 
     /**
-     * `docs/pythonx-adapter-design.md` §10's `Typography`/`Shapes` casualty, closed, and pinned
+     * `docs/design/pythonx-adapter-design.md` §10's `Typography`/`Shapes` casualty, closed, and pinned
      * against the structural rule that closed it rather than against the two hard-coded class names
      * an earlier attempt used.
      *

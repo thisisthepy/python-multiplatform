@@ -9,7 +9,7 @@ import kotlin.jvm.JvmInline
  * Python cannot hold the object itself on any of our targets -- a JVM reference stored in
  * native memory is invisible to the GC, a Kotlin/Native reference is a raw pointer with no
  * ownership, and a WasmGC reference cannot be written into linear memory at all. So the proxy's
- * instance data holds this integer and [HandleTable] holds the object. `docs/object-lifetime.md`
+ * instance data holds this integer and [HandleTable] holds the object. `docs/design/object-lifetime.md`
  * calls this "what JNI's `NewGlobalRef` does, made explicit".
  *
  * The raw value packs a **generation** into the high 32 bits and a **slot index** into the low

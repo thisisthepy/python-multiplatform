@@ -18,7 +18,7 @@ native targets, which use cinterop.
 
 A composed operation is a platform implementation difference, so it belongs in the FFI layer as
 an `expect`/`actual`, **not** in the object model. Composition therefore does not require
-reopening `PyObject` as `expect`/`actual`. See `docs/architecture.md`.
+reopening `PyObject` as `expect`/`actual`. See `docs/design/architecture.md`.
 
 ## Every C API call needs the GIL
 
@@ -87,7 +87,7 @@ queue there — but a reference cycle accumulates exactly as it would on the fre
 deferred-release queue. Measured: 10,000 cyclic groups built purely through the C API leave
 20,000+ objects uncollected indefinitely with `autoDrainInterval = 0`; the same workload with
 `autoDrainInterval` on leaves only what has accumulated since the last checkpoint. See
-`docs/gc-scheduling-investigation.md` §1, §6 and §7.
+`docs/investigations/gc-scheduling-investigation.md` §1, §6 and §7.
 
 `Python3.autoDrainInterval` therefore defaults to **off** on the GIL build too, and that default
 is deliberate rather than an oversight: turning it on is a real behavioural change, not a free
@@ -128,7 +128,7 @@ a pointer into the object's own buffer), and never store a bare `NativePointer` 
 `isIndependentOfPythonMemory` in `conversion/PyProxy.kt` is that rule as code, and every store to
 `cachedNativeValue` on the conversion path goes through it. The full per-type table, the snapshot
 semantics of a cached container, and the borrowed-reference bug this caught in `PyContext` are in
-`docs/object-lifetime.md`, "Conversion caching, and where it stops".
+`docs/design/object-lifetime.md`, "Conversion caching, and where it stops".
 
 ## `expect` declarations cannot be `inline` in an intermediate source set
 

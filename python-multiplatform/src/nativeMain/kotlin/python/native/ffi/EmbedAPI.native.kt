@@ -1061,7 +1061,7 @@ actual fun PyGC_Collect(): Long = python.native.ffi.bindings.PyGC_Collect()
 
 
 //**************************************************
-// Shape vocabulary trampolines (see docs/downcall-design.md).
+// Shape vocabulary trampolines (see docs/design/downcall-design.md).
 //
 // These are NOT `actual` implementations of any `commonMain` `expect` -- there is no
 // commonMain/nativeMain expect for the shape vocabulary. On iOS and androidNative,

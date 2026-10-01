@@ -6,7 +6,7 @@ import kotlin.test.assertTrue
 
 /**
  * `import selectors` used to take the whole Node process down on this target, and `import asyncio`
- * with it. docs/upcall-async-design.md 9.5 recorded that as `RuntimeError: unreachable` and left
+ * with it. docs/design/upcall-async-design.md 9.5 recorded that as `RuntimeError: unreachable` and left
  * the cause open; 15 has it now, and it was never about `selectors` or about wasm.
  *
  * Emscripten feature-detects JSPI at runtime and wraps only `main` in `WebAssembly.promising`.

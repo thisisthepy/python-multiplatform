@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Concepts · python-multiplatform</title>
+<meta name="description" content="Real CPython inside Kotlin Multiplatform: Kotlin calls Python, Python calls Kotlin, on every target.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&amp;family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/site.js"></script>
+</head>
+<body>
+<span hidden data-title-en="Concepts · python-multiplatform" data-title-ko="개념 · python-multiplatform"></span>
+<header class="site-header">
+  <div class="wrap bar">
+    <a class="brand" href="index.html"><svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="2" width="9" height="9" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="13" width="9" height="9" rx="2.5" fill="var(--accent)"/><path d="M11 6.5h4.5a2 2 0 0 1 2 2V13M13 17.5H8.5a2 2 0 0 1-2-2V11" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round"/></svg><span translate="no">python-multiplatform</span></a>
+    <button class="tool menu-toggle" id="menu-toggle" aria-expanded="false" aria-controls="site-nav"><span data-lang="en">Menu</span><span data-lang="ko">메뉴</span></button>
+    <nav class="nav" id="site-nav" aria-label="Primary">
+      <a href="index.html"><span data-lang="en">Home</span><span data-lang="ko">홈</span></a>
+      <a href="getting-started.html"><span data-lang="en">Get started</span><span data-lang="ko">시작하기</span></a>
+      <a href="concepts.html" aria-current="page"><span data-lang="en">Concepts</span><span data-lang="ko">개념</span></a>
+      <a href="guides.html"><span data-lang="en">Guides</span><span data-lang="ko">가이드</span></a>
+      <a href="ecosystem.html"><span data-lang="en">Ecosystem</span><span data-lang="ko">생태계</span></a>
+      <a href="status.html"><span data-lang="en">Status &amp; FAQ</span><span data-lang="ko">상태 · FAQ</span></a>
+    </nav>
+    <div class="tools">
+      <button class="tool" id="lang-toggle" type="button">한국어</button>
+      <button class="tool" id="theme-toggle" type="button" aria-label="Toggle colour theme">☀</button>
+    </div>
+  </div>
+</header>
+<div class="page-head"><div class="wrap">
+  <div class="eyebrow"><span data-lang="en">Concepts</span><span data-lang="ko">개념</span></div>
+  <h1><span data-lang="en">Two directions, one boundary</span><span data-lang="ko">두 방향, 하나의 경계</span></h1>
+  <p><span data-lang="en">Every design decision in this project splits along the direction of the call. The two directions are orthogonal and use entirely different mechanisms.</span><span data-lang="ko">이 프로젝트의 모든 설계는 호출 방향을 따라 갈린다. 두 방향은 직교하며 메커니즘이 완전히 다르다.</span></p>
+</div></div>
+<main><div class="wrap"><div class="prose">
+  <figure class="diagram">
+<svg viewBox="0 0 880 300" role="img" aria-labelledby="dg-t">
+  <title id="dg-t">Kotlin and CPython in one process: downcalls through the Stable ABI, upcalls through one generated table</title>
+  <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="d-arrow"/></marker></defs>
+  <rect class="d-box" x="10" y="20" width="360" height="260" rx="14"/>
+  <text class="d-label" x="34" y="52" translate="no">Kotlin</text>
+  <rect class="d-box" x="34" y="72" width="312" height="52" rx="9"/>
+  <text class="d-label" x="50" y="96" translate="no">PyObject · PyList · PyDict</text><text class="d-sub" x="50" y="114" data-lang="en">typed object model</text><text class="d-sub" x="50" y="114" data-lang="ko">타입이 있는 객체 모델</text>
+  <rect class="d-box" x="34" y="140" width="312" height="52" rx="9"/>
+  <text class="d-label" x="50" y="164" translate="no">EmbedAPI</text><text class="d-sub" x="50" y="182" translate="no">~330 expect fun · Stable ABI</text>
+  <rect class="d-box accent" x="34" y="208" width="312" height="52" rx="9"/>
+  <text class="d-label" x="50" y="232" data-lang="en">Generated function table</text><text class="d-label" x="50" y="232" data-lang="ko">생성된 함수 테이블</text><text class="d-sub" x="50" y="250" data-lang="en">KSP · Gradle artifact walker</text><text class="d-sub" x="50" y="250" data-lang="ko">KSP · Gradle 아티팩트 워커</text>
+  <rect class="d-box" x="510" y="20" width="360" height="260" rx="14"/>
+  <text class="d-label" x="534" y="52" translate="no">CPython</text>
+  <rect class="d-box" x="534" y="72" width="312" height="52" rx="9"/>
+  <text class="d-label" x="550" y="96" data-lang="en">Interpreter + C extensions</text><text class="d-label" x="550" y="96" data-lang="ko">인터프리터 + C 확장</text><text class="d-sub" x="550" y="114" data-lang="en">the real CPython</text><text class="d-sub" x="550" y="114" data-lang="ko">진짜 CPython</text>
+  <rect class="d-box" x="534" y="208" width="312" height="52" rx="9"/>
+  <text class="d-label" x="550" y="232" data-lang="en">Proxies: Greeter(...), Modifier</text><text class="d-label" x="550" y="232" data-lang="ko">프록시: Greeter(...), Modifier</text><text class="d-sub" x="550" y="250" data-lang="en">ordinary Python</text><text class="d-sub" x="550" y="250" data-lang="ko">평범한 Python</text>
+  <path class="d-line" d="M346 166 H 440 V 98 H 532" marker-end="url(#ah)"/>
+  <text class="d-tag" x="384" y="90" data-lang="en">downcall</text><text class="d-tag" x="384" y="90" data-lang="ko">다운콜</text>
+  <path class="d-line" d="M534 234 H 348" marker-end="url(#ah)"/>
+  <text class="d-tag" x="396" y="226" data-lang="en">upcall · 1 entry</text><text class="d-tag" x="396" y="226" data-lang="ko">업콜 · 진입점 1개</text>
+</svg>
+<figcaption><span data-lang="en">One process, two runtimes. Behind each platform's single entry point, every platform uses the same generated table.</span><span data-lang="ko">한 프로세스, 두 런타임. 플랫폼마다 진입점은 하나이고, 그 뒤에서는 모든 플랫폼이 같은 생성 테이블을 쓴다.</span></figcaption>
+</figure>
+  <h2><span class="num">01</span><span data-lang="en">Downcall: Kotlin → Python</span><span data-lang="ko">다운콜: Kotlin → Python</span></h2>
+  <p><span data-lang="en">The CPython Stable ABI is declared once, in <code>EmbedAPI.kt</code>, as about 330 <code>expect</code> functions. Each platform supplies the <code>actual</code>: Panama FFM with <code>invokeExact</code> on the desktop JVM, JNI registered through <code>RegisterNatives</code> on Android, cinterop on Kotlin/Native, and an Emscripten build on wasm.</span><span data-lang="ko">CPython Stable ABI 를 <code>EmbedAPI.kt</code> 에 약 330개의 <code>expect</code> 함수로 한 번 선언한다. 플랫폼마다 <code>actual</code> 을 둔다: 데스크톱 JVM 은 <code>invokeExact</code> 를 쓰는 Panama FFM, Android 는 <code>RegisterNatives</code> 로 등록한 JNI, Kotlin/Native 는 cinterop, wasm 은 Emscripten 빌드.</span></p>
+  <p><span data-lang="en">On top sits a typed object model, sketched by the maintainer in <code>python_for_kotlin_binding.mermaid</code>: <code>PyObject</code> at the root, <code>PyType</code>, <code>PyException</code> as a <code>Throwable</code>, and collections that implement the Kotlin interfaces.</span><span data-lang="ko">그 위에 타입이 있는 객체 모델이 있다. 메인테이너가 <code>python_for_kotlin_binding.mermaid</code> 에 스케치한 대로, 최상위에 <code>PyObject</code>, 그리고 <code>PyType</code>, <code>Throwable</code> 인 <code>PyException</code>, Kotlin 인터페이스를 구현하는 컬렉션들이 있다.</span></p>
+
+  <h2><span class="num">02</span><span data-lang="en">Upcall: Python → Kotlin</span><span data-lang="ko">업콜: Python → Kotlin</span></h2>
+  <p><span data-lang="en">Kotlin/Native has no useful reflection and a GraalVM native image is a closed world, so nothing is looked up at run time. At build time, a KSP processor (for your sources) and the Gradle plugin's artifact walker (for prebuilt jars) generate a function table. Python reaches it through one entry point per platform, wrapped in generated proxies that read like ordinary Python.</span><span data-lang="ko">Kotlin/Native 에는 쓸 만한 리플렉션이 없고 GraalVM 네이티브 이미지는 닫힌 세계이므로, 런타임에 아무것도 조회하지 않는다. 빌드 타임에 KSP 프로세서(내 소스)와 Gradle 플러그인의 아티팩트 워커(빌드된 jar)가 함수 테이블을 생성한다. Python 은 플랫폼마다 하나인 진입점으로 그 테이블에 닿고, 평범한 Python 처럼 읽히는 생성된 프록시가 그것을 감싼다.</span></p>
+  <p><span data-lang="en">Exposure is a blacklist: every <code>public</code> declaration is registered, and <code>@PythonInternal</code> opts one out.</span><span data-lang="ko">노출은 블랙리스트다. 모든 <code>public</code> 선언이 등록되고, <code>@PythonInternal</code> 로 제외한다.</span></p>
+
+  <h2><span class="num">03</span><span data-lang="en">Lifetime across the boundary</span><span data-lang="ko">경계를 넘는 수명</span></h2>
+  <p><span data-lang="en">CPython counts references; Kotlin collects garbage. A Kotlin wrapper takes one reference and gives it back when the wrapper is collected (a <code>Cleaner</code>, or a <code>PhantomReference</code> path on older Android). Cycles that run through a Kotlin proxy are made visible to Python's cyclic GC, so they are collected too.</span><span data-lang="ko">CPython 은 참조를 세고, Kotlin 은 가비지를 수거한다. Kotlin 래퍼는 참조 하나를 잡고, 래퍼가 수거되면 돌려준다 (<code>Cleaner</code>, 구형 Android 에서는 <code>PhantomReference</code> 경로). Kotlin 프록시를 지나는 순환도 Python 의 순환 GC 에 보이게 하므로 함께 수거된다.</span></p>
+
+  <h2><span class="num">04</span><span data-lang="en">Threads</span><span data-lang="ko">스레드</span></h2>
+  <p><span data-lang="en">Every C API call holds the GIL. Parallelism will come from free-threaded CPython (3.14t works on desktop with <code>-PpythonFreeThreaded=true</code>; the default is still the GIL), not from sub-interpreters: extensions that do not declare multi-interpreter support fail to import in a sub-interpreter.</span><span data-lang="ko">모든 C API 호출은 GIL 을 잡는다. 병렬성은 서브 인터프리터가 아니라 free-threaded CPython(desktop 에서 <code>-PpythonFreeThreaded=true</code> 로 3.14t 동작, 기본값은 여전히 GIL)에서 온다. 멀티 인터프리터 지원을 선언하지 않은 확장은 서브 인터프리터에서 import 가 실패하기 때문이다.</span></p>
+
+  <h2><span class="num">05</span><span data-lang="en">Names</span><span data-lang="ko">이름</span></h2>
+  <p><span data-lang="en">A Kotlin package is a Python module under the same name: <code>androidx.compose.ui</code> in Python is androidx. The binder never renames a namespace. Pythonic layers like <code>pythonx</code> are real Python packages that import those modules and reshape them — they live in their own repository.</span><span data-lang="ko">Kotlin 패키지는 같은 이름의 Python 모듈이다. Python 의 <code>androidx.compose.ui</code> 는 androidx 다. 바인더는 네임스페이스를 바꾸지 않는다. <code>pythonx</code> 같은 파이써닉 계층은 그 모듈을 가져와 다듬는 실제 Python 패키지이고, 자기 저장소에 있다.</span></p>
+  <p><span data-lang="en">Design records for each topic are in <a href="https://github.com/thisisthepy/python-multiplatform/tree/develop/docs/design">docs/design</a>.</span><span data-lang="ko">주제별 설계 기록은 <a href="https://github.com/thisisthepy/python-multiplatform/tree/develop/docs/design">docs/design</a> 에 있다.</span></p>
+  <div class="pager"><a href="getting-started.html">← <span data-lang="en">Get started</span><span data-lang="ko">시작하기</span></a><a href="guides.html"><span data-lang="en">Guides</span><span data-lang="ko">가이드</span> →</a></div>
+</div></div></main>
+<footer class="site-footer">
+  <div class="wrap">
+    <span><span data-lang="en">MIT licensed.</span><span data-lang="ko">MIT 라이선스.</span> <span translate="no">© 2024 thisisthepy</span></span>
+    <span><a href="https://github.com/thisisthepy/python-multiplatform">GitHub</a> · <a href="https://github.com/thisisthepy/python-multiplatform/blob/develop/docs/locale/README_ko.md"><span data-lang="en">Korean README</span><span data-lang="ko">한국어 README</span></a></span>
+  </div>
+</footer>
+</body>
+</html>

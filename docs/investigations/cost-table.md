@@ -2,7 +2,7 @@
 
 Kotlin ↔ Python 경계의 비용을, **여섯 타깃 전부에 대해 한 번에** 뽑아 놓은 표.
 
-`docs/upcall-design.md` 와 `docs/downcall-design.md` 는 각자의 조사 과정에서 나온 표를 갖고 있고,
+`docs/design/upcall-design.md` 와 `docs/design/downcall-design.md` 는 각자의 조사 과정에서 나온 표를 갖고 있고,
 그 표들은 **조사가 끝난 시점의 기록**이다. 이 문서는 다르다 — 여기 있는 표는 사람이 옮겨 적은 것이
 아니라 `benchmarks/cost_table.py` 가 실행 결과에서 직접 렌더링한 것이고, 아래 "다시 뽑는 법" 한
 줄이면 통째로 갱신된다.
@@ -11,7 +11,7 @@ Kotlin ↔ Python 경계의 비용을, **여섯 타깃 전부에 대해 한 번�
 
 1. **조건 없는 숫자.** 워밍업 3,000 에서 잰 값들이 워밍업 표기 없이 표에 들어갔고, 나중에
    그 값들이 전부 "호스트 JIT 이 얼마나 데워져 있었는가"의 함수였다는 것이 드러났다
-   (`docs/downcall-design.md`, "The benchmark was measuring the benchmark").
+   (`docs/design/downcall-design.md`, "The benchmark was measuring the benchmark").
 2. **부하 걸린 기계.** 같은 커밋이 672 ns 와 1076 ns 를 오갔고 bisect 한 회차를 통째로 버렸다.
 
 그래서 이 하네스는 두 가지를 강제한다. **숫자와 조건을 같은 산출물에 함께 기록하고, 바쁜 기계에서는

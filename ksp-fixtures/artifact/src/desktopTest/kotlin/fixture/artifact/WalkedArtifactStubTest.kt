@@ -18,7 +18,7 @@ import kotlin.test.assertTrue
  * and this pins the renderer against Compose, JUnit and `kotlin-stdlib` as they actually are.
  *
  * The claim worth having is the last one. A stub's only job is to describe a surface that exists, and
- * `docs/pyi-generation-design.md` §4.5 states the failure mode precisely -- "a stub that says
+ * `docs/design/pyi-generation-design.md` §4.5 states the failure mode precisely -- "a stub that says
  * `Modifier.weight(1.0)` checks is a stub that promises a call the runtime cannot make". So the test
  * is not "the file contains this text", it is **every `def` in the Kotlin-FQN stubs is a key
  * `UpcallTable` resolves, and every key is a `def`**.
@@ -55,7 +55,7 @@ class WalkedArtifactStubTest {
     }
 
     /**
-     * The Kotlin-FQN product, against the package `docs/kotlin-extensions-in-python.md` §3 measured
+     * The Kotlin-FQN product, against the package `docs/design/kotlin-extensions-in-python.md` §3 measured
      * at zero bound declarations.
      *
      * The annotations are the **boundary's**: `Dp` marshals as a raw float and `Modifier` as a

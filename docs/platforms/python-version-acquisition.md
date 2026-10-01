@@ -30,7 +30,7 @@ The project currently uses `python-build-standalone` (maintained by Astral). For
 *   **The Constraint:** This project relies entirely on the CPython Stable ABI for its ~330 bindings.
 *   **Python 3.13 & 3.14:** The traditional Stable ABI (`abi3`) **does not** support free-threaded (GIL-disabled) builds. If we attempt to use a free-threaded 3.14 build, our bindings relying on `abi3` will fail or crash due to opaque structural changes in `PyObject`.
 *   **Python 3.15 (PEP 803):** Python 3.15 introduces `abi3t`, a new variant of the Stable ABI specifically for free-threaded builds.
-*   **Conclusion:** We cannot use free-threaded variants with the Stable ABI in 3.14. We must wait for (or test against) 3.15 to utilize `abi3t` for our bindings.
+*   **Conclusion (superseded 2026-08-12):** this was stale. `Py_LIMITED_API` is not defined here, so `abi3t` is not a blocker; 3.14t works on desktop with `-PpythonFreeThreaded=true` (236 tests, 0 failures). See `docs/roadmap/ROADMAP.md` §9.
 
 ## 5. Security and Integrity Verification
 

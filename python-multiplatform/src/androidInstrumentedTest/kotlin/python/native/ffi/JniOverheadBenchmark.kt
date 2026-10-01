@@ -139,7 +139,7 @@ class JniOverheadBenchmark {
         // This test originally asserted that @CriticalNative must not be slower than ordinary
         // JNI. Measurement disproved that on API 34 (critical ~24ns net, ordinary ~8ns), while
         // API 26 shows the opposite (critical ~2ns, ordinary ~45ns). The assumption was wrong,
-        // so asserting it would only encode the wrong belief. See docs/downcall-design.md.
+        // so asserting it would only encode the wrong belief. See docs/design/downcall-design.md.
         //
         // What is still worth asserting is correctness: all three conventions must return the
         // value they were handed. If a registration silently stopped taking effect, arguments
