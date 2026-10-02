@@ -45,6 +45,7 @@ kotlin {
         }
         val desktopMain by getting {
             dependencies {
+                implementation(projects.pythonMultiplatformCompose)
                 implementation(compose.runtime)
                 implementation(compose.foundation)
                 implementation(compose.material3)
@@ -98,7 +99,10 @@ pythonBindings {
             "androidx.compose.material.icons",
         ),
     )
-    generateStubs.set(false)
+    // Stubs on: `generatePythonStubs` over the real Compose jars is what `tools/stubs/check-stubs.sh` (the mypy
+    // check) and `.github/workflows/stubs.yml` (the published artifact) both run. Nothing depends on the
+    // task, so the render tests do not pay for it.
+    generateStubs.set(true)
 }
 
 /**

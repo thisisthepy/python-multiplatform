@@ -228,6 +228,26 @@ internal object ArtifactScanner {
         // Defaults first: [disambiguateOverloads] renames entries, and the sibling test needs the
         // Kotlin name they still share.
         return assignThunkIndices(disambiguateOverloads(applyDefaultOmission(dropCollidingConstructors(entries))))
+            // The ancestry the binding carries is the model's too (issue #31): copied at the end, from the
+            // callable that was actually bound, so the two cannot be read differently.
+            .map { candidate ->
+                val callable = candidate.callable ?: return@map candidate
+                // ... and so is what the binding lets Python leave out. The model's `declaresDefault` is
+                // Kotlin's own view until [applyDefaultOmission] narrows it, and that pass returns a
+                // candidate untouched when nothing is omittable (past [MAX_OMITTABLE_PARAMETERS], an
+                // unwritable name, an ambiguous sibling): the binding then requires every argument
+                // while the stub would still offer `= ...`. One view, taken from the binding.
+                val omittable = omittableSlotsOf(callable)
+                val receiverIndex = if (callable.receiverTypeName != null) 1 else 0
+                candidate.copy(
+                    declaration = candidate.declaration.copy(
+                        returnSupertypes = callable.returnSupertypes,
+                        parameters = candidate.declaration.parameters.mapIndexed { index, parameter ->
+                            parameter.copy(declaresDefault = omittable.getOrElse(index + receiverIndex) { false })
+                        },
+                    ),
+                )
+            }
     }
 
     /**

@@ -216,11 +216,32 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `ksp-fixtures/compose/src/desktopTest/` (`ComposableRenderTest.kt`, `M3ProofRenderTest.kt`,
   `CallbackDrivenRenderTest.kt`, pointer/drag render tests), `GP/artifact/ComposableBindingTest.kt`;
   `planned` on Android, iOS and wasm.
+- **B-8** A host draws a Python-declared application root with
+  `python.multiplatform.compose.PythonContent(root: PyObject)` or `PythonContent(module, attribute)`,
+  from the `python-multiplatform-compose` module (`python-multiplatform` itself does not depend on
+  Compose). The root is a Python callable, or a Compose `State` that Python holds whose value is that
+  callable. The state is read inside the composition, so a Python write into it replaces the root on
+  the next frame with no host call; Python callables a root passed into composables are released when
+  that root is replaced or the composition is disposed. The entry point names no library.
+  `Status: implemented` on desktop — `ksp-fixtures/compose/.../PythonContentRenderTest.kt`; the module
+  compiles for Android, nothing runs there yet.
 - **B-7** The plugin generates `.pyi` stubs for the Kotlin-named modules only, under Kotlin names
-  (keyword parameters by Kotlin name, `= ...` for a Kotlin default, receiver positional-only). It emits
-  nothing under `pythonx` and renames nothing; a Pythonic stub product belongs to pythonx-compose.
-  `Status: partial` — `GP/stubs/PyiRenderingTest.kt`, `GP/stubs/KotlinNamesOnlyStubTest.kt`,
-  `ksp-fixtures/artifact/.../WalkedArtifactStubTest.kt`; handle-returning stubs are not wrapped.
+  (keyword parameters by Kotlin name, `= ...` for a Kotlin default, receiver positional-only). Types are
+  the declared Kotlin types: one stub class per bound type in the module of its own package, `Dp | float`
+  for a value class bound as its primitive, `Callable[...]` for a function type, `| None` for a nullable;
+  an extension function is also a callable attribute of its receiver's class; an overload set is
+  `@overload`ed under its base name in table-key order; a required parameter after a defaulted one is
+  keyword-only like `inspect.signature`. It emits nothing under `pythonx` and renames nothing; a
+  Pythonic stub product belongs to pythonx-compose. `Status: partial` — `GP/stubs/PyiRenderingTest.kt`,
+  `GP/stubs/TypedStubTest.kt`, `GP/stubs/KotlinNamesOnlyStubTest.kt`,
+  `ksp-fixtures/artifact/.../WalkedArtifactStubTest.kt`, `.../StubSignatureAgreesWithRuntimeTest.kt`,
+  `tools/stubs/check-stubs.sh` (mypy over the Compose stubs). A class whose name is also a function in
+  its module is `Any`.
+- **B-8** CI generates the stubs over the Compose version the build resolves and publishes them
+  (`.github/workflows/stubs.yml`): workflow artifact `kotlin-stubs` on every push to `develop`, with a
+  README naming the Compose version and the commit, and `kotlin-stubs.zip` on every `v*` tag's release.
+  `Status: partial` — the workflow could not be run where it was written; its YAML parses and its
+  assemble step was executed locally.
 
 ## 7. Threading and builds
 
@@ -251,6 +272,12 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 - **N-3** Binding Kotlin/Native klib declarations at run time (B-2). `Status: planned`.
 - **N-4** Linux and Windows desktop runs in CI (P-2). `Status: planned`.
 - **N-5** Native-image upcall verification as an automated test (U-6). `Status: planned`.
+- **N-6** Compose state created and written from Python through the binder:
+  `androidx.compose.runtime.mutableStateOf(x)` callable, and `.value` of the returned `MutableState`
+  readable and writable on its proxy. Neither is bound today: the walker emits only `FUNCTION` and
+  `STATIC_GETTER` entries (no instance members), and declines every declaration whose signature
+  mentions a type parameter. B-8's test writes its root state through a fixture-local KSP-bound
+  setter instead. `Status: planned`.
 
 ---
 

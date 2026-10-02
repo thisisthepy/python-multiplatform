@@ -83,13 +83,13 @@ class KotlinNamesOnlyStubTest {
     @Test
     fun declaredParametersAreKeywordCapableByTheirKotlinNameAndDefaultsAreMarked() {
         val b = body(decl("fillMaxWidth", parameters = listOf(param("fraction", default = true))))
-        assertTrue("def fillMaxWidth(receiver: int, /, fraction: float = ...) -> int:" in b, b)
+        assertTrue("def fillMaxWidth(receiver: androidx.compose.ui.Modifier, /, fraction: float = ...) -> androidx.compose.ui.Modifier:" in b, b)
     }
 
     @Test
     fun aRequiredParameterHasNoDefaultMarker() {
         val b = body(decl("windowInsetsPadding", parameters = listOf(param("windowInsets"))))
-        assertTrue("def windowInsetsPadding(receiver: int, /, windowInsets: float) -> int:" in b, b)
+        assertTrue("def windowInsetsPadding(receiver: androidx.compose.ui.Modifier, /, windowInsets: float) -> androidx.compose.ui.Modifier:" in b, b)
     }
 
     /** `in` is a Python keyword: it cannot be a keyword argument in `.pyi`, so it and everything
@@ -100,7 +100,7 @@ class KotlinNamesOnlyStubTest {
         val b = body(
             decl("scan", parameters = listOf(param("first"), param("in"), param("last", default = true))),
         )
-        assertTrue("def scan(receiver: int, first: float, __a1: float, /, last: float = ...) -> int:" in b, b)
+        assertTrue("def scan(receiver: androidx.compose.ui.Modifier, first: float, __a1: float, /, last: float = ...) -> androidx.compose.ui.Modifier:" in b, b)
         assertFalse("in_" in b, b)
     }
 
@@ -109,14 +109,15 @@ class KotlinNamesOnlyStubTest {
         val b = body(
             decl("assertEquals", parameters = listOf(param(null), param(null))).copy(parameterNamesKnown = false),
         )
-        assertTrue("def assertEquals(receiver: int, __a0: float, __a1: float, /) -> int:" in b, b)
+        assertTrue("def assertEquals(receiver: androidx.compose.ui.Modifier, __a0: float, __a1: float, /) -> androidx.compose.ui.Modifier:" in b, b)
     }
 
-    /** Python rejects a non-default parameter after a default one, so a Kotlin default that precedes
-     * a required parameter cannot be marked; the stub stays valid and the parameter stays named. */
+    /** Python rejects a non-default parameter after a default one, and `inspect.signature` on the
+     * binder's own callable makes such a parameter keyword-only (`KotlinSurface.kt`): so does the
+     * stub, and the default stays marked. */
     @Test
-    fun aDefaultBeforeARequiredParameterIsNotMarkedSoTheStubStaysSyntacticallyValid() {
+    fun aRequiredParameterAfterADefaultIsKeywordOnlyLikeTheRuntimeSignature() {
         val b = body(decl("mix", parameters = listOf(param("a", default = true), param("b"))))
-        assertTrue("def mix(receiver: int, /, a: float, b: float) -> int:" in b, b)
+        assertTrue("def mix(receiver: androidx.compose.ui.Modifier, /, a: float = ..., *, b: float) -> androidx.compose.ui.Modifier:" in b, b)
     }
 }
