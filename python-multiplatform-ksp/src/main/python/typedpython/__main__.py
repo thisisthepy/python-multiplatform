@@ -39,5 +39,10 @@ def main(argv: list[str]) -> int:
     return EXIT_ERRORS if any(d.severity == "error" for d in found) else EXIT_CLEAN
 
 
-if __name__ == "__main__":
+def cli() -> None:
+    """Console-script entry point (`typedpython check ...`)."""
     sys.exit(main(sys.argv[1:]))
+
+
+if __name__ == "__main__":
+    cli()
