@@ -598,9 +598,10 @@ Generation belongs to the Gradle plugin (`AGENTS.md` §12.5), and it reads the s
 the binder, so the stub and the binding cannot drift. **What it emits is the Kotlin surface, not a
 Pythonic one** (SPEC B-7, `docs/design/pyi-generation-design.md`): one `def` per table key under the
 Kotlin module path, Kotlin parameter names, `= ...` for a Kotlin default, the extension receiver as a
-positional-only first parameter, and boundary-type annotations (`Dp` → `float`, `Modifier` → `int`)
-with the Kotlin signature in the docstring. Extension-as-method, `@overload` sets over a base name and
-`Dp | float` are what a Pythonic stub would say; that stub belongs to pythonx-compose. The section
+positional-only first parameter, the declared Kotlin types as stub classes (`Modifier`, `Dp | float`,
+`Callable[...]`), each extension also as a callable attribute of its receiver's class, and `@overload`
+sets over a base name in table-key order, with the Kotlin signature in the docstring (issue #31). What
+stays out is snake_case, `pythonx` and the Pythonic allowlist narrowing, which belong to pythonx-compose. The section
 this replaces — the metaclass stub and the three measured requirements for a Pythonic stub — is in
 [`docs/archive/kotlin-extensions-in-python-pyi.md`](../archive/kotlin-extensions-in-python-pyi.md).
 

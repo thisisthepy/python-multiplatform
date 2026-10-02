@@ -8,6 +8,13 @@
 > [`docs/archive/pyi-generation-pythonic-stubs.md`](../archive/pyi-generation-pythonic-stubs.md);
 > that product belongs to pythonx-compose. Section numbers are kept so that the code's KDoc
 > references still resolve; sections that moved say so where they used to be.
+>
+> **Revised again for issue #31 (typed stubs).** The stub no longer annotates every object as `int`:
+> it names the declared Kotlin type with a stub class per bound type, puts each extension function on
+> its receiver's class as well, and states function types, nullability, value classes and overload
+> sets (§3.1, §3.3–§3.6, §4.1). Everything is still under Kotlin names; the "`Dp | float`, `@overload`
+> sets, `Modifier` callback-Protocol shape" that the paragraph above says left the plugin are back
+> **as Kotlin-name typing**, not as a Pythonic product -- no snake_case, no `pythonx`.
 
 The binder serves Kotlin-named modules (`androidx.compose.foundation.layout`, `junit.runner.Version`,
 a consumer's own package) that exist only as `sys.modules` entries made at run time
@@ -300,41 +307,49 @@ is being fetched and then dropped, one function before it would be used.
 
 ## 3. Kotlin → Python type mapping
 
-### 3.1 The table — boundary types, with the Kotlin signature in the docstring
+### 3.1 The table — the declared Kotlin type, a stub class per bound type
 
-**Current.** A stub describes the module the runtime actually publishes, and that module accepts and
-returns what `UpcallTrampoline` marshals. So every annotation is the parameter's or return's
-**boundary tag** (`python.multiplatform.reflection.TypeTag`), mapped by `boundaryAnnotation` in
-`PyiRendering.kt`, and the declared Kotlin signature goes into the docstring, where a reader wants it
-and a checker cannot act on it:
+**Current (issue #31).** A stub says what the Kotlin declaration says, wherever the runtime serves
+that type. `renderKotlinFqnStubs` (`PyiRendering.kt`) maps each `KotlinTypeModel` with its boundary
+tag as the tiebreaker, and the Kotlin signature stays in the docstring:
 
-    def padding__Dp(receiver: int, /, all: float) -> int:
+    def padding__Dp(receiver: androidx.compose.ui.Modifier, /, all: androidx.compose.ui.unit.Dp | float) -> androidx.compose.ui.Modifier:
         """Kotlin: androidx.compose.ui.Modifier.padding(all: androidx.compose.ui.unit.Dp): androidx.compose.ui.Modifier"""
         ...
 
-(the exact text `WalkedArtifactStubTest.theKotlinFqnStubsDescribeTheModulesTheRuntimePublishes`
-asserts against the real Compose jars).
-
-| boundary tag | `.pyi` | Kotlin declarations that cross as it |
+| Kotlin | `.pyi` | why |
 |---|---|---|
-| `BOOLEAN` | `bool` | `Boolean` |
-| `INT` | `int` | `Byte`, `Short`, `Int`, `Long` (the boundary carries every one as `Long`; Python has one integer type) |
-| `FLOAT` | `float` | `Float`, `Double` |
-| `STRING` | `str` | `String`, `String?` |
-| `BYTES` | `bytes` | `ByteArray`, `ByteArray?` |
-| `UNIT` | `None` | `Unit`, return position only |
-| `OBJECT` | `int` | any object: it crosses as a `HandleTable` integer (`UpcallTrampoline.marshalResult`), so `int` is the truth about the raw module. Function-typed slots also cross as `OBJECT` (§3.5) |
-| none of the above | `object` | defensive default in `boundaryAnnotation`; a declined declaration is not stubbed at all |
+| `Boolean` | `bool` | |
+| `Byte` `Short` `Int` `Long` | `int` | the boundary carries every one as `Long`; Python has one integer type |
+| `Float` `Double` | `float` | |
+| `String`, `Char` | `str` | |
+| `ByteArray` | `bytes` | |
+| `Unit` | `None` | |
+| `Any` | `typing.Any` | |
+| any other class or interface | **a stub class in the module of its own Kotlin package** (`class Modifier` in `androidx/compose/ui/__init__.pyi`), referenced as `androidx.compose.ui.Modifier` from other modules and bare from its own | the value crosses as a `HandleTable` integer and the binding layer wraps it in a proxy class named for the declared type (`PythonxAdapter._wrap`). A nested class is nested in its outer class's stub |
+| a class that extends another | `class BitmapPainter(Painter)` | the nearest supertype the scanner read off the jar (`DeclarationModel.returnSupertypes`, the same list `_is_a` accepts a value for); only for types some bound declaration returns |
+| value class bound as its primitive (`Dp`) | `Dp \| float` as a parameter, `float` as a result | a result is the raw number (`_wrap` only wraps `OBJECT`); the raw module accepts the number, and the binding layer's allowlist (`allow_raw_primitive`) decides at run time, which no stub can know |
+| value class the binder cannot open (`TextUnit`) | its own class | it crosses as an object handle |
+| `(A, B) -> R` | `Callable[[A, B], R]` | `kotlin.FunctionN`'s type arguments; `@Composable` and a receiver are not expressible and not faked |
+| `T?` | `T \| None` | `KotlinTypeModel.isNullable` |
+| type arguments of a non-function class | dropped (`State<Boolean>` is `State`) | the proxy class is one per Kotlin class |
 
-A value class crosses as its underlying primitive's tag when its constructor (parameter side) or its
-property (return side) is public — `Dp` is `FLOAT` and is annotated `float` — and otherwise falls
-through to an object handle (§3.4).
+`typing` is imported as `_t` (`import typing as _t`) because a Kotlin declaration may be called `Any`
+or `Callable`; other modules are imported whole (`import androidx.compose.ui`) and referenced
+qualified, so a class never collides with a name the importing module defines.
 
-**Not emitted:** `list[T]`, `dict[K, V]`, `Callable[...]`, `T | None`, `typing.Never`, or a stub name
-for an object type. Each of those would describe the declared Kotlin type rather than what the raw
-module accepts, and saying `-> Modifier` where Python receives an `int` is the lie §7's first item
-warns about. The declared-Kotlin-type table that the removed Pythonic product implemented
-(`PythonTypes.kt`) is in the archive file, §3.1.
+**A class whose name is also a function in its module falls back to `typing.Any`.** Compose has
+`PaddingValues(...)` the factory and `PaddingValues` the interface, `Color(...)` and `Color`, `Dp(...)`
+and `Dp`. One Python module cannot define both, and the runtime resolves the name to the function
+(`_adapt` asks `_BY_PACKAGE` first), so the type is not reachable there either. In Compose 1.11.1 this
+turns `PaddingValues`, `TextStyle`, `Color`, `AnnotatedString` and `Dp` itself into `Any` (`Dp` then
+collapses to its `float`). It is the honest loss of this design, not a bug to chase: the alternatives
+are a differently named class (a renamed spelling the binder does not have) or a private side module.
+
+**Case-colliding module paths** (`androidx.compose.ui.graphics.Shadow`, a class module, and
+`...graphics.shadow`, a package) are two files on Linux and one on macOS and Windows.
+`PythonStubsTask` warns (`caseCollidingPaths`); generate and publish from a case-sensitive
+filesystem, which is why the CI job (`.github/workflows/stubs.yml`) runs on ubuntu.
 
 ### 3.2 Java declarations have no types to map
 
@@ -364,65 +379,74 @@ not hidden.
 
 ### 3.3 Nullability
 
-**Current.** The binder's gate moved since this section was first written: a nullable **object**
-binds (the handle is already nullable at the boundary; `UpcallTrampoline.toKotlin` maps Python
-`None` to `null`), and `String?` and `ByteArray?` bind; a nullable numeric or `Boolean` primitive and
-a nullable value class stay declined (`resolveKotlinBoundary` and `nullablePrimitiveBoundaryTypeOf`
-in `KotlinMetadata.kt`). The stub does **not** mark nullability: a `String?` parameter is annotated
-`str`, and the `?` appears only in the docstring's Kotlin signature. Marking it `str | None` is
-mechanical once wanted — `KotlinTypeModel.isNullable` carries the fact — and is listed in §7.
+**Current.** The binder's gate: a nullable **object** binds (the handle is already nullable at the
+boundary; `UpcallTrampoline.toKotlin` maps Python `None` to `null`), and `String?` and `ByteArray?`
+bind; a nullable numeric or `Boolean` primitive and a nullable value class stay declined
+(`resolveKotlinBoundary` and `nullablePrimitiveBoundaryTypeOf` in `KotlinMetadata.kt`). The stub marks
+every nullable it renders `T | None`, for parameters and results alike
+(`TypedStubTest.aFunctionTypeIsCallableAndANullableTypeIsOptional`).
 
 ### 3.4 Value classes
 
-**Current.** A value-class parameter is annotated with its underlying boundary type when the binder
-binds it as that primitive (`Dp` → `float`, because `Dp`'s constructor is public and it wraps a
-`Float`). A value class whose wrapper cannot be opened from outside its module (`TextUnit`, every
-`packedValue` class) falls through to the object handle and is annotated `int`. `Color`'s public
-constructor takes `ULong`, which `kotlinPrimitiveBoundaryTypeOf` has no entry for.
+**Current.** A value class the binder binds as its primitive (`Dp`: public constructor, wraps a
+`Float`) is `Dp | float` as a parameter and the raw `float` as a result; the class `Dp` is stubbed in
+`androidx.compose.ui.unit` with a docstring saying what it wraps. A value class whose wrapper cannot be
+opened from outside its module (`TextUnit`, every `packedValue` class) crosses as an object handle and
+is an ordinary class in parameters and results. `Color`'s public constructor takes `ULong`, which
+`kotlinPrimitiveBoundaryTypeOf` has no entry for, so it is an object handle too.
 
 The raw-primitive **allowlist** (`docs/design/kotlin-extensions-in-python.md` §4.4: `Dp` yes, `TextUnit`
-and `Color` no) is not a stub concern here. It is enforced at run time by the binding layer, where it
-starts **empty** and is filled by pythonx-compose through `allow_raw_primitive`
-(`PythonxAdapter.kt`). The stub describes the raw module, which accepts the underlying primitive for
-any value class it binds that way. How the allowlist shows up in a *Pythonic* stub (`Dp | float`
-versus the proxy alone, with the mypy evidence) is archive §3.4.
+and `Color` no) is not a stub concern. It is enforced at run time by the binding layer, where it starts
+**empty** and is filled by pythonx-compose through `allow_raw_primitive` (`PythonxAdapter.kt`), so the
+stub states the widest thing the raw module accepts (`Dp | float`) and the layer above narrows it.
+The mypy evidence for the asymmetry (`Text(fontSize=16)` rejected, `padding(16)` accepted) is archive
+§3.4; it needs the allowlist in the stub, which belongs to the Pythonic layer.
 
 ### 3.5 Function types, and Compose's `content`
 
 **Current.** A function-typed parameter crosses as `OBJECT` (`ArtifactScanner.functionSlotOrNull`):
-the runtime turns a Python callable into a Kotlin `FunctionN` and hands the raw boundary a handle. The
-stub therefore annotates it `int`, with the declared `kotlin.FunctionN<...>` in the docstring; no
-`Callable[...]` is emitted.
-
-Two things the current product does that the original design asked for:
+the runtime turns a Python callable into a Kotlin `FunctionN`. The stub says `Callable[[A], R]` from
+`kotlin.FunctionN`'s type arguments (arguments the callback *receives* are rendered as results, the
+callback's own result as a parameter); `Unit` is `None`. `@Composable` on a lambda and a function type
+with a receiver (`ColumnScope.() -> Unit`, which the metadata spells as a leading argument) are not
+expressible and are not faked. The Kotlin type stays in the docstring.
 
 - **The synthetic parameters are not stubbed.** Parameters come from `KmFunction` metadata, so
   `$composer`, `$changed` and `$default` never appear (`docs/design/kotlin-extensions-in-python.md`
-  §4.6: metadata arity is the correct source). This follows from `DeclarationModel`'s construction;
-  no stub test asserts it for a composable.
-- **A required parameter after a defaulted one is not marked optional.** Python rejects a required
-  parameter after one with a default, and Compose's trailing `content` is exactly that, so a
-  default is marked `= ...` only when no required parameter follows it
-  (`KotlinNamesOnlyStubTest.aDefaultBeforeARequiredParameterIsNotMarkedSoTheStubStaysSyntacticallyValid`,
-  `WalkedArtifactStubTest.noGeneratedDefPutsARequiredParameterAfterADefaultedOne`).
-
-What it does not do: make `content` keyword-only. The run-time signature does
-(`inspect.signature` on a binder-made function makes "required after optional" keyword-only,
-`KotlinSurface.kt`), so stub and run-time signature differ there; §7.
+  §4.6: metadata arity is the correct source).
+- **A required parameter after a defaulted one is keyword-only**, exactly as `inspect.signature` on a
+  binder-made callable reports it (`KotlinSurface.kt`): `def Column(modifier: Modifier = ...,
+  verticalArrangement: Any = ..., horizontalAlignment: Any = ..., *, content: Callable[[ColumnScope],
+  None])`, and the defaults stay marked. The one exception is a declaration with an unwritable
+  parameter name, where a positional-only prefix is already in play and a default is marked only when
+  no required parameter follows it. `StubSignatureAgreesWithRuntimeTest` compares name, kind, default
+  and type against `inspect.signature` for every stubbed function of three real modules.
 
 **Suspend functions are not stubbed** (`renderKotlinFqnStubs` filters `isSuspend`), although the
 runtime makes them awaitable (SPEC U-5). §7.
 
 ### 3.6 Overloads
 
-**Current.** The binder no longer drops an ambiguous name: `ArtifactScanner.disambiguateOverloads`
-gives every member of an overload set its own table key, `name__<types>` (`padding__Dp`,
-`padding__Dp_Dp`, `padding__Dp_Dp_Dp_Dp`, `padding__PaddingValues`; a group of one keeps the bare
-name; `docs/design/kotlin-extensions-in-python.md` §3.1). The stub emits **one `def` per table key**
-and nothing else — `WalkedArtifactStubTest.everyStubbedFunctionIsATableKeyAndEveryTableKeyIsStubbed`
-asserts the two sets are equal. The base name of an overload set (`padding`), which the binding layer
-dispatches at run time (`_Overloads` in `PythonxAdapter.kt`, `(*args, **kwargs)` signature per
-`KotlinSurface.kt`), has no stub; no `@overload` is emitted.
+**Current.** `ArtifactScanner.disambiguateOverloads` gives every member of an overload set its own
+table key, `name__<types>` (`padding__Dp`, `padding__Dp_Dp`, `padding__Dp_Dp_Dp_Dp`,
+`padding__PaddingValues`; a group of one keeps the bare name;
+`docs/design/kotlin-extensions-in-python.md` §3.1). The stub emits **one `def` per table key**, and
+also the **base name** the binding layer serves (`padding`, `_Overloads` in `PythonxAdapter.kt`) as an
+`@overload` set **in table-key order**: the artefact table is sorted by name (`ArtifactScanner.scanJar`),
+the binding layer indexes candidates in that order and `_Overloads` tries them in it, and a checker
+takes the first match, so the stub's order and the dispatcher's are one order. For `padding` that is
+`all`, `horizontal/vertical`, `start/top/end/bottom`, `paddingValues`. A base name is stubbed whenever a
+key has an overload suffix, even for a group of one (the runtime serves it), and not when a declaration
+already has that exact name.
+
+`WalkedArtifactStubTest.everyStubbedFunctionIsATableKeyAndEveryTableKeyIsStubbed` asserts both
+directions: every stubbed `def` is a table key or the base name of one, and every key is stubbed.
+
+Python's one `int`/`float` and a class that fell back to `Any` cannot tell two Kotlin overloads apart
+(`lerp(Int, Int, Float)` and `lerp(Float, Float, Float)`), so mypy reports every later overload as
+`overload-cannot-match`. The runtime dispatcher tells them apart and the explicit spelling reaches each,
+so each overload after the first carries `# type: ignore[overload-cannot-match]`
+(`TypedStubTest.everyOverloadAfterTheFirstSilencesTheCheckersNeverMatchedDiagnostic`).
 
 Parameters are keyword-capable under their **Kotlin** names (`all`, `fraction`, `alignmentLine`);
 nothing is converted to snake_case (`KotlinNamesOnlyStubTest.kotlinNamesAreNeverSnakeCased`). A name
@@ -430,12 +454,6 @@ that is not a Python identifier or is a Python keyword, or an unknown name, forc
 to and including that parameter, spelled `__a<index>`
 (`KotlinNamesOnlyStubTest.aParameterNamedLikeAPythonKeywordForcesAPositionalOnlyPrefix`). A Kotlin
 default is `= ...`, because metadata carries `declaresDefaultValue` but not the value.
-
-The mypy measurements of four `padding` overloads as `@overload`s, the overlap behaviour (mypy takes
-the first match silently) and the judged rule "deterministic, arity-ascending, same order as the
-dispatcher" belong to a Pythonic stub and are in archive §3.6.
-
----
 
 ## 4. Extension functions
 
@@ -451,12 +469,28 @@ dispatcher" belong to a Pythonic stub and are in archive §3.6.
 Nothing measured here disturbs that. Chaining is free because each of the 177 returns `Modifier`, and
 the mypy run in archive §4.4 confirms `Modifier.size(4).padding(2)` type-checks as `Modifier` in a Pythonic stub.
 
-> **Current:** this placement is what a Pythonic layer does with extensions, and the counts are a
-> property of Compose. The stub product here places **every** extension function as a module-level
-> `def` in the module of its declaring package, with the receiver as the first positional-only
-> parameter named `receiver` (`def fillMaxWidth(receiver: int, /, fraction: float = ...) -> int:`,
-> `WalkedArtifactStubTest`). The method form on the receiver's proxy (SPEC U-7) exists only at run
-> time in the binding layer and is not stubbed.
+> **Current (issue #31):** every extension function stays a module-level `def` in the module of its
+> declaring package, with the receiver as the first positional-only parameter named `receiver`
+> (`def fillMaxWidth(receiver: androidx.compose.ui.Modifier, /, fraction: float = ...) ->
+> androidx.compose.ui.Modifier:`), **and** an extension whose receiver is a class is also a **callable
+> attribute of that receiver's stub class**, because the runtime attaches it there (`PythonxAdapter._attach`,
+> SPEC U-7) under both the Kotlin name and every `name__Types` key:
+>
+>     class _Modifier_padding(_t.Protocol):
+>         @_t.overload
+>         def __call__(self, all: float) -> Modifier: ...
+>         ...
+>     class Modifier:
+>         padding: _t.ClassVar[_Modifier_padding]
+>         padding__Dp: _t.ClassVar[_Modifier_padding__Dp]
+>
+> A plain method cannot say both `Modifier.padding(16)` and `m.padding(16)` (the first binds `16` to
+> `self`); a `ClassVar` of a `Protocol` with `__call__` can, and is the shape archive §4.4 measured
+> with mypy. The receivers that stay module-level only are the ones the runtime cannot attach to:
+> Kotlin primitives and `String`, function types, and value classes (never a proxy instance). The
+> protocol classes are private (`_Receiver_name`), carry the Kotlin name unchanged and exist only for a
+> type checker. `Modifier.padding(...)` at run time needs `register_empty` for `Modifier`; the stub does
+> not know whether a consumer called it.
 
 ### 4.2–4.4 Moved
 
@@ -489,7 +523,7 @@ Of the two products the original §5.3 named, only the first remains:
 
 | product | namespace | content |
 |---|---|---|
-| Kotlin-FQN stubs | `androidx.compose.material3`, `junit.runner`, … | 1:1 with the table keys `PythonProxySource` publishes into `sys.modules`; Kotlin names, boundary-type annotations, the Kotlin signature in each docstring, no extension-as-method |
+| Kotlin-FQN stubs | `androidx.compose.material3`, `junit.runner`, … | 1:1 with the table keys `PythonProxySource` publishes into `sys.modules`; Kotlin names, declared-type annotations with a stub class per bound type, extension functions also as callable attributes of their receiver's class, the Kotlin signature in each docstring |
 
 It is the direct descendant of PyREPL's output and the only thing an IDE can see for those modules,
 since they exist only as runtime `sys.modules` entries. The Pythonic stubs a user of `pythonx`
@@ -558,14 +592,12 @@ merges an overlap.
 
 ## 7. Open
 
-- **What to stub for a `TypeTag.OBJECT` return.** `PythonProxySource`'s KDoc records that such a
-  value crosses as a bare handle integer, not as an instance of the class rendered for it, which is
-  why the stub says `-> int` (§3.1). A stub saying `-> Modifier` needs the handle-to-proxy wrapping
-  at the raw module, which is not done (SPEC B-7: "handle-returning stubs are not wrapped").
-- **Nullability** (§3.3) is carried by the model and not rendered.
+- **A class whose name is a function in its module is `Any`** (§3.1): `PaddingValues`, `TextStyle`,
+  `Color`, `AnnotatedString`, `Dp` in Compose 1.11.1.
+- **Supertypes are the nearest one only**, and only for types a bound declaration returns (§3.1); an
+  interface a class implements besides its first listed supertype is not in the stub.
+- **Type arguments of a non-function class are dropped** (§3.1).
 - **Suspend functions** (§3.5) are bound and awaitable but not stubbed.
-- **Overload base names** (§3.6) are dispatched at run time and not stubbed.
-- **`content` keyword-only** (§3.5): the run-time signature makes it keyword-only, the stub does not.
 - **The consumer's own KSP-bound declarations** are not stubbed: KSP does not produce
   `DeclarationModel` (§2.2), although §2.3 records it would need to read nothing new.
 - **Generic declarations.** `BindingPolicy` rejects them, so they are not stubbed; if the binder ever
@@ -576,5 +608,16 @@ merges an overlap.
   is chosen.
 - **IDE pick-up** (§6.2): registering `build/generated/pythonStubs/<sourceSet>/` with an interpreter
   or IDE is per-environment and none of it is implemented or verified; PyCharm was never tested
-  (§0).
+  (§0). Only mypy has seen the typed shape (§8).
 - **commonMain/platform overlap** (§6.3) is not implemented.
+
+## 8. Checked with mypy, and published
+
+- `tools/stubs/check-stubs.sh <stub-dir>` runs `mypy --strict` over `tools/stubs/consumer.py` (a
+  `Modifier` chain from the class and from an instance, `Checkbox`, `Text`, `Column` with its keyword
+  `content`, and four lines that must be rejected) against stubs generated for the real Compose jars
+  (`:ksp-fixtures:compose:generatePythonStubs`, which `ksp-fixtures/compose` now enables). Errors inside
+  the stubs are reported as well, not only in the consumer.
+- `.github/workflows/stubs.yml` runs the stub task and that check on every push to `develop`, uploads
+  the stubs as the workflow artifact `kotlin-stubs` (with a README naming the Compose version and the
+  producing commit) and attaches `kotlin-stubs.zip` to the release of every `v*` tag (issue #32).

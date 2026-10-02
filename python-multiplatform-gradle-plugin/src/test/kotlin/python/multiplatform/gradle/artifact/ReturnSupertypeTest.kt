@@ -93,6 +93,23 @@ class ReturnSupertypeTest {
     }
 
     /**
+     * The same ancestry on the declaration model, which is what the stub generator reads: a stub class
+     * extends what the binding layer's `_is_a` would accept it for (issue #31). One walk, so the two
+     * cannot disagree.
+     */
+    @Test
+    fun theDeclarationModelCarriesTheSameAncestryAsTheBinding() {
+        val graphics = jarUnder("org.jetbrains.compose.ui", "ui-graphics-desktop") ?: return
+        val declarations = ArtifactScanner.scanDeclarations(
+            graphics,
+            includePrefixes = listOf("androidx.compose.ui.graphics"),
+            classpath = composeClasspath(),
+        )
+        val painter = declarations.first { it.bindingName == "androidx.compose.ui.graphics.painter.BitmapPainter" }
+        assertEquals(listOf("androidx.compose.ui.graphics.painter.Painter"), painter.returnSupertypes)
+    }
+
+    /**
      * A return that does **not** cross as a handle carries no ancestry, because nothing could read
      * one: a `Dp` result is a raw `FLOAT` with no identity to hang it on, and a `Boolean` even less.
      * Asked only where it can be answered is also the whole of why the cost below is what it is.
