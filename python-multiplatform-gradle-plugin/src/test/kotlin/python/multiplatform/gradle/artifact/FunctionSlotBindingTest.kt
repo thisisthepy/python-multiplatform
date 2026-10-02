@@ -107,7 +107,11 @@ class FunctionSlotBindingTest {
         val clickable = entries.filter { it.name.substringAfterLast('.').substringBefore("__") == "clickable" }
         assertTrue(clickable.isNotEmpty(), "Modifier.clickable is not bound: ${entries.map { it.name }}")
 
-        val simple = clickable.single { it.paramNames == listOf("<receiver>", "enabled", "onClickLabel", "role", "onClick") }
+        // Compose 1.6's `clickable(enabled, onClickLabel, role, onClick)` is binary-only (hidden) by
+        // CMP 1.11; its source-visible successor adds a defaulted `interactionSource` before `onClick`.
+        val simple = clickable.single {
+            it.paramNames == listOf("<receiver>", "enabled", "onClickLabel", "role", "interactionSource", "onClick")
+        }
         assertEquals("androidx.compose.ui.Modifier", simple.receiverTypeName)
         assertEquals("kotlin.Function0()->kotlin.Unit", simple.paramTypeNames.last(), "clickable.onClick")
         assertEquals("OBJECT", simple.paramTags.last(), "a callable crosses as a handle")
@@ -178,9 +182,17 @@ class FunctionSlotBindingTest {
         val uiDeclarations = ArtifactScanner.scanDeclarations(ui, listOf("androidx.compose.ui"), classpath)
         val pointerInput = uiDeclarations.filter { it.simpleName == "pointerInput" }
         assertTrue(pointerInput.isNotEmpty(), "pointerInput was not walked at all")
+        // Through Compose 1.6 every overload's `block` was a suspend lambda. From Compose 1.8 the keyed
+        // overloads take a `PointerInputEventHandler` (a fun interface) instead and decline earlier, on
+        // their `Any?` keys; only the key-less overload still carries the suspend lambda. All of them
+        // must stay declined, and the suspend one must say why.
         assertTrue(
-            pointerInput.all { it.bindingName == null && it.declineReason?.contains("suspend") == true },
-            "pointerInput must decline for its suspend lambda: ${pointerInput.map { it.declineReason }}",
+            pointerInput.all { it.bindingName == null && it.declineReason != null },
+            "every pointerInput overload must decline with a reason: ${pointerInput.map { it.declineReason }}",
+        )
+        assertTrue(
+            pointerInput.any { it.declineReason?.contains("suspend") == true },
+            "pointerInput's suspend-lambda overload must decline for it: ${pointerInput.map { it.declineReason }}",
         )
 
         val composed = uiDeclarations.filter { it.simpleName == "composed" && it.receiver != null }
