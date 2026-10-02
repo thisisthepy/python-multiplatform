@@ -60,3 +60,14 @@ Python error set, nothing to undo), `-1` Python error set (CPython's exception t
     int  tp_i64_array_exit(tp_i64_array *a);
     /* aliasing guard: 1 if any two of the n objects are the same object */
     int  tp_any_same(PyObject *const *objs, Py_ssize_t n);
+
+## Opaque objects (Kotlin interop and any Python object; ir.Global/GetAttr/CallObject/Truth/CompareObj/ObjToFloat)
+All return new references or NULL with CPython's exception set; none deopts.
+    PyObject *tp_global(PyObject *module_dict, PyObject *name);   /* globals, then builtins; NameError("name 'x' is not defined") */
+    PyObject *tp_getattr(PyObject *obj, PyObject *name);          /* PyObject_GetAttr */
+    PyObject *tp_call(PyObject *callee, PyObject *const *args, size_t nargs, PyObject *kwnames); /* PyObject_Vectorcall */
+    int       tp_truth(PyObject *obj);                            /* 0/1, -1 error (PyObject_IsTrue) */
+    int       tp_compare_bool(PyObject *a, PyObject *b, int op);  /* 0/1, -1 error (PyObject_RichCompareBool) */
+    int       tp_obj_to_f64(PyObject *obj, double *out);          /* 0 / -1 (PyNumber_Float, then exact double) */
+    PyObject *tp_binop_obj(PyObject *a, PyObject *b, int op);     /* PyNumber_Add/... for ir.BinOpKind on OBJ */
+    void      tp_release(PyObject **slot);                        /* Py_CLEAR: the only way generated code drops a reference */
