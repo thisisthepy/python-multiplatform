@@ -146,7 +146,7 @@ internal fun pyObjectToNative(obj: PyObject): Any? {
             // this function for ConversionStrategy.NATIVE.
             //
             // The question to answer first is which of these the boundary should carry, because
-            // each has a different lifetime rule (see docs/object-lifetime.md):
+            // each has a different lifetime rule (see docs/design/object-lifetime.md):
             //   (a) a `Map<String, Any?>` built from the object's `__dict__`, recursively -- a
             //       real native projection, but it drops behaviour, cannot represent cycles, and
             //       needs a visited-set;

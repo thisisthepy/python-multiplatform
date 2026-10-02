@@ -11,7 +11,7 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
 /**
- * The measurement `docs/upcall-async-design.md` is built on, and the only one of its three
+ * The measurement `docs/design/upcall-async-design.md` is built on, and the only one of its three
  * candidates that can be tested without writing the mechanism first.
  *
  * The design question every async upcall convention has to answer is not "can Kotlin start work"

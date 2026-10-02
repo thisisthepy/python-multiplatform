@@ -12,7 +12,7 @@ import python.multiplatform.reflection.TypeTag
 import python.multiplatform.reflection.UpcallTable
 
 /**
- * The Python half of `docs/upcall-async-design.md` §8.6's second gap: the `async def` proxy that
+ * The Python half of `docs/design/upcall-async-design.md` §8.6's second gap: the `async def` proxy that
  * makes `await kotlin_fn(x)` read the same whether the Kotlin body suspended or not.
  *
  * Until this existed, `AsyncUpcallDeliveryTest` wrote that proxy by hand (`_await_kotlin`) and the
@@ -59,7 +59,7 @@ import python.multiplatform.reflection.UpcallTable
  *
  * ### GraalVM native image
  *
- * `CLAUDE.md` requires upcalls to survive a closed-world native image, which is why §7 chose
+ * `AGENTS.md` requires upcalls to survive a closed-world native image, which is why §7 chose
  * build-time tables over run-time reflection. Nothing here reintroduces that risk: this generates a
  * *Python* string from data that is already in a statically-emitted Kotlin table. There is no
  * reflection, no class loading and no dynamic Kotlin code -- the closed world stays closed.
@@ -201,7 +201,7 @@ import python.multiplatform.reflection.UpcallTable
  * | module-level accessors (`fixture.library.WithCompanion_count`) | mangles the name, and `WithCompanion` is already taken as a module by the companion's *functions*, so the two halves of one companion would live in different places |
  * | a C type with `tp_getset` via [python.multiplatform.ffi.ProxyTypeFactory] | new platform C on five targets, for something a pure-Python descriptor already does. The same argument the instance section above makes against that type |
  *
- * The setter half follows `docs/binding-policy.md` rather than restating it: a `val`, or a `var`
+ * The setter half follows `docs/design/binding-policy.md` rather than restating it: a `val`, or a `var`
  * whose setter is `private`/`protected`/`internal`, simply has no `STATIC_SETTER` entry, so this
  * renders a `property` with no `fset` on a class, and on a module one whose `fset` raises with the
  * Kotlin declaration's name in the message. The assignment fails with `AttributeError` instead of
@@ -212,7 +212,7 @@ import python.multiplatform.reflection.UpcallTable
  * This used to be the whole of the section below: a `TypeTag.OBJECT` value returned from an
  * ordinary [CallableKind.FUNCTION] crossed as the bare handle integer, and *"that int is the
  * caller's to release"*, because an integer has nothing to hang a `__del__` off. The path that made
- * the cost of it visible is `docs/kotlin-extensions-in-python.md` §3.2's Compose chain --
+ * the cost of it visible is `docs/design/kotlin-extensions-in-python.md` §3.2's Compose chain --
  * `Modifier.padding(16.dp).size(24.dp)`, assembled from Python out of Compose's own jars, where
  * every link is exactly that shape. §6 records the consequence: **one leaked root per intermediate
  * link**, and Compose modifiers are written long, so the leak grows with how idiomatic the calling
@@ -252,11 +252,11 @@ import python.multiplatform.reflection.UpcallTable
  *
  * | kind | why not |
  * |---|---|
- * | a `TypeTag.OBJECT` result wrapped in the **class rendered for its type** | an owned result is a generic `_PmObject`, not a `Counter`. Nothing would be gained today: the walker emits no `ReflectedClass` at all (`ArtifactScanner` records constructors as needing one "which is the next step"), so no rendered class has ever shared a name with a walked return type. `docs/kotlin-extensions-in-python.md` §4.1's per-receiver proxy is where that belongs, and `_pm_type` carries the Kotlin type name so it has something to key on |
+ * | a `TypeTag.OBJECT` result wrapped in the **class rendered for its type** | an owned result is a generic `_PmObject`, not a `Counter`. Nothing would be gained today: the walker emits no `ReflectedClass` at all (`ArtifactScanner` records constructors as needing one "which is the next step"), so no rendered class has ever shared a name with a walked return type. `docs/design/kotlin-extensions-in-python.md` §4.1's per-receiver proxy is where that belongs, and `_pm_type` carries the Kotlin type name so it has something to key on |
  * | a `TypeTag.OBJECT` result read through a **module attribute** (a top-level or `object` property) | `_pm_static_property` is one shared descriptor for every module attribute and does not see the entry, so owning there means either a `_pm_own` call on the read path of *every* top-level `val` -- a row `GeneratedProxyCostTest` measures at 6-14 ns, which this would multiply -- or a second copy of the descriptor. Neither is worth building for a case no producer reaches: KSP emits no return type name, and the walker emits no properties |
  *
  * These are skipped silently *here* because the skip is a property of this stage, not a policy
- * decision -- `docs/binding-policy.md` already decided they are exposed, and they remain reachable
+ * decision -- `docs/design/binding-policy.md` already decided they are exposed, and they remain reachable
  * through the raw boundary. What is missing is only the sugar.
  */
 object PythonProxySource {
@@ -275,7 +275,7 @@ object PythonProxySource {
      * duplicated -- the handle `_pm_watch` carries is an ordinary object handle. */
     internal const val RELEASE_ENTRY_POINT = "_pm_release"
 
-    /** Where names with no package of their own land; `docs/upcall-table-design.md` §Runtime. */
+    /** Where names with no package of their own land; `docs/design/upcall-table-design.md` §Runtime. */
     const val DEFAULT_ROOT_MODULE: String = "kotlin"
 
     /**
@@ -447,7 +447,7 @@ object PythonProxySource {
                 return _pm_invoke(_h, ())
 
             if _set is None:
-                # `docs/binding-policy.md`: a `val`, or a `var` whose setter is not public API, has
+                # `docs/design/binding-policy.md`: a `val`, or a `var` whose setter is not public API, has
                 # no setter entry. The assignment has to fail -- letting it through would bind a
                 # plain module attribute that shadows the Kotlin declaration for every later read,
                 # silently and only in Python. A `property` with no `fset` already raises
@@ -665,7 +665,7 @@ object PythonProxySource {
                 # A `TypeTag.OBJECT` result crosses as a `HandleTable` integer -- Python cannot hold
                 # a Kotlin reference on any target -- and an integer has nothing to hang a finaliser
                 # off, so every one of them was the caller's to release by hand and nothing ever
-                # did. `docs/kotlin-extensions-in-python.md` 6 records what that cost on the path
+                # did. `docs/design/kotlin-extensions-in-python.md` 6 records what that cost on the path
                 # that made it visible: `Modifier.padding(16.dp).size(24.dp)` leaks one root per
                 # intermediate link, and Compose modifiers are written long.
                 #

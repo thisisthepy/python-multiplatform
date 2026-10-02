@@ -726,7 +726,7 @@ def __pmp_run_file__(path, argv):
      * API therefore never runs the cyclic collector at all, GIL or not: reference cycles the
      * collector would otherwise break simply accumulate. Calling this reclaims them exactly as it
      * merges the free-threaded queue — one call, one checkpoint, both jobs. See
-     * `docs/gc-scheduling-investigation.md` §1 and §6.
+     * `docs/investigations/gc-scheduling-investigation.md` §1 and §6.
      *
      * The trade-off is what runs at the checkpoint, not just what it reclaims: any `__del__`,
      * weakref callback or pending call attached to something the collector or the queue was
@@ -767,7 +767,7 @@ def __pmp_run_file__(path, argv):
      * **It still defaults to off on the GIL build**, but not because there is nothing left to
      * reclaim: reference *cycles* are collected only by a scheduled cyclic collection, and that
      * scheduling is read by the same eval-loop checkpoint on both builds (see
-     * [drainPendingReleases] and `docs/gc-scheduling-investigation.md` §1). An embedder that never
+     * [drainPendingReleases] and `docs/investigations/gc-scheduling-investigation.md` §1). An embedder that never
      * runs Python bytecode accumulates cyclic garbage forever on the GIL build too. The default
      * stays off there because turning it on is a behavioural change an embedder has to opt into
      * knowingly, not a free one: a checkpoint can run `__del__`/weakref callbacks/pending calls at

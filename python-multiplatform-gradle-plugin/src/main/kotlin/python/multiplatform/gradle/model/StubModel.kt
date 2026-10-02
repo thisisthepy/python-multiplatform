@@ -3,7 +3,7 @@ package python.multiplatform.gradle.model
 import java.io.Serializable
 
 /**
- * `docs/pyi-generation-design.md` §2.2's declaration model: **one representation, produced by the
+ * `docs/design/pyi-generation-design.md` §2.2's declaration model: **one representation, produced by the
  * scanner, consumed by two renderers.**
  *
  * ### Why a third model rather than a widened existing one

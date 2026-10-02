@@ -6,7 +6,7 @@ import kotlin.jvm.JvmInline
  * Every shape a `suspend` function can take in a scanned module, so that what the generator does
  * with it is a *measured* fact rather than a reading of [python.multiplatform.ksp.BindingPolicy].
  *
- * `docs/upcall-async-design.md` explains why none of these can be in the table as they stand: a
+ * `docs/design/upcall-async-design.md` explains why none of these can be in the table as they stand: a
  * CPython callback slot is a C frame that must hand back a `PyObject *` before it returns, and a
  * suspension has nothing to hand back. The fixtures exist so that the day an async convention
  * lands, the change in behaviour shows up as these tests failing rather than as silence.
@@ -83,7 +83,7 @@ object SuspendingRegistry {
 // `hasRenderableSignature` in `BindingPolicy` as its own predicate
 // (`BindingPolicy.hasExposableTypes`) rather than folded into the declaration-shape checks.
 //
-// `docs/upcall-async-design.md` §2.1 measured the base case: the generated cast
+// `docs/design/upcall-async-design.md` §2.1 measured the base case: the generated cast
 // (`args[0] as kotlin.coroutines.SuspendFunction1<...>`) compiles and the runtime checkcast
 // passes, because that classifier is real to the Kotlin compiler even though nothing in this
 // compilation ever declares it in source -- there is no `invoke` entry for Python to call through,

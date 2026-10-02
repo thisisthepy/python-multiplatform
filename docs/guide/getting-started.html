@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Get started · python-multiplatform</title>
+<meta name="description" content="Real CPython inside Kotlin Multiplatform: Kotlin calls Python, Python calls Kotlin, on every target.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&amp;family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/site.js"></script>
+</head>
+<body>
+<span hidden data-title-en="Get started · python-multiplatform" data-title-ko="시작하기 · python-multiplatform"></span>
+<header class="site-header">
+  <div class="wrap bar">
+    <a class="brand" href="index.html"><svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="2" width="9" height="9" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="13" width="9" height="9" rx="2.5" fill="var(--accent)"/><path d="M11 6.5h4.5a2 2 0 0 1 2 2V13M13 17.5H8.5a2 2 0 0 1-2-2V11" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round"/></svg><span translate="no">python-multiplatform</span></a>
+    <button class="tool menu-toggle" id="menu-toggle" aria-expanded="false" aria-controls="site-nav"><span data-lang="en">Menu</span><span data-lang="ko">메뉴</span></button>
+    <nav class="nav" id="site-nav" aria-label="Primary">
+      <a href="index.html"><span data-lang="en">Home</span><span data-lang="ko">홈</span></a>
+      <a href="getting-started.html" aria-current="page"><span data-lang="en">Get started</span><span data-lang="ko">시작하기</span></a>
+      <a href="concepts.html"><span data-lang="en">Concepts</span><span data-lang="ko">개념</span></a>
+      <a href="guides.html"><span data-lang="en">Guides</span><span data-lang="ko">가이드</span></a>
+      <a href="ecosystem.html"><span data-lang="en">Ecosystem</span><span data-lang="ko">생태계</span></a>
+      <a href="status.html"><span data-lang="en">Status &amp; FAQ</span><span data-lang="ko">상태 · FAQ</span></a>
+    </nav>
+    <div class="tools">
+      <button class="tool" id="lang-toggle" type="button">한국어</button>
+      <button class="tool" id="theme-toggle" type="button" aria-label="Toggle colour theme">☀</button>
+    </div>
+  </div>
+</header>
+<div class="page-head"><div class="wrap">
+  <div class="eyebrow"><span data-lang="en">Getting started</span><span data-lang="ko">시작하기</span></div>
+  <h1><span data-lang="en">From clone to a running sample</span><span data-lang="ko">클론부터 샘플 실행까지</span></h1>
+  <p><span data-lang="en">No release is published yet, so you build from source. The sample app is the shortest path to seeing both directions work.</span><span data-lang="ko">아직 배포된 릴리스가 없으므로 소스에서 빌드한다. 두 방향이 동작하는 것을 보는 가장 짧은 길은 샘플 앱이다.</span></p>
+</div></div>
+<main><div class="wrap"><div class="prose">
+  <h2><span class="num">01</span><span data-lang="en">Requirements</span><span data-lang="ko">준비물</span></h2>
+  <ul>
+    <li><span data-lang="en">A JDK for Gradle, and Git.</span><span data-lang="ko">Gradle 용 JDK 와 Git.</span></li>
+    <li><span data-lang="en">The Android SDK (with <code>ANDROID_HOME</code> set) for Android targets.</span><span data-lang="ko">Android 타깃에는 Android SDK (<code>ANDROID_HOME</code> 설정).</span></li>
+    <li><span data-lang="en">macOS with Xcode for iOS targets.</span><span data-lang="ko">iOS 타깃에는 Xcode 가 있는 macOS.</span></li>
+  </ul>
+  <p><span data-lang="en">You do not install Python: Gradle downloads the CPython build for each platform, verifies it, and extracts it. The version is set by <code>pythonVersion</code> in <code>gradle.properties</code>.</span><span data-lang="ko">Python 을 설치하지 않는다. Gradle 이 플랫폼마다 CPython 빌드를 내려받아 검증하고 푼다. 버전은 <code>gradle.properties</code> 의 <code>pythonVersion</code> 으로 정한다.</span></p>
+
+  <h2><span class="num">02</span><span data-lang="en">Clone and run</span><span data-lang="ko">클론하고 실행하기</span></h2>
+  <pre translate="no"><code class="language-bash">git clone https://github.com/thisisthepy/python-multiplatform
+cd python-multiplatform
+./gradlew :sample:run</code></pre>
+  <p><span data-lang="en">The desktop sample starts CPython, publishes a Kotlin-built list into Python, evaluates an expression, and drives a Kotlin class from Python.</span><span data-lang="ko">데스크톱 샘플은 CPython 을 시작하고, Kotlin 에서 만든 리스트를 Python 에 게시하고, 식을 평가하고, Python 에서 Kotlin 클래스를 움직인다.</span></p>
+
+  <h2><span class="num">03</span><span data-lang="en">Your first call</span><span data-lang="ko">첫 호출</span></h2>
+  <pre translate="no"><code class="language-kotlin">import python.multiplatform.ffi.PyObject
+import python.multiplatform.ffi.Python3
+import python.multiplatform.ffi.types.basic.PyInt
+import python.multiplatform.ffi.types.collections.PyList
+
+fun main() {
+    Python3.initialize()
+
+    val numbers = PyList.fromList(listOf(2L, 3L, 5L, 7L, 11L).map { PyInt.from(it) })
+    Python3.import(&quot;__main__&quot;).setAttr(&quot;kotlin_numbers&quot;, numbers)
+
+    val globals = Python3.import(&quot;__main__&quot;).dict
+    val result: PyObject = Python3.eval(&quot;sum(kotlin_numbers) * 2&quot;, 258, globals, globals)
+    println(&quot;${result.Type.name}: $result&quot;)   // int: 56
+}</code></pre>
+  <div class="note"><p><span data-lang="en">There is no <code>close()</code> in that code, and none is missing: every wrapper releases its Python reference when the Kotlin object is collected.</span><span data-lang="ko">위 코드에는 <code>close()</code> 가 없고, 빠진 것도 아니다. 모든 래퍼는 Kotlin 객체가 수거될 때 Python 참조를 놓는다.</span></p></div>
+
+  <h2><span class="num">04</span><span data-lang="en">Verify a change</span><span data-lang="ko">변경 검증하기</span></h2>
+  <pre translate="no"><code class="language-bash">./gradlew :python-multiplatform:compileKotlinAndroidNativeArm64 --console=plain &gt; .tmp/build.log 2&gt;&amp;1; echo &quot;EXIT=$?&quot;
+./gradlew :python-multiplatform:desktopTest --rerun --console=plain &gt; .tmp/test.log 2&gt;&amp;1; echo &quot;EXIT=$?&quot;
+./gradlew :ksp-fixtures:app:desktopTest --rerun
+./gradlew :ksp-fixtures:compose:desktopTest --rerun
+./gradlew :ksp-fixtures:artifact:desktopTest --rerun</code></pre>
+  <p><span data-lang="en">Run the fixture modules one by one: a single invocation has hidden an ordering dependency before. Read exit codes from a file, never through a pipe.</span><span data-lang="ko">픽스처 모듈은 하나씩 따로 돌린다. 한 번에 돌리면 순서 의존성이 가려진 적이 있다. 종료 코드는 파이프가 아니라 파일에서 읽는다.</span></p>
+  <div class="pager"><a href="index.html">← <span data-lang="en">Home</span><span data-lang="ko">홈</span></a><a href="concepts.html"><span data-lang="en">Concepts</span><span data-lang="ko">개념</span> →</a></div>
+</div></div></main>
+<footer class="site-footer">
+  <div class="wrap">
+    <span><span data-lang="en">MIT licensed.</span><span data-lang="ko">MIT 라이선스.</span> <span translate="no">© 2024 thisisthepy</span></span>
+    <span><a href="https://github.com/thisisthepy/python-multiplatform">GitHub</a> · <a href="https://github.com/thisisthepy/python-multiplatform/blob/develop/docs/locale/README_ko.md"><span data-lang="en">Korean README</span><span data-lang="ko">한국어 README</span></a></span>
+  </div>
+</footer>
+</body>
+</html>

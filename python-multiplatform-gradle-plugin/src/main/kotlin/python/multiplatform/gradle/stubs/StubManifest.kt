@@ -1,7 +1,7 @@
 package python.multiplatform.gradle.stubs
 
 /**
- * `docs/pyi-generation-design.md` §5.3's manifest: which `pythonx` module wraps which Kotlin
+ * `docs/design/pyi-generation-design.md` §5.3's manifest: which `pythonx` module wraps which Kotlin
  * package, and which value classes may be written as their raw underlying primitive.
  *
  * **The manifest belongs to the Python package, not to this plugin.** §5.2 is the measurement that
@@ -10,7 +10,7 @@ package python.multiplatform.gradle.stubs
  * is `pythonx-compose`'s design decision, and hard-coding Compose's renames into a general-purpose
  * Gradle plugin would make every other library's mapping unreachable.
  *
- * §5.3 also gives `docs/kotlin-extensions-in-python.md` §6's open question ("whether the allowlist
+ * §5.3 also gives `docs/design/kotlin-extensions-in-python.md` §6's open question ("whether the allowlist
  * should be data or code, and where a downstream consumer adds to it") its answer: the same file,
  * in the same package, next to the code whose surface it describes.
  *
@@ -46,7 +46,7 @@ internal data class StubManifest(
     }
 
     /**
-     * `docs/pyi-generation-design.md` §6.1 measurement 2: deleting only `py.typed` made every
+     * `docs/design/pyi-generation-design.md` §6.1 measurement 2: deleting only `py.typed` made every
      * revealed type `Any`. The marker goes in the distribution's top-level *regular* package, which
      * for `pythonx-compose` is `pythonx/compose/` -- `pythonx` itself is a namespace package (§5.1)
      * and a marker there would be in the wrong directory.

@@ -4,7 +4,7 @@ package python.multiplatform.reflection
 /**
  * The GC root that lets Python hold a Kotlin object.
  *
- * `docs/object-lifetime.md` sketches the whole thing in four lines:
+ * `docs/design/object-lifetime.md` sketches the whole thing in four lines:
  *
  *     private val liveHandles = HashMap<Long, Any>()
  *     fun register(obj: Any): Long { val h = next++; liveHandles[h] = obj; return h }
@@ -43,7 +43,7 @@ package python.multiplatform.reflection
  * root, so a Python object reachable only through a Kotlin object reachable only from this
  * table never collects. That needs `tp_traverse` to reach through the handle
  * ([ReflectedClass.traverse]), and for the Kotlin-side case it needs this table to hold weakly
- * with the proxy supplying the strength -- which `docs/object-lifetime.md` records as not yet
+ * with the proxy supplying the strength -- which `docs/design/object-lifetime.md` records as not yet
  * worked through.
  *
  * ### Threading

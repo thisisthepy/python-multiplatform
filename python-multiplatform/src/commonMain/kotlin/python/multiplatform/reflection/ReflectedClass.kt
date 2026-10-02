@@ -34,8 +34,8 @@ enum class ReflectedClassKind {
  * cycle collection.
  *
  * KSP emits one of these per exposed class alongside the [ExposedCallable] entries for its
- * constructor, methods and accessors -- see `docs/upcall-table-design.md`, and for why
- * [traverse] exists at all, `docs/object-lifetime.md`'s "Cycle collection is part of the
+ * constructor, methods and accessors -- see `docs/design/upcall-table-design.md`, and for why
+ * [traverse] exists at all, `docs/design/object-lifetime.md`'s "Cycle collection is part of the
  * table's job".
  */
 class ReflectedClass(

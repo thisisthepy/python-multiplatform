@@ -37,7 +37,7 @@ import kotlin.test.assertTrue
  * ### Why this needs its own `@BeforeTest` rather than `ComposableRenderTest`'s
  *
  * `emptyModifier` and `androidx.compose.foundation.layout.size__Dp` are not composables and are not
- * reached through `pythonx` (`docs/pythonx-adapter-design.md`'s dynamic loader is for the
+ * reached through `pythonx` (`docs/design/pythonx-adapter-design.md`'s dynamic loader is for the
  * composable half of the surface). They come from the *other* producer,
  * `PythonProxySource` + `FunctionTable`, the route `WalkedArtifactComposeModifierTest` uses for the
  * identical seed in `ksp-fixtures/artifact`. Both producers run in the same test here --

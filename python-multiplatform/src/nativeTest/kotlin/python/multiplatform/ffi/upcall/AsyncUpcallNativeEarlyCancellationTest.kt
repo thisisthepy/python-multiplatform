@@ -25,7 +25,7 @@ import kotlin.test.assertTrue
  * `Future.cancel()` reaching `ensureActive()` before the call completes, through `_pm_cancel` --
  * but its observer thread is a `java.lang.Thread`. `_pm_cancel` itself has no JVM dependency: it
  * is a `PyMethodDef` `UpcallEntry.publish` installs identically on every native target
- * (`docs/upcall-async-design.md` §10.2's table lists `nativeMain` once, "iOS·androidNative
+ * (`docs/design/upcall-async-design.md` §10.2's table lists `nativeMain` once, "iOS·androidNative
  * 공용"). This is that path exercised with [NativeThread] standing in for the JVM thread, so the
  * `desktop` cell in §10.6's "확인하지 않은 것" list stops being the only one that says "measured".
  *

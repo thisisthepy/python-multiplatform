@@ -19,7 +19,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * **`Modifier.composed` admits a real composer**, settling `docs/pythonx-adapter-design.md` §9.2/§9.4's
+ * **`Modifier.composed` admits a real composer**, settling `docs/design/pythonx-adapter-design.md` §9.2/§9.4's
  * open question: "unverified whether `composed`'s own contract... admits a composer at all."
  * `fixture.compose.pythonComposed` (`PythonComposed.kt`) is the hand-written wrapper; this proves two
  * independent things about it, the way every other §9 render test in this module proves both a

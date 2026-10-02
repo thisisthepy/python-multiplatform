@@ -8,7 +8,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /**
- * `docs/pythonx-adapter-design.md` §5, measured against real Compose Multiplatform jars.
+ * `docs/design/pythonx-adapter-design.md` §5, measured against real Compose Multiplatform jars.
  *
  * ### What this test exists to pin
  *

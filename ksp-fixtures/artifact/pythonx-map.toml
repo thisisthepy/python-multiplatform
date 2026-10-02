@@ -1,4 +1,4 @@
-# docs/pyi-generation-design.md §5.3's manifest, standing in for the one that would ship inside
+# docs/design/pyi-generation-design.md §5.3's manifest, standing in for the one that would ship inside
 # `pythonx-compose`.
 #
 # It is here rather than in the plugin on purpose: which Kotlin package a `pythonx` module wraps is

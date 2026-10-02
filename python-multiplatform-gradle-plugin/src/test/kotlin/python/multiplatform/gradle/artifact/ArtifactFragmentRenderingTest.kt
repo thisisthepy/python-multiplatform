@@ -35,7 +35,7 @@ class ArtifactFragmentRenderingTest {
     )
 
     /** An extension, so that the rendered `isExtension`/`receiverTypeName` pair -- the fields
-     * `docs/pythonx-adapter-design.md` §4.2 needs and §2.4 records as lost -- appears in the pinned
+     * `docs/design/pythonx-adapter-design.md` §4.2 needs and §2.4 records as lost -- appears in the pinned
      * text rather than only in a scanner unit test. */
     private val trimIndent = ArtifactCallable(
         name = "kotlin.text.trimIndent",

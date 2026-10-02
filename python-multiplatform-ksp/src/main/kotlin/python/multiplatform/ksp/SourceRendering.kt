@@ -67,7 +67,7 @@ private fun renderClass(cls: ClassModel): String {
 /**
  * Renders one `Fragment_<module>.kt` file body -- what a library-role KSP invocation emits.
  *
- * The object is `public` rather than `internal` as `docs/upcall-table-design.md`'s sketch shows
+ * The object is `public` rather than `internal` as `docs/design/upcall-table-design.md`'s sketch shows
  * it: `internal` is enforced per Kotlin *module*, and the app module compiling generated source
  * that references a library's fragment is a different module by that rule even inside the same
  * Gradle build. An `internal` fragment fails to compile from the app side with "cannot access
@@ -110,7 +110,7 @@ fun renderFragmentSource(model: FragmentModel): String {
 
 /**
  * Renders `FunctionTable.kt` -- the app-role aggregator. [fragmentQualifiedNames] is the result
- * of fragment discovery (`docs/upcall-table-design.md` §2): every `Fragment_*` object this app
+ * of fragment discovery (`docs/design/upcall-table-design.md` §2): every `Fragment_*` object this app
  * module and its dependencies emitted, found via
  * [FragmentDiscovery][python.multiplatform.ksp.FragmentDiscovery] and referenced here
  * explicitly. That explicit reference is what keeps every fragment reachable to the Kotlin/Native

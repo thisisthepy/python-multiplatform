@@ -1,0 +1,21 @@
+# Only the benchmark's source and its recorded results are tracked. Everything below is either
+# installed (node_modules, Pods, gems), built (DerivedData, build/, .cxx), or a run log.
+node_modules/
+**/Pods/
+DerivedData/
+build/
+build-check/
+.gradle/
+.cxx/
+.kotlin/
+.caches/
+vendor/bundle/
+xcuserdata/
+.xcode.env.local
+local.properties
+*.log
+*.apk
+*.aab
+*.ipa
+*.jsbundle
+*.o

@@ -15,7 +15,7 @@ import kotlin.test.assertTrue
 
 /**
  * `pythonx` -- the hand-written adaptation layer -- doing the four things
- * `docs/pythonx-adapter-design.md` asks of it, against a table shaped like the walked Compose one.
+ * `docs/design/pythonx-adapter-design.md` asks of it, against a table shaped like the walked Compose one.
  *
  * The four are, in the order the design puts them:
  *
@@ -28,7 +28,7 @@ import kotlin.test.assertTrue
  * 3. **A Kotlin name and a Python name are converted by rule, forwards** (§3), with the index the
  *    forward conversion builds standing in for the "map of exceptions" §3 asks for -- which is what
  *    makes `toURLString` reachable at all.
- * 4. **Overloads are dispatched in Python** (`docs/kotlin-extensions-in-python.md` §3.1: "this
+ * 4. **Overloads are dispatched in Python** (`docs/design/kotlin-extensions-in-python.md` §3.1: "this
  *    layer's job is to make that choice *possible*, not to make it").
  *
  * ### Why the assertions read the Kotlin side
@@ -247,7 +247,7 @@ class PythonxAdapterTest {
 
     /**
      * The dispatcher on keyword **names**, which is the half that needs `ExposedCallable.paramNames`
-     * -- `docs/pythonx-adapter-design.md` §2.4 called the absence of those names "arithmetic", and
+     * -- `docs/design/pythonx-adapter-design.md` §2.4 called the absence of those names "arithmetic", and
      * this is the arithmetic working.
      *
      * `horizontal=`/`vertical=` selects the two-`Dp` overload even though `padding(m, 8, 4)` would
@@ -317,12 +317,12 @@ class PythonxAdapterTest {
     }
 
     /**
-     * `docs/kotlin-extensions-in-python.md` §4.1, running: an extension is a method on its
+     * `docs/design/kotlin-extensions-in-python.md` §4.1, running: an extension is a method on its
      * receiver's proxy, and because every one of them returns the receiver type, the chain is
      * ordinary Python method chaining with no combinator machinery.
      *
      * Both spellings of `Modifier` are exercised. The class object works through the hybrid
-     * descriptor `docs/pyi-generation-design.md` §4.3 measured (a metaclass `def` loses to the
+     * descriptor `docs/design/pyi-generation-design.md` §4.3 measured (a metaclass `def` loses to the
      * class's own MRO); the instance spelling is the ordinary one.
      */
     @Test
@@ -372,7 +372,7 @@ class PythonxAdapterTest {
     }
 
     /**
-     * `docs/kotlin-extensions-in-python.md` §4.4's asymmetry, deliberately kept.
+     * `docs/design/kotlin-extensions-in-python.md` §4.4's asymmetry, deliberately kept.
      *
      * `Dp` is on the allowlist so `padding(16)` is fine. `TextUnit` is not, and it is not an
      * ergonomic preference: a raw `16` reaching a `TextUnit` decodes as `Unspecified` and renders

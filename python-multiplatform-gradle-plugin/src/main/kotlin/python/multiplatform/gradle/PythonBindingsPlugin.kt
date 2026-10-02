@@ -76,7 +76,7 @@ internal fun isBindingKspConfiguration(name: String, isMultiplatform: Boolean): 
 /**
  * The module name the generated fragment object is named after.
  *
- * Every fragment in every artifact lands in one package (`docs/upcall-table-design.md` §1), so
+ * Every fragment in every artifact lands in one package (`docs/design/upcall-table-design.md` §1), so
  * the name has to be unique across artifacts, not just within a build -- two independent
  * libraries both called `:core` would otherwise emit the same object into the same package. The
  * Maven group is what already carries that uniqueness, so it goes in front.
@@ -151,7 +151,7 @@ interface PythonBindingsExtension {
 
     /**
      * Package or class names to bind out of the artefacts this build **resolves**, rather than out
-     * of the source it compiles -- `docs/ecosystem.md` §5b's second producer.
+     * of the source it compiles -- `docs/design/ecosystem.md` §5b's second producer.
      *
      * KSP only ever sees declarations being compiled, so a third-party binary can never carry a
      * fragment. Setting this (together with [artifactConfiguration] and [artifactSourceSet])
@@ -197,7 +197,7 @@ interface PythonBindingsExtension {
     val artifactTargets: MapProperty<String, String>
 
     /**
-     * Whether to emit `.pyi` stubs for the walked artefacts -- `docs/pyi-generation-design.md`.
+     * Whether to emit `.pyi` stubs for the walked artefacts -- `docs/design/pyi-generation-design.md`.
      *
      * Defaults to true wherever the walker itself is registered, and is a no-op everywhere else:
      * nothing is enumerable to stub until there is something to stub *from*. The output is
@@ -301,7 +301,7 @@ class PythonBindingsPlugin : Plugin<Project> {
     }
 
     /**
-     * Registers the artefact walker -- `docs/ecosystem.md` §5b's second producer -- when a consumer
+     * Registers the artefact walker -- `docs/design/ecosystem.md` §5b's second producer -- when a consumer
      * has asked for one.
      *
      * A no-op unless all three of [PythonBindingsExtension.artifactIncludePackages],
@@ -474,7 +474,7 @@ class PythonBindingsPlugin : Plugin<Project> {
     }
 
     /**
-     * Registers `generatePythonStubs` -- `docs/pyi-generation-design.md`'s generator.
+     * Registers `generatePythonStubs` -- `docs/design/pyi-generation-design.md`'s generator.
      *
      * Hooked onto `prepareKotlinIdeaImport` the way PyREPL hooked its own generator (§1.4 keeps that
      * row): it is the one step that makes the stubs exist before the IDE indexes, and it costs one

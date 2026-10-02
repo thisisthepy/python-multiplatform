@@ -1,0 +1,19 @@
+=== conditions ===
+platform:         ios
+timestamp:        2026-08-14T18:35:54+0900
+host:             Darwin 25.5.0 arm64, 8 cores, 16 GB
+load average:     2.83 2.00 1.67   (before the run)
+react-native:     0.87.0
+hermes:           reported by the app itself -- see the 'engine:' line in the report below
+harness digest:   2ae233168010   (rn-benchmark is not a git repository)
+reference repo:   /Volumes/macMini/thisisthepy/PythonMultiplatform @ b393b7d7
+counts:           warmup 100000, 10000 iterations per timed loop, 5 repetitions per row
+                  convergence sweep: 40 repetitions x 10000, cold
+simulator:        iPhone 17 Pro (7A6CE089-C7B3-494D-A9EA-045EA3502E98) (Booted)    [runtime: iOS 26.2]
+xcode:            Xcode 26.6 Build version 17F113 
+app:              /Volumes/macMini/rn-benchmark/DerivedData/Build/Products/Release-iphonesimulator/RNBench.app
+
+bundle id:        org.reactjs.native.example.RNBench  (read from the installed app)
+Filtering the log data using "composedMessage CONTAINS "RNBENCH|""
+
+load average after: 1.05 1.29 1.46

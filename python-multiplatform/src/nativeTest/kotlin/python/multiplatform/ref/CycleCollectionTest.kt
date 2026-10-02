@@ -590,7 +590,7 @@ class CycleCollectionTest {
     }
 
     /**
-     * `ROADMAP.md` §7's remaining gap on this source set, and what every test above does not
+     * `docs/roadmap/ROADMAP.md` §7's remaining gap on this source set, and what every test above does not
      * cover: not whether the collector can reach through a handle *Kotlin* poked into
      * `PyObject_GetTypeData` by hand (every test above does exactly that), but whether a plain
      * Python attribute assignment -- `self._pm_handle = h`, the line a generated proxy's

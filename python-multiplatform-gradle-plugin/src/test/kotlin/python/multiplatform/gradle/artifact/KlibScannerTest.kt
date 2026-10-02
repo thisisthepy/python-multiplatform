@@ -35,7 +35,7 @@ class KlibScannerTest {
     /**
      * `kotlin-stdlib`'s own klib, staged by the Kotlin/Native distribution this build already pins
      * (`kotlin-compiler-embeddable:2.0.20` here; the `.konan` prebuilt toolchain is the matching
-     * version). `~/.konan` is this workspace's own symlink onto external storage -- CLAUDE.md's
+     * version). `~/.konan` is this workspace's own symlink onto external storage -- AGENTS.md's
      * "캐시 ... 홈에서 심볼릭 링크" -- so this path is host-relative, not hardcoded to a volume.
      *
      * Guarded rather than asserted: a machine that has never run a Kotlin/Native build has no
@@ -180,7 +180,7 @@ class KlibScannerTest {
     // ------------------------------------------------------------------- the declaration model half
 
     /**
-     * `docs/pyi-generation-design.md` §2.2's "what is declined stays visible", for the klib producer.
+     * `docs/design/pyi-generation-design.md` §2.2's "what is declined stays visible", for the klib producer.
      *
      * Before this, [KlibScanner] dropped an extension, a `suspend` or an unbindable-typed declaration
      * at a `filter`, so nothing downstream could say it had ever been seen. `kotlin.math` is the case

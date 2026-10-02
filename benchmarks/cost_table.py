@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Cuts the cost tables in `docs/cost-table.md` for every target, in one command.
+Cuts the cost tables in `docs/investigations/cost-table.md` for every target, in one command.
 
 Why this exists
 ---------------
@@ -53,7 +53,7 @@ from typing import Any
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESULTS_DIR = os.path.join(REPO, "benchmarks", "results")
-DOC = os.path.join(REPO, "docs", "cost-table.md")
+DOC = os.path.join(REPO, "docs", "investigations", "cost-table.md")
 MARK_BEGIN = "<!-- COST-TABLE:GENERATED BEGIN -- everything between these markers is written by benchmarks/cost_table.py; edit the script, not this -->"
 MARK_END = "<!-- COST-TABLE:GENERATED END -->"
 

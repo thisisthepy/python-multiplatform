@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Guides · python-multiplatform</title>
+<meta name="description" content="Real CPython inside Kotlin Multiplatform: Kotlin calls Python, Python calls Kotlin, on every target.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&amp;family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/site.js"></script>
+</head>
+<body>
+<span hidden data-title-en="Guides · python-multiplatform" data-title-ko="가이드 · python-multiplatform"></span>
+<header class="site-header">
+  <div class="wrap bar">
+    <a class="brand" href="index.html"><svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="2" width="9" height="9" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="13" width="9" height="9" rx="2.5" fill="var(--accent)"/><path d="M11 6.5h4.5a2 2 0 0 1 2 2V13M13 17.5H8.5a2 2 0 0 1-2-2V11" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round"/></svg><span translate="no">python-multiplatform</span></a>
+    <button class="tool menu-toggle" id="menu-toggle" aria-expanded="false" aria-controls="site-nav"><span data-lang="en">Menu</span><span data-lang="ko">메뉴</span></button>
+    <nav class="nav" id="site-nav" aria-label="Primary">
+      <a href="index.html"><span data-lang="en">Home</span><span data-lang="ko">홈</span></a>
+      <a href="getting-started.html"><span data-lang="en">Get started</span><span data-lang="ko">시작하기</span></a>
+      <a href="concepts.html"><span data-lang="en">Concepts</span><span data-lang="ko">개념</span></a>
+      <a href="guides.html" aria-current="page"><span data-lang="en">Guides</span><span data-lang="ko">가이드</span></a>
+      <a href="ecosystem.html"><span data-lang="en">Ecosystem</span><span data-lang="ko">생태계</span></a>
+      <a href="status.html"><span data-lang="en">Status &amp; FAQ</span><span data-lang="ko">상태 · FAQ</span></a>
+    </nav>
+    <div class="tools">
+      <button class="tool" id="lang-toggle" type="button">한국어</button>
+      <button class="tool" id="theme-toggle" type="button" aria-label="Toggle colour theme">☀</button>
+    </div>
+  </div>
+</header>
+<div class="page-head"><div class="wrap">
+  <div class="eyebrow"><span data-lang="en">Guides</span><span data-lang="ko">가이드</span></div>
+  <h1><span data-lang="en">Task by task</span><span data-lang="ko">작업별로</span></h1>
+  <p><span data-lang="en">Each guide follows one item of the specification and points to the tests that hold it in place.</span><span data-lang="ko">각 가이드는 스펙의 한 항목을 따라가며, 그것을 붙잡고 있는 테스트를 가리킨다.</span></p>
+</div></div>
+<main><div class="wrap">
+  <div class="grid">
+    <a class="card" href="guide-kotlin-to-python.html"><h3><span data-lang="en">Use Python from Kotlin</span><span data-lang="ko">Kotlin 에서 Python 쓰기</span></h3><p><span data-lang="en">Start the interpreter, exchange values, handle Python errors.</span><span data-lang="ko">인터프리터 시작, 값 주고받기, Python 오류 처리.</span></p></a>
+    <a class="card" href="guide-python-to-kotlin.html"><h3><span data-lang="en">Use Kotlin from Python</span><span data-lang="ko">Python 에서 Kotlin 쓰기</span></h3><p><span data-lang="en">Expose classes, properties and <code>suspend</code> functions.</span><span data-lang="ko">클래스, 프로퍼티, <code>suspend</code> 함수 노출.</span></p></a>
+    <a class="card" href="guide-binding-libraries.html"><h3><span data-lang="en">Bind a prebuilt library</span><span data-lang="ko">빌드된 라이브러리 바인딩</span></h3><p><span data-lang="en">Walk jars, generate stubs, call Compose from Python.</span><span data-lang="ko">jar 훑기, 스텁 생성, Python 에서 Compose 부르기.</span></p></a>
+    <a class="card" href="guide-platforms.html"><h3><span data-lang="en">Set up each platform</span><span data-lang="ko">플랫폼별 준비</span></h3><p><span data-lang="en">Desktop <code>PYTHONHOME</code>, Android bootstrap, iOS, wasm.</span><span data-lang="ko">데스크톱 <code>PYTHONHOME</code>, Android 부트스트랩, iOS, wasm.</span></p></a>
+  </div>
+</div></main>
+<footer class="site-footer">
+  <div class="wrap">
+    <span><span data-lang="en">MIT licensed.</span><span data-lang="ko">MIT 라이선스.</span> <span translate="no">© 2024 thisisthepy</span></span>
+    <span><a href="https://github.com/thisisthepy/python-multiplatform">GitHub</a> · <a href="https://github.com/thisisthepy/python-multiplatform/blob/develop/docs/locale/README_ko.md"><span data-lang="en">Korean README</span><span data-lang="ko">한국어 README</span></a></span>
+  </div>
+</footer>
+</body>
+</html>

@@ -29,7 +29,7 @@ The build extracts the stdlib from the BeeWare support archive into `build/pytho
 the simulator *test* task points `SIMCTL_CHILD_PYTHONHOME` at it directly (`simctl` only forwards
 environment variables prefixed `SIMCTL_CHILD_`, which is what makes the test binary see it at
 all). That path is still under this repo's workspace, which lives on an external volume (see
-CLAUDE.md) — fine for the test binary, which `simctl` launches with fewer sandbox restrictions
+AGENTS.md) — fine for the test binary, which `simctl` launches with fewer sandbox restrictions
 than an *installed app*, but exactly the shape that hangs an app rather than starting it. An app
 needs its stdlib staged **inside its own bundle or installed container**, with `PYTHONHOME`
 pointed at that installed path, not at the workspace — see the reproduction recipe in ROADMAP for

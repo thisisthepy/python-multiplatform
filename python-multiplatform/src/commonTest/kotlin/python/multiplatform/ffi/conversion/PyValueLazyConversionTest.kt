@@ -30,7 +30,7 @@ import kotlin.time.TimeSource
  * used to end in `cachedNativeValue!!`.
  *
  * The assertions are grouped by the per-type lifetime rule they pin down
- * (`docs/object-lifetime.md`, "Conversion caching, and where it stops"):
+ * (`docs/design/object-lifetime.md`, "Conversion caching, and where it stops"):
  *
  * - a converted value that shares nothing with CPython may be cached, and
  *   must stay readable after its source is released;
@@ -283,7 +283,7 @@ class PyValueLazyConversionTest {
      * A subclass of a builtin therefore has no native counterpart even though
      * its base does, and so does `complex`, which has a wrapper class but no
      * entry in either dispatch. Asserted rather than assumed, because the
-     * per-type table in `docs/object-lifetime.md` claims it.
+     * per-type table in `docs/design/object-lifetime.md` claims it.
      */
     @Test
     fun exactTypeDispatchLeavesBuiltinSubclassesAndComplexWithoutACounterpart() = PythonTestFixture.withInterpreter {

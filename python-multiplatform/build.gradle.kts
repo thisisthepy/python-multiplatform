@@ -880,7 +880,7 @@ val generateWasmProxyExports = tasks.register<GenerateWasmProxyExportsTask>("gen
 kotlin {
     // ROADMAP §10. The target is a leaf directly under `commonMain` -- deliberately not under an
     // intermediate source set, because `EmbedAPI.kt`'s `expect inline fun`s crash the compiler when
-    // combined with an intermediate `expect`/`actual` (see docs/architecture.md).
+    // combined with an intermediate `expect`/`actual` (see docs/design/architecture.md).
     //
     // `nodejs()` carries the suite: the tests have to drive a real CPython Emscripten build, and
     // Node can load `python.wasm` off the filesystem with no webpack step to fight.
@@ -894,8 +894,8 @@ kotlin {
     //
     // What makes this target able to reach CPython at all is that Kotlin 2.4.20-Beta2 *imports* its
     // linear memory (`intrinsics.memory`) instead of defining one. Emscripten's memory is handed in
-    // there, so a `PyObject*` is an address Kotlin can dereference directly. See docs/wasm-design.md
-    // and `wasm-experiment/`.
+    // there, so a `PyObject*` is an address Kotlin can dereference directly. See docs/platforms/wasm-design.md
+    // and src/wasmJsMain/README.md.
     @OptIn(org.jetbrains.kotlin.gradle.targets.js.dsl.ExperimentalWasmDsl::class)
     wasmJs {
         nodejs()
@@ -1340,7 +1340,7 @@ tasks.withType<org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeSimu
 // build machine, `KotlinNativeSimulatorTest` for simctl. An Android device is neither, so the
 // whole of `commonTest` compiled for this target on every build and had never once been executed.
 //
-// That gap is visible in docs/upcall-design.md: the five-platform upcall table has an empty
+// That gap is visible in docs/design/upcall-design.md: the five-platform upcall table has an empty
 // androidNative row, and `537c1a0b` says it was left empty rather than estimated. It is also the
 // exact situation ROADMAP §11b was in for Android/ART, where attaching the suite to a target that
 // had only ever compiled it surfaced two real defects in the first twelve tests.
@@ -1360,7 +1360,7 @@ tasks.withType<org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeSimu
 //   4. **Results in the same shape as every other target.** The Kotlin/Native runner's TeamCity
 //      logger is the only machine-readable output it has, so its service messages are parsed back
 //      into JUnit XML under `build/test-results/androidNative<Abi>Test/`. That is the directory
-//      CLAUDE.md says to count, and counting it is only trustworthy if a *crashed* run is
+//      AGENTS.md says to count, and counting it is only trustworthy if a *crashed* run is
 //      distinguishable from a clean one -- so a `testStarted` with no `testFinished` is written
 //      out as a failure naming the exit code, rather than silently dropped. A native suite that
 //      dies takes the rest of the run with it, and the difference between "212 passed" and "212
@@ -1671,7 +1671,7 @@ listOf("Arm64" to "arm64-v8a", "X64" to "x86_64").forEach { (targetSuffix, abi) 
             val binary = testBinary
             if (!binary.isFile) throw GradleException("Test binary not found at $binary")
 
-            // CLAUDE.md: results are counted out of this directory, and a crashed run that leaves
+            // AGENTS.md: results are counted out of this directory, and a crashed run that leaves
             // the previous run's XML behind gets counted as the previous run.
             resultsRoot.get().asFile.deleteRecursively()
 
@@ -1776,16 +1776,35 @@ listOf("Arm64" to "arm64-v8a", "X64" to "x86_64").forEach { (targetSuffix, abi) 
 // Ordering comes free from ES modules: the import-object module imports `cpython.mjs`, which has a
 // top-level `await`, so Emscripten is fully instantiated before the import object is built.
 //
-// The CPython build itself is not produced here. It is `/Volumes/macMini/wasm-build/
-// build-cpython-abi.sh` -- CPython 3.14.2 matched to `pyemscripten_2026_0` (PEP 783), relinked with
-// `wasmExports,wasmMemory` added to `-sEXPORTED_RUNTIME_METHODS`. Without those two the 8287 wasm
-// exports are present in the binary but unreachable from JS, so there is nothing to hand
-// `@WasmImport`; neither appears in PEP 783's ABI-sensitive list.
+// The CPython build itself is produced by `tools/wasm/build-cpython.sh` (also reachable as the
+// `buildWasmPython` task below) -- CPython 3.14.2 matched to `pyemscripten_2026_0` (PEP 783),
+// relinked with `wasmExports,wasmMemory` added to `-sEXPORTED_RUNTIME_METHODS`. Without those two the
+// 8287 wasm exports are present in the binary but unreachable from JS, so there is nothing to hand
+// `@WasmImport`; neither appears in PEP 783's ABI-sensitive list. Unlike every other platform's
+// CPython this is a build, not a download: no distributor ships a python.wasm with those exports.
+//
+// The script stages `python.wasm`, `python.mjs` and the stdlib zip into `<repo>/.caches/wasm-runtime`
+// -- the same three files an unpacked `python-multiplatform-wasm-runtime` zip holds -- and that is
+// the default here. It used to be an absolute path outside the repository; when that directory was
+// moved, every wasm task on every checkout silently skipped.
 // =================================================================================================
 
 val wasmPythonDir: String = (project.findProperty("wasmPythonDir")?.toString()
     ?: System.getenv("PMP_PYTHON_DIR")
-    ?: "/Volumes/macMini/wasm-build/cpython314-abi/cross-build/wasm32-emscripten/build/python")
+    ?: rootProject.layout.projectDirectory.dir(".caches/wasm-runtime").asFile.absolutePath)
+
+/**
+ * Builds the CPython Emscripten runtime into `.caches/` and stages it at the default
+ * [wasmPythonDir]. Long (a full CPython cross build) and needs network the first time (emsdk 5.0.3
+ * and the CPython 3.14.2 checkout), so nothing depends on it: the wasm tasks keep their
+ * skip-with-a-message contract when it has not been run.
+ */
+val buildWasmPython by tasks.registering(Exec::class) {
+    group = "python"
+    description = "Builds CPython 3.14.2 for wasm32-emscripten (pyemscripten_2026_0) into .caches/"
+    val script = rootProject.layout.projectDirectory.file("tools/wasm/build-cpython.sh").asFile
+    commandLine("bash", script.absolutePath, "all")
+}
 
 /**
  * The generated `cpython-config.mjs` that `cpython.mjs` imports.
@@ -1844,8 +1863,8 @@ fun Task.wasmRuntimePresent(marker: File): Boolean {
     if (marker.isFile) return true
     val remedy = "Unpack the published runtime " +
         "(io.github.thisisthepy:python-multiplatform-wasm-runtime:$libraryVersion) and point " +
-        "-PwasmPythonDir / PMP_PYTHON_DIR at it, or build one with " +
-        "/Volumes/macMini/wasm-build/build-cpython-abi.sh."
+        "-PwasmPythonDir / PMP_PYTHON_DIR at it, or build one into the default location with " +
+        "./gradlew :python-multiplatform:buildWasmPython (tools/wasm/build-cpython.sh)."
     val what = "$name: no CPython Emscripten build at ${marker.parentFile} " +
         "(looked for ${marker.name})."
     if (requireWasmRuntime) {
@@ -2002,7 +2021,7 @@ fun patchKotlinWasmOutputForCPython(dir: File, modulePrefix: String, logger: org
             throw GradleException(
                 "${importObject.name} has no `intrinsics.memory` placeholder to replace. Kotlin used " +
                     "to emit `new WebAssembly.Memory({ initial: 0 })` there; if that changed, " +
-                    "docs/wasm-design.md's integration step needs revisiting."
+                    "docs/platforms/wasm-design.md's integration step needs revisiting."
             )
         }
     } else {

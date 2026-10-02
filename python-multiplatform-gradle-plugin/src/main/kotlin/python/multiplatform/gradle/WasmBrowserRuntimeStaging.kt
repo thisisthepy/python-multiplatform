@@ -25,7 +25,7 @@ import javax.inject.Inject
  * exists only inside this repository's checkout. An external consumer has no such directory and no
  * way to get one -- the CPython build it names is produced by hand-patching CPython's own source
  * (`Lib/sysconfig`, the generated `Makefile`) against a specific Emscripten SDK version, which is
- * not something any upstream publishes yet. See `build-cpython-abi.sh`'s own header for why: PEP
+ * not something any upstream publishes yet. See `tools/wasm/build-cpython.sh`'s own header for why: PEP
  * 783's `pyemscripten_2026_0` tag is real and accepted, but nothing ships a `python.wasm` whose
  * `EXPORTED_RUNTIME_METHODS` include `wasmExports`/`wasmMemory` -- that addition exists only so this
  * library's `@WasmImport` declarations have something to bind to, and no distributor has a reason to
@@ -125,7 +125,7 @@ internal fun patchWasmOutputForCPython(dir: File, modulePrefix: String, logger: 
     } else if (!text.contains("memory: $ns.wasmMemory")) {
         throw GradleException(
             "${importObject.name} has no `intrinsics.memory` placeholder to replace and is not " +
-                "already patched. See docs/wasm-design.md's integration step."
+                "already patched. See docs/platforms/wasm-design.md's integration step."
         )
     }
 

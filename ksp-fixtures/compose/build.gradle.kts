@@ -2,7 +2,7 @@ import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 /**
- * The other end of `docs/pythonx-adapter-design.md` §5: a real `@Composable`, called from Python,
+ * The other end of `docs/design/pythonx-adapter-design.md` §5: a real `@Composable`, called from Python,
  * inside a real composition, drawing a real pixel.
  *
  * ### Why this is not `:ksp-fixtures:artifact`

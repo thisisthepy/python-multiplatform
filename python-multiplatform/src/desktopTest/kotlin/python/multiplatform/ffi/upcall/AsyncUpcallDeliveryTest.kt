@@ -27,7 +27,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * The delivery half of `docs/upcall-async-design.md` §5: candidate (C) as the surface Python sees,
+ * The delivery half of `docs/design/upcall-async-design.md` §5: candidate (C) as the surface Python sees,
  * candidate (B) as the mechanism underneath it.
  *
  * `PendingCallTest` already pins the half that starts the coroutine, and `AsyncCompletionProbeTest`
@@ -56,7 +56,7 @@ import kotlin.test.assertTrue
  * the shape the generated Python proxy has to have, and it is what makes the fast path free:
  * `await kotlin_fn(x)` costs a `Future` only when the Kotlin body actually suspended. It is written
  * out here rather than generated because Python-side module generation does not exist yet
- * (`docs/upcall-async-design.md` §6, "Python 쪽 프록시가 `await` 를 이해하는 것").
+ * (`docs/design/upcall-async-design.md` §6, "Python 쪽 프록시가 `await` 를 이해하는 것").
  */
 class AsyncUpcallDeliveryTest {
 
@@ -92,7 +92,7 @@ class AsyncUpcallDeliveryTest {
         PythonTestFixture.withInterpreter {
             // No event loop is running on this thread, and that is the point: if the boundary
             // reached `asyncio.get_running_loop()` for a body that had already finished, this
-            // would raise instead of answering. `docs/upcall-async-design.md` §5 -- `suspend` is a
+            // would raise instead of answering. `docs/design/upcall-async-design.md` §5 -- `suspend` is a
             // signature, not a promise to suspend, and the common case must not pay for one.
             val raw = UpcallTrampoline.invoke(UpcallTable.resolve("async.doubleNow").raw, tuple("(21,)"))
             assertNotEquals(0L, raw, "the fast path returned NULL; a Python error was set instead of a value")

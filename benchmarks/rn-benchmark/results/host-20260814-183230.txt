@@ -1,0 +1,119 @@
+=== conditions ===
+platform:         host (no device: JS engine floor and the warmup sweep only)
+timestamp:        2026-08-14T18:32:30+0900
+host:             Darwin 25.5.0 arm64, 8 cores, 16 GB
+load average:     1.62 1.38 1.42   (before the run)
+react-native:     0.87.0
+hermes:           reported by the app itself -- see the 'engine:' line in the report below
+harness digest:   2ae233168010   (rn-benchmark is not a git repository)
+reference repo:   /Volumes/macMini/thisisthepy/PythonMultiplatform @ b393b7d7
+counts:           warmup 100000, 10000 iterations per timed loop, 5 repetitions per row
+                  convergence sweep: 40 repetitions x 10000, cold
+
+/var/folders/_5/4d4g39c14rs42vnbblvl9j580000gn/T/rnbench-hermes.vBIAdxc7xJ.js:45:16: warning: the variable "performance" was not declared in function "makeClock"
+    if (typeof performance !== 'undefined' && performance && typeof performance.now === 'function') {
+               ^~~~~~~~~~~
+/var/folders/_5/4d4g39c14rs42vnbblvl9j580000gn/T/rnbench-hermes.vBIAdxc7xJ.js:470:7: warning: the variable "console" was not declared in function "say"
+      console.log(line);
+      ^~~~~~~
+/var/folders/_5/4d4g39c14rs42vnbblvl9j580000gn/T/rnbench-hermes.vBIAdxc7xJ.js:485:16: warning: the variable "process" was not declared in function "engineName"
+    if (typeof process !== 'undefined' && process.versions && process.versions.v8) {
+               ^~~~~~~
+
+=== RN boundary benchmark: host-side JS rows ===
+engine:     Hermes 0.12.0
+clock:      Date.now (assumed resolution 1000000 ns)
+reps:       5 per row, min-max reported, nothing discarded
+
+This run contains no native boundary. It fixes the JS-side floor and the warmup count.
+
+--- convergence sweep: "JS call, same shape as addInts" ---
+iterations per repetition: 8192000, repetitions: 40, warmup before the first: none
+  32.47  32.35  32.59  32.71  32.47  32.59  32.35  32.59
+  32.23  32.35  32.71  32.59  32.47  32.71  35.03  32.59
+  32.71  32.47  32.59  32.71  32.84  32.71  32.59  32.71
+  32.71  32.47  32.59  32.35  32.47  32.59  32.71  32.71
+  33.08  32.47  32.84  32.71  32.47  32.71  32.59  38.57
+
+  first repetition:        32.47 ns/op
+  second half, min-max:    32.35 - 38.57 ns/op
+  first / second-half min: 1.00x
+  NEVER SETTLED within +/-5% over 40 repetitions on this engine.
+
+  A ratio near 1.00x means this engine has no tier-up to warm and a large warmup buys
+  nothing. A ratio well above 1 means it does, and the repetition at which the series
+  settles multiplied by the iteration count is the warmup the boundary rows need.
+
+--- the same sweep, but after 81920000 calls of warmup ---
+  32.47  32.84  32.59  32.71  32.71  32.71  33.08  32.84
+  32.84  33.20  32.71  32.84  32.59  32.71  33.20  32.59
+  32.71  33.08  32.47  32.71  33.08  32.59  32.71  32.84
+  32.71  32.96  32.84  32.71  32.84  32.71  32.71  32.96
+  32.71  32.84  32.71  32.71  32.84  32.59  32.59  32.96
+
+  warm first repetition:   32.47 ns/op
+  warm, min-max overall:   32.47 - 33.20 ns/op
+
+--- JS-only rows (no boundary anywhere in them) ---
+row                                                                 |    min ns/op |    max ns/op | reps
+------------------------------------------------------------------------------------------------------
+empty JS loop (the loop itself)  [n=32768000, warmup=1000000]       |        13.37 |        14.80 | 5
+JS call, same shape as addInts  [n=8192000, warmup=1000000]         |        32.10 |        32.47 | 5
+JS call returning a string arg  [n=8192000, warmup=1000000]         |        29.42 |        30.52 | 5
+JS sum of an 8-element array  [n=2048000, warmup=1000000]           |       160.16 |       163.09 | 5
+JS sum of a 1000-element array  [n=16000, warmup=100000]            |     13875.01 |     14312.50 | 5
+JS sum of a 3-key object  [n=8192000, warmup=1000000]               |        39.18 |        40.28 | 5
+JS string of 128 chars, built per call  [n=4096000, warmup=1000000] |        65.43 |        65.43 | 5
+
+sink (proves no row was eliminated): 135
+
+
+=== RN boundary benchmark: host-side JS rows ===
+engine:     Node 24.19.0 / V8 13.6.233.17-node.51
+clock:      performance.now (assumed resolution 1000 ns)
+reps:       5 per row, min-max reported, nothing discarded
+
+This run contains no native boundary. It fixes the JS-side floor and the warmup count.
+
+--- convergence sweep: "JS call, same shape as addInts" ---
+iterations per repetition: 4000, repetitions: 40, warmup before the first: none
+  17.82  15.29  802.69  14.43  9.86  9.81  9.82  9.82
+  9.81  9.91  9.94  9.80  9.88  9.85  9.82  9.79
+  11.77  9.85  9.82  9.81  9.80  9.80  11.02  9.90
+  9.79  9.85  9.88  9.85  11.70  9.97  9.83  10.03
+  9.81  9.89  9.81  9.79  9.84  9.82  11.10  9.89
+
+  first repetition:        17.82 ns/op
+  second half, min-max:    9.79 - 11.70 ns/op
+  first / second-half min: 1.82x
+  flat (within +/-5%) from: 156000 calls; a warmup of 100000 has 0.64x margin
+
+  A ratio near 1.00x means this engine has no tier-up to warm and a large warmup buys
+  nothing. A ratio well above 1 means it does, and the repetition at which the series
+  settles multiplied by the iteration count is the warmup the boundary rows need.
+
+--- the same sweep, but after 40000 calls of warmup ---
+  11.13  9.80  9.80  10.84  18.76  9.93  10.51  9.79
+  10.49  9.85  10.00  19.34  9.95  9.84  9.81  9.85
+  9.83  14.42  9.85  9.79  9.85  9.80  9.94  17.67
+  9.84  9.84  9.78  9.89  9.80  11.51  10.10  9.85
+  9.81  9.91  11.06  22.78  15.31  9.86  9.80  9.81
+
+  warm first repetition:   11.13 ns/op
+  warm, min-max overall:   9.78 - 22.78 ns/op
+
+--- JS-only rows (no boundary anywhere in them) ---
+row                                                             |    min ns/op |    max ns/op | reps
+--------------------------------------------------------------------------------------------------
+empty JS loop (the loop itself)  [n=16000, warmup=100000]       |        10.12 |        13.67 | 5
+JS call, same shape as addInts  [n=64000, warmup=100000]        |        10.08 |        10.42 | 5
+JS call returning a string arg  [n=4000, warmup=100000]         |         3.72 |         4.31 | 5
+JS sum of an 8-element array  [n=4000, warmup=100000]           |         6.36 |         6.73 | 5
+JS sum of a 1000-element array  [n=4000, warmup=100000]         |       588.86 |       592.10 | 5
+JS sum of a 3-key object  [n=4000, warmup=100000]               |         4.01 |         4.03 | 5
+JS string of 128 chars, built per call  [n=4000, warmup=100000] |        13.02 |        13.09 | 5
+
+sink (proves no row was eliminated): 132
+
+
+load average after: 1.65 1.42 1.43

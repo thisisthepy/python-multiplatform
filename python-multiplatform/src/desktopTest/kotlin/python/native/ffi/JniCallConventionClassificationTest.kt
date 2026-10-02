@@ -18,7 +18,7 @@ import kotlin.test.fail
  * ordinary costs 6-41 ns (`androidMain/README.md`); guessing wrong the other way is a crash, on a
  * device, once upcalls are live.
  *
- * Why this is a test and not a document: `docs/jni-call-convention-audit.md` classified 71
+ * Why this is a test and not a document: `docs/investigations/jni-call-convention-audit.md` classified 71
  * registrations, its own *Resolution* section re-read the table at 187, and the table this test
  * parses today holds a different number again. A hand-maintained classification is stale from the
  * next commit onward, and staleness in this particular table is invisible until it is a crash.

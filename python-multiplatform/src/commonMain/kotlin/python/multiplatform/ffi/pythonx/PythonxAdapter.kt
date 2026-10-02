@@ -8,7 +8,7 @@ import python.multiplatform.reflection.UpcallTable
  * `pythonx` -- the hand-written Python that adapts the Kotlin declarations, and the generated table
  * it reads.
  *
- * `docs/pythonx-adapter-design.md` §7 draws one line through this whole area: **if it differs per
+ * `docs/design/pythonx-adapter-design.md` §7 draws one line through this whole area: **if it differs per
  * Kotlin declaration it is generated or resolved at run time; if it is the same rule for every
  * declaration it is `pythonx` Python source.** This object is where the two meet, and it keeps them
  * apart on purpose:
@@ -19,7 +19,7 @@ import python.multiplatform.reflection.UpcallTable
  * | [renderTable] | one row per entry in [UpcallTable] | this function, from the table |
  *
  * The 2024 `pythonx-compose` put both on the wrong side of that line -- a Python file per Compose
- * component, 37 of them, 28 empty -- and `docs/pythonx-adapter-design.md` §1 measures what it cost:
+ * component, 37 of them, 28 empty -- and `docs/design/pythonx-adapter-design.md` §1 measures what it cost:
  * `padding()` composed nothing and `fill_max_size()` returned `self`, because a per-declaration
  * wrapper is written once and then never again. Nothing here is per-declaration.
  *
@@ -71,12 +71,12 @@ object PythonxAdapter {
      * Read it as a file -- it is one, and the indentation the Kotlin literal adds is removed by
      * `trimIndent`. What it contains, in the order the design asks for it:
      *
-     * | | `docs/pythonx-adapter-design.md` |
+     * | | `docs/design/pythonx-adapter-design.md` |
      * |---|---|
      * | `_Finder` / `_Loader` | §2.3, the hook a module `__getattr__` cannot replace |
      * | the module `__getattr__` the loader installs | §4.1, adapted once and then a dict hit |
      * | `to_python_name` / `to_kotlin_name` / `kotlin_name_for` | §3, forward by rule, backward by index |
-     * | `_Overloads` | `docs/kotlin-extensions-in-python.md` §3.1, the dispatcher that has to live here |
+     * | `_Overloads` | `docs/design/kotlin-extensions-in-python.md` §3.1, the dispatcher that has to live here |
      * | `_proxy_type` / `_Hybrid` | §4.2, an extension as a method on its receiver, both spellings |
      * | `_coerce`'s allowlist | §4.4, `Dp` yes, a packed value class no |
      */
@@ -85,7 +85,7 @@ object PythonxAdapter {
         #
         # `pythonx` -- the adaptation layer over the Kotlin declarations the upcall table exposes.
         #
-        # `docs/pythonx-adapter-design.md` §7 draws the line this file lives on: *if it differs per Kotlin
+        # `docs/design/pythonx-adapter-design.md` §7 draws the line this file lives on: *if it differs per Kotlin
         # declaration it is generated or resolved at run time; if it is the same rule for every declaration
         # it is `pythonx` Python source.* Nothing here mentions a Kotlin declaration by name. What arrives
         # per declaration is the table `PythonxAdapter.renderTable` emits into `_register_table`, and the
@@ -386,7 +386,7 @@ object PythonxAdapter {
             **This is not injective and the adapter does not rely on it.** `to_url_string` comes back as
             `toUrlString`, which is not a declaration anybody wrote. It is the last resort under
             `kotlin_name_for`, which consults the index the forward rule built first -- that index is the
-            "map of exceptions" `docs/pythonx-adapter-design.md` §3 asks the plugin to emit, except that it
+            "map of exceptions" `docs/design/pythonx-adapter-design.md` §3 asks the plugin to emit, except that it
             is derived from the table at run time and so cannot drift from it.
             '''
             base, sep, suffix = python_name.partition('__')
@@ -401,7 +401,7 @@ object PythonxAdapter {
         def kotlin_name_for(kotlin_package, python_name):
             '''The Kotlin declaration a Python name in [kotlin_package] means, or `None`.
 
-            Index first, rule second. `docs/pythonx-adapter-design.md` §3's invariant -- every name the
+            Index first, rule second. `docs/design/pythonx-adapter-design.md` §3's invariant -- every name the
             stub generator emits must resolve through the adapter -- is a statement about this function.
             '''
             decls = _BY_PACKAGE.get(kotlin_package, {}).get(python_name)
@@ -470,7 +470,7 @@ object PythonxAdapter {
         # `pythonx-compose` is a real distribution with real modules on disk. Its code imports the
         # Kotlin surface under the Kotlin name and restructures it into something Pythonic --
         # `Modifier.padding(16).background(...)` as method chaining, `to_dp(x)` where Python cannot
-        # attach a method to `int` (`docs/kotlin-extensions-in-python.md` §4.1). This file used to
+        # attach a method to `int` (`docs/design/kotlin-extensions-in-python.md` §4.1). This file used to
         # synthesise `pythonx.*` itself, with `__path__ = []` on every module it made, which took
         # those names *and* stopped the real package's files from ever being found. Both are gone.
 
@@ -892,7 +892,7 @@ object PythonxAdapter {
         class _Hybrid:
             '''`Modifier.padding(16)` and `m.padding(16)`, from one descriptor.
 
-            `docs/pyi-generation-design.md` §4.3 measured the metaclass alternative failing at run time: a
+            `docs/design/pyi-generation-design.md` §4.3 measured the metaclass alternative failing at run time: a
             plain `def` on a metaclass is a *non-data* descriptor, so `type.__getattribute__` searches the
             class's own MRO first and `Modifier.padding(16)` binds `16` to `self`. A descriptor in the class
             body is found for both spellings and is told which one it is by `obj`.
@@ -950,7 +950,7 @@ object PythonxAdapter {
 
             def __del__(self, _release=release):
                 # The other half of `HandleTable`'s contract, and the thing
-                # `docs/kotlin-extensions-in-python.md` §3.2 recorded as missing: "three handles leak per
+                # `docs/design/kotlin-extensions-in-python.md` §3.2 recorded as missing: "three handles leak per
                 # run of that test, deliberately, because owning them is what §4.1's proxy is for and
                 # §4.1's proxy does not exist yet." This is that proxy.
                 handle = getattr(self, '_pm_handle', None)
@@ -1309,7 +1309,7 @@ object PythonxAdapter {
                     # `None` is the whole mechanism, and it is not a value being passed: the generated
                     # Kotlin body tests `args[i] == null` and takes a branch whose call expression does
                     # not mention this parameter at all, so the *compiler* supplies the default.
-                    # `docs/pythonx-adapter-design.md` §4.5 -- metadata carries the flag and never the
+                    # `docs/design/pythonx-adapter-design.md` §4.5 -- metadata carries the flag and never the
                     # expression, so this is the only place the default value can come from.
                     #
                     # It costs nothing that was previously possible, and the reason is `_coerce` rather
@@ -1358,7 +1358,7 @@ object PythonxAdapter {
 
 
         class _Overloads:
-            '''The dispatcher `docs/kotlin-extensions-in-python.md` §3.1 says has to live here.
+            '''The dispatcher `docs/design/kotlin-extensions-in-python.md` §3.1 says has to live here.
 
             The walker refuses to arbitrate between overloads because it has only a name to go on; Python
             has the arguments. Selection is on argument count, on keyword names, and on declared type --
@@ -1573,7 +1573,7 @@ object PythonxAdapter {
             `import pythonx.compose.material3` fails *before* any attribute is touched, so laziness inside
             a module is not enough to make the module lazy. A finder answers the import, and the
             `__getattr__` the loader installs answers the names inside it -- two hooks,
-            `docs/pythonx-adapter-design.md` §2.3.
+            `docs/design/pythonx-adapter-design.md` §2.3.
             '''
 
             def find_spec(self, fullname, path=None, target=None):
@@ -1653,7 +1653,7 @@ object PythonxAdapter {
     /**
      * The generated half: one row per [ExposedCallable], and nothing else.
      *
-     * Every field here is one `docs/pythonx-adapter-design.md` §2.4 recorded as *missing* from the
+     * Every field here is one `docs/design/pythonx-adapter-design.md` §2.4 recorded as *missing* from the
      * boundary -- parameter names, whether a slot is an extension receiver, the receiver's type, the
      * **declared** type of a parameter as opposed to its marshalling tag, and whether a parameter
      * has a default. They are on [ExposedCallable] now, and this is what carries them the last step,

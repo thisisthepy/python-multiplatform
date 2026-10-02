@@ -30,7 +30,7 @@ private const val PENDING_CALL = "python.multiplatform.ffi.upcall.PendingCall"
  * continuation there to give it -- so its call goes inside `PendingCall.start { }`, which is itself
  * a `suspend` lambda and needs nothing but `kotlin-stdlib` to build. The entry then evaluates to a
  * `PendingCall` and carries `isSuspend = true`, which is what tells the trampoline to unwrap it.
- * See `docs/upcall-async-design.md` §5 and [BindingPolicy.isSuspending].
+ * See `docs/design/upcall-async-design.md` §5 and [BindingPolicy.isSuspending].
  *
  * [resultExpr] has already been through [wrapReturnExpression], so a `suspend fun` returning `Int`
  * widens inside the coroutine and the boundary still sees the `Long` its `INT` tag promises.
@@ -58,7 +58,7 @@ private fun paramHasDefaultOf(params: List<KSValueParameter>): List<Boolean> =
 
 /**
  * Walks every file KSP knows about in this compilation and turns the exposed surface
- * (`docs/binding-policy.md`) into a [FragmentModel] -- the pure, KSP-independent shape
+ * (`docs/design/binding-policy.md`) into a [FragmentModel] -- the pure, KSP-independent shape
  * [renderFragmentSource] turns into text.
  *
  * ### What each Kotlin shape becomes
@@ -124,14 +124,14 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
      * ([BindingPolicy.isExposedFunctionShape]-family) but names a type
      * ([BindingPolicy.hasExposableTypes]) with no callable entry of its own is not an ordinary,
      * expected exclusion the way `private`/`internal` visibility is -- it is the exact silent
-     * failure mode `docs/upcall-async-design.md` §2.1 measured for `suspend` function types, and
+     * failure mode `docs/design/upcall-async-design.md` §2.1 measured for `suspend` function types, and
      * the whole point of this task is that it should not go unlogged a second time.
      */
     private fun warnUnexposableType(name: String, declaration: KSNode) {
         logger.warn(
             "python-multiplatform-ksp: $name has a type with no exposable classifier (a `suspend` " +
                 "function type, or one nested in a generic argument) and is not exposed to Python -- " +
-                "see docs/upcall-async-design.md §2.1.",
+                "see docs/design/upcall-async-design.md §2.1.",
             declaration,
         )
     }
@@ -348,7 +348,7 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
 
     /**
      * A companion object's members, named and called through the *owner* rather than through
-     * `Owner.Companion`: `docs/binding-policy.md` exposes them as static members of the class,
+     * `Owner.Companion`: `docs/design/binding-policy.md` exposes them as static members of the class,
      * and Kotlin resolves `Owner.member` to the companion's member anyway, named companion or
      * not. The companion gets no [ClassModel] of its own -- there is nothing Python can do with
      * it that it cannot do through the owner.

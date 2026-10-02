@@ -18,7 +18,7 @@ import kotlin.test.assertTrue
  *
  * ### What this is the end of
  *
- * `docs/kotlin-extensions-in-python.md` §3 measured the artefact walker binding **zero**
+ * `docs/design/kotlin-extensions-in-python.md` §3 measured the artefact walker binding **zero**
  * declarations from all 19 Compose desktop jars, and named two gates that each produced that zero on
  * their own: the metadata-kind gate (a Kotlin top-level function hides behind a file facade whose
  * JVM name Kotlin cannot spell) and the type gate (`Modifier` is an ordinary interface, and
@@ -34,7 +34,7 @@ import kotlin.test.assertTrue
  * A `Modifier` extension is not a `@Composable` -- §2.6 counted exactly one function that is both,
  * out of 500 -- so `padding` is an ordinary function returning an ordinary object and needs no
  * composition to run. Composables are a separate problem with a separate blocker
- * (`docs/pythonx-adapter-design.md` §5.3) and nothing here touches them. This module does not even
+ * (`docs/design/pythonx-adapter-design.md` §5.3) and nothing here touches them. This module does not even
  * apply the Compose compiler plugin.
  *
  * ### What Python actually holds
@@ -151,7 +151,7 @@ class WalkedArtifactComposeModifierTest {
      * The bare name is absent by design: four `padding` overloads would otherwise have to be
      * arbitrated between, and the one a sort order picks for `padding` is the `PaddingValues`
      * overload -- the only unmangled one, and the one a Python caller is least likely to want
-     * (`docs/kotlin-extensions-in-python.md` §3). An `AttributeError` naming a declaration that does
+     * (`docs/design/kotlin-extensions-in-python.md` §3). An `AttributeError` naming a declaration that does
      * not exist is the honest answer; a silent call to the wrong overload is not.
      */
     @Test
@@ -169,7 +169,7 @@ class WalkedArtifactComposeModifierTest {
 
     /**
      * The entry carries what a Python adapter needs to build a keyword-argument surface over it --
-     * `docs/pythonx-adapter-design.md` §2.4's table, which recorded every one of these as missing.
+     * `docs/design/pythonx-adapter-design.md` §2.4's table, which recorded every one of these as missing.
      *
      * `padding__Dp` is a good witness for all of them at once: it is an extension (so slot 0 is a
      * receiver, not a first parameter), its declared parameter type is `Dp` while its `TypeTag` is

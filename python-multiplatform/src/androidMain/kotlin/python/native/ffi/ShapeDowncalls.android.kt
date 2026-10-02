@@ -8,7 +8,7 @@ import java.nio.ByteBuffer
  * Each shape is one JNI native-method call into a `@CName`-exported trampoline compiled into
  * `libmultiplatform_python3.13.so` (see `nativeMain/.../EmbedAPI.native.kt`), which casts the
  * `fn` address to a typed `CFunction` pointer and invokes it directly. This is "path 1" from
- * `docs/downcall-design.md`: ordinary JNI -> trampoline -> indirect call. ART cannot synthesize
+ * `docs/design/downcall-design.md`: ordinary JNI -> trampoline -> indirect call. ART cannot synthesize
  * an arbitrary native call at runtime the way Kotlin/Native's cinterop can at compile time, so
  * (unlike desktop, where a single cached `MethodHandle` per shape is built directly in this
  * layer) the actual dispatch mechanism lives in the native trampoline; this file is a thin,

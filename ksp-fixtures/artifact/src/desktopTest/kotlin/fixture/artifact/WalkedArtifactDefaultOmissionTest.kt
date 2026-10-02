@@ -13,7 +13,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 
 /**
- * `docs/pythonx-adapter-design.md` §4.5, closed against the real jars: **Compose's own functions,
+ * `docs/design/pythonx-adapter-design.md` §4.5, closed against the real jars: **Compose's own functions,
  * called from Python with their required arguments and nothing else.**
  *
  * ### What was wrong

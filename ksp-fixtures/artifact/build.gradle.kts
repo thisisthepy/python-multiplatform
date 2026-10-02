@@ -5,7 +5,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
  * The artefact walker end to end: a real third-party jar the build resolves, walked at build time,
  * installed into the same `UpcallTable` KSP's own fragments go into, and imported from Python.
  *
- * `docs/ecosystem.md` §5b names two producers of bindings and splits them by *what they look at* --
+ * `docs/design/ecosystem.md` §5b names two producers of bindings and splits them by *what they look at* --
  * KSP the consumer's own source, the walker everything the build resolves. `:ksp-fixtures:app`
  * covers the first. Nothing covered the second, which is why `androidx.compose.material3` was
  * believed to be unreachable.
@@ -23,7 +23,7 @@ plugins {
 
 kotlin {
     // One target. The walker reads jars, and jars are what a JVM target resolves; whether the same
-    // walk is possible over a `.klib` is `docs/ecosystem.md` §5b's open question and is not
+    // walk is possible over a `.klib` is `docs/design/ecosystem.md` §5b's open question and is not
     // answered by adding a Native target that would silently bind nothing.
     jvm("desktop") {
         @OptIn(ExperimentalKotlinGradlePluginApi::class)
@@ -50,7 +50,7 @@ kotlin {
 
                 // Compose Multiplatform, as plain Maven coordinates and **without** the Compose
                 // Gradle or compiler plugin. That is deliberate and is the whole shape of the claim:
-                // `docs/kotlin-extensions-in-python.md` §3 measured zero declarations bound from
+                // `docs/design/kotlin-extensions-in-python.md` §3 measured zero declarations bound from
                 // these exact jars, and what makes `Modifier.padding(16.dp)` reachable is the
                 // walker's own two gates opening, not any cooperation from Compose's tooling.
                 //
@@ -58,7 +58,7 @@ kotlin {
                 // all: `padding` is an ordinary function returning an ordinary object, so
                 // `WalkedArtifactComposeModifierTest` can call it in a plain JVM test with no
                 // `Composer` anywhere. Composables are a different problem
-                // (`docs/pythonx-adapter-design.md` §5) and are not touched here.
+                // (`docs/design/pythonx-adapter-design.md` §5) and are not touched here.
                 //
                 // Version pinned to the catalog's `compose-plugin`, which is what the rest of this
                 // build resolves, so no second Compose version enters the cache.
@@ -103,7 +103,7 @@ pythonBindings {
     // module's `build.gradle.kts` for why `kotlin.time.Duration` cannot stand in for it.
     //
     // `androidx.compose.foundation.layout` is the scorecard of
-    // `docs/kotlin-extensions-in-python.md`: the package `Modifier.padding` and `Modifier.size` live
+    // `docs/design/kotlin-extensions-in-python.md`: the package `Modifier.padding` and `Modifier.size` live
     // in, measured at **zero bound declarations** before the metadata-kind gate and the type gate
     // were opened. Narrow on purpose -- binding all of Compose here would make this fixture's
     // compile time the cost of a proof it does not need.
@@ -130,7 +130,7 @@ pythonBindings {
         ),
     )
 
-    // `docs/pyi-generation-design.md` §5.3. The file is this fixture's, standing in for the one that
+    // `docs/design/pyi-generation-design.md` §5.3. The file is this fixture's, standing in for the one that
     // would ship inside `pythonx-compose`; without it only the Kotlin-FQN stubs are emitted, which is
     // what the design prescribes for a package that has declared no mapping.
     stubManifest.set(layout.projectDirectory.file("pythonx-map.toml"))
@@ -153,7 +153,7 @@ tasks.named<Test>("desktopTest") {
     jvmArgs("--enable-preview", "-Djava.library.path=.")
 
     // `WalkedArtifactStubTest` reads the stubs the *build* generated -- not a fixture checked in
-    // beside it. Nothing compiles a `.pyi` (`docs/pyi-generation-design.md` §6.2), so unlike the
+    // beside it. Nothing compiles a `.pyi` (`docs/design/pyi-generation-design.md` §6.2), so unlike the
     // generated Kotlin fragments there is no source-set registration that would make this task
     // depend on the generator; the dependency has to be stated.
     val stubs = tasks.named("generatePythonStubs")
