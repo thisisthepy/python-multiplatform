@@ -46,3 +46,15 @@ def test_missing_pyrefly_exits_2(write):
     path = write("user.py", "def f(x: int) -> int:\n    return x\n")
     result = run(path, env_extra={"TYPEDPYTHON_PYREFLY": "/nonexistent/pyrefly"})
     assert result.returncode == 2, result.stdout + result.stderr
+
+
+def test_a_directory_is_checked_file_by_file(write, tmp_path):
+    write("proj/pkg/__init__.py", "")
+    write("proj/pkg/ok.py", "def f(x: int) -> int:\n    return x\n")
+    write("proj/pkg/bad.py", "def g(x):\n    return x\n")
+    write("proj/.venv/lib/junk.py", "def h(x):\n    return x\n")      # hidden: skipped
+    write("proj/pkg/__pycache__/stale.py", "def k(x):\n    return x\n")  # cache: skipped
+    result = run(tmp_path / "proj")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "bad.py" in result.stdout
+    assert "junk.py" not in result.stdout and "stale.py" not in result.stdout
