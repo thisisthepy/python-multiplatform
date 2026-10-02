@@ -45,6 +45,7 @@ kotlin {
         }
         val desktopMain by getting {
             dependencies {
+                implementation(projects.pythonMultiplatformCompose)
                 implementation(compose.runtime)
                 implementation(compose.foundation)
                 implementation(compose.material3)
