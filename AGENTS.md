@@ -79,8 +79,12 @@ disagree, the user's file wins.
 ## 7. Show a conclusion before acting on it
 
 Anything beyond the immediate request — another repository, a public API signature, deleting
-files, killing processes, pushing to a remote, changing branch protection — state what you would do
-and why, and wait. Investigating, measuring, and reporting are always fine.
+files, killing processes, force-pushing, changing branch protection — state what you would do and
+why, and wait. Investigating, measuring, and reporting are always fine.
+
+**Push every commit right away.** After you commit — on a work branch or on `develop` — push it to
+the remote immediately; no confirmation is needed. Never push to `main` or `release` by hand, and
+never force-push without the user's explicit approval.
 
 When a rule and backward compatibility conflict, **the rule wins.** List the callers that break and
 fix them; do not keep the forbidden thing "so nothing breaks".
