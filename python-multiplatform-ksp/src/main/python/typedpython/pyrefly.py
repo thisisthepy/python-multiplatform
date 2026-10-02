@@ -71,7 +71,7 @@ def run(paths: Sequence[Path], search_paths: Sequence[Path] = ()) -> Report:
     files = [str(Path(p).resolve()) for p in paths]
     with tempfile.TemporaryDirectory(prefix="typedpython-") as work:
         config = Path(work) / "pyrefly.toml"
-        config.write_text(_config(search_paths))
+        config.write_text(_config([*search_paths, *import_roots(files)]))
         report_dir = Path(work) / "pysa"
         argv = [
             *command(), "check", *files,
@@ -99,6 +99,22 @@ def run(paths: Sequence[Path], search_paths: Sequence[Path] = ()) -> Report:
             for e in raw_errors
         ]
         return Report(errors, _any_expressions(report_dir, set(files)))
+
+
+def import_roots(files: Sequence[str]) -> list[Path]:
+    """The directory each file is imported from: above its outermost package, else its own.
+
+    The config lives in a temporary directory, and Pyrefly would otherwise take that as the import
+    root, so a package's own imports (relative or absolute) would not resolve.
+    """
+    roots: list[Path] = []
+    for file in files:
+        root = Path(file).parent
+        while (root / "__init__.py").exists():
+            root = root.parent
+        if root not in roots:
+            roots.append(root)
+    return roots
 
 
 def _config(search_paths: Sequence[Path]) -> str:
