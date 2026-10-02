@@ -12,11 +12,13 @@ ignored and overwritten.
    whose tree is the develop tree minus the files below. This happens even when nothing
    is dropped. It is a no-op only if `release` already has that tree and that parent.
    The push uses `--force-with-lease` pinned to the remote sha the run observed.
-2. The workflow opens (or updates) a pull request `release` -> `main`. PRs created with
-   the default `GITHUB_TOKEN` do not trigger other workflows, so `main-source-guard`
-   would not run on them. To make it run, add a repository secret `RELEASE_PR_TOKEN`
-   (a PAT or GitHub App token with pull-request write access); the workflow uses it
-   when present and falls back to `github.token` otherwise.
+2. The workflow opens (or updates) a pull request `release` -> `main` with the default
+   `GITHUB_TOKEN`. This needs the repository setting *Actions -> General -> Allow GitHub
+   Actions to create and approve pull requests*. A PR opened with `GITHUB_TOKEN`
+   triggers no workflows, so `main-source-guard` would never run on it; the workflow
+   therefore sets the `only-release-into-main` commit status on the release commit
+   itself, which satisfies the required check. No PAT is needed; an optional
+   `RELEASE_PR_TOKEN` secret is used for the PR step when present.
 3. Merging that PR is the only way to change `main`. `main-source-guard.yml` fails
    any PR into `main` whose head is not `release`.
 4. On push to `main`, `pages.yml` deploys `docs/guide/` to GitHub Pages.

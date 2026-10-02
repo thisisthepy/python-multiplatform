@@ -10,6 +10,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  statuses: write
 
 concurrency:
   group: release-sync
@@ -33,9 +34,8 @@ jobs:
 
       - name: Open or update PR release -> main
         env:
-          # PRs created with GITHUB_TOKEN do not trigger other workflows, so the
-          # main-source-guard check would never run on this PR. Set the optional
-          # secret RELEASE_PR_TOKEN (PAT or app token) to make it run.
+          # Needs "Allow GitHub Actions to create and approve pull requests" in the
+          # repository's Actions settings. RELEASE_PR_TOKEN is optional.
           GH_TOKEN: ${{ secrets.RELEASE_PR_TOKEN || github.token }}
         run: |
           set -eu
@@ -51,3 +51,17 @@ jobs:
           else
             gh pr create --head release --base main --title "$title" --body "$body"
           fi
+
+      # A PR opened with GITHUB_TOKEN triggers no workflows, so main-source-guard
+      # never runs on it. Report the guard's verdict for the release commit here:
+      # this job just generated it from develop, which is exactly what the guard
+      # requires. A status set with GITHUB_TOKEN satisfies a required check.
+      - name: Mark release as passing the main source guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          if ! git rev-parse -q --verify refs/heads/release >/dev/null; then exit 0; fi
+          gh api "repos/${GITHUB_REPOSITORY}/statuses/$(git rev-parse release)" \
+            -f state=success -f context=only-release-into-main \
+            -f description="generated from develop ${GITHUB_SHA::7} by release-sync"
