@@ -826,10 +826,14 @@ class ComposableRenderTest {
             assert _icon_param_types == _icon_image_types, \
                 "Icon's overloads no longer match what this test recorded: " + repr(_icon_param_types)
 
+            # `materialIcon` (material-icons-core, walked since issue #37) returns an ImageVector,
+            # but only out of a `(ImageVector.Builder) -> ImageVector.Builder` lambda, which Python
+            # cannot write (`IconRenderTest.imageVectorIsUnreachable...` checks that refusal). So it is
+            # not a producer a Python caller can use, and it is the only one.
             _produced = {
                 d.return_type_name
                 for table in _pm_binding._BY_PACKAGE.values() for decls in table.values() for d in decls
-                if d.return_type_name in _icon_image_types
+                if d.return_type_name in _icon_image_types and d.kotlin_name != 'androidx.compose.material.icons.materialIcon'
             }
             assert _produced == {
                 'androidx.compose.ui.graphics.ImageBitmap',
