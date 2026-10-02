@@ -1,0 +1,19 @@
+# TypedPython soundness gate (docs/design/typedpython.md §4.2).
+# The Kotlin processor in this module is built by Gradle; this file only describes the Python
+# package that lives next to it in src/main/python.
+[project]
+name = "typedpython"
+version = "0.1.0"
+requires-python = ">=3.13"
+# Pinned exactly: the gate reads Pyrefly's per-expression type report (--report-pysa), whose
+# format is versioned by Pyrefly, not by a public API.
+dependencies = ["pyrefly==1.3.2"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["src/test/python"]
+pythonpath = ["src/main/python"]
+addopts = "--basetemp=.pytest_tmp"
+markers = ["measurement: records cost; asserts only sanity bounds"]

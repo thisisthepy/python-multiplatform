@@ -207,6 +207,23 @@ TypedPython 은 그래서 자체 텐서 런타임을 만들지 않고 **torch op
 각 단계는 AGENTS.md §5·§14 의 TDD 와 측정 테스트 규정을 따른다. 특히 3 은 경계 비용 감소를, 4 는
 upstream 대비 수치 오차를 기준선으로 박아 둔다.
 
+### 6.1 단계 1 의 현재 상태 (2026-10-03, #16)
+
+- **위치:** `python-multiplatform-ksp/src/main/python/typedpython/`, 테스트는
+  `python-multiplatform-ksp/src/test/python/`. 사용자 지시("ksp랑 통합")에 따라 KSP 모듈 안에 둔다.
+  KSP 프로세서는 Kotlin 심볼만 보고 파이썬 파일 변경으로는 다시 돌지 않으므로, **실행**은 1b 에서
+  Gradle 태스크가 맡는다 — KSP 모듈은 소스와 배포(jar 리소스)의 자리다.
+- **구현된 규칙:** SPEC N-6. Pyrefly 의 `Any` 유출 kind 6개를 에러로 올리고, Pyrefly 의
+  per-expression 타입 리포트(`--report-pysa`)로 사용자 코드 안의 `Any` 식을 찾는다(`any-flow`).
+  `cast()` 인자, 버려지는 식 문장의 값, 함수 시그니처 자체는 제외한다.
+- **미구현:** 타입이 다른 값으로의 재할당, 원소 타입이 섞인 컨테이너. Pyrefly 1.3.2 는 둘 다
+  보고하지 않고, 타입 리포트에 대입 대상의 타입이 없다.
+- **측정:** 1800줄 합성 모듈에서 plain `pyrefly check` 160–235 ms, 게이트 1.3–1.9 s — 두 번 잰 비율이
+  모두 약 8배다. 단독 측정이 아니다(두 번째는 load average 18.6). 절대값보다 비율을 기준으로 본다. 차이의
+  대부분은 타입 리포트가 typeshed 사본까지 디스크에 쓰는 비용으로 보인다(추정, 미분해). 1b 에서
+  빌드마다 돌리기 전에 줄일 대상이다.
+- **고정:** Pyrefly `==1.3.2`. 타입 리포트는 Pyrefly 가 버전을 매기는 포맷이지 공개 API 가 아니다.
+
 ## 7. 위험
 
 - **Pyrefly 의 외부 API 안정성.** 라이브러리 임베드는 확인 전까지 미룬다 (§4.1).
