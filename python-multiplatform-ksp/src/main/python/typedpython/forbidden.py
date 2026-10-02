@@ -4,8 +4,8 @@ These are the dynamic features that make a static type unreliable at compile tim
 reports them as warnings for `checked` code and as errors for `compiled` code; this module only
 finds them.
 
-Not covered here: rebinding a variable to a different type and containers that mix element
-types. Both need inferred types for assignment targets, which Pyrefly 1.3.2 does not report.
+Rebinding a name to a different type and containers that mix element types need inferred types
+for assignment targets; they live in typedpython.rebinding.
 """
 import ast
 from dataclasses import dataclass

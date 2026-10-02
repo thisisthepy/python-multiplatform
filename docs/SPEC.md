@@ -244,12 +244,15 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `unannotated-return`, `unknown-variable-type`, `no-any-return-implicit`, `no-any-return-explicit`,
   `explicit-any`) and any user-code expression of type `Any` outside `cast()` (`any-flow`) as errors;
   the forbidden list (`eval`/`exec`, computed-name `getattr`/`setattr`/`delattr`, patching an imported
-  module or a module-level class) as warnings in `checked` mode and errors in `compiled` mode. Nothing
+  module or a module-level class, rebinding an unannotated name to a different type, and a list/set/dict
+  display whose inferred element type is a union) as warnings in `checked` mode and errors in
+  `compiled` mode. Nothing
   inside dependencies is reported. `python -m typedpython check` exits 0 / 1 / 2 for clean / errors /
   tool failure. `Status: partial` — the gate is asserted by
   `python-multiplatform-ksp/src/test/python/` (run with that module's `.venv`); it is **not yet run by the
-  build** (design §6 step 1b), and rebinding a variable to a different type and mixed-element containers
-  are not detected (Pyrefly 1.3.2 reports neither).
+  build** (design §6 step 1b). Rebinding and mixed containers are found by a second Pyrefly pass over a
+  probed copy (design §6.1), which runs only when a file has a name assigned twice or a container
+  display; `for` targets and comprehension variables are not probed.
 
 ---
 

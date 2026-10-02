@@ -59,6 +59,8 @@ class AnyExpression:
 class Report:
     errors: list[Error]
     any_expressions: list[AnyExpression]
+    # file -> (line, column) -> type, for every expression the type report records.
+    expression_types: dict[str, dict[tuple[int, int], str]]
 
 
 def command() -> list[str]:
@@ -98,7 +100,8 @@ def run(paths: Sequence[Path], search_paths: Sequence[Path] = ()) -> Report:
             Error(_resolve(e["path"]), e["line"], e["column"], e["name"], e["description"])
             for e in raw_errors
         ]
-        return Report(errors, _any_expressions(report_dir, set(files)))
+        types = _expression_types(report_dir, set(files))
+        return Report(errors, _any_expressions(types), _types_by_start(types))
 
 
 def _config(search_paths: Sequence[Path]) -> str:
@@ -111,7 +114,8 @@ def _config(search_paths: Sequence[Path]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _any_expressions(report_dir: Path, files: set[str]) -> list[AnyExpression]:
+def _expression_types(report_dir: Path, files: set[str]) -> list[AnyExpression]:
+    """Every typed expression the report records in the given files (typeshed and deps skipped)."""
     try:
         index = json.loads((report_dir / "pyrefly.pysa.json").read_text())
     except (OSError, json.JSONDecodeError) as e:
@@ -129,10 +133,19 @@ def _any_expressions(report_dir: Path, files: set[str]) -> list[AnyExpression]:
         for function in table["functions"].values():
             types = function["type_table"]
             for location, type_index in function["locations"].items():
-                spelled = types[type_index]["string"]
-                if ANY_IN_TYPE.search(spelled):
-                    found.append(_expression(_resolve(source), location, spelled))
+                found.append(_expression(_resolve(source), location, types[type_index]["string"]))
     return found
+
+
+def _any_expressions(expressions: list[AnyExpression]) -> list[AnyExpression]:
+    return [e for e in expressions if ANY_IN_TYPE.search(e.type)]
+
+
+def _types_by_start(expressions: list[AnyExpression]) -> dict[str, dict[tuple[int, int], str]]:
+    table: dict[str, dict[tuple[int, int], str]] = {}
+    for e in expressions:
+        table.setdefault(e.path, {})[(e.line, e.column)] = e.type
+    return table
 
 
 def _expression(path: str, location: str, spelled: str) -> AnyExpression:

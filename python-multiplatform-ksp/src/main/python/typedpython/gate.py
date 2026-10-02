@@ -11,11 +11,12 @@ Only the given files are user code. Their dependencies are type-checked by Pyref
 as their stubs or sources say; nothing inside them is reported.
 """
 import ast
+import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal
 
-from typedpython import forbidden, pyrefly
+from typedpython import forbidden, pyrefly, rebinding
 from typedpython.diagnostic import Diagnostic, Severity
 
 Mode = Literal["checked", "compiled"]
@@ -67,7 +68,48 @@ def check(
                 finding.message,
             ))
 
+    for d in _rebinding_findings(paths, search_paths):
+        diagnostics.append(Diagnostic(
+            d.path, d.line, d.column, d.rule, forbidden_severity, d.message,
+        ))
+
     return sorted(diagnostics)
+
+
+def _rebinding_findings(
+    paths: Sequence[Path], search_paths: Sequence[Path],
+) -> list[Diagnostic]:
+    """Second Pyrefly pass over probed copies; skipped when no file has anything to probe."""
+    plans: dict[str, tuple[str, list[rebinding.Probe]]] = {}
+    for path in (str(Path(p).resolve()) for p in paths):
+        try:
+            tree = ast.parse(Path(path).read_text(), filename=path)
+        except SyntaxError:
+            continue
+        wanted = rebinding.candidates(rebinding.assignments(tree))
+        if wanted:
+            plans[path] = rebinding.probe(Path(path).read_text(), wanted)
+    if not plans:
+        return []
+
+    found: list[Diagnostic] = []
+    with tempfile.TemporaryDirectory(prefix="typedpython-probe-") as work:
+        copies: dict[str, str] = {}
+        for i, (original, (probed, _)) in enumerate(plans.items()):
+            # One directory per file keeps module names intact; the original's directory goes
+            # on the search path so sibling imports still resolve.
+            copy = Path(work) / str(i) / Path(original).name
+            copy.parent.mkdir()
+            copy.write_text(probed)
+            copies[str(copy.resolve())] = original
+        dirs = sorted({str(Path(o).parent) for o in plans})
+        report = pyrefly.run([Path(c) for c in copies], [*search_paths, *map(Path, dirs)])
+
+        for copy, original in copies.items():
+            types = report.expression_types.get(copy, {})
+            for f in rebinding.judge(plans[original][1], types):
+                found.append(Diagnostic(original, f.line, f.column, f.rule, "warning", f.message))
+    return found
 
 
 def _cast_argument_spans(tree: ast.Module) -> list[tuple[Position, Position]]:
