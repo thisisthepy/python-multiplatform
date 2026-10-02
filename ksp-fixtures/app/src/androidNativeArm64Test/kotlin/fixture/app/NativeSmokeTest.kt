@@ -6,10 +6,10 @@ import kotlin.test.Test
 import kotlin.test.assertTrue
 
 /**
- * Compile+link-only smoke test on a real Kotlin/Native target (docs/design/upcall-table-design.md §8's
+ * Compile+link-only smoke test on a real Kotlin/Native target (docs/design/upcall.md §2.9's
  * "Verify .klib discovery" open question). Not run here -- androidNativeArm64 targets a
  * device/emulator this workspace does not execute tests against -- but linking this binary is
- * what `docs/design/upcall-table-design.md` §11.1's tree-shaking measurement diffs the size of.
+ * what `docs/design/upcall.md` §2.6's tree-shaking measurement diffs the size of.
  */
 class NativeSmokeTest {
     @Test

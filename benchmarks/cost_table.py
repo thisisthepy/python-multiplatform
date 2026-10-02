@@ -4,7 +4,7 @@ Cuts the cost tables in `docs/investigations/cost-table.md` for every target, in
 
 Why this exists
 ---------------
-`docs/upcall-design.md` and `docs/downcall-design.md` both carry cost tables, and both have been
+`docs/design/upcall.md` and `docs/design/downcall-design.md` both carry cost tables, and both have been
 invalidated at least once by numbers that were transcribed by hand from a run whose conditions were
 not written down next to them. The two failures were:
 

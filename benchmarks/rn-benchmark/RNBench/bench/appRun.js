@@ -39,7 +39,7 @@ const REPS = 5;
  *   JS (Hermes, no JIT) --JSI--> C++ --JNI--> **Kotlin, running on ART**
  *
  * The callee of every boundary row is `BenchModule.kt` executing on ART, and ART is precisely the
- * runtime whose tier-up the reference project measured: its `docs/upcall-design.md` sweep found ART
+ * runtime whose tier-up the reference project measured: its `docs/design/upcall.md` sweep found ART
  * on `pmp_api36` still 9% above its plateau at 70 000 calls and only arriving at ~90 000-100 000 --
  * the largest warmup requirement of any configuration it measured, and the one that set its
  * constant. So the RN Android boundary rows sit on the same curve, for the same reason, on the same

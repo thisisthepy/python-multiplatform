@@ -25,12 +25,20 @@ The project currently uses `python-build-standalone` (maintained by Astral). For
 *   **Prebuilt-cpython Status:** The `python/prebuilt-cpython` repository is currently a planning repository containing no artifacts, so it is not a source.
 *   **Conclusion:** We acquire Android artifacts directly from python.org, and iOS artifacts from BeeWare's Python-Apple-support, eliminating the need for kivy toolchain dependency.
 
-## 4. Stable ABI Implications (PEP 803)
+## 4. Stable ABI and free-threaded builds
 
-*   **The Constraint:** This project relies entirely on the CPython Stable ABI for its ~330 bindings.
-*   **Python 3.13 & 3.14:** The traditional Stable ABI (`abi3`) **does not** support free-threaded (GIL-disabled) builds. If we attempt to use a free-threaded 3.14 build, our bindings relying on `abi3` will fail or crash due to opaque structural changes in `PyObject`.
-*   **Python 3.15 (PEP 803):** Python 3.15 introduces `abi3t`, a new variant of the Stable ABI specifically for free-threaded builds.
-*   **Conclusion (superseded 2026-08-12):** this was stale. `Py_LIMITED_API` is not defined here, so `abi3t` is not a blocker; 3.14t works on desktop with `-PpythonFreeThreaded=true` (236 tests, 0 failures). See `docs/roadmap/ROADMAP.md` §9.
+*   **The constraint:** the ~330 bindings target the CPython Stable ABI, and CPython's Limited API /
+    `abi3` is not offered by free-threaded builds in 3.13 and 3.14 (3.15 adds `abi3t`, PEP 803).
+*   **Why it does not block free-threading here:** the bindings are symbols resolved dynamically at run
+    time and `Py_LIMITED_API` is not defined, so no compile-time ABI contract applies. 3.14t works on
+    desktop with `-PpythonFreeThreaded=true` (the whole desktop suite: 236 tests, 0 failures, at the time
+    of ROADMAP §9; SPEC T-2). An earlier version of this section concluded the opposite ("fails or crashes
+    due to opaque structural changes", "wait for 3.15t") and was wrong; see
+    [`../design/threading-and-abi.md`](../design/threading-and-abi.md) and
+    [`../archive/threading-and-abi-3.15t-gate.md`](../archive/threading-and-abi-3.15t-gate.md).
+*   **Scope:** free-threaded prebuilts exist only for the desktop targets (section 2); Android (python.org)
+    and iOS (Python-Apple-support) publish none, so the flag is desktop-only and defaults to `false`
+    (`gradle.properties`). The interpreter version is `pythonVersion` in `gradle.properties`.
 
 ## 5. Security and Integrity Verification
 
@@ -42,3 +50,12 @@ The project currently uses `python-build-standalone` (maintained by Astral). For
 *   **iOS (BeeWare, ≤ 3.14) — nothing exists to verify against.** The `Python-Apple-support` releases publish five `tar.gz` assets and nothing else: no checksums, no signatures, and no GitHub attestations. The lockfile pin is the only honest instrument available here, and no amount of build wiring changes that.
 *   **The lockfile is not superseded by any of this.** The two gates prove different things — the lockfile says "these are the exact bytes this repository reviewed and pinned", Sigstore says "these are the bytes the release manager actually signed". The lockfile is also the only check that works offline and the only one covering every source, so it stays unconditional and Sigstore is layered on top of it.
 *   **The verification is known to fail when it should**, which is the only thing that makes it worth having. Two negative controls were run against the real 3.14.7 Android bundle: flipping one base64 character in `messageSignature.signature` gave `KeylessVerificationException: Artifact signature was not valid`, and pointing the identity map at the 3.13 release manager gave `No provided certificate identities matched values in certificate`. Both failed the build with a non-zero exit.
+
+## 6. WebAssembly
+
+No distributor ships a `python.wasm` that exports `wasmExports` and `wasmMemory` to JavaScript, which the
+`wasmJs` target needs. CPython is therefore **built**, not downloaded: `tools/wasm/build-cpython.sh` builds
+CPython 3.14.2 for `wasm32-emscripten` (Emscripten 5.0.3, matched to the `pyemscripten_2026_0` platform of
+PEP 783) under the git-ignored `.caches/`, and `python-multiplatform-wasm-runtime` is the published zip of
+the result. This is deliberately a different patch release from the native `pythonVersion`; see
+[`wasm-design.md`](wasm-design.md).

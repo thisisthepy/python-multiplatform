@@ -44,7 +44,7 @@ import kotlin.test.assertTrue
  *
  * ### What counts as the same callable
  *
- * Not `is`. A `lambda:` written inline is a **new object on every pass** (`docs/design/pythonx-adapter-design.md`
+ * Not `is`. A `lambda:` written inline is a **new object on every pass** (`docs/archive/pythonx-adapter-design.md`
  * records this), so an identity test on the callable interns nothing at all for the spelling that
  * appears in every example in this module. The key is structural and is described where it is
  * computed, in `PythonxAdapter`'s `_intern_key`; what this file asserts is the consequence:

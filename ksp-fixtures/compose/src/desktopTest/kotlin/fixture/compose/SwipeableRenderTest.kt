@@ -19,7 +19,7 @@ import kotlin.test.assertTrue
 
 /**
  * `Modifier.swipeable` (`androidx.compose.material.SwipeableKt.swipeable-pPrIpRY`), declined for the same
- * unspellable-`T` reason as `anchoredDraggable` (`docs/design/pythonx-adapter-design.md` §9.2) -- fixed here to
+ * unspellable-`T` reason as `anchoredDraggable` (`docs/archive/pythonx-adapter-design.md` §9.2) -- fixed here to
  * `String` the same way `AnchoredDraggableRenderTest` fixes `anchoredDraggable`. See
  * `fixture.compose.pythonSwipeableString` for the wrapper under test and, specifically, for why
  * `thresholds: (T, T) -> ThresholdConfig` is not crossed to Python at all.

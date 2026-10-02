@@ -178,6 +178,13 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   on disk is what `import pythonx` loads. The answer is the same whichever installer
   (`PythonProxySource`, `PythonxAdapter`) ran first for a table. `Status: implemented` on desktop —
   `PM/desktopTest/.../pythonx/KotlinNamedSurfaceTest.kt`, `ksp-fixtures/compose/.../KotlinSignatureMetadataTest.kt`.
+- **U-9** A Pythonic package can serve extra member names on a Kotlin proxy through one hook,
+  `python_multiplatform.binding.add_member_resolver(fn)`, `fn(kotlin_type_name, requested_name,
+  kotlin_member_names) -> kotlin_name | None`, asked only when no Kotlin member of that name exists.
+  The binder renames nothing itself (no resolver: `AttributeError`), and aliases are cached in the
+  registry, not written on the proxy class (`dir()` stays Kotlin-only). Contract in `KotlinSurface.kt`'s
+  KDoc. `Status: implemented` on desktop — `PM/desktopTest/.../pythonx/MemberResolverTest.kt`,
+  `ksp-fixtures/compose/.../MemberResolverComposeTest.kt`.
 
 ## 6. Binding prebuilt libraries (Gradle plugin)
 

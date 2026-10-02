@@ -8,7 +8,7 @@ package python.multiplatform.reflection
  * an object per module in a well-known package, entries built from lambdas rather than
  * `KFunction` references, classes carrying member names and a traverse function -- so that
  * whatever compiles against this API here will compile against generated code later. See
- * `docs/design/upcall-table-design.md` §1 and `ksp-experiment/`.
+ * `docs/design/upcall.md` §2.1 and `ksp-experiment/`.
  */
 
 /** A Kotlin class the way an exposed user class behaves: identity, state, mutation. */

@@ -25,7 +25,7 @@ import kotlin.test.assertTrue
  * `pullRefresh`'s callback overload (`androidx.compose.material.pullrefresh.PullRefreshKt
  * .pullRefresh(Modifier, onPull: (Float) -> Float, onRelease: suspend (Float) -> Float, enabled:
  * Boolean)`) is driven by **nested scroll** from a scrollable descendant, not by pointer events
- * the modifier itself awaits. `docs/design/pythonx-adapter-design.md` §9.4 identified this as needing
+ * the modifier itself awaits. `docs/archive/pythonx-adapter-design.md` §9.4 identified this as needing
  * a larger harness — a real scrollable descendant composed under the `pullRefresh` parent, with
  * an actual drag that makes the scrollable child's nested-scroll callbacks flow upward.
  *

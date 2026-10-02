@@ -59,6 +59,28 @@ import python.multiplatform.reflection.ExposedCallable
  * type is not a Kotlin primitive (`Dp`, `Color`, `TextUnit`) -- the only machine-checkable form of
  * "this is a value class". `composable_lambda` is true for a `@Composable` function-typed slot.
  *
+ * ### Member resolvers: the one hook for names on a proxy
+ *
+ * A proxy the binder returns (`Modifier.padding(16)` is one) serves its Kotlin members under their
+ * Kotlin names only. A Pythonic package built on the binder can say what else a member may be called:
+ *
+ *     python_multiplatform.binding.add_member_resolver(fn)
+ *     python_multiplatform.binding.remove_member_resolver(fn)
+ *
+ *     fn(kotlin_type_name, requested_name, kotlin_member_names) -> kotlin_name | None
+ *
+ * - `fn` is asked only when the proxy has **no** Kotlin member named `requested_name`; a Kotlin name
+ *   never reaches it. `kotlin_member_names` is a tuple of the Kotlin member names the type has.
+ * - The first resolver (in registration order) returning a name that is in `kotlin_member_names` wins,
+ *   and that Kotlin member is served. Any other answer (`None`, an unknown name, a name starting with
+ *   `_`) means "not mine"; with no resolver answering, the result is the usual `AttributeError`.
+ * - The binder renames nothing itself: with no resolver registered behaviour is exactly the
+ *   Kotlin-names-only behaviour above.
+ * - Answers are cached in the resolver registry (cleared when a resolver is added or removed, and
+ *   when a table is registered), never written onto a proxy class: `dir()` of a proxy and the class
+ *   `__dict__` show Kotlin names only. Removing a resolver removes its aliases.
+ * - Registering the same function twice is a no-op. Resolvers are process-wide, like the binding layer.
+ *
  * ### `__signature__` is lazy
  *
  * [PythonProxySource] renders every entry eagerly, and building an `inspect.Signature` for each of

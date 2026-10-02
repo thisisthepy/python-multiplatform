@@ -1,5 +1,30 @@
 # `pythonx` — adapting generated Kotlin bindings without wrapping them one at a time
 
+> **Superseded** by [SPEC.md](../SPEC.md) U-7/U-8,
+> [`KotlinSurface.kt`](../../python-multiplatform/src/commonMain/kotlin/python/multiplatform/ffi/upcall/KotlinSurface.kt)
+> and [`docs/design/kotlin-extensions-in-python.md`](../design/kotlin-extensions-in-python.md) on
+> 2026-10-03; kept for history.
+>
+> **What is superseded:** the binder serving `pythonx` itself — it synthesised `pythonx.*` modules
+> (with `__path__ = []`, so the real on-disk package could not load) and renamed members and
+> parameters to snake_case (§3's rule). Since `238119b7` the binder serves Kotlin-named modules under
+> Kotlin names only, with keyword arguments by Kotlin parameter name and Kotlin defaults; its layer is
+> `python_multiplatform.binding`
+> ([`PythonxAdapter.kt`](../../python-multiplatform/src/commonMain/kotlin/python/multiplatform/ffi/pythonx/PythonxAdapter.kt)),
+> and `pythonx` is a real package in the pythonx-compose repository (`AGENTS.md` §12.1–12.2).
+> Wherever this file says `pythonx._adapt`, `pythonx._bind_composable` or "the `pythonx` adapter",
+> read "the binding layer" for mechanics and "pythonx-compose" for naming.
+>
+> **Still true, and where it lives now:** the binding-layer mechanics — lazy finder plus module
+> `__getattr__` (§2.3, §4.1), extension functions as receiver methods through a hybrid descriptor
+> (§4.2), the value-class allowlist (§4.4, now an empty runtime seam `allow_raw_primitive` that
+> pythonx-compose fills), the composer stack and the `$default` mask computed per call (§5.6) — are
+> in `PythonxAdapter.kt`, whose KDoc still cites this file's section numbers. The `@Composable`
+> measurements (§5.2, §5.6) are summarised in `docs/design/kotlin-extensions-in-python.md` §2.3 and
+> §4.6 and pinned by `ComposableBindingTest` and `ksp-fixtures/compose`. The `Modifier` and material3
+> render proofs (§9, §10) are the `ksp-fixtures/compose` render tests cited by SPEC B-5/B-6. The
+> naming conventions (§3) and the `Modifier` metaclass (§4.3) belong to pythonx-compose.
+
 The 2024 `pythonx-compose` wrote a Python class per Compose component. 37 files, 28 of them empty,
 and the one that mattered most — `pythonx/compose/ui/modifier.py` — is a copy of the Button wrapper
 in which `padding()` composes nothing and `fill_max_size()` returns `self`. The chain was never
@@ -715,7 +740,7 @@ awaitPointerEvent() }`, which is ordinary Kotlin the compiler already knows how 
 machine for. Nothing about Python has to suspend at all if the loop that suspends is hand-written
 Kotlin and Python is only ever asked a synchronous question at each iteration — exactly the shape
 `PythonCallables.PythonFunction` already crosses for every *other* `Function0..Function5` slot in this
-codebase (`docs/design/pythonx-adapter-design.md` §4.2's `content=`, among others).
+codebase (§4.2's `content=` in this file, among others).
 
 That is `fixture.compose.pythonPointerInput` (`ksp-fixtures/compose/src/desktopMain/kotlin/fixture/
 compose/PythonPointerInput.kt`): a hand-written, ordinarily-compiled `suspend` Kotlin function —

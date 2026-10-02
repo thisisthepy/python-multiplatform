@@ -235,7 +235,7 @@ class ProxyHandleLifetimeTest {
             println(
                 "\n--- Proxy handle lifetime: ${currentPlatform.name} --- " +
                     "no proxies are installable on this target, so no proxy lifetime exists to " +
-                    "assert; see docs/design/upcall-async-design.md 12.4\n",
+                    "assert; see docs/design/upcall.md §3.7\n",
             )
             return@withInterpreter
         }

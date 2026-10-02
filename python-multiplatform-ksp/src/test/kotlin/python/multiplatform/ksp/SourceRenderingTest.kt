@@ -287,7 +287,7 @@ class SourceRenderingTest {
 
     @Test
     fun aSuspendingEntryCarriesTheFlagTheTrampolineBranchesOn() {
-        // `docs/design/upcall-async-design.md` §5: the trampoline has to know, before it looks at the
+        // `docs/design/upcall.md` §5.2: the trampoline has to know, before it looks at the
         // result, whether what came back is the value or a PendingCall. The flag is separate from
         // `kind` because the two are orthogonal -- a suspending *method* still has its receiver in
         // args[0], and doubling CallableKind would have made every hasReceiver decision restate it.

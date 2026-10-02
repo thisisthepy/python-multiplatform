@@ -522,7 +522,7 @@ internal data class ResolvedFunction(
     /**
      * Carried rather than filtered out at the source, because the two consumers of this want
      * different things from it: the binder declines a `suspend` declaration outright, and the stub
-     * model records it as declined-because-suspend (`docs/design/pyi-generation-design.md` §3.1 -- "declined
+     * model records it as declined-because-suspend (`docs/archive/pyi-generation-pythonic-stubs.md` §3.1 -- "declined
      * by both producers; must not be stubbed"). Dropping it here would make the second indistinguishable
      * from a declaration that was never declared.
      */

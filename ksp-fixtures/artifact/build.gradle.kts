@@ -58,7 +58,7 @@ kotlin {
                 // all: `padding` is an ordinary function returning an ordinary object, so
                 // `WalkedArtifactComposeModifierTest` can call it in a plain JVM test with no
                 // `Composer` anywhere. Composables are a different problem
-                // (`docs/design/pythonx-adapter-design.md` §5) and are not touched here.
+                // (`docs/archive/pythonx-adapter-design.md` §5) and are not touched here.
                 //
                 // Version pinned to the catalog's `compose-plugin`, which is what the rest of this
                 // build resolves, so no second Compose version enters the cache.

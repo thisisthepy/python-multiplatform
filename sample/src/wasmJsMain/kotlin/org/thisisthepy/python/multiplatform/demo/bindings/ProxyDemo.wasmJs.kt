@@ -37,7 +37,7 @@ actual fun installPythonProxies(): String = try {
  * Not wired on wasmJs, and not fixable by starting a thread the way desktop's and Android's do.
  *
  * `import asyncio` traps this wasm instance rather than raising
- * (`AsyncUpcallPortabilityTest`, `docs/design/upcall-async-design.md` §9.5, and
+ * (`AsyncUpcallPortabilityTest`, `docs/design/upcall.md` §5.8, and
  * `ProxyBootstrap.wasmJs.kt`'s `proxyBootstrapSupportsAsyncio = false`) -- the process goes down
  * with it, not just the call. So this function must never run `import asyncio`, and neither may
  * [awaitFastPathDemo] (shared, `ProxyDemo.kt`) be reached from this target: `ui/App.kt` gates
@@ -46,5 +46,5 @@ actual fun installPythonProxies(): String = try {
  */
 actual fun awaitSuspendingDemo(): String =
     "not available on wasmJs: `import asyncio` traps this wasm instance instead of raising " +
-        "(docs/design/upcall-async-design.md §9.5), so this demo never calls it. The synchronous surface " +
+        "(docs/design/upcall.md §5.8), so this demo never calls it. The synchronous surface " +
         "above -- sections 5 and 6 -- is what `4472f83a` bought back on this target; `await` is not."

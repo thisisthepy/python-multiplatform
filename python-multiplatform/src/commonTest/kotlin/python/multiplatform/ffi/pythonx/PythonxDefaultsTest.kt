@@ -14,7 +14,7 @@ import kotlin.test.assertFails
 import kotlin.test.assertTrue
 
 /**
- * `docs/design/pythonx-adapter-design.md` §4.5 from the Python end: **`f(x)`, not `f(x, None, None, ...)`.**
+ * `docs/archive/pythonx-adapter-design.md` §4.5 from the Python end: **`f(x)`, not `f(x, None, None, ...)`.**
  *
  * ### What the two halves are
  *
@@ -84,7 +84,7 @@ class PythonxDefaultsTest {
     }
 
     /**
-     * The property `docs/design/pythonx-adapter-design.md` §4.5 says an arity-prefix scheme cannot have:
+     * The property `docs/archive/pythonx-adapter-design.md` §4.5 says an arity-prefix scheme cannot have:
      * the argument that is left out is **not** the last one.
      *
      * `padding__Dp_Dp_Dp_Dp(bottom=4)` writes one of four parameters and skips three, one of which

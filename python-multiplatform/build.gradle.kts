@@ -1340,7 +1340,7 @@ tasks.withType<org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeSimu
 // build machine, `KotlinNativeSimulatorTest` for simctl. An Android device is neither, so the
 // whole of `commonTest` compiled for this target on every build and had never once been executed.
 //
-// That gap is visible in docs/design/upcall-design.md: the five-platform upcall table has an empty
+// That gap is visible in docs/design/upcall.md: the five-platform upcall table has an empty
 // androidNative row, and `537c1a0b` says it was left empty rather than estimated. It is also the
 // exact situation ROADMAP §11b was in for Android/ART, where attaching the suite to a target that
 // had only ever compiled it surfaced two real defects in the first twelve tests.

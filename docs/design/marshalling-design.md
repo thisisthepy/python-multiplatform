@@ -38,40 +38,37 @@ differs by 2x between the same two devices. It is 3.3x better than composing on 
 Attribute names, module names and method names are repeated literals, so encoding them again
 on every call is pure waste. CPython interns its own strings for the same reason.
 
-### Status: adopted on Android, not on desktop
+### Status: adopted on desktop, Android and wasm
 
-The first row is labelled "was current" because it no longer describes Android. `internedUtf8`
-and `encodeScratchUtf8` are implemented on both JVM platforms, and Android's call path uses them
-— `EmbedAPI.android.kt`'s `PyObject_GetAttrString` goes through `internedUtf8`, so the live cost
-is the bottom row, not the top one. Quoting 2238 ns as Android's current `getAttr` cost is wrong,
-and it has been quoted that way.
+The first row of the table above is labelled "was current" because it no longer describes any
+platform. `internedUtf8`, `encodeScratchUtf8` and `freeUtf8` are `expect`s in
+`jvmMain/.../ShapeDowncalls.kt` with an `actual` on desktop and Android, and the wasmJs target has
+its own equivalent in `Wasm.kt` (same four-slot scratch). Android's call path uses them —
+`EmbedAPI.android.kt`'s `PyObject_GetAttrString` goes through `internedUtf8`, so the live cost is
+the bottom row, not the top one. Quoting 2238 ns as Android's `getAttr` cost is wrong, and it has
+been quoted that way.
 
-**Desktop has the primitives and does not use them.** `bindings.kt` has 59 `withUtf8` call sites
-and zero `internedUtf8` ones, so every desktop call still allocates and frees a C string. That
-went unnoticed because desktop was already at ~150 ns per string — Panama allocates off-heap
-without crossing a boundary, which is the whole reason Android needed interning to catch up
-rather than the other way round. Wiring it on desktop would take the repeated names down to a
-map lookup plus a 2.65 ns crossing.
+Desktop was wired later than Android (it was already at ~150 ns per string, since Panama allocates
+off-heap without crossing a boundary). At the time of writing `desktopMain/.../bindings.kt` has 31
+`internedUtf8` and 27 `encodeScratchUtf8` call sites and no `withUtf8` call sites; `withUtf8`
+survives only as a helper in `Panama.kt`. I did not find a desktop before/after measurement
+recorded for the switch; the Android table above is the measured evidence.
 
-This is cheaper to adopt than it looks and cheaper than composition, which ROADMAP §6 closed on
-desktop: the primitives already exist and only the call sites change.
-
-**Do not swap all 59 blindly.** The two primitives exist for different lifetimes:
+Do not mix the two primitives up. They exist for different lifetimes:
 
 | | for | lifetime |
 |---|---|---|
 | `internedUtf8` | repeated identifiers — attribute, module, method names | kept, bounded at 4096 entries |
 | `encodeScratchUtf8` | arbitrary content — `exec` source, user strings | thread-local scratch, freed on the next call |
 
-Interning an `exec` source string would blow the cache. Android's actual interns only where the
-argument is a name, which is the rule to follow.
+Interning an `exec` source string would blow the cache; intern only where the argument is a name.
 
 ## The design
 
 Centre the abstraction on **interning**, not on a general allocator.
 
-    // jvmMain — shared by Android and desktop
-    internal expect fun internedUtf8(s: String): Long
+    // jvmMain — shared by Android and desktop (jvmMain/.../ShapeDowncalls.kt)
+    @PublishedApi internal expect fun internedUtf8(s: String): Long
     internal expect fun encodeScratchUtf8(s: String): Long
     internal expect fun freeUtf8(address: Long)
 

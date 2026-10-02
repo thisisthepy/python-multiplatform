@@ -1,3 +1,11 @@
+> **Superseded** by [`../platforms/wasm-design.md`](../platforms/wasm-design.md) on 2026-10-03; kept for history.
+> **Do not file this.** Kotlin 2.4.20-Beta2 (the version the build pins, `gradle/libs.versions.toml`)
+> makes a `wasmJs` module **import** `intrinsics.memory` instead of exporting an unbounded one, so the
+> blocker below no longer exists: the build substitutes Emscripten's `wasmMemory` for that import
+> (`patchKotlinWasmOutputForCPython` in `python-multiplatform/build.gradle.kts`) and no binary patching
+> of a memory section is needed. The `Kotlin 2.0.20 / 2.4.10` behaviour described here is accurate for
+> those versions only.
+
 # YouTrack Issue Draft: Kotlin/Wasm (wasmJs) emits unbounded memory, preventing Emscripten interoperability
 
 ## Title

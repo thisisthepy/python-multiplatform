@@ -160,7 +160,8 @@ interoperability in both directions:
 | `binary/` | Source archives of per-platform CPython distributions |
 | `python_for_kotlin_binding.mermaid` | User-authored sketch of the object model (see rule 14) |
 | `docs/INTENT.md`, `docs/SPEC.md` | Intent and behavioural contract (rule 5) |
-| `docs/design/`, `docs/platforms/`, `docs/investigations/`, `docs/roadmap/` | Design records, platform notes, investigations, progress log |
+| `docs/design/`, `docs/platforms/`, `docs/investigations/`, `docs/roadmap/` | Current design records (one per topic), platform notes, investigation conclusions, the work left to do |
+| `docs/archive/` | Superseded designs and investigation narratives, kept for history (see its `README.md`) |
 
 ### Source-set hierarchy
 

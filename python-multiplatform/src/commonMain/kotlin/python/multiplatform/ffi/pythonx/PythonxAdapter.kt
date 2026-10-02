@@ -17,7 +17,7 @@ import python.multiplatform.reflection.UpcallTable
  * Pythonic API on top of this one through `python_multiplatform.describe` and `inspect.signature`
  * ([KotlinSurface]).
  *
- * `docs/design/pythonx-adapter-design.md` §7 draws one line through this whole area: **if it differs per
+ * `docs/archive/pythonx-adapter-design.md` §7 draws one line through this whole area: **if it differs per
  * Kotlin declaration it is generated or resolved at run time; if it is the same rule for every
  * declaration it is `pythonx` Python source.** This object is where the two meet, and it keeps them
  * apart on purpose:
@@ -28,7 +28,7 @@ import python.multiplatform.reflection.UpcallTable
  * | [renderTable] | one row per entry in [UpcallTable] | this function, from the table |
  *
  * The 2024 `pythonx-compose` put both on the wrong side of that line -- a Python file per Compose
- * component, 37 of them, 28 empty -- and `docs/design/pythonx-adapter-design.md` §1 measures what it cost:
+ * component, 37 of them, 28 empty -- and `docs/archive/pythonx-adapter-design.md` §1 measures what it cost:
  * `padding()` composed nothing and `fill_max_size()` returned `self`, because a per-declaration
  * wrapper is written once and then never again. Nothing here is per-declaration.
  *
@@ -86,7 +86,7 @@ object PythonxAdapter {
      * Read it as a file -- it is one, and the indentation the Kotlin literal adds is removed by
      * `trimIndent`. What it contains, in the order the design asks for it:
      *
-     * | | `docs/design/pythonx-adapter-design.md` |
+     * | | `docs/archive/pythonx-adapter-design.md` |
      * |---|---|
      * | `_Finder` / `_Loader` | §2.3, the hook a module `__getattr__` cannot replace |
      * | the module `__getattr__` the loader installs | §4.1, adapted once and then a dict hit |
@@ -105,7 +105,7 @@ object PythonxAdapter {
         # Pythonic is the job of a real Python package built on top of it (pythonx-compose), which
         # reads `python_multiplatform.describe` and `inspect.signature` to do it by rule.
         #
-        # `docs/design/pythonx-adapter-design.md` §7 draws the line this file lives on: *if it differs per Kotlin
+        # `docs/archive/pythonx-adapter-design.md` §7 draws the line this file lives on: *if it differs per Kotlin
         # declaration it is generated or resolved at run time; if it is the same rule for every declaration
         # it is `pythonx` Python source.* Nothing here mentions a Kotlin declaration by name. What arrives
         # per declaration is the table `PythonxAdapter.renderTable` emits into `_register_table`, and the
@@ -303,6 +303,7 @@ object PythonxAdapter {
             _invalidate()
             _BY_PACKAGE.clear()
             _BY_RECEIVER.clear()
+            _MEMBER_ALIASES.clear()
             _PACKAGES_SEEN.clear()
             _SUPERTYPES.clear()
             present = set()
@@ -895,6 +896,52 @@ object PythonxAdapter {
             _EMPTY_FACTORIES[kotlin_type_name] = kotlin_factory_name
 
 
+        _MEMBER_RESOLVERS = []
+        _MEMBER_ALIASES = {}    # (kotlin receiver type, requested name) -> kotlin member name
+
+
+        def add_member_resolver(fn):
+            '''Registers `fn(kotlin_type_name, requested_name, kotlin_member_names) -> kotlin_name | None`.
+
+            Asked only when a proxy has **no** Kotlin member of the requested name. The first resolver to
+            return a name that is one of `kotlin_member_names` decides, and that Kotlin member is served.
+            The binder renames nothing by itself: with no resolver an unknown name is an `AttributeError`.
+            The answer is cached in this registry, never written onto the proxy class, so `dir()` of a
+            proxy shows Kotlin names only. Registering the same `fn` twice is a no-op.
+            '''
+            if not callable(fn):
+                raise TypeError('a member resolver must be callable')
+            if fn not in _MEMBER_RESOLVERS:
+                _MEMBER_RESOLVERS.append(fn)
+            _MEMBER_ALIASES.clear()
+            return fn
+
+
+        def remove_member_resolver(fn):
+            '''Unregisters a resolver added by `add_member_resolver`; unknown functions are ignored.'''
+            if fn in _MEMBER_RESOLVERS:
+                _MEMBER_RESOLVERS.remove(fn)
+            _MEMBER_ALIASES.clear()
+
+
+        def _resolve_member(cls, name):
+            '''The Kotlin member name a registered resolver maps [name] to on [cls], or `None`.'''
+            if not _MEMBER_RESOLVERS:
+                return None
+            key = (cls._kotlin_type_name, name)
+            cached = _MEMBER_ALIASES.get(key)
+            if cached is not None:
+                return cached
+            members = _BY_RECEIVER.get(cls._kotlin_type_name, {})
+            names = tuple(members)
+            for resolver in tuple(_MEMBER_RESOLVERS):
+                target = resolver(cls._kotlin_type_name, name, names)
+                if target and target in members and not target.startswith('_'):
+                    _MEMBER_ALIASES[key] = target
+                    return target
+            return None
+
+
         class _BoundMember:
             '''An extension applied to a receiver: literally the module-level callable with slot 0 filled.'''
 
@@ -920,7 +967,7 @@ object PythonxAdapter {
         class _Hybrid:
             '''`Modifier.padding(16)` and `m.padding(16)`, from one descriptor.
 
-            `docs/design/pyi-generation-design.md` §4.3 measured the metaclass alternative failing at run time: a
+            `docs/archive/pyi-generation-pythonic-stubs.md` §4.3 measured the metaclass alternative failing at run time: a
             plain `def` on a metaclass is a *non-data* descriptor, so `type.__getattribute__` searches the
             class's own MRO first and `Modifier.padding(16)` binds `16` to `self`. A descriptor in the class
             body is found for both spellings and is told which one it is by `obj`.
@@ -946,9 +993,12 @@ object PythonxAdapter {
                 if name.startswith('_'):
                     raise AttributeError(name)
                 if not _attach(cls, name):
-                    raise AttributeError(
-                        'no Kotlin extension named ' + name + ' on ' + cls._kotlin_type_name
-                    )
+                    target = _resolve_member(cls, name)
+                    if target is None:
+                        raise AttributeError(
+                            'no Kotlin extension named ' + name + ' on ' + cls._kotlin_type_name
+                        )
+                    return getattr(cls, target)
                 return getattr(cls, name)
 
             def __repr__(cls):
@@ -989,9 +1039,12 @@ object PythonxAdapter {
                 if name.startswith('_'):
                     raise AttributeError(name)
                 if not _attach(type(self), name):
-                    raise AttributeError(
-                        'no Kotlin extension named ' + name + ' on ' + type(self)._kotlin_type_name
-                    )
+                    target = _resolve_member(type(self), name)
+                    if target is None:
+                        raise AttributeError(
+                            'no Kotlin extension named ' + name + ' on ' + type(self)._kotlin_type_name
+                        )
+                    return getattr(self, target)
                 return getattr(self, name)
 
             def __repr__(self):
@@ -1343,7 +1396,7 @@ object PythonxAdapter {
                     # `None` is the whole mechanism, and it is not a value being passed: the generated
                     # Kotlin body tests `args[i] == null` and takes a branch whose call expression does
                     # not mention this parameter at all, so the *compiler* supplies the default.
-                    # `docs/design/pythonx-adapter-design.md` §4.5 -- metadata carries the flag and never the
+                    # `docs/archive/pythonx-adapter-design.md` §4.5 -- metadata carries the flag and never the
                     # expression, so this is the only place the default value can come from.
                     #
                     # It costs nothing that was previously possible, and the reason is `_coerce` rather
@@ -1621,7 +1674,7 @@ object PythonxAdapter {
             `import androidx.compose.material3` fails *before* any attribute is touched, so laziness inside
             a module is not enough to make the module lazy. A finder answers the import, and the
             `__getattr__` the loader installs answers the names inside it -- two hooks,
-            `docs/design/pythonx-adapter-design.md` §2.3.
+            `docs/archive/pythonx-adapter-design.md` §2.3.
             '''
 
             def find_spec(self, fullname, path=None, target=None):
@@ -1704,7 +1757,7 @@ object PythonxAdapter {
     /**
      * The generated half: one row per [ExposedCallable], and nothing else.
      *
-     * Every field here is one `docs/design/pythonx-adapter-design.md` §2.4 recorded as *missing* from the
+     * Every field here is one `docs/archive/pythonx-adapter-design.md` §2.4 recorded as *missing* from the
      * boundary -- parameter names, whether a slot is an extension receiver, the receiver's type, the
      * **declared** type of a parameter as opposed to its marshalling tag, and whether a parameter
      * has a default. They are on [ExposedCallable] now, and this is what carries them the last step,

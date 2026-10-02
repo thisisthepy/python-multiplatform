@@ -143,9 +143,10 @@ vendored material and prebuilt CPython artefacts.
 
 `UI.ipynb` imports `pythonx.compose.runtime`, `pythonx.compose.material3`, `pythonx.compose.ui`
 and `pythonx.compose.layout`, and documents signatures like `Text(text, color, font_size)`,
-`Button(onclick, …)` — quoted as the notebook writes it, which is **not** the convention: the
-library spells that parameter `on_click`, and `docs/design/pythonx-adapter-design.md` §3 settles it in the
-library's favour — plus `Column/Row/Spacer/TextField`. It also
+`Button(onclick, …)` — quoted as the notebook writes it; the 2024 library spells that parameter
+`on_click` (`docs/archive/pythonx-adapter-design.md` §3 measured both). Which Python spelling
+`pythonx` uses is pythonx-compose's decision: this repository's binder exposes the Kotlin name
+`onClick` and renames nothing (`docs/INTENT.md` §2.2) — plus `Column/Row/Spacer/TextField`. It also
 requires `main.App` as a live object, `App.messages.getValue()/setValue()`, and
 `main.App.update(NewComposable)` for hot-swapping the UI from a Jupyter cell.
 
@@ -171,12 +172,13 @@ handling at all. Every widget in `pycomposeui` is `@Composable`. Nothing in `pyt
 leave chaquopy until this is designed. *(read from source; not runtime-verified.)* This is the
 smallest and most blocking item, and it is entirely inside this repository.
 
-> **Closed — see `docs/design/pythonx-adapter-design.md` §5.6.** `Text('hi')` written in Python now draws
+> **Closed — see `docs/archive/pythonx-adapter-design.md` §5.6.** `Text('hi')` written in Python now draws
 > through the real `androidx.compose.material3.Text` (`:ksp-fixtures:compose`'s
 > `ComposableRenderTest`: 71 non-background pixels against 0 for an empty body). The paragraph above
 > is right that a *generated Kotlin* entry for a widget cannot compile, and that is not the route
 > taken: an artefact composable's call site is emitted as **bytecode**, with `$composer`, `$changed`
-> and `$default` exposed as ordinary slots, and `pythonx` computes the mask. `BindingPolicy` does now
+> and `$default` exposed as ordinary slots, and the binding layer (`python_multiplatform.binding`,
+> `PythonxAdapter.kt`) computes the mask. `BindingPolicy` does now
 > have `@Composable` handling and what it does is **decline** — a composable in the consumer's *own
 > source* has no compiled signature to call yet, which is a different problem from one in a jar.
 
@@ -189,6 +191,13 @@ module plus, in a demo, raw `ctypes` pointers. `pythonx-compose` needs Kotlin na
 this exists: generated modules are injected into `sys.modules` under their Kotlin fully-qualified
 name. What is missing is a `sys.meta_path` finder so a name resolves on demand rather than only
 after an eager `install()`, the `pythonx` prefix, and generated `.pyi` beside it.
+
+> **Current (2026-10-03):** the finder exists — the binding layer `python_multiplatform.binding`
+> installs a `sys.meta_path` finder that makes Kotlin-named modules importable on demand
+> (`_Finder`/`_Loader` in `PythonxAdapter.kt`; SPEC U-8). The `pythonx` prefix is **not** this
+> repository's to provide: the binder creates no `pythonx` module, and `pythonx` is a real package in
+> pythonx-compose (`AGENTS.md` §12.2). The plugin's `.pyi` are emitted under Kotlin module paths only
+> (SPEC B-7).
 
 **4. One CPython acquisition path, not two.** This repository's `stagePythonHome` downloads from
 python-build-standalone into a Gradle cache; ppp's `python install` downloads from this
@@ -214,30 +223,30 @@ This section documents the current state, language/build system/distribution art
 ### `PythonMultiplatform` (this repository)
 
 - **Observed Current State**:
-  - Embedded CPython FFI binder (`python-multiplatform/src/commonMain/kotlin/.../EmbedAPI.kt`, platform implementations in `EmbedAPI.desktop.kt`, `bindings.kt`, JNI/Panama/cinterop). **Correction, 2026-08-17: this line used to say "CPython 3.13" — stale.** `gradle.properties`'s `pythonVersion` (the single source of truth, read into `Versions.currentVersion` at `python-multiplatform/src/commonMain/kotlin/python/multiplatform/Versions.kt`) is `3.14.7`, and every platform's *observed runtime* agrees: desktop prints `runtime : 3.14.7` (`docs/roadmap/ROADMAP.md:2063`), Android prints `3.14.7` on both `pmp_api36` and `pmp_api26` (`docs/roadmap/ROADMAP.md:2073`), wasmJs prints `3.14.2` — its own, separately-pinned Emscripten build, not this line's concern (`docs/platforms/wasm-design.md`). See the version-mismatch check below.
+  - Embedded CPython FFI binder (`python-multiplatform/src/commonMain/kotlin/.../EmbedAPI.kt`, platform implementations in `EmbedAPI.desktop.kt`, `bindings.kt`, JNI/Panama/cinterop). **Correction, 2026-08-17: this line used to say "CPython 3.13" — stale.** `gradle.properties`'s `pythonVersion` (the single source of truth, read into `Versions.currentVersion` at `python-multiplatform/src/commonMain/kotlin/python/multiplatform/Versions.kt`) is `3.14.7`, and every platform's *observed runtime* agrees: desktop prints `runtime : 3.14.7` (`4ed98143:docs/roadmap/ROADMAP.md:2063`), Android prints `3.14.7` on both `pmp_api36` and `pmp_api26` (`4ed98143:docs/roadmap/ROADMAP.md:2073`), wasmJs prints `3.14.2` — its own, separately-pinned Emscripten build, not this line's concern (`docs/platforms/wasm-design.md`). See the version-mismatch check below.
   - Kotlin object model hierarchy (`python-multiplatform/src/commonMain/kotlin/.../PyObject.kt` and wrappers).
-  - Code generators: KSP processor (`python-multiplatform-ksp/`) producing `FunctionTableFragment`s, and Gradle plugin (`python-multiplatform-gradle-plugin/src/main/kotlin/.../ArtifactBindingGenerator.kt`) scanning resolved dependency JARs via ASM for `ArtifactTable` fragments.
+  - Code generators: KSP processor (`python-multiplatform-ksp/`) producing `FunctionTableFragment`s, and Gradle plugin (`python-multiplatform-gradle-plugin/src/main/kotlin/.../artifact/ArtifactScanner.kt`, `PythonArtifactBindingsTask.kt`; *corrected 2026-10-03 — there is no `ArtifactBindingGenerator.kt`*) scanning resolved dependency jars (ASM + `kotlin-metadata-jvm`) and klibs for `ArtifactTable` fragments, plus `.pyi` stubs under Kotlin module paths (`stubs/PythonStubsTask.kt`).
   - Multiplatform target support: Desktop JVM/Panama, Android JNI, iOS Native Cinterop, androidNativeArm64 (`:python-multiplatform:compileKotlinAndroidNativeArm64`).
   - CPython binary download and SHA-256 lockfile / Sigstore verification (`python-checksums.properties`, `python-multiplatform/build.gradle.kts`).
 - **Language / Build System / Distribution**:
-  - Kotlin Multiplatform (Kotlin 2.0+), Java 21, C/C++ FFI.
+  - Kotlin Multiplatform (Kotlin `2.4.20-Beta2` pinned in `gradle/libs.versions.toml` as of 2026-10-03), Compose Multiplatform 1.11.1 for the sample and fixtures, Java 21, C/C++ FFI.
   - Gradle (`build.gradle.kts`, `settings.gradle.kts`, included build `python-multiplatform-gradle-plugin`).
   - Maven artifact publication (`id("maven-publish")` in `python-multiplatform/build.gradle.kts`, published under group `io.github.thisisthepy:python-multiplatform`).
 - **Goal in Ecosystem**:
   - Core language boundary and binder between Kotlin Multiplatform and CPython.
   - Manages low-level FFI, object reference handles, upcall/downcall function tables, GIL lifecycle, and proxy injection into CPython `sys.modules`.
-- **Gap to Goal**:
-  - `@Composable`-capable callable shape: `ExposedCallable` typed `(Array<Any?>) -> Any?` cannot invoke `@Composable` functions taking synthetic `$composer` / `$changed` parameters. Needs dedicated `CallableKind` or opt-in annotation handling.
-  - Python-side `sys.meta_path` finder for lazy import resolution of Kotlin namespaces (`pythonx.*` or FQCNs) upon import.
-  - Opaque Kotlin object round-tripping for Compose `Composer` (`HandleTable` and `ObjectReference` exist, but runtime hand-off to Python needs verification).
-  - Lifetime and storage of Python callables passed into Kotlin across Compose recompositions (`content=lambda: ...`, `on_click=...`).
+- **Gap to Goal** (status notes added 2026-10-03, read from code and SPEC, not re-run):
+  - `@Composable`-capable callable shape: `ExposedCallable` typed `(Array<Any?>) -> Any?` cannot invoke `@Composable` functions taking synthetic `$composer` / `$changed` parameters. Needs dedicated `CallableKind` or opt-in annotation handling. — *Closed on desktop by bytecode thunks (`ComposableThunks.kt`), SPEC B-6; Android, iOS and wasm planned (SPEC N-2).*
+  - Python-side `sys.meta_path` finder for lazy import resolution of Kotlin namespaces ~~(`pythonx.*` or FQCNs)~~ upon import. — *Exists for Kotlin FQNs in `python_multiplatform.binding` (SPEC U-8). `pythonx.*` is not the binder's to resolve (`AGENTS.md` §12.2).*
+  - Opaque Kotlin object round-tripping for Compose `Composer` (`HandleTable` and `ObjectReference` exist, but runtime hand-off to Python needs verification). — *Done on desktop: one hand-written `@Composable` pushes the live composer as a handle onto the binding layer's stack (`push_composer`), proven by the `ksp-fixtures/compose` render tests.*
+  - Lifetime and storage of Python callables passed into Kotlin across Compose recompositions (`content=lambda: ...`, `onClick=...`). — *Partly addressed: `PythonCallableScope` (`PythonCallables.kt`) holds the callables a composition hands to Kotlin and is closed by a Compose-side `RememberObserver` in `onForgotten`; several hand-written fixture wrappers (`pythonDraggable`, `pythonComposed`, the swipe/anchor wrappers) still leak their callbacks by design, pinned by `DraggableLeakTest`. Not verified here beyond reading the sources.*
   - Retire `stagePythonHome` in favor of `pypackpack`'s Python distribution management.
   - Hand `stageWasmBrowserRuntime` logic to `toolchain`.
 - **Dependency Direction**:
   - `PythonMultiplatform` has no dependencies on other repos in the ecosystem.
   - `pythonx-compose` and consumer applications depend on `PythonMultiplatform` runtime and its Gradle/KSP bindings plugin.
 - **Unverified**:
-  - Behavior of WASM browser runtime (`wasm-experiment/`) under production web bundlers.
+  - Behavior of WASM browser runtime under production web bundlers. (*2026-10-03:* the former `wasm-experiment/` is folded into the library — `wasmJsMain`/`wasmJsTest`, CPython built by `tools/wasm/build-cpython.sh` — commit `6e54f617`; the bundler question is unchanged.)
 
 **Version check (2026-08-17): "3.14 runtime vs. 3.13 header, never checked" — could not find the
 sentence, checked the claim anyway.** The literal sentence was searched for across every `.md` file
@@ -245,17 +254,17 @@ in this repository (`grep -rn` for Korean and English phrasings of "nobody/no on
 verified", "mismatch", combined with "header"/"헤더" and "runtime"/"런타임") and in the git history
 of this file; it does not appear anywhere, verbatim or paraphrased. The nearest things on record are
 this section's own now-corrected "CPython 3.13" line above (stale since the version became
-configurable) and `docs/roadmap/ROADMAP.md:2033`, which already fixed a test fixture that hardcoded the string
+configurable) and `4ed98143:docs/roadmap/ROADMAP.md:2033`, which already fixed a test fixture that hardcoded the string
 "CPython 3.13" while `pythonVersion` had moved to 3.14.7. Neither is the sentence quoted, and neither
 left the underlying question — do headers and runtime actually agree, per platform — checked. That
 question was checked here, freshly, platform by platform:
 
 | platform | header source | runtime source | agree? | how checked |
 |---|---|---|---|---|
-| desktop | none — Panama binds by symbol name at runtime (`java.lang.foreign.Linker`/`SymbolLookup`), no C header is compiled against | `libpython3.14.dylib`/`.so`/`.dll` extracted from the `python-build-standalone` archive pinned to `pythonVersion` (`python-checksums.properties`: `macos-aarch64-3.14.7-20260807`, etc.) | n/a — no header exists to disagree with the runtime | read `build.gradle.kts`'s desktop `jvm()` block; no `cinterop`/`headers()` call anywhere in it; `docs/roadmap/ROADMAP.md:1034-1038` records the same conclusion independently |
+| desktop | none — Panama binds by symbol name at runtime (`java.lang.foreign.Linker`/`SymbolLookup`), no C header is compiled against | `libpython3.14.dylib`/`.so`/`.dll` extracted from the `python-build-standalone` archive pinned to `pythonVersion` (`python-checksums.properties`: `macos-aarch64-3.14.7-20260807`, etc.) | n/a — no header exists to disagree with the runtime | read `build.gradle.kts`'s desktop `jvm()` block; no `cinterop`/`headers()` call anywhere in it; `4ed98143:docs/roadmap/ROADMAP.md:1034-1038` records the same conclusion independently |
 | iOS / androidNative (Kotlin/Native `cinterop`) | `$targetExtractDir/include/python$libVersion/Python.h` (Android) or the extracted `Python.xcframework/.../Headers` (iOS) — **read from the same extraction the runtime library comes from**, not from any vendored copy | same archive, same extraction, `libVersion`/`targetExtractDir` computed from the one `pythonVersion`/`libVersion` variables | **yes, by construction** — both paths are derived from the same Gradle variable, so they cannot independently drift for a given build | read `python-multiplatform/build.gradle.kts:1093-1128` (`targetIncludePath`, the `cinterops.create("python")` block); confirmed no `defFile`/hardcoded header path overrides it |
 | Android JNI (`artMain`, `jni_onload.def`) | none — hand-written `extern` prototypes in `jni_onload.def`, no `#include <Python.h>`, pointers passed as `jlong` | `libpython$libVersion.so` linked with `-lpython$libVersion` from the same extraction tree | n/a for headers; symbol-level agreement already checked by earlier work (`nm`/`objdump` against the shipped `.so`, cited in `docs/roadmap/ROADMAP.md` around the 3.15 migration) | read `python-multiplatform/src/artMain/cinterop/jni_onload.def` and its `build.gradle.kts` cinterop block (no `headers()`/`includeDirs()` call) |
-| wasmJs | Emscripten's own CPython 3.14.2 build, entirely separate toolchain (`docs/platforms/wasm-design.md`) | same 3.14.2 build (`Embedded CPython version: 3.14.2`, `docs/platforms/wasm-design.md:1287`; `runtime : 3.14.2` sample output, `docs/roadmap/ROADMAP.md:1488`) | yes, and deliberately a different minor-patch than the 3.14.7 native default — documented and reasoned about at length in `docs/platforms/wasm-design.md`, not an oversight |
+| wasmJs | Emscripten's own CPython 3.14.2 build, entirely separate toolchain (`docs/platforms/wasm-design.md`) | same 3.14.2 build (`Embedded CPython version: 3.14.2`, `docs/archive/wasm-design-experiment-log.md` "Building CPython 3.14.2 for Emscripten"; `runtime : 3.14.2` sample output, `4ed98143:docs/roadmap/ROADMAP.md:1488`) | yes, and deliberately a different minor-patch than the 3.14.7 native default — documented and reasoned about at length in `docs/platforms/wasm-design.md`, not an oversight |
 
 **What is genuinely stale, and does not affect any of the above:** two artefacts in this repository
 still carry CPython 3.13 and are not read by the default build. `python-multiplatform/src/nativeInterop/cinterop/include/patchlevel.h`
@@ -326,7 +335,7 @@ them is a repository-size decision, not a correctness one, and is left open.
 **`Py_LIMITED_API` status, checked directly:** `grep -rn "Py_LIMITED_API"` across `.kts`/`.def` build
 files finds it only inside vendored CPython header guards (`#if defined(Py_LIMITED_API) ...`) — it is
 never passed as a compiler define anywhere (no `-DPy_LIMITED_API`, no `compilerOpts` setting it). This
-independently confirms `docs/roadmap/ROADMAP.md:1031-1038`'s own finding, reached from the free-threading
+independently confirms `4ed98143:docs/roadmap/ROADMAP.md:1031-1038`'s own finding, reached from the free-threading
 investigation rather than this one: the project does **not** build against the Limited API / Stable
 ABI in the `Py_LIMITED_API`-macro sense. "abi3" as used elsewhere in this repository's docs means a
 self-imposed rule about which C API functions this project chooses to call (ones stable across
@@ -560,7 +569,7 @@ inferring from diff stats:
   - Replace string-based type name parsing in `remember_saveable` with `PythonMultiplatform`'s `PyValue` type tags.
 - **Dependency Direction**:
   - `pythonx-compose` -> `PythonMultiplatform` (depends on `PythonMultiplatform`'s FFI binding surface and Python proxy module at runtime).
-  - Uses `.pyi` stubs emitted by `toolchain` / `PythonMultiplatform` plugin for editor autocompletion.
+  - ~~Uses `.pyi` stubs emitted by `toolchain` / `PythonMultiplatform` plugin for editor autocompletion.~~ *Corrected 2026-10-03:* `PythonMultiplatform`'s plugin emits stubs for the Kotlin-named modules only (SPEC B-7). The Pythonic `pythonx.*` stubs, and the `pythonx-map.toml` manifest that would drive them, are `pythonx-compose`'s own product; it builds its API from `inspect.signature` and `python_multiplatform.describe` (`KotlinSurface.kt`).
 - **Unverified**:
   - Full hot-reload integration with Jupyter notebook server outside `UI.ipynb` static cells.
 
@@ -674,6 +683,8 @@ static.
 
 **`pythonx.*` is ours.** Whatever we wrap or add lives under that prefix. Kotlin fully-qualified
 names point at the original; `pythonx` points at our Pythonic layer. The two namespaces do not mix.
+*(2026-10-03: "ours" means the ecosystem's — `pythonx` is a real package in pythonx-compose; this
+repository's binder creates no `pythonx` module and renames nothing, `AGENTS.md` §12.1–12.2.)*
 
 **The wrapping happens in Python, not in Kotlin.** `pythonx.compose.material3` is Python code that
 uses the generated `androidx.compose.material3` bindings and presents a Pythonic API over them.
@@ -695,9 +706,12 @@ the composer and change flags are threaded the same way every time, and a `conte
 adapted the same way every time. So the layer should resolve on demand — a module `__getattr__`
 that finds the corresponding binding, adapts it once and caches it — rather than enumerate.
 
-That trades away IDE completion, which is exactly why the plugin generates `.pyi` from the same
-metadata: the stubs carry the Pythonic names and signatures the adapter will produce, so an editor
-sees a fully enumerated surface while the runtime enumerates nothing.
+That trades away IDE completion, which is exactly why stubs are generated from the same metadata.
+*(Corrected 2026-10-03:)* this repository's plugin generates stubs for the Kotlin-named modules,
+under Kotlin names (SPEC B-7); the stubs that carry the Pythonic names and signatures belong to
+`pythonx` itself, in pythonx-compose
+([`docs/archive/pyi-generation-pythonic-stubs.md`](../archive/pyi-generation-pythonic-stubs.md) is the
+design that was removed from here).
 
 **`JClass`/`JavaClass`, `KClass`/`KotlinClass`, `ObjcClass` work only where the platform has the
 thing they name.** No stubs, no substitutes, no forced uniformity across targets — a target that

@@ -433,7 +433,7 @@ internal object ArtifactScanner {
      * enforces exactly, so one name reaches one signature by construction; and
      * `PythonProxySource.renderOne` publishes an entry by `setattr`ing its *leaf* name onto a module,
      * so two entries sharing a leaf would silently overwrite each other. A dispatcher therefore lives
-     * in `pythonx` (`docs/design/pythonx-adapter-design.md` §4.1) and selects among these names -- which is
+     * in `pythonx` (`docs/archive/pythonx-adapter-design.md` §4.1) and selects among these names -- which is
      * why they have to exist and be distinguishable, and why `ExposedCallable` now carries
      * `paramNames` and `paramTypeNames` for it to select on. This layer's job is to make the choice
      * *possible*, not to make it.
@@ -801,7 +801,7 @@ internal object ArtifactScanner {
      * because `androidx.compose.runtime.Composable` is declared
      * `@Retention(AnnotationRetention.BINARY)`. `RuntimeInvisible*` is exactly what ASM puts in
      * `invisibleAnnotations`, so the old predicate answered `false` for **every real composable**,
-     * and `DeclarationModel.isComposable` -- which drives `docs/design/pyi-generation-design.md` §3.6's
+     * and `DeclarationModel.isComposable` -- which drives `docs/archive/pyi-generation-pythonic-stubs.md` §3.6's
      * PascalCase rule -- was dead. Nothing caught it because the only composables reaching it were
      * being declined anyway, and a declined entry's flag is not asserted anywhere.
      *
@@ -829,7 +829,7 @@ internal object ArtifactScanner {
      *
      * ### Why the synthetic parameters are exposed rather than hidden
      *
-     * `docs/design/pythonx-adapter-design.md` §4.5 rejected every way of *hiding* them, and each rejection
+     * `docs/archive/pythonx-adapter-design.md` §4.5 rejected every way of *hiding* them, and each rejection
      * still stands: an arity-prefix entry cannot express "pass `text`, skip `modifier`", presence
      * branching costs 2^15 call expressions for `Text`, `Text$default` does not exist, and a
      * generated wrapper cannot restate defaults metadata never carries. What none of those noticed is
@@ -848,7 +848,7 @@ internal object ArtifactScanner {
      * This used to decline one outright, on the stated grounds that "Compose's `$changed` slots count
      * receivers and its `$default` bits are assigned over value parameters, so a receiver shifts one
      * numbering and not the other. Nothing here has measured which." It is measured now, out of the
-     * callee, the way `docs/design/pythonx-adapter-design.md` §5.2 measured the mask in the first place --
+     * callee, the way `docs/archive/pythonx-adapter-design.md` §5.2 measured the mask in the first place --
      * `javap -c androidx/compose/material3/NavigationBarKt`, whose `NavigationBarItem` is
      * `RowScope.NavigationBarItem(selected, onClick, icon, modifier = …, …)`:
      *
@@ -1397,7 +1397,7 @@ internal object ArtifactScanner {
      * The declared shape of one Kotlin function, independent of whether the boundary can carry it.
      *
      * `null` when some part of the signature has no name a stub could write -- a type *parameter*, a
-     * flexible type. `docs/design/pyi-generation-design.md` §3.1's last row and §7: `BindingPolicy` rejects
+     * flexible type. `docs/archive/pyi-generation-pythonic-stubs.md` §3.1's last row and §7: `BindingPolicy` rejects
      * generic declarations, and stubbing what cannot be called would be a lie.
      */
     private fun declarationModelOf(
@@ -1455,7 +1455,7 @@ internal object ArtifactScanner {
         val returnType = resolveKotlinType(function.returnType, classpath, BoundaryDirection.RETURN)
             ?: return declined("no boundary type for return ${kotlinClassifierNameOf(function.returnType) ?: function.returnType.classifier}")
         // Declared, not marshalled: a `Dp` parameter's tag is FLOAT and its declared name is
-        // `androidx.compose.ui.unit.Dp`. `docs/design/pythonx-adapter-design.md` §2.4 row 4. A function slot
+        // `androidx.compose.ui.unit.Dp`. `docs/archive/pythonx-adapter-design.md` §2.4 row 4. A function slot
         // is the one exception and is the reason [functionSlotTypeName] exists: its declared name
         // alone (`kotlin.Function1`) says neither what the lambda is invoked with nor what it must
         // give back, and `pythonx` needs both to build a wrapper at all.
@@ -1577,7 +1577,7 @@ internal object ArtifactScanner {
      * and six others), so 64 is well clear of the corpus while bounding an artefact nobody has
      * measured.
      *
-     * `docs/design/pythonx-adapter-design.md` §4.5 rejects presence branching outright on "2^15 branches for
+     * `docs/archive/pythonx-adapter-design.md` §4.5 rejects presence branching outright on "2^15 branches for
      * `Text`". That objection is to an unbounded version of it and, separately, to a case that is not
      * in the table: `Text` is a `@Composable`, and the arity check in [kotlinCandidates] declines
      * every composable for the synthetic `$composer`/`$changed` parameters its JVM signature carries.

@@ -1,7 +1,7 @@
 # React Native's boundary against PythonMultiplatform's, measured the same way
 
 Reference project: `/Volumes/macMini/thisisthepy/PythonMultiplatform`, whose figures below are
-quoted from `docs/upcall-design.md`, `docs/downcall-design.md` and `ROADMAP.md` at the commit
+quoted from `docs/design/upcall.md`, `docs/downcall-design.md` and `ROADMAP.md` at the commit
 **`73c40da4`** (`develop`, 2026-08-14). **Nothing in the reference project was modified or re-run**;
 its numbers are read, not reproduced.
 
@@ -13,7 +13,7 @@ its numbers are read, not reproduced.
 **One fourth source, added for the iOS comparison and cited separately everywhere it appears:**
 `docs/cost-table.md`, whose `iosSimulatorArm64` row was captured at **`958c0082b294`** at load
 [1.97, 2.29, 5.92], marked uncontaminated, from three runs. §4b and §1c use it rather than
-`upcall-design.md` because it is the only reference-side source that publishes an iOS upcall, its
+`docs/design/upcall.md` because it is the only reference-side source that publishes an iOS upcall, its
 same-run pure-Python callee control and its `withPython` scope figure together — the three cells the
 comparison needs from one execution. Its upcall figure (2253.20–2312.97 ns) and §4a's quoted
 2266–2301 ns are close but **are not the same measurement**; neither is derived from the other.
@@ -62,7 +62,7 @@ by reading generated code rather than documentation:
 
 | | React Native | PythonMultiplatform |
 |---|---|---|
-| **iOS** | JSI (C++) → Objective-C message send. One crossing. The generated `RNBenchSpec.h` builds `NativeBenchSpecJSI` over `ObjCTurboModule::InitParams` and calls the ObjC method directly. | No runtime boundary at all: a `PyMethodDef` whose `ml_meth` is a `staticCFunction` in the same binary (`docs/upcall-design.md`, "cheapest of the three"). |
+| **iOS** | JSI (C++) → Objective-C message send. One crossing. The generated `RNBenchSpec.h` builds `NativeBenchSpecJSI` over `ObjCTurboModule::InitParams` and calls the ObjC method directly. | No runtime boundary at all: a `PyMethodDef` whose `ml_meth` is a `staticCFunction` in the same binary (`docs/design/upcall.md` §7.4). |
 | **Android** | JSI (C++) → **JNI** → Kotlin. Two crossings. Confirmed with `nm` on the built `libappmodules.so`: `NativeBenchSpecJSI::NativeBenchSpecJSI(JavaTurboModule::InitParams const&)`. | C entry point in `artMain/cinterop/jni_onload.def` → **JNI** → Kotlin. Two crossings, "one shim per shape, plus a JNI upcall per call". |
 
 So on both projects Android is structurally the expensive side of the same asymmetry, for the same
@@ -107,7 +107,7 @@ all. Getting this wrong is the failure mode that matters most: two tables side b
 comparison whether or not the cells correspond.
 
 Reference-side sources: `UpcallBoundaryCostTest` (`commonTest`, quoted through
-`docs/upcall-design.md` §"One upcall, across all five platforms") and `overhead/BenchmarkTest`
+`docs/design/upcall.md` §"One upcall, across all five platforms") and `overhead/BenchmarkTest`
 (quoted through `docs/downcall-design.md`).
 
 | row here | what it charges | reference-project counterpart | same direction? | comparable? |
@@ -265,7 +265,7 @@ JS (Hermes, no JIT) --JSI--> C++ --JNI--> Kotlin, running on ART
 
 The callee of every boundary row is `BenchModule.kt` executing on ART. **ART is precisely the
 runtime whose tier-up the reference project measured, and it produced the largest warmup requirement
-in its entire table** (`docs/upcall-design.md`, "Is 100 000 enough on a device?"):
+in its entire table** (`docs/design/upcall.md` §7.2):
 
 | reference target | first repetition ÷ plateau | flat from | margin at a 100 000 warmup |
 |---|---|---|---|
@@ -350,7 +350,7 @@ row on iOS**, which is the opposite of what §3a predicts for Android.
 
 ### 4a. Ours, quoted (not re-run)
 
-`UpcallBoundaryCostTest`, `docs/upcall-design.md`. **Re-quoted 2026-08-14 at `73c40da4`.** The
+`UpcallBoundaryCostTest`, `docs/design/upcall.md`. **Re-quoted 2026-08-14 at `73c40da4`.** The
 previous version of this table was taken at `bd0029d1` and is superseded: it carried four rows as
 *italic* 3 000-warmup readings and two ART rows with three columns reading *not recorded*. Upstream
 has since re-measured every device row at the 100 000 warmup and filled all five columns from one

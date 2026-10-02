@@ -23,7 +23,7 @@ import python.multiplatform.ffi.pythonx.PythonCallables
  * ### Why exactly one, and not one per component
  *
  * The 2024 `pythonx-compose` wrote a Kotlin wrapper per widget -- 37 files, 28 of them empty --
- * and `docs/design/pythonx-adapter-design.md` §1 measures what that cost: `padding()` composed nothing and
+ * and `docs/archive/pythonx-adapter-design.md` §1 measures what that cost: `padding()` composed nothing and
  * `fillMaxSize()` returned `self`, because a per-declaration wrapper is written once and then
  * never again. This is O(1) in the number of composables and stays O(1) by construction: it names no
  * composable, takes no composable-specific parameter, and knows nothing about the declaration Python
@@ -49,7 +49,7 @@ import python.multiplatform.ffi.pythonx.PythonCallables
  *
  * Recomposition. [source] is `exec`ed on every composition pass, so a Python body that is expensive
  * pays for it every frame, and a `@Composable` reached this way can never be *skipped* the way one
- * with stable parameters is. `docs/design/pythonx-adapter-design.md` §5.4 item 4 names this as a property to
+ * with stable parameters is. `docs/archive/pythonx-adapter-design.md` §5.4 item 4 names this as a property to
  * measure before the shape is adopted for anything but a proof, and nothing here has measured it.
  */
 @Composable

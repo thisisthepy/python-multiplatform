@@ -1,7 +1,7 @@
 # rn-benchmark
 
 A React Native app whose only purpose is to price the **JS ↔ native boundary** with the same
-measurement method the [PythonMultiplatform](../thisisthepy/PythonMultiplatform) repository uses to
+measurement method the [PythonMultiplatform](../..) repository uses to
 price its **Python ↔ Kotlin** boundary, so that the two can be read next to each other.
 
 The comparison itself, including what corresponds to what and what is still unmeasured, is in

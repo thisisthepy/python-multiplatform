@@ -12,7 +12,7 @@ import python.multiplatform.reflection.TypeTag
 import python.multiplatform.reflection.UpcallTable
 
 /**
- * The Python half of `docs/design/upcall-async-design.md` §8.6's second gap: the `async def` proxy that
+ * The Python half of `docs/design/upcall.md` §5.5's second gap: the `async def` proxy that
  * makes `await kotlin_fn(x)` read the same whether the Kotlin body suspended or not.
  *
  * Until this existed, `AsyncUpcallDeliveryTest` wrote that proxy by hand (`_await_kotlin`) and the
@@ -275,7 +275,7 @@ object PythonProxySource {
      * duplicated -- the handle `_pm_watch` carries is an ordinary object handle. */
     internal const val RELEASE_ENTRY_POINT = "_pm_release"
 
-    /** Where names with no package of their own land; `docs/design/upcall-table-design.md` §Runtime. */
+    /** Where names with no package of their own land; `docs/design/upcall.md` §Runtime. */
     const val DEFAULT_ROOT_MODULE: String = "kotlin"
 
     /**
