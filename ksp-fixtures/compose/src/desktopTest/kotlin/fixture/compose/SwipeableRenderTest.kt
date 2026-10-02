@@ -75,7 +75,7 @@ class SwipeableRenderTest {
 
         // The drag crosses the fractional threshold and triggers confirmStateChange to the new anchor
         Python3.exec(
-            "assert len(_value_events) > 0, 'on_value_change was never invoked'",
+            "assert len(_value_events) > 0, 'onValueChange was never invoked'",
         )
         Python3.exec(
             "assert 'end' in _value_events, 'did not try to settle at end anchor: ' + repr(_value_events)",

@@ -98,7 +98,7 @@ class RetainedSlotSweepPreconditionTest {
             """
             import sys
 
-            from pythonx.runtime import newFunction as _rs_new_function
+            from python.multiplatform.ffi.pythonx.PythonCallables import newFunction as _rs_new_function
 
             _rs_calls = []
             _rs_bodies = []

@@ -73,7 +73,7 @@ class WalkedArtifactDefaultOmissionTest {
     /**
      * The judgement, in Compose's own code: two calls that write **no** optional argument.
      *
-     * `fill_max_width(m)` and `wrap_content_size(m)` are called with the receiver alone --
+     * `fillMaxWidth(m)` and `wrapContentSize(m)` are called with the receiver alone --
      * `f(x)`, not `f(x, None, None)` -- and the receiver is the only required parameter either of
      * them declares.
      */
@@ -81,23 +81,23 @@ class WalkedArtifactDefaultOmissionTest {
     fun composeFunctionsAreCalledWithTheirRequiredArgumentsAlone() {
         Python3.exec(
             """
-            from androidx.compose.foundation.layout import fill_max_width, wrap_content_size
+            from androidx.compose.foundation.layout import fillMaxWidth, wrapContentSize
             from fixture.artifact import emptyModifier
             from fixture.artifact import equalsFillMaxWidth, equalsFillMaxWidthFraction
             from fixture.artifact import equalsWrapContentSize, equalsWrapContentSizeTopStart
 
-            _filled = fill_max_width(emptyModifier())
+            _filled = fillMaxWidth(emptyModifier())
             assert equalsFillMaxWidth(_filled._pm_handle), (
-                'fill_max_width() did not produce Modifier.fillMaxWidth()'
+                'fillMaxWidth() did not produce Modifier.fillMaxWidth()'
             )
             # The controls. `fraction` defaults to 1f, so a body that had passed the sentinel through
             # as a number would have produced one of these instead.
             assert not equalsFillMaxWidthFraction(_filled._pm_handle, 0.5), 'a default of 1f matched 0.5'
             assert not equalsFillMaxWidthFraction(_filled._pm_handle, 0.0), 'a default of 1f matched 0.0'
 
-            _wrapped = wrap_content_size(emptyModifier())
+            _wrapped = wrapContentSize(emptyModifier())
             assert equalsWrapContentSize(_wrapped._pm_handle), (
-                'wrap_content_size() did not produce Modifier.wrapContentSize()'
+                'wrapContentSize() did not produce Modifier.wrapContentSize()'
             )
             assert not equalsWrapContentSizeTopStart(_wrapped._pm_handle), (
                 'Alignment.Center matched Alignment.TopStart'

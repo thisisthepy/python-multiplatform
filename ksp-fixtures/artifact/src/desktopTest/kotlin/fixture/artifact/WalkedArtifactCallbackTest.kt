@@ -87,13 +87,13 @@ class WalkedArtifactCallbackTest {
         PythonCallables.withScope(PythonCallables.newScope()) {
             Python3.exec(
                 """
-                from kotlin.system import measure_time_millis
+                from kotlin.system import measureTimeMillis
 
                 _ran = []
                 _never = []
                 _control = lambda: _never.append('should not run')
 
-                _elapsed = measure_time_millis(lambda: _ran.append('ran'))
+                _elapsed = measureTimeMillis(lambda: _ran.append('ran'))
 
                 assert _ran == ['ran'], 'the Python callable was not invoked: ' + repr(_ran)
                 assert _never == [], 'a callable nobody passed anywhere ran: ' + repr(_never)
@@ -120,9 +120,9 @@ class WalkedArtifactCallbackTest {
         PythonCallables.withScope(PythonCallables.newScope()) {
             Python3.exec(
                 """
-                from kotlin.system import measure_time_millis
+                from kotlin.system import measureTimeMillis
                 try:
-                    measure_time_millis(lambda wanted: None)
+                    measureTimeMillis(lambda wanted: None)
                     raise AssertionError('a one-argument callable filled a zero-argument slot')
                 except AssertionError:
                     raise
@@ -162,7 +162,7 @@ class WalkedArtifactCallbackTest {
                 assert modifierElementCount(_empty) == 0
 
                 _clicks = []
-                _tappable = clickable(_empty, on_click=lambda: _clicks.append('tap'))
+                _tappable = clickable(_empty, onClick=lambda: _clicks.append('tap'))
 
                 assert not isTheEmptyModifier(_tappable._pm_handle), (
                     'clickable returned the receiver unchanged'
@@ -191,7 +191,7 @@ class WalkedArtifactCallbackTest {
                 from fixture.artifact import emptyModifier
 
                 try:
-                    clickable(emptyModifier(), on_click='not a lambda')
+                    clickable(emptyModifier(), onClick='not a lambda')
                     raise AssertionError('a string filled a () -> Unit slot')
                 except AssertionError:
                     raise
@@ -224,8 +224,8 @@ class WalkedArtifactCallbackTest {
         PythonCallables.withScope(first) {
             Python3.exec(
                 """
-                from kotlin.system import measure_time_millis
-                measure_time_millis(lambda: None)
+                from kotlin.system import measureTimeMillis
+                measureTimeMillis(lambda: None)
                 """.trimIndent(),
             )
             assertEquals(
@@ -243,7 +243,7 @@ class WalkedArtifactCallbackTest {
         // has something to be wrong about.
         val second = PythonCallables.newScope()
         PythonCallables.withScope(second) {
-            Python3.exec("measure_time_millis(lambda: None)")
+            Python3.exec("measureTimeMillis(lambda: None)")
         }
         assertEquals(baseline + 1, HandleTable.liveCount)
 
@@ -272,9 +272,9 @@ class WalkedArtifactCallbackTest {
 
         Python3.exec(
             """
-            from kotlin.system import measure_time_millis
+            from kotlin.system import measureTimeMillis
             try:
-                measure_time_millis(lambda: None)
+                measureTimeMillis(lambda: None)
                 raise AssertionError('a callable crossed with nowhere to live')
             except AssertionError:
                 raise

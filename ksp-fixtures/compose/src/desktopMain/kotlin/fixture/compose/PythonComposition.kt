@@ -18,7 +18,7 @@ import python.multiplatform.reflection.HandleTable
  *
  * The 2024 `pythonx-compose` wrote a Kotlin wrapper per widget -- 37 files, 28 of them empty --
  * and `docs/design/pythonx-adapter-design.md` §1 measures what that cost: `padding()` composed nothing and
- * `fill_max_size()` returned `self`, because a per-declaration wrapper is written once and then
+ * `fillMaxSize()` returned `self`, because a per-declaration wrapper is written once and then
  * never again. This is O(1) in the number of composables and stays O(1) by construction: it names no
  * composable, takes no composable-specific parameter, and knows nothing about the declaration Python
  * is about to call. Every `@Composable` in every artefact the walker binds goes through this one
@@ -57,11 +57,11 @@ fun PythonComposition(source: String) {
     val reference = HandleTable.register(composer)
     try {
         PythonCallables.withScope(arena.scope) {
-            Python3.exec("import pythonx\npythonx.push_composer(${reference.raw})")
+            Python3.exec("import python_multiplatform.binding as _pm_binding\n_pm_binding.push_composer(${reference.raw})")
             try {
                 Python3.exec(source)
             } finally {
-                Python3.exec("import pythonx\npythonx.pop_composer()")
+                Python3.exec("import python_multiplatform.binding as _pm_binding\n_pm_binding.pop_composer()")
             }
         }
     } finally {
@@ -165,7 +165,7 @@ class PythonCallableArena : RememberObserver {
  *
  * Bound by KSP, not the artefact walker: a plain top-level function in this module's own source is
  * an ordinary `FunctionTable` entry, reached from Python through `PythonProxySource` under this
- * module's own Kotlin package name (`fixture.compose.empty_modifier`), the same route
+ * module's own Kotlin package name (`fixture.compose.emptyModifier`), the same route
  * `WalkedArtifactComposeModifierTest` uses for `fixture.artifact.emptyModifier`. `pythonx`'s
  * `_BY_PACKAGE` dispatch -- built over `ArtifactTable` -- never sees it, and does not need to: the
  * `Modifier` handle this returns is an ordinary `TypeTag.OBJECT` value, indistinguishable at the

@@ -63,17 +63,17 @@ class PythonxDefaultsTest {
      * The judgement, in the smallest shape that can state it: a declaration whose only value
      * parameter declares a default, called with **no** value parameter.
      *
-     * `fill_max_height()` is one declaration, so no dispatcher is involved -- this is `_bind`
+     * `fillMaxHeight()` is one declaration, so no dispatcher is involved -- this is `_bind`
      * filling a slot and the Kotlin body taking the branch that writes nothing.
      */
     @Test
     fun aDefaultedParameterMayBeLeftOutEntirely() = withAdapter {
         Python3.exec(
             """
-            from androidx.compose.ui import Modifier, describe_modifier
+            from androidx.compose.ui import Modifier, describeModifier
             _px = {
-                'omitted': describe_modifier(Modifier.fill_max_height()),
-                'given': describe_modifier(Modifier.fill_max_height(0.5)),
+                'omitted': describeModifier(Modifier.fillMaxHeight()),
+                'given': describeModifier(Modifier.fillMaxHeight(0.5)),
             }
             """.trimIndent(),
         )
@@ -96,12 +96,12 @@ class PythonxDefaultsTest {
         Python3.exec(
             """
             from androidx.compose.foundation.layout import padding__Dp_Dp, padding__Dp_Dp_Dp_Dp
-            from androidx.compose.ui import Modifier, describe_modifier
+            from androidx.compose.ui import Modifier, describeModifier
             _px = {
-                'last': describe_modifier(Modifier.padding__Dp_Dp_Dp_Dp(bottom=4)),
-                'middle': describe_modifier(Modifier.padding__Dp_Dp(vertical=4)),
-                'first': describe_modifier(Modifier.padding__Dp_Dp(horizontal=8)),
-                'edges': describe_modifier(Modifier.padding__Dp_Dp_Dp_Dp(start=1, end=3)),
+                'last': describeModifier(Modifier.padding__Dp_Dp_Dp_Dp(bottom=4)),
+                'middle': describeModifier(Modifier.padding__Dp_Dp(vertical=4)),
+                'first': describeModifier(Modifier.padding__Dp_Dp(horizontal=8)),
+                'edges': describeModifier(Modifier.padding__Dp_Dp_Dp_Dp(start=1, end=3)),
             }
             """.trimIndent(),
         )
@@ -122,21 +122,21 @@ class PythonxDefaultsTest {
      * The table cannot express the restriction, though (`paramHasDefault` is per slot), so Python
      * still forms the call and the generated body throws with a message that says what to write.
      *
-     * `fill_max_height()` is the contrast in the same test: no sibling overload, so the same
+     * `fillMaxHeight()` is the contrast in the same test: no sibling overload, so the same
      * omission is generated and runs.
      */
     @Test
     fun omittingEveryArgumentOfAnOverloadedNameIsRefusedByTheBody() = withAdapter {
         Python3.exec(
             """
-            from androidx.compose.ui import Modifier, describe_modifier
+            from androidx.compose.ui import Modifier, describeModifier
             _px = {}
             try:
                 Modifier.padding__Dp_Dp()
                 _px['all'] = 'call succeeded'
             except Exception as e:
                 _px['all'] = str(e)
-            _px['unshadowed'] = describe_modifier(Modifier.fill_max_height())
+            _px['unshadowed'] = describeModifier(Modifier.fillMaxHeight())
             """.trimIndent(),
         )
 
@@ -160,12 +160,12 @@ class PythonxDefaultsTest {
         Python3.exec(
             """
             from androidx.compose.foundation.layout import padding
-            from androidx.compose.ui import Modifier, describe_modifier
+            from androidx.compose.ui import Modifier, describeModifier
             _px = {
-                'one': describe_modifier(Modifier.padding(16)),
-                'two': describe_modifier(Modifier.padding(8, 4)),
-                'four': describe_modifier(Modifier.padding(1, 2, 3, 4)),
-                'three': describe_modifier(Modifier.padding(1, 2, 3)),
+                'one': describeModifier(Modifier.padding(16)),
+                'two': describeModifier(Modifier.padding(8, 4)),
+                'four': describeModifier(Modifier.padding(1, 2, 3, 4)),
+                'three': describeModifier(Modifier.padding(1, 2, 3)),
             }
             """.trimIndent(),
         )
@@ -225,7 +225,7 @@ class PythonxDefaultsTest {
     fun theTableRowCarriesTheOmittableSlotsIntoPython() = withAdapter {
         Python3.exec(
             """
-            import pythonx as _px_mod
+            import python_multiplatform.binding as _px_mod
             _decl = _px_mod._TABLE['androidx.compose.foundation.layout.padding__Dp_Dp']
             _plain = _px_mod._TABLE['androidx.compose.foundation.layout.padding__Dp']
             _px = {
@@ -256,8 +256,8 @@ class PythonxDefaultsTest {
 
         PythonxAdapter.install(COMPOSE_SHAPED_RAW_VALUE_CLASSES)
         Python3.exec(
-            "import pythonx\n" +
-                "pythonx.register_empty('androidx.compose.ui.Modifier', " +
+            "import python_multiplatform.binding as _pm_binding\n" +
+                "_pm_binding.register_empty('androidx.compose.ui.Modifier', " +
                 "'${ComposeShapedFragment.EMPTY_MODIFIER}')",
         )
         block()

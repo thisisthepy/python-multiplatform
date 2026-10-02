@@ -25,7 +25,7 @@ import kotlin.test.assertTrue
  * - A scene whose Python body is `pass` or an empty equivalent has none (or fewer).
  * - Where the component fills the entire scene with its own surface (FAB, TopAppBar, Scaffold,
  *   TabRow), distinct-colour counting is used instead of ink counting — the same approach
- *   [listItemComposesItsHeadlineContentUnderItsSnakeCasedName] uses for ListItem.
+ *   [ComposableRenderTest.listItemComposesItsHeadlineContentUnderItsKotlinName] uses for ListItem.
  *
  * Components judged here (10 of 27):
  * 1. HorizontalDivider — leaf, no required param
@@ -88,13 +88,13 @@ class M3ProofRenderTest {
         val selected = inkOf(
             """
             from androidx.compose.material3 import RadioButton
-            RadioButton(selected=True, on_click=lambda: None)
+            RadioButton(selected=True, onClick=lambda: None)
             """.trimIndent(),
         )
         val deselected = inkOf(
             """
             from androidx.compose.material3 import RadioButton
-            RadioButton(selected=False, on_click=lambda: None)
+            RadioButton(selected=False, onClick=lambda: None)
             """.trimIndent(),
         )
         println("compose render: RadioButton selected=$selected px, deselected=$deselected px")
@@ -122,7 +122,7 @@ class M3ProofRenderTest {
      * finding: the walked table has three overloads, and the current one takes `progress` as
      * `() -> Float`. Passing a Python callable for it is rejected by the overload dispatcher --
      * *"no overload of LinearProgressIndicator accepts these arguments"* -- even though a callable
-     * is accepted for `on_click`, which is `Function0<Unit>`. So a value-returning function slot
+     * is accepted for `onClick`, which is `Function0<Unit>`. So a value-returning function slot
      * does not accept a Python callable today, while a Unit-returning one does. Pinned by
      * [aValueReturningFunctionSlotDoesNotYetAcceptAPythonCallable] rather than left as a note.
      *
@@ -270,14 +270,14 @@ class M3ProofRenderTest {
         val left = pixelsOf(
             """
             from androidx.compose.material3 import Slider
-            Slider(0.0, on_value_change=lambda v: None)
+            Slider(0.0, onValueChange=lambda v: None)
             """.trimIndent(),
             width = 200, height = 48,
         )
         val right = pixelsOf(
             """
             from androidx.compose.material3 import Slider
-            Slider(1.0, on_value_change=lambda v: None)
+            Slider(1.0, onValueChange=lambda v: None)
             """.trimIndent(),
             width = 200, height = 48,
         )
@@ -338,13 +338,13 @@ class M3ProofRenderTest {
         val drawnPixels = pixelsOf(
             """
             from androidx.compose.material3 import FloatingActionButton, Text
-            FloatingActionButton(on_click=lambda: None, content=lambda: Text('hi'))
+            FloatingActionButton(onClick=lambda: None, content=lambda: Text('hi'))
             """.trimIndent(),
         )
         val emptyPixels = pixelsOf(
             """
             from androidx.compose.material3 import FloatingActionButton
-            FloatingActionButton(on_click=lambda: None, content=lambda: None)
+            FloatingActionButton(onClick=lambda: None, content=lambda: None)
             """.trimIndent(),
         )
         val drawnColors = drawnPixels.filter { it != BACKGROUND }.toSet()
@@ -375,10 +375,10 @@ class M3ProofRenderTest {
             """
             from androidx.compose.material3 import TabRow, Tab, Text
             TabRow(
-                selected_tab_index=0,
+                selectedTabIndex=0,
                 tabs=lambda: Tab(
                     selected=True,
-                    on_click=lambda: None,
+                    onClick=lambda: None,
                     text=lambda: Text('Hi'),
                 ),
             )
@@ -389,10 +389,10 @@ class M3ProofRenderTest {
             """
             from androidx.compose.material3 import TabRow, Tab
             TabRow(
-                selected_tab_index=0,
+                selectedTabIndex=0,
                 tabs=lambda: Tab(
                     selected=True,
-                    on_click=lambda: None,
+                    onClick=lambda: None,
                     text=lambda: None,
                 ),
             )
@@ -419,13 +419,13 @@ class M3ProofRenderTest {
         val checked = inkOf(
             """
             from androidx.compose.material3 import Checkbox
-            Checkbox(checked=True, on_checked_change=lambda v: None)
+            Checkbox(checked=True, onCheckedChange=lambda v: None)
             """.trimIndent(),
         )
         val unchecked = inkOf(
             """
             from androidx.compose.material3 import Checkbox
-            Checkbox(checked=False, on_checked_change=lambda v: None)
+            Checkbox(checked=False, onCheckedChange=lambda v: None)
             """.trimIndent(),
         )
         println("compose render: Checkbox checked=$checked px, unchecked=$unchecked px")
@@ -444,13 +444,13 @@ class M3ProofRenderTest {
         val checked = inkOf(
             """
             from androidx.compose.material3 import Switch
-            Switch(checked=True, on_checked_change=lambda v: None)
+            Switch(checked=True, onCheckedChange=lambda v: None)
             """.trimIndent(),
         )
         val unchecked = inkOf(
             """
             from androidx.compose.material3 import Switch
-            Switch(checked=False, on_checked_change=lambda v: None)
+            Switch(checked=False, onCheckedChange=lambda v: None)
             """.trimIndent(),
         )
         println("compose render: Switch checked=$checked px, unchecked=$unchecked px")
@@ -562,13 +562,13 @@ class M3ProofRenderTest {
         val drawnPixels = pixelsOf(
             """
             from androidx.compose.material3 import ExtendedFloatingActionButton, Text
-            ExtendedFloatingActionButton(on_click=lambda: None, text=lambda: Text('hi'), icon=lambda: None)
+            ExtendedFloatingActionButton(onClick=lambda: None, text=lambda: Text('hi'), icon=lambda: None)
             """.trimIndent(),
         )
         val emptyPixels = pixelsOf(
             """
             from androidx.compose.material3 import ExtendedFloatingActionButton
-            ExtendedFloatingActionButton(on_click=lambda: None, text=lambda: None, icon=lambda: None)
+            ExtendedFloatingActionButton(onClick=lambda: None, text=lambda: None, icon=lambda: None)
             """.trimIndent(),
         )
         val drawnColors = drawnPixels.filter { it != BACKGROUND }.toSet()
@@ -620,14 +620,14 @@ class M3ProofRenderTest {
         val drawnPixels = pixelsOf(
             """
             from androidx.compose.material3 import AlertDialog, Text
-            AlertDialog(on_dismiss_request=lambda: None, confirm_button=lambda: Text('OK'), title=lambda: Text('hi'))
+            AlertDialog(onDismissRequest=lambda: None, confirmButton=lambda: Text('OK'), title=lambda: Text('hi'))
             """.trimIndent(),
             width = 200, height = 200,
         )
         val emptyPixels = pixelsOf(
             """
             from androidx.compose.material3 import AlertDialog
-            AlertDialog(on_dismiss_request=lambda: None, confirm_button=lambda: None, title=lambda: None)
+            AlertDialog(onDismissRequest=lambda: None, confirmButton=lambda: None, title=lambda: None)
             """.trimIndent(),
             width = 200, height = 200,
         )
@@ -651,13 +651,13 @@ class M3ProofRenderTest {
         val drawnPixels = pixelsOf(
             """
             from androidx.compose.material3 import NavigationDrawerItem, Text
-            NavigationDrawerItem(label=lambda: Text('hi'), selected=True, on_click=lambda: None)
+            NavigationDrawerItem(label=lambda: Text('hi'), selected=True, onClick=lambda: None)
             """.trimIndent(),
         )
         val emptyPixels = pixelsOf(
             """
             from androidx.compose.material3 import NavigationDrawerItem
-            NavigationDrawerItem(label=lambda: None, selected=True, on_click=lambda: None)
+            NavigationDrawerItem(label=lambda: None, selected=True, onClick=lambda: None)
             """.trimIndent(),
         )
         val drawnColors = drawnPixels.filter { it != BACKGROUND }.toSet()
@@ -680,14 +680,14 @@ class M3ProofRenderTest {
         val drawnPixels = pixelsOf(
             """
             from androidx.compose.material3 import SearchBar, Text
-            SearchBar(query="hi", on_query_change=lambda _: None, on_search=lambda _: None, active=False, on_active_change=lambda _: None, content=lambda *args: Text('hi'))
+            SearchBar(query="hi", onQueryChange=lambda _: None, onSearch=lambda _: None, active=False, onActiveChange=lambda _: None, content=lambda *args: Text('hi'))
             """.trimIndent(),
             width = 200, height = 200,
         )
         val emptyPixels = pixelsOf(
             """
             from androidx.compose.material3 import SearchBar
-            SearchBar(query="", on_query_change=lambda _: None, on_search=lambda _: None, active=False, on_active_change=lambda _: None, content=lambda *args: None)
+            SearchBar(query="", onQueryChange=lambda _: None, onSearch=lambda _: None, active=False, onActiveChange=lambda _: None, content=lambda *args: None)
             """.trimIndent(),
             width = 200, height = 200,
         )
@@ -711,8 +711,8 @@ class M3ProofRenderTest {
         // 2. DatePicker
         val datePickerInk = inkOf(
             """
-            from androidx.compose.material3 import DatePicker, remember_date_picker_state
-            DatePicker(state=remember_date_picker_state())
+            from androidx.compose.material3 import DatePicker, rememberDatePickerState
+            DatePicker(state=rememberDatePickerState())
             """.trimIndent(),
             width = 400, height = 400,
         )
@@ -721,8 +721,8 @@ class M3ProofRenderTest {
         // 3. TimePicker
         val timePickerInk = inkOf(
             """
-            from androidx.compose.material3 import TimePicker, remember_time_picker_state
-            TimePicker(state=remember_time_picker_state())
+            from androidx.compose.material3 import TimePicker, rememberTimePickerState
+            TimePicker(state=rememberTimePickerState())
             """.trimIndent(),
             width = 400, height = 400,
         )
@@ -730,10 +730,10 @@ class M3ProofRenderTest {
 
         val swipeInk = inkOf(
             """
-            from androidx.compose.material3 import SwipeToDismissBox, remember_swipe_to_dismiss_box_state, Text
+            from androidx.compose.material3 import SwipeToDismissBox, rememberSwipeToDismissBoxState, Text
             SwipeToDismissBox(
-                state=remember_swipe_to_dismiss_box_state(),
-                background_content=lambda: Text("bg"),
+                state=rememberSwipeToDismissBoxState(),
+                backgroundContent=lambda: Text("bg"),
                 content=lambda: Text("fg")
             )
             """.trimIndent(),
@@ -780,7 +780,7 @@ class M3ProofRenderTest {
             from androidx.compose.material3 import DropdownMenu, Text
             DropdownMenu(
                 expanded=True,
-                on_dismiss_request=lambda: None,
+                onDismissRequest=lambda: None,
                 content=lambda: Text("Menu Item")
             )
             """.trimIndent(),

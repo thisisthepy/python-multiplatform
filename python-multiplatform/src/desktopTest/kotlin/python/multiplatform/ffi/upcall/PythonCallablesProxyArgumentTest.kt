@@ -76,7 +76,7 @@ class PythonCallablesProxyArgumentTest {
                     Python3.exec(
                         """
                         from proxycls import Counter
-                        from pythonx.runtime import newFunction as _pcpat_new_function
+                        from python.multiplatform.ffi.pythonx.PythonCallables import newFunction as _pcpat_new_function
                         _pcpat_c = Counter(3)
                         _pcpat_handle = _pcpat_new_function(_pcpat_c, 0, False, '', '')
                         assert _pcpat_handle != 0, 'expected a real wrapper handle back'

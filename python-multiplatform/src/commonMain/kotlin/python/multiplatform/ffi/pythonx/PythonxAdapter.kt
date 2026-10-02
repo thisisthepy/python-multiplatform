@@ -1,12 +1,21 @@
 package python.multiplatform.ffi.pythonx
 
 import python.multiplatform.ffi.Python3
+import python.multiplatform.ffi.upcall.KotlinSurface
 import python.multiplatform.reflection.ExposedCallable
 import python.multiplatform.reflection.UpcallTable
 
 /**
- * `pythonx` -- the hand-written Python that adapts the Kotlin declarations, and the generated table
- * it reads.
+ * The binding layer -- `python_multiplatform.binding`, the hand-written Python that serves Kotlin
+ * declarations on their Kotlin-named modules, and the generated table it reads.
+ *
+ * **It renames nothing, and it is not `pythonx`.** A Kotlin-named module carries Kotlin's own
+ * surface: Kotlin declaration names, keyword arguments by Kotlin parameter names, Kotlin defaults,
+ * overloads, value-class rules and the `$composer` slot (`docs/INTENT.md` §2.2). The Kotlin
+ * package and class names below (`ffi.pythonx`, `PythonxAdapter`) are historical; the Python module
+ * this installs is binder-owned, and `pythonx` is a real package in pythonx-compose that builds a
+ * Pythonic API on top of this one through `python_multiplatform.describe` and `inspect.signature`
+ * ([KotlinSurface]).
  *
  * `docs/design/pythonx-adapter-design.md` §7 draws one line through this whole area: **if it differs per
  * Kotlin declaration it is generated or resolved at run time; if it is the same rule for every
@@ -66,6 +75,12 @@ import python.multiplatform.reflection.UpcallTable
 object PythonxAdapter {
 
     /**
+     * Where the binding layer lives in `sys.modules`: a binder-owned name under
+     * [KotlinSurface.MODULE_NAME], never `pythonx` (see [DELIVERY]).
+     */
+    const val MODULE_NAME: String = "python_multiplatform.binding"
+
+    /**
      * The adaptation layer itself: hand-written Python, the same for every table.
      *
      * Read it as a file -- it is one, and the indentation the Kotlin literal adds is removed by
@@ -75,7 +90,7 @@ object PythonxAdapter {
      * |---|---|
      * | `_Finder` / `_Loader` | §2.3, the hook a module `__getattr__` cannot replace |
      * | the module `__getattr__` the loader installs | §4.1, adapted once and then a dict hit |
-     * | `to_python_name` / `to_kotlin_name` / `kotlin_name_for` | §3, forward by rule, backward by index |
+     * | Kotlin names, unchanged | `docs/INTENT.md` §2.2 -- no rule converts a name in either direction |
      * | `_Overloads` | `docs/design/kotlin-extensions-in-python.md` §3.1, the dispatcher that has to live here |
      * | `_proxy_type` / `_Hybrid` | §4.2, an extension as a method on its receiver, both spellings |
      * | `_coerce`'s allowlist | §4.4, `Dp` yes, a packed value class no |
@@ -83,7 +98,12 @@ object PythonxAdapter {
     val SOURCE: String = """
         # GENERATED-FREE: this file is hand-written Python. See PythonxAdapter.kt.
         #
-        # `pythonx` -- the adaptation layer over the Kotlin declarations the upcall table exposes.
+        # `python_multiplatform.binding` -- the binding layer over the Kotlin declarations the upcall
+        # table exposes. It serves Kotlin-named modules with **Kotlin's own surface**: Kotlin
+        # declaration names, keyword arguments by Kotlin parameter names, Kotlin defaults, overloads,
+        # value-class rules and the `${'$'}composer` slot. It renames nothing. Making that surface
+        # Pythonic is the job of a real Python package built on top of it (pythonx-compose), which
+        # reads `python_multiplatform.describe` and `inspect.signature` to do it by rule.
         #
         # `docs/design/pythonx-adapter-design.md` §7 draws the line this file lives on: *if it differs per Kotlin
         # declaration it is generated or resolved at run time; if it is the same rule for every declaration
@@ -100,7 +120,7 @@ object PythonxAdapter {
         import sys as _sys
         import types as _types
 
-        __path__ = []  # a package with no directory: submodules come from _Finder below
+        from python_multiplatform import KOTLIN_DEFAULT, signature_of as _signature_of
 
 
 
@@ -124,7 +144,7 @@ object PythonxAdapter {
                 if _resolve_fn is None or _invoke_fn is None:
                     raise RuntimeError(
                         'the raw upcall entry points are not bound: define _pm_resolve(name_bytes) -> '
-                        'handle and _pm_invoke(handle, args_tuple) -> result before installing pythonx'
+                        'handle and _pm_invoke(handle, args_tuple) -> result before installing the binding layer'
                     )
                 _BOUNDARY['resolve'] = _resolve_fn
                 _BOUNDARY['invoke'] = _invoke_fn
@@ -151,7 +171,8 @@ object PythonxAdapter {
                 'kotlin_name', 'package', 'leaf', 'base', 'suffix', 'arity', 'kind', 'is_suspend',
                 'param_names', 'param_tags', 'param_type_names', 'return_tag', 'return_type_name',
                 'is_extension', 'receiver_type_name', 'param_has_default', 'handle',
-                'composer_index', 'changed_slots', 'default_slots', 'return_supertypes',
+                'composer_index', 'changed_slots', 'default_slots', 'return_supertypes', 'row',
+                'binding',
             )
 
             def __init__(self, row):
@@ -161,12 +182,16 @@ object PythonxAdapter {
                 # In place, and reusing the object: everything already adapted -- a `_Binding` in a module
                 # dict, a `_Hybrid` on a proxy type -- points at this object, and a table reinstall must
                 # refresh what they see rather than leave them looking at the previous epoch's row.
+                # The row itself is kept as sent: it is what `python_multiplatform.describe` and
+                # `inspect.signature` read, the same tuple the proxy layer publishes with.
+                self.row = row
+                self.binding = None
                 (self.kotlin_name, self.arity, self.kind, self.is_suspend, self.param_names,
                  self.param_tags, self.param_type_names, self.return_tag, self.return_type_name,
                  self.is_extension, self.receiver_type_name, self.param_has_default) = row
                 # The declared return type and what it **is a** travel in one string; see
                 # `_split_supertypes`. Split here, once, so that everything downstream -- `_wrap`,
-                # `_pythonx_type_name`, every message -- keeps seeing exactly the name it did before.
+                # `_kotlin_type_name`, every message -- keeps seeing exactly the name it did before.
                 self.return_type_name, self.return_supertypes = _split_supertypes(self.return_type_name)
                 self.package, _, self.leaf = self.kotlin_name.rpartition('.')
                 self.base, _, self.suffix = self.leaf.partition('__')
@@ -189,9 +214,6 @@ object PythonxAdapter {
                 '''
                 return self.arity if self.composer_index < 0 else self.composer_index
 
-            def python_name(self):
-                return to_python_name(self.leaf)
-
             def signature(self):
                 parts = []
                 for index in range(self.declared_arity()):
@@ -199,14 +221,14 @@ object PythonxAdapter {
                     if name == '<receiver>':
                         continue
                     type_name = self.param_type_names[index] if self.param_type_names else self.param_tags[index]
-                    part = to_python_name(name) + ': ' + _simple_name(type_name)
+                    part = name + ': ' + _simple_name(type_name)
                     if self.omittable(index):
                         # The same `= ...` a `.pyi` writes, and for the same reason: a refusal that
                         # listed an optional parameter as if it were required would send the caller
                         # looking for a value they never had to supply.
                         part += ' = ...'
                     parts.append(part)
-                return to_python_name(self.leaf) + '(' + ', '.join(parts) + ')'
+                return self.leaf + '(' + ', '.join(parts) + ')'
 
             def omittable(self, index):
                 '''Whether slot [index] may be left out of a call.
@@ -230,9 +252,9 @@ object PythonxAdapter {
 
 
         _TABLE = {}          # kotlin fqn -> _Decl
-        _MODULES = []        # the pythonx.* modules the loader has built
-        _BY_PACKAGE = {}     # kotlin package -> {python name -> [_Decl]}
-        _BY_RECEIVER = {}    # kotlin receiver type -> {python name -> [_Decl]}
+        _MODULES = []        # the Kotlin-named modules this layer has adapted
+        _BY_PACKAGE = {}     # kotlin package -> {kotlin name -> [_Decl]}
+        _BY_RECEIVER = {}    # kotlin receiver type -> {kotlin name -> [_Decl]}
         _PACKAGES_SEEN = set()
         _SUPERTYPES = {}     # kotlin type name -> the types it is a, nearest first
 
@@ -314,18 +336,30 @@ object PythonxAdapter {
             adapt_existing_modules()
 
 
+        def _drop_adapted(module):
+            '''Removes what this layer cached in [module], and nothing anybody else put there.
+
+            The proxy layer (`PythonProxySource`) publishes into the same Kotlin-named modules, and
+            a name it wrote after this layer cached one is **its**, not stale: it delegates back here
+            at call time. So a name goes only if it still holds the very object this layer put there.
+            '''
+            for name, value in getattr(module, '_kotlin_adapted', {}).items():
+                if module.__dict__.get(name) is value:
+                    del module.__dict__[name]
+            module._kotlin_adapted = {}
+
+
         def _invalidate():
             '''Drops every handle, adapted name and attached method, so the next read resolves again.'''
             for decl in _TABLE.values():
                 decl.handle = None
+                decl.binding = None
             for module in _MODULES:
-                for name in module._pythonx_adapted:
-                    module.__dict__.pop(name, None)
-                module._pythonx_adapted = []
+                _drop_adapted(module)
             for cls in _PROXY_TYPES.values():
-                for name in cls._pythonx_attached:
+                for name in cls._kotlin_attached:
                     type.__delattr__(cls, name)
-                cls._pythonx_attached = []
+                cls._kotlin_attached = []
             # The host rebinds `_pm_resolve`/`_pm_invoke` per interpreter and, in this repository's
             # fixture, per test. Re-reading them costs one attribute lookup per install.
             _BOUNDARY.clear()
@@ -335,10 +369,10 @@ object PythonxAdapter {
             # Two keys per declaration: the base name, which an overload set shares, and the explicit
             # `name__Types` spelling, which is always exactly one declaration. `docs/kotlin-extensions-in-
             # python.md` §3.1 -- the explicit name is the caller saying which, and it has to keep working
-            # whether or not the dispatcher can decide.
-            table.setdefault(to_python_name(decl.base), []).append(decl)
+            # whether or not the dispatcher can decide. Both keys are Kotlin names, unchanged.
+            table.setdefault(decl.base, []).append(decl)
             if decl.suffix:
-                table.setdefault(to_python_name(decl.leaf), []).append(decl)
+                table.setdefault(decl.leaf, []).append(decl)
 
 
         def bound_names():
@@ -346,7 +380,13 @@ object PythonxAdapter {
             return list(_TABLE)
 
 
-        # --------------------------------------------------------------------------- names (§3)
+        # --------------------------------------------------------------------------- names
+
+        # **Kotlin names, unchanged, everywhere.** A Kotlin declaration is reached under its own name
+        # and takes keyword arguments by its own parameter names. There used to be a forward rule
+        # here (`fillMaxWidth` -> `fill_max_width`) and its inverse; both are gone, because a binder
+        # that renames is deciding what a Python API is called, and that is the business of the
+        # Python package built on top (`docs/INTENT.md` §2.2, §2.3).
 
         _KOTLIN_PRIMITIVES = frozenset((
             'kotlin.Byte', 'kotlin.Short', 'kotlin.Int', 'kotlin.Long', 'kotlin.Float', 'kotlin.Double',
@@ -354,65 +394,45 @@ object PythonxAdapter {
         ))
 
 
-        def to_python_name(kotlin_name):
-            '''Kotlin -> Python, the forward direction, which is the one the `.pyi` generator runs.
+        _NOT_BOUND = object()
 
-            A name that starts with an upper-case letter is a type, an object, an enum entry or a
-            composable, and stays PascalCase; everything else is a function, a method, a property or a
-            parameter, and becomes snake_case. The `__Types` suffix of an overload is a list of Kotlin type
-            names and is not touched.
+        # The `UpcallTable` epoch this layer's table was registered for; stamped by
+        # `PythonxAdapter.install`. `python_multiplatform.kotlin_function` compares it with the proxy
+        # layer's own stamp, so a layer installed for an older table never answers for a newer one.
+        _registered_epoch = -1
+
+        # `PythonProxySource.PY_OBJECT`: the one declared parameter type that means "hand this call
+        # the Python object itself".
+        _PY_OBJECT = 'python.multiplatform.ffi.PyObject'
+
+
+        def _read_named(kotlin_name):
+            '''The current value of one exact `STATIC_GETTER` name, or `_NOT_BOUND`.
+
+            What the proxy layer's module-attribute descriptor asks on every read, for the reason
+            `_callable_named` gives for a function.
             '''
-            base, sep, suffix = kotlin_name.partition('__')
-            if not base or base[0].isupper():
-                return kotlin_name
-            out = []
-            for index, ch in enumerate(base):
-                if ch.isupper():
-                    previous = base[index - 1] if index else ''
-                    following = base[index + 1] if index + 1 < len(base) else ''
-                    # A boundary is where a run of capitals starts or where it ends: `zIndex` -> `z_index`,
-                    # `toURLString` -> `to_url_string`.
-                    if index and (not previous.isupper() or (following and not following.isupper())):
-                        out.append('_')
-                    out.append(ch.lower())
-                else:
-                    out.append(ch)
-            return ''.join(out) + sep + suffix
+            decl = _TABLE.get(kotlin_name)
+            if decl is None or decl.kind != 'STATIC_GETTER':
+                return _NOT_BOUND
+            return _read_constant(decl)
 
 
-        def to_kotlin_name(python_name):
-            '''Python -> Kotlin, by rule alone.
+        def _callable_named(kotlin_name):
+            '''The callable this layer serves for one exact Kotlin name, or `None`.
 
-            **This is not injective and the adapter does not rely on it.** `to_url_string` comes back as
-            `toUrlString`, which is not a declaration anybody wrote. It is the last resort under
-            `kotlin_name_for`, which consults the index the forward rule built first -- that index is the
-            "map of exceptions" `docs/design/pythonx-adapter-design.md` §3 asks the plugin to emit, except that it
-            is derived from the table at run time and so cannot drift from it.
+            What the proxy layer's published function asks on every call (`python_multiplatform
+            .kotlin_function`): when this layer knows the declaration, the call is this layer's. A
+            `suspend fun` is not, because only the proxy layer's `async def` awaits its result, and
+            neither is a property read.
             '''
-            base, sep, suffix = python_name.partition('__')
-            if not base or base[0].isupper():
-                return python_name
-            parts = base.split('_')
-            head = parts[0]
-            tail = ''.join(part[:1].upper() + part[1:] for part in parts[1:])
-            return head + tail + sep + suffix
-
-
-        def kotlin_name_for(kotlin_package, python_name):
-            '''The Kotlin declaration a Python name in [kotlin_package] means, or `None`.
-
-            Index first, rule second. `docs/design/pythonx-adapter-design.md` §3's invariant -- every name the
-            stub generator emits must resolve through the adapter -- is a statement about this function.
-            '''
-            decls = _BY_PACKAGE.get(kotlin_package, {}).get(python_name)
-            if decls:
-                if len(decls) == 1:
-                    return decls[0].kotlin_name
-                return [decl.kotlin_name for decl in decls]
-            candidate = kotlin_package + '.' + to_kotlin_name(python_name)
-            if candidate in _TABLE:
-                return candidate
-            return None
+            decl = _TABLE.get(kotlin_name)
+            if decl is None or decl.kind != 'FUNCTION' or decl.is_suspend:
+                return None
+            binding = decl.binding
+            if binding is None:
+                binding = decl.binding = _Binding(decl)
+            return binding
 
 
         def _simple_name(qualified):
@@ -446,15 +466,15 @@ object PythonxAdapter {
             A `pythonx` proxy (`_proxy_type`) is the opposite on purpose: it is one class **per**
             Kotlin type, because `_attach` needs a distinct class to hang each receiver's extension
             methods off (`_BY_RECEIVER` is keyed on it). That is already known at class-definition
-            time, so it is a *class* attribute (`_pythonx_type_name`), not an instance one.
+            time, so it is a *class* attribute (`_kotlin_type_name`), not an instance one.
 
-            Before this, `_coerce` read `type(value)._pythonx_type_name` unconditionally and crashed
-            -- `AttributeError: type object '_PmObject' has no attribute '_pythonx_type_name'` --
+            Before this, `_coerce` read `type(value)._kotlin_type_name` unconditionally and crashed
+            -- `AttributeError: type object '_PmObject' has no attribute '_kotlin_type_name'` --
             the first time a walked result (an `_PmObject`) was passed into a `pythonx`-adapted
             call, because `_PmObject` never had that attribute and was never going to: giving it one
             would mean a class per type, which is the cost `_PmObject` exists to avoid.
             '''
-            declared = getattr(type(value), '_pythonx_type_name', None)
+            declared = getattr(type(value), '_kotlin_type_name', None)
             if declared is not None:
                 return declared
             return getattr(value, '_pm_type', None)
@@ -806,7 +826,7 @@ object PythonxAdapter {
             jvm_arity, composable, arg_types, _return_type = slot
             key = _intern_key(value, slot)
             if key:
-                found = _boundary()['invoke'](_resolve('pythonx.runtime.findFunction'), (key,))
+                found = _boundary()['invoke'](_resolve('${PythonCallables.FIND_FUNCTION}'), (key,))
                 if found:
                     return found
             wanted = _positional_capacity(value, len(arg_types))
@@ -818,7 +838,7 @@ object PythonxAdapter {
                 )
             body = _callable_thunk(value, composable, arg_types, wanted)
             return _boundary()['invoke'](
-                _resolve('pythonx.runtime.newFunction'),
+                _resolve('${PythonCallables.NEW_FUNCTION}'),
                 (body, jvm_arity, composable, ','.join(_arg_tag(t) for t in arg_types), key),
             )
 
@@ -888,6 +908,14 @@ object PythonxAdapter {
             def __call__(self, *args, **kwargs):
                 return self._fn(self._receiver, *args, **kwargs)
 
+            @property
+            def __signature__(self):
+                return _signature_of(self._fn.__kotlin_rows__, drop_receiver=True)
+
+            @property
+            def __kotlin_rows__(self):
+                return self._fn.__kotlin_rows__
+
 
         class _Hybrid:
             '''`Modifier.padding(16)` and `m.padding(16)`, from one descriptor.
@@ -919,21 +947,21 @@ object PythonxAdapter {
                     raise AttributeError(name)
                 if not _attach(cls, name):
                     raise AttributeError(
-                        'no Kotlin extension named ' + name + ' on ' + cls._pythonx_type_name
+                        'no Kotlin extension named ' + name + ' on ' + cls._kotlin_type_name
                     )
                 return getattr(cls, name)
 
             def __repr__(cls):
-                return "<pythonx proxy for '" + cls._pythonx_type_name + "'>"
+                return "<Kotlin proxy for '" + cls._kotlin_type_name + "'>"
 
 
-        def _attach(cls, python_name):
-            '''Installs one extension as a method on [cls], and reports whether there was one.'''
-            decls = _BY_RECEIVER.get(cls._pythonx_type_name, {}).get(python_name)
+        def _attach(cls, name):
+            '''Installs one extension as a method on [cls], under its Kotlin name, and reports whether there was one.'''
+            decls = _BY_RECEIVER.get(cls._kotlin_type_name, {}).get(name)
             if not decls:
                 return False
-            setattr(cls, python_name, _Hybrid(_callable_for(python_name, decls), python_name))
-            cls._pythonx_attached.append(python_name)
+            setattr(cls, name, _Hybrid(_callable_for(name, decls), name))
+            cls._kotlin_attached.append(name)
             return True
 
 
@@ -962,7 +990,7 @@ object PythonxAdapter {
                     raise AttributeError(name)
                 if not _attach(type(self), name):
                     raise AttributeError(
-                        'no Kotlin extension named ' + name + ' on ' + type(self)._pythonx_type_name
+                        'no Kotlin extension named ' + name + ' on ' + type(self)._kotlin_type_name
                     )
                 return getattr(self, name)
 
@@ -975,7 +1003,7 @@ object PythonxAdapter {
                 if factory is None:
                     raise TypeError(
                         'no empty ' + _simple_name(kotlin_type_name) + ' is bound: call '
-                        "pythonx.register_empty('" + kotlin_type_name + "', '<kotlin function name>') "
+                        "python_multiplatform.binding.register_empty('" + kotlin_type_name + "', '<kotlin function name>') "
                         'or start the chain from a value Kotlin handed you'
                     )
                 return _wrap(_boundary()['invoke'](_resolve(factory), ()), kotlin_type_name)
@@ -986,8 +1014,8 @@ object PythonxAdapter {
                 '__getattr__': __getattr__,
                 '__repr__': __repr__,
                 'empty': empty,
-                '_pythonx_type_name': kotlin_type_name,
-                '_pythonx_attached': [],
+                '_kotlin_type_name': kotlin_type_name,
+                '_kotlin_attached': [],
                 '__qualname__': _simple_name(kotlin_type_name),
             }
             cls = _ProxyMeta(_simple_name(kotlin_type_name), (object,), body)
@@ -1014,6 +1042,12 @@ object PythonxAdapter {
                         _simple_name(value.kotlin_type_name),
                     )
                 return value.raw
+            if tag == 'OBJECT' and type_name == _PY_OBJECT:
+                # A parameter declared as the Python object type takes the Python object itself --
+                # a proxy included, which must **not** be unwrapped to the Kotlin object behind it.
+                # The same rule `PythonProxySource.argValues` applies (`PY_OBJECT`), so a call reaches
+                # Kotlin with the same argument whichever layer served it.
+                return value
             if tag == 'OBJECT':
                 # A Kotlin function type is the one OBJECT slot Python can fill with something it
                 # made itself. Everything else in this branch requires a handle, because a Kotlin
@@ -1083,7 +1117,7 @@ object PythonxAdapter {
                         return _refuse(
                             strict,
                             'a raw number is not accepted for ' + _simple_name(type_name) +
-                            ': it is a value class and not on pythonx allowlist, so ' + repr(value) +
+                            ': it is a value class and not on the raw-primitive allowlist, so ' + repr(value) +
                             ' would be reinterpreted rather than converted',
                         )
                 return float(value) if tag == 'FLOAT' else int(value)
@@ -1231,10 +1265,10 @@ object PythonxAdapter {
                     index = -1
                     for slot in range(declared):
                         # `<receiver>` is deliberately not a Python identifier, so no keyword can name
-                        # it -- but `to_python_name` is not asked to make sense of one either.
+                        # it. Every other slot answers to its Kotlin parameter name, exactly.
                         if decl.param_names[slot] == '<receiver>':
                             continue
-                        if to_python_name(decl.param_names[slot]) == key:
+                        if decl.param_names[slot] == key:
                             index = slot
                             break
                     if index < 0:
@@ -1246,10 +1280,10 @@ object PythonxAdapter {
             omitted = 0
             for index in range(declared):
                 value = slots[index]
-                if value is _NO_MATCH or value is None:
+                if value is _NO_MATCH or value is None or value is KOTLIN_DEFAULT:
                     if not decl.omittable(index):
                         missing = decl.param_names[index] if decl.param_names else 'argument ' + str(index)
-                        return _refuse(strict, 'no value for ' + to_python_name(missing))
+                        return _refuse(strict, 'no value for ' + missing)
                     word, bit = divmod(index - bit_offset, _DEFAULT_BITS_PER_WORD)
                     if word >= len(mask):
                         return _refuse(strict, 'no ${'$'}default word covers parameter ' + str(index))
@@ -1291,7 +1325,7 @@ object PythonxAdapter {
                 for key, value in kwargs.items():
                     index = -1
                     for slot, name in enumerate(decl.param_names):
-                        if name != '<receiver>' and to_python_name(name) == key:
+                        if name != '<receiver>' and name == key:
                             index = slot
                             break
                     if index < 0:
@@ -1302,10 +1336,10 @@ object PythonxAdapter {
             defaults_used = 0
             for index, value in enumerate(slots):
                 omittable = decl.omittable(index)
-                if value is _NO_MATCH or (value is None and omittable):
+                if value is _NO_MATCH or value is KOTLIN_DEFAULT or (value is None and omittable):
                     if not omittable:
                         missing = decl.param_names[index] if decl.param_names else 'argument ' + str(index)
-                        return _refuse(strict, 'no value for ' + to_python_name(missing))
+                        return _refuse(strict, 'no value for ' + missing)
                     # `None` is the whole mechanism, and it is not a value being passed: the generated
                     # Kotlin body tests `args[i] == null` and takes a branch whose call expression does
                     # not mention this parameter at all, so the *compiler* supplies the default.
@@ -1342,8 +1376,17 @@ object PythonxAdapter {
 
             def __init__(self, decl):
                 self._decl = decl
-                self.__name__ = decl.python_name()
+                self.__name__ = decl.leaf
                 self.__qualname__ = decl.kotlin_name
+
+            @property
+            def __signature__(self):
+                # Built when asked for -- `inspect.signature` reads it -- and never at adaptation.
+                return _signature_of((self._decl.row,))
+
+            @property
+            def __kotlin_rows__(self):
+                return (self._decl.row,)
 
             def __call__(self, *args, **kwargs):
                 decl = self._decl
@@ -1386,6 +1429,15 @@ object PythonxAdapter {
                 self._decls = decls
                 self.__name__ = name
 
+            @property
+            def __signature__(self):
+                # An overload set has no single signature; `describe` lists every candidate's.
+                return _signature_of(tuple(decl.row for decl in self._decls))
+
+            @property
+            def __kotlin_rows__(self):
+                return tuple(decl.row for decl in self._decls)
+
             def __call__(self, *args, **kwargs):
                 matched = []
                 for decl in self._decls:
@@ -1410,7 +1462,7 @@ object PythonxAdapter {
                         decl.return_type_name if decl.return_tag == 'OBJECT' else None,
                     )
                 candidates = ', '.join(decl.signature() for decl in self._decls)
-                spellings = ', '.join(to_python_name(decl.leaf) for decl in self._decls)
+                spellings = ', '.join(decl.leaf for decl in self._decls)
                 if not matched:
                     raise TypeError(
                         'no overload of ' + self.__name__ + ' accepts these arguments. Candidates: ' +
@@ -1423,10 +1475,10 @@ object PythonxAdapter {
                 )
 
 
-        def _callable_for(python_name, decls):
+        def _callable_for(name, decls):
             if len(decls) == 1:
                 return _Binding(decls[0])
-            return _Overloads(python_name, decls)
+            return _Overloads(name, decls)
 
 
         # --------------------------------------------------------------------------- modules (§2.3)
@@ -1444,9 +1496,9 @@ object PythonxAdapter {
             )
 
 
-        def _adapt(kotlin_package, python_name):
-            '''The value or callable [python_name] means in [kotlin_package], and whether `_module_
-            getattr` may freeze it into the module dict.
+        def _adapt(kotlin_package, name):
+            '''The value or callable the Kotlin name [name] means in [kotlin_package], and whether
+            `_module_getattr` may freeze it into the module dict.
 
             A `kind == 'STATIC_GETTER'` decl is read rather than called (see `_read_constant`) and
             is never cacheable: `ArtifactScanner.constantsOf` binds every public property of an
@@ -1455,21 +1507,19 @@ object PythonxAdapter {
             counter, say -- so the generic "resolved once, then a module-dict hit" cache every other
             adapted name gets here is refused for this one kind, and every read re-enters Kotlin.
             '''
-            decls = _BY_PACKAGE.get(kotlin_package, {}).get(python_name)
+            decls = _BY_PACKAGE.get(kotlin_package, {}).get(name)
             if decls:
                 if len(decls) == 1 and decls[0].kind == 'STATIC_GETTER':
                     return _read_constant(decls[0]), False
-                return _callable_for(python_name, decls), True
-            qualified = kotlin_package + '.' + python_name
-            if python_name[:1].isupper() and (qualified in _BY_RECEIVER or qualified in _PROXY_TYPES):
-                # A type, not a declaration: `pythonx.compose.ui.Modifier` is the receiver proxy.
+                if len(decls) == 1 and decls[0].kind == 'FUNCTION':
+                    # The same object `_callable_named` hands the proxy layer, so a name reaches
+                    # one callable whichever route found it.
+                    return _callable_named(decls[0].kotlin_name) or _Binding(decls[0]), True
+                return _callable_for(name, decls), True
+            qualified = kotlin_package + '.' + name
+            if name[:1].isupper() and (qualified in _BY_RECEIVER or qualified in _PROXY_TYPES):
+                # A type, not a declaration: `androidx.compose.ui.Modifier` is the receiver proxy.
                 return _proxy_type(qualified), True
-            candidate = kotlin_package + '.' + to_kotlin_name(python_name)
-            if candidate in _TABLE:
-                decl = _TABLE[candidate]
-                if decl.kind == 'STATIC_GETTER':
-                    return _read_constant(decl), False
-                return _Binding(decl), True
             return None, False
 
 
@@ -1491,7 +1541,7 @@ object PythonxAdapter {
                 # for this name -- which is why the 551-587 ns figure for a live-property `__getattr__`
                 # does not price this one.
                 setattr(module, name, adapted)
-                module._pythonx_adapted.append(name)
+                module._kotlin_adapted[name] = adapted
                 return adapted
 
             return __getattr__
@@ -1527,12 +1577,10 @@ object PythonxAdapter {
             a module named after its Kotlin package has no such root to drop.
             '''
             module.__path__ = getattr(module, '__path__', [])
-            module._pythonx_kotlin_package = kotlin_package
+            module._kotlin_package = kotlin_package
             # Names adapted by a previous install are stale with it; the fresh `__getattr__` below
-            # re-resolves each on first use.
-            for _stale in getattr(module, '_pythonx_adapted', ()):
-                module.__dict__.pop(_stale, None)
-            module._pythonx_adapted = []
+            # re-resolves each on first use. Only this layer's own -- see `_drop_adapted`.
+            _drop_adapted(module)
             if kotlin_package is None:
                 # A step on the way to a package that has bindings, carrying none of its own.
                 return module
@@ -1570,7 +1618,7 @@ object PythonxAdapter {
         class _Finder:
             '''The half a module `__getattr__` cannot do.
 
-            `import pythonx.compose.material3` fails *before* any attribute is touched, so laziness inside
+            `import androidx.compose.material3` fails *before* any attribute is touched, so laziness inside
             a module is not enough to make the module lazy. A finder answers the import, and the
             `__getattr__` the loader installs answers the names inside it -- two hooks,
             `docs/design/pythonx-adapter-design.md` §2.3.
@@ -1579,9 +1627,9 @@ object PythonxAdapter {
             def find_spec(self, fullname, path=None, target=None):
                 # The name asked for *is* the Kotlin package name. No translation, no prefix, no
                 # map: `import androidx.compose.foundation.layout` resolves because that package
-                # has bindings, and `import pythonx.compose.layout` does not resolve here at all --
-                # that name belongs to a real distribution whose files are on `sys.path`, and this
-                # finder is appended to `sys.meta_path` so the ordinary path finder answers first.
+                # has bindings, and `import pythonx` does not resolve here at all -- that name
+                # belongs to a real distribution whose files are on `sys.path`, and this finder is
+                # appended to `sys.meta_path` so the ordinary path finder answers first.
                 #
                 # A package nothing is bound under is not importable, so a typo is a
                 # ModuleNotFoundError at the import rather than an AttributeError several lines
@@ -1603,26 +1651,28 @@ object PythonxAdapter {
     """.trimIndent()
 
     /**
-     * Puts [SOURCE] into `sys.modules` as the package `pythonx`, exactly once per interpreter.
+     * Puts [SOURCE] into `sys.modules` as `python_multiplatform.binding`, exactly once per
+     * interpreter, after the root module it imports from ([KotlinSurface]).
+     *
+     * **A binder-owned name, and never `pythonx`.** This used to install a `ModuleType('pythonx')`
+     * with `__path__ = []`, and CPython answers `import pythonx` from `sys.modules` before it looks
+     * at `sys.path` -- so the real `pythonx` package (pythonx-compose) could never load once this
+     * had run. `docs/INTENT.md` §2.3, `AGENTS.md` §12.2.
      *
      * The module object is built here rather than by an import, because there is no file for an
-     * import to find (see the class KDoc). `__path__ = []` is what makes it a *package*, which is
-     * what lets `pythonx.compose.ui` be a submodule at all; the finder [SOURCE] installs answers
-     * for those.
-     *
-     * Guarded on `sys.modules` rather than on a Kotlin flag: this repository's test fixture
-     * finalizes and re-initialises the interpreter between tests, and a Kotlin flag would then say
-     * "installed" about an interpreter that no longer exists.
+     * import to find (see the class KDoc). Guarded on `sys.modules` rather than on a Kotlin flag:
+     * this repository's test fixture finalizes and re-initialises the interpreter between tests,
+     * and a Kotlin flag would then say "installed" about an interpreter that no longer exists.
      */
     private val DELIVERY: String = """
         import sys as _px_sys
         import types as _px_types
 
-        if 'pythonx' not in _px_sys.modules:
-            _px_mod = _px_types.ModuleType('pythonx')
-            _px_mod.__path__ = []
-            _px_sys.modules['pythonx'] = _px_mod
-            exec(compile(_px_src, 'pythonx/__init__.py', 'exec'), _px_mod.__dict__)
+        if '$MODULE_NAME' not in _px_sys.modules:
+            _px_mod = _px_types.ModuleType('$MODULE_NAME')
+            _px_sys.modules['$MODULE_NAME'] = _px_mod
+            _px_sys.modules['${KotlinSurface.MODULE_NAME}'].binding = _px_mod
+            exec(compile(_px_src, 'python_multiplatform/binding.py', 'exec'), _px_mod.__dict__)
             del _px_mod
         del _px_src, _px_sys, _px_types
     """.trimIndent()
@@ -1638,9 +1688,10 @@ object PythonxAdapter {
         // The delivery route is an `r"""..."""` Python literal, so a triple double-quote inside
         // [SOURCE] would end it early and a trailing backslash would escape its closing quote.
         // Both would surface as a SyntaxError with a line number inside a string nobody can see.
-        require(!SOURCE.contains("\"\"\"")) { "the pythonx source must not contain a triple double-quote" }
-        require(!SOURCE.endsWith("\\")) { "the pythonx source must not end in a backslash" }
+        require(!SOURCE.contains("\"\"\"")) { "the binding-layer source must not contain a triple double-quote" }
+        require(!SOURCE.endsWith("\\")) { "the binding-layer source must not end in a backslash" }
         return buildString {
+            appendLine(KotlinSurface.DELIVERY)
             appendLine("_px_src = r\"\"\"")
             appendLine(SOURCE)
             appendLine("\"\"\"")
@@ -1677,31 +1728,20 @@ object PythonxAdapter {
      *    was worth carrying before anything read it.
      */
     fun renderTable(entries: List<ExposedCallable>): String = buildString {
-        appendLine("import pythonx as _px_pythonx")
-        appendLine("_px_pythonx._register_table((")
+        appendLine("import $MODULE_NAME as _px_binding")
+        appendLine("_px_binding._register_table((")
         entries.forEach { entry ->
-            append("    (")
-            append(entry.name.quoted())
-            append(", ${entry.arity}")
-            append(", ${entry.kind.name.quoted()}")
-            append(", ${entry.isSuspend.py()}")
-            append(", ${entry.paramNames.map { it.quoted() }.tuple()}")
-            append(", ${entry.paramTypes.map { it.name.quoted() }.tuple()}")
-            append(", ${entry.paramTypeNames.map { it.quoted() }.tuple()}")
-            append(", ${entry.returnType.name.quoted()}")
-            append(", ${entry.returnTypeName?.quoted() ?: "None"}")
-            append(", ${entry.isExtension.py()}")
-            append(", ${entry.receiverTypeName?.quoted() ?: "None"}")
-            append(", ${entry.paramHasDefault.map { it.py() }.tuple()}")
-            appendLine("),")
+            append("    ")
+            append(KotlinSurface.row(entry))
+            appendLine(",")
         }
         appendLine("))")
         // Eager, and the only eager thing here: a target whose bootstrap publishes no entry points
         // must fail at install with the message that says so, rather than at the first attribute
         // read several files away. Everything else -- every handle, every proxy type, every module
         // -- is resolved on first use.
-        appendLine("_px_pythonx._boundary()")
-        append("del _px_pythonx")
+        appendLine("_px_binding._boundary()")
+        append("del _px_binding")
     }
 
     /**
@@ -1716,13 +1756,18 @@ object PythonxAdapter {
         UpcallTable.register(PythonCallables.Fragment)
         val source = render(UpcallTable.entries())
         Python3.exec(source)
+        Python3.exec(
+            "import $MODULE_NAME as _px_binding\n" +
+                "_px_binding._registered_epoch = ${UpcallTable.currentEpoch}\n" +
+                "del _px_binding",
+        )
         // Applied after the adapter exists, because `allow_raw_primitive` is one of the names it
         // defines. Which value classes may be written as a raw primitive is a fact about the
         // library that declares them, so it is injected rather than known here.
         if (rawPrimitiveValueClasses.isNotEmpty()) {
             Python3.exec(
-                (listOf("import pythonx") + rawPrimitiveValueClasses.map {
-                    "pythonx.allow_raw_primitive(${it.pyStr()})"
+                (listOf("import $MODULE_NAME as _px_binding") + rawPrimitiveValueClasses.map {
+                    "_px_binding.allow_raw_primitive(${it.pyStr()})"
                 }).joinToString("\n")
             )
         }
@@ -1731,15 +1776,4 @@ object PythonxAdapter {
 
     /** A Python string literal for [this], quoted the way the rendered source quotes its own. */
     private fun String.pyStr(): String = "'" + replace("\\", "\\\\").replace("'", "\\'") + "'"
-
-    private fun Boolean.py(): String = if (this) "True" else "False"
-
-    private fun List<String>.tuple(): String = when (size) {
-        0 -> "()"
-        1 -> "(${this[0]},)"
-        else -> "(${joinToString(", ")})"
-    }
-
-    private fun String.quoted(): String =
-        "'" + replace("\\", "\\\\").replace("'", "\\'") + "'"
 }

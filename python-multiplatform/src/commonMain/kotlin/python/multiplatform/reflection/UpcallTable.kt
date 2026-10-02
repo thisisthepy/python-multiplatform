@@ -43,6 +43,13 @@ object UpcallTable {
     /** Bumped on every [clear]. A handle's epoch must match this or it is treated as unresolved. */
     private var epoch = 0
 
+    /**
+     * The current [epoch], read-only. The two Python installers stamp it on what they install, so
+     * that when both have run, the one installed for the newer table is the one that answers
+     * (`python_multiplatform.kotlin_function`).
+     */
+    internal val currentEpoch: Int get() = epoch
+
     private val callables = ArrayList<ExposedCallable>()
     private val nameToIndex = HashMap<String, Int>()
     private val installedModules = LinkedHashSet<String>()

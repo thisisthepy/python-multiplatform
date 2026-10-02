@@ -2,7 +2,6 @@ package python.multiplatform.gradle
 
 import org.gradle.api.Plugin
 import org.gradle.api.Project
-import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.provider.ListProperty
 import org.gradle.api.provider.MapProperty
 import org.gradle.api.provider.Property
@@ -207,16 +206,6 @@ interface PythonBindingsExtension {
      * needs per environment.
      */
     val generateStubs: Property<Boolean>
-
-    /**
-     * §5.3's manifest -- which `pythonx` module wraps which Kotlin package, and which value classes
-     * may be written as their raw underlying primitive.
-     *
-     * Owned by the Python package, not by this plugin: `pythonx.compose.layout` wraps
-     * `androidx.compose.foundation.layout`, dropping `foundation.`, and no artefact says so. With no
-     * manifest only the Kotlin-FQN stubs are emitted, which is what §5.3 prescribes.
-     */
-    val stubManifest: RegularFileProperty
 }
 
 /**
@@ -503,7 +492,6 @@ class PythonBindingsPlugin : Plugin<Project> {
             artifacts.from(resolved.artifactFiles)
             includePrefixes.set(includes)
             klibReaderClasspath.from(klibReader)
-            manifest.set(extension.stubManifest)
             outputDirectory.set(project.layout.buildDirectory.dir("generated/pythonStubs/$sourceSetName"))
         }
         project.tasks.matching { it.name == "prepareKotlinIdeaImport" }.configureEach { dependsOn(task) }

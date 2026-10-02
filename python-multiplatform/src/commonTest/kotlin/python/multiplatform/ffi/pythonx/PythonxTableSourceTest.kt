@@ -44,16 +44,16 @@ class PythonxTableSourceTest {
     @Test
     fun aWalkedExtensionRendersAsOneRowCarryingItsWholeDeclaration() {
         assertEquals(
-            "import pythonx as _px_pythonx\n" +
-                "_px_pythonx._register_table((\n" +
+            "import python_multiplatform.binding as _px_binding\n" +
+                "_px_binding._register_table((\n" +
                 "    ('androidx.compose.foundation.layout.padding__Dp', 2, 'FUNCTION', False, " +
                 "('<receiver>', 'all'), ('OBJECT', 'FLOAT'), " +
                 "('androidx.compose.ui.Modifier', 'androidx.compose.ui.unit.Dp'), 'OBJECT', " +
                 "'androidx.compose.ui.Modifier', True, 'androidx.compose.ui.Modifier', " +
                 "(False, False)),\n" +
                 "))\n" +
-                "_px_pythonx._boundary()\n" +
-                "del _px_pythonx",
+                "_px_binding._boundary()\n" +
+                "del _px_binding",
             PythonxAdapter.renderTable(listOf(extension)),
         )
     }
@@ -96,8 +96,14 @@ class PythonxTableSourceTest {
         assertFalse(PythonxAdapter.SOURCE.contains("\"\"\""), "a triple double-quote would end the literal early")
         assertFalse(PythonxAdapter.SOURCE.endsWith("\\"), "a trailing backslash would escape the closing quote")
         val rendered = PythonxAdapter.render(listOf(plain))
-        assertTrue(rendered.startsWith("_px_src = r\"\"\"\n"), rendered.take(40))
-        assertTrue(rendered.contains("_px_sys.modules['pythonx'] = _px_mod"), "the module has to reach sys.modules")
+        // The root module first (`KotlinSurface`), because the binding layer imports from it.
+        assertTrue(rendered.startsWith("import sys as _pms_sys\n"), rendered.take(40))
+        assertTrue(rendered.contains("\n_px_src = r\"\"\"\n"), "the binding layer's own literal")
+        assertTrue(
+            rendered.contains("_px_sys.modules['python_multiplatform.binding'] = _px_mod"),
+            "the module has to reach sys.modules, under a binder-owned name",
+        )
+        assertFalse(rendered.contains("'pythonx'"), "the binder must not occupy the pythonx name")
     }
 
     /**
@@ -120,9 +126,8 @@ class PythonxTableSourceTest {
         // it pinned the binder knowing a UI library by name. The binder may not know one at all, so
         // the assertion is inverted: the mechanism is here, no library that uses it is.
         assertTrue(code.contains("def allow_raw_primitive("), "the seam has to exist")
-        // `pythonx.runtime.*` survives the filter below on purpose: that is the Kotlin package of
-        // this binder's own `PythonCallables.Fragment`, spelled the way every other Kotlin package
-        // is spelled. Naming your own declaration is not renaming someone else's namespace.
+        // `python.multiplatform.ffi.pythonx.PythonCallables.*` survives the filter below on purpose:
+        // that is the true Kotlin FQN of this binder's own `PythonCallables.Fragment` entries.
         // Two rules, and the second is the stronger one. This file used to assert the *presence*
         // of `register_package('pythonx.compose', 'androidx.compose')`, pinning the binder knowing
         // a UI library by name. `register_package` itself is gone with the rest of the renaming:
@@ -130,7 +135,8 @@ class PythonxTableSourceTest {
         // called is decided by the distribution that ships it, not here.
         assertEquals(
             emptyList(),
-            listOf("androidx", "register_package", "'pythonx.compose").filter { code.contains(it) },
+            listOf("androidx", "register_package", "'pythonx", "to_python_name", "to_kotlin_name")
+                .filter { code.contains(it) },
             "the binder either names a library or renames a namespace; it may do neither",
         )
     }
@@ -161,7 +167,7 @@ class PythonxTableSourceTest {
         val rendered = PythonxAdapter.renderTable(PythonCallables.Fragment.entries())
         assertTrue(
             rendered.contains(
-                "('pythonx.runtime.newFunction', 5, 'FUNCTION', False, " +
+                "('python.multiplatform.ffi.pythonx.PythonCallables.newFunction', 5, 'FUNCTION', False, " +
                     "('body', 'jvmArity', 'composable', 'argTags', 'internKey'), " +
                     "('OBJECT', 'INT', 'BOOLEAN', 'STRING', 'STRING'), " +
                     "('python.multiplatform.ffi.PyObject', 'kotlin.Int', 'kotlin.Boolean', " +

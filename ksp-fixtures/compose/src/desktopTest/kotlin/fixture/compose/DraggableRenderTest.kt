@@ -50,8 +50,8 @@ class DraggableRenderTest {
 
     /**
      * The positive claim: a real horizontal drag across the modifier's own box invokes
-     * `on_drag_started` with a real position, `on_delta` one or more times with real (non-zero, not
-     * stub) values that sum to the direction actually dragged, and `on_drag_stopped` exactly once --
+     * `onDragStarted` with a real position, `on_delta` one or more times with real (non-zero, not
+     * stub) values that sum to the direction actually dragged, and `onDragStopped` exactly once --
      * and the accumulated total Python held shows up as a different digit in a fresh scene.
      */
     @Test
@@ -81,7 +81,7 @@ class DraggableRenderTest {
         dragAcrossBox()
 
         Python3.exec(
-            "assert len(_started_events) == 1, 'on_drag_started fired ' + str(len(_started_events)) + ' times'",
+            "assert len(_started_events) == 1, 'onDragStarted fired ' + str(len(_started_events)) + ' times'",
         )
         // The started position must be a real coordinate inside the 48x48 box the drag began in, not
         // a stub value like (0.0, 0.0).
@@ -89,7 +89,7 @@ class DraggableRenderTest {
             """
             sx, sy = _started_events[0]
             assert 0.0 <= sx <= 48.0 and 0.0 <= sy <= 48.0, (
-                'on_drag_started fired with (%r, %r), outside the 48x48 box' % (sx, sy)
+                'onDragStarted fired with (%r, %r), outside the 48x48 box' % (sx, sy)
             )
             """.trimIndent(),
         )
@@ -102,10 +102,10 @@ class DraggableRenderTest {
             "assert _drag_total[0] > 0.0, 'accumulated delta was not positive: ' + repr(_drag_total[0])",
         )
         Python3.exec(
-            "assert len(_stopped_events) == 1, 'on_drag_stopped fired ' + str(len(_stopped_events)) + ' times'",
+            "assert len(_stopped_events) == 1, 'onDragStopped fired ' + str(len(_stopped_events)) + ' times'",
         )
         Python3.exec(
-            "assert isinstance(_stopped_events[0], float), 'on_drag_stopped got a non-float: ' + repr(_stopped_events[0])",
+            "assert isinstance(_stopped_events[0], float), 'onDragStopped got a non-float: ' + repr(_stopped_events[0])",
         )
 
         val after = pixelsOf(BODY)

@@ -170,6 +170,14 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `anExtensionIsAMethodOnItsReceiverAndTheChainComposes`) and against the real Compose jars through
   the artifact walker (`ksp-fixtures/artifact/.../WalkedArtifactComposeModifierTest.kt`); not
   asserted for KSP-generated proxies.
+- **U-8** A function on a Kotlin-named module carries Kotlin's own surface and nothing else: the
+  Kotlin declaration name, keyword arguments by **Kotlin parameter names**, Kotlin defaults for omitted
+  parameters, overload sets under the base name, and its signature as public metadata
+  (`inspect.signature`, `python_multiplatform.describe`; contract in `KotlinSurface.kt`'s KDoc). No
+  member or parameter is renamed; the binder creates no `pythonx` module and a real `pythonx` package
+  on disk is what `import pythonx` loads. The answer is the same whichever installer
+  (`PythonProxySource`, `PythonxAdapter`) ran first for a table. `Status: implemented` on desktop —
+  `PM/desktopTest/.../pythonx/KotlinNamedSurfaceTest.kt`, `ksp-fixtures/compose/.../KotlinSignatureMetadataTest.kt`.
 
 ## 6. Binding prebuilt libraries (Gradle plugin)
 
@@ -196,11 +204,11 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `ksp-fixtures/compose/src/desktopTest/` (`ComposableRenderTest.kt`, `M3ProofRenderTest.kt`,
   `CallbackDrivenRenderTest.kt`, pointer/drag render tests), `GP/artifact/ComposableBindingTest.kt`;
   `planned` on Android, iOS and wasm.
-- **B-7** The plugin generates `.pyi` stubs (snake_case names, keyword escaping, type mapping,
-  `py.typed`). `Status: partial` — `GP/stubs/PyiRenderingTest.kt`, `PythonNameConventionsTest.kt`,
-  `PythonTypeMappingTest.kt`, `StubManifestTest.kt`, `ksp-fixtures/artifact/.../WalkedArtifactStubTest.kt`;
-  the module manifest shape is not agreed with pythonx-compose, and handle-returning stubs are not
-  wrapped. See also the finding in "Outside intent".
+- **B-7** The plugin generates `.pyi` stubs for the Kotlin-named modules only, under Kotlin names
+  (keyword parameters by Kotlin name, `= ...` for a Kotlin default, receiver positional-only). It emits
+  nothing under `pythonx` and renames nothing; a Pythonic stub product belongs to pythonx-compose.
+  `Status: partial` — `GP/stubs/PyiRenderingTest.kt`, `GP/stubs/KotlinNamesOnlyStubTest.kt`,
+  `ksp-fixtures/artifact/.../WalkedArtifactStubTest.kt`; handle-returning stubs are not wrapped.
 
 ## 7. Threading and builds
 
@@ -237,24 +245,11 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 ## Outside intent — needs a decision
 
 Findings where current behaviour is not covered by, or appears to conflict with, `INTENT.md`.
-Nothing here was changed; each needs the maintainer's call.
+Unless marked resolved, nothing here was changed; each needs the maintainer's call.
 
-1. **`.pyi` stubs rename `androidx.*` to `pythonx.*` by default.**
-   `python-multiplatform-gradle-plugin/.../stubs/StubManifest.kt` `pythonModuleFor` returns
-   `"pythonx." + kotlinPackage.removePrefix("androidx.")` when no manifest entry matches, pinned by
-   `GP/stubs/StubManifestTest.kt` `theDefaultRuleRenamesTheLeadingAndroidxToPythonx`. INTENT §2.2
-   says the binder must never export a Kotlin namespace under another name. The runtime does not
-   rename (Kotlin packages import under their own names), but the stub generator invents the
-   `pythonx` name for every `androidx` package without a manifest saying so.
-2. **The library installs a synthetic top-level `pythonx` module.**
-   `PM/commonMain/.../ffi/pythonx/PythonxAdapter.kt` puts a `ModuleType('pythonx')` with
-   `__path__ = []` into `sys.modules` if none is there. INTENT §2.3 says `pythonx` is a real package in
-   pythonx-compose. If this module is installed first, the real on-disk `pythonx` package cannot be
-   found. The adapter's own comments say per-module synthesis was removed; the top-level module
-   remains.
-3. **Member names become snake_case in Python** (`fill_max_width` for `fillMaxWidth`), in the adapter
-   and the stubs. INTENT §2.2 covers namespaces, not member names; whether member renaming is
-   intended is not stated.
+Items 1–3 were resolved by removing the renaming (2026-10-02): stubs and runtime use Kotlin names
+only, and the binder no longer creates a `pythonx` module (U-8, B-7).
+
 4. **`pythonx` adapter machinery lives in this repository** (`PM/commonMain/.../ffi/pythonx/`). INTENT
    §2.3 places `pythonx` in pythonx-compose. Whether the generic adapter belongs here (as a service
    pythonx uses) or there is not stated.

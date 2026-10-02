@@ -80,7 +80,7 @@ fun pythonComposed(modifier: Modifier, factory: PyObject): Modifier = modifier.c
     val composerRef = HandleTable.register(composer)
     val receiverRef = HandleTable.register(this)
     try {
-        Python3.exec("import pythonx\npythonx.push_composer(${composerRef.raw})")
+        Python3.exec("import python_multiplatform.binding as _pm_binding\n_pm_binding.push_composer(${composerRef.raw})")
         try {
             val receiverHandle = PyInt.from(receiverRef.raw)
             try {
@@ -109,7 +109,7 @@ fun pythonComposed(modifier: Modifier, factory: PyObject): Modifier = modifier.c
                 receiverHandle.close()
             }
         } finally {
-            Python3.exec("import pythonx\npythonx.pop_composer()")
+            Python3.exec("import python_multiplatform.binding as _pm_binding\n_pm_binding.pop_composer()")
         }
     } finally {
         HandleTable.release(receiverRef)

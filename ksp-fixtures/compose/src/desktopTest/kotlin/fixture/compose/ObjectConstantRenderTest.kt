@@ -27,7 +27,7 @@ import kotlin.test.assertTrue
  *
  * ### Why arrangement rather than alignment
  *
- * An arrangement is observable without a probe. `Row(horizontal_arrangement=...)` decides *where*
+ * An arrangement is observable without a probe. `Row(horizontalArrangement=...)` decides *where*
  * its children sit, so two arrangements put the same child at two different x positions in the same
  * scene, and the pixels say which one arrived. Alignment would need a measure policy of this test's
  * own to read it back, which is the shape `LayoutIdRenderTest` already carries for a different
@@ -95,7 +95,7 @@ class ObjectConstantRenderTest {
 
         Row(
             modifier=width__Dp(emptyModifier(), 80.0),
-            horizontal_arrangement=Arrangement.$constant,
+            horizontalArrangement=Arrangement.$constant,
             content=lambda scope: Text('X'),
         )
     """.trimIndent()

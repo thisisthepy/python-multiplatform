@@ -85,7 +85,7 @@ class IconRenderTest {
     }
 
     /**
-     * **The claim.** `Icon(painter_resource('opaque-square.png'), ...)` written in Python, drawing
+     * **The claim.** `Icon(painterResource('opaque-square.png'), ...)` written in Python, drawing
      * pixels through `androidx.compose.material3.Icon`.
      *
      * Four things had to be true at once and none of them was:
@@ -112,13 +112,13 @@ class IconRenderTest {
     fun pythonLoadsAPainterAndIconDrawsIt() {
         val drawn = inkOf(
             """
-            from androidx.compose.ui.res import painter_resource
+            from androidx.compose.ui.res import painterResource
             from androidx.compose.material3 import Icon
-            Icon(painter_resource('$RESOURCE'), content_description='a square')
+            Icon(painterResource('$RESOURCE'), contentDescription='a square')
             """.trimIndent(),
         )
         val blank = inkOf("pass")
-        println("compose render: Icon(painter_resource('$RESOURCE')) -> $drawn px, empty body -> $blank px")
+        println("compose render: Icon(painterResource('$RESOURCE')) -> $drawn px, empty body -> $blank px")
         assertEquals(0, blank, "an empty composition must draw nothing, or the measurement is not measuring")
         assertEquals(SQUARE, drawn, "Icon did not draw the 24x24 square the resource holds")
     }
@@ -151,13 +151,13 @@ class IconRenderTest {
     fun aPythonBuiltColorRoundTripsIntoAnotherWalkedCall() {
         Python3.exec(
             """
-            from androidx.compose.ui.graphics import Color__Int_Int_Int_Int, to_argb
+            from androidx.compose.ui.graphics import Color__Int_Int_Int_Int, toArgb
 
             _red = Color__Int_Int_Int_Int(255, 0, 0)
             assert type(_red).__name__ != 'int', 'Color came back as a raw number, not an owned value'
-            assert type(_red)._pythonx_type_name == 'androidx.compose.ui.graphics.Color', \
-                type(_red)._pythonx_type_name
-            assert to_argb(_red) == -65536, ('0xFFFF0000 as a Kotlin Int', to_argb(_red))
+            assert type(_red)._kotlin_type_name == 'androidx.compose.ui.graphics.Color', \
+                type(_red)._kotlin_type_name
+            assert toArgb(_red) == -65536, ('0xFFFF0000 as a Kotlin Int', toArgb(_red))
             """.trimIndent(),
         )
     }
@@ -188,13 +188,12 @@ class IconRenderTest {
     fun aComposablesColorSlotAcceptsAPythonBuiltColorAndTintsWithIt() {
         Python3.exec(
             """
-            import pythonx
-
-            _icon = pythonx._BY_PACKAGE['androidx.compose.material3']['Icon']
+            import python_multiplatform.binding as _pm_binding
+            _icon = _pm_binding._BY_PACKAGE['androidx.compose.material3']['Icon']
             _tints = {(d.param_tags[3], d.param_type_names[3]) for d in _icon}
             assert _tints == {('OBJECT', 'androidx.compose.ui.graphics.Color')}, repr(_tints)
 
-            _scheme = pythonx._BY_PACKAGE['androidx.compose.material3']['light_color_scheme'][0]
+            _scheme = _pm_binding._BY_PACKAGE['androidx.compose.material3']['lightColorScheme'][0]
             assert _scheme.param_tags[0] == 'OBJECT', _scheme.param_tags[0]
             assert _scheme.param_type_names[0] == 'androidx.compose.ui.graphics.Color', \
                 _scheme.param_type_names[0]
@@ -203,9 +202,9 @@ class IconRenderTest {
         val tinted = redOf(
             """
             from androidx.compose.ui.graphics import Color__Int_Int_Int_Int
-            from androidx.compose.ui.res import painter_resource
+            from androidx.compose.ui.res import painterResource
             from androidx.compose.material3 import Icon
-            Icon(painter_resource('$RESOURCE'), content_description='a square',
+            Icon(painterResource('$RESOURCE'), contentDescription='a square',
                  tint=Color__Int_Int_Int_Int(255, 0, 0))
             """.trimIndent(),
         )
@@ -215,9 +214,9 @@ class IconRenderTest {
         // the callee overwrites, rather than into a NullPointerException.
         val untinted = redOf(
             """
-            from androidx.compose.ui.res import painter_resource
+            from androidx.compose.ui.res import painterResource
             from androidx.compose.material3 import Icon
-            Icon(painter_resource('$RESOURCE'), content_description='a square')
+            Icon(painterResource('$RESOURCE'), contentDescription='a square')
             """.trimIndent(),
         )
         println("compose render: Icon(tint=Color(255,0,0)) -> $tinted red px, no tint -> $untinted red px")
@@ -236,7 +235,7 @@ class IconRenderTest {
             """
             from androidx.compose.material3 import Icon
             try:
-                Icon(content_description='nothing')
+                Icon(contentDescription='nothing')
                 raise AssertionError('Icon must not be callable without an image')
             except TypeError:
                 pass
@@ -279,7 +278,7 @@ class IconRenderTest {
             """
             from androidx.compose.ui.graphics import ImageBitmap
             from androidx.compose.material3 import Icon
-            Icon(ImageBitmap(24, 24), content_description='an empty square')
+            Icon(ImageBitmap(24, 24), contentDescription='an empty square')
             """.trimIndent(),
         )
         println("compose render: Icon(ImageBitmap(24, 24)) -> $drawn px")
@@ -290,8 +289,8 @@ class IconRenderTest {
         )
         Python3.exec(
             """
-            import pythonx
-            _all = [d for table in pythonx._BY_PACKAGE.values() for decls in table.values() for d in decls]
+            import python_multiplatform.binding as _pm_binding
+            _all = [d for table in _pm_binding._BY_PACKAGE.values() for decls in table.values() for d in decls]
             # The mechanism, not the symptom: nothing the walker emits can *call* into an existing
             # object. Functions are top-level or extensions, because `kotlinCandidates` filters on
             # ACC_STATIC, and static getters read a singleton's value without taking a receiver.
@@ -329,21 +328,21 @@ class IconRenderTest {
     fun aBitmapPainterIsAcceptedByIconsPainterSlotNowThatTheTableCarriesItsAncestry() {
         Python3.exec(
             """
-            import pythonx
+            import python_multiplatform.binding as _pm_binding
             from androidx.compose.ui.graphics import ImageBitmap
             from androidx.compose.ui.graphics.painter import BitmapPainter
 
             _painter = BitmapPainter(ImageBitmap(24, 24))
             # The proxy still names the type the declaration returns, not its base: the ancestry is a
             # separate fact and must not overwrite the identity.
-            assert type(_painter)._pythonx_type_name == 'androidx.compose.ui.graphics.painter.BitmapPainter', \
-                type(_painter)._pythonx_type_name
+            assert type(_painter)._kotlin_type_name == 'androidx.compose.ui.graphics.painter.BitmapPainter', \
+                type(_painter)._kotlin_type_name
             assert 'androidx.compose.ui.graphics.painter.Painter' in \
-                pythonx._SUPERTYPES.get('androidx.compose.ui.graphics.painter.BitmapPainter', ()), \
-                repr(pythonx._SUPERTYPES.get('androidx.compose.ui.graphics.painter.BitmapPainter'))
+                _pm_binding._SUPERTYPES.get('androidx.compose.ui.graphics.painter.BitmapPainter', ()), \
+                repr(_pm_binding._SUPERTYPES.get('androidx.compose.ui.graphics.painter.BitmapPainter'))
             # And it is not a licence to accept anything: an ImageBitmap is not a Painter.
             assert 'androidx.compose.ui.graphics.painter.Painter' not in \
-                pythonx._SUPERTYPES.get('androidx.compose.ui.graphics.ImageBitmap', ())
+                _pm_binding._SUPERTYPES.get('androidx.compose.ui.graphics.ImageBitmap', ())
             """.trimIndent(),
         )
         val narrow = rightmostInk(bitmapPainterInARow(8))
@@ -377,7 +376,7 @@ class IconRenderTest {
                 pass
 
             try:
-                Icon(Color__Int_Int_Int_Int(255, 0, 0), content_description='not an image')
+                Icon(Color__Int_Int_Int_Int(255, 0, 0), contentDescription='not an image')
                 raise AssertionError('Icon accepted a Color as its image')
             except TypeError as _e:
                 assert 'no overload of Icon accepts these arguments' in str(_e), str(_e)
@@ -392,7 +391,7 @@ class IconRenderTest {
         from androidx.compose.ui.graphics.painter import BitmapPainter
         from androidx.compose.material3 import Icon, Text
         Row(content=lambda row: (
-            Icon(BitmapPainter(ImageBitmap($width, 12)), content_description='a square'),
+            Icon(BitmapPainter(ImageBitmap($width, 12)), contentDescription='a square'),
             Text('hi'),
         ))
         """.trimIndent()
@@ -427,10 +426,10 @@ class IconRenderTest {
     fun imageVectorIsUnreachableBecauseItsBuilderIsANestedClassTheWalkerNeverOpens() {
         Python3.exec(
             """
-            import pythonx
+            import python_multiplatform.binding as _pm_binding
             _vector = 'androidx.compose.ui.graphics.vector.ImageVector'
             _builder = _vector + '.Builder'
-            _all = [d for table in pythonx._BY_PACKAGE.values() for decls in table.values() for d in decls]
+            _all = [d for table in _pm_binding._BY_PACKAGE.values() for decls in table.values() for d in decls]
 
             _producers = [d.kotlin_name for d in _all if d.return_type_name == _vector]
             assert _producers == [], \
@@ -445,7 +444,7 @@ class IconRenderTest {
             assert _builds == [], 'a Builder became constructible: ' + repr(_builds)
 
             # And the static route, declined for its parameter rather than for being nested.
-            assert 'load_xml_image_vector' not in pythonx._BY_PACKAGE.get('androidx.compose.ui.res', {}), \
+            assert 'loadXmlImageVector' not in _pm_binding._BY_PACKAGE.get('androidx.compose.ui.res', {}), \
                 'loadXmlImageVector is bound now -- org.xml.sax.InputSource became resolvable'
             """.trimIndent(),
         )
@@ -544,10 +543,10 @@ class IconRenderTest {
         val baseline = settledBaseline()
         val drawn = inkOf(
             """
-            from androidx.compose.ui.res import painter_resource
+            from androidx.compose.ui.res import painterResource
             from androidx.compose.material3 import Icon
-            _held = painter_resource('$RESOURCE')
-            Icon(_held, content_description='a square')
+            _held = painterResource('$RESOURCE')
+            Icon(_held, contentDescription='a square')
             """.trimIndent(),
         )
         assertEquals(SQUARE, drawn, "the icon did not draw, so nothing can be concluded about its handles")
@@ -564,7 +563,7 @@ class IconRenderTest {
         from androidx.compose.ui.graphics import ImageBitmap
         from androidx.compose.material3 import Icon, Text
         Row(content=lambda row: (
-            Icon(ImageBitmap($width, 12), content_description='a square'),
+            Icon(ImageBitmap($width, 12), contentDescription='a square'),
             Text('hi'),
         ))
         """.trimIndent()

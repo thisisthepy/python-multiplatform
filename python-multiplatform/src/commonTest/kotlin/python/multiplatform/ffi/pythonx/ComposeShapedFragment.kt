@@ -32,9 +32,9 @@ import python.multiplatform.reflection.TypeTag
  * | `padding__Dp_Dp` / `__Dp_Dp_Dp_Dp` again | omitting a defaulted argument, including one in the *middle* of the list |
  * | `fillMaxHeight` | the same, under a name with no overload set: omission with no dispatcher involved |
  * | `size__Dp` | the second link of a chain, so the return really is a receiver again |
- * | `fillMaxWidth` | a receiver-only extension, and a `fill_max_width` reverse-name case |
- * | `zIndex` | `z_index`, the case where a one-letter first segment must not be swallowed |
- * | `toURLString` | a name the snake -> camel rule **cannot** invert; the index has to carry it |
+ * | `fillMaxWidth` | a receiver-only extension, reached under its Kotlin name and no other |
+ * | `zIndex` | a genuine `kotlin.Float` parameter beside `Dp` ones: same tag, different declared type |
+ * | `toURLString` | an acronym-bearing name, which once tested a snake_case rule and now only has to resolve as itself |
  * | `paddingFromBaseline__TextUnit` | the value-class reject list: a packed wrapper must refuse a raw number |
  * | `emptyModifier` | where a chain starts. Compose has no bound declaration for this; see [EMPTY_MODIFIER] |
  * | `Arrangement.Start` / `.End` | `kind = STATIC_GETTER`: a value behind a name, read as an attribute and not called |
@@ -137,7 +137,7 @@ object ComposeShapedFragment : FunctionTableFragment {
         },
         // A defaulted declaration under a name that carries **no** overload set, which is the case
         // where omission has to work without any dispatcher being involved: `Modifier.fillMaxHeight`
-        // is one declaration, so `fill_max_height()` reaches a `_Binding` and not an `_Overloads`.
+        // is one declaration, so `fillMaxHeight()` reaches a `_Binding` and not an `_Overloads`.
         // The real `foundation-layout` declares it exactly this way (`fraction: Float = 1f`), and
         // the default being 1 rather than 0 is what makes omitting it observable at all.
         extension(

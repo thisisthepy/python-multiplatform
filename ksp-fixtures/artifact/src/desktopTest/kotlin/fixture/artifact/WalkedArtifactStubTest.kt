@@ -66,7 +66,7 @@ class WalkedArtifactStubTest {
     @Test
     fun theKotlinFqnStubsDescribeTheModulesTheRuntimePublishes() {
         val layout = stub("androidx/compose/foundation/layout/__init__.pyi")
-        assertTrue("def padding__Dp(receiver: int, all: float, /) -> int:" in layout, layout.take(2000))
+        assertTrue("def padding__Dp(receiver: int, /, all: float) -> int:" in layout, layout.take(2000))
         assertTrue(
             "\"\"\"Kotlin: androidx.compose.ui.Modifier.padding(all: androidx.compose.ui.unit.Dp): " +
                 "androidx.compose.ui.Modifier\"\"\"" in layout,
@@ -79,102 +79,48 @@ class WalkedArtifactStubTest {
     }
 
     /**
-     * §4.4's shape, generated from the real `androidx.compose.foundation.layout` jar: the extension
-     * is an attribute on `Modifier` whose type is a Protocol with an overloaded `__call__`, and
-     * `Modifier` lives in the module its own Kotlin package maps to (`androidx.compose.ui`) even
-     * though `padding` is declared in another (`androidx.compose.foundation.layout`).
+     * The binder never exports a Kotlin namespace under another name (AGENTS.md section 12 rule 1).
+     * `androidx.compose.foundation.layout` is stubbed under that very path, with Kotlin names and
+     * Kotlin parameter names; making it Pythonic is the `pythonx-compose` package's job.
      *
-     * The metaclass of §4.2 is measured not to work in either CPython or mypy, and must not appear.
+     * Pinned over the whole generated tree: nothing under `pythonx/`, no snake_cased member, and none
+     * of the Pythonic product's side files (`py.typed`, `_pm_dispatch.json`).
      */
     @Test
-    fun thePythonicStubsPutEveryExtensionOnItsReceiverAsAProtocolAttribute() {
-        val ui = stub("pythonx/compose/ui/__init__.pyi")
-        assertTrue("class Modifier:" in ui, ui.take(2000))
-        assertTrue("    padding: ClassVar[_Modifier_padding]" in ui, ui.take(4000))
-        assertTrue("class _Modifier_padding(Protocol):" in ui, ui.take(4000))
-        assertTrue("metaclass" !in ui, "§4.3: the metaclass shape does not work in mypy or in CPython")
+    fun theStubsUseKotlinNamesAndNothingIsExportedUnderPythonx() {
+        val paths = generatedPaths()
+        assertEquals(emptyList(), paths.filter { it.startsWith("pythonx/") }, paths.toString())
+        assertTrue(paths.none { it.endsWith("py.typed") || it.endsWith("_pm_dispatch.json") }, paths.toString())
 
-        // §3.4's allowlist, read from this fixture's own `pythonx-map.toml`: `Dp` admits a raw
-        // number and nothing else does.
-        assertTrue("Dp | float" in ui, "the allowlist did not reach the renderer")
-    }
+        val layout = stub("androidx/compose/foundation/layout/__init__.pyi")
+        assertTrue("def fillMaxWidth(receiver: int, /, fraction: float = ...) -> int:" in layout, layout.take(3000))
+        assertTrue("fill_max_width" !in layout, "a Kotlin name was exported under another spelling")
+        assertTrue("alignmentLine: int" in layout, "a Kotlin parameter name was renamed: ${layout.take(3000)}")
 
-    /**
-     * §7's third open item, answered against the real jar rather than left open: "two Kotlin
-     * overloads can map to identical Python signatures once `Dp | float` widening is applied. The
-     * generator must detect that and drop or qualify, and how often it happens... is unknown -- it
-     * needs the scan to be run."
-     *
-     * The scan was run over Compose 1.6.11's `foundation-layout-desktop`. It happens **once**, and
-     * this is it: `WindowInsets(left: Int, top: Int, right: Int, bottom: Int)` is unreachable behind
-     * `WindowInsets(left: Dp, ...)`, because a checker accepts an `int` wherever a `float` is wanted.
-     * mypy 2.3.0 called it "signature 2 will never be matched" before this was handled.
-     *
-     * Dropped from the Pythonic product and named in a comment -- it is still bound, and the
-     * Kotlin-FQN product still has it under its table key.
-     */
-    @Test
-    fun theOneComposeOverloadThatCollapsesIsDroppedWithItsTableKeyNamed() {
-        val layout = stub("pythonx/compose/layout/__init__.pyi")
-        assertTrue(
-            "androidx.compose.foundation.layout.WindowInsets__Int_Int_Int_Int is unreachable" in layout,
-            "the collapsing overload is no longer reported: $layout",
-        )
-        assertTrue(
-            "def __init__(self, left: Dp | float = ..., top: Dp | float = ..., " +
-                "right: Dp | float = ..., bottom: Dp | float = ...) -> None: ..." in layout,
-            "a Kotlin fake constructor belongs on the class, not beside it: $layout",
-        )
-    }
-
-    /**
-     * A lone `@overload` is an error mypy raises in the **consumer's** type check -- "Single overload
-     * definition, multiple required" -- over a file they did not write. The first generated Compose
-     * stub had 60 of them. Pinned over the whole generated tree rather than one file, because the
-     * rule is a property of the renderer and not of this package.
-     */
-    @Test
-    fun noProtocolCarriesASingleDecoratedOverload() {
-        generatedPaths().filter { it.startsWith("pythonx/") && it.endsWith(".pyi") }.forEach { path ->
-            val lines = stub(path).lines()
-            lines.forEachIndexed { index, line ->
-                if (line.trim() != "@overload") return@forEachIndexed
-                val siblings = lines.drop(index + 1).takeWhile { it.isNotBlank() }.count { it.trim() == "@overload" }
-                assertTrue(
-                    siblings >= 1 || lines.take(index).takeLastWhile { it.isNotBlank() }.any { it.trim() == "@overload" },
-                    "$path:${index + 1} is a lone @overload",
-                )
-            }
+        paths.filter { it.endsWith(".pyi") }.forEach { path ->
+            val text = stub(path)
+            assertTrue("pythonx" !in text, "$path mentions pythonx")
+            assertTrue("class _" !in text && "Protocol" !in text, "$path carries the Pythonic Protocol shape")
         }
     }
 
-    /** §6.1 measurement 2: without `py.typed` every revealed type in an installed package is `Any`.
-     * It goes in the top-level *regular* package -- `pythonx` is a namespace package (§5.1). */
-    @Test
-    fun theDistributionCarriesAPyTypedMarker() {
-        assertTrue("pythonx/compose/py.typed" in generatedPaths(), generatedPaths().toString())
-        assertTrue("pythonx/py.typed" !in generatedPaths(), generatedPaths().toString())
-    }
-
     /**
-     * §3.6: the `@overload` order and the dispatcher's resolution order have to come from one place.
-     * The dispatcher does not exist, so the generator writes the order down beside the stub -- and
-     * every name it writes down has to be a table key, or the dispatcher would call nothing.
+     * The runtime resolves a Kotlin default when a defaulted parameter is omitted, so the stub
+     * marks it `= ...`; a parameter with no default stays required. Python rejects a required
+     * parameter after a defaulted one, so for the stub to be valid no `name: type` without `= ...` may
+     * follow one with it. Checked textually, since no Python parser runs in this module.
      */
     @Test
-    fun theDispatchOrderNamesOnlyKeysTheTableResolves() {
-        ArtifactTable.registerInto()
-        val installed = UpcallTable.entries().map { it.name }.toSet()
-
-        val dispatchFiles = generatedPaths().filter { it.endsWith("_pm_dispatch.json") }
-        assertTrue(dispatchFiles.isNotEmpty(), "no dispatch order was written: ${generatedPaths()}")
-
-        val named = Regex("\"([A-Za-z0-9_.]+)\"").findAll(dispatchFiles.joinToString("\n") { stub(it) })
-            .map { it.groupValues[1] }
-            .filter { '.' in it && it.substringBeforeLast('.') in setOf("androidx.compose.foundation.layout", "kotlin.text") }
-            .toList()
-        assertTrue(named.isNotEmpty(), "the dispatch files named no table keys")
-        named.forEach { assertTrue(it in installed, "$it is in a dispatch order and not in the table") }
+    fun noGeneratedDefPutsARequiredParameterAfterADefaultedOne() {
+        generatedPaths().filter { it.endsWith(".pyi") }.forEach { path ->
+            Regex("""^def [A-Za-z0-9_]+\((.*)\) -> """, RegexOption.MULTILINE).findAll(stub(path)).forEach { match ->
+                var sawDefault = false
+                match.groupValues[1].split(", ").filter { it != "/" && it != "*" }.forEach { parameter ->
+                    if ("= ..." in parameter) sawDefault = true
+                    else assertTrue(!sawDefault, "$path: required parameter after a default in ${match.value}")
+                }
+            }
+        }
     }
 
     /**
@@ -191,7 +137,7 @@ class WalkedArtifactStubTest {
         val installed = UpcallTable.entries().map { it.name }.toSet()
 
         val stubbed = generatedPaths()
-            .filter { it.endsWith("__init__.pyi") && !it.startsWith("pythonx/") }
+            .filter { it.endsWith("__init__.pyi") }
             .flatMap { path ->
                 val module = path.removeSuffix("/__init__.pyi").replace('/', '.')
                 val source = stub(path)

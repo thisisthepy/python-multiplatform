@@ -108,7 +108,7 @@ class CallbackDrivenRenderTest {
         val checked = pixelsOf(CHECKBOX)
         val moved = differing(unchecked, checked)
         println(
-            "compose input: Checkbox click -> on_checked_change(True), " +
+            "compose input: Checkbox click -> onCheckedChange(True), " +
                 "ink ${inkOf(unchecked)} -> ${inkOf(checked)} px, $moved pixels changed",
         )
         assertTrue(
@@ -162,7 +162,7 @@ class CallbackDrivenRenderTest {
         val after = pixelsOf(SWITCH)
         val moved = differing(before, after)
         println(
-            "compose input: Switch click -> on_checked_change(True), " +
+            "compose input: Switch click -> onCheckedChange(True), " +
                 "ink ${inkOf(before)} -> ${inkOf(after)} px, $moved pixels changed",
         )
         // Deliberately not an ink comparison: the thumb slides from one end of the track to the
@@ -272,7 +272,7 @@ class CallbackDrivenRenderTest {
         val typed = pixelsOf(TEXT_FIELD, width = FIELD_WIDTH, height = FIELD_HEIGHT)
         val moved = differing(empty, typed)
         println(
-            "compose input: TextField keystroke 'h' -> on_value_change, " +
+            "compose input: TextField keystroke 'h' -> onValueChange, " +
                 "ink ${inkOf(empty)} -> ${inkOf(typed)} px, $moved pixels changed",
         )
         assertTrue(
@@ -445,12 +445,12 @@ class CallbackDrivenRenderTest {
          * show what the callback wrote. */
         val CHECKBOX = """
             from androidx.compose.material3 import Checkbox
-            Checkbox(_cb_state[0], on_checked_change=_cb_toggle)
+            Checkbox(_cb_state[0], onCheckedChange=_cb_toggle)
         """.trimIndent()
 
         val SWITCH = """
             from androidx.compose.material3 import Switch
-            Switch(_cb_state[0], on_checked_change=_cb_toggle)
+            Switch(_cb_state[0], onCheckedChange=_cb_toggle)
         """.trimIndent()
 
         /** M3's `TextField` has no minimum-size default anywhere near `Checkbox`'s 48dp -- its own
@@ -466,7 +466,7 @@ class CallbackDrivenRenderTest {
          * what makes a fresh scene show what the callback wrote. */
         val TEXT_FIELD = """
             from androidx.compose.material3 import TextField
-            TextField(_tf_state[0], on_value_change=_tf_on_change)
+            TextField(_tf_state[0], onValueChange=_tf_on_change)
         """.trimIndent()
 
         /** `java.awt.event.KeyEvent`'s constructor requires a non-null source `Component`; nothing

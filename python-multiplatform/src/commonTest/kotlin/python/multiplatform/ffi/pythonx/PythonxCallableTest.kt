@@ -135,7 +135,7 @@ class PythonxCallableTest {
         Python3.exec(
             """
             import sys
-            import pythonx
+            import python_multiplatform.binding as _pm_binding
             from androidx.compose.material3 import Text
 
             def _px_body():
@@ -226,10 +226,10 @@ class PythonxCallableTest {
             try {
                 Python3.exec(
                     """
-                    import pythonx
+                    import python_multiplatform.binding as _pm_binding
                     from androidx.compose.material3 import Button
                     _px_clicked = []
-                    Button(on_click=lambda: _px_clicked.append(1))
+                    Button(onClick=lambda: _px_clicked.append(1))
                     """.trimIndent(),
                 )
             } finally {
@@ -283,7 +283,7 @@ class PythonxCallableTest {
             try {
                 Python3.exec(
                     """
-                    import pythonx
+                    import python_multiplatform.binding as _pm_binding
                     from androidx.compose.foundation.layout import Column
                     from androidx.compose.material3 import Text
                     for _ in range(REPS):
@@ -346,7 +346,7 @@ class PythonxCallableTest {
     }
 
     /**
-     * **①: a value reaches the Python callable.** `Slider(on_value_change=lambda v: ...)`.
+     * **①: a value reaches the Python callable.** `Slider(onValueChange=lambda v: ...)`.
      *
      * The claim is deliberately not "the callback fired" -- a wrapper that dropped its argument and
      * called `fn()` would fire too, and a slider that never moves is exactly what that renders as.
@@ -363,7 +363,7 @@ class PythonxCallableTest {
             """
             from androidx.compose.material3 import Slider
             _px_seen = []
-            Slider(on_value_change=lambda v: _px_seen.append(v))
+            Slider(onValueChange=lambda v: _px_seen.append(v))
             """.trimIndent(),
         )
 
@@ -597,8 +597,8 @@ class PythonxCallableTest {
         val refusal = assertFails {
             Python3.exec(
                 """
-                from androidx.compose.material3 import remember_sheet_state
-                remember_sheet_state(confirm_value_change=lambda v: True)
+                from androidx.compose.material3 import rememberSheetState
+                rememberSheetState(confirmValueChange=lambda v: True)
                 """.trimIndent(),
             )
         }
@@ -629,7 +629,7 @@ class PythonxCallableTest {
                     """
                     from androidx.compose.material3 import Slider
                     _px_moves = []
-                    Slider(on_value_change=lambda v: _px_moves.append(v))
+                    Slider(onValueChange=lambda v: _px_moves.append(v))
                     """.trimIndent(),
                 )
             } finally {
@@ -650,14 +650,14 @@ class PythonxCallableTest {
 
     private fun pushComposer() = Python3.exec(
         """
-        import pythonx
-        from androidx.compose.runtime import stub_composer
-        _px_composer = stub_composer()
-        pythonx.push_composer(_px_composer)
+        import python_multiplatform.binding as _pm_binding
+        from androidx.compose.runtime import stubComposer
+        _px_composer = stubComposer()
+        _pm_binding.push_composer(_px_composer)
         """.trimIndent(),
     )
 
-    private fun popComposer() = Python3.exec("import pythonx\npythonx.pop_composer()\ndel _px_composer")
+    private fun popComposer() = Python3.exec("import python_multiplatform.binding as _pm_binding\n_pm_binding.pop_composer()\ndel _px_composer")
 
     /** [withAdapter], a composer, and a scope -- the three things a real composition supplies. */
     private inline fun withComposer(crossinline block: () -> Unit) = withAdapter {

@@ -129,11 +129,6 @@ pythonBindings {
             "kotlin.system.TimingKt",
         ),
     )
-
-    // `docs/design/pyi-generation-design.md` §5.3. The file is this fixture's, standing in for the one that
-    // would ship inside `pythonx-compose`; without it only the Kotlin-FQN stubs are emitted, which is
-    // what the design prescribes for a package that has declared no mapping.
-    stubManifest.set(layout.projectDirectory.file("pythonx-map.toml"))
 }
 
 /**

@@ -103,7 +103,7 @@ class PythonxAdapterTest {
             import androidx.compose.ui as _ui
             _px = {'layout': _layout.__name__, 'ui': _ui.__name__}
             try:
-                import pythonx.compose.nothing.here
+                import androidx.compose.nothing.here
                 _px['bogus'] = 'imported'
             except ModuleNotFoundError:
                 _px['bogus'] = 'ModuleNotFoundError'
@@ -146,72 +146,71 @@ class PythonxAdapterTest {
         assertEquals("True", eval("_px['same']"))
     }
 
-    /** §3's rule, both directions, on the names the fixture carries. */
+    /**
+     * A Kotlin name is reached as itself, and no renamed spelling exists.
+     *
+     * This used to pin a snake_case rule in both directions (`fillMaxWidth` <-> `fill_max_width`)
+     * and the index that made `toURLString` reachable as `to_url_string`. The binder renames
+     * nothing now (`docs/INTENT.md` §2.2): Pythonic spellings are the business of a Python package
+     * built on top, so the rule and its inverse are gone, and asking for the snake_case spelling is
+     * an ordinary `AttributeError`.
+     */
     @Test
-    fun theNameRuleConvertsKotlinToPythonAndBack() = withAdapter {
+    fun aKotlinNameIsReachedAsItselfAndNoRenamedSpellingExists() = withAdapter {
         Python3.exec(
             """
-            import pythonx
+            import python_multiplatform.binding as _pm_binding
+            import androidx.compose.foundation.layout as _layout
+            import androidx.compose.ui.draw as _draw
+            import androidx.compose.ui.util as _util
             _px = {
-                'fill': pythonx.to_python_name('fillMaxWidth'),
-                'z': pythonx.to_python_name('zIndex'),
-                'overload': pythonx.to_python_name('padding__Dp_Dp'),
-                'type': pythonx.to_python_name('Modifier'),
-                'acronym': pythonx.to_python_name('toURLString'),
-                'back_fill': pythonx.to_kotlin_name('fill_max_width'),
-                'back_z': pythonx.to_kotlin_name('z_index'),
-                'back_overload': pythonx.to_kotlin_name('padding__Dp_Dp'),
-                'back_type': pythonx.to_kotlin_name('Modifier'),
-                'back_acronym': pythonx.to_kotlin_name('to_url_string'),
+                'kotlin': [
+                    _n for _m, _n in (
+                        (_layout, 'fillMaxWidth'), (_draw, 'zIndex'), (_layout, 'padding__Dp_Dp'),
+                        (_util, 'toURLString'),
+                    ) if getattr(_m, _n, None) is not None
+                ],
+                'snake': [
+                    _n for _m, _n in (
+                        (_layout, 'fill_max_width'), (_draw, 'z_index'), (_util, 'to_url_string'),
+                    ) if hasattr(_m, _n)
+                ],
+                'rule': [_n for _n in ('to_python_name', 'to_kotlin_name') if hasattr(_pm_binding, _n)],
             }
             """.trimIndent(),
         )
 
-        assertEquals("fill_max_width", eval("_px['fill']"))
-        assertEquals("z_index", eval("_px['z']"))
-        // The overload suffix is a list of Kotlin type names and stays PascalCase; only the base
-        // name is a function name.
-        assertEquals("padding__Dp_Dp", eval("_px['overload']"))
-        assertEquals("Modifier", eval("_px['type']"))
-        assertEquals("to_url_string", eval("_px['acronym']"))
-
-        assertEquals("fillMaxWidth", eval("_px['back_fill']"))
-        assertEquals("zIndex", eval("_px['back_z']"))
-        assertEquals("padding__Dp_Dp", eval("_px['back_overload']"))
-        assertEquals("Modifier", eval("_px['back_type']"))
-        // The reverse rule is **wrong** here, and pinning that is the point: snake -> camel is not
-        // injective, so a rule-based reverse alone would lose `toURLString`.
-        assertEquals("toUrlString", eval("_px['back_acronym']"))
+        assertEquals("['fillMaxWidth', 'zIndex', 'padding__Dp_Dp', 'toURLString']", eval("repr(_px['kotlin'])"))
+        assertEquals("[]", eval("repr(_px['snake'])"), "no snake_case spelling may resolve")
+        assertEquals("[]", eval("repr(_px['rule'])"), "the binder must carry no renaming rule")
     }
 
     /**
-     * §3's invariant, stated as the design states it: *every name the `.pyi` generator emits must
-     * resolve through the adapter.*
+     * Every name in the table resolves under its own Kotlin name, in its own Kotlin package.
      *
-     * The generator's name is `to_python_name(kotlin)`, so this converts every entry in the table
-     * forwards and requires the adapter to answer with the same Kotlin declaration -- including
-     * `toURLString`, which the reverse rule provably cannot produce (asserted above). The index
-     * built by the forward conversion is what carries it, and this is the test that says a stub
-     * cannot promise an API the runtime does not have.
+     * This used to be the round trip through the snake_case rule and its inverse; with no rule,
+     * the invariant left is the one that matters to a reader of the `.pyi` stubs: every bound name
+     * is an attribute of the module its Kotlin package names.
      */
     @Test
-    fun everyBoundNameSurvivesTheRoundTripThroughTheAdapter() = withAdapter {
+    fun everyBoundNameResolvesUnderItsOwnKotlinName() = withAdapter {
         Python3.exec(
             """
-            import pythonx
+            import importlib as _importlib
+            import python_multiplatform.binding as _pm_binding
             _px = {'checked': 0, 'bad': []}
-            for _kotlin in pythonx.bound_names():
+            for _kotlin in _pm_binding.bound_names():
                 _package, _, _leaf = _kotlin.rpartition('.')
-                _python = pythonx.to_python_name(_leaf)
-                _back = pythonx.kotlin_name_for(_package, _python)
                 _px['checked'] += 1
-                if _back != _kotlin:
-                    _px['bad'].append(_kotlin + ' -> ' + _python + ' -> ' + str(_back))
+                try:
+                    getattr(_importlib.import_module(_package), _leaf)
+                except Exception as _e:
+                    _px['bad'].append(_kotlin + ': ' + type(_e).__name__ + ': ' + str(_e))
             _px['bad'] = ', '.join(_px['bad'])
             """.trimIndent(),
         )
 
-        assertEquals("", eval("_px['bad']"), "a stub name that the adapter cannot resolve")
+        assertEquals("", eval("_px['bad']"), "a bound name that does not resolve under its Kotlin name")
         assertEquals(
             UpcallTable.entries().size.toString(),
             eval("_px['checked']"),
@@ -228,10 +227,10 @@ class PythonxAdapterTest {
         Python3.exec(
             """
             from androidx.compose.foundation.layout import padding
-            from androidx.compose.ui import empty_modifier, describe_modifier
+            from androidx.compose.ui import emptyModifier, describeModifier
             _px = {
-                'one': describe_modifier(padding(empty_modifier(), 16)),
-                'four': describe_modifier(padding(empty_modifier(), 1, 2, 3, 4)),
+                'one': describeModifier(padding(emptyModifier(), 16)),
+                'four': describeModifier(padding(emptyModifier(), 1, 2, 3, 4)),
             }
             """.trimIndent(),
         )
@@ -258,12 +257,12 @@ class PythonxAdapterTest {
     fun anOverloadSetDispatchesOnKeywordNames() = withAdapter {
         Python3.exec(
             """
-            from androidx.compose.foundation.layout import padding, padding_values_of
-            from androidx.compose.ui import empty_modifier, describe_modifier
+            from androidx.compose.foundation.layout import padding, paddingValuesOf
+            from androidx.compose.ui import emptyModifier, describeModifier
             _px = {
-                'kw': describe_modifier(padding(empty_modifier(), horizontal=8, vertical=4)),
+                'kw': describeModifier(padding(emptyModifier(), horizontal=8, vertical=4)),
                 # the same arity, chosen by argument *type* rather than by count
-                'pv': describe_modifier(padding(empty_modifier(), padding_values_of(2))),
+                'pv': describeModifier(padding(emptyModifier(), paddingValuesOf(2))),
             }
             """.trimIndent(),
         )
@@ -296,14 +295,14 @@ class PythonxAdapterTest {
         Python3.exec(
             """
             from androidx.compose.foundation.layout import padding, padding__Dp
-            from androidx.compose.ui import empty_modifier, describe_modifier
+            from androidx.compose.ui import emptyModifier, describeModifier
             _px = {}
             try:
-                padding(empty_modifier(), 'sixteen')
+                padding(emptyModifier(), 'sixteen')
                 _px['miss'] = 'call succeeded'
             except TypeError as e:
                 _px['miss'] = str(e)
-            _px['explicit'] = describe_modifier(padding__Dp(empty_modifier(), 16))
+            _px['explicit'] = describeModifier(padding__Dp(emptyModifier(), 16))
             """.trimIndent(),
         )
 
@@ -329,12 +328,12 @@ class PythonxAdapterTest {
     fun anExtensionIsAMethodOnItsReceiverAndTheChainComposes() = withAdapter {
         Python3.exec(
             """
-            from androidx.compose.ui import Modifier, describe_modifier
+            from androidx.compose.ui import Modifier, describeModifier
             _chained = Modifier.padding(16).size(24)
-            _from_instance = Modifier.empty().fill_max_width().z_index(2)
+            _from_instance = Modifier.empty().fillMaxWidth().zIndex(2)
             _px = {
-                'chain': describe_modifier(_chained),
-                'instance': describe_modifier(_from_instance),
+                'chain': describeModifier(_chained),
+                'instance': describeModifier(_from_instance),
                 'is_modifier': isinstance(_chained, Modifier),
             }
             """.trimIndent(),
@@ -360,8 +359,8 @@ class PythonxAdapterTest {
     fun theSameChainComparedAgainstADifferentPaddingDoesNotMatch() = withAdapter {
         Python3.exec(
             """
-            from androidx.compose.ui import Modifier, describe_modifier
-            _px = {'described': describe_modifier(Modifier.padding(16).size(24))}
+            from androidx.compose.ui import Modifier, describeModifier
+            _px = {'described': describeModifier(Modifier.padding(16).size(24))}
             _px['wrong_padding'] = _px['described'] == 'padding(17.0) -> size(24.0)'
             _px['wrong_order'] = _px['described'] == 'size(24.0) -> padding(16.0)'
             """.trimIndent(),
@@ -387,15 +386,15 @@ class PythonxAdapterTest {
     fun aRawNumberIsAcceptedForDpAndRefusedForAPackedValueClass() = withAdapter {
         Python3.exec(
             """
-            from androidx.compose.foundation.layout import padding, padding_from_baseline__TextUnit
-            from androidx.compose.ui import Modifier, describe_modifier
-            _px = {'dp': describe_modifier(padding(Modifier.empty(), 16))}
+            from androidx.compose.foundation.layout import padding, paddingFromBaseline__TextUnit
+            from androidx.compose.ui import Modifier, describeModifier
+            _px = {'dp': describeModifier(padding(Modifier.empty(), 16))}
             try:
-                padding_from_baseline__TextUnit(Modifier.empty(), 16)
+                paddingFromBaseline__TextUnit(Modifier.empty(), 16)
                 _px['packed'] = 'call succeeded'
             except TypeError as e:
                 _px['packed'] = str(e)
-            _px['plain_float'] = describe_modifier(Modifier.z_index(2))
+            _px['plain_float'] = describeModifier(Modifier.zIndex(2))
             """.trimIndent(),
         )
 
@@ -453,13 +452,13 @@ class PythonxAdapterTest {
     fun aStaticGetterIsReadAsAnAttributeAndReadFreshEveryTime() = withAdapter {
         Python3.exec(
             """
-            from androidx.compose.foundation.layout import Arrangement, describe_horizontal
+            from androidx.compose.foundation.layout import Arrangement, describeHorizontal
             _px = {}
             _first = Arrangement.Start
             _second = Arrangement.Start
-            _px['first'] = describe_horizontal(_first)
-            _px['second'] = describe_horizontal(_second)
-            _px['end'] = describe_horizontal(Arrangement.End)
+            _px['first'] = describeHorizontal(_first)
+            _px['second'] = describeHorizontal(_second)
+            _px['end'] = describeHorizontal(Arrangement.End)
             """.trimIndent(),
         )
 
@@ -527,8 +526,8 @@ class PythonxAdapterTest {
 
         PythonxAdapter.install(COMPOSE_SHAPED_RAW_VALUE_CLASSES)
         Python3.exec(
-            "import pythonx\n" +
-                "pythonx.register_empty('androidx.compose.ui.Modifier', " +
+            "import python_multiplatform.binding as _pm_binding\n" +
+                "_pm_binding.register_empty('androidx.compose.ui.Modifier', " +
                 "'${ComposeShapedFragment.EMPTY_MODIFIER}')",
         )
         block()

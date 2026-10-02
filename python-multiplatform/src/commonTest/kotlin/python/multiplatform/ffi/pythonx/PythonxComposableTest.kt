@@ -102,8 +102,8 @@ class PythonxComposableTest {
             Text('hi')
             Text('hi', modifier=None)
             Text('hi', color=3)
-            Text('hi', font_size=4)
-            Text('hi', color=3, font_size=4)
+            Text('hi', fontSize=4)
+            Text('hi', color=3, fontSize=4)
             """.trimIndent(),
         )
 
@@ -147,10 +147,10 @@ class PythonxComposableTest {
             PythonCallables.withScope(scope) {
                 Python3.exec(
                     """
-                    from androidx.compose.foundation.layout import stub_row_scope
-                    _row = stub_row_scope()
-                    _row.NavigationBarItem(selected=True, on_click=lambda: None)
-                    _row.NavigationBarItem(selected=True, on_click=lambda: None, enabled=False)
+                    from androidx.compose.foundation.layout import stubRowScope
+                    _row = stubRowScope()
+                    _row.NavigationBarItem(selected=True, onClick=lambda: None)
+                    _row.NavigationBarItem(selected=True, onClick=lambda: None, enabled=False)
                     """.trimIndent(),
                 )
             }
@@ -256,12 +256,12 @@ class PythonxComposableTest {
     fun aComposablePrintsOnlyItsDeclaredParametersInARefusal() = withComposer {
         Python3.exec(
             """
-            import pythonx
-            _px = {'signature': pythonx._TABLE['androidx.compose.material3.Text'].signature()}
+            import python_multiplatform.binding as _pm_binding
+            _px = {'signature': _pm_binding._TABLE['androidx.compose.material3.Text'].signature()}
             """.trimIndent(),
         )
 
-        assertEquals("Text(text: String, modifier: Modifier = ..., color: Int = ..., font_size: Int = ...)", eval("_px['signature']"))
+        assertEquals("Text(text: String, modifier: Modifier = ..., color: Int = ..., fontSize: Int = ...)", eval("_px['signature']"))
     }
 
     /** [withAdapter] plus a composer pushed around the block, which is what the hand-written Kotlin
@@ -269,22 +269,22 @@ class PythonxComposableTest {
     private inline fun withComposer(block: () -> Unit) = withAdapter {
         Python3.exec(
             """
-            import pythonx
-            from androidx.compose.runtime import stub_composer
+            import python_multiplatform.binding as _pm_binding
+            from androidx.compose.runtime import stubComposer
             # Held in a global on purpose. An OBJECT result reaches Python as a proxy that owns its
-            # handle and releases it in `__del__`, so `push_composer(stub_composer())` alone would
+            # handle and releases it in `__del__`, so `push_composer(stubComposer())` alone would
             # push a handle and then drop the last reference to it -- the next call through the
             # boundary then fails with "stale or unknown Kotlin object handle". The real caller is
             # Kotlin, which holds the composer for the composition's lifetime by construction; a
             # Python caller has to say so.
-            _px_composer = stub_composer()
-            pythonx.push_composer(_px_composer)
+            _px_composer = stubComposer()
+            _pm_binding.push_composer(_px_composer)
             """.trimIndent(),
         )
         try {
             block()
         } finally {
-            Python3.exec("import pythonx\npythonx.pop_composer()\ndel _px_composer")
+            Python3.exec("import python_multiplatform.binding as _pm_binding\n_pm_binding.pop_composer()\ndel _px_composer")
         }
     }
 

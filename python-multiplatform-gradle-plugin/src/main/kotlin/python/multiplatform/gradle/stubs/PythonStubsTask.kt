@@ -3,13 +3,10 @@ package python.multiplatform.gradle.stubs
 import org.gradle.api.DefaultTask
 import org.gradle.api.file.ConfigurableFileCollection
 import org.gradle.api.file.DirectoryProperty
-import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.provider.ListProperty
 import org.gradle.api.tasks.Input
-import org.gradle.api.tasks.InputFile
 import org.gradle.api.tasks.InputFiles
 import org.gradle.api.tasks.Internal
-import org.gradle.api.tasks.Optional
 import org.gradle.api.tasks.OutputDirectory
 import org.gradle.api.tasks.PathSensitive
 import org.gradle.api.tasks.PathSensitivity
@@ -24,9 +21,9 @@ import javax.inject.Inject
  *
  * ### Why this is a Gradle task at all
  *
- * `pythonx` adapts Kotlin generically -- a module `__getattr__` finds the binding, adapts it once and
- * caches it -- so **nothing an editor can see is ever enumerated**. The stubs are what pay that back:
- * they carry the fully enumerated Pythonic surface while the runtime enumerates nothing. That
+ * The runtime binds Kotlin generically, so **nothing an editor can see is ever enumerated**. The stubs
+ * are what pay that back: they carry the fully enumerated surface, under the Kotlin names, while the
+ * runtime enumerates nothing. Making it Pythonic is `pythonx`'s job, not this plugin's. That
  * generation belongs to the Gradle plugin, the way PyREPL's `createKotlinMetaPackageForPython` did
  * it, is settled (`agent-rules.md` §12) and this task is it.
  *
@@ -77,16 +74,6 @@ abstract class PythonStubsTask : DefaultTask() {
     @get:Internal
     abstract val klibReaderClasspath: ConfigurableFileCollection
 
-    /**
-     * §5.3's manifest, owned by the Python package being stubbed. Absent means only the Kotlin-FQN
-     * product is emitted, which is the honest default: `pythonx.compose.layout` wrapping
-     * `androidx.compose.foundation.layout` is not inferable from anything this plugin can see.
-     */
-    @get:InputFile
-    @get:Optional
-    @get:PathSensitive(PathSensitivity.NONE)
-    abstract val manifest: RegularFileProperty
-
     @get:OutputDirectory
     abstract val outputDirectory: DirectoryProperty
 
@@ -113,14 +100,7 @@ abstract class PythonStubsTask : DefaultTask() {
             workerExecutor.scanKlibIsolated(klib, includes, temporaryDir, klibReaderClasspath.files).declarations
         }
 
-        val manifestFile = manifest.orNull?.asFile
-        val parsed = if (manifestFile != null && manifestFile.isFile) {
-            parseStubManifest(manifestFile.readText())
-        } else {
-            StubManifest.EMPTY
-        }
-
-        val files = renderKotlinFqnStubs(declarations) + renderPythonicStubs(declarations, parsed)
+        val files = renderKotlinFqnStubs(declarations)
         files.forEach { (path, content) ->
             val file = destination.resolve(path)
             file.parentFile.mkdirs()

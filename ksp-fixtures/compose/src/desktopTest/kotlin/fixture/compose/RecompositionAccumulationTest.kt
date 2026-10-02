@@ -166,7 +166,7 @@ class RecompositionAccumulationTest {
         val measured = measure("_acc_toggle") { pass ->
             "# pass $pass\n" +
                 "from androidx.compose.material3 import Checkbox\n" +
-                "Checkbox(False, on_checked_change=_acc_toggle)"
+                "Checkbox(False, onCheckedChange=_acc_toggle)"
         }
         report("plain callback", measured)
 
@@ -258,7 +258,7 @@ class RecompositionAccumulationTest {
         val measured = measure("_acc_both") { pass ->
             "# pass $pass\n" +
                 "from androidx.compose.material3 import Button\n" +
-                "Button(on_click=_acc_both, content=_acc_both)"
+                "Button(onClick=_acc_both, content=_acc_both)"
         }
         report("one callable, two slot shapes", measured)
 

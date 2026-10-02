@@ -104,12 +104,12 @@ class ComposableRenderTest {
         // crossing of its own that could be the thing that actually worked.
         Python3.exec(
             """
-            import pythonx
+            import python_multiplatform.binding as _pm_binding
             # By the *base* name, not the fully-qualified one: material3 declares four `Text`s, so
-            # the walker gave each an overload suffix and `pythonx._TABLE` has no bare
+            # the walker gave each an overload suffix and `_pm_binding._TABLE` has no bare
             # `androidx.compose.material3.Text` key at all. `from ... import Text` still works --
             # that is `_Overloads` dispatching -- which is what the rendering tests above use.
-            _decls = pythonx._BY_PACKAGE['androidx.compose.material3']['Text']
+            _decls = _pm_binding._BY_PACKAGE['androidx.compose.material3']['Text']
             _decl = [_d for _d in _decls if _d.param_type_names[0] == 'kotlin.String'][0]
             assert len(_decls) >= 2, 'expected Text to be an overload set: ' + repr([_d.leaf for _d in _decls])
             assert tuple(_decl.param_names[-4:]) == ('${'$'}composer', '${'$'}changed', '${'$'}changed1', '${'$'}default'), \
@@ -263,7 +263,7 @@ class ComposableRenderTest {
             """
             from androidx.compose.material3 import Text
             _laid_out = []
-            Text('hi', on_text_layout=lambda result: _laid_out.append(type(result).__name__))
+            Text('hi', onTextLayout=lambda result: _laid_out.append(type(result).__name__))
             """.trimIndent(),
         )
 
@@ -323,14 +323,14 @@ class ComposableRenderTest {
             from androidx.compose.foundation.layout import Row
             from androidx.compose.material3 import Text
             Row(content=lambda row: row.NavigationBarItem(
-                selected=True, on_click=lambda: None, icon=lambda: Text('hi hi hi')))
+                selected=True, onClick=lambda: None, icon=lambda: Text('hi hi hi')))
             """.trimIndent(),
         )
         val withoutIcon = inkOf(
             """
             from androidx.compose.foundation.layout import Row
             Row(content=lambda row: row.NavigationBarItem(
-                selected=True, on_click=lambda: None, icon=lambda: None))
+                selected=True, onClick=lambda: None, icon=lambda: None))
             """.trimIndent(),
         )
 
@@ -495,13 +495,13 @@ class ComposableRenderTest {
         val drawn = inkOf(
             """
             from androidx.compose.material3 import Button, Text
-            Button(on_click=lambda: None, content=lambda: Text('hi'))
+            Button(onClick=lambda: None, content=lambda: Text('hi'))
             """.trimIndent(),
         )
         val empty = inkOf(
             """
             from androidx.compose.material3 import Button
-            Button(on_click=lambda: None, content=lambda: None)
+            Button(onClick=lambda: None, content=lambda: None)
             """.trimIndent(),
         )
         println("compose render: Button(content=Text('hi')) -> $drawn px, empty content -> $empty px")
@@ -565,10 +565,11 @@ class ComposableRenderTest {
 
     /**
      * **`ListItem`.** `headlineContent` is the one parameter with no default (also `Function2`,
-     * arity zero) and it crosses under its `to_python_name` spelling, `headline_content` -- so this
-     * also pins that the walker's camelCase-to-snake_case kwarg mapping reaches a real multi-word
-     * parameter name and not just single-word ones (`content`, `modifier`) every other test here
-     * happens to use.
+     * arity zero) and it is written under its **Kotlin** parameter name, `headlineContent` -- so
+     * this also pins that a keyword argument reaches a real multi-word parameter by its Kotlin name,
+     * not just the single-word ones (`content`, `modifier`) every other test here happens to use.
+     * (It used to be `headline_content`: the binder snake_cased parameters, which it no longer does;
+     * a Pythonic spelling is pythonx-compose's to define.)
      *
      * The empty control is not zero, unlike `Column`'s or `Row`'s: `ListItem`, like `Button`, always
      * paints its own container surface (`colors.containerColor` at `tonalElevation`) whether or not
@@ -577,17 +578,17 @@ class ComposableRenderTest {
      * `Column`'s does.
      */
     @Test
-    fun listItemComposesItsHeadlineContentUnderItsSnakeCasedName() {
+    fun listItemComposesItsHeadlineContentUnderItsKotlinName() {
         val drawnPixels = pixelsOf(
             """
             from androidx.compose.material3 import ListItem, Text
-            ListItem(headline_content=lambda: Text('hi'))
+            ListItem(headlineContent=lambda: Text('hi'))
             """.trimIndent(),
         )
         val emptyPixels = pixelsOf(
             """
             from androidx.compose.material3 import ListItem
-            ListItem(headline_content=lambda: None)
+            ListItem(headlineContent=lambda: None)
             """.trimIndent(),
         )
         // Ink *count* cannot tell these apart: `ListItem`'s own container surface already covers
@@ -599,13 +600,13 @@ class ComposableRenderTest {
         val drawnColors = drawnPixels.filter { it != BACKGROUND }.toSet()
         val emptyColors = emptyPixels.filter { it != BACKGROUND }.toSet()
         println(
-            "compose render: ListItem(headline_content=Text('hi')) -> ${drawnColors.size} distinct colors, " +
+            "compose render: ListItem(headlineContent=Text('hi')) -> ${drawnColors.size} distinct colors, " +
                 "empty -> ${emptyColors.size} distinct colors",
         )
         assertTrue(emptyColors.isNotEmpty(), "a ListItem with no headline must still draw its own container surface")
         assertTrue(
             drawnColors != emptyColors,
-            "headline_content added no new color over the bare container: $emptyColors vs $drawnColors",
+            "headlineContent added no new color over the bare container: $emptyColors vs $drawnColors",
         )
     }
 
@@ -672,13 +673,13 @@ class ComposableRenderTest {
         val drawn = inkOf(
             """
             from androidx.compose.material3 import IconButton, Text
-            IconButton(on_click=lambda: None, content=lambda: Text('hi'))
+            IconButton(onClick=lambda: None, content=lambda: Text('hi'))
             """.trimIndent(),
         )
         val empty = inkOf(
             """
             from androidx.compose.material3 import IconButton
-            IconButton(on_click=lambda: None, content=lambda: None)
+            IconButton(onClick=lambda: None, content=lambda: None)
             """.trimIndent(),
         )
         println("compose render: IconButton(content=Text('hi')) -> $drawn px, empty content -> $empty px")
@@ -769,19 +770,19 @@ class ComposableRenderTest {
     fun lightColorSchemeIsCallableNowThatItsColoursCanBeBuilt() {
         Python3.exec(
             """
-            import pythonx
-            _decl = pythonx._BY_PACKAGE['androidx.compose.material3']['light_color_scheme'][0]
+            import python_multiplatform.binding as _pm_binding
+            _decl = _pm_binding._BY_PACKAGE['androidx.compose.material3']['lightColorScheme'][0]
             # Every one of the 36 Color parameters declares a default in Kotlin, and none of them is
             # omittable here. The cap, unchanged by anything in this commit.
             assert _decl.declared_arity() == 36, _decl.declared_arity()
             assert all(_decl.param_has_default[i] is False for i in range(_decl.declared_arity())), (
-                "light_color_scheme became partly omittable -- ArtifactScanner.MAX_OMITTABLE_PARAMETERS "
+                "lightColorScheme became partly omittable -- ArtifactScanner.MAX_OMITTABLE_PARAMETERS "
                 "(6) must have grown past 36, or the omission plan changed: " + repr(_decl.param_has_default)
             )
-            from androidx.compose.material3 import light_color_scheme
+            from androidx.compose.material3 import lightColorScheme
             try:
-                light_color_scheme()
-                raise AssertionError('light_color_scheme() must not be callable with zero arguments')
+                lightColorScheme()
+                raise AssertionError('lightColorScheme() must not be callable with zero arguments')
             except TypeError as _e:
                 assert 'no value for primary' in str(_e), str(_e)
             """.trimIndent(),
@@ -789,7 +790,7 @@ class ComposableRenderTest {
 
         val red = distinctColorsOf(themedButton(255, 0, 0))
         val green = distinctColorsOf(themedButton(0, 255, 0))
-        println("compose render: MaterialTheme(light_color_scheme(primary=red)) -> ${red.size} colors, green -> ${green.size}")
+        println("compose render: MaterialTheme(lightColorScheme(primary=red)) -> ${red.size} colors, green -> ${green.size}")
         assertTrue(0xFFFF0000.toInt() in red, "the red primary never reached the Button's container: $red")
         assertTrue(0xFF00FF00.toInt() in green, "the green primary never reached the Button's container: $green")
         assertTrue(0xFFFF0000.toInt() !in green, "a green scheme painted red, so the argument was not read: $green")
@@ -813,20 +814,20 @@ class ComposableRenderTest {
     fun twoOfIconsThreeImageTypesNowHaveProducersInTheWalkAndImageVectorDoesNot() {
         Python3.exec(
             """
-            import pythonx
+            import python_multiplatform.binding as _pm_binding
             _icon_image_types = {
                 'androidx.compose.ui.graphics.ImageBitmap',
                 'androidx.compose.ui.graphics.vector.ImageVector',
                 'androidx.compose.ui.graphics.painter.Painter',
             }
-            _decls = pythonx._BY_PACKAGE['androidx.compose.material3']['Icon']
+            _decls = _pm_binding._BY_PACKAGE['androidx.compose.material3']['Icon']
             _icon_param_types = {_d.param_type_names[0] for _d in _decls}
             assert _icon_param_types == _icon_image_types, \
                 "Icon's overloads no longer match what this test recorded: " + repr(_icon_param_types)
 
             _produced = {
                 d.return_type_name
-                for table in pythonx._BY_PACKAGE.values() for decls in table.values() for d in decls
+                for table in _pm_binding._BY_PACKAGE.values() for decls in table.values() for d in decls
                 if d.return_type_name in _icon_image_types
             }
             assert _produced == {
@@ -838,7 +839,7 @@ class ComposableRenderTest {
     }
 
     /**
-     * `light_color_scheme` with every slot black except `primary`, inside a `MaterialTheme`, around a
+     * `lightColorScheme` with every slot black except `primary`, inside a `MaterialTheme`, around a
      * `Button` whose container reads `colorScheme.primary`.
      *
      * The keyword names are read off the walked declaration rather than typed out, so the test says
@@ -846,20 +847,20 @@ class ComposableRenderTest {
      */
     private fun themedButton(red: Int, green: Int, blue: Int): String =
         """
-        import pythonx
+        import python_multiplatform.binding as _pm_binding
         from androidx.compose.ui.graphics import Color__Int_Int_Int_Int as _Color
-        from androidx.compose.material3 import light_color_scheme, MaterialTheme, Button
+        from androidx.compose.material3 import lightColorScheme, MaterialTheme, Button
 
-        _decl = pythonx._BY_PACKAGE['androidx.compose.material3']['light_color_scheme'][0]
-        _slots = [pythonx.to_python_name(_n) for _n in _decl.param_names]
+        _decl = _pm_binding._BY_PACKAGE['androidx.compose.material3']['lightColorScheme'][0]
+        _slots = list(_decl.param_names)
         _black = _Color(0, 0, 0)
         _written = dict((_slot, _black) for _slot in _slots)
         _written['primary'] = _Color($red, $green, $blue)
-        _scheme = light_color_scheme(**_written)
+        _scheme = lightColorScheme(**_written)
 
         MaterialTheme(
-            color_scheme=_scheme,
-            content=lambda: Button(on_click=lambda: None, content=lambda: None),
+            colorScheme=_scheme,
+            content=lambda: Button(onClick=lambda: None, content=lambda: None),
         )
         """.trimIndent()
 

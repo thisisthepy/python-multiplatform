@@ -287,13 +287,16 @@ object PythonCallables {
      * platform work for no new capability. [PythonxAdapter.install] registers it, so the layer that
      * needs the service is the layer that declares it.
      *
-     * It is a `pythonx.*` name on purpose. The walker only ever emits `androidx.*`/`kotlin.*` names
-     * and KSP only ever emits the consumer's own, so nothing can collide with it, and a reader of
-     * `pythonx._TABLE` can see that the adapter has exactly one Kotlin service of its own.
+     * Each entry is named by its **true Kotlin fully-qualified name**
+     * (`python.multiplatform.ffi.pythonx.PythonCallables.newFunction`). It used to be
+     * `pythonx.runtime.newFunction`, which made the proxy layer create a `pythonx` module in
+     * `sys.modules` -- a binder-made name squatting on the real pythonx package -- and exported a
+     * Kotlin declaration under a name that was not its own. Neither is allowed (`AGENTS.md` §12.1,
+     * §12.2).
      */
     internal object Fragment : FunctionTableFragment {
 
-        override val moduleName: String = "pythonx_runtime"
+        override val moduleName: String = "python_multiplatform_runtime"
 
         override fun entries(): List<ExposedCallable> = listOf(
             ExposedCallable(
@@ -336,11 +339,11 @@ object PythonCallables {
         )
     }
 
-    /** The name `pythonx` resolves. Shared so the Python source and the entry cannot drift. */
-    internal const val NEW_FUNCTION: String = "pythonx.runtime.newFunction"
+    /** The name the binding layer resolves. Shared so the Python source and the entry cannot drift. */
+    internal const val NEW_FUNCTION: String = "python.multiplatform.ffi.pythonx.PythonCallables.newFunction"
 
     /** @see findFunction */
-    internal const val FIND_FUNCTION: String = "pythonx.runtime.findFunction"
+    internal const val FIND_FUNCTION: String = "python.multiplatform.ffi.pythonx.PythonCallables.findFunction"
 }
 
 /**
