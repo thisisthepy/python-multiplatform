@@ -253,6 +253,18 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   build** (design §6 step 1b). Rebinding and mixed containers are found by a second Pyrefly pass over a
   probed copy (design §6.1), which runs only when a file has a name assigned twice or a container
   display; `for` targets and comprehension variables are not probed.
+- **N-7** TypedPython compilation (INTENT §1.4; design §4.3 stage 1, #23): `typedpython.compiled` is the
+  identity in CPython; functions it marks, or every module-level function under a first-line
+  `# typedpython: compiled`, compile through Cython to a CPython extension **with CPython's results**:
+  `int` keeps arbitrary precision (C `long long` only behind an entry range check, and in pure functions
+  with overflow checking that redoes the call interpreted), an argument of a different runtime type
+  takes the interpreted path, `list[float]` elements are unboxed only when the function cannot make them
+  non-floats, and `math.sqrt` of a negative still raises `ValueError`. A module that fails the gate in
+  `compiled` mode is not compiled. `python -m typedpython demo <module> [args]` builds a module, runs its
+  `main()` interpreted and compiled, and fails unless the output is identical. `Status: partial` —
+  asserted by `python-multiplatform-ksp/src/test/python/test_compile.py` and `test_cli.py` (CI:
+  `.github/workflows/typedpython.yml`); desktop only, module-level functions with plain signatures only
+  (methods, defaults, `*args` compile as untyped Python), no M2 benchmark targets yet.
 
 ---
 

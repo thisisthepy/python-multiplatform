@@ -21,6 +21,8 @@ packages = ["src/main/python/typedpython"]
 
 [project.optional-dependencies]
 test = ["pytest"]
+# `typedpython demo` / compiler.compile_module: Cython and a C compiler for the host.
+compile = ["cython>=3.1", "setuptools"]
 
 [tool.pytest.ini_options]
 testpaths = ["src/test/python"]

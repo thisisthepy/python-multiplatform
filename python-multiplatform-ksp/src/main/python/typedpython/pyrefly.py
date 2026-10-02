@@ -32,6 +32,11 @@ ANY_LEAK_KINDS = (
 ANY_IN_TYPE = re.compile(r"(?<![\w.])(?:typing\.Any|Any|Unknown)(?![\w])")
 
 
+# Where the `typedpython` package itself lives, so `import typedpython` / `@typedpython.compiled`
+# in user code always resolves, whatever environment Pyrefly reads site-packages from.
+OWN_ROOT = Path(__file__).resolve().parent.parent
+
+
 class PyreflyError(RuntimeError):
     """Pyrefly could not be run, or its output could not be read."""
 
@@ -73,7 +78,7 @@ def run(paths: Sequence[Path], search_paths: Sequence[Path] = ()) -> Report:
     files = [str(Path(p).resolve()) for p in paths]
     with tempfile.TemporaryDirectory(prefix="typedpython-") as work:
         config = Path(work) / "pyrefly.toml"
-        config.write_text(_config([*search_paths, *import_roots(files)]))
+        config.write_text(_config([*search_paths, *import_roots(files), OWN_ROOT]))
         report_dir = Path(work) / "pysa"
         argv = [
             *command(), "check", *files,
