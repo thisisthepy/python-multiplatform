@@ -70,7 +70,9 @@ class PyiRenderingTest {
         val body = files.getValue("androidx/compose/foundation/layout/__init__.pyi")
         assertTrue("def padding__Dp(" in body, body)
         assertTrue("def padding__PaddingValues(" in body, body)
-        assertFalse("def padding(" in body, "the bare name is not a table key: $body")
+        // The base name of an overload set is served by the binding layer's dispatcher, so it is
+        // stubbed as `@overload`s beside the explicit table-key spellings (`TypedStubTest`).
+        assertTrue("@_t.overload\ndef padding(" in body, body)
     }
 
     /**
@@ -85,9 +87,9 @@ class PyiRenderingTest {
     @Test
     fun kotlinFqnParametersAreKeywordCapableAndCarryTheBoundarysOwnTypes() {
         val body = renderKotlinFqnStubs(paddingOverloads).getValue("androidx/compose/foundation/layout/__init__.pyi")
-        assertTrue("def padding__Dp(receiver: int, /, all: float) -> int:" in body, body)
+        assertTrue("def padding__Dp(receiver: androidx.compose.ui.Modifier, /, all: androidx.compose.ui.unit.Dp | float) -> androidx.compose.ui.Modifier:" in body, body)
         // `padding(start, top, end, bottom)` has four defaulted parameters.
-        assertTrue("def padding__Dp_Dp_Dp_Dp(receiver: int, /, start: float = ..., top: float = ..., end: float = ..., bottom: float = ...) -> int:" in body, body)
+        assertTrue("def padding__Dp_Dp_Dp_Dp(receiver: androidx.compose.ui.Modifier, /, start: androidx.compose.ui.unit.Dp | float = ..., top: androidx.compose.ui.unit.Dp | float = ..., end: androidx.compose.ui.unit.Dp | float = ..., bottom: androidx.compose.ui.unit.Dp | float = ...) -> androidx.compose.ui.Modifier:" in body, body)
         assertTrue(
             "\"\"\"Kotlin: androidx.compose.ui.Modifier.padding(all: androidx.compose.ui.unit.Dp): " +
                 "androidx.compose.ui.Modifier\"\"\"" in body,

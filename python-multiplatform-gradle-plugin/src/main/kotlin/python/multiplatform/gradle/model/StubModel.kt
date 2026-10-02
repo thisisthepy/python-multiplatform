@@ -81,6 +81,14 @@ internal data class DeclarationModel(
     val isComposable: Boolean = false,
     val isSuspend: Boolean = false,
     val kind: String = "FUNCTION",
+    /**
+     * What the declared return type **is a**, nearest first, as qualified Kotlin names -- the
+     * ancestry `ArtifactCallable.returnSupertypes` carries into the binding layer, kept here so a
+     * stub class can extend the class a value of it may fill (`BitmapPainter` fills a `Painter`
+     * slot). Empty for a type nothing could read an ancestry for, which is the truth rather than a
+     * gap to fill.
+     */
+    val returnSupertypes: List<String> = emptyList(),
 ) : Serializable
 
 /** @param name `null` when the producer could not read one (§3.2); never a synthesised `arg0`. */
