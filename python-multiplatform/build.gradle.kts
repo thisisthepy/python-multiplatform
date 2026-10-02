@@ -1807,6 +1807,36 @@ val buildWasmPython by tasks.registering(Exec::class) {
 }
 
 /**
+ * Where `tools/wasm/build-cpython.sh wheels` puts the pinned compiled wheels the wasm suite loads
+ * (`wasmJsTest/.../WasmCompiledWheelTest`). Not checked in: they are downloaded by URL and accepted
+ * only against the sha256 the script pins.
+ */
+val wasmWheelsDir: String = (project.findProperty("wasmWheelsDir")?.toString()
+    ?: System.getenv("PMP_WASM_WHEELS_DIR")
+    ?: rootProject.layout.projectDirectory.dir(".caches/wasm-wheels").asFile.absolutePath)
+
+/** Downloads the pinned wheels into [wasmWheelsDir]. Network, a few MB; nothing depends on it. */
+val fetchWasmWheels by tasks.registering(Exec::class) {
+    group = "python"
+    description = "Downloads the pinned pyemscripten_2026_0 wheels the wasm suite loads into .caches/"
+    val script = rootProject.layout.projectDirectory.file("tools/wasm/build-cpython.sh").asFile
+    environment("WASM_WHEELS_DIR", wasmWheelsDir)
+    commandLine("bash", script.absolutePath, "wheels")
+}
+
+/**
+ * The test-only tail of the test bundle's `cpython-config.mjs`: where the wheels were extracted, and
+ * whether their absence is a failure. Appended here, never by [cpythonConfigModule], because a
+ * consumer's bundle has no business with either. All three are always written -- the test reads a
+ * missing knob as "the build did not stage anything", which is a failure rather than a skip.
+ */
+fun testWheelConfig(sitePackages: File?, wheelsDir: File, required: Boolean): String =
+    "\n// Test-only, appended by the wasmJs KotlinJsTest doFirst. See WasmCompiledWheelTest.\n" +
+        "export const PMP_TEST_SITE_PACKAGES = ${groovy.json.JsonOutput.toJson(sitePackages?.absolutePath)};\n" +
+        "export const PMP_TEST_WHEELS_DIR = ${groovy.json.JsonOutput.toJson(wheelsDir.absolutePath)};\n" +
+        "export const PMP_TEST_WHEELS_REQUIRED = $required;\n"
+
+/**
  * The generated `cpython-config.mjs` that `cpython.mjs` imports.
  *
  * Both constants are generated unconditionally: a named export that is missing fails the *whole* ES
@@ -2343,6 +2373,10 @@ tasks.withType<org.jetbrains.kotlin.gradle.targets.js.testing.KotlinJsTest>().co
 
     onlyIf { wasmRuntimePresent(pythonDir.resolve("python.mjs")) }
 
+    // Fetching the wheels changes what WasmCompiledWheelTest can prove, so it re-runs the suite.
+    inputs.files(fileTree(wasmWheelsDir) { include("*.whl") })
+        .withPropertyName("wasmWheels").optional()
+
     doFirst {
         val dir = stagingDir.get().asFile
         // The stdlib zip is what *both* runners get their standard library from -- see
@@ -2358,6 +2392,30 @@ tasks.withType<org.jetbrains.kotlin.gradle.targets.js.testing.KotlinJsTest>().co
         }
         dir.resolve("cpython-config.mjs").writeText(
             cpythonConfigModule(pythonDir, stdlibZipUrl = stdlibZip?.let { "./${it.name}" })
+        )
+
+        // The compiled wheels WasmCompiledWheelTest imports. Extracted rather than put on
+        // `sys.path` as zips: the extension is an Emscripten side module that `dlopen` reads off
+        // the filesystem, which zipimport cannot serve. Under Node the interpreter reaches this
+        // host path through the NODEFS mounts in `cpython.mjs`.
+        val wheels = file(wasmWheelsDir).listFiles { f -> f.name.endsWith(".whl") }?.sortedBy { it.name }.orEmpty()
+        val sitePackages = dir.resolve("wasm-site-packages")
+        delete(sitePackages)
+        if (wheels.isNotEmpty()) {
+            copy {
+                wheels.forEach { from(zipTree(it)) }
+                into(sitePackages)
+            }
+            logger.lifecycle("Extracted ${wheels.size} wheel(s) from $wasmWheelsDir for WasmCompiledWheelTest")
+        } else {
+            logger.lifecycle(
+                "No wheels in $wasmWheelsDir -- WasmCompiledWheelTest will " +
+                    (if (requireWasmRuntime) "FAIL (-PrequireWasmRuntime)" else "skip") +
+                    ". Fetch them with tools/wasm/build-cpython.sh wheels (or :python-multiplatform:fetchWasmWheels)."
+            )
+        }
+        dir.resolve("cpython-config.mjs").appendText(
+            testWheelConfig(sitePackages.takeIf { wheels.isNotEmpty() }, file(wasmWheelsDir), requireWasmRuntime)
         )
 
         // The same two substitutions a consumer's browser bundle needs, and the reason they are a

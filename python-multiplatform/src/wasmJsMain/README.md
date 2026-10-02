@@ -7,10 +7,26 @@ the data path.
 Everything below is measured. The standalone `wasm-experiment/` that first took the measurements
 was retired into this source set and `tools/wasm/` (it remains in git history: `git log --
 wasm-experiment`); `docs/platforms/wasm-design.md` records how they were arrived at, including the several
-conclusions that were wrong before they were run. The two claims the rest of this file stands on
-that only the experiment used to prove -- the shared memory surviving growth, and the interpreter
-carrying the `pyemscripten_2026_0` ABI -- are now `wasmJsTest/.../emscripten/WasmSharedMemoryGrowthTest`
-and `WasmInterpreterAbiTest`.
+conclusions that were wrong before they were run. Everything the experiment proved that this file
+stands on is now a test in `wasmJsTest/.../emscripten/`, run against the real interpreter on every
+`wasmJsNodeTest`:
+
+| claim | test |
+|---|---|
+| the shared memory survives CPython growing it | `WasmSharedMemoryGrowthTest` |
+| Kotlin-only work neither grows nor writes that memory | `WasmKotlinLeavesLinearMemoryAloneTest` |
+| the interpreter carries the `pyemscripten_2026_0` ABI | `WasmInterpreterAbiTest` |
+| ... and a real compiled wheel loads and runs in it | `WasmCompiledWheelTest` (wheels: `tools/wasm/build-cpython.sh wheels`) |
+| direct calls beat a JS frame; hoisting beats a shim; strings and bulk reads | `WasmCrossingOverheadTest` |
+| `Table.set` beats `addFunction` + a JS closure for upcalls | `WasmUpcallRouteOverheadTest` |
+| `PY_CALL_TRAMPOLINE`'s JS fallback is live; `pmp_invoke` survives the wasm one | `WasmCallTrampolineTest` |
+
+The measurement tests print their rows and assert only orderings that held by a wide margin; the
+figures quoted below are the experiment's, and the tests' own output is the current reading.
+
+`tools/wasm/build-cpython.sh stock` builds the unpatched PEP 776 interpreter (plus only the runtime
+methods the library binds through) as the negative control for the ABI tests: against it,
+`WasmInterpreterAbiTest` and `WasmCompiledWheelTest` must fail.
 
 ## Never call `withScopedMemoryAllocator`
 
@@ -379,6 +395,12 @@ through `_PyEM_TrampolineCall`, whose wasm fast path never installs on this tool
 upstream defect — the `EM_JS` initialiser needs `wasmTable`/`wasmMemory` before they exist and the
 `LinkError` is swallowed by a bare `catch`). The cost is symmetric, though — every C extension pays
 the same JS frame, measured at 14 ns over `abs()`.
+
+`wasmJsTest/.../WasmCallTrampolineTest` pins both halves of this. It registers a four-parameter
+export as a `PyMethodDef` -- a shape the wasm trampoline's `ref.test`s reject with `SystemError` and
+the JS fallback calls anyway -- and asserts the fallback answered; the day upstream fixes the
+defect, that test goes red and this paragraph is what to re-measure. It also asserts `pmp_invoke`
+takes two parameters, because the JS fallback would hide an arity the wasm trampoline cannot call.
 
 One incidental trap worth recording: **`Module.UTF8ToString` is not available.** This build's
 `-sEXPORTED_RUNTIME_METHODS` lists `wasmExports` and `wasmMemory` and nothing else, deliberately,

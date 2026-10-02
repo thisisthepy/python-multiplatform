@@ -14,3 +14,9 @@ package python.native.ffi.emscripten
 external val wasmMemory: JsAny
 
 external val wasmExports: JsAny
+
+/**
+ * The Emscripten `Module` itself. Tests reach `HEAPU32`, `wasmTable` and `addFunction` through it
+ * -- the JS-side routes the measurement tests price the direct ones against.
+ */
+external val mod: JsAny

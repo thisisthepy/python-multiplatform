@@ -13,13 +13,24 @@ object Benchmark {
         val nsPerOp: Double
     )
 
+    /**
+     * Measures [block], appends the row to the report, and returns the ns/op it recorded -- so a
+     * test that asserts a relation between two rows compares the figures it printed, not a second
+     * measurement of the same thing.
+     */
     fun run(
         name: String,
         warmupIterations: Int = 1000,
         iterations: Int = 100_000,
         block: () -> Unit
-    ) {
+    ): Double {
         val nsPerOp = measure(warmupIterations, iterations, block)
+        results.add(BenchmarkResult(name, iterations, (nsPerOp * iterations).toLong(), nsPerOp))
+        return nsPerOp
+    }
+
+    /** Appends a row measured elsewhere -- inside Python, say -- so it prints with the rest. */
+    fun record(name: String, iterations: Int, nsPerOp: Double) {
         results.add(BenchmarkResult(name, iterations, (nsPerOp * iterations).toLong(), nsPerOp))
     }
 
