@@ -78,14 +78,28 @@ fi
 old_local=""
 old_local="$(git rev-parse -q --verify "refs/heads/$TARGET^{commit}" 2>/dev/null)" || old_local=""
 
-# No-op only if the existing target has exactly this tree AND this parent.
+# main may hold commits develop lacks (earlier release merges, hotfixes). Then
+# release also takes main as a second parent: the tree stays the filtered source
+# tree, and main can always fast-forward to release -- the PR never conflicts.
+main_commit=""
+for ref in refs/remotes/origin/main refs/heads/main; do
+  main_commit="$(git rev-parse -q --verify "$ref^{commit}" 2>/dev/null)" && break
+  main_commit=""
+done
+parents="$src_commit"
+if [ -n "$main_commit" ] && ! git merge-base --is-ancestor "$main_commit" "$src_commit"; then
+  parents="$src_commit $main_commit"
+fi
+
+# No-op only if the existing target has exactly this tree AND these parents.
 if [ -n "$old_local" ] \
    && [ "$(git rev-parse "$old_local^{tree}")" = "$new_tree" ] \
-   && [ "$(git rev-parse -q --verify "$old_local^" 2>/dev/null || true)" = "$src_commit" ]; then
+   && [ "$(git rev-list --parents -n 1 "$old_local" | cut -d' ' -f2-)" = "$parents" ]; then
   echo "no changes: $TARGET already regenerated from $short"
   new_commit="$old_local"
 else
-  new_commit="$(git commit-tree "$new_tree" -p "$src_commit" -m "Release: sync from $SOURCE $short")"
+  pargs=""; for p in $parents; do pargs="$pargs -p $p"; done
+  new_commit="$(git commit-tree "$new_tree" $pargs -m "Release: sync from $SOURCE $short")"
   git update-ref "refs/heads/$TARGET" "$new_commit"
   echo "$TARGET -> $(git rev-parse --short "$new_commit") (parent $short)"
 fi
