@@ -2,6 +2,8 @@ package fixture.compose
 
 import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.PointerButton
+import androidx.compose.ui.input.pointer.PointerButtons
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.unit.Density
 import org.jetbrains.skia.Bitmap
@@ -18,12 +20,13 @@ import kotlin.test.Test
 import kotlin.test.assertTrue
 
 /**
- * **A real pointer event reaches a Python callback through `Modifier.dragAndDropSource`'s suspend
- * slot** -- the second of the three `docs/design/pythonx-adapter-design.md` §9.2 judges reachable by
- * `pointerInput`'s technique without attempting. `PythonDragAndDropSource.kt`'s KDoc has the reason
- * this one is not merely analogous: disassembling `DragAndDropSourceNode`'s constructor shows it
- * delegates the *same* `SuspendingPointerInputModifierNode` `Modifier.pointerInput` itself delegates
- * to, so this test is structured exactly like `PointerInputRenderTest`.
+ * **A real pointer drag reaches a Python callback through `Modifier.dragAndDropSource`.**
+ *
+ * Through Compose 1.6 this was a tap, forwarded raw by the modifier's suspend `PointerInputScope`
+ * slot exactly as `PointerInputRenderTest` does. Compose 1.11 removed that slot; the only callback
+ * left is `transferData(Offset)`, which Compose's own start detector invokes when a primary-button
+ * mouse drag begins. `PythonDragAndDropSource.kt`'s KDoc has the details. A tap no longer reaches
+ * Python by construction, so both cases drag.
  */
 class DragAndDropSourceRenderTest {
 
@@ -43,11 +46,12 @@ class DragAndDropSourceRenderTest {
     }
 
     /**
-     * The positive claim: a press-and-release at the modifier's own 48x48 box invokes the Python
-     * callback with real (type, x, y) triples, and the digit `Text` draws changes once it has.
+     * The positive claim: a primary-button drag starting inside the modifier's own 48x48 box invokes
+     * the Python callback with a real ("start", x, y) triple, and the digit `Text` draws changes once
+     * it has.
      */
     @Test
-    fun aRealPointerTapReachesThePythonCallbackThroughDragAndDropSource() {
+    fun aRealPointerDragReachesThePythonCallbackThroughDragAndDropSource() {
         Python3.exec(
             """
             _dnd_events = []
@@ -58,9 +62,9 @@ class DragAndDropSourceRenderTest {
         )
 
         val before = pixelsOf(BODY)
-        assertTrue(inkOf(before) > 0, "the Text never composed, so there was nothing to tap")
+        assertTrue(inkOf(before) > 0, "the Text never composed, so there was nothing to drag")
 
-        tapCentre()
+        dragFrom(Offset(START_X, BOX_CENTRE))
 
         Python3.exec(
             "assert len(_dnd_events) >= 1, 'pythonDragAndDropSource never invoked the Python callback'",
@@ -68,7 +72,7 @@ class DragAndDropSourceRenderTest {
         Python3.exec(
             """
             kinds = [e[0] for e in _dnd_events]
-            assert 'press' in kinds, 'no press event reached Python: ' + repr(_dnd_events)
+            assert 'start' in kinds, 'no drag start reached Python: ' + repr(_dnd_events)
             """.trimIndent(),
         )
         Python3.exec(
@@ -83,20 +87,20 @@ class DragAndDropSourceRenderTest {
         val after = pixelsOf(BODY)
         val moved = differing(before, after)
         println(
-            "compose input: dragAndDropSource tap -> ink ${inkOf(before)} -> ${inkOf(after)} px, " +
+            "compose input: dragAndDropSource drag -> ink ${inkOf(before)} -> ${inkOf(after)} px, " +
                 "$moved pixels changed",
         )
         assertTrue(
             moved > 0,
-            "no pixel changed after the tap, so the count the callback wrote never reached the render",
+            "no pixel changed after the drag, so the count the callback wrote never reached the render",
         )
     }
 
     /**
-     * The negative control: a press-and-release well outside the 48x48 box invokes nothing.
+     * The negative control: the same drag, started well outside the 48x48 box, invokes nothing.
      */
     @Test
-    fun aTapThatMissesTheBoxInvokesNothing() {
+    fun aDragThatStartsOutsideTheBoxInvokesNothing() {
         Python3.exec(
             """
             _dnd_events = []
@@ -105,23 +109,29 @@ class DragAndDropSourceRenderTest {
                 _dnd_events.append((kind, x, y))
             """.trimIndent(),
         )
-        tapAt(Offset(SCENE - 2f, SCENE - 2f))
+        dragFrom(Offset(START_X, SCENE - 2f))
         Python3.exec(
-            "assert _dnd_events == [], 'a tap that missed the box invoked the callback: ' + repr(_dnd_events)",
+            "assert _dnd_events == [], 'a drag outside the box invoked the callback: ' + repr(_dnd_events)",
         )
     }
 
-    private fun tapCentre() = tapAt(Offset(BOX_CENTRE, BOX_CENTRE))
-
-    private fun tapAt(at: Offset) {
+    private fun dragFrom(start: Offset) {
         val scene = ImageComposeScene(width = SCENE, height = SCENE, density = Density(1f)) {
             PythonComposition(BODY)
         }
         try {
             scene.render()
-            scene.sendPointerEvent(PointerEventType.Move, at)
-            scene.sendPointerEvent(PointerEventType.Press, at)
-            scene.sendPointerEvent(PointerEventType.Release, at)
+            val held = PointerButtons(isPrimaryPressed = true)
+            scene.sendPointerEvent(PointerEventType.Move, start)
+            scene.sendPointerEvent(PointerEventType.Press, start, buttons = held, button = PointerButton.Primary)
+            // Several move steps, well past the touch slop, so the start detector sees a drag.
+            var x = start.x
+            while (x < start.x + DRAG_DISTANCE) {
+                x += STEP
+                scene.sendPointerEvent(PointerEventType.Move, Offset(x, start.y), buttons = held)
+                scene.render()
+            }
+            scene.sendPointerEvent(PointerEventType.Release, Offset(x, start.y), button = PointerButton.Primary)
             scene.render()
         } finally {
             scene.close()
@@ -148,6 +158,9 @@ class DragAndDropSourceRenderTest {
         const val BACKGROUND = 0
         const val SCENE = 80
         const val BOX_CENTRE = 24f
+        const val START_X = 4f
+        const val DRAG_DISTANCE = 40f
+        const val STEP = 8f
 
         val BODY = """
             from fixture.compose import emptyModifier, pythonDragAndDropSource

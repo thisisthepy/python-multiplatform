@@ -3,68 +3,48 @@ package fixture.compose
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.draganddrop.dragAndDropSource
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.input.pointer.PointerEventType
 import python.multiplatform.ffi.PyObject
 import python.multiplatform.ffi.types.basic.PyFloat
 import python.multiplatform.ffi.types.basic.PyString
 
 /**
- * `Modifier.dragAndDropSource`, reached the same way `pythonPointerInput` reaches
- * `Modifier.pointerInput` (`docs/design/pythonx-adapter-design.md` §9.1) -- confirmed to be the *same*
- * underlying mechanism, not just the same declared shape, by disassembling
- * `DragAndDropSourceNode`'s constructor (no sources jar for this Compose version): it `delegate`s a
- * `SuspendingPointerInputFilterKt.SuspendingPointerInputModifierNode(dragAndDropSourceHandler)` --
- * the exact same node `Modifier.pointerInput` itself delegates to. `dragAndDropSource`'s `block`
- * parameter is a `PointerInputScope` (`DragAndDropSourceScope` extends it) started and cancelled on
- * the same node lifetime `pythonPointerInput` already relies on, so [pythonPointerInput]'s technique
- * -- and its `finally`-based lifetime -- carries over verbatim, not just by analogy.
+ * `Modifier.dragAndDropSource`, with Python told where a drag started.
+ *
+ * ### Why this is no longer `pythonPointerInput`'s technique
+ *
+ * Up to Compose 1.6 `dragAndDropSource` took a `suspend DragAndDropSourceScope.() -> Unit` block --
+ * a `PointerInputScope` -- so this fixture forwarded every raw pointer event exactly as
+ * [pythonPointerInput] does. Compose 1.11 removed that overload. The only public shapes left are
+ * `dragAndDropSource(transferData: (Offset) -> DragAndDropTransferData?)` and the same with a
+ * `drawDragDecoration`; gesture detection is internal (`DragAndDropSourceDefaults.DefaultStartDetector`:
+ * a primary-button mouse drag, or a long press for touch). So the Python callback now sees the one
+ * event the library still hands out: the drag start, as `("start", x, y)`.
  *
  * ### What is exercised here, and what is not
  *
- * This proves the same claim §9.1 proves for `pointerInput`: a real pointer event, delivered while
- * this modifier's suspend slot is active, reaches a synchronous Python callback. It does **not**
- * exercise [androidx.compose.foundation.draganddrop.DragAndDropSourceScope.startTransfer] or
- * [drawDragDecoration] doing anything real -- starting an actual OS-level drag session needs a
- * `DragAndDropTransferData` wrapping a `java.awt.datatransfer.Transferable`, which is a real drag
- * payload and a different, unmeasured claim from "the suspend slot's events reach Python". Not
- * attempted here: [drawDragDecoration] is a hardcoded no-op, and [onEvent] never calls
- * `startTransfer`.
+ * A real pointer drag, recognised by Compose's own start detector, reaches a synchronous Python
+ * callback. Returning `null` declines the transfer, so no OS-level drag session (`DragAndDropTransferData`
+ * wrapping a `java.awt.datatransfer.Transferable`) is ever started -- that remains a different,
+ * unmeasured claim. [drawDragDecoration] is a no-op for the same reason.
  *
- * ### Lifetime
+ * ### Lifetime -- not handled, same as [pythonDraggable]
  *
- * Same shape as [pythonPointerInput]: [onEvent] is released in the `finally` around the whole suspend
- * body, which runs on both ordinary completion and cancellation (node detachment), because this is
- * the same `SuspendingPointerInputModifierNode` coroutine [pythonPointerInput] already relies on for
- * that guarantee.
+ * The old suspend block gave a `finally` that ran on node detachment. The `transferData` lambda has no
+ * such hook, so [onEvent] is held by the modifier and never closed here.
  */
 @OptIn(ExperimentalFoundationApi::class)
 fun pythonDragAndDropSource(modifier: Modifier, onEvent: PyObject): Modifier = modifier.dragAndDropSource(
     drawDragDecoration = { /* not exercised -- see this function's KDoc */ },
-) {
+) { offset ->
+    val typeArg = PyString.from("start")
+    val xArg = PyFloat.from(offset.x.toDouble())
+    val yArg = PyFloat.from(offset.y.toDouble())
     try {
-        awaitPointerEventScope {
-            while (true) {
-                val event = awaitPointerEvent()
-                val change = event.changes.firstOrNull() ?: continue
-                val type = when (event.type) {
-                    PointerEventType.Press -> "press"
-                    PointerEventType.Release -> "release"
-                    PointerEventType.Move -> "move"
-                    else -> "other"
-                }
-                val typeArg = PyString.from(type)
-                val xArg = PyFloat.from(change.position.x.toDouble())
-                val yArg = PyFloat.from(change.position.y.toDouble())
-                try {
-                    onEvent(typeArg, xArg, yArg).close()
-                } finally {
-                    typeArg.close()
-                    xArg.close()
-                    yArg.close()
-                }
-            }
-        }
+        onEvent(typeArg, xArg, yArg).close()
     } finally {
-        onEvent.close()
+        typeArg.close()
+        xArg.close()
+        yArg.close()
     }
+    null
 }

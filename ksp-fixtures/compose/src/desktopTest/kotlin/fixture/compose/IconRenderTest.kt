@@ -191,8 +191,17 @@ class IconRenderTest {
             import pythonx
 
             _icon = pythonx._BY_PACKAGE['androidx.compose.material3']['Icon']
-            _tints = {(d.param_tags[3], d.param_type_names[3]) for d in _icon}
-            assert _tints == {('OBJECT', 'androidx.compose.ui.graphics.Color')}, repr(_tints)
+            # Read `tint` by name: material3 1.9 (CMP 1.11) added `Icon(painter, tint: ColorProducer?,
+            # contentDescription, modifier)`, whose slot 3 is `modifier` and whose tint is a lambda,
+            # not a Color. The Color-tinted overloads are the three this test is about.
+            _tints = {
+                (d.param_tags[d.param_names.index('tint')], d.param_type_names[d.param_names.index('tint')])
+                for d in _icon
+            }
+            assert _tints == {
+                ('OBJECT', 'androidx.compose.ui.graphics.Color'),
+                ('OBJECT', 'androidx.compose.ui.graphics.ColorProducer'),
+            }, repr(_tints)
 
             _scheme = pythonx._BY_PACKAGE['androidx.compose.material3']['light_color_scheme'][0]
             assert _scheme.param_tags[0] == 'OBJECT', _scheme.param_tags[0]

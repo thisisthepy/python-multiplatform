@@ -79,8 +79,8 @@ kotlin {
         }
     }
     
+    // No iosX64(): Compose Multiplatform 1.11 publishes no iosX64 artefacts.
     listOf(
-        iosX64(),
         iosArm64(),
         iosSimulatorArm64()
     ).forEach { iosTarget ->

@@ -439,27 +439,33 @@ class M3ProofRenderTest {
 
     // ── 12. Switch ────────────────────────────────────────────────────────────
 
+    /**
+     * Compared pixel by pixel, not by ink count. Through material3 1.2 the two states happened to
+     * cover different areas; material3 1.9 (CMP 1.11) paints the unchecked track filled and outlined
+     * over exactly the checked track's footprint, so both states ink the same number of pixels and a
+     * count cannot tell them apart. Which pixels, and in what colour, still can.
+     */
     @Test
     fun switchRendersItsCheckedAndUncheckedStates() {
-        val checked = inkOf(
+        val checked = pixelsOf(
             """
             from androidx.compose.material3 import Switch
             Switch(checked=True, on_checked_change=lambda v: None)
             """.trimIndent(),
         )
-        val unchecked = inkOf(
+        val unchecked = pixelsOf(
             """
             from androidx.compose.material3 import Switch
             Switch(checked=False, on_checked_change=lambda v: None)
             """.trimIndent(),
         )
-        println("compose render: Switch checked=$checked px, unchecked=$unchecked px")
-        assertTrue(checked > 0, "Switch(checked=True) drew nothing")
-        assertTrue(unchecked > 0, "Switch(checked=False) drew nothing")
-        assertTrue(
-            checked != unchecked,
-            "checked Switch should differ from unchecked: $unchecked vs $checked",
-        )
+        val checkedInk = checked.count { it != BACKGROUND }
+        val uncheckedInk = unchecked.count { it != BACKGROUND }
+        val differing = checked.indices.count { checked[it] != unchecked[it] }
+        println("compose render: Switch checked=$checkedInk px, unchecked=$uncheckedInk px, $differing px differ")
+        assertTrue(checkedInk > 0, "Switch(checked=True) drew nothing")
+        assertTrue(uncheckedInk > 0, "Switch(checked=False) drew nothing")
+        assertTrue(differing > 0, "checked Switch rendered pixel-identical to unchecked")
     }
 
     // ── 13. BottomAppBar ──────────────────────────────────────────────────────

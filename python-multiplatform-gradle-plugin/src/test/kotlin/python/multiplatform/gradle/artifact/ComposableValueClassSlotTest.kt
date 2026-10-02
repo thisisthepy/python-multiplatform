@@ -354,6 +354,12 @@ class ComposableValueClassSlotTest {
             if (shape.totalCount != descriptors.size) return@forEachPublicComposable
             function.allParameterTypes.forEachIndexed { index, type ->
                 val descriptor = descriptors.getOrNull(index + shift) ?: return@forEachIndexed
+                // `char` has no boundary type on either view, so the scanner declines the whole
+                // declaration by design (`composableSlotTagOf`) -- a decline, not a disagreement.
+                // Compose 1.6 declared no composable with a `Char` slot; material/material3 under
+                // CMP 1.11 do (`SecureTextField`'s `obfuscationCharacter`), so it is skipped here
+                // rather than counted as a mis-pairing.
+                if (descriptor == "C") return@forEachIndexed
                 when (val slot = ArtifactScanner.composableDeclaredSlot(type, descriptor, classpath)) {
                     null -> counts.disagreed++
                     else -> {

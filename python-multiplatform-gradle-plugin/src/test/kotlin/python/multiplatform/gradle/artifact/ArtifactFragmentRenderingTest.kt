@@ -141,6 +141,55 @@ class ArtifactFragmentRenderingTest {
     }
 
     /**
+     * A fragment too big for one JVM method is split, in order, across private helpers.
+     *
+     * `entries()` used to be one `listOf(...)`. Every entry's `paramTypes`/`paramNames`/
+     * `paramTypeNames`/`paramHasDefault` lists are built inline in that method's bytecode, and a
+     * composable carries four lists as long as its parameter count plus three synthetic slots. Compose
+     * Multiplatform 1.11's `material3` (1.9.0, 326 bound entries) pushed that past the JVM's 64 KB
+     * method limit and the consumer's compile died with `MethodTooLargeException`. The split keeps the
+     * runtime contract -- one `entries()` returning every entry in walk order -- and only moves where
+     * the bytecode lives.
+     */
+    @Test
+    fun aLargeFragmentSplitsEntriesAcrossHelpersInOrder() {
+        val count = FRAGMENT_ENTRIES_PER_METHOD * 2 + 1
+        val entries = List(count) { versionId.copy(name = "junit.runner.Version.id$it") }
+        val source = renderArtifactFragmentSource(ArtifactFragment("ArtifactFragment_x", "artifact:x", entries))
+
+        assertTrue(
+            source.contains(
+                "override fun entries(): List<python.multiplatform.reflection.ExposedCallable> =\n" +
+                    "        entries0() + entries1() + entries2()\n",
+            ),
+            source,
+        )
+        listOf(0, 1, 2).forEach { chunk ->
+            assertTrue(
+                source.contains("private fun entries$chunk(): List<python.multiplatform.reflection.ExposedCallable> = listOf("),
+                source,
+            )
+        }
+        assertTrue(!source.contains("entries3()"), source)
+        // Every entry exactly once, in walk order.
+        val names = Regex("name = \"(junit\\.runner\\.Version\\.id\\d+)\"").findAll(source).map { it.groupValues[1] }.toList()
+        assertEquals(entries.map { it.name }, names)
+        // The chunk boundary falls where it says it does.
+        val secondHelper = source.indexOf("private fun entries1()")
+        assertTrue(source.indexOf("\"junit.runner.Version.id${FRAGMENT_ENTRIES_PER_METHOD - 1}\"") < secondHelper, source)
+        assertTrue(source.indexOf("\"junit.runner.Version.id$FRAGMENT_ENTRIES_PER_METHOD\"") > secondHelper, source)
+    }
+
+    /** Up to one chunk's worth, the shape is exactly the single-`listOf` one pinned above. */
+    @Test
+    fun aFragmentThatFitsOneMethodIsNotSplit() {
+        val entries = List(FRAGMENT_ENTRIES_PER_METHOD) { versionId.copy(name = "junit.runner.Version.id$it") }
+        val source = renderArtifactFragmentSource(ArtifactFragment("ArtifactFragment_x", "artifact:x", entries))
+        assertTrue(source.contains("override fun entries(): List<python.multiplatform.reflection.ExposedCallable> = listOf(\n"), source)
+        assertTrue(!source.contains("entries0()"), source)
+    }
+
+    /**
      * `DEPRECATION` is suppressed because a walked artefact is not the consumer's code: JUnit 4's
      * own `junit.framework.Assert` is deprecated, and a consumer who asked for a binding should not
      * be handed a warning about a declaration they did not write.
