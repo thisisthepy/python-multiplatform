@@ -749,8 +749,9 @@ class ComposableRenderTest {
      * That pin had two halves and only one of them was about `lightColorScheme`. The half that
      * stands: `ArtifactScanner.MAX_OMITTABLE_PARAMETERS` caps default-omission at 6 defaulted
      * parameters per declaration, `applyDefaultOmission` gives up on the *whole* declaration when a
-     * candidate exceeds it -- not "some of the 36 became omittable", none of them did -- so every one
-     * of the 36 `Color` arguments must still be written. That is asserted below, unchanged.
+     * candidate exceeds it -- not "some of the 48 became omittable", none of them did -- so every one
+     * of the 48 `Color` arguments must still be written. That is asserted below, unchanged. (36 through
+     * Compose Multiplatform 1.6's material3; material3 1.9, which CMP 1.11 resolves, added 12 more.)
      *
      * The half that does not: *"there is nothing this module's included packages can put in a `Color`
      * slot"*. That was a statement about `artifactIncludePackages`, not about the boundary, and
@@ -758,12 +759,12 @@ class ComposableRenderTest {
      * `IconRenderTest.aPythonBuiltColorRoundTripsIntoAnotherWalkedCall` pins the value round trip --
      * and `lightColorScheme`'s slots are `OBJECT`, so the handles go straight in.
      *
-     * ### Why 36 written arguments is a *render* test and not a table one
+     * ### Why 48 written arguments is a *render* test and not a table one
      *
-     * Writing 36 arguments proves nothing on its own: they could all be dropped. So the scheme is
+     * Writing 48 arguments proves nothing on its own: they could all be dropped. So the scheme is
      * built with every colour black except `primary`, handed to `MaterialTheme`, and a `Button`
      * inside it paints its container from `colorScheme.primary` -- so the colour that comes out of
-     * Skia is the colour Python put in that one named slot out of 36. A scheme whose arguments were
+     * Skia is the colour Python put in that one named slot out of 48. A scheme whose arguments were
      * shifted by one, or whose keyword mapping went wrong, would paint a different slot's black.
      */
     @Test
@@ -772,12 +773,12 @@ class ComposableRenderTest {
             """
             import python_multiplatform.binding as _pm_binding
             _decl = _pm_binding._BY_PACKAGE['androidx.compose.material3']['lightColorScheme'][0]
-            # Every one of the 36 Color parameters declares a default in Kotlin, and none of them is
+            # Every one of the 48 Color parameters declares a default in Kotlin, and none of them is
             # omittable here. The cap, unchanged by anything in this commit.
-            assert _decl.declared_arity() == 36, _decl.declared_arity()
+            assert _decl.declared_arity() == 48, _decl.declared_arity()
             assert all(_decl.param_has_default[i] is False for i in range(_decl.declared_arity())), (
                 "lightColorScheme became partly omittable -- ArtifactScanner.MAX_OMITTABLE_PARAMETERS "
-                "(6) must have grown past 36, or the omission plan changed: " + repr(_decl.param_has_default)
+                "(6) must have grown past 48, or the omission plan changed: " + repr(_decl.param_has_default)
             )
             from androidx.compose.material3 import lightColorScheme
             try:
@@ -843,7 +844,7 @@ class ComposableRenderTest {
      * `Button` whose container reads `colorScheme.primary`.
      *
      * The keyword names are read off the walked declaration rather than typed out, so the test says
-     * "all 36, whatever they are called" instead of pinning a Compose version's parameter list.
+     * "all 48, whatever they are called" instead of pinning a Compose version's parameter list.
      */
     private fun themedButton(red: Int, green: Int, blue: Int): String =
         """

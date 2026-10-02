@@ -6,12 +6,16 @@
 #   tools/wasm/build-cpython.sh zip        rebuild only the stdlib zip of an existing build (no emsdk)
 #   tools/wasm/build-cpython.sh verify     check an existing build and its zip carry the ABI claims
 #   tools/wasm/build-cpython.sh stage      copy python.wasm, python.mjs and the zip to the runtime dir
+#   tools/wasm/build-cpython.sh wheels     download the pinned compiled wheels the wasm suite loads
+#   tools/wasm/build-cpython.sh stock      build a STOCK PEP 776 interpreter as a negative control
 #
 # Everything lands inside this repository, under the git-ignored `.caches/`:
 #
 #   .caches/emsdk                   emsdk, pinned to 5.0.3            (override: EMSDK)
 #   .caches/wasm-build/cpython314   CPython checkout + cross build    (override: CPYTHON_CHECKOUT)
 #   .caches/wasm-runtime            the three files the library needs (override: WASM_RUNTIME_DIR)
+#   .caches/wasm-wheels             pinned pyemscripten_2026_0 wheels     (override: WASM_WHEELS_DIR)
+#   .caches/wasm-build/cpython314-stock, .caches/wasm-runtime-stock   the `stock` control
 #
 # `.caches/wasm-runtime` is the default `wasmPythonDir` in python-multiplatform/build.gradle.kts, so
 # after one run of this script `./gradlew :python-multiplatform:wasmJsNodeTest` runs the suite with
@@ -67,6 +71,22 @@ ZIP="${STDLIB_ZIP:-$BUILD/$ZIP_NAME}"
 
 ABI_FLAGS="-fwasm-exceptions -sSUPPORT_LONGJMP=wasm"
 
+# --- the wheels the suite loads -----------------------------------------------------------------------
+# `wasmJsTest/.../WasmCompiledWheelTest` imports a real compiled pyemscripten_2026_0 wheel and calls
+# into it -- the claim the ABI flags above exist for. The wheels are not checked in; they are
+# downloaded here by URL and accepted only with the sha256 below. Both pins were read from PyPI's
+# JSON API (https://pypi.org/pypi/<project>/<version>/json, `urls[].digests.sha256`):
+#
+#   pydantic-core 2.48.0        Rust/PyO3, cp314-cp314-pyemscripten_2026_0_wasm32 -- the compiled one
+#   typing-extensions 4.16.0    pure Python; pydantic-core 2.48.0 requires typing-extensions>=4.14.1
+#
+# "<file name> <url> <sha256>", one per line.
+WHEELS_DIR="${WASM_WHEELS_DIR:-$CACHES/wasm-wheels}"
+WHEELS=(
+  "pydantic_core-2.48.0-cp314-cp314-pyemscripten_2026_0_wasm32.whl https://files.pythonhosted.org/packages/19/70/b7b9042d5e745d3893f8b5597a00727325d0f41dd5e5fd8875335d876770/pydantic_core-2.48.0-cp314-cp314-pyemscripten_2026_0_wasm32.whl 4fc45a49334c54541cbc97bf416d9300b4b1d3b2840dfb079b1123dc3f9ef5a6"
+  "typing_extensions-4.16.0-py3-none-any.whl https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl 481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8"
+)
+
 die() { echo "build-cpython: $*" >&2; exit 1; }
 
 # --- toolchain --------------------------------------------------------------------------------------
@@ -120,8 +140,34 @@ if "PYEMSCRIPTEN_PLATFORM_VERSION" not in t:
 PATCH
 }
 
+# --- the native build Python, libffi and mpdec ---------------------------------------------------------
+# `configure-host` asserts on the native build interpreter's lib.* directory and links against the
+# wasm libffi/mpdec in the prefix, none of which exists in a fresh checkout. The tree this script
+# was first run against had been built by the driver's own `build` beforehand, which is why only
+# configure-host/make-host appeared here and a fresh checkout failed at configure-host.
+ensure_prerequisites() {
+  if [ ! -x "$NATIVE_PYTHON" ]; then
+    ( cd "$CHECKOUT" &&
+      python3 Tools/wasm/emscripten configure-build-python &&
+      python3 Tools/wasm/emscripten make-build-python )
+  fi
+  if [ ! -f "$CHECKOUT/cross-build/wasm32-emscripten/prefix/lib/libffi.a" ]; then
+    ( cd "$CHECKOUT" && python3 Tools/wasm/emscripten make-libffi )
+  fi
+  if [ ! -f "$CHECKOUT/cross-build/wasm32-emscripten/prefix/lib/libmpdec.a" ]; then
+    ( cd "$CHECKOUT" && python3 Tools/wasm/emscripten make-mpdec )
+  fi
+}
+
 # --- 2b + 3. Makefile edits, before the first link ----------------------------------------------------
+# Split in two because `stock` takes only the second: the platform claim is ABI, the runtime methods
+# are not (neither name is in PEP 783's ABI-sensitive list) and the library cannot bind without them.
 patch_makefile() {
+  patch_makefile_platform
+  patch_makefile_reachability
+}
+
+patch_makefile_platform() {
   python3 - "$BUILD/Makefile" "$PLATFORM_VERSION" <<'PATCH'
 import sys
 from pathlib import Path
@@ -130,6 +176,15 @@ if "\nPYEMSCRIPTEN_PLATFORM_VERSION" not in t:
     i = t.index("CONFIGURE_CFLAGS=\t")
     t = t[:i] + f"PYEMSCRIPTEN_PLATFORM_VERSION=\t{version}\n" + t[i:]
     print(f"Makefile: PYEMSCRIPTEN_PLATFORM_VERSION={version}")
+p.write_text(t)
+PATCH
+}
+
+patch_makefile_reachability() {
+  python3 - "$BUILD/Makefile" <<'PATCH'
+import sys
+from pathlib import Path
+p = Path(sys.argv[1]); t = p.read_text()
 old = "-sEXPORTED_RUNTIME_METHODS=FS,callMain,ENV,HEAPU32,TTY"
 new = old + ",wasmExports,wasmMemory,wasmTable,addFunction,removeFunction"
 if old in t and "wasmExports" not in t:
@@ -143,6 +198,7 @@ PATCH
 do_build() {
   ensure_emsdk
   ensure_checkout
+  ensure_prerequisites
   patch_sysconfig
   ( cd "$CHECKOUT" &&
     python3 Tools/wasm/emscripten configure-host --clean \
@@ -187,9 +243,8 @@ do_zip() {
 }
 
 # --- verify, rather than assume ---------------------------------------------------------------------
-do_verify() {
-  [ -f "$BUILD/python.wasm" ] || die "no $BUILD/python.wasm"
-  [ -f "$ZIP" ] || die "no $ZIP"
+# The names of the wasm tags (export kind 4) a module exports, comma-separated.
+exported_tags() {
   node -e '
 const b = require("fs").readFileSync(process.argv[1]);
 const leb = (b, i) => { let r = 0, s = 0; for (;;) { const x = b[i++]; r |= (x & 0x7f) << s; s += 7; if (!(x & 0x80)) return [r, i]; } };
@@ -201,10 +256,19 @@ while (i < b.length) {
       const kind = b[j++]; [, j] = leb(b, j); if (kind === 4) tags.push(nm); } }
   i = end;
 }
-console.log("exported wasm tags:", tags.join(", ") || "NONE");
-for (const t of ["__cpp_exception", "__c_longjmp"])
-  if (!tags.includes(t)) { console.error("missing tag " + t + ": unwinding ABI NOT matched"); process.exit(1); }
-' "$BUILD/python.wasm"
+console.log(tags.join(","));
+' "$1"
+}
+
+do_verify() {
+  [ -f "$BUILD/python.wasm" ] || die "no $BUILD/python.wasm"
+  [ -f "$ZIP" ] || die "no $ZIP"
+  local tags
+  tags="$(exported_tags "$BUILD/python.wasm")"
+  echo "exported wasm tags: ${tags:-NONE}"
+  for t in __cpp_exception __c_longjmp; do
+    case ",$tags," in *",$t,"*) ;; *) die "missing tag $t: unwinding ABI NOT matched" ;; esac
+  done
   python3 - "$ZIP" "$PLATFORM_VERSION" <<'CHECK'
 import sys, zipfile
 z = zipfile.ZipFile(sys.argv[1]); version = sys.argv[2]
@@ -227,11 +291,80 @@ do_stage() {
   echo "staged into $RUNTIME_DIR"
 }
 
+# --- wheels ------------------------------------------------------------------------------------------
+sha256_of() {
+  if command -v sha256sum > /dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+  else shasum -a 256 "$1" | cut -d' ' -f1; fi
+}
+
+do_wheels() {
+  mkdir -p "$WHEELS_DIR"
+  local entry name url sha dest got
+  for entry in "${WHEELS[@]}"; do
+    read -r name url sha <<< "$entry"
+    dest="$WHEELS_DIR/$name"
+    if [ -f "$dest" ] && [ "$(sha256_of "$dest")" = "$sha" ]; then
+      echo "wheel present: $name"
+      continue
+    fi
+    rm -f "$dest.part"
+    curl -fsSL --retry 3 "$url" -o "$dest.part"
+    got="$(sha256_of "$dest.part")"
+    if [ "$got" != "$sha" ]; then
+      rm -f "$dest.part"
+      die "$name: downloaded sha256 $got, pinned $sha -- refusing it"
+    fi
+    mv "$dest.part" "$dest"
+    echo "fetched $name"
+  done
+}
+
+# --- stock: the negative control ---------------------------------------------------------------------
+# CPython's own PEP 776 build, with exactly one addition: the runtime methods the library binds
+# through (patch_makefile_reachability). No unwinding ABI, no PYEMSCRIPTEN_PLATFORM_VERSION, no
+# sysconfig patch. Point the suite at it and the two tests that exist for the ABI must fail:
+#
+#   ./gradlew :python-multiplatform:wasmJsNodeTest -PwasmPythonDir=.caches/wasm-runtime-stock \
+#       --tests '*WasmInterpreterAbiTest*' --tests '*WasmCompiledWheelTest*'
+#
+#   WasmInterpreterAbiTest   no __cpp_exception tag; PYEMSCRIPTEN_PLATFORM_VERSION is None
+#   WasmCompiledWheelTest    LinkError: ... "__cpp_exception": tag import requires a WebAssembly.Tag
+#
+# A separate checkout, not a second build directory: configure-host --clean wipes the one build
+# directory a checkout has, and the sysconfig patch lives in the checkout's Lib/.
+do_stock() {
+  CHECKOUT="${STOCK_CPYTHON_CHECKOUT:-$CACHES/wasm-build/cpython314-stock}"
+  RUNTIME_DIR="${STOCK_WASM_RUNTIME_DIR:-$CACHES/wasm-runtime-stock}"
+  BUILD="$CHECKOUT/cross-build/wasm32-emscripten/build/python"
+  NATIVE_PYTHON="$CHECKOUT/cross-build/build/python.exe"
+  ZIP="$BUILD/$ZIP_NAME"
+  ensure_emsdk
+  ensure_checkout
+  if grep -q PYEMSCRIPTEN_PLATFORM_VERSION "$CHECKOUT/Lib/sysconfig/__init__.py"; then
+    die "$CHECKOUT carries the ABI build's sysconfig patch; the stock control needs a clean checkout"
+  fi
+  ensure_prerequisites
+  ( cd "$CHECKOUT" && python3 Tools/wasm/emscripten configure-host --clean )
+  patch_makefile_reachability
+  ( cd "$CHECKOUT" && python3 Tools/wasm/emscripten make-host )
+  do_zip
+  # The control is only a control if it really lacks what the ABI build verifies.
+  local tags
+  tags="$(exported_tags "$BUILD/python.wasm")"
+  case ",$tags," in
+    *",__cpp_exception,"*) die "the stock python.wasm exports __cpp_exception -- it is not a negative control" ;;
+  esac
+  echo "stock python.wasm exports no exception tags (${tags:-NONE}), as a control must"
+  do_stage
+}
+
 case "${1:-all}" in
-  all)    do_build; do_zip; do_verify; do_stage ;;
+  all)    do_build; do_zip; do_verify; do_stage; do_wheels ;;
   build)  do_build ;;
   zip)    do_zip ;;
   verify) do_verify ;;
   stage)  do_stage ;;
-  *) die "unknown command '$1' (all | build | zip | verify | stage)" ;;
+  wheels) do_wheels ;;
+  stock)  do_stock ;;
+  *) die "unknown command '$1' (all | build | zip | verify | stage | wheels | stock)" ;;
 esac

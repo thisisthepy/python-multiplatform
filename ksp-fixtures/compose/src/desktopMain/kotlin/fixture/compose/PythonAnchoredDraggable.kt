@@ -1,13 +1,10 @@
 package fixture.compose
 
-import androidx.compose.animation.core.spring
-import androidx.compose.animation.splineBasedDecay
 import androidx.compose.foundation.gestures.AnchoredDraggableState
 import androidx.compose.foundation.gestures.DraggableAnchors
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.anchoredDraggable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.Density
 import python.multiplatform.ffi.PyObject
 import python.multiplatform.ffi.types.basic.PyString
 
@@ -27,6 +24,13 @@ import python.multiplatform.ffi.types.basic.PyString
  *
  * [onConfirmValueChange] is held by the [AnchoredDraggableState] and never closed here, causing a leak
  * for each call to this function. This is the same unhandled lifetime issue noted in [pythonDraggable].
+ *
+ * ### Thresholds
+ *
+ * Compose 1.11 moved `positionalThreshold`, `velocityThreshold` and the snap spec off the state and onto
+ * `AnchoredDraggableDefaults.flingBehavior`, which is `@Composable` and so cannot be called from this
+ * plain function. The state therefore takes the library defaults (positional threshold 50% of the
+ * distance between anchors), which is what the old explicit `totalDistance * 0.5f` already was.
  */
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 fun pythonAnchoredDraggableString(
@@ -46,9 +50,6 @@ fun pythonAnchoredDraggableString(
     val state = AnchoredDraggableState<String>(
         initialValue = initialValue,
         anchors = anchors,
-        positionalThreshold = { totalDistance: Float -> totalDistance * 0.5f },
-        velocityThreshold = { 100f },
-        animationSpec = spring<Float>(),
         confirmValueChange = { newValue: String ->
             val pyStr = PyString.from(newValue)
             try {

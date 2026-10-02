@@ -147,13 +147,17 @@ class WalkedArtifactCallbackTest {
      * The controls are Compose's own structural equality and its own traversal, so neither can pass
      * because the boundary did nothing: an unclicked `Modifier` is `Modifier` itself and folds to
      * zero elements.
+     *
+     * The overload is `(enabled, onClickLabel, role, interactionSource, onClick)`: Compose 1.6's
+     * `(enabled, onClickLabel, role, onClick)` is binary-only (hidden) by Compose Multiplatform 1.11,
+     * and its source-visible successor adds a defaulted `interactionSource`, left to Kotlin here too.
      */
     @Test
     fun clickableIsBuiltInPythonFromTheRealComposeJar() {
         PythonCallables.withScope(PythonCallables.newScope()) {
             Python3.exec(
                 """
-                from androidx.compose.foundation import clickable__Boolean_String_Role_Unit as clickable
+                from androidx.compose.foundation import clickable__Boolean_String_Role_MutableInteractionSource_Unit as clickable
                 from fixture.artifact import emptyModifier, modifierElementCount, isTheEmptyModifier
                 from fixture.artifact import describeModifier
 
@@ -187,7 +191,7 @@ class WalkedArtifactCallbackTest {
         PythonCallables.withScope(PythonCallables.newScope()) {
             Python3.exec(
                 """
-                from androidx.compose.foundation import clickable__Boolean_String_Role_Unit as clickable
+                from androidx.compose.foundation import clickable__Boolean_String_Role_MutableInteractionSource_Unit as clickable
                 from fixture.artifact import emptyModifier
 
                 try:
