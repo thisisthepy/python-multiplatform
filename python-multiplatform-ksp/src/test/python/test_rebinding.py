@@ -122,3 +122,19 @@ def test_no_candidates_means_no_second_pyrefly_run(write, monkeypatch):
     monkeypatch.setattr(gate.pyrefly, "run", counting)
     gate.check([write("user.py", "def f(a: int) -> int:\n    b = a + 1\n    return b\n")])
     assert len(calls) == 1
+
+
+def test_rebinding_inside_a_package_with_relative_imports(write):
+    write("pkg/__init__.py", "")
+    write("pkg/b.py", "def make() -> int:\n    return 1\n")
+    path = write("pkg/a.py", """
+        from .b import make
+
+        def f() -> None:
+            x = make()
+            x = "s"
+            print(x)
+    """)
+    result = gate.check([path])
+    assert by_rule(result, REBIND), result
+    assert not [d for d in result if d.severity == "error"], result

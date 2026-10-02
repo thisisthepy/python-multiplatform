@@ -11,6 +11,7 @@ Only the given files are user code. Their dependencies are type-checked by Pyref
 as their stubs or sources say; nothing inside them is reported.
 """
 import ast
+import shutil
 import tempfile
 from collections.abc import Sequence
 from pathlib import Path
@@ -94,22 +95,47 @@ def _rebinding_findings(
 
     found: list[Diagnostic] = []
     with tempfile.TemporaryDirectory(prefix="typedpython-probe-") as work:
-        copies: dict[str, str] = {}
-        for i, (original, (probed, _)) in enumerate(plans.items()):
-            # One directory per file keeps module names intact; the original's directory goes
-            # on the search path so sibling imports still resolve.
-            copy = Path(work) / str(i) / Path(original).name
-            copy.parent.mkdir()
-            copy.write_text(probed)
-            copies[str(copy.resolve())] = original
-        dirs = sorted({str(Path(o).parent) for o in plans})
-        report = pyrefly.run([Path(c) for c in copies], [*search_paths, *map(Path, dirs)])
-
+        copies = _mirror(Path(work), {o: probed for o, (probed, _) in plans.items()})
+        roots = pyrefly.import_roots(list(plans))
+        mirrored = sorted({str(Path(c).parent) for c in copies})  # flat files: their copy's dir
+        report = pyrefly.run(
+            [Path(c) for c in copies],
+            [*[Path(work) / str(i) for i in range(len(roots))], *map(Path, mirrored),
+             *search_paths, *roots],
+        )
         for copy, original in copies.items():
             types = report.expression_types.get(copy, {})
             for f in rebinding.judge(plans[original][1], types):
                 found.append(Diagnostic(original, f.line, f.column, f.rule, "warning", f.message))
     return found
+
+
+def _mirror(work: Path, probed: dict[str, str]) -> dict[str, str]:
+    """Copy each file's package tree under `work`, with the probed text in place of the file.
+
+    The copy keeps the file's path relative to its import root, so relative imports and imports
+    of sibling modules inside the package resolve to the copied tree. Returns copy -> original.
+    """
+    roots = pyrefly.import_roots(list(probed))
+    copies: dict[str, str] = {}
+    copied: set[Path] = set()
+    for original, text in probed.items():
+        root = pyrefly.import_roots([original])[0]
+        base = work / str(roots.index(root))
+        relative = Path(original).relative_to(root)
+        if len(relative.parts) > 1:
+            package = root / relative.parts[0]
+            if package not in copied:
+                shutil.copytree(
+                    package, base / relative.parts[0], dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns("__pycache__", ".*"),
+                )
+                copied.add(package)
+        target = base / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+        copies[str(target.resolve())] = original
+    return copies
 
 
 def _cast_argument_spans(tree: ast.Module) -> list[tuple[Position, Position]]:
