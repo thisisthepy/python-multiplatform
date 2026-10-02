@@ -303,6 +303,7 @@ object PythonxAdapter {
             _invalidate()
             _BY_PACKAGE.clear()
             _BY_RECEIVER.clear()
+            _MEMBER_ALIASES.clear()
             _PACKAGES_SEEN.clear()
             _SUPERTYPES.clear()
             present = set()
@@ -895,6 +896,52 @@ object PythonxAdapter {
             _EMPTY_FACTORIES[kotlin_type_name] = kotlin_factory_name
 
 
+        _MEMBER_RESOLVERS = []
+        _MEMBER_ALIASES = {}    # (kotlin receiver type, requested name) -> kotlin member name
+
+
+        def add_member_resolver(fn):
+            '''Registers `fn(kotlin_type_name, requested_name, kotlin_member_names) -> kotlin_name | None`.
+
+            Asked only when a proxy has **no** Kotlin member of the requested name. The first resolver to
+            return a name that is one of `kotlin_member_names` decides, and that Kotlin member is served.
+            The binder renames nothing by itself: with no resolver an unknown name is an `AttributeError`.
+            The answer is cached in this registry, never written onto the proxy class, so `dir()` of a
+            proxy shows Kotlin names only. Registering the same `fn` twice is a no-op.
+            '''
+            if not callable(fn):
+                raise TypeError('a member resolver must be callable')
+            if fn not in _MEMBER_RESOLVERS:
+                _MEMBER_RESOLVERS.append(fn)
+            _MEMBER_ALIASES.clear()
+            return fn
+
+
+        def remove_member_resolver(fn):
+            '''Unregisters a resolver added by `add_member_resolver`; unknown functions are ignored.'''
+            if fn in _MEMBER_RESOLVERS:
+                _MEMBER_RESOLVERS.remove(fn)
+            _MEMBER_ALIASES.clear()
+
+
+        def _resolve_member(cls, name):
+            '''The Kotlin member name a registered resolver maps [name] to on [cls], or `None`.'''
+            if not _MEMBER_RESOLVERS:
+                return None
+            key = (cls._kotlin_type_name, name)
+            cached = _MEMBER_ALIASES.get(key)
+            if cached is not None:
+                return cached
+            members = _BY_RECEIVER.get(cls._kotlin_type_name, {})
+            names = tuple(members)
+            for resolver in tuple(_MEMBER_RESOLVERS):
+                target = resolver(cls._kotlin_type_name, name, names)
+                if target and target in members and not target.startswith('_'):
+                    _MEMBER_ALIASES[key] = target
+                    return target
+            return None
+
+
         class _BoundMember:
             '''An extension applied to a receiver: literally the module-level callable with slot 0 filled.'''
 
@@ -946,9 +993,12 @@ object PythonxAdapter {
                 if name.startswith('_'):
                     raise AttributeError(name)
                 if not _attach(cls, name):
-                    raise AttributeError(
-                        'no Kotlin extension named ' + name + ' on ' + cls._kotlin_type_name
-                    )
+                    target = _resolve_member(cls, name)
+                    if target is None:
+                        raise AttributeError(
+                            'no Kotlin extension named ' + name + ' on ' + cls._kotlin_type_name
+                        )
+                    return getattr(cls, target)
                 return getattr(cls, name)
 
             def __repr__(cls):
@@ -989,9 +1039,12 @@ object PythonxAdapter {
                 if name.startswith('_'):
                     raise AttributeError(name)
                 if not _attach(type(self), name):
-                    raise AttributeError(
-                        'no Kotlin extension named ' + name + ' on ' + type(self)._kotlin_type_name
-                    )
+                    target = _resolve_member(type(self), name)
+                    if target is None:
+                        raise AttributeError(
+                            'no Kotlin extension named ' + name + ' on ' + type(self)._kotlin_type_name
+                        )
+                    return getattr(self, target)
                 return getattr(self, name)
 
             def __repr__(self):
