@@ -24,7 +24,7 @@ import python.multiplatform.reflection.TypeTag
  *
  * `Text(text, modifier = ..., color = ..., fontSize = ...)` reduced to four declared parameters and
  * the three synthetic groups a composable's JVM signature really carries
- * (`docs/design/pythonx-adapter-design.md` §5.2):
+ * (`docs/archive/pythonx-adapter-design.md` §5.2):
  *
  * | slot | name | tag | why |
  * |---|---|---|---|

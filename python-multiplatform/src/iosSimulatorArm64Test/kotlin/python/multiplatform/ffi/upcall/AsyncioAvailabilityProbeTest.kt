@@ -6,8 +6,8 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 
 /**
- * `docs/design/upcall-async-design.md` §10.6: whether `asyncio` exists on the iOS distribution has never
- * been measured, only assumed absent by analogy with `_ctypes` (`docs/design/upcall-design.md` §"Can
+ * `docs/design/upcall.md` §8: whether `asyncio` exists on the iOS distribution has never
+ * been measured, only assumed absent by analogy with `_ctypes` (`docs/design/upcall.md` §"Can
  * Python call an address at all?"). That analogy does not hold on inspection -- the BeeWare
  * archive `extractIosSimulatorStdlib` unpacks *does* carry `lib-dynload/_asyncio*.so`,
  * `lib-dynload/_socket*.so` and `lib-dynload/select*.so`, unlike this project's `Python.xcframework`

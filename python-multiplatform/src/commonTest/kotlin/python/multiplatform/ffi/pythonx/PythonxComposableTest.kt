@@ -14,7 +14,7 @@ import kotlin.test.assertFails
 import kotlin.test.assertTrue
 
 /**
- * `docs/design/pythonx-adapter-design.md` §5 from the Python end: **the `$default` mask is arithmetic
+ * `docs/archive/pythonx-adapter-design.md` §5 from the Python end: **the `$default` mask is arithmetic
  * `pythonx` does, not a branch the generator emits.**
  *
  * ### Why the mask has to live here and not in the walker

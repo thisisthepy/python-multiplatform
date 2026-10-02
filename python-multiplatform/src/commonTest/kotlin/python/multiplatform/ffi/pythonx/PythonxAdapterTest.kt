@@ -15,7 +15,7 @@ import kotlin.test.assertTrue
 
 /**
  * `pythonx` -- the hand-written adaptation layer -- doing the four things
- * `docs/design/pythonx-adapter-design.md` asks of it, against a table shaped like the walked Compose one.
+ * `docs/archive/pythonx-adapter-design.md` asks of it, against a table shaped like the walked Compose one.
  *
  * The four are, in the order the design puts them:
  *
@@ -246,7 +246,7 @@ class PythonxAdapterTest {
 
     /**
      * The dispatcher on keyword **names**, which is the half that needs `ExposedCallable.paramNames`
-     * -- `docs/design/pythonx-adapter-design.md` §2.4 called the absence of those names "arithmetic", and
+     * -- `docs/archive/pythonx-adapter-design.md` §2.4 called the absence of those names "arithmetic", and
      * this is the arithmetic working.
      *
      * `horizontal=`/`vertical=` selects the two-`Dp` overload even though `padding(m, 8, 4)` would
@@ -321,7 +321,7 @@ class PythonxAdapterTest {
      * ordinary Python method chaining with no combinator machinery.
      *
      * Both spellings of `Modifier` are exercised. The class object works through the hybrid
-     * descriptor `docs/design/pyi-generation-design.md` §4.3 measured (a metaclass `def` loses to the
+     * descriptor `docs/archive/pyi-generation-pythonic-stubs.md` §4.3 measured (a metaclass `def` loses to the
      * class's own MRO); the instance spelling is the ordinary one.
      */
     @Test

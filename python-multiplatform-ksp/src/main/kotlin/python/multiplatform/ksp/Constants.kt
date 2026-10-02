@@ -2,7 +2,7 @@ package python.multiplatform.ksp
 
 /**
  * The well-known package fragments are emitted into and the aggregator scans.
- * `docs/design/upcall-table-design.md` §1/§2 -- not load-bearing for discovery (the aggregator scans
+ * `docs/design/upcall.md` §2.1/§2 -- not load-bearing for discovery (the aggregator scans
  * the whole package), but fixed so generated code from different modules never collides.
  */
 const val FRAGMENTS_PACKAGE = "python.multiplatform.generated.fragments"
@@ -35,12 +35,12 @@ const val OPTION_EXCLUDE_PACKAGES = "python.multiplatform.excludePackages"
 const val ROLE_LIBRARY = "library"
 const val ROLE_APP = "app"
 
-/** [docs/design/upcall-table-design.md] §11.4: an entry point Python has no use for and cannot call. */
+/** [docs/design/upcall.md] §11.4: an entry point Python has no use for and cannot call. */
 fun isMainFunction(name: String, hasNoParamsOrArgsArray: Boolean): Boolean =
     name == "main" && hasNoParamsOrArgsArray
 
 /** Fragment object name for a given (already sanitised) module name. */
 fun fragmentObjectName(moduleName: String): String = "$FRAGMENT_PREFIX$moduleName"
 
-/** Periods and hyphens collide with Kotlin identifier syntax; `docs/design/upcall-table-design.md` §1. */
+/** Periods and hyphens collide with Kotlin identifier syntax; `docs/design/upcall.md` §2.1. */
 fun sanitiseModuleName(raw: String): String = raw.replace('.', '_').replace('-', '_')

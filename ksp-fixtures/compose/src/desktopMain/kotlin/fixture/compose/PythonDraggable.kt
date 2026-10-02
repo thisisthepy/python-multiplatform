@@ -9,7 +9,7 @@ import python.multiplatform.ffi.types.basic.PyFloat
 
 /**
  * `Modifier.draggable`, reached the same way `pythonPointerInput` reaches `Modifier.pointerInput`
- * (`docs/design/pythonx-adapter-design.md` §9.1) -- `draggable`'s three callback slots decline for the same
+ * (`docs/archive/pythonx-adapter-design.md` §9.1) -- `draggable`'s three callback slots decline for the same
  * reason `pointerInput`'s does (`ArtifactScanner`: a suspend function-typed parameter), and the same
  * fix applies: nothing about Python has to suspend, because the suspension is Kotlin's, hand-written,
  * ordinarily compiled, and Python is only ever asked a synchronous question.
@@ -37,7 +37,7 @@ import python.multiplatform.ffi.types.basic.PyFloat
  * whole lifetime: `onDelta` is held by the `DraggableState` this function builds and is called by
  * Compose's internal drag node for as long as that node stays attached, which this function has no
  * hook into (no `RememberObserver` route without wrapping this in a `@Composable`, which would be a
- * different fix -- see `docs/design/pythonx-adapter-design.md` §9.2's note on `composed`). [onDelta],
+ * different fix -- see `docs/archive/pythonx-adapter-design.md` §9.2's note on `composed`). [onDelta],
  * [onDragStarted] and [onDragStopped] are therefore **never closed here**: each call to this function
  * takes a fresh reference to all three and leaks it. Measured consequence: `DraggableRenderTest`
  * composes this exactly once per scene, so the leak is bounded (three references) for that test and

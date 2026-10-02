@@ -1,3 +1,16 @@
+> **Superseded** by [`../design/downcall-design.md`](../design/downcall-design.md) and
+> [`python-multiplatform/src/androidMain/README.md`](../../python-multiplatform/src/androidMain/README.md) on 2026-10-03; kept for history.
+> This was a plan to replace the Kotlin/Native JNI bridge on Android with a PanamaPort-style FFM path
+> (ART method patching, hidden-API bypass, 14 NDK trampolines). It was **not** built: PanamaPort is
+> not a dependency (AGENTS.md §12.9 — licence, and dependence on ART-internal struct layouts, see §2–§3
+> below), and Android binds CPython through JNI `RegisterNatives` with the calling convention chosen
+> per function and per API level (measured; SPEC C-3). The Kotlin/Native Android library
+> (`libmultiplatform_python3.14.so`) is still the bridge. The 14-shape census in §6 is still
+> accurate and became `jvmMain/.../ShapeDowncalls.kt`. The closing "Open constraint: GraalVM Native
+> Image" section is also resolved: native-image upcalls are verified manually
+> (`docs/platforms/graal-native-image-verification.md`, SPEC U-6) and the desktop FFM reachability
+> metadata is guarded by `ReachabilityMetadataTest.kt` (SPEC C-2).
+
 # Android FFM Design Document (PanamaPort Analysis)
 
 This document provides an implementation design for replacing the existing Kotlin/Native JNI bridge on Android with a Panama-style FFM approach, based on an analysis of the PanamaPort reference implementation.

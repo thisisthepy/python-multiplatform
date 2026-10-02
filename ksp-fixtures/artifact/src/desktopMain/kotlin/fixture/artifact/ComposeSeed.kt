@@ -63,7 +63,7 @@ fun equalsPaddingThenSize(modifier: Modifier, pad: Double, size: Double): Boolea
  * | comparison | the default it reaches | why Python could not have faked it |
  * |---|---|---|
  * | [equalsFillMaxWidth] | `fraction = 1f` | a body that passed `0f` into the omitted slot builds a different `FillElement`, and [equalsFillMaxWidthFraction] is the control that says so |
- * | [equalsWrapContentSize] | `align = Alignment.Center` | `Alignment` crosses as a `TypeTag.OBJECT` handle and **no bound declaration anywhere produces one**, so if the default were not reached there would be nothing to put in the slot at all. This is `docs/design/pythonx-adapter-design.md` §4.5's argument in a single function |
+ * | [equalsWrapContentSize] | `align = Alignment.Center` | `Alignment` crosses as a `TypeTag.OBJECT` handle and **no bound declaration anywhere produces one**, so if the default were not reached there would be nothing to put in the slot at all. This is `docs/archive/pythonx-adapter-design.md` §4.5's argument in a single function |
  * | [equalsVerticalPadding] | `start`, `top` and `end` | the argument that *is* written sits in the middle of the list, which §4.5's arity-prefix candidate cannot express |
  */
 fun equalsFillMaxWidth(modifier: Modifier): Boolean = modifier == Modifier.fillMaxWidth()

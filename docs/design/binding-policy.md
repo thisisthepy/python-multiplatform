@@ -1,7 +1,13 @@
 # 노출 정책 — 무엇이 Python 에서 보이는가
 
 Kotlin 의 무엇을 함수 테이블에 등록해 Python 에 노출할지에 대한 규칙. 테이블 자체의 구조는
-[`upcall-design.md`](upcall-design.md).
+[`upcall.md`](upcall.md).
+
+이 문서의 표는 **KSP 프로세서가 소스에서 읽는 선언**(`python-multiplatform-ksp` 의 `BindingPolicy.kt`)에
+대한 규칙이다. 미리 컴파일된 jar 를 읽는 아티팩트 워커(`python-multiplatform-gradle-plugin`)는
+같은 블랙리스트 정신을 따르되, 소스 없이 바이트코드/Kotlin 메타데이터에서 읽으므로 일부 행이
+다르다 — 아래 해당 행과 §"결정 이력" 에 표시했다. Kotlin 이름은 어느 쪽이든 그대로 노출되며
+(AGENTS.md §12.1) 이 정책에는 이름을 바꾸는 규칙이 없다.
 
 ## 원칙: 블랙리스트
 
@@ -46,7 +52,9 @@ class InternalUtility { }                          // 클래스 통째로 제외
 | **abstract / sealed 클래스의 생성자** | ❌ | "Cannot create an instance of an abstract class" — 생성된 파일이 컴파일되지 않는다 |
 | `private` / `protected` | ❌ | |
 | **`internal`** | ❌ | JVM 바이트코드에서는 name-mangling 된 public 이지만 의미론적으로는 비공개다. KSP 의 `Modifier.INTERNAL` 로 걸러낸다 |
-| **확장 함수** | ❌ | 수신자 없이 호출할 수 없고 Python 호출 규약과 맞지 않는다 |
+| **확장 함수 (KSP, 소스)** | ❌ | 생성되는 엔트리는 `Array<Any?>` 위의 람다이고 수신자를 둘 자리가 없다 (`BindingPolicy.isExposedFunctionShape` 이 `extensionReceiver != null` 을 거른다). 아티팩트 워커는 다르다 — 아래 |
+| **확장 함수 (아티팩트 워커, 컴파일된 jar)** | ✅ 수신자 프록시의 메서드로 | `Modifier.padding(16).size(24)` 처럼 체인이 이어진다 (SPEC U-7, `docs/design/kotlin-extensions-in-python.md`) |
+| **소스 안의 `@Composable`** | ❌ (KSP) | 생성된 호출이 `@Composable` 컨텍스트 밖이라 컴파일되지 않는다. 컴파일된 jar 의 composable 은 워커가 바인딩한다 (SPEC B-6, `docs/design/ecosystem.md` §4) |
 
 ## 라이브러리 자신은 통째로 제외한다
 
@@ -60,9 +68,9 @@ class InternalUtility { }                          // 클래스 통째로 제외
 
 | 대상 | 처리 | 근거 |
 |---|---|---|
-| **`suspend` 함수** | 자동 제외 | Python 에 대응 개념이 없고, 숨은 `Continuation` 인자가 있어 호출 자체가 불가능하다 |
+| **`suspend` 함수** | **노출한다** — 비동기 호출 규약으로 | 생성 본문이 `PendingCall.start { }` 로 코루틴을 시작하고, 경계는 값(중단 없이 끝남) 또는 `asyncio.Future`(중단됨)를 돌려준다. Python 에서 `await` 한다 (SPEC U-5, [`upcall.md`](upcall.md)). 처음에는 "자동 제외"였다 — 아래 정정 참조. `suspend` **함수 타입** 값(`suspend (Long) -> Long`)은 불투명 `OBJECT` 핸들로 나간다 |
 | **`inline` + `reified`** | 자동 제외 | 컴파일 후 reified 타입 정보가 사라진다. **실제 규칙은 이보다 넓다** — 타입 파라미터가 있는 선언은 `reified` 여부와 무관하게 전부 제외한다 |
-| **값 클래스(value class)** | 등록하되 호출 시 실패 허용 | JVM 에서 언박싱된 형태로 노출되어 케이스가 갈린다. 완벽히 걸러내려면 복잡도가 크다 |
+| **값 클래스(value class)** | KSP: 별도 규칙 없음(`BindingPolicy.kt` 에 값 클래스 분기가 없다). 아티팩트 워커: 왕복을 지원하고, 허용 목록의 것(예: `Dp`)만 원시 값으로 쓸 수 있다 | JVM 에서 언박싱된 형태로 노출되어 케이스가 갈린다 (SPEC B-4, `ComposableValueClassSlotTest.kt`) |
 
 `suspend` 와 `reified` 는 KSP 에서 선언 수준으로 판별되므로 걸러내는 비용이 낮다.
 
@@ -73,9 +81,11 @@ class InternalUtility { }                          // 클래스 통째로 제외
 
 특히 다음 둘은 재고 여지가 있다:
 
-- **확장 함수 제외** — 수신자를 첫 인자로 받는 Python 함수로 매핑하는 것은 원리적으로 가능하다. 지금은
-  단순함을 택했다.
-- **값 클래스** — "등록하고 실패하게 둔다"는 사용자에게 불친절하다. 실제 사용 양상을 보고 다시 정한다.
+- **확장 함수 제외 (KSP)** — 소스 경로에서는 제외 상태 그대로다. 다만 이것이 풀린 것은 아티팩트
+  워커 쪽이다: 확장 함수는 수신자 프록시의 메서드로 노출된다(SPEC U-7). KSP 가 생성한 프록시에서의
+  동작은 아직 테스트로 단언되지 않았다.
+- **값 클래스** — 초안의 "등록하고 실패하게 둔다"는 구현되지 않았다. 워커가 값 클래스를 다루고
+  (SPEC B-4), KSP 는 따로 걸러내지 않는다.
 
 ## 구현 시점의 정정 (2026-08)
 
@@ -90,3 +100,10 @@ class InternalUtility { }                          // 클래스 통째로 제외
   붙는 이유이기도 하다.
 - **컴파일러 생성 멤버는 `copy` 와 `componentN` 이 실제로 KSP 에 보인다.** `equals`/`hashCode`/
   `toString` 은 보이지 않았다. 관찰된 사실이며, 둘 다 제외한다.
+- **`suspend` 는 제외 대상에서 빠졌다.** 초안은 "숨은 `Continuation` 인자 때문에 호출이 불가능하다"며
+  자동 제외했다. 비동기 업콜(`PendingCall`)이 생긴 뒤 이 수식어는 제외가 아니라 **본문 형태를
+  고르는 신호**가 되었다 (`BindingPolicy.isSuspending`, `GeneratedSuspendTest`).
+- **추상·봉인 클래스는 클래스로는 노출하되 생성자만 뺀다** (`BindingPolicy.isConstructible`; `inner`
+  클래스도 같다 — 바깥 인스턴스를 둘 자리가 없다). 표의 "abstract / sealed 클래스의 생성자" 행의 구현.
+- **`internal set` 은 노출하지 않는다.** `private set` 은 생성 코드가 컴파일되지 않아서, `internal set`
+  은 컴파일은 되지만 노출 대상이 모듈 공개 API 이기 때문이다 (`BindingPolicy.isExposedSetter`).

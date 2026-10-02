@@ -71,7 +71,7 @@ class PythonProxySourceTest {
         assertContains(source, "if hasattr(_pm_r, '__await__'):")
         assertContains(source, "return await _pm_r")
         // The whole point of the conditional await: an already-complete call must reach the caller
-        // as its value, not wrapped in anything. `docs/design/upcall-async-design.md` §5.
+        // as its value, not wrapped in anything. `docs/design/upcall.md` §5.2.
         assertContains(source, "return _pm_r")
     }
 

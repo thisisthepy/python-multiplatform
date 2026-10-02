@@ -5,7 +5,7 @@ import androidx.compose.ui.layout.layoutId
 
 /**
  * `Modifier.layoutId`, declined for a reason unrelated to suspend
- * (`docs/design/pythonx-adapter-design.md` §9's table): its one non-`Modifier` parameter is `kotlin.Any`, and
+ * (`docs/archive/pythonx-adapter-design.md` §9's table): its one non-`Modifier` parameter is `kotlin.Any`, and
  * `resolveKotlinType` has no [python.multiplatform.reflection.TypeTag] for "whatever tag the caller
  * meant" -- `layoutId` is real-world called with a bare `String` or `Int`, not a Kotlin object handle.
  * One wrapper per concrete tag fixes it, the same way every other concretely-typed hand-written

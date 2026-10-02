@@ -6,6 +6,12 @@ under GraalVM's closed-world assumption, and that choice is only confirmed by bu
 
 This file is both the **procedure** (how to reproduce) and the **record** of the last run.
 
+Status: a manual verification (SPEC U-6). The image itself is not run by any automated test; what
+guards it automatically is `ReachabilityMetadataTest.kt` (SPEC C-2), which checks that every
+`FunctionDescriptor` the desktop backend links is declared in the generated reachability metadata.
+The record below is dated 2026-08-17 and has not been re-run since this document was last reviewed
+(the "Worktree" path in it predates the rule that worktrees live under `.worktrees/`).
+
 ---
 
 ## Procedure

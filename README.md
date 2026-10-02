@@ -185,7 +185,7 @@ no per-platform Python → Kotlin binding code. Details: [design notes](docs/des
 
 ## 📊 Status
 
-Honest summary — see the [roadmap](docs/roadmap/ROADMAP.md) for the full record.
+Honest summary — see the [roadmap](docs/roadmap/ROADMAP.md) for what is left to do.
 
 | Area | State |
 |---|---|
