@@ -56,6 +56,18 @@ build caches, model weights, `node_modules`) into every worktree is how 86 workt
 root, and `docs/` keeps only its subdirectories (no Markdown files directly under `docs/`).
 CI runs `tools/release/sync-release.sh` (`.github/workflows/release-sync.yml`) to produce that layout; do not hand-edit `release` or `main`.
 
+### Issues and pull requests
+
+Every new feature goes through an issue and a pull request:
+
+1. Before starting, search the repository's issues (`gh issue list --state all --search "<keywords>"`).
+2. If no issue covers the work, open one (`gh issue create`) stating what and why, and the
+   completion criterion — which tests must pass.
+3. Work on a `work/<topic>` branch, push every commit, and open a pull request into `develop`
+   whose body contains `Closes #<number>`.
+4. Merge into `develop` through that pull request (`gh pr merge`), not by a local merge, so the
+   issue is linked and closed.
+
 ## 5. Intent → Spec → Test → Code
 
 This project runs on **intent-based spec-driven development** and **test-driven development**.
