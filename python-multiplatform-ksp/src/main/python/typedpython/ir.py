@@ -21,6 +21,26 @@ result:
   The traceback differs (there is no Python frame for compiled code); that is the one accepted
   difference, as for every C extension.
 
+Safety (`verify.py`, maintainer decision 2026-10-03: "IR 단계에서 안전성을 증명하도록 해"). Before any
+C is generated, the verifier proves on the IR that the C will be memory-safe and keep the rules
+above; **a function it cannot prove is not compiled** — it stays interpreted and the reason is
+reported as a diagnostic. What it proves:
+
+- definite assignment: no local is read before it is assigned on every path;
+- types: every node's operands have the types the node requires; no implicit conversion;
+- deopt placement: no node that can deopt in an impure function (`may_deopt` consistent);
+- arrays: every `Index`/`StoreIndex` is either proved in bounds (and marked `proven`) or keeps its
+  runtime check; array params are used only by `Index`/`StoreIndex`/`Len`;
+- ownership: OBJ values are created only by nodes that return a new reference (Box, PyCall, OBJ
+  BinOp) and the back end releases them by one rule (every OBJ local owns its reference; assigning
+  releases the old one; every exit releases all); the IR has no node that frees, aliases a
+  borrowed reference, or reads a possibly-NULL object, so use-after-free and NULL dereference have
+  no IR form.
+
+The generated C touches memory and `PyObject`s only through the runtime helpers (`tp_runtime.h`),
+which are tested separately; AddressSanitizer/UBSan runs, differential tests against the
+interpreter, and fuzzing are the safety net outside the proof.
+
 Module shape (back end). The extension module executes the module's original source in its own
 namespace first, so every name, class and global is the interpreted one and lives in one
 namespace. Then each compiled function `f` replaces the global `f` with a C function, and the
@@ -238,6 +258,10 @@ class Index(Expr):
 
     array: str
     index: Expr
+    # Set only by `verify` when it has proved 0 <= index < len for the non-negative case (e.g. a
+    # `ForRange` index over range(len(array))); then the back end may omit the bounds check.
+    # Never set by the front end. Unproved accesses keep the full check.
+    proven: bool = False
 
 
 # --- statements ----------------------------------------------------------------------------------
@@ -261,6 +285,7 @@ class StoreIndex(Stmt):
     array: str
     index: Expr
     value: Expr
+    proven: bool = False      # as in Index
 
 
 @dataclass(frozen=True)

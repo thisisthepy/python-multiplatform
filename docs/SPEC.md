@@ -253,6 +253,34 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   build** (design §6 step 1b). Rebinding and mixed containers are found by a second Pyrefly pass over a
   probed copy (design §6.1), which runs only when a file has a name assigned twice or a container
   display; `for` targets and comprehension variables are not probed.
+- **N-7** TypedPython compilation to C (INTENT §1.4; design §4.3; #41). `@compiled` (a builtin name, no
+  import — #42) and a first-line `# typedpython: compiled` mark functions; the compiler lowers them
+  through the typed IR (`typedpython/ir.py`) to C against the CPython C API and builds an extension with
+  the platform C compiler. Compiled functions return what CPython returns (IR contract: checked i64
+  with deopt to the interpreted function, Python floor division/modulo, exact int/float comparison,
+  CPython's exception types and messages; tracebacks are the one accepted difference). `Status: planned`.
+- **N-8** TypedPython memory safety is proved on the IR before C is generated (#41; maintainer decision
+  2026-10-03). Each property, and what happens when it cannot be proved:
+
+  | Property proved on the IR | If not proved |
+  |---|---|
+  | No local read before assignment on every path | function not compiled; diagnostic names the local |
+  | Every node's operand types match; no implicit conversion | not compiled; diagnostic |
+  | No deopting node in an impure function | not compiled; diagnostic |
+  | Array access in bounds, or a runtime bounds check kept | the check stays (never an unchecked access) |
+  | Array parameters only indexed, stored, `len`-ed; no aliasing (entry guard) | not compiled; diagnostic |
+  | OBJ references follow one ownership rule; no IR form for free, borrowed alias or NULL read | not compiled; diagnostic |
+  | Integer overflow checked and promoted (deopt) | — (every I64 operation is checked by construction) |
+
+  Generated C reaches memory and `PyObject`s only through the runtime helpers. ASan/UBSan CI,
+  differential tests against the interpreter and fuzzing back the proof. `Status: planned`.
+- **N-9** TypedPython incremental compilation (#41; maintainer decision 2026-10-03). The unit is a module.
+  Its cache key is the source hash, the interface hashes (typed signatures) of the modules it depends
+  on, the compiler version, the target platform and the build flags; a body-only change leaves the
+  interface hash unchanged, so dependent modules are not recompiled. C objects are cached per module.
+  The Gradle task declares exact inputs and outputs so up-to-date checks and the build cache apply.
+  Tests: changing one function body recompiles that module only; an unchanged rebuild spends ~0 s in
+  the compile step. `Status: planned`.
 
 ---
 
