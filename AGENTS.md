@@ -66,7 +66,10 @@ Every new feature goes through an issue and a pull request:
 3. Work on a `work/<topic>` branch, push every commit, and open a pull request into `develop`
    whose body contains `Closes #<number>`.
 4. Merge into `develop` through that pull request (`gh pr merge`), not by a local merge, so the
-   issue is linked and closed.
+   issue is linked.
+5. Then close the issue yourself: `gh issue close <number> --comment "Landed in develop via #<PR>"`.
+   GitHub's `Closes #N` only fires when a pull request merges into the default branch (`main`),
+   and these pull requests merge into `develop`.
 
 ## 5. Intent → Spec → Test → Code
 
