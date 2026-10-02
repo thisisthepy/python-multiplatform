@@ -58,15 +58,21 @@ class WalkedArtifactStubTest {
      * The Kotlin-FQN product, against the package `docs/design/kotlin-extensions-in-python.md` §3 measured
      * at zero bound declarations.
      *
-     * The annotations are the **boundary's**: `Dp` marshals as a raw float and `Modifier` as a
-     * `HandleTable` integer, which is what `androidx.compose.foundation.layout` -- a module that
-     * exists only as a `sys.modules` entry `PythonProxySource` creates -- actually accepts and
-     * returns. §7 lists the handle-to-proxy wrapping that would make it `Modifier` as not yet done.
+     * The annotations are the **declared Kotlin types** (issue #31): a `Modifier` receiver and result,
+     * and `Dp | float` for the value class the binder binds as its primitive.
      */
     @Test
     fun theKotlinFqnStubsDescribeTheModulesTheRuntimePublishes() {
         val layout = stub("androidx/compose/foundation/layout/__init__.pyi")
-        assertTrue("def padding__Dp(receiver: int, /, all: float) -> int:" in layout, layout.take(2000))
+        assertTrue(
+            "def padding__Dp(receiver: androidx.compose.ui.Modifier, /, all: androidx.compose.ui.unit.Dp | float) " +
+                "-> androidx.compose.ui.Modifier:" in layout,
+            layout.take(2000),
+        )
+        // The class is stubbed in the module of its own package, with the extension as an attribute.
+        val ui = stub("androidx/compose/ui/__init__.pyi")
+        assertTrue("class Modifier:" in ui, ui.take(2000))
+        assertTrue("padding__Dp: _t.ClassVar[_Modifier_padding__Dp]" in ui, ui.take(4000))
         assertTrue(
             "\"\"\"Kotlin: androidx.compose.ui.Modifier.padding(all: androidx.compose.ui.unit.Dp): " +
                 "androidx.compose.ui.Modifier\"\"\"" in layout,
@@ -84,7 +90,9 @@ class WalkedArtifactStubTest {
      * Kotlin parameter names; making it Pythonic is the `pythonx-compose` package's job.
      *
      * Pinned over the whole generated tree: nothing under `pythonx/`, no snake_cased member, and none
-     * of the Pythonic product's side files (`py.typed`, `_pm_dispatch.json`).
+     * of the Pythonic product's side files (`py.typed`, `_pm_dispatch.json`). The `Protocol` classes
+     * that type an extension as a method of its receiver's class are typing machinery, not a
+     * renamed product: they are private (`_Receiver_name`) and carry the Kotlin name unchanged.
      */
     @Test
     fun theStubsUseKotlinNamesAndNothingIsExportedUnderPythonx() {
@@ -93,34 +101,61 @@ class WalkedArtifactStubTest {
         assertTrue(paths.none { it.endsWith("py.typed") || it.endsWith("_pm_dispatch.json") }, paths.toString())
 
         val layout = stub("androidx/compose/foundation/layout/__init__.pyi")
-        assertTrue("def fillMaxWidth(receiver: int, /, fraction: float = ...) -> int:" in layout, layout.take(3000))
+        assertTrue(
+            "def fillMaxWidth(receiver: androidx.compose.ui.Modifier, /, fraction: float = ...) " +
+                "-> androidx.compose.ui.Modifier:" in layout,
+            layout.take(3000),
+        )
         assertTrue("fill_max_width" !in layout, "a Kotlin name was exported under another spelling")
-        assertTrue("alignmentLine: int" in layout, "a Kotlin parameter name was renamed: ${layout.take(3000)}")
+        assertTrue("alignmentLine: " in layout, "a Kotlin parameter name was renamed: ${layout.take(3000)}")
 
         paths.filter { it.endsWith(".pyi") }.forEach { path ->
             val text = stub(path)
             assertTrue("pythonx" !in text, "$path mentions pythonx")
-            assertTrue("class _" !in text && "Protocol" !in text, "$path carries the Pythonic Protocol shape")
+            assertTrue(
+                Regex("""class _(?!\w+_\w+\(_t\.Protocol\))""").find(text) == null,
+                "$path carries a private class that is not a receiver-method protocol",
+            )
         }
     }
 
     /**
      * The runtime resolves a Kotlin default when a defaulted parameter is omitted, so the stub
      * marks it `= ...`; a parameter with no default stays required. Python rejects a required
-     * parameter after a defaulted one, so for the stub to be valid no `name: type` without `= ...` may
-     * follow one with it. Checked textually, since no Python parser runs in this module.
+     * parameter after a defaulted one **unless it is keyword-only**, which is exactly what
+     * `inspect.signature` reports for such a parameter (`KotlinSurface.kt`), so the stub writes `*`
+     * before it. Checked textually, since no Python parser runs in this module -- and bracket-aware,
+     * because a `Callable[[A, B], R]` annotation has commas of its own.
      */
     @Test
-    fun noGeneratedDefPutsARequiredParameterAfterADefaultedOne() {
+    fun noGeneratedDefPutsARequiredPositionalParameterAfterADefaultedOne() {
         generatedPaths().filter { it.endsWith(".pyi") }.forEach { path ->
-            Regex("""^def [A-Za-z0-9_]+\((.*)\) -> """, RegexOption.MULTILINE).findAll(stub(path)).forEach { match ->
+            Regex("""^(?:def [A-Za-z0-9_]+|    def __call__)\((.*)\) -> """, RegexOption.MULTILINE).findAll(stub(path)).forEach { match ->
                 var sawDefault = false
-                match.groupValues[1].split(", ").filter { it != "/" && it != "*" }.forEach { parameter ->
-                    if ("= ..." in parameter) sawDefault = true
-                    else assertTrue(!sawDefault, "$path: required parameter after a default in ${match.value}")
+                var keywordOnly = false
+                splitTopLevel(match.groupValues[1]).filter { it != "/" }.forEach { parameter ->
+                    if (parameter == "*") keywordOnly = true
+                    else if ("= ..." in parameter) sawDefault = true
+                    else assertTrue(!sawDefault || keywordOnly, "$path: required positional parameter after a default in ${match.value}")
                 }
             }
         }
+    }
+
+    private fun splitTopLevel(parameters: String): List<String> {
+        val out = mutableListOf<String>()
+        var depth = 0
+        val current = StringBuilder()
+        for (c in parameters) {
+            when {
+                c == '[' -> { depth++; current.append(c) }
+                c == ']' -> { depth--; current.append(c) }
+                c == ',' && depth == 0 -> { out += current.toString().trim(); current.clear() }
+                else -> current.append(c)
+            }
+        }
+        if (current.isNotBlank()) out += current.toString().trim()
+        return out
     }
 
     /**
@@ -157,7 +192,11 @@ class WalkedArtifactStubTest {
             }
             .toSet()
 
-        assertEquals(emptySet(), stubbed - installed, "stubbed but not callable")
+        // The base name of an overload set (`padding` for `padding__Dp`, ...) is served by the binding
+        // layer's dispatcher and is stubbed as `@overload`s; it is not itself a table key.
+        val overloadBases = installed.map { it.substringBeforeLast('.') + "." + it.substringAfterLast('.').substringBefore("__") }
+            .filter { it !in installed }.toSet()
+        assertEquals(emptySet(), stubbed - installed - overloadBases, "stubbed but not callable")
         assertEquals(emptySet(), installed - stubbed, "callable but not stubbed")
     }
 }
