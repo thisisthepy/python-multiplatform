@@ -130,6 +130,31 @@ git update-ref refs/remotes/origin/release "$stale"
 bash "$SYNC" --push >"$SCRATCH/push3.log" 2>&1
 check "push overwrites stale remote release" test "$(git --git-dir="$SCRATCH/remote.git" rev-parse refs/heads/release)" = "$(git rev-parse release)"
 
+# main has diverged from develop (a commit main has and develop lacks, with a
+# conflicting edit): release must still fast-forward main, keep develop's tree.
+git branch -D release -q 2>/dev/null
+base="$(git rev-parse HEAD~1)"
+git checkout -q -b main "$base"
+echo "main-only edit" > LICENSE; git add LICENSE; git commit -q -m "main-only"
+main_tip="$(git rev-parse HEAD)"
+git checkout -q develop
+dev_tip="$(git rev-parse HEAD)"
+bash "$SYNC" >"$SCRATCH/main1.log" 2>&1
+check "diverged main: first parent is source" test "$(git rev-parse release^1)" = "$dev_tip"
+check "diverged main: second parent is main" test "$(git rev-parse -q --verify release^2)" = "$main_tip"
+check "diverged main: main fast-forwards to release" git merge-base --is-ancestor "$main_tip" release
+check "diverged main: tree is develop's, not main's" test "$(git show release:LICENSE)" = "$(git show develop:LICENSE)"
+bash "$SYNC" >"$SCRATCH/main2.log" 2>&1
+h_main="$(git rev-parse release)"
+bash "$SYNC" >"$SCRATCH/main3.log" 2>&1
+check "diverged main: repeat run is a no-op" test "$(git rev-parse release)" = "$h_main"
+# once main is an ancestor of develop, no second parent is added
+git branch -f main "$base"
+git branch -D release -q
+bash "$SYNC" >"$SCRATCH/main4.log" 2>&1
+check "main behind develop: single parent" bash -c '! git rev-parse -q --verify release^2 >/dev/null'
+git branch -D main -q
+
 # Refuses when target is checked out
 git checkout -q release 2>/dev/null
 bash "$SYNC" >/dev/null 2>&1; rc=$?
