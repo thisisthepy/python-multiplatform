@@ -1,12 +1,23 @@
 package fixture.compose
 
 import androidx.compose.ui.ImageComposeScene
+import androidx.compose.ui.InternalComposeUiApi
+import androidx.compose.ui.draganddrop.DragAndDropTransferData
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.asComposeCanvas
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.platform.PlatformContext
+import androidx.compose.ui.platform.PlatformDragAndDropManager
+import androidx.compose.ui.platform.PlatformDragAndDropSource
+import androidx.compose.ui.scene.CanvasLayersComposeScene
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.PointerButton
 import androidx.compose.ui.input.pointer.PointerButtons
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.unit.Density
 import org.jetbrains.skia.Bitmap
+import org.jetbrains.skia.Surface
 import python.multiplatform.ffi.Python3
 import python.multiplatform.ffi.pythonx.PythonxAdapter
 import python.multiplatform.ffi.upcall.PythonProxySource
@@ -115,12 +126,52 @@ class DragAndDropSourceRenderTest {
         )
     }
 
+    /**
+     * Drives a real pointer drag through a scene whose platform *requests* drag-and-drop transfers.
+     *
+     * `ImageComposeScene` cannot be used here: its platform context carries Compose's default
+     * `PlatformDragAndDropManager`, whose `isRequestDragAndDropTransferRequired()` is `false`, so
+     * `DragAndDropSourceNode.onAttach` never installs its start detector and `transferData` is never
+     * asked -- the platform is expected to start the drag itself. Only the desktop window's
+     * `AwtDragAndDropManager` answers `true`. This builds the same scene `ImageComposeScene` builds
+     * (`CanvasLayersComposeScene`), with a manager that answers `true` and, on a request, hands
+     * `PlatformDragAndDropSource` a scope that records the transfer instead of starting an OS drag.
+     * Compose's own start detector, and the fixture's `transferData` lambda, run unmodified.
+     */
+    @OptIn(InternalComposeUiApi::class)
     private fun dragFrom(start: Offset) {
-        val scene = ImageComposeScene(width = SCENE, height = SCENE, density = Density(1f)) {
-            PythonComposition(BODY)
+        val manager = object : PlatformDragAndDropManager {
+            override val isRequestDragAndDropTransferRequired: Boolean get() = true
+
+            override fun requestDragAndDropTransfer(source: PlatformDragAndDropSource, offset: Offset) {
+                source.apply {
+                    val scope = object : PlatformDragAndDropSource.StartTransferScope {
+                        override fun startDragAndDropTransfer(
+                            transferData: DragAndDropTransferData,
+                            decorationSize: Size,
+                            drawDragDecoration: DrawScope.() -> Unit,
+                        ): Boolean = false
+                    }
+                    scope.startDragAndDropTransfer(offset) { false }
+                }
+            }
         }
+        val platformContext = object : PlatformContext by PlatformContext.Empty() {
+            override val dragAndDropManager: PlatformDragAndDropManager get() = manager
+        }
+        val scene = CanvasLayersComposeScene(
+            density = Density(1f),
+            size = IntSize(SCENE, SCENE),
+            platformContext = platformContext,
+        )
+        val surface = Surface.makeRasterN32Premul(SCENE, SCENE)
         try {
-            scene.render()
+            scene.setContent { PythonComposition(BODY) }
+            var nanos = 0L
+            fun frame() { scene.render(surface.canvas.asComposeCanvas(), nanos); nanos += FRAME_NANOS }
+            // Let the modifier's pointer-input coroutines start and reach their first awaitPointerEvent
+            // before the press.
+            repeat(SETTLE_FRAMES) { frame() }
             val held = PointerButtons(isPrimaryPressed = true)
             scene.sendPointerEvent(PointerEventType.Move, start)
             scene.sendPointerEvent(PointerEventType.Press, start, buttons = held, button = PointerButton.Primary)
@@ -129,12 +180,13 @@ class DragAndDropSourceRenderTest {
             while (x < start.x + DRAG_DISTANCE) {
                 x += STEP
                 scene.sendPointerEvent(PointerEventType.Move, Offset(x, start.y), buttons = held)
-                scene.render()
+                frame()
             }
             scene.sendPointerEvent(PointerEventType.Release, Offset(x, start.y), button = PointerButton.Primary)
-            scene.render()
+            frame()
         } finally {
             scene.close()
+            surface.close()
         }
     }
 
@@ -161,6 +213,8 @@ class DragAndDropSourceRenderTest {
         const val START_X = 4f
         const val DRAG_DISTANCE = 40f
         const val STEP = 8f
+        const val SETTLE_FRAMES = 5
+        const val FRAME_NANOS = 16_000_000L
 
         val BODY = """
             from fixture.compose import emptyModifier, pythonDragAndDropSource

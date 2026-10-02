@@ -38,7 +38,11 @@ class KotlinSignatureMetadataTest {
         UpcallTable.clear()
     }
 
-    /** `Checkbox(checked, onCheckedChange, modifier = Modifier, ...)`, as Kotlin declares it. */
+    /**
+     * `Checkbox(checked, onCheckedChange, modifier = Modifier, ...)`, as Kotlin declares it. Compose 1.11
+     * has two `Checkbox` overloads (the second adds `checkmarkStroke`/`outlineStroke`), so the base name
+     * answers `(*args, **kwargs)` and the signature lives on the specific overload callable.
+     */
     @Test
     fun checkboxCarriesItsKotlinParameterNamesAndMarksItsDefaults() {
         for (order in listOf("adapter", "adapter-then-proxy", "proxy-then-adapter")) {
@@ -51,10 +55,17 @@ class KotlinSignatureMetadataTest {
                 """
                 import inspect as _ksm_inspect
                 import python_multiplatform as _ksm_pm
-                from androidx.compose.material3 import Checkbox as _ksm_checkbox
+                import androidx.compose.material3 as _ksm_m3
+                # material3 1.9 (Compose 1.11) overloads Checkbox: the base name is the overload set,
+                # and each overload is its own callable named by its parameter types.
+                _ksm_base = _ksm_m3.Checkbox
+                _ksm_checkbox = _ksm_m3.Checkbox__Boolean_Unit_Modifier_Boolean_CheckboxColors_MutableInteractionSource
                 _ksm_params = list(_ksm_inspect.signature(_ksm_checkbox).parameters.values())
                 _ksm_d = _ksm_pm.describe(_ksm_checkbox)
+                _ksm_all = _ksm_pm.describe(_ksm_base)
                 _ksm = {
+                    'base_sig': str(_ksm_inspect.signature(_ksm_base)),
+                    'all_names': sorted(_q['name'] for _q in _ksm_all),
                     'first': [
                         (_p.name, _p.default is _ksm_pm.KOTLIN_DEFAULT, _p.annotation)
                         for _p in _ksm_params[:3]
@@ -78,7 +89,18 @@ class KotlinSignatureMetadataTest {
             )
             assertEquals("[]", eval("repr(_ksm['synthetic'])"), "$order: \$composer/\$changed/\$default must not appear")
             assertEquals("1", eval("_ksm['count']"), order)
-            assertEquals("androidx.compose.material3.Checkbox", eval("_ksm['name']"), order)
+            assertEquals("(*args, **kwargs)", eval("_ksm['base_sig']"), "$order: an overload set has no single signature")
+            assertEquals(
+                "['androidx.compose.material3.Checkbox__Boolean_Unit_Modifier_Boolean_CheckboxColors_MutableInteractionSource', " +
+                    "'androidx.compose.material3.Checkbox__Boolean_Unit_Stroke_Stroke_Modifier_Boolean_CheckboxColors_MutableInteractionSource']",
+                eval("repr(_ksm['all_names'])"),
+                "$order: describe(base) lists every overload",
+            )
+            assertEquals(
+                "androidx.compose.material3.Checkbox__Boolean_Unit_Modifier_Boolean_CheckboxColors_MutableInteractionSource",
+                eval("_ksm['name']"),
+                order,
+            )
             assertEquals("True", eval("_ksm['composable']"), order)
             assertEquals("True", eval("_ksm['callback']"), order)
             assertEquals("True", eval("_ksm['described']"), "$order: describe and inspect.signature must agree")

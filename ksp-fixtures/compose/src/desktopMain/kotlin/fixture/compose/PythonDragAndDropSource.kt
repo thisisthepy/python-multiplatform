@@ -20,6 +20,10 @@ import python.multiplatform.ffi.types.basic.PyString
  * a primary-button mouse drag, or a long press for touch). So the Python callback now sees the one
  * event the library still hands out: the drag start, as `("start", x, y)`.
  *
+ * `transferData` is only asked when the platform's `PlatformDragAndDropManager` answers
+ * `isRequestDragAndDropTransferRequired() == true` (the desktop window's does; `ImageComposeScene`'s default does
+ * not), so tests must supply such a manager -- see `DragAndDropSourceRenderTest`.
+ *
  * ### What is exercised here, and what is not
  *
  * A real pointer drag, recognised by Compose's own start detector, reaches a synchronous Python
