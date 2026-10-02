@@ -17,7 +17,7 @@ import python.multiplatform.reflection.UpcallTable
  * Pythonic API on top of this one through `python_multiplatform.describe` and `inspect.signature`
  * ([KotlinSurface]).
  *
- * `docs/design/pythonx-adapter-design.md` §7 draws one line through this whole area: **if it differs per
+ * `docs/archive/pythonx-adapter-design.md` §7 draws one line through this whole area: **if it differs per
  * Kotlin declaration it is generated or resolved at run time; if it is the same rule for every
  * declaration it is `pythonx` Python source.** This object is where the two meet, and it keeps them
  * apart on purpose:
@@ -28,7 +28,7 @@ import python.multiplatform.reflection.UpcallTable
  * | [renderTable] | one row per entry in [UpcallTable] | this function, from the table |
  *
  * The 2024 `pythonx-compose` put both on the wrong side of that line -- a Python file per Compose
- * component, 37 of them, 28 empty -- and `docs/design/pythonx-adapter-design.md` §1 measures what it cost:
+ * component, 37 of them, 28 empty -- and `docs/archive/pythonx-adapter-design.md` §1 measures what it cost:
  * `padding()` composed nothing and `fill_max_size()` returned `self`, because a per-declaration
  * wrapper is written once and then never again. Nothing here is per-declaration.
  *
@@ -86,7 +86,7 @@ object PythonxAdapter {
      * Read it as a file -- it is one, and the indentation the Kotlin literal adds is removed by
      * `trimIndent`. What it contains, in the order the design asks for it:
      *
-     * | | `docs/design/pythonx-adapter-design.md` |
+     * | | `docs/archive/pythonx-adapter-design.md` |
      * |---|---|
      * | `_Finder` / `_Loader` | §2.3, the hook a module `__getattr__` cannot replace |
      * | the module `__getattr__` the loader installs | §4.1, adapted once and then a dict hit |
@@ -105,7 +105,7 @@ object PythonxAdapter {
         # Pythonic is the job of a real Python package built on top of it (pythonx-compose), which
         # reads `python_multiplatform.describe` and `inspect.signature` to do it by rule.
         #
-        # `docs/design/pythonx-adapter-design.md` §7 draws the line this file lives on: *if it differs per Kotlin
+        # `docs/archive/pythonx-adapter-design.md` §7 draws the line this file lives on: *if it differs per Kotlin
         # declaration it is generated or resolved at run time; if it is the same rule for every declaration
         # it is `pythonx` Python source.* Nothing here mentions a Kotlin declaration by name. What arrives
         # per declaration is the table `PythonxAdapter.renderTable` emits into `_register_table`, and the
@@ -920,7 +920,7 @@ object PythonxAdapter {
         class _Hybrid:
             '''`Modifier.padding(16)` and `m.padding(16)`, from one descriptor.
 
-            `docs/design/pyi-generation-design.md` §4.3 measured the metaclass alternative failing at run time: a
+            `docs/archive/pyi-generation-pythonic-stubs.md` §4.3 measured the metaclass alternative failing at run time: a
             plain `def` on a metaclass is a *non-data* descriptor, so `type.__getattribute__` searches the
             class's own MRO first and `Modifier.padding(16)` binds `16` to `self`. A descriptor in the class
             body is found for both spellings and is told which one it is by `obj`.
@@ -1343,7 +1343,7 @@ object PythonxAdapter {
                     # `None` is the whole mechanism, and it is not a value being passed: the generated
                     # Kotlin body tests `args[i] == null` and takes a branch whose call expression does
                     # not mention this parameter at all, so the *compiler* supplies the default.
-                    # `docs/design/pythonx-adapter-design.md` §4.5 -- metadata carries the flag and never the
+                    # `docs/archive/pythonx-adapter-design.md` §4.5 -- metadata carries the flag and never the
                     # expression, so this is the only place the default value can come from.
                     #
                     # It costs nothing that was previously possible, and the reason is `_coerce` rather
@@ -1621,7 +1621,7 @@ object PythonxAdapter {
             `import androidx.compose.material3` fails *before* any attribute is touched, so laziness inside
             a module is not enough to make the module lazy. A finder answers the import, and the
             `__getattr__` the loader installs answers the names inside it -- two hooks,
-            `docs/design/pythonx-adapter-design.md` §2.3.
+            `docs/archive/pythonx-adapter-design.md` §2.3.
             '''
 
             def find_spec(self, fullname, path=None, target=None):
@@ -1704,7 +1704,7 @@ object PythonxAdapter {
     /**
      * The generated half: one row per [ExposedCallable], and nothing else.
      *
-     * Every field here is one `docs/design/pythonx-adapter-design.md` §2.4 recorded as *missing* from the
+     * Every field here is one `docs/archive/pythonx-adapter-design.md` §2.4 recorded as *missing* from the
      * boundary -- parameter names, whether a slot is an extension receiver, the receiver's type, the
      * **declared** type of a parameter as opposed to its marshalling tag, and whether a parameter
      * has a default. They are on [ExposedCallable] now, and this is what carries them the last step,

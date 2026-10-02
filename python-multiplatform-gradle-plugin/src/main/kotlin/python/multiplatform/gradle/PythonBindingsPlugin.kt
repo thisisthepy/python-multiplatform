@@ -75,7 +75,7 @@ internal fun isBindingKspConfiguration(name: String, isMultiplatform: Boolean): 
 /**
  * The module name the generated fragment object is named after.
  *
- * Every fragment in every artifact lands in one package (`docs/design/upcall-table-design.md` §1), so
+ * Every fragment in every artifact lands in one package (`docs/design/upcall.md` §2.1), so
  * the name has to be unique across artifacts, not just within a build -- two independent
  * libraries both called `:core` would otherwise emit the same object into the same package. The
  * Maven group is what already carries that uniqueness, so it goes in front.

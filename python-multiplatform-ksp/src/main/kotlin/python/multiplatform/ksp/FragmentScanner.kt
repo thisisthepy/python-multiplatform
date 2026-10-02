@@ -30,7 +30,7 @@ private const val PENDING_CALL = "python.multiplatform.ffi.upcall.PendingCall"
  * continuation there to give it -- so its call goes inside `PendingCall.start { }`, which is itself
  * a `suspend` lambda and needs nothing but `kotlin-stdlib` to build. The entry then evaluates to a
  * `PendingCall` and carries `isSuspend = true`, which is what tells the trampoline to unwrap it.
- * See `docs/design/upcall-async-design.md` §5 and [BindingPolicy.isSuspending].
+ * See `docs/design/upcall.md` §5.2 and [BindingPolicy.isSuspending].
  *
  * [resultExpr] has already been through [wrapReturnExpression], so a `suspend fun` returning `Int`
  * widens inside the coroutine and the boundary still sees the `Long` its `INT` tag promises.
@@ -124,14 +124,14 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
      * ([BindingPolicy.isExposedFunctionShape]-family) but names a type
      * ([BindingPolicy.hasExposableTypes]) with no callable entry of its own is not an ordinary,
      * expected exclusion the way `private`/`internal` visibility is -- it is the exact silent
-     * failure mode `docs/design/upcall-async-design.md` §2.1 measured for `suspend` function types, and
+     * failure mode `docs/design/upcall.md` §5.3 measured for `suspend` function types, and
      * the whole point of this task is that it should not go unlogged a second time.
      */
     private fun warnUnexposableType(name: String, declaration: KSNode) {
         logger.warn(
             "python-multiplatform-ksp: $name has a type with no exposable classifier (a `suspend` " +
                 "function type, or one nested in a generic argument) and is not exposed to Python -- " +
-                "see docs/design/upcall-async-design.md §2.1.",
+                "see docs/design/upcall.md §5.3.",
             declaration,
         )
     }

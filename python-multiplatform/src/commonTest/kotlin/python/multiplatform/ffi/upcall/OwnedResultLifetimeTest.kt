@@ -362,7 +362,7 @@ class OwnedResultLifetimeTest {
             println(
                 "\n--- Owned object results: ${currentPlatform.name} --- " +
                     "no proxies are installable on this target, so nothing owns a result here; " +
-                    "see docs/design/upcall-async-design.md 12.4\n",
+                    "see docs/design/upcall.md §3.7\n",
             )
             return@withInterpreter
         }

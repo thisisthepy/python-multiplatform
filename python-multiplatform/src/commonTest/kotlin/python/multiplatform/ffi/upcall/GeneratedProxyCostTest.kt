@@ -412,7 +412,7 @@ class GeneratedProxyCostTest {
                 println(
                     "\n--- Generated proxy cost: ${currentPlatform.name} --- " +
                         "no proxies are installable on this target, so there is nothing to measure; " +
-                        "see docs/design/upcall-async-design.md 12.4\n",
+                        "see docs/design/upcall.md §3.7\n",
                 )
                 return@withInterpreter
             }

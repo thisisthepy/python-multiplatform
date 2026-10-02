@@ -11,7 +11,7 @@ import python.multiplatform.reflection.HandleTable
 import python.native.ffi.PyLong_AsLongLong
 
 /**
- * `Modifier.composed` -- `docs/design/pythonx-adapter-design.md` §9.2/§9.4's open question, now answered:
+ * `Modifier.composed` -- `docs/archive/pythonx-adapter-design.md` §9.2/§9.4's open question, now answered:
  * **a composer is admitted.** `factory`'s compiled shape is `Function3<Modifier, Composer, Integer,
  * Modifier>` (confirmed by `javap -p` on `androidx.compose.ui.ComposedModifierKt`, matching the
  * lowered shape `PythonCallables` already crosses for every composable `content=` slot), and unlike

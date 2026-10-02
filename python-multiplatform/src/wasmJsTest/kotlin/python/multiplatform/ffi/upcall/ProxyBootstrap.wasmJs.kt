@@ -13,7 +13,7 @@ actual val publishesProxyEntryPoints: Boolean = true
 
 /**
  * Still `false`, but **no longer for the reason §9.5 gave**. `import asyncio` does not trap any
- * more: `docs/design/upcall-async-design.md` §15 found the trap was Emscripten's *runtime* JSPI detection
+ * more: `docs/design/upcall.md` §5.8 found the trap was Emscripten's *runtime* JSPI detection
  * meeting a boot that never calls `main`, fixed it in `cpython.mjs`, and `WasmSelectorsImportTest`
  * now watches `selectors` and `asyncio` import cleanly on this target.
  *

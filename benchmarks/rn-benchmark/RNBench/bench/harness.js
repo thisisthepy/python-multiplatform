@@ -134,7 +134,7 @@
 
   /**
    * Where a sweep settles, in the same terms the reference project's device sweep table uses
-   * (`docs/upcall-design.md`, "Is 100 000 enough on a device?"): first repetition over the plateau,
+   * (`docs/design/upcall.md` §7.2): first repetition over the plateau,
    * the call count from which the series stays flat, and the margin a given warmup has over it.
    *
    * The plateau is the mean of the second half, so it cannot be dragged by the early readings the

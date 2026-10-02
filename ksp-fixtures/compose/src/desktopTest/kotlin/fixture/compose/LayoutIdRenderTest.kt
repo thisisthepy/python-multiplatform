@@ -19,7 +19,7 @@ import kotlin.test.assertTrue
 
 /**
  * **A real string value, tagged from Python, reaches `Measurable.layoutId`** -- `layoutId` declines
- * for a reason unrelated to suspend (`docs/design/pythonx-adapter-design.md` §9's table: its one non-`Modifier`
+ * for a reason unrelated to suspend (`docs/archive/pythonx-adapter-design.md` §9's table: its one non-`Modifier`
  * parameter is `kotlin.Any`, which `resolveKotlinType` has no `TypeTag` for). `fixture.compose
  * .pythonLayoutIdString` (`PythonLayoutId.kt`) fixes the parameter's tag the same way every other
  * concretely-typed hand-written wrapper in this module does.

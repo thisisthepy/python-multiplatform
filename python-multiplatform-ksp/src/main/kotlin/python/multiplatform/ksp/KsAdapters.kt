@@ -49,7 +49,7 @@ fun KSTypeReference.toShape(): TypeShape = resolve().toShape()
  * (`kotlin.coroutines.SuspendFunctionN`) is compiler-synthesized, not something this
  * compilation's KSP scan ever visits as source. It gets no `ReflectedClass`, so `invoke` has no
  * table entry -- the generated cast (`args[0] as kotlin.coroutines.SuspendFunction1<...>`)
- * compiles and the runtime checkcast passes regardless (`docs/design/upcall-async-design.md` §2.1,
+ * compiles and the runtime checkcast passes regardless (`docs/design/upcall.md` §5.3,
  * `GeneratedSuspendTest`), so nothing downstream catches this. What would cross is a handle
  * Python can hold and hand back and nothing else.
  *

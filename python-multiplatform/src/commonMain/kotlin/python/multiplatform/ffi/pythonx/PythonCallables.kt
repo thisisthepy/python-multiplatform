@@ -15,7 +15,7 @@ import python.multiplatform.reflection.TypeTag
 /**
  * The other direction: **a Python callable arriving at a Kotlin function-typed parameter.**
  *
- * `docs/design/pythonx-adapter-design.md` §6 opens by saying the mechanism is half present already --
+ * `docs/archive/pythonx-adapter-design.md` §6 opens by saying the mechanism is half present already --
  * `UpcallTrampoline.toKotlinObject` wraps anything Python sends that is not an integer handle as a
  * `PyObject`, so a `lambda:` does reach Kotlin with a reference of its own. What it reaches is a
  * `PyObject`, and every container composable's `content` slot wants a `kotlin.jvm.functions.FunctionN`.
@@ -64,7 +64,7 @@ import python.multiplatform.reflection.TypeTag
  *
  * So this file owns the first three quarters of that -- creating, holding and releasing -- and the
  * one Compose type involved, `RememberObserver`, stays in the module that has Compose
- * (`:ksp-fixtures:compose`'s `PythonComposition`). `docs/design/pythonx-adapter-design.md` §6 item 1 names
+ * (`:ksp-fixtures:compose`'s `PythonComposition`). `docs/archive/pythonx-adapter-design.md` §6 item 1 names
  * `onForgotten` as "the one that fails silently and should be tested first"; the seam is here and the
  * test is there.
  *

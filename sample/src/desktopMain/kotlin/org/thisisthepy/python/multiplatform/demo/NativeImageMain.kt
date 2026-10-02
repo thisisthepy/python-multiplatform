@@ -55,7 +55,7 @@ fun main() {
     println("KOTLIN: args    stub @ 0x${invokeWithArgsAddr.toString(16)}")
 
     // Python resolves the entry to a handle by name exactly once, then calls back through that
-    // handle -- the ObjC-selector-cache shape docs/design/upcall-design.md argues for, reached here via
+    // handle -- the ObjC-selector-cache shape docs/design/upcall.md argues for, reached here via
     // ctypes function pointers instead of a generated proxy type.
     // Not a tty under Gradle/native-image, so sys.stdout is block-buffered: without an explicit
     // flush before the process exits (there is no Py_Finalize call on this path), every print()

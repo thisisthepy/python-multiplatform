@@ -17,7 +17,7 @@ import python.multiplatform.reflection.HandleTable
  * ### Why exactly one, and not one per component
  *
  * The 2024 `pythonx-compose` wrote a Kotlin wrapper per widget -- 37 files, 28 of them empty --
- * and `docs/design/pythonx-adapter-design.md` §1 measures what that cost: `padding()` composed nothing and
+ * and `docs/archive/pythonx-adapter-design.md` §1 measures what that cost: `padding()` composed nothing and
  * `fillMaxSize()` returned `self`, because a per-declaration wrapper is written once and then
  * never again. This is O(1) in the number of composables and stays O(1) by construction: it names no
  * composable, takes no composable-specific parameter, and knows nothing about the declaration Python
@@ -43,7 +43,7 @@ import python.multiplatform.reflection.HandleTable
  *
  * Recomposition. [source] is `exec`ed on every composition pass, so a Python body that is expensive
  * pays for it every frame, and a `@Composable` reached this way can never be *skipped* the way one
- * with stable parameters is. `docs/design/pythonx-adapter-design.md` §5.4 item 4 names this as a property to
+ * with stable parameters is. `docs/archive/pythonx-adapter-design.md` §5.4 item 4 names this as a property to
  * measure before the shape is adopted for anything but a proof, and nothing here has measured it.
  */
 @Composable
@@ -72,7 +72,7 @@ fun PythonComposition(source: String) {
 /**
  * Who holds a Python callable, and the one hook that says when to let go.
  *
- * `docs/design/pythonx-adapter-design.md` §6 item 1: *"When Compose drops the slot, does anything tell the
+ * `docs/archive/pythonx-adapter-design.md` §6 item 1: *"When Compose drops the slot, does anything tell the
  * Kotlin holder? `RememberObserver.onForgotten` is the only hook that reports it… Item 1 is the one
  * that fails silently and should be tested first."* This is that hook, wired to the one thing that
  * can act on it.

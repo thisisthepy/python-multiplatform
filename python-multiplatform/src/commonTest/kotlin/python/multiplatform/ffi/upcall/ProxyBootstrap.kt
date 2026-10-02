@@ -70,7 +70,7 @@ expect val publishesProxyEntryPoints: Boolean
  * `true` everywhere but wasmJs, where `import asyncio` **traps the wasm instance** -- killing the
  * Node process rather than raising a Python exception, so neither Kotlin nor Python can catch it.
  * `AsyncUpcallPortabilityTest` records how that was found (a `commonTest` case took the whole suite
- * down with it) and `docs/design/upcall-async-design.md` §9.5 has the import-by-import measurement.
+ * down with it) and `docs/design/upcall.md` §5.8 has the import-by-import measurement.
  *
  * Separate from [publishesProxyEntryPoints] because the two answers came apart the moment wasmJs
  * grew a bootstrap. Every *synchronous* generated proxy -- constructor, method, property, static --

@@ -1,5 +1,11 @@
 # TypedPython — 설계 제안
 
+> **참고 (2026-10-03):** §4.4 가 전제하는 스텁 매니페스트(`pythonx-map.toml`, 그리고 그것을 읽어
+> `pythonx.*` 스텁을 내던 `StubManifest`/`renderPythonicStubs`)는 이 저장소의 스텁 생성기에서
+> 제거되었고(`238119b7`), **pythonx-compose 저장소로 옮겨 갔다.** 이 저장소의 `PythonStubsTask` 는
+> 이제 Kotlin 모듈 경로·Kotlin 이름의 스텁만 낸다(SPEC B-7,
+> [`pyi-generation-design.md`](pyi-generation-design.md)). 아래 제안 본문은 수정하지 않았다.
+
 > **이 문서는 설계 제안이지 사양이 아니다.** 사양은 `docs/SPEC.md`, 의도는 `docs/INTENT.md` 에 있고,
 > 이 문서의 내용을 그 둘에 반영할지는 사용자가 정한다. 아래의 이름·표기·단계 구분은 전부 논의용이며
 > 구현하면서 달라질 수 있다.

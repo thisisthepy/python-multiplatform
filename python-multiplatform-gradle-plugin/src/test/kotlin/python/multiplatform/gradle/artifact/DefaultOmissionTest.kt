@@ -7,7 +7,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * `docs/design/pythonx-adapter-design.md` §4.5 closed for everything the walker actually binds: a Kotlin
+ * `docs/archive/pythonx-adapter-design.md` §4.5 closed for everything the walker actually binds: a Kotlin
  * default value is reached by **not writing the argument**, in generated Kotlin *source*.
  *
  * ### What the problem was

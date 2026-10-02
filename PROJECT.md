@@ -4,7 +4,7 @@ Kotlin Multiplatform 에 CPython 을 임베딩해 **Kotlin 과 Python 이 서로
 쓰게 한다. 모든 지원 플랫폼에서 같은 방식으로 동작하고, 경계를 넘는 비용을 측정하며 줄인다.
 
 - 의도(경계): [`docs/INTENT.md`](docs/INTENT.md) · 스펙(동작 계약과 상태): [`docs/SPEC.md`](docs/SPEC.md)
-- 에이전트 규정: [`AGENTS.md`](AGENTS.md) · 진척 기록: [`docs/roadmap/ROADMAP.md`](docs/roadmap/ROADMAP.md)
+- 에이전트 규정: [`AGENTS.md`](AGENTS.md) · 남은 작업: [`docs/roadmap/ROADMAP.md`](docs/roadmap/ROADMAP.md)
 
 ---
 
@@ -13,7 +13,7 @@ Kotlin Multiplatform 에 CPython 을 임베딩해 **Kotlin 과 Python 이 서로
 | 방향 | 이름 | 메커니즘 | 상세 |
 |---|---|---|---|
 | Kotlin → Python | **다운콜** | CPython Stable ABI 함수 호출 (`expect` 약 330개) | [`docs/design/downcall-design.md`](docs/design/downcall-design.md) |
-| Python → Kotlin | **업콜** | 빌드 타임 생성 함수 테이블 + 플랫폼별 진입점 1개 | [`docs/design/upcall-design.md`](docs/design/upcall-design.md) |
+| Python → Kotlin | **업콜** | 빌드 타임 생성 함수 테이블 + 플랫폼별 진입점 1개 | [`docs/design/upcall.md`](docs/design/upcall.md) |
 
 ```
             ┌──────────────────────────────────────────┐

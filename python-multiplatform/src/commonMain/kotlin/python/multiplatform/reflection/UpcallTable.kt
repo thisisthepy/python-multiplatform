@@ -5,7 +5,7 @@ package python.multiplatform.reflection
  * What a KSP-generated fragment implements: one object per module, holding the calls and
  * classes that module exposes.
  *
- * `docs/design/upcall-table-design.md` names the generated objects `Fragment_<module>`; this interface
+ * `docs/design/upcall.md` names the generated objects `Fragment_<module>`; this interface
  * is the shape they are emitted into and the shape [UpcallTable] registers. `moduleName` is what
  * makes [UpcallTable.register] idempotent -- an aggregator that references a fragment already
  * installed manually must not double its entries.
@@ -22,11 +22,11 @@ interface FunctionTableFragment {
 
 
 /**
- * The runtime half of the build-time function table (ROADMAP §7, `docs/design/upcall-design.md`).
+ * The runtime half of the build-time function table (ROADMAP §7, `docs/design/upcall.md`).
  *
  * A name is resolved to a [CallableHandle] once; every call after that carries only the handle --
  * a table index plus an epoch that rejects handles from a table that has since been reinstalled.
- * `docs/design/upcall-design.md` takes this from ObjC: the win is not having a table, it is never
+ * `docs/design/upcall.md` takes this from ObjC: the win is not having a table, it is never
  * hashing and comparing a string more than once per name.
  *
  * [ClassLookup] is the companion registry for the [ReflectedClass] half of a fragment; it is

@@ -17,7 +17,7 @@ kotlin {
         }
     }
     // The Native target that actually verifies `.klib` fragment discovery
-    // (docs/design/upcall-table-design.md §8's open question). Compile-only here: androidNativeArm64
+    // (docs/design/upcall.md §2.9's open question). Compile-only here: androidNativeArm64
     // targets a device/emulator this workspace does not run tests against.
     androidNativeArm64()
     // `:ksp-fixtures:app` grew a second Native leaf so that it would have an intermediate

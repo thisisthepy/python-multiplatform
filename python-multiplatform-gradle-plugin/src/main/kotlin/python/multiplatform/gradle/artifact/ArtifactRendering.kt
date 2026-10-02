@@ -44,7 +44,7 @@ internal data class ArtifactCallable(
      *
      * Carried rather than recomputed because it is not recoverable from anything else here: the
      * receiver is [ArtifactCallable.paramTags]'s slot 0, and a tag says how a value is marshalled,
-     * not what it is. `docs/design/pythonx-adapter-design.md` §2.4 row 3 records this exact loss --
+     * not what it is. `docs/archive/pythonx-adapter-design.md` §2.4 row 3 records this exact loss --
      * "`ArtifactScanner` has both at the moment it constructs the call expression and discards them
      * one line later" -- and §4.2 records that `docs/design/kotlin-extensions-in-python.md` §4.1
      * (an extension becomes a method on its receiver's proxy) has no input without it.
@@ -141,7 +141,7 @@ internal fun artifactFragmentObjectName(coordinates: String): String =
  *
  * **A `@Composable` omits by a second mechanism and so has a second piece of evidence.** Its body has
  * no sentinel test and never will: the `$default` bitmask is a *declared trailing parameter* of the
- * JVM method (`docs/design/pythonx-adapter-design.md` §5.2), so `pythonx` computes an integer instead of
+ * JVM method (`docs/archive/pythonx-adapter-design.md` §5.2), so `pythonx` computes an integer instead of
  * writing `None` into a slot, and there is no branch for the body to have. Carrying a [ThunkSpec] is
  * that evidence -- it is set by exactly one path, the one that emits the mask parameter -- so the
  * rule stays "derived from the body", with two bodies to derive from rather than one.
