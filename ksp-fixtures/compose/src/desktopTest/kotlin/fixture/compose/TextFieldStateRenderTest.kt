@@ -138,7 +138,8 @@ class TextFieldStateRenderTest {
             PythonComposition(REMEMBERED)
         }
         val before: IntArray
-        val after: IntArray
+        var after: IntArray
+        var frames = 0
         try {
             before = pixelsOf(scene.render())
             Python3.exec(
@@ -148,8 +149,18 @@ class TextFieldStateRenderTest {
                 _tfs_seen[0].setTextAndPlaceCursorAtEnd('a much longer line of text')
                 """.trimIndent(),
             )
-            Snapshot.sendApplyNotifications()
-            after = pixelsOf(scene.render())
+            // `TextField(state=...)` does not finish reacting to a state write inside one frame: the
+            // text-changed handling of BasicTextField runs on the scene's coroutine dispatcher, which is
+            // flushed by `render()`, so the pixels can trail the write by a frame. The test is the frame
+            // clock (there is none), so it advances it explicitly -- but only up to MAX_FRAMES, and it
+            // stops at the first frame that differs. A write that truly never reaches the draw leaves every
+            // one of these frames identical to `before`, and the assertion below still fails.
+            after = before
+            while (frames < MAX_FRAMES && differing(before, after) <= 10) {
+                Snapshot.sendApplyNotifications()
+                after = pixelsOf(scene.render())
+                frames++
+            }
             Python3.exec(
                 """
                 assert all(_s.text == 'a much longer line of text' for _s in _tfs_seen), \
@@ -160,7 +171,7 @@ class TextFieldStateRenderTest {
             scene.close()
         }
         val moved = differing(before, after)
-        println("compose rememberTextFieldState: ink ${inkOf(before)} -> ${inkOf(after)} px, $moved pixels differ")
+        println("compose rememberTextFieldState: ink ${inkOf(before)} -> ${inkOf(after)} px, $moved pixels differ after $frames frame(s)")
         assertTrue(inkOf(before) > 0, "TextField(state=rememberTextFieldState(...)) never composed")
         assertTrue(moved > 10, "only $moved pixels differ, so the write from Python never reached the next frame")
     }
@@ -197,6 +208,9 @@ class TextFieldStateRenderTest {
         /** Wide enough for material3's `TextField` and a line of text at density 1. */
         const val FIELD_WIDTH = 280
         const val FIELD_HEIGHT = 64
+
+        /** Upper bound on frames rendered after the write in the remembered-state test. */
+        const val MAX_FRAMES = 4
 
         val REMEMBERED = """
             from androidx.compose.foundation.text.input import rememberTextFieldState
