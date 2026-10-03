@@ -67,3 +67,7 @@ include(":ksp-fixtures:artifact-valueclass")
 // ROADMAP §16e's "investigated, not implemented" half. `KlibScanner` reads `.klib` metadata with
 // `LibraryAbiReader` instead of ASM.
 include(":ksp-fixtures:klib-artifact")
+// pythonx-compose's `UI.ipynb` scenarios end to end (issue #26): the installed pythonx-compose wheel,
+// drawn by `PythonContent`. A fixture and not `sample/`, which is user-authored spec material. Its
+// desktopTest needs `-PpythonxComposeWheel=<wheel>`; see its README.
+include(":ksp-fixtures:notebook-e2e")
