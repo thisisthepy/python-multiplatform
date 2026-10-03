@@ -469,7 +469,9 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   the composition reaches the screen within four frames. Notebook content with no decided or Kotlin
   counterpart is listed, not imitated. `Status: implemented` on desktop: `ksp-fixtures/notebook-e2e/` (20 tests, and a
   README with the cell map, the wheel commands and the gaps), 20 passed, 0 failed against the
-  pythonx-compose `develop` wheel on 2026-10-04 (after #146, #168 and pythonx-compose #88). No CI
+  pythonx-compose `develop` wheel on 2026-10-04 (after #146, #168 and pythonx-compose #88), and again
+  with the notebook's own state spelling (`main.App.messages.getValue()` / `setValue(...)`, #174)
+  against pythonx-compose f6dd3e2. No CI
   workflow runs the module yet.
 
 ## 7. Threading and builds

@@ -90,6 +90,7 @@ pythonBindings {
             "androidx.compose.runtime.MutableState",
             "androidx.compose.foundation.text.input.TextFieldState",
             "androidx.compose.foundation.text.input.TextFieldStateKt",
+            "python.multiplatform.compose.RememberSaveableKt",
         ),
     )
 }
