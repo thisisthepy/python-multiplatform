@@ -84,20 +84,12 @@ kotlin {
         iosArm64(),
         iosSimulatorArm64()
     ).forEach { iosTarget ->
-        val targetABI = when(iosTarget.konanTarget) {
-            ANDROID_ARM64 -> "arm64-v8a"
-            ANDROID_X64 -> "x86_64"
-            IOS_ARM64 -> "ios-arm64"
-            IOS_X64 -> "ios-arm64_x86_64-simulator"
-            IOS_SIMULATOR_ARM64 -> "ios-arm64_x86_64-simulator"
-            else -> throw RuntimeException("Unsupported ABI: ${iosTarget.konanTarget}")
-        }
         iosTarget.binaries.framework {
             baseName = "Demo"
 
-            linkerOpts.addAll(listOf(
-                "-framework", "Python", "-F$projectDir/build/xcode-frameworks/Python.xcframework/$targetABI", "-Objc"
-            ))
+            // `-framework Python -F<build>/xcode-frameworks/Python.xcframework/<slice>` comes from the
+            // bindings plugin, as for any consumer (issue #90).
+            linkerOpts.add("-Objc")
 
             //export(projects.pythonMultiplatform)
         }
@@ -260,19 +252,8 @@ tasks.withType<org.jetbrains.kotlin.gradle.targets.js.webpack.KotlinWebpack>().c
     }
 }
 
-val prepareIosFrameworks by tasks.registering(Sync::class) {
-    dependsOn(":python-multiplatform:downloadPython_ios")
-    
-    val samplePythonVersion = project.findProperty("pythonVersion")?.toString() ?: rootProject.version.toString()
-    val extractedIosDir = project(":python-multiplatform").layout.buildDirectory.dir("python-standalone/extracted/$samplePythonVersion/ios")
-    
-    from(extractedIosDir)
-    into(layout.buildDirectory.dir("xcode-frameworks"))
-}
-
-tasks.matching { it.name.startsWith("link") && it.name.contains("Ios") }.configureEach {
-    dependsOn(prepareIosFrameworks)
-}
+// Python.xcframework reaches build/xcode-frameworks/ through the bindings plugin's
+// `stageIosPythonXcframework`, which every iOS framework link task depends on (issue #90).
 
 android {
     namespace = "org.thisisthepy.python.multiplatform.demo"
@@ -322,6 +303,11 @@ pythonBindings {
     // The demo's Python-facing surface lives in `...demo.bindings`; the UI package is the one
     // that has to be kept out.
     excludePackages.set(listOf("org.thisisthepy.python.multiplatform.demo.ui"))
+
+    // Python.xcframework now comes from the plugin (issue #90); keep it on the CPython the library is
+    // built against when `-PpythonVersion` / `-PpythonAppleSupportBuild` override the defaults.
+    project.findProperty("pythonVersion")?.let { pythonVersion.set(it.toString()) }
+    project.findProperty("pythonAppleSupportBuild")?.let { pythonAppleSupportBuild.set(it.toString()) }
 }
 
 compose.desktop {
