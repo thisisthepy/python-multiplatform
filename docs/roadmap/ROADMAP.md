@@ -318,9 +318,16 @@ Old §15a, §15b, §15d, §15f, §15g, §15h are closed; §15e item 4 is closed 
   Windows-x86_64 are pinned as string assertions in `PythonHomeStagingTest`; Windows' `Lib/`+`DLLs/`
   layout and `linux-aarch64` (no `libpython` in `desktopJar`, relies on `manager.loadFromSidecar`) have
   never executed.
-- **15.4 A packaged desktop application carries no CPython prefix — open.** `stagePythonHome` serves
-  `run`/`test` on a developer machine; nothing makes `jpackage`, Conveyor or an installer ship a
-  prefix and set `PYTHONHOME` for an end user.
+- **15.4 A packaged desktop application carries no CPython prefix — implemented, end-to-end check
+  pending (issue #60, SPEC L-9).** The plugin copies the staged prefix's stdlib and `libpython` into
+  Compose Desktop's `prepare*AppResources` (so `createDistributable` and `package*`) as
+  `python-multiplatform-home/`; at run time the library resolves it through
+  `compose.application.resources.dir` (or `-Dpython.multiplatform.home`) and hands it to CPython with
+  `Py_SetPythonHome`. A child-JVM test with `PYTHONHOME` removed covers the run-time half
+  (`PM/desktopTest/.../env/PackagedPythonHomeLaunchTest.kt`); the packaged sample run is
+  `docs/platforms/desktop-packaged-app.md`. Left: Conveyor and non-Compose jpackage need the
+  property set by hand; no `.pyc` is shipped; only the build host's platform is packaged (jpackage
+  builds for its host anyway).
 - **15.5 The Android AAR duplicates the pure-Python stdlib per ABI — open (measured option, not
   taken).** 790 files / 11.91 MB are byte-identical between `arm64-v8a` and `x86_64`; de-duplicating
   saves 3.16 MB compressed but changes the published asset layout `<abi>/lib/python<X.Y>` that

@@ -131,7 +131,10 @@ plugins {
 `stagePythonHome` downloads the matching CPython build, verifies it against the release's
 `SHA256SUMS`, caches it machine-wide and sets `PYTHONHOME` on `run` and `test`. A `PYTHONHOME` you set
 yourself is never touched; disable staging with `pythonBindings { stagePythonHome.set(false) }`.
-A packaged end-user app still has to ship a prefix and set `PYTHONHOME` itself.
+A Compose Desktop app packaged with `createDistributable` (or a `package*` task) carries the staged
+stdlib and `libpython` in its resources and starts without `PYTHONHOME`
+(`pythonBindings { packagePythonHome.set(false) }` turns that off); any other packaging can name its
+prefix with `-Dpython.multiplatform.home=...`. See `docs/platforms/desktop-packaged-app.md`.
 </details>
 
 <details>
