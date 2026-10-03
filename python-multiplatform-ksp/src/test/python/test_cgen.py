@@ -31,6 +31,7 @@ from typedpython.ir import (
     ForRange, Function, If, Index, Len, Local, Module, Param, Return, StoreIndex, Type,
     Global, GetAttr, CallObject, Truth, CompareObj, ObjToFloat,
     UnaryOp, UnaryOpKind, Unbox, While, Break, Continue, ToFloat, MathCall, MathFunc,
+    NewArray, CopyArray, Tuple,
 )
 
 PACKAGE = Path(__file__).resolve().parents[2] / "main" / "python" / "typedpython"
@@ -262,6 +263,68 @@ SOURCE = textwrap.dedent('''\
 
     def twice_scaled(x: float) -> float:
         return scaled(x) * 2.0
+
+    # --- local arrays and tuple returns (fannkuch, M2) ---
+    def la_build(n: int) -> tuple:
+        a = list(range(n))
+        b = [0] * n
+        s = 0
+        for i in range(n // 2):
+            t = a[i]
+            a[i] = a[n - 1 - i]
+            a[n - 1 - i] = t
+        c = a[:]
+        for i in range(len(c)):
+            b[i] = c[i] * 3 + a[i]
+            s = s + b[i]
+        first = -1
+        last = -1
+        if len(a) > 0:
+            first = a[0]
+            last = a[-1]
+        return (len(a), len(b), first, last, s)
+
+    def la_f64(n: int) -> tuple:
+        x = [0.5] * n
+        y = x[:]
+        total = 0.0
+        for i in range(len(x)):
+            x[i] = x[i] * float(i) + 1.0
+            y[i] = x[i] / 2.0
+            total = total + y[i]
+        return (len(y), total)
+
+    def la_overflow(n: int, k: int) -> tuple:
+        a = list(range(n))
+        b = a[:]
+        acc = 1
+        for i in range(len(b)):
+            acc = acc + k
+            b[i] = i
+        return (acc, len(a))
+
+    def la_index(n: int, i: int) -> int:
+        a = list(range(n))
+        return a[i]
+
+    def la_store(n: int, i: int, v: int) -> int:
+        a = [0] * n
+        a[i] = v
+        return len(a)
+
+    def la_reassign(n: int) -> tuple:
+        a = list(range(n))
+        a = [7] * (n + 1)
+        a = a[:]
+        return (len(a), a[0], a[-1])
+
+    def la_copy_param(xs: list[int]) -> tuple:
+        c = xs[:]
+        c[0] = 99
+        return (xs[0], c[0], len(c))
+
+    def la_unit() -> tuple:
+        return ()
     ''')
 SOURCE = "import math\n" + SOURCE
 
@@ -1031,6 +1094,314 @@ def test_compare_obj_has_no_identity_shortcut(mod):
     assert mod.selfeq(1.0) is True
 
 
+# --- local arrays and tuples (issue #41, contract 513f10f2) -----------------------------------------
+
+I64A, F64A = Type.I64_ARRAY, Type.F64_ARRAY
+LOCAL_ARRAY_HELPERS = ("tp_i64_array_new", "tp_i64_array_iota", "tp_i64_array_copy",
+                       "tp_i64_array_free", "tp_f64_array_new", "tp_f64_array_copy",
+                       "tp_f64_array_free", "tp_tuple")
+
+
+def need_local_array_runtime():
+    need_runtime()
+    header = runtime_dir() / "tp_runtime.h"
+    text = header.read_text()
+    missing = [h for h in LOCAL_ARRAY_HELPERS if not re.search(rf"\b{h}\s*\(", text)]
+    if missing:
+        pytest.skip(f"{header} does not define the local-array helpers yet (the tp-runtime agent "
+                    f"is still writing them): {missing}")
+
+
+def f_la_build():
+    n, i, t = L("n", I64), L("i", I64), L("t", I64)
+    s, first, last = L("s", I64), L("first", I64), L("last", I64)
+    mirror = binop(BinOpKind.SUB, binop(BinOpKind.SUB, n, c(1)), i)
+    return fn("la_build", [Param("n", I64)], OBJ,
+              {"a": I64A, "b": I64A, "c": I64A, "i": I64, "t": I64, "s": I64, "first": I64, "last": I64},
+              [Assign("a", NewArray(I64A, n, None, True)),
+               Assign("b", NewArray(I64A, n, c(0))),
+               Assign("s", c(0)),
+               ForRange("i", c(0), binop(BinOpKind.FLOORDIV, n, c(2)), c(1), (
+                   Assign("t", Index(I64, "a", i)),
+                   StoreIndex("a", i, Index(I64, "a", mirror)),
+                   StoreIndex("a", mirror, t),
+               )),
+               Assign("c", CopyArray(I64A, "a")),
+               ForRange("i", c(0), Len(I64, "c"), c(1), (
+                   StoreIndex("b", i, binop(BinOpKind.ADD, binop(BinOpKind.MUL, Index(I64, "c", i), c(3)),
+                                            Index(I64, "a", i))),
+                   Assign("s", binop(BinOpKind.ADD, s, Index(I64, "b", i))),
+               )),
+               Assign("first", c(-1)), Assign("last", c(-1)),
+               If(Compare(BOOL, CompareKind.GT, Len(I64, "a"), c(0)), (
+                   Assign("first", Index(I64, "a", c(0))),
+                   Assign("last", Index(I64, "a", c(-1))),
+               )),
+               Return(Tuple(OBJ, (Box(OBJ, Len(I64, "a")), Box(OBJ, Len(I64, "b")), Box(OBJ, first),
+                                  Box(OBJ, last), Box(OBJ, s))))],
+              pure=True, may_deopt=True)
+
+
+def f_la_f64():
+    n, i, total = L("n", I64), L("i", I64), L("total", F64)
+    return fn("la_f64", [Param("n", I64)], OBJ,
+              {"x": F64A, "y": F64A, "total": F64, "i": I64},
+              [Assign("x", NewArray(F64A, n, c(0.5))),
+               Assign("y", CopyArray(F64A, "x")),
+               Assign("total", c(0.0)),
+               ForRange("i", c(0), Len(I64, "x"), c(1), (
+                   StoreIndex("x", i, binop(BinOpKind.ADD, binop(BinOpKind.MUL, Index(F64, "x", i),
+                                                                 ToFloat(F64, i)), c(1.0))),
+                   StoreIndex("y", i, binop(BinOpKind.TRUEDIV, Index(F64, "x", i), c(2.0))),
+                   Assign("total", binop(BinOpKind.ADD, total, Index(F64, "y", i))),
+               )),
+               Return(Tuple(OBJ, (Box(OBJ, Len(I64, "y")), Box(OBJ, total))))],
+              pure=True, may_deopt=False)
+
+
+def f_la_overflow():
+    i, acc = L("i", I64), L("acc", I64)
+    return fn("la_overflow", [Param("n", I64), Param("k", I64)], OBJ,
+              {"a": I64A, "b": I64A, "acc": I64, "i": I64},
+              [Assign("a", NewArray(I64A, L("n", I64), None, True)),
+               Assign("b", CopyArray(I64A, "a")),
+               Assign("acc", c(1)),
+               ForRange("i", c(0), Len(I64, "b"), c(1), (
+                   Assign("acc", binop(BinOpKind.ADD, acc, L("k", I64))),
+                   StoreIndex("b", i, i),
+               )),
+               Return(Tuple(OBJ, (Box(OBJ, acc), Box(OBJ, Len(I64, "a")))))],
+              pure=True, may_deopt=True)
+
+
+def f_la_index():
+    return fn("la_index", [Param("n", I64), Param("i", I64)], I64, {"a": I64A},
+              [Assign("a", NewArray(I64A, L("n", I64), None, True)),
+               Return(Index(I64, "a", L("i", I64)))],
+              pure=True, may_deopt=False)
+
+
+def f_la_store():
+    return fn("la_store", [Param("n", I64), Param("i", I64), Param("v", I64)], I64, {"a": I64A},
+              [Assign("a", NewArray(I64A, L("n", I64), c(0))),
+               StoreIndex("a", L("i", I64), L("v", I64)),
+               Return(Len(I64, "a"))],
+              pure=True, may_deopt=False)
+
+
+def f_la_reassign():
+    n = L("n", I64)
+    return fn("la_reassign", [Param("n", I64)], OBJ, {"a": I64A},
+              [Assign("a", NewArray(I64A, n, None, True)),
+               Assign("a", NewArray(I64A, binop(BinOpKind.ADD, n, c(1)), c(7))),
+               Assign("a", CopyArray(I64A, "a")),
+               Return(Tuple(OBJ, (Box(OBJ, Len(I64, "a")), Box(OBJ, Index(I64, "a", c(0))),
+                                  Box(OBJ, Index(I64, "a", c(-1))))))],
+              pure=True, may_deopt=True)
+
+
+def f_la_copy_param():
+    return fn("la_copy_param", [ArrayParam("xs", I64A, stored=False)], OBJ, {"c": I64A},
+              [Assign("c", CopyArray(I64A, "xs")),
+               StoreIndex("c", c(0), c(99)),
+               Return(Tuple(OBJ, (Box(OBJ, Index(I64, "xs", c(0))), Box(OBJ, Index(I64, "c", c(0))),
+                                  Box(OBJ, Len(I64, "c")))))],
+              pure=True, may_deopt=False)
+
+
+def f_la_unit():
+    return fn("la_unit", [], OBJ, {}, [Return(Tuple(OBJ, ()))], pure=True, may_deopt=False)
+
+
+LOCALARR = (f_la_build, f_la_f64, f_la_overflow, f_la_index, f_la_store, f_la_reassign,
+            f_la_copy_param, f_la_unit)
+
+
+@pytest.fixture(scope="module")
+def la():
+    need_local_array_runtime()
+    return build_module("tp_cgen_la", functions=LOCALARR)
+
+
+def test_gen_local_array_scan_calls_only_runtime_helpers():
+    text = gen(LOCALARR, name="tp_gen_la")
+    body = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    body = re.sub(r'"(?:\\.|[^"\\])*"', '""', body)
+    called = set(re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", body))
+    helpers = api_helpers()
+    for h in LOCAL_ARRAY_HELPERS:
+        assert h in helpers, f"{h} is not in runtime/API.md"
+        assert h in called, f"the local-array functions never call {h}"
+    stray = sorted(n for n in called if n.startswith("tp_") and n not in helpers
+                   and not re.search(rf"^static [^\n]*\b{n}\s*\(", body, flags=re.M))
+    assert stray == []
+
+
+def test_gen_local_arrays_never_go_through_the_write_back_exit():
+    text = gen((f_la_build,), name="tp_gen_la2")
+    impl = text[text.index("static int tp_impl_la_build(PyObject *tp_module, int64_t l_n"):]
+    impl = impl[:impl.index("static PyObject *tp_wrap_la_build")]
+    assert "_array_exit" not in impl and "_array_enter" not in impl
+    assert impl.count("tp_i64_array_free(") >= 3          # a, b, c are freed at the exit block
+    assert ".dirty" not in impl and "->dirty" not in impl  # stores into a local set no dirty bit
+
+
+def test_gen_rejects_a_new_array_that_is_not_an_assign_value():
+    from typedpython import cgen
+
+    bad = fn("bad", [Param("n", I64)], I64, {"a": I64A},
+             [ExprStmt(NewArray(I64A, L("n", I64), c(0))), Return(c(0))], pure=True, may_deopt=False)
+    with pytest.raises(cgen.CGenError, match="NewArray"):
+        cgen.generate(Module("tp_bad3", (bad,)), source_file("tp_bad3"))
+
+
+def test_gen_rejects_assigning_an_array_of_the_wrong_element_type():
+    from typedpython import cgen
+
+    bad = fn("bad", [Param("n", I64)], I64, {"a": F64A},
+             [Assign("a", NewArray(I64A, L("n", I64), c(0))), Return(c(0))], pure=True, may_deopt=False)
+    with pytest.raises(cgen.CGenError):
+        cgen.generate(Module("tp_bad4", (bad,)), source_file("tp_bad4"))
+
+
+def test_gen_a_store_into_a_param_array_still_makes_a_pure_function_an_error():
+    from typedpython import cgen
+
+    bad = fn("bad", [ArrayParam("xs", I64A, stored=True)], NONE, {},
+             [StoreIndex("xs", c(0), c(1))], pure=True, may_deopt=False)
+    with pytest.raises(cgen.CGenError, match="pure"):
+        cgen.generate(Module("tp_bad5", (bad,)), source_file("tp_bad5"))
+
+
+def test_gen_a_store_into_a_local_array_is_not_an_effect():
+    text = gen((f_la_store,), name="tp_gen_la3")
+    assert "tp_impl_la_store" in text
+
+
+def test_local_arrays_equal_cpython_for_several_n(la):
+    for n in (0, 1, 2, 3, 7, 10, 64, -1, -5):
+        got, want = la.la_build(n), interp(la, "la_build")(n)
+        assert type(got) is tuple and got == want, (n, got, want)
+    assert deopts(la) == 0
+
+
+def test_f64_local_arrays_equal_cpython_bit_for_bit(la):
+    for n in (0, 1, 5, 100, -3):
+        got, want = la.la_f64(n), interp(la, "la_f64")(n)
+        assert repr(got) == repr(want), (n, got, want)
+
+
+def test_a_tuple_with_no_elements_is_the_empty_tuple(la):
+    assert la.la_unit() == () and type(la.la_unit()) is tuple
+
+
+def test_local_array_index_errors_equal_cpython(la):
+    for fname, args in (("la_index", (5, 5)), ("la_index", (5, -6)), ("la_index", (0, 0)),
+                        ("la_index", (5, 4)), ("la_index", (5, -5)),
+                        ("la_store", (3, 3, 1)), ("la_store", (3, -4, 1)), ("la_store", (0, 0, 1)),
+                        ("la_store", (3, -1, 9)), ("la_store", (3, 2, 9))):
+        try:
+            want = ("ok", interp(la, fname)(*args))
+        except Exception as e:
+            want = (type(e), str(e))
+        try:
+            got = ("ok", getattr(la, fname)(*args))
+        except Exception as e:
+            got = (type(e), str(e))
+        assert got == want, (fname, args, got, want)
+    # and the two messages are really the list ones, not something of our own
+    with pytest.raises(IndexError, match=r"^list index out of range$"):
+        la.la_index(2, 2)
+    with pytest.raises(IndexError, match=r"^list assignment index out of range$"):
+        la.la_store(2, 2, 0)
+
+
+def test_reassigning_a_local_array_replaces_it_and_copy_of_itself_is_safe(la):
+    for n in (0, 1, 5, 40):
+        assert la.la_reassign(n) == interp(la, "la_reassign")(n)
+    for bad in (-1,):                       # a == [7]*0: a[0] raises in both
+        with pytest.raises(IndexError) as g:
+            la.la_reassign(bad)
+        with pytest.raises(IndexError) as w:
+            interp(la, "la_reassign")(bad)
+        assert str(g.value) == str(w.value)
+
+
+def test_copy_of_an_array_param_leaves_the_list_untouched(la):
+    xs = [5, 6, 7]
+    assert la.la_copy_param(xs) == interp(la, "la_copy_param")([5, 6, 7]) == (5, 99, 3)
+    assert xs == [5, 6, 7]
+
+
+def test_overflow_deopt_with_local_arrays_returns_the_big_int_result(la):
+    before = deopts(la)
+    got, want = la.la_overflow(50, 2 ** 62), interp(la, "la_overflow")(50, 2 ** 62)
+    assert got == want and got[0] == 1 + 50 * 2 ** 62 and got[0] > 2 ** 63
+    assert deopts(la) == before + 1
+    before = deopts(la)
+    assert la.la_overflow(10, 2) == interp(la, "la_overflow")(10, 2) and deopts(la) == before
+
+
+def heap_in_use() -> int:
+    """Bytes the C allocator has handed out right now (macOS: aggregated over all malloc zones)."""
+    import ctypes
+
+    if sys.platform != "darwin":
+        pytest.skip("heap-in-use probe is written for macOS (malloc_zone_statistics) only")
+
+    class Stats(ctypes.Structure):
+        _fields_ = [("blocks_in_use", ctypes.c_uint), ("size_in_use", ctypes.c_size_t),
+                    ("max_size_in_use", ctypes.c_size_t), ("size_allocated", ctypes.c_size_t)]
+
+    libc = ctypes.CDLL(None)
+    stats = Stats()
+    libc.malloc_zone_statistics(None, ctypes.byref(stats))
+    return stats.size_in_use
+
+
+def leaked_bytes(call, rounds=40) -> int:
+    import gc
+
+    call()                                  # warm caches and the allocator
+    gc.collect()
+    before = heap_in_use()
+    for _ in range(rounds):
+        call()
+    gc.collect()
+    return heap_in_use() - before
+
+
+# Each call below allocates two 800 KB arrays (n = 100000); a leak of one array per call is 32 MB
+# over 40 rounds, far above the allocator noise this bound allows. (LeakSanitizer does not exist on
+# macOS, so the leak check is this heap-in-use delta; ASan below checks the memory errors.)
+LEAK_LIMIT = 4 * 1024 * 1024
+
+
+def test_deopt_in_a_pure_function_frees_the_local_arrays(la):
+    before = deopts(la)
+    assert la.la_overflow(100_000, 2 ** 62)[1] == 100_000   # deopted: the sum is a big int
+    assert deopts(la) == before + 1
+    assert leaked_bytes(lambda: la.la_overflow(100_000, 2 ** 62)) < LEAK_LIMIT
+
+
+def test_ok_path_frees_the_local_arrays(la):
+    assert leaked_bytes(lambda: la.la_overflow(100_000, 1)) < LEAK_LIMIT
+    assert deopts(la) >= 0
+
+
+def test_error_path_frees_the_local_arrays(la):
+    def boom():
+        try:
+            la.la_index(100_000, 10 ** 9)
+        except IndexError:
+            pass
+    assert leaked_bytes(boom) < LEAK_LIMIT
+
+
+def test_reassigning_in_a_loop_frees_the_old_arrays(la):
+    assert leaked_bytes(lambda: la.la_reassign(100_000)) < LEAK_LIMIT
+
+
 # --- sanitizers -----------------------------------------------------------------------------------
 
 ASAN_SCRIPT = textwrap.dedent('''\
@@ -1077,7 +1448,9 @@ ASAN_SCRIPT = textwrap.dedent('''\
     ''')
 
 
-def test_build_with_address_and_undefined_sanitizers():
+def asan_run(name: str, functions, script_template: str) -> tuple[str, Path]:
+    """Build `functions` with ASan+UBSan, run `script_template` in a sanitized launcher; return the
+    combined output and the extension path (skips when the platform cannot do it)."""
     from typedpython import cbuild
 
     need_runtime()
@@ -1089,10 +1462,9 @@ def test_build_with_address_and_undefined_sanitizers():
     asan_rt = Path(probe.stdout.strip())
     if probe.returncode != 0 or not asan_rt.is_file():
         pytest.skip(f"host compiler {cc!r} has no ASan runtime ({probe.stdout.strip()!r})")
-    name = "tp_cgen_asan"
     src = source_file(name)
     from typedpython import cgen
-    c_source = cgen.generate(Module(name=name, functions=tuple(f() for f in ALL)), src)
+    c_source = cgen.generate(Module(name=name, functions=tuple(f() for f in functions)), src)
     flags = list(cbuild.DEFAULT_FLAGS) + ["-O1", "-g", "-fno-omit-frame-pointer",
                                           "-fsanitize=address,undefined",
                                           "-fno-sanitize-recover=undefined"]
@@ -1117,15 +1489,66 @@ def test_build_with_address_and_undefined_sanitizers():
                ASAN_OPTIONS="detect_leaks=0:abort_on_error=0:halt_on_error=1",
                UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1")
     env.pop("DYLD_INSERT_LIBRARIES", None)
-    script = ASAN_SCRIPT.format(pkg=str(PACKAGE.parent), name=name, so=str(so))
+    script = script_template.format(pkg=str(PACKAGE.parent), name=name, so=str(so))
     run = subprocess.run([str(launcher), "-c", script], capture_output=True, text=True, env=env)
     out = run.stdout + run.stderr
     if "violates platform policy" in out or "Interceptors are not working" in out:
         pytest.skip(f"ASan runtime could not be loaded: {out[-2000:]}")
     assert run.returncode == 0 and "ASAN-RUN-OK" in run.stdout, out[-6000:]
+    return out, so
+
+
+def assert_instrumented(so: Path, out: str) -> None:
     linked = subprocess.run(["otool", "-L", str(so)], capture_output=True, text=True).stdout
     assert "libclang_rt.asan" in linked, linked          # the extension really is instrumented
     assert "runtime error" not in out and "AddressSanitizer" not in out, out[-6000:]
+
+
+def test_build_with_address_and_undefined_sanitizers():
+    out, so = asan_run("tp_cgen_asan", ALL, ASAN_SCRIPT)
+    assert_instrumented(so, out)
+
+
+ASAN_LA_SCRIPT = textwrap.dedent('''\
+    import sys
+    sys.path.insert(0, {pkg!r})
+    from typedpython import cbuild
+    m = cbuild.load({name!r}, {so!r})
+    I = m.__typedpython_interpreted__
+    for n in (0, 1, 2, 3, 7, 64, -4):
+        assert m.la_build(n) == I["la_build"](n), n
+        assert repr(m.la_f64(n)) == repr(I["la_f64"](n)), n
+    for n in (0, 1, 9):
+        assert m.la_reassign(n) == I["la_reassign"](n), n
+    for args in ((5, 5), (5, -6), (0, 0), (5, 4)):
+        for name in ("la_index",):
+            try:
+                want = I[name](*args)
+            except IndexError as e:
+                want = str(e)
+            try:
+                got = getattr(m, name)(*args)
+            except IndexError as e:
+                got = str(e)
+            assert got == want, (name, args, got, want)
+    try:
+        m.la_store(3, 3, 1)
+    except IndexError:
+        pass
+    assert m.la_unit() == ()
+    xs = [5, 6, 7]
+    assert m.la_copy_param(xs) == (5, 99, 3) and xs == [5, 6, 7]
+    for _ in range(100):
+        assert m.la_overflow(1000, 2 ** 62) == I["la_overflow"](1000, 2 ** 62)
+        assert m.la_overflow(1000, 1) == I["la_overflow"](1000, 1)
+    print("ASAN-RUN-OK", m.__typedpython_deopts__)
+    ''')
+
+
+def test_local_arrays_under_address_and_undefined_sanitizers():
+    need_local_array_runtime()
+    out, so = asan_run("tp_cgen_asan_la", LOCALARR, ASAN_LA_SCRIPT)
+    assert_instrumented(so, out)
 
 
 # --- building against the embedded CPython ------------------------------------------------------

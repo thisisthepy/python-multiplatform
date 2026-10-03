@@ -35,6 +35,22 @@ Ownership rule (ir.py "Safety"), implemented by the `_own_*` emit helpers below 
   The generated code never decrements a reference except through `tp_release` (API.md); the only
   increment is `Py_NewRef` when an OBJ local is read or an OBJ parameter is adopted.
 
+Local arrays (ir.NewArray / CopyArray, `Function` docstring "Local arrays"). A local of an array type
+is a `tp_i64_array` / `tp_f64_array` struct held by value in the impl, zero-initialised at entry
+(`{0}`), with `list == NULL` and `dirty == NULL`. It is owned by the function:
+  1. `Assign(local, NewArray | CopyArray)` builds the new array in a zeroed temporary struct
+     (`tp_*_array_new` / `_iota` / `_copy`), and only when that succeeded frees the old array
+     (`tp_*_array_free`) and moves the temporary into the slot — so a failed allocation leaves the
+     old binding intact, as `a = [0] * n` does, and `a = a[:]` copies before it frees;
+  2. every exit of the impl — return, error, deopt — frees every local array and every array
+     temporary in the same exit block that releases the OBJ locals (a deopt of a pure function
+     frees them before the wrapper redoes the call interpreted);
+  3. local arrays never go through `tp_*_array_enter/exit` (there is no list to write back to) and
+     a store into one sets no dirty bit.
+`Index` / `StoreIndex` / `Len` use the same slot helper and `proven` handling as array params.
+`Tuple` evaluates each element into an owned temporary, builds the tuple with `tp_tuple` (which
+steals nothing), then releases the temporaries.
+
 Generated arithmetic is in separate C statements and the file sets `#pragma STDC FP_CONTRACT OFF`
 (cbuild also passes -ffp-contract=off): a fused multiply-add would round differently from CPython.
 """
@@ -52,6 +68,7 @@ class CGenError(Exception):
 
 _CT = {Type.I64: "int64_t", Type.F64: "double", Type.BOOL: "int", Type.OBJ: "PyObject *"}
 _ARRAY_CT = {Type.F64_ARRAY: "tp_f64_array", Type.I64_ARRAY: "tp_i64_array"}
+_CT_ARRAY_REV = {"tp_f64_array": Type.F64_ARRAY, "tp_i64_array": Type.I64_ARRAY}
 _ARRAY_ELEM = {Type.F64_ARRAY: Type.F64, Type.I64_ARRAY: Type.I64}
 _ARRAY_PFX = {Type.F64_ARRAY: "tp_f64_array", Type.I64_ARRAY: "tp_i64_array"}
 _UNBOX = {Type.I64: "tp_unbox_i64", Type.F64: "tp_unbox_f64", Type.BOOL: "tp_unbox_bool"}
@@ -163,11 +180,13 @@ def _walk_stmts(body):
 
 
 def _sub_exprs(e: ir.Expr):
-    for name in ("left", "right", "operand", "index", "obj", "callee"):
+    for name in ("left", "right", "operand", "index", "obj", "callee", "length", "fill"):
         v = getattr(e, name, None)
         if isinstance(v, ir.Expr):
             yield v
     for v in getattr(e, "args", ()) or ():
+        yield v
+    for v in getattr(e, "elements", ()) or ():
         yield v
 
 
@@ -312,7 +331,9 @@ def _check_function(f: ir.Function, functions: dict[str, ir.Function]) -> None:
         raise CGenError(f"{f.name}: may_deopt is False but a node can deopt "
                         f"({type(deopting[0]).__name__})")
     effects = [e for e in _all_exprs(f) if _is_effect(e)]
-    stores = [s for s in _walk_stmts(f.body) if isinstance(s, ir.StoreIndex)]
+    # a store into a local array is not an effect (ir.py "Local arrays"); into a parameter it is
+    stores = [s for s in _walk_stmts(f.body)
+              if isinstance(s, ir.StoreIndex) and f.locals.get(s.array) not in ir.ARRAYS]
     if f.pure and (effects or stores):
         what = type(effects[0]).__name__ if effects else "StoreIndex"
         raise CGenError(f"{f.name}: marked pure but contains an effect ({what})")
@@ -415,6 +436,7 @@ class _FnGen:
         self.depth = 1
         self.temps: list[tuple[str, str]] = []      # (C type, name)
         self.arrays = {p.name: p for p in f.params if isinstance(p, ir.ArrayParam)}
+        self.local_arrays: dict[str, Type] = {}       # name -> F64_ARRAY / I64_ARRAY
         self.types: dict[str, Type] = {}
         for p in f.params:
             if not isinstance(p, ir.ArrayParam):
@@ -424,6 +446,11 @@ class _FnGen:
         for name, t in f.locals.items():
             if name in self.arrays or (name in self.types and self.types[name] is not t):
                 raise CGenError(f"{f.name}: local {name} conflicts with a parameter")
+            if t in ir.ARRAYS:
+                if name in self.types:
+                    raise CGenError(f"{f.name}: local array {name} conflicts with a parameter")
+                self.local_arrays[name] = t
+                continue
             if t not in _CT:
                 raise CGenError(f"{f.name}: local {name} has type {t}")
             self.types[name] = t
@@ -484,7 +511,12 @@ class _FnGen:
     def _own_release_all(self) -> list[str]:
         objs = [_ident("l", n) for n, t in self.types.items() if t is Type.OBJ]
         objs += [n for ct, n in self.temps if ct == "PyObject *"]
-        return [f"    tp_release(&{n});" for n in objs]
+        out = [f"    tp_release(&{n});" for n in objs]
+        # local arrays and array temporaries: freed on every exit (ok, error, deopt); idempotent
+        arrs = [(_ident("l", n), t) for n, t in self.local_arrays.items()]
+        arrs += [(n, _CT_ARRAY_REV[ct]) for ct, n in self.temps if ct in _CT_ARRAY_REV]
+        out += [f"    {_ARRAY_PFX[t]}_free(&{n});" for n, t in arrs]
+        return out
 
     # expressions: return a C expression naming the value (a literal, a scalar local, or a temp);
     # OBJ results are always owned temporaries.
@@ -801,36 +833,98 @@ class _FnGen:
         self.emit(f"if ({t} == NULL) {{ tp_rc = -1; goto tp_exit; }}")
         return t
 
-    def _array(self, name: str) -> ir.ArrayParam:
+    def _array(self, name: str) -> tuple[Type, str]:
+        """(array type, C pointer expression) of an array parameter (already a pointer) or a local
+        array (a struct held by value, so its address)."""
         a = self.arrays.get(name)
-        if a is None:
-            raise CGenError(f"{self.f.name}: {name} is not an array parameter")
-        return a
+        if a is not None:
+            return a.type, _ident("l", name)
+        t = self.local_arrays.get(name)
+        if t is None:
+            raise CGenError(f"{self.f.name}: {name} is not an array parameter or local array")
+        return t, f"(&{_ident('l', name)})"
 
     def ev_Len(self, e: ir.Len) -> str:
-        self._array(e.array)
+        _, ptr = self._array(e.array)
         t = self.tmp("int64_t")
-        self.emit(f"{t} = (int64_t){_ident('l', e.array)}->len;")
+        self.emit(f"{t} = (int64_t){ptr}->len;")
         return t
 
-    def _slot(self, a: ir.ArrayParam, index: ir.Expr, proven: bool, store: int) -> str:
+    def _slot(self, at: Type, ptr: str, index: ir.Expr, proven: bool, store: int) -> str:
         if index.type is not Type.I64:
             raise CGenError(f"{self.f.name}: index of type {index.type}")
         i = self.ev(index)
         if proven:
             return f"(Py_ssize_t)({i})"
         slot = self.tmp("Py_ssize_t")
-        self.check(f"{_ARRAY_PFX[a.type]}_slot({_ident('l', a.name)}, {i}, {store}, &{slot})")
+        self.check(f"{_ARRAY_PFX[at]}_slot({ptr}, {i}, {store}, &{slot})")
         return slot
 
     def ev_Index(self, e: ir.Index) -> str:
-        a = self._array(e.array)
-        if e.type is not _ARRAY_ELEM[a.type]:
-            raise CGenError(f"{self.f.name}: Index of {a.type} typed {e.type}")
-        slot = self._slot(a, e.index, e.proven, 0)
+        at, ptr = self._array(e.array)
+        if e.type is not _ARRAY_ELEM[at]:
+            raise CGenError(f"{self.f.name}: Index of {at} typed {e.type}")
+        slot = self._slot(at, ptr, e.index, e.proven, 0)
         t = self.tmp(_CT[e.type])
-        self.emit(f"{t} = {_ident('l', a.name)}->data[{slot}];")
+        self.emit(f"{t} = {ptr}->data[{slot}];")
         return t
+
+    def ev_NewArray(self, e: ir.NewArray) -> str:
+        raise CGenError(f"{self.f.name}: NewArray is legal only as the value of an Assign to a "
+                        "local array (ir.py)")
+
+    def ev_CopyArray(self, e: ir.CopyArray) -> str:
+        raise CGenError(f"{self.f.name}: CopyArray is legal only as the value of an Assign to a "
+                        "local array (ir.py)")
+
+    def ev_Tuple(self, e: ir.Tuple) -> str:
+        if e.type is not Type.OBJ or any(x.type is not Type.OBJ for x in e.elements):
+            raise CGenError(f"{self.f.name}: Tuple elements must be OBJ (Box scalars)")
+        items = [self.ev(x) for x in e.elements]            # owned temporaries, evaluated in order
+        t = self.tmp("PyObject *")
+        if items:
+            self.emit(f"{{ PyObject *tp_av[{len(items)}] = {{{', '.join(items)}}};")
+            self.emit(f"  {t} = tp_tuple(tp_av, {len(items)}); }}")
+        else:
+            self.emit(f"{t} = tp_tuple(NULL, 0);")
+        self._own_release(*items)                           # tp_tuple stole nothing
+        self.emit(f"if ({t} == NULL) {{ tp_rc = -1; goto tp_exit; }}")
+        return t
+
+    def _assign_array(self, s: ir.Assign, at: Type) -> None:
+        """`local = NewArray | CopyArray`: build into a zeroed temporary, then (only on success)
+        free the old array and move the temporary in."""
+        v = s.value
+        pfx = _ARRAY_PFX[at]
+        if v.type is not at:
+            raise CGenError(f"{self.f.name}: {s.target} is {at}, assigned {v.type}")
+        dst = _ident("l", s.target)
+        new = self.tmp(_ARRAY_CT[at])
+        if isinstance(v, ir.NewArray):
+            if v.length.type is not Type.I64:
+                raise CGenError(f"{self.f.name}: NewArray length of type {v.length.type}")
+            if v.iota:
+                if at is not Type.I64_ARRAY or v.fill is not None:
+                    raise CGenError(f"{self.f.name}: iota NewArray must be I64_ARRAY with no fill")
+                n = self.ev(v.length)
+                self.check(f"{pfx}_iota(&{new}, {n})")
+            else:
+                if v.fill is None or v.fill.type is not _ARRAY_ELEM[at]:
+                    raise CGenError(f"{self.f.name}: NewArray fill must be a "
+                                    f"{_ARRAY_ELEM[at]} (got {None if v.fill is None else v.fill.type})")
+                fill = self.ev(v.fill)                      # `[fill] * n`: fill first, then n
+                n = self.ev(v.length)
+                self.check(f"{pfx}_new(&{new}, {n}, {fill})")
+        elif isinstance(v, ir.CopyArray):
+            st, sptr = self._array(v.src)
+            if st is not at:
+                raise CGenError(f"{self.f.name}: CopyArray of {st} into {at}")
+            self.check(f"{pfx}_copy(&{new}, {sptr})")
+        else:
+            raise CGenError(f"{self.f.name}: local array {s.target} may only be assigned a "
+                            f"NewArray or CopyArray, not {type(v).__name__}")
+        self.emit(f"{pfx}_free(&{dst});")
+        self.emit(f"{dst} = {new}; {new} = ({_ARRAY_CT[at]}){{0}};")
 
     # statements
 
@@ -842,6 +936,9 @@ class _FnGen:
             m(s)
 
     def st_Assign(self, s: ir.Assign) -> None:
+        if s.target in self.local_arrays:
+            self._assign_array(s, self.local_arrays[s.target])
+            return
         t = self.types.get(s.target)
         if t is None:
             raise CGenError(f"{self.f.name}: assignment to unknown local {s.target}")
@@ -854,16 +951,17 @@ class _FnGen:
             self.emit(f"{_ident('l', s.target)} = {v};")
 
     def st_StoreIndex(self, s: ir.StoreIndex) -> None:
-        a = self._array(s.array)
-        if not a.stored:
-            raise CGenError(f"{self.f.name}: store into {a.name}, declared stored=False")
-        if s.value.type is not _ARRAY_ELEM[a.type]:
-            raise CGenError(f"{self.f.name}: store of {s.value.type} into {a.type}")
+        at, ptr = self._array(s.array)
+        local = s.array in self.local_arrays
+        if not local and not self.arrays[s.array].stored:
+            raise CGenError(f"{self.f.name}: store into {s.array}, declared stored=False")
+        if s.value.type is not _ARRAY_ELEM[at]:
+            raise CGenError(f"{self.f.name}: store of {s.value.type} into {at}")
         v = self.ev(s.value)                    # CPython: value, then container, then index
-        slot = self._slot(a, s.index, s.proven, 1)
-        arr = _ident("l", a.name)
-        self.emit(f"{arr}->data[{slot}] = {v};")
-        self.emit(f"{arr}->dirty[{slot}] = 1;")
+        slot = self._slot(at, ptr, s.index, s.proven, 1)
+        self.emit(f"{ptr}->data[{slot}] = {v};")
+        if not local:                           # a local array has no list to write back to
+            self.emit(f"{ptr}->dirty[{slot}] = 1;")
 
     def st_ExprStmt(self, s: ir.ExprStmt) -> None:
         v = self.ev(s.value)
@@ -983,6 +1081,8 @@ class _FnGen:
                "    tp_state *tp_st = (tp_state *)PyModule_GetState(tp_module);",
                "    PyObject *tp_dict = PyModule_GetDict(tp_module); /* borrowed: owned by the module */"]
         params = {p.name for p in f.params} | {g.name for g in f.entry_globals}
+        for name, t in self.local_arrays.items():
+            out.append(f"    {_ARRAY_CT[t]} {_ident('l', name)} = {{0}};")
         for name, t in self.types.items():
             if name in params and t is not Type.OBJ:
                 continue
@@ -990,11 +1090,12 @@ class _FnGen:
             ct = _CT[t]
             out.append(f"    {ct}{'' if ct.endswith('*') else ' '}{_ident('l', name)} = {init};")
         for ct, n in self.temps:
-            init = "NULL" if ct == "PyObject *" else "0"
+            init = "NULL" if ct == "PyObject *" else "{0}" if ct in _CT_ARRAY_REV else "0"
             sep = "" if ct.endswith("*") else " "
             out.append(f"    {ct}{sep}{n} = {init};")
         out.append("    (void)tp_st; (void)tp_dict; (void)tp_s;"
-                   + "".join(f" (void){_ident('l', n)};" for n in self.types if n not in params))
+                   + "".join(f" (void){_ident('l', n)};" for n in self.types if n not in params)
+                   + "".join(f" (void){_ident('l', n)};" for n in self.local_arrays))
         out += prologue
         out += self.lines
         out.append("tp_exit:")
