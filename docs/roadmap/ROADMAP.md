@@ -99,20 +99,20 @@ String-carrying operations: **closed**, interning beats composing on every API l
 
 Closed in its core: build-time table, KSP generator, one entry point per platform, generated proxies,
 `tp_traverse` handle slot on all five targets, GraalVM native image (SPEC U-1…U-6, M-3, M-4;
-`ksp-fixtures/app/src/desktopTest/`, `PM/commonTest/.../reflection/UpcallTableTest.kt`,
+`python-multiplatform-ksp/fixtures/app/src/desktopTest/`, `PM/commonTest/.../reflection/UpcallTableTest.kt`,
 `PM/*Test/.../ref/CycleCollectionTest.kt`). Upcall cost is measured
 (`PM/commonTest/.../reflection/UpcallOverheadTest.kt`, `PM/commonTest/.../ffi/upcall/GeneratedProxyCostTest.kt`).
 
 - **7.1 Generated proxies exercised outside desktop, partial.** SPEC U-3: the full proxy behaviour
   (construct, methods, properties, companions) is asserted on desktop only; outside it there are
-  `ksp-fixtures/app/src/androidNativeArm64Test/.../NativeSmokeTest.kt` and
-  `ksp-fixtures/android/.../GeneratedAndroidTableTest.kt`. The KSP-generated-proxy cycle proof
-  (`ksp-fixtures/app/src/desktopTest/.../RefHolderCycleCollectionTest.kt`) likewise exists on desktop
-  only, because `ksp-fixtures/app` has no iOS or device leaf; other targets prove the slot with a
+  `python-multiplatform-ksp/fixtures/app/src/androidNativeArm64Test/.../NativeSmokeTest.kt` and
+  `python-multiplatform-ksp/fixtures/android/.../GeneratedAndroidTableTest.kt`. The KSP-generated-proxy cycle proof
+  (`python-multiplatform-ksp/fixtures/app/src/desktopTest/.../RefHolderCycleCollectionTest.kt`) likewise exists on desktop
+  only, because `python-multiplatform-ksp/fixtures/app` has no iOS or device leaf; other targets prove the slot with a
   hand-built subclass (`PM/nativeTest/.../CycleCollectionTest.kt`).
 - **7.2 Extension functions as methods on KSP-generated proxies, partial.** SPEC U-7: asserted for a
   hand-written table (`PM/commonTest/.../pythonx/PythonxAdapterTest.kt`) and for walked jars
-  (`ksp-fixtures/artifact/.../WalkedArtifactComposeModifierTest.kt`); not for a table KSP generated.
+  (`python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactComposeModifierTest.kt`); not for a table KSP generated.
 - **7.3 Incremental KSP, open (deferred design change).** A one-file change regenerates the
   module's whole `Fragment_<module>` (100 % dirty, measured with `ksp.incremental.log`). The only
   route is per-file fragments, which changes fragment naming and `UpcallTable`'s duplicate detection;
@@ -257,7 +257,7 @@ pre-release URL, `PyList.subList` (a live `PySubList`), the `TODO` triage, `runM
 ## 13. The sample, and the AGP version that shapes it
 
 The sample runs on desktop, Android (both emulators), the iOS simulator and in a browser; the bindings
-plugin applies to Android modules (AGP 8.10.1); `ksp-fixtures/android` exists; the generated
+plugin applies to Android modules (AGP 8.10.1); `python-multiplatform-ksp/fixtures/android` exists; the generated
 `installGeneratedUpcallTable` `actual` reaches intermediate source sets; the per-platform upcall
 trampolines exist. GraalVM native image upcalls are verified by hand
 (`docs/platforms/graal-native-image-verification.md`, `PM/desktopTest/.../ReachabilityMetadataTest.kt`).
@@ -334,7 +334,7 @@ Old §15a, §15b, §15d, §15f, §15g, §15h are closed; §15e item 4 is closed 
 
 The walker binds jar declarations, statics, top-level functions, extensions, constructors, value
 classes, defaults, callbacks, `@Composable`s, by generating Kotlin source (SPEC B-1, B-3, B-4, B-6;
-`GP/test/.../artifact/ArtifactScannerTest.kt`, `ksp-fixtures/artifact/`, `ksp-fixtures/compose/`),
+`GP/test/.../artifact/ArtifactScannerTest.kt`, `python-multiplatform-gradle-plugin/fixtures/artifact/`, `python-multiplatform-compose/fixtures/compose/`),
 reads Kotlin metadata (`GP/main/.../artifact/KotlinMetadata.kt`), walks klibs through an isolated
 worker (`KlibScanner.kt`, `KlibScanWorkAction.kt`), and takes several targets (`artifactTargets`,
 `GP/test/.../ArtifactTargetsWiringTest.kt`). Consumers bootstrap `_pm_resolve`/`_pm_invoke` through
@@ -342,11 +342,11 @@ worker (`KlibScanner.kt`, `KlibScanWorkAction.kt`), and takes several targets (`
 description, §16e/§16f's open remainder is below.
 
 - **16.1 klib declarations bound at run time, partial.** SPEC B-2/N-3. `KlibScannerTest` reads real
-  klibs and declines with reasons; `ksp-fixtures/klib-artifact` walks
+  klibs and declines with reasons; `python-multiplatform-gradle-plugin/fixtures/klib-artifact` walks
   `androidNativeArm64CompileKlibraries` through the plugin, but the namespace it walks
   (`kotlinx.coroutines`) yields **zero** bindings by design, so a successful read and a silently
   failed one still produce the same empty `ArtifactTable`
-  (`ksp-fixtures/klib-artifact/src/androidNativeArm64Test/.../WalkedKlibArtifactTableTest.kt`). And no
+  (`python-multiplatform-gradle-plugin/fixtures/klib-artifact/src/androidNativeArm64Test/.../WalkedKlibArtifactTableTest.kt`). And no
   Gradle task runs that fixture's tests, they are compiled and linked, and run only by pushing
   `test.kexe` by hand. Next: a namespace that yields at least one binding, and a run task.
 - **16.2 The product klib path under a Kotlin version skew, open.** `KlibScannerTest` reads klibs
@@ -361,7 +361,7 @@ description, §16e/§16f's open remainder is below.
   SPEC B-5; pinned red-by-design by `M3ProofRenderTest.aValueReturningFunctionSlotDoesNotYetAcceptAPythonCallable`.
 - **16.6 `.pyi` stubs for handle-returning functions are not wrapped, open.** SPEC B-7.
 - **16.7 Compose through Python on Android, iOS and wasm, open.** SPEC B-6/N-2: the render proofs
-  (`ksp-fixtures/compose/src/desktopTest/`) are desktop only.
+  (`python-multiplatform-compose/fixtures/compose/src/desktopTest/`) are desktop only.
 - **16.8 Two material3 components not reachable from Python, open.** The dynamic `ColorScheme`
   factory is Android-only. Since #73 the class name resolves to `ColorScheme`'s own constructor (its
   `Color` parameters no longer hide it), which needs every colour written out; nothing renders with one
@@ -375,7 +375,7 @@ From `docs/design/ecosystem.md` §5, "What each repository owes, PythonMultiplat
 the `@Composable` callable shape, the `sys.meta_path` finder (`_Finder` in
 `PM/commonMain/kotlin/python/multiplatform/ffi/pythonx/PythonxAdapter.kt`, tested in
 `PythonxAdapterTest.kt`), the `Composer` hand-off and Python-callable lifetime across recompositions
-(`ksp-fixtures/compose/src/desktopTest/.../ComposableRenderTest.kt`, `RecompositionAccumulationTest.kt`)
+(`python-multiplatform-compose/fixtures/compose/src/desktopTest/.../ComposableRenderTest.kt`, `RecompositionAccumulationTest.kt`)
 are done on desktop; the other platforms are 16.7. The production-bundler question is 10.4.
 
 - **17.1 Retire `stagePythonHome` in favour of pypackpack's Python distribution, open (cross-repo).**

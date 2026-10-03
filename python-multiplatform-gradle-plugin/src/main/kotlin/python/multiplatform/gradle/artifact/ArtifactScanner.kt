@@ -1642,7 +1642,7 @@ internal object ArtifactScanner {
      *   *different* limit from the one this method opens, which is why it is named rather than left
      *   to fail as a compile error in somebody's generated fragment.
      * - **`@Composable`, inside a declaration that is not.** `Modifier.composed(factory:)` is the
-     *   case. The fragment is compiled without the Compose plugin (`:ksp-fixtures:artifact`'s
+     *   case. The fragment is compiled without the Compose plugin (`:python-multiplatform-gradle-plugin-fixtures:artifact`'s
      *   `build.gradle.kts` says so, and it is the whole shape of that fixture's claim), so
      *   `@Composable Modifier.() -> Modifier` written there is an ordinary `Function1` while the slot
      *   is a lowered `Function3`. **This one does not fail as a compile error**, which is why it is

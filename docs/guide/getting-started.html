@@ -72,9 +72,9 @@ fun main() {
   <h2><span class="num">04</span><span data-lang="en">Verify a change</span><span data-lang="ko">변경 검증하기</span></h2>
   <pre translate="no"><code class="language-bash">./gradlew :python-multiplatform:compileKotlinAndroidNativeArm64 --console=plain &gt; .tmp/build.log 2&gt;&amp;1; echo &quot;EXIT=$?&quot;
 ./gradlew :python-multiplatform:desktopTest --rerun --console=plain &gt; .tmp/test.log 2&gt;&amp;1; echo &quot;EXIT=$?&quot;
-./gradlew :ksp-fixtures:app:desktopTest --rerun
-./gradlew :ksp-fixtures:compose:desktopTest --rerun
-./gradlew :ksp-fixtures:artifact:desktopTest --rerun</code></pre>
+./gradlew :python-multiplatform-ksp:fixtures:app:desktopTest --rerun
+./gradlew :python-multiplatform-compose:fixtures:compose:desktopTest --rerun
+./gradlew :python-multiplatform-gradle-plugin-fixtures:artifact:desktopTest --rerun</code></pre>
   <p><span data-lang="en">Run the fixture modules one by one: a single invocation has hidden an ordering dependency before. Read exit codes from a file, never through a pipe.</span><span data-lang="ko">픽스처 모듈은 하나씩 따로 돌린다. 한 번에 돌리면 순서 의존성이 가려진 적이 있다. 종료 코드는 파이프가 아니라 파일에서 읽는다.</span></p>
   <div class="pager"><a href="index.html">← <span data-lang="en">Home</span><span data-lang="ko">홈</span></a><a href="concepts.html"><span data-lang="en">Concepts</span><span data-lang="ko">개념</span> →</a></div>
 </div></div></main>

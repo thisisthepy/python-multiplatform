@@ -64,7 +64,7 @@ import python.multiplatform.reflection.TypeTag
  *
  * So this file owns the first three quarters of that -- creating, holding and releasing -- and the
  * one Compose type involved, `RememberObserver`, stays in the module that has Compose
- * (`:ksp-fixtures:compose`'s `PythonComposition`). `docs/archive/pythonx-adapter-design.md` §6 item 1 names
+ * (`:python-multiplatform-compose:fixtures:compose`'s `PythonComposition`). `docs/archive/pythonx-adapter-design.md` §6 item 1 names
  * `onForgotten` as "the one that fails silently and should be tested first"; the seam is here and the
  * test is there.
  *
@@ -106,7 +106,7 @@ import python.multiplatform.reflection.TypeTag
  * else. Interning bounds the case that actually recurs; the sweep needed that measurement first.
  *
  * **That measurement now exists, and the verdict is that a same-pass sweep is unsafe.**
- * `:ksp-fixtures:compose`'s `RetainedSlotSweepPreconditionTest
+ * `:python-multiplatform-compose:fixtures:compose`'s `RetainedSlotSweepPreconditionTest
  * .aRetainingSlotKeepsPassZerosWrapperWhileLaterPassesCrossAndGoUntouched` drives a real
  * `remember(key)` (the mechanism `LaunchedEffect(key)` is built on) with a constant key across six
  * recompositions of one composition, each supplying a callable with a distinct capture -- so each

@@ -4,7 +4,7 @@
 #   .github/scripts/stubs/check-stubs.sh <stub-dir> [venv-dir]
 #
 # <stub-dir> is what `generatePythonStubs` wrote, e.g.
-#   ksp-fixtures/compose/build/generated/pythonStubs/desktopMain
+#   python-multiplatform-compose/fixtures/compose/build/generated/pythonStubs/desktopMain
 # The venv defaults to <repo>/.tmp/stubs-venv (git-ignored) and is created on first use.
 set -euo pipefail
 
