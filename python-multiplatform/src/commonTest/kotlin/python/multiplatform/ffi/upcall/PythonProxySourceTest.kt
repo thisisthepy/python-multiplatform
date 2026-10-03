@@ -380,9 +380,25 @@ class PythonProxySourceTest {
         // 551-587 ns per read on desktop against 6-14 ns for the descriptor that replaced it. A
         // hook reintroduced here would be a fifty-fold regression on every top-level `val` read,
         // and it would be invisible -- both shapes are correct.
+        //
+        // Issue #131 adds one hook, and it is the exception that keeps the rule: the PEP 562
+        // `__getattr__` of `KotlinSurface.module_alias_getattr` runs only for a name the module does
+        // NOT have (a Pythonic alias), so a real Kotlin name is still found by the descriptor first
+        // and never reaches it. It lives in the delivered `KotlinSurface` half; the proxy half, which
+        // renders every real attribute, must define no hook of its own.
+        val proxyHalf = PythonProxySource.support.removePrefix(python.multiplatform.ffi.upcall.KotlinSurface.DELIVERY)
         assertFalse(
-            PythonProxySource.support.contains("def __getattr__("),
+            proxyHalf.contains("def __getattr__("),
             "a module attribute must be answered by a data descriptor, not by the fallback hook",
+        )
+        assertEquals(
+            1,
+            Regex("def __getattr__\\(").findAll(python.multiplatform.ffi.upcall.KotlinSurface.DELIVERY).count(),
+            "the only fallback hook is the alias one in module_alias_getattr",
+        )
+        assertTrue(
+            python.multiplatform.ffi.upcall.KotlinSurface.DELIVERY.contains("def module_alias_getattr(module):"),
+            "the single hook must be the alias hook",
         )
         assertFalse(
             PythonProxySource.support.contains("def __setattr__("),

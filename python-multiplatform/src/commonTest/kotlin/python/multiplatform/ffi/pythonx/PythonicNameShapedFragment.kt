@@ -86,7 +86,11 @@ object PythonicNameShapedFragment : FunctionTableFragment {
             name = "$BOX.selectedIndex", arity = 0, paramTypes = emptyList(), returnType = TypeTag.INT,
             kind = CallableKind.GETTER, paramNames = emptyList(), paramTypeNames = emptyList(),
             returnTypeName = INT, receiverTypeName = BOX,
-        ) { args -> (args[0] as PythonicBox).selectedIndex },
+        ) { args ->
+            // TypeTag.INT crosses as a Long (the boundary casts the result to it); a Kotlin Int result
+            // is the fixture's mistake, not the alias path's.
+            (args[0] as PythonicBox).selectedIndex.toLong()
+        },
         ExposedCallable(
             name = "$BOX.selectedIndex=", arity = 1, paramTypes = listOf(TypeTag.INT), returnType = TypeTag.UNIT,
             kind = CallableKind.SETTER, paramNames = listOf("value"), paramTypeNames = listOf(INT),
