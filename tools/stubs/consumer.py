@@ -7,7 +7,7 @@ the class and continued from an instance, `Checkbox`, `Text`, and a container wi
 and mypy runs with `warn_unused_ignores`, so a stub that stopped rejecting one fails the check too.
 """
 
-from androidx.compose.foundation.layout import Column, Row, fillMaxWidth, padding__Dp
+from androidx.compose.foundation.layout import Arrangement, Column, Row, fillMaxWidth, padding__Dp
 from androidx.compose.material3 import Checkbox, Text
 from androidx.compose.ui import Modifier
 
@@ -39,6 +39,9 @@ def content() -> None:
 
 Column(modifier=chain, content=lambda scope: None)
 Row(content=lambda scope: None)
+# `SpaceBetween` is a `HorizontalOrVertical`: a `Vertical` slot and a `Horizontal` slot both take it (#71).
+Column(verticalArrangement=Arrangement.SpaceBetween, content=lambda scope: None)
+Row(horizontalArrangement=Arrangement.SpaceBetween, content=lambda scope: None)
 
 # Rejected on purpose. (`padding("sixteen")` is not among them: one `padding` overload takes a
 # `PaddingValues`, a type the stubs cannot name -- `PaddingValues(...)` the factory owns the name -- so
