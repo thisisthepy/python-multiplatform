@@ -149,7 +149,8 @@ def cmd_selfcheck() -> int:
     failures = []
     cases = [
         ("clean call is silent", "m.oob_read(0); m.overflow(0)", None, 0),
-        ("ASan reports heap overflow", "m.oob_read(64)", "AddressSanitizer: heap-buffer-overflow", None),
+        ("ASan reports heap overflow", "m.oob_read(8)",   # first byte past the end: always in the redzone
+         "AddressSanitizer: heap-buffer-overflow", None),
         ("UBSan reports signed overflow", "m.overflow(1)", "runtime error: signed integer overflow", None),
     ]
     for name, call, needle, want_rc in cases:
@@ -166,7 +167,7 @@ def cmd_selfcheck() -> int:
             ok = needle in out and run.returncode != 0 and "RETURNED-WITHOUT-REPORT" not in out
         print(f"{'ok  ' if ok else 'FAIL'} {name} (rc={run.returncode})")
         if not ok:
-            failures.append(f"{name}:\n{out[-1500:]}")
+            failures.append(f"{name}:\n--- head ---\n{out[:2500]}\n--- tail ---\n{out[-800:]}")
     if failures:
         print("\n".join(failures), file=sys.stderr)
         print("SELF-CHECK FAILED: the sanitizer setup does not detect a known fault", file=sys.stderr)
