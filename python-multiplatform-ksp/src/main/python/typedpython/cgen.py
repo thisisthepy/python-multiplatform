@@ -55,6 +55,23 @@ is a `tp_i64_array` / `tp_f64_array` struct held by value in the impl, zero-init
 `Tuple` evaluates each element into an owned temporary, builds the tuple with `tp_tuple` (which
 steals nothing), then releases the temporaries.
 
+Fixed-layout classes (SPEC N-11, ir.ClassDecl). The module state holds, per ClassDecl, a strong
+reference to the class object, a `cls_ok` flag and one captured `PyMemberDef *` per field. The exec
+slot fills them AFTER the original source ran (`tp_class_capture`: a heap type made by `type`, base
+object, no __dict__, every field a writable object slot made for that very class); a class that fails
+any check is "not compiled" (`cls_ok = 0`) and is never touched through memory:
+  1. every wrapper first tests `cls_ok` of every class its function uses *or reaches through C to C
+     Calls* (`_ModGen.uses`), else it takes the interpreted path (a static property of the module, so
+     callees need no check of their own);
+  2. a `Param.cls` guard (`type(x) is C`, or `x is None` when optional) runs in the wrapper AND at the
+     top of the impl, before tp_enter_call and before anything is owned: the wrapper's copy serves
+     impure functions (whose impl may never return 1), the impl's copy serves C to C Calls, where a
+     failure is a deopt — so a Call of a function with a `Param.cls` parameter counts as a node that
+     can deopt (`_can_deopt`), exactly like a callee with entry_globals;
+  3. FieldGet / FieldSet / New go through `tp_field_get` / `tp_field_set` / `tp_new_fixed` with the
+     captured descriptors; CheckExact deopts (return 1) on mismatch and is legal only in a pure
+     function; IsExact and Is are plain BOOLs.
+
 Generated arithmetic is in separate C statements and the file sets `#pragma STDC FP_CONTRACT OFF`
 (cbuild also passes -ffp-contract=off): a fused multiply-add would round differently from CPython.
 """
@@ -156,6 +173,9 @@ def _exprs_of_stmt(s: ir.Stmt):
     elif isinstance(s, ir.StoreIndex):
         yield s.value
         yield s.index
+    elif isinstance(s, ir.FieldSet):
+        yield s.value
+        yield s.obj
     elif isinstance(s, ir.ExprStmt):
         yield s.value
     elif isinstance(s, ir.If):
@@ -211,15 +231,40 @@ def _can_deopt(e: ir.Expr, functions: dict[str, ir.Function]) -> bool:
         return not e.proven              # a proven op cannot deopt (overflow = SystemError)
     if isinstance(e, ir.UnaryOp) and e.op is ir.UnaryOpKind.NEG and e.operand.type is Type.I64:
         return not e.proven
-    if isinstance(e, ir.Unbox):
+    if isinstance(e, (ir.Unbox, ir.CheckExact)):
         return True
     if isinstance(e, ir.Call):
         if e.redo:
             return False                 # the callee's deopt is absorbed by its interpreted redo
         callee = functions.get(e.function)
         # a callee's entry-global guard runs at the call (`_FnGen.ev_Call`) and can fail there
-        return callee is not None and (callee.may_deopt or bool(callee.entry_globals))
+        return callee is not None and (callee.may_deopt or bool(callee.entry_globals)
+                                       or _has_cls_param(callee))
     return False
+
+
+def _has_cls_param(f: ir.Function) -> bool:
+    """A Param.cls guard runs at every call of `f`, C to C included, and a failure is a deopt."""
+    return any(isinstance(p, ir.Param) and p.cls is not None for p in f.params)
+
+
+def _direct_classes(f: ir.Function) -> set[str]:
+    out = {p.cls for p in f.params if isinstance(p, ir.Param) and p.cls is not None}
+    for e in _all_exprs(f):
+        if isinstance(e, (ir.IsExact, ir.CheckExact, ir.FieldGet, ir.New)):
+            out.add(e.cls)
+    for s in _walk_stmts(f.body):
+        if isinstance(s, ir.FieldSet):
+            out.add(s.cls)
+    return out
+
+
+def _param_cls_fail(obj_c: str, k: int, optional: bool) -> str:
+    """The C condition under which a `Param.cls` guard FAILS for the borrowed argument `obj_c`
+    (class slot `k` of the module state): not exactly the class, and not None when optional.
+    Emitted both in the wrapper and at the top of the impl (module docstring)."""
+    exact = f"tp_is_exact({obj_c}, (PyTypeObject *)tp_st->classes[{k}])"
+    return f"!({exact} || {obj_c} == Py_None)" if optional else f"!{exact}"
 
 
 def _is_effect(e: ir.Expr) -> bool:
@@ -238,6 +283,48 @@ class _ModGen:
             raise CGenError("duplicate compiled function names")
         self.names: list[str] = []
         self.kwtuples: list[tuple[str, ...]] = []
+        self.classes = {cd.name: cd for cd in module.classes}
+        if len(self.classes) != len(module.classes):
+            raise CGenError("duplicate ClassDecl names")
+        self.class_index = {cd.name: i for i, cd in enumerate(module.classes)}
+        self.slot_base: dict[str, int] = {}
+        total = 0
+        for cd in module.classes:
+            if len(set(cd.fields)) != len(cd.fields):
+                raise CGenError(f"class {cd.name}: duplicate field names")
+            self.slot_base[cd.name] = total
+            total += len(cd.fields)
+        self.n_slots = total
+        self._uses: dict[str, set[str]] = {}
+
+    def cls(self, fname: str, name: str) -> ir.ClassDecl:
+        cd = self.classes.get(name)
+        if cd is None:
+            raise CGenError(f"{fname}: class {name!r} has no ClassDecl in the module")
+        return cd
+
+    def slot(self, fname: str, cls: str, field: str) -> str:
+        cd = self.cls(fname, cls)
+        if field not in cd.fields:
+            raise CGenError(f"{fname}: class {cls} has no field {field!r}")
+        return f"tp_st->slots[{self.slot_base[cls] + cd.fields.index(field)}]"
+
+    def uses(self, f: ir.Function) -> list[str]:
+        """Every class `f` uses or reaches through C to C Calls (module docstring, rule 1)."""
+        if not self._uses:
+            for g in self.module.functions:
+                self._uses[g.name] = _direct_classes(g)
+            changed = True
+            while changed:
+                changed = False
+                for g in self.module.functions:
+                    for e in _all_exprs(g):
+                        if isinstance(e, ir.Call) and e.function in self._uses:
+                            extra = self._uses[e.function] - self._uses[g.name]
+                            if extra:
+                                self._uses[g.name] |= extra
+                                changed = True
+        return sorted(self._uses[f.name], key=lambda n: self.class_index.get(n, -1))
 
     def name_index(self, s: str) -> int:
         if s not in self.names:
@@ -288,6 +375,9 @@ def generate(module: ir.Module, source_path: Path) -> str:
     w("typedef struct {")
     w(f"    PyObject *names[{n_names + 1}];")
     w(f"    PyObject *kwnames[{n_kw + 1}];")
+    w(f"    PyObject *classes[{len(module.classes) + 1}];      /* strong refs; NULL when not compiled */")
+    w(f"    int cls_ok[{len(module.classes) + 1}];")
+    w(f"    PyMemberDef *slots[{mg.n_slots + 1}];     /* owned by the classes above */")
     w("} tp_state;")
     w("")
     w("static const char *const tp_name_strings[] = {")
@@ -295,6 +385,10 @@ def generate(module: ir.Module, source_path: Path) -> str:
         w(f"    {c_string(s)},")
     w("    NULL")
     w("};")
+    w("")
+    for cd in module.classes:
+        items = "".join(f"{c_string(x)}, " for x in cd.fields)
+        w(f"static const char *const tp_fields_{mg.class_index[cd.name]}[] = {{{items}NULL}};")
     w("")
     for f in module.functions:
         w(_impl_signature(f) + ";")
@@ -337,9 +431,10 @@ def _check_function(f: ir.Function, functions: dict[str, ir.Function]) -> None:
     effects = [e for e in _all_exprs(f) if _is_effect(e)]
     # a store into a local array is not an effect (ir.py "Local arrays"); into a parameter it is
     stores = [s for s in _walk_stmts(f.body)
-              if isinstance(s, ir.StoreIndex) and f.locals.get(s.array) not in ir.ARRAYS]
+              if (isinstance(s, ir.StoreIndex) and f.locals.get(s.array) not in ir.ARRAYS)
+              or isinstance(s, ir.FieldSet)]
     if f.pure and (effects or stores):
-        what = type(effects[0]).__name__ if effects else "StoreIndex"
+        what = type(effects[0]).__name__ if effects else type(stores[0]).__name__
         raise CGenError(f"{f.name}: marked pure but contains an effect ({what})")
     for e in _all_exprs(f):
         if isinstance(e, (ir.BinOp, ir.UnaryOp)) and e.proven:
@@ -362,7 +457,7 @@ def _check_function(f: ir.Function, functions: dict[str, ir.Function]) -> None:
                 if not callee.pure:
                     raise CGenError(f"{f.name}: redo Call of impure {e.function!r} "
                                     "(redoing it could repeat an effect)")
-            elif (callee.may_deopt or callee.entry_globals) and not f.pure:
+            elif (callee.may_deopt or callee.entry_globals or _has_cls_param(callee)) and not f.pure:
                 raise CGenError(f"{f.name}: Call of deopting {e.function!r} from an impure caller "
                                 "without redo")
     if f.entry_globals:
@@ -375,6 +470,10 @@ def _check_function(f: ir.Function, functions: dict[str, ir.Function]) -> None:
                 raise CGenError(f"{f.name}: array param {p.name} is stored into in a pure function")
         elif p.type not in _CT:
             raise CGenError(f"{f.name}: param {p.name} has type {p.type}")
+        elif p.cls is not None and p.type is not Type.OBJ:
+            raise CGenError(f"{f.name}: param {p.name} has a class guard but type {p.type}")
+        elif p.optional and p.cls is None:
+            raise CGenError(f"{f.name}: param {p.name} is optional without a class")
 
 
 def _is_closed(f: ir.Function, functions: dict[str, ir.Function], seen=None) -> bool:
@@ -801,6 +900,68 @@ class _FnGen:
         self.depth -= 1
         self.emit("}")
 
+    def _obj_operand(self, e: ir.Expr, what: str) -> str:
+        if e.type is not Type.OBJ:
+            raise CGenError(f"{self.f.name}: {what} on {e.type}")
+        return self.ev(e)
+
+    def ev_Is(self, e: ir.Is) -> str:
+        a = self._obj_operand(e.left, "Is")
+        b = self._obj_operand(e.right, "Is")
+        t = self.tmp("int")
+        self.emit(f"{t} = ({a} {'!=' if e.negate else '=='} {b});")
+        self._own_release(a, b)
+        return t
+
+    def ev_IsExact(self, e: ir.IsExact) -> str:
+        k = self._class(e.cls)
+        o = self._obj_operand(e.obj, "IsExact")
+        t = self.tmp("int")
+        self.emit(f"{t} = tp_is_exact({o}, (PyTypeObject *)tp_st->classes[{k}]);")
+        self._own_release(o)
+        return t
+
+    def ev_CheckExact(self, e: ir.CheckExact) -> str:
+        k = self._class(e.cls)
+        o = self._obj_operand(e.obj, "CheckExact")
+        # a deopt: legal only in a pure function (_check_function); the exit block releases `o`
+        self.emit(f"if (!tp_is_exact({o}, (PyTypeObject *)tp_st->classes[{k}])) {{ tp_rc = 1; goto tp_exit; }}")
+        return o
+
+    def ev_FieldGet(self, e: ir.FieldGet) -> str:
+        slot = self.mg.slot(self.f.name, e.cls, e.field)
+        o = self._obj_operand(e.obj, "FieldGet")
+        t = self.tmp("PyObject *")
+        self.emit(f"{t} = tp_field_get({o}, {slot});")
+        self._own_release(o)
+        self.emit(f"if ({t} == NULL) {{ tp_rc = -1; goto tp_exit; }}")
+        return t
+
+    def ev_New(self, e: ir.New) -> str:
+        cd = self.mg.cls(self.f.name, e.cls)
+        if not cd.trivial_init:
+            raise CGenError(f"{self.f.name}: New of class {e.cls}, whose __init__ is not trivial")
+        if len(e.args) != len(cd.fields):
+            raise CGenError(f"{self.f.name}: New {e.cls} with {len(e.args)} args for "
+                            f"{len(cd.fields)} fields")
+        k = self._class(e.cls)
+        items = [self._obj_operand(a, "New argument") for a in e.args]
+        t = self.tmp("PyObject *")
+        base = self.mg.slot_base[e.cls]
+        if items:
+            self.emit(f"{{ PyObject *tp_av[{len(items)}] = {{{', '.join(items)}}};")
+            self.emit(f"  {t} = tp_new_fixed((PyTypeObject *)tp_st->classes[{k}], &tp_st->slots[{base}], "
+                      f"tp_av, {len(items)}); }}")
+        else:
+            self.emit(f"{t} = tp_new_fixed((PyTypeObject *)tp_st->classes[{k}], NULL, NULL, 0);")
+        self._own_release(*items)                           # the slots took their own references
+        self.emit(f"if ({t} == NULL) {{ tp_rc = -1; goto tp_exit; }}")
+        return t
+
+    def _class(self, name: str) -> int:
+        self.mg.cls(self.f.name, name)
+        return self.mg.class_index[name]
+
     def ev_Global(self, e: ir.Global) -> str:
         k = self.mg.name_index(e.name)
         return self._own_new(f"tp_global(tp_dict, tp_st->names[{k}])")
@@ -965,6 +1126,14 @@ class _FnGen:
         if not local:                           # a local array has no list to write back to
             self.emit(f"{ptr}->dirty[{slot}] = 1;")
 
+    def st_FieldSet(self, s: ir.FieldSet) -> None:
+        slot = self.mg.slot(self.f.name, s.cls, s.field)
+        v = self._obj_operand(s.value, "FieldSet value")      # CPython: value, then the object
+        o = self._obj_operand(s.obj, "FieldSet")
+        self.emit(f"tp_s = tp_field_set({o}, {slot}, {v});")
+        self._own_release(o, v)
+        self.emit("if (tp_s < 0) { tp_rc = -1; goto tp_exit; }")
+
     def st_ExprStmt(self, s: ir.ExprStmt) -> None:
         v = self.ev(s.value)
         if v is None:
@@ -1100,6 +1269,10 @@ class _FnGen:
                    + "".join(f" (void){_ident('l', n)};" for n in self.local_arrays))
         # Depth guard (issue #57): nothing is owned yet, so a refusal returns directly and counts
         # nothing; every other exit goes through tp_exit, which leaves exactly once.
+        for p in f.params:
+            if isinstance(p, ir.Param) and p.cls is not None:
+                k = self._class(p.cls)
+                out.append(f"    if ({_param_cls_fail(_ident('p', p.name), k, p.optional)}) return 1;")
         out.append("    if (tp_enter_call() != 0) return -1;")
         out += prologue
         out += self.lines
@@ -1140,6 +1313,18 @@ class _FnGen:
         L.append("    (void)tp_x;")
         # arity / keywords -> the interpreted function raises CPython's own TypeError
         L.append(f"    if (tp_nargs != {n} || (tp_kwnames != NULL && PyTuple_GET_SIZE(tp_kwnames) != 0)) goto tp_deopt;")
+        # fixed-layout classes: not compiled -> interpreted; Param.cls guards (before any effect)
+        classes = self.mg.uses(f)
+        cls_params = [(i, p) for i, p in enumerate(f.params)
+                      if isinstance(p, ir.Param) and p.cls is not None]
+        for cname in classes:
+            self.mg.cls(f.name, cname)
+        if classes:
+            L.insert(3, "    tp_state *tp_st = (tp_state *)PyModule_GetState(tp_module);")
+            L.append("    if (!(" + " && ".join(f"tp_st->cls_ok[{self.mg.class_index[n]}]"
+                                                 for n in classes) + ")) goto tp_deopt;")
+        for i, p in cls_params:
+            L.append(f"    if ({_param_cls_fail(f'tp_args[{i}]', self._class(p.cls), p.optional)}) goto tp_deopt;")
         # scalar guards: exact type (and i64 range)
         for i, p in enumerate(f.params):
             if not isinstance(p, ir.ArrayParam) and p.type in _UNBOX:
@@ -1158,7 +1343,8 @@ class _FnGen:
         gnames = []
         if f.entry_globals:
             L.insert(3, "    PyObject *tp_dict = PyModule_GetDict(tp_module); /* borrowed */")
-            L.insert(3, "    tp_state *tp_st = (tp_state *)PyModule_GetState(tp_module);")
+            if not classes:
+                L.insert(3, "    tp_state *tp_st = (tp_state *)PyModule_GetState(tp_module);")
         for j, g in enumerate(f.entry_globals):
             # entry read of a module global: exact type or deopt (still before any effect)
             k = self.mg.name_index(g.name)
@@ -1257,6 +1443,7 @@ static int tp_traverse(PyObject *tp_module, visitproc visit, void *arg)
     if (tp_st == NULL) return 0;
     for (i = 0; i < sizeof(tp_st->names) / sizeof(tp_st->names[0]); i++) Py_VISIT(tp_st->names[i]);
     for (i = 0; i < sizeof(tp_st->kwnames) / sizeof(tp_st->kwnames[0]); i++) Py_VISIT(tp_st->kwnames[i]);
+    for (i = 0; i < sizeof(tp_st->classes) / sizeof(tp_st->classes[0]); i++) Py_VISIT(tp_st->classes[i]);
     return 0;
 }
 
@@ -1267,6 +1454,8 @@ static int tp_clear(PyObject *tp_module)
     if (tp_st == NULL) return 0;
     for (i = 0; i < sizeof(tp_st->names) / sizeof(tp_st->names[0]); i++) tp_release(&tp_st->names[i]);
     for (i = 0; i < sizeof(tp_st->kwnames) / sizeof(tp_st->kwnames[0]); i++) tp_release(&tp_st->kwnames[i]);
+    for (i = 0; i < sizeof(tp_st->cls_ok) / sizeof(tp_st->cls_ok[0]); i++) tp_st->cls_ok[i] = 0;
+    for (i = 0; i < sizeof(tp_st->classes) / sizeof(tp_st->classes[0]); i++) tp_release(&tp_st->classes[i]);
     return 0;
 }
 
@@ -1282,7 +1471,7 @@ def _exec_function(mg: _ModGen) -> str:
         "    tp_state *tp_st = (tp_state *)PyModule_GetState(tp_module);",
         "    PyObject *tp_dict = PyModule_GetDict(tp_module); /* borrowed: owned by the module */",
         "    PyObject *tp_code = NULL, *tp_res = NULL, *tp_table = NULL, *tp_zero = NULL;",
-        "    PyObject *tp_modname = NULL, *tp_f = NULL, *tp_cf = NULL;",
+        "    PyObject *tp_modname = NULL, *tp_f = NULL, *tp_cf = NULL, *tp_c = NULL;",
         "    int tp_rc = -1, tp_k;",
         "    size_t i;",
         "    for (i = 0; tp_name_strings[i] != NULL; i++) {",
@@ -1310,6 +1499,21 @@ def _exec_function(mg: _ModGen) -> str:
         "    if (tp_res == NULL) goto tp_done;",
         "    tp_table = PyDict_New();",
         "    if (tp_table == NULL || PyDict_SetItemString(tp_dict, \"__typedpython_interpreted__\", tp_table) < 0) goto tp_done;",
+    ]
+    for cd in mg.module.classes:
+        j = mg.class_index[cd.name]
+        L += [
+            f"    tp_k = PyDict_GetItemStringRef(tp_dict, {c_string(cd.name)}, &tp_c);",
+            "    if (tp_k < 0) goto tp_done;",
+            "    if (tp_k == 1) {",
+            f"        tp_k = tp_class_capture(tp_c, tp_fields_{j}, {len(cd.fields)}, "
+            f"&tp_st->slots[{mg.slot_base[cd.name]}]);",
+            "        if (tp_k < 0) goto tp_done;",
+            f"        if (tp_k == 1) {{ tp_st->classes[{j}] = tp_c; tp_c = NULL; tp_st->cls_ok[{j}] = 1; }}",
+            "    }",
+            "    tp_release(&tp_c);",
+        ]
+    L += [
         "    tp_zero = PyLong_FromLong(0);",
         "    if (tp_zero == NULL || PyDict_SetItemString(tp_dict, \"__typedpython_deopts__\", tp_zero) < 0) goto tp_done;",
         "    tp_modname = PyModule_GetNameObject(tp_module);",
@@ -1330,7 +1534,7 @@ def _exec_function(mg: _ModGen) -> str:
         "    tp_rc = 0;",
         "tp_done:",
         "    tp_release(&tp_code); tp_release(&tp_res); tp_release(&tp_table); tp_release(&tp_zero);",
-        "    tp_release(&tp_modname); tp_release(&tp_f); tp_release(&tp_cf);",
+        "    tp_release(&tp_modname); tp_release(&tp_f); tp_release(&tp_cf); tp_release(&tp_c);",
         "    return tp_rc;",
         "}",
         "",

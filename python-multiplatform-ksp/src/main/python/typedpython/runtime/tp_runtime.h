@@ -1009,6 +1009,123 @@ static inline void tp_release(PyObject **slot)
 }
 
 /* ------------------------------------------------------------------------------------------
+ * Fixed-layout classes (SPEC N-11, ir.ClassDecl; API.md "Fixed-layout classes"). A compiled class
+ * is a plain heap type whose instances keep every field in an object slot at a fixed offset; the
+ * slots are reached through the PyMemberDef of the member descriptor captured at module init.
+ * Nothing here runs user code: PyMember_GetOne/SetOne touch the slot only.
+ * ------------------------------------------------------------------------------------------ */
+
+/* Look up `field` in cls's OWN dict (not through the MRO: a subclass or an instance attribute must
+ * not be consulted) and capture its PyMemberDef. It must be a member descriptor made for exactly
+ * this class (d_type == cls), of an object slot (Py_T_OBJECT_EX), writable, of that name, whose
+ * offset lies inside the instance. 0 = captured, 1 = not a plain slot (the class is not compiled),
+ * -1 = error. The PyMemberDef lives in cls->tp_members: the caller must keep `cls` alive for as long
+ * as the pointer is used (the generated module holds a strong reference). */
+static inline int tp_slot_capture(PyTypeObject *cls, const char *field, PyMemberDef **out)
+{
+    PyObject *dict, *descr = NULL;
+    int found, rc = 1;
+    PyMemberDescrObject *md;
+    PyMemberDef *m;
+
+    dict = PyType_GetDict(cls);
+    if (dict == NULL) {
+        return -1;
+    }
+    found = PyDict_GetItemStringRef(dict, field, &descr);
+    Py_DECREF(dict);
+    if (found < 0) {
+        return -1;
+    }
+    if (found == 0) {
+        return 1;
+    }
+    if (Py_IS_TYPE(descr, &PyMemberDescr_Type)) {
+        md = (PyMemberDescrObject *)descr;
+        m = md->d_member;
+        if (md->d_common.d_type == cls && m != NULL && m->name != NULL
+            && strcmp(m->name, field) == 0 && m->type == Py_T_OBJECT_EX
+            && (m->flags & Py_READONLY) == 0 && m->offset >= (Py_ssize_t)sizeof(PyObject)
+            && m->offset + (Py_ssize_t)sizeof(PyObject *) <= cls->tp_basicsize) {
+            *out = m;
+            rc = 0;
+        }
+    }
+    Py_DECREF(descr);
+    return rc;
+}
+
+/* The class object itself must be what ClassDecl promises: a heap type made by `type` (no
+ * metaclass), base `object`, no instance __dict__, no variable size, object's own tp_new and
+ * tp_alloc (so tp_new_fixed is what `C(...)` does for a trivial __init__), and then every field a
+ * plain slot. `slots[i]` receives the PyMemberDef of fields[i]. 1 = compiled, 0 = not, -1 = error. */
+static inline int tp_class_capture(PyObject *cls_obj, const char *const *fields, Py_ssize_t n,
+                                   PyMemberDef **slots)
+{
+    PyTypeObject *cls;
+    Py_ssize_t i;
+    int rc;
+
+    if (!PyType_Check(cls_obj)) {
+        return 0;
+    }
+    cls = (PyTypeObject *)cls_obj;
+    if (!(cls->tp_flags & Py_TPFLAGS_HEAPTYPE) || Py_TYPE(cls) != &PyType_Type
+        || cls->tp_base != &PyBaseObject_Type || cls->tp_dictoffset != 0
+        || cls->tp_itemsize != 0 || cls->tp_new != PyBaseObject_Type.tp_new
+        || cls->tp_alloc != PyType_GenericAlloc || (cls->tp_flags & Py_TPFLAGS_IS_ABSTRACT)) {
+        return 0;
+    }
+    for (i = 0; i < n; i++) {
+        rc = tp_slot_capture(cls, fields[i], &slots[i]);
+        if (rc != 0) {
+            return rc < 0 ? -1 : 0;
+        }
+    }
+    return 1;
+}
+
+/* obj.field of a proved-exact instance: a new reference, or CPython's AttributeError for an unset
+ * slot ("'C' object has no attribute 'f'"). */
+static inline PyObject *tp_field_get(PyObject *obj, PyMemberDef *m)
+{
+    return PyMember_GetOne((const char *)obj, m);
+}
+
+/* obj.field = v: the slot takes its own reference to v and releases the old one. 0 or -1. */
+static inline int tp_field_set(PyObject *obj, PyMemberDef *m, PyObject *v)
+{
+    return PyMember_SetOne((char *)obj, m, v);
+}
+
+/* The observable result of a trivial __init__: allocate with cls's tp_alloc and set slots[i] to
+ * values[i] (new references; the caller keeps its own). NULL with the error set on failure; the
+ * half-built object is released (its unset slots are NULL, which dealloc handles). */
+static inline PyObject *tp_new_fixed(PyTypeObject *cls, PyMemberDef *const *slots,
+                                     PyObject *const *values, Py_ssize_t n)
+{
+    Py_ssize_t i;
+    PyObject *obj = cls->tp_alloc(cls, 0);
+
+    if (obj == NULL) {
+        return NULL;
+    }
+    for (i = 0; i < n; i++) {
+        if (PyMember_SetOne((char *)obj, slots[i], values[i]) < 0) {
+            Py_DECREF(obj);
+            return NULL;
+        }
+    }
+    return obj;
+}
+
+/* type(obj) is cls */
+static inline int tp_is_exact(PyObject *obj, PyTypeObject *cls)
+{
+    return Py_IS_TYPE(obj, cls);
+}
+
+/* ------------------------------------------------------------------------------------------
  * Call depth (issue #57): compiled frames have no Python frame, so a recursion made of them would
  * neither raise RecursionError nor stop before the C stack ends. tp_enter_call / tp_leave_call
  * bracket every compiled impl function. See API.md "Call depth".
