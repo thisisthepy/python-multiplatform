@@ -2,12 +2,12 @@ package fixture.app
 
 import fixture.library.Counter
 import fixture.library.RefHolder
-import python.multiplatform.ffi.PyObject
+import python.multiplatform.ffi.Python3
 import python.multiplatform.generated.FunctionTable
 import python.multiplatform.reflection.ClassLookup
 import python.multiplatform.reflection.HandleTable
 import python.multiplatform.reflection.UpcallTable
-import python.native.ffi.toNativePointer
+import python.native.ffi.toRawValue
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -149,18 +149,30 @@ class GeneratedTableTest {
         // their pointer value, with no reflection at runtime.
         assertTrue(ClassLookup.require("fixture.library.RefHolder").hasTraverse)
 
-        val primary = PyObject(0xAAAAL.toNativePointer()!!, borrowed = false)
-        val secondary = PyObject(0xBBBBL.toNativePointer()!!, borrowed = false)
+        // Real objects, not made-up addresses. A `PyObject` registers a cleaner that calls
+        // `Py_DecRef(pointer)` once the JVM collects it, whatever the test meant by it. This used to
+        // wrap 0xAAAA and 0xBBBB with `borrowed = false`; the test passed, and the first collection
+        // after it in the same JVM -- any test that ran 10,000 upcalls or called System.gc() --
+        // died in `Py_XDECREF` on the Cleaner thread with si_addr 0xaaaa (issue #98).
+        //
+        // `PyObject_CallNoArgs` returns a new reference, and `invoke()` builds the wrapper with
+        // `borrowed = false`, so each wrapper owns exactly the reference its cleaner gives back.
+        Python3.initialize(silent = true)
+        val objectType = Python3.import("builtins").getAttr("object")
+        val primary = objectType.invoke()
+        val secondary = objectType.invoke()
+        val primaryAddress = primary.pointer.toRawValue()
+        val secondaryAddress = secondary.pointer.toRawValue()
         val holder = RefHolder(primary, secondary)
 
         val visited = mutableListOf<Long>()
         ClassLookup.require("fixture.library.RefHolder").traverse(holder) { visited.add(it) }
 
-        assertEquals(listOf(0xAAAAL, 0xBBBBL), visited)
+        assertEquals(listOf(primaryAddress, secondaryAddress), visited)
 
         holder.primary = null
         visited.clear()
         ClassLookup.require("fixture.library.RefHolder").traverse(holder) { visited.add(it) }
-        assertEquals(listOf(0xBBBBL), visited)
+        assertEquals(listOf(secondaryAddress), visited)
     }
 }
