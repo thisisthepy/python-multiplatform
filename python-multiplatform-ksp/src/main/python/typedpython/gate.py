@@ -14,6 +14,7 @@ import ast
 import shutil
 import tempfile
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -25,30 +26,107 @@ Mode = Literal["checked", "compiled"]
 Position = tuple[int, int]
 
 
+@dataclass(frozen=True)
+class _Run:
+    """One user file as Pyrefly sees it: the text it was given and where that text differs."""
+
+    original: str
+    text: str  # the source Pyrefly reads: the original, or the probed copy of it
+    probes: list[rebinding.Probe]
+    remap: "_Remap"
+
+
+class _Remap:
+    """Maps positions in probed text back to the original source.
+
+    A probe inserts `; name` on the line of its assignment, so a column to the right of an
+    insertion is `len("; name")` further right than in the original; line numbers never change.
+    """
+
+    def __init__(self, probes: Sequence[rebinding.Probe]) -> None:
+        self._inserted: dict[int, list[tuple[int, int]]] = {}
+        for p in probes:
+            self._inserted.setdefault(p.line, []).append((p.column - 2, len(p.name) + 2))
+
+    def to_original(self, line: int, column: int) -> Position | None:
+        """The original position, or None when it lies inside an inserted probe load."""
+        shift = 0
+        for start, length in self._inserted.get(line, ()):
+            if column >= start + length:
+                shift += length
+            elif column >= start:
+                return None
+        return line, column - shift
+
+
 def check(
     paths: Sequence[Path],
     mode: Mode = "checked",
     search_paths: Sequence[Path] = (),
 ) -> list[Diagnostic]:
-    report = pyrefly.run(paths, search_paths)
-    diagnostics = [
-        Diagnostic(e.path, e.line, e.column, f"pyrefly/{e.kind}", "error", e.message)
-        for e in report.errors
-    ]
-    reported = {(d.path, d.line, d.column) for d in diagnostics}
-
+    runs = _plan([str(Path(p).resolve()) for p in paths])
     forbidden_severity: Severity = "error" if mode == "compiled" else "warning"
-    for path in (str(Path(p).resolve()) for p in paths):
-        source = Path(path).read_text()
+    diagnostics: list[Diagnostic] = []
+
+    # One Pyrefly run for everything. When any file has something to probe, it runs on a mirrored
+    # package tree holding the probed copies (and the other files unchanged); otherwise on the
+    # files themselves.
+    with tempfile.TemporaryDirectory(prefix="typedpython-probe-") as work:
+        probing = any(r.probes for r in runs.values())
+        if probing:
+            copies = _mirror(Path(work), {o: r.text for o, r in runs.items()})
+            roots = pyrefly.import_roots(list(runs))
+            mirror = _Mirror(copies, [((Path(work) / str(i)).resolve(), r)
+                                      for i, r in enumerate(roots)])
+            report = pyrefly.run(
+                [Path(c) for c in copies],
+                [*[Path(work) / str(i) for i in range(len(roots))],
+                 *sorted({Path(c).parent for c in copies}),
+                 *search_paths, *roots],
+            )
+        else:
+            mirror = _Mirror({o: o for o in runs}, [])
+            report = pyrefly.run([Path(p) for p in runs], search_paths)
+    original_of = mirror.copies
+    run_of = {c: runs[o] for c, o in original_of.items()}
+
+    reported: set[tuple[str, int, int]] = set()
+    for e in report.errors:
+        run = run_of.get(e.path)
+        if run is None:
+            diagnostics.append(Diagnostic(
+                mirror.original(e.path), e.line, e.column, f"pyrefly/{e.kind}", "error", e.message,
+            ))
+            continue
+        position = run.remap.to_original(e.line, e.column)
+        if position is None:
+            # An error inside an inserted `; name` means the probe itself is wrong.
+            diagnostics.append(Diagnostic(
+                run.original, e.line, e.column, "internal/probe-error", "error",
+                f"pyrefly/{e.kind} inside a probe load (`{e.message}`); this is a gate bug",
+            ))
+            continue
+        diagnostics.append(Diagnostic(
+            run.original, *position, f"pyrefly/{e.kind}", "error", e.message,
+        ))
+        reported.add((run.original, *position))
+
+    for copy, run in run_of.items():
+        path = run.original
         try:
-            tree = ast.parse(source, filename=path)
+            tree = ast.parse(run.text, filename=path)
         except SyntaxError:
             continue  # Pyrefly has already reported the parse error
 
+        # Judged on the probed text: the probe loads are expression statements, so they are
+        # discarded values and never become any-flow findings.
         cast_spans = _cast_argument_spans(tree)
         discarded = _discarded_values(tree)
         for expr in report.any_expressions:
-            if expr.path != path or (expr.path, expr.line, expr.column) in reported:
+            if expr.path != copy:
+                continue
+            start = run.remap.to_original(expr.line, expr.column)
+            if start is None or (path, *start) in reported:
                 continue
             if _is_signature(expr.type):
                 continue  # a callable whose signature mentions Any; its result is judged on its own
@@ -57,57 +135,55 @@ def check(
             if any(_inside((expr.line, expr.column), span) for span in cast_spans):
                 continue
             diagnostics.append(Diagnostic(
-                path, expr.line, expr.column, "any-flow", "error",
+                path, *start, "any-flow", "error",
                 f"this expression has type `{expr.type}`; give it a type, or cast() it "
                 "where it leaves untyped code",
             ))
-            reported.add((expr.path, expr.line, expr.column))
+            reported.add((path, *start))
 
-        for finding in forbidden.scan(source, path):
+        for finding in forbidden.scan(Path(path).read_text(), path):
             diagnostics.append(Diagnostic(
                 path, finding.line, finding.column, finding.rule, forbidden_severity,
                 finding.message,
             ))
 
-    for d in _rebinding_findings(paths, search_paths):
-        diagnostics.append(Diagnostic(
-            d.path, d.line, d.column, d.rule, forbidden_severity, d.message,
-        ))
+        types = report.expression_types.get(copy, {})
+        for f in rebinding.judge(run.probes, types):
+            diagnostics.append(Diagnostic(path, f.line, f.column, f.rule, forbidden_severity,
+                                          f.message))
 
     return sorted(diagnostics)
 
 
-def _rebinding_findings(
-    paths: Sequence[Path], search_paths: Sequence[Path],
-) -> list[Diagnostic]:
-    """Second Pyrefly pass over probed copies; skipped when no file has anything to probe."""
-    plans: dict[str, tuple[str, list[rebinding.Probe]]] = {}
-    for path in (str(Path(p).resolve()) for p in paths):
+def _plan(paths: Sequence[str]) -> dict[str, _Run]:
+    """Each file's text for Pyrefly: probed when it has rebinding/mixed-container candidates."""
+    runs: dict[str, _Run] = {}
+    for path in paths:
+        source = Path(path).read_text()
+        probed, probes = source, []
         try:
-            tree = ast.parse(Path(path).read_text(), filename=path)
+            tree = ast.parse(source, filename=path)
         except SyntaxError:
-            continue
-        wanted = rebinding.candidates(rebinding.assignments(tree))
-        if wanted:
-            plans[path] = rebinding.probe(Path(path).read_text(), wanted)
-    if not plans:
-        return []
+            tree = None
+        if tree is not None and (wanted := rebinding.candidates(rebinding.assignments(tree))):
+            probed, probes = rebinding.probe(source, wanted)
+        runs[path] = _Run(path, probed, probes, _Remap(probes))
+    return runs
 
-    found: list[Diagnostic] = []
-    with tempfile.TemporaryDirectory(prefix="typedpython-probe-") as work:
-        copies = _mirror(Path(work), {o: probed for o, (probed, _) in plans.items()})
-        roots = pyrefly.import_roots(list(plans))
-        mirrored = sorted({str(Path(c).parent) for c in copies})  # flat files: their copy's dir
-        report = pyrefly.run(
-            [Path(c) for c in copies],
-            [*[Path(work) / str(i) for i in range(len(roots))], *map(Path, mirrored),
-             *search_paths, *roots],
-        )
-        for copy, original in copies.items():
-            types = report.expression_types.get(copy, {})
-            for f in rebinding.judge(plans[original][1], types):
-                found.append(Diagnostic(original, f.line, f.column, f.rule, "warning", f.message))
-    return found
+
+@dataclass(frozen=True)
+class _Mirror:
+    copies: dict[str, str]  # copy -> original
+    bases: list[tuple[Path, Path]]  # (mirrored root, original root)
+
+    def original(self, path: str) -> str:
+        """The original path of a file in the mirrored tree (a dependency's, for instance)."""
+        for base, root in self.bases:
+            try:
+                return str(root / Path(path).relative_to(base))
+            except ValueError:
+                continue
+        return path
 
 
 def _mirror(work: Path, probed: dict[str, str]) -> dict[str, str]:
