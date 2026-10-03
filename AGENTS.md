@@ -143,6 +143,15 @@ Report by category, and never put them in one column:
 A rising test count is not progress when the tests assert an absence. Before writing "nothing left
 to implement", say what you counted against.
 
+### Writing docs and code text
+
+- **No em-dash.** Do not write the em-dash character (U+2014) anywhere: docs, guides, README,
+  comments, docstrings, strings, commit messages, PR and issue text. Use a comma, colon,
+  parentheses, or two sentences.
+- **Install and run examples use `uv`, `ppp` (pypackpack) or `tcl` (toolchain-lite).** Never write
+  a `pip install` example in a guide, README or doc.
+- **Tone:** the pythonx-compose guide is the reference for how docs read; align with it.
+
 ## 10. Agents
 
 - A headless agent (`claude -p`, `agy -p`) has **no next turn**. Tell it to run long commands in the

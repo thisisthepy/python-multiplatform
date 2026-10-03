@@ -97,3 +97,83 @@ CPython's own Python-frame check uses. It then calls `Py_EnterRecursiveCall(" in
 C-stack guard: a raised recursion limit can never let compiled C overflow the stack. Counters are
 per module (the header is `static`): frames of a *different* compiled module that sit between two
 frames of this one are not counted.
+
+## Fixed-layout classes (ir.ClassDecl / FieldGet / FieldSet / New / IsExact / CheckExact; SPEC N-11)
+Guard state, one per ClassDecl in the module state (zeroed = not compiled):
+
+    typedef struct {
+        unsigned int tag;       /* tp_version_tag at which the slots were proved; never 0 while compiled */
+        unsigned int bad_tag;   /* a tag at which tp_class_refresh failed (0: none); not retried */
+        uint64_t gepoch;        /* tp_globals_epoch at which module_dict[name] was last seen to be the class */
+        PyObject *init;         /* strong: the class's own __init__ at capture, or NULL */
+        Py_ssize_t slow;        /* failed per-access checks (introspection) */
+        Py_ssize_t refreshed;   /* new tags adopted by tp_class_refresh (introspection) */
+    } tp_class_rt;
+    static uint64_t tp_globals_epoch;   /* moves when a watched module dict changes a class-name key */
+
+At module init (none runs user code):
+
+    /* `name` in cls's OWN dict (no MRO): 1 found (*out new ref), 0 absent, -1 error */
+    int  tp_own_attr(PyTypeObject *cls, const char *name, PyObject **out);
+    /* `field` in cls's own dict must be a member descriptor made for cls, of a writable
+       Py_T_OBJECT_EX slot of that name inside the instance: *out = its PyMemberDef, *descr = a new
+       reference to the descriptor. 0 ok, 1 not a plain slot (class not compiled), -1 error */
+    int  tp_slot_capture(PyTypeObject *cls, const char *field, PyMemberDef **out, PyObject **descr);
+    /* heap type made by `type`, base object, no __dict__, fixed size, object's tp_new/tp_alloc,
+       generic getattro/setattro (no __getattribute__/__getattr__/__setattr__/__delattr__), not abstract */
+    int  tp_class_shape_ok(PyTypeObject *cls);
+    /* the whole ClassDecl check: shape, every field (slots[i], descrs[i]), rt->init, and a version
+       tag (PyUnstable_Type_AssignVersionTag; none → not compiled). 1 compiled, 0 not, -1 error;
+       on 0/-1 nothing is kept */
+    int  tp_class_capture(PyObject *cls, const char *const *fields, Py_ssize_t n,
+                          PyMemberDef **slots, PyObject **descrs, tp_class_rt *rt);
+    void tp_class_rt_clear(tp_class_rt *rt, PyObject **descrs, Py_ssize_t n);  /* drop refs, zero tags */
+
+At every access (the class may have changed since init; cgen.py "Classes changed after init"):
+
+    /* FieldGet/FieldSet (obj) or New (obj == NULL): 1 = type(obj) is cls and cls's tp_version_tag is
+       rt->tag (or tp_class_refresh re-proved it), 0 = take the slow path / deopt, -1 = error.
+       Fast case: one type compare, one tag compare. */
+    int  tp_class_current(PyObject *obj, PyObject *cls, tp_class_rt *rt, const char *const *fields,
+                          Py_ssize_t n, PyObject *const *descrs);
+    /* the tag moved: get a tag (exhausted → 0), shape still ok, every field still the very
+       descriptor object and __init__ the very object captured → adopt the tag (1); else remember
+       it in bad_tag (0). -1 error. Runs no user code. */
+    int  tp_class_refresh(PyTypeObject *cls, tp_class_rt *rt, const char *const *fields,
+                          Py_ssize_t n, PyObject *const *descrs);
+    /* LOAD_GLOBAL of the class name as an identity test: 1 module_dict[name] is cls, 0 not (or not a
+       module global), -1 error. watched: a 1 is cached in rt->gepoch until tp_globals_epoch moves */
+    int  tp_class_global_ok(PyObject *module_dict, PyObject *name, PyObject *cls, tp_class_rt *rt,
+                            int watched);
+    unsigned int tp_class_tag(PyObject *cls);                     /* cls->tp_version_tag; 0 for NULL */
+
+Module-dict watcher (one id per module instance; ids 2..7 of 8 per interpreter are free for all
+extensions together):
+
+    /* body of the module's PyDict_WatchCallback: move tp_globals_epoch when key is an exact str
+       equal to one of `names` (NULL-terminated), any other key type or str subclass, or NULL
+       (cleared/cloned/deallocated). Never raises; returns 0 */
+    int  tp_globals_watch_event(PyDict_WatchEvent event, PyObject *key, const char *const *names);
+    /* PyDict_AddWatcher + PyDict_Watch: *id1 = id + 1, or 0 when no id is free / Watch failed
+       (error cleared: the caller uses the conservative path, a dict lookup per New) */
+    void tp_globals_watch(PyObject *module_dict, PyDict_WatchCallback cb, int *id1);
+    /* PyDict_Unwatch (if module_dict) + PyDict_ClearWatcher; idempotent; keeps a pending exception */
+    void tp_globals_unwatch(PyObject *module_dict, int *id1);
+
+Slot access and the slow paths:
+
+    PyObject *tp_field_get(PyObject *obj, PyMemberDef *m);           /* PyMember_GetOne: new ref or AttributeError */
+    int       tp_field_set(PyObject *obj, PyMemberDef *m, PyObject *v); /* PyMember_SetOne: 0 / -1 */
+    int       tp_setattr(PyObject *obj, PyObject *name, PyObject *v);   /* STORE_ATTR (PyObject_SetAttr): 0 / -1 */
+    PyObject *tp_new_fixed(PyTypeObject *cls, PyMemberDef *const *slots, PyObject *const *values, Py_ssize_t n);
+              /* cls->tp_alloc(cls, 0) then set each slot (new references); NULL + MemoryError */
+    int       tp_is_exact(PyObject *obj, PyTypeObject *cls);         /* Py_IS_TYPE */
+FieldGet's slow path is `tp_getattr`, New's is `tp_global` + `tp_call` (the binding loaded before
+the arguments), IsExact's compares with `tp_global`; in a pure function every slow path is a deopt.
+
+Version tags (CPython 3.14 Objects/typeobject.c): PyType_Modified sets tp_version_tag to 0 for the
+type and its subclasses; assign_version_tag gives a heap type `NEXT_VERSION_TAG(interp)++`, a
+per-interpreter counter that only grows and, once it wraps to 0, assigns nothing again; a class
+gets at most MAX_VERSIONS_PER_CLASS (1000) tags. So a tag never repeats within an interpreter and a
+class whose tags are exhausted keeps 0 (never current). Py_TPFLAGS_VALID_VERSION_TAG is "Unused.
+Legacy flag" in 3.14 (never set) and is not consulted.
