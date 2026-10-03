@@ -1223,7 +1223,10 @@ internal object ArtifactScanner {
         // value classes to `androidx.compose.ui.input.pointer.PointerInputChange`, whose old
         // `consumed: ConsumedData` constructor is exactly this shape: `e: None of the following
         // candidates is applicable` against a generated call naming a constructor Kotlin source can
-        // no longer resolve.
+        // no longer resolve. Issue #73 narrowed this: a constructor with a value-class parameter has
+        // the same synthetic-bridge shape *without* being hidden (`TextFieldState`), and only the
+        // `kotlin.Deprecated(level = HIDDEN)` on the bridge tells the two apart -- see
+        // [realPublicInitDescriptorsOf].
         //
         // Checked for an **ordinary class only**. A value class's own box constructor is the other
         // case this object's KDoc already warns bytecode cannot judge -- "the compiler makes the
@@ -1237,14 +1240,56 @@ internal object ArtifactScanner {
             .filter { kmClass.isValue || it.jvmSignature.descriptor in realPublicInitDescriptorsOf(ownerNode) }
             .mapNotNull { function ->
                 val (paramDescriptors, _) = splitMethodDescriptor(function.jvmSignature.descriptor)
-                candidateFromFunction(owner, false, function, classpath, paramDescriptors, isComposable = false)?.copy(isConstructor = true)
+                candidateFromFunction(owner, false, function, classpath, paramDescriptors, isComposable = false)
+                    ?.let { it.copy(isConstructor = true, declaration = it.declaration.copy(isConstructor = true)) }
             }
     }
 
+    /**
+     * The JVM descriptors of the `<init>`s Kotlin source outside the module can reach.
+     *
+     * ### Two synthetic shapes, and only one of them is hidden (issue #73)
+     *
+     * A constructor with a **value-class parameter** compiles to a JVM-`private` `<init>` taking the
+     * unboxed values, behind a public `ACC_SYNTHETIC` bridge whose last parameter is a
+     * `DefaultConstructorMarker` -- and that bridge is the descriptor `@Metadata` records. `javap -v` on
+     * `androidx/compose/foundation/text/input/TextFieldState` (foundation-desktop 1.11.1): the metadata
+     * constructor `(initialText: String, initialSelection: TextRange)` is
+     * `(Ljava/lang/String;JLkotlin/jvm/internal/DefaultConstructorMarker;)V`, `ACC_PUBLIC, ACC_SYNTHETIC`,
+     * no annotation. Rejecting every synthetic `<init>` therefore dropped `TextFieldState`'s only public
+     * constructor -- silently, so its stub class came out with no way to create one.
+     *
+     * A `@Deprecated(level = HIDDEN)` constructor with a value-class parameter has **the same** shape,
+     * and is told apart only by the annotation the compiler leaves on the bridge:
+     * `PointerInputChange`'s `(…, ConsumedData, …, DefaultConstructorMarker)` and four of `TextStyle`'s
+     * bridges carry `RuntimeVisibleAnnotations: kotlin.Deprecated(level = DeprecationLevel.HIDDEN)`,
+     * while their non-hidden siblings carry none. Source cannot call a hidden one at all ("Unresolved
+     * reference"), so it stays out -- without a model, like every other hidden declaration
+     * ([kotlinCandidates]). A plain synthetic `<init>` without the marker (an ordinary hidden
+     * constructor) stays out as before.
+     */
     private fun realPublicInitDescriptorsOf(ownerNode: ClassNode): Set<String> =
         ownerNode.methods
-            .filter { it.name == "<init>" && it.access.hasFlag(Opcodes.ACC_PUBLIC) && !it.access.hasFlag(Opcodes.ACC_SYNTHETIC) }
+            .filter { it.name == "<init>" && it.access.hasFlag(Opcodes.ACC_PUBLIC) }
+            .filter { method ->
+                !method.access.hasFlag(Opcodes.ACC_SYNTHETIC) ||
+                    (method.desc.endsWith(DEFAULT_CONSTRUCTOR_MARKER_TAIL) && !isHiddenDeprecated(method))
+            }
             .mapTo(mutableSetOf()) { it.desc }
+
+    /** How a value-class constructor's public bridge ends; see [realPublicInitDescriptorsOf]. */
+    private const val DEFAULT_CONSTRUCTOR_MARKER_TAIL = "Lkotlin/jvm/internal/DefaultConstructorMarker;)V"
+
+    /** `kotlin.Deprecated` is `RUNTIME`-retained, so a `level = HIDDEN` on a bridge is in the visible list. */
+    private fun isHiddenDeprecated(method: org.objectweb.asm.tree.MethodNode): Boolean =
+        method.visibleAnnotations.orEmpty().any { annotation ->
+            if (annotation.desc != "Lkotlin/Deprecated;") return@any false
+            val values = annotation.values ?: return@any false
+            (0 until values.size - 1 step 2).any { i ->
+                values[i] == "level" &&
+                    (values[i + 1] as? Array<*>)?.let { it.getOrNull(0) == "Lkotlin/DeprecationLevel;" && it.getOrNull(1) == "HIDDEN" } == true
+            }
+        }
 
     /**
      * Whether this JVM method is a `@Composable`.

@@ -260,6 +260,15 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   static (`Arrangement.spacedBy`, #53), except `Any`'s members, ones that also exist as a
   `@JvmStatic` static, and `@Composable` ones (declined); an `internal` or file-private object is
   skipped. `Status: implemented` — `GP/artifact/ObjectMemberBindingTest.kt`.
+  A public constructor of a public, non-abstract, non-generic class binds under the class's own name
+  (`pkg.Class`), including one with a value-class parameter, which `kotlinc` compiles to a private
+  `<init>` behind a public synthetic bridge ending in `DefaultConstructorMarker` (the descriptor
+  `@Metadata` records); a `@Deprecated(level = HIDDEN)` constructor, whose bridge carries that
+  annotation, is skipped (#73). A declared `kotlin.CharSequence` **result** — of a function, a property
+  getter or an object constant — crosses as a Python `str` (the generated body returns Kotlin's
+  `toString()` of it; `null` stays `None` for `CharSequence?`); a `CharSequence` parameter is still
+  declined (#73). `Status: implemented` — `GP/artifact/TextStateBindingTest.kt`,
+  `ksp-fixtures/compose/.../TextFieldStateRenderTest.kt`.
 - **B-2** The walker on **klibs** (Kotlin/Native libraries). `Status: partial` —
   `GP/artifact/KlibScannerTest.kt` and `ksp-fixtures/klib-artifact` assert that the scanned klib's
   declarations are declined with reasons; no klib declaration is bound at run time yet.
@@ -298,7 +307,13 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `GP/stubs/TypedStubTest.kt`, `GP/stubs/KotlinNamesOnlyStubTest.kt`,
   `ksp-fixtures/artifact/.../WalkedArtifactStubTest.kt`, `.../StubSignatureAgreesWithRuntimeTest.kt`,
   `tools/stubs/check-stubs.sh` (mypy over the Compose stubs). A class whose name is also a function in
-  its module is `Any`. A property is a `@property` (with a setter for a `var`) of its receiver's stub
+  its module is `Any` — except that a class's own bound constructor is that class's `__init__`
+  (`@overload`ed for several), so the class keeps its stub, members and properties; a single one's
+  docstring carries its table key after `Kotlin constructor: `; its `__`-suffixed table-key spellings
+  stay module functions; a value class bound as its primitive keeps its constructor as a module function
+  returning the primitive (#73, `GP/artifact/TextStateBindingTest.kt`,
+  `ksp-fixtures/artifact/.../WalkedArtifactStubTest.kt`). In Python the class name is the constructor,
+  as `Typography(...)` already was (`M3ProofRenderTest.kt`). A property is a `@property` (with a setter for a `var`) of its receiver's stub
   class, its docstring carrying its table key after `Kotlin property: `; where that class has no stub,
   a comment with the same marker says so (`GP/stubs/PropertyStubTest.kt`). An object constant is annotated with its
   declared type even when that type is nested in the object (`Alignment.End: Horizontal`, a class of the

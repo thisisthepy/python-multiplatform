@@ -239,6 +239,16 @@ internal fun resolveKotlinBoundary(
     direction: BoundaryDirection,
 ): ResolvedBoundary? {
     val classifier = type.classifier as? KmClassifier.Class ?: return null
+    // Issue #73: a declared `kotlin.CharSequence` **result** crosses as a Python `str`. Kotlin's own
+    // `toString()` of a `CharSequence` is its characters (`TextFieldState.text` is a
+    // `TextFieldCharSequence`, a `StringBuilder` is one too), so the generated body converts and the
+    // boundary carries the `STRING` it already knows. Return only: a `CharSequence` *parameter* stays
+    // declined, because nothing has asked for it and `kotlin/CharSequence` has no class file to cast
+    // an object handle to.
+    if (classifier.name == KOTLIN_CHAR_SEQUENCE) {
+        if (direction != BoundaryDirection.RETURN) return null
+        return ResolvedBoundary(if (type.isNullable) NULLABLE_CHAR_SEQUENCE_RESULT else CHAR_SEQUENCE_RESULT, carrier = null)
+    }
     // A nullable *primitive* or value class stays declined. `TypeTag.INT` carries a `Long` and the
     // read narrows it (`(args[0] as Long).toInt()`), so a `null` arriving for an `Int?` would throw
     // inside the cast rather than reach the declaration -- and a nullable value class boxes, which
@@ -498,6 +508,29 @@ private fun renderKotlinTypeName(type: KmType, classpath: ArtifactClasspath, isA
 
 /** `kotlin.Any`, as `KmClassifier.Class` spells it. */
 internal const val KOTLIN_ANY = "kotlin/Any"
+
+/** `kotlin.CharSequence`, as `KmClassifier.Class` spells it. A built-in: it has no class file. */
+internal const val KOTLIN_CHAR_SEQUENCE = "kotlin/CharSequence"
+
+/**
+ * What a declared `kotlin.CharSequence` result crosses as (issue #73): the `str` of its characters.
+ * Return-only -- [resolveKotlinBoundary] never hands it out for a parameter, and its read refuses to be
+ * written into generated source should anything ever ask.
+ */
+private val CHAR_SEQUENCE_RESULT = BoundaryType(
+    tag = "STRING",
+    readFn = { error("a kotlin.CharSequence boundary is return-only") },
+    wrapFn = { call -> "($call).toString()" },
+    isReturnOnly = true,
+)
+
+/** The nullable form: `null` stays `null`, which the `STRING` tag already carries as `None`. */
+private val NULLABLE_CHAR_SEQUENCE_RESULT = BoundaryType(
+    tag = "STRING",
+    readFn = { error("a kotlin.CharSequence boundary is return-only") },
+    wrapFn = { call -> "($call)?.toString()" },
+    isReturnOnly = true,
+)
 
 /** What a `kotlin.Any?` slot crosses as: an object handle, cast to nothing narrower. */
 private val NULLABLE_ANY_BOUNDARY = BoundaryType("OBJECT", "(%s as kotlin.Any?)", "(%s)")

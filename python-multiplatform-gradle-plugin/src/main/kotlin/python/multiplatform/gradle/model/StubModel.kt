@@ -95,6 +95,14 @@ internal data class DeclarationModel(
      * gap to fill.
      */
     val returnSupertypes: List<String> = emptyList(),
+    /**
+     * The declaration is a class's own constructor (issue #73): [simpleName] is the class's name,
+     * [owner] its package and [returnType] the class itself. A stub renders it as that class's
+     * `__init__` rather than as a module function that would take the class's name away from it -- a
+     * top-level factory of the same name (`PaddingValues(...)`) is a different declaration and keeps
+     * the `Any` rule.
+     */
+    val isConstructor: Boolean = false,
 ) : Serializable
 
 /** @param name `null` when the producer could not read one (§3.2); never a synthesised `arg0`. */
