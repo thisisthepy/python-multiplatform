@@ -449,7 +449,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 - **B-10** pythonx-compose's `UI.ipynb` scenarios run end to end on desktop (#26), in the spellings
   pythonx-compose decided: with the pythonx-compose **wheel** installed (a path or version input; no
   wheel fails every scenario by name unless `-PnotebookE2e.skip=true` disables them) and the host
-  drawing `PythonContent("pythonx.compose.runtime", "app_root")` (B-8): `import main` draws the root it
+  drawing `PythonAppView(module = "pythonx.compose.runtime", attribute = "app_root")` (B-8): `import main` draws the root it
   declares; the notebook reads and writes the state the screen shows and the screen follows within four
   frames; a cell that redeclares the root with `@app` puts it on screen within four frames with no
   update call, and disabling the replacement wiring (a stub `@app`, or a host handed the root once)
@@ -458,8 +458,10 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   Hangul input-method composition with no Python function started and the root not rerun, holds the
   composing range in Compose, and the notebook reads the committed text; a write from Python outside
   the composition reaches the screen within four frames. Notebook content with no decided or Kotlin
-  counterpart is listed, not imitated. `Status: planned`: `ksp-fixtures/notebook-e2e/` (tests, and a
-  README with the cell map, the wheel commands and the gaps); not yet run.
+  counterpart is listed, not imitated. `Status: implemented` on desktop: `ksp-fixtures/notebook-e2e/` (20 tests, and a
+  README with the cell map, the wheel commands and the gaps), 20 passed, 0 failed against the
+  pythonx-compose `develop` wheel on 2026-10-04 (after #146, #168 and pythonx-compose #88). No CI
+  workflow runs the module yet.
 
 ## 7. Threading and builds
 
