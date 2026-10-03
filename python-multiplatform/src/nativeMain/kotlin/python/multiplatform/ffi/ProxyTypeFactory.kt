@@ -273,8 +273,8 @@ private fun proxyDealloc(self: CPointer<CPyObject>?) {
  * as a global ([proxyTypeAddress]).
  *
  * Everything else is easier here than on desktop. `PyType_Spec` and `PyType_Slot` come out of
- * cinterop as real structs, so the spec is filled in by field name instead of by hand-computed
- * offsets through `sun.misc.Unsafe`.
+ * cinterop as real structs, so the spec is filled in by field name instead of at hand-computed
+ * offsets in a byte image that desktop copies out through `java.lang.foreign`.
  *
  * ### Threads CPython created
  *
