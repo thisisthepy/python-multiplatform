@@ -170,6 +170,13 @@ internal object ArtifactScanner {
      * `KotlinClassMetadata` instead. */
     private const val KOTLIN_KIND_CLASS = 1
 
+    /** What `kotlin.Any` gives every object and an `object` may override; not part of its API. */
+    private val ANY_MEMBER_SIGNATURES = setOf(
+        "toString" to "()Ljava/lang/String;",
+        "hashCode" to "()I",
+        "equals" to "(Ljava/lang/Object;)Z",
+    )
+
     /**
      * Every binding this jar (or, for a test fixture, this directory of `.class` files -- see
      * `ArtifactClasspath`) offers, sorted by name.
@@ -539,8 +546,17 @@ internal object ArtifactScanner {
         classpath: ArtifactClasspath,
     ): List<Candidate> {
         val bySignature = functions.associateBy { it.jvmSignature.name to it.jvmSignature.descriptor }
+        // A Kotlin `object`'s functions are instance methods of its singleton (issue #53:
+        // `Arrangement.spacedBy`); generated source reaches them as `Owner.name(...)`, so they bind
+        // like a static. A composable one is declined below -- its thunk is a static call.
+        val isObject = ownerIsClass && ownerNode.fields.any { it.name == "INSTANCE" && it.access.hasFlag(Opcodes.ACC_STATIC) }
+        val staticSignatures = ownerNode.methods.filter { it.access.hasFlag(Opcodes.ACC_STATIC) }.map { it.name to it.desc }.toSet()
         return ownerNode.methods
-            .filter { it.access.hasFlag(Opcodes.ACC_PUBLIC) && it.access.hasFlag(Opcodes.ACC_STATIC) }
+            .filter { it.access.hasFlag(Opcodes.ACC_PUBLIC) }
+            .filter {
+                it.access.hasFlag(Opcodes.ACC_STATIC) ||
+                    (isObject && (it.name to it.desc) !in staticSignatures && (it.name to it.desc) !in ANY_MEMBER_SIGNATURES)
+            }
             .filter { !it.access.hasFlag(Opcodes.ACC_SYNTHETIC) && !it.access.hasFlag(Opcodes.ACC_BRIDGE) }
             .filter { !it.name.startsWith("<") && '$' !in it.name }
             .mapNotNull { method ->
@@ -555,6 +571,12 @@ internal object ArtifactScanner {
                             declinedCandidate(owner, ownerIsClass, suspending, classpath, "suspend", isComposable(method))
                         }
                 if (function.isSuspend) return@mapNotNull declinedCandidate(owner, ownerIsClass, function, classpath, "suspend", isComposable(method))
+                if (!method.access.hasFlag(Opcodes.ACC_STATIC) && isComposable(method)) {
+                    return@mapNotNull declinedCandidate(
+                        owner, ownerIsClass, function, classpath,
+                        "a @Composable member of an object: its generated call is a static invocation", true,
+                    )
+                }
                 // A member whose Kotlin-declared parameter count does not match its JVM parameter
                 // count has an implicit JVM parameter metadata does not account for -- a value
                 // class's own instance turned into an unboxed receiver, or a composable's synthetic
@@ -975,11 +997,15 @@ internal object ArtifactScanner {
                     valueClassUnboxOwners = declaredSlots.map { it.unboxOwner } + List(syntheticTags.size) { null },
                 ),
             ),
+            // `paramTags` is slot-aligned, so an extension's receiver is slot 0 and `model.parameters`
+            // (receiver excluded) starts at slot 1. Reading it unshifted gave `NavigationBarItem`'s
+            // `colors` the tag of `alwaysShowLabel`: `bool` in the stub (issue #53).
             declaration = model.copy(
                 bindingName = qualifiedName,
                 returnBoundaryTag = returnTag,
+                receiverBoundaryTag = if (function.isExtension) paramTags.firstOrNull() else null,
                 parameters = model.parameters.mapIndexed { index, parameter ->
-                    parameter.copy(boundaryTag = paramTags.getOrNull(index))
+                    parameter.copy(boundaryTag = paramTags.getOrNull(index + (if (function.isExtension) 1 else 0)))
                 },
             ),
         )

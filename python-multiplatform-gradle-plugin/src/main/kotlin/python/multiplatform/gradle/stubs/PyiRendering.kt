@@ -33,6 +33,11 @@ import python.multiplatform.gradle.model.ValueClassModel
  * `PaddingValues` the interface) cannot be both in one Python module, and the runtime resolves the
  * name to the function, so such a type is annotated `Any`.
  *
+ * A Kotlin `object` (`Alignment`, `Arrangement`) is a module of its constants and functions, and the
+ * types nested in it (`Alignment.Horizontal`) are classes of that same module, so
+ * `Alignment.End` is annotated `Horizontal` rather than `Any` (issue #53). The object's own type
+ * (`Alignment.Center: Alignment`) has no class to name and stays `Any`.
+ *
  * ### Extension functions are also methods
  *
  * The runtime attaches an extension to the receiver's proxy class (`PythonxAdapter._attach`), reached
@@ -253,8 +258,22 @@ private class StubRenderer(private val bound: List<DeclarationModel>) {
     private fun classReference(type: KotlinTypeModel, ctx: ModuleOut): String =
         classReference(type.qualifiedName, type.valueClass, ctx)
 
+    /**
+     * [classRefOf], except that a type nested in a Kotlin `object` whose constants and functions are
+     * a module of their own (issue #53) is a class **of that module**: `Alignment.Horizontal` is
+     * `Horizontal` in `androidx.compose.ui.Alignment`, not a class `Alignment` in `androidx.compose.ui`
+     * (a module and a class cannot share the name, which is why this used to fall back to `Any`).
+     * The object's own type (`Alignment`) has no such home and stays unresolved here.
+     */
+    private fun resolveRef(qualifiedName: String): ClassRef? {
+        val ref = classRefOf(qualifiedName) ?: return null
+        val objectModule = "${ref.pkg}.${ref.top}"
+        if (ref.path.size < 2 || objectModule !in moduleNames || ref.top in takenNames[ref.pkg].orEmpty()) return ref
+        return ClassRef(objectModule, ref.path.drop(1))
+    }
+
     private fun classReference(qualifiedName: String, valueClass: ValueClassModel?, ctx: ModuleOut): String {
-        val ref = classRefOf(qualifiedName) ?: return ANY
+        val ref = resolveRef(qualifiedName) ?: return ANY
         if (ref.top in takenNames[ref.pkg].orEmpty() || "${ref.pkg}.${ref.top}" in moduleNames) return ANY
         if (qualifiedName !in classes || classes[qualifiedName] == null) classes[qualifiedName] = valueClass ?: classes[qualifiedName]
         val path = ref.path.joinToString(".")
@@ -408,7 +427,7 @@ private class StubRenderer(private val bound: List<DeclarationModel>) {
         .groupBy({ it.first }, { it.second })
 
     private fun renderClass(qualifiedName: String) {
-        val ref = classRefOf(qualifiedName) ?: return
+        val ref = resolveRef(qualifiedName) ?: return
         val ctx = out(ref.pkg)
         val node = ctx.node(ref.path)
         node.qualifiedName = qualifiedName
