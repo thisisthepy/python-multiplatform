@@ -109,7 +109,8 @@ class BinOp(Expr):
 
     I64 (result I64, except TRUEDIV → F64):
       ADD/SUB/MUL — checked; overflow → deopt.
-      FLOORDIV/MOD — Python floor semantics (result sign follows the divisor for MOD); divisor 0
+      FLOORDIV/MOD — Python floor semantics (result sign follows the divisor for MOD; the runtime
+        handles -2**63 % -1 == 0 without C's undefined behaviour); divisor 0
         → ZeroDivisionError("integer division or modulo by zero") for FLOORDIV and
         ZeroDivisionError("integer modulo by zero") for MOD (CPython 3.13/3.14 messages; the
         runtime's differential tests pin them); -2**63 // -1 overflows → deopt.
@@ -197,8 +198,9 @@ class Box(Expr):
 
 @dataclass(frozen=True)
 class Unbox(Expr):
-    """An OBJ known by the front end to be exactly int/float/bool converted to a scalar. For I64,
-    a value outside the i64 range → deopt (so only legal in a pure function or a guard)."""
+    """An OBJ converted to a scalar. The runtime checks the exact type (`tp_unbox_*`) and the i64
+    range; anything else → deopt. Because it can deopt, it is legal only in a pure function (the
+    verifier enforces this); impure code converts objects with `ObjToFloat` instead."""
 
     operand: Expr
 
@@ -217,7 +219,8 @@ class MathFunc(Enum):
 
 @dataclass(frozen=True)
 class MathCall(Expr):
-    """`math.<func>(x...)` on F64, type F64, with the stdlib `math` module's errors:
+    """`math.<func>(x...)` on F64, type F64 (ATAN2 and HYPOT take exactly two arguments; other arities
+    stay interpreted), with the stdlib `math` module's errors:
     a domain error → ValueError("math domain error"), a range overflow →
     OverflowError("math range error") (CPython's math_1/math_2 rules on errno/inf/nan)."""
 
@@ -229,7 +232,9 @@ class MathCall(Expr):
 class Call(Expr):
     """A direct call of another compiled function in the same module (C to C). If the callee may
     deopt, the caller must be pure (the deopt propagates and the outermost compiled call is
-    redone); the front end otherwise emits `PyCall`."""
+    redone); otherwise the front end calls it as an object (`CallObject(Global(name), ...)`).
+    Recursion (any call cycle) is rejected by the verifier: compiled C has no recursion limit where
+    CPython raises RecursionError."""
 
     function: str
     args: tuple[Expr, ...]
@@ -237,7 +242,7 @@ class Call(Expr):
 
 @dataclass(frozen=True)
 class Global(Expr):
-    """Reading a module-level name (then builtins), looked up **at the time of the read** in the
+    """Reading a module-level name (then builtins) as a new reference, looked up **at the time of the read** in the
     module namespace, exactly as CPython's LOAD_GLOBAL: rebinding the global later is seen.
     Unbound → NameError("name 'x' is not defined"). Type OBJ. This is how compiled code reaches
     functions and classes imported from Kotlin packages through the binder (they are ordinary
@@ -279,10 +284,11 @@ class Truth(Expr):
 
 @dataclass(frozen=True)
 class CompareObj(Expr):
-    """A comparison with an OBJ operand **in a condition** (If/While cond, And/Or operand):
+    """A comparison of two OBJ operands (a scalar side arrives through `Box`) **directly as a
+    condition**: an If/While cond, or an And/Or operand when that And/Or is itself the condition.
     PyObject_RichCompareBool semantics — the rich comparison runs, then its truth value. Type BOOL.
-    The front end must not use it where the comparison's own result object is kept (`x = a < b`),
-    because that object need not be a bool."""
+    Anywhere the comparison's own result object would be kept (`x = a < b`, `r = c and a < b`,
+    `not (a < b)`) it is not allowed, because that object need not be a bool."""
 
     op: CompareKind
     left: Expr
@@ -439,13 +445,13 @@ class Function:
     param (`type(x) is float`, not isinstance — CPython would compute with the int or the subclass
     it was given), i64 range for I64, the ArrayParam checks. A failing guard → deopt (always safe:
     nothing has happened yet). Wrong arity or keyword use → deopt too, so CPython raises its own
-    TypeError.
+    TypeError. A function returning a value must return on every path (no falling off the end).
     """
 
     name: str
     params: tuple[Param | ArrayParam, ...]
     returns: Type
-    locals: dict[str, Type]
+    locals: dict[str, Type]          # non-parameter locals only (temporaries included)
     body: tuple[Stmt, ...]
     pure: bool
     may_deopt: bool
