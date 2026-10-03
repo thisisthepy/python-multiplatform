@@ -1,0 +1,3 @@
+# TypedPython's builtin names (docs/design/typedpython.md §2.3). A `__builtins__.pyi` on the type
+# checker's search path declares names the interpreter provides without an import.
+def compiled[T](f: T, /) -> T: ...

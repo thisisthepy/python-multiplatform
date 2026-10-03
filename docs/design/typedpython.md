@@ -55,7 +55,7 @@ TypedPython 의 목표는 **새 언어를 만들지 않고, 파이썬 문법 그
 |---|---|---|---|
 | 0 | 서드파티 패키지 (의존성) | 없음 — 검사하지 않는다 | 바이트코드 (pypackpack 이 받은 그대로) |
 | 1 `checked` | **사용자 프로젝트의 파이썬 코드 전부 — 기본값** | 빌드 타임 타입 오류, `Any` 유출 0 (§4.2) | 바이트코드 |
-| 1 `compiled` | `@compiled` 또는 모듈 선언 | `checked` + §3.1 금지 목록 | C 확장 모듈 |
+| 1 `compiled` | `@compiled` (내장 이름, import 없음) 또는 모듈 선언 `# typedpython: compiled` | `checked` + §3.1 금지 목록 | C 확장 모듈 |
 | 2 `kernel` | `@kernel` | 객체·힙 할당 없음, 고정 dtype | SPIR-V / MSL / WGSL / PTX |
 
 - **사용자 코드는 표시하지 않아도 검사된다.** 타입 오류가 있으면 Kotlin 컴파일 에러처럼 빌드가
@@ -245,7 +245,14 @@ upstream 대비 수치 오차를 기준선으로 박아 둔다.
 
 ## 8. 미결 사항 (사용자 결정)
 
-1. `compiled` 의 표기 — 모듈 선언 방식, 데코레이터 이름.
+1. ~~`compiled` 의 표기~~ — **결정됨 (2026-10-03, 메인테이너):** `compiled` 는 **내장 이름**이다. 패키지
+   아래에 두지 않고(`@typedpython.compiled` 아님) import 없이 `@compiled` 로 쓴다. 런타임은 임베디드
+   인터프리터 시작 시 `builtins.compiled` 를 설치하고(#42), 일반 CPython 에서는 `typedpython` wheel 의
+   `typedpython_builtins.pth` 가 `builtins` 에 없을 때만 항등 함수를 설치한다(런타임이 넣은 것을 덮어쓰지
+   않는다). 타입 검사기에는 `__builtins__.pyi` 로 알린다 — Pyrefly 1.3.2 는 검색 경로의 그 파일을 추가
+   내장으로 읽는다(실측). 모듈 단위 표기는 `# typedpython: compiled` 주석을 유지한다: `# pyright: strict` 와 같은
+   도구 pragma 형태이고, 실행 시 이름 조회가 필요 없어 일반 CPython 에서 부작용이 없으며, 데코레이터 없이
+   모듈 전체를 지정할 수 있다.
 2. 고정폭 정수의 오버플로 의미.
 3. pypackpack Cython 백엔드 슬롯의 인터페이스를 누가 정하는가.
 4. GPU 착지를 torchnative 커스텀 op 로 할 것인가 (다른 레포 변경).
