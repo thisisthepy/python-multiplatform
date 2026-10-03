@@ -127,6 +127,10 @@ pythonBindings {
             "androidx.compose.foundation.layout",
             "androidx.compose.foundation.ClickableKt",
             "kotlin.system.TimingKt",
+            // `TextUnit(30, TextUnitType.Sp)`: a value class over `Long` whose property is internal,
+            // so it can only ever be held in Python as a boxed handle (issue #168).
+            "androidx.compose.ui.unit.TextUnitKt",
+            "androidx.compose.ui.unit.TextUnitType",
         ),
     )
 }

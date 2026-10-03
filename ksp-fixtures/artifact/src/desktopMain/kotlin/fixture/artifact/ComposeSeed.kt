@@ -6,7 +6,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 
 /**
  * The declarations `WalkedArtifactComposeModifierTest` needs that the *walker* cannot supply,
@@ -84,3 +86,8 @@ fun equalsVerticalPadding(modifier: Modifier, vertical: Double): Boolean =
 /** The negative control for [equalsVerticalPadding]: the same number in the *horizontal* slot. */
 fun equalsHorizontalPadding(modifier: Modifier, horizontal: Double): Boolean =
     modifier == Modifier.padding(horizontal = horizontal.dp)
+
+/** Structural equality of a boxed `TextUnit` against `size.sp`; the box is what a handle resolves to. */
+fun equalsSp(value: TextUnit, size: Double): Boolean = value == size.sp
+
+fun describeValue(value: TextUnit): String = value.toString()
