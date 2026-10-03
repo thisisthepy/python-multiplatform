@@ -377,7 +377,11 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `ksp-fixtures/artifact/.../WalkedArtifactDefaultOmissionTest.kt`, `PM/commonTest/.../PythonxDefaultsTest.kt`.
 - **B-4** Value classes round-trip; only allow-listed ones (e.g. `Dp`) may be written as their raw
   primitive. `Status: implemented`, `GP/artifact/ComposableValueClassSlotTest.kt`,
-  `WalkedArtifactPythonImportTest.kt`.
+  `WalkedArtifactPythonImportTest.kt`. A value class is opened as its raw primitive only when both its
+  constructor and its underlying property are public; otherwise (`TextUnitType`) it crosses as a boxed
+  handle, so a parameter of it takes the boxed value of its own class
+  (`TextUnit(30, TextUnitType.Sp)`) and a raw number is refused (#168,
+  `ksp-fixtures/artifact/.../WalkedArtifactValueClassBoxTest.kt`).
 - **B-5** Python callables can fill Kotlin function-typed parameters (arity and callability checked).
   `Status: partial`, `ksp-fixtures/artifact/.../WalkedArtifactCallbackTest.kt`; a value-returning slot
   (`() -> Float`) does not yet accept a Python callable (`M3ProofRenderTest.kt`
