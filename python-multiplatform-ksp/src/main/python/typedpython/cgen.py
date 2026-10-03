@@ -1346,7 +1346,10 @@ class _FnGen:
     def poll(self) -> None:
         """At the top of each loop iteration (#141): signals, pending calls, GIL hand-off."""
         if not self.snapshot:
-            self.emit("if (tp_poll(tp_st->breaker) != 0) { tp_rc = -1; goto tp_exit; }")
+            # A function-local countdown (kept in a register), not the module counter: a load and
+            # store of a global on every iteration of a short inner loop cost fannkuch ~38%.
+            self.emit("if (--tp_pc == 0) { tp_pc = TP_POLL_INTERVAL; "
+                      "if (tp_poll_slow(tp_st->breaker) != 0) { tp_rc = -1; goto tp_exit; } }")
 
     def st_While(self, s: ir.While) -> None:
         self.emit("for (;;) {")
@@ -1438,6 +1441,7 @@ class _FnGen:
         out = [_impl_signature(f), "{",
                "    int tp_rc = 0;",
                "    int tp_s = 0;",
+               "    int tp_pc = TP_POLL_INTERVAL; /* loop poll countdown (#141) */",
                "    tp_state *tp_st = (tp_state *)PyModule_GetState(tp_module);",
                "    PyObject *tp_dict = PyModule_GetDict(tp_module); /* borrowed: owned by the module */"]
         params = {p.name for p in f.params} | {g.name for g in f.entry_globals}
@@ -1453,7 +1457,7 @@ class _FnGen:
             init = "NULL" if ct == "PyObject *" else "{0}" if ct in _CT_ARRAY_REV else "0"
             sep = "" if ct.endswith("*") else " "
             out.append(f"    {ct}{sep}{n} = {init};")
-        out.append("    (void)tp_st; (void)tp_dict; (void)tp_s;"
+        out.append("    (void)tp_st; (void)tp_dict; (void)tp_s; (void)tp_pc;"
                    + "".join(f" (void){_ident('l', n)};" for n in self.types if n not in params)
                    + "".join(f" (void){_ident('l', n)};" for n in self.local_arrays))
         # Depth guard (issue #57): nothing is owned yet, so a refusal returns directly and counts
