@@ -30,7 +30,7 @@ def get_modules():
     Because this function manipulates the import system in a way that might
     be fragile or do unexpected things if it is run many times, it uses a
     `call_once` decorator to ensure that this is only ever called exactly
-    one time — in other words, when using this function you will only ever
+    one time, in other words, when using this function you will only ever
     get one copy of each module rather than a fresh import each time.
     """
     import zoneinfo as c_module
@@ -80,7 +80,7 @@ class ZoneInfoTestBase(unittest.TestCase):
         with lock:
             if block_tzdata:
                 # In order to fully exclude tzdata from the path, we need to
-                # clear the sys.modules cache of all its contents — setting the
+                # clear the sys.modules cache of all its contents, setting the
                 # root package to None is not enough to block direct access of
                 # already-imported submodules (though it will prevent new
                 # imports of submodules).

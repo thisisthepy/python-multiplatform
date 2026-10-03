@@ -14,7 +14,7 @@ import kotlin.test.assertTrue
  * `GCLeakTest` asks whether a dropped wrapper's reference eventually comes back, and every one of
  * its assertions is a *lower* bound: the count fell, a cleaner ran, the delta is positive. A
  * mechanism that gives the same reference back **twice** satisfies all of them. That is not a
- * hypothetical failure in this repository — a wrapper taking ownership of a pointer it had only
+ * hypothetical failure in this repository, a wrapper taking ownership of a pointer it had only
  * borrowed produced exactly one extra release per wrapper, corrupted CPython's free lists, and
  * surfaced as a segfault in a test that had nothing to do with the code at fault. It is the reason
  * ROADMAP §1 looked unfixable for three attempts.
@@ -27,7 +27,7 @@ import kotlin.test.assertTrue
  * The target carries [BALLAST] extra references throughout. Without them, a double free of
  * [WRAPPERS] references would drive the count to zero, CPython would free an object this test is
  * still holding, and the failure would arrive as a crash somewhere else instead of as a readable
- * assertion here — which is precisely the failure mode being guarded against, and a test that
+ * assertion here, which is precisely the failure mode being guarded against, and a test that
  * reproduces it uncontrolled is worth less than one that reports it.
  */
 private const val WRAPPERS = 100
@@ -102,8 +102,8 @@ private fun takeAndDrop(target: PyObject, count: Int) {
 /**
  * A cross-thread counter for release actions.
  *
- * `@Volatile` rather than an atomic because each instance is written by exactly one releaser — the
- * cleaner thread for a dropped cleaner, the test thread for an explicit `close()` — so there is no
+ * `@Volatile` rather than an atomic because each instance is written by exactly one releaser, the
+ * cleaner thread for a dropped cleaner, the test thread for an explicit `close()`, so there is no
  * read-modify-write to lose. Two counters, never one shared between two cleaners, for that reason.
  */
 private class ReleaseCount {

@@ -1,9 +1,9 @@
-# tp_runtime.h — the C runtime API generated code may call
+# tp_runtime.h, the C runtime API generated code may call
 
 Generated C (cgen.py) reaches memory and `PyObject`s **only** through these helpers (SPEC N-9).
 Header-only, `static inline`, C99 + CPython C API, no other dependencies. Every helper implements
 the CPython behaviour named in `ir.py`. Return convention unless stated: `0` ok, `1` deopt (no
-Python error set, nothing to undo), `-1` Python error set (CPython's exception type and message — **of the running interpreter**: 3.14 changed several ZeroDivisionError and math-domain messages, and the runtime selects them by PY_VERSION_HEX).
+Python error set, nothing to undo), `-1` Python error set (CPython's exception type and message, **of the running interpreter**: 3.14 changed several ZeroDivisionError and math-domain messages, and the runtime selects them by PY_VERSION_HEX).
 
 ## Integers (int64_t)
     int tp_add_i64(int64_t a, int64_t b, int64_t *out);      /* 0 / 1 on overflow */

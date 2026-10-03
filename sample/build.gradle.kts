@@ -217,7 +217,7 @@ fun patchWasmOutputForCPython(dir: File, modulePrefix: String) {
         // first browser run found. `_start()` is Kotlin `main()`; the library's own test bundle has
         // no such call (its runner starts the tests from outside), so appending had always been
         // enough and every executable bundle would have registered its upcall entry point one line
-        // too late. The symptom is `pmpRegisterUpcall returned -1` — `kotlinExports` still null —
+        // too late. The symptom is `pmpRegisterUpcall returned -1`, `kotlinExports` still null,
         // for an application whose sections 1-4 all worked.
         val startCall = "exports._start();"
         val note = "// Added by :sample's build: upcall registration needs the raw wasm exports,\n" +

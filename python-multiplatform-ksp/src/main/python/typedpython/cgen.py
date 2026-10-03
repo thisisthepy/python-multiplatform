@@ -27,14 +27,14 @@ returns -1 directly: RecursionError set, nothing counted) and `tp_leave_call()` 
 block, so ok, error and deopt exits all leave exactly once.
 
 Ownership rule (ir.py "Safety"), implemented by the `_own_*` emit helpers below and nowhere else:
-  1. every OBJ local — including each OBJ parameter, which the impl copies with a new reference at
-     entry — owns one strong reference, or is NULL;
+  1. every OBJ local, including each OBJ parameter, which the impl copies with a new reference at
+     entry, owns one strong reference, or is NULL;
   2. every OBJ-typed expression evaluates into a fresh temporary that owns a new reference;
      temporaries are NULL at every statement boundary;
   3. a temporary is consumed exactly once: moved into a local (the local's old reference is
      released), moved into `*tp_out` by Return, or released (`tp_release`) right after the helper
      that borrowed it returns;
-  4. every exit of the impl — return, error, deopt — goes through one exit block that releases
+  4. every exit of the impl, return, error, deopt, goes through one exit block that releases
      every OBJ local and temporary.
   The generated code never decrements a reference except through `tp_release` (API.md); the only
   increment is `Py_NewRef` when an OBJ local is read or an OBJ parameter is adopted.
@@ -44,9 +44,9 @@ is a `tp_i64_array` / `tp_f64_array` struct held by value in the impl, zero-init
 (`{0}`), with `list == NULL` and `dirty == NULL`. It is owned by the function:
   1. `Assign(local, NewArray | CopyArray)` builds the new array in a zeroed temporary struct
      (`tp_*_array_new` / `_iota` / `_copy`), and only when that succeeded frees the old array
-     (`tp_*_array_free`) and moves the temporary into the slot — so a failed allocation leaves the
+     (`tp_*_array_free`) and moves the temporary into the slot, so a failed allocation leaves the
      old binding intact, as `a = [0] * n` does, and `a = a[:]` copies before it frees;
-  2. every exit of the impl — return, error, deopt — frees every local array and every array
+  2. every exit of the impl, return, error, deopt, frees every local array and every array
      temporary in the same exit block that releases the OBJ locals (a deopt of a pure function
      frees them before the wrapper redoes the call interpreted);
   3. local arrays never go through `tp_*_array_enter/exit` (there is no list to write back to) and
@@ -66,7 +66,7 @@ any check is "not compiled" (`cls_ok = 0`) and is never touched through memory:
   2. a `Param.cls` guard (`type(x) is C`, or `x is None` when optional) runs in the wrapper AND at the
      top of the impl, before tp_enter_call and before anything is owned: the wrapper's copy serves
      impure functions (whose impl may never return 1), the impl's copy serves C to C Calls, where a
-     failure is a deopt — so a Call of a function with a `Param.cls` parameter counts as a node that
+     failure is a deopt, so a Call of a function with a `Param.cls` parameter counts as a node that
      can deopt (`_can_deopt`), exactly like a callee with entry_globals;
   3. FieldGet / FieldSet / New go through `tp_field_get` / `tp_field_set` / `tp_new_fixed` with the
      captured descriptors; CheckExact deopts (return 1) on mismatch and is legal only in a pure
@@ -76,7 +76,7 @@ Classes changed after init (the class, the module global or an instance's __clas
 guards above only select the path; correctness never depends on them, because user code can change
 a class between calls or, in an impure function, between entry and the access. Every access
 re-proves what it relies on, right where CPython would look:
-  4. FieldGet / FieldSet: `tp_class_current(obj, ...)` — `type(obj) is C` and C's tp_version_tag is
+  4. FieldGet / FieldSet: `tp_class_current(obj, ...)`, `type(obj) is C` and C's tp_version_tag is
      the tag captured at init (or re-proved by `tp_class_refresh`, which adopts a new tag when every
      field is still the very member descriptor and __init__ the very function captured at init:
      `Node.counter = 1` costs one refresh, not a slow path forever). One type compare and one tag
@@ -91,11 +91,11 @@ re-proves what it relies on, right where CPython would look:
      binding on the slow path).
   When a check fails: in an impure function, the slow path with CPython's semantics and no deopt
   (FieldGet -> tp_getattr, FieldSet -> tp_setattr, New -> call what the global held when it was
-  loaded, IsExact -> compare with the current global); in a pure function, a deopt (return 1) —
+  loaded, IsExact -> compare with the current global); in a pure function, a deopt (return 1),
   running the property or __init__ there could repeat its effect if a later node deopted and the
   call were redone. A pure function may thus return 1 even when `may_deopt` is False, so:
   7. an impure caller of a pure callee that uses classes, in a Call without `redo`, redoes that
-     callee interpreted on a 1 (`_redo_call`, any return type) — the callee deopted before running
+     callee interpreted on a 1 (`_redo_call`, any return type), the callee deopted before running
      any user code, so the redo is unobservable; the impure caller itself never deopts;
   8. an impure function with entry globals (closed: it runs no user code, ir.Function.entry_globals)
      checks at entry, in the wrapper, that every class it reaches is current and every class global
@@ -433,7 +433,7 @@ def generate(module: ir.Module, source_path: Path, display_path: str | None = No
 
     out: list[str] = []
     w = out.append
-    w(f"/* Generated by typedpython.cgen from {source_path.name} — do not edit. */")
+    w(f"/* Generated by typedpython.cgen from {source_path.name}, do not edit. */")
     w("#define PY_SSIZE_T_CLEAN")
     w("#include <Python.h>")
     w("#include <stdint.h>")
@@ -570,8 +570,8 @@ def _check_function(f: ir.Function, functions: dict[str, ir.Function]) -> None:
 
 
 def _is_closed(f: ir.Function, functions: dict[str, ir.Function], seen=None) -> bool:
-    """ir.Function.entry_globals: runs no user code — no effect node, Calls only to closed
-    functions — so nothing can rebind a module global while it runs."""
+    """ir.Function.entry_globals: runs no user code, no effect node, Calls only to closed
+    functions, so nothing can rebind a module global while it runs."""
     seen = set() if seen is None else seen
     if f.name in seen:
         return True
@@ -668,7 +668,7 @@ class _FnGen:
 
     def check_proven(self, call: str) -> None:
         """A checked I64 helper on a `proven` op (ir.BinOp.proven): it can only return 0 or 1, and
-        1 means the front end's and the verifier's proof was wrong — an internal error, never a
+        1 means the front end's and the verifier's proof was wrong, an internal error, never a
         deopt (a proven op may sit after an effect)."""
         self.emit(f"tp_s = {call};")
         self.emit("if (tp_s != 0) { PyErr_SetString(PyExc_SystemError, "
@@ -677,7 +677,7 @@ class _FnGen:
     def fail(self) -> None:
         self.emit("{ tp_rc = -1; goto tp_exit; }")
 
-    # ownership helpers — the only places that create or drop references (see module docstring)
+    # ownership helpers, the only places that create or drop references (see module docstring)
 
     def _own_new(self, call: str) -> str:
         """A fresh temporary owning the new reference `call` returns (NULL -> error exit)."""
@@ -1662,7 +1662,7 @@ def _state_functions(mg: _ModGen) -> str:
 
 def _class_info_function(mg: _ModGen) -> str:
     """`__typedpython_class_info__()`: {class name: {compiled, captured_tag, tag, current, slow,
-    refreshed, watched}} — introspection of the guards (module docstring)."""
+    refreshed, watched}}, introspection of the guards (module docstring)."""
     L = [
         "static PyObject *tp_class_info(PyObject *tp_module, PyObject *tp_unused)",
         "{",

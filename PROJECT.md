@@ -1,4 +1,4 @@
-# python-multiplatform — 프로젝트 요점
+# python-multiplatform, 프로젝트 요점
 
 Kotlin Multiplatform 에 CPython 을 임베딩해 **Kotlin 과 Python 이 서로의 라이브러리를 양방향으로**
 쓰게 한다. 모든 지원 플랫폼에서 같은 방식으로 동작하고, 경계를 넘는 비용을 측정하며 줄인다.
@@ -35,7 +35,7 @@ Kotlin Multiplatform 에 CPython 을 임베딩해 **Kotlin 과 Python 이 서로
 | 플랫폼 | Kotlin 실행 환경 | 다운콜 | 업콜 진입 | 상태 |
 |---|---|---|---|---|
 | Desktop (macOS) | JVM | Panama FFM (`invokeExact`) | FFM upcall stub | 전체 스위트 · GraalVM 네이티브 이미지 업콜 검증 |
-| Desktop (Linux/Windows) | JVM | 동상 | 동상 | 배선만 — 실행 기록 없음 |
+| Desktop (Linux/Windows) | JVM | 동상 | 동상 | 배선만, 실행 기록 없음 |
 | Android | ART | JNI `RegisterNatives` | JNI | 기기 테스트 |
 | iOS | Kotlin/Native | cinterop | `@CName` | 시뮬레이터에서 공통 스위트 |
 | androidNative | Kotlin/Native | cinterop | `@CName` | 기기에서 공통 스위트 |
@@ -45,7 +45,7 @@ Kotlin Multiplatform 에 CPython 을 임베딩해 **Kotlin 과 Python 이 서로
 
 | 경로 | 내용 |
 |---|---|
-| `python-multiplatform/` | 라이브러리 — FFI 계층(`python/native/ffi/`), 객체 모델(`python/multiplatform/ffi/`), 업콜 런타임 |
+| `python-multiplatform/` | 라이브러리, FFI 계층(`python/native/ffi/`), 객체 모델(`python/multiplatform/ffi/`), 업콜 런타임 |
 | `python-multiplatform-ksp/` | 업콜 테이블을 생성하는 KSP 프로세서 |
 | `python-multiplatform-gradle-plugin/` | `stagePythonHome`, 아티팩트 워커(빌드된 jar/klib 바인딩), `.pyi` 스텁 생성 |
 | `ksp-fixtures/` | 생성기 산출물을 실제로 쓰는 소비자 모듈 (`app`, `compose`, `artifact`, …) |
@@ -67,7 +67,7 @@ Kotlin Multiplatform 에 CPython 을 임베딩해 **Kotlin 과 Python 이 서로
 ```
 
 - 컴파일 확인은 세 타깃: `compileKotlinAndroidNativeArm64`(기본 루프), `compileKotlinIosSimulatorArm64`,
-  `compileKotlinDesktop`. **androidNative 를 빼먹지 않는다** — `nativeMain` 을 iOS 와 공유한다.
+  `compileKotlinDesktop`. **androidNative 를 빼먹지 않는다**, `nativeMain` 을 iOS 와 공유한다.
 - 생성기 소비자 검증은 **모듈마다 따로**: `:ksp-fixtures:app:desktopTest`,
   `:ksp-fixtures:compose:desktopTest`, `:ksp-fixtures:artifact:desktopTest`.
 - 결과는 `build/test-results/<target>/*.xml` 을 지우고 `--rerun` 으로 다시 돌려 센다.
@@ -84,15 +84,15 @@ Kotlin Multiplatform 에 CPython 을 임베딩해 **Kotlin 과 Python 이 서로
   KSP 업콜 테이블과 프록시(클래스·프로퍼티·companion·`suspend`·취소), jar 아티팩트 워커, Python 에서
   Compose 렌더(데스크톱), Android 부트스트랩, GraalVM 네이티브 이미지 업콜(데스크톱, 수동 검증).
 - **부분**: iOS·androidNative·wasm 의 업콜과 수명 검증, klib 워커(스캐너만), `.pyi` 스텁, GIL 해제,
-  Linux/Windows, free-threaded 는 desktop 한정·옵트인(3.14t, `-PpythonFreeThreaded=true`, 236 테스트 0 실패 — ROADMAP §9).
+  Linux/Windows, free-threaded 는 desktop 한정·옵트인(3.14t, `-PpythonFreeThreaded=true`, 236 테스트 0 실패, ROADMAP §9).
 - **계획**: Android/iOS 의 free-threaded(프리빌트 없음), Android/iOS/wasm 의 Compose, 네이티브 이미지 검증 자동화.
 
 ## 6. 큰 결정들
 
 | 결정 | 근거 |
 |---|---|
-| Python→Kotlin 은 **런타임 리플렉션 아님** — 빌드 타임 테이블 | Kotlin/Native 에 리플렉션이 사실상 없고, GraalVM 네이티브 이미지는 closed-world 다 |
-| **JVM 메서드를 이름으로 찾지 않는다** — Kotlin 소스를 생성해 `kotlinc` 가 컴파일 | 값 클래스 맹글링 접미사가 겹쳐서 이름 조회는 원리적으로 불가능하다 |
+| Python→Kotlin 은 **런타임 리플렉션 아님**, 빌드 타임 테이블 | Kotlin/Native 에 리플렉션이 사실상 없고, GraalVM 네이티브 이미지는 closed-world 다 |
+| **JVM 메서드를 이름으로 찾지 않는다**, Kotlin 소스를 생성해 `kotlinc` 가 컴파일 | 값 클래스 맹글링 접미사가 겹쳐서 이름 조회는 원리적으로 불가능하다 |
 | 바인더는 **Kotlin 네임스페이스를 다른 이름으로 내보내지 않는다** | 사용자 규정. `androidx.*` 는 원본 Kotlin, `pythonx.*` 는 pythonx-compose 의 실제 패키지 |
 | 노출은 **블랙리스트** (`@PythonInternal`) | 화이트리스트는 붙이기를 잊으면 조용히 사라진다 |
 | 병렬성은 **free-threading**, 멀티 인터프리터 아님 | 인터프리터별 GIL 은 C 확장이 `Py_mod_multiple_interpreters` 를 선언해야 import 된다 |
@@ -103,11 +103,11 @@ Kotlin Multiplatform 에 CPython 을 임베딩해 **Kotlin 과 Python 이 서로
 
 ## 7. 열린 질문
 
-`docs/SPEC.md` 끝의 "Outside intent — needs a decision" 이 원본이다. 요지:
+`docs/SPEC.md` 끝의 "Outside intent, needs a decision" 이 원본이다. 요지:
 
-1. `.pyi` 스텁 생성기가 매니페스트 없이도 `androidx.*` 를 `pythonx.*` 로 바꿔 쓴다 — 네임스페이스
+1. `.pyi` 스텁 생성기가 매니페스트 없이도 `androidx.*` 를 `pythonx.*` 로 바꿔 쓴다, 네임스페이스
    개명 금지 규정과 충돌하는가.
-2. 라이브러리가 `sys.modules` 에 합성 `pythonx` 모듈(`__path__ = []`)을 넣는다 — 실제 `pythonx`
+2. 라이브러리가 `sys.modules` 에 합성 `pythonx` 모듈(`__path__ = []`)을 넣는다, 실제 `pythonx`
    패키지를 가리는가.
 3. 멤버 이름의 snake_case 변환은 의도된 것인가.
 4. 범용 `pythonx` 어댑터가 이 저장소에 있어야 하는가, pythonx-compose 에 있어야 하는가.

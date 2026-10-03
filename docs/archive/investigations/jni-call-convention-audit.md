@@ -1,4 +1,4 @@
-> **Superseded** by [docs/investigations/jni-call-convention-audit.md](../../investigations/jni-call-convention-audit.md) on 2026-10-03 — the conclusion, numbers and reproduction steps live there; this is the full original narrative, kept for history.
+> **Superseded** by [docs/investigations/jni-call-convention-audit.md](../../investigations/jni-call-convention-audit.md) on 2026-10-03, the conclusion, numbers and reproduction steps live there; this is the full original narrative, kept for history.
 
 # JNI Calling Convention Audit
 
@@ -200,12 +200,12 @@ Based on CPython's documented semantics, the following rules apply when classify
 Written after checking section 2 against this repository's own measurements and against the
 registration table as it stands at 187 entries (the audit read 71).
 
-**The table holds 366 today**, so this resolution is itself a snapshot — roughly 180 registrations
+**The table holds 366 today**, so this resolution is itself a snapshot, roughly 180 registrations
 have never been classified by any hand-written pass. That is why the classification moved into
 `JniCallConventionClassificationTest`, which re-derives it from `bindings.kt`, `jni_onload.def` and
 the bundled CPython headers on every desktop build. Its re-derivation agrees with the judgement
-recorded here — the eight GC-blocking call sites reproduce exactly, no function was wrongly
-promoted, and all 366 prologues match their convention — so what was missing was never correctness,
+recorded here, the eight GC-blocking call sites reproduce exactly, no function was wrongly
+promoted, and all 366 prologues match their convention, so what was missing was never correctness,
 only a way for it to stay correct.
 
 ## The promotion to `@CriticalNative` is rejected
@@ -226,7 +226,7 @@ API 26-31, only ~2-4ns on API 34+". That is backwards. Measured here, net of the
 `@CriticalNative` is a **loss** on the two newest levels measured. Taking section 2 as written
 would slow every one of those eight functions down on any device from Android 14 onward.
 
-It could be had behind the existing `preferFastNative` branch — critical below 34, ordinary above.
+It could be had behind the existing `preferFastNative` branch, critical below 34, ordinary above.
 That is not being done, for three reasons.
 
 **It is not a relabel.** `@CriticalNative` receives no `JNIEnv` or `jclass`, so it cannot reuse the
@@ -240,11 +240,11 @@ registration name does not change.
 | | audit says | actually |
 |---|---|---|
 | `PyGILState_Release` | "unlocks mutex (non-blocking)" | the release that drops the counter to zero deletes the thread state; clearing a thread state decrefs its dict and exception state, so `__del__` runs |
-| `PyThreadState_GetDict` | "reads struct pointer" | allocates the thread dict with `PyDict_New` on first call per thread — a GC-tracked allocation, so rule 2 applies |
+| `PyThreadState_GetDict` | "reads struct pointer" | allocates the thread dict with `PyDict_New` on first call per thread, a GC-tracked allocation, so rule 2 applies |
 | `PyEval_InitThreads` | "initializes locking" | a no-op retained for the stable ABI (removed from the C API in 3.13; still exported by the bundled `libpython`, confirmed with `nm -D`). Promoting a no-op buys the convention delta and nothing else |
 
 That leaves `Py_IncRef`, `Py_NewRef`, `Py_XNewRef`, `PyGILState_GetThisThreadState` and
-`PyEval_SaveThread` as genuine leaves — and of those, only the three refcount operations are on a
+`PyEval_SaveThread` as genuine leaves, and of those, only the three refcount operations are on a
 path called often enough for tens of nanoseconds to accumulate.
 
 **The audit's own confidence claim does not hold.** "Unresolved entries: none" is not available
@@ -256,12 +256,12 @@ The static sweep found one place where the current configuration contradicts the
 it is a demotion rather than a promotion.
 
 `PyList_GetItemRaw` was registered `@CriticalNative` with **no `@FastNative` twin and no
-`preferFastNative` branch** — the only declaration in `bindings.kt` that ignores the device axis.
+`preferFastNative` branch**, the only declaration in `bindings.kt` that ignores the device axis.
 It is also the per-element call of bulk list iteration, so the penalty multiplies by N. ROADMAP §5
 measured `list → LongArray`, 1000 elements, at 50065.89 ns on API 36 hardware: 50 ns per element,
 against a `@CriticalNative` net cost of 44.05 ns on that device. That 50 ns also covers the loop and
 the `toNativePointer` conversion, so 44.05 is an upper bound on the convention's share rather than
-an attribution — but it is an upper bound of 88%, which is enough to act on.
+an attribution, but it is an upper bound of 88%, which is enough to act on.
 
 So a `@FastNative` twin was added (`f_PyList_GetItemRaw` in `jni_onload.def`,
 `PyList_GetItemRawF` in `bindings.kt`) and the call site now branches on `preferFastNative`, the
@@ -279,7 +279,7 @@ composition was paying for a configuration mistake rather than for crossings.
 
 ## The registrations added since the audit: 116, all ordinary, no defects
 
-The audit read 71 entries. The table has 187 — 74 added at `9abc8edd`, 42 at `aea09585`, none
+The audit read 71 entries. The table has 187, 74 added at `9abc8edd`, 42 at `aea09585`, none
 removed.
 
 **Every one of the 116 is registered `N`-suffixed and declared plain `@JvmStatic external fun`.**
@@ -323,16 +323,16 @@ path and all eight can allocate a GC-tracked exception on the failure path:
 
 | call site | success path | failure path |
 |---|---|---|
-| `Py_IsInitialized` | reads a global | — |
-| `Py_GetVersion` | returns a static `const char*` | — |
-| `PyErr_Occurred` | reads the thread state, borrowed | — |
+| `Py_IsInitialized` | reads a global | - |
+| `Py_GetVersion` | returns a static `const char*` | - |
+| `PyErr_Occurred` | reads the thread state, borrowed | - |
 | `PyLong_FromLongLong` | non-GC allocation | preallocated `MemoryError` |
 | `PyUnicode_FromString` | non-GC allocation | `UnicodeDecodeError` on malformed UTF-8 |
 | `PyUnicode_AsUTF8` | caches the UTF-8 form | `UnicodeEncodeError` on lone surrogates |
 | `PyList_Size` | reads `ob_size` | `PyErr_BadInternalCall` on a non-list |
 | `PyList_GetItem` | indexes the item array | `IndexError` out of range |
 
-That second column is second-order and conditional — the exception instance is GC-tracked, so it
+That second column is second-order and conditional, the exception instance is GC-tracked, so it
 can cross the collection threshold, so the cyclic collector can run a `__del__`, which with upcalls
 live can be Kotlin. It is not a live defect and it is not a reason to demote these eight, which are
 the measured hot path. It is the reason step 4 of the decision procedure does not pretend "provably

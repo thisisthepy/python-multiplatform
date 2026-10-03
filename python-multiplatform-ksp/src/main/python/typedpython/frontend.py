@@ -3,7 +3,7 @@
 `lower(path)` reads one module and returns an `ir.Module`:
 
 - Which functions: module-level `def`s decorated with the builtin `@compiled` (a bare name, no
-  import — #42), or every module-level `def` when the first non-empty line is
+  import, #42), or every module-level `def` when the first non-empty line is
   `# typedpython: compiled`.
 - A function is lowered only when **all** of it is expressible in the IR; otherwise it is left out
   and `Module.skipped[name]` says why, with the line. There is no partial lowering.
@@ -1525,7 +1525,7 @@ class _Lowerer:
             if p.type != Type.OBJ and e.type != p.type:
                 direct = False  # the callee's guard would deopt; the global keeps CPython's result
         # A class parameter's guard (`type(x) is C`) fails for an argument not proved to be a C:
-        # that is a deopt of the callee at its entry — redoable only by a pure caller.
+        # that is a deopt of the callee at its entry, redoable only by a pure caller.
         unproved = any(isinstance(p, ir.Param) and p.cls is not None and not self.arg_proved(e, p)
                        for p, e in zip(callee.params, args))
         if unproved and self.impure_mode:

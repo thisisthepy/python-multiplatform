@@ -28,7 +28,7 @@ from typedpython.ir import (
 )
 
 SOURCE = textwrap.dedent('''\
-    """typedpython class test module — the interpreted reference."""
+    """typedpython class test module, the interpreted reference."""
 
     class Node:
         __slots__ = ("left", "right")
@@ -287,7 +287,7 @@ def test_other_argument_types_take_the_interpreted_path(m):
     def outcome(f, x):
         try:
             return ("ok", f(x))
-        except Exception as e:                            # noqa: BLE001 — the type and text are the result
+        except Exception as e:                            # noqa: BLE001, the type and text are the result
             return (type(e), str(e))
 
     for bad in (5, "x", object(), m.Fat(None, None), m.Fat(m.Fat(None, None), None)):

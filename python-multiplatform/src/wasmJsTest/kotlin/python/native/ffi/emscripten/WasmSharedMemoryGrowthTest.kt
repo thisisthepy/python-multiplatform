@@ -17,7 +17,7 @@ import python.native.ffi.Wasm
  * CPython links `-sALLOW_MEMORY_GROWTH -sINITIAL_MEMORY=20971520`, so growth is not hypothetical:
  * it happens the first time anything allocates past the initial 20 MiB. A JS `TypedArray` view
  * detaches when the buffer grows; Kotlin holds the memory as a wasm *import* and does not. The
- * whole data path of this target — every `char*` read and every C string Kotlin writes — rests on
+ * whole data path of this target, every `char*` read and every C string Kotlin writes, rests on
  * that, and until this test it was proved only by the standalone `wasm-experiment/` (Tests C and
  * D, now in git history), which no build ran.
  *

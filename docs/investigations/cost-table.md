@@ -2,16 +2,16 @@
 
 Kotlin ↔ Python 경계의 비용을, **여섯 타깃 전부에 대해 한 번에** 뽑아 놓은 표.
 
-> **결론과 상태 (2026-10-03 확인).** 업콜 1건은 같은 모양의 다운콜의 약 0.9~3.1 배다 — 호스트 JVM 에서
+> **결론과 상태 (2026-10-03 확인).** 업콜 1건은 같은 모양의 다운콜의 약 0.9~3.1 배다, 호스트 JVM 에서
 > 약 543–576 ns (다운콜 260–266), iOS 시뮬레이터 약 2.3 µs, androidNative 약 3.4 µs, ART API 26/36 약 1.0–1.3 µs,
 > wasmJs 약 300 ns. 모든 숫자는 아래 마커 사이의 표(커밋 `958c0082b294`, 2026-08-14, Apple M1, 타깃당 3회의
 > min–max, 워밍업 100,000)에서 온 것이고, 그 표의 숫자는 이 문장보다 우선한다. 하네스(`benchmarks/cost-table.sh`,
-> `benchmarks/cost_table.py`)는 이 문서의 마커 사이만 다시 쓴다 — 마커와 그 바깥의 "다시 뽑는 법" 절은 하네스가
+> `benchmarks/cost_table.py`)는 이 문서의 마커 사이만 다시 쓴다, 마커와 그 바깥의 "다시 뽑는 법" 절은 하네스가
 > 기대하는 형식이므로 손으로 고치지 않는다. 이 표는 **측정을 기록할 뿐 임계값을 단언하지 않는다**(SPEC X-1).
 > 표는 2026-08-14 컷이므로 그 뒤의 커밋을 반영하지 않는다. 다시 뽑으려면 아래 "다시 뽑는 법".
 
 `docs/design/upcall.md` 와 `docs/design/downcall-design.md` 는 각자의 조사 과정에서 나온 표를 갖고 있고,
-그 표들은 **조사가 끝난 시점의 기록**이다. 이 문서는 다르다 — 여기 있는 표는 사람이 옮겨 적은 것이
+그 표들은 **조사가 끝난 시점의 기록**이다. 이 문서는 다르다, 여기 있는 표는 사람이 옮겨 적은 것이
 아니라 `benchmarks/cost_table.py` 가 실행 결과에서 직접 렌더링한 것이고, 아래 "다시 뽑는 법" 한
 줄이면 통째로 갱신된다.
 
@@ -40,7 +40,7 @@ ANDROID_HOME=/Users/ibrew/Library/Android/sdk ./benchmarks/cost-table.sh --runs 
 
 | 조건 | 없으면 |
 |---|---|
-| **기계가 조용할 것** — 1분 load average 가 4.0 미만 | 수집이 **거부된다.** `--allow-busy` 로 넘길 수 있으나, 그 경우 산출물과 표 머리에 오염 표시가 붙고 그 숫자는 인용 대상이 아니다 |
+| **기계가 조용할 것**, 1분 load average 가 4.0 미만 | 수집이 **거부된다.** `--allow-busy` 로 넘길 수 있으나, 그 경우 산출물과 표 머리에 오염 표시가 붙고 그 숫자는 인용 대상이 아니다 |
 | `ANDROID_HOME` 이 platform-tools 가 있는 SDK 를 가리킬 것 | ART 두 타깃과 `androidNativeArm64` 가 **skipped 로 기록된다** (조용히 빠지지 않는다) |
 | 에뮬레이터 `pmp_api26`, `pmp_api36` 이 떠 있을 것 | 해당 타깃이 skipped 로 기록되고, 띄우는 명령이 출력과 JSON 에 함께 남는다 |
 | Xcode 라이선스 동의 | `iosSimulatorArm64` 가 실패로 기록된다 |
@@ -67,7 +67,7 @@ python3 benchmarks/cost_table.py render --check           # 문서가 최신 JSO
 ```
 
 `--targets` 로 좁히는 것은 **타깃**을 좁히는 것이지 스위트를 좁히는 것이 아니다. 하네스는 어떤
-경우에도 `--tests` 를 쓰지 않는다 — 스위트를 좁히면 측정 영역 자체가 바뀌고, 이 저장소는 그것으로
+경우에도 `--tests` 를 쓰지 않는다, 스위트를 좁히면 측정 영역 자체가 바뀌고, 이 저장소는 그것으로
 한 회차를 버렸다 (양 끝이 1300~1400 ns 로 올라갔다).
 
 ### 나눠 뜬 것을 하나의 표로 합치기
@@ -100,10 +100,10 @@ python3 benchmarks/cost_table.py render --in benchmarks/results/host.json,benchm
 | `artApi26` | `:python-multiplatform:connectedDebugAndroidTest` | `build/outputs/androidTest-results/connected/debug/<기기>/logcat-*.txt` | **에뮬레이터** (`pmp_api26`) |
 | `artApi36` | `:python-multiplatform:connectedDebugAndroidTest` | 〃 | **에뮬레이터** (`pmp_api36`) |
 
-기본 여섯 외에 `androidNativeArm64Api26` 이 하나 더 선언되어 있다 — `docs/design/upcall.md` 의 표가
+기본 여섯 외에 `androidNativeArm64Api26` 이 하나 더 선언되어 있다, `docs/design/upcall.md` 의 표가
 androidNative 를 API 레벨별로 나눠 기록하기 때문이고, `--targets` 로 이름을 대면 돈다.
 
-**ART 만 결과를 읽는 경로가 다르다.** AGP 가 쓰는 JUnit XML 에는 `<system-out>` 이 없다 —
+**ART 만 결과를 읽는 경로가 다르다.** AGP 가 쓰는 JUnit XML 에는 `<system-out>` 이 없다,
 251개 testcase 에 0개였다. 대신 AGP 는 테스트별 `logcat-<클래스>-<메서드>.txt` 를 옆에 남기고,
 벤치마크의 `println` 은 거기 `I System.out:` 줄로 들어간다. 하네스는 그 줄에서 접두사를 떼고 읽는다.
 
@@ -113,7 +113,7 @@ androidNative 를 API 레벨별로 나눠 기록하기 때문이고, `--targets`
 
 | 파일 | 소스셋 | 재는 것 | 파서가 읽는 형태 |
 |---|---|---|---|
-| `overhead/Benchmark.kt` | `commonTest` | 하네스 자체 (`run`/`measure`) — 벤치마크가 아니다 | — |
+| `overhead/Benchmark.kt` | `commonTest` | 하네스 자체 (`run`/`measure`), 벤치마크가 아니다 | - |
 | `overhead/BenchmarkTest.kt` | `commonTest` | 포인터 박싱, refcount 왕복, 문자열 마샬링(8/256/8192자), 정수 마샬링, `PyObject` 래퍼, `PyObject_GetAttrString` | `--- Benchmark Report ---` 표 |
 | `native/ffi/UpcallBoundaryCostTest.kt` | `commonTest` | **업콜 1건**과 그것을 재는 데 필요한 다섯 기준선(같은 실행 안에서) | `--- Upcall boundary cost: <플랫폼> ---` 블록 |
 | `ffi/upcall/GeneratedProxyCostTest.kt` | `commonTest` | 생성된 프록시 계층이 붙이는 비용 | `--- Generated proxy cost... ---` 블록 (JSON·TSV 에는 들어가나 아래 표에는 쓰지 않는다) |
@@ -126,14 +126,14 @@ androidNative 를 API 레벨별로 나눠 기록하기 때문이고, `--targets`
 
 **다운콜은** `BenchmarkTest` 와 `UpcallBoundaryCostTest.measureDowncalls()` 에서,
 **업콜은** `UpcallBoundaryCostTest` 와 `reflection/UpcallOverheadTest` 에서 나온다.
-아래 표 두 개는 앞의 둘만 쓴다 — 여섯 타깃 전부에서 같은 모양으로 도는 것이 그 둘이기 때문이다.
+아래 표 두 개는 앞의 둘만 쓴다, 여섯 타깃 전부에서 같은 모양으로 도는 것이 그 둘이기 때문이다.
 
 파서는 라벨을 하드코딩하지 않는다. 위 블록 형식(`--- 제목: 플랫폼 ---`, 조건 줄, 들여쓴 `라벨  값 ns`)
 을 따르는 것은 전부 JSON·TSV 로 들어간다. 표에 어떤 라벨을 쓸지는 렌더러가 고른다.
 
 ### 워밍업은 타깃의 성질이 아니라 **테스트 클래스**의 성질이다
 
-`Benchmark.printReport` 로 출력하는 클래스가 여럿이고, 각자 워밍업이 다르다 —
+`Benchmark.printReport` 로 출력하는 클래스가 여럿이고, 각자 워밍업이 다르다,
 `BenchmarkTest` 는 100,000, `reflection/UpcallOverheadTest` 는 `Benchmark.run` 의 기본값 1,000,
 `GeneratedProxyCostTest` 는 5,000. 그래서 하네스는 모든 행에 **출력한 테스트 클래스**를 함께
 기록하고, 렌더러는 `BenchmarkTest` 행만 그 표에 넣는다. 나머지는 "출력한 테스트" 열을 달아 별도
@@ -152,7 +152,7 @@ androidNative 를 API 레벨별로 나눠 기록하기 때문이고, `--targets`
 
 공백 구분자를 요구하는 파서는 **다운콜 표를 이루는 다섯 행을 통째로 놓친다.** 하네스는 값을 뒤쪽
 단위(`ns`)에 앵커해 읽으므로 영향받지 않는다. 다만 사람이 읽는 출력으로서는 결함이고,
-`commonTest` 파일을 고치는 일이라 여기서는 손대지 않고 기록만 해 둔다 — 고칠 때는 `padEnd(54)` 를
+`commonTest` 파일을 고치는 일이라 여기서는 손대지 않고 기록만 해 둔다, 고칠 때는 `padEnd(54)` 를
 가장 긴 라벨(58자)보다 크게 올리면 된다.
 
 ---
@@ -181,7 +181,7 @@ androidNative 를 API 레벨별로 나눠 기록하기 때문이고, `--targets`
 
 | 파일 | 내용 |
 |---|---|
-| `benchmarks/results/cost-table-<시각>.json` | 실행별 전체 기록 — 조건, 스위트 집계, 파싱된 모든 지표, 건너뛴 타깃과 그 이유 |
+| `benchmarks/results/cost-table-<시각>.json` | 실행별 전체 기록, 조건, 스위트 집계, 파싱된 모든 지표, 건너뛴 타깃과 그 이유 |
 | `benchmarks/results/cost-table-<시각>.tsv` | 같은 것의 long-format. `target run status source section label value unit iterations platform commit contaminated` |
 | `benchmarks/results/logs/<타깃>-run<N>-<시각>.log` | 그 실행의 Gradle 출력 전체 |
 | 이 문서의 마커 사이 | 위 JSON 에서 렌더링된 표 |
@@ -192,7 +192,7 @@ CPU·코어 수·OS, **시작/종료 load average 와 ceiling**, 타깃당 실�
 `WARMUP_BULK`, **기기·시뮬레이터 식별자**(AVD 이름, 시리얼, API 레벨, ABI / 부팅된 시뮬레이터),
 플랫폼이 스스로 보고한 이름, 스위트 통과·실패·스킵 수, 벽시계 시간, 그리고 태스크 종료 코드.
 
-`BenchmarkTest` 의 워밍업만 소스에서 읽는다 — 그 테스트는 자기 워밍업을 출력하지 않기 때문이다.
+`BenchmarkTest` 의 워밍업만 소스에서 읽는다, 그 테스트는 자기 워밍업을 출력하지 않기 때문이다.
 (`UpcallBoundaryCostTest` 는 출력한다.) 워밍업 없는 숫자가 이 표를 한 번 무효화했으므로 추정하지
 않고, 읽지 못하면 그 사실을 기록한다.
 
@@ -206,17 +206,17 @@ _Generated by `benchmarks/cost_table.py` from `cut-hostless.json, cut-api36.json
 
 Every number below is a function of these. A cost table without them is a record of whatever else was running.
 
-- **commit** `958c0082b294` — Merge branch 'work/objecttype' into develop
+- **commit** `958c0082b294`, Merge branch 'work/objecttype' into develop
 - **branch** `develop`, worktree `/Volumes/macMini/thisisthepy/PythonMultiplatform`
-- **captured** 2026-08-14T16:31:30+09:00 — the first of several cuts; each one's own time is in the source table below
+- **captured** 2026-08-14T16:31:30+09:00, the first of several cuts; each one's own time is in the source table below
 - **host** Apple M1, 8 cores, Darwin 25.5.0 arm64
-- **load average** [1.97, 2.29, 5.92] at start, [2.47, 3.28, 5.19] at end (ceiling 4.0, guard `ok`) — of the first cut only; per-cut figures below
-- **runs per target** 3 — ranges below are min–max over them
+- **load average** [1.97, 2.29, 5.92] at start, [2.47, 3.28, 5.19] at end (ceiling 4.0, guard `ok`), of the first cut only; per-cut figures below
+- **runs per target** 3, ranges below are min–max over them
 - **`UpcallBoundaryCostTest`** warmup and iteration counts are self-reported per target in the table below (the test prints them)
-- **`BenchmarkTest`** warmup, read from the source at this commit: `WARMUP` = 100000, `WARMUP_BULK` = 10000 (the ≥4096-char string rows use the second — see that file's own caveat)
+- **`BenchmarkTest`** warmup, read from the source at this commit: `WARMUP` = 100000, `WARMUP_BULK` = 10000 (the ≥4096-char string rows use the second, see that file's own caveat)
 - **suite scope** full task, never `--tests`-filtered: narrowing the suite changes what is being measured
 
-This table is merged from several cuts — which target came from which:
+This table is merged from several cuts, which target came from which:
 
 | cut | commit | captured | load at start | contaminated | targets |
 |---|---|---|---|---|---|
@@ -226,9 +226,9 @@ This table is merged from several cuts — which target came from which:
 
 | target | task | status | device / simulator | platform, self-reported | tests/fail/skip | wall s | loop counts |
 |---|---|---|---|---|---|---|---|
-| `desktop` | `:python-multiplatform:desktopTest` | ok | — | MacOS 26.5.1 (aarch64) / JVM 21.0.12 | 396/0/1 | 30.0/12.7/12.5 | iterations per loop: 10000, warmup: 100000 |
-| `iosSimulatorArm64` | `:python-multiplatform:iosSimulatorArm64Test` | ok | — | iOS 26.2 (SDK 260200, arm64) / Native | 350/0/0 | 66.1/36.7/36.5 | iterations per loop: 10000, warmup: 100000 |
-| `wasmJs` | `:python-multiplatform:wasmJsNodeTest` | ok | — | Web emscripten (wasm32) / Wasm Kotlin/Wasm | 364/0/0 | 21.3/5.9/5.7 | iterations per loop: 10000, warmup: 100000 |
+| `desktop` | `:python-multiplatform:desktopTest` | ok | - | MacOS 26.5.1 (aarch64) / JVM 21.0.12 | 396/0/1 | 30.0/12.7/12.5 | iterations per loop: 10000, warmup: 100000 |
+| `iosSimulatorArm64` | `:python-multiplatform:iosSimulatorArm64Test` | ok | - | iOS 26.2 (SDK 260200, arm64) / Native | 350/0/0 | 66.1/36.7/36.5 | iterations per loop: 10000, warmup: 100000 |
+| `wasmJs` | `:python-multiplatform:wasmJsNodeTest` | ok | - | Web emscripten (wasm32) / Wasm Kotlin/Wasm | 364/0/0 | 21.3/5.9/5.7 | iterations per loop: 10000, warmup: 100000 |
 | `androidNativeArm64` | `:python-multiplatform:androidNativeArm64Test` | ok | `pmp_api36` (emulator-5554, API 36, arm64-v8a) | Android 16 (SDK 36, aarch64) / Native | 353/0/0 | 76.4/46.7/46.3 | iterations per loop: 10000, warmup: 100000 |
 | `artApi26` | `:python-multiplatform:connectedDebugAndroidTest` | failed | `pmp_api26` (emulator-5556, API 26, arm64-v8a) | Android 8.0.0 (SDK 26, aarch64) / ART VM 0.9 | 381/3/0 | 153.8/149.1/148.3 | iterations per loop: 10000, warmup: 100000 |
 | `artApi36` | `:python-multiplatform:connectedDebugAndroidTest` | failed | `pmp_api36` (emulator-5554, API 36, arm64-v8a) | Android 16 (SDK 36, aarch64) / ART VM 0.9 | 381/2/0 | 262.9/148.7/146.7 | iterations per loop: 10000, warmup: 100000 |
@@ -246,7 +246,7 @@ This table is merged from several cuts — which target came from which:
 | `artApi26` | 1196.52–1272.28 ns | 1253.41–1295.79 ns | 1800.86–1863.97 ns | 0.92–1.01x | 1.05–1.18x |
 | `artApi36` | 995.61–1154.10 ns | 804.27–838.60 ns | 1100.87–1167.17 ns | 1.18–1.43x | 1.10–1.29x |
 
-Controls, from the same block — these are what say whether a row moved because the boundary moved or because the whole host did:
+Controls, from the same block, these are what say whether a row moved because the boundary moved or because the whole host did:
 
 | target | empty Python loop | pure-Python callee | GIL-held trampoline |
 |---|---|---|---|
@@ -306,22 +306,22 @@ These also come through `Benchmark.printReport`, and they are **not comparable w
 | `UpcallOverheadTest` | `arrayOf(1L) allocation + boxing` | 1,000,000 | 6.44–6.64 ns | 67.25–68.87 ns | 8.66–8.98 ns | 76.93–77.80 ns | 9.31–10.23 ns | 18.86–20.10 ns |
 | `UpcallOverheadTest` | `invoke with a pre-built args array` | 1,000,000 | 8.64–8.91 ns | 173.09–179.16 ns | 23.07–24.06 ns | 240.92–251.28 ns | 34.76–37.70 ns | 60.44–61.46 ns |
 | `UpcallOverheadTest` | `direct Kotlin call (floor)` | 1,000,000 | 2.26–2.95 ns | 15.02–15.39 ns | 4.45–4.63 ns | 15.15–15.49 ns | 4.14–4.21 ns | 13.79–14.69 ns |
-| `WasmFinalizationTest` | `cleaner: registerCleaner + close (the whole hook)` | 50,000 | — | — | 77.70–90.21 ns | — | — | — |
-| `WasmFinalizationTest` | `cleaner: toJsReference() alone (the externref crossing)` | 50,000 | — | — | 32.70–35.38 ns | — | — | — |
-| `WasmMarshallingOverheadTest` | `marshal: malloc+encodeToByteArray+copy+free (old)` | 200,000 | — | — | 76.95–80.44 ns | — | — | — |
-| `WasmMarshallingOverheadTest` | `marshal: malloc+free only` | 200,000 | — | — | 13.41–14.15 ns | — | — | — |
-| `WasmMarshallingOverheadTest` | `marshal: encodeToByteArray only` | 200,000 | — | — | 50.10–52.39 ns | — | — | — |
-| `WasmMarshallingOverheadTest` | `marshal: Wasm.scratchUtf8` | 200,000 | — | — | 28.44–29.48 ns | — | — | — |
-| `WasmMarshallingOverheadTest` | `marshal: Wasm.internedUtf8 (hit)` | 200,000 | — | — | 20.71–21.71 ns | — | — | — |
-| `WasmMarshallingOverheadTest` | `marshal 54-char name: Wasm.scratchUtf8` | 200,000 | — | — | 145.61–152.15 ns | — | — | — |
-| `WasmMarshallingOverheadTest` | `marshal 54-char name: Wasm.internedUtf8 (hit)` | 200,000 | — | — | 24.73–25.88 ns | — | — | — |
-| `WasmMarshallingOverheadTest` | `getattr: C string allocated per call (old)` | 50,000 | — | — | 241.35–259.20 ns | — | — | — |
-| `WasmMarshallingOverheadTest` | `getattr: interned C string (new)` | 50,000 | — | — | 186.85–200.06 ns | — | — | — |
-| `WasmMarshallingOverheadTest` | `getattr via actual: C string per call (old)` | 50,000 | — | — | 222.20–239.95 ns | — | — | — |
-| `WasmMarshallingOverheadTest` | `getattr via actual: interned (new)` | 50,000 | — | — | 191.19–205.26 ns | — | — | — |
-| `WasmMarshallingOverheadTest` | `getattr: scratch C string` | 50,000 | — | — | 192.62–204.75 ns | — | — | — |
-| `WasmMarshallingOverheadTest` | `marshal 4000 B: malloc+encode+copy+free (old)` | 20,000 | — | — | 14285.62–14866.91 ns | — | — | — |
-| `WasmMarshallingOverheadTest` | `marshal 4000 B: Wasm.scratchUtf8` | 20,000 | — | — | 9420.60–9830.11 ns | — | — | — |
+| `WasmFinalizationTest` | `cleaner: registerCleaner + close (the whole hook)` | 50,000 | - | - | 77.70–90.21 ns | - | - | - |
+| `WasmFinalizationTest` | `cleaner: toJsReference() alone (the externref crossing)` | 50,000 | - | - | 32.70–35.38 ns | - | - | - |
+| `WasmMarshallingOverheadTest` | `marshal: malloc+encodeToByteArray+copy+free (old)` | 200,000 | - | - | 76.95–80.44 ns | - | - | - |
+| `WasmMarshallingOverheadTest` | `marshal: malloc+free only` | 200,000 | - | - | 13.41–14.15 ns | - | - | - |
+| `WasmMarshallingOverheadTest` | `marshal: encodeToByteArray only` | 200,000 | - | - | 50.10–52.39 ns | - | - | - |
+| `WasmMarshallingOverheadTest` | `marshal: Wasm.scratchUtf8` | 200,000 | - | - | 28.44–29.48 ns | - | - | - |
+| `WasmMarshallingOverheadTest` | `marshal: Wasm.internedUtf8 (hit)` | 200,000 | - | - | 20.71–21.71 ns | - | - | - |
+| `WasmMarshallingOverheadTest` | `marshal 54-char name: Wasm.scratchUtf8` | 200,000 | - | - | 145.61–152.15 ns | - | - | - |
+| `WasmMarshallingOverheadTest` | `marshal 54-char name: Wasm.internedUtf8 (hit)` | 200,000 | - | - | 24.73–25.88 ns | - | - | - |
+| `WasmMarshallingOverheadTest` | `getattr: C string allocated per call (old)` | 50,000 | - | - | 241.35–259.20 ns | - | - | - |
+| `WasmMarshallingOverheadTest` | `getattr: interned C string (new)` | 50,000 | - | - | 186.85–200.06 ns | - | - | - |
+| `WasmMarshallingOverheadTest` | `getattr via actual: C string per call (old)` | 50,000 | - | - | 222.20–239.95 ns | - | - | - |
+| `WasmMarshallingOverheadTest` | `getattr via actual: interned (new)` | 50,000 | - | - | 191.19–205.26 ns | - | - | - |
+| `WasmMarshallingOverheadTest` | `getattr: scratch C string` | 50,000 | - | - | 192.62–204.75 ns | - | - | - |
+| `WasmMarshallingOverheadTest` | `marshal 4000 B: malloc+encode+copy+free (old)` | 20,000 | - | - | 14285.62–14866.91 ns | - | - | - |
+| `WasmMarshallingOverheadTest` | `marshal 4000 B: Wasm.scratchUtf8` | 20,000 | - | - | 9420.60–9830.11 ns | - | - | - |
 
 <!-- COST-TABLE:GENERATED END -->
 

@@ -29,7 +29,7 @@ internal const val WASM_PROXY_EXPORTS_FILE_NAME = "WasmProxyTypeExports"
  * ### Why this must be generated into the executable, not the library
  *
  * `@WasmExport` is honoured only in the compilation that produces the `.wasm` binary. A library
- * klib linked in does not carry the annotation into the binary's export section — measured, not
+ * klib linked in does not carry the annotation into the binary's export section, measured, not
  * assumed: the identical annotation on the identical function exported from `wasmJsTest` and did
  * not export from `wasmJsMain`. So the three lines cannot live in the library; they must be
  * emitted into each executable compilation that embeds it.
@@ -45,9 +45,9 @@ internal const val WASM_PROXY_EXPORTS_FILE_NAME = "WasmProxyTypeExports"
  * exactly match the C slot signature it fills raises `RuntimeError: null function or function
  * signature mismatch` at runtime. The three C signatures are:
  *
- *     int  tp_traverse(PyObject *self, visitproc visit, void *arg)  — (i32,i32,i32) -> i32
- *     int  tp_clear   (PyObject *self)                              — (i32)         -> i32
- *     void tp_dealloc (PyObject *self)                              — (i32)         -> ()
+ *     int  tp_traverse(PyObject *self, visitproc visit, void *arg) , (i32,i32,i32) -> i32
+ *     int  tp_clear   (PyObject *self)                             , (i32)         -> i32
+ *     void tp_dealloc (PyObject *self)                             , (i32)         -> ()
  *
  * [packageName] is the package the generated file is placed in, matching the executable module's
  * choice. It is the only variable part of the output.

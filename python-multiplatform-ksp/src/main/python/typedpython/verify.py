@@ -6,7 +6,7 @@ section of `ir.py`. A function it cannot prove is removed from `Module.functions
 `Diagnostic`. A proved function comes back with each `Index`/`StoreIndex` whose bounds were proved
 marked `proven=True`; every other access has `proven=False` (an input `proven` is never trusted).
 
-The verifier reads nothing but `ir` — it is independent of the front end — and it trusts no flag
+The verifier reads nothing but `ir`, it is independent of the front end, and it trusts no flag
 the front end set (`pure`, `may_deopt`, `ArrayParam.stored`, node `type`s): each is recomputed from
 the body and compared.
 

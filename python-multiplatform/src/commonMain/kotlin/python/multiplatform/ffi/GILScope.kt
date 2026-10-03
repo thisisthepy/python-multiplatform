@@ -29,7 +29,7 @@ public class ThreadGILState(var state: Int = 0, var depth: Int = 0) {
  * release mark skips it entirely when no reference has been given back since the previous one, so
  * a workload that allocates nothing pays a field compare and nothing else.
  *
- * Not inline, so that [withGIL] — which is — can reach the internal counters through it.
+ * Not inline, so that [withGIL], which is, can reach the internal counters through it.
  */
 @PublishedApi
 internal fun maybeReachEvalCheckpoint(tState: ThreadGILState) {

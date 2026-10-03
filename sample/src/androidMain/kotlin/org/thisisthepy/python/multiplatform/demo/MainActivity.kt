@@ -15,8 +15,8 @@ private const val TAG = "PythonDemo"
  * `Py_Initialize`: CPython's stdlib ships inside the library module's assets and has to be
  * unpacked to a readable directory, and `PYTHONHOME` has to name that directory's prefix.
  *
- * That was ~55 lines here — an ABI lookup, a version-derived stdlib path, a recursive
- * `AssetManager` copy, and an "already unpacked?" probe — all of it duplicated in the external
+ * That was ~55 lines here, an ABI lookup, a version-derived stdlib path, a recursive
+ * `AssetManager` copy, and an "already unpacked?" probe, all of it duplicated in the external
  * consumer app and in the library's own instrumentation fixture, and all of it wrong about the
  * same thing (a copy interrupted partway through looked complete to the probe). It is
  * [PythonBootstrap] now, shipped in the AAR, and the host app's share is one call.

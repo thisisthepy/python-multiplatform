@@ -36,11 +36,11 @@ one prefix holds one `lib-dynload`. Upstream's `utils.sh` has the same limit wit
 **Xcode** (`tools/xcode/install-python.sh`, a Run Script phase after Copy Bundle Resources and before
 Embed Frameworks; `ENABLE_USER_SCRIPT_SANDBOXING = NO`).
 
-1. Runs Gradle as above. The output is captured, then parsed, then checked to be a directory — a
+1. Runs Gradle as above. The output is captured, then parsed, then checked to be a directory, a
    failing Gradle stops the phase and never leaves `rsync` an empty source (issue #59's comment).
 2. `rsync -a --delete` the prefix to `<app>/python-multiplatform-home/`.
 3. The payload, if configured, to `<app>/python/` (`--delete`, without `__pycache__`):
-   `PYTHON_PAYLOAD_DIR=<dir>` (a directory whose contents are the payload root — the app's own Python
+   `PYTHON_PAYLOAD_DIR=<dir>` (a directory whose contents are the payload root, the app's own Python
    sources, or toolchain's `build/pythonStaging/ios/python`), or `PYTHON_PAYLOAD_TASK=<gradle task>`
    that prints `PYTHON_PAYLOAD_DIR=` under `-q` (toolchain's `:app:stagePythonBundleIosForXcode`).
    Neither set: no payload, and an old `<app>/python/` is removed.
@@ -53,7 +53,7 @@ Embed Frameworks; `ENABLE_USER_SCRIPT_SANDBOXING = NO`).
 `Python3.initialize()` calls `applyPackagedPythonHome()` after the `PYTHONHOME` pre-flight check
 (L-3) and before `Py_Initialize()`. `IosPythonHome.resolve()` takes the first of:
 
-1. `PYTHONHOME` in the environment — nothing else happens. The simulator test task and an Xcode
+1. `PYTHONHOME` in the environment, nothing else happens. The simulator test task and an Xcode
    scheme variable keep working as before.
 2. `<NSBundle.mainBundle.resourcePath>/python-multiplatform-home`, only if that directory exists.
 
@@ -101,7 +101,7 @@ export PYTHON_PAYLOAD_DIR="$SRCROOT/../sample/python/src/main"
 ```
 
 It replaced two phases: "Install Target Specific Python Standard Library", which rsynced the slice's
-`lib/` — only `libpython3.14.dylib` — into `<app>/lib/`, and "Prepare Python Binary Modules", which
+`lib/`, only `libpython3.14.dylib`, into `<app>/lib/`, and "Prepare Python Binary Modules", which
 did the framework wrapping from a template copied in as a resource. `iosApp/iosApp/dylib-Info-template.plist`
 is no longer copied into the app; the file itself is still in the project.
 
@@ -175,7 +175,7 @@ Fail shapes and what they mean:
 
 | Seen | Meaning |
 |---|---|
-| No `DEMO` lines, 0% CPU (`sample <pid>` parked in `open$NOCANCEL`) | the app read a path outside its container — check `env` for a stray `PYTHONHOME` |
+| No `DEMO` lines, 0% CPU (`sample <pid>` parked in `open$NOCANCEL`) | the app read a path outside its container, check `env` for a stray `PYTHONHOME` |
 | `Fatal Python error: Failed to import encodings module` | no `python-multiplatform-home/` in the installed app; the phase did not run |
 | `DEMO 8 bundle | ModuleNotFoundError: No module named '_json'` | the `.fwork` did not resolve; compare `sys.executable`'s directory with the app directory |
 | `DEMO 8 bundle | ModuleNotFoundError: No module named 'example_py'` | `<app>/python/` missing: `PYTHON_PAYLOAD_DIR` not set in the phase |

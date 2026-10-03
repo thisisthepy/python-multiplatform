@@ -11,7 +11,7 @@ The behavioural contract of python-multiplatform. It must stay inside [`INTENT.m
 | `planned` | Intended, not asserted by any test. |
 
 Status here was assigned from the test sources at the time of writing (2026-10). "Implemented" means
-"a test asserts it", not "a test was observed passing in this revision" — this document was written
+"a test asserts it", not "a test was observed passing in this revision", this document was written
 without running Gradle. Tests that only print `SKIP` when no interpreter is available are not counted
 as evidence. Paths are relative to the repository root; `PM` = `python-multiplatform/src`,
 `GP` = `python-multiplatform-gradle-plugin/src/test/kotlin/python/multiplatform/gradle`.
@@ -35,7 +35,7 @@ fail, then implement.
   iosSimulatorArm64, androidNativeArm64 and wasmJs (each has a test source set). `partial` for
   `iosArm64`, `iosX64`, `androidNativeX64` (compile-wired, no tests run there).
 - **P-2** Linux and Windows desktop: the build downloads and links the right CPython archive.
-  `Status: partial` — the suite has never been observed running on either.
+  `Status: partial`, the suite has never been observed running on either.
 - **P-3** The interpreter is not vendored: Gradle downloads, verifies and extracts CPython per
   platform; the version is set in `gradle.properties`. `Status: implemented` (build logic;
   `GP/PythonHomeStagingTest.kt` covers the naming, URL, checksum and stamp decisions).
@@ -46,10 +46,10 @@ fail, then implement.
   `Python3.exec(source)` runs statements, `Python3.eval(expr, mode, globals, locals)` returns a
   `PyObject`, `Python3.import(name)` returns a `PyModule`. Python errors surface as `PyException`
   carrying the real Python exception (not a printed-and-cleared one).
-  `Status: implemented` — `PM/commonTest/.../ffi/Python3Test.kt`, `SmokeTest.kt`, `VersionsTest.kt`.
+  `Status: implemented`, `PM/commonTest/.../ffi/Python3Test.kt`, `SmokeTest.kt`, `VersionsTest.kt`.
 - **L-2** `Python3.runMain` / `runApp` run a module or `-c` source with argv, map `sys.exit` status to
   a return value, restore argv, and do not finalize the shared interpreter.
-  `Status: implemented` — `PM/commonTest/.../RunMainTest.kt`, `RunAppTest.kt`.
+  `Status: implemented`, `PM/commonTest/.../RunMainTest.kt`, `RunAppTest.kt`.
 - **L-3** Before `Py_Initialize`, a `PYTHONHOME` pre-flight check turns a missing or unusable stdlib
   into a catchable `IllegalStateException` naming the path and version, instead of CPython's process
   abort. `Status: implemented` on desktop (`PM/desktopTest/.../env/PythonHomeCheckTest.kt`);
@@ -58,20 +58,20 @@ fail, then implement.
   registers `stagePythonHome`, which downloads the matching CPython, verifies it against the release
   `SHA256SUMS`, caches it machine-wide and sets `PYTHONHOME` on `run`/`test`. A user-set `PYTHONHOME`
   is never overridden; `pythonBindings { stagePythonHome.set(false) }` disables it.
-  `Status: partial` — decisions are unit-tested (`GP/PythonHomeStagingTest.kt`); no end-to-end test
+  `Status: partial`, decisions are unit-tested (`GP/PythonHomeStagingTest.kt`); no end-to-end test
   of the task.
 - **L-5** Android: `PythonBootstrap.initialize(context)` unpacks the stdlib shipped in the APK assets
   to app-private storage once (a stamp written last decides re-unpacking, including after APK
-  upgrades), sets `PYTHONHOME` and starts the interpreter. `Status: implemented` (needs a device) —
+  upgrades), sets `PYTHONHOME` and starts the interpreter. `Status: implemented` (needs a device),
   `PM/androidInstrumentedTest/.../env/PythonBootstrapTest.kt`, `PythonPayloadStagingTest.kt`.
 - **L-6** A consumer's Python payload (jar resource on desktop, APK asset on Android) is extracted once
   and put on `sys.path` before the first import. `Status: implemented` on desktop
   (`PM/desktopTest/.../env/PythonPayloadTest.kt`) and Android (`PythonPayloadStagingTest.kt`).
 - **L-7** iOS: the framework carries no stdlib, so `PYTHONHOME` must point at one; the test build
-  extracts it. `Status: partial` — exercised by the shared suite on the simulator; no iOS-specific
+  extracts it. `Status: partial`, exercised by the shared suite on the simulator; no iOS-specific
   lifecycle test beyond `PM/iosSimulatorArm64Test/.../AsyncioAvailabilityProbeTest.kt`. An installed
   app carries its own stdlib: L-11.
-- **L-8** Initialisation sets `builtins.compiled` to an identity decorator (an existing one is kept), so `@compiled` needs no import on any platform (N-7, issue #42). `Status: implemented` — `PM/commonTest/.../ffi/BuiltinCompiledTest.kt`.
+- **L-8** Initialisation sets `builtins.compiled` to an identity decorator (an existing one is kept), so `@compiled` needs no import on any platform (N-7, issue #42). `Status: implemented`, `PM/commonTest/.../ffi/BuiltinCompiledTest.kt`.
 - **L-9** Desktop: a packaged application starts with no `PYTHONHOME` in its environment (issue #60,
   ROADMAP §15.4). The Gradle plugin copies the prefix `stagePythonHome` stages into Compose Desktop's
   application resources (every `prepare*AppResources` task, so `createDistributable` and the
@@ -84,11 +84,11 @@ fail, then implement.
   that directory exists. A prefix taken from a property goes through L-3's check (a catchable
   `IllegalStateException` naming the path and where it came from), is handed to CPython with
   `Py_SetPythonHome`, and is where `libpython` is loaded from when it contains one.
-  `Status: partial` — `GP/PackagedPythonHomeTest.kt` (what is copied, which tasks, the switch);
+  `Status: partial`, `GP/PackagedPythonHomeTest.kt` (what is copied, which tasks, the switch);
   `PM/desktopTest/.../env/PackagedPythonHomeTest.kt` (resolution order, `wchar_t` encoding, library
   lookup) and `PackagedPythonHomeLaunchTest.kt` (a child JVM with `PYTHONHOME` removed imports `json`
   from the prefix a property names, or from a Compose resources directory). The
-  `createDistributable` run itself is a manual check —
+  `createDistributable` run itself is a manual check,
   `docs/platforms/desktop-packaged-app.md`.
 - **L-9a** (issue #74) Desktop packaging and loading of `libpython`: every `lib/**` entry of the desktop jar is a real
   file (never 0 bytes -- Gradle extracts the python-build-standalone symlink `libpython3.14.so` as an empty file, so
@@ -110,9 +110,9 @@ fail, then implement.
   native memory is reached through `java.lang.foreign`, never `sun.misc.Unsafe` (module
   `jdk.unsupported`): the proxy heap type (`ProxyTypeFactory.createProxyType`, `_pm_proxy_base`) is
   built, and its handle slot read and cleared on deallocation, on a runtime limited to `java.base`.
-  `Status: implemented` — `PM/desktopTest/.../ffi/JlinkedRuntimeProxyTypeTest.kt` (a child JVM with
+  `Status: implemented`, `PM/desktopTest/.../ffi/JlinkedRuntimeProxyTypeTest.kt` (a child JVM with
   `--limit-modules java.base` installs the proxy base, and a dropped subclass instance releases its
-  handle). The packaged sample's own log is a manual check —
+  handle). The packaged sample's own log is a manual check,
   `docs/platforms/desktop-packaged-app.md`.
 - **L-11** iOS: an installed app starts with no `PYTHONHOME` in its environment, and
   `Python.xcframework` carries no standard library (issue #59, ROADMAP §13.1). The library build
@@ -131,72 +131,72 @@ fail, then implement.
   `<NSBundle.mainBundle.resourcePath>/python-multiplatform-home` when that directory exists. A
   bundled prefix goes through L-3's check (a catchable `IllegalStateException` naming the path and
   where it came from) and is handed to CPython with `Py_SetPythonHome`. With neither, nothing is set
-  and behaviour is as before. `Status: partial` — `GP/IosPythonHomeLayoutTest.kt` (slice choice,
+  and behaviour is as before. `Status: partial`, `GP/IosPythonHomeLayoutTest.kt` (slice choice,
   source directories, file selection, a staged fake tree); `PM/iosSimulatorArm64Test/.../env/IosPythonHomeTest.kt`
   (resolution order; the simulator test task's `PYTHONHOME` still wins). The installed-app run on the
-  simulator is a manual check — `docs/platforms/ios-app-bundle.md`.
+  simulator is a manual check, `docs/platforms/ios-app-bundle.md`.
 
 ## 2. Low-level C API (downcall surface)
 
 - **C-1** The CPython Stable ABI is declared once as `expect` functions in `EmbedAPI.kt` (≈330) with an
-  `actual` on every platform; no CPython-deprecated symbol is declared. `Status: implemented` —
+  `actual` on every platform; no CPython-deprecated symbol is declared. `Status: implemented`,
   `PM/desktopTest/.../ffi/EmbedApiSurfaceTest.kt` (source scan), `PM/commonTest/.../ffi/EmbedApiLowLevelTest.kt`
   (round trips, borrowed vs. new references, error indicator).
 - **C-2** Desktop calls go through `MethodHandle.invokeExact`, pointers as `JAVA_LONG`; every
   `FunctionDescriptor` linked is declared in the native-image reachability metadata.
-  `Status: implemented` — `PM/desktopTest/.../ffi/ReachabilityMetadataTest.kt`.
+  `Status: implemented`, `PM/desktopTest/.../ffi/ReachabilityMetadataTest.kt`.
 - **C-3** Android binds through `RegisterNatives` with the calling convention chosen per function;
-  re-entrant functions are never `@CriticalNative`. `Status: implemented` —
+  re-entrant functions are never `@CriticalNative`. `Status: implemented`,
   `PM/desktopTest/.../ffi/JniCallConventionClassificationTest.kt`, `PM/androidInstrumentedTest/.../JniWiringTest.kt`.
-- **C-4** Every C API call holds the GIL. `Status: partial` — enforced by convention and README rules;
+- **C-4** Every C API call holds the GIL. `Status: partial`, enforced by convention and README rules;
   the only direct test (`PM/commonTest/.../GilParkingTest.kt`) asserts only "does not crash". Releasing
   the GIL after initialisation is not enabled.
 - **C-5** A thread CPython creates can upcall into ART: it is attached once per thread and detached when
-  it dies. `Status: implemented` on Android — `PM/androidInstrumentedTest/.../UpcallThreadAttachTest.kt`.
+  it dies. `Status: implemented` on Android, `PM/androidInstrumentedTest/.../UpcallThreadAttachTest.kt`.
 - **C-6** wasm: `Py_ssize_t` boundaries and the `-1` error return are handled at the 32-bit ABI.
-  `Status: implemented` — `PM/wasmJsTest/.../WasmPySsizeTBoundaryTest.kt`.
+  `Status: implemented`, `PM/wasmJsTest/.../WasmPySsizeTBoundaryTest.kt`.
 
 ## 3. Object model (Kotlin uses Python)
 
 All in `PM/commonTest`, so they run wherever the interpreter loads.
 
 - **O-1** `PyObject`: `getAttr`, `setAttr`, `delAttr`, `getAttrOrNull`, call (`invoke`), `equals` /
-  `hashCode` / `toString` delegate to Python. `Status: implemented` — `PyObjectTest.kt`.
+  `hashCode` / `toString` delegate to Python. `Status: implemented`, `PyObjectTest.kt`.
 - **O-2** `PyType`: name, bases, MRO, `isSubtypeOf`, `isInstance`, construct by call, `cast` refuses an
-  incompatible object. `Status: implemented` — `PyTypeTest.kt`.
+  incompatible object. `Status: implemented`, `PyTypeTest.kt`.
 - **O-3** `PyException` is a Kotlin `Throwable` carrying the Python exception type and message.
-  `Status: implemented` — `PyExceptionTest.kt`.
+  `Status: implemented`, `PyExceptionTest.kt`.
 - **O-4** Basic types `PyInt`, `PyFloat`, `PyBool`, `PyString`, `PyNone`, bytes round-trip with Kotlin
-  values. `Status: implemented` — `PyBasicTypesTest.kt`, `PyValueBytesConversionTest.kt`.
+  values. `Status: implemented`, `PyBasicTypesTest.kt`, `PyValueBytesConversionTest.kt`.
 - **O-5** Collections implement the Kotlin collection interfaces: `PyList` (`MutableList`, `fromList`,
   views), `PyDict` (`MutableMap`), `PySet` (`MutableSet`, set algebra, frozenset), `PyTuple` (`List`),
-  plus iterators. `Status: implemented` — `PyListTest.kt`, `PyDictTest.kt`, `PySetTest.kt`,
+  plus iterators. `Status: implemented`, `PyListTest.kt`, `PyDictTest.kt`, `PySetTest.kt`,
   `PyTupleTest.kt`, `PyIteratorTest.kt`.
 - **O-6** Modules, builtins, callables (bound methods, class/static methods), utilities (range, slice,
-  ellipsis), import and GC helpers. `Status: implemented` — `PyModuleTest.kt`, `BuiltinsTest.kt`,
+  ellipsis), import and GC helpers. `Status: implemented`, `PyModuleTest.kt`, `BuiltinsTest.kt`,
   `PyCallablesTest.kt`, `PyUtilitiesTest.kt`, `PyImportTest.kt`, `PyGCTest.kt`.
 - **O-7** Conversion: `PyValue` with selectable conversion strategies (`withContext`), lazily cached
   snapshots invalidated on demand; buffer-view types and types with no Kotlin counterpart are refused.
-  `Status: implemented` — `ConversionTest.kt`, `PyValueLazyConversionTest.kt`.
+  `Status: implemented`, `ConversionTest.kt`, `PyValueLazyConversionTest.kt`.
 
 ## 4. Object lifetime
 
 - **M-1** A Kotlin wrapper owns one Python reference and releases it when the wrapper becomes
-  unreachable — no `close()` needed; explicit release is idempotent and runs exactly once.
-  `Status: implemented` — `PM/commonTest/.../ref/GCLeakTest.kt`, `RefCountTest.kt`,
+  unreachable, no `close()` needed; explicit release is idempotent and runs exactly once.
+  `Status: implemented`, `PM/commonTest/.../ref/GCLeakTest.kt`, `RefCountTest.kt`,
   `OwnershipLeakTest.kt`, `DoubleReleaseTest.kt`, `EvalCheckpointTest.kt`.
 - **M-2** On Android below API 33 (no `java.lang.ref.Cleaner`), a `PhantomReference` path does the same.
-  `Status: implemented` — `PM/jvmTest/.../PhantomCleanerRegistryTest.kt`,
+  `Status: implemented`, `PM/jvmTest/.../PhantomCleanerRegistryTest.kt`,
   `PM/androidInstrumentedTest/.../AndroidCleanerPathTest.kt`.
 - **M-3** Reference cycles that cross the boundary (Python → Kotlin proxy → Python) are collected by
   Python's cyclic GC, including on threads CPython created and for Python subclasses of proxies.
   `Status: implemented` on desktop (`PM/desktopTest/.../ref/CycleCollectionTest.kt`,
-  `ksp-fixtures/app/.../RefHolderCycleCollectionTest.kt`); `partial` elsewhere — tests exist for
+  `ksp-fixtures/app/.../RefHolderCycleCollectionTest.kt`); `partial` elsewhere, tests exist for
   native, Android and wasm (`PM/nativeTest/.../CycleCollectionTest.kt`,
   `PM/androidInstrumentedTest/.../CycleCollectionTest.kt`, `PM/wasmJsTest/.../WasmCycleCollectionTest.kt`)
   but `docs/roadmap/ROADMAP.md` §7 records remaining per-target gaps.
 - **M-4** Handles given to Python never alias a reused slot; owned results release when Python drops
-  them. `Status: implemented` — `PM/commonTest/.../reflection/HandleTableTest.kt`,
+  them. `Status: implemented`, `PM/commonTest/.../reflection/HandleTableTest.kt`,
   `ProxyHandleLifetimeTest.kt`, `OwnedResultLifetimeTest.kt`.
 
 ## 5. Upcalls (Python uses Kotlin)
@@ -204,33 +204,33 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 - **U-1** A KSP processor generates, at build time, a function table for every `public` Kotlin
   declaration in a module; `@PythonInternal` excludes a class or member. Fragments from several
   modules aggregate; a name claimed twice is an error. No runtime reflection is used.
-  `Status: implemented` — `PM/commonTest/.../reflection/UpcallTableTest.kt`,
+  `Status: implemented`, `PM/commonTest/.../reflection/UpcallTableTest.kt`,
   `ksp-fixtures/app/src/desktopTest/.../GeneratedTableTest.kt`, `python-multiplatform-ksp/src/test/.../SourceRenderingTest.kt`.
 - **U-2** One entry point per platform marshals arguments (int, float, bool, str, bytes with NUL,
   objects), turns a Kotlin exception into a Python exception and a `Unit` return into `None`.
-  `Status: implemented` — `PM/commonTest/.../UpcallEntryTest.kt`, `UpcallTrampolineTest.kt`,
+  `Status: implemented`, `PM/commonTest/.../UpcallEntryTest.kt`, `UpcallTrampolineTest.kt`,
   `PM/nativeTest/.../UpcallRawEntryPointTest.kt`.
 - **U-3** Generated Python proxies let Python write ordinary Python against Kotlin: construct a class,
   call methods, get/set properties (a `private set` is read-only), read companion / static members.
-  A Kotlin package is importable under its own name. `Status: implemented` on desktop —
+  A Kotlin package is importable under its own name. `Status: implemented` on desktop,
   `PM/commonTest/.../upcall/PythonProxyInstallTest.kt`, `ksp-fixtures/app/.../GeneratedDeclarationKindsTest.kt`,
-  `GeneratedStaticPropertyProxyTest.kt`; `partial` elsewhere — only `ksp-fixtures/app/.../NativeSmokeTest.kt`
+  `GeneratedStaticPropertyProxyTest.kt`; `partial` elsewhere, only `ksp-fixtures/app/.../NativeSmokeTest.kt`
   (androidNative) and `ksp-fixtures/android/.../GeneratedAndroidTableTest.kt` run outside desktop.
 - **U-4** Declaration kinds: objects, companions, interfaces (not constructible), enum entries as
   statics, abstract classes (no constructor), nested classes. Not exposed: annotation classes,
-  generic declarations, data-class synthetics. `Status: implemented` on desktop —
+  generic declarations, data-class synthetics. `Status: implemented` on desktop,
   `GeneratedDeclarationKindsTest.kt`.
 - **U-5** `suspend` functions are awaitable from Python (`await g.greetNow(1)`); a function that never
   suspends completes without a Future; cancelling the Python future cancels the Kotlin coroutine.
-  `Status: implemented` on desktop and Kotlin/Native — `PM/desktopTest/.../upcall/AsyncUpcallDeliveryTest.kt`,
+  `Status: implemented` on desktop and Kotlin/Native, `PM/desktopTest/.../upcall/AsyncUpcallDeliveryTest.kt`,
   `AsyncUpcallCancellationTest.kt`, `AsyncUpcallEarlyCancellationTest.kt`, `PM/nativeTest/.../AsyncUpcallNative*Test.kt`,
   `ksp-fixtures/app/.../GeneratedSuspendTest.kt`; `planned` on wasm (no threads).
 - **U-6** Upcalls work in a GraalVM native image (desktop). `Status: implemented` with manual
-  verification — procedure and record in `docs/platforms/graal-native-image-verification.md`
+  verification, procedure and record in `docs/platforms/graal-native-image-verification.md`
   (`:sample:nativeCompile`, Liberica NIK), guarded automatically by `ReachabilityMetadataTest.kt` (C-2).
   Not automated as a test of the image itself.
 - **U-7** A Kotlin extension function is a method on its receiver's proxy, so chains compose
-  (`Modifier.padding(16).size(24)`). `Status: partial` — asserted against a hand-written,
+  (`Modifier.padding(16).size(24)`). `Status: partial`, asserted against a hand-written,
   Compose-shaped table (`PM/commonTest/.../pythonx/PythonxAdapterTest.kt`
   `anExtensionIsAMethodOnItsReceiverAndTheChainComposes`) and against the real Compose jars through
   the artifact walker (`ksp-fixtures/artifact/.../WalkedArtifactComposeModifierTest.kt`); not
@@ -247,28 +247,28 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   on disk is what `import pythonx` loads. The answer is the same whichever installer
   (`PythonProxySource`, `PythonxAdapter`) ran first for a table. **A name that is both a function and a
   module is callable** (#78): Kotlin has `TextRange(2)` (a top-level factory) and `TextRange.Zero` (a
-  companion constant), so the module `androidx.compose.ui.text.TextRange` is itself callable — calling it
-  runs the function or overload set of that name in its parent package — while its attributes stay the
+  companion constant), so the module `androidx.compose.ui.text.TextRange` is itself callable, calling it
+  runs the function or overload set of that name in its parent package, while its attributes stay the
   companion's constants and functions. One rule with the class case (#73): a Kotlin name that is a
   constructor or factory is what calling it does, whatever else lives under that name. `Status:
-  implemented` on desktop —
+  implemented` on desktop,
   `PM/desktopTest/.../pythonx/KotlinNamedSurfaceTest.kt`, `BinderNamespaceTest.kt`, `ksp-fixtures/compose/.../KotlinSignatureMetadataTest.kt`.
 - **U-9** A Pythonic package can serve extra member names on a Kotlin proxy through one hook,
   `python_multiplatform.binding.add_member_resolver(fn)`, `fn(kotlin_type_name, requested_name,
   kotlin_member_names) -> kotlin_name | (kotlin_name, keyword_map) | None`, asked when no Kotlin member
-  of that name exists — and, for a Kotlin-named member, only when a call passes keywords and only for
+  of that name exists, and, for a Kotlin-named member, only when a call passes keywords and only for
   its `{python_kw: kotlinParam}` keyword map (#34).
   Resolvers are asked before the binder's own U-12 alias, so a resolver still decides a name it
   answers; with none answering, the U-12 alias is served, and a name that is no alias is an
   `AttributeError`. Aliases are cached in the registry, not written on the proxy class (`dir()` stays
   Kotlin-only). Contract in `KotlinSurface.kt`'s
-  KDoc. `Status: implemented` on desktop — `PM/desktopTest/.../pythonx/MemberResolverTest.kt`,
+  KDoc. `Status: implemented` on desktop, `PM/desktopTest/.../pythonx/MemberResolverTest.kt`,
   `ksp-fixtures/compose/.../MemberResolverComposeTest.kt`.
   A resolver (or anything else) reads a member's declaration rows from the receiver type alone with
   `python_multiplatform.describe_member(kotlin_type_name, kotlin_member_name)`: `describe()`'s
   tuple-of-dicts for every extension overload or the property getter/setter that type's proxy serves
   under that name, supertypes included, invoking nothing; `AttributeError` for a name it does not
-  serve (#54). `Status: implemented` — `PM/commonTest/.../pythonx/PythonxPropertyTest.kt`.
+  serve (#54). `Status: implemented`, `PM/commonTest/.../pythonx/PythonxPropertyTest.kt`.
 - **U-10** A Kotlin property is an attribute of its receiver's proxy (#38): a member `val`/`var` of a
   public class or interface reads (and, for a public setter, writes) as a Python `property`, an
   extension property's getter reads the same way on its receiver (`Icons.Default.Add`), and both are
@@ -276,21 +276,21 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   attribute and makes no package. `None` written for a slot with no default is Kotlin's `null` for a
   reference type; a Kotlin proxy written into a `kotlin.Any?` slot is the Kotlin object, and any other
   Python object is held by Kotlin as itself. A Python **scalar** written into a `kotlin.Any`/`kotlin.Any?`
-  slot — a function argument or a property write — is boxed into the Kotlin type it means (#69): `bool`
+  slot, a function argument or a property write, is boxed into the Kotlin type it means (#69): `bool`
   → `kotlin.Boolean` (checked before `int`); `int` → `kotlin.Int` when it fits in 32 bits, else
   `kotlin.Long`, and outside 64 bits refused with a reason; `float` → `kotlin.Double`; `str` →
   `kotlin.String`. `None` is `null` for `Any?`; for a non-null `Any` it is Kotlin's own refusal (the
-  table does not carry nullability). Reading a `kotlin.Any`/`kotlin.Any?` value back — a property, a
-  function result, or a callback argument — gives the Python scalar for a Kotlin `Int`/`Long`/`Short`/`Byte`
+  table does not carry nullability). Reading a `kotlin.Any`/`kotlin.Any?` value back, a property, a
+  function result, or a callback argument, gives the Python scalar for a Kotlin `Int`/`Long`/`Short`/`Byte`
   (`int`), `Double`/`Float` (`float`), `Boolean` (`bool`), `String`/`Char` (`str`), and a proxy for any
-  other Kotlin object. `Status: implemented` —
+  other Kotlin object. `Status: implemented`,
   `PM/commonTest/.../pythonx/PythonxPropertyTest.kt`, `ksp-fixtures/compose/.../PythonContentRenderTest.kt`,
   `AnySlotScalarRenderTest.kt`, `MaterialIconsRenderTest.kt`.
 - **U-11** A KSP-bound function, method or property whose declared return type is a Kotlin class that
   has a generated proxy returns an instance of **that class's proxy** (#94), not a generic owner: its
   methods and properties work and `isinstance(result, TheClass)` holds. The class is found by the declared
   return type's Kotlin name; a return type with no generated proxy stays a generic owner object. The
-  result's ownership is the same as for any owned result. `Status: implemented` —
+  result's ownership is the same as for any owned result. `Status: implemented`,
   `ksp-fixtures/app/.../KspClassResultProxyTest.kt` (red until #94 lands).
 - **U-12** Pythonic names (#131). On a Kotlin-named module every declaration, proxy member and keyword
   parameter is reachable by its Kotlin name **and** by its Pythonic name; the Kotlin name keeps
@@ -340,8 +340,8 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 
 - **B-1** The artifact walker binds declarations from prebuilt **jars** (Kotlin metadata read with ASM,
   overloads suffixed, multi-file facades reachable) by generating Kotlin source that `kotlinc`
-  compiles — never by JVM name lookup. KSP and the walker share one Python namespace.
-  `Status: implemented` on desktop — `GP/artifact/ArtifactScannerTest.kt`,
+  compiles, never by JVM name lookup. KSP and the walker share one Python namespace.
+  `Status: implemented` on desktop, `GP/artifact/ArtifactScannerTest.kt`,
   `ksp-fixtures/artifact/.../WalkedArtifactTableTest.kt`, `WalkedArtifactPythonImportTest.kt`.
   Beside functions and object constants it binds (#38): generic functions whose type parameters are
   unbounded and not reified, each read as `kotlin.Any?` and written out at the call
@@ -350,35 +350,35 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   for a public setter with every class type parameter unbounded, `SETTER` entries `Owner.prop=`; and
   top-level extension property getters (`pkg.prop`, receiver in `receiverTypeName`). Properties take no
   part in overload naming or in a constructor's name check; a property key another binding already
-  holds is declined, and so is a property or an extension function whose receiver has a supertype missing from the consumer's compile classpath (kotlinc cannot build its member scope; the reason names the missing supertype, #66). `Status: implemented` — `GP/artifact/PropertyBindingTest.kt` (properties and, #66, extension functions).
+  holds is declined, and so is a property or an extension function whose receiver has a supertype missing from the consumer's compile classpath (kotlinc cannot build its member scope; the reason names the missing supertype, #66). `Status: implemented`, `GP/artifact/PropertyBindingTest.kt` (properties and, #66, extension functions).
   The public instance functions of a Kotlin-public `object` bind under the object's name like a
   static (`Arrangement.spacedBy`, #53), except `Any`'s members, ones that also exist as a
   `@JvmStatic` static, and `@Composable` ones (declined); an `internal` or file-private object is
-  skipped. `Status: implemented` — `GP/artifact/ObjectMemberBindingTest.kt`.
+  skipped. `Status: implemented`, `GP/artifact/ObjectMemberBindingTest.kt`.
   A public constructor of a public, non-abstract, non-generic class binds under the class's own name
   (`pkg.Class`), including one with a value-class parameter, which `kotlinc` compiles to a private
   `<init>` behind a public synthetic bridge ending in `DefaultConstructorMarker` (the descriptor
   `@Metadata` records); a `@Deprecated(level = HIDDEN)` constructor, whose bridge carries that
-  annotation, is skipped (#73). A declared `kotlin.CharSequence` **result** — of a function, a property
-  getter or an object constant — crosses as a Python `str` (the generated body returns Kotlin's
+  annotation, is skipped (#73). A declared `kotlin.CharSequence` **result**, of a function, a property
+  getter or an object constant, crosses as a Python `str` (the generated body returns Kotlin's
   `toString()` of it; `null` stays `None` for `CharSequence?`); a `CharSequence` parameter is still
-  declined (#73). `Status: implemented` — `GP/artifact/TextStateBindingTest.kt`,
+  declined (#73). `Status: implemented`, `GP/artifact/TextStateBindingTest.kt`,
   `ksp-fixtures/compose/.../TextFieldStateRenderTest.kt`.
-- **B-2** The walker on **klibs** (Kotlin/Native libraries). `Status: partial` —
+- **B-2** The walker on **klibs** (Kotlin/Native libraries). `Status: partial`,
   `GP/artifact/KlibScannerTest.kt` and `ksp-fixtures/klib-artifact` assert that the scanned klib's
   declarations are declined with reasons; no klib declaration is bound at run time yet.
 - **B-3** Default arguments can be omitted from Python (a call per subset of defaulted parameters,
-  ambiguous omissions refused). `Status: implemented` — `GP/artifact/DefaultOmissionTest.kt`,
+  ambiguous omissions refused). `Status: implemented`, `GP/artifact/DefaultOmissionTest.kt`,
   `ksp-fixtures/artifact/.../WalkedArtifactDefaultOmissionTest.kt`, `PM/commonTest/.../PythonxDefaultsTest.kt`.
 - **B-4** Value classes round-trip; only allow-listed ones (e.g. `Dp`) may be written as their raw
-  primitive. `Status: implemented` — `GP/artifact/ComposableValueClassSlotTest.kt`,
+  primitive. `Status: implemented`, `GP/artifact/ComposableValueClassSlotTest.kt`,
   `WalkedArtifactPythonImportTest.kt`.
 - **B-5** Python callables can fill Kotlin function-typed parameters (arity and callability checked).
-  `Status: partial` — `ksp-fixtures/artifact/.../WalkedArtifactCallbackTest.kt`; a value-returning slot
+  `Status: partial`, `ksp-fixtures/artifact/.../WalkedArtifactCallbackTest.kt`; a value-returning slot
   (`() -> Float`) does not yet accept a Python callable (`M3ProofRenderTest.kt`
   `aValueReturningFunctionSlotDoesNotYetAcceptAPythonCallable`).
 - **B-6** `@Composable` functions are callable from Python inside a composition; a Python click reaches
-  a Kotlin callback and the redraw shows it. `Status: implemented` on desktop —
+  a Kotlin callback and the redraw shows it. `Status: implemented` on desktop,
   `ksp-fixtures/compose/src/desktopTest/` (`ComposableRenderTest.kt`, `M3ProofRenderTest.kt`,
   `CallbackDrivenRenderTest.kt`, pointer/drag render tests), `GP/artifact/ComposableBindingTest.kt`;
   `planned` on Android, iOS and wasm.
@@ -389,7 +389,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   callable. The state is read inside the composition, so a Python write into it replaces the root on
   the next frame with no host call; Python callables a root passed into composables are released when
   that root is replaced or the composition is disposed. The entry point names no library.
-  `Status: implemented` on desktop — `ksp-fixtures/compose/.../PythonContentRenderTest.kt`; the module
+  `Status: implemented` on desktop, `ksp-fixtures/compose/.../PythonContentRenderTest.kt`; the module
   compiles for Android, nothing runs there yet.
 - **B-7** The plugin generates `.pyi` stubs for the Kotlin-named modules only, under Kotlin names
   plus their U-12 Pythonic aliases (`fill_max_width = fillMaxWidth` beside each module `def`, a second
@@ -407,10 +407,10 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `ksp-fixtures/artifact/.../WalkedArtifactStubTest.kt`, `.../StubSignatureAgreesWithRuntimeTest.kt`,
   `GP/stubs/CompanionFactoryStubTest.kt` (#78: a name that is both a function and a Kotlin-named
   module is stubbed in its parent package as one attribute whose type has `__call__` (the function or
-  its `@overload`s) and the module's constants and functions as members — never as a bare `def`, which
+  its `@overload`s) and the module's constants and functions as members, never as a bare `def`, which
   would hide `TextRange.Zero` from a checker),
   `tools/stubs/check-stubs.sh` (mypy over the Compose stubs). A class whose name is also a function in
-  its module is `Any` — except that a class's own bound constructor is that class's `__init__`
+  its module is `Any`, except that a class's own bound constructor is that class's `__init__`
   (`@overload`ed for several), so the class keeps its stub, members and properties; a single one's
   docstring carries its table key after `Kotlin constructor: `; its `__`-suffixed table-key spellings
   stay module functions; a value class bound as its primitive keeps its constructor as a module function
@@ -430,12 +430,12 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 - **B-8** CI generates the stubs over the Compose version the build resolves and publishes them
   (`.github/workflows/stubs.yml`): workflow artifact `kotlin-stubs` on every push to `develop`, with a
   README naming the Compose version and the commit, and `kotlin-stubs.zip` on every `v*` tag's release.
-  `Status: partial` — the workflow could not be run where it was written; its YAML parses and its
+  `Status: partial`, the workflow could not be run where it was written; its YAML parses and its
   assemble step was executed locally.
 - **B-9** When a configuration named `typedpythonStubs` exists (toolchain's plugin creates it), every
   stubs task's output directory is added to it, with the task dependency travelling with the files, in
   either plugin application order. Without that configuration nothing happens and none is created.
-  `Status: implemented` — `GP/TypedPythonStubsWiringTest.kt` (a `ProjectBuilder` project; the toolchain
+  `Status: implemented`, `GP/TypedPythonStubsWiringTest.kt` (a `ProjectBuilder` project; the toolchain
   side that consumes the configuration is toolchain#23 and is not exercised here).
 
 ## 7. Threading and builds
@@ -444,24 +444,24 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   (see C-4).
 - **T-2** Free-threaded builds selected with `-PpythonFreeThreaded=true` download a different CPython
   asset. `Status: partial` (desktop only, opt-in; default is `pythonFreeThreaded=false` in `gradle.properties`)
-  — `GP/PythonHomeStagingTest.kt`, `PM/desktopTest/.../FreeThreadedGCGateTest.kt`, `VersionsTest.kt`.
+ , `GP/PythonHomeStagingTest.kt`, `PM/desktopTest/.../FreeThreadedGCGateTest.kt`, `VersionsTest.kt`.
   3.14t runs the whole desktop suite with `-PpythonFreeThreaded=true` (236 tests, 0 failures; ROADMAP §9).
   Only desktop has free-threaded prebuilts; Android and iOS do not. `Py_LIMITED_API` is not defined, so
   `abi3t` is not a blocker.
 - **T-3** `python-multiplatform` publishes per-target, per-flavour CPython include directories as
   `Provider<Directory>` carrying the extraction task (`cpythonIncludeDirectories` extension; see
   `docs/platforms/python-version-acquisition.md` §7). `Status: partial` (only the configured flavour is
-  extracted) — `GP/CPythonIncludeDirectoriesTest.kt`.
+  extracted), `GP/CPythonIncludeDirectoriesTest.kt`.
 - **T-4** `python-multiplatform` publishes the CPython version it embeds: extension `pythonMultiplatform`,
   Gradle attributes `org.thisisthepy.python.version` / `org.thisisthepy.python.free-threaded` on every
   consumable `*Elements` configuration, and the resource `META-INF/python-multiplatform/python.properties`
-  in the jar and AAR (see `docs/platforms/python-version-acquisition.md` "Published version") —
+  in the jar and AAR (see `docs/platforms/python-version-acquisition.md` "Published version"),
   `GP/EmbeddedPythonVersionTest.kt`.
 - **T-5** Every acquired CPython reports the pinned version: `PY_VERSION` in each target's `patchlevel.h`
   equals `pythonVersion`, and a `downloadPython_*` task fails the build, naming the target and both
   versions, when it does not (issue #47: iOS shipped 3.14.6 under `pythonVersion=3.14.7`). The iOS
   extraction is stamped with its lock key so bumping the pinned archive discards the old tree.
-  `Status: implemented` — `GP/AcquiredHeaderVersionTest.kt` (the real-tree case needs the trees from
+  `Status: implemented`, `GP/AcquiredHeaderVersionTest.kt` (the real-tree case needs the trees from
   `downloadAllPythonBuilds`; it skips when nothing was acquired).
 
 ## 8. Measurement
@@ -495,13 +495,13 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   display whose inferred element type is a union) as warnings in `checked` mode and errors in
   `compiled` mode. Nothing
   inside dependencies is reported. `python -m typedpython check` exits 0 / 1 / 2 for clean / errors /
-  tool failure. `Status: partial` — the gate is asserted by
+  tool failure. `Status: partial`, the gate is asserted by
   `python-multiplatform-ksp/src/test/python/` (run with that module's `.venv`); it is **not yet run by the
   build** (design §6 step 1b). Rebinding and mixed containers are found by a second Pyrefly pass over a
   probed copy (design §6.1), which runs only when a file has a name assigned twice or a container
   display; `for` targets and comprehension variables are not probed.
 - **N-8** TypedPython compilation to C (INTENT §1.4; design §4.3; #41). `@compiled` (a builtin name, no
-  import — #42) and a first-line `# typedpython: compiled` mark functions; the compiler lowers them
+  import, #42) and a first-line `# typedpython: compiled` mark functions; the compiler lowers them
   through the typed IR (`typedpython/ir.py`) to C against the CPython C API and builds an extension with
   the platform C compiler. Compiled functions return what CPython returns (IR contract: checked i64
   with deopt to the interpreted function, Python floor division/modulo, exact int/float comparison,
@@ -538,7 +538,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   field access only when its layout is fixed **in CPython too**: it declares `__slots__` listing exactly
   its annotated instance fields, has no base but `object`, no metaclass, no decorator but `@compiled`,
   and (gate, compiled mode) nothing in the project subclasses it or assigns its class attributes. The
-  compiler never adds `__slots__` itself — that would change what CPython does (`__dict__`, `vars()`,
+  compiler never adds `__slots__` itself, that would change what CPython does (`__dict__`, `vars()`,
   adding attributes). What is compiled, keeping CPython's results:
   - field reads/writes on a value guarded `type(x) is C` go straight to the slot (the member descriptor's
     offset, captured and checked at module init); an unset slot raises CPython's AttributeError; values
@@ -565,7 +565,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 
 ---
 
-## Outside intent — needs a decision
+## Outside intent, needs a decision
 
 Findings where current behaviour is not covered by, or appears to conflict with, `INTENT.md`.
 Unless marked resolved, nothing here was changed; each needs the maintainer's call.
