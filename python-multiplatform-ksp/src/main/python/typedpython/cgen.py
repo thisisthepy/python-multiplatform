@@ -185,14 +185,17 @@ def _all_exprs(f: ir.Function):
 
 def _can_deopt(e: ir.Expr, functions: dict[str, ir.Function]) -> bool:
     if isinstance(e, ir.BinOp) and e.left.type is Type.I64 and e.op in _I64_DEOPT:
-        return True
+        return not e.proven              # a proven op cannot deopt (overflow = SystemError)
     if isinstance(e, ir.UnaryOp) and e.op is ir.UnaryOpKind.NEG and e.operand.type is Type.I64:
-        return True
+        return not e.proven
     if isinstance(e, ir.Unbox):
         return True
     if isinstance(e, ir.Call):
+        if e.redo:
+            return False                 # the callee's deopt is absorbed by its interpreted redo
         callee = functions.get(e.function)
-        return callee is not None and callee.may_deopt
+        # a callee's entry-global guard runs at the call (`_FnGen.ev_Call`) and can fail there
+        return callee is not None and (callee.may_deopt or bool(callee.entry_globals))
     return False
 
 
@@ -314,14 +317,31 @@ def _check_function(f: ir.Function, functions: dict[str, ir.Function]) -> None:
         what = type(effects[0]).__name__ if effects else "StoreIndex"
         raise CGenError(f"{f.name}: marked pure but contains an effect ({what})")
     for e in _all_exprs(f):
+        if isinstance(e, (ir.BinOp, ir.UnaryOp)) and e.proven:
+            checked = (e.op in (ir.BinOpKind.ADD, ir.BinOpKind.SUB, ir.BinOpKind.MUL)
+                       if isinstance(e, ir.BinOp) else e.op is ir.UnaryOpKind.NEG)
+            operand = e.left if isinstance(e, ir.BinOp) else e.operand
+            if not checked or operand.type is not Type.I64:
+                raise CGenError(f"{f.name}: proven is set on {e.op.name} of {operand.type} "
+                                "(ir.py: I64 ADD/SUB/MUL and NEG only)")
         if isinstance(e, ir.Call):
             callee = functions.get(e.function)
             if callee is None:
                 raise CGenError(f"{f.name}: Call of {e.function!r}, which is not compiled here")
             if any(isinstance(p, ir.ArrayParam) for p in callee.params):
                 raise CGenError(f"{f.name}: Call of {e.function!r}, which takes array params")
-            if callee.may_deopt and not f.pure:
-                raise CGenError(f"{f.name}: Call of deopting {e.function!r} from an impure caller")
+            if e.redo:
+                if callee.returns not in (Type.F64, Type.BOOL, Type.NONE):
+                    raise CGenError(f"{f.name}: redo Call of {e.function!r}, which returns "
+                                    f"{callee.returns} (ir.py: F64, BOOL or NONE only)")
+                if not callee.pure:
+                    raise CGenError(f"{f.name}: redo Call of impure {e.function!r} "
+                                    "(redoing it could repeat an effect)")
+            elif (callee.may_deopt or callee.entry_globals) and not f.pure:
+                raise CGenError(f"{f.name}: Call of deopting {e.function!r} from an impure caller "
+                                "without redo")
+    if f.entry_globals:
+        _check_entry_globals(f, functions)
     for p in f.params:
         if isinstance(p, ir.ArrayParam):
             if p.type not in ir.ARRAYS:
@@ -330,6 +350,43 @@ def _check_function(f: ir.Function, functions: dict[str, ir.Function]) -> None:
                 raise CGenError(f"{f.name}: array param {p.name} is stored into in a pure function")
         elif p.type not in _CT:
             raise CGenError(f"{f.name}: param {p.name} has type {p.type}")
+
+
+def _is_closed(f: ir.Function, functions: dict[str, ir.Function], seen=None) -> bool:
+    """ir.Function.entry_globals: runs no user code — no effect node, Calls only to closed
+    functions — so nothing can rebind a module global while it runs."""
+    seen = set() if seen is None else seen
+    if f.name in seen:
+        return True
+    seen.add(f.name)
+    for e in _all_exprs(f):
+        if _is_effect(e):
+            return False
+        if isinstance(e, ir.Call):
+            callee = functions.get(e.function)
+            if callee is None or not _is_closed(callee, functions, seen):
+                return False
+    return True
+
+
+def _check_entry_globals(f: ir.Function, functions: dict[str, ir.Function]) -> None:
+    names = [g.name for g in f.entry_globals]
+    if len(set(names)) != len(names):
+        raise CGenError(f"{f.name}: entry_globals lists a name twice")
+    taken = {p.name for p in f.params} | set(f.locals)
+    for g in f.entry_globals:
+        if not isinstance(g, ir.Param) or g.type not in ir.SCALARS:
+            raise CGenError(f"{f.name}: entry global {g.name} must be a scalar Param, not {g.type}")
+        if g.name in taken:
+            raise CGenError(f"{f.name}: entry global {g.name} is also a parameter or local")
+    for s in _walk_stmts(f.body):
+        if isinstance(s, ir.Assign) and s.target in names:
+            raise CGenError(f"{f.name}: assignment to entry global {s.target}")
+        if isinstance(s, ir.ForRange) and s.var in names:
+            raise CGenError(f"{f.name}: entry global {s.var} used as a range variable")
+    if not _is_closed(f, functions):
+        raise CGenError(f"{f.name}: entry_globals in a function that is not closed (it can run "
+                        "user code, which could rebind the global between entry and use)")
 
 
 def _impl_signature(f: ir.Function) -> str:
@@ -341,6 +398,8 @@ def _impl_signature(f: ir.Function) -> str:
             params.append(f"PyObject *{_ident('p', p.name)}")
         else:
             params.append(f"{_CT[p.type]} {_ident('l', p.name)}")
+    for g in f.entry_globals:                  # read and unboxed by the caller (wrapper or Call)
+        params.append(f"{_CT[g.type]} {_ident('l', g.name)}")
     if f.returns is not Type.NONE:
         ct = _CT[f.returns]
         params.append(f"{ct}{'' if ct.endswith('*') else ' '}*tp_out")
@@ -360,6 +419,8 @@ class _FnGen:
         for p in f.params:
             if not isinstance(p, ir.ArrayParam):
                 self.types[p.name] = p.type
+        for g in f.entry_globals:              # the body reads each as Local(name)
+            self.types[g.name] = g.type
         for name, t in f.locals.items():
             if name in self.arrays or (name in self.types and self.types[name] is not t):
                 raise CGenError(f"{f.name}: local {name} conflicts with a parameter")
@@ -381,6 +442,14 @@ class _FnGen:
         """A helper with the 0 / 1 deopt / -1 error convention."""
         self.emit(f"tp_s = {call};")
         self.emit("if (tp_s != 0) { tp_rc = tp_s; goto tp_exit; }")
+
+    def check_proven(self, call: str) -> None:
+        """A checked I64 helper on a `proven` op (ir.BinOp.proven): it can only return 0 or 1, and
+        1 means the front end's and the verifier's proof was wrong — an internal error, never a
+        deopt (a proven op may sit after an effect)."""
+        self.emit(f"tp_s = {call};")
+        self.emit("if (tp_s != 0) { PyErr_SetString(PyExc_SystemError, "
+                  "\"typedpython: proven operation overflowed\"); tp_rc = -1; goto tp_exit; }")
 
     def fail(self) -> None:
         self.emit("{ tp_rc = -1; goto tp_exit; }")
@@ -458,7 +527,10 @@ class _FnGen:
         a, b = self.ev(e.left), self.ev(e.right)
         if lt is Type.I64:
             t = self.tmp("double" if e.op is ir.BinOpKind.TRUEDIV else "int64_t")
-            self.check(f"{_I64_OP[e.op]}({a}, {b}, &{t})")
+            if e.proven:
+                self.check_proven(f"{_I64_OP[e.op]}({a}, {b}, &{t})")
+            else:
+                self.check(f"{_I64_OP[e.op]}({a}, {b}, &{t})")
             return t
         if lt is Type.F64:
             t = self.tmp("double")
@@ -486,7 +558,10 @@ class _FnGen:
             return t
         if ot is Type.I64 and e.op is ir.UnaryOpKind.NEG:
             t = self.tmp("int64_t")
-            self.check(f"tp_neg_i64({v}, &{t})")
+            if e.proven:
+                self.check_proven(f"tp_neg_i64({v}, &{t})")
+            else:
+                self.check(f"tp_neg_i64({v}, &{t})")
             return t
         if ot is Type.F64 and e.op is ir.UnaryOpKind.NEG:
             t = self.tmp("double")
@@ -608,17 +683,89 @@ class _FnGen:
             args.append(v)
             if a.type is Type.OBJ:
                 owned.append(v)
+        values = list(args)                     # the evaluated arguments, for a redo
         t = None
+        self.emit("tp_s = 0;")
+        # The callee's entry globals (ir.Function.entry_globals) are its entry guards: read them
+        # here, at the callee's entry. A mismatch is the callee's deopt (tp_s = 1), handled below
+        # exactly as a deopt inside the callee.
+        for g in callee.entry_globals:
+            args.append(self._read_entry_global(g, "tp_s = 1;"))
         if callee.returns is not Type.NONE:
             t = self.tmp(_CT[callee.returns])
             args.append(f"&{t}")
+        self.emit("if (tp_s == 0) {")
+        self.depth += 1
         # C-to-C recursion has no Python frame: guard the C stack as CPython guards its own.
         self.emit('if (Py_EnterRecursiveCall(" in compiled code")) { tp_rc = -1; goto tp_exit; }')
         self.emit(f"tp_s = {_ident('tp_impl', e.function)}(tp_module{''.join(', ' + x for x in args)});")
         self.emit("Py_LeaveRecursiveCall();")
+        self.depth -= 1
+        self.emit("}")
+        if e.redo:
+            self._redo_call(callee, e.args, values, t)
         self._own_release(*owned)
         self.emit("if (tp_s != 0) { tp_rc = tp_s; goto tp_exit; }")
         return t
+
+    def _read_entry_global(self, g: ir.Param, on_mismatch: str, on_error: str = "tp_rc = -1; goto tp_exit;",
+                           guard: str = "tp_s == 0") -> str:
+        """Emit the entry read of module global `g` (tp_global, exact-type unbox, release) guarded
+        by `tp_s == 0`; on a wrong type or an unbound name run `on_mismatch` (a deopt: the
+        interpreted function then sees the same binding and raises CPython's own NameError where
+        CPython would). Returns the C scalar holding the value."""
+        k = self.mg.name_index(g.name)
+        gv, go = self.tmp(_CT[g.type]), self.tmp("PyObject *")
+        self.emit(f"if ({guard}) {{")
+        self.emit(f"    {go} = tp_global(tp_dict, tp_st->names[{k}]);")
+        self.emit(f"    if ({go} == NULL) {{")
+        self.emit(f"        if (!PyErr_ExceptionMatches(PyExc_NameError)) {{ {on_error} }}")
+        self.emit(f"        PyErr_Clear(); {on_mismatch}")
+        self.emit("    } else {")
+        self.emit(f"        tp_s = {_UNBOX[g.type]}({go}, &{gv});")
+        self.emit(f"        tp_release(&{go});")
+        self.emit(f"        if (tp_s < 0) {{ {on_error} }}")
+        self.emit(f"        if (tp_s != 0) {{ {on_mismatch} }}")
+        self.emit("    }")
+        self.emit("}")
+        return gv
+
+    def _redo_call(self, callee: ir.Function, arg_exprs, values: list[str], t: str | None) -> None:
+        """ir.Call.redo: on the callee's deopt (tp_s == 1) run `__typedpython_interpreted__[callee]`
+        on the already-evaluated arguments (boxed), count the deopt, convert the result back, and
+        continue in the caller. The callee is pure, so the redo is unobservable."""
+        k = self.mg.name_index(callee.name)
+        self.emit("if (tp_s == 1) {")
+        self.depth += 1
+        boxes = []
+        av = []
+        for a, v in zip(arg_exprs, values):
+            if a.type is Type.OBJ:
+                av.append(v)                    # still owned by the caller; released after
+            else:
+                b = self._own_new(f"{_BOX[a.type]}({v})")
+                boxes.append(b)
+                av.append(b)
+        rr = self.tmp("PyObject *")
+        if av:
+            self.emit(f"{{ PyObject *tp_av[{len(av)}] = {{{', '.join(av)}}};")
+            self.emit(f"  {rr} = tp_cg_redo(tp_module, {k}, tp_av, {len(av)}, NULL); }}")
+        else:
+            self.emit(f"{rr} = tp_cg_redo(tp_module, {k}, NULL, 0, NULL);")
+        self._own_release(*boxes)
+        self.emit(f"if ({rr} == NULL) {{ tp_rc = -1; goto tp_exit; }}")
+        rt = callee.returns
+        if rt is Type.NONE:
+            self.emit(f"tp_s = ({rr} == Py_None) ? 0 : 1;")
+            what = "None"
+        else:
+            self.emit(f"tp_s = {_UNBOX[rt]}({rr}, &{t});")
+            what = {Type.F64: "a float", Type.BOOL: "True or False"}[rt]
+        self._own_release(rr)
+        msg = c_string(f"typedpython: the interpreted redo of {callee.name} did not return {what}")
+        self.emit(f"if (tp_s != 0) {{ PyErr_SetString(PyExc_SystemError, {msg}); tp_rc = -1; goto tp_exit; }}")
+        self.depth -= 1
+        self.emit("}")
 
     def ev_Global(self, e: ir.Global) -> str:
         k = self.mg.name_index(e.name)
@@ -835,7 +982,7 @@ class _FnGen:
                "    int tp_s = 0;",
                "    tp_state *tp_st = (tp_state *)PyModule_GetState(tp_module);",
                "    PyObject *tp_dict = PyModule_GetDict(tp_module); /* borrowed: owned by the module */"]
-        params = {p.name for p in f.params}
+        params = {p.name for p in f.params} | {g.name for g in f.entry_globals}
         for name, t in self.types.items():
             if name in params and t is not Type.OBJ:
                 continue
@@ -901,6 +1048,25 @@ class _FnGen:
             L.append(f"    tp_s = {_ARRAY_PFX[p.type]}_enter(tp_args[{i}], &tp_a{i});")
             L.append("    if (tp_s < 0) goto tp_error;")
             L.append("    if (tp_s != 0) goto tp_deopt;")
+        gnames = []
+        if f.entry_globals:
+            L.insert(3, "    PyObject *tp_dict = PyModule_GetDict(tp_module); /* borrowed */")
+            L.insert(3, "    tp_state *tp_st = (tp_state *)PyModule_GetState(tp_module);")
+        for j, g in enumerate(f.entry_globals):
+            # entry read of a module global: exact type or deopt (still before any effect)
+            k = self.mg.name_index(g.name)
+            L.append(f"    {_CT[g.type]} tp_g{j} = 0;")
+            L.append(f"    {{ PyObject *tp_go = tp_global(tp_dict, tp_st->names[{k}]);")
+            L.append("      if (tp_go == NULL) {")
+            L.append("          if (!PyErr_ExceptionMatches(PyExc_NameError)) goto tp_error;")
+            L.append("          PyErr_Clear(); goto tp_deopt; }")
+            L.append(f"      tp_s = {_UNBOX[g.type]}(tp_go, &tp_g{j}); Py_DECREF(tp_go); }}")
+            L.append("    if (tp_s < 0) goto tp_error;")
+            L.append("    if (tp_s != 0) goto tp_deopt;")
+            gnames.append(f"tp_g{j}")
+        if gnames:
+            at = len(args) - (1 if f.returns is not Type.NONE else 0)
+            args[at:at] = gnames
         L.append(f"    tp_s = {_ident('tp_impl', f.name)}(tp_module{''.join(', ' + a for a in args)});")
         if f.pure:
             L.append("    if (tp_s == 1) goto tp_deopt;")

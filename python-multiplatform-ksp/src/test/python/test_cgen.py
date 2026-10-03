@@ -80,9 +80,10 @@ def call(name, *args, kwnames=()):
     return CallObject(OBJ, Global(OBJ, name), tuple(args), tuple(kwnames))
 
 
-def fn(name, params, returns, locals_, body, *, pure, may_deopt, line=1):
+def fn(name, params, returns, locals_, body, *, pure, may_deopt, line=1, entry_globals=()):
     return Function(name=name, params=tuple(params), returns=returns, locals=dict(locals_),
-                    body=tuple(body), pure=pure, may_deopt=may_deopt, source_line=line)
+                    body=tuple(body), pure=pure, may_deopt=may_deopt, source_line=line,
+                    entry_globals=tuple(entry_globals))
 
 
 # The module source that every e2e module embeds; each test picks the functions it compiles.
@@ -208,6 +209,59 @@ SOURCE = textwrap.dedent('''\
         if o:
             return True
         return False
+
+    # --- 957315ea: proven ops, callee-only redo, entry snapshots of globals, CompareObj ---
+    def proven_eff(x: int) -> int:
+        record(x)
+        return x + 1
+
+    def growth(n: int) -> float:
+        acc = 1
+        for i in range(n):
+            acc = acc * 3
+        return float(acc)
+
+    def growth_lie(n: int) -> float:
+        acc = 1
+        for i in range(n):
+            acc = acc * 3
+        return acc          # the IR below claims float(acc): a contract violation the redo catches
+
+    def fill(xs: list[float], n: int) -> float:
+        for i in range(len(xs)):
+            xs[i] = xs[i] * 2.0
+        g = growth(n)
+        xs[0] = xs[0] + g
+        return g
+
+    def fill_lie(xs: list[float], n: int) -> float:
+        xs[0] = xs[0] * 2.0
+        return growth_lie(n)
+
+    def big(n: int) -> bool:
+        acc = 1
+        for i in range(n):
+            acc = acc * 3
+        return acc > 1000
+
+    def flag(xs: list[float], n: int) -> float:
+        xs[0] = xs[0] + 1.0
+        if big(n):
+            return 1.0
+        return 0.0
+
+    def selfeq(x) -> bool:
+        if x == x:
+            return True
+        return False
+
+    SCALE = 2.5
+
+    def scaled(x: float) -> float:
+        return x * SCALE
+
+    def twice_scaled(x: float) -> float:
+        return scaled(x) * 2.0
     ''')
 SOURCE = "import math\n" + SOURCE
 
@@ -370,12 +424,92 @@ def f_truthy():
               pure=False, may_deopt=False)
 
 
+def f_proven_eff():
+    x = L("x", I64)
+    return fn("proven_eff", [Param("x", I64)], I64, {},
+              [ExprStmt(call("record", Box(OBJ, x))),
+               Return(BinOp(I64, BinOpKind.ADD, x, c(1), proven=True))],
+              pure=False, may_deopt=False)
+
+
+def _growth_ir(name, result):
+    acc = L("acc", I64)
+    return fn(name, [Param("n", I64)], result, {"acc": I64, "i": I64},
+              [Assign("acc", c(1)),
+               ForRange("i", c(0), L("n", I64), c(1), (Assign("acc", binop(BinOpKind.MUL, acc, c(3))),)),
+               Return(ToFloat(F64, acc) if result is F64 else Compare(BOOL, CompareKind.GT, acc, c(1000)))],
+              pure=True, may_deopt=True)
+
+
+def f_growth():
+    return _growth_ir("growth", F64)
+
+
+def f_growth_lie():
+    return _growth_ir("growth_lie", F64)
+
+
+def f_big():
+    return _growth_ir("big", BOOL)
+
+
+def f_fill():
+    i, g = L("i", I64), L("g", F64)
+    return fn("fill", [ArrayParam("xs", Type.F64_ARRAY, stored=True), Param("n", I64)], F64,
+              {"i": I64, "g": F64},
+              [ForRange("i", c(0), Len(I64, "xs"), c(1),
+                        (StoreIndex("xs", i, binop(BinOpKind.MUL, Index(F64, "xs", i, proven=True), c(2.0)),
+                                    proven=True),)),
+               Assign("g", Call(F64, "growth", (L("n", I64),), redo=True)),
+               StoreIndex("xs", c(0), binop(BinOpKind.ADD, Index(F64, "xs", c(0)), g)),
+               Return(g)],
+              pure=False, may_deopt=False)
+
+
+def f_fill_lie():
+    return fn("fill_lie", [ArrayParam("xs", Type.F64_ARRAY, stored=True), Param("n", I64)], F64, {},
+              [StoreIndex("xs", c(0), binop(BinOpKind.MUL, Index(F64, "xs", c(0)), c(2.0))),
+               Return(Call(F64, "growth_lie", (L("n", I64),), redo=True))],
+              pure=False, may_deopt=False)
+
+
+def f_flag():
+    return fn("flag", [ArrayParam("xs", Type.F64_ARRAY, stored=True), Param("n", I64)], F64, {},
+              [StoreIndex("xs", c(0), binop(BinOpKind.ADD, Index(F64, "xs", c(0)), c(1.0))),
+               If(Call(BOOL, "big", (L("n", I64),), redo=True), (Return(c(1.0)),)),
+               Return(c(0.0))],
+              pure=False, may_deopt=False)
+
+
+def f_selfeq():
+    x = L("x", OBJ)
+    return fn("selfeq", [Param("x", OBJ)], BOOL, {},
+              [If(CompareObj(BOOL, CompareKind.EQ, x, x), (Return(c(True)),)), Return(c(False))],
+              pure=False, may_deopt=False)
+
+
+def f_scaled():
+    return fn("scaled", [Param("x", F64)], F64, {},
+              [Return(binop(BinOpKind.MUL, L("x", F64), L("SCALE", F64)))],
+              pure=True, may_deopt=False, entry_globals=[Param("SCALE", F64)])
+
+
+def f_twice_scaled():
+    # The callee's entry-global guard can fail at the call: that is a deopt of the callee, which a
+    # pure caller propagates (so this caller may deopt).
+    return fn("twice_scaled", [Param("x", F64)], F64, {},
+              [Return(binop(BinOpKind.MUL, Call(F64, "scaled", (L("x", F64),)), c(2.0)))],
+              pure=True, may_deopt=True)
+
+
 INTEROP = (f_interop, f_which, f_length, f_calls_boom, f_truthy)
+CONTRACT_957315EA = (f_proven_eff, f_growth, f_growth_lie, f_big, f_fill, f_fill_lie, f_flag,
+                     f_selfeq, f_scaled, f_twice_scaled)
 OBJ_HELPERS = ("tp_global", "tp_getattr", "tp_call", "tp_truth", "tp_compare_bool", "tp_obj_to_f64",
                "tp_binop_obj", "tp_release")
 
 ALL = (f_poly, f_mul_all, f_twice_mul, f_eff, f_scale, f_addfirst, f_floordiv, f_objmix,
-       f_count_until, f_isum, f_hyp, f_mixed_lt, f_tofl, f_neg_last) + INTEROP
+       f_count_until, f_isum, f_hyp, f_mixed_lt, f_tofl, f_neg_last) + INTEROP + CONTRACT_957315EA
 
 
 # --- building -------------------------------------------------------------------------------------
@@ -727,6 +861,176 @@ def test_gen_rejects_an_effect_in_a_pure_function():
         cgen.generate(Module("tp_bad3", (bad,)), source_file("tp_bad3"))
 
 
+# --- 957315ea: proven ops, Call.redo, entry_globals, CompareObj without identity shortcut ----------
+
+def test_gen_accepts_proven_ops_in_an_impure_function():
+    from typedpython import cgen
+
+    a = L("a", I64)
+    ok = fn("ok", [Param("a", I64)], I64, {},
+            [ExprStmt(call("record", Box(OBJ, a))),
+             Return(UnaryOp(I64, UnaryOpKind.NEG, BinOp(I64, BinOpKind.SUB, a, c(1), proven=True),
+                            proven=True))],
+            pure=False, may_deopt=False)
+    text = cgen.generate(Module("tp_proven_gen", (ok,)), source_file("tp_proven_gen"))
+    assert "typedpython: proven operation overflowed" in text
+
+
+def test_gen_rejects_proven_on_an_op_that_is_not_checked_i64_arithmetic():
+    from typedpython import cgen
+
+    bad = fn("badproven", [Param("a", I64)], I64, {},
+             [Return(BinOp(I64, BinOpKind.FLOORDIV, L("a", I64), c(2), proven=True))],
+             pure=True, may_deopt=True)
+    with pytest.raises(cgen.CGenError, match="proven"):
+        cgen.generate(Module("tp_bad4", (bad,)), source_file("tp_bad4"))
+
+
+def test_gen_rejects_redo_of_an_i64_callee():
+    from typedpython import cgen
+
+    caller = fn("caller", [Param("a", I64)], I64, {},
+                [ExprStmt(call("record", Box(OBJ, L("a", I64)))),
+                 Return(Call(I64, "mul_all", (L("a", I64), c(2)), redo=True))],
+                pure=False, may_deopt=False)
+    with pytest.raises(cgen.CGenError, match="redo"):
+        cgen.generate(Module("tp_bad5", (f_mul_all(), caller)), source_file("tp_bad5"))
+
+
+def test_gen_rejects_entry_globals_in_a_function_that_runs_user_code():
+    from typedpython import cgen
+
+    bad = fn("notclosed", [Param("o", OBJ)], F64, {},
+             [ExprStmt(call("record", L("o", OBJ))), Return(L("SCALE", F64))],
+             pure=False, may_deopt=False, entry_globals=[Param("SCALE", F64)])
+    with pytest.raises(cgen.CGenError, match="closed"):
+        cgen.generate(Module("tp_bad6", (bad,)), source_file("tp_bad6"))
+
+
+def test_proven_op_in_an_impure_function_computes_the_interpreted_result(mod):
+    mod.calls.clear()
+    before = deopts(mod)
+    assert mod.proven_eff(5) == interp(mod, "proven_eff")(5) == 6
+    assert mod.calls == [5, 5] and deopts(mod) == before
+    mod.calls.clear()
+    # A proof the IR producer got wrong: the overflow is an internal error, never a deopt (the
+    # effect has happened already, so a redo would run it twice).
+    with pytest.raises(SystemError, match="typedpython: proven operation overflowed"):
+        mod.proven_eff(2 ** 63 - 1)
+    assert mod.calls == [2 ** 63 - 1] and deopts(mod) == before
+
+
+def test_redo_reruns_only_the_pure_callee_and_the_callers_effects_happen_once(mod):
+    xs, ys = [1.0, 2.0], [1.0, 2.0]
+    before = deopts(mod)
+    got = mod.fill(xs, 10)
+    assert deopts(mod) == before                      # 3**10 fits: no redo
+    want = interp(mod, "fill")(ys, 10)
+    assert repr(got) == repr(want) and xs == ys == [2.0 + 3.0 ** 10, 4.0]
+
+    xs, ys = [1.0, 2.0], [1.0, 2.0]
+    before = deopts(mod)
+    got = mod.fill(xs, 45)                            # 3**40 leaves i64 inside growth
+    assert deopts(mod) == before + 1                  # growth redone once, fill not redone
+    want = interp(mod, "fill")(ys, 45)
+    assert type(got) is float and repr(got) == repr(want) == repr(float(3 ** 45))
+    # effects exactly once: xs[1] doubled once, xs[0] doubled once then grown once
+    assert xs == ys == [2.0 + float(3 ** 45), 4.0]
+    assert [type(v) for v in xs] == [float, float]
+
+
+def test_redo_of_a_bool_callee(mod):
+    for n, want_r in ((3, 0.0), (7, 1.0), (45, 1.0)):
+        xs, ys = [1.0], [1.0]
+        before = deopts(mod)
+        got = mod.flag(xs, n)
+        assert deopts(mod) == before + (1 if n >= 40 else 0)
+        assert got == interp(mod, "flag")(ys, n) == want_r
+        assert xs == ys == [2.0]
+
+
+def test_redo_result_of_the_wrong_type_is_a_system_error_naming_the_callee(mod):
+    xs = [1.0]
+    assert mod.fill_lie(xs, 10) == float(3 ** 10) and xs == [2.0]
+    xs = [1.0]
+    with pytest.raises(SystemError, match="growth_lie"):
+        mod.fill_lie(xs, 45)
+    assert xs == [2.0]                                # the caller's store is written back once
+
+
+def test_redo_releases_its_temporaries(mod):
+    # The redo creates a boxed argument, the interpreted function object reference and a result
+    # float per call; a leak of any one is >= 24 bytes per call, so 2000 calls would grow by
+    # >= 48 KB. (Floats are not GC-tracked and are fresh objects, so refcounts cannot show this.)
+    import tracemalloc
+
+    def run(k):
+        for _ in range(k):
+            xs = [1.0]
+            mod.fill(xs, 45)
+            mod.flag(xs, 45)
+            try:
+                mod.fill_lie(xs, 45)
+            except SystemError:
+                pass
+
+    run(200)                                          # warm free lists and caches
+    tracemalloc.start()
+    try:
+        base = tracemalloc.get_traced_memory()[0]
+        run(2000)
+        grown = tracemalloc.get_traced_memory()[0] - base
+    finally:
+        tracemalloc.stop()
+    assert grown < 16 * 1024, grown
+    n = 10 ** 30
+    before = sys.getrefcount(n)
+    for _ in range(1000):
+        mod.selfeq(n)
+    assert sys.getrefcount(n) == before
+
+
+def test_entry_global_is_read_at_each_call(mod):
+    old = mod.SCALE
+    try:
+        before = deopts(mod)
+        assert repr(mod.scaled(3.0)) == repr(interp(mod, "scaled")(3.0)) == repr(7.5)
+        mod.SCALE = 4.0                                 # rebinding between calls is seen
+        assert mod.scaled(3.0) == interp(mod, "scaled")(3.0) == 12.0
+        assert mod.twice_scaled(3.0) == interp(mod, "twice_scaled")(3.0) == 24.0
+        assert deopts(mod) == before
+        mod.SCALE = 3                                   # an int: the whole call is interpreted
+        got = mod.scaled(3.0)
+        assert deopts(mod) == before + 1
+        assert type(got) is float and got == interp(mod, "scaled")(3.0) == 9.0
+        d = deopts(mod)
+        assert mod.twice_scaled(3.0) == 18.0
+        # the pure caller is redone (+1); the interpreted caller calls the compiled scaled, whose
+        # guard fails again (+1)
+        assert deopts(mod) == d + 2
+        del mod.SCALE                                   # unbound: interpreted path raises NameError
+        with pytest.raises(NameError) as got_e:
+            mod.scaled(3.0)
+        with pytest.raises(NameError) as want_e:
+            interp(mod, "scaled")(3.0)
+        assert str(got_e.value) == str(want_e.value) == "name 'SCALE' is not defined"
+    finally:
+        mod.SCALE = old
+
+
+def test_compare_obj_has_no_identity_shortcut(mod):
+    nan = float("nan")
+    assert mod.selfeq(nan) is interp(mod, "selfeq")(nan) is False
+
+    class Never:
+        def __eq__(self, other):
+            return False
+
+    o = Never()
+    assert mod.selfeq(o) is interp(mod, "selfeq")(o) is False
+    assert mod.selfeq(1.0) is True
+
+
 # --- sanitizers -----------------------------------------------------------------------------------
 
 ASAN_SCRIPT = textwrap.dedent('''\
@@ -756,6 +1060,13 @@ ASAN_SCRIPT = textwrap.dedent('''\
         m.objmix(10 ** 30, 10 ** 31); m.calls.clear()
     assert m.neg_last([1.0, 2.0]) == -2.0
     assert m.count_until(50, 7) == I["count_until"](50, 7)
+    for _ in range(50):
+        xs = [1.0, 2.0]; m.fill(xs, 45); m.flag(xs, 45)
+        try:
+            m.fill_lie([1.0], 45)
+        except SystemError:
+            pass
+    assert m.scaled(2.0) == 5.0 and m.selfeq(float("nan")) is False
     for _ in range(50):
         m.made.clear(); m.interop(1.5, 20)
         try:
