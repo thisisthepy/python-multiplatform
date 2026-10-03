@@ -169,6 +169,22 @@ Gradle 태스크는 입력·출력을 정확히 선언해 up-to-date 판정과 �
 - **LPython** — 업스트림 활동이 LFortran 쪽으로 옮겨간 것으로 보인다.
 - **Rust 생성** — 위.
 
+### 4.3.3 재귀 (SPEC N-8, #57)
+
+호출 사이클(직접·상호 재귀)은 컴파일한다. 컴파일된 프레임에는 파이썬 프레임이 없으므로 모든 컴파일
+함수의 진입에서 `tp_enter_call()`, 모든 출구(ok·error·deopt)에서 `tp_leave_call()` 을 부른다. 진입은
+스레드별 컴파일 프레임 수에 현재 파이썬 프레임 깊이(`PyThreadState_GetFrame`/`PyFrame_GetBack`, 공개 API 만,
+최상위 프레임 동일성으로 캐시)를 더해 `Py_GetRecursionLimit()` 와 비교하고, 넘으면 CPython 과 같은
+`RecursionError("maximum recursion depth exceeded")` 를 낸다. 이어서 `Py_EnterRecursiveCall` 이 C 스택을
+지킨다. **측정(3.13.0, 3.14.7, 기본 한도 1000):** 인터프리터와 컴파일 재귀 모두 같은 깊이(997)에서
+실패하고, 인터프리터 프레임 k 개 위에서 컴파일 재귀를 시작해도 `최대 n + (추가 프레임 수)` 가 일정해
+오프셋이 없다. 오프셋이 생기는 곳은 둘이다. (1) 한도를 C 스택이 먼저 닫을 만큼 올리면(예: 100만) C 가드의
+메시지가 나온다 — 3.13 은 `maximum recursion depth exceeded in compiled code`, 3.14 는
+`Stack overflow (used 8144 kB) in compiled code` — 인터프리터는 같은 한도에서 파이썬 한도 메시지를 낸다.
+(2) 카운터는 모듈별(헤더가 `static`)이라, 한 컴파일 모듈의 두 프레임 사이에 **다른** 컴파일 모듈의
+프레임이 끼면 그 프레임은 세지 않는다. 테스트는 두 경우 모두 "둘 다 예외를 내고 죽지 않는다" 만 단언하고
+깊이를 기록한다(`test_recursion.py`).
+
 ### 4.4 Kotlin 경계의 직접 호출
 
 이 플랫폼에서만 가능한 이점이다.

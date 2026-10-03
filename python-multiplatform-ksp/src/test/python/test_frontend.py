@@ -783,9 +783,10 @@ def test_while_condition_with_a_temporary_reevaluates_it_each_iteration(tmp_path
     "@compiled\ndef f(n: int) -> int:\n    return g(n)\n\n"
     "@compiled\ndef g(n: int) -> int:\n    return f(n)\n",
 ])
-def test_recursion_is_skipped(tmp_path, source):
+def test_recursion_is_lowered_not_skipped(tmp_path, source):
+    # #57: a call cycle is compiled; the run-time depth guard replaces the old refusal.
     m = lower(tmp_path, source)
-    assert m.functions == () and "recurs" in m.skipped["f"]
+    assert {f.name for f in m.functions} >= {"f"} and not any("recurs" in r for r in m.skipped.values())
 
 
 def test_int_modulo_cannot_be_recorded_as_proven_so_it_deopts(tmp_path):

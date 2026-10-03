@@ -437,7 +437,11 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   through the typed IR (`typedpython/ir.py`) to C against the CPython C API and builds an extension with
   the platform C compiler. Compiled functions return what CPython returns (IR contract: checked i64
   with deopt to the interpreted function, Python floor division/modulo, exact int/float comparison,
-  CPython's exception types and messages; tracebacks are the one accepted difference). `Status: planned`.
+  CPython's exception types and messages; tracebacks are the one accepted difference). Call cycles
+  (direct and mutual recursion) are compiled: every compiled function counts its frame (`tp_enter_call` /
+  `tp_leave_call`, added to the Python frame depth and compared with `sys.getrecursionlimit()`), so recursion
+  past the limit raises `RecursionError('maximum recursion depth exceeded')` where CPython does, and a C-stack
+  guard keeps the process alive at any limit (#57). `Status: planned`.
 - **N-9** TypedPython memory safety is proved on the IR before C is generated (#41; maintainer decision
   2026-10-03). Each property, and what happens when it cannot be proved:
 

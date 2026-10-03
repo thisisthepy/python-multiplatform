@@ -1008,4 +1008,72 @@ static inline void tp_release(PyObject **slot)
     Py_CLEAR(*slot);
 }
 
+/* ------------------------------------------------------------------------------------------
+ * Call depth (issue #57): compiled frames have no Python frame, so a recursion made of them would
+ * neither raise RecursionError nor stop before the C stack ends. tp_enter_call / tp_leave_call
+ * bracket every compiled impl function. See API.md "Call depth".
+ * ------------------------------------------------------------------------------------------ */
+#if defined(_MSC_VER)
+#define TP_THREAD_LOCAL __declspec(thread)
+#else
+#define TP_THREAD_LOCAL __thread
+#endif
+
+typedef struct {
+    Py_ssize_t count;       /* compiled frames in flight on this thread (this module) */
+    PyObject *frame;        /* strong ref: the top Python frame when `pydepth` was measured */
+    Py_ssize_t pydepth;     /* Python frames below and including `frame` */
+} tp_depth_state;
+
+static TP_THREAD_LOCAL tp_depth_state tp_depth = {0, NULL, 0};
+
+/* Python frame depth of the running thread: public API only. The walk is O(depth), so it is
+ * cached by the identity of the top frame (kept alive while compiled frames are in flight). */
+static inline Py_ssize_t tp_python_depth(void)
+{
+    PyFrameObject *top = PyThreadState_GetFrame(PyThreadState_Get());    /* new ref or NULL */
+    if (top == NULL) {
+        return 0;
+    }
+    if (tp_depth.frame == (PyObject *)top) {
+        Py_DECREF(top);
+        return tp_depth.pydepth;
+    }
+    Py_ssize_t depth = 0;
+    PyFrameObject *cur = top;
+    Py_INCREF(cur);
+    while (cur != NULL) {
+        depth++;
+        PyFrameObject *back = PyFrame_GetBack(cur);
+        Py_DECREF(cur);
+        cur = back;
+    }
+    PyObject *old = tp_depth.frame;
+    tp_depth.frame = (PyObject *)top;       /* takes the reference from GetFrame */
+    tp_depth.pydepth = depth;
+    Py_XDECREF(old);
+    return depth;
+}
+
+static inline int tp_enter_call(void)
+{
+    if (tp_python_depth() + tp_depth.count + 1 > Py_GetRecursionLimit()) {
+        PyErr_SetString(PyExc_RecursionError, "maximum recursion depth exceeded");
+        return -1;
+    }
+    if (Py_EnterRecursiveCall(" in compiled code")) {
+        return -1;
+    }
+    tp_depth.count++;
+    return 0;
+}
+
+static inline void tp_leave_call(void)
+{
+    Py_LeaveRecursiveCall();
+    if (--tp_depth.count == 0) {
+        Py_CLEAR(tp_depth.frame);
+    }
+}
+
 #endif /* TP_RUNTIME_H */
