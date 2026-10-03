@@ -89,32 +89,148 @@ class PythonxPropertyTest {
             from propshape import makeDerived
             _pp_state = mutableStateOf(makeDerived('d'))
             _pp = {'held': describeState(_pp_state)}
+            # Read back through the same `Any?` (#69): a Kotlin object that is not a scalar is still a
+            # proxy over its handle, and writing that proxy on is the same Kotlin object again.
+            _pp_back = _pp_state.value
+            _pp['back_is_proxy'] = getattr(_pp_back, '_pm_handle', None) is not None
+            _pp['passed_on'] = describeState(mutableStateOf(_pp_back))
             """.trimIndent(),
         )
         assertEquals("kotlin:d", eval("_pp['held']"))
+        assertEquals("True", eval("repr(_pp['back_is_proxy'])"), "a Kotlin object read from Any? is not a proxy")
+        assertEquals("kotlin:d", eval("_pp['passed_on']"))
     }
 
+    // ------------------------------------------------------------- scalars in an Any? slot (#69)
+    //
+    // Red before #69, and what each red says: every write below raised `TypeError: ... an int cannot
+    // be stored in a Kotlin Any?: it would cross as an object handle` (a `bool` is an `int` there
+    // too), and a Kotlin-held scalar read back came out as a `kotlin.Any` proxy over a handle rather
+    // than as the Python value. A *regression* reads differently: the right Python value with the
+    // wrong Kotlin class behind it (`Long:7` where `Int:7` is expected), or a handle count that
+    // does not come back to its baseline.
+
     /**
-     * An `int` would cross an `OBJECT` slot as a handle and name some other Kotlin object; refused
-     * with a reason rather than stored.
+     * Each scalar written through an `Any?` **function** slot (`mutableStateOf(value)`) is the Kotlin
+     * box the issue names, and reads back as the Python value and type it was.
      */
     @Test
-    fun anIntIsRefusedForAnAnySlot() = withAdapter {
+    fun aScalarPassedToAnAnySlotIsAKotlinBoxAndReadsBackAsItself() = withAdapter {
+        Python3.exec(SCALARS + "\n" +
+            """
+            from androidx.compose.runtime import mutableStateOf, describeState
+            _pp = {}
+            for _pp_label, _pp_value in _pp_scalars:
+                _pp_state = mutableStateOf(_pp_value)
+                _pp_back = _pp_state.value
+                _pp[_pp_label] = (describeState(_pp_state), type(_pp_back).__name__, _pp_back == _pp_value)
+            """.trimIndent(),
+        )
+        assertScalarRoundTrips()
+    }
+
+    /** The same rules through a `var` **property** write (`state.value = x`), starting from `null`. */
+    @Test
+    fun aScalarWrittenToAnAnyPropertyIsAKotlinBoxAndReadsBackAsItself() = withAdapter {
+        Python3.exec(SCALARS + "\n" +
+            """
+            from androidx.compose.runtime import mutableStateOf, describeState
+            _pp = {}
+            _pp_state = mutableStateOf(None)
+            for _pp_label, _pp_value in _pp_scalars:
+                _pp_state.value = _pp_value
+                _pp_back = _pp_state.value
+                _pp[_pp_label] = (describeState(_pp_state), type(_pp_back).__name__, _pp_back == _pp_value)
+            """.trimIndent(),
+        )
+        assertScalarRoundTrips()
+    }
+
+    /** An `int` no Kotlin integer holds is refused with a reason, through both spellings. */
+    @Test
+    fun anIntOutside64BitsIsRefusedForAnAnySlot() = withAdapter {
         Python3.exec(
             """
             from androidx.compose.runtime import mutableStateOf
             _pp_state = mutableStateOf(None)
             _pp = {}
-            for _pp_label, _pp_call in (('call', lambda: mutableStateOf(7)), ('write', lambda: setattr(_pp_state, 'value', 7))):
-                try:
-                    _pp_call()
-                    _pp[_pp_label] = 'accepted'
-                except TypeError as _pp_e:
-                    _pp[_pp_label] = str(_pp_e)
+            for _pp_label, _pp_value in (('above', 2**63), ('below', -2**63 - 1)):
+                for _pp_how, _pp_call in (
+                    ('call', lambda: mutableStateOf(_pp_value)),
+                    ('write', lambda: setattr(_pp_state, 'value', _pp_value)),
+                ):
+                    try:
+                        _pp_call()
+                        _pp[_pp_label + '_' + _pp_how] = 'accepted'
+                    except TypeError as _pp_e:
+                        _pp[_pp_label + '_' + _pp_how] = str(_pp_e)
+            _pp['still_empty'] = _pp_state.value is None
             """.trimIndent(),
         )
-        assertTrue("int" in eval("_pp['call']"), eval("_pp['call']"))
-        assertTrue("int" in eval("_pp['write']"), eval("_pp['write']"))
+        for (key in listOf("above_call", "above_write", "below_call", "below_write")) {
+            val message = eval("_pp['$key']")
+            assertTrue("64 bits" in message, "$key: $message")
+        }
+        assertEquals("True", eval("repr(_pp['still_empty'])"), "a refused write reached Kotlin")
+    }
+
+    /**
+     * The read-back direction on values **Kotlin** put there: every boxed type the issue lists comes
+     * out as the Python scalar, including the ones Python never writes (`Short`, `Byte`, `Float`, `Char`).
+     */
+    @Test
+    fun aKotlinScalarReadFromAnAnySlotIsThePythonScalar() = withAdapter {
+        Python3.exec(
+            """
+            from propshape import stateHolding
+            _pp = {}
+            for _pp_kind in ('Int', 'Long', 'Short', 'Byte', 'Double', 'Float', 'Boolean', 'String', 'Char'):
+                _pp_back = stateHolding(_pp_kind).value
+                _pp[_pp_kind] = (type(_pp_back).__name__, repr(_pp_back))
+            """.trimIndent(),
+        )
+        assertEquals("('int', '7')", eval("repr(_pp['Int'])"))
+        assertEquals("('int', '1099511627776')", eval("repr(_pp['Long'])"))
+        assertEquals("('int', '300')", eval("repr(_pp['Short'])"))
+        assertEquals("('int', '-5')", eval("repr(_pp['Byte'])"))
+        assertEquals("('float', '2.5')", eval("repr(_pp['Double'])"))
+        assertEquals("('float', '1.5')", eval("repr(_pp['Float'])"))
+        assertEquals("('bool', 'True')", eval("repr(_pp['Boolean'])"))
+        assertEquals("('str', \"'text'\")", eval("repr(_pp['String'])"))
+        assertEquals("('str', \"'c'\")", eval("repr(_pp['Char'])"))
+    }
+
+    /**
+     * Boxing and unboxing root nothing that outlives the statement: the box a write takes, and the
+     * handle a scalar read crosses as, are both given back. Counted at both ends -- the state's own
+     * proxy holds one root, and that one must still be there.
+     */
+    @Test
+    fun boxingAScalarLeavesNoHandleRooted() = withAdapter {
+        Python3.exec(
+            """
+            from androidx.compose.runtime import mutableStateOf
+            _pp_state = mutableStateOf(None)
+            """.trimIndent(),
+        )
+        val baseline = HandleTable.liveCount
+        Python3.exec(
+            """
+            for _pp_i in range(20):
+                _pp_state.value = _pp_i
+                _pp_state.value = _pp_state.value + 2**40
+                _pp_state.value = float(_pp_i)
+                _pp_state.value = (_pp_i % 2 == 0)
+                _pp_state.value = str(_pp_i)
+                _pp_last = _pp_state.value
+            _pp_other = mutableStateOf(_pp_i)
+            _pp_seen = _pp_other.value
+            del _pp_other
+            """.trimIndent(),
+        )
+        assertEquals("'19'", eval("repr(_pp_last)"))
+        assertEquals("19", eval("repr(_pp_seen)"))
+        assertEquals(baseline, HandleTable.liveCount, "a box or an unboxed read left a handle rooted")
     }
 
     /** A `val` has no setter: writing it is Python's own refusal, and nothing reaches Kotlin. */
@@ -308,4 +424,38 @@ class PythonxPropertyTest {
     }
 
     private fun eval(expression: String): String = PythonTestFixture.eval(expression).toString()
+
+    /** What [SCALARS] must read back as: the Kotlin box Kotlin holds, the Python type, and equality. */
+    private fun assertScalarRoundTrips() {
+        val expected = listOf(
+            "true_" to "('Boolean:true', 'bool', True)",
+            "false_" to "('Boolean:false', 'bool', True)",
+            "int" to "('Int:7', 'int', True)",
+            "zero" to "('Int:0', 'int', True)",
+            "negative" to "('Int:-3', 'int', True)",
+            "int_max" to "('Int:2147483647', 'int', True)",
+            "int_min" to "('Int:-2147483648', 'int', True)",
+            "long" to "('Long:2147483648', 'int', True)",
+            "long_negative" to "('Long:-2147483649', 'int', True)",
+            "long_max" to "('Long:9223372036854775807', 'int', True)",
+            "long_min" to "('Long:-9223372036854775808', 'int', True)",
+            "float" to "('Double:2.5', 'float', True)",
+            "str" to "('String:hi', 'str', True)",
+        )
+        for ((label, shape) in expected) {
+            assertEquals(shape, eval("repr(_pp['$label'])"), label)
+        }
+    }
+
+    private companion object {
+        /** Every scalar #69 names, at each edge of the `Int`/`Long` choice. */
+        val SCALARS = """
+            _pp_scalars = (
+                ('true_', True), ('false_', False),
+                ('int', 7), ('zero', 0), ('negative', -3), ('int_max', 2**31 - 1), ('int_min', -2**31),
+                ('long', 2**31), ('long_negative', -2**31 - 1), ('long_max', 2**63 - 1), ('long_min', -2**63),
+                ('float', 2.5), ('str', 'hi'),
+            )
+        """.trimIndent()
+    }
 }

@@ -798,20 +798,25 @@ class M3ProofRenderTest {
     }
 
     /**
-     * `ColorScheme` is unreachable, and the message says which of the two reasons reaches Python
-     * first.
+     * `ColorScheme` resolves to its **constructor**, and calling it with nothing fails as a call of that
+     * constructor -- not as a proxy type asking for a handle.
      *
-     * The documented reason is arithmetic: the factory takes thirty-six colour parameters and the
-     * omission mask holds thirty-one bits, so it cannot be called with defaults. That is true of
-     * `lightColorScheme`. But the *name* `ColorScheme` resolves to the class, and a bound class is
-     * a proxy type whose constructor wants the handle of an existing Kotlin instance -- so calling
-     * it bare fails one step earlier than the parameter count, asking for `handle`.
+     * This pinned the other answer until issue #73, and said why it might change: "Pinned as observed
+     * rather than as expected. When this message changes, something about how classes bind changed with
+     * it." What changed is exactly that. `ColorScheme`'s public constructors take `Color`, a value class,
+     * so `kotlinc` compiles each to a private `<init>` behind a synthetic `DefaultConstructorMarker`
+     * bridge, and the walker used to refuse every synthetic `<init>`. It now refuses only a
+     * `@Deprecated(level = HIDDEN)` one, so `ColorScheme(...)` is bound -- the same way `Typography(...)`
+     * already was ([typographyChangesFontRender] calls it by its class name).
      *
-     * Pinned as observed rather than as expected. When this message changes, something about how
-     * classes bind changed with it.
+     * Why the constructor and not the type: in Kotlin, `ColorScheme(...)` *is* the constructor call, and
+     * the binder carries Kotlin's surface (U-8). The proxy type answers "build me from a handle", which no
+     * Python caller can use -- this test was the evidence -- and stays reachable as `type(value)` of
+     * anything Kotlin returns. `ColorScheme()` with no arguments still fails, because no constructor
+     * declares a default for its colours; the message now names the constructor's overloads.
      */
     @Test
-    fun colorSchemeResolvesToItsProxyTypeRatherThanAnythingCallable() {
+    fun colorSchemeResolvesToItsConstructorAndABareCallNamesItsOverloads() {
         val error = try {
             Python3.exec("from androidx.compose.material3 import ColorScheme; ColorScheme()")
             null
@@ -819,11 +824,12 @@ class M3ProofRenderTest {
             e.message ?: ""
         }
         println("compose render: ColorScheme() -> ${error?.take(120)}")
-        assertTrue(error != null, "ColorScheme() succeeded but nothing in the table can build one")
+        assertTrue(error != null, "ColorScheme() succeeded, but every ColorScheme constructor requires its colours")
         assertTrue(
-            error.contains("handle"),
-            "expected the proxy type's own constructor to ask for a handle, got: $error",
+            "ColorScheme__" in error,
+            "expected the bare call to be refused by ColorScheme's constructor overloads, got: $error",
         )
+        assertTrue("handle" !in error, "ColorScheme still resolves to the proxy type: $error")
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

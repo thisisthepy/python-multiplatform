@@ -18,7 +18,8 @@ import python.multiplatform.reflection.TypeTag
  * | `propshape.Base.label` | a member `val` declared **only** on a supertype, so a subtype proxy reaches it by ancestry alone |
  * | `propshape.boost` | an extension *function* on that supertype, for the same lookup |
  * | `Icons.Default` + `icons.filled.Add` | an object's constant, and a top-level **extension property** on the type that constant is (`AddKt.getAdd(Icons$Filled)`) |
- * | `describeState` / `describeVector` / `describeBase` | read back what Kotlin actually holds, since a proxy alone cannot say |
+ * | `describeState` / `describeVector` / `describeBase` | read back what Kotlin actually holds, since a proxy alone cannot say -- for a scalar (#69), its Kotlin class |
+ * | `propshape.stateHolding` | a state Kotlin filled with a boxed scalar of the named kind, for the read-back direction of #69 |
  *
  * [calls] records every Kotlin-side invocation, which is how a test tells "described without reading"
  * apart from "read".
@@ -109,8 +110,41 @@ object PropertyShapedFragment : FunctionTableFragment {
                 null -> "null"
                 is PyObject -> "python"
                 is StubBase -> "kotlin:" + held.label
+                // Issue #69: a Python scalar written into the `Any?` slot is a Kotlin box, and its
+                // Kotlin class is what this reports -- `Int` and `Long` are different answers.
+                is Int -> "Int:$held"
+                is Long -> "Long:$held"
+                is Double -> "Double:$held"
+                is Boolean -> "Boolean:$held"
+                is String -> "String:$held"
                 else -> "kotlin:other"
             }
+        },
+        ExposedCallable(
+            name = "propshape.stateHolding",
+            arity = 1,
+            paramTypes = listOf(TypeTag.STRING),
+            returnType = TypeTag.OBJECT,
+            paramNames = listOf("kind"),
+            paramTypeNames = listOf("kotlin.String"),
+            returnTypeName = "$MUTABLE_STATE<:$STATE",
+        ) { args ->
+            // A state whose value Kotlin put there itself, so the read-back direction of #69 is
+            // tested for every boxed type Kotlin can hold, not only those Python can write.
+            StubMutableState(
+                when (val kind = args[0] as String) {
+                    "Int" -> 7
+                    "Long" -> 1L shl 40
+                    "Short" -> 300.toShort()
+                    "Byte" -> (-5).toByte()
+                    "Double" -> 2.5
+                    "Float" -> 1.5f
+                    "Boolean" -> true
+                    "String" -> "text"
+                    "Char" -> 'c'
+                    else -> error("no Kotlin value of kind $kind")
+                },
+            )
         },
         ExposedCallable(
             name = "propshape.makeDerived",

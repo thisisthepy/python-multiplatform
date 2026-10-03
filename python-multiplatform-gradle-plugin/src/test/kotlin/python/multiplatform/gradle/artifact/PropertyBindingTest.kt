@@ -207,6 +207,32 @@ class PropertyBindingTest {
         assertTrue("fixture.artifactproperty.reach" in withSupertype, withSupertype.toString())
     }
 
+    /**
+     * #66: an extension *function* on the same receiver goes through the same cast, so it is declined
+     * the same way and bound once the classpath carries the supertype.
+     *
+     * Red before the fix: `probe` is bound (the first assertion fails).
+     */
+    @Test
+    fun aReceiverWithASupertypeOffTheClasspathHasItsExtensionFunctionsDeclined() {
+        val names = entries.map { it.name }
+        assertTrue("fixture.artifactproperty.probe" !in names, names.toString())
+
+        val probe = ArtifactScanner.scanDeclarations(fixtureClasses, includePrefixes = listOf("fixture.artifactproperty"))
+            .single { it.simpleName == "probe" }
+        assertEquals(null, probe.bindingName, probe.toString())
+        val reason = assertNotNull(probe.declineReason, probe.toString())
+        assertTrue("org.objectweb.asm.Opcodes" in reason && "classpath" in reason, reason)
+
+        val asm = File(org.objectweb.asm.Opcodes::class.java.protectionDomain.codeSource.location.toURI())
+        val withSupertype = ArtifactScanner.scanJar(
+            fixtureClasses,
+            includePrefixes = listOf("fixture.artifactproperty"),
+            classpath = listOf(fixtureClasses, asm),
+        ).map { it.name }
+        assertTrue("fixture.artifactproperty.probe" in withSupertype, withSupertype.toString())
+    }
+
     // -------------------------------------------------------------------------- the fragment
 
     /** A property is not an extension slot at the boundary: `isExtension = false`, receiver still named. */

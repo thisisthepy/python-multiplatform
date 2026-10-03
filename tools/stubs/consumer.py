@@ -7,9 +7,13 @@ the class and continued from an instance, `Checkbox`, `Text`, and a container wi
 and mypy runs with `warn_unused_ignores`, so a stub that stopped rejecting one fails the check too.
 """
 
+from typing import assert_type
+
 from androidx.compose.foundation.layout import Arrangement, Column, Row, fillMaxWidth, padding__Dp
-from androidx.compose.material3 import Checkbox, Text
+from androidx.compose.material.icons import Icons
+from androidx.compose.material3 import Checkbox, Icon, Text
 from androidx.compose.ui import Modifier
+from androidx.compose.ui.graphics.vector import ImageVector
 
 # A chain started from the class, the way Kotlin writes `Modifier.padding(16.dp)`.
 chain: Modifier = Modifier.fillMaxWidth().padding(16.0).size(24.0)
@@ -42,6 +46,11 @@ Row(content=lambda scope: None)
 # `SpaceBetween` is a `HorizontalOrVertical`: a `Vertical` slot and a `Horizontal` slot both take it (#71).
 Column(verticalArrangement=Arrangement.SpaceBetween, content=lambda scope: None)
 Row(horizontalArrangement=Arrangement.SpaceBetween, content=lambda scope: None)
+
+# An extension property on a type nested in an object (issue #68): `Icons.Default` is `Icons.Filled`.
+# `assert_type`, not an annotation: an `Any` (the stub before #53/#67) would satisfy an annotation.
+assert_type(Icons.Default.Add, ImageVector)
+Icon(Icons.Default.Add, contentDescription=None)
 
 # Rejected on purpose. (`padding("sixteen")` is not among them: one `padding` overload takes a
 # `PaddingValues`, a type the stubs cannot name -- `PaddingValues(...)` the factory owns the name -- so
