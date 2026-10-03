@@ -173,14 +173,19 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 - **U-8** A function on a Kotlin-named module carries Kotlin's own surface and nothing else: the
   Kotlin declaration name, keyword arguments by **Kotlin parameter names**, Kotlin defaults for omitted
   parameters, overload sets under the base name, and its signature as public metadata
-  (`inspect.signature`, `python_multiplatform.describe`; contract in `KotlinSurface.kt`'s KDoc). No
+  (`inspect.signature`, `python_multiplatform.describe`; contract in `KotlinSurface.kt`'s KDoc).
+  `describe(module, name)` describes any bound name, a named constant (`STATIC_GETTER`) included,
+  without evaluating it (#36). A module's `dir()` lists its direct child packages/objects and reading
+  one as an attribute imports it (#35) — Kotlin names only. No
   member or parameter is renamed; the binder creates no `pythonx` module and a real `pythonx` package
   on disk is what `import pythonx` loads. The answer is the same whichever installer
   (`PythonProxySource`, `PythonxAdapter`) ran first for a table. `Status: implemented` on desktop —
-  `PM/desktopTest/.../pythonx/KotlinNamedSurfaceTest.kt`, `ksp-fixtures/compose/.../KotlinSignatureMetadataTest.kt`.
+  `PM/desktopTest/.../pythonx/KotlinNamedSurfaceTest.kt`, `BinderNamespaceTest.kt`, `ksp-fixtures/compose/.../KotlinSignatureMetadataTest.kt`.
 - **U-9** A Pythonic package can serve extra member names on a Kotlin proxy through one hook,
   `python_multiplatform.binding.add_member_resolver(fn)`, `fn(kotlin_type_name, requested_name,
-  kotlin_member_names) -> kotlin_name | None`, asked only when no Kotlin member of that name exists.
+  kotlin_member_names) -> kotlin_name | (kotlin_name, keyword_map) | None`, asked when no Kotlin member
+  of that name exists — and, for a Kotlin-named member, only when a call passes keywords and only for
+  its `{python_kw: kotlinParam}` keyword map (#34).
   The binder renames nothing itself (no resolver: `AttributeError`), and aliases are cached in the
   registry, not written on the proxy class (`dir()` stays Kotlin-only). Contract in `KotlinSurface.kt`'s
   KDoc. `Status: implemented` on desktop — `PM/desktopTest/.../pythonx/MemberResolverTest.kt`,

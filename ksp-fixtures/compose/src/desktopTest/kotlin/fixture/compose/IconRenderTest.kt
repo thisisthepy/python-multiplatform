@@ -442,8 +442,21 @@ class IconRenderTest {
             _all = [d for table in _pm_binding._BY_PACKAGE.values() for decls in table.values() for d in decls]
 
             _producers = [d.kotlin_name for d in _all if d.return_type_name == _vector]
-            assert _producers == [], \
-                'something now returns an ImageVector -- the builder is reachable: ' + repr(_producers)
+            # material-icons-core (issue #37) brings one: `materialIcon(name, ..., imageVectorBuilder)`.
+            # It builds through a `(ImageVector.Builder) -> ImageVector.Builder` lambda, and a Python
+            # callable cannot stand in for a lambda that has to give something back -- refused below,
+            # so it opens nothing. Anything else returning an ImageVector still fails this.
+            assert _producers == ['androidx.compose.material.icons.materialIcon'], \
+                'something else now returns an ImageVector -- the builder may be reachable: ' + repr(_producers)
+            import androidx.compose.material.icons as _mi
+            _mi_decl = [d for d in _all if d.kotlin_name == 'androidx.compose.material.icons.materialIcon'][0]
+            _mi_slot = [n for n, t in zip(_mi_decl.param_names, _mi_decl.param_type_names)
+                        if t.startswith('kotlin.Function')][0]
+            try:
+                _mi.materialIcon('x', **{_mi_slot: lambda builder: builder})
+                raise AssertionError('materialIcon accepted a Python builder lambda')
+            except TypeError as _mi_e:
+                assert 'cannot be written in Python yet' in str(_mi_e), str(_mi_e)
 
             # The extension *on* the builder is bound; the type that would produce one is not. That
             # gap is the nested-class skip and nothing else.
