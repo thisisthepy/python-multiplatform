@@ -129,8 +129,10 @@ plugins {
 
 `stagePythonHome` 이 맞는 CPython 빌드를 내려받아 릴리스의 `SHA256SUMS` 로 검증하고, 기기 전체가 쓰는
 캐시에 풀고, `run` 과 `test` 에 `PYTHONHOME` 을 설정한다. 직접 설정한 `PYTHONHOME` 은 건드리지 않는다.
-`pythonBindings { stagePythonHome.set(false) }` 로 끌 수 있다. 최종 사용자용으로 패키징한 앱은 여전히
-prefix 를 함께 배포하고 `PYTHONHOME` 을 직접 설정해야 한다.
+`pythonBindings { stagePythonHome.set(false) }` 로 끌 수 있다. `createDistributable`(또는 `package*`
+태스크)로 패키징한 Compose Desktop 앱은 스테이징된 stdlib 와 `libpython` 을 리소스에 담아 `PYTHONHOME`
+없이 시작한다(`pythonBindings { packagePythonHome.set(false) }` 로 끈다). 그 밖의 패키징은
+`-Dpython.multiplatform.home=...` 으로 prefix 를 지정한다. `docs/platforms/desktop-packaged-app.md` 참고.
 </details>
 
 <details>
