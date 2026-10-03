@@ -567,6 +567,29 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     compiled.
   A class outside these rules stays interpreted with a reason. Methods are not compiled yet.
   `Status: implemented (module-level functions; methods planned)`.
+- **N-12** TypedPython object cost: virtual objects, refcount elision, region allocation (design §4.3.4).
+  Every execution of compiled code must be indistinguishable from some valid CPython execution. An object
+  of an N-11 class without `__del__` and without a `__weakref__` slot may live as a C struct (a virtual
+  object) and is turned into a real object (materialised) just before any observation point:
+  - leaving the function, or being stored into a global, a container or a real object's field;
+  - being passed to unknown code, or reaching `id()` or the default `hash`/`repr`;
+  - **any call into unknown code while it is alive**, because `gc.get_objects()` and `tracemalloc` see it
+    without being passed it. At such a call every live virtual object is materialised, in allocation order.
+  `is`, `type()` and `isinstance` on virtual objects are decided statically. An increment/decrement pair is
+  elided only when another owned reference keeps the object alive throughout and no unknown code runs in
+  between, so every refcount that can be observed is exact. Virtual objects whose count is unbounded live in
+  a region tied to one activation (the innermost scope that bounds their lifetime) and are freed together;
+  real objects are never placed in a region. A failed region allocation raises `MemoryError` where CPython
+  would. The verifier proves non-escape, materialisation before every observation point, a keeping
+  reference for every elided pair, and region lifetimes; anything unproved compiles as N-11. Differential
+  tests include `id`, `gc.get_objects` count and order, `gc.get_referrers`, `sys.getrefcount`,
+  `tracemalloc`, `is` between virtual and real objects, and `MemoryError` during construction.
+  **Outside the identity: when the cyclic garbage collector runs** (user decision, 2026-10-04). Not
+  allocating changes when collections are scheduled, and so when finalisers, weakref callbacks and
+  `gc.callbacks` of *unrelated* cyclic garbage run. The language reference leaves this to the
+  implementation ("An implementation is allowed to postpone garbage collection or omit it
+  altogether", Data model §3.1), and CPython itself changed it in 3.14 (incremental GC). Everything
+  else above stays exact. `Status: planned (design)`.
 
 ---
 
