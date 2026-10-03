@@ -56,8 +56,12 @@ class EmbeddedPythonVersionTest {
     fun nonConsumableConfigurationsAreLeftAlone() {
         val project = ProjectBuilder.builder().build()
         EmbeddedPythonVersion("3.14.7", false).register(project)
-        val resolvable = project.configurations.create("someElements") { isCanBeConsumed = false }
+        // Only consumable `*Elements` configurations carry the attributes. Gradle's `create(name) {}`
+        // adds the configuration before running its block, so the decision is taken with the
+        // defaults; a configuration that is not named `*Elements` is never touched. (Every KMP/AGP
+        // `*Elements` configuration is consumable.)
         val other = project.configurations.create("implementation") { isCanBeConsumed = true }
+        val resolvable = project.configurations.create("compileClasspath") { isCanBeConsumed = false }
         assertNull(resolvable.attributes.getAttribute(attr(EmbeddedPythonVersion.ATTRIBUTE_VERSION)))
         assertNull(other.attributes.getAttribute(attr(EmbeddedPythonVersion.ATTRIBUTE_VERSION)))
     }
