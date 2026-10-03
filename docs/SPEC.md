@@ -220,7 +220,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   for a public setter with every class type parameter unbounded, `SETTER` entries `Owner.prop=`; and
   top-level extension property getters (`pkg.prop`, receiver in `receiverTypeName`). Properties take no
   part in overload naming or in a constructor's name check; a property key another binding already
-  holds is declined. `Status: implemented` — `GP/artifact/PropertyBindingTest.kt`.
+  holds is declined, and so is a property whose receiver has a supertype missing from the consumer's compile classpath (kotlinc cannot build its member scope). `Status: implemented` — `GP/artifact/PropertyBindingTest.kt`.
 - **B-2** The walker on **klibs** (Kotlin/Native libraries). `Status: partial` —
   `GP/artifact/KlibScannerTest.kt` and `ksp-fixtures/klib-artifact` assert that the scanned klib's
   declarations are declined with reasons; no klib declaration is bound at run time yet.
