@@ -507,6 +507,10 @@ def test_mutation_without_the_param_guard_the_subclass_test_fails(monkeypatch):
     need_runtime()
     from typedpython import cgen, cbuild
     monkeypatch.setattr(cgen, "_param_cls_fail", lambda *a, **k: "0")      # the guard never fires
+    # Since the per-access class check (test_cgen_class_changes.py) every FieldGet also tests
+    # `type(obj) is C` itself, so the entry guard alone is no longer the only defence: the mutant
+    # removes both (with the per-access check kept, this mutant computes the right results).
+    monkeypatch.setattr(cgen, "_class_current_expr", lambda *a, **k: "1")
     src = generate("tp_cgen_cls_mut")
     monkeypatch.undo()
     so = cbuild.build(src, "tp_cgen_cls_mut", OUT_ROOT / "tp_cgen_cls_mut", runtime_dir=runtime_dir())

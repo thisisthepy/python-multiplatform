@@ -1013,27 +1013,73 @@ static inline void tp_release(PyObject **slot)
  * is a plain heap type whose instances keep every field in an object slot at a fixed offset; the
  * slots are reached through the PyMemberDef of the member descriptor captured at module init.
  * Nothing here runs user code: PyMember_GetOne/SetOne touch the slot only.
+ *
+ * A class can change after init (a property replaces a field, __init__ is replaced, the module
+ * global is rebound, an instance's __class__ is assigned). Compiled code therefore re-proves its
+ * preconditions at EVERY FieldGet / FieldSet / New:
+ *   - the class is unchanged: cls->tp_version_tag equals the tag captured (or re-proved) for it.
+ *     CPython clears the tag to 0 on every change of the type (PyType_Modified /
+ *     type_modified_unlocked) and a later lookup assigns a NEW one from a per-interpreter counter
+ *     that only grows and stops at 0 when exhausted (typeobject.c assign_version_tag), so an old
+ *     tag never comes back and a tag of 0 never matches (the captured tag is never 0).
+ *     (Py_TPFLAGS_VALID_VERSION_TAG is "Unused. Legacy flag" in 3.14's object.h and is never set:
+ *     it cannot be part of the test.)
+ *   - FieldGet / FieldSet: Py_IS_TYPE(obj, cls) (covers `obj.__class__ = Other`).
+ *   - New: the module global still is the class (tp_class_global_ok).
+ * When a check fails the generated code takes a slow path with CPython's own semantics (or, in a
+ * pure function, deopts); see cgen.py "Fixed-layout classes".
  * ------------------------------------------------------------------------------------------ */
+
+/* Per-class guard state, one per ClassDecl in the module state (zeroed = not compiled). */
+typedef struct {
+    unsigned int tag;       /* tp_version_tag at which the slots were proved; never 0 while compiled */
+    unsigned int bad_tag;   /* a tag at which tp_class_refresh failed (0: none); not retried */
+    uint64_t gepoch;        /* tp_globals_epoch at which module_dict[name] was last seen to be cls */
+    PyObject *init;         /* strong: the class's own __init__ at capture, or NULL if it had none */
+    Py_ssize_t slow;        /* per-access checks that failed (introspection only) */
+    Py_ssize_t refreshed;   /* new tags adopted by tp_class_refresh (introspection only) */
+} tp_class_rt;
+
+/* Moves whenever a watched module dict changes a key that is (or may be) a compiled class name, is
+ * cleared, cloned or deallocated (tp_globals_watch_event). Static: one counter per extension, shared
+ * by every instance of the module in the process; an instance re-proves its own globals after any
+ * move. The module declares no Py_mod_multiple_interpreters / Py_mod_gil slot, so CPython loads it
+ * only into interpreters sharing the main GIL and keeps the GIL on in a free-threaded build: plain
+ * reads and writes are serialised. */
+static uint64_t tp_globals_epoch = 1;
+
+/* `name` in cls's OWN dict (not through the MRO). 1 found (*out a new reference), 0 absent, -1 error. */
+static inline int tp_own_attr(PyTypeObject *cls, const char *name, PyObject **out)
+{
+    PyObject *dict = PyType_GetDict(cls);
+    int found;
+
+    *out = NULL;
+    if (dict == NULL) {
+        return -1;
+    }
+    found = PyDict_GetItemStringRef(dict, name, out);
+    Py_DECREF(dict);
+    return found;
+}
 
 /* Look up `field` in cls's OWN dict (not through the MRO: a subclass or an instance attribute must
  * not be consulted) and capture its PyMemberDef. It must be a member descriptor made for exactly
  * this class (d_type == cls), of an object slot (Py_T_OBJECT_EX), writable, of that name, whose
- * offset lies inside the instance. 0 = captured, 1 = not a plain slot (the class is not compiled),
- * -1 = error. The PyMemberDef lives in cls->tp_members: the caller must keep `cls` alive for as long
- * as the pointer is used (the generated module holds a strong reference). */
-static inline int tp_slot_capture(PyTypeObject *cls, const char *field, PyMemberDef **out)
+ * offset lies inside the instance. 0 = captured (*out set, *descr a new reference to the descriptor),
+ * 1 = not a plain slot (the class is not compiled), -1 = error. The PyMemberDef lives in
+ * cls->tp_members: the caller must keep `cls` alive for as long as the pointer is used (the
+ * generated module holds a strong reference). */
+static inline int tp_slot_capture(PyTypeObject *cls, const char *field, PyMemberDef **out,
+                                  PyObject **descr_out)
 {
-    PyObject *dict, *descr = NULL;
+    PyObject *descr = NULL;
     int found, rc = 1;
     PyMemberDescrObject *md;
     PyMemberDef *m;
 
-    dict = PyType_GetDict(cls);
-    if (dict == NULL) {
-        return -1;
-    }
-    found = PyDict_GetItemStringRef(dict, field, &descr);
-    Py_DECREF(dict);
+    *descr_out = NULL;
+    found = tp_own_attr(cls, field, &descr);
     if (found < 0) {
         return -1;
     }
@@ -1048,19 +1094,48 @@ static inline int tp_slot_capture(PyTypeObject *cls, const char *field, PyMember
             && (m->flags & Py_READONLY) == 0 && m->offset >= (Py_ssize_t)sizeof(PyObject)
             && m->offset + (Py_ssize_t)sizeof(PyObject *) <= cls->tp_basicsize) {
             *out = m;
-            rc = 0;
+            *descr_out = descr;          /* the reference moves to the caller */
+            return 0;
         }
     }
     Py_DECREF(descr);
     return rc;
 }
 
-/* The class object itself must be what ClassDecl promises: a heap type made by `type` (no
- * metaclass), base `object`, no instance __dict__, no variable size, object's own tp_new and
- * tp_alloc (so tp_new_fixed is what `C(...)` does for a trivial __init__), and then every field a
- * plain slot. `slots[i]` receives the PyMemberDef of fields[i]. 1 = compiled, 0 = not, -1 = error. */
+/* The type-level conditions of ClassDecl: a heap type made by `type` (no metaclass), base `object`,
+ * no instance __dict__, no variable size, object's own tp_new and tp_alloc (so tp_new_fixed is what
+ * `C(...)` does for a trivial __init__), and the generic attribute protocol (no __getattribute__,
+ * __getattr__, __setattr__ or __delattr__: those would run instead of, or after, the slot access). */
+static inline int tp_class_shape_ok(PyTypeObject *cls)
+{
+    return (cls->tp_flags & Py_TPFLAGS_HEAPTYPE) && Py_TYPE(cls) == &PyType_Type
+        && cls->tp_base == &PyBaseObject_Type && cls->tp_dictoffset == 0
+        && cls->tp_itemsize == 0 && cls->tp_new == PyBaseObject_Type.tp_new
+        && cls->tp_alloc == PyType_GenericAlloc && !(cls->tp_flags & Py_TPFLAGS_IS_ABSTRACT)
+        && cls->tp_getattro == PyObject_GenericGetAttr
+        && cls->tp_setattro == PyObject_GenericSetAttr;
+}
+
+static inline void tp_class_rt_clear(tp_class_rt *rt, PyObject **descrs, Py_ssize_t n)
+{
+    Py_ssize_t i;
+    for (i = 0; i < n; i++) {
+        Py_CLEAR(descrs[i]);
+    }
+    Py_CLEAR(rt->init);
+    rt->tag = 0;
+    rt->bad_tag = 0;
+    rt->gepoch = 0;
+}
+
+/* At module init: the class object must be what ClassDecl promises (tp_class_shape_ok) and every
+ * field a plain slot. slots[i] receives the PyMemberDef of fields[i], descrs[i] a strong reference
+ * to its member descriptor, rt->init a strong reference to the class's own __init__ (or NULL), and
+ * rt->tag the class's version tag (PyUnstable_Type_AssignVersionTag assigns one if it has none; a
+ * class that cannot get a tag is not compiled). 1 = compiled, 0 = not (nothing kept), -1 = error
+ * (nothing kept). */
 static inline int tp_class_capture(PyObject *cls_obj, const char *const *fields, Py_ssize_t n,
-                                   PyMemberDef **slots)
+                                   PyMemberDef **slots, PyObject **descrs, tp_class_rt *rt)
 {
     PyTypeObject *cls;
     Py_ssize_t i;
@@ -1070,19 +1145,200 @@ static inline int tp_class_capture(PyObject *cls_obj, const char *const *fields,
         return 0;
     }
     cls = (PyTypeObject *)cls_obj;
-    if (!(cls->tp_flags & Py_TPFLAGS_HEAPTYPE) || Py_TYPE(cls) != &PyType_Type
-        || cls->tp_base != &PyBaseObject_Type || cls->tp_dictoffset != 0
-        || cls->tp_itemsize != 0 || cls->tp_new != PyBaseObject_Type.tp_new
-        || cls->tp_alloc != PyType_GenericAlloc || (cls->tp_flags & Py_TPFLAGS_IS_ABSTRACT)) {
+    if (!tp_class_shape_ok(cls)) {
         return 0;
     }
     for (i = 0; i < n; i++) {
-        rc = tp_slot_capture(cls, fields[i], &slots[i]);
+        rc = tp_slot_capture(cls, fields[i], &slots[i], &descrs[i]);
         if (rc != 0) {
+            tp_class_rt_clear(rt, descrs, i);
             return rc < 0 ? -1 : 0;
         }
     }
+    if (tp_own_attr(cls, "__init__", &rt->init) < 0) {
+        tp_class_rt_clear(rt, descrs, n);
+        return -1;
+    }
+    if (!PyUnstable_Type_AssignVersionTag(cls) || cls->tp_version_tag == 0) {
+        tp_class_rt_clear(rt, descrs, n);
+        return 0;
+    }
+    rt->tag = cls->tp_version_tag;
+    rt->bad_tag = 0;
+    rt->gepoch = 0;
+    rt->slow = 0;
+    rt->refreshed = 0;
     return 1;
+}
+
+/* The class's tag moved (or is 0). Re-prove what the captured slots rely on, without running user
+ * code: get a tag (none left: 0), the shape still holds, every field's own-dict entry is the very
+ * member descriptor object captured at init, and __init__ is the very object captured at init. Then
+ * adopt the new tag (1). Otherwise remember the tag as bad (0), so the next access with that tag
+ * does not search again. -1 = error (a failed dict lookup). */
+static inline int tp_class_refresh(PyTypeObject *cls, tp_class_rt *rt, const char *const *fields,
+                                   Py_ssize_t n, PyObject *const *descrs)
+{
+    unsigned int tag;
+    Py_ssize_t i;
+    PyObject *d;
+    int found;
+
+    if (!PyUnstable_Type_AssignVersionTag(cls) || cls->tp_version_tag == 0) {
+        return 0;                                /* tags exhausted for this class */
+    }
+    tag = cls->tp_version_tag;
+    if (tag == rt->tag) {
+        return 1;
+    }
+    if (tag == rt->bad_tag) {
+        return 0;
+    }
+    if (!tp_class_shape_ok(cls)) {
+        goto bad;
+    }
+    for (i = 0; i < n; i++) {
+        found = tp_own_attr(cls, fields[i], &d);
+        if (found < 0) {
+            return -1;
+        }
+        Py_XDECREF(d);                           /* identity only; descrs[i] keeps it alive */
+        if (d != descrs[i]) {
+            goto bad;
+        }
+    }
+    found = tp_own_attr(cls, "__init__", &d);
+    if (found < 0) {
+        return -1;
+    }
+    Py_XDECREF(d);
+    if (d != rt->init) {
+        goto bad;
+    }
+    rt->tag = tag;
+    rt->refreshed++;
+    return 1;
+bad:
+    rt->bad_tag = tag;
+    return 0;
+}
+
+/* cls's current tp_version_tag, 0 for NULL (introspection: __typedpython_class_info__). */
+static inline unsigned int tp_class_tag(PyObject *cls)
+{
+    return cls != NULL ? ((PyTypeObject *)cls)->tp_version_tag : 0u;
+}
+
+/* The per-access check of FieldGet / FieldSet (obj != NULL) and New (obj == NULL): 1 = the captured
+ * slots are what `obj.f` / `C(...)` reach now (obj is exactly cls, and cls is unchanged since the
+ * slots were proved, or re-proved by tp_class_refresh), 0 = take the slow path, -1 = error. The
+ * fast case is one type compare and one tag compare. */
+static inline int tp_class_current(PyObject *obj, PyObject *cls_obj, tp_class_rt *rt,
+                                   const char *const *fields, Py_ssize_t n, PyObject *const *descrs)
+{
+    PyTypeObject *cls = (PyTypeObject *)cls_obj;
+    if (cls == NULL || (obj != NULL && !Py_IS_TYPE(obj, cls))) {
+        return 0;
+    }
+    if (cls->tp_version_tag == rt->tag) {        /* rt->tag != 0 while cls != NULL */
+        return 1;
+    }
+    return tp_class_refresh(cls, rt, fields, n, descrs);
+}
+
+/* LOAD_GLOBAL of a class name, as an identity test: 1 = module_dict[name] is cls, 0 = it is not (or
+ * the name is not a module global: the slow path then asks tp_global), -1 = error. With a dict
+ * watcher on module_dict (`watched`), a 1 is remembered in rt->gepoch until tp_globals_epoch moves,
+ * so the steady state is one compare; without one (no watcher id was free) every call looks up. */
+static inline int tp_class_global_ok(PyObject *module_dict, PyObject *name, PyObject *cls,
+                                     tp_class_rt *rt, int watched)
+{
+    PyObject *v;
+    if (cls == NULL) {
+        return 0;
+    }
+    if (watched && rt->gepoch == tp_globals_epoch) {
+        return 1;
+    }
+    v = PyDict_GetItemWithError(module_dict, name);   /* borrowed */
+    if (v == NULL) {
+        return PyErr_Occurred() ? -1 : 0;
+    }
+    if (v != cls) {
+        return 0;
+    }
+    if (watched) {
+        rt->gepoch = tp_globals_epoch;
+    }
+    return 1;
+}
+
+/* The body of a module's PyDict_WatchCallback: move tp_globals_epoch when `key` is one of the
+ * NULL-terminated class `names` (an exact str compared by content), may equal one (any other key
+ * type, a str subclass), or is NULL (cleared / cloned / deallocated). Never raises; returns 0. */
+static inline int tp_globals_watch_event(PyDict_WatchEvent event, PyObject *key,
+                                         const char *const *names)
+{
+    Py_ssize_t i;
+    (void)event;
+    if (key != NULL && PyUnicode_CheckExact(key)) {
+#if PY_VERSION_HEX >= 0x030D0000
+        for (i = 0; names[i] != NULL; i++) {
+            if (PyUnicode_EqualToUTF8(key, names[i])) {
+                tp_globals_epoch++;
+                return 0;
+            }
+        }
+        return 0;
+#else
+        (void)i;
+        (void)names;
+#endif
+    }
+    tp_globals_epoch++;
+    return 0;
+}
+
+/* Watch module_dict with `cb` (a function calling tp_globals_watch_event). *id1 = watcher id + 1, or
+ * 0 when no dict-watcher id is free (8 per interpreter, 2 reserved by CPython, shared with every
+ * other extension) or PyDict_Watch failed: the caller then takes the conservative path (a dict
+ * lookup per New). Never leaves an error set. */
+static inline void tp_globals_watch(PyObject *module_dict, PyDict_WatchCallback cb, int *id1)
+{
+    int id;
+    *id1 = 0;
+    id = PyDict_AddWatcher(cb);
+    if (id < 0) {
+        PyErr_Clear();
+        return;
+    }
+    if (PyDict_Watch(id, module_dict) < 0) {
+        PyErr_Clear();
+        if (PyDict_ClearWatcher(id) < 0) {
+            PyErr_Clear();
+        }
+        return;
+    }
+    *id1 = id + 1;
+}
+
+/* Undo tp_globals_watch (module clear / free): unwatch module_dict (if still there) and release the
+ * watcher id. Idempotent; keeps any exception that was already set. */
+static inline void tp_globals_unwatch(PyObject *module_dict, int *id1)
+{
+    PyObject *exc;
+    if (*id1 <= 0) {
+        return;
+    }
+    exc = PyErr_GetRaisedException();
+    if (module_dict != NULL && PyDict_Unwatch(*id1 - 1, module_dict) < 0) {
+        PyErr_Clear();
+    }
+    if (PyDict_ClearWatcher(*id1 - 1) < 0) {
+        PyErr_Clear();
+    }
+    *id1 = 0;
+    PyErr_SetRaisedException(exc);
 }
 
 /* obj.field of a proved-exact instance: a new reference, or CPython's AttributeError for an unset
@@ -1096,6 +1352,12 @@ static inline PyObject *tp_field_get(PyObject *obj, PyMemberDef *m)
 static inline int tp_field_set(PyObject *obj, PyMemberDef *m, PyObject *v)
 {
     return PyMember_SetOne((char *)obj, m, v);
+}
+
+/* The slow path of FieldSet: STORE_ATTR (PyObject_SetAttr). 0 or -1. */
+static inline int tp_setattr(PyObject *obj, PyObject *name, PyObject *v)
+{
+    return PyObject_SetAttr(obj, name, v);
 }
 
 /* The observable result of a trivial __init__: allocate with cls's tp_alloc and set slots[i] to

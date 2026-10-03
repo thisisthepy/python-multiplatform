@@ -361,7 +361,9 @@ class Is(Expr):
 class IsExact(Expr):
     """`type(obj) is C` for a compiled fixed-layout class C (SPEC N-11): no user code. Type BOOL.
     A true IsExact dominating a FieldGet/FieldSet on the same local is what the verifier accepts as
-    the exact-type proof for that access."""
+    the exact-type proof for that access. `C` is the module global as CPython reads it: when the
+    global no longer is the class captured at init, the back end compares with the current binding
+    (impure) or deopts (pure)."""
 
     obj: Expr
     cls: str
@@ -382,7 +384,11 @@ class FieldGet(Expr):
     """`obj.field` of a compiled fixed-layout class C whose exact type is proved (a dominating true
     IsExact on the same local, a CheckExact, a New, or a parameter guarded `type(x) is C`). Reads the
     slot through the member descriptor captured at module init: a new reference, or CPython's own
-    AttributeError for an unset slot. Runs no user code, so it is not an effect. Type OBJ."""
+    AttributeError for an unset slot. Runs no user code, so it is not an effect. Type OBJ.
+    The class may change after init (a property replacing the field, `obj.__class__ = Other`): the
+    back end re-checks `type(obj) is C` and C's version tag at the access, and otherwise does what
+    CPython does — `getattr(obj, field)` in an impure function, a deopt in a pure one (where running
+    user code could be repeated by a later deopt's redo). FieldSet likewise (setattr)."""
 
     obj: Expr
     cls: str
@@ -394,7 +400,9 @@ class New(Expr):
     """`C(args)` for a compiled class whose `__init__` only assigns each slot once from its parameters
     (ClassDecl.trivial_init): allocate with C's tp_alloc and fill the slots in __init__'s order —
     the observable result of running that __init__. A fresh object is not an effect. Type OBJ; args
-    are OBJ (scalars through Box)."""
+    are OBJ (scalars through Box). `C` is read as a module global before the args, as CPython's
+    LOAD_GLOBAL is: if it is no longer the captured class, or the class changed (e.g. __init__), the
+    back end calls what the global held (impure) or deopts (pure)."""
 
     cls: str
     args: tuple[Expr, ...]
