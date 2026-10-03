@@ -112,6 +112,7 @@ object PythonxAdapter {
         # only per-library knowledge is the package map and the value-class allowlist, both of which are
         # data and both of which a consumer can extend at run time.
 
+        import importlib as _importlib
         import importlib.machinery as _machinery
         # Read once per crossing, never per invocation: `_positional_capacity` asks it how many
         # arguments a callable takes at the moment the callable becomes a Kotlin `FunctionN`, and the
@@ -256,6 +257,7 @@ object PythonxAdapter {
         _BY_PACKAGE = {}     # kotlin package -> {kotlin name -> [_Decl]}
         _BY_RECEIVER = {}    # kotlin receiver type -> {kotlin name -> [_Decl]}
         _PACKAGES_SEEN = set()
+        _CHILDREN = {}       # kotlin package -> the Kotlin names of its direct child packages/objects
         _SUPERTYPES = {}     # kotlin type name -> the types it is a, nearest first
 
 
@@ -304,7 +306,9 @@ object PythonxAdapter {
             _BY_PACKAGE.clear()
             _BY_RECEIVER.clear()
             _MEMBER_ALIASES.clear()
+            _MEMBER_KEYWORDS.clear()
             _PACKAGES_SEEN.clear()
+            _CHILDREN.clear()
             _SUPERTYPES.clear()
             present = set()
             for row in rows:
@@ -328,6 +332,11 @@ object PythonxAdapter {
                 segments = decl.package.split('.')
                 for count in range(1, len(segments) + 1):
                     _PACKAGES_SEEN.add('.'.join(segments[:count]))
+                    if count > 1:
+                        # Issue #35: a package lists its direct children in `dir()` and serves them
+                        # as attributes. Kotlin names, exactly as the table spells them -- an object
+                        # (`Alignment`) is a package here, because its members are bound under it.
+                        _CHILDREN.setdefault('.'.join(segments[:count - 1]), set()).add(segments[count - 1])
             for gone in [name for name in _TABLE if name not in present]:
                 del _TABLE[gone]
             # Here rather than at the end of this file: `_PACKAGES_SEEN` is empty until this
@@ -379,6 +388,19 @@ object PythonxAdapter {
         def bound_names():
             '''Every Kotlin fully-qualified name the adapter knows about.'''
             return list(_TABLE)
+
+
+        def _rows_named(kotlin_package, name):
+            '''The table rows [name] stands for in [kotlin_package], or `None` -- without reading anything.
+
+            What `python_multiplatform.describe(module, name)` asks first (issue #36): a
+            `STATIC_GETTER` read runs Kotlin, so a description has to come from the table and never
+            from the module attribute. An overload set's base name answers every member.
+            '''
+            decls = _BY_PACKAGE.get(kotlin_package, {}).get(name)
+            if not decls:
+                return None
+            return tuple(decl.row for decl in decls)
 
 
         # --------------------------------------------------------------------------- names
@@ -897,23 +919,30 @@ object PythonxAdapter {
 
 
         _MEMBER_RESOLVERS = []
-        _MEMBER_ALIASES = {}    # (kotlin receiver type, requested name) -> kotlin member name
+        _MEMBER_ALIASES = {}    # (kotlin receiver type, requested name) -> (kotlin member name, keyword map)
+        _MEMBER_KEYWORDS = {}   # (kotlin receiver type, kotlin member name) -> keyword map ({} for none)
 
 
         def add_member_resolver(fn):
-            '''Registers `fn(kotlin_type_name, requested_name, kotlin_member_names) -> kotlin_name | None`.
+            '''Registers `fn(kotlin_type_name, requested_name, kotlin_member_names)`.
 
-            Asked only when a proxy has **no** Kotlin member of the requested name. The first resolver to
-            return a name that is one of `kotlin_member_names` decides, and that Kotlin member is served.
-            The binder renames nothing by itself: with no resolver an unknown name is an `AttributeError`.
-            The answer is cached in this registry, never written onto the proxy class, so `dir()` of a
-            proxy shows Kotlin names only. Registering the same `fn` twice is a no-op.
+            It answers `kotlin_name`, `(kotlin_name, keyword_map)` or `None`. Asked for a name the proxy
+            has **no** Kotlin member of: the first resolver to return a name that is one of
+            `kotlin_member_names` decides, and that Kotlin member is served. Asked for a Kotlin member
+            name only when a call to it passes keyword arguments, and then only for its keyword map
+            (the answer must name that same member). `keyword_map` is `{python_kw: kotlinParam}`,
+            applied to that member's calls; keywords it does not name pass through unchanged.
+            The binder renames nothing by itself: with no resolver an unknown name is an `AttributeError`
+            and a keyword is a Kotlin parameter name. Answers are cached in this registry, never
+            written onto the proxy class, so `dir()` of a proxy shows Kotlin names only. Registering
+            the same `fn` twice is a no-op.
             '''
             if not callable(fn):
                 raise TypeError('a member resolver must be callable')
             if fn not in _MEMBER_RESOLVERS:
                 _MEMBER_RESOLVERS.append(fn)
             _MEMBER_ALIASES.clear()
+            _MEMBER_KEYWORDS.clear()
             return fn
 
 
@@ -922,10 +951,25 @@ object PythonxAdapter {
             if fn in _MEMBER_RESOLVERS:
                 _MEMBER_RESOLVERS.remove(fn)
             _MEMBER_ALIASES.clear()
+            _MEMBER_KEYWORDS.clear()
+
+
+        def _resolver_answer(answer):
+            '''`(kotlin_name, keyword_map)` out of a resolver's answer; `(None, None)` for "not mine".'''
+            if isinstance(answer, tuple):
+                if len(answer) != 2 or not isinstance(answer[0], str) or not hasattr(answer[1], 'items'):
+                    raise TypeError(
+                        'a member resolver answers kotlin_name, (kotlin_name, keyword_map) or None; got ' +
+                        repr(answer)
+                    )
+                return answer[0], dict(answer[1])
+            if isinstance(answer, str):
+                return answer, None
+            return None, None
 
 
         def _resolve_member(cls, name):
-            '''The Kotlin member name a registered resolver maps [name] to on [cls], or `None`.'''
+            '''`(kotlin_member_name, keyword_map_or_None)` a registered resolver maps [name] to on [cls], or `None`.'''
             if not _MEMBER_RESOLVERS:
                 return None
             key = (cls._kotlin_type_name, name)
@@ -935,24 +979,67 @@ object PythonxAdapter {
             members = _BY_RECEIVER.get(cls._kotlin_type_name, {})
             names = tuple(members)
             for resolver in tuple(_MEMBER_RESOLVERS):
-                target = resolver(cls._kotlin_type_name, name, names)
+                target, keywords = _resolver_answer(resolver(cls._kotlin_type_name, name, names))
                 if target and target in members and not target.startswith('_'):
-                    _MEMBER_ALIASES[key] = target
-                    return target
+                    _MEMBER_ALIASES[key] = (target, keywords)
+                    return _MEMBER_ALIASES[key]
             return None
 
 
+        def _member_keywords(type_name, name):
+            '''The keyword map a resolver gives the Kotlin member [name] of [type_name]; `{}` for none.
+
+            Asked only when a call passes keywords and a resolver is registered, so a call written with
+            Kotlin keywords and no resolver costs what it always did.
+            '''
+            key = (type_name, name)
+            cached = _MEMBER_KEYWORDS.get(key)
+            if cached is not None:
+                return cached
+            names = tuple(_BY_RECEIVER.get(type_name, {}))
+            found = {}
+            for resolver in tuple(_MEMBER_RESOLVERS):
+                target, keywords = _resolver_answer(resolver(type_name, name, names))
+                if target == name and keywords is not None:
+                    found = keywords
+                    break
+            _MEMBER_KEYWORDS[key] = found
+            return found
+
+
+        def _map_keywords(name, keywords, kwargs):
+            mapped = {}
+            for key, value in kwargs.items():
+                target = keywords.get(key, key)
+                if target in mapped:
+                    raise TypeError(name + "() got multiple values for argument '" + target + "'")
+                mapped[target] = value
+            return mapped
+
+
         class _BoundMember:
-            '''An extension applied to a receiver: literally the module-level callable with slot 0 filled.'''
+            '''An extension applied to a receiver: literally the module-level callable with slot 0 filled.
 
-            __slots__ = ('_fn', '_receiver', '__name__')
+            `_keywords` is the keyword map a member resolver gave (issue #34): `None` until something
+            decides -- then a call with keywords asks the resolvers for this Kotlin name's map.
+            '''
 
-            def __init__(self, fn, receiver, name):
+            __slots__ = ('_fn', '_receiver', '__name__', '_type_name', '_keywords')
+
+            def __init__(self, fn, receiver, name, type_name=None):
                 self._fn = fn
                 self._receiver = receiver
                 self.__name__ = name
+                self._type_name = type_name
+                self._keywords = None
 
             def __call__(self, *args, **kwargs):
+                if kwargs:
+                    keywords = self._keywords
+                    if keywords is None and _MEMBER_RESOLVERS and self._type_name is not None:
+                        keywords = _member_keywords(self._type_name, self.__name__)
+                    if keywords:
+                        kwargs = _map_keywords(self.__name__, keywords, kwargs)
                 return self._fn(self._receiver, *args, **kwargs)
 
             @property
@@ -980,9 +1067,18 @@ object PythonxAdapter {
                 self._name = name
 
             def __get__(self, obj, owner=None):
+                if owner is None:
+                    owner = type(obj)
                 if obj is None:
                     obj = owner.empty()
-                return _BoundMember(self._fn, obj, self._name)
+                return _BoundMember(self._fn, obj, self._name, getattr(owner, '_kotlin_type_name', None))
+
+
+        def _aliased(member, keywords):
+            '''The member an alias answer served, carrying that answer's keyword map (if it gave one).'''
+            if keywords is not None and isinstance(member, _BoundMember):
+                member._keywords = keywords
+            return member
 
 
         class _ProxyMeta(type):
@@ -993,12 +1089,12 @@ object PythonxAdapter {
                 if name.startswith('_'):
                     raise AttributeError(name)
                 if not _attach(cls, name):
-                    target = _resolve_member(cls, name)
-                    if target is None:
+                    resolved = _resolve_member(cls, name)
+                    if resolved is None:
                         raise AttributeError(
                             'no Kotlin extension named ' + name + ' on ' + cls._kotlin_type_name
                         )
-                    return getattr(cls, target)
+                    return _aliased(getattr(cls, resolved[0]), resolved[1])
                 return getattr(cls, name)
 
             def __repr__(cls):
@@ -1039,12 +1135,12 @@ object PythonxAdapter {
                 if name.startswith('_'):
                     raise AttributeError(name)
                 if not _attach(type(self), name):
-                    target = _resolve_member(type(self), name)
-                    if target is None:
+                    resolved = _resolve_member(type(self), name)
+                    if resolved is None:
                         raise AttributeError(
                             'no Kotlin extension named ' + name + ' on ' + type(self)._kotlin_type_name
                         )
-                    return getattr(self, target)
+                    return _aliased(getattr(self, resolved[0]), resolved[1])
                 return getattr(self, name)
 
             def __repr__(self):
@@ -1573,6 +1669,11 @@ object PythonxAdapter {
             if name[:1].isupper() and (qualified in _BY_RECEIVER or qualified in _PROXY_TYPES):
                 # A type, not a declaration: `androidx.compose.ui.Modifier` is the receiver proxy.
                 return _proxy_type(qualified), True
+            if qualified in _PACKAGES_SEEN:
+                # Issue #35: a child package or object, imported on first read, so
+                # `androidx.compose.ui.Alignment.End` needs no `import` of `Alignment` first. The import
+                # system would bind the same module onto this one after an explicit import anyway.
+                return _importlib.import_module(qualified), True
             return None, False
 
 
@@ -1603,6 +1704,7 @@ object PythonxAdapter {
         def _module_dir(kotlin_package):
             def __dir__():
                 names = set(_BY_PACKAGE.get(kotlin_package, {}))
+                names.update(_CHILDREN.get(kotlin_package, ()))
                 for type_name in _BY_RECEIVER:
                     package, _, leaf = type_name.rpartition('.')
                     if package == kotlin_package:

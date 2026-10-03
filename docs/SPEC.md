@@ -173,14 +173,19 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 - **U-8** A function on a Kotlin-named module carries Kotlin's own surface and nothing else: the
   Kotlin declaration name, keyword arguments by **Kotlin parameter names**, Kotlin defaults for omitted
   parameters, overload sets under the base name, and its signature as public metadata
-  (`inspect.signature`, `python_multiplatform.describe`; contract in `KotlinSurface.kt`'s KDoc). No
+  (`inspect.signature`, `python_multiplatform.describe`; contract in `KotlinSurface.kt`'s KDoc).
+  `describe(module, name)` describes any bound name, a named constant (`STATIC_GETTER`) included,
+  without evaluating it (#36). A module's `dir()` lists its direct child packages/objects and reading
+  one as an attribute imports it (#35) — Kotlin names only. No
   member or parameter is renamed; the binder creates no `pythonx` module and a real `pythonx` package
   on disk is what `import pythonx` loads. The answer is the same whichever installer
   (`PythonProxySource`, `PythonxAdapter`) ran first for a table. `Status: implemented` on desktop —
-  `PM/desktopTest/.../pythonx/KotlinNamedSurfaceTest.kt`, `ksp-fixtures/compose/.../KotlinSignatureMetadataTest.kt`.
+  `PM/desktopTest/.../pythonx/KotlinNamedSurfaceTest.kt`, `BinderNamespaceTest.kt`, `ksp-fixtures/compose/.../KotlinSignatureMetadataTest.kt`.
 - **U-9** A Pythonic package can serve extra member names on a Kotlin proxy through one hook,
   `python_multiplatform.binding.add_member_resolver(fn)`, `fn(kotlin_type_name, requested_name,
-  kotlin_member_names) -> kotlin_name | None`, asked only when no Kotlin member of that name exists.
+  kotlin_member_names) -> kotlin_name | (kotlin_name, keyword_map) | None`, asked when no Kotlin member
+  of that name exists — and, for a Kotlin-named member, only when a call passes keywords and only for
+  its `{python_kw: kotlinParam}` keyword map (#34).
   The binder renames nothing itself (no resolver: `AttributeError`), and aliases are cached in the
   registry, not written on the proxy class (`dir()` stays Kotlin-only). Contract in `KotlinSurface.kt`'s
   KDoc. `Status: implemented` on desktop — `PM/desktopTest/.../pythonx/MemberResolverTest.kt`,
@@ -211,6 +216,15 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `ksp-fixtures/compose/src/desktopTest/` (`ComposableRenderTest.kt`, `M3ProofRenderTest.kt`,
   `CallbackDrivenRenderTest.kt`, pointer/drag render tests), `GP/artifact/ComposableBindingTest.kt`;
   `planned` on Android, iOS and wasm.
+- **B-8** A host draws a Python-declared application root with
+  `python.multiplatform.compose.PythonContent(root: PyObject)` or `PythonContent(module, attribute)`,
+  from the `python-multiplatform-compose` module (`python-multiplatform` itself does not depend on
+  Compose). The root is a Python callable, or a Compose `State` that Python holds whose value is that
+  callable. The state is read inside the composition, so a Python write into it replaces the root on
+  the next frame with no host call; Python callables a root passed into composables are released when
+  that root is replaced or the composition is disposed. The entry point names no library.
+  `Status: implemented` on desktop — `ksp-fixtures/compose/.../PythonContentRenderTest.kt`; the module
+  compiles for Android, nothing runs there yet.
 - **B-7** The plugin generates `.pyi` stubs for the Kotlin-named modules only, under Kotlin names
   (keyword parameters by Kotlin name, `= ...` for a Kotlin default, receiver positional-only). Types are
   the declared Kotlin types: one stub class per bound type in the module of its own package, `Dp | float`
@@ -262,6 +276,12 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 - **N-3** Binding Kotlin/Native klib declarations at run time (B-2). `Status: planned`.
 - **N-4** Linux and Windows desktop runs in CI (P-2). `Status: planned`.
 - **N-5** Native-image upcall verification as an automated test (U-6). `Status: planned`.
+- **N-6** Compose state created and written from Python through the binder:
+  `androidx.compose.runtime.mutableStateOf(x)` callable, and `.value` of the returned `MutableState`
+  readable and writable on its proxy. Neither is bound today: the walker emits only `FUNCTION` and
+  `STATIC_GETTER` entries (no instance members), and declines every declaration whose signature
+  mentions a type parameter. B-8's test writes its root state through a fixture-local KSP-bound
+  setter instead. `Status: planned`.
 
 ---
 

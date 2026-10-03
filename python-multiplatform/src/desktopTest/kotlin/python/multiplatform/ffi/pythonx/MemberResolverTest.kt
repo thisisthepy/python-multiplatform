@@ -188,7 +188,119 @@ class MemberResolverTest {
         assertEquals("AttributeError", eval("_mr['after']"))
     }
 
+    // ------------------------------------------------------------------------------- keyword maps (#34)
+
+    /**
+     * Issue #34's completion statement: `m.padding(padding_values=...)`. `padding` is a Kotlin name,
+     * so the resolver is asked for it only for its keyword map -- and only because the call passed
+     * a keyword.
+     */
+    @Test
+    fun aKeywordMapRenamesTheKeywordsOfAKotlinNamedMember() = withAdapter {
+        withKeywordResolver {
+            Python3.exec(
+                """
+                from androidx.compose.ui import Modifier, describeModifier
+                from androidx.compose.foundation.layout import paddingValuesOf
+                _mr = {
+                    'instance': describeModifier(Modifier.padding(16).padding(padding_values=paddingValuesOf(4))),
+                    'class': describeModifier(Modifier.padding(padding_values=paddingValuesOf(2))),
+                    'kotlin_kw_still_works': describeModifier(Modifier.padding(paddingValues=paddingValuesOf(1))),
+                    'asked_for_padding': [c for c in _mr_calls if c[1] == 'padding'] != [],
+                }
+                """.trimIndent(),
+            )
+            assertEquals("padding(16.0) -> padding(pv(4.0))", eval("_mr['instance']"))
+            assertEquals("padding(pv(2.0))", eval("_mr['class']"))
+            assertEquals("padding(pv(1.0))", eval("_mr['kotlin_kw_still_works']"))
+            assertEquals("True", eval("_mr['asked_for_padding']"))
+        }
+    }
+
+    /** An alias answer can carry a map too: the map applies to that alias's call. */
+    @Test
+    fun aKeywordMapRidesAlongWithAnAlias() = withAdapter {
+        withKeywordResolver {
+            Python3.exec(
+                """
+                from androidx.compose.ui import Modifier, describeModifier
+                _mr = {'chain': describeModifier(Modifier.padding(1).fill_max_height(frac=0.5))}
+                """.trimIndent(),
+            )
+            assertEquals("padding(1.0) -> fillMaxHeight(f=0.5)", eval("_mr['chain']"))
+        }
+    }
+
+    /** A keyword neither the map nor Kotlin knows is refused with the Kotlin parameter names. */
+    @Test
+    fun anUnknownKeywordStillRaisesTypeErrorNamingTheKotlinParameters() = withAdapter {
+        withKeywordResolver {
+            Python3.exec(
+                """
+                from androidx.compose.ui import Modifier
+                _mr = {}
+                for _label, _call in (
+                    ('overloads', lambda: Modifier.padding(1).padding(bogus_kw=1)),
+                    ('single', lambda: Modifier.padding(1).fill_max_height(bogus_kw=1)),
+                ):
+                    try:
+                        _call()
+                        _mr[_label] = 'accepted'
+                    except TypeError as _e:
+                        _mr[_label] = str(_e)
+                """.trimIndent(),
+            )
+            val overloads = eval("_mr['overloads']")
+            assertTrue("paddingValues" in overloads && "horizontal" in overloads, overloads)
+            val single = eval("_mr['single']")
+            assertTrue("fraction" in single && "bogus_kw" in single, single)
+        }
+    }
+
+    /** No resolver: a Python-spelled keyword on a member is refused exactly as before. */
+    @Test
+    fun withNoResolverAKeywordIsNotMapped() = withAdapter {
+        Python3.exec(
+            """
+            from androidx.compose.ui import Modifier
+            from androidx.compose.foundation.layout import paddingValuesOf
+            try:
+                Modifier.padding(1).padding(padding_values=paddingValuesOf(4))
+                _mr = {'outcome': 'accepted'}
+            except TypeError:
+                _mr = {'outcome': 'TypeError'}
+            """.trimIndent(),
+        )
+        assertEquals("TypeError", eval("_mr['outcome']"))
+    }
+
     // ------------------------------------------------------------------------------- helpers
+
+    /**
+     * Answers `padding` with its Kotlin name plus a keyword map, and `fill_max_height` with an alias
+     * plus one; records every question.
+     */
+    private inline fun withKeywordResolver(block: () -> Unit) {
+        Python3.exec(
+            """
+            import python_multiplatform.binding as _b
+            _mr_calls = []
+            def _kw_resolver(type_name, requested, kotlin_names):
+                _mr_calls.append((type_name, requested, tuple(kotlin_names)))
+                if requested == 'padding':
+                    return ('padding', {'padding_values': 'paddingValues'})
+                if requested == 'fill_max_height':
+                    return ('fillMaxHeight', {'frac': 'fraction'})
+                return None
+            _b.add_member_resolver(_kw_resolver)
+            """.trimIndent(),
+        )
+        try {
+            block()
+        } finally {
+            Python3.exec("_b.remove_member_resolver(_kw_resolver)")
+        }
+    }
 
     /** `fill_max_width` -> `fillMaxWidth`, and nothing else: the consumer's rule, not the binder's. */
     private inline fun withResolver(recording: Boolean = false, block: () -> Unit) {

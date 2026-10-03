@@ -45,10 +45,13 @@ kotlin {
         }
         val desktopMain by getting {
             dependencies {
+                implementation(projects.pythonMultiplatformCompose)
                 implementation(compose.runtime)
                 implementation(compose.foundation)
                 implementation(compose.material3)
                 implementation(compose.ui)
+                // `Icons.Default.Add` and friends (issue #37): the one place an `ImageVector` is built.
+                implementation(libs.compose.material.icons.core)
                 implementation(compose.desktop.currentOs)
             }
         }
@@ -92,6 +95,8 @@ pythonBindings {
             "androidx.compose.ui.graphics",
             "androidx.compose.ui.res",
             "androidx.compose.ui",
+            // 5. `material.icons` -- `Icons.Default` and the icon properties behind it (issue #37).
+            "androidx.compose.material.icons",
         ),
     )
     // Stubs on: `generatePythonStubs` over the real Compose jars is what `tools/stubs/check-stubs.sh` (the mypy

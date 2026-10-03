@@ -41,6 +41,9 @@ rootProject.name = "PythonMultiplatformMobile"
 include(":sample")
 include(":python-multiplatform")
 include(":python-multiplatform-ksp")
+// The Compose host: the `@Composable` that draws a Python-declared root. Its own module so that
+// `:python-multiplatform` never depends on Compose.
+include(":python-multiplatform-compose")
 include(":ksp-fixtures:library")
 include(":ksp-fixtures:app")
 // The fixture that carries an Android plugin. `:library` and `:app` apply none, which is why the
