@@ -147,7 +147,7 @@ and `pythonx.compose.layout`, and documents signatures like `Text(text, color, f
 `on_click` (`docs/archive/pythonx-adapter-design.md` §3 measured both). Which Python spelling
 `pythonx` uses is pythonx-compose's decision: this repository's binder exposes the Kotlin name
 `onClick` and its Pythonic alias `on_click` on the Kotlin-named module, and renames no namespace
-(`docs/INTENT.md` §2.2, SPEC U-12) — plus `Column/Row/Spacer/TextField`. It also
+(`docs/INTENT.md` §2.2, SPEC U-12) - plus `Column/Row/Spacer/TextField`. It also
 requires `main.App` as a live object, `App.messages.getValue()/setValue()`, and
 `main.App.update(NewComposable)` for hot-swapping the UI from a Jupyter cell.
 

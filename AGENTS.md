@@ -205,14 +205,14 @@ around one.
 
 1. **The binder never exports a Kotlin namespace under a different name.** A Kotlin fully-qualified
    name in Python means the original Kotlin (`androidx.compose...` is androidx). The binder must
-   contain **no** feature that renames `androidx` to `pythonx` — or any package path to any other —
+   contain **no** feature that renames `androidx` to `pythonx` - or any package path to any other -
    not even as an opt-in or a default kept "for compatibility" (rule 7).
    This rule is about **namespaces only**. Converting the names *inside* a Kotlin-named module is a
    python-multiplatform feature the maintainer asked for ("파이썬 형태로 인자랑 바꿔주는건 원래
    python-multiplatform 자체에서 지원하는 기능"): every lower-case-first declaration, proxy member and
    keyword parameter is also reachable by its snake_case name (`fill_max_width`,
    `on_checked_change=`), beside its Kotlin name, which keeps working (SPEC U-12). Do not remove that
-   conversion in the name of this rule — that mistake was made once (238119b7, reverted by #131).
+   conversion in the name of this rule - that mistake was made once (238119b7, reverted by #131).
 2. **`pythonx` is a real Python package** (it lives in the separate `pythonx-compose` repository).
    Its code imports the `androidx` modules and makes them Pythonic. Do not build anything here that
    synthesises `pythonx.*` modules or prevents a real on-disk `pythonx` package from loading. (The

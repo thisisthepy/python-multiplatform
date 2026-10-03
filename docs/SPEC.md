@@ -238,11 +238,11 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 - **U-8** A function on a Kotlin-named module carries Kotlin's surface: the Kotlin declaration name,
   keyword arguments by **Kotlin parameter names**, Kotlin defaults for omitted parameters, overload sets
   under the base name, and its signature as public metadata (`inspect.signature`,
-  `python_multiplatform.describe`; contract in `KotlinSurface.kt`'s KDoc) — and, beside each Kotlin
+  `python_multiplatform.describe`; contract in `KotlinSurface.kt`'s KDoc) - and, beside each Kotlin
   name, its Pythonic alias (U-12).
   `describe(module, name)` describes any bound name, a named constant (`STATIC_GETTER`) included,
   without evaluating it (#36). A module's `dir()` lists its direct child packages/objects and reading
-  one as an attribute imports it (#35) — Kotlin names only (the U-12 aliases are served, not listed).
+  one as an attribute imports it (#35) - Kotlin names only (the U-12 aliases are served, not listed).
   No namespace is renamed; the binder creates no `pythonx` module and a real `pythonx` package
   on disk is what `import pythonx` loads. The answer is the same whichever installer
   (`PythonProxySource`, `PythonxAdapter`) ran first for a table. **A name that is both a function and a
@@ -297,7 +297,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   working. The namespace is never converted: `androidx.compose.material3` is a module under exactly
   that name, and no package segment gets an alias (AGENTS §12.1, §12.2).
   - **Rule** (pythonx-compose 0.1.0a1's `_reexport.py`, character for character; `python_multiplatform.
-    python_name`/`snake_case`): a name starting upper-case is unchanged — types, objects, composables,
+    python_name`/`snake_case`): a name starting upper-case is unchanged - types, objects, composables,
     PascalCase constants (`Checkbox`, `Modifier`, `Alignment.End`). Any other name is snake_case, a run
     of capitals counting as one word (`rememberTextFieldState` → `remember_text_field_state`,
     `toURLString` → `to_url_string`, `zIndex` → `z_index`). An explicit overload key converts its base
@@ -312,7 +312,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     for module names and keywords of what it renders. Not converted: classes rendered by KSP
     (`PythonProxySource.renderClass`), whose constructors and methods are positional and whose members
     keep their Kotlin names.
-  - **Collisions.** An alias is served only when it is unambiguous in its namespace — one module (its
+  - **Collisions.** An alias is served only when it is unambiguous in its namespace - one module (its
     bound names and child packages), one proxy type (its members and every supertype's), one
     declaration's parameters. An alias that is already a Kotlin name there belongs to that Kotlin name
     (`foo_bar` is the Kotlin `foo_bar`, never `fooBar`); an alias two Kotlin names map to (`toURL`,
@@ -323,12 +323,12 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     converts `dir()` by the same rule (pythonx-compose 0.1.0a1's `_name_table`) therefore sees no
     collision.
   - **Metadata.** `inspect.signature` shows each parameter under its Pythonic keyword (the Kotlin name
-    where no alias is served) — it is the call surface Python tools read; `describe()` keeps the Kotlin
+    where no alias is served) - it is the call surface Python tools read; `describe()` keeps the Kotlin
     declaration's names in `name` and adds the Pythonic keyword as `python_name`;
     `describe(module, alias)` and `describe_member(type, alias)` describe the Kotlin declaration the
     alias is served for.
   - **Stubs** (B-7) carry the same names.
-  `Status: implemented` on desktop (tests written first, not yet run at the time of writing) —
+  `Status: implemented` on desktop (tests written first, not yet run at the time of writing) -
   `PM/commonTest/.../pythonx/PythonicNameTest.kt`,
   `PythonxAdapterTest.kt` (`theNameRuleConvertsKotlinToPythonAndEitherSpellingReachesOneDeclaration`,
   `everyBoundNameSurvivesTheRoundTripThroughItsPythonicName`), `PM/desktopTest/.../pythonx/KotlinNamedSurfaceTest.kt`,
@@ -402,7 +402,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   for a value class bound as its primitive, `Callable[...]` for a function type, `| None` for a nullable;
   an extension function is also a callable attribute of its receiver's class; an overload set is
   `@overload`ed under its base name in table-key order; a required parameter after a defaulted one is
-  keyword-only like `inspect.signature`. It emits nothing under `pythonx` and converts no namespace. `Status: partial` — `GP/stubs/PyiRenderingTest.kt`,
+  keyword-only like `inspect.signature`. It emits nothing under `pythonx` and converts no namespace. `Status: partial` - `GP/stubs/PyiRenderingTest.kt`,
   `GP/stubs/TypedStubTest.kt`, `GP/stubs/KotlinNamesOnlyStubTest.kt`,
   `ksp-fixtures/artifact/.../WalkedArtifactStubTest.kt`, `.../StubSignatureAgreesWithRuntimeTest.kt`,
   `GP/stubs/CompanionFactoryStubTest.kt` (#78: a name that is both a function and a Kotlin-named

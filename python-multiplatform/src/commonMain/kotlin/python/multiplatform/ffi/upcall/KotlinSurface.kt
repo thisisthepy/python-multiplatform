@@ -479,11 +479,16 @@ object KotlinSurface {
                 # is kept on the module's type (`PythonProxySource._pm_kotlin_rows`), and a rendered
                 # function is found by `getattr_static`, which runs no descriptor -- so a constant's
                 # Kotlin getter is never invoked here.
-                row = (getattr(type(module), '_pm_kotlin_rows', None) or {}).get(name)
+                kotlin = name
+                row = (getattr(type(module), '_pm_kotlin_rows', None) or {}).get(kotlin)
+                if row is None and not name.startswith('_'):
+                    # A Pythonic alias describes the Kotlin declaration it is served for (issue #131).
+                    kotlin = _module_aliases(module).get(name, name)
+                    row = (getattr(type(module), '_pm_kotlin_rows', None) or {}).get(kotlin)
                 if row is not None:
                     rows = (row,)
                 else:
-                    rows = getattr(_inspect.getattr_static(module, name, None), '__kotlin_rows__', None)
+                    rows = getattr(_inspect.getattr_static(module, kotlin, None), '__kotlin_rows__', None)
             if not rows:
                 raise AttributeError(
                     "module '" + module.__name__ + "' has no bound Kotlin declaration named '" + name + "'"
