@@ -63,6 +63,11 @@ class Report:
     expression_types: dict[str, dict[tuple[int, int], str]]
 
 
+# Directory holding `__builtins__.pyi`: names the interpreter provides without an import (`compiled`).
+# Pyrefly 1.3.2 reads that file from any search-path entry as extra builtins.
+BUILTIN_STUBS = Path(__file__).parent / "builtin_stubs"
+
+
 def command() -> list[str]:
     """The Pyrefly command line: `TYPEDPYTHON_PYREFLY`, or the copy installed next to this Python."""
     override = os.environ.get("TYPEDPYTHON_PYREFLY")
@@ -73,7 +78,7 @@ def run(paths: Sequence[Path], search_paths: Sequence[Path] = ()) -> Report:
     files = [str(Path(p).resolve()) for p in paths]
     with tempfile.TemporaryDirectory(prefix="typedpython-") as work:
         config = Path(work) / "pyrefly.toml"
-        config.write_text(_config([*search_paths, *import_roots(files)]))
+        config.write_text(_config([*search_paths, *import_roots(files), BUILTIN_STUBS]))
         report_dir = Path(work) / "pysa"
         argv = [
             *command(), "check", *files,

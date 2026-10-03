@@ -1,0 +1,1 @@
+import builtins; builtins.compiled = getattr(builtins, "compiled", lambda f, /: f)
