@@ -483,7 +483,10 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     fill the slots directly (the same observable result as running that `__init__`); any other `__init__`
     is called as an object;
   - methods compile like functions with `self` guarded `type(self) is C`; anything else on the class stays
-    interpreted.
+    interpreted;
+  - a function that writes a slot is never "closed" (no `entry_globals` snapshot): overwriting a slot can
+    drop the last reference to the old value, and its `__del__` is user code that can rebind globals. This
+    is stricter than the IR contract requires, on purpose.
   A class outside these rules stays interpreted with a reason. `Status: planned`.
 
 ---
