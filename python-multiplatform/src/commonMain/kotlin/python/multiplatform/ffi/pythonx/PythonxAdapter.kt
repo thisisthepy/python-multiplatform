@@ -1339,10 +1339,41 @@ object PythonxAdapter {
 
 
         def _wrap(result, kotlin_type_name):
-            '''A `TypeTag.OBJECT` result: a handle integer, given an owner.'''
-            if kotlin_type_name is None or not isinstance(result, int):
+            '''A `TypeTag.OBJECT` result: a handle integer, given an owner.
+
+            A `bool` is not a handle even though it is an `int`: the boundary never sends one for a
+            Kotlin object, and a `True` read as handle 1 would name some unrelated root.
+
+            A value read as `kotlin.Any` may be a boxed scalar (issue #69); `_from_any` asks.
+            '''
+            if kotlin_type_name is None or isinstance(result, bool) or not isinstance(result, int):
                 return result
+            if kotlin_type_name == _KOTLIN_ANY:
+                return _from_any(result)
             return _proxy_type(kotlin_type_name)(result)
+
+
+        def _from_any(handle):
+            '''The handle of a value Kotlin holds as `kotlin.Any`: the Python scalar, or a proxy.
+
+            ### Why this has to ask Kotlin
+
+            A Kotlin `Int` in an `Any` crosses as a handle like every other Kotlin object, and an `int`
+            is all Python receives either way -- so nothing on this side can tell `MutableState<Int>`'s
+            7 from the handle of a `Modifier`. Kotlin can: `PythonCallables.unboxScalar` looks the
+            handle up, and for a boxed `Int`/`Long`/`Short`/`Byte`/`Double`/`Float`/`Boolean`/
+            `String`/`Char` it **releases** the root and answers the Python scalar (a new reference,
+            built by the trampoline). For anything else it answers `None` and the root stays, owned
+            by the proxy built here exactly as before.
+
+            The cost is one more crossing per `kotlin.Any` read that is not a Python object. A Python
+            object Kotlin holds (`state.value = root`) comes back as itself, not as an `int`, and
+            never reaches this function.
+            '''
+            scalar = _boundary()['invoke'](_resolve('${PythonCallables.UNBOX_SCALAR}'), (handle,))
+            if scalar is None:
+                return _proxy_type(_KOTLIN_ANY)(handle)
+            return scalar
 
 
         # --------------------------------------------------------------------------- calling
@@ -1354,6 +1385,73 @@ object PythonxAdapter {
         # The tags whose Kotlin side is a reference, so `None` can reach it as `null`. A number or a
         # Boolean cannot: `TypeTag.INT` narrows a `Long`, and the walker declines a nullable one.
         _NULLABLE_TAGS = ('STRING', 'BYTES', 'OBJECT')
+
+        # Issue #69: which Kotlin integer an `int` written into a `kotlin.Any` slot becomes. `Int` when
+        # it fits in 32 bits -- what `mutableStateOf(0)` is in Kotlin -- else `Long`; outside 64 bits
+        # there is no Kotlin integer to box it as, and the write is refused.
+        _INT_MIN = -(1 << 31)
+        _INT_MAX = (1 << 31) - 1
+        _LONG_MIN = -(1 << 63)
+        _LONG_MAX = (1 << 63) - 1
+
+        # What `_coerce` puts in a scalar's slot during a *trial* bind, for `_CALLABLE_PENDING`'s
+        # reason: boxing crosses into Kotlin and roots the box, which a candidate that then loses
+        # has no business doing. The winner is re-bound strictly before the call.
+        _SCALAR_PENDING = object()
+
+
+        class _BoxedArgument(int):
+            '''The handle of a Kotlin box, on its way into one `kotlin.Any` slot of one call.
+
+            An `int` because that is what the slot reads a Kotlin object as (`UpcallTrampoline
+            .toKotlinObject`); a subclass so that it can give the root back. It lives in the argument
+            tuple, so it dies -- and releases -- when the call that tuple was built for is over, by
+            which time Kotlin holds the box by an ordinary reference (the state's field, say) and
+            needs the root no more. Released earlier, the slot would resolve a stale handle.
+            '''
+
+            __slots__ = ()
+
+            def __del__(self):
+                try:
+                    _boundary()['release'](int(self))
+                except Exception:
+                    # `__del__` cannot raise usefully, and at interpreter teardown the boundary may
+                    # already be gone; the root then goes with `HandleTable` itself.
+                    pass
+
+
+        def _box_scalar(value, strict):
+            '''A Python scalar for a `kotlin.Any` slot, as the handle of the Kotlin box it means (#69).
+
+            `bool` before `int`, because a `bool` *is* an `int`. A subclass of a scalar type is boxed as
+            the base type's value (`int(value)`), never sent as itself: an `int` subclass reaching the
+            slot would be read as a handle.
+            '''
+            if isinstance(value, bool):
+                entry = '${PythonCallables.BOX_BOOLEAN}'
+                carried = bool(value)
+            elif isinstance(value, int):
+                if _INT_MIN <= value <= _INT_MAX:
+                    entry = '${PythonCallables.BOX_INT}'
+                elif _LONG_MIN <= value <= _LONG_MAX:
+                    entry = '${PythonCallables.BOX_LONG}'
+                else:
+                    return _refuse(
+                        strict,
+                        'an int outside 64 bits cannot be stored in a Kotlin Any?: no Kotlin integer '
+                        'holds ' + repr(value),
+                    )
+                carried = int(value)
+            elif isinstance(value, float):
+                entry = '${PythonCallables.BOX_DOUBLE}'
+                carried = float(value)
+            else:
+                entry = '${PythonCallables.BOX_STRING}'
+                carried = str(value)
+            if not strict:
+                return _SCALAR_PENDING
+            return _BoxedArgument(_boundary()['invoke'](_resolve(entry), (carried,)))
 
 
         def _coerce(value, tag, type_name, decl, slot, strict):
@@ -1367,19 +1465,18 @@ object PythonxAdapter {
                     return None
                 return _refuse(strict, 'None is not a ' + _simple_name(type_name or tag))
             if tag == 'OBJECT' and type_name == _KOTLIN_ANY and not isinstance(value, _ValueProxy):
-                # `Any?` holds whatever it is given. A proxy is a Kotlin object and goes as its handle;
-                # any other Python object goes as itself, and Kotlin keeps it as a `PyObject`
-                # (`UpcallTrampoline.toKotlinObject`) -- which is how a Python root function lands in a
-                # Compose `MutableState`. An `int` cannot: the boundary reads every int in an OBJECT
-                # slot as a handle, so `mutableStateOf(0)` would name some other Kotlin object.
+                # `Any?` holds whatever it is given. A proxy is a Kotlin object and goes as its handle.
+                # A Python scalar is boxed as the Kotlin type it means (issue #69, `_box_scalar`):
+                # `mutableStateOf(0)` holds a Kotlin `Int`, which Compose and every Kotlin reader
+                # expects. Sent as itself it could not cross at all -- the boundary reads every int in
+                # an OBJECT slot as a handle. Any other Python object goes as itself, and Kotlin keeps
+                # it as a `PyObject` (`UpcallTrampoline.toKotlinObject`) -- which is how a Python root
+                # function lands in a Compose `MutableState`.
                 handle = getattr(value, '_pm_handle', None)
                 if handle is not None:
                     return handle
-                if isinstance(value, int):
-                    return _refuse(
-                        strict,
-                        'an int cannot be stored in a Kotlin Any?: it would cross as an object handle',
-                    )
+                if isinstance(value, (int, float, str)):
+                    return _box_scalar(value, strict)
                 return value
             if isinstance(value, _ValueProxy):
                 if type_name is not None and value.kotlin_type_name != type_name:
