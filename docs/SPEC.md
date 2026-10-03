@@ -244,7 +244,13 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   one as an attribute imports it (#35) — Kotlin names only. No
   member or parameter is renamed; the binder creates no `pythonx` module and a real `pythonx` package
   on disk is what `import pythonx` loads. The answer is the same whichever installer
-  (`PythonProxySource`, `PythonxAdapter`) ran first for a table. `Status: implemented` on desktop —
+  (`PythonProxySource`, `PythonxAdapter`) ran first for a table. **A name that is both a function and a
+  module is callable** (#78): Kotlin has `TextRange(2)` (a top-level factory) and `TextRange.Zero` (a
+  companion constant), so the module `androidx.compose.ui.text.TextRange` is itself callable — calling it
+  runs the function or overload set of that name in its parent package — while its attributes stay the
+  companion's constants and functions. One rule with the class case (#73): a Kotlin name that is a
+  constructor or factory is what calling it does, whatever else lives under that name. `Status:
+  implemented` on desktop —
   `PM/desktopTest/.../pythonx/KotlinNamedSurfaceTest.kt`, `BinderNamespaceTest.kt`, `ksp-fixtures/compose/.../KotlinSignatureMetadataTest.kt`.
 - **U-9** A Pythonic package can serve extra member names on a Kotlin proxy through one hook,
   `python_multiplatform.binding.add_member_resolver(fn)`, `fn(kotlin_type_name, requested_name,
@@ -277,6 +283,12 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   other Kotlin object. `Status: implemented` —
   `PM/commonTest/.../pythonx/PythonxPropertyTest.kt`, `ksp-fixtures/compose/.../PythonContentRenderTest.kt`,
   `AnySlotScalarRenderTest.kt`, `MaterialIconsRenderTest.kt`.
+- **U-11** A KSP-bound function, method or property whose declared return type is a Kotlin class that
+  has a generated proxy returns an instance of **that class's proxy** (#94), not a generic owner: its
+  methods and properties work and `isinstance(result, TheClass)` holds. The class is found by the declared
+  return type's Kotlin name; a return type with no generated proxy stays a generic owner object. The
+  result's ownership is the same as for any owned result. `Status: implemented` —
+  `ksp-fixtures/app/.../KspClassResultProxyTest.kt` (red until #94 lands).
 
 ## 6. Binding prebuilt libraries (Gradle plugin)
 
@@ -343,6 +355,10 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   Pythonic stub product belongs to pythonx-compose. `Status: partial` — `GP/stubs/PyiRenderingTest.kt`,
   `GP/stubs/TypedStubTest.kt`, `GP/stubs/KotlinNamesOnlyStubTest.kt`,
   `ksp-fixtures/artifact/.../WalkedArtifactStubTest.kt`, `.../StubSignatureAgreesWithRuntimeTest.kt`,
+  `GP/stubs/CompanionFactoryStubTest.kt` (#78: a name that is both a function and a Kotlin-named
+  module is stubbed in its parent package as one attribute whose type has `__call__` (the function or
+  its `@overload`s) and the module's constants and functions as members — never as a bare `def`, which
+  would hide `TextRange.Zero` from a checker),
   `tools/stubs/check-stubs.sh` (mypy over the Compose stubs). A class whose name is also a function in
   its module is `Any` — except that a class's own bound constructor is that class's `__init__`
   (`@overload`ed for several), so the class keeps its stub, members and properties; a single one's

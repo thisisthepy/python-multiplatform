@@ -103,23 +103,45 @@ class TextFieldStateRenderTest {
      * crosses as a handle made by its walked factory `TextRange(index: Int)` -- separate from the test
      * above so a failure here says it is this slot.
      *
-     * Spelled by its table key, `TextRange__Int`. The bare name `TextRange` is not the factory's overload
-     * set in Python: `TextRange.Zero` (a companion constant) makes `androidx.compose.ui.text.TextRange` a
-     * module, and that module is what `from ... import TextRange` finds -- observed as
-     * "'_PmModule_androidx_compose_ui_text_TextRange' object is not callable". That collision predates
-     * issue #73 and is not this test's subject.
+     * Spelled `TextRange(...)`, as in Kotlin (issue #78): the module `...text.TextRange` holds the companion's
+     * `Zero` and is itself callable, dispatching to the factory's overload set. It used to have to be
+     * spelled by its table key, `TextRange__Int`, because the bare name was the module and not callable.
      */
     @Test
     fun theInitialSelectionCrossesAsATextRangeHandle() {
         Python3.exec(
             """
             from androidx.compose.foundation.text.input import TextFieldState
-            from androidx.compose.ui.text import TextRange__Int
+            from androidx.compose.ui.text import TextRange
 
-            _tfs_selected = TextFieldState('hello', TextRange__Int(2))
+            _tfs_selected = TextFieldState('hello', TextRange(2))
             assert _tfs_selected.text == 'hello', repr(_tfs_selected.text)
-            _tfs_kw = TextFieldState(initialText='kw', initialSelection=TextRange__Int(0))
+            _tfs_kw = TextFieldState(initialText='kw', initialSelection=TextRange(0))
             assert _tfs_kw.text == 'kw', repr(_tfs_kw.text)
+            """.trimIndent(),
+        )
+    }
+
+    /**
+     * Issue #78: Kotlin has `TextRange(2)` and `TextRange.Zero`; Python has both, from the one name.
+     * Also the explicit table-key spelling, which must keep working, and a two-argument overload.
+     */
+    @Test
+    fun textRangeIsBothAFactoryAndTheHolderOfItsCompanionConstants() {
+        Python3.exec(
+            """
+            from androidx.compose.ui.text import TextRange, TextRange__Int
+            from androidx.compose.foundation.text.input import TextFieldState
+
+            assert callable(TextRange), type(TextRange)
+            _tr_zero = TextRange.Zero
+            _tr_two = TextRange(2)
+            _tr_pair = TextRange(1, 3)
+            _tr_key = TextRange__Int(2)
+            _tr_state = TextFieldState('hello', _tr_two)
+            assert _tr_state.text == 'hello', repr(_tr_state.text)
+            _tr_zero_state = TextFieldState('hello', TextRange.Zero)
+            assert _tr_zero_state.text == 'hello', repr(_tr_zero_state.text)
             """.trimIndent(),
         )
     }
