@@ -156,6 +156,13 @@ val buildTypedPythonBridge by tasks.registering(Exec::class) {
 
 tasks.named<Test>("desktopTest") {
     dependsOn(buildTypedPythonBridge)
+    // The tests import tp_kotlin_bridge.py from src/; without this the interpreter leaves a
+    // __pycache__ in the source tree.
+    environment("PYTHONDONTWRITEBYTECODE", "1")
+    val skipReason = typedPythonSkipReason
+    doFirst {
+        if (skipReason != null) logger.warn("TypedPython bridge tests will be SKIPPED: $skipReason")
+    }
     if (typedPythonSkipReason == null) {
         inputs.dir(typedPythonBridgeDir).withPropertyName("typedPythonBridge")
         systemProperty(
