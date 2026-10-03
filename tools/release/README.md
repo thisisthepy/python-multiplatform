@@ -16,10 +16,9 @@ ignored and overwritten.
    `GITHUB_TOKEN`. This needs the repository setting *Actions -> General -> Allow GitHub
    Actions to create and approve pull requests*. No PAT is needed; an optional
    `RELEASE_PR_TOKEN` secret is used for the PR step when present.
-3. Merging that PR is the only way to change `main`. Branch protection (below) makes `main`
-   PR-only and lets only administrators merge; the maintainer merges the `release` PR and
-   checks that its head is `release` (maintainer decision 2026-10-03: no source-branch
-   workflow, settings only).
+3. Merging that PR is the only way to change `main`. The maintainer protects `main` in the
+   repository settings (locked) and merges the `release` PR after checking that its head is
+   `release` (maintainer decision 2026-10-03: settings only, no scripts or workflows for it).
 4. On push to `main`, `pages.yml` deploys `docs/guide/` to GitHub Pages.
 
 ## What is dropped on release
@@ -42,8 +41,5 @@ It refuses to run while `release` is checked out.
 
 ## Protecting main
 
-    tools/release/protect-main.sh               # print what would be applied
-    tools/release/protect-main.sh --apply       # apply via gh api (needs admin)
-
-This requires a pull request (no approving review needed), blocks direct push, force-push and
-deletion, leaves the branch unlocked, and restricts merging to administrators.
+`main`'s protection is set by the maintainer in the repository settings (the branch is locked;
+the maintainer merges the `release` pull request). Agents do not script or change it.
