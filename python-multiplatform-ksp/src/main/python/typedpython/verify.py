@@ -31,8 +31,6 @@ Rules (the `rule` of a Diagnostic):
   verify/unknown-node         a node (or enum field) that `ir` does not define
   verify/call-unresolved      a Call names a function that is not compiled in this module
   verify/call-unverified      a Call names a function that the verifier rejected
-  verify/recursion            the function is on a cycle of Calls (C stack depth is unbounded;
-                              CPython would raise RecursionError instead)
   verify/condition-only       a CompareObj outside a condition (If/While cond, or an And/Or
                               operand that is itself in a condition): its rich-comparison result
                               need not be a bool, so only its truth value may be used
@@ -146,7 +144,6 @@ ESCAPE = "verify/array-escape"
 UNKNOWN = "verify/unknown-node"
 UNRESOLVED = "verify/call-unresolved"
 UNVERIFIED = "verify/call-unverified"
-RECURSION = "verify/recursion"
 STRUCTURE = "verify/structure"
 CONDITION_ONLY = "verify/condition-only"
 PROVEN = "verify/proven-overflow"
@@ -1018,45 +1015,6 @@ def _exact(op: BinOpKind, a: tuple[int, int], b: tuple[int, int]) -> tuple[int, 
     return min(products), max(products)
 
 
-def _cycles(graph: dict[str, set[str]]) -> set[str]:
-    """Names on a cycle of `graph` (Tarjan's strongly connected components)."""
-    index: dict[str, int] = {}
-    low: dict[str, int] = {}
-    stack: list[str] = []
-    on: set[str] = set()
-    result: set[str] = set()
-    counter = [0]
-
-    def visit(v: str) -> None:
-        index[v] = low[v] = counter[0]
-        counter[0] += 1
-        stack.append(v)
-        on.add(v)
-        for w in graph.get(v, ()):
-            if w not in graph:
-                continue
-            if w not in index:
-                visit(w)
-                low[v] = min(low[v], low[w])
-            elif w in on:
-                low[v] = min(low[v], index[w])
-        if low[v] == index[v]:
-            comp = []
-            while True:
-                w = stack.pop()
-                on.discard(w)
-                comp.append(w)
-                if w == v:
-                    break
-            if len(comp) > 1 or v in graph.get(v, ()):
-                result.update(comp)
-
-    for v in graph:
-        if v not in index:
-            visit(v)
-    return result
-
-
 def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
     """Prove each function of `module`; return the module of proved functions (with proven bounds
     marked) and every diagnostic. Rejected functions move to `skipped` with the reason."""
@@ -1112,9 +1070,11 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
             reject(name, g.source_line, ENTRY_OPEN,
                    f"has entry globals but is not closed: {open_why[name]}")
 
-    for name in sorted(_cycles(callees)):
-        reject(name, sigs[name].source_line, RECURSION,
-               f"'{name}' is on a cycle of calls; compiled recursion has no depth limit")
+    # A call cycle (direct or mutual recursion) is legal: every compiled impl function counts its
+    # frame at entry (tp_enter_call), so recursion ends in RecursionError where CPython raises it
+    # and the C stack cannot overflow (issue #57). Purity and may_deopt flow through the cycle as
+    # through any Call: each flag is proved on the function's own body against its callees'
+    # declared flags, so a cycle through a may_deopt callee is legal only in a pure function.
 
     # A call into a function that is not compiled cannot be a C call: propagate to a fixpoint.
     changed = True

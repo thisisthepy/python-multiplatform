@@ -22,6 +22,10 @@ Per function `f`:
   guard, or the impl's 1 in a pure function) increments `__typedpython_deopts__` and calls
   `__typedpython_interpreted__[f]` with the original arguments.
 
+Depth (issue #57): every impl function calls `tp_enter_call()` before it owns anything (a refusal
+returns -1 directly: RecursionError set, nothing counted) and `tp_leave_call()` in the one exit
+block, so ok, error and deopt exits all leave exactly once.
+
 Ownership rule (ir.py "Safety"), implemented by the `_own_*` emit helpers below and nowhere else:
   1. every OBJ local — including each OBJ parameter, which the impl copies with a new reference at
      entry — owns one strong reference, or is NULL;
@@ -728,10 +732,8 @@ class _FnGen:
             args.append(f"&{t}")
         self.emit("if (tp_s == 0) {")
         self.depth += 1
-        # C-to-C recursion has no Python frame: guard the C stack as CPython guards its own.
-        self.emit('if (Py_EnterRecursiveCall(" in compiled code")) { tp_rc = -1; goto tp_exit; }')
+        # Depth is counted by the callee itself (tp_enter_call at its entry, issue #57).
         self.emit(f"tp_s = {_ident('tp_impl', e.function)}(tp_module{''.join(', ' + x for x in args)});")
-        self.emit("Py_LeaveRecursiveCall();")
         self.depth -= 1
         self.emit("}")
         if e.redo:
@@ -1096,10 +1098,14 @@ class _FnGen:
         out.append("    (void)tp_st; (void)tp_dict; (void)tp_s;"
                    + "".join(f" (void){_ident('l', n)};" for n in self.types if n not in params)
                    + "".join(f" (void){_ident('l', n)};" for n in self.local_arrays))
+        # Depth guard (issue #57): nothing is owned yet, so a refusal returns directly and counts
+        # nothing; every other exit goes through tp_exit, which leaves exactly once.
+        out.append("    if (tp_enter_call() != 0) return -1;")
         out += prologue
         out += self.lines
         out.append("tp_exit:")
         out += self._own_release_all()
+        out.append("    tp_leave_call();")
         out.append("    return tp_rc;")
         out.append("}")
         out.append("")

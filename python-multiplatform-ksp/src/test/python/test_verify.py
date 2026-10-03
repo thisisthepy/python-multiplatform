@@ -39,7 +39,6 @@ ARRAY_STORED = "verify/array-stored"
 UNKNOWN = "verify/unknown-node"
 UNRESOLVED = "verify/call-unresolved"
 UNVERIFIED = "verify/call-unverified"
-RECURSION = "verify/recursion"
 STRUCTURE = "verify/structure"
 CONDITION_ONLY = "verify/condition-only"
 PROVEN = "verify/proven-overflow"
@@ -703,12 +702,35 @@ def test_caller_of_a_rejected_callee_is_rejected_transitively():
     assert UNVERIFIED in rules_for(diags, "h") and UNVERIFIED in rules_for(diags, "k")
 
 
-def test_recursion_is_rejected():
-    assert_rejected(RECURSION, fn("f", returns=I64, body=[Return(Call(I64, "f", ()))]))
-    g = fn("g", returns=I64, body=[Return(Call(I64, "f", ()))])
-    out, diags = assert_rejected(RECURSION, fn("f", returns=I64, body=[Return(Call(I64, "g", ()))]),
-                                 g)
-    assert "g" not in kept(out)
+def test_direct_and_mutual_recursion_are_accepted():
+    # #57: compiled frames are depth-counted at run time (tp_enter_call), so a call cycle is legal.
+    out, diags = run(fn("f", params=[Param("n", I64)], returns=I64, pure=True,
+                        body=[Return(Call(I64, "f", (li("n"),)))]))
+    assert kept(out) == ["f"] and diags == [], diags
+    out, diags = run(fn("f", params=[Param("n", I64)], returns=I64, pure=True,
+                        body=[Return(Call(I64, "g", (li("n"),)))]),
+                     fn("g", params=[Param("n", I64)], returns=I64, pure=True,
+                        body=[Return(Call(I64, "f", (li("n"),)))]))
+    assert sorted(kept(out)) == ["f", "g"] and diags == [], diags
+
+
+def test_a_cycle_through_a_may_deopt_callee_is_legal_only_in_pure_functions():
+    # pure: the deopt redoes the outermost compiled call, which is unobservable
+    f = fn("f", params=[Param("n", I64)], returns=I64, pure=True, may_deopt=True,
+           body=[Return(add(Call(I64, "f", (li("n"),)), i(1)))])
+    assert_accepted(f)
+    # impure: a deopt inside the cycle could redo an effect, as for any Call
+    g = fn("g", params=[Param("n", I64)], returns=I64, may_deopt=True,
+           body=[ExprStmt(pycall("print")), Return(add(Call(I64, "g", (li("n"),)), i(1)))])
+    out, diags = run(g)
+    assert kept(out) == [] and DEOPT in rules_for(diags, "g")
+
+
+def test_a_cycle_keeps_every_other_rule():
+    bad = fn("f", params=[Param("n", I64)], returns=I64,
+             body=[Return(Call(I64, "f", (Const(F64, 1.0),)))])       # argument type mismatch
+    out, diags = run(bad)
+    assert kept(out) == [] and "f" in out.skipped
 
 
 def test_duplicate_function_names_are_rejected():
