@@ -348,6 +348,59 @@ class Tuple(Expr):
 
 
 @dataclass(frozen=True)
+class Is(Expr):
+    """`a is b` / `a is not b` (negate) on OBJ operands: identity, no user code. Type BOOL. With
+    `Const(None, OBJ)` this is how `x is None` is written."""
+
+    left: Expr
+    right: Expr
+    negate: bool = False
+
+
+@dataclass(frozen=True)
+class IsExact(Expr):
+    """`type(obj) is C` for a compiled fixed-layout class C (SPEC N-11): no user code. Type BOOL.
+    A true IsExact dominating a FieldGet/FieldSet on the same local is what the verifier accepts as
+    the exact-type proof for that access."""
+
+    obj: Expr
+    cls: str
+
+
+@dataclass(frozen=True)
+class CheckExact(Expr):
+    """`obj` itself (type OBJ), after checking `type(obj) is C`; anything else → deopt. Because it
+    can deopt it is legal only in a pure function — the same rule as Unbox. It is the proof the
+    verifier accepts for a field access the front end cannot guard with a dominating IsExact."""
+
+    obj: Expr
+    cls: str
+
+
+@dataclass(frozen=True)
+class FieldGet(Expr):
+    """`obj.field` of a compiled fixed-layout class C whose exact type is proved (a dominating true
+    IsExact on the same local, a CheckExact, a New, or a parameter guarded `type(x) is C`). Reads the
+    slot through the member descriptor captured at module init: a new reference, or CPython's own
+    AttributeError for an unset slot. Runs no user code, so it is not an effect. Type OBJ."""
+
+    obj: Expr
+    cls: str
+    field: str
+
+
+@dataclass(frozen=True)
+class New(Expr):
+    """`C(args)` for a compiled class whose `__init__` only assigns each slot once from its parameters
+    (ClassDecl.trivial_init): allocate with C's tp_alloc and fill the slots in __init__'s order —
+    the observable result of running that __init__. A fresh object is not an effect. Type OBJ; args
+    are OBJ (scalars through Box)."""
+
+    cls: str
+    args: tuple[Expr, ...]
+
+
+@dataclass(frozen=True)
 class Len(Expr):
     """`len(array)` of an array parameter. Type I64."""
 
@@ -389,6 +442,17 @@ class StoreIndex(Stmt):
     index: Expr
     value: Expr
     proven: bool = False      # as in Index
+
+
+@dataclass(frozen=True)
+class FieldSet(Stmt):
+    """`obj.field = value` on a proved-exact compiled class (as FieldGet). An effect — unless `obj` is
+    a New made in this same function and not yet escaped (not assumed in M2b: always an effect)."""
+
+    obj: Expr
+    cls: str
+    field: str
+    value: Expr
 
 
 @dataclass(frozen=True)
@@ -445,6 +509,10 @@ class Continue(Stmt):
 class Param:
     name: str
     type: Type
+    # For an OBJ parameter annotated with a compiled class C: the entry guard checks
+    # `type(x) is C` (or `x is None` too when `optional`), deopting before any effect otherwise.
+    cls: str | None = None
+    optional: bool = False
 
 
 @dataclass(frozen=True)
@@ -516,8 +584,21 @@ class Function:
 
 
 @dataclass(frozen=True)
+class ClassDecl:
+    """A compiled fixed-layout class (SPEC N-11): `__slots__` written by the user equal to its
+    annotated fields, base object, no metaclass, no decorator but @compiled. The module init checks
+    every field's class attribute is a member descriptor and captures it; if not, the class is
+    not compiled (functions using it deopt at entry or are refused by the verifier)."""
+
+    name: str
+    fields: tuple[str, ...]
+    trivial_init: bool      # __init__(self, *fields-in-order) doing exactly `self.f = f` once each
+
+
+@dataclass(frozen=True)
 class Module:
     name: str
     functions: tuple[Function, ...]
     # Functions the front end left interpreted, with the reason (for `demo` and the coverage table).
     skipped: dict[str, str] = field(default_factory=dict)
+    classes: tuple[ClassDecl, ...] = ()

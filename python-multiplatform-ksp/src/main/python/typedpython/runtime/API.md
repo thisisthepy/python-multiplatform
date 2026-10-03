@@ -97,3 +97,13 @@ CPython's own Python-frame check uses. It then calls `Py_EnterRecursiveCall(" in
 C-stack guard: a raised recursion limit can never let compiled C overflow the stack. Counters are
 per module (the header is `static`): frames of a *different* compiled module that sit between two
 frames of this one are not counted.
+
+## Fixed-layout classes (ir.ClassDecl / FieldGet / FieldSet / New / IsExact / CheckExact; SPEC N-11)
+    /* at module init: look up `field` in cls's dict; it must be a member descriptor of an OBJECT
+       slot; fills *out with its PyMemberDef*. 0 ok, 1 not a plain slot (class not compiled), -1 error */
+    int       tp_slot_capture(PyTypeObject *cls, const char *field, PyMemberDef **out);
+    PyObject *tp_field_get(PyObject *obj, PyMemberDef *m);           /* PyMember_GetOne: new ref or AttributeError */
+    int       tp_field_set(PyObject *obj, PyMemberDef *m, PyObject *v); /* PyMember_SetOne: 0 / -1 */
+    PyObject *tp_new_fixed(PyTypeObject *cls, PyMemberDef *const *slots, PyObject *const *values, Py_ssize_t n);
+              /* cls->tp_alloc(cls, 0) then set each slot (new references); NULL + MemoryError */
+    int       tp_is_exact(PyObject *obj, PyTypeObject *cls);         /* Py_IS_TYPE */
