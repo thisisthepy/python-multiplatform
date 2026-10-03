@@ -320,14 +320,15 @@ def test_augmented_store_evaluates_a_computed_index_once(tmp_path):
 def test_list_params_become_array_params_with_stored(tmp_path):
     m = lower(tmp_path, """
         @compiled
-        def scale(a: list[float], b: list[float], k: float, c: list[int]) -> None:
+        def scale(a: list[float], b: list[float], k: float) -> None:
             for i in range(len(a)):
                 a[i] = b[i] * k
     """)
     f = function(m, "scale")
+    # two list parameters at most (#159: the lists are locked from copy-in to write-back; CPython
+    # has no three-object critical section). A third one is test_free_threaded.py's.
     assert f.params == (
-        ArrayParam("a", Type.F64_ARRAY, True), ArrayParam("b", Type.F64_ARRAY, False),
-        Param("k", F64), ArrayParam("c", Type.I64_ARRAY, False),
+        ArrayParam("a", Type.F64_ARRAY, True), ArrayParam("b", Type.F64_ARRAY, False), Param("k", F64),
     )
     assert f.body[0].stop == Len(I64, "a")
 

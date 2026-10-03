@@ -34,7 +34,7 @@ jobs:
       - name: Create the environment
         # pyrefly is pinned exactly: the gate reads its versioned type-report format.
         run: |
-          uv venv .venv --python 3.13
+          uv venv .venv --python 3.15t
           uv pip install --python .venv/bin/python "pyrefly==1.3.2" pytest
 
       - name: Behaviour tests
@@ -62,7 +62,7 @@ jobs:
 
       - name: Create the environment
         run: |
-          uv venv .venv --python 3.13
+          uv venv .venv --python 3.15t
           uv pip install --python .venv/bin/python "pyrefly==1.3.2" pytest
 
       - name: Relax ASLR entropy (ASan shadow mapping on newer kernels)
@@ -103,7 +103,7 @@ jobs:
       - name: Create the TypedPython host environment
         working-directory: python-multiplatform-ksp
         run: |
-          uv venv .venv --python 3.13
+          uv venv .venv --python 3.15t
           uv pip install --python .venv/bin/python "pyrefly==1.3.2" pytest
 
       - name: App fixture tests

@@ -37,7 +37,9 @@ Rules (the `rule` of a Diagnostic):
   verify/structure            break/continue outside a loop, the ForRange var assigned in its body,
                               a zero or non-constant step, duplicate names, bad declarations, an
                               entry global that collides with a parameter/local/other entry global or
-                              is assigned in the body
+                              is assigned in the body, or more than two array parameters (the lists
+                              are locked from copy-in to write-back: one- and two-object critical
+                              sections only, #159)
   verify/proven-overflow      `proven` is set on an op the verifier cannot prove stays inside i64 (or
                               on a node `proven` does not apply to, or it is not a bool)
   verify/redo                 `Call.redo` where it is not legal (see below)
@@ -310,6 +312,10 @@ class _Checker:
             if p.name in params:
                 self.error(STRUCTURE, f"parameter '{p.name}' appears twice")
             params.add(p.name)
+        if sum(type(p) is ArrayParam for p in fn.params) > 2:
+            self.error(STRUCTURE, "more than two array parameters: compiled code holds each list's "
+                                  "critical section from copy-in to write-back, and free-threaded "
+                                  "CPython has no section for more than two objects (#159)")
         eg = fn.entry_globals
         if not isinstance(eg, tuple):
             self.error(STRUCTURE, "entry_globals is not a tuple")

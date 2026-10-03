@@ -454,8 +454,14 @@ def test_reference_counts_are_unchanged_over_many_calls(m):
                 pass
 
     churn(20)                                               # warm up caches, then measure
-    counts = lambda: (sys.getrefcount(shared), sys.getrefcount(node), sys.getrefcount(m.Node),
-                      sys.getrefcount(m.Sub), sys.getrefcount(bare))
+    def counts():
+        # Free-threaded CPython (#159): a heap type is deferred-refcounted, and sys.getrefcount of it
+        # returns a flagged value (bit 60) whose count moves as thread-local counts are merged, with
+        # no change in what holds the type. Only a value without the flag is a real count.
+        deferred = 1 << 60
+        types = tuple(None if (n := sys.getrefcount(t)) >= deferred else n for t in (m.Node, m.Sub))
+        return (sys.getrefcount(shared), sys.getrefcount(node), sys.getrefcount(bare)) + types
+
     base = counts()
     churn(3000)
     assert counts() == base, (base, counts())

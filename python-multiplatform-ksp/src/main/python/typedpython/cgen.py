@@ -22,6 +22,20 @@ Per function `f`:
   guard, or the impl's 1 in a pure function) increments `__typedpython_deopts__` and calls
   `__typedpython_interpreted__[f]` with the original arguments.
 
+Free-threaded CPython 3.15t (issue #159; runtime/API.md "Free-threaded CPython" holds the table of
+every piece of shared state). The module slots declare `{Py_mod_gil, Py_MOD_GIL_NOT_USED}` (under
+`#ifdef Py_GIL_DISABLED`), so importing it keeps the GIL off. In `tp_wrap_f`, a function with list
+parameters holds the lists' critical section (`tp_cs_begin`, one list or two) from before the first
+copy-in to after the last write-back: `tp_cs_end` is part of the same `exits` that run the write-back
+on every path (ok, error, deopt, the last before the interpreted redo), and is a no-op on a path
+that left before locking. More than two list parameters are refused here (`CGenError`), as in the
+front end and the verifier: CPython has no three-object critical section. A function that holds an
+array does not poll the eval breaker (#141, open decision #152), so a long compiled array loop
+delays other threads' stop-the-world requests until it returns: a liveness delay, results
+unaffected. The `__typedpython_deopts__` read-add-write of `tp_cg_redo` runs in the module dict's
+critical section. Module state is written only by the exec slot; the class guards are atomic
+(tp_runtime.h).
+
 Depth (issue #57): every impl function calls `tp_enter_call()` before it owns anything (a refusal
 returns -1 directly: RecursionError set, nothing counted) and `tp_leave_call()` in the one exit
 block, so ok, error and deopt exits all leave exactly once.
@@ -502,6 +516,9 @@ def generate(module: ir.Module, source_path: Path, display_path: str | None = No
     w(_state_functions(mg))
     w("static PyModuleDef_Slot tp_slots[] = {")
     w("    {Py_mod_exec, (void *)tp_exec},")
+    w("#ifdef Py_GIL_DISABLED")
+    w("    {Py_mod_gil, Py_MOD_GIL_NOT_USED},  /* free-threaded safe: runtime/API.md \"Free-threaded CPython\" */")
+    w("#endif")
     w("    {0, NULL}")
     w("};")
     w("")
@@ -556,6 +573,10 @@ def _check_function(f: ir.Function, functions: dict[str, ir.Function]) -> None:
                                 "without redo")
     if f.entry_globals:
         _check_entry_globals(f, functions)
+    n_arrays = sum(isinstance(p, ir.ArrayParam) for p in f.params)
+    if n_arrays > 2:
+        raise CGenError(f"{f.name}: {n_arrays} array parameters; at most two (CPython offers one- and "
+                        "two-object critical sections only, and a third lock could suspend the others)")
     for p in f.params:
         if isinstance(p, ir.ArrayParam):
             if p.type not in ir.ARRAYS:
@@ -1027,7 +1048,7 @@ class _FnGen:
 
     def _slow(self, cls: str) -> None:
         """Count a failed per-access check; in a pure function it is a deopt (module docstring)."""
-        self.emit(f"tp_st->cls_rt[{self._class(cls)}].slow++;")
+        self.emit(f"tp_class_note_slow(&tp_st->cls_rt[{self._class(cls)}]);")
         if self.f.pure:
             self.emit("tp_rc = 1; goto tp_exit;")
 
@@ -1112,10 +1133,10 @@ class _FnGen:
         self.emit("  } else {")
         self.depth += 1
         if self.f.pure:
-            self.emit(f"if ({gk}) {{ tp_st->cls_rt[{k}].slow++; }}")
+            self.emit(f"if ({gk}) {{ tp_class_note_slow(&tp_st->cls_rt[{k}]); }}")
             self.emit("tp_rc = 1; goto tp_exit;")          # (g is NULL here: pure never loads it)
         else:
-            self.emit(f"if ({gk}) tp_st->cls_rt[{k}].slow++;")
+            self.emit(f"if ({gk}) tp_class_note_slow(&tp_st->cls_rt[{k}]);")
             # call what the global held when it was loaded: the class itself, or the rebinding
             self.emit(f"  {t} = tp_call({gk} ? tp_st->classes[{k}] : {g}, tp_av, {len(items)}, NULL);")
         self.depth -= 1
@@ -1497,6 +1518,8 @@ class _FnGen:
             L.append(f"    {_CT[f.returns]} tp_r = {init};")
         args = []
         arrays = []
+        if sum(isinstance(p, ir.ArrayParam) for p in f.params) > 0:
+            L.append("    tp_cs tp_lock = {0};")
         for i, p in enumerate(f.params):
             if isinstance(p, ir.ArrayParam):
                 L.append(f"    {_ARRAY_CT[p.type]} tp_a{i} = {{0}};")
@@ -1510,6 +1533,8 @@ class _FnGen:
         if f.returns is not Type.NONE:
             args.append("&tp_r")
         exits = [f"    if ({_ARRAY_PFX[p.type]}_exit(&tp_a{i}) < 0) tp_x = -1;" for i, p in arrays]
+        if arrays:
+            exits.append("    tp_cs_end(&tp_lock);       /* after the write-back; a no-op if never taken */")
         L.append("    (void)tp_x;")
         # arity / keywords -> the interpreted function raises CPython's own TypeError
         L.append(f"    if (tp_nargs != {n} || (tp_kwnames != NULL && PyTuple_GET_SIZE(tp_kwnames) != 0)) goto tp_deopt;")
@@ -1546,6 +1571,14 @@ class _FnGen:
             objs = ", ".join(f"tp_args[{i}]" for i, _ in arrays)
             L.append(f"    {{ PyObject *const tp_objs[{len(arrays)}] = {{{objs}}};")
             L.append(f"      if (tp_any_same(tp_objs, {len(arrays)})) goto tp_deopt; }}")
+        if arrays:
+            # Free-threaded (#159): the lists' critical section(s) from before the first copy-in to
+            # after the last write-back (every exit runs `exits`). A non-list argument deopts here,
+            # as tp_*_array_enter would, without being locked.
+            L.append("    if (" + " || ".join(f"!PyList_CheckExact(tp_args[{i}])" for i, _ in arrays)
+                     + ") goto tp_deopt;")
+            second = f"tp_args[{arrays[1][0]}]" if len(arrays) == 2 else "NULL"
+            L.append(f"    tp_cs_begin(&tp_lock, tp_args[{arrays[0][0]}], {second});")
         for i, p in arrays:
             L.append(f"    tp_s = {_ARRAY_PFX[p.type]}_enter(tp_args[{i}], &tp_a{i});")
             L.append("    if (tp_s < 0) goto tp_error;")
@@ -1620,13 +1653,20 @@ static PyObject *tp_cg_redo(PyObject *tp_module, int tp_name, PyObject *const *t
     PyObject *tp_count = NULL, *tp_one = NULL, *tp_next = NULL, *tp_table = NULL, *tp_f = NULL;
     PyObject *tp_result = NULL;
     int tp_k;
-    tp_k = PyDict_GetItemStringRef(tp_dict, "__typedpython_deopts__", &tp_count);
-    if (tp_k == 0) PyErr_SetString(PyExc_RuntimeError, "typedpython: __typedpython_deopts__ is missing");
-    if (tp_k <= 0) goto tp_done;
     tp_one = PyLong_FromLong(1);
     if (tp_one == NULL) goto tp_done;
-    tp_next = PyNumber_Add(tp_count, tp_one);
-    if (tp_next == NULL || PyDict_SetItemString(tp_dict, "__typedpython_deopts__", tp_next) < 0) goto tp_done;
+    /* The counter is a read-modify-write of a module global: under the module dict's critical
+     * section, or concurrent deopts lose counts (#159). */
+    tp_k = 0;
+    Py_BEGIN_CRITICAL_SECTION(tp_dict);
+    tp_k = PyDict_GetItemStringRef(tp_dict, "__typedpython_deopts__", &tp_count);
+    if (tp_k == 0) PyErr_SetString(PyExc_RuntimeError, "typedpython: __typedpython_deopts__ is missing");
+    if (tp_k > 0) {
+        tp_next = PyNumber_Add(tp_count, tp_one);
+        if (tp_next == NULL || PyDict_SetItemString(tp_dict, "__typedpython_deopts__", tp_next) < 0) tp_k = -1;
+    }
+    Py_END_CRITICAL_SECTION();
+    if (tp_k <= 0) goto tp_done;
     tp_k = PyDict_GetItemStringRef(tp_dict, "__typedpython_interpreted__", &tp_table);
     if (tp_k == 0) PyErr_SetString(PyExc_RuntimeError, "typedpython: __typedpython_interpreted__ is missing");
     if (tp_k <= 0) goto tp_done;
@@ -1704,10 +1744,11 @@ def _class_info_function(mg: _ModGen) -> str:
             f"    tp_c = tp_st->classes[{k}];",
             "    tp_d = Py_BuildValue(\"{s:O,s:I,s:I,s:O,s:n,s:n,s:O}\",",
             f"        \"compiled\", tp_st->cls_ok[{k}] ? Py_True : Py_False,",
-            f"        \"captured_tag\", tp_st->cls_rt[{k}].tag,",
+            f"        \"captured_tag\", tp_class_rt_tag(&tp_st->cls_rt[{k}]),",
             "        \"tag\", tp_class_tag(tp_c),",
-            f"        \"current\", (tp_c != NULL && tp_class_tag(tp_c) == tp_st->cls_rt[{k}].tag) ? Py_True : Py_False,",
-            f"        \"slow\", tp_st->cls_rt[{k}].slow, \"refreshed\", tp_st->cls_rt[{k}].refreshed,",
+            f"        \"current\", (tp_c != NULL && tp_class_tag(tp_c) == tp_class_rt_tag(&tp_st->cls_rt[{k}])) ? Py_True : Py_False,",
+            f"        \"slow\", tp_class_rt_slow(&tp_st->cls_rt[{k}]), \"refreshed\", "
+            f"tp_class_rt_refreshed(&tp_st->cls_rt[{k}]),",
             "        \"watched\", tp_st->watch_id1 > 0 ? Py_True : Py_False);",
             f"    if (tp_d == NULL || PyDict_SetItemString(tp_out, {c_string(cd.name)}, tp_d) < 0) {{",
             "        Py_XDECREF(tp_d); Py_DECREF(tp_out); return NULL; }",

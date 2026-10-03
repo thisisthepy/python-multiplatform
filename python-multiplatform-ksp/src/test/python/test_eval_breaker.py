@@ -153,4 +153,7 @@ def test_a_handler_is_deferred_while_an_array_copy_is_live(extension):
     assert r["handler"] is not None, "the handler never ran"
     assert r["t1"] - r["t0"] > 0.3, f"call too short to judge: {r}"
     if r["s"] == r["plain"]:
-        assert r["handler"] >= r["t1"], f"handler ran inside the call but its write is not in the result: {r}"
+        # The deferred handler runs at the first eval-breaker check after the call returns, which can
+        # come a few microseconds BEFORE the child reads t1 (3.15t checks right after a call): the
+        # tolerance only has to separate that from "ran inside a call of 0.3 s or more".
+        assert r["handler"] >= r["t1"] - 0.005, f"handler ran inside the call but its write is not in the result: {r}"
