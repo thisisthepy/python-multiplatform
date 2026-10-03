@@ -1,0 +1,611 @@
+"""TypedPython front end: Python AST + Pyrefly types -> typed IR (#41, SPEC N-7).
+
+Each test writes a small module and asserts on the IR `frontend.lower` produces, or on the reason
+a function was left interpreted. The IR's own docstrings (typedpython/ir.py) are the contract:
+mixed int/float gets `ToFloat`, chains evaluate the middle operand once, an impure function has
+no node that can deopt.
+"""
+import shutil
+import textwrap
+from pathlib import Path
+
+import pytest
+
+from typedpython import frontend
+from typedpython.ir import (
+    And, ArrayParam, Assign, BinOp, BinOpKind, Box, Break, Call, CallObject, Compare, CompareKind,
+    CompareObj, Const, ExprStmt, While, ForRange, GetAttr, Global, If, Index, Len, Local, MathCall,
+    MathFunc, ObjToFloat, Param, Return, StoreIndex, ToFloat, Truth, Type,
+)
+
+I64, F64, BOOL, OBJ = Type.I64, Type.F64, Type.BOOL, Type.OBJ
+BENCH = Path("/Volumes/macMini/thisisthepy/PythonMultiplatform/.worktrees/typedpython-bench"
+             "/benchmarks/typedpython/py")
+
+
+def lower(tmp_path, source, name="mod.py"):
+    path = tmp_path / name
+    path.write_text(textwrap.dedent(source).lstrip("\n"))
+    return frontend.lower(path)
+
+
+def function(module, name):
+    found = [f for f in module.functions if f.name == name]
+    assert found, f"{name} was not lowered: {module.skipped.get(name)!r}"
+    return found[0]
+
+
+# --- the basic shape -----------------------------------------------------------------------------
+
+def test_scalar_loop_lowers_to_for_range(tmp_path):
+    m = lower(tmp_path, """
+        # typedpython: compiled
+        def total(n: int, x: float) -> float:
+            acc: float = 0.0
+            for k in range(n):
+                acc += x
+            return acc
+    """)
+    assert m.skipped == {}
+    f = function(m, "total")
+    assert f.params == (Param("n", I64), Param("x", F64))
+    assert f.returns == F64
+    assert f.locals == {"acc": F64, "k": I64}
+    assert f.body == (
+        Assign("acc", Const(F64, 0.0)),
+        ForRange("k", Const(I64, 0), Local(I64, "n"), Const(I64, 1), (
+            Assign("acc", BinOp(F64, BinOpKind.ADD, Local(F64, "acc"), Local(F64, "x"))),
+        )),
+        Return(Local(F64, "acc")),
+    )
+    assert f.pure and not f.may_deopt
+    assert f.source_line == 2
+
+
+def test_int_locals_in_a_pure_function_are_i64_and_may_deopt(tmp_path):
+    # `c` is unannotated: its type comes from Pyrefly.
+    m = lower(tmp_path, """
+        @compiled
+        def f(a: int, b: int) -> int:
+            c = a + b
+            return c * 2
+    """)
+    f = function(m, "f")
+    assert f.locals == {"c": I64}
+    assert f.body[0] == Assign("c", BinOp(I64, BinOpKind.ADD, Local(I64, "a"), Local(I64, "b")))
+    assert f.pure and f.may_deopt
+
+
+def test_unannotated_local_with_two_types_is_skipped(tmp_path):
+    m = lower(tmp_path, """
+        @compiled
+        def f(a: int) -> float:
+            c = a
+            c = 1.5
+            return c
+    """)
+    assert m.functions == ()
+    assert "`c`" in m.skipped["f"] and "line " in m.skipped["f"]
+
+
+def test_impure_function_keeps_an_unbounded_int_local_as_a_python_int(tmp_path):
+    # Impure: a deopt could not be redone, so `m` is a CPython int object, not a checked i64.
+    m = lower(tmp_path, """
+        @compiled
+        def g(a: list[float], n: int) -> None:
+            m: int = n
+            m += 1
+            a[0] = 1.0
+    """)
+    f = function(m, "g")
+    assert f.locals == {"m": OBJ}
+    assert f.body[:2] == (
+        Assign("m", Box(OBJ, Local(I64, "n"))),
+        Assign("m", BinOp(OBJ, BinOpKind.ADD, Local(OBJ, "m"), Box(OBJ, Const(I64, 1)))),
+    )
+    assert not f.pure and not f.may_deopt
+
+
+def test_impure_function_with_bounded_range_indices_lowers_without_deopt(tmp_path):
+    m = lower(tmp_path, """
+        @compiled
+        def h(a: list[float], n: int) -> None:
+            for i in range(n):
+                for j in range(i + 1, n):
+                    a[j] += a[i]
+    """)
+    f = function(m, "h")
+    assert not f.pure and not f.may_deopt
+    assert f.params == (ArrayParam("a", Type.F64_ARRAY, True), Param("n", I64))
+
+
+def test_impure_function_with_unproved_int_arithmetic_is_skipped(tmp_path):
+    m = lower(tmp_path, """
+        @compiled
+        def h(a: list[float], n: int) -> None:
+            a[n * 2] = 1.0
+    """)
+    # `n * 2` can overflow i64 and the function is impure, so it is an int object: no native index.
+    assert m.functions == ()
+    assert "line 3" in m.skipped["h"] and "n * 2" in m.skipped["h"]
+
+
+# --- conversions ---------------------------------------------------------------------------------
+
+def test_mixed_int_float_arithmetic_inserts_to_float(tmp_path):
+    m = lower(tmp_path, """
+        @compiled
+        def mix(n: int, x: float) -> float:
+            return n * x + 1
+    """)
+    f = function(m, "mix")
+    assert f.body == (Return(BinOp(
+        F64, BinOpKind.ADD,
+        BinOp(F64, BinOpKind.MUL, ToFloat(F64, Local(I64, "n")), Local(F64, "x")),
+        ToFloat(F64, Const(I64, 1)),
+    )),)
+
+
+def test_int_value_into_a_float_local_is_skipped(tmp_path):
+    # CPython keeps the int: `y` would be an int at run time, not a float.
+    m = lower(tmp_path, """
+        @compiled
+        def f(n: int) -> float:
+            y: float = n
+            return y
+    """)
+    assert m.functions == ()
+    assert "line 3" in m.skipped["f"]
+
+
+def test_int_true_division_gives_float(tmp_path):
+    m = lower(tmp_path, """
+        @compiled
+        def f(a: int, b: int) -> float:
+            return a / b
+    """)
+    assert function(m, "f").body == (
+        Return(BinOp(F64, BinOpKind.TRUEDIV, Local(I64, "a"), Local(I64, "b"))),)
+
+
+def test_float_of_int_is_to_float(tmp_path):
+    m = lower(tmp_path, """
+        @compiled
+        def f(a: int) -> float:
+            return float(a)
+    """)
+    assert function(m, "f").body == (Return(ToFloat(F64, Local(I64, "a"))),)
+
+
+# --- chained comparison --------------------------------------------------------------------------
+
+def test_chained_compare_of_locals(tmp_path):
+    m = lower(tmp_path, """
+        @compiled
+        def between(lo: int, x: int, hi: int) -> bool:
+            return lo < x <= hi
+    """)
+    assert function(m, "between").body == (Return(And(
+        BOOL,
+        Compare(BOOL, CompareKind.LT, Local(I64, "lo"), Local(I64, "x")),
+        Compare(BOOL, CompareKind.LE, Local(I64, "x"), Local(I64, "hi")),
+    )),)
+
+
+def test_chained_compare_evaluates_the_middle_once(tmp_path):
+    m = lower(tmp_path, """
+        @compiled
+        def sq(v: float) -> float:
+            return v * v
+
+        @compiled
+        def within(lo: float, x: float, hi: float) -> bool:
+            return lo < sq(x) < hi
+    """)
+    f = function(m, "within")
+    assert len(f.body) == 2
+    first, ret = f.body
+    assert isinstance(first, Assign) and first.value == Call(F64, "sq", (Local(F64, "x"),))
+    t = first.target
+    assert f.locals[t] == F64 and t not in ("lo", "x", "hi")
+    assert ret == Return(And(
+        BOOL,
+        Compare(BOOL, CompareKind.LT, Local(F64, "lo"), Local(F64, t)),
+        Compare(BOOL, CompareKind.LT, Local(F64, t), Local(F64, "hi")),
+    ))
+
+
+# --- arrays --------------------------------------------------------------------------------------
+
+def test_augmented_store_into_an_array_element(tmp_path):
+    m = lower(tmp_path, """
+        @compiled
+        def bump(a: list[float], i: int, e: float) -> None:
+            a[i] += e
+    """)
+    assert function(m, "bump").body == (StoreIndex(
+        "a", Local(I64, "i"),
+        BinOp(F64, BinOpKind.ADD, Index(F64, "a", Local(I64, "i")), Local(F64, "e")),
+    ),)
+
+
+def test_augmented_store_evaluates_a_computed_index_once(tmp_path):
+    m = lower(tmp_path, """
+        @compiled
+        def bump_last(a: list[float], e: float) -> None:
+            a[len(a) - 1] += e
+    """)
+    f = function(m, "bump_last")
+    first, store = f.body
+    assert isinstance(first, Assign)
+    assert first.value == BinOp(I64, BinOpKind.SUB, Len(I64, "a"), Const(I64, 1))
+    t = first.target
+    assert store == StoreIndex(
+        "a", Local(I64, t),
+        BinOp(F64, BinOpKind.ADD, Index(F64, "a", Local(I64, t)), Local(F64, "e")),
+    )
+    assert not f.pure and not f.may_deopt
+
+
+def test_list_params_become_array_params_with_stored(tmp_path):
+    m = lower(tmp_path, """
+        @compiled
+        def scale(a: list[float], b: list[float], k: float, c: list[int]) -> None:
+            for i in range(len(a)):
+                a[i] = b[i] * k
+    """)
+    f = function(m, "scale")
+    assert f.params == (
+        ArrayParam("a", Type.F64_ARRAY, True), ArrayParam("b", Type.F64_ARRAY, False),
+        Param("k", F64), ArrayParam("c", Type.I64_ARRAY, False),
+    )
+    assert f.body[0].stop == Len(I64, "a")
+
+
+def test_array_param_used_whole_is_skipped(tmp_path):
+    m = lower(tmp_path, """
+        @compiled
+        def first(a: list[float]) -> float:
+            return a[0]
+
+        @compiled
+        def caller(a: list[float]) -> float:
+            return first(a)
+    """)
+    assert [f.name for f in m.functions] == ["first"]
+    assert "`a`" in m.skipped["caller"] and "line 7" in m.skipped["caller"]
+
+
+def test_int_stored_into_a_float_array_is_skipped(tmp_path):
+    m = lower(tmp_path, """
+        @compiled
+        def zero(a: list[float]) -> None:
+            a[0] = 0
+    """)
+    assert m.functions == () and "line 3" in m.skipped["zero"]
+
+
+# --- math ----------------------------------------------------------------------------------------
+
+def test_math_sqrt_of_stdlib_math(tmp_path):
+    m = lower(tmp_path, """
+        import math
+
+        @compiled
+        def norm(x: float, y: float) -> float:
+            return math.sqrt(x * x + y * y)
+    """)
+    assert function(m, "norm").body == (Return(MathCall(F64, MathFunc.SQRT, (BinOp(
+        F64, BinOpKind.ADD,
+        BinOp(F64, BinOpKind.MUL, Local(F64, "x"), Local(F64, "x")),
+        BinOp(F64, BinOpKind.MUL, Local(F64, "y"), Local(F64, "y")),
+    ),)),),)
+
+
+@pytest.mark.parametrize("binding", ["import cmath as math", "import math\nmath = 3"])
+def test_shadowed_math_is_skipped(tmp_path, binding):
+    m = lower(tmp_path, binding + """
+
+@compiled
+def norm(x: float) -> float:
+    return math.sqrt(x)
+""")
+    assert m.functions == ()
+    assert "math" in m.skipped["norm"]
+
+
+# --- calls and purity ----------------------------------------------------------------------------
+
+def test_impure_caller_of_a_deopting_function_is_skipped(tmp_path):
+    m = lower(tmp_path, """
+        @compiled
+        def tri(i: int, j: int) -> float:
+            return 1.0 / ((i + j) * (i + j + 1) // 2 + i + 1)
+
+        @compiled
+        def fill(n: int, out: list[float]) -> None:
+            for i in range(n):
+                out[i] = tri(i, i)
+    """)
+    tri = function(m, "tri")
+    assert tri.pure and tri.may_deopt
+    assert "tri" in m.skipped["fill"] and "line 8" in m.skipped["fill"]
+
+
+def test_pure_caller_of_a_deopting_function_lowers(tmp_path):
+    m = lower(tmp_path, """
+        @compiled
+        def add(i: int, j: int) -> int:
+            return i + j
+
+        @compiled
+        def twice(i: int) -> int:
+            return add(i, i)
+    """)
+    twice = function(m, "twice")
+    assert twice.body == (Return(Call(I64, "add", (Local(I64, "i"), Local(I64, "i")))),)
+    assert twice.pure and twice.may_deopt
+
+
+def test_caller_of_an_interpreted_function_calls_it_as_an_object(tmp_path):
+    m = lower(tmp_path, """
+        @compiled
+        def bad(x: float) -> float:
+            try:
+                return x
+            except ValueError:
+                return 0.0
+
+        @compiled
+        def good(x: float) -> object:
+            return bad(x)
+
+        @compiled
+        def typed(x: float) -> float:
+            return bad(x)
+    """)
+    assert [f.name for f in m.functions] == ["good"]
+    assert "line 3" in m.skipped["bad"] and "try" in m.skipped["bad"]
+    assert function(m, "good").body == (
+        Return(CallObject(OBJ, Global(OBJ, "bad"), (Box(OBJ, Local(F64, "x")),))),)
+    # The result is an object; a float return would need a conversion CPython does not make.
+    assert "bad(x)" in m.skipped["typed"] and "line 14" in m.skipped["typed"]
+
+
+# --- what is (not) lowered -----------------------------------------------------------------------
+
+@pytest.mark.parametrize("body, what", [
+    ("    try:\n        pass\n    except ValueError:\n        pass\n", "try"),
+    ("    with x:\n        pass\n", "with"),
+    ("    yield x\n", "yield"),
+    ("    global q\n", "global"),
+    ("    y = [x]\n", "list"),
+    ("    y = (lambda: x)\n", "lambda"),
+])
+def test_unsupported_construct_is_skipped_with_its_line(tmp_path, body, what):
+    m = lower(tmp_path, "@compiled\ndef f(x: float) -> None:\n" + body)
+    assert m.functions == ()
+    assert "line 3" in m.skipped["f"] and what in m.skipped["f"]
+
+
+@pytest.mark.parametrize("signature", [
+    "def f(x: float = 1.0) -> float:", "def f(*x: float) -> float:", "def f(x) -> float:",
+    "def f(x: float):", "def f(*, x: float) -> float:", "def f(x: float, /) -> float:",
+    "@staticmethod\ndef f(x: float) -> float:",
+])
+def test_unsupported_signature_is_skipped(tmp_path, signature):
+    m = lower(tmp_path, f"@compiled\n{signature}\n    return 1.0\n")
+    assert m.functions == () and "f" in m.skipped
+
+
+def test_global_read_is_a_global_node(tmp_path):
+    m = lower(tmp_path, """
+        K: float = 2.0
+
+        @compiled
+        def f(x: float) -> object:
+            return x * K
+
+        @compiled
+        def g(x: float) -> float:
+            return x * K
+    """)
+    f = function(m, "f")
+    assert f.body == (Return(
+        BinOp(OBJ, BinOpKind.MUL, Box(OBJ, Local(F64, "x")), Global(OBJ, "K"))),)
+    assert not f.pure and not f.may_deopt
+    assert "x * K" in m.skipped["g"]
+
+
+def test_module_marker_compiles_every_module_level_def(tmp_path):
+    m = lower(tmp_path, """
+
+        # typedpython: compiled
+        def a(x: float) -> float:
+            return x
+
+        def b(x: float) -> float:
+            return -x
+
+        @staticmethod
+        def c(x: float) -> float:
+            return x
+    """)
+    assert [f.name for f in m.functions] == ["a", "b"]
+    assert set(m.skipped) == {"c"} and "decorator" in m.skipped["c"]
+
+
+def test_without_marker_only_compiled_functions_are_lowered(tmp_path):
+    m = lower(tmp_path, """
+        x: int = 1
+        # typedpython: compiled
+        def a(x: float) -> float:
+            return x
+
+        @compiled
+        def b(x: float) -> float:
+            return -x
+    """)
+    assert [f.name for f in m.functions] == ["b"]
+    assert m.skipped == {}
+
+
+# --- objects: Kotlin interop and any Python value -------------------------------------------------
+
+def test_compiled_code_calls_imported_callables_around_native_float_math(tmp_path):
+    (tmp_path / "kotlinlib.py").write_text(textwrap.dedent("""
+        class Canvas:
+            pass
+
+        def make_canvas(n: int) -> Canvas:
+            return Canvas()
+
+        def draw(c: Canvas, x: float, alpha: float) -> None:
+            pass
+    """))
+    m = lower(tmp_path, """
+        import math
+        from kotlinlib import draw, make_canvas
+
+        @compiled
+        def render(n: int, scale: float) -> float:
+            canvas = make_canvas(n)
+            total: float = 0.0
+            hits: int = 0
+            for i in range(n):
+                x: float = i * scale
+                total += math.sqrt(x)
+                draw(canvas, x, alpha=0.5)
+                hits += 1
+                if hits > n:
+                    break
+            return total
+    """)
+    f = function(m, "render")
+    assert not f.pure and not f.may_deopt
+    assert f.locals == {"canvas": OBJ, "total": F64, "hits": OBJ, "i": I64, "x": F64}
+    assert f.body[0] == Assign("canvas", CallObject(
+        OBJ, Global(OBJ, "make_canvas"), (Box(OBJ, Local(I64, "n")),)))
+    loop = f.body[3]
+    assert isinstance(loop, ForRange) and loop.var == "i"
+    assert loop.body == (
+        Assign("x", BinOp(F64, BinOpKind.MUL, ToFloat(F64, Local(I64, "i")), Local(F64, "scale"))),
+        Assign("total", BinOp(F64, BinOpKind.ADD, Local(F64, "total"),
+                              MathCall(F64, MathFunc.SQRT, (Local(F64, "x"),)))),
+        ExprStmt(CallObject(OBJ, Global(OBJ, "draw"), (
+            Local(OBJ, "canvas"), Box(OBJ, Local(F64, "x")), Box(OBJ, Const(F64, 0.5)),
+        ), ("alpha",))),
+        Assign("hits", BinOp(OBJ, BinOpKind.ADD, Local(OBJ, "hits"), Box(OBJ, Const(I64, 1)))),
+        If(CompareObj(BOOL, CompareKind.GT, Local(OBJ, "hits"), Box(OBJ, Local(I64, "n"))),
+           (Break(),)),
+    )
+
+
+def test_object_truth_float_and_method_calls(tmp_path):
+    m = lower(tmp_path, """
+        @compiled
+        def f(o: object, x: float) -> float:
+            if o:
+                return float(o.scale(x))
+            return x
+    """)
+    assert function(m, "f").body == (
+        If(Truth(BOOL, Local(OBJ, "o")), (Return(ObjToFloat(F64, CallObject(
+            OBJ, GetAttr(OBJ, Local(OBJ, "o"), "scale"), (Box(OBJ, Local(F64, "x")),)))),)),
+        Return(Local(F64, "x")),
+    )
+
+
+def test_object_comparison_outside_a_condition_is_skipped(tmp_path):
+    # `a < b` on objects returns whatever __lt__ returns, which need not be a bool.
+    m = lower(tmp_path, """
+        @compiled
+        def f(o: object, x: float) -> bool:
+            return o < x
+    """)
+    assert m.functions == () and "line 3" in m.skipped["f"]
+
+
+@pytest.mark.parametrize("body", ["return not (o < x)", "r: bool = c and o < x\n    return r"])
+def test_object_comparison_not_directly_a_condition_is_skipped(tmp_path, body):
+    m = lower(tmp_path, f"@compiled\ndef f(o: object, x: float, c: bool) -> bool:\n    {body}\n")
+    assert m.functions == () and "line 3" in m.skipped["f"]
+
+
+def test_object_comparison_as_an_operand_of_a_condition(tmp_path):
+    m = lower(tmp_path, """
+        @compiled
+        def f(o: object, x: float, c: bool) -> int:
+            if c and o < x:
+                return 1
+            return 0
+    """)
+    assert function(m, "f").body[0].cond == And(
+        BOOL, Local(BOOL, "c"),
+        CompareObj(BOOL, CompareKind.LT, Local(OBJ, "o"), Box(OBJ, Local(F64, "x"))))
+
+
+def test_while_condition_with_a_temporary_reevaluates_it_each_iteration(tmp_path):
+    m = lower(tmp_path, """
+        @compiled
+        def sq(v: float) -> float:
+            return v * v
+
+        @compiled
+        def shrink(lo: float, x: float, hi: float) -> float:
+            while lo < sq(x) < hi:
+                x = x * 0.5
+            return x
+    """)
+    loop = function(m, "shrink").body[0]
+    assert isinstance(loop, While) and loop.cond == Const(BOOL, True)
+    temp, test = loop.body[0], loop.body[1]
+    assert isinstance(temp, Assign) and temp.value == Call(F64, "sq", (Local(F64, "x"),))
+    # The condition stays an If condition (never under `not`), and exits through its else.
+    assert isinstance(test, If) and isinstance(test.cond, And)
+    assert test.then == () and test.orelse == (Break(),)
+
+
+@pytest.mark.parametrize("source", [
+    "@compiled\ndef f(n: int) -> int:\n    return f(n)\n",
+    "@compiled\ndef f(n: int) -> int:\n    return g(n)\n\n"
+    "@compiled\ndef g(n: int) -> int:\n    return f(n)\n",
+])
+def test_recursion_is_skipped(tmp_path, source):
+    m = lower(tmp_path, source)
+    assert m.functions == () and "recurs" in m.skipped["f"]
+
+
+def test_int_modulo_never_deopts(tmp_path):
+    m = lower(tmp_path, """
+        @compiled
+        def put(a: list[float], i: int, n: int) -> None:
+            a[i % n] = 1.0
+    """)
+    f = function(m, "put")
+    assert not f.pure and not f.may_deopt
+
+
+def test_locals_exclude_parameters(tmp_path):
+    m = lower(tmp_path, """
+        @compiled
+        def f(n: int) -> int:
+            n = n + 1
+            return n
+    """)
+    assert function(m, "f").locals == {}
+
+
+# --- benchmarks ----------------------------------------------------------------------------------
+
+@pytest.mark.skipif(not BENCH.exists(), reason="benchmark worktree not present")
+def test_nbody_kernels_lower(tmp_path):
+    path = tmp_path / "nbody.py"
+    shutil.copy(BENCH / "nbody.py", path)
+    path.write_text("# typedpython: compiled\n" + path.read_text())
+    m = frontend.lower(path)
+    for name in ("advance", "energy"):
+        function(m, name)
+    advance = function(m, "advance")
+    assert not advance.pure and not advance.may_deopt
+    assert function(m, "energy").pure
