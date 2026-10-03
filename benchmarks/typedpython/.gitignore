@@ -1,0 +1,5 @@
+target/
+java-out/
+__pycache__/
+*.class
+tp-build/
