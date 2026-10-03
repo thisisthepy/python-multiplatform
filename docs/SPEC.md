@@ -96,8 +96,12 @@ fail, then implement.
   classpath library is extracted to `<user cache>/python-multiplatform/<python version>/<platform>/` (macOS
   `~/Library/Caches`, Windows `%LOCALAPPDATA%`, else `$XDG_CACHE_HOME` or `~/.cache`; fallback
   `java.io.tmpdir/python-multiplatform-<user>`; override `-Dpython.multiplatform.cache`), never the working
-  directory, and reused when its size matches. `Status: implemented` --
-  `PM/desktopTest/.../ffi/DesktopJarLibrariesTest.kt`, `ExtractLibraryCacheTest.kt`.
+  directory, and reused when its size matches. The same holds for the plugin's staged prefix and the packaged
+  `python-multiplatform-home`: `stagePythonHome` extracts the archive itself and materialises every symlink/hard
+  link as a copy of its in-archive target (Gradle's `tarTree` yields 0-byte files), the staging stamp changed so
+  old prefixes are re-extracted, and the packaged copy fails the build on any 0-byte `libpython*`.
+  `Status: implemented` -- `PM/desktopTest/.../ffi/DesktopJarLibrariesTest.kt`, `ExtractLibraryCacheTest.kt`,
+  `GP/StagedPrefixLinksTest.kt`.
 
 ## 2. Low-level C API (downcall surface)
 
