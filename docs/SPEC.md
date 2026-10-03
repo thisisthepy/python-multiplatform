@@ -216,6 +216,11 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   nothing under `pythonx` and renames nothing; a Pythonic stub product belongs to pythonx-compose.
   `Status: partial` — `GP/stubs/PyiRenderingTest.kt`, `GP/stubs/KotlinNamesOnlyStubTest.kt`,
   `ksp-fixtures/artifact/.../WalkedArtifactStubTest.kt`; handle-returning stubs are not wrapped.
+- **B-8** When a configuration named `typedpythonStubs` exists (toolchain's plugin creates it), every
+  stubs task's output directory is added to it, with the task dependency travelling with the files, in
+  either plugin application order. Without that configuration nothing happens and none is created.
+  `Status: implemented` — `GP/TypedPythonStubsWiringTest.kt` (a `ProjectBuilder` project; the toolchain
+  side that consumes the configuration is toolchain#23 and is not exercised here).
 
 ## 7. Threading and builds
 
