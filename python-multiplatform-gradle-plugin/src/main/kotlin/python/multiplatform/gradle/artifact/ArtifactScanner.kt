@@ -1911,6 +1911,17 @@ internal object ArtifactScanner {
         if (function.hasUnsubstitutableTypeParameters) {
             return declined("a bounded or reified type parameter: kotlin.Any? cannot stand for it")
         }
+        // Issue #66: `receiver.alias(...)` resolves against the receiver's member scope, which needs
+        // every supertype of it -- the rule an extension property's receiver already gets.
+        if (function.isExtension) {
+            val receiverName = (function.receiverType?.classifier as? KmClassifier.Class)?.name
+            if (receiverName != null) {
+                val missing = classpath.unreachableSupertypeOf(receiverName.replace('.', '$'))
+                if (missing != null) {
+                    return declined(unreachableReceiverReason(missing, receiverName.replace('/', '.')))
+                }
+            }
+        }
 
         // Read before `resolveKotlinType` is asked anything, because for a function-typed parameter
         // it is the one that would answer -- and would answer "no". See [functionSlotOrNull].
