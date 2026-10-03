@@ -19,10 +19,21 @@ free of overflow is a CPython int object (OBJ, `PyNumber_*`), a call to a compil
 may deopt goes through the module global (`CallObject(Global)`), and only `for ... in range()`
 targets whose every binding is such a loop stay I64. The proof is a small interval analysis:
 constants, range targets (between their bounds), `len()` and the i64 range of a guarded parameter.
+It is recorded in the IR: an I64 ADD/SUB/MUL/NEG it proves cannot overflow is `proven=True` (the
+verifier re-proves it; a proven op does not deopt). Division and modulo of ints cannot be recorded,
+so they count as deopting. An impure caller of a pure callee that may deopt and returns F64, BOOL
+or NONE emits `Call(redo=True)`: only the callee is redone on a deopt.
+
+Entry globals (ir.Function.entry_globals). A module-level name assigned once at top level, of type
+float/int/bool (annotated, or literals and arithmetic of such names), never rebound or deleted in
+the module, and read in a *closed* function (one that runs no user code, decided after lowering)
+is read once at entry: a `Param` of the function and `Local(name)` at every read. Elsewhere it is a
+`Global` (OBJ).
 """
 from __future__ import annotations
 
 import ast
+import dataclasses
 import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -100,6 +111,7 @@ def _src(node: ast.AST) -> str:
 class _ModuleInfo:
     bindings: dict[str, list[tuple[int, str]]]   # module-level name -> [(line, how)]
     stdlib_math: bool
+    scalar_globals: dict[str, Type] = field(default_factory=dict)  # entry-global candidates
 
     def bound(self, name: str) -> bool:
         return name in self.bindings
@@ -141,7 +153,8 @@ def lower(path: Path) -> ir.Module:
     # Optimistic start: every candidate lowered, pure, not deopting; then iterate to a fixpoint
     # (purity is the greatest fixpoint through calls, may_deopt the least).
     env: dict[str, ir.Function] = {
-        name: ir.Function(name, s.params, s.returns, {}, (), True, False, s.node.lineno)
+        name: ir.Function(name=name, params=s.params, returns=s.returns, locals={}, body=(), pure=True,
+                    may_deopt=False, source_line=s.node.lineno)
         for name, s in signatures.items()
     }
     results: dict[str, ir.Function | str] = {}
@@ -217,7 +230,55 @@ def _module_info(tree: ast.Module) -> _ModuleInfo:
                 add(name, node.lineno, "global")
 
     math = bindings.get("math", [])
-    return _ModuleInfo(bindings, len(math) == 1 and math[0][1] == "import math")
+    return _ModuleInfo(bindings, len(math) == 1 and math[0][1] == "import math",
+                       _scalar_globals(tree, bindings))
+
+
+def _scalar_globals(tree: ast.Module, bindings: dict[str, list[tuple[int, str]]]) -> dict[str, Type]:
+    """Module-level names that are assigned exactly once, at top level, with a float/int/bool
+    value, and are never rebound (`global`, `del`, `:=`, a loop target ...) anywhere in the module."""
+    spoiled = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)
+               and isinstance(n.ctx, ast.Del)}
+    spoiled |= {n.target.id for n in ast.walk(tree)
+                if isinstance(n, ast.NamedExpr) and isinstance(n.target, ast.Name)}
+    found: dict[str, Type] = {}
+    for stmt in tree.body:
+        if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name) \
+                and stmt.value is not None:
+            name, annotated = stmt.target.id, SCALAR_KIND.get(_annotation_kind(stmt.annotation))
+            t = annotated
+        elif isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 \
+                and isinstance(stmt.targets[0], ast.Name):
+            name, t = stmt.targets[0].id, _literal_type(stmt.value, found)
+        else:
+            continue
+        if t is not None and len(bindings.get(name, [])) == 1 and name not in spoiled:
+            found[name] = t
+    return found
+
+
+def _literal_type(node: ast.expr, known: dict[str, Type]) -> Type | None:
+    """The type of an expression made only of literals, arithmetic and `known` globals."""
+    if isinstance(node, ast.Constant):
+        v = node.value
+        if isinstance(v, bool):
+            return Type.BOOL
+        if isinstance(v, int):
+            return Type.I64 if I64_MIN <= v <= I64_MAX else None
+        return Type.F64 if isinstance(v, float) else None
+    if isinstance(node, ast.Name):
+        return known.get(node.id)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        t = _literal_type(node.operand, known)
+        return t if t in (Type.I64, Type.F64) else None
+    if isinstance(node, ast.BinOp) and type(node.op) in BINOP:
+        a, b = _literal_type(node.left, known), _literal_type(node.right, known)
+        if a not in (Type.I64, Type.F64) or b not in (Type.I64, Type.F64):
+            return None
+        if a == b == Type.I64 and not isinstance(node.op, ast.Div):
+            return Type.I64
+        return Type.F64
+    return None
 
 
 def _binding_targets(stmt: ast.stmt) -> list[ast.expr]:
@@ -349,10 +410,20 @@ def _lower_function(
 
 
 def _lower_in_mode(sig, env, info, inferred, impure: bool) -> ir.Function:
+    fn = _lower_with_bounds(sig, env, info, inferred, impure, info.scalar_globals)
+    if fn.entry_globals and not _closed(fn, env):
+        # A global read once at entry is only the same as a read at each use if nothing between
+        # can run user code: here something can, so the reads stay `Global`.
+        fn = _lower_with_bounds(sig, env, info, inferred, impure, {})
+    return fn
+
+
+def _lower_with_bounds(sig, env, info, inferred, impure: bool,
+                       candidates: dict[str, Type]) -> ir.Function:
     # Range-target intervals: least fixpoint by iteration, widened to TOP if it does not settle.
     bounds: dict[str, Interval] = {}
     for _ in range(8):
-        lowerer = _Lowerer(sig, env, info, inferred, impure, bounds)
+        lowerer = _Lowerer(sig, env, info, inferred, impure, bounds, candidates)
         fn = lowerer.run()
         joined = {**bounds}
         for var, iv in lowerer.found_bounds.items():
@@ -361,7 +432,7 @@ def _lower_in_mode(sig, env, info, inferred, impure: bool) -> ir.Function:
             return fn
         bounds = joined
     widened = {var: TOP for var in bounds}
-    return _Lowerer(sig, env, info, inferred, impure, widened).run()
+    return _Lowerer(sig, env, info, inferred, impure, widened, candidates).run()
 
 
 def _join(a: Interval, b: Interval) -> Interval:
@@ -381,8 +452,10 @@ class _Binding:
 class _Lowerer:
     def __init__(self, sig: _Signature, env: dict[str, ir.Function], info: _ModuleInfo,
                  inferred: dict[str, list[tuple[int, str]]], impure: bool,
-                 bounds: dict[str, Interval]) -> None:
+                 bounds: dict[str, Interval], candidates: dict[str, Type]) -> None:
         self.sig = sig
+        self.candidates = candidates
+        self.entry_used: dict[str, Type] = {}
         self.fn = sig.node
         self.env = env
         self.info = info
@@ -433,8 +506,10 @@ class _Lowerer:
         pure = not self.impure
         assert pure or not self.deopts or not self.impure_mode, \
             "impure mode emitted a deopting node"
-        return ir.Function(self.fn.name, params, self.sig.returns, locals_, body, pure,
-                           self.deopts, self.fn.lineno)
+        return ir.Function(
+            name=self.fn.name, params=params, returns=self.sig.returns, locals=locals_, body=body,
+            pure=pure, may_deopt=self.deopts, source_line=self.fn.lineno,
+            entry_globals=tuple(ir.Param(n, t) for n, t in self.entry_used.items()))
 
     # --- names and types ---
 
@@ -773,6 +848,9 @@ class _Lowerer:
                     b.how == "annotation" for b in self.bindings[name]):
                 raise Skip(node.lineno, f"`{name}` is read but never assigned")
             return ir.Local(self.local_type(name, node.lineno), name)
+        if name in self.candidates:
+            self.entry_used.setdefault(name, self.candidates[name])
+            return ir.Local(self.candidates[name], name)
         return ir.Global(Type.OBJ, name)
 
     def array_misuse(self, name: str, node: ast.AST) -> Skip:
@@ -812,8 +890,8 @@ class _Lowerer:
         if lt == Type.I64 and rt == Type.I64:
             result = Type.F64 if op == ir.BinOpKind.TRUEDIV else Type.I64
             e = ir.BinOp(result, op, left, right)
-            if self.proved(e):
-                return e
+            if self.recordable(e) and self.proved(e):
+                return dataclasses.replace(e, proven=True)
             if self.impure_mode:
                 return self.obj_binop(op, left, right)
             self.deopts = True
@@ -840,8 +918,10 @@ class _Lowerer:
             return ir.UnaryOp(Type.F64, kind, operand)
         if operand.type == Type.I64:
             e = ir.UnaryOp(Type.I64, kind, operand)
-            if kind == ir.UnaryOpKind.POS or self.proved(e):
+            if kind == ir.UnaryOpKind.POS:
                 return e
+            if self.proved(e):
+                return dataclasses.replace(e, proven=True)
             if self.impure_mode:  # -x of a CPython int is 0 - x
                 return self.obj_binop(ir.BinOpKind.SUB, ir.Const(Type.I64, 0), operand)
             self.deopts = True
@@ -974,7 +1054,10 @@ class _Lowerer:
             return None
         self.hoist_ok = False
         args = [self.value(a) for a in node.args]
-        direct = not (callee.may_deopt and self.impure_mode)  # else a deopt could not be redone
+        redo = callee.may_deopt and self.impure_mode and callee.pure \
+            and callee.returns in (Type.F64, Type.BOOL, Type.NONE)
+        # else a deopt could not be redone (an I64 result of a redo could be a big int)
+        direct = redo or not (callee.may_deopt and self.impure_mode)
         for p, e in zip(callee.params, args):
             if p.type != Type.OBJ and e.type != p.type:
                 direct = False  # the callee's guard would deopt; the global keeps CPython's result
@@ -984,11 +1067,11 @@ class _Lowerer:
                                  tuple(self.boxed(e, a) for e, a in zip(args, node.args)))
         if not callee.pure:
             self.impure = True
-        if callee.may_deopt:
+        if callee.may_deopt and not redo:
             self.deopts = True
         typed = tuple(self.boxed(e, a) if p.type == Type.OBJ else e
                       for p, e, a in zip(callee.params, args, node.args))
-        return ir.Call(callee.returns, name, typed)
+        return ir.Call(callee.returns, name, typed, redo=redo)
 
     def math_call(self, attr: str, node: ast.Call) -> ir.Expr | None:
         try:
@@ -1040,6 +1123,11 @@ class _Lowerer:
             return self._result_interval(e)
         return TOP
 
+    @staticmethod
+    def recordable(e: ir.BinOp) -> bool:
+        """`proven` exists for ADD/SUB/MUL only; the verifier cannot re-prove the others."""
+        return e.op in (ir.BinOpKind.ADD, ir.BinOpKind.SUB, ir.BinOpKind.MUL)
+
     def proved(self, e: ir.BinOp | ir.UnaryOp) -> bool:
         """The i64 operation provably does not deopt (no overflow, exact division)."""
         if isinstance(e, ir.UnaryOp):
@@ -1085,6 +1173,31 @@ class _Lowerer:
 
 
 # --- helpers -------------------------------------------------------------------------------------
+
+def _walk(x):
+    if isinstance(x, (tuple, list)):
+        for y in x:
+            yield from _walk(y)
+    elif dataclasses.is_dataclass(x) and not isinstance(x, type):
+        yield x
+        for f in dataclasses.fields(x):
+            yield from _walk(getattr(x, f.name))
+
+
+def _closed(fn: ir.Function, env: dict[str, ir.Function], seen: frozenset[str] = frozenset()) -> bool:
+    """`fn` runs no user code: no GetAttr, CallObject, Truth, CompareObj, ObjToFloat or OBJ
+    BinOp, and calls only closed functions."""
+    for n in _walk(fn.body):
+        if isinstance(n, (ir.GetAttr, ir.CallObject, ir.Truth, ir.CompareObj, ir.ObjToFloat)):
+            return False
+        if isinstance(n, ir.BinOp) and n.type == Type.OBJ:
+            return False
+        if isinstance(n, ir.Call):
+            callee = env.get(n.function)
+            if callee is None or n.function in seen or not _closed(callee, env, seen | {fn.name}):
+                return False
+    return True
+
 
 def _box(e: ir.Expr) -> ir.Expr:
     return ir.Box(Type.OBJ, e) if e.type in ir.SCALARS else e
