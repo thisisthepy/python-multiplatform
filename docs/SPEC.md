@@ -102,6 +102,15 @@ fail, then implement.
   old prefixes are re-extracted, and the packaged copy fails the build on any 0-byte `libpython*`.
   `Status: implemented` -- `PM/desktopTest/.../ffi/DesktopJarLibrariesTest.kt`, `ExtractLibraryCacheTest.kt`,
   `GP/StagedPrefixLinksTest.kt`.
+- **L-10** Desktop: the library uses no JDK module beyond `java.base`, so it runs on a `jlink`ed
+  runtime such as the one Compose Desktop's `createDistributable` bundles (issue #77). In particular
+  native memory is reached through `java.lang.foreign`, never `sun.misc.Unsafe` (module
+  `jdk.unsupported`): the proxy heap type (`ProxyTypeFactory.createProxyType`, `_pm_proxy_base`) is
+  built, and its handle slot read and cleared on deallocation, on a runtime limited to `java.base`.
+  `Status: implemented` — `PM/desktopTest/.../ffi/JlinkedRuntimeProxyTypeTest.kt` (a child JVM with
+  `--limit-modules java.base` installs the proxy base, and a dropped subclass instance releases its
+  handle). The packaged sample's own log is a manual check —
+  `docs/platforms/desktop-packaged-app.md`.
 
 ## 2. Low-level C API (downcall surface)
 
@@ -232,10 +241,18 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   extension property's getter reads the same way on its receiver (`Icons.Default.Add`), and both are
   found on the type and then on every type the table says it is a. A property is never a module
   attribute and makes no package. `None` written for a slot with no default is Kotlin's `null` for a
-  reference type; a Python object written into a `kotlin.Any?` slot is held by Kotlin as itself, and an
-  `int` is refused there (it would cross as a handle). `Status: implemented` —
+  reference type; a Kotlin proxy written into a `kotlin.Any?` slot is the Kotlin object, and any other
+  Python object is held by Kotlin as itself. A Python **scalar** written into a `kotlin.Any`/`kotlin.Any?`
+  slot — a function argument or a property write — is boxed into the Kotlin type it means (#69): `bool`
+  → `kotlin.Boolean` (checked before `int`); `int` → `kotlin.Int` when it fits in 32 bits, else
+  `kotlin.Long`, and outside 64 bits refused with a reason; `float` → `kotlin.Double`; `str` →
+  `kotlin.String`. `None` is `null` for `Any?`; for a non-null `Any` it is Kotlin's own refusal (the
+  table does not carry nullability). Reading a `kotlin.Any`/`kotlin.Any?` value back — a property, a
+  function result, or a callback argument — gives the Python scalar for a Kotlin `Int`/`Long`/`Short`/`Byte`
+  (`int`), `Double`/`Float` (`float`), `Boolean` (`bool`), `String`/`Char` (`str`), and a proxy for any
+  other Kotlin object. `Status: implemented` —
   `PM/commonTest/.../pythonx/PythonxPropertyTest.kt`, `ksp-fixtures/compose/.../PythonContentRenderTest.kt`,
-  `MaterialIconsRenderTest.kt`.
+  `AnySlotScalarRenderTest.kt`, `MaterialIconsRenderTest.kt`.
 
 ## 6. Binding prebuilt libraries (Gradle plugin)
 
@@ -251,11 +268,20 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   for a public setter with every class type parameter unbounded, `SETTER` entries `Owner.prop=`; and
   top-level extension property getters (`pkg.prop`, receiver in `receiverTypeName`). Properties take no
   part in overload naming or in a constructor's name check; a property key another binding already
-  holds is declined, and so is a property whose receiver has a supertype missing from the consumer's compile classpath (kotlinc cannot build its member scope). `Status: implemented` — `GP/artifact/PropertyBindingTest.kt`.
+  holds is declined, and so is a property or an extension function whose receiver has a supertype missing from the consumer's compile classpath (kotlinc cannot build its member scope; the reason names the missing supertype, #66). `Status: implemented` — `GP/artifact/PropertyBindingTest.kt` (properties and, #66, extension functions).
   The public instance functions of a Kotlin-public `object` bind under the object's name like a
   static (`Arrangement.spacedBy`, #53), except `Any`'s members, ones that also exist as a
   `@JvmStatic` static, and `@Composable` ones (declined); an `internal` or file-private object is
   skipped. `Status: implemented` — `GP/artifact/ObjectMemberBindingTest.kt`.
+  A public constructor of a public, non-abstract, non-generic class binds under the class's own name
+  (`pkg.Class`), including one with a value-class parameter, which `kotlinc` compiles to a private
+  `<init>` behind a public synthetic bridge ending in `DefaultConstructorMarker` (the descriptor
+  `@Metadata` records); a `@Deprecated(level = HIDDEN)` constructor, whose bridge carries that
+  annotation, is skipped (#73). A declared `kotlin.CharSequence` **result** — of a function, a property
+  getter or an object constant — crosses as a Python `str` (the generated body returns Kotlin's
+  `toString()` of it; `null` stays `None` for `CharSequence?`); a `CharSequence` parameter is still
+  declined (#73). `Status: implemented` — `GP/artifact/TextStateBindingTest.kt`,
+  `ksp-fixtures/compose/.../TextFieldStateRenderTest.kt`.
 - **B-2** The walker on **klibs** (Kotlin/Native libraries). `Status: partial` —
   `GP/artifact/KlibScannerTest.kt` and `ksp-fixtures/klib-artifact` assert that the scanned klib's
   declarations are declined with reasons; no klib declaration is bound at run time yet.
@@ -294,17 +320,33 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `GP/stubs/TypedStubTest.kt`, `GP/stubs/KotlinNamesOnlyStubTest.kt`,
   `ksp-fixtures/artifact/.../WalkedArtifactStubTest.kt`, `.../StubSignatureAgreesWithRuntimeTest.kt`,
   `tools/stubs/check-stubs.sh` (mypy over the Compose stubs). A class whose name is also a function in
-  its module is `Any`. A property is a `@property` (with a setter for a `var`) of its receiver's stub
+  its module is `Any` — except that a class's own bound constructor is that class's `__init__`
+  (`@overload`ed for several), so the class keeps its stub, members and properties; a single one's
+  docstring carries its table key after `Kotlin constructor: `; its `__`-suffixed table-key spellings
+  stay module functions; a value class bound as its primitive keeps its constructor as a module function
+  returning the primitive (#73, `GP/artifact/TextStateBindingTest.kt`,
+  `ksp-fixtures/artifact/.../WalkedArtifactStubTest.kt`). In Python the class name is the constructor,
+  as `Typography(...)` already was (`M3ProofRenderTest.kt`). A property is a `@property` (with a setter for a `var`) of its receiver's stub
   class, its docstring carrying its table key after `Kotlin property: `; where that class has no stub,
   a comment with the same marker says so (`GP/stubs/PropertyStubTest.kt`). An object constant is annotated with its
   declared type even when that type is nested in the object (`Alignment.End: Horizontal`, a class of the
   object's own module; elsewhere `androidx.compose.ui.Alignment.Horizontal`); the object's own type
-  stays `Any` (#53, `GP/stubs/ObjectStubTest.kt`).
+  stays `Any` (#53, `GP/stubs/ObjectStubTest.kt`). An extension property whose receiver is a type nested in such an object is a `@property` of that nested class in the object's module (`Icons.Default: Filled`, `Filled.Add: ImageVector`, #68), not a marker comment in the package module.
+  A stub class lists **every** Kotlin supertype that has a stub class as a base, not only the first
+  (`Arrangement.HorizontalOrVertical(Horizontal, Vertical)`, so a `Vertical` slot accepts it): `Any`
+  and `java.lang.*` are dropped, and a base already implied by another listed base's known ancestry
+  is dropped, so the order is a valid Python MRO (#71, `GP/stubs/SupertypeStubTest.kt`, and the
+  `Column`/`Row` `SpaceBetween` lines of `tools/stubs/consumer.py`).
 - **B-8** CI generates the stubs over the Compose version the build resolves and publishes them
   (`.github/workflows/stubs.yml`): workflow artifact `kotlin-stubs` on every push to `develop`, with a
   README naming the Compose version and the commit, and `kotlin-stubs.zip` on every `v*` tag's release.
   `Status: partial` — the workflow could not be run where it was written; its YAML parses and its
   assemble step was executed locally.
+- **B-9** When a configuration named `typedpythonStubs` exists (toolchain's plugin creates it), every
+  stubs task's output directory is added to it, with the task dependency travelling with the files, in
+  either plugin application order. Without that configuration nothing happens and none is created.
+  `Status: implemented` — `GP/TypedPythonStubsWiringTest.kt` (a `ProjectBuilder` project; the toolchain
+  side that consumes the configuration is toolchain#23 and is not exercised here).
 
 ## 7. Threading and builds
 
@@ -325,6 +367,12 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   consumable `*Elements` configuration, and the resource `META-INF/python-multiplatform/python.properties`
   in the jar and AAR (see `docs/platforms/python-version-acquisition.md` "Published version") —
   `GP/EmbeddedPythonVersionTest.kt`.
+- **T-5** Every acquired CPython reports the pinned version: `PY_VERSION` in each target's `patchlevel.h`
+  equals `pythonVersion`, and a `downloadPython_*` task fails the build, naming the target and both
+  versions, when it does not (issue #47: iOS shipped 3.14.6 under `pythonVersion=3.14.7`). The iOS
+  extraction is stamped with its lock key so bumping the pinned archive discards the old tree.
+  `Status: implemented` — `GP/AcquiredHeaderVersionTest.kt` (the real-tree case needs the trees from
+  `downloadAllPythonBuilds`; it skips when nothing was acquired).
 
 ## 8. Measurement
 

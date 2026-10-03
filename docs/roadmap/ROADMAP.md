@@ -366,8 +366,9 @@ description, §16e/§16f's open remainder is below.
 - **16.7 Compose through Python on Android, iOS and wasm — open.** SPEC B-6/N-2: the render proofs
   (`ksp-fixtures/compose/src/desktopTest/`) are desktop only.
 - **16.8 Two material3 components not reachable from Python — open.** The dynamic `ColorScheme`
-  factory is Android-only and the class name resolves to a proxy whose constructor wants a handle
-  (`M3ProofRenderTest.colorSchemeResolvesToItsProxyTypeRatherThanAnythingCallable`). `DropdownMenu`
+  factory is Android-only. Since #73 the class name resolves to `ColorScheme`'s own constructor (its
+  `Color` parameters no longer hide it), which needs every colour written out; nothing renders with one
+  yet (`M3ProofRenderTest.colorSchemeResolvesToItsConstructorAndABareCallNamesItsOverloads`). `DropdownMenu`
   renders into a popup layer `ImageComposeScene` does not capture, so it is unverified rather than
   known broken (`M3ProofRenderTest.popupLayersAreNotCapturedByImageComposeScene`).
 

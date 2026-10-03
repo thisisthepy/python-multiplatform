@@ -31,7 +31,13 @@ import python.multiplatform.gradle.model.ValueClassModel
  *
  * A class whose name is also a function in its module (`PaddingValues(...)` the factory and
  * `PaddingValues` the interface) cannot be both in one Python module, and the runtime resolves the
- * name to the function, so such a type is annotated `Any`.
+ * name to the function, so such a type is annotated `Any`. A class's **own constructor** is the
+ * exception (issue #73): it is rendered as the class's `__init__`, so the class keeps its stub --
+ * members, properties and all -- and `TextFieldState(...)` type-checks as a `TextFieldState`, which is
+ * what the runtime's constructor callable returns; its docstring carries the table key after
+ * [CONSTRUCTOR_MARKER]. Its `__`-suffixed table-key spellings stay module functions as well. A value
+ * class bound as its primitive is not the exception: its constructor returns the raw number. (`isinstance(x, TextFieldState)` is the one thing the stub promises that the
+ * runtime, whose module attribute is the callable, does not do.)
  *
  * A Kotlin `object` (`Alignment`, `Arrangement`) is a module of its constants and functions, and the
  * types nested in it (`Alignment.Horizontal`) are classes of that same module, so
@@ -79,6 +85,15 @@ internal fun renderKotlinFqnStubs(declarations: List<DeclarationModel>): Map<Str
 
 /** What precedes a property accessor's table key in its stub; see this file's KDoc. */
 internal const val PROPERTY_MARKER = "Kotlin property: "
+
+/**
+ * What precedes a constructor's table key in the docstring of the `__init__` it is stubbed as (issue
+ * #73): the key (`pkg.Class`) is a module attribute at run time but has no module-level `def` in the
+ * stub, so this is where a test matches the key to its stub, the same way [PROPERTY_MARKER] does for a
+ * property. An `@overload`ed `__init__` carries none: every member of an overload set is also stubbed
+ * as a module function under its `__`-suffixed key.
+ */
+internal const val CONSTRUCTOR_MARKER = "Kotlin constructor: "
 
 private val PROPERTY_KINDS = setOf("GETTER", "SETTER")
 
@@ -188,10 +203,38 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
     private val byModule: Map<String, List<DeclarationModel>> =
         bound.groupBy { moduleOf(it) }.toSortedMap()
 
-    /** Every name a module defines at the top level, which a class stub must not take. */
+    /**
+     * A class's own constructor, published in the class's own package under the class's name (issue
+     * #73). It does not take that name away from the class: the stub writes it as the class's
+     * `__init__`, so `TextFieldState(...)` type-checks as making a `TextFieldState` -- which is what the
+     * runtime's constructor callable returns. A factory function of the same name is not one of these.
+     *
+     * Only a constructor whose result crosses as a **handle**: a value class the boundary opens
+     * (`Meters`, `Dp`) is built and returned as its raw primitive, so `Meters(3.0)` gives a `float`, and
+     * an `__init__` would promise a `Meters`. That one stays a module function and its class `Any`, as
+     * before issue #73.
+     */
+    private fun isOwnConstructor(d: DeclarationModel): Boolean =
+        d.isConstructor && d.kind == "FUNCTION" && d.receiver == null && d.returnBoundaryTag == "OBJECT" &&
+            moduleOf(d) == d.owner && baseOf(leafOf(d)) == d.simpleName &&
+            d.returnType.qualifiedName == "${d.owner}.${d.simpleName}"
+
+    /** Every name a module defines at the top level, which a class stub must not take. A constructor's
+     * base name is its class's, so it takes nothing but its `__`-suffixed table-key spelling. */
     private val takenNames: Map<String, Set<String>> = byModule.mapValues { (_, entries) ->
-        entries.flatMap { d -> leafOf(d).let { leaf -> if (isSuffixed(leaf)) listOf(leaf, baseOf(leaf)) else listOf(leaf) } }.toSet()
+        entries.flatMap { d ->
+            leafOf(d).let { leaf ->
+                when {
+                    isOwnConstructor(d) -> if (isSuffixed(leaf)) listOf(leaf) else emptyList()
+                    isSuffixed(leaf) -> listOf(leaf, baseOf(leaf))
+                    else -> listOf(leaf)
+                }
+            }
+        }.toSet()
     }
+
+    /** Class qualified name -> its bound constructors, in table-key order; filled by [renderModuleDefs]. */
+    private val constructorsByClass = sortedMapOf<String, MutableList<DeclarationModel>>()
 
     /**
      * Module prefixes (every module and every directory above it) that name one directory on a
@@ -399,8 +442,16 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
                 return@forEach
             }
             val ctx = out(module)
-            val sorted = entries.sortedBy { it.bindingName }
+            // A constructor is its class's `__init__` (see [isOwnConstructor]) whenever the class has a
+            // stub to put it in; only its `__`-suffixed table-key spelling is also a module function,
+            // because the runtime serves it as one. A class with no stub keeps the old rendering.
+            val (constructors, sorted) = entries.sortedBy { it.bindingName }
+                .partition { isOwnConstructor(it) && classReference(it.returnType, ctx) != ANY }
             sorted.forEach { ctx.defs += renderDef(it, ctx) }
+            constructors.forEach { d ->
+                if (isSuffixed(leafOf(d))) ctx.defs += renderDef(d, ctx)
+                constructorsByClass.getOrPut(d.returnType.qualifiedName) { mutableListOf() } += d
+            }
             // The base name of an overload set: the binding layer serves it, so the stub says it.
             val unsuffixedLeaves = sorted.filter { !isSuffixed(leafOf(it)) }.map { leafOf(it) }.toSet()
             sorted.filter { it.kind != "STATIC_GETTER" && isSuffixed(leafOf(it)) }
@@ -455,6 +506,24 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
         .mapNotNull { d -> methodReceiver(d)?.let { it to d } }
         .groupBy({ it.first }, { it.second })
 
+    /**
+     * Issue #71: every Kotlin supertype that has a stub class is a base, not just the first one
+     * (`Arrangement.HorizontalOrVertical` is both a `Horizontal` and a `Vertical`). The ancestry is
+     * nearest-first and transitive, so a base is dropped when another candidate's own known ancestry
+     * already contains it (Python would reject `class C(A, B)` with B a subclass of A as an
+     * inconsistent MRO, and the repeat adds nothing); what remains keeps the ancestry's order.
+     * `kotlin.Any` and `java.lang.*` are `object`, which every Python class already has.
+     */
+    private fun stubBasesOf(qualifiedName: String, ctx: ModuleOut): List<String> {
+        val candidates = supertypes[qualifiedName].orEmpty()
+            .filter { it != qualifiedName && it != "kotlin.Any" && !it.startsWith("java.lang.") && classRefOf(it) != null }
+            .distinct()
+        val kept = candidates.filter { base ->
+            candidates.none { other -> other != base && base in supertypes[other].orEmpty() && other !in supertypes[base].orEmpty() }
+        }
+        return kept.map { classReference(it, null, ctx) }.filter { it != ANY }.distinct()
+    }
+
     private fun renderClass(qualifiedName: String) {
         val ref = resolveRef(qualifiedName) ?: return
         val ctx = out(ref.pkg)
@@ -467,12 +536,19 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
         } else {
             "Kotlin: $qualifiedName"
         }
-        supertypes[qualifiedName]
-            ?.firstOrNull { it != qualifiedName && it != "kotlin.Any" && !it.startsWith("java.lang.") && classRefOf(it) != null }
-            ?.let { base ->
-                val reference = classReference(base, null, ctx)
-                if (reference != ANY) node.bases = reference
+        stubBasesOf(qualifiedName, ctx).takeIf { it.isNotEmpty() }?.let { node.bases = it.joinToString(", ") }
+
+        constructorsByClass[qualifiedName]?.let { group ->
+            group.forEachIndexed { index, d ->
+                node.members += if (group.size == 1) {
+                    "def __init__(${parameters(d, ctx, method = true)}) -> None:\n" +
+                        "    \"\"\"$CONSTRUCTOR_MARKER${d.bindingName} (${kotlinSignatureOf(d)})\"\"\"\n" +
+                        "    ..."
+                } else {
+                    "@$TYPING.overload\ndef __init__(${parameters(d, ctx, method = true)}) -> None: ..." + shadowed(index)
+                }
             }
+        }
 
         val attributes = sortedMapOf<String, MutableList<DeclarationModel>>()
         extensionsByReceiver[qualifiedName].orEmpty().sortedBy { it.bindingName }.forEach { d ->

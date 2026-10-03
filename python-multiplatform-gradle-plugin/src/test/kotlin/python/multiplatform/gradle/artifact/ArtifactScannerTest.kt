@@ -685,13 +685,13 @@ class ArtifactScannerTest {
      * name list that would have needed one more line per class someone next wants opened --
      * [aFocusRequesterConstructorIsDroppedBecauseItWouldShadowFocusRequesterDefault] pins that rule
      * directly. `TextStyle` itself is pinned here only by outcome (no bound constructor, `Default`
-     * still reachable): in the jar this measures, every one of `TextStyle`'s own constructors turns
-     * out to be `@Deprecated(level = HIDDEN)` -- backed by a JVM-`private` implementation behind a
-     * synthetic public bridge metadata's descriptor does not match -- so
-     * [ArtifactScanner.constructorCandidates]'s separate bytecode cross-check (found by this same
-     * widening, against `PointerInputChange`) already filters every one of them out before
-     * [ArtifactScanner.dropCollidingConstructors] would have had a candidate to drop. Both checks
-     * close `TextStyle`; only the second is what this test can attribute to a specific mechanism.
+     * still reachable). Every public `TextStyle` constructor takes a value class, so each one is a
+     * JVM-`private` `<init>` behind a synthetic `DefaultConstructorMarker` bridge; `javap -v` on
+     * ui-text-desktop 1.11.1 shows four of those bridges carrying `kotlin.Deprecated(level = HIDDEN)`
+     * and two that do not. Until issue #73 the bytecode cross-check in
+     * [ArtifactScanner.constructorCandidates] refused every synthetic `<init>`, so all six were gone
+     * before [ArtifactScanner.dropCollidingConstructors] saw them; since #73 it refuses only the hidden
+     * four, and the other two reach -- and are dropped by -- the constant-collision rule.
      */
     @Test
     fun aTypographyOrShapesConstructorBindsButATextStyleConstructorDoesNot() {

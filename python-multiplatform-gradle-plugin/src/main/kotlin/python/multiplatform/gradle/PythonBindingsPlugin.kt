@@ -21,6 +21,9 @@ private const val OPTION_EXCLUDE_PACKAGES = "python.multiplatform.excludePackage
 private const val ROLE_LIBRARY = "library"
 private const val ROLE_APP = "app"
 
+/** Created by toolchain's plugin (toolchain#23); referenced by name only. */
+private const val TYPEDPYTHON_STUBS_CONFIGURATION = "typedpythonStubs"
+
 /**
  * Which KSP configurations the processor belongs on.
  *
@@ -509,6 +512,20 @@ class PythonBindingsPlugin : Plugin<Project> {
             outputDirectory.set(project.layout.buildDirectory.dir("generated/pythonStubs/$sourceSetName"))
         }
         project.tasks.matching { it.name == "prepareKotlinIdeaImport" }.configureEach { dependsOn(task) }
+        feedTypedPythonStubs(project, task)
+    }
+
+    /**
+     * Adds [task]'s output to toolchain's `typedpythonStubs` configuration, by name only -- there is
+     * no compile-time dependency on toolchain. `matching` + `configureEach` covers a configuration
+     * that already exists and one created later, so plugin application order does not matter; if it
+     * never appears, nothing happens. The provider is `flatMap`ped from the task, so resolving the
+     * configuration runs the task.
+     */
+    private fun feedTypedPythonStubs(project: Project, task: org.gradle.api.tasks.TaskProvider<PythonStubsTask>) {
+        project.configurations.matching { it.name == TYPEDPYTHON_STUBS_CONFIGURATION }.configureEach {
+            project.dependencies.add(name, project.files(task.flatMap { it.outputDirectory }))
+        }
     }
 
     /**

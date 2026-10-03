@@ -39,7 +39,7 @@ plugins {
 val configuredPythonVersion = project.findProperty("pythonVersion")?.toString() ?: project.rootProject.version.toString()
 val pythonFreeThreaded = project.findProperty("pythonFreeThreaded")?.toString()?.toBoolean() ?: false
 val pbsRelease = project.findProperty("pythonBuildStandaloneRelease")?.toString() ?: "20260807"
-val pythonAppleSupportBuild = project.findProperty("pythonAppleSupportBuild")?.toString() ?: "b10"
+val pythonAppleSupportBuild = project.findProperty("pythonAppleSupportBuild")?.toString() ?: "b11"
 
 val pythonVersion = configuredPythonVersion
 val libraryVersion = "$pythonVersion-alpha01"
@@ -112,6 +112,26 @@ val extractedDir = file("$downloadDir/extracted/$configuredPythonVersion")
  * separating for the same reason the version does.
  */
 val desktopFlavourSuffix = if (pythonFreeThreaded) "-freethreaded" else ""
+
+/**
+ * Fails the build when the extracted CPython's own headers report a version other than
+ * `pythonVersion` (issue #47). The archive name and the lockfile say what was meant to be
+ * downloaded; `PY_VERSION` in `patchlevel.h` says what it is. iOS once shipped 3.14.6 (BeeWare
+ * `3.14-b10`) under `pythonVersion=3.14.7` and nothing noticed.
+ */
+fun requireHeaderVersion(label: String, extracted: File) {
+    val headers = extracted.walkTopDown().filter { it.name == "patchlevel.h" }.toList()
+    if (headers.isEmpty()) throw GradleException("$label: no patchlevel.h under $extracted, cannot verify the CPython version")
+    val re = Regex("""^\s*#\s*define\s+PY_VERSION\s+"([^"]+)"""", RegexOption.MULTILINE)
+    for (h in headers) {
+        val actual = re.find(h.readText())?.groupValues?.get(1)
+            ?: throw GradleException("$label: no PY_VERSION in $h")
+        if (actual != configuredPythonVersion) {
+            throw GradleException("$label: $h says PY_VERSION $actual but pythonVersion=$configuredPythonVersion. " +
+                "Pin an archive that ships $configuredPythonVersion (see docs/platforms/python-version-acquisition.md).")
+        }
+    }
+}
 
 val checksumsFile = rootProject.file("python-checksums.properties")
 val pythonArchiveKeys = mutableMapOf<String, File>()
@@ -482,6 +502,7 @@ val downloadTasks = desktopTargets.map { (platform, pbsTarget) ->
                     into(extractDir)
                 }
             }
+            requireHeaderVersion(platform, extractDir)
         }
     }
 }
@@ -531,6 +552,7 @@ val androidDownloadTasks = androidTargets.map { (platform, arch) ->
                     into(extractDir)
                 }
             }
+            requireHeaderVersion(platform, extractDir)
         }
     }
 }
@@ -540,7 +562,7 @@ val androidDownloadTasks = androidTargets.map { (platform, arch) ->
  *
  * python.org began publishing an official iOS XCframework with 3.15 (the first entries in
  * `ftp/python/3.15.0/` are the 3.15.0b1 betas). BeeWare's Python-Apple-support, which was the
- * only source before that, stops at `3.14-b10` and has no 3.15 tag. The two do not overlap:
+ * only source before that, stops at `3.14-b11` (3.14.7) and has no 3.15 tag. The two do not overlap:
  * 3.14 and earlier can only come from BeeWare, 3.15 and later only from python.org. So this is a
  * hard switch on the version, not a preference.
  *
@@ -601,6 +623,15 @@ val downloadPython_ios = tasks.register("downloadPython_ios") {
         verifyChecksum(iosLockKey, iosArchive)
         if (iosFromPythonOrg) maybeVerifySigstore(iosArchive, iosUrl)
 
+        // The iOS extract dir is keyed by pythonVersion, not by archive, so bumping the pinned
+        // archive (b10 -> b11) would otherwise keep the old tree: "not empty, skip". A stamp of the
+        // archive's lock key + digest tells a stale tree from a current one (issue #47).
+        val iosStamp = file("$iosExtractDir/.archive-stamp")
+        val iosWanted = "$iosLockKey ${iosArchive.name}"
+        if (iosExtractDir.exists() && (!iosStamp.exists() || iosStamp.readText().trim() != iosWanted)) {
+            println("Discarding stale iOS extraction in $iosExtractDir")
+            iosExtractDir.deleteRecursively()
+        }
         val isEmpty = iosExtractDir.list()?.isEmpty() ?: true
         if (isEmpty) {
             println("Extracting $iosArchive to $iosExtractDir")
@@ -608,7 +639,9 @@ val downloadPython_ios = tasks.register("downloadPython_ios") {
                 from(tarTree(resources.gzip(iosArchive)))
                 into(iosExtractDir)
             }
+            iosStamp.writeText(iosWanted + "\n")
         }
+        requireHeaderVersion("ios", iosExtractDir)
     }
 }
 

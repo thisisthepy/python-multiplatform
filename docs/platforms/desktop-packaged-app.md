@@ -94,7 +94,17 @@ and pass `-Dpython.multiplatform.home=<path>`; jpackage expands `$APPDIR` inside
 - The library needs `--enable-preview` on JDK 21 (`java.lang.foreign` is a preview API there) and
   `--enable-native-access=ALL-UNNAMED`. A packaged app gets JVM options only from
   `compose.desktop.application { jvmArgs(...) }`; the sample's `build.gradle.kts` sets them for
-  `JavaExec` tasks only.
+  `JavaExec` tasks only. Observed on 2026-10-03 (issue #77): the packaged sample on its bundled
+  21.0.12 runtime, with neither flag, initialises CPython and runs every step; the only trace is
+  the JDK's `WARNING: A restricted method in java.lang.foreign.Linker has been called`. The backend
+  reaches `java.lang.foreign` reflectively (`Panama.kt`), so no class file of ours is a preview
+  class file. Not a promise for later JDKs, where the restricted-method warning becomes an error.
+- The bundled runtime is `jlink`ed and holds only the modules Compose was told about -- the sample's
+  `runtime/Contents/Home/release` lists `java.base java.datatransfer java.xml java.prefs
+  java.desktop java.logging jdk.crypto.ec`. The library therefore uses nothing outside `java.base`
+  (SPEC L-10). It used `sun.misc.Unsafe` (module `jdk.unsupported`) to build the proxy heap type,
+  which in the packaged app failed every proxy install with `ExceptionInInitializerError: null` and
+  every Kotlin-namespace import after it with `No module named 'org'` (issue #77).
 
 ## How to check it
 
@@ -115,7 +125,8 @@ env -u PYTHONHOME -u PYTHON_MULTIPLATFORM_LIBPYTHON \
     "$APP/Contents/MacOS/org.thisisthepy.python.multiplatform.demo" > .tmp/packaged-run.log 2>&1 &
 ```
 
-Expected in `.tmp/packaged-run.log`: `runtime : 3.14.7 ...` and the `await` lines (which import
-`asyncio`), with no `Fatal Python error`. The window stays open; close it or kill the process.
+Expected in `.tmp/packaged-run.log`: `runtime : 3.14.7 ...`, `proxies : installed: ...` (not
+`ExceptionInInitializerError`), the `Greeter` lines, and the `await` lines (which import `asyncio`),
+with no `Fatal Python error` and no `No module named`. The window stays open; close it or kill the process.
 Running from `/` as the working directory (`cd / && env -u PYTHONHOME "$OLDPWD/$APP/..."`) also
 checks that nothing is extracted into the working directory.

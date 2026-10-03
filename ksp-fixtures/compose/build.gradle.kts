@@ -104,6 +104,13 @@ pythonBindings {
             "androidx.compose.runtime.SnapshotStateKt",
             "androidx.compose.runtime.State",
             "androidx.compose.runtime.MutableState",
+            // 7. `TextField(state = ...)`'s state (issue #73): the `TextFieldState` class (its constructor
+            //    and its `text`) and its file facade (`rememberTextFieldState`,
+            //    `setTextAndPlaceCursorAtEnd`, `clearText`). Classes, not the package, for item 6's
+            //    reason: `androidx.compose.foundation.text.input` is the whole new text stack.
+            //    `TextFieldStateRenderTest` is what each one is for.
+            "androidx.compose.foundation.text.input.TextFieldState",
+            "androidx.compose.foundation.text.input.TextFieldStateKt",
         ),
     )
     // Stubs on: `generatePythonStubs` over the real Compose jars is what `tools/stubs/check-stubs.sh` (the mypy
