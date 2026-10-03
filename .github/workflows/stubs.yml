@@ -32,8 +32,6 @@ concurrency:
 jobs:
   stubs:
     name: Generate stubs
-    # ubuntu, not macos: two Kotlin names can differ only by case (`graphics.Shadow` the class module and
-    # `graphics.shadow` the package), which are two paths here and one on a case-insensitive filesystem.
     runs-on: ubuntu-latest
     permissions:
       contents: write   # attaching the stubs to a tag's release
@@ -108,3 +106,44 @@ jobs:
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
             || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "Kotlin-name stubs for the Compose version this tag builds against."
           gh release upload "$GITHUB_REF_NAME" build/kotlin-stubs.zip --clobber
+
+  # Issue #44: the stub layout is case-unique, so the stubs generate, extract and type-check on a
+  # case-insensitive filesystem too (`graphics.Shadow` the class and `graphics.shadow` the package).
+  stubs-macos:
+    name: Generate stubs (macOS, case-insensitive)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'zulu'
+          cache: 'gradle'
+
+      - name: Setup Python (for mypy)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Generate the stubs over the Compose jars
+        run: ./gradlew :ksp-fixtures:compose:generatePythonStubs --console=plain
+
+      - name: No two stub paths are equal under case folding
+        run: |
+          python3 - ksp-fixtures/compose/build/generated/pythonStubs/desktopMain <<'PY'
+          import os, sys
+          seen = {}
+          for root, dirs, files in os.walk(sys.argv[1]):
+              for name in dirs + files:
+                  rel = os.path.relpath(os.path.join(root, name), sys.argv[1])
+                  seen.setdefault(rel.casefold(), []).append(rel)
+          clashes = [v for v in seen.values() if len(v) > 1]
+          print("clashes:", clashes)
+          sys.exit(1 if clashes else 0)
+          PY
+
+      - name: Type-check a consumer against them (mypy)
+        run: tools/stubs/check-stubs.sh ksp-fixtures/compose/build/generated/pythonStubs/desktopMain

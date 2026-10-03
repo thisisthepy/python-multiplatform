@@ -159,7 +159,32 @@ private class StubRenderer(private val bound: List<DeclarationModel>) {
         entries.flatMap { d -> leafOf(d).let { leaf -> if (isSuffixed(leaf)) listOf(leaf, baseOf(leaf)) else listOf(leaf) } }.toSet()
     }
 
-    private val moduleNames: Set<String> = byModule.keys
+    /**
+     * Module prefixes (every module and every directory above it) that name one directory on a
+     * case-insensitive filesystem together with a sibling (issue #44). In each such group the
+     * all-lower-case spelling keeps its path -- a Kotlin package -- and every other spelling is a
+     * class module that is emitted inside its parent package's `__init__.pyi` instead.
+     */
+    private val foldedPrefixes: Set<String> = run {
+        val prefixes = byModule.keys.flatMap { module ->
+            val parts = module.split('.')
+            parts.indices.map { parts.take(it + 1).joinToString(".") }
+        }.toSet()
+        prefixes.groupBy { it.lowercase() }.values
+            .filter { it.size > 1 }
+            .flatten()
+            .filter { '.' in it && it.substringAfterLast('.') != it.substringAfterLast('.').lowercase() }
+            .toSet()
+    }
+
+    /** The shortest folded prefix of [module] (the module itself included), or `null` if it keeps its own path. */
+    private fun foldedPrefixOf(module: String): String? {
+        val parts = module.split('.')
+        return parts.indices.map { parts.take(it + 1).joinToString(".") }.firstOrNull { it in foldedPrefixes }
+    }
+
+    /** The modules that are still files: a folded class module is a class, not a module, for `classReference`. */
+    private val moduleNames: Set<String> = byModule.keys.filter { foldedPrefixOf(it) == null }.toSet()
 
     private val supertypes: Map<String, List<String>> = bound
         .filter { it.returnSupertypes.isNotEmpty() }
@@ -283,6 +308,12 @@ private class StubRenderer(private val bound: List<DeclarationModel>) {
 
     private fun renderDef(d: DeclarationModel, ctx: ModuleOut): String {
         val leaf = leafOf(d)
+        // A Kotlin name that is a Python keyword (Compose's `Shadow.None`) cannot be written as an
+        // attribute or a def -- `None: Shadow` makes the whole file a syntax error. Leave it out and
+        // say how to reach it; the runtime still serves it under its Kotlin name.
+        if (leaf in PYTHON_KEYWORDS) {
+            return "# Kotlin: ${kotlinSignatureOf(d)} -- '$leaf' is a Python keyword; reach it with getattr(..., '$leaf')"
+        }
         if (d.kind == "STATIC_GETTER") {
             return buildString {
                 appendLine("$leaf: ${result(d, ctx)}")
@@ -297,7 +328,8 @@ private class StubRenderer(private val bound: List<DeclarationModel>) {
     }
 
     private fun overloadDefs(name: String, group: List<DeclarationModel>, ctx: ModuleOut): String =
-        group.withIndex().joinToString("\n") { (index, d) ->
+        if (name in PYTHON_KEYWORDS) "# '$name' is a Python keyword; reach it with getattr(..., '$name')"
+        else group.withIndex().joinToString("\n") { (index, d) ->
             val signature = "def $name(${parameters(d, ctx, method = false)}) -> ${result(d, ctx)}: ..." + shadowed(index)
             if (group.size > 1) "@$TYPING.overload\n$signature" else signature
         }
@@ -313,6 +345,11 @@ private class StubRenderer(private val bound: List<DeclarationModel>) {
 
     private fun renderModuleDefs() {
         byModule.forEach { (module, entries) ->
+            val folded = foldedPrefixOf(module)
+            if (folded != null) {
+                renderFoldedModule(module, folded, entries)
+                return@forEach
+            }
             val ctx = out(module)
             val sorted = entries.sortedBy { it.bindingName }
             sorted.forEach { ctx.defs += renderDef(it, ctx) }
@@ -324,6 +361,32 @@ private class StubRenderer(private val bound: List<DeclarationModel>) {
                 .forEach { (base, group) ->
                     if (base !in unsuffixedLeaves) ctx.defs += overloadDefs(base, group, ctx)
                 }
+        }
+    }
+
+    /**
+     * A class module that collides case-insensitively with a sibling path (issue #44): its functions
+     * become static members of the class of that name in the parent package's module, nested for the
+     * parts of [module] below [folded]. The runtime import path is unchanged; only the stub layout is.
+     * If the parent already defines a function of that name, the class cannot be declared beside it
+     * (the runtime resolves the name to the function, as for `classReference`), so nothing is emitted.
+     */
+    private fun renderFoldedModule(module: String, folded: String, entries: List<DeclarationModel>) {
+        val parentModule = folded.substringBeforeLast('.')
+        val className = folded.substringAfterLast('.')
+        if (className in takenNames[parentModule].orEmpty()) return
+        val ctx = out(parentModule)
+        val path = listOf(className) + module.removePrefix(folded).split('.').filter { it.isNotEmpty() }
+        val node = ctx.node(path)
+        val sorted = entries.sortedBy { it.bindingName }
+        val defs = sorted.map { renderDef(it, ctx) }
+        val unsuffixedLeaves = sorted.filter { !isSuffixed(leafOf(it)) }.map { leafOf(it) }.toSet()
+        val overloads = sorted.filter { it.kind != "STATIC_GETTER" && isSuffixed(leafOf(it)) }
+            .groupBy { baseOf(leafOf(it)) }
+            .toSortedMap()
+            .mapNotNull { (base, group) -> if (base !in unsuffixedLeaves) overloadDefs(base, group, ctx) else null }
+        (defs + overloads).forEach { text ->
+            node.members += text.lines().joinToString("\n") { if (it.startsWith("def ")) "@staticmethod\n$it" else it }
         }
     }
 
@@ -398,7 +461,9 @@ private class StubRenderer(private val bound: List<DeclarationModel>) {
         node.bases?.let { into.append('(').append(it).append(')') }
         into.appendLine(":")
         into.append(indent).append("    \"\"\"").append(node.doc ?: "Kotlin: container of nested classes").appendLine("\"\"\"")
-        node.members.forEach { into.append(indent).append("    ").appendLine(it) }
+        node.members.forEach { member ->
+            member.lines().forEach { into.append(indent).append("    ").appendLine(it) }
+        }
         node.children.values.forEach { renderNode(it, "$indent    ", into) }
     }
 
