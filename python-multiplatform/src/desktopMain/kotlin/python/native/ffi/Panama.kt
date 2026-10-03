@@ -81,6 +81,14 @@ internal object Panama {
     /** Release a slot obtained from [allocatePointerSlot]. */
     val freePointerSlot: (Long) -> Unit
 
+    /** Copy [ByteArray] verbatim into a new native `malloc` buffer and return its address.
+     *
+     *  For C strings that are not UTF-8: `Py_SetPythonHome` takes a `wchar_t *`, which is UTF-32
+     *  on macOS and Linux and UTF-16 on Windows, so the caller encodes (terminator included) and
+     *  this only places the bytes. Release with [freeUtf8Address] (both are `malloc`). Not
+     *  available on the JDK 16-18 incubator backend, for the reason the pointer slots are not. */
+    val allocateBytesFreeable: (ByteArray) -> Long
+
     /** One `MethodHandle` per ABI shape, **unbound** to any specific target function: its
      *  leading parameter is the callee's address (as a plain `long`, adapted from
      *  `MemorySegment`/`MemoryAddress` so the handle's static Java type is exactly
@@ -139,6 +147,7 @@ internal object Panama {
                 allocatePointerSlot = data.allocatePointerSlot
                 readPointerSlot = data.readPointerSlot
                 freePointerSlot = data.freePointerSlot
+                allocateBytesFreeable = data.allocateBytesFreeable
                 unboundDowncallHandle = data.unboundDowncallHandle
                 createUpcallStubLongToLong = data.createUpcallStubLongToLong
                 createUpcallStubII_L = data.createUpcallStubII_L
@@ -157,6 +166,7 @@ internal object Panama {
                 allocatePointerSlot = data.allocatePointerSlot
                 readPointerSlot = data.readPointerSlot
                 freePointerSlot = data.freePointerSlot
+                allocateBytesFreeable = data.allocateBytesFreeable
                 unboundDowncallHandle = data.unboundDowncallHandle
                 createUpcallStubLongToLong = data.createUpcallStubLongToLong
                 createUpcallStubII_L = data.createUpcallStubII_L
@@ -179,6 +189,7 @@ internal object Panama {
         val allocatePointerSlot: () -> Long,
         val readPointerSlot: (Long) -> Long,
         val freePointerSlot: (Long) -> Unit,
+        val allocateBytesFreeable: (ByteArray) -> Long,
         val unboundDowncallHandle: (Int, Int, ReturnKind) -> MethodHandle,
         val createUpcallStubLongToLong: (MethodHandle) -> Long,
         val createUpcallStubII_L: (MethodHandle) -> Long,
@@ -475,6 +486,21 @@ internal object Panama {
 
         val freeSlot: (Long) -> Unit = freeAddr
 
+        // ---- Arbitrary bytes into a malloc buffer (non-UTF-8 C strings: wchar_t) ----
+        //
+        // `allocFreeable` above, minus its UTF-8 encoding: the caller hands over the finished
+        // bytes, terminator included. Kept separate rather than having `allocFreeable` delegate to
+        // it, so the per-string path that every `withUtf8` call takes gains no extra indirection.
+        val allocBytes: (ByteArray) -> Long = { bytes ->
+            val len = bytes.size.toLong()
+            val addr = mallocHandle.invokeExact(len) as Long
+            if (addr == 0L) throw OutOfMemoryError("native malloc failed for a $len-byte buffer")
+            val srcSeg: Any = ofArrayExact.invokeExact(bytes) as Any
+            val dstSeg: Any = addressToSegmentExact.invokeExact(addr, len) as Any
+            copyExact.invokeExact(srcSeg, 0L, dstSeg, 0L, len) as Unit
+            addr
+        }
+
         // ---- Shape vocabulary: unbound downcall handles, one per (intArgs, floatArgs, returnKind) ----
 
         val downcallHandle2Method = linkerClass.getMethod("downcallHandle", functionDescriptorClass, optionArrayType)
@@ -560,7 +586,7 @@ internal object Panama {
             segmentAddressExact.invokeExact(stub) as Long
         }
 
-        return ModernData(allocStr, readStr, findSym, findAddr, allocFreeable, freeAddr, allocSlot, readSlot, freeSlot, buildShape, buildUpcallStub, buildUpcallStubII_L, buildUpcallStubIII_I, buildUpcallStubI_I, buildUpcallStubI_V)
+        return ModernData(allocStr, readStr, findSym, findAddr, allocFreeable, freeAddr, allocSlot, readSlot, freeSlot, allocBytes, buildShape, buildUpcallStub, buildUpcallStubII_L, buildUpcallStubIII_I, buildUpcallStubI_I, buildUpcallStubI_V)
     }
 
     private fun adaptModernHandle(
@@ -632,6 +658,7 @@ internal object Panama {
         val allocatePointerSlot: () -> Long,
         val readPointerSlot: (Long) -> Long,
         val freePointerSlot: (Long) -> Unit,
+        val allocateBytesFreeable: (ByteArray) -> Long,
         val unboundDowncallHandle: (Int, Int, ReturnKind) -> MethodHandle,
         val createUpcallStubLongToLong: (MethodHandle) -> Long,
         val createUpcallStubII_L: (MethodHandle) -> Long,
@@ -818,6 +845,15 @@ internal object Panama {
         val readSlot: (Long) -> Long = { slotsUnsupported() }
         val freeSlot: (Long) -> Unit = { slotsUnsupported() }
 
+        // Same reason as the slots: this backend writes native memory only through `toCString`,
+        // which cannot place a wchar_t string. JDK 19+ resolves the modern backend.
+        val allocBytes: (ByteArray) -> Long = {
+            throw UnsupportedOperationException(
+                "Writing arbitrary bytes to native memory is not implemented on the " +
+                    "jdk.incubator.foreign backend (JDK 16-18). Run on JDK 19 or newer."
+            )
+        }
+
         val freeAddr: (Long) -> Unit = { addr ->
             freeableScopes.remove(addr)?.let { scopeCloseMethod.invoke(it) }
             Unit
@@ -910,7 +946,7 @@ internal object Panama {
             toRawLongMethod.invoke(segAddressMethod.invoke(stub)) as Long
         }
 
-        return IncubatorData(allocStr, readStr, findSym, findAddr, allocFreeable, freeAddr, allocSlot, readSlot, freeSlot, buildShape, buildUpcallStub, buildUpcallStubII_L, buildUpcallStubIII_I, buildUpcallStubI_I, buildUpcallStubI_V)
+        return IncubatorData(allocStr, readStr, findSym, findAddr, allocFreeable, freeAddr, allocSlot, readSlot, freeSlot, allocBytes, buildShape, buildUpcallStub, buildUpcallStubII_L, buildUpcallStubIII_I, buildUpcallStubI_I, buildUpcallStubI_V)
     }
 
     private fun adaptIncubatorHandle(

@@ -1,0 +1,45 @@
+fn eval_a(i: usize, j: usize) -> f64 {
+    1.0 / (((i + j) * (i + j + 1) / 2 + i + 1) as f64)
+}
+
+fn mul_av(n: usize, v: &[f64], out: &mut [f64]) {
+    for i in 0..n {
+        let mut s = 0.0f64;
+        for j in 0..n {
+            s += eval_a(i, j) * v[j];
+        }
+        out[i] = s;
+    }
+}
+
+fn mul_atv(n: usize, v: &[f64], out: &mut [f64]) {
+    for i in 0..n {
+        let mut s = 0.0f64;
+        for j in 0..n {
+            s += eval_a(j, i) * v[j];
+        }
+        out[i] = s;
+    }
+}
+
+fn mul_atav(n: usize, v: &[f64], out: &mut [f64], tmp: &mut [f64]) {
+    mul_av(n, v, tmp);
+    mul_atv(n, tmp, out);
+}
+
+fn main() {
+    let n: usize = std::env::args().nth(1).unwrap().parse().unwrap();
+    let mut u = vec![1.0f64; n];
+    let mut v = vec![0.0f64; n];
+    let mut tmp = vec![0.0f64; n];
+    for _ in 0..10 {
+        mul_atav(n, &u, &mut v, &mut tmp);
+        mul_atav(n, &v, &mut u, &mut tmp);
+    }
+    let (mut vbv, mut vv) = (0.0f64, 0.0f64);
+    for i in 0..n {
+        vbv += u[i] * v[i];
+        vv += v[i] * v[i];
+    }
+    println!("{:.9}", (vbv / vv).sqrt());
+}

@@ -128,6 +128,20 @@ interface PythonBindingsExtension {
      */
     val stagePythonHome: Property<Boolean>
 
+    /**
+     * Whether a packaged desktop application carries the staged CPython prefix -- SPEC L-9, issue
+     * #60. Defaults to true.
+     *
+     * When on, every Compose Desktop `prepare*AppResources` task (what `createDistributable` and
+     * the `package*` tasks take their resources from) depends on `stagePythonHome` and copies the
+     * prefix's stdlib and shared library into `python-multiplatform-home/`; the library finds it
+     * there at run time through Compose's `compose.application.resources.dir`. Independent of
+     * [stagePythonHome]: an app must ship the prefix this library was built against even on a
+     * machine whose developer runs with their own `PYTHONHOME`. Turn it off for an app that
+     * provides a prefix some other way (and names it with `-Dpython.multiplatform.home=...`).
+     */
+    val packagePythonHome: Property<Boolean>
+
     /** CPython version to stage. Defaults to the one this library was built against. */
     val pythonVersion: Property<String>
 
@@ -534,7 +548,8 @@ class PythonBindingsPlugin : Plugin<Project> {
     }
 
     /**
-     * Registers `stagePythonHome` and hands its result to every task that launches a JVM.
+     * Registers `stagePythonHome`, hands its result to every task that launches a JVM, and puts it
+     * into a packaged desktop application.
      *
      * The prefix path is computed here rather than carried as a `Provider`, and it can be: it is a
      * pure function of the version, the release, the host and the Gradle user home, none of which
@@ -543,18 +558,15 @@ class PythonBindingsPlugin : Plugin<Project> {
      * only way CPython's `getenv(3)` and [python.multiplatform.env.PythonHomeCheck]'s
      * `System.getenv` can be guaranteed to read the same thing.
      *
-     * Skipped entirely when `PYTHONHOME` is already set, so a consumer with their own prefix keeps
-     * it, and when the host is not a platform this library ships for — the latter warns rather
+     * The `environment(...)` wiring is skipped when `PYTHONHOME` is already set, so a consumer with
+     * their own prefix keeps it. The task itself is registered regardless -- registration is lazy,
+     * and it runs only when something depends on it -- because packaging (SPEC L-9) must ship the
+     * prefix this library was built against whatever the developer's own shell points at. Nothing
+     * at all happens on a host that is not a platform this library ships for; that warns rather
      * than fails, because a project may well be building only its Android or iOS targets there.
      */
-    private fun configurePythonHomeStaging(project: Project, extension: PythonBindingsExtension) {
+    internal fun configurePythonHomeStaging(project: Project, extension: PythonBindingsExtension) {
         val enabled = extension.stagePythonHome.getOrElse(true)
-        // `providers.environmentVariable`, not `System.getenv`: the latter reads the *daemon's*
-        // environment, and a daemon is reused across invocations that do not share one. A user
-        // running `PYTHONHOME=/their/prefix ./gradlew run` against a daemon that was started
-        // without it would otherwise be told, silently, that they had set nothing -- and have
-        // their prefix replaced by a staged one on the very task they were configuring.
-        if (!shouldStagePythonHome(project.providers.environmentVariable("PYTHONHOME").orNull, enabled)) return
 
         val platform = hostDesktopPlatform(
             System.getProperty("os.name").orEmpty(),
@@ -591,15 +603,65 @@ class PythonBindingsPlugin : Plugin<Project> {
             downloadDir.set(java.io.File(cacheRoot, "archives"))
         }
 
-        val home = prefix.absolutePath
-        project.tasks.withType(org.gradle.api.tasks.JavaExec::class.java).configureEach {
-            dependsOn(stage)
-            environment("PYTHONHOME", home)
+        // `providers.environmentVariable`, not `System.getenv`: the latter reads the *daemon's*
+        // environment, and a daemon is reused across invocations that do not share one. A user
+        // running `PYTHONHOME=/their/prefix ./gradlew run` against a daemon that was started
+        // without it would otherwise be told, silently, that they had set nothing -- and have
+        // their prefix replaced by a staged one on the very task they were configuring.
+        if (shouldStagePythonHome(project.providers.environmentVariable("PYTHONHOME").orNull, enabled)) {
+            val home = prefix.absolutePath
+            project.tasks.withType(org.gradle.api.tasks.JavaExec::class.java).configureEach {
+                dependsOn(stage)
+                environment("PYTHONHOME", home)
+            }
+            project.tasks.withType(org.gradle.api.tasks.testing.Test::class.java).configureEach {
+                dependsOn(stage)
+                environment("PYTHONHOME", home)
+            }
         }
-        project.tasks.withType(org.gradle.api.tasks.testing.Test::class.java).configureEach {
-            dependsOn(stage)
-            environment("PYTHONHOME", home)
-        }
+
+        configurePackagedPythonHome(
+            project = project,
+            extension = extension,
+            stage = stage,
+            includes = packagedPrefixIncludes(version, freeThreaded, windows = platform.startsWith("windows")),
+        )
+    }
+
+    /**
+     * SPEC L-9: copies the staged prefix's stdlib and shared library into every Compose Desktop
+     * `prepare*AppResources` task under [PACKAGED_HOME_DIRECTORY], so that `createDistributable`
+     * puts it at `$APPDIR/resources/python-multiplatform-home` -- where the library looks, through
+     * the `compose.application.resources.dir` property Compose's launcher always sets.
+     *
+     * Into Compose's own resources task rather than through `nativeDistributions.appResourcesRootDir`:
+     * that is a single directory property the consumer may already be using for their own files,
+     * and setting it here would replace theirs. Adding a `from` to the task that assembles it
+     * composes with whatever the consumer configured. One copy, too: the prefix goes straight from
+     * the Gradle-user-home cache into Compose's staging directory, and `Sync` is incremental.
+     *
+     * [PythonBindingsExtension.packagePythonHome] is read when the task is *executed* and its
+     * dependencies computed, not now -- this runs while the plugin is being applied, before the
+     * consumer's `pythonBindings { }` block has.
+     */
+    private fun configurePackagedPythonHome(
+        project: Project,
+        extension: PythonBindingsExtension,
+        stage: org.gradle.api.tasks.TaskProvider<StagePythonHomeTask>,
+        includes: List<String>,
+    ) {
+        val packaging = project.provider { extension.packagePythonHome.getOrElse(true) }
+        val stagedPrefix = stage.flatMap { it.destinationDir.dir("python") }
+        project.tasks.withType(org.gradle.api.tasks.Sync::class.java)
+            .matching { isComposeAppResourcesTask(it.name) }
+            .configureEach {
+                dependsOn(java.util.concurrent.Callable { if (packaging.get()) listOf(stage) else emptyList() })
+                from(java.util.concurrent.Callable { if (packaging.get()) stagedPrefix else emptyList<Any>() }) {
+                    include(includes)
+                    exclude(PACKAGED_PREFIX_EXCLUDES)
+                    into(PACKAGED_HOME_DIRECTORY)
+                }
+            }
     }
 
     /**
