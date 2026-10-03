@@ -288,6 +288,171 @@ static PyObject *s_array_exit_zeroed(PyObject *self, PyObject *arg)
     return PyLong_FromLong(rc);
 }
 
+
+/* ---- local arrays ----
+ * local_run(kind, init, script) -> (rc, error, results)
+ *   kind: "f64" | "i64"; init: ("new", n, fill) | ("iota", n) [i64 only] | ("param", pylist, nocopy)
+ *   ("copy_local", n, fill) / ("copy_param", pylist) build a source, then copy it into the array under test.
+ * script ops: ("get", i) | ("set", i, v) | ("len",) | ("flags",) -> (list_is_null, dirty_is_null, data_is_null)
+ *           | ("free",) | ("exit",) -> exit rc | ("copy",) -> (list, contents of an independent copy;
+ *             the copy is then set to [i]=v by ("copyset", i, v) which returns (src contents, copy contents))
+ * Struct memory is poisoned with 0xAB before every init, so a field left unset shows up. */
+#define LOCAL_RUN(SUF, STRUCT, CTYPE, FROMC, PARSEFMT, PARSET)                                   \
+    static int loc_##SUF##_contents(const STRUCT *a, PyObject **out)                             \
+    {                                                                                            \
+        PyObject *l = PyList_New(a->len);                                                        \
+        if (!l) return -1;                                                                       \
+        for (Py_ssize_t i = 0; i < a->len; i++) {                                                \
+            PyObject *v = FROMC(a->data[i]);                                                     \
+            if (!v) { Py_DECREF(l); return -1; }                                                 \
+            PyList_SET_ITEM(l, i, v);                                                            \
+        }                                                                                        \
+        *out = l;                                                                                \
+        return 0;                                                                                \
+    }                                                                                            \
+    static PyObject *s_##SUF##_local_run(PyObject *self, PyObject *args)                         \
+    {                                                                                            \
+        PyObject *init, *script;                                                                 \
+        if (!PyArg_ParseTuple(args, "OO", &init, &script)) return NULL;                          \
+        STRUCT a, src;                                                                           \
+        memset(&a, 0xAB, sizeof a);                                                              \
+        memset(&src, 0xAB, sizeof src);                                                          \
+        const char *ik = PyUnicode_AsUTF8(PyTuple_GET_ITEM(init, 0));                            \
+        int rc = 0;                                                                              \
+        int have_src = 0;                                                                        \
+        if (!strcmp(ik, "new")) {                                                                \
+            long long n = PyLong_AsLongLong(PyTuple_GET_ITEM(init, 1));                          \
+            PARSET f;                                                                            \
+            if (!PyArg_Parse(PyTuple_GET_ITEM(init, 2), PARSEFMT, &f)) return NULL;              \
+            rc = tp_##SUF##_array_new(&a, (int64_t)n, (CTYPE)f);                                 \
+        } else if (!strcmp(ik, "iota")) {                                                        \
+            long long n = PyLong_AsLongLong(PyTuple_GET_ITEM(init, 1));                          \
+            rc = TP_IOTA_##SUF(&a, (int64_t)n);                                                  \
+        } else {                                                                                 \
+            /* copy_local / copy_param: build the source, then copy it */                        \
+            if (!strcmp(ik, "copy_param")) {                                                     \
+                int erc = tp_##SUF##_array_enter(PyTuple_GET_ITEM(init, 1), &src);               \
+                if (erc != 0) { if (!PyErr_Occurred()) PyErr_SetString(PyExc_AssertionError, "enter deopt"); return NULL; } \
+            } else {                                                                             \
+                long long n = PyLong_AsLongLong(PyTuple_GET_ITEM(init, 1));                      \
+                PARSET f;                                                                        \
+                if (!PyArg_Parse(PyTuple_GET_ITEM(init, 2), PARSEFMT, &f)) return NULL;          \
+                if (tp_##SUF##_array_new(&src, (int64_t)n, (CTYPE)f) != 0) { return NULL; }      \
+                for (Py_ssize_t i = 0; i < src.len; i++) src.data[i] = (CTYPE)(f + (PARSET)i);   \
+            }                                                                                    \
+            have_src = 1;                                                                        \
+            rc = tp_##SUF##_array_copy(&a, &src);                                                \
+        }                                                                                        \
+        if (rc != 0) {                                                                           \
+            if (rc != -1 || !PyErr_Occurred()) {                                                 \
+                PyErr_SetString(PyExc_AssertionError, "local init: rc not 0/-1 or no error");    \
+                return NULL;                                                                     \
+            }                                                                                    \
+            PyObject *err = PyErr_GetRaisedException();                                          \
+            int zeroed = a.list == NULL && a.len == 0 && a.data == NULL && a.dirty == NULL;      \
+            if (have_src) tp_##SUF##_array_free(&src);                                           \
+            return Py_BuildValue("(iN[N])", rc, err, PyBool_FromLong(zeroed));                      \
+        }                                                                                        \
+        if (PyErr_Occurred()) { PyErr_SetString(PyExc_AssertionError, "error set with rc 0"); return NULL; } \
+        PyObject *results = PyList_New(0);                                                       \
+        Py_ssize_t ns = PyList_GET_SIZE(script);                                                 \
+        for (Py_ssize_t k = 0; k < ns; k++) {                                                    \
+            PyObject *op = PyList_GET_ITEM(script, k);                                           \
+            const char *kind = PyUnicode_AsUTF8(PyTuple_GET_ITEM(op, 0));                        \
+            PyObject *item = NULL;                                                               \
+            if (!strcmp(kind, "get") || !strcmp(kind, "set")) {                                  \
+                long long i = PyLong_AsLongLong(PyTuple_GET_ITEM(op, 1));                        \
+                int store = kind[0] == 's';                                                      \
+                Py_ssize_t slot = -7;                                                            \
+                int r = tp_##SUF##_array_slot(&a, (int64_t)i, store, &slot);                     \
+                if (r < 0) item = PyErr_GetRaisedException();                                    \
+                else if (!store) item = FROMC(a.data[slot]);                                     \
+                else {                                                                           \
+                    PARSET v;                                                                    \
+                    if (!PyArg_Parse(PyTuple_GET_ITEM(op, 2), PARSEFMT, &v)) goto fail;          \
+                    a.data[slot] = (CTYPE)v;                                                     \
+                    item = Py_NewRef(Py_None);                                                   \
+                }                                                                                \
+            } else if (!strcmp(kind, "len")) {                                                   \
+                item = PyLong_FromSsize_t(a.len);                                                \
+            } else if (!strcmp(kind, "contents")) {                                              \
+                if (loc_##SUF##_contents(&a, &item) < 0) goto fail;                              \
+            } else if (!strcmp(kind, "srccontents")) {                                           \
+                if (!have_src || loc_##SUF##_contents(&src, &item) < 0) goto fail;               \
+            } else if (!strcmp(kind, "flags")) {                                                 \
+                item = Py_BuildValue("(iiin)", a.list == NULL, a.dirty == NULL, a.data == NULL, a.len); \
+            } else if (!strcmp(kind, "srcflags")) {                                              \
+                item = Py_BuildValue("(iiin)", src.list == NULL, src.dirty == NULL, src.data == NULL, src.len); \
+            } else if (!strcmp(kind, "free")) {                                                  \
+                tp_##SUF##_array_free(&a);                                                       \
+                item = Py_NewRef(Py_None);                                                       \
+            } else if (!strcmp(kind, "exit")) {                                                  \
+                item = PyLong_FromLong(tp_##SUF##_array_exit(&a));                               \
+            } else if (!strcmp(kind, "srcset")) {                                                \
+                long long i = PyLong_AsLongLong(PyTuple_GET_ITEM(op, 1));                        \
+                PARSET v;                                                                        \
+                if (!have_src || !PyArg_Parse(PyTuple_GET_ITEM(op, 2), PARSEFMT, &v)) goto fail; \
+                src.data[i] = (CTYPE)v;                                                          \
+                item = Py_NewRef(Py_None);                                                       \
+            } else {                                                                             \
+                PyErr_SetString(PyExc_ValueError, "bad op");                                     \
+                goto fail;                                                                       \
+            }                                                                                    \
+            if (!item || PyList_Append(results, item) < 0) { Py_XDECREF(item); goto fail; }      \
+            Py_DECREF(item);                                                                     \
+        }                                                                                        \
+        tp_##SUF##_array_free(&a);                                                               \
+        if (have_src) tp_##SUF##_array_free(&src);                                               \
+        return Py_BuildValue("(iON)", 0, Py_None, results);                                      \
+    fail:                                                                                        \
+        tp_##SUF##_array_free(&a);                                                               \
+        if (have_src) tp_##SUF##_array_free(&src);                                               \
+        Py_DECREF(results);                                                                      \
+        return NULL;                                                                             \
+    }
+static int TP_IOTA_f64(tp_f64_array *a, int64_t n) { (void)a; (void)n; PyErr_SetString(PyExc_ValueError, "no f64 iota"); return -2; }
+static int TP_IOTA_i64(tp_i64_array *a, int64_t n) { return tp_i64_array_iota(a, n); }
+LOCAL_RUN(f64, tp_f64_array, double, PyFloat_FromDouble, "d", double)
+LOCAL_RUN(i64, tp_i64_array, int64_t, PyLong_FromLongLong, "L", long long)
+
+/* free on a zeroed struct, twice */
+static PyObject *s_local_free_zeroed(PyObject *self, PyObject *arg)
+{
+    if (PyLong_AsLong(arg) == 0) {
+        tp_f64_array a; memset(&a, 0, sizeof a);
+        tp_f64_array_free(&a); tp_f64_array_free(&a);
+    } else {
+        tp_i64_array a; memset(&a, 0, sizeof a);
+        tp_i64_array_free(&a); tp_i64_array_free(&a);
+    }
+    Py_RETURN_NONE;
+}
+
+/* copy from a zeroed (never-initialised) source struct: must give an empty local array */
+static PyObject *s_local_copy_of_zeroed(PyObject *self, PyObject *arg)
+{
+    Py_ssize_t len;
+    if (PyLong_AsLong(arg) == 0) {
+        tp_f64_array s0, d; memset(&s0, 0, sizeof s0); memset(&d, 0xAB, sizeof d);
+        if (tp_f64_array_copy(&d, &s0) != 0) return NULL;
+        len = d.len; tp_f64_array_free(&d);
+    } else {
+        tp_i64_array s0, d; memset(&s0, 0, sizeof s0); memset(&d, 0xAB, sizeof d);
+        if (tp_i64_array_copy(&d, &s0) != 0) return NULL;
+        len = d.len; tp_i64_array_free(&d);
+    }
+    return PyLong_FromSsize_t(len);
+}
+
+static PyObject *s_tuple(PyObject *self, PyObject *seq)
+{
+    PyObject *fast = PySequence_Fast(seq, "sequence expected");
+    if (!fast) return NULL;
+    PyObject *t = tp_tuple(PySequence_Fast_ITEMS(fast), PySequence_Fast_GET_SIZE(fast));
+    Py_DECREF(fast);
+    return t;
+}
+
 static PyObject *s_any_same(PyObject *self, PyObject *seq)
 {
     PyObject *fast = PySequence_Fast(seq, "sequence expected");
@@ -428,6 +593,9 @@ static PyMethodDef methods[] = {
     M("unbox_bool", s_unbox_bool, METH_O),
     M("f64_array_run", s_f64_array_run, METH_VARARGS), M("i64_array_run", s_i64_array_run, METH_VARARGS),
     M("array_exit_zeroed", s_array_exit_zeroed, METH_O),
+    M("f64_local_run", s_f64_local_run, METH_VARARGS), M("i64_local_run", s_i64_local_run, METH_VARARGS),
+    M("local_free_zeroed", s_local_free_zeroed, METH_O), M("tuple_", s_tuple, METH_O),
+    M("local_copy_of_zeroed", s_local_copy_of_zeroed, METH_O),
     M("global_", s_global, METH_VARARGS), M("getattr_", s_getattr, METH_VARARGS),
     M("call", s_call, METH_VARARGS), M("call_many", s_call_many, METH_VARARGS),
     M("getattr_many", s_getattr_many, METH_VARARGS), M("binop_many", s_binop_many, METH_VARARGS),
