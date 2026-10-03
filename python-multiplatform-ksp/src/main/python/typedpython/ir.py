@@ -468,16 +468,16 @@ class Function:
     params: tuple[Param | ArrayParam, ...]
     returns: Type
     locals: dict[str, Type]          # non-parameter locals only (temporaries included)
+    body: tuple[Stmt, ...]
+    pure: bool
+    may_deopt: bool
+    source_line: int
     # Module globals of a scalar type read ONCE at entry, as part of the guards: each must be
     # exactly that type (else deopt, before any effect), and the body reads it as `Local(name)`.
     # Legal only for a *closed* function — one that runs no user code (no GetAttr, CallObject,
     # Truth, CompareObj, ObjToFloat, OBJ BinOp; Calls only to closed functions) — so nothing can
     # rebind the global between entry and use, and reading it once equals reading it at each use.
     entry_globals: tuple[Param, ...] = ()
-    body: tuple[Stmt, ...]
-    pure: bool
-    may_deopt: bool
-    source_line: int
 
 
 @dataclass(frozen=True)
