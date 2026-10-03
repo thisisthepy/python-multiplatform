@@ -289,7 +289,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   function result, or a callback argument, gives the Python scalar for a Kotlin `Int`/`Long`/`Short`/`Byte`
   (`int`), `Double`/`Float` (`float`), `Boolean` (`bool`), `String`/`Char` (`str`), and a proxy for any
   other Kotlin object. `Status: implemented`,
-  `PM/commonTest/.../pythonx/PythonxPropertyTest.kt`, `ksp-fixtures/compose/.../PythonContentRenderTest.kt`,
+  `PM/commonTest/.../pythonx/PythonxPropertyTest.kt`, `ksp-fixtures/compose/.../PythonAppViewRenderTest.kt`,
   `AnySlotScalarRenderTest.kt`, `MaterialIconsRenderTest.kt`.
 - **U-11** A KSP-bound function, method or property whose declared return type is a Kotlin class that
   has a generated proxy returns an instance of **that class's proxy** (#94), not a generic owner: its
@@ -388,13 +388,13 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `CallbackDrivenRenderTest.kt`, pointer/drag render tests), `GP/artifact/ComposableBindingTest.kt`;
   `planned` on Android, iOS and wasm.
 - **B-8** A host draws a Python-declared application root with
-  `python.multiplatform.compose.PythonContent(root: PyObject)` or `PythonContent(module, attribute)`,
+  `python.multiplatform.compose.PythonAppView(modifier, module, attribute)` (or `PythonWidget(composableName, modifier, moduleName)` or `PythonWidget(root: PyObject)`, inside a `PythonLauncher { }` that starts the interpreter),
   from the `python-multiplatform-compose` module (`python-multiplatform` itself does not depend on
   Compose). The root is a Python callable, or a Compose `State` that Python holds whose value is that
   callable. The state is read inside the composition, so a Python write into it replaces the root on
   the next frame with no host call; Python callables a root passed into composables are released when
   that root is replaced or the composition is disposed. The entry point names no library.
-  `Status: implemented` on desktop, `ksp-fixtures/compose/.../PythonContentRenderTest.kt`; the module
+  `Status: implemented` on desktop, `ksp-fixtures/compose/.../PythonAppViewRenderTest.kt`; the module
   compiles for Android, nothing runs there yet.
 - **B-7** The plugin generates `.pyi` stubs for the Kotlin-named modules only, under Kotlin names
   plus their U-12 Pythonic aliases (`fill_max_width = fillMaxWidth` beside each module `def`, a second

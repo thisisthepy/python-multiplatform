@@ -5,7 +5,9 @@ import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.unit.Density
 import org.jetbrains.skia.Bitmap
 import org.jetbrains.skia.Image
-import python.multiplatform.compose.PythonContent
+import python.multiplatform.compose.PythonAppView
+import python.multiplatform.compose.PythonLauncher
+import python.multiplatform.compose.PythonWidget
 import python.multiplatform.ffi.Python3
 import python.multiplatform.ffi.pythonx.PythonCallables
 import python.multiplatform.ffi.pythonx.PythonxAdapter
@@ -35,13 +37,13 @@ import kotlin.test.assertTrue
  * the next frame shows the new root, and nothing on the Kotlin side was called to make it so. The
  * only thing the test does between the write and the frame is what a window's frame clock does on
  * its own -- deliver the snapshot's apply notification -- and the per-root call counters show that the
- * host's `PythonContent` was not re-entered by anything but that.
+ * host's `PythonAppView` was not re-entered by anything but that.
  *
  * The lifetime half follows `ComposableRenderTest.aDisposedCompositionGivesEveryPythonCallableBack`:
  * a named Python function crosses as a `content=` slot, its `sys.getrefcount` rises while composed,
  * and comes back to its baseline exactly -- above means a leak, below means a double release.
  */
-class PythonContentRenderTest {
+class PythonAppViewRenderTest {
 
     @BeforeTest
     fun installBothProducers() {
@@ -63,7 +65,7 @@ class PythonContentRenderTest {
     /**
      * Declare, render, replace by a state write, render, replace back, render, dispose.
      *
-     * Reached through `PythonContent(module, attribute)`, the spelling a host that knows only a module
+     * Reached through `PythonAppView(module, attribute)`, the spelling a host that knows only a module
      * name uses.
      */
     @Test
@@ -73,7 +75,7 @@ class PythonContentRenderTest {
         val baseInner = pyInt("sys.getrefcount(_inner)")
 
         val scene = ImageComposeScene(width = 200, height = 60, density = Density(1f)) {
-            PythonContent(module = "__main__", attribute = "_root_state")
+            PythonAppView(module = "__main__", attribute = "_root_state")
         }
         val inkA: Int
         val inkB: Int
@@ -130,7 +132,7 @@ class PythonContentRenderTest {
         val state = Python3.import("__main__").getAttr("_root_state")
 
         val scene = ImageComposeScene(width = 200, height = 60, density = Density(1f)) {
-            PythonContent(root = state)
+            PythonWidget(root = state)
         }
         val ink: Int
         val held: Int
@@ -191,7 +193,7 @@ class PythonContentRenderTest {
     fun aPlainPythonCallableIsAFixedRoot() {
         val root = Python3.import("__main__").getAttr("_root_a")
         val scene = ImageComposeScene(width = 200, height = 60, density = Density(1f)) {
-            PythonContent(root = root)
+            PythonWidget(root = root)
         }
         val ink: Int
         try {
@@ -202,6 +204,60 @@ class PythonContentRenderTest {
         root.close()
         assertEquals(1, pyInt("_calls['a']"), "the callable root was not composed exactly once")
         assertTrue(ink > 0, "the callable root drew nothing")
+    }
+
+    /** `PythonWidget(name, moduleName = ...)` draws exactly what `PythonWidget(root = <that callable>)` draws. */
+    @Test
+    fun aNamedWidgetDrawsTheSamePixelsAsThePassedCallable() {
+        val root = Python3.import("__main__").getAttr("_root_a")
+        val byObject = ImageComposeScene(width = 200, height = 60, density = Density(1f)) {
+            PythonWidget(root = root)
+        }
+        val inkObject: Int
+        try {
+            inkObject = inkOfImage(byObject.render())
+        } finally {
+            byObject.close()
+        }
+        root.close()
+        val byName = ImageComposeScene(width = 200, height = 60, density = Density(1f)) {
+            PythonWidget("_root_a", moduleName = "__main__")
+        }
+        val inkName: Int
+        try {
+            inkName = inkOfImage(byName.render())
+        } finally {
+            byName.close()
+        }
+        assertTrue(inkObject > 0, "the callable drew nothing")
+        assertEquals(inkObject, inkName, "the named widget drew different pixels than the callable it names")
+        assertEquals(2, pyInt("_calls['a']"), "each of the two compositions should have called the root once")
+    }
+
+    /**
+     * `PythonLauncher` composes its content. The interpreter is already initialised here (the
+     * `@BeforeTest` of this class, and earlier classes in the same JVM, did it), so what is tested is
+     * that the launcher leaves a running interpreter alone and draws `PythonAppView` inside it; the
+     * not-initialised start cannot be arranged safely, as Python cannot be re-initialised after a
+     * finalize.
+     */
+    @Test
+    fun aLauncherComposesItsContent() {
+        Python3.exec("_root_state.value = _root_a")
+        val scene = ImageComposeScene(width = 200, height = 60, density = Density(1f)) {
+            PythonLauncher {
+                PythonAppView(module = "__main__", attribute = "_root_state")
+            }
+        }
+        val ink: Int
+        try {
+            ink = inkOfImage(scene.render())
+        } finally {
+            scene.close()
+        }
+        assertTrue(Python3.isInitialized)
+        assertTrue(ink > 0, "the content of the launcher drew nothing")
+        assertEquals(1, pyInt("_calls['a']"))
     }
 
     /**

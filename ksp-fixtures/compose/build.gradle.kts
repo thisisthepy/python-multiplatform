@@ -100,7 +100,7 @@ pythonBindings {
             // 6. Compose state, from Python (issue #38): `mutableStateOf` (a generic function, its `T`
             //    read as `kotlin.Any?`) and the `value` property of `State`/`MutableState`. Classes, not
             //    the package: `androidx.compose.runtime` is the whole runtime, and this is the one
-            //    facade and two interfaces `PythonContentRenderTest` writes its root through.
+            //    facade and two interfaces `PythonAppViewRenderTest` writes its root through.
             "androidx.compose.runtime.SnapshotStateKt",
             "androidx.compose.runtime.State",
             "androidx.compose.runtime.MutableState",
