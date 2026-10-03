@@ -317,6 +317,68 @@ def _is_effect(e: ir.Expr) -> bool:
     return isinstance(e, ir.BinOp) and e.type is Type.OBJ
 
 
+
+# --- bounded functions (fast entry, issue #147) ----------------------------------------------------
+
+# Nodes that can run Python code (and so create Python frames the compiled frame count must see):
+# their slow paths call getattr, the class, __bool__, __float__, a Python callable, a descriptor.
+_RUNS_PYTHON = (ir.CallObject, ir.GetAttr, ir.Truth, ir.CompareObj, ir.ObjToFloat, ir.FieldGet,
+                ir.FieldSet, ir.New)
+
+
+def _runs_no_python(f: ir.Function) -> bool:
+    """Conservative: False when `f` has any node that can run Python code, any `redo` Call, or
+    touches an object at all (an OBJ parameter, local, result or expression: releasing one can run
+    a finalizer)."""
+    if f.returns is Type.OBJ or f.entry_globals and any(g.type is Type.OBJ for g in f.entry_globals):
+        return False
+    if any(isinstance(p, ir.Param) and p.type is Type.OBJ for p in f.params):
+        return False
+    if any(t is Type.OBJ for t in f.locals.values()):
+        return False
+    for s in _walk_stmts(f.body):
+        if isinstance(s, ir.FieldSet):
+            return False
+    for e in _all_exprs(f):
+        if isinstance(e, _RUNS_PYTHON) or e.type is Type.OBJ:
+            return False
+        if isinstance(e, ir.Call) and e.redo:
+            return False
+    return True
+
+
+def _bounded_functions(functions: dict[str, ir.Function]) -> dict[str, int]:
+    """name -> k for every bounded function (module docstring, "Fast entry"): in no call cycle,
+    every callee bounded, `_runs_no_python`. k(f) = 1 + max(k(callee)), 1 without callees: the most
+    compiled frames a call of `f` can have in flight at once."""
+    callees: dict[str, set[str]] = {}
+    for name, f in functions.items():
+        callees[name] = {e.function for e in _all_exprs(f) if isinstance(e, ir.Call)}
+    k: dict[str, int | None] = {}                 # None: not bounded (also while on the DFS stack)
+
+    def visit(name: str) -> int | None:
+        if name in k:
+            return k[name]
+        k[name] = None                            # on the stack: reaching it again is a cycle
+        f = functions[name]
+        if not _runs_no_python(f):
+            return None
+        deepest = 0
+        for c in callees[name]:
+            if c not in functions:
+                return None
+            kc = visit(c)
+            if kc is None:
+                return None
+            deepest = max(deepest, kc)
+        k[name] = deepest + 1
+        return k[name]
+
+    for name in functions:
+        visit(name)
+    return {n: v for n, v in k.items() if v is not None}
+
+
 # --- module --------------------------------------------------------------------------------------
 
 class _ModGen:
@@ -340,6 +402,7 @@ class _ModGen:
             total += len(cd.fields)
         self.n_slots = total
         self._uses: dict[str, set[str]] = {}
+        self.bounded = _bounded_functions(self.functions)     # name -> k (module docstring, "Fast entry")
 
     def cls(self, fname: str, name: str) -> ir.ClassDecl:
         cd = self.classes.get(name)
@@ -484,6 +547,8 @@ def generate(module: ir.Module, source_path: Path, display_path: str | None = No
         w("")
     for f in module.functions:
         w(_impl_signature(f) + ";")
+        if f.name in mg.bounded:
+            w(_impl_signature(f, fast=True) + ";")
     w("")
     w(_TEMPLATE_REDO)
     for b in bodies:
@@ -493,6 +558,9 @@ def generate(module: ir.Module, source_path: Path, display_path: str | None = No
     for f in module.functions:
         w(f"    {{{c_string(f.name)}, (PyCFunction)(void (*)(void)){_ident('tp_wrap', f.name)}, "
           f"METH_FASTCALL | METH_KEYWORDS, NULL}},")
+    w("#ifdef TP_TRACE_FAST")
+    w('    {"__tp_trace_fast_hits__", (PyCFunction)tp_trace_fast_hits, METH_NOARGS, NULL},')
+    w("#endif")
     w("    {NULL, NULL, 0, NULL}")
     w("};")
     w("")
@@ -607,7 +675,7 @@ def _check_entry_globals(f: ir.Function, functions: dict[str, ir.Function]) -> N
                         "user code, which could rebind the global between entry and use)")
 
 
-def _impl_signature(f: ir.Function) -> str:
+def _impl_signature(f: ir.Function, fast: bool = False) -> str:
     params = ["PyObject *tp_module"]
     for p in f.params:
         if isinstance(p, ir.ArrayParam):
@@ -621,14 +689,28 @@ def _impl_signature(f: ir.Function) -> str:
     if f.returns is not Type.NONE:
         ct = _CT[f.returns]
         params.append(f"{ct}{'' if ct.endswith('*') else ' '}*tp_out")
+    if fast:
+        return f"static inline int {_ident('tp_fimpl', f.name)}({', '.join(params)})"
     return f"static int {_ident('tp_impl', f.name)}({', '.join(params)})"
+
+
+def _impl_call_args(f: ir.Function) -> str:
+    """The arguments that forward an impl's own parameters to another impl of the same signature."""
+    args = ["tp_module"]
+    for p in f.params:
+        args.append(_ident("l" if isinstance(p, ir.ArrayParam) or p.type is not Type.OBJ else "p", p.name))
+    args += [_ident("l", g.name) for g in f.entry_globals]
+    if f.returns is not Type.NONE:
+        args.append("tp_out")
+    return ", ".join(args)
 
 
 # --- function bodies -----------------------------------------------------------------------------
 
 class _FnGen:
-    def __init__(self, mg: _ModGen, f: ir.Function):
+    def __init__(self, mg: _ModGen, f: ir.Function, fast: bool = False):
         self.mg, self.f = mg, f
+        self.fast = fast                            # the uncounted twin of a bounded function
         self.lines: list[str] = []
         self.depth = 1
         self.temps: list[tuple[str, str]] = []      # (C type, name)
@@ -926,7 +1008,11 @@ class _FnGen:
         self.emit("if (tp_s == 0) {")
         self.depth += 1
         # Depth is counted by the callee itself (tp_enter_call at its entry, issue #57).
-        self.emit(f"tp_s = {_ident('tp_impl', e.function)}(tp_module{''.join(', ' + x for x in args)});")
+        if self.fast:
+            # the fast twin's callees are bounded too (_bounded_functions): their fast twins, uncounted
+            self.emit(f"tp_s = {_ident('tp_fimpl', e.function)}(tp_module{''.join(', ' + x for x in args)});")
+        else:
+            self.emit(f"tp_s = {_ident('tp_impl', e.function)}(tp_module{''.join(', ' + x for x in args)});")
         self.depth -= 1
         self.emit("}")
         if e.redo:
@@ -1423,7 +1509,7 @@ class _FnGen:
 
     # whole function
 
-    def generate(self) -> str:
+    def impl(self) -> str:
         f = self.f
         prologue = []
         for p in f.params:
@@ -1438,12 +1524,16 @@ class _FnGen:
             self.emit("tp_rc = -1;")
         self.emit("goto tp_exit;")
 
-        out = [_impl_signature(f), "{",
+        out = [_impl_signature(f, fast=self.fast), "{",
                "    int tp_rc = 0;",
                "    int tp_s = 0;",
                "    int tp_pc = TP_POLL_INTERVAL; /* loop poll countdown (#141) */",
-               "    tp_state *tp_st = (tp_state *)PyModule_GetState(tp_module);",
-               "    PyObject *tp_dict = PyModule_GetDict(tp_module); /* borrowed: owned by the module */"]
+               ]
+        body_text = "\n".join(self.lines)
+        if not self.fast or "tp_st" in body_text:
+            out.append("    tp_state *tp_st = (tp_state *)PyModule_GetState(tp_module);")
+        if not self.fast or "tp_dict" in body_text:
+            out.append("    PyObject *tp_dict = PyModule_GetDict(tp_module); /* borrowed: owned by the module */")
         params = {p.name for p in f.params} | {g.name for g in f.entry_globals}
         for name, t in self.local_arrays.items():
             out.append(f"    {_ARRAY_CT[t]} {_ident('l', name)} = {{0}};")
@@ -1457,7 +1547,11 @@ class _FnGen:
             init = "NULL" if ct == "PyObject *" else "{0}" if ct in _CT_ARRAY_REV else "0"
             sep = "" if ct.endswith("*") else " "
             out.append(f"    {ct}{sep}{n} = {init};")
-        out.append("    (void)tp_st; (void)tp_dict; (void)tp_s; (void)tp_pc;"
+        # (a fast twin declares tp_st / tp_dict only when its body reads them: PyModule_GetState and
+        # PyModule_GetDict are external calls, and a leaf must stay free of them to inline well)
+        out.append("    (void)tp_s; (void)tp_pc;"
+                   + (" (void)tp_st;" if not self.fast or "tp_st" in body_text else "")
+                   + (" (void)tp_dict;" if not self.fast or "tp_dict" in body_text else "")
                    + "".join(f" (void){_ident('l', n)};" for n in self.types if n not in params)
                    + "".join(f" (void){_ident('l', n)};" for n in self.local_arrays))
         # Depth guard (issue #57): nothing is owned yet, so a refusal returns directly and counts
@@ -1466,11 +1560,28 @@ class _FnGen:
             if isinstance(p, ir.Param) and p.cls is not None:
                 k = self._class(p.cls)
                 out.append(f"    if ({_param_cls_fail(_ident('p', p.name), k, p.optional)}) return 1;")
-        out.append("    if (tp_enter_call() != 0) return -1;")
+        k_bound = self.mg.bounded.get(f.name)
+        if self.fast:
+            # Fast twin of a bounded function (module docstring, "Fast entry"): the caller proved
+            # room for every frame this call tree can have, so there is nothing to count or refuse.
+            pass
+        else:
+            if k_bound is not None:
+                # Precheck: room for the k frames of this whole call tree, then run its uncounted
+                # twin. Without room, fall through to the counted path below, which raises
+                # RecursionError at exactly the call where the interpreter would.
+                out.append(f"    if (tp_depth_room({k_bound})) {{")
+                out.append("        int tp_fr;")
+                out.append("        tp_trace_fast_hit();")
+                out.append(f"        tp_fr = {_ident('tp_fimpl', f.name)}({_impl_call_args(f)});")
+                out.append("        tp_depth_done();")
+                out.append("        return tp_fr;")
+                out.append("    }")
+            out.append("    if (tp_enter_call() != 0) return -1;")
         # Eval breaker (#141): a snapshot-holding function never polls and defers others' polls.
         if self.snapshot:
             out.append("    tp_snapshot_depth++;")
-        else:
+        elif not self.fast:
             out.append("    if (tp_poll(tp_st->breaker) != 0) { tp_rc = -1; goto tp_exit; }")
         out += prologue
         out += self.lines
@@ -1478,12 +1589,21 @@ class _FnGen:
         out += self._own_release_all()
         if self.snapshot:
             out.append("    tp_snapshot_depth--;")
-        out.append("    tp_leave_call();")
+        if not self.fast:
+            out.append("    tp_leave_call();")
         out.append("    return tp_rc;")
         out.append("}")
         out.append("")
-        out.append(self.wrapper())
         return "\n".join(out)
+
+    def generate(self) -> str:
+        """The impl (preceded by its fast twin when bounded) and the wrapper."""
+        parts = []
+        if self.f.name in self.mg.bounded:
+            parts.append(_FnGen(self.mg, self.f, fast=True).impl())
+        parts.append(self.impl())
+        parts.append(self.wrapper())
+        return "\n".join(parts)
 
     def wrapper(self) -> str:
         f = self.f
@@ -1806,6 +1926,11 @@ def _exec_function(mg: _ModGen) -> str:
             "    tp_release(&tp_f); tp_release(&tp_cf);",
         ]
     L += [
+        "#ifdef TP_TRACE_FAST",
+        f"    tp_cf = PyCFunction_NewEx(&tp_methods[{len(mg.module.functions)}], tp_module, tp_modname);",
+        "    if (tp_cf == NULL || PyDict_SetItemString(tp_dict, \"__tp_trace_fast_hits__\", tp_cf) < 0) goto tp_done;",
+        "    tp_release(&tp_cf);",
+        "#endif",
         "    tp_rc = 0;",
         "tp_done:",
         "    tp_release(&tp_code); tp_release(&tp_res); tp_release(&tp_table); tp_release(&tp_zero);",

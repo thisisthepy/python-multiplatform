@@ -98,6 +98,23 @@ C-stack guard: a raised recursion limit can never let compiled C overflow the st
 per module (the header is `static`): frames of a *different* compiled module that sit between two
 frames of this one are not counted.
 
+## Fast entry (bounded functions; issue #147)
+    int  tp_depth_room(Py_ssize_t k);   /* 1 iff tp_python_depth() + count + k <= Py_GetRecursionLimit() */
+    void tp_trace_fast_hit(void);       /* counts a fast entry; a no-op unless -DTP_TRACE_FAST */
+    void tp_depth_done(void);           /* after a fast tree: drop the cached top frame when count is 0 */
+A function is *bounded* when it is in no call cycle, every function it Calls is bounded, and its body
+has no node that can run Python code (CallObject, GetAttr, Truth, CompareObj, ObjToFloat, FieldGet,
+FieldSet, New, any OBJ-typed expression, any `redo` Call). Its k is `1 + max(k(callee))` (1 with no
+callees). cgen emits, per bounded `f`, `static inline int tp_fimpl_f(...)` (the impl body without
+tp_enter_call / tp_leave_call and without the entry poll, Calls to the callees' `tp_fimpl_*`) and, at
+the top of `tp_impl_f` after the Param.cls guards, `if (tp_depth_room(k)) { r = tp_fimpl_f(...);
+tp_depth_done(); return r; }`. No room: the counted path runs and raises RecursionError exactly where
+it raised before. `tp_enter_call` compares `depth + count + 1`; the fast tree has at most k frames, so
+`depth + count + k` is the same comparison at its deepest frame. Py_EnterRecursiveCall is skipped on
+the fast path: the tree is bounded, so it adds at most k small C frames. A fast tree's frames are not
+in `tp_depth.count`; only the eval-breaker poll can run Python code under it. `-DTP_TRACE_FAST`
+(tests only) adds `__tp_trace_fast_hits__()` to the module: the number of entries that took the fast path.
+
 ## Eval breaker (top of every loop iteration and impl entry; issue #141)
     int  tp_poll(PyObject *breaker);        /* 0 continue; -1 exception set (a signal handler raised) */
     int  tp_poll_slow(PyObject *breaker);   /* every TP_POLL_INTERVAL polls: call the breaker */
