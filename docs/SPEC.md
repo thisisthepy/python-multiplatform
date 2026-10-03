@@ -209,6 +209,20 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   registry, not written on the proxy class (`dir()` stays Kotlin-only). Contract in `KotlinSurface.kt`'s
   KDoc. `Status: implemented` on desktop — `PM/desktopTest/.../pythonx/MemberResolverTest.kt`,
   `ksp-fixtures/compose/.../MemberResolverComposeTest.kt`.
+  A resolver (or anything else) reads a member's declaration rows from the receiver type alone with
+  `python_multiplatform.describe_member(kotlin_type_name, kotlin_member_name)`: `describe()`'s
+  tuple-of-dicts for every extension overload or the property getter/setter that type's proxy serves
+  under that name, supertypes included, invoking nothing; `AttributeError` for a name it does not
+  serve (#54). `Status: implemented` — `PM/commonTest/.../pythonx/PythonxPropertyTest.kt`.
+- **U-10** A Kotlin property is an attribute of its receiver's proxy (#38): a member `val`/`var` of a
+  public class or interface reads (and, for a public setter, writes) as a Python `property`, an
+  extension property's getter reads the same way on its receiver (`Icons.Default.Add`), and both are
+  found on the type and then on every type the table says it is a. A property is never a module
+  attribute and makes no package. `None` written for a slot with no default is Kotlin's `null` for a
+  reference type; a Python object written into a `kotlin.Any?` slot is held by Kotlin as itself, and an
+  `int` is refused there (it would cross as a handle). `Status: implemented` —
+  `PM/commonTest/.../pythonx/PythonxPropertyTest.kt`, `ksp-fixtures/compose/.../PythonContentRenderTest.kt`,
+  `MaterialIconsRenderTest.kt`.
 
 ## 6. Binding prebuilt libraries (Gradle plugin)
 
@@ -217,6 +231,18 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   compiles — never by JVM name lookup. KSP and the walker share one Python namespace.
   `Status: implemented` on desktop — `GP/artifact/ArtifactScannerTest.kt`,
   `ksp-fixtures/artifact/.../WalkedArtifactTableTest.kt`, `WalkedArtifactPythonImportTest.kt`.
+  Beside functions and object constants it binds (#38): generic functions whose type parameters are
+  unbounded and not reified, each read as `kotlin.Any?` and written out at the call
+  (`mutableStateOf<kotlin.Any?>(...)`), a bounded or reified one still declined; member properties of
+  public classes and interfaces that cross as object handles, as `GETTER` entries `Owner.prop` and,
+  for a public setter with every class type parameter unbounded, `SETTER` entries `Owner.prop=`; and
+  top-level extension property getters (`pkg.prop`, receiver in `receiverTypeName`). Properties take no
+  part in overload naming or in a constructor's name check; a property key another binding already
+  holds is declined, and so is a property whose receiver has a supertype missing from the consumer's compile classpath (kotlinc cannot build its member scope). `Status: implemented` — `GP/artifact/PropertyBindingTest.kt`.
+  The public instance functions of a Kotlin-public `object` bind under the object's name like a
+  static (`Arrangement.spacedBy`, #53), except `Any`'s members, ones that also exist as a
+  `@JvmStatic` static, and `@Composable` ones (declined); an `internal` or file-private object is
+  skipped. `Status: implemented` — `GP/artifact/ObjectMemberBindingTest.kt`.
 - **B-2** The walker on **klibs** (Kotlin/Native libraries). `Status: partial` —
   `GP/artifact/KlibScannerTest.kt` and `ksp-fixtures/klib-artifact` assert that the scanned klib's
   declarations are declined with reasons; no klib declaration is bound at run time yet.
@@ -255,7 +281,12 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `GP/stubs/TypedStubTest.kt`, `GP/stubs/KotlinNamesOnlyStubTest.kt`,
   `ksp-fixtures/artifact/.../WalkedArtifactStubTest.kt`, `.../StubSignatureAgreesWithRuntimeTest.kt`,
   `tools/stubs/check-stubs.sh` (mypy over the Compose stubs). A class whose name is also a function in
-  its module is `Any`.
+  its module is `Any`. A property is a `@property` (with a setter for a `var`) of its receiver's stub
+  class, its docstring carrying its table key after `Kotlin property: `; where that class has no stub,
+  a comment with the same marker says so (`GP/stubs/PropertyStubTest.kt`). An object constant is annotated with its
+  declared type even when that type is nested in the object (`Alignment.End: Horizontal`, a class of the
+  object's own module; elsewhere `androidx.compose.ui.Alignment.Horizontal`); the object's own type
+  stays `Any` (#53, `GP/stubs/ObjectStubTest.kt`).
 - **B-8** CI generates the stubs over the Compose version the build resolves and publishes them
   (`.github/workflows/stubs.yml`): workflow artifact `kotlin-stubs` on every push to `develop`, with a
   README naming the Compose version and the commit, and `kotlin-stubs.zip` on every `v*` tag's release.
@@ -302,10 +333,8 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 - **N-5** Native-image upcall verification as an automated test (U-6). `Status: planned`.
 - **N-6** Compose state created and written from Python through the binder:
   `androidx.compose.runtime.mutableStateOf(x)` callable, and `.value` of the returned `MutableState`
-  readable and writable on its proxy. Neither is bound today: the walker emits only `FUNCTION` and
-  `STATIC_GETTER` entries (no instance members), and declines every declaration whose signature
-  mentions a type parameter. B-8's test writes its root state through a fixture-local KSP-bound
-  setter instead. `Status: planned`.
+  readable and writable on its proxy. Implemented by #38 (B-1, U-10); B-8's test now writes its root
+  through `state.value = root` and the KSP-bound stand-in is gone. `Status: implemented`.
 
 ---
 

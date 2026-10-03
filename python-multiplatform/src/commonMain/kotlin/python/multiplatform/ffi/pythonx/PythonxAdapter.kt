@@ -259,6 +259,25 @@ object PythonxAdapter {
         _PACKAGES_SEEN = set()
         _CHILDREN = {}       # kotlin package -> the Kotlin names of its direct child packages/objects
         _SUPERTYPES = {}     # kotlin type name -> the types it is a, nearest first
+        _PROPERTIES = {}     # kotlin type a property is read on -> {kotlin name -> _Property}
+
+
+        # The two row kinds that are attributes of a *value* rather than names in a package (issue #38):
+        # `Owner.prop` (and `Owner.prop=` for a `var`), and an extension property's `pkg.prop`. Neither
+        # is indexed by package -- `MutableState.value` is not a module, and `Icons.Filled.Add` is read
+        # off `Icons.Default`, not imported -- so both live in `_PROPERTIES`, keyed by the type the
+        # row's `receiver_type_name` says they are read on.
+        _PROPERTY_KINDS = ('GETTER', 'SETTER')
+
+
+        class _Property:
+            '''One Kotlin property of one type: its getter row and, for a `var`, its setter row.'''
+
+            __slots__ = ('getter', 'setter')
+
+            def __init__(self):
+                self.getter = None
+                self.setter = None
 
 
         # What `ArtifactRendering.SUPERTYPE_SEPARATOR` writes between a declared return type and its
@@ -310,6 +329,7 @@ object PythonxAdapter {
             _PACKAGES_SEEN.clear()
             _CHILDREN.clear()
             _SUPERTYPES.clear()
+            _PROPERTIES.clear()
             present = set()
             for row in rows:
                 kotlin_name = row[0]
@@ -326,6 +346,20 @@ object PythonxAdapter {
                 # disagreement would be a walker bug rather than something to reconcile here.
                 if decl.return_supertypes and decl.return_type_name not in _SUPERTYPES:
                     _SUPERTYPES[decl.return_type_name] = decl.return_supertypes
+                if decl.kind in _PROPERTY_KINDS:
+                    # A property is served on its receiver's proxy, never from a package (see
+                    # `_PROPERTY_KINDS`). A row with no receiver has nowhere to be served, and is
+                    # still described by name through `_TABLE`.
+                    if decl.receiver_type_name:
+                        name = decl.leaf[:-1] if decl.kind == 'SETTER' and decl.leaf.endswith('=') else decl.leaf
+                        prop = _PROPERTIES.setdefault(decl.receiver_type_name, {}).get(name)
+                        if prop is None:
+                            prop = _PROPERTIES[decl.receiver_type_name][name] = _Property()
+                        if decl.kind == 'GETTER':
+                            prop.getter = decl
+                        else:
+                            prop.setter = decl
+                    continue
                 _index(_BY_PACKAGE.setdefault(decl.package, {}), decl)
                 if decl.is_extension and decl.receiver_type_name:
                     _index(_BY_RECEIVER.setdefault(decl.receiver_type_name, {}), decl)
@@ -339,6 +373,11 @@ object PythonxAdapter {
                         _CHILDREN.setdefault('.'.join(segments[:count - 1]), set()).add(segments[count - 1])
             for gone in [name for name in _TABLE if name not in present]:
                 del _TABLE[gone]
+            # A setter whose getter is not in the table is not a property Python can read; the walker
+            # never emits one, and a hand-written table that does gets nothing rather than half.
+            for by_name in _PROPERTIES.values():
+                for name in [name for name, prop in by_name.items() if prop.getter is None]:
+                    del by_name[name]
             # Here rather than at the end of this file: `_PACKAGES_SEEN` is empty until this
             # function has run, and a module `PythonProxySource` created before it will never reach
             # the finder -- CPython answers from `sys.modules` first. Called on every table change
@@ -976,11 +1015,10 @@ object PythonxAdapter {
             cached = _MEMBER_ALIASES.get(key)
             if cached is not None:
                 return cached
-            members = _BY_RECEIVER.get(cls._kotlin_type_name, {})
-            names = tuple(members)
+            names = _member_names(cls._kotlin_type_name)
             for resolver in tuple(_MEMBER_RESOLVERS):
                 target, keywords = _resolver_answer(resolver(cls._kotlin_type_name, name, names))
-                if target and target in members and not target.startswith('_'):
+                if target and target in names and not target.startswith('_'):
                     _MEMBER_ALIASES[key] = (target, keywords)
                     return _MEMBER_ALIASES[key]
             return None
@@ -996,7 +1034,7 @@ object PythonxAdapter {
             cached = _MEMBER_KEYWORDS.get(key)
             if cached is not None:
                 return cached
-            names = tuple(_BY_RECEIVER.get(type_name, {}))
+            names = _member_names(type_name)
             found = {}
             for resolver in tuple(_MEMBER_RESOLVERS):
                 target, keywords = _resolver_answer(resolver(type_name, name, names))
@@ -1101,12 +1139,123 @@ object PythonxAdapter {
                 return "<Kotlin proxy for '" + cls._kotlin_type_name + "'>"
 
 
+        def _served_types(type_name):
+            '''[type_name], then every type it is a, nearest first -- the order a member is looked up in.
+
+            The ancestry is the one the table carries (`_SUPERTYPES`, read off the jar by the walker),
+            so a `MutableState` proxy finds what is declared on `State` and a `BitmapPainter` proxy
+            what extends `Painter`, and nothing here has to know a hierarchy it cannot see.
+            '''
+            return (type_name,) + tuple(_SUPERTYPES.get(type_name, ()))
+
+
+        def _member(type_name, name):
+            '''What the Kotlin name [name] means on a value of [type_name]: a `_Property`, a list of
+            extension decls, or `None`. The nearest type that has the name wins, and on one type a
+            property wins over an extension function of the same name -- Kotlin resolves a member
+            before an extension, and a property is the member here.'''
+            for candidate in _served_types(type_name):
+                prop = _PROPERTIES.get(candidate, {}).get(name)
+                if prop is not None:
+                    return prop
+                decls = _BY_RECEIVER.get(candidate, {}).get(name)
+                if decls:
+                    return decls
+            return None
+
+
+        def _member_names(type_name):
+            '''Every Kotlin member name a value of [type_name] is served under, supertypes included.'''
+            names = []
+            seen = set()
+            for candidate in _served_types(type_name):
+                for table in (_PROPERTIES, _BY_RECEIVER):
+                    for name in table.get(candidate, {}):
+                        if name not in seen:
+                            seen.add(name)
+                            names.append(name)
+            return tuple(names)
+
+
+        def _member_rows(type_name, name):
+            '''The table rows [name] stands for on a value of [type_name], or `None` -- reading nothing.
+
+            What `python_multiplatform.describe_member` asks (issue #54). The same lookup `_attach`
+            serves by, so a description and the attribute it describes cannot disagree: a property
+            answers its getter row and, for a `var`, its setter row; an extension answers every
+            declaration its name stands for, an overload set's base name included.
+            '''
+            found = _member(type_name, name)
+            if found is None:
+                return None
+            if isinstance(found, _Property):
+                return tuple(decl.row for decl in (found.getter, found.setter) if decl is not None)
+            return tuple(decl.row for decl in found)
+
+
+        def _receiver_handle(receiver, name):
+            handle = getattr(receiver, '_pm_handle', None)
+            if handle is None:
+                raise TypeError(name + ' is read on a Kotlin value, and ' + repr(receiver) + ' holds none')
+            return handle
+
+
+        def _read_property(decl, receiver):
+            '''One `GETTER` read: the receiver's handle in `args[0]`, nothing else (`CallableKind.GETTER`).'''
+            return _wrap(
+                _boundary()['invoke'](decl.bound_handle(), (_receiver_handle(receiver, decl.kotlin_name),)),
+                decl.return_type_name if decl.return_tag == 'OBJECT' else None,
+            )
+
+
+        def _write_property(decl, receiver, value):
+            '''One `SETTER` write: the receiver's handle, then the value, coerced as any argument is.'''
+            name = decl.kotlin_name[:-1] if decl.kotlin_name.endswith('=') else decl.kotlin_name
+            tag = decl.param_tags[0] if decl.param_tags else 'OBJECT'
+            type_name = decl.param_type_names[0] if decl.param_type_names else None
+            try:
+                coerced = _coerce(value, tag, type_name, decl, 0, True)
+            except _Mismatch as mismatch:
+                raise TypeError(name + ' = ...: ' + str(mismatch)) from None
+            _boundary()['invoke'](decl.bound_handle(), (_receiver_handle(receiver, name), coerced))
+
+
+        def _property_of(prop, name):
+            '''A Python `property` over one Kotlin property: read-only for a `val`, writable for a `var`.
+
+            A data descriptor, so it answers on the instance before `__getattr__` is ever asked; every
+            read and write re-enters Kotlin, because a property's value is the Kotlin object's to
+            change (`MutableState.value` is the case that motivated this).
+            '''
+            getter = prop.getter
+
+            def fget(self):
+                return _read_property(getter, self)
+
+            fset = None
+            if prop.setter is not None:
+                setter = prop.setter
+
+                def fset(self, value):
+                    _write_property(setter, self, value)
+
+            doc = 'Kotlin property ' + getter.kotlin_name + (' (var)' if fset is not None else ' (val)')
+            return property(fget, fset, None, doc)
+
+
         def _attach(cls, name):
-            '''Installs one extension as a method on [cls], under its Kotlin name, and reports whether there was one.'''
-            decls = _BY_RECEIVER.get(cls._kotlin_type_name, {}).get(name)
-            if not decls:
+            '''Installs one Kotlin member on [cls] under its Kotlin name, and reports whether there was one.
+
+            An extension function becomes a `_Hybrid` method; a property (issue #38) becomes a Python
+            `property`. Both are looked up on [cls]'s type and then on each type it is a (`_member`).
+            '''
+            found = _member(cls._kotlin_type_name, name)
+            if found is None:
                 return False
-            setattr(cls, name, _Hybrid(_callable_for(name, decls), name))
+            if isinstance(found, _Property):
+                setattr(cls, name, _property_of(found, name))
+            else:
+                setattr(cls, name, _Hybrid(_callable_for(name, found), name))
             cls._kotlin_attached.append(name)
             return True
 
@@ -1119,8 +1268,10 @@ object PythonxAdapter {
 
             release = _boundary()['release']
 
-            def __init__(self, handle):
-                self._pm_handle = handle
+            def __init__(self, handle, _set=object.__setattr__):
+                # Past `__setattr__` below: `_pm_handle` is never a Kotlin name, and construction is
+                # the hot path the proxy's cost table prices.
+                _set(self, '_pm_handle', handle)
 
             def __del__(self, _release=release):
                 # The other half of `HandleTable`'s contract, and the thing
@@ -1143,6 +1294,20 @@ object PythonxAdapter {
                     return _aliased(getattr(self, resolved[0]), resolved[1])
                 return getattr(self, name)
 
+            def __setattr__(self, name, value, _set=object.__setattr__):
+                # A Kotlin property is installed on the class lazily, by `_attach`, the first time it is
+                # *read* (`__getattr__`). A write that comes first would otherwise find no descriptor
+                # and land in the instance dict -- Kotlin never told, and every later read answered
+                # from that dict instead of Kotlin (issue #38: `state.value = 7` was "accepted").
+                # So a write attaches first; `object.__setattr__` then goes through the `property`
+                # (its setter, or Python's own refusal for a `val`). A name no Kotlin member has is
+                # stored on the instance as before.
+                if not name.startswith('_'):
+                    cls = type(self)
+                    if name not in cls.__dict__:
+                        _attach(cls, name)
+                _set(self, name, value)
+
             def __repr__(self):
                 return '<' + _simple_name(kotlin_type_name) + ' handle=' + repr(self._pm_handle) + '>'
 
@@ -1161,6 +1326,7 @@ object PythonxAdapter {
                 '__init__': __init__,
                 '__del__': __del__,
                 '__getattr__': __getattr__,
+                '__setattr__': __setattr__,
                 '__repr__': __repr__,
                 'empty': empty,
                 '_kotlin_type_name': kotlin_type_name,
@@ -1181,8 +1347,40 @@ object PythonxAdapter {
 
         # --------------------------------------------------------------------------- calling
 
+        # What an unbounded Kotlin type parameter is read as (issue #38): `mutableStateOf`'s `value`,
+        # `MutableState.value`. The one OBJECT slot a Python object can fill as itself.
+        _KOTLIN_ANY = 'kotlin.Any'
+
+        # The tags whose Kotlin side is a reference, so `None` can reach it as `null`. A number or a
+        # Boolean cannot: `TypeTag.INT` narrows a `Long`, and the walker declines a nullable one.
+        _NULLABLE_TAGS = ('STRING', 'BYTES', 'OBJECT')
+
+
         def _coerce(value, tag, type_name, decl, slot, strict):
             '''One argument on its way in. Returns the marshalled value, or raises when `strict`.'''
+            if value is None:
+                # `None` written for a slot that has no default to fall back on: Kotlin's `null`, which
+                # a nullable declaration takes (`Icon(..., contentDescription=None)`) and a non-null
+                # one refuses itself. A defaulted slot never gets here -- `_bind` reads `None` there as
+                # "leave it to Kotlin's default".
+                if tag in _NULLABLE_TAGS:
+                    return None
+                return _refuse(strict, 'None is not a ' + _simple_name(type_name or tag))
+            if tag == 'OBJECT' and type_name == _KOTLIN_ANY and not isinstance(value, _ValueProxy):
+                # `Any?` holds whatever it is given. A proxy is a Kotlin object and goes as its handle;
+                # any other Python object goes as itself, and Kotlin keeps it as a `PyObject`
+                # (`UpcallTrampoline.toKotlinObject`) -- which is how a Python root function lands in a
+                # Compose `MutableState`. An `int` cannot: the boundary reads every int in an OBJECT
+                # slot as a handle, so `mutableStateOf(0)` would name some other Kotlin object.
+                handle = getattr(value, '_pm_handle', None)
+                if handle is not None:
+                    return handle
+                if isinstance(value, int):
+                    return _refuse(
+                        strict,
+                        'an int cannot be stored in a Kotlin Any?: it would cross as an object handle',
+                    )
+                return value
             if isinstance(value, _ValueProxy):
                 if type_name is not None and value.kotlin_type_name != type_name:
                     return _refuse(
@@ -1429,7 +1627,9 @@ object PythonxAdapter {
             omitted = 0
             for index in range(declared):
                 value = slots[index]
-                if value is _NO_MATCH or value is None or value is KOTLIN_DEFAULT:
+                # `None` means "Kotlin's default" only where there is one; written for a slot that has
+                # none it is a value -- `null` -- and `_coerce` decides whether the slot takes it.
+                if value is _NO_MATCH or value is KOTLIN_DEFAULT or (value is None and decl.omittable(index)):
                     if not decl.omittable(index):
                         missing = decl.param_names[index] if decl.param_names else 'argument ' + str(index)
                         return _refuse(strict, 'no value for ' + missing)
@@ -1495,17 +1695,14 @@ object PythonxAdapter {
                     # `docs/archive/pythonx-adapter-design.md` §4.5 -- metadata carries the flag and never the
                     # expression, so this is the only place the default value can come from.
                     #
-                    # It costs nothing that was previously possible, and the reason is `_coerce` rather
-                    # than the walker: `_coerce` refuses `None` for every tag it knows -- 'expected a
-                    # str' for STRING, 'expected a bool' for BOOLEAN, a handle or a callable for OBJECT
-                    # -- so no `None` a caller wrote in a slot has ever reached Kotlin as a *value*.
-                    # `resolveKotlinType` narrows it further by declining a nullable number, a nullable
-                    # Boolean and a nullable value class outright; a nullable `String`/`ByteArray` is
-                    # bound (`nullablePrimitiveBoundaryTypeOf`, which is what makes `Modifier.clickable`
-                    # reachable) and is the one case where "omitted" is the only way to spell `null`
-                    # from `pythonx`. That is exact for a slot whose Kotlin default *is* `null`, which
-                    # every such slot measured so far has, and it is a refusal rather than a wrong
-                    # value for one that is not.
+                    # Only for a slot that **has** a default. Written for a slot without one, `None`
+                    # is a value -- Kotlin's `null` -- and `_coerce` passes it for a reference tag
+                    # (STRING, BYTES, OBJECT: `Icon(..., contentDescription=None)`) and refuses it for
+                    # a number or a Boolean. `resolveKotlinType` declines a nullable number, Boolean
+                    # and value class outright, so a defaulted nullable `String`/`ByteArray`/object is
+                    # the one case where "omitted" and `null` share a spelling here; that is exact for
+                    # a slot whose Kotlin default *is* `null`, which every such slot measured so far
+                    # has, and it is a refusal rather than a wrong value for one that is not.
                     slots[index] = None
                     defaults_used += 1
                     continue
