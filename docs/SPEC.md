@@ -89,6 +89,15 @@ fail, then implement.
   from the prefix a property names, or from a Compose resources directory). The
   `createDistributable` run itself is a manual check —
   `docs/platforms/desktop-packaged-app.md`.
+- **L-10** Desktop: the library uses no JDK module beyond `java.base`, so it runs on a `jlink`ed
+  runtime such as the one Compose Desktop's `createDistributable` bundles (issue #77). In particular
+  native memory is reached through `java.lang.foreign`, never `sun.misc.Unsafe` (module
+  `jdk.unsupported`): the proxy heap type (`ProxyTypeFactory.createProxyType`, `_pm_proxy_base`) is
+  built, and its handle slot read and cleared on deallocation, on a runtime limited to `java.base`.
+  `Status: implemented` — `PM/desktopTest/.../ffi/JlinkedRuntimeProxyTypeTest.kt` (a child JVM with
+  `--limit-modules java.base` installs the proxy base, and a dropped subclass instance releases its
+  handle). The packaged sample's own log is a manual check —
+  `docs/platforms/desktop-packaged-app.md`.
 
 ## 2. Low-level C API (downcall surface)
 
