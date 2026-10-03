@@ -1,0 +1,149 @@
+name: Kotlin-name stubs
+
+# Issue #32: pythonx-compose consumes the binder's Kotlin-name `.pyi` stubs for the real Compose jars
+# but cannot run this repository's Gradle build. This job runs the stub task over the Compose version the
+# build resolves (`compose-plugin` in gradle/libs.versions.toml) and publishes the result.
+#
+#   - every push to develop and every pull request: the stubs are generated, type-checked against
+#     tools/stubs/consumer.py with mypy (issue #31), and uploaded as the workflow artifact `kotlin-stubs`;
+#   - every `v*` tag: the same stubs are also attached to the tag's GitHub release as `kotlin-stubs.zip`.
+
+on:
+  push:
+    branches: [ "develop" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "develop" ]
+    paths:
+      - "python-multiplatform-gradle-plugin/**"
+      - "ksp-fixtures/compose/**"
+      - "tools/stubs/**"
+      - "gradle/libs.versions.toml"
+      - ".github/workflows/stubs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stubs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  stubs:
+    name: Generate stubs
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # attaching the stubs to a tag's release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'zulu'
+          cache: 'gradle'
+
+      - name: Setup Python (for mypy)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Generate the stubs over the Compose jars
+        run: ./gradlew :ksp-fixtures:compose:generatePythonStubs --console=plain
+
+      - name: Type-check a consumer against them (mypy)
+        run: tools/stubs/check-stubs.sh ksp-fixtures/compose/build/generated/pythonStubs/desktopMain
+
+      - name: Assemble the artifact
+        run: |
+          set -euo pipefail
+          compose_version="$(sed -nE 's/^compose-plugin = "([^"]+)".*/\1/p' gradle/libs.versions.toml)"
+          test -n "$compose_version"
+          out=build/kotlin-stubs
+          rm -rf "$out"
+          mkdir -p "$out"
+          cp -R ksp-fixtures/compose/build/generated/pythonStubs/desktopMain/. "$out/"
+          cat > "$out/README.md" <<README
+          # Kotlin-name stubs for Compose ${compose_version}
+
+          \`.pyi\` stubs for the Kotlin declarations the python-multiplatform binder serves, under the
+          **Kotlin** module paths and Kotlin names (\`androidx.compose.material3.Checkbox\`, parameters by
+          their Kotlin names). Nothing here is renamed or Pythonic; that is pythonx-compose's layer.
+
+          | | |
+          |---|---|
+          | Compose | ${compose_version} (desktop jars) |
+          | python-multiplatform commit | ${GITHUB_SHA} |
+          | ref | ${GITHUB_REF} |
+          | workflow run | ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} |
+          | generator | \`:ksp-fixtures:compose:generatePythonStubs\` |
+
+          Packages stubbed: the \`artifactIncludePackages\` of \`ksp-fixtures/compose/build.gradle.kts\` at
+          that commit.
+
+          Use: put this directory on the type checker's path (\`MYPYPATH=<this directory>\`, or the
+          IDE's "stub path" / interpreter paths). It is checked with mypy against
+          \`tools/stubs/consumer.py\` in the commit above.
+          README
+          (cd build && zip -qr kotlin-stubs.zip kotlin-stubs)
+
+      - name: Upload the stubs
+        uses: actions/upload-artifact@v4
+        with:
+          name: kotlin-stubs
+          path: build/kotlin-stubs
+          if-no-files-found: error
+
+      - name: Attach the stubs to the tag's release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "Kotlin-name stubs for the Compose version this tag builds against."
+          gh release upload "$GITHUB_REF_NAME" build/kotlin-stubs.zip --clobber
+
+  # Issue #44: the stub layout is case-unique, so the stubs generate, extract and type-check on a
+  # case-insensitive filesystem too (`graphics.Shadow` the class and `graphics.shadow` the package).
+  stubs-macos:
+    name: Generate stubs (macOS, case-insensitive)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'zulu'
+          cache: 'gradle'
+
+      - name: Setup Python (for mypy)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Generate the stubs over the Compose jars
+        run: ./gradlew :ksp-fixtures:compose:generatePythonStubs --console=plain
+
+      - name: No two stub paths are equal under case folding
+        run: |
+          python3 - ksp-fixtures/compose/build/generated/pythonStubs/desktopMain <<'PY'
+          import os, sys
+          seen = {}
+          for root, dirs, files in os.walk(sys.argv[1]):
+              for name in dirs + files:
+                  rel = os.path.relpath(os.path.join(root, name), sys.argv[1])
+                  seen.setdefault(rel.casefold(), []).append(rel)
+          clashes = [v for v in seen.values() if len(v) > 1]
+          print("clashes:", clashes)
+          sys.exit(1 if clashes else 0)
+          PY
+
+      - name: Type-check a consumer against them (mypy)
+        run: tools/stubs/check-stubs.sh ksp-fixtures/compose/build/generated/pythonStubs/desktopMain

@@ -1,0 +1,46 @@
+name: Desktop CI
+
+on:
+  push:
+    branches: [ "develop", "main" ]
+  pull_request:
+    branches: [ "develop", "main" ]
+
+concurrency:
+  # A newer push to the same ref supersedes this run; frees the shared macOS runners.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Desktop Tests
+    # macOS runner is used to compile for iOS and is also good for Desktop.
+    # We use ubuntu, macos, and windows to cover the major desktop platforms.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'zulu'
+          # This automatically caches ~/.gradle/caches and ~/.gradle/wrapper
+          cache: 'gradle'
+
+      - name: Cache Konan
+        uses: actions/cache@v4
+        with:
+          # Cache Kotlin Native compiler and dependencies
+          path: ~/.konan
+          key: ${{ runner.os }}-konan-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-konan-
+
+      - name: Run Desktop Tests
+        # Using --console=plain so logs are readable in GitHub Actions
+        run: ./gradlew :python-multiplatform:desktopTest --console=plain

@@ -39,7 +39,16 @@ interface Platform {
 }
 
 enum class OSType {
-    Windows, MacOS, Linux, Android, IOS;
+    Windows, MacOS, Linux, Android, IOS,
+
+    /**
+     * `wasm32-emscripten`. Not an operating system, which is the point -- the host is whatever runs
+     * the wasm. CPython reports `emscripten` for `sys.platform` for the same reason.
+     *
+     * Both `when (currentPlatform.os)` sites in the tree (`manager.kt`, `Platform.desktop.kt`) have
+     * an `else` branch, so adding this entry does not change any other target's behaviour.
+     */
+    Web;
 
     override fun toString(): String {
         if (this == IOS) return "iOS"
@@ -48,7 +57,14 @@ enum class OSType {
 }
 
 enum class PlatformType {
-    JVM, Native
+    JVM, Native,
+
+    /**
+     * Kotlin/Wasm. Neither [JVM] nor [Native]: objects live on the WasmGC heap and CPython is
+     * reached through `@WasmImport` against a shared linear memory, not through JNI, Panama or
+     * cinterop. [Platform.isJvm] and [Platform.isNative] are therefore both false here.
+     */
+    Wasm
 }
 
 expect val currentPlatform: Platform

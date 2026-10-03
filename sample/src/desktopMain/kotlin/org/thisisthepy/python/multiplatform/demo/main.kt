@@ -2,55 +2,41 @@ package org.thisisthepy.python.multiplatform.demo
 
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
-import python.multiplatform.ffi.Python3
-import python.native.ffi.*
-import java.nio.charset.Charset
+import org.thisisthepy.python.multiplatform.demo.ui.App
 
-
+/**
+ * `./gradlew :sample:run`.
+ *
+ * The interpreter comes up before the window because every section of the screen reads from it;
+ * `build.gradle.kts` gives this task the `PYTHONHOME` that `Py_Initialize` needs to find a
+ * stdlib, and the same prefix is where `manager.loadLibPython` finds `libpython` when the library
+ * is on the classpath as class directories rather than as `desktopJar`.
+ *
+ * This used to be a page of raw `PyLong_FromLongLong` / `PyRun_SimpleString` calls, including a
+ * pointer round-tripped through a `Double`. None of that is how the library is meant to be used
+ * any more, and one of those calls (`PyRun_SimpleString`) swallows the error indicator, which is
+ * exactly what `Python3.exec` exists to avoid.
+ */
 fun main() = application {
-    Python3.initialize()
+    PythonDemo.start()
 
-    val pylong = PyLong_FromLongLong(1234567890)
-    println("pylong: $pylong")
-    if (pylong == null) {
-        println("PyLong_FromLongLong failed")
-    } else {
-        val pyptr = pylong.toRawValue()
-        println("pyptr: $pyptr")
-        val pyptr1 = 0.0 + pyptr
-        val recoverd = pyptr1.toLong().toNativePointer()
-        println("recoverd: $recoverd")
-        println("address value: ${recoverd?.toAddressValue()}")
-        val result = recoverd?.let { PyLong_AsLongLong(it) }
-        println("result: $result")
-    }
-
-    val consoleEncoding = System.console()?.charset()?.name() ?: Charset.defaultCharset().displayName()
-
-    // Sync Python stdout/stderr encoding with Java console encoding
-    PyRun_SimpleString("""
-        import sys
-        import io
-        print("Python original sys.getdefaultencoding():", sys.getdefaultencoding())
-        #sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='${consoleEncoding}')
-        #sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='${consoleEncoding}')
-        print("Python sys.getdefaultencoding():", sys.getdefaultencoding())
-        print("Python sys.stdout.encoding:", sys.stdout.encoding)
-    """.trimIndent())
-
-
-    val code = "print('Hello, 안녕 Python!', flush=True)"
-    println(code)
-    PyRun_SimpleString(code)
-    val codeConv = PyUnicode_FromString(code)
-    println(codeConv)
-    val codeConvStr = codeConv?.let { PyUnicode_AsUTF8(it) }
-    println(codeConvStr)
-
+    // Echoed to stdout as well as to the window: `:sample:run` is the only desktop check there
+    // is, and a Compose window cannot be read by a build log.
+    println("runtime : ${PythonDemo.runtimeSummary()}")
+    println("eval    : ${PythonDemo.DEFAULT_EXPRESSION} -> ${PythonDemo.evaluate(PythonDemo.DEFAULT_EXPRESSION)}")
+    println("table   : ${UpcallDemo.tableSummary()}")
+    println("upcall  : ${UpcallDemo.callFromPython()}")
+    // Sections 5-7. The screen runs these on a button press; echoing them here is what makes
+    // `:sample:run` able to say whether they worked, since a window cannot be read by a build log.
+    println("proxies : ${PythonDemo.proxyInstallReport()}")
+    println(PythonDemo.classProxy())
+    println(PythonDemo.staticSurface())
+    println(PythonDemo.awaitFastPath())
+    println(PythonDemo.awaitSuspending())
 
     Window(
         onCloseRequest = { exitApplication() },
-        title = "PythonMultiplatform",
+        title = "Python Multiplatform",
     ) {
         App()
     }

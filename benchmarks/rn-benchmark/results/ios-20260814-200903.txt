@@ -1,0 +1,136 @@
+=== conditions ===
+platform:         ios
+timestamp:        2026-08-14T20:09:19+0900
+host:             Darwin 25.5.0 arm64, 8 cores, 16 GB
+load average:     3.79 4.24 5.65   (before the run)
+react-native:     0.87.0
+hermes:           reported by the app itself -- see the 'engine:' line in the report below
+harness digest:   0c397d62e51c   (rn-benchmark is not a git repository)
+reference repo:   /Volumes/macMini/thisisthepy/PythonMultiplatform @ 5ff77ff4
+counts:           warmup 100000, 10000 iterations per timed loop, 5 repetitions per row
+                  convergence sweep: 40 repetitions x 10000, cold
+simulator:        iPhone 17 Pro (7A6CE089-C7B3-494D-A9EA-045EA3502E98) (Booted)    [runtime: iOS 26.2]
+xcode:            Xcode 26.6 Build version 17F113 
+app:              /Volumes/macMini/rn-benchmark/DerivedData/Build/Products/Release-iphonesimulator/RNBench.app
+
+bundle id:        org.reactjs.native.example.RNBench  (read from the installed app)
+# sweep: JS-only row, cold
+# sweep: boundary row addInts, cold
+# js row: empty JS loop (the loop itself)
+# js row: JS call, same shape as addInts
+# js row: JS call returning a string arg
+# js row: JS sum of an 8-element array
+# js row: JS sum of a 1000-element array
+# js row: JS sum of a 3-key object
+# js row: JS string of 128 chars, built per call
+# boundary row: zeroArgs() -- boundary, no arguments
+# boundary row: addInts(3, 4) -- two numbers
+# boundary row: stringLength(8 chars)
+# boundary row: stringLength(128 chars)
+# boundary row: echoString(8 chars) -- 2 conversions
+# boundary row: echoString(128 chars) -- 2 conversions
+# boundary row: sumArray(8 elements)
+# boundary row: sumArray(1000 elements)
+# boundary row: sumObject(3 keys)
+# boundary row: noop() -- void, ASYNC DISPATCH, not a crossing
+# async round-trip rows
+=== RN boundary benchmark: on-device ===
+engine:  Hermes OSS Release Version=250829098.0.16, Build=Release, Bytecode Version=98
+clock:   performance.now
+warmup:  100000 calls per row, iterations per timed loop: 10000
+reps:    5 per row, min-max reported, nothing discarded
+module:  present
+--- convergence sweep: "JS call, same shape as addInts" (no boundary: Hermes only) ---
+  40 repetitions of 10000 calls, no warmup before the first
+       14.12     14.13     14.25     14.13     14.10     14.07     14.15     14.10
+       15.37     14.07     14.08     14.08     14.08     14.16     14.17     14.19
+       14.08     14.10     14.26     14.07     14.07     14.07     13.77     13.57
+       13.57     13.58     13.58     13.63     13.59     13.57     13.57     13.85
+       13.57     14.02     13.72     14.20     14.07     14.06     14.09     14.10
+  plateau (mean of 2nd half):  13.81 ns/op
+  first repetition:            14.12 ns/op  (1.02x the plateau)
+  flat (within +/-5%) from:   90000 calls
+  margin at a warmup of 100000:  1.11x   <-- THIN. A slower or busier host would read this row unsettled.
+--- convergence sweep: addInts(3, 4) through the TurboModule (Hermes -> JSI -> Objective-C++) ---
+  40 repetitions of 10000 calls, no warmup before the first
+     1168.88   1117.55   1120.53   1139.41   1140.29   1131.98   1122.16   1126.92
+     1109.50   1119.71   1128.45   1119.94   1117.99   1138.89   1153.46   1107.35
+     1122.39   1116.71   1156.35   1131.19   1109.51   1105.70   1105.92   1107.69
+     1109.72   1133.28   1159.75   1122.45   1107.68   1105.83   1104.75   1106.83
+     1105.61   1105.61   1102.64   1105.48   1105.65   1103.33   1105.82   1106.63
+  plateau (mean of 2nd half):  1110.99 ns/op
+  first repetition:            1168.88 ns/op  (1.05x the plateau)
+  flat (within +/-5%) from:   10000 calls
+  margin at a warmup of 100000:  10.00x
+  Read the two sweeps together. The JS one prices Hermes, which has no JIT and is expected
+  to be flat from the first repetition. The boundary one prices Hermes plus a callee
+  running as Objective-C++, AOT.
+  On iOS that callee is AOT-compiled and does NOT tier up, so neither side of this
+  boundary has a warm-up curve to climb: a sweep that fails to settle here is evidence
+  of a busy machine, not of a warmup that is too short. Check the load average.
+row                                            |    min ns/op |    max ns/op | reps
+---------------------------------------------------------------------------------
+empty JS loop (the loop itself)                |        13.68 |        14.08 | 5
+JS call, same shape as addInts                 |        13.37 |        13.39 | 5
+JS call returning a string arg                 |        14.63 |        14.65 | 5
+JS sum of an 8-element array                   |       139.68 |       140.70 | 5
+JS sum of a 1000-element array                 |     12481.35 |     12698.35 | 5
+JS sum of a 3-key object                       |        25.68 |        26.11 | 5
+JS string of 128 chars, built per call         |        76.02 |        80.42 | 5
+zeroArgs() -- boundary, no arguments           |       975.82 |       985.27 | 5
+addInts(3, 4) -- two numbers                   |      1101.28 |      1119.40 | 5
+stringLength(8 chars)                          |      1376.30 |      1377.83 | 5
+stringLength(128 chars)                        |      1783.75 |      1844.78 | 5
+echoString(8 chars) -- 2 conversions           |      1428.03 |      1479.65 | 5
+echoString(128 chars) -- 2 conversions         |      1882.72 |      1916.37 | 5
+sumArray(8 elements)                           |      2024.79 |      2065.26 | 5
+sumArray(1000 elements)                        |     64584.08 |     65445.09 | 5
+sumObject(3 keys)                              |      2250.80 |      2270.83 | 5
+noop() -- void, ASYNC DISPATCH, not a crossing |      1421.74 |      1514.50 | 5
+addInts' body, native loop, no crossing        |         3.50 |         3.54 | 5
+sink (proves no row was eliminated): 1
+--- native -> JS, ROUND TRIPS (scheduler hop included; not comparable with the rows above) ---
+row                                   |    min ns/op |    max ns/op | reps
+------------------------------------------------------------------------
+native -> JS callback round trip      |     13642.42 |     14032.71 | 5
+native -> JS promise round trip       |     13868.88 |     14646.50 | 5
+bare JS Promise.resolve await (floor) |       805.33 |      1351.58 | 5
+--- ratios, every term from this run ---
+  addInts / a JS call of the same shape:      82.39x
+  addInts / zeroArgs (what two numbers cost): 1.13x
+  sumArray(1000) / sumArray(8):              31.90x
+  echoString(128) / echoString(8):           1.32x
+--- warmup verdict, from this run's own sweeps ---
+  JS-only (Hermes): settles at 90000 calls, so warmup 100000 has only 1.11x margin -- TOO THIN. Raise it.
+  boundary (Hermes+JSI+ObjC++): settles at 10000 calls; warmup 100000 has 10.00x margin. Adequate.
+  ==> AT LEAST ONE SWEEP SAYS THIS WARMUP IS INSUFFICIENT.
+      THE JS-ONLY BASELINE IS NOT SETTLED. That indicts the JS rows and every ratio
+      printed above, since those divide by one -- but NOT the absolute boundary
+      figures, which do not depend on it.
+      Note what this verdict does NOT say: the boundary sweep above settled. Read its
+      "flat from" line before discarding the boundary rows -- an unsettled Hermes
+      baseline on a machine with frequency scaling is not a statement about them.
+      Raise WARMUP in bench/appRun.js and re-run, or re-run on a quieter machine.
+all 21 rows returned a positive duration
+END
+
+load average after: 3.33 4.10 5.51
+
+=== capture check ===
+benchmark rows captured:  21
+END marker seen:          yes
+warmup verdict:           INSUFFICIENT   (the app's own, from its convergence sweeps)
+
+*** NOT QUOTABLE AS A WHOLE: the run's own warmup verdict is INSUFFICIENT. ***
+
+21 rows were captured and the report is complete, but at least one convergence sweep
+did not settle far enough before the warmup count. WHICH sweep decides which rows are
+affected, and the report says which -- read the 'warmup verdict' block above rather
+than discarding the file:
+
+  - boundary sweep thin  -> the rows that cross into native are not figures.
+  - JS-only sweep thin   -> the JS baseline and the ratios are not figures; the
+                            absolute boundary numbers do not depend on them.
+
+On this machine the usual cause is load, not a genuinely short warmup: check the load
+average at the top of this file, and re-run quiet before changing WARMUP.

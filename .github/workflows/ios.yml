@@ -1,0 +1,40 @@
+name: iOS CI
+
+on:
+  push:
+    branches: [ "develop", "main" ]
+  pull_request:
+    branches: [ "develop", "main" ]
+
+concurrency:
+  # A newer push to the same ref supersedes this run; frees the shared macOS runners.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compile:
+    name: Compile iOS Simulator Arm64
+    # macos-latest is required since iOS compilation needs Xcode
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'zulu'
+          cache: 'gradle'
+
+      - name: Cache Konan
+        uses: actions/cache@v4
+        with:
+          path: ~/.konan
+          key: ${{ runner.os }}-konan-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-konan-
+
+      - name: Compile iOS Simulator Arm64
+        # Compile iOS Simulator which includes commonMain + nativeMain + iosMain
+        run: ./gradlew :python-multiplatform:compileKotlinIosSimulatorArm64 --console=plain

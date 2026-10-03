@@ -121,3 +121,15 @@ fun sayHello() {
 //        return jniEnvVal.CallObjectMethodA!!.invoke(env, thiz, methodId, null) as jstring
 //    }
 //}
+
+/**
+ * Diagnostic only: returns its argument unchanged.
+ *
+ * Exported under `python.native.ffi.bindings` so the Android JVM side can call it through the same
+ * path as every other binding. Its whole purpose is to make an argument-slot mismatch visible —
+ * if the JNI calling convention does not match this export's signature, the value read back will
+ * not be the value passed in.
+ */
+@CName("Java_python_native_ffi_bindings_diagEcho")
+@kotlin.OptIn(kotlin.experimental.ExperimentalNativeApi::class, kotlinx.cinterop.ExperimentalForeignApi::class)
+fun diagEcho(env: Long, clazz: Long, x: Long): Long = x

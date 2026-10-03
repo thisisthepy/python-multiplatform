@@ -1,29 +1,34 @@
 package python.multiplatform.ffi.conversion
 
-
 /**
- * TODO: 영어로 다시 작성
+ * Controls how much a [PyObject][python.multiplatform.ffi.PyObject] gets
+ * converted towards a native Kotlin value when it crosses the Kotlin/Python
+ * boundary, trading off safety/fidelity against overhead.
  *
- * 기본 자료형
- * - RAW 원시 포인터로 보관 가능
- * - TYPED 타입을 가지고, 필요 시 네이티브로 변환하고 그 값 캐싱
- * - NATIVE 코틀린 자료형으로 변환 가능
+ * Roughly, from cheapest/most-Python-native to most-eager/most-Kotlin-native:
  *
- * 콜렉션 자료형, 함수 등
- * - RAW 원시 포인터로 보관 가능
- * - TYPED 타입을 가지고, 필요 시 네이티브로 변환하고 그 값 캐싱
- * - NATIVE 코틀린 자료형으로 변환 가능
- *
- * 코틀린으로 변환 불가능한 자료형
- * - RAW 원시 포인터로 보관 가능
- * - TYPED 타입을 가지고, 필요 시 네이티브로 변환하고 그 값 캐싱
- *
- * 사용자 정의 오브젝트 자료형
- * - 원시 포인터로만 보관 가능
- *
- * ** 컨택스트가 2개가 필요할 듯 하다
- *
+ * - [RAW]: keep only the raw `NativePointer`; no wrapper object is
+ *   materialised at all. Cheapest, but loses type safety and refcount
+ *   bookkeeping convenience.
+ * - [UNMANAGED]: wrap in a [python.multiplatform.ffi.PyObject] (or the
+ *   appropriate subclass) but leave it fully under Python's own refcount
+ *   management -- no defensive copy, no caching of a converted value.
+ * - [TYPED]: wrap in the appropriate typed [PyObject] subclass (e.g.
+ *   [python.multiplatform.ffi.types.basic.PyInt]) and lazily convert to a
+ *   native value on demand, caching the result (see
+ *   [PyProxy.cachedNativeValue]).
+ * - [NATIVE]: eagerly convert all the way down to native Kotlin
+ *   types/collections (e.g. a Python `dict` becomes a Kotlin `Map`
+ *   recursively). Most convenient, most expensive, and only possible for
+ *   Python values that have a native Kotlin counterpart at all -- custom
+ *   user-defined Python objects cannot go further than [TYPED].
+ * - [DEFAULT]: defers to whatever [PyContext] considers the sane default
+ *   (currently [TYPED]).
  */
-class Strategy {
-
+enum class ConversionStrategy {
+    DEFAULT,
+    UNMANAGED,
+    RAW,
+    TYPED,
+    NATIVE,
 }

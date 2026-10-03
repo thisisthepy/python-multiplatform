@@ -1,0 +1,21 @@
+=== conditions ===
+platform:         android
+timestamp:        2026-08-14T16:02:45+0900
+host:             Darwin 25.5.0 arm64, 8 cores, 16 GB
+load average:     15.68 17.80 16.83   (before the run)
+react-native:     0.87.0
+hermes:           reported by the app itself -- see the 'engine:' line in the report below
+harness digest:   df3f74f34aff   (rn-benchmark is not a git repository)
+reference repo:   /Volumes/macMini/thisisthepy/PythonMultiplatform @ 73c40da4
+counts:           warmup 100000, 10000 iterations per timed loop, 5 repetitions per row
+                  convergence sweep: 40 repetitions x 10000, cold
+
+=== NOT RUN ===
+SKIPPED: more than one device is attached and ANDROID_SERIAL is not set.
+Attached: emulator-5554 emulator-5556 
+The app id (com.rnbench) is the same on every device, so a multi-device run would install over
+itself. Re-run with the one you may use, e.g.:
+  ANDROID_SERIAL=emulator-5554 ./run-bench.sh android
+On this machine the emulators are shared, so setting it is your assertion that that one is free.
+
+No figures were produced. Do not treat any cell this run would have filled as measured.

@@ -36,6 +36,13 @@
 #define NCURSES_OPAQUE 0
 #endif
 
+/* PDCurses exposes its ncurses-compatible mouse API, the one this module uses,
+   only when this is defined before the curses header is included below.
+   Ignored by other curses implementations. */
+#ifndef PDC_NCMOUSE
+#  define PDC_NCMOUSE
+#endif
+
 #if defined(HAVE_NCURSESW_NCURSES_H)
 #  include <ncursesw/ncurses.h>
 #elif defined(HAVE_NCURSESW_CURSES_H)
@@ -75,13 +82,12 @@ extern "C" {
 
 /* Type declarations */
 
-typedef struct {
+typedef struct PyCursesWindowObject {
     PyObject_HEAD
     WINDOW *win;
     char *encoding;
+    struct PyCursesWindowObject *orig;
 } PyCursesWindowObject;
-
-#define PyCursesWindow_Check(v) Py_IS_TYPE((v), &PyCursesWindow_Type)
 
 #define PyCurses_CAPSULE_NAME "_curses._C_API"
 
@@ -98,6 +104,8 @@ static void **PyCurses_API;
 #define PyCursesSetupTermCalled  {if (! ((int (*)(void))PyCurses_API[1]) () ) return NULL;}
 #define PyCursesInitialised      {if (! ((int (*)(void))PyCurses_API[2]) () ) return NULL;}
 #define PyCursesInitialisedColor {if (! ((int (*)(void))PyCurses_API[3]) () ) return NULL;}
+
+#define PyCursesWindow_Check(v)     Py_IS_TYPE((v), &PyCursesWindow_Type)
 
 #define import_curses() \
     PyCurses_API = (void **)PyCapsule_Import(PyCurses_CAPSULE_NAME, 1);

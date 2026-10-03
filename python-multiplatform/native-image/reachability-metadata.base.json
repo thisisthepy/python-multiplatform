@@ -1,0 +1,30 @@
+{
+  "_comment": [
+    "Hand-authored half of the GraalVM reachability metadata shipped at",
+    "META-INF/native-image/org.thisisthepy/python-multiplatform/reachability-metadata.json.",
+    "The `foreign` section is NOT here: it is derived from the desktop FFI sources by the",
+    "`generateDesktopReachabilityMetadata` task (see python-multiplatform/build.gradle.kts) and",
+    "merged in front of these keys. Only entries that cannot be derived from code belong here.",
+    "Keys starting with `_` are stripped before the file is written, since native-image validates",
+    "the document against a schema."
+  ],
+  "_comment_resources": [
+    "There is deliberately no `resources` entry for `lib/<platform>/libpython*`. A registered",
+    "resource is not read from a jar at runtime by a native image -- it is baked into the image",
+    "heap as a byte[], which cost 19.4 MB of a 35.4 MB binary so that manager.kt could write it",
+    "straight back out to a temporary file at startup. CPython has to exist on disk anyway,",
+    "because PYTHONHOME must point at a prefix with a matching stdlib for Py_Initialize to get",
+    "past `encodings`, so manager.kt loads the library from that same prefix when the classpath",
+    "copy is absent. Re-adding a glob here would put the 19.4 MB back.",
+    "Consumers with no PYTHONHOME on disk can set PYTHON_MULTIPLATFORM_LIBPYTHON instead.",
+    "If a platform-scoped glob is ever added back, write it as `lib/${hostPlatform}/**`: the jar",
+    "carries all four platforms and an image needs exactly one. The desktop ProcessResources",
+    "filter substitutes that placeholder."
+  ],
+  "reflection": [
+    {
+      "type": "python.native.ffi.UpcallTarget",
+      "allPublicMethods": true
+    }
+  ]
+}

@@ -1,228 +1,232 @@
-# Python Multiplatform
+English | [한국어](docs/locale/README_ko.md)
 
-![Build](https://github.com/thisisthepy/toolchain/workflows/Build/badge.svg)
-[![Version](https://img.shields.io/jetbrains/plugin/v/MARKETPLACE_ID.svg)](https://plugins.jetbrains.com/plugin/MARKETPLACE_ID)
-[![Downloads](https://img.shields.io/jetbrains/plugin/d/MARKETPLACE_ID.svg)](https://plugins.jetbrains.com/plugin/MARKETPLACE_ID)
+<div align="center">
 
+# 🐍 python-multiplatform
 
-### Description
+**Real CPython inside Kotlin Multiplatform — Kotlin calls Python, Python calls Kotlin, on every target.**
 
-A multiplatform solution to use Python with Kotlin interoperably.
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Kotlin Multiplatform](https://img.shields.io/badge/Kotlin-Multiplatform-7F52FF.svg?logo=kotlin&logoColor=white)](https://kotlinlang.org/docs/multiplatform.html)
+[![CPython](https://img.shields.io/badge/CPython-3.14-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
+[![Platforms](https://img.shields.io/badge/platforms-JVM%20%7C%20Android%20%7C%20iOS%20%7C%20Android%20native%20%7C%20wasm%20(exp.)-lightgrey.svg)](#-platforms)
 
-Thanks to many contributors who develop dependent packages for this python-kotlin library production.
+[Guide](https://thisisthepy.github.io/python-multiplatform/) ·
+[Design notes](docs/design/) ·
+[Roadmap](docs/roadmap/ROADMAP.md)
 
-
-#### Supporting multiplatforms:
-
-- Android (arm64, arm32, x86, x86_64) with [Kivy Android ToolChain](https://github.com/thisisthepy/toolchain-android)
-- iOS (arm64) with [Kivy ios Toolchain](https://github.com/thisisthepy/toolchain-ios)
-- masOS (universal) with [Python Standalone Builds](https://github.com/indygreg/python-build-standalone)
-- Linux (x86_64) with [Python Standalone Builds](https://github.com/indygreg/python-build-standalone)
-- Windows (x86_64) with [Python Standalone Builds](https://github.com/indygreg/python-build-standalone)
-- WASM - Not yet supported.
-
-
-> [!NOTE]  
-> ** Since Xcode only runs on macOS, you need macOS to build this repo for iOS.
-
-
-### Template ToDo list ✨
-- [x] Bring python embed API for Kotlin/JVM targets (Windows, Linux, macOS, Android).
-- [x] Bring python embed API for Kotlin/Native targets (iOS).
-- [x] Python interop API (Binder) for Kotlin side.
-- [ ] Kotlin interop API (Binder) for Python side.
-
-___
-
-## Build Manually 🛠️
-
-#### (1) Clone this repo
-
-- RC version
-
-
-    git clone https://github.com/thisisthepy/python-multiplatform-mobile PythonMultiplatformMobile
-
-- dev version
-
-
-    git clone https://github.com/thisisthepy/python-multiplatform-mobile@develop PythonMultiplatformMobile
-
-- specific release version
-
-
-    git clone https://github.com/thisisthepy/python-multiplatform-mobile@python3.13 PythonMultiplatformMobile
-
-
-#### (2) Build gradle project
-
-This is a Kotlin Multiplatform project targeting Android, iOS, Web, Desktop.
-
-* `/composeApp` is for code that will be shared across your Compose Multiplatform applications.
-  It contains several subfolders:
-  - `commonMain` is for code that’s common for all targets.
-  - Other folders are for Kotlin code that will be compiled for only the platform indicated in the folder name.
-    For example, if you want to use Apple’s CoreCrypto for the iOS part of your Kotlin app,
-    `iosMain` would be the right folder for such calls.
-
-* `/iosApp` contains iOS applications. Even if you’re sharing your UI with Compose Multiplatform, 
-  you need this entry point for your iOS app. This is also where you should add SwiftUI code for your project.
-
-
-Learn more about [Kotlin Multiplatform](https://www.jetbrains.com/help/kotlin-multiplatform-dev/get-started.html),
-[Compose Multiplatform](https://github.com/JetBrains/compose-multiplatform/#compose-multiplatform),
-[Kotlin/Wasm](https://kotl.in/wasm/)…
-
-We would appreciate your feedback on Compose/Web and Kotlin/Wasm in the public Slack channel [#compose-web](https://slack-chats.kotlinlang.org/c/compose-web).
-If you face any issues, please report them on [GitHub](https://github.com/JetBrains/compose-multiplatform/issues).
-
-You can open the web application by running the `:composeApp:wasmJsBrowserDevelopmentRun` Gradle task.
-
+</div>
 
 ---
 
-## Use Pre-Built Package 🧰
+## 💡 Why
 
-#### (1) Maven Repo (Release only)
+Python has the libraries; Kotlin Multiplatform has the reach — desktop, Android, iOS, the web.
+python-multiplatform puts **the real CPython interpreter** inside a Kotlin Multiplatform app and
+builds a two-way bridge across it:
 
-In your project build.gradle.kts
+- Kotlin gets a **typed, Kotlin-idiomatic object model** over Python: a `PyList` *is* a `MutableList`,
+  a `PyDict` *is* a `MutableMap`, a Python error *is* a `Throwable`.
+- Python gets **Kotlin classes as ordinary Python**: `Greeter('Kotlin').greet(2)`, `await` on a
+  `suspend fun`, Kotlin extension functions as methods — all through a table generated at build time,
+  so it works where reflection does not: Kotlin/Native and GraalVM native images.
 
-    implementation("io.github.thisisthepy:python-multiplatform:0.0.1")
+It is CPython itself, not a re-implementation, so C extensions keep working.
 
-#### (2) Jitpack (for Pre-release)
+## ✨ Features
 
-In your project settings.gradle.kts
+- 🔌 **Downcalls** — the CPython Stable ABI (~330 functions) as one `expect` surface with an `actual`
+  per platform: Panama `invokeExact` on desktop, `RegisterNatives` JNI on Android, cinterop on Native.
+- 🧩 **Object model** — `PyObject`, `PyType`, `PyException`, basic types, `PyList` / `PyDict` /
+  `PySet` / `PyTuple` implementing Kotlin collection interfaces, modules, callables, conversion.
+- 🚀 **Upcalls** — a KSP processor generates a function table; Python constructs Kotlin classes, calls
+  methods, reads and writes properties, and `await`s `suspend` functions with cancellation.
+- 📦 **Bind prebuilt libraries** — the Gradle plugin walks jars (Compose included) and generates the
+  bindings and `.pyi` stubs, with default-argument omission and value-class support.
+- ♻️ **No manual memory management** — wrappers release their Python reference when collected; reference
+  cycles that cross the boundary are collected by Python's cyclic GC.
+- 🧪 **Measured** — every boundary mechanism ships with overhead tests; the cost table is rendered from
+  real runs ([cost table](docs/investigations/cost-table.md)).
 
-    pluginManagement {
-        repositories {
-            google {
-                mavenContent {
-                    includeGroupAndSubgroups("androidx")
-                    includeGroupAndSubgroups("com.android")
-                    includeGroupAndSubgroups("com.google")
-                }
-            }
-            mavenCentral()
-            gradlePluginPortal()
-    
-            maven {
-                setUrl("https://jitpack.io")  // Add this line!
-            }
-        }
-    }
+## 🚀 Quick start
 
+> **Not published yet.** No release is on Maven Central or JitPack today. Build from source (below);
+> coordinates will be announced when a release exists.
 
-In your project build.gradle.kts
+```bash
+git clone https://github.com/thisisthepy/python-multiplatform
+cd python-multiplatform
+./gradlew :sample:run          # desktop demo app
+```
 
-    implementation("com.github.thisisthepy:python-multiplatform-mobile:0.0.1")
-
-
-> [!TIP]
-> Some tips
-
----
-
-## Usage 📑
-
-In your main method,
+### Kotlin → Python
 
 ```kotlin
+import python.multiplatform.ffi.PyObject
+import python.multiplatform.ffi.Python3
+import python.multiplatform.ffi.types.basic.PyInt
+import python.multiplatform.ffi.types.collections.PyList
 
-object PythonIntegration {
-    val python = Python3Library()
-    
-    @JvmStatic
-    fun main(args: Array<String>) {
+fun main() {
+    Python3.initialize()
 
-        python!!.Py_Initialize()  // Run python interprepter
+    // A real Python list of real Python ints, published into __main__.
+    val numbers = PyList.fromList(listOf(2L, 3L, 5L, 7L, 11L).map { PyInt.from(it) })
+    Python3.import("__main__").setAttr("kotlin_numbers", numbers)
 
-        if (python!!.Py_IsInitialized() == 0) {
-            throw RuntimeException("Failed to initialize Python")
-        }
-        
-        val module = py!!.PyImport_ImportModule(moduleName)  // Module import
-        if (module == null) {
-            throw RuntimeException("Failed to import module: $moduleName")
-        }
+    val globals = Python3.import("__main__").dict
+    val result: PyObject = Python3.eval("sum(kotlin_numbers) * 2", 258 /* Py_eval_input */, globals, globals)
+    println("${result.Type.name}: $result")   // int: 56
 
-        callFunction(mathModule, "pow", 2.0, 3.0)
-
-        val func = py!!.PyObject_GetAttrString(module, funcName)
-
-        if (func == null) {
-            throw java.lang.RuntimeException("Failed to get function: $funcName")
-        }
-
-        val pyArgs = py!!.PyTuple_New(args.size)
-        for (i in args.indices) {
-            val arg = convertJavaToPython(args[i])
-            println("The type of variable is ${arg::class.simpleName}")
-            py!!.PyTuple_SetItem(pyArgs, i, arg)
-        }
-
-        val result = py!!.PyObject_CallObject(func, pyArgs)
-
-        if (result != null) {
-            println(funcName + " result: " + convertPythonToJava(result))
-            py!!.Py_DecRef(result)
-        }
-
-        py!!.Py_DecRef(pyArgs)
-        py!!.Py_DecRef(func)
-
-        python!!.Py_DecRef(mathModule)
-
-        if (python!!.Py_IsInitialized() != 0) {
-            python!!.Py_Finalize()
-        }
-    }
-
-    private fun convertJavaToPython(obj: Any): Pointer {
-        if (obj is Int || obj is Long) {
-            println("obj is converted to PyLong: $obj")
-            return py!!.PyLong_FromLong((obj as Number).toLong())
-        } else if (obj is Float || obj is Double) {
-            println("obj is converted to PyFloat: $obj")
-            return py!!.PyFloat_FromDouble((obj as Number).toDouble())
-        } else if (obj is String) {
-            println("obj is converted to String: $obj")
-            return py!!.PyUnicode_FromString(obj)
-        }
-        throw UnsupportedOperationException("Unsupported type: " + obj.javaClass)
-    }
-
-    private fun convertPythonToJava(pyObj: Pointer): Any {
-        // This is a simplistic conversion. In a real-world scenario, you'd need more type checking.
-        val result1 = py!!.PyLong_AsLong(pyObj)
-        if (py!!.PyErr_Occurred() == null) {
-            return result1
-        }
-        py!!.PyErr_Clear()
-
-        val result2 = py!!.PyFloat_AsDouble(pyObj)
-        if (py!!.PyErr_Occurred() == null) {
-            return result2
-        }
-        py!!.PyErr_Clear()
-
-        val result3 = py!!.PyUnicode_AsUTF8(pyObj)
-        if (py!!.PyErr_Occurred() == null) {
-            return result3
-        }
-        py!!.PyErr_Clear()
-
-        throw UnsupportedOperationException("Unsupported type")
-    }
-
+    Python3.exec("print('hello from python')")
+    // No close() anywhere: each wrapper releases its reference when it is collected.
 }
-
 ```
-  
-> [!IMPORTANT]
-> Somethig important
 
----
+### Python → Kotlin
 
-## Stargazers over time 🌟
+Any `public` Kotlin declaration is exposed (opt out with `@PythonInternal`):
 
-[![Stargazers over time](https://starchart.cc/thisisthepy/python-multiplatform-mobile.svg?variant=adaptive)](https://starchart.cc/thisisthepy/python-multiplatform-mobile)
+```kotlin
+package org.thisisthepy.python.multiplatform.demo.bindings
+
+class Greeter(subject: String) {
+    var subject: String = subject
+    var greetings: Long = 0
+        private set
+
+    fun greet(times: Long): String { /* ... */ }
+    suspend fun greetNow(times: Long): String = greet(times)
+}
+```
+
+```python
+from org.thisisthepy.python.multiplatform.demo.bindings import Greeter
+
+g = Greeter('Kotlin')    # constructs the Kotlin object
+g.greet(2)               # calls the Kotlin method
+g.subject = 'Python'     # property setter
+g.greetings = 99         # AttributeError: the Kotlin setter is private
+
+async def main():
+    return await g.greetNow(1)   # a Kotlin suspend fun, awaited
+```
+
+Both snippets come from the [`sample/`](sample/) app. The Kotlin package name is the Python module
+name, unchanged.
+
+### Platform setup
+
+<details>
+<summary><b>Desktop</b> — apply the Gradle plugin so <code>PYTHONHOME</code> has a stdlib</summary>
+
+```kotlin
+plugins {
+    kotlin("jvm")
+    application
+    id("io.github.thisisthepy.python.multiplatform.bindings") version "<version>"
+}
+```
+
+`stagePythonHome` downloads the matching CPython build, verifies it against the release's
+`SHA256SUMS`, caches it machine-wide and sets `PYTHONHOME` on `run` and `test`. A `PYTHONHOME` you set
+yourself is never touched; disable staging with `pythonBindings { stagePythonHome.set(false) }`.
+A Compose Desktop app packaged with `createDistributable` (or a `package*` task) carries the staged
+stdlib and `libpython` in its resources and starts without `PYTHONHOME`
+(`pythonBindings { packagePythonHome.set(false) }` turns that off); any other packaging can name its
+prefix with `-Dpython.multiplatform.home=...`. See `docs/platforms/desktop-packaged-app.md`.
+</details>
+
+<details>
+<summary><b>Android</b> — call <code>PythonBootstrap.initialize</code></summary>
+
+```kotlin
+import python.multiplatform.env.PythonBootstrap
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        PythonBootstrap.initialize(this)   // unpacks the stdlib once, then starts CPython
+    }
+}
+```
+
+The stdlib ships in the APK and is unpacked to app-private storage on first launch
+(measured 237–480 ms on API 26–36), then skipped by a stamp check (4–28 ms). Idempotent.
+</details>
+
+## 🧭 Architecture at a glance
+
+```mermaid
+flowchart LR
+    subgraph Kotlin
+      K[Your Kotlin code] --> OM[Object model<br/>PyObject · PyList · PyDict …]
+      OM --> FFI["EmbedAPI (expect)<br/>~330 Stable ABI functions"]
+      T[Generated function table<br/>KSP · Gradle artifact walker]
+    end
+    subgraph CPython
+      P[Your Python code] --> PX[Generated proxies<br/>Greeter · Modifier …]
+    end
+    FFI -- "downcall<br/>Panama · JNI · cinterop · wasm" --> CPython
+    PX -- "upcall<br/>one entry point per platform" --> T
+    T --> K
+```
+
+Behind each platform's single entry point, **every platform uses the same generated table** — there is
+no per-platform Python → Kotlin binding code. Details: [design notes](docs/design/).
+
+## 🌍 Platforms
+
+| Platform | Downcall | Upcall | Status |
+|---|---|---|---|
+| Desktop JVM (macOS) | Panama FFM | FFM upcall stub | ✅ full suite, GraalVM native image verified |
+| Desktop JVM (Linux, Windows) | Panama FFM | FFM upcall stub | 🟡 wired, never run |
+| Android | JNI (`RegisterNatives`) | JNI | ✅ device-tested |
+| iOS | cinterop | `@CName` | 🟡 shared suite on simulator |
+| Android native | cinterop | `@CName` | 🟡 shared suite on device |
+| wasmJs (browser, Node) | Emscripten CPython | `@WasmExport` | 🧪 experimental |
+
+## 📊 Status
+
+Honest summary — see the [roadmap](docs/roadmap/ROADMAP.md) for what is left to do.
+
+| Area | State |
+|---|---|
+| Interpreter lifecycle, object model, downcall surface | ✅ implemented |
+| Object lifetime and cross-boundary cycle collection | ✅ desktop · 🟡 other targets |
+| Upcalls (classes, properties, `suspend`, cancellation) | ✅ desktop · 🟡 other targets |
+| Binding prebuilt jars, Compose from Python | ✅ desktop · ⏳ Android / iOS / wasm |
+| Binding Kotlin/Native klibs | 🟡 scanner only |
+| `.pyi` stub generation | 🟡 partial |
+| Free-threaded CPython (3.14t, desktop only, opt-in `-PpythonFreeThreaded=true`) | 🟡 partial |
+
+## 🧱 The ecosystem
+
+| Repository | Role |
+|---|---|
+| **python-multiplatform** | The language boundary (this repository) |
+| [pythonx-compose](https://github.com/thisisthepy/pythonx-compose) | Pythonic packages over Compose, built on this binder |
+| [toolchain](https://github.com/thisisthepy/toolchain) | Gradle vocabulary for building Python apps |
+| [pypackpack](https://github.com/thisisthepy/pypackpack) | Python acquisition, dependency resolution, bundling |
+| [torchnative](https://github.com/thisisthepy/torchnative) | The real PyTorch ecosystem on device |
+| [Gemstone](https://github.com/LogitAI/Gemstone) | Independent project planning to adopt python-multiplatform |
+
+## 📖 Documentation
+
+- 🌐 **[Guide](https://thisisthepy.github.io/python-multiplatform/)** (English / 한국어) — source in [`docs/guide/`](docs/guide/)
+- 🏗 [Design notes](docs/design/) — architecture, downcalls, upcalls, lifetime, threading, binding policy
+- 📱 [Platform notes](docs/platforms/) — Android FFM, wasm, CPython acquisition, GraalVM verification
+- 🔬 [Investigations](docs/investigations/) — measurements and audits
+- 🗺 [Roadmap](docs/roadmap/ROADMAP.md)
+- 🇰🇷 [README in Korean](docs/locale/README_ko.md)
+
+## 🤝 Contributing
+
+This project runs on intent-based, spec-driven, test-driven development: the intent bounds the spec,
+the spec drives the tests, and tests are written red before the code. Read the
+[contributing section of the guide](https://thisisthepy.github.io/python-multiplatform/#contributing)
+before opening a pull request. Building iOS targets requires macOS with Xcode.
+
+## 📄 License
+
+[MIT](LICENSE) © 2024 thisisthepy

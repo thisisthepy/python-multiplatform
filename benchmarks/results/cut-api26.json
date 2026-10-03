@@ -1,0 +1,2655 @@
+{
+  "schema": 2,
+  "capturedAt": "2026-08-14T16:53:51+09:00",
+  "commit": "958c0082b294c423d4f1eace3022d0e83fe1e94b",
+  "commitSubject": "Merge branch 'work/objecttype' into develop",
+  "branch": "develop",
+  "workingTreeDirty": true,
+  "worktree": "/Volumes/macMini/thisisthepy/PythonMultiplatform",
+  "host": {
+    "os": "Darwin 25.5.0",
+    "machine": "arm64",
+    "cpu": "Apple M1",
+    "cores": 8,
+    "cpuBrandCores": "8"
+  },
+  "loadAtStart": [
+    3.69,
+    2.75,
+    3.62
+  ],
+  "loadGuard": "ok",
+  "loadCeiling": 4.0,
+  "contaminated": false,
+  "runsRequested": 3,
+  "targetsRequested": [
+    "artApi26"
+  ],
+  "benchmarkTestWarmup": {
+    "WARMUP": 100000,
+    "WARMUP_BULK": 10000
+  },
+  "runs": [
+    {
+      "target": "artApi26",
+      "task": ":python-multiplatform:connectedDebugAndroidTest",
+      "run": 1,
+      "requiresDevice": true,
+      "notes": "",
+      "log": "benchmarks/results/logs/artApi26-run1-20260814-165351.log",
+      "device": {
+        "serial": "emulator-5556",
+        "avd": "pmp_api26",
+        "props": {
+          "ro.build.version.sdk": "26",
+          "ro.build.version.release": "8.0.0",
+          "ro.product.cpu.abi": "arm64-v8a",
+          "ro.product.model": "Android SDK built for arm64"
+        }
+      },
+      "command": "/Volumes/macMini/thisisthepy/PythonMultiplatform/gradlew :python-multiplatform:connectedDebugAndroidTest --console=plain --rerun",
+      "loadBefore": [
+        3.69,
+        2.75,
+        3.62
+      ],
+      "wallSeconds": 153.8,
+      "exitCode": 1,
+      "loadAfter": [
+        2.02,
+        2.61,
+        3.44
+      ],
+      "suite": {
+        "tests": 381,
+        "failures": 3,
+        "skipped": 0,
+        "errors": 0
+      },
+      "resultFiles": 1,
+      "deviceDirs": [
+        "pmp_api26(AVD) - 8.0.0"
+      ],
+      "rows": [
+        {
+          "source": "Benchmark.printReport",
+          "label": "PyObject_GetAttrString",
+          "key": "pyobject_getattrstring",
+          "iterations": 10000,
+          "value": 1391.7,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "PyLong_FromLongLong",
+          "key": "pylong_fromlonglong",
+          "iterations": 100000,
+          "value": 1230.39,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "PyLong_AsLongLong",
+          "key": "pylong_aslonglong",
+          "iterations": 100000,
+          "value": 653.66,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "NativePointer.toRawValue()",
+          "key": "nativepointer.torawvalue()",
+          "iterations": 1000000,
+          "value": 3.7,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "NativePointer.toAddressValue()",
+          "key": "nativepointer.toaddressvalue()",
+          "iterations": 1000000,
+          "value": 18.37,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "AddressValue.toNativePointer()",
+          "key": "addressvalue.tonativepointer()",
+          "iterations": 1000000,
+          "value": 19.98,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "Py_IncRef/Py_DecRef",
+          "key": "py_incref/py_decref",
+          "iterations": 1000000,
+          "value": 1270.82,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "Manual IncRef/DecRef",
+          "key": "manual incref/decref",
+          "iterations": 100000,
+          "value": 1321.38,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "PyObject wrapper creation",
+          "key": "pyobject wrapper creation",
+          "iterations": 100000,
+          "value": 1741.41,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "PyUnicode_FromString (8 chars)",
+          "key": "pyunicode_fromstring (8 chars)",
+          "iterations": 10000,
+          "value": 1404.0,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "PyUnicode_AsUTF8 (8 chars)",
+          "key": "pyunicode_asutf8 (8 chars)",
+          "iterations": 10000,
+          "value": 4040.6,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "PyUnicode_FromString (256 chars)",
+          "key": "pyunicode_fromstring (256 chars)",
+          "iterations": 10000,
+          "value": 2503.43,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "PyUnicode_AsUTF8 (256 chars)",
+          "key": "pyunicode_asutf8 (256 chars)",
+          "iterations": 10000,
+          "value": 50387.81,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "PyUnicode_FromString (8192 chars)",
+          "key": "pyunicode_fromstring (8192 chars)",
+          "iterations": 10000,
+          "value": 35140.57,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "PyUnicode_AsUTF8 (8192 chars)",
+          "key": "pyunicode_asutf8 (8192 chars)",
+          "iterations": 10000,
+          "value": 1479421.62,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "arrayOf(1L) allocation + boxing",
+          "key": "arrayof(1l) allocation + boxing",
+          "iterations": 1000000,
+          "value": 10.18,
+          "unit": "ns",
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "invoke with a pre-built args array",
+          "key": "invoke with a pre-built args array",
+          "iterations": 1000000,
+          "value": 35.8,
+          "unit": "ns",
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "direct Kotlin call (floor)",
+          "key": "direct kotlin call (floor)",
+          "iterations": 1000000,
+          "value": 4.14,
+          "unit": "ns",
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "HandleTable.resolve(handle)",
+          "key": "handletable.resolve(handle)",
+          "iterations": 1000000,
+          "value": 16.53,
+          "unit": "ns",
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "HandleTable.register + release",
+          "key": "handletable.register + release",
+          "iterations": 500000,
+          "value": 74.27,
+          "unit": "ns",
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "UpcallTable.resolve(name) [200 entries]",
+          "key": "upcalltable.resolve(name) [200 entries]",
+          "iterations": 1000000,
+          "value": 46.84,
+          "unit": "ns",
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "UpcallTable.invoke(handle, args)",
+          "key": "upcalltable.invoke(handle, args)",
+          "iterations": 1000000,
+          "value": 46.57,
+          "unit": "ns",
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "UpcallTable.invokeByName(name, args)",
+          "key": "upcalltable.invokebyname(name, args)",
+          "iterations": 1000000,
+          "value": 79.61,
+          "unit": "ns",
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        }
+      ],
+      "blocks": [
+        {
+          "block": "START OF GilParkingTest",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.ffi.GilParkingTest"
+        },
+        {
+          "block": "END OF GilParkingTest",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.ffi.GilParkingTest"
+        },
+        {
+          "block": "Generated proxy cost",
+          "platform": "Android 8.0.0 (SDK 26, aarch64) / ART VM 0.9",
+          "conditions": {
+            "iterations per row": "10000 x 3 (best taken)",
+            "warmup": "5000"
+          },
+          "metrics": [
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "empty Python function (the harness floor)",
+              "key": "empty python function (the harness floor)",
+              "value": 40.43,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "plain.x            pure Python, no boundary",
+              "key": "plain.x pure python, no boundary",
+              "value": 44.14,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "plain.p            pure Python @property, no boundary",
+              "key": "plain.p pure python @property, no boundary",
+              "value": 84.5,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "_pm_invoke(h, ())                        raw boundary, arity 0",
+              "key": "_pm_invoke(h, ()) raw boundary, arity 0",
+              "value": 842.02,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "demo.calc.ping()                          module function proxy",
+              "key": "demo.calc.ping() module function proxy",
+              "value": 797.35,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "_pm_release(_pm_invoke(h, (10,)))        raw boundary + release",
+              "key": "_pm_release(_pm_invoke(h, (10,))) raw boundary + release",
+              "value": 1380.11,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "Counter(10)                               constructor proxy",
+              "key": "counter(10) constructor proxy",
+              "value": 1833.82,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "_pm_invoke(h, (self, 5))                 raw boundary",
+              "key": "_pm_invoke(h, (self, 5)) raw boundary",
+              "value": 1670.02,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "c.increment(5)                            instance method proxy",
+              "key": "c.increment(5) instance method proxy",
+              "value": 1603.4,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "_pm_invoke(h, (self,))                   raw boundary",
+              "key": "_pm_invoke(h, (self,)) raw boundary",
+              "value": 1302.02,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "c.value                                   property read (descriptor)",
+              "key": "c.value property read (descriptor)",
+              "value": 1354.17,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "_pm_invoke(h, (self, 'x'))               raw boundary",
+              "key": "_pm_invoke(h, (self, 'x')) raw boundary",
+              "value": 3701.34,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "c.label = 'x'                             property write (descriptor)",
+              "key": "c.label = 'x' property write (descriptor)",
+              "value": 4117.91,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "_pm_invoke(h, ())                        raw boundary, arity 0 again",
+              "key": "_pm_invoke(h, ()) raw boundary, arity 0 again",
+              "value": 798.54,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "_pm_invoke(h, (12,))                     raw boundary",
+              "key": "_pm_invoke(h, (12,)) raw boundary",
+              "value": 1043.9,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "Counter.created                           static read (metaclass)",
+              "key": "counter.created static read (metaclass)",
+              "value": 881.22,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "Counter.created = 12                      static write (metaclass)",
+              "key": "counter.created = 12 static write (metaclass)",
+              "value": 1395.41,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "demo.calc.tally                           top-level read (module type)",
+              "key": "demo.calc.tally top-level read (module type)",
+              "value": 870.29,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "demo.calc.tally = 9                       top-level write (module type)",
+              "key": "demo.calc.tally = 9 top-level write (module type)",
+              "value": 1169.82,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Pure-Python floors, net of the harness (no boundary anywhere in these)",
+              "label": "plain attribute read",
+              "key": "plain attribute read",
+              "value": 3.7,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Pure-Python floors, net of the harness (no boundary anywhere in these)",
+              "label": "@property read",
+              "key": "@property read",
+              "value": 44.06,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Pure-Python floors, net of the harness (no boundary anywhere in these)",
+              "label": "the descriptor itself costs",
+              "key": "the descriptor itself costs",
+              "value": 40.35,
+              "unit": "ns"
+            }
+          ],
+          "origin": "python.multiplatform.ffi.upcall.GeneratedProxyCostTest"
+        },
+        {
+          "block": "Generated proxy install cost",
+          "platform": "Android 8.0.0 (SDK 26, aarch64) / ART VM 0.9",
+          "conditions": {
+            "iterations": "20",
+            "warmup": "5"
+          },
+          "metrics": [
+            {
+              "source": "Generated proxy install cost",
+              "section": "",
+              "label": "PythonProxySource.render()      Kotlin string building only",
+              "key": "pythonproxysource.render() kotlin string building only",
+              "value": 933.04,
+              "unit": "us"
+            },
+            {
+              "source": "Generated proxy install cost",
+              "section": "",
+              "label": "PythonProxySource.install()     render + Python3.exec",
+              "key": "pythonproxysource.install() render + python3.exec",
+              "value": 2602.72,
+              "unit": "us"
+            },
+            {
+              "source": "Generated proxy install cost",
+              "section": "",
+              "label": "...of which Python3.exec",
+              "key": "of which python3.exec",
+              "value": 1669.67,
+              "unit": "us"
+            }
+          ],
+          "origin": "python.multiplatform.ffi.upcall.GeneratedProxyCostTest"
+        },
+        {
+          "block": "Generated proxy cost, await fast path",
+          "platform": "Android 8.0.0 (SDK 26, aarch64) / ART VM 0.9",
+          "conditions": {
+            "iterations per row": "10000 x 3 (best taken)",
+            "warmup": "5000"
+          },
+          "metrics": [
+            {
+              "source": "Generated proxy cost, await fast path",
+              "section": "",
+              "label": "_pm_invoke(h, (21,)) inside the coroutine, no await",
+              "key": "_pm_invoke(h, (21,)) inside the coroutine, no await",
+              "value": 1221.47,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost, await fast path",
+              "section": "",
+              "label": "await a pure-Python coroutine that never suspends",
+              "key": "await a pure-python coroutine that never suspends",
+              "value": 124.15,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost, await fast path",
+              "section": "",
+              "label": "await demo.calc.doubleNow(21)   generated async def, fast path",
+              "key": "await demo.calc.doublenow(21) generated async def, fast path",
+              "value": 1490.08,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost, await fast path",
+              "section": "",
+              "label": "await proxy / raw boundary in the same loop",
+              "key": "await proxy / raw boundary in the same loop",
+              "value": 1.21,
+              "unit": "x"
+            },
+            {
+              "source": "Generated proxy cost, await fast path",
+              "section": "",
+              "label": "what the async def wrapper adds",
+              "key": "what the async def wrapper adds",
+              "value": 268.6,
+              "unit": "ns"
+            }
+          ],
+          "origin": "python.multiplatform.ffi.upcall.GeneratedProxyCostTest"
+        },
+        {
+          "block": "Benchmark Report",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "block": "Benchmark Report",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "block": "Benchmark Report",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "block": "Benchmark Report",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "block": "Benchmark Report",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "block": "Benchmark Report",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "block": "eval-loop checkpoint cost (freeThreaded=false)",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.ref.EvalCheckpointTest"
+        },
+        {
+          "block": "Benchmark Report",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        },
+        {
+          "block": "Benchmark Report",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        },
+        {
+          "block": "Benchmark Report",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        },
+        {
+          "block": "Upcall boundary cost",
+          "platform": "Android 8.0.0 (SDK 26, aarch64) / ART VM 0.9",
+          "conditions": {
+            "iterations per loop": "10000",
+            "warmup": "100000"
+          },
+          "metrics": [
+            {
+              "source": "Upcall boundary cost",
+              "section": "Python-driven (timed inside Python)",
+              "label": "empty Python loop",
+              "key": "empty python loop",
+              "value": 20.01,
+              "unit": "ns"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Python-driven (timed inside Python)",
+              "label": "pure-Python callee, same shape",
+              "key": "pure-python callee, same shape",
+              "value": 62.92,
+              "unit": "ns"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Python-driven (timed inside Python)",
+              "label": "upcall to Kotlin",
+              "key": "upcall to kotlin",
+              "value": 1235.37,
+              "unit": "ns"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Python-driven (timed inside Python)",
+              "label": "upcall net of loop",
+              "key": "upcall net of loop",
+              "value": 1215.36,
+              "unit": "ns"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Python-driven (timed inside Python)",
+              "label": "upcall net of a Python call",
+              "key": "upcall net of a python call",
+              "value": 1172.44,
+              "unit": "ns"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Comparison basis, same run (timed inside Kotlin)",
+              "label": "Py_IncRef + Py_DecRef (2 downcalls, a GIL scope each)",
+              "key": "py_incref + py_decref (2 downcalls, a gil scope each)",
+              "value": 1177.35,
+              "unit": "ns"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Comparison basis, same run (timed inside Kotlin)",
+              "label": "PyObject_CallObject on a Python def (downcall, same shape)",
+              "key": "pyobject_callobject on a python def (downcall, same shape)",
+              "value": 1277.09,
+              "unit": "ns"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Comparison basis, same run (timed inside Kotlin)",
+              "label": "UpcallTrampoline.invoke from Kotlin (no shim, no boundary)",
+              "key": "upcalltrampoline.invoke from kotlin (no shim, no boundary)",
+              "value": 1803.44,
+              "unit": "ns"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Comparison basis, same run (timed inside Kotlin)",
+              "label": "...the same, with the GIL already held by the caller",
+              "key": "the same, with the gil already held by the caller",
+              "value": 1142.08,
+              "unit": "ns"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Comparison basis, same run (timed inside Kotlin)",
+              "label": "...Python3.withPython { } with nothing in it, for scale",
+              "key": "python3.withpython { } with nothing in it, for scale",
+              "value": 520.57,
+              "unit": "ns"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Ratios",
+              "label": "upcall / downcall of the same shape",
+              "key": "upcall / downcall of the same shape",
+              "value": 0.96,
+              "unit": "x"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Ratios",
+              "label": "upcall / trampoline alone, caller holding nothing",
+              "key": "upcall / trampoline alone, caller holding nothing",
+              "value": 0.68,
+              "unit": "x"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Ratios",
+              "label": "upcall / trampoline alone, GIL held (what the shim adds)",
+              "key": "upcall / trampoline alone, gil held (what the shim adds)",
+              "value": 1.08,
+              "unit": "x"
+            }
+          ],
+          "origin": "python.native.ffi.UpcallBoundaryCostTest"
+        },
+        {
+          "block": "Android upcall overhead (API 26, arm64-v8a)",
+          "platform": null,
+          "conditions": {
+            "iterations per loop": "10000",
+            "warmup": "100000"
+          },
+          "metrics": [
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Python-driven, instrumentation thread (ART already knows it)",
+              "label": "empty Python loop",
+              "key": "empty python loop",
+              "value": 20.01,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Python-driven, instrumentation thread (ART already knows it)",
+              "label": "pure-Python callee",
+              "key": "pure-python callee",
+              "value": 60.98,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Python-driven, instrumentation thread (ART already knows it)",
+              "label": "upcall to Kotlin",
+              "key": "upcall to kotlin",
+              "value": 1239.87,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Python-driven, instrumentation thread (ART already knows it)",
+              "label": "upcall net of loop",
+              "key": "upcall net of loop",
+              "value": 1219.85,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Python-driven, threading.Thread (a pthread ART has never seen)",
+              "label": "empty Python loop",
+              "key": "empty python loop",
+              "value": 20.01,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Python-driven, threading.Thread (a pthread ART has never seen)",
+              "label": "pure-Python callee",
+              "key": "pure-python callee",
+              "value": 62.75,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Python-driven, threading.Thread (a pthread ART has never seen)",
+              "label": "first upcall on the thread",
+              "key": "first upcall on the thread",
+              "value": 119916.0,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Python-driven, threading.Thread (a pthread ART has never seen)",
+              "label": "upcall to Kotlin (steady state)",
+              "key": "upcall to kotlin (steady state)",
+              "value": 1183.25,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Python-driven, threading.Thread (a pthread ART has never seen)",
+              "label": "upcall net of loop",
+              "key": "upcall net of loop",
+              "value": 1163.24,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Attach",
+              "label": "worker minus instrumentation thread",
+              "key": "worker minus instrumentation thread",
+              "value": -56.61,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Comparison basis, same run",
+              "label": "Py_IncRef + Py_DecRef (2 JNI downcalls, a GIL scope each)",
+              "key": "py_incref + py_decref (2 jni downcalls, a gil scope each)",
+              "value": 1171.1,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Comparison basis, same run",
+              "label": "PyObject_CallObject on a Python def (downcall, same shape)",
+              "key": "pyobject_callobject on a python def (downcall, same shape)",
+              "value": 1278.28,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Comparison basis, same run",
+              "label": "UpcallTrampoline.invoke from Kotlin (no C shim, no JNI)",
+              "key": "upcalltrampoline.invoke from kotlin (no c shim, no jni)",
+              "value": 1707.95,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Ratios",
+              "label": "upcall (instrumentation thread) / downcall of same shape",
+              "key": "upcall (instrumentation thread) / downcall of same shape",
+              "value": 0.96,
+              "unit": "x"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Ratios",
+              "label": "upcall (worker thread)          / downcall of same shape",
+              "key": "upcall (worker thread) / downcall of same shape",
+              "value": 0.92,
+              "unit": "x"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Ratios",
+              "label": "upcall (instrumentation thread) / trampoline alone",
+              "key": "upcall (instrumentation thread) / trampoline alone",
+              "value": 0.72,
+              "unit": "x"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Ratios",
+              "label": "upcall (worker thread)          / trampoline alone",
+              "key": "upcall (worker thread) / trampoline alone",
+              "value": 0.69,
+              "unit": "x"
+            }
+          ],
+          "origin": "python.native.ffi.UpcallOverheadTest"
+        }
+      ],
+      "status": "failed"
+    },
+    {
+      "target": "artApi26",
+      "task": ":python-multiplatform:connectedDebugAndroidTest",
+      "run": 2,
+      "requiresDevice": true,
+      "notes": "",
+      "log": "benchmarks/results/logs/artApi26-run2-20260814-165625.log",
+      "device": {
+        "serial": "emulator-5556",
+        "avd": "pmp_api26",
+        "props": {
+          "ro.build.version.sdk": "26",
+          "ro.build.version.release": "8.0.0",
+          "ro.product.cpu.abi": "arm64-v8a",
+          "ro.product.model": "Android SDK built for arm64"
+        }
+      },
+      "command": "/Volumes/macMini/thisisthepy/PythonMultiplatform/gradlew :python-multiplatform:connectedDebugAndroidTest --console=plain --rerun",
+      "loadBefore": [
+        2.02,
+        2.61,
+        3.44
+      ],
+      "wallSeconds": 149.1,
+      "exitCode": 1,
+      "loadAfter": [
+        1.6,
+        2.26,
+        3.16
+      ],
+      "suite": {
+        "tests": 381,
+        "failures": 3,
+        "skipped": 0,
+        "errors": 0
+      },
+      "resultFiles": 1,
+      "deviceDirs": [
+        "pmp_api26(AVD) - 8.0.0"
+      ],
+      "rows": [
+        {
+          "source": "Benchmark.printReport",
+          "label": "PyObject_GetAttrString",
+          "key": "pyobject_getattrstring",
+          "iterations": 10000,
+          "value": 1484.84,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "PyLong_FromLongLong",
+          "key": "pylong_fromlonglong",
+          "iterations": 100000,
+          "value": 1222.29,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "PyLong_AsLongLong",
+          "key": "pylong_aslonglong",
+          "iterations": 100000,
+          "value": 606.21,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "NativePointer.toRawValue()",
+          "key": "nativepointer.torawvalue()",
+          "iterations": 1000000,
+          "value": 3.78,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "NativePointer.toAddressValue()",
+          "key": "nativepointer.toaddressvalue()",
+          "iterations": 1000000,
+          "value": 16.57,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "AddressValue.toNativePointer()",
+          "key": "addressvalue.tonativepointer()",
+          "iterations": 1000000,
+          "value": 20.17,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "Py_IncRef/Py_DecRef",
+          "key": "py_incref/py_decref",
+          "iterations": 1000000,
+          "value": 1197.08,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "Manual IncRef/DecRef",
+          "key": "manual incref/decref",
+          "iterations": 100000,
+          "value": 1192.7,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "PyObject wrapper creation",
+          "key": "pyobject wrapper creation",
+          "iterations": 100000,
+          "value": 1745.09,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "PyUnicode_FromString (8 chars)",
+          "key": "pyunicode_fromstring (8 chars)",
+          "iterations": 10000,
+          "value": 1485.24,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "PyUnicode_AsUTF8 (8 chars)",
+          "key": "pyunicode_asutf8 (8 chars)",
+          "iterations": 10000,
+          "value": 4034.62,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "PyUnicode_FromString (256 chars)",
+          "key": "pyunicode_fromstring (256 chars)",
+          "iterations": 10000,
+          "value": 2514.75,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "PyUnicode_AsUTF8 (256 chars)",
+          "key": "pyunicode_asutf8 (256 chars)",
+          "iterations": 10000,
+          "value": 49856.68,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "PyUnicode_FromString (8192 chars)",
+          "key": "pyunicode_fromstring (8192 chars)",
+          "iterations": 10000,
+          "value": 34593.37,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "PyUnicode_AsUTF8 (8192 chars)",
+          "key": "pyunicode_asutf8 (8192 chars)",
+          "iterations": 10000,
+          "value": 1485238.0,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "arrayOf(1L) allocation + boxing",
+          "key": "arrayof(1l) allocation + boxing",
+          "iterations": 1000000,
+          "value": 10.23,
+          "unit": "ns",
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "invoke with a pre-built args array",
+          "key": "invoke with a pre-built args array",
+          "iterations": 1000000,
+          "value": 34.76,
+          "unit": "ns",
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "direct Kotlin call (floor)",
+          "key": "direct kotlin call (floor)",
+          "iterations": 1000000,
+          "value": 4.21,
+          "unit": "ns",
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "HandleTable.resolve(handle)",
+          "key": "handletable.resolve(handle)",
+          "iterations": 1000000,
+          "value": 15.52,
+          "unit": "ns",
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "HandleTable.register + release",
+          "key": "handletable.register + release",
+          "iterations": 500000,
+          "value": 72.57,
+          "unit": "ns",
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "UpcallTable.resolve(name) [200 entries]",
+          "key": "upcalltable.resolve(name) [200 entries]",
+          "iterations": 1000000,
+          "value": 46.42,
+          "unit": "ns",
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "UpcallTable.invoke(handle, args)",
+          "key": "upcalltable.invoke(handle, args)",
+          "iterations": 1000000,
+          "value": 46.82,
+          "unit": "ns",
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "UpcallTable.invokeByName(name, args)",
+          "key": "upcalltable.invokebyname(name, args)",
+          "iterations": 1000000,
+          "value": 81.72,
+          "unit": "ns",
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        }
+      ],
+      "blocks": [
+        {
+          "block": "START OF GilParkingTest",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.ffi.GilParkingTest"
+        },
+        {
+          "block": "END OF GilParkingTest",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.ffi.GilParkingTest"
+        },
+        {
+          "block": "Generated proxy cost",
+          "platform": "Android 8.0.0 (SDK 26, aarch64) / ART VM 0.9",
+          "conditions": {
+            "iterations per row": "10000 x 3 (best taken)",
+            "warmup": "5000"
+          },
+          "metrics": [
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "empty Python function (the harness floor)",
+              "key": "empty python function (the harness floor)",
+              "value": 40.43,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "plain.x            pure Python, no boundary",
+              "key": "plain.x pure python, no boundary",
+              "value": 43.3,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "plain.p            pure Python @property, no boundary",
+              "key": "plain.p pure python @property, no boundary",
+              "value": 56.31,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "_pm_invoke(h, ())                        raw boundary, arity 0",
+              "key": "_pm_invoke(h, ()) raw boundary, arity 0",
+              "value": 818.27,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "demo.calc.ping()                          module function proxy",
+              "key": "demo.calc.ping() module function proxy",
+              "value": 829.9,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "_pm_release(_pm_invoke(h, (10,)))        raw boundary + release",
+              "key": "_pm_release(_pm_invoke(h, (10,))) raw boundary + release",
+              "value": 1351.9,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "Counter(10)                               constructor proxy",
+              "key": "counter(10) constructor proxy",
+              "value": 1815.94,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "_pm_invoke(h, (self, 5))                 raw boundary",
+              "key": "_pm_invoke(h, (self, 5)) raw boundary",
+              "value": 1647.61,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "c.increment(5)                            instance method proxy",
+              "key": "c.increment(5) instance method proxy",
+              "value": 1599.43,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "_pm_invoke(h, (self,))                   raw boundary",
+              "key": "_pm_invoke(h, (self,)) raw boundary",
+              "value": 1345.64,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "c.value                                   property read (descriptor)",
+              "key": "c.value property read (descriptor)",
+              "value": 1373.15,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "_pm_invoke(h, (self, 'x'))               raw boundary",
+              "key": "_pm_invoke(h, (self, 'x')) raw boundary",
+              "value": 3690.5,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "c.label = 'x'                             property write (descriptor)",
+              "key": "c.label = 'x' property write (descriptor)",
+              "value": 4023.26,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "_pm_invoke(h, ())                        raw boundary, arity 0 again",
+              "key": "_pm_invoke(h, ()) raw boundary, arity 0 again",
+              "value": 811.36,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "_pm_invoke(h, (12,))                     raw boundary",
+              "key": "_pm_invoke(h, (12,)) raw boundary",
+              "value": 1068.53,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "Counter.created                           static read (metaclass)",
+              "key": "counter.created static read (metaclass)",
+              "value": 873.49,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "Counter.created = 12                      static write (metaclass)",
+              "key": "counter.created = 12 static write (metaclass)",
+              "value": 1204.87,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "demo.calc.tally                           top-level read (module type)",
+              "key": "demo.calc.tally top-level read (module type)",
+              "value": 896.76,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "demo.calc.tally = 9                       top-level write (module type)",
+              "key": "demo.calc.tally = 9 top-level write (module type)",
+              "value": 1168.65,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Pure-Python floors, net of the harness (no boundary anywhere in these)",
+              "label": "plain attribute read",
+              "key": "plain attribute read",
+              "value": 2.87,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Pure-Python floors, net of the harness (no boundary anywhere in these)",
+              "label": "@property read",
+              "key": "@property read",
+              "value": 15.87,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Pure-Python floors, net of the harness (no boundary anywhere in these)",
+              "label": "the descriptor itself costs",
+              "key": "the descriptor itself costs",
+              "value": 13.0,
+              "unit": "ns"
+            }
+          ],
+          "origin": "python.multiplatform.ffi.upcall.GeneratedProxyCostTest"
+        },
+        {
+          "block": "Generated proxy install cost",
+          "platform": "Android 8.0.0 (SDK 26, aarch64) / ART VM 0.9",
+          "conditions": {
+            "iterations": "20",
+            "warmup": "5"
+          },
+          "metrics": [
+            {
+              "source": "Generated proxy install cost",
+              "section": "",
+              "label": "PythonProxySource.render()      Kotlin string building only",
+              "key": "pythonproxysource.render() kotlin string building only",
+              "value": 995.97,
+              "unit": "us"
+            },
+            {
+              "source": "Generated proxy install cost",
+              "section": "",
+              "label": "PythonProxySource.install()     render + Python3.exec",
+              "key": "pythonproxysource.install() render + python3.exec",
+              "value": 2482.11,
+              "unit": "us"
+            },
+            {
+              "source": "Generated proxy install cost",
+              "section": "",
+              "label": "...of which Python3.exec",
+              "key": "of which python3.exec",
+              "value": 1486.13,
+              "unit": "us"
+            }
+          ],
+          "origin": "python.multiplatform.ffi.upcall.GeneratedProxyCostTest"
+        },
+        {
+          "block": "Generated proxy cost, await fast path",
+          "platform": "Android 8.0.0 (SDK 26, aarch64) / ART VM 0.9",
+          "conditions": {
+            "iterations per row": "10000 x 3 (best taken)",
+            "warmup": "5000"
+          },
+          "metrics": [
+            {
+              "source": "Generated proxy cost, await fast path",
+              "section": "",
+              "label": "_pm_invoke(h, (21,)) inside the coroutine, no await",
+              "key": "_pm_invoke(h, (21,)) inside the coroutine, no await",
+              "value": 1290.92,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost, await fast path",
+              "section": "",
+              "label": "await a pure-Python coroutine that never suspends",
+              "key": "await a pure-python coroutine that never suspends",
+              "value": 115.82,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost, await fast path",
+              "section": "",
+              "label": "await demo.calc.doubleNow(21)   generated async def, fast path",
+              "key": "await demo.calc.doublenow(21) generated async def, fast path",
+              "value": 1509.61,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost, await fast path",
+              "section": "",
+              "label": "await proxy / raw boundary in the same loop",
+              "key": "await proxy / raw boundary in the same loop",
+              "value": 1.16,
+              "unit": "x"
+            },
+            {
+              "source": "Generated proxy cost, await fast path",
+              "section": "",
+              "label": "what the async def wrapper adds",
+              "key": "what the async def wrapper adds",
+              "value": 218.68,
+              "unit": "ns"
+            }
+          ],
+          "origin": "python.multiplatform.ffi.upcall.GeneratedProxyCostTest"
+        },
+        {
+          "block": "Benchmark Report",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "block": "Benchmark Report",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "block": "Benchmark Report",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "block": "Benchmark Report",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "block": "Benchmark Report",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "block": "Benchmark Report",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "block": "eval-loop checkpoint cost (freeThreaded=false)",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.ref.EvalCheckpointTest"
+        },
+        {
+          "block": "Benchmark Report",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        },
+        {
+          "block": "Benchmark Report",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        },
+        {
+          "block": "Benchmark Report",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        },
+        {
+          "block": "Upcall boundary cost",
+          "platform": "Android 8.0.0 (SDK 26, aarch64) / ART VM 0.9",
+          "conditions": {
+            "iterations per loop": "10000",
+            "warmup": "100000"
+          },
+          "metrics": [
+            {
+              "source": "Upcall boundary cost",
+              "section": "Python-driven (timed inside Python)",
+              "label": "empty Python loop",
+              "key": "empty python loop",
+              "value": 20.04,
+              "unit": "ns"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Python-driven (timed inside Python)",
+              "label": "pure-Python callee, same shape",
+              "key": "pure-python callee, same shape",
+              "value": 56.1,
+              "unit": "ns"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Python-driven (timed inside Python)",
+              "label": "upcall to Kotlin",
+              "key": "upcall to kotlin",
+              "value": 1196.52,
+              "unit": "ns"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Python-driven (timed inside Python)",
+              "label": "upcall net of loop",
+              "key": "upcall net of loop",
+              "value": 1176.47,
+              "unit": "ns"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Python-driven (timed inside Python)",
+              "label": "upcall net of a Python call",
+              "key": "upcall net of a python call",
+              "value": 1140.41,
+              "unit": "ns"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Comparison basis, same run (timed inside Kotlin)",
+              "label": "Py_IncRef + Py_DecRef (2 downcalls, a GIL scope each)",
+              "key": "py_incref + py_decref (2 downcalls, a gil scope each)",
+              "value": 1189.74,
+              "unit": "ns"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Comparison basis, same run (timed inside Kotlin)",
+              "label": "PyObject_CallObject on a Python def (downcall, same shape)",
+              "key": "pyobject_callobject on a python def (downcall, same shape)",
+              "value": 1295.79,
+              "unit": "ns"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Comparison basis, same run (timed inside Kotlin)",
+              "label": "UpcallTrampoline.invoke from Kotlin (no shim, no boundary)",
+              "key": "upcalltrampoline.invoke from kotlin (no shim, no boundary)",
+              "value": 1863.97,
+              "unit": "ns"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Comparison basis, same run (timed inside Kotlin)",
+              "label": "...the same, with the GIL already held by the caller",
+              "key": "the same, with the gil already held by the caller",
+              "value": 1135.93,
+              "unit": "ns"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Comparison basis, same run (timed inside Kotlin)",
+              "label": "...Python3.withPython { } with nothing in it, for scale",
+              "key": "python3.withpython { } with nothing in it, for scale",
+              "value": 540.11,
+              "unit": "ns"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Ratios",
+              "label": "upcall / downcall of the same shape",
+              "key": "upcall / downcall of the same shape",
+              "value": 0.92,
+              "unit": "x"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Ratios",
+              "label": "upcall / trampoline alone, caller holding nothing",
+              "key": "upcall / trampoline alone, caller holding nothing",
+              "value": 0.64,
+              "unit": "x"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Ratios",
+              "label": "upcall / trampoline alone, GIL held (what the shim adds)",
+              "key": "upcall / trampoline alone, gil held (what the shim adds)",
+              "value": 1.05,
+              "unit": "x"
+            }
+          ],
+          "origin": "python.native.ffi.UpcallBoundaryCostTest"
+        },
+        {
+          "block": "Android upcall overhead (API 26, arm64-v8a)",
+          "platform": null,
+          "conditions": {
+            "iterations per loop": "10000",
+            "warmup": "100000"
+          },
+          "metrics": [
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Python-driven, instrumentation thread (ART already knows it)",
+              "label": "empty Python loop",
+              "key": "empty python loop",
+              "value": 20.03,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Python-driven, instrumentation thread (ART already knows it)",
+              "label": "pure-Python callee",
+              "key": "pure-python callee",
+              "value": 51.68,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Python-driven, instrumentation thread (ART already knows it)",
+              "label": "upcall to Kotlin",
+              "key": "upcall to kotlin",
+              "value": 1184.87,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Python-driven, instrumentation thread (ART already knows it)",
+              "label": "upcall net of loop",
+              "key": "upcall net of loop",
+              "value": 1164.84,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Python-driven, threading.Thread (a pthread ART has never seen)",
+              "label": "empty Python loop",
+              "key": "empty python loop",
+              "value": 20.01,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Python-driven, threading.Thread (a pthread ART has never seen)",
+              "label": "pure-Python callee",
+              "key": "pure-python callee",
+              "value": 51.67,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Python-driven, threading.Thread (a pthread ART has never seen)",
+              "label": "first upcall on the thread",
+              "key": "first upcall on the thread",
+              "value": 81167.0,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Python-driven, threading.Thread (a pthread ART has never seen)",
+              "label": "upcall to Kotlin (steady state)",
+              "key": "upcall to kotlin (steady state)",
+              "value": 1197.14,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Python-driven, threading.Thread (a pthread ART has never seen)",
+              "label": "upcall net of loop",
+              "key": "upcall net of loop",
+              "value": 1177.13,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Attach",
+              "label": "worker minus instrumentation thread",
+              "key": "worker minus instrumentation thread",
+              "value": 12.26,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Comparison basis, same run",
+              "label": "Py_IncRef + Py_DecRef (2 JNI downcalls, a GIL scope each)",
+              "key": "py_incref + py_decref (2 jni downcalls, a gil scope each)",
+              "value": 1230.33,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Comparison basis, same run",
+              "label": "PyObject_CallObject on a Python def (downcall, same shape)",
+              "key": "pyobject_callobject on a python def (downcall, same shape)",
+              "value": 1297.37,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Comparison basis, same run",
+              "label": "UpcallTrampoline.invoke from Kotlin (no C shim, no JNI)",
+              "key": "upcalltrampoline.invoke from kotlin (no c shim, no jni)",
+              "value": 1812.02,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Ratios",
+              "label": "upcall (instrumentation thread) / downcall of same shape",
+              "key": "upcall (instrumentation thread) / downcall of same shape",
+              "value": 0.91,
+              "unit": "x"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Ratios",
+              "label": "upcall (worker thread)          / downcall of same shape",
+              "key": "upcall (worker thread) / downcall of same shape",
+              "value": 0.92,
+              "unit": "x"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Ratios",
+              "label": "upcall (instrumentation thread) / trampoline alone",
+              "key": "upcall (instrumentation thread) / trampoline alone",
+              "value": 0.65,
+              "unit": "x"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Ratios",
+              "label": "upcall (worker thread)          / trampoline alone",
+              "key": "upcall (worker thread) / trampoline alone",
+              "value": 0.66,
+              "unit": "x"
+            }
+          ],
+          "origin": "python.native.ffi.UpcallOverheadTest"
+        }
+      ],
+      "status": "failed"
+    },
+    {
+      "target": "artApi26",
+      "task": ":python-multiplatform:connectedDebugAndroidTest",
+      "run": 3,
+      "requiresDevice": true,
+      "notes": "",
+      "log": "benchmarks/results/logs/artApi26-run3-20260814-165854.log",
+      "device": {
+        "serial": "emulator-5556",
+        "avd": "pmp_api26",
+        "props": {
+          "ro.build.version.sdk": "26",
+          "ro.build.version.release": "8.0.0",
+          "ro.product.cpu.abi": "arm64-v8a",
+          "ro.product.model": "Android SDK built for arm64"
+        }
+      },
+      "command": "/Volumes/macMini/thisisthepy/PythonMultiplatform/gradlew :python-multiplatform:connectedDebugAndroidTest --console=plain --rerun",
+      "loadBefore": [
+        1.6,
+        2.26,
+        3.16
+      ],
+      "wallSeconds": 148.3,
+      "exitCode": 1,
+      "loadAfter": [
+        1.79,
+        2.09,
+        2.94
+      ],
+      "suite": {
+        "tests": 381,
+        "failures": 3,
+        "skipped": 0,
+        "errors": 0
+      },
+      "resultFiles": 1,
+      "deviceDirs": [
+        "pmp_api26(AVD) - 8.0.0"
+      ],
+      "rows": [
+        {
+          "source": "Benchmark.printReport",
+          "label": "PyObject_GetAttrString",
+          "key": "pyobject_getattrstring",
+          "iterations": 10000,
+          "value": 1351.16,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "PyLong_FromLongLong",
+          "key": "pylong_fromlonglong",
+          "iterations": 100000,
+          "value": 1154.5,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "PyLong_AsLongLong",
+          "key": "pylong_aslonglong",
+          "iterations": 100000,
+          "value": 572.33,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "NativePointer.toRawValue()",
+          "key": "nativepointer.torawvalue()",
+          "iterations": 1000000,
+          "value": 3.8,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "NativePointer.toAddressValue()",
+          "key": "nativepointer.toaddressvalue()",
+          "iterations": 1000000,
+          "value": 16.62,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "AddressValue.toNativePointer()",
+          "key": "addressvalue.tonativepointer()",
+          "iterations": 1000000,
+          "value": 20.2,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "Py_IncRef/Py_DecRef",
+          "key": "py_incref/py_decref",
+          "iterations": 1000000,
+          "value": 1152.69,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "Manual IncRef/DecRef",
+          "key": "manual incref/decref",
+          "iterations": 100000,
+          "value": 1147.2,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "PyObject wrapper creation",
+          "key": "pyobject wrapper creation",
+          "iterations": 100000,
+          "value": 1691.66,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "PyUnicode_FromString (8 chars)",
+          "key": "pyunicode_fromstring (8 chars)",
+          "iterations": 10000,
+          "value": 1418.8,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "PyUnicode_AsUTF8 (8 chars)",
+          "key": "pyunicode_asutf8 (8 chars)",
+          "iterations": 10000,
+          "value": 3967.62,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "PyUnicode_FromString (256 chars)",
+          "key": "pyunicode_fromstring (256 chars)",
+          "iterations": 10000,
+          "value": 2484.13,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "PyUnicode_AsUTF8 (256 chars)",
+          "key": "pyunicode_asutf8 (256 chars)",
+          "iterations": 10000,
+          "value": 49560.37,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "PyUnicode_FromString (8192 chars)",
+          "key": "pyunicode_fromstring (8192 chars)",
+          "iterations": 10000,
+          "value": 36591.68,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "PyUnicode_AsUTF8 (8192 chars)",
+          "key": "pyunicode_asutf8 (8192 chars)",
+          "iterations": 10000,
+          "value": 1475619.82,
+          "unit": "ns",
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "arrayOf(1L) allocation + boxing",
+          "key": "arrayof(1l) allocation + boxing",
+          "iterations": 1000000,
+          "value": 9.31,
+          "unit": "ns",
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "invoke with a pre-built args array",
+          "key": "invoke with a pre-built args array",
+          "iterations": 1000000,
+          "value": 37.7,
+          "unit": "ns",
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "direct Kotlin call (floor)",
+          "key": "direct kotlin call (floor)",
+          "iterations": 1000000,
+          "value": 4.16,
+          "unit": "ns",
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "HandleTable.resolve(handle)",
+          "key": "handletable.resolve(handle)",
+          "iterations": 1000000,
+          "value": 18.37,
+          "unit": "ns",
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "HandleTable.register + release",
+          "key": "handletable.register + release",
+          "iterations": 500000,
+          "value": 74.31,
+          "unit": "ns",
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "UpcallTable.resolve(name) [200 entries]",
+          "key": "upcalltable.resolve(name) [200 entries]",
+          "iterations": 1000000,
+          "value": 46.57,
+          "unit": "ns",
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "UpcallTable.invoke(handle, args)",
+          "key": "upcalltable.invoke(handle, args)",
+          "iterations": 1000000,
+          "value": 45.97,
+          "unit": "ns",
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        },
+        {
+          "source": "Benchmark.printReport",
+          "label": "UpcallTable.invokeByName(name, args)",
+          "key": "upcalltable.invokebyname(name, args)",
+          "iterations": 1000000,
+          "value": 80.83,
+          "unit": "ns",
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        }
+      ],
+      "blocks": [
+        {
+          "block": "START OF GilParkingTest",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.ffi.GilParkingTest"
+        },
+        {
+          "block": "END OF GilParkingTest",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.ffi.GilParkingTest"
+        },
+        {
+          "block": "Generated proxy cost",
+          "platform": "Android 8.0.0 (SDK 26, aarch64) / ART VM 0.9",
+          "conditions": {
+            "iterations per row": "10000 x 3 (best taken)",
+            "warmup": "5000"
+          },
+          "metrics": [
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "empty Python function (the harness floor)",
+              "key": "empty python function (the harness floor)",
+              "value": 40.44,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "plain.x            pure Python, no boundary",
+              "key": "plain.x pure python, no boundary",
+              "value": 43.29,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "plain.p            pure Python @property, no boundary",
+              "key": "plain.p pure python @property, no boundary",
+              "value": 56.73,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "_pm_invoke(h, ())                        raw boundary, arity 0",
+              "key": "_pm_invoke(h, ()) raw boundary, arity 0",
+              "value": 802.89,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "demo.calc.ping()                          module function proxy",
+              "key": "demo.calc.ping() module function proxy",
+              "value": 817.36,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "_pm_release(_pm_invoke(h, (10,)))        raw boundary + release",
+              "key": "_pm_release(_pm_invoke(h, (10,))) raw boundary + release",
+              "value": 1333.54,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "Counter(10)                               constructor proxy",
+              "key": "counter(10) constructor proxy",
+              "value": 1782.78,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "_pm_invoke(h, (self, 5))                 raw boundary",
+              "key": "_pm_invoke(h, (self, 5)) raw boundary",
+              "value": 1550.12,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "c.increment(5)                            instance method proxy",
+              "key": "c.increment(5) instance method proxy",
+              "value": 1535.76,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "_pm_invoke(h, (self,))                   raw boundary",
+              "key": "_pm_invoke(h, (self,)) raw boundary",
+              "value": 1302.15,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "c.value                                   property read (descriptor)",
+              "key": "c.value property read (descriptor)",
+              "value": 1496.81,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "_pm_invoke(h, (self, 'x'))               raw boundary",
+              "key": "_pm_invoke(h, (self, 'x')) raw boundary",
+              "value": 3720.56,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "c.label = 'x'                             property write (descriptor)",
+              "key": "c.label = 'x' property write (descriptor)",
+              "value": 3952.55,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "_pm_invoke(h, ())                        raw boundary, arity 0 again",
+              "key": "_pm_invoke(h, ()) raw boundary, arity 0 again",
+              "value": 788.07,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "_pm_invoke(h, (12,))                     raw boundary",
+              "key": "_pm_invoke(h, (12,)) raw boundary",
+              "value": 1059.48,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "Counter.created                           static read (metaclass)",
+              "key": "counter.created static read (metaclass)",
+              "value": 861.19,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "Counter.created = 12                      static write (metaclass)",
+              "key": "counter.created = 12 static write (metaclass)",
+              "value": 1207.12,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "demo.calc.tally                           top-level read (module type)",
+              "key": "demo.calc.tally top-level read (module type)",
+              "value": 873.07,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Raw figures (timed inside Python, one shared loop)",
+              "label": "demo.calc.tally = 9                       top-level write (module type)",
+              "key": "demo.calc.tally = 9 top-level write (module type)",
+              "value": 1198.65,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Pure-Python floors, net of the harness (no boundary anywhere in these)",
+              "label": "plain attribute read",
+              "key": "plain attribute read",
+              "value": 2.85,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Pure-Python floors, net of the harness (no boundary anywhere in these)",
+              "label": "@property read",
+              "key": "@property read",
+              "value": 16.29,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost",
+              "section": "Pure-Python floors, net of the harness (no boundary anywhere in these)",
+              "label": "the descriptor itself costs",
+              "key": "the descriptor itself costs",
+              "value": 13.43,
+              "unit": "ns"
+            }
+          ],
+          "origin": "python.multiplatform.ffi.upcall.GeneratedProxyCostTest"
+        },
+        {
+          "block": "Generated proxy install cost",
+          "platform": "Android 8.0.0 (SDK 26, aarch64) / ART VM 0.9",
+          "conditions": {
+            "iterations": "20",
+            "warmup": "5"
+          },
+          "metrics": [
+            {
+              "source": "Generated proxy install cost",
+              "section": "",
+              "label": "PythonProxySource.render()      Kotlin string building only",
+              "key": "pythonproxysource.render() kotlin string building only",
+              "value": 922.0,
+              "unit": "us"
+            },
+            {
+              "source": "Generated proxy install cost",
+              "section": "",
+              "label": "PythonProxySource.install()     render + Python3.exec",
+              "key": "pythonproxysource.install() render + python3.exec",
+              "value": 2502.51,
+              "unit": "us"
+            },
+            {
+              "source": "Generated proxy install cost",
+              "section": "",
+              "label": "...of which Python3.exec",
+              "key": "of which python3.exec",
+              "value": 1580.5,
+              "unit": "us"
+            }
+          ],
+          "origin": "python.multiplatform.ffi.upcall.GeneratedProxyCostTest"
+        },
+        {
+          "block": "Generated proxy cost, await fast path",
+          "platform": "Android 8.0.0 (SDK 26, aarch64) / ART VM 0.9",
+          "conditions": {
+            "iterations per row": "10000 x 3 (best taken)",
+            "warmup": "5000"
+          },
+          "metrics": [
+            {
+              "source": "Generated proxy cost, await fast path",
+              "section": "",
+              "label": "_pm_invoke(h, (21,)) inside the coroutine, no await",
+              "key": "_pm_invoke(h, (21,)) inside the coroutine, no await",
+              "value": 1200.7,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost, await fast path",
+              "section": "",
+              "label": "await a pure-Python coroutine that never suspends",
+              "key": "await a pure-python coroutine that never suspends",
+              "value": 118.88,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost, await fast path",
+              "section": "",
+              "label": "await demo.calc.doubleNow(21)   generated async def, fast path",
+              "key": "await demo.calc.doublenow(21) generated async def, fast path",
+              "value": 1515.19,
+              "unit": "ns"
+            },
+            {
+              "source": "Generated proxy cost, await fast path",
+              "section": "",
+              "label": "await proxy / raw boundary in the same loop",
+              "key": "await proxy / raw boundary in the same loop",
+              "value": 1.26,
+              "unit": "x"
+            },
+            {
+              "source": "Generated proxy cost, await fast path",
+              "section": "",
+              "label": "what the async def wrapper adds",
+              "key": "what the async def wrapper adds",
+              "value": 314.48,
+              "unit": "ns"
+            }
+          ],
+          "origin": "python.multiplatform.ffi.upcall.GeneratedProxyCostTest"
+        },
+        {
+          "block": "Benchmark Report",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "block": "Benchmark Report",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "block": "Benchmark Report",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "block": "Benchmark Report",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "block": "Benchmark Report",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "block": "Benchmark Report",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.overhead.BenchmarkTest"
+        },
+        {
+          "block": "eval-loop checkpoint cost (freeThreaded=false)",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.ref.EvalCheckpointTest"
+        },
+        {
+          "block": "Benchmark Report",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        },
+        {
+          "block": "Benchmark Report",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        },
+        {
+          "block": "Benchmark Report",
+          "platform": null,
+          "conditions": {},
+          "metrics": [],
+          "origin": "python.multiplatform.reflection.UpcallOverheadTest"
+        },
+        {
+          "block": "Upcall boundary cost",
+          "platform": "Android 8.0.0 (SDK 26, aarch64) / ART VM 0.9",
+          "conditions": {
+            "iterations per loop": "10000",
+            "warmup": "100000"
+          },
+          "metrics": [
+            {
+              "source": "Upcall boundary cost",
+              "section": "Python-driven (timed inside Python)",
+              "label": "empty Python loop",
+              "key": "empty python loop",
+              "value": 20.08,
+              "unit": "ns"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Python-driven (timed inside Python)",
+              "label": "pure-Python callee, same shape",
+              "key": "pure-python callee, same shape",
+              "value": 65.66,
+              "unit": "ns"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Python-driven (timed inside Python)",
+              "label": "upcall to Kotlin",
+              "key": "upcall to kotlin",
+              "value": 1272.28,
+              "unit": "ns"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Python-driven (timed inside Python)",
+              "label": "upcall net of loop",
+              "key": "upcall net of loop",
+              "value": 1252.19,
+              "unit": "ns"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Python-driven (timed inside Python)",
+              "label": "upcall net of a Python call",
+              "key": "upcall net of a python call",
+              "value": 1206.62,
+              "unit": "ns"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Comparison basis, same run (timed inside Kotlin)",
+              "label": "Py_IncRef + Py_DecRef (2 downcalls, a GIL scope each)",
+              "key": "py_incref + py_decref (2 downcalls, a gil scope each)",
+              "value": 1137.97,
+              "unit": "ns"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Comparison basis, same run (timed inside Kotlin)",
+              "label": "PyObject_CallObject on a Python def (downcall, same shape)",
+              "key": "pyobject_callobject on a python def (downcall, same shape)",
+              "value": 1253.41,
+              "unit": "ns"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Comparison basis, same run (timed inside Kotlin)",
+              "label": "UpcallTrampoline.invoke from Kotlin (no shim, no boundary)",
+              "key": "upcalltrampoline.invoke from kotlin (no shim, no boundary)",
+              "value": 1800.86,
+              "unit": "ns"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Comparison basis, same run (timed inside Kotlin)",
+              "label": "...the same, with the GIL already held by the caller",
+              "key": "the same, with the gil already held by the caller",
+              "value": 1073.4,
+              "unit": "ns"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Comparison basis, same run (timed inside Kotlin)",
+              "label": "...Python3.withPython { } with nothing in it, for scale",
+              "key": "python3.withpython { } with nothing in it, for scale",
+              "value": 506.19,
+              "unit": "ns"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Ratios",
+              "label": "upcall / downcall of the same shape",
+              "key": "upcall / downcall of the same shape",
+              "value": 1.01,
+              "unit": "x"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Ratios",
+              "label": "upcall / trampoline alone, caller holding nothing",
+              "key": "upcall / trampoline alone, caller holding nothing",
+              "value": 0.7,
+              "unit": "x"
+            },
+            {
+              "source": "Upcall boundary cost",
+              "section": "Ratios",
+              "label": "upcall / trampoline alone, GIL held (what the shim adds)",
+              "key": "upcall / trampoline alone, gil held (what the shim adds)",
+              "value": 1.18,
+              "unit": "x"
+            }
+          ],
+          "origin": "python.native.ffi.UpcallBoundaryCostTest"
+        },
+        {
+          "block": "Android upcall overhead (API 26, arm64-v8a)",
+          "platform": null,
+          "conditions": {
+            "iterations per loop": "10000",
+            "warmup": "100000"
+          },
+          "metrics": [
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Python-driven, instrumentation thread (ART already knows it)",
+              "label": "empty Python loop",
+              "key": "empty python loop",
+              "value": 20.08,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Python-driven, instrumentation thread (ART already knows it)",
+              "label": "pure-Python callee",
+              "key": "pure-python callee",
+              "value": 65.62,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Python-driven, instrumentation thread (ART already knows it)",
+              "label": "upcall to Kotlin",
+              "key": "upcall to kotlin",
+              "value": 1160.42,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Python-driven, instrumentation thread (ART already knows it)",
+              "label": "upcall net of loop",
+              "key": "upcall net of loop",
+              "value": 1140.33,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Python-driven, threading.Thread (a pthread ART has never seen)",
+              "label": "empty Python loop",
+              "key": "empty python loop",
+              "value": 20.01,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Python-driven, threading.Thread (a pthread ART has never seen)",
+              "label": "pure-Python callee",
+              "key": "pure-python callee",
+              "value": 66.0,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Python-driven, threading.Thread (a pthread ART has never seen)",
+              "label": "first upcall on the thread",
+              "key": "first upcall on the thread",
+              "value": 79542.0,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Python-driven, threading.Thread (a pthread ART has never seen)",
+              "label": "upcall to Kotlin (steady state)",
+              "key": "upcall to kotlin (steady state)",
+              "value": 1176.18,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Python-driven, threading.Thread (a pthread ART has never seen)",
+              "label": "upcall net of loop",
+              "key": "upcall net of loop",
+              "value": 1156.16,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Attach",
+              "label": "worker minus instrumentation thread",
+              "key": "worker minus instrumentation thread",
+              "value": 15.75,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Comparison basis, same run",
+              "label": "Py_IncRef + Py_DecRef (2 JNI downcalls, a GIL scope each)",
+              "key": "py_incref + py_decref (2 jni downcalls, a gil scope each)",
+              "value": 1156.68,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Comparison basis, same run",
+              "label": "PyObject_CallObject on a Python def (downcall, same shape)",
+              "key": "pyobject_callobject on a python def (downcall, same shape)",
+              "value": 1261.37,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Comparison basis, same run",
+              "label": "UpcallTrampoline.invoke from Kotlin (no C shim, no JNI)",
+              "key": "upcalltrampoline.invoke from kotlin (no c shim, no jni)",
+              "value": 1831.66,
+              "unit": "ns"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Ratios",
+              "label": "upcall (instrumentation thread) / downcall of same shape",
+              "key": "upcall (instrumentation thread) / downcall of same shape",
+              "value": 0.91,
+              "unit": "x"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Ratios",
+              "label": "upcall (worker thread)          / downcall of same shape",
+              "key": "upcall (worker thread) / downcall of same shape",
+              "value": 0.93,
+              "unit": "x"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Ratios",
+              "label": "upcall (instrumentation thread) / trampoline alone",
+              "key": "upcall (instrumentation thread) / trampoline alone",
+              "value": 0.63,
+              "unit": "x"
+            },
+            {
+              "source": "Android upcall overhead (API 26, arm64-v8a)",
+              "section": "Ratios",
+              "label": "upcall (worker thread)          / trampoline alone",
+              "key": "upcall (worker thread) / trampoline alone",
+              "value": 0.64,
+              "unit": "x"
+            }
+          ],
+          "origin": "python.native.ffi.UpcallOverheadTest"
+        }
+      ],
+      "status": "failed"
+    }
+  ],
+  "loadAtEnd": [
+    1.79,
+    2.09,
+    2.94
+  ]
+}

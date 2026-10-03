@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Status &amp; FAQ · python-multiplatform</title>
+<meta name="description" content="Real CPython inside Kotlin Multiplatform: Kotlin calls Python, Python calls Kotlin, on every target.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&amp;family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/site.js"></script>
+</head>
+<body>
+<span hidden data-title-en="Status &amp; FAQ · python-multiplatform" data-title-ko="상태 · FAQ · python-multiplatform"></span>
+<header class="site-header">
+  <div class="wrap bar">
+    <a class="brand" href="index.html"><svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="2" width="9" height="9" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="13" width="9" height="9" rx="2.5" fill="var(--accent)"/><path d="M11 6.5h4.5a2 2 0 0 1 2 2V13M13 17.5H8.5a2 2 0 0 1-2-2V11" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round"/></svg><span translate="no">python-multiplatform</span></a>
+    <button class="tool menu-toggle" id="menu-toggle" aria-expanded="false" aria-controls="site-nav"><span data-lang="en">Menu</span><span data-lang="ko">메뉴</span></button>
+    <nav class="nav" id="site-nav" aria-label="Primary">
+      <a href="index.html"><span data-lang="en">Home</span><span data-lang="ko">홈</span></a>
+      <a href="getting-started.html"><span data-lang="en">Get started</span><span data-lang="ko">시작하기</span></a>
+      <a href="concepts.html"><span data-lang="en">Concepts</span><span data-lang="ko">개념</span></a>
+      <a href="guides.html"><span data-lang="en">Guides</span><span data-lang="ko">가이드</span></a>
+      <a href="ecosystem.html"><span data-lang="en">Ecosystem</span><span data-lang="ko">생태계</span></a>
+      <a href="status.html" aria-current="page"><span data-lang="en">Status &amp; FAQ</span><span data-lang="ko">상태 · FAQ</span></a>
+    </nav>
+    <div class="tools">
+      <button class="tool" id="lang-toggle" type="button">한국어</button>
+      <button class="tool" id="theme-toggle" type="button" aria-label="Toggle colour theme">☀</button>
+    </div>
+  </div>
+</header>
+<div class="page-head"><div class="wrap">
+  <div class="eyebrow"><span data-lang="en">Status</span><span data-lang="ko">상태</span></div>
+  <h1><span data-lang="en">What works today</span><span data-lang="ko">지금 되는 것</span></h1>
+  <p><span data-lang="en">Status is assigned from the tests in the repository, not from plans. Partial means partial.</span><span data-lang="ko">상태는 계획이 아니라 저장소의 테스트에서 정한다. 부분은 부분이다.</span></p>
+</div></div>
+<main><div class="wrap"><div class="prose">
+  <div class="table-wrap"><table>
+    <thead><tr><th><span data-lang="en">Area</span><span data-lang="ko">영역</span></th><th><span data-lang="en">Status</span><span data-lang="ko">상태</span></th></tr></thead>
+    <tbody>
+<tr><td><span data-lang="en">Interpreter lifecycle, downcall surface, object model</span><span data-lang="ko">인터프리터 수명주기, 다운콜 표면, 객체 모델</span></td><td><span class="pill ok"><span data-lang="en">implemented</span><span data-lang="ko">구현</span></span></td></tr>
+<tr><td><span data-lang="en">Reference release and cross-boundary cycle collection (desktop)</span><span data-lang="ko">참조 해제와 경계 순환 수거 (데스크톱)</span></td><td><span class="pill ok"><span data-lang="en">implemented</span><span data-lang="ko">구현</span></span></td></tr>
+<tr><td><span data-lang="en">Upcalls: classes, properties, <code>suspend</code>, cancellation (desktop)</span><span data-lang="ko">업콜: 클래스, 프로퍼티, <code>suspend</code>, 취소 (데스크톱)</span></td><td><span class="pill ok"><span data-lang="en">implemented</span><span data-lang="ko">구현</span></span></td></tr>
+<tr><td><span data-lang="en">Upcalls in a GraalVM native image (desktop, manual verification)</span><span data-lang="ko">GraalVM 네이티브 이미지 업콜 (데스크톱, 수동 검증)</span></td><td><span class="pill ok"><span data-lang="en">implemented</span><span data-lang="ko">구현</span></span></td></tr>
+<tr><td><span data-lang="en">Binding prebuilt jars; Compose from Python (desktop)</span><span data-lang="ko">빌드된 jar 바인딩, Python 에서 Compose (데스크톱)</span></td><td><span class="pill ok"><span data-lang="en">implemented</span><span data-lang="ko">구현</span></span></td></tr>
+<tr><td><span data-lang="en">Android bootstrap and thread attach</span><span data-lang="ko">Android 부트스트랩과 스레드 attach</span></td><td><span class="pill ok"><span data-lang="en">implemented</span><span data-lang="ko">구현</span></span></td></tr>
+<tr><td><span data-lang="en">iOS, Android native, wasm: upcall and lifetime coverage</span><span data-lang="ko">iOS, Android native, wasm: 업콜과 수명 검증</span></td><td><span class="pill part"><span data-lang="en">partial</span><span data-lang="ko">부분</span></span></td></tr>
+<tr><td><span data-lang="en">Extension functions as methods</span><span data-lang="ko">확장 함수를 메서드로</span></td><td><span class="pill part"><span data-lang="en">partial</span><span data-lang="ko">부분</span></span></td></tr>
+<tr><td><span data-lang="en"><code>.pyi</code> stubs; klib binding</span><span data-lang="ko"><code>.pyi</code> 스텁, klib 바인딩</span></td><td><span class="pill part"><span data-lang="en">partial</span><span data-lang="ko">부분</span></span></td></tr>
+<tr><td><span data-lang="en">Linux and Windows desktop runs</span><span data-lang="ko">Linux, Windows 데스크톱 실행</span></td><td><span class="pill part"><span data-lang="en">partial</span><span data-lang="ko">부분</span></span></td></tr>
+<tr><td><span data-lang="en">Free-threaded CPython 3.14t (desktop only, opt-in)</span><span data-lang="ko">free-threaded CPython 3.14t (desktop 한정, 옵트인)</span></td><td><span class="pill partial"><span data-lang="en">partial</span><span data-lang="ko">부분</span></span></td></tr>
+<tr><td><span data-lang="en">Compose from Python on Android, iOS, wasm</span><span data-lang="ko">Android, iOS, wasm 에서 Python 으로 Compose</span></td><td><span class="pill plan"><span data-lang="en">planned</span><span data-lang="ko">계획</span></span></td></tr>
+    </tbody>
+  </table></div>
+  <p class="muted"><span data-lang="en">The full, item-by-item contract with the test that backs each item is <code>docs/SPEC.md</code> on the <code>develop</code> branch; the work still left is listed in the <a href="https://github.com/thisisthepy/python-multiplatform/blob/develop/docs/roadmap/ROADMAP.md">roadmap</a>.</span><span data-lang="ko">항목별 계약과 각 항목을 받치는 테스트는 <code>develop</code> 브랜치의 <code>docs/SPEC.md</code> 에, 남은 작업은 <a href="https://github.com/thisisthepy/python-multiplatform/blob/develop/docs/roadmap/ROADMAP.md">로드맵</a> 에 있다.</span></p>
+
+  <h2>FAQ</h2>
+  <h3><span data-lang="en">Is it published on Maven Central?</span><span data-lang="ko">Maven Central 에 배포되어 있나?</span></h3>
+  <p><span data-lang="en">Not yet. Build from source until a release is announced.</span><span data-lang="ko">아직 아니다. 릴리스가 공지될 때까지 소스에서 빌드한다.</span></p>
+  <h3><span data-lang="en">Which Python version?</span><span data-lang="ko">어떤 Python 버전인가?</span></h3>
+  <p><span data-lang="en">CPython 3.14 today (<code>pythonVersion</code> in <code>gradle.properties</code>). Free-threaded builds can be selected with <code>-PpythonFreeThreaded=true</code>; this works on desktop only (236 tests, 0 failures); Android and iOS have no free-threaded prebuilts.</span><span data-lang="ko">현재 CPython 3.14 다 (<code>gradle.properties</code> 의 <code>pythonVersion</code>). free-threaded 빌드는 <code>-PpythonFreeThreaded=true</code> 로 고를 수 있고, desktop 에서만 동작하며(236 테스트 0 실패) Android/iOS 에는 free-threaded 프리빌트가 없다.</span></p>
+  <h3><span data-lang="en">Do C extensions work?</span><span data-lang="ko">C 확장이 동작하나?</span></h3>
+  <p><span data-lang="en">Yes, in principle: this is CPython itself, not a re-implementation. Each extension still has to be built for each target platform.</span><span data-lang="ko">원리적으로 그렇다. 재구현이 아니라 CPython 그 자체이기 때문이다. 다만 확장마다 타깃 플랫폼별로 빌드되어 있어야 한다.</span></p>
+  <h3><span data-lang="en">Why not reflection?</span><span data-lang="ko">왜 리플렉션을 쓰지 않나?</span></h3>
+  <p><span data-lang="en">Kotlin/Native has effectively none, and a GraalVM native image only contains what was known at build time. A generated table works in both.</span><span data-lang="ko">Kotlin/Native 에는 사실상 없고, GraalVM 네이티브 이미지에는 빌드 타임에 알려진 것만 들어간다. 생성된 테이블은 둘 다에서 동작한다.</span></p>
+  <h3><span data-lang="en">Why is <code>androidx</code> not renamed to something Pythonic?</span><span data-lang="ko">왜 <code>androidx</code> 를 파이써닉한 이름으로 바꾸지 않나?</span></h3>
+  <p><span data-lang="en">Because a Kotlin name in Python should mean the Kotlin thing. Pythonic packages are written on top, under their own names, in pythonx-compose.</span><span data-lang="ko">Python 에서 Kotlin 이름은 Kotlin 의 그것을 뜻해야 하기 때문이다. 파이써닉한 패키지는 그 위에, 자기 이름으로, pythonx-compose 에서 작성한다.</span></p>
+  <div class="pager"><a href="ecosystem.html">← <span data-lang="en">Ecosystem</span><span data-lang="ko">생태계</span></a><span></span></div>
+</div></div></main>
+<footer class="site-footer">
+  <div class="wrap">
+    <span><span data-lang="en">MIT licensed.</span><span data-lang="ko">MIT 라이선스.</span> <span translate="no">© 2024 thisisthepy</span></span>
+    <span><a href="https://github.com/thisisthepy/python-multiplatform">GitHub</a> · <a href="https://github.com/thisisthepy/python-multiplatform/blob/develop/docs/locale/README_ko.md"><span data-lang="en">Korean README</span><span data-lang="ko">한국어 README</span></a></span>
+  </div>
+</footer>
+</body>
+</html>

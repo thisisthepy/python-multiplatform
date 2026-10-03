@@ -1,80 +1,41 @@
-package python.multiplatform.reflection//package python.multiplatform.ffi
-//
-//import kotlin.reflect.KClass
-//
-//
-//object ClassLookup {
-//    private val classMap = mapOf<String, Any>(
-//        "kotlin" to mapOf<String, Any>(
-//            "reflect" to mapOf<String, Any>(
-//                "KClass" to KClass::class
-//            )
-//        ),
-//        "python" to mapOf<String, Any>(
-//            "multiplatform" to mapOf<String, Any>(
-//                "currentPlatform" to python.multiplatform.currentPlatform::class,
-//            )
-//        )
-//    )
-//
-//    private const val CACHE_SIZE = 100
-//    private val lruCache = LRUCache<String, KClass<*>>(CACHE_SIZE)
-//
-//    fun findClass(packageName: String): KClass<*>? {
-//        if (packageName in lruCache) {
-//            return lruCache.get(packageName)  // From cache
-//        }
-//
-//        val parts = packageName.split(".")
-//        var currentMap: Any? = classMap
-//        for (part in parts) {
-//            if (currentMap is Map<*, *>) {
-//                currentMap = currentMap[part]
-//            } else {
-//                return null  // Not matched while searching
-//            }
-//        }
-//
-//        return currentMap as? KClass<*>
-//    }
-//
-//    fun getMember(kClass: KClass<*>, memberName: String): Any? {
-//        return kClass.members.find { it.name == memberName }
-//    }
-//
-//    fun invokeStaticMethod(kClass: KClass<*>, methodName: String, vararg args: Any?): Any? {
-//        val method = kClass.declaredFunctions.find { it.name == methodName }
-//        method?.isAccessible = true
-//        return method?.call(*args)
-//    }
-//
-//    fun invokeStaticMethodWithPackageName(packageName: String, methodName: String, vararg args: Any): Any? {
-//        val kClass = findClass
-//    }
-//}
-//
-//
-//private class LRUCache<K, V>(val capacity: Int) {
-//    private val map: MutableMap<K, V> = linkedMapOf()
-//
-//    fun get(key: K): V? {
-//        return map[key]
-//    }
-//
-//    fun put(key: K, value: V) {
-//        if (key in map) {
-//            map.remove(key)  // Update the key ordering
-//        } else if (map.size >= capacity) {
-//            map.entries.iterator().next().also { map.remove(it.key) }
-//        }
-//        map[key] = value
-//    }
-//
-//    fun containsKey(packageName: K): Boolean {
-//        return map.containsKey(packageName)
-//    }
-//
-//    operator fun contains(packageName: K): Boolean {
-//        return containsKey(packageName)
-//    }
-//}
+package python.multiplatform.reflection
+
+
+/**
+ * Name -> [ReflectedClass] registry.
+ *
+ * Populated by [UpcallTable] as fragments are registered, and cleared alongside it -- kept
+ * separate because class lookup (`type()`, `isinstance()`) is a distinct Python-visible operation
+ * from callable resolution, even though both come from the same fragments.
+ */
+object ClassLookup {
+
+    private val classes = LinkedHashMap<String, ReflectedClass>()
+
+    internal fun register(cls: ReflectedClass) {
+        classes[cls.name] = cls
+    }
+
+    internal fun clear() {
+        classes.clear()
+    }
+
+    internal val count: Int get() = classes.size
+
+    /** The class registered under [name], or `null` if nothing claims it. */
+    fun find(name: String): ReflectedClass? = classes[name]
+
+    /** [find], but throws where the caller has no better response than to give up. */
+    fun require(name: String): ReflectedClass =
+        find(name) ?: throw IllegalArgumentException("no such exposed class: $name")
+
+    /**
+     * Every class currently registered, in registration order.
+     *
+     * For generators that need to describe the whole set rather than resolve one name --
+     * [python.multiplatform.ffi.upcall.PythonProxySource] is the one that does, to render a
+     * Python class per [ReflectedClass] alongside the module functions it already renders. A
+     * copy, for the same reason [UpcallTable.entries] returns one.
+     */
+    fun all(): List<ReflectedClass> = classes.values.toList()
+}

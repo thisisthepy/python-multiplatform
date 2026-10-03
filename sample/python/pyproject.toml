@@ -1,0 +1,5 @@
+[project]
+name = "usage-example-python"
+version = "0.1.0"
+description = "The Python half of usage-example, bundled by pypackpack and staged by the toolchain plugin."
+requires-python = ">=3.13"

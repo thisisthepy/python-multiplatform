@@ -1,0 +1,40 @@
+name: Android Native CI
+
+on:
+  push:
+    branches: [ "develop", "main" ]
+  pull_request:
+    branches: [ "develop", "main" ]
+
+concurrency:
+  # A newer push to the same ref supersedes this run; frees the shared macOS runners.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compile:
+    name: Compile Android Native
+    # ubuntu-latest is sufficient and faster for cross-compiling to Android Native
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'zulu'
+          cache: 'gradle'
+
+      - name: Cache Konan
+        uses: actions/cache@v4
+        with:
+          path: ~/.konan
+          key: ${{ runner.os }}-konan-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-konan-
+
+      - name: Compile Android Native Arm64
+        # Compile Android Native which includes commonMain + nativeMain + artMain
+        run: ./gradlew :python-multiplatform:compileKotlinAndroidNativeArm64 --console=plain

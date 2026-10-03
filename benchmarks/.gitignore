@@ -1,0 +1,5 @@
+# Raw Gradle output for each run: large, and reconstructable by re-running. The JSON and TSV next
+# to it are the artefact -- they are *not* ignored, because a rendered table without the cut it was
+# rendered from is exactly the un-auditable number this whole harness exists to stop.
+results/logs/
+__pycache__/

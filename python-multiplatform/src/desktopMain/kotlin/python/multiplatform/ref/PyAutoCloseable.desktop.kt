@@ -3,16 +3,35 @@ package python.multiplatform.ref
 import python.native.ffi.NativePointer
 import java.lang.ref.Cleaner
 
+actual interface PlatformCleaner : AutoCloseable {
+    actual override fun close()
+}
 
-actual abstract class PyAutoCloseable actual constructor(pointer: NativePointer): AutoCloseable {
-    private val cleaner = Cleaner.create()
-    private val cleanable: Cleaner.Cleanable = cleaner.register(this) {
-        clean()
-    }
+private val SHARED_CLEANER: Cleaner = Cleaner.create()
 
-    actual abstract fun clean()
+actual fun registerCleaner(
+    pointer: NativePointer,
+    closeAction: (NativePointer) -> Unit
+): PlatformCleaner {
+    return DesktopCleaner(pointer, closeAction)
+}
+
+private class DesktopCleaner(
+    pointer: NativePointer,
+    closeAction: (NativePointer) -> Unit
+) : PlatformCleaner {
+    private val cleanable: Cleaner.Cleanable = SHARED_CLEANER.register(this, CleanupAction(pointer, closeAction))
 
     override fun close() {
         cleanable.clean()
+    }
+}
+
+private class CleanupAction(
+    private val pointer: NativePointer,
+    private val action: (NativePointer) -> Unit
+) : Runnable {
+    override fun run() {
+        action(pointer)
     }
 }

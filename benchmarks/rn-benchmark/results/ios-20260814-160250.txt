@@ -1,0 +1,26 @@
+=== conditions ===
+platform:         ios
+timestamp:        2026-08-14T16:02:53+0900
+host:             Darwin 25.5.0 arm64, 8 cores, 16 GB
+load average:     15.06 17.64 16.78   (before the run)
+react-native:     0.87.0
+hermes:           reported by the app itself -- see the 'engine:' line in the report below
+harness digest:   df3f74f34aff   (rn-benchmark is not a git repository)
+reference repo:   /Volumes/macMini/thisisthepy/PythonMultiplatform @ 73c40da4
+counts:           warmup 100000, 10000 iterations per timed loop, 5 repetitions per row
+                  convergence sweep: 40 repetitions x 10000, cold
+
+=== NOT RUN ===
+SKIPPED: Xcode offers zero eligible iOS destinations for this workspace.
+  	Ineligible destinations for the "RNBench" scheme:
+  		{ platform:iOS, id:dvtdevice-DVTiPhonePlaceholder-iphoneos:placeholder, name:Any iOS Device, error:iOS 26.5 is not installed. Please download and install the platform from Xcode > Settings > Components. }
+
+This is not a defect in this project: the same is true of every project on this machine,
+including CocoaPods' own targets. Xcode 26.6 ships without the iOS platform
+component, and the simulator runtimes present (from older Xcode installs) will not be used.
+Clearing it needs:  xcodebuild -downloadPlatform iOS
+which writes several GB into /Library/Developer/CoreSimulator on the internal disk, where
+7.4Gi is free. Ask before doing that -- this workspace keeps large artefacts off the
+internal disk on purpose.
+
+No figures were produced. Do not treat any cell this run would have filled as measured.

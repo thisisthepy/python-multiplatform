@@ -1,0 +1,177 @@
+name: WasmJS CI
+
+# Two jobs, because the runner can do one of these two things unconditionally and the other only
+# when it has been given an interpreter.
+#
+# The single job this replaces asked for `wasmJsNodeTest` on a runner with no CPython Emscripten
+# build. Every wasm task is guarded by `onlyIf { <that build>.exists() }`, so the task SKIPped and
+# the job reported **green having run zero tests** -- a tick that measured nothing, which is worse
+# than a red one because nobody goes looking. See `wasmRuntimePresent` in
+# python-multiplatform/build.gradle.kts.
+#
+# `compile` is what a runner can always do honestly, and it is named for exactly that.
+# `test` runs the real suite, and runs only when there is a runtime to run it against.
+
+on:
+  push:
+    branches: [ "develop", "main" ]
+  pull_request:
+    branches: [ "develop", "main" ]
+
+concurrency:
+  # A newer push to the same ref supersedes this run; frees the shared macOS runners.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compile:
+    name: WasmJS compile (no interpreter)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'zulu'
+          cache: 'gradle'
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Cache Konan
+        uses: actions/cache@v4
+        with:
+          path: ~/.konan
+          key: ${{ runner.os }}-konan-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-konan-
+
+      # No test task here, deliberately. Compiling `wasmJsMain` and `wasmJsTest` needs no
+      # interpreter, so this is coverage the runner can actually deliver; asking for a test task it
+      # cannot run is what produced the empty green tick.
+      - name: Compile wasmJs main and test sources
+        run: ./gradlew :python-multiplatform:compileKotlinWasmJs :python-multiplatform:wasmJsTestClasses --console=plain
+
+      # Says out loud what the green tick above does and does not cover, so that a reader of this
+      # workflow's result does not have to infer it. Drops away the moment the runtime URL exists.
+      - name: Say what did not run
+        if: vars.WASM_RUNTIME_URL == ''
+        run: |
+          {
+            echo "### wasmJs tests did not run"
+            echo
+            echo "This job compiled \`wasmJsMain\` and \`wasmJsTest\`. **No wasm test was executed.**"
+            echo
+            echo "Running them needs a CPython Emscripten build, which this repository publishes as"
+            echo "\`io.github.thisisthepy:python-multiplatform-wasm-runtime\` (a 7 MB zip built by"
+            echo "\`:python-multiplatform:wasmBrowserRuntimeZip\`) but has never pushed to a remote"
+            echo "repository -- it exists only in the maintainer's \`mavenLocal\`."
+            echo
+            echo "Set the repository variable \`WASM_RUNTIME_URL\` to a URL that serves that zip"
+            echo "(a GitHub release asset is enough) and the \`test\` job below will run the real"
+            echo "suite: 344 Node tests and 10 browser tests."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::warning title=wasmJs tests did not run::No CPython Emscripten runtime is available to this runner; set the WASM_RUNTIME_URL repository variable. This job compiled only."
+
+  test:
+    name: WasmJS Node + browser tests
+    runs-on: ubuntu-latest
+    # The whole point of the guard: this job exists only when it can do its job. A job that does not
+    # run shows up grey in the checks list, which is a different claim from a green one.
+    if: vars.WASM_RUNTIME_URL != ''
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'zulu'
+          cache: 'gradle'
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Cache Konan
+        uses: actions/cache@v4
+        with:
+          path: ~/.konan
+          key: ${{ runner.os }}-konan-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-konan-
+
+      # The five files this unpacks are the whole interpreter as far as the test tasks are
+      # concerned -- python.wasm, python.mjs, the stdlib zip and the two glue modules. That is a
+      # property of `cpython.mjs`'s boot rather than an accident: the Node route used to reach the
+      # standard library through NODEFS against a CPython *source checkout*, which no artefact
+      # carries, and now installs the staged zip into MEMFS exactly as the browser route does.
+      - name: Fetch the CPython Emscripten runtime
+        run: |
+          set -euo pipefail
+          curl -fsSL "${{ vars.WASM_RUNTIME_URL }}" -o "$RUNNER_TEMP/wasm-runtime.zip"
+          mkdir -p "$RUNNER_TEMP/wasm-runtime"
+          unzip -q "$RUNNER_TEMP/wasm-runtime.zip" -d "$RUNNER_TEMP/wasm-runtime"
+          for f in python.wasm python.mjs; do
+            test -f "$RUNNER_TEMP/wasm-runtime/$f" \
+              || { echo "::error::$f is not in the runtime zip served by WASM_RUNTIME_URL"; exit 1; }
+          done
+          ls -l "$RUNNER_TEMP/wasm-runtime"
+
+      # `WasmCompiledWheelTest` imports a real compiled pyemscripten_2026_0 wheel. Under
+      # `-PrequireWasmRuntime` a missing wheel is a failure, not a skip, so fetch them first: by URL,
+      # each accepted only against the sha256 the script pins.
+      - name: Fetch the pinned wasm wheels
+        run: bash tools/wasm/build-cpython.sh wheels
+
+      # `-PrequireWasmRuntime` is the second half of the guard, and it is what makes this job unable
+      # to repeat the original defect: if either task would skip -- no interpreter, or no
+      # Chromium-family browser for karma -- the build fails naming what was missing, instead of
+      # reporting success having run nothing.
+      - name: Run wasmJs tests
+        run: |
+          ./gradlew \
+            :python-multiplatform:wasmJsNodeTest \
+            :python-multiplatform:wasmJsBrowserTest \
+            -PwasmPythonDir="$RUNNER_TEMP/wasm-runtime" \
+            -PrequireWasmRuntime=true \
+            --console=plain
+
+      # Belt to the guard's braces, and it guards a different failure: a task that *runs* but
+      # reports nothing. A wasm `LinkError` at instantiation takes out the whole module and is
+      # reported as zero tests rather than as a failure, which is the shape ROADMAP §10 records for
+      # a missing stdlib zip in the browser ("404, zero tests reported").
+      #
+      # The floors are the baselines ROADMAP §10 records, so they fail when coverage *shrinks* and
+      # stay quiet when it grows.
+      - name: Assert the suites were not empty
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import glob, sys, xml.etree.ElementTree as ET
+          floors = {"wasmJsNodeTest": 344, "wasmJsBrowserTest": 10}
+          bad = False
+          for task, floor in floors.items():
+              files = glob.glob(f"python-multiplatform/build/test-results/{task}/*.xml")
+              total = sum(int(ET.parse(f).getroot().get("tests", 0)) for f in files)
+              print(f"{task}: {total} tests in {len(files)} result files (floor {floor})")
+              if total < floor:
+                  print(f"::error::{task} reported {total} tests, below its recorded baseline of {floor}")
+                  bad = True
+          sys.exit(1 if bad else 0)
+          PY
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-test-results
+          path: python-multiplatform/build/test-results/
+          if-no-files-found: error
