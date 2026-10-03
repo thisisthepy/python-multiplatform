@@ -292,6 +292,11 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   README naming the Compose version and the commit, and `kotlin-stubs.zip` on every `v*` tag's release.
   `Status: partial` — the workflow could not be run where it was written; its YAML parses and its
   assemble step was executed locally.
+- **B-9** When a configuration named `typedpythonStubs` exists (toolchain's plugin creates it), every
+  stubs task's output directory is added to it, with the task dependency travelling with the files, in
+  either plugin application order. Without that configuration nothing happens and none is created.
+  `Status: implemented` — `GP/TypedPythonStubsWiringTest.kt` (a `ProjectBuilder` project; the toolchain
+  side that consumes the configuration is toolchain#23 and is not exercised here).
 
 ## 7. Threading and builds
 
