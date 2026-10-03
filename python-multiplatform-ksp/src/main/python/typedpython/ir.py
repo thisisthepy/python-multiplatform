@@ -111,9 +111,10 @@ class BinOp(Expr):
       ADD/SUB/MUL — checked; overflow → deopt.
       FLOORDIV/MOD — Python floor semantics (result sign follows the divisor for MOD; the runtime
         handles -2**63 % -1 == 0 without C's undefined behaviour); divisor 0
-        → ZeroDivisionError("integer division or modulo by zero") for FLOORDIV and
-        ZeroDivisionError("integer modulo by zero") for MOD (CPython 3.13/3.14 messages; the
-        runtime's differential tests pin them); -2**63 // -1 overflows → deopt.
+        → ZeroDivisionError with the running interpreter's message (3.13: "integer division or
+        modulo by zero" / "integer modulo by zero"; 3.14: "division by zero" for every case — the
+        runtime selects by version and its differential tests pin both); -2**63 // -1 overflows →
+        deopt. Every ZeroDivisionError/math-domain message below follows the same rule.
       TRUEDIV — CPython rounds int/int correctly; when both |operands| <= 2**53 the C double
         division is exact-rounded too, otherwise → deopt. Divisor 0 → ZeroDivisionError("division
         by zero").
@@ -129,6 +130,11 @@ class BinOp(Expr):
     op: BinOpKind
     left: Expr
     right: Expr
+    # I64 ADD/SUB/MUL only: set by the front end when an interval proof shows the result cannot
+    # leave the i64 range; the verifier re-proves it (never trusts it) and a proven op cannot
+    # deopt, so it is allowed in an impure function. The back end still uses the checked helper
+    # and treats an overflow there as an internal error (SystemError), never as a deopt.
+    proven: bool = False
 
 
 class UnaryOpKind(Enum):
@@ -143,6 +149,7 @@ class UnaryOp(Expr):
 
     op: UnaryOpKind
     operand: Expr
+    proven: bool = False          # NEG of I64: as BinOp.proven
 
 
 class CompareKind(Enum):
@@ -238,6 +245,13 @@ class Call(Expr):
 
     function: str
     args: tuple[Expr, ...]
+    # Set when an impure caller calls a may_deopt (therefore pure) callee: on a deopt inside the
+    # callee, only the callee is redone by its interpreted function — unobservable, because the
+    # callee is pure — and the caller continues. Allowed only for callees returning F64, BOOL or
+    # NONE: an F64-typed IR expression is a Python float in CPython too (ints reach floats only
+    # through explicit ToFloat or float arithmetic), so the redone result is exactly a float; an
+    # I64 result could be a big int and is not allowed here.
+    redo: bool = False
 
 
 @dataclass(frozen=True)
@@ -286,7 +300,9 @@ class Truth(Expr):
 class CompareObj(Expr):
     """A comparison of two OBJ operands (a scalar side arrives through `Box`) **directly as a
     condition**: an If/While cond, or an And/Or operand when that And/Or is itself the condition.
-    PyObject_RichCompareBool semantics — the rich comparison runs, then its truth value. Type BOOL.
+    Semantics of `if a == b:` in CPython: the rich comparison runs, then the truth value of its
+    result — **without** PyObject_RichCompareBool's identity shortcut (a NaN float compared with
+    itself is False in CPython's `if x == x`). Type BOOL.
     Anywhere the comparison's own result object would be kept (`x = a < b`, `r = c and a < b`,
     `not (a < b)`) it is not allowed, because that object need not be a bool."""
 
@@ -452,6 +468,12 @@ class Function:
     params: tuple[Param | ArrayParam, ...]
     returns: Type
     locals: dict[str, Type]          # non-parameter locals only (temporaries included)
+    # Module globals of a scalar type read ONCE at entry, as part of the guards: each must be
+    # exactly that type (else deopt, before any effect), and the body reads it as `Local(name)`.
+    # Legal only for a *closed* function — one that runs no user code (no GetAttr, CallObject,
+    # Truth, CompareObj, ObjToFloat, OBJ BinOp; Calls only to closed functions) — so nothing can
+    # rebind the global between entry and use, and reading it once equals reading it at each use.
+    entry_globals: tuple[Param, ...] = ()
     body: tuple[Stmt, ...]
     pure: bool
     may_deopt: bool

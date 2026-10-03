@@ -3,7 +3,7 @@
 Generated C (cgen.py) reaches memory and `PyObject`s **only** through these helpers (SPEC N-8).
 Header-only, `static inline`, C99 + CPython C API, no other dependencies. Every helper implements
 the CPython behaviour named in `ir.py`. Return convention unless stated: `0` ok, `1` deopt (no
-Python error set, nothing to undo), `-1` Python error set (CPython's exception type and message).
+Python error set, nothing to undo), `-1` Python error set (CPython's exception type and message — **of the running interpreter**: 3.14 changed several ZeroDivisionError and math-domain messages, and the runtime selects them by PY_VERSION_HEX).
 
 ## Integers (int64_t)
     int tp_add_i64(int64_t a, int64_t b, int64_t *out);      /* 0 / 1 on overflow */
@@ -65,9 +65,10 @@ Python error set, nothing to undo), `-1` Python error set (CPython's exception t
 All return new references or NULL with CPython's exception set; none deopts.
     PyObject *tp_global(PyObject *module_dict, PyObject *name);   /* globals, then builtins; NameError("name 'x' is not defined") */
     PyObject *tp_getattr(PyObject *obj, PyObject *name);          /* PyObject_GetAttr */
-    PyObject *tp_call(PyObject *callee, PyObject *const *args, size_t nargs, PyObject *kwnames); /* PyObject_Vectorcall */
+    PyObject *tp_call(PyObject *callee, PyObject *const *args, size_t nargs, PyObject *kwnames); /* PyObject_Vectorcall: nargs = positional count; keyword values follow at args[nargs..] */
+    /* tp_binop_obj op codes: TP_BINOP_ADD..TP_BINOP_MOD = 0..5 in ir.BinOpKind declaration order */
     int       tp_truth(PyObject *obj);                            /* 0/1, -1 error (PyObject_IsTrue) */
-    int       tp_compare_bool(PyObject *a, PyObject *b, int op);  /* 0/1, -1 error (PyObject_RichCompareBool) */
+    int       tp_compare_bool(PyObject *a, PyObject *b, int op);  /* 0/1, -1 error: PyObject_RichCompare then PyObject_IsTrue (no identity shortcut, as `if a == b`) */
     int       tp_obj_to_f64(PyObject *obj, double *out);          /* 0 / -1 (PyNumber_Float, then exact double) */
     PyObject *tp_binop_obj(PyObject *a, PyObject *b, int op);     /* PyNumber_Add/... for ir.BinOpKind on OBJ */
     void      tp_release(PyObject **slot);                        /* Py_CLEAR: the only way generated code drops a reference */
