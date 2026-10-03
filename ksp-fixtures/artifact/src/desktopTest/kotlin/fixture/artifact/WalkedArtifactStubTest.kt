@@ -191,12 +191,31 @@ class WalkedArtifactStubTest {
                 (functions + constants).map { "$module.$it" }.toList()
             }
             .toSet()
+        // A third shape (issue #38): a `GETTER`/`SETTER` is an attribute of its receiver's proxy, not of
+        // a module, so its stub is a `@property` in that receiver's stub class -- or, where the class
+        // has no stub, a comment saying so -- and either way it carries its table key after
+        // `Kotlin property: `. Matched by key, because the key is not derivable from where it sits.
+        val properties = generatedPaths()
+            .filter { it.endsWith(".pyi") }
+            .flatMap { path ->
+                Regex("""Kotlin property: ([^\s"]+)""").findAll(stub(path)).map { it.groupValues[1] }.toList()
+            }
+            .toSet()
+        val propertyKeys = UpcallTable.entries()
+            .filter { it.kind.name == "GETTER" || it.kind.name == "SETTER" }
+            .map { it.name }
+            .toSet()
+        // Not vacuous: `kotlin.text` is walked here, and `Regex.pattern` is a member `val` of a class
+        // that crosses as a handle.
+        assertTrue("kotlin.text.Regex.pattern" in propertyKeys, "no property was bound: $propertyKeys")
+        assertEquals(emptySet(), properties - propertyKeys, "a property stub names no property key")
+        assertEquals(emptySet(), propertyKeys - properties, "a property key has no stub")
 
         // The base name of an overload set (`padding` for `padding__Dp`, ...) is served by the binding
         // layer's dispatcher and is stubbed as `@overload`s; it is not itself a table key.
         val overloadBases = installed.map { it.substringBeforeLast('.') + "." + it.substringAfterLast('.').substringBefore("__") }
             .filter { it !in installed }.toSet()
         assertEquals(emptySet(), stubbed - installed - overloadBases, "stubbed but not callable")
-        assertEquals(emptySet(), installed - stubbed, "callable but not stubbed")
+        assertEquals(emptySet(), installed - propertyKeys - stubbed, "callable but not stubbed")
     }
 }

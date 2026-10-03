@@ -26,8 +26,12 @@ import kotlin.test.assertTrue
  * **The host entry point** (python-multiplatform#18, for pythonx-compose#11's `@app`): the host says
  * *where* the Python root state lives, and from then on Python alone decides what is on screen.
  *
- * The root lives in a Compose `MutableState` that Python created and holds ([rootState]); Python
- * replaces the root by writing into it ([writeRoot]). The claim is that this write is *all* it takes:
+ * The root lives in a Compose `MutableState` that Python created and holds --
+ * `androidx.compose.runtime.mutableStateOf(None)`, the walked Compose function itself, its `T` read as
+ * `kotlin.Any?` (issue #38) -- and Python replaces the root by writing its `value` property:
+ * `state.value = root`, the walked `MutableState.value` setter. No fixture function stands between
+ * Python and Compose any more (the KSP-bound `rootState`/`writeRoot` stand-ins are gone). The claim is
+ * that this write is *all* it takes:
  * the next frame shows the new root, and nothing on the Kotlin side was called to make it so. The
  * only thing the test does between the write and the frame is what a window's frame clock does on
  * its own -- deliver the snapshot's apply notification -- and the per-root call counters show that the
@@ -64,7 +68,7 @@ class PythonContentRenderTest {
      */
     @Test
     fun aRootWrittenFromPythonIsDrawnOnTheNextFrameWithoutAHostCall() {
-        Python3.exec("writeRoot(_root_state, _root_a)")
+        Python3.exec("_root_state.value = _root_a")
         val baseRoots = HandleTable.liveCount
         val baseInner = pyInt("sys.getrefcount(_inner)")
 
@@ -85,7 +89,7 @@ class PythonContentRenderTest {
             assertEquals(1, pyInt("_calls['a']"), "an idle frame re-ran the root, so something polls")
 
             // Python replaces the root. Nothing on the Kotlin side is called.
-            Python3.exec("writeRoot(_root_state, _root_b)")
+            Python3.exec("_root_state.value = _root_b")
             inkB = inkOfImage(nextFrame(scene))
             assertEquals(1, pyInt("_calls['b']"), "the root Python wrote was not composed on the next frame")
             assertEquals(1, pyInt("_calls['a']"), "the replaced root was composed again")
@@ -94,7 +98,7 @@ class PythonContentRenderTest {
             assertTrue(heldInner > baseInner, "nothing held _inner while root B was composed: $baseInner -> $heldInner")
 
             // And back.
-            Python3.exec("writeRoot(_root_state, _root_a)")
+            Python3.exec("_root_state.value = _root_a")
             inkABack = inkOfImage(nextFrame(scene))
             assertEquals(2, pyInt("_calls['a']"), "switching back did not compose root A again")
             assertEquals(1, pyInt("_calls['b']"), "root B ran after it was replaced")
@@ -120,7 +124,7 @@ class PythonContentRenderTest {
      */
     @Test
     fun theHostCanPassThePythonStateObjectAndDisposalReleasesWhatTheRootPassed() {
-        Python3.exec("writeRoot(_root_state, _root_b)")
+        Python3.exec("_root_state.value = _root_b")
         val baseRoots = HandleTable.liveCount
         val baseInner = pyInt("sys.getrefcount(_inner)")
         val state = Python3.import("__main__").getAttr("_root_state")
@@ -146,6 +150,40 @@ class PythonContentRenderTest {
         assertEquals(baseInner, after, "the composition did not give _inner back")
         assertEquals(0, HandleTable.liveCount - baseRoots, "handles left rooted after the composition was disposed")
         assertEquals(0, PythonCallables.openScopeCount, "a callable scope was left open")
+    }
+
+    /**
+     * The state is Compose's own, reached through the walk alone (issue #38): `mutableStateOf` is the
+     * walked generic function, and `value` is the walked `MutableState` property, read and written as a
+     * Python attribute -- the Python function written in is the very object read back.
+     *
+     * Red before the walker bound generics and properties: `mutableStateOf` was not in the table
+     * (`ImportError` at `ROOTS`, in `@BeforeTest`), and once it is, `_root_state.value` is an
+     * `AttributeError` until properties are served.
+     */
+    @Test
+    fun theRootStateIsComposesOwnMutableStateAndValueIsItsWalkedProperty() {
+        Python3.exec(
+            """
+            import python_multiplatform as _prs_pm
+            _prs = {
+                'type': type(_root_state)._kotlin_type_name,
+                'empty': _root_state.value is None,
+                'kinds': [_d['kind'] for _d in _prs_pm.describe_member('androidx.compose.runtime.MutableState', 'value')],
+                'factory': _prs_pm.describe(mutableStateOf)[0]['name'],
+            }
+            _root_state.value = _root_a
+            _prs['same'] = _root_state.value is _root_a
+            _root_state.value = None
+            _prs['cleared'] = _root_state.value is None
+            """.trimIndent(),
+        )
+        assertEquals("androidx.compose.runtime.MutableState", pyStr("_prs['type']"))
+        assertEquals("True", pyStr("_prs['empty']"))
+        assertEquals("['GETTER', 'SETTER']", pyStr("_prs['kinds']"))
+        assertEquals("androidx.compose.runtime.mutableStateOf", pyStr("_prs['factory']"))
+        assertEquals("True", pyStr("_prs['same']"), "the root written into the state is not the one read back")
+        assertEquals("True", pyStr("_prs['cleared']"))
     }
 
     /** A Python callable passed directly is a root that never changes -- no state involved. */
@@ -203,7 +241,7 @@ class PythonContentRenderTest {
          */
         val ROOTS = """
             import sys
-            from fixture.compose import rootState, writeRoot
+            from androidx.compose.runtime import mutableStateOf
             from androidx.compose.foundation.layout import Column
             from androidx.compose.material3 import Text
 
@@ -220,7 +258,7 @@ class PythonContentRenderTest {
                 _calls['b'] += 1
                 Column(content=_inner)
 
-            _root_state = rootState()
+            _root_state = mutableStateOf(None)
         """.trimIndent()
     }
 }
