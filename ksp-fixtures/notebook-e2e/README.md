@@ -8,7 +8,9 @@ regression fails under the notebook cell's number.
 The specification is the user's notebook, `pythonx-compose/UI.ipynb` (read in place, never copied).
 Where pythonx-compose has since decided a different spelling (its `docs/INTENT.md` §5 and
 `docs/SPEC.md`), the tests use the decided one: `@app` and an `app_root` state instead of
-`main.App.update(...)`; `.value` instead of `getValue()`/`setValue()`; Kotlin parameter names in
+`main.App.update(...)`. The UI state is the notebook's own: `remember_saveable` inside the root,
+attached as `App.messages`, read and written with `getValue()`/`setValue()` (`.value` is an alias),
+which needs `python.multiplatform.compose.RememberSaveableKt` in the bindings. Kotlin parameter names in
 snake_case; `Color(0xFF...)`; `DefaultIcons.Add` without parentheses;
 `TextField(state=..., modifier=Modifier.padding(8))`.
 

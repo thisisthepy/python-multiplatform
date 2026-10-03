@@ -91,13 +91,15 @@ class NotebookRootTest {
         try {
             assertEquals(0, differing(pixelsOf(scene.render()), initial), "the app's first frame is not its initial message")
 
-            // Cells 9-10.
-            cell("message_backup = main.messages.value")
+            // Cell 9: the state the root remembered is reachable as main.App.messages.
+            assertEquals("True", pyStr("hasattr(main.App, 'messages')"), "cell 9: main.App.messages does not exist after the first frame")
+            // Cell 10.
+            cell("message_backup = main.App.messages.getValue()")
             assertEquals("<class 'str'>", pyStr("type(message_backup)"), "the state did not read back as a str")
             assertEquals(INITIAL_MESSAGE, pyStr("message_backup"), "cell 10 read something other than what is on screen")
 
             // Cell 12.
-            cell("main.messages.value = '$CHANGED_MESSAGE'")
+            cell("main.App.messages.setValue('$CHANGED_MESSAGE')")
             val (afterWrite, writeFrames) = framesUntil({ scene.render() }) { it.contentEquals(changed) }
             assertEquals(
                 0, differing(afterWrite, changed),
@@ -106,13 +108,14 @@ class NotebookRootTest {
             assertEquals(2, pyInt("main.calls['App']"), "the write did not recompose the root exactly once")
 
             // Cell 13.
-            cell("main.messages.value = message_backup")
+            cell("main.App.messages.setValue(message_backup)  # 복원")
             val (afterRestore, restoreFrames) = framesUntil({ scene.render() }) { it.contentEquals(initial) }
             assertEquals(
                 0, differing(afterRestore, initial),
                 "cell 13: after $restoreFrames frame(s) the screen does not show the restored message",
             )
-            assertEquals(INITIAL_MESSAGE, pyStr("main.messages.value"))
+            assertEquals(INITIAL_MESSAGE, pyStr("main.App.messages.getValue()"))
+            assertEquals(INITIAL_MESSAGE, pyStr("main.App.messages.value"), ".value is not an alias of getValue()")
         } finally {
             scene.close()
         }
