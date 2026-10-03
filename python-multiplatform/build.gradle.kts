@@ -21,6 +21,7 @@ import org.jetbrains.kotlin.konan.target.linker
 import python.multiplatform.gradle.CPythonFlavour
 import python.multiplatform.gradle.CPythonIncludeDirectories
 import python.multiplatform.gradle.CPythonIncludeLayout
+import python.multiplatform.gradle.EmbeddedPythonVersion
 import python.multiplatform.gradle.GenerateWasmProxyExportsTask
 
 
@@ -638,6 +639,27 @@ extensions.add(
     },
 )
 
+/**
+ * Public build output (issue #61): the CPython version this build embeds, as the `pythonMultiplatform`
+ * extension, as Gradle attributes on the published variants, and as a classpath resource
+ * (`META-INF/python-multiplatform/python.properties`) in the jar and the AAR. See
+ * `docs/platforms/python-version-acquisition.md` "Published version".
+ */
+val embeddedPythonVersion = EmbeddedPythonVersion(configuredPythonVersion, pythonFreeThreaded)
+embeddedPythonVersion.register(project)
+
+val generatePythonProperties by tasks.registering {
+    val outputDir = layout.buildDirectory.dir("generated/python-properties")
+    val content = embeddedPythonVersion.renderProperties()
+    inputs.property("content", content)
+    outputs.dir(outputDir)
+    doLast {
+        val file = outputDir.get().asFile.resolve(EmbeddedPythonVersion.RESOURCE_PATH)
+        file.parentFile.mkdirs()
+        file.writeText(content)
+    }
+}
+
 val androidBuildDir = "$projectDir/build/android"
 
 // =================================================================================================
@@ -1225,6 +1247,7 @@ kotlin {
         jvmTest.dependsOn(commonTest)
         val desktopMain by getting {
             resources.srcDirs("src/desktopMain/resources")
+            resources.srcDir(generatePythonProperties)
             // `reachability-metadata.json` is generated, not checked in -- see
             // GenerateReachabilityMetadata above. Wiring it as a resource srcDir (through the
             // task's own output provider, so the dependency is inferred) is what puts it on the
@@ -2548,6 +2571,8 @@ android {
     compileSdk = libs.versions.android.compileSdk.get().toInt()
 
     sourceSets["main"].assets.srcDirs("src/androidMain/assets", "$androidBuildDir/assets")
+    // KMP androidMain resources do not reach the AAR's classes.jar; AGP's main resources do.
+    sourceSets["main"].resources.srcDir(generatePythonProperties)
     sourceSets["androidTest"].assets.srcDirs("$androidBuildDir/assets")
     sourceSets["debug"].jniLibs.srcDirs("src/androidMain/jniLibs",
         "$androidBuildDir/jniLibs", "$androidBuildDir/debug/jniLibs")

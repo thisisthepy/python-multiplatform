@@ -258,6 +258,11 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `Provider<Directory>` carrying the extraction task (`cpythonIncludeDirectories` extension; see
   `docs/platforms/python-version-acquisition.md` §7). `Status: partial` (only the configured flavour is
   extracted) — `GP/CPythonIncludeDirectoriesTest.kt`.
+- **T-4** `python-multiplatform` publishes the CPython version it embeds: extension `pythonMultiplatform`,
+  Gradle attributes `org.thisisthepy.python.version` / `org.thisisthepy.python.free-threaded` on every
+  consumable `*Elements` configuration, and the resource `META-INF/python-multiplatform/python.properties`
+  in the jar and AAR (see `docs/platforms/python-version-acquisition.md` "Published version") —
+  `GP/EmbeddedPythonVersionTest.kt`.
 
 ## 8. Measurement
 
