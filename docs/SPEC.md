@@ -283,6 +283,12 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   other Kotlin object. `Status: implemented` —
   `PM/commonTest/.../pythonx/PythonxPropertyTest.kt`, `ksp-fixtures/compose/.../PythonContentRenderTest.kt`,
   `AnySlotScalarRenderTest.kt`, `MaterialIconsRenderTest.kt`.
+- **U-11** A KSP-bound function, method or property whose declared return type is a Kotlin class that
+  has a generated proxy returns an instance of **that class's proxy** (#94), not a generic owner: its
+  methods and properties work and `isinstance(result, TheClass)` holds. The class is found by the declared
+  return type's Kotlin name; a return type with no generated proxy stays a generic owner object. The
+  result's ownership is the same as for any owned result. `Status: implemented` —
+  `ksp-fixtures/app/.../KspClassResultProxyTest.kt` (red until #94 lands).
 
 ## 6. Binding prebuilt libraries (Gradle plugin)
 
