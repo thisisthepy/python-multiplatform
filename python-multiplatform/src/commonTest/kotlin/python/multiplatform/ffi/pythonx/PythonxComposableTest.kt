@@ -102,7 +102,7 @@ class PythonxComposableTest {
             Text('hi')
             Text('hi', modifier=None)
             Text('hi', color=3)
-            Text('hi', fontSize=4)
+            Text('hi', font_size=4)
             Text('hi', color=3, fontSize=4)
             """.trimIndent(),
         )
@@ -149,7 +149,7 @@ class PythonxComposableTest {
                     """
                     from androidx.compose.foundation.layout import stubRowScope
                     _row = stubRowScope()
-                    _row.NavigationBarItem(selected=True, onClick=lambda: None)
+                    _row.NavigationBarItem(selected=True, on_click=lambda: None)
                     _row.NavigationBarItem(selected=True, onClick=lambda: None, enabled=False)
                     """.trimIndent(),
                 )

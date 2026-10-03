@@ -363,7 +363,7 @@ class PythonxCallableTest {
             """
             from androidx.compose.material3 import Slider
             _px_seen = []
-            Slider(onValueChange=lambda v: _px_seen.append(v))
+            Slider(on_value_change=lambda v: _px_seen.append(v))
             """.trimIndent(),
         )
 
@@ -597,8 +597,8 @@ class PythonxCallableTest {
         val refusal = assertFails {
             Python3.exec(
                 """
-                from androidx.compose.material3 import rememberSheetState
-                rememberSheetState(confirmValueChange=lambda v: True)
+                from androidx.compose.material3 import remember_sheet_state
+                remember_sheet_state(confirm_value_change=lambda v: True)
                 """.trimIndent(),
             )
         }

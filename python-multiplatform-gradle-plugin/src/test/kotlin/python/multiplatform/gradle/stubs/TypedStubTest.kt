@@ -146,7 +146,8 @@ class TypedStubTest {
         assertTrue(order[0].contains("all: androidx.compose.ui.unit.Dp | float"), order.toString())
         assertTrue(order[1].contains("horizontal"), order.toString())
         assertTrue(order[2].contains("start"), order.toString())
-        assertTrue(order[3].contains("paddingValues"), order.toString())
+        // Issue #131: the parameter is written under the keyword `inspect.signature` shows.
+        assertTrue(order[3].contains("padding_values"), order.toString())
         // ... and the explicit table-key spellings are still there, one def each.
         assertTrue("def padding__Dp(receiver: androidx.compose.ui.Modifier, /, all:" in layout, layout)
         assertTrue("def padding__PaddingValues(" in layout, layout)
@@ -154,7 +155,7 @@ class TypedStubTest {
         val ui = file(files, pkgUi)
         val methodOrder = Regex("""class _Modifier_padding\(_t\.Protocol\):\n((?:    .*\n)+)""").find(ui)!!.groupValues[1]
         val calls = Regex("""def __call__\(self, (\w+)""").findAll(methodOrder).map { it.groupValues[1] }.toList()
-        assertEquals(listOf("all", "horizontal", "start", "paddingValues"), calls, ui)
+        assertEquals(listOf("all", "horizontal", "start", "padding_values"), calls, ui)
     }
 
     /** Python's `int`/`float` cannot tell two Kotlin overloads apart, so a checker calls every later
@@ -245,7 +246,7 @@ class TypedStubTest {
         )
         val body = file(files(checkbox), "androidx.compose.material3")
         assertTrue(
-            "def Checkbox(checked: bool, onCheckedChange: _t.Callable[[bool], None] | None, " +
+            "def Checkbox(checked: bool, on_checked_change: _t.Callable[[bool], None] | None, " +
                 "modifier: androidx.compose.ui.Modifier = ..., *, content: _t.Callable[[], None]) -> None:" in body,
             body,
         )
@@ -286,12 +287,24 @@ class TypedStubTest {
 
     // ------------------------------------------------------------------------ Kotlin names only
 
+    /**
+     * Issue #131: the Kotlin names stay and the Pythonic aliases are added beside them -- as
+     * `alias = kotlinName` at module level and as a second `ClassVar` of the same Protocol on the
+     * receiver -- and nothing is emitted under `pythonx`.
+     */
     @Test
-    fun theTypedStubsStillCarryOnlyKotlinNames() {
+    fun theTypedStubsCarryTheKotlinNamesAndThePythonicAliasesAndNothingUnderPythonx() {
         val all = files(*padding.toTypedArray(), fillMaxWidth)
         assertEquals(emptyList(), all.keys.filter { it.startsWith("pythonx/") })
         val text = all.keys.joinToString("\n") + all.values.joinToString("\n")
         assertFalse("pythonx" in text, text)
-        assertFalse("fill_max_width" in text || "padding_values" in text, text)
+        val layout = file(all, pkgLayout)
+        assertTrue(Regex("^def fillMaxWidth\\(", RegexOption.MULTILINE).containsMatchIn(layout), layout)
+        assertTrue(Regex("^fill_max_width = fillMaxWidth${'$'}", RegexOption.MULTILINE).containsMatchIn(layout), layout)
+        val ui = file(all, pkgUi)
+        assertTrue("    fillMaxWidth: _t.ClassVar[_Modifier_fillMaxWidth]" in ui, ui)
+        assertTrue("    fill_max_width: _t.ClassVar[_Modifier_fillMaxWidth]" in ui, ui)
+        // `padding` has no other spelling: nothing is invented for it.
+        assertFalse(Regex("^padding_\\w* = ", RegexOption.MULTILINE).containsMatchIn(layout), layout)
     }
 }

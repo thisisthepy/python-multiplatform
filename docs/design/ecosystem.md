@@ -146,7 +146,8 @@ and `pythonx.compose.layout`, and documents signatures like `Text(text, color, f
 `Button(onclick, …)` — quoted as the notebook writes it; the 2024 library spells that parameter
 `on_click` (`docs/archive/pythonx-adapter-design.md` §3 measured both). Which Python spelling
 `pythonx` uses is pythonx-compose's decision: this repository's binder exposes the Kotlin name
-`onClick` and renames nothing (`docs/INTENT.md` §2.2) — plus `Column/Row/Spacer/TextField`. It also
+`onClick` and its Pythonic alias `on_click` on the Kotlin-named module, and renames no namespace
+(`docs/INTENT.md` §2.2, SPEC U-12) — plus `Column/Row/Spacer/TextField`. It also
 requires `main.App` as a live object, `App.messages.getValue()/setValue()`, and
 `main.App.update(NewComposable)` for hot-swapping the UI from a Jupyter cell.
 
@@ -684,7 +685,8 @@ static.
 **`pythonx.*` is ours.** Whatever we wrap or add lives under that prefix. Kotlin fully-qualified
 names point at the original; `pythonx` points at our Pythonic layer. The two namespaces do not mix.
 *(2026-10-03: "ours" means the ecosystem's — `pythonx` is a real package in pythonx-compose; this
-repository's binder creates no `pythonx` module and renames nothing, `AGENTS.md` §12.1–12.2.)*
+repository's binder creates no `pythonx` module and renames no namespace, `AGENTS.md` §12.1–12.2; the
+snake_case aliases it serves live on the Kotlin-named modules, SPEC U-12.)*
 
 **The wrapping happens in Python, not in Kotlin.** `pythonx.compose.material3` is Python code that
 uses the generated `androidx.compose.material3` bindings and presents a Pythonic API over them.

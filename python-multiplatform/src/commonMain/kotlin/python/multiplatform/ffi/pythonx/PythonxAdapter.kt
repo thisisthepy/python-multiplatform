@@ -9,13 +9,14 @@ import python.multiplatform.reflection.UpcallTable
  * The binding layer -- `python_multiplatform.binding`, the hand-written Python that serves Kotlin
  * declarations on their Kotlin-named modules, and the generated table it reads.
  *
- * **It renames nothing, and it is not `pythonx`.** A Kotlin-named module carries Kotlin's own
- * surface: Kotlin declaration names, keyword arguments by Kotlin parameter names, Kotlin defaults,
- * overloads, value-class rules and the `$composer` slot (`docs/INTENT.md` §2.2). The Kotlin
- * package and class names below (`ffi.pythonx`, `PythonxAdapter`) are historical; the Python module
- * this installs is binder-owned, and `pythonx` is a real package in pythonx-compose that builds a
- * Pythonic API on top of this one through `python_multiplatform.describe` and `inspect.signature`
- * ([KotlinSurface]).
+ * **It renames no namespace, and it is not `pythonx`.** A Kotlin-named module is served under its
+ * Kotlin package name only (`docs/INTENT.md` §2.2), with Kotlin defaults, overloads, value-class
+ * rules and the `$composer` slot. Inside it, every declaration, proxy member and keyword parameter
+ * answers to its Kotlin name **and** to its Pythonic (snake_case) alias where that alias is
+ * unambiguous (issue #131; the rule and the policy are [KotlinSurface]'s). The Kotlin package and
+ * class names below (`ffi.pythonx`, `PythonxAdapter`) are historical; the Python module this
+ * installs is binder-owned, and `pythonx` is a real package in pythonx-compose that builds on this
+ * one through `python_multiplatform.describe` and `inspect.signature` ([KotlinSurface]).
  *
  * `docs/archive/pythonx-adapter-design.md` §7 draws one line through this whole area: **if it differs per
  * Kotlin declaration it is generated or resolved at run time; if it is the same rule for every
@@ -90,7 +91,7 @@ object PythonxAdapter {
      * |---|---|
      * | `_Finder` / `_Loader` | §2.3, the hook a module `__getattr__` cannot replace |
      * | the module `__getattr__` the loader installs | §4.1, adapted once and then a dict hit |
-     * | Kotlin names, unchanged | `docs/INTENT.md` §2.2 -- no rule converts a name in either direction |
+     * | `_package_aliases` / `_member_aliases` | issue #131 -- Kotlin names as keys, Pythonic aliases resolved on a miss; no namespace converted |
      * | `_Overloads` | `docs/design/kotlin-extensions-in-python.md` §3.1, the dispatcher that has to live here |
      * | `_proxy_type` / `_Hybrid` | §4.2, an extension as a method on its receiver, both spellings |
      * | `_coerce`'s allowlist | §4.4, `Dp` yes, a packed value class no |
@@ -99,11 +100,11 @@ object PythonxAdapter {
         # GENERATED-FREE: this file is hand-written Python. See PythonxAdapter.kt.
         #
         # `python_multiplatform.binding` -- the binding layer over the Kotlin declarations the upcall
-        # table exposes. It serves Kotlin-named modules with **Kotlin's own surface**: Kotlin
-        # declaration names, keyword arguments by Kotlin parameter names, Kotlin defaults, overloads,
-        # value-class rules and the `${'$'}composer` slot. It renames nothing. Making that surface
-        # Pythonic is the job of a real Python package built on top of it (pythonx-compose), which
-        # reads `python_multiplatform.describe` and `inspect.signature` to do it by rule.
+        # table exposes. It serves Kotlin-named modules: Kotlin declaration names and their Pythonic
+        # aliases, keyword arguments by Kotlin parameter name or Pythonic alias, Kotlin defaults,
+        # overloads, value-class rules and the `${'$'}composer` slot. It renames no namespace: a
+        # Kotlin package is a module under exactly its Kotlin name. A Python package built on top of
+        # it (pythonx-compose) reads `python_multiplatform.describe` and `inspect.signature`.
         #
         # `docs/archive/pythonx-adapter-design.md` §7 draws the line this file lives on: *if it differs per Kotlin
         # declaration it is generated or resolved at run time; if it is the same rule for every declaration
@@ -122,6 +123,10 @@ object PythonxAdapter {
         import types as _types
 
         from python_multiplatform import KOTLIN_DEFAULT, signature_of as _signature_of
+        # The naming rule (issue #131) lives in the root module, once, so that both installers and the
+        # stub generator's mirror of it agree; see `KotlinSurface`.
+        from python_multiplatform import keyword_slots as _keyword_slots
+        from python_multiplatform import pythonic_aliases as _pythonic_aliases
 
 
 
@@ -173,7 +178,7 @@ object PythonxAdapter {
                 'param_names', 'param_tags', 'param_type_names', 'return_tag', 'return_type_name',
                 'is_extension', 'receiver_type_name', 'param_has_default', 'handle',
                 'composer_index', 'changed_slots', 'default_slots', 'return_supertypes', 'row',
-                'binding',
+                'binding', 'keywords',
             )
 
             def __init__(self, row):
@@ -187,6 +192,9 @@ object PythonxAdapter {
                 # `inspect.signature` read, the same tuple the proxy layer publishes with.
                 self.row = row
                 self.binding = None
+                # `{keyword: slot}`, Kotlin names and Pythonic aliases (`keyword_slots`), built on the
+                # first call that passes a keyword rather than for every row at install.
+                self.keywords = None
                 (self.kotlin_name, self.arity, self.kind, self.is_suspend, self.param_names,
                  self.param_tags, self.param_type_names, self.return_tag, self.return_type_name,
                  self.is_extension, self.receiver_type_name, self.param_has_default) = row
@@ -250,6 +258,13 @@ object PythonxAdapter {
                 if self.handle is None:
                     self.handle = _resolve(self.kotlin_name)
                 return self.handle
+
+            def keyword_slot(self, keyword):
+                '''The slot [keyword] names -- a Kotlin parameter name or its Pythonic alias -- or -1.'''
+                keywords = self.keywords
+                if keywords is None:
+                    keywords = self.keywords = _keyword_slots(self.row)
+                return keywords.get(keyword, -1)
 
 
         _TABLE = {}          # kotlin fqn -> _Decl
@@ -324,6 +339,7 @@ object PythonxAdapter {
             _invalidate()
             _BY_PACKAGE.clear()
             _BY_RECEIVER.clear()
+            _ALIASES.clear()
             _MEMBER_ALIASES.clear()
             _MEMBER_KEYWORDS.clear()
             _PACKAGES_SEEN.clear()
@@ -436,7 +452,11 @@ object PythonxAdapter {
             `STATIC_GETTER` read runs Kotlin, so a description has to come from the table and never
             from the module attribute. An overload set's base name answers every member.
             '''
-            decls = _BY_PACKAGE.get(kotlin_package, {}).get(name)
+            by_name = _BY_PACKAGE.get(kotlin_package, {})
+            decls = by_name.get(name)
+            if not decls:
+                kotlin = _package_aliases(kotlin_package).get(name)
+                decls = by_name.get(kotlin) if kotlin is not None else None
             if not decls:
                 return None
             return tuple(decl.row for decl in decls)
@@ -444,11 +464,47 @@ object PythonxAdapter {
 
         # --------------------------------------------------------------------------- names
 
-        # **Kotlin names, unchanged, everywhere.** A Kotlin declaration is reached under its own name
-        # and takes keyword arguments by its own parameter names. There used to be a forward rule
-        # here (`fillMaxWidth` -> `fill_max_width`) and its inverse; both are gone, because a binder
-        # that renames is deciding what a Python API is called, and that is the business of the
-        # Python package built on top (`docs/INTENT.md` §2.2, §2.3).
+        # **Kotlin names, and their Pythonic aliases** (issue #131). A Kotlin declaration is reached
+        # under its own name; a lower-case-first one also under its snake_case name, and each keyword
+        # parameter under its Kotlin name and its snake_case one. The rule and the ambiguity policy are
+        # the root module's (`python_multiplatform.python_name`, `pythonic_aliases`; see
+        # `KotlinSurface`). Every index here stays keyed by the **Kotlin** name: an alias is resolved
+        # to its Kotlin name on a miss and never becomes a second key, so one declaration has one
+        # owner, one `_Binding`, one `_Hybrid`.
+        #
+        # What is *not* converted: a namespace. `androidx.compose.foundation.layout` is importable as
+        # exactly that, and no segment of a package path ever gets an alias (`docs/INTENT.md` §2.2).
+
+        _ALIASES = {}   # ('package' | 'type', kotlin name) -> {alias: kotlin name}; cleared per table
+
+
+        def _package_aliases(kotlin_package):
+            '''`{alias: kotlin_name}` for the bound names of one Kotlin package.
+
+            The namespace is every bound name there -- base names, explicit `name__Types` keys,
+            constants -- plus its child packages and objects, which occupy a name without ever being
+            given an alias. Built once per package per table.
+            '''
+            key = ('package', kotlin_package)
+            found = _ALIASES.get(key)
+            if found is None:
+                names = set(_BY_PACKAGE.get(kotlin_package, {}))
+                names.update(_CHILDREN.get(kotlin_package, ()))
+                found = _ALIASES[key] = _pythonic_aliases(names)
+            return found
+
+
+        def _member_aliases(type_name):
+            '''`{alias: kotlin_name}` for every member a value of [type_name] is served under.
+
+            The namespace is the whole lookup `_member` walks -- the type and every type it is a -- so
+            an alias that two members of the chain would both claim is not served at all.
+            '''
+            key = ('type', type_name)
+            found = _ALIASES.get(key)
+            if found is None:
+                found = _ALIASES[key] = _pythonic_aliases(_member_names(type_name))
+            return found
 
         _KOTLIN_PRIMITIVES = frozenset((
             'kotlin.Byte', 'kotlin.Short', 'kotlin.Int', 'kotlin.Long', 'kotlin.Float', 'kotlin.Double',
@@ -971,10 +1027,11 @@ object PythonxAdapter {
             name only when a call to it passes keyword arguments, and then only for its keyword map
             (the answer must name that same member). `keyword_map` is `{python_kw: kotlinParam}`,
             applied to that member's calls; keywords it does not name pass through unchanged.
-            The binder renames nothing by itself: with no resolver an unknown name is an `AttributeError`
-            and a keyword is a Kotlin parameter name. Answers are cached in this registry, never
-            written onto the proxy class, so `dir()` of a proxy shows Kotlin names only. Registering
-            the same `fn` twice is a no-op.
+            Resolvers are asked before the binder's own Pythonic alias (issue #131): with no resolver
+            answering, `fill_max_width` is still served as `fillMaxWidth`, and a keyword is a Kotlin
+            parameter name or its alias. Answers are cached in this registry, never written onto the
+            proxy class, so `dir()` of a proxy shows Kotlin names only. Registering the same `fn`
+            twice is a no-op.
             '''
             if not callable(fn):
                 raise TypeError('a member resolver must be callable')
@@ -1129,9 +1186,12 @@ object PythonxAdapter {
                 if not _attach(cls, name):
                     resolved = _resolve_member(cls, name)
                     if resolved is None:
-                        raise AttributeError(
-                            'no Kotlin extension named ' + name + ' on ' + cls._kotlin_type_name
-                        )
+                        kotlin = _member_aliases(cls._kotlin_type_name).get(name)
+                        if kotlin is None:
+                            raise AttributeError(
+                                'no Kotlin extension named ' + name + ' on ' + cls._kotlin_type_name
+                            )
+                        return getattr(cls, kotlin)
                     return _aliased(getattr(cls, resolved[0]), resolved[1])
                 return getattr(cls, name)
 
@@ -1186,6 +1246,9 @@ object PythonxAdapter {
             declaration its name stands for, an overload set's base name included.
             '''
             found = _member(type_name, name)
+            if found is None:
+                kotlin = _member_aliases(type_name).get(name)
+                found = _member(type_name, kotlin) if kotlin is not None else None
             if found is None:
                 return None
             if isinstance(found, _Property):
@@ -1288,9 +1351,13 @@ object PythonxAdapter {
                 if not _attach(type(self), name):
                     resolved = _resolve_member(type(self), name)
                     if resolved is None:
-                        raise AttributeError(
-                            'no Kotlin extension named ' + name + ' on ' + type(self)._kotlin_type_name
-                        )
+                        # The binder's own alias, last: a resolver may say otherwise (`KotlinSurface`).
+                        kotlin = _member_aliases(type(self)._kotlin_type_name).get(name)
+                        if kotlin is None:
+                            raise AttributeError(
+                                'no Kotlin extension named ' + name + ' on ' + type(self)._kotlin_type_name
+                            )
+                        return getattr(self, kotlin)
                     return _aliased(getattr(self, resolved[0]), resolved[1])
                 return getattr(self, name)
 
@@ -1301,11 +1368,19 @@ object PythonxAdapter {
                 # from that dict instead of Kotlin (issue #38: `state.value = 7` was "accepted").
                 # So a write attaches first; `object.__setattr__` then goes through the `property`
                 # (its setter, or Python's own refusal for a `val`). A name no Kotlin member has is
-                # stored on the instance as before.
+                # stored on the instance as before -- unless it is the Pythonic alias of one
+                # (`selected_index = 2` for `selectedIndex`, issue #131), which writes that member.
                 if not name.startswith('_'):
                     cls = type(self)
-                    if name not in cls.__dict__:
-                        _attach(cls, name)
+                    if name not in cls.__dict__ and not _attach(cls, name):
+                        kotlin = _member_aliases(cls._kotlin_type_name).get(name)
+                        if kotlin is not None:
+                            if kotlin not in cls.__dict__:
+                                _attach(cls, kotlin)
+                            # Only a property is written through; an alias of a function is not a
+                            # place to store anything, so it is left to the instance as before.
+                            if isinstance(cls.__dict__.get(kotlin), property):
+                                name = kotlin
                 _set(self, name, value)
 
             def __repr__(self):
@@ -1706,15 +1781,12 @@ object PythonxAdapter {
             bit_offset = 1 if decl.is_extension else 0
             if kwargs:
                 for key, value in kwargs.items():
-                    index = -1
-                    for slot in range(declared):
-                        # `<receiver>` is deliberately not a Python identifier, so no keyword can name
-                        # it. Every other slot answers to its Kotlin parameter name, exactly.
-                        if decl.param_names[slot] == '<receiver>':
-                            continue
-                        if decl.param_names[slot] == key:
-                            index = slot
-                            break
+                    # `<receiver>` is deliberately not a Python identifier, so no keyword can name it,
+                    # and the synthetic slots after `${'$'}composer` answer to none. Every other slot
+                    # answers to its Kotlin parameter name and to its Pythonic alias (`keyword_slots`).
+                    index = decl.keyword_slot(key)
+                    if index >= declared:
+                        index = -1
                     if index < 0:
                         return _refuse(strict, 'has no parameter named ' + key)
                     if slots[index] is not _NO_MATCH:
@@ -1769,11 +1841,8 @@ object PythonxAdapter {
                 if not decl.param_names:
                     return _refuse(strict, 'the producer supplied no parameter names, so it is positional only')
                 for key, value in kwargs.items():
-                    index = -1
-                    for slot, name in enumerate(decl.param_names):
-                        if name != '<receiver>' and name == key:
-                            index = slot
-                            break
+                    # A Kotlin parameter name or its Pythonic alias; never the receiver.
+                    index = decl.keyword_slot(key)
                     if index < 0:
                         return _refuse(strict, 'has no parameter named ' + key)
                     if slots[index] is not _NO_MATCH:
@@ -2031,6 +2100,18 @@ object PythonxAdapter {
                     raise AttributeError(name)
                 adapted, cacheable = _adapt(kotlin_package, name)
                 if adapted is None:
+                    kotlin = _package_aliases(kotlin_package).get(name)
+                    if kotlin is not None:
+                        # A Pythonic alias (issue #131): whatever the Kotlin name reads as, through the
+                        # module -- the proxy layer's function, this layer's overload set, a live
+                        # constant -- so the two spellings are one object. Frozen into the module dict
+                        # only when the Kotlin name itself is (a constant is read every time), and
+                        # recorded as this layer's, so a table change drops it with everything else.
+                        adapted = getattr(module, kotlin)
+                        if module.__dict__.get(kotlin) is adapted:
+                            setattr(module, name, adapted)
+                            module._kotlin_adapted[name] = adapted
+                        return adapted
                     raise AttributeError(
                         "module '" + module.__name__ + "' has no attribute '" + name +
                         "' (nothing named that is exposed from Kotlin package " + kotlin_package + ')'

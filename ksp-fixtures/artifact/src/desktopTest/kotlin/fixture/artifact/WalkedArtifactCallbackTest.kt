@@ -87,13 +87,13 @@ class WalkedArtifactCallbackTest {
         PythonCallables.withScope(PythonCallables.newScope()) {
             Python3.exec(
                 """
-                from kotlin.system import measureTimeMillis
+                from kotlin.system import measure_time_millis
 
                 _ran = []
                 _never = []
                 _control = lambda: _never.append('should not run')
 
-                _elapsed = measureTimeMillis(lambda: _ran.append('ran'))
+                _elapsed = measure_time_millis(lambda: _ran.append('ran'))
 
                 assert _ran == ['ran'], 'the Python callable was not invoked: ' + repr(_ran)
                 assert _never == [], 'a callable nobody passed anywhere ran: ' + repr(_never)
@@ -120,9 +120,9 @@ class WalkedArtifactCallbackTest {
         PythonCallables.withScope(PythonCallables.newScope()) {
             Python3.exec(
                 """
-                from kotlin.system import measureTimeMillis
+                from kotlin.system import measure_time_millis
                 try:
-                    measureTimeMillis(lambda wanted: None)
+                    measure_time_millis(lambda wanted: None)
                     raise AssertionError('a one-argument callable filled a zero-argument slot')
                 except AssertionError:
                     raise
@@ -166,7 +166,7 @@ class WalkedArtifactCallbackTest {
                 assert modifierElementCount(_empty) == 0
 
                 _clicks = []
-                _tappable = clickable(_empty, onClick=lambda: _clicks.append('tap'))
+                _tappable = clickable(_empty, on_click=lambda: _clicks.append('tap'))
 
                 assert not isTheEmptyModifier(_tappable._pm_handle), (
                     'clickable returned the receiver unchanged'

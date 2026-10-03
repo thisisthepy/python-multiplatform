@@ -8,12 +8,25 @@ import python.multiplatform.reflection.ExposedCallable
  * ### Why it exists
  *
  * A Kotlin-named module (`androidx.compose.material3`, `kotlin.text`, a consumer's own package)
- * carries **Kotlin's own surface**: Kotlin declaration names, keyword arguments by **Kotlin
- * parameter names**, Kotlin defaults for what a call leaves out. Nothing is renamed -- no
- * snake_case, no `pythonx` -- because a Kotlin name in Python means the original Kotlin
- * (`docs/INTENT.md` §2.2). Making that surface Pythonic is the business of a real Python package
- * built on top of it (pythonx-compose, §2.3), and this module is what such a package reads to do
- * it by rule rather than by a wrapper per declaration.
+ * is importable under its Kotlin package name and nothing else: **a namespace is never renamed**,
+ * no `pythonx` module is made (`docs/INTENT.md` §2.2, §2.3). Inside it, each declaration is reached
+ * by its Kotlin name **and** by its Pythonic name, and takes keyword arguments by **either** spelling
+ * of each parameter (issue #131):
+ *
+ * | Kotlin | also reachable as | rule |
+ * |---|---|---|
+ * | `rememberTextFieldState` | `remember_text_field_state` | snake_case of a lower-case-first name |
+ * | `toURLString` | `to_url_string` | a run of capitals is one word |
+ * | `paddingFromBaseline__TextUnit` | `padding_from_baseline__TextUnit` | an explicit overload key keeps its suffix |
+ * | `Checkbox`, `Modifier`, `Alignment.End` | (unchanged) | upper-case first: types, objects, composables, constants |
+ * | `onCheckedChange=` | `on_checked_change=` | a keyword is snake_case of the Kotlin parameter name |
+ *
+ * The rule is pythonx-compose 0.1.0a1's (`_reexport.py`'s `snake_case`/`python_name`), so a package
+ * built on top sees the same spelling it always computed. An alias is served only when it is
+ * unambiguous in its namespace -- one module, one proxy type (supertypes included), or one
+ * declaration's parameters: it must not already be a Kotlin name there and no second Kotlin name may
+ * map to it ([SOURCE]'s `pythonic_aliases`). An ambiguous alias is not served, and every Kotlin name
+ * involved stays reachable as itself. `dir()` lists Kotlin names only.
  *
  * Two installers put functions into those modules -- [PythonProxySource] renders every table entry
  * eagerly; [python.multiplatform.ffi.pythonx.PythonxAdapter] adapts names lazily, adds overload
@@ -28,11 +41,19 @@ import python.multiplatform.reflection.ExposedCallable
  * | `describe_member(type, name)` | the declaration(s) a member name of a Kotlin type stands for on its proxy -- an extension function or a property, supertypes included -- read from the table |
  * | `kotlin_function(raw, row)` | what [PythonProxySource] wraps each rendered function in: keyword arguments by Kotlin name, omitted defaults, and the metadata above |
  * | `signature_of(rows)` | the `inspect.Signature` for one declaration (`(*args, **kwargs)` for an overload set) |
+ * | `snake_case(name)`, `python_name(name)` | the naming rule below, the one both installers and the stub generator apply |
+ * | `pythonic_aliases(names)` | `{alias: kotlin_name}` for one namespace, ambiguous aliases left out |
+ * | `keyword_slots(row)` | `{keyword: slot}` for one declaration: Kotlin parameter names and their aliases |
+ * | `module_alias_getattr(module)` | the PEP 562 `__getattr__` [PythonProxySource] gives the modules it creates, serving the aliases |
  *
  * ### The public contract, for a Pythonic layer
  *
  * Every function the binder puts on a Kotlin-named module -- whichever installer put it there --
- * answers `inspect.signature(fn)` with the **Kotlin** parameter names, in declaration order:
+ * answers `inspect.signature(fn)` with the **Pythonic** keyword of each parameter (its snake_case
+ * alias, or its Kotlin name where none is served), in declaration order. `describe()` carries both:
+ * `name` is the Kotlin parameter name, `python_name` the keyword the signature shows. The signature
+ * is the call surface Python tools read (`help()`, IDEs, `Signature.bind`), so it shows the spelling
+ * Python code is written in; the description is the Kotlin declaration, so it keeps Kotlin's.
  *
  * - an extension receiver is a positional-only parameter named `receiver`;
  * - a parameter with a Kotlin default has `default is python_multiplatform.KOTLIN_DEFAULT`;
@@ -53,8 +74,9 @@ import python.multiplatform.reflection.ExposedCallable
  *      'composable': True,                               # has a $composer slot
  *      'content': None,                                  # name of a trailing @Composable lambda parameter
  *      'parameters': (
- *          {'name': 'checked', 'type': 'kotlin.Boolean', 'tag': 'BOOLEAN',
+ *          {'name': 'checked', 'python_name': 'checked', 'type': 'kotlin.Boolean', 'tag': 'BOOLEAN',
  *           'has_default': False, 'value_class': False, 'composable_lambda': False},
+ *          {'name': 'onCheckedChange', 'python_name': 'on_checked_change', ...},
  *          ...)}
  *
  * `python_multiplatform.describe(module, name)` describes **any** bound name of a Kotlin-named
@@ -83,6 +105,8 @@ import python.multiplatform.reflection.ExposedCallable
  * - a name the type does not have is looked up on each type the table says it **is a**, nearest
  *   first -- the same lookup the proxy uses, so a description cannot disagree with the attribute;
  * - nothing is invoked: no getter runs, no handle is resolved;
+ * - a member's Pythonic alias (`fill_max_width`) describes the Kotlin member it is served for, and so
+ *   does `describe(module, alias)` for a module name;
  * - a name served on neither the type nor any supertype, or any name while the binding layer is not
  *   installed (it is what serves members on a proxy), raises `AttributeError`.
  *
@@ -90,9 +114,12 @@ import python.multiplatform.reflection.ExposedCallable
  *
  * A Kotlin-named module's `dir()` lists its bound declarations, the receiver types under it, and
  * its **direct child packages and objects** (an object whose members are bound, `Alignment`, is a
- * package here). Each under its Kotlin name. Reading a child as an attribute imports it, so
- * `androidx.compose.ui.Alignment.End` works after `import androidx` alone; a name nothing is bound
- * under stays an `AttributeError`.
+ * package here). Each under its Kotlin name only -- the Pythonic aliases are served but not listed,
+ * so `dir()` names each declaration once (and a layer that converts `dir()` by the same rule, as
+ * pythonx-compose 0.1.0a1's `_name_table` does, sees no two entries for one name). Reading a child
+ * as an attribute imports it, so `androidx.compose.ui.Alignment.End` works after `import androidx`
+ * alone; a name nothing is bound under stays an `AttributeError`. A package segment is a namespace
+ * and is never given an alias.
  *
  * `value_class` is true for a parameter whose marshalling tag is a primitive while its declared
  * type is not a Kotlin primitive (`Dp`, `Color`, `TextUnit`) -- the only machine-checkable form of
@@ -101,7 +128,10 @@ import python.multiplatform.reflection.ExposedCallable
  * ### Member resolvers: the one hook for names on a proxy
  *
  * A proxy the binder returns (`Modifier.padding(16)` is one) serves its Kotlin members under their
- * Kotlin names only. A Pythonic package built on the binder can say what else a member may be called:
+ * Kotlin names and their Pythonic aliases. The order a name is looked up in is fixed: **the Kotlin
+ * member of that name, then the registered resolvers, then the binder's own snake_case alias** -- so
+ * a resolver can still decide what a name means, and with none registered the alias is served. A
+ * Pythonic package built on the binder can say what else a member may be called:
  *
  *     python_multiplatform.binding.add_member_resolver(fn)
  *     python_multiplatform.binding.remove_member_resolver(fn)
@@ -113,20 +143,23 @@ import python.multiplatform.reflection.ExposedCallable
  *   never reaches it. `kotlin_member_names` is a tuple of the Kotlin member names the type has.
  * - The first resolver (in registration order) returning a name that is in `kotlin_member_names` wins,
  *   and that Kotlin member is served. Any other answer (`None`, an unknown name, a name starting with
- *   `_`) means "not mine"; with no resolver answering, the result is the usual `AttributeError`.
+ *   `_`) means "not mine"; with no resolver answering, the binder's own alias is served, and a name
+ *   that is no alias either is the usual `AttributeError`.
  * - **Keyword maps.** An answer may be `(kotlin_name, keyword_map)`, `keyword_map` being
  *   `{python_kw: kotlinParam}`: it is applied when that member is called, and keywords it does not
- *   name pass through as Kotlin parameter names (an unknown one is still the binding layer's
- *   `TypeError`, which lists the Kotlin parameters). For a member the proxy *does* have under its
+ *   name pass through unchanged, to be matched as a Kotlin parameter name or its Pythonic alias (an
+ *   unknown one is still the binding layer's `TypeError`). A map that turns `padding_values` into
+ *   `paddingValues` is therefore harmless: the binder would have accepted either. For a member the proxy *does* have under its
  *   Kotlin name (`padding`), resolvers are asked only when a call to it passes keyword arguments, and
  *   only for its keyword map: an answer counts when it is `(that same name, keyword_map)`; a plain
  *   name or `None` means no map. A call with no keywords never asks. A tuple of any other shape is a
  *   `TypeError`.
- * - The binder renames nothing itself: with no resolver registered behaviour is exactly the
- *   Kotlin-names-only behaviour above.
+ * - With no resolver registered, a proxy serves its Kotlin names and the binder's aliases (issue #131).
  * - Answers are cached in the resolver registry (cleared when a resolver is added or removed, and
  *   when a table is registered), never written onto a proxy class: `dir()` of a proxy and the class
- *   `__dict__` show Kotlin names only. Removing a resolver removes its aliases.
+ *   `__dict__` show Kotlin names only. Removing a resolver removes its aliases. The binder's own
+ *   aliases follow the same rule: computed per type, cached beside the table, never written onto the
+ *   class, so reading an alias costs a `__getattr__` miss every time.
  * - Registering the same function twice is a no-op. Resolvers are process-wide, like the binding layer.
  *
  * ### `__signature__` is lazy
@@ -162,6 +195,7 @@ object KotlinSurface {
 
         import inspect as _inspect
         import keyword as _keyword
+        import re as _re
         import sys as _sys
 
         _pm_root = True
@@ -226,6 +260,135 @@ object KotlinSurface {
             return name.startswith('${'$'}')
 
 
+        # ------------------------------------------------------------- Pythonic names (issue #131)
+        #
+        # A Kotlin-named module is reachable under its Kotlin package name and nothing else -- a
+        # namespace is never renamed (`docs/INTENT.md` §2.2). Inside it, every declaration, member and
+        # keyword parameter is reachable by its Kotlin name **and** by its Pythonic name. The rule is
+        # the one pythonx-compose 0.1.0a1 uses (`pythonx/compose/_reexport.py`), character for
+        # character, so a package built on top sees no change of spelling:
+        #
+        # - a name that starts upper-case (a type, an object, a `@Composable`, an enum entry, a
+        #   PascalCase constant) is unchanged;
+        # - any other name is snake_case, a run of capitals counting as one word
+        #   (`fillMaxWidth` -> `fill_max_width`, `toURLString` -> `to_url_string`);
+        # - an explicit overload key converts its base and keeps its `__Types` suffix
+        #   (`paddingFromBaseline__TextUnit` -> `padding_from_baseline__TextUnit`);
+        # - a keyword parameter is `snake_case` of its Kotlin name (`onCheckedChange` -> `on_checked_change`).
+        #
+        # An alias is served only when it is unambiguous in its namespace (`pythonic_aliases`): when it
+        # is not already some Kotlin name there, and when no second Kotlin name maps to it. Otherwise
+        # the Kotlin names are still the only spellings, and nothing is guessed.
+
+        _LOWER_UPPER = _re.compile(r'([a-z0-9])([A-Z])')
+        _ACRONYM_WORD = _re.compile(r'([A-Z]+)([A-Z][a-z])')
+
+
+        def snake_case(kotlin_name):
+            '''`fillMaxWidth` -> `fill_max_width`, `toURLString` -> `to_url_string`, `zIndex` -> `z_index`.'''
+            return _LOWER_UPPER.sub(r'\1_\2', _ACRONYM_WORD.sub(r'\1_\2', kotlin_name)).lower()
+
+
+        def python_name(kotlin_name):
+            '''The one Pythonic spelling of a Kotlin declaration or member name.
+
+            Upper-case names keep their Kotlin spelling. An explicit overload key (`padding__Dp`)
+            converts its base and keeps the type suffix, which names Kotlin types.
+            '''
+            if not kotlin_name or kotlin_name[:1].isupper():
+                return kotlin_name
+            base, sep, suffix = kotlin_name.partition('__')
+            return snake_case(base) + sep + suffix
+
+
+        def pythonic_aliases(kotlin_names, rule=python_name):
+            '''`{alias: kotlin_name}` for the names of one namespace, ambiguity refused.
+
+            An alias is served when it differs from its Kotlin name, is a Python identifier, is not
+            itself one of [kotlin_names] (that Kotlin name owns it), and exactly one Kotlin name maps
+            to it. Two Kotlin names that map to one alias (`toURL` and `toUrl` -> `to_url`) serve no
+            alias at all: both stay reachable by their Kotlin names only. Independent of order.
+            '''
+            names = set(kotlin_names)
+            found = {}
+            clashed = set()
+            for kotlin in names:
+                if not isinstance(kotlin, str):
+                    continue
+                alias = rule(kotlin)
+                if alias == kotlin or alias in names or not alias.isidentifier():
+                    continue
+                other = found.get(alias)
+                if other is None:
+                    found[alias] = kotlin
+                elif other != kotlin:
+                    clashed.add(alias)
+            for alias in clashed:
+                del found[alias]
+            return found
+
+
+        def _parameter_aliases(names):
+            '''`{kotlin_parameter: pythonic_keyword}` for one declaration's own parameter names.'''
+            own = [name for name in names if name != _RECEIVER and not _is_synthetic(name)]
+            return {kotlin: alias for alias, kotlin in pythonic_aliases(own, snake_case).items()}
+
+
+        def keyword_slots(row):
+            '''`{keyword: slot}` for one table row: each Kotlin parameter name, and its Pythonic alias.
+
+            The receiver and the synthetic Compose slots answer to no keyword. An alias that collides
+            with another parameter's Kotlin name, or that two parameters share, is not served
+            (`pythonic_aliases`); those parameters are reached by their Kotlin names.
+            '''
+            names = row[_NAMES] or ()
+            index = {}
+            for slot, name in enumerate(names):
+                if name == _RECEIVER or _is_synthetic(name):
+                    continue
+                index.setdefault(name, slot)
+            for kotlin, alias in _parameter_aliases(names).items():
+                index.setdefault(alias, index[kotlin])
+            return index
+
+
+        def _module_aliases(module):
+            '''`{alias: kotlin_name}` for the names the proxy layer published on [module].
+
+            Recomputed when the proxy layer renders a new table or the module gains a name, so an alias
+            always reads the module's *current* Kotlin attribute and never a value cached from an
+            older render.
+            '''
+            names = [name for name in module.__dict__ if not name.startswith('_')]
+            rows = getattr(type(module), '_pm_kotlin_rows', None) or {}
+            names.extend(name for name in rows if name not in module.__dict__)
+            key = (_proxy_epoch, len(names))
+            cached = module.__dict__.get('_pm_aliases')
+            if cached is not None and cached[0] == key:
+                return cached[1]
+            aliases = pythonic_aliases(names)
+            module.__dict__['_pm_aliases'] = (key, aliases)
+            return aliases
+
+
+        def module_alias_getattr(module):
+            '''The PEP 562 `__getattr__` the proxy layer gives a module it creates: Pythonic aliases.
+
+            Asked only for a name the module does not have. The binding layer, when it adapts the
+            module, replaces this with its own `__getattr__`, which serves the same aliases from the
+            table. The alias is never written into the module: every read goes to the Kotlin name.
+            '''
+            def __getattr__(name):
+                if name.startswith('__') and name.endswith('__'):
+                    raise AttributeError(name)
+                kotlin = _module_aliases(module).get(name)
+                if kotlin is None:
+                    raise AttributeError("module '" + module.__name__ + "' has no attribute '" + name + "'")
+                return getattr(module, kotlin)
+
+            return __getattr__
+
+
         def _is_composable_lambda(type_name):
             if not type_name or not type_name.startswith(_FUNCTION_PREFIX):
                 return False
@@ -243,6 +406,7 @@ object KotlinSurface {
             tags = row[_TAGS] or ()
             types = row[_TYPES] or ()
             defaults = row[_DEFAULTS] or ()
+            aliases = _parameter_aliases(names)
             parameters = []
             for index in range(row[_ARITY]):
                 name = _field(names, index)
@@ -252,6 +416,9 @@ object KotlinSurface {
                 tag = _field(tags, index)
                 parameters.append({
                     'name': name,
+                    # The keyword `inspect.signature` shows for it: its snake_case alias, or its Kotlin
+                    # name where no alias is served (issue #131). Both are accepted by a call.
+                    'python_name': aliases.get(name, name),
                     'type': type_name,
                     'tag': tag,
                     'has_default': bool(_field(defaults, index)),
@@ -358,6 +525,10 @@ object KotlinSurface {
         def signature_of(rows, drop_receiver=False):
             '''The `inspect.Signature` of one declaration; `(*args, **kwargs)` for anything else.
 
+            Each parameter is shown under its **Pythonic** keyword (`on_checked_change`), or under its
+            Kotlin name where no alias is served (issue #131); a call accepts both spellings, and
+            `describe` carries both (`name`, `python_name`).
+
             An overload set has no single signature, and a declaration whose Kotlin parameter name
             Python cannot spell (`in`, `is`, `from` ...) cannot be written as one -- its keyword is
             still accepted through `**{...}`, and `describe` still carries the true name.
@@ -376,7 +547,12 @@ object KotlinSurface {
                 if drop_receiver and params:
                     params = params[1:]
                 return _inspect.Signature(params, return_annotation=_annotation(_declared_return(row[_RTYPE])))
-            receiver_name = 'receiver' if 'receiver' not in names else '_receiver'
+            aliases = _parameter_aliases(names)
+            shown = {}
+            for name in names:
+                alias = aliases.get(name)
+                shown[name] = alias if alias is not None and not _keyword.iskeyword(alias) else name
+            receiver_name = 'receiver' if 'receiver' not in shown.values() else '_receiver'
             kind = P.POSITIONAL_OR_KEYWORD
             seen_default = False
             for index, name in enumerate(names):
@@ -387,6 +563,7 @@ object KotlinSurface {
                     if not drop_receiver:
                         params.append(P(receiver_name, P.POSITIONAL_ONLY, annotation=annotation))
                     continue
+                name = shown[name]
                 if not name.isidentifier() or _keyword.iskeyword(name):
                     return _GENERIC
                 has_default = bool(_field(defaults, index))
@@ -436,8 +613,11 @@ object KotlinSurface {
         _MISSING = _Missing()
 
 
-        def bind_slots(row, args, kwargs):
-            '''Positional and Kotlin-named keyword arguments -> one value per slot of [row].
+        def bind_slots(row, args, kwargs, keywords=None):
+            '''Positional and keyword arguments -> one value per slot of [row].
+
+            A keyword is a Kotlin parameter name or its Pythonic alias ([keywords], `keyword_slots`
+            when not given); writing both spellings of one parameter is "multiple values".
 
             A defaulted slot the call left out (or filled with `KOTLIN_DEFAULT`) becomes `None`: the
             walked Kotlin body tests `args[i] == null` and takes a call expression that does not
@@ -457,13 +637,10 @@ object KotlinSurface {
             if len(args) > arity:
                 raise TypeError(name + '() takes ' + str(arity) + ' arguments, got ' + str(len(args)))
             slots = list(args) + [_MISSING] * (arity - len(args))
+            if kwargs and keywords is None:
+                keywords = keyword_slots(row)
             for key, value in kwargs.items():
-                index = -1
-                if key != _RECEIVER and not _is_synthetic(key):
-                    for slot, declared in enumerate(names):
-                        if declared == key:
-                            index = slot
-                            break
+                index = keywords.get(key, -1)
                 if index < 0:
                     raise TypeError(name + "() got an unexpected keyword argument '" + key + "'")
                 if slots[index] is not _MISSING:
@@ -492,7 +669,8 @@ object KotlinSurface {
               answer is the same whichever installer ran first; across tables the newer install
               wins, and neither layer's handles from an older table are ever used;
             - otherwise a call that fills every slot positionally goes straight to [raw], and any
-              other call is mapped onto the slots by Kotlin parameter name first (`bind_slots`).
+              other call is mapped onto the slots by Kotlin parameter name or Pythonic alias first
+              (`bind_slots`; the keyword map is built on the first call that passes a keyword).
             '''
             name = row[_NAME]
             arity = row[_ARITY]
@@ -500,6 +678,7 @@ object KotlinSurface {
             has_defaults = any(row[_DEFAULTS] or ())
             modules = _sys.modules
             default = KOTLIN_DEFAULT
+            keywords = []
 
             def kotlin(*args, **kwargs):
                 binding = modules.get(BINDING_MODULE)
@@ -515,7 +694,9 @@ object KotlinSurface {
                             break
                     else:
                         return raw(*args)
-                return raw(*bind_slots(row, args, kwargs))
+                if kwargs and not keywords:
+                    keywords.append(keyword_slots(row))
+                return raw(*bind_slots(row, args, kwargs, keywords[0] if keywords else None))
 
             kotlin.__wrapped__ = _SignatureCarrier(raw, (row,))
             kotlin.__kotlin_rows__ = (row,)

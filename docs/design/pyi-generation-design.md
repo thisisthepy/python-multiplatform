@@ -14,7 +14,11 @@
 > its receiver's class as well, and states function types, nullability, value classes and overload
 > sets (§3.1, §3.3–§3.6, §4.1). Everything is still under Kotlin names; the "`Dp | float`, `@overload`
 > sets, `Modifier` callback-Protocol shape" that the paragraph above says left the plugin are back
-> **as Kotlin-name typing**, not as a Pythonic product -- no snake_case, no `pythonx`.
+> **as Kotlin-name typing**, not as a Pythonic product -- no `pythonx`.
+>
+> **Revised again for issue #131.** snake_case is back -- not as a `pythonx` product, but as the
+> Pythonic aliases the runtime serves on the Kotlin-named modules themselves (SPEC U-12): parameters
+> under their Pythonic keyword, and `alias = kotlinName` beside each module-level name (§3.6).
 
 The binder serves Kotlin-named modules (`androidx.compose.foundation.layout`, `junit.runner.Version`,
 a consumer's own package) that exist only as `sys.modules` entries made at run time
@@ -456,8 +460,10 @@ Python's one `int`/`float` and a class that fell back to `Any` cannot tell two K
 so each overload after the first carries `# type: ignore[overload-cannot-match]`
 (`TypedStubTest.everyOverloadAfterTheFirstSilencesTheCheckersNeverMatchedDiagnostic`).
 
-Parameters are keyword-capable under their **Kotlin** names (`all`, `fraction`, `alignmentLine`);
-nothing is converted to snake_case (`KotlinNamesOnlyStubTest.kotlinNamesAreNeverSnakeCased`). A name
+Parameters are keyword-capable under the keyword `inspect.signature` shows: the Pythonic one where an
+alias is served (`all`, `fraction`, `alignment_line`), else the Kotlin name; each module-level name also
+gets `alias = kotlinName` (issue #131, SPEC U-12;
+`KotlinNamesOnlyStubTest.aKotlinNameKeepsItsDefAndGainsItsPythonicAlias`). A name
 that is not a Python identifier or is a Python keyword, or an unknown name, forces positional-only up
 to and including that parameter, spelled `__a<index>`
 (`KotlinNamesOnlyStubTest.aParameterNamedLikeAPythonKeywordForcesAPositionalOnlyPrefix`). A Kotlin
@@ -521,7 +527,7 @@ There is none. A stub lives at the Kotlin module path the runtime publishes onto
 `androidx/compose/foundation/layout/__init__.pyi`, `junit/runner/Version/__init__.pyi` for a static on
 a class — and nothing is emitted under `pythonx/`
 (`KotlinNamesOnlyStubTest.theStubLivesUnderTheKotlinModulePathAndNothingLivesUnderPythonx`,
-`WalkedArtifactStubTest.theStubsUseKotlinNamesAndNothingIsExportedUnderPythonx`). The `androidx.` →
+`WalkedArtifactStubTest.theStubsKeepKotlinNamesAddPythonicAliasesAndExportNothingUnderPythonx`). The `androidx.` →
 `pythonx.` default rule, the observation that `pythonx.compose.layout` wraps
 `androidx.compose.foundation.layout`, and the `pythonx-map.toml` manifest are in archive §5.
 

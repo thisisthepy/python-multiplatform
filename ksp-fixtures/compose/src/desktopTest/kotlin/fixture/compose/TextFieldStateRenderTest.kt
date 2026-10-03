@@ -147,7 +147,36 @@ class TextFieldStateRenderTest {
     }
 
     /**
-     * Made inside a composition by `rememberTextFieldState`, drawn by `TextField(state=...)` in the same
+     * Issue #131: the Pythonic spellings are the same declarations as the Kotlin ones -- the
+     * `@Composable` `remember_text_field_state`, the constructor's `initial_text=`/`initial_selection=`
+     * keywords, and the extensions `clear_text()`/`set_text_and_place_cursor_at_end()` -- and the
+     * Kotlin spellings keep working beside them.
+     */
+    @Test
+    fun thePythonicSpellingsAreTheSameDeclarations() {
+        Python3.exec(
+            """
+            from androidx.compose.foundation.text.input import (
+                TextFieldState, rememberTextFieldState, remember_text_field_state,
+            )
+            from androidx.compose.ui.text import TextRange
+
+            assert remember_text_field_state is rememberTextFieldState
+            _tfs_py = TextFieldState(initial_text='kw', initial_selection=TextRange(0))
+            assert _tfs_py.text == 'kw', repr(_tfs_py.text)
+            _tfs_py.clear_text()
+            assert _tfs_py.text == '', repr(_tfs_py.text)
+            _tfs_py.set_text_and_place_cursor_at_end('snake')
+            assert _tfs_py.text == 'snake', repr(_tfs_py.text)
+            _tfs_py.setTextAndPlaceCursorAtEnd('camel')
+            assert _tfs_py.text == 'camel', repr(_tfs_py.text)
+            """.trimIndent(),
+        )
+    }
+
+    /**
+     * Made inside a composition by `remember_text_field_state` (the Pythonic spelling of
+     * `rememberTextFieldState`, issue #131), drawn by `TextField(state=...)` in the same
      * body, then written from Python **outside** the composition: the state is Compose snapshot state,
      * so the next frame of the *same* scene shows the new text with no host call and no Python body
      * re-run being needed. Every value the body saw is the one remembered state (each reads the written
@@ -168,7 +197,7 @@ class TextFieldStateRenderTest {
                 """
                 assert len(_tfs_seen) >= 1, _tfs_seen
                 assert type(_tfs_seen[0].text) is str and _tfs_seen[0].text == 'abc', repr(_tfs_seen[0].text)
-                _tfs_seen[0].setTextAndPlaceCursorAtEnd('a much longer line of text')
+                _tfs_seen[0].set_text_and_place_cursor_at_end('a much longer line of text')
                 """.trimIndent(),
             )
             // `TextField(state=...)` does not finish reacting to a state write inside one frame: the
@@ -235,9 +264,9 @@ class TextFieldStateRenderTest {
         const val MAX_FRAMES = 4
 
         val REMEMBERED = """
-            from androidx.compose.foundation.text.input import rememberTextFieldState
+            from androidx.compose.foundation.text.input import remember_text_field_state
             from androidx.compose.material3 import TextField
-            _tfs_state = rememberTextFieldState('abc')
+            _tfs_state = remember_text_field_state('abc')
             _tfs_seen.append(_tfs_state)
             TextField(state=_tfs_state)
         """.trimIndent()
