@@ -2,6 +2,7 @@ package python.multiplatform.gradle
 
 import org.gradle.api.GradleException
 import org.gradle.api.file.Directory
+import org.gradle.api.file.RegularFile
 import org.gradle.api.provider.Provider
 import org.gradle.api.tasks.TaskProvider
 
@@ -55,6 +56,38 @@ object CPythonIncludeLayout {
             else -> "ios/Python.xcframework/$target/include/python$tag"
         }
     }
+
+    // ---- link libraries (issue #56) ----
+
+    /** Android links `libpython3.x.so`, Windows links the import library; macOS/Linux/iOS need none. */
+    fun isLinkRequired(target: String): Boolean = target in androidTargets || target == "windows-x86_64"
+
+    /** Free-threaded link libraries exist on Windows only (`python314t.lib`); Android has no free-threaded build. */
+    fun supportsLinkLibrary(target: String, flavour: CPythonFlavour): Boolean =
+        isLinkRequired(target) && (flavour == CPythonFlavour.GIL || target == "windows-x86_64")
+
+    /** Directory holding the link library, relative to the version-keyed extraction root. */
+    fun linkLibraryDirRelativePath(target: String, flavour: CPythonFlavour): String {
+        require(supportsLinkLibrary(target, flavour)) { "no $flavour link library for target '$target'" }
+        return when (target) {
+            "windows-x86_64" ->
+                (if (flavour == CPythonFlavour.FREE_THREADED) "windows-x86_64-freethreaded" else "windows-x86_64") +
+                    "/python/libs"
+            else -> "$target/prefix/lib"
+        }
+    }
+
+    /** File name of the link library, e.g. `libpython3.14.so` or `python314.lib` (`python314t.lib` free-threaded). */
+    fun linkLibraryFileName(target: String, flavour: CPythonFlavour, pythonVersion: String): String {
+        require(supportsLinkLibrary(target, flavour)) { "no $flavour link library for target '$target'" }
+        val parts = pythonVersion.split('.')
+        require(parts.size >= 2) { "python version '$pythonVersion' has no major.minor" }
+        return if (target == "windows-x86_64") {
+            "python${parts[0]}${parts[1]}" + (if (flavour == CPythonFlavour.FREE_THREADED) "t" else "") + ".lib"
+        } else {
+            "libpython${parts[0]}.${parts[1]}.so"
+        }
+    }
 }
 
 /**
@@ -95,5 +128,40 @@ class CPythonIncludeDirectories(
         val relative = CPythonIncludeLayout.relativePath(target, flavour, pythonVersion)
         // `TaskProvider.map` keeps the task as the producer, so the dependency travels with the value.
         return task.map { extractedRoot.dir(relative) }
+    }
+
+    /** Whether linking against CPython is needed at all for [target] (false on macOS, Linux and iOS). */
+    fun isLinkRequired(target: String): Boolean = CPythonIncludeLayout.isLinkRequired(target)
+
+    /** Whether [libraryDir]/[libraryFile] would succeed for this pair in this build. */
+    fun isLinkAvailable(target: String, flavour: CPythonFlavour = CPythonFlavour.GIL): Boolean =
+        CPythonIncludeLayout.supportsLinkLibrary(target, flavour) && extractionTask(target, flavour) != null
+
+    private fun linkTask(target: String, flavour: CPythonFlavour): TaskProvider<*> {
+        if (!CPythonIncludeLayout.supportsLinkLibrary(target, flavour)) {
+            throw GradleException(
+                "No $flavour CPython link library for '$target'. Only android-* and windows-x86_64 link against " +
+                    "CPython; macOS, Linux and iOS need none (isLinkRequired=false); free-threaded exists on Windows only.",
+            )
+        }
+        return extractionTask(target, flavour) ?: throw GradleException(
+            "The $flavour CPython for '$target' is not extracted by this build. " +
+                "Only the flavour selected with -PpythonFreeThreaded is downloaded.",
+        )
+    }
+
+    /** The directory holding the link library (the `-L` directory); resolving it runs the extraction task first. */
+    fun libraryDir(target: String, flavour: CPythonFlavour = CPythonFlavour.GIL): Provider<Directory> {
+        val task = linkTask(target, flavour)
+        val relative = CPythonIncludeLayout.linkLibraryDirRelativePath(target, flavour)
+        return task.map { extractedRoot.dir(relative) }
+    }
+
+    /** The link library file itself (`libpython3.14.so` / `python314.lib`); carries the extraction task. */
+    fun libraryFile(target: String, flavour: CPythonFlavour = CPythonFlavour.GIL): Provider<RegularFile> {
+        val task = linkTask(target, flavour)
+        val relative = CPythonIncludeLayout.linkLibraryDirRelativePath(target, flavour) + "/" +
+            CPythonIncludeLayout.linkLibraryFileName(target, flavour, pythonVersion)
+        return task.map { extractedRoot.file(relative) }
     }
 }
