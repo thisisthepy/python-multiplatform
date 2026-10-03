@@ -211,11 +211,24 @@ class WalkedArtifactStubTest {
         assertEquals(emptySet(), properties - propertyKeys, "a property stub names no property key")
         assertEquals(emptySet(), propertyKeys - properties, "a property key has no stub")
 
+        // A fourth shape (issue #73): a class's own constructor, whose key (`kotlin.text.MatchGroup`) is a
+        // module attribute at run time, is stubbed as that class's `__init__` so the class keeps its stub
+        // -- and its docstring carries the key after `Kotlin constructor: `. Matched by key, like a
+        // property, and counted as stubbed only in the direction "this key has a stub": a marker naming
+        // no installed key is still "stubbed but not callable" below.
+        val constructors = generatedPaths()
+            .filter { it.endsWith(".pyi") }
+            .flatMap { path ->
+                Regex("""Kotlin constructor: ([^\s"]+)""").findAll(stub(path)).map { it.groupValues[1] }.toList()
+            }
+            .toSet()
+        assertEquals(emptySet(), constructors - installed, "a constructor stub names no table key")
+
         // The base name of an overload set (`padding` for `padding__Dp`, ...) is served by the binding
         // layer's dispatcher and is stubbed as `@overload`s; it is not itself a table key.
         val overloadBases = installed.map { it.substringBeforeLast('.') + "." + it.substringAfterLast('.').substringBefore("__") }
             .filter { it !in installed }.toSet()
         assertEquals(emptySet(), stubbed - installed - overloadBases, "stubbed but not callable")
-        assertEquals(emptySet(), installed - propertyKeys - stubbed, "callable but not stubbed")
+        assertEquals(emptySet(), installed - propertyKeys - stubbed - constructors, "callable but not stubbed")
     }
 }

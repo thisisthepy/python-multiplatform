@@ -159,5 +159,32 @@ class TextStateBindingTest {
         assertTrue("    replaceAll: _t.ClassVar[" in stub, stub)
         assertFalse(Regex("^def Editable\\(", RegexOption.MULTILINE).containsMatchIn(stub), "the constructor took the class's name: $stub")
         assertTrue("class Legacy:" in stub && "    def __init__(self, span: Span) -> None:" in stub, stub)
+        // The table key `fixture.artifacttextstate.Editable` has no module-level `def`; the marker is where
+        // `WalkedArtifactStubTest`'s "every table key is stubbed" finds it.
+        assertTrue("\"\"\"Kotlin constructor: $pkg.Editable (" in stub, stub)
+    }
+
+    /**
+     * A value class the boundary opens (`Meters(value: Double)`, bound as `FLOAT`) is built and returned
+     * as its raw number, so its constructor must stay a module function returning that number: an
+     * `__init__` would promise a `Meters` instance the runtime never gives. Found by
+     * `:ksp-fixtures:artifact`'s `everyStubbedFunctionIsATableKeyAndEveryTableKeyIsStubbed` reporting
+     * `fixture.valueclass.Meters` as "callable but not stubbed" after the first version of this change.
+     */
+    @Test
+    fun aValueClassConstructorThatReturnsItsPrimitiveStaysAModuleFunction() {
+        val double = python.multiplatform.gradle.model.KotlinTypeModel("kotlin.Double")
+        val meters = python.multiplatform.gradle.model.KotlinTypeModel(
+            "fixture.vc.Meters",
+            valueClass = python.multiplatform.gradle.model.ValueClassModel(double, constructorIsPublic = true, propertyIsPublic = true),
+        )
+        val constructor = python.multiplatform.gradle.model.DeclarationModel(
+            simpleName = "Meters", owner = "fixture.vc", ownerIsClass = false, receiver = null,
+            parameters = listOf(python.multiplatform.gradle.model.DeclaredParameter("value", double, declaresDefault = false, boundaryTag = "FLOAT")),
+            returnType = meters, returnBoundaryTag = "FLOAT", bindingName = "fixture.vc.Meters", isConstructor = true,
+        )
+        val stub = renderKotlinFqnStubs(listOf(constructor)).getValue("fixture/vc/__init__.pyi")
+        assertTrue(Regex("^def Meters\\(value: float\\) -> float:", RegexOption.MULTILINE).containsMatchIn(stub), stub)
+        assertFalse("__init__" in stub, stub)
     }
 }

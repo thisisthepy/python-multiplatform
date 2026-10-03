@@ -34,8 +34,9 @@ import python.multiplatform.gradle.model.ValueClassModel
  * name to the function, so such a type is annotated `Any`. A class's **own constructor** is the
  * exception (issue #73): it is rendered as the class's `__init__`, so the class keeps its stub --
  * members, properties and all -- and `TextFieldState(...)` type-checks as a `TextFieldState`, which is
- * what the runtime's constructor callable returns. Its `__`-suffixed table-key spellings stay module
- * functions as well. (`isinstance(x, TextFieldState)` is the one thing the stub promises that the
+ * what the runtime's constructor callable returns; its docstring carries the table key after
+ * [CONSTRUCTOR_MARKER]. Its `__`-suffixed table-key spellings stay module functions as well. A value
+ * class bound as its primitive is not the exception: its constructor returns the raw number. (`isinstance(x, TextFieldState)` is the one thing the stub promises that the
  * runtime, whose module attribute is the callable, does not do.)
  *
  * A Kotlin `object` (`Alignment`, `Arrangement`) is a module of its constants and functions, and the
@@ -84,6 +85,15 @@ internal fun renderKotlinFqnStubs(declarations: List<DeclarationModel>): Map<Str
 
 /** What precedes a property accessor's table key in its stub; see this file's KDoc. */
 internal const val PROPERTY_MARKER = "Kotlin property: "
+
+/**
+ * What precedes a constructor's table key in the docstring of the `__init__` it is stubbed as (issue
+ * #73): the key (`pkg.Class`) is a module attribute at run time but has no module-level `def` in the
+ * stub, so this is where a test matches the key to its stub, the same way [PROPERTY_MARKER] does for a
+ * property. An `@overload`ed `__init__` carries none: every member of an overload set is also stubbed
+ * as a module function under its `__`-suffixed key.
+ */
+internal const val CONSTRUCTOR_MARKER = "Kotlin constructor: "
 
 private val PROPERTY_KINDS = setOf("GETTER", "SETTER")
 
@@ -198,9 +208,14 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
      * #73). It does not take that name away from the class: the stub writes it as the class's
      * `__init__`, so `TextFieldState(...)` type-checks as making a `TextFieldState` -- which is what the
      * runtime's constructor callable returns. A factory function of the same name is not one of these.
+     *
+     * Only a constructor whose result crosses as a **handle**: a value class the boundary opens
+     * (`Meters`, `Dp`) is built and returned as its raw primitive, so `Meters(3.0)` gives a `float`, and
+     * an `__init__` would promise a `Meters`. That one stays a module function and its class `Any`, as
+     * before issue #73.
      */
     private fun isOwnConstructor(d: DeclarationModel): Boolean =
-        d.isConstructor && d.kind == "FUNCTION" && d.receiver == null &&
+        d.isConstructor && d.kind == "FUNCTION" && d.receiver == null && d.returnBoundaryTag == "OBJECT" &&
             moduleOf(d) == d.owner && baseOf(leafOf(d)) == d.simpleName &&
             d.returnType.qualifiedName == "${d.owner}.${d.simpleName}"
 
@@ -514,7 +529,7 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
             group.forEachIndexed { index, d ->
                 node.members += if (group.size == 1) {
                     "def __init__(${parameters(d, ctx, method = true)}) -> None:\n" +
-                        "    \"\"\"Kotlin: ${kotlinSignatureOf(d)}\"\"\"\n" +
+                        "    \"\"\"$CONSTRUCTOR_MARKER${d.bindingName} (${kotlinSignatureOf(d)})\"\"\"\n" +
                         "    ..."
                 } else {
                     "@$TYPING.overload\ndef __init__(${parameters(d, ctx, method = true)}) -> None: ..." + shadowed(index)

@@ -100,19 +100,25 @@ class TextFieldStateRenderTest {
 
     /**
      * The `initialSelection` slot: `TextRange` is a value class whose constructor is `internal`, so it
-     * crosses as a handle made by its walked factory `TextRange(Int)` -- separate from the test above so
-     * a failure here says it is this slot.
+     * crosses as a handle made by its walked factory `TextRange(index: Int)` -- separate from the test
+     * above so a failure here says it is this slot.
+     *
+     * Spelled by its table key, `TextRange__Int`. The bare name `TextRange` is not the factory's overload
+     * set in Python: `TextRange.Zero` (a companion constant) makes `androidx.compose.ui.text.TextRange` a
+     * module, and that module is what `from ... import TextRange` finds -- observed as
+     * "'_PmModule_androidx_compose_ui_text_TextRange' object is not callable". That collision predates
+     * issue #73 and is not this test's subject.
      */
     @Test
     fun theInitialSelectionCrossesAsATextRangeHandle() {
         Python3.exec(
             """
             from androidx.compose.foundation.text.input import TextFieldState
-            from androidx.compose.ui.text import TextRange
+            from androidx.compose.ui.text import TextRange__Int
 
-            _tfs_selected = TextFieldState('hello', TextRange(2))
+            _tfs_selected = TextFieldState('hello', TextRange__Int(2))
             assert _tfs_selected.text == 'hello', repr(_tfs_selected.text)
-            _tfs_kw = TextFieldState(initialText='kw', initialSelection=TextRange(0))
+            _tfs_kw = TextFieldState(initialText='kw', initialSelection=TextRange__Int(0))
             assert _tfs_kw.text == 'kw', repr(_tfs_kw.text)
             """.trimIndent(),
         )

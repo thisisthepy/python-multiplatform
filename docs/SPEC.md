@@ -291,8 +291,12 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `ksp-fixtures/artifact/.../WalkedArtifactStubTest.kt`, `.../StubSignatureAgreesWithRuntimeTest.kt`,
   `tools/stubs/check-stubs.sh` (mypy over the Compose stubs). A class whose name is also a function in
   its module is `Any` — except that a class's own bound constructor is that class's `__init__`
-  (`@overload`ed for several), so the class keeps its stub, members and properties; its `__`-suffixed
-  table-key spellings stay module functions (#73, `GP/artifact/TextStateBindingTest.kt`). A property is a `@property` (with a setter for a `var`) of its receiver's stub
+  (`@overload`ed for several), so the class keeps its stub, members and properties; a single one's
+  docstring carries its table key after `Kotlin constructor: `; its `__`-suffixed table-key spellings
+  stay module functions; a value class bound as its primitive keeps its constructor as a module function
+  returning the primitive (#73, `GP/artifact/TextStateBindingTest.kt`,
+  `ksp-fixtures/artifact/.../WalkedArtifactStubTest.kt`). In Python the class name is the constructor,
+  as `Typography(...)` already was (`M3ProofRenderTest.kt`). A property is a `@property` (with a setter for a `var`) of its receiver's stub
   class, its docstring carrying its table key after `Kotlin property: `; where that class has no stub,
   a comment with the same marker says so (`GP/stubs/PropertyStubTest.kt`). An object constant is annotated with its
   declared type even when that type is nested in the object (`Alignment.End: Horizontal`, a class of the
