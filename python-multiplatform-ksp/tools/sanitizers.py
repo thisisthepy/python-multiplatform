@@ -136,7 +136,11 @@ def cmd_selfcheck() -> int:
     src = work / "tp_faulty.c"
     src.write_text(FAULTY_C)
     so = work / ("tp_faulty" + sysconfig.get_config_var("EXT_SUFFIX"))
-    build = cc() + SAN_FLAGS + ["-fPIC", "-shared", f"-I{sysconfig.get_paths()['include']}", str(src),
+    # UBSan's object-size check would stop the planted out-of-bounds read before ASan sees it (seen
+    # on the first CI run). Disable it for this fault-planting build only, so the ASan case proves
+    # ASan itself; UBSan is proven by the signed-overflow case.
+    build = cc() + SAN_FLAGS + ["-fno-sanitize=object-size", "-fPIC", "-shared",
+                                f"-I{sysconfig.get_paths()['include']}", str(src),
                                 "-o", str(so)]
     if sys.platform == "darwin":
         build += ["-undefined", "dynamic_lookup"]
