@@ -579,9 +579,12 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   reference for every elided pair, and region lifetimes; anything unproved compiles as N-11. Differential
   tests include `id`, `gc.get_objects` count and order, `gc.get_referrers`, `sys.getrefcount`,
   `tracemalloc`, `is` between virtual and real objects, and `MemoryError` during construction.
-  Needs a decision before implementation (design §4.3.4 마): whether the timing of garbage collection
-  is part of the identity. Not allocating changes when collections run, and so when finalisers of
-  unrelated cyclic garbage run. `Status: planned (design)`.
+  **Outside the identity: when the cyclic garbage collector runs** (user decision, 2026-10-04). Not
+  allocating changes when collections are scheduled, and so when finalisers, weakref callbacks and
+  `gc.callbacks` of *unrelated* cyclic garbage run. The language reference leaves this to the
+  implementation ("An implementation is allowed to postpone garbage collection or omit it
+  altogether", Data model §3.1), and CPython itself changed it in 3.14 (incremental GC). Everything
+  else above stays exact. `Status: planned (design)`.
 
 ---
 
