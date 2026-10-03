@@ -370,7 +370,7 @@ class ComposableRenderTest {
             """.trimIndent(),
         )
 
-        PythonCallableArena.resetCounters()
+        CountingCallableArena.resetCounters()
         val scene = ImageComposeScene(width = 200, height = 60, density = Density(1f)) {
             PythonComposition(
                 """
@@ -393,15 +393,15 @@ class ComposableRenderTest {
 
         println(
             "callable lifetime: refcount base=$base held=$held disposed=$after; " +
-                "arenas created=${PythonCallableArena.created} forgotten=${PythonCallableArena.forgotten} " +
-                "released=${PythonCallableArena.released}",
+                "arenas created=${CountingCallableArena.created} forgotten=${CountingCallableArena.forgotten} " +
+                "released=${CountingCallableArena.released}",
         )
-        assertEquals(1, PythonCallableArena.created, "the arena was never remembered")
+        assertEquals(1, CountingCallableArena.created, "the arena was never remembered")
         assertTrue(held > base, "nothing held a reference for the composition: $base -> $held")
-        assertEquals(1, PythonCallableArena.forgotten, "onForgotten never fired, so nothing could release")
+        assertEquals(1, CountingCallableArena.forgotten, "onForgotten never fired, so nothing could release")
         // Not "at least one": `close` reports `0` for every call after the first, so a total above
         // the number of callables that crossed is the double-release this cannot be allowed to pass.
-        assertEquals(1, PythonCallableArena.released, "callables released, expected exactly the one that crossed")
+        assertEquals(1, CountingCallableArena.released, "callables released, expected exactly the one that crossed")
         assertEquals(base, after, "the composition did not give the Python reference back")
     }
 
@@ -445,7 +445,7 @@ class ComposableRenderTest {
             """.trimIndent(),
         )
 
-        PythonCallableArena.resetCounters()
+        CountingCallableArena.resetCounters()
         val body = mutableStateOf(columnCalling("_first"))
         val scene = ImageComposeScene(width = 200, height = 60, density = Density(1f)) {
             PythonComposition(body.value)
@@ -458,8 +458,8 @@ class ComposableRenderTest {
             Snapshot.sendApplyNotifications()
             secondInk = inkOfImage(scene.render())
             Python3.exec("_held_first = sys.getrefcount(_first)")
-            assertEquals(1, PythonCallableArena.created, "the arena was rebuilt instead of remembered")
-            assertEquals(0, PythonCallableArena.released, "something released a callable before disposal")
+            assertEquals(1, CountingCallableArena.created, "the arena was rebuilt instead of remembered")
+            assertEquals(0, CountingCallableArena.released, "something released a callable before disposal")
         } finally {
             scene.close()
         }
@@ -468,14 +468,14 @@ class ComposableRenderTest {
         println(
             "recomposition: ink $firstInk -> $secondInk; _first refcount " +
                 "${pyInt("_base_first")} held=${pyInt("_held_first")} disposed=${pyInt("_after_first")}; " +
-                "released=${PythonCallableArena.released}",
+                "released=${CountingCallableArena.released}",
         )
         assertTrue(secondInk > firstInk, "the second pass drew the first pass's content: $firstInk vs $secondInk")
         assertTrue(
             pyInt("_held_first") > pyInt("_base_first"),
             "the first pass's callable was not still held during the second",
         )
-        assertEquals(2, PythonCallableArena.released, "expected both passes' callables to be released once each")
+        assertEquals(2, CountingCallableArena.released, "expected both passes' callables to be released once each")
         assertEquals(pyInt("_base_first"), pyInt("_after_first"), "the first pass's callable never came back")
         assertEquals(pyInt("_base_second"), pyInt("_after_second"), "the second pass's callable never came back")
     }
