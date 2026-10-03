@@ -25,8 +25,8 @@ from typedpython.ir import (
 )
 
 I64, F64, BOOL, OBJ, NONE = Type.I64, Type.F64, Type.BOOL, Type.OBJ, Type.NONE
-BINARY_TREES = Path("/Volumes/macMini/thisisthepy/PythonMultiplatform/.worktrees/bench"
-                    "/benchmarks/typedpython/py/binary_trees.py")
+BINARY_TREES = Path(__file__).resolve().parents[4] / "benchmarks/typedpython/py/binary_trees.py"
+SLOTS_LINE = '    __slots__ = ("left", "right")\n'
 
 MARK = "# typedpython: compiled\n"
 
@@ -571,8 +571,7 @@ def g(a: float) -> object:
 
 def test_binary_trees_with_slots_lowers_make_and_check(tmp_path):
     source = BINARY_TREES.read_text()
-    assert "class Node:\n    left:" in source
-    source = source.replace("class Node:\n", 'class Node:\n    __slots__ = ("left", "right")\n', 1)
+    assert "class Node:\n" + SLOTS_LINE in source   # the benchmark itself declares the slots
     path = tmp_path / "binary_trees.py"
     path.write_text(MARK + source)
     m = frontend.lower(path)
@@ -596,7 +595,9 @@ def test_binary_trees_with_slots_lowers_make_and_check(tmp_path):
 
 def test_binary_trees_without_slots_stays_object_code(tmp_path):
     path = tmp_path / "binary_trees.py"
-    path.write_text(MARK + BINARY_TREES.read_text())
+    source = BINARY_TREES.read_text()
+    assert SLOTS_LINE in source
+    path.write_text(MARK + source.replace(SLOTS_LINE, "", 1))   # the run.py no-slots baseline
     m = frontend.lower(path)
     assert m.classes == ()
     assert "`__slots__`" in m.skipped["Node"]
