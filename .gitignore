@@ -54,3 +54,10 @@ google-services.json
 
 # scratch space for agents and scripts; delete when done
 .tmp/
+
+# TypedPython benchmark harness: uv venv, Cython/numba build output and numba caches
+benchmarks/typedpython/.venv/
+benchmarks/typedpython/build/
+benchmarks/typedpython/target/
+benchmarks/typedpython/java-out/
+benchmarks/typedpython/tp-build/
