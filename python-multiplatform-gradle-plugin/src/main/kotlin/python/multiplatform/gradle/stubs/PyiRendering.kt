@@ -43,6 +43,16 @@ import python.multiplatform.gradle.model.ValueClassModel
  * each table-key spelling (`padding__Dp`) are attributes, because the runtime indexes both.
  * The module-level `def`s stay, with the receiver as the first positional-only parameter.
  *
+ * ### Properties (issue #38)
+ *
+ * A `GETTER`/`SETTER` key is not a module attribute: the binding layer serves it as a Python
+ * `property` of the proxy of the type it is read on (`receiver`). So it is stubbed there, as
+ * `@property` (plus `@<name>.setter` for a `var`), and each accessor's docstring carries its table key
+ * after [PROPERTY_MARKER] -- the one place a test can match a key to its stub. A property whose
+ * receiver has no stub class (its name is taken by a function or a module of its package, so the
+ * type is annotated `Any`) cannot be written anywhere true; it gets a comment carrying the same
+ * marker in the receiver package's module, saying so, rather than vanishing.
+ *
  * ### Overloads
  *
  * An overload set is `@overload`ed under its base name, **in table-key order**: the artefact table is
@@ -61,6 +71,11 @@ private const val RECEIVER_NAME = "receiver"
 
 internal fun renderKotlinFqnStubs(declarations: List<DeclarationModel>): Map<String, String> =
     StubRenderer(declarations.filter { it.bindingName != null && !it.isSuspend }).render()
+
+/** What precedes a property accessor's table key in its stub; see this file's KDoc. */
+internal const val PROPERTY_MARKER = "Kotlin property: "
+
+private val PROPERTY_KINDS = setOf("GETTER", "SETTER")
 
 /** Python's hard keywords (`keyword.kwlist`): none of these can be a parameter name. */
 private val PYTHON_KEYWORDS = setOf(
@@ -136,7 +151,21 @@ private fun classRefOf(qualifiedName: String): ClassRef? {
 
 private enum class Role { PARAM, RESULT }
 
-private class StubRenderer(private val bound: List<DeclarationModel>) {
+private class StubRenderer(declarations: List<DeclarationModel>) {
+
+    /** Everything that is a module attribute; properties are attributes of a proxy instead. */
+    private val bound: List<DeclarationModel> = declarations.filter { it.kind !in PROPERTY_KINDS }
+
+    /** receiver type -> property name -> (getter, setter). A setter never stands without its getter. */
+    private val properties: Map<String, Map<String, Pair<DeclarationModel, DeclarationModel?>>> = run {
+        val accessors = declarations.filter { it.kind in PROPERTY_KINDS && it.receiver != null }
+        val setters = accessors.filter { it.kind == "SETTER" }.associateBy { it.bindingName!!.removeSuffix("=") }
+        accessors.filter { it.kind == "GETTER" }
+            .groupBy { it.receiver!!.qualifiedName }
+            .mapValues { (_, getters) ->
+                getters.sortedBy { it.simpleName }.associate { it.simpleName to (it to setters[it.bindingName]) }
+            }
+    }
 
     // ------------------------------------------------------------------------ what is taken
 
@@ -445,6 +474,54 @@ private class StubRenderer(private val bound: List<DeclarationModel>) {
             }
             node.members += "$attribute: $TYPING.ClassVar[$protocol]"
         }
+        properties[qualifiedName].orEmpty().forEach { (name, accessors) ->
+            val (getter, setter) = accessors
+            if (!isIdentifier(name) || name in node.children || name in attributes) {
+                node.members += propertyNotStubbed(getter, setter, "'$name' cannot be written as an attribute here")
+                return@forEach
+            }
+            node.members += renderProperty(name, getter, setter, ctx)
+        }
+    }
+
+    private fun renderProperty(name: String, getter: DeclarationModel, setter: DeclarationModel?, ctx: ModuleOut): String = buildString {
+        appendLine("@property")
+        appendLine("def $name(self) -> ${result(getter, ctx)}:")
+        appendLine("    \"\"\"$PROPERTY_MARKER${getter.bindingName} (${propertySignatureOf(getter)})\"\"\"")
+        append("    ...")
+        if (setter != null) {
+            val parameter = setter.parameters.single()
+            appendLine()
+            appendLine("@$name.setter")
+            appendLine("def $name(self, value: ${annotate(parameter.type, parameter.boundaryTag, Role.PARAM, ctx)}) -> None:")
+            appendLine("    \"\"\"$PROPERTY_MARKER${setter.bindingName}\"\"\"")
+            append("    ...")
+        }
+    }
+
+    private fun propertyNotStubbed(getter: DeclarationModel, setter: DeclarationModel?, why: String): String =
+        listOfNotNull(getter, setter).joinToString("\n") { "# $PROPERTY_MARKER${it.bindingName} is not stubbed: $why" }
+
+    private fun propertySignatureOf(getter: DeclarationModel): String {
+        val type = getter.returnType.qualifiedName + if (getter.returnType.isNullable) "?" else ""
+        return "${getter.receiver!!.qualifiedName}.${getter.simpleName}: $type"
+    }
+
+    /**
+     * Every receiver that has properties gets its stub class -- even one no signature mentions, since
+     * a value of it can still reach Python (a `kotlin.Any?` result, a supertype's slot). One whose
+     * class cannot be stubbed gets the marker comment instead; see this file's KDoc.
+     */
+    private fun registerPropertyOwners() {
+        properties.forEach { (receiver, byName) ->
+            val ref = classRefOf(receiver)
+            val home = ref?.pkg ?: receiver.substringBeforeLast('.', "")
+            val ctx = out(home)
+            if (ref != null && classReference(receiver, null, ctx) != ANY) return@forEach
+            byName.values.forEach { (getter, setter) ->
+                ctx.defs += propertyNotStubbed(getter, setter, "${receiver.substringAfterLast('.')} has no stub class (its name is taken in its module)")
+            }
+        }
     }
 
     private fun renderClasses() {
@@ -471,6 +548,7 @@ private class StubRenderer(private val bound: List<DeclarationModel>) {
 
     fun render(): Map<String, String> {
         renderModuleDefs()
+        registerPropertyOwners()
         renderClasses()
         return modules.filterValues { it.defs.isNotEmpty() || it.classes.isNotEmpty() }
             .mapValues { (_, ctx) ->
