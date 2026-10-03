@@ -21,7 +21,7 @@ Kotlin/Native `String` parameter, or a boxed `java.lang.Long`.
 `everyDeclarationIsRegisteredOrIsOneOfTheFourNamedExceptions` parses `bindings.kt` and
 `jni_onload.def` on every desktop build and fails if a declaration has no entry or the exception
 set above goes stale. The rule is written in `androidMain/README.md` ("Every `external fun` here
-needs a table entry — no exceptions by reachability"). The migration this report recommended
+needs a table entry, no exceptions by reachability"). The migration this report recommended
 (strings first, then core object model, then exceptions, then the rest) is complete.
 
 ## Numbers (all historical)

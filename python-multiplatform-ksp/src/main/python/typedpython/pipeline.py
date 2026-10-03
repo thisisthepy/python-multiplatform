@@ -4,7 +4,7 @@
 
 1. The gate in `compiled` mode: a module with type errors is not compiled at all.
 2. `frontend.lower`: functions outside the IR are left interpreted (`skipped`, with reasons).
-3. `verify.verify`: functions the verifier cannot prove are left interpreted too (SPEC N-9 —
+3. `verify.verify`: functions the verifier cannot prove are left interpreted too (SPEC N-9,
    unsafe code is never generated silently).
 4. If nothing is left to compile, no C is produced (`extension is None`): the module ships as
    ordinary Python.
@@ -12,6 +12,7 @@
 """
 import hashlib
 import json
+import re
 import sysconfig
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,6 +34,11 @@ class Result:
     diagnostics: list[verify.Diagnostic] = field(default_factory=list)
 
 
+def _relative(path: Path, root: Path) -> str:
+    """The module's path relative to the project root, posix separators (what the C embeds)."""
+    return Path(path).resolve().relative_to(Path(root).resolve()).as_posix()
+
+
 def _gate_or_raise(path: Path) -> None:
     errors = [d for d in gate.check([path], mode="compiled") if d.severity == "error"]
     if errors:
@@ -47,8 +53,12 @@ def compile_module(
     python_include: Path | None = None,
     ext_suffix: str | None = None,
     runtime_dir: Path | None = None,
+    project_root: Path | None = None,
 ) -> Result:
+    """`project_root`: the root the embedded source path is relative to (#112); default: the source's
+    own directory, so the file name alone is embedded."""
     path = Path(path).resolve()
+    root = path.parent if project_root is None else Path(project_root).resolve()
     _gate_or_raise(path)
 
     lowered = frontend.lower(path)
@@ -57,7 +67,7 @@ def compile_module(
     if not proved.functions:
         return Result(path, proved, None, skipped, diagnostics)
 
-    c_source = cgen.generate(proved, path)
+    c_source = cgen.generate(proved, path, _relative(path, root))
     extension = cbuild.build(
         c_source, path.stem, Path(out_dir),
         runtime_dir=runtime_dir, python_include=python_include, ext_suffix=ext_suffix,
@@ -98,6 +108,36 @@ COMPILER_VERSION = _tree_hash(_PACKAGE)
 _NO_EXTENSION = ".noext"        # cache artefact of a module with nothing compiled
 
 
+@dataclass(frozen=True)
+class SkippedItem:
+    """A function or class that stays interpreted, and why (pypackpack's native-level report)."""
+    name: str
+    file: str                               # package-relative, posix
+    line: int | None
+    message: str                            # without the "line N: " prefix
+
+
+_LINE_PREFIX = re.compile(r"line (\d+): ")
+
+
+def skipped_items(skipped: dict[str, str], diagnostics: list[verify.Diagnostic], file: str) -> list[SkippedItem]:
+    """Structure `ir.Module.skipped` (name -> text, which stays as it is: the incremental interface
+    hash reads its keys only). The front end writes `line N: reason`; the verifier writes `rule:
+    message` and records the line in its diagnostic for the function."""
+    lines: dict[str, int] = {}
+    for d in diagnostics:
+        lines.setdefault(d.function, d.source_line)
+    out = []
+    for name, text in sorted(skipped.items()):
+        m = _LINE_PREFIX.match(text)
+        if m:
+            line, message = int(m.group(1)), text[m.end():]
+        else:
+            line, message = lines.get(name), text
+        out.append(SkippedItem(name, file, line, message))
+    return out
+
+
 @dataclass
 class ModuleResult:
     path: Path
@@ -107,6 +147,8 @@ class ModuleResult:
     reasons: list[str] = field(default_factory=list)       # why it was rebuilt (empty if reused)
     skipped: dict[str, str] = field(default_factory=dict)  # function -> why it stays interpreted
     interface: str = ""
+    kind: str = "compiled"                  # "compiled" | "nothing_compiled" | "not_marked"
+    skipped_items: list[SkippedItem] = field(default_factory=list)   # `skipped`, structured
 
 
 @dataclass
@@ -129,16 +171,19 @@ def compile_project(
 ) -> ProjectResult:
     sources = [Path(s).resolve() for s in sources]
     cache_dir = Path(cache_dir)
-    verified: dict[Path, ir.Module] = {}
+    verified: dict[Path, list[SkippedItem]] = {}
+    verified_module_skipped: dict[Path, dict[str, str]] = {}
+    root = Path(project_root).resolve()
 
     def lower(path: Path) -> ir.Module:
         _gate_or_raise(path)
-        proved, _ = verify.verify(frontend.lower(path))
-        verified[path] = proved          # the VERIFIED module: its signatures are what gets compiled
+        proved, diagnostics = verify.verify(frontend.lower(path))
+        verified_module_skipped[path] = dict(proved.skipped)
+        verified[path] = skipped_items(proved.skipped, diagnostics, _relative(path, root))         # the VERIFIED module: its signatures are what gets compiled
         return proved
 
     def generate(module: ir.Module, path: Path) -> str:
-        return cgen.generate(module, path) if module.functions else ""
+        return cgen.generate(module, path, _relative(path, root)) if module.functions else ""
 
     def compile_c(c_source: str, name: str, out_dir: Path) -> Path:
         if not c_source:
@@ -166,11 +211,18 @@ def compile_project(
     for m in report.modules:
         record = side / f"{m.key}.json"
         if m.status == "rebuilt":
-            record.write_text(json.dumps(dict(verified[m.path].skipped)))
+            record.write_text(json.dumps({
+                "skipped": dict(verified_module_skipped[m.path]),
+                "items": [vars(i) for i in verified[m.path]]}))
         try:
-            skipped = json.loads(record.read_text())
-        except (OSError, ValueError):
-            skipped = {}
+            data = json.loads(record.read_text())
+            skipped = dict(data["skipped"])
+            items = [SkippedItem(**i) for i in data["items"]]
+        except (OSError, ValueError, KeyError, TypeError):
+            skipped, items = {}, []
         ext = None if m.artifact is None or m.artifact.suffix == _NO_EXTENSION else m.artifact
-        out.append(ModuleResult(m.path, m.name, ext, m.status, list(m.reasons), skipped, m.interface))
+        kind = ("not_marked" if not frontend.is_opted_in(m.path)
+                else "compiled" if ext is not None else "nothing_compiled")
+        out.append(ModuleResult(m.path, m.name, ext, m.status, list(m.reasons), skipped, m.interface,
+                                kind, items))
     return ProjectResult(out)

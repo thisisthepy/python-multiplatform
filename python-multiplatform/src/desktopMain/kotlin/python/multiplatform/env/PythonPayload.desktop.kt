@@ -15,7 +15,7 @@ import java.util.zip.ZipEntry
  *
  * `toolchain`'s `stagePythonBundleDesktop` registers `build/pythonStaging/desktop` as a JVM
  * resource root, so `processResources` copies `python/...` to the root of the consumer's jar. That
- * is a **classpath resource, not a filesystem path** — and CPython's importer opens modules with
+ * is a **classpath resource, not a filesystem path**, and CPython's importer opens modules with
  * `open(2)`, which cannot see inside a zip. So a jar payload has to be materialised before it can
  * go on `sys.path`; a payload sitting on the classpath as a plain directory (a Gradle `run`, an
  * exploded application image, an IDE run configuration) already is one and is used where it lies.
@@ -42,7 +42,7 @@ internal object ClasspathPayload {
      *
      * The context class loader is what an application server, a Gradle test worker or any other
      * container sets to "the class path of the thing currently running", and it is the only one a
-     * test can substitute — which is what makes the start-up path testable at all rather than only
+     * test can substitute, which is what makes the start-up path testable at all rather than only
      * its inner half. This class's own loader is the fallback and covers the ordinary case where
      * the library and the payload ship on the same class path.
      */
@@ -55,7 +55,7 @@ internal object ClasspathPayload {
      * `<tmp>/python-multiplatform-payload`, overridable with the `python.multiplatform.payload.cache`
      * system property.
      *
-     * The temporary directory rather than a user cache directory because the content is derived —
+     * The temporary directory rather than a user cache directory because the content is derived,
      * losing it costs one re-extraction, and the stamp key makes a stale copy impossible rather
      * than merely unlikely.
      */
@@ -113,7 +113,7 @@ internal object ClasspathPayload {
      * `python/` as the class loader sees it, asked for both with and without the trailing slash.
      *
      * A jar can only answer either of these from a `python/` **directory entry**, and not every
-     * archive has one — `JarOutputStream` writes directory entries only if asked. [classPathJarFiles]
+     * archive has one, `JarOutputStream` writes directory entries only if asked. [classPathJarFiles]
      * is the fallback for that case; asking here first is what keeps the common case a single
      * lookup instead of a class path scan.
      */
@@ -145,14 +145,14 @@ internal object ClasspathPayload {
      * collision nobody had noticed: this library's own top-level Kotlin package is `python`.**
      * `python.multiplatform` and `python.native` compile to class files under `python/multiplatform`
      * and `python/native`, so *every* class path this library is on already answers
-     * `getResources("python/")` — with the library's own class output directory during a Gradle
+     * `getResources("python/")`, with the library's own class output directory during a Gradle
      * build, and with a `jar:` URL into `python-multiplatform.jar` once it is published. Name-based
      * discovery would therefore have put a directory of `.class` files at `sys.path[0]` in every
      * application that used this library, and extracted the entire library jar to do it. Observed,
      * not theorised: this returned
      * `build/classes/kotlin/desktop/{main,test}/python` on the very first run of the suite.
      *
-     * The test is what `ResourceBundler` itself produces — its `findPythonPackages` bundles exactly
+     * The test is what `ResourceBundler` itself produces, its `findPythonPackages` bundles exactly
      * those immediate children that are directories holding an `__init__.py`, plus whatever the
      * `src/<family>` overlay adds. So: at least one immediate child that is a module file, or a
      * directory with an `__init__` in it. A `python/` holding only `.class` files fails it, and so
@@ -185,7 +185,7 @@ internal object ClasspathPayload {
 
     private fun String.isModuleFileName(): Boolean = endsWith(".py") || endsWith(".pyc")
 
-    /** `bytecode`-level bundles ship `.pyc` beside (or instead of) the `.py` — see `ResourceBundler` assumption 6. */
+    /** `bytecode`-level bundles ship `.pyc` beside (or instead of) the `.py`, see `ResourceBundler` assumption 6. */
     private val INIT_NAMES = listOf("__init__.py", "__init__.pyc")
 
     private fun jarOf(url: URL): JarFile? = runCatching {
@@ -195,8 +195,8 @@ internal object ClasspathPayload {
     /**
      * The jars on [loader]'s own class path, for the archives [payloadUrls] cannot see into.
      *
-     * `URLClassLoader` is asked directly; for everything else — including the `AppClassLoader` a
-     * plain `java -jar` run gets — `java.class.path` is the only description of the class path the
+     * `URLClassLoader` is asked directly; for everything else, including the `AppClassLoader` a
+     * plain `java -jar` run gets, `java.class.path` is the only description of the class path the
      * JVM exposes. Both are walked up the parent chain, because a payload jar is as likely to be
      * on a parent loader as on the one that loaded this class.
      */
@@ -233,8 +233,8 @@ internal object ClasspathPayload {
      * Materialises the `python/` subtree of [jar] under [cacheDir], or returns null when it holds
      * none.
      *
-     * The directory is named by a digest of *what is in the archive* — every payload entry's name,
-     * size and CRC — rather than by the jar's path or timestamp. Two consequences, both wanted:
+     * The directory is named by a digest of *what is in the archive*, every payload entry's name,
+     * size and CRC, rather than by the jar's path or timestamp. Two consequences, both wanted:
      * a rebuilt jar with identical content reuses the extraction, and a jar rewritten in place with
      * different content cannot be mistaken for it. The CRCs come from the archive's central
      * directory, so the key costs no reading of file content at all.

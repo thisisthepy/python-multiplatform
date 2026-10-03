@@ -18,11 +18,12 @@ import kotlin.test.assertTrue
  *
  * `docs/INTENT.md` §2.2 and §2.3, as executable statements:
  *
- * - A Kotlin declaration is reached under its Kotlin name, takes keyword arguments by its **Kotlin
- *   parameter names** and leaves an omitted defaulted parameter to Kotlin's own default. Nothing is
- *   snake_cased: `fillMaxWidth` is `fillMaxWidth`, and `fill_max_width` does not exist.
+ * - A Kotlin package is a module under its Kotlin name and nothing else: no namespace is renamed.
+ * - Inside it, a Kotlin declaration is reached under its Kotlin name **and** its Pythonic alias
+ *   (`fillMaxWidth` / `fill_max_width`, issue #131), takes keyword arguments by either spelling of a
+ *   parameter, and leaves an omitted defaulted parameter to Kotlin's own default.
  * - `pythonx` is a real package in pythonx-compose. The binder neither creates a `pythonx` module
- *   nor prevents one on disk from loading.
+ *   nor prevents one on disk from loading -- and such a package can build on the aliases.
  * - Every function the binder puts on a Kotlin-named module carries its signature as public metadata
  *   (`inspect.signature`, and `python_multiplatform.describe`) so a Pythonic layer can build on it
  *   by rule rather than by a wrapper per declaration.
@@ -123,46 +124,97 @@ class KotlinNamedSurfaceTest {
         assertTrue("horizontal_padding" in eval("_kns['unknown']"), eval("_kns['unknown']"))
     }
 
-    /** No snake_case anywhere: not as a member, not as a keyword. */
+    /**
+     * Issue #131: a Kotlin name and its Pythonic alias are one declaration, and a keyword is accepted
+     * by either spelling -- whichever installer ran. (`238119b7` had made the snake_case member an
+     * `AttributeError` and the snake_case keyword a `TypeError`; this is the reversal of exactly
+     * those two assertions.)
+     */
     @Test
-    fun aKotlinNameIsNotSnakeCased() = withBothInstalled {
+    fun aKotlinNameAndItsPythonicAliasAreOneDeclaration() = withBothInstalled {
         Python3.exec(
             """
+            import python_multiplatform as _kns_pm
             import androidx.compose.foundation.layout as _kns_layout
-            from androidx.compose.ui import emptyModifier, describeModifier
-            _kns = {'kotlin': describeModifier(_kns_layout.fillMaxWidth(emptyModifier()))}
-            try:
-                _kns_layout.fill_max_width
-                _kns['snake_member'] = 'resolved'
-            except AttributeError:
-                _kns['snake_member'] = 'AttributeError'
-            try:
-                _kns_layout.padding__Dp_Dp(emptyModifier(), vertical=1.0)
-                _kns['kotlin_keyword'] = 'accepted'
-            except TypeError as _kns_e:
-                _kns['kotlin_keyword'] = str(_kns_e)
-            try:
-                _kns_layout.padding__PaddingValues(emptyModifier(), padding_values=None)
-                _kns['snake_keyword'] = 'accepted'
-            except TypeError as _kns_e:
-                _kns['snake_keyword'] = 'TypeError'
-            import python_multiplatform.binding as _kns_binding
-            _kns['renamers'] = [
-                _n for _n in ('to_python_name', 'to_kotlin_name') if hasattr(_kns_binding, _n)
-            ]
+            from androidx.compose.ui import emptyModifier, describeModifier, empty_modifier, describe_modifier
+            _kns = {
+                'kotlin': describeModifier(_kns_layout.fillMaxWidth(emptyModifier())),
+                'snake': describe_modifier(_kns_layout.fill_max_width(empty_modifier())),
+                'same': _kns_layout.fill_max_width is _kns_layout.fillMaxWidth,
+                'kotlin_keyword': describeModifier(_kns_layout.padding__Dp_Dp(emptyModifier(), vertical=1.0)),
+                'snake_keyword': describeModifier(_kns_layout.padding__PaddingValues(
+                    emptyModifier(), padding_values=_kns_layout.padding_values_of(2))),
+                'kotlin_keyword_pv': describeModifier(_kns_layout.padding__PaddingValues(
+                    emptyModifier(), paddingValues=_kns_layout.paddingValuesOf(3))),
+                'rule': _kns_pm.python_name('rememberTextFieldState'),
+                'dir': [_n for _n in dir(_kns_layout) if _n in ('fill_max_width', 'padding_values_of')],
+            }
             """.trimIndent(),
         )
         assertEquals("fillMaxWidth", eval("_kns['kotlin']"))
-        assertEquals("AttributeError", eval("_kns['snake_member']"))
-        assertEquals("accepted", eval("_kns['kotlin_keyword']"))
-        assertEquals("TypeError", eval("_kns['snake_keyword']"))
-        assertEquals("[]", eval("repr(_kns['renamers'])"))
+        assertEquals("fillMaxWidth", eval("_kns['snake']"))
+        assertEquals("True", eval("_kns['same']"))
+        assertEquals("padding(v=1.0)", eval("_kns['kotlin_keyword']"))
+        assertEquals("padding(pv(2.0))", eval("_kns['snake_keyword']"))
+        assertEquals("padding(pv(3.0))", eval("_kns['kotlin_keyword_pv']"))
+        assertEquals("remember_text_field_state", eval("_kns['rule']"))
+        assertEquals("[]", eval("repr(_kns['dir'])"), "dir() lists each declaration once, by its Kotlin name")
     }
 
     /**
-     * The public metadata contract a Pythonic layer builds on: `inspect.signature` shows the Kotlin
-     * parameter names with defaults marked, and `python_multiplatform.describe` gives the overload
-     * set with per-parameter Kotlin types.
+     * AGENTS.md §12.2 with the aliases in place: a real `pythonx` package on disk loads, and its own
+     * code reaches the Kotlin-named module by the Pythonic names -- the namespace it imports is
+     * `androidx.*`, untouched, and the binder has made no `pythonx` module of its own.
+     */
+    @Test
+    fun aRealPythonxPackageOnDiskBuildsOnThePythonicNames() = PythonTestFixture.withInterpreter {
+        installAdapter()
+        PythonProxySource.install()
+        Python3.exec(
+            """
+            import os as _kns_os, sys as _kns_sys
+            _kns = {
+                'occupied': sorted(
+                    _n for _n in _kns_sys.modules if _n == 'pythonx' or _n.startswith('pythonx.')
+                ),
+            }
+            _kns_root = _kns_os.path.abspath(
+                _kns_os.path.join('build', 'tmp', 'kotlin-named-surface-pythonic', str(_kns_os.getpid()))
+            )
+            _kns_os.makedirs(_kns_os.path.join(_kns_root, 'pythonx'), exist_ok=True)
+            with open(_kns_os.path.join(_kns_root, 'pythonx', '__init__.py'), 'w') as _kns_f:
+                _kns_f.write(
+                    "from androidx.compose.foundation.layout import fill_max_width\n"
+                    "from androidx.compose.ui import empty_modifier, describe_modifier\n"
+                    "MARK = 'on-disk'\n"
+                    "def full_width():\n"
+                    "    return describe_modifier(fill_max_width(empty_modifier()))\n"
+                )
+            _kns_sys.path.insert(0, _kns_root)
+            try:
+                import pythonx as _kns_px
+                _kns['mark'] = getattr(_kns_px, 'MARK', None)
+                _kns['from_disk'] = (getattr(_kns_px, '__file__', None) or '').startswith(_kns_root)
+                _kns['works'] = _kns_px.full_width()
+            finally:
+                _kns_sys.path.remove(_kns_root)
+                if getattr(_kns_sys.modules.get('pythonx'), 'MARK', None) == 'on-disk':
+                    del _kns_sys.modules['pythonx']
+                import shutil as _kns_shutil
+                _kns_shutil.rmtree(_kns_root, ignore_errors=True)
+            """.trimIndent(),
+        )
+        assertEquals("[]", eval("repr(_kns['occupied'])"), "the binder must not create any pythonx module")
+        assertEquals("on-disk", eval("_kns['mark']"))
+        assertEquals("True", eval("_kns['from_disk']"))
+        assertEquals("fillMaxWidth", eval("_kns['works']"))
+    }
+
+    /**
+     * The public metadata contract a Pythonic layer builds on: `inspect.signature` shows each
+     * parameter's Pythonic keyword (the Kotlin name where it has no alias) with defaults marked, and
+     * `python_multiplatform.describe` gives the overload set with per-parameter Kotlin names, Pythonic
+     * names and Kotlin types.
      *
      * Asserted for the proxy-rendered function and for the binding layer's own, in both install
      * orders, so the answer cannot depend on who got there first.
@@ -190,6 +242,11 @@ class KotlinNamedSurfaceTest {
                                 for _p in _kns_sig.parameters.values()
                             ],
                             'annotation': _kns_sig.parameters['vertical'].annotation,
+                            'pythonic': list(_kns_inspect.signature(_kns_layout.padding__PaddingValues).parameters),
+                            'both_names': [
+                                (_q['name'], _q['python_name'])
+                                for _q in _kns_pm.describe(_kns_layout.padding__PaddingValues)[0]['parameters']
+                            ],
                             'one': [
                                 (_d['name'], [(_q['name'], _q['type'], _q['has_default']) for _q in _d['parameters']], _d['receiver'])
                                 for _d in _kns_pm.describe(_kns_layout.padding__Dp_Dp)
@@ -206,6 +263,9 @@ class KotlinNamedSurfaceTest {
                     order,
                 )
                 assertEquals("androidx.compose.ui.unit.Dp", eval("_kns['annotation']"), order)
+                // Issue #131: the signature shows the Pythonic keyword, `describe` both spellings.
+                assertEquals("['receiver', 'padding_values']", eval("repr(_kns['pythonic'])"), order)
+                assertEquals("[('paddingValues', 'padding_values')]", eval("repr(_kns['both_names'])"), order)
                 assertEquals(
                     "[('androidx.compose.foundation.layout.padding__Dp_Dp', " +
                         "[('horizontal', 'androidx.compose.ui.unit.Dp', True), ('vertical', 'androidx.compose.ui.unit.Dp', True)], " +

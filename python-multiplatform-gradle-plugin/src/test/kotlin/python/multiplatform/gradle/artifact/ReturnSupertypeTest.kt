@@ -132,7 +132,7 @@ class ReturnSupertypeTest {
     }
 
     /**
-     * **The price.** Over the four packages `:ksp-fixtures:compose` actually walks, how many entries
+     * **The price.** Over the four packages `:python-multiplatform-compose:fixtures:compose` actually walks, how many entries
      * gain anything, how many characters that is against the rendered fragments, and how long the
      * longest chain gets.
      *

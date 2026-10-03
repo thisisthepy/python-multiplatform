@@ -12,7 +12,7 @@ package python.multiplatform.reflection
  *
  *     e: TableInstall.kt: Unresolved reference 'FunctionTable'.
  *
- * observed on `ksp-fixtures/app`'s `commonMain`. ROADMAP §13 recorded the consequence: every
+ * observed on `python-multiplatform-ksp/fixtures/app`'s `commonMain`. ROADMAP §13 recorded the consequence: every
  * consumer wrote the same one-line `actual` once per leaf target, and shared code that wanted the
  * table had nothing to call. `androidMain` is the exception that proves the rule -- it *is* the
  * Android target's own source set, so it can name `FunctionTable` -- and an exception per platform

@@ -147,42 +147,111 @@ class PythonxAdapterTest {
     }
 
     /**
-     * A Kotlin name is reached as itself, and no renamed spelling exists.
+     * §3's rule, forwards, on the names the fixture carries -- restored by issue #131 after
+     * `238119b7` removed it.
      *
-     * This used to pin a snake_case rule in both directions (`fillMaxWidth` <-> `fill_max_width`)
-     * and the index that made `toURLString` reachable as `to_url_string`. The binder renames
-     * nothing now (`docs/INTENT.md` §2.2): Pythonic spellings are the business of a Python package
-     * built on top, so the rule and its inverse are gone, and asking for the snake_case spelling is
-     * an ordinary `AttributeError`.
+     * The rule is pythonx-compose 0.1.0a1's: a lower-case-first name is snake_case with a run of
+     * capitals as one word, an upper-case-first name is unchanged, and an explicit overload key keeps
+     * its suffix. There is still no reverse rule: `toURLString` is reachable as `to_url_string` because
+     * the forward conversion of the module's own Kotlin names is what is looked up, and a reverse rule
+     * would have produced `toUrlString`, a declaration nobody wrote.
      */
     @Test
-    fun aKotlinNameIsReachedAsItselfAndNoRenamedSpellingExists() = withAdapter {
+    fun theNameRuleConvertsKotlinToPythonAndEitherSpellingReachesOneDeclaration() = withAdapter {
         Python3.exec(
             """
+            import python_multiplatform as _pm
             import python_multiplatform.binding as _pm_binding
             import androidx.compose.foundation.layout as _layout
             import androidx.compose.ui.draw as _draw
             import androidx.compose.ui.util as _util
             _px = {
-                'kotlin': [
-                    _n for _m, _n in (
-                        (_layout, 'fillMaxWidth'), (_draw, 'zIndex'), (_layout, 'padding__Dp_Dp'),
-                        (_util, 'toURLString'),
-                    ) if getattr(_m, _n, None) is not None
+                'fill': _pm.python_name('fillMaxWidth'),
+                'z': _pm.python_name('zIndex'),
+                'overload': _pm.python_name('padding__Dp_Dp'),
+                'suffixed': _pm.python_name('paddingFromBaseline__TextUnit'),
+                'type': _pm.python_name('Modifier'),
+                'acronym': _pm.python_name('toURLString'),
+                'keyword': _pm.snake_case('paddingValues'),
+                'same': [
+                    _k for _m, _k, _s in (
+                        (_layout, 'fillMaxWidth', 'fill_max_width'), (_draw, 'zIndex', 'z_index'),
+                        (_util, 'toURLString', 'to_url_string'),
+                        (_layout, 'paddingFromBaseline__TextUnit', 'padding_from_baseline__TextUnit'),
+                        (_layout, 'paddingValuesOf', 'padding_values_of'),
+                    ) if getattr(_m, _s) is getattr(_m, _k)
                 ],
-                'snake': [
-                    _n for _m, _n in (
-                        (_layout, 'fill_max_width'), (_draw, 'z_index'), (_util, 'to_url_string'),
-                    ) if hasattr(_m, _n)
-                ],
-                'rule': [_n for _n in ('to_python_name', 'to_kotlin_name') if hasattr(_pm_binding, _n)],
+                'url': _util.to_url_string('x'),
+                'no_reverse': hasattr(_util, 'toUrlString'),
+                'rule_in_binding': [_n for _n in ('to_python_name', 'to_kotlin_name') if hasattr(_pm_binding, _n)],
             }
             """.trimIndent(),
         )
 
-        assertEquals("['fillMaxWidth', 'zIndex', 'padding__Dp_Dp', 'toURLString']", eval("repr(_px['kotlin'])"))
-        assertEquals("[]", eval("repr(_px['snake'])"), "no snake_case spelling may resolve")
-        assertEquals("[]", eval("repr(_px['rule'])"), "the binder must carry no renaming rule")
+        assertEquals("fill_max_width", eval("_px['fill']"))
+        assertEquals("z_index", eval("_px['z']"))
+        // The overload suffix is a list of Kotlin type names and stays PascalCase; only the base
+        // name is a function name.
+        assertEquals("padding__Dp_Dp", eval("_px['overload']"))
+        assertEquals("padding_from_baseline__TextUnit", eval("_px['suffixed']"))
+        assertEquals("Modifier", eval("_px['type']"))
+        assertEquals("to_url_string", eval("_px['acronym']"))
+        assertEquals("padding_values", eval("_px['keyword']"))
+        assertEquals(
+            "['fillMaxWidth', 'zIndex', 'toURLString', 'paddingFromBaseline__TextUnit', 'paddingValuesOf']",
+            eval("repr(_px['same'])"),
+            "an alias must be the very object its Kotlin name is",
+        )
+        assertEquals("url:x", eval("_px['url']"))
+        assertEquals("False", eval("_px['no_reverse']"), "a reverse rule would invent toUrlString")
+        // The rule is the root module's, once; the binding layer carries no second copy of it.
+        assertEquals("[]", eval("repr(_px['rule_in_binding'])"))
+    }
+
+    /**
+     * §3's invariant, stated as the design states it -- *every name the `.pyi` generator emits must
+     * resolve through the adapter* -- restored by issue #131.
+     *
+     * The generator writes `python_name(kotlin)` beside every Kotlin name, so this converts every
+     * entry in the table forwards and requires the module to answer with the very object the Kotlin
+     * name gives -- including `toURLString`, which a reverse rule provably cannot produce (above).
+     * Counted, so an empty failure list means something.
+     */
+    @Test
+    fun everyBoundNameSurvivesTheRoundTripThroughItsPythonicName() = withAdapter {
+        Python3.exec(
+            """
+            import importlib as _importlib
+            import python_multiplatform as _pm
+            import python_multiplatform.binding as _pm_binding
+            _px = {'checked': 0, 'aliased': 0, 'bad': []}
+            for _kotlin in _pm_binding.bound_names():
+                _package, _, _leaf = _kotlin.rpartition('.')
+                _python = _pm.python_name(_leaf)
+                _px['checked'] += 1
+                _module = _importlib.import_module(_package)
+                try:
+                    _by_kotlin = getattr(_module, _leaf)
+                    _by_python = getattr(_module, _python)
+                except Exception as _e:
+                    _px['bad'].append(_kotlin + ' -> ' + _python + ': ' + type(_e).__name__ + ': ' + str(_e))
+                    continue
+                if _python != _leaf:
+                    _px['aliased'] += 1
+                    # A constant is read afresh on every access, so two reads are two proxies.
+                    if callable(_by_kotlin) and _by_python is not _by_kotlin:
+                        _px['bad'].append(_kotlin + ' -> ' + _python + ': a different object')
+            _px['bad'] = ', '.join(_px['bad'])
+            """.trimIndent(),
+        )
+
+        assertEquals("", eval("_px['bad']"), "a stub name that the adapter cannot resolve")
+        assertEquals(
+            UpcallTable.entries().size.toString(),
+            eval("_px['checked']"),
+            "every entry has to be checked, or the empty failure list means nothing",
+        )
+        assertTrue(eval("_px['aliased']").toInt() >= 8, "too few entries had an alias to check: ${eval("_px['aliased']")}")
     }
 
     /**
@@ -276,6 +345,78 @@ class PythonxAdapterTest {
     }
 
     /**
+     * The same dispatch with the **Pythonic** keyword (issue #131, the spelling `238119b7` removed):
+     * `padding_values=` names only `padding__PaddingValues`'s `paddingValues`, so it is the keyword,
+     * not the type, that selects -- and the Kotlin keyword `paddingValues=` selects the same overload.
+     * Writing both spellings of one parameter is "two values", not a silent pick.
+     */
+    @Test
+    fun anOverloadSetDispatchesOnPythonicKeywordNames() = withAdapter {
+        Python3.exec(
+            """
+            from androidx.compose.foundation.layout import padding, padding_values_of
+            from androidx.compose.ui import empty_modifier, describe_modifier
+            _px = {
+                'snake': describe_modifier(padding(empty_modifier(), padding_values=padding_values_of(2))),
+                'kotlin': describe_modifier(padding(empty_modifier(), paddingValues=padding_values_of(3))),
+            }
+            try:
+                padding(empty_modifier(), paddingValues=padding_values_of(1), padding_values=padding_values_of(1))
+                _px['both'] = 'call succeeded'
+            except TypeError as e:
+                _px['both'] = str(e)
+            """.trimIndent(),
+        )
+
+        assertEquals("padding(pv(2.0))", eval("_px['snake']"))
+        assertEquals("padding(pv(3.0))", eval("_px['kotlin']"))
+        assertTrue(eval("_px['both']") != "call succeeded", "two spellings of one parameter were both accepted")
+        assertEquals(
+            listOf("padding__PaddingValues", "padding__PaddingValues"),
+            ComposeShapedFragment.calls,
+        )
+    }
+
+    /**
+     * An int picks the overload its Kotlin literal would (#146, SPEC U-8). `Color(0xFFFFFFFF)` is the
+     * notebook's own spelling (pythonx-compose `UI.ipynb`); Kotlin types that literal as `Long`, since it
+     * does not fit in 32 bits, and `0x11223344` as `Int`. An `Int` slot never takes an int outside 32
+     * bits, even when named explicitly, and an int outside 64 bits fits no overload at all.
+     */
+    @Test
+    fun anIntArgumentPicksTheOverloadItsKotlinLiteralWould() = withAdapter {
+        Python3.exec(
+            """
+            from androidx.compose.ui.graphics import Color, Color__Int, Color__Long
+            _px = {
+                'long': Color(0xFFFFFFFF),
+                'int': Color(0x11223344),
+                'negative': Color(-1),
+                'wide': Color(1 << 40),
+                'explicitLong': Color__Long(5),
+            }
+            for _key, _call in (('tooWide', lambda: Color(1 << 70)), ('intOverflow', lambda: Color__Int(1 << 31))):
+                try:
+                    _px[_key] = 'call succeeded: ' + _call()
+                except TypeError as e:
+                    _px[_key] = 'TypeError'
+            """.trimIndent(),
+        )
+
+        assertEquals("Long:4294967295", eval("_px['long']"))
+        assertEquals("Int:287454020", eval("_px['int']"))
+        assertEquals("Int:-1", eval("_px['negative']"))
+        assertEquals("Long:1099511627776", eval("_px['wide']"))
+        assertEquals("Long:5", eval("_px['explicitLong']"))
+        assertEquals("TypeError", eval("_px['tooWide']"), "an int outside 64 bits reached an integral slot")
+        assertEquals("TypeError", eval("_px['intOverflow']"), "an Int slot took an int outside 32 bits")
+        assertEquals(
+            listOf("Color__Long", "Color__Int", "Color__Int", "Color__Long", "Color__Long"),
+            ComposeShapedFragment.calls,
+        )
+    }
+
+    /**
      * What the dispatcher does when it cannot decide, and what it does when the caller has already
      * decided.
      *
@@ -344,6 +485,38 @@ class PythonxAdapterTest {
         assertEquals("True", eval("_px['is_modifier']"))
         assertEquals(
             listOf("padding__Dp", "size__Dp", "fillMaxWidth", "zIndex"),
+            ComposeShapedFragment.calls,
+        )
+    }
+
+    /**
+     * The same chain under the Pythonic method names (issue #131): `fill_max_width` and `z_index`
+     * are the Kotlin members `fillMaxWidth` and `zIndex`, from the class object and from an instance,
+     * with a snake_case keyword (`z_index=` is `zIndex`'s own parameter `zIndex`). The proxy class
+     * keeps Kotlin names only: an alias is resolved on each read and never written onto it.
+     */
+    @Test
+    fun anExtensionIsReachedOnItsReceiverByItsPythonicNameToo() = withAdapter {
+        Python3.exec(
+            """
+            from androidx.compose.ui import Modifier, describe_modifier
+            _from_class = Modifier.fill_max_width().z_index(2)
+            _from_instance = Modifier.empty().padding(16).fill_max_width().z_index(z_index=3)
+            _px = {
+                'class': describe_modifier(_from_class),
+                'instance': describe_modifier(_from_instance),
+                'alias_in_class_dict': [_n for _n in ('fill_max_width', 'z_index') if _n in vars(type(_from_class))],
+                'alias_in_dir': [_n for _n in ('fill_max_width', 'z_index') if _n in dir(_from_class)],
+            }
+            """.trimIndent(),
+        )
+
+        assertEquals("fillMaxWidth -> zIndex(2.0)", eval("_px['class']"))
+        assertEquals("padding(16.0) -> fillMaxWidth -> zIndex(3.0)", eval("_px['instance']"))
+        assertEquals("[]", eval("repr(_px['alias_in_class_dict'])"))
+        assertEquals("[]", eval("repr(_px['alias_in_dir'])"))
+        assertEquals(
+            listOf("fillMaxWidth", "zIndex", "padding__Dp", "fillMaxWidth", "zIndex"),
             ComposeShapedFragment.calls,
         )
     }

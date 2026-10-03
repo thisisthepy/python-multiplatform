@@ -249,7 +249,7 @@ class PythonPayloadTest {
      * **This library's own top-level Kotlin package is `python`.**
      *
      * `python.multiplatform` compiles to class files under `python/multiplatform`, so every class path this
-     * library is on answers `getResources("python/")` — with `build/classes/kotlin/desktop/main/python`
+     * library is on answers `getResources("python/")`, with `build/classes/kotlin/desktop/main/python`
      * during a Gradle build, and with a `jar:` URL into `python-multiplatform.jar` once published.
      * Name-based discovery therefore puts a directory of `.class` files at `sys.path[0]` in every
      * application that uses this library. It is not hypothetical: this test failed on the first run

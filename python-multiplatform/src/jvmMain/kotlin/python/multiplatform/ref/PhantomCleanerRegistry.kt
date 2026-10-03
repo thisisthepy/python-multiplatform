@@ -14,13 +14,13 @@ import java.util.concurrent.atomic.AtomicLong
  * [ReferenceQueue] the collector enqueues them on, and a thread that drains it.
  *
  * **Why this is in `jvmMain` rather than `androidMain`.** It is the fallback for an Android version,
- * but nothing in it is Android-specific — `PhantomReference` and `ReferenceQueue` are Java 1.2. It
+ * but nothing in it is Android-specific, `PhantomReference` and `ReferenceQueue` are Java 1.2. It
  * used to live in `androidMain`, and the consequence was that ROADMAP §4 could only say "Android
  * below API 33 uses the `PhantomReference` path and is not covered yet": the only way to run it was
  * on a device below API 33, and the emulators this project has are API 36, which take the `Cleaner`
  * branch and never reach here. Sitting in `jvmMain` it is reachable from `desktopTest`, and
- * `PhantomCleanerRegistryTest` runs it on every desktop build. `desktopMain` does not use it — it
- * has a real `Cleaner` — so this is a test seam, not a change of behaviour for that target.
+ * `PhantomCleanerRegistryTest` runs it on every desktop build. `desktopMain` does not use it, it
+ * has a real `Cleaner`, so this is a test seam, not a change of behaviour for that target.
  *
  * **The action must not be able to reach its owner.** The registry holds every live entry strongly,
  * and each entry holds its action strongly; an action that could reach the owner would therefore
@@ -40,7 +40,7 @@ internal object PhantomCleanerRegistry {
      * Every entry that has not been released yet, held strongly.
      *
      * A `PhantomReference` nobody holds is itself collectable, and a collected reference is never
-     * enqueued — so this table is not bookkeeping, it is what makes the mechanism work at all.
+     * enqueued, so this table is not bookkeeping, it is what makes the mechanism work at all.
      */
     private val active = ConcurrentHashMap<Entry, Boolean>()
 
@@ -84,7 +84,7 @@ internal object PhantomCleanerRegistry {
      * **The `Throwable` catch is the whole point of this loop's shape**, and it was measured before
      * it was written: with only the `InterruptedException` catch this loop used to have, one
      * release action that threw propagated out of the loop, out of the `Runnable`, and ended the
-     * thread — after which *every* later release on the whole process was silently never made.
+     * thread, after which *every* later release on the whole process was silently never made.
      * `PhantomCleanerRegistryTest.aReleaseThatThrowsDoesNotStopLaterReleases` failed with
      * `count: 0`, and so did the unrelated case that happened to run after it. `java.lang.ref
      * .Cleaner`'s own thread swallows `Throwable` for exactly this reason, which is why the API 33+
@@ -118,7 +118,7 @@ internal object PhantomCleanerRegistry {
 
     /**
      * Arranges for [action] to run once [owner] is unreachable, or once [Cleanable.clean] is
-     * called — whichever happens first, and never both.
+     * called, whichever happens first, and never both.
      */
     fun register(owner: Any, action: Runnable): Cleanable {
         val entry = Entry(owner, action)

@@ -14,7 +14,7 @@ The library supports **two flavours**, chosen at build time:
 
 The interpreter version is pinned by `pythonVersion` in `gradle.properties` (3.14.7 at the time of
 writing). Free-threading is **not** gated on 3.15t: the whole desktop suite runs on 3.14.7t
-(236 tests, 0 failures, 1 skipped — ROADMAP §9; SPEC T-2). Only desktop has free-threaded
+(236 tests, 0 failures, 1 skipped, ROADMAP §9; SPEC T-2). Only desktop has free-threaded
 prebuilts; Android and iOS have none, so the opt-in is desktop-only. How the earlier "from 3.15t"
 conclusion was reached, and why it did not hold, is in
 [`../archive/threading-and-abi-3.15t-gate.md`](../archive/threading-and-abi-3.15t-gate.md).
@@ -24,7 +24,7 @@ conclusion was reached, and why it did not hold, is in
 PEP 684 gives real parallelism on GIL builds by giving each sub-interpreter its own GIL. It was
 evaluated and rejected for this project.
 
-It is technically reachable. `Py_NewInterpreterFromConfig` is exported from libpython —
+It is technically reachable. `Py_NewInterpreterFromConfig` is exported from libpython,
 verified with `nm` on `libpython3.14.dylib`:
 
 ```
@@ -48,7 +48,7 @@ typedef struct {
 The Stable ABI is a compile-time contract, not a runtime one, and this project resolves symbols
 dynamically, so calling a non-limited symbol is possible.
 
-The blocker is not the ABI — it is **extension compatibility**. Per-interpreter GIL requires every C
+The blocker is not the ABI, it is **extension compatibility**. Per-interpreter GIL requires every C
 extension to implement multi-phase init and declare `Py_mod_multiple_interpreters`; extensions that
 do not simply fail to import. That would cost exactly the Python libraries this project exists to
 share, in return for parallelism.
@@ -68,12 +68,12 @@ available on free-threaded builds for extension *modules*. What it asks of us if
 | Requirement | Our status |
 |---|---|
 | `PyObject` / `PyVarObject` become incomplete types; no field access | **Compatible.** `PyObject` appears only as an opaque pointer and is never dereferenced. |
-| Extensions may not embed `PyObject` in their own structs | Compatible — nothing does. |
+| Extensions may not embed `PyObject` in their own structs | Compatible, nothing does. |
 | `PyModExport` hook (PEP 793) instead of static `PyModuleDef` | Not relevant: we embed CPython rather than building an extension module. It would matter if Kotlin classes were ever exposed as a CPython extension module. |
 
 ## PEP 809 may collapse the two flavours into one (forward-looking)
 
-[PEP 809](https://peps.python.org/pep-0809/) — **Draft**, also targeting 3.15 — would replace `abi3`
+[PEP 809](https://peps.python.org/pep-0809/), **Draft**, also targeting 3.15, would replace `abi3`
 with time-bound versioned ABIs (`abi2026`), each frozen for at least ten years with at least five
 years of overlap. Crucially, a single extension compiled against `abi2026` supports **both**
 free-threaded and GIL-enabled builds.
@@ -96,7 +96,7 @@ Desktop (macOS arm64/x86_64, Linux x86_64, Windows x86_64) has GIL and free-thre
 python-build-standalone releases; the build uses the `-freethreaded` archive when
 `pythonFreeThreaded=true`. **Android (python.org) and iOS (Python-Apple-support) publish no
 free-threaded build**, so free-threading stays a desktop-only opt-in, and enabling it by default
-would split the threading model — and the object-lifetime and thread-state design layered on top —
+would split the threading model, and the object-lifetime and thread-state design layered on top,
 across platforms. Switching the default would additionally need adequate free-threaded wheel
 coverage for the C extensions users care about. Table as of the 20260807 release, kept in the
 archive note above.

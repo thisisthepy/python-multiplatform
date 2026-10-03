@@ -34,7 +34,7 @@ plugins {
     // Gradle 8.11.1, which AGP 8.10 requires), so the split is gone and this module holds its own
     // Python-facing declarations again -- `src/*/kotlin/.../demo/bindings/`.
     //
-    // `ksp-fixtures/android` is the regression test. It is the first fixture to apply an Android
+    // `python-multiplatform-ksp/fixtures/android` is the regression test. It is the first fixture to apply an Android
     // plugin, which is exactly why nothing caught this.
     id("io.github.thisisthepy.python.multiplatform.bindings")
 }
@@ -217,7 +217,7 @@ fun patchWasmOutputForCPython(dir: File, modulePrefix: String) {
         // first browser run found. `_start()` is Kotlin `main()`; the library's own test bundle has
         // no such call (its runner starts the tests from outside), so appending had always been
         // enough and every executable bundle would have registered its upcall entry point one line
-        // too late. The symptom is `pmpRegisterUpcall returned -1` — `kotlinExports` still null —
+        // too late. The symptom is `pmpRegisterUpcall returned -1`, `kotlinExports` still null,
         // for an application whose sections 1-4 all worked.
         val startCall = "exports._start();"
         val note = "// Added by :sample's build: upcall registration needs the raw wasm exports,\n" +

@@ -72,7 +72,7 @@ dependencies {
     //   - not in the library. `python-multiplatform` does not depend on this plugin;
     //     `:python-multiplatform:dependencies` reports `kotlin-compiler-embeddable:2.0.20` in no
     //     configuration at all, `desktopRuntimeClasspath` included.
-    //   - not on a consumer's *application* classpath. `:ksp-fixtures:app:dependencies` reports zero
+    //   - not on a consumer's *application* classpath. `:python-multiplatform-ksp:fixtures:app:dependencies` reports zero
     //     occurrences of `2.0.20`. (It does report `kotlin-compiler-embeddable:2.4.0` and
     //     `2.4.20-Beta2` under `kotlinCompilerPluginClasspath*` and the commonizer's configurations
     //     -- KGP's own, present before this dependency existed.)
@@ -125,7 +125,7 @@ dependencies {
     // classloader's parent is Gradle's own minimal worker infrastructure, not that root scope, so
     // `org.jetbrains.kotlin.library.*` has exactly one source inside the worker. Confirmed against a
     // real consumer build, not only this plugin's own unit tests:
-    // `:ksp-fixtures:klib-artifact:generatePythonArtifactBindings` and `:generatePythonStubs` both
+    // `:python-multiplatform-gradle-plugin-fixtures:klib-artifact:generatePythonArtifactBindings` and `:generatePythonStubs` both
     // pass and emit the walker's real output (`kotlinx.coroutines.flow.internal.checkIndexOverflow`).
     //
     // ### Compile-only here, resolved by the consumer at klib-walking time

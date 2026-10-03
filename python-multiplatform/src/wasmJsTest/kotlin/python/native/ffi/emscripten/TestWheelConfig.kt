@@ -4,7 +4,7 @@ package python.native.ffi.emscripten
 
 /**
  * Where the `KotlinJsTest` `doFirst` in `python-multiplatform/build.gradle.kts` extracted the
- * pinned wheels `tools/wasm/build-cpython.sh wheels` downloads, or `null` when none were found.
+ * pinned wheels `python-multiplatform/scripts/wasm/build-cpython.sh wheels` downloads, or `null` when none were found.
  * Test-only: appended to the test bundle's `cpython-config.mjs`, never to a consumer's.
  */
 external val PMP_TEST_SITE_PACKAGES: JsString?

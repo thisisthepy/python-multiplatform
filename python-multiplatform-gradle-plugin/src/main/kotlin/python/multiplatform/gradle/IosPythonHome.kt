@@ -33,7 +33,7 @@ import java.nio.file.StandardCopyOption
  *
  * `build/utils.sh`'s `install_stdlib` merges the shared tree with one `lib-$ARCHS` tree into the app;
  * this does the same merge at Gradle time, into a directory per slice, so the Xcode phase
- * (`tools/xcode/install-python.sh`) copies a finished prefix and needs no path into the archive.
+ * (`python-multiplatform-gradle-plugin/src/main/resources/xcode/install-python.sh`) copies a finished prefix and needs no path into the archive.
  * Pure functions are separated out so the layout is pinned by tests without downloading anything.
  */
 object IosPythonHomeLayout {
@@ -100,7 +100,7 @@ object IosPythonHomeLayout {
         val platform = effectivePlatformName?.trim()?.removePrefix("-")
         require(!platform.isNullOrEmpty()) {
             "EFFECTIVE_PLATFORM_NAME is not set. This task picks the iOS slice from the settings Xcode " +
-                "exports to a Run Script phase; run it from one (tools/xcode/install-python.sh does)."
+                "exports to a Run Script phase; run it from one (python-multiplatform-gradle-plugin/src/main/resources/xcode/install-python.sh does)."
         }
         val archList = archs?.trim()?.split(Regex("\\s+"))?.filter { it.isNotEmpty() }.orEmpty()
         require(archList.isNotEmpty()) { "ARCHS is not set; run this from an Xcode Run Script phase." }
