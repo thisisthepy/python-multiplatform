@@ -15,7 +15,7 @@ import pytest
 from typedpython import frontend
 from typedpython.ir import (
     And, ArrayParam, Assign, BinOp, BinOpKind, Box, Break, Call, CallObject, Compare, CompareKind,
-    CompareObj, Const, ExprStmt, While, ForRange, GetAttr, Global, If, Index, Len, Local, MathCall,
+    CompareObj, Const, CopyArray, NewArray, Tuple, ExprStmt, While, ForRange, GetAttr, Global, If, Index, Len, Local, MathCall,
     MathFunc, ObjToFloat, Param, Return, StoreIndex, ToFloat, Truth, Type, UnaryOp, UnaryOpKind,
 )
 
@@ -850,3 +850,204 @@ def test_spectral_norm_kernels_lower(tmp_path):
         assert not f.pure and not f.may_deopt
         [call] = nodes(f, Call)
         assert call.function == "eval_a" and call.redo
+
+
+# --- local fixed-size arrays and tuple returns (ir.NewArray / CopyArray / Tuple, #41 M2) ---------
+
+def test_list_range_local_is_an_iota_array(tmp_path):
+    m = lower(tmp_path, """
+        @compiled
+        def f(n: int) -> int:
+            x: list[int] = list(range(n))
+            return x[0]
+    """)
+    f = function(m, "f")
+    assert f.locals == {"x": Type.I64_ARRAY}
+    assert f.body == (
+        Assign("x", NewArray(Type.I64_ARRAY, Local(I64, "n"), None, True)),
+        Return(Index(I64, "x", Const(I64, 0))),
+    )
+    assert f.pure and not f.may_deopt
+
+
+def test_fill_locals_are_new_arrays_of_their_element_type(tmp_path):
+    m = lower(tmp_path, """
+        @compiled
+        def f(n: int) -> float:
+            a: list[int] = [0] * n
+            b = [1.5] * n
+            return b[a[0]]
+    """)
+    f = function(m, "f")
+    assert f.locals == {"a": Type.I64_ARRAY, "b": Type.F64_ARRAY}
+    assert f.body[:2] == (
+        Assign("a", NewArray(Type.I64_ARRAY, Local(I64, "n"), Const(I64, 0))),
+        Assign("b", NewArray(Type.F64_ARRAY, Local(I64, "n"), Const(F64, 1.5))),
+    )
+    assert f.pure
+
+
+def test_slice_copy_of_a_local_and_of_a_parameter(tmp_path):
+    m = lower(tmp_path, """
+        @compiled
+        def f(p: list[int], n: int) -> int:
+            x: list[int] = list(range(n))
+            y = x[:]
+            z: list[int] = p[:]
+            return y[0] + z[0]
+    """)
+    f = function(m, "f")
+    assert f.locals == {"x": Type.I64_ARRAY, "y": Type.I64_ARRAY, "z": Type.I64_ARRAY}
+    assert f.body[1] == Assign("y", CopyArray(Type.I64_ARRAY, "x"))
+    assert f.body[2] == Assign("z", CopyArray(Type.I64_ARRAY, "p"))
+    assert f.params[0] == ArrayParam("p", Type.I64_ARRAY, False)
+
+
+@pytest.mark.parametrize("what, source, snippet", [
+    ("returned", "return x", "return x"),
+    ("passed to a call", "print(x)\n    return 0", "print(x)"),
+    ("compared", "return x == y", "x == y"),
+    ("iterated over", "for v in x:\n        pass\n    return 0", "x"),
+    ("sliced other than [:]", "w = x[1:]\n    return 0", "x[1:]"),
+    ("appended to", "x.append(1)\n    return 0", "x.append(1)"),
+    ("aliased", "w = x\n    return 0", "w = x"),
+    ("copied outside an assignment", "return len(x[:])", "x[:]"),
+    ("rebound by a non-array value", "x = 5\n    return 0", "x"),
+])
+def test_local_array_escapes_skip_the_function(tmp_path, what, source, snippet):
+    source = source.replace("\n    ", "\n            ")  # the f-string below is dedented
+    m = lower(tmp_path, f"""
+        @compiled
+        def f(n: int) -> int:
+            x: list[int] = list(range(n))
+            y: list[int] = [0] * n
+            {source}
+    """)
+    assert "f" not in [fn.name for fn in m.functions], what
+    reason = m.skipped["f"]
+    assert snippet in reason, (what, reason)
+    assert "array" in reason, (what, reason)
+
+
+@pytest.mark.parametrize("annotation, value", [
+    ("list[str]", '["a"] * n'),
+    ("list[bool]", "[True] * n"),
+    ("list[list[int]]", "[[0]] * n"),
+])
+def test_local_array_element_type_must_be_exactly_int_or_float(tmp_path, annotation, value):
+    m = lower(tmp_path, f"""
+        @compiled
+        def f(n: int) -> int:
+            x: {annotation} = {value}
+            return 0
+    """)
+    assert "f" in m.skipped
+    assert "exactly int or float" in m.skipped["f"], m.skipped["f"]
+
+
+def test_int_fill_of_a_float_array_is_skipped(tmp_path):
+    m = lower(tmp_path, """
+        @compiled
+        def f(n: int) -> int:
+            x: list[float] = [0] * n
+            return 0
+    """)
+    assert "f" in m.skipped and "float" in m.skipped["f"]
+
+
+def test_function_with_only_local_array_stores_is_pure(tmp_path):
+    m = lower(tmp_path, """
+        @compiled
+        def f(n: int) -> int:
+            x: list[int] = [0] * n
+            for i in range(n):
+                x[i] = i * i
+                x[i] += 1
+            return x[n - 1] * n
+    """)
+    f = function(m, "f")
+    assert nodes(f, StoreIndex) and f.pure
+    # pure, so the unbounded int arithmetic is native with deopt, not a CPython int
+    assert f.may_deopt
+    assert f.locals["x"] == Type.I64_ARRAY and f.returns == I64
+
+
+def test_function_storing_into_an_array_param_is_still_impure(tmp_path):
+    m = lower(tmp_path, """
+        @compiled
+        def f(p: list[int], n: int) -> int:
+            x: list[int] = [0] * n
+            p[0] = 1
+            x[0] = 2
+            return x[0]
+    """)
+    f = function(m, "f")
+    assert not f.pure and not f.may_deopt
+    assert f.params[0] == ArrayParam("p", Type.I64_ARRAY, True)
+
+
+def test_storing_a_local_array_into_nothing_but_locals_keeps_calls_impure(tmp_path):
+    # An object call is an effect whatever the arrays do.
+    m = lower(tmp_path, """
+        @compiled
+        def f(n: int, g: object) -> int:
+            x: list[int] = [0] * n
+            x[0] = 1
+            g(1)
+            return x[0]
+    """)
+    assert not function(m, "f").pure
+
+
+def test_tuple_return_boxes_each_element(tmp_path):
+    m = lower(tmp_path, """
+        @compiled
+        def f(a: int, b: float) -> tuple[int, float]:
+            return a, b
+    """)
+    f = function(m, "f")
+    assert f.returns == OBJ
+    assert f.body == (Return(Tuple(OBJ, (Box(OBJ, Local(I64, "a")), Box(OBJ, Local(F64, "b"))))),)
+    assert f.pure
+
+
+def test_tuple_return_with_object_element_and_deopting_arithmetic(tmp_path):
+    m = lower(tmp_path, """
+        @compiled
+        def f(a: int, b: int, o: object) -> tuple[int, object]:
+            return a // b, o
+    """)
+    f = function(m, "f")
+    assert f.pure and f.may_deopt
+    [ret] = nodes(f, Return)
+    assert isinstance(ret.value, Tuple) and ret.value.elements[1] == Local(OBJ, "o")
+
+
+@pytest.mark.parametrize("annotation, value, snippet", [
+    ("tuple[int, float]", "a, b", "float"),
+    ("object", "a, b", "tuple["),
+    ("tuple[int, int, int]", "a, b", "declares 3"),
+    ("tuple[int, ...]", "a, b", "..."),
+])
+def test_tuple_return_must_match_its_annotation(tmp_path, annotation, value, snippet):
+    m = lower(tmp_path, f"""
+        @compiled
+        def f(a: int, b: int) -> {annotation}:
+            return {value}
+    """)
+    assert "f" in m.skipped
+    assert snippet in m.skipped["f"], m.skipped["f"]
+
+
+@pytest.mark.skipif(not BENCH.exists(), reason="benchmark worktree not present")
+def test_fannkuch_lowers(tmp_path):
+    path = tmp_path / "fannkuch.py"
+    path.write_text("# typedpython: compiled\n" + (BENCH / "fannkuch.py").read_text())
+    m = frontend.lower(path)
+    assert "fannkuch" in [f.name for f in m.functions], m.skipped.get("fannkuch")
+    f = function(m, "fannkuch")
+    assert f.pure and f.may_deopt
+    assert f.returns == OBJ and f.params == (Param("n", I64),)
+    assert f.locals["perm1"] == f.locals["count"] == f.locals["perm"] == Type.I64_ARRAY
+    assert len(nodes(f, NewArray)) == 2 and len(nodes(f, CopyArray)) == 1
+    assert nodes(f, Tuple)

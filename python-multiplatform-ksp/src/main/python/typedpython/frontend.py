@@ -122,6 +122,10 @@ class _Signature:
     node: ast.FunctionDef
     params: tuple[ir.Param | ir.ArrayParam, ...]
     returns: Type
+    # `-> tuple[a, b]`: the element kinds (a scalar type, else OBJ); None when not a tuple annotation.
+    tuple_returns: tuple[Type, ...] | None = None
+    tuple_ellipsis: bool = False   # `tuple[int, ...]`: a variable length
+    return_annotation: str = ""
 
 
 def lower(path: Path) -> ir.Module:
@@ -348,7 +352,20 @@ def _signature(fn: ast.FunctionDef) -> _Signature:
         returns = Type.NONE
     else:
         returns = SCALAR_KIND.get(_annotation_kind(fn.returns), Type.OBJ)
-    return _Signature(fn, tuple(params), returns)
+    elements, ellipsis = _tuple_annotation(fn.returns)
+    return _Signature(fn, tuple(params), returns, elements, ellipsis, _src(fn.returns))
+
+
+def _tuple_annotation(annotation: ast.expr) -> tuple[tuple[Type, ...] | None, bool]:
+    """`tuple[int, float]` -> ((I64, F64), False); `tuple[int, ...]` -> (None, True)."""
+    if not (isinstance(annotation, ast.Subscript) and isinstance(annotation.value, ast.Name)
+            and annotation.value.id == "tuple"):
+        return None, False
+    inner = annotation.slice
+    items = list(inner.elts) if isinstance(inner, ast.Tuple) else [inner]
+    if any(isinstance(i, ast.Constant) and i.value is Ellipsis for i in items):
+        return None, True
+    return tuple(SCALAR_KIND.get(_annotation_kind(i), Type.OBJ) for i in items), False
 
 
 def _annotation_kind(annotation: ast.expr) -> str:
@@ -469,6 +486,9 @@ class _Lowerer:
         self.bindings: dict[str, list[_Binding]] = {}
         self.annotations: dict[str, list[tuple[int, str]]] = {}
         self._collect_bindings()
+        # Local arrays (ir.NewArray / CopyArray): name -> array type; also in `self.arrays`.
+        self.local_arrays = self._find_local_arrays()
+        self.arrays.update(self.local_arrays)
         self.range_vars = {
             n for n, bs in self.bindings.items()
             if n not in self.params and any(b.how == "range" for b in bs)
@@ -484,6 +504,7 @@ class _Lowerer:
         self.impure = False      # an effect outside the locals
         self.deopts = False      # a node that can deopt
         self.stored: set[str] = set()
+        self.current: ast.stmt | None = None   # the statement being lowered (for messages)
 
     # --- entry ---
 
@@ -535,6 +556,68 @@ class _Lowerer:
                         if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
                             add(n.id, stmt.lineno, "assign")
 
+    def _find_local_arrays(self) -> dict[str, Type]:
+        """Locals created by `list(range(n))`, `[v] * n` or `src[:]` (src an array). Every binding
+        of such a name must be one of those creations: a local array is never rebound to anything
+        else, so it has one element type for its whole life."""
+        creations: dict[str, list[tuple[ast.stmt, str, ast.expr]]] = {}
+        for stmt in rebinding._own_statements(self.fn):
+            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 \
+                    and isinstance(stmt.targets[0], ast.Name):
+                name, value = stmt.targets[0].id, stmt.value
+            elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name) \
+                    and stmt.value is not None:
+                name, value = stmt.target.id, stmt.value
+            else:
+                continue
+            kind = _creation_kind(value)
+            if kind is not None and name not in self.params:
+                creations.setdefault(name, []).append((stmt, kind, value))
+        known = set(self.arrays) | {n for n, cs in creations.items()
+                                    if any(k != "copy" for _, k, _ in cs)}
+        while True:
+            more = {n for n, cs in creations.items() if n not in known and any(
+                k == "copy" and v.value.id in known for _, k, v in cs)}  # type: ignore[attr-defined]
+            if not more:
+                break
+            known |= more
+        found: dict[str, Type] = {}
+        for name, cs in creations.items():
+            if name not in known:
+                continue
+            cs = [c for c in cs if c[1] != "copy" or c[2].value.id in known]  # type: ignore[attr-defined]
+            lines = {c[0].lineno for c in cs}
+            other = [b for b in self.bindings[name] if b.how != "annotation" and b.line not in lines]
+            if other:
+                raise Skip(other[0].line, f"local `{name}` is a native array (created at line "
+                                          f"{cs[0][0].lineno}) but is also bound by something "
+                                          "that does not create an array")
+            found[name] = self._array_type(name, cs, found)
+        return found
+
+    def _array_type(self, name: str, cs, found: dict[str, Type]) -> Type:
+        line = cs[0][0].lineno
+        kinds: list[tuple[int, str]] = list(self.annotations.get(name, []))
+        if name not in self.annotations:
+            kinds += self.inferred.get(name, [])
+        distinct = sorted({k for _, k in kinds})
+        if len(distinct) > 1:
+            raise Skip(line, f"local `{name}` is given values of types "
+                             + " and ".join(f"`{k}`" for k in distinct))
+        if distinct:
+            if distinct[0] not in ARRAY_KIND:
+                raise Skip(line, f"local `{name}: {distinct[0]}`: a native array's element type "
+                                 "must be exactly int or float")
+            return ARRAY_KIND[distinct[0]]
+        for _, kind, value in cs:  # unknown to Pyrefly: a copy takes its source's type
+            if kind == "copy":
+                src = value.value.id
+                if src in self.arrays:
+                    return self.arrays[src]
+                if src in found:
+                    return found[src]
+        raise Skip(line, f"no type is known for local `{name}`")
+
     def is_local(self, name: str) -> bool:
         return name in self.params or name in self.bindings or name in self.temps
 
@@ -543,6 +626,8 @@ class _Lowerer:
             return self.temps[name]
         if name in self.params:
             return self.params[name].type
+        if name in self.local_arrays:
+            return self.local_arrays[name]
         if name in self.types:
             return self.types[name]
         kinds: list[tuple[int, str]] = list(self.annotations.get(name, []))
@@ -558,8 +643,8 @@ class _Lowerer:
                               + " and ".join(f"`{k}`" for k in distinct))
         kind = distinct[0]
         if kind in ARRAY_KIND or kind.startswith(("list[float]", "list[int]")):
-            raise Skip(kinds[0][0], f"local `{name}: {kind}`: only parameters can be native "
-                                    "arrays")
+            raise Skip(kinds[0][0], f"local `{name}: {kind}`: a list local is a native array only "
+                                    "when created by `list(range(n))`, `[v] * n` or `src[:]`")
         if kind == "int":
             t = Type.OBJ if self.impure_mode and name not in self.range_vars else Type.I64
         else:
@@ -594,6 +679,7 @@ class _Lowerer:
 
     def stmt(self, node: ast.stmt) -> list[ir.Stmt]:
         self.start()
+        self.current = node
         line = node.lineno
         if isinstance(node, ast.Pass):
             return []
@@ -643,6 +729,8 @@ class _Lowerer:
         line = node.lineno
         if isinstance(target, ast.Name):
             name = target.id
+            if name in self.local_arrays:
+                return self.new_array(name, value_node, node)
             if name in self.arrays:
                 raise Skip(line, f"array parameter `{name}` is rebound")
             value = self.value(value_node)
@@ -657,14 +745,60 @@ class _Lowerer:
             if not _simple(target.slice) and not _trivial(value):
                 value = self.temp(value)
             index = self.index(target.slice)
-            self.stored.add(array)
-            self.impure = True
+            self.store_effect(array)
             return self.take() + [ir.StoreIndex(array, index, value)]
         if isinstance(target, ast.Attribute):
             raise Skip(line, f"assignment to attribute `{_src(target)}` is not supported")
         if isinstance(target, (ast.Tuple, ast.List)):
             raise Skip(line, "tuple unpacking is not supported")
         raise _unsupported(target)
+
+    def array_word(self, name: str) -> str:
+        return "local array" if name in self.local_arrays else "array parameter"
+
+    def store_effect(self, array: str) -> None:
+        """A store into a parameter list is an effect (write-back); into a local array it is not."""
+        if array not in self.local_arrays:
+            self.stored.add(array)
+            self.impure = True
+
+    def new_array(self, name: str, value_node: ast.expr, node: ast.stmt) -> list[ir.Stmt]:
+        line = node.lineno
+        t = self.local_arrays[name]
+        elem = Type.F64 if t == Type.F64_ARRAY else Type.I64
+        what = f"local array `{name}: {TYPE_NAME[t]}`"
+        kind = _creation_kind(value_node)
+        if kind == "iota":
+            call = value_node.args[0]  # type: ignore[attr-defined]
+            if not (self.builtin("list") and self.builtin("range")):
+                raise Skip(line, f"`{_src(value_node)}` with `list` or `range` rebound")
+            if elem != Type.I64:
+                raise Skip(line, f"`{_src(value_node)}` is a list of int, but {what} is "
+                                 f"{TYPE_NAME[t]}")
+            length = self.range_bound(call.args[0])
+            return self.take() + [ir.Assign(name, ir.NewArray(t, length, None, True))]
+        if kind == "fill":
+            assert isinstance(value_node, ast.BinOp) and isinstance(value_node.left, ast.List)
+            fill = self.coerce(self.value(value_node.left.elts[0]), elem,
+                               value_node.left.elts[0], what)
+            if not _trivial(fill):
+                fill = self.temp(fill)  # `[v] * n` evaluates v before n
+            length = self.value(value_node.right)
+            if length.type != Type.I64:
+                why = (" (it is a CPython int here: its arithmetic is not proved free of i64 "
+                       "overflow in an impure function)" if length.type == Type.OBJ
+                       and self.impure_mode else "")
+                raise Skip(line, f"array length `{_src(value_node.right)}` is "
+                                 f"{TYPE_NAME[length.type]}, not a native int{why}")
+            return self.take() + [ir.Assign(name, ir.NewArray(t, length, fill))]
+        if kind == "copy":
+            assert isinstance(value_node, ast.Subscript) and isinstance(value_node.value, ast.Name)
+            src = value_node.value.id
+            if self.arrays[src] != t:
+                raise Skip(line, f"`{_src(value_node)}` is {TYPE_NAME[self.arrays[src]]}, but "
+                                 f"{what} is {TYPE_NAME[t]}")
+            return [ir.Assign(name, ir.CopyArray(t, src))]
+        raise Skip(line, f"{what} is rebound to `{_src(value_node)}`, which does not create an array")
 
     def aug_assign(self, node: ast.AugAssign) -> list[ir.Stmt]:
         line = node.lineno
@@ -673,7 +807,7 @@ class _Lowerer:
         if isinstance(target, ast.Name):
             name = target.id
             if name in self.arrays:
-                raise Skip(line, f"array parameter `{name}` is rebound")
+                raise Skip(line, f"{self.array_word(name)} `{name}` is rebound")
             if not self.is_local(name):
                 raise _unsupported(node)
             t = self.local_type(name, line)
@@ -689,8 +823,7 @@ class _Lowerer:
             self.hoist_ok = False
             result = self.arith(op, load, self.sub(node.value), node)
             result = self.coerce(result, elem, node, f"`{array}: {TYPE_NAME[self.arrays[array]]}`")
-            self.stored.add(array)
-            self.impure = True
+            self.store_effect(array)
             return self.take() + [ir.StoreIndex(array, index, result)]
         if isinstance(target, ast.Attribute):
             raise Skip(line, f"assignment to attribute `{_src(target)}` is not supported")
@@ -702,6 +835,8 @@ class _Lowerer:
             raise Skip(line, "`for ... else` is not supported")
         if not isinstance(node.target, ast.Name):
             raise Skip(line, f"loop target `{_src(node.target)}` is not supported (only a name)")
+        if isinstance(node.iter, ast.Name) and node.iter.id in self.arrays:
+            raise self.array_misuse(node.iter.id, node.iter)
         if not (_is_range_call(node.iter) and self.builtin("range")):
             raise Skip(line, f"`for` over `{_src(node.iter)}` is not supported (only range())")
         call = node.iter
@@ -761,9 +896,34 @@ class _Lowerer:
             return [ir.Return(None)]
         if returns == Type.NONE:
             raise Skip(node.lineno, "returns a value from a function declared to return None")
+        if isinstance(node.value, ast.Tuple):
+            return self.return_tuple(node.value)
         value = self.value(node.value)
         value = self.coerce(value, returns, node.value, "the return value")
         return self.take() + [ir.Return(value)]
+
+    def return_tuple(self, node: ast.Tuple) -> list[ir.Stmt]:
+        sig = self.sig
+        if any(isinstance(e, ast.Starred) for e in node.elts):
+            raise Skip(node.lineno, f"`return {_src(node)}` with a starred element is not supported")
+        if sig.tuple_returns is None:
+            why = ("a variable-length `tuple[..., ...]`" if sig.tuple_ellipsis
+                   else f"`{sig.return_annotation}`")
+            raise Skip(node.lineno, f"returns `{_src(node)}`, but the declared return type is "
+                                    f"{why}, not a fixed `tuple[...]`")
+        kinds = sig.tuple_returns
+        if len(kinds) != len(node.elts):
+            raise Skip(node.lineno, f"returns {len(node.elts)} values, but the return type "
+                                    f"`{sig.return_annotation}` declares {len(kinds)}")
+        elements = []
+        for kind, e_node in zip(kinds, node.elts):
+            e = self.value(e_node)
+            if e.type in ir.SCALARS and kind in ir.SCALARS and e.type != kind:
+                raise Skip(e_node.lineno, f"`{_src(e_node)}` is {TYPE_NAME[e.type]}, but the "
+                                          f"return type `{sig.return_annotation}` declares "
+                                          f"{TYPE_NAME[kind]} there")
+            elements.append(self.boxed(e, e_node))
+        return self.take() + [ir.Return(ir.Tuple(Type.OBJ, tuple(elements)))]
 
     # --- expressions ---
 
@@ -834,6 +994,10 @@ class _Lowerer:
             return ir.GetAttr(Type.OBJ, obj, node.attr)
         if isinstance(node, ast.Subscript):
             if isinstance(node.value, ast.Name) and node.value.id in self.arrays:
+                if isinstance(node.slice, ast.Slice):
+                    raise Skip(line, f"`{_src(node)}` slices {self.array_word(node.value.id)} "
+                                     f"`{node.value.id}`: only `y = {node.value.id}[:]` as the whole "
+                                     "right-hand side of an assignment is a native copy")
                 array, elem = self.array_of(node)
                 return ir.Index(elem, array, self.index(node.slice))
             raise Skip(line, f"subscript `{_src(node)}` of an object is not supported")
@@ -854,8 +1018,13 @@ class _Lowerer:
         return ir.Global(Type.OBJ, name)
 
     def array_misuse(self, name: str, node: ast.AST) -> Skip:
+        where = self.current if isinstance(self.current, (
+            ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Return, ast.Expr)) else node
+        if name in self.local_arrays:
+            return Skip(node.lineno, f"local array `{name}` is used other than by indexing, len() "
+                                     f"or as a `[:]` source (in `{_src(where)}`)")
         return Skip(node.lineno, f"array parameter `{name}` is used other than by indexing or "
-                                 f"len() (in `{_src(node)}`)")
+                                 f"len() (in `{_src(where)}`)")
 
     def array_of(self, node: ast.Subscript) -> tuple[str, Type]:
         if not (isinstance(node.value, ast.Name) and node.value.id in self.arrays):
@@ -1218,6 +1387,24 @@ def _trivial(e: ir.Expr) -> bool:
     if isinstance(e, (ir.Compare, ir.And, ir.Or)):
         return _trivial(e.left) and _trivial(e.right)
     return False
+
+
+def _creation_kind(node: ast.expr) -> str | None:
+    """How a statement's value creates a native array: "iota" `list(range(n))`, "fill" `[v] * n`,
+    "copy" `name[:]` (whether `name` is an array is decided by the caller), else None."""
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "list" \
+            and not node.keywords and len(node.args) == 1 and _is_range_call(node.args[0]) \
+            and len(node.args[0].args) == 1:
+        return "iota"
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult) \
+            and isinstance(node.left, ast.List) and len(node.left.elts) == 1 \
+            and not isinstance(node.left.elts[0], ast.Starred):
+        return "fill"
+    if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) \
+            and isinstance(node.slice, ast.Slice) and node.slice.lower is None \
+            and node.slice.upper is None and node.slice.step is None:
+        return "copy"
+    return None
 
 
 def _simple(node: ast.expr) -> bool:
