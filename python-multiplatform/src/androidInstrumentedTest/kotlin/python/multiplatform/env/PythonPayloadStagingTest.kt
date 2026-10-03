@@ -17,7 +17,7 @@ import kotlin.test.assertTrue
  * `assets/python/` is a *consumer's* asset: `toolchain`'s `stagePythonBundleAndroid` registers a
  * staging root into the consuming application's AGP asset sources. This library's own instrumented
  * APK is not such a consumer and carries no payload, so the copy loop in
- * [PythonBootstrap.stagePayload] is unreachable from here — there is no fixture to drive it with,
+ * [PythonBootstrap.stagePayload] is unreachable from here, there is no fixture to drive it with,
  * and manufacturing one means adding an asset source directory to `build.gradle.kts`, which is a
  * build-structure change and not this test's to make.
  *

@@ -52,7 +52,7 @@ def _canon(obj) -> bytes:
 
 
 def interface_hash(module: ir.Module) -> str:
-    """sha256 over the compiled functions' signatures and the skipped names — nothing else."""
+    """sha256 over the compiled functions' signatures and the skipped names, nothing else."""
     functions = []
     for f in sorted(module.functions, key=lambda f: f.name):
         params = [[p.name, p.type.value, "array" if isinstance(p, ir.ArrayParam) else "scalar"]

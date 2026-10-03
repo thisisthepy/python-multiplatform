@@ -4,7 +4,7 @@
 
 1. The gate in `compiled` mode: a module with type errors is not compiled at all.
 2. `frontend.lower`: functions outside the IR are left interpreted (`skipped`, with reasons).
-3. `verify.verify`: functions the verifier cannot prove are left interpreted too (SPEC N-9 —
+3. `verify.verify`: functions the verifier cannot prove are left interpreted too (SPEC N-9,
    unsafe code is never generated silently).
 4. If nothing is left to compile, no C is produced (`extension is None`): the module ships as
    ordinary Python.

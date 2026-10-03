@@ -4,7 +4,7 @@ English | [한국어](docs/locale/README_ko.md)
 
 # 🐍 python-multiplatform
 
-**Real CPython inside Kotlin Multiplatform — Kotlin calls Python, Python calls Kotlin, on every target.**
+**Real CPython inside Kotlin Multiplatform, Kotlin calls Python, Python calls Kotlin, on every target.**
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Kotlin Multiplatform](https://img.shields.io/badge/Kotlin-Multiplatform-7F52FF.svg?logo=kotlin&logoColor=white)](https://kotlinlang.org/docs/multiplatform.html)
@@ -21,31 +21,31 @@ English | [한국어](docs/locale/README_ko.md)
 
 ## 💡 Why
 
-Python has the libraries; Kotlin Multiplatform has the reach — desktop, Android, iOS, the web.
+Python has the libraries; Kotlin Multiplatform has the reach, desktop, Android, iOS, the web.
 python-multiplatform puts **the real CPython interpreter** inside a Kotlin Multiplatform app and
 builds a two-way bridge across it:
 
 - Kotlin gets a **typed, Kotlin-idiomatic object model** over Python: a `PyList` *is* a `MutableList`,
   a `PyDict` *is* a `MutableMap`, a Python error *is* a `Throwable`.
 - Python gets **Kotlin classes as ordinary Python**: `Greeter('Kotlin').greet(2)`, `await` on a
-  `suspend fun`, Kotlin extension functions as methods — all through a table generated at build time,
+  `suspend fun`, Kotlin extension functions as methods, all through a table generated at build time,
   so it works where reflection does not: Kotlin/Native and GraalVM native images.
 
 It is CPython itself, not a re-implementation, so C extensions keep working.
 
 ## ✨ Features
 
-- 🔌 **Downcalls** — the CPython Stable ABI (~330 functions) as one `expect` surface with an `actual`
+- 🔌 **Downcalls**: the CPython Stable ABI (~330 functions) as one `expect` surface with an `actual`
   per platform: Panama `invokeExact` on desktop, `RegisterNatives` JNI on Android, cinterop on Native.
-- 🧩 **Object model** — `PyObject`, `PyType`, `PyException`, basic types, `PyList` / `PyDict` /
+- 🧩 **Object model**: `PyObject`, `PyType`, `PyException`, basic types, `PyList` / `PyDict` /
   `PySet` / `PyTuple` implementing Kotlin collection interfaces, modules, callables, conversion.
-- 🚀 **Upcalls** — a KSP processor generates a function table; Python constructs Kotlin classes, calls
+- 🚀 **Upcalls**: a KSP processor generates a function table; Python constructs Kotlin classes, calls
   methods, reads and writes properties, and `await`s `suspend` functions with cancellation.
-- 📦 **Bind prebuilt libraries** — the Gradle plugin walks jars (Compose included) and generates the
+- 📦 **Bind prebuilt libraries**: the Gradle plugin walks jars (Compose included) and generates the
   bindings and `.pyi` stubs, with default-argument omission and value-class support.
-- ♻️ **No manual memory management** — wrappers release their Python reference when collected; reference
+- ♻️ **No manual memory management**: wrappers release their Python reference when collected; reference
   cycles that cross the boundary are collected by Python's cyclic GC.
-- 🧪 **Measured** — every boundary mechanism ships with overhead tests; the cost table is rendered from
+- 🧪 **Measured**: every boundary mechanism ships with overhead tests; the cost table is rendered from
   real runs ([cost table](docs/investigations/cost-table.md)).
 
 ## 🚀 Quick start
@@ -118,7 +118,7 @@ name, unchanged.
 ### Platform setup
 
 <details>
-<summary><b>Desktop</b> — apply the Gradle plugin so <code>PYTHONHOME</code> has a stdlib</summary>
+<summary><b>Desktop</b>, apply the Gradle plugin so <code>PYTHONHOME</code> has a stdlib</summary>
 
 ```kotlin
 plugins {
@@ -138,7 +138,7 @@ prefix with `-Dpython.multiplatform.home=...`. See `docs/platforms/desktop-packa
 </details>
 
 <details>
-<summary><b>Android</b> — call <code>PythonBootstrap.initialize</code></summary>
+<summary><b>Android</b>, call <code>PythonBootstrap.initialize</code></summary>
 
 ```kotlin
 import python.multiplatform.env.PythonBootstrap
@@ -172,7 +172,7 @@ flowchart LR
     T --> K
 ```
 
-Behind each platform's single entry point, **every platform uses the same generated table** — there is
+Behind each platform's single entry point, **every platform uses the same generated table**, there is
 no per-platform Python → Kotlin binding code. Details: [design notes](docs/design/).
 
 ## 🌍 Platforms
@@ -188,7 +188,7 @@ no per-platform Python → Kotlin binding code. Details: [design notes](docs/des
 
 ## 📊 Status
 
-Honest summary — see the [roadmap](docs/roadmap/ROADMAP.md) for what is left to do.
+Honest summary, see the [roadmap](docs/roadmap/ROADMAP.md) for what is left to do.
 
 | Area | State |
 |---|---|
@@ -213,10 +213,10 @@ Honest summary — see the [roadmap](docs/roadmap/ROADMAP.md) for what is left t
 
 ## 📖 Documentation
 
-- 🌐 **[Guide](https://thisisthepy.github.io/python-multiplatform/)** (English / 한국어) — source in [`docs/guide/`](docs/guide/)
-- 🏗 [Design notes](docs/design/) — architecture, downcalls, upcalls, lifetime, threading, binding policy
-- 📱 [Platform notes](docs/platforms/) — Android FFM, wasm, CPython acquisition, GraalVM verification
-- 🔬 [Investigations](docs/investigations/) — measurements and audits
+- 🌐 **[Guide](https://thisisthepy.github.io/python-multiplatform/)** (English / 한국어), source in [`docs/guide/`](docs/guide/)
+- 🏗 [Design notes](docs/design/), architecture, downcalls, upcalls, lifetime, threading, binding policy
+- 📱 [Platform notes](docs/platforms/), Android FFM, wasm, CPython acquisition, GraalVM verification
+- 🔬 [Investigations](docs/investigations/), measurements and audits
 - 🗺 [Roadmap](docs/roadmap/ROADMAP.md)
 - 🇰🇷 [README in Korean](docs/locale/README_ko.md)
 

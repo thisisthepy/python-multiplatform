@@ -71,18 +71,18 @@ the plugin's KMP support, not a native-image limitation.
 - **Date:** 2026-08-17
 - **Branch / commit:** `work/graal` off `develop` @ `4687070a` (*Merge branch 'work/syspath' into develop*)
 - **Worktree:** `/Volumes/macMini/worktrees/graal`
-- **Machine note:** other agents were building concurrently — load average was **10.39** and physical
+- **Machine note:** other agents were building concurrently, load average was **10.39** and physical
   memory was nearly exhausted (129 MB unused of 16 GB) when `nativeCompile` started. It still
   succeeded, and the pass/fail results below are unaffected by contention. **The timings, however,
   are not clean benchmarks and should not be quoted as such.**
 
-### Step 1 — JVM control
+### Step 1, JVM control
 
 ```
 :sample:runNativeImageUpcallDemo   EXIT=0   BUILD SUCCESSFUL in 42s
 ```
 
-### Step 2 — Native image build
+### Step 2, Native image build
 
 ```
 :sample:nativeCompile              EXIT=0   BUILD SUCCESSFUL in 46s
@@ -96,18 +96,18 @@ the plugin's KMP support, not a native-image limitation.
 Finished generating 'upcall-native-demo' in 43.5s.
 ```
 
-Artifact: `sample/build/native/nativeCompile/upcall-native-demo` — **26,317,504 bytes (25.1 MB)**,
+Artifact: `sample/build/native/nativeCompile/upcall-native-demo`, **26,317,504 bytes (25.1 MB)**,
 `Mach-O 64-bit executable arm64`.
 
 The `28 downcalls and 5 upcalls` the image registered match **exactly** the counts in the
 *generated* `reachability-metadata.json`
 (`python-multiplatform/build/generated/native-image-metadata/desktop/...`, `foreign.downcalls` = 28,
 `foreign.upcalls` = 5). The image consumed the generated metadata rather than a checked-in file that
-could have rotted out of sync — which is the failure mode `generateDesktopReachabilityMetadata`
+could have rotted out of sync, which is the failure mode `generateDesktopReachabilityMetadata`
 exists to prevent, since an undeclared descriptor builds clean and dies at the first call with
 `MissingForeignRegistrationError`.
 
-### Step 3 — Native image execution
+### Step 3, Native image execution
 
 ```
 :sample:runNativeUpcallDemo        EXIT=0   BUILD SUCCESSFUL in 3s
@@ -151,7 +151,7 @@ completer thread            ->  clean
 PYTHON: PROXY_OK
 ```
 
-### Step 4 — JVM vs native diff
+### Step 4, JVM vs native diff
 
 The two runs are the **same commit and the same entry point**, so they are directly comparable. This
 is the control that matters; comparing against a ROADMAP snapshot from an older commit (as an
@@ -171,15 +171,15 @@ Diffing the two 32-line output blocks:
 ```
 
 **29 of 32 lines are byte-identical.** The only three that differ are raw runtime stub addresses,
-which carry no semantics. Every line that asserts behaviour — the table size, the resolved handles,
+which carry no semantics. Every line that asserts behaviour, the table size, the resolved handles,
 `invoke result = 7`, `invoke_args result = 'presses x3 = 21'`, the `-1` for `@PythonInternal`, all
-of the proxy assertions, and both markers — is identical.
+of the proxy assertions, and both markers, is identical.
 
 Incidental observation: under native-image the three Panama upcall stubs land at **contiguous**
 addresses 0x40 apart, whereas on the JVM they are scattered. Consistent with stubs being laid out
 into one image region at build time rather than allocated on demand.
 
-### Step 5 — Closed-world proof
+### Step 5, Closed-world proof
 
 Running through Gradle leaves open the objection that a JVM was somewhere in the picture. It was
 not. The binary was executed **directly, with `JAVA_HOME` removed from the environment**:
@@ -217,7 +217,7 @@ rather than been produced silently.
 | Generated Python proxy layer works | **YES** (`PROXY_OK`, including `await` over a `suspend fun` settled from a Kotlin thread) |
 | `@PythonInternal` opt-out still enforced | **YES** (resolves to `-1`) |
 | Behaviour differs from JVM | **NO** (29/32 lines identical; the 3 differing lines are runtime addresses) |
-| Reflection registration needed for the upcall path | **NO** — the path uses none, which is the §7 design premise holding |
+| Reflection registration needed for the upcall path | **NO**, the path uses none, which is the §7 design premise holding |
 
 Nothing is outstanding on the desktop target. The untested surface is other targets: this verifies
 **desktop only**, as `sample/build.gradle.kts` wires `nativeCompile` from the `desktop` compilation.

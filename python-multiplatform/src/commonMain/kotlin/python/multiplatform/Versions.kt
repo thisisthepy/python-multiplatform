@@ -6,7 +6,7 @@ package python.multiplatform
  *
  * This used to be an enum whose only entry was `PYTHON_3_13_0`, validated against
  * [BuildConfig.pythonVersion] at class-initialisation time. That made every version bump a source
- * change, and failing to make it did not produce a build error — it produced an
+ * change, and failing to make it did not produce a build error, it produced an
  * `ExceptionInInitializerError` the first time anything touched the FFI at runtime, which is how
  * moving the build to 3.14.7 broke the Android path while every compile target still passed.
  *
@@ -22,7 +22,7 @@ class Versions private constructor(val versionString: String) {
          * Parses `major.minor[.patch][suffix]`, e.g. `3.14.7` or `3.15.0rc1`.
          *
          * Rejects anything without at least a major and minor component, since [compactVersionString]
-         * — which names the shared library and the stdlib directory — depends on both.
+         *, which names the shared library and the stdlib directory, depends on both.
          */
         fun parse(versionString: String): Versions {
             val parts = versionString.split(".")

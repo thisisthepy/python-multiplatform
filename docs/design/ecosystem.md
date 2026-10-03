@@ -1,8 +1,8 @@
 # The repositories around this one, and what each owes
 
 `/Volumes/macMini/thisisthepy` holds several repositories that are meant to compose into one
-product. Until now none of them referenced the others in writing — this repository's `docs/roadmap/ROADMAP.md`
-mentions `pypackpack`, `toolchain`, `pythonx` and `chaquopy` exactly zero times — so this file
+product. Until now none of them referenced the others in writing, this repository's `docs/roadmap/ROADMAP.md`
+mentions `pypackpack`, `toolchain`, `pythonx` and `chaquopy` exactly zero times, so this file
 records the intended relationships, what each repository actually contains today, and what has to
 be built before the parts can meet.
 
@@ -26,7 +26,7 @@ than observed are marked as such.
     pythonx-compose      Compose bound into Python, so a UI can be written in Python.
 
     PyREPL               reference implementation for turning a Kotlin namespace into `.pyi` stubs,
-                         and — see below — the actual origin of `toolchain`.
+                         and, see below, the actual origin of `toolchain`.
 
 The division of labour that matters: **ppp owns the work, toolchain owns the Gradle vocabulary,
 this repository owns the language boundary.** A feature that acquires a Python distribution or
@@ -46,14 +46,14 @@ Working: `init`, `python use/list/find/install/uninstall`, `package add/remove/s
 `target list/add/remove`, per-package dependency operations with platform markers, and `build`
 driving Meson for C/C++.
 
-Placeholder — verified by line count, all two to four lines: the whole `bundle/` tree, the whole
+Placeholder, verified by line count, all two to four lines: the whole `bundle/` tree, the whole
 `deploy/` tree, every compile backend except Meson (Clang, MSVC, NDK, XCode, Emscripten, Cargo),
 and all of `compile/middleware/{external,transcompile,minification}`.
 
 It is already designed to be called from Gradle. `dependency/frontend/BaseInterface.kt` declares
 `enum FrontendType { CLI, GRADLE }` and `Gradle.kt` returns the same middleware the CLI uses. The
-stable surface is `dependency/middleware/BaseInterface.kt` — `initProject`, `addDependencies`,
-`syncDependencies`, `addTargets`, `installPythonVersion`, and so on — plus
+stable surface is `dependency/middleware/BaseInterface.kt`, `initProject`, `addDependencies`,
+`syncDependencies`, `addTargets`, `installPythonVersion`, and so on, plus
 `compile/middleware/BaseInterface.kt`'s `compile`.
 
 **But `packpack/build.gradle.kts` applies no `maven-publish` and declares no publication.** Nothing
@@ -65,23 +65,23 @@ cannot be implemented at all.
 A Kotlin Gradle plugin, id `org.thisisthepy.python.multiplatform`, about 1,240 lines. It registers
 a `python` extension and three tasks. What the tasks do today: copy a local folder into
 `src/main/assets/python`, copy `build/pythonLibraries` into `build/pythonBundle/libs`, zip that,
-and shell out `uv install -r` — which is not a valid uv command.
+and shell out `uv install -r`, which is not a valid uv command.
 
 **`toolchain` shares git history with `PyREPL`.** Commits `f806656`, `5f3f932`, `1b32d03`,
 `654ef7c` exist in both with identical hashes; `dba17dd` extracted PyREPL's meta-generation out of
 `app/build.gradle.kts` into `toolchain/.../meta/createMetaClass.kt`. So the pyi generator to study
-is already here, in a mutated form — see §4.
+is already here, in a mutated form, see §4.
 
 The target API is `(플러그인예시)build.gradle.kts` at the repo root: 276 lines describing
 `compileSdk`, per-platform declarations, `packaging { embedLevel, hotReload, codePush }`,
 `buildTypes { compileLevel }`, `projectFlavors`, `buildFeatures { metaclass, compose }`, and source
-sets carrying both `implementation("pyzmq")` and `integration("pycomposeui")` — the latter being a
+sets carrying both `implementation("pyzmq")` and `integration("pycomposeui")`, the latter being a
 Kotlin-dependent Python package that needs a `KLIBDEPENS` file in its wheel.
 
 Of that spec the DSL data classes exist for roughly 60%, and **none of `hotReload`, `codePush`,
 `buildTypes`, `projectFlavors`, `buildFeatures`, `metaDirs`, `libDirs` or `integration()` is read by
 any task.** `PythonPlugin.kt` consumes only `sourceSets.*.dependencies.implementations`.
-`dsl/PythonConfiguration.kt` is dead code — its extension is never registered.
+`dsl/PythonConfiguration.kt` is dead code, its extension is never registered.
 
 `toolchain/usage-example/` does not apply the plugin, has no `python { }` block, and is commented
 out of `settings.gradle.kts`. **There is currently no executable definition of the target API.**
@@ -96,7 +96,7 @@ with uv, crossenv and meson instead of kivy recipes.
 Two generations coexist, and the one the notebook demonstrates is in neither of them.
 
 `pythonx/compose/` is the chaquopy generation: a `Composable` decorator class, `ComposeApp`, and
-material3 wrappers — 37 files of which 28 are empty. It binds through `jclass(...)` and
+material3 wrappers, 37 files of which 28 are empty. It binds through `jclass(...)` and
 `from java import jclass`, and it reaches **AndroidX directly**:
 
     from androidx.compose.material3 import TextKt
@@ -121,7 +121,7 @@ The Kotlin-to-pyi converter lives inline in `app/build.gradle.kts`, 627 lines. I
 source set's resolved artifacts, reads the jars with **ASM** (not kotlinx-metadata), and writes one
 `__init__.pyi` per Java package under `src/<sourceSet>/generated/meta/`, with `...` bodies and a
 JNI-ish type map. It drops private members, `<init>`, `Companion`, and **any member whose name
-contains `-`** — that is, it discards the mangled ones rather than scanning for them. Collisions
+contains `-`**, that is, it discards the mangled ones rather than scanning for them. Collisions
 between `commonMain` and a platform source set are resolved by renaming both and re-exporting.
 
 It is stubs only; the runtime underneath is chaquopy `jclass`. Its purpose is IDE completion.
@@ -134,7 +134,7 @@ keep.**
 ### Not part of this chain
 
 `Gemstone` belongs to a different organisation and does not depend on any of these; its README says
-it is *scheduled* to adopt Python Multiplatform. `reference/` and `cpython/` are not repositories —
+it is *scheduled* to adopt Python Multiplatform. `reference/` and `cpython/` are not repositories,
 vendored material and prebuilt CPython artefacts.
 
 ---
@@ -143,7 +143,7 @@ vendored material and prebuilt CPython artefacts.
 
 `UI.ipynb` imports `pythonx.compose.runtime`, `pythonx.compose.material3`, `pythonx.compose.ui`
 and `pythonx.compose.layout`, and documents signatures like `Text(text, color, font_size)`,
-`Button(onclick, …)` — quoted as the notebook writes it; the 2024 library spells that parameter
+`Button(onclick, …)`, quoted as the notebook writes it; the 2024 library spells that parameter
 `on_click` (`docs/archive/pythonx-adapter-design.md` §3 measured both). Which Python spelling
 `pythonx` uses is pythonx-compose's decision: this repository's binder exposes the Kotlin name
 `onClick` and its Pythonic alias `on_click` on the Kotlin-named module, and renames no namespace
@@ -173,14 +173,14 @@ handling at all. Every widget in `pycomposeui` is `@Composable`. Nothing in `pyt
 leave chaquopy until this is designed. *(read from source; not runtime-verified.)* This is the
 smallest and most blocking item, and it is entirely inside this repository.
 
-> **Closed — see `docs/archive/pythonx-adapter-design.md` §5.6.** `Text('hi')` written in Python now draws
+> **Closed, see `docs/archive/pythonx-adapter-design.md` §5.6.** `Text('hi')` written in Python now draws
 > through the real `androidx.compose.material3.Text` (`:ksp-fixtures:compose`'s
 > `ComposableRenderTest`: 71 non-background pixels against 0 for an empty body). The paragraph above
 > is right that a *generated Kotlin* entry for a widget cannot compile, and that is not the route
 > taken: an artefact composable's call site is emitted as **bytecode**, with `$composer`, `$changed`
 > and `$default` exposed as ordinary slots, and the binding layer (`python_multiplatform.binding`,
 > `PythonxAdapter.kt`) computes the mask. `BindingPolicy` does now
-> have `@Composable` handling and what it does is **decline** — a composable in the consumer's *own
+> have `@Composable` handling and what it does is **decline**, a composable in the consumer's *own
 > source* has no compiled signature to call yet, which is a different problem from one in a jar.
 
 **2. `packpack` must be publishable.** One file. Without it the stated architecture is
@@ -193,7 +193,7 @@ this exists: generated modules are injected into `sys.modules` under their Kotli
 name. What is missing is a `sys.meta_path` finder so a name resolves on demand rather than only
 after an eager `install()`, the `pythonx` prefix, and generated `.pyi` beside it.
 
-> **Current (2026-10-03):** the finder exists — the binding layer `python_multiplatform.binding`
+> **Current (2026-10-03):** the finder exists, the binding layer `python_multiplatform.binding`
 > installs a `sys.meta_path` finder that makes Kotlin-named modules importable on demand
 > (`_Finder`/`_Loader` in `PythonxAdapter.kt`; SPEC U-8). The `pythonx` prefix is **not** this
 > repository's to provide: the binder creates no `pythonx` module, and `pythonx` is a real package in
@@ -224,9 +224,9 @@ This section documents the current state, language/build system/distribution art
 ### `PythonMultiplatform` (this repository)
 
 - **Observed Current State**:
-  - Embedded CPython FFI binder (`python-multiplatform/src/commonMain/kotlin/.../EmbedAPI.kt`, platform implementations in `EmbedAPI.desktop.kt`, `bindings.kt`, JNI/Panama/cinterop). **Correction, 2026-08-17: this line used to say "CPython 3.13" — stale.** `gradle.properties`'s `pythonVersion` (the single source of truth, read into `Versions.currentVersion` at `python-multiplatform/src/commonMain/kotlin/python/multiplatform/Versions.kt`) is `3.14.7`, and every platform's *observed runtime* agrees: desktop prints `runtime : 3.14.7` (`4ed98143:docs/roadmap/ROADMAP.md:2063`), Android prints `3.14.7` on both `pmp_api36` and `pmp_api26` (`4ed98143:docs/roadmap/ROADMAP.md:2073`), wasmJs prints `3.14.2` — its own, separately-pinned Emscripten build, not this line's concern (`docs/platforms/wasm-design.md`). See the version-mismatch check below.
+  - Embedded CPython FFI binder (`python-multiplatform/src/commonMain/kotlin/.../EmbedAPI.kt`, platform implementations in `EmbedAPI.desktop.kt`, `bindings.kt`, JNI/Panama/cinterop). **Correction, 2026-08-17: this line used to say "CPython 3.13", stale.** `gradle.properties`'s `pythonVersion` (the single source of truth, read into `Versions.currentVersion` at `python-multiplatform/src/commonMain/kotlin/python/multiplatform/Versions.kt`) is `3.14.7`, and every platform's *observed runtime* agrees: desktop prints `runtime : 3.14.7` (`4ed98143:docs/roadmap/ROADMAP.md:2063`), Android prints `3.14.7` on both `pmp_api36` and `pmp_api26` (`4ed98143:docs/roadmap/ROADMAP.md:2073`), wasmJs prints `3.14.2`, its own, separately-pinned Emscripten build, not this line's concern (`docs/platforms/wasm-design.md`). See the version-mismatch check below.
   - Kotlin object model hierarchy (`python-multiplatform/src/commonMain/kotlin/.../PyObject.kt` and wrappers).
-  - Code generators: KSP processor (`python-multiplatform-ksp/`) producing `FunctionTableFragment`s, and Gradle plugin (`python-multiplatform-gradle-plugin/src/main/kotlin/.../artifact/ArtifactScanner.kt`, `PythonArtifactBindingsTask.kt`; *corrected 2026-10-03 — there is no `ArtifactBindingGenerator.kt`*) scanning resolved dependency jars (ASM + `kotlin-metadata-jvm`) and klibs for `ArtifactTable` fragments, plus `.pyi` stubs under Kotlin module paths (`stubs/PythonStubsTask.kt`).
+  - Code generators: KSP processor (`python-multiplatform-ksp/`) producing `FunctionTableFragment`s, and Gradle plugin (`python-multiplatform-gradle-plugin/src/main/kotlin/.../artifact/ArtifactScanner.kt`, `PythonArtifactBindingsTask.kt`; *corrected 2026-10-03, there is no `ArtifactBindingGenerator.kt`*) scanning resolved dependency jars (ASM + `kotlin-metadata-jvm`) and klibs for `ArtifactTable` fragments, plus `.pyi` stubs under Kotlin module paths (`stubs/PythonStubsTask.kt`).
   - Multiplatform target support: Desktop JVM/Panama, Android JNI, iOS Native Cinterop, androidNativeArm64 (`:python-multiplatform:compileKotlinAndroidNativeArm64`).
   - CPython binary download and SHA-256 lockfile / Sigstore verification (`python-checksums.properties`, `python-multiplatform/build.gradle.kts`).
 - **Language / Build System / Distribution**:
@@ -237,19 +237,19 @@ This section documents the current state, language/build system/distribution art
   - Core language boundary and binder between Kotlin Multiplatform and CPython.
   - Manages low-level FFI, object reference handles, upcall/downcall function tables, GIL lifecycle, and proxy injection into CPython `sys.modules`.
 - **Gap to Goal** (status notes added 2026-10-03, read from code and SPEC, not re-run):
-  - `@Composable`-capable callable shape: `ExposedCallable` typed `(Array<Any?>) -> Any?` cannot invoke `@Composable` functions taking synthetic `$composer` / `$changed` parameters. Needs dedicated `CallableKind` or opt-in annotation handling. — *Closed on desktop by bytecode thunks (`ComposableThunks.kt`), SPEC B-6; Android, iOS and wasm planned (SPEC N-2).*
-  - Python-side `sys.meta_path` finder for lazy import resolution of Kotlin namespaces ~~(`pythonx.*` or FQCNs)~~ upon import. — *Exists for Kotlin FQNs in `python_multiplatform.binding` (SPEC U-8). `pythonx.*` is not the binder's to resolve (`AGENTS.md` §12.2).*
-  - Opaque Kotlin object round-tripping for Compose `Composer` (`HandleTable` and `ObjectReference` exist, but runtime hand-off to Python needs verification). — *Done on desktop: one hand-written `@Composable` pushes the live composer as a handle onto the binding layer's stack (`push_composer`), proven by the `ksp-fixtures/compose` render tests.*
-  - Lifetime and storage of Python callables passed into Kotlin across Compose recompositions (`content=lambda: ...`, `onClick=...`). — *Partly addressed: `PythonCallableScope` (`PythonCallables.kt`) holds the callables a composition hands to Kotlin and is closed by a Compose-side `RememberObserver` in `onForgotten`; several hand-written fixture wrappers (`pythonDraggable`, `pythonComposed`, the swipe/anchor wrappers) still leak their callbacks by design, pinned by `DraggableLeakTest`. Not verified here beyond reading the sources.*
+  - `@Composable`-capable callable shape: `ExposedCallable` typed `(Array<Any?>) -> Any?` cannot invoke `@Composable` functions taking synthetic `$composer` / `$changed` parameters. Needs dedicated `CallableKind` or opt-in annotation handling., *Closed on desktop by bytecode thunks (`ComposableThunks.kt`), SPEC B-6; Android, iOS and wasm planned (SPEC N-2).*
+  - Python-side `sys.meta_path` finder for lazy import resolution of Kotlin namespaces ~~(`pythonx.*` or FQCNs)~~ upon import., *Exists for Kotlin FQNs in `python_multiplatform.binding` (SPEC U-8). `pythonx.*` is not the binder's to resolve (`AGENTS.md` §12.2).*
+  - Opaque Kotlin object round-tripping for Compose `Composer` (`HandleTable` and `ObjectReference` exist, but runtime hand-off to Python needs verification)., *Done on desktop: one hand-written `@Composable` pushes the live composer as a handle onto the binding layer's stack (`push_composer`), proven by the `ksp-fixtures/compose` render tests.*
+  - Lifetime and storage of Python callables passed into Kotlin across Compose recompositions (`content=lambda: ...`, `onClick=...`)., *Partly addressed: `PythonCallableScope` (`PythonCallables.kt`) holds the callables a composition hands to Kotlin and is closed by a Compose-side `RememberObserver` in `onForgotten`; several hand-written fixture wrappers (`pythonDraggable`, `pythonComposed`, the swipe/anchor wrappers) still leak their callbacks by design, pinned by `DraggableLeakTest`. Not verified here beyond reading the sources.*
   - Retire `stagePythonHome` in favor of `pypackpack`'s Python distribution management.
   - Hand `stageWasmBrowserRuntime` logic to `toolchain`.
 - **Dependency Direction**:
   - `PythonMultiplatform` has no dependencies on other repos in the ecosystem.
   - `pythonx-compose` and consumer applications depend on `PythonMultiplatform` runtime and its Gradle/KSP bindings plugin.
 - **Unverified**:
-  - Behavior of WASM browser runtime under production web bundlers. (*2026-10-03:* the former `wasm-experiment/` is folded into the library — `wasmJsMain`/`wasmJsTest`, CPython built by `tools/wasm/build-cpython.sh` — commit `6e54f617`; the bundler question is unchanged.)
+  - Behavior of WASM browser runtime under production web bundlers. (*2026-10-03:* the former `wasm-experiment/` is folded into the library, `wasmJsMain`/`wasmJsTest`, CPython built by `tools/wasm/build-cpython.sh`, commit `6e54f617`; the bundler question is unchanged.)
 
-**Version check (2026-08-17): "3.14 runtime vs. 3.13 header, never checked" — could not find the
+**Version check (2026-08-17): "3.14 runtime vs. 3.13 header, never checked", could not find the
 sentence, checked the claim anyway.** The literal sentence was searched for across every `.md` file
 in this repository (`grep -rn` for Korean and English phrasings of "nobody/no one checked", "never
 verified", "mismatch", combined with "header"/"헤더" and "runtime"/"런타임") and in the git history
@@ -257,19 +257,19 @@ of this file; it does not appear anywhere, verbatim or paraphrased. The nearest 
 this section's own now-corrected "CPython 3.13" line above (stale since the version became
 configurable) and `4ed98143:docs/roadmap/ROADMAP.md:2033`, which already fixed a test fixture that hardcoded the string
 "CPython 3.13" while `pythonVersion` had moved to 3.14.7. Neither is the sentence quoted, and neither
-left the underlying question — do headers and runtime actually agree, per platform — checked. That
+left the underlying question, do headers and runtime actually agree, per platform, checked. That
 question was checked here, freshly, platform by platform:
 
 | platform | header source | runtime source | agree? | how checked |
 |---|---|---|---|---|
-| desktop | none — Panama binds by symbol name at runtime (`java.lang.foreign.Linker`/`SymbolLookup`), no C header is compiled against | `libpython3.14.dylib`/`.so`/`.dll` extracted from the `python-build-standalone` archive pinned to `pythonVersion` (`python-checksums.properties`: `macos-aarch64-3.14.7-20260807`, etc.) | n/a — no header exists to disagree with the runtime | read `build.gradle.kts`'s desktop `jvm()` block; no `cinterop`/`headers()` call anywhere in it; `4ed98143:docs/roadmap/ROADMAP.md:1034-1038` records the same conclusion independently |
-| iOS / androidNative (Kotlin/Native `cinterop`) | `$targetExtractDir/include/python$libVersion/Python.h` (Android) or the extracted `Python.xcframework/.../Headers` (iOS) — **read from the same extraction the runtime library comes from**, not from any vendored copy | same archive, same extraction, `libVersion`/`targetExtractDir` computed from the one `pythonVersion`/`libVersion` variables | **yes, by construction** — both paths are derived from the same Gradle variable, so they cannot independently drift for a given build | read `python-multiplatform/build.gradle.kts:1093-1128` (`targetIncludePath`, the `cinterops.create("python")` block); confirmed no `defFile`/hardcoded header path overrides it |
-| Android JNI (`artMain`, `jni_onload.def`) | none — hand-written `extern` prototypes in `jni_onload.def`, no `#include <Python.h>`, pointers passed as `jlong` | `libpython$libVersion.so` linked with `-lpython$libVersion` from the same extraction tree | n/a for headers; symbol-level agreement already checked by earlier work (`nm`/`objdump` against the shipped `.so`, cited in `docs/roadmap/ROADMAP.md` around the 3.15 migration) | read `python-multiplatform/src/artMain/cinterop/jni_onload.def` and its `build.gradle.kts` cinterop block (no `headers()`/`includeDirs()` call) |
-| wasmJs | Emscripten's own CPython 3.14.2 build, entirely separate toolchain (`docs/platforms/wasm-design.md`) | same 3.14.2 build (`Embedded CPython version: 3.14.2`, `docs/archive/wasm-design-experiment-log.md` "Building CPython 3.14.2 for Emscripten"; `runtime : 3.14.2` sample output, `4ed98143:docs/roadmap/ROADMAP.md:1488`) | yes, and deliberately a different minor-patch than the 3.14.7 native default — documented and reasoned about at length in `docs/platforms/wasm-design.md`, not an oversight |
+| desktop | none, Panama binds by symbol name at runtime (`java.lang.foreign.Linker`/`SymbolLookup`), no C header is compiled against | `libpython3.14.dylib`/`.so`/`.dll` extracted from the `python-build-standalone` archive pinned to `pythonVersion` (`python-checksums.properties`: `macos-aarch64-3.14.7-20260807`, etc.) | n/a, no header exists to disagree with the runtime | read `build.gradle.kts`'s desktop `jvm()` block; no `cinterop`/`headers()` call anywhere in it; `4ed98143:docs/roadmap/ROADMAP.md:1034-1038` records the same conclusion independently |
+| iOS / androidNative (Kotlin/Native `cinterop`) | `$targetExtractDir/include/python$libVersion/Python.h` (Android) or the extracted `Python.xcframework/.../Headers` (iOS), **read from the same extraction the runtime library comes from**, not from any vendored copy | same archive, same extraction, `libVersion`/`targetExtractDir` computed from the one `pythonVersion`/`libVersion` variables | **yes, by construction**, both paths are derived from the same Gradle variable, so they cannot independently drift for a given build | read `python-multiplatform/build.gradle.kts:1093-1128` (`targetIncludePath`, the `cinterops.create("python")` block); confirmed no `defFile`/hardcoded header path overrides it |
+| Android JNI (`artMain`, `jni_onload.def`) | none, hand-written `extern` prototypes in `jni_onload.def`, no `#include <Python.h>`, pointers passed as `jlong` | `libpython$libVersion.so` linked with `-lpython$libVersion` from the same extraction tree | n/a for headers; symbol-level agreement already checked by earlier work (`nm`/`objdump` against the shipped `.so`, cited in `docs/roadmap/ROADMAP.md` around the 3.15 migration) | read `python-multiplatform/src/artMain/cinterop/jni_onload.def` and its `build.gradle.kts` cinterop block (no `headers()`/`includeDirs()` call) |
+| wasmJs | Emscripten's own CPython 3.14.2 build, entirely separate toolchain (`docs/platforms/wasm-design.md`) | same 3.14.2 build (`Embedded CPython version: 3.14.2`, `docs/archive/wasm-design-experiment-log.md` "Building CPython 3.14.2 for Emscripten"; `runtime : 3.14.2` sample output, `4ed98143:docs/roadmap/ROADMAP.md:1488`) | yes, and deliberately a different minor-patch than the 3.14.7 native default, documented and reasoned about at length in `docs/platforms/wasm-design.md`, not an oversight |
 
 **What is genuinely stale, and does not affect any of the above:** two artefacts in this repository
 still carry CPython 3.13 and are not read by the default build. `python-multiplatform/src/nativeInterop/cinterop/include/patchlevel.h`
-is a vendored header tree whose `PY_VERSION` reads `"3.13.0+"` — `git log` shows it landed with
+is a vendored header tree whose `PY_VERSION` reads `"3.13.0+"`, `git log` shows it landed with
 `b184cba5` (pre-dates `pythonVersion` becoming a Gradle property) and `build.gradle.kts` never
 references `nativeInterop/cinterop/include` at all; cinterop reads headers from the version-keyed
 extraction tree instead (table above). `binary/` holds five committed CPython 3.13.0 archives from
@@ -278,12 +278,12 @@ special-cased branch `if (configuredPythonVersion == "3.13.0" && !pythonFreeThre
 `desktopJar` task (`build.gradle.kts:1049`), i.e. only if a consumer explicitly builds with
 `-PpythonVersion=3.13.0`. That legacy path has no `Py_LIMITED_API`/header dependency either (desktop
 never compiles against headers), so even under `-PpythonVersion=3.13.0` there is no header/runtime
-split — but `python-checksums.properties` has **no 3.13.0 entries for Android or iOS**, so that flag
+split, but `python-checksums.properties` has **no 3.13.0 entries for Android or iOS**, so that flag
 would fail checksum verification on those two targets rather than silently mixing versions; this was
 not run to confirm the failure mode, only the absence of pinned checksums.
 
 **Correction to the paragraph above, made while verifying it: the 3.13 headers are not inert.** They
-are not a *compiler* input — that part holds, `build.gradle.kts` never puts
+are not a *compiler* input, that part holds, `build.gradle.kts` never puts
 `nativeInterop/cinterop/include` on an include path. But two test suites read that directory as their
 source of truth about the C API: `EmbedApiSurfaceTest.kt:454` and
 `JniCallConventionClassificationTest.kt:628` both open `src/nativeInterop/cinterop/include` and
@@ -292,7 +292,7 @@ call-convention classification. So the one place in this repository where a 3.13
 runtime is the evidence layer, not the build: a function whose deprecation or signature changed in
 3.14 would be classified from 3.13's text and the tests would agree with themselves. This is the
 mismatch the check set out to look for, in the one shape nobody had looked at, and it is recorded
-rather than fixed here — refreshing the header tree is a separate change with its own verification.
+rather than fixed here, refreshing the header tree is a separate change with its own verification.
 
 **That separate change was made (2026-08-17), and it answered the open question: nothing this
 project uses moved between 3.13 and 3.14.** The vendored `include/` tree was replaced with the
@@ -322,7 +322,7 @@ VendoredHeaderVersionTest.kt`): it compares `patchlevel.h`'s `PY_MAJOR/MINOR/MIC
 `gradle.properties`'s `pythonVersion` and fails if they diverge, with a canary test so that a
 regex that stops matching fails loudly instead of making the comparison vacuous. It was watched
 failing on the pre-refresh tree (`expected:<3.1[4.7]> but was:<3.1[3.0]>`, sole failure in a
-469-test run) before it was trusted. It compares versions, not contents — deliberately, since a
+469-test run) before it was trusted. It compares versions, not contents, deliberately, since a
 content comparison would need the extraction present and so would be unavailable exactly when the
 extraction has not been run.
 
@@ -334,26 +334,26 @@ and no test; the runtime stdlib comes from the version-keyed extraction instead.
 them is a repository-size decision, not a correctness one, and is left open.
 
 **`Py_LIMITED_API` status, checked directly:** `grep -rn "Py_LIMITED_API"` across `.kts`/`.def` build
-files finds it only inside vendored CPython header guards (`#if defined(Py_LIMITED_API) ...`) — it is
+files finds it only inside vendored CPython header guards (`#if defined(Py_LIMITED_API) ...`), it is
 never passed as a compiler define anywhere (no `-DPy_LIMITED_API`, no `compilerOpts` setting it). This
 independently confirms `4ed98143:docs/roadmap/ROADMAP.md:1031-1038`'s own finding, reached from the free-threading
 investigation rather than this one: the project does **not** build against the Limited API / Stable
 ABI in the `Py_LIMITED_API`-macro sense. "abi3" as used elsewhere in this repository's docs means a
 self-imposed rule about which C API functions this project chooses to call (ones stable across
 versions), not a `Py_LIMITED_API` compilation mode. So the "Stable ABI permits a header/runtime minor
-mismatch" escape hatch the task brief raised does not apply here — but it is not needed, either,
+mismatch" escape hatch the task brief raised does not apply here, but it is not needed, either,
 because the table above shows headers and runtime are never independently sourced in the first place.
 
 **Residual risk, marked as such because it was not run:** the table above is a build-configuration
 argument (headers and runtime derive from one variable), corroborated by *observed* `sys.version`-
-equivalent output on desktop and Android and by an existing wasmJs run — not by a from-scratch build
+equivalent output on desktop and Android and by an existing wasmJs run, not by a from-scratch build
 of `compileKotlinIosSimulatorArm64`/`compileKotlinAndroidNativeArm64` performed in this pass (this
 check reused `docs/roadmap/ROADMAP.md`'s existing, dated build/test evidence rather than re-running Gradle). If a
 future change hardcodes a header path or a library name outside the `libVersion`/`targetIncludePath`
 variables audited above, this guarantee would silently stop holding; nothing currently tests for that
 kind of regression directly (the closest is the version-agnostic assertion in `Python3Test.kt`'s
 `versionReportsTheConfiguredRelease`, which catches a runtime drift but not a header-only one, since
-no target here has a runtime check *of the header's declared version* — the headers have no
+no target here has a runtime check *of the header's declared version*, the headers have no
 executable presence to assert against).
 
 **Issues (checked 2026-08-16):** the only open issue against this repository is
@@ -368,7 +368,7 @@ Cross-checked against code rather than assumed:
 - The "335/336/336/315" difference claim was incorrect. Commit `4ac2eca6` proved that `grep` counted
   the numbers wrong: Kotlin block comments nest, and each file carries superseded pre-migration drafts
   inside comments, so `grep` scanned them as live code. When counted with comment-aware scanning,
-  the difference between `expect` and `actual` members is **zero on every target** — it was empty before
+  the difference between `expect` and `actual` members is **zero on every target**, it was empty before
   the commit and remained empty after. The miscount pattern (grep unable to see block nesting) has
   recurred three times in this repository (`EmbedAPI` initial draft, two parser canaries); documenting
   this as a pattern is valuable to prevent it again. `EmbedAPI.wasmJs.kt` exists too (not one of the
@@ -377,7 +377,7 @@ Cross-checked against code rather than assumed:
   Rather than removing deprecated CPython APIs, the repository kept them and marked them `@Deprecated`
   in Kotlin: `PyEval_InitThreads` was removed (empty in CPython 3.9+), four functions kept marked
   `@Deprecated` without `ReplaceWith` (because exact replacements exist but blind swaps would be wrong
-  in ways the compiler cannot catch — three return borrowed vs. new references, one takes an unnormalized
+  in ways the compiler cannot catch, three return borrowed vs. new references, one takes an unnormalized
   triple), and three that CPython marks as "discouraged" (not deprecated) were left alone. Commit `4ac2eca6`
   adds a test that validates all three targets against a canonical set; the test passes at 466 cases
   across all five targets.
@@ -416,7 +416,7 @@ Cross-checked against code rather than assumed:
 
 **Issues (checked 2026-08-16):** two open issues,
 [`toolchain#2`](https://github.com/thisisthepy/toolchain/issues/2) ("[Todo] Kotlin Gradle Plugin and Build
-Tools" — a checklist, sub-issue `pypackpack#2`) and
+Tools", a checklist, sub-issue `pypackpack#2`) and
 [`toolchain#1`](https://github.com/thisisthepy/toolchain/issues/1) ("[Todo] Toolchain-lite for python-only
 users", parent `pypackpack#2`, one line: `tcl install pythonx-compose`). Full checklist-vs-code table is in
 §5c. Three corrections to the bullets above, found by reading the current tree (`git log --oneline -12`
@@ -425,7 +425,7 @@ runs through `fb1dba7`, `30a064c`, `f7008eb`) rather than by re-deriving them:
 - **The `createMetaClass.kt` generator this file described above no longer exists.** `git log` shows it
   deleted in `30a064c` ("Feat: Open the packagePython chain, delegate dependency install, and delete the
   meta generator"); `find . -iname "createMetaClass*"` in the working tree returns nothing. The "Observed
-  Current State" bullet above describing it is stale as of that commit — left as written per this
+  Current State" bullet above describing it is stale as of that commit, left as written per this
   repository's convention of not erasing superseded claims, corrected here instead.
 - **"Delete redundant tasks" (this file's own gap item) did not happen by deletion.** `InstallDependenciesTask`,
   `BuildPythonArtifactTask` and `AssemblePythonPackageTask` all still exist, under the same names. What
@@ -436,10 +436,10 @@ runs through `fb1dba7`, `30a064c`, `f7008eb`) rather than by re-deriving them:
   copy-to-`src/main/assets/python`-then-zip step that lived inline in `PythonPlugin.kt`'s `afterEvaluate`
   was deleted (that part of the gap item is accurate), but the task classes were rewired, not removed.
 - **"Wire up DSL" is now partially wrong.** `integration()` and `buildTypes` (`debug`/`release` selection
-  via `-Ppython.buildType`) are wired as of `fb1dba7` and an earlier commit respectively — confirmed by
+  via `-Ppython.buildType`) are wired as of `fb1dba7` and an earlier commit respectively, confirmed by
   reading `PythonPlugin.kt`'s `collectInstallDependencies` (folds `implementations + integrations`) and
   `resolveActiveBuildType`. `hotReload`, `codePush`, `buildFeatures` (`metaclass`/`compose`), `metaDirs`,
-  `libDirs` and per-variant `platforms` (e.g. Android min-SDK) remain unwired — but `fb1dba7`'s commit
+  `libDirs` and per-variant `platforms` (e.g. Android min-SDK) remain unwired, but `fb1dba7`'s commit
   message states this was tested, not assumed: registering `PythonConfiguration.kt`'s extension was tried
   and confirmed to compile and do nothing (`usage-example` never imports the DSL package that would reach
   it), and the rest have no corresponding concept in `pypackpack` to bind to yet. `PythonConfiguration.kt`
@@ -476,7 +476,7 @@ runs through `fb1dba7`, `30a064c`, `f7008eb`) rather than by re-deriving them:
 - **Unverified**:
   - Wheel patch generation (`WheelPatchBundler.kt`) and incremental upload logic (placeholder files only).
 
-**Issues (checked 2026-08-16):** four open issues —
+**Issues (checked 2026-08-16):** four open issues,
 [`pypackpack#2`](https://github.com/thisisthepy/pypackpack/issues/2) ("[Todo] PyPackPack Initial
 Development", parent `toolchain#2`, subs `pypackpack#1`/`toolchain#1`),
 [`pypackpack#1`](https://github.com/thisisthepy/pypackpack/issues/1) ("[Todo] Python Dependency
@@ -485,21 +485,21 @@ Management", parent `pypackpack#2`, sub `pypackpack#5`),
 in uv with Platform Markers", help wanted, a how-to guide rather than a checklist), and
 [`pypackpack#12`](https://github.com/thisisthepy/pypackpack/issues/12) ("Ambiguous file name due to
 duplicated name on entirely codebase", a naming-convention proposal). Full checklist-vs-code table in §5c.
-Several "Gap to Goal" items above are now stale — this repository moved fast in the last two days
-(`git log --oneline -12` runs `488bac0` back through `08353c7`, all dated 2026-08-15/16) — and their commit
+Several "Gap to Goal" items above are now stale, this repository moved fast in the last two days
+(`git log --oneline -12` runs `488bac0` back through `08353c7`, all dated 2026-08-15/16), and their commit
 messages are unusually explicit about what they do and do not close, so this agent read each rather than
 inferring from diff stats:
 
 - **"Publish to Maven" is done.** `d10ab76` ("Build: Publish packpack, so toolchain can finally depend on
   it") added `maven-publish` to `packpack/build.gradle.kts`; the commit message states
   `publishToMavenLocal` now produces `org.thisisthepy.python.multiplatform:packpack:0.1.0`. The one caveat
-  the same commit records — CLI dependencies (Clikt, Ktor, zstd) leaking onto a library consumer's
-  classpath because the CLI lived in the same module — was itself closed one commit later, `488bac0`
+  the same commit records, CLI dependencies (Clikt, Ktor, zstd) leaking onto a library consumer's
+  classpath because the CLI lived in the same module, was itself closed one commit later, `488bac0`
   ("Build: Split the CLI into its own module"): confirmed by `find . -iname BuildCommand.kt`, which now
   resolves under `cli/src/main/kotlin/.../cli/BuildCommand.kt`, not under `packpack/`.
 - **"Implement `bundle` stage" is partially done, more precisely than "all four bundlers are
   placeholders."** `8d7b4b4` ("Feat: Implement the resource bundle...") implemented `ResourceBundler.kt`
-  (310 lines, its own 328-line test file) — the one bundle type `python-multiplatform` and `toolchain`
+  (310 lines, its own 328-line test file), the one bundle type `python-multiplatform` and `toolchain`
   need per the commit message. `BinaryBundler.kt`, `FatWheelBundler.kt`, `SingleWheelBundler.kt` and
   `WheelPatchBundler.kt` are still placeholders (re-confirmed by this agent, unchanged). But
   `ResourceBundler` is not yet reachable from the CLI: `grep -n "ResourceBundler\|resource"
@@ -510,14 +510,14 @@ inferring from diff stats:
   Close the three known defects...") added a `registry.properties` file bridging `install`'s
   project-relative writes and `find`/`list`/`uninstall`'s `~/.pypackpack/python/<version>` reads. `docs/SPEC.md`
   confirms this in its `python install` section. The same section still lists "Final placement after
-  download/extraction is incomplete (marked `TODO` in code)" as an open limitation — the registry closes
+  download/extraction is incomplete (marked `TODO` in code)" as an open limitation, the registry closes
   the *lookup* mismatch, not this separate placement TODO.
 - **"Auto-install build tools" is done.** `isMesonInstalled()` used to be a stub returning `true`
   (per `8d7b4b4`'s commit message); `5de8656` made it probe `meson --version`/`ninja --version` for real
   and call `Meson.installMeson()` when the probe fails.
 - **"CLI pass-through flags" is done, not just started.** `5de8656`'s message states `add`/`remove`/
   `sync`/`tree` forward unrecognized flags in all three command shapes, verified through the middleware to
-  the per-target `uv` call — `docs/SPEC.md`'s dependency-management section documents the same allowlist
+  the per-target `uv` call, `docs/SPEC.md`'s dependency-management section documents the same allowlist
   (`parsePassthroughArgs` in `cli/CommandExtension.kt`) and a known ordering gotcha (`--target`'s greedy
   vararg swallows a passthrough flag placed after it).
 - **Non-Meson compile backends and bundlers remain placeholders, re-confirmed.** `Clang.kt`, `MSVC.kt`,
@@ -526,7 +526,7 @@ inferring from diff stats:
 - **`pypackpack#12`'s file-naming complaint is unresolved.** The suggested rename
   (`BaseInterface.kt`/`DefaultInterface.kt` duplicated across `dependency/`, `compile/backend/`,
   `compile/middleware/`, `bundle/`, `deploy/` → `FrontendInterface.kt`/`MiddlewareInterface.kt`/
-  `BackendInterface.kt`/`DefaultMiddleware.kt`/`DefaultBackend.kt`) has not been applied — `find . -iname
+  `BackendInterface.kt`/`DefaultMiddleware.kt`/`DefaultBackend.kt`) has not been applied, `find . -iname
   "*Interface*.kt"` still returns the ambiguous names the issue complains about, unchanged.
 - **`pypackpack#5`'s platform-marker guide describes something that already mostly works.** `MarkerPolicy`
   (`dependency/middleware/DefaultInterface.kt`) builds `platform_system == '...' and platform_machine ==
@@ -538,12 +538,12 @@ inferring from diff stats:
 - **`pypackpack#1`'s "Middleware Refactoring" item ("are `DevEnv`/`CrossEnv` redundant wrappers?") is
   still genuinely open**, not stale: reading `DevEnv.kt` now, its methods still follow "resolve project
   root → delegate to backend → print success/failure", i.e. still the shape the issue calls a simple
-  wrapper. `CrossEnv.kt` (552 lines) has grown well past that shape, though — asymmetric, unresolved by
+  wrapper. `CrossEnv.kt` (552 lines) has grown well past that shape, though, asymmetric, unresolved by
   this agent's reading, matches the issue's unchecked box.
-- **`pypackpack#1`'s "settings.gradle.kts — [ ] uv" item could not be resolved to a concrete claim.** The
+- **`pypackpack#1`'s "settings.gradle.kts, [ ] uv" item could not be resolved to a concrete claim.** The
   issue text is a single unexplained bullet with no elaboration. `settings.gradle.kts` today has no
   mention of `uv` (checked directly); whether that is the intended scope of the checkbox, this agent could
-  not determine from the issue alone — left open rather than guessed.
+  not determine from the issue alone, left open rather than guessed.
 
 ---
 
@@ -575,7 +575,7 @@ inferring from diff stats:
   - Full hot-reload integration with Jupyter notebook server outside `UI.ipynb` static cells.
 
 **Issues (checked 2026-08-16):** `gh issue list --repo thisisthepy/pythonx-compose --state open` returns
-nothing. There is no issue tracker source for this repository's gap list — everything in "Gap to Goal"
+nothing. There is no issue tracker source for this repository's gap list, everything in "Gap to Goal"
 above is this document's own inference from reading the code, not sourced from an issue. Flagged here so
 it is not mistaken for the issue-backed items in the other three repos.
 
@@ -591,13 +591,13 @@ it is not mistaken for the issue-backed items in the other three repos.
 - **Language / Build System / Distribution**:
   - Pure Python (3.9+).
   - `setup.py` (package name `toolchain`, version `3.11.0.1`).
-  - PyPI package / Python CLI tool (`pip install git+https://...`).
+  - PyPI package / Python CLI tool (`uv tool install git+https://...`).
 - **Goal in Ecosystem**:
   - **Legacy reference implementation only.**
   - Kept for historical reference to understand pre-2024 CPython cross-compilation and recipe management.
   - Replaced entirely by `pypackpack` (cross-compilation and packaging in Kotlin via `uv`/`crossenv`/`meson`) and `toolchain` (Gradle plugin interface).
 - **Gap to Goal**:
-  - Deprecated/superseded. No active development or gap to close — retained for historical reference only.
+  - Deprecated/superseded. No active development or gap to close, retained for historical reference only.
 - **Dependency Direction**:
   - None. Independent legacy Python CLI tool.
 - **Unverified**:
@@ -605,7 +605,7 @@ it is not mistaken for the issue-backed items in the other three repos.
 
 ---
 
-## 5b. The Python import surface — decided
+## 5b. The Python import surface, decided
 
 Four questions were open about what Python code should look like. They are settled.
 
@@ -620,8 +620,8 @@ ordinary jar in that set, so it is covered like anything else.
 The two producers are therefore split by *what they look at*, not by whether something is
 reachable:
 
-    KSP                 the consumer's own source — declarations it can see being compiled
-    artefact walker     everything the build resolves — third-party jars, AndroidX included
+    KSP                 the consumer's own source, declarations it can see being compiled
+    artefact walker     everything the build resolves, third-party jars, AndroidX included
 
 Both run at build time under the same applied plugin. An earlier draft of this file claimed
 AndroidX could never be reached because KSP does not see it; that conflated one producer's limit
@@ -629,10 +629,10 @@ with the system's.
 
 What genuinely differs per platform is what a *jar* means. On JVM and Android the artefacts are
 jars and the walker applies directly. On iOS, androidNative and wasm the artefacts are klibs, and
-whether the same walk is possible there — and what a Kotlin declaration from a klib can be bound
-to at runtime with no JVM underneath — is the open question, not AndroidX.
+whether the same walk is possible there, and what a Kotlin declaration from a klib can be bound
+to at runtime with no JVM underneath, is the open question, not AndroidX.
 
-**Update — the walker now exists on one path, and both of those questions have answers.**
+**Update, the walker now exists on one path, and both of those questions have answers.**
 `python-multiplatform-gradle-plugin` gained `generatePythonArtifactBindings`, and
 `ksp-fixtures/artifact` carries a resolved `junit:junit:4.13.2` through ASM, a generated
 `FunctionTableFragment`, `UpcallTable` and `PythonProxySource` to
@@ -640,7 +640,7 @@ to at runtime with no JVM underneath — is the open question, not AndroidX.
 things in it change what this section says:
 
 - **The walker's fragments are a second aggregator (`ArtifactTable`), not additions to KSP's
-  `FunctionTable`.** One `UpcallTable`, one fragment interface, one Python namespace — but
+  `FunctionTable`.** One `UpcallTable`, one fragment interface, one Python namespace, but
   `FunctionTable` keeps meaning "every module in this graph compiled with the processor", which is
   what `ksp-fixtures/app` asserts and what a consumer's own table should not silently outgrow.
   Install site: `UpcallTable.install(FunctionTable.fragments + ArtifactTable.fragments)`.
@@ -649,7 +649,7 @@ things in it change what this section says:
   (`kotlin/text/StringsKt__IndentKt`) behind a facade Kotlin cannot name, and its extension receiver
   is indistinguishable from an ordinary parameter in bytecode. The `@Metadata` *kind* is readable
   with ASM; the payload that carries the Kotlin names is `d1`/`d2` and needs `kotlin-metadata-jvm`.
-  So AndroidX is reachable, as this section says — one library short of it, not one design short.
+  So AndroidX is reachable, as this section says, one library short of it, not one design short.
 - **klib is the easier half, not the harder one.**
   `org.jetbrains.kotlin.library.abi.LibraryAbiReader`, already in the `kotlin-compiler-embeddable`
   this build pins, read `python-multiplatform-iosX64Main.klib` and returned 441 top-level
@@ -660,17 +660,17 @@ things in it change what this section says:
   is an ordinary Kotlin call with no reflection. ~~The open question that remains is not
   feasibility but cost: `@ExperimentalLibraryAbiReader`, and a ~60 MB compiler artefact on the
   plugin classpath versioned against the consumer's Kotlin rather than the plugin's.~~ **The cost
-  question is answered too, and not by shrinking it — by moving it off the plugin's classpath.**
+  question is answered too, and not by shrinking it, by moving it off the plugin's classpath.**
   ROADMAP §16e/16f: `KlibScanner` runs inside an isolated Gradle worker
   (`WorkerExecutor.scanKlibIsolated`) whose classpath is supplied per build rather than baked into
   the plugin jar, because calling it from the plugin's own classloader throws `NoSuchMethodError`
-  against a real consumer's `kotlin-util-klib` — a correctness fix that also happens to keep the
+  against a real consumer's `kotlin-util-klib`, a correctness fix that also happens to keep the
   ~60 MB artefact off a build that never walks a klib. `PythonArtifactBindingsTask` is wired to it
   and covered by `KlibScannerTest` against two real klibs.
 
 **Dynamic binding is a removed option, not a missing one.** The 2024 design document
-(*PyComposeUI*, the open-source contest report) specifies a dynamic binder — Java/Kotlin
-Reflection on the JVM target, `ctypes` and `pyobjc` on Kotlin/Native — with a generated meta
+(*PyComposeUI*, the open-source contest report) specifies a dynamic binder, Java/Kotlin
+Reflection on the JVM target, `ctypes` and `pyobjc` on Kotlin/Native, with a generated meta
 package existing only so an IDE can infer types against it. That is history. The binder was built
 statically instead, and the reason is the same one §7 records for choosing a build-time table:
 a GraalVM native image is a closed world and Kotlin/Native has no reflection, so a name that only
@@ -684,19 +684,19 @@ static.
 
 **`pythonx.*` is ours.** Whatever we wrap or add lives under that prefix. Kotlin fully-qualified
 names point at the original; `pythonx` points at our Pythonic layer. The two namespaces do not mix.
-*(2026-10-03: "ours" means the ecosystem's — `pythonx` is a real package in pythonx-compose; this
+*(2026-10-03: "ours" means the ecosystem's, `pythonx` is a real package in pythonx-compose; this
 repository's binder creates no `pythonx` module and renames no namespace, `AGENTS.md` §12.1–12.2; the
 snake_case aliases it serves live on the Kotlin-named modules, SPEC U-12.)*
 
 **The wrapping happens in Python, not in Kotlin.** `pythonx.compose.material3` is Python code that
 uses the generated `androidx.compose.material3` bindings and presents a Pythonic API over them.
-There is no hand-written Kotlin wrapper module in between — that is what the existing
+There is no hand-written Kotlin wrapper module in between, that is what the existing
 `io.github.thisisthepy.pycomposeui` `RuntimeKt` and `Runtime_androidKt` are, and they are the shape
 being moved away from.
 
 This settles a question that otherwise looks hard. A `@Composable` function is, after compilation,
 an ordinary function taking `$composer` and `$changed`; a binding generated from the artefact
-exposes that signature as it is, and the Python wrapper passes the composer as a value — which is
+exposes that signature as it is, and the Python wrapper passes the composer as a value, which is
 what `pythonx-compose`'s `Composable` class already does. So nothing on the Kotlin side needs a
 `@Composable` callable type, and the upcall trampolines do not have to preserve a `@Composable`
 context.
@@ -705,8 +705,8 @@ context.
 for every Composable is the cost that made the existing `pythonx-compose` 37 files of which 28 are
 empty. The conversions are rules, not per-function decisions: a Pythonic name maps to the original,
 the composer and change flags are threaded the same way every time, and a `content=` callable is
-adapted the same way every time. So the layer should resolve on demand — a module `__getattr__`
-that finds the corresponding binding, adapts it once and caches it — rather than enumerate.
+adapted the same way every time. So the layer should resolve on demand, a module `__getattr__`
+that finds the corresponding binding, adapts it once and caches it, rather than enumerate.
 
 That trades away IDE completion, which is exactly why stubs are generated from the same metadata.
 *(Corrected 2026-10-03:)* this repository's plugin generates stubs for the Kotlin-named modules,
@@ -716,19 +716,19 @@ under Kotlin names (SPEC B-7); the stubs that carry the Pythonic names and signa
 design that was removed from here).
 
 **`JClass`/`JavaClass`, `KClass`/`KotlinClass`, `ObjcClass` work only where the platform has the
-thing they name.** No stubs, no substitutes, no forced uniformity across targets — a target that
+thing they name.** No stubs, no substitutes, no forced uniformity across targets, a target that
 has no JVM has no `JClass`, and says so.
 
 **`.pyi` generation belongs to the Gradle plugin**, the way PyREPL did it: read the resolved
 artefacts at build time and emit stubs per source set. It is not a sibling of `PythonProxySource`,
 which fills `sys.modules` at runtime; these are different products for different consumers, one for
-the interpreter and one for the IDE. Long term that generator belongs to `toolchain` — see §5.
+the interpreter and one for the IDE. Long term that generator belongs to `toolchain`, see §5.
 
 ---
 
 ## 5c. Issue checklists against the code
 
-§5 was originally written by reading working copies, and it never opened an issue tracker — this
+§5 was originally written by reading working copies, and it never opened an issue tracker, this
 repository's own `docs/roadmap/ROADMAP.md` mentions the other repos zero times, and the same was true of GitHub issues.
 That is the gap this section closes. Issues read in full, 2026-08-16:
 
@@ -740,64 +740,64 @@ That is the gap this section closes. Issues read in full, 2026-08-16:
 `pythonx-compose` has none open. Seven issues came back across the other three repos, each read with
 `gh issue view <n> --repo <repo>`, then checked against the working copy (not against the issue's own
 description of itself). "✅ done" below means this agent found the corresponding code and, where the issue
-or a commit message made a narrower claim, checked that narrower claim too — not just that a file with a
+or a commit message made a narrower claim, checked that narrower claim too, not just that a file with a
 plausible name exists.
 
-### `toolchain#2` — "[Todo] Kotlin Gradle Plugin and Build Tools"
+### `toolchain#2`, "[Todo] Kotlin Gradle Plugin and Build Tools"
 
 | Checklist item | Issue's checkbox | Actual state (checked against code) |
 |---|---|---|
-| Create the basic structure of the plugin | ☑ checked | ✅ matches — `PythonPlugin.kt` registers the `python` extension and three tasks |
-| Python version setup → Version Enum (alpha, rc, normal) | ☐ unchecked | ❌ matches — `compileSdk` is a plain `String` in `DSLCore.kt`; no enum anywhere |
-| Build target platform setup → platform-specific min-SDK setting | ☐ unchecked | 🟡 partial — `AndroidPlatformExtension.androidSdk: Int` exists in `DSLPlatforms.kt` but no task reads it (per `fb1dba7`'s own commit message: "platforms has a partial hook... mapping them silently would be wrong") |
-| Build target platform setup → check Kotlin-side enabled build target | ☐ unchecked | ❌ matches — no code found that inspects which KMP targets are enabled |
-| Hot reload / Code Push → expose a direct run button | ☐ unchecked | ❌ matches — `HotReloadExtension`/`CodePushExtension` (`DSLPackaging.kt`) are pure data holders; `fb1dba7`: "hotReload and codePush have no backend concept in packpack" |
-| SourceSet setup → `implementation` | ☐ unchecked | ✅ **stale checkbox** — wired since before `fb1dba7`; `collectInstallDependencies` reads `implementations` |
-| SourceSet setup → `integration` | ☐ unchecked | ✅ **stale checkbox** — `fb1dba7` ("Feat: Make integration() install...") folds `integrations` into the same install list; it is treated identically to `implementation`, no `KLIBDEPENS` distinction (deliberately, per the same commit — nothing in `pypackpack` has that concept) |
-| SourceSet setup → etcs (src/resource path, sourceset naming) | ☐ unchecked | ❌ matches — `SourceSetConfig.srcDirs`/`metaDirs`/`libDirs` (`DSLBuild.kt`) accept values via DSL but nothing reads them (`fb1dba7`: "metaDirs and libDirs have nothing in the resource bundler to bind to") |
-| CompileLevel setup (debug/release, project flavors) | ☐ unchecked | 🟡 partial — `debug`/`release` selection via `resolveActiveBuildType`/`-Ppython.buildType` is wired; project flavors (`buildFeatures`) are not (`fb1dba7`: "buildFeatures has no consumer at all") |
-| Automate the build process and integrate with KMP | ☐ unchecked | 🟡 largely done, not fully end-to-end verified by this agent — `buildTask`→`installTask`→`packageTask` chain runs and delegates real work to `pypackpack`'s `ResourceBundler` (`30a064c`); this agent did not run `usage-example` to confirm a full build |
+| Create the basic structure of the plugin | ☑ checked | ✅ matches, `PythonPlugin.kt` registers the `python` extension and three tasks |
+| Python version setup → Version Enum (alpha, rc, normal) | ☐ unchecked | ❌ matches, `compileSdk` is a plain `String` in `DSLCore.kt`; no enum anywhere |
+| Build target platform setup → platform-specific min-SDK setting | ☐ unchecked | 🟡 partial, `AndroidPlatformExtension.androidSdk: Int` exists in `DSLPlatforms.kt` but no task reads it (per `fb1dba7`'s own commit message: "platforms has a partial hook... mapping them silently would be wrong") |
+| Build target platform setup → check Kotlin-side enabled build target | ☐ unchecked | ❌ matches, no code found that inspects which KMP targets are enabled |
+| Hot reload / Code Push → expose a direct run button | ☐ unchecked | ❌ matches, `HotReloadExtension`/`CodePushExtension` (`DSLPackaging.kt`) are pure data holders; `fb1dba7`: "hotReload and codePush have no backend concept in packpack" |
+| SourceSet setup → `implementation` | ☐ unchecked | ✅ **stale checkbox**, wired since before `fb1dba7`; `collectInstallDependencies` reads `implementations` |
+| SourceSet setup → `integration` | ☐ unchecked | ✅ **stale checkbox**, `fb1dba7` ("Feat: Make integration() install...") folds `integrations` into the same install list; it is treated identically to `implementation`, no `KLIBDEPENS` distinction (deliberately, per the same commit, nothing in `pypackpack` has that concept) |
+| SourceSet setup → etcs (src/resource path, sourceset naming) | ☐ unchecked | ❌ matches, `SourceSetConfig.srcDirs`/`metaDirs`/`libDirs` (`DSLBuild.kt`) accept values via DSL but nothing reads them (`fb1dba7`: "metaDirs and libDirs have nothing in the resource bundler to bind to") |
+| CompileLevel setup (debug/release, project flavors) | ☐ unchecked | 🟡 partial, `debug`/`release` selection via `resolveActiveBuildType`/`-Ppython.buildType` is wired; project flavors (`buildFeatures`) are not (`fb1dba7`: "buildFeatures has no consumer at all") |
+| Automate the build process and integrate with KMP | ☐ unchecked | 🟡 largely done, not fully end-to-end verified by this agent, `buildTask`→`installTask`→`packageTask` chain runs and delegates real work to `pypackpack`'s `ResourceBundler` (`30a064c`); this agent did not run `usage-example` to confirm a full build |
 
-### `toolchain#1` — "[Todo] Toolchain-lite for python-only users"
+### `toolchain#1`, "[Todo] Toolchain-lite for python-only users"
 
-One line, no checklist: `tcl install pythonx-compose`. ❌ Not started — `find . -iname "*tcl*" -o -iname
+One line, no checklist: `tcl install pythonx-compose`. ❌ Not started, `find . -iname "*tcl*" -o -iname
 "*lite*"` in the `toolchain` working copy (excluding `.git`/`build`) returns nothing.
 
-### `pypackpack#2` — "[Todo] PyPackPack Initial Development"
+### `pypackpack#2`, "[Todo] PyPackPack Initial Development"
 
 | Checklist item | Issue's checkbox | Actual state (checked against code) |
 |---|---|---|
-| Create the basic structure of the plugin | ☐ unchecked | (parent bullet, not independently checkable — see sub-items) |
-| Python version setup → Version Enum | ☐ unchecked | ❌ same as `toolchain#2` — no enum found in either repo |
+| Create the basic structure of the plugin | ☐ unchecked | (parent bullet, not independently checkable, see sub-items) |
+| Python version setup → Version Enum | ☐ unchecked | ❌ same as `toolchain#2`, no enum found in either repo |
 | Build target platform setup → platform-specific min-SDK | ☐ unchecked | ❌ not found in `pypackpack` |
-| Build target platform setup → check Kotlin-side enabled build target | ☑ checked | 🟡 not independently verified by this agent — no corroborating code found in the time available; recorded as unverified rather than disputed |
+| Build target platform setup → check Kotlin-side enabled build target | ☑ checked | 🟡 not independently verified by this agent, no corroborating code found in the time available; recorded as unverified rather than disputed |
 | Hot reload / Code Push → run button | ☐ unchecked | ❌ matches |
-| SourceSet setup → implementation (python-only) | ☐ unchecked | 🟡 the underlying dependency-add path exists (`DependencyBackend.addDependencies`), but this is `toolchain`'s DSL concept, not `pypackpack`'s — checkbox sits on the wrong side of the boundary the ecosystem doc draws in §1 |
-| SourceSet setup → integration (python+kotlin mixed) | ☐ unchecked | ❌ matches — no `KLIBDEPENS` handling anywhere in `pypackpack` (grepped, zero hits) |
-| External tool detection → Nuitka | ☐ unchecked | ❌ matches — `Nuitka.kt` is 4 lines |
-| External tool detection → Host Python | ☑ checked | ✅ matches — `python install` downloads a prebuilt CPython from `python-multiplatform`'s GitHub releases (`docs/SPEC.md`, confirmed) |
-| External tool detection → MSVC, Clang | ☐ unchecked | ❌ matches — both 4-line placeholders |
-| External tool detection → Poetry or UV | ☑ checked | ✅ matches — `dependency/backend/external/UV.kt` is a real, exercised integration |
-| External tool detection → Crossenv or equivalent | ☐ unchecked | 🟡 partial — `CrossEnv.kt` exists at 552 lines and is exercised by `add`/`sync`/`tree` per-target commands, but "creating a dedicated venv per target" is explicitly listed as not-yet-implemented in `docs/SPEC.md` |
-| Compilation modes → instant (pure python) | ☑ checked | 🟡 not verified as a selectable mode — `docs/SPEC.md` states the `--level` CLI flag is "accepted but ignored" for `build`, i.e. there's exactly one behavior today, which happens to look like `instant`, not a selection mechanism |
-| Compilation modes → bytecode/mixed/native | ☐ unchecked | ❌ matches — `docs/SPEC.md` lists all three as "Not yet implemented (target)" |
+| SourceSet setup → implementation (python-only) | ☐ unchecked | 🟡 the underlying dependency-add path exists (`DependencyBackend.addDependencies`), but this is `toolchain`'s DSL concept, not `pypackpack`'s, checkbox sits on the wrong side of the boundary the ecosystem doc draws in §1 |
+| SourceSet setup → integration (python+kotlin mixed) | ☐ unchecked | ❌ matches, no `KLIBDEPENS` handling anywhere in `pypackpack` (grepped, zero hits) |
+| External tool detection → Nuitka | ☐ unchecked | ❌ matches, `Nuitka.kt` is 4 lines |
+| External tool detection → Host Python | ☑ checked | ✅ matches, `python install` downloads a prebuilt CPython from `python-multiplatform`'s GitHub releases (`docs/SPEC.md`, confirmed) |
+| External tool detection → MSVC, Clang | ☐ unchecked | ❌ matches, both 4-line placeholders |
+| External tool detection → Poetry or UV | ☑ checked | ✅ matches, `dependency/backend/external/UV.kt` is a real, exercised integration |
+| External tool detection → Crossenv or equivalent | ☐ unchecked | 🟡 partial, `CrossEnv.kt` exists at 552 lines and is exercised by `add`/`sync`/`tree` per-target commands, but "creating a dedicated venv per target" is explicitly listed as not-yet-implemented in `docs/SPEC.md` |
+| Compilation modes → instant (pure python) | ☑ checked | 🟡 not verified as a selectable mode, `docs/SPEC.md` states the `--level` CLI flag is "accepted but ignored" for `build`, i.e. there's exactly one behavior today, which happens to look like `instant`, not a selection mechanism |
+| Compilation modes → bytecode/mixed/native | ☐ unchecked | ❌ matches, `docs/SPEC.md` lists all three as "Not yet implemented (target)" |
 | Build Tools → configure Nuitka | ☐ unchecked | ❌ matches |
 | Build Tools → compatibility testing with Android | ☐ unchecked | ❌ not found |
-| Build Tools → minification | ☐ unchecked | ❌ matches — `compile/middleware/minification/` has only the base interface |
+| Build Tools → minification | ☐ unchecked | ❌ matches, `compile/middleware/minification/` has only the base interface |
 
-### `pypackpack#1` — "[Todo] Python Dependency Management"
+### `pypackpack#1`, "[Todo] Python Dependency Management"
 
 | Checklist item | Issue's checkbox | Actual state (checked against code) |
 |---|---|---|
-| Handle `pyproject.toml` → lossless modification | ☑ checked | ✅ matches — `utils/toml/TomlEditor.kt` + `TomlValue.kt` exist and are exercised (SPEC.md's `target add/remove`, `package remove` sections describe editing specific keys in place) |
-| Fix `CrossEnv.kt` abstraction → encapsulate UV logic in backend | ☑ checked | ✅ plausible, not fully re-derived — `CrossEnv.kt`'s target-marker logic (`MarkerPolicy`) and per-target `uv` calls live in the middleware/backend layers this item describes; this agent did not diff against a pre-fix version to confirm the decoupling directly |
-| Middleware Refactoring → is `DevEnv`/`CrossEnv` still a redundant wrapper? | ☐ unchecked | ✅ matches, genuinely still open — `DevEnv.kt` (240 lines) still follows "resolve project root → delegate to backend → print result" for every method, the shape the issue questions. `CrossEnv.kt` (552 lines) has grown well past a simple wrapper, which is itself an argument the two are no longer symmetric — unresolved either way |
-| Target Platforms → research a cleaner architecture for platform-specific deps via UV | ☐ unchecked | 🟡 partial — `MarkerPolicy`/`Platforms.describeTarget` (`utils/Platforms.kt`) already implement a `platform_system`/`platform_machine` marker scheme and thread `--python-platform` through `tree`/`sync`, i.e. a pattern exists; whether it counts as the "research" this item asks for is a judgment call this agent did not make either way |
-| `settings.gradle.kts` → `uv` | ☐ unchecked | ❓ could not resolve — the issue gives no elaboration beyond the single word "uv"; `settings.gradle.kts` today has no `uv` reference at all, but this agent could not determine what behavior the checkbox is asking for, so this is left open rather than guessed |
+| Handle `pyproject.toml` → lossless modification | ☑ checked | ✅ matches, `utils/toml/TomlEditor.kt` + `TomlValue.kt` exist and are exercised (SPEC.md's `target add/remove`, `package remove` sections describe editing specific keys in place) |
+| Fix `CrossEnv.kt` abstraction → encapsulate UV logic in backend | ☑ checked | ✅ plausible, not fully re-derived, `CrossEnv.kt`'s target-marker logic (`MarkerPolicy`) and per-target `uv` calls live in the middleware/backend layers this item describes; this agent did not diff against a pre-fix version to confirm the decoupling directly |
+| Middleware Refactoring → is `DevEnv`/`CrossEnv` still a redundant wrapper? | ☐ unchecked | ✅ matches, genuinely still open, `DevEnv.kt` (240 lines) still follows "resolve project root → delegate to backend → print result" for every method, the shape the issue questions. `CrossEnv.kt` (552 lines) has grown well past a simple wrapper, which is itself an argument the two are no longer symmetric, unresolved either way |
+| Target Platforms → research a cleaner architecture for platform-specific deps via UV | ☐ unchecked | 🟡 partial, `MarkerPolicy`/`Platforms.describeTarget` (`utils/Platforms.kt`) already implement a `platform_system`/`platform_machine` marker scheme and thread `--python-platform` through `tree`/`sync`, i.e. a pattern exists; whether it counts as the "research" this item asks for is a judgment call this agent did not make either way |
+| `settings.gradle.kts` → `uv` | ☐ unchecked | ❓ could not resolve, the issue gives no elaboration beyond the single word "uv"; `settings.gradle.kts` today has no `uv` reference at all, but this agent could not determine what behavior the checkbox is asking for, so this is left open rather than guessed |
 
-### `pypackpack#5` — "Managing Multi-Platform Dependencies in uv with Platform Markers" (help wanted, guide not checklist)
+### `pypackpack#5`, "Managing Multi-Platform Dependencies in uv with Platform Markers" (help wanted, guide not checklist)
 
-Not a checklist — a how-to document proposing `platform_system`/`platform_machine` PEP 508 markers per
+Not a checklist, a how-to document proposing `platform_system`/`platform_machine` PEP 508 markers per
 target. 🟡 **largely already matches the shipped design**: `MarkerPolicy.markerForTarget` in
 `dependency/middleware/DefaultInterface.kt` builds exactly `platform_system == '...' and platform_machine
 == '...'`, and `--python-platform` is passed to `uv tree`/`uv add` per target. The one place code and guide
@@ -806,7 +806,7 @@ come back as `platform_machine`/`sys_platform` rather than `platform_system`/`pl
 breaks `remove --target`'s re-derived-marker matching for some dependencies. So the guide's approach is
 implemented, with one recorded, unfixed bug in marker-round-tripping.
 
-### `pypackpack#12` — "Ambiguous file name due to duplicated name on entirely codebase" (question, not checklist)
+### `pypackpack#12`, "Ambiguous file name due to duplicated name on entirely codebase" (question, not checklist)
 
 ❌ **Not addressed.** The issue proposes renaming `BaseInterface.kt`/`DefaultInterface.kt` (duplicated
 across `dependency/`, `compile/backend/`, `compile/middleware/`, `bundle/`, `deploy/`) to
@@ -814,7 +814,7 @@ across `dependency/`, `compile/backend/`, `compile/middleware/`, `bundle/`, `dep
 `DefaultBackend.kt`. `find . -iname "*Interface*.kt"` in the current tree still shows `BaseInterface.kt`
 and `DefaultInterface.kt` repeated in all five domains named in the issue, unchanged.
 
-### `python-multiplatform#4` — "Add Python/C API expect declaration reclassification and actual definitions"
+### `python-multiplatform#4`, "Add Python/C API expect declaration reclassification and actual definitions"
 
 No checklist, two prose tasks. ✅ **Closed** by commit `4ac2eca6` ("Fix: Remove the drafts stranded in
 comments, and reclassify what CPython deprecated"). The "20-member gap" this document had reported
@@ -836,13 +836,13 @@ each repository's block). Two kinds of mismatch, kept separate rather than merge
   `pypackpack#1`'s `DevEnv`/`CrossEnv` redundancy question and its unexplained `settings.gradle.kts`/`uv`
   item; `toolchain#2`'s Python-version-enum and Kotlin-target-detection sub-items; `pypackpack#2`'s
   compile-mode checklist (`instant`/`bytecode`/`mixed`/`native`) and Android-build-compatibility item.
-  These were not in this document before this pass — they are what "renders §5 incomplete" in the sense
+  These were not in this document before this pass, they are what "renders §5 incomplete" in the sense
   the task described, now folded into each repository's "Issues" note above rather than duplicated again
   here.
 - **In §5's original gap lists, absent from any issue**: `PythonMultiplatform`'s `@Composable`-callable-shape
-  gap (already closed per §4 item 1, and never was a `python-multiplatform` issue — it is `pythonx-compose`'s
+  gap (already closed per §4 item 1, and never was a `python-multiplatform` issue, it is `pythonx-compose`'s
   problem surfacing in this repo's code), its `sys.meta_path` lazy-import gap, and all of `pythonx-compose`'s
-  "Gap to Goal" list. These are this document's own judgment calls, not sourced from a tracker — flagged in
+  "Gap to Goal" list. These are this document's own judgment calls, not sourced from a tracker, flagged in
   the `pythonx-compose` "Issues" note above since that repository has zero open issues to source anything
   from.
 

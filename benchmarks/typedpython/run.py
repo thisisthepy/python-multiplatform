@@ -201,7 +201,7 @@ def measure(args: argparse.Namespace) -> int:
     print("|---|---|" + "---|" * len(COLUMNS))
     for name, row in results.items():
         cells = [f"{row[c]['median_s']:.3f} s" if isinstance(row.get(c), dict)
-                 else str(row.get(c, "—" if c == NOSLOTS else NOT_BUILT))
+                 else str(row.get(c, ", " if c == NOSLOTS else NOT_BUILT))
                  for c in COLUMNS]  # type: ignore[index]
         flag = "" if row["outputs_agree"] else " (OUTPUTS DIFFER)"
         print(f"| {name}{flag} | {row['size']} | " + " | ".join(cells) + " |")
@@ -270,7 +270,7 @@ def interleaved(args: argparse.Namespace) -> int:
     print("|---|---|---|---|---|")
     for name, r in results.items():
         if "skipped" in r:
-            print(f"| {name} | — | {r['skipped']} | | |")
+            print(f"| {name} | - | {r['skipped']} | | |")
             continue
         loads = [p["load"][0] for p in r["pairs"]]  # type: ignore[index]
         print(f"| {name} | {r['size']} | {r['median_ratio']:.1f}x | {r['min_ratio']:.1f}–{r['max_ratio']:.1f}x "

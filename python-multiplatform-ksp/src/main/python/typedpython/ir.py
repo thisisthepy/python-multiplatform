@@ -23,7 +23,7 @@ result:
 
 Safety (`verify.py`, maintainer decision 2026-10-03: "IR 단계에서 안전성을 증명하도록 해"). Before any
 C is generated, the verifier proves on the IR that the C will be memory-safe and keep the rules
-above; **a function it cannot prove is not compiled** — it stays interpreted and the reason is
+above; **a function it cannot prove is not compiled**, it stays interpreted and the reason is
 reported as a diagnostic. What it proves:
 
 - definite assignment: no local is read before it is assigned on every path;
@@ -108,20 +108,20 @@ class BinOp(Expr):
     inserts `ToFloat` for mixed int/float, as CPython converts the int).
 
     I64 (result I64, except TRUEDIV → F64):
-      ADD/SUB/MUL — checked; overflow → deopt.
-      FLOORDIV/MOD — Python floor semantics (result sign follows the divisor for MOD; the runtime
+      ADD/SUB/MUL, checked; overflow → deopt.
+      FLOORDIV/MOD, Python floor semantics (result sign follows the divisor for MOD; the runtime
         handles -2**63 % -1 == 0 without C's undefined behaviour); divisor 0
         → ZeroDivisionError with the running interpreter's message (3.13: "integer division or
-        modulo by zero" / "integer modulo by zero"; 3.14: "division by zero" for every case — the
+        modulo by zero" / "integer modulo by zero"; 3.14: "division by zero" for every case, the
         runtime selects by version and its differential tests pin both); -2**63 // -1 overflows →
         deopt. Every ZeroDivisionError/math-domain message below follows the same rule.
-      TRUEDIV — CPython rounds int/int correctly; when both |operands| <= 2**53 the C double
+      TRUEDIV, CPython rounds int/int correctly; when both |operands| <= 2**53 the C double
         division is exact-rounded too, otherwise → deopt. Divisor 0 → ZeroDivisionError("division
         by zero").
     F64:
-      ADD/SUB/MUL — IEEE, as CPython.
-      TRUEDIV — divisor 0.0 (either sign) → ZeroDivisionError("float division by zero").
-      FLOORDIV/MOD — CPython's float floor division and modulo (sign of divisor, `-0.0` cases),
+      ADD/SUB/MUL, IEEE, as CPython.
+      TRUEDIV, divisor 0.0 (either sign) → ZeroDivisionError("float division by zero").
+      FLOORDIV/MOD, CPython's float floor division and modulo (sign of divisor, `-0.0` cases),
         divisor 0.0 → ZeroDivisionError("float floor division by zero") / ("float modulo by
         zero").
     OBJ: CPython's generic operation on objects (PyNumber_*), never deopts.
@@ -164,7 +164,7 @@ class CompareKind(Enum):
 @dataclass(frozen=True)
 class Compare(Expr):
     """Result BOOL. Chains (`a < b < c`) are lowered by the front end into `And` with each middle
-    operand evaluated once (via a temporary). Mixed I64/F64 compares **exactly**, as CPython does —
+    operand evaluated once (via a temporary). Mixed I64/F64 compares **exactly**, as CPython does,
     not by converting the int to double (2**53+1 != float(2**53)). NaN compares as in IEEE."""
 
     op: CompareKind
@@ -247,14 +247,14 @@ class Call(Expr):
     exactly that class, so such a call counts as a node that can deopt: the caller is pure (and
     `may_deopt`), or the call is `redo`. A pure callee that uses a compiled class can also return the
     deopt signal with `may_deopt` False, when the class changed after init (N-11); an impure caller
-    then redoes that callee interpreted, for OBJ and I64 results as well — such a callee is pure and
+    then redoes that callee interpreted, for OBJ and I64 results as well, such a callee is pure and
     its I64 result is interval-proved, so the redone value is the same and fits."""
 
     function: str
     args: tuple[Expr, ...]
     # Set when an impure caller calls a may_deopt (therefore pure) callee: on a deopt inside the
-    # callee, only the callee is redone by its interpreted function — unobservable, because the
-    # callee is pure — and the caller continues. Allowed only for callees returning F64, BOOL or
+    # callee, only the callee is redone by its interpreted function, unobservable, because the
+    # callee is pure, and the caller continues. Allowed only for callees returning F64, BOOL or
     # NONE: an F64-typed IR expression is a Python float in CPython too (ints reach floats only
     # through explicit ToFloat or float arithmetic), so the redone result is exactly a float; an
     # I64 result could be a big int and is not allowed here.
@@ -274,7 +274,7 @@ class Global(Expr):
 
 @dataclass(frozen=True)
 class GetAttr(Expr):
-    """`obj.name` on an OBJ (PyObject_GetAttr — descriptors, properties and binder proxies' attribute
+    """`obj.name` on an OBJ (PyObject_GetAttr, descriptors, properties and binder proxies' attribute
     hooks run exactly as in CPython). Type OBJ. Makes the function impure: a property may have
     effects, so the call can never be redone."""
 
@@ -284,7 +284,7 @@ class GetAttr(Expr):
 
 @dataclass(frozen=True)
 class CallObject(Expr):
-    """Calling an OBJ callable — a binder Kotlin function or proxy method, any Python callable —
+    """Calling an OBJ callable, a binder Kotlin function or proxy method, any Python callable,
     with positional `args` and keyword arguments `kwnames` (the last len(kwnames) args are the
     keyword values, as in vectorcall). Arguments are OBJ (scalars arrive through Box). Type OBJ.
     Makes the function impure. This is the general path that keeps Kotlin interop available to
@@ -308,7 +308,7 @@ class CompareObj(Expr):
     """A comparison of two OBJ operands (a scalar side arrives through `Box`) **directly as a
     condition**: an If/While cond, or an And/Or operand when that And/Or is itself the condition.
     Semantics of `if a == b:` in CPython: the rich comparison runs, then the truth value of its
-    result — **without** PyObject_RichCompareBool's identity shortcut (a NaN float compared with
+    result, **without** PyObject_RichCompareBool's identity shortcut (a NaN float compared with
     itself is False in CPython's `if x == x`). Type BOOL.
     Anywhere the comparison's own result object would be kept (`x = a < b`, `r = c and a < b`,
     `not (a < b)`) it is not allowed, because that object need not be a bool."""
@@ -348,7 +348,7 @@ class CopyArray(Expr):
 
 @dataclass(frozen=True)
 class Tuple(Expr):
-    """`(a, b, ...)` of scalars/OBJs — a new tuple (type OBJ). Scalar elements arrive through Box."""
+    """`(a, b, ...)` of scalars/OBJs, a new tuple (type OBJ). Scalar elements arrive through Box."""
 
     elements: tuple[Expr, ...]
 
@@ -378,7 +378,7 @@ class IsExact(Expr):
 @dataclass(frozen=True)
 class CheckExact(Expr):
     """`obj` itself (type OBJ), after checking `type(obj) is C`; anything else → deopt. Because it
-    can deopt it is legal only in a pure function — the same rule as Unbox. It is the proof the
+    can deopt it is legal only in a pure function, the same rule as Unbox. It is the proof the
     verifier accepts for a field access the front end cannot guard with a dominating IsExact."""
 
     obj: Expr
@@ -393,7 +393,7 @@ class FieldGet(Expr):
     AttributeError for an unset slot. Runs no user code, so it is not an effect. Type OBJ.
     The class may change after init (a property replacing the field, `obj.__class__ = Other`): the
     back end re-checks `type(obj) is C` and C's version tag at the access, and otherwise does what
-    CPython does — `getattr(obj, field)` in an impure function, a deopt in a pure one (where running
+    CPython does, `getattr(obj, field)` in an impure function, a deopt in a pure one (where running
     user code could be repeated by a later deopt's redo). FieldSet likewise (setattr)."""
 
     obj: Expr
@@ -404,7 +404,7 @@ class FieldGet(Expr):
 @dataclass(frozen=True)
 class New(Expr):
     """`C(args)` for a compiled class whose `__init__` only assigns each slot once from its parameters
-    (ClassDecl.trivial_init): allocate with C's tp_alloc and fill the slots in __init__'s order —
+    (ClassDecl.trivial_init): allocate with C's tp_alloc and fill the slots in __init__'s order,
     the observable result of running that __init__. A fresh object is not an effect. Type OBJ; args
     are OBJ (scalars through Box). `C` is read as a module global before the args, as CPython's
     LOAD_GLOBAL is: if it is no longer the captured class, or the class changed (e.g. __init__), the
@@ -460,7 +460,7 @@ class StoreIndex(Stmt):
 
 @dataclass(frozen=True)
 class FieldSet(Stmt):
-    """`obj.field = value` on a proved-exact compiled class (as FieldGet). An effect — unless `obj` is
+    """`obj.field = value` on a proved-exact compiled class (as FieldGet). An effect, unless `obj` is
     a New made in this same function and not yet escaped (not assumed in M2b: always an effect)."""
 
     obj: Expr
@@ -492,7 +492,7 @@ class ForRange(Stmt):
     """`for var in range(start, stop, step)`: `step` is a non-zero I64 Const; `start`/`stop` are
     evaluated once before the loop, as range() does. `var` is I64 and is not assigned in the body
     (the front end checks), so it never overflows: it stays between start and stop. After the loop
-    `var` keeps its last value, and if the loop ran zero times it keeps its previous binding — the
+    `var` keeps its last value, and if the loop ran zero times it keeps its previous binding, the
     front end rejects reading it after the loop unless it was definitely assigned before."""
 
     var: str
@@ -538,7 +538,7 @@ class ArrayParam:
     the same list object (aliasing would make separate copies diverge). Then the elements are copied
     into a C array. The function body only indexes, stores into and takes `len` of it (no calls that
     could observe the list, no appends: the front end checks), so the list and the array cannot
-    diverge observably. On **every** exit — return, exception, or deopt — dirty elements are
+    diverge observably. On **every** exit, return, exception, or deopt, dirty elements are
     written back as new float/int objects before control leaves the function, so CPython's
     partial-update-then-raise behaviour is preserved, and a deopt redo starts from the same list
     state the interpreted function would see... which is only correct because a function with array
@@ -558,24 +558,24 @@ class Function:
     interpreted; `frontend` records why).
 
     Local arrays (fannkuch, M2): a local of an array type holds a native array the function owns,
-    created only by NewArray/CopyArray. It never escapes — used only by Index/StoreIndex/Len and
-    as a CopyArray source; never returned, passed, boxed or captured — so stores into it are not
+    created only by NewArray/CopyArray. It never escapes, used only by Index/StoreIndex/Len and
+    as a CopyArray source; never returned, passed, boxed or captured, so stores into it are not
     effects (a function whose only stores are into local arrays can be pure), and no list object
     ever exists for it. Reassigning the local frees the old array; every exit frees all of them.
     Its length never changes after creation, so a bounds proof against Len(local) holds.
 
-    `pure`: no effect outside its own locals — no stores into anything but locals, no CallObject,
+    `pure`: no effect outside its own locals, no stores into anything but locals, no CallObject,
     no GetAttr (a property can have effects), no Truth/CompareObj/ObjToFloat/OBJ BinOp (they run
     user methods), only `Call`s to pure functions.
 
     Kotlin interop (maintainer: compiled code must still talk to Kotlin freely): a function that
-    calls into the binder is impure, so its int arithmetic cannot use the deopting I64 path —
+    calls into the binder is impure, so its int arithmetic cannot use the deopting I64 path,
     unbounded ints there are OBJ (CPython's own int objects, PyNumber_*), while floats (F64 never
     deopts), bounded loop indices, and the loops around the calls are still native. Only a pure
     function may contain deopting nodes after entry.
 
     Entry guards are generated by the back end from the params: exact runtime type per scalar/array
-    param (`type(x) is float`, not isinstance — CPython would compute with the int or the subclass
+    param (`type(x) is float`, not isinstance, CPython would compute with the int or the subclass
     it was given), i64 range for I64, the ArrayParam checks. A failing guard → deopt (always safe:
     nothing has happened yet). Wrong arity or keyword use → deopt too, so CPython raises its own
     TypeError. A function returning a value must return on every path (no falling off the end).
@@ -591,8 +591,8 @@ class Function:
     source_line: int
     # Module globals of a scalar type read ONCE at entry, as part of the guards: each must be
     # exactly that type (else deopt, before any effect), and the body reads it as `Local(name)`.
-    # Legal only for a *closed* function — one that runs no user code (no GetAttr, CallObject,
-    # Truth, CompareObj, ObjToFloat, OBJ BinOp; Calls only to closed functions) — so nothing can
+    # Legal only for a *closed* function, one that runs no user code (no GetAttr, CallObject,
+    # Truth, CompareObj, ObjToFloat, OBJ BinOp; Calls only to closed functions), so nothing can
     # rebind the global between entry and use, and reading it once equals reading it at each use.
     entry_globals: tuple[Param, ...] = ()
 

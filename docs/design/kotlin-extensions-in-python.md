@@ -2,14 +2,14 @@
 
 Compose is the first library whose API this binder has to reach that is *mostly* extension
 functions over value-class parameters. `Modifier.padding(16.dp)` is the shape, and neither half of
-it — the extension receiver nor the `Dp` — survives into JVM bytecode as itself.
+it, the extension receiver nor the `Dp`, survives into JVM bytecode as itself.
 
 This file records what the Compose artefacts actually contain, what the artefact walker binds from
 them today, and what the Python surface should look like. Everything under "Measured" was counted
 from real jars on 2026-08-14 and the commands are reproducible from §1. Everything under a
 "Judged" heading is a decision, and the alternatives that were rejected are named.
 
-## Status — what this document has been overtaken by, and where
+## Status, what this document has been overtaken by, and where
 
 This file was written at commit `f378ce87` (2026-08-14 15:28). Two commits landed within the hour
 that invalidated parts of it. Nothing measured here has been deleted; each superseded claim is left
@@ -63,13 +63,13 @@ jars. Sanity check that the harness works: the same binary returns 9 entries fro
 **§3.2's re-measurement does not use this harness.** A standalone copy has to be re-copied every time
 the walker changes, and it was already stale by the time §3's zero was recorded. The replacement is
 `ArtifactScannerTest.composeModifierExtensionsSurviveBothGates`, which runs *the* `ArtifactScanner`
-against the same cached jars on every build — no copy, and no way for the number to go unrecounted.
+against the same cached jars on every build, no copy, and no way for the number to go unrecounted.
 It walks 6 of the 19 jars rather than all of them; §3.2 says which, and why the two counts are not
 comparable.
 
 ---
 
-## 2. Measured — the size of the surface
+## 2. Measured, the size of the surface
 
 ### 2.1 Overall
 
@@ -90,9 +90,9 @@ comparable.
 | … public | 251 | 252 |
 | … internal | 40 | 37 |
 | … private | 39 | 32 |
-| public **top-level** (the chainable API) | **177** | — |
-| … mangled | **52 (29.4%)** | — |
-| public **member** extensions (need a dispatch receiver) | 74, over 32 owner classes | — |
+| public **top-level** (the chainable API) | **177** | - |
+| … mangled | **52 (29.4%)** | - |
+| public **member** extensions (need a dispatch receiver) | 74, over 32 owner classes | - |
 
 The two ecosystems agree to within one function, so the numbers are a property of Compose and not
 of one packaging of it.
@@ -125,7 +125,7 @@ Metadata arity excludes the synthetic parameters; the JVM descriptor does not.
 low.** `docs/archive/pythonx-adapter-design.md` §5.2 found this by re-counting with `javap -p`; the count
 has since been reproduced a third time, independently, against the same 1.6.11 jars. What was
 missed is **`$default`**. The trailing JVM parameters of `Button` are `Composer, int, int` and of
-`Text-fLXpl1I` are `Composer, int, int, int` — `$composer`, one or two `$changed` masks, and a
+`Text-fLXpl1I` are `Composer, int, int, int`, `$composer`, one or two `$changed` masks, and a
 `$default` mask.
 
 `$default` is easy to miss because Compose does not carry it the way the rest of Kotlin does.
@@ -136,8 +136,8 @@ itself instead. Reproduce with:
     unzip -o -q "$GRADLE_CACHE/.../material3-desktop-1.6.11.jar" 'androidx/compose/material3/ButtonKt.class'
     javap -p androidx/compose/material3/ButtonKt.class
 
-The conclusion drawn from this table — *never derive arity from a descriptor; metadata arity is the
-source* (§4.6) — is unaffected, and the correction strengthens it: the error was made by counting
+The conclusion drawn from this table, *never derive arity from a descriptor; metadata arity is the
+source* (§4.6), is unaffected, and the correction strengthens it: the error was made by counting
 descriptors by hand, which is the exact failure the rule forbids a machine to make. The `+2/+3/+4/+5`
 distribution in §2.6 was **not** re-derived and may be shifted the same way; treat it as unconfirmed.
 
@@ -145,15 +145,15 @@ distribution in §2.6 was **not** re-derived and may be shifted the same way; tr
 `Button`, `Card`, `Column`, `Row` are not mangled because none of their parameters is.
 
 **`Text--4IGK_g` appears twice in the same class with different descriptors.** That is not an
-anomaly — across corpus A, **108 mangled JVM names are ambiguous within their own class**. The
+anomaly, across corpus A, **108 mangled JVM names are ambiguous within their own class**. The
 mangling suffix is a hash of the *value-class parameter signature only*, so it is shared by
 unrelated functions: `-3ABfNKs` is worn by `padding`, `size`, `width`, `height`, `requiredSize`,
 `requiredWidth`, `requiredHeight`, `times` and `surfaceColorAtElevation`, all of which take a
 single `Dp`; `-VpY3zN4` is worn by thirteen functions taking two `Dp`s.
 
 This retires an approach rather than complicating it. Any binder that *looks a function up by
-name* — Java reflection, a Python `__dict__` sweep, the 2024 `pythonx-compose` probe that scanned
-`ButtonKt.__dict__` for keys beginning `"Button-"` — cannot address a Compose function
+name*, Java reflection, a Python `__dict__` sweep, the 2024 `pythonx-compose` probe that scanned
+`ButtonKt.__dict__` for keys beginning `"Button-"`, cannot address a Compose function
 unambiguously even in principle. This binder does not look functions up by name: it emits Kotlin
 source that says `Modifier.padding(16.dp)` and lets `kotlinc` do the mangling. The mangled name
 never appears in anything we generate.
@@ -187,7 +187,7 @@ under raw-number coercion, is wrong twice over. `16.sp` produces a `TextUnit`, a
 
 The high word is the unit tag (`1` = Sp, `2` = Em, `0` = Unspecified) and the low word is the raw
 float bits. A raw Python `16` handed to a `TextUnit` parameter therefore has tag `0` and decodes
-as `TextUnit.Unspecified` — not "16 of the wrong unit", but *silently no value at all*.
+as `TextUnit.Unspecified`, not "16 of the wrong unit", but *silently no value at all*.
 
 Only **three** value classes in all of Compose wrap a `Float`: `Dp`, `text.style.BaselineShift`,
 and `LineHeightStyle.Alignment`. Ambiguity between float-shaped units is a non-problem; packing is
@@ -208,12 +208,12 @@ occurrence: `Dp` 56, `Role` 11, `Color` 8, `TextUnit` 4, `TransformOrigin` 4, `D
 `BlurredEdgeTreatment` 2, `MarqueeAnimationMode` 1, `CompositingStrategy` 1, `PointerEventType` 1.
 **`Dp` alone is 62% of all value-class parameter occurrences on `Modifier`.**
 
-### 2.5 Name collisions — far rarer than assumed, and the first count was wrong
+### 2.5 Name collisions, far rarer than assumed, and the first count was wrong
 
 Counted naively over *every* public extension function, 41 `(receiver, name)` pairs appear in more
 than one package, which would have made a "require qualification on collision" rule
-unaffordable. That count is an artefact. Most of it is **member** extension functions — `Dp.toPx`
-is declared inside the `Density` interface, `Modifier.align` inside `RowScope` — which metadata
+unaffordable. That count is an artefact. Most of it is **member** extension functions, `Dp.toPx`
+is declared inside the `Density` interface, `Modifier.align` inside `RowScope`, which metadata
 records again in every implementing class. They are not competing top-level declarations and
 Kotlin's import scope never sees them as such.
 
@@ -243,7 +243,7 @@ costs five names in the whole library.
 descriptor; matching on the substring `Composable` inflates this to 524 by catching
 `ComposableTarget` and friends). 183 are mangled.
 
-Every one of them gains synthetic JVM parameters — `$composer`, one or two `$changed` bitmasks,
+Every one of them gains synthetic JVM parameters, `$composer`, one or two `$changed` bitmasks,
 zero to two `$default` bitmasks:
 
     +2 params : 80      +3 params : 349      +4 params : 62      +5 params : 9
@@ -261,12 +261,12 @@ disjoint problems.
 
 ---
 
-## 3. Measured — what the artefact walker bound from Compose, and what it binds now
+## 3. Measured, what the artefact walker bound from Compose, and what it binds now
 
 **This section is kept as it was measured, because the zero is why the work that follows it
 happened.** It describes commit `f378ce87` (2026-08-14 15:28). Two gates are named in the funnel
 below and a third in §3.1; all three are gone, and §3.2 is the re-measurement. Read §3 and §3.1 as
-the diagnosis and §3.2 as the outcome — not as a description of the walker today.
+the diagnosis and §3.2 as the outcome, not as a description of the walker today.
 
 **Zero. From all 19 jars of corpus A, and all 19 of corpus B.**
 
@@ -291,12 +291,12 @@ Two independent gates each zero Compose on their own.
 
 **The metadata-kind gate.** A Kotlin top-level function compiles into a file facade (`k=2`) or a
 multi-file part (`k=5`), and the walker declines both because their JVM names are not names Kotlin
-can write. That drops **all 1,411 public top-level Compose functions**, mangled or not —
+can write. That drops **all 1,411 public top-level Compose functions**, mangled or not,
 `ButtonKt.Button` and `PaddingKt.padding` alike. The entire top-level Compose API is behind this
 one gate.
 
-> **Closed by `15fc5a62`, 25 minutes after this was written.** The gate was one line —
-> `kotlinMetadataKind(node)?.let { if (it != KOTLIN_KIND_CLASS) return emptyList() }` — and it is
+> **Closed by `15fc5a62`, 25 minutes after this was written.** The gate was one line,
+> `kotlinMetadataKind(node)?.let { if (it != KOTLIN_KIND_CLASS) return emptyList() }`, and it is
 > gone: `ArtifactScanner.scanClassNode`'s `when` now dispatches on the decoded
 > `KotlinClassMetadata`, with arms for `FileFacade` (`k=2`) and `MultiFileClassFacade` (`k=4`,
 > which fetches each part by name and reads the part's own `kmPackage`). The `KOTLIN_KIND_CLASS`
@@ -312,11 +312,11 @@ something that is not a primitive, `String`, `byte[]` or `void`.
 > `python.multiplatform.reflection.TypeTag.OBJECT` **already existed**, and so did the entire
 > runtime path behind it: `UpcallTrampoline.marshalResult` already put a returned Kotlin object into
 > `HandleTable` and handed Python the integer, and `toKotlinObject` already resolved it back. All of
-> that predates this document — it is checkable in the tree at `f378ce87`. What the *walker* lacked
+> that predates this document, it is checkable in the tree at `f378ce87`. What the *walker* lacked
 > was not a marshalling category but a **Kotlin type name to cast the handle to**, which a JVM
 > descriptor genuinely cannot supply (`Ljava/util/List;` has no Kotlin spelling Kotlin will accept
-> written out). `@Metadata`'s classifier *is* that name — `androidx/compose/ui/Modifier`, `/` for
-> `.` and nothing else to guess — so the object case lives in `resolveKotlinType`
+> written out). `@Metadata`'s classifier *is* that name, `androidx/compose/ui/Modifier`, `/` for
+> `.` and nothing else to guess, so the object case lives in `resolveKotlinType`
 > (`KotlinMetadata.kt`) and the descriptor-only `boundaryTypeOf` still has no `OBJECT` arm, on
 > purpose. The gate was real; "no boundary type exists" was not the reason it was shut.
 
@@ -324,7 +324,7 @@ something that is not a primitive, `String`, `byte[]` or `void`.
 it, but the 190 it lets through die at the next gate anyway. This matters for how the gap is
 described: the mangling filter is being replaced right now by metadata-driven understanding, and
 when it is gone the Compose number will still be zero until the facade gate and the type gate move
-too. The 52-of-177 mangling figure in §2.2 is therefore not a measure of what is unreachable — it
+too. The 52-of-177 mangling figure in §2.2 is therefore not a measure of what is unreachable, it
 is a measure of **how much surface the metadata work opens that a descriptor-only walker could
 never have named**.
 
@@ -351,22 +351,22 @@ that costs **33 of 130 names**, and the casualty list is the API's centre of gra
     scale scrollable selectable shadow size toggleable transformable triStateToggleable width
 
 Overload dispatch is a larger problem than name collision (§2.5: five cases) and is unsolved here.
-Python's own answer — one function that inspects its arguments — is available because the Python
+Python's own answer, one function that inspects its arguments, is available because the Python
 side is a dispatcher, not a one-to-one mirror; see §4.4.
 
-**Solved by `f455ef41` — by distinguishing, not by choosing.** The principle that made the drop-rule
+**Solved by `f455ef41`, by distinguishing, not by choosing.** The principle that made the drop-rule
 right survives intact and is worth restating, because it is what rules out the obvious fix: nothing
 may arbitrate. `org.junit.Assert.assertEquals` has eight bindable overloads and a sort order picks
 the deprecated `(double, double)` that always fails, so `assertEquals(3, 3)` from Python would
 silently call the one that cannot work. That is still refused.
 
 What the drop-rule did not have was a way to *tell the overloads apart*: with only JVM descriptors
-there is no Kotlin parameter type to name one by, and the JVM name cannot do it either — §2.3 counts
+there is no Kotlin parameter type to name one by, and the JVM name cannot do it either, §2.3 counts
 108 mangled JVM names that are ambiguous inside their own class. `@Metadata` supplies the declared
 Kotlin types, so `ArtifactScanner.disambiguateOverloads` now gives each member of a set a name of its
 own:
 
-- a group of **one** keeps the bare Kotlin name — always, so a bare name still means exactly one
+- a group of **one** keeps the bare Kotlin name, always, so a bare name still means exactly one
   declaration;
 - a group of more than one gets `name__<types>`, under the **first of three schemes that separates
   the group**: the simple names of the declared value parameters; then the receiver joined to them
@@ -375,7 +375,7 @@ own:
 - a group **no scheme separates** is still dropped. The old rule survives as the floor.
 
 `padding` comes out as `padding__Dp`, `padding__Dp_Dp`, `padding__Dp_Dp_Dp_Dp` and
-`padding__PaddingValues` — pinned by
+`padding__PaddingValues`, pinned by
 `ArtifactScannerTest.composeModifierExtensionsSurviveBothGates`. The receiver is left out of the
 suffix unless it is what separates the group, since spelling every `Modifier` extension
 `padding__Modifier_Dp` restates the one parameter the reader already knows from where the name is
@@ -388,7 +388,7 @@ because an overload set is a property of a *package* and Kotlin lets one live in
 `ClassNode`s, one Kotlin name, invisible to a per-class grouping, which would have emitted both under
 the same table key.
 
-The dispatcher §4.4 asks for is still wanted and still cannot live in the table — `UpcallTable` is
+The dispatcher §4.4 asks for is still wanted and still cannot live in the table, `UpcallTable` is
 keyed by name and `ExposedCallable` carries one fixed arity, so one name reaches one signature by
 construction. ~~It belongs in `pythonx` (`docs/archive/pythonx-adapter-design.md` §4.1) and selects
 among these names.~~ **Current:** it lives in this repository's binding layer,
@@ -398,7 +398,7 @@ selects among these names; the table's job is still to make that choice *possibl
 ### 3.2 Re-measured at `958c0082`: 314
 
 The successor to the zero above, out of the same Gradle cache and the same
-`org.jetbrains.compose.*` 1.6.11 release — though over a subset of the jars, which is why the counts
+`org.jetbrains.compose.*` 1.6.11 release, though over a subset of the jars, which is why the counts
 below are not the ones in §2 with different values:
 
     compose: 314 declarations bound, 104 of them Modifier extensions
@@ -414,15 +414,15 @@ here: 18 tests, 0 failures.
 
 | | §2 (corpus A) | §3.2 |
 |---|---|---|
-| jars walked | 19, every `org.jetbrains.compose.*` the cache held | **6** — `foundation-layout`, `ui-unit`, `foundation`, `ui`, `material`, `material3`, all 1.6.11 desktop |
-| jars on the resolution classpath | — | 15 (the six plus `ui-geometry`, `ui-graphics`, `ui-text`, `ui-util`, `runtime`, `runtime-saveable`, `animation-core`, `collection`, `annotation`, and `kotlin-stdlib`) |
+| jars walked | 19, every `org.jetbrains.compose.*` the cache held | **6**, `foundation-layout`, `ui-unit`, `foundation`, `ui`, `material`, `material3`, all 1.6.11 desktop |
+| jars on the resolution classpath | - | 15 (the six plus `ui-geometry`, `ui-graphics`, `ui-text`, `ui-util`, `runtime`, `runtime-saveable`, `animation-core`, `collection`, `annotation`, and `kotlin-stdlib`) |
 | package filter | none | `androidx.compose` |
 | unit counted | **declarations**, and for `Modifier` the 177 public top-level extensions over 130 distinct Kotlin names | **bindings**, after overload disambiguation |
 
 So the 104 and the 177 are not the same quantity twice. `padding` alone contributes **four** entries
 to the 104 and **four** declarations to the 177 but only **one** name to the 130; and the six jars
-are a subset of the nineteen. The declined count is in a third unit again — 45 distinct Kotlin
-*names*, deduplicated — so 104 + 45 sums to nothing meaningful. **The number of distinct Kotlin
+are a subset of the nineteen. The declined count is in a third unit again, 45 distinct Kotlin
+*names*, deduplicated, so 104 + 45 sums to nothing meaningful. **The number of distinct Kotlin
 names among the 104 bindings was not measured**, and no comparison against 130 is claimed here.
 
 The classpath is separate from the walked set for a reason §1's tooling did not have to face:
@@ -431,8 +431,8 @@ so a value class or an extension receiver has to be resolvable from jars that ar
 being bound.
 
 **What the remaining 45 are, counted rather than asserted.** 43 of them declare a function-typed
-parameter. A Python callable cannot become a Kotlin `FunctionN` at this boundary —
-`UpcallTrampoline.toKotlinObject` would hand the cast a `PyObject` — so binding them would produce
+parameter. A Python callable cannot become a Kotlin `FunctionN` at this boundary,
+`UpcallTrampoline.toKotlinObject` would hand the cast a `PyObject`, so binding them would produce
 entries that always fail, and declining them is correct rather than pending. §2.2's "66 of the 177
 take at least one lambda" is the same fact seen from the other side. This is the honest remaining
 limit on the `Modifier` chain and it is not a metadata problem.
@@ -444,7 +444,7 @@ limit on the `Modifier` chain and it is not a metadata problem.
 
 The chain itself runs. `WalkedArtifactComposeModifierTest` assembles
 `Modifier.padding(16.dp).size(24.dp)` **from Python**, out of Compose's own jars, under Compose's own
-names — no `Composer` anywhere, because §2.6 already established that a `Modifier` extension is not a
+names, no `Composer` anywhere, because §2.6 already established that a `Modifier` extension is not a
 composable. What Python holds is an integer handle per link, and **nothing releases them**: a bare
 handle returned from a `CallableKind.FUNCTION` reaches Python as an `int`, which has nothing to hang
 a finaliser off. Three handles leak per run of that test, deliberately, because owning them is what
@@ -453,13 +453,13 @@ receiver proxies, `_proxy_type` in `PythonxAdapter.kt`, SPEC U-7.)*
 
 ---
 
-## 4. Judged — the Python surface
+## 4. Judged, the Python surface
 
 ### 4.1 An extension function becomes a method on its receiver's proxy
 
 Adopted, as proposed. Chaining then costs nothing: each of the 177 `Modifier` extensions returns
 `Modifier`, so `Modifier.padding(16).background(...)` is ordinary Python method chaining with no
-combinator machinery. This is what the 2024 attempt never reached —
+combinator machinery. This is what the 2024 attempt never reached,
 `pythonx/compose/ui/modifier.py` is a copy of the Button wrapper in which `padding()` composes
 nothing and `fill_max_size()` returns `self`.
 
@@ -482,7 +482,7 @@ a real loss of fidelity and it is confined to 20 functions. (This file first wro
 
 `Modifier` in Kotlin is an interface, and `Modifier` as an *expression* is `Modifier.Companion`.
 The relevant observation is that **`Modifier$Companion` implements `androidx.compose.ui.Modifier`**
-— it is an instance of the very type it is the companion of, and it is the empty modifier that
+it is an instance of the very type it is the companion of, and it is the empty modifier that
 starts every chain.
 
 So Python does not need to reconcile two things. It needs one class whose *class object* also
@@ -508,7 +508,7 @@ spellings work, and the generated `.pyi` can state all three (§4.5).
 > `type.__getattribute__`'s documented order: a metaclass attribute wins only if it is a **data**
 > descriptor, and a plain `def` on a metaclass is a non-data descriptor, so the class's own MRO is
 > searched first. `Modifier.padding(16)` binds `16` to `self` and raises `TypeError`. It raises only
-> because the two arities differ by one — for a pair that happened to match it would bind *silently*,
+> because the two arities differ by one, for a pair that happened to match it would bind *silently*,
 > which is the worse failure.
 >
 > **In mypy**, the same stub gives ten errors in twenty lines; every class-object spelling fails and
@@ -516,15 +516,15 @@ spellings work, and the generated `.pyi` can state all three (§4.5).
 >
 > Two fixes work at run time and neither fixes the checker: a `@property` on the metaclass *is* a
 > data descriptor and does win, as does a hybrid descriptor in the class body with no metaclass at
-> all — but **mypy does not model metaclass data-descriptor precedence** and still resolves the
+> all, but **mypy does not model metaclass data-descriptor precedence** and still resolves the
 > class's own method. That combination is the worst available: a correct runtime with a wrong IDE.
 >
 > What resolves it is to stop making the stub mirror the runtime mechanism. Pick a runtime that
 > works (either of the two above) and declare each operation in the stub as a **class attribute whose
-> type is a Protocol with an overloaded `__call__`** — `padding: ClassVar[_Modifier_padding]` — which
+> type is a Protocol with an overloaded `__call__`**, `padding: ClassVar[_Modifier_padding]`, which
 > checks clean for all three spellings. `docs/archive/pyi-generation-pythonic-stubs.md` §4.4 adopts that and measured
 > it against mypy; PyCharm is listed there as unverified. The *observation* this section is built on
-> is untouched — `Modifier$Companion`
+> is untouched, `Modifier$Companion`
 > implements `androidx.compose.ui.Modifier`, so one name really can serve as both the type and the
 > empty modifier, and the three spellings really are the requirement. Only the mechanism proposed
 > for reaching them is retired. *(2026-10-03: the binding layer reaches both run-time spellings with a
@@ -532,8 +532,8 @@ spellings work, and the generated `.pyi` can state all three (§4.5).
 > modifier is a Pythonic layer and belongs to pythonx-compose.)*
 
 **Rejected: binding the module-level name `Modifier` to the companion instance.** It is simpler at
-runtime and reads identically in the common case, but it destroys `Modifier` as an annotation —
-a type checker cannot use an instance in `m: Modifier` — and the stubs exist precisely so that a
+runtime and reads identically in the common case, but it destroys `Modifier` as an annotation,
+a type checker cannot use an instance in `m: Modifier`, and the stubs exist precisely so that a
 type checker can.
 
 ### 4.3 Collisions demand qualification; they do not get silently resolved
@@ -541,8 +541,8 @@ type checker can.
 Confirmed, and now with a price attached: **five names** in the whole of Compose (§2.5). The
 default binding is the unqualified name; when two packages contribute the same
 `(receiver, name)`, neither wins and both are reachable only through a qualified accessor. The
-same reasoning as dropping ambiguous overloads — a silent choice is a wrong call that never
-reports itself — but the cost here is now known to be negligible rather than assumed to be.
+same reasoning as dropping ambiguous overloads, a silent choice is a wrong call that never
+reports itself, but the cost here is now known to be negligible rather than assumed to be.
 
 What is lost relative to Kotlin is real and should be said plainly: Kotlin's import scope means an
 extension is invisible unless imported, so an application that imports only `material3` never sees
@@ -556,8 +556,8 @@ Measurement says a blanket rule in either direction is wrong.
 
 **The evidence against blanket raw coercion.** For `TextUnit`, raw `16` decodes as `Unspecified`
 (§2.4). For `Color`, raw `0xFFFF0000` is not red. For `Offset`, `Size`, `DpSize`, `IntSize`,
-`IntOffset`, `DpOffset`, `TransformOrigin`, `CornerRadius`, `Constraints` — every `packedValue`
-class, 20 of the 25 `Long`-backed ones — a user-meaningful number is not the stored number. None of
+`IntOffset`, `DpOffset`, `TransformOrigin`, `CornerRadius`, `Constraints`, every `packedValue`
+class, 20 of the 25 `Long`-backed ones, a user-meaningful number is not the stored number. None of
 these failures raises; they render wrong.
 
 **The evidence against blanket `dp(16)`.** `Dp` is 62% of value-class parameter occurrences on
@@ -574,8 +574,8 @@ stores from one that packs. Whether a wrapper packs is a semantic fact with no b
 
 Adopted:
 
-1. **Every value-class parameter accepts its proxy** — `Modifier.padding(dp(16))` always works.
-2. **Raw primitives are accepted only for an explicit allowlist**, seeded with `Dp` and extended by
+1. **Every value-class parameter accepts its proxy**: `Modifier.padding(dp(16))` always works.
+2. **Raw primitives are accepted only for an explicit allowlist**: seeded with `Dp` and extended by
    hand with evidence. `Dp` covers most of the ergonomic benefit on its own. *(Current: the binder's
    allowlist starts empty and the seeding is pythonx-compose's, through `allow_raw_primitive`.)*
 3. **Everything not on the allowlist rejects a raw number with an error that names the constructor
@@ -585,7 +585,7 @@ Adopted:
    renders with no font size. *(Current: the binding layer refuses with "a raw number is not accepted
    for TextUnit: it is a value class and not on the raw-primitive allowlist …"; naming the
    constructor to call is left to the Pythonic layer, which owns `sp`.)*
-4. **`Color` is on the reject list despite passing the constructor test**, and the allowlist
+4. **`Color` is on the reject list despite passing the constructor test**: and the allowlist
    mechanism is manual precisely so that this exception has somewhere to live.
 
 Residual risk, stated rather than mitigated: the allowlist is a human judgement per type, and a new
@@ -603,7 +603,7 @@ positional-only first parameter, the declared Kotlin types as stub classes (`Mod
 sets over a base name in table-key order, with the Kotlin signature in the docstring (issue #31). What
 stays out is `pythonx` and the Pythonic allowlist narrowing, which belong to pythonx-compose; the
 snake_case aliases the runtime serves are in (SPEC U-12, B-7). The section
-this replaces — the metaclass stub and the three measured requirements for a Pythonic stub — is in
+this replaces, the metaclass stub and the three measured requirements for a Pythonic stub, is in
 [`docs/archive/kotlin-extensions-in-python-pyi.md`](../archive/kotlin-extensions-in-python-pyi.md).
 
 ### 4.6 `@Composable` needs no new machinery here
@@ -620,12 +620,12 @@ arity is the correct source, and the generated Kotlin passes the composer explic
 
 The "2–5" comes from §2.6's distribution, which §2.3's correction leaves unconfirmed; the nine
 functions re-counted in §2.3 are all `+3` or `+4`. The rule this paragraph states is what the
-correction *proves* rather than what it weakens — the original nine descriptor counts were done by
+correction *proves* rather than what it weakens, the original nine descriptor counts were done by
 hand and were all one low, for the same reason a machine would be: a `$default` mask is
 indistinguishable from an ordinary trailing `int` unless you already know the Kotlin arity.
 
 Two things this paragraph did not yet know. **`$default` is the third synthetic**, and Compose
-carries it as a *declared* trailing parameter rather than emitting a `Button$default` bridge — so
+carries it as a *declared* trailing parameter rather than emitting a `Button$default` bridge, so
 "call the synthetic to omit an argument" is not available for a composable at all
 (`docs/archive/pythonx-adapter-design.md` §4.5). And **the generated Kotlin cannot pass the composer
 explicitly**: `docs/archive/pythonx-adapter-design.md` §5.3 finds that Kotlin source can neither call a
@@ -633,7 +633,7 @@ explicitly**: `docs/archive/pythonx-adapter-design.md` §5.3 finds that Kotlin s
 not parameters of the Kotlin declaration. That is a property of this generator, not of Compose, and
 it is why composables remain blocked while the `Modifier` chain of §3.2 runs.
 
-**Update — composables are callable (SPEC B-6), and not through generated Kotlin.** What settled it
+**Update, composables are callable (SPEC B-6), and not through generated Kotlin.** What settled it
 (first recorded in `docs/archive/pythonx-adapter-design.md` §5.6):
 
 - `@Composable` is `@Retention(BINARY)`: it appears in `RuntimeInvisibleAnnotations`, so the walker
@@ -644,7 +644,7 @@ it is why composables remain blocked while the `Modifier` chain of §3.2 runs.
 - In the `$default` mask, bit *i* is parameter *i*; `$changed` is passed as `0`, the conservative
   value. Shifting the mask by one bit made the render fail, so the encoding is load-bearing.
 - A Kotlin file facade has no Kotlin name (`unresolved reference 'TextKt'`), so the call site is
-  emitted as **bytecode** — one `INVOKESTATIC` per composable in `ComposableThunks.kt`, name and
+  emitted as **bytecode**, one `INVOKESTATIC` per composable in `ComposableThunks.kt`, name and
   descriptor copied from the walked `MethodNode` at build time; no runtime lookup.
 - The binding layer (`python_multiplatform.binding`) computes the `$default` mask from which
   arguments the Python call wrote and threads the composer from a stack that one hand-written
@@ -664,12 +664,12 @@ suppress mangling, 4 wrappers taking `color: Long` so that `Color(...)` could be
 Kotlin side, and 3 taking raw `Float` sizes.
 
 That shim also invented API. `Card(modifier=…, corner_radius=20, color=…)` in `UI.ipynb` is not
-Compose — `material3.Card` has no `corner_radius` parameter in either of its overloads (§2.3). The
+Compose, `material3.Card` has no `corner_radius` parameter in either of its overloads (§2.3). The
 shim absorbed shape and colour into flat keyword arguments per component, by hand, which is exactly
 the per-function wrapping `docs/design/ecosystem.md` §5b rules out.
 
 The modifier chain was never built. `pythonx/compose/ui/modifier.py` lines 20–22 probe
-`ButtonKt.__dict__` for a key starting `"Button-"` — a name-based lookup, which §2.3 shows cannot
+`ButtonKt.__dict__` for a key starting `"Button-"`, a name-based lookup, which §2.3 shows cannot
 be made unambiguous for Compose no matter how carefully it is written.
 
 ---
@@ -686,8 +686,8 @@ happened.
   dispatch receiver that Kotlin supplies implicitly from the enclosing lambda. Python has no
   implicit receiver, so `Modifier.weight(1f)` cannot work as written; the scope has to be passed
   into the content callable and the call spelled against it. No shape has been chosen. The walker
-  still declines them explicitly — `ArtifactScanner`'s `KotlinClassMetadata.Class` arm filters
-  extensions out, so nothing arrives half-bound — and `docs/design/pyi-generation-design.md` §4.5 adds the
+  still declines them explicitly, `ArtifactScanner`'s `KotlinClassMetadata.Class` arm filters
+  extensions out, so nothing arrives half-bound, and `docs/design/pyi-generation-design.md` §4.5 adds the
   consequence for stubs: they **must not** be stubbed as plain methods on `Modifier`, because a stub
   that says `Modifier.weight(1.0)` checks is a stub promising a call the runtime cannot make.
 - **Overload dispatch.** *Moved, not closed.* The "drop ambiguous names" rule that cost 33 of 130
@@ -696,25 +696,25 @@ happened.
   count and type, selecting among `padding__Dp` / `padding__Dp_Dp` / `padding__PaddingValues`.
   *Closed since:* it lives in this repository's binding layer (`_Overloads` in `PythonxAdapter.kt`,
   serving the base name; SPEC U-8), not in `pythonx`, and it interacts with §4.4 exactly as
-  described — if the raw `16` is what selects the `Dp` overload, then raw-primitive acceptance is
+  described, if the raw `16` is what selects the `Dp` overload, then raw-primitive acceptance is
   also overload resolution (a bare handle is not allowed to vote in a dispatch).
 - **The type gate.** *Closed*, by `f455ef41`. `Shape`, `Brush` and `PaddingValues` bind now, and the
   paragraph above misnamed what was missing: the boundary *type* (`TypeTag.OBJECT`) and its whole
   runtime (`HandleTable`, `marshalResult`, `toKotlinObject`) already existed; the walker lacked a
   Kotlin type name to cast to, which `@Metadata`'s classifier supplies. See §3's note on the type
   gate. What is left of the 45 declined `Modifier` extensions is **43 with a function-typed
-  parameter** (§3.2) — that is the lambda half of "66 take a lambda". *(Since closed in turn:
+  parameter** (§3.2), that is the lambda half of "66 take a lambda". *(Since closed in turn:
   function-typed slots bind, SPEC B-5; see §3.2's note.)*
 - **Handle ownership.** *New, opened by closing the type gate.* Every object crossing to Python is a
   strong root in `HandleTable`, and an entry bound by this walker returns it as a bare `int` with
   nothing to hang a finaliser off. A chained `Modifier.padding(...).size(...)` leaks one handle per
   intermediate link until §4.1's proxy exists to own them. Known, bounded, and true of every
-  `OBJECT`-returning KSP entry already — but it is now on the Compose path. *(The proxy exists now in
+  `OBJECT`-returning KSP entry already, but it is now on the Compose path. *(The proxy exists now in
   the binding layer, and SPEC M-4 asserts that owned results are released when Python drops them;
   the raw module still hands out bare handles.)*
-- **Whether the allowlist of §4.4 should be data or code**, and where a downstream consumer adds to
+- **Whether the allowlist of §4.4 should be data or code**: and where a downstream consumer adds to
   it for a library this repository has never seen. *Closed:* it is run-time data in the binding
-  layer — `_VALUE_CLASS_ALLOWLIST`, empty in this repository, extended by the Pythonic package
+  layer, `_VALUE_CLASS_ALLOWLIST`, empty in this repository, extended by the Pythonic package
   through `allow_raw_primitive` (`PythonxAdapter.kt`). The manifest candidate
   (`docs/archive/pyi-generation-pythonic-stubs.md` §5.3) was implemented and removed with the
   Pythonic stubs; it belongs to pythonx-compose.
@@ -722,4 +722,4 @@ happened.
   `docs/design/ecosystem.md` §5b records that `LibraryAbiReader` exposes extension receivers and unerased
   types from klibs, which suggests the same design carries to iOS and androidNative, but no Compose
   klib has been read yet. *(Since: `KlibScanner` produces declarations from klibs through
-  `LibraryAbiReader`, but none is bound at run time yet — SPEC B-2/N-3.)*
+  `LibraryAbiReader`, but none is bound at run time yet, SPEC B-2/N-3.)*

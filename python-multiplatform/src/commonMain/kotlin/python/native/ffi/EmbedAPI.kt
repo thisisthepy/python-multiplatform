@@ -288,8 +288,8 @@ expect inline fun Py_GetBuildInfo(): String?
  *
  * This is no longer bound to a C symbol. `ceval.h` marks it `Py_DEPRECATED(3.9)`, which is a
  * compiler-enforced deprecation and therefore a removal schedule, and since 3.9 the C function's
- * body has been empty. A Kotlin no-op is not an approximation of it — it is the same behaviour with
- * one fewer FFI crossing — so nothing is lost by taking it out of the `expect`/`actual` surface,
+ * body has been empty. A Kotlin no-op is not an approximation of it, it is the same behaviour with
+ * one fewer FFI crossing, so nothing is lost by taking it out of the `expect`/`actual` surface,
  * and callers written against older embeddings still compile. `EmbedApiSurfaceTest` derives the
  * `Py_DEPRECATED` set from the bundled headers and fails if this name reappears in the surface.
  */
@@ -1287,7 +1287,7 @@ expect fun PyImport_ImportModule(name: String): NativePointer?
  * [PyImport_ImportModule] instead.
  *
  * This is no longer bound to a C symbol. CPython 3.15 removed the entry point, and since 3.3
- * it had been an exact alias of `PyImport_ImportModule` — not a distinct code path — so
+ * it had been an exact alias of `PyImport_ImportModule`, not a distinct code path, so
  * forwarding here is behaviour-preserving on every supported version rather than an
  * approximation. Keeping the name costs nothing at the FFI boundary and lets existing source
  * compile through the version bump; `EmbedApiLowLevelTest` pins it to the function it aliases.
@@ -1537,7 +1537,7 @@ expect fun PyImport_GetImporter(path: NativePointer): NativePointer?
  * the module is not found, and "-1" with an exception set if the
  * initialization failed.  To access the imported module on a
  * successful load, use "PyImport_ImportModule()".  (Note the misnomer
- * — this function would reload the module if it was already
+ *, this function would reload the module if it was already
  * imported.)
  *
  * Added in version 3.3.
@@ -4133,16 +4133,16 @@ expect fun PyWeakref_NewProxy(ob: NativePointer, callback: NativePointer): Nativ
  * with [Py_DecRef]. Returns `null` if the referent is no longer live, and also `null` if *ref*
  * is not a weak reference object.
  *
- * The C function distinguishes those two outcomes by its `int` return — `0` for a dead referent
- * and `-1` for an error — while writing the object through an out-parameter. An out-parameter
+ * The C function distinguishes those two outcomes by its `int` return, `0` for a dead referent
+ * and `-1` for an error, while writing the object through an out-parameter. An out-parameter
  * does not survive this FFI boundary (Android requires primitives only across JNI), so both
  * arrive here as `null`. No information is lost: the error case sets the error indicator and the
  * dead case does not, so [PyErr_Occurred] separates them. `EmbedApiLowLevelTest` asserts that a
  * dead referent leaves the indicator clear.
  *
  * This replaces `PyWeakref_GetObject`, which CPython removed in 3.15. The two are not
- * interchangeable: the removed function returned a *borrowed* reference and `Py_None` — not
- * `null` — for a dead referent. `PyWeakref_GetRef` exists in 3.13 and 3.14 as well, so binding
+ * interchangeable: the removed function returned a *borrowed* reference and `Py_None`, not
+ * `null`, for a dead referent. `PyWeakref_GetRef` exists in 3.13 and 3.14 as well, so binding
  * it does not cost support for the version this build defaults to.
  */
 expect fun PyWeakref_GetRef(ref: NativePointer): NativePointer?

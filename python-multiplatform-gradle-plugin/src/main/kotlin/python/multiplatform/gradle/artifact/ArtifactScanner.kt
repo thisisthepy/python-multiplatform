@@ -42,7 +42,7 @@ import java.util.jar.JarFile
  *
  * | PyREPL's filter | here | why |
  * |---|---|---|
- * | not `private`/`protected` | **not enough** — must be `public`, and Kotlin-`public` rather than only JVM-`public` | PyREPL keeps package-private members, which is harmless in a stub; `internal` is JVM-public but not a name generated Kotlin may call |
+ * | not `private`/`protected` | **not enough**, must be `public`, and Kotlin-`public` rather than only JVM-`public` | PyREPL keeps package-private members, which is harmless in a stub; `internal` is JVM-public but not a name generated Kotlin may call |
  * | drop `<init>` | kept | a constructor needs a `ReflectedClass` and a receiver handle, which is the next step |
  * | drop `Companion` | subsumed | only statics are bound, and `Companion` is an instance field |
  * | drop names containing `-` | **not kept** | see below |

@@ -7,7 +7,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
- * [Python3.runApp] — the decided, deliberately reduced subset of CPython's command-line parser
+ * [Python3.runApp], the decided, deliberately reduced subset of CPython's command-line parser
  * that an *embedder* can drive without calling `Py_BytesMain`/`Py_RunMain` (which finalize the
  * interpreter; see ROADMAP §12/§14b item 10 and [RunMainTest]'s header for why those cannot be the
  * implementation of anything called more than once).

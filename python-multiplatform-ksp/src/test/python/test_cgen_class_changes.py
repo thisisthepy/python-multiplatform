@@ -7,7 +7,7 @@ After init, compiled code must still compute what the interpreter computes when 
   * changes `Node.__init__`, or adds an unrelated class attribute (`Node.counter = 1`);
   * exhausts the class's version tags (tp_version_tag stays 0);
 and it must do so mid-body too, when an impure compiled function runs a Python callback
-(CallObject) between entry and the field access / New — without a deopt after that effect.
+(CallObject) between entry and the field access / New, without a deopt after that effect.
 
 Every scenario runs in a CHILD process (a crash fails one test, not the run) on a fresh compiled
 module instance, and the same scenario runs on the plain interpreted source (loaded as an ordinary
@@ -41,7 +41,7 @@ from typedpython.ir import (
 TEST_DIR = Path(__file__).resolve().parent
 
 SOURCE = textwrap.dedent('''\
-    """typedpython class-change test module — the interpreted reference."""
+    """typedpython class-change test module, the interpreted reference."""
 
     class Node:
         __slots__ = ("left", "right")
@@ -257,7 +257,7 @@ def norm(x):
     for f in ("left", "right", "extra"):
         try:
             d[f] = norm(getattr(x, f))
-        except Exception as e:                   # noqa: BLE001 — the outcome is the result
+        except Exception as e:                   # noqa: BLE001, the outcome is the result
             d[f] = ["exc", type(e).__name__, str(e)]
     return d
 
@@ -529,7 +529,7 @@ def _run(M, scenario, compiled):
             return ["exc", type(e).__name__, str(e)]
     try:
         out = SCENARIOS[scenario](M, call, P)
-    except Exception as e:                       # noqa: BLE001 — a scenario must not raise itself
+    except Exception as e:                       # noqa: BLE001, a scenario must not raise itself
         out = ["scenario-raised", type(e).__name__, str(e)]
     return out, probes
 

@@ -1,4 +1,4 @@
-# Upcalls — Python → Kotlin
+# Upcalls, Python → Kotlin
 
 How Python code imports Kotlin packages, constructs Kotlin classes, calls their functions (including
 `suspend` ones) and reads their properties. The opposite direction is
@@ -60,8 +60,8 @@ The equivalent here:
 | Once per name | Python passes a name (`"demo.Counter.increment"`); **Kotlin resolves it** in the table and returns a `CallableHandle` |
 | Every call after that | The handle crosses, never the string |
 
-Passing a string per call costs `PyUnicode` → UTF-8 (an allocation) + the boundary + hashing + comparison —
-hundreds of ns — whatever the table looks like. `UpcallTable.resolve` returns a `CallableHandle` whose raw
+Passing a string per call costs `PyUnicode` → UTF-8 (an allocation) + the boundary + hashing + comparison,
+hundreds of ns, whatever the table looks like. `UpcallTable.resolve` returns a `CallableHandle` whose raw
 value packs the table **epoch** (high 32 bits) and the index (low 32), so a handle cached across a table
 reinstall is rejected rather than calling a different function
 (`python-multiplatform/src/commonMain/kotlin/python/multiplatform/reflection/ExposedCallable.kt`,
@@ -124,7 +124,7 @@ misreading of §12.1 and restored; §12.1 now says it governs namespaces only. S
 ### 2.1 Fragments, one per module
 
 The KSP processor (`python-multiplatform-ksp/`) is shipped as an artifact and runs in **every** module that
-exposes Kotlin to Python — including the user's own modules, since exposing the user's classes is the
+exposes Kotlin to Python, including the user's own modules, since exposing the user's classes is the
 point. Each module emits one **fragment object** into the well-known package
 `python.multiplatform.generated.fragments`:
 
@@ -192,9 +192,9 @@ object Fragment_io_github_thisisthepy_ksp_fixtures_library : python.multiplatfor
 
 Asserted against KSP-generated fragments, not hand-written ones:
 `ksp-fixtures/app/src/desktopTest/.../GeneratedDeclarationKindsTest.kt`,
-`GeneratedSuspendTest.kt`, `GeneratedTableTest.kt` (which runs `UpcallTableTest`'s scenarios — constructor
+`GeneratedSuspendTest.kt`, `GeneratedTableTest.kt` (which runs `UpcallTableTest`'s scenarios, constructor
 / method / getter / setter round trip through `HandleTable`, `@PythonInternal` exclusion, narrow
-`Int`/`Float` widening, `tp_traverse` field detection — against a generated table), and
+`Int`/`Float` widening, `tp_traverse` field detection, against a generated table), and
 `python-multiplatform-ksp/src/test/.../SourceRenderingTest.kt`.
 
 ### 2.3 Aggregation in the app module
@@ -225,8 +225,8 @@ different fragments is an error**, detected before anything is mutated (SPEC U-1
 **Discovery** uses `resolver.getDeclarationsFromPackage("python.multiplatform.generated.fragments")`, in two
 KSP rounds:
 
-1. **Round 1** — generate the app's own `Fragment_<app>`. The new file triggers round 2.
-2. **Round 2** — `getDeclarationsFromPackage` now sees the app's fresh fragment **and** every dependency's
+1. **Round 1**: generate the app's own `Fragment_<app>`. The new file triggers round 2.
+2. **Round 2**: `getDeclarationsFromPackage` now sees the app's fresh fragment **and** every dependency's
    fragment, which is on the compilation classpath as compiled classes (JAR) or klib metadata. Generate
    `FunctionTable`.
 
@@ -237,8 +237,8 @@ expensive because it scans the whole classpath; the package query is cheap. (A m
 
 `getDeclarationsFromPackage` is `@KspExperimental`. It is the documented cross-module API, nothing
 non-experimental does the job, and it has been stable since KSP 1.x. Discovery sits behind the
-`FragmentDiscovery` interface (`FragmentDiscovery.kt`) so a fallback — each module writing a metadata file
-under `META-INF/`, read by the aggregator — can replace it without changing the fragment or table shape.
+`FragmentDiscovery` interface (`FragmentDiscovery.kt`) so a fallback, each module writing a metadata file
+under `META-INF/`, read by the aggregator, can replace it without changing the fragment or table shape.
 
 The same mechanism serves every target:
 
@@ -312,7 +312,7 @@ derives `moduleName`. Notes from building it:
   compilation, which emitted a duplicate fragment shadowing `main`'s. `ksp-fixtures/android` carries the
   Android plugin for this reason ([ROADMAP](../roadmap/ROADMAP.md) §13).
 
-### 2.6 Tree shaking — decision: accept the cost (measured)
+### 2.6 Tree shaking, decision: accept the cost (measured)
 
 If the aggregator references every fragment and every fragment references every `public` callable, the
 linker sees the entire public API as reachable. Each lambda `{ args -> greet(args[0] as String) }` is a
@@ -321,7 +321,7 @@ static reference to `greet`; a reachable fragment makes every target reachable. 
 cannot all hold: (1) blacklist exposure, (2) a full table referenced at build time (required on
 Kotlin/Native), (3) tree shaking of unused entries.
 
-**Chosen: give up (3) — accept the cost**, because (1) is settled (§1.5) and (2) is forced by §2.3. The
+**Chosen: give up (3), accept the cost**, because (1) is settled (§1.5) and (2) is forced by §2.3. The
 remaining options, one line each:
 
 | Option | Verdict |
@@ -344,11 +344,11 @@ remaining options, one line each:
 
 This is a **floor**: each function is a one-line expression, so almost all of the 1.84 KB is the
 `ExposedCallable`, its lambda, its name string and Kotlin/Native per-function metadata. A real library adds
-its function bodies on top. For 200 entries the floor is ≈11% of a 3.26 MB stripped baseline — noticeable,
+its function bodies on top. For 200 entries the floor is ≈11% of a 3.26 MB stripped baseline, noticeable,
 not disqualifying. Whether that is acceptable for a real library is a product judgement; the only real
 mitigation would be changing the exposure model, which is settled.
 
-### 2.7 Incremental KSP — measured, `ALL_FILES` stays
+### 2.7 Incremental KSP, measured, `ALL_FILES` stays
 
 `Dependencies(false)` would never regenerate the aggregator and miss a newly added fragment;
 `Dependencies.ALL_FILES` is correct but reprocesses on every change. A narrower declaration buys nothing.
@@ -359,12 +359,12 @@ Measured with `ksp.incremental.log=true` on `:ksp-fixtures:app` (two files), mod
 | `ALL_FILES` | 100.00% |
 | `Dependencies(aggregating = true, <generated fragment files>)` | 100.00% |
 
-A module's own `Fragment_<module>` is an *aggregating* output over every source file — correctly, since under
-blacklist exposure any file can add an entry — so any change regenerates it and KSP marks every source that
+A module's own `Fragment_<module>` is an *aggregating* output over every source file, correctly, since under
+blacklist exposure any file can add an entry, so any change regenerates it and KSP marks every source that
 maps to it dirty. A classpath-only change behaves the same (adding a function to `:ksp-fixtures:library`
 dirtied both app files with `CP changes` listing `Fragment_ksp_fixture_library`). The only route to real
 incrementality is **per-file fragments**, which changes fragment naming, `UpcallTable`'s per-module
-idempotency and where duplicate names are detected — a design change, not done.
+idempotency and where duplicate names are detected, a design change, not done.
 
 ### 2.8 Alternatives rejected
 
@@ -412,7 +412,7 @@ Argument passing needs exactly one C shape:
     PyObject *pm_invoke(long callableHandle, PyObject *args)       // (long, long) -> long
 
 Arity and types travel inside the tuple and the table entry, never in the C signature. A stub specialised
-per signature would need one per `(arity, tag-vector)` — unbounded and impossible to pre-generate for a
+per signature would need one per `(arity, tag-vector)`, unbounded and impossible to pre-generate for a
 closed world. The remaining slots were already in the downcall vocabulary:
 
 | Slot | C signature | Carrier shape | |
@@ -425,7 +425,7 @@ closed world. The remaining slots were already in the downcall vocabulary:
 | name → handle | `long(const char *)` | `(long) -> long` | pre-existing |
 | release / cancel | `int(long)` | `(long) -> int` | pre-existing (`_pm_release`, `_pm_cancel`) |
 
-`newfunc` is unaccounted for only if `tp_new` is ever bound directly; it is not — construction goes
+`newfunc` is unaccounted for only if `tp_new` is ever bound directly; it is not, construction goes
 through a `CONSTRUCTOR` entry called from Python (§4.2).
 
 ### 3.3 What crosses, per tag
@@ -437,25 +437,25 @@ The `Array<Any?>` an entry receives has one representation per `TypeTag`, which 
 |---|---|---|
 | `INT` | `int` | `Long` (a declared `Int`/`Short`/`Byte` is narrowed by generated code) |
 | `FLOAT` | `float` | `Double` |
-| `BOOLEAN` | `bool` | `Boolean` — a distinct Python type, not folded into `INT` |
+| `BOOLEAN` | `bool` | `Boolean`, a distinct Python type, not folded into `INT` |
 | `STRING` | `str` | `String` |
 | `BYTES` | `bytes` | `ByteArray` (NUL bytes survive; SPEC U-2) |
 | `UNIT` | `None` | `Unit` |
 | `OBJECT` | `int` handle, **or** any Python object | the Kotlin instance from `HandleTable`, **or** a `PyObject` |
-| — | `None` | `null`, whatever the tag |
+| - | `None` | `null`, whatever the tag |
 
 `OBJECT` is resolved by what Python actually sent: Python cannot hold a Kotlin reference, so a Kotlin
 object crosses as an `ObjectReference` integer (`(generation shl 32) | slot`, generation ≥ 1); anything
 else is a Python object and reaches a parameter declared `PyObject`.
 
-`BYTES` is correct and slow — one item at a time — because `PyBytes_AsString` is bound as a NUL-terminated
+`BYTES` is correct and slow, one item at a time, because `PyBytes_AsString` is bound as a NUL-terminated
 string read and `PyBytes_AsStringAndSize` is in no platform's `EmbedAPI` yet (`UpcallTrampoline.toByteArray`
 KDoc). When it is, both directions collapse to one call.
 
 ### 3.4 Conventions that are not negotiable
 
 - **Arguments are borrowed.** `PyTuple_GetItem` lends, so a `PyObject` built over one takes
-  `borrowed = true`. `borrowed = false` gives back a reference nobody took — one per call — and the free
+  `borrowed = true`. `borrowed = false` gives back a reference nobody took, one per call, and the free
   lands somewhere unrelated. That bug crashed this repository twice.
 - **The result is a new reference**; Python takes ownership. Measured end to end through each platform's
   real entry point: a hundred calls move the returned object's refcount by zero
@@ -481,8 +481,8 @@ runtimes the moment upcalls exist ([`androidMain/README.md`](../../python-multip
 
 ### 3.6 Handles and their lifetimes
 
-- `CallableHandle` — table index + epoch (§1.2). `-1` is `NONE`; a valid handle is never negative.
-- `HandleTable` / `ObjectReference` — a Kotlin object given to Python is rooted in `HandleTable` under a
+- `CallableHandle`, table index + epoch (§1.2). `-1` is `NONE`; a valid handle is never negative.
+- `HandleTable` / `ObjectReference`, a Kotlin object given to Python is rooted in `HandleTable` under a
   generation-tagged handle; releases are generational, so a second release is a no-op and a stale handle
   never frees a reused slot (SPEC M-4, `HandleTableTest`, `ProxyHandleLifetimeTest`,
   `OwnedResultLifetimeTest`). Generated proxies give their handle back in `__del__` (§4.2).
@@ -515,7 +515,7 @@ came out of it: the generator's assumptions about bootstraps are only proven by 
 
 ### 3.8 Android: the boundary runs the other way, and threads attach once
 
-`RegisterNatives` binds a JVM `external fun` to a C function — the **downcall** direction. A
+`RegisterNatives` binds a JVM `external fun` to a C function, the **downcall** direction. A
 `PyMethodDef`'s `ml_meth` must be a real C function pointer and Kotlin/JVM on ART can produce none. So the
 entry points are C functions in `jni_onload.def`, and *they* call Kotlin with `CallStaticLongMethod` against
 `UpcallCallbacks`, a class looked up once in `JNI_OnLoad` and held as a global ref. `RegisterNatives` appears
@@ -528,8 +528,8 @@ for `tp_traverse`/`tp_clear` (`ProxyCallbacks`), down to reusing `pmp_attach`.
 `threading.Thread` and asserts it did not land on the instrumentation thread.
 
 **Attach once per thread, detach at thread death.** Attaching and detaching per call was the most expensive
-thing on the Android upcall path (§7.6). The belief that forced it — "ART aborts if a thread exits without
-detaching" — is false: `Thread::ThreadExitCallback` (`runtime/thread.cc`, same shape in `android-8.0.0_r1`
+thing on the Android upcall path (§7.6). The belief that forced it, "ART aborts if a thread exits without
+detaching", is false: `Thread::ThreadExitCallback` (`runtime/thread.cc`, same shape in `android-8.0.0_r1`
 and `main`) warns on its first invocation and only reaches `LOG(FATAL)` on a second, which only an `#else`
 branch Android does not compile could arm; bionic clears a key's value before its destructor and never
 re-reads it. `UpcallThreadAttachTest.aThreadThatExitsWithoutDetachingLeaksItsPeerRatherThanAbortingArt`
@@ -539,7 +539,7 @@ lets an attached pthread exit undetached on `pmp_api26` and `pmp_api36` with no 
 `pthread_key_create` destructor (`pmp_thread_exit_detach`) that defers to its second invocation so it cannot
 run before ART's own exit callback.
 
-**Holding attachments is not a new risk.** Peak simultaneous attachments do not change — under the per-call
+**Holding attachments is not a new risk.** Peak simultaneous attachments do not change, under the per-call
 scheme every worker upcalling at an instant is attached at that instant; the ceiling is the number of live
 Python threads either way. What changes is that release must be reliable:
 `manyConcurrentWorkersAreEachAttachedOnceAndAllReleased` holds 32 workers on a `threading.Barrier`, checks
@@ -548,7 +548,7 @@ emulators). The instrument reads GC reachability of the peer, not `ThreadGroup.e
 does not report an attached native thread's peer at all; a positive control (peer unreclaimable while its
 worker is parked mid-upcall) is kept in the test because it is what caught that.
 
-The C shims take no GIL — CPython holds it when calling a `PyCFunction` — and the trampoline takes its own
+The C shims take no GIL, CPython holds it when calling a `PyCFunction`, and the trampoline takes its own
 pair (§3.5).
 
 ### 3.9 iOS and androidNative: the `@CName` + `ctypes.CDLL(None)` route, measured
@@ -559,8 +559,8 @@ binary. On iOS **neither half holds**:
 | Binary | `pm_upcall_invoke` / `pm_upcall_resolve` / `pm_upcall_release_object` |
 |---|---|
 | androidNative `libmultiplatform_python3.14.so` | **exported** (`T` in `nm -D`) |
-| iOS `PythonMultiplatform.framework` | **absent** — a K/N framework exports the Objective-C surface plus the Konan runtime |
-| Kotlin/Native test executable, either target | **absent**, also from per-file caches — never emitted |
+| iOS `PythonMultiplatform.framework` | **absent**, a K/N framework exports the Objective-C surface plus the Konan runtime |
+| Kotlin/Native test executable, either target | **absent**, also from per-file caches, never emitted |
 
 and this project's iOS `Python.framework` binary has no `_ctypes`, so `import ctypes` raises
 `ModuleNotFoundError` (Android's CPython ships `_ctypes.so`). The `@CName` functions
@@ -579,7 +579,7 @@ puts the export in CPython's table (`pmpRegisterUpcall`) and builds `PyCFunction
 objects over it.
 
 A `PyCFunction` carries `self` as well as the function pointer, so one export already backs any number of
-distinct callables. Putting a value no handle can take in `self` turns it into a dispatcher — **no second
+distinct callables. Putting a value no handle can take in `self` turns it into a dispatcher, **no second
 export, and no op argument**:
 
 | `self` | Name | Shape |
@@ -600,7 +600,7 @@ guard ("the raw upcall entry points are not bound …"), so the passing run depe
 The bare mechanism (`call_indirect`, no arguments) was measured at 3.1 ns in the former standalone
 `wasm-experiment` (against 10.9 ns for `addFunction` around a JS closure); that experiment is now
 `wasmJsTest/.../WasmUpcallRouteOverheadTest.kt`, measured from Python as in production. **3.1 ns must not be
-quoted for an upcall that carries arguments** — that is ~300 ns (§7.2).
+quoted for an upcall that carries arguments**, that is ~300 ns (§7.2).
 
 ---
 
@@ -624,34 +624,34 @@ installed table; `install()` executes it. Not a KSP-emitted `.py` resource, beca
 
 ### 4.2 Shapes
 
-- **Module functions** — published into `sys.modules` under the Kotlin package (`_pm_module`), so
+- **Module functions**: published into `sys.modules` under the Kotlin package (`_pm_module`), so
   `from demo.calc import doubleLater` works with no import hook (CPython checks `sys.modules` before any
   finder). Each is wrapped by `python_multiplatform.kotlin_function` (§4.3).
-- **Classes** — a plain Python `class` whose `__init__` calls the `CONSTRUCTOR` entry and stores the handle in
+- **Classes**: a plain Python `class` whose `__init__` calls the `CONSTRUCTOR` entry and stores the handle in
   `self._pm_handle`; methods and properties pass it as `args[0]`. A `private set` property refuses
   assignment. Interfaces and abstract classes have no constructor.
-- **Handle release** — `__del__` (`tp_finalize`, run by `tp_dealloc`) calls `_pm_release`, looked up once at
+- **Handle release**: `__del__` (`tp_finalize`, run by `tp_dealloc`) calls `_pm_release`, looked up once at
   class-definition time and carried as a default argument (globals are `None` during finalisation). Without
   it, `GeneratedProxyCostTest`'s constructor row ended at 78 002 live handles. Alternatives measured on CPython
   3.13, construct + destruct net of a plain object: `__del__` +66 ns; per-instance holder +158 ns;
   `weakref.ref` registry +260 ns; `weakref.finalize` +555 ns. The accepted weakness: a subclass that defines
   `__del__` without calling `super().__del__()` leaks its handle (measured). `ProxyHandleLifetimeTest` pins
   release, including through a cycle.
-- **GC base** — where `ProxyTypeFactory.installGcBase()` succeeds it publishes the cycle-collecting
+- **GC base**: where `ProxyTypeFactory.installGcBase()` succeeds it publishes the cycle-collecting
   `PyType_FromSpec` type as `_pm_proxy_base`, and generated classes subclass it through a `PyMemberDef` named
   `_pm_handle`, so `self._pm_handle = …` writes into the C slot `tp_traverse` reads (§6). Otherwise they fall
   back to `_PmObject`. Every platform's `actual` now implements `installGcBase` (code read; the `expect`'s
   KDoc saying Android and wasm return `false` is stale).
-- **Class statics** (companion / `object` properties, enum entries) — a descriptor on a **metaclass** rendered
+- **Class statics** (companion / `object` properties, enum entries), a descriptor on a **metaclass** rendered
   beside the class, so instances cannot see them (Kotlin's rule). **Companion functions** go on the metaclass
   too: a `staticmethod` in the class body would be reachable through an instance, and an accessor pair would
   disagree with the Kotlin declaration.
-- **Top-level `val`/`var`** — a `property` (a *data* descriptor) on a `ModuleType` subclass generated **per
+- **Top-level `val`/`var`**: a `property` (a *data* descriptor) on a `ModuleType` subclass generated **per
   module** (one shared type would answer the attribute on every module). The previous shape, a
   `__getattr__`/`__setattr__` pair on one shared subclass, cost ~50× more per read because `__getattr__` is
   the fallback hook: `module_getattro` first raises a fully formatted `AttributeError` that the hook discards
   (§7.7).
-- **`suspend` functions** — `async def` wrappers that await the result only if it is awaitable:
+- **`suspend` functions**: `async def` wrappers that await the result only if it is awaitable:
 
       async def _pm_f_0(a0):
           _pm_r = _pm_invoke(_pm_h_0, (a0,))
@@ -717,24 +717,24 @@ demonstrates it (§5.8); `planned` on wasm.
 ### 5.1 Why a suspend function cannot simply be called
 
 CPython calls a C function pointer whose frame must return a `PyObject *` synchronously; a suspension has
-nothing to return. `runBlocking` is not a solution: it blocks the thread the upcall arrived on — on Android a
-CPython-created pthread — so the interpreter waiting for the answer is the thing being blocked. The only
+nothing to return. `runBlocking` is not a solution: it blocks the thread the upcall arrived on, on Android a
+CPython-created pthread, so the interpreter waiting for the answer is the thing being blocked. The only
 option: **return something else now and deliver the value later.**
 
 ### 5.2 Three candidates; (C) chosen, with (B) as its mechanism
 
-All three share the Kotlin half — start the coroutine inside the synchronous frame and park the result where
+All three share the Kotlin half, start the coroutine inside the synchronous frame and park the result where
 it can be addressed later.
 
 | Candidate | Verdict |
 |---|---|
 | **(A) handle + polling** (`is_done(h)` / `result(h)`) | **Rejected.** On wasmJs Python and Kotlin share one JS thread and resumption only happens when control returns to the host, so a polling loop that never yields prevents its own progress (inferred). Also burns a core and re-takes the GIL at every switch interval, and KSP cannot expose a generic `Deferred<T>` |
-| **(B) callback** — Python passes a callable, Kotlin calls it on completion | Works: a Kotlin-created thread can take the GIL and call Python while the main thread is inside `run_until_complete` (measured, `AsyncCompletionProbeTest.aKotlinCreatedThreadCanResolveAnAsyncioFutureTheInterpreterIsWaitingOn`, which passes only after observing `loop.is_running()`). Hands all synchronisation to the user |
-| **(C) asyncio** — Kotlin creates a `Future` on the running loop and resolves it with `loop.call_soon_threadsafe` | **Chosen.** Needs no new binding: `PyImport_ImportModule`, `PyObject_GetAttrString` and `PyObject_Call*` are enough (measured, `AsyncCompletionProbeTest.everyApiThisNeedsIsAlreadyBoundSoAnAsyncioConventionAddsNoNewBinding`). `await kotlin_fn(x)` is syntax Python users already know |
+| **(B) callback**, Python passes a callable, Kotlin calls it on completion | Works: a Kotlin-created thread can take the GIL and call Python while the main thread is inside `run_until_complete` (measured, `AsyncCompletionProbeTest.aKotlinCreatedThreadCanResolveAnAsyncioFutureTheInterpreterIsWaitingOn`, which passes only after observing `loop.is_running()`). Hands all synchronisation to the user |
+| **(C) asyncio**, Kotlin creates a `Future` on the running loop and resolves it with `loop.call_soon_threadsafe` | **Chosen.** Needs no new binding: `PyImport_ImportModule`, `PyObject_GetAttrString` and `PyObject_Call*` are enough (measured, `AsyncCompletionProbeTest.everyApiThisNeedsIsAlreadyBoundSoAnAsyncioConventionAddsNoNewBinding`). `await kotlin_fn(x)` is syntax Python users already know |
 
 (C) is mechanically (B): `call_soon_threadsafe` is a downcall from the completion thread. `Py_AddPendingCall`
 (in the Stable ABI, not bound in `EmbedAPI`) was not needed. The cost of (C): the application must be written
-async — the loop must be running.
+async, the loop must be running.
 
 **The fast path comes before the convention.** `suspend` is a signature, not a promise to suspend: a body
 that reaches no suspension point is complete before `PendingCall.start` returns
@@ -744,7 +744,7 @@ directly with no `Future` and no event loop.
 What would reverse this choice: if a target's loop could not be made to yield to its host, (B) would be the
 better public surface there; if a completion thread on Android were found to need an ART attach, the
 `pmp_thread_exit_detach` destructor (§3.8) would have to be replicated on the completion side. (A Kotlin/JVM
-thread is already known to ART, so no attach is expected — inferred; the ART sample in §5.8 resumes from a
+thread is already known to ART, so no attach is expected, inferred; the ART sample in §5.8 resumes from a
 `java.lang.Thread` and works.)
 
 ### 5.3 KSP: a different body, not an exclusion
@@ -775,11 +775,11 @@ that; it is stale.)
 - **No `kotlinx.coroutines` dependency.** `startCoroutine` and `Continuation` are stdlib; the dispatcher a
   user's `suspend fun` needs is already on the user's classpath.
 - **The context is the `PendingCall` itself** (a `CoroutineContext.Element`), with no dispatcher, so the body
-  runs on the calling thread until its first real suspension — which is where the fast path comes from, and
+  runs on the calling thread until its first real suspension, which is where the fast path comes from, and
   why work before the first suspension runs **inside the C frame, holding the GIL**.
 - **Nothing escapes**: body and listener failures are parked, as in the trampoline.
 - **No new handle machinery**: it is an ordinary object in `HandleTable`.
-- **Unsynchronised**, on the boundary's rule that every mutation happens on a GIL-holding thread; a
+- **Unsynchronised**: on the boundary's rule that every mutation happens on a GIL-holding thread; a
   completion that reaches Python takes the GIL anyway.
 
 ### 5.5 Delivery
@@ -798,10 +798,10 @@ really ensures; a completion inside a later upcall correctly nests. The Kotlin w
 reference to the `Future`; the completion lambda keeps the wrapper alive until it fires.
 
 **The fast path is wider than "did not suspend".** If the completion thread resumes the continuation while the
-upcall frame is still running — `CFUNCTYPE` releases the GIL for the upcall itself — `deliver` sees `isDone`
+upcall frame is still running, `CFUNCTYPE` releases the GIL for the upcall itself, `deliver` sees `isDone`
 and returns the value. Correct, but the synchronous-completion ratio is a function of the race, and a test of
 the slow path must observe that a `Future` actually crossed (`AsyncUpcallDeliveryTest` records
-`type(r).__name__`; the proxy tests count `create_future` calls instead and assert `0` on the fast path —
+`type(r).__name__`; the proxy tests count `create_future` calls instead and assert `0` on the fast path,
 `PythonProxyInstallTest.theSameGeneratedProxyBuildsNoFutureWhenTheKotlinBodyNeverSuspends`).
 
 **No running loop:** a call that really suspends fails with `RuntimeError: no running event loop`, and the
@@ -815,7 +815,7 @@ A suspending entry that never suspends works with no loop at all
 **A completion landing on a cancelled `Future` is dropped, not raised.** Measured before the fix
 (`AsyncUpcallCancellationTest`): `await` got `CancelledError`; the loop's `call_exception_handler` got one
 `InvalidStateError: invalid state`; the completion thread's error indicator was clean and the next unrelated
-upcall worked — no contamination, just an unactionable log entry. Two guards, only the second a guarantee:
+upcall worked, no contamination, just an unactionable log entry. Two guards, only the second a guarantee:
 `AsyncUpcall.resolve` checks `done()` before scheduling (cheap, racy), and the scheduled callback is
 `_pm_settle`, which checks `done()` **again on the loop thread**. Removing only `_pm_settle`'s guard turns
 exactly the race test red; the race is forced, not left to timing (the Python coroutine spins without
@@ -826,7 +826,7 @@ the coroutine's *completion*; the suspension point's continuation belongs to who
 `suspendCoroutine`, their dispatcher, `kotlinx.coroutines`). `PendingCall` never sees it, the stdlib cannot
 reach it, and resuming twice is undefined. Forced cancellation is what a `Job` tree does. What works:
 `ensureActive()` (top-level, reads `coroutineContext[PendingCall]`) throws `CancellationException` once the
-call is cancelled — the same contract as `kotlinx.coroutines`, where a body that never checks is never
+call is cancelled, the same contract as `kotlinx.coroutines`, where a body that never checks is never
 cancelled either. The element is not a `ContinuationInterceptor`, so the fast path is untouched.
 
     suspend fun slowSum(n: Long): Long {
@@ -855,7 +855,7 @@ at completion), then resumes once and requires `CancellationException` and `isDo
 
 | Releaser | Only it covers |
 |---|---|
-| Python done callback | a cancelled body that never cooperates — the Kotlin completion never runs |
+| Python done callback | a cancelled body that never cooperates, the Kotlin completion never runs |
 | Kotlin `resolve` | the loop stopping before the scheduled done callback ran |
 
 Generational release makes the second a no-op and a late `_pm_cancel(stale)` harmless. Measured with
@@ -867,11 +867,11 @@ Generational release makes the second a no-op and a late `_pm_cancel(stale)` har
 | after cancel, coroutine not yet finished | baseline (Python released it) |
 | after cancel and body exit | baseline |
 | after normal completion | baseline |
-| fast path | baseline — nothing registered (`theFastPathRegistersNoHandleAtAll`) |
+| fast path | baseline, nothing registered (`theFastPathRegistersNoHandleAtAll`) |
 
 Registration happens after `deliver`'s `isDone` early return, so the fast path touches neither `HandleTable`,
 `__main__` nor `add_done_callback`. The slow path pays two `__main__` lookups and one `_pm_watch` call. Not
-reclaimed: a call whose `Future` never settles and whose coroutine never ends — that has leaked its
+reclaimed: a call whose `Future` never settles and whose coroutine never ends, that has leaked its
 continuation already.
 
 ### 5.7 Desktop and Kotlin/Native tests
@@ -879,7 +879,7 @@ continuation already.
 The desktop tests use `java.lang.Thread` and `java.util.concurrent`, so they cannot move to `commonTest`; the
 claims are re-verified on Kotlin/Native with `nativeTest/.../NativeThread.kt`, a thin `pthread_create`
 wrapper. Not `Worker`: the question is whether a completion may come from a thread the Kotlin/Native runtime
-never attached itself, which `Worker` would sidestep — the same situation
+never attached itself, which `Worker` would sidestep, the same situation
 `CycleCollectionTest.testDeallocOnAThreadCPythonCreated` measures for `tp_dealloc`.
 
 | `nativeTest` | Desktop counterpart | Re-verifies |
@@ -890,33 +890,33 @@ never attached itself, which `Worker` would sidestep — the same situation
 
 All passed on the iOS simulator, three repeated runs. They are in `nativeTest`, which
 `androidNativeArm64Test` also runs, and they predate the androidNative full-suite runs recorded in §5.8
-(316 tests, 0 failures) — but no per-test androidNative result for them was recorded (unverified).
-`AsyncUpcallPortabilityTest` (`commonTest`) keeps only the two paths that return before touching asyncio — fast
-path and failure-before-suspend — which need no thread and run on all targets.
+(316 tests, 0 failures), but no per-test androidNative result for them was recorded (unverified).
+`AsyncUpcallPortabilityTest` (`commonTest`) keeps only the two paths that return before touching asyncio, fast
+path and failure-before-suspend, which need no thread and run on all targets.
 
 ### 5.8 Per platform
 
-**Desktop** — everything above (`AsyncUpcallDeliveryTest`, `AsyncUpcallCancellationTest`,
+**Desktop**, everything above (`AsyncUpcallDeliveryTest`, `AsyncUpcallCancellationTest`,
 `AsyncUpcallEarlyCancellationTest`, `PythonProxyDeliveryTest`).
 
-**iOS simulator** — asyncio is available. The iOS `Python.framework` binary has no `lib-dynload`, but asyncio
+**iOS simulator**, asyncio is available. The iOS `Python.framework` binary has no `lib-dynload`, but asyncio
 comes from the separately extracted BeeWare stdlib (`build/python-stdlib/ios-simulator/lib/python3.14/` with
 `asyncio/` and `lib-dynload/_asyncio…so`, `select…so`, `_socket…so`).
 `iosSimulatorArm64Test/.../AsyncioAvailabilityProbeTest.kt` (isolated in its own file) runs
 `asyncio.new_event_loop().run_until_complete(...)` and passes. Delivery, early cancellation and the silent drop
 pass (§5.7).
 
-**Android (ART)** — proxies, including `async` ones, run on `pmp_api26` and `pmp_api36`
+**Android (ART)**, proxies, including `async` ones, run on `pmp_api26` and `pmp_api36`
 (`connectedDebugAndroidTest`: 336 tests, 0 failures on each; `PythonProxyInstallTest`'s 11 on the real path).
 The sample app on both emulators showed:
 
 | Section | Output |
 |---|---|
-| 3 — upcall | `handle 4294967327 -> 0 · with args -> presses x3 = 0` (called from Python via `_pm_resolve`/`_pm_invoke`) |
-| 5 — class proxy | `installed over PyMethodDef via JNI: 466 lines, 2 proxy classes`, `Greeter('Kotlin').greet(2) -> hello Kotlin! hello Kotlin!`, `g.greetings = 99 -> AttributeError (private set held)` |
-| 6 — companion | `Greeter.forget() -> 100, then built=0`, `Greeter('x').built -> AttributeError (companion is class-only)` |
-| 7 — fast path | `await g.greetNow(1) -> hello fast path!`, `Futures created -> 0` |
-| 7 — really suspends | `await g.greetLater(2) -> hello slow path! hello slow path!`, `Futures created -> 1`, `raised -> None`, `completer thread -> clean` |
+| 3, upcall | `handle 4294967327 -> 0 · with args -> presses x3 = 0` (called from Python via `_pm_resolve`/`_pm_invoke`) |
+| 5, class proxy | `installed over PyMethodDef via JNI: 466 lines, 2 proxy classes`, `Greeter('Kotlin').greet(2) -> hello Kotlin! hello Kotlin!`, `g.greetings = 99 -> AttributeError (private set held)` |
+| 6, companion | `Greeter.forget() -> 100, then built=0`, `Greeter('x').built -> AttributeError (companion is class-only)` |
+| 7, fast path | `await g.greetNow(1) -> hello fast path!`, `Futures created -> 0` |
+| 7, really suspends | `await g.greetLater(2) -> hello slow path! hello slow path!`, `Futures created -> 1`, `raised -> None`, `completer thread -> clean` |
 
 The last row resumes the parked continuation from a `java.lang.Thread`, as on desktop. (The original record
 adds that `pmp_attach` runs on that path too; a `java.lang.Thread` is already known to ART, so that is
@@ -924,7 +924,7 @@ adds that `pmp_attach` runs on that path too; a `java.lang.Thread` is already kn
 `Worker` or memory-model decision in the sample; the library's `PythonProxyNativeDeliveryTest` does it with
 `pthread_create`).
 
-**wasmJs** — the synchronous proxy surface runs (10 of `PythonProxyInstallTest`'s 11); `await` does not yet:
+**wasmJs**, the synchronous proxy surface runs (10 of `PythonProxyInstallTest`'s 11); `await` does not yet:
 
 1. *The trap is fixed.* `import selectors` / `import asyncio` used to kill the Node process with
    `RuntimeError: unreachable`. That was the third symptom: `select.poll().poll(0)` raised
@@ -937,7 +937,7 @@ adds that `pmp_attach` runs on that path too; a `java.lang.Thread` is already kn
    flag to disable it); Gradle's runner uses Node 26. `selectors` was the first victim because it *calls*
    `poll(0)` at import time; `asyncio` died only through it. **Fix:** `cpython.mjs`
    (`python-multiplatform/src/wasmJsMain/resources/`) deletes `WebAssembly.promising` and
-   `WebAssembly.Suspending` before calling the Emscripten factory, putting Node 26 on the synchronous path —
+   `WebAssembly.Suspending` before calling the Emscripten factory, putting Node 26 on the synchronous path,
    which is what this library needs, since every call arrives from Kotlin as a synchronous wasm call. A
    `sys.modules['selectors']` shim was rejected: it only moves the death to the first loop iteration, hands
    users a fake module, and fixes the wrong layer. `wasmJsTest/.../WasmSelectorsImportTest.kt` (4 tests):
@@ -971,7 +971,7 @@ more generated field (`FragmentScanner.traverseBody`, `ClassModel.traverseBody`)
 reflection-based binding cannot afford this, which is why mature ones document "do not create cycles"
 instead. Generated proxies reach the traversable type through the GC base of §4.2.
 
-Status: SPEC M-3 — implemented on desktop (`desktopTest/.../ref/CycleCollectionTest.kt`,
+Status: SPEC M-3, implemented on desktop (`desktopTest/.../ref/CycleCollectionTest.kt`,
 `ksp-fixtures/app/.../RefHolderCycleCollectionTest.kt`), partial elsewhere. Mechanism and the hard parts
 (traverse during collection, `tp_clear` mutating Kotlin state, cycles closing on the Kotlin side) are in
 [`object-lifetime.md`](object-lifetime.md).
@@ -1032,11 +1032,11 @@ Controls from the same cut:
 The previous hand-cut round (warmup 100 000; five full suites per device, eleven on the hosts) read:
 desktop 510–560 ns, wasmJs 290–304 ns, iOS 2266–2301 ns, androidNative `pmp_api36` 3228–3275 ns,
 `pmp_api26` 3234–3310 ns, ART `pmp_api36` 944–1063 ns, ART `pmp_api26` 1146–1233 ns. (The predecessor document
-labelled this list "warmup 3,000"; that was wrong — the 3 000-warmup desktop and wasmJs figures were 674 ns and
+labelled this list "warmup 3,000"; that was wrong, the 3 000-warmup desktop and wasmJs figures were 674 ns and
 322 ns.) In that round each host had exactly one outlying run in eleven, kept rather than dropped: desktop's
 GIL-held trampoline once read 186.81 ns against 76–91 ns (its ratio 2.89x against 5.62–7.02x); one wasmJs run
 inflated every boundary row together (upcall 432.55, downcall 144.64, trampoline 264.44 ns) while the empty GIL
-scope stayed at 24.67 ns, so its ratio (2.99x) stayed in band — the case for preferring the ratio on wasm.
+scope stayed at 24.67 ns, so its ratio (2.99x) stayed in band, the case for preferring the ratio on wasm.
 
 ### 7.2 Warmup: why 100 000, and what the old figures were measuring
 
@@ -1055,7 +1055,7 @@ and ruled out CPython-side state are in [`downcall-design.md`](downcall-design.m
 674 → 537 ns and wasmJs 322 → 292 ns. 13 desktop and 12 wasmJs full-suite runs, 3 of each with the lever
 pulled.
 
-**JIT hosts fell, AOT hosts did not** — the prediction that separates the explanations:
+**JIT hosts fell, AOT hosts did not**, the prediction that separates the explanations:
 
 | re-measured at 100 000 | upcall, old → new | downcall, old → new |
 |---|---|---|
@@ -1068,7 +1068,7 @@ moved, 1209–1329 → 1146–1233 ns). ART has a JIT and moved like desktop and
 no warmup": from cold, androidNative's first 10 000 upcalls read ~1.3× the plateau; the old Kotlin/Native rows
 landed near it only because the rest of the suite had warmed the path.
 
-**Device sweep** — 40 consecutive reps of 10 000 calls from cold; first-rep ratio = rep 1 / mean of reps 21–40:
+**Device sweep**, 40 consecutive reps of 10 000 calls from cold; first-rep ratio = rep 1 / mean of reps 21–40:
 
 | Target | rep 1 / plateau (Python-driven upcall) | flat from | margin at 100 000 |
 |---|---|---|---|
@@ -1076,10 +1076,10 @@ landed near it only because the rest of the suite had warmed the path.
 | androidNative `pmp_api36` | 1.27x | ~40 000 | 2.5x |
 | androidNative `pmp_api26` | 1.30x | ~30 000 | 3.3x |
 | ART `pmp_api26` | 1.93x | ~20 000, noisily | 5x |
-| **ART `pmp_api36`** | **8.56x** | **~90 000–100 000** | **~1x — none** |
+| **ART `pmp_api36`** | **8.56x** | **~90 000–100 000** | **~1x, none** |
 
 ART `pmp_api36`'s sweep: 9194.8, 3218.9, 2288.7, 1648.3, 1218.3, 1173.3, 1129.5, 1532.7, 1057.8, 1044.6 ns against
-a plateau of 1074.2 — still 9% high at 70 000. Its downcall is flat from ~80 000 and its GIL-held trampoline
+a plateau of 1074.2, still 9% high at 70 000. Its downcall is flat from ~80 000 and its GIL-held trampoline
 from ~50 000, so the Python-driven upcall sets the requirement. The controls are flat from the first rep on all
 five device configurations (iOS 10.5 → 10.2 ns and 37.9 → 38.0 ns; ART `pmp_api36` 17.3 → 17.3 ns and
 49.7 → 50.4 ns), so the sweep measures the boundary, not the interpreter. The host sweeps behind `WARMUP`'s doc:
@@ -1093,7 +1093,7 @@ ART `pmp_api36`, a slower device or busier host may read the boundary before it 
 
 **Filtered runs.** A desktop `--tests` run of this class alone reads 506–550 ns, inside the full-suite band, and
 its controls match (8.4–8.6 vs 8.4 ns). **wasmJs is the exception**: filtered it reads 321–353 ns and its
-*pure-Python* controls read 23.1 and 83.1 ns against the suite's 15.0 and 47.2 — CPython is itself a wasm
+*pure-Python* controls read 23.1 and 83.1 ns against the suite's 15.0 and 47.2, CPython is itself a wasm
 module there, so a short-lived Node process runs the interpreter 55–74% slower. Tripling the warmup to 300 000
 does not move it (host-lifetime-bound). wasmJs's ratios survive filtering (2.66–3.13x vs 2.91–3.14x); its
 absolutes are a full-suite figure only. The devices do not have the effect (three filtered runs vs five
@@ -1119,7 +1119,7 @@ against a `threading.Thread` caller.
 pushes `test.kexe` and the CPython prefix (`Py_Initialize` aborts without a stdlib) to `/data/local/tmp`, runs
 it under the TeamCity logger and converts the service messages to JUnit XML under
 `build/test-results/androidNativeArm64Test/`, on every connected device with a matching ABI. First runs: 252
-tests, 0 failures, both emulators, five runs — `artMain` and the androidNative cinterop came up clean.
+tests, 0 failures, both emulators, five runs, `artMain` and the androidNative cinterop came up clean.
 
 ### 7.3 The trampoline column needs a control
 
@@ -1138,17 +1138,17 @@ simulator, 0.82–0.85x and 0.77–0.78x on androidNative `pmp_api36`/`pmp_api26
 
 The **GIL-held** row is the comparable denominator (§7.1 uses it). Desktop and wasmJs never showed the effect
 because their GIL scope is 24–57 ns against 276–1221 ns on a device. At the old 3 000 warmup desktop's empty
-scope read 124–152 ns and wasmJs's 79–81 ns — the cheapest operation is the one an unwarmed loop overstates
+scope read 124–152 ns and wasmJs's 79–81 ns, the cheapest operation is the one an unwarmed loop overstates
 most. wasmJs's GIL-held trampoline is dearer than desktop's although its GIL scope is half the price, so wasm
 pays for the trampoline body, not the GIL.
 
 ### 7.4 Where the differences come from
 
-- **iOS and androidNative: the scaffolding, not the boundary.** There is no runtime boundary on these targets —
+- **iOS and androidNative: the scaffolding, not the boundary.** There is no runtime boundary on these targets,
   a `staticCFunction` in the same binary. What is expensive is per-call scaffolding every C API call shares: an
   empty `withPython` scope is 720–1002 ns there against 50–57 ns on desktop and 24–28 ns on wasm, and the same
   inflation hits the downcall denominator, which is why the ratio sits near 1.4. (In the round that measured
-  `Py_IncRef + Py_DecRef` — two calls, two GIL scopes — it cost 1551–2032 ns on iOS and 2010–2132 ns on
+  `Py_IncRef + Py_DecRef`, two calls, two GIL scopes, it cost 1551–2032 ns on iOS and 2010–2132 ns on
   androidNative against 110–120 ns on desktop and 44–49 ns on wasm; those device figures were unwarmed, so the
   multiple is not quotable, but the gap is wide enough that the conclusion survives.) Work to move either number
   belongs in the scaffolding, not in `UpcallEntry`.
@@ -1156,13 +1156,13 @@ pays for the trampoline body, not the GIL.
   ns is the Panama upcall stub plus the `ctypes` shim, the largest relative boundary measured (5.62–7.02x in that
   round, 5.54–6.46x in the cost table). Desktop's `_pm_invoke` is a `ctypes.CFUNCTYPE` (and in this benchmark a
   Python `lambda *a: _pm_invoke(_pm_h, a)`), where other targets bind a `PyCFunction`, so desktop's row is an
-  **upper bound** on its boundary — it includes ctypes' argument conversion and, in the benchmark, one extra
+  **upper bound** on its boundary, it includes ctypes' argument conversion and, in the benchmark, one extra
   Python call (26.7–27.2 ns).
-- **wasmJs: ~300 ns with arguments**, of which 122–129 ns is the trampoline; the rest is the Python-side callable
+- **wasmJs: ~300 ns with arguments**: of which 122–129 ns is the trampoline; the rest is the Python-side callable
   and the crossing with a real tuple. Its scaffolding is the cheapest and most stable (24.47–27.52 ns for an
   empty scope across eleven runs), as there is no OS thread machinery; that row reads 34–37 ns when the class is
   run alone, for the reason in §7.2.
-- **ART: one JNI upcall per call**, plus the per-thread attach the first time a CPython-created thread calls
+- **ART: one JNI upcall per call**: plus the per-thread attach the first time a CPython-created thread calls
   (§7.6). Neither is on the marshalling path.
 
 ### 7.5 What a user calls: the generated proxy over the boundary
@@ -1170,7 +1170,7 @@ pays for the trampoline body, not the GIL.
 `GeneratedProxyCostTest` (`commonTest`) prices each proxy surface against the raw `_pm_invoke` call it wraps,
 measured through the same object, in the same run, each row a zero-argument Python function called by one
 shared loop (the floor is subtracted). Each row is the **minimum of three timed loops**: the quantity is a
-difference of tens of ns on a boundary of hundreds and noise is one-sided — with one loop per row, four runs put
+difference of tens of ns on a boundary of hundreds and noise is one-sided, with one loop per row, four runs put
 the instance-method delta at −17, −31, −60 and −71 ns. The last row of each table is the report's own
 resolution: two raw rows are the same call (`_pm_invoke(h, ())`, different handle), so their difference is what
 cannot be resolved. Three runs; taken in the round before §7.2's warmup fix, so read internally (raw against
@@ -1187,7 +1187,7 @@ proxy), not against §7.1's absolutes.
 | `Counter.created = 12` static write | 466–507 ns | 511–573 ns | 1.07–1.13x | +34…+66 ns |
 | `demo.calc.tally` top-level read | 449–485 ns | 484–521 ns | 1.03–1.07x | +14…+36 ns |
 | `demo.calc.tally = 9` top-level write | 466–507 ns | 520–553 ns | 1.08–1.11x | +44…+54 ns |
-| `Counter(10)` constructor | 682–761 ns | 588–627 ns | — | not separable (below) |
+| `Counter(10)` constructor | 682–761 ns | 588–627 ns | - | not separable (below) |
 | *resolution* | | | | *−3…+9 ns* |
 | **iOS simulator** (arm64) | | | | |
 | `demo.calc.ping()` module function | 1801–1890 ns | 1829–1895 ns | 1.00–1.01x | +6…+28 ns |
@@ -1239,7 +1239,7 @@ an empty call: plain module attribute 14 ns; PEP 562 module `__getattr__` 214 ns
 | `demo.calc.tally = 9` write | +109…+136 ns (1.21–1.29x) | +44…+54 ns (1.08–1.11x) |
 
 `PythonProxyInstallTest` passed unchanged across it, including the read-only refusal; nothing in the source
-says which shape is fifty times dearer — the measurement found it.
+says which shape is fifty times dearer, the measurement found it.
 
 **The await fast path costs one coroutine frame:**
 
@@ -1288,7 +1288,7 @@ Attach once per thread (after, commit `409da6fc`):
 | upcall / downcall of the same shape, worker | **0.99–1.09x** | **2.00–2.34x** |
 
 Re-run unchanged over five full suites per emulator after `09bf2397` put `commonTest` on the device (so
-`UpcallBoundaryCostTest`'s several hundred thousand upcalls ran first and left the JIT warm — the observation the
+`UpcallBoundaryCostTest`'s several hundred thousand upcalls ran first and left the JIT warm, the observation the
 warmup fix came from: the API 36 instrumentation row differs fourfold at the same warmup and emulator):
 
 | re-run, 5 suites each | API 26 | API 36 |
@@ -1299,10 +1299,10 @@ warmup fix came from: the API 36 instrumentation row differs fourfold at the sam
 | first upcall on a fresh worker | 88 250–242 375 ns | 41 208–611 416 ns |
 
 On API 36 the claim sharpens (the gap is tight around zero). On API 26 a worker costs a little more (+43–249 ns
-against a ~1250 ns call) — not a return of the per-call attach. **The first upcall on each worker still pays the
+against a ~1250 ns call), not a return of the per-call attach. **The first upcall on each worker still pays the
 attach in full** (56–142 µs in the first round, 41–611 µs in the re-run): once per thread, not once per call. A
 worker that upcalls once gains nothing; one that upcalls in a loop is 20–50× better off. The structural assertion
-the test enforces — one ART thread per Python worker — is a count and unaffected by warmup.
+the test enforces, one ART thread per Python worker, is a count and unaffected by warmup.
 
 ---
 
