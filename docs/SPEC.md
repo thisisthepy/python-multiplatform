@@ -70,6 +70,7 @@ fail, then implement.
 - **L-7** iOS: the framework carries no stdlib, so `PYTHONHOME` must point at one; the test build
   extracts it. `Status: partial` — exercised by the shared suite on the simulator; no iOS-specific
   lifecycle test beyond `PM/iosSimulatorArm64Test/.../AsyncioAvailabilityProbeTest.kt`.
+- **L-8** Initialisation sets `builtins.compiled` to an identity decorator (an existing one is kept), so `@compiled` needs no import on any platform (N-7, issue #42). `Status: implemented` — `PM/commonTest/.../ffi/BuiltinCompiledTest.kt`.
 
 ## 2. Low-level C API (downcall surface)
 
