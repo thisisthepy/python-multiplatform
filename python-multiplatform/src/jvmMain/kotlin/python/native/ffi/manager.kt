@@ -3,6 +3,7 @@ package python.native.ffi
 import python.multiplatform.OSType
 import python.multiplatform.Versions
 import python.multiplatform.currentPlatform
+import python.multiplatform.env.PackagedPythonHome
 import java.io.File
 import java.io.FileOutputStream
 import java.util.*
@@ -69,9 +70,11 @@ internal object manager {
      * extraction path has: the stdlib comes from `PYTHONHOME` while the binary came from the jar,
      * so the two can disagree about the version.
      *
-     * Only [LIBPYTHON_OVERRIDE_ENV] takes precedence over the classpath copy. The `PYTHONHOME`
-     * probe runs *after* it, and only when the resource is absent, so a classpath deployment loads
-     * exactly the library it always did.
+     * Precedence: [LIBPYTHON_OVERRIDE_ENV]; then a packaged application's prefix
+     * ([PackagedPythonHome], SPEC L-9) when it holds the library; then the classpath copy. The
+     * `PYTHONHOME` probe runs last, and only when the resource is absent. [PackagedPythonHome]
+     * resolves to nothing while `PYTHONHOME` is set, so a development or test run loads exactly
+     * the library it always did.
      */
     private fun loadFromSidecar(libraryName: String, prerequisites: List<String> = emptyList()): Boolean {
         val override = System.getenv(LIBPYTHON_OVERRIDE_ENV)
@@ -82,8 +85,16 @@ internal object manager {
                 }
             }
         } else {
-            if (hasBundledLibrary(libraryName)) return false
-            resolveSidecarLibrary(libraryName)
+            // A packaged application's own prefix (SPEC L-9) comes before the classpath copy. That
+            // copy is extracted into the *working directory* and then loaded through
+            // `java.library.path` -- which works for this build's tests because they pass
+            // `-Djava.library.path=.`, and does not for an app a desktop launches with `/` as its
+            // working directory. Loading the library that sits beside the stdlib also keeps the
+            // two from coming from different builds. Null whenever PYTHONHOME is set, so a
+            // development run loads exactly what it always did.
+            val packaged = PackagedPythonHome.resolve()?.let { libraryUnder(it.path, libraryName) }
+            if (packaged == null && hasBundledLibrary(libraryName)) return false
+            packaged ?: resolveSidecarLibrary(libraryName)
                 ?: throw UnsatisfiedLinkError(
                     "CPython is neither bundled on the classpath nor present under PYTHONHOME" +
                         (System.getenv("PYTHONHOME")?.let { " ($it)" } ?: " (PYTHONHOME is unset)") +
@@ -107,6 +118,11 @@ internal object manager {
      */
     internal fun resolveSidecarLibrary(libraryName: String): File? {
         val home = System.getenv("PYTHONHOME")?.takeIf { it.isNotBlank() } ?: return null
+        return libraryUnder(home, libraryName)
+    }
+
+    /** [libraryName]'s shared library under the prefix [home], in either layout; null if absent. */
+    internal fun libraryUnder(home: String, libraryName: String): File? {
         val fileName = System.mapLibraryName(libraryName)
         return sequenceOf(
             File(home, "lib/$fileName"),

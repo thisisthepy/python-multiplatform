@@ -14,6 +14,17 @@ object bindings {
     inline fun Py_Initialize() = Py_InitializeHandle.invokeExact() as Unit
     val Py_InitializeExHandle: MethodHandle
     inline fun Py_InitializeEx(initsigs: Int) = Py_InitializeExHandle.invokeExact(initsigs) as Unit
+    /**
+     * `void Py_SetPythonHome(const wchar_t *home)` -- desktop only, not in `EmbedAPI.kt`.
+     *
+     * How a packaged desktop app, whose launcher cannot set `PYTHONHOME`, names its prefix before
+     * `Py_Initialize()` (SPEC L-9, `applyPackagedPythonHome`). Deprecated in 3.11 in favour of
+     * `PyConfig.home`, but `PyConfig` is a struct whose layout the Stable ABI does not promise (see
+     * `Python3.initialize`), and this function is part of the Stable ABI, so its symbol stays
+     * exported. Takes a `wchar_t *`, not UTF-8: see `encodeWideString`.
+     */
+    val Py_SetPythonHomeHandle: MethodHandle
+    inline fun Py_SetPythonHome(home: Long) = Py_SetPythonHomeHandle.invokeExact(home) as Unit
     val Py_IsInitializedHandle: MethodHandle
     inline fun Py_IsInitialized(): Int = Py_IsInitializedHandle.invokeExact() as Int
     val Py_IsFinalizingHandle: MethodHandle
@@ -930,6 +941,7 @@ inline fun PyDict_GetItemString(p: Long, key: String): Long {
         // Section 1
         Py_InitializeHandle = find("Py_Initialize", Void.TYPE)
         Py_InitializeExHandle = find("Py_InitializeEx", Void.TYPE, Integer.TYPE)
+        Py_SetPythonHomeHandle = find("Py_SetPythonHome", Void.TYPE, P)
         Py_IsInitializedHandle = find("Py_IsInitialized", Integer.TYPE)
         Py_IsFinalizingHandle = find("Py_IsFinalizing", Integer.TYPE)
         Py_FinalizeExHandle = find("Py_FinalizeEx", Integer.TYPE)

@@ -71,6 +71,24 @@ fail, then implement.
   extracts it. `Status: partial` — exercised by the shared suite on the simulator; no iOS-specific
   lifecycle test beyond `PM/iosSimulatorArm64Test/.../AsyncioAvailabilityProbeTest.kt`.
 - **L-8** Initialisation sets `builtins.compiled` to an identity decorator (an existing one is kept), so `@compiled` needs no import on any platform (N-7, issue #42). `Status: implemented` — `PM/commonTest/.../ffi/BuiltinCompiledTest.kt`.
+- **L-9** Desktop: a packaged application starts with no `PYTHONHOME` in its environment (issue #60,
+  ROADMAP §15.4). The Gradle plugin copies the prefix `stagePythonHome` stages into Compose Desktop's
+  application resources (every `prepare*AppResources` task, so `createDistributable` and the
+  `package*` tasks built on it) under `python-multiplatform-home/`: the standard library
+  (`lib/python<X.Y>/`, or `Lib/` and `DLLs/` on Windows) and the shared library, without
+  `__pycache__`, headers, `bin/` or Tcl/Tk. `pythonBindings { packagePythonHome.set(false) }` turns
+  this off. At run time, before `Py_Initialize`, desktop takes the first of: `PYTHONHOME` from the
+  environment (CPython reads it itself and nothing else happens); the system property
+  `python.multiplatform.home`; `<compose.application.resources.dir>/python-multiplatform-home` when
+  that directory exists. A prefix taken from a property goes through L-3's check (a catchable
+  `IllegalStateException` naming the path and where it came from), is handed to CPython with
+  `Py_SetPythonHome`, and is where `libpython` is loaded from when it contains one.
+  `Status: partial` — `GP/PackagedPythonHomeTest.kt` (what is copied, which tasks, the switch);
+  `PM/desktopTest/.../env/PackagedPythonHomeTest.kt` (resolution order, `wchar_t` encoding, library
+  lookup) and `PackagedPythonHomeLaunchTest.kt` (a child JVM with `PYTHONHOME` removed imports `json`
+  from the prefix a property names, or from a Compose resources directory). The
+  `createDistributable` run itself is a manual check —
+  `docs/platforms/desktop-packaged-app.md`.
 - **L-9a** (issue #74) Desktop packaging and loading of `libpython`: every `lib/**` entry of the desktop jar is a real
   file (never 0 bytes -- Gradle extracts the python-build-standalone symlink `libpython3.14.so` as an empty file, so
   symlinks are resolved and the real library is packed under the `System.mapLibraryName` name, no `.so.1.0`); linux

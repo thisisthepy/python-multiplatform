@@ -2600,6 +2600,11 @@ android {
     sourceSets["main"].assets.srcDirs("src/androidMain/assets", "$androidBuildDir/assets")
     // KMP androidMain resources do not reach the AAR's classes.jar; AGP's main resources do.
     sourceSets["main"].resources.srcDir(generatePythonProperties)
+    // AGP's legacy source-set API resolves that provider to files and drops the task dependency
+    // (issue #72: `processReleaseJavaRes` read the output with no declared dependency), so it is
+    // declared on every AGP java-resources task explicitly.
+    tasks.matching { Regex("""process\w*JavaRes""").matches(it.name) }
+        .configureEach { dependsOn(generatePythonProperties) }
     sourceSets["androidTest"].assets.srcDirs("$androidBuildDir/assets")
     sourceSets["debug"].jniLibs.srcDirs("src/androidMain/jniLibs",
         "$androidBuildDir/jniLibs", "$androidBuildDir/debug/jniLibs")
