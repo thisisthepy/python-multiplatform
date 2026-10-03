@@ -31,7 +31,12 @@ import python.multiplatform.gradle.model.ValueClassModel
  *
  * A class whose name is also a function in its module (`PaddingValues(...)` the factory and
  * `PaddingValues` the interface) cannot be both in one Python module, and the runtime resolves the
- * name to the function, so such a type is annotated `Any`.
+ * name to the function, so such a type is annotated `Any`. A class's **own constructor** is the
+ * exception (issue #73): it is rendered as the class's `__init__`, so the class keeps its stub --
+ * members, properties and all -- and `TextFieldState(...)` type-checks as a `TextFieldState`, which is
+ * what the runtime's constructor callable returns. Its `__`-suffixed table-key spellings stay module
+ * functions as well. (`isinstance(x, TextFieldState)` is the one thing the stub promises that the
+ * runtime, whose module attribute is the callable, does not do.)
  *
  * A Kotlin `object` (`Alignment`, `Arrangement`) is a module of its constants and functions, and the
  * types nested in it (`Alignment.Horizontal`) are classes of that same module, so
@@ -188,10 +193,33 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
     private val byModule: Map<String, List<DeclarationModel>> =
         bound.groupBy { moduleOf(it) }.toSortedMap()
 
-    /** Every name a module defines at the top level, which a class stub must not take. */
+    /**
+     * A class's own constructor, published in the class's own package under the class's name (issue
+     * #73). It does not take that name away from the class: the stub writes it as the class's
+     * `__init__`, so `TextFieldState(...)` type-checks as making a `TextFieldState` -- which is what the
+     * runtime's constructor callable returns. A factory function of the same name is not one of these.
+     */
+    private fun isOwnConstructor(d: DeclarationModel): Boolean =
+        d.isConstructor && d.kind == "FUNCTION" && d.receiver == null &&
+            moduleOf(d) == d.owner && baseOf(leafOf(d)) == d.simpleName &&
+            d.returnType.qualifiedName == "${d.owner}.${d.simpleName}"
+
+    /** Every name a module defines at the top level, which a class stub must not take. A constructor's
+     * base name is its class's, so it takes nothing but its `__`-suffixed table-key spelling. */
     private val takenNames: Map<String, Set<String>> = byModule.mapValues { (_, entries) ->
-        entries.flatMap { d -> leafOf(d).let { leaf -> if (isSuffixed(leaf)) listOf(leaf, baseOf(leaf)) else listOf(leaf) } }.toSet()
+        entries.flatMap { d ->
+            leafOf(d).let { leaf ->
+                when {
+                    isOwnConstructor(d) -> if (isSuffixed(leaf)) listOf(leaf) else emptyList()
+                    isSuffixed(leaf) -> listOf(leaf, baseOf(leaf))
+                    else -> listOf(leaf)
+                }
+            }
+        }.toSet()
     }
+
+    /** Class qualified name -> its bound constructors, in table-key order; filled by [renderModuleDefs]. */
+    private val constructorsByClass = sortedMapOf<String, MutableList<DeclarationModel>>()
 
     /**
      * Module prefixes (every module and every directory above it) that name one directory on a
@@ -399,8 +427,16 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
                 return@forEach
             }
             val ctx = out(module)
-            val sorted = entries.sortedBy { it.bindingName }
+            // A constructor is its class's `__init__` (see [isOwnConstructor]) whenever the class has a
+            // stub to put it in; only its `__`-suffixed table-key spelling is also a module function,
+            // because the runtime serves it as one. A class with no stub keeps the old rendering.
+            val (constructors, sorted) = entries.sortedBy { it.bindingName }
+                .partition { isOwnConstructor(it) && classReference(it.returnType, ctx) != ANY }
             sorted.forEach { ctx.defs += renderDef(it, ctx) }
+            constructors.forEach { d ->
+                if (isSuffixed(leafOf(d))) ctx.defs += renderDef(d, ctx)
+                constructorsByClass.getOrPut(d.returnType.qualifiedName) { mutableListOf() } += d
+            }
             // The base name of an overload set: the binding layer serves it, so the stub says it.
             val unsuffixedLeaves = sorted.filter { !isSuffixed(leafOf(it)) }.map { leafOf(it) }.toSet()
             sorted.filter { it.kind != "STATIC_GETTER" && isSuffixed(leafOf(it)) }
@@ -473,6 +509,18 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
                 val reference = classReference(base, null, ctx)
                 if (reference != ANY) node.bases = reference
             }
+
+        constructorsByClass[qualifiedName]?.let { group ->
+            group.forEachIndexed { index, d ->
+                node.members += if (group.size == 1) {
+                    "def __init__(${parameters(d, ctx, method = true)}) -> None:\n" +
+                        "    \"\"\"Kotlin: ${kotlinSignatureOf(d)}\"\"\"\n" +
+                        "    ..."
+                } else {
+                    "@$TYPING.overload\ndef __init__(${parameters(d, ctx, method = true)}) -> None: ..." + shadowed(index)
+                }
+            }
+        }
 
         val attributes = sortedMapOf<String, MutableList<DeclarationModel>>()
         extensionsByReceiver[qualifiedName].orEmpty().sortedBy { it.bindingName }.forEach { d ->
