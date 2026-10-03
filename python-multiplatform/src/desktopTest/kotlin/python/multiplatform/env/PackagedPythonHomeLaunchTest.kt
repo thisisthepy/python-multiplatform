@@ -33,8 +33,21 @@ class PackagedPythonHomeLaunchTest {
 
     @AfterTest
     fun cleanup() {
-        scratchDirs.forEach { it.deleteRecursively() }
+        scratchDirs.forEach { deleteWithoutFollowingLinks(it) }
         scratchDirs.clear()
+    }
+
+    /**
+     * A scratch directory here holds a symbolic link to the *real* staged prefix. `File.deleteRecursively`
+     * follows it and empties the prefix every other test in this JVM (and the next run) depends on --
+     * it did, and 159 desktop tests failed with "no readable standard library". `Files.walk` without
+     * `FOLLOW_LINKS` lists the link itself, so the link is deleted and its target is not.
+     */
+    private fun deleteWithoutFollowingLinks(dir: File) {
+        if (!Files.exists(dir.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS)) return
+        Files.walk(dir.toPath()).use { paths ->
+            paths.sorted(Comparator.reverseOrder()).forEach { Files.delete(it) }
+        }
     }
 
     /** Under `build/`, not the system temporary directory -- AGENTS.md rule 2. */
