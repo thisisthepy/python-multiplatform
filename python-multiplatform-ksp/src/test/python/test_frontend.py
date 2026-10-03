@@ -5,6 +5,7 @@ a function was left interpreted. The IR's own docstrings (typedpython/ir.py) are
 mixed int/float gets `ToFloat`, chains evaluate the middle operand once, an impure function has
 no node that can deopt.
 """
+import dataclasses
 import shutil
 import textwrap
 from pathlib import Path
@@ -15,7 +16,7 @@ from typedpython import frontend
 from typedpython.ir import (
     And, ArrayParam, Assign, BinOp, BinOpKind, Box, Break, Call, CallObject, Compare, CompareKind,
     CompareObj, Const, ExprStmt, While, ForRange, GetAttr, Global, If, Index, Len, Local, MathCall,
-    MathFunc, ObjToFloat, Param, Return, StoreIndex, ToFloat, Truth, Type,
+    MathFunc, ObjToFloat, Param, Return, StoreIndex, ToFloat, Truth, Type, UnaryOp, UnaryOpKind,
 )
 
 I64, F64, BOOL, OBJ = Type.I64, Type.F64, Type.BOOL, Type.OBJ
@@ -33,6 +34,20 @@ def function(module, name):
     found = [f for f in module.functions if f.name == name]
     assert found, f"{name} was not lowered: {module.skipped.get(name)!r}"
     return found[0]
+
+
+def nodes(root, cls):
+    """Every IR node of class `cls` under `root` (a Function, statement or expression)."""
+    found, stack = [], [root]
+    while stack:
+        x = stack.pop()
+        if isinstance(x, (tuple, list)):
+            stack.extend(x)
+        elif dataclasses.is_dataclass(x) and not isinstance(x, type):
+            if isinstance(x, cls):
+                found.append(x)
+            stack.extend(getattr(x, f.name) for f in dataclasses.fields(x))
+    return found
 
 
 # --- the basic shape -----------------------------------------------------------------------------
@@ -128,6 +143,61 @@ def test_impure_function_with_unproved_int_arithmetic_is_skipped(tmp_path):
     # `n * 2` can overflow i64 and the function is impure, so it is an int object: no native index.
     assert m.functions == ()
     assert "line 3" in m.skipped["h"] and "n * 2" in m.skipped["h"]
+
+
+def test_range_index_arithmetic_is_proven(tmp_path):
+    # ir.BinOp.proven / UnaryOp.proven: the interval proof is recorded in the node.
+    m = lower(tmp_path, """
+        @compiled
+        def shift(a: list[float]) -> None:
+            for i in range(4):
+                a[i + 1] = a[i] - float(-i) + float(i * 2 - 1)
+    """)
+    f = function(m, "shift")
+    assert not f.pure and not f.may_deopt
+    ints = [b for b in nodes(f, BinOp) if b.type == I64]
+    assert ints and all(b.proven for b in ints)
+    assert BinOp(I64, BinOpKind.ADD, Local(I64, "i"), Const(I64, 1), proven=True) in ints
+    assert nodes(f, UnaryOp) == [UnaryOp(I64, UnaryOpKind.NEG, Local(I64, "i"), proven=True)]
+
+
+def test_unbounded_int_arithmetic_is_not_proven(tmp_path):
+    m = lower(tmp_path, """
+        @compiled
+        def f(a: int, b: int) -> int:
+            return -(a + b)
+    """)
+    f = function(m, "f")
+    assert f.pure and f.may_deopt
+    assert f.body == (Return(UnaryOp(I64, UnaryOpKind.NEG, BinOp(
+        I64, BinOpKind.ADD, Local(I64, "a"), Local(I64, "b")))),)
+    assert not any(b.proven for b in nodes(f, BinOp)) and not nodes(f, UnaryOp)[0].proven
+
+
+def test_float_arithmetic_is_never_marked_proven(tmp_path):
+    # `proven` is for I64 ADD/SUB/MUL/NEG only (F64 never deopts).
+    m = lower(tmp_path, """
+        @compiled
+        def f(x: float) -> float:
+            return -(x + 1.0)
+    """)
+    f = function(m, "f")
+    assert not any(n.proven for n in nodes(f, BinOp) + nodes(f, UnaryOp))
+
+
+@pytest.mark.parametrize("expr", ["i // 2", "i / 2"])
+def test_int_division_cannot_be_recorded_as_proven_so_it_deopts(tmp_path, expr):
+    # ir.BinOp.proven exists for ADD/SUB/MUL only; the verifier cannot re-prove // and / on i64,
+    # so they count as deopting: in a pure function may_deopt, in an impure one a CPython int.
+    m = lower(tmp_path, f"""
+@compiled
+def f(n: int) -> float:
+    t: float = 0.0
+    for i in range(10):
+        t += {expr}
+    return t
+""")
+    assert function(m, "f").may_deopt
 
 
 # --- conversions ---------------------------------------------------------------------------------
@@ -238,7 +308,7 @@ def test_augmented_store_evaluates_a_computed_index_once(tmp_path):
     f = function(m, "bump_last")
     first, store = f.body
     assert isinstance(first, Assign)
-    assert first.value == BinOp(I64, BinOpKind.SUB, Len(I64, "a"), Const(I64, 1))
+    assert first.value == BinOp(I64, BinOpKind.SUB, Len(I64, "a"), Const(I64, 1), proven=True)
     t = first.target
     assert store == StoreIndex(
         "a", Local(I64, t),
@@ -316,7 +386,8 @@ def norm(x: float) -> float:
 
 # --- calls and purity ----------------------------------------------------------------------------
 
-def test_impure_caller_of_a_deopting_function_is_skipped(tmp_path):
+def test_impure_caller_redoes_a_deopting_pure_callee(tmp_path):
+    # ir.Call.redo: on a deopt only the (pure) callee is redone; the caller does not deopt.
     m = lower(tmp_path, """
         @compiled
         def tri(i: int, j: int) -> float:
@@ -329,7 +400,66 @@ def test_impure_caller_of_a_deopting_function_is_skipped(tmp_path):
     """)
     tri = function(m, "tri")
     assert tri.pure and tri.may_deopt
-    assert "tri" in m.skipped["fill"] and "line 8" in m.skipped["fill"]
+    fill = function(m, "fill")
+    assert not fill.pure and not fill.may_deopt
+    assert nodes(fill, Call) == [Call(F64, "tri", (Local(I64, "i"), Local(I64, "i")), redo=True)]
+    assert nodes(fill, CallObject) == []
+
+
+@pytest.mark.parametrize("returns, body, use", [
+    ("bool", "return i + j > 0", "if tri(i, i):\n            out[i] = 1.0"),
+    ("None", "k = i + j", "tri(i, i)\n        out[i] = 1.0"),
+])
+def test_redo_call_for_bool_and_none_callees(tmp_path, returns, body, use):
+    m = lower(tmp_path, f"""
+@compiled
+def tri(i: int, j: int) -> {returns}:
+    {body}
+
+@compiled
+def fill(n: int, out: list[float]) -> None:
+    for i in range(n):
+        {use}
+""")
+    assert function(m, "tri").may_deopt
+    fill = function(m, "fill")
+    assert not fill.pure and not fill.may_deopt
+    [call] = nodes(fill, Call)
+    assert call.function == "tri" and call.redo
+
+
+def test_impure_caller_of_an_int_returning_deopting_callee_calls_the_global(tmp_path):
+    # An I64 result of a redo could be a big int: such a callee is still called as an object.
+    m = lower(tmp_path, """
+        @compiled
+        def add(i: int, j: int) -> int:
+            return i + j
+
+        @compiled
+        def fill(n: int, out: list[float]) -> None:
+            for i in range(n):
+                out[i] = float(add(i, i))
+    """)
+    fill = function(m, "fill")
+    assert not fill.pure and not fill.may_deopt
+    assert nodes(fill, Call) == []
+    assert nodes(fill, CallObject) == [
+        CallObject(OBJ, Global(OBJ, "add"), (Box(OBJ, Local(I64, "i")), Box(OBJ, Local(I64, "i"))))]
+
+
+def test_pure_caller_of_a_deopting_callee_does_not_redo(tmp_path):
+    m = lower(tmp_path, """
+        @compiled
+        def tri(i: int, j: int) -> float:
+            return 1.0 / (i + j)
+
+        @compiled
+        def twice(i: int) -> float:
+            return tri(i, i) * 2.0
+    """)
+    twice = function(m, "twice")
+    assert twice.pure and twice.may_deopt
+    assert [c.redo for c in nodes(twice, Call)] == [False]
 
 
 def test_pure_caller_of_a_deopting_function_lowers(tmp_path):
@@ -398,23 +528,105 @@ def test_unsupported_signature_is_skipped(tmp_path, signature):
     assert m.functions == () and "f" in m.skipped
 
 
-def test_global_read_is_a_global_node(tmp_path):
+def test_global_read_in_a_function_that_runs_user_code_is_a_global_node(tmp_path):
+    # `print(x)` runs user code, which could rebind K: K is read where it is used (LOAD_GLOBAL).
     m = lower(tmp_path, """
         K: float = 2.0
 
         @compiled
         def f(x: float) -> object:
+            print(x)
             return x * K
 
         @compiled
         def g(x: float) -> float:
+            print(x)
             return x * K
     """)
     f = function(m, "f")
-    assert f.body == (Return(
-        BinOp(OBJ, BinOpKind.MUL, Box(OBJ, Local(F64, "x")), Global(OBJ, "K"))),)
+    assert f.body[1] == Return(
+        BinOp(OBJ, BinOpKind.MUL, Box(OBJ, Local(F64, "x")), Global(OBJ, "K")))
+    assert f.entry_globals == ()
     assert not f.pure and not f.may_deopt
     assert "x * K" in m.skipped["g"]
+
+
+def test_scalar_globals_in_a_closed_function_are_entry_globals(tmp_path):
+    m = lower(tmp_path, """
+        PI: float = 3.141592653589793
+        SOLAR_MASS: float = 4 * PI * PI
+        DAYS = 365.24
+        N = 3
+        ON: bool = True
+
+        @compiled
+        def scale(a: list[float]) -> None:
+            for i in range(N):
+                if ON:
+                    a[i] = a[i] / SOLAR_MASS * DAYS
+
+        @compiled
+        def k(x: float) -> float:
+            return x * SOLAR_MASS
+    """)
+    scale = function(m, "scale")
+    assert scale.entry_globals == (Param("N", I64), Param("ON", BOOL), Param("SOLAR_MASS", F64),
+                                   Param("DAYS", F64))
+    assert nodes(scale, Global) == []
+    assert Local(F64, "SOLAR_MASS") in nodes(scale, Local)
+    assert not scale.pure and not scale.may_deopt
+    k = function(m, "k")
+    assert k.entry_globals == (Param("SOLAR_MASS", F64),)
+    assert k.body == (Return(BinOp(F64, BinOpKind.MUL, Local(F64, "x"), Local(F64, "SOLAR_MASS"))),)
+    assert k.pure and not k.may_deopt
+    assert "SOLAR_MASS" not in k.locals
+
+
+def test_closedness_follows_calls(tmp_path):
+    m = lower(tmp_path, """
+        K: float = 2.0
+
+        @compiled
+        def noisy(x: float) -> float:
+            print(x)
+            return x
+
+        @compiled
+        def quiet(x: float) -> float:
+            return x + 1.0
+
+        @compiled
+        def via_noisy(x: float) -> object:
+            return noisy(x) * K
+
+        @compiled
+        def via_quiet(x: float) -> float:
+            return quiet(x) * K
+    """)
+    assert function(m, "via_noisy").entry_globals == ()
+    assert Global(OBJ, "K") in nodes(function(m, "via_noisy"), Global)
+    assert function(m, "via_quiet").entry_globals == (Param("K", F64),)
+
+
+@pytest.mark.parametrize("module", [
+    "K: float = 2.0\nK = 3.0\n",                                         # assigned twice
+    "K: float = 2.0\n\ndef reset() -> None:\n    global K\n    K = 1.0\n",  # `global K` elsewhere
+    "import os\nif os.sep:\n    K = 2.0\n",                             # not at top level
+    "for K in (1.0,):\n    pass\n",                                      # a loop target
+    "import os\nK = os.cpu_count()\n",                                   # neither annotated nor literal
+    "K: str = 'a'\n",                                                    # not a scalar
+    "K: float = 2.0\ndel K\n",                                           # deleted
+])
+def test_a_global_that_may_be_rebound_is_never_an_entry_global(tmp_path, module):
+    m = lower(tmp_path, module + """
+
+@compiled
+def f(x: float) -> object:
+    return x * K
+""")
+    f = function(m, "f")
+    assert f.entry_globals == ()
+    assert Global(OBJ, "K") in nodes(f, Global)
 
 
 def test_module_marker_compiles_every_module_level_def(tmp_path):
@@ -576,14 +788,22 @@ def test_recursion_is_skipped(tmp_path, source):
     assert m.functions == () and "recurs" in m.skipped["f"]
 
 
-def test_int_modulo_never_deopts(tmp_path):
+def test_int_modulo_cannot_be_recorded_as_proven_so_it_deopts(tmp_path):
+    # ir.BinOp.proven covers ADD/SUB/MUL only and the verifier counts an unproven i64 `%` as a
+    # deopting node: in a pure function that is may_deopt, in an impure one a CPython int.
     m = lower(tmp_path, """
+        @compiled
+        def pure_mod(i: int, n: int) -> int:
+            return i % n
+
         @compiled
         def put(a: list[float], i: int, n: int) -> None:
             a[i % n] = 1.0
     """)
-    f = function(m, "put")
-    assert not f.pure and not f.may_deopt
+    f = function(m, "pure_mod")
+    assert f.pure and f.may_deopt
+    assert not any(b.proven for b in nodes(f, BinOp))
+    assert "i % n" in m.skipped["put"]
 
 
 def test_locals_exclude_parameters(tmp_path):
@@ -604,8 +824,29 @@ def test_nbody_kernels_lower(tmp_path):
     shutil.copy(BENCH / "nbody.py", path)
     path.write_text("# typedpython: compiled\n" + path.read_text())
     m = frontend.lower(path)
-    for name in ("advance", "energy"):
+    for name in ("advance", "energy", "offset_momentum"):
         function(m, name)
     advance = function(m, "advance")
     assert not advance.pure and not advance.may_deopt
-    assert function(m, "energy").pure
+    assert BinOp(I64, BinOpKind.ADD, Local(I64, "i"), Const(I64, 1), proven=True) \
+        in nodes(advance, BinOp)
+    energy = function(m, "energy")
+    assert energy.pure and not energy.may_deopt
+    offset = function(m, "offset_momentum")
+    assert not offset.pure and not offset.may_deopt
+    assert offset.entry_globals == (Param("SOLAR_MASS", F64),)
+    assert nodes(offset, Global) == []
+
+
+@pytest.mark.skipif(not BENCH.exists(), reason="benchmark worktree not present")
+def test_spectral_norm_kernels_lower(tmp_path):
+    path = tmp_path / "spectral_norm.py"
+    path.write_text("# typedpython: compiled\n" + (BENCH / "spectral_norm.py").read_text())
+    m = frontend.lower(path)
+    eval_a = function(m, "eval_a")
+    assert eval_a.pure and eval_a.may_deopt
+    for name in ("mul_av", "mul_atv"):
+        f = function(m, name)
+        assert not f.pure and not f.may_deopt
+        [call] = nodes(f, Call)
+        assert call.function == "eval_a" and call.redo
