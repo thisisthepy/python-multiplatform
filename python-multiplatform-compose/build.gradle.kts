@@ -36,6 +36,7 @@ kotlin {
             api(projects.pythonMultiplatform)
             api(compose.runtime)
             api(compose.ui)
+            api(compose.runtimeSaveable)
         }
     }
 }
