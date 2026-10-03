@@ -187,7 +187,7 @@ cycles, interning and `Py_ssize_t` are closed (`PM/wasmJsTest/`: `WasmFinalizati
 `WasmCycleCollectionTest`, `WasmPySsizeTBoundaryTest`, `WasmBrowserRuntimeTest`,
 `WasmSelectorsImportTest`); the plugin stages the runtime for consumers
 (`GP/main/kotlin/python/multiplatform/gradle/WasmBrowserRuntimeStaging.kt`,
-`GenerateWasmProxyExportsTask.kt`). The interpreter is built by `tools/wasm/build-cpython.sh`
+`GenerateWasmProxyExportsTask.kt`). The interpreter is built by `python-multiplatform/scripts/wasm/build-cpython.sh`
 (`docs/platforms/wasm-design.md`). Old §10c/§10d (browser test, CI split) are closed; their open
 remainder is 10.1.
 
@@ -212,7 +212,7 @@ remainder is 10.1.
   staged by the plugin; it was never run in a browser, and no production bundler other than the
   Kotlin Gradle webpack setup was tried (also `docs/design/ecosystem.md` §5 "Unverified").
 - **10.5 The wasm CPython build lacks lzma, zstd and OpenSSL, open.** Listed as "NOT DONE" in
-  `tools/wasm/build-cpython.sh`'s header; ABI-sensitive per the Pyodide flag list, though they did not
+  `python-multiplatform/scripts/wasm/build-cpython.sh`'s header; ABI-sensitive per the Pyodide flag list, though they did not
   gate the one compiled wheel tested (`WasmCompiledWheelTest`).
 - **10.6 The sample's wasm upcall line (`presses x3 = 0`) was never cross-checked against desktop,
   unverified, minor.**
@@ -264,7 +264,7 @@ trampolines exist. GraalVM native image upcalls are verified by hand
 
 - **13.1 The iOS app bundle carries no Python standard library, implemented, simulator proof
   open.** SPEC L-11, issue #59, `docs/platforms/ios-app-bundle.md`: per-slice staging
-  (`stageIosPythonHome_*`, `stageIosPythonHomeForXcode`), `tools/xcode/install-python.sh` (stdlib to
+  (`stageIosPythonHome_*`, `stageIosPythonHomeForXcode`), `python-multiplatform-gradle-plugin/src/main/resources/xcode/install-python.sh` (stdlib to
   `<app>/python-multiplatform-home/`, payload to `<app>/python/`, `.so` wrapped as frameworks with
   `.fwork` placeholders) replacing the two broken phases of the old root `iosApp/` (now `sample/src/iosMain/app.xcodeproj`, #107), and `IosPythonHome` +
   `Py_SetPythonHome` at run time. Left: the installed-app run on the simulator with no

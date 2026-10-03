@@ -627,7 +627,7 @@ merges an overlap.
 
 ## 8. Checked with mypy, and published
 
-- `tools/stubs/check-stubs.sh <stub-dir>` runs `mypy --strict` over `tools/stubs/consumer.py` (a
+- `.github/scripts/stubs/check-stubs.sh <stub-dir>` runs `mypy --strict` over `.github/scripts/stubs/consumer.py` (a
   `Modifier` chain from the class and from an instance, `Checkbox`, `Text`, `Column` with its keyword
   `content`, and four lines that must be rejected) against stubs generated for the real Compose jars
   (`:ksp-fixtures:compose:generatePythonStubs`, which `ksp-fixtures/compose` now enables). Errors inside

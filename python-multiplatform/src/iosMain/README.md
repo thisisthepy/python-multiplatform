@@ -33,7 +33,7 @@ than an installed app, and exactly the shape that hangs an app rather than start
 An installed **app** carries its own prefix inside its bundle (SPEC L-11,
 `docs/platforms/ios-app-bundle.md`):
 
-- `stageIosPythonHome_<sdk>_<arch>` stages the stdlib for one slice; `tools/xcode/install-python.sh`,
+- `stageIosPythonHome_<sdk>_<arch>` stages the stdlib for one slice; `python-multiplatform-gradle-plugin/src/main/resources/xcode/install-python.sh`,
   an Xcode Run Script phase, copies it to `<app>/python-multiplatform-home/`, copies the consumer's
   payload to `<app>/python/`, and wraps every `.so` as `Frameworks/<module>.framework` with a
   `.fwork` placeholder (Apple loads no loose binaries; CPython's `AppleFrameworkLoader` follows the

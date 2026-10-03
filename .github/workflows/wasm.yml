@@ -129,7 +129,7 @@ jobs:
       # `-PrequireWasmRuntime` a missing wheel is a failure, not a skip, so fetch them first: by URL,
       # each accepted only against the sha256 the script pins.
       - name: Fetch the pinned wasm wheels
-        run: bash tools/wasm/build-cpython.sh wheels
+        run: bash python-multiplatform/scripts/wasm/build-cpython.sh wheels
 
       # `-PrequireWasmRuntime` is the second half of the guard, and it is what makes this job unable
       # to repeat the original defect: if either task would skip -- no interpreter, or no

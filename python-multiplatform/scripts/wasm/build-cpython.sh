@@ -2,12 +2,12 @@
 # CPython 3.14.2 for wasm32-emscripten, ABI-matched to pyemscripten_2026_0 (PEP 783), and staged as
 # the runtime python-multiplatform's wasmJs target runs against.
 #
-#   tools/wasm/build-cpython.sh            build + zip + verify + stage   (needs network the first time)
-#   tools/wasm/build-cpython.sh zip        rebuild only the stdlib zip of an existing build (no emsdk)
-#   tools/wasm/build-cpython.sh verify     check an existing build and its zip carry the ABI claims
-#   tools/wasm/build-cpython.sh stage      copy python.wasm, python.mjs and the zip to the runtime dir
-#   tools/wasm/build-cpython.sh wheels     download the pinned compiled wheels the wasm suite loads
-#   tools/wasm/build-cpython.sh stock      build a STOCK PEP 776 interpreter as a negative control
+#   python-multiplatform/scripts/wasm/build-cpython.sh            build + zip + verify + stage   (needs network the first time)
+#   python-multiplatform/scripts/wasm/build-cpython.sh zip        rebuild only the stdlib zip of an existing build (no emsdk)
+#   python-multiplatform/scripts/wasm/build-cpython.sh verify     check an existing build and its zip carry the ABI claims
+#   python-multiplatform/scripts/wasm/build-cpython.sh stage      copy python.wasm, python.mjs and the zip to the runtime dir
+#   python-multiplatform/scripts/wasm/build-cpython.sh wheels     download the pinned compiled wheels the wasm suite loads
+#   python-multiplatform/scripts/wasm/build-cpython.sh stock      build a STOCK PEP 776 interpreter as a negative control
 #
 # Everything lands inside this repository, under the git-ignored `.caches/`:
 #
@@ -53,7 +53,7 @@
 # PYVERSION ?= 3.14.2).
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 CACHES="$ROOT/.caches"
 
 CPYTHON_TAG=v3.14.2
