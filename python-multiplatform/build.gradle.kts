@@ -575,23 +575,17 @@ val androidDownloadTasks = androidTargets.map { (platform, arch) ->
  * `pyabi.h`, `slots.h` and `slots_generated.h` instead -- a 3.14-vs-3.15 difference, not a
  * packaging one. Both ship a GIL-enabled build; neither publishes a free-threaded iOS variant.
  */
-val iosFromPythonOrg = pythonVersion.split(".").let {
-    it[0].toInt() > 3 || (it[0].toInt() == 3 && it[1].toInt() >= 15)
-}
-
-val iosArchiveName = if (iosFromPythonOrg) {
-    "python-$pythonVersion-iOS-XCframework.tar.gz"
-} else {
-    "Python-$libVersion-iOS-support.$pythonAppleSupportBuild.tar.gz"
-}
-val iosUrl = if (iosFromPythonOrg) {
-    "https://www.python.org/ftp/python/$pythonOrgReleaseDir/$iosArchiveName"
-} else {
-    "https://github.com/beeware/Python-Apple-support/releases/download/$libVersion-$pythonAppleSupportBuild/$iosArchiveName"
-}
+// Name, URL and lockfile key come from the Gradle plugin's `IosSupportArchive` (issue #90), which a
+// consumer's `acquireIosPythonSupport` uses too, so the two cannot pin different archives. The
+// SHA-256 itself stays in `python-checksums.properties`; the plugin build generates its table from
+// that same file.
+val iosPin = python.multiplatform.gradle.IosSupportArchive.forVersion(pythonVersion, pythonAppleSupportBuild)
+val iosFromPythonOrg = iosPin.fromPythonOrg
+val iosArchiveName = iosPin.archiveName
+val iosUrl = iosPin.url
 val iosArchive = file("$downloadDir/$iosArchiveName")
 val iosExtractDir = file("$extractedDir/ios")
-val iosLockKey = if (iosFromPythonOrg) "ios-$pythonVersion-pythonorg" else "ios-$libVersion-$pythonAppleSupportBuild"
+val iosLockKey = iosPin.lockKey
 pythonArchiveKeys[iosLockKey] = iosArchive
 
 val downloadPython_ios = tasks.register("downloadPython_ios") {
@@ -1449,56 +1443,18 @@ tasks.withType<org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeSimu
 // The selection rules are `IosPythonHomeLayout` in the Gradle plugin, where they are unit-tested.
 // =================================================================================================
 
-val iosPythonHomeRoot = layout.buildDirectory.dir("python-ios-home")
-
-val stageIosPythonHomeSlices = python.multiplatform.gradle.IosPythonHomeLayout.slices.map { slice ->
-    tasks.register(slice.stageTaskName, python.multiplatform.gradle.StageIosPythonHomeTask::class.java) {
-        group = "python"
-        description = "Stages CPython's standard library for an iOS app built for ${slice.name} (SPEC L-10)"
-        dependsOn(downloadPython_ios)
-        xcframework.set(file("$extractedDir/ios/Python.xcframework"))
-        sliceName.set(slice.name)
-        pythonVersion.set(configuredPythonVersion)
-        destinationDir.set(iosPythonHomeRoot.map { it.dir(slice.name) })
-    }
-}
-
-/** Every slice; the Xcode phase uses [stageIosPythonHomeForXcode], which stages only the one it builds. */
-val stageIosPythonHome by tasks.registering {
-    group = "python"
-    description = "Stages CPython's standard library for every iOS app slice (SPEC L-10)"
-    dependsOn(stageIosPythonHomeSlices)
-}
-
-/**
- * The Xcode phase's entry point. Picks the slice from `EFFECTIVE_PLATFORM_NAME` and `ARCHS` -- Xcode
- * exports both to a Run Script phase, and `./gradlew` passes the client's environment to the build --
- * stages it, and prints two lines a `-q` run leaves alone on stdout:
- *
- *     PYTHON_HOME_DIR=<abs>/python-ios-home/<slice>/home
- *     PYTHON_DYLIB_INFO_TEMPLATE=<abs>/python-ios-home/<slice>/dylib-Info-template.plist
- *
- * The same contract shape as toolchain's `stagePythonBundleIosForXcode` (`PYTHON_PAYLOAD_DIR=`).
- * Run outside Xcode (no `EFFECTIVE_PLATFORM_NAME`), or for a universal `ARCHS`, it fails while the
- * task graph is built, with the reason, rather than staging a guessed slice.
- */
-val stageIosPythonHomeForXcode by tasks.registering {
-    group = "python"
-    description = "Stages the iOS app prefix for the slice Xcode is building and prints its path (SPEC L-10)"
-    val platformName = providers.environmentVariable("EFFECTIVE_PLATFORM_NAME")
-    val archs = providers.environmentVariable("ARCHS")
-    val selected = providers.provider {
-        python.multiplatform.gradle.IosPythonHomeLayout.sliceFor(platformName.orNull, archs.orNull)
-    }
-    // Only the slice being built: staging all three costs three lib-dynload trees per build.
-    dependsOn(selected.map { tasks.named(it.stageTaskName) })
-    val root = iosPythonHomeRoot.map { it.asFile.absolutePath }
-    doLast {
-        val slice = selected.get().name
-        println("PYTHON_HOME_DIR=${root.get()}/$slice/${python.multiplatform.gradle.StageIosPythonHomeTask.PREFIX_DIRECTORY}")
-        println("PYTHON_DYLIB_INFO_TEMPLATE=${root.get()}/$slice/${python.multiplatform.gradle.StageIosPythonHomeTask.TEMPLATE_NAME}")
-    }
-}
+// `stageIosPythonHome_<slice>`, `stageIosPythonHome` and `stageIosPythonHomeForXcode` (prints
+// PYTHON_HOME_DIR= and PYTHON_DYLIB_INFO_TEMPLATE= for the slice Xcode builds) are registered by the
+// Gradle plugin's `IosPythonHomeTasks`, the same registration a consumer that applies the plugin gets
+// (issue #90); only the xcframework differs -- this build's own extraction here, the plugin's
+// Gradle-user-home cache there.
+python.multiplatform.gradle.IosPythonHomeTasks.register(
+    project = project,
+    xcframework = layout.dir(provider { file("$extractedDir/ios/Python.xcframework") }),
+    root = layout.buildDirectory.dir(python.multiplatform.gradle.IosPythonHomeTasks.STAGING_DIRECTORY),
+    pythonVersion = provider { configuredPythonVersion },
+    after = downloadPython_ios,
+)
 
 // =================================================================================================
 // androidNative -- giving the target a test *run*, not just a test *link*.

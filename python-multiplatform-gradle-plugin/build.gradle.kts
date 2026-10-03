@@ -246,6 +246,21 @@ val generateCoordinates = tasks.register("generateCoordinates") {
     val pythonVersionValue = rootProperties.getProperty("pythonVersion") ?: "3.14.7"
     val pbsReleaseValue = rootProperties.getProperty("pythonBuildStandaloneRelease") ?: "20260807"
     val freeThreadedValue = rootProperties.getProperty("pythonFreeThreaded")?.toBoolean() ?: false
+    // BeeWare's Python-Apple-support build tag (SPEC L-11, issue #90); same fallback as the library.
+    val appleSupportBuildValue = rootProperties.getProperty("pythonAppleSupportBuild") ?: "b11"
+
+    // The iOS archive pins, generated from the root build's own lockfile rather than restated: the
+    // library's `downloadPython_ios` verifies against `python-checksums.properties`, and a consumer's
+    // `acquireIosPythonSupport` must accept exactly the same bytes. Only the `ios-*` keys are carried;
+    // desktop staging verifies against upstream's SHA256SUMS instead (`StagePythonHomeTask`). A
+    // checkout without the lockfile generates an empty table, and the task then fails with the key
+    // it was looking for rather than downloading an unverified archive.
+    val iosChecksumsValue = Properties().apply {
+        val file = rootDir.resolve("../python-checksums.properties")
+        if (file.isFile) file.inputStream().use { load(it) }
+    }.let { props ->
+        props.stringPropertyNames().filter { it.startsWith("ios-") }.sorted().associateWith { props.getProperty(it).trim() }
+    }
 
     // `python-multiplatform` itself is versioned "$pythonVersion-alpha01" -- see that build's own
     // `val libraryVersion` -- which is *not* this plugin build's `project.version` (kept in step by
@@ -262,6 +277,8 @@ val generateCoordinates = tasks.register("generateCoordinates") {
     inputs.property("pythonVersion", pythonVersionValue)
     inputs.property("pbsRelease", pbsReleaseValue)
     inputs.property("pythonFreeThreaded", freeThreadedValue)
+    inputs.property("pythonAppleSupportBuild", appleSupportBuildValue)
+    inputs.property("iosChecksums", iosChecksumsValue)
     inputs.property("wasmRuntimeCoordinates", wasmRuntimeCoordinatesValue)
     outputs.dir(outputDir)
     doLast {
@@ -281,6 +298,18 @@ val generateCoordinates = tasks.register("generateCoordinates") {
             internal const val DEFAULT_PBS_RELEASE: String = "$pbsReleaseValue"
 
             internal const val DEFAULT_PYTHON_FREE_THREADED: Boolean = $freeThreadedValue
+
+            /** BeeWare Python-Apple-support build tag the library's iOS archive comes from (<= 3.14). */
+            internal const val DEFAULT_PYTHON_APPLE_SUPPORT_BUILD: String = "$appleSupportBuildValue"
+
+            /**
+             * The `ios-*` entries of the root build's `python-checksums.properties`: lock key ->
+             * SHA-256 of the iOS support archive. One table, read by the library build at download
+             * time and generated here for a consumer's `acquireIosPythonSupport` (issue #90).
+             */
+            internal val PINNED_IOS_SUPPORT_SHA256: Map<String, String> = mapOf(
+                ${iosChecksumsValue.entries.joinToString(",\n                ") { "\"${it.key}\" to \"${it.value}\"" }}
+            )
 
             /**
              * `python-multiplatform`'s `wasmRuntime` publication -- see ROADMAP §10. Versioned
@@ -310,9 +339,23 @@ val generateCoordinates = tasks.register("generateCoordinates") {
     }
 }
 
+/**
+ * The Xcode Run Script `tools/xcode/install-python.sh`, carried inside the plugin jar so a consumer
+ * outside this repository gets the same script this repository's `iosApp` runs (issue #90).
+ * Copied, not rewritten: the repository file stays the one source, and
+ * `WriteIosInstallPythonScriptTask` only replaces its default Gradle task path at write time.
+ */
+val xcodeScriptResources = tasks.register<Sync>("xcodeScriptResources") {
+    from(rootDir.resolve("../tools/xcode/install-python.sh"))
+    into(layout.buildDirectory.dir("generated/xcodeScriptResources/python/multiplatform/gradle/xcode"))
+}
+
 sourceSets.main {
     kotlin.srcDir(generateCoordinates)
+    resources.srcDir(layout.buildDirectory.dir("generated/xcodeScriptResources"))
 }
+
+tasks.named("processResources") { dependsOn(xcodeScriptResources) }
 
 /**
  * Fails if anything a consumer would put on their **buildscript** classpath by applying this plugin

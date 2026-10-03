@@ -217,8 +217,12 @@ internal fun stagingStamp(
  * short". A copy rather than a link also survives being copied into a jar or an app image, which
  * flatten links. Dependency-free: `GZIPInputStream` plus a minimal ustar/GNU/pax header reader.
  * A link whose target is not inside the archive, or that escapes [root], is skipped.
+ *
+ * [include] sees each entry's archive path (no trailing `/`) and drops the ones it rejects, data and
+ * links alike -- the iOS support archive carries a `testbed/` Xcode project beside
+ * `Python.xcframework/`, with a link back to it that would otherwise be copied in full (issue #90).
  */
-internal fun extractTarGzMaterialisingLinks(archive: File, root: File) {
+internal fun extractTarGzMaterialisingLinks(archive: File, root: File, include: (String) -> Boolean = { true }) {
     val rootPath = root.canonicalFile.toPath()
     fun inside(rel: String): java.nio.file.Path? {
         val p = rootPath.resolve(rel).normalize()
@@ -281,6 +285,10 @@ internal fun extractTarGzMaterialisingLinks(archive: File, root: File) {
             (paxLink ?: longLink)?.let { linkName = it }
             longName = null; longLink = null; paxPath = null; paxLink = null
 
+            if (!include(name.trimEnd('/'))) {
+                if (size > 0) readData(size)
+                continue
+            }
             val dest = inside(name.trimEnd('/')) ?: run {
                 if (size > 0) readData(size)
                 null

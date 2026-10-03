@@ -21,6 +21,9 @@ private const val OPTION_EXCLUDE_PACKAGES = "python.multiplatform.excludePackage
 private const val ROLE_LIBRARY = "library"
 private const val ROLE_APP = "app"
 
+internal const val ACQUIRE_IOS_SUPPORT_TASK = "acquireIosPythonSupport"
+internal const val STAGE_IOS_XCFRAMEWORK_TASK = "stageIosPythonXcframework"
+
 /** Created by toolchain's plugin (toolchain#23); referenced by name only. */
 private const val TYPEDPYTHON_STUBS_CONFIGURATION = "typedpythonStubs"
 
@@ -155,6 +158,14 @@ interface PythonBindingsExtension {
     val pythonFreeThreaded: Property<Boolean>
 
     /**
+     * BeeWare Python-Apple-support build tag (`b11`) whose iOS support archive provides
+     * `Python.xcframework` for CPython <= 3.14 (3.15+ comes from python.org and ignores it). Defaults
+     * to the one this library was built against. Only archives the library's
+     * `python-checksums.properties` pins can be staged -- see [AcquireIosPythonSupportTask].
+     */
+    val pythonAppleSupportBuild: Property<String>
+
+    /**
      * Whether to unpack `python-multiplatform`'s published wasm browser runtime for any `wasmJs*`
      * task this consumer's build declares. Defaults to true, and is a no-op unless a `wasmJs()`
      * target actually exists -- see [StageWasmBrowserRuntimeTask]'s kdoc for why registering it is
@@ -279,6 +290,7 @@ class PythonBindingsPlugin : Plugin<Project> {
         }
 
         configurePythonHomeStaging(project, extension)
+        configureIosPython(project, extension)
         configureWasmBrowserRuntimeStaging(project, extension)
 
         project.afterEvaluate {
@@ -682,6 +694,91 @@ class PythonBindingsPlugin : Plugin<Project> {
                     requireNoEmptyLibraries(destinationDir.resolve(PACKAGED_HOME_DIRECTORY))
                 }
             }
+    }
+
+    /**
+     * The consumer side of SPEC L-11 -- issue #90. An app outside this repository that applies this
+     * plugin and depends on the published library gets:
+     *
+     * 1. `acquireIosPythonSupport`: the pinned iOS support archive ([IosSupportArchive]), downloaded,
+     *    checked against the root lockfile's SHA-256, and its `Python.xcframework` extracted once per
+     *    machine under `<Gradle user home>/python-multiplatform/ios-support/<lock key>/`, with a stamp
+     *    -- the iOS counterpart of `stagePythonHome`.
+     * 2. `stageIosPythonXcframework`: that framework synced to `build/xcode-frameworks/Python.xcframework`,
+     *    for the app's Xcode project to link and embed; and, on every Kotlin/Native iOS `Framework`
+     *    binary, `-framework Python -F<that>/<slice>` appended to `linkerOpts` with the link task
+     *    depending on the sync ([IosPythonXcframework.wireFrameworks]).
+     * 3. `stageIosPythonHome_<slice>`, `stageIosPythonHome` and `stageIosPythonHomeForXcode` into
+     *    `build/python-ios-home/`, the same tasks and output contract the library build has
+     *    ([IosPythonHomeTasks]).
+     * 4. `writeIosInstallPythonScript`: `tools/xcode/install-python.sh` written to
+     *    `build/python-multiplatform/xcode/`, defaulting to this project's own
+     *    `stageIosPythonHomeForXcode`.
+     *
+     * All four are registered lazily on every host and never run unless asked for, or unless an iOS
+     * framework is linked; nothing is downloaded by a build that does neither. The extension is read
+     * through providers, so a `pythonBindings { }` block after `plugins { }` still takes effect.
+     */
+    internal fun configureIosPython(project: Project, extension: PythonBindingsExtension) {
+        val version = project.provider { extension.pythonVersion.getOrElse(DEFAULT_PYTHON_VERSION) }
+        val appleSupportBuild = project.provider {
+            extension.pythonAppleSupportBuild.getOrElse(DEFAULT_PYTHON_APPLE_SUPPORT_BUILD)
+        }
+        val pin = version.zip(appleSupportBuild) { v, b -> IosSupportArchive.forVersion(v, b) }
+        val cacheRoot = java.io.File(project.gradle.gradleUserHomeDir, IosSupportArchive.CACHE_DIRECTORY)
+
+        val acquire = project.tasks.register(ACQUIRE_IOS_SUPPORT_TASK, AcquireIosPythonSupportTask::class.java) {
+            group = "python"
+            description = "Downloads the pinned iOS support archive and extracts Python.xcframework into the Gradle user home."
+            pythonVersion.set(version)
+            archiveName.set(pin.map { it.archiveName })
+            url.set(pin.map { it.url })
+            lockKey.set(pin.map { it.lockKey })
+            sha256.set(pin.map { IosSupportArchive.pinnedSha256(it.lockKey).orEmpty() })
+            destinationDir.set(project.layout.dir(pin.map { java.io.File(cacheRoot, it.lockKey) }))
+            downloadDir.set(java.io.File(cacheRoot, "archives"))
+        }
+        val cachedXcframework = acquire.flatMap { it.destinationDir.dir(IosPythonXcframework.NAME) }
+
+        val stagedXcframework = project.layout.buildDirectory
+            .dir("${IosPythonXcframework.STAGED_DIRECTORY}/${IosPythonXcframework.NAME}")
+        val stageXcframework = project.tasks.register(STAGE_IOS_XCFRAMEWORK_TASK, org.gradle.api.tasks.Sync::class.java) {
+            group = "python"
+            description = "Copies Python.xcframework into build/xcode-frameworks for Xcode and the Kotlin framework link."
+            dependsOn(acquire)
+            from(cachedXcframework)
+            into(stagedXcframework)
+            exclude("**/__pycache__/**")
+        }
+
+        IosPythonHomeTasks.register(
+            project = project,
+            xcframework = cachedXcframework,
+            root = project.layout.buildDirectory.dir(IosPythonHomeTasks.STAGING_DIRECTORY),
+            pythonVersion = version,
+            after = acquire,
+        )
+
+        val writeScript = project.tasks.register(
+            WriteIosInstallPythonScriptTask.NAME,
+            WriteIosInstallPythonScriptTask::class.java,
+        ) {
+            group = "python"
+            description = "Writes the Xcode Run Script install-python.sh for this project into its build directory."
+            homeTaskPath.set(consumerIosHomeTaskPath(project.path))
+            template.set(project.provider { bundledInstallPythonScript() })
+            scriptFile.set(project.layout.buildDirectory.file(WriteIosInstallPythonScriptTask.SCRIPT_PATH))
+        }
+
+        project.pluginManager.withPlugin("org.jetbrains.kotlin.multiplatform") {
+            val kotlin = project.extensions.findByName("kotlin") ?: return@withPlugin
+            IosPythonXcframework.wireFrameworks(
+                project = project,
+                kotlin = kotlin,
+                stagedXcframework = stagedXcframework.get().asFile,
+                linkDependencies = listOf(stageXcframework, writeScript),
+            )
+        }
     }
 
     /**
