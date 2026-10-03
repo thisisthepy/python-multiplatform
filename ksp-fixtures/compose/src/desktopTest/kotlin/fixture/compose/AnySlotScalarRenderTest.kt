@@ -4,7 +4,7 @@ import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.unit.Density
-import python.multiplatform.compose.PythonContent
+import python.multiplatform.compose.PythonWidget
 import python.multiplatform.ffi.Python3
 import python.multiplatform.ffi.pythonx.PythonxAdapter
 import python.multiplatform.ffi.upcall.PythonProxySource
@@ -25,7 +25,7 @@ import kotlin.test.assertTrue
  * `Int`, and incrementing it from Python (`counter.value = counter.value + 1`, the walked
  * `MutableState.value` getter and setter) recomposes the root that read it.
  *
- * Modelled on [PythonContentRenderTest]: `ImageComposeScene` has no frame clock, so the test is the
+ * Modelled on [PythonAppViewRenderTest]: `ImageComposeScene` has no frame clock, so the test is the
  * clock (`Snapshot.sendApplyNotifications()` and a render), and the root counts its own invocations so
  * a frame can be attributed.
  *
@@ -81,7 +81,7 @@ class AnySlotScalarRenderTest {
 
         val root = Python3.import("__main__").getAttr("_asr_root")
         val scene = ImageComposeScene(width = 200, height = 60, density = Density(1f)) {
-            PythonContent(root = root)
+            PythonWidget(root = root)
         }
         try {
             scene.render()
