@@ -62,15 +62,15 @@ class PythonHomeStagingTest {
         // *different* CPython build than the `libpython` in `desktopJar` was taken from, and the
         // two can disagree about ABI while both being version 3.14.7.
         assertEquals(
-            "cpython-3.14.7+20260807-aarch64-apple-darwin-install_only.tar.gz",
+            "cpython-3.14.7+20260807-aarch64-apple-darwin-install_only_stripped.tar.gz",
             pbsAssetName("3.14.7", "20260807", "macos-aarch64", freeThreaded = false),
         )
         assertEquals(
-            "cpython-3.14.7+20260807-x86_64-unknown-linux-gnu-install_only.tar.gz",
+            "cpython-3.14.7+20260807-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
             pbsAssetName("3.14.7", "20260807", "linux-x86_64", freeThreaded = false),
         )
         assertEquals(
-            "cpython-3.14.7+20260807-x86_64-pc-windows-msvc-install_only.tar.gz",
+            "cpython-3.14.7+20260807-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
             pbsAssetName("3.14.7", "20260807", "windows-x86_64", freeThreaded = false),
         )
     }
@@ -81,7 +81,7 @@ class PythonHomeStagingTest {
         // prefix holds `lib/python3.14t/` rather than `lib/python3.14/`. Staging the default
         // tarball for a free-threaded consumer produces a prefix `PythonHomeCheck` rejects.
         assertEquals(
-            "cpython-3.14.7+20260807-aarch64-apple-darwin-freethreaded-install_only.tar.gz",
+            "cpython-3.14.7+20260807-aarch64-apple-darwin-freethreaded-install_only_stripped.tar.gz",
             pbsAssetName("3.14.7", "20260807", "macos-aarch64", freeThreaded = true),
         )
     }
@@ -90,8 +90,8 @@ class PythonHomeStagingTest {
     fun theUrlIsTheAstralReleaseTheRepoPins() {
         assertEquals(
             "https://github.com/astral-sh/python-build-standalone/releases/download/20260807/" +
-                "cpython-3.14.7+20260807-aarch64-apple-darwin-install_only.tar.gz",
-            pbsAssetUrl("20260807", "cpython-3.14.7+20260807-aarch64-apple-darwin-install_only.tar.gz"),
+                "cpython-3.14.7+20260807-aarch64-apple-darwin-install_only_stripped.tar.gz",
+            pbsAssetUrl("20260807", "cpython-3.14.7+20260807-aarch64-apple-darwin-install_only_stripped.tar.gz"),
         )
     }
 
@@ -103,12 +103,12 @@ class PythonHomeStagingTest {
         // than on a line index matters: the file lists every asset of the release, hundreds of
         // them, in no order this code should depend on.
         val sums = """
-            1111111111111111111111111111111111111111111111111111111111111111  cpython-3.14.7+20260807-x86_64-pc-windows-msvc-install_only.tar.gz
-            2222222222222222222222222222222222222222222222222222222222222222  cpython-3.14.7+20260807-aarch64-apple-darwin-install_only.tar.gz
+            1111111111111111111111111111111111111111111111111111111111111111  cpython-3.14.7+20260807-x86_64-pc-windows-msvc-install_only_stripped.tar.gz
+            2222222222222222222222222222222222222222222222222222222222222222  cpython-3.14.7+20260807-aarch64-apple-darwin-install_only_stripped.tar.gz
         """.trimIndent()
         assertEquals(
             "2222222222222222222222222222222222222222222222222222222222222222",
-            sha256Of(sums, "cpython-3.14.7+20260807-aarch64-apple-darwin-install_only.tar.gz"),
+            sha256Of(sums, "cpython-3.14.7+20260807-aarch64-apple-darwin-install_only_stripped.tar.gz"),
         )
     }
 
@@ -116,16 +116,16 @@ class PythonHomeStagingTest {
     fun aFilenameThatIsOnlyASuffixOfAnotherIsNotMatched() {
         // `endsWith` is what the root build uses, and it is wrong in principle here: the
         // free-threaded asset name *contains* nothing of the default one, but
-        // `...-install_only.tar.gz` is a suffix of `...-freethreaded-install_only.tar.gz`. Asking
+        // `...-install_only_stripped.tar.gz` is a suffix of `...-freethreaded-install_only_stripped.tar.gz`. Asking
         // for the default asset must not return the free-threaded hash, or verification fails on
         // a file that is actually intact.
         val sums = """
-            3333333333333333333333333333333333333333333333333333333333333333  cpython-3.14.7+20260807-aarch64-apple-darwin-freethreaded-install_only.tar.gz
-            4444444444444444444444444444444444444444444444444444444444444444  cpython-3.14.7+20260807-aarch64-apple-darwin-install_only.tar.gz
+            3333333333333333333333333333333333333333333333333333333333333333  cpython-3.14.7+20260807-aarch64-apple-darwin-freethreaded-install_only_stripped.tar.gz
+            4444444444444444444444444444444444444444444444444444444444444444  cpython-3.14.7+20260807-aarch64-apple-darwin-install_only_stripped.tar.gz
         """.trimIndent()
         assertEquals(
             "4444444444444444444444444444444444444444444444444444444444444444",
-            sha256Of(sums, "cpython-3.14.7+20260807-aarch64-apple-darwin-install_only.tar.gz"),
+            sha256Of(sums, "cpython-3.14.7+20260807-aarch64-apple-darwin-install_only_stripped.tar.gz"),
         )
     }
 
