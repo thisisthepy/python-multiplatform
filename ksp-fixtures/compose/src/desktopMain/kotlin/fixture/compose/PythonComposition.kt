@@ -16,9 +16,9 @@ import python.multiplatform.ffi.pythonx.PythonCallables
  *
  * The composer plumbing and the callable holder are no longer this fixture's: they are
  * `python-multiplatform-compose`'s `withPythonComposer` and `PythonCallableArena`, which the host
- * entry point `PythonContent` is built on too. What stays is executing a *source string* per pass,
+ * entry point `PythonAppView` is built on too. What stays is executing a *source string* per pass,
  * which is a test harness rather than an entry point -- a host draws a Python-declared root with
- * `PythonContent` (`PythonContentRenderTest`).
+ * `PythonAppView` (`PythonAppViewRenderTest`).
  *
  * ### Why exactly one, and not one per component
  *
