@@ -285,7 +285,7 @@ upstream 대비 수치 오차를 기준선으로 박아 둔다.
    도구 pragma 형태이고, 실행 시 이름 조회가 필요 없어 일반 CPython 에서 부작용이 없으며, 데코레이터 없이
    모듈 전체를 지정할 수 있다.
 2. ~~고정폭 정수의 오버플로 의미~~ — **결정됨:** `int` 는 i64 로 컴파일하고 오버플로 시 인터프리터 재실행으로 큰 정수로 승격(의미 보존).
-3. ~~pypackpack Cython 슬롯 인터페이스 소유~~ — **결정됨:** pypackpack 이 정한다. TypedPython 은 생성한 C 소스, 빌드 플래그, 모듈 목록, 모듈별 `.py` 폴백을 넘긴다(Cython 폐기 후 갱신).
+3. ~~pypackpack Cython 슬롯 인터페이스 소유~~ — **결정됨:** pypackpack 이 정한다. TypedPython 은 생성한 C 소스, 빌드 플래그, C 를 낸 모듈 목록을 넘긴다. 확장이 원본 소스를 품으므로 별도 `.py` 폴백은 없다(Cython 폐기 후 갱신).
 4. GPU 착지를 torchnative 커스텀 op 로 할 것인가 (다른 레포 변경).
 5. ~~TypedPython 을 별도 레포로 분리할 것인가~~ — **결정됨 (2026-10-02):** PythonMultiplatform 의
    기본 동작. 검사는 기본, 컴파일은 opt-in.
