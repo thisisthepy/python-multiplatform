@@ -293,6 +293,19 @@ def _whole_module(source: str) -> bool:
     return next((line.strip() for line in source.splitlines() if line.strip()), "") == MARKER
 
 
+def is_opted_in(path: Path) -> bool:
+    """Whether the front end considers the module for compilation at all: the `# typedpython: compiled`
+    marker as its first non-empty line, or a module-level `def` / `class` decorated `@compiled`
+    (the same tests `_targets` and `_classes` apply)."""
+    source = Path(path).read_text()
+    if _whole_module(source):
+        return True
+    return any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        and any(isinstance(d, ast.Name) and d.id == "compiled" for d in node.decorator_list)
+        for node in ast.parse(source, filename=str(path)).body)
+
+
 def _classes(
     tree: ast.Module, source: str, info: _ModuleInfo,
 ) -> tuple[dict[str, ir.ClassDecl], dict[str, str]]:
