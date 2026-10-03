@@ -8,6 +8,13 @@ The project currently uses `python-build-standalone` (maintained by Astral). For
 *   **Asset Naming Scheme:** The asset naming follows the pattern: `cpython-<python-version>+<build-date>-<target>-<flavour>.<ext>`.
     *   Targets include: `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`.
     *   Flavours include: `install_only`, `install_only_stripped`, and `full` (which also includes debug symbols, pgo/lto variants). The archives are available in `.tar.gz` and `.tar.zst` formats.
+*   **Flavour acquired: `install_only_stripped`** (issue #86). The plain `install_only` linux `libpython3.14.so.1.0`
+    carries debug info (251,884,016 bytes); the `install_only_stripped` one is 33,106,704 bytes with no `.debug_*`
+    section (it keeps `.symtab`, so `file` still says "not stripped"). The stripped flavour exists for every desktop
+    target and both GIL and free-threaded builds, for 3.14.7 and 3.15.0rc1 in release `20260807`, so no platform falls
+    back. The archives are pinned in `python-checksums.properties` and agree with the release's `SHA256SUMS`; the
+    desktop jar's build check (`DesktopJarLibrariesTest`) fails if a linux library in it has `.debug_info`. A host
+    `strip` (absent or ELF-blind on macOS) is not used.
 *   **URL Pattern:** `https://github.com/astral-sh/python-build-standalone/releases/download/<release-tag>/<asset-name>`
 
 ## 2. Free-threaded Variants

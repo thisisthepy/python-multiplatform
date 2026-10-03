@@ -240,8 +240,9 @@ class Call(Expr):
     """A direct call of another compiled function in the same module (C to C). If the callee may
     deopt, the caller must be pure (the deopt propagates and the outermost compiled call is
     redone); otherwise the front end calls it as an object (`CallObject(Global(name), ...)`).
-    Recursion (any call cycle) is rejected by the verifier: compiled C has no recursion limit where
-    CPython raises RecursionError."""
+    A call cycle (direct or mutual recursion) is legal: every compiled function counts its frame at
+    entry (runtime `tp_enter_call`), so a recursion that CPython stops with RecursionError is stopped
+    with the same error, and the C stack cannot overflow."""
 
     function: str
     args: tuple[Expr, ...]

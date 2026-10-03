@@ -92,8 +92,10 @@ fail, then implement.
   `docs/platforms/desktop-packaged-app.md`.
 - **L-9a** (issue #74) Desktop packaging and loading of `libpython`: every `lib/**` entry of the desktop jar is a real
   file (never 0 bytes -- Gradle extracts the python-build-standalone symlink `libpython3.14.so` as an empty file, so
-  symlinks are resolved and the real library is packed under the `System.mapLibraryName` name, no `.so.1.0`); linux
-  libraries are stripped of debug info when an ELF-capable `strip` exists on the build host (best-effort). The
+  symlinks are resolved and the real library is packed under the `System.mapLibraryName` name, no `.so.1.0`); desktop
+  archives are python-build-standalone's `install_only_stripped` flavour (issue #86; URL and SHA-256 pinned in
+  `python-checksums.properties`), so no linux `libpython*.so` in the jar has a `.debug_*` section (a stripped
+  3.14.7 x86_64 library is 33,106,704 bytes against 251,884,016 unstripped); no host `strip` is involved. The
   classpath library is extracted to `<user cache>/python-multiplatform/<python version>/<platform>/` (macOS
   `~/Library/Caches`, Windows `%LOCALAPPDATA%`, else `$XDG_CACHE_HOME` or `~/.cache`; fallback
   `java.io.tmpdir/python-multiplatform-<user>`; override `-Dpython.multiplatform.cache`), never the working
@@ -242,7 +244,13 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   one as an attribute imports it (#35) — Kotlin names only. No
   member or parameter is renamed; the binder creates no `pythonx` module and a real `pythonx` package
   on disk is what `import pythonx` loads. The answer is the same whichever installer
-  (`PythonProxySource`, `PythonxAdapter`) ran first for a table. `Status: implemented` on desktop —
+  (`PythonProxySource`, `PythonxAdapter`) ran first for a table. **A name that is both a function and a
+  module is callable** (#78): Kotlin has `TextRange(2)` (a top-level factory) and `TextRange.Zero` (a
+  companion constant), so the module `androidx.compose.ui.text.TextRange` is itself callable — calling it
+  runs the function or overload set of that name in its parent package — while its attributes stay the
+  companion's constants and functions. One rule with the class case (#73): a Kotlin name that is a
+  constructor or factory is what calling it does, whatever else lives under that name. `Status:
+  implemented` on desktop —
   `PM/desktopTest/.../pythonx/KotlinNamedSurfaceTest.kt`, `BinderNamespaceTest.kt`, `ksp-fixtures/compose/.../KotlinSignatureMetadataTest.kt`.
 - **U-9** A Pythonic package can serve extra member names on a Kotlin proxy through one hook,
   `python_multiplatform.binding.add_member_resolver(fn)`, `fn(kotlin_type_name, requested_name,
@@ -275,6 +283,12 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   other Kotlin object. `Status: implemented` —
   `PM/commonTest/.../pythonx/PythonxPropertyTest.kt`, `ksp-fixtures/compose/.../PythonContentRenderTest.kt`,
   `AnySlotScalarRenderTest.kt`, `MaterialIconsRenderTest.kt`.
+- **U-11** A KSP-bound function, method or property whose declared return type is a Kotlin class that
+  has a generated proxy returns an instance of **that class's proxy** (#94), not a generic owner: its
+  methods and properties work and `isinstance(result, TheClass)` holds. The class is found by the declared
+  return type's Kotlin name; a return type with no generated proxy stays a generic owner object. The
+  result's ownership is the same as for any owned result. `Status: implemented` —
+  `ksp-fixtures/app/.../KspClassResultProxyTest.kt` (red until #94 lands).
 
 ## 6. Binding prebuilt libraries (Gradle plugin)
 
@@ -341,6 +355,10 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   Pythonic stub product belongs to pythonx-compose. `Status: partial` — `GP/stubs/PyiRenderingTest.kt`,
   `GP/stubs/TypedStubTest.kt`, `GP/stubs/KotlinNamesOnlyStubTest.kt`,
   `ksp-fixtures/artifact/.../WalkedArtifactStubTest.kt`, `.../StubSignatureAgreesWithRuntimeTest.kt`,
+  `GP/stubs/CompanionFactoryStubTest.kt` (#78: a name that is both a function and a Kotlin-named
+  module is stubbed in its parent package as one attribute whose type has `__call__` (the function or
+  its `@overload`s) and the module's constants and functions as members — never as a bare `def`, which
+  would hide `TextRange.Zero` from a checker),
   `tools/stubs/check-stubs.sh` (mypy over the Compose stubs). A class whose name is also a function in
   its module is `Any` — except that a class's own bound constructor is that class's `__init__`
   (`@overload`ed for several), so the class keeps its stub, members and properties; a single one's
@@ -451,7 +469,11 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   through the typed IR (`typedpython/ir.py`) to C against the CPython C API and builds an extension with
   the platform C compiler. Compiled functions return what CPython returns (IR contract: checked i64
   with deopt to the interpreted function, Python floor division/modulo, exact int/float comparison,
-  CPython's exception types and messages; tracebacks are the one accepted difference). `Status: planned`.
+  CPython's exception types and messages; tracebacks are the one accepted difference). Call cycles
+  (direct and mutual recursion) are compiled: every compiled function counts its frame (`tp_enter_call` /
+  `tp_leave_call`, added to the Python frame depth and compared with `sys.getrecursionlimit()`), so recursion
+  past the limit raises `RecursionError('maximum recursion depth exceeded')` where CPython does, and a C-stack
+  guard keeps the process alive at any limit (#57). `Status: planned`.
 - **N-9** TypedPython memory safety is proved on the IR before C is generated (#41; maintainer decision
   2026-10-03). Each property, and what happens when it cannot be proved:
 
@@ -476,6 +498,23 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   The Gradle task declares exact inputs and outputs so up-to-date checks and the build cache apply.
   Tests: changing one function body recompiles that module only; an unchanged rebuild spends ~0 s in
   the compile step. `Status: planned`.
+- **N-11** TypedPython fixed-layout classes (M2b, 2026-11-21; design §4.3.3). A class compiles to fixed
+  field access only when its layout is fixed **in CPython too**: it declares `__slots__` listing exactly
+  its annotated instance fields, has no base but `object`, no metaclass, no decorator but `@compiled`,
+  and (gate, compiled mode) nothing in the project subclasses it or assigns its class attributes. The
+  compiler never adds `__slots__` itself — that would change what CPython does (`__dict__`, `vars()`,
+  adding attributes). What is compiled, keeping CPython's results:
+  - field reads/writes on a value guarded `type(x) is C` go straight to the slot (the member descriptor's
+    offset, captured and checked at module init); an unset slot raises CPython's AttributeError; values
+    are objects (no unboxing of fields in impure code);
+  - a slot read is not an effect (no user code runs: the attribute is a member descriptor, checked at
+    init, and the exact-type guard rules out subclasses), so a function that only reads fields can stay pure;
+  - `C(args)` whose `__init__` only assigns each slot once from its parameters is lowered to allocate and
+    fill the slots directly (the same observable result as running that `__init__`); any other `__init__`
+    is called as an object;
+  - methods compile like functions with `self` guarded `type(self) is C`; anything else on the class stays
+    interpreted.
+  A class outside these rules stays interpreted with a reason. `Status: planned`.
 
 ---
 

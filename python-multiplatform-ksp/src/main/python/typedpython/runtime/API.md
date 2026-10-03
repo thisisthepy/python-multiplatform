@@ -84,3 +84,16 @@ Same structs as above with `list == NULL` and `dirty == NULL`. 0 ok, -1 MemoryEr
     void tp_f64_array_free(tp_f64_array *a);
     /* tp_*_array_slot works unchanged on local arrays (same IndexError messages as list). */
     PyObject *tp_tuple(PyObject *const *items, Py_ssize_t n);           /* new tuple; steals nothing */
+
+## Call depth (every compiled impl function: enter at entry, leave at every exit; issue #57)
+    int  tp_enter_call(void);   /* 0 ok; -1 RecursionError set, nothing counted (the caller must NOT call leave) */
+    void tp_leave_call(void);   /* undoes one successful tp_enter_call; exactly once per success, on ok, error and deopt exits alike */
+`tp_enter_call` makes compiled recursion fail where interpreted recursion fails. It counts, per thread,
+the compiled frames in flight (they have no Python frame), adds the current Python frame depth
+(`PyThreadState_GetFrame` / `PyFrame_GetBack`, public API only; cached while the top frame is the same
+object, so a pure compiled recursion pays O(1) per call) and compares the total with
+`Py_GetRecursionLimit()`. Over it: `RecursionError("maximum recursion depth exceeded")`, the text
+CPython's own Python-frame check uses. It then calls `Py_EnterRecursiveCall(" in compiled code")`, the
+C-stack guard: a raised recursion limit can never let compiled C overflow the stack. Counters are
+per module (the header is `static`): frames of a *different* compiled module that sit between two
+frames of this one are not counted.

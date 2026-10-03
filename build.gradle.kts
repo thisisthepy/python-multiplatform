@@ -29,3 +29,14 @@ tasks.register("publishAllToMavenLocal") {
     dependsOn(":python-multiplatform-ksp:publishToMavenLocal")
     dependsOn(gradle.includedBuild("python-multiplatform-gradle-plugin").task(":publishToMavenLocal"))
 }
+
+// The build's single Kotlin/Wasm npm lock (one workspace for every wasm module) lives next to the
+// version catalog instead of a root `kotlin-js-store/` (issue #110). KGP only allows this on the
+// root project; the `*Property` forms are the non-deprecated API from Kotlin 2.4 on. Mismatch
+// reporting keeps its default (FAIL), so CI notices a drifted lock.
+plugins.withType<org.jetbrains.kotlin.gradle.targets.wasm.yarn.WasmYarnPlugin> {
+    extensions.getByType<org.jetbrains.kotlin.gradle.targets.wasm.yarn.WasmYarnRootExtension>().apply {
+        lockFileDirectoryProperty.set(layout.projectDirectory.dir("gradle"))
+        lockFileNameProperty.set("wasm-yarn.lock")
+    }
+}
