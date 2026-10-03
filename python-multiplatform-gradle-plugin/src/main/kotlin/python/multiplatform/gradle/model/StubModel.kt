@@ -80,7 +80,21 @@ internal data class DeclarationModel(
     val parameterNamesKnown: Boolean = true,
     val isComposable: Boolean = false,
     val isSuspend: Boolean = false,
+    /**
+     * `FUNCTION`, `STATIC_GETTER` (an object's constant), or `GETTER`/`SETTER` (issue #38): a
+     * property read off an instance, whose [receiver] is the type it is read on -- the owner of a
+     * member property, the receiver of an extension property -- and whose [owner] is the class or
+     * package that declares it. A `SETTER`'s one parameter is the value written.
+     */
     val kind: String = "FUNCTION",
+    /**
+     * What the declared return type **is a**, nearest first, as qualified Kotlin names -- the
+     * ancestry `ArtifactCallable.returnSupertypes` carries into the binding layer, kept here so a
+     * stub class can extend the class a value of it may fill (`BitmapPainter` fills a `Painter`
+     * slot). Empty for a type nothing could read an ancestry for, which is the truth rather than a
+     * gap to fill.
+     */
+    val returnSupertypes: List<String> = emptyList(),
 ) : Serializable
 
 /** @param name `null` when the producer could not read one (§3.2); never a synthesised `arg0`. */

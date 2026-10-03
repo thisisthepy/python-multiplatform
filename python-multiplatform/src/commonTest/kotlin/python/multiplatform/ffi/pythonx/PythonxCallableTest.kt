@@ -17,7 +17,7 @@ import kotlin.test.assertTrue
  * The direction the composable work left open: **a Python callable reaching a Kotlin function-typed
  * parameter.**
  *
- * `docs/design/pythonx-adapter-design.md` §6 states the starting position exactly -- "a Python callable can
+ * `docs/archive/pythonx-adapter-design.md` §6 states the starting position exactly -- "a Python callable can
  * already cross into Kotlin", as a `PyObject`, because `UpcallTrampoline.toKotlinObject` wraps
  * anything that is not an integer handle. What it *cannot* do is arrive as a `Function0` or a
  * `Function3`, which is what every container composable's `content` slot is after the Compose plugin

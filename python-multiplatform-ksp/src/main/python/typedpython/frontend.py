@@ -1,4 +1,4 @@
-"""Front end: Python AST + Pyrefly-inferred types -> the typed IR (`ir.py`, #41, SPEC N-7).
+"""Front end: Python AST + Pyrefly-inferred types -> the typed IR (`ir.py`, #41, SPEC N-8).
 
 `lower(path)` reads one module and returns an `ir.Module`:
 

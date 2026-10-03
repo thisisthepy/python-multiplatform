@@ -52,7 +52,7 @@ object UpcallTarget {
      * All of the work is in [UpcallTrampoline], which is `commonMain` -- there is nothing
      * desktop-specific about turning a tuple into an `Array<Any?>`. What is desktop-specific is
      * only how the address of this method reaches Python, i.e. `Panama.createUpcallStubII_L`.
-     * See `docs/design/upcall-design.md` for what the other platforms need instead.
+     * See `docs/design/upcall.md` for what the other platforms need instead.
      */
     @JvmStatic
     fun upcallInvokeWithArgs(handleRaw: Long, argsTuple: Long): Long =

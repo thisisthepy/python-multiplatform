@@ -1,4 +1,4 @@
-"""Incremental compilation (SPEC N-9, #41): module cache keyed by source + dependency interface hashes."""
+"""Incremental compilation (SPEC N-10, #41): module cache keyed by source + dependency interface hashes."""
 from __future__ import annotations
 
 import dataclasses

@@ -20,7 +20,7 @@ import kotlin.math.ceil
  *
  * 1. **The synthetic parameters are unreachable from source.** `androidx.compose.material3.Text`
  *    declares 16 Kotlin parameters and its JVM method takes 20 -- `$composer`, two `$changed`
- *    bitmasks and one `$default` (`docs/design/pythonx-adapter-design.md` §5.2, and
+ *    bitmasks and one `$default` (`docs/archive/pythonx-adapter-design.md` §5.2, and
  *    `ComposableBindingTest.everyComposableJvmSignatureIsKotlinParamsThenComposerThenInts` over
  *    every composable in three jars). The Compose plugin adds them during IR lowering, so at source
  *    level they are not parameters of anything and cannot be named or passed. Whatever the Compose
@@ -239,7 +239,7 @@ internal fun generateThunkClass(fragmentObjectName: String, specs: List<ThunkSpe
  * ### Why null arrives at all, and why zero is the right answer
  *
  * A `@Composable`'s omitted argument is not absent: the slot is still a real JVM parameter, and what
- * says it was left out is a bit of the `$default` mask (`docs/design/pythonx-adapter-design.md` §5.2). So
+ * says it was left out is a bit of the `$default` mask (`docs/archive/pythonx-adapter-design.md` §5.2). So
  * `pythonx._absent` has to put *something* in the slot, and for an `OBJECT` slot the only thing it
  * can put there is `None`. Its own docstring states the invariant that makes any value safe: the
  * callee's generated prologue assigns over the slot before its first use, which is what the mask

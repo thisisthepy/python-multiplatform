@@ -21,7 +21,7 @@ fun greet(name: String, punctuation: String = "!"): String = name + punctuation
 
 /**
  * Two defaulted parameters, so that the *middle* of the list can be the one omitted.
- * `docs/design/pythonx-adapter-design.md` §4.5 names exactly this as what an arity-prefix scheme cannot
+ * `docs/archive/pythonx-adapter-design.md` §4.5 names exactly this as what an arity-prefix scheme cannot
  * express: "pass `text` and `font_size`, skip `modifier` and `color`".
  */
 fun label(bag: Bag, prefix: String = "[", suffix: String = "]"): String = prefix + bag.text + suffix

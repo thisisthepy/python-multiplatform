@@ -1,4 +1,4 @@
-"""TypedPython IR safety verifier (SPEC N-8, #41; maintainer decision 2026-10-03).
+"""TypedPython IR safety verifier (SPEC N-9, #41; maintainer decision 2026-10-03).
 
 `verify(module)` proves, per function and on the IR alone, the properties listed in the "Safety"
 section of `ir.py`. A function it cannot prove is removed from `Module.functions` and moved to

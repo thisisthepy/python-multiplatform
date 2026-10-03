@@ -2,7 +2,7 @@ import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 /**
- * The other end of `docs/design/pythonx-adapter-design.md` §5: a real `@Composable`, called from Python,
+ * The other end of `docs/archive/pythonx-adapter-design.md` §5: a real `@Composable`, called from Python,
  * inside a real composition, drawing a real pixel.
  *
  * ### Why this is not `:ksp-fixtures:artifact`
@@ -45,10 +45,13 @@ kotlin {
         }
         val desktopMain by getting {
             dependencies {
+                implementation(projects.pythonMultiplatformCompose)
                 implementation(compose.runtime)
                 implementation(compose.foundation)
                 implementation(compose.material3)
                 implementation(compose.ui)
+                // `Icons.Default.Add` and friends (issue #37): the one place an `ImageVector` is built.
+                implementation(libs.compose.material.icons.core)
                 implementation(compose.desktop.currentOs)
             }
         }
@@ -92,9 +95,21 @@ pythonBindings {
             "androidx.compose.ui.graphics",
             "androidx.compose.ui.res",
             "androidx.compose.ui",
+            // 5. `material.icons` -- `Icons.Default` and the icon properties behind it (issue #37).
+            "androidx.compose.material.icons",
+            // 6. Compose state, from Python (issue #38): `mutableStateOf` (a generic function, its `T`
+            //    read as `kotlin.Any?`) and the `value` property of `State`/`MutableState`. Classes, not
+            //    the package: `androidx.compose.runtime` is the whole runtime, and this is the one
+            //    facade and two interfaces `PythonContentRenderTest` writes its root through.
+            "androidx.compose.runtime.SnapshotStateKt",
+            "androidx.compose.runtime.State",
+            "androidx.compose.runtime.MutableState",
         ),
     )
-    generateStubs.set(false)
+    // Stubs on: `generatePythonStubs` over the real Compose jars is what `tools/stubs/check-stubs.sh` (the mypy
+    // check) and `.github/workflows/stubs.yml` (the published artifact) both run. Nothing depends on the
+    // task, so the render tests do not pay for it.
+    generateStubs.set(true)
 }
 
 /**

@@ -377,7 +377,7 @@ class ArtifactScannerTest {
             "{ args -> (fixture.artifactvalueclass.ropeLength((args[0] as fixture.artifactvalueclass.Rope))) }",
             ropeLength.lambdaBody,
         )
-        // The declared type survives beside the tag: `docs/design/pythonx-adapter-design.md` §2.4 row 4.
+        // The declared type survives beside the tag: `docs/archive/pythonx-adapter-design.md` §2.4 row 4.
         assertEquals(listOf("fixture.artifactvalueclass.Rope"), ropeLength.paramTypeNames)
         assertEquals(listOf("rope"), ropeLength.paramNames)
         assertEquals(listOf(false), ropeLength.paramHasDefault)
@@ -413,7 +413,7 @@ class ArtifactScannerTest {
      * A class's own public primary constructor, bound the same way a top-level function is:
      * `Rope(Double): Rope`'s shape, and [Rope]'s own KDoc records why this used to be entirely
      * absent -- `ArtifactScanner.kotlinCandidates`'s `ACC_STATIC` filter drops `<init>` along with
-     * every instance method, and nothing else ever picked it back up. `docs/design/pythonx-adapter-design.md`
+     * every instance method, and nothing else ever picked it back up. `docs/archive/pythonx-adapter-design.md`
      * §10 names `Typography`/`Shapes` as the real-world casualty: not declined, simply never scanned.
      */
     @Test
@@ -668,7 +668,7 @@ class ArtifactScannerTest {
     }
 
     /**
-     * `docs/design/pythonx-adapter-design.md` §10's `Typography`/`Shapes` casualty, closed, and pinned
+     * `docs/archive/pythonx-adapter-design.md` §10's `Typography`/`Shapes` casualty, closed, and pinned
      * against the structural rule that closed it rather than against the two hard-coded class names
      * an earlier attempt used.
      *

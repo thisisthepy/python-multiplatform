@@ -2,7 +2,15 @@
 
 Kotlin ↔ Python 경계의 비용을, **여섯 타깃 전부에 대해 한 번에** 뽑아 놓은 표.
 
-`docs/design/upcall-design.md` 와 `docs/design/downcall-design.md` 는 각자의 조사 과정에서 나온 표를 갖고 있고,
+> **결론과 상태 (2026-10-03 확인).** 업콜 1건은 같은 모양의 다운콜의 약 0.9~3.1 배다 — 호스트 JVM 에서
+> 약 543–576 ns (다운콜 260–266), iOS 시뮬레이터 약 2.3 µs, androidNative 약 3.4 µs, ART API 26/36 약 1.0–1.3 µs,
+> wasmJs 약 300 ns. 모든 숫자는 아래 마커 사이의 표(커밋 `958c0082b294`, 2026-08-14, Apple M1, 타깃당 3회의
+> min–max, 워밍업 100,000)에서 온 것이고, 그 표의 숫자는 이 문장보다 우선한다. 하네스(`benchmarks/cost-table.sh`,
+> `benchmarks/cost_table.py`)는 이 문서의 마커 사이만 다시 쓴다 — 마커와 그 바깥의 "다시 뽑는 법" 절은 하네스가
+> 기대하는 형식이므로 손으로 고치지 않는다. 이 표는 **측정을 기록할 뿐 임계값을 단언하지 않는다**(SPEC X-1).
+> 표는 2026-08-14 컷이므로 그 뒤의 커밋을 반영하지 않는다. 다시 뽑으려면 아래 "다시 뽑는 법".
+
+`docs/design/upcall.md` 와 `docs/design/downcall-design.md` 는 각자의 조사 과정에서 나온 표를 갖고 있고,
 그 표들은 **조사가 끝난 시점의 기록**이다. 이 문서는 다르다 — 여기 있는 표는 사람이 옮겨 적은 것이
 아니라 `benchmarks/cost_table.py` 가 실행 결과에서 직접 렌더링한 것이고, 아래 "다시 뽑는 법" 한
 줄이면 통째로 갱신된다.
@@ -68,10 +76,10 @@ python3 benchmarks/cost_table.py render --check           # 문서가 최신 JSO
 정상이다. 그럴 때는 각각 뜨고 렌더링할 때 합친다.
 
 ```bash
-./benchmarks/cost-table.sh collect --targets desktop,iosSimulatorArm64,wasmJs --out /tmp/host.json
-./benchmarks/cost-table.sh collect --targets artApi36,androidNativeArm64     --out /tmp/a36.json
-./benchmarks/cost-table.sh collect --targets artApi26                        --out /tmp/a26.json
-python3 benchmarks/cost_table.py render --in /tmp/host.json,/tmp/a36.json,/tmp/a26.json
+./benchmarks/cost-table.sh collect --targets desktop,iosSimulatorArm64,wasmJs --out benchmarks/results/host.json
+./benchmarks/cost-table.sh collect --targets artApi36,androidNativeArm64     --out benchmarks/results/a36.json
+./benchmarks/cost-table.sh collect --targets artApi26                        --out benchmarks/results/a26.json
+python3 benchmarks/cost_table.py render --in benchmarks/results/host.json,benchmarks/results/a36.json,benchmarks/results/a26.json
 ```
 
 **커밋이 다른 cut 을 합치는 것은 거부된다.** 서로 다른 트리에서 나온 행을 한 표에 놓는 것이
@@ -92,7 +100,7 @@ python3 benchmarks/cost_table.py render --in /tmp/host.json,/tmp/a36.json,/tmp/a
 | `artApi26` | `:python-multiplatform:connectedDebugAndroidTest` | `build/outputs/androidTest-results/connected/debug/<기기>/logcat-*.txt` | **에뮬레이터** (`pmp_api26`) |
 | `artApi36` | `:python-multiplatform:connectedDebugAndroidTest` | 〃 | **에뮬레이터** (`pmp_api36`) |
 
-기본 여섯 외에 `androidNativeArm64Api26` 이 하나 더 선언되어 있다 — `upcall-design.md` 의 표가
+기본 여섯 외에 `androidNativeArm64Api26` 이 하나 더 선언되어 있다 — `docs/design/upcall.md` 의 표가
 androidNative 를 API 레벨별로 나눠 기록하기 때문이고, `--targets` 로 이름을 대면 돈다.
 
 **ART 만 결과를 읽는 경로가 다르다.** AGP 가 쓰는 JUnit XML 에는 `<system-out>` 이 없다 —
@@ -320,7 +328,7 @@ These also come through `Benchmark.printReport`, and they are **not comparable w
 ## The React Native comparison's Android column is unquotable, and not for the reason assumed
 
 The cross-runtime comparison this table is read against
-(`/Volumes/macMini/rn-benchmark/COMPARISON.md`) has an Android column that cannot
+(`benchmarks/rn-benchmark/COMPARISON.md`) has an Android column that cannot
 be quoted. Two solo runs on a quiet machine, one at the documented warmup and one
 at four times it, both ended with the benchmark refusing its own numbers:
 

@@ -135,6 +135,10 @@ to implement", say what you counted against.
   counts, lifetimes, class loaders) gets the strongest tier; work a test will catch can use a
   cheaper one.
 - Give every agent prompt the absolute paths it may write to, and repeat rule 2 in it.
+- **Subagents do not run heavy local builds.** Subagents write code, design, investigate, review
+  and document. Gradle builds, cargo builds, the test gate and model runs are done by the session
+  itself — one at a time on this machine — or by CI (GitHub Actions) on a pushed branch. Several
+  sessions share one machine; parallel local builds slow every one of them.
 
 ---
 
@@ -160,7 +164,8 @@ interoperability in both directions:
 | `binary/` | Source archives of per-platform CPython distributions |
 | `python_for_kotlin_binding.mermaid` | User-authored sketch of the object model (see rule 14) |
 | `docs/INTENT.md`, `docs/SPEC.md` | Intent and behavioural contract (rule 5) |
-| `docs/design/`, `docs/platforms/`, `docs/investigations/`, `docs/roadmap/` | Design records, platform notes, investigations, progress log |
+| `docs/design/`, `docs/platforms/`, `docs/investigations/`, `docs/roadmap/` | Current design records (one per topic), platform notes, investigation conclusions, the work left to do |
+| `docs/archive/` | Superseded designs and investigation narratives, kept for history (see its `README.md`) |
 
 ### Source-set hierarchy
 

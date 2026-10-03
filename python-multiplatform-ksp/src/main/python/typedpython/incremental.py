@@ -1,4 +1,4 @@
-"""Incremental compilation (SPEC N-9, #41): a per-module build cache.
+"""Incremental compilation (SPEC N-10, #41): a per-module build cache.
 
 The unit is a module. Its cache key covers the source, the *interface* hashes of the project modules
 it imports, the compiler version, the target platform and the build flags. A body-only change in a

@@ -1,5 +1,11 @@
 # TypedPython — 설계 제안
 
+> **참고 (2026-10-03):** §4.4 가 전제하는 스텁 매니페스트(`pythonx-map.toml`, 그리고 그것을 읽어
+> `pythonx.*` 스텁을 내던 `StubManifest`/`renderPythonicStubs`)는 이 저장소의 스텁 생성기에서
+> 제거되었고(`238119b7`), **pythonx-compose 저장소로 옮겨 갔다.** 이 저장소의 `PythonStubsTask` 는
+> 이제 Kotlin 모듈 경로·Kotlin 이름의 스텁만 낸다(SPEC B-7,
+> [`pyi-generation-design.md`](pyi-generation-design.md)). 아래 제안 본문은 수정하지 않았다.
+
 > **이 문서는 설계 제안이지 사양이 아니다.** 사양은 `docs/SPEC.md`, 의도는 `docs/INTENT.md` 에 있고,
 > 이 문서의 내용을 그 둘에 반영할지는 사용자가 정한다. 아래의 이름·표기·단계 구분은 전부 논의용이며
 > 구현하면서 달라질 수 있다.
@@ -140,7 +146,7 @@ API 안정성을 확인한 뒤로 미룬다.
 - **순서.** 스칼라 int/float/bool 과 컴파일된 함수끼리의 호출 → `list[float]`/`list[int]` 의 네이티브
   배열 → 고정 레이아웃 클래스.
 
-### 4.3.1 안전성은 IR 에서 증명한다 (SPEC N-8)
+### 4.3.1 안전성은 IR 에서 증명한다 (SPEC N-9)
 
 사용자 결정: "IR 단계에서 안전성을 증명하도록 해". C 를 만들기 전에 `verify.py` 가 IR 에서 증명한다 —
 정의 전 사용 없음, 노드 타입 일치, 비순수 함수에 deopt 노드 없음, 배열 접근은 경계 증명 또는 런타임 검사
@@ -148,7 +154,7 @@ API 안정성을 확인한 뒤로 미룬다.
 않고** 인터프리터에 남기며 이유를 진단으로 낸다. 생성 C 는 `tp_runtime.h` 헬퍼로만 메모리와 `PyObject`
 를 다룬다. 증명 밖의 안전망: ASan/UBSan, 인터프리터와의 차등 테스트, IR 수준 퍼징.
 
-### 4.3.2 증분 컴파일 (SPEC N-9)
+### 4.3.2 증분 컴파일 (SPEC N-10)
 
 사용자 결정: "증분 컴파일도 지원하도록 해. 빌드 속도 너무 오래 안걸리게". 단위는 모듈. 키는 소스 해시 +
 의존 모듈의 **인터페이스** 해시(타입 시그니처) + 컴파일러 버전 + 플랫폼 + 빌드 플래그. 본문만 바뀌면
@@ -240,7 +246,7 @@ upstream 대비 수치 오차를 기준선으로 박아 둔다.
   `python-multiplatform-ksp/src/test/python/`. 사용자 지시("ksp랑 통합")에 따라 KSP 모듈 안에 둔다.
   KSP 프로세서는 Kotlin 심볼만 보고 파이썬 파일 변경으로는 다시 돌지 않으므로, **실행**은 1b 에서
   Gradle 태스크가 맡는다 — KSP 모듈은 소스와 배포(jar 리소스)의 자리다.
-- **구현된 규칙:** SPEC N-6. Pyrefly 의 `Any` 유출 kind 6개를 에러로 올리고, Pyrefly 의
+- **구현된 규칙:** SPEC N-7. Pyrefly 의 `Any` 유출 kind 6개를 에러로 올리고, Pyrefly 의
   per-expression 타입 리포트(`--report-pysa`)로 사용자 코드 안의 `Any` 식을 찾는다(`any-flow`).
   `cast()` 인자, 버려지는 식 문장의 값, 함수 시그니처 자체는 제외한다.
 - **재할당·혼합 컨테이너 (#22):** Pyrefly 1.3.2 는 둘 다 보고하지 않고, 타입 리포트에 대입 대상의

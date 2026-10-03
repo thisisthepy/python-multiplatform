@@ -18,6 +18,10 @@ import org.jetbrains.kotlin.gradle.tasks.KotlinNativeLink
 import org.jetbrains.kotlin.konan.target.Family
 import org.jetbrains.kotlin.konan.target.KonanTarget.*
 import org.jetbrains.kotlin.konan.target.linker
+import python.multiplatform.gradle.CPythonFlavour
+import python.multiplatform.gradle.CPythonIncludeDirectories
+import python.multiplatform.gradle.CPythonIncludeLayout
+import python.multiplatform.gradle.EmbeddedPythonVersion
 import python.multiplatform.gradle.GenerateWasmProxyExportsTask
 
 
@@ -614,6 +618,48 @@ val downloadAllPythonBuilds by tasks.registering {
     dependsOn(downloadPython_ios)
 }
 
+/**
+ * Public build output (issue #46): the include directory of the CPython this build acquires, per
+ * target and flavour, each carrying its extraction task. Consumers (pypackpack's compile slot,
+ * TypedPython's C build) read it with
+ * `project(":python-multiplatform").extensions.getByType<CPythonIncludeDirectories>().includeDir("macos-aarch64")`
+ * after `evaluationDependsOn(":python-multiplatform")`. Only the desktop flavour selected with
+ * `-PpythonFreeThreaded` has a task; Android and iOS are always GIL. See
+ * `docs/platforms/python-version-acquisition.md` §7.
+ */
+extensions.add(
+    "cpythonIncludeDirectories",
+    CPythonIncludeDirectories(
+        layout.projectDirectory.dir(extractedDir.absolutePath),
+        configuredPythonVersion,
+    ) { target, flavour ->
+        val desktop = target in CPythonIncludeLayout.desktopTargets
+        val extractedFlavour = if (desktop && pythonFreeThreaded) CPythonFlavour.FREE_THREADED else CPythonFlavour.GIL
+        if (flavour == extractedFlavour) tasks.named(CPythonIncludeLayout.downloadTaskName(target)) else null
+    },
+)
+
+/**
+ * Public build output (issue #61): the CPython version this build embeds, as the `pythonMultiplatform`
+ * extension, as Gradle attributes on the published variants, and as a classpath resource
+ * (`META-INF/python-multiplatform/python.properties`) in the jar and the AAR. See
+ * `docs/platforms/python-version-acquisition.md` "Published version".
+ */
+val embeddedPythonVersion = EmbeddedPythonVersion(configuredPythonVersion, pythonFreeThreaded)
+embeddedPythonVersion.register(project)
+
+val generatePythonProperties by tasks.registering {
+    val outputDir = layout.buildDirectory.dir("generated/python-properties")
+    val content = embeddedPythonVersion.renderProperties()
+    inputs.property("content", content)
+    outputs.dir(outputDir)
+    doLast {
+        val file = outputDir.get().asFile.resolve(EmbeddedPythonVersion.RESOURCE_PATH)
+        file.parentFile.mkdirs()
+        file.writeText(content)
+    }
+}
+
 val androidBuildDir = "$projectDir/build/android"
 
 // =================================================================================================
@@ -1201,6 +1247,7 @@ kotlin {
         jvmTest.dependsOn(commonTest)
         val desktopMain by getting {
             resources.srcDirs("src/desktopMain/resources")
+            resources.srcDir(generatePythonProperties)
             // `reachability-metadata.json` is generated, not checked in -- see
             // GenerateReachabilityMetadata above. Wiring it as a resource srcDir (through the
             // task's own output provider, so the dependency is inferred) is what puts it on the
@@ -1340,7 +1387,7 @@ tasks.withType<org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeSimu
 // build machine, `KotlinNativeSimulatorTest` for simctl. An Android device is neither, so the
 // whole of `commonTest` compiled for this target on every build and had never once been executed.
 //
-// That gap is visible in docs/design/upcall-design.md: the five-platform upcall table has an empty
+// That gap is visible in docs/design/upcall.md: the five-platform upcall table has an empty
 // androidNative row, and `537c1a0b` says it was left empty rather than estimated. It is also the
 // exact situation ROADMAP §11b was in for Android/ART, where attaching the suite to a target that
 // had only ever compiled it surfaced two real defects in the first twelve tests.
@@ -2524,6 +2571,8 @@ android {
     compileSdk = libs.versions.android.compileSdk.get().toInt()
 
     sourceSets["main"].assets.srcDirs("src/androidMain/assets", "$androidBuildDir/assets")
+    // KMP androidMain resources do not reach the AAR's classes.jar; AGP's main resources do.
+    sourceSets["main"].resources.srcDir(generatePythonProperties)
     sourceSets["androidTest"].assets.srcDirs("$androidBuildDir/assets")
     sourceSets["debug"].jniLibs.srcDirs("src/androidMain/jniLibs",
         "$androidBuildDir/jniLibs", "$androidBuildDir/debug/jniLibs")

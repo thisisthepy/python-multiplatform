@@ -18,7 +18,7 @@ kotlin {
         // (build.gradle.kts) -- this module's test binary needs the same CPython symbols
         // resolved at final link time, since python-multiplatform's klib only declares them via
         // cinterop and does not itself embed a static libpython. This is a throwaway measurement
-        // wiring: only linkDebugTestAndroidNativeArm64 needs it (docs/design/upcall-table-design.md
+        // wiring: only linkDebugTestAndroidNativeArm64 needs it (docs/design/upcall.md
         // §11.1's tree-shaking measurement), not the ordinary JVM-only fixture test path.
         val downloadDir = project(":python-multiplatform").layout.buildDirectory.dir("python-standalone").get().asFile
         val pyVersion = project.findProperty("pythonVersion")?.toString() ?: project.rootProject.version.toString()

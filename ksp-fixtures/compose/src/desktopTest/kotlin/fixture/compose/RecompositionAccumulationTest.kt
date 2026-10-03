@@ -44,7 +44,7 @@ import kotlin.test.assertTrue
  *
  * ### What counts as the same callable
  *
- * Not `is`. A `lambda:` written inline is a **new object on every pass** (`docs/design/pythonx-adapter-design.md`
+ * Not `is`. A `lambda:` written inline is a **new object on every pass** (`docs/archive/pythonx-adapter-design.md`
  * records this), so an identity test on the callable interns nothing at all for the spelling that
  * appears in every example in this module. The key is structural and is described where it is
  * computed, in `PythonxAdapter`'s `_intern_key`; what this file asserts is the consequence:
@@ -322,7 +322,7 @@ class RecompositionAccumulationTest {
             """.trimIndent(),
         )
 
-        PythonCallableArena.resetCounters()
+        CountingCallableArena.resetCounters()
         val body = mutableStateOf(nested(0))
         val scene = ImageComposeScene(width = 200, height = 60, density = Density(1f)) {
             PythonComposition(body.value)
@@ -332,7 +332,7 @@ class RecompositionAccumulationTest {
         try {
             var previouslyServed = 0
             scene.render()
-            val arena = PythonCallableArena.latest ?: error("no arena was remembered")
+            val arena = CountingCallableArena.latest ?: error("no arena was remembered")
             servedPerPass += arena.scope.liveCount + arena.scope.reuseCount
             innerCallsPerPass += pyInt("_acc_inner_calls[0]")
             previouslyServed = servedPerPass[0]
@@ -367,7 +367,7 @@ class RecompositionAccumulationTest {
             scene.close()
         }
         assertEquals(
-            2, PythonCallableArena.released,
+            2, CountingCallableArena.released,
             "both wrappers, released once each -- the inner one is still Compose's at the end",
         )
     }
@@ -411,7 +411,7 @@ class RecompositionAccumulationTest {
      * @param watched the name of a Python global whose refcount to follow, or `null`.
      */
     private fun measure(watched: String?, source: (Int) -> String): Accumulation {
-        PythonCallableArena.resetCounters()
+        CountingCallableArena.resetCounters()
         val baseRoots = HandleTable.liveCount
         val baseRefs = if (watched == null) 0 else pyInt("sys.getrefcount($watched)")
 
@@ -431,8 +431,8 @@ class RecompositionAccumulationTest {
                 Snapshot.sendApplyNotifications()
                 ink += inkOfImage(scene.render())
             }
-            assertEquals(1, PythonCallableArena.created, "the arena was rebuilt instead of remembered")
-            val arena = PythonCallableArena.latest ?: error("no arena was remembered")
+            assertEquals(1, CountingCallableArena.created, "the arena was rebuilt instead of remembered")
+            val arena = CountingCallableArena.latest ?: error("no arena was remembered")
             wrappers = arena.scope.liveCount
             reuses = arena.scope.reuseCount
             rootDelta = HandleTable.liveCount - baseRoots
@@ -446,7 +446,7 @@ class RecompositionAccumulationTest {
             rootDelta = rootDelta,
             heldRefs = heldRefs,
             inkPerPass = ink,
-            releasedAtDisposal = PythonCallableArena.released,
+            releasedAtDisposal = CountingCallableArena.released,
             rootsAfterDisposal = HandleTable.liveCount - baseRoots,
             refsAfterDisposal = if (watched == null) 0 else pyInt("sys.getrefcount($watched)") - baseRefs,
         )

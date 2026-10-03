@@ -1,4 +1,4 @@
-"""The IR safety verifier (SPEC N-8, #41).
+"""The IR safety verifier (SPEC N-9, #41).
 
 `verify.verify(module)` proves each function's safety properties on the IR; a function it cannot
 prove is removed from `functions`, moved to `skipped` with the reason, and reported. Every test
@@ -1376,7 +1376,7 @@ def test_each_proof_mutation_kind_was_exercised():
     assert len(kinds) == 16, sorted(kinds)     # 14 kinds; kind 6 has three variants
 
 
-# --- 10. local arrays and tuples (NewArray / CopyArray / Tuple; issue #41, N-8) -------------------
+# --- 10. local arrays and tuples (NewArray / CopyArray / Tuple; issue #41, N-9) -------------------
 
 def na(t, n, fill=None, iota=False): return NewArray(t, n, fill, iota)
 def la(name, t=F64A): return Local(t, name)

@@ -24,7 +24,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * The generated Python proxy actually running -- `docs/design/upcall-async-design.md` §8.6's second gap.
+ * The generated Python proxy actually running -- `docs/design/upcall.md` §5.5's second gap.
  *
  * `PythonProxySourceTest` pins what [PythonProxySource.render] emits, as text, with no interpreter.
  * This is the other half: CPython executes that text and the proxies do what the text says.

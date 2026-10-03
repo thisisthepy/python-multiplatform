@@ -1,10 +1,10 @@
-"""Source → gate → frontend → verify → cgen → cbuild (design §4.3, SPEC N-7/N-8, #41).
+"""Source → gate → frontend → verify → cgen → cbuild (design §4.3, SPEC N-8/N-9, #41).
 
 `compile_module` is the one entry point the CLI, the demo and the build slot use:
 
 1. The gate in `compiled` mode: a module with type errors is not compiled at all.
 2. `frontend.lower`: functions outside the IR are left interpreted (`skipped`, with reasons).
-3. `verify.verify`: functions the verifier cannot prove are left interpreted too (SPEC N-8 —
+3. `verify.verify`: functions the verifier cannot prove are left interpreted too (SPEC N-9 —
    unsafe code is never generated silently).
 4. If nothing is left to compile, no C is produced (`extension is None`): the module ships as
    ordinary Python.
@@ -77,7 +77,7 @@ def load(result: Result) -> ModuleType:
     return cbuild.load(result.source.stem, result.extension)
 
 
-# --- incremental project build (SPEC N-9) ----------------------------------------------------------
+# --- incremental project build (SPEC N-10) ----------------------------------------------------------
 
 def _tree_hash(*dirs: Path) -> str:
     h = hashlib.sha256()

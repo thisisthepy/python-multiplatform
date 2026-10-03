@@ -26,7 +26,7 @@ import kotlin.test.assertTrue
  * The answer used to be **silently skipped** -- `BindingPolicy.isExposedFunctionShape` dropped any
  * declaration carrying `Modifier.SUSPEND`, so nothing was emitted and nothing was logged, and a
  * user exposing a `suspend fun` got an `AttributeError` from Python with no indication that the
- * function had been seen and rejected. `docs/design/upcall-async-design.md` §6 recorded that as
+ * function had been seen and rejected. `docs/design/upcall.md` §5.4 recorded that as
  * deliberate: the silence was held in place so that the day a convention landed, the change would
  * show up as these tests failing rather than as one silence quietly becoming another.
  *
@@ -179,7 +179,7 @@ class GeneratedSuspendTest {
     @Test
     fun theGeneratedBodyStartsTheCoroutineAndParksItsOutcomeInAPendingCall() {
         // `PendingCall.start { suspendingTopLevel(args[0] as Long) }` is what the generator emits.
-        // Nothing in that fixture reaches a suspension point, so `docs/design/upcall-async-design.md` §5's
+        // Nothing in that fixture reaches a suspension point, so `docs/design/upcall.md` §5.2's
         // fast path applies: the call is already complete before `start` returned, and the boundary
         // can hand Python a real `int` with no Future and no event loop.
         val call = startCall("fixture.library.suspendingTopLevel", 21L)
@@ -218,7 +218,7 @@ class GeneratedSuspendTest {
     // (`args[0] as kotlin.coroutines.SuspendFunction1<...>`) compiled and checkcast cleanly
     // anyway -- a classifier with no source declaration in this compilation and no `invoke` entry
     // in the table, so what crossed was a handle Python could hold and hand back and nothing
-    // else. `docs/design/upcall-async-design.md` §2.1 measured that as deliberately left open.
+    // else. `docs/design/upcall.md` §5.3 measured that as deliberately left open.
     //
     // It is closed now: `BindingPolicy.hasExposableTypes` rejects any property, parameter or
     // return type where `KSType.isSuspendFunctionType` is true (recursing into type arguments and
@@ -346,7 +346,7 @@ class GeneratedSuspendTest {
     fun theRejectedClassifierHasNoInvokeEntryEitherWayConsistentWithTheOldMeasurement() {
         // Even where a suspending-type handle *did* used to cross (the old `suspendingHandler`
         // path this file no longer exercises), nothing ever exposed `SuspendFunction1.invoke` --
-        // `docs/design/upcall-async-design.md` §2.1's point stands regardless of which side of this fix
+        // `docs/design/upcall.md` §5.3's point stands regardless of which side of this fix
         // it is read from.
         assertFalse(UpcallTable.resolve("kotlin.coroutines.SuspendFunction1.invoke").isValid)
     }

@@ -7,7 +7,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * `docs/design/pythonx-adapter-design.md` §4.5 closed for everything the walker actually binds: a Kotlin
+ * `docs/archive/pythonx-adapter-design.md` §4.5 closed for everything the walker actually binds: a Kotlin
  * default value is reached by **not writing the argument**, in generated Kotlin *source*.
  *
  * ### What the problem was
@@ -172,6 +172,33 @@ class DefaultOmissionTest {
      * is all `false`, so `pythonx` requires every argument and the `.pyi` writes no `= ...`. The
      * declaration is still bound and still callable; what it loses is omission.
      */
+    /**
+     * The stub's side of the same rule: the declaration model says `declaresDefault` for exactly the
+     * slots the **binding** lets Python leave out, so a stub never promises an omission the runtime
+     * refuses. Before this was pinned the model kept Kotlin's own view for a declaration the cap (or a
+     * name the walker cannot write) left all-required, and `combinedClickable`'s stub offered nine
+     * defaults that `inspect.signature` at run time requires (`StubSignatureAgreesWithRuntimeTest`).
+     */
+    @Test
+    fun theDeclarationModelMarksADefaultOnlyWhereTheBindingAllowsOmission() {
+        val declarations = ArtifactScanner.scanDeclarations(fixtureClasses, includePrefixes = listOf("fixture.artifactdefaults"))
+        fun defaults(name: String) = declarations.single { it.bindingName == "fixture.artifactdefaults.$name" }.parameters.map { it.declaresDefault }
+        assertEquals(List(7) { false }, defaults("wide"))
+        assertEquals(List(6) { true }, defaults("sixWide"))
+        assertEquals(listOf(false, true), defaults("greet"))
+        // And for every bound declaration, receiver slot included, the two views are one view.
+        val bound = walk().associateBy { it.name }
+        declarations.filter { it.bindingName != null }.forEach { declaration ->
+            val callable = bound.getValue(declaration.bindingName!!)
+            val offset = if (callable.receiverTypeName != null) 1 else 0
+            assertEquals(
+                declaration.parameters.indices.map { index -> callable.paramHasDefault.getOrElse(index + offset) { false } },
+                declaration.parameters.map { it.declaresDefault },
+                declaration.bindingName,
+            )
+        }
+    }
+
     @Test
     fun aDeclarationWiderThanTheCapKeepsEveryParameterRequired() {
         val wide = entry("wide")

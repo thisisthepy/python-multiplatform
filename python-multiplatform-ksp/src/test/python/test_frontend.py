@@ -1,4 +1,4 @@
-"""TypedPython front end: Python AST + Pyrefly types -> typed IR (#41, SPEC N-7).
+"""TypedPython front end: Python AST + Pyrefly types -> typed IR (#41, SPEC N-8).
 
 Each test writes a small module and asserts on the IR `frontend.lower` produces, or on the reason
 a function was left interpreted. The IR's own docstrings (typedpython/ir.py) are the contract:

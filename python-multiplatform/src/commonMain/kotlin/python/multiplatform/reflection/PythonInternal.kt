@@ -6,7 +6,7 @@ package python.multiplatform.reflection
  * library author needs is a way to say "not this one".
  *
  * Applies to a top-level function, a class (excluding the whole class and its members), or a
- * member function/property. The KSP fragment generator (`docs/design/upcall-table-design.md`) is the
+ * member function/property. The KSP fragment generator (`docs/design/upcall.md`) is the
  * only reader of this annotation; it has no effect at runtime.
  */
 @Target(AnnotationTarget.FUNCTION, AnnotationTarget.PROPERTY, AnnotationTarget.CLASS)

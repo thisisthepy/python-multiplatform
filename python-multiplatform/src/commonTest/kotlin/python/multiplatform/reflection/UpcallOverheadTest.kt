@@ -14,7 +14,7 @@ private const val TABLE_ENTRIES = 200
  * What the upcall path costs, and specifically the comparison the design rests on: a name
  * resolved on every call against a handle resolved once and cached.
  *
- * `docs/design/upcall-design.md` puts per-call name passing at hundreds of nanoseconds and a cached
+ * `docs/design/upcall.md` puts per-call name passing at hundreds of nanoseconds and a cached
  * handle at 10--20 ns. **These numbers are a lower bound on the gap, not the gap.** Everything
  * measured here is inside Kotlin; the expensive part of the name path is what happens before
  * it -- `PyUnicode` to UTF-8 (an allocation) and the FFI boundary crossing, both measured

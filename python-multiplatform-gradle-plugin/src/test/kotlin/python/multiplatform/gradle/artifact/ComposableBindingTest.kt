@@ -8,7 +8,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /**
- * `docs/design/pythonx-adapter-design.md` §5, measured against real Compose Multiplatform jars.
+ * `docs/archive/pythonx-adapter-design.md` §5, measured against real Compose Multiplatform jars.
  *
  * ### What this test exists to pin
  *
@@ -608,6 +608,35 @@ class ComposableBindingTest {
                     }
                 }
             }
+        }
+    }
+
+    /**
+     * Issue #53: an extension composable's declared parameters carry **their own** boundary tags.
+     *
+     * The composable path tags every JVM slot, receiver first, and the declaration model lists the
+     * value parameters without the receiver; pairing them by index shifted every tag by one, so
+     * `RowScope.NavigationBarItem`'s `colors: NavigationBarItemColors` read the tag of the
+     * `alwaysShowLabel: Boolean` before it and the stub annotated it `bool`.
+     */
+    @Test
+    fun anExtensionComposablesParametersAreTaggedByTheirOwnType() {
+        val material3 = jarUnder("org.jetbrains.compose.material3", "material3-desktop") ?: return
+        val items = ArtifactScanner.scanDeclarations(
+            material3,
+            includePrefixes = listOf("androidx.compose.material3"),
+            classpath = composeClasspath(),
+        ).filter { it.simpleName == "NavigationBarItem" && it.bindingName != null }
+        assertTrue(items.isNotEmpty(), "NavigationBarItem is bound")
+        items.forEach { item ->
+            assertEquals("androidx.compose.foundation.layout.RowScope", item.receiver?.qualifiedName)
+            assertEquals("OBJECT", item.receiverBoundaryTag, "the receiver's own tag")
+            val byName = item.parameters.associateBy { it.name }
+            assertEquals("BOOLEAN", byName["selected"]?.boundaryTag)
+            byName["alwaysShowLabel"]?.let { assertEquals("BOOLEAN", it.boundaryTag) }
+            val colors = byName.getValue("colors")
+            assertEquals("androidx.compose.material3.NavigationBarItemColors", colors.type.qualifiedName)
+            assertEquals("OBJECT", colors.boundaryTag, "${item.bindingName}: colors is an object, not the Boolean before it")
         }
     }
 }

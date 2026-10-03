@@ -21,9 +21,9 @@ private const val UPCALL_TABLE = "python.multiplatform.reflection.UpcallTable"
  *
  * Mirrors `python.multiplatform.ksp.CallableEntryModel` field for field, minus what a jar cannot
  * answer: there is no `isSuspend` (a `suspend` function's JVM shape takes a `Continuation`, which
- * [boundaryTypeOf] declines, so no suspending declaration ever reaches here) and no `kind` (every
- * entry is a `FUNCTION`, because only statics are bound -- an instance method would need a
- * `ReflectedClass` and a receiver handle, which is the next step and not this one).
+ * [boundaryTypeOf] declines, so no suspending declaration ever reaches here). [kind] is `FUNCTION`
+ * for every call, `STATIC_GETTER` for an object's constant, and `GETTER`/`SETTER` for a property read
+ * off an instance (issue #38) -- instance *methods* are still not bound.
  *
  * `Serializable`: [KlibScanWorkAction] hands one of these back across the `WorkerExecutor` isolation
  * boundary it runs [KlibScanner] behind.
@@ -42,9 +42,14 @@ internal data class ArtifactCallable(
     /**
      * The Kotlin type this declaration extends, or `null` when it is not an extension function.
      *
+     * For a `GETTER`/`SETTER` (issue #38) it is the type the property is **read on** -- the owner of a
+     * member property, the receiver of an extension property -- which is what the binding layer
+     * keys a proxy's properties on. It is not a slot there (`CallableKind.GETTER.hasReceiver` puts
+     * the receiver in `args[0]` uncounted), so [renderEntry] writes `isExtension = false` for one.
+     *
      * Carried rather than recomputed because it is not recoverable from anything else here: the
      * receiver is [ArtifactCallable.paramTags]'s slot 0, and a tag says how a value is marshalled,
-     * not what it is. `docs/design/pythonx-adapter-design.md` §2.4 row 3 records this exact loss --
+     * not what it is. `docs/archive/pythonx-adapter-design.md` §2.4 row 3 records this exact loss --
      * "`ArtifactScanner` has both at the moment it constructs the call expression and discards them
      * one line later" -- and §4.2 records that `docs/design/kotlin-extensions-in-python.md` §4.1
      * (an extension becomes a method on its receiver's proxy) has no input without it.
@@ -141,12 +146,12 @@ internal fun artifactFragmentObjectName(coordinates: String): String =
  *
  * **A `@Composable` omits by a second mechanism and so has a second piece of evidence.** Its body has
  * no sentinel test and never will: the `$default` bitmask is a *declared trailing parameter* of the
- * JVM method (`docs/design/pythonx-adapter-design.md` §5.2), so `pythonx` computes an integer instead of
+ * JVM method (`docs/archive/pythonx-adapter-design.md` §5.2), so `pythonx` computes an integer instead of
  * writing `None` into a slot, and there is no branch for the body to have. Carrying a [ThunkSpec] is
  * that evidence -- it is set by exactly one path, the one that emits the mask parameter -- so the
  * rule stays "derived from the body", with two bodies to derive from rather than one.
  */
-private fun omittableSlotsOf(entry: ArtifactCallable): List<Boolean> =
+internal fun omittableSlotsOf(entry: ArtifactCallable): List<Boolean> =
     if ("== null" in entry.lambdaBody || entry.thunk != null) entry.paramHasDefault else entry.paramHasDefault.map { false }
 
 /**
@@ -188,7 +193,7 @@ private fun renderEntry(entry: ArtifactCallable): String {
         |    paramNames = listOf($paramNames),
         |    paramTypeNames = listOf($paramTypeNames),
         |    returnTypeName = ${renderedReturnTypeName(entry)?.quoted() ?: "null"},
-        |    isExtension = ${entry.receiverTypeName != null},
+        |    isExtension = ${entry.receiverTypeName != null && entry.kind == "FUNCTION"},
         |    receiverTypeName = ${entry.receiverTypeName?.quoted() ?: "null"},
         |    paramHasDefault = listOf($paramHasDefault),
         |    callable = ${entry.lambdaBody},

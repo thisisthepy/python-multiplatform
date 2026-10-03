@@ -12,7 +12,7 @@ import python.multiplatform.reflection.TypeTag
 import python.multiplatform.reflection.UpcallTable
 
 /**
- * The Python half of `docs/design/upcall-async-design.md` §8.6's second gap: the `async def` proxy that
+ * The Python half of `docs/design/upcall.md` §5.5's second gap: the `async def` proxy that
  * makes `await kotlin_fn(x)` read the same whether the Kotlin body suspended or not.
  *
  * Until this existed, `AsyncUpcallDeliveryTest` wrote that proxy by hand (`_await_kotlin`) and the
@@ -275,7 +275,7 @@ object PythonProxySource {
      * duplicated -- the handle `_pm_watch` carries is an ordinary object handle. */
     internal const val RELEASE_ENTRY_POINT = "_pm_release"
 
-    /** Where names with no package of their own land; `docs/design/upcall-table-design.md` §Runtime. */
+    /** Where names with no package of their own land; `docs/design/upcall.md` §Runtime. */
     const val DEFAULT_ROOT_MODULE: String = "kotlin"
 
     /**
@@ -425,6 +425,20 @@ object PythonProxySource {
             )
             _mod.__class__ = _t
             return _t
+
+
+        def _pm_kotlin_rows(_mod, _name, _row):
+            # The table row of the static property `_pm_static_property` just put on [_mod]'s type,
+            # kept beside it on that type (`_pm_kotlin_rows`, name -> row) so that
+            # `python_multiplatform.describe(module, name)` can describe a constant without reading
+            # it (issue #36). Beside the descriptor rather than on it: the read path stays a plain
+            # `property`, which is what `GeneratedProxyCostTest` prices.
+            _t = _pm_module_type(_mod)
+            _rows = _t.__dict__.get('_pm_kotlin_rows')
+            if _rows is None:
+                _rows = {}
+                _t._pm_kotlin_rows = _rows
+            _rows[_name] = _row
 
 
         def _pm_static_property(_mod, _name, _get, _set):
@@ -1030,7 +1044,8 @@ object PythonProxySource {
             if (setter != null) appendLine("$setterHandle = _pm_lookup(${setter.name.quoted()})")
             append(
                 "_pm_static_property(_pm_module(${module.quoted()}), ${leaf.quoted()}, " +
-                    "$getterHandle, $setterHandle)",
+                    "$getterHandle, $setterHandle)\n" +
+                    "_pm_kotlin_rows(_pm_module(${module.quoted()}), ${leaf.quoted()}, ${KotlinSurface.row(getter)})",
             )
         }
         return source to index

@@ -28,7 +28,7 @@ object BindingPolicy {
             // Cheap check first (`shortName`, no resolution); only resolve the annotation type
             // when the name plausibly matches, since resolving every annotation on every
             // declaration would be the expensive path `getSymbolsWithAnnotation` was rejected
-            // for avoiding (docs/design/upcall-table-design.md §2, "Discovery key").
+            // for avoiding (docs/design/upcall.md §2.3, "Discovery key").
             shortName == "PythonInternal" &&
                 annotation.annotationType.resolve().declaration.qualifiedName?.asString() == PYTHON_INTERNAL_ANNOTATION
         }
@@ -157,7 +157,7 @@ object BindingPolicy {
 
     /**
      * Whether this declaration needs the asynchronous calling convention
-     * (`docs/design/upcall-async-design.md`).
+     * (`docs/design/upcall.md`).
      *
      * `suspend` used to be a rejection here, and silently: a C callback slot has to hand back a
      * `PyObject *` before it returns and a suspension has nothing to hand back, so until there was
@@ -233,7 +233,7 @@ object BindingPolicy {
      * [FragmentScanner] can tell "not exposed because of shape" (private, `@PythonInternal`, ...)
      * apart from "not exposed because a type in the signature has no callable entry" and warn only
      * on the latter -- the former is ordinary and silent by design, the latter is the failure mode
-     * `docs/design/upcall-async-design.md` §2.1 measured as a classifier that compiles and checkcasts but
+     * `docs/design/upcall.md` §5.3 measured as a classifier that compiles and checkcasts but
      * has nothing behind it.
      */
     fun hasExposableTypes(function: KSFunctionDeclaration): Boolean =

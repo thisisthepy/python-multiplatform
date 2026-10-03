@@ -1,25 +1,23 @@
 # Threading model and Stable ABI
 
-> **Note (2026-10):** the conclusion below, "free-threading starts at 3.15t", is superseded. It dates from
-> 2026-08-10. `docs/roadmap/ROADMAP.md` §9 (2026-08-12) corrects it: 3.14t works on desktop with
-> `-PpythonFreeThreaded=true` (236 tests, 0 failures); the default stays `pythonFreeThreaded=false`; only
-> desktop has free-threaded prebuilts; `Py_LIMITED_API` is not defined, so `abi3t` is not a blocker. The
-> reasoning is kept as history.
-
 ## Decision
 
-Parallelism will come from **free-threaded CPython**, not from per-interpreter GIL sub-interpreters.
+Parallelism comes from **free-threaded CPython**, not from per-interpreter GIL sub-interpreters
+(AGENTS.md §12.8).
 
-The library ships **two flavours**, and the developer picks one by choosing which interpreter build
-they depend on:
+The library supports **two flavours**, chosen at build time:
 
-| Interpreter | Threading behaviour |
-|---|---|
-| `python3.X` (GIL) | Kotlin threads each attach a thread state and serialise on the GIL |
-| `python3.Xt` (free-threaded) | Each Kotlin thread talks to its own free-running Python thread |
+| Interpreter | Threading behaviour | Status |
+|---|---|---|
+| `python3.X` (GIL) | Kotlin threads each attach a thread state and serialise on the GIL | default (`pythonFreeThreaded=false` in `gradle.properties`) |
+| `python3.Xt` (free-threaded) | Each Kotlin thread talks to its own free-running Python thread | **3.14t works on desktop**, opt-in with `-PpythonFreeThreaded=true` |
 
-**Free-threading was originally planned from 3.15t onwards only** (superseded: see the note above; 3.14t
-works on desktop, opt-in). The reasoning for that gate is set out below.
+The interpreter version is pinned by `pythonVersion` in `gradle.properties` (3.14.7 at the time of
+writing). Free-threading is **not** gated on 3.15t: the whole desktop suite runs on 3.14.7t
+(236 tests, 0 failures, 1 skipped — ROADMAP §9; SPEC T-2). Only desktop has free-threaded
+prebuilts; Android and iOS have none, so the opt-in is desktop-only. How the earlier "from 3.15t"
+conclusion was reached, and why it did not hold, is in
+[`../archive/threading-and-abi-3.15t-gate.md`](../archive/threading-and-abi-3.15t-gate.md).
 
 ## Why not per-interpreter GIL
 
@@ -55,28 +53,25 @@ extension to implement multi-phase init and declare `Py_mod_multiple_interpreter
 do not simply fail to import. That would cost exactly the Python libraries this project exists to
 share, in return for parallelism.
 
-## Why 3.15t and not 3.14t (historical; superseded by ROADMAP §9)
+## Stable ABI on free-threaded builds
 
-Free-threaded builds **do not support the Limited API or the Stable ABI** in 3.13 or 3.14. All ~330
-bindings here target the Stable ABI, so a free-threaded 3.14 build cannot be used without abandoning
-it and recompiling per Python version — which would defeat the version-parameterised acquisition
-pipeline.
+CPython's Limited API / Stable ABI (`abi3`) is not offered by free-threaded builds in 3.13 and 3.14.
+That does not block this project: the ~330 bindings are symbols resolved dynamically at run time, and `Py_LIMITED_API` is not defined anywhere in the build, so no
+compile-time ABI contract is in play (SPEC T-2). What matters is that the symbols exist in the
+free-threaded `libpython3.14t`, and the suite passing on it shows they do. The cost of the
+free-threaded name changes is in the loader: such an install ships `libpython3.14t.dylib`,
+`lib/python3.14t/` and `bin/python3.14t` only (`Versions.abiFlags` carries the `t`; ROADMAP §9).
 
-[PEP 803](https://peps.python.org/pep-0803/) — **Final**, targeting 3.15 — introduces `abi3t`, a
-Stable ABI variant for free-threaded builds, with `abi3t` / `abi3.abi3t` wheel tags and forward
-compatibility across all later versions. 3.15 is therefore the first release where free-threading
-and the Stable ABI coexist.
-
-### What abi3t requires of us
+[PEP 803](https://peps.python.org/pep-0803/) (`abi3t`, targeting 3.15) would make a Stable ABI
+available on free-threaded builds for extension *modules*. What it asks of us if we ever adopt it:
 
 | Requirement | Our status |
 |---|---|
-| `PyObject` / `PyVarObject` become incomplete types; no field access | **Compatible.** Verified: `PyObject` appears only as `CPointer<PyObject>` and is never dereferenced. The only `.pointed` uses in the tree are commented-out `JNIEnv` code in `JniExport.kt`. |
+| `PyObject` / `PyVarObject` become incomplete types; no field access | **Compatible.** `PyObject` appears only as an opaque pointer and is never dereferenced. |
 | Extensions may not embed `PyObject` in their own structs | Compatible — nothing does. |
-| `PyModExport` hook (PEP 793) instead of static `PyModuleDef` | Not yet relevant. We embed CPython rather than building an extension module. **It becomes relevant for the upcall work**, where Kotlin classes are exposed to Python. |
-| No backwards compatibility with 3.14 or earlier | Was accepted at the time; no longer applies, 3.14t is used on desktop (ROADMAP §9). |
+| `PyModExport` hook (PEP 793) instead of static `PyModuleDef` | Not relevant: we embed CPython rather than building an extension module. It would matter if Kotlin classes were ever exposed as a CPython extension module. |
 
-## PEP 809 may collapse the two flavours into one
+## PEP 809 may collapse the two flavours into one (forward-looking)
 
 [PEP 809](https://peps.python.org/pep-0809/) — **Draft**, also targeting 3.15 — would replace `abi3`
 with time-bound versioned ABIs (`abi2026`), each frozen for at least ten years with at least five
@@ -95,44 +90,38 @@ If PEP 809 lands, the plan simplifies:
 
 Design for two artefacts, but keep the split shallow enough to collapse later.
 
-## Prebuilt availability, as of the 20260807 python-build-standalone release
+## Prebuilt availability
 
-| Platform | GIL | Free-threaded |
-|---|---|---|
-| macOS arm64 / x86_64 | ✅ | ✅ (incl. `3.15.0rc1`) |
-| Linux x86_64 | ✅ | ✅ (incl. `3.15.0rc1`) |
-| Windows x86_64 | ✅ | ✅ (incl. `3.15.0rc1`) |
-| Android (python.org) | ✅ | ❌ none published |
-| iOS (Python-Apple-support) | ✅ | ❌ none published |
+Desktop (macOS arm64/x86_64, Linux x86_64, Windows x86_64) has GIL and free-threaded builds on the
+python-build-standalone releases; the build uses the `-freethreaded` archive when
+`pythonFreeThreaded=true`. **Android (python.org) and iOS (Python-Apple-support) publish no
+free-threaded build**, so free-threading stays a desktop-only opt-in, and enabling it by default
+would split the threading model — and the object-lifetime and thread-state design layered on top —
+across platforms. Switching the default would additionally need adequate free-threaded wheel
+coverage for the C extensions users care about. Table as of the 20260807 release, kept in the
+archive note above.
 
-Desktop free-threaded builds exist today, including 3.15 release candidates. **Mobile has none**, so
-enabling free-threading before mobile artefacts appear would split the threading model across
-platforms — and with it the object-lifetime and thread-state design layered on top.
+## Thread-state management
 
-Switching the default (originally) required all three of the following; ROADMAP §9 shows 1 is not needed for 3.14t on desktop, while 2 still holds:
+Every C API call holds an attached thread state (AGENTS.md §16, `commonMain/README.md`):
+`withGIL { }` (`python/multiplatform/ffi/GILScope.kt`) calls `PyGILState_Ensure`/`Release` at the
+outermost scope with a per-thread nesting counter, and `withoutGIL { }` wraps
+`PyEval_SaveThread`/`RestoreThread` for long non-Python work. `Python3.withPython` goes through
+`withGIL`. This is needed on **both** flavours: free-threading removes contention on a global lock,
+not the requirement that a thread be attached before it touches any object.
 
-1. CPython 3.15 final, for `abi3t`
-2. Free-threaded mobile artefacts from python.org and Python-Apple-support
-3. Adequate free-threaded wheel coverage for the C extensions users care about
+Entry points reached from C (upcalls) take their own unconditional `PyGILState_Ensure` instead of
+trusting the nesting counter (`UpcallTrampoline.attached`; reason in `commonMain/README.md`).
 
-`gradle.properties` already carries `pythonFreeThreaded`, defaulting to `false`, so the switch is a
-configuration change once those hold.
+Consequences specific to free-threading, all recorded in ROADMAP §9 and
+`docs/design/object-lifetime.md`:
 
-## What has to be built either way
-
-The binding layer currently performs **no thread-state management at all**. There are no
-`PyGILState_Ensure` / `PyGILState_Release` bindings, no calls to them, and `Python3.withPython` only
-checks an initialisation flag. Calling into Python from any thread other than the initialising one is
-therefore broken today, independently of GIL versus free-threading.
-
-Free-threading does not remove this requirement: `PyGILState_Ensure` still exists there and still
-attaches a thread state. What disappears is contention on a global lock, not the need for a thread
-state. The work is nearly identical for both flavours, so building it now also prepares the
-free-threaded path.
-
-Two further consequences of free-threading, not yet addressed:
-
-- Kotlin-side caches become concurrently accessed. `PyType.getInstance` currently memoises into a
-  plain `mutableMapOf`, which is a data race the moment two Kotlin threads run Python in parallel.
-- `PyGILState_Ensure` per call is expensive. Thread state should be cached per thread and acquired at
-  entry and exit boundaries, not around every FFI crossing.
+- Deallocation of an object decref'd by a non-owning thread is deferred to the owner's eval-loop
+  checkpoint; a pure C-API embedder never reaches one, so the library takes a periodic checkpoint
+  itself (`maybeReachEvalCheckpoint`, `Python3.drainPendingReleases`; `Python3.autoDrainInterval` defaults on for free-threaded builds and off on the GIL build).
+- Kotlin-side caches become concurrently accessed. `PyType.getInstance` still memoises into a plain
+  `mutableMapOf` (`python/multiplatform/ffi/PyType.kt`), which relies on the caller holding the GIL;
+  under free-threading that is a data race once two Kotlin threads create types in parallel. The
+  desktop suite passing on 3.14t does not exercise that case.
+- `PyGILState_Ensure` per call is expensive; the nesting counter keeps inner scopes cheap, and on a
+  free-threaded build widening the outermost scope costs other threads nothing.

@@ -38,7 +38,7 @@ private const val METH_O = 0x0008
  * `PyObject *pm_upcall_invoke(long callableHandle, PyObject *args)` -- the one C shape argument
  * passing needs, and the same one `PyCFunction` has once `self` takes the handle's place.
  *
- * This is the symbol `docs/design/upcall-design.md` expects a host to reach with `dlopen(NULL)` /
+ * This is the symbol `docs/design/upcall.md` expects a host to reach with `dlopen(NULL)` /
  * `ctypes.CDLL(None)`. Whether it is *findable* that way depends entirely on which binary the
  * Kotlin/Native code ends up in, and that turned out to vary; see [UpcallEntry] for the three
  * measurements. [UpcallEntry.invokeAddress] is the route that does not depend on the link at all.
@@ -167,7 +167,7 @@ private fun raiseTypeError(message: String) {
  * This is the shape [pmUpcallInvoke] was written to converge on, reached the way CPython reaches
  * any built-in function. It exists as well as the raw symbol because **the iOS distribution has
  * no `_ctypes`** (`Python.framework` exports `PyInit__abc` ... `PyInit_time` and nothing else,
- * and carries no `lib-dynload`), so `ctypes.CDLL(None)` -- the route `docs/design/upcall-design.md`
+ * and carries no `lib-dynload`), so `ctypes.CDLL(None)` -- the route `docs/design/upcall.md`
  * names for this platform -- cannot be used there at all. A `PyMethodDef` is the only way to hand
  * Python a callable that lands on a C function pointer on that target, and it is also what the
  * generated proxy type will install, so nothing here is scaffolding for the test alone.
@@ -317,7 +317,7 @@ private fun bindHandle(raw: Long): CPointer<CPyObject>? {
  *
  * ### Two routes, because the documented one only half exists
  *
- * `docs/design/upcall-design.md` named one route for this platform -- a `@CName` symbol picked up by
+ * `docs/design/upcall.md` named one route for this platform -- a `@CName` symbol picked up by
  * `ctypes.CDLL(None)`, on the grounds that Python and Kotlin/Native are one binary so no C glue
  * is needed. Checked, and it holds in one of the three binaries this project produces:
  *

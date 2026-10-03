@@ -59,8 +59,8 @@ import python.native.ffi.toRawValue
  *
  * The shape is deliberately the one CPython's own `PyCFunction` slot uses
  * (`PyObject *(PyObject *self, PyObject *args)`): when the generated proxy type lands, `self`
- * takes the handle's place and no new stub is needed. `docs/design/upcall-design.md`'s "왜 트램폴린이
- * 적어도 되는가" is exactly this argument, and the remaining CPython slot shapes
+ * takes the handle's place and no new stub is needed. `docs/design/upcall.md` §1.3 (formerly "왜 트램폴린이
+ * 적어도 되는가") is exactly this argument, and the remaining CPython slot shapes
  * (`(long,long,long) -> int` for `initproc`/`setter`/`traverse`, `(long) -> int` for `clear`,
  * `(long) -> void` for `destructor`) are already in `Panama`'s vocabulary.
  *
@@ -122,7 +122,7 @@ object UpcallTrampoline {
             // A suspending entry's body hands back a PendingCall rather than the value, because
             // this frame has to return before the coroutine can finish. `AsyncUpcall` either
             // unwraps an already-complete one -- the common case, and free -- or builds the
-            // `asyncio.Future` that will carry the answer. See docs/design/upcall-async-design.md §5.
+            // `asyncio.Future` that will carry the answer. See docs/design/upcall.md §5.2.
             if (entry.isSuspend) AsyncUpcall.deliver(entry, result)
             else marshalResult(entry.returnType, result)
         } catch (t: Throwable) {
@@ -171,7 +171,7 @@ object UpcallTrampoline {
     /**
      * Tells the [PendingCall] behind [callHandle] that the Python side has stopped waiting for it.
      *
-     * The Python end of `docs/design/upcall-async-design.md` §9.3's missing half. Without this, the only
+     * The Python end of `docs/design/upcall.md` §5.6's missing half. Without this, the only
      * moment Kotlin could learn that a `Future` had been cancelled was when the coroutine finished
      * and [AsyncUpcall] found the `Future` already settled -- which is the moment the news becomes
      * useless. `PythonProxySource`'s `_pm_watch` hangs a `Future.add_done_callback` on the `Future`

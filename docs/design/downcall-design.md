@@ -1,11 +1,19 @@
 # 다운콜 설계 — Kotlin → Python
 
 Kotlin 코드가 CPython Stable ABI 함수를 호출하는 방향. 반대 방향은
-[`upcall-design.md`](upcall-design.md).
+[`upcall.md`](upcall.md).
+
+> **현재 상태 (2026-10-03 기준, 코드로 확인).** 플랫폼별 다운콜 경로는 각 `EmbedAPI.<platform>.kt` +
+> `bindings.kt` 가 직접 구현한다: 데스크톱은 Panama `MethodHandle` + `invokeExact` (포인터는
+> `JAVA_LONG`), Android 는 `RegisterNatives` 로 등록한 JNI (함수별·API 레벨별 호출 규약), Native 는
+> cinterop. 아래 "shape 트램폴린" 14종은 **어휘(vocabulary)로 구현되어 있으나**(`jvmMain/.../ShapeDowncalls.kt`
+> 의 `expect` + 데스크톱·Android·Native 구현) 330개 `actual` 을 `jvmMain` 한 벌로 합치는 통합에는
+> **쓰이지 않았다** — 소스에서 shape 함수를 부르는 곳은 데스크톱 `ProxyTypeFactory` 의 `tp_traverse`/
+> `tp_free` 호출 두 곳뿐이다. 이 문서의 shape 설계 절은 그 계획과 근거의 기록이다.
 
 ## 시그니처 shape 조사 결과
 
-`EmbedAPI.kt` 의 약 330개 `expect` 선언을 전수 분석한 결과다.
+`EmbedAPI.kt` 의 약 330개 `expect` 선언을 전수 분석한 결과다 (조사 시점의 수. 현재 `expect` 선언은 314줄로 센다).
 
 | 항목 | 결과 |
 |---|---|
@@ -40,13 +48,14 @@ Kotlin/Native 가 헤더를 읽어 직접 호출 코드를 낸다. **오버헤�
 
 리플렉션은 초기화 때 한 번만 돌고 이후는 캐시된 `MethodHandle` 을 쓴다.
 
-**알려진 성능 문제**: 호출부 305곳이 `MethodHandle.invoke(...) as Long` 형태다. `invoke` 는 호출
-지점에서 `asType` 변환을 하고, Kotlin 에서는 반환 타입이 `Any!` 로 보이므로 **호출마다 박싱/언박싱이
-발생**한다. Panama 의 핵심 장점(JIT 인라인 가능, 할당 없는 다운콜)이 사라진다. `invokeExact` 는 호출
-지점의 정적 시그니처가 핸들 타입과 정확히 일치해야 하는데, shape 14종으로 고정하면 그 조건을 맞추기
-훨씬 쉬워진다.
+**성능 문제는 해결되었다.** 초기에는 호출부 305곳이 `MethodHandle.invoke(...) as Long` 이었고 호출마다
+`asType` 변환과 박싱이 일어나 `PyList_Size` 한 번이 약 1016 ns 였다. 포인터를 `ADDRESS` 대신
+`ValueLayout.JAVA_LONG` 으로 기술하고 호출부를 `invokeExact` 로 바꿔 **2.65 ns** 가 되었다 (아래
+"Fixed: 1015.95 ns -> 2.65 ns"). 현재 `desktopMain/.../bindings.kt` 에는 `invokeExact` 315곳이 있고
+`.invoke(` 는 0곳이다 (AGENTS.md §16: 무조건 `invokeExact`). 리플렉션은 핸들을 **만들 때** 심볼당 한 번만
+돈다. `Linker.Option.critical()` 은 쓰지 않는다 (`downcallHandle(..., emptyOptions)`).
 
-### Android(ART) — shape 트램폴린 (미구현)
+### Android(ART) — shape 트램폴린 (구현됨, 단 주 경로는 아니다)
 
 ART 는 런타임에 임의 시그니처의 네이티브 호출을 만들 수 없다. 그래서 shape 마다 트램폴린을 **미리
 컴파일**해두고, 대상 함수 포인터를 첫 인자로 받는다:
@@ -60,16 +69,16 @@ fun downcallJ_J(fn: Long, a0: Long): Long =
 
 주소는 런타임에 무엇이든 될 수 있고, **고정되는 것은 시그니처 형태뿐**이다.
 
-도달 방법은 두 단계로 나눈다:
+도달 방법은 두 단계로 계획했다:
 
-| 단계 | 경로 | 비용 |
+| 단계 | 경로 | 상태 |
 |---|---|---|
-| 1 | 일반 JNI → 트램폴린 → 간접 호출 | JNI 전환 비용 포함 |
-| 2 | ART 엔트리 포인트 패치 + `@CriticalNative` → 트램폴린 | 간접 분기 1회만 |
+| 1 | 일반 JNI → 트램폴린 → 간접 호출 | **구현됨.** `androidMain/.../bindings.kt` 의 `downcall*` `external fun` 14개가 `jni_onload.def` 에서 등록되고, Kotlin/Native 트램폴린(`nativeMain/.../EmbedAPI.native.kt`)이 함수 포인터를 직접 호출한다. `ShapeDowncalls.android.kt` 가 감싼다 |
+| 2 | ART 엔트리 포인트 패치 + `@CriticalNative` → 트램폴린 | **하지 않았다.** `@CriticalNative` 는 API 34+ 에서 오히려 비싸다고 실측됐고(아래), 호출 규약은 함수별로 고르는 것으로 정리됐다 |
 
-1단계는 에뮬레이터 없이 컴파일 검증이 되고, 2단계는 같은 트램폴린 코드를 그대로 쓰면서 도달 방법만
-바꾼다. `@CriticalNative` 는 `JNIEnv` 도 `jclass` 도 GC 스레드 상태 전환도 없어 ART 에서 가장 빠른
-네이티브 규약이다.
+실제 Android 바인딩은 shape 를 거치지 않고 **함수마다** `RegisterNatives` 로 등록한 JNI 를 쓴다
+(`androidMain/README.md`). shape 트램폴린은 `ffiSymbol` 로 얻은 임의 주소를 부르는 일반 수단으로
+남아 있다.
 
 **LLVM JIT 은 필요 없다 — 다만 근거는 아래와 같다.**
 
@@ -86,7 +95,8 @@ ART 에는 FFM 을 위한 VM 지원이 없다. HotSpot 은 `downcallHandle` 호�
 stub_descriptor = stub_descriptor.insertArgumentLayouts(0, WORD);  // leading function pointer
 ```
 
-우리 `downcallII_I(fn, a0, a1)` 과 같은 구조다. 차이는 **생성 시점**뿐이다:
+우리 `downcallII_I(fn, a0, a1)` 과 같은 구조다. 차이는 **생성 시점**뿐이다 (PanamaPort 는 의존성으로 쓰지
+않는다 — AGENTS.md §12.9. 아래는 설계 근거로 읽은 분석이다; [`android-ffm-design.md`](../archive/android-ffm-design.md)):
 
 | | PanamaPort | 이 프로젝트 |
 |---|---|---|
@@ -102,12 +112,11 @@ stub_descriptor = stub_descriptor.insertArgumentLayouts(0, WORD);  // leading fu
 부트스트랩 수단이며 — LLVM API 같은 내부 네이티브 함수를 바인딩한다 — `Core` 의 Linker 경로에서는
 쓰이지 않는다.)
 
-## JVM 통합 — Desktop + Android 를 한 벌로
+## JVM 통합 — Desktop + Android 를 한 벌로 (계획; 미수행)
 
-현재 JVM 쪽은 330개 `actual` 이 **두 벌** 있다. 여기에 플랫폼별 `bindings` 선언까지 더하면 손으로
-유지하는 선언이 1,300개에 가깝다. 바인딩 하나를 추가하려면 네 계층을 맞춰야 한다.
-
-shape 를 도입하면 플랫폼별 표면이 **14개로 줄고** 330개 `actual` 은 `jvmMain` 에 한 벌만 남는다:
+계획은 이랬다. 당시 JVM 쪽은 330개 `actual` 이 **두 벌** 있고 플랫폼별 `bindings` 선언까지 더하면 손으로
+유지하는 선언이 1,300개에 가까웠다. shape 를 도입하면 플랫폼별 표면이 14개로 줄고 330개 `actual` 은
+`jvmMain` 에 한 벌만 남는다:
 
 ```
 commonMain   expect fun PyList_Size(list: NativePointer): Long
@@ -119,77 +128,53 @@ jvmMain      actual fun PyList_Size(list) = downcallJ_J(sym.PyList_Size, list.to
 ```
 
 **인터페이스나 추상 클래스를 쓰지 않는다.** `expect`/`actual` 이 같은 일을 하는 언어 기능이고,
-인터페이스를 두면 호출마다 가상 디스패치가 붙는다. `expect`/`actual` 은 컴파일 타임에 확정된다.
+인터페이스를 두면 호출마다 가상 디스패치가 붙는다.
 
-검증된 절차:
+실험으로 확인한 절차(함수 하나 `PyList_Size` 로 4개 타깃 컴파일): commonMain `expect` 에서 `inline`
+제거 → 플랫폼 `actual` 삭제 → `jvmMain` 에 `actual` 하나 → shape 함수를 `internal expect`.
 
-1. 대상 함수의 commonMain `expect` 에서 `inline` 제거
-2. `androidMain`/`desktopMain` 의 `actual` 삭제
-3. `jvmMain` 에 `actual` 하나 + shape 함수 호출
-4. shape 함수를 `internal expect` 로 두고 각 플랫폼이 `internal actual` 제공
-
-함수 하나(`PyList_Size`)로 4개 타깃 전부 컴파일되는 것까지 실험으로 확인했다.
+**현재 상태: 이 통합은 진행되지 않았다.** `jvmMain` 에는 shape 어휘(`ShapeDowncalls.kt`)와 문자열
+마샬링 `expect`(`internedUtf8` 등)만 있고, 330개 `actual` 은 여전히 `desktopMain` 과 `androidMain` 에 각각
+있다. 이유는 아래 실측들이다: 데스크톱은 `invokeExact` 로 2.65 ns 에 도달해 shape 가 필요 없었고, Android 는
+함수별 호출 규약 선택이 shape 단일화보다 비용을 크게 좌우했다. `expect inline fun` + 중간 소스셋 조합의
+컴파일러 크래시 제약(AGENTS.md §16)도 그대로 남아 있다.
 
 ## GraalVM Native Image
 
 Native Image 는 **FFM 다운콜을 빌드 타임에 등록**해야 한다. `reflect-config.json` 으로는 안 되고,
-커스텀 `Feature` 의 `duringSetup` 단계에서 `RuntimeForeignAccess.registerForDowncall(descriptor, options)`
-를 호출해야 하며, `-H:+ForeignAPISupport` 로 활성화하는 **실험적** 기능이다.
+`RuntimeForeignAccess.registerForDowncall(descriptor, options)` 를 쓰는 등록(여기서는 reachability
+메타데이터)이 필요하며, `-H:+ForeignAPISupport` 로 활성화하는 **실험적** 기능이다. 데스크톱이 연결하는
+모든 `FunctionDescriptor` 가 그 메타데이터에 선언되어 있는지는 `ReachabilityMetadataTest.kt` 가 지킨다
+(SPEC C-2). `JAVA_LONG`/shape 로 시그니처 종류가 한정되는 것이 등록을 단순하게 한다.
 
-여기서도 shape 14종이 유리하다 — `Feature` 하나에서 `registerForDowncall` 을 14번 부르면 끝난다.
-임의 시그니처를 런타임에 만드는 구조였다면 애초에 불가능하다.
-
-우선순위는 낮다. 상세는 [`android-ffm-design.md`](../platforms/android-ffm-design.md).
+이것은 더 이상 "우선순위 낮음"이 아니다 — 업콜이 네이티브 이미지에서 동작해야 한다는 것은 이 저장소의
+결정이다 (AGENTS.md §13). 절차와 마지막 검증 기록은
+[`graal-native-image-verification.md`](../platforms/graal-native-image-verification.md) (SPEC U-6: 수동 검증,
+이미지 자체를 테스트하는 자동화는 아직 없음).
 
 ## 스레드 상태
 
-다운콜은 전부 GIL(또는 free-threaded 빌드의 스레드 상태)을 요구한다.
-[`threading-and-abi.md`](threading-and-abi.md) 를 본다.
+다운콜은 전부 GIL(또는 free-threaded 빌드의 스레드 상태)을 요구한다 — `withGIL { }`
+(`python/multiplatform/ffi/GILScope.kt`). [`threading-and-abi.md`](threading-and-abi.md) 를 본다.
 
 ---
 
 ## 개정: Android 는 shape 트램폴린만으로 풀리지 않는다
 
 위의 shape 설계는 **Desktop 에는 유효하지만 Android 에는 그대로 적용되지 않는다.** 설계 논의에서
-드러난 사실들을 기록한다.
+드러난 사실과, 그 결과 실제로 택한 방식을 기록한다.
 
-### 확인된 버그: 현재 Android JNI 배선이 어긋나 있다
+### 과거의 JNI 배선 버그 (수정됨)
 
-`@CName` 이 만드는 C 함수는 선언한 Kotlin 인자만 받는다:
+초기에는 `@CName` 으로 만든 C 함수(`JNIEnv`/`jclass` 를 받지 않음)를 일반 JNI 메서드처럼 이름으로
+연결해서, ART 가 넘기는 `JNIEnv*`·`jclass` 때문에 **인자가 두 칸 밀렸다.** 지금은 `JNI_OnLoad`
+(`artMain`)가 `RegisterNatives` 로 모든 `external fun` 을 등록한다 (367개 중 363개; 예외 4개는 의도적 —
+ROADMAP §2). 이름 기반 연결은 API 26 에서 런타임을 abort 시키기도 한다. 초안의 진단·표는
+[`../archive/downcall-design-android-first-diagnosis.md`](../archive/downcall-design-android-first-diagnosis.md).
 
-```
-Java_python_native_ffi_bindings_PyList_1Size(jlong list)
-```
-
-그런데 `androidMain/bindings.kt` 는 이를 **일반 JNI 메서드**로 선언한다. 일반 JNI 메서드를 ART 는
-이렇게 호출한다:
-
-```
-Java_..._PyList_1Size(JNIEnv* env, jobject thiz, jlong list)
-```
-
-**인자가 두 칸 밀린다.** `list` 자리에 `JNIEnv*` 가 들어간다. 확인 결과 `@CName` 익스포트 중
-`JNIEnv` 를 받는 것은 0개이고, `@CriticalNative`/`@FastNative` 도 어디에도 없다.
-
-즉 **Android JVM 경로는 컴파일만 되고 런타임에 동작하지 않는다.** 실행된 적이 없어 드러나지 않았다.
-
-### ART 의 세 가지 호출 규약
-
-| | 일반 JNI | `@FastNative` | `@CriticalNative` |
-|---|---|---|---|
-| 전환 오버헤드 | 115 ns | 35 ns | 25 ns |
-| C 시그니처 | `(JNIEnv*, jobject, args…)` | 동일 | **`(args…)` 만** |
-| 객체 인자·반환 | 가능 | 가능 | **원시 타입만** |
-| 정적/인스턴스 | 둘 다 | 둘 다 | **정적만** |
-| JVM 으로 콜백 | 가능 | 가능 | **불가** |
-| 실행 중 GC | 허용 | **차단** | **차단** |
-
-shape 트램폴린은 정적이고 `Long`/`Double` 만 주고받으므로 `@CriticalNative` 에 정확히 맞는다. 그리고
-우리 `@CName` 익스포트가 `JNIEnv` 를 받지 않는다는 사실이 곧 `@CriticalNative` 규약과 일치하므로,
-**애노테이션을 붙이는 것이 성능 개선인 동시에 위 버그의 수정**이다.
-
-`@CriticalNative` 는 API 34 부터 공식 SDK 에 포함된다. minSdk 26 구간에서는 `RegisterNatives` 로
-등록해야 한다 — `RegisterNatives` 는 호출 규약이 아니라 바인딩 수단이므로 둘은 대안 관계가 아니다.
+**호출 규약은 per-API-level 이면서 per-function 이다.** 전환 비용은 아래 "Measured" 절의 실측을 따른다
+(API 34 를 경계로 `@CriticalNative` 와 `@FastNative` 가 뒤집힌다). `@CriticalNative` 는 `RegisterNatives`
+로만 등록하고, 정적·원시 타입만, 그리고 JVM 으로 되돌아올 수 없는 함수에만 쓴다.
 
 ### critical 계열은 업콜과 공존할 수 없다
 
@@ -227,30 +212,21 @@ Android 쪽이 더 빠를 수는 없다. 다만 **얼마나 다른지는 측정�
 우리 desktop 구현은 현재 `Linker.Option.critical()` 을 쓰지 않는다 —
 `Panama.kt` 가 `downcallHandle(..., emptyOptions)` 로 기본 경로를 탄다.
 
-### 미결정: 조립 단위의 범위
+### 조립 단위의 범위 — 정해졌다
 
-경계 통과가 비싸고 뜨거운 호출에는 critical 도 못 쓰므로, **통과 횟수 자체를 줄이는 것**이 확실한
-접근이다. 원래 설계 의도가 이것이었다 — `bindings` 의 저수준 함수들을 `Python3.kt` 같은 **바인더
-레벨 연산으로 조립**해 `artMain` 에서 내보내고, `androidMain` 은 그 굵은 단위를 호출한다.
-`artMain/JniExport.kt` 의 `initialize`/`finalize`/`internalIsInitialized` 가 그 형태로 남아 있다.
+경계 통과가 비싸고 뜨거운 호출에는 critical 도 못 쓰므로 **통과 횟수 자체를 줄이는 것**이 접근이었다 —
+`bindings` 의 저수준 함수들을 바인더 레벨 연산으로 조립해 `artMain` 에서 내보내고 `androidMain` 은 그
+굵은 단위를 한 번 부른다 (`artMain` 의 `asmGetAttr` 등; 조립 단위는 길고 업콜 가능성이 있으므로 일반
+JNI, shape 계열은 짧고 콜백이 없으므로 규약을 함수별로 선택).
 
-조립 단위는 길고 업콜 가능성이 있으므로 일반 JNI 를 쓴다. 통과가 적으면 개당 115 ns 도 감당된다.
-반대로 shape 트램폴린은 짧고 콜백이 없으므로 `@CriticalNative` 를 쓴다. **둘은 대립이 아니라 층이
-다르다** — 조립이 통과 횟수를 줄이고, critical 이 남은 통과를 싸게 한다.
-
-정해야 할 것은 **조립 단위를 어느 층위로 잡는가**이다. 지금 객체 모델(`PyObject`, `PyType`, 컬렉션)이
-`commonMain` 에 있고 그 안에서 원시 `expect` 를 호출하므로, Android 에서 조립하려면 그 연산 자체가
-플랫폼별로 갈라져야 한다. 후보:
-
-1. 바인더 API 를 `expect`/`actual` 로 올리고, Android 는 `artMain` 조립 함수를 호출하는 얇은
-   포워더가 된다 — 로직은 Kotlin/Native 에 한 벌
-2. `commonMain` 에 로직을 두되 Android 만 별도 경로 — 중복 발생
-3. 조립을 `Python3` 수준으로 한정하고 `PyObject`/컬렉션은 잘게 둔다 — 절충
-
-이 결정 전에는 `EmbedAPI.jvm.kt` 통합을 진행할 수 없다. Android 가 조립 단위를 쓰면 잘게 쪼갠 330개
-`expect` 를 구현하지 않게 되기 때문이다.
-
----
+초안은 세 후보를 두고 결정을 미뤘다(바인더 API 를 `expect`/`actual` 로 올림 / `commonMain` 에 두고 Android
+만 별도 경로 / `Python3` 수준만 조립). **택한 것은 어느 것도 아니다**: 조립은 **FFI 층의 `expect`/`actual`**
+(`EmbedAPI`)에 두고 객체 모델은 공통으로 둔다 — 객체 모델은 `bindings` 를 참조하지 않는다
+(`architecture.md` "Consequence for composed operations", `commonMain/README.md`). 그리고 **문자열을
+나르는 연산에서는 조립보다 interning 이 더 싸고 일반적**이라 그쪽으로 갔다
+([`marshalling-design.md`](marshalling-design.md)); 조립이 남는 곳은 통과 횟수가 N 에 비례하는 일괄
+연산(1000원소 리스트 변환 11배)이다. 데스크톱에서는 조립을 하지 않기로 닫혔다 (ROADMAP §6: 마샬링이
+호출의 10.5%).
 
 ## Measured: what the JNI calling convention actually costs (2026-08-11)
 
@@ -308,10 +284,10 @@ measure on physical devices at both API levels.**
 ### Consequence for the design
 
 If this holds on hardware, the current design is optimal at minSdk and worst-case on modern
-Android, which is backwards from where the users are. The fix would be to pick the convention
-per API level. The annotation is compile-time, so that means declaring both variants and
-dispatching on `Build.VERSION.SDK_INT` — a branch costing ~1-2ns to avoid ~22ns. Not done yet,
-because it should not be built on emulator numbers alone.
+Android, which is backwards from where the users are. The fix is to pick the convention per API
+level. The annotation is compile-time, so that means declaring both variants and dispatching on
+`Build.VERSION.SDK_INT` — a branch costing ~1-2ns to avoid ~22ns. (It held on hardware, below, and
+was then built: `bindings.preferFastNative`.)
 
 ### Re-measured on physical hardware — the inversion is real
 
@@ -358,9 +334,9 @@ for one declaration. The fix is to declare both variants and dispatch on
 still receives JNIEnv and jclass, so its exports need those leading parameters — meaning two
 export sets in artMain, not one.
 
-Not yet implemented. The crossover API level is also still unknown: it lies somewhere between
-26 and 34, and picking the threshold well needs measurements at 28/30/31/32 that have not
-been taken.
+**Implemented** (`bindings.preferFastNative = SDK_INT >= 34`, `androidMain/.../bindings.kt`; the
+crossover is pinned in the next section, and `dispatchPicksTheFasterConventionOnThisDevice` re-measures
+it on whatever device runs it).
 
 ### The crossover, pinned: Android 14
 
@@ -404,7 +380,10 @@ so a changed `.def` or a cleaned `build/` produces an APK holding a stale — or
 missing — `libmultiplatform_python3.14.so` and no `libpython3.14.so` beside it. The symptom is
 `UnsatisfiedLinkError`, which reads like a code error and is not one.
 
-Until the task dependencies are fixed, run this before any instrumented test:
+The copy tasks are now wired as dependencies of the assets/jniLibs merge tasks
+(`python-multiplatform/build.gradle.kts`, `copyAndroidPythonBinaries` / `copyAndroidPythonAssets`);
+I did not verify whether `connectedDebugAndroidTest` now forces the `linkAndroidNative*` tasks too.
+If an instrumented run fails with `UnsatisfiedLinkError`, run this first:
 
     ./gradlew :python-multiplatform:linkAndroidNativeArm64 :python-multiplatform:linkAndroidNativeX64 \
               :python-multiplatform:copyAndroidPythonBinaries :python-multiplatform:copyAndroidPythonAssets
@@ -444,6 +423,9 @@ work — importing a module or running a statement dwarfs a 40ns transition — 
 calls, where the transition genuinely dominates, are exactly the ones that keep it.
 
 ## Desktop vs Android, measured
+
+> The first two tables below are the **pre-fix** desktop numbers (reflective `invoke`); the desktop
+> row is corrected by "Fixed: 1015.95 ns -> 2.65 ns" and "Desktop vs Android, corrected" further down.
 
 Same benchmark shape on both sides: same warmup, same iteration count, best-of-7, a
 pure-Kotlin identity call subtracted as the floor, and the same real C API call —
@@ -611,11 +593,11 @@ per-crossing cost is highest, which is modern Android, which is where the users 
 ### Where this leaves the design
 
 `PyObject` was `expect`/`actual` with an Android `actual` marked `external` — the hook for
-exactly this — until commit 0fae961a (2025-12-20) folded it into a single `commonMain` class
-along with `PyObject.desktop.kt` and `PyObject.native.kt`. That commit's real subject was
-moving `PyAutoCloseable` to per-platform implementations, which was right and should stand;
-losing the composition hook was collateral. Restoring `expect`/`actual` on `PyObject` while
-keeping the `PyAutoCloseable` split is what reopens this path.
+exactly this — until commit 0fae961a (2025-12-20) folded it into a single `commonMain` class.
+That commit's real subject was moving `PyAutoCloseable` to per-platform implementations, which was
+right and should stand; losing the composition hook was collateral. The resolution was **not** to
+restore `expect`/`actual` on `PyObject`: composition lives in the FFI layer (`architecture.md`), and
+for string-carrying operations interning replaced it (`marshalling-design.md`).
 
 Windows cannot host a Kotlin/Native assembly library, so a composed desktop path would cover
 macOS and Linux only, with Windows staying on direct Panama calls. At 2.65ns per crossing
@@ -623,7 +605,7 @@ that is a much smaller loss on desktop than the same gap would be on Android.
 
 ## One downcall, across all platforms
 
-The upcall side has "One upcall, across all five platforms" in `upcall-design.md` — one shared
+The upcall side has §7.1 "One upcall, per platform" in [`upcall.md`](upcall.md#71-one-upcall-per-platform) — one shared
 test, run on every target, min–max over several runs, quoted rows marked as quotes. The downcall
 side had no equivalent: the benchmarks that exist are real and each one answers a question, but
 they are scattered across five files with no shared shape, so "how expensive is a downcall on
@@ -634,7 +616,7 @@ platform X" had no single table to read.
 | File | Source set | What it measures | Runs where |
 |---|---|---|---|
 | `commonTest/.../overhead/Benchmark.kt` | `commonTest` | Warmup-then-time harness (`run`/`measure`), not a benchmark itself | wherever the tests below run |
-| `commonTest/.../overhead/BenchmarkTest.kt` | `commonTest` | Pointer boxing, raw refcount churn, string marshalling (`PyUnicode_FromString`/`AsUTF8`, three lengths), integer marshalling, `PyObject` wrapper cost, `PyObject_GetAttrString` | compiles for all six run paths below; **confirmed green** on desktop / iosSimulatorArm64 / wasmJsNode this run; reaches androidInstrumented and androidNativeArm64/X64 through the same `commonTest` dependency edge but neither ran here (no emulator this session) |
+| `commonTest/.../overhead/BenchmarkTest.kt` | `commonTest` | Pointer boxing, raw refcount churn, string marshalling (`PyUnicode_FromString`/`AsUTF8`, three lengths), integer marshalling, `PyObject` wrapper cost, `PyObject_GetAttrString` | compiles for all six run paths below; **confirmed green** on desktop / iosSimulatorArm64 / wasmJsNode when the table was first cut; reaches androidInstrumented and androidNativeArm64/X64 through the same `commonTest` dependency edge but neither ran here (no emulator this session) |
 | `desktopTest/.../DesktopOverheadBenchmark.kt` | `desktopTest` | Panama transition cost (`PyList_Size` net of a pure-Kotlin floor); the string-marshalling-share-of-`exec` test is `@Ignore`d (destabilises the interpreter, see the file's own comment) | desktop only |
 | `wasmJsTest/.../WasmMarshallingOverheadTest.kt` | `wasmJsTest` | `internedUtf8` vs `scratchUtf8` vs the old malloc/copy/free route, at two string lengths, both standalone and through a real `PyObject_GetAttrString` | wasmJs only |
 | `androidInstrumentedTest/.../JniOverheadBenchmark.kt` | `androidInstrumentedTest` | JNI calling-convention transition cost: ordinary / `@FastNative` / `@CriticalNative`, on a trivial echo and on `PyList_Size` | Android/ART only, needs a device or emulator |
@@ -644,7 +626,7 @@ Two more files live next to these and share the word "overhead" or "Upcall" in t
 **not** downcall benchmarks — noted here only so a future reader does not double-count them:
 `commonTest/.../reflection/UpcallOverheadTest.kt` prices the upcall dispatch table
 (`UpcallTable.resolve` vs a cached handle), and `androidInstrumentedTest/.../UpcallOverheadTest.kt`
-prices the Android upcall attach. Both are upcall-side and already covered by `upcall-design.md`.
+prices the Android upcall attach. Both are upcall-side and already covered by `upcall.md`.
 
 `BenchmarkTest` reaches every one of the six execution paths KGP registers for this module
 (`desktopTest`, `iosSimulatorArm64Test`, `iosX64Test`, `wasmJsNodeTest`, `androidInstrumentedTest`/
@@ -653,7 +635,7 @@ prices the Android upcall attach. Both are upcall-side and already covered by `u
 compile — on three of the six this pass: desktop, the iOS simulator, and wasmJs (see Validation
 below). `iosX64Test` has no practical run path on Apple Silicon and nobody targets it; the
 Android/ART and androidNative rows need a connected device or emulator, which this pass did not
-have available (AGENTS.md's "에뮬레이터는 쓰지 마라" for this task).
+have available.
 
 ### A shared table, picked to match the upcall table's columns
 
@@ -674,7 +656,7 @@ run's `BenchmarkTest` XML was not preserved before the second run overwrote it �
 `UpcallBoundaryCostTest` numbers were captured from console output before that happened, which is
 why that row has three runs and this one has two).
 
-androidNative and Android/ART rows are **quoted from `upcall-design.md`**, not re-measured — marked
+androidNative and Android/ART rows are **quoted from `upcall.md`**, not re-measured — marked
 † below, same convention that document uses for its own quoted rows. Cells with no prior
 measurement of this exact quantity are left blank rather than approximated from a different one
 (e.g. `CompositionBenchmark`'s composed `getAttr` is a different quantity — four crossings folded
@@ -708,320 +690,43 @@ into one — not a bare `PyUnicode_FromString`).
 
 > **The `PyUnicode_FromString, 8 chars` column has been updated.** It is sourced from
 > `overhead/BenchmarkTest` with warmup now 100,000 (was 100), for the reason "The benchmark was
-> measuring the benchmark" explains in `upcall-design.md`. The old figures here were 3–7x the warmed
+> measuring the benchmark" explains in `upcall.md`. The old figures here were 3–7x the warmed
 > cost because they were swept at the old `100`-call warmup on desktop (1132–1146 ns cold vs 167–458 ns warm).
 > The new column records the current cost at 100,000 warmup, from commit `958c0082b294`. The first three
 > columns also come from `UpcallBoundaryCostTest` (already fixed at 100,000 warmup since `7e9c6b8c`), so
 > all four columns are now consistent in warmup and source.
 
-### Ratio consistency: mostly holds, desktop is the exception
+### Warmup: what the boundary benchmarks must do
 
-> **Superseded as a source of numbers, kept as the record of how the defect was found.** Every figure
-> in this section and the two that follow it was taken with `UpcallBoundaryCostTest`'s 3 000-call
-> warmup, which "The benchmark was measuring the benchmark" below shows was too small by more than an
-> order of magnitude. The reasoning is what still stands: these three sections are what established
-> that the number moved for a repository-located reason and then that the reason was the benchmark's
-> own methodology. Current figures are in `upcall-design.md`'s table.
+The first version of the shared table was taken with `UpcallBoundaryCostTest`'s 3 000-call warmup,
+and its absolute upcall figure then *drifted* between commits (desktop 861 ns → ~690 ns, wasmJs
+~490 ns → ~310 ns) without any change to the timed code. The investigation (full record in
+[`../archive/downcall-design-benchmark-drift.md`](../archive/downcall-design-benchmark-drift.md))
+established:
 
-`upcall-design.md`'s own upcall/downcall ratios, from the same `UpcallBoundaryCostTest`, are
-reproduced by these three fresh runs (the test computes and prints its own ratio each time, so this
-is a direct comparison, not a re-derivation):
-
-| Platform | ratio recorded in `upcall-design.md` | ratio, this pass (3 runs) | consistent? |
-|---|---|---|---|
-| desktop | 2.49–2.89x | 2.13–2.34x | **no — see below** |
-| iOS simulator | 1.33–1.43x | 1.38–1.42x | yes, nested inside the old range |
-| wasmJs | 2.56–3.36x | 2.36–2.63x | mostly — top of the new range overlaps the bottom of the old one. **Superseded: since drifted to 1.58–1.68x, pinned to `4472f83a` and explained — see "wasmJs: closed too" below** |
-
-**Desktop's ratio moved outside the previously recorded range, and it is the upcall side that
-moved, not the downcall side.** This pass's downcall-same-shape figure (315.69–335.32 ns) sits at
-the bottom of the old 315–527 ns range — consistent, just at its floor. This pass's upcall figure
-(687.83–741.26 ns, read from the same `UpcallBoundaryCostTest` runs) sits *below* the old range's
-floor of 861 ns entirely. So on this machine, at this commit (`65e1bf5d`), a desktop upcall through
-`ctypes` measures cheaper than what `upcall-design.md`'s table recorded, while the downcall side did
-not move. Two things separate the two tables and either could be the cause: `develop` has moved a
-great deal since that table was captured (this session's own `git merge` pulled in 87 changed files,
-including upcall-adjacent ones — see the merge log above), and the two tables were also captured on
-different runs of the same machine, which is exactly the kind of thing this document elsewhere warns
-is not comparable. Neither is ruled out here; this is reported as an open discrepancy, not resolved
-into either explanation.
-
-### Closed: repository drift, not run-to-run noise (2026-08-14)
-
-The discrepancy above was tested directly rather than argued from a second reading. `537c1a0b`
-(the commit the 861 ns floor was recorded on) and the current tip were each built in their own
-freshly created `git worktree` — not reused, not incrementally recompiled — and
-`:python-multiplatform:desktopTest` (the full suite, not a filtered subset — see the pitfall below)
-was run three times against each, clearing `build/test-results` before every run:
-
-| | run 1 | run 2 | run 3 |
-|---|---|---|---|
-| `537c1a0b`, fresh worktree | 870.48 ns | 808.72 ns | 869.12 ns |
-| current tip, fresh worktree | 697.73 ns | 680.46 ns | 686.21 ns |
-
-Same machine, same JDK (Temurin 21.0.12), same day. The two bands (809–870 ns vs. 680–698 ns) do
-not overlap across six runs split into two isolated builds, which rules out ordinary run-to-run
-variance as the explanation. Something in the repository between those two points changed the
-measured number. `537c1a0b`'s figure also reproduces its own historical record (861–1313 ns) almost
-exactly, which rules out a stale or miscalibrated re-measurement on this end.
-
-**A methodology pitfall found along the way:** an initial attempt to bisect the ~75 commits in
-between used `--tests UpcallBoundaryCostTest` to skip the other ~359 tests and go faster. That
-filter alone moved the number into the 1300–1400 ns range at *every* commit tried, old and new
-alike — it does not merely add noise, it changes which regime the measurement lands in. Re-running
-the same checkouts with the unfiltered full suite reproduced the fast band again. The cause is
-below; the practical lesson is that this benchmark's absolute number is not a property of the
-timed code alone, so a comparison across two runs is only valid if both used the same suite scope
-this document already required (Validation runs the full suite) — a filtered re-run of one
-benchmark test is not equivalent to the run it is being compared against, even on the same commit.
-
-**Bisection was attempted and did not converge to one commit; it converged to a window, and to a
-mechanism.** Git bisect (full-suite grading, threshold at 750 ns) was run between `537c1a0b` and
-the fast tip. Partway through, machine load reached 10–12 on this 8-core host — two Android
-emulators and other concurrent agent activity were running, unrelated to this task and outside its
-control (`ps aux` at the time confirmed it; this document's own environment notes elsewhere warn
-that this machine hosts several worktrees' worth of parallel agent work). Under that load, repeated
-measurements of the *same* checkout spanned both regimes (one commit read 672, 771, and 1076 ns
-across three consecutive runs), which made single-commit attribution unreliable. What did hold up
-under repetition was the window: commits at or before `4722cfe9` measured consistently in the slow
-band (854–855 ns), and commits at or after `ec8ff389` measured consistently in the fast band (672,
-700 ns, each confirmed in its own fresh clean worktree). That window —
-`4722cfe9..ec8ff389` (~15 commits) — contains both commits this task flagged as candidates:
-`6776329d` ("Perf: Price the layer users actually call, and stop a module read raising an exception
-per access") and `d45071e7` (proxy handle lifetime). `975d3900` sits well outside this window and is
-ruled out.
-
-**Neither candidate touches the code this benchmark measures, which points at an indirect cause.**
-`git diff <parent>..<commit>` for both `6776329d` and `d45071e7` shows changes confined to
-`PythonProxySource` (the generated-proxy source emitter, its tests) and, for `d45071e7`, a doc-only
-comment added to `HandleTable.kt`. Neither touches `UpcallTable.resolve`, `HandleTable.resolve`/
-`release`, the non-suspend branch of `UpcallTrampoline.invoke`, or desktop's `UpcallStub` — the
-actual call chain `UpcallBoundaryCostTest` times through `TrampolineFragment`. A commit that does
-not touch the timed path cannot have made the timed path itself cheaper.
-
-What it can do is change what runs *before* the timed path in the same process. `desktopTest` sets
-no `forkEvery`, so Gradle's default applies: all ~360 tests in the suite run in one forked JVM, one
-JIT compiler, one heap (confirmed by reading the `tasks.named<Test>("desktopTest")` block in
-`build.gradle.kts` — no fork-per-test config exists). `6776329d`'s own commit title is "stop a
-module read raising an exception per access" — replacing an exception-driven control-flow path
-(expensive on the JVM: every throw captures a stack trace) with a direct one.
-`GeneratedProxyCostTest`, touched by the same commit, drives `N = 10_000` iterations times 3 kept
-times multiple rows of generated-proxy calls that exercise exactly that module-attribute path, and
-it runs earlier in the same shared JVM process as `UpcallBoundaryCostTest`. Removing tens of
-thousands of exception throws from an earlier test changes the shared process's GC pressure and
-JIT tiering history by the time a later, unrelated benchmark in the same run gets timed — without
-the later benchmark's own code path changing at all. That is a plausible, mechanism-level
-explanation for why only desktop moved: iOS runs through XCTest's own process model and wasmJs
-through a Node process with a different (V8) JIT, neither sharing HotSpot's C2 warm-up state the
-way every desktop test in one Gradle-forked JVM does.
-
-**This is not proven to the level of a single blamed commit** — machine contention prevented that —
-but it is proven to the level that matters for the table: the number moved for a real, reproducible,
-repository-located reason, not for noise, and the most likely mechanism is a same-process
-warm-up artifact of the benchmark's own methodology rather than a genuine drop in the upcall
-boundary's per-call cost. The open discrepancy above is closed on that basis, not left open.
-
-**wasmJs has since drifted further, past even its own "consistent" reading above.** A fresh check
-on the current tip (same machine, same session, two runs: 321.32 ns and 315.89 ns, tight) puts
-wasmJs's upcall figure well below the 687–741 ns-equivalent range implied by this table's own
-"this pass" ratio (2.36–2.63x against a ~192–205 ns downcall figure that still matches today's
-run) — today's ratio is 1.26–1.67x. So the "yes, mostly consistent" verdict recorded for wasmJs
-above was accurate for the commit it was measured on (`65e1bf5d`) and has since gone stale in the
-same direction as desktop's did. iOS was not re-checked: this task's constraints rule out using the
-iOS simulator, so its "yes, nested inside the old range" verdict above stands unverified rather
-than reconfirmed.
-
-### wasmJs: closed too — one commit, and the mechanism demonstrated rather than argued (2026-08-14)
-
-wasmJs's drift is **repository drift, not noise**, it is pinned to the **single commit `4472f83a`**,
-and — unlike desktop's, which stayed at the level of a plausible story — its mechanism was
-reproduced by a controlled experiment. It is *not* a genuine change in what the wasm upcall boundary
-costs.
-
-The measurement protocol was the one the desktop section above used, with two changes forced by
-this machine: runs at the two ends were **interleaved** rather than run in two blocks, and the
-timed task was re-run with `--rerun` on `wasmJsNodeTest` alone rather than `--rerun-tasks`, so a
-full Kotlin recompile does not finish moments before the benchmark starts. Every run is the **whole
-wasm suite** (filtering changes the measured region — see the pitfall below), `build/test-results`
-is cleared before each, and all of them are 344/0/0 (258/0/0 at `537c1a0b`, whose suite was smaller).
-
-| commit | upcall | downcall, same shape | ratio | runs |
-|---|---|---|---|---|
-| `65e1bf5d` (parent) | 484.22–500.38 ns | 190.11–191.00 ns | 2.53–2.61x | 3 |
-| **`4472f83a` (child)** | **306.66–315.82 ns** | **189.32–202.56 ns** | **1.52–1.66x** | 3 |
-| `ec8ff389` | 482.03–507.38 ns | 197.87–204.10 ns | 2.38–2.53x | 3 |
-| `4722cfe9` | 477.40–497.05 ns | 190.60–203.23 ns | 2.34–2.60x | 3 |
-| `17f058ca` | 302.55–320.54 ns | 189.47–203.92 ns | 1.50–1.65x | 3 |
-| `73f2af6b` | 312.50–322.11 ns | 188.95–213.49 ns | 1.46–1.66x | 3 |
-| current tip | 355.82–373.21 ns | 222.07–226.88 ns | 1.58–1.64x | 4 (+4 earlier) |
-
-`4472f83a` and its own parent are adjacent commits measured minutes apart in one worktree, and their
-upcall bands do not touch. **The downcall column does not move anywhere in this table** — it is the
-upcall side alone, exactly as on desktop.
-
-**The window does *not* overlap desktop's.** Desktop's was `4722cfe9..ec8ff389`; both of those
-endpoints measure in wasm's *slow* band and are indistinguishable from each other, so wasm did not
-move across desktop's window at all. `4472f83a` sits after `ec8ff389`. The two platforms therefore
-do **not** share a cause in `commonMain`'s marshalling or handle paths — which was the hypothesis
-worth testing, and it is refuted rather than left open.
-
-**The MEMFS change is not the cause either.** `3355851c` (stdlib zip installed into MEMFS instead
-of resolving out of a CPython source checkout) was the obvious environmental confound, since it
-lands after the desktop window. `73f2af6b` is its immediate parent and already measures 312–322 ns —
-fully in the fast band. The transition happened before it.
-
-**Why a commit that only adds a branch to the timed function made it measure cheaper.**
-`4472f83a`'s only edit to the timed path is a `when` on `self` in `UpcallEntry.invokeMethod`, which
-can only cost more, not less. What it also did was make `PythonProxySource.install()` succeed on
-wasm for the first time. Before it, `GeneratedProxyCostTest` and `ProxyHandleLifetimeTest` printed
-"no proxies are installable on this target, so there is nothing to measure" and drove **zero**
-upcalls; after it, `GeneratedProxyCostTest` drives on the order of 270 000 calls
-(`N = 10 000` × 3 kept × ~9 rows) straight through `UpcallEntry.invokeMethod` — earlier in the
-**same Node process**, and therefore into the same V8 wasm tier-up state that
-`UpcallBoundaryCostTest` is later timed in. The benchmark's own 3 000-iteration warmup does not
-reach that state on its own.
-
-That was tested, not just asserted. At the **current tip**, with nothing changed but
-`GeneratedProxyCostTest`'s body short-circuited so it installs nothing and calls nothing — the
-pre-`4472f83a` behaviour, same commit, same build, suite still 344/0/0 — the upcall figure went
-back up:
-
-| current tip | upcall | downcall | ratio |
-|---|---|---|---|
-| as it is | 355.82–373.21 ns | 222.07–226.88 ns | 1.58–1.64x |
-| with `GeneratedProxyCostTest` inert | 459.67–473.79 ns | 187.24–192.16 ns | 2.36–2.53x |
-
-One lever, at one commit, moves the number across the whole gap and lands it back on `65e1bf5d`'s
-band (2.53–2.61x) and on this document's own "this pass" reading (2.36–2.63x). So the desktop
-section's suspicion — that this benchmark reports a same-process warm-up artifact rather than a
-boundary cost — is **confirmed on wasmJs by direct experiment**, on a different commit and a
-non-overlapping window from desktop's. What the two platforms share is the methodology, not a
-code path.
-
-**The consequence for the table is that `UpcallBoundaryCostTest`'s absolute upcall figure is not a
-property of the commit alone.** It is a property of the commit *and* of how much upcall traffic the
-rest of the suite pushed through the same process first. Any future row should record the suite
-composition it was taken with, or the number will "drift" again the next time an unrelated test
-starts or stops exercising the boundary.
-
-**One thing did not reproduce and is left as observed.** `537c1a0b`, the commit
-`upcall-design.md`'s 703–1075 ns wasm row was recorded on, does not reproduce that row here: a
-freshly created worktree at it measured 546.45 ns once and then 1476.85–1602.25 ns on four
-subsequent runs (its trampoline figure was similarly unstable, 268–612 ns, while its downcall stayed
-flat at 239–247 ns). That commit's suite is 258 tests rather than 344 and predates the MEMFS change,
-so it is a different environment in two ways at once, and no attempt is made here to reconcile it.
-The conclusion above rests on the adjacent-commit pair `65e1bf5d`/`4472f83a` and on the tip-vs-tip
-experiment, neither of which depends on `537c1a0b` at all.
-
-**Load, since these numbers depend on it.** Machine load average was 1.4–1.6 at the start and
-stayed in the 1.7–3.2 band for every run quoted above. An earlier batch was thrown away: creating
-the comparison worktree set Spotlight indexing its 16 190 files, which took load to 10.4 and made
-the same commit read 546 ns then 1448–1677 ns. Those runs are not in this document. The machine also
-had an Android emulator resident throughout, which is why the floor is ~1.5 rather than ~0.
-
-### The benchmark was measuring the benchmark, and the count that fixes it is measured (2026-08-14)
-
-The two sections above diagnosed `UpcallBoundaryCostTest` and stopped there: they established that
-its absolute figure was a same-process warm-up artefact, pinned wasmJs's shift to one commit, and
-attached a staleness note to the table. **The measurement itself was not changed**, so the next pass
-would have re-derived the same non-number. This section changes it and shows the change works.
-
-#### What is warming, decided by experiment rather than by plausibility
-
-Both earlier sections reached for "JIT tiering" as a story. It is testable, and the obvious rival —
-CPython-side state, meaning the specializing interpreter, free lists, the allocator, string
-interning — makes an opposite prediction about one row that the report already prints.
-
-The timed loops were run **40 times in succession** inside one run, on both hosts, in two suite
-configurations. Per 10 000 calls:
-
-| | rep 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | … plateau |
-|---|---|---|---|---|---|---|---|---|---|
-| desktop upcall, suite as-is | 801 | 744 | 704 | 705 | 676 | 602 | 593 | 537 | ~535 ns |
-| desktop upcall, proxy test inert | 1307 | 716 | 696 | 660 | 548 | 539 | 558 | 554 | ~535 ns |
-| desktop downcall (Kotlin-driven) | 475 | 264 | 264 | 212 | 141 | 141 | 140 | 143 | ~141 ns |
-| wasmJs upcall, suite as-is | 300 | 313 | 317 | 290 | 301 | 285 | 305 | 278 | ~280 ns |
-| wasmJs upcall, proxy test inert | 785 | 339 | 317 | 303 | 294 | 299 | 319 | 279 | ~280 ns |
-
-**The two configurations converge on the same value and they converge from opposite sides.** So the
-plateau belongs to the boundary and everything before it belongs to the suite. That alone settles
-what the number should be.
-
-**Two rows in the same sweep do not move at all**, and they are what identifies the mechanism: the
-empty Python loop (8–9 ns desktop, 14–16 ns wasm) and the pure-Python callee (24–27 ns, 47–54 ns) are
-flat from the very first rep, in every configuration, on both hosts. CPython-side state would move
-those — they are pure interpreter work — and it does not. Only rows that cross into host code move.
-It is host JIT tier-up: C2 on the JVM, V8's tiering on wasm.
-
-The confirmation is on desktop, where the two runtimes can be told apart: CPython is a **native
-dylib** there, so its own speed cannot depend on how warm the JVM is, and indeed desktop's
-pure-Python rows are identical (8.44–8.59 ns) whether the class runs alone or inside the full suite.
-
-#### The count, and why 100 000
-
-Convergence needed 40 000 calls cold and 70 000 warm on desktop, and ~70 000 on wasm. The warm side
-settles later, so it sets the requirement; 100 000 is that with margin. The Kotlin-driven rows were
-on the same curve and worse off — they warmed `N / 4` = 2 500, and desktop's downcall row reads 653,
-266, 266, 161 before settling at ~141 — so they use the same count now. Warming the Python-driven and
-Kotlin-driven halves differently would make the headline ratio a ratio of two compilation states.
-
-`GeneratedProxyCostTest` needed far less, and the reason is its shape: it warms all 19 rows before
-timing any, so the shared `_pm_invoke` path already received 19 × 3 000 = 57 000 calls — just under
-the knee. 5 000 puts it at 95 000. Measured, its raw rows moved from 3–7% solo-vs-suite disagreement
-to 1–3.4%.
-
-**`inline` on `Benchmark.measure` was tried and is worse.** The hypothesis was that one shared
-`block()` call site goes megamorphic across every benchmark in the process. Inlining it made desktop's
-downcall row need ~230 000 iterations to reach the plateau it reaches in ~50 000 through the shared
-non-inlined loop, because each inlined copy is separate code that tiers up on its own. Reverted, and
-recorded so it is not tried again.
-
-#### The check the old table could not pass
-
-| | full suite | proxy test short-circuited | this class alone (`--tests`) |
-|---|---|---|---|
-| desktop upcall, **3 000 warmup** | 673.91 ns | 536.75 ns | — |
-| desktop upcall, **100 000 warmup** | 510–560 ns (11 runs) | 501–530 ns (3) | 506–550 ns (3) |
-| wasmJs upcall, **3 000 warmup** | 322.03 ns | 291.67 ns | — |
-| wasmJs upcall, **100 000 warmup** | 290–304 ns (7 runs) | 287–301 ns (3) | 321–353 ns (3) |
-
-The middle column is the lever the wasmJs section above used to prove the defect existed. It used to
-move desktop by 25% and wasmJs by 10%; it now moves neither outside its own run-to-run band. **That
-is the fix.**
-
-**The third column is honest about what is still not fixed, on one target.** Desktop passes it. wasmJs
-does not, and the reason is not the boundary: filtered to this class alone, wasmJs's *pure-Python*
-rows read 23.05 ns and 83.10 ns against the full suite's 15.04 ns and 47.22 ns — 55–74% slower, in
-rows with no boundary in them. CPython is itself a wasm module under V8, so a Node process that lives
-one second runs the interpreter's own bytecode slower than one that lives ten, and every row is
-inflated together. Raising the warmup to 300 000 does not move it (solo read 318.83 and 326.21 ns
-against 100 000's 320.54–337.42), which is what distinguishes a host-lifetime effect from a
-call-count effect. **wasmJs's ratio columns do survive filtering** — 2.66–3.13x solo against
-2.91–3.14x in the suite — so the ratio is the quantity to quote there, and the absolute column is a
-full-suite figure that must be labelled as one. It is left in the table with that label rather than
-deleted, because desktop's is now sound and dropping both would lose a real result.
-
-#### What it costs
-
-Measured on this machine, full suite, `build/test-results` cleared before each run:
-
-| | 3 000 warmup | 100 000 warmup |
-|---|---|---|
-| `desktopTest`, total test time | 4.93–4.97 s | 5.10–5.20 s |
-| …of which `UpcallBoundaryCostTest` | 0.036 s | 0.155–0.162 s |
-| …of which `GeneratedProxyCostTest` | 0.553–0.571 s | 0.625–0.661 s |
-| `wasmJsNodeTest`, wall clock | 4.31 s / 5.85 s | 4.43 s / 6.11 s |
-
-**About +0.2 s on desktop (+4% of test time) and +0.1 s on wasm.** The warmup is bounded by the very
-cost it is warming, so eight rows of 100 000 calls at ~500 ns is under a second by construction. The
-wasm rows are wall clock because that runner reports 0.0 s per class in its XML.
-
-Test counts are unchanged throughout: **desktop 360/0/1, wasmJs 344/0/0**, on every run quoted here.
-
-**Load.** 1.14 at the start, 1.6–3.8 for every run quoted, `uptime` checked before each batch. No
-other agent was running and no worktree was created during this pass, so the Spotlight problem the
-previous section had did not arise. Two readings taken while load was transiently 6.25 (back-to-back
-Gradle invocations) were timing measurements only, and are not among the per-call figures.
+- The figure was a **same-process warm-up artefact**, not a boundary cost. Anything that pushed
+  upcall traffic through the shared JVM / Node process earlier in the suite (a proxy cost test
+  starting to install proxies; one commit on wasmJs, `4472f83a`) moved the number by 25% on desktop
+  and ~35% on wasmJs. Confirmed by direct experiment (short-circuiting `GeneratedProxyCostTest`
+  moved it back).
+- It is **host JIT tier-up** (C2 on the JVM, V8 on wasm), not CPython-side state: the pure-Python
+  rows (empty loop 8–9 ns desktop; callee 24–27 ns) are flat from the first repetition, only rows
+  that cross into host code move. 40 repetitions plateau at ~535 ns (desktop upcall), ~141 ns
+  (desktop Kotlin-driven downcall), ~280 ns (wasmJs upcall).
+- **Convergence needs 40 000 calls cold and ~70 000 warm, so the warmup is 100 000** (and
+  `GeneratedProxyCostTest` 5 000 per row, because it shares `_pm_invoke` across 19 rows). Cost:
+  about +0.2 s on desktop (+4% of suite time).
+- With 100 000 warmup the "proxy test short-circuited" lever no longer moves desktop (501–530 vs
+  510–560 ns) or wasmJs (287–301 vs 290–304 ns) outside run-to-run noise. That is the fix.
+- On wasmJs the **absolute** column still does not survive filtering (`--tests` this class alone: pure
+  Python rows 55–74% slower, because a short-lived Node process runs CPython-under-V8 colder); the
+  **ratio** columns do (2.66–3.13x solo vs 2.91–3.14x in the suite). Quote wasmJs absolutes as
+  full-suite figures.
+- `inline` on `Benchmark.measure` was tried and is worse (needs ~230 000 iterations for the same
+  plateau). Do not retry.
+- Rules that follow: a measurement is **full suite, single task, quiet machine** (`uptime` first);
+  filtering with `--tests` changes the measured region; record the suite composition with the
+  number; never run two measurement sessions concurrently (load 10–12 made one commit read 672–1076 ns).
 
 ### What is deliberately not in the shared table
 

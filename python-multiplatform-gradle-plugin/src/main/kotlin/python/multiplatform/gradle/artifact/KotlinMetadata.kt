@@ -6,9 +6,13 @@ import kotlin.metadata.KmConstructor
 import kotlin.metadata.KmDeclarationContainer
 import kotlin.metadata.KmFunction
 import kotlin.metadata.KmType
+import kotlin.metadata.KmTypeParameter
+import kotlin.metadata.KmTypeProjection
 import kotlin.metadata.Visibility
 import kotlin.metadata.declaresDefaultValue
+import kotlin.metadata.isDefinitelyNonNull
 import kotlin.metadata.isNullable
+import kotlin.metadata.isReified
 import kotlin.metadata.isSuspend
 import kotlin.metadata.isValue
 import kotlin.metadata.jvm.JvmMethodSignature
@@ -246,6 +250,13 @@ internal fun resolveKotlinBoundary(
     } else {
         nullablePrimitiveBoundaryTypeOf(classifier.name)?.let { return ResolvedBoundary(it, carrier = null) }
         if (kotlinPrimitiveBoundaryTypeOf(classifier.name) != null) return null
+        // `kotlin.Any?` -- what an unbounded type parameter is read as (issue #38, see
+        // [substituteAnyFor]), and the one built-in with no class file that is nonetheless a
+        // complete answer: anything crosses as it. A Kotlin object arrives as the instance its
+        // handle names, a Python object as a `PyObject` (`UpcallTrampoline.toKotlinObject`), and
+        // `None` as `null`. Nullable only: a non-null `kotlin.Any` stays declined, because nothing
+        // here has asked for it and `None` would then be a value the declaration refuses.
+        if (classifier.name == KOTLIN_ANY) return ResolvedBoundary(NULLABLE_ANY_BOUNDARY, carrier = null)
     }
 
     val info = if (type.isNullable) null else classpath.valueClassInfo(classifier.name)
@@ -362,6 +373,45 @@ internal fun ArtifactClasspath.nameablePublicSupertypesOf(kotlinInternalName: St
 private const val JAVA_LANG_OBJECT = "java/lang/Object"
 
 /**
+ * The first supertype of [binaryName] -- direct or inherited, nearest first -- that this walk cannot
+ * find as a class file, as a qualified name; `null` when every one is there.
+ *
+ * ### Why a receiver needs its whole ancestry
+ *
+ * Generated Kotlin that reads a member off a value (`(args[0] as Owner).prop`, or an extension
+ * property's `receiver.alias`) makes `kotlinc` resolve `Owner`'s member scope, and that scope is built
+ * from every supertype. One that is not on the consumer's compile classpath fails the whole generated
+ * file: "Cannot access 'androidx.lifecycle.ViewModelStoreOwner' which is a supertype of
+ * 'androidx.compose.ui.platform.DefaultArchitectureComponentsOwner'. Check your module classpath"
+ * (ui-desktop 1.11 depends on lifecycle-viewmodel with `implementation` scope, so a consumer's compile
+ * classpath -- which is what this walk is given -- does not carry it). Nothing `Owner` itself declares
+ * says so; only walking the chain does.
+ *
+ * The JDK's own classes (`java/`, `javax/`, `jdk/`, `sun/`) are never among the roots a walk is given
+ * and are always there to `kotlinc`, and neither is `kotlin/`: the standard library is on every
+ * Kotlin compile classpath, while a test fixture's directory walk does not carry it.
+ */
+internal fun ArtifactClasspath.unreachableSupertypeOf(binaryName: String): String? {
+    val start = classNode(binaryName) ?: return null
+    val visited = HashSet<String>()
+    val pending = ArrayDeque<ClassNode>()
+    pending.addLast(start)
+    while (pending.isNotEmpty()) {
+        val node = pending.removeFirst()
+        val parents = listOfNotNull(node.superName) + node.interfaces.orEmpty()
+        for (parent in parents) {
+            if (!visited.add(parent)) continue
+            if (ALWAYS_ON_A_KOTLIN_COMPILE_CLASSPATH.any { parent.startsWith(it) }) continue
+            val parentNode = classNode(parent) ?: return parent.replace('/', '.').replace('$', '.')
+            pending.addLast(parentNode)
+        }
+    }
+    return null
+}
+
+private val ALWAYS_ON_A_KOTLIN_COMPILE_CLASSPATH = listOf("java/", "javax/", "jdk/", "sun/", "kotlin/")
+
+/**
  * The object-handle boundary type: `docs/design/kotlin-extensions-in-python.md` §6's "type gate", and the
  * second of the two things that independently held Compose at zero.
  *
@@ -427,8 +477,13 @@ private fun objectBoundaryTypeOrNull(type: KmType, classpath: ArtifactClasspath)
  * exists for, and one that surfaces as a compile failure of the *generated* file rather than as
  * anything the generator could notice.
  */
-private fun renderKotlinTypeName(type: KmType, classpath: ArtifactClasspath): String? {
+private fun renderKotlinTypeName(type: KmType, classpath: ArtifactClasspath, isArgument: Boolean = false): String? {
     val classifier = type.classifier as? KmClassifier.Class ?: return null
+    // A type *argument* may be `kotlin.Any` -- which is what an unbounded type parameter becomes
+    // (issue #38): `mutableStateOf`'s `policy: SnapshotMutationPolicy<T>` is written
+    // `SnapshotMutationPolicy<kotlin.Any?>`. Only as an argument: at the top level a `kotlin.Any`
+    // slot is [resolveKotlinBoundary]'s own decision, and it opens the nullable one only.
+    if (isArgument && classifier.name == KOTLIN_ANY) return "kotlin.Any" + if (type.isNullable) "?" else ""
     if (!classpath.isNameablePublicClass(classifier.name)) return null
     val base = classifier.name.replace('/', '.')
     if (type.arguments.isEmpty()) return base + if (type.isNullable) "?" else ""
@@ -436,9 +491,89 @@ private fun renderKotlinTypeName(type: KmType, classpath: ArtifactClasspath): St
     for (argument in type.arguments) {
         val argumentType = argument.type
         // A star projection is spellable as-is; anything else has to be a nameable type.
-        rendered += if (argumentType == null) "*" else renderKotlinTypeName(argumentType, classpath) ?: return null
+        rendered += if (argumentType == null) "*" else renderKotlinTypeName(argumentType, classpath, isArgument = true) ?: return null
     }
     return "$base<${rendered.joinToString(", ")}>" + if (type.isNullable) "?" else ""
+}
+
+/** `kotlin.Any`, as `KmClassifier.Class` spells it. */
+internal const val KOTLIN_ANY = "kotlin/Any"
+
+/** What a `kotlin.Any?` slot crosses as: an object handle, cast to nothing narrower. */
+private val NULLABLE_ANY_BOUNDARY = BoundaryType("OBJECT", "(%s as kotlin.Any?)", "(%s)")
+
+/**
+ * Which of [parameters] may be read as `kotlin.Any?` -- every one of them, or `null` when even one
+ * may not (issue #38).
+ *
+ * ### The rule
+ *
+ * An **unbounded, non-reified** type parameter is substituted by `kotlin.Any?`, and the generated
+ * call names it explicitly (`mutableStateOf<kotlin.Any?>(value = ...)`), so Kotlin never has to infer
+ * it -- `structuralEqualityPolicy()` has nothing to infer `T` from and would not compile otherwise.
+ * That is exact rather than approximate: an unbounded `T` admits `Any?`, so the call is one Kotlin
+ * itself would accept, and the value Python hands in reaches the declaration unchanged.
+ *
+ * A **bounded** parameter (`T : Comparable<T>`, `R : Any`) is declined: `Any?` is not within its
+ * bound and nothing narrower is known. A **reified** one is declined because its type argument is
+ * *read* at run time (`typeOf<T>()`, `is T`), so `Any?` would change what the body does, not just
+ * what it is called with.
+ *
+ * `T : Any?` written out is the same as no bound, and is treated so.
+ */
+internal fun substitutableTypeParameterIds(parameters: List<KmTypeParameter>): Set<Int>? {
+    val ids = HashSet<Int>()
+    for (parameter in parameters) {
+        if (parameter.isReified) return null
+        val bounded = parameter.upperBounds.any { bound ->
+            (bound.classifier as? KmClassifier.Class)?.name != KOTLIN_ANY || !bound.isNullable
+        }
+        if (bounded) return null
+        ids += parameter.id
+    }
+    return ids
+}
+
+/**
+ * [this] with every type parameter in [ids] replaced by `kotlin.Any?`, or `null` when it mentions a
+ * type parameter outside [ids] (a bounded one, or one this declaration does not own).
+ *
+ * Returns [this] itself when there is nothing to replace, so the common, non-generic signature is not
+ * copied. A replaced type keeps its own nullability, `suspend`-ness and arguments; a definitely-non-null
+ * `T & Any` is declined, since `Any?` is exactly what it excludes.
+ */
+internal fun KmType.substituteAnyFor(ids: Set<Int>): KmType? {
+    if (!mentionsTypeParameter()) return this
+    val own = classifier
+    if (own is KmClassifier.TypeParameter) {
+        if (own.id !in ids || isDefinitelyNonNull) return null
+        return nullableAnyType()
+    }
+    if (outerType != null) return null
+    val copy = KmType()
+    copy.classifier = own
+    copy.isNullable = isNullable
+    copy.isSuspend = isSuspend
+    for (projection in arguments) {
+        val argument = projection.type
+        copy.arguments += if (argument == null) {
+            projection
+        } else {
+            KmTypeProjection(projection.variance, argument.substituteAnyFor(ids) ?: return null)
+        }
+    }
+    return copy
+}
+
+private fun KmType.mentionsTypeParameter(): Boolean =
+    classifier is KmClassifier.TypeParameter ||
+        arguments.any { it.type?.mentionsTypeParameter() == true } ||
+        outerType?.mentionsTypeParameter() == true
+
+/** A fresh `kotlin.Any?`. */
+internal fun nullableAnyType(): KmType = KmType().apply {
+    classifier = KmClassifier.Class(KOTLIN_ANY)
+    isNullable = true
 }
 
 /** Whether generated Kotlin in another module may write this classifier's name: it has to exist as
@@ -522,11 +657,35 @@ internal data class ResolvedFunction(
     /**
      * Carried rather than filtered out at the source, because the two consumers of this want
      * different things from it: the binder declines a `suspend` declaration outright, and the stub
-     * model records it as declined-because-suspend (`docs/design/pyi-generation-design.md` §3.1 -- "declined
+     * model records it as declined-because-suspend (`docs/archive/pyi-generation-pythonic-stubs.md` §3.1 -- "declined
      * by both producers; must not be stubbed"). Dropping it here would make the second indistinguishable
      * from a declaration that was never declared.
      */
     val isSuspend: Boolean = false,
+    /**
+     * How many type arguments a call has to write, each of them `kotlin.Any?` (issue #38): the
+     * declaration's own type parameters, every one unbounded and non-reified, already substituted
+     * out of [allParameterTypes], [receiverType] and [returnType] by [resolvedFunctionOrNull]. `0`
+     * for a declaration that is not generic -- and for one whose type parameters cannot be
+     * substituted, which keeps its type parameters and is declined downstream exactly as before.
+     */
+    val typeArgumentCount: Int = 0,
+    /**
+     * The declaration has a type parameter that cannot be read as `kotlin.Any?` -- bounded or
+     * reified (issue #38). Carried rather than left to fall out of an unnameable type, because a
+     * reified parameter need not appear in the signature at all (`typeNameOf<T>(): String`) and such a
+     * declaration would otherwise look non-generic and be called with no type argument.
+     */
+    val hasUnsubstitutableTypeParameters: Boolean = false,
+    /**
+     * One of the declaration's type parameters is `reified`. Carried apart from
+     * [hasUnsubstitutableTypeParameters] because `kotlinc` compiles such a function to an
+     * `ACC_SYNTHETIC` method (a stub that only throws -- the real body exists only inlined), which
+     * `ArtifactScanner.kotlinCandidates` would otherwise drop with every other synthetic before any
+     * model is built. This is how it is declined *visibly* instead (B-1: "a bounded or reified one
+     * still declined").
+     */
+    val hasReifiedTypeParameter: Boolean = false,
 )
 
 /** The name given to the extension-receiver slot. Deliberately not a Python identifier: a receiver
@@ -606,13 +765,24 @@ internal fun functionsOf(container: KmDeclarationContainer): List<ResolvedFuncti
 private fun resolvedFunctionOrNull(function: KmFunction): ResolvedFunction? {
     if (function.visibility != Visibility.PUBLIC) return null
     val signature = function.signature ?: return null
-    val receiver = function.receiverParameterType
-    val allParams = listOfNotNull(receiver) + function.valueParameters.map { it.type }
+    val declaredReceiver = function.receiverParameterType
+    val declaredParams = listOfNotNull(declaredReceiver) + function.valueParameters.map { it.type }
+    // Issue #38: an unbounded, non-reified type parameter is read as `kotlin.Any?`, and the call
+    // names it (`typeArgumentCount`). A declaration that cannot be substituted keeps its type
+    // parameters, and `declarationModelOf` declines it as it always did -- nothing changes for it.
+    val substitutable = substitutableTypeParameterIds(function.typeParameters)
+    val substituted = substitutable?.let { ids ->
+        val params = declaredParams.map { it.substituteAnyFor(ids) ?: return@let null }
+        val returns = function.returnType.substituteAnyFor(ids) ?: return@let null
+        params to returns
+    }
+    val allParams = substituted?.first ?: declaredParams
+    val receiver = if (declaredReceiver != null) allParams.first() else null
     return ResolvedFunction(
         kotlinName = function.name,
         isExtension = receiver != null,
         allParameterTypes = allParams,
-        returnType = function.returnType,
+        returnType = substituted?.second ?: function.returnType,
         jvmSignature = signature,
         receiverType = receiver,
         allParameterNames = (if (receiver != null) listOf(RECEIVER_PARAMETER_NAME) else emptyList()) +
@@ -620,6 +790,9 @@ private fun resolvedFunctionOrNull(function: KmFunction): ResolvedFunction? {
         allParameterDefaults = (if (receiver != null) listOf(false) else emptyList()) +
             function.valueParameters.map { it.declaresDefaultValue },
         isSuspend = function.isSuspend,
+        typeArgumentCount = if (substituted != null) function.typeParameters.size else 0,
+        hasUnsubstitutableTypeParameters = function.typeParameters.isNotEmpty() && substituted == null,
+        hasReifiedTypeParameter = function.typeParameters.any { it.isReified },
     )
 }
 

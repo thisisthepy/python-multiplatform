@@ -1,4 +1,4 @@
-"""compile_project: the incremental cache wired into the real pipeline (SPEC N-9, #41).
+"""compile_project: the incremental cache wired into the real pipeline (SPEC N-10, #41).
 
 Real Pyrefly, real C builds. The three-module project: `a` imports `b`; `c` is independent.
 """

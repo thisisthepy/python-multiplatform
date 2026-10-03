@@ -95,7 +95,7 @@ Behind the per-platform entry point, every platform uses the same generated func
 no per-platform Python → Kotlin binding code to maintain.
 
 > Inferred — confirm with the maintainer: this "one mechanism everywhere" property is a goal, not
-> only an implementation detail. It is stated as a decision in `PROJECT.md` and `docs/design/upcall-design.md`.
+> only an implementation detail. It is stated as a decision in `PROJECT.md` and `docs/design/upcall.md`.
 
 ## 3. What it deliberately is NOT
 
@@ -104,7 +104,7 @@ no per-platform Python → Kotlin binding code to maintain.
 | A binder that renames namespaces (`androidx` → `pythonx`, or any other) | §2.2 |
 | A replacement for the `pythonx` packages | §2.3 — they are real packages in their own repository |
 | Runtime-reflection or name-lookup based binding | §2.1 — impossible under Kotlin/Native and native image |
-| A hand-written wrapper per Kotlin function or class | Generic adaptation plus generated tables; per-declaration wrappers were tried in 2024 and rotted (`docs/design/pythonx-adapter-design.md`) |
+| A hand-written wrapper per Kotlin function or class | Generic adaptation plus generated tables; per-declaration wrappers were tried in 2024 and rotted (`docs/archive/pythonx-adapter-design.md`) |
 | A Python re-implementation, transpiler, or JVM-hosted Python | It embeds CPython itself, so C extensions keep working. TypedPython (§1.4) does not change this: checked code is ordinary Python, and compiled code is a CPython extension module, not a translation to another runtime |
 | A build tool, dependency resolver or packager | That is pypackpack (the work) and toolchain (the Gradle vocabulary) |
 | A sub-interpreter parallelism model | Rejected: extensions that do not declare multi-interpreter support fail to import; parallelism comes from free-threaded CPython |

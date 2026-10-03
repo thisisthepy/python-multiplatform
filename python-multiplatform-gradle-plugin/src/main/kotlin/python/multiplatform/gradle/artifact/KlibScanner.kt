@@ -136,7 +136,7 @@ import java.io.File
 internal object KlibScanner {
 
     /**
-     * `docs/design/pyi-generation-design.md` §3.6's name rule depends on this: a composable keeps its
+     * `docs/archive/pyi-generation-pythonic-stubs.md` §3.6's name rule (the Pythonic naming, now pythonx-compose's) depends on this: a composable keeps its
      * PascalCase spelling where every other function becomes snake_case.
      *
      * Read here for the same reason [ArtifactScanner.isComposable] reads it off ASM -- carried in the
@@ -220,7 +220,7 @@ internal object KlibScanner {
      * `null` -- the declaration vanishing entirely rather than being declined -- only when its
      * signature has no name a stub could write: a type *parameter* (`fun <T> f(t: T)`), a dynamic or
      * error type. That is [ArtifactScanner.declarationModelOf]'s own rule and
-     * `docs/design/pyi-generation-design.md` §3.1's last row: `BindingPolicy` rejects generic declarations
+     * `docs/archive/pyi-generation-pythonic-stubs.md` §3.1's last row: `BindingPolicy` rejects generic declarations
      * and stubbing what cannot even be spelled would be a lie, so there is nothing to record.
      *
      * `internal`, not `private`: no real klib available to this module's tests binds a declaration

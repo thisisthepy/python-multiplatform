@@ -10,7 +10,7 @@ import java.io.OutputStreamWriter
 
 /**
  * The single entry point KSP loads (`META-INF/services/...SymbolProcessorProvider`).
- * `docs/design/upcall-table-design.md` §6: one processor module, two roles selected by
+ * `docs/design/upcall.md` §2.5: one processor module, two roles selected by
  * [OPTION_ROLE] -- a library emits a fragment, an app emits a fragment for itself and then
  * aggregates every fragment it can see.
  */
@@ -18,7 +18,7 @@ class PythonBindingProcessorProvider : SymbolProcessorProvider {
     override fun create(environment: SymbolProcessorEnvironment): SymbolProcessor {
         val moduleName = sanitiseModuleName(
             environment.options[OPTION_MODULE_NAME]
-                ?: error("$OPTION_MODULE_NAME is required (see docs/design/upcall-table-design.md §6)"),
+                ?: error("$OPTION_MODULE_NAME is required (see docs/design/upcall.md §2.5)"),
         )
         val excludePackages = environment.options[OPTION_EXCLUDE_PACKAGES]
             ?.split(",")
@@ -126,7 +126,7 @@ class LibraryProcessor(
  * `python.multiplatform.role = app`: round 1 does what [LibraryProcessor] does for the app's own
  * sources; round 2 discovers every `Fragment_*` visible on the classpath (its own, just
  * generated, plus every dependency's) and emits the aggregator. See
- * `docs/design/upcall-table-design.md` §2/§6 for why this needs two rounds -- round 1's own fragment
+ * `docs/design/upcall.md` §2.3/§6 for why this needs two rounds -- round 1's own fragment
  * has to exist as a compiled/generated symbol before [discovery] can see it alongside the
  * others.
  *

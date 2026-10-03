@@ -34,7 +34,7 @@ import kotlin.test.assertTrue
  * A `Modifier` extension is not a `@Composable` -- §2.6 counted exactly one function that is both,
  * out of 500 -- so `padding` is an ordinary function returning an ordinary object and needs no
  * composition to run. Composables are a separate problem with a separate blocker
- * (`docs/design/pythonx-adapter-design.md` §5.3) and nothing here touches them. This module does not even
+ * (`docs/archive/pythonx-adapter-design.md` §5.3) and nothing here touches them. This module does not even
  * apply the Compose compiler plugin.
  *
  * ### What Python actually holds
@@ -169,7 +169,7 @@ class WalkedArtifactComposeModifierTest {
 
     /**
      * The entry carries what a Python adapter needs to build a keyword-argument surface over it --
-     * `docs/design/pythonx-adapter-design.md` §2.4's table, which recorded every one of these as missing.
+     * `docs/archive/pythonx-adapter-design.md` §2.4's table, which recorded every one of these as missing.
      *
      * `padding__Dp` is a good witness for all of them at once: it is an extension (so slot 0 is a
      * receiver, not a first parameter), its declared parameter type is `Dp` while its `TypeTag` is

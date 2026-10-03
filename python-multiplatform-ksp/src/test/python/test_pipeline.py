@@ -1,4 +1,4 @@
-"""End to end: source -> frontend -> verify -> cgen -> cbuild -> import (SPEC N-7, #41)."""
+"""End to end: source -> frontend -> verify -> cgen -> cbuild -> import (SPEC N-8, #41)."""
 import importlib.util
 import os
 import subprocess

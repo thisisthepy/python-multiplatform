@@ -24,7 +24,7 @@ import python.multiplatform.reflection.UpcallTable
  *
  * None of the marshalling. Turning a Python argument tuple into an `Array<Any?>` and a Kotlin
  * result back into a `PyObject *` is [UpcallTrampoline], which is `commonMain` and shared with
- * every other platform -- `docs/design/upcall-design.md`'s "what each platform still owes" is only the
+ * every other platform -- `docs/design/upcall.md` §3.7 is only the
  * address-publishing step, and on Android that step is the C shim plus these three methods.
  *
  * ### Rules these must obey
@@ -62,7 +62,7 @@ import python.multiplatform.reflection.UpcallTable
  * It is not marked with [HighOverheadNativeCall]. That marker is `@RequiresOptIn`, and its job is
  * to make a Kotlin *caller* acknowledge a cost; nothing in Kotlin calls these — C does, from
  * CPython — so applying it here would be inert. The cost is recorded instead where the callers
- * that can act on it will look: here, in `pmp_upcall_invoke_meth`, and in `docs/design/upcall-design.md`.
+ * that can act on it will look: here, in `pmp_upcall_invoke_meth`, and in `docs/design/upcall.md`.
  */
 object UpcallCallbacks {
 

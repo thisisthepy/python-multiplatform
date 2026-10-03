@@ -1,9 +1,9 @@
 package fixture.compose
 
-import androidx.compose.runtime.currentComposer
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
+import python.multiplatform.compose.withPythonComposer
 import python.multiplatform.ffi.PyObject
 import python.multiplatform.ffi.Python3
 import python.multiplatform.ffi.types.basic.PyInt
@@ -11,7 +11,7 @@ import python.multiplatform.reflection.HandleTable
 import python.native.ffi.PyLong_AsLongLong
 
 /**
- * `Modifier.composed` -- `docs/design/pythonx-adapter-design.md` §9.2/§9.4's open question, now answered:
+ * `Modifier.composed` -- `docs/archive/pythonx-adapter-design.md` §9.2/§9.4's open question, now answered:
  * **a composer is admitted.** `factory`'s compiled shape is `Function3<Modifier, Composer, Integer,
  * Modifier>` (confirmed by `javap -p` on `androidx.compose.ui.ComposedModifierKt`, matching the
  * lowered shape `PythonCallables` already crosses for every composable `content=` slot), and unlike
@@ -53,8 +53,9 @@ import python.native.ffi.PyLong_AsLongLong
  *
  * ### The composer, and the receiver, cross the same way [PythonComposition]'s does
  *
- * [currentComposer] is rooted and pushed onto `pythonx`'s composer stack (`pythonx.push_composer`) for
- * the duration of the call, so [factory] may itself call a bound composable (the same contract
+ * The composer is rooted and pushed onto the binding layer's composer stack for the duration of the
+ * call by `python-multiplatform-compose`'s `withPythonComposer` -- the same helper [PythonComposition]
+ * uses -- so [factory] may itself call a bound composable (the same contract
  * [PythonComposition] documents). `this` -- the `Modifier` chain [factory] receives as its receiver,
  * matching `@Composable Modifier.() -> Modifier` -- is rooted too and passed as a bare handle
  * (`int`), which `PythonxAdapter._coerce`'s OBJECT branch already accepts as a caller-selected
@@ -76,11 +77,11 @@ fun pythonComposed(modifier: Modifier, factory: PyObject): Modifier = modifier.c
     slot.invocations++
     ComposedInvocationSlot.lastCreated = slot
 
-    val composer = currentComposer
-    val composerRef = HandleTable.register(composer)
-    val receiverRef = HandleTable.register(this)
-    try {
-        Python3.exec("import python_multiplatform.binding as _pm_binding\n_pm_binding.push_composer(${composerRef.raw})")
+    val receiver = this
+    // The receiver is rooted *inside* the composer call: Compose forbids a try/finally around a
+    // composable invocation, so the release cannot wrap `withPythonComposer` from outside.
+    withPythonComposer {
+        val receiverRef = HandleTable.register(receiver)
         try {
             val receiverHandle = PyInt.from(receiverRef.raw)
             try {
@@ -101,7 +102,7 @@ fun pythonComposed(modifier: Modifier, factory: PyObject): Modifier = modifier.c
                     } else {
                         Python3.withPython { PyLong_AsLongLong(result.pointer) }
                     }
-                    (HandleTable.resolveRaw(raw) as? Modifier) ?: this
+                    (HandleTable.resolveRaw(raw) as? Modifier) ?: receiver
                 } finally {
                     result.close()
                 }
@@ -109,11 +110,8 @@ fun pythonComposed(modifier: Modifier, factory: PyObject): Modifier = modifier.c
                 receiverHandle.close()
             }
         } finally {
-            Python3.exec("import python_multiplatform.binding as _pm_binding\n_pm_binding.pop_composer()")
+            HandleTable.release(receiverRef)
         }
-    } finally {
-        HandleTable.release(receiverRef)
-        HandleTable.release(composerRef)
     }
 }
 
