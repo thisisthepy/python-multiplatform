@@ -294,6 +294,12 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   consumable `*Elements` configuration, and the resource `META-INF/python-multiplatform/python.properties`
   in the jar and AAR (see `docs/platforms/python-version-acquisition.md` "Published version") —
   `GP/EmbeddedPythonVersionTest.kt`.
+- **T-5** Every acquired CPython reports the pinned version: `PY_VERSION` in each target's `patchlevel.h`
+  equals `pythonVersion`, and a `downloadPython_*` task fails the build, naming the target and both
+  versions, when it does not (issue #47: iOS shipped 3.14.6 under `pythonVersion=3.14.7`). The iOS
+  extraction is stamped with its lock key so bumping the pinned archive discards the old tree.
+  `Status: implemented` — `GP/AcquiredHeaderVersionTest.kt` (the real-tree case needs the trees from
+  `downloadAllPythonBuilds`; it skips when nothing was acquired).
 
 ## 8. Measurement
 
