@@ -137,6 +137,14 @@ def commands(name: str, size: str, python: str, java_source: bool,
     return cmds
 
 
+def source_commit() -> str:
+    """The commit the harness (and the TypedPython sources beside it) was measured at."""
+    result = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True)
+    dirty = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"],
+                           capture_output=True, text=True).stdout.strip()
+    return result.stdout.strip() + ("+dirty" if dirty else "") if result.returncode == 0 else "unknown"
+
+
 def run_once(cmd: list[str]) -> tuple[float, str]:
     start = time.perf_counter()
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -212,6 +220,7 @@ def measure(args: argparse.Namespace) -> int:
         out_dir.mkdir(exist_ok=True)
         path = out_dir / f"{datetime.date.today().isoformat()}-{socket.gethostname()}.json"
         payload = {"date": datetime.datetime.now().isoformat(timespec="seconds"),
+                   "commit": source_commit(),
                    "host": socket.gethostname(), "load_average": load, "repeat": args.repeat,
                    "python": subprocess.run([args.python, "--version"], capture_output=True, text=True).stdout.strip(),
                    "results": results}
@@ -281,6 +290,7 @@ def interleaved(args: argparse.Namespace) -> int:
         out_dir.mkdir(exist_ok=True)
         path = out_dir / f"{datetime.date.today().isoformat()}-{socket.gethostname()}-interleaved.json"
         path.write_text(json.dumps({"date": datetime.datetime.now().isoformat(timespec="seconds"),
+                                    "commit": source_commit(),
                                     "host": socket.gethostname(), "method": "interleaved A/B",
                                     "pairs": args.pairs, "results": results}, indent=2) + "\n")
         print(f"wrote {path}")
