@@ -266,7 +266,7 @@ trampolines exist. GraalVM native image upcalls are verified by hand
   open.** SPEC L-11, issue #59, `docs/platforms/ios-app-bundle.md`: per-slice staging
   (`stageIosPythonHome_*`, `stageIosPythonHomeForXcode`), `tools/xcode/install-python.sh` (stdlib to
   `<app>/python-multiplatform-home/`, payload to `<app>/python/`, `.so` wrapped as frameworks with
-  `.fwork` placeholders) replacing `iosApp/`'s two broken phases, and `IosPythonHome` +
+  `.fwork` placeholders) replacing the two broken phases of the old root `iosApp/` (now `sample/src/iosMain/app.xcodeproj`, #107), and `IosPythonHome` +
   `Py_SetPythonHome` at run time. Left: the installed-app run on the simulator with no
   `SIMCTL_CHILD_*` (the page's "Checking it"); a device run; and a way for consumers outside this
   repository to stage the stdlib (the iOS archive download is in this build script, not the plugin).
