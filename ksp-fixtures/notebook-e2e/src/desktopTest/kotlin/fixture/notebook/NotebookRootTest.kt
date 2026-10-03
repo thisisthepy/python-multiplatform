@@ -12,7 +12,8 @@ import fixture.notebook.NotebookHost.inkOf
 import fixture.notebook.NotebookHost.pixelsOf
 import fixture.notebook.NotebookHost.pyInt
 import fixture.notebook.NotebookHost.pyStr
-import python.multiplatform.compose.PythonContent
+import python.multiplatform.compose.PythonAppView
+import python.multiplatform.compose.PythonWidget
 import python.multiplatform.ffi.Python3
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -55,7 +56,7 @@ class NotebookRootTest {
 
     /**
      * Cells 6-7: `import main` declares the app, and the host -- configured once with
-     * `PythonContent("pythonx.compose.runtime", "app_root")` -- draws it. `main.App` is the root on
+     * `PythonAppView(module = "pythonx.compose.runtime", attribute = "app_root")` -- draws it. `main.App` is the root on
      * screen. An idle frame does not run it again: nothing polls.
      */
     @Test
@@ -163,7 +164,7 @@ class NotebookRootTest {
     }
 
     /**
-     * **Negative check, host half.** The host given the root *function* once (`PythonContent(root =
+     * **Negative check, host half.** The host given the root *function* once (`PythonWidget(root =
      * main.App)`) instead of the state that holds it -- the root-replacement wiring disabled on the
      * Kotlin side. A redeclaration then writes a state no composition reads, and the screen stays.
      */
@@ -171,7 +172,7 @@ class NotebookRootTest {
     fun negative_aHostHandedTheRootOnceDoesNotFollowARedeclaration() {
         val expected = NotebookHost.controlPixels(W, H) { NewUiControl() }
         val fixedRoot = Python3.import("main").getAttr("App")
-        val scene = ImageComposeScene(width = W, height = H, density = Density(1f)) { PythonContent(root = fixedRoot) }
+        val scene = ImageComposeScene(width = W, height = H, density = Density(1f)) { PythonWidget(root = fixedRoot) }
         try {
             scene.render()
             val seen = NotebookHost.redeclare(scene, CELL_05 + CELL_15, expected)

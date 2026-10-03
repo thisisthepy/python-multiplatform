@@ -6,7 +6,7 @@ import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.unit.Density
 import org.jetbrains.skia.Bitmap
 import org.jetbrains.skia.Image
-import python.multiplatform.compose.PythonContent
+import python.multiplatform.compose.PythonAppView
 import python.multiplatform.ffi.Python3
 import python.multiplatform.ffi.pythonx.PythonxAdapter
 import python.multiplatform.ffi.upcall.PythonProxySource
@@ -18,7 +18,7 @@ import kotlin.test.fail
 
 /**
  * The host the notebook talks to: one interpreter, the pythonx-compose **wheel** on `sys.path`, and a
- * scene drawing `PythonContent("pythonx.compose.runtime", "app_root")` -- the line pythonx-compose's
+ * scene drawing `PythonAppView(module = "pythonx.compose.runtime", attribute = "app_root")` -- the line pythonx-compose's
  * SPEC S5.4 says a host is configured with.
  *
  * The interpreter and the upcall table are installed once per test JVM and never cleared: a
@@ -128,10 +128,10 @@ internal object NotebookHost {
 
     fun pyInt(expression: String): Int = pyStr(expression).toInt()
 
-    /** The host: `PythonContent` reading pythonx-compose's root state. */
+    /** The host: `PythonAppView` reading pythonx-compose's root state. */
     fun hostScene(width: Int, height: Int): ImageComposeScene =
         ImageComposeScene(width = width, height = height, density = Density(1f)) {
-            PythonContent(module = "pythonx.compose.runtime", attribute = "app_root")
+            PythonAppView(module = "pythonx.compose.runtime", attribute = "app_root")
         }
 
     /** What [content] draws from Kotlin, the control a Python-drawn screen is compared with. */

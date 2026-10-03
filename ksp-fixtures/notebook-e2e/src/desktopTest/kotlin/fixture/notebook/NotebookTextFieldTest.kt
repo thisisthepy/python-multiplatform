@@ -15,7 +15,7 @@ import fixture.notebook.NotebookHost.pixelsOf
 import fixture.notebook.NotebookHost.pyInt
 import fixture.notebook.NotebookHost.pyStr
 import fixture.notebook.NotebookRootTest.Companion.CELL_05
-import python.multiplatform.compose.PythonContent
+import python.multiplatform.compose.PythonAppView
 import python.multiplatform.reflection.HandleTable
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -51,7 +51,7 @@ class NotebookTextFieldTest {
     @Test
     fun cell32to33_aTextFieldKeepsInputMethodCompositionInComposeAndTheNotebookReadsTheResult() {
         val scene = InputMethodScene(WIDTH, HEIGHT) {
-            PythonContent(module = "pythonx.compose.runtime", attribute = "app_root")
+            PythonAppView(module = "pythonx.compose.runtime", attribute = "app_root")
         }
         try {
             scene.render()

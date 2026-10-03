@@ -4,7 +4,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 /**
  * Issue #26: pythonx-compose's `UI.ipynb` scenarios, run end to end against a real host.
  *
- * The host is `python-multiplatform-compose`'s `PythonContent("pythonx.compose.runtime", "app_root")`
+ * The host is `python-multiplatform-compose`'s `PythonAppView(module = "pythonx.compose.runtime", attribute = "app_root")`
  * (#18). The Python side is the **installed pythonx-compose wheel**, not a copy of its sources and
  * not a stand-in: every `pythonx.compose.*` import in the tests must resolve to the files the wheel
  * unpacked (the tests check `__file__`). The wheel is an input:

@@ -454,7 +454,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   Hangul input-method composition with no Python function started and the root not rerun, holds the
   composing range in Compose, and the notebook reads the committed text; a write from Python outside
   the composition reaches the screen within four frames. Notebook content with no decided or Kotlin
-  counterpart is listed, not imitated. `Status: planned` — `ksp-fixtures/notebook-e2e/` (tests, and a
+  counterpart is listed, not imitated. `Status: planned`: `ksp-fixtures/notebook-e2e/` (tests, and a
   README with the cell map, the wheel commands and the gaps); not yet run.
 
 ## 7. Threading and builds

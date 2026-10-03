@@ -1,7 +1,7 @@
-# `:ksp-fixtures:notebook-e2e` — pythonx-compose's `UI.ipynb`, end to end
+# `:ksp-fixtures:notebook-e2e`: pythonx-compose's `UI.ipynb`, end to end
 
 Issue #26. A desktop host draws a Python-declared root through `python-multiplatform-compose`
-(`PythonContent("pythonx.compose.runtime", "app_root")`, #18), with the **pythonx-compose wheel
+(`PythonAppView(module = "pythonx.compose.runtime", attribute = "app_root")`, #18), with the **pythonx-compose wheel
 installed**, and runs the notebook's scenarios against it. Each scenario is its own test, so a
 regression fails under the notebook cell's number.
 
@@ -14,18 +14,16 @@ snake_case; `Color(0xFF...)`; `DefaultIcons.Add` without parentheses;
 
 ## Building the wheel
 
-pythonx-compose builds its wheel with setuptools (`pyproject.toml`); its own `tests/test_wheel.py`
-builds it with `pip wheel`. From a pythonx-compose checkout, with `setuptools` and `wheel`
-installed in the Python you run:
+Build the wheel with uv from a clean copy of pythonx-compose's `develop`, so nothing is written into
+that checkout:
 
 ```bash
-cd ../pythonx-compose            # or wherever the checkout is
-python3 -m pip wheel . --no-deps --no-build-isolation -w ../PythonMultiplatform/.tmp/pythonx-compose-dist
+mkdir -p .tmp/pxc-src
+git -C ../pythonx-compose archive origin/develop | tar -x -C .tmp/pxc-src
+(cd .tmp/pxc-src && uv build --wheel --out-dir ../pythonx-compose-dist)
 ```
 
-This leaves `build/` and `pythonx_compose.egg-info/` in the pythonx-compose checkout (both are
-git-ignored there). To avoid even that, copy the sources first, as `tests/test_wheel.py` does. The
-result is `pythonx_compose-<version>-py3-none-any.whl` (version 0.0.1 at the time of writing).
+The result is `.tmp/pythonx-compose-dist/pythonx_compose-<version>-py3-none-any.whl`.
 
 ## Running
 
@@ -45,8 +43,8 @@ skip. Only `-PnotebookE2e.skip=true` disables `desktopTest`, and the build log t
 scenarios did not run. Which of the two CI wants is CI's decision; no workflow runs this module yet.
 
 "Installing" is unpacking the pure-Python wheel into `build/pythonx-compose/site-packages`
-(`installPythonxComposeWheel`), which is what `pip install --target` does for such a wheel; the
-embedded interpreter has no pip of its own. The tests then require `pythonx.compose.__file__` to be
+(`installPythonxComposeWheel`), which is all installing a pure-Python wheel amounts to; the embedded
+interpreter has no installer of its own. The tests then require `pythonx.compose.__file__` to be
 inside that directory, so a stray source checkout on `sys.path` cannot stand in for the wheel.
 
 ## Scenarios
@@ -74,8 +72,8 @@ pass means the screen shows what the cell declared.
 ### The text field (cells 31–33, pythonx-compose #10)
 
 `TextField(state=remember_text_field_state(""))` is focused by a click (keyboard focus traversal if
-the click does not do it), then receives a Hangul input-method sequence — composing ㅎ, 하, 한, then
-committing 한 — with a frame after each event. While it types, a `sys.monitoring` counter of every
+the click does not do it), then receives a Hangul input-method sequence (composing ㅎ, 하, 한, then
+committing 한) with a frame after each event. While it types, a `sys.monitoring` counter of every
 Python function started (`PY_START`, all threads) must stay at zero and the root must not rerun.
 Kotlin's `TextFieldState` must hold the composing text with composing range `0..1` at each step and
 `한` with no composing range after the commit; the notebook then reads `fields[-1].text == "한"`.
@@ -92,7 +90,7 @@ that records the request, and delivers each event the way the desktop window's
 if (composing.isNotEmpty()) setComposingText(composing, 1) }`. Not exercised: the AWT layer above it
 (decoding an `InputMethodEvent` into those two strings), which needs a window.
 
-## Gaps — notebook content not expressed here
+## Gaps: notebook content not expressed here
 
 | Notebook | Why it is not in a test |
 |---|---|
