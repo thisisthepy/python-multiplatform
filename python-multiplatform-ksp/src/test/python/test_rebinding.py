@@ -138,3 +138,47 @@ def test_rebinding_inside_a_package_with_relative_imports(write):
     result = gate.check([path])
     assert by_rule(result, REBIND), result
     assert not [d for d in result if d.severity == "error"], result
+
+
+def test_pyrefly_runs_once_when_a_file_has_a_candidate(write, monkeypatch):
+    """The probed copy is the only Pyrefly run: errors, any-flow and types all come from it."""
+    calls = []
+    real = gate.pyrefly.run
+
+    def counting(*args, **kwargs):
+        calls.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(gate.pyrefly, "run", counting)
+    result = found(write, """
+        def f() -> None:
+            x = 1
+            x = "a"
+            print(x)
+    """)
+    assert by_rule(result, REBIND)
+    assert len(calls) == 1
+
+
+def test_error_column_after_a_probe_points_at_the_original_source(write):
+    """`x = 1; y = undefined_name`: the probe goes after `x = 1`, left of the error."""
+    source = "x = 1\nx = 2\nx = 1; y = undefined_name\n"
+    path = write("user.py", source)
+    result = gate.check([path])
+    [d] = [d for d in result if d.rule == "pyrefly/unknown-name"]
+    original_column = source.splitlines()[2].index("undefined_name") + 1
+    assert (d.line, d.column) == (3, original_column)
+
+
+def test_error_left_of_a_probe_keeps_its_column(write):
+    source = "x = 1\nx = 2\nprint(undefined_name); x = 3\n"
+    path = write("user.py", source)
+    [d] = [d for d in gate.check([path]) if d.rule == "pyrefly/unknown-name"]
+    assert (d.line, d.column) == (3, source.splitlines()[2].index("undefined_name") + 1)
+
+
+def test_probe_loads_are_not_any_flow_findings(write):
+    """The probe load `; x` has type Unknown here, but it is a discarded value, not a finding."""
+    path = write("user.py", "x = eval('1')\nx = eval('2')\nprint(x)\n")
+    flows = {(d.line, d.column) for d in gate.check([path]) if d.rule == "any-flow"}
+    assert flows == {(3, 7)}  # the user's own load of x, not the probe loads on lines 1 and 2
