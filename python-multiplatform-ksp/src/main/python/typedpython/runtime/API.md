@@ -72,3 +72,15 @@ All return new references or NULL with CPython's exception set; none deopts.
     int       tp_obj_to_f64(PyObject *obj, double *out);          /* 0 / -1 (PyNumber_Float, then exact double) */
     PyObject *tp_binop_obj(PyObject *a, PyObject *b, int op);     /* PyNumber_Add/... for ir.BinOpKind on OBJ */
     void      tp_release(PyObject **slot);                        /* Py_CLEAR: the only way generated code drops a reference */
+
+## Local arrays (ir.NewArray / CopyArray; owned by the function, no list object)
+Same structs as above with `list == NULL` and `dirty == NULL`. 0 ok, -1 MemoryError.
+    int  tp_i64_array_new(tp_i64_array *a, int64_t n, int64_t fill);   /* n < 0 → empty */
+    int  tp_i64_array_iota(tp_i64_array *a, int64_t n);                 /* 0..n-1; n < 0 → empty */
+    int  tp_f64_array_new(tp_f64_array *a, int64_t n, double fill);
+    int  tp_i64_array_copy(tp_i64_array *dst, const tp_i64_array *src);
+    int  tp_f64_array_copy(tp_f64_array *dst, const tp_f64_array *src);
+    void tp_i64_array_free(tp_i64_array *a);                            /* no write-back; zeroes; idempotent */
+    void tp_f64_array_free(tp_f64_array *a);
+    /* tp_*_array_slot works unchanged on local arrays (same IndexError messages as list). */
+    PyObject *tp_tuple(PyObject *const *items, Py_ssize_t n);           /* new tuple; steals nothing */

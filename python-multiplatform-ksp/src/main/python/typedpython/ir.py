@@ -64,8 +64,8 @@ class Type(Enum):
     BOOL = "bool"          # a Python bool
     NONE = "none"          # the value None (only as a return type)
     OBJ = "obj"            # any Python object, held as a strong reference (PyObject*)
-    F64_ARRAY = "f64[]"    # a list[float] parameter lowered to a native array (see ArrayParam)
-    I64_ARRAY = "i64[]"    # a list[int] parameter lowered to a native array (see ArrayParam)
+    F64_ARRAY = "f64[]"    # a list[float] parameter (ArrayParam) or a local array (NewArray/CopyArray)
+    I64_ARRAY = "i64[]"    # a list[int] parameter (ArrayParam) or a local array (NewArray/CopyArray)
 
 
 SCALARS = (Type.I64, Type.F64, Type.BOOL)
@@ -320,6 +320,33 @@ class ObjToFloat(Expr):
 
 
 @dataclass(frozen=True)
+class NewArray(Expr):
+    """A fresh **local** array (type F64_ARRAY / I64_ARRAY), owned by the function:
+    `[fill] * length` (`iota=False`), or `list(range(length))` (`iota=True`, I64 only, elements
+    0..length-1). A negative length gives an empty array, as in CPython. Allocation failure →
+    MemoryError. Only legal as the value of an `Assign` to a local of the same array type."""
+
+    length: Expr                   # I64
+    fill: Expr | None = None       # element-typed; None when iota
+    iota: bool = False
+
+
+@dataclass(frozen=True)
+class CopyArray(Expr):
+    """`src[:]` of a local or parameter array: a fresh local array with the same elements.
+    Only legal as the value of an `Assign` to a local of the same array type."""
+
+    src: str
+
+
+@dataclass(frozen=True)
+class Tuple(Expr):
+    """`(a, b, ...)` of scalars/OBJs — a new tuple (type OBJ). Scalar elements arrive through Box."""
+
+    elements: tuple[Expr, ...]
+
+
+@dataclass(frozen=True)
 class Len(Expr):
     """`len(array)` of an array parameter. Type I64."""
 
@@ -446,6 +473,13 @@ class Function:
     ArrayParam, or Param of type OBJ for anything else). Keyword-only, *args, **kwargs, defaults
     and decorators other than `compiled` are not compiled in this stage (the function stays
     interpreted; `frontend` records why).
+
+    Local arrays (fannkuch, M2): a local of an array type holds a native array the function owns,
+    created only by NewArray/CopyArray. It never escapes — used only by Index/StoreIndex/Len and
+    as a CopyArray source; never returned, passed, boxed or captured — so stores into it are not
+    effects (a function whose only stores are into local arrays can be pure), and no list object
+    ever exists for it. Reassigning the local frees the old array; every exit frees all of them.
+    Its length never changes after creation, so a bounds proof against Len(local) holds.
 
     `pure`: no effect outside its own locals — no stores into anything but locals, no CallObject,
     no GetAttr (a property can have effects), no Truth/CompareObj/ObjToFloat/OBJ BinOp (they run
