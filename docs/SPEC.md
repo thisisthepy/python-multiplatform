@@ -70,6 +70,7 @@ fail, then implement.
 - **L-7** iOS: the framework carries no stdlib, so `PYTHONHOME` must point at one; the test build
   extracts it. `Status: partial` — exercised by the shared suite on the simulator; no iOS-specific
   lifecycle test beyond `PM/iosSimulatorArm64Test/.../AsyncioAvailabilityProbeTest.kt`.
+- **L-8** Initialisation sets `builtins.compiled` to an identity decorator (an existing one is kept), so `@compiled` needs no import on any platform (N-7, issue #42). `Status: implemented` — `PM/commonTest/.../ffi/BuiltinCompiledTest.kt`.
 
 ## 2. Low-level C API (downcall surface)
 
@@ -277,6 +278,15 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   3.14t runs the whole desktop suite with `-PpythonFreeThreaded=true` (236 tests, 0 failures; ROADMAP §9).
   Only desktop has free-threaded prebuilts; Android and iOS do not. `Py_LIMITED_API` is not defined, so
   `abi3t` is not a blocker.
+- **T-3** `python-multiplatform` publishes per-target, per-flavour CPython include directories as
+  `Provider<Directory>` carrying the extraction task (`cpythonIncludeDirectories` extension; see
+  `docs/platforms/python-version-acquisition.md` §7). `Status: partial` (only the configured flavour is
+  extracted) — `GP/CPythonIncludeDirectoriesTest.kt`.
+- **T-4** `python-multiplatform` publishes the CPython version it embeds: extension `pythonMultiplatform`,
+  Gradle attributes `org.thisisthepy.python.version` / `org.thisisthepy.python.free-threaded` on every
+  consumable `*Elements` configuration, and the resource `META-INF/python-multiplatform/python.properties`
+  in the jar and AAR (see `docs/platforms/python-version-acquisition.md` "Published version") —
+  `GP/EmbeddedPythonVersionTest.kt`.
 
 ## 8. Measurement
 

@@ -59,3 +59,81 @@ CPython 3.14.2 for `wasm32-emscripten` (Emscripten 5.0.3, matched to the `pyemsc
 PEP 783) under the git-ignored `.caches/`, and `python-multiplatform-wasm-runtime` is the published zip of
 the result. This is deliberately a different patch release from the native `pythonVersion`; see
 [`wasm-design.md`](wasm-design.md).
+
+## 7. Include directories as a build output
+
+Compiling a C extension against the embedded CPython needs that CPython's headers, not the host's.
+`python-multiplatform` exposes them as a project extension named `cpythonIncludeDirectories`
+(`python.multiplatform.gradle.CPythonIncludeDirectories`, in the Gradle plugin module).
+
+*   **Key:** `(target, flavour)`. Targets: `macos-aarch64`, `macos-x86_64`, `linux-x86_64`,
+    `windows-x86_64`, `android-aarch64`, `android-x86_64`, `ios-arm64`, `ios-arm64_x86_64-simulator`
+    (the iOS names are XCFramework slices). Flavour: `CPythonFlavour.GIL` (default) or `FREE_THREADED`
+    (desktop only).
+*   **Value:** `Provider<Directory>` of the directory that directly contains `Python.h`, i.e. the `-I`
+    directory: `<ver>/<target>[-freethreaded]/python/include/python3.14[t]` on desktop (Windows has no
+    `python3.14` level), `<ver>/android-*/prefix/include/python3.14`,
+    `<ver>/ios/Python.xcframework/<slice>/include/python3.14`.
+*   **Task dependency:** the provider carries the matching `downloadPython_*` task; using it as a task
+    input makes Gradle download and extract first.
+*   **Only the configured flavour is extracted.** `-PpythonFreeThreaded=true` selects the free-threaded
+    desktop tree; asking for the other flavour throws a `GradleException` naming that property
+    (`isAvailable` tests it without throwing).
+
+```kotlin
+// consumer build.gradle.kts
+evaluationDependsOn(":python-multiplatform")
+val includes = project(":python-multiplatform").extensions.getByType<CPythonIncludeDirectories>()
+tasks.register<Exec>("compileExt") {
+    val inc = includes.includeDir("macos-aarch64")   // or ("linux-x86_64", CPythonFlavour.FREE_THREADED)
+    inputs.dir(inc)
+    commandLine("cc", "-I${inc.get().asFile}", "-c", "ext.c")
+}
+```
+
+### Link libraries
+
+The same extension exposes the library to link against (issue #56):
+`libraryDir(target, flavour)` (`Provider<Directory>`, the `-L` directory) and
+`libraryFile(target, flavour)` (`Provider<RegularFile>`), both carrying the `downloadPython_*` task.
+
+| Target | Link library (under `<ver>/`) |
+|---|---|
+| `android-aarch64`, `android-x86_64` | `<target>/prefix/lib/libpython3.14.so` |
+| `windows-x86_64` | `windows-x86_64/python/libs/python314.lib` (`python3.lib` is the stable-ABI one) |
+| `windows-x86_64` free-threaded | `windows-x86_64-freethreaded/python/libs/python314t.lib` |
+| macOS, Linux, iOS | none -- `isLinkRequired(target)` is false; `libraryDir`/`libraryFile` throw `GradleException` |
+
+Android has no free-threaded build, so that combination throws. `isLinkAvailable(target, flavour)`
+tests without throwing; the other flavour fails naming `-PpythonFreeThreaded`, as for `includeDir`.
+
+## Published version
+
+A consumer that builds against `python-multiplatform` must know which CPython it embeds (issue #61).
+The answer is published three ways, all derived from `pythonVersion` / `pythonFreeThreaded` in
+`gradle.properties`.
+
+*   **Extension** `pythonMultiplatform` (`python.multiplatform.gradle.EmbeddedPythonVersion`):
+    `pythonVersion` (`3.14.7`), `majorMinor` (`3.14`), `freeThreaded`.
+*   **Gradle attributes** on every consumable `*Elements` configuration (so they land in the published
+    module metadata): `org.thisisthepy.python.version` and `org.thisisthepy.python.free-threaded`
+    (both `String`; the latter is `"true"`/`"false"`).
+*   **Resource** `META-INF/python-multiplatform/python.properties` (`pythonVersion=`, `freeThreaded=`),
+    inside the desktop jar and the Android AAR's `classes.jar`.
+
+```kotlin
+// composite build (includeBuild): read the extension
+evaluationDependsOn(":python-multiplatform")
+val embedded = project(":python-multiplatform").extensions.getByType<EmbeddedPythonVersion>()
+println(embedded.majorMinor)
+
+// published artefact: read the resource from the classpath
+val text = Thread.currentThread().contextClassLoader
+    .getResourceAsStream(EmbeddedPythonVersion.RESOURCE_PATH)!!.use { it.readBytes().decodeToString() }
+val embedded = EmbeddedPythonVersion.parse(text)
+
+// published artefact: require a matching variant through the attributes
+configurations.named("desktopRuntimeClasspath") {
+    attributes.attribute(Attribute.of("org.thisisthepy.python.version", String::class.java), "3.14.7")
+}
+```
