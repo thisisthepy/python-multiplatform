@@ -148,3 +148,168 @@ def test_sqrt_of_a_negative_raises_like_cpython(write, tmp_path):
     module = build(write, tmp_path, "floats_neg", FLOATS).load()
     with pytest.raises(ValueError, match="math domain error"):
         module.scale([-1.0], 1.0)
+
+
+# --- default arguments (design §6.2) -------------------------------------------------------------
+
+DEFAULTS = """
+    import typedpython
+
+    CALLS = [0]
+
+    def make_step() -> int:
+        CALLS[0] += 1
+        return 10 * CALLS[0]
+
+    @typedpython.compiled
+    def scaled(x: float, k: float = 2.0, n: int = 3) -> float:
+        return x * k + n
+
+    @typedpython.compiled
+    def stepped(x: int, step: int = make_step()) -> int:
+        return x + step
+"""
+
+
+def test_default_arguments_are_typed_and_keep_the_signature(write, tmp_path):
+    built = build(write, tmp_path, "defaults", DEFAULTS)
+    assert "scaled" in built.typed_functions and "scaled" not in built.untyped
+    module, interpreted = built.load(), built.load_interpreted()
+    assert module.scaled(1.5) == interpreted.scaled(1.5)                  # both defaults used
+    assert module.scaled(1.5, 3.0) == interpreted.scaled(1.5, 3.0)        # one overridden
+    assert module.scaled(1.5, 3.0, 7) == interpreted.scaled(1.5, 3.0, 7)  # both overridden
+    assert module.scaled(1.5, n=9) == interpreted.scaled(1.5, n=9)        # by keyword
+    assert module.__typedpython_deopts__ == 0
+
+
+def test_a_default_of_the_wrong_runtime_type_takes_the_interpreted_path(write, tmp_path):
+    module = build(write, tmp_path, "defaults_type", DEFAULTS).load()
+    interpreted = module._tp_interpreted()
+    assert module.scaled(1.0, 2) == interpreted.scaled(1.0, 2)    # int passed for a float parameter
+    assert type(module.scaled(1.0, 2)) is type(interpreted.scaled(1.0, 2))
+    assert module.__typedpython_deopts__ == 2
+
+
+def test_defaults_are_evaluated_once_at_definition_time(write, tmp_path):
+    module = build(write, tmp_path, "defaults_once", DEFAULTS).load()
+    assert module.CALLS == [1]               # evaluated while the module loaded, not per call
+    assert module.stepped(1) == 11
+    assert module.stepped(2) == 12
+    assert module.stepped(1, 5) == 6
+    assert module.CALLS == [1]
+
+
+# --- methods (design §6.2) -----------------------------------------------------------------------
+
+METHODS = """
+    # typedpython: compiled
+
+    class Acc:
+        def __init__(self, start: int) -> None:
+            self.total = start
+
+        def add(self, n: int) -> None:
+            self.total += n
+
+        def power(self, base: int, n: int) -> int:
+            r = 1
+            for _ in range(n):
+                r *= base
+            return r
+
+        def scaled(self, x: float, k: float = 2.0) -> float:
+            return x * k
+
+        def is_peer(self, other: "Acc", n: int) -> bool:
+            return isinstance(other, Acc)
+
+        @staticmethod
+        def twice(n: int) -> int:
+            return n * 2
+"""
+
+
+def test_methods_are_typed_and_instances_stay_ordinary(write, tmp_path):
+    built = build(write, tmp_path, "methods", METHODS)
+    for name in ("Acc.__init__", "Acc.add", "Acc.power", "Acc.scaled", "Acc.is_peer"):
+        assert name in built.typed_functions, name
+    assert "Acc.twice" in built.untyped            # a decorated method is left alone
+    module = built.load()
+    acc = module.Acc(5)
+    acc.dynamic = 1                                # not a cdef class: dynamic attributes still work
+    assert acc.__dict__ == {"total": 5, "dynamic": 1}
+    assert module.Acc.twice(4) == 8
+    assert acc.scaled(1.5) == 3.0 and acc.scaled(1.5, 4.0) == 6.0
+
+
+def test_a_pure_method_promotes_on_overflow_and_keeps_the_bound_instance(write, tmp_path):
+    built = build(write, tmp_path, "methods_pure", METHODS)
+    module, interpreted = built.load(), built.load_interpreted()
+    acc = module.Acc(0)
+    assert acc.power(2, 10) == 1024
+    assert module.__typedpython_deopts__ == 0
+    assert acc.power(10, 30) == interpreted.Acc(0).power(10, 30) == 10**30
+    assert module.__typedpython_deopts__ == 1
+
+
+def test_a_method_that_stores_into_self_takes_the_interpreted_path_before_any_effect(write, tmp_path):
+    module = build(write, tmp_path, "methods_store", METHODS).load()
+    acc = module.Acc(0)
+    acc.add(2**70)
+    acc.add(1)
+    assert acc.total == 2**70 + 1        # each call took effect exactly once
+    assert module.__typedpython_deopts__ == 1
+
+
+def test_the_interpreted_fallback_sees_the_compiled_class(write, tmp_path):
+    module = build(write, tmp_path, "methods_global", METHODS).load()
+    assert module.Acc(0).is_peer(module.Acc(1), 2**70) is True
+    assert module.__typedpython_deopts__ == 1
+
+
+PROPERTY_READ = """
+    # typedpython: compiled
+
+    class P:
+        def __init__(self) -> None:
+            self.count = 0
+
+        @property
+        def tick(self) -> int:
+            self.count += 1
+            return self.count
+
+        def calc(self, n: int) -> int:
+            r = self.tick
+            for _ in range(n):
+                r *= 1 << 40
+            return r
+"""
+
+
+def test_reading_an_attribute_of_self_is_not_pure(write, tmp_path):
+    # `self.tick` is a property with an effect; redoing the call after an overflow would run it twice.
+    built = build(write, tmp_path, "property_read", PROPERTY_READ)
+    module, interpreted = built.load(), built.load_interpreted()
+    a, b = module.P(), interpreted.P()
+    assert a.calc(5) == b.calc(5)                 # 2**200: overflows a C long long
+    assert a.count == b.count == 1
+
+
+DECORATED = """
+    import typedpython
+
+    class K:
+        @typedpython.compiled
+        def half(self, n: int) -> float:
+            return n / 2
+
+        def plain(self, n: int) -> int:
+            return n
+"""
+
+
+def test_a_decorated_method_is_typed_and_an_undecorated_one_is_not(write, tmp_path):
+    built = build(write, tmp_path, "decorated_method", DECORATED)
+    assert built.typed_functions == ["K.half"]
+    assert built.load().K().half(3) == 1.5
