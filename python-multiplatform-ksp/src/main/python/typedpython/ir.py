@@ -242,7 +242,13 @@ class Call(Expr):
     redone); otherwise the front end calls it as an object (`CallObject(Global(name), ...)`).
     A call cycle (direct or mutual recursion) is legal: every compiled function counts its frame at
     entry (runtime `tp_enter_call`), so a recursion that CPython stops with RecursionError is stopped
-    with the same error, and the C stack cannot overflow."""
+    with the same error, and the C stack cannot overflow.
+    A callee with a `Param.cls` parameter can deopt at entry whenever an argument is not proved to be
+    exactly that class, so such a call counts as a node that can deopt: the caller is pure (and
+    `may_deopt`), or the call is `redo`. A pure callee that uses a compiled class can also return the
+    deopt signal with `may_deopt` False, when the class changed after init (N-11); an impure caller
+    then redoes that callee interpreted, for OBJ and I64 results as well — such a callee is pure and
+    its I64 result is interval-proved, so the redone value is the same and fits."""
 
     function: str
     args: tuple[Expr, ...]

@@ -486,8 +486,16 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     interpreted;
   - a function that writes a slot is never "closed" (no `entry_globals` snapshot): overwriting a slot can
     drop the last reference to the old value, and its `__del__` is user code that can rebind globals. This
-    is stricter than the IR contract requires, on purpose.
-  A class outside these rules stays interpreted with a reason. `Status: planned`.
+    is stricter than the IR contract requires, on purpose;
+  - a change after init keeps CPython's results: every slot access checks `type(x) is C` and the
+    class's `tp_version_tag` against the one captured at init (a tag is never reused; 0 never matches),
+    and every `C(args)` checks that the module global still is the captured class (a module-dict
+    watcher, or a dict lookup per call when no watcher id is free). On a mismatch an impure function
+    takes the generic path (`getattr`/`setattr`/calling the current global) and a pure one deopts.
+    A class that defines `__getattr__`, `__getattribute__`, `__setattr__` or `__delattr__` is not
+    compiled.
+  A class outside these rules stays interpreted with a reason. Methods are not compiled yet.
+  `Status: implemented (module-level functions; methods planned)`.
 
 ---
 
