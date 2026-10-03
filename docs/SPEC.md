@@ -220,7 +220,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   for a public setter with every class type parameter unbounded, `SETTER` entries `Owner.prop=`; and
   top-level extension property getters (`pkg.prop`, receiver in `receiverTypeName`). Properties take no
   part in overload naming or in a constructor's name check; a property key another binding already
-  holds is declined, and so is a property whose receiver has a supertype missing from the consumer's compile classpath (kotlinc cannot build its member scope). `Status: implemented` — `GP/artifact/PropertyBindingTest.kt`.
+  holds is declined, and so is a property or an extension function whose receiver has a supertype missing from the consumer's compile classpath (kotlinc cannot build its member scope; the reason names the missing supertype, #66). `Status: implemented` — `GP/artifact/PropertyBindingTest.kt` (properties and, #66, extension functions).
   The public instance functions of a Kotlin-public `object` bind under the object's name like a
   static (`Arrangement.spacedBy`, #53), except `Any`'s members, ones that also exist as a
   `@JvmStatic` static, and `@Composable` ones (declined); an `internal` or file-private object is
@@ -268,7 +268,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   a comment with the same marker says so (`GP/stubs/PropertyStubTest.kt`). An object constant is annotated with its
   declared type even when that type is nested in the object (`Alignment.End: Horizontal`, a class of the
   object's own module; elsewhere `androidx.compose.ui.Alignment.Horizontal`); the object's own type
-  stays `Any` (#53, `GP/stubs/ObjectStubTest.kt`).
+  stays `Any` (#53, `GP/stubs/ObjectStubTest.kt`). An extension property whose receiver is a type nested in such an object is a `@property` of that nested class in the object's module (`Icons.Default: Filled`, `Filled.Add: ImageVector`, #68), not a marker comment in the package module.
 - **B-8** CI generates the stubs over the Compose version the build resolves and publishes them
   (`.github/workflows/stubs.yml`): workflow artifact `kotlin-stubs` on every push to `develop`, with a
   README naming the Compose version and the commit, and `kotlin-stubs.zip` on every `v*` tag's release.

@@ -87,3 +87,6 @@ class Detached : org.objectweb.asm.Opcodes {
 
 /** The same receiver, read through an extension property. */
 val Detached.reach: Int get() = level
+
+/** The same receiver, called through an extension function (#66). */
+fun Detached.probe(): Int = level

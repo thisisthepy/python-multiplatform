@@ -128,4 +128,40 @@ class ObjectStubTest {
         assertTrue("Start: Horizontal" in text, text)
         assertFalse("_t.Any" in text, text)
     }
+
+    // ------------------------------------------- an extension property on a type nested in an object
+
+    /**
+     * #68: `Icons.Default.Add`. `Default` is an object constant of `Icons` typed `Icons.Filled`, and `Add`
+     * is an extension property declared in the package `...icons.filled` on that nested type. The stub
+     * class is `Filled` in the object's own module `...icons.Icons` (#53), and `Add` is its property.
+     *
+     * Not red against develop at fa2558e3: #53 already resolves the receiver into the object's module,
+     * and the regenerated Compose stubs (CI run 37098191598) carry `Default: Filled` and
+     * `Filled.Add`. The marker comment of #68 came from the stubs built before #53. This pins it.
+     */
+    @Test
+    fun anExtensionPropertyOnATypeNestedInAnObjectIsAttributeOfThatTypesClass() {
+        val icons = "androidx.compose.material.icons.Icons"
+        val filled = KotlinTypeModel("$icons.Filled")
+        val default = constant("$icons.Default", filled)
+        val add = DeclarationModel(
+            simpleName = "Add",
+            owner = "androidx.compose.material.icons.filled",
+            ownerIsClass = false,
+            receiver = filled,
+            receiverBoundaryTag = "OBJECT",
+            parameters = emptyList(),
+            returnType = KotlinTypeModel("androidx.compose.ui.graphics.vector.ImageVector"),
+            returnBoundaryTag = "OBJECT",
+            bindingName = "androidx.compose.material.icons.filled.Add",
+            kind = "GETTER",
+        )
+        val files = renderKotlinFqnStubs(listOf(default, add))
+        val text = file(files, icons)
+        assertTrue(Regex("""^Default: Filled$""", RegexOption.MULTILINE).containsMatchIn(text), text)
+        assertTrue("class Filled:" in text, text)
+        assertTrue("    def Add(self) -> androidx.compose.ui.graphics.vector.ImageVector:" in text, text)
+        files.values.forEach { assertFalse("is not stubbed" in it, it) }
+    }
 }
