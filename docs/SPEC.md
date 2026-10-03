@@ -71,6 +71,15 @@ fail, then implement.
   extracts it. `Status: partial` — exercised by the shared suite on the simulator; no iOS-specific
   lifecycle test beyond `PM/iosSimulatorArm64Test/.../AsyncioAvailabilityProbeTest.kt`.
 - **L-8** Initialisation sets `builtins.compiled` to an identity decorator (an existing one is kept), so `@compiled` needs no import on any platform (N-7, issue #42). `Status: implemented` — `PM/commonTest/.../ffi/BuiltinCompiledTest.kt`.
+- **L-9a** (issue #74) Desktop packaging and loading of `libpython`: every `lib/**` entry of the desktop jar is a real
+  file (never 0 bytes -- Gradle extracts the python-build-standalone symlink `libpython3.14.so` as an empty file, so
+  symlinks are resolved and the real library is packed under the `System.mapLibraryName` name, no `.so.1.0`); linux
+  libraries are stripped of debug info when an ELF-capable `strip` exists on the build host (best-effort). The
+  classpath library is extracted to `<user cache>/python-multiplatform/<python version>/<platform>/` (macOS
+  `~/Library/Caches`, Windows `%LOCALAPPDATA%`, else `$XDG_CACHE_HOME` or `~/.cache`; fallback
+  `java.io.tmpdir/python-multiplatform-<user>`; override `-Dpython.multiplatform.cache`), never the working
+  directory, and reused when its size matches. `Status: implemented` --
+  `PM/desktopTest/.../ffi/DesktopJarLibrariesTest.kt`, `ExtractLibraryCacheTest.kt`.
 
 ## 2. Low-level C API (downcall surface)
 
