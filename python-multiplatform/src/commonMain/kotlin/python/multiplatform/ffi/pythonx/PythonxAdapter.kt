@@ -1469,6 +1469,43 @@ object PythonxAdapter {
         _LONG_MIN = -(1 << 63)
         _LONG_MAX = (1 << 63) - 1
 
+        # Issue #146: the range of each Kotlin integral type an INT slot can declare. A slot whose
+        # declared type is not listed (a value class over `Int`, say) is not range-checked here.
+        _INTEGRAL_RANGES = {
+            'kotlin.Byte': (-(1 << 7), (1 << 7) - 1),
+            'kotlin.Short': (-(1 << 15), (1 << 15) - 1),
+            'kotlin.Int': (_INT_MIN, _INT_MAX),
+            'kotlin.Long': (_LONG_MIN, _LONG_MAX),
+        }
+
+
+        def _literal_misfits(decl, args, kwargs):
+            '''How many int arguments land in an integral slot of another width than their Kotlin literal.
+
+            Kotlin types an integer literal as `Int` when it fits in 32 bits and as `Long` otherwise,
+            and resolves overloads on that type: `Color(0x11223344)` is `Color(Int)`,
+            `Color(0xFFFFFFFF)` is `Color(Long)`. `_Overloads` prefers the candidates with the fewest
+            misfits among those still tied, so a call picks the overload Kotlin would (#146).
+            '''
+            if decl.composer_index >= 0 or not decl.param_type_names:
+                return 0
+            pairs = list(enumerate(args))
+            for key, value in kwargs.items():
+                index = decl.keyword_slot(key)
+                if index >= 0:
+                    pairs.append((index, value))
+            misfits = 0
+            for index, value in pairs:
+                if index >= len(decl.param_type_names) or isinstance(value, bool) or not isinstance(value, int):
+                    continue
+                declared = decl.param_type_names[index]
+                if declared not in _INTEGRAL_RANGES:
+                    continue
+                literal = 'kotlin.Int' if _INT_MIN <= value <= _INT_MAX else 'kotlin.Long'
+                if declared != literal:
+                    misfits += 1
+            return misfits
+
         # What `_coerce` puts in a scalar's slot during a *trial* bind, for `_CALLABLE_PENDING`'s
         # reason: boxing crosses into Kotlin and roots the box, which a candidate that then loses
         # has no business doing. The winner is re-bound strictly before the call.
@@ -1638,6 +1675,16 @@ object PythonxAdapter {
                             'a raw number is not accepted for ' + _simple_name(type_name) +
                             ': it is a value class and not on the raw-primitive allowlist, so ' + repr(value) +
                             ' would be reinterpreted rather than converted',
+                        )
+                if tag == 'INT' and isinstance(value, int):
+                    # Issue #146: an integral slot takes an int only inside its Kotlin type's range,
+                    # as `kotlinc` would refuse the literal. Without this an `Int` slot also matched
+                    # `0xFFFFFFFF`, and `Color(0xFFFFFFFF)` tied with `Color(Long)`.
+                    bounds = _INTEGRAL_RANGES.get(type_name)
+                    if bounds is not None and not (bounds[0] <= value <= bounds[1]):
+                        return _refuse(
+                            strict,
+                            repr(value) + ' does not fit in ' + _simple_name(type_name),
                         )
                 return float(value) if tag == 'FLOAT' else int(value)
             if tag == 'BOOLEAN':
@@ -1959,6 +2006,12 @@ object PythonxAdapter {
                 if matched:
                     fewest = min(entry[2] for entry in matched)
                     matched = [entry for entry in matched if entry[2] == fewest]
+                if len(matched) > 1:
+                    # Still tied: prefer the overload whose integral slots match each int's Kotlin
+                    # literal type (#146). Candidates that agree on that stay tied and are refused.
+                    scored = [(_literal_misfits(entry[0], args, kwargs), entry) for entry in matched]
+                    least = min(score for score, _ in scored)
+                    matched = [entry for score, entry in scored if score == least]
                 if len(matched) == 1:
                     decl = matched[0][0]
                     # Re-bound strictly, and the trial binding above is discarded. A trial bind is a

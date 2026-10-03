@@ -378,6 +378,45 @@ class PythonxAdapterTest {
     }
 
     /**
+     * An int picks the overload its Kotlin literal would (#146, SPEC U-8). `Color(0xFFFFFFFF)` is the
+     * notebook's own spelling (pythonx-compose `UI.ipynb`); Kotlin types that literal as `Long`, since it
+     * does not fit in 32 bits, and `0x11223344` as `Int`. An `Int` slot never takes an int outside 32
+     * bits, even when named explicitly, and an int outside 64 bits fits no overload at all.
+     */
+    @Test
+    fun anIntArgumentPicksTheOverloadItsKotlinLiteralWould() = withAdapter {
+        Python3.exec(
+            """
+            from androidx.compose.ui.graphics import Color, Color__Int, Color__Long
+            _px = {
+                'long': Color(0xFFFFFFFF),
+                'int': Color(0x11223344),
+                'negative': Color(-1),
+                'wide': Color(1 << 40),
+                'explicitLong': Color__Long(5),
+            }
+            for _key, _call in (('tooWide', lambda: Color(1 << 70)), ('intOverflow', lambda: Color__Int(1 << 31))):
+                try:
+                    _px[_key] = 'call succeeded: ' + _call()
+                except TypeError as e:
+                    _px[_key] = 'TypeError'
+            """.trimIndent(),
+        )
+
+        assertEquals("Long:4294967295", eval("_px['long']"))
+        assertEquals("Int:287454020", eval("_px['int']"))
+        assertEquals("Int:-1", eval("_px['negative']"))
+        assertEquals("Long:1099511627776", eval("_px['wide']"))
+        assertEquals("Long:5", eval("_px['explicitLong']"))
+        assertEquals("TypeError", eval("_px['tooWide']"), "an int outside 64 bits reached an integral slot")
+        assertEquals("TypeError", eval("_px['intOverflow']"), "an Int slot took an int outside 32 bits")
+        assertEquals(
+            listOf("Color__Long", "Color__Int", "Color__Int", "Color__Long", "Color__Long"),
+            ComposeShapedFragment.calls,
+        )
+    }
+
+    /**
      * What the dispatcher does when it cannot decide, and what it does when the caller has already
      * decided.
      *
