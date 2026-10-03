@@ -89,6 +89,19 @@ fail, then implement.
   from the prefix a property names, or from a Compose resources directory). The
   `createDistributable` run itself is a manual check —
   `docs/platforms/desktop-packaged-app.md`.
+- **L-9a** (issue #74) Desktop packaging and loading of `libpython`: every `lib/**` entry of the desktop jar is a real
+  file (never 0 bytes -- Gradle extracts the python-build-standalone symlink `libpython3.14.so` as an empty file, so
+  symlinks are resolved and the real library is packed under the `System.mapLibraryName` name, no `.so.1.0`); linux
+  libraries are stripped of debug info when an ELF-capable `strip` exists on the build host (best-effort). The
+  classpath library is extracted to `<user cache>/python-multiplatform/<python version>/<platform>/` (macOS
+  `~/Library/Caches`, Windows `%LOCALAPPDATA%`, else `$XDG_CACHE_HOME` or `~/.cache`; fallback
+  `java.io.tmpdir/python-multiplatform-<user>`; override `-Dpython.multiplatform.cache`), never the working
+  directory, and reused when its size matches. The same holds for the plugin's staged prefix and the packaged
+  `python-multiplatform-home`: `stagePythonHome` extracts the archive itself and materialises every symlink/hard
+  link as a copy of its in-archive target (Gradle's `tarTree` yields 0-byte files), the staging stamp changed so
+  old prefixes are re-extracted, and the packaged copy fails the build on any 0-byte `libpython*`.
+  `Status: implemented` -- `PM/desktopTest/.../ffi/DesktopJarLibrariesTest.kt`, `ExtractLibraryCacheTest.kt`,
+  `GP/StagedPrefixLinksTest.kt`.
 - **L-10** Desktop: the library uses no JDK module beyond `java.base`, so it runs on a `jlink`ed
   runtime such as the one Compose Desktop's `createDistributable` bundles (issue #77). In particular
   native memory is reached through `java.lang.foreign`, never `sun.misc.Unsafe` (module
