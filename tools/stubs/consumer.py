@@ -9,7 +9,7 @@ and mypy runs with `warn_unused_ignores`, so a stub that stopped rejecting one f
 
 from typing import assert_type
 
-from androidx.compose.foundation.layout import Column, Row, fillMaxWidth, padding__Dp
+from androidx.compose.foundation.layout import Arrangement, Column, Row, fillMaxWidth, padding__Dp
 from androidx.compose.material.icons import Icons
 from androidx.compose.material3 import Checkbox, Icon, Text
 from androidx.compose.ui import Modifier
@@ -43,6 +43,9 @@ def content() -> None:
 
 Column(modifier=chain, content=lambda scope: None)
 Row(content=lambda scope: None)
+# `SpaceBetween` is a `HorizontalOrVertical`: a `Vertical` slot and a `Horizontal` slot both take it (#71).
+Column(verticalArrangement=Arrangement.SpaceBetween, content=lambda scope: None)
+Row(horizontalArrangement=Arrangement.SpaceBetween, content=lambda scope: None)
 
 # An extension property on a type nested in an object (issue #68): `Icons.Default` is `Icons.Filled`.
 # `assert_type`, not an annotation: an `Any` (the stub before #53/#67) would satisfy an annotation.

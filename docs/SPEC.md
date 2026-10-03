@@ -319,6 +319,11 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   declared type even when that type is nested in the object (`Alignment.End: Horizontal`, a class of the
   object's own module; elsewhere `androidx.compose.ui.Alignment.Horizontal`); the object's own type
   stays `Any` (#53, `GP/stubs/ObjectStubTest.kt`). An extension property whose receiver is a type nested in such an object is a `@property` of that nested class in the object's module (`Icons.Default: Filled`, `Filled.Add: ImageVector`, #68), not a marker comment in the package module.
+  A stub class lists **every** Kotlin supertype that has a stub class as a base, not only the first
+  (`Arrangement.HorizontalOrVertical(Horizontal, Vertical)`, so a `Vertical` slot accepts it): `Any`
+  and `java.lang.*` are dropped, and a base already implied by another listed base's known ancestry
+  is dropped, so the order is a valid Python MRO (#71, `GP/stubs/SupertypeStubTest.kt`, and the
+  `Column`/`Row` `SpaceBetween` lines of `tools/stubs/consumer.py`).
 - **B-8** CI generates the stubs over the Compose version the build resolves and publishes them
   (`.github/workflows/stubs.yml`): workflow artifact `kotlin-stubs` on every push to `develop`, with a
   README naming the Compose version and the commit, and `kotlin-stubs.zip` on every `v*` tag's release.

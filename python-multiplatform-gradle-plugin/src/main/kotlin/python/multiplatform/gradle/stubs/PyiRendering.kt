@@ -506,6 +506,24 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
         .mapNotNull { d -> methodReceiver(d)?.let { it to d } }
         .groupBy({ it.first }, { it.second })
 
+    /**
+     * Issue #71: every Kotlin supertype that has a stub class is a base, not just the first one
+     * (`Arrangement.HorizontalOrVertical` is both a `Horizontal` and a `Vertical`). The ancestry is
+     * nearest-first and transitive, so a base is dropped when another candidate's own known ancestry
+     * already contains it (Python would reject `class C(A, B)` with B a subclass of A as an
+     * inconsistent MRO, and the repeat adds nothing); what remains keeps the ancestry's order.
+     * `kotlin.Any` and `java.lang.*` are `object`, which every Python class already has.
+     */
+    private fun stubBasesOf(qualifiedName: String, ctx: ModuleOut): List<String> {
+        val candidates = supertypes[qualifiedName].orEmpty()
+            .filter { it != qualifiedName && it != "kotlin.Any" && !it.startsWith("java.lang.") && classRefOf(it) != null }
+            .distinct()
+        val kept = candidates.filter { base ->
+            candidates.none { other -> other != base && base in supertypes[other].orEmpty() && other !in supertypes[base].orEmpty() }
+        }
+        return kept.map { classReference(it, null, ctx) }.filter { it != ANY }.distinct()
+    }
+
     private fun renderClass(qualifiedName: String) {
         val ref = resolveRef(qualifiedName) ?: return
         val ctx = out(ref.pkg)
@@ -518,12 +536,7 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
         } else {
             "Kotlin: $qualifiedName"
         }
-        supertypes[qualifiedName]
-            ?.firstOrNull { it != qualifiedName && it != "kotlin.Any" && !it.startsWith("java.lang.") && classRefOf(it) != null }
-            ?.let { base ->
-                val reference = classReference(base, null, ctx)
-                if (reference != ANY) node.bases = reference
-            }
+        stubBasesOf(qualifiedName, ctx).takeIf { it.isNotEmpty() }?.let { node.bases = it.joinToString(", ") }
 
         constructorsByClass[qualifiedName]?.let { group ->
             group.forEachIndexed { index, d ->
