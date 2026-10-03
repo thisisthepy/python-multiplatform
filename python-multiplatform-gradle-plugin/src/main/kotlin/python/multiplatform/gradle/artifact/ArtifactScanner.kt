@@ -570,9 +570,27 @@ internal object ArtifactScanner {
         val bySignature = functions.associateBy { it.jvmSignature.name to it.jvmSignature.descriptor }
         return ownerNode.methods
             .filter { it.access.hasFlag(Opcodes.ACC_PUBLIC) && it.access.hasFlag(Opcodes.ACC_STATIC) }
-            .filter { !it.access.hasFlag(Opcodes.ACC_SYNTHETIC) && !it.access.hasFlag(Opcodes.ACC_BRIDGE) }
+            .filter { !it.access.hasFlag(Opcodes.ACC_BRIDGE) }
             .filter { !it.name.startsWith("<") && '$' !in it.name }
             .mapNotNull { method ->
+                if (method.access.hasFlag(Opcodes.ACC_SYNTHETIC)) {
+                    // A synthetic method is never bound. One case still reaches the model, declined:
+                    // a public `inline fun <reified T>` compiles to a synthetic stub that only throws
+                    // (the body exists only inlined), and B-1 says a reified declaration is
+                    // *declined*, which `docs/design/pyi-generation-design.md` §2.2 means visibly.
+                    // Every other synthetic (`@Deprecated(level = HIDDEN)`, compiler helpers) stays
+                    // out silently, as before issue #38.
+                    val reified = bySignature[method.name to method.desc]?.takeIf { it.hasReifiedTypeParameter }
+                        ?: return@mapNotNull null
+                    return@mapNotNull declinedCandidate(
+                        owner,
+                        ownerIsClass,
+                        reified,
+                        classpath,
+                        "a reified type parameter: its type argument is read at run time, so kotlin.Any? cannot stand for it",
+                        isComposable(method),
+                    )
+                }
                 val function = bySignature[method.name to method.desc]
                     // A `suspend` declaration's JVM shape carries a trailing `Continuation`, so its
                     // descriptor never matches the one metadata records and it would fall out here
@@ -801,6 +819,8 @@ internal object ArtifactScanner {
      *   no instances to read;
      * - the class **crosses as an object handle**. A value class the boundary opens (`Dp`, `Meters`)
      *   reaches Python as its raw primitive, so no proxy of it can ever exist to read a property on;
+     * - every supertype of the class is on the walk's (= the consumer's compile) classpath
+     *   ([unreachableSupertypeOf]); otherwise each property is declined with the missing name;
      * - the property is public, declares no extension receiver of its own (a member extension needs
      *   two receivers), is not a `@Composable get()` ([constantsOf] gives the measured reason), and
      *   its accessor is a real, non-synthetic method (a `@Deprecated(level = HIDDEN)` one is
@@ -844,11 +864,16 @@ internal object ArtifactScanner {
         val readableIds = kmClass.typeParameters.filter { parameter ->
             substitutableTypeParameterIds(listOf(parameter)) != null
         }.mapTo(HashSet()) { it.id }
+        // Every property is read through `(args[0] as Owner)`, which needs all of `Owner`'s
+        // supertypes on the consumer's compile classpath ([unreachableSupertypeOf]).
+        val receiverDecline = classpath.unreachableSupertypeOf(ownerNode.name)
+            ?.let { missing -> unreachableReceiverReason(missing, owner) }
 
         return kmClass.properties.flatMap { property ->
             if (property.visibility != Visibility.PUBLIC) return@flatMap emptyList()
             if (property.receiverParameterType != null) return@flatMap emptyList()
             propertyCandidates(
+                receiverDecline = receiverDecline,
                 property = property,
                 ownerNode = ownerNode,
                 classpath = classpath,
@@ -919,6 +944,15 @@ internal object ArtifactScanner {
         if (receiverBoundary.boundary.tag != OBJECT_TAG) {
             return@flatMap declined("its receiver crosses as ${receiverBoundary.boundary.tag}, so no proxy of it exists to read the property on")
         }
+        // The same rule a member property's owner gets: `receiver.alias` resolves against the
+        // receiver's member scope too, which needs every supertype of it.
+        val receiverName = (receiver.classifier as? KmClassifier.Class)?.name
+        if (receiverName != null) {
+            val missing = classpath.unreachableSupertypeOf(receiverName.replace('.', '$'))
+            if (missing != null) {
+                return@flatMap declined(unreachableReceiverReason(missing, receiverName.replace('/', '.')))
+            }
+        }
         val alias = "artifact_ext_" + key.map { if (it.isLetterOrDigit()) it else '_' }.joinToString("")
         propertyCandidates(
             property = property,
@@ -945,6 +979,8 @@ internal object ArtifactScanner {
      * @param typeIds the type parameters [property]'s type may mention, each read as `kotlin.Any?`.
      * @param readAccess the Kotlin expression that reads the property off `args[0]`.
      * @param writeAccess the assignable expression a setter writes, or `null` for none.
+     * @param receiverDecline set when nothing may be read on the receiver at all
+     *   ([unreachableSupertypeOf]); the property is then declined with it, model still built.
      */
     private fun propertyCandidates(
         property: kotlin.metadata.KmProperty,
@@ -959,6 +995,7 @@ internal object ArtifactScanner {
         readAccess: () -> String,
         writeAccess: (() -> String)?,
         imports: List<String>,
+        receiverDecline: String? = null,
     ): List<Candidate> {
         if (!isWritableParameterName(property.name)) return emptyList()
         val type = property.returnType.substituteAnyFor(typeIds) ?: return emptyList()
@@ -974,6 +1011,7 @@ internal object ArtifactScanner {
             kind = GETTER_KIND,
         )
         fun declined(reason: String) = listOf(Candidate(null, getterModel.copy(declineReason = reason)))
+        if (receiverDecline != null) return declined(receiverDecline)
 
         // The accessor has to be a method source can name. Looked up by the signature `@Metadata`
         // records for it -- read for its flags, never called by it (AGENTS.md §12.4: the generated
@@ -1105,6 +1143,15 @@ internal object ArtifactScanner {
             }
         }
     }
+
+    /**
+     * Why a property is not read on a receiver whose ancestry the consumer's compile classpath does not
+     * fully carry. Declined rather than bound, because the alternative is not a failing entry but a
+     * generated file `kotlinc` rejects as a whole -- every other binding of the artefact with it.
+     */
+    private fun unreachableReceiverReason(missing: String, receiver: String): String =
+        "its receiver $receiver has a supertype, $missing, that is not on the compile classpath, " +
+            "so generated Kotlin cannot read a member of it"
 
     internal const val GETTER_KIND = "GETTER"
     internal const val SETTER_KIND = "SETTER"

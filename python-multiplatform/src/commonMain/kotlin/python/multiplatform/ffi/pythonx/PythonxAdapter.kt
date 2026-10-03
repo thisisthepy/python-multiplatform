@@ -1268,8 +1268,10 @@ object PythonxAdapter {
 
             release = _boundary()['release']
 
-            def __init__(self, handle):
-                self._pm_handle = handle
+            def __init__(self, handle, _set=object.__setattr__):
+                # Past `__setattr__` below: `_pm_handle` is never a Kotlin name, and construction is
+                # the hot path the proxy's cost table prices.
+                _set(self, '_pm_handle', handle)
 
             def __del__(self, _release=release):
                 # The other half of `HandleTable`'s contract, and the thing
@@ -1292,6 +1294,20 @@ object PythonxAdapter {
                     return _aliased(getattr(self, resolved[0]), resolved[1])
                 return getattr(self, name)
 
+            def __setattr__(self, name, value, _set=object.__setattr__):
+                # A Kotlin property is installed on the class lazily, by `_attach`, the first time it is
+                # *read* (`__getattr__`). A write that comes first would otherwise find no descriptor
+                # and land in the instance dict -- Kotlin never told, and every later read answered
+                # from that dict instead of Kotlin (issue #38: `state.value = 7` was "accepted").
+                # So a write attaches first; `object.__setattr__` then goes through the `property`
+                # (its setter, or Python's own refusal for a `val`). A name no Kotlin member has is
+                # stored on the instance as before.
+                if not name.startswith('_'):
+                    cls = type(self)
+                    if name not in cls.__dict__:
+                        _attach(cls, name)
+                _set(self, name, value)
+
             def __repr__(self):
                 return '<' + _simple_name(kotlin_type_name) + ' handle=' + repr(self._pm_handle) + '>'
 
@@ -1310,6 +1326,7 @@ object PythonxAdapter {
                 '__init__': __init__,
                 '__del__': __del__,
                 '__getattr__': __getattr__,
+                '__setattr__': __setattr__,
                 '__repr__': __repr__,
                 'empty': empty,
                 '_kotlin_type_name': kotlin_type_name,

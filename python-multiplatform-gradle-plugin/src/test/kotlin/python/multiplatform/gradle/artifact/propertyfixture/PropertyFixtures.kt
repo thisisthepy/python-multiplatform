@@ -71,3 +71,19 @@ var Counter.mirrored: Int
 
 /** Generic: property syntax has no place to write a type argument. */
 val <T> Box<T>.contentOrNull: T? get() = content
+
+// ------------------------------------------------------------- a receiver the classpath cannot see
+
+/**
+ * `androidx.compose.ui.platform.DefaultArchitectureComponentsOwner`'s shape: a public class with a
+ * supertype (`org.objectweb.asm.Opcodes`, standing in for lifecycle's `ViewModelStoreOwner`) that the
+ * walk's classpath -- this fixture directory alone -- does not carry. Generated Kotlin reading
+ * `level` off it would not compile ("Cannot access ... which is a supertype of ..."), so its
+ * properties are declined; given a classpath that carries the supertype, they bind.
+ */
+class Detached : org.objectweb.asm.Opcodes {
+    val level: Int = 1
+}
+
+/** The same receiver, read through an extension property. */
+val Detached.reach: Int get() = level

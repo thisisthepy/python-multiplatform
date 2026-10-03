@@ -373,6 +373,45 @@ internal fun ArtifactClasspath.nameablePublicSupertypesOf(kotlinInternalName: St
 private const val JAVA_LANG_OBJECT = "java/lang/Object"
 
 /**
+ * The first supertype of [binaryName] -- direct or inherited, nearest first -- that this walk cannot
+ * find as a class file, as a qualified name; `null` when every one is there.
+ *
+ * ### Why a receiver needs its whole ancestry
+ *
+ * Generated Kotlin that reads a member off a value (`(args[0] as Owner).prop`, or an extension
+ * property's `receiver.alias`) makes `kotlinc` resolve `Owner`'s member scope, and that scope is built
+ * from every supertype. One that is not on the consumer's compile classpath fails the whole generated
+ * file: "Cannot access 'androidx.lifecycle.ViewModelStoreOwner' which is a supertype of
+ * 'androidx.compose.ui.platform.DefaultArchitectureComponentsOwner'. Check your module classpath"
+ * (ui-desktop 1.11 depends on lifecycle-viewmodel with `implementation` scope, so a consumer's compile
+ * classpath -- which is what this walk is given -- does not carry it). Nothing `Owner` itself declares
+ * says so; only walking the chain does.
+ *
+ * The JDK's own classes (`java/`, `javax/`, `jdk/`, `sun/`) are never among the roots a walk is given
+ * and are always there to `kotlinc`, and neither is `kotlin/`: the standard library is on every
+ * Kotlin compile classpath, while a test fixture's directory walk does not carry it.
+ */
+internal fun ArtifactClasspath.unreachableSupertypeOf(binaryName: String): String? {
+    val start = classNode(binaryName) ?: return null
+    val visited = HashSet<String>()
+    val pending = ArrayDeque<ClassNode>()
+    pending.addLast(start)
+    while (pending.isNotEmpty()) {
+        val node = pending.removeFirst()
+        val parents = listOfNotNull(node.superName) + node.interfaces.orEmpty()
+        for (parent in parents) {
+            if (!visited.add(parent)) continue
+            if (ALWAYS_ON_A_KOTLIN_COMPILE_CLASSPATH.any { parent.startsWith(it) }) continue
+            val parentNode = classNode(parent) ?: return parent.replace('/', '.').replace('$', '.')
+            pending.addLast(parentNode)
+        }
+    }
+    return null
+}
+
+private val ALWAYS_ON_A_KOTLIN_COMPILE_CLASSPATH = listOf("java/", "javax/", "jdk/", "sun/", "kotlin/")
+
+/**
  * The object-handle boundary type: `docs/design/kotlin-extensions-in-python.md` §6's "type gate", and the
  * second of the two things that independently held Compose at zero.
  *
@@ -638,6 +677,15 @@ internal data class ResolvedFunction(
      * declaration would otherwise look non-generic and be called with no type argument.
      */
     val hasUnsubstitutableTypeParameters: Boolean = false,
+    /**
+     * One of the declaration's type parameters is `reified`. Carried apart from
+     * [hasUnsubstitutableTypeParameters] because `kotlinc` compiles such a function to an
+     * `ACC_SYNTHETIC` method (a stub that only throws -- the real body exists only inlined), which
+     * `ArtifactScanner.kotlinCandidates` would otherwise drop with every other synthetic before any
+     * model is built. This is how it is declined *visibly* instead (B-1: "a bounded or reified one
+     * still declined").
+     */
+    val hasReifiedTypeParameter: Boolean = false,
 )
 
 /** The name given to the extension-receiver slot. Deliberately not a Python identifier: a receiver
@@ -744,6 +792,7 @@ private fun resolvedFunctionOrNull(function: KmFunction): ResolvedFunction? {
         isSuspend = function.isSuspend,
         typeArgumentCount = if (substituted != null) function.typeParameters.size else 0,
         hasUnsubstitutableTypeParameters = function.typeParameters.isNotEmpty() && substituted == null,
+        hasReifiedTypeParameter = function.typeParameters.any { it.isReified },
     )
 }
 

@@ -169,6 +169,44 @@ class PropertyBindingTest {
         assertTrue(squared.declineReason!!.contains("receiver"), squared.declineReason)
     }
 
+    // ----------------------------------------------------- a receiver the classpath cannot see
+
+    /**
+     * The `:ksp-fixtures:compose` compile failure on ui-desktop 1.11's
+     * `DefaultArchitectureComponentsOwner`: its supertypes live in lifecycle jars that the consumer's
+     * compile classpath does not carry, so `(args[0] as Owner).lifecycle` does not compile. Declined
+     * with a reason naming the missing supertype -- for a member property and an extension property
+     * alike -- and bound once the classpath carries it, so the decline is about the classpath and not
+     * the class.
+     *
+     * Red before the fix: `Detached.level` and `reach` are bound (the first assertion fails).
+     */
+    @Test
+    fun aReceiverWithASupertypeOffTheClasspathHasItsPropertiesDeclined() {
+        val names = entries.map { it.name }
+        assertTrue("fixture.artifactproperty.Detached.level" !in names, names.toString())
+        assertTrue("fixture.artifactproperty.reach" !in names, names.toString())
+
+        val declarations = ArtifactScanner.scanDeclarations(fixtureClasses, includePrefixes = listOf("fixture.artifactproperty"))
+        val level = declarations.single { it.owner == "fixture.artifactproperty.Detached" && it.simpleName == "level" }
+        val reach = declarations.single { it.simpleName == "reach" }
+        listOf(level, reach).forEach { declined ->
+            assertEquals(null, declined.bindingName, declined.toString())
+            assertEquals("GETTER", declined.kind, declined.toString())
+            val reason = assertNotNull(declined.declineReason, declined.toString())
+            assertTrue("org.objectweb.asm.Opcodes" in reason && "classpath" in reason, reason)
+        }
+
+        val asm = File(org.objectweb.asm.Opcodes::class.java.protectionDomain.codeSource.location.toURI())
+        val withSupertype = ArtifactScanner.scanJar(
+            fixtureClasses,
+            includePrefixes = listOf("fixture.artifactproperty"),
+            classpath = listOf(fixtureClasses, asm),
+        ).map { it.name }
+        assertTrue("fixture.artifactproperty.Detached.level" in withSupertype, withSupertype.toString())
+        assertTrue("fixture.artifactproperty.reach" in withSupertype, withSupertype.toString())
+    }
+
     // -------------------------------------------------------------------------- the fragment
 
     /** A property is not an extension slot at the boundary: `isExtension = false`, receiver still named. */
