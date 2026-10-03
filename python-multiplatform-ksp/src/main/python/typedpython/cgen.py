@@ -459,6 +459,7 @@ def generate(module: ir.Module, source_path: Path, display_path: str | None = No
     w(f"    PyObject *descrs[{mg.n_slots + 1}];       /* strong: the member descriptor of each slot */")
     w(f"    tp_class_rt cls_rt[{len(module.classes) + 1}];  /* version-tag / global guard state */")
     w("    int watch_id1;                  /* dict watcher id + 1 on the module dict; 0 = none */")
+    w("    PyObject *breaker;              /* `lambda: None`; calling it runs the eval breaker (#141) */")
     w("} tp_state;")
     w("")
     w("static const char *const tp_name_strings[] = {")
@@ -1337,9 +1338,20 @@ class _FnGen:
             self.depth -= 1
         self.emit("}")
 
+    @property
+    def snapshot(self) -> bool:
+        """Holds an array copy-in or an entry-globals snapshot, so must not run user code (#141)."""
+        return bool(self.f.entry_globals) or any(isinstance(p, ir.ArrayParam) for p in self.f.params)
+
+    def poll(self) -> None:
+        """At the top of each loop iteration (#141): signals, pending calls, GIL hand-off."""
+        if not self.snapshot:
+            self.emit("if (tp_poll(tp_st->breaker) != 0) { tp_rc = -1; goto tp_exit; }")
+
     def st_While(self, s: ir.While) -> None:
         self.emit("for (;;) {")
         self.depth += 1
+        self.poll()
         c = self._cond(s.cond)
         self.emit(f"if (!({c})) break;")
         self.stmts(s.body)
@@ -1376,6 +1388,7 @@ class _FnGen:
         self.depth += 1
         self.emit(f"for ({tk} = 0; {tk} < {tn}; {tk}++) {{")
         self.depth += 1
+        self.poll()
         self.emit(f"{var} = (int64_t)((uint64_t){ts} {sign} {tk} * {mag});")
         self.stmts(s.body)
         self.depth -= 1
@@ -1450,10 +1463,17 @@ class _FnGen:
                 k = self._class(p.cls)
                 out.append(f"    if ({_param_cls_fail(_ident('p', p.name), k, p.optional)}) return 1;")
         out.append("    if (tp_enter_call() != 0) return -1;")
+        # Eval breaker (#141): a snapshot-holding function never polls and defers others' polls.
+        if self.snapshot:
+            out.append("    tp_snapshot_depth++;")
+        else:
+            out.append("    if (tp_poll(tp_st->breaker) != 0) { tp_rc = -1; goto tp_exit; }")
         out += prologue
         out += self.lines
         out.append("tp_exit:")
         out += self._own_release_all()
+        if self.snapshot:
+            out.append("    tp_snapshot_depth--;")
         out.append("    tp_leave_call();")
         out.append("    return tp_rc;")
         out.append("}")
@@ -1631,6 +1651,7 @@ def _state_functions(mg: _ModGen) -> str:
         "    tp_state *tp_st = (tp_state *)PyModule_GetState(tp_module);",
         "    size_t i;",
         "    if (tp_st == NULL) return 0;",
+        "    Py_VISIT(tp_st->breaker);",
         "    for (i = 0; i < sizeof(tp_st->names) / sizeof(tp_st->names[0]); i++) Py_VISIT(tp_st->names[i]);",
         "    for (i = 0; i < sizeof(tp_st->kwnames) / sizeof(tp_st->kwnames[0]); i++) Py_VISIT(tp_st->kwnames[i]);",
         "    for (i = 0; i < sizeof(tp_st->classes) / sizeof(tp_st->classes[0]); i++) Py_VISIT(tp_st->classes[i]);",
@@ -1645,6 +1666,7 @@ def _state_functions(mg: _ModGen) -> str:
         "    size_t i;",
         "    if (tp_st == NULL) return 0;",
         "    if (tp_st->watch_id1 > 0) tp_globals_unwatch(PyModule_GetDict(tp_module), &tp_st->watch_id1);",
+        "    tp_release(&tp_st->breaker);",
         "    for (i = 0; i < sizeof(tp_st->names) / sizeof(tp_st->names[0]); i++) tp_release(&tp_st->names[i]);",
         "    for (i = 0; i < sizeof(tp_st->kwnames) / sizeof(tp_st->kwnames[0]); i++) tp_release(&tp_st->kwnames[i]);",
         "    for (i = 0; i < sizeof(tp_st->cls_ok) / sizeof(tp_st->cls_ok[0]); i++) tp_st->cls_ok[i] = 0;",
@@ -1727,6 +1749,11 @@ def _exec_function(mg: _ModGen) -> str:
         "        tp_release(&tp_b);",
         "        if (tp_k < 0) goto tp_done;",
         "    }",
+        "    tp_code = Py_CompileString(\"lambda: None\", \"<typedpython eval breaker>\", Py_eval_input);",
+        "    if (tp_code == NULL) goto tp_done;",
+        "    tp_st->breaker = PyEval_EvalCode(tp_code, tp_dict, tp_dict);",
+        "    tp_release(&tp_code);",
+        "    if (tp_st->breaker == NULL) goto tp_done;",
         "    tp_code = Py_CompileString(tp_source, tp_source_path, Py_file_input);",
         "    if (tp_code == NULL) goto tp_done;",
         "    tp_res = PyEval_EvalCode(tp_code, tp_dict, tp_dict);",

@@ -98,6 +98,16 @@ C-stack guard: a raised recursion limit can never let compiled C overflow the st
 per module (the header is `static`): frames of a *different* compiled module that sit between two
 frames of this one are not counted.
 
+## Eval breaker (top of every loop iteration and impl entry; issue #141)
+    int  tp_poll(PyObject *breaker);        /* 0 continue; -1 exception set (a signal handler raised) */
+    int  tp_poll_slow(PyObject *breaker);   /* every TP_POLL_INTERVAL polls: call the breaker */
+    Py_ssize_t tp_snapshot_depth;           /* ++ at entry, -- at tp_exit of a snapshot-holding impl */
+`breaker` is the module state's `lambda: None`. Calling it runs CPython's own eval-breaker handling
+in its RESUME: signals, pending calls, forced GIL switching to a waiting thread, async exceptions and
+scheduled collections, exactly as between two bytecodes. A function that holds an array copy-in
+(ir.ArrayParam) or an entry-globals snapshot never polls, and while one is active the slow path does
+nothing: the event stays pending and is handled after it returns.
+
 ## Fixed-layout classes (ir.ClassDecl / FieldGet / FieldSet / New / IsExact / CheckExact; SPEC N-11)
 Guard state, one per ClassDecl in the module state (zeroed = not compiled):
 

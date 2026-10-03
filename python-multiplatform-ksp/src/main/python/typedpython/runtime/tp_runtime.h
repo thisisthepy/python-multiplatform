@@ -1455,4 +1455,51 @@ static inline void tp_leave_call(void)
     }
 }
 
+/* ------------------------------------------------------------------------------------------
+ * Eval breaker (issue #141). The interpreter checks between bytecodes for signals, pending calls,
+ * GIL drop requests, async exceptions and scheduled collections; compiled code has no bytecodes.
+ * So at the top of every loop iteration and at every impl entry `tp_poll` counts down a module
+ * counter (one decrement under the GIL), and every TP_POLL_INTERVAL polls `tp_poll_slow` calls a
+ * Python no-op (`lambda: None`, made by the module's exec slot). Its RESUME runs CPython's own
+ * eval-breaker handling, so everything the interpreter would do there happens, the same way
+ * (forced GIL switching to a waiting thread, KeyboardInterrupt, gc). Public API only.
+ *
+ * Signal handlers, pending calls and other threads are user code that may change lists and
+ * globals. A function holding an array copy-in or an entry-globals snapshot runs no user code by
+ * contract (ir.ArrayParam, ir.Function.entry_globals), so such a function does not poll, and while
+ * one is active (`tp_snapshot_depth > 0`, counted at its entry and exit) the slow path does nothing:
+ * the event stays pending and is handled at the next poll or bytecode after it returns, which is the
+ * CPython execution in which it arrived late.
+ * ------------------------------------------------------------------------------------------ */
+#ifndef TP_POLL_INTERVAL
+#define TP_POLL_INTERVAL 4096
+#endif
+
+static int tp_poll_countdown = TP_POLL_INTERVAL;
+static Py_ssize_t tp_snapshot_depth = 0;
+
+static inline int tp_poll_slow(PyObject *breaker)
+{
+    PyObject *r;
+    tp_poll_countdown = TP_POLL_INTERVAL;
+    if (tp_snapshot_depth > 0 || breaker == NULL) {
+        return 0;
+    }
+    r = PyObject_CallNoArgs(breaker);
+    if (r == NULL) {
+        return -1;
+    }
+    Py_DECREF(r);
+    return 0;
+}
+
+/* 0 = continue, -1 = exception set (e.g. KeyboardInterrupt from a signal handler). */
+static inline int tp_poll(PyObject *breaker)
+{
+    if (--tp_poll_countdown > 0) {
+        return 0;
+    }
+    return tp_poll_slow(breaker);
+}
+
 #endif /* TP_RUNTIME_H */
