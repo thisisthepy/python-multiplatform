@@ -410,9 +410,16 @@ class _ModGen:
         return self.kwtuples.index(kw)
 
 
-def generate(module: ir.Module, source_path: Path) -> str:
-    """One C file implementing `module`; `source_path` is the original Python source, embedded."""
+def generate(module: ir.Module, source_path: Path, display_path: str | None = None) -> str:
+    """One C file implementing `module`; `source_path` is the original Python source, embedded.
+
+    `display_path` is the path embedded as the code object's filename (tracebacks of the interpreted
+    fallback): the module's path relative to the project root, posix separators (#112). It never
+    defaults to the absolute host path, so the C does not depend on where the project was built;
+    left out, it is the file name.
+    """
     source_path = Path(source_path)
+    display_path = source_path.name if display_path is None else display_path
     source = source_path.read_text(encoding="utf-8")
     mg = _ModGen(module)
     for f in module.functions:
@@ -438,7 +445,7 @@ def generate(module: ir.Module, source_path: Path) -> str:
     w("#pragma STDC FP_CONTRACT OFF")
     w("")
     w(f"static const char tp_source[] =\n    {c_string(source)};")
-    w(f"static const char tp_source_path[] = {c_string(str(source_path))};")
+    w(f"static const char tp_source_path[] = {c_string(display_path)};")
     w("")
     n_names, n_kw = len(mg.names), len(mg.kwtuples)
     w("/* Module state: interned names (globals, attributes, keywords, function names) and the")
