@@ -1939,6 +1939,51 @@ object PythonxAdapter {
             )
 
 
+        def _is_function_set(decls):
+            '''True when every declaration is a callable (`FUNCTION`), none a constant.'''
+            return all(decl.kind == 'FUNCTION' for decl in decls)
+
+
+        def _module_call(self, *args, **kwargs):
+            '''Calls the function or overload set that shares this module's Kotlin name (issue #78).
+
+            Resolved on every call, from the table, so a table that changed after the module was made
+            callable is followed and one that no longer holds the function is a TypeError.
+            '''
+            parent, _, leaf = self._kotlin_package.rpartition('.')
+            decls = _BY_PACKAGE.get(parent, {}).get(leaf)
+            if not decls or not _is_function_set(decls):
+                raise TypeError("'" + self.__name__ + "' is a Kotlin object, not a function")
+            decl = decls[0]
+            target = _callable_named(decl.kotlin_name) if len(decls) == 1 else None
+            if target is None:
+                target = _callable_for(leaf, decls)
+            return target(*args, **kwargs)
+
+
+        def _make_callable(module, kotlin_package):
+            '''Makes [module] callable when its Kotlin name is also a function in its parent package.
+
+            `__call__` is looked up on the type, so the module is reclassed onto a subclass of its own
+            type -- the same move the proxy layer's `_pm_module_type` makes, and marked `_pm_owned`
+            the same way so that layer reuses this type instead of replacing it. Per module, so the
+            hook exists on exactly the modules whose name is a function.
+            '''
+            parent, _, leaf = kotlin_package.rpartition('.')
+            decls = _BY_PACKAGE.get(parent, {}).get(leaf) if parent else None
+            if not decls or not _is_function_set(decls):
+                return
+            kind = type(module)
+            if not getattr(kind, '_pm_owned', False):
+                kind = type(
+                    '_PmModule_' + module.__name__.replace('.', '_'),
+                    (kind,),
+                    {'_pm_owned': True},
+                )
+                module.__class__ = kind
+            kind.__call__ = _module_call
+
+
         def _adapt(kotlin_package, name):
             '''The value or callable the Kotlin name [name] means in [kotlin_package], and whether
             `_module_getattr` may freeze it into the module dict.
@@ -1951,6 +1996,15 @@ object PythonxAdapter {
             adapted name gets here is refused for this one kind, and every read re-enters Kotlin.
             '''
             decls = _BY_PACKAGE.get(kotlin_package, {}).get(name)
+            if decls and _is_function_set(decls) and kotlin_package + '.' + name in _PACKAGES_SEEN:
+                # Issue #78: Kotlin has both `TextRange(2)` and `TextRange.Zero`. The name is the
+                # child module -- whose attributes are the companion's -- and that module is
+                # callable (`_make_callable`), dispatching to the function or overload set. One
+                # object answers both, whichever of the two layers or imports reached it first.
+                _child = _importlib.import_module(kotlin_package + '.' + name)
+                if getattr(_child, '_kotlin_package', None) != kotlin_package + '.' + name:
+                    _adapt_module(_child, kotlin_package + '.' + name)
+                return _child, True
             if decls:
                 if len(decls) == 1 and decls[0].kind == 'STATIC_GETTER':
                     return _read_constant(decls[0]), False
@@ -2036,6 +2090,7 @@ object PythonxAdapter {
             _MODULES.append(module)
             module.__getattr__ = _module_getattr(module, kotlin_package)
             module.__dir__ = _module_dir(kotlin_package)
+            _make_callable(module, kotlin_package)
             return module
 
 

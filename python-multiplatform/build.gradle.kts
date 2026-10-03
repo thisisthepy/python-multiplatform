@@ -437,7 +437,7 @@ val desktopTargets = mapOf(
 )
 
 val downloadTasks = desktopTargets.map { (platform, pbsTarget) ->
-    val flavour = if (pythonFreeThreaded) "freethreaded-install_only" else "install_only"
+    val flavour = if (pythonFreeThreaded) "freethreaded-install_only_stripped" else "install_only_stripped"
     val assetName = "cpython-$configuredPythonVersion+$pbsRelease-$pbsTarget-$flavour.tar.gz"
     val url = "https://github.com/astral-sh/python-build-standalone/releases/download/$pbsRelease/$assetName"
     val archive = file("$downloadDir/$assetName")
@@ -1131,7 +1131,9 @@ kotlin {
         //   1. drops every zero-length library (a symlink stub is never a library),
         //   2. renames `libX.so.1.0` to `libX.so`, so the jar carries the real file under the name
         //      `System.mapLibraryName` produces,
-        //   3. strips debug info from linux libraries, best-effort (see below).
+        // Debug info is not stripped here (issue #86): the archives acquired above are python-build-
+        // standalone's `install_only_stripped` flavour, so the linux library already has none, and
+        // a host `strip` (absent or ELF-blind on macOS) would only be a second, unreliable mechanism.
         val stageDesktopLibraries = tasks.register<Sync>("stageDesktopLibraries") {
             dependsOn(downloadAllPythonBuilds)
             val stageDir = layout.buildDirectory.dir("desktop-libs")
@@ -1150,28 +1152,6 @@ kotlin {
                     path = "lib/$platform/$filename"
                 }
                 includeEmptyDirs = false
-            }
-            doLast {
-                // Best-effort: GNU strip / llvm-strip are not on every build host (Apple's strip
-                // cannot read ELF). When none works the unstripped library ships, and says so.
-                val candidates = listOf("llvm-strip", "x86_64-linux-gnu-strip", "strip")
-                stageDir.get().asFile.walkTopDown()
-                    .filter { it.isFile && it.parentFile.name.startsWith("linux-") && it.name.endsWith(".so") }
-                    .forEach { lib ->
-                        val before = lib.length()
-                        val done = candidates.any { tool ->
-                            try {
-                                val proc = ProcessBuilder(tool, "--strip-debug", lib.absolutePath)
-                                    .redirectErrorStream(true).start()
-                                proc.inputStream.readBytes()
-                                proc.waitFor() == 0
-                            } catch (_: java.io.IOException) { false }
-                        }
-                        logger.lifecycle(
-                            if (done) "stripped ${lib.name}: $before -> ${lib.length()} bytes"
-                            else "no ELF-capable strip found; ${lib.name} ships unstripped ($before bytes)"
-                        )
-                    }
             }
         }
         tasks.withType<Jar>().matching { it.name == "desktopJar" }.configureEach {

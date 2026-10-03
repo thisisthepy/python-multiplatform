@@ -146,12 +146,6 @@ def lower(path: Path) -> ir.Module:
         except Skip as e:
             skipped[node.name] = e.reason
 
-    for name, cycle in _call_cycles(signatures).items():
-        skipped[name] = (f"line {signatures[name].node.lineno}: recursion "
-                         f"({' -> '.join(cycle)}) is not compiled: C has no recursion limit "
-                         "where CPython raises RecursionError")
-        del signatures[name]
-
     kinds = _inferred_kinds(path, source, tree, [s.node for s in signatures.values()])
 
     # Optimistic start: every candidate lowered, pure, not deopting; then iterate to a fixpoint
@@ -180,30 +174,6 @@ def lower(path: Path) -> ir.Module:
             skipped[name] = result
     functions.sort(key=lambda f: f.source_line)
     return ir.Module(path.stem, tuple(functions), skipped)
-
-
-def _call_cycles(signatures: dict[str, _Signature]) -> dict[str, list[str]]:
-    """Candidates on a call cycle through calls by name to other candidates (syntactic, so a
-    call that would end up as CallObject is counted too: conservative)."""
-    calls = {
-        name: {n.func.id for n in ast.walk(s.node) if isinstance(n, ast.Call)
-               and isinstance(n.func, ast.Name) and n.func.id in signatures}
-        for name, s in signatures.items()
-    }
-    cycles: dict[str, list[str]] = {}
-    for start in signatures:
-        stack = [(start, [start])]
-        seen: set[str] = set()
-        while stack and start not in cycles:
-            name, path = stack.pop()
-            for callee in sorted(calls[name]):
-                if callee == start:
-                    cycles[start] = path + [start]
-                    break
-                if callee not in seen:
-                    seen.add(callee)
-                    stack.append((callee, path + [callee]))
-    return cycles
 
 
 def _module_info(tree: ast.Module) -> _ModuleInfo:

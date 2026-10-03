@@ -24,9 +24,15 @@ class Counter(var count: Long = 0) {
 
     fun label(prefix: String): String = "$prefix$count"
 
+    /** A method returning a Kotlin class (#94): the result must be a `Counter` proxy. */
+    fun twin(): Counter = Counter(count)
+
     @PythonInternal
     fun hiddenMethod(): Long = -1L
 }
+
+/** A top-level function returning a Kotlin class (#94): the result must be a `Counter` proxy. */
+fun makeCounter(start: Long): Counter = Counter(start)
 
 /** Holds Python references directly, the way a real exposed class would -- exercises the
  * generator's `tp_traverse` field-detection path (docs/design/object-lifetime.md). */

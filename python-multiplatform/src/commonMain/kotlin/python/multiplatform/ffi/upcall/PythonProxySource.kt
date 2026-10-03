@@ -245,15 +245,14 @@ import python.multiplatform.reflection.UpcallTable
  *
  * **It is gated on the producer having named the return type**, and [ownedTypeOf] is where the
  * reason is written out: `OBJECT` means two different things in the result direction and the tag
- * alone cannot separate them. The walker names its return types; KSP does not, so the KSP path
- * keeps the bare-handle contract exactly as [ProxyHandleLifetimeTest] pins it.
+ * alone cannot separate them. The walker and KSP both name their return types, and a name that matches a
+ * rendered class is wrapped in that class (`_pm_classes`, #94); any other is a generic `_PmObject`.
  *
  * ### What is still not rendered
  *
  * | kind | why not |
  * |---|---|
- * | a `TypeTag.OBJECT` result wrapped in the **class rendered for its type** | an owned result is a generic `_PmObject`, not a `Counter`. Nothing would be gained today: the walker emits no `ReflectedClass` at all (`ArtifactScanner` records constructors as needing one "which is the next step"), so no rendered class has ever shared a name with a walked return type. `docs/design/kotlin-extensions-in-python.md` §4.1's per-receiver proxy is where that belongs, and `_pm_type` carries the Kotlin type name so it has something to key on |
- * | a `TypeTag.OBJECT` result read through a **module attribute** (a top-level or `object` property) | `_pm_static_property` is one shared descriptor for every module attribute and does not see the entry, so owning there means either a `_pm_own` call on the read path of *every* top-level `val` -- a row `GeneratedProxyCostTest` measures at 6-14 ns, which this would multiply -- or a second copy of the descriptor. Neither is worth building for a case no producer reaches: KSP emits no return type name, and the walker emits no properties |
+ * | a `TypeTag.OBJECT` result read through a **module attribute** (a top-level or `object` property) | `_pm_static_property` is one shared descriptor for every module attribute and does not see the entry, so owning there means either a `_pm_own` call on the read path of *every* top-level `val` -- a row `GeneratedProxyCostTest` measures at 6-14 ns, which this would multiply -- or a second copy of the descriptor. Neither is worth building for a case no producer reaches: the walker emits no properties, and a KSP top-level `val` of a class type is not wrapped here |
  *
  * These are skipped silently *here* because the skip is a property of this stage, not a policy
  * decision -- `docs/design/binding-policy.md` already decided they are exposed, and they remain reachable
@@ -756,12 +755,27 @@ object PythonProxySource {
                         self._pm_handle = None
                         _pm_r(_pm_h)
 
+            # Kotlin type name -> the class `renderClass` rendered for it. Filled by each rendered
+            # class's own registration line, so a reinstall replaces an entry and never duplicates it.
+            _pm_classes = {}
+
             def _pm_own(_pm_h, _pm_t=None):
                 # `None` is how a nullable Kotlin return arrives -- `marshalResult` answers a null
                 # with Python's `None` whatever the tag says -- and there is nothing to own.
                 if _pm_h is None:
                     return None
-                return _PmObject(_pm_h, _pm_t)
+                # The class rendered for the declared type, when there is one: the instance is built
+                # without `__init__` (which would call the Kotlin constructor) and gets the handle
+                # exactly where a constructed one keeps it. Ownership is unchanged -- the same
+                # owner base releases it. A type nothing rendered (a walked class, a library type)
+                # stays a generic `_PmObject`.
+                _pm_c = _pm_classes.get(_pm_t)
+                if _pm_c is None:
+                    return _PmObject(_pm_h, _pm_t)
+                _pm_o = _pm_c.__new__(_pm_c)
+                _pm_o._pm_handle = _pm_h
+                _pm_o._pm_type = _pm_t
+                return _pm_o
 
             def _pm_owned_new(_pm_m, _pm_n, _pm_b, _pm_ns, **_pm_kw):
                 # How a rendered class that has a **metaclass** becomes an owner. A rendered class
@@ -922,10 +936,10 @@ object PythonProxySource {
      * So the gate is [ExposedCallable.returnTypeName]: the producer naming the Kotlin type is the
      * only signal that says "this really is a handle". The artefact walker supplies it
      * (`WalkedArtifactComposeModifierTest` asserts `androidx.compose.ui.Modifier` on `padding__Dp`);
-     * the KSP processor supplies none at all, so every KSP entry keeps the bare-handle contract
-     * `ProxyHandleLifetimeTest.testRawHandleIsTheCallersToRelease` pins and nothing on that path
-     * moves. Teaching KSP to emit the name is what would extend this to it, and that is the
-     * processor's change, not this one's.
+     * the KSP processor supplies it too (`FragmentScanner` fills `returnTypeName` for
+     * functions, methods and properties from the declared return type), so a KSP result is owned
+     * the same way. `_pm_own` then answers with the class rendered for that name when there is one
+     * (#94), and with a generic `_PmObject` otherwise.
      */
     private fun ownedTypeOf(entry: ExposedCallable): String? =
         entry.returnTypeName?.takeIf { entry.returnType == TypeTag.OBJECT && it !in NOT_A_HANDLE }
@@ -1238,6 +1252,8 @@ object PythonProxySource {
             appendLine()
             appendLine("$className.__qualname__ = ${cls.name.quoted()}")
             appendLine("setattr(_pm_module(${module.quoted()}), ${className.quoted()}, $className)")
+            // The lookup `_pm_own` uses to hand a result back as this class, keyed by the Kotlin name.
+            appendLine("_pm_classes[${cls.name.quoted()}] = $className")
         }
         return source to index
     }

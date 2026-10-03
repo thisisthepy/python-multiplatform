@@ -111,7 +111,7 @@ internal fun hostDesktopPlatform(osName: String, osArch: String): String? {
         name.startsWith("linux") -> "linux"
         else -> return null
     }
-    // Upstream publishes no aarch64 Windows `install_only` build, and this library has never
+    // Upstream publishes no aarch64 Windows `install_only_stripped` build, and this library has never
     // shipped a `libpython` for one either.
     if (os == "windows" && arch == "aarch64") return null
     return "$os-$arch"
@@ -141,7 +141,7 @@ internal fun pbsAssetName(
     platform: String,
     freeThreaded: Boolean,
 ): String {
-    val flavour = if (freeThreaded) "freethreaded-install_only" else "install_only"
+    val flavour = if (freeThreaded) "freethreaded-install_only_stripped" else "install_only_stripped"
     return "cpython-$pythonVersion+$pbsRelease-${pbsTripleFor(platform)}-$flavour.tar.gz"
 }
 
@@ -152,8 +152,8 @@ internal fun pbsAssetUrl(pbsRelease: String, assetName: String): String =
  * The SHA-256 upstream records for [assetName], or null when the release does not list it.
  *
  * Matched on the whole filename rather than with `endsWith`, which the root build uses and which
- * is wrong in principle: `...-install_only.tar.gz` is a suffix of
- * `...-freethreaded-install_only.tar.gz`, so asking for the default asset could return the
+ * is wrong in principle: `...-install_only_stripped.tar.gz` is a suffix of
+ * `...-freethreaded-install_only_stripped.tar.gz`, so asking for the default asset could return the
  * free-threaded hash and fail verification on a file that is perfectly intact.
  */
 internal fun sha256Of(sha256sums: String, assetName: String): String? =
