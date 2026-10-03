@@ -229,14 +229,6 @@ class TypedPythonKotlinCallTest {
      */
     @Test
     fun tenThousandCompiledCallsLeakNoReferenceAndNoKotlinHandle() {
-        // Blocked by python-multiplatform#98: when the cleaner releases the wrappers that 10,000
-        // upcalls leave behind, the binder releases one reference twice and the JVM dies (SIGSEGV in
-        // Py_XDECREF on Cleaner-0) -- on the interpreted control as much as on the compiled loop.
-        // Re-enable with -Dtypedpython.leakTest=true once #98 is fixed.
-        assumeTrue(
-            "blocked by python-multiplatform#98 (binder double release on the cleaner path)",
-            System.getProperty("typedpython.leakTest") == "true",
-        )
         Python3.exec(
             """
             import gc, sys, sysconfig
