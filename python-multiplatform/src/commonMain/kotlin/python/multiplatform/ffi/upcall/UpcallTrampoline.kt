@@ -310,6 +310,7 @@ object UpcallTrampoline {
     }
 
     private fun fromKotlinObject(value: Any): Long {
+        if (value is ScalarResult) return fromKotlinScalar(value.value)
         if (value is PyObject) {
             // The wrapper keeps the reference it holds, so Python needs one of its own.
             Py_IncRef(value.pointer)
@@ -318,6 +319,24 @@ object UpcallTrampoline {
         // Rooted until Python gives it back through releaseObject(); see HandleTable's class doc
         // on why this table leaks by construction if nothing does.
         return newReference(PyLong_FromLongLong(HandleTable.register(value).raw), "object handle")
+    }
+
+    /**
+     * A boxed Kotlin scalar as the Python scalar it means (issue #69), reached only through a
+     * [ScalarResult] -- see there for why a bare boxed value must not take this path.
+     *
+     * Every constructor here returns a **new reference**, which is what this function owes Python;
+     * nothing is wrapped in a Kotlin `PyObject`, so there is no second reference left for a cleaner.
+     */
+    private fun fromKotlinScalar(value: Any): Long = when (value) {
+        is Boolean -> newReference(PyBool_FromLong(if (value) 1 else 0), "bool")
+        is Int, is Long, is Short, is Byte -> newReference(PyLong_FromLongLong((value as Number).toLong()), "int")
+        is Double, is Float -> newReference(PyFloat_FromDouble((value as Number).toDouble()), "float")
+        is String -> newReference(PyUnicode_FromString(value), "str")
+        is Char -> newReference(PyUnicode_FromString(value.toString()), "str")
+        else -> throw IllegalArgumentException(
+            "a ${value::class.simpleName} is not a Kotlin scalar Python has a value type for",
+        )
     }
 
     /** The mirror of [toByteArray], and the same caveat: a tuple of ints, one object per byte. */
@@ -412,3 +431,21 @@ object UpcallTrampoline {
      */
     internal fun runtimeErrorClass(): PyObject = PyObject(runtimeErrorType, borrowed = true)
 }
+
+/**
+ * A `TypeTag.OBJECT` result that is to reach Python as the **scalar** [value] holds -- `int`,
+ * `float`, `bool` or `str` -- rather than as a [HandleTable] handle (issue #69).
+ *
+ * ### Why a marker, and not a rule on the boxed value itself
+ *
+ * An `OBJECT` result crosses as an integer handle, and Python has no way to tell a handle from an
+ * `int`. If [UpcallTrampoline] turned every boxed `Int` it was handed into a Python `int`, a caller
+ * expecting a handle -- every KSP entry, every walked function returning a type parameter -- could
+ * no longer tell a Kotlin `Int` from the Kotlin object whose handle happens to be that number. So
+ * the scalar form is **asked for**, by the one caller that knows it wants it: the binding layer,
+ * reading a `kotlin.Any` value, calls `PythonCallables.unboxScalar`, which answers with this. No
+ * other path produces one, so nothing that crosses today changes shape.
+ *
+ * @property value a `Boolean`, `Int`, `Long`, `Short`, `Byte`, `Double`, `Float`, `String` or `Char`.
+ */
+internal class ScalarResult(val value: Any)
