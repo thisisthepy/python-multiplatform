@@ -240,6 +240,11 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   under the base name, and its signature as public metadata (`inspect.signature`,
   `python_multiplatform.describe`; contract in `KotlinSurface.kt`'s KDoc) - and, beside each Kotlin
   name, its Pythonic alias (U-12).
+  An `int` reaches an integral parameter only inside that Kotlin type's range, and when an overload
+  set still ties, the candidate whose integral parameters are each argument's Kotlin literal type
+  (`Int` if it fits in 32 bits, else `Long`) is called, as `kotlinc` resolves `Color(0xFFFFFFFF)` to
+  `Color(Long)` and `Color(0x11223344)` to `Color(Int)` (#146). `Status: implemented`,
+  `PM/commonTest/.../pythonx/PythonxAdapterTest.kt` `anIntArgumentPicksTheOverloadItsKotlinLiteralWould`.
   `describe(module, name)` describes any bound name, a named constant (`STATIC_GETTER`) included,
   without evaluating it (#36). A module's `dir()` lists its direct child packages/objects and reading
   one as an attribute imports it (#35) - Kotlin names only (the U-12 aliases are served, not listed).
