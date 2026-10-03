@@ -346,10 +346,18 @@ turns `PaddingValues`, `TextStyle`, `Color`, `AnnotatedString` and `Dp` itself i
 collapses to its `float`). It is the honest loss of this design, not a bug to chase: the alternatives
 are a differently named class (a renamed spelling the binder does not have) or a private side module.
 
-**Case-colliding module paths** (`androidx.compose.ui.graphics.Shadow`, a class module, and
-`...graphics.shadow`, a package) are two files on Linux and one on macOS and Windows.
-`PythonStubsTask` warns (`caseCollidingPaths`); generate and publish from a case-sensitive
-filesystem, which is why the CI job (`.github/workflows/stubs.yml`) runs on ubuntu.
+**Stub paths are case-unique** (issue #44). `androidx.compose.ui.graphics.Shadow` (a class the runtime
+exposes as a module) and `...graphics.shadow` (a package) would be one directory on macOS and Windows.
+The rule: a class module whose path equals a sibling's under case folding (directories above a module
+count) is emitted in its parent package's `__init__.pyi` -- as the class `Shadow`, its functions as
+`@staticmethod`s, nested class modules as nested classes -- and the package keeps `shadow/__init__.pyi`.
+In each colliding group the all-lower-case spelling is the package and keeps its path. A class module
+without a collision still gets its own `<Class>/__init__.pyi`. The runtime import path is unchanged; only
+the stub layout moves, and `from androidx.compose.ui.graphics import Shadow` resolves to the class.
+If the parent package already defines a function of the same name the class cannot sit beside it, and
+nothing is emitted for that module (the runtime resolves the name to the function too).
+`StubCaseLayoutTest` asserts no two emitted paths are equal under `lowercase()`;
+`PythonStubsTask` still warns (`caseCollidingPaths`) as a backstop, and the CI job runs on macOS as well.
 
 ### 3.2 Java declarations have no types to map
 
