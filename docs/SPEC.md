@@ -69,7 +69,8 @@ fail, then implement.
   (`PM/desktopTest/.../env/PythonPayloadTest.kt`) and Android (`PythonPayloadStagingTest.kt`).
 - **L-7** iOS: the framework carries no stdlib, so `PYTHONHOME` must point at one; the test build
   extracts it. `Status: partial` — exercised by the shared suite on the simulator; no iOS-specific
-  lifecycle test beyond `PM/iosSimulatorArm64Test/.../AsyncioAvailabilityProbeTest.kt`.
+  lifecycle test beyond `PM/iosSimulatorArm64Test/.../AsyncioAvailabilityProbeTest.kt`. An installed
+  app carries its own stdlib: L-10.
 - **L-8** Initialisation sets `builtins.compiled` to an identity decorator (an existing one is kept), so `@compiled` needs no import on any platform (N-7, issue #42). `Status: implemented` — `PM/commonTest/.../ffi/BuiltinCompiledTest.kt`.
 - **L-9** Desktop: a packaged application starts with no `PYTHONHOME` in its environment (issue #60,
   ROADMAP §15.4). The Gradle plugin copies the prefix `stagePythonHome` stages into Compose Desktop's
@@ -89,6 +90,27 @@ fail, then implement.
   from the prefix a property names, or from a Compose resources directory). The
   `createDistributable` run itself is a manual check —
   `docs/platforms/desktop-packaged-app.md`.
+- **L-10** iOS: an installed app starts with no `PYTHONHOME` in its environment, and
+  `Python.xcframework` carries no standard library (issue #59, ROADMAP §13.1). The library build
+  stages one prefix per slice (`iphoneos-arm64`, `iphonesimulator-arm64`, `iphonesimulator-x86_64`):
+  the shared `Python.xcframework/lib/python<X.Y>/` merged with that slice's
+  `lib-<arch>/python<X.Y>/` (`lib-dynload/`, `_sysconfigdata`), without `__pycache__`,
+  `libpython*.dylib`, or the top-level packages `test`, `idlelib`, `tkinter`, `turtledemo` and
+  `ensurepip`; `stageIosPythonHomeForXcode` picks the slice from Xcode's `EFFECTIVE_PLATFORM_NAME`
+  and `ARCHS` and prints `PYTHON_HOME_DIR=` and `PYTHON_DYLIB_INFO_TEMPLATE=`. An Xcode Run Script
+  phase (`tools/xcode/install-python.sh`, after Copy Bundle Resources and before Embed Frameworks)
+  copies that prefix into `<app>/python-multiplatform-home/` and the consumer's payload (L-6) into
+  `<app>/python/`, and moves every `.so` under either into `Frameworks/<dotted.name>.framework`,
+  leaving a `.fwork` placeholder, as CPython's `AppleFrameworkLoader` and Apple's rule against loose
+  binaries require. At run time, before `Py_Initialize`, iOS takes the first of: `PYTHONHOME` from
+  the environment (CPython reads it itself and nothing else happens);
+  `<NSBundle.mainBundle.resourcePath>/python-multiplatform-home` when that directory exists. A
+  bundled prefix goes through L-3's check (a catchable `IllegalStateException` naming the path and
+  where it came from) and is handed to CPython with `Py_SetPythonHome`. With neither, nothing is set
+  and behaviour is as before. `Status: partial` — `GP/IosPythonHomeLayoutTest.kt` (slice choice,
+  source directories, file selection, a staged fake tree); `PM/iosSimulatorArm64Test/.../env/IosPythonHomeTest.kt`
+  (resolution order; the simulator test task's `PYTHONHOME` still wins). The installed-app run on the
+  simulator is a manual check — `docs/platforms/ios-app-bundle.md`.
 
 ## 2. Low-level C API (downcall surface)
 

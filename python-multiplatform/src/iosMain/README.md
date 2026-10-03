@@ -24,39 +24,34 @@ error anywhere in the log. `PythonHomeCheck`'s own filesystem probe cannot promi
 either: it reads the same directory through the same kind of syscall CPython's import machinery
 does, and a path whose access is *parked* rather than *denied* can park the check identically.
 
-**The recipe below only works for the test binary, not the app — do not assume it carries over.**
-The build extracts the stdlib from the BeeWare support archive into `build/python-stdlib/`, and
-the simulator *test* task points `SIMCTL_CHILD_PYTHONHOME` at it directly (`simctl` only forwards
-environment variables prefixed `SIMCTL_CHILD_`, which is what makes the test binary see it at
-all). That path is still under this repo's workspace, which lives on an external volume (see
-AGENTS.md) — fine for the test binary, which `simctl` launches with fewer sandbox restrictions
-than an *installed app*, but exactly the shape that hangs an app rather than starting it. An app
-needs its stdlib staged **inside its own bundle or installed container**, with `PYTHONHOME`
-pointed at that installed path, not at the workspace — see the reproduction recipe in ROADMAP for
-the two extra steps (`rsync`ing the stdlib into the built `.app` and resolving
-`SIMCTL_CHILD_PYTHONHOME` from `simctl get_app_container` after install) this repository does not
-yet automate.
+**The test binary and an installed app get their stdlib differently.** The build extracts the
+stdlib into `build/python-stdlib/`, and the simulator *test* task points `SIMCTL_CHILD_PYTHONHOME`
+at it (`simctl` only forwards variables prefixed `SIMCTL_CHILD_`). That path is on this workspace's
+external volume — fine for the test binary, which `simctl` launches with fewer sandbox restrictions
+than an installed app, and exactly the shape that hangs an app rather than starting it.
 
-## The consumer's payload is staged and not attached — the runtime half is here, the Xcode half is not
+An installed **app** carries its own prefix inside its bundle (SPEC L-10,
+`docs/platforms/ios-app-bundle.md`):
+
+- `stageIosPythonHome_<sdk>_<arch>` stages the stdlib for one slice; `tools/xcode/install-python.sh`,
+  an Xcode Run Script phase, copies it to `<app>/python-multiplatform-home/`, copies the consumer's
+  payload to `<app>/python/`, and wraps every `.so` as `Frameworks/<module>.framework` with a
+  `.fwork` placeholder (Apple loads no loose binaries; CPython's `AppleFrameworkLoader` follows the
+  placeholder).
+- `IosPythonHome` (`PackagedPythonHome.ios.kt`) resolves `<resourcePath>/python-multiplatform-home`
+  when `PYTHONHOME` is unset, checks it with `PythonHomeCheck`, and hands it to `Py_SetPythonHome`
+  before `Py_Initialize()`. An environment `PYTHONHOME` still wins, which is what keeps the test task
+  working.
+
+## The consumer's payload
 
 `PythonPayload.discoverStagedPayloadRoots` looks for `python/` under
-`NSBundle.mainBundle.resourcePath` and puts it on `sys.path` if it is there. Nothing puts it there.
-
-`toolchain`'s `49da1d8` produces `build/pythonStaging/ios/python` and stops, saying why: "a native
-framework has no Gradle resource mechanism, and its resources go through an Xcode phase in a project
-file this plugin does not own." So three things are missing, all of them packaging:
-
-1. A **Copy Bundle Resources** phase referencing that directory, with *folder reference* semantics —
-   a group flattens the package directories and every `__init__.py` collides.
-2. A **build-order dependency** on the Gradle task that produces it, expressed in the Run Script
-   phase `iosApp/` already uses to drive Gradle.
-3. A **run on device or simulator that proves it**, which is not desktop's check. Per the section
-   above, a path under this repo's external volume does not merely fail for an *installed* app — it
-   parks `open$NOCANCEL` forever at 0% CPU. Reading the payload out of the app's own bundle is what
-   avoids that, and is why the answer must be the bundle rather than a workspace path.
-
-Until (1) and (2) exist this returns an empty list on every run, and no test here can tell "the
-phase is missing" from "the code is wrong". Desktop is the platform driven end to end instead.
+`NSBundle.mainBundle.resourcePath` and puts it on `sys.path` if it is there. The Xcode phase above
+puts it there, from `PYTHON_PAYLOAD_DIR` (a directory, e.g. the app's own Python sources) or
+`PYTHON_PAYLOAD_TASK` (a Gradle task printing `PYTHON_PAYLOAD_DIR=`, e.g. `toolchain`'s
+`stagePythonBundleIosForXcode`). It is copied with `rsync --delete`, which is why the stdlib does not
+live in the same directory. Extension modules in the payload are wrapped as frameworks like the
+stdlib's.
 
 ## No boundary, in either direction
 
