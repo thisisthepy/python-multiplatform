@@ -6,7 +6,7 @@
 
 **Kotlin Multiplatform 안의 진짜 CPython — Kotlin 이 Python 을, Python 이 Kotlin 을, 모든 타깃에서 부른다.**
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](../../LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](../../LICENSE)
 [![Kotlin Multiplatform](https://img.shields.io/badge/Kotlin-Multiplatform-7F52FF.svg?logo=kotlin&logoColor=white)](https://kotlinlang.org/docs/multiplatform.html)
 [![CPython](https://img.shields.io/badge/CPython-3.14-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![Platforms](https://img.shields.io/badge/platforms-JVM%20%7C%20Android%20%7C%20iOS%20%7C%20Android%20native%20%7C%20wasm%20(exp.)-lightgrey.svg)](#-플랫폼)
@@ -227,4 +227,4 @@ iOS 타깃 빌드에는 Xcode 가 있는 macOS 가 필요하다.
 
 ## 📄 라이선스
 
-[MIT](../../LICENSE) © 2024 thisisthepy
+[Apache-2.0](../../LICENSE) © 2024 thisisthepy
