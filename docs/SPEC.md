@@ -536,6 +536,12 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   build** (design §6 step 1b). Rebinding and mixed containers are found by a second Pyrefly pass over a
   probed copy (design §6.1), which runs only when a file has a name assigned twice or a container
   display; `for` targets and comprehension variables are not probed.
+- **N-7b** The type gate also runs when a module is imported in development mode (maintainer decision
+  2026-10-04, agent-first): in a notebook cell, a hot reload or a debug run, importing a project module
+  first checks it with the N-7 gate, and a type error stops the import with the gate's diagnostics before
+  any of the module's code runs. Release builds rely on the build gate (#20) and skip it. Results are cached
+  by file content, so an unchanged module is not checked again. There are no per-call runtime type checks:
+  compiled and interpreted code behave exactly as CPython does (N-8). `Status: planned` (#183).
 - **N-8** TypedPython compilation to C (INTENT §1.4; design §4.3; #41). `@compiled` (a builtin name, no
   import, #42) and a first-line `# typedpython: compiled` mark functions; the compiler lowers them
   through the typed IR (`typedpython/ir.py`) to C against the CPython C API and builds an extension with
