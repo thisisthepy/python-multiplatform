@@ -10,6 +10,11 @@ on:
     branches: [ "develop", "main" ]
     paths: [ "python-multiplatform-ksp/**", "ksp-fixtures/app/**", ".github/workflows/typedpython.yml" ]
 
+concurrency:
+  # A newer push to the same ref supersedes this run; frees the shared macOS runners.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: TypedPython tests (${{ matrix.os }})
