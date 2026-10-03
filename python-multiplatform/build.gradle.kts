@@ -1379,6 +1379,68 @@ tasks.withType<org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeSimu
 }
 
 // =================================================================================================
+// The standard library inside an iOS *app* -- SPEC L-10, issue #59.
+//
+// `extractIosSimulatorStdlib` above serves the simulator *test* binary, which `simctl` points at a
+// workspace path through SIMCTL_CHILD_PYTHONHOME. An installed app has no such variable, and a path on
+// this workspace's external volume parks the sandboxed app at 0% CPU (iosMain/README.md). So an app
+// carries its own prefix inside its bundle, staged here per slice and copied in by the Xcode Run
+// Script phase `tools/xcode/install-python.sh`; `IosPythonHome` (iosMain) finds it at run time.
+// The selection rules are `IosPythonHomeLayout` in the Gradle plugin, where they are unit-tested.
+// =================================================================================================
+
+val iosPythonHomeRoot = layout.buildDirectory.dir("python-ios-home")
+
+val stageIosPythonHomeSlices = python.multiplatform.gradle.IosPythonHomeLayout.slices.map { slice ->
+    tasks.register(slice.stageTaskName, python.multiplatform.gradle.StageIosPythonHomeTask::class.java) {
+        group = "python"
+        description = "Stages CPython's standard library for an iOS app built for ${slice.name} (SPEC L-10)"
+        dependsOn(downloadPython_ios)
+        xcframework.set(file("$extractedDir/ios/Python.xcframework"))
+        sliceName.set(slice.name)
+        pythonVersion.set(configuredPythonVersion)
+        destinationDir.set(iosPythonHomeRoot.map { it.dir(slice.name) })
+    }
+}
+
+/** Every slice; the Xcode phase uses [stageIosPythonHomeForXcode], which stages only the one it builds. */
+val stageIosPythonHome by tasks.registering {
+    group = "python"
+    description = "Stages CPython's standard library for every iOS app slice (SPEC L-10)"
+    dependsOn(stageIosPythonHomeSlices)
+}
+
+/**
+ * The Xcode phase's entry point. Picks the slice from `EFFECTIVE_PLATFORM_NAME` and `ARCHS` -- Xcode
+ * exports both to a Run Script phase, and `./gradlew` passes the client's environment to the build --
+ * stages it, and prints two lines a `-q` run leaves alone on stdout:
+ *
+ *     PYTHON_HOME_DIR=<abs>/python-ios-home/<slice>/home
+ *     PYTHON_DYLIB_INFO_TEMPLATE=<abs>/python-ios-home/<slice>/dylib-Info-template.plist
+ *
+ * The same contract shape as toolchain's `stagePythonBundleIosForXcode` (`PYTHON_PAYLOAD_DIR=`).
+ * Run outside Xcode (no `EFFECTIVE_PLATFORM_NAME`), or for a universal `ARCHS`, it fails while the
+ * task graph is built, with the reason, rather than staging a guessed slice.
+ */
+val stageIosPythonHomeForXcode by tasks.registering {
+    group = "python"
+    description = "Stages the iOS app prefix for the slice Xcode is building and prints its path (SPEC L-10)"
+    val platformName = providers.environmentVariable("EFFECTIVE_PLATFORM_NAME")
+    val archs = providers.environmentVariable("ARCHS")
+    val selected = providers.provider {
+        python.multiplatform.gradle.IosPythonHomeLayout.sliceFor(platformName.orNull, archs.orNull)
+    }
+    // Only the slice being built: staging all three costs three lib-dynload trees per build.
+    dependsOn(selected.map { tasks.named(it.stageTaskName) })
+    val root = iosPythonHomeRoot.map { it.asFile.absolutePath }
+    doLast {
+        val slice = selected.get().name
+        println("PYTHON_HOME_DIR=${root.get()}/$slice/${python.multiplatform.gradle.StageIosPythonHomeTask.PREFIX_DIRECTORY}")
+        println("PYTHON_DYLIB_INFO_TEMPLATE=${root.get()}/$slice/${python.multiplatform.gradle.StageIosPythonHomeTask.TEMPLATE_NAME}")
+    }
+}
+
+// =================================================================================================
 // androidNative -- giving the target a test *run*, not just a test *link*.
 //
 // Every other target in this build has a task that executes its tests. androidNative had
