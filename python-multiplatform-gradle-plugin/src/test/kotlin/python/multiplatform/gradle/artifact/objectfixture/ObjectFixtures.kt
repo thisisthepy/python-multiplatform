@@ -31,3 +31,8 @@ object StaticSpacing {
 class Plain {
     fun instanceMethod(count: Int): Int = count
 }
+
+/** JVM-public, Kotlin-internal: generated source outside this module cannot name it. */
+internal object HiddenSpacing {
+    fun hiddenFunction(count: Int): Int = count
+}

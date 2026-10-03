@@ -64,4 +64,9 @@ class ObjectMemberBindingTest {
     fun anOrdinaryClassInstanceMethodIsStillNotBound() {
         assertTrue(declarations().none { it.simpleName == "instanceMethod" && it.bindingName != null })
     }
+
+    @Test
+    fun anInternalObjectsMembersAreNotBoundOrDeclared() {
+        assertTrue(declarations().none { it.simpleName == "hiddenFunction" })
+    }
 }
