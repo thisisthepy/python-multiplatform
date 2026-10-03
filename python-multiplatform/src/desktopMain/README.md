@@ -95,6 +95,36 @@ The staged prefix is shared per machine (under the Gradle user home), keyed by v
 release + platform, and stamped after the last extracted byte — so an interrupted extraction is
 never mistaken for a finished one. See ROADMAP §15h.
 
+## A packaged app names its prefix in-process, with `Py_SetPythonHome` (SPEC L-9)
+
+The section above is about `PYTHONHOME` **the environment variable**. A packaged application
+(`createDistributable`, an installer, `java -jar`) is started by a launcher that takes
+`--java-options` and no environment, so it gets the prefix another way:
+
+- The plugin copies the staged prefix's stdlib and `libpython` (no `__pycache__`, headers, `bin/`,
+  Tcl/Tk) into Compose Desktop's application resources as `python-multiplatform-home/`, i.e.
+  `$APPDIR/resources/python-multiplatform-home` in the app image.
+- At run time `PackagedPythonHome` (`jvmMain`) resolves: environment `PYTHONHOME` (wins; nothing
+  else happens) → `-Dpython.multiplatform.home` → `<compose.application.resources.dir>/python-multiplatform-home`
+  if it exists. `applyPackagedPythonHome` checks the result with `PythonHomeCheck` and hands it to
+  `Py_SetPythonHome` before `Py_Initialize()`. That writes CPython's path configuration directly;
+  it is not an environment variable, so there is nothing `PythonHomeCheck` could fail to see.
+- `manager.loadLibPython` loads `libpython` from that prefix ahead of the classpath copy. The
+  classpath copy is extracted into the *working directory* and loaded via `java.library.path`,
+  which this repo's tests make work with `-Djava.library.path=.` and a launched app does not have.
+
+`Py_SetPythonHome` is deprecated since 3.11 in favour of `PyConfig.home`, but `PyConfig` is a
+struct whose layout the Stable ABI does not promise, and the function is in the Stable ABI, so its
+symbol stays exported. It takes `wchar_t *` — UTF-32 here, UTF-16 on Windows — encoded by hand in
+`encodeWideString` rather than through `Py_DecodeLocale`, which before pre-initialisation decodes
+with the C locale (the ANSI code page on Windows). The buffer is never freed (a few hundred bytes,
+once per process): the API asks for static storage.
+
+Not shipped: bytecode. python-build-standalone's `install_only` prefix has no `.pyc`, and the
+staged one's `__pycache__` reflects whatever ran against it, so neither is packaged; CPython writes
+`__pycache__` into the app image on first use where it can. See
+`docs/platforms/desktop-packaged-app.md`.
+
 ## The consumer's own Python is a classpath resource, and `python/` collides with our own package
 
 `toolchain`'s `stagePythonBundleDesktop` puts a consumer's payload at the **root of the jar** as
