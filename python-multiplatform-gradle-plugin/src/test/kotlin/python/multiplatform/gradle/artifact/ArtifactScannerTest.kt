@@ -548,7 +548,7 @@ class ArtifactScannerTest {
      * fail this. What the floors pin is that the two gates are open, which is the fact under test.
      *
      * `docs/design/ecosystem.md` §5b's own target (calling a composable) is out of scope here on purpose --
-     * this counts declarations, and `:ksp-fixtures:artifact` is where a call is actually made.
+     * this counts declarations, and `:python-multiplatform-gradle-plugin-fixtures:artifact` is where a call is actually made.
      */
     @Test
     fun composeModifierExtensionsSurviveBothGates() {

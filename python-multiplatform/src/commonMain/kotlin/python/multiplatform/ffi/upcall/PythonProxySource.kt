@@ -230,7 +230,7 @@ import python.multiplatform.reflection.UpcallTable
  * A class with static members already has a metaclass, and the two requirements do not both fit in
  * a base list: Python has no syntax for a base *after* a keyword, so the only spelling available is
  * `class Foo(_PmObject, metaclass=_pm_t_1):` -- which separates the class from the metaclass a
- * reader is pairing it with, and did more than that. `ksp-fixtures:app` locates a companion by
+ * reader is pairing it with, and did more than that. `python-multiplatform-ksp:fixtures:app` locates a companion by
  * matching `class (_pm_t_\d+)\(type\):` lazily through to `class Foo\(metaclass=\1\):`, and once
  * that terminator no longer existed the match could not complete: `java.util.regex`'s lazy loop
  * recurses once per character, so it scanned the rest of a 30 KB module and raised

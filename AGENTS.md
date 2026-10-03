@@ -184,7 +184,7 @@ interoperability in both directions:
 | `python-multiplatform/` | The library: FFI layer, object model, upcall runtime |
 | `python-multiplatform-ksp/` | KSP processor that generates the upcall table from Kotlin sources |
 | `python-multiplatform-gradle-plugin/` | Gradle plugin: `PYTHONHOME` staging, artifact walker (binds prebuilt jars/klibs), `.pyi` stub generation |
-| `ksp-fixtures/` | Consumer modules that exercise what the generators produce |
+| `<module>/fixtures/` | Consumer modules that exercise what the generators produce, each inside the module whose output it checks (`python-multiplatform-ksp`, `python-multiplatform-gradle-plugin`, `python-multiplatform-compose`) |
 | `sample/` | Compose Multiplatform demo app (desktop, Android, iOS, wasmJs, GraalVM native image) |
 | `binary/` | Source archives of per-platform CPython distributions |
 | `python_for_kotlin_binding.mermaid` | User-authored sketch of the object model (see rule 14) |
@@ -296,16 +296,22 @@ Rule 5 applies. In addition:
 checking only iOS lets androidNative break unnoticed (an `actual` placed only in `iosMain` once did,
 for days).
 
-### The generator consumers: `ksp-fixtures`
+### The generator consumers: `<module>/fixtures`
 
 `:python-multiplatform-gradle-plugin:test` alone does not verify the code that **uses** what the
 generators emit. Run each fixture module as a **separate** Gradle invocation (rule 8):
 
 | Task | Catches |
 |---|---|
-| `:ksp-fixtures:app:desktopTest` | Upcall and proxy runtime |
-| `:ksp-fixtures:compose:desktopTest` | Compose bindings and render proofs |
-| `:ksp-fixtures:artifact:desktopTest` | Artifact walker and `.pyi` stubs |
+| `:python-multiplatform-ksp:fixtures:app:desktopTest` | Upcall and proxy runtime |
+| `:python-multiplatform-compose:fixtures:compose:desktopTest` | Compose bindings and render proofs |
+| `:python-multiplatform-gradle-plugin-fixtures:artifact:desktopTest` | Artifact walker and `.pyi` stubs |
+
+Where each lives: `python-multiplatform-ksp/fixtures/{library,app,android}` (KSP processor),
+`python-multiplatform-gradle-plugin/fixtures/{artifact,artifact-valueclass,klib-artifact}` (artifact
+walker; the plugin is an included build, so their Gradle path is
+`:python-multiplatform-gradle-plugin-fixtures:<name>`) and
+`python-multiplatform-compose/fixtures/{compose,notebook-e2e}` (Compose host).
 
 Forgetting `artifact` has put red tests on `develop` twice; plugin unit tests cannot see them.
 Running the three in one invocation once hid 24 failures caused by an ordering dependency.

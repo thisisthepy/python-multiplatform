@@ -11,7 +11,7 @@ import python.multiplatform.reflection.TypeTag
  *
  * ### Why a stand-in rather than the real jars
  *
- * `WalkedArtifactComposeModifierTest` (in `ksp-fixtures/artifact`) already proves that the walker
+ * `WalkedArtifactComposeModifierTest` (in `python-multiplatform-gradle-plugin/fixtures/artifact`) already proves that the walker
  * produces these entries out of `foundation-layout-desktop-1.6.11.jar` and that Compose's own
  * `padding` runs when Python calls them. What it cannot do is run anywhere but desktop, because it
  * needs a JVM classpath. The adapter under test here is `commonMain` Python, so its tests belong in

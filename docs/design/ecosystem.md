@@ -174,7 +174,7 @@ leave chaquopy until this is designed. *(read from source; not runtime-verified.
 smallest and most blocking item, and it is entirely inside this repository.
 
 > **Closed, see `docs/archive/pythonx-adapter-design.md` §5.6.** `Text('hi')` written in Python now draws
-> through the real `androidx.compose.material3.Text` (`:ksp-fixtures:compose`'s
+> through the real `androidx.compose.material3.Text` (`:python-multiplatform-compose:fixtures:compose`'s
 > `ComposableRenderTest`: 71 non-background pixels against 0 for an empty body). The paragraph above
 > is right that a *generated Kotlin* entry for a widget cannot compile, and that is not the route
 > taken: an artefact composable's call site is emitted as **bytecode**, with `$composer`, `$changed`
@@ -239,7 +239,7 @@ This section documents the current state, language/build system/distribution art
 - **Gap to Goal** (status notes added 2026-10-03, read from code and SPEC, not re-run):
   - `@Composable`-capable callable shape: `ExposedCallable` typed `(Array<Any?>) -> Any?` cannot invoke `@Composable` functions taking synthetic `$composer` / `$changed` parameters. Needs dedicated `CallableKind` or opt-in annotation handling., *Closed on desktop by bytecode thunks (`ComposableThunks.kt`), SPEC B-6; Android, iOS and wasm planned (SPEC N-2).*
   - Python-side `sys.meta_path` finder for lazy import resolution of Kotlin namespaces ~~(`pythonx.*` or FQCNs)~~ upon import., *Exists for Kotlin FQNs in `python_multiplatform.binding` (SPEC U-8). `pythonx.*` is not the binder's to resolve (`AGENTS.md` §12.2).*
-  - Opaque Kotlin object round-tripping for Compose `Composer` (`HandleTable` and `ObjectReference` exist, but runtime hand-off to Python needs verification)., *Done on desktop: one hand-written `@Composable` pushes the live composer as a handle onto the binding layer's stack (`push_composer`), proven by the `ksp-fixtures/compose` render tests.*
+  - Opaque Kotlin object round-tripping for Compose `Composer` (`HandleTable` and `ObjectReference` exist, but runtime hand-off to Python needs verification)., *Done on desktop: one hand-written `@Composable` pushes the live composer as a handle onto the binding layer's stack (`push_composer`), proven by the `python-multiplatform-compose/fixtures/compose` render tests.*
   - Lifetime and storage of Python callables passed into Kotlin across Compose recompositions (`content=lambda: ...`, `onClick=...`)., *Partly addressed: `PythonCallableScope` (`PythonCallables.kt`) holds the callables a composition hands to Kotlin and is closed by a Compose-side `RememberObserver` in `onForgotten`; several hand-written fixture wrappers (`pythonDraggable`, `pythonComposed`, the swipe/anchor wrappers) still leak their callbacks by design, pinned by `DraggableLeakTest`. Not verified here beyond reading the sources.*
   - Retire `stagePythonHome` in favor of `pypackpack`'s Python distribution management.
   - Hand `stageWasmBrowserRuntime` logic to `toolchain`.
@@ -634,7 +634,7 @@ to at runtime with no JVM underneath, is the open question, not AndroidX.
 
 **Update, the walker now exists on one path, and both of those questions have answers.**
 `python-multiplatform-gradle-plugin` gained `generatePythonArtifactBindings`, and
-`ksp-fixtures/artifact` carries a resolved `junit:junit:4.13.2` through ASM, a generated
+`python-multiplatform-gradle-plugin/fixtures/artifact` carries a resolved `junit:junit:4.13.2` through ASM, a generated
 `FunctionTableFragment`, `UpcallTable` and `PythonProxySource` to
 `from junit.runner.Version import id` answering `"4.13.2"`. ROADMAP §16 records it in full; three
 things in it change what this section says:
@@ -642,7 +642,7 @@ things in it change what this section says:
 - **The walker's fragments are a second aggregator (`ArtifactTable`), not additions to KSP's
   `FunctionTable`.** One `UpcallTable`, one fragment interface, one Python namespace, but
   `FunctionTable` keeps meaning "every module in this graph compiled with the processor", which is
-  what `ksp-fixtures/app` asserts and what a consumer's own table should not silently outgrow.
+  what `python-multiplatform-ksp/fixtures/app` asserts and what a consumer's own table should not silently outgrow.
   Install site: `UpcallTable.install(FunctionTable.fragments + ArtifactTable.fragments)`.
 - **ASM alone does not reach `androidx.compose.material3`.** It reaches Java statics and Kotlin
   `@JvmStatic`s. A Kotlin *top-level* function compiles onto a package-private multi-file part

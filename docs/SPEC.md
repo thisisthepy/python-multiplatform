@@ -191,7 +191,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 - **M-3** Reference cycles that cross the boundary (Python → Kotlin proxy → Python) are collected by
   Python's cyclic GC, including on threads CPython created and for Python subclasses of proxies.
   `Status: implemented` on desktop (`PM/desktopTest/.../ref/CycleCollectionTest.kt`,
-  `ksp-fixtures/app/.../RefHolderCycleCollectionTest.kt`); `partial` elsewhere, tests exist for
+  `python-multiplatform-ksp/fixtures/app/.../RefHolderCycleCollectionTest.kt`); `partial` elsewhere, tests exist for
   native, Android and wasm (`PM/nativeTest/.../CycleCollectionTest.kt`,
   `PM/androidInstrumentedTest/.../CycleCollectionTest.kt`, `PM/wasmJsTest/.../WasmCycleCollectionTest.kt`)
   but `docs/roadmap/ROADMAP.md` §7 records remaining per-target gaps.
@@ -205,7 +205,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   declaration in a module; `@PythonInternal` excludes a class or member. Fragments from several
   modules aggregate; a name claimed twice is an error. No runtime reflection is used.
   `Status: implemented`, `PM/commonTest/.../reflection/UpcallTableTest.kt`,
-  `ksp-fixtures/app/src/desktopTest/.../GeneratedTableTest.kt`, `python-multiplatform-ksp/src/test/.../SourceRenderingTest.kt`.
+  `python-multiplatform-ksp/fixtures/app/src/desktopTest/.../GeneratedTableTest.kt`, `python-multiplatform-ksp/src/test/.../SourceRenderingTest.kt`.
 - **U-2** One entry point per platform marshals arguments (int, float, bool, str, bytes with NUL,
   objects), turns a Kotlin exception into a Python exception and a `Unit` return into `None`.
   `Status: implemented`, `PM/commonTest/.../UpcallEntryTest.kt`, `UpcallTrampolineTest.kt`,
@@ -213,9 +213,9 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 - **U-3** Generated Python proxies let Python write ordinary Python against Kotlin: construct a class,
   call methods, get/set properties (a `private set` is read-only), read companion / static members.
   A Kotlin package is importable under its own name. `Status: implemented` on desktop,
-  `PM/commonTest/.../upcall/PythonProxyInstallTest.kt`, `ksp-fixtures/app/.../GeneratedDeclarationKindsTest.kt`,
-  `GeneratedStaticPropertyProxyTest.kt`; `partial` elsewhere, only `ksp-fixtures/app/.../NativeSmokeTest.kt`
-  (androidNative) and `ksp-fixtures/android/.../GeneratedAndroidTableTest.kt` run outside desktop.
+  `PM/commonTest/.../upcall/PythonProxyInstallTest.kt`, `python-multiplatform-ksp/fixtures/app/.../GeneratedDeclarationKindsTest.kt`,
+  `GeneratedStaticPropertyProxyTest.kt`; `partial` elsewhere, only `python-multiplatform-ksp/fixtures/app/.../NativeSmokeTest.kt`
+  (androidNative) and `python-multiplatform-ksp/fixtures/android/.../GeneratedAndroidTableTest.kt` run outside desktop.
 - **U-4** Declaration kinds: objects, companions, interfaces (not constructible), enum entries as
   statics, abstract classes (no constructor), nested classes. Not exposed: annotation classes,
   generic declarations, data-class synthetics. `Status: implemented` on desktop,
@@ -224,7 +224,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   suspends completes without a Future; cancelling the Python future cancels the Kotlin coroutine.
   `Status: implemented` on desktop and Kotlin/Native, `PM/desktopTest/.../upcall/AsyncUpcallDeliveryTest.kt`,
   `AsyncUpcallCancellationTest.kt`, `AsyncUpcallEarlyCancellationTest.kt`, `PM/nativeTest/.../AsyncUpcallNative*Test.kt`,
-  `ksp-fixtures/app/.../GeneratedSuspendTest.kt`; `planned` on wasm (no threads).
+  `python-multiplatform-ksp/fixtures/app/.../GeneratedSuspendTest.kt`; `planned` on wasm (no threads).
 - **U-6** Upcalls work in a GraalVM native image (desktop). `Status: implemented` with manual
   verification, procedure and record in `docs/platforms/graal-native-image-verification.md`
   (`:sample:nativeCompile`, Liberica NIK), guarded automatically by `ReachabilityMetadataTest.kt` (C-2).
@@ -233,7 +233,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   (`Modifier.padding(16).size(24)`). `Status: partial`, asserted against a hand-written,
   Compose-shaped table (`PM/commonTest/.../pythonx/PythonxAdapterTest.kt`
   `anExtensionIsAMethodOnItsReceiverAndTheChainComposes`) and against the real Compose jars through
-  the artifact walker (`ksp-fixtures/artifact/.../WalkedArtifactComposeModifierTest.kt`); not
+  the artifact walker (`python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactComposeModifierTest.kt`); not
   asserted for KSP-generated proxies.
 - **U-8** A function on a Kotlin-named module carries Kotlin's surface: the Kotlin declaration name,
   keyword arguments by **Kotlin parameter names**, Kotlin defaults for omitted parameters, overload sets
@@ -257,7 +257,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   companion's constants and functions. One rule with the class case (#73): a Kotlin name that is a
   constructor or factory is what calling it does, whatever else lives under that name. `Status:
   implemented` on desktop,
-  `PM/desktopTest/.../pythonx/KotlinNamedSurfaceTest.kt`, `BinderNamespaceTest.kt`, `ksp-fixtures/compose/.../KotlinSignatureMetadataTest.kt`.
+  `PM/desktopTest/.../pythonx/KotlinNamedSurfaceTest.kt`, `BinderNamespaceTest.kt`, `python-multiplatform-compose/fixtures/compose/.../KotlinSignatureMetadataTest.kt`.
 - **U-9** A Pythonic package can serve extra member names on a Kotlin proxy through one hook,
   `python_multiplatform.binding.add_member_resolver(fn)`, `fn(kotlin_type_name, requested_name,
   kotlin_member_names) -> kotlin_name | (kotlin_name, keyword_map) | None`, asked when no Kotlin member
@@ -268,7 +268,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `AttributeError`. Aliases are cached in the registry, not written on the proxy class (`dir()` stays
   Kotlin-only). Contract in `KotlinSurface.kt`'s
   KDoc. `Status: implemented` on desktop, `PM/desktopTest/.../pythonx/MemberResolverTest.kt`,
-  `ksp-fixtures/compose/.../MemberResolverComposeTest.kt`.
+  `python-multiplatform-compose/fixtures/compose/.../MemberResolverComposeTest.kt`.
   A resolver (or anything else) reads a member's declaration rows from the receiver type alone with
   `python_multiplatform.describe_member(kotlin_type_name, kotlin_member_name)`: `describe()`'s
   tuple-of-dicts for every extension overload or the property getter/setter that type's proxy serves
@@ -289,14 +289,14 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   function result, or a callback argument, gives the Python scalar for a Kotlin `Int`/`Long`/`Short`/`Byte`
   (`int`), `Double`/`Float` (`float`), `Boolean` (`bool`), `String`/`Char` (`str`), and a proxy for any
   other Kotlin object. `Status: implemented`,
-  `PM/commonTest/.../pythonx/PythonxPropertyTest.kt`, `ksp-fixtures/compose/.../PythonAppViewRenderTest.kt`,
+  `PM/commonTest/.../pythonx/PythonxPropertyTest.kt`, `python-multiplatform-compose/fixtures/compose/.../PythonAppViewRenderTest.kt`,
   `AnySlotScalarRenderTest.kt`, `MaterialIconsRenderTest.kt`.
 - **U-11** A KSP-bound function, method or property whose declared return type is a Kotlin class that
   has a generated proxy returns an instance of **that class's proxy** (#94), not a generic owner: its
   methods and properties work and `isinstance(result, TheClass)` holds. The class is found by the declared
   return type's Kotlin name; a return type with no generated proxy stays a generic owner object. The
   result's ownership is the same as for any owned result. `Status: implemented`,
-  `ksp-fixtures/app/.../KspClassResultProxyTest.kt` (red until #94 lands).
+  `python-multiplatform-ksp/fixtures/app/.../KspClassResultProxyTest.kt` (red until #94 lands).
 - **U-12** Pythonic names (#131). On a Kotlin-named module every declaration, proxy member and keyword
   parameter is reachable by its Kotlin name **and** by its Pythonic name; the Kotlin name keeps
   working. The namespace is never converted: `androidx.compose.material3` is a module under exactly
@@ -338,7 +338,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `PythonxAdapterTest.kt` (`theNameRuleConvertsKotlinToPythonAndEitherSpellingReachesOneDeclaration`,
   `everyBoundNameSurvivesTheRoundTripThroughItsPythonicName`), `PM/desktopTest/.../pythonx/KotlinNamedSurfaceTest.kt`,
   `PythonxComposeCompatibilityTest.kt`, `MemberResolverTest.kt`, and the Compose render tests written
-  with Pythonic names (`ksp-fixtures/compose/.../M3ProofRenderTest.kt`, `CallbackDrivenRenderTest.kt`,
+  with Pythonic names (`python-multiplatform-compose/fixtures/compose/.../M3ProofRenderTest.kt`, `CallbackDrivenRenderTest.kt`,
   `TextFieldStateRenderTest.kt`).
 
 ## 6. Binding prebuilt libraries (Gradle plugin)
@@ -347,7 +347,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   overloads suffixed, multi-file facades reachable) by generating Kotlin source that `kotlinc`
   compiles, never by JVM name lookup. KSP and the walker share one Python namespace.
   `Status: implemented` on desktop, `GP/artifact/ArtifactScannerTest.kt`,
-  `ksp-fixtures/artifact/.../WalkedArtifactTableTest.kt`, `WalkedArtifactPythonImportTest.kt`.
+  `python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactTableTest.kt`, `WalkedArtifactPythonImportTest.kt`.
   Beside functions and object constants it binds (#38): generic functions whose type parameters are
   unbounded and not reified, each read as `kotlin.Any?` and written out at the call
   (`mutableStateOf<kotlin.Any?>(...)`), a bounded or reified one still declined; member properties of
@@ -368,27 +368,27 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   getter or an object constant, crosses as a Python `str` (the generated body returns Kotlin's
   `toString()` of it; `null` stays `None` for `CharSequence?`); a `CharSequence` parameter is still
   declined (#73). `Status: implemented`, `GP/artifact/TextStateBindingTest.kt`,
-  `ksp-fixtures/compose/.../TextFieldStateRenderTest.kt`.
+  `python-multiplatform-compose/fixtures/compose/.../TextFieldStateRenderTest.kt`.
 - **B-2** The walker on **klibs** (Kotlin/Native libraries). `Status: partial`,
-  `GP/artifact/KlibScannerTest.kt` and `ksp-fixtures/klib-artifact` assert that the scanned klib's
+  `GP/artifact/KlibScannerTest.kt` and `python-multiplatform-gradle-plugin/fixtures/klib-artifact` assert that the scanned klib's
   declarations are declined with reasons; no klib declaration is bound at run time yet.
 - **B-3** Default arguments can be omitted from Python (a call per subset of defaulted parameters,
   ambiguous omissions refused). `Status: implemented`, `GP/artifact/DefaultOmissionTest.kt`,
-  `ksp-fixtures/artifact/.../WalkedArtifactDefaultOmissionTest.kt`, `PM/commonTest/.../PythonxDefaultsTest.kt`.
+  `python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactDefaultOmissionTest.kt`, `PM/commonTest/.../PythonxDefaultsTest.kt`.
 - **B-4** Value classes round-trip; only allow-listed ones (e.g. `Dp`) may be written as their raw
   primitive. `Status: implemented`, `GP/artifact/ComposableValueClassSlotTest.kt`,
   `WalkedArtifactPythonImportTest.kt`. A value class is opened as its raw primitive only when both its
   constructor and its underlying property are public; otherwise (`TextUnitType`) it crosses as a boxed
   handle, so a parameter of it takes the boxed value of its own class
   (`TextUnit(30, TextUnitType.Sp)`) and a raw number is refused (#168,
-  `ksp-fixtures/artifact/.../WalkedArtifactValueClassBoxTest.kt`).
+  `python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactValueClassBoxTest.kt`).
 - **B-5** Python callables can fill Kotlin function-typed parameters (arity and callability checked).
-  `Status: partial`, `ksp-fixtures/artifact/.../WalkedArtifactCallbackTest.kt`; a value-returning slot
+  `Status: partial`, `python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactCallbackTest.kt`; a value-returning slot
   (`() -> Float`) does not yet accept a Python callable (`M3ProofRenderTest.kt`
   `aValueReturningFunctionSlotDoesNotYetAcceptAPythonCallable`).
 - **B-6** `@Composable` functions are callable from Python inside a composition; a Python click reaches
   a Kotlin callback and the redraw shows it. `Status: implemented` on desktop,
-  `ksp-fixtures/compose/src/desktopTest/` (`ComposableRenderTest.kt`, `M3ProofRenderTest.kt`,
+  `python-multiplatform-compose/fixtures/compose/src/desktopTest/` (`ComposableRenderTest.kt`, `M3ProofRenderTest.kt`,
   `CallbackDrivenRenderTest.kt`, pointer/drag render tests), `GP/artifact/ComposableBindingTest.kt`;
   `planned` on Android, iOS and wasm.
 - **B-8** A host draws a Python-declared application root with
@@ -398,7 +398,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   callable. The state is read inside the composition, so a Python write into it replaces the root on
   the next frame with no host call; Python callables a root passed into composables are released when
   that root is replaced or the composition is disposed. The entry point names no library.
-  `Status: implemented` on desktop, `ksp-fixtures/compose/.../PythonAppViewRenderTest.kt`; the module
+  `Status: implemented` on desktop, `python-multiplatform-compose/fixtures/compose/.../PythonAppViewRenderTest.kt`; the module
   compiles for Android, nothing runs there yet.
 - **B-9** A Python root keeps state across the recreation of its composition with
   `python.multiplatform.compose.rememberSaveableWrapper(initial)` (the pycomposeui function of that name),
@@ -408,7 +408,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `SaveableStateRegistry.performSave()` and a new composition over a registry built from the saved map; without
   a registry the new composition starts at `initial`. Any other value (a Python `list`) raises an error that
   names its type. `Status: implemented` on desktop (#174),
-  `ksp-fixtures/compose/.../RememberSaveableRenderTest.kt`.
+  `python-multiplatform-compose/fixtures/compose/.../RememberSaveableRenderTest.kt`.
 - **B-7** The plugin generates `.pyi` stubs for the Kotlin-named modules only, under Kotlin names
   plus their U-12 Pythonic aliases (`fill_max_width = fillMaxWidth` beside each module `def`, a second
   `ClassVar` or `@property` on a receiver's class, a second member of a callable module), parameters
@@ -422,7 +422,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `@overload`ed under its base name in table-key order; a required parameter after a defaulted one is
   keyword-only like `inspect.signature`. It emits nothing under `pythonx` and converts no namespace. `Status: partial` - `GP/stubs/PyiRenderingTest.kt`,
   `GP/stubs/TypedStubTest.kt`, `GP/stubs/KotlinNamesOnlyStubTest.kt`,
-  `ksp-fixtures/artifact/.../WalkedArtifactStubTest.kt`, `.../StubSignatureAgreesWithRuntimeTest.kt`,
+  `python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactStubTest.kt`, `.../StubSignatureAgreesWithRuntimeTest.kt`,
   `GP/stubs/CompanionFactoryStubTest.kt` (#78: a name that is both a function and a Kotlin-named
   module is stubbed in its parent package as one attribute whose type has `__call__` (the function or
   its `@overload`s) and the module's constants and functions as members, never as a bare `def`, which
@@ -433,7 +433,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   docstring carries its table key after `Kotlin constructor: `; its `__`-suffixed table-key spellings
   stay module functions; a value class bound as its primitive keeps its constructor as a module function
   returning the primitive (#73, `GP/artifact/TextStateBindingTest.kt`,
-  `ksp-fixtures/artifact/.../WalkedArtifactStubTest.kt`). In Python the class name is the constructor,
+  `python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactStubTest.kt`). In Python the class name is the constructor,
   as `Typography(...)` already was (`M3ProofRenderTest.kt`). A property is a `@property` (with a setter for a `var`) of its receiver's stub
   class, its docstring carrying its table key after `Kotlin property: `; where that class has no stub,
   a comment with the same marker says so (`GP/stubs/PropertyStubTest.kt`). An object constant is annotated with its
@@ -467,7 +467,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   Hangul input-method composition with no Python function started and the root not rerun, holds the
   composing range in Compose, and the notebook reads the committed text; a write from Python outside
   the composition reaches the screen within four frames. Notebook content with no decided or Kotlin
-  counterpart is listed, not imitated. `Status: implemented` on desktop: `ksp-fixtures/notebook-e2e/` (20 tests, and a
+  counterpart is listed, not imitated. `Status: implemented` on desktop: `python-multiplatform-compose/fixtures/notebook-e2e/` (20 tests, and a
   README with the cell map, the wheel commands and the gaps), 20 passed, 0 failed against the
   pythonx-compose `develop` wheel on 2026-10-04 (after #146, #168 and pythonx-compose #88), and again
   with the notebook's own state spelling (`main.App.messages.getValue()` / `setValue(...)`, #174)

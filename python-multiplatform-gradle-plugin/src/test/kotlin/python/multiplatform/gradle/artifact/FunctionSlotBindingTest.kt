@@ -249,7 +249,7 @@ class FunctionSlotBindingTest {
     }
 
     /**
-     * `kotlin.system.measureTimeMillis`, which is the shape `:ksp-fixtures:artifact` calls from real
+     * `kotlin.system.measureTimeMillis`, which is the shape `:python-multiplatform-gradle-plugin-fixtures:artifact` calls from real
      * Python: the same `() -> Unit` slot `clickable.onClick` has, on a declaration that **invokes**
      * it rather than storing it for a composition to invoke later.
      *

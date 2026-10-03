@@ -36,7 +36,7 @@ import java.io.File
  * proved it and both attempts at aligning the version that failed before classloader isolation was
  * tried. [KlibScanWorkAction] is that isolation: every caller of this object goes through
  * [WorkerExecutor.scanKlibIsolated][python.multiplatform.gradle.artifact.scanKlibIsolated] rather than
- * calling [scanKlib]/[scanKlibDeclarations] directly, and `:ksp-fixtures:klib-artifact
+ * calling [scanKlib]/[scanKlibDeclarations] directly, and `:python-multiplatform-gradle-plugin-fixtures:klib-artifact
  * :generatePythonArtifactBindings`/`:generatePythonStubs` passing is what confirms the isolation
  * actually holds in a consumer build, not only in this file's own unit tests.
  *

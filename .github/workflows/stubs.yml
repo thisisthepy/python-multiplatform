@@ -16,7 +16,7 @@ on:
     branches: [ "develop" ]
     paths:
       - "python-multiplatform-gradle-plugin/**"
-      - "ksp-fixtures/compose/**"
+      - "python-multiplatform-compose/fixtures/compose/**"
       - ".github/scripts/stubs/**"
       - "gradle/libs.versions.toml"
       - ".github/workflows/stubs.yml"
@@ -52,10 +52,10 @@ jobs:
           python-version: '3.13'
 
       - name: Generate the stubs over the Compose jars
-        run: ./gradlew :ksp-fixtures:compose:generatePythonStubs --console=plain
+        run: ./gradlew :python-multiplatform-compose:fixtures:compose:generatePythonStubs --console=plain
 
       - name: Type-check a consumer against them (mypy)
-        run: .github/scripts/stubs/check-stubs.sh ksp-fixtures/compose/build/generated/pythonStubs/desktopMain
+        run: .github/scripts/stubs/check-stubs.sh python-multiplatform-compose/fixtures/compose/build/generated/pythonStubs/desktopMain
 
       - name: Assemble the artifact
         run: |
@@ -65,7 +65,7 @@ jobs:
           out=build/kotlin-stubs
           rm -rf "$out"
           mkdir -p "$out"
-          cp -R ksp-fixtures/compose/build/generated/pythonStubs/desktopMain/. "$out/"
+          cp -R python-multiplatform-compose/fixtures/compose/build/generated/pythonStubs/desktopMain/. "$out/"
           cat > "$out/README.md" <<README
           # Kotlin-name stubs for Compose ${compose_version}
 
@@ -79,9 +79,9 @@ jobs:
           | python-multiplatform commit | ${GITHUB_SHA} |
           | ref | ${GITHUB_REF} |
           | workflow run | ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} |
-          | generator | \`:ksp-fixtures:compose:generatePythonStubs\` |
+          | generator | \`:python-multiplatform-compose:fixtures:compose:generatePythonStubs\` |
 
-          Packages stubbed: the \`artifactIncludePackages\` of \`ksp-fixtures/compose/build.gradle.kts\` at
+          Packages stubbed: the \`artifactIncludePackages\` of \`python-multiplatform-compose/fixtures/compose/build.gradle.kts\` at
           that commit.
 
           Use: put this directory on the type checker's path (\`MYPYPATH=<this directory>\`, or the
@@ -129,11 +129,11 @@ jobs:
           python-version: '3.13'
 
       - name: Generate the stubs over the Compose jars
-        run: ./gradlew :ksp-fixtures:compose:generatePythonStubs --console=plain
+        run: ./gradlew :python-multiplatform-compose:fixtures:compose:generatePythonStubs --console=plain
 
       - name: No two stub paths are equal under case folding
         run: |
-          python3 - ksp-fixtures/compose/build/generated/pythonStubs/desktopMain <<'PY'
+          python3 - python-multiplatform-compose/fixtures/compose/build/generated/pythonStubs/desktopMain <<'PY'
           import os, sys
           seen = {}
           for root, dirs, files in os.walk(sys.argv[1]):
@@ -146,4 +146,4 @@ jobs:
           PY
 
       - name: Type-check a consumer against them (mypy)
-        run: .github/scripts/stubs/check-stubs.sh ksp-fixtures/compose/build/generated/pythonStubs/desktopMain
+        run: .github/scripts/stubs/check-stubs.sh python-multiplatform-compose/fixtures/compose/build/generated/pythonStubs/desktopMain

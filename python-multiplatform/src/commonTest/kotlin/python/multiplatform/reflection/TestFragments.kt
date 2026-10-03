@@ -174,7 +174,7 @@ enum class TestColor(val weight: Long) {
 /**
  * The declaration kinds whose members do not take a receiver -- companion/object members and
  * enum entries -- plus the class descriptors that tell the Python side what shape to build.
- * Written the way `python-multiplatform-ksp` emits them; `ksp-fixtures` proves the generator
+ * Written the way `python-multiplatform-ksp` emits them; `python-multiplatform-ksp/fixtures` proves the generator
  * actually does.
  */
 object TestStaticsFragment : FunctionTableFragment {

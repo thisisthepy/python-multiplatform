@@ -33,7 +33,7 @@ does not revisit it.
 What this file answers: **what the generator reads**, **what it writes**, and **where the result
 goes**. The generator is `PythonStubsTask` + `renderKotlinFqnStubs` (`PyiRendering.kt`, in
 `python-multiplatform-gradle-plugin/src/main/kotlin/python/multiplatform/gradle/stubs/`); its tests are
-`PyiRenderingTest`, `KotlinNamesOnlyStubTest` and `ksp-fixtures/artifact`'s `WalkedArtifactStubTest`.
+`PyiRenderingTest`, `KotlinNamesOnlyStubTest` and `python-multiplatform-gradle-plugin/fixtures/artifact`'s `WalkedArtifactStubTest`.
 
 Everything under "Observed" was read from working copies or run as a command on 2026-08-14, with the
 path or the command given, unless dated otherwise. Everything under "Judged" is a decision, and the
@@ -630,7 +630,7 @@ merges an overlap.
 - `.github/scripts/stubs/check-stubs.sh <stub-dir>` runs `mypy --strict` over `.github/scripts/stubs/consumer.py` (a
   `Modifier` chain from the class and from an instance, `Checkbox`, `Text`, `Column` with its keyword
   `content`, and four lines that must be rejected) against stubs generated for the real Compose jars
-  (`:ksp-fixtures:compose:generatePythonStubs`, which `ksp-fixtures/compose` now enables). Errors inside
+  (`:python-multiplatform-compose:fixtures:compose:generatePythonStubs`, which `python-multiplatform-compose/fixtures/compose` now enables). Errors inside
   the stubs are reported as well, not only in the consumer.
 - `.github/workflows/stubs.yml` runs the stub task and that check on every push to `develop`, uploads
   the stubs as the workflow artifact `kotlin-stubs` (with a README naming the Compose version and the
