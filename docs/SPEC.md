@@ -253,6 +253,10 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   3.14t runs the whole desktop suite with `-PpythonFreeThreaded=true` (236 tests, 0 failures; ROADMAP §9).
   Only desktop has free-threaded prebuilts; Android and iOS do not. `Py_LIMITED_API` is not defined, so
   `abi3t` is not a blocker.
+- **T-3** `python-multiplatform` publishes per-target, per-flavour CPython include directories as
+  `Provider<Directory>` carrying the extraction task (`cpythonIncludeDirectories` extension; see
+  `docs/platforms/python-version-acquisition.md` §7). `Status: partial` (only the configured flavour is
+  extracted) — `GP/CPythonIncludeDirectoriesTest.kt`.
 
 ## 8. Measurement
 

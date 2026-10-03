@@ -18,6 +18,9 @@ import org.jetbrains.kotlin.gradle.tasks.KotlinNativeLink
 import org.jetbrains.kotlin.konan.target.Family
 import org.jetbrains.kotlin.konan.target.KonanTarget.*
 import org.jetbrains.kotlin.konan.target.linker
+import python.multiplatform.gradle.CPythonFlavour
+import python.multiplatform.gradle.CPythonIncludeDirectories
+import python.multiplatform.gradle.CPythonIncludeLayout
 import python.multiplatform.gradle.GenerateWasmProxyExportsTask
 
 
@@ -613,6 +616,27 @@ val downloadAllPythonBuilds by tasks.registering {
     dependsOn(androidDownloadTasks)
     dependsOn(downloadPython_ios)
 }
+
+/**
+ * Public build output (issue #46): the include directory of the CPython this build acquires, per
+ * target and flavour, each carrying its extraction task. Consumers (pypackpack's compile slot,
+ * TypedPython's C build) read it with
+ * `project(":python-multiplatform").extensions.getByType<CPythonIncludeDirectories>().includeDir("macos-aarch64")`
+ * after `evaluationDependsOn(":python-multiplatform")`. Only the desktop flavour selected with
+ * `-PpythonFreeThreaded` has a task; Android and iOS are always GIL. See
+ * `docs/platforms/python-version-acquisition.md` §7.
+ */
+extensions.add(
+    "cpythonIncludeDirectories",
+    CPythonIncludeDirectories(
+        layout.projectDirectory.dir(extractedDir.absolutePath),
+        configuredPythonVersion,
+    ) { target, flavour ->
+        val desktop = target in CPythonIncludeLayout.desktopTargets
+        val extractedFlavour = if (desktop && pythonFreeThreaded) CPythonFlavour.FREE_THREADED else CPythonFlavour.GIL
+        if (flavour == extractedFlavour) tasks.named(CPythonIncludeLayout.downloadTaskName(target)) else null
+    },
+)
 
 val androidBuildDir = "$projectDir/build/android"
 
