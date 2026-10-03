@@ -107,3 +107,33 @@ The same extension exposes the library to link against (issue #56):
 Android has no free-threaded build, so that combination throws. `isLinkAvailable(target, flavour)`
 tests without throwing; the other flavour fails naming `-PpythonFreeThreaded`, as for `includeDir`.
 
+## Published version
+
+A consumer that builds against `python-multiplatform` must know which CPython it embeds (issue #61).
+The answer is published three ways, all derived from `pythonVersion` / `pythonFreeThreaded` in
+`gradle.properties`.
+
+*   **Extension** `pythonMultiplatform` (`python.multiplatform.gradle.EmbeddedPythonVersion`):
+    `pythonVersion` (`3.14.7`), `majorMinor` (`3.14`), `freeThreaded`.
+*   **Gradle attributes** on every consumable `*Elements` configuration (so they land in the published
+    module metadata): `org.thisisthepy.python.version` and `org.thisisthepy.python.free-threaded`
+    (both `String`; the latter is `"true"`/`"false"`).
+*   **Resource** `META-INF/python-multiplatform/python.properties` (`pythonVersion=`, `freeThreaded=`),
+    inside the desktop jar and the Android AAR's `classes.jar`.
+
+```kotlin
+// composite build (includeBuild): read the extension
+evaluationDependsOn(":python-multiplatform")
+val embedded = project(":python-multiplatform").extensions.getByType<EmbeddedPythonVersion>()
+println(embedded.majorMinor)
+
+// published artefact: read the resource from the classpath
+val text = Thread.currentThread().contextClassLoader
+    .getResourceAsStream(EmbeddedPythonVersion.RESOURCE_PATH)!!.use { it.readBytes().decodeToString() }
+val embedded = EmbeddedPythonVersion.parse(text)
+
+// published artefact: require a matching variant through the attributes
+configurations.named("desktopRuntimeClasspath") {
+    attributes.attribute(Attribute.of("org.thisisthepy.python.version", String::class.java), "3.14.7")
+}
+```
