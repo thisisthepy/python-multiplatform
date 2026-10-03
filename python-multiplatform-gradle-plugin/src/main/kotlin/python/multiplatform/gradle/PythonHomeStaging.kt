@@ -60,6 +60,15 @@ import javax.inject.Inject
  *   does, has neither problem: CPython and `PythonHomeCheck` read the same value from the same
  *   place, exactly as they already do for this repository's own `desktopTest`.
  *
+ * ### A packaged application (SPEC L-9)
+ *
+ * Both points above are about the developer's machine. A packaged app has no Gradle to set its
+ * environment, so the same staged prefix is also copied into Compose Desktop's application
+ * resources ([packagedPrefixIncludes], `PythonBindingsPlugin.configurePackagedPythonHome`) and the
+ * library hands it to CPython in-process with `Py_SetPythonHome` -- which is not an environment
+ * variable, so the objection above does not apply to it. Only the host's platform is copied, into
+ * the *application*, never into the library artifact. See `docs/platforms/desktop-packaged-app.md`.
+ *
  * ### What it deliberately does not do
  *
  * It does not validate the prefix beyond [stdlibMarkerRelativePath], and that marker is the file
@@ -194,6 +203,54 @@ internal fun stagingStamp(
     freeThreaded: Boolean,
 ): String = "python-multiplatform $pythonVersion+$pbsRelease $platform " +
     (if (freeThreaded) "freethreaded" else "default")
+
+/**
+ * The directory a packaged desktop application carries its CPython prefix in, inside Compose
+ * Desktop's application resources (`$APPDIR/resources/` in a `createDistributable` image) --
+ * SPEC L-9, issue #60.
+ *
+ * `PackagedPythonHome.DIRECTORY_NAME` in the library's `jvmMain` is the run-time half and must be
+ * the same string; the two builds share no code, so each side pins it in a test.
+ */
+internal const val PACKAGED_HOME_DIRECTORY = "python-multiplatform-home"
+
+/**
+ * What of a staged prefix a packaged application needs, as include patterns relative to the prefix.
+ *
+ * The standard library and the shared library `manager.loadLibPython` loads out of the same prefix.
+ * Measured for 3.14.7 macos-aarch64 on this machine, `__pycache__` excluded: 1,195 files and
+ * 39.6 MB (19.4 MB of it `libpython3.14.dylib`) out of the prefix's 68.9 MB. Left out:
+ * `include/` and `lib/pkgconfig` (build-time only), `bin/` (an embedding app has no `python3`
+ * executable to run), and Tcl/Tk (`libtcl*`, `tcl9.0/`, `tk9.0/`: `tkinter` is not something a
+ * Compose app reaches, and they are a further 4 MB of libraries alone).
+ *
+ * The Windows layout differs and is matched as the library's own lookups match it: `Lib/` and
+ * `DLLs/` (extension modules) under the prefix, and the interpreter plus the MSVC runtime as
+ * `*.dll` at its root, which is where `manager.libraryUnder` looks on that layout.
+ */
+internal fun packagedPrefixIncludes(pythonVersion: String, freeThreaded: Boolean, windows: Boolean): List<String> {
+    if (windows) return listOf("Lib/**", "DLLs/**", "*.dll")
+    val parts = pythonVersion.split('.')
+    require(parts.size >= 2) { "python version '$pythonVersion' has no major.minor" }
+    val tag = "${parts[0]}.${parts[1]}" + if (freeThreaded) "t" else ""
+    return listOf("lib/python$tag/**", "lib/libpython$tag.*")
+}
+
+/**
+ * Never packaged: the staged prefix is shared by every project on the machine, and CPython writes
+ * bytecode caches into it from every run that uses it, so its `__pycache__` directories reflect the
+ * developer's history rather than the build.
+ */
+internal val PACKAGED_PREFIX_EXCLUDES: List<String> = listOf("**/__pycache__/**")
+
+/**
+ * Compose Desktop's `Sync` task that assembles an application's resources: `prepareAppResources`
+ * for the default build type, `prepare<BuildType>AppResources` for the others (`Release`). Matched
+ * by name, like the wasm wiring matches `wasmJsProcessResources`, so this plugin carries no
+ * compile-time dependency on the Compose Gradle plugin; `Sync` itself is Gradle's own type.
+ */
+internal fun isComposeAppResourcesTask(name: String): Boolean =
+    Regex("""prepare([A-Z]\w*)?AppResources""").matches(name)
 
 /**
  * Whether the plugin should stage a prefix and set `PYTHONHOME`.

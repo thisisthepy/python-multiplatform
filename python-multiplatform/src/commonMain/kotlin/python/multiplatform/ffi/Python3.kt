@@ -3,6 +3,7 @@ package python.multiplatform.ffi
 import python.multiplatform.BuildConfig
 import python.multiplatform.env.PythonHomeCheck
 import python.multiplatform.env.PythonPayload
+import python.multiplatform.env.applyPackagedPythonHome
 import python.multiplatform.ffi.exceptions.PyException
 import python.multiplatform.ffi.types.modules.PyModule
 import python.native.ffi.*
@@ -57,6 +58,11 @@ object Python3 {
         // PythonHomeCheck's doc comment). Cheap even so: one or two filesystem probes against a
         // handful of candidate paths, not a directory walk.
         PythonHomeCheck.verifyOrThrow()
+        // A packaged desktop app has no PYTHONHOME in its environment and hands its own prefix to
+        // CPython here instead (SPEC L-9); a no-op everywhere else, and whenever PYTHONHOME is set.
+        // Before Py_Initialize() because that is the last point a home can be chosen, and it
+        // throws rather than continuing because Py_Initialize() would abort instead.
+        applyPackagedPythonHome()
         memScoped {
             Py_Initialize()
             // There is nothing richer to report than this. `Py_Initialize()` returns void and,
