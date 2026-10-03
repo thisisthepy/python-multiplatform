@@ -270,7 +270,9 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   | Array access in bounds, or a runtime bounds check kept | the check stays (never an unchecked access) |
   | Array parameters only indexed, stored, `len`-ed; no aliasing (entry guard) | not compiled; diagnostic |
   | OBJ references follow one ownership rule; no IR form for free, borrowed alias or NULL read | not compiled; diagnostic |
-  | Integer overflow checked and promoted (deopt) | — (every I64 operation is checked by construction) |
+  | Integer overflow checked and promoted (deopt); an op marked `proven` must re-prove its interval fits i64 | not compiled; diagnostic `verify/proven-overflow` |
+  | `Call.redo` only from an impure caller to a pure, may-deopt callee returning F64/BOOL/NONE | not compiled; diagnostic `verify/redo` |
+  | `entry_globals` only in a closed function (no user code runs); a call of a function with entry globals is a deopt point in its caller unless it is a legal redo or the caller snapshots the same globals | not compiled; diagnostic `verify/entry-global-open` / `verify/deopt-impure` |
 
   Generated C reaches memory and `PyObject`s only through the runtime helpers. ASan/UBSan CI,
   differential tests against the interpreter and fuzzing back the proof. `Status: planned`.
