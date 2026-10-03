@@ -202,7 +202,149 @@ internal fun stagingStamp(
     platform: String,
     freeThreaded: Boolean,
 ): String = "python-multiplatform $pythonVersion+$pbsRelease $platform " +
-    (if (freeThreaded) "freethreaded" else "default")
+    (if (freeThreaded) "freethreaded" else "default") +
+    // Bumped when the extraction itself changes. "links-materialised" (issue #74): Gradle's
+    // `tarTree` turned the archive's `libpython3.14.so -> libpython3.14.so.1.0` into a 0-byte file,
+    // so every prefix staged before this is wrong and must be extracted again.
+    " links-materialised"
+
+/**
+ * Extracts a python-build-standalone `.tar.gz` into [root], turning every symbolic and hard link
+ * into a copy of its in-archive target (issue #74).
+ *
+ * Gradle's `tarTree` extracts a symlink as an empty regular file, so `lib/libpython3.14.so` -- a
+ * link to `libpython3.14.so.1.0` -- came out 0 bytes and `System.load` failed with "file too
+ * short". A copy rather than a link also survives being copied into a jar or an app image, which
+ * flatten links. Dependency-free: `GZIPInputStream` plus a minimal ustar/GNU/pax header reader.
+ * A link whose target is not inside the archive, or that escapes [root], is skipped.
+ */
+internal fun extractTarGzMaterialisingLinks(archive: File, root: File) {
+    val rootPath = root.canonicalFile.toPath()
+    fun inside(rel: String): java.nio.file.Path? {
+        val p = rootPath.resolve(rel).normalize()
+        return if (p.startsWith(rootPath) && p != rootPath) p else null
+    }
+    class Link(val path: java.nio.file.Path, val target: String, val hard: Boolean)
+    val links = mutableListOf<Link>()
+
+    java.util.zip.GZIPInputStream(archive.inputStream().buffered(1 shl 16)).use { input ->
+        val header = ByteArray(512)
+        var longName: String? = null
+        var longLink: String? = null
+        var paxPath: String? = null
+        var paxLink: String? = null
+
+        fun readFully(buf: ByteArray, len: Int): Boolean {
+            var n = 0
+            while (n < len) { val r = input.read(buf, n, len - n); if (r < 0) return false; n += r }
+            return true
+        }
+        fun str(off: Int, len: Int): String {
+            var end = off
+            while (end < off + len && header[end] != 0.toByte()) end++
+            return String(header, off, end - off, Charsets.UTF_8)
+        }
+        fun octal(off: Int, len: Int): Long = str(off, len).trim().ifEmpty { "0" }.toLong(8)
+        fun readData(size: Long): ByteArray {
+            val padded = (size + 511) / 512 * 512
+            val buf = ByteArray(padded.toInt())
+            check(readFully(buf, buf.size)) { "truncated tar entry in $archive" }
+            return buf.copyOf(size.toInt())
+        }
+
+        while (true) {
+            if (!readFully(header, 512)) break
+            if (header.all { it == 0.toByte() }) break
+            var name = str(0, 100)
+            val prefix = str(345, 155)
+            if (prefix.isNotEmpty() && str(257, 5) == "ustar") name = "$prefix/$name"
+            val mode = octal(100, 8)
+            val size = octal(124, 12)
+            val type = header[156].toInt().toChar()
+            var linkName = str(157, 100)
+            when (type) {
+                'L' -> { longName = String(readData(size), Charsets.UTF_8).trimEnd('\u0000'); continue }
+                'K' -> { longLink = String(readData(size), Charsets.UTF_8).trimEnd('\u0000'); continue }
+                'x' -> {
+                    String(readData(size), Charsets.UTF_8).lineSequence().forEach { rec ->
+                        val kv = rec.substringAfter(' ', "")
+                        when {
+                            kv.startsWith("path=") -> paxPath = kv.removePrefix("path=")
+                            kv.startsWith("linkpath=") -> paxLink = kv.removePrefix("linkpath=")
+                        }
+                    }
+                    continue
+                }
+                'g' -> { readData(size); continue }
+            }
+            (paxPath ?: longName)?.let { name = it }
+            (paxLink ?: longLink)?.let { linkName = it }
+            longName = null; longLink = null; paxPath = null; paxLink = null
+
+            val dest = inside(name.trimEnd('/')) ?: run {
+                if (size > 0) readData(size)
+                null
+            } ?: continue
+            when (type) {
+                '5' -> java.nio.file.Files.createDirectories(dest)
+                '2' -> links += Link(dest, linkName, hard = false)
+                '1' -> links += Link(dest, linkName, hard = true)
+                '0', '\u0000', '7' -> {
+                    java.nio.file.Files.createDirectories(dest.parent)
+                    dest.toFile().outputStream().use { out ->
+                        var remaining = size
+                        val buf = ByteArray(1 shl 16)
+                        while (remaining > 0) {
+                            val r = input.read(buf, 0, minOf(buf.size.toLong(), remaining).toInt())
+                            check(r >= 0) { "truncated tar entry $name in $archive" }
+                            out.write(buf, 0, r); remaining -= r
+                        }
+                    }
+                    var pad = (512 - size % 512) % 512
+                    while (pad > 0) { val r = input.skip(pad); if (r <= 0) { input.read(); pad-- } else pad -= r }
+                    if (mode and 0b001_001_001L != 0L) dest.toFile().setExecutable(true, false)
+                }
+                else -> if (size > 0) readData(size)
+            }
+        }
+    }
+
+    // Links last, repeated until stable, so a link to a link (or to a later entry) resolves.
+    var pending: List<Link> = links
+    while (pending.isNotEmpty()) {
+        val unresolved = mutableListOf<Link>()
+        for (link in pending) {
+            val source = if (link.hard) inside(link.target)
+            else link.path.parent.resolve(link.target).normalize().takeIf { it.startsWith(rootPath) }
+            val file = source?.toFile()
+            if (file == null || !file.exists() || (file.isFile && pending.any { it.path == source })) {
+                unresolved += link; continue
+            }
+            if (file.isDirectory) file.copyRecursively(link.path.toFile(), overwrite = true)
+            else {
+                java.nio.file.Files.createDirectories(link.path.parent)
+                file.copyTo(link.path.toFile(), overwrite = true)
+                link.path.toFile().setExecutable(file.canExecute(), false)
+            }
+        }
+        if (unresolved.size == pending.size) break // remaining targets are outside the archive
+        pending = unresolved
+    }
+}
+
+/**
+ * Fails when a packaged prefix carries a zero-length shared library -- a symlink stub is never a
+ * library, and shipping one fails at the user's first launch with "file too short" (issue #74).
+ */
+internal fun requireNoEmptyLibraries(dir: File) {
+    if (!dir.isDirectory) return
+    val empty = dir.walkTopDown()
+        .filter { it.isFile && it.length() == 0L && it.name.startsWith("libpython") }
+        .map { it.relativeTo(dir).path }.toList()
+    if (empty.isNotEmpty()) {
+        throw GradleException("packaged CPython prefix contains zero-length libraries: $empty (symlink stubs?)")
+    }
+}
 
 /**
  * The directory a packaged desktop application carries its CPython prefix in, inside Compose
@@ -334,10 +476,8 @@ abstract class StagePythonHomeTask : DefaultTask() {
         }
 
         logger.lifecycle("Staging CPython $version ($target) into $prefix")
-        fs.copy {
-            from(archives.tarTree(archives.gzip(archive)))
-            into(root)
-        }
+        // Not `tarTree`: it extracts the archive's symlinks as empty files (issue #74).
+        extractTarGzMaterialisingLinks(archive, root)
 
         if (!marker.isFile) {
             throw GradleException(

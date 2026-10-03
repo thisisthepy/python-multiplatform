@@ -661,6 +661,9 @@ class PythonBindingsPlugin : Plugin<Project> {
                     exclude(PACKAGED_PREFIX_EXCLUDES)
                     into(PACKAGED_HOME_DIRECTORY)
                 }
+                doLast {
+                    requireNoEmptyLibraries(destinationDir.resolve(PACKAGED_HOME_DIRECTORY))
+                }
             }
     }
 
