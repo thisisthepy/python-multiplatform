@@ -1464,12 +1464,15 @@ static inline void tp_leave_call(void)
  * at exactly the call where it is raised without the fast entry, never earlier.
  *
  * Skipping Py_EnterRecursiveCall on the fast path is safe because the tree is bounded: at most k
- * small compiled frames (no recursion, no Python callbacks except the eval-breaker poll, which is
- * the interpreter's own call), so they use a bounded amount of C stack on top of the entry's.
+ * small compiled frames (no recursion, no Python callbacks except at the two points below), so they
+ * use a bounded amount of C stack on top of the entry's.
  *
- * Python frames created by user code under a fast tree cannot exist (a bounded function runs no
- * Python code) except through the eval-breaker poll (signal handlers, finalizers): those frames
- * see a compiled count that does not include the fast tree's frames (at most k). */
+ * The frames of a fast tree are not in `tp_depth.count`. A bounded tree runs Python code at exactly
+ * two points: a `redo` Call (the interpreted original) and the eval-breaker poll in a loop (signal
+ * handler, finalizer, another compiled call). Around each, the twin brackets the code with
+ * tp_depth_py_begin(tp_fd) / tp_depth_py_end(tp_fd), `tp_fd` being the tree's active frames (itself
+ * included), so the count is exactly what the counted path would have there: Python frames and
+ * compiled calls started from it see the true depth. */
 static inline int tp_depth_room(Py_ssize_t k)
 {
     return tp_python_depth() + tp_depth.count + k <= Py_GetRecursionLimit();
@@ -1482,6 +1485,20 @@ static inline void tp_depth_done(void)
     if (tp_depth.count == 0) {
         Py_CLEAR(tp_depth.frame);
     }
+}
+
+/* Around a point of a fast tree that can run Python code: the count includes the tree's `fd` active
+ * frames. begin/end are balanced. end also drops the cached top frame when no compiled frame is
+ * counted any more (the code in between may have cached another frame, as tp_leave_call would). */
+static inline void tp_depth_py_begin(int fd)
+{
+    tp_depth.count += fd;
+}
+
+static inline void tp_depth_py_end(int fd)
+{
+    tp_depth.count -= fd;
+    tp_depth_done();
 }
 
 #ifdef TP_TRACE_FAST

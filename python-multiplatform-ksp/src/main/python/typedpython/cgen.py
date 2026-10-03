@@ -26,6 +26,19 @@ Depth (issue #57): every impl function calls `tp_enter_call()` before it owns an
 returns -1 directly: RecursionError set, nothing counted) and `tp_leave_call()` in the one exit
 block, so ok, error and deopt exits all leave exactly once.
 
+Fast entry (issue #147). A *bounded* function (`_bounded_functions`: no call cycle, every callee
+bounded, no node that can run Python code) has a call tree of at most k compiled frames. Its
+`tp_impl_f` first tests `tp_depth_room(k)`: with room for all k frames it runs `tp_fimpl_f`, the
+twin with the same body and no tp_enter_call / tp_leave_call / entry poll, whose Calls go to the
+callees' twins (a `static inline` function in the same unit, so the C compiler can inline it);
+without room the counted path runs and raises RecursionError exactly where it always did. Frames
+of a fast tree are not in `tp_depth.count`, so every twin takes `int tp_fd`, the number of the
+tree's frames active including itself (1 from the precheck, `tp_fd + 1` into a callee twin), and
+the two points where a fast tree can run Python code, a `redo` Call and the loop poll's
+`tp_poll_slow` (a signal handler, a finalizer, another compiled call), are wrapped in
+`tp_depth_py_begin(tp_fd)` / `tp_depth_py_end(tp_fd)`, which add and remove `tp_fd` from the count:
+whatever runs there sees the count the counted path would have had.
+
 Ownership rule (ir.py "Safety"), implemented by the `_own_*` emit helpers below and nowhere else:
   1. every OBJ local, including each OBJ parameter, which the impl copies with a new reference at
      entry, owns one strong reference, or is NULL;
@@ -327,9 +340,11 @@ _RUNS_PYTHON = (ir.CallObject, ir.GetAttr, ir.Truth, ir.CompareObj, ir.ObjToFloa
 
 
 def _runs_no_python(f: ir.Function) -> bool:
-    """Conservative: False when `f` has any node that can run Python code, any `redo` Call, or
-    touches an object at all (an OBJ parameter, local, result or expression: releasing one can run
-    a finalizer)."""
+    """Conservative: False when `f` has any node that can run Python code, or touches an object
+    other than a fresh exact int, float or bool made by Box of a scalar (an OBJ parameter, local,
+    result or any other OBJ expression: releasing one can run a finalizer). A `redo` Call is
+    allowed (its callee is bounded, checked by the caller): the redo is one of the two points where
+    a fast tree runs Python code, and `_redo_call` counts the tree's frames around it."""
     if f.returns is Type.OBJ or f.entry_globals and any(g.type is Type.OBJ for g in f.entry_globals):
         return False
     if any(isinstance(p, ir.Param) and p.type is Type.OBJ for p in f.params):
@@ -340,9 +355,9 @@ def _runs_no_python(f: ir.Function) -> bool:
         if isinstance(s, ir.FieldSet):
             return False
     for e in _all_exprs(f):
-        if isinstance(e, _RUNS_PYTHON) or e.type is Type.OBJ:
+        if isinstance(e, _RUNS_PYTHON):
             return False
-        if isinstance(e, ir.Call) and e.redo:
+        if e.type is Type.OBJ and not (isinstance(e, ir.Box) and e.operand.type in ir.SCALARS):
             return False
     return True
 
@@ -677,6 +692,8 @@ def _check_entry_globals(f: ir.Function, functions: dict[str, ir.Function]) -> N
 
 def _impl_signature(f: ir.Function, fast: bool = False) -> str:
     params = ["PyObject *tp_module"]
+    if fast:
+        params.append("int tp_fd")              # compiled frames of this fast tree, itself included
     for p in f.params:
         if isinstance(p, ir.ArrayParam):
             params.append(f"{_ARRAY_CT[p.type]} *{_ident('l', p.name)}")
@@ -694,9 +711,10 @@ def _impl_signature(f: ir.Function, fast: bool = False) -> str:
     return f"static int {_ident('tp_impl', f.name)}({', '.join(params)})"
 
 
-def _impl_call_args(f: ir.Function) -> str:
-    """The arguments that forward an impl's own parameters to another impl of the same signature."""
-    args = ["tp_module"]
+def _impl_call_args(f: ir.Function, fd: str | None = None) -> str:
+    """The arguments that forward an impl's own parameters to another impl of the same signature
+    (`fd`: the value of a fast twin's `tp_fd`)."""
+    args = ["tp_module"] + ([fd] if fd is not None else [])
     for p in f.params:
         args.append(_ident("l" if isinstance(p, ir.ArrayParam) or p.type is not Type.OBJ else "p", p.name))
     args += [_ident("l", g.name) for g in f.entry_globals]
@@ -1010,7 +1028,7 @@ class _FnGen:
         # Depth is counted by the callee itself (tp_enter_call at its entry, issue #57).
         if self.fast:
             # the fast twin's callees are bounded too (_bounded_functions): their fast twins, uncounted
-            self.emit(f"tp_s = {_ident('tp_fimpl', e.function)}(tp_module{''.join(', ' + x for x in args)});")
+            self.emit(f"tp_s = {_ident('tp_fimpl', e.function)}(tp_module, tp_fd + 1{''.join(', ' + x for x in args)});")
         else:
             self.emit(f"tp_s = {_ident('tp_impl', e.function)}(tp_module{''.join(', ' + x for x in args)});")
         self.depth -= 1
@@ -1064,13 +1082,19 @@ class _FnGen:
                 boxes.append(b)
                 av.append(b)
         rr = self.tmp("PyObject *")
+        # In a fast twin the interpreted callee (a Python frame) and whatever it calls must see the
+        # frames of this fast tree: count them for exactly the span that can run Python code, from
+        # the call to the release of its result (module docstring, "Fast entry").
+        end = "tp_depth_py_end(tp_fd); " if self.fast else ""
+        if self.fast:
+            self.emit("tp_depth_py_begin(tp_fd);")
         if av:
             self.emit(f"{{ PyObject *tp_av[{len(av)}] = {{{', '.join(av)}}};")
             self.emit(f"  {rr} = tp_cg_redo(tp_module, {k}, tp_av, {len(av)}, NULL); }}")
         else:
             self.emit(f"{rr} = tp_cg_redo(tp_module, {k}, NULL, 0, NULL);")
         self._own_release(*boxes)
-        self.emit(f"if ({rr} == NULL) {{ tp_rc = -1; goto tp_exit; }}")
+        self.emit(f"if ({rr} == NULL) {{ {end}tp_rc = -1; goto tp_exit; }}")
         rt = callee.returns
         if rt is Type.NONE:
             self.emit(f"tp_s = ({rr} == Py_None) ? 0 : 1;")
@@ -1082,6 +1106,8 @@ class _FnGen:
             self.emit(f"tp_s = {_UNBOX[rt]}({rr}, &{t});")
             what = {Type.F64: "a float", Type.BOOL: "True or False", Type.I64: "an int in i64"}[rt]
         self._own_release(rr)
+        if self.fast:
+            self.emit("tp_depth_py_end(tp_fd);")
         msg = c_string(f"typedpython: the interpreted redo of {callee.name} did not return {what}")
         self.emit(f"if (tp_s != 0) {{ PyErr_SetString(PyExc_SystemError, {msg}); tp_rc = -1; goto tp_exit; }}")
         self.depth -= 1
@@ -1434,6 +1460,12 @@ class _FnGen:
         if not self.snapshot:
             # A function-local countdown (kept in a register), not the module counter: a load and
             # store of a global on every iteration of a short inner loop cost fannkuch ~38%.
+            if self.fast:
+                # the poll can run a signal handler or another compiled call: count this fast tree
+                self.emit("if (--tp_pc == 0) { tp_pc = TP_POLL_INTERVAL; tp_depth_py_begin(tp_fd); "
+                          "tp_s = tp_poll_slow(tp_st->breaker); tp_depth_py_end(tp_fd); "
+                          "if (tp_s != 0) { tp_rc = -1; goto tp_exit; } }")
+                return
             self.emit("if (--tp_pc == 0) { tp_pc = TP_POLL_INTERVAL; "
                       "if (tp_poll_slow(tp_st->breaker) != 0) { tp_rc = -1; goto tp_exit; } }")
 
@@ -1549,7 +1581,7 @@ class _FnGen:
             out.append(f"    {ct}{sep}{n} = {init};")
         # (a fast twin declares tp_st / tp_dict only when its body reads them: PyModule_GetState and
         # PyModule_GetDict are external calls, and a leaf must stay free of them to inline well)
-        out.append("    (void)tp_s; (void)tp_pc;"
+        out.append("    (void)tp_s; (void)tp_pc;" + (" (void)tp_fd;" if self.fast else "")
                    + (" (void)tp_st;" if not self.fast or "tp_st" in body_text else "")
                    + (" (void)tp_dict;" if not self.fast or "tp_dict" in body_text else "")
                    + "".join(f" (void){_ident('l', n)};" for n in self.types if n not in params)
@@ -1573,7 +1605,7 @@ class _FnGen:
                 out.append(f"    if (tp_depth_room({k_bound})) {{")
                 out.append("        int tp_fr;")
                 out.append("        tp_trace_fast_hit();")
-                out.append(f"        tp_fr = {_ident('tp_fimpl', f.name)}({_impl_call_args(f)});")
+                out.append(f"        tp_fr = {_ident('tp_fimpl', f.name)}({_impl_call_args(f, '1')});")
                 out.append("        tp_depth_done();")
                 out.append("        return tp_fr;")
                 out.append("    }")

@@ -67,9 +67,21 @@ def loopy(n: int) -> float:
     for i in range(n):
         s += leaf(i)
     return s
+
+
+def outer(n: int) -> float:
+    return loopy(n) + 1.0
+
+
+def cube(x: int) -> float:
+    return float(x * x * x) + leaf(x)
+
+
+def fill(x: int, out: list[float]) -> None:
+    out[0] = cube(x)
 """
 
-BOUNDED = {"leaf": 1, "mid": 2, "top": 3, "loopy": 2}
+BOUNDED = {"leaf": 1, "mid": 2, "top": 3, "loopy": 2, "outer": 3, "cube": 2, "fill": 3}
 NOT_BOUNDED = ("objy", "viaobj", "rec", "callrec")
 
 
@@ -145,7 +157,7 @@ def test_the_fast_impl_is_never_addressed(traced):
     assert "&tp_fimpl_" not in c and "(tp_fimpl_" not in c
 
 
-CHILD = """\
+LOAD = """\
 import importlib.machinery, importlib.util, json, sys
 def load(name, path, ext):
     if ext:
@@ -160,7 +172,9 @@ comp = load("fast_mod", sys.argv[1], True)
 plain = load("fast_mod_plain", sys.argv[2], False)
 LIMIT = int(sys.argv[3])
 sys.setrecursionlimit(LIMIT)
+"""
 
+DESCEND = """\
 def descend(d, fn, a):
     if d > 0:
         return descend(d - 1, fn, a)
@@ -174,7 +188,9 @@ def run(fn, a, d):
         return descend(d, fn, a)
     except RecursionError:
         return ("deep",)
+"""
 
+CHILD = LOAD + DESCEND + """\
 report = {"mismatch": [], "ok": {}, "rec": {}, "hits": []}
 for name in ("leaf", "mid", "top", "loopy"):
     arg = 3
@@ -209,6 +225,149 @@ def test_differential_depth_at_every_depth_around_the_limit(traced, tmp_path):
         assert r["ok"][name] > 100 and r["rec"][name] >= 1, (name, r)
     # top needs more room than leaf: it starts raising at a smaller depth
     assert r["rec"]["top"] > r["rec"]["leaf"]
+
+
+CHILD_REDO = LOAD + DESCEND + """\
+def mk(mod):
+    def call(x):
+        out = [0.0]
+        mod.fill(x, out)
+        return out[0]
+    return call
+
+def deep_comp(i):
+    return float(comp.rec(50))
+
+def deep_plain(i):
+    return float(plain.rec(50))
+
+report = {"mismatch": [], "ok": {}, "rec": {}, "deopts": 0}
+for x in (3, 3_000_000):             # 3: no overflow; 3_000_000: x * x * x overflows i64, the redo runs
+    if x != 3:
+        # the interpreted cube of the redo looks `leaf` up in its module globals: make that a deep
+        # call, so that what the redo runs depends on the exact depth it starts from
+        comp.leaf = deep_comp
+        plain.leaf = deep_plain
+    ok = 0
+    before = comp.__typedpython_deopts__
+    for d in range(1, LIMIT + 6):
+        c = run(mk(comp), x, d)
+        p = run(mk(plain), x, d)
+        if c != p:
+            report["mismatch"].append([x, d, c, p])
+        kind = c[0]
+        report.setdefault(kind, {})
+        report[kind][str(x)] = report[kind].get(str(x), 0) + 1
+        ok += kind == "ok"
+    if x != 3:
+        report["deopts"] = comp.__typedpython_deopts__ - before
+        report["deopt_ok"] = ok
+print(json.dumps(report))
+"""
+
+CHILD_SIGNAL = LOAD + DESCEND + """\
+import signal
+
+class Stop(Exception):
+    pass
+
+M = None
+res = []
+
+def measure():
+    lo, hi = 0, 400
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        try:
+            M.rec(mid)
+            lo = mid
+        except RecursionError:
+            hi = mid - 1
+    return lo
+
+def handler(sig, frm):
+    res.append(measure())
+    raise Stop
+
+signal.signal(signal.SIGALRM, handler)
+
+# interpreted baseline: outer_py -> spin_py -> trip, the handler runs in trip's frame, where the
+# compiled run has the breaker lambda (outer and spin are compiled frames with no Python frame)
+def trip():
+    signal.raise_signal(signal.SIGALRM)
+
+def spin_py():
+    trip()
+
+def outer_py(a):
+    spin_py()
+
+def base(d):
+    global M
+    M = plain
+    res.clear()
+    try:
+        descend(d, outer_py, 0)
+    except Stop:
+        pass
+    return list(res)
+
+def compiled(d):
+    global M
+    M = comp
+    res.clear()
+    signal.setitimer(signal.ITIMER_REAL, 0.05)
+    try:
+        descend(d, comp.outer, 10 ** 9)      # outer -> loopy: the poll runs in a fast tree at fd 2
+    except Stop:
+        pass
+    signal.setitimer(signal.ITIMER_REAL, 0)
+    return list(res)
+
+report = {"mismatch": [], "values": []}
+for d in range(0, 150, 7):
+    b, c = base(d), compiled(d)
+    report["values"].append(b)
+    if b != c or len(b) != 1:
+        report["mismatch"].append([d, b, c])
+print(json.dumps(report))
+"""
+
+
+def run_child(script, so, plain_src, limit="200"):
+    proc = subprocess.run([sys.executable, "-c", script, str(so), str(plain_src), limit],
+                          capture_output=True, text=True, timeout=300)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_a_redo_inside_a_fast_tree_sees_the_exact_depth(traced, tmp_path):
+    # fill (impure, bounded) -> cube (bounded, deopts on i64 overflow): the redo runs the interpreted
+    # cube, whose `leaf` (rebound by the child to a call of the compiled recursive rec(50)) goes
+    # through the counted path; the depth at which that raises RecursionError must be the
+    # interpreter's, so the redo must be counted with the frames of the fast tree around it
+    proved, c, so = traced
+    plain_src = tmp_path / "fast_mod_plain.py"
+    plain_src.write_text(SOURCE)
+    r = run_child(CHILD_REDO, so, plain_src)
+    assert r["mismatch"] == [], r["mismatch"][:5]
+    for x in ("3", "3000000"):
+        assert r["ok"][x] > 100 and r["rec"][x] >= 1, (x, r)
+    assert r["deopts"] >= r["deopt_ok"] > 100           # the redo really ran at every ok depth
+    assert "tp_depth_py_begin(tp_fd);" in fn_text(c, "static inline int tp_fimpl_fill")
+
+
+def test_a_signal_handler_in_a_fast_tree_poll_sees_the_exact_depth(traced, tmp_path):
+    # a compiled recursive call made by a signal handler that the poll of a loop two frames deep
+    # in a fast tree runs reaches RecursionError at the interpreter's depth
+    proved, c, so = traced
+    plain_src = tmp_path / "fast_mod_plain.py"
+    plain_src.write_text(SOURCE)
+    r = run_child(CHILD_SIGNAL, so, plain_src)
+    assert r["mismatch"] == [], r["mismatch"][:5]
+    assert len({v[0] for v in r["values"]}) > 5            # the measured depth tracks the stack depth
+    loop = fn_text(c, "static inline int tp_fimpl_loopy")
+    assert "tp_depth_py_begin(tp_fd);" in loop and "tp_depth_py_end(tp_fd);" in loop
 
 
 def test_the_fast_path_is_taken_when_there_is_room(tmp_path):
