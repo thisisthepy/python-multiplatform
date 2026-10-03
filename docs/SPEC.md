@@ -369,6 +369,20 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   either plugin application order. Without that configuration nothing happens and none is created.
   `Status: implemented` — `GP/TypedPythonStubsWiringTest.kt` (a `ProjectBuilder` project; the toolchain
   side that consumes the configuration is toolchain#23 and is not exercised here).
+- **B-10** pythonx-compose's `UI.ipynb` scenarios run end to end on desktop (#26), in the spellings
+  pythonx-compose decided: with the pythonx-compose **wheel** installed (a path or version input; no
+  wheel fails every scenario by name unless `-PnotebookE2e.skip=true` disables them) and the host
+  drawing `PythonContent("pythonx.compose.runtime", "app_root")` (B-8): `import main` draws the root it
+  declares; the notebook reads and writes the state the screen shows and the screen follows within four
+  frames; a cell that redeclares the root with `@app` puts it on screen within four frames with no
+  update call, and disabling the replacement wiring (a stub `@app`, or a host handed the root once)
+  leaves the screen unchanged; each practice cell (Text, Button, Card, Icon, Column, Row, Arrangement,
+  Spacer) draws exactly what the same composables draw from Kotlin; `TextField(state=...)` takes a
+  Hangul input-method composition with no Python function started and the root not rerun, holds the
+  composing range in Compose, and the notebook reads the committed text; a write from Python outside
+  the composition reaches the screen within four frames. Notebook content with no decided or Kotlin
+  counterpart is listed, not imitated. `Status: planned` — `ksp-fixtures/notebook-e2e/` (tests, and a
+  README with the cell map, the wheel commands and the gaps); not yet run.
 
 ## 7. Threading and builds
 
