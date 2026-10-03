@@ -52,8 +52,10 @@ fun tpCheck(value: Double, limit: Double): Double {
  * wrapper unreachable -- so the token's `sys.getrefcount` is only meaningful after a JVM collection
  * and the cleaner have run (`TypedPythonKotlinCallTest.settledCounts`).
  *
- * Deliberately **not** closed here: closing a `PyObject` argument inside an upcall releases its
- * reference twice and crashed the test JVM (`Py_XDECREF` on the cleaner thread) -- binder issue #98.
+ * Not closed here, so the test also covers the cleaner path. Closing it would be equally correct:
+ * `close()` gives back the wrapper's one reference and the cleaner then has nothing left to release
+ * (`closeArgument`, `PyObjectArgumentReleaseTest`). The JVM crash once blamed on that (issue #98) came
+ * from a test wrapping fake addresses as owned objects, not from the binder.
  */
 fun tpTouch(token: PyObject?): Long {
     TpBridgeLedger.touches += 1
