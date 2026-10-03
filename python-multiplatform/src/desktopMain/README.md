@@ -125,6 +125,23 @@ staged one's `__pycache__` reflects whatever ran against it, so neither is packa
 `__pycache__` into the app image on first use where it can. See
 `docs/platforms/desktop-packaged-app.md`.
 
+## Nothing outside `java.base` (SPEC L-10)
+
+A packaged app does not run on the JDK the build used. Compose Desktop's `createDistributable`
+`jlink`s a runtime holding only the modules it was told about; the sample's image has `java.base
+java.datatransfer java.xml java.prefs java.desktop java.logging jdk.crypto.ec` and nothing else.
+`sun.misc.Unsafe` is in `jdk.unsupported`, so `Class.forName("sun.misc.Unsafe")` there throws
+`ClassNotFoundException` -- which `ProxyType`'s initialiser did, so every proxy install in the
+packaged sample failed with `ExceptionInInitializerError: null` and every import of a Kotlin
+namespace after it with `No module named 'org'` (issue #77). Under Gradle every module is
+observable and nothing showed it.
+
+Native memory is reached through `Panama` (`java.lang.foreign`, in `java.base`):
+`allocateBytesFreeable` for a struct image built in a heap `ByteBuffer`, `readPointerSlot` /
+`writePointerSlot` for one 8-byte word. `JlinkedRuntimeProxyTypeTest` (desktopTest) runs a child JVM
+with `--limit-modules java.base`, which makes a full JDK behave like a jlinked image without building
+one. Tests may still use `Unsafe` (`CycleCollectionTest` does): they run on the full JDK.
+
 ## The consumer's own Python is a classpath resource, and `python/` collides with our own package
 
 `toolchain`'s `stagePythonBundleDesktop` puts a consumer's payload at the **root of the jar** as

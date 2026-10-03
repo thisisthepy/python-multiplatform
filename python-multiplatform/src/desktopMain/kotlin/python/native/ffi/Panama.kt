@@ -75,8 +75,20 @@ internal object Panama {
      *  Release with [freePointerSlot]. */
     val allocatePointerSlot: () -> Long
 
-    /** Read back the pointer a callee wrote into a slot obtained from [allocatePointerSlot]. */
+    /** Read back the pointer a callee wrote into a slot obtained from [allocatePointerSlot].
+     *
+     *  Reads any 8 native bytes at the address, in the platform's byte order, so it is also the
+     *  desktop's `*(int64_t *)addr` -- `ProxyType` reads its handle slot through it. */
     val readPointerSlot: (Long) -> Long
+
+    /** Write a pointer-sized value (`*(int64_t *)addr = value`, native byte order).
+     *
+     *  The other half of [readPointerSlot]. It exists so that nothing on desktop reaches native
+     *  memory through `sun.misc.Unsafe`: that class lives in the `jdk.unsupported` module, which a
+     *  `jlink`ed runtime -- Compose Desktop's `createDistributable` among them -- does not contain
+     *  unless asked to (issue #77, SPEC L-10). `java.lang.foreign` is in `java.base`, which every
+     *  runtime has. */
+    val writePointerSlot: (Long, Long) -> Unit
 
     /** Release a slot obtained from [allocatePointerSlot]. */
     val freePointerSlot: (Long) -> Unit
@@ -146,6 +158,7 @@ internal object Panama {
                 freeUtf8Address = data.freeUtf8Address
                 allocatePointerSlot = data.allocatePointerSlot
                 readPointerSlot = data.readPointerSlot
+                writePointerSlot = data.writePointerSlot
                 freePointerSlot = data.freePointerSlot
                 allocateBytesFreeable = data.allocateBytesFreeable
                 unboundDowncallHandle = data.unboundDowncallHandle
@@ -165,6 +178,7 @@ internal object Panama {
                 freeUtf8Address = data.freeUtf8Address
                 allocatePointerSlot = data.allocatePointerSlot
                 readPointerSlot = data.readPointerSlot
+                writePointerSlot = data.writePointerSlot
                 freePointerSlot = data.freePointerSlot
                 allocateBytesFreeable = data.allocateBytesFreeable
                 unboundDowncallHandle = data.unboundDowncallHandle
@@ -188,6 +202,7 @@ internal object Panama {
         val freeUtf8Address: (Long) -> Unit,
         val allocatePointerSlot: () -> Long,
         val readPointerSlot: (Long) -> Long,
+        val writePointerSlot: (Long, Long) -> Unit,
         val freePointerSlot: (Long) -> Unit,
         val allocateBytesFreeable: (ByteArray) -> Long,
         val unboundDowncallHandle: (Int, Int, ReturnKind) -> MethodHandle,
@@ -484,6 +499,15 @@ internal object Panama {
             java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.nativeOrder()).getLong(0)
         }
 
+        // The same copy as `readSlot`, running the other way: byte[] -> native.
+        val writeSlot: (Long, Long) -> Unit = { addr, value ->
+            val bytes = ByteArray(POINTER_BYTES.toInt())
+            java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.nativeOrder()).putLong(0, value)
+            val srcSeg: Any = ofArrayExact.invokeExact(bytes) as Any
+            val dstSeg: Any = addressToSegmentExact.invokeExact(addr, POINTER_BYTES) as Any
+            copyExact.invokeExact(srcSeg, 0L, dstSeg, 0L, POINTER_BYTES) as Unit
+        }
+
         val freeSlot: (Long) -> Unit = freeAddr
 
         // ---- Arbitrary bytes into a malloc buffer (non-UTF-8 C strings: wchar_t) ----
@@ -586,7 +610,7 @@ internal object Panama {
             segmentAddressExact.invokeExact(stub) as Long
         }
 
-        return ModernData(allocStr, readStr, findSym, findAddr, allocFreeable, freeAddr, allocSlot, readSlot, freeSlot, allocBytes, buildShape, buildUpcallStub, buildUpcallStubII_L, buildUpcallStubIII_I, buildUpcallStubI_I, buildUpcallStubI_V)
+        return ModernData(allocStr, readStr, findSym, findAddr, allocFreeable, freeAddr, allocSlot, readSlot, writeSlot, freeSlot, allocBytes, buildShape, buildUpcallStub, buildUpcallStubII_L, buildUpcallStubIII_I, buildUpcallStubI_I, buildUpcallStubI_V)
     }
 
     private fun adaptModernHandle(
@@ -657,6 +681,7 @@ internal object Panama {
         val freeUtf8Address: (Long) -> Unit,
         val allocatePointerSlot: () -> Long,
         val readPointerSlot: (Long) -> Long,
+        val writePointerSlot: (Long, Long) -> Unit,
         val freePointerSlot: (Long) -> Unit,
         val allocateBytesFreeable: (ByteArray) -> Long,
         val unboundDowncallHandle: (Int, Int, ReturnKind) -> MethodHandle,
@@ -843,6 +868,7 @@ internal object Panama {
         }
         val allocSlot: () -> Long = { slotsUnsupported() }
         val readSlot: (Long) -> Long = { slotsUnsupported() }
+        val writeSlot: (Long, Long) -> Unit = { _, _ -> slotsUnsupported() }
         val freeSlot: (Long) -> Unit = { slotsUnsupported() }
 
         // Same reason as the slots: this backend writes native memory only through `toCString`,
@@ -946,7 +972,7 @@ internal object Panama {
             toRawLongMethod.invoke(segAddressMethod.invoke(stub)) as Long
         }
 
-        return IncubatorData(allocStr, readStr, findSym, findAddr, allocFreeable, freeAddr, allocSlot, readSlot, freeSlot, allocBytes, buildShape, buildUpcallStub, buildUpcallStubII_L, buildUpcallStubIII_I, buildUpcallStubI_I, buildUpcallStubI_V)
+        return IncubatorData(allocStr, readStr, findSym, findAddr, allocFreeable, freeAddr, allocSlot, readSlot, writeSlot, freeSlot, allocBytes, buildShape, buildUpcallStub, buildUpcallStubII_L, buildUpcallStubIII_I, buildUpcallStubI_I, buildUpcallStubI_V)
     }
 
     private fun adaptIncubatorHandle(
