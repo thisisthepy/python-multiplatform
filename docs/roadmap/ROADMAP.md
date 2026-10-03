@@ -262,17 +262,14 @@ plugin applies to Android modules (AGP 8.10.1); `ksp-fixtures/android` exists; t
 trampolines exist. GraalVM native image upcalls are verified by hand
 (`docs/platforms/graal-native-image-verification.md`, `PM/desktopTest/.../ReachabilityMetadataTest.kt`).
 
-- **13.1 The iOS app bundle carries no Python standard library — open.** (Was old §9 item 4 and §14b
-  item 11.) The Xcode "Install Target Specific Python Standard Library" phase
-  (`iosApp/iosApp.xcodeproj/project.pbxproj`) rsyncs `…/ios-arm64_x86_64-simulator/lib/`, which holds
-  only `libpython3.14.dylib`, and nothing in the app path sets `PYTHONHOME`
-  (`sample/src/iosMain/.../MainViewController.kt` says so). The app starts only with a manual `rsync`
-  plus `SIMCTL_CHILD_PYTHONHOME` (recipe in git history, old §13). To decide first: stage by Gradle or
-  by a corrected Xcode phase; take `PYTHONHOME` from the environment or derive it from the bundle in
-  `iosMain` without breaking the test task. The "Prepare Python Binary Modules" phase rewrites
-  `lib-dynload/*.so` into `.fwork` placeholders, so a bundle-hosted stdlib needs BeeWare's importer
-  or that phase disabled. A `PYTHONHOME` on an external volume hangs the sandboxed app in `open()`
-  rather than failing.
+- **13.1 The iOS app bundle carries no Python standard library — implemented, simulator proof
+  open.** SPEC L-11, issue #59, `docs/platforms/ios-app-bundle.md`: per-slice staging
+  (`stageIosPythonHome_*`, `stageIosPythonHomeForXcode`), `tools/xcode/install-python.sh` (stdlib to
+  `<app>/python-multiplatform-home/`, payload to `<app>/python/`, `.so` wrapped as frameworks with
+  `.fwork` placeholders) replacing `iosApp/`'s two broken phases, and `IosPythonHome` +
+  `Py_SetPythonHome` at run time. Left: the installed-app run on the simulator with no
+  `SIMCTL_CHILD_*` (the page's "Checking it"); a device run; and a way for consumers outside this
+  repository to stage the stdlib (the iOS archive download is in this build script, not the plugin).
 - **13.2 Native-image upcall verification as an automated test — open.** SPEC U-6/N-5: the procedure
   is manual (`:sample:nativeCompile`, Liberica NIK); only the reachability metadata is guarded
   automatically.

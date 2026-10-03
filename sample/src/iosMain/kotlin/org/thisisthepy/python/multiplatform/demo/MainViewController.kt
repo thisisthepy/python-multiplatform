@@ -10,8 +10,9 @@ import org.thisisthepy.python.multiplatform.demo.ui.App
  * from inside a composable body -- on every recomposition, and only once the user had expanded
  * the section that hosted it.
  *
- * On iOS the shipped framework carries no stdlib, so `PYTHONHOME` has to point at one before this
- * runs; see `python-multiplatform/src/iosMain/README.md`.
+ * On iOS the shipped framework carries no stdlib. An app built through `iosApp/`'s "Install Python
+ * Standard Library and Payload" phase carries one in its bundle and the library finds it there
+ * (SPEC L-10); see `python-multiplatform/src/iosMain/README.md`.
  */
 fun MainViewController() = run {
     // Outside the content lambda on purpose: that lambda is `@Composable`, so anything in it runs
@@ -59,5 +60,13 @@ private fun dumpDemoSections() {
     line("6 staticSurface") { PythonDemo.staticSurface() }
     line("7 awaitFast") { PythonDemo.awaitFastPath() }
     line("7 awaitSuspending") { PythonDemo.awaitSuspending() }
+    // SPEC L-10 (issue #59): a stdlib module, a stdlib extension module (a .fwork framework), and the
+    // payload's module, all read out of the installed bundle -- docs/platforms/ios-app-bundle.md.
+    line("8 bundle") {
+        PythonDemo.evaluate(
+            "(__import__('json').dumps(__import__('example_py').greeting()), __import__('_json').__file__, " +
+                "__import__('example_py').__file__, __import__('sys').prefix, __import__('sys').executable)"
+        )
+    }
     println("DEMO ---- end ----")
 }
