@@ -108,9 +108,51 @@ is no longer copied into the app; the file itself is still in the project.
 `sample/src/iosMain/app.xcodeproj` is not wired: it still references `../../dist/toolchain/...` and
 a `ComposeApp` framework that this build does not produce, and has never been built here.
 
-A consumer outside this repository cannot call `:python-multiplatform:stageIosPythonHomeForXcode`:
-the iOS archive download lives in this repository's build script, not in the published plugin. That
-is the next step if consumers are to get this without copying the sample.
+## Wiring an app outside this repository (issue #90)
+
+An app that applies the published plugin (`io.github.thisisthepy.python.multiplatform.bindings`) and
+depends on the published library gets every Gradle piece above on its own project; nothing has to
+be copied from this repository.
+
+| Task (on the consumer project) | What it does |
+|---|---|
+| `acquireIosPythonSupport` | Downloads the iOS support archive pinned for the library's CPython (`IosSupportArchive`: BeeWare `<X.Y>-<build>` up to 3.14, python.org from 3.15), accepts it only if its SHA-256 equals the `ios-*` entry of `python-checksums.properties`, extracts `Python.xcframework/` once per machine into `<Gradle user home>/python-multiplatform/ios-support/<lock key>/` and stamps it |
+| `stageIosPythonXcframework` | Syncs that framework to `build/xcode-frameworks/Python.xcframework` (for the Xcode project to link and embed) |
+| — (automatic) | Every Kotlin/Native iOS `Framework` binary gets `-framework Python -F<build>/xcode-frameworks/Python.xcframework/<slice>` in `linkerOpts`, and its link task depends on the two tasks above and below |
+| `stageIosPythonHome_<slice>`, `stageIosPythonHome`, `stageIosPythonHomeForXcode` | As in this repository, into `build/python-ios-home/`; prints `PYTHON_HOME_DIR=` and `PYTHON_DYLIB_INFO_TEMPLATE=` |
+| `writeIosInstallPythonScript` | Writes this repository's `tools/xcode/install-python.sh` (carried in the plugin jar) to `build/python-multiplatform/xcode/install-python.sh`, with `PYTHON_HOME_TASK` defaulting to `<project path>:stageIosPythonHomeForXcode` |
+
+**Where the pins live.** One table: `python-checksums.properties` at the repository root. The library
+build verifies `downloadPython_ios` against it at download time; the plugin build generates its
+`ios-*` entries into `PINNED_IOS_SUPPORT_SHA256` (`generateCoordinates`), so a published plugin
+carries exactly the pins of the library it was built with. The archive name, URL and lock key are one
+function (`IosSupportArchive.forVersion`) called by both. `pythonBindings { pythonVersion;
+pythonAppleSupportBuild }` choose another archive; one without a pin is refused before any download.
+
+**How a consumer gets the script.** From the plugin, not by copying: `writeIosInstallPythonScript`
+writes the version of the script that matches the plugin's own tasks, and a plugin upgrade rewrites
+it. The consumer's Xcode project (in `iosApp/` beside a Gradle root whose app module is `:app`):
+
+- Link and embed `../app/build/xcode-frameworks/Python.xcframework` (run
+  `./gradlew :app:stageIosPythonXcframework` once before opening the project, so the file exists).
+- A "Compile Kotlin Framework" phase: `cd "$SRCROOT/.."` and `./gradlew :app:embedAndSignAppleFrameworkForXcode`.
+- After Copy Bundle Resources and before Embed Frameworks, with `ENABLE_USER_SCRIPT_SANDBOXING = NO`:
+
+```sh
+set -e
+cd "$SRCROOT/.."
+./gradlew -q :app:writeIosInstallPythonScript
+export PYTHON_PAYLOAD_DIR="$SRCROOT/../app/python"     # or PYTHON_PAYLOAD_TASK=<task printing PYTHON_PAYLOAD_DIR=>
+/bin/bash app/build/python-multiplatform/xcode/install-python.sh
+```
+
+`tools/consumer-ios-fixture/` is exactly such a consumer (a standalone Gradle build resolving only from
+`mavenLocal()`, one `iosSimulatorArm64` framework, a SwiftUI app printing the DEMO 8 probe); it uses
+the repository's wrapper as `../../gradlew`, which a real consumer writes as `./gradlew`.
+
+In this repository, `:sample` applies the plugin too, so its `Python.xcframework` and linker flags now
+come from the same tasks (it used to copy the library's extraction in `prepareIosFrameworks`), and
+`iosApp/` is unchanged: the path it references is the same.
 
 ## Checking it (completion criterion of #59)
 
@@ -132,8 +174,8 @@ test ! -e python-multiplatform/build/python-ios-home/iphonesimulator-arm64/home/
 EFFECTIVE_PLATFORM_NAME=-iphonesimulator ARCHS="arm64 x86_64" \
   ./gradlew -q :python-multiplatform:stageIosPythonHomeForXcode > .tmp/stage-universal.out 2>&1; echo "EXIT=$?"
 
-# 1. Frameworks the Xcode project links against
-./gradlew :sample:prepareIosFrameworks --console=plain > .tmp/prepare.log 2>&1; echo "EXIT=$?"
+# 1. Frameworks the Xcode project links against (from the bindings plugin, issue #90)
+./gradlew :sample:stageIosPythonXcframework --console=plain > .tmp/prepare.log 2>&1; echo "EXIT=$?"
 
 # 2. Build the app (flags from the last verified run, ROADMAP history 2026-08-13: actool cannot
 #    compile the app icon against this machine's simulator runtimes, and -target avoids
@@ -179,3 +221,85 @@ Fail shapes and what they mean:
 | `Fatal Python error: Failed to import encodings module` | no `python-multiplatform-home/` in the installed app; the phase did not run |
 | `DEMO 8 bundle | ModuleNotFoundError: No module named '_json'` | the `.fwork` did not resolve; compare `sys.executable`'s directory with the app directory |
 | `DEMO 8 bundle | ModuleNotFoundError: No module named 'example_py'` | `<app>/python/` missing: `PYTHON_PAYLOAD_DIR` not set in the phase |
+
+## Checking it from a consumer (completion criterion of #90)
+
+The same probe, from `tools/consumer-ios-fixture/`, built against `mavenLocal()` only. All commands
+from the repository root unless a `cd` says otherwise; one Gradle invocation at a time.
+
+```bash
+export JAVA_HOME=/Users/ibrew/Library/Java/JavaVirtualMachines/jdk-21.0.12+8/Contents/Home
+export ANDROID_HOME=<Android SDK>       # :python-multiplatform's configuration needs it
+df -h /
+
+# 0. Publish the plugin, the processor and the library's iOS simulator variant to mavenLocal
+./gradlew -p python-multiplatform-gradle-plugin publishToMavenLocal --console=plain > .tmp/pub-plugin.log 2>&1; echo "EXIT=$?"
+./gradlew :python-multiplatform-ksp:publishToMavenLocal --console=plain > .tmp/pub-ksp.log 2>&1; echo "EXIT=$?"
+./gradlew :python-multiplatform:publishKotlinMultiplatformPublicationToMavenLocal \
+    :python-multiplatform:publishIosSimulatorArm64PublicationToMavenLocal \
+    --console=plain > .tmp/pub-lib.log 2>&1; echo "EXIT=$?"
+ls ~/.m2/repository/io/github/thisisthepy/python-multiplatform-iossimulatorarm64/3.14.7-alpha01/
+unzip -l ~/.m2/repository/io/github/thisisthepy/python-multiplatform-gradle-plugin/3.13.0/python-multiplatform-gradle-plugin-3.13.0.jar \
+    | grep install-python.sh                                      # the script travels in the jar
+
+cd tools/consumer-ios-fixture
+
+# 1. The consumer has the tasks
+../../gradlew :app:tasks --group python --console=plain > ../../.tmp/fx-tasks.log 2>&1; echo "EXIT=$?"
+grep -E '^(acquireIosPythonSupport|stageIosPythonXcframework|stageIosPythonHome|stageIosPythonHomeForXcode|writeIosInstallPythonScript) ' ../../.tmp/fx-tasks.log
+
+# 2. Python.xcframework: acquired into the Gradle user home (checksum-pinned, stamped), synced into build/
+../../gradlew :app:stageIosPythonXcframework --console=plain > ../../.tmp/fx-xcf.log 2>&1; echo "EXIT=$?"
+cat ~/.gradle/python-multiplatform/ios-support/ios-3.14-b11/.python-multiplatform-ios-support; echo
+test ! -e ~/.gradle/python-multiplatform/ios-support/ios-3.14-b11/testbed && echo "testbed/ not extracted"
+ls app/build/xcode-frameworks/Python.xcframework/ios-arm64_x86_64-simulator/Python.framework/Python
+
+# 3. The Kotlin framework links Python.framework with no linkerOpts in the consumer's build script
+../../gradlew :app:linkDebugFrameworkIosSimulatorArm64 --console=plain > ../../.tmp/fx-link.log 2>&1; echo "EXIT=$?"
+otool -L app/build/bin/iosSimulatorArm64/debugFramework/ConsumerApp.framework/ConsumerApp | grep Python.framework
+
+# 4. stdlib staging with the same output contract; universal ARCHS refused
+EFFECTIVE_PLATFORM_NAME=-iphonesimulator ARCHS=arm64 \
+  ../../gradlew -q :app:stageIosPythonHomeForXcode > ../../.tmp/fx-stage.out 2>&1; echo "EXIT=$?"
+cat ../../.tmp/fx-stage.out    # PYTHON_HOME_DIR=<abs>/tools/consumer-ios-fixture/app/build/python-ios-home/iphonesimulator-arm64/home ...
+EFFECTIVE_PLATFORM_NAME=-iphonesimulator ARCHS="arm64 x86_64" \
+  ../../gradlew -q :app:stageIosPythonHomeForXcode > ../../.tmp/fx-stage-universal.out 2>&1; echo "EXIT=$?"   # non-zero, names ONLY_ACTIVE_ARCH
+
+# 5. The script, defaulting to the consumer's own task
+../../gradlew -q :app:writeIosInstallPythonScript > ../../.tmp/fx-script.log 2>&1; echo "EXIT=$?"
+grep -n 'home_task=' app/build/python-multiplatform/xcode/install-python.sh   # ${PYTHON_HOME_TASK:-:app:stageIosPythonHomeForXcode}
+
+# 6. Build the app
+(cd iosApp && xcodebuild -project iosApp.xcodeproj -target iosApp -configuration Debug \
+    -sdk iphonesimulator ARCHS=arm64 ONLY_ACTIVE_ARCH=YES SYMROOT="$PWD/build" \
+    CODE_SIGN_IDENTITY="-" CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM="" build) \
+  > ../../.tmp/fx-xcodebuild.log 2>&1; echo "EXIT=$?"
+grep -E "Installing the Python|Wrapped|error:" ../../.tmp/fx-xcodebuild.log
+
+APP=iosApp/build/Debug-iphonesimulator/ConsumerFixture.app
+ls "$APP/python-multiplatform-home/lib/python3.14/os.py" "$APP/python/example_py/__init__.py"
+ls "$APP/python-multiplatform-home/lib/python3.14/lib-dynload" | grep -c '\.fwork$'   # 67 for 3.14
+find "$APP/python-multiplatform-home" "$APP/python" -name '*.so' | wc -l               # 0
+ls -d "$APP/Frameworks/_json.framework" "$APP/Frameworks/Python.framework" "$APP/Frameworks/ConsumerApp.framework"
+codesign --verify --deep --strict "$APP" && echo SIGNED_OK
+
+# 7. Install and launch with no SIMCTL_CHILD_* variable
+UDID=$(xcrun simctl list devices booted | grep -oE '[0-9A-F-]{36}' | head -n 1); echo "$UDID"
+env | grep '^SIMCTL_CHILD_' && echo "unset these first"     # must print nothing
+xcrun simctl uninstall "$UDID" io.github.thisisthepy.consumerfixture
+xcrun simctl install "$UDID" "$APP"
+xcrun simctl launch --console-pty --terminate-running-process "$UDID" \
+    io.github.thisisthepy.consumerfixture > ../../.tmp/fx-launch.log 2>&1 &
+LAUNCH=$!
+# wait for "DEMO ---- end ----" in ../../.tmp/fx-launch.log (Monitor/until-loop; no sleep in this shell), then:
+kill "$LAUNCH"
+grep '^DEMO' ../../.tmp/fx-launch.log
+```
+
+Pass: `DEMO 0 initialize | ok`; `DEMO 1 runtime` names `3.14.7  ·  sys.platform=ios`; `DEMO 8 bundle`
+is a `tuple:` whose five entries are `"Hello from the iOS consumer fixture's Python payload 0.1.0"`
+(as JSON), `_json.__file__` ending
+`ConsumerFixture.app/python-multiplatform-home/lib/python3.14/lib-dynload/_json.cpython-314-iphonesimulator.fwork`,
+`example_py.__file__` ending `ConsumerFixture.app/python/example_py/__init__.py`, `sys.prefix` ending
+`ConsumerFixture.app/python-multiplatform-home`, and `sys.executable` ending
+`ConsumerFixture.app/ConsumerFixture`. The fail shapes are the table above.

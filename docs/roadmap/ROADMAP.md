@@ -268,8 +268,11 @@ trampolines exist. GraalVM native image upcalls are verified by hand
   `<app>/python-multiplatform-home/`, payload to `<app>/python/`, `.so` wrapped as frameworks with
   `.fwork` placeholders) replacing `iosApp/`'s two broken phases, and `IosPythonHome` +
   `Py_SetPythonHome` at run time. Left: the installed-app run on the simulator with no
-  `SIMCTL_CHILD_*` (the page's "Checking it"); a device run; and a way for consumers outside this
-  repository to stage the stdlib (the iOS archive download is in this build script, not the plugin).
+  `SIMCTL_CHILD_*` (the page's "Checking it"); a device run. Consumers outside this repository
+  (issue #90): the plugin now acquires the pinned archive, stages `Python.xcframework`, wires the
+  Kotlin framework's `linkerOpts`, registers `stageIosPythonHomeForXcode` and writes
+  `install-python.sh` (`GP/IosConsumerWiringTest.kt`); the `mavenLocal()` consumer run
+  (`tools/consumer-ios-fixture`, the page's "Checking it from a consumer") is open.
 - **13.2 Native-image upcall verification as an automated test — open.** SPEC U-6/N-5: the procedure
   is manual (`:sample:nativeCompile`, Liberica NIK); only the reachability metadata is guarded
   automatically.

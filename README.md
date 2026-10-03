@@ -138,6 +138,16 @@ prefix with `-Dpython.multiplatform.home=...`. See `docs/platforms/desktop-packa
 </details>
 
 <details>
+<summary><b>iOS</b> — the same plugin provides <code>Python.xcframework</code> and the app's stdlib</summary>
+
+Applied to a Kotlin Multiplatform module with iOS framework binaries, the plugin downloads the pinned
+iOS support archive (checksum-verified, cached machine-wide), syncs `Python.xcframework` to
+`build/xcode-frameworks/`, adds `-framework Python -F...` to every iOS framework's linker options, and
+registers `stageIosPythonHomeForXcode` and `writeIosInstallPythonScript` for the Xcode Run Script phase
+that copies the stdlib and your Python payload into the app. See `docs/platforms/ios-app-bundle.md`.
+</details>
+
+<details>
 <summary><b>Android</b> — call <code>PythonBootstrap.initialize</code></summary>
 
 ```kotlin

@@ -129,10 +129,31 @@ fail, then implement.
   `<NSBundle.mainBundle.resourcePath>/python-multiplatform-home` when that directory exists. A
   bundled prefix goes through L-3's check (a catchable `IllegalStateException` naming the path and
   where it came from) and is handed to CPython with `Py_SetPythonHome`. With neither, nothing is set
-  and behaviour is as before. `Status: partial` — `GP/IosPythonHomeLayoutTest.kt` (slice choice,
-  source directories, file selection, a staged fake tree); `PM/iosSimulatorArm64Test/.../env/IosPythonHomeTest.kt`
+  and behaviour is as before.
+  **Outside this repository** (issue #90), a project that applies the Gradle plugin
+  (`io.github.thisisthepy.python.multiplatform.bindings`) gets the same without this repository's
+  build scripts: `acquireIosPythonSupport` downloads the iOS support archive pinned for the library's
+  CPython version (BeeWare `<X.Y>-<build>` up to 3.14, python.org from 3.15; name, URL and lockfile
+  key are one function shared with the library build), accepts it only if its SHA-256 equals the
+  `ios-*` entry of the root `python-checksums.properties` (generated into the plugin when it is built;
+  no entry, no download), extracts only `Python.xcframework/` (links as copies) once per machine into
+  `<Gradle user home>/python-multiplatform/ios-support/<lock key>/` behind a stamp written last, and
+  fails when a `patchlevel.h` reports another `PY_VERSION`; `stageIosPythonXcframework` syncs it to
+  `build/xcode-frameworks/Python.xcframework`; every Kotlin/Native iOS `Framework` binary gets
+  `-framework Python -F<that>/<slice>` appended to its `linkerOpts` and its link task depends on that
+  sync (test executables and non-iOS targets are untouched); `stageIosPythonHome_<slice>`,
+  `stageIosPythonHome` and `stageIosPythonHomeForXcode` behave as above, into `build/python-ios-home/`;
+  `writeIosInstallPythonScript` writes `tools/xcode/install-python.sh` to
+  `build/python-multiplatform/xcode/install-python.sh` with its default `PYTHON_HOME_TASK` set to that
+  project's own `stageIosPythonHomeForXcode`, `PYTHON_PAYLOAD_DIR`/`PYTHON_PAYLOAD_TASK` unchanged.
+  `pythonBindings { pythonVersion; pythonAppleSupportBuild }` select the archive. `Status: partial` —
+  `GP/IosPythonHomeLayoutTest.kt` (slice choice, source directories, file selection, a staged fake
+  tree); `GP/IosConsumerWiringTest.kt` (the pins equal the lockfile, the consumer's tasks and paths,
+  linker options on fake KGP binaries, acquisition of a fake archive: checksum, version, `testbed/`
+  excluded, links materialised, stamp); `PM/iosSimulatorArm64Test/.../env/IosPythonHomeTest.kt`
   (resolution order; the simulator test task's `PYTHONHOME` still wins). The installed-app run on the
-  simulator is a manual check — `docs/platforms/ios-app-bundle.md`.
+  simulator, in this repository and from a consumer built against `mavenLocal()`, is a manual check —
+  `docs/platforms/ios-app-bundle.md`.
 
 ## 2. Low-level C API (downcall surface)
 
