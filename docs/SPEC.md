@@ -91,8 +91,10 @@ fail, then implement.
   `docs/platforms/desktop-packaged-app.md`.
 - **L-9a** (issue #74) Desktop packaging and loading of `libpython`: every `lib/**` entry of the desktop jar is a real
   file (never 0 bytes -- Gradle extracts the python-build-standalone symlink `libpython3.14.so` as an empty file, so
-  symlinks are resolved and the real library is packed under the `System.mapLibraryName` name, no `.so.1.0`); linux
-  libraries are stripped of debug info when an ELF-capable `strip` exists on the build host (best-effort). The
+  symlinks are resolved and the real library is packed under the `System.mapLibraryName` name, no `.so.1.0`); desktop
+  archives are python-build-standalone's `install_only_stripped` flavour (issue #86; URL and SHA-256 pinned in
+  `python-checksums.properties`), so no linux `libpython*.so` in the jar has a `.debug_*` section (a stripped
+  3.14.7 x86_64 library is 33,106,704 bytes against 251,884,016 unstripped); no host `strip` is involved. The
   classpath library is extracted to `<user cache>/python-multiplatform/<python version>/<platform>/` (macOS
   `~/Library/Caches`, Windows `%LOCALAPPDATA%`, else `$XDG_CACHE_HOME` or `~/.cache`; fallback
   `java.io.tmpdir/python-multiplatform-<user>`; override `-Dpython.multiplatform.cache`), never the working
