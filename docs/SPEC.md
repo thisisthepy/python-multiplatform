@@ -201,10 +201,18 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   extension property's getter reads the same way on its receiver (`Icons.Default.Add`), and both are
   found on the type and then on every type the table says it is a. A property is never a module
   attribute and makes no package. `None` written for a slot with no default is Kotlin's `null` for a
-  reference type; a Python object written into a `kotlin.Any?` slot is held by Kotlin as itself, and an
-  `int` is refused there (it would cross as a handle). `Status: implemented` —
+  reference type; a Kotlin proxy written into a `kotlin.Any?` slot is the Kotlin object, and any other
+  Python object is held by Kotlin as itself. A Python **scalar** written into a `kotlin.Any`/`kotlin.Any?`
+  slot — a function argument or a property write — is boxed into the Kotlin type it means (#69): `bool`
+  → `kotlin.Boolean` (checked before `int`); `int` → `kotlin.Int` when it fits in 32 bits, else
+  `kotlin.Long`, and outside 64 bits refused with a reason; `float` → `kotlin.Double`; `str` →
+  `kotlin.String`. `None` is `null` for `Any?`; for a non-null `Any` it is Kotlin's own refusal (the
+  table does not carry nullability). Reading a `kotlin.Any`/`kotlin.Any?` value back — a property, a
+  function result, or a callback argument — gives the Python scalar for a Kotlin `Int`/`Long`/`Short`/`Byte`
+  (`int`), `Double`/`Float` (`float`), `Boolean` (`bool`), `String`/`Char` (`str`), and a proxy for any
+  other Kotlin object. `Status: implemented` —
   `PM/commonTest/.../pythonx/PythonxPropertyTest.kt`, `ksp-fixtures/compose/.../PythonContentRenderTest.kt`,
-  `MaterialIconsRenderTest.kt`.
+  `AnySlotScalarRenderTest.kt`, `MaterialIconsRenderTest.kt`.
 
 ## 6. Binding prebuilt libraries (Gradle plugin)
 
