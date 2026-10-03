@@ -186,7 +186,6 @@ interoperability in both directions:
 | `python-multiplatform-gradle-plugin/` | Gradle plugin: `PYTHONHOME` staging, artifact walker (binds prebuilt jars/klibs), `.pyi` stub generation |
 | `<module>/fixtures/` | Consumer modules that exercise what the generators produce, each inside the module whose output it checks (`python-multiplatform-ksp`, `python-multiplatform-gradle-plugin`, `python-multiplatform-compose`) |
 | `sample/` | Compose Multiplatform demo app (desktop, Android, iOS, wasmJs, GraalVM native image) |
-| `binary/` | Source archives of per-platform CPython distributions |
 | `python_for_kotlin_binding.mermaid` | User-authored sketch of the object model (see rule 14) |
 | `docs/INTENT.md`, `docs/SPEC.md` | Intent and behavioural contract (rule 5) |
 | `docs/design/`, `docs/platforms/`, `docs/investigations/`, `docs/roadmap/` | Current design records (one per topic), platform notes, investigation conclusions, the work left to do |

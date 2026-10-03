@@ -54,3 +54,6 @@ google-services.json
 
 # scratch space for agents and scripts; delete when done
 .tmp/
+
+# Local Claude Code settings: per machine, not part of the repository.
+.claude/
