@@ -10,7 +10,7 @@ import platform.Foundation.NSBundle
 import platform.Foundation.NSFileManager
 
 /**
- * Where an installed iOS app's CPython prefix is -- SPEC L-10, issue #59.
+ * Where an installed iOS app's CPython prefix is -- SPEC L-11, issue #59.
  *
  * `Python.xcframework` carries no standard library, and an installed app is launched by SpringBoard
  * (or `simctl launch`) with no `PYTHONHOME`. The simulator *test* task sets one, pointing at the
@@ -73,7 +73,7 @@ internal object IosPythonHome {
 }
 
 /**
- * iOS's half of SPEC L-10: hand the bundled prefix to CPython with `Py_SetPythonHome`.
+ * iOS's half of SPEC L-11: hand the bundled prefix to CPython with `Py_SetPythonHome`.
  *
  * `Py_SetPythonHome` rather than `setenv("PYTHONHOME")`: it writes CPython's path configuration
  * directly, so there is no process-wide variable for a child process or a later reader to inherit,

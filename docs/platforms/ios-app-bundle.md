@@ -1,6 +1,6 @@
 # iOS: the standard library and the payload inside the app bundle
 
-SPEC L-10, issue #59, ROADMAP §13.1.
+SPEC L-11, issue #59, ROADMAP §13.1.
 
 `Python.xcframework` carries the interpreter and headers and no standard library, and an installed
 app is launched with no `PYTHONHOME`. Until now only the simulator *test* binary had a stdlib

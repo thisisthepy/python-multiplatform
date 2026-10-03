@@ -9,7 +9,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * SPEC L-10 (issue #59): where an installed iOS app's CPython prefix is resolved from.
+ * SPEC L-11 (issue #59): where an installed iOS app's CPython prefix is resolved from.
  *
  * The build-time half -- what is staged and copied into the bundle under that name -- is
  * `python-multiplatform-gradle-plugin/src/test/.../IosPythonHomeLayoutTest.kt`.

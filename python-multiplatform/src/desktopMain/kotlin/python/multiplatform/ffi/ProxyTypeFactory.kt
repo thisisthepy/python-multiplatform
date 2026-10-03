@@ -1,6 +1,8 @@
 package python.multiplatform.ffi
 
 import java.lang.invoke.MethodHandles
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import python.native.ffi.Panama
 import python.native.ffi.bindings
 import python.native.ffi.downcallII_I
@@ -25,21 +27,15 @@ private const val PY_RELATIVE_OFFSET = 8
 
 object ProxyType {
 
-    // Resolved once at class initialisation rather than per callback.
-    //
-    // These used to be looked up inside each slot: Class.forName, getDeclaredField,
-    // setAccessible and getMethod on every single call, then Method.invoke with a boxed Long.
-    // tp_clear runs only during a collection so that was merely wasteful; tp_dealloc runs on
-    // *every* proxy death, which is the common case, so the same shape there would put four
-    // reflective lookups on the hot path of the object model.
-    private val unsafeClass = Class.forName("sun.misc.Unsafe")
-    private val theUnsafe = unsafeClass.getDeclaredField("theUnsafe").apply { isAccessible = true }.get(null)
-    private val getLongMethod = unsafeClass.getMethod("getLong", Long::class.javaPrimitiveType)
-    private val putLongMethod =
-        unsafeClass.getMethod("putLong", Long::class.javaPrimitiveType, Long::class.javaPrimitiveType)
-
-    private fun peekLong(addr: Long): Long = getLongMethod.invoke(theUnsafe, addr) as Long
-    private fun pokeLong(addr: Long, value: Long) { putLongMethod.invoke(theUnsafe, addr, value) }
+    // Through java.lang.foreign (java.base), not sun.misc.Unsafe. Unsafe lives in the
+    // `jdk.unsupported` module, which a jlink'ed runtime does not contain unless asked to -- and
+    // Compose Desktop's `createDistributable` image does not ask. There, resolving it here made
+    // this object's <clinit> throw ClassNotFoundException, every proxy install died with
+    // `ExceptionInInitializerError: null`, and every Kotlin-namespace import after it with
+    // `No module named 'org'` (issue #77, SPEC L-10). Nothing is resolved reflectively per call:
+    // both are handles Panama built once.
+    private fun peekLong(addr: Long): Long = Panama.readPointerSlot(addr)
+    private fun pokeLong(addr: Long, value: Long) { Panama.writePointerSlot(addr, value) }
 
     /**
      * Takes the [HandleTable] root out of [selfPtr]'s handle slot and drops it, returning the
@@ -171,34 +167,9 @@ actual object ProxyTypeFactory {
     actual fun createProxyType(): Long {
         if (ProxyType.proxyTypePtr != 0L) return ProxyType.proxyTypePtr
 
-        val unsafeClass = Class.forName("sun.misc.Unsafe")
-        val theUnsafe = unsafeClass.getDeclaredField("theUnsafe").apply { isAccessible = true }.get(null)
-        val allocateMemory = unsafeClass.getMethod("allocateMemory", Long::class.javaPrimitiveType)
-        val putInt = unsafeClass.getMethod("putInt", Long::class.javaPrimitiveType, Int::class.javaPrimitiveType)
-        val putLong = unsafeClass.getMethod("putLong", Long::class.javaPrimitiveType, Long::class.javaPrimitiveType)
-
-        // Room for eight 16-byte PyType_Slot entries; five are used -- traverse, clear, dealloc,
-        // members, sentinel -- with room to spare so a sixth does not silently write past the block.
-        val slotsAddr = allocateMemory.invoke(theUnsafe, 16L * 8) as Long
-        // Slot 0: Py_tp_traverse (71)
-        putInt.invoke(theUnsafe, slotsAddr, 71)
-        val traverseStub = Panama.createUpcallStubIII_I(MethodHandles.lookup().unreflect(ProxyType::class.java.getMethod("tp_traverse", Long::class.javaPrimitiveType, Long::class.javaPrimitiveType, Long::class.javaPrimitiveType)))
-        putLong.invoke(theUnsafe, slotsAddr + 8, traverseStub)
-
-        // Slot 1: Py_tp_clear (51)
-        putInt.invoke(theUnsafe, slotsAddr + 16, 51)
-        val clearStub = Panama.createUpcallStubI_I(MethodHandles.lookup().unreflect(ProxyType::class.java.getMethod("tp_clear", Long::class.javaPrimitiveType)))
-        putLong.invoke(theUnsafe, slotsAddr + 24, clearStub)
-
-        // Slot 2: Py_tp_dealloc (52). Not 50 -- that is Py_tp_call, which an earlier comment here
-        // named by mistake. Without this the type inherits subtype_dealloc, which frees the
-        // object correctly and knows nothing about the handle it was carrying.
-        putInt.invoke(theUnsafe, slotsAddr + 32, 52)
-        val deallocStub = Panama.createUpcallStubI_V(MethodHandles.lookup().unreflect(ProxyType::class.java.getMethod("tp_dealloc", Long::class.javaPrimitiveType)))
-        putLong.invoke(theUnsafe, slotsAddr + 40, deallocStub)
-
-        // Slot 3: Py_tp_members (72) -- the handle slot, exposed to Python itself. `PyMemberDef` on
-        // every 64-bit target this ships for (macos-aarch64/x86_64, linux-x86_64, windows-x86_64):
+        // Slot 3's payload -- Py_tp_members (72), the handle slot exposed to Python itself.
+        // `PyMemberDef` on every 64-bit target this ships for (macos-aarch64/x86_64, linux-x86_64,
+        // windows-x86_64):
         //
         //     struct PyMemberDef { const char *name; int type; Py_ssize_t offset; int flags;
         //                          const char *doc; };
@@ -206,6 +177,7 @@ actual object ProxyTypeFactory {
         // name@0(8) type@8(4) [pad 4] offset@16(8) flags@24(4) [pad 4] doc@32(8) = 40 bytes,
         // and the array needs a second, all-zero entry -- PyMemberDef's own required NUL-name
         // terminator, the same contract PyMethodDef and PyType_Slot arrays already carry here.
+        // [nativeStruct] starts from zeroes, so the terminator is written by not writing it.
         //
         // `Py_RELATIVE_OFFSET` (3.12+, `descrobject.h`) is what makes `offset = 0` mean "the start
         // of *this type's* relative data" rather than "byte 0 of the object" -- the same base
@@ -216,37 +188,70 @@ actual object ProxyTypeFactory {
         // make every member on every base type in the MRO wrong by however much the subclass added
         // -- which is precisely the multiple/deep-inheritance case this type exists to allow
         // (`Py_TPFLAGS_BASETYPE`, and `work/untrack`'s proof that a subclass survives deallocation).
-        val membersAddr = allocateMemory.invoke(theUnsafe, 40L * 2) as Long
-        putLong.invoke(theUnsafe, membersAddr, Panama.allocateUtf8String("_pm_handle"))
-        putInt.invoke(theUnsafe, membersAddr + 8, PY_T_LONG)
-        putLong.invoke(theUnsafe, membersAddr + 16, 0L)
-        putInt.invoke(theUnsafe, membersAddr + 24, PY_RELATIVE_OFFSET)
-        putLong.invoke(theUnsafe, membersAddr + 32, 0L)
-        putLong.invoke(theUnsafe, membersAddr + 40, 0L) // sentinel: name
-        putInt.invoke(theUnsafe, membersAddr + 48, 0) // sentinel: type
-        putLong.invoke(theUnsafe, membersAddr + 56, 0L) // sentinel: offset
-        putInt.invoke(theUnsafe, membersAddr + 64, 0) // sentinel: flags
-        putLong.invoke(theUnsafe, membersAddr + 72, 0L) // sentinel: doc
+        val membersAddr = nativeStruct(40 * 2) {
+            putLong(0, Panama.allocateUtf8String("_pm_handle"))
+            putInt(8, PY_T_LONG)
+            putLong(16, 0L)
+            putInt(24, PY_RELATIVE_OFFSET)
+            putLong(32, 0L)
+            // 40..79: the sentinel entry, all zero.
+        }
 
-        putInt.invoke(theUnsafe, slotsAddr + 48, PY_TP_MEMBERS)
-        putLong.invoke(theUnsafe, slotsAddr + 56, membersAddr)
+        val traverseStub = Panama.createUpcallStubIII_I(MethodHandles.lookup().unreflect(ProxyType::class.java.getMethod("tp_traverse", Long::class.javaPrimitiveType, Long::class.javaPrimitiveType, Long::class.javaPrimitiveType)))
+        val clearStub = Panama.createUpcallStubI_I(MethodHandles.lookup().unreflect(ProxyType::class.java.getMethod("tp_clear", Long::class.javaPrimitiveType)))
+        val deallocStub = Panama.createUpcallStubI_V(MethodHandles.lookup().unreflect(ProxyType::class.java.getMethod("tp_dealloc", Long::class.javaPrimitiveType)))
 
-        // Slot 4: sentinel
-        putInt.invoke(theUnsafe, slotsAddr + 64, 0)
-        putLong.invoke(theUnsafe, slotsAddr + 72, 0L)
+        // Room for eight 16-byte PyType_Slot entries ({ int slot; void *pfunc; }); five are used --
+        // traverse, clear, dealloc, members, sentinel -- with room to spare so a sixth does not
+        // silently write past the block.
+        val slotsAddr = nativeStruct(16 * 8) {
+            // Slot 0: Py_tp_traverse (71)
+            putInt(0, 71)
+            putLong(8, traverseStub)
+            // Slot 1: Py_tp_clear (51)
+            putInt(16, 51)
+            putLong(24, clearStub)
+            // Slot 2: Py_tp_dealloc (52). Not 50 -- that is Py_tp_call, which an earlier comment
+            // here named by mistake. Without this the type inherits subtype_dealloc, which frees
+            // the object correctly and knows nothing about the handle it was carrying.
+            putInt(32, 52)
+            putLong(40, deallocStub)
+            // Slot 3: Py_tp_members (72)
+            putInt(48, PY_TP_MEMBERS)
+            putLong(56, membersAddr)
+            // Slot 4 (64..79): the sentinel, all zero.
+        }
 
-        val specAddr = allocateMemory.invoke(theUnsafe, 32L) as Long
-        putLong.invoke(theUnsafe, specAddr, Panama.allocateUtf8String("KotlinProxy"))
-        // negative basicsize means it's appended to the end of the base object (PyObject)
-        putInt.invoke(theUnsafe, specAddr + 8, -8) // 8 bytes for the handle
-        putInt.invoke(theUnsafe, specAddr + 12, 0)
-        putInt.invoke(theUnsafe, specAddr + 16, (1 shl 10) or (1 shl 14)) // Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HAVE_GC
-        putLong.invoke(theUnsafe, specAddr + 24, slotsAddr)
+        // PyType_Spec { const char *name; int basicsize; int itemsize; unsigned int flags;
+        //               PyType_Slot *slots; }
+        val specAddr = nativeStruct(32) {
+            putLong(0, Panama.allocateUtf8String("KotlinProxy"))
+            // negative basicsize means it's appended to the end of the base object (PyObject)
+            putInt(8, -8) // 8 bytes for the handle
+            putInt(12, 0)
+            putInt(16, (1 shl 10) or (1 shl 14)) // Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HAVE_GC
+            putLong(24, slotsAddr)
+        }
 
         ProxyType.proxyTypePtr = python.multiplatform.ffi.withGIL {
             bindings.PyType_FromSpec(specAddr)
         }
         return ProxyType.proxyTypePtr
+    }
+
+    /**
+     * A zero-filled native block of [size] bytes holding what [fill] wrote, in native byte order.
+     *
+     * Built as a heap image and copied out in one step by [Panama.allocateBytesFreeable] (native
+     * `malloc`), rather than poked field by field through `sun.misc.Unsafe` -- see
+     * the note above `ProxyType.peekLong` for why Unsafe is not available in a packaged app. Never freed:
+     * `PyType_FromSpec` may keep pointing into the slot and member arrays for the life of the type,
+     * and the type lives for the life of the process.
+     */
+    private fun nativeStruct(size: Int, fill: ByteBuffer.() -> Unit): Long {
+        val image = ByteBuffer.allocate(size).order(ByteOrder.nativeOrder())
+        image.fill()
+        return Panama.allocateBytesFreeable(image.array())
     }
 
     /**

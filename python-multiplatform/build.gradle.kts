@@ -39,7 +39,7 @@ plugins {
 val configuredPythonVersion = project.findProperty("pythonVersion")?.toString() ?: project.rootProject.version.toString()
 val pythonFreeThreaded = project.findProperty("pythonFreeThreaded")?.toString()?.toBoolean() ?: false
 val pbsRelease = project.findProperty("pythonBuildStandaloneRelease")?.toString() ?: "20260807"
-val pythonAppleSupportBuild = project.findProperty("pythonAppleSupportBuild")?.toString() ?: "b10"
+val pythonAppleSupportBuild = project.findProperty("pythonAppleSupportBuild")?.toString() ?: "b11"
 
 val pythonVersion = configuredPythonVersion
 val libraryVersion = "$pythonVersion-alpha01"
@@ -112,6 +112,26 @@ val extractedDir = file("$downloadDir/extracted/$configuredPythonVersion")
  * separating for the same reason the version does.
  */
 val desktopFlavourSuffix = if (pythonFreeThreaded) "-freethreaded" else ""
+
+/**
+ * Fails the build when the extracted CPython's own headers report a version other than
+ * `pythonVersion` (issue #47). The archive name and the lockfile say what was meant to be
+ * downloaded; `PY_VERSION` in `patchlevel.h` says what it is. iOS once shipped 3.14.6 (BeeWare
+ * `3.14-b10`) under `pythonVersion=3.14.7` and nothing noticed.
+ */
+fun requireHeaderVersion(label: String, extracted: File) {
+    val headers = extracted.walkTopDown().filter { it.name == "patchlevel.h" }.toList()
+    if (headers.isEmpty()) throw GradleException("$label: no patchlevel.h under $extracted, cannot verify the CPython version")
+    val re = Regex("""^\s*#\s*define\s+PY_VERSION\s+"([^"]+)"""", RegexOption.MULTILINE)
+    for (h in headers) {
+        val actual = re.find(h.readText())?.groupValues?.get(1)
+            ?: throw GradleException("$label: no PY_VERSION in $h")
+        if (actual != configuredPythonVersion) {
+            throw GradleException("$label: $h says PY_VERSION $actual but pythonVersion=$configuredPythonVersion. " +
+                "Pin an archive that ships $configuredPythonVersion (see docs/platforms/python-version-acquisition.md).")
+        }
+    }
+}
 
 val checksumsFile = rootProject.file("python-checksums.properties")
 val pythonArchiveKeys = mutableMapOf<String, File>()
@@ -482,6 +502,7 @@ val downloadTasks = desktopTargets.map { (platform, pbsTarget) ->
                     into(extractDir)
                 }
             }
+            requireHeaderVersion(platform, extractDir)
         }
     }
 }
@@ -531,6 +552,7 @@ val androidDownloadTasks = androidTargets.map { (platform, arch) ->
                     into(extractDir)
                 }
             }
+            requireHeaderVersion(platform, extractDir)
         }
     }
 }
@@ -540,7 +562,7 @@ val androidDownloadTasks = androidTargets.map { (platform, arch) ->
  *
  * python.org began publishing an official iOS XCframework with 3.15 (the first entries in
  * `ftp/python/3.15.0/` are the 3.15.0b1 betas). BeeWare's Python-Apple-support, which was the
- * only source before that, stops at `3.14-b10` and has no 3.15 tag. The two do not overlap:
+ * only source before that, stops at `3.14-b11` (3.14.7) and has no 3.15 tag. The two do not overlap:
  * 3.14 and earlier can only come from BeeWare, 3.15 and later only from python.org. So this is a
  * hard switch on the version, not a preference.
  *
@@ -601,6 +623,15 @@ val downloadPython_ios = tasks.register("downloadPython_ios") {
         verifyChecksum(iosLockKey, iosArchive)
         if (iosFromPythonOrg) maybeVerifySigstore(iosArchive, iosUrl)
 
+        // The iOS extract dir is keyed by pythonVersion, not by archive, so bumping the pinned
+        // archive (b10 -> b11) would otherwise keep the old tree: "not empty, skip". A stamp of the
+        // archive's lock key + digest tells a stale tree from a current one (issue #47).
+        val iosStamp = file("$iosExtractDir/.archive-stamp")
+        val iosWanted = "$iosLockKey ${iosArchive.name}"
+        if (iosExtractDir.exists() && (!iosStamp.exists() || iosStamp.readText().trim() != iosWanted)) {
+            println("Discarding stale iOS extraction in $iosExtractDir")
+            iosExtractDir.deleteRecursively()
+        }
         val isEmpty = iosExtractDir.list()?.isEmpty() ?: true
         if (isEmpty) {
             println("Extracting $iosArchive to $iosExtractDir")
@@ -608,7 +639,9 @@ val downloadPython_ios = tasks.register("downloadPython_ios") {
                 from(tarTree(resources.gzip(iosArchive)))
                 into(iosExtractDir)
             }
+            iosStamp.writeText(iosWanted + "\n")
         }
+        requireHeaderVersion("ios", iosExtractDir)
     }
 }
 
@@ -1097,6 +1130,56 @@ kotlin {
                 into("META-INF/LICENSE")
             }
         }
+        // Issue #74. python-build-standalone ships `libpython3.14.so -> libpython3.14.so.1.0` as a
+        // symlink. Gradle's `tarTree` extracts a symlink as an empty regular file, so the jar used
+        // to carry a 0-byte `libpython3.14.so` (the name the loader asks for) beside the real
+        // 252 MB `libpython3.14.so.1.0` that nothing asked for. Staging here:
+        //   1. drops every zero-length library (a symlink stub is never a library),
+        //   2. renames `libX.so.1.0` to `libX.so`, so the jar carries the real file under the name
+        //      `System.mapLibraryName` produces,
+        //   3. strips debug info from linux libraries, best-effort (see below).
+        val stageDesktopLibraries = tasks.register<Sync>("stageDesktopLibraries") {
+            dependsOn(downloadAllPythonBuilds)
+            val stageDir = layout.buildDirectory.dir("desktop-libs")
+            into(stageDir)
+            from("$extractedDir") {
+                include("macos-*$desktopFlavourSuffix/python/lib/libpython*.dylib")
+                include("linux-*$desktopFlavourSuffix/python/lib/libpython*.so*")
+                include("windows-*$desktopFlavourSuffix/python/python*.dll")
+                include("windows-*$desktopFlavourSuffix/python/vcruntime*.dll")
+                // `macos-*` matches `macos-aarch64-freethreaded` too.
+                if (!pythonFreeThreaded) exclude("*-freethreaded/**")
+                eachFile {
+                    if (file.length() == 0L) { exclude(); return@eachFile }
+                    val platform = relativePath.segments[0].removeSuffix(desktopFlavourSuffix)
+                    val filename = name.replace(Regex("""(\.so)(\.\d+)+$"""), "$1")
+                    path = "lib/$platform/$filename"
+                }
+                includeEmptyDirs = false
+            }
+            doLast {
+                // Best-effort: GNU strip / llvm-strip are not on every build host (Apple's strip
+                // cannot read ELF). When none works the unstripped library ships, and says so.
+                val candidates = listOf("llvm-strip", "x86_64-linux-gnu-strip", "strip")
+                stageDir.get().asFile.walkTopDown()
+                    .filter { it.isFile && it.parentFile.name.startsWith("linux-") && it.name.endsWith(".so") }
+                    .forEach { lib ->
+                        val before = lib.length()
+                        val done = candidates.any { tool ->
+                            try {
+                                val proc = ProcessBuilder(tool, "--strip-debug", lib.absolutePath)
+                                    .redirectErrorStream(true).start()
+                                proc.inputStream.readBytes()
+                                proc.waitFor() == 0
+                            } catch (_: java.io.IOException) { false }
+                        }
+                        logger.lifecycle(
+                            if (done) "stripped ${lib.name}: $before -> ${lib.length()} bytes"
+                            else "no ELF-capable strip found; ${lib.name} ships unstripped ($before bytes)"
+                        )
+                    }
+            }
+        }
         tasks.withType<Jar>().matching { it.name == "desktopJar" }.configureEach {
             if (configuredPythonVersion == "3.13.0" && !pythonFreeThreaded) {
                 from(libPathForDesktop) {
@@ -1106,34 +1189,11 @@ kotlin {
                     into("lib")
                 }
             } else {
-                dependsOn(downloadAllPythonBuilds)
-                from("$extractedDir") {
-                    include("macos-*$desktopFlavourSuffix/python/lib/libpython*.dylib")
-                    include("linux-*$desktopFlavourSuffix/python/lib/libpython*.so*")
-                    include("windows-*$desktopFlavourSuffix/python/python*.dll")
-                    include("windows-*$desktopFlavourSuffix/python/vcruntime*.dll")
-                    // `macos-*` matches `macos-aarch64-freethreaded` too, so a default build whose
-                    // build directory has ever seen `-PpythonFreeThreaded=true` would otherwise
-                    // pack both flavours' libraries into the same platform directory.
-                    if (!pythonFreeThreaded) exclude("*-freethreaded/**")
-                    eachFile {
-                        // `path` here is already destination-relative -- `into("lib")` below is
-                        // applied before eachFile sees the file, so the leading segment is "lib",
-                        // not the platform directory from the `from(...)` source tree. Indexing
-                        // parts[0] silently dropped the platform and collapsed every platform's
-                        // library onto the same jar entry (DuplicatesStrategy.WARN then kept only
-                        // the last one copied, breaking every platform but that one).
-                        val parts = path.split("/")
-                        // The flavour suffix exists only to keep the two extraction trees apart on
-                        // disk; the jar layout is what `manager.platformDirectory()` looks up, and
-                        // it names platforms alone. A free-threaded jar carries the same directory
-                        // names with a differently-named library inside.
-                        val platform = parts[1].removeSuffix(desktopFlavourSuffix)
-                        val filename = parts.last()
-                        path = "lib/$platform/$filename"
-                    }
-                    into("lib")
-                    includeEmptyDirs = false
+                // Issue #74: the libraries are packed from the staged tree, not straight from the
+                // extraction, so that symlinks are resolved and the linux library is stripped.
+                dependsOn(stageDesktopLibraries)
+                from(stageDesktopLibraries.map { it.destinationDir }) {
+                    include("lib/**")
                 }
             }
         }
@@ -2743,26 +2803,18 @@ tasks.withType<org.jetbrains.kotlin.gradle.tasks.CInteropProcess>().configureEac
 }
 
 val copyDesktopPythonBinariesForTests by tasks.registering(Copy::class) {
-    dependsOn(downloadAllPythonBuilds)
-    from("$extractedDir") {
-        include("macos-*$desktopFlavourSuffix/python/lib/libpython*.dylib")
-        include("linux-*$desktopFlavourSuffix/python/lib/libpython*.so*")
-        include("windows-*$desktopFlavourSuffix/python/python*.dll")
-        include("windows-*$desktopFlavourSuffix/python/vcruntime*.dll")
-        if (!pythonFreeThreaded) exclude("*-freethreaded/**")
-        eachFile {
-            val parts = path.split("/")
-            val platform = parts[0].removeSuffix(desktopFlavourSuffix)
-            val filename = parts.last()
-            path = "lib/$platform/$filename"
-        }
-        includeEmptyDirs = false
-    }
+    // Same resolved/stripped tree the desktop jar packs (issue #74).
+    val stage = tasks.named<Sync>("stageDesktopLibraries")
+    dependsOn(stage)
+    from(stage.map { it.destinationDir })
     into(layout.buildDirectory.dir("desktop-test-binaries"))
 }
 
 tasks.named<Test>("desktopTest") {
     dependsOn(copyDesktopPythonBinariesForTests)
+    // DesktopJarLibrariesTest opens the produced jar.
+    dependsOn("desktopJar")
+    systemProperty("pm.desktopJar", tasks.named<Jar>("desktopJar").get().archiveFile.get().asFile.absolutePath)
     classpath += files(layout.buildDirectory.dir("desktop-test-binaries"))
     
     javaLauncher.set(

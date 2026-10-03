@@ -336,7 +336,79 @@ object PythonCallables {
                 paramHasDefault = listOf(false),
                 callable = { args -> findFunction(args[0] as String) },
             ),
+            // Issue #69: a Python scalar written into a `kotlin.Any` slot, boxed as the Kotlin type
+            // `PythonxAdapter._box_scalar` chose. Each takes the primitive tag that already carries
+            // that value exactly, and answers with the handle of the box (see [boxScalar]).
+            boxEntry(BOX_INT, TypeTag.INT, "kotlin.Int") { (it as Long).toInt() },
+            boxEntry(BOX_LONG, TypeTag.INT, "kotlin.Long") { it as Long },
+            boxEntry(BOX_DOUBLE, TypeTag.FLOAT, "kotlin.Double") { it as Double },
+            boxEntry(BOX_BOOLEAN, TypeTag.BOOLEAN, "kotlin.Boolean") { it as Boolean },
+            boxEntry(BOX_STRING, TypeTag.STRING, "kotlin.String") { it as String },
+            ExposedCallable(
+                name = UNBOX_SCALAR,
+                arity = 1,
+                // INT, not OBJECT: this needs the handle *number*, to release it, and an OBJECT
+                // slot would hand over only the object it resolves to.
+                paramTypes = listOf(TypeTag.INT),
+                returnType = TypeTag.OBJECT,
+                paramNames = listOf("handle"),
+                paramTypeNames = listOf("kotlin.Long"),
+                // No return type name, like the two entries above: the result is a Python scalar or
+                // `None`, never a handle, so no producer may try to own it.
+                paramHasDefault = listOf(false),
+                callable = { args -> unboxScalar(args[0] as Long) },
+            ),
         )
+
+        private fun boxEntry(name: String, tag: TypeTag, typeName: String, box: (Any?) -> Any): ExposedCallable =
+            ExposedCallable(
+                name = name,
+                arity = 1,
+                paramTypes = listOf(tag),
+                returnType = TypeTag.INT,
+                paramNames = listOf("value"),
+                paramTypeNames = listOf(typeName),
+                paramHasDefault = listOf(false),
+                callable = { args -> boxScalar(box(args[0])) },
+            )
+    }
+
+    /**
+     * Roots [value] -- a Kotlin box the binding layer asked for -- and returns its raw handle.
+     *
+     * ### Why a box crosses as a handle at all
+     *
+     * The value is on its way into an `OBJECT` slot, and the only thing an `OBJECT` slot reads a
+     * Python `int` as is a [HandleTable] handle (`UpcallTrampoline.toKotlinObject`). So the box is
+     * made here, rooted, and its handle is what Python then puts in the slot; the slot resolves it to
+     * this very object, and whatever Kotlin stores it in holds it from then on by an ordinary
+     * reference.
+     *
+     * ### Who gives the root back
+     *
+     * Python, as soon as the argument tuple the handle sits in is gone: `PythonxAdapter
+     * ._BoxedArgument` is an `int` whose `__del__` releases it, so the root lives exactly as long as
+     * the one call it was made for. Releasing here instead would hand the slot a stale handle.
+     */
+    internal fun boxScalar(value: Any): Long = HandleTable.register(value).raw
+
+    /**
+     * What a handle Python read out of a `kotlin.Any` slot means, if it is a boxed scalar.
+     *
+     * @return a [python.multiplatform.ffi.upcall.ScalarResult] -- which the trampoline marshals as
+     *   the Python scalar, as a new reference -- **after releasing [raw]**, because the Python side
+     *   keeps no proxy over a scalar and the handle has no other owner; or `null` (`None`) for any
+     *   other object, whose handle is left rooted for the proxy Python then builds over it. A stale
+     *   [raw] is `null` too: there is nothing to release, and the proxy built over it refuses on use.
+     */
+    internal fun unboxScalar(raw: Long): Any? {
+        val held = HandleTable.resolveRaw(raw) ?: return null
+        when (held) {
+            is Boolean, is Int, is Long, is Short, is Byte, is Double, is Float, is String, is Char -> Unit
+            else -> return null
+        }
+        HandleTable.release(ObjectReference(raw))
+        return python.multiplatform.ffi.upcall.ScalarResult(held)
     }
 
     /** The name the binding layer resolves. Shared so the Python source and the entry cannot drift. */
@@ -344,6 +416,24 @@ object PythonCallables {
 
     /** @see findFunction */
     internal const val FIND_FUNCTION: String = "python.multiplatform.ffi.pythonx.PythonCallables.findFunction"
+
+    /** @see boxScalar */
+    internal const val BOX_INT: String = "python.multiplatform.ffi.pythonx.PythonCallables.boxInt"
+
+    /** @see boxScalar */
+    internal const val BOX_LONG: String = "python.multiplatform.ffi.pythonx.PythonCallables.boxLong"
+
+    /** @see boxScalar */
+    internal const val BOX_DOUBLE: String = "python.multiplatform.ffi.pythonx.PythonCallables.boxDouble"
+
+    /** @see boxScalar */
+    internal const val BOX_BOOLEAN: String = "python.multiplatform.ffi.pythonx.PythonCallables.boxBoolean"
+
+    /** @see boxScalar */
+    internal const val BOX_STRING: String = "python.multiplatform.ffi.pythonx.PythonCallables.boxString"
+
+    /** @see unboxScalar */
+    internal const val UNBOX_SCALAR: String = "python.multiplatform.ffi.pythonx.PythonCallables.unboxScalar"
 }
 
 /**

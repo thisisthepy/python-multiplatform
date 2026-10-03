@@ -15,7 +15,7 @@ import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 
 /**
- * What an iOS app bundle carries of CPython's standard library, and where it comes from -- SPEC L-10,
+ * What an iOS app bundle carries of CPython's standard library, and where it comes from -- SPEC L-11,
  * issue #59.
  *
  * `Python.xcframework` ships the interpreter and headers and nothing else (`iosMain/README.md`); the
@@ -24,7 +24,7 @@ import java.nio.file.StandardCopyOption
  * ```
  * Python.xcframework/
  *   lib/python3.14/                              pure-Python stdlib, shared by every slice
- *   ios-arm64/lib-arm64/python3.14/              lib-dynload/*.so, _sysconfigdata (device)
+ *   ios-arm64/lib-arm64/python3.14/              lib-dynload/ (the .so files), _sysconfigdata (device)
  *   ios-arm64_x86_64-simulator/lib-arm64/...     the same for the arm64 simulator
  *   ios-arm64_x86_64-simulator/lib-x86_64/...    ...and the x86_64 simulator
  *   build/iOS-dylib-Info-template.plist          Info.plist for an extension-module framework
@@ -183,7 +183,7 @@ object IosPythonHomeLayout {
 }
 
 /**
- * Stages one slice's prefix for an iOS app bundle (SPEC L-10): `<destination>/home/lib/python<X.Y>/`
+ * Stages one slice's prefix for an iOS app bundle (SPEC L-11): `<destination>/home/lib/python<X.Y>/`
  * as [IosPythonHomeLayout.plan] lists it, plus `<destination>/dylib-Info-template.plist` *beside*
  * the prefix -- it is an input to the Xcode phase, not part of what the app carries.
  *

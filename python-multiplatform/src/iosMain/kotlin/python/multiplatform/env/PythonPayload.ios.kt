@@ -8,7 +8,7 @@ import platform.Foundation.NSBundle
  *
  * `toolchain` produces the payload (`build/pythonStaging/ios/python`, or the app's own sources);
  * `tools/xcode/install-python.sh`, an Xcode Run Script phase, copies it there and wraps any
- * extension module in it as a framework (SPEC L-10, `docs/platforms/ios-app-bundle.md`). An app
+ * extension module in it as a framework (SPEC L-11, `docs/platforms/ios-app-bundle.md`). An app
  * built without that phase has no `python/`, and this returns an empty list.
  *
  * A payload read out of the app's own bundle is also what avoids the external-volume hang

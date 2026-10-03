@@ -11,7 +11,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * SPEC L-10 (issue #59): which slice an Xcode build stages, which files of `Python.xcframework` go
+ * SPEC L-11 (issue #59): which slice an Xcode build stages, which files of `Python.xcframework` go
  * into the app's prefix, and what the staging task leaves on disk.
  *
  * The run-time half -- the library finding `<resourcePath>/python-multiplatform-home` and handing it

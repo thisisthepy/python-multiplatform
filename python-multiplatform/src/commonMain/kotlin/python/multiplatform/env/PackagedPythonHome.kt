@@ -2,7 +2,7 @@ package python.multiplatform.env
 
 /**
  * Points CPython at the prefix a packaged application ships, when there is one -- SPEC L-9
- * (desktop) and L-10 (iOS).
+ * (desktop) and L-11 (iOS).
  *
  * Called once by [python.multiplatform.ffi.Python3.initialize], after [PythonHomeCheck] and before
  * `Py_Initialize()`, which is the only window in which a home can still be chosen. Desktop and iOS

@@ -30,7 +30,7 @@ at it (`simctl` only forwards variables prefixed `SIMCTL_CHILD_`). That path is 
 external volume — fine for the test binary, which `simctl` launches with fewer sandbox restrictions
 than an installed app, and exactly the shape that hangs an app rather than starting it.
 
-An installed **app** carries its own prefix inside its bundle (SPEC L-10,
+An installed **app** carries its own prefix inside its bundle (SPEC L-11,
 `docs/platforms/ios-app-bundle.md`):
 
 - `stageIosPythonHome_<sdk>_<arch>` stages the stdlib for one slice; `tools/xcode/install-python.sh`,

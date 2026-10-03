@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Xcode Run Script phase: put CPython's standard library and the app's python/ payload into the .app.
-# SPEC L-10, issue #59. Procedure and reasoning: docs/platforms/ios-app-bundle.md.
+# SPEC L-11, issue #59. Procedure and reasoning: docs/platforms/ios-app-bundle.md.
 #
 # Place the phase AFTER "Copy Bundle Resources" and BEFORE "Embed Frameworks", in a target whose
 # ENABLE_USER_SCRIPT_SANDBOXING is NO (the phase reads the Gradle build directory). It:
