@@ -135,6 +135,10 @@ to implement", say what you counted against.
   counts, lifetimes, class loaders) gets the strongest tier; work a test will catch can use a
   cheaper one.
 - Give every agent prompt the absolute paths it may write to, and repeat rule 2 in it.
+- **Subagents do not run heavy local builds.** Subagents write code, design, investigate, review
+  and document. Gradle builds, cargo builds, the test gate and model runs are done by the session
+  itself — one at a time on this machine — or by CI (GitHub Actions) on a pushed branch. Several
+  sessions share one machine; parallel local builds slow every one of them.
 
 ---
 

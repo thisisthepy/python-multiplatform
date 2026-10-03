@@ -427,6 +427,20 @@ object PythonProxySource {
             return _t
 
 
+        def _pm_kotlin_rows(_mod, _name, _row):
+            # The table row of the static property `_pm_static_property` just put on [_mod]'s type,
+            # kept beside it on that type (`_pm_kotlin_rows`, name -> row) so that
+            # `python_multiplatform.describe(module, name)` can describe a constant without reading
+            # it (issue #36). Beside the descriptor rather than on it: the read path stays a plain
+            # `property`, which is what `GeneratedProxyCostTest` prices.
+            _t = _pm_module_type(_mod)
+            _rows = _t.__dict__.get('_pm_kotlin_rows')
+            if _rows is None:
+                _rows = {}
+                _t._pm_kotlin_rows = _rows
+            _rows[_name] = _row
+
+
         def _pm_static_property(_mod, _name, _get, _set):
             # A `property` -- a *data* descriptor -- rather than a `__getattr__`/`__setattr__` pair
             # on a shared subclass, which is what this used to be. Both are correct; they are not
@@ -1030,7 +1044,8 @@ object PythonProxySource {
             if (setter != null) appendLine("$setterHandle = _pm_lookup(${setter.name.quoted()})")
             append(
                 "_pm_static_property(_pm_module(${module.quoted()}), ${leaf.quoted()}, " +
-                    "$getterHandle, $setterHandle)",
+                    "$getterHandle, $setterHandle)\n" +
+                    "_pm_kotlin_rows(_pm_module(${module.quoted()}), ${leaf.quoted()}, ${KotlinSurface.row(getter)})",
             )
         }
         return source to index

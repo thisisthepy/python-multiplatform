@@ -183,12 +183,27 @@ class FunctionSlotBindingTest {
         val pointerInput = uiDeclarations.filter { it.simpleName == "pointerInput" }
         assertTrue(pointerInput.isNotEmpty(), "pointerInput was not walked at all")
         // Through Compose 1.6 every overload's `block` was a suspend lambda. From Compose 1.8 the keyed
-        // overloads take a `PointerInputEventHandler` (a fun interface) instead and decline earlier, on
-        // their `Any?` keys; only the key-less overload still carries the suspend lambda. All of them
-        // must stay declined, and the suspend one must say why.
+        // overloads take a `PointerInputEventHandler` (a fun interface) instead; only the key-less
+        // overload still carries the suspend lambda. Until issue #38 the keyed ones also declined, on
+        // their `Any?` keys -- an incidental reason, not this test's subject: #38 (SPEC B-1/U-10) makes
+        // `kotlin.Any?` cross as an object handle, so a keyed overload, whose `block` is an
+        // interface-typed object slot and not a function slot at all, now binds. What this test is
+        // about still holds without exception: no overload with a function-typed slot binds, and
+        // every overload that does not bind says why.
         assertTrue(
-            pointerInput.all { it.bindingName == null && it.declineReason != null },
-            "every pointerInput overload must decline with a reason: ${pointerInput.map { it.declineReason }}",
+            pointerInput.all { declaration ->
+                if (declaration.bindingName == null) {
+                    declaration.declineReason != null
+                } else {
+                    declaration.parameters.none { it.type.qualifiedName.startsWith("kotlin.Function") }
+                }
+            },
+            "a pointerInput overload with a function-typed slot bound, or one declined silently: " +
+                "${pointerInput.map { it.bindingName to it.declineReason }}",
+        )
+        assertTrue(
+            pointerInput.none { it.bindingName == null && it.declineReason == null },
+            "every declined pointerInput overload must say why: ${pointerInput.map { it.declineReason }}",
         )
         assertTrue(
             pointerInput.any { it.declineReason?.contains("suspend") == true },

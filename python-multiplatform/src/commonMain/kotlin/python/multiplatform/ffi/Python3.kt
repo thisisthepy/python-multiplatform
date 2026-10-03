@@ -49,6 +49,7 @@ object Python3 {
             // get here and the consumer's payload has still not been put on sys.path. The hook
             // does its work at most once per process, so arriving here repeatedly is free.
             PythonPayload.installStagedRootsOnStartup()
+            installBuiltinCompiledOnce()
             return
         }
         // Runs once per process, before the call whose own failure mode is either an uncatchable
@@ -78,12 +79,47 @@ object Python3 {
         // commonMain and commonTest is now inside withPython{} or withGIL{}, so this is safe.
         // See ROADMAP §1 and §4 for the history and the previous revert.
         if (mainThreadState == null) mainThreadState = PyEval_SaveThread()
+        // `compiled` becomes a builtin name here (docs/SPEC.md N-7). Needs the GIL, so it comes
+        // after the parking above and goes through exec()'s withPython/withGIL.
+        installBuiltinCompiledOnce()
         // The consumer's own Python code goes on sys.path here: after Py_Initialize() built the
         // list (nothing can add to it before that point) and before this function returns, so
         // before any import a caller can reach. `PYTHONHOME` above is the *standard library* and
         // is a separate mechanism entirely -- see PythonPayload for the whole reasoning, and for
         // the `autoInstall` switch that turns this off.
         PythonPayload.installStagedRootsOnStartup()
+    }
+
+    private var builtinCompiledInstalled = false
+
+    private fun installBuiltinCompiledOnce() {
+        if (builtinCompiledInstalled) return
+        installBuiltinCompiled()
+        builtinCompiledInstalled = true
+    }
+
+    /**
+     * Sets `builtins.compiled` to an identity decorator so `@compiled` needs no import.
+     * The TypedPython compiler picks decorated functions at build time; at run time it does
+     * nothing. An existing `builtins.compiled` (e.g. the typedpython dev shim) is left alone.
+     *
+     * Runs through [exec], which holds the GIL for every C API call it makes; no raw pointer is
+     * held here, so there is no reference to state. The snippet runs inside a function so it
+     * leaves no names behind in `__main__`.
+     */
+    internal fun installBuiltinCompiled() {
+        exec(
+            """
+            def _pm_install_compiled():
+                import builtins
+                if not hasattr(builtins, "compiled"):
+                    def compiled(f):
+                        return f
+                    builtins.compiled = compiled
+            _pm_install_compiled()
+            del _pm_install_compiled
+            """.trimIndent()
+        )
     }
 
     /**
@@ -110,6 +146,7 @@ object Python3 {
         // initialize() rebuilds it instead of calling through a dangling one. Same for the
         // runMain/runApp helpers, which are cached the same way and would dangle the same way.
         checkpointCallable = null
+        builtinCompiledInstalled = false
         runModuleCallable = null
         runTopLevelCallable = null
         runFileCallable = null

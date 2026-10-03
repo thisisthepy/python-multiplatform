@@ -12,6 +12,9 @@ androidx-lifecycle = "2.10.0"
 androidx-material = "1.12.0"
 androidx-test-junit = "1.2.1"
 compose-plugin = "1.11.1"
+# JetBrains stopped publishing material-icons with Compose after 1.7.3 (Maven Central: newest is 1.7.3);
+# it is the version Compose Multiplatform 1.11.x points to, resolved against 1.11.1's ui/ui-graphics.
+compose-material-icons = "1.7.3"
 graalvm-buildtools = "0.10.6"
 junit = "4.13.2"
 kotlin = "2.4.20-Beta2"
@@ -20,6 +23,7 @@ kotlinx-coroutines = "1.8.1"
 ksp = "2.3.11"
 
 [libraries]
+compose-material-icons-core = { module = "org.jetbrains.compose.material:material-icons-core", version.ref = "compose-material-icons" }
 kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test", version.ref = "kotlin" }
 kotlin-test-junit = { module = "org.jetbrains.kotlin:kotlin-test-junit", version.ref = "kotlin" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }

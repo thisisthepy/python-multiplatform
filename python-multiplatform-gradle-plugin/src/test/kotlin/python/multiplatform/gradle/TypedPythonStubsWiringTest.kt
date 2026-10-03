@@ -9,7 +9,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * SPEC B-8 (python-multiplatform#27): the stubs task output reaches toolchain's `typedpythonStubs`
+ * SPEC B-9 (python-multiplatform#27): the stubs task output reaches toolchain's `typedpythonStubs`
  * configuration by name, with the task dependency attached, whichever side appears first.
  */
 class TypedPythonStubsWiringTest {

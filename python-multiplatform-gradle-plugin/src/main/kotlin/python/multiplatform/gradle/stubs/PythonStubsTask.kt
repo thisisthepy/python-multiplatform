@@ -101,6 +101,12 @@ abstract class PythonStubsTask : DefaultTask() {
         }
 
         val files = renderKotlinFqnStubs(declarations)
+        caseCollidingPaths(files.keys).forEach { group ->
+            logger.warn(
+                "python-multiplatform: stub paths differ only by case and name one file on a case-insensitive " +
+                    "filesystem (macOS, Windows); the last one written wins: $group",
+            )
+        }
         files.forEach { (path, content) ->
             val file = destination.resolve(path)
             file.parentFile.mkdirs()

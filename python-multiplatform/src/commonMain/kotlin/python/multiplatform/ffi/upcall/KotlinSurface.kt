@@ -24,6 +24,8 @@ import python.multiplatform.reflection.ExposedCallable
  * |---|---|
  * | `KOTLIN_DEFAULT` | the `inspect.Parameter.default` of a parameter whose Kotlin declaration has a default. Passing it (or leaving the parameter out) means "Kotlin's own default" |
  * | `describe(fn)` | the declaration(s) behind a binder-made callable: a tuple of dicts, one per overload (see [SOURCE]) |
+ * | `describe(module, name)` | the declaration(s) a bound name of a Kotlin-named module stands for, read from the table and never by reading the name |
+ * | `describe_member(type, name)` | the declaration(s) a member name of a Kotlin type stands for on its proxy -- an extension function or a property, supertypes included -- read from the table |
  * | `kotlin_function(raw, row)` | what [PythonProxySource] wraps each rendered function in: keyword arguments by Kotlin name, omitted defaults, and the metadata above |
  * | `signature_of(rows)` | the `inspect.Signature` for one declaration (`(*args, **kwargs)` for an overload set) |
  *
@@ -55,6 +57,43 @@ import python.multiplatform.reflection.ExposedCallable
  *           'has_default': False, 'value_class': False, 'composable_lambda': False},
  *          ...)}
  *
+ * `python_multiplatform.describe(module, name)` describes **any** bound name of a Kotlin-named
+ * module -- a function, an overload set's base name, an explicit `name__Types` spelling, and a
+ * named constant (`kind: 'STATIC_GETTER'`, `returns` its declared type, no parameters) -- **without
+ * evaluating it**: a constant's Kotlin getter is never invoked. One declaration answers one dict;
+ * an overload set's base name answers the tuple `describe(fn)` gives for it. A name that is not a
+ * bound declaration (a child package, a typo) raises `AttributeError`; `describe(fn)` with one
+ * argument is unchanged. So `describe(androidx.compose.ui.Alignment, 'End')['returns']` is
+ * `'androidx.compose.ui.Alignment.Horizontal'`.
+ *
+ * ### Members of a type: `describe_member(kotlin_type_name, kotlin_member_name)`
+ *
+ * What a member resolver needs to build a keyword map, and what `describe(module, name)` cannot
+ * give it: an extension is declared in *its* package, which is not the receiver's, so the receiver's
+ * type is the only key a resolver holds (issue #54). The answer has `describe()`'s shape -- a tuple of
+ * dicts, one per declaration -- and is exactly what the proxy of that type serves under that name:
+ *
+ * - an **extension function** answers every declaration the name stands for on that type -- for an
+ *   overload set's base name every candidate, for an explicit `name__Types` spelling that one;
+ *   `describe_member('androidx.compose.ui.Modifier', 'padding')` lists the `padding` overloads with
+ *   their Kotlin parameter names;
+ * - a **property** (issue #38) answers its getter (`kind: 'GETTER'`, no parameters, `returns` its
+ *   type) and, for a `var`, its setter (`kind: 'SETTER'`, one parameter, the value written). A member
+ *   property and an extension property look the same here; `receiver` is the type it is read on;
+ * - a name the type does not have is looked up on each type the table says it **is a**, nearest
+ *   first -- the same lookup the proxy uses, so a description cannot disagree with the attribute;
+ * - nothing is invoked: no getter runs, no handle is resolved;
+ * - a name served on neither the type nor any supertype, or any name while the binding layer is not
+ *   installed (it is what serves members on a proxy), raises `AttributeError`.
+ *
+ * ### Modules list and serve their children
+ *
+ * A Kotlin-named module's `dir()` lists its bound declarations, the receiver types under it, and
+ * its **direct child packages and objects** (an object whose members are bound, `Alignment`, is a
+ * package here). Each under its Kotlin name. Reading a child as an attribute imports it, so
+ * `androidx.compose.ui.Alignment.End` works after `import androidx` alone; a name nothing is bound
+ * under stays an `AttributeError`.
+ *
  * `value_class` is true for a parameter whose marshalling tag is a primitive while its declared
  * type is not a Kotlin primitive (`Dp`, `Color`, `TextUnit`) -- the only machine-checkable form of
  * "this is a value class". `composable_lambda` is true for a `@Composable` function-typed slot.
@@ -67,13 +106,22 @@ import python.multiplatform.reflection.ExposedCallable
  *     python_multiplatform.binding.add_member_resolver(fn)
  *     python_multiplatform.binding.remove_member_resolver(fn)
  *
- *     fn(kotlin_type_name, requested_name, kotlin_member_names) -> kotlin_name | None
+ *     fn(kotlin_type_name, requested_name, kotlin_member_names)
+ *         -> kotlin_name | (kotlin_name, keyword_map) | None
  *
  * - `fn` is asked only when the proxy has **no** Kotlin member named `requested_name`; a Kotlin name
  *   never reaches it. `kotlin_member_names` is a tuple of the Kotlin member names the type has.
  * - The first resolver (in registration order) returning a name that is in `kotlin_member_names` wins,
  *   and that Kotlin member is served. Any other answer (`None`, an unknown name, a name starting with
  *   `_`) means "not mine"; with no resolver answering, the result is the usual `AttributeError`.
+ * - **Keyword maps.** An answer may be `(kotlin_name, keyword_map)`, `keyword_map` being
+ *   `{python_kw: kotlinParam}`: it is applied when that member is called, and keywords it does not
+ *   name pass through as Kotlin parameter names (an unknown one is still the binding layer's
+ *   `TypeError`, which lists the Kotlin parameters). For a member the proxy *does* have under its
+ *   Kotlin name (`padding`), resolvers are asked only when a call to it passes keyword arguments, and
+ *   only for its keyword map: an answer counts when it is `(that same name, keyword_map)`; a plain
+ *   name or `None` means no map. A call with no keywords never asks. A tuple of any other shape is a
+ *   `TypeError`.
  * - The binder renames nothing itself: with no resolver registered behaviour is exactly the
  *   Kotlin-names-only behaviour above.
  * - Answers are cached in the resolver registry (cleared when a resolver is added or removed, and
@@ -156,6 +204,7 @@ object KotlinSurface {
         _NAME, _ARITY, _KIND, _SUSPEND, _NAMES, _TAGS, _TYPES, _RTAG, _RTYPE, _EXT, _RECV, _DEFAULTS = range(12)
 
         _RECEIVER = '<receiver>'
+        _PROPERTY_KINDS = ('GETTER', 'SETTER')
         _COMPOSER = '${'$'}composer'
         _FUNCTION_PREFIX = 'kotlin.Function'
         _COMPOSABLE_MARK = '@Composable'
@@ -216,7 +265,9 @@ object KotlinSurface {
                 'name': row[_NAME],
                 'kind': row[_KIND],
                 'suspend': bool(row[_SUSPEND]),
-                'receiver': row[_RECV] if row[_EXT] else None,
+                # A property's receiver is not one of its slots (`CallableKind.GETTER`), but it is
+                # still the type the property is read on -- the one fact a reader of a property needs.
+                'receiver': row[_RECV] if row[_EXT] or row[_KIND] in _PROPERTY_KINDS else None,
                 'returns': _declared_return(row[_RTYPE]),
                 'composable': _COMPOSER in names,
                 'content': last['name'] if last is not None and last['composable_lambda'] else None,
@@ -224,16 +275,73 @@ object KotlinSurface {
             }
 
 
-        def describe(fn):
+        _NO_NAME = object()
+
+
+        def describe(fn, name=_NO_NAME):
             '''The Kotlin declaration(s) behind [fn]: a tuple of dicts, one per overload.
 
             [fn] is anything the binder put on a Kotlin-named module -- a function the proxy layer
             rendered, a callable or overload set the binding layer adapted, or an extension already
             applied to its receiver (`Modifier.padding`). See `KotlinSurface` for the dict's keys.
+
+            `describe(module, name)` describes the bound Kotlin name [name] of a Kotlin-named
+            [module] without reading it -- a `STATIC_GETTER` (`Alignment.End`) included, whose getter
+            is never run. One declaration answers one dict; an overload set's base name answers the
+            same tuple `describe(fn)` gives for it.
             '''
+            if name is not _NO_NAME:
+                return _describe_named(fn, name)
             rows = getattr(fn, '__kotlin_rows__', None)
             if rows is None:
                 raise TypeError(repr(fn) + ' is not a Kotlin declaration the binder exposed')
+            return tuple(_describe_row(row) for row in rows)
+
+
+        def _describe_named(module, name):
+            if not isinstance(module, type(_sys)):
+                raise TypeError('describe(module, name) takes a Kotlin-named module, not ' + repr(module))
+            if not isinstance(name, str):
+                raise TypeError('describe(module, name): name must be a str')
+            rows = None
+            binding = _sys.modules.get(BINDING_MODULE)
+            if binding is not None:
+                rows = binding._rows_named(module.__name__, name)
+            if rows is None:
+                # The proxy layer's own, read without touching the attribute: a static property's row
+                # is kept on the module's type (`PythonProxySource._pm_kotlin_rows`), and a rendered
+                # function is found by `getattr_static`, which runs no descriptor -- so a constant's
+                # Kotlin getter is never invoked here.
+                row = (getattr(type(module), '_pm_kotlin_rows', None) or {}).get(name)
+                if row is not None:
+                    rows = (row,)
+                else:
+                    rows = getattr(_inspect.getattr_static(module, name, None), '__kotlin_rows__', None)
+            if not rows:
+                raise AttributeError(
+                    "module '" + module.__name__ + "' has no bound Kotlin declaration named '" + name + "'"
+                )
+            described = tuple(_describe_row(row) for row in rows)
+            return described[0] if len(described) == 1 else described
+
+
+        def describe_member(kotlin_type_name, kotlin_member_name):
+            '''The Kotlin declaration(s) the member [kotlin_member_name] of [kotlin_type_name] stands for.
+
+            A tuple of dicts, `describe()`'s shape: every overload of an extension function, or a
+            property's getter (and setter, for a `var`). Looked up on the type and then on every type
+            the table says it is a, nearest first -- exactly what a proxy of that type serves under
+            that name. Invokes nothing. `AttributeError` for a name the type is not served under.
+            '''
+            if not isinstance(kotlin_type_name, str) or not isinstance(kotlin_member_name, str):
+                raise TypeError('describe_member(kotlin_type_name, kotlin_member_name) takes two str')
+            binding = _sys.modules.get(BINDING_MODULE)
+            rows = binding._member_rows(kotlin_type_name, kotlin_member_name) if binding is not None else None
+            if not rows:
+                raise AttributeError(
+                    "Kotlin type '" + kotlin_type_name + "' has no member named '" + kotlin_member_name + "'" +
+                    ('' if binding is not None else ' (the binding layer, which serves members, is not installed)')
+                )
             return tuple(_describe_row(row) for row in rows)
 
 
