@@ -19,9 +19,9 @@ import pytest
 from typedpython import ir
 from typedpython.ir import (
     And, ArrayParam, Assign, BinOp, BinOpKind, Box, Break, Call, CallObject, Compare, CompareKind,
-    CompareObj, Const, Continue, ExprStmt, ForRange, Function, GetAttr, Global, If, Index, Len,
-    Local, MathCall, MathFunc, Module, ObjToFloat, Or, Param, Return, StoreIndex, ToFloat, Truth,
-    Type, Unbox, UnaryOp, UnaryOpKind, While,
+    CompareObj, Const, Continue, CopyArray, ExprStmt, ForRange, Function, GetAttr, Global, If, Index,
+    Len, Local, MathCall, MathFunc, Module, NewArray, ObjToFloat, Or, Param, Return, StoreIndex,
+    ToFloat, Truth, Tuple, Type, Unbox, UnaryOp, UnaryOpKind, While,
 )
 
 I64, F64, BOOL, NONE, OBJ = Type.I64, Type.F64, Type.BOOL, Type.NONE, Type.OBJ
@@ -45,6 +45,7 @@ CONDITION_ONLY = "verify/condition-only"
 PROVEN = "verify/proven-overflow"
 REDO = "verify/redo"
 ENTRY_OPEN = "verify/entry-global-open"
+ESCAPE = "verify/array-escape"
 
 
 def _verify():
@@ -1373,3 +1374,628 @@ def test_each_proof_mutation_kind_was_exercised():
     base = _proof_functions()
     kinds = {_proof_mutations(rng, base)[0] for _ in range(300)}
     assert len(kinds) == 16, sorted(kinds)     # 14 kinds; kind 6 has three variants
+
+
+# --- 10. local arrays and tuples (NewArray / CopyArray / Tuple; issue #41, N-8) -------------------
+
+def na(t, n, fill=None, iota=False): return NewArray(t, n, fill, iota)
+def la(name, t=F64A): return Local(t, name)
+def tup(*elements): return Tuple(OBJ, tuple(elements))
+
+
+def _local_sum(body=None, pure=True, may_deopt=False, params=(), locals_=None, returns=F64):
+    """t = [0.0] * 8; for k in range(len(t)): t[k] = 1.0; s += t[k]; return s"""
+    body = body if body is not None else [
+        Assign("t", na(F64A, i(8), f(0.0))),
+        Assign("s", f(0.0)),
+        ForRange("k", i(0), Len(I64, "t"), i(1), (
+            StoreIndex("t", li("k"), f(1.0)),
+            Assign("s", add(lf("s"), Index(F64, "t", li("k")), F64)),
+        )),
+        Return(lf("s")),
+    ]
+    return fn(params=params, locals_={"t": F64A, "s": F64, "k": I64, **(locals_ or {})},
+              returns=returns, pure=pure, may_deopt=may_deopt, body=body)
+
+
+def _flags(function):
+    out = assert_accepted(function)
+    return [a.proven for a in _accesses(out.functions[0])]
+
+
+# 10.1 what a local array may be and where an allocation may stand
+
+def test_a_pure_function_with_a_local_array_is_accepted():
+    assert_accepted(_local_sum())
+
+
+def test_storing_into_a_local_array_is_not_an_effect():
+    assert_accepted(_local_sum(pure=True))
+    assert_accepted(_local_sum(pure=False))             # a conservative flag is also fine
+
+
+def test_storing_into_an_array_param_still_makes_a_function_impure():
+    g = _local_sum(params=[ArrayParam("a", F64A, stored=True)], body=[
+        Assign("t", na(F64A, i(8), f(0.0))),
+        StoreIndex("t", i(0), f(1.0)),
+        StoreIndex("a", i(0), f(1.0)),
+        Return(f(0.0)),
+    ])
+    assert_rejected(FLAG_PURE, g)
+    assert_accepted(dataclasses.replace(g, pure=False))
+
+
+def test_reading_a_local_array_does_not_make_the_stored_flag_wrong():
+    assert_accepted(_local_sum(params=[ArrayParam("a", F64A, stored=False)]))
+
+
+def test_may_deopt_flag_is_recomputed_with_local_arrays():
+    deopting = _local_sum(body=[
+        Assign("t", na(I64A, i(4), i(0))),
+        Assign("x", add(Index(I64, "t", i(0)), i(1))),
+        Return(ToFloat(F64, li("x"))),
+    ], locals_={"t": I64A, "x": I64}, may_deopt=True)
+    assert_accepted(deopting)
+    assert_rejected(FLAG_DEOPT, dataclasses.replace(deopting, may_deopt=False))
+    assert_rejected(FLAG_DEOPT, dataclasses.replace(_local_sum(), may_deopt=True))
+    assert_rejected(DEOPT, dataclasses.replace(deopting, pure=False))
+
+
+def test_each_allocation_form_is_accepted():
+    for t, alloc, deopts in [(F64A, na(F64A, i(3), f(1.5)), False),
+                             (I64A, na(I64A, i(3), i(7)), False),
+                             (I64A, na(I64A, li("n"), None, True), False),
+                             (F64A, na(F64A, add(li("n"), i(1)), f(0.0)), True)]:
+        assert_accepted(fn(params=[Param("n", I64)], locals_={"t": t}, returns=NONE, pure=True,
+                           may_deopt=deopts, body=[Assign("t", alloc), Return()]))
+
+
+@pytest.mark.parametrize("place", ["expr-stmt", "return", "call-arg", "box", "tuple", "fill",
+                                   "length", "condition-free-assign"])
+def test_an_allocation_anywhere_but_an_assign_to_a_local_array_is_rejected(place):
+    alloc = na(F64A, i(2), f(0.0))
+    stmt = {
+        "expr-stmt": ExprStmt(alloc),
+        "return": Return(alloc),
+        "call-arg": ExprStmt(Call(NONE, "g", (alloc,))),
+        "box": Assign("o", Box(OBJ, alloc)),
+        "tuple": Assign("o", tup(alloc)),
+        "fill": Assign("t", na(F64A, i(2), alloc)),
+        "length": Assign("t", na(F64A, alloc, f(0.0))),
+        "condition-free-assign": Assign("o", alloc),
+    }[place]
+    g = fn(locals_={"t": F64A, "o": OBJ}, returns=NONE, body=[stmt, Return()] if place != "return"
+           else [stmt])
+    out, diags = run(g, fn("g", params=[Param("x", OBJ)], returns=NONE, body=[Return()]))
+    assert "f" not in kept(out)
+    assert ESCAPE in rules_for(diags, "f"), [dataclasses.astuple(d) for d in diags]
+
+
+def test_a_copy_anywhere_but_an_assign_to_a_local_array_is_rejected():
+    for stmt in [ExprStmt(CopyArray(F64A, "a")), Return(CopyArray(F64A, "a")),
+                 Assign("o", CopyArray(F64A, "a")), Assign("x", CopyArray(F64A, "a"))]:
+        g = fn(params=[ArrayParam("a", F64A, stored=False)], locals_={"o": OBJ, "x": F64},
+               returns=NONE, body=[stmt, Return()])
+        out, diags = run(g)
+        assert "f" not in kept(out)
+        assert ESCAPE in rules_for(diags, "f"), (stmt, [dataclasses.astuple(d) for d in diags])
+
+
+def test_an_allocation_into_an_array_param_is_rejected():
+    assert_rejected(ARRAY_USE, fn(params=[ArrayParam("a", F64A, stored=True)], returns=NONE, body=[
+        Assign("a", na(F64A, i(2), f(0.0))), Return()]))
+
+
+def test_the_allocation_type_must_match_the_declared_local():
+    assert_rejected(TYPE, fn(locals_={"t": I64A}, returns=NONE, body=[
+        Assign("t", na(F64A, i(2), f(0.0))), Return()]))
+    assert_rejected(TYPE, fn(locals_={"t": F64A}, returns=NONE, body=[
+        Assign("t", CopyArray(I64A, "a")), Return()],
+        params=[ArrayParam("a", I64A, stored=False)]))
+
+
+def test_the_node_type_must_be_an_array_type():
+    assert_rejected(TYPE, fn(locals_={"t": F64A}, returns=NONE, body=[
+        Assign("t", NewArray(I64, i(2), i(0))), Return()]))
+
+
+def test_a_local_array_may_only_be_assigned_an_allocation():
+    assert_rejected(TYPE, fn(locals_={"t": F64A}, returns=NONE, body=[
+        Assign("t", f(1.0)), Return()]))
+    assert_rejected(TYPE, fn(locals_={"t": F64A}, returns=NONE, body=[
+        Assign("t", Const(NONE, None)), Return()]))
+
+
+def test_new_array_length_must_be_i64():
+    assert_rejected(TYPE, fn(locals_={"t": F64A}, returns=NONE, body=[
+        Assign("t", na(F64A, f(2.0), f(0.0))), Return()]))
+    assert_rejected(OWNERSHIP, fn(locals_={"t": F64A}, returns=NONE, body=[
+        Assign("t", na(F64A, g_("N"), f(0.0))), Return()]))
+
+
+def test_new_array_fill_must_match_the_element_type():
+    assert_rejected(TYPE, fn(locals_={"t": F64A}, returns=NONE, body=[
+        Assign("t", na(F64A, i(2), i(0))), Return()]))
+    assert_rejected(TYPE, fn(locals_={"t": I64A}, returns=NONE, body=[
+        Assign("t", na(I64A, i(2), f(0.0))), Return()]))
+    assert_rejected(OWNERSHIP, fn(locals_={"t": I64A}, returns=NONE, body=[
+        Assign("t", na(I64A, i(2), g_("zero"))), Return()]))
+
+
+def test_new_array_fill_is_absent_exactly_when_iota():
+    assert_rejected(TYPE, fn(locals_={"t": I64A}, returns=NONE, body=[
+        Assign("t", na(I64A, i(2))), Return()]))
+    assert_rejected(TYPE, fn(locals_={"t": I64A}, returns=NONE, body=[
+        Assign("t", na(I64A, i(2), i(0), True)), Return()]))
+
+
+def test_iota_is_only_for_i64_arrays_and_must_be_a_bool():
+    assert_rejected(TYPE, fn(locals_={"t": F64A}, returns=NONE, body=[
+        Assign("t", na(F64A, i(2), None, True)), Return()]))
+    assert_rejected(TYPE, fn(locals_={"t": I64A}, returns=NONE, body=[
+        Assign("t", NewArray(I64A, i(2), None, 1)), Return()]))
+
+
+def test_copy_array_source_must_be_an_array_of_the_same_type():
+    ok = fn(params=[ArrayParam("a", F64A, stored=False)], locals_={"t": F64A}, returns=NONE,
+            pure=True, body=[Assign("t", CopyArray(F64A, "a")), Return()])
+    assert_accepted(ok)
+    assert_rejected(ARRAY_USE, dataclasses.replace(ok, params=(Param("a", F64),)))
+    assert_rejected(ARRAY_USE, fn(locals_={"t": F64A, "x": F64}, returns=NONE, body=[
+        Assign("x", f(1.0)), Assign("t", CopyArray(F64A, "x")), Return()]))
+    assert_rejected(ARRAY_USE, fn(locals_={"t": F64A}, returns=NONE, body=[
+        Assign("t", CopyArray(F64A, "nowhere")), Return()]))
+    assert_rejected(TYPE, dataclasses.replace(
+        ok, params=(ArrayParam("a", I64A, stored=False),)))
+
+
+def test_copy_of_a_local_array_is_accepted():
+    assert_accepted(fn(locals_={"t": I64A, "u": I64A}, returns=NONE, pure=True, body=[
+        Assign("t", na(I64A, i(4), None, True)), Assign("u", CopyArray(I64A, "t")), Return()]))
+
+
+def test_local_array_declarations_are_checked():
+    assert_rejected(TYPE, fn(params=[Param("t", I64)], locals_={"t": I64A}, returns=NONE,
+                             body=[Return()]))
+    assert_rejected(ARRAY_USE, fn(params=[ArrayParam("t", I64A, stored=False)],
+                                  locals_={"t": I64A}, returns=NONE, body=[Return()]))
+    assert_rejected(STRUCTURE, fn(entry_globals=[Param("t", I64)], locals_={"t": I64A},
+                                  returns=NONE, body=[Return()]))
+    assert_rejected(TYPE, fn(locals_={"t": Type.NONE}, returns=NONE, body=[Return()]))
+
+
+# 10.2 no escape
+
+def _escapes(use, ret=NONE):
+    """f(): t = [0] * 2; <use>; with t an i64 local array; g takes an OBJ."""
+    t = la("t", I64A)
+    stmt = use(t)
+    g = fn(locals_={"t": I64A, "o": OBJ, "x": I64, "a": F64A, "u": I64A}, returns=ret, body=[
+        Assign("t", na(I64A, i(2), i(0))), stmt] + ([Return()] if ret is NONE else []))
+    out, diags = run(g, fn("g", params=[Param("x", OBJ)], returns=NONE, body=[Return()]))
+    assert "f" not in kept(out)
+    assert ESCAPE in rules_for(diags, "f"), [dataclasses.astuple(d) for d in diags]
+
+
+@pytest.mark.parametrize("use", [
+    lambda t: ExprStmt(t),
+    lambda t: ExprStmt(Call(NONE, "g", (t,))),
+    lambda t: ExprStmt(call_obj(g_("h"), t)),
+    lambda t: ExprStmt(call_obj(t)),
+    lambda t: Assign("o", Box(OBJ, t)),
+    lambda t: Assign("o", tup(t)),
+    lambda t: Assign("o", tup(Box(OBJ, i(1)), t)),
+    lambda t: Assign("u", t),
+    lambda t: Assign("o", t),
+    lambda t: Assign("x", Unbox(I64, t)),
+    lambda t: Assign("o", GetAttr(OBJ, t, "x")),
+    lambda t: If(Truth(BOOL, t), ()),
+    lambda t: If(CompareObj(BOOL, CompareKind.EQ, t, lo("o")), ()),
+])
+def test_a_local_array_used_as_a_value_is_an_escape(use):
+    _escapes(use)
+
+
+def test_returning_a_local_array_is_an_escape():
+    for returns in (OBJ, NONE):
+        g = fn(locals_={"t": I64A}, returns=returns, body=[
+            Assign("t", na(I64A, i(2), i(0))), Return(la("t", I64A))])
+        out, diags = run(g)
+        assert "f" not in kept(out)
+        assert ESCAPE in rules_for(diags, "f")
+
+
+def test_a_local_array_is_not_a_loop_variable_or_an_array_param_argument():
+    assert_rejected(TYPE, fn(locals_={"t": I64A}, returns=NONE, body=[
+        Assign("t", na(I64A, i(2), i(0))),
+        ForRange("t", i(0), i(2), i(1), ()), Return()]))
+    callee = fn("g", params=[ArrayParam("a", I64A, stored=False)], returns=NONE, body=[Return()])
+    caller = fn(locals_={"t": I64A}, returns=NONE, body=[
+        Assign("t", na(I64A, i(2), i(0))), ExprStmt(Call(NONE, "g", (la("t", I64A),))),
+        Return()])
+    out, diags = run(callee, caller)
+    assert "f" not in kept(out) and ESCAPE in rules_for(diags, "f")
+
+
+def test_index_store_len_and_copy_source_are_the_only_uses_and_are_accepted():
+    assert_accepted(fn(locals_={"t": I64A, "u": I64A, "x": I64}, returns=I64, pure=True,
+                       may_deopt=True, body=[
+        Assign("t", na(I64A, i(4), i(0))),
+        StoreIndex("t", i(1), i(5)),
+        Assign("u", CopyArray(I64A, "t")),
+        Assign("x", add(Index(I64, "u", i(1)), Len(I64, "t"))),
+        Return(li("x")),
+    ]))
+
+
+def test_index_and_store_name_a_declared_array():
+    assert_rejected(ARRAY_USE, fn(locals_={"x": I64}, returns=I64, body=[
+        Assign("x", Index(I64, "nowhere", i(0))), Return(li("x"))]))
+    assert_rejected(ARRAY_USE, fn(locals_={"x": I64}, returns=NONE, body=[
+        Assign("x", i(1)), StoreIndex("x", i(0), i(1)), Return()]))
+
+
+def test_store_value_must_match_the_local_element_type():
+    assert_rejected(TYPE, fn(locals_={"t": F64A}, returns=NONE, body=[
+        Assign("t", na(F64A, i(2), f(0.0))), StoreIndex("t", i(0), i(1)), Return()]))
+    assert_rejected(TYPE, fn(locals_={"t": F64A}, returns=NONE, body=[
+        Assign("t", na(F64A, i(2), f(0.0))), StoreIndex("t", f(0.0), f(1.0)), Return()]))
+
+
+# 10.3 bounds
+
+def test_loop_over_len_of_a_local_array_is_proven():
+    assert _flags(_local_sum()) == [True, True]
+
+
+def test_loop_over_len_of_a_local_array_of_unknown_length_is_proven():
+    g = _local_sum(params=[Param("n", I64)], body=[
+        Assign("t", na(F64A, li("n"), f(0.0))),
+        ForRange("k", i(0), Len(I64, "t"), i(1), (StoreIndex("t", li("k"), f(1.0)),)),
+        Return(f(0.0)),
+    ])
+    assert _flags(g) == [True]
+
+
+def test_other_indices_into_an_array_of_unknown_length_are_unproven():
+    g = _local_sum(params=[Param("n", I64)], body=[
+        Assign("t", na(F64A, li("n"), f(0.0))),
+        StoreIndex("t", i(0), f(1.0)),
+        ForRange("k", i(0), li("n"), i(1), (StoreIndex("t", li("k"), f(1.0)),)),
+        Return(f(0.0)),
+    ])
+    assert _flags(g) == [False, False]
+
+
+def test_reassigning_the_array_inside_the_loop_defeats_the_loop_proof():
+    g = _local_sum(body=[
+        Assign("t", na(F64A, i(8), f(0.0))),
+        Assign("s", f(0.0)),
+        ForRange("k", i(0), Len(I64, "t"), i(1), (
+            Assign("t", na(F64A, i(1), f(0.0))),
+            Assign("s", add(lf("s"), Index(F64, "t", li("k")), F64)),
+        )),
+        Return(lf("s")),
+    ])
+    assert _flags(g) == [False]
+
+
+def test_reassigning_the_array_in_a_nested_statement_also_defeats_it():
+    g = _local_sum(params=[Param("c", BOOL)], body=[
+        Assign("t", na(F64A, i(8), f(0.0))),
+        Assign("s", f(0.0)),
+        ForRange("k", i(0), Len(I64, "t"), i(1), (
+            If(lb("c"), (Assign("t", na(F64A, i(1), f(0.0))),)),
+            Assign("s", add(lf("s"), Index(F64, "t", li("k")), F64)),
+        )),
+        Return(lf("s")),
+    ])
+    assert _flags(g) == [False]
+
+
+def _const_index(length, *indices, extra=()):
+    """t = [0.0] * length; x = t[i0] + t[i1] + ...  -> the proven flags in order"""
+    reads = [Index(F64, "t", i(ix)) for ix in indices]
+    total = reads[0]
+    for r in reads[1:]:
+        total = add(total, r, F64)
+    return fn(locals_={"t": F64A}, returns=F64, pure=True, body=[
+        *extra, Assign("t", na(F64A, i(length), f(0.0))), Return(total)])
+
+
+def test_constant_indices_below_a_known_length_are_proven():
+    assert _flags(_const_index(8, 0, 7)) == [True, True]
+
+
+def test_constant_indices_outside_a_known_length_are_not_proven():
+    assert _flags(_const_index(8, 8, 100, -1, -8)) == [False, False, False, False]
+    assert _flags(_const_index(0, 0)) == [False]
+    assert _flags(_const_index(-3, 0)) == [False]        # a negative length is an empty array
+
+
+def test_an_index_expression_with_a_bounded_interval_is_proven():
+    g = fn(locals_={"t": F64A, "s": F64, "k": I64}, returns=F64, pure=True, may_deopt=False, body=[
+        Assign("t", na(F64A, i(10), f(0.0))),
+        Assign("s", f(0.0)),
+        ForRange("k", i(0), i(9), i(1), (
+            Assign("s", add(lf("s"), Index(F64, "t", padd(li("k"), i(1))), F64)),
+            Assign("s", add(lf("s"), Index(F64, "t", psub(li("k"), i(1))), F64)),
+        )),
+        Return(lf("s")),
+    ])
+    assert _flags(g) == [True, False]      # k + 1 in [1, 9]; k - 1 in [-1, 7] may be negative
+
+
+def test_the_length_interval_comes_from_the_length_expression():
+    g = fn(locals_={"t": F64A, "j": I64, "s": F64}, returns=F64, pure=True, body=[
+        Assign("s", f(0.0)),
+        ForRange("j", i(2), i(6), i(1), (
+            Assign("t", na(F64A, li("j"), f(0.0))),
+            Assign("s", add(lf("s"), Index(F64, "t", i(0)), F64)),
+            Assign("s", add(lf("s"), Index(F64, "t", i(1)), F64)),
+            Assign("s", add(lf("s"), Index(F64, "t", i(2)), F64)),
+        )),
+        Return(lf("s")),
+    ])
+    assert _flags(g) == [True, True, False]      # j in [2, 5] -> the length is at least 2
+
+
+def test_a_twice_assigned_array_has_no_known_length():
+    g = fn(params=[Param("c", BOOL)], locals_={"t": F64A}, returns=F64, pure=True, body=[
+        Assign("t", na(F64A, i(8), f(0.0))),
+        If(lb("c"), (Assign("t", na(F64A, i(1), f(0.0))),)),
+        Return(Index(F64, "t", i(5))),
+    ])
+    assert _flags(g) == [False]
+
+
+def test_a_copy_inherits_the_length_of_a_known_source_only():
+    g = fn(params=[ArrayParam("a", F64A, stored=False)], locals_={"t": F64A, "u": F64A, "v": F64A},
+           returns=F64, pure=True, body=[
+        Assign("t", na(F64A, i(4), f(0.0))),
+        Assign("u", CopyArray(F64A, "t")),
+        Assign("v", CopyArray(F64A, "a")),
+        Return(add(add(Index(F64, "u", i(3)), Index(F64, "u", i(4)), F64),
+                   Index(F64, "v", i(0)), F64)),
+    ])
+    assert _flags(g) == [True, False, False]
+
+
+def test_a_proven_flag_from_the_input_is_not_trusted_for_local_arrays():
+    g = fn(params=[Param("n", I64)], locals_={"t": F64A}, returns=F64, pure=True, body=[
+        Assign("t", na(F64A, li("n"), f(0.0))),
+        Return(Index(F64, "t", i(0), proven=True)),
+    ])
+    assert _flags(g) == [False]
+
+
+def test_len_of_a_local_array_has_the_length_interval():
+    def doubled(length):
+        return fn(params=[Param("n", I64)], locals_={"t": F64A, "x": I64}, returns=I64, pure=True,
+                  body=[Assign("t", na(F64A, length, f(0.0))),
+                        Assign("x", pmul(Len(I64, "t"), i(2 ** 60))), Return(li("x"))])
+    assert_accepted(doubled(i(5)))              # len == 5: 5 * 2**60 fits i64 (only if known)
+    assert_rejected(PROVEN, doubled(li("n")))   # unknown length: [0, 2**62] * 2**60 does not
+    assert_rejected(PROVEN, doubled(i(20)))     # len == 20: 20 * 2**60 does not fit
+
+
+# 10.4 definite assignment
+
+@pytest.mark.parametrize("use", [
+    lambda: Assign("x", Index(F64, "t", i(0))),
+    lambda: StoreIndex("t", i(0), f(1.0)),
+    lambda: Assign("n", Len(I64, "t")),
+    lambda: Assign("u", CopyArray(F64A, "t")),
+    lambda: ForRange("k", i(0), Len(I64, "t"), i(1), ()),
+])
+def test_a_local_array_must_be_assigned_before_any_use(use):
+    g = fn(params=[Param("c", BOOL)], locals_={"t": F64A, "u": F64A, "x": F64, "n": I64, "k": I64},
+           returns=NONE, body=[
+        If(lb("c"), (Assign("t", na(F64A, i(2), f(0.0))),)),
+        use(), Return()])
+    assert_rejected(DA, g)
+    fixed = dataclasses.replace(g, body=(Assign("t", na(F64A, i(2), f(0.0))),) + g.body[1:])
+    assert_accepted(dataclasses.replace(fixed, pure=True))
+
+
+def test_assigned_on_both_branches_a_local_array_is_defined():
+    assert_accepted(fn(params=[Param("c", BOOL)], locals_={"t": F64A}, returns=F64, pure=True,
+                       body=[If(lb("c"), (Assign("t", na(F64A, i(2), f(0.0))),),
+                                (Assign("t", na(F64A, i(3), f(0.0))),)),
+                             Return(Index(F64, "t", i(0)))]))
+
+
+def test_a_local_array_assigned_in_a_loop_is_not_defined_after_it():
+    assert_rejected(DA, fn(locals_={"t": F64A, "k": I64}, returns=F64, body=[
+        ForRange("k", i(0), i(3), i(1), (Assign("t", na(F64A, i(2), f(0.0))),)),
+        Return(Index(F64, "t", i(0)))]))
+
+
+def test_the_allocation_operands_are_read_before_the_array_is_assigned():
+    assert_rejected(DA, fn(locals_={"t": F64A}, returns=NONE, body=[
+        Assign("t", na(F64A, Len(I64, "t"), f(0.0))), Return()]))
+
+
+# 10.5 tuples
+
+def test_a_tuple_of_boxed_scalars_and_objects_is_accepted():
+    assert_accepted(fn(params=[Param("o", OBJ), Param("x", F64)], locals_={"r": OBJ}, returns=OBJ,
+                       pure=True, body=[
+        Assign("r", tup(Box(OBJ, lf("x")), lo("o"), Box(OBJ, i(3)))), Return(lo("r"))]))
+
+
+def test_a_tuple_can_be_returned_directly_and_may_be_empty():
+    assert_accepted(fn(returns=OBJ, pure=True, body=[Return(tup())]))
+    assert_accepted(fn(params=[Param("x", I64)], returns=OBJ, pure=True,
+                       body=[Return(tup(Box(OBJ, li("x"))))]))
+
+
+def test_a_tuple_of_local_array_elements_is_accepted_through_index():
+    assert_accepted(fn(locals_={"t": I64A}, returns=OBJ, pure=True, body=[
+        Assign("t", na(I64A, i(3), i(1))),
+        Return(tup(Box(OBJ, Index(I64, "t", i(0))), Box(OBJ, Len(I64, "t"))))]))
+
+
+def test_a_scalar_tuple_element_needs_box():
+    assert_rejected(OWNERSHIP, fn(params=[Param("x", F64)], returns=OBJ, body=[
+        Return(tup(lf("x")))]))
+    assert_rejected(OWNERSHIP, fn(returns=OBJ, body=[Return(tup(i(1)))]))
+
+
+def test_a_tuple_is_an_obj_and_only_an_obj():
+    assert_rejected(TYPE, fn(returns=I64, body=[Return(Tuple(I64, ()))]))
+    assert_rejected(OWNERSHIP, fn(returns=I64, body=[Return(tup())]))
+    assert_rejected(OWNERSHIP, fn(locals_={"x": F64}, returns=NONE, body=[
+        Assign("x", tup()), Return()]))
+    assert_rejected(TYPE, fn(returns=BOOL, body=[Return(Tuple(BOOL, ()))]))
+
+
+def test_a_tuple_creates_a_reference():
+    # an OBJ local assigned from a tuple is an owned reference, like Box/CallObject
+    assert_accepted(fn(locals_={"r": OBJ, "q": OBJ}, returns=OBJ, pure=True, body=[
+        Assign("r", tup()), Assign("q", tup(lo("r"))), Return(lo("q"))]))
+
+
+def test_tuple_elements_must_be_a_tuple_of_checked_expressions():
+    assert_rejected(STRUCTURE, fn(returns=OBJ, body=[Return(Tuple(OBJ, [Box(OBJ, i(1))]))]))
+    assert_rejected(DA, fn(locals_={"o": OBJ}, returns=OBJ, body=[Return(tup(lo("o")))]))
+    assert_rejected(TYPE, fn(returns=OBJ, body=[Return(tup(Const(F64, 1)))]))
+
+
+def test_a_tuple_is_not_an_effect_but_unboxing_its_elements_is_not_available():
+    # a tuple creation is pure; the function may keep pure=True with a deopt-free body
+    assert_accepted(fn(returns=OBJ, pure=True, may_deopt=False, body=[Return(tup())]))
+
+
+# 10.6 mutation: nothing slips through
+
+def _array_functions():
+    """Correct functions with local arrays and tuples; the mutator breaks them."""
+    fk = fn("fk", params=[Param("n", I64), ArrayParam("a", I64A, stored=False)],
+            locals_={"p": I64A, "q": I64A, "k": I64, "s": I64, "t": OBJ, "o": OBJ},
+            returns=OBJ, pure=True, may_deopt=True, line=3, body=[
+                Assign("p", na(I64A, i(8), None, True)),
+                Assign("q", CopyArray(I64A, "p")),
+                Assign("s", i(0)),
+                Assign("o", g_("OBJECT")),
+                ForRange("k", i(0), Len(I64, "p"), i(1), (
+                    StoreIndex("q", li("k"), add(Index(I64, "p", li("k")), i(1))),
+                    Assign("s", add(li("s"), Index(I64, "q", li("k")))),
+                )),
+                Assign("t", tup(Box(OBJ, li("s")), Box(OBJ, Index(I64, "q", i(0))), lo("o"))),
+                Return(lo("t")),
+            ])
+    ip = fn("ip", params=[ArrayParam("a", F64A, stored=True)],
+            locals_={"z": F64A, "k": I64, "r": OBJ}, returns=NONE, line=9, body=[
+                Assign("z", na(F64A, Len(I64, "a"), f(0.0))),
+                ForRange("k", i(0), Len(I64, "a"), i(1), (
+                    StoreIndex("z", li("k"), Index(F64, "a", li("k"))),
+                    StoreIndex("a", li("k"), BinOp(F64, BinOpKind.ADD, Index(F64, "z", li("k")),
+                                                   f(1.0))),
+                )),
+                Assign("r", call_obj(g_("print"), Box(OBJ, Index(F64, "z", i(0))))),
+                Return(),
+            ])
+    sink = fn("sink", params=[Param("x", OBJ)], returns=NONE, line=12, body=[Return()])
+    return {x.name: x for x in (fk, ip, sink)}
+
+
+def _array_mutations(rng, base):
+    """(description, functions by name, the function that must be rejected, the rules any one of
+    which is an acceptable report)."""
+    b = dict(base)
+    fk, ip = b["fk"], b["ip"]
+    kind = rng.randrange(16)
+    arr = rng.choice([("p", I64A), ("q", I64A)])
+    leak = la(*arr)
+    insert = lambda g, *stmts: dataclasses.replace(g, body=g.body[:-1] + tuple(stmts) + g.body[-1:])
+    if kind == 0:       # return the array
+        b["fk"] = dataclasses.replace(fk, body=fk.body[:-1] + (Return(leak),))
+        return "return array", b, "fk", {ESCAPE}
+    if kind == 1:       # pass it to a compiled Call
+        b["fk"] = insert(fk, ExprStmt(Call(NONE, "sink", (leak,))))
+        return "call array", b, "fk", {ESCAPE}
+    if kind == 2:       # pass it to CallObject
+        b["fk"] = insert(fk, Assign("o", call_obj(g_("keep"), leak)))
+        return "callobject array", b, "fk", {ESCAPE}
+    if kind == 3:       # box it
+        b["fk"] = insert(fk, Assign("o", Box(OBJ, leak)))
+        return "box array", b, "fk", {ESCAPE}
+    if kind == 4:       # put it in a tuple
+        b["fk"] = insert(fk, Assign("o", tup(Box(OBJ, i(1)), leak)))
+        return "tuple array", b, "fk", {ESCAPE}
+    if kind == 5:       # alias it
+        b["fk"] = insert(fk, Assign("q" if arr[0] == "p" else "p", leak))
+        return "alias array", b, "fk", {ESCAPE}
+    if kind == 6:       # an allocation where it may not stand
+        alloc = rng.choice([na(I64A, i(2), i(0)), CopyArray(I64A, "p")])
+        stmt = rng.choice([ExprStmt(alloc), Assign("o", alloc), Assign("s", alloc),
+                           Assign("o", Box(OBJ, alloc))])
+        b["fk"] = insert(fk, stmt)
+        return "stray allocation", b, "fk", {ESCAPE}
+    if kind == 7:       # pure flag set on an impure function / an extra effect in a pure one
+        if rng.random() < 0.5:
+            b["ip"] = dataclasses.replace(ip, pure=True)
+            return "pure on impure", b, "ip", {FLAG_PURE}
+        b["fk"] = insert(fk, StoreIndex("a", i(0), i(1)))
+        return "param store in pure", b, "fk", {FLAG_PURE}
+    if kind == 8:       # pure flag cleared on a function that deopts / may_deopt flipped
+        if rng.random() < 0.5:
+            b["fk"] = dataclasses.replace(fk, pure=False)
+            return "drop pure", b, "fk", {DEOPT}
+        b["fk"] = dataclasses.replace(fk, may_deopt=False)
+        return "drop may_deopt", b, "fk", {FLAG_DEOPT}
+    if kind == 9:       # an impurity added to the pure function
+        stmt = rng.choice([ExprStmt(pycall("print")),
+                           Assign("o", GetAttr(OBJ, g_("m"), "x"))])
+        b["fk"] = insert(fk, stmt)
+        return "impurity in pure", b, "fk", {FLAG_PURE}
+    if kind == 10:      # the allocation is removed: every use reads an unassigned array
+        keep = [s for s in fk.body if not (type(s) is Assign and s.target == arr[0])]
+        b["fk"] = dataclasses.replace(fk, body=tuple(keep))
+        return "drop allocation", b, "fk", {DA}
+    if kind == 11:      # a malformed allocation
+        bad = rng.choice([na(I64A, i(8)), na(I64A, i(8), i(0), True), na(I64A, f(8.0), i(0)),
+                          na(I64A, i(8), f(0.0)), NewArray(I64A, i(8), None, 1),
+                          na(F64A, i(8), f(0.0)), NewArray(I64, i(8), i(0))])
+        b["fk"] = dataclasses.replace(fk, body=(Assign("p", bad),) + fk.body[1:])
+        return "bad allocation", b, "fk", {TYPE}
+    if kind == 12:      # a bad copy source
+        src = rng.choice([("n", {ARRAY_USE}), ("nowhere", {ARRAY_USE})])
+        b["fk"] = dataclasses.replace(fk, body=(fk.body[0], Assign("q", CopyArray(I64A, src[0]))
+                                                ) + fk.body[2:])
+        return "bad copy source", b, "fk", src[1] | {DA}
+    if kind == 13:      # a scalar tuple element without Box
+        b["fk"] = insert(fk, Assign("o", tup(li("s"))))
+        return "unboxed tuple element", b, "fk", {OWNERSHIP}
+    if kind == 14:      # the local's declared type disagrees with the allocation
+        b["fk"] = dataclasses.replace(fk, locals={**fk.locals, "p": F64A})
+        return "declared type", b, "fk", {TYPE}
+    # kind 15: a tuple typed as something else
+    b["fk"] = insert(fk, Assign("s", Tuple(I64, ())))
+    return "tuple not obj", b, "fk", {TYPE, OWNERSHIP}
+
+
+def test_array_base_functions_are_accepted():
+    assert_accepted(*_array_functions().values())
+
+
+@pytest.mark.parametrize("seed", [20261005])
+def test_no_array_breaking_mutation_slips_through(seed):
+    rng = random.Random(seed)
+    base = _array_functions()
+    missed = []
+    for n in range(400):
+        desc, funcs, target, allowed = _array_mutations(rng, base)
+        out, diags = run(*funcs.values())
+        got = rules_for(diags, target)
+        if target in kept(out) or not (got & allowed):
+            missed.append((n, desc, target, sorted(got)))
+    assert missed == []
+
+
+def test_each_array_mutation_kind_was_exercised():
+    rng = random.Random(20261005)
+    base = _array_functions()
+    kinds = {_array_mutations(rng, base)[0] for _ in range(400)}
+    assert len(kinds) == 18, sorted(kinds)     # 16 kinds; kinds 7 and 8 have two variants
