@@ -1097,6 +1097,56 @@ kotlin {
                 into("META-INF/LICENSE")
             }
         }
+        // Issue #74. python-build-standalone ships `libpython3.14.so -> libpython3.14.so.1.0` as a
+        // symlink. Gradle's `tarTree` extracts a symlink as an empty regular file, so the jar used
+        // to carry a 0-byte `libpython3.14.so` (the name the loader asks for) beside the real
+        // 252 MB `libpython3.14.so.1.0` that nothing asked for. Staging here:
+        //   1. drops every zero-length library (a symlink stub is never a library),
+        //   2. renames `libX.so.1.0` to `libX.so`, so the jar carries the real file under the name
+        //      `System.mapLibraryName` produces,
+        //   3. strips debug info from linux libraries, best-effort (see below).
+        val stageDesktopLibraries = tasks.register<Sync>("stageDesktopLibraries") {
+            dependsOn(downloadAllPythonBuilds)
+            val stageDir = layout.buildDirectory.dir("desktop-libs")
+            into(stageDir)
+            from("$extractedDir") {
+                include("macos-*$desktopFlavourSuffix/python/lib/libpython*.dylib")
+                include("linux-*$desktopFlavourSuffix/python/lib/libpython*.so*")
+                include("windows-*$desktopFlavourSuffix/python/python*.dll")
+                include("windows-*$desktopFlavourSuffix/python/vcruntime*.dll")
+                // `macos-*` matches `macos-aarch64-freethreaded` too.
+                if (!pythonFreeThreaded) exclude("*-freethreaded/**")
+                eachFile {
+                    if (file.length() == 0L) { exclude(); return@eachFile }
+                    val platform = relativePath.segments[0].removeSuffix(desktopFlavourSuffix)
+                    val filename = name.replace(Regex("""(\.so)(\.\d+)+$"""), "$1")
+                    path = "lib/$platform/$filename"
+                }
+                includeEmptyDirs = false
+            }
+            doLast {
+                // Best-effort: GNU strip / llvm-strip are not on every build host (Apple's strip
+                // cannot read ELF). When none works the unstripped library ships, and says so.
+                val candidates = listOf("llvm-strip", "x86_64-linux-gnu-strip", "strip")
+                stageDir.get().asFile.walkTopDown()
+                    .filter { it.isFile && it.parentFile.name.startsWith("linux-") && it.name.endsWith(".so") }
+                    .forEach { lib ->
+                        val before = lib.length()
+                        val done = candidates.any { tool ->
+                            try {
+                                val proc = ProcessBuilder(tool, "--strip-debug", lib.absolutePath)
+                                    .redirectErrorStream(true).start()
+                                proc.inputStream.readBytes()
+                                proc.waitFor() == 0
+                            } catch (_: java.io.IOException) { false }
+                        }
+                        logger.lifecycle(
+                            if (done) "stripped ${lib.name}: $before -> ${lib.length()} bytes"
+                            else "no ELF-capable strip found; ${lib.name} ships unstripped ($before bytes)"
+                        )
+                    }
+            }
+        }
         tasks.withType<Jar>().matching { it.name == "desktopJar" }.configureEach {
             if (configuredPythonVersion == "3.13.0" && !pythonFreeThreaded) {
                 from(libPathForDesktop) {
@@ -1106,34 +1156,11 @@ kotlin {
                     into("lib")
                 }
             } else {
-                dependsOn(downloadAllPythonBuilds)
-                from("$extractedDir") {
-                    include("macos-*$desktopFlavourSuffix/python/lib/libpython*.dylib")
-                    include("linux-*$desktopFlavourSuffix/python/lib/libpython*.so*")
-                    include("windows-*$desktopFlavourSuffix/python/python*.dll")
-                    include("windows-*$desktopFlavourSuffix/python/vcruntime*.dll")
-                    // `macos-*` matches `macos-aarch64-freethreaded` too, so a default build whose
-                    // build directory has ever seen `-PpythonFreeThreaded=true` would otherwise
-                    // pack both flavours' libraries into the same platform directory.
-                    if (!pythonFreeThreaded) exclude("*-freethreaded/**")
-                    eachFile {
-                        // `path` here is already destination-relative -- `into("lib")` below is
-                        // applied before eachFile sees the file, so the leading segment is "lib",
-                        // not the platform directory from the `from(...)` source tree. Indexing
-                        // parts[0] silently dropped the platform and collapsed every platform's
-                        // library onto the same jar entry (DuplicatesStrategy.WARN then kept only
-                        // the last one copied, breaking every platform but that one).
-                        val parts = path.split("/")
-                        // The flavour suffix exists only to keep the two extraction trees apart on
-                        // disk; the jar layout is what `manager.platformDirectory()` looks up, and
-                        // it names platforms alone. A free-threaded jar carries the same directory
-                        // names with a differently-named library inside.
-                        val platform = parts[1].removeSuffix(desktopFlavourSuffix)
-                        val filename = parts.last()
-                        path = "lib/$platform/$filename"
-                    }
-                    into("lib")
-                    includeEmptyDirs = false
+                // Issue #74: the libraries are packed from the staged tree, not straight from the
+                // extraction, so that symlinks are resolved and the linux library is stripped.
+                dependsOn(stageDesktopLibraries)
+                from(stageDesktopLibraries.map { it.destinationDir }) {
+                    include("lib/**")
                 }
             }
         }
@@ -2676,26 +2703,18 @@ tasks.withType<org.jetbrains.kotlin.gradle.tasks.CInteropProcess>().configureEac
 }
 
 val copyDesktopPythonBinariesForTests by tasks.registering(Copy::class) {
-    dependsOn(downloadAllPythonBuilds)
-    from("$extractedDir") {
-        include("macos-*$desktopFlavourSuffix/python/lib/libpython*.dylib")
-        include("linux-*$desktopFlavourSuffix/python/lib/libpython*.so*")
-        include("windows-*$desktopFlavourSuffix/python/python*.dll")
-        include("windows-*$desktopFlavourSuffix/python/vcruntime*.dll")
-        if (!pythonFreeThreaded) exclude("*-freethreaded/**")
-        eachFile {
-            val parts = path.split("/")
-            val platform = parts[0].removeSuffix(desktopFlavourSuffix)
-            val filename = parts.last()
-            path = "lib/$platform/$filename"
-        }
-        includeEmptyDirs = false
-    }
+    // Same resolved/stripped tree the desktop jar packs (issue #74).
+    val stage = tasks.named<Sync>("stageDesktopLibraries")
+    dependsOn(stage)
+    from(stage.map { it.destinationDir })
     into(layout.buildDirectory.dir("desktop-test-binaries"))
 }
 
 tasks.named<Test>("desktopTest") {
     dependsOn(copyDesktopPythonBinariesForTests)
+    // DesktopJarLibrariesTest opens the produced jar.
+    dependsOn("desktopJar")
+    systemProperty("pm.desktopJar", tasks.named<Jar>("desktopJar").get().archiveFile.get().asFile.absolutePath)
     classpath += files(layout.buildDirectory.dir("desktop-test-binaries"))
     
     javaLauncher.set(

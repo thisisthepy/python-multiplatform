@@ -46,8 +46,13 @@ internal object manager {
             }
         }
 
-        System.loadLibrary(libName)
-        libList.forEach { it.delete() }
+        if (libList.isEmpty()) {
+            System.loadLibrary(libName)
+        } else {
+            // Absolute path: the cache directory is not on `java.library.path`, and the extracted
+            // files are the cache, so they are not deleted after loading (issue #74).
+            libList.forEach { System.load(it.absolutePath) }
+        }
     }
 
     /**
@@ -128,22 +133,63 @@ internal object manager {
         currentPlatform.os.name.lowercase(Locale.getDefault()) +
             (if (currentPlatform.isArm) "-aarch64" else "-x86_64")
 
-    @Synchronized
-    private fun extractLibrary(libraryName: String, location: String = "/lib"): File {
-        var libraryFileName = System.mapLibraryName(libraryName)
-        val tempFile = File(".", libraryFileName)
-
-        libraryFileName = platformDirectory() + "/" + libraryFileName
-
-        javaClass.getResourceAsStream("$location/$libraryFileName").use { inputStream ->
-            if (inputStream == null) {
-                throw UnsatisfiedLinkError("Library $libraryFileName not found in JAR")
-            }
-            FileOutputStream(tempFile).use { outputStream ->
-                inputStream.copyTo(outputStream)
-            }
+    /**
+     * Root of the extraction cache. Never the working directory (issue #74).
+     *
+     * macOS `~/Library/Caches/python-multiplatform`, Windows `%LOCALAPPDATA%\\python-multiplatform`,
+     * elsewhere `$XDG_CACHE_HOME` or `~/.cache` + `/python-multiplatform`. When none of those is
+     * usable the fallback is `java.io.tmpdir/python-multiplatform-<user>`. Overridable with the
+     * `python.multiplatform.cache` system property (tests use it).
+     */
+    internal fun cacheRoot(): File {
+        System.getProperty("python.multiplatform.cache")?.takeIf { it.isNotBlank() }?.let { return File(it) }
+        val home = System.getProperty("user.home")?.takeIf { it.isNotBlank() }
+        val base = when (currentPlatform.os) {
+            OSType.MacOS -> home?.let { File(it, "Library/Caches") }
+            OSType.Windows -> System.getenv("LOCALAPPDATA")?.takeIf { it.isNotBlank() }?.let { File(it) }
+            else -> System.getenv("XDG_CACHE_HOME")?.takeIf { it.isNotBlank() }?.let { File(it) }
+                ?: home?.let { File(it, ".cache") }
         }
+        val root = base?.let { File(it, "python-multiplatform") }
+        if (root != null && (root.isDirectory || root.mkdirs()) && root.canWrite()) return root
+        val user = System.getProperty("user.name") ?: "user"
+        return File(System.getProperty("java.io.tmpdir"), "python-multiplatform-$user")
+    }
 
-        return tempFile
+    /**
+     * Copies the bundled library into `<cacheRoot>/<python version>/<platform>/` and returns it,
+     * reusing a previous copy whose size equals the resource's. The write goes to a temporary
+     * sibling and is moved into place, so a concurrent process never loads a half-written file.
+     */
+    @Synchronized
+    internal fun extractLibrary(
+        libraryName: String,
+        location: String = "/lib",
+        cacheRoot: File = cacheRoot(),
+    ): File {
+        val fileName = System.mapLibraryName(libraryName)
+        val resource = "$location/${platformDirectory()}/$fileName"
+        val url = javaClass.getResource(resource)
+            ?: throw UnsatisfiedLinkError("Library ${platformDirectory()}/$fileName not found in JAR")
+
+        val dir = File(cacheRoot, Versions.currentVersion.versionString + "/" + platformDirectory())
+        dir.mkdirs()
+        val target = File(dir, fileName)
+
+        val expected = url.openConnection().let { c -> c.contentLengthLong.also { (c as? java.net.HttpURLConnection)?.disconnect() } }
+        if (target.isFile && expected > 0 && target.length() == expected) return target
+
+        val tmp = File.createTempFile("$fileName.", ".part", dir)
+        try {
+            url.openStream().use { input -> FileOutputStream(tmp).use { input.copyTo(it) } }
+            if (tmp.length() == 0L) throw UnsatisfiedLinkError("Library $resource is empty in the JAR")
+            java.nio.file.Files.move(
+                tmp.toPath(), target.toPath(),
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+            )
+        } finally {
+            tmp.delete()
+        }
+        return target
     }
 }
