@@ -31,6 +31,16 @@ ask first.**
 
 Writing to *another* repository is not an exception either. Do it only when told to work there.
 
+### Do not add top-level folders
+
+**Never add a new directory (or a new file) at the repository root on your own.** The root layout is
+the maintainer's: source modules, `docs/`, `gradle/`, `.github/` and the files that tools require
+there. Work belongs inside an existing module or directory — sources under `src/<sourceSet>/`,
+CI-only scripts under `.github/scripts/`, temporary files under the git-ignored `.tmp/`. If you think
+a new top-level entry is needed, propose it (what, why, which alternatives inside existing
+directories you ruled out) and wait for approval. This was added after unapproved root folders
+(`ksp-fixtures/`, `tools/`, `kotlin-js-store/`, `iosApp/`, `sample/python`) had to be dismantled.
+
 ## 3. Worktrees link large artefacts instead of copying them
 
 A worktree is a full checkout. Copying large untracked artefacts (prebuilt runtimes, vendored trees,
