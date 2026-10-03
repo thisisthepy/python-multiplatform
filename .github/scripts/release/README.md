@@ -7,7 +7,7 @@ between runs, and any existing `release` (e.g. a stale one from an older workflo
 ignored and overwritten.
 
 1. Every push to `develop` triggers `.github/workflows/release-sync.yml`, which runs
-   `tools/release/sync-release.sh --push`. It rebuilds `release` from scratch as exactly
+   `.github/scripts/release/sync-release.sh --push`. It rebuilds `release` from scratch as exactly
    one commit (`Release: sync from develop <sha>`) whose parent is that develop commit and
    whose tree is the develop tree minus the files below. This happens even when nothing
    is dropped. It is a no-op only if `release` already has that tree and that parent.
@@ -31,10 +31,10 @@ Only Markdown is ever dropped.
 
 ## Local use
 
-    tools/release/sync-release.sh --dry-run     # list paths that would be dropped
-    tools/release/sync-release.sh               # regenerate local release branch
-    tools/release/sync-release.sh --push        # also push to origin
-    tools/release/test-sync-release.sh          # tests (throwaway repo in .tmp/)
+    .github/scripts/release/sync-release.sh --dry-run     # list paths that would be dropped
+    .github/scripts/release/sync-release.sh               # regenerate local release branch
+    .github/scripts/release/sync-release.sh --push        # also push to origin
+    .github/scripts/release/test-sync-release.sh          # tests (throwaway repo in .tmp/)
 
 The script uses plumbing and a private index, so your working tree, index and HEAD are untouched.
 It refuses to run while `release` is checked out.

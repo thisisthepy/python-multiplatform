@@ -5,7 +5,7 @@ name: Kotlin-name stubs
 # build resolves (`compose-plugin` in gradle/libs.versions.toml) and publishes the result.
 #
 #   - every push to develop and every pull request: the stubs are generated, type-checked against
-#     tools/stubs/consumer.py with mypy (issue #31), and uploaded as the workflow artifact `kotlin-stubs`;
+#     .github/scripts/stubs/consumer.py with mypy (issue #31), and uploaded as the workflow artifact `kotlin-stubs`;
 #   - every `v*` tag: the same stubs are also attached to the tag's GitHub release as `kotlin-stubs.zip`.
 
 on:
@@ -17,7 +17,7 @@ on:
     paths:
       - "python-multiplatform-gradle-plugin/**"
       - "ksp-fixtures/compose/**"
-      - "tools/stubs/**"
+      - ".github/scripts/stubs/**"
       - "gradle/libs.versions.toml"
       - ".github/workflows/stubs.yml"
   workflow_dispatch:
@@ -55,7 +55,7 @@ jobs:
         run: ./gradlew :ksp-fixtures:compose:generatePythonStubs --console=plain
 
       - name: Type-check a consumer against them (mypy)
-        run: tools/stubs/check-stubs.sh ksp-fixtures/compose/build/generated/pythonStubs/desktopMain
+        run: .github/scripts/stubs/check-stubs.sh ksp-fixtures/compose/build/generated/pythonStubs/desktopMain
 
       - name: Assemble the artifact
         run: |
@@ -86,7 +86,7 @@ jobs:
 
           Use: put this directory on the type checker's path (\`MYPYPATH=<this directory>\`, or the
           IDE's "stub path" / interpreter paths). It is checked with mypy against
-          \`tools/stubs/consumer.py\` in the commit above.
+          \`.github/scripts/stubs/consumer.py\` in the commit above.
           README
           (cd build && zip -qr kotlin-stubs.zip kotlin-stubs)
 
@@ -146,4 +146,4 @@ jobs:
           PY
 
       - name: Type-check a consumer against them (mypy)
-        run: tools/stubs/check-stubs.sh ksp-fixtures/compose/build/generated/pythonStubs/desktopMain
+        run: .github/scripts/stubs/check-stubs.sh ksp-fixtures/compose/build/generated/pythonStubs/desktopMain

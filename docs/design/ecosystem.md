@@ -247,7 +247,7 @@ This section documents the current state, language/build system/distribution art
   - `PythonMultiplatform` has no dependencies on other repos in the ecosystem.
   - `pythonx-compose` and consumer applications depend on `PythonMultiplatform` runtime and its Gradle/KSP bindings plugin.
 - **Unverified**:
-  - Behavior of WASM browser runtime under production web bundlers. (*2026-10-03:* the former `wasm-experiment/` is folded into the library, `wasmJsMain`/`wasmJsTest`, CPython built by `tools/wasm/build-cpython.sh`, commit `6e54f617`; the bundler question is unchanged.)
+  - Behavior of WASM browser runtime under production web bundlers. (*2026-10-03:* the former `wasm-experiment/` is folded into the library, `wasmJsMain`/`wasmJsTest`, CPython built by `python-multiplatform/scripts/wasm/build-cpython.sh`, commit `6e54f617`; the bundler question is unchanged.)
 
 **Version check (2026-08-17): "3.14 runtime vs. 3.13 header, never checked", could not find the
 sentence, checked the claim anyway.** The literal sentence was searched for across every `.md` file

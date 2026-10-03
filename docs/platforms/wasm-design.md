@@ -18,7 +18,7 @@ has a browser wasm target. `wasmWasi` is not a target (when last assessed it was
 |---|---|---|
 | How Kotlin reaches CPython | Raw Stable ABI symbols as `@WasmImport`s against the Emscripten module's own wasm exports, **no JS in the call path** | Preserves the exact object model (`NativePointer`, `PyObject`) of every other target; a high-level Pyodide-style JS API (`pyodide.runPython`, `PyProxy`) would replace the whole object model with `JsAny` wrappers and covers almost none of the ~330 C functions |
 | Memory | **One shared linear memory.** Kotlin imports Emscripten's `Module.wasmMemory` as its `intrinsics.memory` | Needs Kotlin ≥ 2.4.20-Beta2, whose `wasmJs` modules **import** `intrinsics.memory` (`min=0, max=none`). Releases up to 2.4.10 exported an unbounded memory, which Emscripten cannot import, the earlier plan to patch the `.wasm` memory section (and a YouTrack issue) is obsolete ([`../archive/wasm-youtrack-issue.md`](../archive/wasm-youtrack-issue.md)) |
-| Where CPython comes from | **Our own Emscripten build**, `tools/wasm/build-cpython.sh`: CPython **3.14.2**, Emscripten **5.0.3**, matched to the `pyemscripten_2026_0` platform of PEP 783 | No distributor ships a `python.wasm` exporting `wasmExports,wasmMemory`. The version is deliberately not the 3.14.x pinned for native targets (`pythonVersion` in `gradle.properties`); see `docs/design/ecosystem.md` |
+| Where CPython comes from | **Our own Emscripten build**, `python-multiplatform/scripts/wasm/build-cpython.sh`: CPython **3.14.2**, Emscripten **5.0.3**, matched to the `pyemscripten_2026_0` platform of PEP 783 | No distributor ships a `python.wasm` exporting `wasmExports,wasmMemory`. The version is deliberately not the 3.14.x pinned for native targets (`pythonVersion` in `gradle.properties`); see `docs/design/ecosystem.md` |
 | C shim / composition | **None** | The hops that composition amortised are gone; measured gain ≤ 2.9 ns per operation (below). It also removes a second build pipeline |
 | `EXPORTED_FUNCTIONS` list | **Not needed** | `-sMAIN_MODULE` is `LINKABLE`, so the whole Stable ABI is exported (all 310 C symbols `EmbedAPI.kt` declared at the time were found in the build's 8287 exports). The build adds `wasmExports,wasmMemory` to `-sEXPORTED_RUNTIME_METHODS`, which is not ABI-sensitive |
 | Upcalls (Python → Kotlin) | `@WasmExport` trampolines placed in CPython's `__indirect_function_table` with `WebAssembly.Table.set`; the table index is the C function pointer. Routing is by data (a handle in `self`/`closure`), through the generated table, as on every platform | A funcref is a funcref: `call_indirect` reaches the Kotlin export directly. Measured 3.1 ns vs 10.9 ns for the `addFunction` + JS-closure route |
@@ -86,7 +86,7 @@ Corrections that came out of measuring (they changed the design):
 
 ## The interpreter build and the platform tag
 
-`tools/wasm/build-cpython.sh` builds CPython 3.14.2 with CPython's own `Tools/wasm/emscripten` driver
+`python-multiplatform/scripts/wasm/build-cpython.sh` builds CPython 3.14.2 with CPython's own `Tools/wasm/emscripten` driver
 plus the changes that make it claim `pyemscripten_2026_0` (PEP 783):
 
 | | stock Tier 3 build | this build |
@@ -100,8 +100,8 @@ Evidence: a real PyPI wheel, `pydantic_core-2.48.0-cp314-cp314-pyemscripten_2026
 and runs on this build (`validate_python(42) -> 42`, a `ValidationError` raised and caught, the
 exception exercises the unwinding ABI), and fails with `tag import requires a WebAssembly.Tag` on the
 stock build. This is one wheel and one code path; it does not show that every compiled extension
-loads. `WasmCompiledWheelTest` runs it (`tools/wasm/build-cpython.sh wheels` fetches the pinned wheels);
-`WasmInterpreterAbiTest` checks the claims, with `tools/wasm/build-cpython.sh stock` as the negative
+loads. `WasmCompiledWheelTest` runs it (`python-multiplatform/scripts/wasm/build-cpython.sh wheels` fetches the pinned wheels);
+`WasmInterpreterAbiTest` checks the claims, with `python-multiplatform/scripts/wasm/build-cpython.sh stock` as the negative
 control. Emscripten is pinned to 5.0.3 because that is what the platform specifies, and installing it
 replaces `~/emsdk/upstream` in place (a global setting).
 

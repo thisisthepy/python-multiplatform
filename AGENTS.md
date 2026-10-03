@@ -22,7 +22,7 @@ files, lives **inside this repository's root directory.**
 | Worktrees | `.worktrees/<name>` (git-ignored) |
 | Temporary files | `.tmp/` (git-ignored); delete when done |
 | Benchmarks | `benchmarks/` |
-| Developer tooling | `tools/` |
+| Developer tooling | `.github/scripts/` (CI-only), or beside the module it serves |
 
 Before writing a file, check that its absolute path starts with this repository's root. If it does
 not, stop. The only exceptions are a path the user names explicitly, and caches that build tools
@@ -70,7 +70,7 @@ landed or reported, not left. Branches named `release-*` are preserved snapshots
 
 `main` carries a reduced layout: of the Markdown files, only `README.md` stays at the repository
 root, and `docs/` keeps only its subdirectories (no Markdown files directly under `docs/`).
-CI runs `tools/release/sync-release.sh` (`.github/workflows/release-sync.yml`) to produce that layout; do not hand-edit `release` or `main`.
+CI runs `.github/scripts/release/sync-release.sh` (`.github/workflows/release-sync.yml`) to produce that layout; do not hand-edit `release` or `main`.
 
 ### Issues and pull requests
 

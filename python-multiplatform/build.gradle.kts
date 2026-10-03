@@ -1425,7 +1425,7 @@ tasks.withType<org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeSimu
 // workspace path through SIMCTL_CHILD_PYTHONHOME. An installed app has no such variable, and a path on
 // this workspace's external volume parks the sandboxed app at 0% CPU (iosMain/README.md). So an app
 // carries its own prefix inside its bundle, staged here per slice and copied in by the Xcode Run
-// Script phase `tools/xcode/install-python.sh`; `IosPythonHome` (iosMain) finds it at run time.
+// Script phase `python-multiplatform-gradle-plugin/src/main/resources/xcode/install-python.sh`; `IosPythonHome` (iosMain) finds it at run time.
 // The selection rules are `IosPythonHomeLayout` in the Gradle plugin, where they are unit-tested.
 // =================================================================================================
 
@@ -1925,7 +1925,7 @@ listOf("Arm64" to "arm64-v8a", "X64" to "x86_64").forEach { (targetSuffix, abi) 
 // Ordering comes free from ES modules: the import-object module imports `cpython.mjs`, which has a
 // top-level `await`, so Emscripten is fully instantiated before the import object is built.
 //
-// The CPython build itself is produced by `tools/wasm/build-cpython.sh` (also reachable as the
+// The CPython build itself is produced by `python-multiplatform/scripts/wasm/build-cpython.sh` (also reachable as the
 // `buildWasmPython` task below) -- CPython 3.14.2 matched to `pyemscripten_2026_0` (PEP 783),
 // relinked with `wasmExports,wasmMemory` added to `-sEXPORTED_RUNTIME_METHODS`. Without those two the
 // 8287 wasm exports are present in the binary but unreachable from JS, so there is nothing to hand
@@ -1951,12 +1951,12 @@ val wasmPythonDir: String = (project.findProperty("wasmPythonDir")?.toString()
 val buildWasmPython by tasks.registering(Exec::class) {
     group = "python"
     description = "Builds CPython 3.14.2 for wasm32-emscripten (pyemscripten_2026_0) into .caches/"
-    val script = rootProject.layout.projectDirectory.file("tools/wasm/build-cpython.sh").asFile
+    val script = rootProject.layout.projectDirectory.file("python-multiplatform/scripts/wasm/build-cpython.sh").asFile
     commandLine("bash", script.absolutePath, "all")
 }
 
 /**
- * Where `tools/wasm/build-cpython.sh wheels` puts the pinned compiled wheels the wasm suite loads
+ * Where `python-multiplatform/scripts/wasm/build-cpython.sh wheels` puts the pinned compiled wheels the wasm suite loads
  * (`wasmJsTest/.../WasmCompiledWheelTest`). Not checked in: they are downloaded by URL and accepted
  * only against the sha256 the script pins.
  */
@@ -1968,7 +1968,7 @@ val wasmWheelsDir: String = (project.findProperty("wasmWheelsDir")?.toString()
 val fetchWasmWheels by tasks.registering(Exec::class) {
     group = "python"
     description = "Downloads the pinned pyemscripten_2026_0 wheels the wasm suite loads into .caches/"
-    val script = rootProject.layout.projectDirectory.file("tools/wasm/build-cpython.sh").asFile
+    val script = rootProject.layout.projectDirectory.file("python-multiplatform/scripts/wasm/build-cpython.sh").asFile
     environment("WASM_WHEELS_DIR", wasmWheelsDir)
     commandLine("bash", script.absolutePath, "wheels")
 }
@@ -2043,7 +2043,7 @@ fun Task.wasmRuntimePresent(marker: File): Boolean {
     val remedy = "Unpack the published runtime " +
         "(io.github.thisisthepy:python-multiplatform-wasm-runtime:$libraryVersion) and point " +
         "-PwasmPythonDir / PMP_PYTHON_DIR at it, or build one into the default location with " +
-        "./gradlew :python-multiplatform:buildWasmPython (tools/wasm/build-cpython.sh)."
+        "./gradlew :python-multiplatform:buildWasmPython (python-multiplatform/scripts/wasm/build-cpython.sh)."
     val what = "$name: no CPython Emscripten build at ${marker.parentFile} " +
         "(looked for ${marker.name})."
     if (requireWasmRuntime) {
@@ -2560,7 +2560,7 @@ tasks.withType<org.jetbrains.kotlin.gradle.targets.js.testing.KotlinJsTest>().co
             logger.lifecycle(
                 "No wheels in $wasmWheelsDir -- WasmCompiledWheelTest will " +
                     (if (requireWasmRuntime) "FAIL (-PrequireWasmRuntime)" else "skip") +
-                    ". Fetch them with tools/wasm/build-cpython.sh wheels (or :python-multiplatform:fetchWasmWheels)."
+                    ". Fetch them with python-multiplatform/scripts/wasm/build-cpython.sh wheels (or :python-multiplatform:fetchWasmWheels)."
             )
         }
         dir.resolve("cpython-config.mjs").appendText(

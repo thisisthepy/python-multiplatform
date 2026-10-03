@@ -2,7 +2,7 @@
 # Tests for sync-release.sh. Builds a throwaway repo under <repo>/.tmp/.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$(cd "$HERE/../.." && pwd)"
+ROOT="$(cd "$HERE/../../.." && pwd)"
 SYNC="$HERE/sync-release.sh"
 SCRATCH="$ROOT/.tmp/release-sync-test.$$"
 FAILS=0; PASSES=0

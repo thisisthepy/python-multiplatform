@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Checks the bilingual GitHub Pages guide in docs/guide/.
 
-    python3 tools/check_guide.py [guide-dir]
+    python3 .github/scripts/check_guide.py [guide-dir]
 
 Fails (exit 1) when:
   1. an HTML file does not parse into balanced elements;
@@ -153,7 +153,7 @@ def check(guide):
 
 def main():
     here = os.path.dirname(os.path.abspath(__file__))
-    guide = sys.argv[1] if len(sys.argv) > 1 else os.path.join(here, "..", "docs", "guide")
+    guide = sys.argv[1] if len(sys.argv) > 1 else os.path.join(here, "..", "..", "docs", "guide")
     failures = check(guide)
     for f in failures:
         print("FAIL", f)

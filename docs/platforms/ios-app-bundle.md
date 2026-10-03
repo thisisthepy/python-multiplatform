@@ -33,7 +33,7 @@ PYTHON_DYLIB_INFO_TEMPLATE=<abs>/python-multiplatform/build/python-ios-home/ipho
 A universal `ARCHS` (`arm64 x86_64`) is refused with the fix (`ONLY_ACTIVE_ARCH=YES` or `ARCHS=arm64`):
 one prefix holds one `lib-dynload`. Upstream's `utils.sh` has the same limit without saying so.
 
-**Xcode** (`tools/xcode/install-python.sh`, a Run Script phase after Copy Bundle Resources and before
+**Xcode** (`python-multiplatform-gradle-plugin/src/main/resources/xcode/install-python.sh`, a Run Script phase after Copy Bundle Resources and before
 Embed Frameworks; `ENABLE_USER_SCRIPT_SANDBOXING = NO`).
 
 1. Runs Gradle as above. The output is captured, then parsed, then checked to be a directory, a
@@ -97,7 +97,7 @@ The sample's project is `sample/src/iosMain/app.xcodeproj` (target `app`, produc
 set -e
 cd "$SRCROOT/../../.."
 export PYTHON_PAYLOAD_DIR="$SRCROOT/../commonMain/python"
-/bin/bash tools/xcode/install-python.sh
+/bin/bash python-multiplatform-gradle-plugin/src/main/resources/xcode/install-python.sh
 ```
 
 It replaced two phases: "Install Target Specific Python Standard Library", which rsynced the slice's

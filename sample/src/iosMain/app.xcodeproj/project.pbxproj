@@ -296,7 +296,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -e\n# SPEC L-10 / issue #59: the CPython stdlib and this app's python/ payload into the .app, with\n# extension modules wrapped as frameworks. See docs/platforms/ios-app-bundle.md.\ncd \"$SRCROOT/../../..\"\nexport PYTHON_PAYLOAD_DIR=\"$SRCROOT/../commonMain/python\"\n/bin/bash tools/xcode/install-python.sh\n";
+			shellScript = "set -e\n# SPEC L-10 / issue #59: the CPython stdlib and this app's python/ payload into the .app, with\n# extension modules wrapped as frameworks. See docs/platforms/ios-app-bundle.md.\ncd \"$SRCROOT/../../..\"\nexport PYTHON_PAYLOAD_DIR=\"$SRCROOT/../commonMain/python\"\n/bin/bash python-multiplatform-gradle-plugin/src/main/resources/xcode/install-python.sh\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 

@@ -122,7 +122,7 @@ fail, then implement.
   `libpython*.dylib`, or the top-level packages `test`, `idlelib`, `tkinter`, `turtledemo` and
   `ensurepip`; `stageIosPythonHomeForXcode` picks the slice from Xcode's `EFFECTIVE_PLATFORM_NAME`
   and `ARCHS` and prints `PYTHON_HOME_DIR=` and `PYTHON_DYLIB_INFO_TEMPLATE=`. An Xcode Run Script
-  phase (`tools/xcode/install-python.sh`, after Copy Bundle Resources and before Embed Frameworks)
+  phase (`python-multiplatform-gradle-plugin/src/main/resources/xcode/install-python.sh`, after Copy Bundle Resources and before Embed Frameworks)
   copies that prefix into `<app>/python-multiplatform-home/` and the consumer's payload (L-6) into
   `<app>/python/`, and moves every `.so` under either into `Frameworks/<dotted.name>.framework`,
   leaving a `.fwork` placeholder, as CPython's `AppleFrameworkLoader` and Apple's rule against loose
@@ -427,7 +427,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   module is stubbed in its parent package as one attribute whose type has `__call__` (the function or
   its `@overload`s) and the module's constants and functions as members, never as a bare `def`, which
   would hide `TextRange.Zero` from a checker),
-  `tools/stubs/check-stubs.sh` (mypy over the Compose stubs). A class whose name is also a function in
+  `.github/scripts/stubs/check-stubs.sh` (mypy over the Compose stubs). A class whose name is also a function in
   its module is `Any`, except that a class's own bound constructor is that class's `__init__`
   (`@overload`ed for several), so the class keeps its stub, members and properties; a single one's
   docstring carries its table key after `Kotlin constructor: `; its `__`-suffixed table-key spellings
@@ -444,7 +444,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   (`Arrangement.HorizontalOrVertical(Horizontal, Vertical)`, so a `Vertical` slot accepts it): `Any`
   and `java.lang.*` are dropped, and a base already implied by another listed base's known ancestry
   is dropped, so the order is a valid Python MRO (#71, `GP/stubs/SupertypeStubTest.kt`, and the
-  `Column`/`Row` `SpaceBetween` lines of `tools/stubs/consumer.py`).
+  `Column`/`Row` `SpaceBetween` lines of `.github/scripts/stubs/consumer.py`).
 - **B-8** CI generates the stubs over the Compose version the build resolves and publishes them
   (`.github/workflows/stubs.yml`): workflow artifact `kotlin-stubs` on every push to `develop`, with a
   README naming the Compose version and the commit, and `kotlin-stubs.zip` on every `v*` tag's release.
