@@ -472,6 +472,23 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   The Gradle task declares exact inputs and outputs so up-to-date checks and the build cache apply.
   Tests: changing one function body recompiles that module only; an unchanged rebuild spends ~0 s in
   the compile step. `Status: planned`.
+- **N-11** TypedPython fixed-layout classes (M2b, 2026-11-21; design §4.3.3). A class compiles to fixed
+  field access only when its layout is fixed **in CPython too**: it declares `__slots__` listing exactly
+  its annotated instance fields, has no base but `object`, no metaclass, no decorator but `@compiled`,
+  and (gate, compiled mode) nothing in the project subclasses it or assigns its class attributes. The
+  compiler never adds `__slots__` itself — that would change what CPython does (`__dict__`, `vars()`,
+  adding attributes). What is compiled, keeping CPython's results:
+  - field reads/writes on a value guarded `type(x) is C` go straight to the slot (the member descriptor's
+    offset, captured and checked at module init); an unset slot raises CPython's AttributeError; values
+    are objects (no unboxing of fields in impure code);
+  - a slot read is not an effect (no user code runs: the attribute is a member descriptor, checked at
+    init, and the exact-type guard rules out subclasses), so a function that only reads fields can stay pure;
+  - `C(args)` whose `__init__` only assigns each slot once from its parameters is lowered to allocate and
+    fill the slots directly (the same observable result as running that `__init__`); any other `__init__`
+    is called as an object;
+  - methods compile like functions with `self` guarded `type(self) is C`; anything else on the class stays
+    interpreted.
+  A class outside these rules stays interpreted with a reason. `Status: planned`.
 
 ---
 
