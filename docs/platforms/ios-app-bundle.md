@@ -96,7 +96,7 @@ The sample's project is `iosApp/iosApp.xcodeproj` (product `PythonDemo.app`, bun
 ```sh
 set -e
 cd "$SRCROOT/.."
-export PYTHON_PAYLOAD_DIR="$SRCROOT/../sample/python/src/main"
+export PYTHON_PAYLOAD_DIR="$SRCROOT/../sample/src/commonMain/python"
 /bin/bash tools/xcode/install-python.sh
 ```
 
