@@ -489,7 +489,7 @@ def host_facts() -> dict[str, Any]:
 
 def clean_results(target: Target) -> None:
     """
-    CLAUDE.md: a crashed run leaves the previous run's XML behind and it gets counted as this run's.
+    AGENTS.md: a crashed run leaves the previous run's XML behind and it gets counted as this run's.
     The same trap applies to the parsed numbers, and worse -- a stale XML yields a *plausible*
     benchmark row from a different commit.
     """
