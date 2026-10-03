@@ -674,6 +674,234 @@ def test_large_arrays_round_trip(rt):
     assert all(lst[i] == (-float(i) if i % 997 == 0 else float(i)) for i in range(n))
 
 
+def bits(x):
+    return struct.pack("<d", x).hex()
+
+
+# --- local arrays (ir.NewArray / CopyArray; API.md "Local arrays") ------------------------------
+
+LOCAL_NS = [0, 1, 2, 5, 17, 1000]
+
+
+def _local(rt, kind, init, script=()):
+    return getattr(rt, f"{kind}_local_run")(init, list(script))
+
+
+def _flat(rt, kind, init, script=()):
+    rc, err, res = _local(rt, kind, init, script)
+    assert rc == 0 and err is None, (rc, err)
+    return res
+
+
+@pytest.mark.parametrize("n", LOCAL_NS + [-1, -3, -(2**40), I64_MIN])
+def test_i64_local_new_matches_list_repeat(rt, n):
+    contents, flags = _flat(rt, "i64", ("new", n, 7), [("contents",), ("flags",)])
+    assert contents == [7] * n
+    assert flags == (1, 1, 0, max(n, 0))  # list NULL, dirty NULL, data allocated, len
+
+
+@pytest.mark.parametrize("n", LOCAL_NS + [-1, -3, -(2**40), I64_MIN])
+def test_f64_local_new_matches_list_repeat(rt, n):
+    contents, flags = _flat(rt, "f64", ("new", n, -0.0), [("contents",), ("flags",)])
+    assert [bits(x) for x in contents] == [bits(x) for x in [-0.0] * n]
+    assert flags == (1, 1, 0, max(n, 0))
+
+
+def test_i64_local_new_extreme_fill_values(rt):
+    for fill in (I64_MIN, I64_MAX, -1):
+        assert _flat(rt, "i64", ("new", 3, fill), [("contents",)])[0] == [fill] * 3
+
+
+@pytest.mark.parametrize("n", LOCAL_NS + [-1, -2, -100, I64_MIN])
+def test_i64_local_iota_matches_list_range(rt, n):
+    contents, ln = _flat(rt, "i64", ("iota", n), [("contents",), ("len",)])
+    assert contents == list(range(n))
+    assert ln == len(range(n))
+
+
+@pytest.mark.parametrize("kind,fill", [("i64", 3), ("f64", 1.5)])
+def test_local_huge_n_is_memory_error_not_a_crash(rt, kind, fill):
+    # 2**62 and I64_MAX overflow n*sizeof(elem); 2**50 elements cannot be malloc'ed
+    for n in (I64_MAX, 2**62, 2**61, 2**50):
+        rc, err, res = _local(rt, kind, ("new", n, fill))
+        assert rc == -1 and type(err) is MemoryError, (n, rc, err)
+        assert res == [True]   # the struct is left zeroed (safe to free)
+
+
+def test_local_iota_huge_n_is_memory_error(rt):
+    for n in (I64_MAX, 2**62, 2**50):
+        rc, err, _ = _local(rt, "i64", ("iota", n))
+        assert rc == -1 and type(err) is MemoryError
+
+
+@pytest.mark.parametrize("kind", ["i64", "f64"])
+def test_local_slot_matches_list_semantics_including_messages(rt, kind):
+    fill = 4 if kind == "i64" else 4.0
+    idxs = [0, 1, 2, 3, 4, -1, -2, -3, -4, -5, 100, -100, I64_MAX, I64_MIN, I64_MIN + 1, 2**40]
+    script = [("get", i) for i in idxs] + [("set", i, 1) for i in idxs]
+    res = _flat(rt, kind, ("new", 3, fill), script)
+    scratch = [fill] * 3
+    ref = []
+    for i in idxs:
+        try:
+            ref.append(("val", scratch[i]))
+        except IndexError as e:
+            ref.append(("exc", type(e), str(e)))
+    for i in idxs:
+        try:
+            scratch[i] = 1
+            ref.append(("set",))
+        except IndexError as e:
+            ref.append(("exc", type(e), str(e)))
+    got = [("exc", type(r), str(r)) if isinstance(r, BaseException)
+           else ("set",) if r is None else ("val", r) for r in res]
+    assert got == ref
+    assert {(g[1], g[2]) for g in got if g[0] == "exc"} == {
+        (IndexError, "list index out of range"), (IndexError, "list assignment index out of range")}
+
+
+@pytest.mark.parametrize("kind", ["i64", "f64"])
+def test_local_empty_array_slot_raises(rt, kind):
+    for n in (0, -4):
+        res = _flat(rt, kind, ("new", n, 0), [("get", 0), ("set", 0, 1), ("get", -1), ("len",)])
+        assert [(type(r), str(r)) for r in res[:3]] == [
+            (IndexError, "list index out of range"), (IndexError, "list assignment index out of range"),
+            (IndexError, "list index out of range")]
+        assert res[3] == 0
+
+
+@pytest.mark.parametrize("kind", ["i64", "f64"])
+def test_local_slot_writes_are_visible(rt, kind):
+    res = _flat(rt, kind, ("new", 4, 0), [("set", 1, 9), ("set", -1, 8), ("contents",)])
+    assert [int(x) for x in res[2]] == [0, 9, 0, 8]
+
+
+@pytest.mark.parametrize("kind", ["i64", "f64"])
+def test_local_free_is_idempotent_zeroes_and_does_not_write_back(rt, kind):
+    res = _flat(rt, kind, ("new", 3, 1),
+                [("set", 0, 5), ("free",), ("flags",), ("len",), ("free",), ("flags",)])
+    assert res[2] == (1, 1, 1, 0) and res[3] == 0
+    assert res[5] == (1, 1, 1, 0)
+
+
+@pytest.mark.parametrize("which", [0, 1])
+def test_local_free_on_a_zeroed_struct_is_a_noop(rt, which):
+    rt.local_free_zeroed(which)  # twice inside; a crash or ASan report fails the run
+
+
+@pytest.mark.parametrize("kind", ["i64", "f64"])
+def test_array_exit_on_a_local_array_behaves_as_free(rt, kind):
+    # chosen contract: exit never writes back to a local array (list == NULL) and never fails;
+    # it frees and zeroes exactly like _free, so a stray exit is safe.
+    res = _flat(rt, kind, ("new", 3, 1), [("set", 0, 5), ("exit",), ("flags",), ("exit",), ("free",)])
+    assert res[1] == 0 and res[2] == (1, 1, 1, 0) and res[3] == 0
+
+
+@pytest.mark.parametrize("kind", ["i64", "f64"])
+def test_local_copy_from_local_is_equal_and_independent(rt, kind):
+    res = _flat(rt, kind, ("copy_local", 5, 10),
+                [("contents",), ("srccontents",), ("set", 2, 99), ("srcset", 0, -7),
+                 ("contents",), ("srccontents",), ("flags",), ("srcflags",)])
+    assert [int(x) for x in res[0]] == [10, 11, 12, 13, 14] == [int(x) for x in res[1]]
+    assert [int(x) for x in res[4]] == [10, 11, 99, 13, 14]    # copy mutated, source untouched below
+    assert [int(x) for x in res[5]] == [-7, 11, 12, 13, 14]    # source mutated, copy unaffected
+    assert res[6] == (1, 1, 0, 5) and res[7] == (1, 1, 0, 5)
+
+
+@pytest.mark.parametrize("kind,mk", [("i64", _il), ("f64", _fl)])
+def test_local_copy_from_a_parameter_array_produces_a_local_one(rt, kind, mk):
+    lst = mk(3, 1, 4, 1, 5)
+    before = list(lst)
+    res = _flat(rt, kind, ("copy_param", lst),
+                [("flags",), ("srcflags",), ("set", 0, 100), ("contents",), ("exit",), ("flags",)])
+    assert res[0] == (1, 1, 0, 5)      # the copy: list NULL, dirty NULL
+    assert res[1] == (0, 0, 0, 5)      # the source really was a list-backed parameter array
+    assert [int(x) for x in res[3]] == [100, 1, 4, 1, 5]
+    assert res[4] == 0 and res[5] == (1, 1, 1, 0)   # exit on the copy is a plain free
+    assert lst == before               # mutating the copy never reaches the list
+
+
+@pytest.mark.parametrize("kind,mk", [("i64", _il), ("f64", _fl)])
+def test_local_copy_of_a_parameter_array_ignores_dirty_slots_of_the_source_and_keeps_values(rt, kind, mk):
+    lst = mk(3, 1, 4)
+    res = _flat(rt, kind, ("copy_param", lst), [("contents",)])
+    assert [int(x) for x in res[0]] == [3, 1, 4]
+
+
+@pytest.mark.parametrize("kind", ["i64", "f64"])
+def test_local_copy_of_an_empty_array(rt, kind):
+    res = _flat(rt, kind, ("copy_local", 0, 1), [("contents",), ("len",), ("get", 0)])
+    assert res[0] == [] and res[1] == 0 and isinstance(res[2], IndexError)
+    res = _flat(rt, kind, ("copy_local", -5, 1), [("len",)])
+    assert res == [0]
+
+
+@pytest.mark.parametrize("kind", ["i64", "f64"])
+def test_local_copy_of_a_zeroed_source_is_empty(rt, kind):
+    assert rt.local_copy_of_zeroed(0 if kind == "f64" else 1) == 0
+
+
+def test_local_large_arrays_round_trip(rt):
+    n = 1_000_000
+    contents, = _flat(rt, "i64", ("iota", n), [("contents",)])
+    assert contents == list(range(n))
+
+
+def _tup(rt, items):
+    return rt.tuple_(items)
+
+
+def test_tp_tuple_contents_and_identity(rt):
+    a, b, c = object(), [1], "x" * 3
+    t = _tup(rt, [a, b, c])
+    assert type(t) is tuple and len(t) == 3
+    assert t[0] is a and t[1] is b and t[2] is c
+
+
+def test_tp_tuple_empty(rt):
+    t = _tup(rt, [])
+    assert t == () and type(t) is tuple
+
+
+def test_tp_tuple_steals_nothing_refcounts_balance(rt):
+    items = [object(), [1, 2], 3.25 + float(os.getpid()), "s" + str(os.getpid())]
+    before = [sys.getrefcount(x) for x in items]
+    t = _tup(rt, items)
+    during = [sys.getrefcount(x) for x in items]
+    assert during == [b + 1 for b in before]    # the tuple holds exactly one new reference each
+    del t
+    after = [sys.getrefcount(x) for x in items]
+    assert after == before                      # released with the tuple: nothing stolen, nothing leaked
+
+
+def test_tp_tuple_same_object_twice(rt):
+    x = object()
+    before = sys.getrefcount(x)
+    t = _tup(rt, [x, x])
+    assert sys.getrefcount(x) == before + 2
+    del t
+    assert sys.getrefcount(x) == before
+
+
+# --- local arrays: cost measurements (observation, not assertion of a threshold) -----------------
+
+def test_local_array_cost_is_observable(rt, capsys):
+    import time
+    n = 200_000
+    t0 = time.perf_counter()
+    for _ in range(50):
+        rt.i64_local_run(("iota", n), [])
+    dt = (time.perf_counter() - t0) / 50
+    # a one-malloc fill must stay far below materialising the same list in Python
+    t0 = time.perf_counter()
+    for _ in range(50):
+        list(range(n))
+    ref = (time.perf_counter() - t0) / 50
+    with capsys.disabled():
+        print(f"\n[measure] local iota({n}): {dt*1e6:.0f} us, list(range): {ref*1e6:.0f} us")
+    assert dt < 50 * ref + 1.0  # sanity bound only: catches an accidental O(n^2), not tuning
+
+
 # --- opaque objects ---------------------------------------------------------------------------
 
 def exc_of(fn, *a):

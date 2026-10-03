@@ -737,6 +737,148 @@ static inline int tp_i64_array_exit(tp_i64_array *a)
     return rc;
 }
 
+/* ------------------------------------------------------------------------------------------
+ * Local arrays (ir.NewArray / CopyArray): owned by the function, no list object behind them.
+ * Same structs as above with list == NULL and dirty == NULL; the slot helpers work on them
+ * unchanged. rc 0 ok, -1 MemoryError (the struct is then zeroed, so _free is still safe).
+ * n < 0 gives an empty array, like CPython's [x] * -1 == []. A size that overflows
+ * n * sizeof(element) is a MemoryError, not a wrapped small allocation. _free never writes
+ * anything back, zeroes the struct and is idempotent. _exit on a local array is defined to
+ * behave exactly like _free (nothing to write back since list == NULL, rc 0), so a stray _exit
+ * is harmless; local arrays are still released with _free.
+ * ------------------------------------------------------------------------------------------ */
+static inline void *tp__local_alloc(int64_t n, size_t elem, Py_ssize_t *len)
+{
+    void *p;
+    if (n < 0) {
+        n = 0;
+    }
+    if (n > (int64_t)PY_SSIZE_T_MAX || (uint64_t)n > (uint64_t)(SIZE_MAX / elem)) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    p = malloc(n ? (size_t)n * elem : elem);
+    if (p == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    *len = (Py_ssize_t)n;
+    return p;
+}
+
+static inline int tp_i64_array_new(tp_i64_array *a, int64_t n, int64_t fill)
+{
+    Py_ssize_t len = 0, i;
+    int64_t *p;
+    a->list = NULL; a->len = 0; a->data = NULL; a->dirty = NULL;
+    p = (int64_t *)tp__local_alloc(n, sizeof(int64_t), &len);
+    if (p == NULL) {
+        return -1;
+    }
+    for (i = 0; i < len; i++) {
+        p[i] = fill;
+    }
+    a->data = p;
+    a->len = len;
+    return 0;
+}
+
+static inline int tp_i64_array_iota(tp_i64_array *a, int64_t n)
+{
+    Py_ssize_t len = 0, i;
+    int64_t *p;
+    a->list = NULL; a->len = 0; a->data = NULL; a->dirty = NULL;
+    p = (int64_t *)tp__local_alloc(n, sizeof(int64_t), &len);
+    if (p == NULL) {
+        return -1;
+    }
+    for (i = 0; i < len; i++) {
+        p[i] = (int64_t)i;
+    }
+    a->data = p;
+    a->len = len;
+    return 0;
+}
+
+static inline int tp_f64_array_new(tp_f64_array *a, int64_t n, double fill)
+{
+    Py_ssize_t len = 0, i;
+    double *p;
+    a->list = NULL; a->len = 0; a->data = NULL; a->dirty = NULL;
+    p = (double *)tp__local_alloc(n, sizeof(double), &len);
+    if (p == NULL) {
+        return -1;
+    }
+    for (i = 0; i < len; i++) {
+        p[i] = fill;
+    }
+    a->data = p;
+    a->len = len;
+    return 0;
+}
+
+/* dst is overwritten (not freed); src may be a parameter array or a local one; dst is local */
+static inline int tp_i64_array_copy(tp_i64_array *dst, const tp_i64_array *src)
+{
+    Py_ssize_t len = 0;
+    int64_t *p = (int64_t *)tp__local_alloc((int64_t)src->len, sizeof(int64_t), &len);
+    dst->list = NULL; dst->len = 0; dst->data = NULL; dst->dirty = NULL;
+    if (p == NULL) {
+        return -1;
+    }
+    if (len > 0) {
+        memcpy(p, src->data, (size_t)len * sizeof(int64_t));
+    }
+    dst->data = p;
+    dst->len = len;
+    return 0;
+}
+
+static inline int tp_f64_array_copy(tp_f64_array *dst, const tp_f64_array *src)
+{
+    Py_ssize_t len = 0;
+    double *p = (double *)tp__local_alloc((int64_t)src->len, sizeof(double), &len);
+    dst->list = NULL; dst->len = 0; dst->data = NULL; dst->dirty = NULL;
+    if (p == NULL) {
+        return -1;
+    }
+    if (len > 0) {
+        memcpy(p, src->data, (size_t)len * sizeof(double));
+    }
+    dst->data = p;
+    dst->len = len;
+    return 0;
+}
+
+static inline void tp_i64_array_free(tp_i64_array *a)
+{
+    free(a->data);
+    free(a->dirty);
+    a->list = NULL; a->len = 0; a->data = NULL; a->dirty = NULL;
+}
+
+static inline void tp_f64_array_free(tp_f64_array *a)
+{
+    free(a->data);
+    free(a->dirty);
+    a->list = NULL; a->len = 0; a->data = NULL; a->dirty = NULL;
+}
+
+/* a new tuple of the n items; the items are borrowed (each gets its own new reference) */
+static inline PyObject *tp_tuple(PyObject *const *items, Py_ssize_t n)
+{
+    Py_ssize_t i;
+    PyObject *t = PyTuple_New(n);
+    if (t == NULL) {
+        return NULL;
+    }
+    for (i = 0; i < n; i++) {
+        Py_INCREF(items[i]);
+        PyTuple_SET_ITEM(t, i, items[i]);
+    }
+    return t;
+}
+
 /* aliasing guard: 1 if any two of the n objects are the same object */
 static inline int tp_any_same(PyObject *const *objs, Py_ssize_t n)
 {
