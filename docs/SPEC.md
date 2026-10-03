@@ -400,6 +400,15 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   that root is replaced or the composition is disposed. The entry point names no library.
   `Status: implemented` on desktop, `ksp-fixtures/compose/.../PythonAppViewRenderTest.kt`; the module
   compiles for Android, nothing runs there yet.
+- **B-9** A Python root keeps state across the recreation of its composition with
+  `python.multiplatform.compose.rememberSaveableWrapper(initial)` (the pycomposeui function of that name),
+  callable from Python inside a composition. A Python `int` (32 bit) becomes `rememberSaveable { mutableIntStateOf }`,
+  a larger one `mutableLongStateOf`, a `float` `mutableDoubleStateOf`, a `bool` or `str` `mutableStateOf`; the
+  returned `MutableState` is read and written through `.value`. A value written from Python survives
+  `SaveableStateRegistry.performSave()` and a new composition over a registry built from the saved map; without
+  a registry the new composition starts at `initial`. Any other value (a Python `list`) raises an error that
+  names its type. `Status: implemented` on desktop (#174),
+  `ksp-fixtures/compose/.../RememberSaveableRenderTest.kt`.
 - **B-7** The plugin generates `.pyi` stubs for the Kotlin-named modules only, under Kotlin names
   plus their U-12 Pythonic aliases (`fill_max_width = fillMaxWidth` beside each module `def`, a second
   `ClassVar` or `@property` on a receiver's class, a second member of a callable module), parameters

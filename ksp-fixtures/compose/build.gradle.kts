@@ -111,6 +111,10 @@ pythonBindings {
             //    `TextFieldStateRenderTest` is what each one is for.
             "androidx.compose.foundation.text.input.TextFieldState",
             "androidx.compose.foundation.text.input.TextFieldStateKt",
+            // 8. `rememberSaveableWrapper` (issue #174): the one function of `python-multiplatform-compose`
+            //    Python calls inside a composition. Its file facade, not the package, so that the host
+            //    composables (`PythonAppView` and friends) stay out of the table.
+            "python.multiplatform.compose.RememberSaveableKt",
         ),
     )
     // Stubs on: `generatePythonStubs` over the real Compose jars is what `tools/stubs/check-stubs.sh` (the mypy
