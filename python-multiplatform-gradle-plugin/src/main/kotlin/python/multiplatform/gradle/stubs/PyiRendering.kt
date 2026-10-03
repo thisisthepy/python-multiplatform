@@ -418,6 +418,55 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
         }
     }
 
+    /**
+     * A name that is a function (or an overload set) in its package **and** a module of its own (issue
+     * #78): Kotlin's `TextRange(2)` and `TextRange.Zero`. At run time the module is callable, so the
+     * stub says one attribute of the parent package whose type has `__call__` -- the function, its
+     * `@overload`s -- and the module's constants and functions as members. A bare `def` would hide
+     * `TextRange.Zero` from a checker; a bare module would hide `TextRange(2)`. The module's own file
+     * still exists for `import pkg.TextRange`. Member order is table-key order, as everywhere.
+     */
+    private fun callableModule(
+        name: String,
+        calls: List<DeclarationModel>,
+        members: List<DeclarationModel>,
+        ctx: ModuleOut,
+    ): String {
+        if (name in PYTHON_KEYWORDS) return "# '$name' is a Python keyword; reach it with getattr(..., '$name')"
+        val protocol = "_${name}_callable_module"
+        val sortedMembers = members.sortedBy { it.bindingName }
+        ctx.protocols += buildString {
+            appendLine("class $protocol($TYPING.Protocol):")
+            appendLine("    \"\"\"Kotlin: the function $name, and the members of the module $name\"\"\"")
+            calls.forEachIndexed { index, d ->
+                if (calls.size > 1) appendLine("    @$TYPING.overload")
+                appendLine("    def __call__(${parameters(d, ctx, method = true)}) -> ${result(d, ctx)}: ..." + shadowed(index))
+            }
+            val attributes = sortedMapOf<String, MutableList<DeclarationModel>>()
+            sortedMembers.forEach { d ->
+                val leaf = leafOf(d)
+                attributes.getOrPut(leaf) { mutableListOf() } += d
+                if (d.kind != "STATIC_GETTER" && isSuffixed(leaf)) attributes.getOrPut(baseOf(leaf)) { mutableListOf() } += d
+            }
+            attributes.forEach { (attribute, group) ->
+                if (!isIdentifier(attribute) || attribute == "__call__") {
+                    appendLine("    # '$attribute' cannot be written as an attribute here; reach it with getattr(..., '$attribute')")
+                    return@forEach
+                }
+                val first = group.first()
+                if (first.kind == "STATIC_GETTER") {
+                    appendLine("    $attribute: ${result(first, ctx)}")
+                } else {
+                    group.forEachIndexed { index, d ->
+                        if (group.size > 1) appendLine("    @$TYPING.overload")
+                        appendLine("    def $attribute(${parameters(d, ctx, method = true)}) -> ${result(d, ctx)}: ..." + shadowed(index))
+                    }
+                }
+            }
+        }.trimEnd()
+        return "$name: $protocol"
+    }
+
     private fun overloadDefs(name: String, group: List<DeclarationModel>, ctx: ModuleOut): String =
         if (name in PYTHON_KEYWORDS) "# '$name' is a Python keyword; reach it with getattr(..., '$name')"
         else group.withIndex().joinToString("\n") { (index, d) ->
@@ -447,7 +496,18 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
             // because the runtime serves it as one. A class with no stub keeps the old rendering.
             val (constructors, sorted) = entries.sortedBy { it.bindingName }
                 .partition { isOwnConstructor(it) && classReference(it.returnType, ctx) != ANY }
-            sorted.forEach { ctx.defs += renderDef(it, ctx) }
+            // Issue #78: a name that is both a function here and a module of its own (`TextRange(2)`
+            // and `TextRange.Zero`) is one callable attribute, not a bare `def`; see [callableModule].
+            val companions = sorted.filter { it.kind != "STATIC_GETTER" }
+                .map { baseOf(leafOf(it)) }
+                .filter { "$module.$it" in moduleNames }
+                .toSortedSet()
+            sorted.filter { it.kind == "STATIC_GETTER" || isSuffixed(leafOf(it)) || leafOf(it) !in companions }
+                .forEach { ctx.defs += renderDef(it, ctx) }
+            companions.forEach { base ->
+                val calls = sorted.filter { it.kind != "STATIC_GETTER" && baseOf(leafOf(it)) == base }
+                ctx.defs += callableModule(base, calls, byModule.getValue("$module.$base"), ctx)
+            }
             constructors.forEach { d ->
                 if (isSuffixed(leafOf(d))) ctx.defs += renderDef(d, ctx)
                 constructorsByClass.getOrPut(d.returnType.qualifiedName) { mutableListOf() } += d
@@ -458,7 +518,7 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
                 .groupBy { baseOf(leafOf(it)) }
                 .toSortedMap()
                 .forEach { (base, group) ->
-                    if (base !in unsuffixedLeaves) ctx.defs += overloadDefs(base, group, ctx)
+                    if (base !in unsuffixedLeaves && base !in companions) ctx.defs += overloadDefs(base, group, ctx)
                 }
         }
     }
