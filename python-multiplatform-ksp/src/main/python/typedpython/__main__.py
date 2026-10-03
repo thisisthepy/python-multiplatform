@@ -30,8 +30,16 @@ def main(argv: list[str]) -> int:
     demo.add_argument("argv", nargs="*", help="sys.argv[1:] for the module's main()")
     demo.add_argument("--out", type=Path, default=Path("build/typedpython"),
                       help="where the extension is built (default: build/typedpython)")
+    build = commands.add_parser("build", help="compile modules incrementally (cached per module)")
+    build.add_argument("paths", nargs="+", type=Path, help="files, or directories to build recursively")
+    build.add_argument("--cache", type=Path, default=Path("build/typedpython-cache"),
+                       help="incremental cache directory (default: build/typedpython-cache)")
+    build.add_argument("--out", type=Path, default=None,
+                       help="copy the built extensions here (default: leave them in the cache)")
     args = parser.parse_args(argv)
 
+    if args.command == "build":
+        return _build(args.paths, args.cache, args.out)
     if args.command == "demo":
         return _demo(args.module, args.argv, args.out)
 
@@ -48,6 +56,38 @@ def main(argv: list[str]) -> int:
             print(f"{d.severity.upper()} {d.path}:{d.line}:{d.column}: {d.message} [{d.rule}]")
 
     return EXIT_ERRORS if any(d.severity == "error" for d in found) else EXIT_CLEAN
+
+
+def _build(paths: list[Path], cache: Path, out: Path | None) -> int:
+    import os
+    import shutil
+
+    from typedpython import pipeline
+
+    sources = python_files(paths)
+    if not sources:
+        print("typedpython: no Python files to build", file=sys.stderr)
+        return EXIT_FAILURE
+    dirs = [p.resolve() for p in paths if p.is_dir()] or [p.resolve().parent for p in paths]
+    root = Path(os.path.commonpath([str(d) for d in dirs]))
+    try:
+        result = pipeline.compile_project(sources, root, cache)
+    except pipeline.CompileError as e:
+        print(f"typedpython: {e}", file=sys.stderr)
+        return EXIT_ERRORS
+    except PyreflyError as e:
+        print(f"typedpython: {e}", file=sys.stderr)
+        return EXIT_FAILURE
+    for m in result.modules:
+        why = f" ({', '.join(m.reasons)})" if m.reasons else ""
+        what = m.extension.name if m.extension else "no extension (interpreted)"
+        print(f"{m.status:7} {m.name}: {what}{why}")
+        for name, reason in sorted(m.skipped.items()):
+            print(f"          interpreted: {name} — {reason}")
+        if out is not None and m.extension is not None:
+            out.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(m.extension, out / m.extension.name)
+    return EXIT_CLEAN
 
 
 def _demo(module: Path, module_argv: list[str], out: Path) -> int:
