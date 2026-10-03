@@ -24,21 +24,21 @@ import kotlin.test.assertTrue
  * - A scene whose Python body calls the component has ink (non-background pixels > 0).
  * - A scene whose Python body is `pass` or an empty equivalent has none (or fewer).
  * - Where the component fills the entire scene with its own surface (FAB, TopAppBar, Scaffold,
- *   TabRow), distinct-colour counting is used instead of ink counting — the same approach
- *   [ComposableRenderTest.listItemComposesItsHeadlineContentUnderItsKotlinName] uses for ListItem.
+ *   TabRow), distinct-colour counting is used instead of ink counting, the same approach
+ *   [ComposableRenderTest.listItemComposesItsHeadlineContentUnderItsSnakeCasedName] uses for ListItem.
  *
  * Components judged here (10 of 27):
- * 1. HorizontalDivider — leaf, no required param
- * 2. RadioButton — selected: Boolean, onClick: Function0
- * 3. LinearProgressIndicator — progress: () -> Float (determinate; the indeterminate overload
+ * 1. HorizontalDivider, leaf, no required param
+ * 2. RadioButton, selected: Boolean, onClick: Function0
+ * 3. LinearProgressIndicator, progress: () -> Float (determinate; the indeterminate overload
  *    animates forever and hangs the scene, see that test)
- * 4. CircularProgressIndicator — progress: () -> Float, same reason
- * 5. Surface — content: @Composable () -> Unit
- * 6. Scaffold — content: @Composable (PaddingValues) -> Unit (fills scene — colour-set comparison)
- * 7. Slider — value: Float, onValueChange: (Float) -> Unit (pixel-set comparison)
- * 8. TopAppBar — title: @Composable () -> Unit (fills scene — colour-set comparison)
- * 9. FloatingActionButton — onClick: Function0, content: @Composable () -> Unit (colour-set)
- * 10. Tab + TabRow — selected/onClick/text inside TabRow (colour-set)
+ * 4. CircularProgressIndicator, progress: () -> Float, same reason
+ * 5. Surface, content: @Composable () -> Unit
+ * 6. Scaffold, content: @Composable (PaddingValues) -> Unit (fills scene, colour-set comparison)
+ * 7. Slider, value: Float, onValueChange: (Float) -> Unit (pixel-set comparison)
+ * 8. TopAppBar, title: @Composable () -> Unit (fills scene, colour-set comparison)
+ * 9. FloatingActionButton, onClick: Function0, content: @Composable () -> Unit (colour-set)
+ * 10. Tab + TabRow, selected/onClick/text inside TabRow (colour-set)
  */
 class M3ProofRenderTest {
 
@@ -59,7 +59,7 @@ class M3ProofRenderTest {
     // ── 1. HorizontalDivider ──────────────────────────────────────────────────
 
     /**
-     * HorizontalDivider — leaf, every parameter defaulted. Must draw a visible line on a 200x10
+     * HorizontalDivider, leaf, every parameter defaulted. Must draw a visible line on a 200x10
      * scene; pass must draw nothing.
      */
     @Test
@@ -80,7 +80,7 @@ class M3ProofRenderTest {
     // ── 2. RadioButton ───────────────────────────────────────────────────────
 
     /**
-     * RadioButton — selected=True paints a filled ring, selected=False paints only a ring.
+     * RadioButton, selected=True paints a filled ring, selected=False paints only a ring.
      * Both must draw; and the filled variant (selected) must have more ink than the hollow one.
      */
     @Test
@@ -88,13 +88,13 @@ class M3ProofRenderTest {
         val selected = inkOf(
             """
             from androidx.compose.material3 import RadioButton
-            RadioButton(selected=True, onClick=lambda: None)
+            RadioButton(selected=True, on_click=lambda: None)
             """.trimIndent(),
         )
         val deselected = inkOf(
             """
             from androidx.compose.material3 import RadioButton
-            RadioButton(selected=False, onClick=lambda: None)
+            RadioButton(selected=False, on_click=lambda: None)
             """.trimIndent(),
         )
         println("compose render: RadioButton selected=$selected px, deselected=$deselected px")
@@ -197,7 +197,7 @@ class M3ProofRenderTest {
     // ── 5. Surface ───────────────────────────────────────────────────────────
 
     /**
-     * Surface — content: @Composable () -> Unit (Function2, arity 0, same shape as MaterialTheme).
+     * Surface, content: @Composable () -> Unit (Function2, arity 0, same shape as MaterialTheme).
      * Surface's own container background does not fill the full 200x60 scene at its default size,
      * so ink-counting works: with Text inside vs empty content gives different non-zero ink.
      */
@@ -223,7 +223,7 @@ class M3ProofRenderTest {
     // ── 6. Scaffold ──────────────────────────────────────────────────────────
 
     /**
-     * Scaffold — content: @Composable (PaddingValues) -> Unit. Scaffold fills the scene with its
+     * Scaffold, content: @Composable (PaddingValues) -> Unit. Scaffold fills the scene with its
      * own surface, so ink-counting cannot distinguish content from no content (both max out at
      * scene pixels). Distinct-colour counting (same approach as ListItem) is the right tool: the
      * glyph colour is not the container fill, so Text inside adds a new colour to the set.
@@ -260,9 +260,9 @@ class M3ProofRenderTest {
     // ── 7. Slider ────────────────────────────────────────────────────────────
 
     /**
-     * Slider — value: Float, onValueChange: (Float) -> Unit, both required.
+     * Slider, value: Float, onValueChange: (Float) -> Unit, both required.
      * Slider(0.0) places the thumb at the left end; Slider(1.0) at the right. The thumb is the
-     * only element that moves, so the two pixel sets must differ — same argument
+     * only element that moves, so the two pixel sets must differ, same argument
      * [ComposableRenderTest.theStringPythonWroteIsTheStringComposeDrew] uses for Text length.
      */
     @Test
@@ -270,14 +270,14 @@ class M3ProofRenderTest {
         val left = pixelsOf(
             """
             from androidx.compose.material3 import Slider
-            Slider(0.0, onValueChange=lambda v: None)
+            Slider(0.0, on_value_change=lambda v: None)
             """.trimIndent(),
             width = 200, height = 48,
         )
         val right = pixelsOf(
             """
             from androidx.compose.material3 import Slider
-            Slider(1.0, onValueChange=lambda v: None)
+            Slider(1.0, on_value_change=lambda v: None)
             """.trimIndent(),
             width = 200, height = 48,
         )
@@ -286,14 +286,14 @@ class M3ProofRenderTest {
         assertTrue(ink > 0, "Slider drew nothing at value=0.0")
         assertTrue(
             !left.contentEquals(right),
-            "Slider(0.0) and Slider(1.0) produced identical pixels — the value argument was not read",
+            "Slider(0.0) and Slider(1.0) produced identical pixels, the value argument was not read",
         )
     }
 
     // ── 8. TopAppBar ─────────────────────────────────────────────────────────
 
     /**
-     * TopAppBar — title: @Composable () -> Unit (Function2, arity 0), required.
+     * TopAppBar, title: @Composable () -> Unit (Function2, arity 0), required.
      * TopAppBar fills the full scene with its own container, so ink counting gives the same
      * result with or without a title. Distinct-colour counting finds the glyph colour.
      */
@@ -329,7 +329,7 @@ class M3ProofRenderTest {
     // ── 9. FloatingActionButton ───────────────────────────────────────────────
 
     /**
-     * FloatingActionButton — onClick: Function0, content: @Composable () -> Unit, both required.
+     * FloatingActionButton, onClick: Function0, content: @Composable () -> Unit, both required.
      * The FAB always draws its own container surface, which in a 200x60 scene fills nearly the
      * full height. Distinct-colour counting finds the glyph colour added by Text inside.
      */
@@ -338,13 +338,13 @@ class M3ProofRenderTest {
         val drawnPixels = pixelsOf(
             """
             from androidx.compose.material3 import FloatingActionButton, Text
-            FloatingActionButton(onClick=lambda: None, content=lambda: Text('hi'))
+            FloatingActionButton(on_click=lambda: None, content=lambda: Text('hi'))
             """.trimIndent(),
         )
         val emptyPixels = pixelsOf(
             """
             from androidx.compose.material3 import FloatingActionButton
-            FloatingActionButton(onClick=lambda: None, content=lambda: None)
+            FloatingActionButton(on_click=lambda: None, content=lambda: None)
             """.trimIndent(),
         )
         val drawnColors = drawnPixels.filter { it != BACKGROUND }.toSet()
@@ -363,8 +363,8 @@ class M3ProofRenderTest {
     // ── 10. Tab + TabRow ──────────────────────────────────────────────────────
 
     /**
-     * TabRow — selectedTabIndex: Int, tabs: @Composable () -> Unit.
-     * Tab — selected: Boolean, onClick: Function0, text: @Composable () -> Unit.
+     * TabRow, selectedTabIndex: Int, tabs: @Composable () -> Unit.
+     * Tab, selected: Boolean, onClick: Function0, text: @Composable () -> Unit.
      *
      * TabRow fills the scene with its indicator and background, so distinct-colour counting is
      * again the right tool. Tab's text slot carries the glyph colour.
@@ -375,7 +375,7 @@ class M3ProofRenderTest {
             """
             from androidx.compose.material3 import TabRow, Tab, Text
             TabRow(
-                selectedTabIndex=0,
+                selected_tab_index=0,
                 tabs=lambda: Tab(
                     selected=True,
                     onClick=lambda: None,
@@ -389,7 +389,7 @@ class M3ProofRenderTest {
             """
             from androidx.compose.material3 import TabRow, Tab
             TabRow(
-                selectedTabIndex=0,
+                selected_tab_index=0,
                 tabs=lambda: Tab(
                     selected=True,
                     onClick=lambda: None,
@@ -419,13 +419,13 @@ class M3ProofRenderTest {
         val checked = inkOf(
             """
             from androidx.compose.material3 import Checkbox
-            Checkbox(checked=True, onCheckedChange=lambda v: None)
+            Checkbox(checked=True, on_checked_change=lambda v: None)
             """.trimIndent(),
         )
         val unchecked = inkOf(
             """
             from androidx.compose.material3 import Checkbox
-            Checkbox(checked=False, onCheckedChange=lambda v: None)
+            Checkbox(checked=False, on_checked_change=lambda v: None)
             """.trimIndent(),
         )
         println("compose render: Checkbox checked=$checked px, unchecked=$unchecked px")
@@ -450,13 +450,13 @@ class M3ProofRenderTest {
         val checked = pixelsOf(
             """
             from androidx.compose.material3 import Switch
-            Switch(checked=True, onCheckedChange=lambda v: None)
+            Switch(checked=True, on_checked_change=lambda v: None)
             """.trimIndent(),
         )
         val unchecked = pixelsOf(
             """
             from androidx.compose.material3 import Switch
-            Switch(checked=False, onCheckedChange=lambda v: None)
+            Switch(checked=False, on_checked_change=lambda v: None)
             """.trimIndent(),
         )
         val checkedInk = checked.count { it != BACKGROUND }
@@ -568,13 +568,13 @@ class M3ProofRenderTest {
         val drawnPixels = pixelsOf(
             """
             from androidx.compose.material3 import ExtendedFloatingActionButton, Text
-            ExtendedFloatingActionButton(onClick=lambda: None, text=lambda: Text('hi'), icon=lambda: None)
+            ExtendedFloatingActionButton(on_click=lambda: None, text=lambda: Text('hi'), icon=lambda: None)
             """.trimIndent(),
         )
         val emptyPixels = pixelsOf(
             """
             from androidx.compose.material3 import ExtendedFloatingActionButton
-            ExtendedFloatingActionButton(onClick=lambda: None, text=lambda: None, icon=lambda: None)
+            ExtendedFloatingActionButton(on_click=lambda: None, text=lambda: None, icon=lambda: None)
             """.trimIndent(),
         )
         val drawnColors = drawnPixels.filter { it != BACKGROUND }.toSet()

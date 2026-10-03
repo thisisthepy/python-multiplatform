@@ -82,8 +82,12 @@ def _build(paths: list[Path], cache: Path, out: Path | None) -> int:
         why = f" ({', '.join(m.reasons)})" if m.reasons else ""
         what = m.extension.name if m.extension else "no extension (interpreted)"
         print(f"{m.status:7} {m.name}: {what}{why}")
-        for name, reason in sorted(m.skipped.items()):
-            print(f"          interpreted: {name} — {reason}")
+        rel = m.path.relative_to(root).as_posix()
+        if m.kind == "not_marked":
+            print(f"          {rel}: not marked for compilation (no `# typedpython: compiled`, no @compiled)")
+        for item in m.skipped_items:
+            where = f"{item.file}:{item.line}" if item.line is not None else item.file
+            print(f"          {where}: {item.name}: {item.message}")
         if out is not None and m.extension is not None:
             out.mkdir(parents=True, exist_ok=True)
             shutil.copy2(m.extension, out / m.extension.name)
@@ -131,7 +135,7 @@ def _demo(module: Path, module_argv: list[str], out: Path) -> int:
     compiled_names = [f.name for f in result.module.functions]
     print(f"compiled functions: {', '.join(compiled_names) or '(none)'}")
     for name, reason in sorted(result.skipped.items()):
-        print(f"  interpreted: {name} — {reason}")
+        print(f"  interpreted: {name}, {reason}")
     out_i, t_i = run(interpreted)
     out_c, t_c = run(lambda: pipeline.load(result))
     print(f"interpreted: {t_i * 1000:.1f} ms   compiled: {t_c * 1000:.1f} ms   "

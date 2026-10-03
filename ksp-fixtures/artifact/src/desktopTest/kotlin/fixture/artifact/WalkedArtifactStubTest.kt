@@ -86,16 +86,17 @@ class WalkedArtifactStubTest {
 
     /**
      * The binder never exports a Kotlin namespace under another name (AGENTS.md section 12 rule 1).
-     * `androidx.compose.foundation.layout` is stubbed under that very path, with Kotlin names and
-     * Kotlin parameter names; making it Pythonic is the `pythonx-compose` package's job.
+     * `androidx.compose.foundation.layout` is stubbed under that very path. Inside it (issue #131)
+     * each declaration keeps its Kotlin `def` and gains its Pythonic alias as an assignment, and a
+     * parameter is written under the keyword `inspect.signature` shows.
      *
-     * Pinned over the whole generated tree: nothing under `pythonx/`, no snake_cased member, and none
-     * of the Pythonic product's side files (`py.typed`, `_pm_dispatch.json`). The `Protocol` classes
-     * that type an extension as a method of its receiver's class are typing machinery, not a
-     * renamed product: they are private (`_Receiver_name`) and carry the Kotlin name unchanged.
+     * Pinned over the whole generated tree: nothing under `pythonx/`, and none of the old Pythonic
+     * product's side files (`py.typed`, `_pm_dispatch.json`). The `Protocol` classes that type an
+     * extension as a method of its receiver's class are typing machinery: they are private
+     * (`_Receiver_name`) and named after the Kotlin member.
      */
     @Test
-    fun theStubsUseKotlinNamesAndNothingIsExportedUnderPythonx() {
+    fun theStubsKeepKotlinNamesAddPythonicAliasesAndExportNothingUnderPythonx() {
         val paths = generatedPaths()
         assertEquals(emptyList(), paths.filter { it.startsWith("pythonx/") }, paths.toString())
         assertTrue(paths.none { it.endsWith("py.typed") || it.endsWith("_pm_dispatch.json") }, paths.toString())
@@ -106,8 +107,12 @@ class WalkedArtifactStubTest {
                 "-> androidx.compose.ui.Modifier:" in layout,
             layout.take(3000),
         )
-        assertTrue("fill_max_width" !in layout, "a Kotlin name was exported under another spelling")
-        assertTrue("alignmentLine: " in layout, "a Kotlin parameter name was renamed: ${layout.take(3000)}")
+        assertTrue(
+            Regex("^fill_max_width = fillMaxWidth${'$'}", RegexOption.MULTILINE).containsMatchIn(layout),
+            "the Pythonic alias of fillMaxWidth is missing",
+        )
+        assertTrue(Regex("^def fill_max_width\\(", RegexOption.MULTILINE).find(layout) == null, "the Kotlin def must stay the Kotlin name")
+        assertTrue("alignment_line: " in layout, "a parameter is not under its Pythonic keyword: ${layout.take(3000)}")
 
         paths.filter { it.endsWith(".pyi") }.forEach { path ->
             val text = stub(path)

@@ -495,13 +495,13 @@ class ComposableRenderTest {
         val drawn = inkOf(
             """
             from androidx.compose.material3 import Button, Text
-            Button(onClick=lambda: None, content=lambda: Text('hi'))
+            Button(on_click=lambda: None, content=lambda: Text('hi'))
             """.trimIndent(),
         )
         val empty = inkOf(
             """
             from androidx.compose.material3 import Button
-            Button(onClick=lambda: None, content=lambda: None)
+            Button(on_click=lambda: None, content=lambda: None)
             """.trimIndent(),
         )
         println("compose render: Button(content=Text('hi')) -> $drawn px, empty content -> $empty px")
@@ -565,11 +565,11 @@ class ComposableRenderTest {
 
     /**
      * **`ListItem`.** `headlineContent` is the one parameter with no default (also `Function2`,
-     * arity zero) and it is written under its **Kotlin** parameter name, `headlineContent` -- so
-     * this also pins that a keyword argument reaches a real multi-word parameter by its Kotlin name,
-     * not just the single-word ones (`content`, `modifier`) every other test here happens to use.
-     * (It used to be `headline_content`: the binder snake_cased parameters, which it no longer does;
-     * a Pythonic spelling is pythonx-compose's to define.)
+     * arity zero) and it is written under its **snake_cased** keyword, `headline_content` -- so
+     * this also pins that a keyword argument reaches a real multi-word parameter by its Pythonic name
+     * (issue #131), not just the single-word ones (`content`, `modifier`) every other test here
+     * happens to use. The Kotlin spelling `headlineContent=` reaches the same parameter; the empty
+     * control below is written that way, so both spellings render here.
      *
      * The empty control is not zero, unlike `Column`'s or `Row`'s: `ListItem`, like `Button`, always
      * paints its own container surface (`colors.containerColor` at `tonalElevation`) whether or not
@@ -578,11 +578,11 @@ class ComposableRenderTest {
      * `Column`'s does.
      */
     @Test
-    fun listItemComposesItsHeadlineContentUnderItsKotlinName() {
+    fun listItemComposesItsHeadlineContentUnderItsSnakeCasedName() {
         val drawnPixels = pixelsOf(
             """
             from androidx.compose.material3 import ListItem, Text
-            ListItem(headlineContent=lambda: Text('hi'))
+            ListItem(headline_content=lambda: Text('hi'))
             """.trimIndent(),
         )
         val emptyPixels = pixelsOf(
@@ -600,7 +600,7 @@ class ComposableRenderTest {
         val drawnColors = drawnPixels.filter { it != BACKGROUND }.toSet()
         val emptyColors = emptyPixels.filter { it != BACKGROUND }.toSet()
         println(
-            "compose render: ListItem(headlineContent=Text('hi')) -> ${drawnColors.size} distinct colors, " +
+            "compose render: ListItem(headline_content=Text('hi')) -> ${drawnColors.size} distinct colors, " +
                 "empty -> ${emptyColors.size} distinct colors",
         )
         assertTrue(emptyColors.isNotEmpty(), "a ListItem with no headline must still draw its own container surface")

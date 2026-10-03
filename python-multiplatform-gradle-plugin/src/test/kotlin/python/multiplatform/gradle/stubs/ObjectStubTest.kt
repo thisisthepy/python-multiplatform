@@ -85,7 +85,7 @@ class ObjectStubTest {
         )
         val files = renderKotlinFqnStubs(listOf(end, column))
         val layout = file(files, pkgLayout)
-        assertTrue("horizontalAlignment: $alignment.Horizontal = ..." in layout, layout)
+        assertTrue("horizontal_alignment: $alignment.Horizontal = ..." in layout, layout)
         assertTrue("import $alignment\n" in layout, layout)
     }
 

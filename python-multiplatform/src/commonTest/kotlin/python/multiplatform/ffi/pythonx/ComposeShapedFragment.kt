@@ -32,9 +32,9 @@ import python.multiplatform.reflection.TypeTag
  * | `padding__Dp_Dp` / `__Dp_Dp_Dp_Dp` again | omitting a defaulted argument, including one in the *middle* of the list |
  * | `fillMaxHeight` | the same, under a name with no overload set: omission with no dispatcher involved |
  * | `size__Dp` | the second link of a chain, so the return really is a receiver again |
- * | `fillMaxWidth` | a receiver-only extension, reached under its Kotlin name and no other |
- * | `zIndex` | a genuine `kotlin.Float` parameter beside `Dp` ones: same tag, different declared type |
- * | `toURLString` | an acronym-bearing name, which once tested a snake_case rule and now only has to resolve as itself |
+ * | `fillMaxWidth` | a receiver-only extension, reached as `fillMaxWidth` and as its Pythonic alias `fill_max_width` |
+ * | `zIndex` | a genuine `kotlin.Float` parameter beside `Dp` ones: same tag, different declared type; and `z_index`, the case where a one-letter first segment must not be swallowed |
+ * | `toURLString` | a name the snake -> camel rule **cannot** invert (`to_url_string` -> `toUrlString`); only the forward conversion of the module's own names reaches it |
  * | `paddingFromBaseline__TextUnit` | the value-class reject list: a packed wrapper must refuse a raw number |
  * | `emptyModifier` | where a chain starts. Compose has no bound declaration for this; see [EMPTY_MODIFIER] |
  * | `Arrangement.Start` / `.End` | `kind = STATIC_GETTER`: a value behind a name, read as an attribute and not called |

@@ -3,7 +3,7 @@
 Android binds CPython through `RegisterNatives`. `@CriticalNative` and `@FastNative` both stop the
 ART collector for the duration of the call, and `@CriticalNative` receives no `JNIEnv`. So neither
 may be used for a function that can re-enter the runtime, which means any function that can run
-Python (`__del__`, `__getattr__`, a module's top-level code) — with upcalls live, that Python can
+Python (`__del__`, `__getattr__`, a module's top-level code), with upcalls live, that Python can
 be Kotlin.
 
 ## Conclusion
@@ -45,13 +45,13 @@ All eight are leaves on the success path; all can allocate a GC-tracked exceptio
 path. That second column is conditional and second-order (the exception instance is GC-tracked, so
 it can cross the collection threshold, so the collector can run a `__del__`); it is not a reason
 to demote them, they are the measured hot path. It is why "provably a leaf" is not the promotion
-test — the honest test is *leaf on the success path, and measured worth it*.
+test, the honest test is *leaf on the success path, and measured worth it*.
 
 | call site | success path | failure path |
 |---|---|---|
-| `Py_IsInitialized` | reads a global | — |
-| `Py_GetVersion` | static `const char*` | — |
-| `PyErr_Occurred` | reads thread state, borrowed | — |
+| `Py_IsInitialized` | reads a global | - |
+| `Py_GetVersion` | static `const char*` | - |
+| `PyErr_Occurred` | reads thread state, borrowed | - |
 | `PyLong_FromLongLong` | non-GC allocation | preallocated `MemoryError` |
 | `PyUnicode_FromString` | non-GC allocation | `UnicodeDecodeError` |
 | `PyUnicode_AsUTF8` | caches UTF-8 form | `UnicodeEncodeError` on lone surrogates |
@@ -62,7 +62,7 @@ test — the honest test is *leaf on the success path, and measured worth it*.
 
 Change in per-call cost, net of the Kotlin floor, from moving a function off ordinary JNI
 (source: `docs/design/downcall-design.md`, `androidMain/README.md`; ART emulators / device per those
-documents — conditions are in them, not re-measured here):
+documents, conditions are in them, not re-measured here):
 
 | API | ordinary → `@FastNative` (ns) | ordinary → `@CriticalNative` (ns) |
 |---|---|---|
@@ -77,14 +77,14 @@ documents — conditions are in them, not re-measured here):
 `list → LongArray`, 1000 elements, at 50065.89 ns on API 36 hardware (50 ns/element) against a
 `@CriticalNative` net cost of 44.05 ns there (an upper bound on the convention's share, since the
 50 ns also covers the loop and pointer conversion). Predicted after the twin: 44.05 → 3.55 ns per
-element on API 36 — a prediction, not a recorded measurement.
+element on API 36, a prediction, not a recorded measurement.
 
 ## The three rejected promotions that were not leaves
 
 | | audit said | actually |
 |---|---|---|
 | `PyGILState_Release` | "unlocks mutex (non-blocking)" | the release that drops the counter to zero deletes the thread state; clearing it decrefs its dict and exception state, so `__del__` runs |
-| `PyThreadState_GetDict` | "reads struct pointer" | allocates the thread dict with `PyDict_New` on first call per thread — a GC-tracked allocation |
+| `PyThreadState_GetDict` | "reads struct pointer" | allocates the thread dict with `PyDict_New` on first call per thread, a GC-tracked allocation |
 | `PyEval_InitThreads` | "initializes locking" | a no-op kept for the stable ABI; promoting it buys only the convention delta |
 
 The genuine leaves among the eight are `Py_IncRef`, `Py_NewRef`, `Py_XNewRef`,

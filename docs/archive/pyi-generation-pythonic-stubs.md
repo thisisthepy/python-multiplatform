@@ -1,4 +1,4 @@
-# Generating `.pyi` — the Pythonic stub product (archived)
+# Generating `.pyi`, the Pythonic stub product (archived)
 
 > **Superseded** by [`docs/design/pyi-generation-design.md`](../design/pyi-generation-design.md) and
 > [SPEC.md](../SPEC.md) B-7 on 2026-10-03; the Pythonic stub product belongs to pythonx-compose; kept
@@ -26,7 +26,7 @@
 
 `pythonx` adapts Kotlin generically rather than wrapping function by function (`docs/design/ecosystem.md`
 §5b): a module `__getattr__` finds the corresponding binding, adapts it once and caches it. Nothing
-an editor can see is ever enumerated. `.pyi` is what pays that back — the stubs carry the fully
+an editor can see is ever enumerated. `.pyi` is what pays that back, the stubs carry the fully
 enumerated Pythonic surface the adapter will produce, so an IDE sees everything while the runtime
 enumerates nothing. Generation belongs to the Gradle plugin, the way PyREPL did it; that is settled
 and this file does not revisit it.
@@ -57,7 +57,7 @@ descriptor, `list` = the hand-maintained allowlist of §3.4.
 | `ByteArray` | `bytes` | Km/KS | |
 | `Unit` | `None` | Km/KS | return position only |
 | `Nothing` | `typing.Never` | Km/KS | a function returning it never returns; `Never` is the exact Python spelling |
-| `T?` | `T \| None` | `KmType.isNullable`, `KSType.isMarkedNullable` | **not bindable today** — `resolveKotlinType` declines nullable outright. §3.3 |
+| `T?` | `T \| None` | `KmType.isNullable`, `KSType.isMarkedNullable` | **not bindable today**, `resolveKotlinType` declines nullable outright. §3.3 |
 | `List<T>` `MutableList<T>` | `list[T]` | Km/KS type args | not bindable today (the type gate) |
 | `Set<T>` | `set[T]` | | |
 | `Map<K, V>` | `dict[K, V]` | | |
@@ -66,17 +66,17 @@ descriptor, `list` = the hand-maintained allowlist of §3.4.
 | `IntArray` `LongArray` `…` | `list[int]` etc. | desc/Km | `ByteArray` is the exception above |
 | `() -> Unit` | `Callable[[], None]` | Km classifier `kotlin/Function0` | §3.5 |
 | `(A) -> B` | `Callable[[A], B]` | `kotlin/FunctionN` type args | |
-| `suspend (…) -> T` | — | `KmFunction.isSuspend`, `KSType.isSuspendFunctionType` | declined by both producers; must not be stubbed |
+| `suspend (…) -> T` | - | `KmFunction.isSuspend`, `KSType.isSuspendFunctionType` | declined by both producers; must not be stubbed |
 | value class on the allowlist | `Dp \| float` | Km + `list` | §3.4 |
 | value class off the allowlist | `TextUnit` | Km | §3.4 |
-| any other class/interface | its own stub name | Km/KS | requires that class to have a stub in the same namespace, which for a `TypeTag.OBJECT` handle is a promise the runtime does not yet keep — §7 |
-| a generic type *parameter* (`fun <T> f(x: T)`) | — | | `BindingPolicy` rejects these before the binder sees them; stubbing what cannot be called would be a lie. §7 |
+| any other class/interface | its own stub name | Km/KS | requires that class to have a stub in the same namespace, which for a `TypeTag.OBJECT` handle is a promise the runtime does not yet keep, §7 |
+| a generic type *parameter* (`fun <T> f(x: T)`) | - | | `BindingPolicy` rejects these before the binder sees them; stubbing what cannot be called would be a lie. §7 |
 
 > Archive note: this table maps the **declared Kotlin type**; it was implemented as `PythonTypes.kt`
 > for the Pythonic product and removed with it. The current stubs annotate the **boundary** type
-> instead — see `docs/design/pyi-generation-design.md` §3.1.
+> instead, see `docs/design/pyi-generation-design.md` §3.1.
 
-### 3.4 Value classes — how the allowlist shows up
+### 3.4 Value classes, how the allowlist shows up
 
 `docs/design/kotlin-extensions-in-python.md` §4.4 decided this and measured why a machine rule fails: the
 rule "coerce iff the value class has a public constructor taking exactly its underlying type"
@@ -89,7 +89,7 @@ In a stub the distinction is one union member:
 | Kotlin parameter | `.pyi` | why |
 |---|---|---|
 | `Dp` (on the allowlist) | `Dp \| float` | public constructor, wraps a plain `Float`, and it *is* the identity on that float. 62% of value-class parameter occurrences on `Modifier` |
-| `TextUnit` (rejected) | `TextUnit` | packed `Long`; raw `16` decodes as `Unspecified` — silently no value at all |
+| `TextUnit` (rejected) | `TextUnit` | packed `Long`; raw `16` decodes as `Unspecified`, silently no value at all |
 | `Color` (rejected despite passing the constructor test) | `Color` | `Color(int)` is `ULong(value) shl 32`; raw `0xFFFF0000` is transparent black through the constructor and red through the factory |
 | every `packedValue` class (`Offset`, `Size`, `DpSize`, `IntSize`, `IntOffset`, `DpOffset`, `TransformOrigin`, `CornerRadius`, `Constraints`) | the proxy alone | a user-meaningful number is not the stored number, and none of these failures raises |
 
@@ -99,7 +99,7 @@ In a stub the distinction is one union member:
     error: Argument "font_size" to "Text" has incompatible type "int"; expected "TextUnit"
 
 while `Modifier.padding(16)` in the same file checked clean. So the stub is not merely documentation
-of the asymmetry — a checker acts on it, and the user finds out at edit time rather than seeing a
+of the asymmetry, a checker acts on it, and the user finds out at edit time rather than seeing a
 label render with no font size.
 
 What a stub cannot carry is §4.4's *third* clause, the error message that names the constructor to
@@ -124,7 +124,7 @@ Two things the stub should do and one it should not:
   `Column(modifier=Modifier.size(4), content=lambda: Text("x"))` resolves clean.
 - **`@Composable` on a lambda parameter is not expressible and should not be faked.** A
   `@Composable () -> Unit` and a `() -> Unit` are the same Python `Callable[[], None]`. Kotlin's
-  restriction — a composable lambda may only be invoked in a composable context — has no Python
+  restriction, a composable lambda may only be invoked in a composable context, has no Python
   counterpart, and inventing a distinct alias would give a checker a rule it cannot enforce.
   `docs/design/ecosystem.md` §5b already decided the composer is threaded as an ordinary value.
 - **Do not stub the synthetic parameters.** `$composer` and `$changed` are in the JVM descriptor and
@@ -159,12 +159,12 @@ listed. mypy issued **no** overlap diagnostic.
 
 That last fact is the one to be careful about. mypy reports overlapping overloads only when their
 *return types* are incompatible, and every `Modifier` extension returns `Modifier`. So variants 2 and
-3 genuinely overlap — `p(8)` matches `all` and also matches `horizontal` positionally — and the
+3 genuinely overlap, `p(8)` matches `all` and also matches `horizontal` positionally, and the
 checker silently takes the **first** match.
 
 **Judged: overload order is part of the generated output and must be deterministic and
 arity-ascending.** In the run above, arity-ascending put `all: Dp` before `horizontal, vertical`, and
-`p(8)` selected `all` — the right answer, but only because of the order. Two further consequences:
+`p(8)` selected `all`, the right answer, but only because of the order. Two further consequences:
 
 - The stub's order must be **the same order the Python-side dispatcher resolves in**. If the runtime
   dispatcher (`docs/design/kotlin-extensions-in-python.md` §6, unsolved) picks differently, the stub lies
@@ -177,7 +177,7 @@ Kotlin parameter names go through the same snake_case conversion as everything e
 (`paddingValues` → `padding_values`), which `pythonx-compose` already does by hand: `text.py` maps
 `font_size` → `fontSize`, `letter_spacing` → `letterSpacing`, and 14 more.
 
-## 4. Extension functions — and the metaclass proposal does not survive contact
+## 4. Extension functions, and the metaclass proposal does not survive contact
 
 This is the section the Compose surface turns on: 604 public top-level extension functions over 136
 receivers, and 177 chainable ones on `Modifier` alone.
@@ -256,7 +256,7 @@ Modifier3().padding(16)   # -> correct
 ```
 
 But declaring the metaclass side as `@property -> _PaddingCall` in the stub changes nothing for
-mypy — it still resolves the class's own method and produces the same twelve errors. **mypy does not
+mypy, it still resolves the class's own method and produces the same twelve errors. **mypy does not
 model metaclass data-descriptor precedence.**
 
 ### 4.4 Judged: callback-Protocol attributes, and the stub need not mirror the runtime mechanism
@@ -277,7 +277,7 @@ class Modifier:
     background: ClassVar[_Modifier_background]
 ```
 
-**Measured** — the same twenty-line user file that produced ten errors against §4.2 produces exactly
+**Measured**, the same twenty-line user file that produced ten errors against §4.2 produces exactly
 the two intended ones:
 
 | expression | revealed / result |
@@ -290,14 +290,14 @@ the two intended ones:
 | `Modifier.size(4).padding(2)` | `Modifier` |
 | `m.padding(16)` where `m: Modifier` | `Modifier` |
 | `takes_modifier(Modifier.padding(16))` where `def takes_modifier(m: Modifier)` | clean |
-| `Text("hi", font_size=16)` | **error** — `int` is not `TextUnit` (intended, §3.4) |
+| `Text("hi", font_size=16)` | **error**, `int` is not `TextUnit` (intended, §3.4) |
 | `Modifier.padding("nope")` | **error**, with all overload variants listed (intended) |
 
-`ClassVar` is not load-bearing for inference — a plain `padding: _Modifier_padding` gives byte-identical
-results — but it is the honest annotation, and it stops a checker accepting `m.padding = something`.
+`ClassVar` is not load-bearing for inference, a plain `padding: _Modifier_padding` gives byte-identical
+results, but it is the honest annotation, and it stops a checker accepting `m.padding = something`.
 
 The point that makes this legitimate rather than a trick: **a `.pyi` completely replaces the `.py`
-for a checker, so the stub's mechanism and the runtime's mechanism do not have to agree — only the
+for a checker, so the stub's mechanism and the runtime's mechanism do not have to agree, only the
 types do.** The runtime uses the hybrid descriptor of §4.3, which binds `self` correctly for both
 spellings; the stub says "a callable attribute", which is what a checker can act on. The one
 inaccuracy is that a checker believes `Modifier.padding` and `m.padding` are the same object, and
@@ -308,7 +308,7 @@ nothing observable depends on that.
 | alternative | why not |
 |---|---|
 | the metaclass of §4.2 as written | measured not to work, in both mypy and CPython (§4.3) |
-| metaclass whose members are `@property -> Protocol` | works at run time, does not work in mypy — the class's own member still wins. Would give a *correct runtime* with a *wrong IDE*, which is the worst of the two |
+| metaclass whose members are `@property -> Protocol` | works at run time, does not work in mypy, the class's own member still wins. Would give a *correct runtime* with a *wrong IDE*, which is the worst of the two |
 | bind the module-level name `Modifier` to the companion instance | already rejected in §4.2 of the other document and still right: it destroys `Modifier` as an annotation, and the stubs exist so that annotation works |
 | drop the `Modifier.padding(...)` spelling, require `Modifier().padding(...)` | changes the API away from Kotlin's for a reason that is an implementation detail of Python attribute lookup |
 | emit both the metaclass **and** the Protocol attributes | the class attribute shadows the metaclass in both engines, so the metaclass is dead text that a reader will believe |
@@ -316,12 +316,12 @@ nothing observable depends on that.
 **Cost, stated:** one Protocol class per `(receiver, name)` pair. For `Modifier` that is 130 extra
 class definitions in `pythonx/compose/ui/__init__.pyi`; across the 507 distinct `(receiver, name)`
 pairs in corpus A, ~507 if every receiver is stubbed. They are generated, never read by a human, and
-`.pyi` files are not executed — but a 500-class stub file is a real indexing cost for an IDE and it
+`.pyi` files are not executed, but a 500-class stub file is a real indexing cost for an IDE and it
 has not been measured.
 
 **Not verified: PyCharm.** Callback protocols are standard typing and PyCharm supports `Protocol`,
 but whether its inference resolves `Modifier.padding(16)` through a `ClassVar[Protocol]` was not
-tested. **This is the single most load-bearing unverified claim in this document** — §4.4 is chosen
+tested. **This is the single most load-bearing unverified claim in this document**, §4.4 is chosen
 over §4.2 on mypy evidence alone, and if PyCharm follows the runtime MRO rule the way mypy does then
 §4.4 works there too, while if it has its own metaclass handling the conclusion could differ.
 Verify before implementing.
@@ -335,7 +335,7 @@ Verify before implementing.
 ### 5.1 Observed: the shape of `pythonx-compose`
 
 `/Volumes/macMini/thisisthepy/pythonx-compose/pythonx/` contains **only** `compose/`, and there is
-**no `pythonx/__init__.py`** — `pythonx` is an implicit namespace package, so several distributions
+**no `pythonx/__init__.py`**, `pythonx` is an implicit namespace package, so several distributions
 can contribute subpackages under it. `pythonx/compose/` has `__init__.py`, `layout/`, `lite/`,
 `material3/`, `native/`, `runtime/`, `test/`, `ui/`, `ui/unit/`, `wrapper/`.
 
@@ -358,7 +358,7 @@ both. Against the actual directories:
 | `pythonx.compose.runtime` | `androidx.compose.runtime` | yes |
 | `pythonx.compose.ui` | `androidx.compose.ui` | yes |
 | `pythonx.compose.ui.unit` | `androidx.compose.ui.unit` | yes |
-| `pythonx.compose.layout` | `androidx.compose.foundation.layout` | **no — `foundation.` is dropped** |
+| `pythonx.compose.layout` | `androidx.compose.foundation.layout` | **no, `foundation.` is dropped** |
 | `pythonx.compose.wrapper`, `.native`, `.lite`, `.test` | none | no counterpart |
 
 The `layout` entry is not inferred. `pythonx/compose/layout/arrangement.py` line 7 reads
@@ -371,12 +371,12 @@ re-exports `Arrangement` from it.
 belongs to the Python package, not to the plugin.**
 
 The reason is ownership, not convenience. Which Kotlin package a `pythonx` module wraps is
-`pythonx-compose`'s design decision — the plugin has no basis on which to invent
+`pythonx-compose`'s design decision, the plugin has no basis on which to invent
 `pythonx.compose.layout` for `androidx.compose.foundation.layout`, and hard-coding Compose's
 particular renames into a general-purpose Gradle plugin would make every other library's mapping
 unreachable.
 
-So: a data file inside the Python distribution — e.g. `pythonx/compose/pythonx-map.toml` — declaring
+So: a data file inside the Python distribution, e.g. `pythonx/compose/pythonx-map.toml`, declaring
 
     [modules]
     "pythonx.compose.layout"  = "androidx.compose.foundation.layout"
@@ -408,14 +408,14 @@ description of anything.
 
 ---
 
-## 6. Where the files go — the parts about the Pythonic product
+## 6. Where the files go, the parts about the Pythonic product
 
 From §6.1 (measurements 3 and 4 stayed in `docs/design/pyi-generation-design.md`):
 
 Five mypy runs in `/Volumes/macMini/tmp/pyicheck`, each reported above or below:
 
 1. **A `.pyi` beside a `.py` wins.** The fixture's `pythonx/compose/ui/__init__.py` contains nothing
-   but `def __getattr__(name): raise AttributeError(name)` — the shape the real adapter will have —
+   but `def __getattr__(name): raise AttributeError(name)`, the shape the real adapter will have,
    and every name in §4.4's table resolved from `__init__.pyi`. This is the deployment that matters:
    the dynamic adapter ships, the stub ships beside it, and the checker never sees the dynamism.
 2. **`py.typed` is mandatory once the package is installed.** With `pythonx/` copied into the venv's
@@ -426,13 +426,13 @@ Five mypy runs in `/Volumes/macMini/tmp/pyicheck`, each reported above or below:
               stubs or py.typed marker  [import-untyped]
        note: Revealed type is "Any"        (every line)
 
-   The marker goes in the top-level *regular* package of the distribution — here `pythonx/compose/`,
+   The marker goes in the top-level *regular* package of the distribution, here `pythonx/compose/`,
    because `pythonx` is a namespace package (§5.1). That placement was the one tested and it works.
 
 From §6.2:
 
-- **For a published `pythonx` wheel the stubs belong inside the wheel** — `.pyi` beside `.py` plus
-  `py.typed`, both verified in §6.1 — built by `pypackpack`'s bundle stage, not regenerated per
+- **For a published `pythonx` wheel the stubs belong inside the wheel**: `.pyi` beside `.py` plus
+  `py.typed`, both verified in §6.1, built by `pypackpack`'s bundle stage, not regenerated per
   consumer build. The plugin's per-build generation covers the consumer's own Kotlin and the
   third-party jars *its* build resolves; a shipped `pythonx-compose` covers Compose once.
 
@@ -440,22 +440,22 @@ Two audiences, two destinations, one generator.
 
 ---
 
-## 7. Open — the items that belonged to the Pythonic product
+## 7. Open, the items that belonged to the Pythonic product
 
 - **PyCharm.** §4.4 rests entirely on mypy. Verify `ClassVar[Protocol]` resolution, `@overload`
   ordering, and `.pyi`-beside-`.py` precedence in PyCharm before implementing. If PyCharm does model
   metaclass data descriptors, §4.2's shape becomes viable again there and the two engines would want
-  different stubs — which would be a genuinely new problem.
+  different stubs, which would be a genuinely new problem.
 - **The 500-class stub cost.** ~507 callback Protocols for corpus A's `(receiver, name)` pairs, and
   130 for `Modifier` alone in one file. Not measured for IDE indexing time or for mypy's own runtime.
 - **Whether any real Compose overload set collapses.** §3.6 shows four `padding` overloads coexisting,
   but two Kotlin overloads can map to identical Python signatures once `Dp | float` widening is
   applied. The generator must detect that and drop or qualify, and how often it happens across the
-  33 multi-overload `Modifier` names is unknown — it needs the scan to be run.
+  33 multi-overload `Modifier` names is unknown, it needs the scan to be run.
 - **Stub order vs dispatcher order.** §3.6: the `@overload` order and the Python-side dispatcher's
   resolution order must come from one place. The dispatcher does not exist
   (`docs/design/kotlin-extensions-in-python.md` §6).
-  *Archive note (2026-10-03): the dispatcher now exists — `_Overloads` in the binding layer
+  *Archive note (2026-10-03): the dispatcher now exists, `_Overloads` in the binding layer
   `python_multiplatform.binding` (`PythonxAdapter.kt`) serves the base name of an overload set.*
 - **klib.** §0. The `pythonx.*` surface on iOS and androidNative has no producer yet.
 - **The manifest of §5.3** does not exist and has not been agreed with `pythonx-compose`.

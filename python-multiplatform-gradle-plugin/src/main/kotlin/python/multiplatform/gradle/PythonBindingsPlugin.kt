@@ -121,7 +121,7 @@ interface PythonBindingsExtension {
 
     /**
      * Whether to stage a CPython prefix for this machine and point `PYTHONHOME` at it on every
-     * `JavaExec` and `Test` task. Defaults to true — see [PythonHomeStaging] for why the library
+     * `JavaExec` and `Test` task. Defaults to true, see [PythonHomeStaging] for why the library
      * cannot supply one at runtime, and ROADMAP §15e item 4 for the gap it closes.
      *
      * It is already a no-op whenever `PYTHONHOME` is set in the environment, so setting this to
@@ -571,7 +571,7 @@ class PythonBindingsPlugin : Plugin<Project> {
      * The prefix path is computed here rather than carried as a `Provider`, and it can be: it is a
      * pure function of the version, the release, the host and the Gradle user home, none of which
      * need the task to have run. That keeps `environment(...)` a plain string set at configuration
-     * time — the value is in the child process's environment before its JVM starts, which is the
+     * time, the value is in the child process's environment before its JVM starts, which is the
      * only way CPython's `getenv(3)` and [python.multiplatform.env.PythonHomeCheck]'s
      * `System.getenv` can be guaranteed to read the same thing.
      *

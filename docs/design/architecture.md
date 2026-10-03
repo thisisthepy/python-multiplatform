@@ -31,7 +31,7 @@ cinterop 어느 쪽과도 겹치지 않는다), 바로 아래에 적힌 `expect 
 크래시가 난다.** 마이그레이션 대상 함수에서 `inline` 을 떼면 해결된다. `EmbedAPI.kt` 의 `inline` 중
 다수는 컴파일러가 이미 "인라인 이득 없음" 경고를 내고 있어, 떼는 데 실질적 손해가 없다. (크래시는
 Kotlin 2.0.20 에서 관찰됐다. 빌드는 이후 Kotlin 2.4.20-Beta2 로 올라갔고(`gradle/libs.versions.toml`),
-이 크래시를 그 버전에서 다시 확인하지는 않았다 — 그래서 AGENTS.md §16 은 여전히 JVM 계열 통합 전에
+이 크래시를 그 버전에서 다시 확인하지는 않았다, 그래서 AGENTS.md §16 은 여전히 JVM 계열 통합 전에
 확인하라고 한다.)
 
 ## FFI 계층
@@ -58,7 +58,7 @@ desktop·native 와 동일하다.
 ### CPython C 매크로는 바인딩할 수 없다
 
 `PyLong_Check` 계열은 헤더의 `#define` 이라 심볼로 export 되지 않는다. `nm` 으로 확인했다. 그래서
-`ffi/PyTypeChecks.kt` 가 common Kotlin 으로 11종을 구현한다 — `PyObject_IsInstance` 와 캐시된 타입
+`ffi/PyTypeChecks.kt` 가 common Kotlin 으로 11종을 구현한다, `PyObject_IsInstance` 와 캐시된 타입
 객체를 쓰며, `expect`/`actual` 분기가 없으므로 네 플랫폼 동작이 구조적으로 동일하다.
 
 ## 타입 래퍼 계층
@@ -101,7 +101,7 @@ Kotlin 제약 때문에 다이어그램대로 갈 수 없던 지점들:
 
 명령 목록과 어떤 소스셋을 덮는지는 AGENTS.md §15 가 기준이다 (`compileKotlinAndroidNativeArm64`,
 `compileKotlinIosSimulatorArm64`, `compileKotlinDesktop`, 그리고 `ksp-fixtures` 세 모듈을 각각 따로).
-테스트는 컴파일 검증만이 아니다 — 데스크톱(`desktopTest`), iOS 시뮬레이터, 안드로이드 기기, wasm(Node)
+테스트는 컴파일 검증만이 아니다, 데스크톱(`desktopTest`), iOS 시뮬레이터, 안드로이드 기기, wasm(Node)
 에서 실제 CPython 을 구동하는 스위트가 있다 (SPEC §0 의 "Test path" 열).
 
 `Python.framework` 에는 표준 라이브러리가 없어 `Py_Initialize()` 가
@@ -128,7 +128,7 @@ libpython3.14
 
 **The object model must never reference `bindings`.** `PyObject` and friends call the EmbedAPI
 functions in `python.native.ffi` and nothing below them. `bindings` is an implementation
-detail that only `EmbedAPI.<platform>.kt` is allowed to know about — it does not even exist on
+detail that only `EmbedAPI.<platform>.kt` is allowed to know about, it does not even exist on
 the native targets, which reach CPython through cinterop instead.
 
 Concretely, this is correct:
@@ -149,8 +149,8 @@ fun getAttr(name: String) = PyObject(bindings.asmGetAttr(pointer.raw(), name))
 
 ### Consequence for composed operations
 
-A composed call — one that does a whole binder operation natively and crosses the boundary
-once — is still a platform implementation difference, so it belongs in the FFI layer, not in
+A composed call, one that does a whole binder operation natively and crosses the boundary
+once, is still a platform implementation difference, so it belongs in the FFI layer, not in
 the object model:
 
 ```kotlin
@@ -206,7 +206,7 @@ expect abstract class PyAutoCloseable(pointer: NativePointer) {
 the base held a hardcoded (and commented-out) `//PyDecRef(this.pointer)`; after, it calls
 `clean()` and `PyObject` supplies it.
 
-**3. Split the single `jvmMain` implementation into per-platform leaves** — and this fixed a
+**3. Split the single `jvmMain` implementation into per-platform leaves**, and this fixed a
 latent crash. `jvmMain`'s version called `Cleaner.create()` unconditionally, and Android
 inherited it while minSdk was 24. `java.lang.ref.Cleaner` does not exist below API 33, so
 every `PyObject` construction on API 24-32 would have thrown `NoClassDefFoundError`. The new
@@ -215,7 +215,7 @@ every `PyObject` construction on API 24-32 would have thrown `NoClassDefFoundErr
 
 **4. As a consequence, `PyObject` stopped being `expect`/`actual`.** Once the base class was
 expressible in `commonMain`, `PyObject` could inherit it there and finally have real method
-bodies — which is how the commented logic became code.
+bodies, which is how the commented logic became code.
 
 | platform | lifetime mechanism after the split |
 |---|---|
@@ -229,17 +229,17 @@ bodies — which is how the commented logic became code.
 
 The split is sound and stays. What was lost was incidental: `PyObject.android.kt` had been the
 only place an `actual external fun` could go, and that was the hook for routing an operation
-through a single composed JNI call. Measurement later put a number on it — 5.5x on one
+through a single composed JNI call. Measurement later put a number on it, 5.5x on one
 `getAttr`, 11x on a 1000-element list conversion. Recovering it does not mean reverting the
 commit; it means expressing composed operations in the FFI layer, as above. (The `PyObject_GetAttrComposed`
 snippet is illustrative, not a function in the tree. For string-carrying calls, interning later beat
-composition and replaced it — `marshalling-design.md`; composition remains only where crossing count
+composition and replaced it, `marshalling-design.md`; composition remains only where crossing count
 scales with N.)
 
 ## Test layering: low-level and assembled
 
 Tests are split by which layer they exercise, and both layers must be covered on every
-platform. This is not organisational tidiness — the gap between them hid a defect for the whole
+platform. This is not organisational tidiness, the gap between them hid a defect for the whole
 of the object model's life.
 
 **Low-level** tests call EmbedAPI functions one at a time: does this function return what its C
@@ -254,7 +254,7 @@ Android, everything under `androidInstrumentedTest` that reaches through `bindin
 ### Why both, everywhere
 
 At the time, `commonTest` was entirely assembled and ran only on iOS and desktop. Android's
-instrumented tests were entirely low-level (today `commonTest` also runs on Android and wasm; SPEC §0). So no test anywhere called the real object model on a device —
+instrumented tests were entirely low-level (today `commonTest` also runs on Android and wasm; SPEC §0). So no test anywhere called the real object model on a device,
 and it turned out `Python3.exec` crashes the process on its first call there, because several
 functions it reaches still take a Kotlin `String` straight across JNI.
 
@@ -276,5 +276,5 @@ afterwards. Go through `PythonTestFixture`, which initialises once per process.
 
 **Read test counts from a cleaned results directory.** Gradle leaves XML from previous runs in
 place, so a crashed run can report the previous run's numbers. A suite that "passes 111 tests"
-while crashing is what stale XML looks like — delete `build/test-results/<target>/` when a
+while crashing is what stale XML looks like, delete `build/test-results/<target>/` when a
 count needs to be trusted.

@@ -1390,7 +1390,7 @@ kotlin {
 }
 
 /**
- * The iOS `Python.framework` ships only the interpreter binary and headers — it carries no
+ * The iOS `Python.framework` ships only the interpreter binary and headers, it carries no
  * standard library. `Py_Initialize()` therefore aborts the process with
  * "Fatal Python error: Failed to import encodings module" unless PYTHONHOME points at a
  * prefix containing `lib/python3.13`.
@@ -2177,7 +2177,7 @@ val wasmBrowserRuntimeZip by tasks.registering(Zip::class) {
  *
  * Byte-identical in intent to the two substitutions the `KotlinJsTest` block below performs on this
  * module's own test bundle, and it exists as a function because a *consumer* has to perform them
- * too — on its own webpack context, against its own module name. Neither can be done from inside
+ * too, on its own webpack context, against its own module name. Neither can be done from inside
  * Kotlin: one is the compiler's `intrinsics.memory` placeholder, the other needs a value
  * (`wasmInstance.exports`) that exists only in the generated entry module's scope.
  *
@@ -2233,11 +2233,11 @@ fun patchKotlinWasmOutputForCPython(dir: File, modulePrefix: String, logger: org
  * The entry module with `pmpSetKotlinExports(exports)` inserted, and the *position* is the point.
  *
  * This wiring was written against a test bundle, whose entry module ends at
- * `setWasmExports(wasmExports)` — the runner calls `startUnitTests` later, from outside — so
+ * `setWasmExports(wasmExports)`, the runner calls `startUnitTests` later, from outside, so
  * appending the handoff was enough. An **executable** bundle does not end there:
  * `binaries.executable()` makes the generated entry module finish with `exports._start()`, which is
  * Kotlin `main()`. Appended text therefore ran *after* the whole application had already executed,
- * and every upcall in it failed with `pmpRegisterUpcall returned -1` — the code for "`kotlinExports`
+ * and every upcall in it failed with `pmpRegisterUpcall returned -1`, the code for "`kotlinExports`
  * is still null".
  *
  * Observed in a browser rather than reasoned about: the sample printed sections 1-4 correctly and
@@ -2744,8 +2744,8 @@ publishing {
             url.set("https://github.com/thisisthepy/python-multiplatform-mobile")
             licenses {
                 license {
-                    //name.set("The Apache License, Version 2.0")
-                    //url.set("http://www.apache.org/licenses/LICENSE-2.0.txt")
+                    name.set("The Apache License, Version 2.0")
+                    url.set("https://www.apache.org/licenses/LICENSE-2.0.txt")
                 }
             }
             developers {

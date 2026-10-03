@@ -812,7 +812,7 @@ class WeirdZoneTest(ZoneInfoTestBase):
 
         def zt_as_tuple(zt):
             # zt may be a tuple (timestamp, offset_before, offset_after) or
-            # a ZoneTransition object — this is to allow the timestamp to be
+            # a ZoneTransition object, this is to allow the timestamp to be
             # values that are outside the valid range for datetimes but still
             # valid 64-bit timestamps.
             if isinstance(zt, tuple):

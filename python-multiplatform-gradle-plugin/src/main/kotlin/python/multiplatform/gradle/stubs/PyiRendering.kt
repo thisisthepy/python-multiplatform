@@ -10,8 +10,27 @@ import python.multiplatform.gradle.model.ValueClassModel
  *
  * One `def` per bound declaration, in the module the runtime publishes it onto, under the Kotlin
  * names. The binder never exports a Kotlin namespace under another name (AGENTS.md §12 rule 1), so
- * there is no second, renamed product: a `pythonx` module is a real Python package that imports
- * these modules and makes them Pythonic, and its own stubs are its own.
+ * there is no second, renamed product and nothing under `pythonx`: a `pythonx` module is a real
+ * Python package that imports these modules, and its own stubs are its own.
+ *
+ * ### Pythonic names (issue #131)
+ *
+ * The runtime serves every lower-case-first declaration and member under its snake_case alias too,
+ * and takes each keyword by its Kotlin name or its snake_case one ([pythonName], [snakeCase],
+ * [pythonicAliases]; the runtime's rule in `KotlinSurface.kt`). The stub says the same:
+ *
+ * - **parameters** are written under the keyword `inspect.signature` shows -- the snake_case alias
+ *   where one is served for that declaration, else the Kotlin name. A stub can name a parameter only
+ *   once, and it names it the way the signature does; a Kotlin keyword still works at run time, but a
+ *   checker reports it;
+ * - **module-level names** keep their Kotlin `def` (or constant), followed by `alias = kotlinName` for
+ *   each alias the runtime serves in that module, so the alias has exactly the Kotlin name's type;
+ * - **members of a receiver's class** get the alias as a second `ClassVar` of the same `Protocol`, or a
+ *   second `@property` with the same table key in its docstring;
+ * - members of a callable module (#78) get the alias as a second member.
+ *
+ * Not aliased: a class module folded into its parent for a case-insensitive filesystem (#44) -- its
+ * functions keep their Kotlin names only in the stub, although the runtime serves the alias.
  *
  * Returns *relative path to file content*, so nothing here touches a disk and every assertion in
  * `PyiRenderingTest` and `TypedStubTest` is over text. `PythonStubsTask` is the only thing that writes.
@@ -364,7 +383,11 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
             hasReceiver -> RECEIVER_NAME
             else -> null
         }
-        val writable = parameters.map { d.parameterNamesKnown && isWritableName(it.name, reserved) }
+        // Issue #131: each parameter under the keyword `inspect.signature` shows at run time -- its
+        // snake_case alias where one is served for this declaration, else its Kotlin name. The runtime
+        // accepts both spellings; a stub can name only one.
+        val shown = pythonicParameterNames(d)
+        val writable = parameters.indices.map { d.parameterNamesKnown && isWritableName(shown[it], reserved) }
         // Everything up to and including the last unwritable name is positional-only.
         val positionalOnlyEnd = writable.indexOfLast { !it }
         val lastRequired = parameters.indexOfLast { !it.declaresDefault }
@@ -383,13 +406,27 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
         }
         parameters.forEachIndexed { index, parameter ->
             if (index == keywordOnlyStart) rendered += "*"
-            val name = if (writable[index]) parameter.name!! else "__a$index"
+            val name = if (writable[index]) shown[index]!! else "__a$index"
             val marked = if (positionalOnlyEnd >= 0) parameter.declaresDefault && index > lastRequired else parameter.declaresDefault
             rendered += "$name: " + annotate(parameter.type, parameter.boundaryTag, Role.PARAM, ctx) + if (marked) " = ..." else ""
             if (index == positionalOnlyEnd) rendered += "/"
         }
         if (parameters.isEmpty() && hasReceiver) rendered += "/"
         return rendered.joinToString(", ")
+    }
+
+    /**
+     * Per parameter, the name `KotlinSurface.signature_of` shows: the snake_case alias the runtime
+     * serves for it (`keyword_slots`: not another parameter's Kotlin name, not shared by two
+     * parameters, not a Python keyword), else the Kotlin name; `null` where the name is unknown.
+     */
+    private fun pythonicParameterNames(d: DeclarationModel): List<String?> {
+        val kotlinNames = d.parameters.mapNotNull { it.name }
+        val aliasOf = pythonicAliases(kotlinNames, ::snakeCase).entries.associate { (alias, kotlin) -> kotlin to alias }
+        return d.parameters.map { parameter ->
+            val name = parameter.name ?: return@map null
+            aliasOf[name]?.takeIf { it !in PYTHON_KEYWORDS } ?: name
+        }
     }
 
     private fun result(d: DeclarationModel, ctx: ModuleOut): String =
@@ -448,6 +485,9 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
                 attributes.getOrPut(leaf) { mutableListOf() } += d
                 if (d.kind != "STATIC_GETTER" && isSuffixed(leaf)) attributes.getOrPut(baseOf(leaf)) { mutableListOf() } += d
             }
+            // Issue #131: the module's Pythonic aliases are members too, typed as their Kotlin names.
+            val namespace = attributes.keys + childSegments("${ctx.module}.$name")
+            pythonicAliases(namespace).forEach { (alias, kotlin) -> attributes[kotlin]?.let { attributes[alias] = it } }
             attributes.forEach { (attribute, group) ->
                 if (!isIdentifier(attribute) || attribute == "__call__") {
                     appendLine("    # '$attribute' cannot be written as an attribute here; reach it with getattr(..., '$attribute')")
@@ -514,14 +554,34 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
             }
             // The base name of an overload set: the binding layer serves it, so the stub says it.
             val unsuffixedLeaves = sorted.filter { !isSuffixed(leafOf(it)) }.map { leafOf(it) }.toSet()
+            val overloadBases = mutableSetOf<String>()
             sorted.filter { it.kind != "STATIC_GETTER" && isSuffixed(leafOf(it)) }
                 .groupBy { baseOf(leafOf(it)) }
                 .toSortedMap()
                 .forEach { (base, group) ->
-                    if (base !in unsuffixedLeaves && base !in companions) ctx.defs += overloadDefs(base, group, ctx)
+                    if (base !in unsuffixedLeaves && base !in companions) {
+                        ctx.defs += overloadDefs(base, group, ctx)
+                        overloadBases += base
+                    }
                 }
+            // Issue #131: the Pythonic alias of every name written above, as an assignment, so a
+            // checker gives it exactly the Kotlin name's type. The namespace is the runtime's
+            // (`_package_aliases`): every bound name of the package and its child packages.
+            val written = sorted.map { leafOf(it) } + constructors.filter { isSuffixed(leafOf(it)) }.map { leafOf(it) } +
+                companions + overloadBases
+            val namespace = entries.flatMap { listOf(leafOf(it), baseOf(leafOf(it))) } + childSegments(module)
+            ctx.defs += aliasAssignments(pythonicAliases(namespace), written.toSet())
         }
     }
+
+    /** The segment directly under [module] of every module below it: its child packages and objects. */
+    private fun childSegments(module: String): List<String> =
+        byModule.keys.filter { it.startsWith("$module.") }.map { it.removePrefix("$module.").substringBefore('.') }.distinct()
+
+    /** `alias = kotlinName` for each alias whose Kotlin name the stub module writes, sorted by alias. */
+    private fun aliasAssignments(aliases: Map<String, String>, written: Set<String>): List<String> =
+        aliases.filter { (alias, kotlin) -> kotlin in written && kotlin !in PYTHON_KEYWORDS && alias !in PYTHON_KEYWORDS }
+            .map { (alias, kotlin) -> "$alias = $kotlin" }
 
     /**
      * A class module that collides case-insensitively with a sibling path (issue #44): its functions
@@ -616,6 +676,10 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
             attributes.getOrPut(leaf) { mutableListOf() } += d
             if (isSuffixed(leaf)) attributes.getOrPut(baseOf(leaf)) { mutableListOf() } += d
         }
+        // Issue #131: the proxy also serves each member's Pythonic alias, decided over every member
+        // name the runtime looks up for this type -- its own and every supertype's (`_member_aliases`).
+        val aliases = pythonicAliases(memberNamesOf(qualifiedName))
+        val protocols = mutableMapOf<String, String>()
         attributes.forEach { (attribute, group) ->
             if (!isIdentifier(attribute) || attribute in node.children) return@forEach
             val protocol = "_" + ref.path.joinToString("_") + "_" + attribute
@@ -628,7 +692,9 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
                 }
             }
             node.members += "$attribute: $TYPING.ClassVar[$protocol]"
+            protocols[attribute] = protocol
         }
+        val stubbedProperties = mutableMapOf<String, Pair<DeclarationModel, DeclarationModel?>>()
         properties[qualifiedName].orEmpty().forEach { (name, accessors) ->
             val (getter, setter) = accessors
             if (!isIdentifier(name) || name in node.children || name in attributes) {
@@ -636,8 +702,21 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
                 return@forEach
             }
             node.members += renderProperty(name, getter, setter, ctx)
+            stubbedProperties[name] = accessors
+        }
+        aliases.forEach { (alias, kotlin) ->
+            if (!isIdentifier(alias) || alias in node.children) return@forEach
+            protocols[kotlin]?.let { node.members += "$alias: $TYPING.ClassVar[$it]" }
+            stubbedProperties[kotlin]?.let { (getter, setter) -> node.members += renderProperty(alias, getter, setter, ctx) }
         }
     }
+
+    /** Every member name the binding layer serves on a proxy of [qualifiedName]: `_member_names`. */
+    private fun memberNamesOf(qualifiedName: String): Set<String> =
+        (listOf(qualifiedName) + supertypes[qualifiedName].orEmpty()).flatMap { type ->
+            extensionsByReceiver[type].orEmpty().flatMap { listOf(leafOf(it), baseOf(leafOf(it))) } +
+                properties[type].orEmpty().keys
+        }.toSet()
 
     private fun renderProperty(name: String, getter: DeclarationModel, setter: DeclarationModel?, ctx: ModuleOut): String = buildString {
         appendLine("@property")

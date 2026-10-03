@@ -18,7 +18,7 @@ import python.native.ffi.PythonOnDevice
  * ### Why this file exists
  *
  * Android's instrumented tests all reach through `bindings` and rebuild each call by hand, and
- * `commonTest` — which does exercise the object model — only runs on iOS and desktop. Nothing
+ * `commonTest`, which does exercise the object model, only runs on iOS and desktop. Nothing
  * ran the real API on a device, so nothing noticed that it does not work there: `Python3.exec`
  * crashes the process on its **first** call, on both API 26 and API 36, because
  * `PyImport_AddModuleRef`, `PyObject_GetAttrString` and `PyRun_String` still take a Kotlin
@@ -29,7 +29,7 @@ import python.native.ffi.PythonOnDevice
  *
  * ### Why it is disabled
  *
- * These crash the instrumentation **process**, not just the test — a crashed runner takes every
+ * These crash the instrumentation **process**, not just the test, a crashed runner takes every
  * other test on the device with it, so leaving them enabled would hide the suite rather than
  * report a failure.
  *

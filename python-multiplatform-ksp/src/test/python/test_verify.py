@@ -179,7 +179,7 @@ def test_read_in_loop_body_before_its_assignment_in_the_body_is_rejected():
 
 def test_continue_skips_the_rest_of_the_loop_body():
     # `continue` before the assignment: the read after the If in the body is reached only on the
-    # path that assigned x — accepted. The read after the loop is not (zero iterations).
+    # path that assigned x, accepted. The read after the loop is not (zero iterations).
     body_ok = (If(lb("c"), (Continue(),), (Assign("x", i(1)),)), ExprStmt(li("x")))
     assert_accepted(fn(params=[Param("c", BOOL)], locals_={"x": I64},
                        body=[While(lb("c"), body_ok), Return()]))
@@ -646,7 +646,7 @@ def test_scalar_into_an_obj_slot_without_box_is_rejected():
 
 
 def test_obj_from_a_node_that_does_not_create_a_reference_is_rejected():
-    assert_rejected(OWNERSHIP, fn(returns=OBJ, body=[Return(Const(OBJ, None))]))
+    # Const(OBJ, None) creates a reference since N-11 (`return None`); see test_verify_classes.py.
     assert_rejected(OWNERSHIP, fn(params=[Param("o", OBJ)], returns=OBJ,
                                   body=[Return(UnaryOp(OBJ, UnaryOpKind.NEG, lo("o")))]))
     assert_rejected(OWNERSHIP, fn(params=[ArrayParam("a", F64A, stored=False)], returns=OBJ,
@@ -881,7 +881,7 @@ def test_proven_flag_survives_verification():
 # --- 8. Call.redo ---------------------------------------------------------------------------------
 
 def _callee(name="g", returns=F64, pure=True, may_deopt=True):
-    """g(n: int) — deopts on n * 2 overflow when may_deopt; returns `returns`."""
+    """g(n: int), deopts on n * 2 overflow when may_deopt; returns `returns`."""
     prod = BinOp(I64, BinOpKind.MUL, li("n"), i(2)) if may_deopt else li("n")
     value = {F64: ToFloat(F64, prod), I64: prod, BOOL: lt(prod, i(0)), NONE: None}[returns]
     body = ([ExprStmt(prod), Return()] if returns is NONE else [Return(value)])
@@ -1190,7 +1190,7 @@ def _breaking_mutations(rng, g):
             return "drop box", _replace_body(g, bpath, bx.operand), {OWNERSHIP, TYPE}
         return "drop box", _replace_body(g, path, Box(OBJ, e)) if e.type in (I64, F64, BOOL) \
             else _replace_body(g, path, Unbox(F64, e)), {OWNERSHIP, TYPE, STRUCTURE}
-    # kind 13: drop the first Assign (its local becomes possibly unassigned) — breaking because the
+    # kind 13: drop the first Assign (its local becomes possibly unassigned), breaking because the
     # local is read later, which holds for the first Assign of both base functions.
     k = next(j for j, s in enumerate(g.body) if isinstance(s, Assign))
     return "drop assign", dataclasses.replace(g, body=g.body[:k] + g.body[k + 1:]), {DA}

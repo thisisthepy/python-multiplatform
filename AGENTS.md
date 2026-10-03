@@ -14,8 +14,8 @@ overrides any default your tooling has.
 
 ## 2. Nothing is created outside this repository
 
-Everything your work produces — worktrees, agent prompts, logs, measurements, experiments, scratch
-files — lives **inside this repository's root directory.**
+Everything your work produces, worktrees, agent prompts, logs, measurements, experiments, scratch
+files, lives **inside this repository's root directory.**
 
 | What | Where |
 |---|---|
@@ -26,7 +26,7 @@ files — lives **inside this repository's root directory.**
 
 Before writing a file, check that its absolute path starts with this repository's root. If it does
 not, stop. The only exceptions are a path the user names explicitly, and caches that build tools
-manage themselves. **Re-pointing a shared cache or a home-directory symlink reaches other projects —
+manage themselves. **Re-pointing a shared cache or a home-directory symlink reaches other projects,
 ask first.**
 
 Writing to *another* repository is not an exception either. Do it only when told to work there.
@@ -35,7 +35,7 @@ Writing to *another* repository is not an exception either. Do it only when told
 
 **Never add a new directory (or a new file) at the repository root on your own.** The root layout is
 the maintainer's: source modules, `docs/`, `gradle/`, `.github/` and the files that tools require
-there. Work belongs inside an existing module or directory — sources under `src/<sourceSet>/`,
+there. Work belongs inside an existing module or directory, sources under `src/<sourceSet>/`,
 CI-only scripts under `.github/scripts/`, temporary files under the git-ignored `.tmp/`. If you think
 a new top-level entry is needed, propose it (what, why, which alternatives inside existing
 directories you ruled out) and wait for approval. This was added after unapproved root folders
@@ -49,7 +49,7 @@ build caches, model weights, `node_modules`) into every worktree is how 86 workt
 
 - Create worktrees under `.worktrees/<name>`.
 - **Symlink** large untracked directories from the main checkout instead of copying or rebuilding
-  them. If `tools/worktree-add.sh` exists, use it — it does the linking.
+  them. If `tools/worktree-add.sh` exists, use it, it does the linking.
 - Delete a worktree once its branch is merged: `git worktree remove .worktrees/<name>`.
 - Periodically delete `build/` directories inside worktrees; they only grow.
 
@@ -78,7 +78,7 @@ Every new feature goes through an issue and a pull request:
 
 1. Before starting, search the repository's issues (`gh issue list --state all --search "<keywords>"`).
 2. If no issue covers the work, open one (`gh issue create`) stating what and why, and the
-   completion criterion — which tests must pass.
+   completion criterion, which tests must pass.
 3. Work on a `feat/<topic>` branch, push every commit, and open a pull request into `develop`
    whose body contains `Closes #<number>`.
 4. Merge into `develop` through that pull request (`gh pr merge`), not by a local merge, so the
@@ -102,18 +102,18 @@ If a request conflicts with `docs/INTENT.md`, say so instead of implementing it.
 
 ## 6. User-authored files are specification
 
-Files the user wrote by hand — notebooks, example build files, sample apps — are the specification.
+Files the user wrote by hand, notebooks, example build files, sample apps, are the specification.
 Read them **first**. Never delete, rewrite, or `git add` them without being told to. Generated
 documentation (roadmaps, design notes) is a record of work, not a requirement; when the two
 disagree, the user's file wins.
 
 ## 7. Show a conclusion before acting on it
 
-Anything beyond the immediate request — another repository, a public API signature, deleting
-files, killing processes, force-pushing, changing branch protection — state what you would do and
+Anything beyond the immediate request, another repository, a public API signature, deleting
+files, killing processes, force-pushing, changing branch protection, state what you would do and
 why, and wait. Investigating, measuring, and reporting are always fine.
 
-**Push every commit right away.** After you commit — on a work branch or on `develop` — push it to
+**Push every commit right away.** After you commit, on a work branch or on `develop`, push it to
 the remote immediately; no confirmation is needed. Never push to `main` or `release` by hand, and
 never force-push without the user's explicit approval.
 
@@ -143,6 +143,15 @@ Report by category, and never put them in one column:
 A rising test count is not progress when the tests assert an absence. Before writing "nothing left
 to implement", say what you counted against.
 
+### Writing docs and code text
+
+- **No em-dash.** Do not write the em-dash character (U+2014) anywhere: docs, guides, README,
+  comments, docstrings, strings, commit messages, PR and issue text. Use a comma, colon,
+  parentheses, or two sentences.
+- **Install and run examples use `uv`, `ppp` (pypackpack) or `tcl` (toolchain-lite).** Never write
+  a `pip install` example in a guide, README or doc.
+- **Tone:** the pythonx-compose guide is the reference for how docs read; align with it.
+
 ## 10. Agents
 
 - A headless agent (`claude -p`, `agy -p`) has **no next turn**. Tell it to run long commands in the
@@ -153,7 +162,7 @@ to implement", say what you counted against.
 - Give every agent prompt the absolute paths it may write to, and repeat rule 2 in it.
 - **Subagents do not run heavy local builds.** Subagents write code, design, investigate, review
   and document. Gradle builds, cargo builds, the test gate and model runs are done by the session
-  itself — one at a time on this machine — or by CI (GitHub Actions) on a pushed branch. Several
+  itself, one at a time on this machine, or by CI (GitHub Actions) on a pushed branch. Several
   sessions share one machine; parallel local builds slow every one of them.
 
 ---
@@ -192,29 +201,37 @@ the default hierarchy template is not applied.
 
 ### Layers
 
-- **FFI** — `python/native/ffi/EmbedAPI.kt` declares the CPython Stable ABI as `expect` functions
+- **FFI**: `python/native/ffi/EmbedAPI.kt` declares the CPython Stable ABI as `expect` functions
   (about 330). Each platform supplies `EmbedAPI.<platform>.kt` + `bindings.kt` as `actual`s.
   `NativePointer` (a value class) unifies the platform pointer representation.
-- **Object model** — `python/multiplatform/ffi/` holds the Kotlin wrapper types rooted at `PyObject`.
-- **Upcall runtime** — `python/multiplatform/reflection/` and `python/multiplatform/ffi/upcall/`.
+- **Object model**: `python/multiplatform/ffi/` holds the Kotlin wrapper types rooted at `PyObject`.
+- **Upcall runtime**: `python/multiplatform/reflection/` and `python/multiplatform/ffi/upcall/`.
 
-## 12. Decisions already made — do not reverse them
+## 12. Decisions already made, do not reverse them
 
 These come from the maintainer or were settled with evidence. Raise a concern instead of working
 around one.
 
 1. **The binder never exports a Kotlin namespace under a different name.** A Kotlin fully-qualified
    name in Python means the original Kotlin (`androidx.compose...` is androidx). The binder must
-   contain **no** feature that renames `androidx` to `pythonx`, not even as an opt-in or a default
-   kept "for compatibility" (rule 7).
+   contain **no** feature that renames `androidx` to `pythonx` - or any package path to any other -
+   not even as an opt-in or a default kept "for compatibility" (rule 7).
+   This rule is about **namespaces only**. Converting the names *inside* a Kotlin-named module is a
+   python-multiplatform feature the maintainer asked for ("파이썬 형태로 인자랑 바꿔주는건 원래
+   python-multiplatform 자체에서 지원하는 기능"): every lower-case-first declaration, proxy member and
+   keyword parameter is also reachable by its snake_case name (`fill_max_width`,
+   `on_checked_change=`), beside its Kotlin name, which keeps working (SPEC U-12). Do not remove that
+   conversion in the name of this rule - that mistake was made once (238119b7, reverted by #131).
 2. **`pythonx` is a real Python package** (it lives in the separate `pythonx-compose` repository).
    Its code imports the `androidx` modules and makes them Pythonic. Do not build anything here that
-   synthesises `pythonx.*` modules or prevents a real on-disk `pythonx` package from loading.
+   synthesises `pythonx.*` modules or prevents a real on-disk `pythonx` package from loading. (The
+   snake_case names of rule 1 live on the `androidx.*` modules themselves; they never create a
+   `pythonx` module.)
 3. **No runtime reflection, no dynamic binding.** Kotlin/Native has effectively no reflection and
    GraalVM native image is closed-world. Upcalls go through a table generated at build time.
 4. **Never look up JVM methods by name.** The artifact walker generates Kotlin source and `kotlinc`
    compiles it; the compiler does the name mangling. (Value-class mangling hashes only the
-   signature, so `padding`, `size`, `width` and `height` all share one suffix — name lookup is
+   signature, so `padding`, `size`, `width` and `height` all share one suffix, name lookup is
    impossible in principle.)
 5. **`.pyi` generation belongs to the Gradle plugin** (the PyREPL approach).
 6. **`JClass` / `KClass` / `ObjcClass` work only where the platform really has them.** Do not stub
@@ -227,7 +244,7 @@ around one.
 ## 13. Upcalls must work in a GraalVM native image
 
 An upcall (Python → Kotlin) is not done when it passes on the JVM. It must also work in a **GraalVM
-native image** — that is the reason the design uses a build-time table. Only building the image
+native image**, that is the reason the design uses a build-time table. Only building the image
 proves the choice holds.
 
 - Toolchain: **Liberica Native Image Kit**.
@@ -260,7 +277,7 @@ Rule 5 applies. In addition:
 
 - Compile errors are lines starting with `e: `. Most `w: ` warnings (inlining in particular) are
   pre-existing; ignore them.
-- In a **background** run, do not end the script with `echo` — the tool then reports `echo`'s exit
+- In a **background** run, do not end the script with `echo`, the tool then reports `echo`'s exit
   code (always 0). Read the `EXIT=` line from the log, or make Gradle the last command.
 - Android tasks need `ANDROID_HOME` set to the Android SDK.
 - Before counting results, delete `build/test-results/<target>/` **and** pass `--rerun` (or
@@ -300,7 +317,7 @@ Running the three in one invocation once hid 24 failures caused by an ordering d
 - `git merge` **silently refuses** when there are uncommitted changes. Check the result directly
   (`git merge --no-edit develop && echo OK`), not by grepping for `CONFLICT`; otherwise you verify
   against the old baseline.
-- **Rebuild after every merge.** Branches that pass separately can break together — two agents once
+- **Rebuild after every merge.** Branches that pass separately can break together, two agents once
   migrated the same function independently and cinterop rejected the duplicate C wrapper. Before
   adding JNI wrappers, check for duplicates:
 
@@ -310,7 +327,7 @@ Running the three in one invocation once hid 24 failures caused by an ordering d
 ### Inspecting an agent's work
 
 - To check that a test is red before a fix, use `git stash push -- <file>` and `git stash pop`.
-  **Never `git checkout -- <directory>`** on uncommitted agent work — it cannot be recovered (nine
+  **Never `git checkout -- <directory>`** on uncommitted agent work, it cannot be recovered (nine
   files were lost that way once).
 - Agents have broken every kind of instruction here: reverting others' work with `git checkout`,
   editing `commonMain` and the source-set structure of `build.gradle.kts` outside their scope,
@@ -328,7 +345,7 @@ them: `python-multiplatform/src/<sourceSet>/README.md`. **Read it before touchin
 | `desktopMain` | **Never `MethodHandle.invoke`; always `invokeExact`.** Pointers are `JAVA_LONG`, not `ADDRESS` |
 | `androidMain` | Bind through `RegisterNatives`; choose the calling convention per API level and per function; only primitive types cross the boundary |
 | `artMain` | JNI lives here only (`nativeMain` is shared with iOS); this is where composed functions go |
-| `nativeMain` | Shared with iOS — no Android-only code. There is no boundary, so no composition is needed |
+| `nativeMain` | Shared with iOS, no Android-only code. There is no boundary, so no composition is needed |
 | `iosMain` | The framework has no stdlib → `PYTHONHOME` is required; pass env vars to simulator tests with the `SIMCTL_CHILD_` prefix |
 | `wasmJsMain` | Experimental; see its README and `docs/platforms/wasm-design.md` |
 
@@ -363,22 +380,22 @@ below exists because that happened here.
    check explicitly that it is compatible with the structure the user described. If you think your
    design is better, **say so instead of building it.** *(An adapter that synthesised `pythonx.*`
    set `__path__ = []` on every module, which made the user-required on-disk `pythonx` package
-   impossible to load — and then its code was deleted as "unnecessary".)*
+   impossible to load, and then its code was deleted as "unnecessary".)*
 3. **Test count is not progress.** Report by category (rule 9). Before writing "nothing left to
-   implement", state what you counted against — closing every roadmap item left the gaps in
+   implement", state what you counted against, closing every roadmap item left the gaps in
    `docs/design/ecosystem.md` §5 untouched. *(71 tests in one repository all asserted absences and
    added no capability.)*
 4. **Your criterion can decide the answer.** When writing an audit or investigation prompt, write one
-   line on **what this criterion cannot find**. Ask by capability — "what now provides what this
-   file used to provide?" — not by identifier. When an agent's conclusion matches your hypothesis,
+   line on **what this criterion cannot find**. Ask by capability, "what now provides what this
+   file used to provide?", not by identifier. When an agent's conclusion matches your hypothesis,
    be more suspicious, not less. *(An audit required identical identifiers to count code as
    migrated; Python code reimplemented as a Kotlin scanner could never match, so "nothing migrated"
    was reported as fact.)*
 5. **A check that cannot fail is not a check.** Run modules separately; never `git add -A` and stop
    when the changed-file count differs from the report; when you add a public path, disable it and
    confirm something breaks. *(21 fixtures used raw addresses instead of the new public API, so
-   emptying the API still passed. A 22nd changed file — a production file replaced by a tamper stub
-   — was committed by `git add -A`.)*
+   emptying the API still passed. A 22nd changed file, a production file replaced by a tamper stub
+  , was committed by `git add -A`.)*
 6. **Backward compatibility ranks below rules.** If "to avoid breaking callers we must keep X" comes
    to mind, check whether X is the forbidden thing. List the callers that break and fix them.
 7. **Show conclusions before executing them.** Deleting files, killing processes, changing APIs
@@ -400,7 +417,7 @@ user's visibility for interrupt resistance without asking.
 
 ### Model tiers
 
-Pass the model explicitly — the `Agent` tool otherwise inherits the coordinator's model. The test is
+Pass the model explicitly, the `Agent` tool otherwise inherits the coordinator's model. The test is
 not "how hard is it" but **"would the coordinator notice if it were wrong?"** Work a test catches can
 use a cheaper tier; interpreting measurements, deciding what stays open, and safety arguments cannot.
 
@@ -424,7 +441,7 @@ more than the tier.
   to a backgrounded command, one of them an `xcodebuild`.)
 - "Do not run `git commit`, `add`, `checkout`, `restore` or `stash`." The only exception is
   `git merge --no-edit develop`, and if it is refused, report and stop.
-- "Do not touch files outside your assigned directories" — in particular the source-set structure in
+- "Do not touch files outside your assigned directories", in particular the source-set structure in
   `build.gradle.kts` and `commonMain`, unless told to.
 - "Do not report what you did not observe. Count numbers for real. If you do not know, say so; if you
   could not do it, say so and say where it stopped."
@@ -442,7 +459,7 @@ agy -p "<prompt>" --model <model> --print-timeout 40m \
 - `--dangerously-skip-permissions` is required headless: without it the first tool needing the
   `command` permission is auto-denied and agy exits having done nothing, with no failing exit code.
 - `--effort` is accepted only by model names without a built-in level (e.g. `gemini-3.6-flash`).
-  Claude models and names like `gemini-3.6-flash-high` reject it and exit immediately — which looks
+  Claude models and names like `gemini-3.6-flash-high` reject it and exit immediately, which looks
   like success in a background run.
 - After launching, read the head of the log **and** the worktree's `git status --short`; an exit
   code does not prove the agent did anything.
@@ -458,7 +475,7 @@ agy -p "<prompt>" --model <model> --print-timeout 40m \
 - Isolate TDD and large work in a worktree (rule 3). An agent in its red phase breaks the build for
   every other agent sharing the tree; splitting file ownership does not prevent that.
 - The limit is the machine (8 cores, 16 GB RAM), not git: **3–4** agents that build and test, plus
-  3–4 that only read or write docs. **Android/iOS device tests: one at a time** — there are two
+  3–4 that only read or write docs. **Android/iOS device tests: one at a time**, there are two
   emulators and the same package name collides on install.
 - Split work by directory; agents sharing a file overwrite each other. Agents sharing one Gradle
   daemon serialise their builds.
@@ -476,7 +493,7 @@ agy -p "<prompt>" --model <model> --print-timeout 40m \
 
       find .worktrees -maxdepth 3 -type d -name build -not -path '*/build/*' -print0 | xargs -0 -n 20 rm -rf
 
-  First make sure no build is running — a Gradle/Kotlin daemon holding files leaves a half-deleted
+  First make sure no build is running, a Gradle/Kotlin daemon holding files leaves a half-deleted
   tree. A live process is not necessarily a running build (an `aapt2` once sat for four days); check
   `etime`. Check each worktree for uncommitted changes before deleting anything.
 - Deleting the worktree itself is the next step and is safe once its branch is merged.

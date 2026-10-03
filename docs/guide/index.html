@@ -34,7 +34,7 @@
 
 <section class="hero"><div class="wrap">
   <div class="eyebrow"><span data-lang="en">Kotlin Multiplatform × CPython</span><span data-lang="ko">Kotlin Multiplatform × CPython</span></div>
-  <h1><span data-lang="en">Real CPython inside Kotlin — each language calls the other, on every target.</span><span data-lang="ko">Kotlin 안의 진짜 CPython — 두 언어가 서로를, 모든 타깃에서 부른다.</span></h1>
+  <h1><span data-lang="en">Real CPython inside Kotlin, each language calls the other, on every target.</span><span data-lang="ko">Kotlin 안의 진짜 CPython, 두 언어가 서로를, 모든 타깃에서 부른다.</span></h1>
   <p class="lead"><span data-lang="en">python-multiplatform embeds the CPython interpreter itself in a Kotlin Multiplatform app. Kotlin sees Python as typed Kotlin objects; Python sees Kotlin classes as ordinary Python.</span><span data-lang="ko">python-multiplatform 은 CPython 인터프리터 그 자체를 Kotlin Multiplatform 앱에 임베딩한다. Kotlin 에게 Python 은 타입이 있는 Kotlin 객체이고, Python 에게 Kotlin 클래스는 평범한 Python 이다.</span></p>
   <div class="cta">
     <a class="btn primary" href="getting-started.html"><span data-lang="en">Get started</span><span data-lang="ko">시작하기</span></a>
@@ -74,7 +74,7 @@
   <ol class="principles">
     <li><div><strong><span data-lang="en">The real interpreter, not an imitation</span><span data-lang="ko">흉내가 아니라 진짜 인터프리터</span></strong><span class="d"><span data-lang="en">CPython itself is embedded, so C extensions and the whole Python ecosystem keep working.</span><span data-lang="ko">CPython 그 자체를 임베딩하므로 C 확장과 Python 생태계 전체가 그대로 동작한다.</span></span></div></li>
     <li><div><strong><span data-lang="en">Each language stays itself</span><span data-lang="ko">각 언어는 자기 모습 그대로</span></strong><span class="d"><span data-lang="en">A <code>PyList</code> is a Kotlin <code>MutableList</code>; a Kotlin class is constructed with <code>Greeter('Kotlin')</code>; an extension function is a method on its receiver.</span><span data-lang="ko"><code>PyList</code> 는 Kotlin 의 <code>MutableList</code> 이고, Kotlin 클래스는 <code>Greeter('Kotlin')</code> 으로 생성하며, 확장 함수는 수신 객체의 메서드다.</span></span></div></li>
-    <li><div><strong><span data-lang="en">Built ahead of time, works in a closed world</span><span data-lang="ko">미리 생성하므로 닫힌 세계에서도 동작</span></strong><span class="d"><span data-lang="en">No runtime reflection. A function table generated at build time is why upcalls work on Kotlin/Native and in GraalVM native images — an upcall that passes only on the JVM is not done.</span><span data-lang="ko">런타임 리플렉션을 쓰지 않는다. 빌드 타임에 생성한 함수 테이블 덕분에 업콜이 Kotlin/Native 와 GraalVM 네이티브 이미지에서도 동작한다 — JVM 에서만 통과하는 업콜은 완료가 아니다.</span></span></div></li>
+    <li><div><strong><span data-lang="en">Built ahead of time, works in a closed world</span><span data-lang="ko">미리 생성하므로 닫힌 세계에서도 동작</span></strong><span class="d"><span data-lang="en">No runtime reflection. A function table generated at build time is why upcalls work on Kotlin/Native and in GraalVM native images, an upcall that passes only on the JVM is not done.</span><span data-lang="ko">런타임 리플렉션을 쓰지 않는다. 빌드 타임에 생성한 함수 테이블 덕분에 업콜이 Kotlin/Native 와 GraalVM 네이티브 이미지에서도 동작한다, JVM 에서만 통과하는 업콜은 완료가 아니다.</span></span></div></li>
     <li><div><strong><span data-lang="en">Names are never rewritten</span><span data-lang="ko">이름은 바꾸지 않는다</span></strong><span class="d"><span data-lang="en">A Kotlin package is imported in Python under its own name. Pythonic layers such as <code>pythonx</code> are real Python packages built on top, in their own repository.</span><span data-lang="ko">Kotlin 패키지는 Python 에서 자기 이름 그대로 import 된다. <code>pythonx</code> 같은 파이써닉 계층은 그 위에 세운 실제 Python 패키지이며, 자기 저장소에 있다.</span></span></div></li>
     <li><div><strong><span data-lang="en">Every crossing is measured</span><span data-lang="ko">모든 경계 통과는 측정한다</span></strong><span class="d"><span data-lang="en">Each boundary mechanism ships with overhead tests; the cost table is rendered from real runs on every target.</span><span data-lang="ko">경계 메커니즘마다 오버헤드 테스트가 함께 있고, 비용 표는 모든 타깃의 실제 실행에서 렌더링된다.</span></span></div></li>
   </ol>
@@ -100,7 +100,7 @@
 </div></main>
 <footer class="site-footer">
   <div class="wrap">
-    <span><span data-lang="en">MIT licensed.</span><span data-lang="ko">MIT 라이선스.</span> <span translate="no">© 2024 thisisthepy</span></span>
+    <span><span data-lang="en">Apache-2.0 licensed.</span><span data-lang="ko">Apache-2.0 라이선스.</span> <span translate="no">© 2024 thisisthepy</span></span>
     <span><a href="https://github.com/thisisthepy/python-multiplatform">GitHub</a> · <a href="https://github.com/thisisthepy/python-multiplatform/blob/develop/docs/locale/README_ko.md"><span data-lang="en">Korean README</span><span data-lang="ko">한국어 README</span></a></span>
   </div>
 </footer>

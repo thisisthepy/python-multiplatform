@@ -1,4 +1,4 @@
-> **Superseded** by [docs/investigations/gil-parking-investigation.md](../../investigations/gil-parking-investigation.md) on 2026-10-03 — the conclusion, numbers and reproduction steps live there; this is the full original narrative, kept for history.
+> **Superseded** by [docs/investigations/gil-parking-investigation.md](../../investigations/gil-parking-investigation.md) on 2026-10-03, the conclusion, numbers and reproduction steps live there; this is the full original narrative, kept for history.
 
 # Why enabling `PyEval_SaveThread()` in `Python3.initialize()` crashes desktopTest
 
@@ -10,7 +10,7 @@ below are cited from `python/cpython` at tag `v3.14.0` on GitHub, fetched read-o
 **Ruled out, with source evidence:** the failure is not "`PyGILState_Ensure` creates a second,
 competing `PyThreadState`" on the initialising thread. It reuses the *same* `PyThreadState*` that
 `Py_Initialize()` created. This is CPython's documented, intended mechanism for exactly this
-pattern (park, then re-enter from a C thread later) — see §2 and §3.
+pattern (park, then re-enter from a C thread later), see §2 and §3.
 
 **Established, with source evidence, but not sufficient by itself:** `PyEval_SaveThread()` leaves
 the calling OS thread's slot in the GILState TSS (`autoTSSkey`) pointing at the parked
@@ -33,7 +33,7 @@ whichever thread first touches it. `desktopTest`'s Gradle configuration
 (`python-multiplatform/build.gradle.kts:724`) sets no `maxParallelForks`, no
 `junit.jupiter.execution.parallel.*` property exists anywhere in the repo, and no
 `junit-platform.properties` exists. Gradle's `Test` task therefore runs the whole suite
-sequentially inside one worker JVM, on the JVM's single test-execution thread — which is named
+sequentially inside one worker JVM, on the JVM's single test-execution thread, which is named
 `"Test worker"` by Gradle, matching the thread name in today's crash report verbatim. So
 `Python3.initialize()` and `EmbedApiLowLevelTest.importReturnsANewReferenceAndMissingModulesReportFailure`
 run on the **same OS thread**, in the same process, with nothing else attaching in between.
@@ -97,7 +97,7 @@ GIL is released, and the per-OS-thread "current thread state" pointer
 own comment above states outright that detaching deliberately leaves it alone.
 
 By the end of `Py_Initialize()` (before the parking call), the calling thread's GILState TSS slot
-is already bound to the main thread's `PyThreadState`, with `gilstate_counter == 1` — confirmed by
+is already bound to the main thread's `PyThreadState`, with `gilstate_counter == 1`, confirmed by
 `_PyGILState_SetTstate()`'s debug assertions (`Python/pystate.c`):
 
 ```c
@@ -106,8 +106,8 @@ assert(gilstate_tss_get(runtime) == tstate);
 assert(tstate->gilstate_counter == 1);
 ```
 
-(`bind_gilstate_tstate` is what performs that binding, called from `tstate_activate` — i.e. from
-inside `_PyThreadState_Attach`/`PyEval_RestoreThread` — the first time the main thread is
+(`bind_gilstate_tstate` is what performs that binding, called from `tstate_activate`, i.e. from
+inside `_PyThreadState_Attach`/`PyEval_RestoreThread`, the first time the main thread is
 attached during startup.)
 
 ## 3. What `PyGILState_Ensure()` then does on that same thread
@@ -146,16 +146,16 @@ the "new thread" branch (which would create a genuinely second `PyThreadState`) 
 `tcur` is the exact same `PyThreadState*` `Py_Initialize()` created. `holds_gil(tcur)` compares
 `tcur` against `current_fast_get()`, which is `NULL` after parking, so `has_gil = 0`, and
 `PyEval_RestoreThread(tcur)` re-attaches that same object (`current_fast_set`, GIL re-acquired,
-`tstate_activate` — which is a no-op on the already-bound gilstate slot). `gilstate_counter` goes
+`tstate_activate`, which is a no-op on the already-bound gilstate slot). `gilstate_counter` goes
 1 → 2. `PyGILState_Release()` mirrors this exactly: decrements 2 → 1, and because the saved
 `oldstate` was `PyGILState_UNLOCKED`, it re-parks with another internal `PyEval_SaveThread()` call.
 This is self-consistent and, cycled repeatedly, returns to the same `gilstate_counter == 1`,
 detached baseline every time. **Nothing in this path frees, reallocates, or otherwise clears the
-frame stack, exception state, or recursion bookkeeping that the object already carried** — it is
+frame stack, exception state, or recursion bookkeeping that the object already carried**, it is
 literally the same object, reused.
 
 This rules out "two thread states corrupting each other's interpreter frame stack" as the
-mechanism, at least on the initialising thread — there is only ever one `PyThreadState` in play
+mechanism, at least on the initialising thread, there is only ever one `PyThreadState` in play
 here. It does not, by itself, identify what *does* go wrong.
 
 ## 4. Whether `PyGILState_Release` is handed an invalid state
@@ -166,7 +166,7 @@ still-registered `tcur`. There is no thread-identity mismatch and no stale/delet
 `Release` in this flow. (Contrast with the *different*, already-fixed bug documented in
 `GCLeakTest.desktop.kt:6-11`: an earlier version called `PyEval_SaveThread()` from `forceGC()` on
 a thread that was not attached at all. `PyEval_SaveThread`'s body dereferences
-`_PyThreadState_GET()` unconditionally — on a PGO/LTO release build, `assert()`s such as
+`_PyThreadState_GET()` unconditionally, on a PGO/LTO release build, `assert()`s such as
 `detach_thread`'s `assert(tstate == current_fast_get())` compile out, so a `NULL` tstate reaches
 `detach_thread` and is dereferenced (`tstate->critical_section`) with no check. That is a plain
 null-pointer crash from calling `PyEval_SaveThread` while unattached, and it is a different bug
@@ -186,7 +186,7 @@ knowing before trusting older blog posts or Stack Overflow answers about this AP
 
 Two candidates for what actually breaks, neither confirmed:
 
-**Candidate A — stale per-thread C-stack recursion limits.** Each `_PyThreadStateImpl` carries
+**Candidate A, stale per-thread C-stack recursion limits.** Each `_PyThreadStateImpl` carries
 `c_stack_top` / `c_stack_soft_limit` / `c_stack_hard_limit`, computed **once** by
 `_Py_InitializeRecursionLimits()` from the current machine stack pointer, and only if
 `c_stack_hard_limit == 0`:
@@ -204,13 +204,13 @@ _PyThreadState_Attach(PyThreadState *tstate)
 ```
 
 Because our thread reuses the same `PyThreadState` object across every park/re-enter cycle, this
-calibration happens exactly once — at whatever C call depth `Py_Initialize()`'s *first* internal
-attach happened at — and is **never** recomputed on later re-entries from a structurally different
+calibration happens exactly once, at whatever C call depth `Py_Initialize()`'s *first* internal
+attach happened at, and is **never** recomputed on later re-entries from a structurally different
 call depth (the JVM/Panama boundary is a different C stack shape than CPython's own
 `Py_InitializeFromConfig` call chain). `_Py_CheckRecursiveCall` compares the live stack pointer
 against this stale `c_stack_hard_limit` on every recursive C call in the eval loop
 (`if (here_addr < c_stack_hard_limit) Py_FatalError(...)`). This is a real, citable staleness bug
-in the reuse path — but by itself it explains a *miscalibrated guard*, and the failure it produces
+in the reuse path, but by itself it explains a *miscalibrated guard*, and the failure it produces
 when it fires is a `RecursionError` or a `Py_FatalError` with the text "Unrecoverable stack
 overflow", neither of which matches today's raw `SIGSEGV` (no such message was reported), and a
 single-frame `PyImport_ImportModule("sys")` call is not deep enough to plausibly exhaust several
@@ -218,16 +218,16 @@ hundred KB to MB of C stack on its own. **I could not make this candidate fit th
 without more evidence, and flag it mainly because it's a real, separate latent hazard in the reuse
 pattern that the fix should be aware of regardless of whether it explains today's crash.**
 
-**Candidate B — something the eval loop touches on the initial (never-parked) startup path that
+**Candidate B, something the eval loop touches on the initial (never-parked) startup path that
 `import sys`'s cache-hit-with-Python-level-bookkeeping path exercises differently.**
 `PyImport_ImportModule("sys")` for an already-loaded module does not simply `PyDict_GetItemString`
-and return — `import_ensure_initialized()` (in `Modules/import.c`, not fetched in this
+and return, `import_ensure_initialized()` (in `Modules/import.c`, not fetched in this
 investigation) can invoke Python-level machinery (attribute lookups on `__spec__`, method calls),
 which is consistent with the reported crash frames (`PyObject_CallMethodObjArgs` →
 `_PyFunction_Vectorcall` → `DICT_MERGE`) being genuine bytecode execution rather than a pure C
-lookup. I could not determine, from source reading alone, why *this* bytecode execution — on a
+lookup. I could not determine, from source reading alone, why *this* bytecode execution, on a
 thread whose `PyThreadState` is otherwise identical to the one `Py_Initialize()` used successfully
-— would be unsafe. This is the open question the experiment in §6 is aimed at.
+would be unsafe. This is the open question the experiment in §6 is aimed at.
 
 I was not able to reduce this to one explanation. Ranked: reuse of the same `PyThreadState` across
 the park/re-enter boundary is established fact and is the right place to keep looking; which piece
@@ -236,7 +236,7 @@ failure shape and Candidate B unconfirmed.
 
 ## 6. Minimal experiment (does not require the full suite)
 
-Add a single desktop test — not to run today, but to hand to the next attempt — that escalates in
+Add a single desktop test, not to run today, but to hand to the next attempt, that escalates in
 four steps on **one thread**, printing/asserting between each so a failure localizes to a specific
 step instead of reporting "0 tests run":
 
@@ -295,7 +295,7 @@ fun parkThenReenterSameThreadIsolatesTheFailure() {
 }
 ```
 
-This is deliberately not `@Test`-annotated as ready to run blind — the next attempt should run it
+This is deliberately not `@Test`-annotated as ready to run blind, the next attempt should run it
 alone (`--tests` filter), on a quiet tree, and stop at the first step that crashes rather than
 proceeding to the next. That directly gives a call-depth-bounded bisection of the failure, which
 the "audit every call site" and "run the whole suite" attempts so far have not produced.
@@ -306,8 +306,8 @@ investigation (see §7).
 
 ## 7. What the fix would look like, under each candidate
 
-- **If Candidate A (stale C-stack calibration) turns out to matter**, no amount of call-site
-  guarding fixes it — the fix has to either recalibrate `c_stack_hard_limit` on every reattachment
+- **If Candidate A (stale C-stack calibration) turns out to matter**: no amount of call-site
+  guarding fixes it, the fix has to either recalibrate `c_stack_hard_limit` on every reattachment
   (not something this project's API surface exposes; would need a non-limited-API call or a
   CPython-side change) or ensure the *first* attach happens at a call depth structurally
   representative of where Python will actually run later. Concretely: call `Py_Initialize()`
@@ -317,14 +317,14 @@ investigation (see §7).
   one-line fix.
 
 - **If Candidate B (something Python-level import bookkeeping depends on) turns out to matter**,
-  the fix likely isn't about *this* call site specifically — `PyImport_ImportModule("sys")` is
-  representative of "any first bytecode execution after reattachment", not a special case — so
+  the fix likely isn't about *this* call site specifically, `PyImport_ImportModule("sys")` is
+  representative of "any first bytecode execution after reattachment", not a special case, so
   narrowing further requires the bisection in §6 before a fix can be scoped at all.
 
 - **If the experiment shows Step 1 or Step 2 already crashes** (i.e. even bare reattachment or a
   pure-C call is unsafe), that overturns the "reuse is fine, something else breaks" framing of this
   whole document, and the next place to look is the desktop Panama bindings for exactly these four
-  functions (`bindings.kt:41-50`) — this project has a documented, repeated history of exactly this
+  functions (`bindings.kt:41-50`), this project has a documented, repeated history of exactly this
   class of bug (`invoke` vs `invokeExact`, `ADDRESS` vs `JAVA_LONG`), and while a quick read during
   this investigation found `PyEval_SaveThread`/`RestoreThread`/`PyGILState_Ensure`/`Release` all
   using `invokeExact` and the project's `P = JAVA_LONG` pointer convention correctly, that read was
@@ -336,23 +336,23 @@ investigation (see §7).
   fundamentally what's unsafe in this embedding (as opposed to something narrower), the design
   question becomes whether the initialising thread should ever call `PyGILState_Ensure` again at
   all. An alternative shape: run `Py_Initialize()` on a dedicated thread that parks once and is
-  never reused for Python work afterward — every subsequent call, including from what is currently
+  never reused for Python work afterward, every subsequent call, including from what is currently
   "the same thread" in tests, would then go through the "first time on this OS thread" branch of
   `PyGILState_Ensure`, which creates a genuinely fresh `PyThreadState` rather than resurrecting the
   init-time one. That is a bigger change than uncommenting the parking line (it changes where
   `Py_Initialize()`/`Py_Finalize()` are allowed to be called from, and `Python3.finalize()`'s
   `PyEval_RestoreThread(mainThreadState)` call would need to run on that same dedicated thread
   too), and it should not be attempted until the experiment in §6 has actually localized the fault
-  — building it on a guess would repeat the pattern this document was asked to stop.
+ , building it on a guess would repeat the pattern this document was asked to stop.
 
 ## 8. What could not be determined
 
 - **The exact opcode-level or memory-level reason `DICT_MERGE` faults.** Both candidates in §5 are
   plausible mechanisms consistent with *some* of the evidence, but neither was confirmed against
   the specific crash. This needs the experiment in §6, or a debugger session (`lldb` on the core,
-  or a build with `Py_DEBUG` to turn the compiled-out `assert()`s back on) — deliberately not
+  or a build with `Py_DEBUG` to turn the compiled-out `assert()`s back on), deliberately not
   attempted here per the "prefer reading over running" instruction for this task.
-- **Whether `import_ensure_initialized`'s Python-level path (Candidate B) is real** — I did not
+- **Whether `import_ensure_initialized`'s Python-level path (Candidate B) is real**: I did not
   fetch `Modules/import.c`, so the claim that a `sys.modules` cache hit still runs Python-level
   code is inferred from general CPython import-machinery knowledge, not confirmed against 3.14
   source in this session.

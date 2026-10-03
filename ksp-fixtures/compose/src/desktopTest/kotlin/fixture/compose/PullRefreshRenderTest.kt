@@ -26,7 +26,7 @@ import kotlin.test.assertTrue
  * .pullRefresh(Modifier, onPull: (Float) -> Float, onRelease: suspend (Float) -> Float, enabled:
  * Boolean)`) is driven by **nested scroll** from a scrollable descendant, not by pointer events
  * the modifier itself awaits. `docs/archive/pythonx-adapter-design.md` §9.4 identified this as needing
- * a larger harness — a real scrollable descendant composed under the `pullRefresh` parent, with
+ * a larger harness, a real scrollable descendant composed under the `pullRefresh` parent, with
  * an actual drag that makes the scrollable child's nested-scroll callbacks flow upward.
  *
  * ### What is proven here
@@ -42,7 +42,7 @@ import kotlin.test.assertTrue
  *
  * `onPull: (Float) -> Float` must return the amount consumed. §9.6 settled the shape for
  * value-returning slots: Kotlin supplies the return value, Python is given a one-way notification.
- * `pythonPullRefreshCallbacks` implements exactly that — the lambda always returns `pullAvailable`
+ * `pythonPullRefreshCallbacks` implements exactly that, the lambda always returns `pullAvailable`
  * (consuming everything offered) while firing a notification to Python.
  *
  * `onRelease: suspend (Float) -> Float` is the same: Kotlin closes the coroutine returning `0f`,
@@ -53,7 +53,7 @@ import kotlin.test.assertTrue
  * A scrollable descendant inside Compose requires `rememberScrollState()` and `verticalScroll`,
  * which are not in `artifactIncludePackages`. Building the nested-scroll parent/child tree in
  * Kotlin (inside `PythonPullRefreshHarness`) avoids adding those packages to the walker's scope
- * — this proof is about the callback boundary, not about what the walker covers.
+ *, this proof is about the callback boundary, not about what the walker covers.
  */
 class PullRefreshRenderTest {
 
@@ -106,7 +106,7 @@ class PullRefreshRenderTest {
         }
         try {
             scene.render()
-            // Drag downward from near the top — the scrollable child is already at the top, so
+            // Drag downward from near the top, the scrollable child is already at the top, so
             // over-scroll flows into PullRefreshNestedScrollConnection.onPreScroll -> onPull.
             scene.sendPointerEvent(PointerEventType.Move, Offset(SCENE / 2f, START_Y), type = PointerType.Touch)
             scene.sendPointerEvent(PointerEventType.Press, Offset(SCENE / 2f, START_Y), type = PointerType.Touch)
@@ -176,7 +176,7 @@ class PullRefreshRenderTest {
         }
         try {
             scene.render()
-            // Press and drag in the bottom-right corner — outside the Box that carries pullRefresh.
+            // Press and drag in the bottom-right corner, outside the Box that carries pullRefresh.
             val at = Offset(SCENE - 2f, SCENE - 2f)
             scene.sendPointerEvent(PointerEventType.Move, at, type = PointerType.Touch)
             scene.sendPointerEvent(PointerEventType.Press, at, type = PointerType.Touch)
