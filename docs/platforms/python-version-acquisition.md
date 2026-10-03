@@ -90,3 +90,20 @@ tasks.register<Exec>("compileExt") {
     commandLine("cc", "-I${inc.get().asFile}", "-c", "ext.c")
 }
 ```
+
+### Link libraries
+
+The same extension exposes the library to link against (issue #56):
+`libraryDir(target, flavour)` (`Provider<Directory>`, the `-L` directory) and
+`libraryFile(target, flavour)` (`Provider<RegularFile>`), both carrying the `downloadPython_*` task.
+
+| Target | Link library (under `<ver>/`) |
+|---|---|
+| `android-aarch64`, `android-x86_64` | `<target>/prefix/lib/libpython3.14.so` |
+| `windows-x86_64` | `windows-x86_64/python/libs/python314.lib` (`python3.lib` is the stable-ABI one) |
+| `windows-x86_64` free-threaded | `windows-x86_64-freethreaded/python/libs/python314t.lib` |
+| macOS, Linux, iOS | none -- `isLinkRequired(target)` is false; `libraryDir`/`libraryFile` throw `GradleException` |
+
+Android has no free-threaded build, so that combination throws. `isLinkAvailable(target, flavour)`
+tests without throwing; the other flavour fails naming `-PpythonFreeThreaded`, as for `includeDir`.
+
