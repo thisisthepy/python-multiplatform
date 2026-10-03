@@ -195,14 +195,14 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `python_multiplatform.describe_member(kotlin_type_name, kotlin_member_name)`: `describe()`'s
   tuple-of-dicts for every extension overload or the property getter/setter that type's proxy serves
   under that name, supertypes included, invoking nothing; `AttributeError` for a name it does not
-  serve (#54). `Status: implemented, unverified` — `PM/commonTest/.../pythonx/PythonxPropertyTest.kt`.
+  serve (#54). `Status: implemented` — `PM/commonTest/.../pythonx/PythonxPropertyTest.kt`.
 - **U-10** A Kotlin property is an attribute of its receiver's proxy (#38): a member `val`/`var` of a
   public class or interface reads (and, for a public setter, writes) as a Python `property`, an
   extension property's getter reads the same way on its receiver (`Icons.Default.Add`), and both are
   found on the type and then on every type the table says it is a. A property is never a module
   attribute and makes no package. `None` written for a slot with no default is Kotlin's `null` for a
   reference type; a Python object written into a `kotlin.Any?` slot is held by Kotlin as itself, and an
-  `int` is refused there (it would cross as a handle). `Status: implemented, unverified` —
+  `int` is refused there (it would cross as a handle). `Status: implemented` —
   `PM/commonTest/.../pythonx/PythonxPropertyTest.kt`, `ksp-fixtures/compose/.../PythonContentRenderTest.kt`,
   `MaterialIconsRenderTest.kt`.
 
@@ -220,7 +220,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   for a public setter with every class type parameter unbounded, `SETTER` entries `Owner.prop=`; and
   top-level extension property getters (`pkg.prop`, receiver in `receiverTypeName`). Properties take no
   part in overload naming or in a constructor's name check; a property key another binding already
-  holds is declined. `Status: implemented, unverified` — `GP/artifact/PropertyBindingTest.kt`.
+  holds is declined. `Status: implemented` — `GP/artifact/PropertyBindingTest.kt`.
 - **B-2** The walker on **klibs** (Kotlin/Native libraries). `Status: partial` —
   `GP/artifact/KlibScannerTest.kt` and `ksp-fixtures/klib-artifact` assert that the scanned klib's
   declarations are declined with reasons; no klib declaration is bound at run time yet.
@@ -309,7 +309,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 - **N-6** Compose state created and written from Python through the binder:
   `androidx.compose.runtime.mutableStateOf(x)` callable, and `.value` of the returned `MutableState`
   readable and writable on its proxy. Implemented by #38 (B-1, U-10); B-8's test now writes its root
-  through `state.value = root` and the KSP-bound stand-in is gone. `Status: implemented, unverified`.
+  through `state.value = root` and the KSP-bound stand-in is gone. `Status: implemented`.
 
 ---
 
