@@ -385,6 +385,9 @@ internal object ArtifactScanner {
                 functions = functionsOf(metadata.kmClass).filterNot { it.isExtension },
                 ownerNode = node,
                 classpath = classpath,
+                // The rule `objectConstantCandidates` uses: Kotlin visibility from metadata, never the
+                // JVM flags (an `internal object` is a JVM-public class).
+                bindObjectMembers = metadata.kmClass.visibility == Visibility.PUBLIC,
             ) + constructorCandidates(metadata.kmClass, node, classpath) +
                 objectConstantCandidates(metadata.kmClass, node, classpath)
             is KotlinClassMetadata.FileFacade -> kotlinCandidates(
@@ -544,12 +547,13 @@ internal object ArtifactScanner {
         functions: List<ResolvedFunction>,
         ownerNode: ClassNode,
         classpath: ArtifactClasspath,
+        bindObjectMembers: Boolean = false,
     ): List<Candidate> {
         val bySignature = functions.associateBy { it.jvmSignature.name to it.jvmSignature.descriptor }
         // A Kotlin `object`'s functions are instance methods of its singleton (issue #53:
         // `Arrangement.spacedBy`); generated source reaches them as `Owner.name(...)`, so they bind
         // like a static. A composable one is declined below -- its thunk is a static call.
-        val isObject = ownerIsClass && ownerNode.fields.any { it.name == "INSTANCE" && it.access.hasFlag(Opcodes.ACC_STATIC) }
+        val isObject = ownerIsClass && bindObjectMembers && ownerNode.fields.any { it.name == "INSTANCE" && it.access.hasFlag(Opcodes.ACC_STATIC) }
         val staticSignatures = ownerNode.methods.filter { it.access.hasFlag(Opcodes.ACC_STATIC) }.map { it.name to it.desc }.toSet()
         return ownerNode.methods
             .filter { it.access.hasFlag(Opcodes.ACC_PUBLIC) }
