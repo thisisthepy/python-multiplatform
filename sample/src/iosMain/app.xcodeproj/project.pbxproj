@@ -49,7 +49,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-		8B3F1A502CC49F1D00B85330 /* Python.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Python.xcframework; path = "../../../build/xcode-frameworks/Python.xcframework"; sourceTree = "<group>"; };
+		8B3F1A502CC49F1D00B85330 /* Python.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Python.xcframework; path = "../../build/xcode-frameworks/Python.xcframework"; sourceTree = "<group>"; };
 		7555FF7B242A565900829871 /* PythonDemo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PythonDemo.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		8B1A04782B85BED60008D451 /* app-Info.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; path = "app-Info.plist"; sourceTree = "<group>"; };
 		8B1A047C2B85BEFC0008D451 /* Preview Content */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "Preview Content"; path = "swift/Preview Content"; sourceTree = "<group>"; };
@@ -446,7 +446,7 @@
 				ENABLE_PREVIEWS = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
-					"$(SRCROOT)/../../../build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)",
+					"$(SRCROOT)/../../build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)",
 				);
 				INFOPLIST_FILE = "app-Info.plist";
 				IPHONEOS_DEPLOYMENT_TARGET = 15.3;
@@ -481,7 +481,7 @@
 				ENABLE_PREVIEWS = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
-					"$(SRCROOT)/../../../build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)",
+					"$(SRCROOT)/../../build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)",
 				);
 				INFOPLIST_FILE = "app-Info.plist";
 				IPHONEOS_DEPLOYMENT_TARGET = 15.3;
