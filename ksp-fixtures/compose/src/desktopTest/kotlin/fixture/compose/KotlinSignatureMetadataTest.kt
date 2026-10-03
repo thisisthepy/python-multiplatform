@@ -17,7 +17,7 @@ import kotlin.test.assertTrue
  *
  * pythonx-compose re-exposes Kotlin-named modules Pythonically by **one rule** applied to every
  * module it lists, with no per-widget wrapper. That rule needs, for each function: its Kotlin
- * parameter names, which have defaults, the overload set behind a base name, which parameters are
+ * parameter names (and, since issue #131, the Pythonic keyword the binder serves for each), which have defaults, the overload set behind a base name, which parameters are
  * value classes, and which one is the trailing `@Composable` content lambda. This pins that the
  * binder publishes exactly that -- through `inspect.signature` and `python_multiplatform.describe`
  * (`KotlinSurface`'s KDoc is the contract) -- for a real composable (`Checkbox`) and a real
@@ -39,7 +39,9 @@ class KotlinSignatureMetadataTest {
     }
 
     /**
-     * `Checkbox(checked, onCheckedChange, modifier = Modifier, ...)`, as Kotlin declares it. Compose 1.11
+     * `Checkbox(checked, onCheckedChange, modifier = Modifier, ...)`, as Kotlin declares it -- and as
+     * `inspect.signature` shows it to Python since issue #131: `on_checked_change`, the keyword a
+     * Python caller writes, while `describe` keeps the Kotlin name beside it. Compose 1.11
      * has two `Checkbox` overloads (the second adds `checkmarkStroke`/`outlineStroke`), so the base name
      * answers `(*args, **kwargs)` and the signature lives on the specific overload callable.
      */
@@ -75,13 +77,14 @@ class KotlinSignatureMetadataTest {
                     'name': _ksm_d[0]['name'],
                     'composable': _ksm_d[0]['composable'],
                     'callback': _ksm_d[0]['parameters'][1]['type'].startswith('kotlin.Function1'),
-                    'described': [_q['name'] for _q in _ksm_d[0]['parameters']] ==
+                    'described': [_q['python_name'] for _q in _ksm_d[0]['parameters']] ==
                                  [_p.name for _p in _ksm_params],
+                    'kotlin_names': [_q['name'] for _q in _ksm_d[0]['parameters']][:2],
                 }
                 """.trimIndent(),
             )
             assertEquals(
-                "[('checked', False, 'kotlin.Boolean'), ('onCheckedChange', False, " +
+                "[('checked', False, 'kotlin.Boolean'), ('on_checked_change', False, " +
                     "${eval("repr(_ksm_d[0]['parameters'][1]['type'])")}), " +
                     "('modifier', True, 'androidx.compose.ui.Modifier')]",
                 eval("repr(_ksm['first'])"),
@@ -103,7 +106,8 @@ class KotlinSignatureMetadataTest {
             )
             assertEquals("True", eval("_ksm['composable']"), order)
             assertEquals("True", eval("_ksm['callback']"), order)
-            assertEquals("True", eval("_ksm['described']"), "$order: describe and inspect.signature must agree")
+            assertEquals("True", eval("_ksm['described']"), "$order: describe's python_name and inspect.signature must agree")
+            assertEquals("['checked', 'onCheckedChange']", eval("repr(_ksm['kotlin_names'])"), "$order: describe keeps the Kotlin names")
         }
     }
 

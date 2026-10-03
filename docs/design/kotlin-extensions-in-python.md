@@ -26,7 +26,7 @@ in place with what replaced it, because the old measurement is why the replaceme
 | §1, the Compose version | 1.6.11 | the measurements here were taken on 1.6.11 and are kept as such; the build now pins Compose Multiplatform **1.11.1** (`gradle/libs.versions.toml`, `compose-plugin`), with material3 1.9.0 |
 | §3.2, 43 `Modifier` extensions declined for a function-typed parameter | "a real boundary limit" | function-typed slots bind now (SPEC B-5); `ArtifactScanner`'s KDoc records **157 `Modifier` extensions bound and 8 declined** after `functionSlotOrNull` (not re-measured for this revision) |
 | §3.1/§6, where the overload dispatcher lives | "in `pythonx`" | in **this repository's** binding layer, `python_multiplatform.binding` (`_Overloads` in `PythonxAdapter.kt`), which serves the base name (`padding`) and selects among the `name__<types>` entries (SPEC U-8) |
-| §4.1, primitive receivers as `pythonx.compose.ui.unit.to_dp(x)` | snake_case, under `pythonx` | the binder serves Kotlin names only (`docs/INTENT.md` §2.2): such an extension is a module-level function on its Kotlin-named module, receiver first. A Pythonic spelling is pythonx-compose's |
+| §4.1, primitive receivers as `pythonx.compose.ui.unit.to_dp(x)` | under `pythonx` | the binder renames no namespace (`docs/INTENT.md` §2.2): such an extension is a module-level function on its Kotlin-named module, receiver first, reachable as `toDp` and as its Pythonic alias `to_dp` (SPEC U-12) |
 | §4.4, the allowlist | decided, not built | built at run time in the binding layer: `_VALUE_CLASS_ALLOWLIST` starts **empty** and pythonx-compose fills it through `allow_raw_primitive` (`PythonxAdapter.kt`) |
 | §4.5, `.pyi` with `@overload` and `Dp \| float` | proposed for this plugin | the plugin emits Kotlin-named stubs with boundary types only (SPEC B-7, `docs/design/pyi-generation-design.md`); the Pythonic stub is pythonx-compose's. §4.5 is replaced below; the original is in [`docs/archive/kotlin-extensions-in-python-pyi.md`](../archive/kotlin-extensions-in-python-pyi.md) |
 | §4.6, composables | "remain blocked" | callable from Python inside a composition (SPEC B-6); see §4.6's update |
@@ -475,8 +475,8 @@ Not every receiver can take a method, and the split was counted:
 Python cannot attach a method to `int`, so `Int.toDp` and its 19 siblings stay module-level
 functions on their Kotlin-named module, taking the receiver as the first positional argument. That is
 a real loss of fidelity and it is confined to 20 functions. (This file first wrote the result as
-`pythonx.compose.ui.unit.to_dp(x)`; the binder renames nothing, and a snake_case spelling under
-`pythonx` is pythonx-compose's to add.)
+`pythonx.compose.ui.unit.to_dp(x)`; the binder renames no namespace -- it serves `to_dp` on
+`androidx.compose.ui.unit` itself (SPEC U-12) -- and anything under `pythonx` is pythonx-compose's.)
 
 ### 4.2 `Modifier` as one name for both the type and the empty modifier
 
@@ -601,7 +601,8 @@ Kotlin module path, Kotlin parameter names, `= ...` for a Kotlin default, the ex
 positional-only first parameter, the declared Kotlin types as stub classes (`Modifier`, `Dp | float`,
 `Callable[...]`), each extension also as a callable attribute of its receiver's class, and `@overload`
 sets over a base name in table-key order, with the Kotlin signature in the docstring (issue #31). What
-stays out is snake_case, `pythonx` and the Pythonic allowlist narrowing, which belong to pythonx-compose. The section
+stays out is `pythonx` and the Pythonic allowlist narrowing, which belong to pythonx-compose; the
+snake_case aliases the runtime serves are in (SPEC U-12, B-7). The section
 this replaces — the metaclass stub and the three measured requirements for a Pythonic stub — is in
 [`docs/archive/kotlin-extensions-in-python-pyi.md`](../archive/kotlin-extensions-in-python-pyi.md).
 

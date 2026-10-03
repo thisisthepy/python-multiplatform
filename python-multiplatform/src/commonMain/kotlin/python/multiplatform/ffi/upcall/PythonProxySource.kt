@@ -299,6 +299,10 @@ object PythonProxySource {
         # Kotlin defaults for what a call leaves out, and the signature as public metadata. See
         # `KotlinSurface`.
         from python_multiplatform import kotlin_function as _pm_kotlin_function
+        # Each module this layer creates also answers the Pythonic alias of a Kotlin name it holds
+        # (`remember_text_field_state` for `rememberTextFieldState`, issue #131), through a PEP 562
+        # `__getattr__` that runs only for a name the module does not have. See `KotlinSurface`.
+        from python_multiplatform import module_alias_getattr as _pm_module_alias_getattr
 
 
         def _pm_settle(_fut, _ok, _payload):
@@ -351,6 +355,10 @@ object PythonProxySource {
             _m = _pm_sys.modules.get(_name)
             if _m is None:
                 _m = _pm_types.ModuleType(_name)
+                # Only on a module this layer creates: one the binding layer made already has its
+                # own `__getattr__`, which serves the same aliases from its table, and a module
+                # anybody else made is theirs.
+                _m.__getattr__ = _pm_module_alias_getattr(_m)
                 _pm_sys.modules[_name] = _m
                 if '.' in _name:
                     _parent, _, _leaf = _name.rpartition('.')

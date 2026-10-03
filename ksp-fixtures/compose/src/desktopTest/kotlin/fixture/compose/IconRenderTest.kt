@@ -112,13 +112,13 @@ class IconRenderTest {
     fun pythonLoadsAPainterAndIconDrawsIt() {
         val drawn = inkOf(
             """
-            from androidx.compose.ui.res import painterResource
+            from androidx.compose.ui.res import painter_resource
             from androidx.compose.material3 import Icon
-            Icon(painterResource('$RESOURCE'), contentDescription='a square')
+            Icon(painter_resource('$RESOURCE'), content_description='a square')
             """.trimIndent(),
         )
         val blank = inkOf("pass")
-        println("compose render: Icon(painterResource('$RESOURCE')) -> $drawn px, empty body -> $blank px")
+        println("compose render: Icon(painter_resource('$RESOURCE')) -> $drawn px, empty body -> $blank px")
         assertEquals(0, blank, "an empty composition must draw nothing, or the measurement is not measuring")
         assertEquals(SQUARE, drawn, "Icon did not draw the 24x24 square the resource holds")
     }

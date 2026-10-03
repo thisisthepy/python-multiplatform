@@ -153,7 +153,7 @@ class TextStateBindingTest {
         entry("$pkg.Editable")
         val stub = renderKotlinFqnStubs(declarations).getValue("fixture/artifacttextstate/__init__.pyi")
         assertTrue("class Editable:" in stub, stub)
-        assertTrue("    def __init__(self, initialText: str = ..., initialSelection: Span = ...) -> None:" in stub, stub)
+        assertTrue("    def __init__(self, initial_text: str = ..., initial_selection: Span = ...) -> None:" in stub, stub)
         assertTrue("    @property\n    def text(self) -> str:" in stub, stub)
         assertTrue("    @property\n    def draft(self) -> str | None:" in stub, stub)
         assertTrue("    replaceAll: _t.ClassVar[" in stub, stub)

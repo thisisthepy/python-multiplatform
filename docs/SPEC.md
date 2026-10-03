@@ -235,14 +235,15 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `anExtensionIsAMethodOnItsReceiverAndTheChainComposes`) and against the real Compose jars through
   the artifact walker (`ksp-fixtures/artifact/.../WalkedArtifactComposeModifierTest.kt`); not
   asserted for KSP-generated proxies.
-- **U-8** A function on a Kotlin-named module carries Kotlin's own surface and nothing else: the
-  Kotlin declaration name, keyword arguments by **Kotlin parameter names**, Kotlin defaults for omitted
-  parameters, overload sets under the base name, and its signature as public metadata
-  (`inspect.signature`, `python_multiplatform.describe`; contract in `KotlinSurface.kt`'s KDoc).
+- **U-8** A function on a Kotlin-named module carries Kotlin's surface: the Kotlin declaration name,
+  keyword arguments by **Kotlin parameter names**, Kotlin defaults for omitted parameters, overload sets
+  under the base name, and its signature as public metadata (`inspect.signature`,
+  `python_multiplatform.describe`; contract in `KotlinSurface.kt`'s KDoc) - and, beside each Kotlin
+  name, its Pythonic alias (U-12).
   `describe(module, name)` describes any bound name, a named constant (`STATIC_GETTER`) included,
   without evaluating it (#36). A module's `dir()` lists its direct child packages/objects and reading
-  one as an attribute imports it (#35) — Kotlin names only. No
-  member or parameter is renamed; the binder creates no `pythonx` module and a real `pythonx` package
+  one as an attribute imports it (#35) - Kotlin names only (the U-12 aliases are served, not listed).
+  No namespace is renamed; the binder creates no `pythonx` module and a real `pythonx` package
   on disk is what `import pythonx` loads. The answer is the same whichever installer
   (`PythonProxySource`, `PythonxAdapter`) ran first for a table. **A name that is both a function and a
   module is callable** (#78): Kotlin has `TextRange(2)` (a top-level factory) and `TextRange.Zero` (a
@@ -257,8 +258,10 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   kotlin_member_names) -> kotlin_name | (kotlin_name, keyword_map) | None`, asked when no Kotlin member
   of that name exists — and, for a Kotlin-named member, only when a call passes keywords and only for
   its `{python_kw: kotlinParam}` keyword map (#34).
-  The binder renames nothing itself (no resolver: `AttributeError`), and aliases are cached in the
-  registry, not written on the proxy class (`dir()` stays Kotlin-only). Contract in `KotlinSurface.kt`'s
+  Resolvers are asked before the binder's own U-12 alias, so a resolver still decides a name it
+  answers; with none answering, the U-12 alias is served, and a name that is no alias is an
+  `AttributeError`. Aliases are cached in the registry, not written on the proxy class (`dir()` stays
+  Kotlin-only). Contract in `KotlinSurface.kt`'s
   KDoc. `Status: implemented` on desktop — `PM/desktopTest/.../pythonx/MemberResolverTest.kt`,
   `ksp-fixtures/compose/.../MemberResolverComposeTest.kt`.
   A resolver (or anything else) reads a member's declaration rows from the receiver type alone with
@@ -289,6 +292,49 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   return type's Kotlin name; a return type with no generated proxy stays a generic owner object. The
   result's ownership is the same as for any owned result. `Status: implemented` —
   `ksp-fixtures/app/.../KspClassResultProxyTest.kt` (red until #94 lands).
+- **U-12** Pythonic names (#131). On a Kotlin-named module every declaration, proxy member and keyword
+  parameter is reachable by its Kotlin name **and** by its Pythonic name; the Kotlin name keeps
+  working. The namespace is never converted: `androidx.compose.material3` is a module under exactly
+  that name, and no package segment gets an alias (AGENTS §12.1, §12.2).
+  - **Rule** (pythonx-compose 0.1.0a1's `_reexport.py`, character for character; `python_multiplatform.
+    python_name`/`snake_case`): a name starting upper-case is unchanged - types, objects, composables,
+    PascalCase constants (`Checkbox`, `Modifier`, `Alignment.End`). Any other name is snake_case, a run
+    of capitals counting as one word (`rememberTextFieldState` → `remember_text_field_state`,
+    `toURLString` → `to_url_string`, `zIndex` → `z_index`). An explicit overload key converts its base
+    and keeps its `__Types` suffix (`paddingFromBaseline__TextUnit` → `padding_from_baseline__TextUnit`).
+    A keyword is `snake_case` of its Kotlin parameter name (`onCheckedChange=` → `on_checked_change=`).
+  - **Scope.** Module functions, overload base names, explicit overload keys, lower-case-first module
+    constants, functions and constants of a Kotlin `object` (a module here: `Arrangement.spacedBy` →
+    `Arrangement.spaced_by`), extension methods and properties on a proxy (read and write:
+    `state.selected_index = 2` writes `selectedIndex`), and the keyword parameters of every function,
+    method and constructor-shaped function (`TextFieldState(initial_text=...)`). Served by the binding
+    layer (`PythonxAdapter`) for names and keywords, and by the proxy layer (`PythonProxySource`) alone
+    for module names and keywords of what it renders. Not converted: classes rendered by KSP
+    (`PythonProxySource.renderClass`), whose constructors and methods are positional and whose members
+    keep their Kotlin names.
+  - **Collisions.** An alias is served only when it is unambiguous in its namespace - one module (its
+    bound names and child packages), one proxy type (its members and every supertype's), one
+    declaration's parameters. An alias that is already a Kotlin name there belongs to that Kotlin name
+    (`foo_bar` is the Kotlin `foo_bar`, never `fooBar`); an alias two Kotlin names map to (`toURL`,
+    `toUrl` → `to_url`) is not served at all, and both stay reachable by their Kotlin names. Decided
+    from the table, independent of order. Writing both spellings of one parameter is "two values".
+  - **Listing.** `dir()` of a module and of a proxy lists Kotlin names only, so each declaration is
+    listed once; an alias is resolved on a miss and never written onto a proxy class. A layer that
+    converts `dir()` by the same rule (pythonx-compose 0.1.0a1's `_name_table`) therefore sees no
+    collision.
+  - **Metadata.** `inspect.signature` shows each parameter under its Pythonic keyword (the Kotlin name
+    where no alias is served) - it is the call surface Python tools read; `describe()` keeps the Kotlin
+    declaration's names in `name` and adds the Pythonic keyword as `python_name`;
+    `describe(module, alias)` and `describe_member(type, alias)` describe the Kotlin declaration the
+    alias is served for.
+  - **Stubs** (B-7) carry the same names.
+  `Status: implemented` on desktop (tests written first, not yet run at the time of writing) -
+  `PM/commonTest/.../pythonx/PythonicNameTest.kt`,
+  `PythonxAdapterTest.kt` (`theNameRuleConvertsKotlinToPythonAndEitherSpellingReachesOneDeclaration`,
+  `everyBoundNameSurvivesTheRoundTripThroughItsPythonicName`), `PM/desktopTest/.../pythonx/KotlinNamedSurfaceTest.kt`,
+  `PythonxComposeCompatibilityTest.kt`, `MemberResolverTest.kt`, and the Compose render tests written
+  with Pythonic names (`ksp-fixtures/compose/.../M3ProofRenderTest.kt`, `CallbackDrivenRenderTest.kt`,
+  `TextFieldStateRenderTest.kt`).
 
 ## 6. Binding prebuilt libraries (Gradle plugin)
 
@@ -346,13 +392,17 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `Status: implemented` on desktop — `ksp-fixtures/compose/.../PythonContentRenderTest.kt`; the module
   compiles for Android, nothing runs there yet.
 - **B-7** The plugin generates `.pyi` stubs for the Kotlin-named modules only, under Kotlin names
-  (keyword parameters by Kotlin name, `= ...` for a Kotlin default, receiver positional-only). Types are
+  plus their U-12 Pythonic aliases (`fill_max_width = fillMaxWidth` beside each module `def`, a second
+  `ClassVar` or `@property` on a receiver's class, a second member of a callable module), parameters
+  written under the keyword `inspect.signature` shows (the Pythonic one; a stub can name a parameter
+  once, so a Kotlin keyword type-checks as an error although it runs), `= ...` for a Kotlin default,
+  receiver positional-only; a class module folded for a case-insensitive filesystem (#44) carries no
+  aliases. Types are
   the declared Kotlin types: one stub class per bound type in the module of its own package, `Dp | float`
   for a value class bound as its primitive, `Callable[...]` for a function type, `| None` for a nullable;
   an extension function is also a callable attribute of its receiver's class; an overload set is
   `@overload`ed under its base name in table-key order; a required parameter after a defaulted one is
-  keyword-only like `inspect.signature`. It emits nothing under `pythonx` and renames nothing; a
-  Pythonic stub product belongs to pythonx-compose. `Status: partial` — `GP/stubs/PyiRenderingTest.kt`,
+  keyword-only like `inspect.signature`. It emits nothing under `pythonx` and converts no namespace. `Status: partial` - `GP/stubs/PyiRenderingTest.kt`,
   `GP/stubs/TypedStubTest.kt`, `GP/stubs/KotlinNamesOnlyStubTest.kt`,
   `ksp-fixtures/artifact/.../WalkedArtifactStubTest.kt`, `.../StubSignatureAgreesWithRuntimeTest.kt`,
   `GP/stubs/CompanionFactoryStubTest.kt` (#78: a name that is both a function and a Kotlin-named
@@ -520,8 +570,11 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 Findings where current behaviour is not covered by, or appears to conflict with, `INTENT.md`.
 Unless marked resolved, nothing here was changed; each needs the maintainer's call.
 
-Items 1–3 were resolved by removing the renaming (2026-10-02): stubs and runtime use Kotlin names
-only, and the binder no longer creates a `pythonx` module (U-8, B-7).
+Items 1–2 were resolved on 2026-10-02: stubs no longer turn `androidx.*` into `pythonx.*`, and the
+binder no longer creates a `pythonx` module (U-8, B-7). Item 3 (member names in snake_case) was
+answered by the maintainer the other way: converting member and parameter names is python-multiplatform's
+own feature, and only namespaces are never converted. It was removed with items 1–2 by mistake and
+restored by #131 (U-12).
 
 4. **`pythonx` adapter machinery lives in this repository** (`PM/commonMain/.../ffi/pythonx/`). INTENT
    §2.3 places `pythonx` in pythonx-compose. Whether the generic adapter belongs here (as a service
