@@ -646,7 +646,7 @@ def test_scalar_into_an_obj_slot_without_box_is_rejected():
 
 
 def test_obj_from_a_node_that_does_not_create_a_reference_is_rejected():
-    assert_rejected(OWNERSHIP, fn(returns=OBJ, body=[Return(Const(OBJ, None))]))
+    # Const(OBJ, None) creates a reference since N-11 (`return None`); see test_verify_classes.py.
     assert_rejected(OWNERSHIP, fn(params=[Param("o", OBJ)], returns=OBJ,
                                   body=[Return(UnaryOp(OBJ, UnaryOpKind.NEG, lo("o")))]))
     assert_rejected(OWNERSHIP, fn(params=[ArrayParam("a", F64A, stored=False)], returns=OBJ,
