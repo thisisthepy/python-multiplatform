@@ -389,6 +389,6 @@ are done on desktop; the other platforms are 16.7. The production-bundler questi
   pythonx-compose (SPEC "Outside intent" item 4). It no longer synthesises a `pythonx` module
   (it installs `python_multiplatform.binding`); whether it stays here as a service is unstated.
 - **17.4 The committed CPython 3.13 trees, decision.** `python-multiplatform/src/nativeInterop/cinterop/lib`
-  (15 555 tracked files, Android/desktop/iOS) and `binary/` (3.13.0 archives) are read only by the
-  `-PpythonVersion=3.13.0` desktop branch; the Android 3.13 stdlib trees by nothing. INTENT §3 says the
+  (15 555 tracked files, Android/desktop/iOS) is read only by the
+  `-PpythonVersion=3.13.0` desktop branch (`binary/`, unreferenced 3.13.0 archives, was removed on 2026-10-04); the Android 3.13 stdlib trees by nothing. INTENT §3 says the
   interpreter is not vendored. Removing them is a repository-size decision (`ecosystem.md` §5).

@@ -272,10 +272,8 @@ still carry CPython 3.13 and are not read by the default build. `python-multipla
 is a vendored header tree whose `PY_VERSION` reads `"3.13.0+"`, `git log` shows it landed with
 `b184cba5` (pre-dates `pythonVersion` becoming a Gradle property) and `build.gradle.kts` never
 references `nativeInterop/cinterop/include` at all; cinterop reads headers from the version-keyed
-extraction tree instead (table above). `binary/` holds five committed CPython 3.13.0 archives from
-`python-build-standalone` release `20241008` (`binary/download.md`); they are consumed only by the
-special-cased branch `if (configuredPythonVersion == "3.13.0" && !pythonFreeThreaded)` in the
-`desktopJar` task (`build.gradle.kts:1049`), i.e. only if a consumer explicitly builds with
+extraction tree instead (table above). `binary/`, which held five unreferenced CPython 3.13.0 archives, was removed on 2026-10-04. The
+`-PpythonVersion=3.13.0` branch of the `desktopJar` task reads the vendored tree above, only if a consumer explicitly builds with
 `-PpythonVersion=3.13.0`. That legacy path has no `Py_LIMITED_API`/header dependency either (desktop
 never compiles against headers), so even under `-PpythonVersion=3.13.0` there is no header/runtime
 split, but `python-checksums.properties` has **no 3.13.0 entries for Android or iOS**, so that flag
