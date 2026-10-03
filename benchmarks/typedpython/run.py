@@ -198,6 +198,62 @@ def measure(args: argparse.Namespace) -> int:
     return 0
 
 
+def interleaved(args: argparse.Namespace) -> int:
+    """CPython vs TypedPython @compiled, alternated A/B in the same time window (leader decision,
+    2026-10-03): when the machine is never quiet, load hits both sides of each pair alike, so the
+    per-pair ratio is stable even though absolute times are not. Reports the median ratio, never
+    absolute times as the result, with the load average recorded at every pair."""
+    if not args.typedpython:
+        print("interleaved needs --typedpython")
+        return 2
+    compiled = build_compiled(Path(args.typedpython), args.typedpython_python)
+    results: dict[str, dict[str, object]] = {}
+    for name, spec in BENCHMARKS.items():
+        entry = compiled.get(name)
+        if not isinstance(entry, tuple):
+            results[name] = {"skipped": entry}
+            continue
+        size = args.size.get(name, spec[5])
+        cmds = commands(name, size, args.python, False, compiled)
+        a_cmd, b_cmd = cmds["CPython"], cmds["TypedPython @compiled"]
+        pairs = []
+        for i in range(args.pairs):
+            order = (a_cmd, b_cmd) if i % 2 == 0 else (b_cmd, a_cmd)   # alternate which runs first
+            load = os.getloadavg()
+            (t1, o1), (t2, o2) = run_once(order[0]), run_once(order[1])
+            t_a, o_a, t_b, o_b = (t1, o1, t2, o2) if order[0] is a_cmd else (t2, o2, t1, o1)
+            if o_a != o_b:
+                print(f"{name}: OUTPUTS DIFFER in pair {i}: {o_a!r} vs {o_b!r}")
+                return 1
+            pairs.append({"cpython_s": t_a, "compiled_s": t_b, "ratio": t_a / t_b, "load": load})
+        ratios = [p["ratio"] for p in pairs]
+        results[name] = {"size": size, "compiled_functions": entry[1], "pairs": pairs,
+                         "median_ratio": statistics.median(ratios), "min_ratio": min(ratios),
+                         "max_ratio": max(ratios)}
+        print(f"measured {name}", file=sys.stderr)
+
+    print()
+    print("| benchmark | size | speedup vs CPython (median of pairs) | range | load during pairs (1-min) |")
+    print("|---|---|---|---|---|")
+    for name, r in results.items():
+        if "skipped" in r:
+            print(f"| {name} | — | {r['skipped']} | | |")
+            continue
+        loads = [p["load"][0] for p in r["pairs"]]  # type: ignore[index]
+        print(f"| {name} | {r['size']} | {r['median_ratio']:.1f}x | {r['min_ratio']:.1f}–{r['max_ratio']:.1f}x "
+              f"| {min(loads):.1f}–{max(loads):.1f} |")
+    print(f"\n{args.pairs} A/B pairs per benchmark, order alternated; ratio = CPython time / compiled time.")
+    if args.write:
+        out_dir = ROOT / "results"
+        out_dir.mkdir(exist_ok=True)
+        path = out_dir / f"{datetime.date.today().isoformat()}-{socket.gethostname()}-interleaved.json"
+        path.write_text(json.dumps({"date": datetime.datetime.now().isoformat(timespec="seconds"),
+                                    "host": socket.gethostname(), "method": "interleaved A/B",
+                                    "pairs": args.pairs, "results": results}, indent=2) + "\n")
+        print(f"wrote {path}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -205,7 +261,12 @@ def main() -> int:
     v.add_argument("--python", default=sys.executable)
     m = sub.add_parser("measure")
     m.add_argument("--python", default=sys.executable)
-    for p in (v, m):
+    ab = sub.add_parser("interleaved", help="CPython vs @compiled alternated A/B; reports median ratios")
+    ab.add_argument("--python", default=sys.executable)
+    ab.add_argument("--pairs", type=int, default=11)
+    ab.add_argument("--write", action="store_true")
+    ab.add_argument("--size", action="append", default=[], metavar="NAME=N")
+    for p in (v, m, ab):
         p.add_argument("--typedpython", metavar="DIR",
                        help="directory holding the typedpython package; enables the @compiled column")
         p.add_argument("--typedpython-python", default=sys.executable,
@@ -216,8 +277,10 @@ def main() -> int:
     m.add_argument("--size", action="append", default=[], metavar="NAME=N",
                    help="override a benchmark size (for runner smoke tests only)")
     args = parser.parse_args()
-    if args.cmd == "measure":
+    if args.cmd in ("measure", "interleaved"):
         args.size = dict(s.split("=", 1) for s in args.size)
+    if args.cmd == "interleaved":
+        return interleaved(args)
     return verify(args) if args.cmd == "verify" else measure(args)
 
 
