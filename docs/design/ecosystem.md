@@ -853,3 +853,24 @@ each repository's block). Two kinds of mismatch, kept separate rather than merge
 It describes five repositories and sits in one of them, because that is the only one with an
 active working copy and a documentation habit. If the organisation grows a place for cross-repo
 documents, this belongs there, and what stays here is the last section's first entry.
+
+## 7. Priorities and the pythonx family (decided 2026-10-04)
+
+The maintainer focuses on darkpyonix for a while; thisisthepy proceeds **linearly** in this order:
+torchnative, then python-multiplatform (TypedPython included), then pypackpack and toolchain-lite,
+then pythonx-compose, then the other pythonx packages and Gemstone. Each repository first records its
+decisions as issues, finishes document updates and folder cleanup, and lists what is left until its
+next release; lower-priority repositories then hold new heavy work until their turn.
+
+| Package | Decision | Where it is recorded |
+|---|---|---|
+| `pythonx-concurrent` | Structured concurrency bridging asyncio and Kotlin coroutines. Spec written in detail, implementation deferred. Python coroutines may run on JVM virtual threads and on any Kotlin dispatcher by being stepped from Kotlin ("Kotlin mode"); blocking-style Python on virtual threads is not offered. | its `docs/SPEC.md` (§7); binder requests #164, #161, #162 |
+| `pythonx-platform` | Device features from Python (plyer-like): camera, sensors, notifications, file picker, permissions. The Kotlin implementations belong in `compose-multiplatform-core-extended` as multiplatform `androidx.*` libraries; Python reaches them through the binder's names (snake_case aliases included); `pythonx-platform` is at most a thin Pythonic layer. Repository and spec to be created in its turn. | OS notifications: compose-multiplatform-core-extended#13 |
+| `pythonx-game` | Direction open. Recommended, not measured: Filament as the 3D renderer (scene level, the height of three.js, PBR and glTF, Vulkan/Metal/GL, Android Kotlin API, Apache-2.0) with a Python declarative layer on top; Compose's Skia canvas for 2D; wgpu only where custom GPU compute is needed (its per-call validation costs CPU, and it is a GPU API, not a scene engine). | this section |
+| `pythonx-native` | Not a repository. Building Rust crates as Python extension modules for the app is pypackpack's Cargo backend; Kotlin reaches the crate through python-multiplatform. | pypackpack#65 |
+
+TypedPython decisions of the same day: GC collection timing is outside the CPython-equivalence
+guarantee (option (b), SPEC N-12); the gap-closing items of the Cython/numba/LPython comparison are
+approved (#147 to #151, #143); open decisions are #152 (yielding the GIL in array loops), #153
+(fastmath opt-in) and whether the first usable release may compile on desktop only. Free-threaded
+readiness across repositories is #158 (GIL stays the default until decided), with #159 to #163.
