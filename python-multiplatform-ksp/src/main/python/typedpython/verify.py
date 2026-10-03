@@ -33,7 +33,60 @@ Rules (the `rule` of a Diagnostic):
                               operand that is itself in a condition): its rich-comparison result
                               need not be a bool, so only its truth value may be used
   verify/structure            break/continue outside a loop, the ForRange var assigned in its body,
-                              a zero or non-constant step, duplicate names, bad declarations
+                              a zero or non-constant step, duplicate names, bad declarations, an
+                              entry global that collides with a parameter/local/other entry global or
+                              is assigned in the body
+  verify/proven-overflow      `proven` is set on an op the verifier cannot prove stays inside i64 (or
+                              on a node `proven` does not apply to, or it is not a bool)
+  verify/redo                 `Call.redo` where it is not legal (see below)
+  verify/entry-global-open    a function with entry_globals is not closed
+
+Proven i64 operations. The verifier never trusts `BinOp.proven` / `UnaryOp.proven`: for every I64
+expression it computes an interval [lo, hi] (exact Python ints) and accepts `proven=True` only on an
+I64 ADD/SUB/MUL (BinOp) or NEG (UnaryOp) whose exact result interval lies inside [-2**63, 2**63-1];
+anything else (a different op, a non-I64 node, a result that may leave i64, a non-bool flag) is
+rejected, and so is the whole function. A proven op is not a deopting node (an impure function may
+contain it; a pure one does not count it toward `may_deopt`); every unproven I64 ADD/SUB/MUL/NEG
+still deopts. The interval rules, exactly:
+
+  Const v                      [v, v]
+  Local, a ForRange var inside its own loop body:
+      step > 0                 [lo(start), max(lo(start), hi(stop) - 1)]
+      step < 0                 [min(hi(start), lo(stop) + 1), hi(start)]
+                               (the bounds are the intervals of the start/stop expressions, both
+                               evaluated before the loop; then intersected with the i64 range)
+  Len(array)                   [0, 2**62]
+  ADD / SUB / MUL              interval arithmetic on the operand intervals (for MUL the min/max of
+                               the four endpoint products); a proven op must fit i64 exactly, an
+                               unproven one is clamped to i64 (a result outside it deopts, so only
+                               in-range values flow on)
+  NEG / POS                    [-hi, -lo] / [lo, hi]
+  everything else              the full i64 range: I64 params and entry globals, every local that is
+                               not the ForRange var of an enclosing loop (the verifier does no flow
+                               analysis, so a local assigned a constant is still "any i64"), a loop
+                               var after its loop, Index elements, Unbox, Call results, FLOORDIV,
+                               MOD, TRUEDIV
+
+What this cannot prove: anything that needs knowing a value through assignments (accumulators,
+`x = 1; x + 1`), relations between variables (`i < n` does not bound `i + n`), bounds that come from
+guards or conditions (`if n < 100`), values through array elements, calls or Unbox, the result of
+`//` and `%` (even by a constant), a loop var after the loop, or `range` bounds that are themselves
+full-range (`range(n)` bounds the var only by i64). A function needing such a proof keeps its
+checked, deopting ops (and is then legal only if pure).
+
+Call.redo. Legal only if the caller is impure, the callee is pure and may_deopt, and the callee
+returns F64, BOOL or NONE (`verify/redo` otherwise). A redo call is not a deopting node in the
+caller: the callee alone is redone, unobservably, since it is pure.
+
+Function.entry_globals. Scalar `Param`s (I64/F64/BOOL), read once at entry as part of the guards;
+assigned at entry for definite assignment; the body reads them as `Local(name)` of that type and may
+not assign them; their names collide with no parameter, local or other entry global. The function
+must be *closed*: no GetAttr, CallObject, Truth, CompareObj, ObjToFloat or OBJ BinOp, and Calls only
+to closed functions (a fixpoint over the call graph), else `verify/entry-global-open`. Beyond that
+rule (conservative, not in ir.py): a Call of a function that has entry globals can fail the callee's
+entry guard in the middle of the caller, which is a deopt there unless the caller is itself guarded
+the same way (it lists the same name and type as an entry global, and being closed cannot see it
+rebound) or the call is a legal `redo`.
 """
 from __future__ import annotations
 
@@ -63,6 +116,9 @@ UNVERIFIED = "verify/call-unverified"
 RECURSION = "verify/recursion"
 STRUCTURE = "verify/structure"
 CONDITION_ONLY = "verify/condition-only"
+PROVEN = "verify/proven-overflow"
+REDO = "verify/redo"
+ENTRY_OPEN = "verify/entry-global-open"
 
 
 @dataclass(frozen=True)
@@ -90,6 +146,9 @@ _MATH_ARITY = {MathFunc.ATAN2: 2, MathFunc.HYPOT: 2}            # every other Ma
 _I64_DEOPT_OPS = frozenset({BinOpKind.ADD, BinOpKind.SUB, BinOpKind.MUL, BinOpKind.FLOORDIV,
                             BinOpKind.MOD, BinOpKind.TRUEDIV})
 _I64_MIN, _I64_MAX = -2 ** 63, 2 ** 63 - 1
+_FULL = (_I64_MIN, _I64_MAX)
+_LEN_MAX = 2 ** 62
+_PROVABLE_OPS = frozenset({BinOpKind.ADD, BinOpKind.SUB, BinOpKind.MUL})
 
 # Definite assignment uses `None` for "unreachable" (bottom: every name counts as assigned).
 _State = frozenset[str] | None
@@ -107,6 +166,7 @@ class _Loop:
     def __init__(self, var: str | None, bounds_array: str | None):
         self.var = var                      # ForRange var (None for While)
         self.bounds_array = bounds_array    # array whose indices by `var` are in bounds
+        self.interval = _FULL               # the values `var` takes inside the body
         self.breaks: list[_State] = []
 
 
@@ -125,6 +185,8 @@ class _Checker:
         self.loops: list[_Loop] = []
         self.scalars: dict[str, Type] = {}   # name -> type of every scalar/OBJ variable
         self.arrays: dict[str, Type] = {}    # name -> array type of every ArrayParam
+        self.entry: dict[str, Type] = {}     # name -> type of every entry global
+        self.opens: list[str] = []           # reasons the function is not closed
 
     def error(self, rule: str, message: str) -> None:
         d = Diagnostic(self.fn.name, rule, message, self.fn.source_line)
@@ -156,11 +218,35 @@ class _Checker:
             if p.name in params:
                 self.error(STRUCTURE, f"parameter '{p.name}' appears twice")
             params.add(p.name)
+        eg = fn.entry_globals
+        if not isinstance(eg, tuple):
+            self.error(STRUCTURE, "entry_globals is not a tuple")
+            eg = ()
+        for p in eg:
+            if type(p) is ArrayParam:
+                self.error(TYPE, f"entry global '{p.name}' is an array")
+                continue
+            if type(p) is not Param:
+                self.error(UNKNOWN, f"entry global {p!r} is not an ir Param")
+                continue
+            if p.type not in ir.SCALARS:
+                self.error(TYPE, f"entry global '{p.name}' has type {p.type}; only i64, f64 and "
+                                 f"bool globals can be read at entry")
+                continue
+            if p.name in params or p.name in self.entry:
+                self.error(STRUCTURE, f"entry global '{p.name}' collides with a parameter or "
+                                      f"another entry global")
+                continue
+            self.entry[p.name] = p.type
+            self.scalars[p.name] = p.type
+        params |= set(self.entry)
         if not isinstance(fn.locals, dict):
             self.error(STRUCTURE, "locals is not a dict")
             return frozenset(params)
         for name, t in fn.locals.items():
-            if name in self.arrays:
+            if name in self.entry:
+                self.error(STRUCTURE, f"local '{name}' collides with an entry global")
+            elif name in self.arrays:
                 self.error(ARRAY_USE, f"local '{name}' shadows array parameter '{name}'")
             elif t not in _VALUE_TYPES:
                 self.error(TYPE, f"local '{name}' has type {t}")
@@ -242,12 +328,56 @@ class _Checker:
             self.error(DA, f"local '{name}' may be read before it is assigned")
         return e
 
+    def interval(self, e: ir.Expr) -> tuple[int, int]:
+        """The interval rules in the module docstring: [lo, hi] bounding every value `e` (an I64
+        expression, already checked) can take when it completes without deopting."""
+        cls = type(e)
+        if getattr(e, "type", None) is not Type.I64:
+            return _FULL
+        if cls is Const:
+            return (e.value, e.value) if type(e.value) is int else _FULL
+        if cls is Local:
+            for loop in reversed(self.loops):
+                if loop.var == e.name:
+                    return loop.interval
+            return _FULL
+        if cls is Len:
+            return (0, _LEN_MAX)
+        if cls is BinOp and e.op in _PROVABLE_OPS:
+            lo, hi = _exact(e.op, self.interval(e.left), self.interval(e.right))
+            return (max(lo, _I64_MIN), min(hi, _I64_MAX))
+        if cls is UnaryOp and e.op in (UnaryOpKind.NEG, UnaryOpKind.POS):
+            lo, hi = self.interval(e.operand)
+            lo, hi = (-hi, -lo) if e.op is UnaryOpKind.NEG else (lo, hi)
+            return (max(lo, _I64_MIN), min(hi, _I64_MAX))
+        return _FULL
+
+    def check_proven(self, shape_ok: bool, interval: tuple[int, int], what: str) -> bool:
+        """`proven=True` (already known to be a bool) is accepted only if re-proved. Returns
+        whether the node counts as non-deopting."""
+        if not shape_ok:
+            self.error(PROVEN, f"`proven` is set on {what}, which has no i64 overflow to prove")
+        elif not (_I64_MIN <= interval[0] and interval[1] <= _I64_MAX):
+            self.error(PROVEN, f"`proven` is set on {what} but its result interval "
+                               f"[{interval[0]}, {interval[1]}] is not inside i64")
+        else:
+            return True
+        return False
+
     def e_BinOp(self, e: BinOp, state: _State) -> ir.Expr:
         if type(e.op) is not BinOpKind:
             self.error(UNKNOWN, f"BinOp op {e.op!r} is not a BinOpKind")
             return e
         left, right = self.expr(e.left, state), self.expr(e.right, state)
         lt, rt = getattr(left, "type", None), getattr(right, "type", None)
+        proven = False
+        if type(e.proven) is not bool:
+            self.error(TYPE, f"BinOp `proven` {e.proven!r} is not a bool")
+        elif e.proven:
+            shape = (e.type is Type.I64 and lt is Type.I64 and rt is Type.I64
+                     and e.op in _PROVABLE_OPS)
+            exact = _exact(e.op, self.interval(left), self.interval(right)) if shape else _FULL
+            proven = self.check_proven(shape, exact, f"{e.type.value} {e.op.value}")
         if lt not in (Type.I64, Type.F64, Type.OBJ):
             self.error(TYPE if lt is not Type.OBJ else OWNERSHIP,
                        f"BinOp {e.op.value} on {getattr(lt, 'value', lt)} operands")
@@ -258,10 +388,11 @@ class _Checker:
             if e.type is not want:
                 self.error(TYPE, f"{lt.value} {e.op.value} {rt.value} is {want.value}, node says "
                                  f"{e.type.value}")
-            if lt is Type.I64 and e.op in _I64_DEOPT_OPS:
+            if lt is Type.I64 and e.op in _I64_DEOPT_OPS and not proven:
                 self.can_deopt = True
             if lt is Type.OBJ:
                 self.effects.append(f"OBJ {e.op.value} (runs user methods)")
+                self.opens.append(f"OBJ {e.op.value} (runs user methods)")
         return dataclasses.replace(e, left=left, right=right)
 
     def e_UnaryOp(self, e: UnaryOp, state: _State) -> ir.Expr:
@@ -270,6 +401,14 @@ class _Checker:
             return e
         operand = self.expr(e.operand, state)
         ot = getattr(operand, "type", None)
+        proven = False
+        if type(e.proven) is not bool:
+            self.error(TYPE, f"UnaryOp `proven` {e.proven!r} is not a bool")
+        elif e.proven:
+            shape = e.type is Type.I64 and ot is Type.I64 and e.op is UnaryOpKind.NEG
+            lo, hi = self.interval(operand) if shape else _FULL
+            proven = self.check_proven(shape, (-hi, -lo) if shape else _FULL,
+                                       f"unary {e.op.value} of {getattr(ot, 'value', ot)}")
         if e.op is UnaryOpKind.NOT:
             self.slot(operand, Type.BOOL, "operand of not")
             if e.type is not Type.BOOL:
@@ -282,7 +421,7 @@ class _Checker:
             elif e.type is not ot:
                 self.error(TYPE, f"unary {e.op.value} of {ot.value} is {ot.value}, node says "
                                  f"{e.type.value}")
-            elif ot is Type.I64 and e.op is UnaryOpKind.NEG:
+            elif ot is Type.I64 and e.op is UnaryOpKind.NEG and not proven:
                 self.can_deopt = True
         return dataclasses.replace(e, operand=operand)
 
@@ -387,11 +526,38 @@ class _Checker:
         if e.type is not callee.returns:
             self.error(TYPE, f"'{e.function}' returns {callee.returns.value}, node says "
                              f"{e.type.value}")
-        if callee.may_deopt is True:
+        redo = False
+        if type(e.redo) is not bool:
+            self.error(TYPE, f"Call `redo` {e.redo!r} is not a bool")
+        elif e.redo:
+            if self.fn.pure is True:
+                self.error(REDO, f"redo call of '{e.function}' in a pure function (a pure caller "
+                                 f"propagates the deopt instead)")
+            elif callee.pure is not True or callee.may_deopt is not True:
+                self.error(REDO, f"redo call of '{e.function}', which is not a pure may_deopt "
+                                 f"function")
+            elif callee.returns not in (Type.F64, Type.BOOL, Type.NONE):
+                self.error(REDO, f"redo call of '{e.function}' returning "
+                                 f"{getattr(callee.returns, 'value', callee.returns)}: only f64, "
+                                 f"bool and none results are exactly reproducible")
+            else:
+                redo = True
+        if callee.may_deopt is True and not redo:
+            self.can_deopt = True
+        if not redo and not self.covers(callee):
             self.can_deopt = True
         if callee.pure is not True:
             self.effects.append(f"calls impure '{e.function}'")
         return dataclasses.replace(e, args=args)
+
+    def covers(self, callee: Function) -> bool:
+        """Every entry global of `callee` is also an entry global of this function with the same
+        type: the callee's entry guard cannot fail mid-caller (this function, being closed,
+        cannot see the global rebound)."""
+        eg = callee.entry_globals
+        if not isinstance(eg, tuple):
+            return False
+        return all(type(p) is Param and self.entry.get(p.name) is p.type for p in eg)
 
     def obj_operand(self, e: object, state: _State, what: str) -> ir.Expr:
         x = self.expr(e, state)
@@ -414,6 +580,7 @@ class _Checker:
             self.error(TYPE, f"GetAttr name {e.name!r} is not a str")
         self.result(e, Type.OBJ)
         self.effects.append(f"GetAttr .{e.name} (a property may have effects)")
+        self.opens.append(f"GetAttr .{e.name}")
         return dataclasses.replace(e, obj=obj)
 
     def e_CallObject(self, e: CallObject, state: _State) -> ir.Expr:
@@ -429,12 +596,14 @@ class _Checker:
                              f"argument(s) (they must name distinct trailing arguments)")
         self.result(e, Type.OBJ)
         self.effects.append("CallObject")
+        self.opens.append("CallObject")
         return dataclasses.replace(e, callee=callee, args=args)
 
     def e_Truth(self, e: Truth, state: _State) -> ir.Expr:
         operand = self.obj_operand(e.operand, state, "operand of Truth")
         self.result(e, Type.BOOL)
         self.effects.append("Truth (runs __bool__/__len__)")
+        self.opens.append("Truth")
         return dataclasses.replace(e, operand=operand)
 
     def e_CompareObj(self, e: CompareObj, state: _State) -> ir.Expr:
@@ -450,12 +619,14 @@ class _Checker:
                 self.error(TYPE, f"CompareObj operand of type {getattr(t, 'value', t)}")
         self.result(e, Type.BOOL)
         self.effects.append("CompareObj (runs rich comparison)")
+        self.opens.append("CompareObj")
         return dataclasses.replace(e, left=left, right=right)
 
     def e_ObjToFloat(self, e: ObjToFloat, state: _State) -> ir.Expr:
         operand = self.obj_operand(e.operand, state, "operand of ObjToFloat")
         self.result(e, Type.F64)
         self.effects.append("ObjToFloat (runs __float__/__index__)")
+        self.opens.append("ObjToFloat")
         return dataclasses.replace(e, operand=operand)
 
     def array(self, name: str, node: str) -> Type | None:
@@ -525,6 +696,8 @@ class _Checker:
             self.slot(value, self.scalars[target], f"assignment to '{target}'")
             if getattr(value, "type", None) is Type.NONE:
                 self.error(TYPE, f"None assigned to '{target}'")
+        if target in self.entry:
+            self.error(STRUCTURE, f"entry global '{target}' is assigned in the body")
         for loop in self.loops:
             if loop.var == target:
                 self.error(STRUCTURE, f"loop variable '{target}' is assigned in its loop body")
@@ -582,6 +755,8 @@ class _Checker:
             self.error(ARRAY_USE, f"loop variable '{var}' is an array parameter")
         elif self.scalars.get(var) is not Type.I64:
             self.error(TYPE, f"loop variable '{var}' must be a declared i64 local")
+        if var in self.entry:
+            self.error(STRUCTURE, f"entry global '{var}' is assigned by the loop")
         for outer in self.loops:
             if outer.var == var:
                 self.error(STRUCTURE, f"loop variable '{var}' is assigned in its loop body "
@@ -592,6 +767,16 @@ class _Checker:
                 and stop.array in self.arrays):
             bounds = stop.array
         loop = _Loop(var, bounds)
+        if (step_ok and getattr(start, "type", None) is Type.I64
+                and getattr(stop, "type", None) is Type.I64):
+            (slo, shi), (elo, ehi) = self.interval(start), self.interval(stop)
+            if step.value > 0:
+                lo = slo
+                hi = max(lo, ehi - 1)
+            else:
+                hi = shi
+                lo = min(hi, elo + 1)
+            loop.interval = (max(lo, _I64_MIN), min(hi, _I64_MAX))
         self.loops.append(loop)
         body, _ = self.block(s.body, None if state is None else state | {var})
         self.loops.pop()
@@ -651,6 +836,16 @@ class _Checker:
                                          f"{'stores' if p.name in self.stored else 'never stores'}"
                                          f" into it")
         return dataclasses.replace(fn, body=body)
+
+
+def _exact(op: BinOpKind, a: tuple[int, int], b: tuple[int, int]) -> tuple[int, int]:
+    """The exact (unbounded) result interval of ADD/SUB/MUL on operand intervals."""
+    if op is BinOpKind.ADD:
+        return a[0] + b[0], a[1] + b[1]
+    if op is BinOpKind.SUB:
+        return a[0] - b[1], a[1] - b[0]
+    products = (a[0] * b[0], a[0] * b[1], a[1] * b[0], a[1] * b[1])
+    return min(products), max(products)
 
 
 def _cycles(graph: dict[str, set[str]]) -> set[str]:
@@ -721,6 +916,7 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
 
     checked: dict[str, Function] = {}
     callees: dict[str, set[str]] = {}
+    open_why: dict[str, str] = {}          # a function that runs user code -> why
     for name, g in sigs.items():
         c = _Checker(g, sigs)
         rebuilt = c.run()
@@ -728,6 +924,23 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
             reject(d.function, d.source_line, d.rule, d.message)
         checked[name] = rebuilt
         callees[name] = c.callees
+        if c.opens:
+            open_why[name] = c.opens[0]
+
+    # Closedness (entry_globals): a fixpoint over the call graph.
+    changed = True
+    while changed:
+        changed = False
+        for name, cs in callees.items():
+            if name not in open_why:
+                bad = sorted(c for c in cs if c in open_why)
+                if bad:
+                    open_why[name] = f"calls '{bad[0]}', which runs user code ({open_why[bad[0]]})"
+                    changed = True
+    for name, g in sigs.items():
+        if name in open_why and isinstance(g.entry_globals, tuple) and g.entry_globals:
+            reject(name, g.source_line, ENTRY_OPEN,
+                   f"has entry globals but is not closed: {open_why[name]}")
 
     for name in sorted(_cycles(callees)):
         reject(name, sigs[name].source_line, RECURSION,
