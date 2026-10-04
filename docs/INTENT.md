@@ -40,9 +40,23 @@ CPython interpreter inside a Kotlin Multiplatform application so that:
    is **checked** by default; **compiling** it to native code is opt-in. The compiled code still runs on
    the embedded CPython, as an extension module (`docs/design/typedpython.md`).
 
-   > The maintainer also asked to *explore* GPU kernels written in Python without a separate language
-   > ("GPU 관련 최적화까지도 별도 언어 없이 지원할 방안을 모색해보자"). That is an exploration, not yet
-   > a commitment; it is recorded in the design note only.
+5. **High-performance kernels are written in Python too** (TypedPython tier 2). The maintainer first
+   asked to explore it ("GPU 관련 최적화까지도 별도 언어 없이 지원할 방안을 모색해보자") and on
+   2026-10-04 made it a commitment ("GPU 커널 등 탐색을 약속으로 올려"), so that TypedPython can stand
+   where Mojo stands without leaving Python syntax:
+
+   - **GPU kernels** are valid Python functions marked `@kernel`, compiled **ahead of time** for Vulkan
+     (Android, desktop), Metal (iOS, macOS), WebGPU (web) and CUDA (desktop). iOS forbids runtime code
+     generation, so nothing is compiled on the device.
+   - **CPU SIMD** is part of the `@compiled` tier: vectorised native code for NEON and AVX from the
+     same valid Python.
+   - A kernel still runs unmodified on plain CPython, which is how it is debugged and how its numbers
+     are checked.
+   - Kernels land in the existing ecosystem as torch ops through torchnative, not in a separate tensor
+     runtime.
+
+   The backend choice is in `docs/design/typedpython.md` §5; the evidence is in
+   `docs/investigations/typedpython-kernel-backend.md` and `typedpython-kernel-ir.md`.
 
 The CPython version moved on from 3.13 (the build pins 3.14.x today and offers opt-in free-threaded 3.14t builds
 on desktop only); the intent, embed **CPython itself**, not a re-implementation, is unchanged.
