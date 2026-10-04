@@ -351,7 +351,12 @@ IDE·타입 체커가 찾는 자리(pythonx-compose 배포본)에 설치돼야 �
 - 커널 안: 고정 dtype 스칼라(f32, f16, bf16, int8 포함), 버퍼·텐서 뷰, 산술, 제어 흐름, 배리어.
   객체 생성·힙 할당·예외·파이썬 호출은 없다. 위반은 등급 1 과 같은 게이트에서 컴파일 에러.
 - **커널 함수도 유효한 파이썬이다.** 타일 연산은 CPU 참조 구현을 가진 일반 파이썬 함수이고, 커널은
-  CPython 에서 그대로 실행되어 수치를 대조할 수 있다. TileLang · Triton 과 갈리는 지점이다.
+  CPython 에서 그대로 실행되어 수치를 대조할 수 있다. TileLang · Triton · JAX Pallas 와 갈리는 지점이다
+  (Pallas 는 CPU 에서 `interpret=True` 로만, JAX 위에서 돈다).
+- **참조 구현은 numpy 에 의존하지 않는다 (결정 2026-10-04).** 타일 연산의 CPU 참조는 순수 파이썬(표준
+  라이브러리의 `array`, `memoryview`, `struct`)으로 쓴다. 참조의 목적은 정답이지 속도가 아니다. 커널을
+  JAX · torch · numpy 없이 CPython 만으로 실행할 수 있다는 것이 Pallas 대비 차별점이고, 첫 조각의
+  시험으로 박는다 (§6 의 4).
 
 ### 5.3 CPU SIMD: `@compiled` 의 벡터화
 
@@ -377,6 +382,8 @@ Mojo 의 절반은 CPU SIMD 다. 등급 1 `@compiled` 의 C 백엔드(§4.3)가 
 - 채택하지 않는 것(참고 자료로만): TileLang/TVM (Vulkan 백엔드 없음, 커널이 일반 파이썬으로 실행되지
   않음), CubeCL (진입점이 Rust 매크로, JIT 전용), IREE (모델 단위 입력과 자체 출력 형식, SPIR-V 코드
   생성만 떼어 쓸 공식 경로 없음), xDSL (spirv 방언·SPIR-V/MSL/PTX 출력기 없음).
+- IREE 기각은 **커널 컴파일러로서의** 평가다. **모델 통째 배포** 관점에서는 JAX 가 StableHLO 를 내고
+  IREE 가 그것을 모바일로 AOT 컴파일하는 길이 경쟁자로 남는다 (§5.10).
 
 ### 5.5 출력기: 대상별로 교체 가능
 
@@ -390,6 +397,8 @@ Mojo 의 절반은 CPU SIMD 다. 등급 1 `@compiled` 의 C 백엔드(§4.3)가 
   Metal 4 텐서 연산(MSL 4 전용)에는 닿지 않는다.
 - **MSL 과 WGSL 출력기는 어느 IR 을 택해도 우리가 쓴다.** MLIR 상류에 두 대상이 없다.
 - SPIR-V 와 PTX 는 직접 내거나 MLIR 휠로 직렬화한다 (§5.4).
+- **커널 번들은 IR 버전과 출력기 버전을 기록한다.** 런타임은 맞지 않는 번들을 거부한다. `jax.export` 가
+  호환 창을 명시하는 것과 같은 자리다.
 
 ### 5.6 런타임과 착지점: torchnative
 
@@ -449,7 +458,48 @@ LLM 디코딩은 작은 연산이 많아 연산 사이의 디스패치와 메모
 `torch.compile` 이득의 대부분이 융합이다. §5.6 이 미룬 그래프 캡처 기반 융합(동적 shape, in-place KV
 갱신 문제)은 torchnative #68 에서 다룬다. 그전까지 모델 전체 수준의 속도 경쟁력은 제한된다.
 
-### 5.10 선례, Taichi
+### 5.10 JAX 와의 관계: 어디서 이기고, 무엇을 torch 에 맡기는가
+
+> **결정 (2026-10-04, 메인테이너):** 설계는 JAX 대비 장점이 분명해야 한다. **torch 가 JAX 만큼
+> 성능을 내는 부분만 torch 에 맡기고**, 그렇지 않은 부분은 목록으로 두어 따로 판단한다. 근거는
+> [`typedpython-vs-jax.md`](../investigations/typedpython-vs-jax.md).
+
+**포지셔닝.** "JAX 보다 낫다" 가 아니라 **"JAX 가 가지 않는 곳에서 이긴다"** 로 쓴다. 근거가 이 범위에서만
+선다.
+
+| 우리가 이기는 곳 | 근거 (조사 2026-10-04, 웹 요약 경유) |
+|---|---|
+| 모바일 GPU(Vulkan, Metal)가 1급 대상 | Pallas 의 GPU 하강은 Mosaic GPU(Hopper 이상)이고 Triton 백엔드는 deprecated, Vulkan/Metal 백엔드 없음. jax-metal 은 macOS 15.6 에서 실패하는 이슈가 열려 있다 |
+| 파이썬 의미 보존 | `jit` 은 트레이싱이라 부작용이 트레이스 때만 실행되고, 값 의존 분기는 에러, 배열은 불변, 범위 밖 인덱스는 clamp 된다. Pallas 커널은 JAX 없이 실행되지 않는다 |
+| 빌드 타임 타입 게이트 | jaxtyping 은 실행(트레이스) 시점 검사이고 정적 검사기에는 `Array` 로만 보인다. 단, 우리도 shape 오류는 정적으로 잡지 못한다 |
+| 생태계 착지 | transformers v5 가 TF 와 Flax 를 제거하고 PyTorch 만 남겼다. torch op 착지(§5.6)가 그 생태계에 붙는다 |
+
+**torch 에 맡기는 조건.** JAX 의 강점 중 우리가 직접 만들지 않는 것은 torch 가 맡는다. 다만 **torch 가
+JAX 와 같은 수준의 성능을 낸다는 근거가 있을 때만** 맡긴다고 확정하고, 근거가 없으면 아래 목록에 둔다.
+2026-10-04 현재 어느 항목도 측정 근거가 없으므로 **전부 "판단 대기"** 다.
+
+| 기능 | JAX | torch 대응 | 판단 |
+|---|---|---|---|
+| 전체 프로그램 융합 | XLA | 데스크톱 `torch.compile`(Inductor). 모바일은 불가, torchnative 그래프 캡처로 대체 예정(#68, §5.9) | 판단 대기. **모바일에서는 알려진 격차** |
+| 자동 미분 (`grad`) | 함수 변환, `jit` 과 합성 | `torch.autograd`, `torch.func.grad` | 판단 대기 (학습 성능 비교 없음. 온디바이스 목표상 추론이 우선) |
+| 벡터화 (`vmap`) | `jit` 안에서 융합까지 | `torch.func.vmap` | 판단 대기 (`vmap` + 컴파일 조합의 성능 비교 없음) |
+| 변환의 합성 (`jit`·`grad`·`vmap`) | 1급 | `torch.func` + `torch.compile` | 판단 대기 |
+| 샤딩, 다중 기기 | `shard_map`, pjit | DTensor, FSDP | 판단 대기 (온디바이스 목표 밖일 가능성) |
+| TPU · Hopper/Blackwell 커널 성숙도 | Mosaic TPU/GPU | torch_xla, Triton | 판단 대기 (데스크톱 CUDA 는 §5.8 의 Triton·TileLang 기준) |
+| 내보낸 산출물의 호환 보장 | `jax.export` 후방 6 개월, 전방 3 주 | `torch.export`, ExecuTorch | 판단 대기. 우리 커널 번들은 IR 버전과 출력기 버전을 기록한다(§5.5) |
+
+각 항목은 측정(같은 작업을 JAX 와 torch 로 실행한 시간)이나 메인테이너 판단으로 "torch 에 맡김", "우리가
+만든다", "범위 밖" 중 하나로 닫는다 (§8 의 8).
+
+**불분명한 것.**
+
+- **JAX + IREE 모델 배포.** `jax.export` 의 StableHLO 를 IREE 가 AOT 컴파일해 모바일에 싣는 길은 이론상 있다.
+  IREE 는 §5.4 에서 *커널 컴파일러로서* 기각했지만(코드 생성만 떼어 쓸 공식 경로 없음), *모델 통째 배포*
+  관점에서는 경쟁자다. 실제로 iOS/Android GPU 에서 도는 사례는 찾지 못했다.
+- **성능.** 양쪽 모두 모바일 측정이 없다. "JAX 보다 빠르다" 고 주장할 근거는 지금 없다 (§5.8).
+- **데스크톱 CUDA(PTX) 와 Mosaic GPU.** 비교 근거가 없다.
+
+### 5.11 선례, Taichi
 
 파이썬 문법으로 Vulkan / Metal 커널을 AOT 컴파일해 모바일에 실었던 가장 가까운 선례다. 지금은
 활동이 크게 줄었다. 기술보다는 **독자 런타임과 독자 생태계로 고립된 것**이 원인으로 보인다.
@@ -463,7 +513,7 @@ TypedPython 은 그래서 자체 텐서 런타임을 만들지 않고 **torch op
 | 1b | 빌드 기본 단계로 연결 | PythonMultiplatform Gradle 플러그인이 사용자 파이썬 소스에 게이트를 항상 돌리고, 에러면 빌드 실패 | 1 |
 | 2 | typed IR → C 백엔드 (#41) | 프론트엔드·검증기·C 생성·런타임, 데스크톱에서 끝까지 | 없음 (pypackpack 슬롯은 3 의 의존) |
 | 3 | Kotlin 직접 호출 | 스텁 타입 기반 C ABI 호출 생성 | 스텁 배선 완료 |
-| 4 | 첫 커널 조각 | f16 원소별 연산 또는 softmax 하나를 SPIR-V 로 컴파일해 torchnative `vulkan.rs` 로 실행, 기기에서 일반 파이썬 실행 · torchnative CPU 와 수치 일치, llama.cpp 대비 시간 기록 (§5.8) (추정 2~4 주) | torchnative 의 임의 SPIR-V 실행 진입점 |
+| 4 | 첫 커널 조각 | f16 원소별 연산 또는 softmax 하나를 SPIR-V 로 컴파일해 torchnative `vulkan.rs` 로 실행, 기기에서 일반 파이썬 실행 · torchnative CPU 와 수치 일치, llama.cpp 대비 시간 기록 (§5.8), 커널이 JAX · torch · numpy 없이 CPython 만으로 실행됨 (§5.2) (추정 2~4 주) | torchnative 의 임의 SPIR-V 실행 진입점 |
 | 4b | Metal 조각 | 같은 커널을 MSL 로 직접 내 iOS · macOS 에서 수치 일치 | 4, candle-metal 연결 방식 (§8) |
 | 5 | 타일 행렬곱 | 행렬 유닛(cooperative matrix, simdgroup_matrix)을 쓰는 타일 matmul, 없는 기기는 SIMT 폴백, 빌드 타임 오토튜닝 (§5.7) (추정 2~4 개월, MLIR 패스 사용 시 1~3 개월) | 4, 4b |
 | 6 | 착지 | 커널을 `torch.library` op · `kernels` 번들 항목으로 등록, `transformers` 무수정 사용 | 5 |
@@ -542,3 +592,6 @@ upstream 대비 수치 오차와 커널 시간을 기준선으로 박아 둔다.
 6. 기본 검사에서 빠져나가는 방법을 둘 것인가, 예: 동적 기능이 꼭 필요한 모듈 하나를 `checked` 에서
    빼는 표기. 두지 않으면 보장이 강해지고, 두면 이식이 쉬워진다.
 7. §3.1 금지 목록을 `checked` 에서 경고로 둘 것인가, 에러로 둘 것인가.
+8. **§5.10 의 "판단 대기" 목록.** 융합, 자동 미분, `vmap`, 변환 합성, 샤딩, TPU · 최신 GPU 성숙도, 내보낸
+   산출물의 호환 보장 각각을 "torch 에 맡김" (torch 가 JAX 만큼 성능을 낸다는 근거가 있을 때만),
+   "우리가 만든다", "범위 밖" 중 하나로 정한다.
