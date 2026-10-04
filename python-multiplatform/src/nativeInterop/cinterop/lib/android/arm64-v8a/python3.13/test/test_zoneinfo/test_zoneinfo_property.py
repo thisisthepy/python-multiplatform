@@ -41,7 +41,7 @@ def _valid_keys():
         except ModuleNotFoundError:
             return False
 
-    # This relies on the fact that dictionaries maintain insertion order — for
+    # This relies on the fact that dictionaries maintain insertion order, for
     # shrinking purposes, it is preferable to start with the standard version,
     # then move to the posix/ version, then to the right/ version.
     out_zones = {"": available_zones}

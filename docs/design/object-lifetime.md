@@ -3,7 +3,7 @@
 Two runtimes, two memory models, and no shared view between them. This is what has been
 settled, what is measured, and what is still open.
 
-## Kotlin holding Python — solved and verified
+## Kotlin holding Python, solved and verified
 
 CPython counts references; a Kotlin wrapper takes one on construction and gives it back when it
 closes.
@@ -14,7 +14,7 @@ closes.
     the Kotlin wrapper closes       refcount 0, freed
 
 `RefCountTest` checks this in both directions, because both failure modes are silent: releasing
-one too few leaks, and releasing one too many frees an object still in use — that crash lands
+one too few leaks, and releasing one too many frees an object still in use, that crash lands
 somewhere unrelated, which is how the interpreter corruption during the lifetime work first
 appeared, as a segfault inside `Py_Finalize` far from its cause.
 
@@ -31,7 +31,7 @@ library therefore takes a periodic checkpoint itself (`Python3.drainPendingRelea
 `autoDrainInterval`, on by default only for free-threaded builds). See ROADMAP §9,
 `docs/investigations/gc-scheduling-investigation.md` and [`threading-and-abi.md`](threading-and-abi.md).
 
-## Python holding Kotlin — the handle table
+## Python holding Kotlin, the handle table
 
 There is no counterpart to `Py_INCREF` for a JVM or Kotlin/Native object, so something on the
 Kotlin side has to act as a GC root:
@@ -48,7 +48,7 @@ Python holds only the integer handle; the map holds the object. This is what JNI
 
 The sketch above has no answer to that, and neither did the implementation. `HandleTable` is
 generational precisely so that a double release is safe, and its class doc named the counterpart
-exactly — *"the proxy's `tp_dealloc` calling `release` is the entire lifetime contract"* — but
+exactly, *"the proxy's `tp_dealloc` calling `release` is the entire lifetime contract"*, but
 `PythonProxySource` rendered a proxy class whose `__init__` took a handle and which had no path
 back at all. Every Kotlin object Python ever constructed stayed rooted for the life of the process.
 
@@ -64,13 +64,13 @@ Two separate defects wore that one number, and it is worth keeping them apart:
 | a proxy instance (`Counter(10)`) | the Python object | the **library**: no `__del__` was rendered. Fixed; `ProxyHandleLifetimeTest` pins it, including for a proxy inside a reference cycle |
 | a bare handle from `_pm_invoke` on a CONSTRUCTOR entry | the **caller** | nothing was wrong with the library. An integer has nothing to hang a finaliser off, so the caller must call `_pm_release`; the measurement harness was not doing it |
 
-The leak was **identical on desktop and on the iOS simulator** — 64 handles registered, 64 still
-live after `gc.collect()`, on both — which is what one would expect of a defect in generated Python
+The leak was **identical on desktop and on the iOS simulator**, 64 handles registered, 64 still
+live after `gc.collect()`, on both, which is what one would expect of a defect in generated Python
 that `commonMain` renders. The earlier impression that "iOS was stable" was about the *measurement*
 and not about the table: the iOS boundary costs about 3.5 µs against desktop's 0.5 µs, so the same
 drift was proportionally invisible there.
 
-`__del__` was chosen over `weakref.finalize` on price — the alternatives and their measured costs
+`__del__` was chosen over `weakref.finalize` on price, the alternatives and their measured costs
 are tabulated in `PythonProxySource`'s KDoc. The pre-PEP-442 objection to `__del__` (an object with
 one, inside a cycle, was never finalised at all) has not applied since CPython 3.4, and the cycle
 case is asserted rather than assumed.
@@ -80,7 +80,7 @@ case below is untouched. What changed is only that "Python has finished with it"
 at all, which is the precondition for anything else.
 
 A note for anyone reading older discussion: Panama has no equivalent of `NewGlobalRef`, and it
-does not need one. Panama is an API for *native memory*, not for JVM object lifetime — a
+does not need one. Panama is an API for *native memory*, not for JVM object lifetime, a
 `MemorySegment` holding an address does not keep a Kotlin object alive. The GC root is an
 ordinary Kotlin data structure, not anything Panama provides. Looking for the answer inside
 Panama was looking at the wrong layer.
@@ -89,7 +89,7 @@ Panama was looking at the wrong layer.
 
 ### Why reference counting cannot do it
 
-Not a boundary problem — an inherent limit of reference counting, in any language:
+Not a boundary problem, an inherent limit of reference counting, in any language:
 
     a = []; b = []
     a.append(b); b.append(a)
@@ -104,7 +104,7 @@ CPython's algorithm is simple, and it turns on one requirement:
 
 1. each tracked object's `tp_traverse` enumerates the `PyObject`s it holds
 2. references discovered that way are subtracted from the refcount
-3. if the remainder is zero, the object is kept alive only from inside the cycle — collectable
+3. if the remainder is zero, the object is kept alive only from inside the cycle, collectable
 4. `tp_clear` drops those references and breaks the cycle
 
 **Everything depends on step 1 being able to see through whatever holds the reference.**
@@ -138,7 +138,7 @@ fields are `PyObject`-typed. A traverse entry is one more generated function:
         obj.otherField?.let { visit(it.pointer.toRawValue()) }
     }
 
-No reflection — which is the whole reason the table exists. A reflection-based binding would
+No reflection, which is the whole reason the table exists. A reflection-based binding would
 find this expensive; that is why mature ones (JPype and similar) document "do not create
 cycles" instead of solving it. We are not in that position.
 
@@ -166,7 +166,7 @@ strongly, so it is a root regardless.
 
 **Still open.** The handle table holds strongly (`HandleTable.kt` notes it "needs to hold weakly" for
 this case; ROADMAP §14b records it as untouched). The likely answer is to make the map hold weakly,
-with the strong reference supplied by the Python proxy for as long as it lives — so "Python stopped
+with the strong reference supplied by the Python proxy for as long as it lives, so "Python stopped
 using it" becomes "the JVM may collect it". That inverts who owns the strength and has not been
 worked through.
 
@@ -174,7 +174,7 @@ worked through.
 
 An earlier discussion concluded that "cycles are handled by each language's GC" on the strength
 of the four-step refcount sequence at the top of this document. That sequence is correct, and it
-is implemented and tested — but it describes the **non-cyclic** case. Step 4, "the Kotlin side
+is implemented and tested, but it describes the **non-cyclic** case. Step 4, "the Kotlin side
 releases", is exactly what a cycle prevents from ever happening. The claim does not follow, and
 the same discussion walked it back a few messages later.
 
@@ -183,7 +183,7 @@ the same discussion walked it back a few messages later.
 `PyContext` chooses how far a Python value is converted toward Kotlin, per
 `ConversionStrategy`; `withContext` swaps and restores the strategy even on throw, and all five
 variants dispatch. `PyValue`'s lazy path is filled in too: the stub that used to end in
-`cachedNativeValue!!` — an NPE on any genuine cache miss — is gone. No `!!` on that field remains
+`cachedNativeValue!!`, an NPE on any genuine cache miss, is gone. No `!!` on that field remains
 anywhere in the library sources; the only occurrence of the expression left in the tree is a
 comment in `ConversionTest` recording that it used to be there.
 
@@ -196,23 +196,23 @@ actually returns, not from what the type looks like.
 ### The rule, per source type
 
 `PyProxy.toKotlinOrNull` converts through `pyObjectToNative`, whose dispatch compares the source's
-**exact** type object against `PyTypeChecks`' cached builtin types — `PyLong_Check` semantics, not
+**exact** type object against `PyTypeChecks`' cached builtin types, `PyLong_Check` semantics, not
 `isinstance`. So the table is by exact type; a subclass falls through to the last row.
 
 | Python type | Conversion | Kotlin result | Points into Python memory? | Cached? |
 |---|---|---|---|---|
 | `None` | `PyNone.isNone`, a pointer comparison | `null` | no | re-derived; `null` cannot be told apart from "not computed", and the comparison costs no FFI call |
-| `bool` | `PyLong_AsLongLong(...) != 0` | `Boolean` | no — a scalar copy | yes |
-| `int` | `PyLong_AsLongLong` | `Long` | no — a scalar copy (64-bit range only; wider ints do not round-trip) | yes |
-| `float` | `PyFloat_AsDouble` | `Double` | no — a scalar copy | yes |
-| `str` | `PyUnicode_AsUTF8` | `String` | **the C call returns a `const char*` owned by CPython**, but that pointer never leaves the binding: `EmbedAPI`'s `expect` returns `String?`, and each platform decodes at the boundary (`toKString()` on Kotlin/Native, `Panama.readUtf8String` on desktop, `Wasm.readUtf8String` on wasmJs). The `String` is a copy. | yes — the `String`, never the pointer |
-| `list`, `tuple` | `toNativeList()`, recursive | `List<Any?>` | no — every element is itself one of the rows above | yes, as a **snapshot** |
+| `bool` | `PyLong_AsLongLong(...) != 0` | `Boolean` | no, a scalar copy | yes |
+| `int` | `PyLong_AsLongLong` | `Long` | no, a scalar copy (64-bit range only; wider ints do not round-trip) | yes |
+| `float` | `PyFloat_AsDouble` | `Double` | no, a scalar copy | yes |
+| `str` | `PyUnicode_AsUTF8` | `String` | **the C call returns a `const char*` owned by CPython**, but that pointer never leaves the binding: `EmbedAPI`'s `expect` returns `String?`, and each platform decodes at the boundary (`toKString()` on Kotlin/Native, `Panama.readUtf8String` on desktop, `Wasm.readUtf8String` on wasmJs). The `String` is a copy. | yes, the `String`, never the pointer |
+| `list`, `tuple` | `toNativeList()`, recursive | `List<Any?>` | no, every element is itself one of the rows above | yes, as a **snapshot** |
 | `dict` | `toNativeMap()`, recursive over a snapshot of the entries | `Map<Any?, Any?>` | no | yes, as a **snapshot** |
 | `set`, `frozenset` | `toNativeSet()`, recursive over `PySequence_Tuple` | `Set<Any?>` | no | yes, as a **snapshot** |
-| anything else *inside a container* | `pyObjectToNative`'s `else`: `str(obj)` | `String` | no — a copy, but lossy and one-way | yes |
-| `bytes`, `bytearray` | `bytes.hex()` across the boundary, decoded to bytes on this side | `ByteArray` | yes — a copy, and `bytearray` a **snapshot** | yes |
-| `memoryview` | **none — refused** | `null` / `PyTypeError` | the buffer protocol hands out a pointer *into* the object, and a copy would still not carry format, shape and strides | never |
-| user-defined classes, subclasses of builtins, `complex`, ... | **none — refused** | `null` / `PyTypeError` | — | never |
+| anything else *inside a container* | `pyObjectToNative`'s `else`: `str(obj)` | `String` | no, a copy, but lossy and one-way | yes |
+| `bytes`, `bytearray` | `bytes.hex()` across the boundary, decoded to bytes on this side | `ByteArray` | yes, a copy, and `bytearray` a **snapshot** | yes |
+| `memoryview` | **none, refused** | `null` / `PyTypeError` | the buffer protocol hands out a pointer *into* the object, and a copy would still not carry format, shape and strides | never |
+| user-defined classes, subclasses of builtins, `complex`, ... | **none, refused** | `null` / `PyTypeError` | - | never |
 
 The container rows are the answer to "what happens when the elements are themselves `PyObject`s":
 they are not. `pyObjectToNative` recurses, so a converted container bottoms out in `Long`,
@@ -228,7 +228,7 @@ staleness and the recovery are both pinned by tests.
 
 | `ConversionStrategy` | Hands back | Cacheable |
 |---|---|---|
-| `RAW` | a bare `NativePointer` — no wrapper, no incref, nothing that releases it | **never.** It is an address, not a reference. `PyValue`'s constructor rejects one as `initialNativeValue`, because storing it would fail only once the address had been reused, far from the cause |
+| `RAW` | a bare `NativePointer`, no wrapper, no incref, nothing that releases it | **never.** It is an address, not a reference. `PyValue`'s constructor rejects one as `initialNativeValue`, because storing it would fail only once the address had been reused, far from the cause |
 | `UNMANAGED` | the `PyObject` unchanged, under Python's own refcounting | no native value exists to cache |
 | `TYPED` / `DEFAULT` | a `PyValue` over a wrapper it owns a reference to | per the type table above |
 | `NATIVE` | the fully-converted value, eagerly | nothing holds it; there is no cache in this path |
@@ -239,7 +239,7 @@ staleness and the recovery are both pinned by tests.
 scalars, `String`, `ByteArray` and containers built recursively out of those; `false` for a
 `NativePointer` (an unowned address) and for a `PyObject` (a reference, but not a native value),
 and false for anything unrecognised. Every store to `cachedNativeValue` on the conversion path
-passes through it, and a value it rejects is still returned to the caller — it is simply
+passes through it, and a value it rejects is still returned to the caller, it is simply
 re-converted next time instead of kept. Today every branch the walk can reach passes; the guard
 exists so a branch added later cannot acquire a cache without someone deciding that it should.
 
@@ -248,12 +248,12 @@ exists so a branch added later cannot acquire a cache without someone deciding t
 The Python side has the opposite rule: `cachedPyObjectValue` must hold an **owned** reference,
 never a borrowed one, because the proxy can outlive whatever handed the object over.
 
-`PyContext.proxyConvert` did not honour it. `typedWrap` returns a fresh wrapper — built
-`borrowed = true`, i.e. with its own incref — for the nine builtins it knows, and returns *the
+`PyContext.proxyConvert` did not honour it. `typedWrap` returns a fresh wrapper, built
+`borrowed = true`, i.e. with its own incref, for the nine builtins it knows, and returns *the
 caller's wrapper unchanged* for everything else. On that second path the `PyValue` held no
 reference of its own, so a caller closing its wrapper (which callers do; `hasNativeCounterpart`
 does it to its own scratch wrapper) left the `PyValue` pointing at a released object. Measured as
-a missing `+1` on `sys.getrefcount` — 3 where 4 was required — by
+a missing `+1` on `sys.getrefcount`, 3 where 4 was required, by
 `PyValueLazyConversionTest.pyContextGivesEveryPyValueItsOwnReference`, and fixed by taking an
 independent reference on the fallback path. Both branches now hand the `PyValue` a wrapper nobody
 else holds.
@@ -269,7 +269,7 @@ else holds.
   What changed is that the buffer is not the only route. `bytes.hex()` is exact, pure ASCII, and
   costs three FFI crossings whatever the length, where walking the sequence costs one per byte.
   The price is four passes over the payload where a direct copy would make one, which makes this
-  the largest per-byte cost in the conversion layer — the case for adding a real
+  the largest per-byte cost in the conversion layer, the case for adding a real
   `PyBytes_AsStringAndSize` binding later. That binding is not free either: a non-primitive value
   would have to cross four platform boundaries against `androidMain`'s primitives-only rule.
 - **Subclasses of builtins are refused** because the dispatch is by exact type. That is

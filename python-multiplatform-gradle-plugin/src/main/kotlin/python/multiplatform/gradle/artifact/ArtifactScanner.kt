@@ -42,7 +42,7 @@ import java.util.jar.JarFile
  *
  * | PyREPL's filter | here | why |
  * |---|---|---|
- * | not `private`/`protected` | **not enough** — must be `public`, and Kotlin-`public` rather than only JVM-`public` | PyREPL keeps package-private members, which is harmless in a stub; `internal` is JVM-public but not a name generated Kotlin may call |
+ * | not `private`/`protected` | **not enough**, must be `public`, and Kotlin-`public` rather than only JVM-`public` | PyREPL keeps package-private members, which is harmless in a stub; `internal` is JVM-public but not a name generated Kotlin may call |
  * | drop `<init>` | kept | a constructor needs a `ReflectedClass` and a receiver handle, which is the next step |
  * | drop `Companion` | subsumed | only statics are bound, and `Companion` is an instance field |
  * | drop names containing `-` | **not kept** | see below |
@@ -1642,7 +1642,7 @@ internal object ArtifactScanner {
      *   *different* limit from the one this method opens, which is why it is named rather than left
      *   to fail as a compile error in somebody's generated fragment.
      * - **`@Composable`, inside a declaration that is not.** `Modifier.composed(factory:)` is the
-     *   case. The fragment is compiled without the Compose plugin (`:ksp-fixtures:artifact`'s
+     *   case. The fragment is compiled without the Compose plugin (`:python-multiplatform-gradle-plugin-fixtures:artifact`'s
      *   `build.gradle.kts` says so, and it is the whole shape of that fixture's claim), so
      *   `@Composable Modifier.() -> Modifier` written there is an ordinary `Function1` while the slot
      *   is a lowered `Function3`. **This one does not fail as a compile error**, which is why it is

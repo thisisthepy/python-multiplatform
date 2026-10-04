@@ -89,7 +89,7 @@ def fn(name, params, returns, locals_, body, *, pure, may_deopt, line=1, entry_g
 
 # The module source that every e2e module embeds; each test picks the functions it compiles.
 SOURCE = textwrap.dedent('''\
-    """typedpython test module — the interpreted reference."""
+    """typedpython test module, the interpreted reference."""
     calls = []
 
     def record(x):
@@ -713,7 +713,7 @@ def test_deopt_propagates_through_a_c_to_c_call(mod):
     assert deopts(mod) == before
     assert mod.twice_mul(7, 40) == 2 * 7 ** 40
     # The outermost compiled call is redone once (+1). The interpreted twice_mul then calls the
-    # global mul_all — the compiled one, since there is one namespace — which deopts again (+1).
+    # global mul_all, the compiled one, since there is one namespace, which deopts again (+1).
     assert deopts(mod) == before + 2
 
 

@@ -181,8 +181,8 @@ object Python3 {
      * ### What this is instead of
      *
      * The body this replaces called `Py_RunMain()`, and the reason that is not a bug that can be
-     * patched is in the header: `Py_RunMain()` is declared in `cpython/pylifecycle.h` — a
-     * *lifecycle* function, and not part of the Limited API this binding otherwise targets — and
+     * patched is in the header: `Py_RunMain()` is declared in `cpython/pylifecycle.h`, a
+     * *lifecycle* function, and not part of the Limited API this binding otherwise targets, and
      * its contract is to run whatever `PyConfig.run_command`/`run_module`/`run_filename` names
      * **and then finalize Python**. There is no mode in which it leaves the runtime standing. So
      * it destroyed the interpreter it was asked to run a module in, while [isInitialized] still
@@ -199,7 +199,7 @@ object Python3 {
      *
      * ### What it does
      *
-     * `runpy.run_module(moduleName, run_name="__main__", alter_sys=True)` — the standard library's
+     * `runpy.run_module(moduleName, run_name="__main__", alter_sys=True)`, the standard library's
      * own answer, and the machinery CPython's `-m` switch itself goes through
      * (`runpy._run_module_as_main` shares `_get_module_details`/`_run_code` with it). It touches
      * no lifecycle function, so nothing here can finalize anything. Concretely, `alter_sys=True`
@@ -207,7 +207,7 @@ object Python3 {
      *
      * - `_TempModule("__main__")` installs a **fresh** module as `sys.modules["__main__"]` for the
      *   duration and puts the previous one back in `__exit__`. The module therefore gets a clean
-     *   `__main__` namespace, and the embedder's own `__main__` — the one [exec] writes into — is
+     *   `__main__` namespace, and the embedder's own `__main__`, the one [exec] writes into, is
      *   neither read nor written, and is restored whether the module returns or raises.
      * - `_ModifiedArgv0(spec.origin)` points `sys.argv[0]` at the module's file while it runs and
      *   restores it afterwards, which is what `python -m` does.
@@ -218,7 +218,7 @@ object Python3 {
      * including when the module raises. Two halves to that:
      *
      * - It has to be *set*, because `runpy`'s `_ModifiedArgv0.__enter__` reads `sys.argv[0]`
-     *   before writing it. An embedded interpreter is not guaranteed to have a usable one — this
+     *   before writing it. An embedded interpreter is not guaranteed to have a usable one, this
      *   is the same soft spot the old body fell into from the other side.
      * - It has to be *restored*, because it is process-global state that the caller did not ask
      *   to have rewritten. A module run is a nested activity here, not the process's reason for
@@ -230,7 +230,7 @@ object Python3 {
      * ### Exceptions, and `sys.exit()`
      *
      * An exception escaping the module body propagates as a [PyException] carrying the real
-     * Python type, message and traceback, and the interpreter stays usable — a failing module is
+     * Python type, message and traceback, and the interpreter stays usable, a failing module is
      * an ordinary failure, not a poisoned runtime.
      *
      * `SystemExit` is deliberately **not** in that class. A module written to be run as `__main__`
@@ -330,10 +330,10 @@ object Python3 {
      * The Python side of [runMain].
      *
      * It is written in Python rather than assembled out of C API calls because every line of it
-     * is a `try`/`finally` or an `except` — restoring `sys.argv` on both paths, and telling
+     * is a `try`/`finally` or an `except`, restoring `sys.argv` on both paths, and telling
      * `SystemExit` apart from a real failure. Expressing that through the C API would mean
      * `PyErr_GetRaisedException` plus a `PyErr_GivenExceptionMatches` against a `SystemExit` this
-     * binding exposes no `PyExc_*` handle for, then re-raising by hand — more code, and all of it
+     * binding exposes no `PyExc_*` handle for, then re-raising by hand, more code, and all of it
      * in the one path that exists to report failures.
      *
      * What it deliberately does *not* do is catch anything but `SystemExit`: any other exception
@@ -376,7 +376,7 @@ def __pmp_run_module__(mod_name, argv):
 
     /**
      * Compiles [RUN_MODULE_SOURCE] once into a private globals dict and keeps a strong reference
-     * to the resulting function, exactly as [checkpointCallableHoldingGIL] does — including the
+     * to the resulting function, exactly as [checkpointCallableHoldingGIL] does, including the
      * detail that a module-level `def` needs no `__builtins__` entry of its own, because frame
      * setup falls back to the interpreter's builtins when the globals mapping has none.
      *
@@ -412,55 +412,55 @@ def __pmp_run_module__(mod_name, argv):
 
     /**
      * Runs [args] the way `python <args>` would parse and dispatch them, in an interpreter that
-     * **survives the call** — the same property [runMain] exists for, and for the same reason:
+     * **survives the call**, the same property [runMain] exists for, and for the same reason:
      * `Py_BytesMain(argc, argv)` is CPython's CLI `main`, it reaches `Py_RunMain()`
      * (`cpython/pylifecycle.h`), and that function's contract is to run and then finalize. There
      * is no mode in which it leaves the runtime standing, so it can never be this function's
-     * implementation — wiring up its `(int argc, char **argv)` marshalling would only have bought
+     * implementation, wiring up its `(int argc, char **argv)` marshalling would only have bought
      * a function with exactly the defect [runMain] was fixed to avoid. (ROADMAP §12 has the full
      * history: the marshalling used to be recorded as the blocker, but it was never the real one.)
      *
      * ### The decided, deliberately smaller scope
      *
-     * `Py_BytesMain` also *parses* the command line — `-c`, `-m`, a script path, `-`, and a long
-     * tail of single-letter flags — and reimplementing all of that against a `PyConfig` this
+     * `Py_BytesMain` also *parses* the command line, `-c`, `-m`, a script path, `-`, and a long
+     * tail of single-letter flags, and reimplementing all of that against a `PyConfig` this
      * binding does not carry (struct layout is exactly what the Stable ABI does not promise) is
      * not worth paying for options that mostly cannot mean anything here anyway. So this parses a
      * deliberately reduced subset of the same grammar:
      *
-     * - **`-c <cmd>`** — runs `<cmd>` as a statement sequence in the embedder's own, persistent
-     *   `__main__` — the same namespace [exec] writes into. `sys.argv[0]` is `"-c"`, matching
+     * - **`-c <cmd>`**, runs `<cmd>` as a statement sequence in the embedder's own, persistent
+     *   `__main__`, the same namespace [exec] writes into. `sys.argv[0]` is `"-c"`, matching
      *   CPython (`python3 -c "import sys;print(sys.argv)" a b` → `['-c', 'a', 'b']`, verified
      *   against the system interpreter while designing this).
-     * - **`-m <module>`** — a straight delegation to [runMain], which already *is* `python -m`'s
+     * - **`-m <module>`**, a straight delegation to [runMain], which already *is* `python -m`'s
      *   implementation (`runpy.run_module(..., alter_sys=True)`). Nothing here duplicates it.
-     * - **a bare script path** — reads the file (through Python's own `open()`, not a new
-     *   per-platform Kotlin file API — `nativeMain` has no filesystem abstraction of its own, and
+     * - **a bare script path**, reads the file (through Python's own `open()`, not a new
+     *   per-platform Kotlin file API, `nativeMain` has no filesystem abstraction of its own, and
      *   CPython already has one that works identically everywhere this binding runs) and runs it,
      *   again in the embedder's persistent `__main__`. `sys.argv[0]` is the path exactly as
-     *   given — CPython does not resolve it (`cd /tmp && python3 argvtest.py` → `sys.argv[0] ==
+     *   given, CPython does not resolve it (`cd /tmp && python3 argvtest.py` → `sys.argv[0] ==
      *   'argvtest.py'`, not an absolute path; verified the same way).
-     * - **`--` followed by a path** — forces the next token to be read as a script path even if it
+     * - **`--` followed by a path**, forces the next token to be read as a script path even if it
      *   looks like an option, mirroring CPython's own observed behaviour: `python3 -- -c args`
      *   does *not* run `-c` as a command, it tries to open a file literally named `-c`. This binding
      *   does not carry `-c`/`-m` support past a leading `--`, since CPython's own parser does not
      *   either once option scanning has been told to stop.
      * - **`-`, and anything else starting with `-`** (`-E -I -S -s -B -O -OO -X -W -u -P` among
-     *   them, per the design that fixed this scope) — refused **by name** rather than silently
+     *   them, per the design that fixed this scope), refused **by name** rather than silently
      *   ignored. `-` means "read the program from stdin", which an embedded interpreter has no
      *   sane default for. The rest are `PyConfig` fields (`isolated`, `use_environment`,
      *   `site_import`, `user_site_directory`, `write_bytecode`, `optimization_level`, `Xoptions`,
      *   warning filters, unbuffered I/O, `safe_path`) that only mean anything **before**
-     *   `Py_Initialize()` — this interpreter is already initialized by the time [runApp] is
+     *   `Py_Initialize()`, this interpreter is already initialized by the time [runApp] is
      *   called, so honouring them would mean either lying about what happened or silently doing
      *   nothing, and the second one is exactly the defect this function used to have. Naming the
      *   option in the refusal is deliberate: a caller who typed `-I` expecting isolation and got a
      *   generic "unsupported" would not necessarily notice their isolation request was dropped.
-     * - **empty `args`** — refused the same way, since CPython's own default with nothing on the
+     * - **empty `args`**, refused the same way, since CPython's own default with nothing on the
      *   command line is also to read from stdin (interactively, if it is a tty).
      *
      * Anything after the mode-selecting token (the command, the module name, or the script path)
-     * is passed through verbatim as `sys.argv[1:]` — no re-parsing, so an argument to the
+     * is passed through verbatim as `sys.argv[1:]`, no re-parsing, so an argument to the
      * caller's own script that happens to start with `-` is never mistaken for one of the options
      * above.
      *
@@ -475,7 +475,7 @@ def __pmp_run_module__(mod_name, argv):
      * returning and the raising path.
      *
      * @param args the command-line arguments *after* the program name, e.g. `["-c", "print(1)"]`
-     *   or `["script.py", "--flag"]` — the same slice `Py_BytesMain(argc, argv)` would see as
+     *   or `["script.py", "--flag"]`, the same slice `Py_BytesMain(argc, argv)` would see as
      *   `argv[1:]`.
      * @return the exit status: 0 for a clean run, otherwise whatever the program passed to
      *   `sys.exit()`.
@@ -540,10 +540,10 @@ def __pmp_run_module__(mod_name, argv):
      * a `SystemExit` handle this binding exposes no accessor for.
      *
      * `__pmp_run_file__` reads the script through Python's own `open()` rather than a Kotlin file
-     * API deliberately — `nativeMain` has no cross-platform filesystem abstraction of its own
+     * API deliberately, `nativeMain` has no cross-platform filesystem abstraction of its own
      * (`iosMain`/`artMain` diverge below it), and CPython already has one that behaves identically
      * on every target this binding runs on. `compile()` is given the raw `bytes` `open("rb")`
-     * returns, not a decoded `str`, so a PEP 263 encoding cookie in the script is still honoured —
+     * returns, not a decoded `str`, so a PEP 263 encoding cookie in the script is still honoured,
      * passing a `str` would have silently ignored one.
      */
     private const val RUN_APP_SOURCE = """
@@ -661,7 +661,7 @@ def __pmp_run_file__(path, argv):
 
     /**
      * Calls [helper] with [leadingArgs] (converted to `str`) followed by [argv] (converted to a
-     * `list[str]`), and reads back the `int` it returns the same way [runMain] does — [helper]'s
+     * `list[str]`), and reads back the `int` it returns the same way [runMain] does, [helper]'s
      * only non-`SystemExit` failure mode is an escaped exception, which arrives here as
      * `PyObject_CallObject` returning `null` with the indicator set.
      *
@@ -735,8 +735,8 @@ def __pmp_run_file__(path, argv):
 
     /**
      * CPython defers a set of housekeeping jobs to a *checkpoint* that only the evaluation loop
-     * reaches. `_Py_HandlePending` — called from the `_CHECK_PERIODIC` uop that begins every
-     * Python-level frame and closes every call instruction — is the single place that
+     * reaches. `_Py_HandlePending`, called from the `_CHECK_PERIODIC` uop that begins every
+     * Python-level frame and closes every call instruction, is the single place that
      *
      * - merges the free-threaded build's biased reference-counting queue
      *   (`_PY_EVAL_EXPLICIT_MERGE_BIT` → `_Py_brc_merge_refcounts`),
@@ -759,24 +759,24 @@ def __pmp_run_file__(path, argv):
      * reason this is not done from the cleaner: the cleaner owns nothing, so a checkpoint taken
      * there would drain an empty queue while running Python on a thread whose only job is to hand
      * references back. Use [PyGC_Collect] instead if you need to reclaim on behalf of some other
-     * thread — it stops the world and merges every thread's queue, at a cost proportional to the
+     * thread, it stops the world and merges every thread's queue, at a cost proportional to the
      * heap rather than to the queue.
      *
-     * **This is not only a free-threading fix.** `_PY_GC_SCHEDULED_BIT` — the bit `_Py_ScheduleGC`
-     * sets on every allocation that crosses a generation threshold — is cleared by the same
+     * **This is not only a free-threading fix.** `_PY_GC_SCHEDULED_BIT`, the bit `_Py_ScheduleGC`
+     * sets on every allocation that crosses a generation threshold, is cleared by the same
      * `_Py_HandlePending` this reaches. That scheduling has been how allocation triggers a cyclic
      * collection since 3.12, on *both* builds. An embedder driving CPython purely through the C
      * API therefore never runs the cyclic collector at all, GIL or not: reference cycles the
      * collector would otherwise break simply accumulate. Calling this reclaims them exactly as it
-     * merges the free-threaded queue — one call, one checkpoint, both jobs. See
+     * merges the free-threaded queue, one call, one checkpoint, both jobs. See
      * `docs/investigations/gc-scheduling-investigation.md` §1 and §6.
      *
      * The trade-off is what runs at the checkpoint, not just what it reclaims: any `__del__`,
      * weakref callback or pending call attached to something the collector or the queue was
-     * holding can execute here, inside whatever `withGIL` scope happened to trip the checkpoint —
+     * holding can execute here, inside whatever `withGIL` scope happened to trip the checkpoint,
      * a scope its caller did not ask to yield control from. Measured reentrant-safe (a `__del__`
      * that calls back into Kotlin mid-collection completes without deadlocking, looping or
-     * crashing — `GCSchedulingMeasurementTest.testReentrancyDuringCheckpoint`), but it is still a
+     * crashing, `GCSchedulingMeasurementTest.testReentrancyDuringCheckpoint`), but it is still a
      * side effect the caller did not request, and is why [autoDrainInterval] defaults to off on
      * the GIL build rather than always on.
      *
@@ -803,7 +803,7 @@ def __pmp_run_file__(path, argv):
      * released since the previous one, so a workload that never drops a wrapper never pays.
      *
      * Defaults to on for free-threaded builds, where deferred release is the defect described on
-     * [drainPendingReleases] — a build with the global lock frees a *plain* reference the
+     * [drainPendingReleases], a build with the global lock frees a *plain* reference the
      * cleaner's `Py_DecRef` immediately, with no queue to drain, so that half of the checkpoint's
      * job really is pure overhead there.
      *
@@ -817,7 +817,7 @@ def __pmp_run_file__(path, argv):
      * a `withGIL` scope exit the caller never asked to yield from. Measured cost when on: ~5.5 ns
      * per outermost scope (~2.9% of the ~190 ns floor), amortised over this interval. Turn it on
      * explicitly, call [drainPendingReleases] to force one checkpoint without changing this, or
-     * call [PyGC_Collect] directly for an immediate, unconditional collection — [drainPendingReleases]
+     * call [PyGC_Collect] directly for an immediate, unconditional collection, [drainPendingReleases]
      * and `PyGC_Collect` both work regardless of this setting.
      */
     var autoDrainInterval: Int = if (BuildConfig.pythonFreeThreaded) DEFAULT_AUTO_DRAIN_INTERVAL else 0
@@ -881,7 +881,7 @@ def __pmp_run_file__(path, argv):
     internal fun reachEvalCheckpointHoldingGIL() {
         // Do not disturb an error indicator its owner has not read yet. Several call sites read
         // the indicator *after* their `withPython { ... }` scope has closed (see
-        // `PyObject.getAttr`), and entering the eval loop can replace it — a pending signal
+        // `PyObject.getAttr`), and entering the eval loop can replace it, a pending signal
         // handler or a finaliser raising is enough.
         if (PyErr_Occurred() != null) {
             CheckpointCounter.skipped++
@@ -894,7 +894,7 @@ def __pmp_run_file__(path, argv):
         val result = PyObject_CallNoArgs(callable)
         if (result == null) {
             // The body is `pass`, so nothing raised here belongs to the caller: it came out of
-            // the checkpoint itself — a pending signal, a pending call, a finaliser. There is no
+            // the checkpoint itself, a pending signal, a pending call, a finaliser. There is no
             // caller to hand it to, and leaving it set would surface as a spurious failure in
             // whatever ran next, so it is cleared and counted.
             PyErr_Clear()

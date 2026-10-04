@@ -11,7 +11,7 @@ import python.multiplatform.reflection.TypeTag
  *
  * ### Why a stand-in rather than the real jars
  *
- * `WalkedArtifactComposeModifierTest` (in `ksp-fixtures/artifact`) already proves that the walker
+ * `WalkedArtifactComposeModifierTest` (in `python-multiplatform-gradle-plugin/fixtures/artifact`) already proves that the walker
  * produces these entries out of `foundation-layout-desktop-1.6.11.jar` and that Compose's own
  * `padding` runs when Python calls them. What it cannot do is run anywhere but desktop, because it
  * needs a JVM classpath. The adapter under test here is `commonMain` Python, so its tests belong in
@@ -32,12 +32,13 @@ import python.multiplatform.reflection.TypeTag
  * | `padding__Dp_Dp` / `__Dp_Dp_Dp_Dp` again | omitting a defaulted argument, including one in the *middle* of the list |
  * | `fillMaxHeight` | the same, under a name with no overload set: omission with no dispatcher involved |
  * | `size__Dp` | the second link of a chain, so the return really is a receiver again |
- * | `fillMaxWidth` | a receiver-only extension, reached under its Kotlin name and no other |
- * | `zIndex` | a genuine `kotlin.Float` parameter beside `Dp` ones: same tag, different declared type |
- * | `toURLString` | an acronym-bearing name, which once tested a snake_case rule and now only has to resolve as itself |
+ * | `fillMaxWidth` | a receiver-only extension, reached as `fillMaxWidth` and as its Pythonic alias `fill_max_width` |
+ * | `zIndex` | a genuine `kotlin.Float` parameter beside `Dp` ones: same tag, different declared type; and `z_index`, the case where a one-letter first segment must not be swallowed |
+ * | `toURLString` | a name the snake -> camel rule **cannot** invert (`to_url_string` -> `toUrlString`); only the forward conversion of the module's own names reaches it |
  * | `paddingFromBaseline__TextUnit` | the value-class reject list: a packed wrapper must refuse a raw number |
  * | `emptyModifier` | where a chain starts. Compose has no bound declaration for this; see [EMPTY_MODIFIER] |
  * | `Arrangement.Start` / `.End` | `kind = STATIC_GETTER`: a value behind a name, read as an attribute and not called |
+ * | `Color__Int` / `Color__Long` | one integral parameter at two widths: an int picks the overload its Kotlin literal would (#146) |
  */
 object ComposeShapedFragment : FunctionTableFragment {
 
@@ -94,6 +95,32 @@ object ComposeShapedFragment : FunctionTableFragment {
             paramTypeNames = listOf(MODIFIER),
             returnTypeName = "kotlin.String",
         ) { args -> (args[0] as StubModifier).describe() },
+        // `Color(color: Int)` and `Color(color: Long)` (#146): the same TypeTag, two Kotlin widths. Kotlin
+        // types `0xFFFFFFFF` as a Long literal and `0x11223344` as an Int one, and picks accordingly.
+        ExposedCallable(
+            name = "androidx.compose.ui.graphics.Color__Int",
+            arity = 1,
+            paramTypes = listOf(TypeTag.INT),
+            returnType = TypeTag.STRING,
+            paramNames = listOf("color"),
+            paramTypeNames = listOf("kotlin.Int"),
+            returnTypeName = "kotlin.String",
+        ) { args ->
+            calls += "Color__Int"
+            "Int:${(args[0] as Number).toLong()}"
+        },
+        ExposedCallable(
+            name = "androidx.compose.ui.graphics.Color__Long",
+            arity = 1,
+            paramTypes = listOf(TypeTag.INT),
+            returnType = TypeTag.STRING,
+            paramNames = listOf("color"),
+            paramTypeNames = listOf("kotlin.Long"),
+            returnTypeName = "kotlin.String",
+        ) { args ->
+            calls += "Color__Long"
+            "Long:${(args[0] as Number).toLong()}"
+        },
         // padding, all four overloads, with the receiver in slot 0 exactly as the walker emits it.
         extension(
             name = "androidx.compose.foundation.layout.padding__Dp",

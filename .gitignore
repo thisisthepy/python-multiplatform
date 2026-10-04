@@ -49,8 +49,11 @@ google-services.json
 # subagent worktrees live inside the repo
 .worktrees/
 
-# repo-local caches: emsdk, the CPython wasm build and its staged runtime (tools/wasm/build-cpython.sh)
+# repo-local caches: emsdk, the CPython wasm build and its staged runtime (python-multiplatform/scripts/wasm/build-cpython.sh)
 .caches/
 
 # scratch space for agents and scripts; delete when done
 .tmp/
+
+# Local Claude Code settings: per machine, not part of the repository.
+.claude/

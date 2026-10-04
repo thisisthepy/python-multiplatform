@@ -3,7 +3,7 @@
 `lower(path)` reads one module and returns an `ir.Module`:
 
 - Which functions: module-level `def`s decorated with the builtin `@compiled` (a bare name, no
-  import — #42), or every module-level `def` when the first non-empty line is
+  import, #42), or every module-level `def` when the first non-empty line is
   `# typedpython: compiled`.
 - A function is lowered only when **all** of it is expressible in the IR; otherwise it is left out
   and `Module.skipped[name]` says why, with the line. There is no partial lowering.
@@ -23,6 +23,19 @@ It is recorded in the IR: an I64 ADD/SUB/MUL/NEG it proves cannot overflow is `p
 verifier re-proves it; a proven op does not deopt). Division and modulo of ints cannot be recorded,
 so they count as deopting. An impure caller of a pure callee that may deopt and returns F64, BOOL
 or NONE emits `Call(redo=True)`: only the callee is redone on a deopt.
+
+Fixed-layout classes (SPEC N-11, `ir.ClassDecl`). A module-level class (in a marked module, or
+decorated `@compiled`) becomes a `ClassDecl` only when its layout is fixed in CPython too; see
+`_class_decl` for the rules. A class that fails them has no `ClassDecl`, an entry in
+`Module.skipped` under the class name with the reason, and the functions using it lower as before
+(`GetAttr`, `CallObject`). Over a `ClassDecl`: `None` is `Const(None, OBJ)`, `is`/`is not` is
+`ir.Is`, a parameter annotated `C` / `C | None` / `Optional[C]` is an OBJ `Param(cls=C, optional)`,
+`obj.field` is a `FieldGet` (exact type proved: a non-optional never-rebound parameter, or a local
+only ever bound to `C(...)` built as `New`; otherwise `CheckExact` in a pure function, and the
+function is skipped in an impure one), `obj.field = v` is a `FieldSet` (an effect; only on a proved
+object), and `C(args)` is `New` when `ClassDecl.trivial_init` (arguments in `__slots__` order) else
+`CallObject(Global(C))`. `trivial_init` requires the i-th `__init__` parameter to be stored into
+the i-th slot (ir.ClassDecl: "`__init__(self, *fields-in-order)`"); other orders stay an object call.
 
 Entry globals (ir.Function.entry_globals). A module-level name assigned once at top level, of type
 float/int/bool (annotated, or literals and arithmetic of such names), never rebound or deleted in
@@ -112,6 +125,7 @@ class _ModuleInfo:
     bindings: dict[str, list[tuple[int, str]]]   # module-level name -> [(line, how)]
     stdlib_math: bool
     scalar_globals: dict[str, Type] = field(default_factory=dict)  # entry-global candidates
+    classes: dict[str, ir.ClassDecl] = field(default_factory=dict)  # compiled fixed-layout classes
 
     def bound(self, name: str) -> bool:
         return name in self.bindings
@@ -135,6 +149,9 @@ def lower(path: Path) -> ir.Module:
     info = _module_info(tree)
 
     skipped: dict[str, str] = {}
+    class_decls, class_skips = _classes(tree, source, info)
+    info.classes = class_decls
+    skipped.update(class_skips)
     signatures: dict[str, _Signature] = {}
     for node, reason in _targets(tree, source, info):
         if reason is not None:
@@ -142,7 +159,7 @@ def lower(path: Path) -> ir.Module:
             continue
         assert isinstance(node, ast.FunctionDef)
         try:
-            signatures[node.name] = _signature(node)
+            signatures[node.name] = _signature(node, info.classes)
         except Skip as e:
             skipped[node.name] = e.reason
 
@@ -173,7 +190,7 @@ def lower(path: Path) -> ir.Module:
         else:
             skipped[name] = result
     functions.sort(key=lambda f: f.source_line)
-    return ir.Module(path.stem, tuple(functions), skipped)
+    return ir.Module(path.stem, tuple(functions), skipped, tuple(class_decls.values()))
 
 
 def _module_info(tree: ast.Module) -> _ModuleInfo:
@@ -265,11 +282,185 @@ def _binding_targets(stmt: ast.stmt) -> list[ast.expr]:
     return []
 
 
+# --- fixed-layout classes (SPEC N-11) --------------------------------------------------------------
+
+# A user override of any of these runs user code on a slot read, write or construction, which the
+# direct slot access (FieldGet/FieldSet/New) would skip.
+SLOT_ACCESS_DUNDERS = ("__getattribute__", "__getattr__", "__setattr__", "__delattr__", "__new__")
+
+
+def _whole_module(source: str) -> bool:
+    return next((line.strip() for line in source.splitlines() if line.strip()), "") == MARKER
+
+
+def is_opted_in(path: Path) -> bool:
+    """Whether the front end considers the module for compilation at all: the `# typedpython: compiled`
+    marker as its first non-empty line, or a module-level `def` / `class` decorated `@compiled`
+    (the same tests `_targets` and `_classes` apply)."""
+    source = Path(path).read_text()
+    if _whole_module(source):
+        return True
+    return any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        and any(isinstance(d, ast.Name) and d.id == "compiled" for d in node.decorator_list)
+        for node in ast.parse(source, filename=str(path)).body)
+
+
+def _classes(
+    tree: ast.Module, source: str, info: _ModuleInfo,
+) -> tuple[dict[str, ir.ClassDecl], dict[str, str]]:
+    whole = _whole_module(source)
+    decls: dict[str, ir.ClassDecl] = {}
+    skipped: dict[str, str] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        marked = any(isinstance(d, ast.Name) and d.id == "compiled" for d in node.decorator_list)
+        if not (whole or marked):
+            continue
+        result = _class_decl(node, tree, info)
+        if isinstance(result, str):
+            skipped[node.name] = result
+        else:
+            decls[node.name] = result
+    return decls, skipped
+
+
+def _class_decl(node: ast.ClassDef, tree: ast.Module, info: _ModuleInfo) -> ir.ClassDecl | str:
+    """The `ClassDecl` of a class whose layout is fixed in CPython too, else why it is not one."""
+    name, at = node.name, f"line {node.lineno}: class `{node.name}`"
+    other = [d for d in node.decorator_list if not (isinstance(d, ast.Name) and d.id == "compiled")]
+    if other:
+        return f"{at}: decorator `@{_src(other[0])}` is not supported (only `@compiled`)"
+    if node.decorator_list and info.bound("compiled"):
+        return f"{at}: `compiled` is bound in this module, so `@compiled` is not the builtin"
+    if node.keywords:
+        return f"{at}: has a metaclass or class keyword `{node.keywords[0].arg}`"
+    bases = [b for b in node.bases if not (isinstance(b, ast.Name) and b.id == "object")]
+    if bases or (node.bases and info.bound("object")):
+        shown = _src(bases[0]) if bases else "object"
+        return f"{at}: has a base class `{shown}` (only `object` is allowed)"
+    if len(info.bindings.get(name, [])) > 1:
+        lines = ", ".join(str(line) for line, _ in info.bindings[name])
+        return f"{at}: `{name}` is bound more than once (lines {lines})"
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Del) and n.id == name:
+            return f"{at}: `{name}` is deleted (line {n.lineno}); bound more than once"
+        if isinstance(n, ast.NamedExpr) and isinstance(n.target, ast.Name) and n.target.id == name:
+            return f"{at}: `{name}` is rebound by `:=` (line {n.lineno}); bound more than once"
+        if isinstance(n, ast.ClassDef) and any(isinstance(b, ast.Name) and b.id == name
+                                               for b in n.bases):
+            return f"{at}: is subclassed by `{n.name}` (line {n.lineno})"
+        for target in _assigned_attributes(n):
+            if isinstance(target.value, ast.Name) and target.value.id == name:
+                return (f"{at}: its class attribute `{target.attr}` is assigned at line "
+                        f"{target.lineno}")
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) \
+                and n.func.id in ("setattr", "delattr") and n.args \
+                and isinstance(n.args[0], ast.Name) and n.args[0].id == name:
+            return f"{at}: its class attribute is assigned by `{_src(n)}` at line {n.lineno}"
+
+    slots: ast.expr | None = None
+    annotated: list[str] = []
+    init: ast.FunctionDef | None = None
+    for st in node.body:
+        if isinstance(st, ast.Expr) and isinstance(st.value, ast.Constant) \
+                and isinstance(st.value.value, str):
+            continue
+        if isinstance(st, ast.Pass):
+            continue
+        if isinstance(st, ast.Assign) and len(st.targets) == 1 \
+                and isinstance(st.targets[0], ast.Name) and st.targets[0].id == "__slots__":
+            slots = st.value
+        elif isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name) and st.value is None:
+            annotated.append(st.target.id)
+        elif isinstance(st, ast.FunctionDef):
+            if st.name in SLOT_ACCESS_DUNDERS:
+                return f"{at}: defines `{st.name}`, which runs user code on slot access"
+            if st.name == "__init__":
+                init = st
+        else:
+            return (f"{at}: class body statement `{_src(st).splitlines()[0]}` (line {st.lineno}) "
+                    "is not supported (only `__slots__`, bare field annotations and methods)")
+    if slots is None:
+        return f"{at}: has no `__slots__`"
+    if not (isinstance(slots, (ast.Tuple, ast.List)) and all(
+            isinstance(e, ast.Constant) and isinstance(e.value, str) for e in slots.elts)):
+        return f"{at}: `__slots__` is not a literal tuple or list of strings"
+    fields = tuple(e.value for e in slots.elts)  # type: ignore[attr-defined]
+    twice = next((f for f in fields if fields.count(f) > 1), None)
+    if twice is not None:
+        return f"{at}: `__slots__` lists `{twice}` twice"
+    if set(fields) != set(annotated):
+        return (f"{at}: `__slots__` {fields} does not equal its annotated fields "
+                f"{tuple(dict.fromkeys(annotated))}")
+    return ir.ClassDecl(name, fields, init is not None and _trivial_init(init, fields))
+
+
+def _assigned_attributes(n: ast.AST) -> list[ast.Attribute]:
+    targets: list[ast.expr] = []
+    if isinstance(n, ast.Assign):
+        targets = list(n.targets)
+    elif isinstance(n, (ast.AugAssign, ast.AnnAssign)):
+        targets = [n.target]
+    elif isinstance(n, ast.Delete):
+        targets = list(n.targets)
+    elif isinstance(n, (ast.For, ast.AsyncFor)):
+        targets = [n.target]
+    found: list[ast.Attribute] = []
+    for t in targets:
+        found += [x for x in ast.walk(t) if isinstance(x, ast.Attribute)]
+    return found
+
+
+def _trivial_init(init: ast.FunctionDef, fields: tuple[str, ...]) -> bool:
+    """`__init__(self, p0, p1, ...)` whose body is exactly `self.<f> = <param>` once per slot, with
+    parameter i stored into slot i (`ir.ClassDecl.trivial_init`). Statement order is free."""
+    a = init.args
+    if init.decorator_list or a.posonlyargs or a.kwonlyargs or a.vararg or a.kwarg or a.defaults \
+            or init.returns is not None and _src(init.returns) != "None" or not a.args:
+        return False
+    self_name, params = a.args[0].arg, [x.arg for x in a.args[1:]]
+    body = list(init.body)
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
+            and isinstance(body[0].value.value, str):
+        body = body[1:]
+    if len(params) != len(fields) or len(set(params)) != len(params) or len(body) != len(fields):
+        return False
+    stored: dict[str, str] = {}
+    for st in body:
+        if not (isinstance(st, ast.Assign) and len(st.targets) == 1
+                and isinstance(st.targets[0], ast.Attribute)
+                and isinstance(st.targets[0].value, ast.Name)
+                and st.targets[0].value.id == self_name and isinstance(st.value, ast.Name)
+                and st.value.id in params and self_name not in params):
+            return False
+        field_name = st.targets[0].attr
+        if field_name not in fields or field_name in stored:
+            return False
+        stored[field_name] = st.value.id
+    return all(stored.get(f) == p for f, p in zip(fields, params))
+
+
+def _class_of(kind: str, classes: dict[str, ir.ClassDecl]) -> tuple[str, bool] | None:
+    """`C`, `C | None`, `None | C`, `Optional[C]`, `"C | None"` (an annotation spelled by
+    `_annotation_kind`) -> (C, optional) for a compiled class C, else None."""
+    kind = kind.strip("'\"")
+    optional = False
+    for prefix in ("Optional[", "typing.Optional["):
+        if kind.startswith(prefix) and kind.endswith("]"):
+            kind, optional = kind[len(prefix):-1], True
+    parts = [p.strip("'\"") for p in kind.split("|")]
+    named = [p for p in parts if p != "None"]
+    if len(named) != 1 or named[0] not in classes:
+        return None
+    return named[0], optional or len(named) != len(parts)
+
+
 def _targets(
     tree: ast.Module, source: str, info: _ModuleInfo,
 ) -> list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str | None]]:
-    first = next((line.strip() for line in source.splitlines() if line.strip()), "")
-    whole_module = first == MARKER
+    whole_module = _whole_module(source)
     found: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str | None]] = []
     for node in tree.body:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -294,7 +485,7 @@ def _targets(
     return found
 
 
-def _signature(fn: ast.FunctionDef) -> _Signature:
+def _signature(fn: ast.FunctionDef, classes: dict[str, ir.ClassDecl] | None = None) -> _Signature:
     args = fn.args
     line = fn.lineno
     if args.posonlyargs:
@@ -314,6 +505,8 @@ def _signature(fn: ast.FunctionDef) -> _Signature:
         kind = _annotation_kind(a.annotation)
         if kind in ARRAY_KIND:
             params.append(ir.ArrayParam(a.arg, ARRAY_KIND[kind], False))  # `stored` set later
+        elif (c := _class_of(kind, classes or {})) is not None:
+            params.append(ir.Param(a.arg, Type.OBJ, c[0], c[1]))
         else:
             params.append(ir.Param(a.arg, SCALAR_KIND.get(kind, Type.OBJ)))
     if fn.returns is None:
@@ -475,6 +668,7 @@ class _Lowerer:
         self.deopts = False      # a node that can deopt
         self.stored: set[str] = set()
         self.current: ast.stmt | None = None   # the statement being lowered (for messages)
+        self._new_locals: dict[str, str] | None = None
 
     # --- entry ---
 
@@ -718,10 +912,122 @@ class _Lowerer:
             self.store_effect(array)
             return self.take() + [ir.StoreIndex(array, index, value)]
         if isinstance(target, ast.Attribute):
+            found = self.field_set(target, value_node)
+            if found is not None:
+                return found
             raise Skip(line, f"assignment to attribute `{_src(target)}` is not supported")
         if isinstance(target, (ast.Tuple, ast.List)):
             raise Skip(line, "tuple unpacking is not supported")
         raise _unsupported(target)
+
+    # --- fixed-layout classes ---
+
+    def new_class(self, node: ast.expr) -> str | None:
+        """The class C when `node` is `C(args)` that lowers to `ir.New`."""
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+            return None
+        decl = self.info.classes.get(node.func.id)
+        if decl is None or not decl.trivial_init or self.is_local(decl.name) \
+                or node.keywords or any(isinstance(a, ast.Starred) for a in node.args) \
+                or len(node.args) != len(decl.fields):
+            return None
+        return decl.name
+
+    def new_locals(self) -> dict[str, str]:
+        """Locals every one of whose bindings is a `C(...)` lowered to `New`: always exactly a C."""
+        if self._new_locals is None:
+            good: dict[str, set[str]] = {}
+            bad: set[str] = set()
+            for stmt in rebinding._own_statements(self.fn):
+                if stmt is self.fn:
+                    continue
+                value = None
+                if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 \
+                        and isinstance(stmt.targets[0], ast.Name):
+                    name, value = stmt.targets[0].id, stmt.value
+                elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                    name, value = stmt.target.id, stmt.value
+                    if value is None:
+                        continue
+                else:
+                    for t in _binding_targets(stmt):
+                        bad |= {n.id for n in ast.walk(t) if isinstance(n, ast.Name)}
+                    continue
+                c = self.new_class(value)
+                if c is None:
+                    bad.add(name)
+                else:
+                    good.setdefault(name, set()).add(c)
+            self._new_locals = {n: next(iter(cs)) for n, cs in good.items()
+                                if n not in bad and len(cs) == 1 and n not in self.params}
+        return self._new_locals
+
+    def cls_of_name(self, name: str) -> tuple[str | None, bool]:
+        """(compiled class the name is declared to hold, whether its exact type is proved)."""
+        classes = self.info.classes
+        if name in self.params:
+            p = self.params[name]
+            if isinstance(p, ir.Param) and p.cls is not None:
+                rebound = any(b.how != "annotation" for b in self.bindings.get(name, []))
+                return p.cls, not p.optional and not rebound
+            return None, False
+        if name in self.new_locals():
+            return self.new_locals()[name], True
+        if name in self.bindings:
+            kinds = list(self.annotations.get(name, []))
+            if name not in self.annotations:
+                kinds += self.inferred.get(name, [])
+            found = {_class_of(k, classes) for _, k in kinds}
+            if len(found) == 1 and None not in found:
+                return next(iter(found))[0], False  # type: ignore[index]
+        return None, False
+
+    def field_target(self, node: ast.Attribute) -> tuple[ir.Local, str, bool] | None:
+        """(object, class, exact type proved) for `name.field` of a compiled class's field."""
+        if not (isinstance(node.value, ast.Name) and self.is_local(node.value.id)):
+            return None
+        cls, exact = self.cls_of_name(node.value.id)
+        if cls is None or node.attr not in self.info.classes[cls].fields:
+            return None
+        return ir.Local(Type.OBJ, node.value.id), cls, exact
+
+    def field_get(self, node: ast.Attribute) -> ir.Expr | None:
+        found = self.field_target(node)
+        if found is None:
+            return None
+        obj, cls, exact = found
+        if not exact:
+            if self.impure_mode:
+                raise Skip(node.lineno, f"`{_src(node)}`: the exact type of `{obj.name}` is not "
+                                        f"proved to be `{cls}`, and an impure function cannot "
+                                        "deopt on a failed check")
+            obj = ir.CheckExact(Type.OBJ, obj, cls)
+            self.deopts = True
+        return ir.FieldGet(Type.OBJ, obj, cls, node.attr)
+
+    def field_set(self, target: ast.Attribute, value_node: ast.expr) -> list[ir.Stmt] | None:
+        found = self.field_target(target)
+        if found is None:
+            return None
+        obj, cls, exact = found
+        if not exact:
+            raise Skip(target.lineno, f"`{_src(target)} = ...`: the exact type of `{obj.name}` is "
+                                      f"not proved to be `{cls}`, and a store cannot be guarded by "
+                                      "a deopting check")
+        value = self.boxed(self.value(value_node), value_node)
+        self.impure = True
+        return self.take() + [ir.FieldSet(obj, cls, target.attr, value)]
+
+    def arg_proved(self, e: ir.Expr, p: ir.Param) -> bool:
+        """The argument `e` is certainly accepted by the callee's entry guard for `p.cls`."""
+        if isinstance(e, ir.Const) and e.value is None:
+            return p.optional
+        if isinstance(e, (ir.New, ir.CheckExact)):
+            return e.cls == p.cls
+        if isinstance(e, ir.Local) and e.type == Type.OBJ:
+            cls, exact = self.cls_of_name(e.name)
+            return exact and cls == p.cls
+        return False
 
     def array_word(self, name: str) -> str:
         return "local array" if name in self.local_arrays else "array parameter"
@@ -860,6 +1166,8 @@ class _Lowerer:
     def return_(self, node: ast.Return) -> list[ir.Stmt]:
         returns = self.sig.returns
         if node.value is None or (isinstance(node.value, ast.Constant) and node.value.value is None):
+            if returns == Type.OBJ:
+                return [ir.Return(ir.Const(Type.OBJ, None))]
             if returns != Type.NONE:
                 raise Skip(node.lineno, f"returns None from a function declared to return "
                                         f"{TYPE_NAME[returns]}")
@@ -940,6 +1248,8 @@ class _Lowerer:
                 return ir.Const(Type.I64, v)
             if isinstance(v, float):
                 return ir.Const(Type.F64, v)
+            if v is None:
+                return ir.Const(Type.OBJ, None)
             raise Skip(line, f"{type(v).__name__} constant `{_src(node)}` is not supported")
         if isinstance(node, ast.Name):
             return self.name(node)
@@ -959,6 +1269,9 @@ class _Lowerer:
         if isinstance(node, ast.Attribute):
             if isinstance(node.value, ast.Name) and node.value.id in self.arrays:
                 raise self.array_misuse(node.value.id, node)
+            field_get = self.field_get(node)
+            if field_get is not None:
+                return field_get
             obj = self.boxed(self.sub(node.value), node.value)
             self.impure = True
             return ir.GetAttr(Type.OBJ, obj, node.attr)
@@ -1101,6 +1414,12 @@ class _Lowerer:
 
     def link(self, op: ast.cmpop, left: ir.Expr, right: ir.Expr, obj_ok: bool,
              node: ast.Compare) -> ir.Expr:
+        if isinstance(op, (ast.Is, ast.IsNot)):
+            if left.type != Type.OBJ or right.type != Type.OBJ:
+                raise Skip(node.lineno, f"identity comparison `{_src(node)}` of a native "
+                                        f"{TYPE_NAME[left.type if left.type != Type.OBJ else right.type]}"
+                                        " is not supported (only of objects)")
+            return ir.Is(Type.BOOL, left, right, isinstance(op, ast.IsNot))
         kind = COMPARE.get(type(op))
         if kind is None:
             raise Skip(node.lineno, f"comparison `{_src(node)}` is not supported "
@@ -1161,6 +1480,11 @@ class _Lowerer:
                     return arg  # float(x) of an exact float is x itself
                 self.impure = True
                 return ir.ObjToFloat(Type.F64, _box(arg))
+            new_cls = self.new_class(node)
+            if new_cls is not None:
+                self.hoist_ok = False
+                return ir.New(Type.OBJ, new_cls,
+                              tuple(self.boxed(self.value(a), a) for a in node.args))
             if not self.is_local(name) and name in self.env:
                 direct = self.direct_call(name, node)
                 if direct is not None:
@@ -1200,13 +1524,19 @@ class _Lowerer:
         for p, e in zip(callee.params, args):
             if p.type != Type.OBJ and e.type != p.type:
                 direct = False  # the callee's guard would deopt; the global keeps CPython's result
+        # A class parameter's guard (`type(x) is C`) fails for an argument not proved to be a C:
+        # that is a deopt of the callee at its entry, redoable only by a pure caller.
+        unproved = any(isinstance(p, ir.Param) and p.cls is not None and not self.arg_proved(e, p)
+                       for p, e in zip(callee.params, args))
+        if unproved and self.impure_mode:
+            direct = False
         if not direct:
             self.impure = True
             return ir.CallObject(Type.OBJ, ir.Global(Type.OBJ, name),
                                  tuple(self.boxed(e, a) for e, a in zip(args, node.args)))
         if not callee.pure:
             self.impure = True
-        if callee.may_deopt and not redo:
+        if (callee.may_deopt and not redo) or unproved:
             self.deopts = True
         typed = tuple(self.boxed(e, a) if p.type == Type.OBJ else e
                       for p, e, a in zip(callee.params, args, node.args))

@@ -130,7 +130,7 @@ class KlibScannerTest {
      * test pinned one -- `checkIndexOverflow`, `kotlinx.coroutines.flow.internal`'s bounds check -- as
      * bound. It was wrong: `checkIndexOverflow` is `@PublishedApi internal`, binary-visible so an
      * inline call site elsewhere in the *same* library can resolve it, but not source-visible outside
-     * that module. `KlibScanWorkAction`'s KDoc records how this was found -- `:ksp-fixtures
+     * that module. `KlibScanWorkAction`'s KDoc records how this was found -- `:python-multiplatform-gradle-plugin-fixtures
      * :klib-artifact:compileKotlinAndroidNativeArm64` failing to compile the generated fragment with
      * "it is internal in file", the first time this walker's output was ever actually compiled rather
      * than only unit-tested. `KlibScanner`'s `PUBLISHED_API` constant has the rest. Every other candidate in

@@ -5,10 +5,10 @@ name: TypedPython CI
 on:
   push:
     branches: [ "develop", "main" ]
-    paths: [ "python-multiplatform-ksp/**", "ksp-fixtures/app/**", ".github/workflows/typedpython.yml" ]
+    paths: [ "python-multiplatform-ksp/**", "python-multiplatform-ksp/fixtures/app/**", ".github/workflows/typedpython.yml" ]
   pull_request:
     branches: [ "develop", "main" ]
-    paths: [ "python-multiplatform-ksp/**", "ksp-fixtures/app/**", ".github/workflows/typedpython.yml" ]
+    paths: [ "python-multiplatform-ksp/**", "python-multiplatform-ksp/fixtures/app/**", ".github/workflows/typedpython.yml" ]
 
 concurrency:
   # A newer push to the same ref supersedes this run; frees the shared macOS runners.
@@ -86,7 +86,7 @@ jobs:
     # fixture's desktop JVM. buildTypedPythonBridge needs a host Python with pyrefly; without one the
     # four TypedPythonKotlinCallTest tests skip. Locally that is allowed; here a skip fails the job.
     # macOS only: elsewhere the JVM does not load libpython with global symbols, so the
-    # dynamic_lookup extension cannot resolve the C API (ksp-fixtures/app/build.gradle.kts).
+    # dynamic_lookup extension cannot resolve the C API (python-multiplatform-ksp/fixtures/app/build.gradle.kts).
     name: TypedPython from Kotlin, app fixture (macos-latest)
     runs-on: macos-latest
     steps:
@@ -108,15 +108,15 @@ jobs:
 
       - name: App fixture tests
         run: |
-          rm -rf ksp-fixtures/app/build/test-results/desktopTest
-          ./gradlew :ksp-fixtures:app:desktopTest --rerun --console=plain \
+          rm -rf python-multiplatform-ksp/fixtures/app/build/test-results/desktopTest
+          ./gradlew :python-multiplatform-ksp:fixtures:app:desktopTest --rerun --console=plain \
             -PtypedpythonPython="$PWD/python-multiplatform-ksp/.venv/bin/python"
 
       - name: The TypedPython tests ran (none skipped)
         run: |
           python3 - <<'PY'
           import glob, sys, xml.etree.ElementTree as ET
-          cases = [c for p in glob.glob("ksp-fixtures/app/build/test-results/desktopTest/*.xml")
+          cases = [c for p in glob.glob("python-multiplatform-ksp/fixtures/app/build/test-results/desktopTest/*.xml")
                    for c in ET.parse(p).getroot().iter("testcase")
                    if c.get("classname") == "fixture.app.TypedPythonKotlinCallTest"]
           skipped = [c.get("name") for c in cases if c.find("skipped") is not None]

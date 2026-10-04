@@ -18,7 +18,7 @@ import python.multiplatform.reflection.TypeTag
  * `$default` bits a Python call sets, what goes in the slots it left out, and what `$changed` is.
  *
  * The real end of it -- `androidx.compose.material3.Text` drawing "hi" -- is
- * `:ksp-fixtures:compose`'s `ComposableRenderTest`, which is desktop-only for exactly those reasons.
+ * `:python-multiplatform-compose:fixtures:compose`'s `ComposableRenderTest`, which is desktop-only for exactly those reasons.
  *
  * ### The shape, and why every field of it matters
  *

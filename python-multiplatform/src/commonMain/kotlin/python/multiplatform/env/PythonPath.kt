@@ -19,7 +19,7 @@ import python.native.ffi.Py_DecRef
  *
  * That form has to be *parsed and compiled* on every call (`Python3.exec` goes through
  * `PyRun_String`, measured at ~11 µs for a trivial statement in `EvalCheckpointTest`), and it
- * interpolates a filesystem path into Python source — a payload directory containing a quote or a
+ * interpolates a filesystem path into Python source, a payload directory containing a quote or a
  * backslash, which every Windows path does, either breaks the statement or changes what it does.
  * Going through the list object directly has neither problem.
  *
@@ -34,7 +34,7 @@ import python.native.ffi.Py_DecRef
  * ### Ordering
  *
  * [prepend] puts the entry at `sys.path[0]`, which is where CPython itself puts the directory of
- * the script being run. That is the right position for a payload — it *is* the application's own
+ * the script being run. That is the right position for a payload, it *is* the application's own
  * code, and an application must be able to ship a module that overrides one it inherits. The cost
  * of that choice is that a payload module named after a standard library one shadows it, so
  * [append] exists for an embedder who wants the opposite and knows why.
@@ -101,7 +101,7 @@ object PythonPath {
         true
     }
 
-    /** `sys.path`, a **borrowed** reference — `PySys_GetObject` does not hand ownership over. */
+    /** `sys.path`, a **borrowed** reference, `PySys_GetObject` does not hand ownership over. */
     private fun sysPathHoldingGIL(): NativePointer? = PySys_GetObject("path")
 
     private fun readEntriesHoldingGIL(path: NativePointer): List<String> {

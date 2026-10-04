@@ -6,7 +6,7 @@ section of `ir.py`. A function it cannot prove is removed from `Module.functions
 `Diagnostic`. A proved function comes back with each `Index`/`StoreIndex` whose bounds were proved
 marked `proven=True`; every other access has `proven=False` (an input `proven` is never trusted).
 
-The verifier reads nothing but `ir` — it is independent of the front end — and it trusts no flag
+The verifier reads nothing but `ir`, it is independent of the front end, and it trusts no flag
 the front end set (`pure`, `may_deopt`, `ArrayParam.stored`, node `type`s): each is recomputed from
 the body and compared.
 
@@ -42,6 +42,52 @@ Rules (the `rule` of a Diagnostic):
                               on a node `proven` does not apply to, or it is not a bool)
   verify/redo                 `Call.redo` where it is not legal (see below)
   verify/entry-global-open    a function with entry_globals is not closed
+  verify/class                a class named by FieldGet/FieldSet/New/IsExact/CheckExact/Param.cls is not
+                              a (valid) ClassDecl of the module, a field is not one of its fields, a
+                              New names a class without trivial_init or has the wrong arity, or a
+                              ClassDecl itself is malformed (bad name/fields, duplicates)
+  verify/field-unproved       a FieldGet/FieldSet whose object is not proved to be exactly the class
+
+Fixed-layout classes (SPEC N-11). The verifier never trusts the front end for them either:
+
+  * Every class named anywhere must be a valid `ClassDecl` of `Module.classes`; every field named
+    must be one of that class's `fields`; `New` needs `trivial_init` and exactly len(fields) OBJ
+    arguments; `Param.cls` only on an OBJ parameter (`optional` only together with `cls`).
+  * Exact-type proof for FieldGet/FieldSet (`verify/field-unproved` otherwise). The object must be
+    one of exactly these forms, for the same class C as the access:
+      (a) a `Local` that is a parameter with cls=C and optional=False, until the local is assigned;
+      (b) a `CheckExact(x, C)` node used directly as the object;
+      (c) a `New(C, ...)` node used directly as the object;
+      (d) a `Local` proved exact-C by control flow, with no assignment of it in between: inside the
+          `then` of `If(IsExact(Local, C), ...)`, or its `orelse` when the condition is false
+          (`Not(IsExact)`), and inside the right operand of an `And` whose left operand is
+          such a test (an `Or`'s right operand: when the left is false); or
+          `Is(Local x, Const(None, OBJ), negate=True)` (true, or `negate=False` false) when x is
+          an `optional` parameter of class C that the function never assigns anywhere; or
+          after `if <not exact>: return/break/continue` (the facts of the branches that fall
+          through are intersected); or a local assigned from (b), (c) or another proved local
+          (`x = New(C, ..)`, `x = CheckExact(y, C)`, `x = y`) from there until it is assigned again;
+      (e) a `Local` that is not a parameter, entry global or loop var, and whose every Assign in the
+          function is a `New(C, ...)` of that same class: whatever is read from it (definite
+          assignment is proved separately) is a C created by New. Flow-insensitive, so one other kind
+          of assignment anywhere in the function ends the form.
+    Facts are killed by any assignment of the local (and, in a loop, by an assignment anywhere in
+    the loop body for the whole loop, the loop var included). Nothing else is accepted: not
+    isinstance, not a fact about another local, not a fact through a call, GetAttr or FieldGet.
+  * A `Call` of a compiled callee whose parameter has cls=C (the callee's entry guard) with an
+    argument not proved exact-C by the forms above can fail that guard in the middle of the caller:
+    it counts toward `may_deopt` (so it is legal only in a pure function) unless it is a legal redo.
+  * Purity/deopt: CheckExact can deopt (like Unbox to i64): only in a pure function, and it counts
+    toward `may_deopt` even when redundant. FieldSet is an effect (and makes the function not
+    *closed*: replacing a slot may drop the last reference to the old value, whose `__del__` is user
+    code). FieldGet, Is, IsExact, New are not effects.
+  * Typing: Is/IsExact give BOOL over OBJ operands; FieldGet/New/CheckExact give OBJ; `Const(None,
+    OBJ)` is the only OBJ constant (anything else `verify/type`) and counts as a reference creator
+    (a new reference to the None singleton) wherever an OBJ may flow: an operand of Is, a returned
+    value, an argument.
+  * Ownership: New, FieldGet and CheckExact are reference creators. CheckExact is read as the IR says,
+    "`obj` itself ... after checking": the result is a new reference to the operand (the back end
+    increfs it); the operand's own reference is untouched.
 
 Proven i64 operations. The verifier never trusts `BinOp.proven` / `UnaryOp.proven`: for every I64
 expression it computes an interval [lo, hi] (exact Python ints) and accepts `proven=True` only on an
@@ -130,6 +176,7 @@ from .ir import (
     Local, MathCall, MathFunc, Module, NewArray, ObjToFloat, Or, Param, Return, StoreIndex, ToFloat,
     Truth, Tuple, Type, Unbox, UnaryOp, UnaryOpKind, While,
 )
+from .ir import CheckExact, ClassDecl, FieldGet, FieldSet, Is, IsExact, New
 
 DA = "verify/definite-assignment"
 MISSING_RETURN = "verify/missing-return"
@@ -149,6 +196,8 @@ CONDITION_ONLY = "verify/condition-only"
 PROVEN = "verify/proven-overflow"
 REDO = "verify/redo"
 ENTRY_OPEN = "verify/entry-global-open"
+CLASS = "verify/class"
+FIELD = "verify/field-unproved"
 
 
 @dataclass(frozen=True)
@@ -163,13 +212,15 @@ class Diagnostic:
 # the one the back end implements).
 _EXPRS = frozenset({Const, Local, BinOp, UnaryOp, Compare, And, Or, ToFloat, Box, Unbox, MathCall,
                     Call, Global, GetAttr, CallObject, Truth, CompareObj, ObjToFloat, Len, Index,
-                    NewArray, CopyArray, Tuple})
-_STMTS = frozenset({Assign, StoreIndex, ExprStmt, If, While, ForRange, Return, Break, Continue})
+                    NewArray, CopyArray, Tuple, Is, IsExact, CheckExact, FieldGet, New})
+_STMTS = frozenset({Assign, StoreIndex, ExprStmt, If, While, ForRange, Return, Break, Continue,
+                    FieldSet})
 # Nodes whose OBJ result is a new reference (ir.py "ownership": Box, Global, GetAttr, CallObject,
 # OBJ BinOp, Tuple), plus reads of an OBJ local (the local owns its reference; the back end increfs or
 # borrows under that rule) and Calls of a compiled function returning OBJ (which returns a new
 # reference by the same rule).
-_OBJ_PRODUCERS = frozenset({Box, Global, GetAttr, CallObject, BinOp, Local, Call, Tuple})
+_OBJ_PRODUCERS = frozenset({Box, Global, GetAttr, CallObject, BinOp, Local, Call, Tuple, New,
+                            FieldGet, CheckExact, Const})     # an OBJ Const is None (e_Const)
 _VALUE_TYPES = (Type.I64, Type.F64, Type.BOOL, Type.OBJ)        # what a local may hold
 _RETURN_TYPES = _VALUE_TYPES + (Type.NONE,)
 _ELEMENT = {Type.F64_ARRAY: Type.F64, Type.I64_ARRAY: Type.I64}
@@ -205,9 +256,15 @@ class _Checker:
     """Checks one function against the module's signatures. Collects diagnostics; rebuilds the
     body with proven bounds."""
 
-    def __init__(self, function: Function, signatures: dict[str, Function]):
+    def __init__(self, function: Function, signatures: dict[str, Function],
+                 classes: dict[str, ClassDecl] | None = None):
         self.fn = function
         self.sigs = signatures
+        self.classes = classes or {}
+        self.facts: dict[str, str] = {}      # local -> class it is proved exactly (see docstring)
+        self.optional: dict[str, str] = {}   # optional-class parameter -> class
+        self.reassigned: frozenset[str] = frozenset()
+        self.new_only: dict[str, str] = {}   # local whose every assignment is New(C, ..) -> C
         self.diags: list[Diagnostic] = []
         self.can_deopt = False
         self.effects: list[str] = []         # reasons the body is impure
@@ -246,6 +303,7 @@ class _Checker:
                                      f"ArrayParam")
                 else:
                     self.scalars[p.name] = p.type
+                    self.param_class(p)
             else:
                 self.error(UNKNOWN, f"parameter {p!r} is not an ir Param/ArrayParam")
                 continue
@@ -266,6 +324,9 @@ class _Checker:
             if p.type not in ir.SCALARS:
                 self.error(TYPE, f"entry global '{p.name}' has type {p.type}; only i64, f64 and "
                                  f"bool globals can be read at entry")
+                continue
+            if p.cls is not None or p.optional is not False:
+                self.error(TYPE, f"entry global '{p.name}' carries a class annotation")
                 continue
             if p.name in params or p.name in self.entry:
                 self.error(STRUCTURE, f"entry global '{p.name}' collides with a parameter or "
@@ -300,6 +361,102 @@ class _Checker:
             if not isinstance(getattr(fn, flag), bool):
                 self.error(TYPE, f"`{flag}` is not a bool")
         return frozenset(params)
+
+    def param_class(self, p: Param) -> None:
+        """`Param.cls`/`optional`: only on an OBJ parameter, naming a ClassDecl of the module. A
+        non-optional one is an exact-C fact at entry (the entry guard); an optional one is C or None."""
+        if type(p.optional) is not bool:
+            self.error(TYPE, f"parameter '{p.name}' has a non-bool `optional`")
+            return
+        if p.cls is None:
+            if p.optional:
+                self.error(TYPE, f"parameter '{p.name}' is optional but names no class")
+            return
+        if p.type is not Type.OBJ:
+            self.error(TYPE, f"parameter '{p.name}' names class {p.cls!r} but is "
+                             f"{p.type.value}, not obj")
+        elif not self.known_class(p.cls, f"parameter '{p.name}'"):
+            return
+        elif p.optional:
+            self.optional[p.name] = p.cls
+        else:
+            self.facts[p.name] = p.cls
+
+    def known_class(self, cls: object, what: str) -> bool:
+        if not isinstance(cls, str) or cls not in self.classes:
+            self.error(CLASS, f"{what} names class {cls!r}, which is not a compiled class of this "
+                              f"module")
+            return False
+        return True
+
+    def known_field(self, cls: str, field: object, what: str) -> bool:
+        if not self.known_class(cls, what):
+            return False
+        if not isinstance(field, str) or field not in self.classes[cls].fields:
+            self.error(CLASS, f"{what}: '{field}' is not a field of class '{cls}' "
+                              f"(fields: {', '.join(self.classes[cls].fields)})")
+            return False
+        return True
+
+    # --- exact-type facts ---------------------------------------------------------------------
+
+    def new_only_locals(self, params: frozenset[str]) -> dict[str, str]:
+        """Form (e): locals (not parameters, entry globals, loop vars or arrays) every Assign of
+        which is a `New` of one and the same declared class."""
+        values: dict[str, list[object]] = {}
+        _assigned_values(self.fn.body, values)
+        loop_vars = _loop_vars(self.fn.body)
+        out: dict[str, str] = {}
+        for name, vs in values.items():
+            if name in params or name in loop_vars or name in self.larrays:
+                continue
+            classes = {v.cls for v in vs if type(v) is New and isinstance(v.cls, str)}
+            if (len(classes) == 1 and all(type(v) is New for v in vs)
+                    and next(iter(classes)) in self.classes):
+                out[name] = next(iter(classes))
+        return out
+
+    def exact_of(self, e: object) -> str | None:
+        """The class `e` is proved to be exactly (forms (a)-(d) of the module docstring)."""
+        cls = type(e)
+        if cls is Local:
+            return self.facts.get(e.name) or self.new_only.get(e.name)
+        if cls is CheckExact or cls is New:
+            return e.cls if isinstance(e.cls, str) and e.cls in self.classes else None
+        return None
+
+    def _none_test(self, c: Is) -> str | None:
+        """`x is None` / `x is not None` on an optional-C parameter never assigned: the name."""
+        for a, b in ((c.left, c.right), (c.right, c.left)):
+            if (type(a) is Local and type(b) is Const and b.type is Type.OBJ and b.value is None
+                    and a.name in self.optional and a.name not in self.reassigned):
+                return a.name
+        return None
+
+    def facts_if(self, c: object, truth: bool) -> dict[str, str]:
+        """The exact-type facts that hold when condition `c` evaluated to `truth`."""
+        cls = type(c)
+        if cls is IsExact:
+            if truth and type(c.obj) is Local and c.cls in self.classes:
+                return {c.obj.name: c.cls}
+            return {}
+        if cls is Is and type(c.negate) is bool:
+            name = self._none_test(c)
+            if name is not None and truth is c.negate:     # `is not None` true, or `is None` false
+                return {name: self.optional[name]}
+            return {}
+        if cls is UnaryOp and c.op is UnaryOpKind.NOT:
+            return self.facts_if(c.operand, not truth)
+        if (cls is And and truth) or (cls is Or and not truth):
+            return {**self.facts_if(c.left, truth), **self.facts_if(c.right, truth)}
+        return {}
+
+    def proved(self, obj: ir.Expr, cls: str, what: str) -> None:
+        if self.exact_of(obj) != cls:
+            self.error(FIELD, f"{what}: the object is not proved to be exactly '{cls}' (needs an "
+                              f"exact-{cls} parameter, a CheckExact, a New, or a dominating "
+                              f"IsExact / `is not None` of an optional parameter on the same local, "
+                              f"with no assignment in between)")
 
     # --- expressions --------------------------------------------------------------------------
 
@@ -348,7 +505,9 @@ class _Checker:
               or (t is Type.F64 and type(v) is float)
               or (t is Type.BOOL and type(v) is bool)
               or (t is Type.NONE and v is None))
-        if not ok and t is not Type.OBJ:
+        if t is Type.OBJ:
+            ok = v is None          # the only OBJ constant: a new reference to the None singleton
+        if not ok:
             self.error(TYPE, f"constant {v!r} does not match type {t.value}")
         return e
 
@@ -488,7 +647,12 @@ class _Checker:
 
     def _bool_pair(self, e: And | Or, state: _State, cond: bool = False) -> ir.Expr:
         name = type(e).__name__
-        left, right = self.expr(e.left, state, cond), self.expr(e.right, state, cond)
+        left = self.expr(e.left, state, cond)
+        saved = self.facts
+        # the right operand runs only when the left was true (And) / false (Or)
+        self.facts = {**saved, **self.facts_if(left, type(e) is And)}
+        right = self.expr(e.right, state, cond)
+        self.facts = saved
         self.slot(left, Type.BOOL, f"left operand of {name}")
         self.slot(right, Type.BOOL, f"right operand of {name}")
         if e.type is not Type.BOOL:
@@ -586,6 +750,10 @@ class _Checker:
                                  f"bool and none results are exactly reproducible")
             else:
                 redo = True
+        if not redo:
+            for k, (a, p) in enumerate(zip(args, callee.params)):
+                if type(p) is Param and p.cls is not None and self.exact_of(a) != p.cls:
+                    self.can_deopt = True       # the callee's entry guard `type(x) is C` may fail
         if callee.may_deopt is True and not redo:
             self.can_deopt = True
         if not redo and not self.covers(callee):
@@ -723,6 +891,51 @@ class _Checker:
                 return loop.bounds_array == array
         return False
 
+    # --- fixed-layout classes -----------------------------------------------------------------
+
+    def e_Is(self, e: Is, state: _State) -> ir.Expr:
+        left = self.obj_operand(e.left, state, "left operand of is")
+        right = self.obj_operand(e.right, state, "right operand of is")
+        if type(e.negate) is not bool:
+            self.error(TYPE, f"Is `negate` {e.negate!r} is not a bool")
+        self.result(e, Type.BOOL)
+        return dataclasses.replace(e, left=left, right=right)
+
+    def e_IsExact(self, e: IsExact, state: _State) -> ir.Expr:
+        obj = self.obj_operand(e.obj, state, "operand of IsExact")
+        self.known_class(e.cls, "IsExact")
+        self.result(e, Type.BOOL)
+        return dataclasses.replace(e, obj=obj)
+
+    def e_CheckExact(self, e: CheckExact, state: _State) -> ir.Expr:
+        obj = self.obj_operand(e.obj, state, "operand of CheckExact")
+        self.known_class(e.cls, "CheckExact")
+        self.result(e, Type.OBJ)
+        self.can_deopt = True       # a wrong type deopts, even if the check is redundant
+        return dataclasses.replace(e, obj=obj)
+
+    def e_FieldGet(self, e: FieldGet, state: _State) -> ir.Expr:
+        obj = self.obj_operand(e.obj, state, f"object of .{e.field}")
+        self.result(e, Type.OBJ)
+        if self.known_field(e.cls, e.field, f"FieldGet .{e.field}"):
+            self.proved(obj, e.cls, f"FieldGet {e.cls}.{e.field}")
+        return dataclasses.replace(e, obj=obj)        # a slot read runs no user code: not an effect
+
+    def e_New(self, e: New, state: _State) -> ir.Expr:
+        args = self.args(e.args, state, f"New {e.cls}")
+        for k, a in enumerate(args):
+            self.slot(a, Type.OBJ, f"argument {k + 1} of New {e.cls}")
+        self.result(e, Type.OBJ)
+        if self.known_class(e.cls, "New"):
+            decl = self.classes[e.cls]
+            if decl.trivial_init is not True:
+                self.error(CLASS, f"New of '{e.cls}', whose __init__ is not trivial (it must be "
+                                  f"called as an object)")
+            if len(args) != len(decl.fields):
+                self.error(CLASS, f"New of '{e.cls}' has {len(args)} argument(s) for "
+                                  f"{len(decl.fields)} field(s)")
+        return dataclasses.replace(e, args=args)
+
     # --- tuples and local arrays --------------------------------------------------------------
 
     def e_Tuple(self, e: Tuple, state: _State) -> ir.Expr:
@@ -841,6 +1054,11 @@ class _Checker:
                 self.error(TYPE, f"None assigned to '{target}'")
         if target in self.entry:
             self.error(STRUCTURE, f"entry global '{target}' is assigned in the body")
+        proved = None if alloc else self.exact_of(value)
+        if proved is not None:
+            self.facts[target] = proved
+        else:
+            self.facts.pop(target, None)
         for loop in self.loops:
             if loop.var == target:
                 self.error(STRUCTURE, f"loop variable '{target}' is assigned in its loop body")
@@ -864,20 +1082,53 @@ class _Checker:
         self.slot(c2, Type.BOOL, f"condition of {what}")
         return c2
 
+    def s_FieldSet(self, s: FieldSet, state: _State):
+        obj = self.obj_operand(s.obj, state, f"object of .{s.field} =")
+        value = self.expr(s.value, state)
+        self.slot(value, Type.OBJ, f"value stored into .{s.field}")
+        if self.known_field(s.cls, s.field, f"FieldSet .{s.field}"):
+            self.proved(obj, s.cls, f"FieldSet {s.cls}.{s.field}")
+        self.effects.append(f"FieldSet .{s.field} (a store)")
+        self.opens.append(f"FieldSet .{s.field}")      # dropping the old value may run its __del__
+        return dataclasses.replace(s, obj=obj, value=value), state
+
     def s_If(self, s: If, state: _State):
         cond = self.cond(s.cond, state, "if")
+        base = self.facts
+        self.facts = {**base, **self.facts_if(cond, True)}
         then, st = self.block(s.then, state)
+        then_facts = self.facts
+        self.facts = {**base, **self.facts_if(cond, False)}
         orelse, se = self.block(s.orelse, state)
+        else_facts = self.facts
+        if st is None and se is None:
+            self.facts = base
+        elif st is None:
+            self.facts = else_facts
+        elif se is None:
+            self.facts = then_facts
+        else:
+            self.facts = {k: v for k, v in then_facts.items() if else_facts.get(k) == v}
         return dataclasses.replace(s, cond=cond, then=then, orelse=orelse), _meet(st, se)
 
+    def loop_facts(self, body: object, extra: tuple[str, ...] = ()) -> dict[str, str]:
+        """The facts that hold at the head of every iteration: those of the entry that nothing in
+        the loop body (or its loop var) assigns."""
+        killed = _assigned_names(body) | set(extra)
+        return {k: v for k, v in self.facts.items() if k not in killed}
+
     def s_While(self, s: While, state: _State):
+        head = self.loop_facts(s.body)
+        self.facts = head
         cond = self.cond(s.cond, state, "while")
         loop = _Loop(None, None)
+        self.facts = {**head, **self.facts_if(cond, True)}
         self.loops.append(loop)
         # Assignments only add names, so the loop-head state is the entry state (the meet of the
         # entry, end-of-body and continue states equals the entry state).
         body, _ = self.block(s.body, state)
         self.loops.pop()
+        self.facts = dict(head)       # leaving by the condition or a break: no more than the head's facts
         forever = type(s.cond) is Const and s.cond.type is Type.BOOL and s.cond.value is True
         after: _State = None if forever else state
         for br in loop.breaks:
@@ -924,8 +1175,11 @@ class _Checker:
                 lo = min(hi, elo + 1)
             loop.interval = (max(lo, _I64_MIN), min(hi, _I64_MAX))
         self.loops.append(loop)
+        head = self.loop_facts(s.body, (var,))
+        self.facts = dict(head)
         body, _ = self.block(s.body, None if state is None else state | {var})
         self.loops.pop()
+        self.facts = dict(head)
         # Zero iterations leave `var` (and everything the body assigns) as it was: the state after
         # the loop is the entry state, met with every break state (each a superset of it).
         after: _State = state
@@ -960,6 +1214,8 @@ class _Checker:
     def run(self) -> Function:
         fn = self.fn
         params = self.declarations()
+        self.reassigned = frozenset(_assigned_names(fn.body))
+        self.new_only = self.new_only_locals(params)
         if self.larrays:
             counts: dict[str, int] = {}
             _assigned(fn.body, counts)
@@ -1005,6 +1261,53 @@ def _assigned(body: object, counts: dict[str, int] | None = None) -> dict[str, i
     return counts
 
 
+def _assigned_values(body: object, out: dict[str, list[object]]) -> None:
+    """Every Assign value in `body`, by target (tolerates a malformed body)."""
+    if isinstance(body, tuple):
+        for st in body:
+            cls = type(st)
+            if cls is Assign:
+                out.setdefault(st.target, []).append(st.value)
+            elif cls is If:
+                _assigned_values(st.then, out)
+                _assigned_values(st.orelse, out)
+            elif cls in (While, ForRange):
+                _assigned_values(st.body, out)
+
+
+def _loop_vars(body: object) -> set[str]:
+    out: set[str] = set()
+    if isinstance(body, tuple):
+        for st in body:
+            cls = type(st)
+            if cls is If:
+                out |= _loop_vars(st.then) | _loop_vars(st.orelse)
+            elif cls is While:
+                out |= _loop_vars(st.body)
+            elif cls is ForRange:
+                out.add(st.var)
+                out |= _loop_vars(st.body)
+    return out
+
+
+def _assigned_names(body: object) -> set[str]:
+    """Every local assigned anywhere in `body` by an Assign or as a ForRange var."""
+    out: set[str] = set()
+    if isinstance(body, tuple):
+        for st in body:
+            cls = type(st)
+            if cls is Assign:
+                out.add(st.target)
+            elif cls is If:
+                out |= _assigned_names(st.then) | _assigned_names(st.orelse)
+            elif cls is While:
+                out |= _assigned_names(st.body)
+            elif cls is ForRange:
+                out.add(st.var)
+                out |= _assigned_names(st.body)
+    return out
+
+
 def _exact(op: BinOpKind, a: tuple[int, int], b: tuple[int, int]) -> tuple[int, int]:
     """The exact (unbounded) result interval of ADD/SUB/MUL on operand intervals."""
     if op is BinOpKind.ADD:
@@ -1041,12 +1344,13 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
                 reject(name, g.source_line, STRUCTURE, f"function '{name}' is defined "
                                                        f"{len(gs)} times")
     sigs = {name: gs[0] for name, gs in named.items() if len(gs) == 1}
+    classes, skipped_classes = _check_classes(module, set(named), diags)
 
     checked: dict[str, Function] = {}
     callees: dict[str, set[str]] = {}
     open_why: dict[str, str] = {}          # a function that runs user code -> why
     for name, g in sigs.items():
-        c = _Checker(g, sigs)
+        c = _Checker(g, sigs, classes)
         rebuilt = c.run()
         for d in c.diags:
             reject(d.function, d.source_line, d.rule, d.message)
@@ -1092,6 +1396,44 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
     kept = tuple(checked[g.name] for g in functions
                  if type(g) is Function and g.name in checked and g.name not in reasons)
     skipped = dict(module.skipped)
-    for name, reason in reasons.items():
+    for name, reason in {**skipped_classes, **reasons}.items():
         skipped.setdefault(name, reason)
-    return Module(module.name, kept, skipped), diags
+    return Module(module.name, kept, skipped, tuple(classes.values())), diags
+
+
+def _check_classes(module: Module, function_names: set[str], diags: list[Diagnostic]
+                   ) -> tuple[dict[str, ClassDecl], dict[str, str]]:
+    """The valid ClassDecls of the module by name, and the reason for each invalid one."""
+    declared = module.classes if isinstance(module.classes, tuple) else ()
+    names: dict[str, int] = {}
+    for c in declared:
+        if type(c) is ClassDecl and isinstance(c.name, str):
+            names[c.name] = names.get(c.name, 0) + 1
+    valid: dict[str, ClassDecl] = {}
+    bad: dict[str, str] = {}
+    for c in declared:
+        problem = None
+        if type(c) is not ClassDecl:
+            problem = f"{type(c).__name__} is not an ir ClassDecl"
+        elif not (isinstance(c.name, str) and c.name.isidentifier()):
+            problem = f"class name {c.name!r} is not an identifier"
+        elif names[c.name] > 1:
+            problem = f"class '{c.name}' is declared {names[c.name]} times"
+        elif c.name in function_names:
+            problem = f"class '{c.name}' has the name of a function of the module"
+        elif not (isinstance(c.fields, tuple) and all(isinstance(f, str) and f.isidentifier()
+                                                      for f in c.fields)):
+            problem = f"fields of class '{c.name}' are not a tuple of identifiers"
+        elif len(set(c.fields)) != len(c.fields):
+            problem = f"class '{c.name}' lists a field twice"
+        elif type(c.trivial_init) is not bool:
+            problem = f"`trivial_init` of class '{c.name}' is not a bool"
+        name = getattr(c, "name", repr(c))
+        if problem is None:
+            valid[c.name] = c
+        else:
+            d = Diagnostic(str(name), CLASS, problem, 0)
+            if d not in diags:
+                diags.append(d)
+            bad.setdefault(str(name), f"{CLASS}: {problem}")
+    return valid, bad

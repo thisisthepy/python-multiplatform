@@ -20,7 +20,7 @@ Conclusions (current):
   `ob_tid` instead of a refcount (header layout differs), and heap types are deferred-ref-counted,
   so the type's count is observable only after a collection. An eval-loop checkpoint provably does
   not fix it; two `PyGC_Collect()` calls in the test do. (§3)
-- **The checkpoint fixes §1 on the GIL build; free-threaded it often reclaims nothing**, because
+- **The checkpoint fixes §1 on the GIL build; free-threaded it often reclaims nothing**: because
   `_Py_RunGC` re-asks `gc_should_collect`, which gates generation 0 on growth of the **whole
   process's** memory footprint (the JVM's). Python-side allocation cannot move it. Not caused by
   per-call `PyGILState_Ensure/Release` scopes (tested, rejected). (§8, §8d)
@@ -116,7 +116,7 @@ one `_Py_HandlePending` (BRC merge, QSBR sweep, scheduled collection if any). No
 `Python3.autoDrainInterval` outermost scopes, and only if `ReleaseCounter.released` has moved.
 `reachEvalCheckpointHoldingGIL` declines while `PyErr_Occurred()` is non-null. It is not taken from
 the cleaner thread (the queue belongs to the owning thread; running Python there is the ROADMAP §1
-deadlock) — pinned by `EvalCheckpointTest.testCleanerActivityAloneTakesNoCheckpoint`.
+deadlock), pinned by `EvalCheckpointTest.testCleanerActivityAloneTakesNoCheckpoint`.
 `PyGC_Collect` is the one Stable ABI call that reclaims on behalf of other threads (it stops the
 world and merges each thread state), at heap-walk cost, and the only thing that materialises a
 deferred reference.
@@ -128,7 +128,7 @@ The test asserts the *ordering*, not the numbers.
 
 | | ns/op | |
 |---|---:|---|
-| `withGIL { }` — attach and detach | 170.51 | floor |
+| `withGIL { }`, attach and detach | 170.51 | floor |
 | `Python3.drainPendingReleases()` | 302.70 | ~132 ns over floor |
 | `withGIL { Py_MakePendingCalls() }` | 197.34 | cheap, does not merge |
 | `Python3.exec("pass")` | 7 037.04 | 23× the checkpoint |
@@ -211,14 +211,14 @@ Experiments (all in `FreeThreadedGCGateTest`; residue of 20,000 and collections 
 
 | experiment | free-threaded | GIL |
 |---|---|---|
-| `gc.get_count()[0]` shape across workload | sawtooth `[1728, 1488, 976, 464, 2464, 1488, 976, 464, 2464, 1488]`, 0 collections, residue 20,000 (memory gate declines) | — |
-| threshold `(2000,10,10)` | 20,000 — 0 collections | 1,968 — 9 collections |
-| `(2000,0,0)` (`old[0].threshold == 0` short-circuits `:2126`) | **1,318 — 8 collections** | 1,966 — 5 collections |
-| `(2000,10,10)` again (A/B/A, one JVM) | 20,000 — 0 | 1,970 — 9 |
+| `gc.get_count()[0]` shape across workload | sawtooth `[1728, 1488, 976, 464, 2464, 1488, 976, 464, 2464, 1488]`, 0 collections, residue 20,000 (memory gate declines) | - |
+| threshold `(2000,10,10)` | 20,000, 0 collections | 1,968, 9 collections |
+| `(2000,0,0)` (`old[0].threshold == 0` short-circuits `:2126`) | **1,318, 8 collections** | 1,966, 5 collections |
+| `(2000,10,10)` again (A/B/A, one JVM) | 20,000, 0 | 1,970, 9 |
 | `threshold0` 2000 / 500 / 100 (bar 80,000 / 20,000 / 4,000) | 20,000 / 20,000 / **1,466 (3 collections)** | scales smoothly: 9 / 36 / 172 collections |
-| baseline | 20,000 — 0 | 1,972 — 9 |
-| 400 MB ballast faulted in midway | **9,754 — 1 collection** | 1,988 — 9 |
-| ballast dropped | 20,000 — 0 | 1,968 — 9 |
+| baseline | 20,000, 0 | 1,972, 9 |
+| 400 MB ballast faulted in midway | **9,754, 1 collection** | 1,988, 9 |
+| ballast dropped | 20,000, 0 | 1,968, 9 |
 
 The ballast result reproduced identically in three consecutive JVMs: JVM memory growth, and nothing
 else, collected Python cycles. Probe pitfall recorded: sampling `gc.get_count()` every 500

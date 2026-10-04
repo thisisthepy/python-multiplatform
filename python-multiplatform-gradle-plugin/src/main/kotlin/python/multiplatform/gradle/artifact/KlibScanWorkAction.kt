@@ -99,7 +99,7 @@ internal data class KlibScanResult(
  * list into the worker copied the collision in with it, and
  * `:generatePythonArtifactBindings` failed with the same
  * `NoSuchMethodError: KotlinLibraryImplKt.createKotlinLibrary$default` the isolation was introduced to
- * fix. In this repository it happened to work: `ksp-fixtures` resolves the plugin from an *included
+ * fix. In this repository it happened to work: the `fixtures/` modules resolve the plugin from an *included
  * build*, which does get a scope of its own, so no in-repo fixture can see this.
  *
  * The worker classpath is therefore built from an explicit coordinate list

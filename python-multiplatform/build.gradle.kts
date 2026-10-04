@@ -1390,7 +1390,7 @@ kotlin {
 }
 
 /**
- * The iOS `Python.framework` ships only the interpreter binary and headers — it carries no
+ * The iOS `Python.framework` ships only the interpreter binary and headers, it carries no
  * standard library. `Py_Initialize()` therefore aborts the process with
  * "Fatal Python error: Failed to import encodings module" unless PYTHONHOME points at a
  * prefix containing `lib/python3.13`.
@@ -1425,7 +1425,7 @@ tasks.withType<org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeSimu
 // workspace path through SIMCTL_CHILD_PYTHONHOME. An installed app has no such variable, and a path on
 // this workspace's external volume parks the sandboxed app at 0% CPU (iosMain/README.md). So an app
 // carries its own prefix inside its bundle, staged here per slice and copied in by the Xcode Run
-// Script phase `tools/xcode/install-python.sh`; `IosPythonHome` (iosMain) finds it at run time.
+// Script phase `python-multiplatform-gradle-plugin/src/main/resources/xcode/install-python.sh`; `IosPythonHome` (iosMain) finds it at run time.
 // The selection rules are `IosPythonHomeLayout` in the Gradle plugin, where they are unit-tested.
 // =================================================================================================
 
@@ -1925,7 +1925,7 @@ listOf("Arm64" to "arm64-v8a", "X64" to "x86_64").forEach { (targetSuffix, abi) 
 // Ordering comes free from ES modules: the import-object module imports `cpython.mjs`, which has a
 // top-level `await`, so Emscripten is fully instantiated before the import object is built.
 //
-// The CPython build itself is produced by `tools/wasm/build-cpython.sh` (also reachable as the
+// The CPython build itself is produced by `python-multiplatform/scripts/wasm/build-cpython.sh` (also reachable as the
 // `buildWasmPython` task below) -- CPython 3.14.2 matched to `pyemscripten_2026_0` (PEP 783),
 // relinked with `wasmExports,wasmMemory` added to `-sEXPORTED_RUNTIME_METHODS`. Without those two the
 // 8287 wasm exports are present in the binary but unreachable from JS, so there is nothing to hand
@@ -1951,12 +1951,12 @@ val wasmPythonDir: String = (project.findProperty("wasmPythonDir")?.toString()
 val buildWasmPython by tasks.registering(Exec::class) {
     group = "python"
     description = "Builds CPython 3.14.2 for wasm32-emscripten (pyemscripten_2026_0) into .caches/"
-    val script = rootProject.layout.projectDirectory.file("tools/wasm/build-cpython.sh").asFile
+    val script = rootProject.layout.projectDirectory.file("python-multiplatform/scripts/wasm/build-cpython.sh").asFile
     commandLine("bash", script.absolutePath, "all")
 }
 
 /**
- * Where `tools/wasm/build-cpython.sh wheels` puts the pinned compiled wheels the wasm suite loads
+ * Where `python-multiplatform/scripts/wasm/build-cpython.sh wheels` puts the pinned compiled wheels the wasm suite loads
  * (`wasmJsTest/.../WasmCompiledWheelTest`). Not checked in: they are downloaded by URL and accepted
  * only against the sha256 the script pins.
  */
@@ -1968,7 +1968,7 @@ val wasmWheelsDir: String = (project.findProperty("wasmWheelsDir")?.toString()
 val fetchWasmWheels by tasks.registering(Exec::class) {
     group = "python"
     description = "Downloads the pinned pyemscripten_2026_0 wheels the wasm suite loads into .caches/"
-    val script = rootProject.layout.projectDirectory.file("tools/wasm/build-cpython.sh").asFile
+    val script = rootProject.layout.projectDirectory.file("python-multiplatform/scripts/wasm/build-cpython.sh").asFile
     environment("WASM_WHEELS_DIR", wasmWheelsDir)
     commandLine("bash", script.absolutePath, "wheels")
 }
@@ -2043,7 +2043,7 @@ fun Task.wasmRuntimePresent(marker: File): Boolean {
     val remedy = "Unpack the published runtime " +
         "(io.github.thisisthepy:python-multiplatform-wasm-runtime:$libraryVersion) and point " +
         "-PwasmPythonDir / PMP_PYTHON_DIR at it, or build one into the default location with " +
-        "./gradlew :python-multiplatform:buildWasmPython (tools/wasm/build-cpython.sh)."
+        "./gradlew :python-multiplatform:buildWasmPython (python-multiplatform/scripts/wasm/build-cpython.sh)."
     val what = "$name: no CPython Emscripten build at ${marker.parentFile} " +
         "(looked for ${marker.name})."
     if (requireWasmRuntime) {
@@ -2177,7 +2177,7 @@ val wasmBrowserRuntimeZip by tasks.registering(Zip::class) {
  *
  * Byte-identical in intent to the two substitutions the `KotlinJsTest` block below performs on this
  * module's own test bundle, and it exists as a function because a *consumer* has to perform them
- * too — on its own webpack context, against its own module name. Neither can be done from inside
+ * too, on its own webpack context, against its own module name. Neither can be done from inside
  * Kotlin: one is the compiler's `intrinsics.memory` placeholder, the other needs a value
  * (`wasmInstance.exports`) that exists only in the generated entry module's scope.
  *
@@ -2233,11 +2233,11 @@ fun patchKotlinWasmOutputForCPython(dir: File, modulePrefix: String, logger: org
  * The entry module with `pmpSetKotlinExports(exports)` inserted, and the *position* is the point.
  *
  * This wiring was written against a test bundle, whose entry module ends at
- * `setWasmExports(wasmExports)` — the runner calls `startUnitTests` later, from outside — so
+ * `setWasmExports(wasmExports)`, the runner calls `startUnitTests` later, from outside, so
  * appending the handoff was enough. An **executable** bundle does not end there:
  * `binaries.executable()` makes the generated entry module finish with `exports._start()`, which is
  * Kotlin `main()`. Appended text therefore ran *after* the whole application had already executed,
- * and every upcall in it failed with `pmpRegisterUpcall returned -1` — the code for "`kotlinExports`
+ * and every upcall in it failed with `pmpRegisterUpcall returned -1`, the code for "`kotlinExports`
  * is still null".
  *
  * Observed in a browser rather than reasoned about: the sample printed sections 1-4 correctly and
@@ -2560,7 +2560,7 @@ tasks.withType<org.jetbrains.kotlin.gradle.targets.js.testing.KotlinJsTest>().co
             logger.lifecycle(
                 "No wheels in $wasmWheelsDir -- WasmCompiledWheelTest will " +
                     (if (requireWasmRuntime) "FAIL (-PrequireWasmRuntime)" else "skip") +
-                    ". Fetch them with tools/wasm/build-cpython.sh wheels (or :python-multiplatform:fetchWasmWheels)."
+                    ". Fetch them with python-multiplatform/scripts/wasm/build-cpython.sh wheels (or :python-multiplatform:fetchWasmWheels)."
             )
         }
         dir.resolve("cpython-config.mjs").appendText(
@@ -2744,8 +2744,8 @@ publishing {
             url.set("https://github.com/thisisthepy/python-multiplatform-mobile")
             licenses {
                 license {
-                    //name.set("The Apache License, Version 2.0")
-                    //url.set("http://www.apache.org/licenses/LICENSE-2.0.txt")
+                    name.set("The Apache License, Version 2.0")
+                    url.set("https://www.apache.org/licenses/LICENSE-2.0.txt")
                 }
             }
             developers {

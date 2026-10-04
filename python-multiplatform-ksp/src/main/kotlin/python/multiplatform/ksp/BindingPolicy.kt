@@ -132,7 +132,7 @@ object BindingPolicy {
      *     Cannot access 'privateSet': it is private in 'fixture.library.RestrictedSetters'.
      *     Cannot access 'topLevelPrivateSet': it is private in file.
      *
-     * -- observed on `ksp-fixtures/library`'s `RestrictedSetters` before this check existed.
+     * -- observed on `python-multiplatform-ksp/fixtures/library`'s `RestrictedSetters` before this check existed.
      *
      * `internal set` is excluded for a different reason, and the difference is worth stating
      * because it does *not* announce itself: `internal` is enforced per Kotlin module and the

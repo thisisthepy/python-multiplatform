@@ -1,4 +1,4 @@
-# artMain — rules
+# artMain, rules
 
 androidNative sources shared only by `androidNativeArm64` and `androidNativeX64`. iOS depends on
 `nativeMain` directly and never sees this, which is what makes it the right home for JNI code.
@@ -29,5 +29,5 @@ once. Measured against the per-call equivalent on device:
 | `Python3.exec` | 17799.46 ns | 10123.94 ns | 1.8x |
 
 They must take and return primitives, or fill a caller-provided array: Kotlin/Native objects
-cannot cross to the JVM. And they run Python, so they use ordinary JNI — a GC-blocking
+cannot cross to the JVM. And they run Python, so they use ordinary JNI, a GC-blocking
 convention would be wrong regardless of speed.
