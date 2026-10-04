@@ -31,7 +31,8 @@ TypedPython 의 목표는 **새 언어를 만들지 않고, 파이썬 문법 그
 
 1. 타입이 확정된 코드는 **네이티브로 컴파일**해서 앱에 싣는다. PythonMultiplatform 의 배포 목표인
    "파이썬 부분도 컴파일된 채로 들어간다" 와 같은 자리다.
-2. GPU 커널을 **별도 언어(CUDA, Metal Shading Language, Mojo) 없이** 파이썬 서브셋으로 쓴다.
+2. GPU 커널과 CPU SIMD 를 **별도 언어(CUDA, Metal Shading Language, Mojo) 없이** 파이썬 서브셋으로
+   쓴다. 2026-10-04 에 탐색에서 약속으로 올라갔다 (INTENT §1.5, §5).
 
 ## 2. 원칙
 
@@ -61,8 +62,8 @@ TypedPython 의 목표는 **새 언어를 만들지 않고, 파이썬 문법 그
 |---|---|---|---|
 | 0 | 서드파티 패키지 (의존성) | 없음, 검사하지 않는다 | 바이트코드 (pypackpack 이 받은 그대로) |
 | 1 `checked` | **사용자 프로젝트의 파이썬 코드 전부, 기본값** | 빌드 타임 타입 오류, `Any` 유출 0 (§4.2) | 바이트코드 |
-| 1 `compiled` | `@compiled` (내장 이름, import 없음) 또는 모듈 선언 `# typedpython: compiled` | `checked` + §3.1 금지 목록 | C 확장 모듈 |
-| 2 `kernel` | `@kernel` | 객체·힙 할당 없음, 고정 dtype | SPIR-V / MSL / WGSL / PTX |
+| 1 `compiled` | `@compiled` (내장 이름, import 없음) 또는 모듈 선언 `# typedpython: compiled` | `checked` + §3.1 금지 목록 | C 확장 모듈 (NEON · AVX 벡터화, §5.3) |
+| 2 `kernel` | `@kernel` | 객체·힙 할당 없음, 고정 dtype | SPIR-V / MSL (직접) / WGSL / PTX, 빌드 타임 (§5) |
 
 - **사용자 코드는 표시하지 않아도 검사된다.** 타입 오류가 있으면 Kotlin 컴파일 에러처럼 빌드가
   실패한다. TS 의 `strict` 기본값과 같은 위치다.
@@ -322,43 +323,96 @@ PyPy·GraalVM 과 같은 방식이다. N-11 클래스의 객체를 PyObject 대�
 **선행 조건:** 스텁 생성기가 픽스처 대역이 아닌 실제 `pythonx-map.toml` 을 읽고, 생성된 스텁이
 IDE·타입 체커가 찾는 자리(pythonx-compose 배포본)에 설치돼야 한다. 2026-10 현재 미완료.
 
-## 5. 등급 2, 별도 언어 없는 GPU
+## 5. 등급 2, 별도 언어 없는 커널
+
+> **결정 (2026-10-04, 메인테이너):** GPU 커널과 CPU SIMD 는 탐색이 아니라 **약속**이다 (INTENT §1.5).
+> 아래 백엔드 결정의 근거는 [`typedpython-kernel-backend.md`](../investigations/typedpython-kernel-backend.md)
+> 와 [`typedpython-kernel-ir.md`](../investigations/typedpython-kernel-ir.md) 에 있다. 두 조사는 실제 기기
+> 성능을 재지 않았다. 아래 "측정" 표기가 붙은 항목은 첫 조각에서 확인한다.
 
 ### 5.1 하드 제약: AOT
 
 **iOS 는 런타임 코드 생성을 금지한다.** torchnative `docs/design/DESIGN.md` 는 이 이유로 Triton 을
 기각했다. Android 에도 인앱 GPU 컴파일러 툴체인이 없고, autotuning 워밍업은 짧은 세션에서 상각되지
-않는다. 따라서 **GPU 커널은 빌드 타임에 컴파일된다.** JIT 은 데스크톱 개발 편의로만 허용한다.
+않는다. 따라서 **커널은 빌드 타임에 컴파일된다.** JIT 은 데스크톱 개발 편의로만 허용한다. 컴파일러는
+빌드 도구에만 들어가고 앱에는 컴파일된 커널만 실린다. 그래서 컴파일러 쪽 의존성의 무게는 앱 크기가
+아니라 툴체인의 문제다.
 
-### 5.2 커널 모델
+### 5.2 커널 모델: 타일 우선, SIMT 는 폴백
 
-Triton · NVIDIA Warp 처럼 파이썬 함수에 `@kernel` 을 붙인다.
+파이썬 함수에 `@kernel` 을 붙인다.
 
-- **처음에는 SIMT** (스레드 인덱스 기반). 컴퓨트 셰이더에 그대로 대응된다.
-- 타일 추상화(Triton · cuTile 식)는 그다음.
-- 커널 안: 고정 dtype 스칼라, 버퍼·텐서 뷰, 산술, 제어 흐름, 공유 메모리, 배리어.
+- **기본은 타일 수준이다.** 타일 복사, 타일 행렬곱, 단계별 파이프라이닝, 공유 메모리·레지스터 조각
+  할당을 1급 연산으로 둔다 (TileLang 의 `T.copy` · `T.gemm` · `T.Pipelined` 와 같은 층위). AI 커널의
+  성능은 행렬 유닛(텐서 코어, Apple simdgroup_matrix · Metal 4 cooperative tensor, Vulkan
+  `VK_KHR_cooperative_matrix`)과 메모리 계층을 쓰는 데서 나오고, 그것을 표현하는 단위가 타일이다.
+- **SIMT(스레드 인덱스 기반)는 폴백이자 저수준 탈출구다.** 행렬 유닛이 없는 기기가 실제로 많다
+  (Mali 대부분, 구형 Adreno). 타일 연산은 행렬 유닛이 없으면 SIMT 코드로 낮춰진다.
+- 커널 안: 고정 dtype 스칼라(f32, f16, bf16, int8 포함), 버퍼·텐서 뷰, 산술, 제어 흐름, 배리어.
   객체 생성·힙 할당·예외·파이썬 호출은 없다. 위반은 등급 1 과 같은 게이트에서 컴파일 에러.
-- 커널 함수도 유효한 파이썬이다. CPU 에서 참조 구현으로 실행해 수치를 대조할 수 있다.
+- **커널 함수도 유효한 파이썬이다.** 타일 연산은 CPU 참조 구현을 가진 일반 파이썬 함수이고, 커널은
+  CPython 에서 그대로 실행되어 수치를 대조할 수 있다. TileLang · Triton 과 갈리는 지점이다.
 
-### 5.3 컴파일 경로
+### 5.3 CPU SIMD: `@compiled` 의 벡터화
 
-    @kernel 서브셋 → 자체 소형 IR → SPIR-V ─┬─ Vulkan (Android, 데스크톱)
-                                            ├─ SPIRV-Cross → MSL (iOS, macOS)
-                                            └─ naga → WGSL (웹)
-                                  └──────────── PTX (데스크톱 CUDA, 별도)
+Mojo 의 절반은 CPU SIMD 다. 등급 1 `@compiled` 의 C 백엔드(§4.3)가 이 자리를 맡는다.
 
-한 소스에서 모바일·데스크톱·웹 타깃이 나온다.
+- 첫 단계는 **C 벡터 확장**(`__attribute__((vector_size))`)으로 NEON · AVX 를 내는 것이다.
+- 행렬곱 같은 핫 커널은 손으로 쓴 NEON 경로를 둔다.
+- 벡터 폭과 dtype 을 표현하는 타입은 등급 2 의 타일·dtype 표기와 같은 어휘를 쓴다.
 
-### 5.4 착지점, torchnative
+이 절은 조사가 얕다(investigations 의 [I] 표기). 첫 GPU 조각 다음에 별도로 설계한다.
 
-컴파일된 커널을 **`torch.library` 커스텀 op 로 등록**하고 mps / vulkan 구현을 붙인다. 그러면
-`transformers` 코드가 수정 없이 그 커널을 쓴다.
+### 5.4 IR: 우리 것, MLIR 에 사상되게
 
-torchnative 의 설계는 이미 이 자리를 비워두고 있다. 융합 어텐션 같은 커널 계층을 "prefill 문제의
-예정된 해법" 으로 지목했고, 커널 소스 후보로 손으로 쓴 Metal/NEON, CubeCL, AOT Triton 을 올려
-두었다. TypedPython 등급 2 는 **같은 자리를 파이썬으로 채우는 네 번째 후보**다.
+프론트엔드(유효한 파이썬 커널을 읽는 부분)와 IR 은 우리가 만든다. "CPython 에서 그대로 실행" 원칙을
+지키는 길이 이것뿐이다. 다만 IR 은 **MLIR 의 gpu · vector · linalg 구조에 그대로 사상되게** 설계한다.
+나중에 MLIR 로 옮기거나 둘 사이를 오가는 비용을 낮추기 위해서다.
 
-### 5.5 선례, Taichi
+- **MLIR 파이썬 휠은 선택적 보조 도구다.** SPIR-V · PTX 직렬화, 검증, 교차 대조에 쓴다. 공식 휠은
+  LLVM 의 nightly(eudsl, alpha)이고 PyPI 에 없으며, 3.14t 휠은 있으나 **3.15t 휠은 아직 없다**(조사
+  시점 2026-10-04). 그래서 3.14t 별도 프로세스에서 돌리고, 날짜를 고정한 휠을 잠금 파일에 둔다. 빠지면
+  SPIR-V 를 직접 내는 쪽으로 돌아간다.
+- MLIR 의 타일링 · 벡터 · transform 패스를 쓸지는 **첫 조각이 동작한 뒤** 정한다.
+- 채택하지 않는 것(참고 자료로만): TileLang/TVM (Vulkan 백엔드 없음, 커널이 일반 파이썬으로 실행되지
+  않음), CubeCL (진입점이 Rust 매크로, JIT 전용), IREE (모델 단위 입력과 자체 출력 형식, SPIR-V 코드
+  생성만 떼어 쓸 공식 경로 없음), xDSL (spirv 방언·SPIR-V/MSL/PTX 출력기 없음).
+
+### 5.5 출력기: 대상별로 교체 가능
+
+    @kernel (유효한 파이썬) → 프론트엔드 → 우리 IR ─┬─ SPIR-V ──── Vulkan (Android, 데스크톱)
+                                                    ├─ MSL 직접 ─ Metal (iOS, macOS)
+                                                    ├─ WGSL ───── WebGPU (웹)
+                                                    ├─ PTX ────── CUDA (데스크톱)
+                                                    └─ C + 벡터 확장 ─ CPU (참조 · 폴백)
+
+- **Apple 은 MSL 을 직접 낸다.** SPIRV-Cross 를 거치면 행렬 유닛이 8x8 float simdgroup 까지만 가고,
+  Metal 4 텐서 연산(MSL 4 전용)에는 닿지 않는다.
+- **MSL 과 WGSL 출력기는 어느 IR 을 택해도 우리가 쓴다.** MLIR 상류에 두 대상이 없다.
+- SPIR-V 와 PTX 는 직접 내거나 MLIR 휠로 직렬화한다 (§5.4).
+
+### 5.6 런타임과 착지점: torchnative
+
+**별도 런타임을 만들지 않는다.** 커널은 torchnative 의 장치 계층에서 실행된다.
+
+- **Vulkan:** torchnative `torch_c/src/vulkan.rs` 는 이미 SPIR-V 를 싣고(`include_bytes!`), 파이프라인을
+  만들고, push constant 로 shape 을 넘겨 실행한다. 첫 조각은 glslc 로 만든 셰이더 자리에 우리
+  컴파일러가 만든 SPIR-V 를 넣는 일이다.
+- **Metal:** candle-metal 경로. 우리 MSL 커널을 거기에 붙이는 방식은 torchnative 와 정한다 (§8).
+- **wgpu 는 웹 전용이다.** torchnative 가 기기에서 두 방식을 나란히 재 보았다: ash 는 크레이트 4 개
+  719 KB, wgpu 는 60 개 6.77 MB 이고 torchnative 는 ash 를 권고했다(`docs/devices/VULKAN.md` §5.3).
+  wgpu 를 네이티브 런타임으로 쓰면 행렬 유닛이 실험 기능 뒤에 갇힌다.
+- **착지:** 컴파일된 커널은 `torch.library` 커스텀 op, 또는 torchnative 가 빌드 타임으로 옮긴 HF
+  `kernels` 번들 리졸버의 항목으로 등록된다. 그러면 `transformers` 코드가 수정 없이 그 커널을 쓴다.
+  `kernels` 규격에 `vulkan` 슬롯이 없는 구멍을 이 커널이 메운다.
+- **수치 기준:** torchnative CPU 경로(bf16/fp16 에서 비트 일치하는 `flash.rs` 등)가 정답지다. 커널의
+  일반 파이썬 실행, torchnative CPU, GPU 출력의 세 쪽을 대조한다.
+- **자동 융합은 뒤로 미룬다.** torchnative 의 그래프 캡처로 `torch.compile` 을 대신하는 길(캡처한
+  그래프의 융합 구간을 커널 컴파일러로 넘김)은 가치가 크지만, 그 캡처는 동적 shape · in-place 변경 ·
+  제어 흐름을 거부하고 LLM 의 KV 캐시 갱신이 in-place 라 정면으로 걸린다. 그전까지는 리졸버를 통한
+  레이어 교체로 착지한다.
+
+### 5.7 선례, Taichi
 
 파이썬 문법으로 Vulkan / Metal 커널을 AOT 컴파일해 모바일에 실었던 가장 가까운 선례다. 지금은
 활동이 크게 줄었다. 기술보다는 **독자 런타임과 독자 생태계로 고립된 것**이 원인으로 보인다.
@@ -372,11 +426,15 @@ TypedPython 은 그래서 자체 텐서 런타임을 만들지 않고 **torch op
 | 1b | 빌드 기본 단계로 연결 | PythonMultiplatform Gradle 플러그인이 사용자 파이썬 소스에 게이트를 항상 돌리고, 에러면 빌드 실패 | 1 |
 | 2 | typed IR → C 백엔드 (#41) | 프론트엔드·검증기·C 생성·런타임, 데스크톱에서 끝까지 | 없음 (pypackpack 슬롯은 3 의 의존) |
 | 3 | Kotlin 직접 호출 | 스텁 타입 기반 C ABI 호출 생성 | 스텁 배선 완료 |
-| 4 | 커널 하나 | 융합 softmax 를 Vulkan · Metal 양쪽에서 upstream 과 수치 일치 | torchnative 착지 승인 |
-| 5 | 커널 컴파일러 일반화 | SIMT 서브셋 전체, 이후 타일 | 4 |
+| 4 | 첫 커널 조각 | f16 원소별 연산 또는 softmax 하나를 SPIR-V 로 컴파일해 torchnative `vulkan.rs` 로 실행, 기기에서 일반 파이썬 실행 · torchnative CPU 와 수치 일치 (추정 2~4 주) | torchnative 의 임의 SPIR-V 실행 진입점 |
+| 4b | Metal 조각 | 같은 커널을 MSL 로 직접 내 iOS · macOS 에서 수치 일치 | 4, candle-metal 연결 방식 (§8) |
+| 5 | 타일 행렬곱 | 행렬 유닛(cooperative matrix, simdgroup_matrix)을 쓰는 타일 matmul, 없는 기기는 SIMT 폴백 (추정 2~4 개월, MLIR 패스 사용 시 1~3 개월) | 4, 4b |
+| 6 | 착지 | 커널을 `torch.library` op · `kernels` 번들 항목으로 등록, `transformers` 무수정 사용 | 5 |
+| 7 | CPU SIMD | `@compiled` C 백엔드의 벡터 확장 · NEON 경로 (§5.3) | 2 |
 
-각 단계는 AGENTS.md §5·§14 의 TDD 와 측정 테스트 규정을 따른다. 특히 3 은 경계 비용 감소를, 4 는
-upstream 대비 수치 오차를 기준선으로 박아 둔다.
+각 단계는 AGENTS.md §5·§14 의 TDD 와 측정 테스트 규정을 따른다. 특히 3 은 경계 비용 감소를, 4 와 5 는
+upstream 대비 수치 오차와 커널 시간을 기준선으로 박아 둔다. 4 와 5 의 기간은 조사의 추정이지 측정이
+아니다.
 
 ### 6.1 단계 1 의 현재 상태 (2026-10-03, #16)
 
@@ -410,6 +468,10 @@ upstream 대비 수치 오차를 기준선으로 박아 둔다.
   그 목록이 2단계 IR 의 요구사항이 된다.
 - **등급 2 컴파일러의 규모.** 가장 큰 작업이다. 커널 하나를 끝까지 하는 것(§6 의 4)을 첫 검증
   단위로 삼아 범위를 제한한다.
+- **행렬 유닛의 실제 지원 범위.** Adreno 는 신형 칩에서 확장 두 개가 필요하고 Mali 는 대부분 없다.
+  SIMT 폴백이 기본 경로가 되는 기기가 많을 수 있다. 기기별 측정 전에는 성능을 약속하지 않는다.
+- **MLIR 휠의 변동.** nightly · alpha 이고 3.15t 휠이 없다. 선택적 보조로만 두고 날짜 고정 휠을 쓴다.
+  빠져도 SPIR-V 를 직접 내는 경로가 남아야 한다 (§5.4).
 - **기본 검사의 오탐.** 검사가 기본값이므로, 오탐 하나가 모든 사용자의 빌드를 막는다. 1b 를 켜기 전에
   이 저장소의 실제 사용자 측 파이썬 코드(`sample/`, pythonx-compose 의 소비 예시)에 게이트를 돌려
   에러 수와 그 원인을 기준선으로 박아 둔다.
@@ -430,7 +492,10 @@ upstream 대비 수치 오차를 기준선으로 박아 둔다.
    모듈 전체를 지정할 수 있다.
 2. ~~고정폭 정수의 오버플로 의미~~, **결정됨:** `int` 는 i64 로 컴파일하고 오버플로 시 인터프리터 재실행으로 큰 정수로 승격(의미 보존).
 3. ~~pypackpack Cython 슬롯 인터페이스 소유~~, **결정됨:** pypackpack 이 정한다. TypedPython 은 생성한 C 소스, 빌드 플래그, C 를 낸 모듈 목록을 넘긴다. 확장이 원본 소스를 품으므로 별도 `.py` 폴백은 없다(Cython 폐기 후 갱신).
-4. GPU 착지를 torchnative 커스텀 op 로 할 것인가 (다른 레포 변경).
+4. ~~GPU 착지를 torchnative 커스텀 op 로 할 것인가~~, **결정됨 (2026-10-04, 메인테이너):** 커널은
+   torchnative 장치 계층에서 실행되고 torch op · `kernels` 번들로 착지한다 (§5.6). torchnative 와 정할
+   것은 남는다: Metal 커널을 candle-metal 에 붙이는 방식, 등록 경로를 ATen 디스패처와 `kernels`
+   리졸버 중 무엇으로 정식화할지, Vulkan f16 · 행렬 유닛을 장치 계층에 넣을지.
 5. ~~TypedPython 을 별도 레포로 분리할 것인가~~, **결정됨 (2026-10-02):** PythonMultiplatform 의
    기본 동작. 검사는 기본, 컴파일은 opt-in.
 6. 기본 검사에서 빠져나가는 방법을 둘 것인가, 예: 동적 기능이 꼭 필요한 모듈 하나를 `checked` 에서
