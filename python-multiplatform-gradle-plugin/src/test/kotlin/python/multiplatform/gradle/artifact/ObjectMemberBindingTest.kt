@@ -61,8 +61,11 @@ class ObjectMemberBindingTest {
     }
 
     @Test
-    fun anOrdinaryClassInstanceMethodIsStillNotBound() {
-        assertTrue(declarations().none { it.simpleName == "instanceMethod" && it.bindingName != null })
+    fun anOrdinaryClassInstanceMethodIsAMethodOfItsInstancesNotAStatic() {
+        // Issue #215: bound since, as a `METHOD` read on an instance -- never as an object's static.
+        val instanceMethod = declarations().single { it.simpleName == "instanceMethod" }
+        assertEquals("METHOD", instanceMethod.kind)
+        assertEquals("fixture.artifactobject.Plain.instanceMethod", instanceMethod.bindingName)
     }
 
     @Test

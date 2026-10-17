@@ -21,10 +21,30 @@ tasks.test {
 // python-multiplatform-gradle-plugin's `generateCoordinates` task, from this same group/artifactId/
 // version) names an artifact that never gets published anywhere -- every consumer outside this repo
 // resolves the plugin id fine and then fails on the processor dependency itself.
+// The TypedPython gate, published beside the processor as `<this>:typedpython-gate@zip` (#20,
+// toolchain#90): the typedpython wheel under its real file name plus typedpython-gate.json (wheel
+// sha256, pyrefly version and the sha256 of every pyrefly wheel), so toolchain's typedpythonCheck
+// installs it with uv --require-hashes and needs no -Ptypedpython.wheelDir. gate_bundle.py builds it.
+val typedpythonGateBundle by tasks.registering(Exec::class) {
+    group = "build"
+    description = "Builds the TypedPython gate bundle (wheel + manifest) published with this module."
+    val out = layout.buildDirectory.file("typedpython-gate/typedpython-gate.zip")
+    inputs.files(fileTree("src/main/python") { exclude("**/__pycache__/**") }).withPropertyName("gateSources")
+    inputs.files("pyproject.toml", "typedpython-gate.lock.json", "gate_bundle.py").withPropertyName("gateBuild")
+    outputs.file(out)
+    executable = "python3"
+    args("gate_bundle.py", "--out", out.get().asFile.absolutePath)
+}
+
 publishing {
     publications {
         create<MavenPublication>("maven") {
             from(components["java"])
+            artifact(typedpythonGateBundle.map { it.outputs.files.singleFile }) {
+                classifier = "typedpython-gate"
+                extension = "zip"
+                builtBy(typedpythonGateBundle)
+            }
         }
     }
 }

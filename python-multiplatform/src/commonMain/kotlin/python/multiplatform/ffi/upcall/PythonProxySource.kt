@@ -230,7 +230,7 @@ import python.multiplatform.reflection.UpcallTable
  * A class with static members already has a metaclass, and the two requirements do not both fit in
  * a base list: Python has no syntax for a base *after* a keyword, so the only spelling available is
  * `class Foo(_PmObject, metaclass=_pm_t_1):` -- which separates the class from the metaclass a
- * reader is pairing it with, and did more than that. `ksp-fixtures:app` locates a companion by
+ * reader is pairing it with, and did more than that. `python-multiplatform-ksp:fixtures:app` locates a companion by
  * matching `class (_pm_t_\d+)\(type\):` lazily through to `class Foo\(metaclass=\1\):`, and once
  * that terminator no longer existed the match could not complete: `java.util.regex`'s lazy loop
  * recurses once per character, so it scanned the rest of a 30 KB module and raised
@@ -299,6 +299,10 @@ object PythonProxySource {
         # Kotlin defaults for what a call leaves out, and the signature as public metadata. See
         # `KotlinSurface`.
         from python_multiplatform import kotlin_function as _pm_kotlin_function
+        # Each module this layer creates also answers the Pythonic alias of a Kotlin name it holds
+        # (`remember_text_field_state` for `rememberTextFieldState`, issue #131), through a PEP 562
+        # `__getattr__` that runs only for a name the module does not have. See `KotlinSurface`.
+        from python_multiplatform import module_alias_getattr as _pm_module_alias_getattr
 
 
         def _pm_settle(_fut, _ok, _payload):
@@ -351,6 +355,10 @@ object PythonProxySource {
             _m = _pm_sys.modules.get(_name)
             if _m is None:
                 _m = _pm_types.ModuleType(_name)
+                # Only on a module this layer creates: one the binding layer made already has its
+                # own `__getattr__`, which serves the same aliases from its table, and a module
+                # anybody else made is theirs.
+                _m.__getattr__ = _pm_module_alias_getattr(_m)
                 _pm_sys.modules[_name] = _m
                 if '.' in _name:
                     _parent, _, _leaf = _name.rpartition('.')

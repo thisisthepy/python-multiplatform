@@ -4,8 +4,8 @@ How CPython runs under Kotlin/Wasm in this library, why it has this shape, and w
 get there. The rules a contributor must follow are in
 [`python-multiplatform/src/wasmJsMain/README.md`](../../python-multiplatform/src/wasmJsMain/README.md);
 the behavioural contract is `docs/SPEC.md` (§0, C-6, M-3, U-5). This document is the design record.
-The chronological experiment log it was distilled from — including the stretch where wasm was
-"parked" — is [`../archive/wasm-design-experiment-log.md`](../archive/wasm-design-experiment-log.md).
+The chronological experiment log it was distilled from, including the stretch where wasm was
+"parked", is [`../archive/wasm-design-experiment-log.md`](../archive/wasm-design-experiment-log.md).
 
 **Status: integrated and experimental.** `wasmJs` is a Kotlin target (`python-multiplatform/build.gradle.kts`),
 `src/wasmJsMain` implements the `EmbedAPI` `actual`s, and `src/wasmJsTest` runs the suite on Node
@@ -16,9 +16,9 @@ has a browser wasm target. `wasmWasi` is not a target (when last assessed it was
 
 | Decision | Choice | Why |
 |---|---|---|
-| How Kotlin reaches CPython | Raw Stable ABI symbols as `@WasmImport`s against the Emscripten module's own wasm exports — **no JS in the call path** | Preserves the exact object model (`NativePointer`, `PyObject`) of every other target; a high-level Pyodide-style JS API (`pyodide.runPython`, `PyProxy`) would replace the whole object model with `JsAny` wrappers and covers almost none of the ~330 C functions |
-| Memory | **One shared linear memory.** Kotlin imports Emscripten's `Module.wasmMemory` as its `intrinsics.memory` | Needs Kotlin ≥ 2.4.20-Beta2, whose `wasmJs` modules **import** `intrinsics.memory` (`min=0, max=none`). Releases up to 2.4.10 exported an unbounded memory, which Emscripten cannot import — the earlier plan to patch the `.wasm` memory section (and a YouTrack issue) is obsolete ([`../archive/wasm-youtrack-issue.md`](../archive/wasm-youtrack-issue.md)) |
-| Where CPython comes from | **Our own Emscripten build**, `tools/wasm/build-cpython.sh`: CPython **3.14.2**, Emscripten **5.0.3**, matched to the `pyemscripten_2026_0` platform of PEP 783 | No distributor ships a `python.wasm` exporting `wasmExports,wasmMemory`. The version is deliberately not the 3.14.x pinned for native targets (`pythonVersion` in `gradle.properties`); see `docs/design/ecosystem.md` |
+| How Kotlin reaches CPython | Raw Stable ABI symbols as `@WasmImport`s against the Emscripten module's own wasm exports, **no JS in the call path** | Preserves the exact object model (`NativePointer`, `PyObject`) of every other target; a high-level Pyodide-style JS API (`pyodide.runPython`, `PyProxy`) would replace the whole object model with `JsAny` wrappers and covers almost none of the ~330 C functions |
+| Memory | **One shared linear memory.** Kotlin imports Emscripten's `Module.wasmMemory` as its `intrinsics.memory` | Needs Kotlin ≥ 2.4.20-Beta2, whose `wasmJs` modules **import** `intrinsics.memory` (`min=0, max=none`). Releases up to 2.4.10 exported an unbounded memory, which Emscripten cannot import, the earlier plan to patch the `.wasm` memory section (and a YouTrack issue) is obsolete ([`../archive/wasm-youtrack-issue.md`](../archive/wasm-youtrack-issue.md)) |
+| Where CPython comes from | **Our own Emscripten build**, `python-multiplatform/scripts/wasm/build-cpython.sh`: CPython **3.14.2**, Emscripten **5.0.3**, matched to the `pyemscripten_2026_0` platform of PEP 783 | No distributor ships a `python.wasm` exporting `wasmExports,wasmMemory`. The version is deliberately not the 3.14.x pinned for native targets (`pythonVersion` in `gradle.properties`); see `docs/design/ecosystem.md` |
 | C shim / composition | **None** | The hops that composition amortised are gone; measured gain ≤ 2.9 ns per operation (below). It also removes a second build pipeline |
 | `EXPORTED_FUNCTIONS` list | **Not needed** | `-sMAIN_MODULE` is `LINKABLE`, so the whole Stable ABI is exported (all 310 C symbols `EmbedAPI.kt` declared at the time were found in the build's 8287 exports). The build adds `wasmExports,wasmMemory` to `-sEXPORTED_RUNTIME_METHODS`, which is not ABI-sensitive |
 | Upcalls (Python → Kotlin) | `@WasmExport` trampolines placed in CPython's `__indirect_function_table` with `WebAssembly.Table.set`; the table index is the C function pointer. Routing is by data (a handle in `self`/`closure`), through the generated table, as on every platform | A funcref is a funcref: `call_indirect` reaches the Kotlin export directly. Measured 3.1 ns vs 10.9 ns for the `addFunction` + JS-closure route |
@@ -44,7 +44,7 @@ has a browser wasm target. `wasmWasi` is not a target (when last assessed it was
   cold paths.
 - The generated entry module is patched at build time (`patchKotlinWasmOutputForCPython`): one
   substitution for the memory, one for the upcall handoff (`pmpSetKotlinExports(exports)`, before
-  `exports._start()`). An application must also declare the three `@WasmExport` trampolines itself —
+  `exports._start()`). An application must also declare the three `@WasmExport` trampolines itself,
   `@WasmExport` is honoured only in the compilation that produces the `.wasm` (`ProxyTypeExportNames`;
   generating that file from the Gradle plugin is not done).
 - **JSPI must not reach the embedding.** `cpython.mjs` deletes `WebAssembly.promising` /
@@ -65,9 +65,9 @@ current figures: run `WasmCrossingOverheadTest`, `WasmUpcallRouteOverheadTest`,
 | Bulk read, 1000 `i32`: shared memory `Pointer.loadInt()` vs `Module.HEAP32` | 0.7 vs 7.1 ns per element |
 | Composition against the interpreter, reading one global (200 000×): naive / + interned strings / + hoisted module+dict | 259.5 / 185.4 / **65.2** ns; a composed call would save 2.9 ns of that |
 | Upcall, 10 M indirect calls issued from C: `table.set` vs `addFunction` + JS closure vs C→C control | **3.1** vs 10.9 vs 0.7 ns |
-| Kotlin `METH_O` function vs C builtin `abs` through `PyMethodDef` | 87 vs 73 ns (14 ns is the JS frame CPython's own trampoline imposes — see below) |
+| Kotlin `METH_O` function vs C builtin `abs` through `PyMethodDef` | 87 vs 73 ns (14 ns is the JS frame CPython's own trampoline imposes, see below) |
 | String argument, `"version"` (7 chars) / 54 chars: scratch vs interned | 30.6 / 157.0 ns vs 22.2 / 26.4 ns (`WasmMarshallingOverheadTest`, 200 000 iterations) |
-| `char*` → `String`, 27 / 4000 bytes: ASCII `CharArray`+`concatToString()` vs `ByteArray`+`decodeToString()` | 103 / 5 875 ns vs 405 / **58 271** ns — never `decodeToString()` a large buffer |
+| `char*` → `String`, 27 / 4000 bytes: ASCII `CharArray`+`concatToString()` vs `ByteArray`+`decodeToString()` | 103 / 5 875 ns vs 405 / **58 271** ns, never `decodeToString()` a large buffer |
 
 Corrections that came out of measuring (they changed the design):
 
@@ -86,22 +86,22 @@ Corrections that came out of measuring (they changed the design):
 
 ## The interpreter build and the platform tag
 
-`tools/wasm/build-cpython.sh` builds CPython 3.14.2 with CPython's own `Tools/wasm/emscripten` driver
+`python-multiplatform/scripts/wasm/build-cpython.sh` builds CPython 3.14.2 with CPython's own `Tools/wasm/emscripten` driver
 plus the changes that make it claim `pyemscripten_2026_0` (PEP 783):
 
 | | stock Tier 3 build | this build |
 |---|---|---|
-| Unwinding ABI `-fwasm-exceptions -sSUPPORT_LONGJMP=wasm` at compile **and** link | absent | **present — this is the one that gates loading a compiled wheel** (the side module imports the `__cpp_exception` tag) |
+| Unwinding ABI `-fwasm-exceptions -sSUPPORT_LONGJMP=wasm` at compile **and** link | absent | **present, this is the one that gates loading a compiled wheel** (the side module imports the `__cpp_exception` tag) |
 | `PYEMSCRIPTEN_PLATFORM_VERSION` | not defined anywhere in CPython 3.14.2 | defined via a patch to `sysconfig` (`_ALWAYS_STR`; otherwise `int('2026_0') == 20260` silently yields the tag `pyemscripten_20260_wasm32`) |
 | `wasmExports,wasmMemory,wasmTable` in `-sEXPORTED_RUNTIME_METHODS` | no | yes (not ABI-sensitive) |
-| `lzma`, `zstd`, OpenSSL | missing | **still missing** — ABI-sensitive per Pyodide's flag list but they did not gate the wheel tested; costs `_lzma`, `_zstd`, `_hashlib`, `_ssl` |
+| `lzma`, `zstd`, OpenSSL | missing | **still missing**, ABI-sensitive per Pyodide's flag list but they did not gate the wheel tested; costs `_lzma`, `_zstd`, `_hashlib`, `_ssl` |
 
 Evidence: a real PyPI wheel, `pydantic_core-2.48.0-cp314-cp314-pyemscripten_2026_0_wasm32.whl`, imports
-and runs on this build (`validate_python(42) -> 42`, a `ValidationError` raised and caught — the
+and runs on this build (`validate_python(42) -> 42`, a `ValidationError` raised and caught, the
 exception exercises the unwinding ABI), and fails with `tag import requires a WebAssembly.Tag` on the
 stock build. This is one wheel and one code path; it does not show that every compiled extension
-loads. `WasmCompiledWheelTest` runs it (`tools/wasm/build-cpython.sh wheels` fetches the pinned wheels);
-`WasmInterpreterAbiTest` checks the claims, with `tools/wasm/build-cpython.sh stock` as the negative
+loads. `WasmCompiledWheelTest` runs it (`python-multiplatform/scripts/wasm/build-cpython.sh wheels` fetches the pinned wheels);
+`WasmInterpreterAbiTest` checks the claims, with `python-multiplatform/scripts/wasm/build-cpython.sh stock` as the negative
 control. Emscripten is pinned to 5.0.3 because that is what the platform specifies, and installing it
 replaces `~/emsdk/upstream` in place (a global setting).
 

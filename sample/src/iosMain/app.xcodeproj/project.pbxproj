@@ -7,7 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		6E386A4C481B4D329CCF934C /* python in Resources */ = {isa = PBXBuildFile; fileRef = F91AA643B9094B8D8ED04A9C /* python */; };
+		8B3F1A512CC49F1D00B85330 /* Python.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8B3F1A502CC49F1D00B85330 /* Python.xcframework */; };
+		8B3F1A5C2CC574B200B85330 /* Python.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 8B3F1A502CC49F1D00B85330 /* Python.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		8B1A047D2B85BEFC0008D451 /* Preview Content in Resources */ = {isa = PBXBuildFile; fileRef = 8B1A047C2B85BEFC0008D451 /* Preview Content */; };
 		8B1A04802B85BF3E0008D451 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 8B1A047F2B85BF3E0008D451 /* Assets.xcassets */; };
 		8B1A04982B85C3820008D451 /* iOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B1A04972B85C3820008D451 /* iOSApp.swift */; };
@@ -31,9 +32,6 @@
 		8B1A04CB2B85CD050008D451 /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8B1A04CA2B85CD050008D451 /* QuartzCore.framework */; };
 		8B1A04CD2B85CD100008D451 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8B1A04CC2B85CD100008D451 /* UIKit.framework */; };
 		8B1A04CF2B85CD190008D451 /* WebKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8B1A04CE2B85CD190008D451 /* WebKit.framework */; };
-		8B1A04DD2B85CEE90008D451 /* Launch Screen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 8B1A04DC2B85CEE90008D451 /* Launch Screen.storyboard */; };
-		8BFA8DAD2B8B4C9C00E220D3 /* include in Resources */ = {isa = PBXBuildFile; fileRef = 8BFA8DAC2B8B4C9B00E220D3 /* include */; };
-		8BFA8DAF2B8B4CAF00E220D3 /* lib in Resources */ = {isa = PBXBuildFile; fileRef = 8BFA8DAE2B8B4CAF00E220D3 /* lib */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -43,6 +41,7 @@
 			dstPath = "";
 			dstSubfolderSpec = 10;
 			files = (
+				8B3F1A5C2CC574B200B85330 /* Python.xcframework in Embed Frameworks */,
 			);
 			name = "Embed Frameworks";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -50,8 +49,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-		F91AA643B9094B8D8ED04A9C /* python */ = {isa = PBXFileReference; lastKnownFileType = folder; name = python; path = "../../build/pythonStaging/ios/python"; sourceTree = "<group>"; };
-		7555FF7B242A565900829871 /* app.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = app.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		8B3F1A502CC49F1D00B85330 /* Python.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Python.xcframework; path = "../../build/xcode-frameworks/Python.xcframework"; sourceTree = "<group>"; };
+		7555FF7B242A565900829871 /* PythonDemo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PythonDemo.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		8B1A04782B85BED60008D451 /* app-Info.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; path = "app-Info.plist"; sourceTree = "<group>"; };
 		8B1A047C2B85BEFC0008D451 /* Preview Content */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "Preview Content"; path = "swift/Preview Content"; sourceTree = "<group>"; };
 		8B1A047F2B85BF3E0008D451 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; name = Assets.xcassets; path = swift/Assets.xcassets; sourceTree = "<group>"; };
@@ -81,9 +80,6 @@
 		8B1A04D12B85CD360008D451 /* libc++.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = "libc++.tbd"; path = "usr/lib/libc++.tbd"; sourceTree = SDKROOT; };
 		8B1A04D22B85CD4A0008D451 /* libsqlite3.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libsqlite3.tbd; path = usr/lib/libsqlite3.tbd; sourceTree = SDKROOT; };
 		8B1A04D32B85CD580008D451 /* libz.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libz.tbd; path = usr/lib/libz.tbd; sourceTree = SDKROOT; };
-		8B1A04DC2B85CEE90008D451 /* Launch Screen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = "Launch Screen.storyboard"; path = "swift/Storyboards/Launch Screen.storyboard"; sourceTree = "<group>"; };
-		8BFA8DAC2B8B4C9B00E220D3 /* include */ = {isa = PBXFileReference; lastKnownFileType = folder; name = include; path = ../../dist/toolchain/darwin/root/python3/include; sourceTree = "<group>"; };
-		8BFA8DAE2B8B4CAF00E220D3 /* lib */ = {isa = PBXFileReference; lastKnownFileType = folder; name = lib; path = ../../dist/toolchain/darwin/root/python3/lib; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -91,6 +87,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				8B3F1A512CC49F1D00B85330 /* Python.xcframework in Frameworks */,
 				8B1A04CB2B85CD050008D451 /* QuartzCore.framework in Frameworks */,
 				8B1A04B72B85CC930008D451 /* CoreMedia.framework in Frameworks */,
 				8B1A04B32B85CC7F0008D451 /* CoreGraphics.framework in Frameworks */,
@@ -128,7 +125,7 @@
 		7555FF7C242A565900829871 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				7555FF7B242A565900829871 /* app.app */,
+				7555FF7B242A565900829871 /* PythonDemo.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -136,6 +133,7 @@
 		7555FFB0242A642200829871 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				8B3F1A502CC49F1D00B85330 /* Python.xcframework */,
 				8B1A04D32B85CD580008D451 /* libz.tbd */,
 				8B1A04D22B85CD4A0008D451 /* libsqlite3.tbd */,
 				8B1A04D12B85CD360008D451 /* libc++.tbd */,
@@ -166,9 +164,7 @@
 			isa = PBXGroup;
 			children = (
 				8B1A047F2B85BF3E0008D451 /* Assets.xcassets */,
-				8B1A047E2B85BF0B0008D451 /* EmbeddedPython */,
 				8B1A047C2B85BEFC0008D451 /* Preview Content */,
-				8B1A04DB2B85CECC0008D451 /* Storyboards */,
 				8B1A04782B85BED60008D451 /* app-Info.plist */,
 			);
 			name = Resources;
@@ -184,15 +180,6 @@
 			name = Sources;
 			sourceTree = "<group>";
 		};
-		8B1A047E2B85BF0B0008D451 /* EmbeddedPython */ = {
-			isa = PBXGroup;
-			children = (
-				8BFA8DAC2B8B4C9B00E220D3 /* include */,
-				8BFA8DAE2B8B4CAF00E220D3 /* lib */,
-			);
-			name = EmbeddedPython;
-			sourceTree = "<group>";
-		};
 		8B1A04A62B85C5480008D451 /* Bridges */ = {
 			isa = PBXGroup;
 			children = (
@@ -202,14 +189,6 @@
 			name = Bridges;
 			sourceTree = "<group>";
 		};
-		8B1A04DB2B85CECC0008D451 /* Storyboards */ = {
-			isa = PBXGroup;
-			children = (
-				8B1A04DC2B85CEE90008D451 /* Launch Screen.storyboard */,
-			);
-			name = Storyboards;
-			sourceTree = "<group>";
-		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -217,10 +196,11 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 7555FFA5242A565B00829871 /* Build configuration list for PBXNativeTarget "app" */;
 			buildPhases = (
-				7555FFB5242A651A00829871 /* ShellScript */,
+				7555FFB5242A651A00829871 /* Compile Kotlin Framework */,
 				7555FF77242A565900829871 /* Sources */,
 				7555FF78242A565900829871 /* Frameworks */,
 				7555FF79242A565900829871 /* Resources */,
+				8B3F1A532CC49F9C00B85330 /* Install Python Standard Library and Payload */,
 				7555FFB4242A642300829871 /* Embed Frameworks */,
 			);
 			buildRules = (
@@ -228,8 +208,8 @@
 			dependencies = (
 			);
 			name = app;
-			productName = iosApp;
-			productReference = 7555FF7B242A565900829871 /* app.app */;
+			productName = app;
+			productReference = 7555FF7B242A565900829871 /* PythonDemo.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -272,19 +252,15 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				6E386A4C481B4D329CCF934C /* python in Resources */,
-				8BFA8DAF2B8B4CAF00E220D3 /* lib in Resources */,
-				8BFA8DAD2B8B4C9C00E220D3 /* include in Resources */,
 				8B1A047D2B85BEFC0008D451 /* Preview Content in Resources */,
 				8B1A04802B85BF3E0008D451 /* Assets.xcassets in Resources */,
-				8B1A04DD2B85CEE90008D451 /* Launch Screen.storyboard in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
-		7555FFB5242A651A00829871 /* ShellScript */ = {
+		7555FFB5242A651A00829871 /* Compile Kotlin Framework */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
@@ -294,13 +270,33 @@
 			);
 			inputPaths = (
 			);
+			name = "Compile Kotlin Framework";
 			outputFileListPaths = (
 			);
 			outputPaths = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "cd \"$SRCROOT/../../..\"\n./gradlew :sample:embedAndSignAppleFrameworkForXcode\n";
+			shellScript = "if [ \"YES\" = \"$OVERRIDE_KOTLIN_BUILD_IDE_SUPPORTED\" ]; then\n  echo \"Skipping Gradle build task invocation due to OVERRIDE_KOTLIN_BUILD_IDE_SUPPORTED environment variable set to \\\"YES\\\"\"\n  exit 0\nfi\ncd \"$SRCROOT/../../..\"\n./gradlew :python-multiplatform:embedAndSignAppleFrameworkForXcode\n./gradlew :sample:embedAndSignAppleFrameworkForXcode\n";
+		};
+		8B3F1A532CC49F9C00B85330 /* Install Python Standard Library and Payload */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Install Python Standard Library and Payload";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -e\n# SPEC L-10 / issue #59: the CPython stdlib and this app's python/ payload into the .app, with\n# extension modules wrapped as frameworks. See docs/platforms/ios-app-bundle.md.\ncd \"$SRCROOT/../../..\"\nexport PYTHON_PAYLOAD_DIR=\"$SRCROOT/../commonMain/python\"\n/bin/bash python-multiplatform-gradle-plugin/src/main/resources/xcode/install-python.sh\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -369,7 +365,8 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 14.1;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.3;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -424,7 +421,8 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 14.1;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.3;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				SDKROOT = iphoneos;
@@ -441,15 +439,17 @@
 				CLANG_ENABLE_MODULES = YES;
 				CLANG_ENABLE_OBJC_ARC = NO;
 				CLANG_ENABLE_OBJC_WEAK = YES;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = ZP73KJVT6Q;
 				DEVELOPMENT_ASSET_PATHS = "swift/Preview\\ Content";
 				ENABLE_PREVIEWS = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
-					"$(SRCROOT)/../../../build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)",
+					"$(SRCROOT)/../../build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)",
 				);
 				INFOPLIST_FILE = "app-Info.plist";
-				IPHONEOS_DEPLOYMENT_TARGET = 13.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.3;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -459,8 +459,8 @@
 					"-framework",
 					Demo,
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = orgIdentifier.iosApp;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = org.thisisthepy.python.multiplatform.demo;
+				PRODUCT_NAME = PythonDemo;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -474,15 +474,17 @@
 				CLANG_ENABLE_MODULES = YES;
 				CLANG_ENABLE_OBJC_ARC = NO;
 				CLANG_ENABLE_OBJC_WEAK = YES;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = ZP73KJVT6Q;
 				DEVELOPMENT_ASSET_PATHS = "swift/Preview\\ Content";
 				ENABLE_PREVIEWS = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
-					"$(SRCROOT)/../../../build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)",
+					"$(SRCROOT)/../../build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)",
 				);
 				INFOPLIST_FILE = "app-Info.plist";
-				IPHONEOS_DEPLOYMENT_TARGET = 13.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.3;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -492,8 +494,8 @@
 					"-framework",
 					Demo,
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = orgIdentifier.iosApp;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = org.thisisthepy.python.multiplatform.demo;
+				PRODUCT_NAME = PythonDemo;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};

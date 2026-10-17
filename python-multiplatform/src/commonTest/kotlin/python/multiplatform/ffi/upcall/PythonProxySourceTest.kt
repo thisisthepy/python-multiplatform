@@ -380,9 +380,25 @@ class PythonProxySourceTest {
         // 551-587 ns per read on desktop against 6-14 ns for the descriptor that replaced it. A
         // hook reintroduced here would be a fifty-fold regression on every top-level `val` read,
         // and it would be invisible -- both shapes are correct.
+        //
+        // Issue #131 adds one hook, and it is the exception that keeps the rule: the PEP 562
+        // `__getattr__` of `KotlinSurface.module_alias_getattr` runs only for a name the module does
+        // NOT have (a Pythonic alias), so a real Kotlin name is still found by the descriptor first
+        // and never reaches it. It lives in the delivered `KotlinSurface` half; the proxy half, which
+        // renders every real attribute, must define no hook of its own.
+        val proxyHalf = PythonProxySource.support.removePrefix(python.multiplatform.ffi.upcall.KotlinSurface.DELIVERY)
         assertFalse(
-            PythonProxySource.support.contains("def __getattr__("),
+            proxyHalf.contains("def __getattr__("),
             "a module attribute must be answered by a data descriptor, not by the fallback hook",
+        )
+        assertEquals(
+            1,
+            Regex("def __getattr__\\(").findAll(python.multiplatform.ffi.upcall.KotlinSurface.DELIVERY).count(),
+            "the only fallback hook is the alias one in module_alias_getattr",
+        )
+        assertTrue(
+            python.multiplatform.ffi.upcall.KotlinSurface.DELIVERY.contains("def module_alias_getattr(module):"),
+            "the single hook must be the alias hook",
         )
         assertFalse(
             PythonProxySource.support.contains("def __setattr__("),
@@ -826,7 +842,7 @@ class PythonProxySourceTest {
         // A rendered class must be a `_PmObject` (so `_pm_unwrap` accepts an instance of one) *and*
         // its statics must sit on a metaclass. Written the obvious way those two read as
         // `class Foo(_PmObject, metaclass=_pm_t_1):`, and that spelling is what broke
-        // `ksp-fixtures:app`: see [theCompanionShapeAConsumerMatchesWithALazyRegexStaysAdjacent].
+        // `python-multiplatform-ksp:fixtures:app`: see [theCompanionShapeAConsumerMatchesWithALazyRegexStaysAdjacent].
         //
         // Python has no syntax for putting a base *after* a keyword, so the base has to come from
         // somewhere other than the base list, and the metaclass is the only thing left holding the
@@ -860,7 +876,7 @@ class PythonProxySourceTest {
     @Test
     fun theCompanionShapeAConsumerMatchesWithALazyRegexStaysAdjacent() {
         // Pinned here because the consumer that reads it cannot pin it for itself, and because the
-        // way it failed hid what had happened. `ksp-fixtures:app`'s
+        // way it failed hid what had happened. `python-multiplatform-ksp:fixtures:app`'s
         // `GeneratedStaticPropertyProxyTest` locates a companion's metaclass with
         //
         //     class (_pm_t_\d+)\(type\):\n(?:.|\n)*?class Foo\(metaclass=\1\):

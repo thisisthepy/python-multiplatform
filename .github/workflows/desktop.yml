@@ -1,15 +1,16 @@
 name: Desktop CI
 
 on:
+  # Checked on develop after merging, not on every pull request (user decision,
+  # 2026-10-17). A red develop is fixed forward by its own pull request.
   push:
     branches: [ "develop", "main" ]
-  pull_request:
-    branches: [ "develop", "main" ]
-
+  workflow_dispatch:
 concurrency:
-  # A newer push to the same ref supersedes this run; frees the shared macOS runners.
+  # A run in progress finishes; a newer push replaces only the queued run (frequent merges
+  # to develop otherwise cancelled every run before it reported).
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   test:
@@ -41,6 +42,191 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-konan-
 
+      # The dev agent's protocol (SPEC L-12, #233): stdlib-only, so the runner's own python3 runs it.
+      - name: Dev agent protocol tests
+        working-directory: python-multiplatform/src/test/python
+        run: python3 -m unittest -v test_devagent
+
       - name: Run Desktop Tests
         # Using --console=plain so logs are readable in GitHub Actions
         run: ./gradlew :python-multiplatform:desktopTest --console=plain
+
+  # The dev agent's protocol on the other desktop OSes (#238). Its socket options differ per platform
+  # (SO_EXCLUSIVEADDRUSE on Windows, SO_REUSEADDR on POSIX), and the port-takeover and restart tests are
+  # what check them. Stdlib only: no JDK, no Gradle.
+  dev-agent:
+    name: Dev agent protocol (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Dev agent protocol tests
+        working-directory: python-multiplatform/src/test/python
+        run: python -m unittest -v test_devagent
+
+  # pythonx-compose's UI.ipynb, end to end (#26, #213): the installed pythonx-compose wheel drives a
+  # real desktop Compose host, pixel-compared with the same composables drawn from Kotlin. Its own
+  # job and Gradle invocation, so it neither hides nor is hidden by the module tests above.
+  notebook-e2e:
+    name: Notebook E2E (pythonx-compose wheel)
+    runs-on: macos-latest
+    env:
+      WHEEL_DIR: ${{ github.workspace }}/.tmp/pythonx-compose-dist
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Beside this repository, as on a developer machine; the wheel is built from it, not installed
+      # from PyPI, so the scenarios follow pythonx-compose develop.
+      - name: Checkout pythonx-compose develop
+        uses: actions/checkout@v4
+        with:
+          repository: thisisthepy/pythonx-compose
+          ref: develop
+          path: .tmp/pythonx-compose
+          fetch-depth: 1
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Build the pythonx-compose wheel
+        run: |
+          uv build --wheel --directory .tmp/pythonx-compose --out-dir "$WHEEL_DIR"
+          ls -l "$WHEEL_DIR"
+          git -C .tmp/pythonx-compose log -1 --format='pythonx-compose %h %s'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'zulu'
+          cache: 'gradle'
+
+      - name: Cache Konan
+        uses: actions/cache@v4
+        with:
+          path: ~/.konan
+          key: ${{ runner.os }}-konan-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-konan-
+
+      # No skip property: without a wheel every scenario fails by name, which is what CI wants.
+      - name: Run the notebook scenarios
+        run: >
+          ./gradlew :python-multiplatform-compose:fixtures:notebook-e2e:desktopTest --rerun
+          -PpythonxComposeWheel="$WHEEL_DIR" --console=plain
+
+      - name: Count the scenarios
+        if: always()
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import glob, xml.etree.ElementTree as ET
+          files = glob.glob("python-multiplatform-compose/fixtures/notebook-e2e/build/test-results/desktopTest/*.xml")
+          total = failed = skipped = 0
+          for f in files:
+              suite = ET.parse(f).getroot()
+              total += int(suite.get("tests", 0))
+              failed += int(suite.get("failures", 0)) + int(suite.get("errors", 0))
+              skipped += int(suite.get("skipped", 0))
+          print(f"Notebook E2E: {total} tests, {total - failed - skipped} passed, {failed} failed, {skipped} skipped ({len(files)} suites)")
+          PY
+          cat "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: notebook-e2e-reports
+          path: |
+            python-multiplatform-compose/fixtures/notebook-e2e/build/reports/tests/desktopTest
+            python-multiplatform-compose/fixtures/notebook-e2e/build/test-results/desktopTest
+
+  # The notebook E2E in a GraalVM native image on macOS (#249, #251). It takes `ui`, `ui-text` and
+  # `foundation` from compose-multiplatform-core-extended, which a runner reads from the fork's GitHub
+  # Packages registry; until the repository variable COMPOSE_EXTENDED_VERSION names a published
+  # development version (`1.11.1-ext.N-dev.<sha>`) the job is skipped.
+  notebook-e2e-native-image:
+    name: Notebook E2E in a native image (macOS)
+    if: ${{ vars.COMPOSE_EXTENDED_VERSION != '' }}
+    runs-on: macos-latest
+    permissions:
+      contents: read
+      packages: read
+    env:
+      WHEEL_DIR: ${{ github.workspace }}/.tmp/pythonx-compose-dist
+      COMPOSE_EXTENDED_VERSION: ${{ vars.COMPOSE_EXTENDED_VERSION }}
+      COMPOSE_EXTENDED_GROUP_PREFIX: ${{ vars.COMPOSE_EXTENDED_GROUP_PREFIX || 'org.thisisthepy.compose' }}
+      COMPOSE_EXTENDED_REPOSITORY: ${{ vars.COMPOSE_EXTENDED_REPOSITORY || 'https://maven.pkg.github.com/thisisthepy/compose-multiplatform-core-extended' }}
+      # GitHub Packages asks for a token even for a public package. A read:packages PAT in the secret
+      # GH_PACKAGES_TOKEN is used when it exists; otherwise this repository's own token.
+      GITHUB_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}
+      TOKEN_SOURCE: ${{ secrets.GH_PACKAGES_TOKEN != '' && 'GH_PACKAGES_TOKEN' || 'GITHUB_TOKEN' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout pythonx-compose develop
+        uses: actions/checkout@v4
+        with:
+          repository: thisisthepy/pythonx-compose
+          ref: develop
+          path: .tmp/pythonx-compose
+          fetch-depth: 1
+
+      # Before any build: can this token read the fork's packages? One known POM, so a refusal is
+      # reported as what it is rather than as a dependency resolution error minutes later.
+      - name: Check access to the fork's packages
+        run: |
+          group_path="${COMPOSE_EXTENDED_GROUP_PREFIX//.//}/ui"
+          pom="$COMPOSE_EXTENDED_REPOSITORY/$group_path/ui-desktop/$COMPOSE_EXTENDED_VERSION/ui-desktop-$COMPOSE_EXTENDED_VERSION.pom"
+          status=$(curl -s -o /dev/null -w '%{http_code}' -u "${GITHUB_ACTOR}:${GITHUB_TOKEN}" "$pom")
+          echo "reading $pom with $TOKEN_SOURCE: HTTP $status"
+          if [ "$status" != "200" ]; then
+            echo "::error::The fork's packages could not be read with $TOKEN_SOURCE (HTTP $status at $pom). Add a personal access token (classic) with read:packages as the repository secret GH_PACKAGES_TOKEN, or check COMPOSE_EXTENDED_VERSION / COMPOSE_EXTENDED_REPOSITORY."
+            exit 1
+          fi
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Build the pythonx-compose wheel
+        run: uv build --wheel --directory .tmp/pythonx-compose --out-dir "$WHEEL_DIR"
+
+      - name: Setup Java 21 (Gradle)
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'zulu'
+          cache: 'gradle'
+
+      # The JDK 25 toolchain native-image comes from, found by Gradle's toolchain resolution.
+      - name: Setup Liberica NIK 25
+        uses: graalvm/setup-graalvm@v1
+        with:
+          java-version: '25'
+          distribution: 'liberica'
+          set-java-home: 'false'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Records Compose and skiko's configuration against the fork version this run uses, then builds
+      # the image and runs it with JAVA_HOME and PYTHONHOME removed: 20 of 20 and no libjvm.
+      - name: Build and run the native image
+        run: >
+          ./gradlew :python-multiplatform-compose:fixtures:notebook-e2e:notebookE2eNativeAgent
+          :python-multiplatform-compose:fixtures:notebook-e2e:notebookE2eNativeRun
+          -PpythonxComposeWheel="$WHEEL_DIR"
+          -PcomposeExtended.version="$COMPOSE_EXTENDED_VERSION"
+          -PcomposeExtended.groupPrefix="$COMPOSE_EXTENDED_GROUP_PREFIX"
+          -PcomposeExtended.mavenLocal=false
+          -PcomposeExtended.repository="$COMPOSE_EXTENDED_REPOSITORY"
+          --console=plain

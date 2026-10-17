@@ -133,7 +133,7 @@ def test_rebuilt_and_reused_extensions_compute_the_interpreted_results(project, 
 def test_module_with_nothing_compiled_has_no_extension_and_is_reused(tmp_path):
     root = tmp_path / "proj"
     root.mkdir()
-    (root / "plain.py").write_text(HEADER + "def f(s: str) -> str:\n    return s + 'x'\n")
+    (root / "plain.py").write_text(HEADER + "def f(s: str) -> str:\n    return s[1:]\n")
     cache = tmp_path / "cache"
     first = pipeline.compile_project([root / "plain.py"], root, cache)
     m = first.modules[0]

@@ -8,7 +8,7 @@ import kotlin.test.assertTrue
  * Pins the version-string arithmetic that names the CPython artefacts on disk.
  *
  * The interesting case is the free-threaded flavour. A free-threaded install renames *everything*
- * the runtime looks up by name — `libpython3.14t.dylib`, `lib/python3.14t/`, `bin/python3.14t` —
+ * the runtime looks up by name, `libpython3.14t.dylib`, `lib/python3.14t/`, `bin/python3.14t`,
  * and it does not ship the un-suffixed names at all. Getting [Versions.taggedVersionString] wrong
  * therefore does not degrade gracefully: `manager.loadLibPython` throws `UnsatisfiedLinkError` for
  * a file that was downloaded and is sitting right there under a different name.

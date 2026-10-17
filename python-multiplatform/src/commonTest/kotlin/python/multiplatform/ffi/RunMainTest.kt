@@ -8,13 +8,13 @@ import kotlin.test.assertTrue
 import kotlin.time.TimeSource
 
 /**
- * [Python3.runMain] — running a module as `__main__` in an interpreter that has to **survive**
+ * [Python3.runMain], running a module as `__main__` in an interpreter that has to **survive**
  * the call.
  *
  * The design question these tests fix an answer to is recorded in ROADMAP §12. The short form:
  *
  * - `Py_RunMain()` (and `Py_BytesMain()`, which reaches it) **always finalizes the interpreter**
- *   — `cpython/pylifecycle.h` declares it, and it is not in the Limited API at all. Neither can
+ *  , `cpython/pylifecycle.h` declares it, and it is not in the Limited API at all. Neither can
  *   be the implementation of anything an embedder calls more than once.
  * - `PyImport_ImportModule()` runs the module body under its *own* `__name__` and caches it in
  *   `sys.modules`, so `if __name__ == "__main__":` never fires and a second call is a no-op.
@@ -25,7 +25,7 @@ import kotlin.time.TimeSource
  * `alter_sys=True` is the part that makes the module observe a `__main__`-shaped world:
  * `runpy._run_module_code` runs the code in a **fresh** module namespace, installs it as
  * `sys.modules["__main__"]` for the duration, points `sys.argv[0]` at the module's origin, and
- * restores both in `__exit__` — so the `__main__` this suite's other tests write globals into is
+ * restores both in `__exit__`, so the `__main__` this suite's other tests write globals into is
  * put back whether the module returns or raises. [theInterpreterAndItsMainNamespaceSurviveRunMain]
  * is the guard for that specifically.
  */
@@ -301,7 +301,7 @@ class RunMainTest {
      * `runMain` is not in the same cost class as `exec` and must not be reached for in a loop:
      * every call re-runs the import system's `find_spec`, recompiles or reloads the module's code
      * object and builds a fresh namespace. This prints the measured per-call cost of both rather
-     * than asserting a threshold — the number is machine- and load-dependent, and the point is
+     * than asserting a threshold, the number is machine- and load-dependent, and the point is
      * that it is visible in the log next to `exec`'s, not that it sits under some bound.
      *
      * The one assertion is directional and holds by construction (a module run does strictly more
@@ -359,7 +359,7 @@ class RunMainTest {
          * A meta-path finder serving module source out of a dict, installed once.
          *
          * `runpy` goes through `importlib.util.find_spec` and then `spec.loader.get_code(...)`
-         * (runpy.py, `_get_module_details`), so a plain `sys.modules` entry is not enough — the
+         * (runpy.py, `_get_module_details`), so a plain `sys.modules` entry is not enough, the
          * spec has to be able to produce a code object. This is the smallest thing that can, and
          * being in-memory it works identically on every target this suite runs on.
          */

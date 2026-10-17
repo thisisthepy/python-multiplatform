@@ -57,11 +57,11 @@ import python.multiplatform.reflection.UpcallTable
  * `threading.Thread` is a bare pthread, so the first time one reaches ART it must be attached.
  * `pmp_attach` holds that attachment for the life of the thread and gives it back from a
  * `pthread_key_create` destructor, which is what turned it from a per-call charge of 14–62 µs into
- * a per-thread one — but a thread that upcalls exactly once still pays all of it.
+ * a per-thread one, but a thread that upcalls exactly once still pays all of it.
  *
  * It is not marked with [HighOverheadNativeCall]. That marker is `@RequiresOptIn`, and its job is
- * to make a Kotlin *caller* acknowledge a cost; nothing in Kotlin calls these — C does, from
- * CPython — so applying it here would be inert. The cost is recorded instead where the callers
+ * to make a Kotlin *caller* acknowledge a cost; nothing in Kotlin calls these, C does, from
+ * CPython, so applying it here would be inert. The cost is recorded instead where the callers
  * that can act on it will look: here, in `pmp_upcall_invoke_meth`, and in `docs/design/upcall.md`.
  */
 object UpcallCallbacks {

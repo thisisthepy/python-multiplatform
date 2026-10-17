@@ -3,7 +3,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 /**
  * The Compose host for python-multiplatform: the `@Composable` entry point that draws a Python-declared
- * root (`PythonContent`) and the composer/callable plumbing it shares with every Python call into a
+ * root (`PythonAppView`, `PythonWidget`, `PythonLauncher`) and the composer/callable plumbing it shares with every Python call into a
  * composable.
  *
  * A separate module so that `:python-multiplatform` itself never depends on Compose (same naming as
@@ -35,6 +35,8 @@ kotlin {
         commonMain.dependencies {
             api(projects.pythonMultiplatform)
             api(compose.runtime)
+            api(compose.ui)
+            api(compose.runtimeSaveable)
         }
     }
 }

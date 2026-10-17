@@ -608,4 +608,16 @@ static PyMethodDef methods[] = {
 static struct PyModuleDef moddef = {PyModuleDef_HEAD_INIT, TP_STR(TP_SHIM_NAME), NULL, -1, methods,
                                     NULL, NULL, NULL, NULL};
 
-PyMODINIT_FUNC TP_CAT(PyInit_, TP_SHIM_NAME)(void) { return PyModule_Create(&moddef); }
+PyMODINIT_FUNC TP_CAT(PyInit_, TP_SHIM_NAME)(void)
+{
+    PyObject *m = PyModule_Create(&moddef);
+#ifdef Py_GIL_DISABLED
+    /* #159: the helpers are thread-safe; do not let importing the shim switch the GIL back on for
+       the rest of the test process */
+    if (m != NULL && PyUnstable_Module_SetGIL(m, Py_MOD_GIL_NOT_USED) < 0) {
+        Py_DECREF(m);
+        return NULL;
+    }
+#endif
+    return m;
+}

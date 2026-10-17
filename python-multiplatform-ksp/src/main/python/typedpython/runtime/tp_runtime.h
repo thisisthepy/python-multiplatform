@@ -23,6 +23,92 @@
 #endif
 
 /* ------------------------------------------------------------------------------------------
+ * Free-threaded CPython (3.15t is the only supported build; issue #159, runtime/API.md
+ * "Free-threaded CPython"). Without a GIL every static, every module-state field and every
+ * object another thread can reach is shared. Each piece of shared mutable state is one of:
+ *   thread-local   TP_THREAD_LOCAL (tp_depth, tp_poll_countdown, tp_snapshot_depth)
+ *   atomic         tp_atomic_* below (tp_globals_epoch, tp_class_rt tag / bad_tag / gepoch /
+ *                  counters, tp_version_tag reads)
+ *   immutable      written only by the module's exec slot (or by tp_clear, when no call can run)
+ *   locked         a critical section on the object (array parameters, the module dict, the
+ *                  deopt counter)
+ * and a borrowed reference is never held across anything another thread could free: containers
+ * are read through the strong-reference API (PyDict_GetItemRef ...) or under a critical section.
+ * ------------------------------------------------------------------------------------------ */
+#if defined(__GNUC__) || defined(__clang__)
+static inline unsigned int tp_atomic_load_u32(const unsigned int *p)
+{ return __atomic_load_n(p, __ATOMIC_RELAXED); }
+static inline void tp_atomic_store_u32(unsigned int *p, unsigned int v)
+{ __atomic_store_n(p, v, __ATOMIC_RELAXED); }
+static inline uint64_t tp_atomic_load_u64(const uint64_t *p)
+{ return __atomic_load_n(p, __ATOMIC_RELAXED); }
+static inline void tp_atomic_store_u64(uint64_t *p, uint64_t v)
+{ __atomic_store_n(p, v, __ATOMIC_RELAXED); }
+static inline void tp_atomic_add_u64(uint64_t *p, uint64_t v)
+{ (void)__atomic_fetch_add(p, v, __ATOMIC_ACQ_REL); }
+static inline Py_ssize_t tp_atomic_load_ssize(const Py_ssize_t *p)
+{ return __atomic_load_n(p, __ATOMIC_RELAXED); }
+static inline void tp_atomic_add_ssize(Py_ssize_t *p, Py_ssize_t v)
+{ (void)__atomic_fetch_add(p, v, __ATOMIC_RELAXED); }
+#else
+#error "tp_runtime.h needs the GCC/Clang __atomic builtins (the build uses cc, see cbuild.py)"
+#endif
+
+/* cls->tp_version_tag: CPython clears and reassigns it from any thread (PyType_Modified, under the
+ * type's lock); every read here is an atomic load, as CPython's own (FT_ATOMIC_LOAD_UINT_RELAXED). */
+static inline unsigned int tp_type_tag(const PyTypeObject *cls)
+{
+    return tp_atomic_load_u32(&cls->tp_version_tag);
+}
+
+#if defined(_MSC_VER)
+#define TP_THREAD_LOCAL __declspec(thread)
+#else
+#define TP_THREAD_LOCAL __thread
+#endif
+
+/* Critical sections for array parameters (tp_cs_*): from before the copy-in to after the
+ * write-back, on every exit path. One list or two (CPython offers one- and two-object sections
+ * only; a function with more list parameters stays interpreted). With a GIL they are no-ops. */
+typedef struct {
+    int n;                       /* 0 = not held, 1 or 2 objects locked */
+#ifdef Py_GIL_DISABLED
+    PyCriticalSection2 cs;
+#endif
+} tp_cs;
+
+static inline void tp_cs_begin(tp_cs *c, PyObject *a, PyObject *b)
+{
+#ifdef Py_GIL_DISABLED
+    if (b == NULL) {
+        PyCriticalSection_Begin((PyCriticalSection *)&c->cs, a);
+        c->n = 1;
+    }
+    else {
+        PyCriticalSection2_Begin(&c->cs, a, b);
+        c->n = 2;
+    }
+#else
+    (void)a;
+    c->n = b == NULL ? 1 : 2;
+#endif
+}
+
+/* idempotent: a no-op when nothing is held */
+static inline void tp_cs_end(tp_cs *c)
+{
+#ifdef Py_GIL_DISABLED
+    if (c->n == 1) {
+        PyCriticalSection_End((PyCriticalSection *)&c->cs);
+    }
+    else if (c->n == 2) {
+        PyCriticalSection2_End(&c->cs);
+    }
+#endif
+    c->n = 0;
+}
+
+/* ------------------------------------------------------------------------------------------
  * Exception messages that CPython changed between 3.13 and 3.14.
  *   3.13: "integer division or modulo by zero" (int //), "integer modulo by zero" (int %),
  *         "float division by zero" / "float floor division by zero" / "float modulo by zero",
@@ -57,6 +143,13 @@
 #define TP_BINOP_TRUEDIV 3
 #define TP_BINOP_FLOORDIV 4
 #define TP_BINOP_MOD 5
+/* the augmented forms `a op= b` (PyNumber_InPlace*): ir.BinOp.inplace */
+#define TP_BINOP_IADD 6
+#define TP_BINOP_ISUB 7
+#define TP_BINOP_IMUL 8
+#define TP_BINOP_ITRUEDIV 9
+#define TP_BINOP_IFLOORDIV 10
+#define TP_BINOP_IMOD 11
 
 /* ------------------------------------------------------------------------------------------
  * Integers (int64_t)
@@ -131,6 +224,38 @@ static inline int tp_neg_i64(int64_t a, int64_t *out)
     *out = -a;
     return 0;
 }
+
+/* Proven i64 operations (ir.BinOp.proven / UnaryOp.proven): the verifier showed the result fits in
+ * i64, so the generated code does the arithmetic with no check (unsigned wrap-around, which is plain
+ * machine arithmetic and has no undefined behaviour). Built with -DTP_CHECK_PROVEN, each of them is
+ * the checked helper again and a wrong proof is a SystemError, never a deopt: that is for the tests
+ * and for debugging a verifier change. The macros use the generated function's `tp_s`, `tp_rc` and
+ * `tp_exit`. */
+static inline int64_t tp_padd_i64(int64_t a, int64_t b) { return (int64_t)((uint64_t)a + (uint64_t)b); }
+static inline int64_t tp_psub_i64(int64_t a, int64_t b) { return (int64_t)((uint64_t)a - (uint64_t)b); }
+static inline int64_t tp_pmul_i64(int64_t a, int64_t b) { return (int64_t)((uint64_t)a * (uint64_t)b); }
+static inline int64_t tp_pneg_i64(int64_t a) { return (int64_t)(0 - (uint64_t)a); }
+#ifdef TP_CHECK_PROVEN
+#define tp_proven_fail()                                                                          \
+    do {                                                                                          \
+        PyErr_SetString(PyExc_SystemError, "typedpython: proven operation overflowed");           \
+        tp_rc = -1;                                                                               \
+        goto tp_exit;                                                                             \
+    } while (0)
+#define tp_proven(op, a, b, t)                                                                    \
+    do {                                                                                          \
+        tp_s = tp_##op##_i64((a), (b), &(t));                                                     \
+        if (tp_s != 0) tp_proven_fail();                                                          \
+    } while (0)
+#define tp_proven_neg(a, t)                                                                       \
+    do {                                                                                          \
+        tp_s = tp_neg_i64((a), &(t));                                                             \
+        if (tp_s != 0) tp_proven_fail();                                                          \
+    } while (0)
+#else
+#define tp_proven(op, a, b, t) ((t) = tp_p##op##_i64((a), (b)))
+#define tp_proven_neg(a, t) ((t) = tp_pneg_i64(a))
+#endif
 
 /* Python floor division: the quotient rounds toward negative infinity. */
 static inline int tp_floordiv_i64(int64_t a, int64_t b, int64_t *out)
@@ -581,6 +706,16 @@ static inline int tp_unbox_bool(PyObject *o, int *out)
  *
  * enter: rc 0 -> the struct holds the copy; rc 1 or -1 -> the struct is zeroed (so exit is a safe
  * no-op) and nothing was changed. `list` is borrowed: the caller keeps the argument alive.
+ *
+ * Free-threaded (#159): the CALLER holds the list's critical section (tp_cs_begin) from before
+ * enter to after exit, on every exit path. enter and exit read and write the list's items through
+ * borrowed references (PyList_GET_ITEM) and rely on that lock: no other thread can change the list
+ * between the copy-in and the write-back, so the whole call is one atomic step as far as lists are
+ * concerned (CPython can produce that interleaving: every list operation takes the same lock).
+ * Liveness note (issue #152): a function holding an array does not poll the eval breaker, so a long
+ * compiled array loop delays other threads' stop-the-world requests (the free-threaded GC) until it
+ * returns; results are unaffected. Polls inside such functions need the re-validation decided in
+ * #152 (after a poll the critical section is re-taken and the list may have changed).
  * exit: writes the dirty slots back as new objects (PyList_SetItem steals the new reference and, on
  * failure, drops it), always frees, and zeroes the struct. On a write-back failure it stops,
  * frees, and returns -1 with that error set (MemoryError, or IndexError if the list shrank).
@@ -736,6 +871,148 @@ static inline int tp_i64_array_exit(tp_i64_array *a)
     a->dirty = NULL;
     return rc;
 }
+
+/* ------------------------------------------------------------------------------------------
+ * Buffer arrays (issue #149; ir.ArrayParam.buffer): an exact array.array argument
+ * is NOT copied. tp_buf_enter takes one Py_buffer export and tp_buf_exit releases it; the wrapper
+ * calls exit on every path (ok, error, deopt), so the export, which forbids a resize of the
+ * array.array, is held exactly as long as the compiled call.
+ *
+ * enter(obj, exact, fmt1, fmt2, writable, b): rc 0 = held (b->data, b->len set); rc 1 = deopt, b
+ * is zeroed and nothing is held, nothing changed, no exception left; rc -1 = MemoryError set.
+ * Deopt (never memory access) unless ALL hold: `exact` is non-NULL and Py_IS_TYPE(obj, exact)
+ * (a subclass could override __getitem__), PyObject_GetBuffer succeeds with C_CONTIGUOUS | FORMAT
+ * (| WRITABLE when the function stores), ndim == 1, itemsize == 8, no suboffsets, shape[0] * 8 ==
+ * view.len, the format is exactly fmt1 or fmt2 ("d"; "q" or "l": the 8-byte signed ints, a byte
+ * order prefix or an unsigned/other format fails), and the data is 8-byte aligned (the access is
+ * an 8-byte atomic). An empty buffer is held too (len 0, no element is ever touched).
+ *
+ * Element access (tp_buf_ld_* / tp_buf_st_*): one relaxed atomic 8-byte load or store of the bit
+ * pattern on the buffer memory, bit-cast with memcpy. Another thread may write the same element concurrently: that is a data race in the program, and
+ * the atomic makes it a torn-value-free one (an element is read or written whole), the closest a
+ * compiled loop gets to what the interpreter's own element read/write does. -DTP_BUFFER_PLAIN
+ * replaces the atomics with plain loads and stores; it exists only to measure what the atomics
+ * cost, it is not a supported configuration for threads. len is the export's shape[0], fixed for
+ * the call (the export forbids resizing).
+ * ------------------------------------------------------------------------------------------ */
+typedef struct { Py_buffer view; Py_ssize_t len; void *data; int held; } tp_buf;
+
+/* `mod.attr` as a new reference in *out; not importable (or no such attribute): *out stays NULL
+ * and the error is cleared, so every guard against it deopts. -1 only for MemoryError. */
+static inline int tp_import_attr(const char *mod, const char *attr, PyObject **out)
+{
+    PyObject *m = PyImport_ImportModule(mod);
+    *out = NULL;
+    if (m != NULL) {
+        *out = PyObject_GetAttrString(m, attr);
+        Py_DECREF(m);
+    }
+    if (*out == NULL) {
+        if (PyErr_ExceptionMatches(PyExc_MemoryError)) {
+            return -1;
+        }
+        PyErr_Clear();
+    }
+    return 0;
+}
+
+static inline void tp_buf_exit(tp_buf *b)
+{
+    if (b->held) {
+        PyBuffer_Release(&b->view);
+    }
+    memset(b, 0, sizeof(*b));
+}
+
+static inline int tp_buf_enter(PyObject *obj, PyObject *exact, const char *fmt1, const char *fmt2,
+                               int writable, tp_buf *b)
+{
+    int flags = PyBUF_C_CONTIGUOUS | PyBUF_FORMAT;
+    memset(b, 0, sizeof(*b));
+    if (exact == NULL || !Py_IS_TYPE(obj, (PyTypeObject *)exact)) {
+        return 1;
+    }
+    if (writable) {
+        flags |= PyBUF_WRITABLE;
+    }
+    if (PyObject_GetBuffer(obj, &b->view, flags) != 0) {
+        if (PyErr_ExceptionMatches(PyExc_MemoryError)) {
+            return -1;
+        }
+        PyErr_Clear();                       /* read-only, not contiguous, ...: the object path */
+        memset(b, 0, sizeof(*b));
+        return 1;
+    }
+    b->held = 1;
+    if (b->view.ndim != 1 || b->view.itemsize != 8 || b->view.shape == NULL
+            || b->view.suboffsets != NULL || b->view.shape[0] < 0
+            || b->view.shape[0] * 8 != b->view.len || b->view.format == NULL
+            || !(strcmp(b->view.format, fmt1) == 0 || (fmt2 != NULL && strcmp(b->view.format, fmt2) == 0))
+            || (writable && b->view.readonly)
+            || (b->view.shape[0] > 0 && (b->view.buf == NULL || ((uintptr_t)b->view.buf & 7) != 0))) {
+        tp_buf_exit(b);
+        return 1;
+    }
+    b->len = b->view.shape[0];
+    b->data = b->view.buf;
+    return 0;
+}
+
+/* index: a negative index counts from the end; out of range -> IndexError with the text CPython's
+ * own array.array uses ("array index out of range" / "array assignment index out of range") */
+static inline int tp_buf_slot(const tp_buf *b, int64_t i, int store, Py_ssize_t *slot)
+{
+    if (i < 0) {
+        i += (int64_t)b->len;
+        if (i < 0) goto out_of_range;
+    }
+    else if (i >= (int64_t)b->len) {
+        goto out_of_range;
+    }
+    *slot = (Py_ssize_t)i;
+    return 0;
+out_of_range:
+    PyErr_SetString(PyExc_IndexError,
+                    store ? "array assignment index out of range" : "array index out of range");
+    return -1;
+}
+
+#ifdef TP_BUFFER_PLAIN
+static inline double tp_buf_ld_f64(const tp_buf *b, Py_ssize_t i) { return ((const double *)b->data)[i]; }
+static inline int64_t tp_buf_ld_i64(const tp_buf *b, Py_ssize_t i) { return ((const int64_t *)b->data)[i]; }
+static inline void tp_buf_st_f64(const tp_buf *b, Py_ssize_t i, double v) { ((double *)b->data)[i] = v; }
+static inline void tp_buf_st_i64(const tp_buf *b, Py_ssize_t i, int64_t v) { ((int64_t *)b->data)[i] = v; }
+#else
+static inline double tp_buf_ld_f64(const tp_buf *b, Py_ssize_t i)
+{
+    uint64_t u = __atomic_load_n((const uint64_t *)b->data + i, __ATOMIC_RELAXED);
+    double d;
+    memcpy(&d, &u, sizeof d);
+    return d;
+}
+
+static inline int64_t tp_buf_ld_i64(const tp_buf *b, Py_ssize_t i)
+{
+    uint64_t u = __atomic_load_n((const uint64_t *)b->data + i, __ATOMIC_RELAXED);
+    int64_t v;
+    memcpy(&v, &u, sizeof v);
+    return v;
+}
+
+static inline void tp_buf_st_f64(const tp_buf *b, Py_ssize_t i, double v)
+{
+    uint64_t u;
+    memcpy(&u, &v, sizeof u);
+    __atomic_store_n((uint64_t *)b->data + i, u, __ATOMIC_RELAXED);
+}
+
+static inline void tp_buf_st_i64(const tp_buf *b, Py_ssize_t i, int64_t v)
+{
+    uint64_t u;
+    memcpy(&u, &v, sizeof u);
+    __atomic_store_n((uint64_t *)b->data + i, u, __ATOMIC_RELAXED);
+}
+#endif
 
 /* ------------------------------------------------------------------------------------------
  * Local arrays (ir.NewArray / CopyArray): owned by the function, no list object behind them.
@@ -903,29 +1180,42 @@ static inline int tp_any_same(PyObject *const *objs, Py_ssize_t n)
  * its "__builtins__" (a module or a dict) is searched next, the interpreter's builtins if absent. */
 static inline PyObject *tp_global(PyObject *module_dict, PyObject *name)
 {
-    PyObject *v, *builtins;
-    v = PyDict_GetItemWithError(module_dict, name);
-    if (v != NULL) {
-        Py_INCREF(v);
+    PyObject *v = NULL, *builtins = NULL;
+    int rc;
+    /* strong references only (PyDict_GetItemRef): another thread may rebind or delete the name,
+     * or replace __builtins__, at any moment */
+    rc = PyDict_GetItemRef(module_dict, name, &v);
+    if (rc > 0) {
         return v;
     }
-    if (PyErr_Occurred()) {
+    if (rc < 0) {
         return NULL;
     }
-    builtins = PyDict_GetItemString(module_dict, "__builtins__"); /* borrowed, errors ignored */
+    rc = PyDict_GetItemStringRef(module_dict, "__builtins__", &builtins);   /* errors ignored */
+    if (rc < 0) {
+        PyErr_Clear();
+        builtins = NULL;
+    }
     if (builtins != NULL && PyModule_Check(builtins)) {
-        builtins = PyModule_GetDict(builtins);
+        PyObject *d = PyModule_GetDict(builtins);          /* borrowed: owned by `builtins`, which we hold */
+        Py_XINCREF(d);
+        Py_DECREF(builtins);
+        builtins = d;
     }
     if (builtins == NULL || !PyDict_Check(builtins)) {
-        builtins = PyEval_GetBuiltins();
+        Py_XDECREF(builtins);
+        builtins = PyEval_GetFrameBuiltins();              /* new reference */
+        if (builtins == NULL) {
+            PyErr_Clear();
+        }
     }
     if (builtins != NULL) {
-        v = PyDict_GetItemWithError(builtins, name);
-        if (v != NULL) {
-            Py_INCREF(v);
+        rc = PyDict_GetItemRef(builtins, name, &v);
+        Py_DECREF(builtins);
+        if (rc > 0) {
             return v;
         }
-        if (PyErr_Occurred()) {
+        if (rc < 0) {
             return NULL;
         }
     }
@@ -987,19 +1277,209 @@ static inline int tp_obj_to_f64(PyObject *obj, double *out)
     return 0;
 }
 
-/* op is an ir.BinOpKind: TP_BINOP_ADD .. TP_BINOP_MOD (declaration order) */
+/* Fast-path guards (issue #150). A fast path may replace a generic C API call only when the
+ * operand is exactly the type for which the fast path is what the generic call ends up in:
+ * subclasses (which can override __getitem__, __setitem__, __add__, ...) always take the generic
+ * call. These two macros are the only places where "exactly" is decided; the mutation tests in
+ * test_str_dict.py widen each to PyDict_Check / PyUnicode_Check and must fail. */
+#define TP_FASTPATH_GUARD_DICT(o) PyDict_CheckExact(o)
+#define TP_FASTPATH_GUARD_STR(o) PyUnicode_CheckExact(o)
+
+/* op is an ir.BinOpKind: TP_BINOP_ADD .. TP_BINOP_MOD (declaration order), or its in-place form
+ * TP_BINOP_IADD .. TP_BINOP_IMOD. `str + str` (both exactly str) is PyUnicode_Concat, which is what
+ * PyNumber_Add ends in for two strs (str has no nb_add, its sq_concat is PyUnicode_Concat), and
+ * what the interpreter's BINARY_OP_ADD_UNICODE calls. */
 static inline PyObject *tp_binop_obj(PyObject *a, PyObject *b, int op)
 {
     switch (op) {
-    case TP_BINOP_ADD: return PyNumber_Add(a, b);
+    case TP_BINOP_ADD:
+        if (TP_FASTPATH_GUARD_STR(a) && TP_FASTPATH_GUARD_STR(b)) {
+            return PyUnicode_Concat(a, b);
+        }
+        return PyNumber_Add(a, b);
     case TP_BINOP_SUB: return PyNumber_Subtract(a, b);
     case TP_BINOP_MUL: return PyNumber_Multiply(a, b);
     case TP_BINOP_TRUEDIV: return PyNumber_TrueDivide(a, b);
     case TP_BINOP_FLOORDIV: return PyNumber_FloorDivide(a, b);
     case TP_BINOP_MOD: return PyNumber_Remainder(a, b);
+    case TP_BINOP_IADD: return PyNumber_InPlaceAdd(a, b);
+    case TP_BINOP_ISUB: return PyNumber_InPlaceSubtract(a, b);
+    case TP_BINOP_IMUL: return PyNumber_InPlaceMultiply(a, b);
+    case TP_BINOP_ITRUEDIV: return PyNumber_InPlaceTrueDivide(a, b);
+    case TP_BINOP_IFLOORDIV: return PyNumber_InPlaceFloorDivide(a, b);
+    case TP_BINOP_IMOD: return PyNumber_InPlaceRemainder(a, b);
     }
     PyErr_SetString(PyExc_SystemError, "tp_binop_obj: unknown operator");
     return NULL;
+}
+
+/* ------------------------------------------------------------------------------------------
+ * str and dict code (issue #150; API.md "Objects: subscript, in, f-strings, iteration"). Each
+ * helper makes the C API call the interpreter's bytecode makes; the fast paths are guarded by the
+ * exact type (TP_FASTPATH_GUARD_*). All return new references or NULL / -1 with CPython's exception.
+ * ------------------------------------------------------------------------------------------ */
+
+/* BINARY_OP []: PyObject_GetItem. For an object that is exactly a dict: PyDict_GetItemRef (a strong
+ * reference, free-threaded safe) and KeyError(key) when absent, which is what dict_subscript does
+ * for an exact dict (BINARY_OP_SUBSCR_DICT in the interpreter). */
+static inline PyObject *tp_getitem(PyObject *obj, PyObject *key)
+{
+    if (TP_FASTPATH_GUARD_DICT(obj)) {
+        PyObject *v = NULL;
+        int rc = PyDict_GetItemRef(obj, key, &v);
+        if (rc > 0) {
+            return v;
+        }
+        if (rc == 0) {
+            PyObject *exc = PyObject_CallOneArg(PyExc_KeyError, key);   /* _PyErr_SetKeyError */
+            if (exc != NULL) {
+                PyErr_SetObject((PyObject *)Py_TYPE(exc), exc);
+                Py_DECREF(exc);
+            }
+        }
+        return NULL;
+    }
+    return PyObject_GetItem(obj, key);
+}
+
+/* STORE_SUBSCR: PyObject_SetItem; an exact dict's mp_ass_subscript is PyDict_SetItem. 0 / -1. */
+static inline int tp_setitem(PyObject *obj, PyObject *key, PyObject *value)
+{
+    if (TP_FASTPATH_GUARD_DICT(obj)) {
+        return PyDict_SetItem(obj, key, value);
+    }
+    return PyObject_SetItem(obj, key, value);
+}
+
+/* CONTAINS_OP: PySequence_Contains(container, needle). 1 / 0 / -1. */
+static inline int tp_contains(PyObject *container, PyObject *needle)
+{
+    return PySequence_Contains(container, needle);
+}
+
+static inline PyObject *tp_new_list(void)
+{
+    return PyList_New(0);
+}
+
+static inline PyObject *tp_new_dict(void)
+{
+    return PyDict_New();
+}
+
+/* One f-string field (CONVERT_VALUE, then FORMAT_SIMPLE or FORMAT_WITH_SPEC): `conversion` is -1,
+ * 's', 'r' or 'a'; `spec` is NULL or the format spec str. */
+static inline PyObject *tp_format(PyObject *value, PyObject *spec, int conversion)
+{
+    PyObject *converted, *result;
+    switch (conversion) {
+    case -1: converted = Py_NewRef(value); break;
+    case 's': converted = PyObject_Str(value); break;
+    case 'r': converted = PyObject_Repr(value); break;
+    case 'a': converted = PyObject_ASCII(value); break;
+    default:
+        PyErr_SetString(PyExc_SystemError, "tp_format: unknown conversion");
+        return NULL;
+    }
+    if (converted == NULL) {
+        return NULL;
+    }
+    if (spec == NULL && PyUnicode_CheckExact(converted)) {
+        return converted;                      /* FORMAT_SIMPLE: an exact str is its own format */
+    }
+    result = PyObject_Format(converted, spec);
+    Py_DECREF(converted);
+    return result;
+}
+
+/* BUILD_STRING: the join of n strs with the empty separator. */
+static inline PyObject *tp_build_string(PyObject *const *parts, Py_ssize_t n)
+{
+    PyObject *seq = tp_tuple(parts, n);
+    PyObject *empty, *result;
+    if (seq == NULL) {
+        return NULL;
+    }
+    empty = PyUnicode_New(0, 0);               /* the empty-string singleton */
+    if (empty == NULL) {
+        Py_DECREF(seq);
+        return NULL;
+    }
+    result = PyUnicode_Join(empty, seq);
+    Py_DECREF(empty);
+    Py_DECREF(seq);
+    return result;
+}
+
+/* GET_ITER: PyObject_GetIter. */
+static inline PyObject *tp_get_iter(PyObject *obj)
+{
+    return PyObject_GetIter(obj);
+}
+
+/* FOR_ITER: the next item (a new reference), or NULL with no error set at the end (a StopIteration
+ * is the end and is cleared), or NULL with the exception set. */
+static inline PyObject *tp_iter_next(PyObject *iter)
+{
+    return PyIter_Next(iter);
+}
+
+/* UNPACK_SEQUENCE (no star) of `v` into the n slots `out`, each a new reference. An exact tuple of
+ * length n is taken directly (immutable, so the items cannot change under us); anything else goes
+ * through its iterator, with the interpreter's unpack_iterable errors. 0 ok; -1 error, with no
+ * reference left in `out`. */
+static inline int tp_unpack(PyObject *v, Py_ssize_t n, PyObject **out)
+{
+    PyObject *it, *w;
+    Py_ssize_t i;
+    if (PyTuple_CheckExact(v) && PyTuple_GET_SIZE(v) == n) {
+        for (i = 0; i < n; i++) {
+            out[i] = Py_NewRef(PyTuple_GET_ITEM(v, i));
+        }
+        return 0;
+    }
+    it = PyObject_GetIter(v);
+    if (it == NULL) {
+        if (PyErr_ExceptionMatches(PyExc_TypeError) && Py_TYPE(v)->tp_iter == NULL
+                && !PySequence_Check(v)) {
+            PyErr_Format(PyExc_TypeError, "cannot unpack non-iterable %.200s object",
+                         Py_TYPE(v)->tp_name);
+        }
+        return -1;
+    }
+    for (i = 0; i < n; i++) {
+        w = PyIter_Next(it);
+        if (w == NULL) {
+            if (!PyErr_Occurred()) {
+                PyErr_Format(PyExc_ValueError,
+                             "not enough values to unpack (expected %zd, got %zd)", n, i);
+            }
+            goto fail;
+        }
+        out[i] = w;
+    }
+    w = PyIter_Next(it);
+    if (w == NULL) {
+        if (PyErr_Occurred()) {
+            goto fail;
+        }
+        Py_DECREF(it);
+        return 0;
+    }
+    Py_DECREF(w);
+    if (PyList_CheckExact(v) || PyTuple_CheckExact(v) || PyDict_CheckExact(v)) {
+        Py_ssize_t ll = PyDict_CheckExact(v) ? PyDict_Size(v) : Py_SIZE(v);
+        PyErr_Format(PyExc_ValueError, "too many values to unpack (expected %zd, got %zd)", n, ll);
+    }
+    else {
+        PyErr_Format(PyExc_ValueError, "too many values to unpack (expected %zd)", n);
+    }
+fail:
+    while (i > 0) {
+        Py_CLEAR(out[--i]);
+    }
+    Py_DECREF(it);
+    return -1;
 }
 
 /* Py_CLEAR: the only way generated code drops a reference */
@@ -1009,16 +1489,421 @@ static inline void tp_release(PyObject **slot)
 }
 
 /* ------------------------------------------------------------------------------------------
+ * Fixed-layout classes (SPEC N-11, ir.ClassDecl; API.md "Fixed-layout classes"). A compiled class
+ * is a plain heap type whose instances keep every field in an object slot at a fixed offset; the
+ * slots are reached through the PyMemberDef of the member descriptor captured at module init.
+ * Nothing here runs user code: PyMember_GetOne/SetOne touch the slot only.
+ *
+ * A class can change after init (a property replaces a field, __init__ is replaced, the module
+ * global is rebound, an instance's __class__ is assigned). Compiled code therefore re-proves its
+ * preconditions at EVERY FieldGet / FieldSet / New:
+ *   - the class is unchanged: cls->tp_version_tag equals the tag captured (or re-proved) for it.
+ *     CPython clears the tag to 0 on every change of the type (PyType_Modified /
+ *     type_modified_unlocked) and a later lookup assigns a NEW one from a per-interpreter counter
+ *     that only grows and stops at 0 when exhausted (typeobject.c assign_version_tag), so an old
+ *     tag never comes back and a tag of 0 never matches (the captured tag is never 0).
+ *     (Py_TPFLAGS_VALID_VERSION_TAG is "Unused. Legacy flag" in 3.14's object.h and is never set:
+ *     it cannot be part of the test.)
+ *   - FieldGet / FieldSet: Py_IS_TYPE(obj, cls) (covers `obj.__class__ = Other`).
+ *   - New: the module global still is the class (tp_class_global_ok).
+ * When a check fails the generated code takes a slow path with CPython's own semantics (or, in a
+ * pure function, deopts); see cgen.py "Fixed-layout classes".
+ * ------------------------------------------------------------------------------------------ */
+
+/* Per-class guard state, one per ClassDecl in the module state (zeroed = not compiled). */
+typedef struct {
+    unsigned int tag;       /* tp_version_tag at which the slots were proved; never 0 while compiled.
+                               ATOMIC (tp_atomic_*): any thread reads and refreshes it */
+    unsigned int bad_tag;   /* a tag at which tp_class_refresh failed (0: none); not retried. ATOMIC */
+    uint64_t gepoch;        /* tp_globals_epoch at which module_dict[name] was last seen to be cls.
+                               ATOMIC */
+    PyObject *init;         /* strong: the class's own __init__ at capture, or NULL if it had none.
+                               IMMUTABLE after tp_class_capture */
+    Py_ssize_t slow;        /* per-access checks that failed (introspection only). ATOMIC */
+    Py_ssize_t refreshed;   /* new tags adopted by tp_class_refresh (introspection only). ATOMIC */
+} tp_class_rt;
+
+/* Moves whenever a watched module dict changes a key that is (or may be) a compiled class name, is
+ * cleared, cloned or deallocated (tp_globals_watch_event). Static: one counter per extension, shared
+ * by every instance of the module in the process; an instance re-proves its own globals after any
+ * move. ATOMIC (tp_atomic_*): the watcher callback runs on whichever thread changes the dict, and
+ * the module declares Py_mod_gil = Py_MOD_GIL_NOT_USED. The module declares no
+ * Py_mod_multiple_interpreters slot, so CPython loads it only into interpreters sharing the main
+ * one. */
+static uint64_t tp_globals_epoch = 1;
+
+/* `name` in cls's OWN dict (not through the MRO). 1 found (*out a new reference), 0 absent, -1 error. */
+static inline int tp_own_attr(PyTypeObject *cls, const char *name, PyObject **out)
+{
+    PyObject *dict = PyType_GetDict(cls);
+    int found;
+
+    *out = NULL;
+    if (dict == NULL) {
+        return -1;
+    }
+    found = PyDict_GetItemStringRef(dict, name, out);
+    Py_DECREF(dict);
+    return found;
+}
+
+/* Look up `field` in cls's OWN dict (not through the MRO: a subclass or an instance attribute must
+ * not be consulted) and capture its PyMemberDef. It must be a member descriptor made for exactly
+ * this class (d_type == cls), of an object slot (Py_T_OBJECT_EX), writable, of that name, whose
+ * offset lies inside the instance. 0 = captured (*out set, *descr a new reference to the descriptor),
+ * 1 = not a plain slot (the class is not compiled), -1 = error. The PyMemberDef lives in
+ * cls->tp_members: the caller must keep `cls` alive for as long as the pointer is used (the
+ * generated module holds a strong reference). */
+static inline int tp_slot_capture(PyTypeObject *cls, const char *field, PyMemberDef **out,
+                                  PyObject **descr_out)
+{
+    PyObject *descr = NULL;
+    int found, rc = 1;
+    PyMemberDescrObject *md;
+    PyMemberDef *m;
+
+    *descr_out = NULL;
+    found = tp_own_attr(cls, field, &descr);
+    if (found < 0) {
+        return -1;
+    }
+    if (found == 0) {
+        return 1;
+    }
+    if (Py_IS_TYPE(descr, &PyMemberDescr_Type)) {
+        md = (PyMemberDescrObject *)descr;
+        m = md->d_member;
+        if (md->d_common.d_type == cls && m != NULL && m->name != NULL
+            && strcmp(m->name, field) == 0 && m->type == Py_T_OBJECT_EX
+            && (m->flags & Py_READONLY) == 0 && m->offset >= (Py_ssize_t)sizeof(PyObject)
+            && m->offset + (Py_ssize_t)sizeof(PyObject *) <= cls->tp_basicsize) {
+            *out = m;
+            *descr_out = descr;          /* the reference moves to the caller */
+            return 0;
+        }
+    }
+    Py_DECREF(descr);
+    return rc;
+}
+
+/* The type-level conditions of ClassDecl: a heap type made by `type` (no metaclass), base `object`,
+ * no instance __dict__, no variable size, object's own tp_new and tp_alloc (so tp_new_fixed is what
+ * `C(...)` does for a trivial __init__), and the generic attribute protocol (no __getattribute__,
+ * __getattr__, __setattr__ or __delattr__: those would run instead of, or after, the slot access). */
+static inline int tp_class_shape_ok(PyTypeObject *cls)
+{
+    return (cls->tp_flags & Py_TPFLAGS_HEAPTYPE) && Py_TYPE(cls) == &PyType_Type
+        && cls->tp_base == &PyBaseObject_Type && cls->tp_dictoffset == 0
+        && cls->tp_itemsize == 0 && cls->tp_new == PyBaseObject_Type.tp_new
+        && cls->tp_alloc == PyType_GenericAlloc && !(cls->tp_flags & Py_TPFLAGS_IS_ABSTRACT)
+        && cls->tp_getattro == PyObject_GenericGetAttr
+        && cls->tp_setattro == PyObject_GenericSetAttr;
+}
+
+static inline void tp_class_rt_clear(tp_class_rt *rt, PyObject **descrs, Py_ssize_t n)
+{
+    Py_ssize_t i;
+    for (i = 0; i < n; i++) {
+        Py_CLEAR(descrs[i]);
+    }
+    Py_CLEAR(rt->init);
+    rt->tag = 0;
+    rt->bad_tag = 0;
+    rt->gepoch = 0;
+}
+
+/* At module init: the class object must be what ClassDecl promises (tp_class_shape_ok) and every
+ * field a plain slot. slots[i] receives the PyMemberDef of fields[i], descrs[i] a strong reference
+ * to its member descriptor, rt->init a strong reference to the class's own __init__ (or NULL), and
+ * rt->tag the class's version tag (PyUnstable_Type_AssignVersionTag assigns one if it has none; a
+ * class that cannot get a tag is not compiled). 1 = compiled, 0 = not (nothing kept), -1 = error
+ * (nothing kept). */
+static inline int tp_class_capture(PyObject *cls_obj, const char *const *fields, Py_ssize_t n,
+                                   PyMemberDef **slots, PyObject **descrs, tp_class_rt *rt)
+{
+    PyTypeObject *cls;
+    Py_ssize_t i;
+    int rc;
+
+    if (!PyType_Check(cls_obj)) {
+        return 0;
+    }
+    cls = (PyTypeObject *)cls_obj;
+    if (!tp_class_shape_ok(cls)) {
+        return 0;
+    }
+    for (i = 0; i < n; i++) {
+        rc = tp_slot_capture(cls, fields[i], &slots[i], &descrs[i]);
+        if (rc != 0) {
+            tp_class_rt_clear(rt, descrs, i);
+            return rc < 0 ? -1 : 0;
+        }
+    }
+    if (tp_own_attr(cls, "__init__", &rt->init) < 0) {
+        tp_class_rt_clear(rt, descrs, n);
+        return -1;
+    }
+    if (!PyUnstable_Type_AssignVersionTag(cls) || tp_type_tag(cls) == 0) {
+        tp_class_rt_clear(rt, descrs, n);
+        return 0;
+    }
+    /* init time: the class has not been handed to compiled code yet, plain stores are enough (the
+     * import completing publishes them) */
+    rt->tag = tp_type_tag(cls);
+    rt->bad_tag = 0;
+    rt->gepoch = 0;
+    rt->slow = 0;
+    rt->refreshed = 0;
+    return 1;
+}
+
+/* The class's tag moved (or is 0). Re-prove what the captured slots rely on, without running user
+ * code: get a tag (none left: 0), the shape still holds, every field's own-dict entry is the very
+ * member descriptor object captured at init, and __init__ is the very object captured at init. Then
+ * adopt the new tag (1). Otherwise remember the tag as bad (0), so the next access with that tag
+ * does not search again. -1 = error (a failed dict lookup). */
+static inline int tp_class_refresh(PyTypeObject *cls, tp_class_rt *rt, const char *const *fields,
+                                   Py_ssize_t n, PyObject *const *descrs)
+{
+    unsigned int tag;
+    Py_ssize_t i;
+    PyObject *d;
+    int found;
+
+    if (!PyUnstable_Type_AssignVersionTag(cls) || tp_type_tag(cls) == 0) {
+        return 0;                                /* tags exhausted for this class */
+    }
+    /* The tag is read BEFORE the dict is examined: a change after the read gives the class a new
+     * tag, so a tag adopted below is stale at once and the next access refreshes again. Two
+     * threads refreshing at the same time adopt the same or an older tag; both are safe. */
+    tag = tp_type_tag(cls);
+    if (tag == tp_atomic_load_u32(&rt->tag)) {
+        return 1;
+    }
+    if (tag == tp_atomic_load_u32(&rt->bad_tag)) {
+        return 0;
+    }
+    if (!tp_class_shape_ok(cls)) {
+        goto bad;
+    }
+    for (i = 0; i < n; i++) {
+        found = tp_own_attr(cls, fields[i], &d);
+        if (found < 0) {
+            return -1;
+        }
+        Py_XDECREF(d);                           /* identity only; descrs[i] keeps it alive */
+        if (d != descrs[i]) {
+            goto bad;
+        }
+    }
+    found = tp_own_attr(cls, "__init__", &d);
+    if (found < 0) {
+        return -1;
+    }
+    Py_XDECREF(d);
+    if (d != rt->init) {
+        goto bad;
+    }
+    tp_atomic_store_u32(&rt->tag, tag);
+    tp_atomic_add_ssize(&rt->refreshed, 1);
+    return 1;
+bad:
+    tp_atomic_store_u32(&rt->bad_tag, tag);
+    return 0;
+}
+
+/* A failed per-access check was taken (introspection counter). */
+static inline void tp_class_note_slow(tp_class_rt *rt)
+{
+    tp_atomic_add_ssize(&rt->slow, 1);
+}
+
+/* introspection reads (__typedpython_class_info__) */
+static inline unsigned int tp_class_rt_tag(const tp_class_rt *rt) { return tp_atomic_load_u32(&rt->tag); }
+static inline Py_ssize_t tp_class_rt_slow(const tp_class_rt *rt) { return tp_atomic_load_ssize(&rt->slow); }
+static inline Py_ssize_t tp_class_rt_refreshed(const tp_class_rt *rt)
+{
+    return tp_atomic_load_ssize(&rt->refreshed);
+}
+
+/* cls's current tp_version_tag, 0 for NULL (introspection: __typedpython_class_info__). */
+static inline unsigned int tp_class_tag(PyObject *cls)
+{
+    return cls != NULL ? tp_type_tag((PyTypeObject *)cls) : 0u;
+}
+
+/* The per-access check of FieldGet / FieldSet (obj != NULL) and New (obj == NULL): 1 = the captured
+ * slots are what `obj.f` / `C(...)` reach now (obj is exactly cls, and cls is unchanged since the
+ * slots were proved, or re-proved by tp_class_refresh), 0 = take the slow path, -1 = error. The
+ * fast case is one type compare and one tag compare. */
+static inline int tp_class_current(PyObject *obj, PyObject *cls_obj, tp_class_rt *rt,
+                                   const char *const *fields, Py_ssize_t n, PyObject *const *descrs)
+{
+    PyTypeObject *cls = (PyTypeObject *)cls_obj;
+    if (cls == NULL || (obj != NULL && !Py_IS_TYPE(obj, cls))) {
+        return 0;
+    }
+    if (tp_type_tag(cls) == tp_atomic_load_u32(&rt->tag)) {   /* rt->tag != 0 while cls != NULL */
+        return 1;
+    }
+    return tp_class_refresh(cls, rt, fields, n, descrs);
+}
+
+/* LOAD_GLOBAL of a class name, as an identity test: 1 = module_dict[name] is cls, 0 = it is not (or
+ * the name is not a module global: the slow path then asks tp_global), -1 = error. With a dict
+ * watcher on module_dict (`watched`), a 1 is remembered in rt->gepoch until tp_globals_epoch moves,
+ * so the steady state is one compare; without one (no watcher id was free) every call looks up. */
+static inline int tp_class_global_ok(PyObject *module_dict, PyObject *name, PyObject *cls,
+                                     tp_class_rt *rt, int watched)
+{
+    PyObject *v = NULL;
+    uint64_t epoch;
+    int rc;
+    if (cls == NULL) {
+        return 0;
+    }
+    if (watched && tp_atomic_load_u64(&rt->gepoch) == tp_atomic_load_u64(&tp_globals_epoch)) {
+        return 1;
+    }
+    /* The epoch is read and the dict looked up inside the dict's critical section. The watcher
+     * runs BEFORE a change is stored and under the same lock, so either the change finished (the
+     * lookup sees it) or it has not begun (its epoch move comes later and invalidates what is
+     * remembered below). Without the lock a thread could read the epoch after the move but look up
+     * before the store, and remember a stale binding as current for good. */
+    Py_BEGIN_CRITICAL_SECTION(module_dict);
+    epoch = tp_atomic_load_u64(&tp_globals_epoch);
+    rc = PyDict_GetItemRef(module_dict, name, &v);     /* strong */
+    Py_END_CRITICAL_SECTION();
+    if (rc <= 0) {
+        return rc;                                     /* 0 absent, -1 error */
+    }
+    rc = (v == cls);
+    Py_DECREF(v);
+    if (rc && watched) {
+        tp_atomic_store_u64(&rt->gepoch, epoch);
+    }
+    return rc;
+}
+
+/* The body of a module's PyDict_WatchCallback: move tp_globals_epoch when `key` is one of the
+ * NULL-terminated class `names` (an exact str compared by content), may equal one (any other key
+ * type, a str subclass), or is NULL (cleared / cloned / deallocated). Never raises; returns 0. */
+static inline int tp_globals_watch_event(PyDict_WatchEvent event, PyObject *key,
+                                         const char *const *names)
+{
+    Py_ssize_t i;
+    (void)event;
+    if (key != NULL && PyUnicode_CheckExact(key)) {
+#if PY_VERSION_HEX >= 0x030D0000
+        for (i = 0; names[i] != NULL; i++) {
+            if (PyUnicode_EqualToUTF8(key, names[i])) {
+                tp_atomic_add_u64(&tp_globals_epoch, 1);
+                return 0;
+            }
+        }
+        return 0;
+#else
+        (void)i;
+        (void)names;
+#endif
+    }
+    tp_atomic_add_u64(&tp_globals_epoch, 1);
+    return 0;
+}
+
+/* Watch module_dict with `cb` (a function calling tp_globals_watch_event). *id1 = watcher id + 1, or
+ * 0 when no dict-watcher id is free (8 per interpreter, 2 reserved by CPython, shared with every
+ * other extension) or PyDict_Watch failed: the caller then takes the conservative path (a dict
+ * lookup per New). Never leaves an error set. */
+static inline void tp_globals_watch(PyObject *module_dict, PyDict_WatchCallback cb, int *id1)
+{
+    int id;
+    *id1 = 0;
+    id = PyDict_AddWatcher(cb);
+    if (id < 0) {
+        PyErr_Clear();
+        return;
+    }
+    if (PyDict_Watch(id, module_dict) < 0) {
+        PyErr_Clear();
+        if (PyDict_ClearWatcher(id) < 0) {
+            PyErr_Clear();
+        }
+        return;
+    }
+    *id1 = id + 1;
+}
+
+/* Undo tp_globals_watch (module clear / free): unwatch module_dict (if still there) and release the
+ * watcher id. Idempotent; keeps any exception that was already set. */
+static inline void tp_globals_unwatch(PyObject *module_dict, int *id1)
+{
+    PyObject *exc;
+    if (*id1 <= 0) {
+        return;
+    }
+    exc = PyErr_GetRaisedException();
+    if (module_dict != NULL && PyDict_Unwatch(*id1 - 1, module_dict) < 0) {
+        PyErr_Clear();
+    }
+    if (PyDict_ClearWatcher(*id1 - 1) < 0) {
+        PyErr_Clear();
+    }
+    *id1 = 0;
+    PyErr_SetRaisedException(exc);
+}
+
+/* obj.field of a proved-exact instance: a new reference, or CPython's AttributeError for an unset
+ * slot ("'C' object has no attribute 'f'"). */
+static inline PyObject *tp_field_get(PyObject *obj, PyMemberDef *m)
+{
+    return PyMember_GetOne((const char *)obj, m);
+}
+
+/* obj.field = v: the slot takes its own reference to v and releases the old one. 0 or -1. */
+static inline int tp_field_set(PyObject *obj, PyMemberDef *m, PyObject *v)
+{
+    return PyMember_SetOne((char *)obj, m, v);
+}
+
+/* The slow path of FieldSet: STORE_ATTR (PyObject_SetAttr). 0 or -1. */
+static inline int tp_setattr(PyObject *obj, PyObject *name, PyObject *v)
+{
+    return PyObject_SetAttr(obj, name, v);
+}
+
+/* The observable result of a trivial __init__: allocate with cls's tp_alloc and set slots[i] to
+ * values[i] (new references; the caller keeps its own). NULL with the error set on failure; the
+ * half-built object is released (its unset slots are NULL, which dealloc handles). */
+static inline PyObject *tp_new_fixed(PyTypeObject *cls, PyMemberDef *const *slots,
+                                     PyObject *const *values, Py_ssize_t n)
+{
+    Py_ssize_t i;
+    PyObject *obj = cls->tp_alloc(cls, 0);
+
+    if (obj == NULL) {
+        return NULL;
+    }
+    for (i = 0; i < n; i++) {
+        if (PyMember_SetOne((char *)obj, slots[i], values[i]) < 0) {
+            Py_DECREF(obj);
+            return NULL;
+        }
+    }
+    return obj;
+}
+
+/* type(obj) is cls */
+static inline int tp_is_exact(PyObject *obj, PyTypeObject *cls)
+{
+    return Py_IS_TYPE(obj, cls);
+}
+
+/* ------------------------------------------------------------------------------------------
  * Call depth (issue #57): compiled frames have no Python frame, so a recursion made of them would
  * neither raise RecursionError nor stop before the C stack ends. tp_enter_call / tp_leave_call
  * bracket every compiled impl function. See API.md "Call depth".
  * ------------------------------------------------------------------------------------------ */
-#if defined(_MSC_VER)
-#define TP_THREAD_LOCAL __declspec(thread)
-#else
-#define TP_THREAD_LOCAL __thread
-#endif
-
 typedef struct {
     Py_ssize_t count;       /* compiled frames in flight on this thread (this module) */
     PyObject *frame;        /* strong ref: the top Python frame when `pydepth` was measured */
@@ -1074,6 +1959,135 @@ static inline void tp_leave_call(void)
     if (--tp_depth.count == 0) {
         Py_CLEAR(tp_depth.frame);
     }
+}
+
+/* Fast entry (issue #147). A *bounded* compiled function (cgen: no call cycle, bounded callees, no
+ * node that can run Python code) has a call tree of at most k compiled frames, k known at build time.
+ * `tp_depth_room(k)` is true exactly when tp_enter_call would accept all k nested frames, the same
+ * comparison with the deepest frame's count (depth + count + k <= limit); then the whole tree runs
+ * through its uncounted twins (`tp_fimpl_*`: no tp_enter_call, no tp_leave_call), which the C
+ * compiler can inline. When it is false the caller takes the counted path, so RecursionError is raised
+ * at exactly the call where it is raised without the fast entry, never earlier.
+ *
+ * Skipping Py_EnterRecursiveCall on the fast path is safe because the tree is bounded: at most k
+ * small compiled frames (no recursion, no Python callbacks except at the two points below), so they
+ * use a bounded amount of C stack on top of the entry's.
+ *
+ * The frames of a fast tree are not in `tp_depth.count`. A bounded tree runs Python code at exactly
+ * two points: a `redo` Call (the interpreted original) and the eval-breaker poll in a loop (signal
+ * handler, finalizer, another compiled call). Around each, the twin brackets the code with
+ * tp_depth_py_begin(tp_fd) / tp_depth_py_end(tp_fd), `tp_fd` being the tree's active frames (itself
+ * included), so the count is exactly what the counted path would have there: Python frames and
+ * compiled calls started from it see the true depth. */
+static inline int tp_depth_room(Py_ssize_t k)
+{
+    return tp_python_depth() + tp_depth.count + k <= Py_GetRecursionLimit();
+}
+
+/* After a fast tree: tp_python_depth may have cached the top frame (a strong reference) and, with
+ * no counted frame in flight, nothing else would drop it, as tp_leave_call does at count 0. */
+static inline void tp_depth_done(void)
+{
+    if (tp_depth.count == 0) {
+        Py_CLEAR(tp_depth.frame);
+    }
+}
+
+/* Around a point of a fast tree that can run Python code: the count includes the tree's `fd` active
+ * frames. begin/end are balanced. end also drops the cached top frame when no compiled frame is
+ * counted any more (the code in between may have cached another frame, as tp_leave_call would). */
+static inline void tp_depth_py_begin(int fd)
+{
+    tp_depth.count += fd;
+}
+
+static inline void tp_depth_py_end(int fd)
+{
+    tp_depth.count -= fd;
+    tp_depth_done();
+}
+
+#ifdef TP_TRACE_FAST
+/* Test builds only (-DTP_TRACE_FAST): how many entries took the fast path. */
+static Py_ssize_t tp_trace_fast_hits_count = 0;
+static inline void tp_trace_fast_hit(void) { tp_trace_fast_hits_count++; }
+static PyObject *tp_trace_fast_hits(PyObject *tp_module, PyObject *tp_unused)
+{
+    (void)tp_module; (void)tp_unused;
+    return PyLong_FromSsize_t(tp_trace_fast_hits_count);
+}
+#else
+static inline void tp_trace_fast_hit(void) {}
+#endif
+
+/* ------------------------------------------------------------------------------------------
+ * Eval breaker (issue #141). The interpreter checks between bytecodes for signals, pending calls,
+ * GIL drop requests, async exceptions and scheduled collections; compiled code has no bytecodes.
+ * So at the top of every loop iteration and at every impl entry `tp_poll` counts down a module
+ * counter (one decrement under the GIL), and every TP_POLL_INTERVAL polls `tp_poll_slow` calls a
+ * Python no-op (`lambda: None`, made by the module's exec slot). Its RESUME runs CPython's own
+ * eval-breaker handling, so everything the interpreter would do there happens, the same way
+ * (forced GIL switching to a waiting thread, KeyboardInterrupt, gc). Public API only.
+ *
+ * Signal handlers, pending calls and other threads are user code that may change lists and
+ * globals. A function holding an array copy-in or an entry-globals snapshot runs no user code by
+ * contract (ir.ArrayParam, ir.Function.entry_globals), so such a function does not poll, and while
+ * one is active (`tp_snapshot_depth > 0`, counted at its entry and exit) the slow path does nothing:
+ * the event stays pending and is handled at the next poll or bytecode after it returns, which is the
+ * CPython execution in which it arrived late.
+ * ------------------------------------------------------------------------------------------ */
+#ifndef TP_POLL_INTERVAL
+#define TP_POLL_INTERVAL 4096
+#endif
+
+/* Per thread (#159): a shared counter would make threads poll for each other and, worse, let one
+ * thread's snapshot-holding function suppress another thread's polls. */
+static TP_THREAD_LOCAL int tp_poll_countdown = TP_POLL_INTERVAL;
+static TP_THREAD_LOCAL Py_ssize_t tp_snapshot_depth = 0;
+
+/* Kept out of line and marked cold: inlined into every loop body it bloated short inner loops
+ * (fannkuch paid ~11% with it inline). */
+#if defined(__GNUC__) || defined(__clang__)
+#define TP_COLD __attribute__((noinline, cold, unused))
+#define TP_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+#define TP_COLD
+#define TP_UNLIKELY(x) (x)
+#endif
+
+static TP_COLD int tp_poll_slow(PyObject *breaker)
+{
+    PyObject *r;
+    tp_poll_countdown = TP_POLL_INTERVAL;
+    if (tp_snapshot_depth > 0 || breaker == NULL) {
+        return 0;
+    }
+    r = PyObject_CallNoArgs(breaker);
+    if (r == NULL) {
+        return -1;
+    }
+    Py_DECREF(r);
+    return 0;
+}
+
+/* A loop's poll countdown (a local of the impl, kept in a register): 1 when the slow path is due,
+ * which also resets the countdown. Inline, with the rare case marked unlikely. */
+static inline int tp_pc_tick(int *pc)
+{
+    if (TP_UNLIKELY(--*pc == 0)) {
+        *pc = TP_POLL_INTERVAL;
+        return 1;
+    }
+    return 0;
+}
+
+/* 0 = continue, -1 = exception set (e.g. KeyboardInterrupt from a signal handler). */
+static inline int tp_poll(PyObject *breaker)
+{
+    if (!TP_UNLIKELY(--tp_poll_countdown <= 0)) {
+        return 0;
+    }
+    return tp_poll_slow(breaker);
 }
 
 #endif /* TP_RUNTIME_H */

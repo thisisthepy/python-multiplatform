@@ -9,12 +9,14 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * AGENTS.md section 12 rule 1: the binder never exports a Kotlin namespace under another name, and has
- * no feature that turns `androidx` into `pythonx`. Pythonic renaming is the `pythonx-compose`
- * package's job.
+ * AGENTS.md section 12 rule 1: the binder never exports a Kotlin **namespace** under another name, and
+ * has no feature that turns `androidx` into `pythonx`. Member and parameter names are another matter
+ * (issue #131): the runtime serves each lower-case-first name under its snake_case alias as well, and
+ * the stub says so -- the Kotlin `def` stays, the alias is an assignment beside it, and a parameter is
+ * written under the keyword `inspect.signature` shows.
  *
  * These tests look at everything the generator can emit for a set of androidx declarations, not at
- * one function, so a renaming feature added anywhere in the stub pipeline fails them.
+ * one function, so a namespace-renaming feature added anywhere in the stub pipeline fails them.
  */
 class KotlinNamesOnlyStubTest {
 
@@ -57,13 +59,34 @@ class KotlinNamesOnlyStubTest {
         assertFalse(files.keys.any { it.endsWith("py.typed") || it.endsWith("_pm_dispatch.json") }, files.keys.toString())
     }
 
+    /** The Kotlin name is the `def`; its Pythonic alias is the same object, as the runtime serves it. */
     @Test
-    fun kotlinNamesAreNeverSnakeCased() {
+    fun aKotlinNameKeepsItsDefAndGainsItsPythonicAlias() {
         val all = everythingEmitted().values.joinToString("\n")
         assertTrue("def fillMaxWidth(" in all, all)
         assertTrue("fraction: float" in all, all)
-        assertFalse("fill_max_width" in all, all)
-        assertFalse("window_insets" in all, all)
+        assertTrue(Regex("^fill_max_width = fillMaxWidth${'$'}", RegexOption.MULTILINE).containsMatchIn(all), all)
+        assertTrue(Regex("^window_insets_padding = windowInsetsPadding${'$'}", RegexOption.MULTILINE).containsMatchIn(all), all)
+        // A parameter has one name in a stub: the Pythonic keyword.
+        assertTrue("window_insets: float" in all, all)
+        assertFalse("windowInsets: float" in all, all)
+        // The namespace is not converted: the module path is the Kotlin package.
+        assertFalse(Regex("^def fill_max_width\\(", RegexOption.MULTILINE).containsMatchIn(all), all)
+    }
+
+    /**
+     * The collision policy (`pythonicAliases`, the runtime's `pythonic_aliases`): an alias two Kotlin
+     * names map to is not written, and an alias that is another declaration's Kotlin name belongs to it.
+     */
+    @Test
+    fun anAmbiguousAliasIsNotWrittenAndAKotlinNameOwnsItsSpelling() {
+        val text = renderKotlinFqnStubs(
+            listOf(decl("toURL"), decl("toUrl"), decl("fooBar"), decl("foo_bar")),
+        ).values.joinToString("\n")
+        assertFalse(Regex("^to_url = ", RegexOption.MULTILINE).containsMatchIn(text), text)
+        assertFalse(Regex("^foo_bar = ", RegexOption.MULTILINE).containsMatchIn(text), text)
+        assertTrue(Regex("^def foo_bar\\(", RegexOption.MULTILINE).containsMatchIn(text), text)
+        assertTrue(Regex("^def toURL\\(", RegexOption.MULTILINE).containsMatchIn(text), text)
     }
 
     @Test
@@ -78,8 +101,8 @@ class KotlinNamesOnlyStubTest {
     private fun body(vararg d: DeclarationModel) =
         renderKotlinFqnStubs(d.toList()).getValue("androidx/compose/foundation/layout/__init__.pyi")
 
-    /** The receiver is positional-only; declared parameters are positional-or-keyword by their Kotlin
-     * name, and a defaulted one carries `= ...`. */
+    /** The receiver is positional-only; declared parameters are positional-or-keyword by their
+     * Pythonic keyword (the Kotlin name where they have none), and a defaulted one carries `= ...`. */
     @Test
     fun declaredParametersAreKeywordCapableByTheirKotlinNameAndDefaultsAreMarked() {
         val b = body(decl("fillMaxWidth", parameters = listOf(param("fraction", default = true))))
@@ -89,7 +112,7 @@ class KotlinNamesOnlyStubTest {
     @Test
     fun aRequiredParameterHasNoDefaultMarker() {
         val b = body(decl("windowInsetsPadding", parameters = listOf(param("windowInsets"))))
-        assertTrue("def windowInsetsPadding(receiver: androidx.compose.ui.Modifier, /, windowInsets: float) -> androidx.compose.ui.Modifier:" in b, b)
+        assertTrue("def windowInsetsPadding(receiver: androidx.compose.ui.Modifier, /, window_insets: float) -> androidx.compose.ui.Modifier:" in b, b)
     }
 
     /** `in` is a Python keyword: it cannot be a keyword argument in `.pyi`, so it and everything

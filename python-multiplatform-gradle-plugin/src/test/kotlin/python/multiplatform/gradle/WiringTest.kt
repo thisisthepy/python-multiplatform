@@ -8,12 +8,12 @@ import kotlin.test.assertTrue
 /**
  * The three decisions the plugin makes for the user, as pure functions.
  *
- * The plugin's real proof is `ksp-fixtures`, which applies it and runs its generated table; these
+ * The plugin's real proof is the `fixtures/` modules, which apply it and runs its generated table; these
  * pin the parts that would otherwise only be observable as a missing fragment or a duplicate one.
  */
 class WiringTest {
 
-    // Observed on `:ksp-fixtures:app` (`gradlew dependencies`), Kotlin 2.4.20-Beta2 + KSP 2.3.11.
+    // Observed on `:python-multiplatform-ksp:fixtures:app` (`gradlew dependencies`), Kotlin 2.4.20-Beta2 + KSP 2.3.11.
     private val observedConfigurations = listOf(
         "ksp",
         "kspAndroidNativeArm64",
@@ -46,7 +46,7 @@ class WiringTest {
         assertTrue(isBindingKspConfiguration("ksp", isMultiplatform = false))
     }
 
-    // Observed on `:ksp-fixtures:android` (`gradlew :ksp-fixtures:android:dependencies`), the
+    // Observed on `:python-multiplatform-ksp:fixtures:android` (`gradlew :python-multiplatform-ksp:fixtures:android:dependencies`), the
     // fixture that carries `com.android.library`. AGP names its source sets with the build type
     // *last*, so the test configurations here do not end in `Test` the way the Kotlin-target ones
     // above do. Every one of the nine `...Test...` names below was receiving the processor before
@@ -95,7 +95,7 @@ class WiringTest {
         // The ROADMAP §13 defect: `kspAndroidTestDebug` does not end in `Test`, so the processor
         // ran over the unit-test sources and emitted a `Fragment_<module>`/`FunctionTable` pair
         // that shadowed `main`'s inside the test compilation. Observed on
-        // `:ksp-fixtures:android` before this filter was widened.
+        // `:python-multiplatform-ksp:fixtures:android` before this filter was widened.
         for (name in listOf(
             "kspAndroidTestDebug",
             "kspAndroidTestRelease",
@@ -147,8 +147,8 @@ class WiringTest {
         // Two independent libraries both called `:core` would otherwise both emit
         // `python.multiplatform.generated.fragments.Fragment_core` and collide on one classpath.
         assertEquals(
-            "io_github_thisisthepy_ksp_fixtures_app",
-            deriveModuleName(group = "io.github.thisisthepy", path = ":ksp-fixtures:app", name = "app"),
+            "io_github_thisisthepy_python_multiplatform_ksp_fixtures_app",
+            deriveModuleName(group = "io.github.thisisthepy", path = ":python-multiplatform-ksp:fixtures:app", name = "app"),
         )
         assertEquals(
             "com_example_core",

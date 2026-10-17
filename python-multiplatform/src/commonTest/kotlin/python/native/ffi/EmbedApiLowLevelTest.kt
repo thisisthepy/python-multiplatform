@@ -14,7 +14,7 @@ import python.multiplatform.ffi.PythonTestFixture
  *
  * ### Why this file exists
  *
- * Every other test under `commonTest` exercises the assembled layer — `Python3`, `PyObject`,
+ * Every other test under `commonTest` exercises the assembled layer, `Python3`, `PyObject`,
  * the collections. That is the right default, but it means a broken individual binding is only
  * ever seen through whatever the object model happens to call, and only in the combinations it
  * happens to use. Android demonstrated the cost of the mirror-image gap: its instrumented tests
@@ -26,7 +26,7 @@ import python.multiplatform.ffi.PythonTestFixture
  * where it found it.
  *
  * The reference conventions are the part worth being explicit about, because getting one wrong
- * is silent in both directions — one too few leaks, one too many frees an object still in use
+ * is silent in both directions, one too few leaks, one too many frees an object still in use
  * and the crash lands somewhere unrelated.
  */
 class EmbedApiLowLevelTest {

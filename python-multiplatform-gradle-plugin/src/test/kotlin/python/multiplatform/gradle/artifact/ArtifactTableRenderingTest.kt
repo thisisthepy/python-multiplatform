@@ -14,7 +14,7 @@ import kotlin.test.assertEquals
  *
  * 1. **`FunctionTable` already means something.** `PackageScanFragmentDiscovery` builds it from
  *    `Resolver.getDeclarationsFromPackage(python.multiplatform.generated.fragments)` -- "every
- *    module in this graph that was compiled with the processor". `ksp-fixtures/app`'s
+ *    module in this graph that was compiled with the processor". `python-multiplatform-ksp/fixtures/app`'s
  *    `CommonInstallTest` asserts that set exactly. Putting walked artefacts in it would silently
  *    change a shipped contract, and would make a consumer's table grow when they added an unrelated
  *    dependency.

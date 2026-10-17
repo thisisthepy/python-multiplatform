@@ -16,7 +16,7 @@ actual interface PlatformCleaner : AutoCloseable {
  * [PhantomCleanerRegistry], which is the same mechanism written by hand.
  *
  * This nullable value, not `SDK_INT`, is what the code below branches on. The two are equivalent
- * only as long as nothing else can make the `Cleaner` absent — and the previous version of this
+ * only as long as nothing else can make the `Cleaner` absent, and the previous version of this
  * file branched on `SDK_INT` and then called `sharedCleaner?.register(...)`, so a null here on
  * API 33+ would have produced a wrapper with **no release registered at all**, silently, with the
  * `?.` reading as caution. Branching on the object removes the case rather than tolerating it.
@@ -32,11 +32,11 @@ actual fun registerCleaner(
 }
 
 /**
- * One release, run by whichever of `close()` and the collector gets there first — and never by
+ * One release, run by whichever of `close()` and the collector gets there first, and never by
  * both. Both branches guarantee that: `Cleaner.Cleanable.clean()` is documented to run its action
  * at most once, and [PhantomCleanerRegistry.Cleanable] holds a compare-and-set flag for it. It has
  * to be a guarantee rather than a convention, because a second run is a second `Py_DecRef` on a
- * reference this wrapper no longer owns — the double free of ROADMAP §1 and §4.
+ * reference this wrapper no longer owns, the double free of ROADMAP §1 and §4.
  */
 private class AndroidCleaner(
     pointer: NativePointer,

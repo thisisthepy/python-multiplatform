@@ -116,7 +116,9 @@ def test_impure_function_keeps_an_unbounded_int_local_as_a_python_int(tmp_path):
     assert f.locals == {"m": OBJ}
     assert f.body[:2] == (
         Assign("m", Box(OBJ, Local(I64, "n"))),
-        Assign("m", BinOp(OBJ, BinOpKind.ADD, Local(OBJ, "m"), Box(OBJ, Const(I64, 1)))),
+        # `m += 1` on an object is the in-place operation (PyNumber_InPlaceAdd, #150)
+        Assign("m", BinOp(OBJ, BinOpKind.ADD, Local(OBJ, "m"), Box(OBJ, Const(I64, 1)),
+                          inplace=True)),
     )
     assert not f.pure and not f.may_deopt
 
@@ -185,10 +187,11 @@ def test_float_arithmetic_is_never_marked_proven(tmp_path):
     assert not any(n.proven for n in nodes(f, BinOp) + nodes(f, UnaryOp))
 
 
-@pytest.mark.parametrize("expr", ["i // 2", "i / 2"])
+@pytest.mark.parametrize("expr", ["i // 3", "i / 2"])
 def test_int_division_cannot_be_recorded_as_proven_so_it_deopts(tmp_path, expr):
-    # ir.BinOp.proven exists for ADD/SUB/MUL only; the verifier cannot re-prove // and / on i64,
-    # so they count as deopting: in a pure function may_deopt, in an impure one a CPython int.
+    # ir.BinOp.proven exists for ADD/SUB/MUL and for // and % by a power of two of a value >= 0
+    # (#148, test_interval_proofs.py); the verifier cannot re-prove // by 3 or / on i64, so they
+    # count as deopting: in a pure function may_deopt, in an impure one a CPython int.
     m = lower(tmp_path, f"""
 @compiled
 def f(n: int) -> float:
@@ -320,14 +323,15 @@ def test_augmented_store_evaluates_a_computed_index_once(tmp_path):
 def test_list_params_become_array_params_with_stored(tmp_path):
     m = lower(tmp_path, """
         @compiled
-        def scale(a: list[float], b: list[float], k: float, c: list[int]) -> None:
+        def scale(a: list[float], b: list[float], k: float) -> None:
             for i in range(len(a)):
                 a[i] = b[i] * k
     """)
     f = function(m, "scale")
+    # two list parameters at most (#159: the lists are locked from copy-in to write-back; CPython
+    # has no three-object critical section). A third one is test_free_threaded.py's.
     assert f.params == (
-        ArrayParam("a", Type.F64_ARRAY, True), ArrayParam("b", Type.F64_ARRAY, False),
-        Param("k", F64), ArrayParam("c", Type.I64_ARRAY, False),
+        ArrayParam("a", Type.F64_ARRAY, True), ArrayParam("b", Type.F64_ARRAY, False), Param("k", F64),
     )
     assert f.body[0].stop == Len(I64, "a")
 
@@ -707,7 +711,8 @@ def test_compiled_code_calls_imported_callables_around_native_float_math(tmp_pat
         ExprStmt(CallObject(OBJ, Global(OBJ, "draw"), (
             Local(OBJ, "canvas"), Box(OBJ, Local(F64, "x")), Box(OBJ, Const(F64, 0.5)),
         ), ("alpha",))),
-        Assign("hits", BinOp(OBJ, BinOpKind.ADD, Local(OBJ, "hits"), Box(OBJ, Const(I64, 1)))),
+        Assign("hits", BinOp(OBJ, BinOpKind.ADD, Local(OBJ, "hits"), Box(OBJ, Const(I64, 1)),
+                             inplace=True)),    # `hits += 1` on an object: in place (#150)
         If(CompareObj(BOOL, CompareKind.GT, Local(OBJ, "hits"), Box(OBJ, Local(I64, "n"))),
            (Break(),)),
     )

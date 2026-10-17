@@ -3,17 +3,17 @@ name: TypedPython CI
 # The TypedPython gate and compiler are Python (python-multiplatform-ksp/src/{main,test}/python).
 # Gradle does not run them; this workflow does.
 on:
+  # Checked on develop after merging, not on every pull request (user decision,
+  # 2026-10-17). A red develop is fixed forward by its own pull request.
   push:
     branches: [ "develop", "main" ]
-    paths: [ "python-multiplatform-ksp/**", "ksp-fixtures/app/**", ".github/workflows/typedpython.yml" ]
-  pull_request:
-    branches: [ "develop", "main" ]
-    paths: [ "python-multiplatform-ksp/**", "ksp-fixtures/app/**", ".github/workflows/typedpython.yml" ]
-
+    paths: [ "python-multiplatform-ksp/**", "python-multiplatform-ksp/fixtures/app/**", ".github/workflows/typedpython.yml" ]
+  workflow_dispatch:
 concurrency:
-  # A newer push to the same ref supersedes this run; frees the shared macOS runners.
+  # A run in progress finishes; a newer push replaces only the queued run (frequent merges
+  # to develop otherwise cancelled every run before it reported).
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   test:
@@ -34,11 +34,11 @@ jobs:
       - name: Create the environment
         # pyrefly is pinned exactly: the gate reads its versioned type-report format.
         run: |
-          uv venv .venv --python 3.13
-          uv pip install --python .venv/bin/python "pyrefly==1.3.2" pytest
+          uv venv .venv --python 3.15t
+          uv pip install --python .venv/bin/python "pyrefly==1.3.2" pytest numpy
 
       - name: Behaviour tests
-        run: .venv/bin/python -m pytest -q -m "not measurement"
+        run: .venv/bin/python -m pytest -q -m "not measurement and not race_mutant"
 
       - name: Measurements (recorded, sanity bounds only)
         # A shared runner is not an idle machine (AGENTS.md §8): read ratios, not absolute times.
@@ -62,8 +62,8 @@ jobs:
 
       - name: Create the environment
         run: |
-          uv venv .venv --python 3.13
-          uv pip install --python .venv/bin/python "pyrefly==1.3.2" pytest
+          uv venv .venv --python 3.15t
+          uv pip install --python .venv/bin/python "pyrefly==1.3.2" pytest numpy
 
       - name: Relax ASLR entropy (ASan shadow mapping on newer kernels)
         run: sudo sysctl -w vm.mmap_rnd_bits=28 || true
@@ -78,15 +78,15 @@ jobs:
         # only (tools/sanitizers.py env prints it); the gate's pyrefly runs without it.
         run: |
           env $(.venv/bin/python tools/sanitizers.py env) \
-            .venv/bin/python -m pytest -q -m "not measurement" \
-              src/test/python/test_cgen.py src/test/python/test_runtime.py src/test/python/test_pipeline.py
+            .venv/bin/python -m pytest -q -m "not measurement and not race_mutant" \
+              src/test/python/test_cgen.py src/test/python/test_runtime.py src/test/python/test_pipeline.py src/test/python/test_interval_proofs.py
 
   app-fixture:
     # #45: a TypedPython-compiled module calling Kotlin through the upcall table, in the app
     # fixture's desktop JVM. buildTypedPythonBridge needs a host Python with pyrefly; without one the
     # four TypedPythonKotlinCallTest tests skip. Locally that is allowed; here a skip fails the job.
     # macOS only: elsewhere the JVM does not load libpython with global symbols, so the
-    # dynamic_lookup extension cannot resolve the C API (ksp-fixtures/app/build.gradle.kts).
+    # dynamic_lookup extension cannot resolve the C API (python-multiplatform-ksp/fixtures/app/build.gradle.kts).
     name: TypedPython from Kotlin, app fixture (macos-latest)
     runs-on: macos-latest
     steps:
@@ -103,20 +103,20 @@ jobs:
       - name: Create the TypedPython host environment
         working-directory: python-multiplatform-ksp
         run: |
-          uv venv .venv --python 3.13
-          uv pip install --python .venv/bin/python "pyrefly==1.3.2" pytest
+          uv venv .venv --python 3.15t
+          uv pip install --python .venv/bin/python "pyrefly==1.3.2" pytest numpy
 
       - name: App fixture tests
         run: |
-          rm -rf ksp-fixtures/app/build/test-results/desktopTest
-          ./gradlew :ksp-fixtures:app:desktopTest --rerun --console=plain \
+          rm -rf python-multiplatform-ksp/fixtures/app/build/test-results/desktopTest
+          ./gradlew :python-multiplatform-ksp:fixtures:app:desktopTest --rerun --console=plain \
             -PtypedpythonPython="$PWD/python-multiplatform-ksp/.venv/bin/python"
 
       - name: The TypedPython tests ran (none skipped)
         run: |
           python3 - <<'PY'
           import glob, sys, xml.etree.ElementTree as ET
-          cases = [c for p in glob.glob("ksp-fixtures/app/build/test-results/desktopTest/*.xml")
+          cases = [c for p in glob.glob("python-multiplatform-ksp/fixtures/app/build/test-results/desktopTest/*.xml")
                    for c in ET.parse(p).getroot().iter("testcase")
                    if c.get("classname") == "fixture.app.TypedPythonKotlinCallTest"]
           skipped = [c.get("name") for c in cases if c.find("skipped") is not None]

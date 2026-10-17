@@ -130,7 +130,7 @@ class KlibScannerTest {
      * test pinned one -- `checkIndexOverflow`, `kotlinx.coroutines.flow.internal`'s bounds check -- as
      * bound. It was wrong: `checkIndexOverflow` is `@PublishedApi internal`, binary-visible so an
      * inline call site elsewhere in the *same* library can resolve it, but not source-visible outside
-     * that module. `KlibScanWorkAction`'s KDoc records how this was found -- `:ksp-fixtures
+     * that module. `KlibScanWorkAction`'s KDoc records how this was found -- `:python-multiplatform-gradle-plugin-fixtures
      * :klib-artifact:compileKotlinAndroidNativeArm64` failing to compile the generated fragment with
      * "it is internal in file", the first time this walker's output was ever actually compiled rather
      * than only unit-tested. `KlibScanner`'s `PUBLISHED_API` constant has the rest. Every other candidate in
@@ -141,22 +141,46 @@ class KlibScannerTest {
      * "does it survive a real, messy artefact, and decline what it must decline" case.
      */
     @Test
-    fun aRealThirdPartyKlibIsScannedWithoutCrashingAndDeclinesEveryDeclaration() {
+    fun aRealThirdPartyKlibIsScannedWithoutCrashingAndBindsItsHandleFactoriesAndMembers() {
+        // Zero before issue #234, when no Kotlin object could cross the klib boundary. Since then the
+        // non-extension factories whose types are this klib's own classes bind, and since #237 the
+        // members of its interfaces and final classes; the extensions, the suspend functions, the
+        // members of open classes and anything typed by another klib (`CoroutineContext`) are declined.
         val entries = KlibScanner.scanKlib(coroutinesKlib, includePrefixes = emptyList())
-        assertEquals(emptyList(), entries.map { it.name })
+        assertEquals(
+            listOf(
+                "kotlinx.coroutines.ChildJob.parentCancelled",
+                "kotlinx.coroutines.CompletableJob.complete",
+                "kotlinx.coroutines.DisposableHandle.dispose",
+                "kotlinx.coroutines.Job",
+                "kotlinx.coroutines.Job.attachChild",
+                "kotlinx.coroutines.Job.start",
+                "kotlinx.coroutines.MainScope",
+                "kotlinx.coroutines.Runnable.run",
+                "kotlinx.coroutines.SupervisorJob",
+                "kotlinx.coroutines.TimeoutCancellationException.createCopy",
+                "kotlinx.coroutines.newFixedThreadPoolContext",
+                "kotlinx.coroutines.newSingleThreadContext",
+                "kotlinx.coroutines.sync.Mutex",
+                "kotlinx.coroutines.sync.Semaphore",
+                "kotlinx.coroutines.sync.Semaphore.release",
+                "kotlinx.coroutines.sync.Semaphore.tryAcquire",
+            ),
+            entries.map { it.name },
+        )
     }
 
-    /** The specific bug [aRealThirdPartyKlibIsScannedWithoutCrashingAndDeclinesEveryDeclaration] pins
+    /** The specific bug [aRealThirdPartyKlibIsScannedWithoutCrashingAndBindsItsHandleFactoriesAndMembers] pins
      * the fix for, isolated to one declaration and its reason. */
     @Test
     fun aPublishedApiInternalDeclarationIsDeclinedWithItsOwnReason() {
         val declarations = KlibScanner.scanKlibDeclarations(coroutinesKlib, includePrefixes = emptyList())
-        val checkIndexOverflow = declarations.single { it.simpleName == "checkIndexOverflow" }
-        assertEquals(null, checkIndexOverflow.bindingName)
-        assertTrue(
-            checkIndexOverflow.declineReason?.contains("PublishedApi") == true,
-            "expected a @PublishedApi decline reason, got ${checkIndexOverflow.declineReason}",
-        )
+        // checkIndexOverflow lives in kotlinx.coroutines.internal, which B-11 (#192) skips outright:
+        // it gets no model at all, so the @PublishedApi reason is checked on declarations elsewhere.
+        assertTrue(declarations.none { it.simpleName == "checkIndexOverflow" })
+        val publishedApi = declarations.filter { it.declineReason?.contains("PublishedApi") == true }
+        assertTrue(publishedApi.isNotEmpty(), "expected a @PublishedApi decline outside internal packages")
+        assertTrue(publishedApi.all { it.bindingName == null })
     }
 
     /**

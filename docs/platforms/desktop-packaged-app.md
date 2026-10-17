@@ -11,8 +11,8 @@ app now gets its prefix, why it was done this way, and how to check it.
 ## What happens
 
 **Build time** (`python-multiplatform-gradle-plugin`, `PythonBindingsPlugin.configurePackagedPythonHome`).
-Every Compose Desktop `prepare*AppResources` task — the `Sync` that `createDistributable`,
-`packageDmg`/`packageMsi`/`packageDeb` and their `Release` variants take their resources from —
+Every Compose Desktop `prepare*AppResources` task, the `Sync` that `createDistributable`,
+`packageDmg`/`packageMsi`/`packageDeb` and their `Release` variants take their resources from,
 depends on `stagePythonHome` and copies part of the staged prefix into `python-multiplatform-home/`:
 
 | Host | Copied (relative to the prefix) |
@@ -30,7 +30,7 @@ In the app image the directory is `$APPDIR/resources/python-multiplatform-home`;
 
 **Run time** (`python-multiplatform`). `PackagedPythonHome.resolve()` (`jvmMain`) takes the first of:
 
-1. `PYTHONHOME` in the environment — then nothing else happens; CPython reads it itself.
+1. `PYTHONHOME` in the environment, then nothing else happens; CPython reads it itself.
 2. The system property `python.multiplatform.home`, used even if the path does not exist, so that a
    wrong value is reported by name.
 3. `<compose.application.resources.dir>/python-multiplatform-home`, only if that directory exists.
@@ -58,7 +58,7 @@ mechanism for the stdlib was considered and not taken:
   abort at `Py_Initialize` rather than a re-extraction. (Not observed here; a reason not to take the
   risk for the one tree whose absence is fatal.)
 - `libpython` has to be a file for `System.load` anyway. Loading it from the classpath copy means
-  extracting 19.4 MB into the working directory and finding it through `java.library.path` — this
+  extracting 19.4 MB into the working directory and finding it through `java.library.path`, this
   repo's tests pass `-Djava.library.path=.`, a launched app has no such flag and may have `/` as its
   working directory. Loading it from the packaged prefix also pairs it with its own stdlib.
 - jpackage builds an image for the host it runs on, so only one platform's prefix is ever packaged;

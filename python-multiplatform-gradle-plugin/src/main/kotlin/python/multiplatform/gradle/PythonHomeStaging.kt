@@ -15,14 +15,14 @@ import java.security.MessageDigest
 import javax.inject.Inject
 
 /**
- * Staging a CPython prefix for a consumer's build — ROADMAP §15e item 4.
+ * Staging a CPython prefix for a consumer's build, ROADMAP §15e item 4.
  *
  * ### The gap this closes
  *
  * §15c published the library to `mavenLocal()` and built a genuine external JVM consumer against
  * it. Everything worked *except* start-up: `desktopJar` carries `libpython` for four host
  * platforms under `lib/<platform>/`, and `manager.loadLibPython` finds it there with no wiring at
- * all — but it carries **no standard library**, and `Py_Initialize()` dies with
+ * all, but it carries **no standard library**, and `Py_Initialize()` dies with
  * `Fatal Python error: Failed to import encodings module` until `PYTHONHOME` names a prefix that
  * has one. Verified rather than read: the published jar's `lib/` tree is 14 entries, every one of
  * them a shared library.
@@ -45,17 +45,17 @@ import javax.inject.Inject
  *   instead of being multiplied into an artifact every consumer downloads. That matters here more
  *   than usual: `desktopJar` is already 87.7 MB for four platforms' `libpython`, and the four
  *   platforms' stdlibs measure a further 43.5 MB compressed (macos-aarch64 8.1, macos-x86_64 7.1,
- *   linux-x86_64 8.2, windows-x86_64 20.1) — for payload of which any one consumer uses exactly
+ *   linux-x86_64 8.2, windows-x86_64 20.1), for payload of which any one consumer uses exactly
  *   one quarter. Putting per-platform payload into the artifact every platform resolves is the
  *   defect §15d diagnosed when `allMetadataJar` reached 87.4 MB, and it was fixed by *narrowing*
  *   scope, not by accepting the size.
  * - **`PYTHONHOME` cannot be set from inside a running JVM.** CPython reads it with `getenv(3)`,
  *   from the native process environment. Android's helper calls `Os.setenv`; the JVM has no
- *   equivalent — `System.getenv` is an immutable snapshot taken at start-up, and changing it (by
+ *   equivalent, `System.getenv` is an immutable snapshot taken at start-up, and changing it (by
  *   reflection or otherwise) does not touch the native environment CPython actually reads. A
  *   runtime helper would therefore have to reach libc's `setenv` through Panama, which is a
  *   different symbol on Windows (`_putenv_s`), and would then be setting a value that
- *   [python.multiplatform.env.PythonHomeCheck] — which reads `System.getenv` — could no longer
+ *   [python.multiplatform.env.PythonHomeCheck], which reads `System.getenv`, could no longer
  *   see. Setting it when the *process is launched*, which is what Gradle's `environment(...)`
  *   does, has neither problem: CPython and `PythonHomeCheck` read the same value from the same
  *   place, exactly as they already do for this repository's own `desktopTest`.
@@ -95,7 +95,7 @@ internal object PythonHomeStaging {
  * `linux-aarch64` is included even though `desktopJar` carries no `libpython` for it, and that is
  * not an oversight: `manager.loadFromSidecar` falls back to loading the interpreter *out of
  * `PYTHONHOME`* whenever the classpath has no library for the running platform, so a staged prefix
- * is the whole of what that host needs. Staging is the only reason it can work at all — this is
+ * is the whole of what that host needs. Staging is the only reason it can work at all, this is
  * not verified on such a host, see this file's own note in ROADMAP §15g.
  */
 internal fun hostDesktopPlatform(osName: String, osArch: String): String? {
@@ -172,8 +172,8 @@ internal fun sha256Of(sha256sums: String, assetName: String): String? =
 /**
  * A file that must be readable under a prefix for it to be usable, relative to the prefix.
  *
- * This is exactly what `PythonHomeCheck.diagnose` probes — `lib/python<tag>/os.py`, or `Lib/os.py`
- * on the layout CPython's Windows build produces — so a prefix this staging accepts is one
+ * This is exactly what `PythonHomeCheck.diagnose` probes, `lib/python<tag>/os.py`, or `Lib/os.py`
+ * on the layout CPython's Windows build produces, so a prefix this staging accepts is one
  * `Python3.initialize()` accepts. Asserting a named file rather than "the directory is not empty"
  * is §15f's lesson: the root build's own extraction step skips when `extractDir.list()` is
  * non-empty, which is true of a tree whose extraction was interrupted.
@@ -190,7 +190,7 @@ internal fun stdlibMarkerRelativePath(pythonVersion: String, freeThreaded: Boole
  * Identifies precisely which distribution was extracted.
  *
  * Written after the last byte and deleted before a rewrite begins, so it cannot be true of a
- * partial tree — §15f found three hand-written Android copies that each probed a single entry of
+ * partial tree, §15f found three hand-written Android copies that each probed a single entry of
  * the result and so accepted a tree whose copy had been interrupted.
  *
  * It names the upstream release as well as the Python version because astral republishes the same
@@ -397,8 +397,8 @@ internal fun isComposeAppResourcesTask(name: String): Boolean =
 /**
  * Whether the plugin should stage a prefix and set `PYTHONHOME`.
  *
- * A consumer who has already set `PYTHONHOME` — at a system CPython, at a conda prefix, at a build
- * they compiled themselves — keeps it. Replacing it would turn a working setup into a
+ * A consumer who has already set `PYTHONHOME`, at a system CPython, at a conda prefix, at a build
+ * they compiled themselves, keeps it. Replacing it would turn a working setup into a
  * differently-configured one on a library upgrade, and §15c's whole finding is that setting it by
  * hand is what consumers have had to do until now.
  */

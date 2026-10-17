@@ -24,7 +24,7 @@ full text is in git (`git log -- docs/design/upcall-design.md`).
 | [`wasm-design-experiment-log.md`](wasm-design-experiment-log.md) | [`../platforms/wasm-design.md`](../platforms/wasm-design.md) | The chronological lab notebook of the wasm experiment, including its "parked" phase and the conclusions that were wrong before they were tested. wasm is now integrated (`tools/wasm/build-cpython.sh`, `wasmJsTest`). |
 | [`wasm-youtrack-issue.md`](wasm-youtrack-issue.md) | [`../platforms/wasm-design.md`](../platforms/wasm-design.md) | A draft Kotlin/Wasm compiler issue. Do not file it: Kotlin 2.4.20-Beta2 imports the shared memory, so the problem it describes no longer applies. |
 
-## Investigation narratives — `investigations/`
+## Investigation narratives, `investigations/`
 
 The current file of the same name in [`../investigations/`](../investigations/) keeps the conclusion,
 the numbers with their conditions, and how to reproduce them. The archived copy is the full original,

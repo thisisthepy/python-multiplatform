@@ -30,4 +30,7 @@ test = ["pytest"]
 testpaths = ["src/test/python"]
 pythonpath = ["src/main/python"]
 addopts = "--basetemp=.pytest_tmp"
-markers = ["measurement: records cost; asserts only sanity bounds"]
+markers = [
+    "measurement: records cost; asserts only sanity bounds",
+    "race_mutant: shows a concurrency test catches a mutant; depends on the race firing, so local only (not in CI)",
+]

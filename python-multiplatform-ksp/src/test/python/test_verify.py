@@ -179,7 +179,7 @@ def test_read_in_loop_body_before_its_assignment_in_the_body_is_rejected():
 
 def test_continue_skips_the_rest_of_the_loop_body():
     # `continue` before the assignment: the read after the If in the body is reached only on the
-    # path that assigned x — accepted. The read after the loop is not (zero iterations).
+    # path that assigned x, accepted. The read after the loop is not (zero iterations).
     body_ok = (If(lb("c"), (Continue(),), (Assign("x", i(1)),)), ExprStmt(li("x")))
     assert_accepted(fn(params=[Param("c", BOOL)], locals_={"x": I64},
                        body=[While(lb("c"), body_ok), Return()]))
@@ -646,7 +646,7 @@ def test_scalar_into_an_obj_slot_without_box_is_rejected():
 
 
 def test_obj_from_a_node_that_does_not_create_a_reference_is_rejected():
-    assert_rejected(OWNERSHIP, fn(returns=OBJ, body=[Return(Const(OBJ, None))]))
+    # Const(OBJ, None) creates a reference since N-11 (`return None`); see test_verify_classes.py.
     assert_rejected(OWNERSHIP, fn(params=[Param("o", OBJ)], returns=OBJ,
                                   body=[Return(UnaryOp(OBJ, UnaryOpKind.NEG, lo("o")))]))
     assert_rejected(OWNERSHIP, fn(params=[ArrayParam("a", F64A, stored=False)], returns=OBJ,
@@ -743,10 +743,11 @@ def test_duplicate_function_names_are_rejected():
 # The verifier never trusts `proven`: it computes an interval for every I64 expression and accepts
 # a proven op only when the exact result interval fits in i64. Intervals (verify.py documents them):
 # Const [v, v]; a ForRange var inside its own loop [lo(start), hi(stop)-1] (step > 0) or
-# [lo(stop)+1, hi(start)] (step < 0); Len [0, 2**60-1]; ADD/SUB/MUL/NEG/POS by interval arithmetic;
+# [lo(stop)+1, hi(start)] (step < 0); Len [0, 2**62]; ADD/SUB/MUL/NEG/POS by interval arithmetic;
 # MOD by a divisor whose interval is positive [0, hi(divisor)-1]; FLOORDIV by a positive divisor
-# interval by its endpoints; everything else (params, entry globals, other locals, Index, Unbox,
-# Call) the full i64 range.
+# interval by its endpoints; a local assigned only i64 values (not a loop var) the join of their
+# intervals, narrowed by the guards around the read (#148, test_interval_proofs.py); everything else
+# (params, entry globals, Index, Unbox, Call) the full i64 range.
 
 def _ranged(op, start=0, stop=5, step=1, impure=True, pure=False, may_deopt=False, params=()):
     """for k in range(start, stop, step): t = <op(k)>   in an (impure) function"""
@@ -843,27 +844,35 @@ def test_range_up_to_a_param_bounds_the_var_by_the_param_range():
 
 
 def test_len_bound_is_zero_to_two_to_the_62():
-    a = [ArrayParam("a", F64A, stored=False)]
+    # impure through a store into the array itself (an array function may not call user code, #203)
+    a = [ArrayParam("a", F64A, stored=True)]
     L = Len(I64, "a")
-    assert_accepted(fn(params=a, returns=I64, body=[IMPURE, Return(padd(L, i(2 ** 62 - 1)))]))
+    W = If(Compare(BOOL, CompareKind.GT, L, i(0)), (StoreIndex("a", i(0), f(0.0)),))
+    assert_accepted(fn(params=a, returns=I64, body=[W, Return(padd(L, i(2 ** 62 - 1)))]))
     assert_rejected(PROVEN, fn(params=a, returns=I64,
-                               body=[IMPURE, Return(padd(L, i(2 ** 62)))]))
-    assert_rejected(PROVEN, fn(params=a, returns=I64, body=[IMPURE, Return(pmul(L, i(2)))]))
-    assert_accepted(fn(params=a, returns=I64, body=[IMPURE, Return(pmul(L, i(-2)))]))  # -2**63
-    assert_rejected(PROVEN, fn(params=a, returns=I64, body=[IMPURE, Return(pmul(L, i(-3)))]))
+                               body=[W, Return(padd(L, i(2 ** 62)))]))
+    assert_rejected(PROVEN, fn(params=a, returns=I64, body=[W, Return(pmul(L, i(2)))]))
+    assert_accepted(fn(params=a, returns=I64, body=[W, Return(pmul(L, i(-2)))]))  # -2**63
+    assert_rejected(PROVEN, fn(params=a, returns=I64, body=[W, Return(pmul(L, i(-3)))]))
 
 
-def test_mod_and_floordiv_are_full_range_so_nothing_is_provable_from_them():
+def test_mod_and_floordiv_by_a_constant_have_bounded_results():
+    # #148: n % 7 is in [0, 6] (it was full range before)
     ps = [Param("n", I64)]
     m = BinOp(I64, BinOpKind.MOD, li("n"), i(7))
-    assert_rejected(PROVEN, fn(params=ps, returns=I64, pure=True, may_deopt=True,
-                               body=[Return(padd(m, i(1)))]))
+    assert_accepted(fn(params=ps, returns=I64, pure=True, may_deopt=True,
+                       body=[Return(padd(m, i(1)))]))
+    # ... and by an unknown divisor it is still full range
+    ps2 = [Param("n", I64), Param("d", I64)]
+    full = BinOp(I64, BinOpKind.MOD, li("n"), li("d"))
+    assert_rejected(PROVEN, fn(params=ps2, returns=I64, pure=True, may_deopt=True,
+                               body=[Return(padd(full, i(1)))]))
 
 
 def test_what_the_intervals_cannot_prove():
-    # a local assigned a constant is still full range (locals other than loop vars are not tracked)
-    assert_rejected(PROVEN, fn(locals_={"x": I64}, returns=I64,
-                               body=[IMPURE, Assign("x", i(1)), Return(padd(li("x"), i(1)))]))
+    # a local assigned an unknown value is full range (#148: a local assigned a constant is not)
+    assert_rejected(PROVEN, fn(params=[Param("n", I64)], locals_={"x": I64}, returns=I64,
+                               body=[IMPURE, Assign("x", li("n")), Return(padd(li("x"), i(1)))]))
     # the loop var after its loop is full range
     assert_rejected(PROVEN, fn(locals_={"k": I64}, returns=I64, body=[
         IMPURE, Assign("k", i(0)), ForRange("k", i(0), i(5), i(1), ()), Return(padd(li("k"), i(1)))]))
@@ -881,7 +890,7 @@ def test_proven_flag_survives_verification():
 # --- 8. Call.redo ---------------------------------------------------------------------------------
 
 def _callee(name="g", returns=F64, pure=True, may_deopt=True):
-    """g(n: int) — deopts on n * 2 overflow when may_deopt; returns `returns`."""
+    """g(n: int), deopts on n * 2 overflow when may_deopt; returns `returns`."""
     prod = BinOp(I64, BinOpKind.MUL, li("n"), i(2)) if may_deopt else li("n")
     value = {F64: ToFloat(F64, prod), I64: prod, BOOL: lt(prod, i(0)), NONE: None}[returns]
     body = ([ExprStmt(prod), Return()] if returns is NONE else [Return(value)])
@@ -978,10 +987,10 @@ def test_entry_global_in_a_function_running_user_code_is_rejected(node):
 
 
 def test_the_same_open_node_without_entry_globals_is_accepted():
-    # The open node alone is fine: only entry globals need the function closed.
-    a = ArrayParam("a", F64A, stored=False)
-    assert_accepted(fn(params=[a], returns=F64, body=[
-        ExprStmt(CallObject(OBJ, Global(OBJ, "print"), (), ())), Return(Index(F64, "a", i(0)))]))
+    # The open node alone is fine: only entry globals (and array parameters, #203) need the
+    # function closed.
+    assert_accepted(fn(params=[Param("x", F64)], returns=F64, body=[
+        ExprStmt(CallObject(OBJ, Global(OBJ, "print"), (), ())), Return(lf("x"))]))
 
 
 def test_global_read_and_box_keep_a_function_closed():
@@ -1074,9 +1083,10 @@ def _base_functions():
                   Return(add(lf("s"), MathCall(F64, MathFunc.SQRT, (ToFloat(F64, li("c")),)),
                              F64)),
               ])
-    impure = fn("scale", params=[ArrayParam("a", F64A, stored=True), Param("x", F64),
-                                 Param("o", OBJ), Param("c", BOOL)],
-                locals_={"k": I64, "r": OBJ, "y": F64}, returns=F64, line=20, body=[
+    # a local array, not an ArrayParam: this function calls user code (#203)
+    impure = fn("scale", params=[Param("x", F64), Param("o", OBJ), Param("c", BOOL)],
+                locals_={"a": F64A, "k": I64, "r": OBJ, "y": F64}, returns=F64, line=20, body=[
+                    Assign("a", na(F64A, i(4), f(1.0))),
                     Assign("r", call_obj(GetAttr(OBJ, g_("Modifier"), "padding"),
                                          Box(OBJ, lf("x")), lo("o"), kw=("dp",))),
                     Assign("y", Unbox(F64, lo("r"))),
@@ -1147,6 +1157,10 @@ def _breaking_mutations(rng, g):
     if kind == 4:   # flip may_deopt
         return "flip may_deopt", dataclasses.replace(g, may_deopt=not g.may_deopt), {
             FLAG_DEOPT, DEOPT}
+    if kind == 5 and not any(isinstance(p, ArrayParam) for p in g.params):
+        kind = 3    # no ArrayParam (scale has a local array since #203): flip pure instead
+    if kind == 3:
+        return "flip pure", dataclasses.replace(g, pure=not g.pure), {FLAG_PURE, DEOPT, FLAG_DEOPT}
     if kind == 5:   # flip stored on the first array
         k = next(j for j, p in enumerate(g.params) if isinstance(p, ArrayParam))
         p = g.params[k]
@@ -1190,7 +1204,7 @@ def _breaking_mutations(rng, g):
             return "drop box", _replace_body(g, bpath, bx.operand), {OWNERSHIP, TYPE}
         return "drop box", _replace_body(g, path, Box(OBJ, e)) if e.type in (I64, F64, BOOL) \
             else _replace_body(g, path, Unbox(F64, e)), {OWNERSHIP, TYPE, STRUCTURE}
-    # kind 13: drop the first Assign (its local becomes possibly unassigned) — breaking because the
+    # kind 13: drop the first Assign (its local becomes possibly unassigned), breaking because the
     # local is read later, which holds for the first Assign of both base functions.
     k = next(j for j, s in enumerate(g.body) if isinstance(s, Assign))
     return "drop assign", dataclasses.replace(g, body=g.body[:k] + g.body[k + 1:]), {DA}
@@ -1297,7 +1311,7 @@ def _proof_mutations(rng, base):
         return "proven on param add", b, "q", {PROVEN}
     if kind == 2:       # proven set on a node that has no i64 overflow
         node = rng.choice([BinOp(F64, BinOpKind.ADD, f(1.0), f(2.0), proven=True),
-                           BinOp(I64, BinOpKind.FLOORDIV, i(4), i(2), proven=True),
+                           BinOp(I64, BinOpKind.FLOORDIV, i(-4), i(2), proven=True),   # negative dividend
                            UnaryOp(I64, UnaryOpKind.POS, i(1), proven=True),
                            BinOp(I64, BinOpKind.ADD, i(1), i(2), proven=1)])
         t = Type.F64 if node.type is F64 else Type.I64
@@ -1915,7 +1929,7 @@ def _array_functions():
                     StoreIndex("a", li("k"), BinOp(F64, BinOpKind.ADD, Index(F64, "z", li("k")),
                                                    f(1.0))),
                 )),
-                Assign("r", call_obj(g_("print"), Box(OBJ, Index(F64, "z", i(0))))),
+                Assign("r", Box(OBJ, Index(F64, "z", i(0)))),   # no user call: an ArrayParam (#203)
                 Return(),
             ])
     sink = fn("sink", params=[Param("x", OBJ)], returns=NONE, line=12, body=[Return()])
@@ -2021,3 +2035,40 @@ def test_each_array_mutation_kind_was_exercised():
     base = _array_functions()
     kinds = {_array_mutations(rng, base)[0] for _ in range(400)}
     assert len(kinds) == 18, sorted(kinds)     # 16 kinds; kinds 7 and 8 have two variants
+
+
+# --- #203: an ArrayParam function must be closed ---------------------------------------------
+
+ARRAY_OPEN = "verify/array-open"
+
+
+def _arr_fn(name, body, returns=F64, locals_=None, params_extra=()):
+    return fn(name, params=[ArrayParam("a", F64A, stored=False), *params_extra], returns=returns,
+              locals_=locals_, body=body)
+
+
+def test_array_function_calling_an_object_is_rejected():
+    # the callback can change the list the function copied in (#203)
+    assert_rejected(ARRAY_OPEN, _arr_fn("f", [ExprStmt(pycall("cb")), Return(Index(F64, "a", i(0)))]))
+
+
+def test_array_function_reading_an_attribute_is_rejected():
+    body = [ExprStmt(GetAttr(OBJ, lo("o"), "x")), Return(Index(F64, "a", i(0)))]
+    assert_rejected(ARRAY_OPEN, _arr_fn("f", body, params_extra=[Param("o", OBJ)]))
+
+
+def test_array_function_testing_an_object_is_rejected():
+    body = [If(Truth(BOOL, lo("o")), (Return(f(0.0)),)), Return(Index(F64, "a", i(0)))]
+    assert_rejected(ARRAY_OPEN, _arr_fn("f", body, params_extra=[Param("o", OBJ)]))
+
+
+def test_array_function_calling_an_open_function_is_rejected():
+    g = fn("g", returns=NONE, body=[ExprStmt(pycall("cb")), Return()])
+    caller = _arr_fn("f", [ExprStmt(Call(NONE, "g", ())), Return(Index(F64, "a", i(0)))])
+    assert_rejected(ARRAY_OPEN, caller, g)
+
+
+def test_closed_array_function_is_still_accepted():
+    g = fn("g", params=[Param("x", F64)], returns=F64, body=[Return(lf("x"))])
+    caller = _arr_fn("f", [Return(Call(F64, "g", (Index(F64, "a", i(0)),)))])
+    assert_accepted(caller, g)

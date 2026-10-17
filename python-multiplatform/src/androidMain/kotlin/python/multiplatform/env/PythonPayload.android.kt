@@ -14,7 +14,7 @@ import java.io.File
  *
  * ### Why discovery here is a registry rather than a scan
  *
- * Unpacking assets needs a `Context`, and `Python3.initialize()` has none — it is a `commonMain`
+ * Unpacking assets needs a `Context`, and `Python3.initialize()` has none, it is a `commonMain`
  * function on an object with no platform state. The two-step (stage, then register; discover, then
  * install) is what lets `PythonBootstrap.initialize(context)` do the part that needs a `Context`
  * before the part that does not. `PythonBootstrap` already sits in exactly that position for

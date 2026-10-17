@@ -16,8 +16,8 @@ actual fun AddressValue.toNativePointer(): NativePointer = NativePointer((this a
  * Deliberately does not delegate to the `JNIPointer?` overload below.
  *
  * `JNIPointer` is a typealias for `Long`, so that overload's receiver is `Long?` and this one's is
- * `Long`. Overload resolution prefers the more specific, non-null receiver — that is, this function
- * itself — so writing `toNativePointer()` here recurses forever and blows the stack. On Android the
+ * `Long`. Overload resolution prefers the more specific, non-null receiver, that is, this function
+ * itself, so writing `toNativePointer()` here recurses forever and blows the stack. On Android the
  * platform pointer *is* the `Long`, so the conversion is written out instead.
  */
 @HighOverheadNativeCall

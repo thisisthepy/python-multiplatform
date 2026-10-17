@@ -35,8 +35,8 @@ object PythonOnDevice {
      * Calling the C function directly here skipped the parking, and then made the omission
      * permanent: `Python3.isInitialized` is seeded from `Py_IsInitialized()` the first time the
      * object is touched, so it latched to `true` and [Python3.initialize] returned early for the
-     * rest of the process. The instrumentation thread — which is also the thread every test body
-     * runs on — held the GIL for the entire run, and every cleaner blocked on the first
+     * rest of the process. The instrumentation thread, which is also the thread every test body
+     * runs on, held the GIL for the entire run, and every cleaner blocked on the first
      * `PyGILState_Ensure` it reached.
      *
      * That state is invisible while nothing releases the GIL, which is why it survived: the old

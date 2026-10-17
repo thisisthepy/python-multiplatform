@@ -89,8 +89,9 @@ _Py_ThreadCanHandleSignals(PyInterpreterState *interp)
 /* Variable and static inline functions for in-line access to current thread
    and interpreter state */
 
-#if defined(HAVE_THREAD_LOCAL) && !defined(Py_BUILD_CORE_MODULE)
+#if !defined(Py_BUILD_CORE_MODULE)
 extern _Py_thread_local PyThreadState *_Py_tss_tstate;
+extern _Py_thread_local PyInterpreterState *_Py_tss_interp;
 #endif
 
 #ifndef NDEBUG
@@ -114,7 +115,7 @@ PyAPI_FUNC(PyThreadState *) _PyThreadState_GetCurrent(void);
 static inline PyThreadState*
 _PyThreadState_GET(void)
 {
-#if defined(HAVE_THREAD_LOCAL) && !defined(Py_BUILD_CORE_MODULE)
+#if !defined(Py_BUILD_CORE_MODULE)
     return _Py_tss_tstate;
 #else
     return _PyThreadState_GetCurrent();
@@ -148,6 +149,23 @@ extern void _PyThreadState_Detach(PyThreadState *tstate);
 // If there is no stop-the-world pause in progress, then the thread switches
 // to the "detached" state.
 extern void _PyThreadState_Suspend(PyThreadState *tstate);
+
+#ifdef Py_GIL_DISABLED
+// Try to atomically transition a *different* thread's state from "detached"
+// to "suspended". On success, the target thread cannot attach until
+// _PyThreadState_ResumeDetached() is called, and the caller may safely
+// perform operations that are normally only permitted for the owning thread
+// (such as merging the biased reference counts of objects it owns).
+//
+// The caller must not run arbitrary Python code, allocate GC objects, or
+// stop the world while holding the thread in the suspended state.
+// Returns 1 on success, 0 if the thread was not in the "detached" state.
+extern int _PyThreadState_TrySuspendDetached(PyThreadState *tstate);
+
+// Undo a successful _PyThreadState_TrySuspendDetached(): switch the thread
+// back to "detached" and wake it if it is waiting to attach.
+extern void _PyThreadState_ResumeDetached(PyThreadState *tstate);
+#endif
 
 // Mark the thread state as "shutting down". This is used during interpreter
 // and runtime finalization. The thread may no longer attach to the
@@ -204,11 +222,15 @@ _Py_EnsureFuncTstateNotNULL(const char *func, PyThreadState *tstate)
    See also PyInterpreterState_Get()
    and _PyGILState_GetInterpreterStateUnsafe(). */
 static inline PyInterpreterState* _PyInterpreterState_GET(void) {
-    PyThreadState *tstate = _PyThreadState_GET();
 #ifdef Py_DEBUG
+    PyThreadState *tstate = _PyThreadState_GET();
     _Py_EnsureTstateNotNULL(tstate);
 #endif
-    return tstate->interp;
+#if !defined(Py_BUILD_CORE_MODULE)
+    return _Py_tss_interp;
+#else
+    return _PyThreadState_GET()->interp;
+#endif
 }
 
 
@@ -261,6 +283,8 @@ extern int _PyOS_InterruptOccurred(PyThreadState *tstate);
     PyMutex_LockFlags(&(runtime)->interpreters.mutex, _Py_LOCK_DONT_DETACH)
 #define HEAD_UNLOCK(runtime) \
     PyMutex_Unlock(&(runtime)->interpreters.mutex)
+#define ASSERT_HEAD_IS_LOCKED(runtime) \
+    assert(PyMutex_IsLocked(&(runtime)->interpreters.mutex))
 
 #define _Py_FOR_EACH_TSTATE_UNLOCKED(interp, t) \
     for (PyThreadState *t = interp->threads.head; t; t = t->next)
@@ -332,6 +356,24 @@ _Py_RecursionLimit_GetMargin(PyThreadState *tstate)
     return Py_ARITHMETIC_RIGHT_SHIFT(intptr_t, (intptr_t)_tstate->c_stack_soft_limit - here_addr, _PyOS_STACK_MARGIN_SHIFT);
 #endif
 }
+
+/* PEP 788 structures. */
+
+struct PyInterpreterGuard {
+    PyInterpreterState *interp;
+};
+
+struct PyInterpreterView {
+    int64_t id;
+};
+
+// Exports for '_testinternalcapi' shared extension
+PyAPI_FUNC(Py_ssize_t) _PyInterpreterState_GuardCountdown(PyInterpreterState *interp);
+PyAPI_FUNC(PyInterpreterState *) _PyInterpreterGuard_GetInterpreter(PyInterpreterGuard *guard);
+
+extern int _PyInterpreterGuard_TryAcquire(PyInterpreterState *interp,
+                                          PyInterpreterGuard *guard);
+extern void _PyInterpreterGuard_Release(PyInterpreterGuard *guard);
 
 #ifdef __cplusplus
 }

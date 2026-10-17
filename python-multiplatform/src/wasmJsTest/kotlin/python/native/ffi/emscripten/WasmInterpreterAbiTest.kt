@@ -7,7 +7,7 @@ import python.multiplatform.ffi.Python3
 import python.multiplatform.ffi.PythonTestFixture
 
 /**
- * The interpreter under test is the one `tools/wasm/build-cpython.sh` produces: CPython matched to
+ * The interpreter under test is the one `python-multiplatform/scripts/wasm/build-cpython.sh` produces: CPython matched to
  * PEP 783's `pyemscripten_2026_0`, so that a compiled PyPI wheel with that tag can load.
  *
  * A stock PEP 776 build differs in exactly the two places asserted here, and both fail silently

@@ -89,7 +89,7 @@ def fn(name, params, returns, locals_, body, *, pure, may_deopt, line=1, entry_g
 
 # The module source that every e2e module embeds; each test picks the functions it compiles.
 SOURCE = textwrap.dedent('''\
-    """typedpython test module — the interpreted reference."""
+    """typedpython test module, the interpreted reference."""
     calls = []
 
     def record(x):
@@ -713,7 +713,7 @@ def test_deopt_propagates_through_a_c_to_c_call(mod):
     assert deopts(mod) == before
     assert mod.twice_mul(7, 40) == 2 * 7 ** 40
     # The outermost compiled call is redone once (+1). The interpreted twice_mul then calls the
-    # global mul_all — the compiled one, since there is one namespace — which deopts again (+1).
+    # global mul_all, the compiled one, since there is one namespace, which deopts again (+1).
     assert deopts(mod) == before + 2
 
 
@@ -936,14 +936,16 @@ def test_gen_accepts_proven_ops_in_an_impure_function():
                             proven=True))],
             pure=False, may_deopt=False)
     text = cgen.generate(Module("tp_proven_gen", (ok,)), source_file("tp_proven_gen"))
-    assert "typedpython: proven operation overflowed" in text
+    # #148: a proven op is plain arithmetic (TP_PROVEN*, tp_runtime.h), not the checked helper
+    assert "tp_proven(sub," in text and "tp_proven_neg(" in text
+    assert "tp_sub_i64(" not in text and "tp_neg_i64(" not in text
 
 
 def test_gen_rejects_proven_on_an_op_that_is_not_checked_i64_arithmetic():
     from typedpython import cgen
 
     bad = fn("badproven", [Param("a", I64)], I64, {},
-             [Return(BinOp(I64, BinOpKind.FLOORDIV, L("a", I64), c(2), proven=True))],
+             [Return(BinOp(I64, BinOpKind.FLOORDIV, L("a", I64), c(3), proven=True))],   # 3: no shift
              pure=True, may_deopt=True)
     with pytest.raises(cgen.CGenError, match="proven"):
         cgen.generate(Module("tp_bad4", (bad,)), source_file("tp_bad4"))
@@ -975,9 +977,24 @@ def test_proven_op_in_an_impure_function_computes_the_interpreted_result(mod):
     before = deopts(mod)
     assert mod.proven_eff(5) == interp(mod, "proven_eff")(5) == 6
     assert mod.calls == [5, 5] and deopts(mod) == before
+
+
+@pytest.fixture(scope="module")
+def checked_mod():
+    from typedpython import cbuild
+    return build_module("tp_cgen_proven_checked", (f_proven_eff,),
+                        flags=list(cbuild.DEFAULT_FLAGS) + ["-DTP_CHECK_PROVEN"])
+
+
+def test_proven_op_with_a_wrong_proof_is_an_internal_error_when_proofs_are_checked(checked_mod):
+    # #148: a proven op is unchecked by default; -DTP_CHECK_PROVEN checks every one again. A proof
+    # the IR producer got wrong is then an internal error, never a deopt (the effect has happened
+    # already, so a redo would run it twice).
+    mod = checked_mod
     mod.calls.clear()
-    # A proof the IR producer got wrong: the overflow is an internal error, never a deopt (the
-    # effect has happened already, so a redo would run it twice).
+    before = deopts(mod)
+    assert mod.proven_eff(5) == 6
+    mod.calls.clear()
     with pytest.raises(SystemError, match="typedpython: proven operation overflowed"):
         mod.proven_eff(2 ** 63 - 1)
     assert mod.calls == [2 ** 63 - 1] and deopts(mod) == before

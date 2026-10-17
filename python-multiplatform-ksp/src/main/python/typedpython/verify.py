@@ -6,7 +6,7 @@ section of `ir.py`. A function it cannot prove is removed from `Module.functions
 `Diagnostic`. A proved function comes back with each `Index`/`StoreIndex` whose bounds were proved
 marked `proven=True`; every other access has `proven=False` (an input `proven` is never trusted).
 
-The verifier reads nothing but `ir` — it is independent of the front end — and it trusts no flag
+The verifier reads nothing but `ir`, it is independent of the front end, and it trusts no flag
 the front end set (`pure`, `may_deopt`, `ArrayParam.stored`, node `type`s): each is recomputed from
 the body and compared.
 
@@ -37,17 +37,80 @@ Rules (the `rule` of a Diagnostic):
   verify/structure            break/continue outside a loop, the ForRange var assigned in its body,
                               a zero or non-constant step, duplicate names, bad declarations, an
                               entry global that collides with a parameter/local/other entry global or
-                              is assigned in the body
+                              is assigned in the body, or more than two array parameters (the lists
+                              are locked from copy-in to write-back: one- and two-object critical
+                              sections only, #159)
   verify/proven-overflow      `proven` is set on an op the verifier cannot prove stays inside i64 (or
                               on a node `proven` does not apply to, or it is not a bool)
   verify/redo                 `Call.redo` where it is not legal (see below)
   verify/entry-global-open    a function with entry_globals is not closed
+  verify/array-open           a function with an ArrayParam runs user code (#203)
+  verify/buffer               a malformed `ArrayParam.buffer` (only None and "array"), or a
+                              CopyArray of a buffer array (#149)
+  verify/class                a class named by FieldGet/FieldSet/New/IsExact/CheckExact/Param.cls is not
+                              a (valid) ClassDecl of the module, a field is not one of its fields, a
+                              New names a class without trivial_init or has the wrong arity, or a
+                              ClassDecl itself is malformed (bad name/fields, duplicates)
+  verify/field-unproved       a FieldGet/FieldSet whose object is not proved to be exactly the class
+
+Fixed-layout classes (SPEC N-11). The verifier never trusts the front end for them either:
+
+  * Every class named anywhere must be a valid `ClassDecl` of `Module.classes`; every field named
+    must be one of that class's `fields`; `New` needs `trivial_init` and exactly len(fields) OBJ
+    arguments; `Param.cls` only on an OBJ parameter (`optional` only together with `cls`).
+  * Exact-type proof for FieldGet/FieldSet (`verify/field-unproved` otherwise). The object must be
+    one of exactly these forms, for the same class C as the access:
+      (a) a `Local` that is a parameter with cls=C and optional=False, until the local is assigned;
+      (b) a `CheckExact(x, C)` node used directly as the object;
+      (c) a `New(C, ...)` node used directly as the object;
+      (d) a `Local` proved exact-C by control flow, with no assignment of it in between: inside the
+          `then` of `If(IsExact(Local, C), ...)`, or its `orelse` when the condition is false
+          (`Not(IsExact)`), and inside the right operand of an `And` whose left operand is
+          such a test (an `Or`'s right operand: when the left is false); or
+          `Is(Local x, Const(None, OBJ), negate=True)` (true, or `negate=False` false) when x is
+          an `optional` parameter of class C that the function never assigns anywhere; or
+          after `if <not exact>: return/break/continue` (the facts of the branches that fall
+          through are intersected); or a local assigned from (b), (c) or another proved local
+          (`x = New(C, ..)`, `x = CheckExact(y, C)`, `x = y`) from there until it is assigned again;
+      (e) a `Local` that is not a parameter, entry global or loop var, and whose every Assign in the
+          function is a `New(C, ...)` of that same class: whatever is read from it (definite
+          assignment is proved separately) is a C created by New. Flow-insensitive, so one other kind
+          of assignment anywhere in the function ends the form.
+    Facts are killed by any assignment of the local (and, in a loop, by an assignment anywhere in
+    the loop body for the whole loop, the loop var included). Nothing else is accepted: not
+    isinstance, not a fact about another local, not a fact through a call, GetAttr or FieldGet.
+  * A `Call` of a compiled callee whose parameter has cls=C (the callee's entry guard) with an
+    argument not proved exact-C by the forms above can fail that guard in the middle of the caller:
+    it counts toward `may_deopt` (so it is legal only in a pure function) unless it is a legal redo.
+  * Purity/deopt: CheckExact can deopt (like Unbox to i64): only in a pure function, and it counts
+    toward `may_deopt` even when redundant. FieldSet is an effect (and makes the function not
+    *closed*: replacing a slot may drop the last reference to the old value, whose `__del__` is user
+    code). FieldGet, Is, IsExact, New are not effects.
+  * Typing: Is/IsExact give BOOL over OBJ operands; FieldGet/New/CheckExact give OBJ; `Const(None,
+    OBJ)` is the only OBJ constant (anything else `verify/type`) and counts as a reference creator
+    (a new reference to the None singleton) wherever an OBJ may flow: an operand of Is, a returned
+    value, an argument.
+  * Ownership: New, FieldGet and CheckExact are reference creators. CheckExact is read as the IR says,
+    "`obj` itself ... after checking": the result is a new reference to the operand (the back end
+    increfs it); the operand's own reference is untouched.
+
+Objects, str and dict code (#150). GetItem, Contains, Format, StoreItem and ForObj run user code
+(`__getitem__`, `__hash__`, `__eq__`, `__format__`, `__iter__`, `__next__`, `__setitem__`): each is an
+effect and makes the function not closed (so it can hold no array, no buffer and no entry global),
+like CallObject. NewList, NewDict and BuildString run none. They are OBJ producers (new references)
+with the OBJ operand slots below; an OBJ Const is None or a plain str (UTF-8, no NUL); a ForObj's
+targets are distinct declared OBJ locals, assigned by the loop (so definitely assigned inside the
+body, and not after it unless assigned before: a loop of zero iterations binds nothing), killing
+any exact-type fact about them; `unpack` false means exactly one target; `BinOp.inplace` only on an
+OBJ operation; `Format.conversion` is -1, 97, 114 or 115 and `spec` None or a plain str.
 
 Proven i64 operations. The verifier never trusts `BinOp.proven` / `UnaryOp.proven`: for every I64
 expression it computes an interval [lo, hi] (exact Python ints) and accepts `proven=True` only on an
-I64 ADD/SUB/MUL (BinOp) or NEG (UnaryOp) whose exact result interval lies inside [-2**63, 2**63-1];
-anything else (a different op, a non-I64 node, a result that may leave i64, a non-bool flag) is
-rejected, and so is the whole function. A proven op is not a deopting node (an impure function may
+I64 ADD/SUB/MUL (BinOp) or NEG (UnaryOp) whose exact result interval lies inside [-2**63, 2**63-1],
+or on an I64 FLOORDIV/MOD whose divisor is a Const power of two >= 1 and whose dividend interval lies
+inside [0, 2**63-1] (the back end then emits a shift / mask, #148);
+anything else (a different op, a non-I64 node, a result that may leave i64, a dividend that may be
+negative, another divisor, a non-bool flag) is rejected, and so is the whole function. A proven op is not a deopting node (an impure function may
 contain it; a pure one does not count it toward `may_deopt`); every unproven I64 ADD/SUB/MUL/NEG
 still deopts. The interval rules, exactly:
 
@@ -57,17 +120,45 @@ still deopts. The interval rules, exactly:
       step < 0                 [min(hi(start), lo(stop) + 1), hi(start)]
                                (the bounds are the intervals of the start/stop expressions, both
                                evaluated before the loop; then intersected with the i64 range)
+  Local, any other I64 local   see "Local variables and guards" below
   Len(array)                   [0, 2**62]
   ADD / SUB / MUL              interval arithmetic on the operand intervals (for MUL the min/max of
                                the four endpoint products); a proven op must fit i64 exactly, an
                                unproven one is clamped to i64 (a result outside it deopts, so only
                                in-range values flow on)
   NEG / POS                    [-hi, -lo] / [lo, hi]
-  everything else              the full i64 range: I64 params and entry globals, every local that is
-                               not the ForRange var of an enclosing loop (the verifier does no flow
-                               analysis, so a local assigned a constant is still "any i64"), a loop
-                               var after its loop, Index elements, Unbox, Call results, FLOORDIV,
-                               MOD, TRUEDIV
+  MOD                          divisor interval > 0: [0, hi(b) - 1]; < 0: [lo(b) + 1, 0]; else
+                               [-(d - 1), d - 1] with d = max |b|
+  FLOORDIV                     divisor interval that keeps its sign: the min/max of the four
+                               corner quotients; else [-m, m] with m = max |a| (all clamped to i64:
+                               -2**63 // -1 deopts, so it yields no value)
+  everything else              the full i64 range: I64 params and entry globals, a loop var after
+                               its loop, Index elements, Unbox, Call results, TRUEDIV
+
+Local variables and guards (#148). Two flow facts narrow what a read of an I64 local can be; both
+are computed here, never taken from the front end.
+
+  * Assigned values. A local that is not a parameter, entry global, array or ForRange var of the
+    function, and is assigned by Assign statements, has the join of the intervals of every value
+    assigned to it (an unproven op counts clamped to i64, as above). The intervals are a fixed point:
+    `_prove` walks the body again and again, each walk reading the intervals the previous one found,
+    until no interval grows; from the fourth walk a bound that still grows jumps to the i64 limit,
+    and after 16 walks every such local is full range. The fixed point means each assigned value
+    lies inside its local's interval, whichever path ran. An assignment that reads a local with no
+    interval yet (the first walks) adds nothing that walk. So `x = 1; x + 1` is proven, and a counter
+    that starts at 0 and only grows (`k = 0 ... k = k + 1`) is in [0, 2**63-1], not "any i64".
+  * Guards. Inside the then-branch of `If(c)` (the else-branch for `c` false), the body of
+    `While(c)`, and after an `If` one branch of which cannot complete (return, break, continue), a
+    Local that is a side of an I64 comparison with the other side's interval [lo, hi] is narrowed:
+    `x < e` gives x <= hi - 1, `x <= e` x <= hi, `x > e` x >= lo + 1, `x >= e` x >= lo, `x == e`
+    [lo, hi]; the Local may be either side; And (true) and Or (false) apply both links, Not flips,
+    the negation of a comparison is the opposite comparison, `!=` and anything else give nothing.
+    A guard on `x` ends at the next Assign to `x`; entering a loop drops the guards on every local
+    the loop body assigns (the back edge brings other values); a While's condition is re-read at
+    each iteration, so it narrows the top of every iteration. A read is the assigned-values interval
+    narrowed by the guard (and a ForRange var's interval is narrowed by it too).
+  So `if n > 0: return n - 1` and `while lo < hi: lo += 1; hi -= 1` need no check, `n <= 0` early
+  return then `n - 1` likewise.
 
 Local arrays (NewArray / CopyArray, ir.Function "Local arrays"). A local of an array type holds a
 native array the function owns. The verifier proves, never trusting the front end:
@@ -97,12 +188,12 @@ native array the function owns. The verifier proves, never trusting the front en
 Tuple. `Tuple(OBJ, elements)`: a tuple of OBJ expressions (a scalar needs Box), result OBJ, a
 reference creator in the ownership rule. Building one is not an effect.
 
-What this cannot prove: anything that needs knowing a value through assignments (accumulators,
-`x = 1; x + 1`), relations between variables (`i < n` does not bound `i + n`), bounds that come from
-guards or conditions (`if n < 100`), values through array elements, calls or Unbox, the result of
-`//` and `%` (even by a constant), a loop var after the loop, or `range` bounds that are themselves
-full-range (`range(n)` bounds the var only by i64). A function needing such a proof keeps its
-checked, deopting ops (and is then legal only if pure).
+What this cannot prove: relations between variables (`i < n` bounds `i`, not `i + n`, and says
+nothing about `j` when `j` is not compared), the range of a counter that is bounded only by how
+often a loop runs (`k += 1` in `while c`), values through array elements, calls or Unbox, a loop var
+after the loop, a guard on a local the guarded code assigns before the use, or `range` bounds that
+are themselves full-range (`range(n)` bounds the var only by i64). A function needing such a proof
+keeps its checked, deopting ops (and is then legal only if pure).
 
 Call.redo. Legal only if the caller is impure, the callee is pure and may_deopt, and the callee
 returns F64, BOOL or NONE (`verify/redo` otherwise). A redo call is not a deopting node in the
@@ -130,6 +221,8 @@ from .ir import (
     Local, MathCall, MathFunc, Module, NewArray, ObjToFloat, Or, Param, Return, StoreIndex, ToFloat,
     Truth, Tuple, Type, Unbox, UnaryOp, UnaryOpKind, While,
 )
+from .ir import CheckExact, ClassDecl, FieldGet, FieldSet, Is, IsExact, New
+from .ir import BuildString, Contains, ForObj, Format, GetItem, NewDict, NewList, StoreItem
 
 DA = "verify/definite-assignment"
 MISSING_RETURN = "verify/missing-return"
@@ -149,6 +242,10 @@ CONDITION_ONLY = "verify/condition-only"
 PROVEN = "verify/proven-overflow"
 REDO = "verify/redo"
 ENTRY_OPEN = "verify/entry-global-open"
+ARRAY_OPEN = "verify/array-open"
+BUFFER = "verify/buffer"
+CLASS = "verify/class"
+FIELD = "verify/field-unproved"
 
 
 @dataclass(frozen=True)
@@ -163,13 +260,18 @@ class Diagnostic:
 # the one the back end implements).
 _EXPRS = frozenset({Const, Local, BinOp, UnaryOp, Compare, And, Or, ToFloat, Box, Unbox, MathCall,
                     Call, Global, GetAttr, CallObject, Truth, CompareObj, ObjToFloat, Len, Index,
-                    NewArray, CopyArray, Tuple})
-_STMTS = frozenset({Assign, StoreIndex, ExprStmt, If, While, ForRange, Return, Break, Continue})
+                    NewArray, CopyArray, Tuple, Is, IsExact, CheckExact, FieldGet, New,
+                    GetItem, Contains, NewList, NewDict, Format, BuildString})
+_STMTS = frozenset({Assign, StoreIndex, ExprStmt, If, While, ForRange, Return, Break, Continue,
+                    FieldSet, StoreItem, ForObj})
 # Nodes whose OBJ result is a new reference (ir.py "ownership": Box, Global, GetAttr, CallObject,
 # OBJ BinOp, Tuple), plus reads of an OBJ local (the local owns its reference; the back end increfs or
 # borrows under that rule) and Calls of a compiled function returning OBJ (which returns a new
 # reference by the same rule).
-_OBJ_PRODUCERS = frozenset({Box, Global, GetAttr, CallObject, BinOp, Local, Call, Tuple})
+_OBJ_PRODUCERS = frozenset({Box, Global, GetAttr, CallObject, BinOp, Local, Call, Tuple, New,
+                            FieldGet, CheckExact, Const,      # an OBJ Const is None or a str (e_Const)
+                            GetItem, NewList, NewDict, Format, BuildString})
+_CONVERSIONS = (-1, 97, 114, 115)          # Format.conversion: none, !a, !r, !s
 _VALUE_TYPES = (Type.I64, Type.F64, Type.BOOL, Type.OBJ)        # what a local may hold
 _RETURN_TYPES = _VALUE_TYPES + (Type.NONE,)
 _ELEMENT = {Type.F64_ARRAY: Type.F64, Type.I64_ARRAY: Type.I64}
@@ -180,6 +282,15 @@ _I64_MIN, _I64_MAX = -2 ** 63, 2 ** 63 - 1
 _FULL = (_I64_MIN, _I64_MAX)
 _LEN_MAX = 2 ** 62
 _PROVABLE_OPS = frozenset({BinOpKind.ADD, BinOpKind.SUB, BinOpKind.MUL})
+_POW2_OPS = frozenset({BinOpKind.FLOORDIV, BinOpKind.MOD})   # `proven` means shift / mask
+_NEGATE = {CompareKind.EQ: CompareKind.NE, CompareKind.NE: CompareKind.EQ,
+           CompareKind.LT: CompareKind.GE, CompareKind.GE: CompareKind.LT,
+           CompareKind.LE: CompareKind.GT, CompareKind.GT: CompareKind.LE}
+_SWAP = {CompareKind.EQ: CompareKind.EQ, CompareKind.NE: CompareKind.NE,
+         CompareKind.LT: CompareKind.GT, CompareKind.GT: CompareKind.LT,
+         CompareKind.LE: CompareKind.GE, CompareKind.GE: CompareKind.LE}
+_ROUNDS = 16          # rounds of the local-interval fixpoint before every local is full range
+_WIDEN_FROM = 3       # from this round on a bound that still grows jumps to the i64 limit
 
 # Definite assignment uses `None` for "unreachable" (bottom: every name counts as assigned).
 _State = frozenset[str] | None
@@ -198,6 +309,7 @@ class _Loop:
         self.var = var                      # ForRange var (None for While)
         self.bounds_array = bounds_array    # array whose indices by `var` are in bounds
         self.interval = _FULL               # the values `var` takes inside the body
+        self.bottom = False                 # fixpoint round: start/stop not known yet
         self.breaks: list[_State] = []
 
 
@@ -205,9 +317,26 @@ class _Checker:
     """Checks one function against the module's signatures. Collects diagnostics; rebuilds the
     body with proven bounds."""
 
-    def __init__(self, function: Function, signatures: dict[str, Function]):
+    def __init__(self, function: Function, signatures: dict[str, Function],
+                 classes: dict[str, ClassDecl] | None = None,
+                 var_ivs: dict[str, tuple[int, int]] | None = None, fixing: bool = False):
         self.fn = function
+        # Local intervals (module docstring "Local variables and guards"): `var_ivs` is the interval
+        # of every eligible local; `fixing` says this walk is a round of the fixpoint that computes
+        # them (a local without an interval yet is then "bottom": `bottom` is set when one is read).
+        self.var_ivs = dict(var_ivs or {})
+        self.fixing = fixing
+        self.eligible: frozenset[str] = frozenset()
+        self.contrib: dict[str, tuple[int, int]] = {}
+        self.bottom = False
+        self.dead = 0                        # >0: inside code that is bottom in this round
+        self.refine: dict[str, tuple[int, int]] = {}   # guard facts at this point
         self.sigs = signatures
+        self.classes = classes or {}
+        self.facts: dict[str, str] = {}      # local -> class it is proved exactly (see docstring)
+        self.optional: dict[str, str] = {}   # optional-class parameter -> class
+        self.reassigned: frozenset[str] = frozenset()
+        self.new_only: dict[str, str] = {}   # local whose every assignment is New(C, ..) -> C
         self.diags: list[Diagnostic] = []
         self.can_deopt = False
         self.effects: list[str] = []         # reasons the body is impure
@@ -216,11 +345,13 @@ class _Checker:
         self.loops: list[_Loop] = []
         self.scalars: dict[str, Type] = {}   # name -> type of every scalar/OBJ variable
         self.arrays: dict[str, Type] = {}    # name -> array type of every ArrayParam
+        self.buffers: set[str] = set()       # names of every buffer ArrayParam
         self.larrays: dict[str, Type] = {}   # name -> array type of every local array
         self.assigns: dict[str, int] = {}    # local array -> number of Assign statements to it
         self.lens: dict[str, tuple[int, int]] = {}   # single-assignment local array -> length
         self.entry: dict[str, Type] = {}     # name -> type of every entry global
         self.opens: list[str] = []           # reasons the function is not closed
+        self.slow_user: list[str] = []       # slow paths that can run user code (FieldGet, New)
 
     def error(self, rule: str, message: str) -> None:
         d = Diagnostic(self.fn.name, rule, message, self.fn.source_line)
@@ -238,20 +369,29 @@ class _Checker:
                     self.error(TYPE, f"array parameter '{p.name}' has non-array type {p.type}")
                 elif not isinstance(p.stored, bool):
                     self.error(TYPE, f"array parameter '{p.name}' has a non-bool `stored`")
+                elif p.buffer not in (None, "array"):
+                    self.error(BUFFER, f"array parameter '{p.name}' has buffer kind {p.buffer!r}")
                 else:
                     self.arrays[p.name] = p.type
+                    if p.buffer:
+                        self.buffers.add(p.name)
             elif type(p) is Param:
                 if p.type not in _VALUE_TYPES:
                     self.error(TYPE, f"parameter '{p.name}' has type {p.type}; arrays must be "
                                      f"ArrayParam")
                 else:
                     self.scalars[p.name] = p.type
+                    self.param_class(p)
             else:
                 self.error(UNKNOWN, f"parameter {p!r} is not an ir Param/ArrayParam")
                 continue
             if p.name in params:
                 self.error(STRUCTURE, f"parameter '{p.name}' appears twice")
             params.add(p.name)
+        if sum(type(p) is ArrayParam and p.buffer is None for p in fn.params) > 2:
+            self.error(STRUCTURE, "more than two array parameters: compiled code holds each list's "
+                                  "critical section from copy-in to write-back, and free-threaded "
+                                  "CPython has no section for more than two objects (#159)")
         eg = fn.entry_globals
         if not isinstance(eg, tuple):
             self.error(STRUCTURE, "entry_globals is not a tuple")
@@ -266,6 +406,9 @@ class _Checker:
             if p.type not in ir.SCALARS:
                 self.error(TYPE, f"entry global '{p.name}' has type {p.type}; only i64, f64 and "
                                  f"bool globals can be read at entry")
+                continue
+            if p.cls is not None or p.optional is not False:
+                self.error(TYPE, f"entry global '{p.name}' carries a class annotation")
                 continue
             if p.name in params or p.name in self.entry:
                 self.error(STRUCTURE, f"entry global '{p.name}' collides with a parameter or "
@@ -300,6 +443,102 @@ class _Checker:
             if not isinstance(getattr(fn, flag), bool):
                 self.error(TYPE, f"`{flag}` is not a bool")
         return frozenset(params)
+
+    def param_class(self, p: Param) -> None:
+        """`Param.cls`/`optional`: only on an OBJ parameter, naming a ClassDecl of the module. A
+        non-optional one is an exact-C fact at entry (the entry guard); an optional one is C or None."""
+        if type(p.optional) is not bool:
+            self.error(TYPE, f"parameter '{p.name}' has a non-bool `optional`")
+            return
+        if p.cls is None:
+            if p.optional:
+                self.error(TYPE, f"parameter '{p.name}' is optional but names no class")
+            return
+        if p.type is not Type.OBJ:
+            self.error(TYPE, f"parameter '{p.name}' names class {p.cls!r} but is "
+                             f"{p.type.value}, not obj")
+        elif not self.known_class(p.cls, f"parameter '{p.name}'"):
+            return
+        elif p.optional:
+            self.optional[p.name] = p.cls
+        else:
+            self.facts[p.name] = p.cls
+
+    def known_class(self, cls: object, what: str) -> bool:
+        if not isinstance(cls, str) or cls not in self.classes:
+            self.error(CLASS, f"{what} names class {cls!r}, which is not a compiled class of this "
+                              f"module")
+            return False
+        return True
+
+    def known_field(self, cls: str, field: object, what: str) -> bool:
+        if not self.known_class(cls, what):
+            return False
+        if not isinstance(field, str) or field not in self.classes[cls].fields:
+            self.error(CLASS, f"{what}: '{field}' is not a field of class '{cls}' "
+                              f"(fields: {', '.join(self.classes[cls].fields)})")
+            return False
+        return True
+
+    # --- exact-type facts ---------------------------------------------------------------------
+
+    def new_only_locals(self, params: frozenset[str]) -> dict[str, str]:
+        """Form (e): locals (not parameters, entry globals, loop vars or arrays) every Assign of
+        which is a `New` of one and the same declared class."""
+        values: dict[str, list[object]] = {}
+        _assigned_values(self.fn.body, values)
+        loop_vars = _loop_vars(self.fn.body)
+        out: dict[str, str] = {}
+        for name, vs in values.items():
+            if name in params or name in loop_vars or name in self.larrays:
+                continue
+            classes = {v.cls for v in vs if type(v) is New and isinstance(v.cls, str)}
+            if (len(classes) == 1 and all(type(v) is New for v in vs)
+                    and next(iter(classes)) in self.classes):
+                out[name] = next(iter(classes))
+        return out
+
+    def exact_of(self, e: object) -> str | None:
+        """The class `e` is proved to be exactly (forms (a)-(d) of the module docstring)."""
+        cls = type(e)
+        if cls is Local:
+            return self.facts.get(e.name) or self.new_only.get(e.name)
+        if cls is CheckExact or cls is New:
+            return e.cls if isinstance(e.cls, str) and e.cls in self.classes else None
+        return None
+
+    def _none_test(self, c: Is) -> str | None:
+        """`x is None` / `x is not None` on an optional-C parameter never assigned: the name."""
+        for a, b in ((c.left, c.right), (c.right, c.left)):
+            if (type(a) is Local and type(b) is Const and b.type is Type.OBJ and b.value is None
+                    and a.name in self.optional and a.name not in self.reassigned):
+                return a.name
+        return None
+
+    def facts_if(self, c: object, truth: bool) -> dict[str, str]:
+        """The exact-type facts that hold when condition `c` evaluated to `truth`."""
+        cls = type(c)
+        if cls is IsExact:
+            if truth and type(c.obj) is Local and c.cls in self.classes:
+                return {c.obj.name: c.cls}
+            return {}
+        if cls is Is and type(c.negate) is bool:
+            name = self._none_test(c)
+            if name is not None and truth is c.negate:     # `is not None` true, or `is None` false
+                return {name: self.optional[name]}
+            return {}
+        if cls is UnaryOp and c.op is UnaryOpKind.NOT:
+            return self.facts_if(c.operand, not truth)
+        if (cls is And and truth) or (cls is Or and not truth):
+            return {**self.facts_if(c.left, truth), **self.facts_if(c.right, truth)}
+        return {}
+
+    def proved(self, obj: ir.Expr, cls: str, what: str) -> None:
+        if self.exact_of(obj) != cls:
+            self.error(FIELD, f"{what}: the object is not proved to be exactly '{cls}' (needs an "
+                              f"exact-{cls} parameter, a CheckExact, a New, or a dominating "
+                              f"IsExact / `is not None` of an optional parameter on the same local, "
+                              f"with no assignment in between)")
 
     # --- expressions --------------------------------------------------------------------------
 
@@ -348,7 +587,9 @@ class _Checker:
               or (t is Type.F64 and type(v) is float)
               or (t is Type.BOOL and type(v) is bool)
               or (t is Type.NONE and v is None))
-        if not ok and t is not Type.OBJ:
+        if t is Type.OBJ:
+            ok = v is None or _plain_str(v)   # None, or a str the C source can carry exactly
+        if not ok:
             self.error(TYPE, f"constant {v!r} does not match type {t.value}")
         return e
 
@@ -383,18 +624,67 @@ class _Checker:
         if cls is Local:
             for loop in reversed(self.loops):
                 if loop.var == e.name:
-                    return loop.interval
-            return _FULL
+                    if loop.bottom:
+                        self.bottom = True
+                    return _meet_interval(loop.interval, self.refine.get(e.name))
+            base = _FULL
+            if e.name in self.eligible:
+                known = self.var_ivs.get(e.name)
+                if known is not None:
+                    base = known
+                elif self.fixing:
+                    self.bottom = True
+            return _meet_interval(base, self.refine.get(e.name))
         if cls is Len:
             return self.lens.get(e.array, (0, _LEN_MAX))
         if cls is BinOp and e.op in _PROVABLE_OPS:
             lo, hi = _exact(e.op, self.interval(e.left), self.interval(e.right))
+            return (max(lo, _I64_MIN), min(hi, _I64_MAX))
+        if cls is BinOp and e.op in _POW2_OPS:
+            lo, hi = _div_interval(e.op, self.interval(e.left), self.interval(e.right))
             return (max(lo, _I64_MIN), min(hi, _I64_MAX))
         if cls is UnaryOp and e.op in (UnaryOpKind.NEG, UnaryOpKind.POS):
             lo, hi = self.interval(e.operand)
             lo, hi = (-hi, -lo) if e.op is UnaryOpKind.NEG else (lo, hi)
             return (max(lo, _I64_MIN), min(hi, _I64_MAX))
         return _FULL
+
+    def refinements(self, c: ir.Expr, truth: bool) -> dict[str, tuple[int, int]]:
+        """The intervals that hold of locals when condition `c` evaluated to `truth` (module
+        docstring "Local variables and guards"). A comparison of two I64 operands one of which is a
+        `Local` bounds that local by the interval of the other; And (true) / Or (false) combine
+        both links; Not flips; anything else gives nothing."""
+        cls = type(c)
+        if cls is Compare and type(c.op) is CompareKind:
+            l, r = c.left, c.right
+            if getattr(l, "type", None) is not Type.I64 or getattr(r, "type", None) is not Type.I64:
+                return {}
+            kind = c.op if truth else _NEGATE[c.op]
+            out: dict[str, tuple[int, int]] = {}
+            if type(l) is Local:
+                _narrow(out, l.name, _bound(kind, self.interval(r)))
+            if type(r) is Local:
+                _narrow(out, r.name, _bound(_SWAP[kind], self.interval(l)))
+            return out
+        if cls is UnaryOp and c.op is UnaryOpKind.NOT:
+            return self.refinements(c.operand, not truth)
+        if (cls is And and truth) or (cls is Or and not truth):
+            out = self.refinements(c.left, truth)
+            for name, iv in self.refinements(c.right, truth).items():
+                _narrow(out, name, iv)
+            return out
+        return {}
+
+    def narrowed(self, c: ir.Expr, truth: bool) -> tuple[dict[str, tuple[int, int]], bool]:
+        """(the current guard facts narrowed by `c` being `truth`, whether the narrowing read a local
+        whose interval is not known yet in this fixpoint round)."""
+        self.bottom = False
+        found = self.refinements(c, truth)
+        bottom, self.bottom = self.bottom, False
+        out = dict(self.refine)
+        for name, iv in found.items():
+            _narrow(out, name, iv)
+        return out, bottom
 
     def check_proven(self, shape_ok: bool, interval: tuple[int, int], what: str) -> bool:
         """`proven=True` (already known to be a bool) is accepted only if re-proved. Returns
@@ -408,20 +698,43 @@ class _Checker:
             return True
         return False
 
+    def check_shift(self, op: BinOpKind, left: ir.Expr, right: ir.Expr) -> bool:
+        """`proven` on an I64 FLOORDIV / MOD: the divisor is a Const power of two >= 1 and the
+        dividend lies in [0, 2**63-1], so the back end may emit a shift / mask (Python's floor
+        semantics and C's agree there). Returns whether the node counts as non-deopting."""
+        d = right.value if type(right) is Const and type(right.value) is int else None
+        if d is None or d < 1 or d & (d - 1) != 0:
+            self.error(PROVEN, f"`proven` is set on i64 {op.value} but the divisor is not a "
+                               f"Const power of two >= 1")
+        elif self.interval(left)[0] < 0:
+            self.error(PROVEN, f"`proven` is set on i64 {op.value} by {d} but the dividend may be "
+                               f"negative (its interval starts at {self.interval(left)[0]})")
+        else:
+            return True
+        return False
+
     def e_BinOp(self, e: BinOp, state: _State) -> ir.Expr:
         if type(e.op) is not BinOpKind:
             self.error(UNKNOWN, f"BinOp op {e.op!r} is not a BinOpKind")
             return e
         left, right = self.expr(e.left, state), self.expr(e.right, state)
         lt, rt = getattr(left, "type", None), getattr(right, "type", None)
+        if type(e.inplace) is not bool:
+            self.error(TYPE, f"BinOp `inplace` {e.inplace!r} is not a bool")
+        elif e.inplace and lt is not Type.OBJ:
+            self.error(TYPE, "BinOp `inplace` is set on a non-OBJ operation (it is PyNumber_InPlace*)")
         proven = False
         if type(e.proven) is not bool:
             self.error(TYPE, f"BinOp `proven` {e.proven!r} is not a bool")
         elif e.proven:
-            shape = (e.type is Type.I64 and lt is Type.I64 and rt is Type.I64
-                     and e.op in _PROVABLE_OPS)
-            exact = _exact(e.op, self.interval(left), self.interval(right)) if shape else _FULL
-            proven = self.check_proven(shape, exact, f"{e.type.value} {e.op.value}")
+            both = e.type is Type.I64 and lt is Type.I64 and rt is Type.I64
+            if both and e.op in _POW2_OPS:
+                proven = self.check_shift(e.op, left, right)
+            else:
+                shape = both and e.op in _PROVABLE_OPS
+                exact = (_exact(e.op, self.interval(left), self.interval(right))
+                         if shape else _FULL)
+                proven = self.check_proven(shape, exact, f"{e.type.value} {e.op.value}")
         if lt not in (Type.I64, Type.F64, Type.OBJ):
             self.error(TYPE if lt is not Type.OBJ else OWNERSHIP,
                        f"BinOp {e.op.value} on {getattr(lt, 'value', lt)} operands")
@@ -488,7 +801,12 @@ class _Checker:
 
     def _bool_pair(self, e: And | Or, state: _State, cond: bool = False) -> ir.Expr:
         name = type(e).__name__
-        left, right = self.expr(e.left, state, cond), self.expr(e.right, state, cond)
+        left = self.expr(e.left, state, cond)
+        saved = self.facts
+        # the right operand runs only when the left was true (And) / false (Or)
+        self.facts = {**saved, **self.facts_if(left, type(e) is And)}
+        right = self.expr(e.right, state, cond)
+        self.facts = saved
         self.slot(left, Type.BOOL, f"left operand of {name}")
         self.slot(right, Type.BOOL, f"right operand of {name}")
         if e.type is not Type.BOOL:
@@ -586,6 +904,10 @@ class _Checker:
                                  f"bool and none results are exactly reproducible")
             else:
                 redo = True
+        if not redo:
+            for k, (a, p) in enumerate(zip(args, callee.params)):
+                if type(p) is Param and p.cls is not None and self.exact_of(a) != p.cls:
+                    self.can_deopt = True       # the callee's entry guard `type(x) is C` may fail
         if callee.may_deopt is True and not redo:
             self.can_deopt = True
         if not redo and not self.covers(callee):
@@ -723,6 +1045,104 @@ class _Checker:
                 return loop.bounds_array == array
         return False
 
+    # --- fixed-layout classes -----------------------------------------------------------------
+
+    def e_GetItem(self, e: GetItem, state: _State) -> ir.Expr:
+        obj = self.obj_operand(e.obj, state, "container of GetItem")
+        index = self.obj_operand(e.index, state, "index of GetItem")
+        self.result(e, Type.OBJ)
+        self.effects.append("GetItem (runs __getitem__, __hash__, __eq__, __index__)")
+        self.opens.append("GetItem")
+        return dataclasses.replace(e, obj=obj, index=index)
+
+    def e_Contains(self, e: Contains, state: _State) -> ir.Expr:
+        left = self.obj_operand(e.left, state, "left operand of in")
+        right = self.obj_operand(e.right, state, "right operand of in")
+        if type(e.negate) is not bool:
+            self.error(TYPE, f"Contains `negate` {e.negate!r} is not a bool")
+        self.result(e, Type.BOOL)
+        self.effects.append("Contains (runs __contains__, __iter__, __eq__)")
+        self.opens.append("Contains")
+        return dataclasses.replace(e, left=left, right=right)
+
+    def e_NewList(self, e: NewList, state: _State) -> ir.Expr:
+        self.result(e, Type.OBJ)
+        return e
+
+    def e_NewDict(self, e: NewDict, state: _State) -> ir.Expr:
+        self.result(e, Type.OBJ)
+        return e
+
+    def e_Format(self, e: Format, state: _State) -> ir.Expr:
+        operand = self.obj_operand(e.operand, state, "operand of Format")
+        if e.spec is not None and not _plain_str(e.spec):
+            self.error(TYPE, f"Format spec {e.spec!r} is not None or a plain str")
+        if e.conversion not in _CONVERSIONS or type(e.conversion) is not int:
+            self.error(TYPE, f"Format conversion {e.conversion!r} is not one of {_CONVERSIONS}")
+        self.result(e, Type.OBJ)
+        self.effects.append("Format (runs __format__, __str__, __repr__)")
+        self.opens.append("Format")
+        return dataclasses.replace(e, operand=operand)
+
+    def e_BuildString(self, e: BuildString, state: _State) -> ir.Expr:
+        if not isinstance(e.elements, tuple) or len(e.elements) < 2:
+            self.error(STRUCTURE, "BuildString elements are not a tuple of at least two")
+            return e
+        elements = tuple(self.obj_operand(x, state, f"element {k + 1} of BuildString")
+                         for k, x in enumerate(e.elements))
+        for k, x in enumerate(elements):
+            if not (type(x) is Format or (type(x) is Const and type(x.value) is str)):
+                self.error(TYPE, f"element {k + 1} of BuildString is not a Format or a str Const")
+        self.result(e, Type.OBJ)
+        return dataclasses.replace(e, elements=elements)
+
+    def e_Is(self, e: Is, state: _State) -> ir.Expr:
+        left = self.obj_operand(e.left, state, "left operand of is")
+        right = self.obj_operand(e.right, state, "right operand of is")
+        if type(e.negate) is not bool:
+            self.error(TYPE, f"Is `negate` {e.negate!r} is not a bool")
+        self.result(e, Type.BOOL)
+        return dataclasses.replace(e, left=left, right=right)
+
+    def e_IsExact(self, e: IsExact, state: _State) -> ir.Expr:
+        obj = self.obj_operand(e.obj, state, "operand of IsExact")
+        self.known_class(e.cls, "IsExact")
+        self.result(e, Type.BOOL)
+        return dataclasses.replace(e, obj=obj)
+
+    def e_CheckExact(self, e: CheckExact, state: _State) -> ir.Expr:
+        obj = self.obj_operand(e.obj, state, "operand of CheckExact")
+        self.known_class(e.cls, "CheckExact")
+        self.result(e, Type.OBJ)
+        self.can_deopt = True       # a wrong type deopts, even if the check is redundant
+        return dataclasses.replace(e, obj=obj)
+
+    def e_FieldGet(self, e: FieldGet, state: _State) -> ir.Expr:
+        obj = self.obj_operand(e.obj, state, f"object of .{e.field}")
+        self.result(e, Type.OBJ)
+        if self.known_field(e.cls, e.field, f"FieldGet .{e.field}"):
+            self.proved(obj, e.cls, f"FieldGet {e.cls}.{e.field}")
+        # a slot read runs no user code: not an effect. Its slow path after a class change (getattr)
+        # can, which matters to array functions (#203).
+        self.slow_user.append(f"FieldGet .{e.field} (generic getattr after a class change)")
+        return dataclasses.replace(e, obj=obj)
+
+    def e_New(self, e: New, state: _State) -> ir.Expr:
+        self.slow_user.append(f"New {e.cls} (calls the class after a class change)")
+        args = self.args(e.args, state, f"New {e.cls}")
+        for k, a in enumerate(args):
+            self.slot(a, Type.OBJ, f"argument {k + 1} of New {e.cls}")
+        self.result(e, Type.OBJ)
+        if self.known_class(e.cls, "New"):
+            decl = self.classes[e.cls]
+            if decl.trivial_init is not True:
+                self.error(CLASS, f"New of '{e.cls}', whose __init__ is not trivial (it must be "
+                                  f"called as an object)")
+            if len(args) != len(decl.fields):
+                self.error(CLASS, f"New of '{e.cls}' has {len(args)} argument(s) for "
+                                  f"{len(decl.fields)} field(s)")
+        return dataclasses.replace(e, args=args)
+
     # --- tuples and local arrays --------------------------------------------------------------
 
     def e_Tuple(self, e: Tuple, state: _State) -> ir.Expr:
@@ -761,6 +1181,9 @@ class _Checker:
             src = self.arrays.get(e.src) or self.larrays.get(e.src)
             if not isinstance(e.src, str) or src is None:
                 self.error(ARRAY_USE, f"CopyArray of '{e.src}', which is not an array")
+            elif e.src in self.buffers:
+                self.error(BUFFER, f"CopyArray of buffer array '{e.src}': a buffer array is never "
+                                   "copied)")
             else:
                 self.array(e.src, "copy", state)
                 if src is not e.type:
@@ -841,6 +1264,19 @@ class _Checker:
                 self.error(TYPE, f"None assigned to '{target}'")
         if target in self.entry:
             self.error(STRUCTURE, f"entry global '{target}' is assigned in the body")
+        if (target in self.eligible and not alloc and not self.dead
+                and getattr(value, "type", None) is Type.I64):
+            self.bottom = False
+            iv = self.interval(value)
+            if not self.bottom:
+                self.contrib[target] = _join_interval(self.contrib.get(target), iv)
+            self.bottom = False
+        self.refine.pop(target, None)         # a guard on `target` ends at its assignment
+        proved = None if alloc else self.exact_of(value)
+        if proved is not None:
+            self.facts[target] = proved
+        else:
+            self.facts.pop(target, None)
         for loop in self.loops:
             if loop.var == target:
                 self.error(STRUCTURE, f"loop variable '{target}' is assigned in its loop body")
@@ -864,20 +1300,128 @@ class _Checker:
         self.slot(c2, Type.BOOL, f"condition of {what}")
         return c2
 
+    def s_FieldSet(self, s: FieldSet, state: _State):
+        obj = self.obj_operand(s.obj, state, f"object of .{s.field} =")
+        value = self.expr(s.value, state)
+        self.slot(value, Type.OBJ, f"value stored into .{s.field}")
+        if self.known_field(s.cls, s.field, f"FieldSet .{s.field}"):
+            self.proved(obj, s.cls, f"FieldSet {s.cls}.{s.field}")
+        self.effects.append(f"FieldSet .{s.field} (a store)")
+        self.opens.append(f"FieldSet .{s.field}")      # dropping the old value may run its __del__
+        return dataclasses.replace(s, obj=obj, value=value), state
+
+    def s_StoreItem(self, s: StoreItem, state: _State):
+        obj = self.obj_operand(s.obj, state, "container of StoreItem")
+        index = self.obj_operand(s.index, state, "index of StoreItem")
+        value = self.obj_operand(s.value, state, "value of StoreItem")
+        self.effects.append("StoreItem (runs __setitem__, __hash__, __eq__)")
+        self.opens.append("StoreItem")
+        return dataclasses.replace(s, obj=obj, index=index, value=value), state
+
+    def s_ForObj(self, s: ForObj, state: _State):
+        it = self.obj_operand(s.iter, state, "iterable of ForObj")
+        targets = s.targets
+        ok = (isinstance(targets, tuple) and targets and all(isinstance(t, str) for t in targets)
+              and len(set(targets)) == len(targets))
+        if not ok:
+            self.error(STRUCTURE, f"ForObj targets {targets!r} are not distinct names")
+            targets = ()
+        if type(s.unpack) is not bool:
+            self.error(TYPE, f"ForObj `unpack` {s.unpack!r} is not a bool")
+        elif not s.unpack and len(targets) != 1 and ok:
+            self.error(STRUCTURE, "ForObj without unpack has exactly one target")
+        for t in targets:
+            if t in self.arrays or t in self.larrays:
+                self.error(ARRAY_USE, f"ForObj target '{t}' is an array")
+            elif self.scalars.get(t) is not Type.OBJ:
+                self.error(TYPE, f"ForObj target '{t}' must be a declared obj local")
+            if t in self.entry:
+                self.error(STRUCTURE, f"entry global '{t}' is assigned by the loop")
+            for outer in self.loops:
+                if outer.var == t:
+                    self.error(STRUCTURE, f"loop variable '{t}' is assigned in its loop body "
+                                          f"(by an inner loop)")
+        self.effects.append("ForObj (runs __iter__ and __next__)")
+        self.opens.append("ForObj")
+        loop = _Loop(None, None)
+        self.loops.append(loop)
+        head = self.loop_facts(s.body, tuple(targets))
+        self.facts = dict(head)
+        killed = _assigned_names(s.body) | set(targets)
+        head_refine = {k: v for k, v in self.refine.items() if k not in killed}
+        self.refine = head_refine
+        body, _ = self.block(s.body, None if state is None else state | set(targets))
+        self.loops.pop()
+        self.refine = dict(head_refine)
+        self.facts = dict(head)
+        # Zero iterations leave the targets as they were: the state after the loop is the entry
+        # state, met with every break state (each a superset of it).
+        after: _State = state
+        for br in loop.breaks:
+            after = _meet(after, br)
+        return dataclasses.replace(s, iter=it, body=body), after
+
     def s_If(self, s: If, state: _State):
         cond = self.cond(s.cond, state, "if")
+        base = self.facts
+        entry = self.refine
+        self.facts = {**base, **self.facts_if(cond, True)}
+        self.refine, dead = self.narrowed(cond, True)
+        self.dead += dead
         then, st = self.block(s.then, state)
+        self.dead -= dead
+        then_facts, then_refine = self.facts, self.refine
+        self.facts = {**base, **self.facts_if(cond, False)}
+        self.refine = entry
+        self.refine, dead = self.narrowed(cond, False)
+        self.dead += dead
         orelse, se = self.block(s.orelse, state)
+        self.dead -= dead
+        else_facts, else_refine = self.facts, self.refine
+        if st is None and se is None:
+            self.refine = entry
+        elif st is None:
+            self.refine = else_refine
+        elif se is None:
+            self.refine = then_refine
+        else:
+            self.refine = {k: (min(v[0], else_refine[k][0]), max(v[1], else_refine[k][1]))
+                           for k, v in then_refine.items() if k in else_refine}
+        if st is None and se is None:
+            self.facts = base
+        elif st is None:
+            self.facts = else_facts
+        elif se is None:
+            self.facts = then_facts
+        else:
+            self.facts = {k: v for k, v in then_facts.items() if else_facts.get(k) == v}
         return dataclasses.replace(s, cond=cond, then=then, orelse=orelse), _meet(st, se)
 
+    def loop_facts(self, body: object, extra: tuple[str, ...] = ()) -> dict[str, str]:
+        """The facts that hold at the head of every iteration: those of the entry that nothing in
+        the loop body (or its loop var) assigns."""
+        killed = _assigned_names(body) | set(extra)
+        return {k: v for k, v in self.facts.items() if k not in killed}
+
     def s_While(self, s: While, state: _State):
+        head = self.loop_facts(s.body)
+        self.facts = head
+        killed = _assigned_names(s.body)
+        head_refine = {k: v for k, v in self.refine.items() if k not in killed}
+        self.refine = head_refine
         cond = self.cond(s.cond, state, "while")
         loop = _Loop(None, None)
+        self.facts = {**head, **self.facts_if(cond, True)}
+        self.refine, dead = self.narrowed(cond, True)
+        self.dead += dead
         self.loops.append(loop)
         # Assignments only add names, so the loop-head state is the entry state (the meet of the
         # entry, end-of-body and continue states equals the entry state).
         body, _ = self.block(s.body, state)
         self.loops.pop()
+        self.dead -= dead
+        self.refine = dict(head_refine)
+        self.facts = dict(head)       # leaving by the condition or a break: no more than the head's facts
         forever = type(s.cond) is Const and s.cond.type is Type.BOOL and s.cond.value is True
         after: _State = None if forever else state
         for br in loop.breaks:
@@ -915,7 +1459,9 @@ class _Checker:
         loop = _Loop(var, bounds)
         if (step_ok and getattr(start, "type", None) is Type.I64
                 and getattr(stop, "type", None) is Type.I64):
+            self.bottom = False
             (slo, shi), (elo, ehi) = self.interval(start), self.interval(stop)
+            loop.bottom, self.bottom = self.bottom, False
             if step.value > 0:
                 lo = slo
                 hi = max(lo, ehi - 1)
@@ -924,8 +1470,15 @@ class _Checker:
                 lo = min(hi, elo + 1)
             loop.interval = (max(lo, _I64_MIN), min(hi, _I64_MAX))
         self.loops.append(loop)
+        head = self.loop_facts(s.body, (var,))
+        self.facts = dict(head)
+        killed = _assigned_names(s.body) | {var}
+        head_refine = {k: v for k, v in self.refine.items() if k not in killed}
+        self.refine = head_refine
         body, _ = self.block(s.body, None if state is None else state | {var})
         self.loops.pop()
+        self.refine = dict(head_refine)
+        self.facts = dict(head)
         # Zero iterations leave `var` (and everything the body assigns) as it was: the state after
         # the loop is the entry state, met with every break state (each a superset of it).
         after: _State = state
@@ -960,6 +1513,15 @@ class _Checker:
     def run(self) -> Function:
         fn = self.fn
         params = self.declarations()
+        self.reassigned = frozenset(_assigned_names(fn.body))
+        assigned: dict[str, list[object]] = {}
+        _assigned_values(fn.body, assigned)
+        loop_vars = _loop_vars(fn.body)
+        self.eligible = frozenset(
+            n for n in assigned
+            if self.scalars.get(n) is Type.I64 and n not in params and n not in loop_vars
+            and n not in self.arrays and n not in self.larrays)
+        self.new_only = self.new_only_locals(params)
         if self.larrays:
             counts: dict[str, int] = {}
             _assigned(fn.body, counts)
@@ -1000,9 +1562,130 @@ def _assigned(body: object, counts: dict[str, int] | None = None) -> dict[str, i
             elif cls is If:
                 _assigned(st.then, counts)
                 _assigned(st.orelse, counts)
-            elif cls in (While, ForRange):
+            elif cls in (While, ForRange, ForObj):
                 _assigned(st.body, counts)
     return counts
+
+
+def _assigned_values(body: object, out: dict[str, list[object]]) -> None:
+    """Every Assign value in `body`, by target (tolerates a malformed body)."""
+    if isinstance(body, tuple):
+        for st in body:
+            cls = type(st)
+            if cls is Assign:
+                out.setdefault(st.target, []).append(st.value)
+            elif cls is If:
+                _assigned_values(st.then, out)
+                _assigned_values(st.orelse, out)
+            elif cls in (While, ForRange):
+                _assigned_values(st.body, out)
+            elif cls is ForObj:
+                for t in st.targets if isinstance(st.targets, tuple) else ():
+                    out.setdefault(t, []).append(st)   # not a New: ends form (e) for the target
+                _assigned_values(st.body, out)
+
+
+def _loop_vars(body: object) -> set[str]:
+    out: set[str] = set()
+    if isinstance(body, tuple):
+        for st in body:
+            cls = type(st)
+            if cls is If:
+                out |= _loop_vars(st.then) | _loop_vars(st.orelse)
+            elif cls in (While, ForObj):
+                out |= _loop_vars(st.body)
+            elif cls is ForRange:
+                out.add(st.var)
+                out |= _loop_vars(st.body)
+    return out
+
+
+def _assigned_names(body: object) -> set[str]:
+    """Every local assigned anywhere in `body` by an Assign or as a ForRange var."""
+    out: set[str] = set()
+    if isinstance(body, tuple):
+        for st in body:
+            cls = type(st)
+            if cls is Assign:
+                out.add(st.target)
+            elif cls is If:
+                out |= _assigned_names(st.then) | _assigned_names(st.orelse)
+            elif cls is While:
+                out |= _assigned_names(st.body)
+            elif cls is ForObj:
+                out |= set(st.targets) if isinstance(st.targets, tuple) else set()
+                out |= _assigned_names(st.body)
+            elif cls is ForRange:
+                out.add(st.var)
+                out |= _assigned_names(st.body)
+    return out
+
+
+def _plain_str(v: object) -> bool:
+    """A str the generated C source carries exactly: it encodes to UTF-8 and has no NUL."""
+    if type(v) is not str or "\0" in v:
+        return False
+    try:
+        v.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _meet_interval(a: tuple[int, int], b: tuple[int, int] | None) -> tuple[int, int]:
+    """`a` narrowed by `b`; an empty meet (unreachable code) leaves `a`, which is still sound."""
+    if b is None:
+        return a
+    lo, hi = max(a[0], b[0]), min(a[1], b[1])
+    return (lo, hi) if lo <= hi else a
+
+
+def _narrow(facts: dict[str, tuple[int, int]], name: str, iv: tuple[int, int] | None) -> None:
+    if iv is None:
+        return
+    cur = facts.get(name)
+    facts[name] = iv if cur is None else _meet_interval(cur, iv)
+
+
+def _bound(kind: CompareKind, other: tuple[int, int]) -> tuple[int, int] | None:
+    """The interval of `x` when `x <kind> e` is true and `e` lies in `other`."""
+    lo, hi = other
+    if kind is CompareKind.LT:
+        out = (_I64_MIN, hi - 1)
+    elif kind is CompareKind.LE:
+        out = (_I64_MIN, hi)
+    elif kind is CompareKind.GT:
+        out = (lo + 1, _I64_MAX)
+    elif kind is CompareKind.GE:
+        out = (lo, _I64_MAX)
+    elif kind is CompareKind.EQ:
+        out = (lo, hi)
+    else:
+        return None
+    return out if out[0] <= out[1] else None
+
+
+def _div_interval(op: BinOpKind, a: tuple[int, int], b: tuple[int, int]) -> tuple[int, int]:
+    """The result interval of I64 FLOORDIV / MOD (an operation that completes: a zero divisor
+    raises and -2**63 // -1 deopts, so neither yields a value). MOD: [0, hi(b) - 1] for a positive
+    divisor, [lo(b) + 1, 0] for a negative one, else |result| < max |b|. FLOORDIV: for a divisor
+    that keeps its sign the extremes are at the corners; else |result| <= max |a|."""
+    if op is BinOpKind.MOD:
+        if b[0] > 0:
+            return (0, b[1] - 1)
+        if b[1] < 0:
+            return (b[0] + 1, 0)
+        d = max(abs(b[0]), abs(b[1]), 1)
+        return (-(d - 1), d - 1)
+    if b[0] > 0 or b[1] < 0:
+        corners = [x // y for x in a for y in b]
+        return (min(corners), max(corners))
+    m = max(abs(a[0]), abs(a[1]))
+    return (-m, m)
+
+
+def _join_interval(a: tuple[int, int] | None, b: tuple[int, int]) -> tuple[int, int]:
+    return b if a is None else (min(a[0], b[0]), max(a[1], b[1]))
 
 
 def _exact(op: BinOpKind, a: tuple[int, int], b: tuple[int, int]) -> tuple[int, int]:
@@ -1013,6 +1696,42 @@ def _exact(op: BinOpKind, a: tuple[int, int], b: tuple[int, int]) -> tuple[int, 
         return a[0] - b[1], a[1] - b[0]
     products = (a[0] * b[0], a[0] * b[1], a[1] * b[0], a[1] * b[1])
     return min(products), max(products)
+
+
+def _prove(g: Function, sigs: dict[str, Function], classes: dict[str, ClassDecl]
+           ) -> tuple[_Checker, Function]:
+    """Check `g`, first computing the interval of every eligible local (Local variables and
+    guards): walks of the body repeat, each reading the intervals found by the one before, until
+    they stop growing (a bound still growing from round `_WIDEN_FROM` jumps to the i64 limit). The
+    result is a fixed point, so every assigned value lies inside its local's interval. If it does
+    not settle in `_ROUNDS` walks, every eligible local is full range."""
+    known: dict[str, tuple[int, int]] = {}
+    for rnd in range(_ROUNDS):
+        c = _Checker(g, sigs, classes, known, True)
+        rebuilt = c.run()
+        if not c.eligible:
+            return c, rebuilt
+        grown = dict(known)
+        for name in c.eligible:
+            iv = c.contrib.get(name)
+            if iv is None:
+                continue
+            old = known.get(name)
+            if old is None:
+                grown[name] = iv
+                continue
+            lo = old[0] if iv[0] >= old[0] else (_I64_MIN if rnd >= _WIDEN_FROM else iv[0])
+            hi = old[1] if iv[1] <= old[1] else (_I64_MAX if rnd >= _WIDEN_FROM else iv[1])
+            grown[name] = (lo, hi)
+        if grown == known:
+            absent = c.eligible - set(known)
+            if not absent:
+                return c, rebuilt
+            for name in absent:         # never given an interval: nothing is known about it
+                grown[name] = _FULL
+        known = grown
+    c = _Checker(g, sigs, classes, {}, False)
+    return c, c.run()
 
 
 def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
@@ -1041,19 +1760,22 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
                 reject(name, g.source_line, STRUCTURE, f"function '{name}' is defined "
                                                        f"{len(gs)} times")
     sigs = {name: gs[0] for name, gs in named.items() if len(gs) == 1}
+    classes, skipped_classes = _check_classes(module, set(named), diags)
 
     checked: dict[str, Function] = {}
     callees: dict[str, set[str]] = {}
     open_why: dict[str, str] = {}          # a function that runs user code -> why
+    slow_why: dict[str, str] = {}          # a function whose slow paths can run user code -> why
     for name, g in sigs.items():
-        c = _Checker(g, sigs)
-        rebuilt = c.run()
+        c, rebuilt = _prove(g, sigs, classes)
         for d in c.diags:
             reject(d.function, d.source_line, d.rule, d.message)
         checked[name] = rebuilt
         callees[name] = c.callees
         if c.opens:
             open_why[name] = c.opens[0]
+        if c.slow_user:
+            slow_why[name] = c.slow_user[0]
 
     # Closedness (entry_globals): a fixpoint over the call graph.
     changed = True
@@ -1069,6 +1791,26 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
         if name in open_why and isinstance(g.entry_globals, tuple) and g.entry_globals:
             reject(name, g.source_line, ENTRY_OPEN,
                    f"has entry globals but is not closed: {open_why[name]}")
+
+    # ArrayParam (#203): the list is copied in and written back, so nothing may run user code while
+    # the copy is live: user code could read or change the list. Closed as above, and also no
+    # FieldGet/New, whose slow paths run user code after a class change, anywhere in the call tree.
+    array_why = dict(open_why)
+    for name, why in slow_why.items():
+        array_why.setdefault(name, why)
+    changed = True
+    while changed:
+        changed = False
+        for name, cs in callees.items():
+            if name not in array_why:
+                bad = sorted(c for c in cs if c in array_why)
+                if bad:
+                    array_why[name] = f"calls '{bad[0]}', which can run user code ({array_why[bad[0]]})"
+                    changed = True
+    for name, g in sigs.items():
+        if name in array_why and any(isinstance(p, ArrayParam) for p in g.params):
+            reject(name, g.source_line, ARRAY_OPEN,
+                   f"holds a list copy-in but can run user code: {array_why[name]}")
 
     # A call cycle (direct or mutual recursion) is legal: every compiled impl function counts its
     # frame at entry (tp_enter_call), so recursion ends in RecursionError where CPython raises it
@@ -1092,6 +1834,44 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
     kept = tuple(checked[g.name] for g in functions
                  if type(g) is Function and g.name in checked and g.name not in reasons)
     skipped = dict(module.skipped)
-    for name, reason in reasons.items():
+    for name, reason in {**skipped_classes, **reasons}.items():
         skipped.setdefault(name, reason)
-    return Module(module.name, kept, skipped), diags
+    return Module(module.name, kept, skipped, tuple(classes.values())), diags
+
+
+def _check_classes(module: Module, function_names: set[str], diags: list[Diagnostic]
+                   ) -> tuple[dict[str, ClassDecl], dict[str, str]]:
+    """The valid ClassDecls of the module by name, and the reason for each invalid one."""
+    declared = module.classes if isinstance(module.classes, tuple) else ()
+    names: dict[str, int] = {}
+    for c in declared:
+        if type(c) is ClassDecl and isinstance(c.name, str):
+            names[c.name] = names.get(c.name, 0) + 1
+    valid: dict[str, ClassDecl] = {}
+    bad: dict[str, str] = {}
+    for c in declared:
+        problem = None
+        if type(c) is not ClassDecl:
+            problem = f"{type(c).__name__} is not an ir ClassDecl"
+        elif not (isinstance(c.name, str) and c.name.isidentifier()):
+            problem = f"class name {c.name!r} is not an identifier"
+        elif names[c.name] > 1:
+            problem = f"class '{c.name}' is declared {names[c.name]} times"
+        elif c.name in function_names:
+            problem = f"class '{c.name}' has the name of a function of the module"
+        elif not (isinstance(c.fields, tuple) and all(isinstance(f, str) and f.isidentifier()
+                                                      for f in c.fields)):
+            problem = f"fields of class '{c.name}' are not a tuple of identifiers"
+        elif len(set(c.fields)) != len(c.fields):
+            problem = f"class '{c.name}' lists a field twice"
+        elif type(c.trivial_init) is not bool:
+            problem = f"`trivial_init` of class '{c.name}' is not a bool"
+        name = getattr(c, "name", repr(c))
+        if problem is None:
+            valid[c.name] = c
+        else:
+            d = Diagnostic(str(name), CLASS, problem, 0)
+            if d not in diags:
+                diags.append(d)
+            bad.setdefault(str(name), f"{CLASS}: {problem}")
+    return valid, bad

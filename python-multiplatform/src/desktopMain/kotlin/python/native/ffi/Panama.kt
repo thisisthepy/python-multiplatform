@@ -25,7 +25,7 @@ internal object Panama {
 
     // ---- public surface used by bindings.kt ----
 
-    /** Pointer type carrier for MethodType signatures — always Long. */
+    /** Pointer type carrier for MethodType signatures, always Long. */
     val POINTER_TYPE: Class<*> = Long::class.javaPrimitiveType!!
 
     /** The null-pointer sentinel as a Long. */
@@ -649,7 +649,7 @@ internal object Panama {
         return h
     }
 
-    // Static adapters called via MethodHandle — must use Any to avoid importing MemorySegment
+    // Static adapters called via MethodHandle, must use Any to avoid importing MemorySegment
     @JvmStatic
     fun modernSegmentToLong(seg: Any?): Long {
         if (seg == null) return 0L

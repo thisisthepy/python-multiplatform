@@ -29,7 +29,7 @@ import kotlin.test.assertTrue
  * | | where |
  * |---|---|
  * | does a Python callable become a Kotlin `FunctionN`, with the composer threaded through | here, on all five targets, against [ComposableShapedFragment] |
- * | does a real `androidx.compose.foundation.layout.Column` then draw its content | `:ksp-fixtures:compose`'s `ComposableRenderTest`, desktop only |
+ * | does a real `androidx.compose.foundation.layout.Column` then draw its content | `:python-multiplatform-compose:fixtures:compose`'s `ComposableRenderTest`, desktop only |
  * | does Compose give the callable back when it drops the slot | `ComposableRenderTest.aDisposedCompositionGivesEveryPythonCallableBack`, because `RememberObserver` is a Compose type |
  *
  * The split is [ComposableShapedFragment]'s: `commonTest` runs where there is no Compose runtime, no
@@ -254,7 +254,7 @@ class PythonxCallableTest {
      *
      * This used to assert the opposite, and the opposite was true: one wrapper per crossing, nothing
      * interned, so *n* crossings cost *n* Python references and *n* `HandleTable` roots held until
-     * the scope closed. `:ksp-fixtures:compose`'s `RecompositionAccumulationTest` measured what that
+     * the scope closed. `:python-multiplatform-compose:fixtures:compose`'s `RecompositionAccumulationTest` measured what that
      * came to for a real composition -- **twelve** wrappers for one `content=` composed twelve times,
      * and twenty-four for a `Button` -- and `PythonCallableScope` now keys them. The number here is 1.
      *
@@ -363,7 +363,7 @@ class PythonxCallableTest {
             """
             from androidx.compose.material3 import Slider
             _px_seen = []
-            Slider(onValueChange=lambda v: _px_seen.append(v))
+            Slider(on_value_change=lambda v: _px_seen.append(v))
             """.trimIndent(),
         )
 
@@ -597,8 +597,8 @@ class PythonxCallableTest {
         val refusal = assertFails {
             Python3.exec(
                 """
-                from androidx.compose.material3 import rememberSheetState
-                rememberSheetState(confirmValueChange=lambda v: True)
+                from androidx.compose.material3 import remember_sheet_state
+                remember_sheet_state(confirm_value_change=lambda v: True)
                 """.trimIndent(),
             )
         }

@@ -32,6 +32,12 @@ internal object PackagedPythonHome {
     /** `PACKAGED_HOME_DIRECTORY` in `python-multiplatform-gradle-plugin`; the two must agree. */
     const val DIRECTORY_NAME = "python-multiplatform-home"
 
+    /**
+     * GraalVM sets this to `runtime` inside a native image (and to `buildtime` while building one);
+     * on a JVM it is absent. Read as a property, so nothing here depends on GraalVM's SDK.
+     */
+    const val NATIVE_IMAGE_CODE_PROPERTY = "org.graalvm.nativeimage.imagecode"
+
     /** A resolved prefix and a human-readable account of where it came from, for error messages. */
     data class Resolved(val path: String, val source: String)
 
@@ -40,6 +46,8 @@ internal object PackagedPythonHome {
         environmentHome = System.getenv("PYTHONHOME"),
         property = System::getProperty,
         isDirectory = { File(it).isDirectory },
+        // A lambda: `ProcessHandle` is asked only inside a native image, never on Android or a JVM.
+        executablePath = { ProcessHandle.current().info().command().orElse(null) },
     )
 
     /**
@@ -53,22 +61,31 @@ internal object PackagedPythonHome {
      * 3. `<`[COMPOSE_RESOURCES_PROPERTY]`>/`[DIRECTORY_NAME], **only if that directory exists**:
      *    every Compose app has the property, including one whose build did not package a prefix,
      *    and that app must behave exactly as it did before this existed.
+     * 4. Inside a GraalVM native image only ([NATIVE_IMAGE_CODE_PROPERTY] is `runtime`),
+     *    `<directory of [executablePath]>/`[DIRECTORY_NAME], **only if that directory exists**
+     *    (issue #246). A native image has no `java.home`, no Compose resources directory and no
+     *    launcher to set `PYTHONHOME`, so its prefix ships beside it, as an iOS app's ships in its
+     *    bundle. On a JVM the executable is `java`, and a directory beside it is the JDK's.
      */
     fun resolve(
         environmentHome: String?,
         property: (String) -> String?,
         isDirectory: (String) -> Boolean,
+        executablePath: () -> String? = { null },
     ): Resolved? {
         if (!environmentHome.isNullOrBlank()) return null
         property(HOME_PROPERTY)?.takeIf { it.isNotBlank() }?.let {
             return Resolved(it, "system property $HOME_PROPERTY")
         }
-        val resources = property(COMPOSE_RESOURCES_PROPERTY)?.takeIf { it.isNotBlank() } ?: return null
-        val candidate = File(resources, DIRECTORY_NAME).path
-        return if (isDirectory(candidate)) {
-            Resolved(candidate, "$DIRECTORY_NAME under system property $COMPOSE_RESOURCES_PROPERTY")
-        } else {
-            null
+        property(COMPOSE_RESOURCES_PROPERTY)?.takeIf { it.isNotBlank() }?.let { resources ->
+            val candidate = File(resources, DIRECTORY_NAME).path
+            if (isDirectory(candidate)) {
+                return Resolved(candidate, "$DIRECTORY_NAME under system property $COMPOSE_RESOURCES_PROPERTY")
+            }
         }
+        if (property(NATIVE_IMAGE_CODE_PROPERTY) != "runtime") return null
+        val executable = executablePath() ?: return null
+        val candidate = File(File(executable).absoluteFile.parentFile, DIRECTORY_NAME).path
+        return if (isDirectory(candidate)) Resolved(candidate, "$DIRECTORY_NAME beside the native image $executable") else null
     }
 }

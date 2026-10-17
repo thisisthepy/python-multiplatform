@@ -10,7 +10,7 @@ import org.thisisthepy.python.multiplatform.demo.ui.App
  * from inside a composable body -- on every recomposition, and only once the user had expanded
  * the section that hosted it.
  *
- * On iOS the shipped framework carries no stdlib. An app built through `iosApp/`'s "Install Python
+ * On iOS the shipped framework carries no stdlib. An app built through `sample/src/iosMain/app.xcodeproj`'s "Install Python
  * Standard Library and Payload" phase carries one in its bundle and the library finds it there
  * (SPEC L-10); see `python-multiplatform/src/iosMain/README.md`.
  */

@@ -33,14 +33,14 @@ PYTHON_DYLIB_INFO_TEMPLATE=<abs>/python-multiplatform/build/python-ios-home/ipho
 A universal `ARCHS` (`arm64 x86_64`) is refused with the fix (`ONLY_ACTIVE_ARCH=YES` or `ARCHS=arm64`):
 one prefix holds one `lib-dynload`. Upstream's `utils.sh` has the same limit without saying so.
 
-**Xcode** (`tools/xcode/install-python.sh`, a Run Script phase after Copy Bundle Resources and before
+**Xcode** (`python-multiplatform-gradle-plugin/src/main/resources/xcode/install-python.sh`, a Run Script phase after Copy Bundle Resources and before
 Embed Frameworks; `ENABLE_USER_SCRIPT_SANDBOXING = NO`).
 
-1. Runs Gradle as above. The output is captured, then parsed, then checked to be a directory — a
+1. Runs Gradle as above. The output is captured, then parsed, then checked to be a directory, a
    failing Gradle stops the phase and never leaves `rsync` an empty source (issue #59's comment).
 2. `rsync -a --delete` the prefix to `<app>/python-multiplatform-home/`.
 3. The payload, if configured, to `<app>/python/` (`--delete`, without `__pycache__`):
-   `PYTHON_PAYLOAD_DIR=<dir>` (a directory whose contents are the payload root — the app's own Python
+   `PYTHON_PAYLOAD_DIR=<dir>` (a directory whose contents are the payload root, the app's own Python
    sources, or toolchain's `build/pythonStaging/ios/python`), or `PYTHON_PAYLOAD_TASK=<gradle task>`
    that prints `PYTHON_PAYLOAD_DIR=` under `-q` (toolchain's `:app:stagePythonBundleIosForXcode`).
    Neither set: no payload, and an old `<app>/python/` is removed.
@@ -53,7 +53,7 @@ Embed Frameworks; `ENABLE_USER_SCRIPT_SANDBOXING = NO`).
 `Python3.initialize()` calls `applyPackagedPythonHome()` after the `PYTHONHOME` pre-flight check
 (L-3) and before `Py_Initialize()`. `IosPythonHome.resolve()` takes the first of:
 
-1. `PYTHONHOME` in the environment — nothing else happens. The simulator test task and an Xcode
+1. `PYTHONHOME` in the environment, nothing else happens. The simulator test task and an Xcode
    scheme variable keep working as before.
 2. `<NSBundle.mainBundle.resourcePath>/python-multiplatform-home`, only if that directory exists.
 
@@ -90,23 +90,28 @@ before. `PyConfig.home` is the non-deprecated route, but the library carries no 
 
 ## Wiring an app
 
-The sample's project is `iosApp/iosApp.xcodeproj` (product `PythonDemo.app`, bundle id
+The sample's project is `sample/src/iosMain/app.xcodeproj` (target `app`, product `PythonDemo.app`, bundle id
 `org.thisisthepy.python.multiplatform.demo`). Its phase:
 
 ```sh
 set -e
-cd "$SRCROOT/.."
-export PYTHON_PAYLOAD_DIR="$SRCROOT/../sample/python/src/main"
-/bin/bash tools/xcode/install-python.sh
+cd "$SRCROOT/../../.."
+export PYTHON_PAYLOAD_DIR="$SRCROOT/../commonMain/python"
+/bin/bash python-multiplatform-gradle-plugin/src/main/resources/xcode/install-python.sh
 ```
 
 It replaced two phases: "Install Target Specific Python Standard Library", which rsynced the slice's
-`lib/` — only `libpython3.14.dylib` — into `<app>/lib/`, and "Prepare Python Binary Modules", which
-did the framework wrapping from a template copied in as a resource. `iosApp/iosApp/dylib-Info-template.plist`
-is no longer copied into the app; the file itself is still in the project.
+`lib/`, only `libpython3.14.dylib`, into `<app>/lib/`, and "Prepare Python Binary Modules", which
+did the framework wrapping from a template copied in as a resource. The template is no longer copied
+into the app: `install-python.sh` takes the one the Gradle plugin stages (`PYTHON_DYLIB_INFO_TEMPLATE`).
 
-`sample/src/iosMain/app.xcodeproj` is not wired: it still references `../../dist/toolchain/...` and
-a `ComposeApp` framework that this build does not produce, and has never been built here.
+The project used to live in a root `iosApp/` folder. It moved to `sample/src/iosMain/` (the
+app-template layout, #107); the old `python` folder reference to `build/pythonStaging/ios/python`
+and the `../../dist/toolchain/...` references were removed, because `install-python.sh` already
+copies the payload to `<app>/python/` and a second copy would conflict. The target runs two Gradle
+tasks first (`:python-multiplatform:embedAndSignAppleFrameworkForXcode`,
+`:sample:embedAndSignAppleFrameworkForXcode`), then compiles, then installs Python, then embeds
+`Python.xcframework`.
 
 A consumer outside this repository cannot call `:python-multiplatform:stageIosPythonHomeForXcode`:
 the iOS archive download lives in this repository's build script, not in the published plugin. That
@@ -138,14 +143,14 @@ EFFECTIVE_PLATFORM_NAME=-iphonesimulator ARCHS="arm64 x86_64" \
 # 2. Build the app (flags from the last verified run, ROADMAP history 2026-08-13: actool cannot
 #    compile the app icon against this machine's simulator runtimes, and -target avoids
 #    -destination's eligibility check)
-(cd iosApp && xcodebuild -project iosApp.xcodeproj -target iosApp -configuration Debug \
-    -sdk iphonesimulator ARCHS=arm64 ONLY_ACTIVE_ARCH=YES SYMROOT="$PWD/build" \
+xcodebuild -project sample/src/iosMain/app.xcodeproj -target app -configuration Debug \
+    -sdk iphonesimulator ARCHS=arm64 ONLY_ACTIVE_ARCH=YES SYMROOT="$PWD/sample/build/xcode-app" \
     ASSETCATALOG_COMPILER_APPICON_NAME="" \
-    CODE_SIGN_IDENTITY="-" CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM="" build) \
+    CODE_SIGN_IDENTITY="-" CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM="" build \
   > .tmp/xcodebuild.log 2>&1; echo "EXIT=$?"
 grep -E "Installing the Python|Wrapped|error:" .tmp/xcodebuild.log
 
-APP=iosApp/build/Debug-iphonesimulator/PythonDemo.app
+APP=sample/build/xcode-app/Debug-iphonesimulator/PythonDemo.app
 ls "$APP/python-multiplatform-home/lib/python3.14/os.py" "$APP/python/example_py/__init__.py"
 ls "$APP/python-multiplatform-home/lib/python3.14/lib-dynload" | grep -c '\.fwork$'   # 67 for 3.14
 find "$APP/python-multiplatform-home" "$APP/python" -name '*.so' | wc -l               # 0
@@ -175,7 +180,7 @@ Fail shapes and what they mean:
 
 | Seen | Meaning |
 |---|---|
-| No `DEMO` lines, 0% CPU (`sample <pid>` parked in `open$NOCANCEL`) | the app read a path outside its container — check `env` for a stray `PYTHONHOME` |
+| No `DEMO` lines, 0% CPU (`sample <pid>` parked in `open$NOCANCEL`) | the app read a path outside its container, check `env` for a stray `PYTHONHOME` |
 | `Fatal Python error: Failed to import encodings module` | no `python-multiplatform-home/` in the installed app; the phase did not run |
 | `DEMO 8 bundle | ModuleNotFoundError: No module named '_json'` | the `.fwork` did not resolve; compare `sys.executable`'s directory with the app directory |
 | `DEMO 8 bundle | ModuleNotFoundError: No module named 'example_py'` | `<app>/python/` missing: `PYTHON_PAYLOAD_DIR` not set in the phase |

@@ -71,7 +71,7 @@ fun App() {
 /** 1. The interpreter is really up, and it is the build's configured one. */
 @Composable
 private fun RuntimeSection() {
-    DemoCard("1 — embedded interpreter") {
+    DemoCard("1, embedded interpreter") {
         val summary = remember { runCatching { PythonDemo.runtimeSummary() }.getOrElse { "not started: ${it.message}" } }
         Mono(summary)
     }
@@ -80,7 +80,7 @@ private fun RuntimeSection() {
 /** 2. Kotlin builds a Python object, Python computes with it, Kotlin reads the result back. */
 @Composable
 private fun EvaluateSection() {
-    DemoCard("2 — object model round trip") {
+    DemoCard("2, object model round trip") {
         var expression by remember { mutableStateOf(PythonDemo.DEFAULT_EXPRESSION) }
         var result by remember { mutableStateOf("") }
 
@@ -99,7 +99,7 @@ private fun EvaluateSection() {
 /** 3. The direction that had no example at all until now: Python calling Kotlin. */
 @Composable
 private fun UpcallSection() {
-    DemoCard("3 — Python calls Kotlin (upcall)") {
+    DemoCard("3, Python calls Kotlin (upcall)") {
         var presses by remember { mutableStateOf(0) }
         var answer by remember { mutableStateOf("") }
 
@@ -121,7 +121,7 @@ private fun UpcallSection() {
 /** 4. Proof the KSP processor ran, read off the runtime table rather than off the build log. */
 @Composable
 private fun TableSection() {
-    DemoCard("4 — generated function table") {
+    DemoCard("4, generated function table") {
         Mono(UpcallDemo.tableSummary())
         if (UpcallDemo.available) {
             Mono(
@@ -141,7 +141,7 @@ private fun TableSection() {
  */
 @Composable
 private fun ClassProxySection() {
-    DemoCard("5 — Python drives a Kotlin class") {
+    DemoCard("5, Python drives a Kotlin class") {
         var result by remember { mutableStateOf("") }
 
         Mono(remember { PythonDemo.proxyInstallReport() })
@@ -154,7 +154,7 @@ private fun ClassProxySection() {
 /** 6. The companion object, reached through the class and never through an instance. */
 @Composable
 private fun StaticSurfaceSection() {
-    DemoCard("6 — companion members on the metaclass") {
+    DemoCard("6, companion members on the metaclass") {
         var result by remember { mutableStateOf("") }
 
         Text("Greeter.built = 100; Greeter.forget(); Greeter.PUNCTUATION = '?'")
@@ -172,7 +172,7 @@ private fun StaticSurfaceSection() {
  */
 @Composable
 private fun AwaitSection() {
-    DemoCard("7 — await over a suspend fun") {
+    DemoCard("7, await over a suspend fun") {
         // Neither button below may run on wasmJs: PythonDemo.awaitFastPath() and
         // PythonDemo.awaitSuspending() both reach `import asyncio`, which traps this wasm
         // instance rather than raising (docs/design/upcall.md §5.8) -- there would be no
@@ -186,7 +186,7 @@ private fun AwaitSection() {
         var fast by remember { mutableStateOf("") }
         var slow by remember { mutableStateOf("") }
 
-        Text("await g.greetNow(1) and await g.greetLater(2) — same call site, two paths underneath.")
+        Text("await g.greetNow(1) and await g.greetLater(2), same call site, two paths underneath.")
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Button(onClick = { fast = PythonDemo.awaitFastPath() }) { Text("fast path") }
             Spacer(Modifier.width(4.dp))

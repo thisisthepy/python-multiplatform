@@ -172,7 +172,7 @@ class PropertyBindingTest {
     // ----------------------------------------------------- a receiver the classpath cannot see
 
     /**
-     * The `:ksp-fixtures:compose` compile failure on ui-desktop 1.11's
+     * The `:python-multiplatform-compose:fixtures:compose` compile failure on ui-desktop 1.11's
      * `DefaultArchitectureComponentsOwner`: its supertypes live in lifecycle jars that the consumer's
      * compile classpath does not carry, so `(args[0] as Owner).lifecycle` does not compile. Declined
      * with a reason naming the missing supertype -- for a member property and an extension property

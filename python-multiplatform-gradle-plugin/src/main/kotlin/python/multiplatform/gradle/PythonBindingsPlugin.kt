@@ -12,7 +12,7 @@ import python.multiplatform.gradle.stubs.PythonStubsTask
  * KSP option names. Copied rather than imported: these are the processor's
  * `python.multiplatform.ksp.Constants`, and this plugin ships as a separate build so that a
  * consumer resolves it from the plugin portal without also resolving the processor's compile
- * classpath. Changing one without the other shows up in `ksp-fixtures` as an unwired module.
+ * classpath. Changing one without the other shows up in the `fixtures/` modules as an unwired module.
  */
 private const val OPTION_ROLE = "python.multiplatform.role"
 private const val OPTION_MODULE_NAME = "python.multiplatform.moduleName"
@@ -53,7 +53,7 @@ private const val TYPEDPYTHON_STUBS_CONFIGURATION = "typedpythonStubs"
  * and a second `FunctionTable` -- into the test compilation, where they shadowed the real ones
  * from `main`, because a compilation's own generated sources win over its classpath. The symptom
  * is a table holding the test classes and nothing the module actually exposes.
- * `ksp-fixtures/android` is what surfaced this; no module without an Android plugin can.
+ * `python-multiplatform-ksp/fixtures/android` is what surfaced this; no module without an Android plugin can.
  *
  * `Test` is therefore matched as a camel-case *word* rather than as a suffix: it must start a word
  * and end one. A target or product flavour genuinely named `testing` is not a test compilation and
@@ -96,7 +96,7 @@ internal fun deriveModuleName(group: String, path: String, name: String): String
  * package, so two of them collide. Gradle has no general notion of "the module that ships", and
  * a Kotlin Multiplatform module that builds a framework or a native executable carries no plugin
  * that distinguishes it -- hence the explicit `role` override on the extension, which is what
- * `ksp-fixtures/app` uses.
+ * `python-multiplatform-ksp/fixtures/app` uses.
  */
 internal fun inferRole(hasApplicationPlugin: Boolean, hasAndroidApplicationPlugin: Boolean): String =
     if (hasApplicationPlugin || hasAndroidApplicationPlugin) ROLE_APP else ROLE_LIBRARY
@@ -121,7 +121,7 @@ interface PythonBindingsExtension {
 
     /**
      * Whether to stage a CPython prefix for this machine and point `PYTHONHOME` at it on every
-     * `JavaExec` and `Test` task. Defaults to true — see [PythonHomeStaging] for why the library
+     * `JavaExec` and `Test` task. Defaults to true, see [PythonHomeStaging] for why the library
      * cannot supply one at runtime, and ROADMAP §15e item 4 for the gap it closes.
      *
      * It is already a no-op whenever `PYTHONHOME` is set in the environment, so setting this to
@@ -144,6 +144,14 @@ interface PythonBindingsExtension {
      * provides a prefix some other way (and names it with `-Dpython.multiplatform.home=...`).
      */
     val packagePythonHome: Property<Boolean>
+
+    /**
+     * SPEC L-9 (issue #246): the directory a GraalVM native image of this app is written to. When it
+     * is set, `stageNativeImagePythonHome` copies the same pruned prefix Compose packaging gets into
+     * `<this>/python-multiplatform-home`, where the library finds it at run time beside the
+     * executable. Unset, the task copies nothing.
+     */
+    val nativeImageDirectory: org.gradle.api.file.DirectoryProperty
 
     /** CPython version to stage. Defaults to the one this library was built against. */
     val pythonVersion: Property<String>
@@ -186,7 +194,7 @@ interface PythonBindingsExtension {
      * Named explicitly rather than derived, because this plugin carries no Kotlin Gradle Plugin
      * types (see [TEST_WORD]) and so cannot ask a target what its compile classpath is called. One
      * configuration and one source set is also the honest scope of what has been verified: see
-     * `ksp-fixtures/artifact`, and ROADMAP §16 for the generalisation.
+     * `python-multiplatform-gradle-plugin/fixtures/artifact`, and ROADMAP §16 for the generalisation.
      */
     val artifactConfiguration: Property<String>
 
@@ -362,6 +370,7 @@ class PythonBindingsPlugin : Plugin<Project> {
                     },
                 )
                 includePrefixes.set(includes)
+                excludePackages.set(extension.excludePackages.getOrElse(emptyList()))
                 this.klibReaderClasspath.from(klibReader)
                 outputDirectory.set(
                     project.layout.buildDirectory.dir("generated/pythonArtifactBindings/$sourceSetName"),
@@ -508,6 +517,7 @@ class PythonBindingsPlugin : Plugin<Project> {
             description = "Emits .pyi stubs for the declarations the artefact walker bound."
             artifacts.from(resolved.artifactFiles)
             includePrefixes.set(includes)
+            excludePackages.set(extension.excludePackages.getOrElse(emptyList()))
             klibReaderClasspath.from(klibReader)
             outputDirectory.set(project.layout.buildDirectory.dir("generated/pythonStubs/$sourceSetName"))
         }
@@ -571,7 +581,7 @@ class PythonBindingsPlugin : Plugin<Project> {
      * The prefix path is computed here rather than carried as a `Provider`, and it can be: it is a
      * pure function of the version, the release, the host and the Gradle user home, none of which
      * need the task to have run. That keeps `environment(...)` a plain string set at configuration
-     * time — the value is in the child process's environment before its JVM starts, which is the
+     * time, the value is in the child process's environment before its JVM starts, which is the
      * only way CPython's `getenv(3)` and [python.multiplatform.env.PythonHomeCheck]'s
      * `System.getenv` can be guaranteed to read the same thing.
      *
@@ -682,6 +692,21 @@ class PythonBindingsPlugin : Plugin<Project> {
                     requireNoEmptyLibraries(destinationDir.resolve(PACKAGED_HOME_DIRECTORY))
                 }
             }
+
+        // SPEC L-9 (issue #246): the same prefix beside a native image, wherever the app writes one.
+        val besideImage = project.provider { extension.nativeImageDirectory.isPresent }
+        project.tasks.register("stageNativeImagePythonHome", org.gradle.api.tasks.Sync::class.java) {
+            group = "python"
+            description = "Copies the CPython prefix beside a GraalVM native image (pythonBindings.nativeImageDirectory)."
+            dependsOn(java.util.concurrent.Callable { if (besideImage.get()) listOf(stage) else emptyList() })
+            from(java.util.concurrent.Callable { if (besideImage.get()) stagedPrefix else emptyList<Any>() }) {
+                include(includes)
+                exclude(PACKAGED_PREFIX_EXCLUDES)
+            }
+            into(extension.nativeImageDirectory.dir(PACKAGED_HOME_DIRECTORY).orElse(project.layout.buildDirectory.dir("tmp/stageNativeImagePythonHome-unset")))
+            onlyIf("pythonBindings.nativeImageDirectory is set") { besideImage.get() }
+            doLast { requireNoEmptyLibraries(destinationDir) }
+        }
     }
 
     /**

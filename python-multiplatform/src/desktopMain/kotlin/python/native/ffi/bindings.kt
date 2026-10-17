@@ -927,7 +927,7 @@ inline fun PyDict_GetItemString(p: Long, key: String): Long {
     fun PyObject_GC_UnTrack(op: Long) = PyObject_GC_UnTrackHandle.invokeExact(op) as Unit
 
     init {
-        val P = Panama.POINTER_TYPE  // Long.TYPE — represents a native pointer
+        val P = Panama.POINTER_TYPE  // Long.TYPE, represents a native pointer
 
         // Load the native library first
         manager.loadLibPython()
