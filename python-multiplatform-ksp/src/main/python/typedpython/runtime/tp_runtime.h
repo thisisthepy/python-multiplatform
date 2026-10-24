@@ -14,6 +14,7 @@
 #include <Python.h>
 #include <stdint.h>
 #include <math.h>
+#include <fenv.h>
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>
@@ -396,6 +397,175 @@ static inline int tp_mod_f64(double a, double b, double *out)
     }
     *out = mod;
     return 0;
+}
+
+/* ------------------------------------------------------------------------------------------
+ * numpy scalar arithmetic (#220, step 2). An operation on a value derived from a numpy element is
+ * numpy's, not CPython's: no ZeroDivisionError, inf / nan results, int64 division by zero, and a
+ * RuntimeWarning per floating-point exception. tp_np_f64 returns the exceptions that numpy reports
+ * (TP_NP_* bits). A pure function deopts on any bit (the interpreter then warns); an impure one calls
+ * tp_np_warn. The algorithms are numpy's (npymath: npy_divmod / npy_floor_divide / npy_remainder).
+ * ------------------------------------------------------------------------------------------ */
+
+#define TP_NP_DIVZERO 1
+#define TP_NP_OVERFLOW 2
+#define TP_NP_INVALID 4
+enum { TP_NP_ADD, TP_NP_SUB, TP_NP_MUL, TP_NP_DIV, TP_NP_FLOORDIV, TP_NP_MOD };
+
+#if defined(__GNUC__) || defined(__clang__)
+#define TP_NOINLINE __attribute__((noinline, unused))
+#else
+#define TP_NOINLINE
+#endif
+
+static inline double tp_np_divmod(double a, double b, double *modulus)
+{
+    double div, mod, floordiv;
+    mod = fmod(a, b);
+    if (!b) {
+        *modulus = mod;
+        return a / b;
+    }
+    div = (a - mod) / b;
+    if (mod) {
+        if ((b < 0) != (mod < 0)) {
+            mod += b;
+            div -= 1.0;
+        }
+    }
+    else {
+        mod = copysign(0.0, b);
+    }
+    if (div) {
+        floordiv = floor(div);
+        if (div - floordiv > 0.5) {
+            floordiv += 1.0;
+        }
+    }
+    else {
+        floordiv = copysign(0.0, a / b);
+    }
+    *modulus = mod;
+    return floordiv;
+}
+
+/* The volatile operands and result keep the compiler from moving, folding or sharing the operation
+ * across the flag clear and test (the function is also noinline). */
+static TP_NOINLINE int tp_np_f64(int op, double a, double b, double *out)
+{
+    volatile double va = a, vb = b, vr = 0.0, vd = 0.0;
+    double mod;
+    int flags, force = 0, clear = 0;
+    feclearexcept(FE_ALL_EXCEPT);
+    switch (op) {
+    case TP_NP_ADD: vr = va + vb; break;
+    case TP_NP_SUB: vr = va - vb; break;
+    case TP_NP_MUL: vr = va * vb; break;
+    case TP_NP_DIV: vr = va / vb; break;
+    case TP_NP_FLOORDIV:
+        if (!vb) {
+            feclearexcept(FE_ALL_EXCEPT);
+            vr = va / vb;
+            if (!va) {
+                force = TP_NP_INVALID;
+            }
+        }
+        else {
+            vr = tp_np_divmod(va, vb, &mod);
+        }
+        break;
+    default:
+        if (!vb) {
+            vr = fmod(va, vb);
+            clear = 1;
+        }
+        else {
+            vd = tp_np_divmod(va, vb, &mod);     /* numpy computes the quotient too: its flags count */
+            (void)vd;
+            vr = mod;
+        }
+        break;
+    }
+    flags = 0;
+    if (!clear) {
+        int f = fetestexcept(FE_DIVBYZERO | FE_OVERFLOW | FE_INVALID);
+        flags = ((f & FE_DIVBYZERO) ? TP_NP_DIVZERO : 0) | ((f & FE_OVERFLOW) ? TP_NP_OVERFLOW : 0)
+                | ((f & FE_INVALID) ? TP_NP_INVALID : 0);
+    }
+    *out = vr;
+    return flags | force;
+}
+
+/* numpy's RuntimeWarning for each bit of `flags`, in numpy's order, attributed to `file`:`line` (the
+ * operation's own source position, as the interpreter's frame would give). 0, or -1 with the
+ * exception set (a warning turned into an error). `op` is numpy's scalar name ("add", "divide"...). */
+static TP_NOINLINE int tp_np_warn(PyObject *tp_module, int flags, const char *op, PyObject *file, int line)
+{
+    PyObject *dict = PyModule_GetDict(tp_module);          /* borrowed */
+    PyObject *reg = NULL, *modname = NULL;
+    static const struct { int bit; const char *text; } kinds[3] = {
+        {TP_NP_DIVZERO, "divide by zero"}, {TP_NP_OVERFLOW, "overflow"}, {TP_NP_INVALID, "invalid value"}};
+    int k, rc = 0;
+    if (PyDict_GetItemStringRef(dict, "__warningregistry__", &reg) < 0) {
+        return -1;
+    }
+    if (reg == NULL) {
+        PyObject *fresh = PyDict_New(), *key = PyUnicode_FromString("__warningregistry__"), *got = NULL;
+        int rr = -1;
+        if (fresh != NULL && key != NULL) {
+            rr = PyDict_SetDefaultRef(dict, key, fresh, &got);
+        }
+        Py_XDECREF(fresh);
+        Py_XDECREF(key);
+        if (rr < 0) {
+            return -1;
+        }
+        reg = got;
+    }
+    if (PyDict_GetItemStringRef(dict, "__name__", &modname) < 0) {
+        Py_DECREF(reg);
+        return -1;
+    }
+    for (k = 0; k < 3 && rc == 0; k++) {
+        if (flags & kinds[k].bit) {
+            PyObject *msg = PyUnicode_FromFormat("%s encountered in scalar %s", kinds[k].text, op);
+            if (msg == NULL) {
+                rc = -1;
+                break;
+            }
+            rc = PyErr_WarnExplicitObject(PyExc_RuntimeWarning, msg, file, line, modname, reg);
+            Py_DECREF(msg);
+        }
+    }
+    Py_XDECREF(modname);
+    Py_DECREF(reg);
+    return rc;
+}
+
+/* int64 on the numpy path (pure functions): 0 ok, 1 deopt (the interpreter warns). */
+static inline int tp_np_truediv_i64(int64_t a, int64_t b, double *out)
+{
+    if (b == 0) {
+        return 1;
+    }
+    *out = (double)a / (double)b;          /* numpy converts both to double; CPython rounds exactly */
+    return 0;
+}
+
+static inline int tp_np_floordiv_i64(int64_t a, int64_t b, int64_t *out)
+{
+    if (b == 0) {
+        return 1;
+    }
+    return tp_floordiv_i64(a, b, out);     /* INT64_MIN // -1 is 1 (numpy's overflow warning) */
+}
+
+static inline int tp_np_mod_i64(int64_t a, int64_t b, int64_t *out)
+{
+    if (b == 0) {
+        return 1;
+    }
+    return tp_mod_i64(a, b, out);
 }
 
 /* ------------------------------------------------------------------------------------------

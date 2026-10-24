@@ -208,14 +208,168 @@ SOURCE = textwrap.dedent('''
     def nd_scale(x: npt.NDArray[np.float64], k: float) -> None:
         for i in range(len(x)):
             x[i] = x[i] * k
+
+    def p_div(x: npt.NDArray[np.float64]) -> object:
+        return x[0] / x[1]
+
+
+    def p_fdiv(x: npt.NDArray[np.float64]) -> object:
+        return x[0] // x[1]
+
+
+    def p_mod(x: npt.NDArray[np.float64]) -> object:
+        return x[0] % x[1]
+
+
+    def p_add(x: npt.NDArray[np.float64]) -> object:
+        return x[0] + x[1]
+
+
+    def p_sub(x: npt.NDArray[np.float64]) -> object:
+        return x[0] - x[1]
+
+
+    def p_mul(x: npt.NDArray[np.float64]) -> object:
+        return x[0] * x[1]
+
+
+    def p_pdiv(x: npt.NDArray[np.float64], k: float) -> object:
+        return k / x[0]
+
+
+    def p_idiv(x: npt.NDArray[np.int64]) -> object:
+        return x[0] / x[1]
+
+
+    def p_ifdiv(x: npt.NDArray[np.int64]) -> object:
+        return x[0] // x[1]
+
+
+    def p_imod(x: npt.NDArray[np.int64]) -> object:
+        return x[0] % x[1]
+
+
+    def p_imixed(x: npt.NDArray[np.int64]) -> object:
+        return x[0] // 3 + x[1] % 4
+
+
+    def i_div(x: npt.NDArray[np.float64]) -> None:
+        x[2] = x[0] / x[1]
+
+
+    def i_fdiv(x: npt.NDArray[np.float64]) -> None:
+        x[2] = x[0] // x[1]
+
+
+    def i_mod(x: npt.NDArray[np.float64]) -> None:
+        x[2] = x[0] % x[1]
+
+
+    def i_add(x: npt.NDArray[np.float64]) -> None:
+        x[2] = x[0] + x[1]
+
+
+    def i_sub(x: npt.NDArray[np.float64]) -> None:
+        x[2] = x[0] - x[1]
+
+
+    def i_mul(x: npt.NDArray[np.float64]) -> None:
+        x[2] = x[0] * x[1]
+
+
+    def i_plain(x: npt.NDArray[np.float64], k: float) -> None:
+        x[2] = k / x[1]
+        x[3] = k * 2.0
+
+
+    def i_multiline(x: npt.NDArray[np.float64]) -> None:
+        x[2] = (x[0] *
+                x[1])
+        x[3] = (x[0]
+                / x[1]
+                + x[0] * x[1])
+
+
+    def i_aug(x: npt.NDArray[np.float64]) -> None:
+        x[0] *= x[1]
+        x[1] /= x[2]
+        x[2] += x[3]
+
+
+    def i_loop(x: npt.NDArray[np.float64], y: npt.NDArray[np.float64]) -> float:
+        s = 0.0
+        for i in range(len(x)):
+            y[i] = x[i] / y[i]
+            s += y[i] * x[i]
+        return s
+
+
+    def i_mixed(x: npt.NDArray[np.float64], n: int) -> None:
+        x[0] = n / x[1]
+        x[2] = x[3] * n
+
+
+    def i_ret(x: npt.NDArray[np.float64]) -> object:
+        x[2] = x[0] * x[1]
+        return x[0] / x[1]
+
+
+    def i_ifdiv(x: npt.NDArray[np.int64]) -> object:
+        x[2] = x[0] // x[1]
+        return x[2]
+
+
+    def nd_advance(dt: float, steps: int, x: npt.NDArray[np.float64], y: npt.NDArray[np.float64],
+                   z: npt.NDArray[np.float64], vx: npt.NDArray[np.float64],
+                   vy: npt.NDArray[np.float64], vz: npt.NDArray[np.float64],
+                   mass: npt.NDArray[np.float64]) -> None:
+        for _ in range(steps):
+            for i in range(5):
+                for j in range(i + 1, 5):
+                    dx: float = x[i] - x[j]
+                    dy: float = y[i] - y[j]
+                    dz: float = z[i] - z[j]
+                    d2: float = dx * dx + dy * dy + dz * dz
+                    mag: float = dt / (d2 * math.sqrt(d2))
+                    vx[i] -= dx * mass[j] * mag
+                    vy[i] -= dy * mass[j] * mag
+                    vz[i] -= dz * mass[j] * mag
+                    vx[j] += dx * mass[i] * mag
+                    vy[j] += dy * mass[i] * mag
+                    vz[j] += dz * mass[i] * mag
+            for i in range(5):
+                x[i] += dt * vx[i]
+                y[i] += dt * vy[i]
+                z[i] += dt * vz[i]
+
+
+    def nd_energy_full(x: npt.NDArray[np.float64], y: npt.NDArray[np.float64],
+                       z: npt.NDArray[np.float64], vx: npt.NDArray[np.float64],
+                       vy: npt.NDArray[np.float64], vz: npt.NDArray[np.float64],
+                       mass: npt.NDArray[np.float64]) -> float:
+        e: float = 0.0
+        for i in range(5):
+            e += 0.5 * mass[i] * (vx[i] * vx[i] + vy[i] * vy[i] + vz[i] * vz[i])
+            for j in range(i + 1, 5):
+                dx: float = x[i] - x[j]
+                dy: float = y[i] - y[j]
+                dz: float = z[i] - z[j]
+                e -= mass[i] * mass[j] / math.sqrt(dx * dx + dy * dy + dz * dz)
+        return e
 ''')
 
 COMPILED = {
     "nd_first", "nd_first_f", "nd_first_i", "nd_sum", "nd_sum_from_first", "nd_isum", "nd_gt",
     "nd_flag", "nd_plain", "nd_mixed", "nd_sqrt", "nd_neg", "nd_len", "nd_set", "nd_copy",
     "nd_iset", "nd_get", "nd_param", "nd_branch", "nd_tuple", "nd_overflow", "nd_invalid", "nd_iover", "nd_energy", "nd_copy7",
+    # step 2
+    "nd_div", "nd_idiv", "nd_scale", "p_div", "p_fdiv", "p_mod", "p_add", "p_sub", "p_mul", "p_pdiv",
+    "p_idiv", "p_ifdiv", "p_imod", "p_imixed", "i_div", "i_fdiv", "i_mod", "i_add", "i_sub", "i_mul",
+    "i_plain", "i_multiline", "i_aug", "i_loop", "i_mixed", "i_ret", "nd_advance", "nd_energy_full",
 }
-NOT_COMPILED = {"nd_div", "nd_idiv", "nd_scale", "nd_to_list", "nd_mixed_cmp", "nd_abs", "nd_int_impure"}   # nd_abs calls user code   # could warn / divide, or store a possibly warning op
+IMPURE = {"i_div", "i_fdiv", "i_mod", "i_add", "i_sub", "i_mul", "i_plain", "i_multiline", "i_aug",
+          "i_loop", "i_mixed", "i_ret", "nd_advance", "nd_scale"}
+NOT_COMPILED = {"i_ifdiv", "nd_to_list", "nd_mixed_cmp", "nd_abs", "nd_int_impure"}   # nd_abs calls user code   # could warn / divide, or store a possibly warning op
 
 F = [1.5, -2.25, 3.0, 4.5]
 I = [3, -5, 7, 11]
@@ -238,7 +392,7 @@ def run(fn, args):
             r = ("ok", fn(*args))
         except Exception as e:  # noqa: BLE001 - type and text are the observable
             r = ("raise", type(e), str(e))
-    return r, [(x.category, str(x.message), x.lineno) for x in w]
+    return r, [(x.category, str(x.message), x.filename, x.lineno) for x in w]
 
 
 def same(a, b):
@@ -405,13 +559,14 @@ def test_int_overflow_warning_comes_from_the_interpreter(built):
     differential(m, "nd_iover", lambda: (i64(),))
 
 
-def test_division_and_impure_arithmetic_stay_on_the_object_path(built):
+def test_division_matches_numpy(built):
     _, m, _ = built
     for make in (lambda: (f64([1.0, 0.0]),), lambda: (f64([-1.0, 0.0]),), lambda: (f64([0.0, 0.0]),),
                  lambda: (f64(),)):
-        differential(m, "nd_div", make)
-    c, w = differential(m, "nd_idiv", lambda: (i64([5, 0]),))
+        differential(m, "nd_div", make, expect_deopt=make is not None and make()[0][1] == 0.0)
+    c, w = differential(m, "nd_idiv", lambda: (i64([5, 0]),), expect_deopt=True)
     assert [x[0] for x in w] == [RuntimeWarning]
+    differential(m, "nd_idiv", lambda: (i64([5, 2]),))
     differential(m, "nd_scale", lambda: (f64([BIG, 1.0]), 10.0))
     differential(m, "nd_scale", lambda: (f64(), 2.0))
 
@@ -478,3 +633,176 @@ def _nodes(x):
         yield x
         for f in dataclasses.fields(x):
             yield from _nodes(getattr(x, f.name))
+
+
+# --- step 2: numpy division and impure arithmetic ---------------------------------------------------------
+
+SPECIAL = [0.0, -0.0, 1.0, -1.0, 2.5, -2.5, 1e308, -1e308, 1e-310, 5e-324, float("inf"),
+           float("-inf"), float("nan"), 0.3]
+IMIN = -2 ** 63
+SPECIAL_I = [0, 1, -1, 7, -7, IMAX, IMIN]
+
+
+def grid(m, name, pairs, make, pure):
+    """Every pair, compiled against interpreted: result, TYPE, warnings with file and line."""
+    seen = set()
+    for a, b in pairs:
+        ca, ia = make(a, b), make(a, b)
+        before = m.__typedpython_deopts__
+        c, cw = run(getattr(m, name), ca)
+        deopted = m.__typedpython_deopts__ - before
+        i, iw = run(m.__typedpython_interpreted__[name], ia)
+        assert c[0] == i[0], (name, a, b, c, i)
+        if c[0] == "ok" and c[1] is not None:
+            assert type(c[1]) is type(i[1]), (name, a, b)
+            assert same(c[1], i[1]), (name, a, b, c, i)
+        assert cw == iw, (name, a, b, cw, iw)
+        for x, y in zip(ca, ia):
+            if isinstance(x, np.ndarray):
+                assert x.dtype == y.dtype
+                assert all(same(p, q) and np.signbit(p) == np.signbit(q)
+                           for p, q in zip(x.tolist(), y.tolist()) if p == p), (name, a, b, x, y)
+                assert all((p != p) == (q != q) for p, q in zip(x.tolist(), y.tolist()))
+        assert deopted == (1 if pure and cw else 0), (name, a, b, deopted, cw)
+        seen.update(str(w[1]) for w in cw)
+    return seen
+
+
+def fpairs():
+    return [(a, b) for a in SPECIAL for b in SPECIAL]
+
+
+@pytest.mark.parametrize("name", ["p_div", "p_fdiv", "p_mod", "p_add", "p_sub", "p_mul"])
+def test_pure_float_ops_match_numpy_over_special_values(built, name):
+    _, m, _ = built
+    seen = grid(m, name, fpairs(), lambda a, b: (f64([a, b]),), pure=True)
+    if name == "p_div":
+        assert {"divide by zero encountered in scalar divide", "invalid value encountered in scalar divide",
+                "overflow encountered in scalar divide"} <= seen
+
+
+@pytest.mark.parametrize("name", ["i_div", "i_fdiv", "i_mod", "i_add", "i_sub", "i_mul"])
+def test_impure_float_ops_match_numpy_and_warn_from_the_compiled_code(built, name):
+    _, m, _ = built
+    seen = grid(m, name, fpairs(), lambda a, b: (f64([a, b, 0.0]),), pure=False)
+    assert seen, "numpy warned for no pair: the grid tests nothing"
+
+
+def test_impure_warning_has_the_operations_file_and_line(built):
+    _, m, _ = built
+    _, w = run(m.i_multiline, (f64([BIG, 10.0, 0.0, 0.0]),))
+    lines = [x[3] for x in w]
+    assert len(set(lines)) >= 2, w
+    grid(m, "i_multiline", [(a, b) for a in (1.0, 0.0, BIG, float("inf")) for b in (0.0, 1.0, BIG)],
+         lambda a, b: (f64([a, b, 0.0, 0.0]),), pure=False)
+    grid(m, "i_aug", [(a, b) for a in (1.0, 0.0, BIG) for b in (0.0, 1.0, BIG, float("nan"))],
+         lambda a, b: (f64([a, b, 0.0, BIG]),), pure=False)
+
+
+def test_impure_error_filter_raises_and_leaves_the_same_state(built):
+    _, m, _ = built
+    for fn in (m.i_div, m.__typedpython_interpreted__["i_div"]):
+        x = f64([1.0, 0.0, 7.0])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with pytest.raises(RuntimeWarning, match="divide by zero encountered in scalar divide"):
+                fn(x)
+        assert x.tolist() == [1.0, 0.0, 7.0]
+
+
+def test_impure_default_filter_warns_once_per_location(built):
+    _, m, _ = built
+    out = []
+    for fn in (m.i_div, m.__typedpython_interpreted__["i_div"]):
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("default")
+            m.__dict__.pop("__warningregistry__", None)
+            for _ in range(3):
+                fn(f64([1.0, 0.0, 0.0]))
+        out.append([(x.filename, x.lineno, str(x.message)) for x in w])
+    assert out[0] == out[1] and len(out[0]) == 1, out
+
+
+def test_impure_mixed_plain_and_numpy_operands(built):
+    _, m, _ = built
+    grid(m, "i_plain", [(a, b) for a in (1.0, 0.0, BIG) for b in (0.0, 2.0, -0.0)],
+         lambda a, b: (f64([0.0, b, 0.0, 0.0]), a), pure=False)
+    grid(m, "i_mixed", [(a, b) for a in (1, 0, 2 ** 62) for b in (0.0, 2.0, 1e-310)],
+         lambda a, b: (f64([0.0, b, 0.0, BIG]), a), pure=False)
+    grid(m, "p_pdiv", [(a, b) for a in (1.0, 0.0, BIG) for b in (0.0, 2.0, 1e-310)],
+         lambda a, b: (f64([b, 0.0]), a), pure=True)
+    for name in ("i_loop", "i_ret"):
+        for xs, ys in (([1.0, 2.0, 0.0], [0.0, 4.0, 2.0]), ([BIG, 1.0, 0.0], [1e-5, 0.0, 0.0])):
+            args = lambda: ((f64(xs), f64(ys)) if name == "i_loop" else (f64(xs),))  # noqa: E731
+            differential(m, name, args)
+
+
+@pytest.mark.parametrize("name", ["p_idiv", "p_ifdiv", "p_imod"])
+def test_pure_int_division_matches_numpy(built, name):
+    _, m, _ = built
+    pairs = [(a, b) for a in SPECIAL_I for b in SPECIAL_I]
+    grid(m, name, pairs, lambda a, b: (i64([a, b]),), pure=True)
+
+
+def test_int_division_by_a_constant_and_mixed_ops(built):
+    _, m, _ = built
+    grid(m, "p_imixed", [(a, b) for a in SPECIAL_I for b in SPECIAL_I],
+         lambda a, b: (i64([a, b]),), pure=True)
+    differential(m, "p_idiv", lambda: (i64([2 ** 60 + 1, 3]),))     # numpy divides as doubles
+
+
+def test_the_int_divide_by_zero_in_an_impure_function_stays_on_the_object_path(built):
+    proved, m, _ = built
+    assert "i_ifdiv" in proved.skipped
+    differential(m, "i_ifdiv", lambda: (i64([5, 0, 0]),))
+
+
+def test_a_disabled_warning_path_would_differ(built):
+    """The check that can fail: the compiled impure i_div must emit the warning itself."""
+    _, m, _ = built
+    _, w = run(m.i_div, (f64([1.0, 0.0, 0.0]),))
+    assert [(x[0], x[1]) for x in w] == [(RuntimeWarning, "divide by zero encountered in scalar divide")]
+
+
+BODIES = {
+    "x": [0.0, 4.84143144246472090, -4.15980459285970104e-1, 1.2 , 8.34336671824457987],
+    "y": [0.0, -1.16032004402742839, 7.69901118419740425e-1, -1.2, 4.12479856412430479],
+    "z": [0.0, -1.03622044471123109e-1, -8.5e-1, 0.5, -4.0e-1],
+    "vx": [0.0, 1.66007664274403694e-3 * 365.24, -2.76742510726862411e-3 * 365.24, 0.1, 0.2],
+    "vy": [0.0, 7.69901118419740425e-3 * 365.24, 4.99852801234917238e-3 * 365.24, 0.3, 0.1],
+    "vz": [0.0, -6.90460016972063023e-5 * 365.24, 2.30417297573763929e-5 * 365.24, -0.2, 0.05],
+    "mass": [39.47841760435743, 0.03769367487038949, 0.011286326131968767, 0.0017237240570597112, 0.0020336868699246304],
+}
+
+
+def bodies():
+    return [np.array(BODIES[k], dtype=np.float64) for k in ("x", "y", "z", "vx", "vy", "vz", "mass")]
+
+
+def test_nbody_advance_and_energy_compile_and_match(built):
+    proved, m, _ = built
+    by = {f.name: f for f in proved.functions}
+    assert "nd_advance" in by and "nd_energy_full" in by, proved.skipped
+    assert by["nd_advance"].pure is False and by["nd_energy_full"].pure is True
+    ref = m.__typedpython_interpreted__
+    a, b = bodies(), bodies()
+    for steps in (1, 25):
+        before = m.__typedpython_deopts__
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            m.nd_advance(0.01, steps, *a)
+            ref["nd_advance"](0.01, steps, *b)
+        assert m.__typedpython_deopts__ == before
+        assert w == []
+        for p, q in zip(a, b):
+            assert p.tolist() == q.tolist()
+        e1, e2 = m.nd_energy_full(*a), ref["nd_energy_full"](*b)
+        assert type(e1) is type(e2) is np.float64 and e1 == e2
+    # coincident bodies: the interpreter's warnings and results, from the compiled advance
+    a, b = bodies(), bodies()
+    for arrs in (a, b):
+        arrs[0][2] = arrs[0][1]; arrs[1][2] = arrs[1][1]; arrs[2][2] = arrs[2][1]
+    ca, cw = run(m.nd_advance, (0.01, 1, *a))
+    ia, iw = run(ref["nd_advance"], (0.01, 1, *b))
+    assert cw == iw and cw, (cw, iw)
+    assert all(same(p, q) for u, v in zip(a, b) for p, q in zip(u.tolist(), v.tolist()))

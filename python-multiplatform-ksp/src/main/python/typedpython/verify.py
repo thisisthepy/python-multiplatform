@@ -307,6 +307,8 @@ _I64_MIN, _I64_MAX = -2 ** 63, 2 ** 63 - 1
 _FULL = (_I64_MIN, _I64_MAX)
 _LEN_MAX = 2 ** 62
 _PROVABLE_OPS = frozenset({BinOpKind.ADD, BinOpKind.SUB, BinOpKind.MUL})
+_NP_F64_OPS = frozenset({BinOpKind.ADD, BinOpKind.SUB, BinOpKind.MUL, BinOpKind.TRUEDIV,
+                         BinOpKind.FLOORDIV, BinOpKind.MOD})
 _POW2_OPS = frozenset({BinOpKind.FLOORDIV, BinOpKind.MOD})   # `proven` means shift / mask
 _NEGATE = {CompareKind.EQ: CompareKind.NE, CompareKind.NE: CompareKind.EQ,
            CompareKind.LT: CompareKind.GE, CompareKind.GE: CompareKind.LT,
@@ -774,11 +776,17 @@ class _Checker:
         if type(e.np) is not bool:
             self.error(TYPE, f"BinOp `np` {e.np!r} is not a bool")
         elif e.np:
-            if not (e.type is Type.F64 and lt is Type.F64 and rt is Type.F64
-                    and e.op in (BinOpKind.ADD, BinOpKind.SUB, BinOpKind.MUL)):
-                self.error(TYPE, "BinOp `np` is set on something other than an f64 + - * (#220)")
-            else:
-                self.can_deopt = True        # a non-finite result: the interpreter redoes the call
+            f64_op = e.type is Type.F64 and lt is Type.F64 and rt is Type.F64
+            i64_op = (lt is Type.I64 and rt is Type.I64 and not e.proven and e.op in (
+                BinOpKind.TRUEDIV, BinOpKind.FLOORDIV, BinOpKind.MOD)
+                and e.type is (Type.F64 if e.op is BinOpKind.TRUEDIV else Type.I64))
+            if not (f64_op or i64_op):
+                self.error(TYPE, "BinOp `np` is set on something other than an f64 operation or an "
+                                 "unproven i64 / // % (#220)")
+            elif f64_op and e.op not in _NP_F64_OPS:
+                self.error(TYPE, f"BinOp `np` on an f64 {e.op.value}")
+            elif i64_op or self.fn.pure is True:
+                self.can_deopt = True        # a warning / int64 division by zero: the interpreter redoes
         shift = e.op in (BinOpKind.LSHIFT, BinOpKind.RSHIFT)
         if lt is Type.INT:
             # SPEC N-13: both operands INT, result INT, never deopts (it promotes in place)

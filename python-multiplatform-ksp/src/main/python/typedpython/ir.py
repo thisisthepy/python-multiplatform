@@ -160,7 +160,13 @@ class BinOp(Expr):
     # F64 ADD/SUB/MUL only (#220): an operand may be a numpy scalar in the interpreter, which warns
     # (RuntimeWarning: overflow / invalid value) where a double does not. A non-finite result →
     # deopt, so the interpreter redoes the call and emits the warning; legal only in a pure function.
+    # Step 2 (#220): `np` also covers F64 TRUEDIV / FLOORDIV / MOD (numpy's results: inf / nan, no
+    # ZeroDivisionError) and unproven I64 TRUEDIV / FLOORDIV / MOD (numpy's int64: division by zero
+    # gives 0 / inf / nan; both are a deopt, and legal only in a pure function). Any floating-point
+    # exception (overflow, invalid, divide by zero) is a deopt in a pure function; in an impure F64
+    # operation the code emits numpy's RuntimeWarning itself, at `line` of the cgen display path.
     np: bool = False
+    line: int = 0      # source line of the operation (the warning site of an impure `np` operation)
 
 
 class UnaryOpKind(Enum):

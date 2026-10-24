@@ -1825,6 +1825,13 @@ class _Lowerer:
 
     def arith(self, op: ir.BinOpKind, left: ir.Expr, right: ir.Expr, node: ast.AST,
               inplace: bool = False) -> ir.Expr:
+        e = self._arith(op, left, right, node, inplace)
+        if isinstance(e, ir.BinOp) and e.type in ir.SCALARS and self.numpy:
+            e = dataclasses.replace(e, line=node.lineno)      # the warning site (#220)
+        return e
+
+    def _arith(self, op: ir.BinOpKind, left: ir.Expr, right: ir.Expr, node: ast.AST,
+               inplace: bool = False) -> ir.Expr:
         lt, rt = left.type, right.type
         if Type.BOOL in (lt, rt) or Type.NONE in (lt, rt):
             raise Skip(node.lineno, f"arithmetic on {TYPE_NAME[Type.BOOL if Type.BOOL in (lt, rt) else Type.NONE]} "
