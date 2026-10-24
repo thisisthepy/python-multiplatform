@@ -270,6 +270,19 @@ def _ident(prefix: str, name: str) -> str:
     return f"{prefix}x_{name.encode('utf-8').hex()}"
 
 
+def _vfield(local: str, k: int) -> str:
+    """The name of field `k` of the virtual object held by `local` (not a Python identifier)."""
+    return f"{local}\x00v{k}"
+
+
+def _assigns(body):
+    for s in body:
+        if isinstance(s, ir.Assign):
+            yield s
+        for nested in (getattr(s, "then", ()), getattr(s, "orelse", ()), getattr(s, "body", ())):
+            yield from _assigns(nested)
+
+
 def _i64_lit(v: int) -> str:
     if isinstance(v, bool) or not isinstance(v, int) or not (_INT64_MIN <= v <= _INT64_MAX):
         raise CGenError(f"I64 constant out of range or not an int: {v!r}")
@@ -934,6 +947,16 @@ class _FnGen:
             if t not in _CT:
                 raise CGenError(f"{f.name}: local {name} has type {t}")
             self.types[name] = t
+        # SPEC N-12a: a virtual object lives as one OBJ C local per field (`_vfield`), no object
+        self.virtual: dict[str, str] = {}
+        for x in f.virtual:
+            classes = {e.value.cls for e in _assigns(f.body) if e.target == x
+                       and isinstance(e.value, ir.New)}
+            if len(classes) != 1 or self.types.get(x) is not Type.OBJ:
+                raise CGenError(f"{f.name}: virtual local {x} is not assigned one New class")
+            self.virtual[x] = next(iter(classes))
+            for k in range(len(mg.cls(f.name, self.virtual[x]).fields)):
+                self.types[_vfield(x, k)] = Type.OBJ
 
     # emit primitives
 
@@ -1475,6 +1498,11 @@ class _FnGen:
         return o
 
     def ev_FieldGet(self, e: ir.FieldGet) -> str:
+        if isinstance(e.obj, ir.Local) and e.obj.name in self.virtual:
+            cd = self.mg.cls(self.f.name, e.cls)
+            if e.cls != self.virtual[e.obj.name] or e.field not in cd.fields:
+                raise CGenError(f"{self.f.name}: FieldGet {e.cls}.{e.field} on virtual {e.obj.name}")
+            return self._own_copy(_ident("l", _vfield(e.obj.name, cd.fields.index(e.field))))
         slot = self.mg.slot(self.f.name, e.cls, e.field)
         o = self._obj_operand(e.obj, "FieldGet")
         t = self.tmp("PyObject *")
@@ -1492,6 +1520,26 @@ class _FnGen:
         self._own_release(o)
         self.emit(f"if ({t} == NULL) {{ tp_rc = -1; goto tp_exit; }}")
         return t
+
+    def _assign_virtual(self, s: ir.Assign) -> None:
+        """`x = New(C, args)` of a virtual local: the same guards and argument order as `ev_New`
+        (LOAD_GLOBAL C first, then the arguments, then the class check; a failure is a deopt, the
+        function is pure), but no object: each argument moves into the field local of `x`."""
+        e = s.value
+        cd = self.mg.cls(self.f.name, e.cls)
+        if not isinstance(e, ir.New) or len(e.args) != len(cd.fields) or not self.f.pure:
+            raise CGenError(f"{self.f.name}: virtual {s.target} needs a New of {len(cd.fields)} "
+                            f"fields in a pure function")
+        k = self._class(e.cls)
+        self.emit(f"tp_s = {self._global_ok(e.cls)};")
+        self.emit("if (tp_s < 0) { tp_rc = -1; goto tp_exit; }")
+        self.emit("if (!tp_s) { tp_class_note_slow(&tp_st->cls_rt[%d]); tp_rc = 1; goto tp_exit; }" % k)
+        items = [self._obj_operand(a, "New argument") for a in e.args]
+        self.emit(f"tp_s = {self._current('NULL', e.cls)};")
+        self.emit("if (tp_s < 0) { tp_rc = -1; goto tp_exit; }")
+        self.emit("if (!tp_s) { tp_class_note_slow(&tp_st->cls_rt[%d]); tp_rc = 1; goto tp_exit; }" % k)
+        for i, t in enumerate(items):
+            self._own_move(_ident("l", _vfield(s.target, i)), t)
 
     def ev_New(self, e: ir.New) -> str:
         cd = self.mg.cls(self.f.name, e.cls)
@@ -1751,6 +1799,9 @@ class _FnGen:
     def st_Assign(self, s: ir.Assign) -> None:
         if s.target in self.local_arrays:
             self._assign_array(s, self.local_arrays[s.target])
+            return
+        if s.target in self.virtual:
+            self._assign_virtual(s)
             return
         t = self.types.get(s.target)
         if t is None:

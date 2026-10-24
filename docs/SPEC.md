@@ -771,7 +771,21 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `gc.callbacks` of *unrelated* cyclic garbage run. The language reference leaves this to the
   implementation ("An implementation is allowed to postpone garbage collection or omit it
   altogether", Data model §3.1), and CPython itself changed it in 3.14 (incremental GC). Everything
-  else above stays exact. `Status: planned (design)`.
+  else above stays exact. `Status: N-12a implemented (below); the rest planned (design)`.
+  **N-12a (first step, #143): function-local virtual objects by scalar replacement.** In a `pure` function
+  whose every node is one of Const, Local, scalar BinOp/UnaryOp/Compare/And/Or, ToFloat, ToInt, Box,
+  Unbox, MathCall, Len, Index, NewArray, CopyArray, Is, IsExact, CheckExact, FieldGet, New (so no call,
+  no global or attribute read, no user code at all), an OBJ local whose every assignment is `New(C, ...)`
+  of one N-11 class, whose New arguments are `Box` of a scalar, a `str`/`None` Const or an OBJ parameter,
+  and whose every read is the object of a `FieldGet` of C, is virtual: no object is allocated and its
+  fields live in C locals. The class guard of `New` is kept (a changed class is a deopt, as before).
+  Because the function has no unknown code, nothing can observe a virtual object (`id`, `gc`,
+  `tracemalloc`, `getrefcount`) before it dies; a field read returns the very object that was stored,
+  so `is` on field values is unchanged. The verifier recomputes the set (`Function.virtual`, never
+  trusted from the front end; a forged entry is `verify/virtual-escape`); anything else compiles as
+  N-11. **Known difference:** an object whose allocation was removed raises no `MemoryError` where
+  CPython's allocation would (same nature as escape analysis in PyPy). Impure functions, `FieldSet` on a
+  virtual object, escape with materialisation, borrowed reads and regions are not part of N-12a.
 - **N-13** TypedPython native ints in impure functions (#232; INTENT §1.4: compiled code computes what
   CPython computes). An impure function cannot deopt after an effect, so its `int` locals were CPython
   objects and every `+`, `//`, `%` and comparison was a generic `PyNumber_*` / `PyObject_RichCompare`
