@@ -865,6 +865,9 @@ class _FnGen:
         self.temps: list[tuple[str, str]] = []      # (C type, name)
         self.arrays = {p.name: p for p in f.params if isinstance(p, ir.ArrayParam)}
         self.local_arrays: dict[str, Type] = {}       # name -> F64_ARRAY / I64_ARRAY
+        self.brk: list = []                    # per open loop: goto label for `break`, or None
+        self.label_n = 0
+        self.used_labels: set = set()
         self.types: dict[str, Type] = {}
         for p in f.params:
             if not isinstance(p, ir.ArrayParam):
@@ -1659,7 +1662,9 @@ class _FnGen:
                 local = _ident("l", name)
                 self.emit(f"  {{ PyObject *tp_old = {local}; {local} = tp_u[{i}]; tp_release(&tp_old); }}")
             self.emit("}")
+        self.brk.append(None)
         self.stmts(s.body)
+        self.brk.pop()
         self.depth -= 1
         self.emit("}")
         self._own_release(it)               # after the loop and after a `break`; a return/error exits via tp_exit
@@ -1733,7 +1738,9 @@ class _FnGen:
         self.poll()
         c = self._cond(s.cond)
         self.emit(f"if (!({c})) break;")
+        self.brk.append(None)
         self.stmts(s.body)
+        self.brk.pop()
         self.depth -= 1
         self.emit("}")
 
@@ -1765,13 +1772,33 @@ class _FnGen:
             self.emit(f"    {tn} = ((uint64_t){ts} - (uint64_t){te} - 1u) / {mag} + 1u;")
             sign = "-"
         self.depth += 1
-        self.emit(f"for ({tk} = 0; {tk} < {tn}; {tk}++) {{")
-        self.depth += 1
-        self.poll()
+        if self.snapshot:
+            # no polling in a snapshot holder: a plain loop
+            self.emit(f"for ({tk} = 0; {tk} < {tn}; {tk}++) {{")
+            self.depth += 1
+            self.brk.append(None)
+        else:
+            # Chunked polling (#206): the trip count is known, so poll once per TP_POLL_INTERVAL
+            # iterations. `continue` stays inside the chunk loop; `break` must leave both loops.
+            te2, label = self.tmp("uint64_t"), f"tp_brk{self.label_n}"
+            self.label_n += 1
+            self.emit(f"for ({tk} = 0; {tk} < {tn}; ) {{")
+            self.depth += 1
+            self.poll()
+            self.emit(f"{te2} = {tn} - {tk} > (uint64_t)TP_POLL_INTERVAL ? {tk} + (uint64_t)TP_POLL_INTERVAL : {tn};")
+            self.emit(f"for (; {tk} < {te2}; {tk}++) {{")
+            self.depth += 1
+            self.brk.append(label)
         self.emit(f"{var} = (int64_t)((uint64_t){ts} {sign} {tk} * {mag});")
         self.stmts(s.body)
+        label = self.brk.pop()
         self.depth -= 1
         self.emit("}")
+        if label is not None:
+            self.depth -= 1
+            self.emit("}")
+            if label in self.used_labels:
+                self.emit(f"{label}: ;")
         self.depth -= 1
         self.emit("}")
 
@@ -1792,7 +1819,10 @@ class _FnGen:
         self.emit("tp_rc = 0; goto tp_exit;")
 
     def st_Break(self, s) -> None:
-        self.emit("break;")
+        target = self.brk[-1] if self.brk else None
+        if target:
+            self.used_labels.add(target)
+        self.emit(f"goto {target};" if target else "break;")
 
     def st_Continue(self, s) -> None:
         self.emit("continue;")
