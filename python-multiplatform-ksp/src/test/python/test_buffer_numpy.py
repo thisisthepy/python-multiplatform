@@ -356,6 +356,67 @@ SOURCE = textwrap.dedent('''
                 dz: float = z[i] - z[j]
                 e -= mass[i] * mass[j] / math.sqrt(dx * dx + dy * dy + dz * dz)
         return e
+    # #261: np.bool_ arrays (1-byte items, format "?")
+    def nd_b_get(x: npt.NDArray[np.bool_], i: int) -> object:
+        return x[i]
+
+
+    def nd_b_any(x: npt.NDArray[np.bool_]) -> bool:
+        for i in range(len(x)):
+            if x[i]:
+                return True
+        return False
+
+
+    def nd_b_count(x: npt.NDArray[np.bool_]) -> int:
+        c = 0
+        for i in range(len(x)):
+            if x[i]:
+                c += 1
+        return c
+
+
+    def nd_b_set(x: npt.NDArray[np.bool_], i: int, v: bool) -> None:
+        x[i] = v
+
+
+    def nd_b_flip(x: npt.NDArray[np.bool_]) -> None:
+        for i in range(len(x)):
+            x[i] = not x[i]
+
+
+    def nd_b_copy(a: npt.NDArray[np.bool_], b: npt.NDArray[np.bool_]) -> None:
+        for i in range(len(a)):
+            b[i] = a[i]
+
+
+    def nd_b_eq(x: npt.NDArray[np.bool_], y: npt.NDArray[np.bool_], i: int) -> object:
+        return x[i] == y[i]
+
+
+    def nd_b_gt(x: npt.NDArray[np.float64], m: npt.NDArray[np.bool_]) -> None:
+        for i in range(len(x)):
+            m[i] = x[i] > 2.0
+
+
+    def nd_b_len(x: npt.NDArray[np.bool_]) -> int:
+        return len(x)
+
+
+    def nd_b_store_int(x: npt.NDArray[np.bool_], i: int, v: int) -> None:
+        x[i] = v
+
+
+    def nd_b_store_float(x: npt.NDArray[np.bool_], i: int, v: float) -> None:
+        x[i] = v
+
+
+    def nd_b_arith(x: npt.NDArray[np.bool_], i: int) -> object:
+        return x[i] + 1
+
+
+    def nd_b_whole(x: npt.NDArray[np.bool_]) -> object:
+        return np.sum(x)
 ''')
 
 COMPILED = {
@@ -365,11 +426,13 @@ COMPILED = {
     # step 2
     "nd_div", "nd_idiv", "nd_scale", "p_div", "p_fdiv", "p_mod", "p_add", "p_sub", "p_mul", "p_pdiv",
     "p_idiv", "p_ifdiv", "p_imod", "p_imixed", "i_div", "i_fdiv", "i_mod", "i_add", "i_sub", "i_mul",
+    "nd_b_get", "nd_b_any", "nd_b_count", "nd_b_set", "nd_b_flip", "nd_b_copy", "nd_b_eq", "nd_b_gt",
+    "nd_b_len",
     "i_plain", "i_multiline", "i_aug", "i_loop", "i_mixed", "i_ret", "nd_advance", "nd_energy_full",
 }
 IMPURE = {"i_div", "i_fdiv", "i_mod", "i_add", "i_sub", "i_mul", "i_plain", "i_multiline", "i_aug",
           "i_loop", "i_mixed", "i_ret", "nd_advance", "nd_scale"}
-NOT_COMPILED = {"i_ifdiv", "nd_to_list", "nd_mixed_cmp", "nd_abs", "nd_int_impure"}   # nd_abs calls user code   # could warn / divide, or store a possibly warning op
+NOT_COMPILED = {"nd_b_store_int", "nd_b_store_float", "nd_b_arith", "i_ifdiv", "nd_to_list", "nd_mixed_cmp", "nd_abs", "nd_int_impure"}   # nd_abs calls user code   # could warn / divide, or store a possibly warning op
 
 F = [1.5, -2.25, 3.0, 4.5]
 I = [3, -5, 7, 11]
@@ -806,3 +869,87 @@ def test_nbody_advance_and_energy_compile_and_match(built):
     ia, iw = run(ref["nd_advance"], (0.01, 1, *b))
     assert cw == iw and cw, (cw, iw)
     assert all(same(p, q) for u, v in zip(a, b) for p, q in zip(u.tolist(), v.tolist()))
+
+
+# --- #261: bool arrays (1-byte elements) ---------------------------------------------------------------
+
+def bl(v=(True, False, True, True)):
+    return np.array(v, dtype=np.bool_)
+
+
+def test_bool_array_params_are_numpy_buffers_of_one_byte_items(built):
+    proved, _, c = built
+    by = {f.name: f for f in proved.functions}
+    assert by["nd_b_get"].params[0].buffer == "numpy"
+    assert by["nd_b_get"].params[0].type is ir.Type.BOOL_ARRAY
+    assert by["nd_b_set"].params[0].stored
+    assert '"?"' in c
+
+
+def test_bool_element_is_np_bool(built):
+    _, m, _ = built
+    for i in (0, 1, -1):
+        c, _ = differential(m, "nd_b_get", lambda: (bl(), i))
+        assert type(c[1]) is np.bool_
+
+
+def test_bool_loops_and_results_match(built):
+    _, m, _ = built
+    for v in ([], [False], [False, False], [True, False, True], [False] * 9 + [True]):
+        c, _ = differential(m, "nd_b_any", lambda: (bl(v),))
+        assert type(c[1]) is bool
+        c, _ = differential(m, "nd_b_count", lambda: (bl(v),))
+        assert type(c[1]) is int
+        differential(m, "nd_b_len", lambda: (bl(v),))
+        differential(m, "nd_b_flip", lambda: (bl(v),))
+    differential(m, "nd_b_copy", lambda: (bl(), bl([False] * 4)))
+
+
+def test_bool_stores_and_negative_indexes(built):
+    _, m, _ = built
+    for i in (0, 3, -1, -4):
+        for v in (True, False):
+            differential(m, "nd_b_set", lambda: (bl(), i, v))
+    differential(m, "nd_b_eq", lambda: (bl(), bl([True, True, False, True]), 1))
+    c, _ = differential(m, "nd_b_eq", lambda: (bl(), bl(), 0))
+    assert type(c[1]) is np.bool_
+    differential(m, "nd_b_gt", lambda: (f64(), bl([False] * 4)))
+
+
+@pytest.mark.parametrize("i", [4, -5, 100])
+def test_bool_out_of_range_has_numpys_message(built, i):
+    _, m, _ = built
+    c, _ = differential(m, "nd_b_get", lambda: (bl(), i))
+    assert c[0] == "raise" and c[1] is IndexError and "out of bounds for axis 0 with size 4" in c[2]
+    c, _ = differential(m, "nd_b_set", lambda: (bl(), i, True))
+    assert c[0] == "raise" and "out of bounds for axis 0 with size 4" in c[2]
+
+
+def test_a_store_numpy_converts_differently_stays_interpreted(built):
+    proved, m, _ = built
+    for n in ("nd_b_store_int", "nd_b_store_float", "nd_b_arith"):
+        assert n in proved.skipped
+    for v in (0, 1, 5, -3, 2 ** 70):
+        differential(m, "nd_b_store_int", lambda: (bl(), 1, v))
+    for v in (0.0, 0.5, float("nan")):
+        differential(m, "nd_b_store_float", lambda: (bl(), 2, v))
+    differential(m, "nd_b_arith", lambda: (bl(), 0))
+
+
+def test_bool_guard_refuses_other_dtypes_and_views(built):
+    _, m, _ = built
+    differential(m, "nd_b_get", lambda: (bl(), 0))
+    differential(m, "nd_b_get", lambda: (np.array([1, 0], dtype=np.uint8), 0), expect_deopt=True)
+    differential(m, "nd_b_get", lambda: (f64(), 0), expect_deopt=True)
+    differential(m, "nd_b_get", lambda: (np.array([True, False, True, False])[::2], 0), expect_deopt=True)
+    differential(m, "nd_first", lambda: (bl(),), expect_deopt=True)      # a float64 function, bool array
+    ro = bl()
+    ro.setflags(write=False)
+    differential(m, "nd_b_set", lambda: (ro, 0, True), expect_deopt=True)
+
+
+def test_bool_whole_array_use_is_an_opaque_object(built):
+    proved, m, _ = built
+    f = next((f for f in proved.functions if f.name == "nd_b_whole"), None)
+    assert f is not None and not any(isinstance(p, ir.ArrayParam) for p in f.params)
+    differential(m, "nd_b_whole", lambda: (bl(),))

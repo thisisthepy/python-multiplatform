@@ -299,7 +299,7 @@ _RETURN_TYPES = _VALUE_TYPES + (Type.NONE,)
 _INT_PRODUCERS = frozenset({ToInt, BinOp, UnaryOp, Local, Call})
 _INT_OPS = frozenset({BinOpKind.ADD, BinOpKind.SUB, BinOpKind.MUL, BinOpKind.FLOORDIV,
                       BinOpKind.MOD, BinOpKind.LSHIFT, BinOpKind.RSHIFT})
-_ELEMENT = {Type.F64_ARRAY: Type.F64, Type.I64_ARRAY: Type.I64}
+_ELEMENT = {Type.F64_ARRAY: Type.F64, Type.I64_ARRAY: Type.I64, Type.BOOL_ARRAY: Type.BOOL}
 _MATH_ARITY = {MathFunc.ATAN2: 2, MathFunc.HYPOT: 2}            # every other MathFunc: 1
 _I64_DEOPT_OPS = frozenset({BinOpKind.ADD, BinOpKind.SUB, BinOpKind.MUL, BinOpKind.FLOORDIV,
                             BinOpKind.MOD, BinOpKind.TRUEDIV})

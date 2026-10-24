@@ -93,7 +93,7 @@ Interval = tuple[int, int] | None  # None: no value at all (not yet known to be 
 TYPE_NAME = {
     Type.I64: "int", Type.F64: "float", Type.BOOL: "bool", Type.NONE: "None", Type.OBJ: "object",
     Type.INT: "int",
-    Type.F64_ARRAY: "list[float]", Type.I64_ARRAY: "list[int]",
+    Type.F64_ARRAY: "list[float]", Type.I64_ARRAY: "list[int]", Type.BOOL_ARRAY: "NDArray[np.bool_]",
 }
 SCALAR_KIND = {"int": Type.I64, "float": Type.F64, "bool": Type.BOOL}
 ARRAY_KIND = {"list[float]": Type.F64_ARRAY, "list[int]": Type.I64_ARRAY}
@@ -341,7 +341,8 @@ def _element_only(fn: ast.FunctionDef, name: str) -> bool:
 
 
 # numpy dtypes that are 8-byte buffer arrays (#220): the scalar type annotation they spell
-_NUMPY_DTYPE = {"numpy.float64": Type.F64_ARRAY, "numpy.int64": Type.I64_ARRAY}
+_NUMPY_DTYPE = {"numpy.float64": Type.F64_ARRAY, "numpy.int64": Type.I64_ARRAY,
+                "numpy.bool_": Type.BOOL_ARRAY, "numpy.bool": Type.BOOL_ARRAY}
 
 
 def _scalar_globals(tree: ast.Module, bindings: dict[str, list[tuple[int, str]]]) -> dict[str, Type]:
@@ -801,7 +802,8 @@ def _numpy_kinds(sig: _Signature, inferred: dict[str, list[tuple[int, str]]],
     nodes = {n.lineno: n for n in ast.walk(sig.node)
              if isinstance(n, (ast.Assign, ast.AugAssign)) and len(getattr(n, "targets", [0])) == 1}
 
-    out = {name: [(line, _NUMPY_SPELLED.get(k, k)) for line, k in entries]
+    # newer numpy stubs type an element `typing.Any`: the same "source settles it" case as `Unknown`
+    out = {name: [(line, _NUMPY_SPELLED.get(k, "Unknown" if k == "typing.Any" else k)) for line, k in entries]
            for name, entries in inferred.items()}
 
     def known(name: str) -> str | None:
@@ -816,7 +818,7 @@ def _numpy_kinds(sig: _Signature, inferred: dict[str, list[tuple[int, str]]],
         if isinstance(e, ast.Name):
             return known(e.id)
         if isinstance(e, ast.Subscript) and isinstance(e.value, ast.Name) and e.value.id in arrays:
-            return "float" if arrays[e.value.id] is Type.F64_ARRAY else "int"
+            return {Type.F64_ARRAY: "float", Type.BOOL_ARRAY: "bool"}.get(arrays[e.value.id], "int")
         if isinstance(e, ast.UnaryOp):
             return "bool" if isinstance(e.op, ast.Not) else kind(e.operand)
         if isinstance(e, ast.BinOp):
@@ -1800,7 +1802,7 @@ class _Lowerer:
         if not (isinstance(node.value, ast.Name) and node.value.id in self.arrays):
             raise Skip(node.lineno, f"subscript `{_src(node)}` of an object is not supported")
         name = node.value.id
-        return name, Type.F64 if self.arrays[name] == Type.F64_ARRAY else Type.I64
+        return name, {Type.F64_ARRAY: Type.F64, Type.BOOL_ARRAY: Type.BOOL}.get(self.arrays[name], Type.I64)
 
     def index(self, node: ast.expr) -> ir.Expr:
         if isinstance(node, ast.Slice):
