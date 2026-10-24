@@ -1,8 +1,9 @@
 """The cost policy (cost.py, #150): a function is compiled only if it does native work.
 
-A verified function that only does object operations in its loops (in an impure function an int is a
-CPython object, so `+`, `//`, `%` and `>` are generic PyNumber / RichCompare calls) is slower compiled
-than interpreted, so it stays interpreted with a diagnostic. Pure functions are never touched.
+A verified function that only does object operations in its loops (a `str` concatenation, a call of an
+unknown callable: generic C API calls) is slower compiled than interpreted, so it stays interpreted
+with a diagnostic. Arithmetic on an `int` local of an impure function is native work since #232 (the
+IR type INT, SPEC N-13), so such a loop compiles. Pure functions are never touched.
 `pipeline.compile_module(..., cost_rule=False)` is the test-only opt-out.
 """
 from __future__ import annotations
@@ -16,6 +17,15 @@ from typedpython import cost, pipeline
 HEADER = "# typedpython: compiled\n"
 
 OBJECT_ONLY = HEADER + textwrap.dedent('''
+    def copy_words(src: list[str], dst: list[str]) -> str:
+        w: str = ""
+        for x in src:
+            w = x + w
+            dst.append(w)
+        return w
+''')
+
+INT_LOOP = HEADER + textwrap.dedent('''
     def word_of(word_id: int) -> str:
         x: int = word_id + 17576
         w: str = ""
@@ -39,14 +49,22 @@ def names(result):
 def test_an_object_only_loop_stays_interpreted_with_the_reason(tmp_path):
     r = build(tmp_path, OBJECT_ONLY)
     assert names(r) == set() and r.extension is None
-    assert "slower than the interpreter" in r.skipped["word_of"]
-    assert r.skipped["word_of"].startswith("policy/cost: only object operations in its loops")
+    assert "slower than the interpreter" in r.skipped["copy_words"]
+    assert r.skipped["copy_words"].startswith("policy/cost: only object operations in its loops")
     assert [d.rule for d in r.diagnostics] == ["policy/cost"]
+
+
+def test_an_int_loop_is_native_work_and_compiles(tmp_path):
+    # the function that #150 had to leave interpreted (wordfreq's word_of): its `x > 0`, `x % 26`
+    # and `x //= 26` are INT operations now (SPEC N-13)
+    r = build(tmp_path, INT_LOOP)
+    assert names(r) == {"word_of"} and r.extension is not None, r.skipped
+    assert not [d for d in r.diagnostics if d.rule == "policy/cost"]
 
 
 def test_the_opt_out_compiles_the_same_function(tmp_path):
     r = build(tmp_path, OBJECT_ONLY, cost_rule=False)
-    assert names(r) == {"word_of"} and r.extension is not None
+    assert names(r) == {"copy_words"} and r.extension is not None
 
 
 MIXED = HEADER + textwrap.dedent('''
@@ -66,7 +84,14 @@ MIXED = HEADER + textwrap.dedent('''
         return a * b + 1.0
 
 
-    def object_loop_with_native_op_outside(n: int, xs: list[str]) -> float:
+    def object_loop_with_native_op_outside(n: int, xs: list[str], ys: list[str]) -> float:
+        total: float = 1.0 + 2.0
+        for x in xs:
+            ys.append(x)
+        return total
+
+
+    def int_counter_loop(n: int, xs: list[str]) -> float:
         total: float = 1.0 + 2.0
         i: int = 0
         while i < n:
@@ -87,7 +112,7 @@ MIXED = HEADER + textwrap.dedent('''
 def test_one_native_loop_with_object_operations_compiles(tmp_path):
     r = build(tmp_path, MIXED)
     got = names(r)
-    assert {"mixed", "pure_no_loop", "native_loop_inside_object_loop"} <= got, r.skipped
+    assert {"mixed", "pure_no_loop", "native_loop_inside_object_loop", "int_counter_loop"} <= got, r.skipped
     assert "object_loop_with_native_op_outside" not in got            # the native op is outside the loop
     assert "object_loop_with_native_op_outside" in r.skipped
 
@@ -103,17 +128,17 @@ def test_a_caller_of_a_rejected_function_is_rejected_too(tmp_path):
     src = tmp_path / "p.py"
     src.write_text(OBJECT_ONLY)
     proved, diags = verify.verify(frontend.lower(src))
-    assert [f.name for f in proved.functions] == ["word_of"]
+    assert [f.name for f in proved.functions] == ["copy_words"]
     word = proved.functions[0]
     caller = ir.Function(name="c", params=(), returns=ir.Type.NONE, locals={}, pure=False,
                          may_deopt=False, source_line=1,
                          body=(ir.ForRange("i", ir.Const(ir.Type.I64, 0), ir.Const(ir.Type.I64, 3),
                                            ir.Const(ir.Type.I64, 1),
-                                           (ir.ExprStmt(ir.Call(ir.Type.NONE, "word_of", ())),)),))
+                                           (ir.ExprStmt(ir.Call(ir.Type.NONE, "copy_words", ())),)),))
     module = ir.Module("p", (word, caller))
     out, diags = cost.apply(module, [])
     assert out.functions == ()                       # `c` has no native op (an empty-arg Call is not one)
-    assert "word_of" in out.skipped and "c" in out.skipped
+    assert "copy_words" in out.skipped and "c" in out.skipped
 
 
 def test_the_rule_is_what_keeps_it_interpreted(tmp_path, monkeypatch):

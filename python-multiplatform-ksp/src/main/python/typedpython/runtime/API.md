@@ -137,12 +137,52 @@ All return new references or NULL with CPython's exception set; none deopts.
     PyObject *tp_getattr(PyObject *obj, PyObject *name);          /* PyObject_GetAttr */
     PyObject *tp_call(PyObject *callee, PyObject *const *args, size_t nargs, PyObject *kwnames); /* PyObject_Vectorcall: nargs = positional count; keyword values follow at args[nargs..] */
     /* tp_binop_obj op codes: TP_BINOP_ADD..TP_BINOP_MOD = 0..5 in ir.BinOpKind declaration order;
-       TP_BINOP_IADD..TP_BINOP_IMOD = 6..11 are the augmented forms (PyNumber_InPlace*, ir.BinOp.inplace) */
+       TP_BINOP_IADD..TP_BINOP_IMOD = 6..11 are the augmented forms (PyNumber_InPlace*, ir.BinOp.inplace);
+       TP_BINOP_LSHIFT, TP_BINOP_RSHIFT = 12, 13 and TP_BINOP_ILSHIFT, TP_BINOP_IRSHIFT = 14, 15 */
     int       tp_truth(PyObject *obj);                            /* 0/1, -1 error (PyObject_IsTrue) */
     int       tp_compare_bool(PyObject *a, PyObject *b, int op);  /* 0/1, -1 error: PyObject_RichCompare then PyObject_IsTrue (no identity shortcut, as `if a == b`) */
     int       tp_obj_to_f64(PyObject *obj, double *out);          /* 0 / -1 (PyNumber_Float, then exact double) */
     PyObject *tp_binop_obj(PyObject *a, PyObject *b, int op);     /* PyNumber_Add/... for ir.BinOpKind on OBJ */
     void      tp_release(PyObject **slot);                        /* Py_CLEAR: the only way generated code drops a reference */
+
+## Native ints (ir.Type.INT; SPEC N-13, issue #232)
+A `tp_int` is `{int64_t v; PyObject *big;}`: native when `big == NULL`, else `big` owns a reference to an
+exact int outside i64 (`v` unused). Every temporary and local of this type owns `big`; the exit block
+releases them all. Each operation is the native one when both operands are native and the result fits
+i64, else CPython's `PyNumber_*` on the two ints (exact ints, no user code), with the result narrowed
+back to native when it fits. Nothing deopts. Operations return 0, or -1 with the exception set (a zero
+divisor, a negative shift count, OverflowError, MemoryError), leaving `*out` untouched on failure.
+The overflow checks are the macros `TP_INT_ADD_OVF`, `TP_INT_SUB_OVF`, `TP_INT_MUL_OVF`, the single
+mutation points the tests replace by wrapping arithmetic and must see fail.
+    void      tp_int_release(tp_int *a);                          /* drop big (idempotent) */
+    void      tp_int_copy(tp_int *dst, const tp_int *src);        /* dst = src, a new reference to big */
+    void      tp_int_assign(tp_int *dst, tp_int *src);            /* dst takes src (left empty), releasing what dst held */
+    PyObject *tp_int_box(const tp_int *a);                        /* a new reference to the int (PyLong_FromLongLong when native) */
+    int       tp_int_take(tp_int *out, PyObject *o);              /* o (a new reference, stolen) -> out, narrowed; NULL or a non-exact-int -> -1 */
+    int       tp_int_of_exact(tp_int *out, PyObject *o);          /* o borrowed: 0 ok, 1 not an exact int (nothing set), -1 error */
+    int       tp_int_add(const tp_int *a, const tp_int *b, tp_int *out);      /* also tp_int_sub, tp_int_mul */
+    int       tp_int_floordiv(const tp_int *a, const tp_int *b, tp_int *out); /* also tp_int_mod: floor semantics */
+    int       tp_int_lshift(const tp_int *a, const tp_int *b, tp_int *out);   /* also tp_int_rshift */
+    int       tp_int_neg(const tp_int *a, tp_int *out);
+    int       tp_int_cmp(const tp_int *a, const tp_int *b, int op);           /* op = Py_EQ..Py_GE; 0 / 1, -1 error */
+
+## Global cache (ir.Global; SPEC N-13)
+`tp_gslot` is one cached module-global or builtin read: a BORROWED pointer and the epoch it was read at,
+so the cache extends no object's lifetime (a rebound function, type or module is freed, and its `__del__`s
+run, when CPython would). A read is served from the slot while its `epoch` equals `tp_globals_epoch`;
+otherwise `tp_gcache_fill` looks the name up inside the critical sections of the module dict and the
+builtins dict captured at exec and remembers the object. The watcher moves the epoch on a change of any
+watched name (the names the module reads, the compiled class names and `__builtins__`), a clear or a
+dealloc; a rebinding of `__builtins__` also sets `tp_gcache_off`, after which every read does the full
+lookup. A hit takes its own reference: on the GIL build `Py_NewRef` (nothing runs between the check and
+the incref, and the epoch moves before the dict drops its reference); free-threaded, the fill calls
+`PyUnstable_EnableTryIncRef`, a hit uses `PyUnstable_TryIncRef` and then re-reads the epoch, falling back
+to the fill when either fails. Free-threaded needs CPython 3.14+ (3.13t does not cache).
+`TP_GCACHE_FRESH(slot_epoch, epoch)` is the single mutation point the tests replace by "any nonzero
+epoch" and must see fail. Without a watcher (`watched` 0) every read is `tp_global`.
+    PyObject *tp_gcache_global(tp_gslot *slot, PyObject *module_dict, PyObject *builtins, PyObject *name, int watched); /* a new reference, or NULL with NameError */
+    PyObject *tp_gcache_fill(tp_gslot *slot, PyObject *module_dict, PyObject *builtins, PyObject *name);
+    void      tp_gcache_clear(tp_gslot *slot);                     /* module clear: forget the pointer */
 
 ## Objects: subscript, in, f-strings, iteration (issue #150; ir.GetItem / StoreItem / Contains / NewList / NewDict / Format / BuildString / ForObj / a str Const)
 Every helper makes the C API call the interpreter's bytecode makes, so results, exceptions (type,
@@ -301,6 +341,10 @@ extensions together):
     /* PyDict_AddWatcher + PyDict_Watch: *id1 = id + 1, or 0 when no id is free / Watch failed
        (error cleared: the caller uses the conservative path, a dict lookup per New) */
     void tp_globals_watch(PyObject *module_dict, PyDict_WatchCallback cb, int *id1);
+    /* PyDict_Watch(id1 - 1, builtins); 0, or -1 when it cannot be watched (no exception left) */
+    int  tp_globals_watch_builtins(PyObject *builtins, int id1);
+    /* PyDict_Unwatch(id1 - 1, builtins); keeps a pending exception */
+    void tp_globals_unwatch_builtins(PyObject *builtins, int id1);
     /* PyDict_Unwatch (if module_dict) + PyDict_ClearWatcher; idempotent; keeps a pending exception */
     void tp_globals_unwatch(PyObject *module_dict, int *id1);
 
