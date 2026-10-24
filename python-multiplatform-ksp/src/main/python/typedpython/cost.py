@@ -26,6 +26,9 @@ A rejected function stays interpreted with the diagnostic below. Because an impu
 the target of a direct C `Call`, anything that calls a rejected function is rejected too (the same
 propagation `verify` uses for an unverified callee).
 
+Methods (`ir.Function.owner`, SPEC N-11) are functions here: the same rule decides each one, and a method
+that is rejected stays the original Python function in its class (it is simply not installed).
+
 Straight-line impure functions (no loop at all) are kept: they have no loop to lose to the
 interpreter, and that keeps every function that compiled before #150 compiled (fixed-layout setters,
 Kotlin calls). The rule targets loops over objects only.
@@ -103,8 +106,11 @@ def apply(module: ir.Module, diagnostics: list[Diagnostic]) -> tuple[ir.Module, 
         for fn in module.functions:
             if fn.name in reasons:
                 continue
-            bad = sorted({n.function for n in _walk(fn.body)
-                          if isinstance(n, ir.Call) and n.function in reasons})
+            # (a CheckMethod names its method too: the descriptors are built from the kept methods)
+            bad = sorted({n.function if isinstance(n, ir.Call) else f"{n.cls}.{n.method}"
+                          for n in _walk(fn.body)
+                          if (isinstance(n, ir.Call) and n.function in reasons)
+                          or (isinstance(n, ir.CheckMethod) and f"{n.cls}.{n.method}" in reasons)})
             if bad:
                 reasons[fn.name] = (f"{RULE}: calls '{bad[0]}', which is not compiled "
                                     f"({reasons[bad[0]]})")

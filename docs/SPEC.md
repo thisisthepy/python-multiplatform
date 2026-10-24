@@ -728,8 +728,13 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     takes the generic path (`getattr`/`setattr`/calling the current global) and a pure one deopts.
     A class that defines `__getattr__`, `__getattribute__`, `__setattr__` or `__delattr__` is not
     compiled.
-  A class outside these rules stays interpreted with a reason. Methods are not compiled yet.
-  `Status: implemented (module-level functions; methods planned, #155)`.
+  A class outside these rules stays interpreted with a reason. Plain instance methods of such a class
+  compile too (#155): `self` is guarded `type(self) is C` like a `Param.cls` parameter, so a subclass
+  instance or a foreign `self` runs the original function; the class dict holds a descriptor whose
+  bound method behaves like a function's, and a compiled method calling a method of a compiled class is
+  a direct C call under the same per-access class checks. Decorated methods (static, class, property),
+  dunders and methods that use `super` stay interpreted with a reason.
+  `Status: implemented (module-level functions and plain instance methods)`.
 - **N-12** TypedPython object cost: virtual objects, refcount elision, region allocation (design §4.3.4).
   Every execution of compiled code must be indistinguishable from some valid CPython execution. An object
   of an N-11 class without `__del__` and without a `__weakref__` slot may live as a C struct (a virtual

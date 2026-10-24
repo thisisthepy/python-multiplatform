@@ -42,6 +42,15 @@ object), and `C(args)` is `New` when `ClassDecl.trivial_init` (arguments in `__s
 `CallObject(Global(C))`. `trivial_init` requires the i-th `__init__` parameter to be stored into
 the i-th slot (ir.ClassDecl: "`__init__(self, *fields-in-order)`"); other orders stay an object call.
 
+Methods (SPEC N-11, #155). The plain instance methods of a `ClassDecl` class (`_method_targets`: no
+decorator, not a dunder, once in the class body, no `super()`/`__class__`, `self` unannotated or
+annotated with the class) are lowered like functions under the IR name `C.m` (`ir.Function.owner`), with
+`self` as `Param(OBJ, cls=C)`. Every other method of such a class is in `Module.skipped` under `C.m` with
+the reason. `obj.m(args)` on a local of class C (`method_call`) is `Call("C.m", (CheckMethod(obj, C, m),
+*args))` in a pure function when the callee is a pure compiled method with no entry globals and matching
+argument types; in every other case it stays the generic `CallObject(GetAttr(obj, m))`, which reaches the
+installed descriptor through CPython's own lookup.
+
 Objects, str and dict code (#150). A function may also use, as object operations (each is the C API
 call the interpreter's bytecode makes, ir.py says which): `str` constants, `{}` and `[]`, `o[i]`
 (`GetItem`) and `o[i] = v` (`StoreItem`) on anything that is not a native array, `x in c` /
@@ -161,6 +170,12 @@ class _Signature:
     tuple_returns: tuple[Type, ...] | None = None
     tuple_ellipsis: bool = False   # `tuple[int, ...]`: a variable length
     return_annotation: str = ""
+    owner: str | None = None       # the compiled class this is a method of (ir.Function.owner)
+
+    @property
+    def qname(self) -> str:
+        """The IR name: `f`, or `C.m` for a method (a module function `m` cannot collide)."""
+        return f"{self.owner}.{self.node.name}" if self.owner else self.node.name
 
 
 def lower(path: Path) -> ir.Module:
@@ -183,14 +198,23 @@ def lower(path: Path) -> ir.Module:
             signatures[node.name] = _signature(node, info.classes, info)
         except Skip as e:
             skipped[node.name] = e.reason
+    for owner, node, reason in _method_targets(tree, info):
+        q = f"{owner}.{node.name}"
+        if reason is not None:
+            skipped[q] = reason
+            continue
+        try:
+            signatures[q] = _signature(node, info.classes, info, owner=owner)
+        except Skip as e:
+            skipped[q] = e.reason
 
-    kinds = _inferred_kinds(path, source, tree, [s.node for s in signatures.values()])
+    kinds = _inferred_kinds(path, source, tree, [(q, s.node) for q, s in signatures.items()])
 
     # Optimistic start: every candidate lowered, pure, not deopting; then iterate to a fixpoint
     # (purity is the greatest fixpoint through calls, may_deopt the least).
     env: dict[str, ir.Function] = {
         name: ir.Function(name=name, params=s.params, returns=s.returns, locals={}, body=(), pure=True,
-                    may_deopt=False, source_line=s.node.lineno)
+                    may_deopt=False, source_line=s.node.lineno, owner=s.owner)
         for name, s in signatures.items()
     }
     results: dict[str, ir.Function | str] = {}
@@ -552,8 +576,53 @@ def _targets(
     return found
 
 
+def _method_targets(
+    tree: ast.Module, info: _ModuleInfo,
+) -> list[tuple[str, ast.FunctionDef, str | None]]:
+    """(class, def, reason it stays interpreted or None) for every `def` in the body of a class that
+    is a `ClassDecl` (SPEC N-11, #155). Only a plain instance method is a candidate: no decorator,
+    not a dunder (the interpreter runs those: `__init__` is lowered by `trivial_init`, the rest
+    would change what `repr`, `==`, `del` ... do when compiled), not a name-mangled `__private`,
+    defined once in the class body, not using `super()` or `__class__` (the compiler creates the
+    cell for the original function only), and `self` is unannotated or annotated with the class."""
+    found: list[tuple[str, ast.FunctionDef, str | None]] = []
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef) or node.name not in info.classes:
+            continue
+        counts: dict[str, int] = {}
+        for st in node.body:
+            if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                counts[st.name] = counts.get(st.name, 0) + 1
+        for st in node.body:
+            if isinstance(st, ast.AsyncFunctionDef):
+                found.append((node.name, st, f"line {st.lineno}: async method is not supported"))  # type: ignore[arg-type]
+                continue
+            if not isinstance(st, ast.FunctionDef):
+                continue
+            at = f"line {st.lineno}"
+            reason = None
+            if st.decorator_list:
+                reason = (f"{at}: decorator `@{_src(st.decorator_list[0])}` on a method is not "
+                          "supported (a plain instance method only)")
+            elif st.name.startswith("__"):
+                reason = (f"{at}: `{st.name}` is a dunder or name-mangled method; it stays "
+                          "interpreted (the interpreter runs it)")
+            elif counts[st.name] > 1:
+                reason = f"{at}: `{st.name}` is defined more than once in the class body"
+            elif not st.args.args and not st.args.posonlyargs:
+                reason = f"{at}: a method without a positional `self` parameter"
+            else:
+                used = next((n for n in ast.walk(st) if isinstance(n, ast.Name)
+                             and n.id in ("super", "__class__")), None)
+                if used is not None:
+                    reason = (f"{at}: `{used.id}` needs the class cell of the original function; "
+                              "the method stays interpreted")
+            found.append((node.name, st, reason))
+    return found
+
+
 def _signature(fn: ast.FunctionDef, classes: dict[str, ir.ClassDecl] | None = None,
-               info: _ModuleInfo | None = None) -> _Signature:
+               info: _ModuleInfo | None = None, owner: str | None = None) -> _Signature:
     args = fn.args
     line = fn.lineno
     if args.posonlyargs:
@@ -567,7 +636,14 @@ def _signature(fn: ast.FunctionDef, classes: dict[str, ir.ClassDecl] | None = No
     if args.defaults:
         raise Skip(line, "default parameter values are not supported")
     params: list[ir.Param | ir.ArrayParam] = []
-    for a in args.args:
+    for position, a in enumerate(args.args):
+        if owner is not None and position == 0:
+            # `self` (ir.Function.owner): unannotated, or annotated with the class itself
+            if a.annotation is not None and _annotation_kind(a.annotation).strip("'\"") != owner:
+                raise Skip(a.lineno, f"`{a.arg}` is annotated `{_src(a.annotation)}`, not the "
+                                     f"class `{owner}`")
+            params.append(ir.Param(a.arg, Type.OBJ, owner, False))
+            continue
         if a.annotation is None:
             raise Skip(a.lineno, f"parameter `{a.arg}` has no annotation")
         kind = _annotation_kind(a.annotation)
@@ -594,7 +670,7 @@ def _signature(fn: ast.FunctionDef, classes: dict[str, ir.ClassDecl] | None = No
     else:
         returns = SCALAR_KIND.get(_annotation_kind(fn.returns), Type.OBJ)
     elements, ellipsis = _tuple_annotation(fn.returns)
-    return _Signature(fn, tuple(params), returns, elements, ellipsis, _src(fn.returns))
+    return _Signature(fn, tuple(params), returns, elements, ellipsis, _src(fn.returns), owner)
 
 
 def _tuple_annotation(annotation: ast.expr) -> tuple[tuple[Type, ...] | None, bool]:
@@ -618,11 +694,12 @@ def _annotation_kind(annotation: ast.expr) -> str:
 # --- local types from Pyrefly --------------------------------------------------------------------
 
 def _inferred_kinds(
-    path: Path, source: str, tree: ast.Module, functions: list[ast.FunctionDef],
+    path: Path, source: str, tree: ast.Module, functions: list[tuple[str, ast.FunctionDef]],
 ) -> dict[str, dict[str, list[tuple[int, str]]]]:
-    """function -> local -> [(line, base type)] for every unannotated assignment (Pyrefly)."""
+    """IR function name -> local -> [(line, base type)] for every unannotated assignment (Pyrefly)."""
     scopes = rebinding._scopes(tree)
-    wanted_scopes = {scopes.index(fn) for fn in functions}
+    keys = {id(fn): q for q, fn in functions}
+    wanted_scopes = {scopes.index(fn) for _, fn in functions}
     wanted = [a for a in rebinding.assignments(tree) if a.scope in wanted_scopes]
     if not wanted:
         return {}
@@ -642,7 +719,7 @@ def _inferred_kinds(
         spelled = types.get((p.line, p.column), "Unknown")
         function = scopes[a.scope]
         assert isinstance(function, ast.FunctionDef)
-        found.setdefault(function.name, {}).setdefault(p.name, []).append(
+        found.setdefault(keys[id(function)], {}).setdefault(p.name, []).append(
             (a.line, rebinding._base(spelled)))
     return found
 
@@ -653,7 +730,7 @@ def _lower_function(
     sig: _Signature, env: dict[str, ir.Function], info: _ModuleInfo,
     kinds: dict[str, dict[str, list[tuple[int, str]]]],
 ) -> ir.Function | str:
-    inferred = kinds.get(sig.node.name, {})
+    inferred = kinds.get(sig.qname, {})
     pure_error: Skip | None = None
     try:
         fn = _lower_in_mode(sig, env, info, inferred, impure=False)
@@ -823,9 +900,10 @@ class _Lowerer:
         assert pure or not self.deopts or not self.impure_mode, \
             "impure mode emitted a deopting node"
         return ir.Function(
-            name=self.fn.name, params=params, returns=self.sig.returns, locals=locals_, body=body,
+            name=self.sig.qname, params=params, returns=self.sig.returns, locals=locals_, body=body,
             pure=pure, may_deopt=self.deopts, source_line=self.fn.lineno,
-            entry_globals=tuple(ir.Param(n, t) for n, t in self.entry_used.items()))
+            entry_globals=tuple(ir.Param(n, t) for n, t in self.entry_used.items()),
+            owner=self.sig.owner)
 
     # --- names and types ---
 
@@ -1205,7 +1283,7 @@ class _Lowerer:
         """The argument `e` is certainly accepted by the callee's entry guard for `p.cls`."""
         if isinstance(e, ir.Const) and e.value is None:
             return p.optional
-        if isinstance(e, (ir.New, ir.CheckExact)):
+        if isinstance(e, (ir.New, ir.CheckExact, ir.CheckMethod)):
             return e.cls == p.cls
         if isinstance(e, ir.Local) and e.type == Type.OBJ:
             cls, exact = self.cls_of_name(e.name)
@@ -1778,6 +1856,11 @@ class _Lowerer:
             if math is not None:
                 return math
 
+        if isinstance(func, ast.Attribute) and plain:
+            direct = self.method_call(func, node)
+            if direct is not None:
+                return direct
+
         if isinstance(func, ast.Name) and func.id in self.arrays:
             raise self.array_misuse(func.id, node)
         callee = self.boxed(self.sub(func), func)
@@ -1822,6 +1905,37 @@ class _Lowerer:
         typed = tuple(self.boxed(e, a) if p.type == Type.OBJ else e
                       for p, e, a in zip(callee.params, args, node.args))
         return ir.Call(callee.returns, name, typed, redo=redo)
+
+    def method_call(self, func: ast.Attribute, node: ast.Call) -> ir.Expr | None:
+        """`obj.m(args)` where `obj` is a local of compiled class C and `C.m` a compiled method: the
+        direct C call `Call("C.m", (CheckMethod(obj, C, m), *args))` (ir.CheckMethod), only in a pure
+        function and only to a pure callee, because the check is a deopt. None: the generic path
+        (`CallObject(GetAttr(obj, m), args)`, CPython's own lookup, which finds the descriptor the
+        module installed) lowers the call, decided before any argument is lowered. A callee with
+        entry globals is left to the generic path too (its guard reads would need the caller's)."""
+        if self.impure_mode or not (isinstance(func.value, ast.Name) and self.is_local(func.value.id)):
+            return None
+        cls, _ = self.cls_of_name(func.value.id)
+        callee = self.env.get(f"{cls}.{func.attr}") if cls is not None else None
+        if callee is None or callee.owner != cls or not callee.pure or callee.entry_globals \
+                or len(node.args) != len(callee.params) - 1 \
+                or any(isinstance(p, ir.ArrayParam) for p in callee.params) \
+                or self.local_type(func.value.id, node.lineno) != Type.OBJ:
+            return None
+        assert cls is not None
+        recv = ir.CheckMethod(Type.OBJ, ir.Local(Type.OBJ, func.value.id), cls, func.attr)
+        self.hoist_ok = False
+        args = [recv] + [self.value(a) for a in node.args]
+        for p, e in zip(callee.params, args):
+            if p.type != Type.OBJ and e.type != p.type:
+                # the callee's entry guard would deopt; the impure retry (which takes the generic
+                # path) keeps CPython's result
+                raise Skip(node.lineno, f"argument of type {TYPE_NAME[e.type]} for parameter "
+                                        f"`{p.name}` of `{cls}.{func.attr}`")
+        self.deopts = True      # the CheckMethod (and a class argument's guard) can deopt
+        typed = tuple(self.boxed(e, a) if p.type == Type.OBJ else e
+                      for p, e, a in zip(callee.params, args, [func] + list(node.args)))
+        return ir.Call(callee.returns, f"{cls}.{func.attr}", typed)
 
     def math_call(self, attr: str, node: ast.Call) -> ir.Expr | None:
         try:

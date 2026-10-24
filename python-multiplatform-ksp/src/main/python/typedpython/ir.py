@@ -455,6 +455,23 @@ class CheckExact(Expr):
 
 
 @dataclass(frozen=True)
+class CheckMethod(Expr):
+    """`obj` itself (type OBJ), after checking that `obj.method` is the compiled method `cls.method`
+    CPython would find (SPEC N-11, issue #155): `type(obj) is C` AND every method the module installed
+    in C is still the very object in C's own dict (nobody rebound `C.method` or any other compiled
+    method since init). Anything else → deopt, so it is legal only in a pure function, the same rule
+    as CheckExact; it is how a pure compiled method or function calls `obj.method(args)` as a direct
+    C call: the front end emits `Call("C.method", (CheckMethod(obj, C, method), *args))`. No user
+    code runs. The check comes first among the call's operands, before the arguments are evaluated,
+    where CPython's LOAD_ATTR is. The verifier accepts the result as an exact-C proof (it is that, at
+    the check). `Module.functions` must hold a Function named `C.method` whose `owner` is C."""
+
+    obj: Expr
+    cls: str
+    method: str
+
+
+@dataclass(frozen=True)
 class FieldGet(Expr):
     """`obj.field` of a compiled fixed-layout class C whose exact type is proved (a dominating true
     IsExact on the same local, a CheckExact, a New, or a parameter guarded `type(x) is C`). Reads the
@@ -709,6 +726,11 @@ class Function:
     # only to closed functions), so nothing can
     # rebind the global between entry and use, and reading it once equals reading it at each use.
     entry_globals: tuple[Param, ...] = ()
+    # A method of the compiled fixed-layout class `owner` (SPEC N-11, #155): `name` is
+    # "<owner>.<method>" and params[0] is `self` as Param(OBJ, cls=owner, optional=False). The
+    # back end does not replace a module global with it; it installs a descriptor in the class dict
+    # (cgen.py "Methods"). None: a module-level function.
+    owner: str | None = None
 
 
 @dataclass(frozen=True)

@@ -1521,6 +1521,10 @@ typedef struct {
                                IMMUTABLE after tp_class_capture */
     Py_ssize_t slow;        /* per-access checks that failed (introspection only). ATOMIC */
     Py_ssize_t refreshed;   /* new tags adopted by tp_class_refresh (introspection only). ATOMIC */
+    unsigned int mtag;      /* tp_version_tag at which every compiled method installed in the class was
+                               the very object in the class's own dict (tp_methods_refresh); 0 until
+                               tp_class_retag. ATOMIC */
+    unsigned int mbad_tag;  /* a tag at which tp_methods_refresh failed (0: none); not retried. ATOMIC */
 } tp_class_rt;
 
 /* Moves whenever a watched module dict changes a key that is (or may be) a compiled class name, is
@@ -1610,6 +1614,8 @@ static inline void tp_class_rt_clear(tp_class_rt *rt, PyObject **descrs, Py_ssiz
     rt->tag = 0;
     rt->bad_tag = 0;
     rt->gepoch = 0;
+    rt->mtag = 0;
+    rt->mbad_tag = 0;
 }
 
 /* At module init: the class object must be what ClassDecl promises (tp_class_shape_ok) and every
@@ -1747,6 +1753,83 @@ static inline int tp_class_current(PyObject *obj, PyObject *cls_obj, tp_class_rt
         return 1;
     }
     return tp_class_refresh(cls, rt, fields, n, descrs);
+}
+
+/* Methods (SPEC N-11, #155). At module init, after the module installed its descriptors in the class
+ * dict (which moved the class's version tag): adopt the new tag as the proved tag of the slots (the
+ * fields and __init__ were not touched) and of the methods. Init time, plain stores. 1 = done, 0 = the
+ * class cannot get a tag (the caller marks it not compiled). */
+static inline int tp_class_retag(PyTypeObject *cls, tp_class_rt *rt)
+{
+    if (!PyUnstable_Type_AssignVersionTag(cls) || tp_type_tag(cls) == 0) {
+        return 0;
+    }
+    rt->tag = tp_type_tag(cls);
+    rt->bad_tag = 0;
+    rt->mtag = rt->tag;
+    rt->mbad_tag = 0;
+    return 1;
+}
+
+/* The tag moved (or is 0). Re-prove that `obj.m` still finds the compiled method for every installed
+ * method: the shape still holds (no __getattribute__ / __setattr__ ... added since: they would run
+ * instead of the plain lookup), and the class's own dict entry of each name is the very descriptor
+ * object the module installed (identity, descrs[i] keeps it alive). No user code runs. The tag is
+ * read BEFORE the dict is examined, as in tp_class_refresh. 1 = current (tag adopted), 0 = not,
+ * -1 = error (a failed dict lookup). */
+static inline int tp_methods_refresh(PyTypeObject *cls, tp_class_rt *rt, const char *const *names,
+                                     Py_ssize_t n, PyObject *const *descrs)
+{
+    unsigned int tag;
+    Py_ssize_t i;
+    PyObject *d;
+    int found;
+
+    if (!PyUnstable_Type_AssignVersionTag(cls) || tp_type_tag(cls) == 0) {
+        return 0;
+    }
+    tag = tp_type_tag(cls);
+    if (tag == tp_atomic_load_u32(&rt->mtag)) {
+        return 1;
+    }
+    if (tag == tp_atomic_load_u32(&rt->mbad_tag)) {
+        return 0;
+    }
+    if (!tp_class_shape_ok(cls)) {
+        goto bad;
+    }
+    for (i = 0; i < n; i++) {
+        found = tp_own_attr(cls, names[i], &d);
+        if (found < 0) {
+            return -1;
+        }
+        Py_XDECREF(d);
+        if (d != descrs[i]) {
+            goto bad;
+        }
+    }
+    tp_atomic_store_u32(&rt->mtag, tag);
+    return 1;
+bad:
+    tp_atomic_store_u32(&rt->mbad_tag, tag);
+    return 0;
+}
+
+/* CheckMethod: `type(obj) is cls` and `obj.m` finds the compiled method installed for it, for every
+ * name in `names`. 1 = yes, 0 = no (deopt), -1 = error. Fast case: one type compare, one tag compare. */
+static inline int tp_methods_current(PyObject *obj, PyObject *cls_obj, tp_class_rt *rt,
+                                     const char *const *names, Py_ssize_t n, PyObject *const *descrs)
+{
+    PyTypeObject *cls = (PyTypeObject *)cls_obj;
+    unsigned int mtag;
+    if (cls == NULL || !Py_IS_TYPE(obj, cls)) {
+        return 0;
+    }
+    mtag = tp_atomic_load_u32(&rt->mtag);
+    if (mtag != 0 && tp_type_tag(cls) == mtag) {               /* mtag is 0 until tp_class_retag */
+        return 1;
+    }
+    return tp_methods_refresh(cls, rt, names, n, descrs);
 }
 
 /* LOAD_GLOBAL of a class name, as an identity test: 1 = module_dict[name] is cls, 0 = it is not (or
@@ -1898,6 +1981,10 @@ static inline int tp_is_exact(PyObject *obj, PyTypeObject *cls)
 {
     return Py_IS_TYPE(obj, cls);
 }
+
+/* The exact-type guard of the `self` of a compiled method (wrapper and impl). A single definition so
+ * a test can show that it matters (a header where it is always true is caught). */
+#define TP_SELF_EXACT(o, cls) tp_is_exact(o, cls)
 
 /* ------------------------------------------------------------------------------------------
  * Call depth (issue #57): compiled frames have no Python frame, so a recursion made of them would

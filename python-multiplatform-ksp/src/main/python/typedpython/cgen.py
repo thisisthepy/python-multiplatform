@@ -151,6 +151,21 @@ re-proves what it relies on, right where CPython would look:
   `__typedpython_class_info__()` reports, per class, the captured and current tags, the slow-path
   and refresh counters and whether the module dict is watched (introspection for tests).
 
+Methods (SPEC N-11, issue #155). An `ir.Function` with an `owner` is a method of that compiled class.
+It has an impl and a wrapper like any function (its `self` is `Param(OBJ, cls=owner)`, guarded through
+`TP_SELF_EXACT`, so a `self` that is not exactly the class runs the original), but the module dict is
+not touched. The exec slot, after the class captures and for each class that is compiled
+(`cls_ok`): takes the class's OWN dict entry (it must be a plain Python function, else the class is
+marked not compiled), stores it in `__typedpython_interpreted__["C.m"]`, creates a `tp_method_obj`
+(`_TEMPLATE_METHOD_TYPE`: an immutable heap type, vectorcall, `tp_descr_get` like a function,
+`__name__`/`__qualname__`/`__doc__`/`__module__` forwarded, `__wrapped__` the original), replaces the
+dict entry with it, and finally `tp_class_retag` adopts the class's new version tag as the proved tag
+(the fields and `__init__` were not touched). `ir.CheckMethod` (`ev_CheckMethod`) is how a pure caller
+reaches the impl directly: `tp_methods_current` = `type(obj) is C` and (one tag compare against
+`cls_rt[k].mtag`, else `tp_methods_refresh`) every installed method still is, in C's own dict, the very
+descriptor installed (`tp_st->mdescrs`), and the class shape is unchanged; a failure is a deopt (pure
+functions only). Module-state fields `mtype` and `mdescrs[]` are written by the exec slot only.
+
 Generated arithmetic is in separate C statements and the file sets `#pragma STDC FP_CONTRACT OFF`
 (cbuild also passes -ffp-contract=off): a fused multiply-add would round differently from CPython.
 """
@@ -333,7 +348,7 @@ def _can_deopt(e: ir.Expr, functions: dict[str, ir.Function]) -> bool:
         return not e.proven              # a proven op cannot deopt (no overflow, or a shift / mask)
     if isinstance(e, ir.UnaryOp) and e.op is ir.UnaryOpKind.NEG and e.operand.type is Type.I64:
         return not e.proven
-    if isinstance(e, (ir.Unbox, ir.CheckExact)):
+    if isinstance(e, (ir.Unbox, ir.CheckExact, ir.CheckMethod)):
         return True
     if isinstance(e, ir.Call):
         if e.redo:
@@ -353,7 +368,7 @@ def _has_cls_param(f: ir.Function) -> bool:
 def _direct_classes(f: ir.Function) -> set[str]:
     out = {p.cls for p in f.params if isinstance(p, ir.Param) and p.cls is not None}
     for e in _all_exprs(f):
-        if isinstance(e, (ir.IsExact, ir.CheckExact, ir.FieldGet, ir.New)):
+        if isinstance(e, (ir.IsExact, ir.CheckExact, ir.CheckMethod, ir.FieldGet, ir.New)):
             out.add(e.cls)
     for s in _walk_stmts(f.body):
         if isinstance(s, ir.FieldSet):
@@ -361,11 +376,13 @@ def _direct_classes(f: ir.Function) -> set[str]:
     return out
 
 
-def _param_cls_fail(obj_c: str, k: int, optional: bool) -> str:
+def _param_cls_fail(obj_c: str, k: int, optional: bool, method_self: bool = False) -> str:
     """The C condition under which a `Param.cls` guard FAILS for the borrowed argument `obj_c`
     (class slot `k` of the module state): not exactly the class, and not None when optional.
-    Emitted both in the wrapper and at the top of the impl (module docstring)."""
-    exact = f"tp_is_exact({obj_c}, (PyTypeObject *)tp_st->classes[{k}])"
+    Emitted both in the wrapper and at the top of the impl (module docstring). `method_self`: the
+    `self` of a compiled method, guarded through the single mutation point TP_SELF_EXACT."""
+    test = "TP_SELF_EXACT" if method_self else "tp_is_exact"
+    exact = f"{test}({obj_c}, (PyTypeObject *)tp_st->classes[{k}])"
     return f"!({exact} || {obj_c} == Py_None)" if optional else f"!{exact}"
 
 
@@ -474,6 +491,27 @@ class _ModGen:
             self.slot_base[cd.name] = total
             total += len(cd.fields)
         self.n_slots = total
+        # Methods (module docstring, "Methods"): compiled functions with an `owner`. They are installed
+        # in their class's dict, not in the module dict, and have no PyMethodDef.
+        self.plain = [f for f in module.functions if f.owner is None]
+        self.methods_of: dict[str, list[ir.Function]] = {cd.name: [] for cd in module.classes}
+        for f in module.functions:
+            if f.owner is not None:
+                if f.owner not in self.classes:
+                    raise CGenError(f"{f.name}: owner {f.owner!r} has no ClassDecl in the module")
+                if f.name != f"{f.owner}.{f.name[len(f.owner) + 1:]}" or not f.name[len(f.owner) + 1:].isidentifier():
+                    raise CGenError(f"{f.name}: a method of {f.owner} is named {f.owner}.<identifier>")
+                p0 = f.params[0] if f.params else None
+                if not (isinstance(p0, ir.Param) and p0.type is Type.OBJ and p0.cls == f.owner
+                        and not p0.optional):
+                    raise CGenError(f"{f.name}: the first parameter of a method must be self guarded {f.owner}")
+                self.methods_of[f.owner].append(f)
+        self.method_base: dict[str, int] = {}
+        total_methods = 0
+        for cd in module.classes:
+            self.method_base[cd.name] = total_methods
+            total_methods += len(self.methods_of[cd.name])
+        self.n_methods = total_methods
         self._uses: dict[str, set[str]] = {}
         self.bounded = _bounded_functions(self.functions)     # name -> k (module docstring, "Fast entry")
 
@@ -529,6 +567,17 @@ class _ModGen:
                     todo.append(e.function)
         return sorted(out, key=lambda n: self.class_index.get(n, -1))
 
+    def method(self, fname: str, cls: str, method: str) -> ir.Function:
+        f = self.functions.get(f"{cls}.{method}")
+        if f is None or f.owner != cls:
+            raise CGenError(f"{fname}: CheckMethod names {cls}.{method}, which is not a compiled method")
+        return f
+
+    def methods_c(self, cls: str) -> tuple[str, int, str]:
+        """(C array of the installed method names, their count, C descriptor-array pointer) of `cls`."""
+        k = self.class_index[cls]
+        return f"tp_mnames_{k}", len(self.methods_of[cls]), f"&tp_st->mdescrs[{self.method_base[cls]}]"
+
     def watches_globals(self) -> bool:
         return any(isinstance(e, (ir.New, ir.IsExact))
                    for f in self.module.functions for e in _all_exprs(f))
@@ -572,6 +621,7 @@ def generate(module: ir.Module, source_path: Path, display_path: str | None = No
     w(f"/* Generated by typedpython.cgen from {source_path.name}, do not edit. */")
     w("#define PY_SSIZE_T_CLEAN")
     w("#include <Python.h>")
+    w("#include <stddef.h>")
     w("#include <stdint.h>")
     w('#include "tp_runtime.h"')
     w("")
@@ -597,6 +647,8 @@ def generate(module: ir.Module, source_path: Path, display_path: str | None = No
     w("    int watch_id1;                  /* dict watcher id + 1 on the module dict; 0 = none */")
     w("    PyObject *breaker;              /* `lambda: None`; calling it runs the eval breaker (#141) */")
     w("    PyObject *buf_types[1];         /* strong: array.array (buffer arrays, #149); NULL: not importable */")
+    w("    PyObject *mtype;                /* strong: the descriptor type of compiled methods; NULL: none */")
+    w(f"    PyObject *mdescrs[{mg.n_methods + 1}];        /* strong: the installed descriptor of each method */")
     w("} tp_state;")
     w("")
     w("static const char *const tp_name_strings[] = {")
@@ -608,9 +660,14 @@ def generate(module: ir.Module, source_path: Path, display_path: str | None = No
     for cd in module.classes:
         items = "".join(f"{c_string(x)}, " for x in cd.fields)
         w(f"static const char *const tp_fields_{mg.class_index[cd.name]}[] = {{{items}NULL}};")
+    for cd in module.classes:
+        items = "".join(f"{c_string(f.name[len(cd.name) + 1:])}, " for f in mg.methods_of[cd.name])
+        w(f"static const char *const tp_mnames_{mg.class_index[cd.name]}[] = {{{items}NULL}};")
     names = "".join(f"{c_string(cd.name)}, " for cd in module.classes)
     w(f"static const char *const tp_class_names[] = {{{names}NULL}};")
     w("")
+    if mg.n_methods:
+        w(_TEMPLATE_METHOD_TYPE)
     if module.classes and mg.watches_globals():
         w("/* Dict watcher of the module dict (tp_globals_watch): a class-name key changed. */")
         w("static int tp_watch_cb(PyDict_WatchEvent event, PyObject *dict, PyObject *key, PyObject *value)")
@@ -629,7 +686,7 @@ def generate(module: ir.Module, source_path: Path, display_path: str | None = No
         w(b)
     # method table
     w("static PyMethodDef tp_methods[] = {")
-    for f in module.functions:
+    for f in mg.plain:
         w(f"    {{{c_string(f.name)}, (PyCFunction)(void (*)(void)){_ident('tp_wrap', f.name)}, "
           f"METH_FASTCALL | METH_KEYWORDS, NULL}},")
     w("#ifdef TP_TRACE_FAST")
@@ -1247,6 +1304,21 @@ class _FnGen:
         self.emit(f"if (!tp_is_exact({o}, (PyTypeObject *)tp_st->classes[{k}])) {{ tp_rc = 1; goto tp_exit; }}")
         return o
 
+    def ev_CheckMethod(self, e: ir.CheckMethod) -> str:
+        """`obj.method` is still the compiled method: `type(obj) is C` and every installed method of C
+        is still the object in C's own dict (tp_methods_current); else a deopt (legal in a pure
+        function only, _check_function). The receiver is checked here, before the call's other
+        operands are evaluated, where LOAD_ATTR is."""
+        k = self._class(e.cls)
+        self.mg.method(self.f.name, e.cls, e.method)
+        o = self._obj_operand(e.obj, "CheckMethod")
+        names_c, n, descrs_c = self.mg.methods_c(e.cls)
+        self.emit(f"tp_s = tp_methods_current({o}, tp_st->classes[{k}], &tp_st->cls_rt[{k}], "
+                  f"{names_c}, {n}, {descrs_c});")
+        self.emit("if (tp_s < 0) { tp_rc = -1; goto tp_exit; }")
+        self.emit(f"if (!tp_s) {{ tp_class_note_slow(&tp_st->cls_rt[{k}]); tp_rc = 1; goto tp_exit; }}")
+        return o
+
     def ev_FieldGet(self, e: ir.FieldGet) -> str:
         slot = self.mg.slot(self.f.name, e.cls, e.field)
         o = self._obj_operand(e.obj, "FieldGet")
@@ -1777,7 +1849,7 @@ class _FnGen:
         for p in f.params:
             if isinstance(p, ir.Param) and p.cls is not None:
                 k = self._class(p.cls)
-                out.append(f"    if ({_param_cls_fail(_ident('p', p.name), k, p.optional)}) return 1;")
+                out.append(f"    if ({_param_cls_fail(_ident('p', p.name), k, p.optional, f.owner is not None and p is f.params[0])}) return 1;")
         k_bound = self.mg.bounded.get(f.name)
         if self.fast:
             # Fast twin of a bounded function (module docstring, "Fast entry"): the caller proved
@@ -1870,7 +1942,7 @@ class _FnGen:
             L.append("    if (!(" + " && ".join(f"tp_st->cls_ok[{self.mg.class_index[n]}]"
                                                  for n in classes) + ")) goto tp_deopt;")
         for i, p in cls_params:
-            L.append(f"    if ({_param_cls_fail(f'tp_args[{i}]', self._class(p.cls), p.optional)}) goto tp_deopt;")
+            L.append(f"    if ({_param_cls_fail(f'tp_args[{i}]', self._class(p.cls), p.optional, f.owner is not None and i == 0)}) goto tp_deopt;")
         if classes and f.entry_globals and not f.pure:
             # module docstring, rule 8: a closed impure function must not reach a slow path
             for cname in classes:
@@ -1974,6 +2046,162 @@ class _FnGen:
 
 # --- fixed parts of the module -------------------------------------------------------------------
 
+_TEMPLATE_METHOD_TYPE = r'''
+/* Compiled methods (module docstring, "Methods"). The type of the object that replaces a function
+ * in a compiled class's dict. IMMUTABLE after tp_exec: the type has Py_TPFLAGS_IMMUTABLETYPE and each
+ * object's fields are written once, by tp_method_new, before it is published in the class dict. */
+typedef PyObject *(*tp_method_fn)(PyObject *module, PyObject *const *args, Py_ssize_t nargs,
+                                  PyObject *kwnames);
+
+typedef struct {
+    PyObject_HEAD
+    vectorcallfunc vectorcall;
+    PyObject *module;       /* strong: the extension module (its state holds the class guards) */
+    PyObject *func;         /* strong: the original Python function (`__wrapped__`) */
+    tp_method_fn fn;        /* the generated wrapper: guards, impl, or the interpreted redo */
+} tp_method_obj;
+
+static PyObject *tp_method_vectorcall(PyObject *callable, PyObject *const *args, size_t nargsf,
+                                      PyObject *kwnames)
+{
+    tp_method_obj *m = (tp_method_obj *)callable;
+    return m->fn(m->module, args, PyVectorcall_NARGS(nargsf), kwnames);
+}
+
+/* Binds like a function (func_descr_get): C.m is the object itself, obj.m a bound method. */
+static PyObject *tp_method_get(PyObject *self, PyObject *obj, PyObject *type)
+{
+    (void)type;
+    if (obj == NULL || obj == Py_None) {
+        return Py_NewRef(self);
+    }
+    return PyMethod_New(self, obj);
+}
+
+/* The attributes a function shows are the original function's (the five of SPEC N-11 / API.md
+ * "Methods"); `__wrapped__` is a member. Looked up before the type's own `__doc__` / `__module__`. */
+static PyObject *tp_method_getattro(PyObject *self, PyObject *name)
+{
+    if (PyUnicode_Check(name)
+        && (PyUnicode_CompareWithASCIIString(name, "__name__") == 0
+            || PyUnicode_CompareWithASCIIString(name, "__qualname__") == 0
+            || PyUnicode_CompareWithASCIIString(name, "__doc__") == 0
+            || PyUnicode_CompareWithASCIIString(name, "__module__") == 0)) {
+        return PyObject_GetAttr(((tp_method_obj *)self)->func, name);
+    }
+    return PyObject_GenericGetAttr(self, name);
+}
+
+static PyObject *tp_method_repr(PyObject *self)
+{
+    PyObject *q = PyObject_GetAttrString(((tp_method_obj *)self)->func, "__qualname__"), *r;
+    if (q == NULL) {
+        return NULL;
+    }
+    r = PyUnicode_FromFormat("<compiled function %S at %p>", q, (void *)self);
+    Py_DECREF(q);
+    return r;
+}
+
+static int tp_method_traverse(PyObject *self, visitproc visit, void *arg)
+{
+    tp_method_obj *m = (tp_method_obj *)self;
+    Py_VISIT(Py_TYPE(self));
+    Py_VISIT(m->module);
+    Py_VISIT(m->func);
+    return 0;
+}
+
+static int tp_method_clear(PyObject *self)
+{
+    tp_method_obj *m = (tp_method_obj *)self;
+    Py_CLEAR(m->module);
+    Py_CLEAR(m->func);
+    return 0;
+}
+
+static void tp_method_dealloc(PyObject *self)
+{
+    PyTypeObject *tp = Py_TYPE(self);
+    PyObject_GC_UnTrack(self);
+    (void)tp_method_clear(self);
+    tp->tp_free(self);
+    Py_DECREF(tp);
+}
+
+static PyMemberDef tp_method_members[] = {
+    {"__vectorcalloffset__", Py_T_PYSSIZET, offsetof(tp_method_obj, vectorcall), Py_READONLY, NULL},
+    {"__wrapped__", Py_T_OBJECT_EX, offsetof(tp_method_obj, func), Py_READONLY, NULL},
+    {NULL, 0, 0, 0, NULL}
+};
+
+static PyType_Slot tp_method_slots[] = {
+    {Py_tp_dealloc, (void *)tp_method_dealloc},
+    {Py_tp_traverse, (void *)tp_method_traverse},
+    {Py_tp_clear, (void *)tp_method_clear},
+    {Py_tp_repr, (void *)tp_method_repr},
+    {Py_tp_getattro, (void *)tp_method_getattro},
+    {Py_tp_descr_get, (void *)tp_method_get},
+    {Py_tp_call, (void *)PyVectorcall_Call},
+    {Py_tp_members, (void *)tp_method_members},
+    {0, NULL}
+};
+
+static PyType_Spec tp_method_spec = {
+    "typedpython.compiled_function", sizeof(tp_method_obj), 0,
+    Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | Py_TPFLAGS_IMMUTABLETYPE
+        | Py_TPFLAGS_DISALLOW_INSTANTIATION | Py_TPFLAGS_METHOD_DESCRIPTOR
+        | Py_TPFLAGS_HAVE_VECTORCALL,
+    tp_method_slots
+};
+
+/* Install the descriptor for method `name` of `cls`: the class's own entry must be a plain Python
+ * function. The original is stored in `table` under `qname` whatever it is. 0 = installed (*out is
+ * the strong reference the module state keeps), 1 = not installed (absent or not a function: the
+ * class is then not compiled), -1 = error. Init time only. */
+static int tp_method_install(PyObject *type, PyObject *module, PyObject *cls, const char *name,
+                             PyObject *qname, tp_method_fn fn, PyObject *table, PyObject **out)
+{
+    PyObject *orig = NULL;
+    tp_method_obj *d = NULL;
+    int found, rc = -1;
+
+    found = tp_own_attr((PyTypeObject *)cls, name, &orig);
+    if (found < 0) {
+        return -1;
+    }
+    if (found == 0) {
+        return 1;
+    }
+    if (PyDict_SetItem(table, qname, orig) < 0) {
+        goto done;
+    }
+    if (!PyFunction_Check(orig)) {      /* exactly a Python function: no decorator wrapper */
+        rc = 1;
+        goto done;
+    }
+    d = PyObject_GC_New(tp_method_obj, (PyTypeObject *)type);
+    if (d == NULL) {
+        goto done;
+    }
+    d->vectorcall = tp_method_vectorcall;
+    d->module = Py_NewRef(module);
+    d->func = orig;
+    orig = NULL;                        /* moved into the descriptor */
+    d->fn = fn;
+    PyObject_GC_Track((PyObject *)d);
+    if (PyObject_SetAttrString(cls, name, (PyObject *)d) < 0) {
+        Py_DECREF((PyObject *)d);
+        goto done;
+    }
+    *out = (PyObject *)d;               /* the module state keeps the reference */
+    rc = 0;
+done:
+    Py_XDECREF(orig);
+    return rc;
+}
+'''
+
 _TEMPLATE_REDO = r'''
 /* Deopt: count it, then call __typedpython_interpreted__[name] with the original arguments. */
 static PyObject *tp_cg_redo(PyObject *tp_module, int tp_name, PyObject *const *tp_args,
@@ -2027,6 +2255,8 @@ def _state_functions(mg: _ModGen) -> str:
         "    size_t i;",
         "    if (tp_st == NULL) return 0;",
         "    Py_VISIT(tp_st->breaker);",
+        "    Py_VISIT(tp_st->mtype);",
+        "    for (i = 0; i < sizeof(tp_st->mdescrs) / sizeof(tp_st->mdescrs[0]); i++) Py_VISIT(tp_st->mdescrs[i]);",
         "    for (i = 0; i < 1; i++) Py_VISIT(tp_st->buf_types[i]);",
         "    for (i = 0; i < sizeof(tp_st->names) / sizeof(tp_st->names[0]); i++) Py_VISIT(tp_st->names[i]);",
         "    for (i = 0; i < sizeof(tp_st->kwnames) / sizeof(tp_st->kwnames[0]); i++) Py_VISIT(tp_st->kwnames[i]);",
@@ -2043,6 +2273,8 @@ def _state_functions(mg: _ModGen) -> str:
         "    if (tp_st == NULL) return 0;",
         "    if (tp_st->watch_id1 > 0) tp_globals_unwatch(PyModule_GetDict(tp_module), &tp_st->watch_id1);",
         "    tp_release(&tp_st->breaker);",
+        "    for (i = 0; i < sizeof(tp_st->mdescrs) / sizeof(tp_st->mdescrs[0]); i++) tp_release(&tp_st->mdescrs[i]);",
+        "    tp_release(&tp_st->mtype);",
         "    for (i = 0; i < 1; i++) tp_release(&tp_st->buf_types[i]);",
         "    for (i = 0; i < sizeof(tp_st->names) / sizeof(tp_st->names[0]); i++) tp_release(&tp_st->names[i]);",
         "    for (i = 0; i < sizeof(tp_st->kwnames) / sizeof(tp_st->kwnames[0]); i++) tp_release(&tp_st->kwnames[i]);",
@@ -2075,14 +2307,16 @@ def _class_info_function(mg: _ModGen) -> str:
         k = mg.class_index[cd.name]
         L += [
             f"    tp_c = tp_st->classes[{k}];",
-            "    tp_d = Py_BuildValue(\"{s:O,s:I,s:I,s:O,s:n,s:n,s:O}\",",
+            "    tp_d = Py_BuildValue(\"{s:O,s:I,s:I,s:O,s:n,s:n,s:O,s:n,s:O}\",",
             f"        \"compiled\", tp_st->cls_ok[{k}] ? Py_True : Py_False,",
             f"        \"captured_tag\", tp_class_rt_tag(&tp_st->cls_rt[{k}]),",
             "        \"tag\", tp_class_tag(tp_c),",
             f"        \"current\", (tp_c != NULL && tp_class_tag(tp_c) == tp_class_rt_tag(&tp_st->cls_rt[{k}])) ? Py_True : Py_False,",
             f"        \"slow\", tp_class_rt_slow(&tp_st->cls_rt[{k}]), \"refreshed\", "
             f"tp_class_rt_refreshed(&tp_st->cls_rt[{k}]),",
-            "        \"watched\", tp_st->watch_id1 > 0 ? Py_True : Py_False);",
+            "        \"watched\", tp_st->watch_id1 > 0 ? Py_True : Py_False,",
+            f"        \"methods\", (Py_ssize_t){len(mg.methods_of[cd.name])},",
+            f"        \"methods_current\", (tp_c != NULL && tp_class_tag(tp_c) == tp_atomic_load_u32(&tp_st->cls_rt[{k}].mtag)) ? Py_True : Py_False);",
             f"    if (tp_d == NULL || PyDict_SetItemString(tp_out, {c_string(cd.name)}, tp_d) < 0) {{",
             "        Py_XDECREF(tp_d); Py_DECREF(tp_out); return NULL; }",
             "    Py_DECREF(tp_d);",
@@ -2161,6 +2395,30 @@ def _exec_function(mg: _ModGen) -> str:
             "    }",
             "    tp_release(&tp_c);",
         ]
+    if mg.n_methods:
+        L += [
+            "    tp_st->mtype = PyType_FromModuleAndSpec(tp_module, &tp_method_spec, NULL);",
+            "    if (tp_st->mtype == NULL) goto tp_done;",
+        ]
+    for cd in mg.module.classes:
+        ms = mg.methods_of[cd.name]
+        if not ms:
+            continue
+        j = mg.class_index[cd.name]
+        L += [f"    if (tp_st->cls_ok[{j}]) do {{"]
+        for i, f in enumerate(ms):
+            L += [
+                f"        tp_k = tp_method_install(tp_st->mtype, tp_module, tp_st->classes[{j}], "
+                f"{c_string(f.name[len(cd.name) + 1:])}, tp_st->names[{mg.name_index(f.name)}], "
+                f"{_ident('tp_wrap', f.name)}, tp_table, &tp_st->mdescrs[{mg.method_base[cd.name] + i}]);",
+                "        if (tp_k < 0) goto tp_done;",
+                f"        if (tp_k > 0) {{ tp_st->cls_ok[{j}] = 0; break; }}",
+            ]
+        L += [
+            f"        if (!tp_class_retag((PyTypeObject *)tp_st->classes[{j}], &tp_st->cls_rt[{j}])) "
+            f"tp_st->cls_ok[{j}] = 0;",
+            "    } while (0);",
+        ]
     if mg.module.classes:
         if mg.watches_globals():
             # after the source ran: from here a rebinding of a class name moves tp_globals_epoch
@@ -2176,7 +2434,7 @@ def _exec_function(mg: _ModGen) -> str:
         "    tp_modname = PyModule_GetNameObject(tp_module);",
         "    if (tp_modname == NULL) goto tp_done;",
     ]
-    for j, f in enumerate(mg.module.functions):
+    for j, f in enumerate(mg.plain):
         k = mg.name_index(f.name)
         L += [
             f"    tp_k = PyDict_GetItemRef(tp_dict, tp_st->names[{k}], &tp_f);",
@@ -2189,7 +2447,7 @@ def _exec_function(mg: _ModGen) -> str:
         ]
     L += [
         "#ifdef TP_TRACE_FAST",
-        f"    tp_cf = PyCFunction_NewEx(&tp_methods[{len(mg.module.functions)}], tp_module, tp_modname);",
+        f"    tp_cf = PyCFunction_NewEx(&tp_methods[{len(mg.plain)}], tp_module, tp_modname);",
         "    if (tp_cf == NULL || PyDict_SetItemString(tp_dict, \"__tp_trace_fast_hits__\", tp_cf) < 0) goto tp_done;",
         "    tp_release(&tp_cf);",
         "#endif",

@@ -241,6 +241,8 @@ Guard state, one per ClassDecl in the module state (zeroed = not compiled):
         PyObject *init;         /* IMMUTABLE after capture. strong: the class's own __init__ at capture, or NULL */
         Py_ssize_t slow;        /* ATOMIC. failed per-access checks (introspection) */
         Py_ssize_t refreshed;   /* ATOMIC. new tags adopted by tp_class_refresh (introspection) */
+        unsigned int mtag;      /* ATOMIC. tp_version_tag at which every installed method was the very object in the class dict (#155); 0 until tp_class_retag */
+        unsigned int mbad_tag;  /* ATOMIC. a tag at which tp_methods_refresh failed (0: none); not retried */
     } tp_class_rt;
     static uint64_t tp_globals_epoch;   /* ATOMIC. moves when a watched module dict changes a class-name key */
     /* atomic accessors (relaxed loads, acq_rel adds); every read of cls->tp_version_tag goes through one */
@@ -313,6 +315,61 @@ Slot access and the slow paths:
 FieldGet's slow path is `tp_getattr`, New's is `tp_global` + `tp_call` (the binding loaded before
 the arguments), IsExact's compares with `tp_global`; in a pure function every slow path is a deopt.
 
+### Methods (ir.Function.owner / ir.CheckMethod; SPEC N-11, issue #155)
+
+A plain instance method of a compiled class is an ir.Function named `C.m` with `owner = "C"`. The module
+init (after the class guards are captured) replaces the class dict's function by a descriptor object
+of a type the extension defines, stores the original function in `__typedpython_interpreted__["C.m"]`
+and adopts the class's new version tag:
+
+    typedef PyObject *(*tp_method_fn)(PyObject *module, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames);
+    typedef struct { PyObject_HEAD; vectorcallfunc vectorcall; PyObject *module; PyObject *func; tp_method_fn fn; } tp_method_obj;
+    /* generated: tp_method_install(type, module, cls, name, qname, fn, table, &out): the class's OWN entry
+       must be a plain function (PyFunction_Check): 0 installed, 1 not (class not compiled), -1 error */
+    int  tp_class_retag(PyTypeObject *cls, tp_class_rt *rt);        /* init only: adopt the current tag as tag and mtag */
+    /* CheckMethod: 1 = type(obj) is cls and every installed method name in `names` is, in cls's own dict,
+       the very descriptor in `descrs` (mtag fast path, else tp_methods_refresh); 0 = deopt; -1 error */
+    int  tp_methods_current(PyObject *obj, PyObject *cls, tp_class_rt *rt, const char *const *names,
+                            Py_ssize_t n, PyObject *const *descrs);
+    int  tp_methods_refresh(PyTypeObject *cls, tp_class_rt *rt, const char *const *names, Py_ssize_t n,
+                            PyObject *const *descrs);              /* also re-proves tp_class_shape_ok */
+    #define TP_SELF_EXACT(o, cls) tp_is_exact(o, cls)             /* the one guard of a method's `self` */
+
+What the descriptor does (the type is `typedpython.compiled_function`, immutable, not instantiable,
+GC-tracked, `Py_TPFLAGS_METHOD_DESCRIPTOR | Py_TPFLAGS_HAVE_VECTORCALL`):
+
+  * `C.m` is the descriptor itself, `obj.m` is a `types.MethodType` over it (`tp_descr_get` is
+    `func_descr_get`'s rule); a call goes `vectorcall -> tp_wrap_C.m`, the same wrapper a module-level
+    function has: arity or any keyword, a `self` that is not exactly `C` (a subclass instance, `C.m(5)`),
+    a failed guard, or a deopt of the impl runs the ORIGINAL function with the same arguments, so
+    CPython's own result or error comes out. The deopt counter counts it.
+  * `self` is `Param(OBJ, cls=C)`; its guard is `TP_SELF_EXACT` in the wrapper and at the top of the impl.
+  * A call `obj.m(args)` in a PURE compiled function whose receiver is a local of class C and whose
+    callee is a pure compiled method is `Call("C.m", (CheckMethod(obj, C, m), *args))`: a direct C call
+    guarded by `tp_methods_current` (one type compare, one tag compare). If someone rebound any
+    compiled method of C, added `__getattribute__` ..., or the receiver is not exactly C, the pure
+    caller deopts and CPython's own lookup runs in the redo. Impure callers, calls with keywords,
+    callees with entry globals and argument type mismatches use `CallObject(GetAttr(obj, m))`, which finds
+    the descriptor through `tp_getattr`.
+  * Rebinding or deleting `C.m` replaces or removes the descriptor (CPython semantics); other
+    descriptors of the class are untouched.
+
+Observable differences from a function (recorded; each is tested):
+
+  * `type(C.__dict__["m"])` is `typedpython.compiled_function` (not `function`); `isinstance(C.m,
+    types.FunctionType)` is False; `inspect.isfunction` is False, `callable` is True.
+  * `repr(C.m)` is `<compiled function C.m at 0x...>`; `repr(obj.m)` is the bound-method repr
+    (`<bound method C.m of ...>`), `obj.m.__func__ is C.m`.
+  * Forwarded from the original function on every access: `__name__`, `__qualname__`, `__doc__`,
+    `__module__`. `__wrapped__` is the original function (so `inspect.signature` and `inspect.unwrap`
+    see it). NOT forwarded (AttributeError): `__code__`, `__globals__`, `__defaults__`, `__kwdefaults__`,
+    `__annotations__`, `__closure__`, `__dict__`, `__type_params__`. Nothing can be assigned to it.
+  * A module-level compiled function is a builtin function (`PyCFunction`) with `__name__` and `__module__`
+    only: no `__wrapped__`, no forwarded `__doc__`. The two differ on purpose; a method needs the
+    forwarding for `help()`, `inspect` and pickling a bound method (`__reduce__` reads `__name__`).
+  * A subclass is a different layout case: a subclass instance never takes the compiled path, even
+    through an inherited method (guard fails, original runs).
+
 Version tags (CPython 3.14 Objects/typeobject.c): PyType_Modified sets tp_version_tag to 0 for the
 type and its subclasses; assign_version_tag gives a heap type `NEXT_VERSION_TAG(interp)++`, a
 per-interpreter counter that only grows and, once it wraps to 0, assigns nothing again; a class
@@ -333,6 +390,10 @@ static or module-state field must be added here):
 | `tp_pc` (loop countdown) | local of each impl | per call | a C local |
 | `tp_globals_epoch` | tp_runtime.h static | atomic | relaxed loads, acq_rel add in the watcher callback (any thread); the epoch + dict lookup that remember a binding run in the module dict's critical section |
 | `cls_rt[k].tag`, `.bad_tag`, `.gepoch` | module state | atomic | relaxed `tp_atomic_*`; a stale tag is never reused (tags only grow), so a lost or reordered refresh costs one more refresh |
+| `cls_rt[k].mtag`, `.mbad_tag` | module state | atomic | relaxed `tp_atomic_*`, as `tag`; `tp_class_retag` writes `mtag` plainly at init only |
+| `mtype` (descriptor type), `mdescrs[]` | module state | immutable after init | written by `tp_exec` (and `tp_clear`); the type is `Py_TPFLAGS_IMMUTABLETYPE` |
+| each `tp_method_obj` (`module`, `func`, `fn`, `vectorcall`) | heap object in a class dict | immutable | written once by `tp_method_install` before it is published in the class dict; `tp_method_get` / call read only |
+| `tp_mnames_*`, `tp_method_spec`, `tp_method_slots`, `tp_method_members` | generated statics | immutable | never written after import |
 | `cls_rt[k].slow`, `.refreshed` | module state | atomic | `tp_atomic_add_ssize` (introspection only) |
 | `cls->tp_version_tag` | CPython type | atomic read | `tp_type_tag` (CPython clears and reassigns it from any thread) |
 | `cls_rt[k].init`, `names`, `kwnames`, `classes`, `cls_ok`, `slots`, `descrs`, `breaker`, `watch_id1` | module state | immutable after init | written by `tp_exec` (and `tp_clear` at teardown, when no call can run); the `PyMemberDef`s live in the classes the state holds |

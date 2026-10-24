@@ -94,6 +94,13 @@ Fixed-layout classes (SPEC N-11). The verifier never trusts the front end for th
     "`obj` itself ... after checking": the result is a new reference to the operand (the back end
     increfs it); the operand's own reference is untouched.
 
+Methods (SPEC N-11, #155). A `Function` with an `owner` must name a valid ClassDecl, be called
+`<owner>.<identifier>` (not a slot name) and take `self` as its first parameter, `Param(OBJ, cls=owner,
+optional=False)` (`verify/class` otherwise). `CheckMethod(obj, C, m)` is CheckExact plus a callee edge to
+`C.m`: it deopts (pure functions only, counts toward `may_deopt`), names a compiled method of C
+(`verify/call-unresolved` otherwise; a rejected or removed method rejects the caller) and is an exact-C
+proof like CheckExact.
+
 Objects, str and dict code (#150). GetItem, Contains, Format, StoreItem and ForObj run user code
 (`__getitem__`, `__hash__`, `__eq__`, `__format__`, `__iter__`, `__next__`, `__setitem__`): each is an
 effect and makes the function not closed (so it can hold no array, no buffer and no entry global),
@@ -221,7 +228,7 @@ from .ir import (
     Local, MathCall, MathFunc, Module, NewArray, ObjToFloat, Or, Param, Return, StoreIndex, ToFloat,
     Truth, Tuple, Type, Unbox, UnaryOp, UnaryOpKind, While,
 )
-from .ir import CheckExact, ClassDecl, FieldGet, FieldSet, Is, IsExact, New
+from .ir import CheckExact, CheckMethod, ClassDecl, FieldGet, FieldSet, Is, IsExact, New
 from .ir import BuildString, Contains, ForObj, Format, GetItem, NewDict, NewList, StoreItem
 
 DA = "verify/definite-assignment"
@@ -260,7 +267,7 @@ class Diagnostic:
 # the one the back end implements).
 _EXPRS = frozenset({Const, Local, BinOp, UnaryOp, Compare, And, Or, ToFloat, Box, Unbox, MathCall,
                     Call, Global, GetAttr, CallObject, Truth, CompareObj, ObjToFloat, Len, Index,
-                    NewArray, CopyArray, Tuple, Is, IsExact, CheckExact, FieldGet, New,
+                    NewArray, CopyArray, Tuple, Is, IsExact, CheckExact, CheckMethod, FieldGet, New,
                     GetItem, Contains, NewList, NewDict, Format, BuildString})
 _STMTS = frozenset({Assign, StoreIndex, ExprStmt, If, While, ForRange, Return, Break, Continue,
                     FieldSet, StoreItem, ForObj})
@@ -269,7 +276,7 @@ _STMTS = frozenset({Assign, StoreIndex, ExprStmt, If, While, ForRange, Return, B
 # borrows under that rule) and Calls of a compiled function returning OBJ (which returns a new
 # reference by the same rule).
 _OBJ_PRODUCERS = frozenset({Box, Global, GetAttr, CallObject, BinOp, Local, Call, Tuple, New,
-                            FieldGet, CheckExact, Const,      # an OBJ Const is None or a str (e_Const)
+                            FieldGet, CheckExact, CheckMethod, Const,      # an OBJ Const is None or a str (e_Const)
                             GetItem, NewList, NewDict, Format, BuildString})
 _CONVERSIONS = (-1, 97, 114, 115)          # Format.conversion: none, !a, !r, !s
 _VALUE_TYPES = (Type.I64, Type.F64, Type.BOOL, Type.OBJ)        # what a local may hold
@@ -503,7 +510,7 @@ class _Checker:
         cls = type(e)
         if cls is Local:
             return self.facts.get(e.name) or self.new_only.get(e.name)
-        if cls is CheckExact or cls is New:
+        if cls is CheckExact or cls is CheckMethod or cls is New:
             return e.cls if isinstance(e.cls, str) and e.cls in self.classes else None
         return None
 
@@ -1115,6 +1122,23 @@ class _Checker:
         self.known_class(e.cls, "CheckExact")
         self.result(e, Type.OBJ)
         self.can_deopt = True       # a wrong type deopts, even if the check is redundant
+        return dataclasses.replace(e, obj=obj)
+
+    def e_CheckMethod(self, e: CheckMethod, state: _State) -> ir.Expr:
+        """Methods (SPEC N-11, #155): the check is a deopt, like CheckExact, and names a compiled
+        method of the class: the callee edge makes a rejected or removed method reject this function
+        too (the back end's descriptors are built from the methods that are compiled)."""
+        obj = self.obj_operand(e.obj, state, "operand of CheckMethod")
+        self.result(e, Type.OBJ)
+        self.can_deopt = True
+        if self.known_class(e.cls, "CheckMethod"):
+            q = f"{e.cls}.{e.method}" if isinstance(e.method, str) else None
+            callee = self.sigs.get(q) if q is not None else None
+            if callee is None or callee.owner != e.cls:
+                self.error(UNRESOLVED, f"CheckMethod names method {e.method!r} of '{e.cls}', which "
+                                       f"is not a compiled method of this module")
+            else:
+                self.callees.add(q)
         return dataclasses.replace(e, obj=obj)
 
     def e_FieldGet(self, e: FieldGet, state: _State) -> ir.Expr:
@@ -1761,6 +1785,10 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
                                                        f"{len(gs)} times")
     sigs = {name: gs[0] for name, gs in named.items() if len(gs) == 1}
     classes, skipped_classes = _check_classes(module, set(named), diags)
+    for name, g in sigs.items():
+        problem = _owner_problem(g, classes)
+        if problem is not None:
+            reject(name, g.source_line, CLASS, problem)
 
     checked: dict[str, Function] = {}
     callees: dict[str, set[str]] = {}
@@ -1837,6 +1865,25 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
     for name, reason in {**skipped_classes, **reasons}.items():
         skipped.setdefault(name, reason)
     return Module(module.name, kept, skipped, tuple(classes.values())), diags
+
+
+def _owner_problem(g: Function, classes: dict[str, ClassDecl]) -> str | None:
+    """Why `g.owner` is not a legal method declaration (ir.Function.owner), or None."""
+    owner = g.owner
+    if owner is None:
+        return None
+    if not isinstance(owner, str) or owner not in classes:
+        return f"owner {owner!r} is not a compiled class of this module"
+    prefix = f"{owner}."
+    if not (g.name.startswith(prefix) and g.name[len(prefix):].isidentifier()):
+        return f"a method of '{owner}' must be named '{owner}.<identifier>', not '{g.name}'"
+    first = g.params[0] if g.params else None
+    if not (type(first) is Param and first.type is Type.OBJ and first.cls == owner
+            and first.optional is False):
+        return f"the first parameter of method '{g.name}' must be `self` guarded exactly '{owner}'"
+    if classes[owner].fields and g.name[len(prefix):] in classes[owner].fields:
+        return f"method '{g.name}' has the name of a slot of '{owner}'"
+    return None
 
 
 def _check_classes(module: Module, function_names: set[str], diags: list[Diagnostic]
