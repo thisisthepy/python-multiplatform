@@ -304,5 +304,29 @@ def test_every_compiled_function_enters_and_leaves(built):
     from typedpython import cgen
     result = built[0]
     c = cgen.generate(result.module, result.source)
-    assert c.count("tp_enter_call()") >= len(NAMES)
-    assert c.count("tp_leave_call()") >= len(NAMES)
+    assert c.count("tp_enter_call(tp_ts, tp_t)") >= len(NAMES)
+    assert c.count("tp_leave_call(tp_t)") >= len(NAMES)
+
+
+def test_a_compiled_call_looks_up_the_thread_state_at_most_once(built):
+    """#125: the wrapper does the one lookup; impls and fast twins only receive tp_ts."""
+    import re
+    from typedpython import cgen
+    result = built[0]
+    c = cgen.generate(result.module, result.source)
+    lookups = re.compile(r"PyThreadState_Get(?:Unchecked)?\s*\(|tp_tls_get\s*\(|\btp_tls_v\b")
+    tstate = re.compile(r"PyThreadState_Get(?:Unchecked)?\s*\(")
+    tlsre = re.compile(r"tp_tls_get\s*\(|\btp_tls_v\b")
+    # strip the comment that mentions the lookup, then count call sites per generated function
+    bodies = re.split(r"\n(?=static (?:inline )?(?:int|PyObject \*) ?tp_(?:wrap|impl|fimpl)_)", c)
+    seen = 0
+    for b in bodies:
+        head = b.split("(", 1)[0]
+        if "tp_wrap_" in head:
+            seen += 1
+            assert len(tstate.findall(b)) <= 1 and len(tlsre.findall(b)) <= 1, head
+        elif "tp_impl_" in head or "tp_fimpl_" in head:
+            seen += 1
+            assert not lookups.findall(b), head
+    assert seen >= len(NAMES)
+    assert "tp_enter_call(tp_ts, tp_t)" in c

@@ -1256,7 +1256,7 @@ def test_gen_local_array_scan_calls_only_runtime_helpers():
 
 def test_gen_local_arrays_never_go_through_the_write_back_exit():
     text = gen((f_la_build,), name="tp_gen_la2")
-    impl = text[text.index("static int tp_impl_la_build(PyObject *tp_module, int64_t l_n"):]
+    impl = text[text.index("static int tp_impl_la_build(PyObject *tp_module, PyThreadState *tp_ts, tp_tls *tp_t, int64_t l_n"):]
     impl = impl[:impl.index("static PyObject *tp_wrap_la_build")]
     assert "_array_exit" not in impl and "_array_enter" not in impl
     assert impl.count("tp_i64_array_free(") >= 3          # a, b, c are freed at the exit block
