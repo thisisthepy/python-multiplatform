@@ -271,6 +271,17 @@ GC), async exceptions and scheduled collections, exactly as between two bytecode
 (ir.ArrayParam) or an entry-globals snapshot never polls, and while one is active the slow path does
 nothing: the event stays pending and is handled after it returns.
 
+## Tracing, profiling and monitoring (entry of every function; issue #142, SPEC N-14)
+    int  tp_traced(PyObject *module, PyCodeObject *code);       /* 1: run the interpreted original */
+    PyObject *tp_state.orig_code[];  /* GENERATED, module state: STRONG ref to the original's code, per interned name */
+`tp_traced` is true when the calling thread has a `sys.settrace` / `sys.setprofile` function
+(`PyThreadState.c_tracefunc` / `c_profilefunc`), when any `sys.monitoring` tool has a global event
+(`PyMonitoring_EnterScope` version, then `sys.monitoring.get_events` only when it moved), or when a tool
+has a local event on `code`, the original function's code object (a strong reference in the module state, filled at module exec after `__typedpython_interpreted__` is built, traversed and released with the state; NULL for a name that is no function) (`code->_co_monitoring`, whose first
+16 bytes are `local_monitors`; mirrored for 3.14 and 3.15 only, any other version is a named `#error`). The
+wrapper calls it before anything else and takes the deopt path; an impure caller calls it before a
+direct call of a compiled callee.
+
 ## Fixed-layout classes (ir.ClassDecl / FieldGet / FieldSet / New / IsExact / CheckExact; SPEC N-11)
 Guard state, one per ClassDecl in the module state (zeroed = not compiled):
 
