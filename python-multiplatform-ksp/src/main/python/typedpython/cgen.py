@@ -188,10 +188,10 @@ _ARRAY_CT = {Type.F64_ARRAY: "tp_f64_array", Type.I64_ARRAY: "tp_i64_array"}
 _BUFFER_KINDS = {None: None, "array": 0, "numpy": 1}
 # buf_types slots 2..4: the numpy scalar types a Box.np makes (np.float64, np.int64, np.bool_)
 _NP_SLOT = {Type.F64: 2, Type.I64: 3, Type.BOOL: 4}
-_BUFFER_FMT = {Type.F64_ARRAY: ('"d"', "NULL"), Type.I64_ARRAY: ('"q"', '"l"')}
-_BUFFER_SFX = {Type.F64_ARRAY: "f64", Type.I64_ARRAY: "i64"}
+_BUFFER_FMT = {Type.F64_ARRAY: ('"d"', "NULL"), Type.I64_ARRAY: ('"q"', '"l"'), Type.BOOL_ARRAY: ('"?"', "NULL")}
+_BUFFER_SFX = {Type.F64_ARRAY: "f64", Type.I64_ARRAY: "i64", Type.BOOL_ARRAY: "bool"}
 _CT_ARRAY_REV = {"tp_f64_array": Type.F64_ARRAY, "tp_i64_array": Type.I64_ARRAY}
-_ARRAY_ELEM = {Type.F64_ARRAY: Type.F64, Type.I64_ARRAY: Type.I64}
+_ARRAY_ELEM = {Type.F64_ARRAY: Type.F64, Type.I64_ARRAY: Type.I64, Type.BOOL_ARRAY: Type.BOOL}
 _ARRAY_PFX = {Type.F64_ARRAY: "tp_f64_array", Type.I64_ARRAY: "tp_i64_array"}
 _UNBOX = {Type.I64: "tp_unbox_i64", Type.F64: "tp_unbox_f64", Type.BOOL: "tp_unbox_bool"}
 _BOX = {Type.I64: "tp_box_i64", Type.F64: "tp_box_f64", Type.BOOL: "tp_box_bool"}

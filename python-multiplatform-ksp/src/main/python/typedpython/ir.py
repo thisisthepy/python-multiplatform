@@ -68,12 +68,13 @@ class Type(Enum):
     INT = "int"            # a Python int that is a native i64 or, once promoted, a PyLong (SPEC N-13)
     F64_ARRAY = "f64[]"    # a list[float] parameter (ArrayParam) or a local array (NewArray/CopyArray)
     I64_ARRAY = "i64[]"    # a list[int] parameter (ArrayParam) or a local array (NewArray/CopyArray)
+    BOOL_ARRAY = "bool[]"  # a numpy np.bool_ buffer parameter only (1-byte items, #261)
 
 
 SCALARS = (Type.I64, Type.F64, Type.BOOL)
 # INT is not a scalar: it owns a reference when promoted. It is created only by `ToInt`, by arithmetic
 # on INTs, and by a redo `Call` of an i64-returning callee, and it becomes an object only through `Box`.
-ARRAYS = (Type.F64_ARRAY, Type.I64_ARRAY)
+ARRAYS = (Type.F64_ARRAY, Type.I64_ARRAY, Type.BOOL_ARRAY)
 
 
 # --- expressions ---------------------------------------------------------------------------------

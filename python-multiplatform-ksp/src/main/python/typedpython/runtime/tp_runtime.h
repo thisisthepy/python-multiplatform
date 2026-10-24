@@ -1115,8 +1115,8 @@ static inline void tp_buf_exit(tp_buf *b)
     memset(b, 0, sizeof(*b));
 }
 
-static inline int tp_buf_enter(PyObject *obj, PyObject *exact, const char *fmt1, const char *fmt2,
-                               int writable, tp_buf *b)
+static inline int tp__buf_enter(PyObject *obj, PyObject *exact, const char *fmt1, const char *fmt2,
+                                int writable, Py_ssize_t isz, tp_buf *b)
 {
     int flags = PyBUF_C_CONTIGUOUS | PyBUF_FORMAT;
     memset(b, 0, sizeof(*b));
@@ -1135,18 +1135,25 @@ static inline int tp_buf_enter(PyObject *obj, PyObject *exact, const char *fmt1,
         return 1;
     }
     b->held = 1;
-    if (b->view.ndim != 1 || b->view.itemsize != 8 || b->view.shape == NULL
+    if (b->view.ndim != 1 || b->view.itemsize != isz || b->view.shape == NULL
             || b->view.suboffsets != NULL || b->view.shape[0] < 0
-            || b->view.shape[0] * 8 != b->view.len || b->view.format == NULL
+            || b->view.shape[0] * isz != b->view.len || b->view.format == NULL
             || !(strcmp(b->view.format, fmt1) == 0 || (fmt2 != NULL && strcmp(b->view.format, fmt2) == 0))
             || (writable && b->view.readonly)
-            || (b->view.shape[0] > 0 && (b->view.buf == NULL || ((uintptr_t)b->view.buf & 7) != 0))) {
+            || (b->view.shape[0] > 0 && (b->view.buf == NULL || ((uintptr_t)b->view.buf & (uintptr_t)(isz - 1)) != 0))) {
         tp_buf_exit(b);
         return 1;
     }
     b->len = b->view.shape[0];
     b->data = b->view.buf;
     return 0;
+}
+
+/* The item size follows the format: "?" (numpy bool_, #261) has 1-byte items, every other format 8. */
+static inline int tp_buf_enter(PyObject *obj, PyObject *exact, const char *fmt1, const char *fmt2,
+                               int writable, tp_buf *b)
+{
+    return tp__buf_enter(obj, exact, fmt1, fmt2, writable, strcmp(fmt1, "?") == 0 ? 1 : 8, b);
 }
 
 /* A numpy array (#220): the same guard on the exact `numpy.ndarray`; `np` selects numpy's IndexError
@@ -1191,7 +1198,19 @@ static inline double tp_buf_ld_f64(const tp_buf *b, Py_ssize_t i) { return ((con
 static inline int64_t tp_buf_ld_i64(const tp_buf *b, Py_ssize_t i) { return ((const int64_t *)b->data)[i]; }
 static inline void tp_buf_st_f64(const tp_buf *b, Py_ssize_t i, double v) { ((double *)b->data)[i] = v; }
 static inline void tp_buf_st_i64(const tp_buf *b, Py_ssize_t i, int64_t v) { ((int64_t *)b->data)[i] = v; }
+static inline int tp_buf_ld_bool(const tp_buf *b, Py_ssize_t i) { return ((const uint8_t *)b->data)[i] != 0; }
+static inline void tp_buf_st_bool(const tp_buf *b, Py_ssize_t i, int v) { ((uint8_t *)b->data)[i] = v != 0; }
 #else
+static inline int tp_buf_ld_bool(const tp_buf *b, Py_ssize_t i)
+{
+    return __atomic_load_n((const uint8_t *)b->data + i, __ATOMIC_RELAXED) != 0;
+}
+
+static inline void tp_buf_st_bool(const tp_buf *b, Py_ssize_t i, int v)
+{
+    __atomic_store_n((uint8_t *)b->data + i, (uint8_t)(v != 0), __ATOMIC_RELAXED);
+}
+
 static inline double tp_buf_ld_f64(const tp_buf *b, Py_ssize_t i)
 {
     uint64_t u = __atomic_load_n((const uint64_t *)b->data + i, __ATOMIC_RELAXED);
