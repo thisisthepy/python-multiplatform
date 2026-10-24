@@ -203,8 +203,21 @@ are themselves full-range (`range(n)` bounds the var only by i64). A function ne
 keeps its checked, deopting ops (and is then legal only if pure).
 
 Call.redo. Legal only if the caller is impure, the callee is pure and may_deopt, and the callee
-returns F64, BOOL or NONE (`verify/redo` otherwise). A redo call is not a deopting node in the
-caller: the callee alone is redone, unobservably, since it is pure.
+returns F64, BOOL, NONE or I64 (`verify/redo` otherwise); a redo Call of an I64-returning callee has
+type INT (below). A redo call is not a deopting node in the caller: the callee alone is redone,
+unobservably, since it is pure.
+
+Native ints (SPEC N-13, #232). `Type.INT` is a Python int that is a native i64 or, once an operation
+left the i64 range, a PyLong. It lives only in locals and temporaries (never a parameter, entry global
+or return value). It is produced only by `ToInt` (of an I64), by BinOp/UnaryOp over INT operands, by
+an INT local, and by a redo Call of an I64-returning callee (an INT argument may stand for an I64
+parameter of a redo callee: a promoted value does not fit, which is the callee's deopt, redone).
+BinOp on INT: both operands INT, ADD/SUB/MUL/FLOORDIV/MOD/LSHIFT/RSHIFT, result INT; TRUEDIV of ints is an
+OBJ operation on boxed values; `proven` is never legal on it. UnaryOp NEG/POS of INT is INT. Compare of two
+INTs is BOOL. An INT crosses into an object slot only through `Box`, and an I64 into an INT slot only
+through `ToInt`; an INT never flows into an I64 slot. None of these nodes can deopt (they promote), run
+user code or make a function impure, so an impure function may contain them freely, and they do not
+affect `may_deopt`, `pure` or closedness. The shifts exist only on INT and OBJ.
 
 Function.entry_globals. Scalar `Param`s (I64/F64/BOOL), read once at entry as part of the guards;
 assigned at entry for definite assignment; the body reads them as `Local(name)` of that type and may
@@ -226,7 +239,7 @@ from .ir import (
     And, ArrayParam, Assign, BinOp, BinOpKind, Box, Break, Call, CallObject, Compare, CompareKind,
     CompareObj, Const, Continue, CopyArray, ExprStmt, ForRange, Function, GetAttr, Global, If, Index, Len,
     Local, MathCall, MathFunc, Module, NewArray, ObjToFloat, Or, Param, Return, StoreIndex, ToFloat,
-    Truth, Tuple, Type, Unbox, UnaryOp, UnaryOpKind, While,
+    ToInt, Truth, Tuple, Type, Unbox, UnaryOp, UnaryOpKind, While,
 )
 from .ir import CheckExact, CheckMethod, ClassDecl, FieldGet, FieldSet, Is, IsExact, New
 from .ir import BuildString, Contains, ForObj, Format, GetItem, NewDict, NewList, StoreItem
@@ -265,7 +278,7 @@ class Diagnostic:
 
 # Exact classes, not isinstance: a subclass of an ir node is not an ir node (its meaning is not
 # the one the back end implements).
-_EXPRS = frozenset({Const, Local, BinOp, UnaryOp, Compare, And, Or, ToFloat, Box, Unbox, MathCall,
+_EXPRS = frozenset({Const, Local, BinOp, UnaryOp, Compare, And, Or, ToFloat, ToInt, Box, Unbox, MathCall,
                     Call, Global, GetAttr, CallObject, Truth, CompareObj, ObjToFloat, Len, Index,
                     NewArray, CopyArray, Tuple, Is, IsExact, CheckExact, CheckMethod, FieldGet, New,
                     GetItem, Contains, NewList, NewDict, Format, BuildString})
@@ -280,7 +293,12 @@ _OBJ_PRODUCERS = frozenset({Box, Global, GetAttr, CallObject, BinOp, Local, Call
                             GetItem, NewList, NewDict, Format, BuildString})
 _CONVERSIONS = (-1, 97, 114, 115)          # Format.conversion: none, !a, !r, !s
 _VALUE_TYPES = (Type.I64, Type.F64, Type.BOOL, Type.OBJ)        # what a local may hold
+_LOCAL_TYPES = _VALUE_TYPES + (Type.INT,)       # an INT lives only in a local or a temporary (SPEC N-13)
 _RETURN_TYPES = _VALUE_TYPES + (Type.NONE,)
+# The nodes that produce an INT (an owned tp_int: native, or a PyLong once promoted).
+_INT_PRODUCERS = frozenset({ToInt, BinOp, UnaryOp, Local, Call})
+_INT_OPS = frozenset({BinOpKind.ADD, BinOpKind.SUB, BinOpKind.MUL, BinOpKind.FLOORDIV,
+                      BinOpKind.MOD, BinOpKind.LSHIFT, BinOpKind.RSHIFT})
 _ELEMENT = {Type.F64_ARRAY: Type.F64, Type.I64_ARRAY: Type.I64}
 _MATH_ARITY = {MathFunc.ATAN2: 2, MathFunc.HYPOT: 2}            # every other MathFunc: 1
 _I64_DEOPT_OPS = frozenset({BinOpKind.ADD, BinOpKind.SUB, BinOpKind.MUL, BinOpKind.FLOORDIV,
@@ -437,7 +455,7 @@ class _Checker:
                     self.error(TYPE, f"local array '{name}' collides with a scalar parameter")
                 else:
                     self.larrays[name] = t
-            elif t not in _VALUE_TYPES:
+            elif t not in _LOCAL_TYPES:
                 self.error(TYPE, f"local '{name}' has type {t}")
             elif name in self.scalars and self.scalars[name] is not t:
                 self.error(TYPE, f"local '{name}' declared {t} but parameter is "
@@ -554,7 +572,15 @@ class _Checker:
         got = getattr(e, "type", None)
         if got is want:
             return
-        if got is Type.OBJ and want in ir.SCALARS:
+        if got is Type.INT and want is Type.OBJ:
+            self.error(OWNERSHIP, f"{what}: int flows into an OBJ slot without Box")
+        elif want is Type.INT and got in (Type.I64, Type.OBJ):
+            self.error(TYPE if got is Type.I64 else OWNERSHIP,
+                       f"{what}: {got.value} flows into an int slot without ToInt")
+        elif got is Type.INT and want in ir.SCALARS:
+            self.error(TYPE, f"{what}: an int (native or promoted) cannot flow into a {want.value} "
+                             f"slot")
+        elif got is Type.OBJ and want in ir.SCALARS:
             self.error(OWNERSHIP, f"{what}: OBJ flows into a {want.value} slot without Unbox")
         elif want is Type.OBJ and got in ir.SCALARS:
             self.error(OWNERSHIP, f"{what}: {got.value} flows into an OBJ slot without Box")
@@ -580,6 +606,9 @@ class _Checker:
             self.error(OWNERSHIP, f"{cls.__name__} cannot produce an OBJ (only Box, Global, GetAttr, CallObject, OBJ "
                                   f"BinOp, Tuple, OBJ locals and OBJ-returning Calls create "
                                   f"references)")
+        if t is Type.INT and cls not in _INT_PRODUCERS:
+            self.error(OWNERSHIP, f"{cls.__name__} cannot produce an int (only ToInt, int BinOp/UnaryOp, "
+                                  f"int locals and redo Calls of i64 functions do)")
         if cls is CompareObj and not cond:
             self.error(CONDITION_ONLY, "CompareObj outside a condition: the rich comparison's "
                                        "result object would be kept, and it need not be a bool")
@@ -742,11 +771,23 @@ class _Checker:
                 exact = (_exact(e.op, self.interval(left), self.interval(right))
                          if shape else _FULL)
                 proven = self.check_proven(shape, exact, f"{e.type.value} {e.op.value}")
-        if lt not in (Type.I64, Type.F64, Type.OBJ):
+        shift = e.op in (BinOpKind.LSHIFT, BinOpKind.RSHIFT)
+        if lt is Type.INT:
+            # SPEC N-13: both operands INT, result INT, never deopts (it promotes in place)
+            if rt is not Type.INT:
+                self.slot(right, Type.INT, f"right operand of {e.op.value}")
+            elif e.op not in _INT_OPS:
+                self.error(TYPE, f"int {e.op.value} has no INT form (box the operands: it is an OBJ "
+                                 f"operation)")
+            elif e.type is not Type.INT:
+                self.error(TYPE, f"int {e.op.value} int is int, node says {e.type.value}")
+        elif lt not in (Type.I64, Type.F64, Type.OBJ):
             self.error(TYPE if lt is not Type.OBJ else OWNERSHIP,
                        f"BinOp {e.op.value} on {getattr(lt, 'value', lt)} operands")
         elif lt is not rt:
             self.slot(right, lt, f"right operand of {e.op.value}")
+        elif shift and lt is not Type.OBJ:
+            self.error(TYPE, f"{e.op.value} on {lt.value} operands: only int (INT) and OBJ shift")
         else:
             want = Type.F64 if (lt is Type.I64 and e.op is BinOpKind.TRUEDIV) else lt
             if e.type is not want:
@@ -757,6 +798,8 @@ class _Checker:
             if lt is Type.OBJ:
                 self.effects.append(f"OBJ {e.op.value} (runs user methods)")
                 self.opens.append(f"OBJ {e.op.value} (runs user methods)")
+        if e.proven and lt is Type.INT:
+            self.error(PROVEN, f"`proven` is set on an int {e.op.value}, which promotes instead")
         return dataclasses.replace(e, left=left, right=right)
 
     def e_UnaryOp(self, e: UnaryOp, state: _State) -> ir.Expr:
@@ -777,6 +820,12 @@ class _Checker:
             self.slot(operand, Type.BOOL, "operand of not")
             if e.type is not Type.BOOL:
                 self.error(TYPE, f"not gives bool, node says {e.type.value}")
+        elif ot is Type.INT:
+            if e.type is not Type.INT:
+                self.error(TYPE, f"unary {e.op.value} of int is int, node says {e.type.value}")
+            if e.proven:
+                self.error(PROVEN, f"`proven` is set on unary {e.op.value} of an int, which "
+                                   f"promotes instead")
         else:
             if ot is Type.OBJ:
                 self.error(OWNERSHIP, f"unary {e.op.value} on OBJ has no IR form")
@@ -796,7 +845,12 @@ class _Checker:
         left, right = self.expr(e.left, state), self.expr(e.right, state)
         lt, rt = getattr(left, "type", None), getattr(right, "type", None)
         numeric = (Type.I64, Type.F64)
-        if Type.OBJ in (lt, rt):
+        if lt is Type.INT or rt is Type.INT:
+            if lt is not rt:
+                self.error(TYPE, f"Compare of {getattr(lt, 'value', lt)} and "
+                                 f"{getattr(rt, 'value', rt)}: both sides of an int comparison are "
+                                 f"INT (ToInt widens an i64)")
+        elif Type.OBJ in (lt, rt):
             self.error(OWNERSHIP, "Compare on an OBJ operand (rich comparison returns an object, "
                                   "not a bool)")
         elif not ((lt in numeric and rt in numeric) or (lt is Type.BOOL and rt is Type.BOOL)):
@@ -830,10 +884,19 @@ class _Checker:
             self.error(TYPE, f"ToFloat gives f64, node says {e.type.value}")
         return dataclasses.replace(e, operand=operand)
 
+    def e_ToInt(self, e: ToInt, state: _State) -> ir.Expr:
+        operand = self.expr(e.operand, state)
+        self.slot(operand, Type.I64, "operand of ToInt")
+        if e.type is not Type.INT:
+            self.error(TYPE, f"ToInt gives int, node says {e.type.value}")
+        return dataclasses.replace(e, operand=operand)
+
     def e_Box(self, e: Box, state: _State) -> ir.Expr:
         operand = self.expr(e.operand, state)
         ot = getattr(operand, "type", None)
-        if ot is Type.OBJ:
+        if ot is Type.INT:
+            pass
+        elif ot is Type.OBJ:
             self.error(OWNERSHIP, "Box of an OBJ (it is already an object)")
         elif ot not in ir.SCALARS and ot not in ir.ARRAYS:
             self.error(TYPE, f"Box of {getattr(ot, 'value', ot)}")
@@ -885,14 +948,19 @@ class _Checker:
         if len(args) != len(callee.params):
             self.error(TYPE, f"'{e.function}' takes {len(callee.params)} argument(s), got "
                              f"{len(args)}")
+        redo_ok = type(e.redo) is bool and e.redo and self.fn.pure is not True
         for k, (a, p) in enumerate(zip(args, callee.params)):
             if type(p) is ArrayParam:
                 self.error(ARRAY_USE, f"'{e.function}' takes array parameter '{p.name}'; an array "
                                       f"cannot be passed by Call (the entry guard and write-back "
                                       f"belong to the Python-level call)")
+            elif (redo_ok and p.type is Type.I64 and getattr(a, "type", None) is Type.INT):
+                pass        # SPEC N-13: a promoted INT does not fit the parameter: the callee's deopt, redone
             else:
                 self.slot(a, p.type, f"argument {k + 1} of '{e.function}'")
-        if e.type is not callee.returns:
+        # SPEC N-13: a redo Call of an i64-returning callee gives an INT (the redone value is any int)
+        int_result = (redo_ok and callee.returns is Type.I64 and e.type is Type.INT)
+        if e.type is not callee.returns and not int_result:
             self.error(TYPE, f"'{e.function}' returns {callee.returns.value}, node says "
                              f"{e.type.value}")
         redo = False
@@ -905,10 +973,13 @@ class _Checker:
             elif callee.pure is not True or callee.may_deopt is not True:
                 self.error(REDO, f"redo call of '{e.function}', which is not a pure may_deopt "
                                  f"function")
-            elif callee.returns not in (Type.F64, Type.BOOL, Type.NONE):
+            elif callee.returns not in (Type.F64, Type.BOOL, Type.NONE, Type.I64):
                 self.error(REDO, f"redo call of '{e.function}' returning "
                                  f"{getattr(callee.returns, 'value', callee.returns)}: only f64, "
-                                 f"bool and none results are exactly reproducible")
+                                 f"bool, none and i64 (as an int) results are exactly reproducible")
+            elif callee.returns is Type.I64 and e.type is not Type.INT:
+                self.error(REDO, f"redo call of '{e.function}' returning i64 must have type int "
+                                 f"(the redone value may be a big int)")
             else:
                 redo = True
         if not redo:

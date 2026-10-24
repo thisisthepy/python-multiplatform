@@ -16,7 +16,7 @@ from typedpython import frontend
 from typedpython.ir import (
     And, ArrayParam, Assign, BinOp, BinOpKind, Box, Break, Call, CallObject, Compare, CompareKind,
     CompareObj, Const, CopyArray, NewArray, Tuple, ExprStmt, While, ForRange, GetAttr, Global, If, Index, Len, Local, MathCall,
-    MathFunc, ObjToFloat, Param, Return, StoreIndex, ToFloat, Truth, Type, UnaryOp, UnaryOpKind,
+    MathFunc, ObjToFloat, Param, Return, StoreIndex, ToFloat, ToInt, Truth, Type, UnaryOp, UnaryOpKind,
 )
 
 I64, F64, BOOL, OBJ = Type.I64, Type.F64, Type.BOOL, Type.OBJ
@@ -103,8 +103,9 @@ def test_unannotated_local_with_two_types_is_skipped(tmp_path):
     assert "`c`" in m.skipped["f"] and "line " in m.skipped["f"]
 
 
-def test_impure_function_keeps_an_unbounded_int_local_as_a_python_int(tmp_path):
-    # Impure: a deopt could not be redone, so `m` is a CPython int object, not a checked i64.
+def test_impure_function_keeps_an_unbounded_int_local_as_a_native_int(tmp_path):
+    # Impure: a deopt could not be redone, so `m` is an INT (SPEC N-13): native i64, promoted in place
+    # to a PyLong on overflow, not a checked i64.
     m = lower(tmp_path, """
         @compiled
         def g(a: list[float], n: int) -> None:
@@ -113,12 +114,11 @@ def test_impure_function_keeps_an_unbounded_int_local_as_a_python_int(tmp_path):
             a[0] = 1.0
     """)
     f = function(m, "g")
-    assert f.locals == {"m": OBJ}
+    INT = Type.INT
+    assert f.locals == {"m": INT}
     assert f.body[:2] == (
-        Assign("m", Box(OBJ, Local(I64, "n"))),
-        # `m += 1` on an object is the in-place operation (PyNumber_InPlaceAdd, #150)
-        Assign("m", BinOp(OBJ, BinOpKind.ADD, Local(OBJ, "m"), Box(OBJ, Const(I64, 1)),
-                          inplace=True)),
+        Assign("m", ToInt(INT, Local(I64, "n"))),
+        Assign("m", BinOp(INT, BinOpKind.ADD, Local(INT, "m"), ToInt(INT, Const(I64, 1)))),
     )
     assert not f.pure and not f.may_deopt
 
@@ -432,8 +432,8 @@ def fill(n: int, out: list[float]) -> None:
     assert call.function == "tri" and call.redo
 
 
-def test_impure_caller_of_an_int_returning_deopting_callee_calls_the_global(tmp_path):
-    # An I64 result of a redo could be a big int: such a callee is still called as an object.
+def test_impure_caller_of_an_int_returning_deopting_callee_redoes_it_as_an_int(tmp_path):
+    # SPEC N-13: an I64 result of a redo may be a big int, so the direct Call has type INT.
     m = lower(tmp_path, """
         @compiled
         def add(i: int, j: int) -> int:
@@ -446,9 +446,9 @@ def test_impure_caller_of_an_int_returning_deopting_callee_calls_the_global(tmp_
     """)
     fill = function(m, "fill")
     assert not fill.pure and not fill.may_deopt
-    assert nodes(fill, Call) == []
-    assert nodes(fill, CallObject) == [
-        CallObject(OBJ, Global(OBJ, "add"), (Box(OBJ, Local(I64, "i")), Box(OBJ, Local(I64, "i"))))]
+    assert nodes(fill, CallObject) == []
+    assert nodes(fill, Call) == [
+        Call(Type.INT, "add", (Local(I64, "i"), Local(I64, "i")), redo=True)]
 
 
 def test_pure_caller_of_a_deopting_callee_does_not_redo(tmp_path):
@@ -699,7 +699,7 @@ def test_compiled_code_calls_imported_callables_around_native_float_math(tmp_pat
     """)
     f = function(m, "render")
     assert not f.pure and not f.may_deopt
-    assert f.locals == {"canvas": OBJ, "total": F64, "hits": OBJ, "i": I64, "x": F64}
+    assert f.locals == {"canvas": OBJ, "total": F64, "hits": Type.INT, "i": I64, "x": F64}
     assert f.body[0] == Assign("canvas", CallObject(
         OBJ, Global(OBJ, "make_canvas"), (Box(OBJ, Local(I64, "n")),)))
     loop = f.body[3]
@@ -711,9 +711,9 @@ def test_compiled_code_calls_imported_callables_around_native_float_math(tmp_pat
         ExprStmt(CallObject(OBJ, Global(OBJ, "draw"), (
             Local(OBJ, "canvas"), Box(OBJ, Local(F64, "x")), Box(OBJ, Const(F64, 0.5)),
         ), ("alpha",))),
-        Assign("hits", BinOp(OBJ, BinOpKind.ADD, Local(OBJ, "hits"), Box(OBJ, Const(I64, 1)),
-                             inplace=True)),    # `hits += 1` on an object: in place (#150)
-        If(CompareObj(BOOL, CompareKind.GT, Local(OBJ, "hits"), Box(OBJ, Local(I64, "n"))),
+        Assign("hits", BinOp(Type.INT, BinOpKind.ADD, Local(Type.INT, "hits"),
+                             ToInt(Type.INT, Const(I64, 1)))),          # native int (SPEC N-13)
+        If(Compare(BOOL, CompareKind.GT, Local(Type.INT, "hits"), ToInt(Type.INT, Local(I64, "n"))),
            (Break(),)),
     )
 

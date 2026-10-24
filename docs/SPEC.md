@@ -676,7 +676,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `Status: implemented` for desktop host builds
   (`test_pipeline.py`, `test_cgen*.py`, `test_recursion.py`, `test_eval_breaker.py`, `test_fast_entry.py`,
   `test_free_threaded.py`; free-threaded 3.15t, #159). Not yet: shipping compiled modules in an app through
-  pypackpack (#25), methods of fixed-layout classes (#155), native ints in impure functions (#232).
+  pypackpack (#25), methods of fixed-layout classes (#155). Native ints in impure functions are N-13 (#232).
 - **N-9** TypedPython memory safety is proved on the IR before C is generated (#41; maintainer decision
   2026-10-03). Each property, and what happens when it cannot be proved:
 
@@ -771,6 +771,68 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   implementation ("An implementation is allowed to postpone garbage collection or omit it
   altogether", Data model §3.1), and CPython itself changed it in 3.14 (incremental GC). Everything
   else above stays exact. `Status: planned (design)`.
+- **N-13** TypedPython native ints in impure functions (#232; INTENT §1.4: compiled code computes what
+  CPython computes). An impure function cannot deopt after an effect, so its `int` locals were CPython
+  objects and every `+`, `//`, `%` and comparison was a generic `PyNumber_*` / `PyObject_RichCompare`
+  call, slower than CPython 3.15's specialising interpreter. The IR has a type `INT` for them: a Python
+  int that is **either a native i64 or, after an overflow, a PyLong carried for the rest of that value's
+  life**. A function never deopts because of an `INT`; it promotes in place.
+  - **Where an `INT` is.** An `int`-typed local of an impure function (not a `range` target, not a
+    parameter) whose every assignment lowers to an `INT` (an arithmetic result on `INT`/i64 operands, an
+    int literal, a native i64 value widened by `ToInt`, or the result of a redo `Call`, below). A local
+    that is also assigned from an object (a call of an unknown callable, a global, `int(x)`) stays an
+    object, as before. An `INT` is created only inside a function; parameters, returns and entry globals
+    stay i64 or object, so the signature and the entry guards are unchanged.
+  - **Arithmetic.** `+ - * // % << >>` and unary `-` and `+` on `INT` operands run natively when both
+    operands are native and the result fits i64. When an operand is a PyLong, or the native result does
+    not fit (`2**63-1 + 1`, `-2**63 - 1`, `2**62 * 4`, `-(-2**63)`, `-2**63 // -1`, a left shift past
+    bit 63), the operation is CPython's own `PyNumber_*` on the two values as exact ints, and the result
+    is native again if it fits i64, else a PyLong. The result is bit-for-bit what the interpreter
+    computes, including after side effects; nothing is redone and nothing deopts. `//` and `%` use
+    floor semantics (sign of the divisor), a zero divisor raises CPython's `ZeroDivisionError` with the
+    running interpreter's message, a negative shift count raises `ValueError('negative shift count')`,
+    a shift by a huge count raises CPython's `OverflowError` / `MemoryError`. `/` of ints is not an
+    `INT` operation: both operands are boxed and `PyNumber_TrueDivide` runs (the result is a float
+    object).
+  - **Comparison.** `==`, `!=`, `<`, `<=`, `>`, `>=` of two `INT`s is a native compare when both are
+    native, else the exact comparison of the two ints; the result is a bool. `if x:` on an `INT` is
+    `x != 0`.
+  - **Boxing.** An `INT` becomes an object only at an object boundary (an argument of an object call,
+    a store into a container, an f-string field, a return value, an operand of an object operation):
+    a native value is boxed with `PyLong_FromLongLong`, a promoted one is the PyLong it already is. A
+    constant used as an object is built once, at module exec, and read from module state (a new
+    reference per use), not boxed per use.
+  - **Calls.** A direct call from an impure function of a pure compiled callee that may deopt and
+    returns i64 is a redo call (SPEC N-8, `Call.redo`): the callee's deopt, including an argument that is
+    a promoted `INT` (it does not fit the callee's i64 parameter), is absorbed by running the
+    interpreted callee on the boxed arguments (unobservable, the callee is pure). The result is an `INT`:
+    exactly an `int` object (a native or a promoted value); any other object raises `SystemError`
+    (`typedpython: the interpreted redo of f did not return an int`), as the existing redo does.
+  - **Globals and builtins.** A module global or builtin read in an impure function (`Global`) is cached
+    per name in module state and revalidated by the dict-watcher epoch (N-11): the cached object is used
+    while no watched key of the module dict (or of the builtins dict) has changed, and any change to a
+    cached name, a clear, a rebinding of `__builtins__`, or a failed watcher registration sends every
+    read back to the full lookup (`tp_global`). The cache holds a borrowed pointer and takes its own
+    reference on each hit, so it extends no lifetime: a rebound function, type or module is freed, and
+    the `__del__` of anything it holds runs, exactly when CPython would run them (free-threaded builds
+    take the reference with `PyUnstable_TryIncRef`, CPython 3.14+). The result is what LOAD_GLOBAL would
+    return at that moment; a name that is unbound still raises `NameError`. This also removes the
+    per-call creation of the `"__builtins__"` string.
+  - **Cost rule (#150).** An `INT` operation (`BinOp`, `Compare`, `UnaryOp` on `INT` operands, a `Call`
+    whose arguments are all native or `INT`) counts as native work, so an impure function whose loops do
+    arithmetic on `INT`s is compiled. This includes such an operation directly in the body of a loop over an
+    object (`for x in obj`, `for _ in range(n)` with an object `n`), which the rule otherwise ignores; float
+    and array work in an object loop still does not count. A loop that does only object operations is
+    still rejected.
+    wordfreq's `word_of` and `main` are compiled.
+  - **Proof.** The verifier checks the types of every `INT` node (an `INT` operation takes `INT`
+    operands and gives an `INT`; `proven` is never set on one; an `INT` flows into an object slot only
+    through `Box`; a `INT` local is declared and definitely assigned like any other) and the call rule
+    above. The generated C releases an `INT`'s PyLong on every exit, as for any owned reference.
+  - **Tests.** `test_native_int_impure.py`: i64 locals in impure functions; the i64 boundary for add,
+    sub, mul, neg, floordiv, mod and shifts, after side effects and with no deopt, each equal to the
+    interpreter; constants pre-boxed; global and builtin reads cached and invalidated by rebinding;
+    wordfreq's `word_of` and `main` compile and print what CPython prints. `Status: implemented`.
 
 ---
 

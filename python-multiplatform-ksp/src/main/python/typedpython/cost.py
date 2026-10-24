@@ -11,10 +11,12 @@ Compiled code wins only when it does native work, so the rule asks for it.
 
 The rule, applied after verification (so it only ever removes verified functions, never changes
 the IR): a function is kept when it is **pure**, or when some loop (`While`, `ForRange`; a `ForObj`
-is a loop over objects and does not count by itself, but loops nested inside it do) has a body, nested
-statements included, containing a native-typed operation:
+is a loop over objects and does not count by itself, but loops nested inside it do, and so does an
+operation on `INT`s directly in its body, SPEC N-13) has a body, nested statements included, containing
+a native-typed operation:
 
-  * a `BinOp`, `Compare`, `UnaryOp` or `MathCall` on I64/F64/BOOL operands;
+  * a `BinOp`, `Compare`, `UnaryOp` or `MathCall` on I64/F64/BOOL/INT operands (an `INT` is a native
+    i64 promoted in place on overflow, SPEC N-13);
   * an `Index` or `StoreIndex` on an array or buffer;
   * a `Call` of a compiled function with at least one argument, all of them native.
 
@@ -33,8 +35,9 @@ Straight-line impure functions (no loop at all) are kept: they have no loop to l
 interpreter, and that keeps every function that compiled before #150 compiled (fixed-layout setters,
 Kotlin calls). The rule targets loops over objects only.
 
-The real fix is native ints in impure functions (a separate issue); when it lands, this rule is the
-thing to revisit.
+Native ints in impure functions (SPEC N-13, #232) landed: an `int` local of an impure function is an
+`INT`, so the loop of wordfreq's `word_of` does native work and is kept. What the rule still rejects is
+a loop whose body is only object operations.
 """
 from __future__ import annotations
 
@@ -48,7 +51,8 @@ RULE = "policy/cost"
 REASON = ("only object operations in its loops: compiled C would be slower than the interpreter "
           "(#150)")
 
-_NATIVE = (Type.I64, Type.F64, Type.BOOL)
+# INT (SPEC N-13, #232) counts: its arithmetic and comparisons are native while the value fits i64
+_NATIVE = (Type.I64, Type.F64, Type.BOOL, Type.INT)
 
 
 def _walk(x):
@@ -83,6 +87,25 @@ def _loops(body):
             yield n
 
 
+def _int_op(n) -> bool:
+    """An operation on `INT`s (SPEC N-13): native until a value leaves i64, then CPython's own."""
+    if isinstance(n, ir.BinOp):
+        return n.left.type is Type.INT
+    if isinstance(n, ir.UnaryOp):
+        return n.operand.type is Type.INT
+    if isinstance(n, ir.Compare):
+        return n.left.type is Type.INT
+    if isinstance(n, ir.Call):
+        return any(a.type is Type.INT for a in n.args) and all(a.type in _NATIVE for a in n.args)
+    return False
+
+
+def _obj_loops(body):
+    for n in _walk(body):
+        if isinstance(n, ir.ForObj):
+            yield n
+
+
 def does_native_work(fn: ir.Function) -> bool:
     if fn.pure:
         return True
@@ -90,7 +113,11 @@ def does_native_work(fn: ir.Function) -> bool:
         # straight-line code (a field setter, a Kotlin call): no loop to lose to the interpreter, and
         # what compiled before #150 keeps compiling
         return True
-    return any(_native_op(n) for loop in _loops(fn.body) for n in _walk(loop.body))
+    if any(_native_op(n) for loop in _loops(fn.body) for n in _walk(loop.body)):
+        return True
+    # a loop over an object does not count by itself, nor for float or array work in its body (#150);
+    # but `INT` arithmetic in it does (SPEC N-13): that is the work the interpreter did slower
+    return any(_int_op(n) for loop in _obj_loops(fn.body) for n in _walk(loop.body))
 
 
 def apply(module: ir.Module, diagnostics: list[Diagnostic]) -> tuple[ir.Module, list[Diagnostic]]:

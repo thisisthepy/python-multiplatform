@@ -1203,4 +1203,4 @@ def test_binop_obj_maps_the_six_kinds_to_the_python_operators(rt):
     assert rt.binop_obj(I64_MAX, 1, 0) == 2**63
     assert rt.binop_obj(I64_MIN, -1, 4) == 2**63
     assert exc_of(rt.binop_obj, 1, 0, 4)[1:3] == (ZeroDivisionError, str(exc_of(operator.floordiv, 1, 0)[2]))
-    assert exc_of(rt.binop_obj, 1, 2, 12)[1] is SystemError       # 6..11 are the in-place forms (#150)
+    assert exc_of(rt.binop_obj, 1, 2, 16)[1] is SystemError       # 6..11 in-place (#150), 12..15 shifts (#232)
