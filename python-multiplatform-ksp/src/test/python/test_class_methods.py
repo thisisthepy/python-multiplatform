@@ -721,6 +721,7 @@ def test_reference_counts_are_flat_over_many_calls(built):
         b = n.check
         b()
         functools.partial(m.Node.check, n)()
+    del b                       # the last bound method holds n and the function
     gc.collect()
     after = (sys.getrefcount(n), sys.getrefcount(other), sys.getrefcount(desc),
              sys.getrefcount(m.Node), sys.getrefcount(m.__typedpython_interpreted__["Node.check"]))
