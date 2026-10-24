@@ -834,6 +834,24 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     sub, mul, neg, floordiv, mod and shifts, after side effects and with no deopt, each equal to the
     interpreter; constants pre-boxed; global and builtin reads cached and invalidated by rebinding;
     wordfreq's `word_of` and `main` compile and print what CPython prints. `Status: implemented`.
+- **N-14** TypedPython tracing, profiling and monitoring (#142; design §4.3.4 마.3). A compiled function
+  has no Python frame, so at entry it checks whether tracing is active and, if so, runs the interpreted
+  original (`__typedpython_interpreted__`, the deopt path), so the events are CPython's own. Active means:
+  the calling thread has a `sys.settrace` / `sys.setprofile` function (per thread, as in CPython), or any
+  `sys.monitoring` tool (ids 0..5) has a global event (any event type). A direct call from an impure compiled
+  function to a compiled callee re-checks, because user code in the caller may have started tracing; a pure
+  function runs no user code, so its callees are not re-checked. Local events (`set_local_events`, which pdb
+  3.14+ and debugpy use for breakpoints) are read from the original function's code object
+  (`_co_monitoring`, first member `local_monitors`); the layout is mirrored for CPython 3.14 and 3.15 and any
+  other version stops the build with the `#error` "typedpython: tp_traced reads the 3.15 _co_monitoring
+  layout". Cost: one public C-API call (`PyMonitoring_EnterScope`, version compare), two `PyThreadState`
+  member loads and a pointer load plus a short byte scan; the Python-level query runs only when the global
+  monitoring events changed. Known difference: `sys.monitoring` turned on while a compiled function is
+  running produces events for that function from its next call on (CPython instruments the running frame;
+  `settrace` agrees with CPython here, it affects new frames only). A fallback run counts as a deopt in
+  `__typedpython_deopts__`, and clearing the events returns calls to the compiled path.
+  `Status: implemented` -- `test_tracing.py` (events equal between compiled and
+  interpreted for settrace, setprofile and monitoring; the `known_difference` test pins the one difference; local-only tools and their clearing).
 
 ---
 

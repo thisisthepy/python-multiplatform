@@ -359,6 +359,12 @@ def _all_exprs(f: ir.Function):
             yield from _walk_exprs(e)
 
 
+def _traced_call(k: int) -> str:
+    """tp_traced for the function whose interpreted original is `names[k]` (SPEC N-14). The code
+    object is a strong reference in the module state, filled at module exec."""
+    return (f"tp_traced(tp_module, (PyCodeObject *)((tp_state *)PyModule_GetState(tp_module))->orig_code[{k}])")
+
+
 def _can_deopt(e: ir.Expr, functions: dict[str, ir.Function]) -> bool:
     if isinstance(e, ir.BinOp) and e.left.type is Type.I64 and e.op in _I64_DEOPT:
         return not e.proven              # a proven op cannot deopt (no overflow, or a shift / mask)
@@ -673,6 +679,7 @@ def generate(module: ir.Module, source_path: Path, display_path: str | None = No
     w("   kwnames tuples of keyword calls. Owned by the module; released in tp_clear. */")
     w("typedef struct {")
     w(f"    PyObject *names[{n_names + 1}];")
+    w(f"    PyObject *orig_code[{n_names + 1}];   /* strong: code of __typedpython_interpreted__[names[k]] (SPEC N-14) */")
     w(f"    PyObject *kwnames[{n_kw + 1}];")
     w(f"    PyObject *classes[{len(module.classes) + 1}];      /* strong refs; NULL when not compiled */")
     w(f"    int cls_ok[{len(module.classes) + 1}];")
@@ -1272,6 +1279,10 @@ class _FnGen:
                 owned.append(v)
         t = ti = None
         self.emit("tp_s = 0;")
+        if not self.f.pure and not self.fast:
+            # user code ran in this impure caller and may have started tracing since our own entry
+            # (SPEC N-14): the callee runs interpreted, through the redo below
+            self.emit(f"if ({_traced_call(self.mg.name_index(callee.name))}) tp_s = 1;")
         for v in int_args:
             # a promoted INT does not fit the callee's i64 parameter: the callee's deopt, redone below
             self.emit(f"if ({v}.big != NULL) tp_s = 1;")
@@ -1302,7 +1313,7 @@ class _FnGen:
             self.emit(f"if (tp_s == 0) {{ {ti}.v = {t}; {ti}.big = NULL; }}")
         if e.redo:
             self._redo_call(callee, e.args, values, t, ti)
-        elif not self.f.pure and callee.pure and self.mg.uses(callee):
+        elif not self.f.pure:
             # a pure callee using classes returns 1 when a class check fails (module docstring,
             # rule 7): redo it interpreted; this impure caller must not deopt
             self._redo_call(callee, e.args, values, t)
@@ -2109,6 +2120,8 @@ class _FnGen:
         has_exits = bool(arrays or buffers)
         L.append("    (void)tp_x;")
         # arity / keywords -> the interpreted function raises CPython's own TypeError
+        # tracing, profiling or monitoring active (SPEC N-14): the interpreted original, before anything
+        L.append(f"    if ({_traced_call(name_k)}) goto tp_deopt;")
         L.append(f"    if (tp_nargs != {n} || (tp_kwnames != NULL && PyTuple_GET_SIZE(tp_kwnames) != 0)) goto tp_deopt;")
         # fixed-layout classes: not compiled -> interpreted; Param.cls guards (before any effect)
         classes = self.mg.uses(f)
@@ -2441,6 +2454,7 @@ def _state_functions(mg: _ModGen) -> str:
         "    for (i = 0; i < sizeof(tp_st->mdescrs) / sizeof(tp_st->mdescrs[0]); i++) Py_VISIT(tp_st->mdescrs[i]);",
         "    for (i = 0; i < sizeof(tp_st->buf_types) / sizeof(tp_st->buf_types[0]); i++) Py_VISIT(tp_st->buf_types[i]);",
         "    for (i = 0; i < sizeof(tp_st->names) / sizeof(tp_st->names[0]); i++) Py_VISIT(tp_st->names[i]);",
+        "    for (i = 0; i < sizeof(tp_st->orig_code) / sizeof(tp_st->orig_code[0]); i++) Py_VISIT(tp_st->orig_code[i]);",
         "    for (i = 0; i < sizeof(tp_st->kwnames) / sizeof(tp_st->kwnames[0]); i++) Py_VISIT(tp_st->kwnames[i]);",
         "    for (i = 0; i < sizeof(tp_st->classes) / sizeof(tp_st->classes[0]); i++) Py_VISIT(tp_st->classes[i]);",
         "    for (i = 0; i < sizeof(tp_st->descrs) / sizeof(tp_st->descrs[0]); i++) Py_VISIT(tp_st->descrs[i]);",
@@ -2462,6 +2476,7 @@ def _state_functions(mg: _ModGen) -> str:
         "    for (i = 0; i < sizeof(tp_st->mdescrs) / sizeof(tp_st->mdescrs[0]); i++) tp_release(&tp_st->mdescrs[i]);",
         "    tp_release(&tp_st->mtype);",
         "    for (i = 0; i < sizeof(tp_st->buf_types) / sizeof(tp_st->buf_types[0]); i++) tp_release(&tp_st->buf_types[i]);",
+        "    for (i = 0; i < sizeof(tp_st->orig_code) / sizeof(tp_st->orig_code[0]); i++) tp_release(&tp_st->orig_code[i]);",
         "    for (i = 0; i < sizeof(tp_st->names) / sizeof(tp_st->names[0]); i++) tp_release(&tp_st->names[i]);",
         "    for (i = 0; i < sizeof(tp_st->kwnames) / sizeof(tp_st->kwnames[0]); i++) tp_release(&tp_st->kwnames[i]);",
         "    for (i = 0; i < sizeof(tp_st->cls_ok) / sizeof(tp_st->cls_ok[0]); i++) tp_st->cls_ok[i] = 0;",
@@ -2526,7 +2541,7 @@ def _exec_function(mg: _ModGen) -> str:
         "    PyObject *tp_dict = PyModule_GetDict(tp_module); /* borrowed: owned by the module */",
         "    PyObject *tp_code = NULL, *tp_res = NULL, *tp_table = NULL, *tp_zero = NULL;",
         "    PyObject *tp_modname = NULL, *tp_f = NULL, *tp_cf = NULL, *tp_c = NULL;",
-        "    int tp_rc = -1, tp_k;",
+        "    int tp_rc = -1, tp_k, tp_k2;",
         "    size_t i;",
         "    for (i = 0; tp_name_strings[i] != NULL; i++) {",
         "        tp_st->names[i] = PyUnicode_InternFromString(tp_name_strings[i]);",
@@ -2661,6 +2676,13 @@ def _exec_function(mg: _ModGen) -> str:
         "    if (tp_cf == NULL || PyDict_SetItemString(tp_dict, \"__tp_trace_fast_hits__\", tp_cf) < 0) goto tp_done;",
         "    tp_release(&tp_cf);",
         "#endif",
+        # SPEC N-14: strong references to the originals' code objects, read by tp_traced at every entry
+        f"    for (tp_k = 0; tp_k < {len(mg.names)}; tp_k++) {{",
+        "        tp_k2 = PyDict_GetItemRef(tp_table, tp_st->names[tp_k], &tp_f);",
+        "        if (tp_k2 < 0) goto tp_done;",
+        "        if (tp_k2 > 0 && PyFunction_Check(tp_f)) tp_st->orig_code[tp_k] = Py_NewRef(PyFunction_GetCode(tp_f));",
+        "        tp_release(&tp_f);",
+        "    }",
         "    tp_rc = 0;",
         "tp_done:",
         "    tp_release(&tp_code); tp_release(&tp_res); tp_release(&tp_table); tp_release(&tp_zero);",

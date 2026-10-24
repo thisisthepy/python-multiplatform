@@ -2783,4 +2783,95 @@ static inline int tp_poll(PyObject *breaker)
     return tp_poll_slow(breaker);
 }
 
+/* Tracing, profiling and monitoring (issue #142, SPEC N-14). A compiled function has no Python
+ * frame, so it emits no settrace / setprofile / sys.monitoring events. At entry (and before a
+ * direct call of a compiled callee from an impure caller) `tp_traced` says whether any of them is
+ * active, and then the interpreted original runs instead, so the events are CPython's own.
+ *
+ * "Active" = this thread has a trace or profile function (public PyThreadState members), or any
+ * sys.monitoring tool (ids 0..5) has a global event. Global monitoring events are read with the
+ * public PyMonitoring_EnterScope, which updates a version number that changes whenever the global
+ * events change and returns at once when it did not; the answer is recomputed in Python
+ * (`sys.monitoring.get_events`) only when the version moved. The entry check is thus one call that
+ * compares two integers plus a few loads and a branch. Local events (set_local_events, used by pdb
+ * 3.14+ and debugpy for breakpoints) do not move that version, so they are read from the ORIGINAL
+ * function's code object: PyCodeObject._co_monitoring (a public member in cpython/code.h) points to
+ * a _PyCoMonitoringData (internal header), whose first member `local_monitors` is 16 bytes, one
+ * tool mask per event. Any non-zero byte means a tool listens on that code object. That layout is
+ * mirrored below for CPython 3.14 and 3.15 only; any other version stops the build with a named #error. A
+ * tracer enabled by another thread during an entry is a benign race.
+ * A monitoring tool turned on while a compiled function runs sees that function from its next call
+ * on (SPEC N-14, known difference). */
+static uint64_t tp_mon_ver = 0;
+static int tp_mon_on = 0;
+static PyMonitoringState tp_mon_state[1];
+static const uint8_t tp_mon_event[1] = {PY_MONITORING_EVENT_PY_START};
+
+#if PY_VERSION_HEX >= 0x030F0000 && PY_VERSION_HEX < 0x03100000
+#define TP_LOCAL_EVENTS 16      /* 3.15: _PY_MONITORING_UNGROUPED_EVENTS */
+#elif PY_VERSION_HEX >= 0x030E0000 && PY_VERSION_HEX < 0x030F0000
+#define TP_LOCAL_EVENTS 11      /* 3.14: _PY_MONITORING_LOCAL_EVENTS */
+#else
+#error "typedpython: tp_traced reads the CPython 3.14/3.15 _co_monitoring layout"
+#endif
+/* The head of _PyCoMonitoringData (Include/internal/pycore_instruments.h): the local_monitors table,
+ * one tool mask per local event. 3.14 and 3.15 only; the build target is 3.15t, 3.14 is the embedded
+ * runtime that test_cgen compiles against. */
+typedef struct { uint8_t tools[TP_LOCAL_EVENTS]; } tp_co_local_monitors;
+
+static TP_COLD int tp_mon_scan(PyObject *module)
+{
+    int on = 1;     /* anything unexpected: the interpreter, which is always correct */
+    PyObject *exc = PyErr_GetRaisedException();
+    PyObject *sys = PyImport_ImportModule("sys");
+    PyObject *mon = sys ? PyObject_GetAttrString(sys, "monitoring") : NULL;
+    (void)module;
+    if (mon != NULL) {
+        on = 0;
+        for (int tool = 0; tool < 6 && !on; tool++) {
+            PyObject *r = PyObject_CallMethod(mon, "get_events", "i", tool);
+            if (r == NULL || PyLong_AsLong(r) != 0) {
+                on = 1;
+            }
+            Py_XDECREF(r);
+        }
+    }
+    Py_XDECREF(mon);
+    Py_XDECREF(sys);
+    PyErr_Clear();
+    PyErr_SetRaisedException(exc);
+    return on;
+}
+
+static inline int tp_traced(PyObject *module, PyCodeObject *code)
+{
+    uint64_t v = tp_mon_ver;
+    PyThreadState *ts = PyThreadState_Get();
+    /* sys.settrace / sys.setprofile (and PyEval_SetTrace / SetProfile): per thread, as in CPython.
+     * c_tracefunc / c_profilefunc are public members of PyThreadState (cpython/pystate.h; coverage's
+     * C tracer and Cython read them), the only internal-looking read here. */
+    if (TP_UNLIKELY(ts->c_tracefunc != NULL || ts->c_profilefunc != NULL)) {
+        return 1;
+    }
+    PyMonitoring_EnterScope(tp_mon_state, &v, tp_mon_event, 1);
+    if (TP_UNLIKELY(v != tp_mon_ver)) {
+        tp_mon_on = tp_mon_scan(module);
+        tp_mon_ver = v;
+    }
+    if (TP_UNLIKELY(tp_mon_on || code == NULL)) {
+        return 1;
+    }
+    {
+        const tp_co_local_monitors *lm = (const tp_co_local_monitors *)code->_co_monitoring;
+        uint8_t any = 0;
+        if (lm == NULL) {
+            return 0;
+        }
+        for (int i = 0; i < TP_LOCAL_EVENTS; i++) {
+            any |= lm->tools[i];
+        }
+        return TP_UNLIKELY(any != 0);
+    }
+}
+
 #endif /* TP_RUNTIME_H */
