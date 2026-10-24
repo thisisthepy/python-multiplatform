@@ -496,3 +496,142 @@ def test_verifier_buffer_params_are_not_limited_but_lists_still_are():
 
     assert_accepted(many(5, "array"))
     assert_rejected("verify/structure", many(3, None))
+
+
+# --- vectorised element-wise store loops (#226) ---------------------------------------------------
+
+VEC_SOURCE = textwrap.dedent('''
+    # typedpython: compiled
+    import array
+
+
+    def vscale(a: array.array[float], k: float) -> None:
+        for i in range(len(a)):
+            a[i] = a[i] * k
+
+
+    def vmix(a: array.array[float], k: float) -> None:
+        for i in range(len(a)):
+            a[i] = -(a[i] - k) * 2.5 + k
+
+
+    def vtwo(a: array.array[float], b: array.array[float]) -> None:
+        for i in range(len(a)):
+            a[i] = a[i] + b[i]
+
+
+    def vfill(a: array.array[float], k: float) -> None:
+        for i in range(len(a)):
+            a[i] = k
+
+
+    def vdiv(a: array.array[float], k: float) -> None:
+        for i in range(len(a)):
+            a[i] = a[i] / k
+''')
+
+
+@pytest.fixture(scope="module")
+def vec_built(tmp_path_factory):
+    d = tmp_path_factory.mktemp("vecmod")
+    path, proved, diags, c = build_source(d, VEC_SOURCE, "vecmod")
+    return Built(proved, diags, c, load_so(cbuild.build(c, path.stem, d / "out"))), d
+
+
+def _body(c, name):
+    start = c.index(f"static int tp_impl_{name}(", c.index("static const char tp_source"))
+    while not c[c.index(")", start) + 1:].startswith("\n{"):
+        start = c.index(f"static int tp_impl_{name}(", start + 1)
+    return c[start:c.index("\n}\n", start)]
+
+
+def test_vector_helper_only_where_the_architecture_guarantees_it():
+    h = (cbuild.RUNTIME_DIR / "tp_runtime.h").read_text()
+    guard = h[h.index("#define TP_BUF_VEC2") - 120:h.index("#define TP_BUF_VEC2")]
+    assert "__aarch64__" in guard and "x86" not in guard and "__SSE" not in guard
+    ld = h[h.index("tp_buf_ld2_f64("):h.index("tp_buf_st2_f64(")]
+    st = h[h.index("tp_buf_st2_f64("):h.index("#endif", h.index("tp_buf_st2_f64("))]
+    assert '"ldr %q0, %1"' in ld and '"str %q1, %0"' in st and '"Q"' in ld and '"=Q"' in st
+    assert '"memory"' not in ld + st
+    assert "vld1q" not in ld + st and "vst1q" not in ld + st      # no plain C access the compiler may split
+    plain = h.index("#ifdef TP_BUFFER_PLAIN")
+    assert h.index("#else", plain) < h.index("#define TP_BUF_VEC2")     # absent from the plain build
+
+
+def test_vectorised_loops_are_emitted_for_the_pattern_only(vec_built):
+    b, _ = vec_built
+    for n in ("vscale", "vmix", "vfill"):
+        body = _body(b.c, n)
+        assert "#ifdef TP_BUF_VEC2" in body and "tp_buf_st2_f64(" in body, n
+        assert "tp_buf_st_f64(" in body, n          # the scalar tail stays
+    for n in ("vdiv", "vtwo"):      # division can raise; b[i] is not proven in range: scalar only
+        assert "tp_buf_st2_f64" not in _body(b.c, n), n
+
+
+@pytest.mark.parametrize("n", [0, 1, 2, 3, 7, 1000, 4097])
+def test_vectorised_results_equal_the_interpreter(vec_built, n):
+    m = vec_built[0].module
+    mk = lambda: array.array("d", [i * 0.37 - 5 for i in range(n)])  # noqa: E731
+    differential(m, "vscale", lambda: (mk(), 1.7))
+    differential(m, "vmix", lambda: (mk(), 0.5))
+    differential(m, "vfill", lambda: (mk(), 3.25))
+    differential(m, "vdiv", lambda: (mk(), 4.0))
+    differential(m, "vtwo", lambda: (mk(), array.array("d", [i * 0.11 for i in range(n)])))
+
+
+def test_fallback_build_without_the_vector_helper_agrees(vec_built, tmp_path):
+    b, _ = vec_built
+    so = cbuild.build(b.c, "vecmod", tmp_path / "novec",
+                      flags=list(cbuild.DEFAULT_FLAGS) + ["-DTP_NO_BUF_VEC"])
+    m = load_so(so)
+    a = array.array("d", [i * 1.5 for i in range(33)])
+    m.vscale(a, 2.0)
+    assert a.tolist() == [i * 3.0 for i in range(33)]
+
+
+def test_concurrent_reader_sees_no_torn_element(vec_built):
+    import struct
+    import threading
+    m = vec_built[0].module
+    x = struct.unpack("<d", struct.pack("<Q", 0x1111111122222222))[0]
+    y = struct.unpack("<d", struct.pack("<Q", 0x3333333344444444))[0]
+    n = 4096
+    a = array.array("d", [x] * n)
+    ok = {struct.pack("<d", x), struct.pack("<d", y)}
+    stop = threading.Event()
+
+    def writer():
+        k = 0
+        while not stop.is_set():
+            m.vfill(a, y if k & 1 else x)
+            k += 1
+
+    t = threading.Thread(target=writer)
+    t.start()
+    bad = 0
+    try:
+        for _ in range(300):
+            raw = a.tobytes()
+            for off in range(0, len(raw), 8):
+                if raw[off:off + 8] not in ok:
+                    bad += 1
+    finally:
+        stop.set()
+        t.join()
+    assert bad == 0
+
+
+def test_no_vec_build_does_not_use_the_helper(vec_built, tmp_path):
+    import subprocess
+    c = tmp_path / "v.c"
+    c.write_text(vec_built[0].c)
+    import sysconfig
+    base = ["cc", "-E", "-P", "-I", str(cbuild.RUNTIME_DIR), "-I", sysconfig.get_paths()["include"]]
+    def body(*flags):
+        out = subprocess.run(base + list(flags) + [str(c)], capture_output=True, text=True, check=True).stdout
+        return _body(out, "vscale")
+    import platform
+    if platform.machine() != "arm64" and platform.machine() != "aarch64":
+        pytest.skip("the vector helper exists on aarch64 only")
+    assert "tp_buf_st2_f64(" in body()
+    assert "tp_buf_st2_f64(" not in body("-DTP_NO_BUF_VEC")
