@@ -666,7 +666,14 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   (direct and mutual recursion) are compiled: every compiled function counts its frame (`tp_enter_call` /
   `tp_leave_call`, added to the Python frame depth and compared with `sys.getrecursionlimit()`), so recursion
   past the limit raises `RecursionError('maximum recursion depth exceeded')` where CPython does, and a C-stack
-  guard keeps the process alive at any limit (#57). `Status: implemented` for desktop host builds
+  guard keeps the process alive at any limit (#57). Compiled loops check the eval breaker so signals
+  (`KeyboardInterrupt`), pending calls and GIL hand-off reach Python during long compiled work (#141): a
+  `while` loop counts down once per iteration; a `for ... in range(...)` loop, whose trip count is known,
+  runs in chunks of `TP_POLL_INTERVAL` iterations and polls once per chunk (#206), with `break`,
+  `continue` and `return` meaning exactly what they mean without chunking (trip counts just below, at and
+  above a multiple of the interval, negative steps, empty ranges and ranges spanning the i64 limits all
+  behave as CPython's `range`). Functions holding an array copy-in or entry-globals snapshot do not poll.
+  `Status: implemented` for desktop host builds
   (`test_pipeline.py`, `test_cgen*.py`, `test_recursion.py`, `test_eval_breaker.py`, `test_fast_entry.py`,
   `test_free_threaded.py`; free-threaded 3.15t, #159). Not yet: shipping compiled modules in an app through
   pypackpack (#25), methods of fixed-layout classes (#155), native ints in impure functions (#232).
