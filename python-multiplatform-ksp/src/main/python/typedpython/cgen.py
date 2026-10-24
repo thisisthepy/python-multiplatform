@@ -37,12 +37,11 @@ critical section. Module state is written only by the exec slot; the class guard
 (tp_runtime.h).
 
 Buffer arrays (issue #149, identity-safe part). A parameter annotated `array.array[float]`,
-`array.array[int]` is an `ArrayParam` with `buffer` "array". numpy: not supported yet (#220):
-a numpy element's arithmetic produces np.float64 / np.int64 / np.bool (compiled code returns float),
-numpy scalar operations emit observable RuntimeWarnings and divide by zero without raising (compiled
-double arithmetic does neither), and emulating that needs taint tracking of numpy-derived values,
-numpy-scalar boxing and FP-exception-to-warning emulation. An `NDArray[...]` parameter is an ordinary
-object parameter. `tp_wrap_f` does not copy it: after the scalar guards, `tp_buf_enter`
+`array.array[int]` is an `ArrayParam` with `buffer` "array"; `NDArray[np.float64]` / `NDArray[np.int64]`
+(#220) is one with `buffer` "numpy" (exact `numpy.ndarray`, an out-of-range index raises numpy's
+IndexError text). A numpy element is an np.float64 / np.int64 in the interpreter: `Box.np` boxes
+the matching numpy scalar when its run-time flag is true, and `BinOp.np` deopts a non-finite float
+`+ - *` result so the interpreter emits numpy's RuntimeWarning (taint.py). `tp_wrap_f` does not copy it: after the scalar guards, `tp_buf_enter`
 checks the exact type (captured in `tp_state.buf_types` by the exec slot), takes one `Py_buffer`
 export (C-contiguous, 1-D, 8-byte items, format `d` / `q` / `l`, aligned, writable when the function
 stores) and any mismatch deopts before an effect. The export is released by `tp_buf_exit`, part of the
@@ -186,7 +185,9 @@ _CT = {Type.I64: "int64_t", Type.F64: "double", Type.BOOL: "int", Type.OBJ: "PyO
 _ARRAY_CT = {Type.F64_ARRAY: "tp_f64_array", Type.I64_ARRAY: "tp_i64_array"}
 # Buffer arrays (#149): `ArrayParam.buffer` -> the exact type the guard compares against (the index
 # into the module state's `buf_types`), and the format strings the export must carry.
-_BUFFER_KINDS = {None: None, "array": 0}
+_BUFFER_KINDS = {None: None, "array": 0, "numpy": 1}
+# buf_types slots 2..4: the numpy scalar types a Box.np makes (np.float64, np.int64, np.bool_)
+_NP_SLOT = {Type.F64: 2, Type.I64: 3, Type.BOOL: 4}
 _BUFFER_FMT = {Type.F64_ARRAY: ('"d"', "NULL"), Type.I64_ARRAY: ('"q"', '"l"')}
 _BUFFER_SFX = {Type.F64_ARRAY: "f64", Type.I64_ARRAY: "i64"}
 _CT_ARRAY_REV = {"tp_f64_array": Type.F64_ARRAY, "tp_i64_array": Type.I64_ARRAY}
@@ -672,7 +673,7 @@ def generate(module: ir.Module, source_path: Path, display_path: str | None = No
     w(f"    PyObject *ints[{len(mg.int_consts) + 1}];             /* strong: the int constants boxed once (SPEC N-13) */")
     w(f"    tp_gslot gc[{len(mg.gnames) + 1}];             /* cached global/builtin reads (SPEC N-13) */")
     w("    PyObject *builtins;             /* strong: the builtins dict the module source ran with; NULL: none */")
-    w("    PyObject *buf_types[1];         /* strong: array.array (buffer arrays, #149); NULL: not importable */")
+    w("    PyObject *buf_types[5];         /* strong: array.array, numpy.ndarray, np.float64, np.int64, np.bool_ (buffer arrays #149, #220); NULL: not importable */")
     w("    PyObject *mtype;                /* strong: the descriptor type of compiled methods; NULL: none */")
     w(f"    PyObject *mdescrs[{mg.n_methods + 1}];        /* strong: the installed descriptor of each method */")
     w("} tp_state;")
@@ -1048,6 +1049,9 @@ class _FnGen:
             t = self.tmp("double")
             if e.op in _F64_INLINE:
                 self.emit(f"{t} = {a} {_F64_INLINE[e.op]} {b};")
+                if e.np:
+                    # #220: numpy would warn (overflow / invalid value); the interpreter redoes the call
+                    self.emit(f"if (!isfinite({t})) {{ tp_rc = 1; goto tp_exit; }}")
             else:
                 self.check(f"{_F64_OP[e.op]}({a}, {b}, &{t})")
             return t
@@ -1155,6 +1159,8 @@ class _FnGen:
         return t
 
     def ev_ToFloat(self, e: ir.ToFloat) -> str:
+        if e.explicit and e.operand.type is Type.F64:
+            return self.ev(e.operand)
         if e.operand.type is not Type.I64:
             raise CGenError(f"{self.f.name}: ToFloat of {e.operand.type}")
         v = self.ev(e.operand)
@@ -1194,6 +1200,12 @@ class _FnGen:
         if ot not in _BOX:
             raise CGenError(f"{self.f.name}: Box of {ot}")
         v = self.ev(e.operand)
+        if e.np is not None:
+            if e.np.type is not Type.BOOL:
+                raise CGenError(f"{self.f.name}: Box np flag of {e.np.type}")
+            flag = self.ev(e.np)
+            return self._own_new(f"({flag} ? tp_box_np(tp_st->buf_types[{_NP_SLOT[ot]}], "
+                                 f"{_BOX[ot]}({v})) : {_BOX[ot]}({v}))")
         return self._own_new(f"{_BOX[ot]}({v})")
 
     def ev_Unbox(self, e: ir.Unbox) -> str:
@@ -2108,7 +2120,8 @@ class _FnGen:
         for i, p in buffers:
             fmt1, fmt2 = _BUFFER_FMT[p.type]
             kind = _BUFFER_KINDS[p.buffer]
-            L.append(f"    tp_s = tp_buf_enter(tp_args[{i}], "
+            enter = "tp_buf_enter_np" if p.buffer == "numpy" else "tp_buf_enter"
+            L.append(f"    tp_s = {enter}(tp_args[{i}], "
                      f"((tp_state *)PyModule_GetState(tp_module))->buf_types[{kind}], "
                      f"{fmt1}, {fmt2}, {int(p.stored)}, &tp_a{i});")
             L.append("    if (tp_s < 0) goto tp_error;")
@@ -2403,7 +2416,7 @@ def _state_functions(mg: _ModGen) -> str:
         "    for (i = 0; i < sizeof(tp_st->ints) / sizeof(tp_st->ints[0]); i++) Py_VISIT(tp_st->ints[i]);",
         "    Py_VISIT(tp_st->mtype);",
         "    for (i = 0; i < sizeof(tp_st->mdescrs) / sizeof(tp_st->mdescrs[0]); i++) Py_VISIT(tp_st->mdescrs[i]);",
-        "    for (i = 0; i < 1; i++) Py_VISIT(tp_st->buf_types[i]);",
+        "    for (i = 0; i < sizeof(tp_st->buf_types) / sizeof(tp_st->buf_types[0]); i++) Py_VISIT(tp_st->buf_types[i]);",
         "    for (i = 0; i < sizeof(tp_st->names) / sizeof(tp_st->names[0]); i++) Py_VISIT(tp_st->names[i]);",
         "    for (i = 0; i < sizeof(tp_st->kwnames) / sizeof(tp_st->kwnames[0]); i++) Py_VISIT(tp_st->kwnames[i]);",
         "    for (i = 0; i < sizeof(tp_st->classes) / sizeof(tp_st->classes[0]); i++) Py_VISIT(tp_st->classes[i]);",
@@ -2425,7 +2438,7 @@ def _state_functions(mg: _ModGen) -> str:
         "    for (i = 0; i < sizeof(tp_st->gc) / sizeof(tp_st->gc[0]); i++) tp_gcache_clear(&tp_st->gc[i]);",
         "    for (i = 0; i < sizeof(tp_st->mdescrs) / sizeof(tp_st->mdescrs[0]); i++) tp_release(&tp_st->mdescrs[i]);",
         "    tp_release(&tp_st->mtype);",
-        "    for (i = 0; i < 1; i++) tp_release(&tp_st->buf_types[i]);",
+        "    for (i = 0; i < sizeof(tp_st->buf_types) / sizeof(tp_st->buf_types[0]); i++) tp_release(&tp_st->buf_types[i]);",
         "    for (i = 0; i < sizeof(tp_st->names) / sizeof(tp_st->names[0]); i++) tp_release(&tp_st->names[i]);",
         "    for (i = 0; i < sizeof(tp_st->kwnames) / sizeof(tp_st->kwnames[0]); i++) tp_release(&tp_st->kwnames[i]);",
         "    for (i = 0; i < sizeof(tp_st->cls_ok) / sizeof(tp_st->cls_ok[0]); i++) tp_st->cls_ok[i] = 0;",
@@ -2541,6 +2554,9 @@ def _exec_function(mg: _ModGen) -> str:
     # module source ran (so its own imports are done). Not importable: NULL, and every guard deopts.
     if "array" in kinds:
         L.append('    if (tp_import_attr("array", "array", &tp_st->buf_types[0]) < 0) goto tp_done;')
+    if "numpy" in kinds:
+        for slot, attr in ((1, "ndarray"), (2, "float64"), (3, "int64"), (4, "bool_")):
+            L.append(f'    if (tp_import_attr("numpy", "{attr}", &tp_st->buf_types[{slot}]) < 0) goto tp_done;')
     L += [
         "    tp_table = PyDict_New();",
         "    if (tp_table == NULL || PyDict_SetItemString(tp_dict, \"__typedpython_interpreted__\", tp_table) < 0) goto tp_done;",

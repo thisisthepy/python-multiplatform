@@ -394,7 +394,7 @@ class _Checker:
                     self.error(TYPE, f"array parameter '{p.name}' has non-array type {p.type}")
                 elif not isinstance(p.stored, bool):
                     self.error(TYPE, f"array parameter '{p.name}' has a non-bool `stored`")
-                elif p.buffer not in (None, "array"):
+                elif p.buffer not in (None, "array", "numpy"):
                     self.error(BUFFER, f"array parameter '{p.name}' has buffer kind {p.buffer!r}")
                 else:
                     self.arrays[p.name] = p.type
@@ -771,6 +771,14 @@ class _Checker:
                 exact = (_exact(e.op, self.interval(left), self.interval(right))
                          if shape else _FULL)
                 proven = self.check_proven(shape, exact, f"{e.type.value} {e.op.value}")
+        if type(e.np) is not bool:
+            self.error(TYPE, f"BinOp `np` {e.np!r} is not a bool")
+        elif e.np:
+            if not (e.type is Type.F64 and lt is Type.F64 and rt is Type.F64
+                    and e.op in (BinOpKind.ADD, BinOpKind.SUB, BinOpKind.MUL)):
+                self.error(TYPE, "BinOp `np` is set on something other than an f64 + - * (#220)")
+            else:
+                self.can_deopt = True        # a non-finite result: the interpreter redoes the call
         shift = e.op in (BinOpKind.LSHIFT, BinOpKind.RSHIFT)
         if lt is Type.INT:
             # SPEC N-13: both operands INT, result INT, never deopts (it promotes in place)
@@ -879,7 +887,10 @@ class _Checker:
 
     def e_ToFloat(self, e: ToFloat, state: _State) -> ir.Expr:
         operand = self.expr(e.operand, state)
-        self.slot(operand, Type.I64, "operand of ToFloat")
+        if type(e.explicit) is not bool:
+            self.error(TYPE, f"ToFloat `explicit` {e.explicit!r} is not a bool")
+        self.slot(operand, Type.F64 if e.explicit and getattr(operand, "type", None) is Type.F64
+                  else Type.I64, "operand of ToFloat")
         if e.type is not Type.F64:
             self.error(TYPE, f"ToFloat gives f64, node says {e.type.value}")
         return dataclasses.replace(e, operand=operand)
@@ -902,7 +913,13 @@ class _Checker:
             self.error(TYPE, f"Box of {getattr(ot, 'value', ot)}")
         if e.type is not Type.OBJ:
             self.error(TYPE, f"Box gives obj, node says {e.type.value}")
-        return dataclasses.replace(e, operand=operand)
+        np_flag = e.np
+        if np_flag is not None:
+            np_flag = self.expr(e.np, state)
+            if ot not in ir.SCALARS:
+                self.error(TYPE, "Box `np` is set on a Box of something other than a scalar")
+            self.slot(np_flag, Type.BOOL, "`np` flag of Box")
+        return dataclasses.replace(e, operand=operand, np=np_flag)
 
     def e_Unbox(self, e: Unbox, state: _State) -> ir.Expr:
         operand = self.expr(e.operand, state)

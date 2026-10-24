@@ -472,7 +472,7 @@ def test_verifier_buffer_kind_and_copy_rules():
     from test_verify import F64 as VF64, F64A as VF64A, assert_rejected, fn
     from typedpython.ir import ArrayParam, Assign, Const, CopyArray, Index, Return, Type
 
-    for kind in ("numpy", "memoryview"):
+    for kind in ("ndarray", "memoryview"):        # "numpy" is a buffer kind since #220
         assert_rejected("verify/buffer", fn("f", params=[ArrayParam("a", VF64A, False, kind)],
                                              returns=VF64, pure=True,
                                              body=[Return(Index(VF64, "a", Const(Type.I64, 0)))]))
@@ -480,6 +480,9 @@ def test_verifier_buffer_kind_and_copy_rules():
               locals_={"b": VF64A},
               body=[Assign("b", CopyArray(VF64A, "a")), Return(Index(VF64, "b", Const(Type.I64, 0)))])
     assert_rejected("verify/buffer", copy)
+    import dataclasses
+    assert_rejected("verify/buffer", dataclasses.replace(
+        copy, params=[ArrayParam("a", VF64A, False, "numpy")]))
 
 
 def test_verifier_buffer_params_are_not_limited_but_lists_still_are():

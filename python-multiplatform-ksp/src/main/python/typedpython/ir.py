@@ -157,6 +157,10 @@ class BinOp(Expr):
     # Any other op, or an op the verifier cannot prove, is rejected (verify/proven-overflow).
     proven: bool = False
     inplace: bool = False
+    # F64 ADD/SUB/MUL only (#220): an operand may be a numpy scalar in the interpreter, which warns
+    # (RuntimeWarning: overflow / invalid value) where a double does not. A non-finite result →
+    # deopt, so the interpreter redoes the call and emits the warning; legal only in a pure function.
+    np: bool = False
 
 
 class UnaryOpKind(Enum):
@@ -217,6 +221,9 @@ class ToFloat(Expr):
     int→float conversion of mixed arithmetic. Type F64."""
 
     operand: Expr
+    # `float(x)` written in the source (#220): the result is a plain float even when `x` is a numpy
+    # scalar in the interpreter. The operand may then also be F64 (the value itself).
+    explicit: bool = False
 
 
 @dataclass(frozen=True)
@@ -231,9 +238,14 @@ class Box(Expr):
     """A scalar or array element converted to a Python object (type OBJ): I64 → int, F64 → float,
     BOOL → True/False, INT → the int (a promoted INT is the PyLong it holds). Used when a typed value
     flows into OBJ code. A Box of an I64 or INT constant is read from module state, built once at
-    module exec (SPEC N-13)."""
+    module exec (SPEC N-13).
+    `np` (#220, a BOOL expression, None otherwise): when it is true at run time the value is a numpy
+    scalar in the interpreter (it derives from an element of a numpy array), and the box is the
+    matching `np.int64` / `np.float64` / `np.bool` instead. The front end computes it per value (a
+    shadow BOOL local per scalar local that can hold one)."""
 
     operand: Expr
+    np: Expr | None = None
 
 
 @dataclass(frozen=True)
@@ -700,8 +712,10 @@ class ArrayParam:
     # copy-in, no write-back, no critical section, no aliasing guard (two buffers may share memory
     # and reads then see writes in program order, as in the interpreter). `len` is the export's
     # shape[0], fixed for the call because the export forbids resizing. Closedness (#203) applies
-    # unchanged. numpy.ndarray is not a buffer kind (its element arithmetic is numpy's: np.float64
-    # results, RuntimeWarnings, no ZeroDivisionError); an ndarray parameter is an ordinary object.
+    # unchanged. "numpy" (#220): an exact `numpy.ndarray` with dtype float64 (F64_ARRAY) or int64
+    # (I64_ARRAY), same guard and element access; an out-of-range index raises numpy's IndexError
+    # ("index i is out of bounds for axis 0 with size n"). The elements are numpy scalars in the
+    # interpreter, see Box.np and BinOp.np.
     # Every other rule above for lists (stored, array-open, Index/StoreIndex/Len only) holds too.
     buffer: str | None = None
 
