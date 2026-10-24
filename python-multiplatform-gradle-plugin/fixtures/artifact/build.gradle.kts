@@ -63,15 +63,15 @@ kotlin {
                 // Version pinned to the catalog's `compose-plugin`, which is what the rest of this
                 // build resolves, so no second Compose version enters the cache.
                 val composeVersion = libs.versions.compose.plugin.get()
-                implementation("org.jetbrains.compose.ui:ui-desktop:$composeVersion")
-                implementation("org.jetbrains.compose.ui:ui-unit-desktop:$composeVersion")
-                implementation("org.jetbrains.compose.foundation:foundation-layout-desktop:$composeVersion")
+                implementation("org.thisisthepy.compose.ui:ui-desktop:$composeVersion")
+                implementation("org.thisisthepy.compose.ui:ui-unit-desktop:$composeVersion")
+                implementation("org.thisisthepy.compose.foundation:foundation-layout-desktop:$composeVersion")
                 // `Modifier.clickable` lives here rather than in `foundation-layout`, and it is the
                 // acceptance criterion for a **non-composable** function-typed slot: an ordinary
                 // function taking `onClick: () -> Unit`, so it needs no composition to call and yet
                 // was unreachable for as long as a `kotlin.FunctionN` parameter was declined one
                 // layer before the slot grammar was consulted (`ArtifactScanner.functionSlotOrNull`).
-                implementation("org.jetbrains.compose.foundation:foundation-desktop:$composeVersion")
+                implementation("org.thisisthepy.compose.foundation:foundation-desktop:$composeVersion")
             }
         }
         val desktopTest by getting {

@@ -14,7 +14,15 @@ pluginManagement {
                 includeGroupAndSubgroups("com.google")
             }
         }
-        mavenCentral()
+        mavenCentral {
+            // `org.thisisthepy.compose.*:1.11.1-ext.1` POMs on Maven Central omit Gradle's
+            // `published-with-gradle-metadata` marker comment, so Gradle must be told to read `.module`
+            // metadata alongside `.pom` to resolve KMP platform variants and plugin runtime elements.
+            metadataSources {
+                gradleMetadata()
+                mavenPom()
+            }
+        }
         gradlePluginPortal()
 
         maven {
@@ -32,7 +40,15 @@ dependencyResolutionManagement {
                 includeGroupAndSubgroups("com.google")
             }
         }
-        mavenCentral()
+        mavenCentral {
+            // `org.thisisthepy.compose.*:1.11.1-ext.1` POMs on Maven Central omit Gradle's
+            // `published-with-gradle-metadata` marker comment, so Gradle must be told to read `.module`
+            // metadata alongside `.pom` to resolve KMP platform variants and plugin runtime elements.
+            metadataSources {
+                gradleMetadata()
+                mavenPom()
+            }
+        }
     }
 }
 

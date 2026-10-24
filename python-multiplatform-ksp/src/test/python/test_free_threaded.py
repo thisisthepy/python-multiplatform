@@ -627,6 +627,56 @@ def test_mutant_without_the_dict_critical_section_is_caught(built, tmp_path):
     assert stale > 0, "the mutant (no dict critical section) was not caught"
 
 
+@pytest.mark.race_mutant
+def test_mutant_with_a_borrowed_field_read_is_caught(built, tmp_path):
+    """#193 (SPEC N-12): a field read of a shared object must take a strong reference
+    (PyMember_GetOne). A borrowed read (load the slot, take the reference later) lets a writer
+    replace the slot and free the old value in between; the concurrent FieldGet test must see it."""
+    result, path, _ = built
+    h = (cbuild.RUNTIME_DIR / "tp_runtime.h").read_text()
+    good = "    return PyMember_GetOne((const char *)obj, m);\n"
+    assert good in h
+    racy = ("    PyObject *v = *(PyObject *volatile *)((char *)obj + m->offset);\n"
+            "    for (volatile int i = 0; i < 2000; i++) { }\n"
+            "    return Py_NewRef(v);\n")
+    d = tmp_path / "rt"
+    d.mkdir()
+    (d / "tp_runtime.h").write_text(h.replace(good, racy))
+    so = cbuild.build(cgen.generate(result.module, path), "ftmod", tmp_path / "mut", runtime_dir=d)
+    body = """
+        cell = m.Cell((0, 0), None)
+        stop = False
+        bad = []
+        def writer():
+            i = 0
+            while not stop:
+                m.seta(cell, (i, [i]))
+                i += 1
+        def reader():
+            for _ in range(20000):
+                v = m.geta(cell)
+                if type(v) is not tuple or len(v) != 2:
+                    bad.append(1)
+        wt = threading.Thread(target=writer); wt.start()
+        errs = run_threads([reader] * 3)
+        stop = True
+        wt.join()
+        print(json.dumps({"bad": len(bad), "errs": len(errs)}))
+    """
+    assert run_child(result.extension, body) == {"bad": 0, "errs": 0}   # the real read is sound
+    caught = False
+    for _ in range(3):
+        try:
+            r = run_child(so, body)
+        except AssertionError:          # the child crashed on a freed object: caught
+            caught = True
+            break
+        if r["bad"] or r["errs"]:
+            caught = True
+            break
+    assert caught, "the mutant (borrowed field read) was not caught"
+
+
 # --- ThreadSanitizer (best effort) --------------------------------------------------------------------
 # The interpreter is not instrumented, so TSan sees races between two accesses made by generated C or
 # the header (the epoch, the class state) but NOT a missing list lock (the list is written by CPython).

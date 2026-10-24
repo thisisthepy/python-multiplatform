@@ -51,7 +51,13 @@ kotlin {
                 implementation(compose.material3)
                 implementation(compose.ui)
                 // `Icons.Default.Add` and friends (issue #37): the one place an `ImageVector` is built.
-                implementation(libs.compose.material.icons.core)
+                // `material-icons-core` stays at 1.7.3 under `org.jetbrains.compose.material`, so exclude
+                // its transitive upstream `org.jetbrains.compose.{runtime,ui}` to avoid pulling a second
+                // Compose copy (1.7.3) alongside `org.thisisthepy.compose.*`.
+                implementation(libs.compose.material.icons.core.get().toString()) {
+                    exclude(group = "org.jetbrains.compose.runtime")
+                    exclude(group = "org.jetbrains.compose.ui")
+                }
                 implementation(compose.desktop.currentOs)
             }
         }

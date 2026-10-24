@@ -57,7 +57,10 @@ kotlin {
                 implementation(compose.foundation)
                 implementation(compose.material3)
                 implementation(compose.ui)
-                implementation(libs.compose.material.icons.core)
+                implementation(libs.compose.material.icons.core.get().toString()) {
+                    exclude(group = "org.jetbrains.compose.runtime")
+                    exclude(group = "org.jetbrains.compose.ui")
+                }
                 implementation(compose.desktop.currentOs)
             }
         }
@@ -207,7 +210,7 @@ val composeExtendedVersion = providers.gradleProperty("composeExtended.version")
 // The fork's group prefix: `org.jetbrains.compose` (its old coordinates) or its own, e.g.
 // `org.thisisthepy.compose`; a module `org.jetbrains.compose.ui:ui-desktop` is then taken as
 // `<prefix>.ui:ui-desktop`.
-val composeExtendedGroupPrefix = providers.gradleProperty("composeExtended.groupPrefix").orNull ?: "org.jetbrains.compose"
+val composeExtendedGroupPrefix = providers.gradleProperty("composeExtended.groupPrefix").orNull ?: "org.thisisthepy.compose"
 val composeExtendedModules = providers.gradleProperty("composeExtended.modules").orNull
     ?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() }?.toSet().orEmpty()
 // Where the fork's modules come from: this machine's mavenLocal (`composeExtended.mavenLocal`), or a
@@ -242,13 +245,21 @@ if (composeExtendedVersion != null && (composeExtendedMavenLocal || composeExten
                 includeGroupAndSubgroups("com.google")
             }
         }
-        mavenCentral()
+        mavenCentral {
+            metadataSources {
+                gradleMetadata()
+                mavenPom()
+            }
+        }
     }
 }
 val e2eNativeRuntime: Configuration = configurations.getByName("desktopTestRuntimeClasspath").copyRecursive().apply {
     resolutionStrategy.eachDependency {
         if (composeExtendedVersion != null && "${requested.group}:${requested.name}" in composeExtendedModules) {
-            useTarget("${requested.group.replaceFirst("org.jetbrains.compose", composeExtendedGroupPrefix)}:${requested.name}:$composeExtendedVersion")
+            val targetGroup = requested.group
+                .replaceFirst("org.jetbrains.compose", composeExtendedGroupPrefix)
+                .replaceFirst("org.thisisthepy.compose", composeExtendedGroupPrefix)
+            useTarget("$targetGroup:${requested.name}:$composeExtendedVersion")
             because("compose-multiplatform-core-extended: an AWT-free main dispatcher for a native image (#249)")
         }
     }

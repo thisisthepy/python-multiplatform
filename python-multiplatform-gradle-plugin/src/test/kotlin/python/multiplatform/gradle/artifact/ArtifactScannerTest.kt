@@ -558,8 +558,13 @@ class ArtifactScannerTest {
         ).firstOrNull { it.isDirectory }
         if (gradleCaches == null) return // no local Gradle cache found at either known location
 
-        fun jarUnder(group: String, artifact: String): File? = gradleCaches.resolve(group).resolve(artifact)
-            .walkTopDown().firstOrNull { it.isFile && it.name.endsWith(".jar") && "sources" !in it.name }
+        fun jarUnder(group: String, artifact: String): File? = listOf(
+            group,
+            group.replaceFirst("org.jetbrains.compose", "org.thisisthepy.compose"),
+        ).firstNotNullOfOrNull { g ->
+            gradleCaches.resolve(g).resolve(artifact)
+                .walkTopDown().firstOrNull { it.isFile && it.name.endsWith(".jar") && "sources" !in it.name }
+        }
 
         val layoutJar = jarUnder("org.jetbrains.compose.foundation", "foundation-layout-desktop") ?: return
         val unitJar = jarUnder("org.jetbrains.compose.ui", "ui-unit-desktop") ?: return
@@ -701,8 +706,13 @@ class ArtifactScannerTest {
         ).firstOrNull { it.isDirectory }
         if (gradleCaches == null) return // no local Gradle cache found at either known location
 
-        fun jarUnder(group: String, artifact: String): File? = gradleCaches.resolve(group).resolve(artifact)
-            .walkTopDown().firstOrNull { it.isFile && it.name.endsWith(".jar") && "sources" !in it.name }
+        fun jarUnder(group: String, artifact: String): File? = listOf(
+            group,
+            group.replaceFirst("org.jetbrains.compose", "org.thisisthepy.compose"),
+        ).firstNotNullOfOrNull { g ->
+            gradleCaches.resolve(g).resolve(artifact)
+                .walkTopDown().firstOrNull { it.isFile && it.name.endsWith(".jar") && "sources" !in it.name }
+        }
 
         val material3Jar = jarUnder("org.jetbrains.compose.material3", "material3-desktop") ?: return
         val uiTextJar = jarUnder("org.jetbrains.compose.ui", "ui-text-desktop") ?: return
@@ -758,8 +768,13 @@ class ArtifactScannerTest {
         ).firstOrNull { it.isDirectory }
         if (gradleCaches == null) return // no local Gradle cache found at either known location
 
-        fun jarUnder(group: String, artifact: String): File? = gradleCaches.resolve(group).resolve(artifact)
-            .walkTopDown().firstOrNull { it.isFile && it.name.endsWith(".jar") && "sources" !in it.name }
+        fun jarUnder(group: String, artifact: String): File? = listOf(
+            group,
+            group.replaceFirst("org.jetbrains.compose", "org.thisisthepy.compose"),
+        ).firstNotNullOfOrNull { g ->
+            gradleCaches.resolve(g).resolve(artifact)
+                .walkTopDown().firstOrNull { it.isFile && it.name.endsWith(".jar") && "sources" !in it.name }
+        }
 
         val uiJar = jarUnder("org.jetbrains.compose.ui", "ui-desktop") ?: return
         val classpath = listOfNotNull(

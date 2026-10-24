@@ -816,8 +816,23 @@ internal object ArtifactScanner {
         // of a @Composable function". Found by generating them and watching the fixture fail to
         // compile, which is also why the check reads the getter's own annotations rather than the
         // property's -- metadata does not carry them for a release build.
-        val getterName = "get" + property.name.replaceFirstChar { it.uppercase() }
-        if (declaringNode.methods.any { it.name == getterName && isComposable(it) }) return@mapNotNull null
+        //
+        // The same check declines `@Deprecated(level = HIDDEN)` properties (`ButtonDefaults.SmallButtonContentPadding`
+        // in Material3 1.11.1-ext.1), whose accessor is `ACC_SYNTHETIC` and therefore unreachable from source.
+        val getter = property.getterSignature?.let { signature ->
+            declaringNode.methods.firstOrNull { it.name == signature.name && it.desc == signature.descriptor }
+        }
+        val field = property.fieldSignature?.let { signature ->
+            declaringNode.fields.firstOrNull { it.name == signature.name && it.desc == signature.descriptor }
+        }
+        when {
+            getter != null -> {
+                if (!getter.access.hasFlag(Opcodes.ACC_PUBLIC) || getter.access.hasFlag(Opcodes.ACC_SYNTHETIC)) return@mapNotNull null
+                if (isComposable(getter)) return@mapNotNull null
+            }
+            field != null && field.access.hasFlag(Opcodes.ACC_PUBLIC) && !field.access.hasFlag(Opcodes.ACC_SYNTHETIC) -> Unit
+            else -> return@mapNotNull null
+        }
         val returnModel = kotlinTypeModelOf(property.returnType, classpath) ?: return@mapNotNull null
         val returnType = resolveKotlinType(property.returnType, classpath, BoundaryDirection.RETURN)
             ?: return@mapNotNull null

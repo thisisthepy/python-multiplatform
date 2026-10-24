@@ -62,8 +62,13 @@ class FunctionSlotBindingTest {
         File("/Volumes/macMini/caches/.gradle/caches/modules-2/files-2.1"),
     ).firstOrNull { it.isDirectory }
 
-    private fun jarUnder(group: String, artifact: String): File? = caches?.resolve(group)?.resolve(artifact)
-        ?.walkTopDown()?.firstOrNull { it.isFile && it.name.endsWith(".jar") && "sources" !in it.name }
+    private fun jarUnder(group: String, artifact: String): File? = listOf(
+        group,
+        group.replaceFirst("org.jetbrains.compose", "org.thisisthepy.compose"),
+    ).firstNotNullOfOrNull { g ->
+        caches?.resolve(g)?.resolve(artifact)
+            ?.walkTopDown()?.firstOrNull { it.isFile && it.name.endsWith(".jar") && "sources" !in it.name }
+    }
 
     private val kotlinStdlibJar: File
         get() = File(Class.forName("kotlin.text.Regex").protectionDomain.codeSource.location.toURI())
