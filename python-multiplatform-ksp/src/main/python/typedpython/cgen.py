@@ -180,7 +180,8 @@ class CGenError(Exception):
     """The IR cannot be lowered as specified (a contract violation by the producer of the IR)."""
 
 
-_CT = {Type.I64: "int64_t", Type.F64: "double", Type.BOOL: "int", Type.OBJ: "PyObject *"}
+_CT = {Type.I64: "int64_t", Type.F64: "double", Type.BOOL: "int", Type.OBJ: "PyObject *",
+       Type.INT: "tp_int"}
 _ARRAY_CT = {Type.F64_ARRAY: "tp_f64_array", Type.I64_ARRAY: "tp_i64_array"}
 # Buffer arrays (#149): `ArrayParam.buffer` -> the exact type the guard compares against (the index
 # into the module state's `buf_types`), and the format strings the export must carry.
@@ -203,6 +204,11 @@ _F64_OP = {ir.BinOpKind.TRUEDIV: "tp_truediv_f64", ir.BinOpKind.FLOORDIV: "tp_fl
            ir.BinOpKind.MOD: "tp_mod_f64"}
 _F64_INLINE = {ir.BinOpKind.ADD: "+", ir.BinOpKind.SUB: "-", ir.BinOpKind.MUL: "*"}
 _OBJ_OP = {k: f"TP_BINOP_{k.name}" for k in ir.BinOpKind}
+# SPEC N-13: the INT operations (tp_runtime.h "Native ints"); TRUEDIV of ints is an OBJ operation
+_INT_OP = {ir.BinOpKind.ADD: "tp_int_add", ir.BinOpKind.SUB: "tp_int_sub",
+           ir.BinOpKind.MUL: "tp_int_mul", ir.BinOpKind.FLOORDIV: "tp_int_floordiv",
+           ir.BinOpKind.MOD: "tp_int_mod", ir.BinOpKind.LSHIFT: "tp_int_lshift",
+           ir.BinOpKind.RSHIFT: "tp_int_rshift"}
 _MATH = {ir.MathFunc.SQRT: 1, ir.MathFunc.EXP: 1, ir.MathFunc.LOG: 1, ir.MathFunc.SIN: 1,
          ir.MathFunc.COS: 1, ir.MathFunc.TAN: 1, ir.MathFunc.FABS: 1, ir.MathFunc.ATAN2: 2,
          ir.MathFunc.HYPOT: 2}
@@ -396,7 +402,7 @@ def _class_current_expr(obj_c: str, k: int, fields_c: str, n: int, descrs_c: str
 
 def _watch_event_stmt() -> str:
     """The body of the module's dict-watcher callback (module docstring, rule 5)."""
-    return "return tp_globals_watch_event(event, key, tp_class_names);"
+    return "return tp_globals_watch_event(event, key, tp_watch_names);"
 
 
 def _is_effect(e: ir.Expr) -> bool:
@@ -425,7 +431,7 @@ def _runs_no_python(f: ir.Function) -> bool:
         return False
     if any(isinstance(p, ir.Param) and p.type is Type.OBJ for p in f.params):
         return False
-    if any(t is Type.OBJ for t in f.locals.values()):
+    if any(t in (Type.OBJ, Type.INT) for t in f.locals.values()):
         return False
     for s in _walk_stmts(f.body):
         if isinstance(s, (ir.FieldSet, ir.StoreItem, ir.ForObj)):
@@ -433,7 +439,8 @@ def _runs_no_python(f: ir.Function) -> bool:
     for e in _all_exprs(f):
         if isinstance(e, _RUNS_PYTHON):
             return False
-        if e.type is Type.OBJ and not (isinstance(e, ir.Box) and e.operand.type in ir.SCALARS):
+        if e.type is Type.INT or (e.type is Type.OBJ and not (isinstance(e, ir.Box)
+                                                              and e.operand.type in ir.SCALARS)):
             return False
     return True
 
@@ -513,6 +520,8 @@ class _ModGen:
             self.method_base[cd.name] = total_methods
             total_methods += len(self.methods_of[cd.name])
         self.n_methods = total_methods
+        self.int_consts: list[int] = []          # module-state boxed int constants (SPEC N-13)
+        self.gnames: list[str] = []              # cached global/builtin reads, one tp_gslot each
         self._uses: dict[str, set[str]] = {}
         self.bounded = _bounded_functions(self.functions)     # name -> k (module docstring, "Fast entry")
 
@@ -583,6 +592,20 @@ class _ModGen:
         return any(isinstance(e, (ir.New, ir.IsExact))
                    for f in self.module.functions for e in _all_exprs(f))
 
+    def needs_watch(self) -> bool:
+        """A dict watcher on the module dict (and the builtins dict): class guards or cached reads."""
+        return self.watches_globals() or bool(self.gnames)
+
+    def int_index(self, v: int) -> int:
+        if v not in self.int_consts:
+            self.int_consts.append(v)
+        return self.int_consts.index(v)
+
+    def gslot_index(self, name: str) -> int:
+        if name not in self.gnames:
+            self.gnames.append(name)
+        return self.gnames.index(name)
+
     def name_index(self, s: str) -> int:
         if s not in self.names:
             self.names.append(s)
@@ -647,6 +670,9 @@ def generate(module: ir.Module, source_path: Path, display_path: str | None = No
     w(f"    tp_class_rt cls_rt[{len(module.classes) + 1}];  /* version-tag / global guard state */")
     w("    int watch_id1;                  /* dict watcher id + 1 on the module dict; 0 = none */")
     w("    PyObject *breaker;              /* `lambda: None`; calling it runs the eval breaker (#141) */")
+    w(f"    PyObject *ints[{len(mg.int_consts) + 1}];             /* strong: the int constants boxed once (SPEC N-13) */")
+    w(f"    tp_gslot gc[{len(mg.gnames) + 1}];             /* cached global/builtin reads (SPEC N-13) */")
+    w("    PyObject *builtins;             /* strong: the builtins dict the module source ran with; NULL: none */")
     w("    PyObject *buf_types[5];         /* strong: array.array, numpy.ndarray, np.float64, np.int64, np.bool_ (buffer arrays #149, #220); NULL: not importable */")
     w("    PyObject *mtype;                /* strong: the descriptor type of compiled methods; NULL: none */")
     w(f"    PyObject *mdescrs[{mg.n_methods + 1}];        /* strong: the installed descriptor of each method */")
@@ -666,11 +692,14 @@ def generate(module: ir.Module, source_path: Path, display_path: str | None = No
         w(f"static const char *const tp_mnames_{mg.class_index[cd.name]}[] = {{{items}NULL}};")
     names = "".join(f"{c_string(cd.name)}, " for cd in module.classes)
     w(f"static const char *const tp_class_names[] = {{{names}NULL}};")
+    watch = [cd.name for cd in module.classes] + list(mg.gnames) + (["__builtins__"] if mg.gnames else [])
+    w("static const char *const tp_watch_names[] = {" + "".join(f"{c_string(x)}, " for x in dict.fromkeys(watch)) + "NULL};")
     w("")
     if mg.n_methods:
         w(_TEMPLATE_METHOD_TYPE)
-    if module.classes and mg.watches_globals():
-        w("/* Dict watcher of the module dict (tp_globals_watch): a class-name key changed. */")
+    if mg.needs_watch():
+        w("/* Dict watcher of the module dict and its builtins dict (tp_globals_watch): a class name or a cached")
+        w("   global changed. */")
         w("static int tp_watch_cb(PyDict_WatchEvent event, PyObject *dict, PyObject *key, PyObject *value)")
         w("{")
         w("    (void)dict; (void)value;")
@@ -752,9 +781,10 @@ def _check_function(f: ir.Function, functions: dict[str, ir.Function]) -> None:
             if any(isinstance(p, ir.ArrayParam) for p in callee.params):
                 raise CGenError(f"{f.name}: Call of {e.function!r}, which takes array params")
             if e.redo:
-                if callee.returns not in (Type.F64, Type.BOOL, Type.NONE):
+                if callee.returns not in (Type.F64, Type.BOOL, Type.NONE) and not (
+                        callee.returns is Type.I64 and e.type is Type.INT):
                     raise CGenError(f"{f.name}: redo Call of {e.function!r}, which returns "
-                                    f"{callee.returns} (ir.py: F64, BOOL or NONE only)")
+                                    f"{callee.returns} (ir.py: F64, BOOL or NONE, or I64 as an INT)")
                 if not callee.pure:
                     raise CGenError(f"{f.name}: redo Call of impure {e.function!r} "
                                     "(redoing it could repeat an effect)")
@@ -775,7 +805,7 @@ def _check_function(f: ir.Function, functions: dict[str, ir.Function]) -> None:
                 raise CGenError(f"{f.name}: array param {p.name} has buffer kind {p.buffer!r}")
             if p.stored and f.pure:
                 raise CGenError(f"{f.name}: array param {p.name} is stored into in a pure function")
-        elif p.type not in _CT:
+        elif p.type not in _CT or p.type is Type.INT:
             raise CGenError(f"{f.name}: param {p.name} has type {p.type}")
         elif p.cls is not None and p.type is not Type.OBJ:
             raise CGenError(f"{f.name}: param {p.name} has a class guard but type {p.type}")
@@ -936,6 +966,9 @@ class _FnGen:
         objs = [_ident("l", n) for n, t in self.types.items() if t is Type.OBJ]
         objs += [n for ct, n in self.temps if ct == "PyObject *"]
         out = [f"    tp_release(&{n});" for n in objs]
+        ints = [_ident("l", n) for n, t in self.types.items() if t is Type.INT]
+        ints += [n for ct, n in self.temps if ct == "tp_int"]
+        out += [f"    tp_int_release(&{n});" for n in ints]
         # local arrays and array temporaries: freed on every exit (ok, error, deopt); idempotent
         arrs = [(_ident("l", n), t) for n, t in self.local_arrays.items()]
         arrs += [(n, _CT_ARRAY_REV[ct]) for ct, n in self.temps if ct in _CT_ARRAY_REV]
@@ -977,6 +1010,10 @@ class _FnGen:
             raise CGenError(f"{self.f.name}: local {e.name} is {t}, read as {e.type}")
         if t is Type.OBJ:
             return self._own_copy(_ident("l", e.name))
+        if t is Type.INT:                 # an owned copy, like an OBJ local (the native case is two loads)
+            c = self.tmp("tp_int")
+            self.emit(f"tp_int_copy(&{c}, &{_ident('l', e.name)});")
+            return c
         return _ident("l", e.name)
 
     def ev_BinOp(self, e: ir.BinOp) -> str:
@@ -984,6 +1021,16 @@ class _FnGen:
         if lt is not rt:
             raise CGenError(f"{self.f.name}: BinOp operands {lt} and {rt}")
         a, b = self.ev(e.left), self.ev(e.right)
+        if lt is Type.INT:
+            if e.op not in _INT_OP or e.proven or e.type is not Type.INT:
+                raise CGenError(f"{self.f.name}: BinOp {e.op.name} on INT operands")
+            t = self.tmp("tp_int")
+            self.emit(f"tp_s = {_INT_OP[e.op]}(&{a}, &{b}, &{t});")
+            self.emit(f"tp_int_release(&{a}); tp_int_release(&{b});")
+            self.emit("if (tp_s != 0) { tp_rc = -1; goto tp_exit; }")
+            return t
+        if lt in (Type.I64, Type.F64) and e.op in (ir.BinOpKind.LSHIFT, ir.BinOpKind.RSHIFT):
+            raise CGenError(f"{self.f.name}: {e.op.value} on {lt} operands (only INT and OBJ shift)")
         if lt is Type.I64:
             t = self.tmp("double" if e.op is ir.BinOpKind.TRUEDIV else "int64_t")
             if e.proven and e.op in _SHIFT_OPS:
@@ -1020,6 +1067,16 @@ class _FnGen:
     def ev_UnaryOp(self, e: ir.UnaryOp) -> str:
         ot = e.operand.type
         v = self.ev(e.operand)
+        if ot is Type.INT and e.op in (ir.UnaryOpKind.NEG, ir.UnaryOpKind.POS):
+            if e.proven or e.type is not Type.INT:
+                raise CGenError(f"{self.f.name}: {e.op} of INT")
+            if e.op is ir.UnaryOpKind.POS:
+                return v                    # the operand's temporary is the result
+            t = self.tmp("tp_int")
+            self.emit(f"tp_s = tp_int_neg(&{v}, &{t});")
+            self.emit(f"tp_int_release(&{v});")
+            self.emit("if (tp_s != 0) { tp_rc = -1; goto tp_exit; }")
+            return t
         if e.op is ir.UnaryOpKind.NOT:
             if ot is not Type.BOOL:
                 raise CGenError(f"{self.f.name}: NOT of {ot}")
@@ -1047,7 +1104,11 @@ class _FnGen:
         lt, rt = e.left.type, e.right.type
         a, b = self.ev(e.left), self.ev(e.right)
         t = self.tmp("int")
-        if lt is rt and lt in ir.SCALARS:
+        if lt is Type.INT and rt is Type.INT:
+            self.emit(f"{t} = tp_int_cmp(&{a}, &{b}, {_PYCMP[e.op]});")
+            self.emit(f"tp_int_release(&{a}); tp_int_release(&{b});")
+            self.emit(f"if ({t} < 0) {{ tp_rc = -1; goto tp_exit; }}")
+        elif lt is rt and lt in ir.SCALARS:
             self.emit(f"{t} = ({a}) {e.op.value} ({b});")
         elif (lt, rt) == (Type.I64, Type.F64):
             self.emit(f"{t} = tp_cmp_i64_f64({a}, {b}, {_PYCMP[e.op]});")
@@ -1107,6 +1168,14 @@ class _FnGen:
         self.emit(f"{t} = tp_i64_to_f64({v});")
         return t
 
+    def ev_ToInt(self, e: ir.ToInt) -> str:
+        if e.operand.type is not Type.I64 or e.type is not Type.INT:
+            raise CGenError(f"{self.f.name}: ToInt of {e.operand.type}")
+        v = self.ev(e.operand)
+        t = self.tmp("tp_int")
+        self.emit(f"{t}.v = {v}; {t}.big = NULL;")
+        return t
+
     def ev_ObjToFloat(self, e: ir.ObjToFloat) -> str:
         if e.operand.type is not Type.OBJ:
             raise CGenError(f"{self.f.name}: ObjToFloat of {e.operand.type}")
@@ -1119,6 +1188,15 @@ class _FnGen:
 
     def ev_Box(self, e: ir.Box) -> str:
         ot = e.operand.type
+        k = e.operand.operand if isinstance(e.operand, ir.ToInt) else e.operand
+        if isinstance(k, ir.Const) and k.type is Type.I64 and ot in (Type.I64, Type.INT):
+            # a constant is boxed once, at module exec (SPEC N-13), and read from module state
+            return self._own_copy(f"tp_st->ints[{self.mg.int_index(k.value)}]")
+        if ot is Type.INT:
+            v = self.ev(e.operand)
+            t = self._own_new(f"tp_int_box(&{v})")
+            self.emit(f"tp_int_release(&{v});")
+            return t
         if ot not in _BOX:
             raise CGenError(f"{self.f.name}: Box of {ot}")
         v = self.ev(e.operand)
@@ -1154,16 +1232,26 @@ class _FnGen:
             raise CGenError(f"{self.f.name}: Call of {e.function} with {len(e.args)} args")
         args = []
         owned = []
+        values = []                             # the evaluated arguments, for a redo
+        int_args = []                           # INT arguments of an i64 parameter (redo only)
         for p, a in zip(callee.params, e.args):
-            if a.type is not p.type:
+            int_arg = a.type is Type.INT and p.type is Type.I64 and e.redo
+            if a.type is not p.type and not int_arg:
                 raise CGenError(f"{self.f.name}: Call {e.function} arg {p.name}: {a.type} for {p.type}")
             v = self.ev(a)
-            args.append(v)
+            values.append(v)
+            if int_arg:
+                args.append(f"{v}.v")
+                int_args.append(v)
+            else:
+                args.append(v)
             if a.type is Type.OBJ:
                 owned.append(v)
-        values = list(args)                     # the evaluated arguments, for a redo
-        t = None
+        t = ti = None
         self.emit("tp_s = 0;")
+        for v in int_args:
+            # a promoted INT does not fit the callee's i64 parameter: the callee's deopt, redone below
+            self.emit(f"if ({v}.big != NULL) tp_s = 1;")
         # The callee's entry globals (ir.Function.entry_globals) are its entry guards: read them
         # here, at the callee's entry. A mismatch is the callee's deopt (tp_s = 1), handled below
         # exactly as a deopt inside the callee.
@@ -1172,6 +1260,11 @@ class _FnGen:
         if callee.returns is not Type.NONE:
             t = self.tmp(_CT[callee.returns])
             args.append(f"&{t}")
+        if e.type is Type.INT:
+            if callee.returns is not Type.I64 or not e.redo:
+                raise CGenError(f"{self.f.name}: Call {e.function} has type INT but is not a redo "
+                                "Call of an i64 function")
+            ti = self.tmp("tp_int")
         self.emit("if (tp_s == 0) {")
         self.depth += 1
         # Depth is counted by the callee itself (tp_enter_call at its entry, issue #57).
@@ -1182,15 +1275,19 @@ class _FnGen:
             self.emit(f"tp_s = {_ident('tp_impl', e.function)}(tp_module{''.join(', ' + x for x in args)});")
         self.depth -= 1
         self.emit("}")
+        if ti is not None:
+            self.emit(f"if (tp_s == 0) {{ {ti}.v = {t}; {ti}.big = NULL; }}")
         if e.redo:
-            self._redo_call(callee, e.args, values, t)
+            self._redo_call(callee, e.args, values, t, ti)
         elif not self.f.pure and callee.pure and self.mg.uses(callee):
             # a pure callee using classes returns 1 when a class check fails (module docstring,
             # rule 7): redo it interpreted; this impure caller must not deopt
             self._redo_call(callee, e.args, values, t)
         self._own_release(*owned)
+        for v in int_args:
+            self.emit(f"tp_int_release(&{v});")
         self.emit("if (tp_s != 0) { tp_rc = tp_s; goto tp_exit; }")
-        return t
+        return ti if ti is not None else t
 
     def _read_entry_global(self, g: ir.Param, on_mismatch: str, on_error: str = "tp_rc = -1; goto tp_exit;",
                            guard: str = "tp_s == 0") -> str:
@@ -1214,7 +1311,8 @@ class _FnGen:
         self.emit("}")
         return gv
 
-    def _redo_call(self, callee: ir.Function, arg_exprs, values: list[str], t: str | None) -> None:
+    def _redo_call(self, callee: ir.Function, arg_exprs, values: list[str], t: str | None,
+                   ti: str | None = None) -> None:
         """ir.Call.redo: on the callee's deopt (tp_s == 1) run `__typedpython_interpreted__[callee]`
         on the already-evaluated arguments (boxed), count the deopt, convert the result back, and
         continue in the caller. The callee is pure, so the redo is unobservable."""
@@ -1226,6 +1324,10 @@ class _FnGen:
         for a, v in zip(arg_exprs, values):
             if a.type is Type.OBJ:
                 av.append(v)                    # still owned by the caller; released after
+            elif a.type is Type.INT:
+                b = self._own_new(f"tp_int_box(&{v})")
+                boxes.append(b)
+                av.append(b)
             else:
                 b = self._own_new(f"{_BOX[a.type]}({v})")
                 boxes.append(b)
@@ -1251,6 +1353,10 @@ class _FnGen:
         elif rt is Type.OBJ:
             self.emit(f"{t} = {rr}; {rr} = NULL; tp_s = 0;")   # moved: the temp owns it now
             what = "an object"
+        elif ti is not None:
+            # SPEC N-13: the redone value is any int: native, or kept as the PyLong it is
+            self.emit(f"tp_s = tp_int_of_exact(&{ti}, {rr});")
+            what = "an int"
         else:
             self.emit(f"tp_s = {_UNBOX[rt]}({rr}, &{t});")
             what = {Type.F64: "a float", Type.BOOL: "True or False", Type.I64: "an int in i64"}[rt]
@@ -1407,8 +1513,11 @@ class _FnGen:
         return self.mg.class_index[name]
 
     def ev_Global(self, e: ir.Global) -> str:
+        # LOAD_GLOBAL through the per-name cache, revalidated by the dict-watcher epoch (SPEC N-13)
         k = self.mg.name_index(e.name)
-        return self._own_new(f"tp_global(tp_dict, tp_st->names[{k}])")
+        g = self.mg.gslot_index(e.name)
+        return self._own_new(f"tp_gcache_global(&tp_st->gc[{g}], tp_dict, tp_st->builtins, "
+                             f"tp_st->names[{k}], tp_st->watch_id1 > 0)")
 
     def ev_GetAttr(self, e: ir.GetAttr) -> str:
         if e.obj.type is not Type.OBJ:
@@ -1617,6 +1726,8 @@ class _FnGen:
         v = self.ev(s.value)
         if t is Type.OBJ:
             self._own_move(_ident("l", s.target), v)
+        elif t is Type.INT:
+            self.emit(f"tp_int_assign(&{_ident('l', s.target)}, &{v});")
         else:
             self.emit(f"{_ident('l', s.target)} = {v};")
 
@@ -1704,6 +1815,8 @@ class _FnGen:
             return
         if s.value.type is Type.OBJ:
             self._own_release(v)
+        elif s.value.type is Type.INT:
+            self.emit(f"tp_int_release(&{v});")
         else:
             self.emit(f"(void){v};")
 
@@ -1872,11 +1985,12 @@ class _FnGen:
         for name, t in self.types.items():
             if name in params and t is not Type.OBJ:
                 continue
-            init = "NULL" if t is Type.OBJ else "0"
+            init = "NULL" if t is Type.OBJ else "{0, NULL}" if t is Type.INT else "0"
             ct = _CT[t]
             out.append(f"    {ct}{'' if ct.endswith('*') else ' '}{_ident('l', name)} = {init};")
         for ct, n in self.temps:
-            init = "NULL" if ct == "PyObject *" else "{0}" if ct in _CT_ARRAY_REV else "0"
+            init = ("NULL" if ct == "PyObject *" else "{0}" if ct in _CT_ARRAY_REV
+                    else "{0, NULL}" if ct == "tp_int" else "0")
             sep = "" if ct.endswith("*") else " "
             out.append(f"    {ct}{sep}{n} = {init};")
         # (a fast twin declares tp_st / tp_dict only when its body reads them: PyModule_GetState and
@@ -2298,6 +2412,8 @@ def _state_functions(mg: _ModGen) -> str:
         "    size_t i;",
         "    if (tp_st == NULL) return 0;",
         "    Py_VISIT(tp_st->breaker);",
+        "    Py_VISIT(tp_st->builtins);",
+        "    for (i = 0; i < sizeof(tp_st->ints) / sizeof(tp_st->ints[0]); i++) Py_VISIT(tp_st->ints[i]);",
         "    Py_VISIT(tp_st->mtype);",
         "    for (i = 0; i < sizeof(tp_st->mdescrs) / sizeof(tp_st->mdescrs[0]); i++) Py_VISIT(tp_st->mdescrs[i]);",
         "    for (i = 0; i < sizeof(tp_st->buf_types) / sizeof(tp_st->buf_types[0]); i++) Py_VISIT(tp_st->buf_types[i]);",
@@ -2314,8 +2430,12 @@ def _state_functions(mg: _ModGen) -> str:
         "    tp_state *tp_st = (tp_state *)PyModule_GetState(tp_module);",
         "    size_t i;",
         "    if (tp_st == NULL) return 0;",
+        "    tp_globals_unwatch_builtins(tp_st->builtins, tp_st->watch_id1);",
         "    if (tp_st->watch_id1 > 0) tp_globals_unwatch(PyModule_GetDict(tp_module), &tp_st->watch_id1);",
         "    tp_release(&tp_st->breaker);",
+        "    tp_release(&tp_st->builtins);",
+        "    for (i = 0; i < sizeof(tp_st->ints) / sizeof(tp_st->ints[0]); i++) tp_release(&tp_st->ints[i]);",
+        "    for (i = 0; i < sizeof(tp_st->gc) / sizeof(tp_st->gc[0]); i++) tp_gcache_clear(&tp_st->gc[i]);",
         "    for (i = 0; i < sizeof(tp_st->mdescrs) / sizeof(tp_st->mdescrs[0]); i++) tp_release(&tp_st->mdescrs[i]);",
         "    tp_release(&tp_st->mtype);",
         "    for (i = 0; i < sizeof(tp_st->buf_types) / sizeof(tp_st->buf_types[0]); i++) tp_release(&tp_st->buf_types[i]);",
@@ -2394,6 +2514,9 @@ def _exec_function(mg: _ModGen) -> str:
         items = ", ".join(f"tp_st->names[{mg.name_index(x)}]" for x in kw)
         L.append(f"    tp_st->kwnames[{k}] = PyTuple_Pack({len(kw)}, {items});")
         L.append(f"    if (tp_st->kwnames[{k}] == NULL) goto tp_done;")
+    for k, v in enumerate(mg.int_consts):
+        L.append(f"    tp_st->ints[{k}] = PyLong_FromLongLong({_i64_lit(v)});")
+        L.append(f"    if (tp_st->ints[{k}] == NULL) goto tp_done;")
     L += [
         "    tp_k = PyDict_ContainsString(tp_dict, \"__builtins__\");",
         "    if (tp_k < 0) goto tp_done;",
@@ -2403,6 +2526,17 @@ def _exec_function(mg: _ModGen) -> str:
         "        tp_k = PyDict_SetItemString(tp_dict, \"__builtins__\", PyModule_GetDict(tp_b));",
         "        tp_release(&tp_b);",
         "        if (tp_k < 0) goto tp_done;",
+        "    }",
+        "    {   /* the builtins dict the module's functions run with (cached builtin reads, SPEC N-13) */",
+        "        PyObject *tp_b = NULL;",
+        "        tp_k = PyDict_GetItemStringRef(tp_dict, \"__builtins__\", &tp_b);",
+        "        if (tp_k < 0) goto tp_done;",
+        "        if (tp_k > 0 && PyModule_Check(tp_b)) {",
+        "            PyObject *tp_bd = Py_NewRef(PyModule_GetDict(tp_b));",
+        "            tp_release(&tp_b);",
+        "            tp_b = tp_bd;",
+        "        }",
+        "        if (tp_k > 0 && tp_b != NULL && PyDict_Check(tp_b)) tp_st->builtins = tp_b; else tp_release(&tp_b);",
         "    }",
         "    tp_code = Py_CompileString(\"lambda: None\", \"<typedpython eval breaker>\", Py_eval_input);",
         "    if (tp_code == NULL) goto tp_done;",
@@ -2465,10 +2599,17 @@ def _exec_function(mg: _ModGen) -> str:
             f"tp_st->cls_ok[{j}] = 0;",
             "    } while (0);",
         ]
+    if mg.needs_watch():
+        # after the source ran: from here a rebinding of a class name or of a cached global moves
+        # tp_globals_epoch; the builtins dict is watched by the same watcher (cached builtin reads)
+        L += [
+            "    tp_globals_watch(tp_dict, tp_watch_cb, &tp_st->watch_id1);",
+            "    if (tp_globals_watch_builtins(tp_st->builtins, tp_st->watch_id1) < 0) {",
+            "        /* cannot watch the builtins: a patched builtin would go unseen, so cache nothing */",
+            "        tp_globals_unwatch(tp_dict, &tp_st->watch_id1);",
+            "    }",
+        ]
     if mg.module.classes:
-        if mg.watches_globals():
-            # after the source ran: from here a rebinding of a class name moves tp_globals_epoch
-            L.append("    tp_globals_watch(tp_dict, tp_watch_cb, &tp_st->watch_id1);")
         L += [
             "    tp_cf = PyCFunction_NewEx(&tp_class_info_def, tp_module, NULL);",
             "    if (tp_cf == NULL || PyDict_SetItemString(tp_dict, \"__typedpython_class_info__\", tp_cf) < 0) goto tp_done;",

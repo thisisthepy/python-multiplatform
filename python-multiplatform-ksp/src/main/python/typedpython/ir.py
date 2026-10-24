@@ -65,11 +65,14 @@ class Type(Enum):
     BOOL = "bool"          # a Python bool
     NONE = "none"          # the value None (only as a return type)
     OBJ = "obj"            # any Python object, held as a strong reference (PyObject*)
+    INT = "int"            # a Python int that is a native i64 or, once promoted, a PyLong (SPEC N-13)
     F64_ARRAY = "f64[]"    # a list[float] parameter (ArrayParam) or a local array (NewArray/CopyArray)
     I64_ARRAY = "i64[]"    # a list[int] parameter (ArrayParam) or a local array (NewArray/CopyArray)
 
 
 SCALARS = (Type.I64, Type.F64, Type.BOOL)
+# INT is not a scalar: it owns a reference when promoted. It is created only by `ToInt`, by arithmetic
+# on INTs, and by a redo `Call` of an i64-returning callee, and it becomes an object only through `Box`.
 ARRAYS = (Type.F64_ARRAY, Type.I64_ARRAY)
 
 
@@ -103,6 +106,8 @@ class BinOpKind(Enum):
     TRUEDIV = "/"
     FLOORDIV = "//"
     MOD = "%"
+    LSHIFT = "<<"          # INT and OBJ operands only (SPEC N-13)
+    RSHIFT = ">>"          # INT and OBJ operands only
 
 
 @dataclass(frozen=True)
@@ -127,6 +132,12 @@ class BinOp(Expr):
       FLOORDIV/MOD, CPython's float floor division and modulo (sign of divisor, `-0.0` cases),
         divisor 0.0 → ZeroDivisionError("float floor division by zero") / ("float modulo by
         zero").
+    INT (SPEC N-13; ADD/SUB/MUL/FLOORDIV/MOD/LSHIFT/RSHIFT, both operands INT, result INT; TRUEDIV of ints
+      is an OBJ operation on boxed values): the native i64 operation when both operands are native
+      and the result fits i64, else CPython's PyNumber_* on the two ints (exact ints, so no user code
+      runs) and the result narrowed back to native when it fits. Never deopts, so it is legal in an
+      impure function; it can raise (ZeroDivisionError, a negative shift count, OverflowError,
+      MemoryError) exactly where CPython does. `proven` is never set on it.
     OBJ: CPython's generic operation on objects (PyNumber_*), never deopts. `inplace` (OBJ only) is
       the augmented form `a op= b` (PyNumber_InPlace*, which a list's `+=` and a user `__iadd__`
       need); an exact `str + str` is PyUnicode_Concat, the function PyNumber_Add ends in for it.
@@ -160,7 +171,8 @@ class UnaryOpKind(Enum):
 
 @dataclass(frozen=True)
 class UnaryOp(Expr):
-    """NEG of I64 is checked (-(-2**63) → deopt). NOT takes a BOOL and gives a BOOL."""
+    """NEG of I64 is checked (-(-2**63) → deopt). NOT takes a BOOL and gives a BOOL. NEG and POS of an
+    INT give an INT and never deopt (-(-2**63) is the PyLong 2**63)."""
 
     op: UnaryOpKind
     operand: Expr
@@ -180,7 +192,8 @@ class CompareKind(Enum):
 class Compare(Expr):
     """Result BOOL. Chains (`a < b < c`) are lowered by the front end into `And` with each middle
     operand evaluated once (via a temporary). Mixed I64/F64 compares **exactly**, as CPython does,
-    not by converting the int to double (2**53+1 != float(2**53)). NaN compares as in IEEE."""
+    not by converting the int to double (2**53+1 != float(2**53)). NaN compares as in IEEE.
+    Two INT operands compare as the exact ints (native when both are native)."""
 
     op: CompareKind
     left: Expr
@@ -214,9 +227,18 @@ class ToFloat(Expr):
 
 
 @dataclass(frozen=True)
+class ToInt(Expr):
+    """An I64 widened to an INT (type INT): native, no object, never fails (SPEC N-13)."""
+
+    operand: Expr
+
+
+@dataclass(frozen=True)
 class Box(Expr):
     """A scalar or array element converted to a Python object (type OBJ): I64 → int, F64 → float,
-    BOOL → True/False. Used when a typed value flows into OBJ code.
+    BOOL → True/False, INT → the int (a promoted INT is the PyLong it holds). Used when a typed value
+    flows into OBJ code. A Box of an I64 or INT constant is read from module state, built once at
+    module exec (SPEC N-13).
     `np` (#220, a BOOL expression, None otherwise): when it is true at run time the value is a numpy
     scalar in the interpreter (it derives from an element of a numpy array), and the box is the
     matching `np.int64` / `np.float64` / `np.bool` instead. The front end computes it per value (a
@@ -271,7 +293,11 @@ class Call(Expr):
     `may_deopt`), or the call is `redo`. A pure callee that uses a compiled class can also return the
     deopt signal with `may_deopt` False, when the class changed after init (N-11); an impure caller
     then redoes that callee interpreted, for OBJ and I64 results as well, such a callee is pure and
-    its I64 result is interval-proved, so the redone value is the same and fits."""
+    its I64 result is interval-proved, so the redone value is the same and fits.
+    SPEC N-13: a redo Call of a callee returning I64 has type INT (the redone value may be any int;
+    it is checked to be exactly an int, anything else is a SystemError), and an argument of type INT
+    may stand for an I64 parameter: a promoted INT does not fit it, which is the callee's deopt
+    (absorbed by the redo, the interpreted callee gets the boxed arguments)."""
 
     function: str
     args: tuple[Expr, ...]

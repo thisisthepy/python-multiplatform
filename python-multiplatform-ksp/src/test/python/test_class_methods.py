@@ -913,7 +913,7 @@ EXPECTED = {
     "binary_trees": {"check", "make"},
     "fannkuch": {"fannkuch"},
     "spectral_norm": {"eval_a", "mul_atv", "mul_av"},
-    "wordfreq": {"next_state"},
+    "wordfreq": {"next_state", "word_of", "main"},   # word_of and main: native ints, #232
     "nbody": set(),
 }
 

@@ -197,6 +197,14 @@ SOURCE = textwrap.dedent('''
         return np.add(x, 1.0).sum()
 
 
+    def nd_int_impure(x: npt.NDArray[np.int64]) -> object:
+        s = 0
+        for i in range(len(x)):
+            s += x[i]
+        x[0] = 1
+        return s
+
+
     def nd_scale(x: npt.NDArray[np.float64], k: float) -> None:
         for i in range(len(x)):
             x[i] = x[i] * k
@@ -207,7 +215,7 @@ COMPILED = {
     "nd_flag", "nd_plain", "nd_mixed", "nd_sqrt", "nd_neg", "nd_len", "nd_set", "nd_copy",
     "nd_iset", "nd_get", "nd_param", "nd_branch", "nd_tuple", "nd_overflow", "nd_invalid", "nd_iover", "nd_energy", "nd_copy7",
 }
-NOT_COMPILED = {"nd_div", "nd_idiv", "nd_scale", "nd_to_list", "nd_mixed_cmp", "nd_abs"}   # nd_abs calls user code   # could warn / divide, or store a possibly warning op
+NOT_COMPILED = {"nd_div", "nd_idiv", "nd_scale", "nd_to_list", "nd_mixed_cmp", "nd_abs", "nd_int_impure"}   # nd_abs calls user code   # could warn / divide, or store a possibly warning op
 
 F = [1.5, -2.25, 3.0, 4.5]
 I = [3, -5, 7, 11]
@@ -450,3 +458,23 @@ def test_whole_array_functions_still_compile_with_an_opaque_parameter(built, nam
     c, _ = differential(m, name, lambda: (f64(),))
     if name == "whole_sum":
         assert type(c[1]) is np.float64
+
+
+def test_a_numpy_value_never_becomes_a_native_int(built):
+    proved, m, _ = built
+    assert "nd_int_impure" in proved.skipped
+    assert not any(type(n).__name__ == "ToInt" for f in proved.functions
+                   if f.name.startswith("nd_") for n in _nodes(f.body))
+    c, _ = differential(m, "nd_int_impure", lambda: (i64(),))
+    assert type(c[1]) is np.int64
+
+
+def _nodes(x):
+    import dataclasses
+    if isinstance(x, (tuple, list)):
+        for y in x:
+            yield from _nodes(y)
+    elif dataclasses.is_dataclass(x) and not isinstance(x, type):
+        yield x
+        for f in dataclasses.fields(x):
+            yield from _nodes(getattr(x, f.name))

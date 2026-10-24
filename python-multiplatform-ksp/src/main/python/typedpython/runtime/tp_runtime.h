@@ -136,7 +136,7 @@ static inline void tp_cs_end(tp_cs *c)
 #define TP_MATH_MSG_FINITE "expected a finite input, got %s"
 #define TP_MATH_MSG_POSITIVE "expected a positive input, got %s"
 
-/* ir.BinOpKind order, for tp_binop_obj */
+/* ir.BinOpKind (names, not positions), for tp_binop_obj */
 #define TP_BINOP_ADD 0
 #define TP_BINOP_SUB 1
 #define TP_BINOP_MUL 2
@@ -150,6 +150,10 @@ static inline void tp_cs_end(tp_cs *c)
 #define TP_BINOP_ITRUEDIV 9
 #define TP_BINOP_IFLOORDIV 10
 #define TP_BINOP_IMOD 11
+#define TP_BINOP_LSHIFT 12
+#define TP_BINOP_RSHIFT 13
+#define TP_BINOP_ILSHIFT 14
+#define TP_BINOP_IRSHIFT 15
 
 /* ------------------------------------------------------------------------------------------
  * Integers (int64_t)
@@ -1343,6 +1347,10 @@ static inline PyObject *tp_binop_obj(PyObject *a, PyObject *b, int op)
     case TP_BINOP_ITRUEDIV: return PyNumber_InPlaceTrueDivide(a, b);
     case TP_BINOP_IFLOORDIV: return PyNumber_InPlaceFloorDivide(a, b);
     case TP_BINOP_IMOD: return PyNumber_InPlaceRemainder(a, b);
+    case TP_BINOP_LSHIFT: return PyNumber_Lshift(a, b);
+    case TP_BINOP_RSHIFT: return PyNumber_Rshift(a, b);
+    case TP_BINOP_ILSHIFT: return PyNumber_InPlaceLshift(a, b);
+    case TP_BINOP_IRSHIFT: return PyNumber_InPlaceRshift(a, b);
     }
     PyErr_SetString(PyExc_SystemError, "tp_binop_obj: unknown operator");
     return NULL;
@@ -1524,6 +1532,245 @@ static inline void tp_release(PyObject **slot)
 }
 
 /* ------------------------------------------------------------------------------------------
+ * Native ints in impure functions (SPEC N-13, ir.Type.INT; API.md "Native ints").
+ * A tp_int is a Python int that is a native i64 (`big == NULL`) or, after an operation left the
+ * i64 range, a PyLong (`big` an owned reference to an exact int, `v` unused). Every operation is
+ * the native one when both operands are native and the result fits, else CPython's PyNumber_* on
+ * the two ints (exact ints, so no user code runs) with the result narrowed back to native when it
+ * fits. Nothing deopts. The generated code owns each tp_int temporary and local, releases `big` on
+ * every exit and moves a temporary into a local with tp_int_assign.
+ * ------------------------------------------------------------------------------------------ */
+typedef struct {
+    int64_t v;
+    PyObject *big;
+} tp_int;
+
+/* The single mutation points of the overflow checks (the mutation tests in test_native_int_impure.py
+ * replace each by a wrapping operation and must fail). */
+#define TP_INT_ADD_OVF(a, b, r) __builtin_add_overflow((a), (b), (r))
+#define TP_INT_SUB_OVF(a, b, r) __builtin_sub_overflow((a), (b), (r))
+#define TP_INT_MUL_OVF(a, b, r) __builtin_mul_overflow((a), (b), (r))
+
+static inline void tp_int_release(tp_int *a)
+{
+    if (a->big != NULL) {
+        Py_CLEAR(a->big);
+    }
+}
+
+static inline void tp_int_copy(tp_int *dst, const tp_int *src)
+{
+    dst->v = src->v;
+    dst->big = src->big != NULL ? Py_NewRef(src->big) : NULL;
+}
+
+/* *dst takes the value of *src (src is left empty); the reference *dst held is released */
+static inline void tp_int_assign(tp_int *dst, tp_int *src)
+{
+    tp_int old = *dst;
+    *dst = *src;
+    src->v = 0;
+    src->big = NULL;
+    tp_int_release(&old);
+}
+
+/* a new reference to the int */
+static inline PyObject *tp_int_box(const tp_int *a)
+{
+    return a->big != NULL ? Py_NewRef(a->big) : PyLong_FromLongLong((long long)a->v);
+}
+
+/* *out = the int `o` (a new reference, stolen): native when it fits i64, else kept as the PyLong.
+ * NULL (the operation failed) or anything but an exact int -> -1 with the exception set. */
+static inline int tp_int_take(tp_int *out, PyObject *o)
+{
+    int overflow = 0;
+    long long v;
+    if (o == NULL) {
+        return -1;
+    }
+    if (!PyLong_CheckExact(o)) {
+        Py_DECREF(o);
+        PyErr_SetString(PyExc_SystemError, "typedpython: an int operation did not produce an int");
+        return -1;
+    }
+    v = PyLong_AsLongLongAndOverflow(o, &overflow);
+    if (overflow == 0) {
+        if (v == -1 && PyErr_Occurred()) {
+            Py_DECREF(o);
+            return -1;
+        }
+        out->v = (int64_t)v;
+        out->big = NULL;
+        Py_DECREF(o);
+        return 0;
+    }
+    out->v = 0;
+    out->big = o;
+    return 0;
+}
+
+/* *out = the exact int `o` (borrowed; a new reference is taken when it does not fit i64):
+ * 0 ok, 1 not an exact int (nothing set, no exception) */
+static inline int tp_int_of_exact(tp_int *out, PyObject *o)
+{
+    if (!PyLong_CheckExact(o)) {
+        return 1;
+    }
+    return tp_int_take(out, Py_NewRef(o)) == 0 ? 0 : -1;
+}
+
+/* the general case: a op b with CPython's own operator on the two ints */
+static int tp_int_binop_slow(int op, const tp_int *a, const tp_int *b, tp_int *out)
+{
+    PyObject *x = tp_int_box(a), *y, *r;
+    if (x == NULL) {
+        return -1;
+    }
+    y = tp_int_box(b);
+    if (y == NULL) {
+        Py_DECREF(x);
+        return -1;
+    }
+    r = tp_binop_obj(x, y, op);
+    Py_DECREF(x);
+    Py_DECREF(y);
+    return tp_int_take(out, r);
+}
+
+#define TP_INT_NATIVE2(a, b) ((a)->big == NULL && (b)->big == NULL)
+
+static inline int tp_int_add(const tp_int *a, const tp_int *b, tp_int *out)
+{
+    int64_t r;
+    if (TP_INT_NATIVE2(a, b) && !TP_INT_ADD_OVF(a->v, b->v, &r)) {
+        out->v = r;
+        out->big = NULL;
+        return 0;
+    }
+    return tp_int_binop_slow(TP_BINOP_ADD, a, b, out);
+}
+
+static inline int tp_int_sub(const tp_int *a, const tp_int *b, tp_int *out)
+{
+    int64_t r;
+    if (TP_INT_NATIVE2(a, b) && !TP_INT_SUB_OVF(a->v, b->v, &r)) {
+        out->v = r;
+        out->big = NULL;
+        return 0;
+    }
+    return tp_int_binop_slow(TP_BINOP_SUB, a, b, out);
+}
+
+static inline int tp_int_mul(const tp_int *a, const tp_int *b, tp_int *out)
+{
+    int64_t r;
+    if (TP_INT_NATIVE2(a, b) && !TP_INT_MUL_OVF(a->v, b->v, &r)) {
+        out->v = r;
+        out->big = NULL;
+        return 0;
+    }
+    return tp_int_binop_slow(TP_BINOP_MUL, a, b, out);
+}
+
+/* floor semantics; a zero divisor and -2**63 // -1 take the general path (CPython's own error / the
+ * PyLong 2**63) */
+static inline int tp_int_floordiv(const tp_int *a, const tp_int *b, tp_int *out)
+{
+    int64_t r;
+    if (TP_INT_NATIVE2(a, b) && b->v != 0 && !(b->v == -1 && a->v == INT64_MIN)
+        && tp_floordiv_i64(a->v, b->v, &r) == 0) {
+        out->v = r;
+        out->big = NULL;
+        return 0;
+    }
+    return tp_int_binop_slow(TP_BINOP_FLOORDIV, a, b, out);
+}
+
+static inline int tp_int_mod(const tp_int *a, const tp_int *b, tp_int *out)
+{
+    int64_t r;
+    if (TP_INT_NATIVE2(a, b) && b->v != 0 && tp_mod_i64(a->v, b->v, &r) == 0) {
+        out->v = r;
+        out->big = NULL;
+        return 0;
+    }
+    return tp_int_binop_slow(TP_BINOP_MOD, a, b, out);
+}
+
+/* a << b natively for 0 <= b <= 63 when no bit is lost (shifting back gives a); anything else,
+ * including a negative count (ValueError) and a huge one, is CPython's */
+static inline int tp_int_lshift(const tp_int *a, const tp_int *b, tp_int *out)
+{
+    if (TP_INT_NATIVE2(a, b) && b->v >= 0 && b->v <= 63) {
+        int64_t r = (int64_t)((uint64_t)a->v << b->v);
+        if ((r >> b->v) == a->v) {
+            out->v = r;
+            out->big = NULL;
+            return 0;
+        }
+    }
+    return tp_int_binop_slow(TP_BINOP_LSHIFT, a, b, out);
+}
+
+static inline int tp_int_rshift(const tp_int *a, const tp_int *b, tp_int *out)
+{
+    if (TP_INT_NATIVE2(a, b) && b->v >= 0) {
+        out->v = b->v >= 64 ? (a->v < 0 ? -1 : 0) : (a->v >> b->v);
+        out->big = NULL;
+        return 0;
+    }
+    return tp_int_binop_slow(TP_BINOP_RSHIFT, a, b, out);
+}
+
+static inline int tp_int_neg(const tp_int *a, tp_int *out)
+{
+    PyObject *x, *r;
+    if (a->big == NULL && a->v != INT64_MIN) {
+        out->v = -a->v;
+        out->big = NULL;
+        return 0;
+    }
+    x = tp_int_box(a);
+    if (x == NULL) {
+        return -1;
+    }
+    r = PyNumber_Negative(x);
+    Py_DECREF(x);
+    return tp_int_take(out, r);
+}
+
+/* a <op> b as a condition: 0 / 1, -1 error. `op` is Py_EQ .. Py_GE. */
+static inline int tp_int_cmp(const tp_int *a, const tp_int *b, int op)
+{
+    PyObject *x, *y;
+    int r;
+    if (TP_INT_NATIVE2(a, b)) {
+        switch (op) {
+        case Py_LT: return a->v < b->v;
+        case Py_LE: return a->v <= b->v;
+        case Py_EQ: return a->v == b->v;
+        case Py_NE: return a->v != b->v;
+        case Py_GT: return a->v > b->v;
+        default: return a->v >= b->v;
+        }
+    }
+    x = tp_int_box(a);
+    if (x == NULL) {
+        return -1;
+    }
+    y = tp_int_box(b);
+    if (y == NULL) {
+        Py_DECREF(x);
+        return -1;
+    }
+    r = tp_compare_bool(x, y, op);
+    Py_DECREF(x);
+    Py_DECREF(y);
+    return r;
+}
+
+/* ------------------------------------------------------------------------------------------
  * Fixed-layout classes (SPEC N-11, ir.ClassDecl; API.md "Fixed-layout classes"). A compiled class
  * is a plain heap type whose instances keep every field in an object slot at a fixed offset; the
  * slots are reached through the PyMemberDef of the member descriptor captured at module init.
@@ -1570,6 +1817,111 @@ typedef struct {
  * Py_mod_multiple_interpreters slot, so CPython loads it only into interpreters sharing the main
  * one. */
 static uint64_t tp_globals_epoch = 1;
+
+
+/* ------------------------------------------------------------------------------------------
+ * Cached global and builtin reads (SPEC N-13; API.md "Global cache"). LOAD_GLOBAL of a name an
+ * impure function reads: the object is remembered per name in a tp_gslot and reused while
+ * tp_globals_epoch has not moved. The epoch moves when the watcher (tp_globals_watch_event) sees
+ * a change of any watched name in the module dict or the builtins dict, a clear, or a rebinding of
+ * `__builtins__` (which also turns the cache off for good, tp_gcache_off).
+ * The slot holds a BORROWED pointer: it extends no lifetime, so a rebound function, type or module
+ * is freed (and its `__del__`s run) exactly when CPython would free it. A hit must therefore take
+ * its own reference safely:
+ *   GIL build:       nothing runs between the epoch check and the incref, and the epoch moves
+ *                    before the dict drops its reference, so an unchanged epoch means the dict
+ *                    still holds the object.
+ *   free-threaded:   the fill calls PyUnstable_EnableTryIncRef(obj), which delays the object's
+ *                    memory past a quiescent state, so PyUnstable_TryIncRef on a just-freed object
+ *                    fails safely; after a successful incref the epoch is read again, and an
+ *                    unchanged epoch (the watcher bumps it BEFORE the dict store) means the dict
+ *                    still held the object when the reference was taken.
+ * Needs CPython 3.14+ when free-threaded (the TryIncRef API); 3.13t does not cache.
+ * ------------------------------------------------------------------------------------------ */
+#define TP_GCACHE_FRESH(slot_epoch, epoch) ((slot_epoch) == (epoch))
+#if !defined(Py_GIL_DISABLED) || PY_VERSION_HEX >= 0x030E0000
+#define TP_GCACHE_AVAILABLE 1
+#else
+#define TP_GCACHE_AVAILABLE 0
+#endif
+
+typedef struct {
+    PyObject *obj;                          /* BORROWED; ATOMIC, written under the module dict's lock */
+    uint64_t epoch;                         /* tp_globals_epoch at which obj was read; 0 = empty. ATOMIC */
+} tp_gslot;
+
+static unsigned int tp_gcache_off = 0;      /* ATOMIC: 1 after `__builtins__` was rebound */
+
+static inline void tp_gcache_clear(tp_gslot *s)
+{
+    s->epoch = 0;
+    s->obj = NULL;
+}
+
+/* the slow path: look the name up (module dict, then the builtins dict captured at exec) inside both
+ * dicts' critical sections, so the epoch read and the lookup cannot straddle a change, and remember
+ * the (borrowed) object. A new reference, or NULL with the exception (NameError from tp_global when
+ * the name is unbound). */
+static PyObject *tp_gcache_fill(tp_gslot *slot, PyObject *module_dict, PyObject *builtins,
+                                PyObject *name)
+{
+    PyObject *v = NULL;
+    uint64_t epoch = 0;
+    int rc;
+    if (!TP_GCACHE_AVAILABLE || builtins == NULL || tp_atomic_load_u32(&tp_gcache_off)) {
+        return tp_global(module_dict, name);
+    }
+    Py_BEGIN_CRITICAL_SECTION2(module_dict, builtins);
+    epoch = tp_atomic_load_u64(&tp_globals_epoch);
+    rc = PyDict_GetItemRef(module_dict, name, &v);
+    if (rc == 0) {
+        rc = PyDict_GetItemRef(builtins, name, &v);
+    }
+    if (rc > 0) {
+#if defined(Py_GIL_DISABLED) && PY_VERSION_HEX >= 0x030E0000
+        PyUnstable_EnableTryIncRef(v);
+#endif
+        __atomic_store_n(&slot->obj, v, __ATOMIC_RELEASE);      /* borrowed: v stays ours to return */
+        __atomic_store_n(&slot->epoch, epoch, __ATOMIC_RELEASE);
+    }
+    Py_END_CRITICAL_SECTION2();
+    if (rc < 0) {
+        return NULL;
+    }
+    if (rc == 0) {
+        return tp_global(module_dict, name);
+    }
+    return v;
+}
+
+/* LOAD_GLOBAL through the cache. `watched`: a dict watcher is installed (without one no change would
+ * be seen, and every read looks up). */
+static inline PyObject *tp_gcache_global(tp_gslot *slot, PyObject *module_dict, PyObject *builtins,
+                                         PyObject *name, int watched)
+{
+    if (watched && TP_GCACHE_AVAILABLE) {
+        uint64_t e = __atomic_load_n(&tp_globals_epoch, __ATOMIC_ACQUIRE);
+        if (TP_GCACHE_FRESH(__atomic_load_n(&slot->epoch, __ATOMIC_ACQUIRE), e)) {
+            PyObject *p = __atomic_load_n(&slot->obj, __ATOMIC_ACQUIRE);
+#if defined(Py_GIL_DISABLED) && PY_VERSION_HEX >= 0x030E0000
+            if (p != NULL && PyUnstable_TryIncRef(p)) {
+                if (__atomic_load_n(&tp_globals_epoch, __ATOMIC_ACQUIRE) == e) {
+                    return p;
+                }
+                Py_DECREF(p);
+            }
+#else
+            if (p != NULL) {
+                return Py_NewRef(p);
+            }
+#endif
+        }
+    }
+    if (!watched) {
+        return tp_global(module_dict, name);
+    }
+    return tp_gcache_fill(slot, module_dict, builtins, name);
+}
 
 /* `name` in cls's OWN dict (not through the MRO). 1 found (*out a new reference), 0 absent, -1 error. */
 static inline int tp_own_attr(PyTypeObject *cls, const char *name, PyObject **out)
@@ -1915,6 +2267,9 @@ static inline int tp_globals_watch_event(PyDict_WatchEvent event, PyObject *key,
 #if PY_VERSION_HEX >= 0x030D0000
         for (i = 0; names[i] != NULL; i++) {
             if (PyUnicode_EqualToUTF8(key, names[i])) {
+                if (PyUnicode_EqualToUTF8(key, "__builtins__")) {
+                    tp_atomic_store_u32(&tp_gcache_off, 1);     /* the builtins dict we watch may be replaced */
+                }
                 tp_atomic_add_u64(&tp_globals_epoch, 1);
                 return 0;
             }
@@ -1950,6 +2305,33 @@ static inline void tp_globals_watch(PyObject *module_dict, PyDict_WatchCallback 
         return;
     }
     *id1 = id + 1;
+}
+
+/* Watch the builtins dict with the module's watcher (cached builtin reads, SPEC N-13). Returns 0, or -1
+ * when it cannot be watched (no exception left): the caller then drops the watcher, so nothing is cached. */
+static inline int tp_globals_watch_builtins(PyObject *builtins, int id1)
+{
+    if (id1 <= 0 || builtins == NULL) {
+        return 0;
+    }
+    if (PyDict_Watch(id1 - 1, builtins) < 0) {
+        PyErr_Clear();
+        return -1;
+    }
+    return 0;
+}
+
+static inline void tp_globals_unwatch_builtins(PyObject *builtins, int id1)
+{
+    PyObject *exc;
+    if (id1 <= 0 || builtins == NULL) {
+        return;
+    }
+    exc = PyErr_GetRaisedException();
+    if (PyDict_Unwatch(id1 - 1, builtins) < 0) {
+        PyErr_Clear();
+    }
+    PyErr_SetRaisedException(exc);
 }
 
 /* Undo tp_globals_watch (module clear / free): unwatch module_dict (if still there) and release the

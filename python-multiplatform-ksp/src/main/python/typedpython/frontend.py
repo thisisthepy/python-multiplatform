@@ -92,6 +92,7 @@ Interval = tuple[int, int] | None  # None: no value at all (not yet known to be 
 
 TYPE_NAME = {
     Type.I64: "int", Type.F64: "float", Type.BOOL: "bool", Type.NONE: "None", Type.OBJ: "object",
+    Type.INT: "int",
     Type.F64_ARRAY: "list[float]", Type.I64_ARRAY: "list[int]",
 }
 SCALAR_KIND = {"int": Type.I64, "float": Type.F64, "bool": Type.BOOL}
@@ -100,6 +101,7 @@ ARRAY_KIND = {"list[float]": Type.F64_ARRAY, "list[int]": Type.I64_ARRAY}
 BINOP = {
     ast.Add: ir.BinOpKind.ADD, ast.Sub: ir.BinOpKind.SUB, ast.Mult: ir.BinOpKind.MUL,
     ast.Div: ir.BinOpKind.TRUEDIV, ast.FloorDiv: ir.BinOpKind.FLOORDIV, ast.Mod: ir.BinOpKind.MOD,
+    ast.LShift: ir.BinOpKind.LSHIFT, ast.RShift: ir.BinOpKind.RSHIFT,
 }
 COMPARE = {
     ast.Eq: ir.CompareKind.EQ, ast.NotEq: ir.CompareKind.NE, ast.Lt: ir.CompareKind.LT,
@@ -859,25 +861,39 @@ class _ObjRange(Exception):
         self.var = var
 
 
+class _ObjInt(Exception):
+    """A local of an impure function that would be an `INT` (SPEC N-13) is assigned an object (a call
+    of an unknown callable, a global, `int(x)`): it stays an object. Raised once per variable; the
+    function is lowered again with the variable an object."""
+
+    def __init__(self, var: str) -> None:
+        super().__init__(var)
+        self.var = var
+
+
 def _lower_with_bounds(sig, env, info, inferred, impure: bool,
                        candidates: dict[str, Type]) -> ir.Function:
     obj_ranges: frozenset[str] = frozenset()
+    obj_ints: frozenset[str] = frozenset()
     while True:
         try:
-            return _lower_rounds(sig, env, info, inferred, impure, candidates, obj_ranges)
+            return _lower_rounds(sig, env, info, inferred, impure, candidates, obj_ranges, obj_ints)
         except _ObjRange as r:
             assert r.var not in obj_ranges, "an object range variable was asked for twice"
             obj_ranges |= {r.var}
+        except _ObjInt as r:
+            assert r.var not in obj_ints, "an object int variable was asked for twice"
+            obj_ints |= {r.var}
 
 
 def _lower_rounds(sig, env, info, inferred, impure: bool, candidates: dict[str, Type],
-                  obj_ranges: frozenset[str]) -> ir.Function:
+                  obj_ranges: frozenset[str], obj_ints: frozenset[str]) -> ir.Function:
     # Range-target intervals: least fixpoint by iteration, widened to TOP if it does not settle.
     # A local that keeps growing (a counter) is widened to the i64 limit from round 3 on, as the
     # verifier's own fixpoint does (verify._prove).
     bounds: dict[str, Interval] = {}
     for rnd in range(16):
-        lowerer = _Lowerer(sig, env, info, inferred, impure, bounds, candidates, obj_ranges)
+        lowerer = _Lowerer(sig, env, info, inferred, impure, bounds, candidates, obj_ranges, obj_ints)
         try:
             fn = lowerer.run()
         except Skip as e:
@@ -895,7 +911,7 @@ def _lower_rounds(sig, env, info, inferred, impure: bool, candidates: dict[str, 
             return fn
         bounds = joined
     widened = {var: TOP for var in bounds}
-    return _Lowerer(sig, env, info, inferred, impure, widened, candidates, obj_ranges).run()
+    return _Lowerer(sig, env, info, inferred, impure, widened, candidates, obj_ranges, obj_ints).run()
 
 
 def _join(a: Interval, b: Interval) -> Interval:
@@ -916,9 +932,11 @@ class _Lowerer:
     def __init__(self, sig: _Signature, env: dict[str, ir.Function], info: _ModuleInfo,
                  inferred: dict[str, list[tuple[int, str]]], impure: bool,
                  bounds: dict[str, Interval], candidates: dict[str, Type],
-                 obj_ranges: frozenset[str] = frozenset()) -> None:
+                 obj_ranges: frozenset[str] = frozenset(),
+                 obj_ints: frozenset[str] = frozenset()) -> None:
         self.sig = sig
         self.obj_ranges = obj_ranges
+        self.obj_ints = obj_ints
         self.candidates = candidates
         self.entry_used: dict[str, Type] = {}
         self.fn = sig.node
@@ -1132,7 +1150,12 @@ class _Lowerer:
             raise Skip(kinds[0][0], f"local `{name}: {kind}`: a list local is a native array only "
                                     "when created by `list(range(n))`, `[v] * n` or `src[:]`")
         if kind == "int":
-            t = Type.OBJ if self.impure_mode and name not in self.range_vars else Type.I64
+            if not self.impure_mode or name in self.range_vars:
+                t = Type.I64
+            elif name in self.iter_vars or name in self.obj_ints:
+                t = Type.OBJ        # a loop over an object binds objects; an int fed from an object stays one
+            else:
+                t = Type.INT        # SPEC N-13: native, promoted in place on overflow
         else:
             t = SCALAR_KIND.get(kind, Type.OBJ)
         if name in self.iter_vars and t != Type.OBJ:
@@ -1252,6 +1275,8 @@ class _Lowerer:
                 raise Skip(line, f"array parameter `{name}` is rebound")
             value = self.value(value_node)
             t = self.local_type(name, line)
+            if t == Type.INT and value.type == Type.OBJ:
+                raise _ObjInt(name)         # fed from an object: the local stays one (SPEC N-13)
             value = self.coerce(value, t, value_node, f"local `{name}`")
             self.note_assign(name, value)
             return self.take() + [ir.Assign(name, value)]
@@ -1426,7 +1451,7 @@ class _Lowerer:
             length = self.value(value_node.right)
             if length.type != Type.I64:
                 why = (" (it is a CPython int here: its arithmetic is not proved free of i64 "
-                       "overflow in an impure function)" if length.type == Type.OBJ
+                       "overflow in an impure function)" if length.type in (Type.OBJ, Type.INT)
                        and self.impure_mode else "")
                 raise Skip(line, f"array length `{_src(value_node.right)}` is "
                                  f"{TYPE_NAME[length.type]}, not a native int{why}")
@@ -1453,6 +1478,8 @@ class _Lowerer:
             t = self.local_type(name, line)
             current = ir.Local(t, name)
             result = self.arith(op, current, self.sub(node.value), node, inplace=True)
+            if t == Type.INT and result.type == Type.OBJ:
+                raise _ObjInt(name)
             result = self.coerce(result, t, node, f"local `{name}`")
             self.note_assign(name, result)
             return self.take() + [ir.Assign(name, result)]
@@ -1564,11 +1591,11 @@ class _Lowerer:
 
     def range_bound(self, node: ast.expr, var: str | None = None) -> ir.Expr:
         e = self.value(node)
-        if e.type == Type.OBJ and self.impure_mode and var is not None:
+        if e.type in (Type.OBJ, Type.INT) and self.impure_mode and var is not None:
             raise _ObjRange(var)    # a CPython int object: the loop is a ForObj over range(...)
         if e.type != Type.I64:
             why = (" (it is a CPython int here: its arithmetic is not proved free of i64 overflow "
-                   "in an impure function)" if e.type == Type.OBJ and self.impure_mode else "")
+                   "in an impure function)" if e.type in (Type.OBJ, Type.INT) and self.impure_mode else "")
             raise Skip(node.lineno, f"range bound `{_src(node)}` is not a native int{why}")
         return e
 
@@ -1638,6 +1665,9 @@ class _Lowerer:
             return ir.Compare(Type.BOOL, ir.CompareKind.NE, e, ir.Const(Type.I64, 0))
         if e.type == Type.F64:
             return ir.Compare(Type.BOOL, ir.CompareKind.NE, e, ir.Const(Type.F64, 0.0))
+        if e.type == Type.INT:
+            return ir.Compare(Type.BOOL, ir.CompareKind.NE, e,
+                              ir.ToInt(Type.INT, ir.Const(Type.I64, 0)))
         if e.type == Type.OBJ:
             self.impure = True
             return ir.Truth(Type.BOOL, e)
@@ -1778,7 +1808,7 @@ class _Lowerer:
         e = self.value(node)
         if e.type != Type.I64:
             why = (" (it is a CPython int here: its arithmetic is not proved free of i64 overflow "
-                   "in an impure function)" if e.type == Type.OBJ and self.impure_mode else "")
+                   "in an impure function)" if e.type in (Type.OBJ, Type.INT) and self.impure_mode else "")
             raise Skip(node.lineno, f"index `{_src(node)}` is {TYPE_NAME[e.type]}, not a native "
                                     f"int{why}")
         return e
@@ -1789,6 +1819,10 @@ class _Lowerer:
             raise Skip(node.lineno, f"operator `{_src(node)}` is not supported")
         return kind
 
+    def to_int(self, e: ir.Expr) -> ir.Expr:
+        """An I64 widened to an INT (SPEC N-13); an INT as it is."""
+        return ir.ToInt(Type.INT, e) if e.type == Type.I64 else e
+
     def arith(self, op: ir.BinOpKind, left: ir.Expr, right: ir.Expr, node: ast.AST,
               inplace: bool = False) -> ir.Expr:
         lt, rt = left.type, right.type
@@ -1797,13 +1831,29 @@ class _Lowerer:
                                     f"in `{_src(node)}` is not supported")
         if Type.OBJ in (lt, rt):
             return self.obj_binop(op, left, right, inplace)
+        shift = op in (ir.BinOpKind.LSHIFT, ir.BinOpKind.RSHIFT)
+        if Type.INT in (lt, rt):
+            if Type.F64 in (lt, rt) or op == ir.BinOpKind.TRUEDIV:
+                return self.obj_binop(op, left, right, inplace)     # a float result: the object operation
+            return ir.BinOp(Type.INT, op, self.to_int(left), self.to_int(right))
+        if shift:
+            if Type.F64 in (lt, rt):
+                return self.obj_binop(op, left, right, inplace)     # CPython's TypeError
+            if not self.impure_mode:
+                raise Skip(node.lineno, f"`{_src(node)}`: a shift of ints is compiled only in an "
+                                        "impure function (native ints with promotion, SPEC N-13)")
+            return ir.BinOp(Type.INT, op, self.to_int(left), self.to_int(right))
         if lt == Type.I64 and rt == Type.I64:
             result = Type.F64 if op == ir.BinOpKind.TRUEDIV else Type.I64
             e = ir.BinOp(result, op, left, right)
             if self.recordable(e) and self.proved(e):
                 return dataclasses.replace(e, proven=True)
             if self.impure_mode:
-                return self.obj_binop(op, left, right, inplace)
+                if op == ir.BinOpKind.TRUEDIV:
+                    return self.obj_binop(op, left, right, inplace)
+                # not proved free of overflow, and an impure function cannot deopt: an INT, native
+                # until an operation leaves i64, then a PyLong, with CPython's results (SPEC N-13)
+                return ir.BinOp(Type.INT, op, self.to_int(left), self.to_int(right))
             self.deopts = True
             return e
         if lt == Type.I64:
@@ -1827,14 +1877,20 @@ class _Lowerer:
         kind = ir.UnaryOpKind.NEG if isinstance(node.op, ast.USub) else ir.UnaryOpKind.POS
         if operand.type == Type.F64:
             return ir.UnaryOp(Type.F64, kind, operand)
+        if operand.type == Type.INT:
+            return ir.UnaryOp(Type.INT, kind, operand)
         if operand.type == Type.I64:
+            if isinstance(operand, ir.Const) and I64_MIN <= -operand.value <= I64_MAX:
+                # a negative literal is one constant, as CPython's compiler folds it (so a Box of it
+                # is the module-state constant, SPEC N-13)
+                return ir.Const(Type.I64, -operand.value if kind == ir.UnaryOpKind.NEG else operand.value)
             e = ir.UnaryOp(Type.I64, kind, operand)
             if kind == ir.UnaryOpKind.POS:
                 return e
             if self.proved(e):
                 return dataclasses.replace(e, proven=True)
-            if self.impure_mode:  # -x of a CPython int is 0 - x
-                return self.obj_binop(ir.BinOpKind.SUB, ir.Const(Type.I64, 0), operand)
+            if self.impure_mode:  # -x of an i64 may leave i64: an INT (SPEC N-13)
+                return ir.UnaryOp(Type.INT, kind, self.to_int(operand))
             self.deopts = True
             return e
         raise Skip(node.lineno, f"unary `{_src(node)}` on {TYPE_NAME[operand.type]} is not "
@@ -1887,6 +1943,12 @@ class _Lowerer:
             raise Skip(node.lineno, f"comparison `{_src(node)}` is not supported "
                                     "(only == != < <= > >=, in, not in, is, is not)")
         lt, rt = left.type, right.type
+        if Type.INT in (lt, rt) and Type.OBJ not in (lt, rt) and Type.F64 not in (lt, rt) \
+                and Type.BOOL not in (lt, rt):
+            return ir.Compare(Type.BOOL, kind, self.to_int(left), self.to_int(right))
+        if Type.INT in (lt, rt) and Type.OBJ not in (lt, rt) and Type.BOOL not in (lt, rt):
+            lt = rt = Type.OBJ              # an int against a float: compared as objects, like the interpreter
+            left, right = _box(left), _box(right)
         if Type.OBJ in (lt, rt):
             if not obj_ok:
                 raise Skip(node.lineno, f"comparison `{_src(node)}` with an object is not "
@@ -1988,11 +2050,13 @@ class _Lowerer:
         self.hoist_ok = False
         args = [self.value(a) for a in node.args]
         redo = callee.may_deopt and self.impure_mode and callee.pure \
-            and callee.returns in (Type.F64, Type.BOOL, Type.NONE)
-        # else a deopt could not be redone (an I64 result of a redo could be a big int)
+            and callee.returns in (Type.F64, Type.BOOL, Type.NONE, Type.I64)
+        # (an I64 result of a redo may be a big int: the call is then an INT, SPEC N-13)
         direct = redo or not (callee.may_deopt and self.impure_mode)
         for p, e in zip(callee.params, args):
             if p.type != Type.OBJ and e.type != p.type:
+                if redo and p.type == Type.I64 and e.type == Type.INT:
+                    continue    # a promoted INT does not fit: the callee's deopt, redone
                 direct = False  # the callee's guard would deopt; the global keeps CPython's result
         # A class parameter's guard (`type(x) is C`) fails for an argument not proved to be a C:
         # that is a deopt of the callee at its entry, redoable only by a pure caller.
@@ -2010,7 +2074,8 @@ class _Lowerer:
             self.deopts = True
         typed = tuple(self.boxed(e, a) if p.type == Type.OBJ else e
                       for p, e, a in zip(callee.params, args, node.args))
-        return ir.Call(callee.returns, name, typed, redo=redo)
+        result = Type.INT if redo and callee.returns == Type.I64 else callee.returns
+        return ir.Call(result, name, typed, redo=redo)
 
     def method_call(self, func: ast.Attribute, node: ast.Call) -> ir.Expr | None:
         """`obj.m(args)` where `obj` is a local of compiled class C and `C.m` a compiled method: the
@@ -2069,10 +2134,14 @@ class _Lowerer:
     def coerce(self, value: ir.Expr, target: Type, node: ast.AST, what: str) -> ir.Expr:
         if value.type == target:
             return value
-        if target == Type.OBJ and value.type in ir.SCALARS:
+        if target == Type.OBJ and (value.type in ir.SCALARS or value.type == Type.INT):
             return ir.Box(Type.OBJ, value)
+        if target == Type.INT and value.type == Type.I64:
+            return ir.ToInt(Type.INT, value)
         extra = ""
-        if value.type == Type.OBJ:
+        if value.type == Type.INT:
+            extra = " (it may be an int beyond i64 here: it cannot be a native i64)"
+        elif value.type == Type.OBJ:
             extra = " (CPython would keep the object as it is; there is no conversion to make)"
         elif value.type == Type.I64 and target == Type.F64:
             extra = " (CPython keeps an int there, it does not convert it to float)"
@@ -2292,14 +2361,14 @@ def _closed(fn: ir.Function, env: dict[str, ir.Function], seen: frozenset[str] =
 
 
 def _box(e: ir.Expr) -> ir.Expr:
-    return ir.Box(Type.OBJ, e) if e.type in ir.SCALARS else e
+    return ir.Box(Type.OBJ, e) if e.type in ir.SCALARS or e.type == Type.INT else e
 
 
 def _trivial(e: ir.Expr) -> bool:
     """No effect, cannot raise, cannot deopt: may be evaluated in any order, or twice."""
     if isinstance(e, (ir.Const, ir.Local, ir.Len)):
         return True
-    if isinstance(e, ir.ToFloat):
+    if isinstance(e, (ir.ToFloat, ir.ToInt)):
         return _trivial(e.operand)
     if isinstance(e, ir.UnaryOp):
         return (e.op == ir.UnaryOpKind.NOT or e.type == Type.F64) and _trivial(e.operand)

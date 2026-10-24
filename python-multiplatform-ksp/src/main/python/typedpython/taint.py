@@ -154,6 +154,8 @@ class _Pass:
             self.plain(x.value, "stored into a list or local array")
         if isinstance(x, ir.NewArray) and x.fill is not None:
             self.plain(x.fill, "the fill of a local array")
+        if isinstance(x, ir.ToInt):
+            self.plain(x.operand, "widened to a native INT (SPEC N-13), which has no numpy form")
         if isinstance(x, ir.Call):
             self.taint(x)            # refuses a tainted argument
         if isinstance(x, ir.Compare):
