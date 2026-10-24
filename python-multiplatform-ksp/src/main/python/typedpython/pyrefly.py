@@ -10,9 +10,11 @@ Pyrefly is used as a CLI, not embedded. Two outputs are read:
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -68,6 +70,27 @@ class Report:
 BUILTIN_STUBS = Path(__file__).parent / "builtin_stubs"
 
 
+# Wall-clock split of the last `run` in milliseconds: pyrefly, parse, cleanup. Read by the
+# measurement test; not part of the gate's contract.
+last_timings: dict[str, float] = {}
+
+
+def _remove_later(directory: str) -> float:
+    """Delete the type report's directory (about 40 MB of typeshed copies) without waiting for it.
+
+    Deleting it inline cost 0.3-0.4 s of a 1.0 s gate. Where `rm` exists it runs detached; the
+    directory is private to this run, so nothing reads it again. Returns the time spent here.
+    """
+    start = time.perf_counter()
+    try:
+        subprocess.Popen(["rm", "-rf", directory], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except OSError:
+        shutil.rmtree(directory, ignore_errors=True)
+    return (time.perf_counter() - start) * 1000
+
+
 def command() -> list[str]:
     """The Pyrefly command line: `TYPEDPYTHON_PYREFLY`, or the copy installed next to this Python."""
     override = os.environ.get("TYPEDPYTHON_PYREFLY")
@@ -76,7 +99,8 @@ def command() -> list[str]:
 
 def run(paths: Sequence[Path], search_paths: Sequence[Path] = ()) -> Report:
     files = [str(Path(p).resolve()) for p in paths]
-    with tempfile.TemporaryDirectory(prefix="typedpython-") as work:
+    work = tempfile.mkdtemp(prefix="typedpython-")
+    try:
         config = Path(work) / "pyrefly.toml"
         config.write_text(_config([*search_paths, *import_roots(files), BUILTIN_STUBS]))
         report_dir = Path(work) / "pysa"
@@ -89,7 +113,9 @@ def run(paths: Sequence[Path], search_paths: Sequence[Path] = ()) -> Report:
             "--report-pysa-format", "json",
         ]
         try:
+            started = time.perf_counter()
             result = subprocess.run(argv, capture_output=True, text=True, check=False)
+            ran = (time.perf_counter() - started) * 1000
         except OSError as e:
             raise PyreflyError(f"cannot run {argv[0]}: {e}") from e
 
@@ -105,8 +131,15 @@ def run(paths: Sequence[Path], search_paths: Sequence[Path] = ()) -> Report:
             Error(_resolve(e["path"]), e["line"], e["column"], e["name"], e["description"])
             for e in raw_errors
         ]
+        started = time.perf_counter()
         types = _expression_types(report_dir, set(files))
-        return Report(errors, _any_expressions(types), _types_by_start(types))
+        report = Report(errors, _any_expressions(types), _types_by_start(types))
+        parsed = (time.perf_counter() - started) * 1000
+        return report
+    finally:
+        last_timings.clear()
+        last_timings.update(pyrefly_ms=locals().get("ran", 0.0), parse_ms=locals().get("parsed", 0.0),
+                            cleanup_ms=_remove_later(work))
 
 
 def import_roots(files: Sequence[str]) -> list[Path]:
