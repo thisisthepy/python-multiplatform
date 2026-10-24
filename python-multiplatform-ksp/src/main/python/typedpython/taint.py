@@ -10,9 +10,9 @@ float until the loop adds an element).
 
 Conservative rules (decision 2026-10-25): whatever the pass cannot reproduce exactly is refused
 (`Refuse`, the function stays interpreted):
-  * `/`, `//`, `%` with a tainted operand (numpy divides without raising and warns),
-  * `+ - *` on F64 with a tainted operand in an impure function (numpy warns on overflow / invalid
-    value; a pure function deopts on a non-finite result instead, `BinOp.np`),
+  (step 2: `/ // %` and F64 `+ - *` on a tainted operand are no longer refused; they are `BinOp.np`
+  operations with numpy's results, a deopt on a warning in a pure function and the compiled code's own
+  RuntimeWarning in an impure one, see ir.BinOp.)
   * a tainted value stored into a list or local array, passed to a compiled callee, or used as the
     fill of a local array (the object stored or passed would have to be the numpy scalar),
   * a comparison of an I64 with an F64 where one side is tainted (numpy converts the int to double,
@@ -69,13 +69,6 @@ class _Pass:
             return None if e.explicit else self.taint(e.operand)
         if isinstance(e, ir.BinOp):
             t = _or(self.taint(e.left), self.taint(e.right))
-            if t is not None and e.op in (ir.BinOpKind.TRUEDIV, ir.BinOpKind.FLOORDIV,
-                                          ir.BinOpKind.MOD):
-                raise Refuse(f"`{e.op.value}` of a value derived from a numpy element (numpy divides "
-                             "without raising and warns; not reproduced yet)")
-            if t is not None and e.type is Type.F64 and not self.pure:
-                raise Refuse(f"`{e.op.value}` of a value derived from a numpy element in a function "
-                             "with effects (numpy would warn on overflow; not reproduced yet)")
             return t
         if isinstance(e, ir.UnaryOp):
             return None if e.op is ir.UnaryOpKind.NOT else self.taint(e.operand)
@@ -142,14 +135,17 @@ class _Pass:
             return stmt
         if isinstance(x, ir.Box) and x.operand.type in ir.SCALARS:
             return dataclasses.replace(x, operand=self.rewrite(x.operand), np=self.taint(x.operand))
-        if isinstance(x, ir.BinOp) and x.type in ir.SCALARS:
-            self.taint(x)            # refuses division / impure arithmetic wherever it appears
-        if isinstance(x, ir.BinOp) and x.type is Type.F64 and x.op in (
-                ir.BinOpKind.ADD, ir.BinOpKind.SUB, ir.BinOpKind.MUL):
+        if isinstance(x, ir.BinOp) and x.type in ir.SCALARS and x.left.type in (Type.F64, Type.I64):
             tainted = _or(self.taint(x.left), self.taint(x.right)) is not None
-            self.deopts = self.deopts or tainted
-            return dataclasses.replace(x, left=self.rewrite(x.left), right=self.rewrite(x.right),
-                                       np=tainted)
+            division = x.op in (ir.BinOpKind.TRUEDIV, ir.BinOpKind.FLOORDIV, ir.BinOpKind.MOD)
+            if x.left.type is Type.F64:
+                np_op = tainted
+            else:                    # I64: + - * keep the checked deopt; the divisions are numpy's
+                np_op = tainted and division and not x.proven
+            if np_op:
+                self.deopts = self.deopts or self.pure
+                return dataclasses.replace(x, left=self.rewrite(x.left), right=self.rewrite(x.right),
+                                           np=True)
         if isinstance(x, ir.StoreIndex) and x.array not in self.numpy:
             self.plain(x.value, "stored into a list or local array")
         if isinstance(x, ir.NewArray) and x.fill is not None:

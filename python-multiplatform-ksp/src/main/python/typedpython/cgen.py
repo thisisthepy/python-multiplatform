@@ -202,6 +202,15 @@ _I64_OP = {ir.BinOpKind.ADD: "tp_add_i64", ir.BinOpKind.SUB: "tp_sub_i64",
            ir.BinOpKind.MOD: "tp_mod_i64", ir.BinOpKind.TRUEDIV: "tp_truediv_i64"}
 _F64_OP = {ir.BinOpKind.TRUEDIV: "tp_truediv_f64", ir.BinOpKind.FLOORDIV: "tp_floordiv_f64",
            ir.BinOpKind.MOD: "tp_mod_f64"}
+_NP_I64_OP = {ir.BinOpKind.TRUEDIV: "tp_np_truediv_i64", ir.BinOpKind.FLOORDIV: "tp_np_floordiv_i64",
+              ir.BinOpKind.MOD: "tp_np_mod_i64"}
+_NP_F64_CODE = {k: f"TP_NP_{k.name}" for k in (
+    ir.BinOpKind.ADD, ir.BinOpKind.SUB, ir.BinOpKind.MUL, ir.BinOpKind.TRUEDIV,
+    ir.BinOpKind.FLOORDIV, ir.BinOpKind.MOD)}
+_NP_F64_CODE[ir.BinOpKind.TRUEDIV] = "TP_NP_DIV"
+_NP_NAME = {ir.BinOpKind.ADD: "add", ir.BinOpKind.SUB: "subtract", ir.BinOpKind.MUL: "multiply",
+            ir.BinOpKind.TRUEDIV: "divide", ir.BinOpKind.FLOORDIV: "floor_divide",
+            ir.BinOpKind.MOD: "remainder"}
 _F64_INLINE = {ir.BinOpKind.ADD: "+", ir.BinOpKind.SUB: "-", ir.BinOpKind.MUL: "*"}
 _OBJ_OP = {k: f"TP_BINOP_{k.name}" for k in ir.BinOpKind}
 # SPEC N-13: the INT operations (tp_runtime.h "Native ints"); TRUEDIV of ints is an OBJ operation
@@ -482,6 +491,7 @@ def _bounded_functions(functions: dict[str, ir.Function]) -> dict[str, int]:
 class _ModGen:
     def __init__(self, module: ir.Module):
         self.module = module
+        self.display_path = ""
         self.functions = {f.name: f for f in module.functions}
         if len(self.functions) != len(module.functions):
             raise CGenError("duplicate compiled function names")
@@ -631,6 +641,7 @@ def generate(module: ir.Module, source_path: Path, display_path: str | None = No
     display_path = source_path.name if display_path is None else display_path
     source = source_path.read_text(encoding="utf-8")
     mg = _ModGen(module)
+    mg.display_path = display_path       # the file name of a compiled numpy RuntimeWarning (#220)
     for f in module.functions:
         _check_function(f, mg.functions)
     for f in module.functions:
@@ -1042,16 +1053,28 @@ class _FnGen:
                     self.emit(f"{t} = {a} & {_i64_lit((1 << k) - 1)};")
             elif e.proven:
                 self.emit(f"tp_proven({e.op.name.lower()}, {a}, {b}, {t});")
+            elif e.np and e.op in _NP_I64_OP:
+                # #220: numpy's int64 / // % (division by zero, INT64_MIN // -1): a deopt, the
+                # interpreter then warns (the verifier allows it in a pure function only)
+                self.check(f"{_NP_I64_OP[e.op]}({a}, {b}, &{t})")
             else:
                 self.check(f"{_I64_OP[e.op]}({a}, {b}, &{t})")
+            return t
+        if lt is Type.F64 and e.np:
+            t = self.tmp("double")
+            self.emit(f"tp_s = tp_np_f64({_NP_F64_CODE[e.op]}, {a}, {b}, &{t});")
+            if self.f.pure:
+                # #220: numpy would warn: the interpreter redoes the call and emits it
+                self.emit("if (tp_s != 0) { tp_rc = 1; goto tp_exit; }")
+            else:
+                fi = self.mg.name_index(self.mg.display_path)
+                self.emit(f"if (tp_s != 0 && tp_np_warn(tp_module, tp_s, \"{_NP_NAME[e.op]}\", "
+                          f"tp_st->names[{fi}], {e.line}) != 0) {{ tp_rc = -1; goto tp_exit; }}")
             return t
         if lt is Type.F64:
             t = self.tmp("double")
             if e.op in _F64_INLINE:
                 self.emit(f"{t} = {a} {_F64_INLINE[e.op]} {b};")
-                if e.np:
-                    # #220: numpy would warn (overflow / invalid value); the interpreter redoes the call
-                    self.emit(f"if (!isfinite({t})) {{ tp_rc = 1; goto tp_exit; }}")
             else:
                 self.check(f"{_F64_OP[e.op]}({a}, {b}, &{t})")
             return t
