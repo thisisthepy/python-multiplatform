@@ -659,6 +659,23 @@ static inline int tp_math_hypot(double x, double y, double *out)
 static inline PyObject *tp_box_i64(int64_t v) { return PyLong_FromLongLong((long long)v); }
 static inline PyObject *tp_box_f64(double v) { return PyFloat_FromDouble(v); }
 static inline PyObject *tp_box_bool(int v) { return PyBool_FromLong(v ? 1 : 0); }
+/* The numpy scalar of type `t` (np.float64 / np.int64 / np.bool_) holding the Python value `o` (a new
+ * reference, consumed); NULL with an exception set. Box.np (#220). */
+static inline PyObject *tp_box_np(PyObject *t, PyObject *o)
+{
+    PyObject *r;
+    if (o == NULL) {
+        return NULL;
+    }
+    if (t == NULL) {
+        Py_DECREF(o);
+        PyErr_SetString(PyExc_SystemError, "typedpython: numpy scalar type is unavailable");
+        return NULL;
+    }
+    r = PyObject_CallOneArg(t, o);
+    Py_DECREF(o);
+    return r;
+}
 
 static inline int tp_unbox_i64(PyObject *o, int64_t *out)
 {
@@ -895,7 +912,7 @@ static inline int tp_i64_array_exit(tp_i64_array *a)
  * cost, it is not a supported configuration for threads. len is the export's shape[0], fixed for
  * the call (the export forbids resizing).
  * ------------------------------------------------------------------------------------------ */
-typedef struct { Py_buffer view; Py_ssize_t len; void *data; int held; } tp_buf;
+typedef struct { Py_buffer view; Py_ssize_t len; void *data; int held; int np; } tp_buf;
 
 /* `mod.attr` as a new reference in *out; not importable (or no such attribute): *out stays NULL
  * and the error is cleared, so every guard against it deopts. -1 only for MemoryError. */
@@ -958,10 +975,23 @@ static inline int tp_buf_enter(PyObject *obj, PyObject *exact, const char *fmt1,
     return 0;
 }
 
+/* A numpy array (#220): the same guard on the exact `numpy.ndarray`; `np` selects numpy's IndexError
+ * text. The format check already refuses a byte-order prefix and every dtype but float64 / int64. */
+static inline int tp_buf_enter_np(PyObject *obj, PyObject *exact, const char *fmt1, const char *fmt2,
+                                  int writable, tp_buf *b)
+{
+    int rc = tp_buf_enter(obj, exact, fmt1, fmt2, writable, b);
+    if (rc == 0) {
+        b->np = 1;
+    }
+    return rc;
+}
+
 /* index: a negative index counts from the end; out of range -> IndexError with the text CPython's
  * own array.array uses ("array index out of range" / "array assignment index out of range") */
 static inline int tp_buf_slot(const tp_buf *b, int64_t i, int store, Py_ssize_t *slot)
 {
+    int64_t orig = i;
     if (i < 0) {
         i += (int64_t)b->len;
         if (i < 0) goto out_of_range;
@@ -972,6 +1002,11 @@ static inline int tp_buf_slot(const tp_buf *b, int64_t i, int store, Py_ssize_t 
     *slot = (Py_ssize_t)i;
     return 0;
 out_of_range:
+    if (b->np) {
+        PyErr_Format(PyExc_IndexError, "index %lld is out of bounds for axis 0 with size %zd",
+                     (long long)orig, b->len);
+        return -1;
+    }
     PyErr_SetString(PyExc_IndexError,
                     store ? "array assignment index out of range" : "array index out of range");
     return -1;

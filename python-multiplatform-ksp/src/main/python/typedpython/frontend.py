@@ -77,7 +77,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from typedpython import gate, ir, pyrefly, rebinding
+from typedpython import gate, ir, pyrefly, rebinding, taint
 from typedpython.ir import Type
 
 MARKER = "# typedpython: compiled"
@@ -313,7 +313,33 @@ def _buffer_kind(annotation: ast.expr, info: _ModuleInfo) -> tuple[Type, str] | 
     if base == "array.array" and isinstance(arg, ast.Name) and arg.id in ("float", "int") \
             and not info.bound(arg.id):
         return ARRAY_KIND[f"list[{arg.id}]"], "array"
+    if base == "numpy.typing.NDArray":
+        dtype = _qualified(arg, info)
+        if dtype in _NUMPY_DTYPE:
+            return _NUMPY_DTYPE[dtype], "numpy"
     return None
+
+
+def _element_only(fn: ast.FunctionDef, name: str) -> bool:
+    """Whether every use of `name` in `fn` is `name[i]` (read or store, not a slice) or `len(name)`,
+    and it is never rebound: the only uses a buffer array supports."""
+    ok: set[int] = set()
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Subscript) and isinstance(n.value, ast.Name) and n.value.id == name \
+                and not isinstance(n.slice, ast.Slice) \
+                and not (isinstance(n.slice, ast.Tuple) and any(isinstance(e, ast.Slice) for e in n.slice.elts)):
+            ok.add(id(n.value))
+        elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "len" \
+                and len(n.args) == 1 and isinstance(n.args[0], ast.Name) and n.args[0].id == name:
+            ok.add(id(n.args[0]))
+    return all(id(n) in ok for n in ast.walk(fn)
+               if isinstance(n, ast.Name) and n.id == name and not isinstance(n.ctx, ast.Param)
+               ) and not any(isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Store)
+                             for n in ast.walk(fn))
+
+
+# numpy dtypes that are 8-byte buffer arrays (#220): the scalar type annotation they spell
+_NUMPY_DTYPE = {"numpy.float64": Type.F64_ARRAY, "numpy.int64": Type.I64_ARRAY}
 
 
 def _scalar_globals(tree: ast.Module, bindings: dict[str, list[tuple[int, str]]]) -> dict[str, Type]:
@@ -648,6 +674,8 @@ def _signature(fn: ast.FunctionDef, classes: dict[str, ir.ClassDecl] | None = No
             raise Skip(a.lineno, f"parameter `{a.arg}` has no annotation")
         kind = _annotation_kind(a.annotation)
         buffer = _buffer_kind(a.annotation, info) if info is not None else None
+        if buffer is not None and buffer[1] == "numpy" and not _element_only(fn, a.arg):
+            buffer = None       # #220: used as a whole object (np.sum(x), x.T, passed on): opaque
         if buffer is not None:
             params.append(ir.ArrayParam(a.arg, buffer[0], False, buffer[1]))  # `stored` set later
         elif kind in ARRAY_KIND:
@@ -669,6 +697,9 @@ def _signature(fn: ast.FunctionDef, classes: dict[str, ir.ClassDecl] | None = No
         returns = Type.NONE
     else:
         returns = SCALAR_KIND.get(_annotation_kind(fn.returns), Type.OBJ)
+        if returns in ir.SCALARS and any(
+                isinstance(p, ir.ArrayParam) and p.buffer == "numpy" for p in params):
+            returns = Type.OBJ      # #220: the interpreter returns np.float64 / np.int64 / np.bool
     elements, ellipsis = _tuple_annotation(fn.returns)
     return _Signature(fn, tuple(params), returns, elements, ellipsis, _src(fn.returns), owner)
 
@@ -731,6 +762,8 @@ def _lower_function(
     kinds: dict[str, dict[str, list[tuple[int, str]]]],
 ) -> ir.Function | str:
     inferred = kinds.get(sig.qname, {})
+    if any(isinstance(p, ir.ArrayParam) and p.buffer == "numpy" for p in sig.params):
+        inferred = _numpy_kinds(sig, inferred)
     pure_error: Skip | None = None
     try:
         fn = _lower_in_mode(sig, env, info, inferred, impure=False)
@@ -747,6 +780,65 @@ def _lower_function(
         if pure_error is not None and not getattr(pure_error, "impure_seen", False):
             return pure_error.reason
         return e.reason
+
+
+_NUMPY_SPELLED = {"float64": "float", "numpy.float64": "float", "int64": "int", "numpy.int64": "int",
+                  "bool_": "bool", "numpy.bool_": "bool", "numpy.bool": "bool"}
+
+
+def _numpy_kinds(sig: _Signature, inferred: dict[str, list[tuple[int, str]]],
+                 ) -> dict[str, list[tuple[int, str]]]:
+    """Pyrefly spells a value computed from a numpy element `Unknown` when it cannot import numpy
+    (or `float64` / `int64` when it can): in a function with numpy arrays (#220) those entries are
+    re-read from the source, as the scalar kind (float / int / bool) the interpreter's numpy scalar
+    stands for. An entry stays `Unknown` when the source does not settle it."""
+    arrays = {p.name: p.type for p in sig.params if isinstance(p, ir.ArrayParam) and p.buffer == "numpy"}
+    scalars = {p.name: _annotation_kind(p_node.annotation)
+               for p, p_node in zip(sig.params, sig.node.args.args)
+               if isinstance(p, ir.Param) and p.type in ir.SCALARS}
+    nodes = {n.lineno: n for n in ast.walk(sig.node)
+             if isinstance(n, (ast.Assign, ast.AugAssign)) and len(getattr(n, "targets", [0])) == 1}
+
+    out = {name: [(line, _NUMPY_SPELLED.get(k, k)) for line, k in entries]
+           for name, entries in inferred.items()}
+
+    def known(name: str) -> str | None:
+        ks = {k for _, k in out.get(name, []) if k != "Unknown"}
+        if name in scalars:
+            ks.add(scalars[name])
+        return next(iter(ks)) if len(ks) == 1 else None
+
+    def kind(e: ast.expr) -> str | None:
+        if isinstance(e, ast.Constant):
+            return {bool: "bool", int: "int", float: "float"}.get(type(e.value))
+        if isinstance(e, ast.Name):
+            return known(e.id)
+        if isinstance(e, ast.Subscript) and isinstance(e.value, ast.Name) and e.value.id in arrays:
+            return "float" if arrays[e.value.id] is Type.F64_ARRAY else "int"
+        if isinstance(e, ast.UnaryOp):
+            return "bool" if isinstance(e.op, ast.Not) else kind(e.operand)
+        if isinstance(e, ast.BinOp):
+            a, b = kind(e.left), kind(e.right)
+            if a is None or b is None or "bool" in (a, b):
+                return None
+            return "float" if "float" in (a, b) or isinstance(e.op, ast.Div) else "int"
+        if isinstance(e, ast.Compare):
+            return "bool"
+        return None
+
+    for _ in range(3):
+        for name, entries in out.items():
+            fixed = []
+            for line, k in entries:
+                node = nodes.get(line)
+                if k == "Unknown" and node is not None:
+                    value = node.value
+                    if isinstance(node, ast.AugAssign):
+                        value = ast.BinOp(left=ast.Name(id=name), op=node.op, right=node.value)
+                    k = kind(value) or k
+                fixed.append((line, k))
+            out[name] = fixed
+    return out
 
 
 def _lower_in_mode(sig, env, info, inferred, impure: bool) -> ir.Function:
@@ -839,6 +931,8 @@ class _Lowerer:
 
         self.params = {p.name: p for p in sig.params}
         self.arrays = {p.name: p.type for p in sig.params if isinstance(p, ir.ArrayParam)}
+        self.numpy = {p.name for p in sig.params
+                      if isinstance(p, ir.ArrayParam) and p.buffer == "numpy"}
         self.bindings: dict[str, list[_Binding]] = {}
         self.annotations: dict[str, list[tuple[int, str]]] = {}
         self._collect_bindings()
@@ -891,6 +985,15 @@ class _Lowerer:
             if name not in self.params:
                 locals_[name] = self.local_type(name, self.bindings[name][0].line)
         locals_.update(self.temps)
+        if self.numpy:
+            try:
+                body, flags, deopts = taint.apply(
+                    body, self.numpy, not self.impure,
+                    frozenset(p.name for p in self.sig.params if isinstance(p, ir.Param)))
+            except taint.Refuse as why:
+                raise Skip(self.fn.lineno, str(why)) from None
+            locals_.update(flags)
+            self.deopts = self.deopts or deopts
         params = tuple(
             ir.ArrayParam(p.name, p.type, p.name in self.stored, p.buffer)
             if isinstance(p, ir.ArrayParam)
@@ -1833,6 +1936,9 @@ class _Lowerer:
                 return ir.Len(Type.I64, node.args[0].id)
             if plain and len(node.args) == 1 and name == "float" and self.builtin("float"):
                 arg = self.value(node.args[0])
+                if self.numpy and arg.type in (Type.I64, Type.F64):
+                    # #220: float(np.float64) / float(np.int64) is a plain float
+                    return ir.ToFloat(Type.F64, arg, explicit=True)
                 if arg.type == Type.I64:
                     return ir.ToFloat(Type.F64, arg)
                 if arg.type == Type.F64:
