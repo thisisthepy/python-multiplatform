@@ -260,6 +260,7 @@ UNVERIFIED = "verify/call-unverified"
 STRUCTURE = "verify/structure"
 CONDITION_ONLY = "verify/condition-only"
 PROVEN = "verify/proven-overflow"
+VIRTUAL = "verify/virtual-escape"
 REDO = "verify/redo"
 ENTRY_OPEN = "verify/entry-global-open"
 ARRAY_OPEN = "verify/array-open"
@@ -1667,7 +1668,100 @@ class _Checker:
                 self.error(ARRAY_STORED, f"array '{p.name}' has stored={p.stored} but the body "
                                          f"{'stores' if p.name in self.stored else 'never stores'}"
                                          f" into it")
-        return dataclasses.replace(fn, body=body)
+        virtual = _virtual_locals(fn, body) if not self.diags else {}
+        if fn.virtual and set(fn.virtual) != set(virtual):
+            self.error(VIRTUAL, f"virtual locals {sorted(fn.virtual)} declared, but only "
+                                f"{sorted(virtual)} are provably virtual (SPEC N-12a)")
+        return dataclasses.replace(fn, body=body, virtual=tuple(sorted(virtual)))
+
+
+# --- virtual objects (SPEC N-12a) ----------------------------------------------------------------------
+
+# The expression nodes a function may contain for its objects to be virtual: none of them runs user
+# code, reads a global or an attribute, or calls anything (a Call can redo in the interpreter), so
+# nothing can observe a live virtual object. OBJ BinOp is excluded in `_virtual_locals`.
+_VIRTUAL_OK = frozenset({Const, Local, BinOp, UnaryOp, Compare, And, Or, ToFloat, ToInt, Box, Unbox,
+                         MathCall, Len, Index, NewArray, CopyArray, Is, IsExact, CheckExact,
+                         FieldGet, New})
+_VIRTUAL_STMTS = frozenset({Assign, StoreIndex, If, While, ForRange, Return, Break, Continue})
+
+
+def _exprs_of(node: object):
+    """Every ir expression directly under `node` (an expression or statement), in field order."""
+    for f in dataclasses.fields(node):
+        v = getattr(node, f.name)
+        for x in (v if isinstance(v, tuple) else (v,)):
+            if isinstance(x, ir.Expr):
+                yield x
+
+
+def _virtual_locals(fn: Function, body: tuple) -> dict[str, str]:
+    """local -> class of the virtual objects of `fn` (SPEC N-12a), or {}. A local is virtual when
+    `fn` is pure and contains only `_VIRTUAL_OK` nodes (no unknown code at all), and the local is
+    never a parameter, is only assigned `New(C, args)` of one class with args that cannot run a
+    finalizer when dropped (Box of a scalar, a str/None Const, an OBJ parameter), and is read only as
+    the object of a `FieldGet` of C. Anything else stays an ordinary object (N-11)."""
+    if fn.pure is not True or not isinstance(body, tuple):
+        return {}
+    params = {p.name for p in fn.params}
+    safe_reads: dict[str, list[str]] = {}
+    other_reads: set[str] = set()
+    ok = True
+
+    def expr(e: object) -> None:
+        nonlocal ok
+        if type(e) not in _VIRTUAL_OK or (type(e) is BinOp and e.type is Type.OBJ):
+            ok = False
+            return
+        if type(e) is FieldGet and type(e.obj) is Local:
+            safe_reads.setdefault(e.obj.name, []).append(e.cls)
+            return
+        if type(e) is Local:
+            other_reads.add(e.name)
+        for x in _exprs_of(e):
+            expr(x)
+
+    def block(stmts: object) -> None:
+        nonlocal ok
+        if not isinstance(stmts, tuple):
+            ok = False
+            return
+        for st in stmts:
+            if type(st) not in _VIRTUAL_STMTS:
+                ok = False
+                return
+            for x in _exprs_of(st):
+                expr(x)
+            for nested in (getattr(st, "then", ()), getattr(st, "orelse", ()), getattr(st, "body", ())):
+                block(nested)
+
+    block(body)
+    if not ok:
+        return {}
+    assigned: dict[str, list[object]] = {}
+    _assigned_values(body, assigned)
+    out: dict[str, str] = {}
+    for name, values in assigned.items():
+        if (fn.locals.get(name) is not Type.OBJ or name in params or name in other_reads
+                or name not in safe_reads):
+            continue
+        if not all(type(v) is New and isinstance(v.cls, str) for v in values):
+            continue
+        classes = {v.cls for v in values}
+        if len(classes) != 1 or set(safe_reads[name]) != classes:
+            continue
+        if not all(_virtual_arg(a, params) for v in values for a in v.args):
+            continue
+        out[name] = next(iter(classes))
+    return out
+
+
+def _virtual_arg(a: object, params: set[str]) -> bool:
+    if type(a) is Box:
+        return a.operand.type in ir.SCALARS
+    if type(a) is Const:
+        return a.type is Type.OBJ
+    return type(a) is Local and a.type is Type.OBJ and a.name in params
 
 
 def _assigned(body: object, counts: dict[str, int] | None = None) -> dict[str, int]:
