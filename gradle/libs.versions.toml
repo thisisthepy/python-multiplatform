@@ -10,8 +10,7 @@ androidx-core-ktx = "1.13.1"
 androidx-espresso-core = "3.6.1"
 androidx-material = "1.12.0"
 androidx-test-junit = "1.2.1"
-androidx-lifecycle = "2.11.0-beta01"
-compose-plugin = "1.11.1-ext.1"
+compose-plugin = "1.11.1-ext.2"
 # JetBrains stopped publishing material-icons with Compose after 1.7.3 (Maven Central: newest is 1.7.3);
 # it is the version Compose Multiplatform 1.11.x points to, resolved against 1.11.1's ui/ui-graphics.
 compose-material-icons = "1.7.3"
@@ -34,8 +33,8 @@ androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version
 androidx-material = { group = "com.google.android.material", name = "material", version.ref = "androidx-material" }
 androidx-constraintlayout = { group = "androidx.constraintlayout", name = "constraintlayout", version.ref = "androidx-constraintlayout" }
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "androidx-activityCompose" }
-androidx-lifecycle-viewmodel = { group = "org.jetbrains.androidx.lifecycle", name = "lifecycle-viewmodel", version.ref = "androidx-lifecycle" }
-androidx-lifecycle-runtime-compose = { group = "org.jetbrains.androidx.lifecycle", name = "lifecycle-runtime-compose", version.ref = "androidx-lifecycle" }
+androidx-lifecycle-viewmodel = { group = "org.thisisthepy.compose.androidx.lifecycle", name = "lifecycle-viewmodel", version.ref = "compose-plugin" }
+androidx-lifecycle-runtime-compose = { group = "org.thisisthepy.compose.androidx.lifecycle", name = "lifecycle-runtime-compose", version.ref = "compose-plugin" }
 kotlinx-coroutines-swing = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-swing", version.ref = "kotlinx-coroutines" }
 kotlinx-browser = { group = "org.jetbrains.kotlinx", name = "kotlinx-browser", version.ref = "kotlinx-browser" }
 
