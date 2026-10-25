@@ -612,10 +612,12 @@ def test_concurrent_reader_sees_no_torn_element(vec_built):
     t.start()
     bad = 0
     try:
-        for _ in range(300):
-            raw = a.tobytes()
-            for off in range(0, len(raw), 8):
-                if raw[off:off + 8] not in ok:
+        # Element by element, as the interpreter reads `a[i]` (one aligned 8-byte load). Not
+        # `a.tobytes()`: that is a memcpy, which may copy byte-wise and tear an element itself, so it
+        # could report a torn element the compiled stores never wrote (seen once on Linux CI).
+        for _ in range(40):
+            for i in range(n):
+                if struct.pack("<d", a[i]) not in ok:
                     bad += 1
     finally:
         stop.set()
