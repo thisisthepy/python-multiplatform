@@ -91,6 +91,20 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
         val classes = mutableListOf<ClassModel>()
 
         files.flatMap { it.declarations }.forEach { declaration ->
+            // Issue #319: Kotlin cannot name a root-package declaration from a named package, and
+            // every generated fragment and table lives in one, so a binding could only ever be an
+            // unresolved reference. Skipped with a warning instead of breaking the consumer's build.
+            if (declaration.packageName.asString().isEmpty()) {
+                if (declaration is KSFunctionDeclaration || declaration is KSPropertyDeclaration || declaration is KSClassDeclaration) {
+                    logger.warn(
+                        "python-multiplatform-ksp: ${declaration.simpleName.asString()} is in the root package " +
+                            "and is not exposed to Python (generated code in a named package cannot refer to it); " +
+                            "give its file a `package` declaration to expose it.",
+                        declaration,
+                    )
+                }
+                return@forEach
+            }
             when (declaration) {
                 is KSFunctionDeclaration ->
                     if (BindingPolicy.isExposedTopLevelFunction(declaration, excludePackages) &&

@@ -7,8 +7,18 @@ plugins {
     `maven-publish`
 }
 
-group = "io.github.thisisthepy"
-version = "3.13.0" // kept in step with the root build's version, which the processor is published under
+group = "org.thisisthepy"
+// Same published version as the library and the KSP processor (#70): "$pythonVersion-$suffix" from
+// the root's gradle.properties, a -P override winning as it does in the root build (Gradle hands
+// start-parameter properties to included builds too).
+val rootGradleProperties = Properties().apply {
+    val file = rootDir.resolve("../gradle.properties")
+    if (file.isFile) file.inputStream().use { load(it) }
+}
+fun rootProperty(name: String, fallback: String): String =
+    findProperty(name)?.toString() ?: rootGradleProperties.getProperty(name) ?: fallback
+val publishedVersion = "${rootProperty("pythonVersion", "3.15.0")}-${rootProperty("libraryVersionSuffix", "alpha01")}"
+version = publishedVersion
 
 /**
  * `KlibScanner`'s reader, named once because three places have to agree on it: this module's own
@@ -72,7 +82,7 @@ dependencies {
     //   - not in the library. `python-multiplatform` does not depend on this plugin;
     //     `:python-multiplatform:dependencies` reports `kotlin-compiler-embeddable:2.0.20` in no
     //     configuration at all, `desktopRuntimeClasspath` included.
-    //   - not on a consumer's *application* classpath. `:ksp-fixtures:app:dependencies` reports zero
+    //   - not on a consumer's *application* classpath. `:python-multiplatform-ksp:fixtures:app:dependencies` reports zero
     //     occurrences of `2.0.20`. (It does report `kotlin-compiler-embeddable:2.4.0` and
     //     `2.4.20-Beta2` under `kotlinCompilerPluginClasspath*` and the commonizer's configurations
     //     -- KGP's own, present before this dependency existed.)
@@ -125,7 +135,7 @@ dependencies {
     // classloader's parent is Gradle's own minimal worker infrastructure, not that root scope, so
     // `org.jetbrains.kotlin.library.*` has exactly one source inside the worker. Confirmed against a
     // real consumer build, not only this plugin's own unit tests:
-    // `:ksp-fixtures:klib-artifact:generatePythonArtifactBindings` and `:generatePythonStubs` both
+    // `:python-multiplatform-gradle-plugin-fixtures:klib-artifact:generatePythonArtifactBindings` and `:generatePythonStubs` both
     // pass and emit the walker's real output (`kotlinx.coroutines.flow.internal.checkIndexOverflow`).
     //
     // ### Compile-only here, resolved by the consumer at klib-walking time
@@ -211,7 +221,7 @@ dependencies {
 gradlePlugin {
     plugins {
         create("pythonMultiplatformBindings") {
-            id = "io.github.thisisthepy.python.multiplatform.bindings"
+            id = "org.thisisthepy.python.multiplatform.bindings"
             implementationClass = "python.multiplatform.gradle.PythonBindingsPlugin"
             displayName = "Python Multiplatform bindings"
             description = "Wires the python-multiplatform KSP processor into every Kotlin target of a module."
@@ -239,23 +249,45 @@ val generateCoordinates = tasks.register("generateCoordinates") {
     // second copy of these values that drifted would pair a stdlib with an interpreter from a
     // different build. The fallbacks match `python-multiplatform/build.gradle.kts`'s own, for the
     // case where this build is checked out without the root's properties beside it.
-    val rootProperties = Properties().apply {
-        val file = rootDir.resolve("../gradle.properties")
-        if (file.isFile) file.inputStream().use { load(it) }
-    }
-    val pythonVersionValue = rootProperties.getProperty("pythonVersion") ?: "3.14.7"
-    val pbsReleaseValue = rootProperties.getProperty("pythonBuildStandaloneRelease") ?: "20260807"
-    val freeThreadedValue = rootProperties.getProperty("pythonFreeThreaded")?.toBoolean() ?: false
+    val pythonVersionValue = rootProperty("pythonVersion", "3.15.0")
+    val pbsReleaseValue = rootProperty("pythonBuildStandaloneRelease", "20261013")
+    val freeThreadedValue = rootProperty("pythonFreeThreaded", "false").toBoolean()
 
-    // `python-multiplatform` itself is versioned "$pythonVersion-alpha01" -- see that build's own
-    // `val libraryVersion` -- which is *not* this plugin build's `project.version` (kept in step by
-    // hand, see the top of this file). The wasm-runtime zip is published under the library's
-    // version, alongside the library artifact it has to pair with, so the coordinate has to be
-    // built the same way rather than reusing this plugin's own version.
-    val libraryVersionValue = "$pythonVersionValue-alpha01"
+    // The library and this plugin publish under one version since #70, so the wasm-runtime zip
+    // (published beside the library artifact) is at this build's own version.
+    val libraryVersionValue = publishedVersion
     val wasmRuntimeCoordinatesValue = "${project.group}:python-multiplatform-wasm-runtime:$libraryVersionValue"
 
     val klibWorkerValue = klibWorkerCoordinates
+
+    // The CPython iOS support archive the library build downloads, derived with the same rule as
+    // `python-multiplatform/build.gradle.kts` (`downloadPython_ios`): python.org from 3.15, BeeWare
+    // before. The SHA-256 is read from the root `python-checksums.properties` under the library's
+    // own lock key and baked into the plugin, so a consumer verifies against the pin this plugin
+    // was built with and needs no lockfile of its own.
+    val iosVersionParts = pythonVersionValue.split(".")
+    val iosFromPythonOrgValue = iosVersionParts[0].toInt() > 3 || (iosVersionParts[0].toInt() == 3 && iosVersionParts[1].toInt() >= 15)
+    val iosLibVersion = "${iosVersionParts[0]}.${iosVersionParts[1]}"
+    val iosReleaseDir = "$iosLibVersion.${iosVersionParts.getOrNull(2)?.takeWhile { it.isDigit() } ?: "0"}"
+    val appleSupportBuild = rootProperty("pythonAppleSupportBuild", "b11")
+    val iosArchiveNameValue = if (iosFromPythonOrgValue) {
+        "python-$pythonVersionValue-iOS-XCframework.tar.gz"
+    } else {
+        "Python-$iosLibVersion-iOS-support.$appleSupportBuild.tar.gz"
+    }
+    val iosUrlValue = if (iosFromPythonOrgValue) {
+        "https://www.python.org/ftp/python/$iosReleaseDir/$iosArchiveNameValue"
+    } else {
+        "https://github.com/beeware/Python-Apple-support/releases/download/$iosLibVersion-$appleSupportBuild/$iosArchiveNameValue"
+    }
+    val iosLockKeyValue = if (iosFromPythonOrgValue) "ios-$pythonVersionValue-pythonorg" else "ios-$iosLibVersion-$appleSupportBuild"
+    val checksumsFile = project.rootDir.resolve("../python-checksums.properties")
+    val iosSha256Value = Properties().apply {
+        if (checksumsFile.isFile) checksumsFile.inputStream().use { load(it) }
+    }.getProperty(iosLockKeyValue)
+        ?: throw GradleException(
+            "python-checksums.properties (${checksumsFile.path}) has no '$iosLockKeyValue'; the plugin bakes the iOS support archive's SHA-256 from it.",
+        )
 
     inputs.property("coordinates", coordinates)
     inputs.property("klibWorkerCoordinates", klibWorkerValue)
@@ -263,6 +295,10 @@ val generateCoordinates = tasks.register("generateCoordinates") {
     inputs.property("pbsRelease", pbsReleaseValue)
     inputs.property("pythonFreeThreaded", freeThreadedValue)
     inputs.property("wasmRuntimeCoordinates", wasmRuntimeCoordinatesValue)
+    inputs.property("iosUrl", iosUrlValue)
+    inputs.property("iosArchiveName", iosArchiveNameValue)
+    inputs.property("iosLockKey", iosLockKeyValue)
+    inputs.property("iosSha256", iosSha256Value)
     outputs.dir(outputDir)
     doLast {
         val file = outputDir.get().file("python/multiplatform/gradle/ProcessorCoordinates.kt").asFile
@@ -279,6 +315,18 @@ val generateCoordinates = tasks.register("generateCoordinates") {
 
             /** The python-build-standalone release tag that published it. */
             internal const val DEFAULT_PBS_RELEASE: String = "$pbsReleaseValue"
+
+            /** The pinned CPython iOS support archive: where it is downloaded from. */
+            internal const val DEFAULT_IOS_ARCHIVE_URL: String = "$iosUrlValue"
+
+            /** Its file name, which is also the file's name under the consumer's `build/python-standalone/`. */
+            internal const val DEFAULT_IOS_ARCHIVE_NAME: String = "$iosArchiveNameValue"
+
+            /** The key it has in the root `python-checksums.properties`, kept for messages. */
+            internal const val DEFAULT_IOS_LOCK_KEY: String = "$iosLockKeyValue"
+
+            /** Its SHA-256, read from `python-checksums.properties` when this plugin was built. */
+            internal const val DEFAULT_IOS_ARCHIVE_SHA256: String = "$iosSha256Value"
 
             internal const val DEFAULT_PYTHON_FREE_THREADED: Boolean = $freeThreadedValue
 

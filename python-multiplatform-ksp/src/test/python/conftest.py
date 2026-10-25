@@ -28,7 +28,9 @@ def errors(diagnostics):
 
 
 # TP_SANITIZE=1 (tools/sanitizers.py): every extension TypedPython builds gets ASan + UBSan, and a
-# sanitizer report fails the run (-fno-sanitize-recover=undefined; ASan halts). Nothing else changes.
+# sanitizer report fails the run (-fno-sanitize-recover=undefined; ASan halts). It also defines
+# TP_CHECK_PROVEN: an op the verifier proved runs the checked helper and raises SystemError if the
+# proof was wrong (#148), so this run catches a wrong proof that the default build would let wrap.
 import os  # noqa: E402
 
 if os.environ.get("TP_SANITIZE") == "1":
@@ -36,7 +38,7 @@ if os.environ.get("TP_SANITIZE") == "1":
     from typedpython import cbuild as _cbuild
 
     _SAN = ["-fsanitize=address,undefined", "-fno-sanitize-recover=undefined", "-g",
-            "-fno-omit-frame-pointer"]
+            "-fno-omit-frame-pointer", "-DTP_CHECK_PROVEN"]
     _orig_compiler = _cbuild.compiler
 
     def _sanitized_compiler():

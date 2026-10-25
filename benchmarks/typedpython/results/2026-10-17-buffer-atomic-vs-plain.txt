@@ -1,0 +1,4 @@
+# atomic vs plain buffer element access, 2026-10-17, quiet window (end load 1.15), interleaved 11 pairs, n=2,000,000 doubles, CPython 3.15.0rc1t
+compiled: ['dot_arr', 'dot_list', 'scale_arr']
+{'dot': 1.001, 'scale': 2.539} (atomic / plain, median of 11)
+dot_arr atomic 1.94 ms, plain 1.92 ms, dot_list (copy-in) 12.28 ms

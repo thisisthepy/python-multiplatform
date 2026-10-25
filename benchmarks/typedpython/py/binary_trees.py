@@ -2,6 +2,7 @@ import sys
 
 
 class Node:
+    __slots__ = ("left", "right")
     left: "Node | None"
     right: "Node | None"
 

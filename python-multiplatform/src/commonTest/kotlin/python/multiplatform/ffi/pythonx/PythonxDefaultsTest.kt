@@ -72,7 +72,7 @@ class PythonxDefaultsTest {
             """
             from androidx.compose.ui import Modifier, describeModifier
             _px = {
-                'omitted': describeModifier(Modifier.fillMaxHeight()),
+                'omitted': describeModifier(Modifier.fill_max_height()),
                 'given': describeModifier(Modifier.fillMaxHeight(0.5)),
             }
             """.trimIndent(),

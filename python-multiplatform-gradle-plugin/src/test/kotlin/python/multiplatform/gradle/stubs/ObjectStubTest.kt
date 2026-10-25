@@ -85,7 +85,7 @@ class ObjectStubTest {
         )
         val files = renderKotlinFqnStubs(listOf(end, column))
         val layout = file(files, pkgLayout)
-        assertTrue("horizontalAlignment: $alignment.Horizontal = ..." in layout, layout)
+        assertTrue("horizontal_alignment: $alignment.Horizontal = ..." in layout, layout)
         assertTrue("import $alignment\n" in layout, layout)
     }
 
@@ -98,12 +98,14 @@ class ObjectStubTest {
     }
 
     @Test
-    fun aNestedTypeWhoseNameAnObjectMemberTakesStaysAny() {
-        // The module already defines `Horizontal` as a constant; a class of that name would shadow it.
+    fun aNestedTypeWhoseNameAnObjectMemberTakesIsStubbedUnderAPrivateName() {
+        // The module already defines `Horizontal` as a constant; a class of that name would shadow it,
+        // so the type is the stub-private `_Horizontal` (issue #217) rather than `Any`.
         val clash = constant("$alignment.Horizontal", alignmentHorizontal)
         val text = file(renderKotlinFqnStubs(listOf(clash)), alignment)
         assertFalse("class Horizontal:" in text, text)
-        assertTrue("Horizontal: _t.Any" in text, text)
+        assertTrue("class _Horizontal:" in text, text)
+        assertTrue("Horizontal: _Horizontal" in text, text)
     }
 
     // ---------------------------------------------------------------- functions of an object

@@ -64,7 +64,7 @@ class JniOverheadBenchmark {
     /**
      * The echo probes touch no interpreter state, but `realCPythonCallByCallingConvention` calls
      * CPython for real, and the main thread state is parked (see
-     * [PythonOnDevice.ensureInitialised]) — so this thread has to attach for itself. Done once
+     * [PythonOnDevice.ensureInitialised]), so this thread has to attach for itself. Done once
      * per test, outside the timed loops, so the attach is not what gets measured.
      */
     private var gilState = 0

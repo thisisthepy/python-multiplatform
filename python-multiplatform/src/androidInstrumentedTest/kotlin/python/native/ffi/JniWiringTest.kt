@@ -11,7 +11,7 @@ import org.junit.runner.RunWith
  * Settles, on a real device, whether the JNI wiring between the Kotlin/Native `@CName` exports and
  * the `external fun` declarations in [bindings] actually passes arguments correctly.
  *
- * The exports take only their declared arguments — none of them accepts a `JNIEnv*`. But `bindings`
+ * The exports take only their declared arguments, none of them accepts a `JNIEnv*`. But `bindings`
  * declares them as ordinary JNI methods, and ART invokes those as
  * `f(JNIEnv*, jobject, args...)`. If that is what happens, every argument arrives shifted by two
  * slots and the first one reads the `JNIEnv` pointer instead of its value.
@@ -57,13 +57,13 @@ class JniWiringTest {
 
     @Test
     fun zeroArgCallsWorkRegardless() {
-        // Expected to pass even with a broken convention — recorded so the contrast with
+        // Expected to pass even with a broken convention, recorded so the contrast with
         // argumentsArriveUnshifted is visible in the results.
         //
         // This used to assert 0, "before initialisation". That premise died when commonTest was
         // connected to Android: 176 tests share one process, and whether the interpreter is
         // already up when this runs is decided by class ordering, not by wiring. It failed on
-        // both API levels for exactly that reason — the interpreter was already up, so it read 1.
+        // both API levels for exactly that reason, the interpreter was already up, so it read 1.
         //
         // Pinning the interpreter to a known state first and asserting the exact value is the
         // stronger check anyway: a zero-arg call under a shifted convention returns whatever

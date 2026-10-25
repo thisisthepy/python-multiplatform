@@ -78,7 +78,7 @@ class WasmProxyExportsRenderingTest {
 
     @Test
     fun traverseHasCorrectArity() {
-        // tp_traverse: (PyObject *self, visitproc visit, void *arg) -> int — three i32 params
+        // tp_traverse: (PyObject *self, visitproc visit, void *arg) -> int, three i32 params
         val source = renderWasmProxyExportsSource("test.pkg")
         assertTrue(
             source.contains("selfPtr: Int, visitPtr: Int, argPtr: Int"),
@@ -88,7 +88,7 @@ class WasmProxyExportsRenderingTest {
 
     @Test
     fun clearHasCorrectArity() {
-        // tp_clear: (PyObject *self) -> int — one i32 param
+        // tp_clear: (PyObject *self) -> int, one i32 param
         val source = renderWasmProxyExportsSource("test.pkg")
         val clearFun = source.substringAfter("pmp_tp_clear\"")
         assertTrue(
@@ -99,12 +99,12 @@ class WasmProxyExportsRenderingTest {
 
     @Test
     fun deallocHasVoidReturn() {
-        // tp_dealloc: (PyObject *self) -> void — no return type annotation (Unit)
+        // tp_dealloc: (PyObject *self) -> void, no return type annotation (Unit)
         val source = renderWasmProxyExportsSource("test.pkg")
         val deallocFun = source.substringAfter("pmp_tp_dealloc\"")
         assertTrue(
             deallocFun.contains("selfPtr: Int) ="),
-            "dealloc must be '(selfPtr: Int) =' — no return type (Unit/void)",
+            "dealloc must be '(selfPtr: Int) =', no return type (Unit/void)",
         )
     }
 

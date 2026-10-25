@@ -2,7 +2,7 @@
 > [`python-multiplatform/src/androidMain/README.md`](../../python-multiplatform/src/androidMain/README.md) on 2026-10-03; kept for history.
 > This was a plan to replace the Kotlin/Native JNI bridge on Android with a PanamaPort-style FFM path
 > (ART method patching, hidden-API bypass, 14 NDK trampolines). It was **not** built: PanamaPort is
-> not a dependency (AGENTS.md §12.9 — licence, and dependence on ART-internal struct layouts, see §2–§3
+> not a dependency (AGENTS.md §12.9, licence, and dependence on ART-internal struct layouts, see §2–§3
 > below), and Android binds CPython through JNI `RegisterNatives` with the calling convention chosen
 > per function and per API level (measured; SPEC C-3). The Kotlin/Native Android library
 > (`libmultiplatform_python3.14.so`) is still the bridge. The 14-shape census in §6 is still
@@ -106,7 +106,7 @@ Based on an analysis of the ~330 functions in `EmbedAPI.kt`, there are exactly 1
 ### Upcalls
 **No.** CPython upcalls (callbacks) also have a small set of signature shapes (e.g., `PyCFunction` is `II_I`, `destructor` is `I_V`, `getter` is `II_I`, `newfunc` is `III_I`, etc.), which collapse into just 4 distinct shapes (`I_V`, `I_I`, `II_I`, `III_I`), perfectly overlapping with the downcall trampolines. 
 
-The real reason LLVM is unnecessary for upcalls is not just the small number of shapes, but that **routing happens through data, not through the function pointer**. Every standard callback receives enough context to identify the Kotlin target—usually the `PyObject *self` instance data (e.g., `destructor`, `reprfunc`), the `PyTypeObject *type` (e.g., `newfunc`), or the `void *closure` (e.g., `getter`, `setter`). Because the identity of the target is carried in the arguments, a handful of shared static trampolines can serve unlimited Kotlin targets. This is exactly how PyO3, JPype, and JEP work. 
+The real reason LLVM is unnecessary for upcalls is not just the small number of shapes, but that **routing happens through data, not through the function pointer**. Every standard callback receives enough context to identify the Kotlin target, usually the `PyObject *self` instance data (e.g., `destructor`, `reprfunc`), the `PyTypeObject *type` (e.g., `newfunc`), or the `void *closure` (e.g., `getter`, `setter`). Because the identity of the target is carried in the arguments, a handful of shared static trampolines can serve unlimited Kotlin targets. This is exactly how PyO3, JPype, and JEP work. 
 
 The ONLY case that would require runtime code generation (LLVM or similar) is handing a bare Kotlin function pointer, with no context argument, to a third-party C API (like `qsort`). CPython's object model does not do this.
 
@@ -159,7 +159,7 @@ That has two consequences, both of which cut against work already committed here
 
 Native Image works under a closed-world assumption, so runtime reflection does not work unless every
 reflective access is registered at build time. This rules out the obvious way of exposing Kotlin to
-Python — walking classes reflectively at run time — and is why that discussion landed on a
+Python, walking classes reflectively at run time, and is why that discussion landed on a
 **build-time generated class/function table**, reached through a single upcall entry point.
 
 The registration policy decided there is worth carrying forward: every `public` declaration is
@@ -179,7 +179,7 @@ Two problems from that discussion remain unresolved:
 `desktopMain/.../Panama.kt` reaches `java.lang.foreign` and `jdk.incubator.foreign` entirely
 through `Class.forName` plus `MethodHandles`, precisely so it compiles on any JDK. Under Native
 Image that is a problem twice over: the reflective lookups need build-time registration, and more
-fundamentally **GraalVM requires FFM downcalls themselves to be registered at compile time** —
+fundamentally **GraalVM requires FFM downcalls themselves to be registered at compile time**,
 an unregistered one fails at run time with
 `ForeignFunctionsRuntime$UnregisteredForeignStubException: Cannot perform downcall ... as it was not
 registered at compilation time`.

@@ -10,8 +10,27 @@ import python.multiplatform.gradle.model.ValueClassModel
  *
  * One `def` per bound declaration, in the module the runtime publishes it onto, under the Kotlin
  * names. The binder never exports a Kotlin namespace under another name (AGENTS.md §12 rule 1), so
- * there is no second, renamed product: a `pythonx` module is a real Python package that imports
- * these modules and makes them Pythonic, and its own stubs are its own.
+ * there is no second, renamed product and nothing under `pythonx`: a `pythonx` module is a real
+ * Python package that imports these modules, and its own stubs are its own.
+ *
+ * ### Pythonic names (issue #131)
+ *
+ * The runtime serves every lower-case-first declaration and member under its snake_case alias too,
+ * and takes each keyword by its Kotlin name or its snake_case one ([pythonName], [snakeCase],
+ * [pythonicAliases]; the runtime's rule in `KotlinSurface.kt`). The stub says the same:
+ *
+ * - **parameters** are written under the keyword `inspect.signature` shows -- the snake_case alias
+ *   where one is served for that declaration, else the Kotlin name. A stub can name a parameter only
+ *   once, and it names it the way the signature does; a Kotlin keyword still works at run time, but a
+ *   checker reports it;
+ * - **module-level names** keep their Kotlin `def` (or constant), followed by `alias = kotlinName` for
+ *   each alias the runtime serves in that module, so the alias has exactly the Kotlin name's type;
+ * - **members of a receiver's class** get the alias as a second `ClassVar` of the same `Protocol`, or a
+ *   second `@property` with the same table key in its docstring;
+ * - members of a callable module (#78) get the alias as a second member.
+ *
+ * Not aliased: a class module folded into its parent for a case-insensitive filesystem (#44) -- its
+ * functions keep their Kotlin names only in the stub, although the runtime serves the alias.
  *
  * Returns *relative path to file content*, so nothing here touches a disk and every assertion in
  * `PyiRenderingTest` and `TypedStubTest` is over text. `PythonStubsTask` is the only thing that writes.
@@ -95,7 +114,21 @@ internal const val PROPERTY_MARKER = "Kotlin property: "
  */
 internal const val CONSTRUCTOR_MARKER = "Kotlin constructor: "
 
+/**
+ * What every member-function stub (issue #215) carries after its table key, in the docstring of the
+ * method or in the comment that says why there is none -- the one place a test can match a key to its
+ * stub, as [PROPERTY_MARKER] is for a property.
+ */
+internal const val METHOD_MARKER = "Kotlin member: "
+
+/**
+ * What precedes a companion handle's table key (`pkg.Owner.Companion`, issue #322) in the docstring of
+ * the class attribute it is stubbed as, or in the comment that says why there is none.
+ */
+internal const val COMPANION_MARKER = "Kotlin companion: "
+
 private val PROPERTY_KINDS = setOf("GETTER", "SETTER")
+private const val METHOD_KIND = "METHOD"
 
 /** Python's hard keywords (`keyword.kwlist`): none of these can be a parameter name. */
 private val PYTHON_KEYWORDS = setOf(
@@ -173,8 +206,19 @@ private enum class Role { PARAM, RESULT }
 
 private class StubRenderer(declarations: List<DeclarationModel>) {
 
-    /** Everything that is a module attribute; properties are attributes of a proxy instead. */
-    private val bound: List<DeclarationModel> = declarations.filter { it.kind !in PROPERTY_KINDS }
+    /** Everything that is a module attribute; properties and member functions are attributes of a proxy instead. */
+    private val bound: List<DeclarationModel> =
+        declarations.filter { it.kind !in PROPERTY_KINDS && it.kind != METHOD_KIND && !it.isCompanionHandle }
+
+    /** owner class -> its companion object handles (`Owner.Companion`), each a class attribute of the owner's stub. */
+    private val companionHandles: Map<String, List<DeclarationModel>> = declarations
+        .filter { it.isCompanionHandle && it.bindingName != null }
+        .groupBy { it.owner }
+
+    /** receiver type -> its bound member functions (issue #215), each a method of the receiver's stub class. */
+    private val methods: Map<String, List<DeclarationModel>> = declarations
+        .filter { it.kind == METHOD_KIND && it.bindingName != null && it.receiver != null }
+        .groupBy { it.receiver!!.qualifiedName }
 
     /** receiver type -> property name -> (getter, setter). A setter never stands without its getter. */
     private val properties: Map<String, Map<String, Pair<DeclarationModel, DeclarationModel?>>> = run {
@@ -276,6 +320,8 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
         var bases: String? = null
         var doc: String? = null
         val members = mutableListOf<String>()
+        /** Companion attributes (name to text), decided in [renderNode] once every nested class is known. */
+        val companionAttributes = mutableListOf<Pair<String, String>>()
     }
 
     private inner class ModuleOut(val module: String) {
@@ -337,6 +383,21 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
      * (a module and a class cannot share the name, which is why this used to fall back to `Any`).
      * The object's own type (`Alignment`) has no such home and stays unresolved here.
      */
+    /**
+     * Where [ref]'s class is declared in its module's stub: its own path, or -- when a function of the
+     * module takes its top name (Kotlin's factory idiom, `Job` and `fun Job()`, issue #217) -- the same
+     * path under the stub-private name `_<Top>`. The function keeps the name, as at run time, and the
+     * type keeps a class every use of it can name; nothing at run time is called `_<Top>`. `null` when
+     * even that name is taken.
+     */
+    private fun stubPathOf(ref: ClassRef): List<String>? {
+        val taken = takenNames[ref.pkg].orEmpty()
+        if (ref.top !in taken) return ref.path
+        val private = "_" + ref.top
+        if (private in taken) return null
+        return listOf(private) + ref.path.drop(1)
+    }
+
     private fun resolveRef(qualifiedName: String): ClassRef? {
         val ref = classRefOf(qualifiedName) ?: return null
         val objectModule = "${ref.pkg}.${ref.top}"
@@ -346,9 +407,10 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
 
     private fun classReference(qualifiedName: String, valueClass: ValueClassModel?, ctx: ModuleOut): String {
         val ref = resolveRef(qualifiedName) ?: return ANY
-        if (ref.top in takenNames[ref.pkg].orEmpty() || "${ref.pkg}.${ref.top}" in moduleNames) return ANY
+        if ("${ref.pkg}.${ref.top}" in moduleNames) return ANY
+        val stubPath = stubPathOf(ref) ?: return ANY
         if (qualifiedName !in classes || classes[qualifiedName] == null) classes[qualifiedName] = valueClass ?: classes[qualifiedName]
-        val path = ref.path.joinToString(".")
+        val path = stubPath.joinToString(".")
         if (ref.pkg == ctx.module) return path
         ctx.imports += ref.pkg
         return "${ref.pkg}.$path"
@@ -364,7 +426,11 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
             hasReceiver -> RECEIVER_NAME
             else -> null
         }
-        val writable = parameters.map { d.parameterNamesKnown && isWritableName(it.name, reserved) }
+        // Issue #131: each parameter under the keyword `inspect.signature` shows at run time -- its
+        // snake_case alias where one is served for this declaration, else its Kotlin name. The runtime
+        // accepts both spellings; a stub can name only one.
+        val shown = pythonicParameterNames(d)
+        val writable = parameters.indices.map { d.parameterNamesKnown && isWritableName(shown[it], reserved) }
         // Everything up to and including the last unwritable name is positional-only.
         val positionalOnlyEnd = writable.indexOfLast { !it }
         val lastRequired = parameters.indexOfLast { !it.declaresDefault }
@@ -383,13 +449,27 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
         }
         parameters.forEachIndexed { index, parameter ->
             if (index == keywordOnlyStart) rendered += "*"
-            val name = if (writable[index]) parameter.name!! else "__a$index"
+            val name = if (writable[index]) shown[index]!! else "__a$index"
             val marked = if (positionalOnlyEnd >= 0) parameter.declaresDefault && index > lastRequired else parameter.declaresDefault
             rendered += "$name: " + annotate(parameter.type, parameter.boundaryTag, Role.PARAM, ctx) + if (marked) " = ..." else ""
             if (index == positionalOnlyEnd) rendered += "/"
         }
         if (parameters.isEmpty() && hasReceiver) rendered += "/"
         return rendered.joinToString(", ")
+    }
+
+    /**
+     * Per parameter, the name `KotlinSurface.signature_of` shows: the snake_case alias the runtime
+     * serves for it (`keyword_slots`: not another parameter's Kotlin name, not shared by two
+     * parameters, not a Python keyword), else the Kotlin name; `null` where the name is unknown.
+     */
+    private fun pythonicParameterNames(d: DeclarationModel): List<String?> {
+        val kotlinNames = d.parameters.mapNotNull { it.name }
+        val aliasOf = pythonicAliases(kotlinNames, ::snakeCase).entries.associate { (alias, kotlin) -> kotlin to alias }
+        return d.parameters.map { parameter ->
+            val name = parameter.name ?: return@map null
+            aliasOf[name]?.takeIf { it !in PYTHON_KEYWORDS } ?: name
+        }
     }
 
     private fun result(d: DeclarationModel, ctx: ModuleOut): String =
@@ -448,6 +528,9 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
                 attributes.getOrPut(leaf) { mutableListOf() } += d
                 if (d.kind != "STATIC_GETTER" && isSuffixed(leaf)) attributes.getOrPut(baseOf(leaf)) { mutableListOf() } += d
             }
+            // Issue #131: the module's Pythonic aliases are members too, typed as their Kotlin names.
+            val namespace = attributes.keys + childSegments("${ctx.module}.$name")
+            pythonicAliases(namespace).forEach { (alias, kotlin) -> attributes[kotlin]?.let { attributes[alias] = it } }
             attributes.forEach { (attribute, group) ->
                 if (!isIdentifier(attribute) || attribute == "__call__") {
                     appendLine("    # '$attribute' cannot be written as an attribute here; reach it with getattr(..., '$attribute')")
@@ -514,14 +597,34 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
             }
             // The base name of an overload set: the binding layer serves it, so the stub says it.
             val unsuffixedLeaves = sorted.filter { !isSuffixed(leafOf(it)) }.map { leafOf(it) }.toSet()
+            val overloadBases = mutableSetOf<String>()
             sorted.filter { it.kind != "STATIC_GETTER" && isSuffixed(leafOf(it)) }
                 .groupBy { baseOf(leafOf(it)) }
                 .toSortedMap()
                 .forEach { (base, group) ->
-                    if (base !in unsuffixedLeaves && base !in companions) ctx.defs += overloadDefs(base, group, ctx)
+                    if (base !in unsuffixedLeaves && base !in companions) {
+                        ctx.defs += overloadDefs(base, group, ctx)
+                        overloadBases += base
+                    }
                 }
+            // Issue #131: the Pythonic alias of every name written above, as an assignment, so a
+            // checker gives it exactly the Kotlin name's type. The namespace is the runtime's
+            // (`_package_aliases`): every bound name of the package and its child packages.
+            val written = sorted.map { leafOf(it) } + constructors.filter { isSuffixed(leafOf(it)) }.map { leafOf(it) } +
+                companions + overloadBases
+            val namespace = entries.flatMap { listOf(leafOf(it), baseOf(leafOf(it))) } + childSegments(module)
+            ctx.defs += aliasAssignments(pythonicAliases(namespace), written.toSet())
         }
     }
+
+    /** The segment directly under [module] of every module below it: its child packages and objects. */
+    private fun childSegments(module: String): List<String> =
+        byModule.keys.filter { it.startsWith("$module.") }.map { it.removePrefix("$module.").substringBefore('.') }.distinct()
+
+    /** `alias = kotlinName` for each alias whose Kotlin name the stub module writes, sorted by alias. */
+    private fun aliasAssignments(aliases: Map<String, String>, written: Set<String>): List<String> =
+        aliases.filter { (alias, kotlin) -> kotlin in written && kotlin !in PYTHON_KEYWORDS && alias !in PYTHON_KEYWORDS }
+            .map { (alias, kotlin) -> "$alias = $kotlin" }
 
     /**
      * A class module that collides case-insensitively with a sibling path (issue #44): its functions
@@ -587,16 +690,40 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
     private fun renderClass(qualifiedName: String) {
         val ref = resolveRef(qualifiedName) ?: return
         val ctx = out(ref.pkg)
-        val node = ctx.node(ref.path)
+        val stubPath = stubPathOf(ref) ?: return
+        val node = ctx.node(stubPath)
         node.qualifiedName = qualifiedName
         val valueClass = classes[qualifiedName]
+        // A class under its stub-private name (issue #217) says so, and why, whatever else it says.
+        val privateNote = if (stubPath.first() != ref.top) {
+            " (stubbed as ${stubPath.joinToString(".")}: '${ref.top}' is the function of that name in its module)"
+        } else {
+            ""
+        }
         node.doc = if (valueClass != null) {
-            "Kotlin value class $qualifiedName over ${valueClass.underlying.qualifiedName}. As a parameter the raw " +
+            "Kotlin value class $qualifiedName$privateNote over ${valueClass.underlying.qualifiedName}. As a parameter the raw " +
                 "primitive is also accepted (the binding layer's allowlist decides, at run time); a result is the raw primitive."
         } else {
-            "Kotlin: $qualifiedName"
+            "Kotlin: $qualifiedName$privateNote"
         }
         stubBasesOf(qualifiedName, ctx).takeIf { it.isNotEmpty() }?.let { node.bases = it.joinToString(", ") }
+
+        // The companion object, a class attribute (`Modifier.Companion`). Typed as the owner when the
+        // companion is one (`Companion: Modifier`), else as the companion's own type.
+        // A stub name is a type or a value, not both: a companion typed as its own type keeps that type's
+        // path (signatures name it as a type), so only a companion typed as the owner becomes an attribute,
+        // and only if no nested class of that name is rendered (decided in renderNode).
+        companionHandles[qualifiedName].orEmpty().forEach { d ->
+            val name = d.simpleName
+            val marker = "# $COMPANION_MARKER${d.bindingName} is not stubbed"
+            when {
+                !isIdentifier(name) -> node.members += "$marker: '$name' cannot be written as an attribute here"
+                d.returnType.qualifiedName != qualifiedName ->
+                    node.members += "$marker: its type ${d.returnType.qualifiedName} is a type path here, not a value"
+                else -> node.companionAttributes += name to
+                    "$name: ${result(d, ctx)}\n\"\"\"$COMPANION_MARKER${d.bindingName} (${kotlinSignatureOf(d)})\"\"\""
+            }
+        }
 
         constructorsByClass[qualifiedName]?.let { group ->
             group.forEachIndexed { index, d ->
@@ -610,12 +737,25 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
             }
         }
 
+        // Issue #215: member functions, by explicit name and, for an overload set, by base name -- the two
+        // keys `_index` serves them under. A member wins over an extension of the same name, as at run time.
+        val memberFunctions = sortedMapOf<String, MutableList<DeclarationModel>>()
+        methods[qualifiedName].orEmpty().sortedBy { it.bindingName }.forEach { d ->
+            val leaf = leafOf(d)
+            memberFunctions.getOrPut(leaf) { mutableListOf() } += d
+            if (isSuffixed(leaf)) memberFunctions.getOrPut(baseOf(leaf)) { mutableListOf() } += d
+        }
         val attributes = sortedMapOf<String, MutableList<DeclarationModel>>()
         extensionsByReceiver[qualifiedName].orEmpty().sortedBy { it.bindingName }.forEach { d ->
             val leaf = leafOf(d)
+            if (leaf in memberFunctions) return@forEach
             attributes.getOrPut(leaf) { mutableListOf() } += d
-            if (isSuffixed(leaf)) attributes.getOrPut(baseOf(leaf)) { mutableListOf() } += d
+            if (isSuffixed(leaf) && baseOf(leaf) !in memberFunctions) attributes.getOrPut(baseOf(leaf)) { mutableListOf() } += d
         }
+        // Issue #131: the proxy also serves each member's Pythonic alias, decided over every member
+        // name the runtime looks up for this type -- its own and every supertype's (`_member_aliases`).
+        val aliases = pythonicAliases(memberNamesOf(qualifiedName))
+        val protocols = mutableMapOf<String, String>()
         attributes.forEach { (attribute, group) ->
             if (!isIdentifier(attribute) || attribute in node.children) return@forEach
             val protocol = "_" + ref.path.joinToString("_") + "_" + attribute
@@ -628,7 +768,19 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
                 }
             }
             node.members += "$attribute: $TYPING.ClassVar[$protocol]"
+            protocols[attribute] = protocol
         }
+        val stubbedMethods = mutableMapOf<String, String>()
+        memberFunctions.forEach { (name, group) ->
+            if (!isIdentifier(name) || name in node.children) {
+                group.filter { leafOf(it) == name }.forEach { node.members += methodNotStubbed(it, "'$name' cannot be written as an attribute here") }
+                return@forEach
+            }
+            val rendered = renderMethods(name, withInherited(qualifiedName, name, group), ctx)
+            node.members += rendered
+            stubbedMethods[name] = name
+        }
+        val stubbedProperties = mutableMapOf<String, Pair<DeclarationModel, DeclarationModel?>>()
         properties[qualifiedName].orEmpty().forEach { (name, accessors) ->
             val (getter, setter) = accessors
             if (!isIdentifier(name) || name in node.children || name in attributes) {
@@ -636,8 +788,81 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
                 return@forEach
             }
             node.members += renderProperty(name, getter, setter, ctx)
+            stubbedProperties[name] = accessors
+        }
+        aliases.forEach { (alias, kotlin) ->
+            if (!isIdentifier(alias) || alias in node.children) return@forEach
+            protocols[kotlin]?.let { node.members += "$alias: $TYPING.ClassVar[$it]" }
+            stubbedProperties[kotlin]?.let { (getter, setter) -> node.members += renderProperty(alias, getter, setter, ctx) }
+            if (kotlin in stubbedMethods && alias !in memberFunctions) node.members += renderMethods(alias, withInherited(qualifiedName, kotlin, memberFunctions.getValue(kotlin)), ctx)
         }
     }
+
+    /**
+     * A subclass that overrides one overload of an inherited name would, as a lone `def`, hide the
+     * inherited overload set from a type checker (an incompatible override), while Kotlin resolution
+     * still sees every inherited signature. So the set rendered for [name] on [qualifiedName] is its
+     * own declarations first, then each signature a stub supertype declares under [name] whose
+     * parameter types no earlier entry already has (nearest supertype first). Only a base name
+     * (not a suffixed explicit key) is widened, because only it is shared across the hierarchy.
+     */
+    private fun withInherited(qualifiedName: String, name: String, own: List<DeclarationModel>): List<DeclarationModel> {
+        if (isSuffixed(name)) return own
+        return orderedOverloads(qualifiedName, name, own)
+    }
+
+    private fun overloadKey(d: DeclarationModel) = d.parameters.map { it.type.qualifiedName }
+
+    /** [type]'s own declarations under [name], in the order its own stub groups them. */
+    private fun ownOverloads(type: String, name: String): List<DeclarationModel> =
+        methods[type].orEmpty().sortedBy { it.bindingName }
+            .filter { leafOf(it) == name || (isSuffixed(leafOf(it)) && baseOf(leafOf(it)) == name) }
+
+    /**
+     * The overload set [type] renders under [name], in an order every subclass can keep: a type checker
+     * requires an overriding overload set to list the supertype's variants in the supertype's order.
+     * So it starts from the nearest stub supertype's own ordered set, puts [own]'s override in place of
+     * any signature it redeclares (same parameter types), and appends [own]'s other signatures. The
+     * same function orders every level, so a supertype and its subclasses always agree.
+     */
+    private fun orderedOverloads(type: String, name: String, own: List<DeclarationModel>): List<DeclarationModel> {
+        val parent = supertypes[type].orEmpty()
+            .filter { it != type && classRefOf(it) != null }
+            .asSequence()
+            .map { orderedOverloads(it, name, ownOverloads(it, name)) }
+            .firstOrNull { it.isNotEmpty() }
+            ?: return own
+        val parentKeys = parent.map(::overloadKey).toSet()
+        return parent.map { p -> own.firstOrNull { overloadKey(it) == overloadKey(p) } ?: p } +
+            own.filter { overloadKey(it) !in parentKeys }
+    }
+
+    /**
+     * One member function, or an overload set under its base name, as methods named [name]. A single
+     * declaration's method carries its table key after [METHOD_MARKER]; an overload set's `@overload`s
+     * do not, because each member is also stubbed under its own explicit name, which does.
+     */
+    private fun renderMethods(name: String, group: List<DeclarationModel>, ctx: ModuleOut): String =
+        if (group.size == 1) {
+            val d = group.single()
+            "def $name(${parameters(d, ctx, method = true)}) -> ${result(d, ctx)}:\n" +
+                "    \"\"\"$METHOD_MARKER${d.bindingName}\"\"\"\n" +
+                "    ..."
+        } else {
+            group.mapIndexed { index, d ->
+                "@$TYPING.overload\ndef $name(${parameters(d, ctx, method = true)}) -> ${result(d, ctx)}: ..." + shadowed(index)
+            }.joinToString("\n")
+        }
+
+    private fun methodNotStubbed(d: DeclarationModel, why: String): String = "# $METHOD_MARKER${d.bindingName} is not stubbed: $why"
+
+    /** Every member name the binding layer serves on a proxy of [qualifiedName]: `_member_names`. */
+    private fun memberNamesOf(qualifiedName: String): Set<String> =
+        (listOf(qualifiedName) + supertypes[qualifiedName].orEmpty()).flatMap { type ->
+            extensionsByReceiver[type].orEmpty().flatMap { listOf(leafOf(it), baseOf(leafOf(it))) } +
+                methods[type].orEmpty().flatMap { listOf(leafOf(it), baseOf(leafOf(it))) } +
+                properties[type].orEmpty().keys
+        }.toSet()
 
     private fun renderProperty(name: String, getter: DeclarationModel, setter: DeclarationModel?, ctx: ModuleOut): String = buildString {
         appendLine("@property")
@@ -667,6 +892,21 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
      * a value of it can still reach Python (a `kotlin.Any?` result, a supertype's slot). One whose
      * class cannot be stubbed gets the marker comment instead; see this file's KDoc.
      */
+    /**
+     * Every receiver that has member functions gets its stub class, as one with properties does; one
+     * whose class cannot be stubbed gets a marker comment per member in its package's module instead.
+     */
+    private fun registerMethodOwners() {
+        methods.forEach { (receiver, declarations) ->
+            val ref = classRefOf(receiver)
+            val ctx = out(ref?.pkg ?: receiver.substringBeforeLast('.', ""))
+            if (ref != null && classReference(receiver, null, ctx) != ANY) return@forEach
+            declarations.forEach { d ->
+                ctx.defs += methodNotStubbed(d, "${receiver.substringAfterLast('.')} has no stub class (its name is taken in its module)")
+            }
+        }
+    }
+
     private fun registerPropertyOwners() {
         properties.forEach { (receiver, byName) ->
             val ref = classRefOf(receiver)
@@ -675,6 +915,34 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
             if (ref != null && classReference(receiver, null, ctx) != ANY) return@forEach
             byName.values.forEach { (getter, setter) ->
                 ctx.defs += propertyNotStubbed(getter, setter, "${receiver.substringAfterLast('.')} has no stub class (its name is taken in its module)")
+            }
+        }
+    }
+
+    /**
+     * Every owner with a companion handle gets its stub class. One whose name is a module (it also
+     * publishes companion constants) cannot have a class, so the handle is a module attribute there,
+     * as the constants are; one whose class is taken by a function gets a comment instead.
+     */
+    private fun registerCompanionOwners() {
+        companionHandles.forEach { (owner, handles) ->
+            val ref = classRefOf(owner)
+            val home = ref?.pkg ?: owner.substringBeforeLast('.', "")
+            val ctx = out(home)
+            if (ref != null && classReference(owner, null, ctx) != ANY) return@forEach
+            if (owner in moduleNames) {
+                val moduleCtx = out(owner)
+                handles.forEach { d ->
+                    // Same rule as the class path: a companion typed as its own type keeps that type's
+                    // name (the module renders the class `Companion`), so it is no module attribute too.
+                    if (d.returnType.qualifiedName != owner) {
+                        moduleCtx.defs += "# $COMPANION_MARKER${d.bindingName} is not stubbed: its type ${d.returnType.qualifiedName} is a type path here, not a value"
+                    } else {
+                        moduleCtx.defs += renderDef(d, moduleCtx)
+                    }
+                }
+            } else {
+                handles.forEach { ctx.defs += "# $COMPANION_MARKER${it.bindingName} is not stubbed: ${owner.substringAfterLast('.')} has no stub class" }
             }
         }
     }
@@ -693,7 +961,11 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
         node.bases?.let { into.append('(').append(it).append(')') }
         into.appendLine(":")
         into.append(indent).append("    \"\"\"").append(node.doc ?: "Kotlin: container of nested classes").appendLine("\"\"\"")
-        node.members.forEach { member ->
+        val companions = node.companionAttributes.map { (name, text) ->
+            if (name in node.children) "# $COMPANION_MARKER${node.qualifiedName}.$name is not stubbed: a nested class '$name' is rendered here"
+            else text
+        }
+        (node.members + companions).forEach { member ->
             member.lines().forEach { into.append(indent).append("    ").appendLine(it) }
         }
         node.children.values.forEach { renderNode(it, "$indent    ", into) }
@@ -704,6 +976,8 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
     fun render(): Map<String, String> {
         renderModuleDefs()
         registerPropertyOwners()
+        registerMethodOwners()
+        registerCompanionOwners()
         renderClasses()
         return modules.filterValues { it.defs.isNotEmpty() || it.classes.isNotEmpty() }
             .mapValues { (_, ctx) ->

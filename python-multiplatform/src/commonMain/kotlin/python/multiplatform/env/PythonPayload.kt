@@ -13,7 +13,7 @@ package python.multiplatform.env
  * `toolchain`'s `49da1d8` then delivered a payload into the desktop jar's root and the APK's assets
  * and recorded the same finding from the other side: nothing reads it there.
  *
- * The only written contract is the producing side's — `pypackpack`'s `ResourceBundler` KDoc:
+ * The only written contract is the producing side's, `pypackpack`'s `ResourceBundler` KDoc:
  *
  * > **Payload root is `python/`.** The bundle directory holds a `python/` subdirectory intended to
  * > be placed on `sys.path` verbatim (staged into Android assets, an iOS resource directory, or a
@@ -25,20 +25,20 @@ package python.multiplatform.env
  * ### Where in start-up this happens, and why it cannot be earlier
  *
  * `Python3.initialize()` calls [installStagedRoots] immediately after `Py_Initialize()` has
- * returned and the main thread state has been parked, before it hands control back to its caller —
+ * returned and the main thread state has been parked, before it hands control back to its caller,
  * so before any `PyImport_ImportModule` this library can reach.
  *
  * It cannot happen earlier, and that is a property of CPython rather than a choice: **`sys.path`
  * does not exist until `Py_Initialize()` has built it.** `PySys_GetObject("path")` before that
- * point has no interpreter to read from. The two mechanisms that *do* run before initialisation —
+ * point has no interpreter to read from. The two mechanisms that *do* run before initialisation,
  * `PYTHONHOME` (an environment variable read by `getenv(3)`) and [PythonHomeCheck] (a filesystem
- * probe of that variable) — are both about the standard library, and neither has a place to put a
+ * probe of that variable), are both about the standard library, and neither has a place to put a
  * consumer directory. So the payload is strictly a post-`Py_Initialize` step, and the useful
  * question is only whether it happens before the caller can import anything. It does.
  *
  * The alternative considered was `PYTHONPATH`, which *is* read at initialisation and would need no
  * post-step. It was rejected: a JVM cannot set an environment variable for itself (see
- * `desktopMain/README.md` — the same reason `PYTHONHOME` is set by the Gradle plugin as the
+ * `desktopMain/README.md`, the same reason `PYTHONHOME` is set by the Gradle plugin as the
  * process is launched), so on the platform this had to work on first it is not available at all.
  *
  * ### It stays automatic
@@ -50,7 +50,7 @@ package python.multiplatform.env
 object PythonPayload {
 
     /**
-     * `python` — `ResourceBundler.PYTHON_ROOT`, the directory name its manifest records as
+     * `python`, `ResourceBundler.PYTHON_ROOT`, the directory name its manifest records as
      * `pythonRoot`, and what `toolchain`'s `PythonStagingLayout.PAYLOAD_ROOT` stages under on all
      * three platforms.
      */
@@ -59,7 +59,7 @@ object PythonPayload {
     /**
      * Whether `Python3.initialize()` puts discovered payload roots on `sys.path` for you.
      *
-     * Set it to false *before* initialising to take the job over — nothing re-reads it afterwards.
+     * Set it to false *before* initialising to take the job over, nothing re-reads it afterwards.
      */
     var autoInstall: Boolean = true
 
@@ -105,16 +105,16 @@ object PythonPayload {
      * The `Python3.initialize()` hook. Does nothing when [autoInstall] is off, and does its work at
      * most once per process.
      *
-     * The once-only flag is not an optimisation, though it is also that — discovery is filesystem
+     * The once-only flag is not an optimisation, though it is also that, discovery is filesystem
      * work on every platform and a class path scan on desktop. It is what lets
      * `Python3.initialize()` call this on the path where it *returns early* because the interpreter
      * was already up. That path is real and is exactly where a payload would otherwise be lost:
      * `Python3.isInitialized` is seeded from `Py_IsInitialized()`, so any component that reached
-     * `Py_Initialize()` first — Android's `PythonInstrumentationRunner` did precisely this, see
-     * `androidMain/README.md` — latches it to true and makes every later `initialize()` a no-op.
+     * `Py_Initialize()` first, Android's `PythonInstrumentationRunner` did precisely this, see
+     * `androidMain/README.md`, latches it to true and makes every later `initialize()` a no-op.
      *
      * Failures propagate rather than being swallowed. A payload that was staged but cannot be read
-     * is a broken build, and the alternative — starting anyway — produces a `ModuleNotFoundError`
+     * is a broken build, and the alternative, starting anyway, produces a `ModuleNotFoundError`
      * at whatever point the application first imports itself, with nothing left to say why.
      */
     internal fun installStagedRootsOnStartup() {
@@ -131,7 +131,7 @@ object PythonPayload {
  * can go on `sys.path` as they are.
  *
  * Returns an empty list when there is no payload, which is the normal state of an application that
- * has not configured one. Implementations may have to *materialise* the directory first — a
+ * has not configured one. Implementations may have to *materialise* the directory first, a
  * classpath resource inside a jar and an entry in an APK's asset archive are both readable by the
  * platform and not by CPython's importer, which opens files with `open(2)`.
  */

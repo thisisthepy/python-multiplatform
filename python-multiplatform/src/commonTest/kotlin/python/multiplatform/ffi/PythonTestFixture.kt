@@ -85,7 +85,7 @@ object PythonTestFixture {
      */
     fun mainGlobals(): PyObject = Python3.withPython {
         // These reach the C API directly, so they need the GIL like any other call. The
-        // initialising thread no longer holds it — see Python3.initialize.
+        // initialising thread no longer holds it, see Python3.initialize.
         // PyImport_AddModule: *borrowed* reference, only read below and never wrapped.
         val modulePtr = python.multiplatform.ffi.Python3.withPython { PyImport_AddModule("__main__") } ?: error("Could not get __main__ module")
         // PyObject_GetAttrString: *new* reference, adopted by the wrapper.

@@ -84,6 +84,27 @@ class PythonPayloadTest {
         )
     }
 
+    // ------------------------------------------------------------ re-extraction keeps links' targets
+
+    @Test
+    fun reExtractingOverAnIncompleteTreeDoesNotDeleteWhatALinkInsideItPointsAt() {
+        val jar = payloadJar("payload_jar_nofollow", withDirectoryEntries = true)
+        val cache = cacheDirectory()
+        val loader = URLClassLoader(arrayOf(jar.toURI().toURL()), null)
+        val root = ClasspathPayload.resolveRoots(loader, cache).single()
+
+        // Make the tree look unfinished (no stamp) and plant a link to a directory outside it.
+        val outside = newTemporaryDirectory("outside")
+        val keep = File(outside, "keep.txt").apply { writeText("keep") }
+        assertTrue(ClasspathPayload.stampFileFor(root).delete(), "expected a stamp to have been written")
+        java.nio.file.Files.createSymbolicLink(File(root, "escape").toPath(), outside.toPath())
+
+        ClasspathPayload.resolveRoots(loader, cache)
+
+        assertTrue(keep.isFile, "the stale tree was replaced, but the link in it was followed and its target deleted")
+        assertFalse(File(root, "escape").exists(), "the stale tree should have been replaced")
+    }
+
     // ---------------------------------------------------------------------- discovery: jar entries
 
     @Test
@@ -249,7 +270,7 @@ class PythonPayloadTest {
      * **This library's own top-level Kotlin package is `python`.**
      *
      * `python.multiplatform` compiles to class files under `python/multiplatform`, so every class path this
-     * library is on answers `getResources("python/")` — with `build/classes/kotlin/desktop/main/python`
+     * library is on answers `getResources("python/")`, with `build/classes/kotlin/desktop/main/python`
      * during a Gradle build, and with a `jar:` URL into `python-multiplatform.jar` once published.
      * Name-based discovery therefore puts a directory of `.class` files at `sys.path[0]` in every
      * application that uses this library. It is not hypothetical: this test failed on the first run

@@ -7,8 +7,11 @@ dependency leaves that dependency's interface hash unchanged, so dependents stay
 The front end, the C back end and the C compiler are passed in as callables, so this file depends on
 none of them (only on `ir`, the contract).
 
+The module's relative path is in the key because the C embeds it (#112): the same content moved to
+another path must not reuse an extension carrying the old path.
+
 Key encoding (v1): sha256 of the compact, key-sorted JSON of
-    {"v": 1, "source": sha256-hex(source bytes),
+    {"v": 1, "path": <module path relative to project root, posix>, "source": sha256-hex(source bytes),
      "deps": [[<dep path relative to project root, posix>, <dep interface hash>], ...] sorted,
      "compiler_version": str, "platform": str, "flags": [str, ...] in the given order}
 Interface hash (v1): sha256 of the compact, key-sorted JSON of
@@ -49,7 +52,7 @@ def _canon(obj) -> bytes:
 
 
 def interface_hash(module: ir.Module) -> str:
-    """sha256 over the compiled functions' signatures and the skipped names — nothing else."""
+    """sha256 over the compiled functions' signatures and the skipped names, nothing else."""
     functions = []
     for f in sorted(module.functions, key=lambda f: f.name):
         params = [[p.name, p.type.value, "array" if isinstance(p, ir.ArrayParam) else "scalar"]
@@ -267,7 +270,7 @@ class BuildCache:
                     dep_hashes[rel(d)] = "src:" + _sha(d.read_bytes())
             comps = {"source": source_hash, "deps": dep_hashes, "compiler_version": compiler_version,
                      "platform": platform, "flags": list(flags)}
-            key = _sha(_canon({"v": _V, "source": source_hash, "deps": sorted(dep_hashes.items()),
+            key = _sha(_canon({"v": _V, "path": rel(p), "source": source_hash, "deps": sorted(dep_hashes.items()),
                                "compiler_version": compiler_version, "platform": platform,
                                "flags": list(flags)}))
             name = _module_name(p, root)

@@ -4,7 +4,9 @@ import kotlin.metadata.ClassKind
 import kotlin.metadata.KmClassifier
 import kotlin.metadata.KmType
 import kotlin.metadata.KmVariance
+import kotlin.metadata.MemberKind
 import kotlin.metadata.Visibility
+import kotlin.metadata.isFunInterface
 import kotlin.metadata.isNullable
 import kotlin.metadata.isSuspend
 import kotlin.metadata.isValue
@@ -42,7 +44,7 @@ import java.util.jar.JarFile
  *
  * | PyREPL's filter | here | why |
  * |---|---|---|
- * | not `private`/`protected` | **not enough** — must be `public`, and Kotlin-`public` rather than only JVM-`public` | PyREPL keeps package-private members, which is harmless in a stub; `internal` is JVM-public but not a name generated Kotlin may call |
+ * | not `private`/`protected` | **not enough**, must be `public`, and Kotlin-`public` rather than only JVM-`public` | PyREPL keeps package-private members, which is harmless in a stub; `internal` is JVM-public but not a name generated Kotlin may call |
  * | drop `<init>` | kept | a constructor needs a `ReflectedClass` and a receiver handle, which is the next step |
  * | drop `Companion` | subsumed | only statics are bound, and `Companion` is an instance field |
  * | drop names containing `-` | **not kept** | see below |
@@ -161,6 +163,12 @@ internal data class Candidate(
      */
     val plan: ArtifactScanner.DefaultOmissionPlan? = null,
     val isConstructor: Boolean = false,
+    /**
+     * True only for the candidate that publishes a companion object itself (`Owner.Companion`). It
+     * shares the owner's name as a prefix, which the constructor-collision rule would otherwise
+     * read as a constant hiding the constructor; the owner stays constructible beside its companion.
+     */
+    val isCompanionHandle: Boolean = false,
 )
 
 internal object ArtifactScanner {
@@ -196,9 +204,16 @@ internal object ArtifactScanner {
      *   test fixtures, false for `androidx.compose.foundation.layout`, whose `Dp` lives in
      *   `androidx.compose.ui.unit`. [PythonArtifactBindingsTask] passes the whole resolved
      *   configuration.
+     * @param excludePackages packages to leave out, on top of every `internal` package (SPEC B-11):
+     *   an entry covers the package it names and the ones below it.
      */
-    fun scanJar(target: File, includePrefixes: List<String> = emptyList(), classpath: List<File> = listOf(target)): List<ArtifactCallable> =
-        scan(target, includePrefixes, classpath).mapNotNull { it.callable }.sortedBy { it.name }
+    fun scanJar(
+        target: File,
+        includePrefixes: List<String> = emptyList(),
+        classpath: List<File> = listOf(target),
+        excludePackages: List<String> = emptyList(),
+    ): List<ArtifactCallable> =
+        scan(target, includePrefixes, classpath, excludePackages).mapNotNull { it.callable }.sortedBy { it.name }
 
     /**
      * The same walk, with the half `docs/design/pyi-generation-design.md` §2.2 asks for kept: one
@@ -214,11 +229,17 @@ internal object ArtifactScanner {
         target: File,
         includePrefixes: List<String> = emptyList(),
         classpath: List<File> = listOf(target),
-    ): List<DeclarationModel> = scan(target, includePrefixes, classpath)
+        excludePackages: List<String> = emptyList(),
+    ): List<DeclarationModel> = scan(target, includePrefixes, classpath, excludePackages)
         .map { it.declaration }
         .sortedWith(compareBy({ it.owner }, { it.simpleName }, { it.bindingName ?: "" }))
 
-    private fun scan(target: File, includePrefixes: List<String>, classpath: List<File>): List<Candidate> {
+    private fun scan(
+        target: File,
+        includePrefixes: List<String>,
+        classpath: List<File>,
+        excludePackages: List<String>,
+    ): List<Candidate> {
         val artifactClasspath = ArtifactClasspath(classpath)
         val entries = mutableListOf<Candidate>()
         forEachClassEntry(target) { relativePath, bytes ->
@@ -228,6 +249,7 @@ internal object ArtifactScanner {
             if ('$' in relativePath) return@forEachClassEntry
             val qualified = binaryNameToQualified(relativePath.removeSuffix(".class"))
             if (!matchesInclude(qualified, includePrefixes)) return@forEachClassEntry
+            if (isExcludedPackage(packageNameOf(relativePath.removeSuffix(".class")), excludePackages)) return@forEachClassEntry
             val node = readClassNodeOrNull(bytes) ?: return@forEachClassEntry
             entries += scanClassNode(node, artifactClasspath)
         }
@@ -246,9 +268,18 @@ internal object ArtifactScanner {
         // neither claims a constructor's namespace (`TextStyle.color` must not cost `TextStyle(...)`
         // its binding) nor joins an overload set. [settlePropertyNames] gives them the one check
         // they do need, against the finished names of everything else.
-        val (properties, functions) = entries.partition { it.declaration.kind in PROPERTY_KINDS }
+        //
+        // Member functions (issue #215) take no part in them either, for the property's reason: a
+        // `METHOD` is served on its receiver's proxy, so `Counter.add` must not cost `Counter(...)` its
+        // constructor (the prefix rule of [dropCollidingConstructors]), and a member is never an
+        // overload of a top-level function of the same name. Inside one class they are an overload set
+        // like any other, so [disambiguateOverloads] still names them; [settleMethodNames] is their one
+        // check against everything else.
+        val (properties, rest) = entries.partition { it.declaration.kind in PROPERTY_KINDS }
+        val (methods, functions) = rest.partition { it.declaration.kind == METHOD_KIND }
         val settledFunctions = assignThunkIndices(disambiguateOverloads(applyDefaultOmission(dropCollidingConstructors(functions))))
-        return (settledFunctions + settlePropertyNames(properties, settledFunctions))
+        val settledMethods = settleMethodNames(disambiguateOverloads(methods), settledFunctions)
+        return (settledFunctions + settledMethods + settlePropertyNames(properties, settledFunctions + settledMethods))
             // The ancestry the binding carries is the model's too (issue #31): copied at the end, from the
             // callable that was actually bound, so the two cannot be read differently.
             .map { candidate ->
@@ -259,8 +290,9 @@ internal object ArtifactScanner {
                 // unwritable name, an ambiguous sibling): the binding then requires every argument
                 // while the stub would still offer `= ...`. One view, taken from the binding.
                 val omittable = omittableSlotsOf(callable)
-                // A property's receiver is not one of its slots (`CallableKind.GETTER.hasReceiver`).
-                val receiverIndex = if (callable.receiverTypeName != null && callable.kind !in PROPERTY_KINDS) 1 else 0
+                // A property's or a member's receiver is not one of its slots (`CallableKind.hasReceiver`);
+                // only an extension's is.
+                val receiverIndex = if (callable.receiverTypeName != null && callable.kind == "FUNCTION") 1 else 0
                 candidate.copy(
                     declaration = candidate.declaration.copy(
                         returnSupertypes = callable.returnSupertypes,
@@ -316,7 +348,8 @@ internal object ArtifactScanner {
         for (candidate in bound) {
             if (!candidate.isConstructor) continue
             val name = candidate.callable!!.name
-            if (boundNames.any { it != name && it.startsWith("$name.") }) {
+            val others = bound.filter { !it.isCompanionHandle }.map { it.callable!!.name }
+            if (others.any { it != name && it.startsWith("$name.") }) {
                 dropReasons.putIfAbsent(candidate, "constructor name collides with a constant this class publishes under its own name")
             }
         }
@@ -380,6 +413,15 @@ internal object ArtifactScanner {
     private fun packageNameOf(binaryName: String): String =
         binaryNameToQualified(binaryName.substringBeforeLast('/', missingDelimiterValue = ""))
 
+    /**
+     * SPEC B-11: a package is out when one of its segments is exactly `internal` (`*.internal`,
+     * `*.internal.*`, the Kotlin `.api` dump convention) or when it equals, or lies below, an
+     * `excludePackages` entry (the KSP side's namespace rule). Shared with [KlibScanner].
+     */
+    internal fun isExcludedPackage(packageName: String, excludePackages: List<String>): Boolean =
+        packageName.split('.').any { it == "internal" } ||
+            excludePackages.any { packageName == it || packageName.startsWith("$it.") }
+
     /** A namespace match, not a text one: `junit.run` is a prefix of the string `junit.runner` and
      * of no package or class. */
     private fun matchesInclude(qualifiedName: String, includePrefixes: List<String>): Boolean =
@@ -410,7 +452,8 @@ internal object ArtifactScanner {
                 bindObjectMembers = metadata.kmClass.visibility == Visibility.PUBLIC,
             ) + constructorCandidates(metadata.kmClass, node, classpath) +
                 objectConstantCandidates(metadata.kmClass, node, classpath) +
-                memberPropertyCandidates(metadata.kmClass, node, classpath)
+                memberPropertyCandidates(metadata.kmClass, node, classpath) +
+                memberFunctionCandidates(metadata.kmClass, node, classpath)
             is KotlinClassMetadata.FileFacade -> {
                 val owner = kotlinPackageNameOverrideOf(node) ?: packageNameOf(node.name)
                 kotlinCandidates(
@@ -541,7 +584,8 @@ internal object ArtifactScanner {
      * group.
      */
     private fun ArtifactCallable.overloadSuffix(includeReceiver: Boolean, qualified: Boolean): String {
-        val skipReceiver = if (receiverTypeName != null && !includeReceiver) 1 else 0
+        // A member's receiver (issue #215) is not in [paramTypeNames] at all, so there is nothing to skip.
+        val skipReceiver = if (receiverTypeName != null && kind == "FUNCTION" && !includeReceiver) 1 else 0
         // A composable's synthetic slots are the same for every member of its overload set --
         // `Composer_Int_Int_Int` on all of them -- so they separate nothing and would only make the
         // Python name unreadable. Dropped, which leaves exactly the declared parameters the two
@@ -551,7 +595,9 @@ internal object ArtifactScanner {
         // A zero-parameter member of a group -- there can be at most one, so this only ever has to
         // be distinct from the others, not descriptive.
         if (parts.isEmpty()) return "0"
-        return parts.joinToString("_") { name ->
+        return parts.joinToString("_") { slotName ->
+            // A functional-interface slot (issue #216) is named by its interface, not by the callable form.
+            val name = slotName.substringBefore(SAM_SEPARATOR)
             val chosen = if (qualified) name else name.substringAfterLast('.')
             chosen.map { if (it.isLetterOrDigit()) it else '_' }.joinToString("")
         }
@@ -581,7 +627,8 @@ internal object ArtifactScanner {
         val bySignature = functions.associateBy { it.jvmSignature.name to it.jvmSignature.descriptor }
         // A Kotlin `object`'s functions are instance methods of its singleton (issue #53:
         // `Arrangement.spacedBy`); generated source reaches them as `Owner.name(...)`, so they bind
-        // like a static. A composable one is declined below -- its thunk is a static call.
+        // like a static. A composable one binds through a thunk that loads `INSTANCE` first and calls
+        // the member with INVOKEVIRTUAL ([ThunkSpec.onObjectInstance]).
         val isObject = ownerIsClass && bindObjectMembers && ownerNode.fields.any { it.name == "INSTANCE" && it.access.hasFlag(Opcodes.ACC_STATIC) }
         val staticSignatures = ownerNode.methods.filter { it.access.hasFlag(Opcodes.ACC_STATIC) }.map { it.name to it.desc }.toSet()
         return ownerNode.methods
@@ -622,12 +669,6 @@ internal object ArtifactScanner {
                             declinedCandidate(owner, ownerIsClass, suspending, classpath, "suspend", isComposable(method))
                         }
                 if (function.isSuspend) return@mapNotNull declinedCandidate(owner, ownerIsClass, function, classpath, "suspend", isComposable(method))
-                if (!method.access.hasFlag(Opcodes.ACC_STATIC) && isComposable(method)) {
-                    return@mapNotNull declinedCandidate(
-                        owner, ownerIsClass, function, classpath,
-                        "a @Composable member of an object: its generated call is a static invocation", true,
-                    )
-                }
                 // A member whose Kotlin-declared parameter count does not match its JVM parameter
                 // count has an implicit JVM parameter metadata does not account for -- a value
                 // class's own instance turned into an unboxed receiver, or a composable's synthetic
@@ -644,7 +685,7 @@ internal object ArtifactScanner {
                     if (isComposable(method)) {
                         composableCandidate(
                             owner, ownerIsClass, function, classpath, paramDescriptors, returnDescriptor, method.name,
-                            ownerNode.name,
+                            ownerNode.name, onObjectInstance = !method.access.hasFlag(Opcodes.ACC_STATIC),
                         )?.let { return@mapNotNull it }
                     }
                     return@mapNotNull declinedCandidate(
@@ -733,10 +774,12 @@ internal object ArtifactScanner {
         // never read as an entry. It is loaded from here instead, by the name the outer class's own
         // metadata gives it -- which is also why the bound name can drop `Companion` while the
         // generated call keeps it.
+        var companionHandle: Candidate? = null
         val companionProperties = kmClass.companionObject?.let { companionName ->
             val companionNode = classpath.classNode(ownerNode.name + "\$" + companionName) ?: return@let null
             val companionMetadata = kotlinClassMetadataOf(companionNode) as? KotlinClassMetadata.Class ?: return@let null
             if (companionMetadata.kmClass.visibility != Visibility.PUBLIC) return@let null
+            companionHandle = companionHandleCandidate(qualified, ownerNode, companionName, companionMetadata.kmClass, classpath)
             constantsOf(
                 companionMetadata.kmClass,
                 companionNode,
@@ -746,7 +789,71 @@ internal object ArtifactScanner {
             )
         }.orEmpty()
 
-        return ownProperties + companionProperties
+        return ownProperties + companionProperties + listOfNotNull(companionHandle)
+    }
+
+    /**
+     * The companion object itself, bound as `Owner.<CompanionName>` (a zero-argument getter).
+     *
+     * The generated body names the companion in Kotlin source (`Owner.Companion`), which kotlinc
+     * compiles to a field read; no JVM member is looked up by name. The value is typed as the owner
+     * when the companion lists the owner as a direct supertype (`Modifier.Companion : Modifier`), so
+     * it is an instance of the owner's proxy; otherwise as the companion's own type. A generic owner
+     * is named without type arguments.
+     */
+    private fun companionHandleCandidate(
+        qualified: String,
+        ownerNode: ClassNode,
+        companionName: String,
+        companionClass: kotlin.metadata.KmClass,
+        classpath: ArtifactClasspath,
+    ): Candidate {
+        val ownerMetadataName = ownerNode.name.replace('$', '.')
+        val companionMetadataName = "$ownerMetadataName.$companionName"
+        val ownerIsSupertype = companionClass.supertypes.any {
+            (it.classifier as? KmClassifier.Class)?.name == ownerMetadataName
+        }
+        val typeName = (if (ownerIsSupertype) ownerMetadataName else companionMetadataName).replace('/', '.')
+        val name = "$qualified.$companionName"
+        val boundary = BoundaryType("OBJECT", "(%s as $typeName)", "(%s)")
+        val supertypes = classpath.nameablePublicSupertypesOf(
+            if (ownerIsSupertype) ownerMetadataName else companionMetadataName,
+        )
+        return Candidate(
+            callable = ArtifactCallable(
+                name = name,
+                arity = 0,
+                paramTags = emptyList(),
+                returnTag = boundary.tag,
+                lambdaBody = "{ ${boundary.wrapReturn(name)} }",
+                returnTypeName = typeName,
+                returnSupertypes = supertypes,
+                paramNames = emptyList(),
+                paramTypeNames = emptyList(),
+                paramHasDefault = emptyList(),
+                kind = "STATIC_GETTER",
+            ),
+            declaration = DeclarationModel(
+                simpleName = companionName,
+                owner = qualified,
+                ownerIsClass = true,
+                receiver = null,
+                parameters = emptyList(),
+                returnType = python.multiplatform.gradle.model.KotlinTypeModel(
+                    qualifiedName = typeName,
+                    isNullable = false,
+                    arguments = emptyList(),
+                    valueClass = null,
+                ),
+                isComposable = false,
+                isSuspend = false,
+                kind = "STATIC_GETTER",
+                bindingName = name,
+                returnBoundaryTag = boundary.tag,
+                isCompanionHandle = true,
+            ),
+            isCompanionHandle = true,
+        )
     }
 
     /**
@@ -777,8 +884,23 @@ internal object ArtifactScanner {
         // of a @Composable function". Found by generating them and watching the fixture fail to
         // compile, which is also why the check reads the getter's own annotations rather than the
         // property's -- metadata does not carry them for a release build.
-        val getterName = "get" + property.name.replaceFirstChar { it.uppercase() }
-        if (declaringNode.methods.any { it.name == getterName && isComposable(it) }) return@mapNotNull null
+        //
+        // The same check declines `@Deprecated(level = HIDDEN)` properties (`ButtonDefaults.SmallButtonContentPadding`
+        // in Material3 1.11.1-ext.1), whose accessor is `ACC_SYNTHETIC` and therefore unreachable from source.
+        val getter = property.getterSignature?.let { signature ->
+            declaringNode.methods.firstOrNull { it.name == signature.name && it.desc == signature.descriptor }
+        }
+        val field = property.fieldSignature?.let { signature ->
+            declaringNode.fields.firstOrNull { it.name == signature.name && it.desc == signature.descriptor }
+        }
+        when {
+            getter != null -> {
+                if (!getter.access.hasFlag(Opcodes.ACC_PUBLIC) || getter.access.hasFlag(Opcodes.ACC_SYNTHETIC)) return@mapNotNull null
+                if (isComposable(getter)) return@mapNotNull null
+            }
+            field != null && field.access.hasFlag(Opcodes.ACC_PUBLIC) && !field.access.hasFlag(Opcodes.ACC_SYNTHETIC) -> Unit
+            else -> return@mapNotNull null
+        }
         val returnModel = kotlinTypeModelOf(property.returnType, classpath) ?: return@mapNotNull null
         val returnType = resolveKotlinType(property.returnType, classpath, BoundaryDirection.RETURN)
             ?: return@mapNotNull null
@@ -820,6 +942,121 @@ internal object ArtifactScanner {
     }
 
     // -------------------------------------------------------------------------- properties (#38)
+
+    /** What a member function's candidate needs of the class it is read on (issue #215). */
+    private class MemberReceiver(
+        /** The class's qualified Kotlin name: the entry's `receiverTypeName` and the key's owner. */
+        val owner: String,
+        /** The receiver as generated source reads it out of `args[0]`. */
+        val read: String,
+        private val model: KotlinTypeModel,
+    ) {
+        /** [declaration] as a `METHOD`: read off a receiver of [owner], every argument passed. */
+        fun restate(declaration: DeclarationModel): DeclarationModel = declaration.copy(
+            kind = METHOD_KIND,
+            receiver = model,
+            receiverBoundaryTag = OBJECT_TAG,
+            parameters = declaration.parameters.map { it.copy(declaresDefault = false) },
+        )
+    }
+
+    /**
+     * A public class's or interface's own **member functions**, as `METHOD` entries under
+     * `Owner.name` (issue #215).
+     *
+     * `kotlinx.coroutines.Job.cancel()` and `CoroutineDispatcher.dispatch(...)` are members: until this
+     * producer, a handle Python held to one could have its properties read and nothing called on it.
+     * `CallableKind.METHOD` already says the shape -- `args[0]` is the receiver, resolved from the
+     * proxy's handle and not counted in `arity` -- and KSP already emits it for its own classes, so
+     * nothing about the boundary is new. The call is source, `(args[0] as Owner).name(...)`; `kotlinc`
+     * resolves and mangles it.
+     *
+     * ### What is bound
+     *
+     * The class rules are [memberPropertyCandidates]': Kotlin-public, a `class`, `interface` or `enum
+     * class` (an `object`'s functions are #53's statics), crossing as an object handle, every supertype
+     * on the walk's classpath. A function is bound when it is public, declared rather than synthesized
+     * (a data class's `copy`/`componentN`, U-4), not an extension (a member extension needs two
+     * receivers), not one of `Any`'s members, and backed by a public, non-static, non-synthetic JVM
+     * method whose parameter count is the declared one. Declined, each with its reason: `suspend`, a
+     * reified or bounded type parameter, `@Composable`, a member of a generic class (its receiver would
+     * be cast with arguments a type parameter of the function may need -- not yet), and a member that
+     * shares its name with a property of the class, because Python has one attribute for both and the
+     * property (#38) keeps it.
+     */
+    private fun memberFunctionCandidates(
+        kmClass: kotlin.metadata.KmClass,
+        ownerNode: ClassNode,
+        classpath: ArtifactClasspath,
+    ): List<Candidate> {
+        if (kmClass.visibility != Visibility.PUBLIC) return emptyList()
+        if (kmClass.kind !in PROPERTY_OWNER_KINDS) return emptyList()
+        val synthesized = kmClass.functions.filter { it.kind == MemberKind.SYNTHESIZED }.mapTo(HashSet()) { it.name }
+        val functions = functionsOf(kmClass).filter { !it.isExtension && it.kotlinName !in synthesized }
+        if (functions.isEmpty()) return emptyList()
+        val owner = binaryNameToQualified(ownerNode.name)
+        val ownerType = KmType().apply { classifier = KmClassifier.Class(ownerNode.name) }
+        val receiverBoundary = resolveKotlinBoundary(ownerType, classpath, BoundaryDirection.PARAMETER) ?: return emptyList()
+        if (receiverBoundary.boundary.tag != OBJECT_TAG) return emptyList()
+        val receiverModel = kotlinTypeModelOf(ownerType, classpath) ?: return emptyList()
+        val member = MemberReceiver(owner, receiverBoundary.boundary.read("args[0]"), receiverModel)
+        val receiverDecline = classpath.unreachableSupertypeOf(ownerNode.name)
+            ?.let { missing -> unreachableReceiverReason(missing, owner) }
+        val propertyNames = kmClass.properties.mapTo(HashSet()) { it.name }
+        val methods = ownerNode.methods.associateBy { it.name to it.desc }
+
+        return functions.mapNotNull { function ->
+            val signature = function.jvmSignature.name to function.jvmSignature.descriptor
+            if (signature in ANY_MEMBER_SIGNATURES) return@mapNotNull null
+            val method = methods[signature]
+            val composable = method != null && isComposable(method)
+            fun declined(reason: String) =
+                declinedCandidate(owner, true, function, classpath, reason, composable)
+                    ?.let { it.copy(declaration = member.restate(it.declaration)) }
+            when {
+                function.isSuspend -> return@mapNotNull declined("suspend")
+                function.hasReifiedTypeParameter ->
+                    return@mapNotNull declined("a reified type parameter: its type argument is read at run time, so kotlin.Any? cannot stand for it")
+                method == null || !method.access.hasFlag(Opcodes.ACC_PUBLIC) -> return@mapNotNull null
+                method.access.hasFlag(Opcodes.ACC_STATIC) || method.access.hasFlag(Opcodes.ACC_SYNTHETIC) ||
+                    method.access.hasFlag(Opcodes.ACC_BRIDGE) -> return@mapNotNull null
+                composable -> return@mapNotNull declined("a @Composable member function: not bound on a proxy")
+                kmClass.typeParameters.isNotEmpty() -> return@mapNotNull declined("a member of a generic class: not bound yet")
+                function.kotlinName in propertyNames ->
+                    return@mapNotNull declined("shares its name with a property of the class, which keeps the attribute")
+                receiverDecline != null -> return@mapNotNull declined(receiverDecline)
+            }
+            val (paramDescriptors, _) = splitMethodDescriptor(method!!.desc)
+            if (function.allParameterTypes.size != paramDescriptors.size) {
+                return@mapNotNull declined(
+                    "the JVM signature carries ${paramDescriptors.size - function.allParameterTypes.size} " +
+                        "parameter(s) metadata does not declare",
+                )
+            }
+            candidateFromFunction(owner, true, function, classpath, paramDescriptors, isComposable = false, member = member)
+        }
+    }
+
+    /**
+     * Gives a member function (issue #215) a key no other binding holds. Keys are `Owner.name`, the
+     * namespace of a property's (`Owner.prop`) and of an object's constants and functions; a property
+     * of the same name is already excluded where the member is built, so what is left here is a nested
+     * object's or a companion's binding under the same dotted name. The other binding keeps it.
+     */
+    private fun settleMethodNames(methods: List<Candidate>, settled: List<Candidate>): List<Candidate> {
+        val taken = settled.mapNotNullTo(HashSet()) { it.callable?.name }
+        return methods.map { candidate ->
+            val name = candidate.callable?.name ?: return@map candidate
+            if (name !in taken) return@map candidate
+            candidate.copy(
+                callable = null,
+                declaration = candidate.declaration.copy(
+                    bindingName = null,
+                    declineReason = "member key $name collides with another binding",
+                ),
+            )
+        }
+    }
 
     /**
      * A public class's or interface's own **member** properties, as `GETTER` entries -- and, for a
@@ -1180,6 +1417,7 @@ internal object ArtifactScanner {
             "so generated Kotlin cannot read a member of it"
 
     internal const val GETTER_KIND = "GETTER"
+    internal const val METHOD_KIND = "METHOD"
     internal const val SETTER_KIND = "SETTER"
 
     /** The two kinds [scan] keeps out of the function passes; see [settlePropertyNames]. */
@@ -1405,6 +1643,7 @@ internal object ArtifactScanner {
         returnDescriptor: String,
         jvmMethodName: String,
         ownerInternalName: String,
+        onObjectInstance: Boolean = false,
     ): Candidate? {
         // A composable's bounded type parameter is left exactly as it was before issue #38: its
         // declared slots are typed from the erased descriptor where metadata names no class, and its
@@ -1463,6 +1702,7 @@ internal object ArtifactScanner {
                     jvmMethodName,
                     "(${paramDescriptors.joinToString("")})$returnDescriptor",
                     valueClassUnboxOwners = declaredSlots.map { it.unboxOwner } + List(syntheticTags.size) { null },
+                    onObjectInstance = onObjectInstance,
                 ),
             ),
             // `paramTags` is slot-aligned, so an extension's receiver is slot 0 and `model.parameters`
@@ -1607,6 +1847,9 @@ internal object ArtifactScanner {
         val typeName: String? = null,
         val boundary: BoundaryType? = null,
         val declineReason: String? = null,
+        /** The type a stub shows for the slot when it is not the declared one: a functional
+         * interface's `kotlin.FunctionN` (issue #216). */
+        val modelType: KotlinTypeModel? = null,
     )
 
     /**
@@ -1642,7 +1885,7 @@ internal object ArtifactScanner {
      *   *different* limit from the one this method opens, which is why it is named rather than left
      *   to fail as a compile error in somebody's generated fragment.
      * - **`@Composable`, inside a declaration that is not.** `Modifier.composed(factory:)` is the
-     *   case. The fragment is compiled without the Compose plugin (`:ksp-fixtures:artifact`'s
+     *   case. The fragment is compiled without the Compose plugin (`:python-multiplatform-gradle-plugin-fixtures:artifact`'s
      *   `build.gradle.kts` says so, and it is the whole shape of that fixture's claim), so
      *   `@Composable Modifier.() -> Modifier` written there is an ordinary `Function1` while the slot
      *   is a lowered `Function3`. **This one does not fail as a compile error**, which is why it is
@@ -1697,6 +1940,142 @@ internal object ArtifactScanner {
         // unchecked (the wrapper is a `Function1<Any?, Unit>` whatever the slot said), which the
         // fragment's file-level `@Suppress("UNCHECKED_CAST")` already covers.
         return FunctionSlot(typeName = name, boundary = BoundaryType("OBJECT", "(%s as $rendered)", "(%s)"))
+    }
+
+    /**
+     * A parameter typed as a **functional interface** (issue #216): a Java interface with one abstract
+     * method (`java.lang.Runnable`) or a Kotlin `fun interface`, whose method returns `Unit` and which is
+     * not generic. `null` for anything else, which leaves the parameter exactly as it was -- an
+     * interface on the classpath still crosses as a handle (`Alignment` is a `fun interface` whose
+     * method returns an `IntOffset`, and its slots must keep taking `Alignment.Center`).
+     *
+     * The slot takes **both** a Python callable and a Kotlin handle. Its type name is the interface's,
+     * then [SAM_SEPARATOR], then the `kotlin.FunctionN` it is equivalent to
+     * (`java.lang.Runnable|kotlin.Function0()->kotlin.Unit`): the binding layer fills it from a callable
+     * through the wrapper path a function type has (B-5, `pythonx._make_function`) and checks a handle
+     * against the interface. The generated read converts a wrapper with a SAM lambda and casts anything
+     * else -- `((%s).let { v -> if (v is kotlin.Function0<*>) java.lang.Runnable { ... } else v as
+     * java.lang.Runnable })` -- which `kotlinc` compiles; nothing is looked up at run time (AGENTS.md §12).
+     *
+     * The interface is read off the consumer's classpath, or, for a `java.`/`javax.` one, off the JDK
+     * this build runs on ([jdkClassNode]): the walk's classpath is the consumer's jars and never held
+     * `java.lang.Runnable`, which is why `runRunnable(block: Runnable)` was declined.
+     */
+    private fun functionalInterfaceSlotOrNull(type: KmType, classpath: ArtifactClasspath): FunctionSlot? {
+        val classifier = type.classifier as? KmClassifier.Class ?: return null
+        val internal = classifier.name
+        if (internal.startsWith(KOTLIN_FUNCTION_INTERNAL_PREFIX)) return null
+        if (type.arguments.isNotEmpty()) return null
+        val binary = internal.replace('.', '$')
+        val node = classpath.classNode(binary) ?: jdkClassNode(binary) ?: return null
+        if (!node.access.hasFlag(Opcodes.ACC_INTERFACE) || !node.access.hasFlag(Opcodes.ACC_PUBLIC)) return null
+        if (node.signature?.startsWith("<") == true) return null
+        val kmClass = when (val metadata = kotlinClassMetadataOf(node)) {
+            null -> null
+            is KotlinClassMetadata.Class -> metadata.kmClass.takeIf { it.isFunInterface } ?: return null
+            else -> return null
+        }
+        val method = abstractMethodsOf(node, classpath)?.singleOrNull() ?: return null
+        val (descriptors, returns) = splitMethodDescriptor(method.desc)
+        if (returns != "V") return null
+        // A Kotlin `fun interface` says each parameter's nullability; a Java one does not, so an object
+        // parameter is taken as nullable there -- Java may pass `null`, and a non-null type would throw.
+        val parameterTypes: List<Pair<String, String>> = if (kmClass != null) {
+            val declared = kmClass.functions.singleOrNull { it.name == method.name } ?: return null
+            if (declared.valueParameters.size != descriptors.size) return null
+            declared.valueParameters.map { parameter ->
+                val name = kotlinClassifierNameOf(parameter.type) ?: return null
+                name to (renderKotlinSourceType(parameter.type, classpath, depth = 0) ?: return null)
+            }
+        } else {
+            descriptors.map { descriptor -> javaParameterTypeOf(descriptor, classpath) ?: return null }
+        }
+        val qualified = internal.replace('/', '.')
+        val arity = parameterTypes.size
+        val functionType = "kotlin.Function$arity<" + (parameterTypes.map { it.second } + UNIT_TYPE_NAME).joinToString(", ") + ">"
+        val star = "kotlin.Function$arity<" + List(arity + 1) { "*" }.joinToString(", ") + ">"
+        val names = (0 until arity).map { "p$it" }
+        val arrow = if (arity == 0) "" else names.joinToString(", ", postfix = " -> ")
+        val convert = "v -> if (v is $star) $qualified { $arrow(v as $functionType)(${names.joinToString(", ")}) } else v as $qualified"
+        val read = if (type.isNullable) "((%s)?.let { $convert })" else "((%s).let { $convert })"
+        return FunctionSlot(
+            typeName = qualified + SAM_SEPARATOR + KOTLIN_FUNCTION_PREFIX + arity +
+                "(" + parameterTypes.joinToString(",") { it.first } + ")" + FUNCTION_RETURNS + UNIT_TYPE_NAME,
+            boundary = BoundaryType("OBJECT", read, "(%s)"),
+            modelType = KotlinTypeModel(
+                "kotlin.Function$arity",
+                isNullable = type.isNullable,
+                arguments = parameterTypes.map { KotlinTypeModel(it.first) } + KotlinTypeModel(UNIT_TYPE_NAME),
+            ),
+        )
+    }
+
+    /** Separates a functional-interface slot's interface from the function type a callable fills it as
+     * (issue #216). Must match `pythonx`'s `_SAM_SEPARATOR`; not a character a classifier can contain. */
+    internal const val SAM_SEPARATOR: String = "|"
+
+    /** `Object`'s public methods, which an interface may redeclare without becoming non-functional. */
+    private val OBJECT_METHOD_SIGNATURES = setOf(
+        "equals" to "(Ljava/lang/Object;)Z",
+        "hashCode" to "()I",
+        "toString" to "()Ljava/lang/String;",
+    )
+
+    /**
+     * The abstract methods an interface leaves to an implementation, its superinterfaces' included and
+     * minus any a subinterface gives a default body; `null` when a superinterface cannot be read.
+     */
+    private fun abstractMethodsOf(node: ClassNode, classpath: ArtifactClasspath): List<org.objectweb.asm.tree.MethodNode>? {
+        val abstract = LinkedHashMap<Pair<String, String>, org.objectweb.asm.tree.MethodNode>()
+        val concrete = HashSet<Pair<String, String>>()
+        fun visit(current: ClassNode, depth: Int): Boolean {
+            if (depth > 8) return false
+            current.methods.filter { !it.access.hasFlag(Opcodes.ACC_STATIC) && !it.access.hasFlag(Opcodes.ACC_SYNTHETIC) }.forEach { method ->
+                val key = method.name to method.desc
+                if (key in OBJECT_METHOD_SIGNATURES || method.name.startsWith("<")) return@forEach
+                if (method.access.hasFlag(Opcodes.ACC_ABSTRACT)) abstract.putIfAbsent(key, method) else concrete += key
+            }
+            return current.interfaces.all { parent ->
+                val parentNode = classpath.classNode(parent) ?: jdkClassNode(parent) ?: return false
+                visit(parentNode, depth + 1)
+            }
+        }
+        if (!visit(node, 0)) return null
+        return abstract.filterKeys { it !in concrete }.values.toList()
+    }
+
+    /**
+     * A Java method parameter as `(slot type name, Kotlin source type)`: primitives and `String` by
+     * their Kotlin names, any other class by its name when it is nameable, an object type nullable.
+     */
+    private fun javaParameterTypeOf(descriptor: String, classpath: ArtifactClasspath): Pair<String, String>? {
+        val primitive = when (descriptor) {
+            "I" -> "kotlin.Int"; "J" -> "kotlin.Long"; "Z" -> "kotlin.Boolean"; "D" -> "kotlin.Double"
+            "F" -> "kotlin.Float"; "S" -> "kotlin.Short"; "B" -> "kotlin.Byte"; "C" -> "kotlin.Char"
+            else -> null
+        }
+        if (primitive != null) return primitive to primitive
+        if (!descriptor.startsWith("L") || !descriptor.endsWith(";")) return null
+        val binary = descriptor.substring(1, descriptor.length - 1)
+        val name = when (binary) {
+            "java/lang/String" -> "kotlin.String"
+            "java/lang/Object" -> "kotlin.Any"
+            else -> if (classpath.isNameablePublicClass(binary)) binary.replace('/', '.').replace('$', '.') else return null
+        }
+        return name to "$name?"
+    }
+
+    /**
+     * A `java.`/`javax.` class file, read from the JDK this build runs on -- the walk's classpath is the
+     * consumer's jars, which never contain the platform. Build time only, and only to recognise a
+     * functional interface ([functionalInterfaceSlotOrNull]); it does not make a JDK type nameable as a
+     * handle anywhere else.
+     */
+    private fun jdkClassNode(binaryName: String): ClassNode? {
+        if (!binaryName.startsWith("java/") && !binaryName.startsWith("javax/")) return null
+        val bytes = ClassLoader.getPlatformClassLoader().getResourceAsStream("$binaryName.class")?.use { it.readBytes() }
+            ?: return null
+        return readClassNodeOrNull(bytes)
     }
 
     /** The Kotlin-source spelling of a function type: `kotlin.Function1<kotlin.Float, kotlin.Unit>`.
@@ -1949,8 +2328,11 @@ internal object ArtifactScanner {
         classpath: ArtifactClasspath,
         paramDescriptors: List<String>,
         isComposable: Boolean,
+        member: MemberReceiver? = null,
     ): Candidate? {
-        val model = declarationModelOf(owner, ownerIsClass, function, classpath, isComposable) ?: return null
+        val model = declarationModelOf(owner, ownerIsClass, function, classpath, isComposable)
+            ?.let { if (member != null) member.restate(it) else it }
+            ?: return null
         val declined = { reason: String -> Candidate(null, model.copy(declineReason = reason)) }
         val receiverIndex = if (function.isExtension) 1 else 0
         if (function.hasUnsubstitutableTypeParameters) {
@@ -1971,7 +2353,7 @@ internal object ArtifactScanner {
         // Read before `resolveKotlinType` is asked anything, because for a function-typed parameter
         // it is the one that would answer -- and would answer "no". See [functionSlotOrNull].
         val functionSlots = function.allParameterTypes.mapIndexed { index, type ->
-            functionSlotOrNull(type, paramDescriptors[index], classpath)
+            functionSlotOrNull(type, paramDescriptors[index], classpath) ?: functionalInterfaceSlotOrNull(type, classpath)
         }
         functionSlots.firstNotNullOfOrNull { it?.declineReason }?.let { return declined(it) }
 
@@ -1995,7 +2377,10 @@ internal object ArtifactScanner {
         val returnTypeName = kotlinClassifierNameOf(function.returnType)
 
         val qualifiedName = "$owner.${function.kotlinName}"
-        val argumentExpressions = resolvedParams.mapIndexed { index, type -> type.read("args[$index]") }
+        // A member's receiver is `args[0]` and is not one of [resolvedParams] (issue #215), so its
+        // declared parameters start at `args[1]`, as in KSP's `METHOD` entries.
+        val firstArgument = if (member != null) 1 else 0
+        val argumentExpressions = resolvedParams.mapIndexed { index, type -> type.read("args[${index + firstArgument}]") }
 
         // Kotlin has no syntax to call an extension function by fully qualifying it the way an
         // ordinary top-level function or a Java static can be (`pkg.fn(args)`) -- the receiver can
@@ -2013,7 +2398,9 @@ internal object ArtifactScanner {
 
         /** The call that passes everything, positionally -- byte for byte what this generator
          * emitted before defaults existed, and still the `else`-less first branch below. */
-        val call = if (function.isExtension) {
+        val call = if (member != null) {
+            "${member.read}.${function.kotlinName}$typeArguments(${argumentExpressions.joinToString(", ")})"
+        } else if (function.isExtension) {
             "${argumentExpressions.first()}.$alias$typeArguments(${argumentExpressions.drop(1).joinToString(", ")})"
         } else {
             "$owner.${function.kotlinName}$typeArguments(${argumentExpressions.joinToString(", ")})"
@@ -2030,10 +2417,11 @@ internal object ArtifactScanner {
             arity = arity,
             paramTags = resolvedParams.map { it.tag },
             returnTag = returnType.tag,
-            lambdaBody = if (arity == 0) "{ ${returnType.wrapReturn(call)} }"
+            // A member reads its receiver out of `args[0]` even with no declared parameter.
+            lambdaBody = if (arity == 0 && member == null) "{ ${returnType.wrapReturn(call)} }"
             else "{ args -> ${returnType.wrapReturn(call)} }",
             imports = imports,
-            receiverTypeName = function.receiverType?.let { kotlinClassifierNameOf(it) },
+            receiverTypeName = member?.owner ?: function.receiverType?.let { kotlinClassifierNameOf(it) },
             paramNames = function.allParameterNames,
             paramTypeNames = paramTypeNames,
             returnTypeName = returnTypeName,
@@ -2041,15 +2429,21 @@ internal object ArtifactScanner {
             // Deliberately all `false` until [applyDefaultOmission] says otherwise: this column is a
             // statement about **this body**, and this body passes everything.
             paramHasDefault = List(resolvedParams.size) { false },
+            kind = if (member != null) METHOD_KIND else "FUNCTION",
         )
-        val omittable = omittableParameterIndices(function, receiverIndex)
+        // A member's defaults are not omittable yet (issue #215): no plan, so Python passes every
+        // argument and the stub says so.
+        val omittable = if (member != null) emptySet() else omittableParameterIndices(function, receiverIndex)
+        val modelParameters = model.parameters.mapIndexed { index, parameter ->
+            functionSlots[index + receiverIndex]?.modelType?.let { parameter.copy(type = it) } ?: parameter
+        }
         return Candidate(
             callable = callable,
             declaration = model.copy(
                 bindingName = qualifiedName,
                 returnBoundaryTag = returnType.tag,
-                receiverBoundaryTag = if (function.isExtension) resolvedParams.first().tag else null,
-                parameters = model.parameters.mapIndexed { index, parameter ->
+                receiverBoundaryTag = if (function.isExtension) resolvedParams.first().tag else model.receiverBoundaryTag,
+                parameters = modelParameters.mapIndexed { index, parameter ->
                     parameter.copy(boundaryTag = resolvedParams[index + receiverIndex].tag)
                 },
             ),

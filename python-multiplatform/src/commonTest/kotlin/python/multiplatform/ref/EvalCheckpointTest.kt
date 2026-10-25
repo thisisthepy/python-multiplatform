@@ -15,7 +15,7 @@ import kotlin.time.measureTime
 /**
  * What an embedder owes CPython that a script never has to think about (ROADMAP §9).
  *
- * CPython defers work to a checkpoint that only the evaluation loop reaches — `_Py_HandlePending`,
+ * CPython defers work to a checkpoint that only the evaluation loop reaches, `_Py_HandlePending`,
  * called from the `_CHECK_PERIODIC` uop that opens every Python-level frame. Nothing in the C API
  * reaches it on its own. A program that drives the interpreter entirely through `PyObject_Call`
  * and friends therefore never merges the free-threaded build's biased reference-counting queue,
@@ -296,7 +296,7 @@ class EvalCheckpointTest {
 
     /**
      * A checkpoint must be cheap enough to ride on ordinary calls, which is the whole reason it is
-     * a cached function object and not `exec("pass")` — the latter recompiles a module every time.
+     * a cached function object and not `exec("pass")`, the latter recompiles a module every time.
      *
      * The assertion is the ordering, not an absolute number: absolute nanoseconds are a property
      * of the machine, but "a cached call beats recompiling" is a property of the design and would
@@ -343,9 +343,9 @@ class EvalCheckpointTest {
     }
 
     /**
-     * The automatic path must not fire from a cleaner. It is suppressed there for two reasons —
+     * The automatic path must not fire from a cleaner. It is suppressed there for two reasons,
      * the queue that needs merging belongs to the owning thread, and running Python on a cleaner is
-     * what ROADMAP §1 turned into a deadlock — and neither is visible from the outside, so it is
+     * what ROADMAP §1 turned into a deadlock, and neither is visible from the outside, so it is
      * pinned here by counting checkpoints while only cleaners are running.
      */
     @Test

@@ -16,7 +16,7 @@ import platform.Foundation.NSFileManager
  * (or `simctl launch`) with no `PYTHONHOME`. The simulator *test* task sets one, pointing at the
  * workspace (`SIMCTL_CHILD_PYTHONHOME`), but the same shape for an app parks it at 0% CPU when the
  * path is on an external volume (`iosMain/README.md`). So the app carries its prefix inside its own
- * bundle -- `tools/xcode/install-python.sh` copies it to `<app>/`[DIRECTORY_NAME] -- and it is handed
+ * bundle -- `python-multiplatform-gradle-plugin/src/main/resources/xcode/install-python.sh` copies it to `<app>/`[DIRECTORY_NAME] -- and it is handed
  * to CPython in-process, before `Py_Initialize`, by [applyPackagedPythonHome].
  *
  * The desktop counterpart is `PackagedPythonHome` (`jvmMain`, SPEC L-9); same order, same name.

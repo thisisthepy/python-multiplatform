@@ -1,4 +1,4 @@
-# desktopMain — rules
+# desktopMain, rules
 
 JVM on macOS, Linux and Windows, reaching CPython through Project Panama.
 
@@ -11,7 +11,7 @@ JVM on macOS, Linux and Windows, reaching CPython through Project Panama.
     inline fun PyList_Size(list: Long): Long = PyList_SizeHandle.invokeExact(list) as Long
 
 This is not a micro-optimisation. Converting the bulk of these wrappers took a real C API call
-(`PyList_Size` on `sys.path`) from **1015.95 ns to 2.65 ns** — about 380x. Before that, desktop
+(`PyList_Size` on `sys.path`) from **1015.95 ns to 2.65 ns**, about 380x. Before that, desktop
 was the slowest FFI path in the project by two orders of magnitude, on the machine that is
 fastest at everything else.
 
@@ -23,7 +23,7 @@ proves nothing; the tests are the check.
 
 Both are 8 bytes and travel in the same register on a 64-bit ABI. `ADDRESS` makes Panama hand
 back a `MemorySegment`, which then has to be unwrapped through per-call argument and return
-filters — and those filters were reflective `MethodHandle` invocations building a segment on
+filters, and those filters were reflective `MethodHandle` invocations building a segment on
 every call. `JAVA_LONG` deletes them, and it is what makes the handle type
 `(long, long, ...) -> long` so that `invokeExact` is reachable at all.
 
@@ -31,14 +31,14 @@ every call. `JAVA_LONG` deletes them, and it is what makes the handle type
 
 The backend resolves `java.lang.foreign` or `jdk.incubator.foreign` reflectively so the code
 compiles against any JDK without importing either. That is correct and should stay. What must
-never happen is reflection reaching the per-call path — that was the other half of the 1015 ns.
+never happen is reflection reaching the per-call path, that was the other half of the 1015 ns.
 Resolve handles once per symbol at startup; after that a call is a handle invocation and
 nothing else.
 
 ## String ownership
 
 `withUtf8 { }` allocates, passes the address, and frees in a `finally`. Values owned by CPython
-(`Py_GetVersion`, `PyUnicode_AsUTF8`) are read and **not** freed — freeing them is a
+(`Py_GetVersion`, `PyUnicode_AsUTF8`) are read and **not** freed, freeing them is a
 use-after-free.
 
 Desktop's string marshalling costs about 200 ns per string, measured at 606.74 ns (10.5%) of a
@@ -49,7 +49,7 @@ off-heap without crossing the boundary at all.
 
 Composing binder operations natively was measured and rejected for desktop: it would buy ~10%
 and cost macOS/Linux Kotlin/Native targets, a packaging path, and permanent Windows asymmetry.
-See ROADMAP §6. Android is different — there the same measurement gives 1.8x.
+See ROADMAP §6. Android is different, there the same measurement gives 1.8x.
 
 ## Never hand-edit `reachability-metadata.json`
 
@@ -59,7 +59,7 @@ the non-derivable half (`reflection`, and any `resources` globs) is checked in, 
 `python-multiplatform/native-image/reachability-metadata.base.json`.
 
 Under GraalVM's closed world, a `FunctionDescriptor` that is not declared there does not fail the
-build — it fails on the first call, with `MissingForeignRegistrationError`. So every new descriptor
+build, it fails on the first call, with `MissingForeignRegistrationError`. So every new descriptor
 has to reach the metadata by construction:
 
 - A new CPython entry point is a `find("sym", ReturnType, Params...)` line in `bindings.kt`, and
@@ -69,14 +69,14 @@ has to reach the metadata by construction:
   parameterTypes = [...])` marker directly above it; its descriptor is assembled reflectively and
   cannot be read out of the code. The generator refuses to run without the marker.
 
-`ReachabilityMetadataTest` checks the shipped file from the other direction — against the
-`MethodHandle.type()`s the loaded classes actually built — so a parser that stops recognising a
+`ReachabilityMetadataTest` checks the shipped file from the other direction, against the
+`MethodHandle.type()`s the loaded classes actually built, so a parser that stops recognising a
 declaration form surfaces as a failing test, not as a binary that dies at a customer.
 
 ## The stdlib is staged by the Gradle plugin, and `PYTHONHOME` is set when the JVM starts
 
 `desktopJar` carries `libpython` for four platforms under `lib/<platform>/` and **no standard
-library** — verified, not assumed: the published jar's `lib/` tree is 14 entries, all of them
+library**, verified, not assumed: the published jar's `lib/` tree is 14 entries, all of them
 shared libraries. `Py_Initialize()` therefore dies with `Failed to import encodings module` until
 `PYTHONHOME` names a prefix that has one.
 
@@ -86,13 +86,13 @@ cannot set an environment variable for itself.** CPython reads `PYTHONHOME` with
 `System.getenv` is an immutable snapshot taken at start-up, and mutating it (reflectively or
 otherwise) does not touch the native environment CPython reads. Android's `PythonBootstrap` calls
 `Os.setenv`; there is no such call here. A runtime helper would have to reach libc `setenv`
-through Panama — a different symbol on Windows (`_putenv_s`) — and would then be setting a value
+through Panama, a different symbol on Windows (`_putenv_s`), and would then be setting a value
 `PythonHomeCheck` could no longer read. Setting it as the child process is launched, which is what
 Gradle's `environment(...)` does and what this repo's own `desktopTest` already does, leaves
 CPython and `PythonHomeCheck` reading the same value from the same place.
 
 The staged prefix is shared per machine (under the Gradle user home), keyed by version + upstream
-release + platform, and stamped after the last extracted byte — so an interrupted extraction is
+release + platform, and stamped after the last extracted byte, so an interrupted extraction is
 never mistaken for a finished one. See ROADMAP §15h.
 
 ## A packaged app names its prefix in-process, with `Py_SetPythonHome` (SPEC L-9)
@@ -115,7 +115,7 @@ The section above is about `PYTHONHOME` **the environment variable**. A packaged
 
 `Py_SetPythonHome` is deprecated since 3.11 in favour of `PyConfig.home`, but `PyConfig` is a
 struct whose layout the Stable ABI does not promise, and the function is in the Stable ABI, so its
-symbol stays exported. It takes `wchar_t *` — UTF-32 here, UTF-16 on Windows — encoded by hand in
+symbol stays exported. It takes `wchar_t *`, UTF-32 here, UTF-16 on Windows, encoded by hand in
 `encodeWideString` rather than through `Py_DecodeLocale`, which before pre-initialisation decodes
 with the C locale (the ANSI code page on Windows). The buffer is never freed (a few hundred bytes,
 once per process): the API asks for static storage.
@@ -152,11 +152,11 @@ same completion-marker discipline `PythonBootstrap.stageStdlib` uses, and the re
 
 **Do not match on the name `python/`.** This library's own top-level Kotlin package *is* `python`,
 so `python/multiplatform` and `python/native` class files answer `getResources("python/")` on every
-classpath this library is on — the build output directory during a Gradle build, and
+classpath this library is on, the build output directory during a Gradle build, and
 `python-multiplatform.jar` itself once published. Name-based discovery therefore puts a directory of
 `.class` files at `sys.path[0]` in every consuming application, and extracts the whole library jar
 to do it. Observed, not theorised: the first run of `PythonPayloadTest` returned
-`build/classes/kotlin/desktop/{main,test}/python`. Discovery asks what is *in* the root instead — at
+`build/classes/kotlin/desktop/{main,test}/python`. Discovery asks what is *in* the root instead, at
 least one immediate child that is a `.py`/`.pyc`, or a directory with an `__init__` in it, which is
 exactly what `ResourceBundler` produces.
 
@@ -175,6 +175,6 @@ does not exist until `Py_Initialize()` has built it.
 resources into the image heap: that copy was 19.4 MB of a 35.4 MB binary, written straight back out
 to a temp file at startup. The library resource is therefore *not* registered, and `manager.kt`
 falls back to `$PYTHONHOME/lib/` (`PYTHON_MULTIPLATFORM_LIBPYTHON` overrides an absolute path).
-`PYTHONHOME` has to point at a real prefix regardless — `Py_Initialize` needs the matching stdlib —
+`PYTHONHOME` has to point at a real prefix regardless, `Py_Initialize` needs the matching stdlib,
 so nothing is lost, and the binary is 16.7 MB. Loading the library out of the same prefix as the
 stdlib also removes the version-skew hazard the jar copy had.

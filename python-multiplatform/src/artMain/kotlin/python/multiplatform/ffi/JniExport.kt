@@ -126,7 +126,7 @@ fun sayHello() {
  * Diagnostic only: returns its argument unchanged.
  *
  * Exported under `python.native.ffi.bindings` so the Android JVM side can call it through the same
- * path as every other binding. Its whole purpose is to make an argument-slot mismatch visible —
+ * path as every other binding. Its whole purpose is to make an argument-slot mismatch visible,
  * if the JNI calling convention does not match this export's signature, the value read back will
  * not be the value passed in.
  */

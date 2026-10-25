@@ -40,7 +40,7 @@ import kotlin.test.assertTrue
  *
  * It is not a proof that Compose draws anything. The fragment behind it is Kotlin this repository
  * owns ([ComposableShapedFragment]), because `commonTest` runs on Kotlin/Native where there is no
- * Compose runtime and no generated thunk class. `:ksp-fixtures:compose`'s `ComposableRenderTest` is
+ * Compose runtime and no generated thunk class. `:python-multiplatform-compose:fixtures:compose`'s `ComposableRenderTest` is
  * the other half, and it renders a real `Text` through a real `Composer`.
  */
 class PythonxComposableTest {
@@ -102,7 +102,7 @@ class PythonxComposableTest {
             Text('hi')
             Text('hi', modifier=None)
             Text('hi', color=3)
-            Text('hi', fontSize=4)
+            Text('hi', font_size=4)
             Text('hi', color=3, fontSize=4)
             """.trimIndent(),
         )
@@ -149,7 +149,7 @@ class PythonxComposableTest {
                     """
                     from androidx.compose.foundation.layout import stubRowScope
                     _row = stubRowScope()
-                    _row.NavigationBarItem(selected=True, onClick=lambda: None)
+                    _row.NavigationBarItem(selected=True, on_click=lambda: None)
                     _row.NavigationBarItem(selected=True, onClick=lambda: None, enabled=False)
                     """.trimIndent(),
                 )

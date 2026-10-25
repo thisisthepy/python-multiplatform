@@ -9,24 +9,24 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /**
- * The `PhantomReference` release path — ROADMAP §4's one uncovered corner.
+ * The `PhantomReference` release path, ROADMAP §4's one uncovered corner.
  *
  * `java.lang.ref.Cleaner` arrived in **Android API 33**. Every device below that runs a different
  * mechanism, and §4 has said "Android below API 33 uses the `PhantomReference` path and is not
  * covered yet" for as long as the section has existed. It stayed uncovered for a structural reason
  * rather than an oversight: the code lived in `androidMain`, so the only way to run it was on a
- * device, and the emulators in this project are API 36 — which takes the `Cleaner` branch and never
+ * device, and the emulators in this project are API 36, which takes the `Cleaner` branch and never
  * touches the fallback at all. The fallback could have been arbitrarily broken and every test in
  * the repository would still have passed.
  *
  * [PhantomCleanerRegistry] therefore lives in `jvmMain`, where `desktopTest` can reach it. Nothing
- * in it is Android-specific — `java.lang.ref.PhantomReference` and `ReferenceQueue` are Java 1.2 —
+ * in it is Android-specific, `java.lang.ref.PhantomReference` and `ReferenceQueue` are Java 1.2,
  * so running it on a desktop JVM exercises the same class an API 26 device would.
  *
  * **It runs on both runtimes, and that immediately paid for itself.** This class sits in `jvmTest`,
  * which `desktopTest` and `androidInstrumentedTest` both depend on, so every case here executes on
  * HotSpot *and* on ART. The first six-target run after it landed was green on desktop and red on
- * both emulators — API 36 with two failures, API 26 with three — for two distinct reasons. One is
+ * both emulators, API 36 with two failures, API 26 with three, for two distinct reasons. One is
  * the test's own (`System.gc()` is not a collection on ART; see [awaitCount]) and one is real
  * (`Reference.reachabilityFence` is API 28+ and the fallback's whole audience is below API 33; see
  * [keptAlive]). Neither is visible from a desktop-only run, and the second is a genuine API-level
@@ -54,7 +54,7 @@ class PhantomCleanerRegistryTest {
      *
      * The action closes over [counter] and nothing else. An action that could reach its own owner
      * would keep that owner strongly reachable through the registry's entry table, and the release
-     * would never run — which is the single way to write this class that disables it silently.
+     * would never run, which is the single way to write this class that disables it silently.
      */
     private fun registerAndDrop(counter: AtomicInteger, throwing: Boolean = false): WeakReference<Any> {
         val owner = Owner()
@@ -90,7 +90,7 @@ class PhantomCleanerRegistryTest {
             }
     }
 
-    /** Registers, releases by hand, and drops the owner — all inside one frame, as above. */
+    /** Registers, releases by hand, and drops the owner, all inside one frame, as above. */
     private fun registerCleanAndDrop(counter: AtomicInteger, cleanTimes: Int = 1) {
         val owner = Owner()
         val cleanable = PhantomCleanerRegistry.register(owner, Runnable { counter.incrementAndGet() })
@@ -112,7 +112,7 @@ class PhantomCleanerRegistryTest {
      * `System.gc()` body back and running this class alone on API 36 reproduced it directly:
      * `owners collected: 0/2; drainThread alive: true; registry drained: 1, failed: 1` for
      * [twoDroppedOwnersRunTwoReleases], and `owners collected: 0/1` for the other two waiting cases.
-     * Twenty seconds of `System.gc()` had reclaimed *nothing* — while the drain thread was alive the
+     * Twenty seconds of `System.gc()` had reclaimed *nothing*, while the drain thread was alive the
      * whole time, and every entry the collector genuinely did hand over (`drained: 1`, plus the
      * throwing one at `failed: 1`) was delivered correctly. The registry was never the fault; the
      * waiting was.

@@ -14,11 +14,13 @@ import kotlin.test.assertTrue
 /**
  * `python_multiplatform.binding.add_member_resolver` (issue #17): the one public point where a
  * Pythonic package built on the binder (pythonx-compose) can say what a Kotlin proxy's member is
- * called, without the binder renaming anything itself.
+ * called. Since issue #131 the binder also serves its own Pythonic alias (`fill_max_width`), asked
+ * **after** the resolvers, so a resolver still decides what a name means wherever it answers.
  *
  * Contract under test:
  *
- * - With no resolver registered, an unknown name on a proxy is an `AttributeError`, exactly as before.
+ * - With no resolver registered, a snake_case alias is the binder's own (issue #131), and a name that
+ *   is no alias either is an `AttributeError`.
  * - `fn(kotlin_type_name, requested_name, kotlin_member_names) -> kotlin_name | None` is asked only
  *   when no Kotlin member of the requested name exists; the Kotlin member it names is served.
  * - The binder's proxy classes are not written to: `dir()` and the class `__dict__` show Kotlin names only.
@@ -41,22 +43,28 @@ class MemberResolverTest {
         HandleTable.releaseAll()
     }
 
+    /** Issue #131: with no resolver, the binder's own alias serves the snake_case name; nonsense stays an error. */
     @Test
-    fun withNoResolverASnakeNameIsAnAttributeError() = withAdapter {
+    fun withNoResolverASnakeNameIsTheBindersOwnAlias() = withAdapter {
         Python3.exec(
             """
-            from androidx.compose.ui import Modifier
+            from androidx.compose.ui import Modifier, describeModifier
             _mr = {}
             for _label, _target in (('instance', Modifier.padding(16)), ('class', Modifier)):
                 try:
-                    _target.fill_max_width
-                    _mr[_label] = 'resolved'
+                    _mr[_label] = describeModifier(_target.fill_max_width())
                 except AttributeError:
                     _mr[_label] = 'AttributeError'
+            try:
+                Modifier.padding(16).fill_max_nothing
+                _mr['nonsense'] = 'resolved'
+            except AttributeError:
+                _mr['nonsense'] = 'AttributeError'
             """.trimIndent(),
         )
-        assertEquals("AttributeError", eval("_mr['instance']"))
-        assertEquals("AttributeError", eval("_mr['class']"))
+        assertEquals("padding(16.0) -> fillMaxWidth", eval("_mr['instance']"))
+        assertEquals("fillMaxWidth", eval("_mr['class']"))
+        assertEquals("AttributeError", eval("_mr['nonsense']"))
     }
 
     @Test
@@ -175,17 +183,17 @@ class MemberResolverTest {
             assertEquals("True", eval("_mr['class_dict_same']"))
             assertEquals("True", eval("_mr['dir_same']"))
         }
-        // Removing the only resolver takes the alias with it: nothing was left on the class.
+        // Removing the only resolver takes its alias with it: nothing was left on the class. The name
+        // still resolves -- now as the binder's own alias (issue #131) -- and that one is not written
+        // onto the class either.
         Python3.exec(
             """
-            try:
-                Modifier.padding(1).fill_max_width
-                _mr = {'after': 'still resolved'}
-            except AttributeError:
-                _mr = {'after': 'AttributeError'}
+            _mr = {'after': 'still resolved' if callable(Modifier.padding(1).fill_max_width) else 'not callable'}
+            _mr['alias_in_class'] = 'fill_max_width' in vars(type(Modifier.padding(1)))
             """.trimIndent(),
         )
-        assertEquals("AttributeError", eval("_mr['after']"))
+        assertEquals("still resolved", eval("_mr['after']"))
+        assertEquals("False", eval("_mr['alias_in_class']"))
     }
 
     // ------------------------------------------------------------------------------- keyword maps (#34)
@@ -257,21 +265,23 @@ class MemberResolverTest {
         }
     }
 
-    /** No resolver: a Python-spelled keyword on a member is refused exactly as before. */
+    /** No resolver: a snake_case keyword on a member is the binder's own keyword alias (issue #131). */
     @Test
-    fun withNoResolverAKeywordIsNotMapped() = withAdapter {
+    fun withNoResolverASnakeKeywordIsTheBindersOwnAlias() = withAdapter {
         Python3.exec(
             """
-            from androidx.compose.ui import Modifier
+            from androidx.compose.ui import Modifier, describeModifier
             from androidx.compose.foundation.layout import paddingValuesOf
+            _mr = {'outcome': describeModifier(Modifier.padding(1).padding(padding_values=paddingValuesOf(4)))}
             try:
-                Modifier.padding(1).padding(padding_values=paddingValuesOf(4))
-                _mr = {'outcome': 'accepted'}
+                Modifier.padding(1).padding(padding_valuez=paddingValuesOf(4))
+                _mr['typo'] = 'accepted'
             except TypeError:
-                _mr = {'outcome': 'TypeError'}
+                _mr['typo'] = 'TypeError'
             """.trimIndent(),
         )
-        assertEquals("TypeError", eval("_mr['outcome']"))
+        assertEquals("padding(1.0) -> padding(pv(4.0))", eval("_mr['outcome']"))
+        assertEquals("TypeError", eval("_mr['typo']"))
     }
 
     // ------------------------------------------------------------------------------- helpers

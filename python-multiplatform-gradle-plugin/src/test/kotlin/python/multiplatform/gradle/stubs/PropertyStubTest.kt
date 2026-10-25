@@ -102,11 +102,12 @@ class PropertyStubTest {
     }
 
     /**
-     * A receiver whose name its own module already spends on a function has no stub class to put
-     * the property in; the key is still accounted for, as a comment, rather than silently absent.
+     * A receiver whose name its own module already spends on a function gets the stub-private class
+     * `_Counter` (issue #217), and the property is on it, carrying its key. Before #217 there was no
+     * class, and the key was accounted for only as a comment.
      */
     @Test
-    fun aPropertyWhoseReceiverHasNoStubClassIsStillAccountedFor() {
+    fun aPropertyWhoseReceiverNameAFunctionTakesIsOnTheStubPrivateClass() {
         val receiver = KotlinTypeModel("p.Counter")
         val constructorLike = DeclarationModel(
             simpleName = "Counter",
@@ -131,7 +132,10 @@ class PropertyStubTest {
             kind = "GETTER",
         )
         val stub = renderKotlinFqnStubs(listOf(constructorLike, count)).getValue("p/__init__.pyi")
-        assertTrue(Regex("^# Kotlin property: p\\.Counter\\.count is not stubbed", RegexOption.MULTILINE).containsMatchIn(stub), stub)
+        assertTrue("class _Counter:" in stub, stub)
+        assertTrue("    def count(self) -> int:" in stub, stub)
+        assertTrue("Kotlin property: p.Counter.count " in stub, stub)
+        assertFalse("is not stubbed" in stub, stub)
         assertFalse("class Counter" in stub, stub)
     }
 }

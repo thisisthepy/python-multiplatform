@@ -6,11 +6,6 @@ import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 import org.jetbrains.kotlin.gradle.ExperimentalWasmDsl
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.targets.js.webpack.KotlinWebpackConfig
-import org.jetbrains.kotlin.konan.target.KonanTarget.ANDROID_ARM64
-import org.jetbrains.kotlin.konan.target.KonanTarget.ANDROID_X64
-import org.jetbrains.kotlin.konan.target.KonanTarget.IOS_ARM64
-import org.jetbrains.kotlin.konan.target.KonanTarget.IOS_SIMULATOR_ARM64
-import org.jetbrains.kotlin.konan.target.KonanTarget.IOS_X64
 
 
 plugins {
@@ -34,9 +29,9 @@ plugins {
     // Gradle 8.11.1, which AGP 8.10 requires), so the split is gone and this module holds its own
     // Python-facing declarations again -- `src/*/kotlin/.../demo/bindings/`.
     //
-    // `ksp-fixtures/android` is the regression test. It is the first fixture to apply an Android
+    // `python-multiplatform-ksp/fixtures/android` is the regression test. It is the first fixture to apply an Android
     // plugin, which is exactly why nothing caught this.
-    id("io.github.thisisthepy.python.multiplatform.bindings")
+    id("org.thisisthepy.python.multiplatform.bindings")
 }
 
 kotlin {
@@ -84,20 +79,12 @@ kotlin {
         iosArm64(),
         iosSimulatorArm64()
     ).forEach { iosTarget ->
-        val targetABI = when(iosTarget.konanTarget) {
-            ANDROID_ARM64 -> "arm64-v8a"
-            ANDROID_X64 -> "x86_64"
-            IOS_ARM64 -> "ios-arm64"
-            IOS_X64 -> "ios-arm64_x86_64-simulator"
-            IOS_SIMULATOR_ARM64 -> "ios-arm64_x86_64-simulator"
-            else -> throw RuntimeException("Unsupported ABI: ${iosTarget.konanTarget}")
-        }
         iosTarget.binaries.framework {
             baseName = "Demo"
 
-            linkerOpts.addAll(listOf(
-                "-framework", "Python", "-F$projectDir/build/xcode-frameworks/Python.xcframework/$targetABI", "-Objc"
-            ))
+            // `-framework Python -F...` and the link task's dependency on preparePythonXcframework come
+            // from the bindings plugin (issue #321); only the non-Python option stays here.
+            linkerOpts.add("-Objc")
 
             //export(projects.pythonMultiplatform)
         }
@@ -217,7 +204,7 @@ fun patchWasmOutputForCPython(dir: File, modulePrefix: String) {
         // first browser run found. `_start()` is Kotlin `main()`; the library's own test bundle has
         // no such call (its runner starts the tests from outside), so appending had always been
         // enough and every executable bundle would have registered its upcall entry point one line
-        // too late. The symptom is `pmpRegisterUpcall returned -1` — `kotlinExports` still null —
+        // too late. The symptom is `pmpRegisterUpcall returned -1`, `kotlinExports` still null,
         // for an application whose sections 1-4 all worked.
         val startCall = "exports._start();"
         val note = "// Added by :sample's build: upcall registration needs the raw wasm exports,\n" +
@@ -260,26 +247,12 @@ tasks.withType<org.jetbrains.kotlin.gradle.targets.js.webpack.KotlinWebpack>().c
     }
 }
 
-val prepareIosFrameworks by tasks.registering(Sync::class) {
-    dependsOn(":python-multiplatform:downloadPython_ios")
-    
-    val samplePythonVersion = project.findProperty("pythonVersion")?.toString() ?: rootProject.version.toString()
-    val extractedIosDir = project(":python-multiplatform").layout.buildDirectory.dir("python-standalone/extracted/$samplePythonVersion/ios")
-    
-    from(extractedIosDir)
-    into(layout.buildDirectory.dir("xcode-frameworks"))
-}
-
-tasks.matching { it.name.startsWith("link") && it.name.contains("Ios") }.configureEach {
-    dependsOn(prepareIosFrameworks)
-}
-
 android {
-    namespace = "org.thisisthepy.python.multiplatform.demo"
+    namespace = "io.github.thisisthepy.python.multiplatform.demo"
     compileSdk = libs.versions.android.compileSdk.get().toInt()
 
     defaultConfig {
-        applicationId = "org.thisisthepy.python.multiplatform.demo"
+        applicationId = "io.github.thisisthepy.python.multiplatform.demo"
         minSdk = libs.versions.android.minSdk.get().toInt()
         targetSdk = libs.versions.android.targetSdk.get().toInt()
         versionCode = 1
@@ -330,7 +303,7 @@ compose.desktop {
 
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
-            packageName = "org.thisisthepy.python.multiplatform.demo"
+            packageName = "io.github.thisisthepy.python.multiplatform.demo"
             packageVersion = "1.0.0"
         }
     }

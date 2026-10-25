@@ -12,6 +12,10 @@ the `typedpython` package, python-multiplatform-ksp/src/main/python) and `--type
 interpreter with the gate's dependencies, e.g. that module's .venv): each benchmark is copied with
 the `# typedpython: compiled` marker, compiled through `typedpython.pipeline`, and its `main()` is
 run from the built extension. Without the option the column reports n/a.
+
+binary-trees declares `__slots__` (TypedPython compiles fixed-layout classes only, SPEC N-11). The
+speedup is reported against that CPython version; `CPython (no __slots__)` runs the same program
+with the `__slots__` line removed, so what adding the slots changes in CPython is recorded too.
 """
 import argparse
 import datetime
@@ -40,7 +44,10 @@ BENCHMARKS = {
     "binary-trees": ("binary_trees.py", "binary_trees.mjs", "BinaryTrees", "binary_trees", "10", "16"),
     "wordfreq": ("wordfreq.py", "wordfreq.mjs", "Wordfreq", "wordfreq", "100000", "3000000"),
 }
-COLUMNS = ["CPython", "Node", "Java", "Rust", "TypedPython @compiled"]
+NOSLOTS = "CPython (no __slots__)"
+COLUMNS = ["CPython", NOSLOTS, "Node", "Java", "Rust", "TypedPython @compiled"]
+SLOTS_LINE = '    __slots__ = ("left", "right")\n'
+NOSLOTS_BENCHMARKS = {"binary-trees"}
 NOT_BUILT = "n/a (not built)"
 
 
@@ -99,6 +106,18 @@ def build_compiled(tp_dir: Path, tp_python: str) -> dict[str, tuple[str, list[st
     return built
 
 
+def noslots_source(name: str) -> Path:
+    """The benchmark with its `__slots__` line removed, written under tp-build/noslots/."""
+    py = BENCHMARKS[name][0]
+    source = (ROOT / "py" / py).read_text()
+    if SLOTS_LINE not in source:
+        sys.exit(f"{name}: expected the line {SLOTS_LINE.strip()!r} in py/{py}")
+    out = TP_BUILD / "noslots" / py
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(source.replace(SLOTS_LINE, "", 1))
+    return out
+
+
 def commands(name: str, size: str, python: str, java_source: bool,
              compiled: dict[str, tuple[str, list[str]] | str] | None = None) -> dict[str, list[str]]:
     py, js, cls, rs, _, _ = BENCHMARKS[name]
@@ -110,10 +129,20 @@ def commands(name: str, size: str, python: str, java_source: bool,
         "Java": java,
         "Rust": [str(TARGET / "release" / rs), size],
     }
+    if name in NOSLOTS_BENCHMARKS:
+        cmds[NOSLOTS] = [python, str(noslots_source(name)), size]
     entry = (compiled or {}).get(name)
     if isinstance(entry, tuple):
         cmds["TypedPython @compiled"] = [python, "-c", RUN_SNIPPET, Path(py).stem, entry[0], size]
     return cmds
+
+
+def source_commit() -> str:
+    """The commit the harness (and the TypedPython sources beside it) was measured at."""
+    result = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True)
+    dirty = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"],
+                           capture_output=True, text=True).stdout.strip()
+    return result.stdout.strip() + ("+dirty" if dirty else "") if result.returncode == 0 else "unknown"
 
 
 def run_once(cmd: list[str]) -> tuple[float, str]:
@@ -179,7 +208,8 @@ def measure(args: argparse.Namespace) -> int:
     print("| benchmark | size | " + " | ".join(COLUMNS) + " |")
     print("|---|---|" + "---|" * len(COLUMNS))
     for name, row in results.items():
-        cells = [f"{row[c]['median_s']:.3f} s" if isinstance(row.get(c), dict) else str(row.get(c, NOT_BUILT))
+        cells = [f"{row[c]['median_s']:.3f} s" if isinstance(row.get(c), dict)
+                 else str(row.get(c, ", " if c == NOSLOTS else NOT_BUILT))
                  for c in COLUMNS]  # type: ignore[index]
         flag = "" if row["outputs_agree"] else " (OUTPUTS DIFFER)"
         print(f"| {name}{flag} | {row['size']} | " + " | ".join(cells) + " |")
@@ -190,6 +220,7 @@ def measure(args: argparse.Namespace) -> int:
         out_dir.mkdir(exist_ok=True)
         path = out_dir / f"{datetime.date.today().isoformat()}-{socket.gethostname()}.json"
         payload = {"date": datetime.datetime.now().isoformat(timespec="seconds"),
+                   "commit": source_commit(),
                    "host": socket.gethostname(), "load_average": load, "repeat": args.repeat,
                    "python": subprocess.run([args.python, "--version"], capture_output=True, text=True).stdout.strip(),
                    "results": results}
@@ -216,6 +247,7 @@ def interleaved(args: argparse.Namespace) -> int:
         size = args.size.get(name, spec[5])
         cmds = commands(name, size, args.python, False, compiled)
         a_cmd, b_cmd = cmds["CPython"], cmds["TypedPython @compiled"]
+        c_cmd = cmds.get(NOSLOTS)
         pairs = []
         for i in range(args.pairs):
             order = (a_cmd, b_cmd) if i % 2 == 0 else (b_cmd, a_cmd)   # alternate which runs first
@@ -225,11 +257,21 @@ def interleaved(args: argparse.Namespace) -> int:
             if o_a != o_b:
                 print(f"{name}: OUTPUTS DIFFER in pair {i}: {o_a!r} vs {o_b!r}")
                 return 1
-            pairs.append({"cpython_s": t_a, "compiled_s": t_b, "ratio": t_a / t_b, "load": load})
+            pair = {"cpython_s": t_a, "compiled_s": t_b, "ratio": t_a / t_b, "load": load}
+            if c_cmd is not None:
+                t_c, o_c = run_once(c_cmd)
+                if o_c != o_a:
+                    print(f"{name}: OUTPUTS DIFFER in pair {i} (no __slots__): {o_c!r} vs {o_a!r}")
+                    return 1
+                pair.update(cpython_noslots_s=t_c, ratio_vs_noslots=t_c / t_b)
+            pairs.append(pair)
         ratios = [p["ratio"] for p in pairs]
         results[name] = {"size": size, "compiled_functions": entry[1], "pairs": pairs,
                          "median_ratio": statistics.median(ratios), "min_ratio": min(ratios),
                          "max_ratio": max(ratios)}
+        if c_cmd is not None:
+            results[name]["median_ratio_vs_noslots"] = statistics.median(
+                p["ratio_vs_noslots"] for p in pairs)
         print(f"measured {name}", file=sys.stderr)
 
     print()
@@ -237,7 +279,7 @@ def interleaved(args: argparse.Namespace) -> int:
     print("|---|---|---|---|---|")
     for name, r in results.items():
         if "skipped" in r:
-            print(f"| {name} | — | {r['skipped']} | | |")
+            print(f"| {name} | - | {r['skipped']} | | |")
             continue
         loads = [p["load"][0] for p in r["pairs"]]  # type: ignore[index]
         print(f"| {name} | {r['size']} | {r['median_ratio']:.1f}x | {r['min_ratio']:.1f}–{r['max_ratio']:.1f}x "
@@ -248,6 +290,7 @@ def interleaved(args: argparse.Namespace) -> int:
         out_dir.mkdir(exist_ok=True)
         path = out_dir / f"{datetime.date.today().isoformat()}-{socket.gethostname()}-interleaved.json"
         path.write_text(json.dumps({"date": datetime.datetime.now().isoformat(timespec="seconds"),
+                                    "commit": source_commit(),
                                     "host": socket.gethostname(), "method": "interleaved A/B",
                                     "pairs": args.pairs, "results": results}, indent=2) + "\n")
         print(f"wrote {path}")

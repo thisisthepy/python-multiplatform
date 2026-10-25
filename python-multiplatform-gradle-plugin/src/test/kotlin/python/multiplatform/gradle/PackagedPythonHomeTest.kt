@@ -101,6 +101,34 @@ class PackagedPythonHomeTest {
         assertTrue(sync.source.files.none { it.startsWith(fixture.prefix) }, "disabled packaging must copy nothing")
     }
 
+    // ---- beside a native image (issue #246) ----
+
+    @Test
+    fun aNativeImageDirectoryGetsThePrunedPrefixBesideTheExecutable() {
+        val fixture = Fixture()
+        val images = File(fixture.root, "native-image-out")
+        fixture.extension.nativeImageDirectory.set(images)
+        val sync = fixture.project.tasks.getByName("stageNativeImagePythonHome") as Sync
+
+        assertEquals(File(images, PACKAGED_HOME_DIRECTORY), sync.destinationDir)
+        val dependencies = sync.taskDependencies.getDependencies(sync).map { it.name }
+        assertTrue("stagePythonHome" in dependencies, "the prefix must be staged first; got $dependencies")
+        val copied = sync.source.files.map { it.relativeTo(fixture.prefix).invariantSeparatorsPath }.toSet()
+        assertTrue(fixture.stdlibFile in copied, "the stdlib must be copied; got $copied")
+        assertTrue(fixture.libraryFile in copied, "the shared library must be copied; got $copied")
+        assertFalse(fixture.headerFile in copied, "headers are build-time only; got $copied")
+        assertFalse(fixture.bytecodeFile in copied, "__pycache__ is not copied; got $copied")
+    }
+
+    @Test
+    fun withoutANativeImageDirectoryTheTaskCopiesNothing() {
+        val fixture = Fixture()
+        val sync = fixture.project.tasks.getByName("stageNativeImagePythonHome") as Sync
+        assertTrue(sync.source.files.none { it.startsWith(fixture.prefix) }, "an unset directory must copy nothing")
+        val dependencies = sync.taskDependencies.getDependencies(sync).map { it.name }
+        assertFalse("stagePythonHome" in dependencies, "an unset directory must not stage; got $dependencies")
+    }
+
     /**
      * A project whose Gradle user home already holds a "staged" prefix, at exactly the path
      * `configurePythonHomeStaging` computes, so the wiring can be read without a download.

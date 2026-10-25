@@ -4,15 +4,30 @@ plugins {
     alias(libs.plugins.android.application).apply(false)
     alias(libs.plugins.android.library).apply(false)
     alias(libs.plugins.jetpack.compose).apply(false)
+    alias(libs.plugins.kotlin.native.desktop).apply(false)
     alias(libs.plugins.compose.compiler).apply(false)
     alias(libs.plugins.kotlin.multiplatform).apply(false)
     alias(libs.plugins.kotlin.jvm).apply(false)
     alias(libs.plugins.ksp).apply(false)
 }
 
+// One published version for every artifact (#70): "$pythonVersion-$libraryVersionSuffix", the same
+// value python-multiplatform and the included Gradle-plugin build derive from gradle.properties.
+val publishedVersion = "${property("pythonVersion")}-${property("libraryVersionSuffix")}"
+
 allprojects {
-    group = "io.github.thisisthepy"
-    version = "3.13.0"  // Official Python release version
+    group = "org.thisisthepy"
+    version = publishedVersion
+}
+
+// Fails the build when any project in this build publishes under another version; the plugin build
+// checks its own the same way (python-multiplatform-gradle-plugin/build.gradle.kts).
+gradle.projectsEvaluated {
+    val wrong = rootProject.allprojects.filter { it.version.toString() != publishedVersion }
+    check(wrong.isEmpty()) {
+        "published versions disagree (#70): expected $publishedVersion, got " +
+            wrong.joinToString { "${it.path}=${it.version}" }
+    }
 }
 
 // ROADMAP §15a/§15e item 3: `python-multiplatform-gradle-plugin` is a separate included build

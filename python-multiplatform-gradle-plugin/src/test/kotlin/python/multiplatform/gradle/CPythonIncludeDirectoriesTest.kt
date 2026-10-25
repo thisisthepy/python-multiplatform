@@ -22,8 +22,13 @@ class CPythonIncludeDirectoriesTest {
         assertEquals("linux-x86_64-freethreaded/python/include/python3.14t", l.relativePath("linux-x86_64", CPythonFlavour.FREE_THREADED, version))
         assertEquals("windows-x86_64/python/include", l.relativePath("windows-x86_64", CPythonFlavour.GIL, version))
         assertEquals("windows-x86_64-freethreaded/python/include", l.relativePath("windows-x86_64", CPythonFlavour.FREE_THREADED, version))
+        // #313: the 3.15 iOS archive has headers only inside the framework.
+        assertEquals("ios/Python.xcframework/ios-arm64/Python.framework/Headers", l.relativePath("ios-arm64", CPythonFlavour.GIL, version))
+        assertEquals(
+            "ios/Python.xcframework/ios-arm64_x86_64-simulator/Python.framework/Headers",
+            l.relativePath("ios-arm64_x86_64-simulator", CPythonFlavour.GIL, version),
+        )
         assertEquals("android-aarch64/prefix/include/python3.14", l.relativePath("android-aarch64", CPythonFlavour.GIL, version))
-        assertEquals("ios/Python.xcframework/ios-arm64/include/python3.14", l.relativePath("ios-arm64", CPythonFlavour.GIL, version))
     }
 
     @Test

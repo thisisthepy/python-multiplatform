@@ -273,7 +273,12 @@ internal fun resolveKotlinBoundary(
     if (info != null) {
         val underlying = resolveKotlinBoundary(info.underlyingType, classpath, direction)
         val usable = when (direction) {
-            BoundaryDirection.PARAMETER -> info.constructorIsPublic
+            // Issue #168: opened as a raw primitive only when it can be opened **both ways**. A value
+            // class whose property is not public (`TextUnitType`) reaches Python as a boxed handle
+            // when Kotlin returns one (`TextUnitType.Sp`), so a parameter of it must take that handle.
+            // Marshalled as the raw primitive it would read a number and refuse the very value Kotlin
+            // handed out; as an object it is cast (`args[i] as TextUnitType`) and kotlinc unboxes.
+            BoundaryDirection.PARAMETER -> info.constructorIsPublic && info.propertyIsPublic && info.propertyName != null
             BoundaryDirection.RETURN -> info.propertyIsPublic && info.propertyName != null
         }
         // Falls through to the object handle below when the wrapper cannot be opened from outside
