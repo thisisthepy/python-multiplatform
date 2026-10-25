@@ -135,3 +135,47 @@ def test_array_function_with_a_callback_matches_cpython(write, tmp_path):
             ys[1] = 9.0
         mod.fill_then(ys, cb2)
         assert ys == [1.0, 9.0, 3.0]
+
+
+GC_REACHABLE = """\
+# typedpython: compiled
+
+
+class Cell:
+    a: object
+    b: object
+    __slots__ = ("a", "b")
+
+    def __init__(self, a: object, b: object) -> None:
+        self.a = a
+        self.b = b
+
+
+def seta(c: Cell, v: object) -> None:
+    c.a = v
+
+
+def fresh(a: object, n: int) -> object:
+    c = Cell(None, None)
+    seta(c, a)
+    s: object = None
+    for i in range(n):
+        s = c.a
+    return s
+"""
+
+
+def test_a_fresh_local_does_not_exempt_the_callee_class_guard(tmp_path):
+    # N-12: on free-threaded CPython another thread can reach even a just-allocated object
+    # through gc.get_objects() and assign __class__, so the callee's `type(x) is C` entry guard
+    # can fail. The impure caller must be skipped (verify/deopt-impure), never a CGenError.
+    path = tmp_path / "gcreach.py"
+    path.write_text(GC_REACHABLE)
+    result = pipeline.compile_module(path, tmp_path / "out", cost_rule=False)
+    assert "fresh" in result.skipped, result.skipped
+    assert "deopt" in result.skipped["fresh"], result.skipped["fresh"]
+    assert "seta" in [f.name for f in result.module.functions]
+    mod = pipeline.load(result)
+    c = mod.Cell(None, None)
+    mod.seta(c, 7)
+    assert c.a == 7

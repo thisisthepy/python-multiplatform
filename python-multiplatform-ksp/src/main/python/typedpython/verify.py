@@ -1009,9 +1009,13 @@ class _Checker:
             else:
                 redo = True
         if not redo:
-            for k, (a, p) in enumerate(zip(args, callee.params)):
-                if type(p) is Param and p.cls is not None and self.exact_of(a) != p.cls:
-                    self.can_deopt = True       # the callee's entry guard `type(x) is C` may fail
+            for p in callee.params:
+                # The callee's entry guard `type(x) is C` may fail, even for an argument that is a
+                # just-allocated `New(C)` local: on free-threaded CPython another thread can find
+                # the object through gc.get_objects() and assign `__class__` (SPEC N-12). So
+                # exact_of must not exempt the guard; cgen's `_can_deopt` is equally conservative.
+                if type(p) is Param and p.cls is not None:
+                    self.can_deopt = True
         if callee.may_deopt is True and not redo:
             self.can_deopt = True
         if not redo and not self.covers(callee):
