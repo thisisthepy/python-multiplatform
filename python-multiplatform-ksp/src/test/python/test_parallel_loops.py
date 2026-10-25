@@ -1777,3 +1777,206 @@ def test_bitwise_equals_interpreter_for_every_thread_count(bbuilt, threads):
         assert r["regions"] == 0 and r["reruns"] == 0
     elif (os.cpu_count() or 1) > 1:
         assert r["regions"] > 0 and r["reruns"] >= 1
+
+
+# =====================================================================================================
+# ThreadSanitizer over the parallel regions (SPEC N-15, #277: "race tests and TSan pass on 3.15t").
+# The interpreter is not instrumented; TSan sees the generated C and the runtime header, which is where
+# the workers, the partial slots and the join live. A report counts when the first non-sanitizer frame
+# of one of its two accesses is in the extension (same rule as test_free_threaded.py).
+# =====================================================================================================
+
+TSOURCE = '''\
+# typedpython: compiled
+
+# typedpython: parallel
+def t_scale(xs: list[float], a: float, b: float) -> None:
+    for i in range(len(xs)):
+        xs[i] = xs[i] * a + b
+
+
+# typedpython: parallel
+def t_sum(xs: list[int]) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s += xs[i]
+    return s
+
+
+# typedpython: parallel
+def t_prod(xs: list[int], c: int) -> int:
+    s: int = 1
+    for i in range(len(xs)):
+        s *= xs[i] * c
+    return s
+
+
+# typedpython: parallel
+def t_min(xs: list[int]) -> int:
+    m = xs[0]
+    for i in range(len(xs)):
+        if xs[i] < m:
+            m = xs[i]
+    return m
+
+
+# typedpython: parallel
+def t_max(xs: list[float]) -> float:
+    m = xs[0]
+    for i in range(len(xs)):
+        if xs[i] > m:
+            m = xs[i]
+    return m
+
+
+# typedpython: parallel
+def t_and(xs: list[int]) -> int:
+    s: int = -1
+    for i in range(len(xs)):
+        s &= xs[i]
+    return s
+
+
+# typedpython: parallel
+def t_or(xs: list[int]) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s |= xs[i]
+    return s
+
+
+# typedpython: parallel
+def t_xor(xs: list[int]) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s ^= xs[i]
+    return s
+'''
+
+TSAN_PAR_BODY = """
+I = m.__typedpython_interpreted__
+n = 131072
+ints = [((k * 40503) % 65521) - 30000 for k in range(n)]
+small = [1 + (k % 2) for k in range(n)]
+flts = [((k * 40503) % 65521) / 13.0 for k in range(n)]
+bad = []
+def work(seed):
+    def go():
+        for _ in range(3):
+            xs = list(flts); m.t_scale(xs, 1.5, -0.5)
+            ys = list(flts); I["t_scale"](ys, 1.5, -0.5)
+            if xs != ys: bad.append("t_scale")
+            for nm, a in (("t_sum", ints), ("t_min", ints), ("t_max", flts), ("t_and", ints),
+                          ("t_or", ints), ("t_xor", ints)):
+                if getattr(m, nm)(list(a)) != I[nm](list(a)): bad.append(nm)
+            if m.t_prod(list(small[:30]), 1) != I["t_prod"](list(small[:30]), 1): bad.append("t_prod")
+    return go
+errors = run_threads([work(k) for k in range(4)])
+print("TSAN-RUN-DONE", json.dumps({"bad": bad, "errors": errors, "regions": m.__typedpython_parallel__()[0]}))
+"""
+
+
+def _tsan_launcher_par(tmp: Path) -> Path | None:
+    if sys.platform != "darwin" and not sys.platform.startswith("linux"):
+        return None
+    cc = (sysconfig.get_config_var("CC") or "cc").split()
+    lc, launcher = tmp / "tsan_launcher.c", tmp / "tsan_python"
+    lc.write_text("#include <Python.h>\nint main(int argc, char **argv) { return Py_BytesMain(argc, argv); }\n")
+    libdir = sysconfig.get_config_var("LIBDIR")
+    try:
+        link = subprocess.run(cc + ["-fsanitize=thread", "-g", f"-I{sysconfig.get_paths()['include']}", str(lc),
+                                    f"-L{libdir}", f"-lpython{sysconfig.get_config_var('LDVERSION')}",
+                                    f"-Wl,-rpath,{libdir}", "-o", str(launcher)],
+                              capture_output=True, text=True)
+    except OSError:
+        return None
+    return launcher if link.returncode == 0 else None
+
+
+def _par_access_is_ours(block: str, name: str) -> bool:
+    for part in block.split("\n\n")[:2]:
+        frames = [ln for ln in part.splitlines() if ln.strip().startswith("#")]
+        first = next((f for f in frames if "libtsan" not in f and "sanitizer_common" not in f), "")
+        if name in first:
+            return True
+    return False
+
+
+def _par_tsan_reports(tmp: Path, launcher: Path, runtime_dir: Path | None, tag: str) -> tuple[int, bool, str]:
+    d = tmp / tag
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / "tsanpar.py"
+    path.write_text(TSOURCE)
+    proved, _ = verify.verify(frontend.lower(path))
+    flags = list(cbuild.DEFAULT_FLAGS) + ["-O1", "-g", "-fno-omit-frame-pointer", "-fsanitize=thread"]
+    so = cbuild.build(cgen.generate(proved, path), "tsanpar", d / "out", runtime_dir=runtime_dir, flags=flags)
+    loader = CHILD + "import time\n"
+    body = loader + textwrap.dedent("""
+        def run_threads(targets):
+            errors = []
+            def wrap(fn):
+                def go():
+                    try:
+                        fn()
+                    except BaseException as e:
+                        errors.append(repr(e))
+                return go
+            ts = [threading.Thread(target=wrap(t)) for t in targets]
+            for t in ts: t.start()
+            for t in ts: t.join()
+            return errors
+    """) + textwrap.dedent(TSAN_PAR_BODY)
+    env = dict(os.environ, PYTHONHOME=sys.base_prefix, TYPEDPYTHON_THREADS="4",
+               TSAN_OPTIONS="halt_on_error=0:report_signal_unsafe=0:history_size=4")
+    env.pop("PYTHON_GIL", None)
+    env.pop("DYLD_INSERT_LIBRARIES", None)
+    run = subprocess.run([str(launcher), "-c", body, str(so)], capture_output=True, text=True, env=env, timeout=900)
+    out = run.stdout + run.stderr
+    blocks = out.split("WARNING: ThreadSanitizer")[1:]
+    ours = [b for b in blocks if _par_access_is_ours(b, "tsanpar")]
+    first = ("WARNING: ThreadSanitizer" + ours[0])[:4000] if ours else ""
+    done = "TSAN-RUN-DONE" in out and '"bad": []' in out and '"errors": []' in out \
+        and '"regions": 0}' not in out         # regions really started workers (not a vacuous pass)
+    return len(ours), done, first + ("" if done else "\n--- output tail ---\n" + out[-1500:])
+
+
+@pytest.fixture(scope="module")
+def par_tsan_launcher(tmp_path_factory):
+    d = tmp_path_factory.mktemp("partsan")
+    launcher = _tsan_launcher_par(d)
+    if launcher is None:
+        pytest.skip("cannot link a ThreadSanitizer launcher on this host")
+    return d, launcher
+
+
+@pytest.mark.skipif(not FREE_THREADED, reason="needs a free-threaded CPython")
+@pytest.mark.skipif((os.cpu_count() or 1) < 2, reason="needs a second core to start a region")
+def test_tsan_reports_nothing_on_parallel_regions(par_tsan_launcher):
+    d, launcher = par_tsan_launcher
+    reports, done, first = _par_tsan_reports(d, launcher, None, "real")
+    assert done and reports == 0, f"{reports} ThreadSanitizer report(s) (done={done}); first:\n{first}"
+
+
+def _racy_par_runtime(tmp: Path) -> Path:
+    """tp_runtime.h with the join removed: workers are detached, so the caller combines the partials
+    while the workers are still writing them."""
+    h = (cbuild.RUNTIME_DIR / "tp_runtime.h").read_text()
+    old = "                pthread_join(th[k], NULL);\n"
+    assert old in h
+    g = h.replace(old, "                pthread_detach(th[k]);\n")
+    d = tmp / "rt"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "tp_runtime.h").write_text(g)
+    return d
+
+
+@pytest.mark.race_mutant
+@pytest.mark.skipif(not FREE_THREADED, reason="needs a free-threaded CPython")
+@pytest.mark.skipif((os.cpu_count() or 1) < 2, reason="needs a second core to start a region")
+def test_tsan_sees_a_region_combined_before_the_join(par_tsan_launcher):
+    """The check can fail: with the join replaced by a detach TSan reports the partials and the loop
+    output being read while workers still write them."""
+    d, launcher = par_tsan_launcher
+    rt = _racy_par_runtime(d / "racy")
+    reports, _done, _first = _par_tsan_reports(d, launcher, rt, "mutant")
+    assert reports > 0
