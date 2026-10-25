@@ -256,7 +256,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `Owner.Companion` (`Owner.<CompanionName>` for a named companion), read as an attribute of the owner's
   proxy class or of its module. When the companion lists the owner as a direct supertype in its Kotlin
   metadata (`Modifier.Companion : Modifier`) the value is an `Owner` proxy instance (`isinstance` holds),
-  otherwise a proxy of the companion's own type. Each read returns a new handle to the same Kotlin object. Two proxies are `==` when they hold the same
+  otherwise a proxy of the companion's own type. An explicit `import pkg.Owner` of the same-named module keeps the class on the parent package (the module stays in `sys.modules`), so `import pkg.Owner as M` binds the class (#323). Each read returns a new handle to the same Kotlin object. Two proxies are `==` when they hold the same
   Kotlin object (reference identity) and hash by its identity hash; `is` is not guaranteed; Kotlin
   `equals` and `hashCode` are not used (value equality is not provided). On wasmJs, which has no
   identity hash, the hash is the object's `hashCode()`, so there a mutable object that overrides it
