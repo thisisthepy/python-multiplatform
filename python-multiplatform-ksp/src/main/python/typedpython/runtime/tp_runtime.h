@@ -3170,8 +3170,14 @@ static inline int tp_par_run(tp_par_fn fn, const void *ctx, uint64_t n)
 #define TP_PAR_BAD 2
 #define TP_PAR_OP_ADD 0
 #define TP_PAR_OP_MUL 1
+#define TP_PAR_OP_AND 2
+#define TP_PAR_OP_OR 3
+#define TP_PAR_OP_XOR 4
 
-static inline int64_t tp_par_identity(int op) { return op == TP_PAR_OP_MUL ? 1 : 0; }
+static inline int64_t tp_par_identity(int op)
+{
+    return op == TP_PAR_OP_MUL ? 1 : op == TP_PAR_OP_AND ? -1 : 0;
+}
 
 /* acc = acc op part[0] op part[1] ... in chunk order, checked like the sequential code. Returns 0 and
  * stores the result in *acc, or 1 (a chunk failed or the combination overflowed) leaving *acc alone. */
@@ -3185,6 +3191,10 @@ static inline int tp_par_combine(int op, int64_t *acc, const int64_t *part, cons
         }
     }
     for (k = 0; k < TP_PAR_HARD_CAP && st[k] == TP_PAR_OK; k++) {
+        if (op >= TP_PAR_OP_AND) {                 /* bitwise: exact, never overflows */
+            v = op == TP_PAR_OP_AND ? (v & part[k]) : op == TP_PAR_OP_OR ? (v | part[k]) : (v ^ part[k]);
+            continue;
+        }
         if (op == TP_PAR_OP_MUL ? tp_mul_i64(v, part[k], &w) : tp_add_i64(v, part[k], &w)) {
             return 1;
         }

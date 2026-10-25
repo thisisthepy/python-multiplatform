@@ -215,13 +215,13 @@ is eligible only if ALL of these hold:
     distinct lists by the entry guard, local arrays are distinct allocations), and a read of the
     stored array itself is the same element the iteration writes.
   * Step 2 (reductions): or the body is a non-empty sequence of `acc = acc op e` (`_par_reduce`): op
-    ADD or MUL, each `acc` a distinct i64 local, definitely assigned before the loop, not an array,
+    ADD, MUL, AND, OR or XOR, each `acc` a distinct i64 local, definitely assigned before the loop, not an array,
     loop variable or entry global, and read nowhere else in the body (not in any `e`); `e` built from
     i64 Const, i64 Local (the loop variable, or a scalar nothing in the body assigns), `b[var]`
-    proven on an i64 non-buffer list or local array, and i64 + - *. Stores and reductions are never
+    proven on an i64 non-buffer list or local array, and i64 + - * & | ^ and ~ (step 4; no shifts). Stores and reductions are never
     mixed in one loop. Those nodes can overflow, which is not a failure of the region: the runtime
-    discards it and reruns the loop sequentially. (& | ^ are not in the compiled subset: the front
-    end lowers no bitwise operator, so there is no such reduction to mark.)
+    discards it and reruns the loop sequentially. Step 4: acc & | ^ e never overflow (identity -1 for &,
+    0 for | and ^); only an overflow inside `e` reruns.
   * Step 3 (min/max): a statement of the reduction body may be `if e < acc: acc = e` / `e > acc` (either
     operand order, no else), `acc` an i64 or f64 local, `e` of its type (`_par_minmax`). That is Python's
     `min(acc, e)`; the f64 NaN case reruns sequentially at run time (SPEC N-15).
@@ -308,6 +308,12 @@ BUFFER = "verify/buffer"
 CLASS = "verify/class"
 FIELD = "verify/field-unproved"
 PAR_LOOP = "verify/par-loop"
+
+
+# SPEC N-15 steps 2 and 4: the reduction operators, and the i64 operators allowed in an element expression
+# (no shifts: their deopt is not a worker failure).
+_PAR_RED_OPS = (BinOpKind.ADD, BinOpKind.MUL, BinOpKind.AND, BinOpKind.OR, BinOpKind.XOR)
+_PAR_I64_OPS = (BinOpKind.ADD, BinOpKind.SUB, BinOpKind.MUL, BinOpKind.AND, BinOpKind.OR, BinOpKind.XOR)
 
 
 @dataclass(frozen=True)
@@ -1754,7 +1760,7 @@ class _Checker:
                 mm[hit[0]] = hit[2]
                 continue
             if (type(st) is not Assign or type(st.value) is not BinOp or st.value.type is not Type.I64
-                    or st.value.op not in (BinOpKind.ADD, BinOpKind.MUL) or st.value.np
+                    or st.value.op not in _PAR_RED_OPS or st.value.np
                     or st.target in accs):
                 return None
             accs[st.target] = st.value.op.name
@@ -1781,8 +1787,10 @@ class _Checker:
                 return False
             if t is BinOp:
                 return (e.type is Type.I64 and e.left.type is Type.I64 and e.right.type is Type.I64
-                        and e.op in (BinOpKind.ADD, BinOpKind.SUB, BinOpKind.MUL) and not e.np
+                        and e.op in _PAR_I64_OPS and not e.np
                         and ok(e.left) and ok(e.right))
+            if t is UnaryOp:                          # ~x of an i64: cannot fail (SPEC N-16)
+                return e.type is Type.I64 and e.op is UnaryOpKind.INVERT and ok(e.operand)
             return False
 
         def reads_acc(e: object) -> bool:

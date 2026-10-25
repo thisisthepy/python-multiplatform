@@ -497,7 +497,7 @@ for the epoch's increment. `tp_runtime.h` needs the GCC/Clang `__atomic` builtin
 
 ## Parallel regions (SPEC N-15, issues #151, #277)
 A `ForRange` the verifier marked `par` (`ir.ParInfo`; marked function, `a[i] = F64 expression` stores
-or i64 `+ *` reductions, or min/max `if e < acc: acc = e` on an i64 or f64) runs its iterations on per-region C threads above a work threshold. Workers touch no Python
+or i64 `+ * & | ^` reductions, or min/max `if e < acc: acc = e` on an i64 or f64) runs its iterations on per-region C threads above a work threshold. Workers touch no Python
 object and no Python API, are not Python threads and never outlive the call.
     #define TP_PAR_MIN_WORK 65536          /* PLACEHOLDER, to be measured on #151: weighted iterations (trip count * ParInfo.weight) */
     #define TP_PAR_MAX_THREADS 8           /* default cap; TYPEDPYTHON_THREADS overrides (1 disables), hard cap 64 */
@@ -512,7 +512,7 @@ object and no Python API, are not Python threads and never outlive the call.
     void tp_par_stats(int64_t out[4]);                           /* regions with workers, workers started, failed creations, reduction reruns */
     #define TP_PAR_NONE 0 / TP_PAR_OK 1 / TP_PAR_BAD 2    /* per-chunk state of a reduction chunk (zero-initialised array of TP_PAR_HARD_CAP) */
     #define TP_PAR_OP_ADD 0 / TP_PAR_OP_MUL 1
-    int  tp_par_combine(int op, int64_t *acc, const int64_t *part, const unsigned char *st);  /* acc op= part[0], part[1], ... in chunk order, checked; 1 if a chunk was BAD or it overflowed (acc untouched) */
+    int  tp_par_combine(int op, int64_t *acc, const int64_t *part, const unsigned char *st);  /* op: TP_PAR_OP_ADD/MUL/AND/OR/XOR; acc op= part[0], part[1], ... in chunk order, checked (AND/OR/XOR never overflow); 1 if a chunk was BAD or it overflowed (acc untouched) */
     void tp_par_rerun_note(void);                                /* counts a discarded reduction region */
 `tp_par_run` always completes the whole range. The calling thread runs the first chunk; a chunk whose
 `pthread_create` failed runs on the calling thread after it (fewer workers, down to none: the sequential

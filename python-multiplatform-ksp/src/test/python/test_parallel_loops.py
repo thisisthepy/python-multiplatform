@@ -1470,3 +1470,310 @@ def test_interpreter_shutdown_with_a_daemon_reduction_region(rbuilt):
         sys.stdout.flush()
     """ % BIG, _threads_env(), timeout=300)
     assert r == {"exiting": True}
+
+
+# =====================================================================================================
+# N-15 step 4: i64 bitwise reductions `acc = acc & e`, `| e`, `^ e` (#277).
+#
+# Written before the implementation (red). `& | ^` are exactly associative and commutative and never
+# overflow: a chunk folds from the identity (-1 for &, 0 for | and ^) and the partials combine in chunk
+# order. An overflow in an element expression (`xs[i] * c`) still discards the region and reruns the
+# loop sequentially. Shifts are not accepted in `e` (their deopt is not a worker failure in v1).
+# Red record: before the change none of the BOK loops was `par` (_par_reduce accepted ADD/MUL only).
+# =====================================================================================================
+
+BSOURCE = '''\
+# typedpython: compiled
+
+# typedpython: parallel
+def b_and(xs: list[int]) -> int:
+    s: int = -1
+    for i in range(len(xs)):
+        s &= xs[i]
+    return s
+
+
+# typedpython: parallel
+def b_or(xs: list[int]) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s |= xs[i]
+    return s
+
+
+# typedpython: parallel
+def b_xor(xs: list[int]) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s ^= xs[i]
+    return s
+
+
+# typedpython: parallel
+def b_and_swapped(xs: list[int], s0: int) -> int:
+    s: int = s0
+    for i in range(len(xs)):
+        s = xs[i] & s
+    return s
+
+
+# typedpython: parallel
+def b_or_swapped(xs: list[int]) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s = xs[i] | s
+    return s
+
+
+# typedpython: parallel
+def b_xor_expr(xs: list[int], c: int) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s = s ^ ((xs[i] * c) + (i & 255))
+    return s
+
+
+# typedpython: parallel
+def b_or_not(xs: list[int]) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s |= ~xs[i]
+    return s
+
+
+# typedpython: parallel
+def b_mix(xs: list[int]) -> int:
+    a: int = 0
+    x: int = 5
+    o: int = 0
+    m: int = 1000000
+    for i in range(len(xs)):
+        a += xs[i]
+        x ^= xs[i] & 4095
+        o |= xs[i]
+        if xs[i] < m:
+            m = xs[i]
+    return a + x * 3 + o * 5 + m * 7
+
+
+# typedpython: parallel
+def b_local(n: int) -> int:
+    t = [0] * n
+    for i in range(len(t)):
+        t[i] = i * 7 - 3
+    s: int = 0
+    for i in range(len(t)):
+        s ^= t[i]
+    return s
+
+
+def b_unmarked(xs: list[int]) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s ^= xs[i]
+    return s
+
+
+# typedpython: parallel
+def nb_acc_read(xs: list[int]) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s |= xs[i] ^ s
+    return s
+
+
+# typedpython: parallel
+def nb_two_ops(xs: list[int]) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s |= xs[i]
+        s &= xs[i]
+    return s
+
+
+# typedpython: parallel
+def nb_and_then_add(xs: list[int]) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s ^= xs[i]
+        s += 1
+    return s
+
+
+# typedpython: parallel
+def nb_shift(xs: list[int]) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s ^= xs[i] << 1
+    return s
+
+
+# typedpython: parallel
+def nb_rshift(xs: list[int], k: int) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s |= xs[i] >> k
+    return s
+
+
+# typedpython: parallel
+def nb_copy(xs: list[int]) -> int:
+    s: int = 0
+    w: int = 0
+    for i in range(len(xs)):
+        s ^= xs[i]
+        w = s
+    return s + w
+
+
+# typedpython: parallel
+def nb_div(xs: list[int], d: int) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s ^= xs[i] // d
+    return s
+'''
+
+BOK = {
+    "b_and": (("s", "AND"),), "b_or": (("s", "OR"),), "b_xor": (("s", "XOR"),),
+    "b_and_swapped": (("s", "AND"),), "b_or_swapped": (("s", "OR"),), "b_xor_expr": (("s", "XOR"),),
+    "b_or_not": (("s", "OR"),), "b_local": (("s", "XOR"),),
+    "b_mix": (("a", "ADD"), ("m", "MIN"), ("o", "OR"), ("x", "XOR")),
+}
+BNO = ["nb_acc_read", "nb_two_ops", "nb_and_then_add", "nb_shift", "nb_rshift", "nb_copy", "nb_div"]
+
+
+@pytest.fixture(scope="module")
+def bbuilt(tmp_path_factory):
+    return build(tmp_path_factory.mktemp("bpar"), BSOURCE, name="bparmod")
+
+
+@pytest.fixture(scope="module")
+def bmod(bbuilt):
+    return cbuild.load("bparmod", bbuilt[2])
+
+
+@pytest.mark.parametrize("name", sorted(BOK))
+def test_bitwise_reduction_loops_are_marked_par(bbuilt, name):
+    loops = [l for l in par_loops(fn(bbuilt, name)) if l.par is not None]
+    assert loops, name
+    assert loops[-1].par.reduce == BOK[name] and loops[-1].par.stored == ()
+
+
+@pytest.mark.parametrize("name", BNO)
+def test_ineligible_bitwise_shapes_stay_sequential(bbuilt, name):
+    f = fn(bbuilt, name)
+    assert f.parallel is True
+    loops = par_loops(f)
+    assert loops and all(l.par is None for l in loops), name
+
+
+def test_unmarked_bitwise_never_parallel(bbuilt):
+    assert all(l.par is None for l in par_loops(fn(bbuilt, "b_unmarked")))
+
+
+def test_bitwise_c_regions_only_for_eligible(bbuilt):
+    import re
+    owners = set(re.findall(r"static void tp_par_(\w+?)(?:_fast)?_\d+_body\(", bbuilt[1]))
+    assert owners == set(BOK), owners
+
+
+def test_verifier_rejects_a_forged_bitwise_reduction(bbuilt):
+    good = par_loops(fn(bbuilt, "b_xor"))[-1].par
+    proved, diags = _forge(bbuilt, "b_xor", dataclasses.replace(good, reduce=(("s", "OR"),)))
+    assert not proved.functions and any(d.rule == PAR_RULE for d in diags)
+    proved, diags = _forge(bbuilt, "b_xor", dataclasses.replace(good, reduce=()))
+    assert not proved.functions and any(d.rule == PAR_RULE for d in diags)
+    for name, op in (("nb_acc_read", "OR"), ("nb_two_ops", "OR"), ("nb_shift", "XOR"), ("nb_rshift", "OR"),
+                     ("nb_copy", "XOR"), ("nb_and_then_add", "XOR")):
+        proved, diags = _forge(bbuilt, name, ir.ParInfo((), (), 3, (("s", op),)))
+        assert not proved.functions and any(d.rule == PAR_RULE for d in diags), name
+    proved, diags = _forge(bbuilt, "b_xor", good)
+    assert proved.functions and not diags
+
+
+def _bsame(m, name, *args):
+    want = m.__typedpython_interpreted__[name](*[list(a) if isinstance(a, list) else a for a in args])
+    got = getattr(m, name)(*[list(a) if isinstance(a, list) else a for a in args])
+    assert got == want and type(got) is type(want), (name, got, want)
+
+
+@pytest.mark.parametrize("n", RSIZES)
+def test_bitwise_reductions_match_interpreter(bmod, n):
+    for lo, hi in ((-1000, 1000), (I64_MIN, I64_MAX), (0, 255)):
+        xs = rdata(n, 3, lo, hi)
+        for nm in ("b_and", "b_or", "b_xor", "b_or_swapped", "b_or_not", "b_mix"):
+            _bsame(bmod, nm, xs)
+        _bsame(bmod, "b_and_swapped", xs, -1)
+        _bsame(bmod, "b_and_swapped", xs, 0x0F0F0F0F0F0F0F0F)
+        _bsame(bmod, "b_xor_expr", xs, 1)
+    _bsame(bmod, "b_local", n)
+
+
+def test_bitwise_identity_edge_values(bmod):
+    n = 300001
+    _bsame(bmod, "b_and", [-1] * n)
+    _bsame(bmod, "b_and", [I64_MIN] * n)
+    _bsame(bmod, "b_or", [I64_MIN] * n)
+    _bsame(bmod, "b_xor", [I64_MAX] * n)
+    _bsame(bmod, "b_xor", [I64_MAX] * (n - 1))
+    z = [-1] * n
+    z[n // 2] = 0
+    _bsame(bmod, "b_and", z)
+
+
+def test_bitwise_region_counter_and_no_rerun(bmod):
+    if (os.cpu_count() or 1) < 2 or os.environ.get("TYPEDPYTHON_THREADS") == "1":
+        pytest.skip("single thread")
+    before = bmod.__typedpython_parallel__()
+    xs = rdata(300001, 4, I64_MIN, I64_MAX)
+    bmod.b_and(list(xs)); bmod.b_or(list(xs)); bmod.b_xor(list(xs))
+    after = bmod.__typedpython_parallel__()
+    assert after[0] - before[0] == 3 and after[3] == before[3]
+
+
+def test_bitwise_element_expression_overflow_reruns_and_equals_python(bmod):
+    n = 300001
+    xs = [1] * n
+    xs[n // 2] = 2**40
+    before = bmod.__typedpython_parallel__()[3]
+    _bsame(bmod, "b_xor_expr", xs, 2**30)               # 2**70 overflows i64: rerun, then promote
+    if (os.cpu_count() or 1) > 1 and os.environ.get("TYPEDPYTHON_THREADS") != "1":
+        assert bmod.__typedpython_parallel__()[3] > before
+
+
+BCHILD_BODY = """
+    import random
+    I = m.__typedpython_interpreted__
+    bad = []
+    def check(name, *args):
+        want = I[name](*[list(a) if isinstance(a, list) else a for a in args])
+        got = getattr(m, name)(*[list(a) if isinstance(a, list) else a for a in args])
+        if not (got == want and type(got) is type(want)):
+            bad.append([name, repr(got), repr(want)])
+    r = random.Random(9)
+    n = 300001
+    for lo, hi in ((-1000, 1000), (-2**63, 2**63 - 1), (0, 255)):
+        xs = [r.randint(lo, hi) for _ in range(n)]
+        for nm in ("b_and", "b_or", "b_xor", "b_or_swapped", "b_or_not", "b_mix"):
+            check(nm, xs)
+        check("b_and_swapped", xs, -1); check("b_xor_expr", xs, 3)
+        for k in (0, 1, 2, 3, 7, 1000):
+            for nm in ("b_and", "b_or", "b_xor", "b_mix"):
+                check(nm, xs[:k])
+    ov = [1] * n; ov[n // 2] = 2**40
+    check("b_xor_expr", ov, 2**30)
+    check("b_local", n)
+    par = m.__typedpython_parallel__()
+    print(json.dumps({"bad": bad, "regions": par[0], "reruns": par[3]}))
+"""
+
+
+@pytest.mark.parametrize("threads", [1, 2, 3, 7])
+def test_bitwise_equals_interpreter_for_every_thread_count(bbuilt, threads):
+    r = run_child(bbuilt[2], BCHILD_BODY, {"TYPEDPYTHON_THREADS": str(threads)}, timeout=900)
+    assert r["bad"] == [], r["bad"][:5]
+    if threads == 1:
+        assert r["regions"] == 0 and r["reruns"] == 0
+    elif (os.cpu_count() or 1) > 1:
+        assert r["regions"] > 0 and r["reruns"] >= 1
