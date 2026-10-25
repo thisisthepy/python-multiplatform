@@ -77,7 +77,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from typedpython import gate, ir, pyrefly, rebinding, taint
+from typedpython import gate, ir, pyrefly, rebinding, resume, taint
 from typedpython.ir import Type
 
 MARKER = "# typedpython: compiled"
@@ -1050,11 +1050,13 @@ class _Lowerer:
         pure = not self.impure
         assert pure or not self.deopts or not self.impure_mode, \
             "impure mode emitted a deopting node"
-        return ir.Function(
+        fn = ir.Function(
             name=self.sig.qname, params=params, returns=self.sig.returns, locals=locals_, body=body,
             pure=pure, may_deopt=self.deopts, source_line=self.fn.lineno,
             entry_globals=tuple(ir.Param(n, t) for n, t in self.entry_used.items()),
             owner=self.sig.owner)
+        # SPEC N-8 (#152): a snapshot holder gets a Python continuation per loop (OSR-style exit).
+        return dataclasses.replace(fn, resumes=resume.resumes_for(self.fn, fn))
 
     # --- names and types ---
 

@@ -825,6 +825,30 @@ class Function:
     # which recomputes it and rejects a function whose declared entries differ
     # (`verify/region-escape`). The front end leaves it empty.
     regions: tuple[str, ...] = ()
+    # SPEC N-8 (#152, option (i)): one entry per loop of a snapshot-holding function (see `resume.py`),
+    # in IR pre-order. Empty for a function that holds no snapshot. A loop whose continuation cannot
+    # be generated (an enclosing `with`/`try`, say) has no entry: its `site` is missing from the tuple.
+    resumes: tuple["Resume", ...] = ()
+
+
+@dataclass(frozen=True)
+class Resume:
+    """A Python continuation of one loop of a snapshot-holding function (SPEC N-8, OSR-style exit).
+
+    `site`: the loop's number, counting every ForRange, While and ForObj of `Function.body` in IR
+    pre-order: statements in order, `If.then` before `If.orelse`, a loop numbered before the loops
+    in its body. `name`: `__tp_resume_<function>_<site>` (a `.` in a method's name becomes `_`).
+    `params`: the exact parameter order of the continuation, see `resume.py` for the contract.
+    `source`: the Python source of the `def`, followed by a line replacing `co_name`/`co_qualname`
+    with the interpreted function's. `linemap`: for each line of `source` (index = line - 1) the
+    original (lineno, end_lineno, col_offset, end_col_offset); `resume.resume_sources` uses it so
+    the continuation's code object carries the original line numbers."""
+
+    site: int
+    name: str
+    params: tuple[str, ...]
+    source: str
+    linemap: tuple[tuple[int, int, int, int], ...] = ()
 
 
 @dataclass(frozen=True)

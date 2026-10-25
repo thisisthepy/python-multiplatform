@@ -2749,13 +2749,64 @@ typedef struct {
 
 /* All per-thread state of the compiled code in ONE thread-local, so a compiled call looks its address
  * up once (tp_tls_get, in the wrapper) and passes the pointer down (#125). */
+/* A local array as a new list, for an OSR-style exit (#152): a local array never escapes, so the
+ * continuation gets a fresh list with the same elements. NULL with an exception on failure. */
+static inline PyObject *tp_list_from_f64(const double *d, Py_ssize_t n)
+{
+    PyObject *l = PyList_New(n);
+    Py_ssize_t i;
+    if (l == NULL) {
+        return NULL;
+    }
+    for (i = 0; i < n; i++) {
+        PyObject *v = PyFloat_FromDouble(d[i]);
+        if (v == NULL) {
+            Py_DECREF(l);
+            return NULL;
+        }
+        PyList_SET_ITEM(l, i, v);
+    }
+    return l;
+}
+
+static inline PyObject *tp_list_from_i64(const int64_t *d, Py_ssize_t n)
+{
+    PyObject *l = PyList_New(n);
+    Py_ssize_t i;
+    if (l == NULL) {
+        return NULL;
+    }
+    for (i = 0; i < n; i++) {
+        PyObject *v = PyLong_FromLongLong((long long)d[i]);
+        if (v == NULL) {
+            Py_DECREF(l);
+            return NULL;
+        }
+        PyList_SET_ITEM(l, i, v);
+    }
+    return l;
+}
+
+/* OSR-style exit (#152, SPEC N-8). A snapshot-holding function's wrapper fills one of these on its own
+ * stack and points tp_tls.osr at it right before calling its impl; the impl takes it at entry and sets
+ * tp_tls.osr back to NULL, so only that one call (not an internal callee, not a recursive call) polls
+ * with these lists. `lock` and `lists` are the wrapper's: the impl ends and re-takes the critical
+ * section around each poll. `result` is set (strong) when the impl left for the continuation and
+ * returned 2; the wrapper then returns it, with its write-back already done. */
+typedef struct tp_osr {
+    tp_cs *lock;                    /* the wrapper's critical section, or NULL (no list parameter) */
+    PyObject *lists[2];             /* the list arguments in critical-section order (borrowed), or NULL */
+    PyObject *result;               /* strong, after an exit: what the continuation returned */
+} tp_osr;
+
 typedef struct {
     tp_depth_state depth;           /* compiled frames in flight (see above) */
     int poll_countdown;             /* eval-breaker poll countdown (#141) */
     Py_ssize_t snapshot_depth;      /* snapshot-holding functions in flight (#141) */
+    tp_osr *osr;                    /* the OSR context for the impl about to be entered (#152), or NULL */
 } tp_tls;
 
-static TP_THREAD_LOCAL tp_tls tp_tls_v = {{0, NULL, 0}, TP_POLL_INTERVAL, 0};
+static TP_THREAD_LOCAL tp_tls tp_tls_v = {{0, NULL, 0}, TP_POLL_INTERVAL, 0, NULL};
 
 static inline tp_tls *tp_tls_get(void)
 {

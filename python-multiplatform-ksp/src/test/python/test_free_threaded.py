@@ -320,11 +320,13 @@ def test_shared_list_only_read(extension):
 
 
 def test_shared_list_writers_and_readers_see_whole_calls(extension):
-    """`fill` writes every element in one call, `edge` reads the first and last: with the list's
-    critical section held from copy-in to write-back, a reader sees a state between two whole calls,
-    so first == last, always."""
+    """`fill` writes every element in one call, `edge` reads the first and last. A call whose loops stay
+    below TP_POLL_INTERVAL holds the list's critical section from copy-in to write-back, so a reader
+    sees a state between two whole calls: first == last, always. (A longer loop polls and releases it
+    between chunks since #152, as an interpreted loop's list stores are visible one by one; that is
+    CPython's behaviour, so this test keeps the list below the interval.)"""
     r = run_child(extension, """
-        shared = [0.0] * 20000
+        shared = [0.0] * 4000   # below TP_POLL_INTERVAL: one call is one critical section (#152)
         torn = []
         stop = False
         def writer(v):
@@ -354,7 +356,7 @@ def test_shared_list_writers_and_readers_see_whole_calls(extension):
 
 def test_shared_list_int_writers_and_readers(extension):
     r = run_child(extension, """
-        shared = [0] * 20000
+        shared = [0] * 4000   # below TP_POLL_INTERVAL: one call is one critical section (#152)
         torn = []
         stop = False
         def writer(v):
