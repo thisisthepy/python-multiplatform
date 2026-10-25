@@ -137,6 +137,8 @@ still deopts. The interval rules, exactly:
                                unproven one is clamped to i64 (a result outside it deopts, so only
                                in-range values flow on)
   NEG / POS                    [-hi, -lo] / [lo, hi]
+  INVERT                       [~hi, ~lo] (~x == -x - 1, always in i64)
+  AND                          an operand with lo >= 0: [0, min of the hi of the non-negative operands]
   MOD                          divisor interval > 0: [0, hi(b) - 1]; < 0: [lo(b) + 1, 0]; else
                                [-(d - 1), d - 1] with d = max |b|
   FLOORDIV                     divisor interval that keeps its sign: the min/max of the four
@@ -213,15 +215,18 @@ is eligible only if ALL of these hold:
     distinct lists by the entry guard, local arrays are distinct allocations), and a read of the
     stored array itself is the same element the iteration writes.
   * Step 2 (reductions): or the body is a non-empty sequence of `acc = acc op e` (`_par_reduce`): op
-    ADD or MUL, each `acc` a distinct i64 local, definitely assigned before the loop, not an array,
+    ADD, MUL, AND, OR or XOR, each `acc` a distinct i64 local, definitely assigned before the loop, not an array,
     loop variable or entry global, and read nowhere else in the body (not in any `e`); `e` built from
     i64 Const, i64 Local (the loop variable, or a scalar nothing in the body assigns), `b[var]`
-    proven on an i64 non-buffer list or local array, and i64 + - *. Stores and reductions are never
+    proven on an i64 non-buffer list or local array, and i64 + - * & | ^ and ~ (step 4; no shifts). Stores and reductions are never
     mixed in one loop. Those nodes can overflow, which is not a failure of the region: the runtime
-    discards it and reruns the loop sequentially. (& | ^ are not in the compiled subset: the front
-    end lowers no bitwise operator, so there is no such reduction to mark; min/max are later.)
+    discards it and reruns the loop sequentially. Step 4: acc & | ^ e never overflow (identity -1 for &,
+    0 for | and ^); only an overflow inside `e` reruns.
+  * Step 3 (min/max): a statement of the reduction body may be `if e < acc: acc = e` / `e > acc` (either
+    operand order, no else), `acc` an i64 or f64 local, `e` of its type (`_par_minmax`). That is Python's
+    `min(acc, e)`; the f64 NaN case reruns sequentially at run time (SPEC N-15).
 Anything else compiles sequentially, unchanged. This cannot find other eligible shapes (stencils,
-calls, nested tiles, min/max); those are later steps.
+calls, nested tiles, `min()` calls); those are later steps.
 
 Tuple. `Tuple(OBJ, elements)`: a tuple of OBJ expressions (a scalar needs Box), result OBJ, a
 reference creator in the ownership rule. Building one is not an effect.
@@ -243,12 +248,15 @@ left the i64 range, a PyLong. It lives only in locals and temporaries (never a p
 or return value). It is produced only by `ToInt` (of an I64), by BinOp/UnaryOp over INT operands, by
 an INT local, and by a redo Call of an I64-returning callee (an INT argument may stand for an I64
 parameter of a redo callee: a promoted value does not fit, which is the callee's deopt, redone).
-BinOp on INT: both operands INT, ADD/SUB/MUL/FLOORDIV/MOD/LSHIFT/RSHIFT, result INT; TRUEDIV of ints is an
+BinOp on INT: both operands INT, ADD/SUB/MUL/FLOORDIV/MOD/LSHIFT/RSHIFT/AND/OR/XOR, result INT; TRUEDIV of ints is an
 OBJ operation on boxed values; `proven` is never legal on it. UnaryOp NEG/POS of INT is INT. Compare of two
 INTs is BOOL. An INT crosses into an object slot only through `Box`, and an I64 into an INT slot only
 through `ToInt`; an INT never flows into an I64 slot. None of these nodes can deopt (they promote), run
 user code or make a function impure, so an impure function may contain them freely, and they do not
-affect `may_deopt`, `pure` or closedness. The shifts exist only on INT and OBJ.
+affect `may_deopt`, `pure` or closedness. Bitwise operators (SPEC N-16, #289): I64 AND/OR/XOR and
+UnaryOp INVERT of I64 / INT are legal and cannot deopt; I64 LSHIFT/RSHIFT are unproven deopting ops
+(overflow, a negative count), so a function holding one is not impure-safe unless it is pure; they
+are built in pure functions only (an impure function shifts INTs). None exists on F64.
 
 Function.entry_globals. Scalar `Param`s (I64/F64/BOOL), read once at entry as part of the guards;
 assigned at entry for definite assignment; the body reads them as `Local(name)` of that type and may
@@ -302,6 +310,12 @@ FIELD = "verify/field-unproved"
 PAR_LOOP = "verify/par-loop"
 
 
+# SPEC N-15 steps 2 and 4: the reduction operators, and the i64 operators allowed in an element expression
+# (no shifts: their deopt is not a worker failure).
+_PAR_RED_OPS = (BinOpKind.ADD, BinOpKind.MUL, BinOpKind.AND, BinOpKind.OR, BinOpKind.XOR)
+_PAR_I64_OPS = (BinOpKind.ADD, BinOpKind.SUB, BinOpKind.MUL, BinOpKind.AND, BinOpKind.OR, BinOpKind.XOR)
+
+
 @dataclass(frozen=True)
 class Diagnostic:
     function: str
@@ -332,11 +346,13 @@ _RETURN_TYPES = _VALUE_TYPES + (Type.NONE,)
 # The nodes that produce an INT (an owned tp_int: native, or a PyLong once promoted).
 _INT_PRODUCERS = frozenset({ToInt, BinOp, UnaryOp, Local, Call})
 _INT_OPS = frozenset({BinOpKind.ADD, BinOpKind.SUB, BinOpKind.MUL, BinOpKind.FLOORDIV,
-                      BinOpKind.MOD, BinOpKind.LSHIFT, BinOpKind.RSHIFT})
+                      BinOpKind.MOD, BinOpKind.LSHIFT, BinOpKind.RSHIFT, BinOpKind.AND,
+                      BinOpKind.OR, BinOpKind.XOR})
+_BITWISE_OPS = frozenset({BinOpKind.AND, BinOpKind.OR, BinOpKind.XOR})   # SPEC N-16
 _ELEMENT = {Type.F64_ARRAY: Type.F64, Type.I64_ARRAY: Type.I64, Type.BOOL_ARRAY: Type.BOOL}
 _MATH_ARITY = {MathFunc.ATAN2: 2, MathFunc.HYPOT: 2}            # every other MathFunc: 1
 _I64_DEOPT_OPS = frozenset({BinOpKind.ADD, BinOpKind.SUB, BinOpKind.MUL, BinOpKind.FLOORDIV,
-                            BinOpKind.MOD, BinOpKind.TRUEDIV})
+                            BinOpKind.MOD, BinOpKind.TRUEDIV, BinOpKind.LSHIFT, BinOpKind.RSHIFT})
 _I64_MIN, _I64_MAX = -2 ** 63, 2 ** 63 - 1
 _FULL = (_I64_MIN, _I64_MAX)
 _LEN_MAX = 2 ** 62
@@ -715,6 +731,13 @@ class _Checker:
         if cls is BinOp and e.op in _POW2_OPS:
             lo, hi = _div_interval(e.op, self.interval(e.left), self.interval(e.right))
             return (max(lo, _I64_MIN), min(hi, _I64_MAX))
+        if cls is BinOp and e.op is BinOpKind.AND:
+            # SPEC N-16: a non-negative operand bounds an AND to [0, its hi] (the sign bit clears)
+            his = [iv[1] for iv in (self.interval(e.left), self.interval(e.right)) if iv[0] >= 0]
+            return (0, min(his)) if his else _FULL
+        if cls is UnaryOp and e.op is UnaryOpKind.INVERT:
+            lo, hi = self.interval(e.operand)          # ~x == -x - 1, monotone decreasing
+            return (~hi, ~lo)
         if cls is UnaryOp and e.op in (UnaryOpKind.NEG, UnaryOpKind.POS):
             lo, hi = self.interval(e.operand)
             lo, hi = (-hi, -lo) if e.op is UnaryOpKind.NEG else (lo, hi)
@@ -836,8 +859,9 @@ class _Checker:
                        f"BinOp {e.op.value} on {getattr(lt, 'value', lt)} operands")
         elif lt is not rt:
             self.slot(right, lt, f"right operand of {e.op.value}")
-        elif shift and lt is not Type.OBJ:
-            self.error(TYPE, f"{e.op.value} on {lt.value} operands: only int (INT) and OBJ shift")
+        elif (shift or e.op in _BITWISE_OPS) and lt is Type.F64:
+            self.error(TYPE, f"{e.op.value} on f64 operands: CPython raises TypeError (an OBJ "
+                             f"operation)")
         else:
             want = Type.F64 if (lt is Type.I64 and e.op is BinOpKind.TRUEDIV) else lt
             if e.type is not want:
@@ -884,6 +908,8 @@ class _Checker:
             elif e.type is not ot:
                 self.error(TYPE, f"unary {e.op.value} of {ot.value} is {ot.value}, node says "
                                  f"{e.type.value}")
+            elif ot is Type.F64 and e.op is UnaryOpKind.INVERT:
+                self.error(TYPE, "unary ~ on f64")
             elif ot is Type.I64 and e.op is UnaryOpKind.NEG and not proven:
                 self.can_deopt = True
         return dataclasses.replace(e, operand=operand)
@@ -1694,8 +1720,8 @@ class _Checker:
                 return e.type is Type.F64 and e.op is UnaryOpKind.NEG and ok(e.operand)
             return False
 
-        if type(body[0]) is Assign:
-            return self._par_reduce(s, body, state, weight, array_ok, at_var)
+        if type(body[0]) in (Assign, If):
+            return self._par_reduce(s, body, state, weight, array_ok, at_var, ok)
         for st in body:
             if type(st) is not StoreIndex or not array_ok(st.array) or not at_var(st.index, st.proven):
                 return None
@@ -1706,26 +1732,41 @@ class _Checker:
         return ParInfo(tuple(sorted(set(stored))), tuple(sorted(set(read))), weight[0])
 
     def _par_reduce(self, s: ForRange, body: tuple, state: _State, weight: list, array_ok,
-                    at_var) -> ParInfo | None:
+                    at_var, ok_f64=None) -> ParInfo | None:
         """SPEC N-15 step 2: a body of only `acc = acc op e` (op ADD or MUL, either operand order), each
         `acc` a distinct i64 local of this function (not a loop variable, array or entry global) that
         is definitely assigned before the loop and appears nowhere else in the body, and `e` built
         from i64 Const, i64 Local (the loop variable, or any scalar the body does not assign), `b[var]`
         proven on an i64 non-buffer list or local array, and i64 + - * . Any of those nodes can overflow:
         the runtime then discards the region and reruns the loop sequentially. No store is allowed in
-        the same loop (a rerun then needs no restore)."""
+        the same loop (a rerun then needs no restore).
+
+        Step 3 (min/max): a statement may instead be `if e < acc: acc = e` (MIN) or `if e > acc: acc = e`
+        (MAX), either operand order, no else, the assigned value equal to the compared `e`, `acc` an
+        I64 or F64 local like the others and `e` of the accumulator's type (F64: the step 1 float
+        expression set). That is Python's `min(acc, e)` / `max(acc, e)`: strict `<` keeps the first
+        element on ties. `<=` / `>=` are not it (the last of equal elements, which differs for -0.0)."""
         var = s.var
         if state is None:
             return None
         accs: dict[str, str] = {}
+        mm: dict[str, object] = {}                     # acc -> e, for MIN / MAX statements
         for st in body:
+            if type(st) is If:
+                hit = self._par_minmax(st)
+                if hit is None or hit[0] in accs:
+                    return None
+                accs[hit[0]] = hit[1]
+                mm[hit[0]] = hit[2]
+                continue
             if (type(st) is not Assign or type(st.value) is not BinOp or st.value.type is not Type.I64
-                    or st.value.op not in (BinOpKind.ADD, BinOpKind.MUL) or st.value.np
+                    or st.value.op not in _PAR_RED_OPS or st.value.np
                     or st.target in accs):
                 return None
             accs[st.target] = st.value.op.name
         for acc in accs:
-            if (self.scalars.get(acc) is not Type.I64 or acc == var or acc in self.arrays
+            want = mm[acc].type if acc in mm else Type.I64
+            if (self.scalars.get(acc) is not want or acc == var or acc in self.arrays
                     or acc in self.larrays or acc in self.entry or acc not in state):
                 return None
         read: list[str] = []
@@ -1746,12 +1787,24 @@ class _Checker:
                 return False
             if t is BinOp:
                 return (e.type is Type.I64 and e.left.type is Type.I64 and e.right.type is Type.I64
-                        and e.op in (BinOpKind.ADD, BinOpKind.SUB, BinOpKind.MUL) and not e.np
+                        and e.op in _PAR_I64_OPS and not e.np
                         and ok(e.left) and ok(e.right))
+            if t is UnaryOp:                          # ~x of an i64: cannot fail (SPEC N-16)
+                return e.type is Type.I64 and e.op is UnaryOpKind.INVERT and ok(e.operand)
             return False
+
+        def reads_acc(e: object) -> bool:
+            if type(e) is Local:
+                return e.name in accs
+            return any(reads_acc(x) for x in _exprs_of(e))
 
         for st in body:
             weight[0] += 2
+            if type(st) is If:
+                e = mm[st.then[0].target]
+                if reads_acc(e) or not (ok(e) if e.type is Type.I64 else (ok_f64 is not None and ok_f64(e))):
+                    return None
+                continue
             b = st.value
             if type(b.left) is Local and b.left.name == st.target and b.left.type is Type.I64:
                 other = b.right
@@ -1762,6 +1815,25 @@ class _Checker:
             if not ok(other):
                 return None
         return ParInfo((), tuple(sorted(set(read))), weight[0], tuple(sorted(accs.items())))
+
+    @staticmethod
+    def _par_minmax(st: If):
+        """(acc, "MIN" | "MAX", e) for `if e < acc: acc = e` and its mirrored spellings, else None."""
+        c = st.cond
+        if (type(c) is not Compare or st.orelse or len(st.then) != 1 or type(st.then[0]) is not Assign
+                or c.op not in (CompareKind.LT, CompareKind.GT)):
+            return None
+        a = st.then[0]
+        if type(c.right) is Local and c.right.name == a.target:
+            e, kind = c.left, "MIN" if c.op is CompareKind.LT else "MAX"       # e < acc, e > acc
+        elif type(c.left) is Local and c.left.name == a.target:
+            e, kind = c.right, "MIN" if c.op is CompareKind.GT else "MAX"      # acc > e, acc < e
+        else:
+            return None
+        if e != a.value or e.type is not c.left.type or e.type is not c.right.type \
+                or e.type not in (Type.I64, Type.F64):
+            return None
+        return a.target, kind, e
 
     def s_Return(self, s: Return, state: _State):
         returns = self.fn.returns

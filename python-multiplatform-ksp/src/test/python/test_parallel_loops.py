@@ -137,9 +137,11 @@ def par_loops(f):
             if isinstance(s, ir.ForRange):
                 out.append(s)
                 walk(s.body)
-            elif isinstance(s, (ir.If, ir.While)):
+            elif isinstance(s, ir.If):
+                walk(s.then)
+                walk(s.orelse)
+            elif isinstance(s, ir.While):
                 walk(s.body)
-                walk(getattr(s, "orelse", ()))
     walk(f.body)
     return out
 
@@ -838,3 +840,940 @@ def test_no_reduction_region_without_a_marker(tmp_path):
     src = RSOURCE.replace("# typedpython: parallel\n", "")
     _, c_text, _, _ = build(tmp_path, src, name="rnomark")
     assert "tp_par_run(" not in c_text and "__typedpython_parallel__" not in c_text
+
+
+# =====================================================================================================
+# Step 3a (SPEC N-15, #277): min/max reductions, the conditional update `if e < acc: acc = e`.
+#
+# The compiled subset has no `min(a, b)` / `max(a, b)` call (it stays a generic object call, never
+# parallel). The form it does compile is Python's own definition of `min(acc, e)`: `if e < acc: acc = e`
+# (`e > acc` for max; `acc > e` and `acc < e` are the same comparison). Strict `<` keeps the first element
+# on ties, which is Python's. Int: exact under chunked combination in chunk order. Float: the chunked
+# combination equals the sequential chain only without NaN, so a NaN (in an element or in the initial
+# accumulator) discards the region and the sequential loop runs; the counterexample is
+# [1.0] | [nan, 0.0]: chunk fold gives 1.0, the sequential chain gives 0.0.
+#
+# Red record: written before the implementation; before it none of these loops was `par`.
+# =====================================================================================================
+
+MSOURCE = '''\
+# typedpython: compiled
+
+# typedpython: parallel
+def mn_i(xs: list[int]) -> int:
+    m = xs[0]
+    for i in range(len(xs)):
+        if xs[i] < m:
+            m = xs[i]
+    return m
+
+
+# typedpython: parallel
+def mx_i(xs: list[int]) -> int:
+    m = xs[0]
+    for i in range(len(xs)):
+        if xs[i] > m:
+            m = xs[i]
+    return m
+
+
+# typedpython: parallel
+def mn_f(xs: list[float]) -> float:
+    m = xs[0]
+    for i in range(len(xs)):
+        if xs[i] < m:
+            m = xs[i]
+    return m
+
+
+# typedpython: parallel
+def mx_f(xs: list[float]) -> float:
+    m = xs[0]
+    for i in range(len(xs)):
+        if xs[i] > m:
+            m = xs[i]
+    return m
+
+
+# typedpython: parallel
+def mn_f_flipped(xs: list[float], init: float) -> float:
+    m = init
+    for i in range(len(xs)):
+        if m > xs[i]:
+            m = xs[i]
+    return m
+
+
+# typedpython: parallel
+def mx_f_flipped(xs: list[float], init: float) -> float:
+    m = init
+    for i in range(len(xs)):
+        if m < xs[i]:
+            m = xs[i]
+    return m
+
+
+# typedpython: parallel
+def mn_i_expr(xs: list[int], c: int) -> int:
+    m = c
+    for i in range(len(xs)):
+        if xs[i] * 3 - i < m:
+            m = xs[i] * 3 - i
+    return m
+
+
+# typedpython: parallel
+def mn_f_expr(xs: list[float], a: float) -> float:
+    m = a
+    for i in range(len(xs)):
+        if xs[i] * a - float(i) < m:
+            m = xs[i] * a - float(i)
+    return m
+
+
+# typedpython: parallel
+def mn_and_sum(xs: list[int]) -> int:
+    m = xs[0]
+    s = 0
+    for i in range(len(xs)):
+        s += xs[i]
+        if xs[i] < m:
+            m = xs[i]
+    return m * 1000003 + s
+
+
+# typedpython: parallel
+def two_ext(xs: list[float]) -> float:
+    lo = xs[0]
+    hi = xs[0]
+    for i in range(len(xs)):
+        if xs[i] < lo:
+            lo = xs[i]
+        if xs[i] > hi:
+            hi = xs[i]
+    return hi - lo
+
+
+# typedpython: parallel
+def mn_i_init(xs: list[int], init: int) -> int:
+    m = init
+    for i in range(len(xs)):
+        if xs[i] < m:
+            m = xs[i]
+    return m
+
+
+# typedpython: parallel
+def mn_i_big_e(xs: list[int], c: int) -> int:
+    m = 0
+    for i in range(len(xs)):
+        if xs[i] * c < m:
+            m = xs[i] * c
+    return m
+
+
+def mn_unmarked(xs: list[int]) -> int:
+    m = xs[0]
+    for i in range(len(xs)):
+        if xs[i] < m:
+            m = xs[i]
+    return m
+
+
+# typedpython: parallel
+def n_le(xs: list[float]) -> float:
+    m = xs[0]
+    for i in range(len(xs)):
+        if xs[i] <= m:
+            m = xs[i]
+    return m
+
+
+# typedpython: parallel
+def n_other_value(xs: list[int]) -> int:
+    m = xs[0]
+    for i in range(len(xs)):
+        if xs[i] < m:
+            m = xs[i] + 1
+    return m
+
+
+# typedpython: parallel
+def n_else(xs: list[int]) -> int:
+    m = xs[0]
+    s = 0
+    for i in range(len(xs)):
+        if xs[i] < m:
+            m = xs[i]
+        else:
+            s += 1
+    return m + s
+
+
+# typedpython: parallel
+def n_two_in_then(xs: list[int]) -> int:
+    m = xs[0]
+    s = 0
+    for i in range(len(xs)):
+        if xs[i] < m:
+            m = xs[i]
+            s += 1
+    return m + s
+
+
+# typedpython: parallel
+def n_acc_in_value(xs: list[int]) -> int:
+    m = xs[0]
+    for i in range(len(xs)):
+        if xs[i] < m:
+            m = xs[i]
+        m = m + 0
+    return m
+
+
+# typedpython: parallel
+def n_cond_other(xs: list[int], t: int) -> int:
+    m = xs[0]
+    for i in range(len(xs)):
+        if xs[i] < t:
+            m = xs[i]
+    return m
+
+
+# typedpython: parallel
+def n_mixed_types(xs: list[int], init: float) -> float:
+    m = init
+    for i in range(len(xs)):
+        if xs[i] < m:
+            m = float(xs[i])
+    return m
+
+
+# typedpython: parallel
+def n_acc_reads_acc(xs: list[int]) -> int:
+    m = xs[0]
+    for i in range(len(xs)):
+        if xs[i] < m:
+            m = xs[i]
+        elif xs[i] == m:
+            m = m
+    return m
+
+
+# typedpython: parallel
+def n_div(xs: list[float], d: float) -> float:
+    m = xs[0]
+    for i in range(len(xs)):
+        if xs[i] / d < m:
+            m = xs[i] / d
+    return m
+'''
+
+MM_OK = {"mn_i": (("m", "MIN"),), "mx_i": (("m", "MAX"),), "mn_f": (("m", "MIN"),),
+         "mx_f": (("m", "MAX"),), "mn_f_flipped": (("m", "MIN"),), "mx_f_flipped": (("m", "MAX"),),
+         "mn_i_expr": (("m", "MIN"),), "mn_f_expr": (("m", "MIN"),),
+         "mn_and_sum": (("m", "MIN"), ("s", "ADD")), "two_ext": (("hi", "MAX"), ("lo", "MIN")),
+         "mn_i_init": (("m", "MIN"),), "mn_i_big_e": (("m", "MIN"),)}
+MM_NO = ["n_le", "n_other_value", "n_else", "n_two_in_then", "n_acc_in_value", "n_cond_other",
+         "n_mixed_types", "n_acc_reads_acc", "n_div"]
+
+
+@pytest.fixture(scope="module")
+def mbuilt(tmp_path_factory):
+    return build(tmp_path_factory.mktemp("mmpar"), MSOURCE, name="mmparmod")
+
+
+@pytest.fixture(scope="module")
+def mmod(mbuilt):
+    return cbuild.load("mmparmod", mbuilt[2])
+
+
+@pytest.mark.parametrize("name", sorted(MM_OK))
+def test_minmax_loops_are_marked_par(mbuilt, name):
+    loops = [l for l in par_loops(fn(mbuilt, name)) if l.par is not None]
+    assert loops, name
+    assert loops[-1].par.reduce == MM_OK[name] and loops[-1].par.stored == ()
+
+
+@pytest.mark.parametrize("name", MM_NO)
+def test_ineligible_minmax_shapes_stay_sequential(mbuilt, name):
+    f = fn(mbuilt, name)
+    assert f.parallel is True
+    loops = par_loops(f)
+    assert loops and all(l.par is None for l in loops), name
+
+
+def test_unmarked_minmax_never_parallel(mbuilt):
+    assert all(l.par is None for l in par_loops(fn(mbuilt, "mn_unmarked")))
+
+
+def test_minmax_c_regions_only_for_eligible(mbuilt):
+    import re
+    owners = set(re.findall(r"static void tp_par_(\w+?)(?:_fast)?_\d+_body\(", mbuilt[1]))
+    assert owners == set(MM_OK), owners
+
+
+def test_verifier_rejects_a_forged_minmax(mbuilt):
+    good = par_loops(fn(mbuilt, "mn_i"))[-1].par
+    proved, diags = _forge(mbuilt, "mn_i", dataclasses.replace(good, reduce=(("m", "MAX"),)))
+    assert not proved.functions and any(d.rule == PAR_RULE for d in diags)
+    for name in ("n_le", "n_other_value", "n_else", "n_cond_other"):
+        proved, diags = _forge(mbuilt, name, ir.ParInfo((), (), 3, (("m", "MIN"),)))
+        assert not proved.functions and any(d.rule == PAR_RULE for d in diags), name
+    proved, diags = _forge(mbuilt, "mn_i", good)
+    assert proved.functions and not diags
+
+
+def test_naive_chunk_fold_differs_on_nan_so_float_nan_cannot_be_chunked():
+    """The counterexample, in plain Python: why a NaN must send the float region to the sequential loop."""
+    nan = float("nan")
+
+    def fold(xs, acc):
+        for x in xs:
+            if x < acc:
+                acc = x
+        return acc
+
+    seq = fold([1.0, nan, 0.0], 5.0)
+    chunk_first = fold([1.0], 5.0)
+    chunk_second = fold([nan, 0.0], 5.0)               # starts from its own first element on a chunk
+    naive = chunk_second if chunk_second < chunk_first else chunk_first
+    assert seq == 0.0
+    # the chunk starting at nan keeps nan, and `nan < 1.0` is false: the combine keeps 1.0
+    p2 = nan
+    for x in [0.0]:
+        if x < p2:
+            p2 = x
+    assert p2 != p2
+    combined = p2 if p2 < 1.0 else 1.0
+    assert combined == 1.0 and combined != seq
+    assert naive in (0.0, 1.0)
+
+
+MM_CHILD_BODY = """
+    import math, random
+    I = m.__typedpython_interpreted__
+    def eq(a, b):
+        if isinstance(a, float):
+            return isinstance(b, float) and struct.pack("<d", a) == struct.pack("<d", b)
+        return a == b and type(a) is type(b)
+    bad = []
+    def check(name, *args):
+        want = I[name](*[list(a) if isinstance(a, list) else a for a in args])
+        got = getattr(m, name)(*[list(a) if isinstance(a, list) else a for a in args])
+        if not eq(got, want):
+            bad.append([name, repr(got), repr(want)])
+    r = random.Random(3)
+    n = 300001
+    ints = [r.randint(-10**6, 10**6) for _ in range(n)]
+    flts = [r.uniform(-1e3, 1e3) for _ in range(n)]
+    for nm in ("mn_i", "mx_i"):
+        check(nm, ints)
+        check(nm, [5] * n)
+    check("mn_i_init", ints, -10**9); check("mn_i_init", ints, 10**9)
+    check("mn_i_expr", ints, 10**9); check("mn_i_expr", ints, -10**9)
+    check("mn_and_sum", ints)
+    check("mn_i_big_e", ints, 2**40)
+    check("mn_i_big_e", ints, 2**60)            # element expression overflows: rerun, then deopt as sequential
+    # int ties: the same value everywhere, nothing is replaced
+    for nm in ("mn_f", "mx_f"):
+        check(nm, flts)
+    check("two_ext", flts)
+    check("mn_f_expr", flts, 1.5)
+    # ties and signed zeros: the first -0.0/+0.0 in iteration order must win
+    for first, second in ((-0.0, 0.0), (0.0, -0.0)):
+        for pos in (0, 1, n // 3, n // 2, n - 2):
+            z = [7.0] * n
+            z[pos] = first
+            z[pos + 1] = second
+            for nm in ("mn_f", "mx_f"):
+                zz = list(z)
+                zz[0] = zz[0] if pos <= 1 else zz[0]
+                check(nm, [1.0 if k not in (pos, pos + 1) else z[k] for k in range(n)] if nm == "mn_f"
+                      else [-1.0 if k not in (pos, pos + 1) else z[k] for k in range(n)])
+            check("mn_f_flipped", [1.0 if k not in (pos, pos + 1) else z[k] for k in range(n)], 0.5)
+            check("mx_f_flipped", [-1.0 if k not in (pos, pos + 1) else z[k] for k in range(n)], -0.5)
+    # a zero that ties with the initial accumulator never replaces it
+    check("mn_f_flipped", [0.0] * n, -0.0); check("mn_f_flipped", [-0.0] * n, 0.0)
+    check("mx_f_flipped", [0.0] * n, -0.0); check("mx_f_flipped", [-0.0] * n, 0.0)
+    # NaN at every kind of position, and the exact counterexample [1] | [nan, 0] around chunk edges
+    for pos in (0, 1, 2, 1000, n // 4, n // 3, n // 2, n // 2 + 1, 2 * n // 3, n - 2, n - 1):
+        for other in (0, 1, 5, n // 2, n - 1):
+            x = [1.0] * n
+            x[other] = 0.0 if other else 1.0
+            x[pos] = float("nan")
+            for nm in ("mn_f", "mx_f"):
+                check(nm, x)
+            check("mn_f_flipped", x, 2.0); check("mx_f_flipped", x, -2.0)
+            check("two_ext", x)
+    x = [1.0] * n; x[n // 3] = float("nan"); x[n // 3 + 1] = 0.0
+    check("mn_f", x); check("mn_f_flipped", x, 9.0)
+    check("mn_f_flipped", [1.0] * n, float("nan")); check("mx_f_flipped", [1.0] * n, float("nan"))
+    check("mn_f", [float("nan")] * n)
+    check("mn_f_flipped", [float("inf")] * n, float("inf"))
+    check("mn_f_expr", [float("inf")] * n, 1.0)            # inf - inf style NaN made inside the expression
+    # small and empty-ish sizes
+    for k in (1, 2, 3, 7, 1000):
+        check("mn_i", ints[:k]); check("mx_f", flts[:k]); check("mn_f_flipped", flts[:k], 0.0)
+    check("mn_f_flipped", [], 3.0)
+    par = m.__typedpython_parallel__()
+    print(json.dumps({"bad": bad, "regions": par[0], "reruns": par[3]}))
+"""
+
+
+@pytest.mark.parametrize("threads", [1, 2, 3, 7])
+def test_minmax_equals_interpreter_for_every_thread_count(mbuilt, threads):
+    r = run_child(mbuilt[2], MM_CHILD_BODY, {"TYPEDPYTHON_THREADS": str(threads)}, timeout=900)
+    assert r["bad"] == [], r["bad"][:5]
+    if threads == 1:
+        assert r["regions"] == 0 and r["reruns"] == 0
+    elif (os.cpu_count() or 1) > 1:
+        assert r["regions"] > 0
+        assert r["reruns"] > 0                         # NaN and overflow cases fell back
+
+
+def test_float_minmax_without_nan_never_reruns(mbuilt):
+    r = run_child(mbuilt[2], """
+        import random
+        rr = random.Random(9)
+        xs = [rr.uniform(-1e3, 1e3) for _ in range(400001)]
+        a = m.mn_f(xs); b = m.mx_f(xs); c = m.mn_f_flipped(xs, 2e3)
+        print(json.dumps({"ok": a == min(xs) and b == max(xs) and c == min(xs),
+                          "regions": m.__typedpython_parallel__()[0], "reruns": m.__typedpython_parallel__()[3]}))
+    """, {"TYPEDPYTHON_THREADS": "4"})
+    assert r["ok"]
+    if (os.cpu_count() or 1) > 1:
+        assert r["regions"] == 3 and r["reruns"] == 0
+
+
+def test_float_minmax_with_nan_reruns_once_per_call(mbuilt):
+    r = run_child(mbuilt[2], """
+        xs = [1.0] * 400001
+        xs[200000] = float("nan"); xs[200001] = 0.0
+        a = m.mn_f(xs)
+        print(json.dumps({"a": a, "regions": m.__typedpython_parallel__()[0], "reruns": m.__typedpython_parallel__()[3]}))
+    """, {"TYPEDPYTHON_THREADS": "4"})
+    assert r["a"] == 0.0
+    if (os.cpu_count() or 1) > 1:
+        assert r["reruns"] == 1
+
+
+# =====================================================================================================
+# Step 3b (SPEC N-15, design §5.2 and §7.4): fork, signals and interpreter shutdown around a region.
+# Every scenario runs in a CHILD interpreter with a timeout (a crash or a hang fails one test).
+# Red record: these are new tests of behaviour steps 1 and 2 already implement (no polling inside a
+# region, workers are not Python threads, per-call threads); none was red before the change.
+# =====================================================================================================
+
+BIG = 4_000_000
+
+
+def _threads_env():
+    return {"TYPEDPYTHON_THREADS": "4"}
+
+
+def test_fork_from_a_python_thread_while_another_thread_runs_a_region(built):
+    r = run_child(built[2], """
+        import os, time, warnings, signal
+        warnings.simplefilter("ignore")
+        big = [float(k %% 977) for k in range(%d)]
+        running = threading.Event()
+        stop = threading.Event()
+        parent_bad = []
+        def regionist():
+            xs = list(big)
+            first = True
+            while not stop.is_set():
+                ys = list(big)
+                if first:
+                    running.set(); first = False
+                m.scale(ys, 2.0, 1.0)
+                if ys[5] != big[5] * 2.0 + 1.0 or ys[-1] != big[-1] * 2.0 + 1.0:
+                    parent_bad.append(1)
+        t = threading.Thread(target=regionist)
+        t.start()
+        assert running.wait(60)
+        out = {}
+        def forker():
+            pid = os.fork()
+            if pid == 0:
+                # the child has only this thread: a small call and a full region must both work
+                ok = True
+                try:
+                    a = [1.5] * 10
+                    m.scale(a, 2.0, 1.0)
+                    ok = ok and a == [4.0] * 10
+                    b = [float(k %% 977) for k in range(300001)]
+                    m.scale(b, 2.0, 1.0)
+                    ok = ok and b[7] == 15.0
+                finally:
+                    os._exit(0 if ok else 3)
+            out["pid"] = pid
+        f = threading.Thread(target=forker)
+        f.start(); f.join()
+        deadline = time.time() + 120
+        status = None
+        while time.time() < deadline:
+            p, st = os.waitpid(out["pid"], os.WNOHANG)
+            if p:
+                status = st
+                break
+            time.sleep(0.01)
+        stop.set(); t.join()
+        print(json.dumps({"status": status, "exited": os.WIFEXITED(status) if status is not None else None,
+                          "code": os.WEXITSTATUS(status) if status is not None and os.WIFEXITED(status) else None,
+                          "parent_bad": parent_bad, "regions": m.__typedpython_parallel__()[0]}))
+    """ % BIG, _threads_env(), timeout=300)
+    assert r["exited"] is True and r["code"] == 0, r
+    assert r["parent_bad"] == []
+    if (os.cpu_count() or 1) > 1:
+        assert r["regions"] >= 1
+
+
+SIGNAL_BODY = """
+    import signal, time
+    main = threading.get_ident()
+    big = [float(k %% 977) for k in range(%d)]
+    seen = []
+    def handler(signum, frame):
+        seen.append((threading.get_ident(), time.perf_counter()))
+        %s
+    signal.signal(signal.SIGALRM, handler)
+    %s
+"""
+
+
+def test_signal_handlers_run_on_the_main_thread_after_the_region(built):
+    r = run_child(built[2], SIGNAL_BODY % (BIG, "pass", "") + """
+    marks = []
+    for _ in range(3):
+        del seen[:]
+        xs = list(big)
+        signal.setitimer(signal.ITIMER_REAL, 0.002)
+        t0 = time.perf_counter()
+        m.scale(xs, 2.0, 1.0)
+        t1 = time.perf_counter()
+        time.sleep(0.05)                                  # let a pending handler run
+        marks.append({"n": len(seen), "all_main": all(i == main for i, _ in seen),
+                      "after_region": all(t >= t1 - 1e-4 for _, t in seen), "dur": t1 - t0,
+                      "ok": xs[3] == big[3] * 2.0 + 1.0 and xs[-1] == big[-1] * 2.0 + 1.0})
+    signal.setitimer(signal.ITIMER_REAL, 0)
+    print(json.dumps({"marks": marks, "regions": m.__typedpython_parallel__()[0]}))
+    """, _threads_env(), timeout=300)
+    for k in r["marks"]:
+        assert k["ok"] and k["all_main"], k
+        assert k["n"] == 1, k
+    if (os.cpu_count() or 1) > 1:
+        assert r["regions"] == 3
+        assert all(k["after_region"] for k in r["marks"]), r["marks"]   # no handler ran inside the region
+
+
+def test_repeating_signals_never_run_a_handler_on_a_worker(built):
+    r = run_child(built[2], SIGNAL_BODY % (BIG, "pass", "") + """
+    signal.setitimer(signal.ITIMER_REAL, 0.001, 0.001)
+    ok = True
+    for _ in range(6):
+        xs = list(big)
+        m.scale(xs, 2.0, 1.0)
+        ok = ok and xs[11] == big[11] * 2.0 + 1.0
+    signal.setitimer(signal.ITIMER_REAL, 0)
+    print(json.dumps({"ok": ok, "n": len(seen), "all_main": all(i == main for i, _ in seen)}))
+    """, _threads_env(), timeout=300)
+    assert r["ok"] and r["all_main"] and r["n"] >= 1
+
+
+def test_keyboardinterrupt_during_a_region_matches_the_sequential_semantics(built):
+    """The interrupt is raised by the handler after the region ended: the list is either completely
+    scaled or untouched (the call raised before write-back), never partly written, and the exception
+    is the KeyboardInterrupt, as for the interpreter."""
+    r = run_child(built[2], SIGNAL_BODY % (BIG, "raise KeyboardInterrupt", "") + """
+    outcomes = []
+    for _ in range(4):
+        xs = list(big)
+        raised = False
+        signal.setitimer(signal.ITIMER_REAL, 0.002)
+        try:
+            m.scale(xs, 2.0, 1.0)
+            time.sleep(0.2)
+        except KeyboardInterrupt:
+            raised = True
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        full = all(xs[k] == big[k] * 2.0 + 1.0 for k in range(0, len(xs), 4093))
+        untouched = xs == big
+        outcomes.append({"raised": raised, "full": full, "untouched": untouched,
+                         "main": all(i == main for i, _ in seen)})
+    print(json.dumps({"outcomes": outcomes}))
+    """, _threads_env(), timeout=300)
+    for o in r["outcomes"]:
+        assert o["raised"] and o["main"], o
+        assert o["full"] != o["untouched"], o               # exactly one: all or nothing
+
+
+def test_keyboardinterrupt_in_a_reduction_region(rbuilt):
+    r = run_child(rbuilt[2], SIGNAL_BODY % (BIG, "raise KeyboardInterrupt", "") + """
+    ints = [k %% 1000 for k in range(%d)]
+    want = sum(ints)
+    res = []
+    for _ in range(4):
+        got = None
+        raised = False
+        signal.setitimer(signal.ITIMER_REAL, 0.002)
+        try:
+            got = m.r_sum(ints)
+            time.sleep(0.2)
+        except KeyboardInterrupt:
+            raised = True
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        res.append({"raised": raised, "got": got})
+    plain = m.r_sum(ints)
+    print(json.dumps({"res": res, "plain": plain, "want": want}))
+    """ % BIG, _threads_env(), timeout=300)
+    assert r["plain"] == r["want"]
+    for o in r["res"]:
+        assert o["raised"] and o["got"] in (None, r["want"]), o   # a result is the full sum or nothing
+
+
+def test_interpreter_shutdown_while_a_daemon_thread_is_in_a_region(built):
+    for attempt in range(3):
+        r = run_child(built[2], """
+            import time
+            big = [float(k %% 977) for k in range(%d)]
+            inside = threading.Event()
+            def spin():
+                while True:
+                    ys = list(big)
+                    inside.set()
+                    m.scale(ys, 2.0, 1.0)
+            t = threading.Thread(target=spin, daemon=True)
+            t.start()
+            assert inside.wait(60)
+            time.sleep(0.01 * attempt_delay)
+            print(json.dumps({"exiting": True}))
+            sys.stdout.flush()
+        """.replace("attempt_delay", str(attempt)) % BIG, _threads_env(), timeout=300)
+        assert r == {"exiting": True}
+
+
+def test_interpreter_shutdown_with_a_daemon_reduction_region(rbuilt):
+    r = run_child(rbuilt[2], """
+        import time
+        ints = list(range(%d))
+        inside = threading.Event()
+        def spin():
+            while True:
+                inside.set()
+                m.r_sum(ints)
+        t = threading.Thread(target=spin, daemon=True)
+        t.start()
+        assert inside.wait(60)
+        print(json.dumps({"exiting": True}))
+        sys.stdout.flush()
+    """ % BIG, _threads_env(), timeout=300)
+    assert r == {"exiting": True}
+
+
+# =====================================================================================================
+# N-15 step 4: i64 bitwise reductions `acc = acc & e`, `| e`, `^ e` (#277).
+#
+# Written before the implementation (red). `& | ^` are exactly associative and commutative and never
+# overflow: a chunk folds from the identity (-1 for &, 0 for | and ^) and the partials combine in chunk
+# order. An overflow in an element expression (`xs[i] * c`) still discards the region and reruns the
+# loop sequentially. Shifts are not accepted in `e` (their deopt is not a worker failure in v1).
+# Red record: before the change none of the BOK loops was `par` (_par_reduce accepted ADD/MUL only).
+# =====================================================================================================
+
+BSOURCE = '''\
+# typedpython: compiled
+
+# typedpython: parallel
+def b_and(xs: list[int]) -> int:
+    s: int = -1
+    for i in range(len(xs)):
+        s &= xs[i]
+    return s
+
+
+# typedpython: parallel
+def b_or(xs: list[int]) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s |= xs[i]
+    return s
+
+
+# typedpython: parallel
+def b_xor(xs: list[int]) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s ^= xs[i]
+    return s
+
+
+# typedpython: parallel
+def b_and_swapped(xs: list[int], s0: int) -> int:
+    s: int = s0
+    for i in range(len(xs)):
+        s = xs[i] & s
+    return s
+
+
+# typedpython: parallel
+def b_or_swapped(xs: list[int]) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s = xs[i] | s
+    return s
+
+
+# typedpython: parallel
+def b_xor_expr(xs: list[int], c: int) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s = s ^ ((xs[i] * c) + (i & 255))
+    return s
+
+
+# typedpython: parallel
+def b_or_not(xs: list[int]) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s |= ~xs[i]
+    return s
+
+
+# typedpython: parallel
+def b_mix(xs: list[int]) -> int:
+    a: int = 0
+    x: int = 5
+    o: int = 0
+    m: int = 1000000
+    for i in range(len(xs)):
+        a += xs[i]
+        x ^= xs[i] & 4095
+        o |= xs[i]
+        if xs[i] < m:
+            m = xs[i]
+    return a + x * 3 + o * 5 + m * 7
+
+
+# typedpython: parallel
+def b_local(n: int) -> int:
+    t = [0] * n
+    for i in range(len(t)):
+        t[i] = i * 7 - 3
+    s: int = 0
+    for i in range(len(t)):
+        s ^= t[i]
+    return s
+
+
+def b_unmarked(xs: list[int]) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s ^= xs[i]
+    return s
+
+
+# typedpython: parallel
+def nb_acc_read(xs: list[int]) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s |= xs[i] ^ s
+    return s
+
+
+# typedpython: parallel
+def nb_two_ops(xs: list[int]) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s |= xs[i]
+        s &= xs[i]
+    return s
+
+
+# typedpython: parallel
+def nb_and_then_add(xs: list[int]) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s ^= xs[i]
+        s += 1
+    return s
+
+
+# typedpython: parallel
+def nb_shift(xs: list[int]) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s ^= xs[i] << 1
+    return s
+
+
+# typedpython: parallel
+def nb_rshift(xs: list[int], k: int) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s |= xs[i] >> k
+    return s
+
+
+# typedpython: parallel
+def nb_copy(xs: list[int]) -> int:
+    s: int = 0
+    w: int = 0
+    for i in range(len(xs)):
+        s ^= xs[i]
+        w = s
+    return s + w
+
+
+# typedpython: parallel
+def nb_div(xs: list[int], d: int) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s ^= xs[i] // d
+    return s
+'''
+
+BOK = {
+    "b_and": (("s", "AND"),), "b_or": (("s", "OR"),), "b_xor": (("s", "XOR"),),
+    "b_and_swapped": (("s", "AND"),), "b_or_swapped": (("s", "OR"),), "b_xor_expr": (("s", "XOR"),),
+    "b_or_not": (("s", "OR"),), "b_local": (("s", "XOR"),),
+    "b_mix": (("a", "ADD"), ("m", "MIN"), ("o", "OR"), ("x", "XOR")),
+}
+BNO = ["nb_acc_read", "nb_two_ops", "nb_and_then_add", "nb_shift", "nb_rshift", "nb_copy", "nb_div"]
+
+
+@pytest.fixture(scope="module")
+def bbuilt(tmp_path_factory):
+    return build(tmp_path_factory.mktemp("bpar"), BSOURCE, name="bparmod")
+
+
+@pytest.fixture(scope="module")
+def bmod(bbuilt):
+    return cbuild.load("bparmod", bbuilt[2])
+
+
+@pytest.mark.parametrize("name", sorted(BOK))
+def test_bitwise_reduction_loops_are_marked_par(bbuilt, name):
+    loops = [l for l in par_loops(fn(bbuilt, name)) if l.par is not None]
+    assert loops, name
+    assert loops[-1].par.reduce == BOK[name] and loops[-1].par.stored == ()
+
+
+@pytest.mark.parametrize("name", BNO)
+def test_ineligible_bitwise_shapes_stay_sequential(bbuilt, name):
+    f = fn(bbuilt, name)
+    assert f.parallel is True
+    loops = par_loops(f)
+    assert loops and all(l.par is None for l in loops), name
+
+
+def test_unmarked_bitwise_never_parallel(bbuilt):
+    assert all(l.par is None for l in par_loops(fn(bbuilt, "b_unmarked")))
+
+
+def test_bitwise_c_regions_only_for_eligible(bbuilt):
+    import re
+    owners = set(re.findall(r"static void tp_par_(\w+?)(?:_fast)?_\d+_body\(", bbuilt[1]))
+    assert owners == set(BOK), owners
+
+
+def test_verifier_rejects_a_forged_bitwise_reduction(bbuilt):
+    good = par_loops(fn(bbuilt, "b_xor"))[-1].par
+    proved, diags = _forge(bbuilt, "b_xor", dataclasses.replace(good, reduce=(("s", "OR"),)))
+    assert not proved.functions and any(d.rule == PAR_RULE for d in diags)
+    proved, diags = _forge(bbuilt, "b_xor", dataclasses.replace(good, reduce=()))
+    assert not proved.functions and any(d.rule == PAR_RULE for d in diags)
+    for name, op in (("nb_acc_read", "OR"), ("nb_two_ops", "OR"), ("nb_shift", "XOR"), ("nb_rshift", "OR"),
+                     ("nb_copy", "XOR"), ("nb_and_then_add", "XOR")):
+        proved, diags = _forge(bbuilt, name, ir.ParInfo((), (), 3, (("s", op),)))
+        assert not proved.functions and any(d.rule == PAR_RULE for d in diags), name
+    proved, diags = _forge(bbuilt, "b_xor", good)
+    assert proved.functions and not diags
+
+
+def _bsame(m, name, *args):
+    want = m.__typedpython_interpreted__[name](*[list(a) if isinstance(a, list) else a for a in args])
+    got = getattr(m, name)(*[list(a) if isinstance(a, list) else a for a in args])
+    assert got == want and type(got) is type(want), (name, got, want)
+
+
+@pytest.mark.parametrize("n", RSIZES)
+def test_bitwise_reductions_match_interpreter(bmod, n):
+    for lo, hi in ((-1000, 1000), (I64_MIN, I64_MAX), (0, 255)):
+        xs = rdata(n, 3, lo, hi)
+        for nm in ("b_and", "b_or", "b_xor", "b_or_swapped", "b_or_not", "b_mix"):
+            _bsame(bmod, nm, xs)
+        _bsame(bmod, "b_and_swapped", xs, -1)
+        _bsame(bmod, "b_and_swapped", xs, 0x0F0F0F0F0F0F0F0F)
+        _bsame(bmod, "b_xor_expr", xs, 1)
+    _bsame(bmod, "b_local", n)
+
+
+def test_bitwise_identity_edge_values(bmod):
+    n = 300001
+    _bsame(bmod, "b_and", [-1] * n)
+    _bsame(bmod, "b_and", [I64_MIN] * n)
+    _bsame(bmod, "b_or", [I64_MIN] * n)
+    _bsame(bmod, "b_xor", [I64_MAX] * n)
+    _bsame(bmod, "b_xor", [I64_MAX] * (n - 1))
+    z = [-1] * n
+    z[n // 2] = 0
+    _bsame(bmod, "b_and", z)
+
+
+def test_bitwise_region_counter_and_no_rerun(bmod):
+    if (os.cpu_count() or 1) < 2 or os.environ.get("TYPEDPYTHON_THREADS") == "1":
+        pytest.skip("single thread")
+    before = bmod.__typedpython_parallel__()
+    xs = rdata(300001, 4, I64_MIN, I64_MAX)
+    bmod.b_and(list(xs)); bmod.b_or(list(xs)); bmod.b_xor(list(xs))
+    after = bmod.__typedpython_parallel__()
+    assert after[0] - before[0] == 3 and after[3] == before[3]
+
+
+def test_bitwise_element_expression_overflow_reruns_and_equals_python(bmod):
+    n = 300001
+    xs = [1] * n
+    xs[n // 2] = 2**40
+    before = bmod.__typedpython_parallel__()[3]
+    _bsame(bmod, "b_xor_expr", xs, 2**30)               # 2**70 overflows i64: rerun, then promote
+    if (os.cpu_count() or 1) > 1 and os.environ.get("TYPEDPYTHON_THREADS") != "1":
+        assert bmod.__typedpython_parallel__()[3] > before
+
+
+BCHILD_BODY = """
+    import random
+    I = m.__typedpython_interpreted__
+    bad = []
+    def check(name, *args):
+        want = I[name](*[list(a) if isinstance(a, list) else a for a in args])
+        got = getattr(m, name)(*[list(a) if isinstance(a, list) else a for a in args])
+        if not (got == want and type(got) is type(want)):
+            bad.append([name, repr(got), repr(want)])
+    r = random.Random(9)
+    n = 300001
+    for lo, hi in ((-1000, 1000), (-2**63, 2**63 - 1), (0, 255)):
+        xs = [r.randint(lo, hi) for _ in range(n)]
+        for nm in ("b_and", "b_or", "b_xor", "b_or_swapped", "b_or_not", "b_mix"):
+            check(nm, xs)
+        check("b_and_swapped", xs, -1); check("b_xor_expr", xs, 3)
+        for k in (0, 1, 2, 3, 7, 1000):
+            for nm in ("b_and", "b_or", "b_xor", "b_mix"):
+                check(nm, xs[:k])
+    ov = [1] * n; ov[n // 2] = 2**40
+    check("b_xor_expr", ov, 2**30)
+    check("b_local", n)
+    par = m.__typedpython_parallel__()
+    print(json.dumps({"bad": bad, "regions": par[0], "reruns": par[3]}))
+"""
+
+
+@pytest.mark.parametrize("threads", [1, 2, 3, 7])
+def test_bitwise_equals_interpreter_for_every_thread_count(bbuilt, threads):
+    r = run_child(bbuilt[2], BCHILD_BODY, {"TYPEDPYTHON_THREADS": str(threads)}, timeout=900)
+    assert r["bad"] == [], r["bad"][:5]
+    if threads == 1:
+        assert r["regions"] == 0 and r["reruns"] == 0
+    elif (os.cpu_count() or 1) > 1:
+        assert r["regions"] > 0 and r["reruns"] >= 1

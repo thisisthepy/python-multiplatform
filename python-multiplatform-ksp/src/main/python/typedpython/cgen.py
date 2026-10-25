@@ -200,7 +200,9 @@ _PYCMP = {ir.CompareKind.EQ: "Py_EQ", ir.CompareKind.NE: "Py_NE", ir.CompareKind
           ir.CompareKind.LE: "Py_LE", ir.CompareKind.GT: "Py_GT", ir.CompareKind.GE: "Py_GE"}
 _I64_OP = {ir.BinOpKind.ADD: "tp_add_i64", ir.BinOpKind.SUB: "tp_sub_i64",
            ir.BinOpKind.MUL: "tp_mul_i64", ir.BinOpKind.FLOORDIV: "tp_floordiv_i64",
-           ir.BinOpKind.MOD: "tp_mod_i64", ir.BinOpKind.TRUEDIV: "tp_truediv_i64"}
+           ir.BinOpKind.MOD: "tp_mod_i64", ir.BinOpKind.TRUEDIV: "tp_truediv_i64",
+           ir.BinOpKind.LSHIFT: "tp_lshift_i64", ir.BinOpKind.RSHIFT: "tp_rshift_i64"}
+_I64_BITWISE = {ir.BinOpKind.AND: "&", ir.BinOpKind.OR: "|", ir.BinOpKind.XOR: "^"}   # SPEC N-16
 _F64_OP = {ir.BinOpKind.TRUEDIV: "tp_truediv_f64", ir.BinOpKind.FLOORDIV: "tp_floordiv_f64",
            ir.BinOpKind.MOD: "tp_mod_f64"}
 _NP_I64_OP = {ir.BinOpKind.TRUEDIV: "tp_np_truediv_i64", ir.BinOpKind.FLOORDIV: "tp_np_floordiv_i64",
@@ -218,13 +220,14 @@ _OBJ_OP = {k: f"TP_BINOP_{k.name}" for k in ir.BinOpKind}
 _INT_OP = {ir.BinOpKind.ADD: "tp_int_add", ir.BinOpKind.SUB: "tp_int_sub",
            ir.BinOpKind.MUL: "tp_int_mul", ir.BinOpKind.FLOORDIV: "tp_int_floordiv",
            ir.BinOpKind.MOD: "tp_int_mod", ir.BinOpKind.LSHIFT: "tp_int_lshift",
-           ir.BinOpKind.RSHIFT: "tp_int_rshift"}
+           ir.BinOpKind.RSHIFT: "tp_int_rshift", ir.BinOpKind.AND: "tp_int_and",
+           ir.BinOpKind.OR: "tp_int_or", ir.BinOpKind.XOR: "tp_int_xor"}
 _MATH = {ir.MathFunc.SQRT: 1, ir.MathFunc.EXP: 1, ir.MathFunc.LOG: 1, ir.MathFunc.SIN: 1,
          ir.MathFunc.COS: 1, ir.MathFunc.TAN: 1, ir.MathFunc.FABS: 1, ir.MathFunc.ATAN2: 2,
          ir.MathFunc.HYPOT: 2}
 # I64 operations whose helper can return 1 (API.md): MOD never overflows (MIN % -1 == 0).
 _I64_DEOPT = {ir.BinOpKind.ADD, ir.BinOpKind.SUB, ir.BinOpKind.MUL, ir.BinOpKind.FLOORDIV,
-              ir.BinOpKind.TRUEDIV}
+              ir.BinOpKind.TRUEDIV, ir.BinOpKind.LSHIFT, ir.BinOpKind.RSHIFT}
 _INT64_MIN, _INT64_MAX = -(2 ** 63), 2 ** 63 - 1
 # `proven` on an I64 op (ir.BinOp.proven): ADD/SUB/MUL cannot overflow; FLOORDIV/MOD by a Const
 # power of two of a value >= 0 become a shift / mask.
@@ -1080,8 +1083,15 @@ class _FnGen:
             self.emit(f"tp_int_release(&{a}); tp_int_release(&{b});")
             self.emit("if (tp_s != 0) { tp_rc = -1; goto tp_exit; }")
             return t
-        if lt in (Type.I64, Type.F64) and e.op in (ir.BinOpKind.LSHIFT, ir.BinOpKind.RSHIFT):
-            raise CGenError(f"{self.f.name}: {e.op.value} on {lt} operands (only INT and OBJ shift)")
+        if lt is Type.F64 and (e.op in _I64_BITWISE or e.op in (ir.BinOpKind.LSHIFT,
+                                                                 ir.BinOpKind.RSHIFT)):
+            raise CGenError(f"{self.f.name}: {e.op.value} on {lt} operands (an OBJ operation)")
+        if lt is Type.I64 and e.op in _I64_BITWISE:
+            if e.proven or e.type is not Type.I64:
+                raise CGenError(f"{self.f.name}: BinOp {e.op.name} on I64 operands")
+            t = self.tmp("int64_t")                 # SPEC N-16: no overflow, no deopt
+            self.emit(f"{t} = {a} {_I64_BITWISE[e.op]} {b};")
+            return t
         if lt is Type.I64:
             t = self.tmp("double" if e.op is ir.BinOpKind.TRUEDIV else "int64_t")
             if e.proven and e.op in _SHIFT_OPS:
@@ -1137,6 +1147,18 @@ class _FnGen:
                 return v                    # the operand's temporary is the result
             t = self.tmp("tp_int")
             self.emit(f"tp_s = tp_int_neg(&{v}, &{t});")
+            self.emit(f"tp_int_release(&{v});")
+            self.emit("if (tp_s != 0) { tp_rc = -1; goto tp_exit; }")
+            return t
+        if e.op is ir.UnaryOpKind.INVERT:      # SPEC N-16
+            if e.proven or e.type is not ot or ot not in (Type.I64, Type.INT):
+                raise CGenError(f"{self.f.name}: INVERT of {ot}")
+            if ot is Type.I64:
+                t = self.tmp("int64_t")
+                self.emit(f"{t} = ~({v});")
+                return t
+            t = self.tmp("tp_int")
+            self.emit(f"tp_s = tp_int_invert(&{v}, &{t});")
             self.emit(f"tp_int_release(&{v});")
             self.emit("if (tp_s != 0) { tp_rc = -1; goto tp_exit; }")
             return t
@@ -2151,10 +2173,22 @@ class _FnGen:
         if info.reduce:
             if info.stored or len(info.reduce) != len(s.body):
                 raise CGenError(f"{f.name}: parallel reduction loop with stores or a missing reduction")
-            for st, (acc, opn) in zip(sorted(s.body, key=lambda x: getattr(x, "target", "")), info.reduce):
+            def key(x):
+                return x.then[0].target if isinstance(x, ir.If) and len(x.then) == 1 else getattr(x, "target", "")
+            for st, (acc, opn) in zip(sorted(s.body, key=key), info.reduce):
+                if opn in ("MIN", "MAX"):
+                    c = st.cond if isinstance(st, ir.If) else None
+                    a = st.then[0] if isinstance(st, ir.If) and len(st.then) == 1 else None
+                    if (not isinstance(c, ir.Compare) or not isinstance(a, ir.Assign) or st.orelse
+                            or a.target != acc or acc == s.var or a.value.type not in (Type.I64, Type.F64)
+                            or self.types.get(acc) is not a.value.type):
+                        raise CGenError(f"{f.name}: parallel min/max statement is not `if e < acc: acc = e`")
+                    reds.append((acc, opn, a.value))
+                    self._par_collect(a.value, scalars, arrays)
+                    continue
                 v = st.value if isinstance(st, ir.Assign) else None
                 if (not isinstance(v, ir.BinOp) or st.target != acc or v.op.name != opn
-                        or opn not in ("ADD", "MUL") or v.type is not Type.I64
+                        or opn not in ("ADD", "MUL", "AND", "OR", "XOR") or v.type is not Type.I64
                         or self.types.get(acc) is not Type.I64 or acc == s.var):
                     raise CGenError(f"{f.name}: parallel reduction statement is not `acc = acc op e`")
                 if isinstance(v.left, ir.Local) and v.left.name == acc:
@@ -2204,15 +2238,35 @@ class _FnGen:
             decls.append(f"    {ct} {ident} = c->{ident};")
             sets.append(f"tp_pr.{ident} = {ident};")
         if reds:
-            fields += ["    unsigned char *tp_pst;"] + [f"    int64_t *tp_part{j};" for j in range(len(reds))]
+            fields += ["    unsigned char *tp_pst;"] + [f"    {_CT[self.types[a]]} *tp_part{j};"
+                                                       for j, (a, _, _) in enumerate(reds)]
         saved = (self.lines, self.temps, self.depth, self.brk)
         self.lines, self.temps, self.depth, self.brk = [], [], 2, []
         try:
-            self.stmts(s.body)
+            if reds:
+                # Assign statements go through the ordinary emitter; a MIN/MAX statement is emitted
+                # here: the chunk folds from its own first element with strict < (> for max), and a
+                # NaN element marks the chunk bad (the region is rerun sequentially, see tp_runtime.h).
+                by_acc = {acc: (opn, e) for acc, opn, e in reds}
+                for st in s.body:
+                    if isinstance(st, ir.If):
+                        acc = st.then[0].target
+                        opn, e = by_acc[acc]
+                        j = [r[0] for r in reds].index(acc)
+                        v = self.ev(e)
+                        ident, cmp = _ident("l", acc), "<" if opn == "MIN" else ">"
+                        if e.type is Type.F64:
+                            self.emit(f"if ({v} != {v}) {{ tp_rc = 1; goto tp_exit; }} /*tpmm*/")
+                        self.emit(f"if (!tp_has{j}) {{ {ident} = {v}; tp_has{j} = 1; }} /*tpmm*/")
+                        self.emit(f"else if ({v} {cmp} {ident}) {{ {ident} = {v}; }} /*tpmm*/")
+                    else:
+                        self.stmts((st,))
+            else:
+                self.stmts(s.body)
             body_lines, body_temps = self.lines, self.temps
         finally:
             self.lines, self.temps, self.depth, self.brk = saved
-        text = "\n".join(body_lines)
+        text = "\n".join(ln for ln in body_lines if "/*tpmm*/" not in ln)
         if reds:
             # the one failure path a reduction body has: the sequential overflow check, which here
             # marks the chunk bad (the worker's own tp_rc / tp_exit); nothing else may remain
@@ -2228,7 +2282,9 @@ class _FnGen:
                "    uint64_t tp_k;", *decls]
         if reds:
             out += ["    int tp_rc = 0;", "    int tp_s = 0;"]
-            out += [f"    int64_t {_ident('l', acc)} = {'1' if opn == 'MUL' else '0'};" for acc, opn, _ in reds]
+            out += [f"    {_CT[self.types[acc]]} {_ident('l', acc)} = { {'MUL': '1', 'AND': '-1'}.get(opn, '0') };"
+                    for acc, opn, _ in reds]
+            out += [f"    int tp_has{j} = 0;" for j, (_, opn, _) in enumerate(reds) if opn in ("MIN", "MAX")]
             out.append("    (void)tp_rc; (void)tp_s;")
         for ct, n in body_temps:
             out.append(f"    {ct}{'' if ct.endswith('*') else ' '}{n} = 0;")
@@ -2239,6 +2295,7 @@ class _FnGen:
         out.append("    }")
         if reds:
             out += [f"    c->tp_part{j}[tp_ci] = {_ident('l', acc)};" for j, (acc, _, _) in enumerate(reds)]
+            out += [f"    if (!tp_has{j}) goto tp_exit;" for j, (_, opn, _) in enumerate(reds) if opn in ("MIN", "MAX")]
             out += ["    c->tp_pst[tp_ci] = TP_PAR_OK;", "    return;", "tp_exit:",
                     "    c->tp_pst[tp_ci] = TP_PAR_BAD;"]
         out += ["}", ""]
@@ -2252,8 +2309,8 @@ class _FnGen:
         self.emit(f"{ctx_t} tp_pr;")
         if reds:
             self.emit("unsigned char tp_pst[TP_PAR_HARD_CAP] = {0};")
-            for j in range(len(reds)):
-                self.emit(f"int64_t tp_pp{j}[TP_PAR_HARD_CAP];")
+            for j, (acc, _, _) in enumerate(reds):
+                self.emit(f"{_CT[self.types[acc]]} tp_pp{j}[TP_PAR_HARD_CAP];")
         self.emit(f"tp_pr.tp_ts = {ts};")
         for line in sets:
             self.emit(line)
@@ -2267,8 +2324,12 @@ class _FnGen:
             # (a chunk, or here) leaves every accumulator untouched and the sequential loop runs.
             self.emit(f"{pok} = 1;")
             for j, (acc, opn, _) in enumerate(reds):
-                self.emit(f"int64_t tp_rv{j} = {_ident('l', acc)};")
-                self.emit(f"{pok} = {pok} && tp_par_combine(TP_PAR_OP_{opn}, &tp_rv{j}, tp_pp{j}, tp_pst) == 0;")
+                self.emit(f"{_CT[self.types[acc]]} tp_rv{j} = {_ident('l', acc)};")
+                if opn in ("MIN", "MAX"):
+                    fn = "tp_par_combine_ext_f64" if self.types[acc] is Type.F64 else "tp_par_combine_ext_i64"
+                    self.emit(f"{pok} = {pok} && {fn}({1 if opn == 'MAX' else 0}, &tp_rv{j}, tp_pp{j}, tp_pst) == 0;")
+                else:
+                    self.emit(f"{pok} = {pok} && tp_par_combine(TP_PAR_OP_{opn}, &tp_rv{j}, tp_pp{j}, tp_pst) == 0;")
             self.emit(f"if ({pok}) {{")
             for j, (acc, _, _) in enumerate(reds):
                 self.emit(f"    {_ident('l', acc)} = tp_rv{j};")

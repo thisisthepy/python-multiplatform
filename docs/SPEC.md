@@ -892,9 +892,31 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     `min(a, b)` compares with `<` and keeps the first element in iteration order on ties (including
     `+0.0` versus `-0.0`), NaN behaviour depends on position because comparisons with NaN are false,
     and chunked combination must reproduce that chain bit for bit; if an implementation cannot, they
-    are left to a later step. Step 2 implements `+` and `*` only: the compiled subset has no bitwise
-    operator (the front end skips a function using `&`, `|` or `^` on ints, there is no IR operation),
-    so `& | ^` are left until the subset has them.
+    are left to a later step. Step 2 implements `+` and `*` (min/max follow in step 3, `& | ^` in step 4 below).
+    **Bitwise (step 4).** `acc = acc & e`, `acc | e`, `acc ^ e` (either operand order; the augmented
+    `acc &= e` lowers to the same shape) on an i64 accumulator, with `e` the step 2 i64 expression set
+    extended with the N-16 operators `& | ^` and `~`. Shifts are not accepted in `e`: their overflow
+    and negative-count deopt is not a worker failure, so such a loop stays sequential. A chunk folds
+    from the identity (-1 for `&`, 0 for `|` and `^`) and the partials combine in chunk order; these
+    operators are exactly associative and commutative and never overflow, so the combination cannot
+    fail. Only an overflow inside `e` (for example `xs[i] * c`) discards the region and reruns the loop
+    sequentially, as for `+`. They may share a loop with `+ *` and min/max accumulators. The accumulator
+    rules are step 2's (read nowhere else in the body, one operator per accumulator).
+    **`min`/`max` (step 3).** The compiled subset has no `min(a, b)` / `max(a, b)` call (it stays a
+    generic object call, sequential). What it does compile is Python's own definition of
+    `min(acc, e)`, the conditional update `if e < acc: acc = e` (`e > acc` for max; `acc > e` and
+    `acc < e` are the same comparisons; no `else`, one statement, the assigned value is the compared
+    `e`). `<=` and `>=` are not min/max (the last of equal elements wins) and stay sequential. The
+    accumulator is a function-local i64 or f64 read nowhere else in the loop and assigned before it, `e` has
+    the accumulator's type and is built as for `+`/`*` (f64: constants, locals, `float(i)`, `b[i]`, `+ - *`,
+    negation). A loop may mix `+ *` and min/max statements. Each chunk folds from its own first element
+    with the same strict comparison; the partials combine in chunk order on the calling thread with the
+    earlier value on the left, so ties keep the first element in iteration order (including `+0.0` versus
+    `-0.0`). i64 is exact under any such grouping. **f64 is chunked only when no NaN is involved**: the
+    chain is not associative with a NaN (`[1.0] | [nan, 0.0]` folds to 1.0 chunked, 0.0 sequentially), so a
+    chunk that meets a NaN element (including one produced by `e`), or a NaN initial accumulator, discards
+    the region and the sequential loop runs, exactly as for an i64 overflow. Result and exception are
+    therefore Python's bit for bit for every NaN and signed-zero placement and thread count.
     A reduction loop is `acc = acc op e` statements only (no element-wise stores in the same loop, so
     a rerun needs no restore), each `acc` a function-local i64 read nowhere else in the loop and
     assigned before it, `e` built from i64 constants, locals, `b[i]` of a list or local int array
@@ -926,7 +948,44 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     chunk, NaN/inf/-0.0), identical bytes for every thread count, failure at first/middle/last
     iteration, negative qualification cases, disabled-path test, reductions, race and GC tests,
     TSan/ASan, N-14, signals, fork and shutdown, and measurement tests for the threshold.
-  `Status: steps 1 and 2 implemented (#277): element-wise F64 stores a[i] = <F64 + - * and negation of constants, locals and b[i]> into list copy-in or local arrays (no failure path: eligible loops cannot fail or deopt); i64 reductions acc += e and acc *= e with the overflow rerun above (stores and reductions never in one loop); & | ^ and min/max reductions, float reductions, the poll inside a region and the rest planned (design)`.
+  `Status: steps 1, 2, 3a and 4 implemented (#277): element-wise F64 stores a[i] = <F64 + - * and negation of constants, locals and b[i]> into list copy-in or local arrays (no failure path: eligible loops cannot fail or deopt); i64 reductions acc += e and acc *= e with the overflow rerun above (stores and reductions never in one loop); i64 and f64 min/max as `if e < acc: acc = e` (f64 with a NaN reruns sequentially); i64 bitwise reductions acc &= e, |= e, ^= e (identity -1 for &, 0 for | and ^; no shifts in e; test_parallel_loops.py bitwise tests); fork, signal and shutdown tests; float + and * reductions, the poll inside a region and the rest planned (design)`.
+
+- **N-16** TypedPython bitwise operators on ints (#289; INTENT §1.4: compiled code computes what CPython
+  computes). `&`, `|`, `^`, unary `~`, `<<`, `>>` and the augmented forms `&= |= ^= <<= >>=` are in the compiled
+  subset, with the results of Python ints (infinite two's complement).
+  - **`& | ^ ~` never overflow.** On i64 operands they are the native operations (a two's complement i64
+    equals Python's infinite two's complement for every value in range, including `~(-2**63) == 2**63-1`);
+    they never deopt, in a pure or an impure function. Any operand that is an `INT` (N-13) makes the
+    operation an `INT` operation: native when both operands are native, else CPython's `PyNumber_And` /
+    `Or` / `Xor` / `Invert` on the two ints, narrowed back to native when the result fits. An object
+    operand makes it the object operation (`PyNumber_*`, `PyNumber_InPlace*` for the augmented form), so
+    `set | set` and a user `__or__` behave as in the interpreter. A float operand is the object operation
+    too (CPython's `TypeError`).
+  - **`>>`** is the arithmetic floor shift: `a >> n` is `a // 2**n` for `n >= 0`; a count of 64 or more gives
+    `0` for `a >= 0` and `-1` for `a < 0`.
+  - **`<<`** `a << n` is exact. A result outside i64 follows the i64 overflow rule: in a pure function the
+    call deopts (the interpreter then computes the big int); in an impure function the operation is an `INT`
+    operation and promotes to a PyLong (N-13). `0 << n` is `0` for every `n >= 0`; a count of 64 or more
+    with a non-zero operand overflows. A huge count on an `INT` operand is CPython's own result
+    (`OverflowError` / `MemoryError`).
+  - **Negative count.** `a << n` and `a >> n` with `n < 0` raise `ValueError('negative shift count')`, as
+    CPython does. In a pure function the compiled code deopts and the interpreter raises the error (the
+    function has no effect to redo, so it is unobservable, and a numpy scalar operand keeps numpy's own
+    behaviour); in an impure function the `INT` operation raises it.
+  - **No undefined behaviour.** The generated C never shifts by a count outside `[0, 63]` and never
+    left-shifts a signed negative value (shifts are done on `uint64_t`, the right shift on a signed value
+    only with a count in range).
+  - **`bool` operands are not supported.** `True & False` is a `bool` in Python and `~True` is `-2`; the
+    subset types no bitwise result as `bool`, so a function using a `bool` operand of a bitwise operator
+    or a shift is skipped (as arithmetic on `bool` already is), and runs interpreted.
+  - **Proof.** The verifier checks the operand and result types of every new node (i64 `& | ^ ~` give
+    i64 and cannot deopt; i64 `<< >>` can deopt; `INT` forms give `INT`; `proven` is never set on them) and
+    the interval of an i64 `&` with a non-negative operand (`[0, hi]`) and of `~`.
+  - **Tests.** `test_bitwise.py`: differential vs the interpreter over a grid of values (0, 1, -1, i64
+    min/max, random) and counts (0, 1, 62, 63, 64, 65, 1000, negative) in a pure and an impure function;
+    `<<` overflow equals Python's big int, with the deopt counter moving in the pure case and not in the
+    impure one; `ValueError` with the same message; augmented forms; INT and object operands; `bool` and
+    float operands skipped or `TypeError`. `Status: implemented`.
 
 ---
 

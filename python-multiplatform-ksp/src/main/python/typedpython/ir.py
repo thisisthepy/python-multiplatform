@@ -108,7 +108,10 @@ class BinOpKind(Enum):
     FLOORDIV = "//"
     MOD = "%"
     LSHIFT = "<<"          # INT and OBJ operands only (SPEC N-13)
-    RSHIFT = ">>"          # INT and OBJ operands only
+    RSHIFT = ">>"          # I64 (pure functions), INT and OBJ operands
+    AND = "&"              # SPEC N-16: I64, INT and OBJ operands
+    OR = "|"
+    XOR = "^"
 
 
 @dataclass(frozen=True)
@@ -133,7 +136,12 @@ class BinOp(Expr):
       FLOORDIV/MOD, CPython's float floor division and modulo (sign of divisor, `-0.0` cases),
         divisor 0.0 → ZeroDivisionError("float floor division by zero") / ("float modulo by
         zero").
-    INT (SPEC N-13; ADD/SUB/MUL/FLOORDIV/MOD/LSHIFT/RSHIFT, both operands INT, result INT; TRUEDIV of ints
+    I64 bitwise (SPEC N-16, #289): AND/OR/XOR are the native operations and never deopt (two's complement
+      i64 equals Python's infinite two's complement in range). RSHIFT is the arithmetic floor shift
+      (a count >= 64 gives 0 or -1). LSHIFT is exact: a result outside i64 → deopt. A negative count →
+      deopt in both shifts (the interpreter raises ValueError("negative shift count"), and numpy scalars keep
+      numpy's behaviour). I64 shifts are built in pure functions only; an impure function shifts INTs.
+    INT (SPEC N-13; ADD/SUB/MUL/FLOORDIV/MOD/LSHIFT/RSHIFT/AND/OR/XOR, both operands INT, result INT; TRUEDIV of ints
       is an OBJ operation on boxed values): the native i64 operation when both operands are native
       and the result fits i64, else CPython's PyNumber_* on the two ints (exact ints, so no user code
       runs) and the result narrowed back to native when it fits. Never deopts, so it is legal in an
@@ -174,6 +182,7 @@ class UnaryOpKind(Enum):
     NEG = "-"
     POS = "+"
     NOT = "not"
+    INVERT = "~"          # I64 and INT only (SPEC N-16); never overflows, never deopts
 
 
 @dataclass(frozen=True)
@@ -665,7 +674,7 @@ class ParInfo:
     read: tuple[str, ...]
     weight: int = 1
     # Step 2 (#277): the i64 reductions `acc = acc op e` of a loop whose body is only such statements,
-    # as sorted (acc, BinOpKind name) pairs, op ADD or MUL. Then `stored` is empty. Each chunk computes
+    # as sorted (acc, BinOpKind name) pairs, op ADD, MUL, AND, OR or XOR (min/max as MIN, MAX). Then `stored` is empty. Each chunk computes
     # its partial from the op's identity with the sequential code's overflow checks; an overflow in any
     # chunk or in the combination discards the region and the sequential loop runs from its start.
     reduce: tuple[tuple[str, str], ...] = ()

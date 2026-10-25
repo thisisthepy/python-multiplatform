@@ -102,7 +102,9 @@ BINOP = {
     ast.Add: ir.BinOpKind.ADD, ast.Sub: ir.BinOpKind.SUB, ast.Mult: ir.BinOpKind.MUL,
     ast.Div: ir.BinOpKind.TRUEDIV, ast.FloorDiv: ir.BinOpKind.FLOORDIV, ast.Mod: ir.BinOpKind.MOD,
     ast.LShift: ir.BinOpKind.LSHIFT, ast.RShift: ir.BinOpKind.RSHIFT,
+    ast.BitAnd: ir.BinOpKind.AND, ast.BitOr: ir.BinOpKind.OR, ast.BitXor: ir.BinOpKind.XOR,
 }
+BITWISE = (ir.BinOpKind.AND, ir.BinOpKind.OR, ir.BinOpKind.XOR)
 COMPARE = {
     ast.Eq: ir.CompareKind.EQ, ast.NotEq: ir.CompareKind.NE, ast.Lt: ir.CompareKind.LT,
     ast.LtE: ir.CompareKind.LE, ast.Gt: ir.CompareKind.GT, ast.GtE: ir.CompareKind.GE,
@@ -1860,17 +1862,19 @@ class _Lowerer:
         if Type.OBJ in (lt, rt):
             return self.obj_binop(op, left, right, inplace)
         shift = op in (ir.BinOpKind.LSHIFT, ir.BinOpKind.RSHIFT)
+        if (shift or op in BITWISE) and Type.F64 in (lt, rt):
+            return self.obj_binop(op, left, right, inplace)         # CPython's TypeError
         if Type.INT in (lt, rt):
             if Type.F64 in (lt, rt) or op == ir.BinOpKind.TRUEDIV:
                 return self.obj_binop(op, left, right, inplace)     # a float result: the object operation
             return ir.BinOp(Type.INT, op, self.to_int(left), self.to_int(right))
+        if op in BITWISE:       # SPEC N-16: native in range, never an overflow, never a deopt
+            return ir.BinOp(Type.I64, op, left, right)
         if shift:
-            if Type.F64 in (lt, rt):
-                return self.obj_binop(op, left, right, inplace)     # CPython's TypeError
-            if not self.impure_mode:
-                raise Skip(node.lineno, f"`{_src(node)}`: a shift of ints is compiled only in an "
-                                        "impure function (native ints with promotion, SPEC N-13)")
-            return ir.BinOp(Type.INT, op, self.to_int(left), self.to_int(right))
+            if self.impure_mode:        # promotes instead of deopting (SPEC N-13)
+                return ir.BinOp(Type.INT, op, self.to_int(left), self.to_int(right))
+            self.deopts = True          # SPEC N-16: an overflow or a negative count deopts
+            return ir.BinOp(Type.I64, op, left, right)
         if lt == Type.I64 and rt == Type.I64:
             result = Type.F64 if op == ir.BinOpKind.TRUEDIV else Type.I64
             e = ir.BinOp(result, op, left, right)
@@ -1899,9 +1903,18 @@ class _Lowerer:
         if isinstance(node.op, ast.Not):
             operand = self.truth(self.sub(node.operand), node.operand)
             return ir.UnaryOp(Type.BOOL, ir.UnaryOpKind.NOT, operand)
-        if not isinstance(node.op, (ast.USub, ast.UAdd)):
+        if not isinstance(node.op, (ast.USub, ast.UAdd, ast.Invert)):
             raise Skip(node.lineno, f"operator `{_src(node)}` is not supported")
         operand = self.sub(node.operand)
+        if isinstance(node.op, ast.Invert):       # SPEC N-16
+            if operand.type == Type.INT:
+                return ir.UnaryOp(Type.INT, ir.UnaryOpKind.INVERT, operand)
+            if operand.type == Type.I64:
+                if isinstance(operand, ir.Const):
+                    return ir.Const(Type.I64, ~operand.value)
+                return ir.UnaryOp(Type.I64, ir.UnaryOpKind.INVERT, operand)
+            raise Skip(node.lineno, f"unary `{_src(node)}` on {TYPE_NAME[operand.type]} is not "
+                                    "supported")
         kind = ir.UnaryOpKind.NEG if isinstance(node.op, ast.USub) else ir.UnaryOpKind.POS
         if operand.type == Type.F64:
             return ir.UnaryOp(Type.F64, kind, operand)
@@ -2196,7 +2209,9 @@ class _Lowerer:
                 if a is None or b is None:
                     return None
                 return _clamp(_div_interval(e.op, a, b))
-            if isinstance(e, ir.BinOp) and e.op == ir.BinOpKind.TRUEDIV:
+            if isinstance(e, ir.BinOp) and e.op in (ir.BinOpKind.TRUEDIV, ir.BinOpKind.LSHIFT,
+                                                    ir.BinOpKind.RSHIFT, ir.BinOpKind.OR,
+                                                    ir.BinOpKind.XOR):
                 return TOP
             # ADD/SUB/MUL/NEG/POS: an op that overflows deopts, so only in-range results flow on
             r = self._result_interval(e)
@@ -2276,6 +2291,8 @@ class _Lowerer:
             a = self.interval(e.operand)
             if a is None:
                 return None
+            if e.op == ir.UnaryOpKind.INVERT:
+                return (~a[1], ~a[0])
             return a if e.op == ir.UnaryOpKind.POS else (-a[1], -a[0])
         a, b = self.interval(e.left), self.interval(e.right)
         if a is None or b is None:
@@ -2287,6 +2304,9 @@ class _Lowerer:
         if e.op == ir.BinOpKind.MUL:
             products = [x * y for x in a for y in b]
             return (min(products), max(products))
+        if e.op == ir.BinOpKind.AND:    # a non-negative operand bounds the result to [0, its max]
+            his = [x[1] for x in (a, b) if x[0] >= 0]
+            return (0, min(his)) if his else TOP
         return TOP
 
 

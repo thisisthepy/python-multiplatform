@@ -10,6 +10,8 @@ Python error set, nothing to undo), `-1` Python error set (CPython's exception t
     int tp_sub_i64(int64_t a, int64_t b, int64_t *out);
     int tp_mul_i64(int64_t a, int64_t b, int64_t *out);
     int tp_neg_i64(int64_t a, int64_t *out);                 /* 1 for INT64_MIN */
+    int tp_lshift_i64(int64_t a, int64_t b, int64_t *out);   /* 1 for b < 0 or a result outside i64 (SPEC N-16) */
+    int tp_rshift_i64(int64_t a, int64_t b, int64_t *out);   /* 1 for b < 0; b >= 64 gives 0 / -1 */
     /* Proven operations (ir.BinOp.proven, #148): the verifier showed the result fits in i64, so the
        generated code calls these (function-like macros; no check, no status). With
        -DTP_CHECK_PROVEN they are the checked helpers above and a wrong proof is a SystemError. A
@@ -138,7 +140,8 @@ All return new references or NULL with CPython's exception set; none deopts.
     PyObject *tp_call(PyObject *callee, PyObject *const *args, size_t nargs, PyObject *kwnames); /* PyObject_Vectorcall: nargs = positional count; keyword values follow at args[nargs..] */
     /* tp_binop_obj op codes: TP_BINOP_ADD..TP_BINOP_MOD = 0..5 in ir.BinOpKind declaration order;
        TP_BINOP_IADD..TP_BINOP_IMOD = 6..11 are the augmented forms (PyNumber_InPlace*, ir.BinOp.inplace);
-       TP_BINOP_LSHIFT, TP_BINOP_RSHIFT = 12, 13 and TP_BINOP_ILSHIFT, TP_BINOP_IRSHIFT = 14, 15 */
+       TP_BINOP_LSHIFT, TP_BINOP_RSHIFT = 12, 13 and TP_BINOP_ILSHIFT, TP_BINOP_IRSHIFT = 14, 15;
+       TP_BINOP_AND, OR, XOR = 16, 17, 18 and TP_BINOP_IAND, IOR, IXOR = 19, 20, 21 (SPEC N-16) */
     int       tp_truth(PyObject *obj);                            /* 0/1, -1 error (PyObject_IsTrue) */
     int       tp_compare_bool(PyObject *a, PyObject *b, int op);  /* 0/1, -1 error: PyObject_RichCompare then PyObject_IsTrue (no identity shortcut, as `if a == b`) */
     int       tp_obj_to_f64(PyObject *obj, double *out);          /* 0 / -1 (PyNumber_Float, then exact double) */
@@ -164,6 +167,8 @@ mutation points the tests replace by wrapping arithmetic and must see fail.
     int       tp_int_floordiv(const tp_int *a, const tp_int *b, tp_int *out); /* also tp_int_mod: floor semantics */
     int       tp_int_lshift(const tp_int *a, const tp_int *b, tp_int *out);   /* also tp_int_rshift */
     int       tp_int_neg(const tp_int *a, tp_int *out);
+    int       tp_int_and(const tp_int *a, const tp_int *b, tp_int *out);      /* also tp_int_or, tp_int_xor (SPEC N-16) */
+    int       tp_int_invert(const tp_int *a, tp_int *out);                    /* ~a; never leaves i64 when native */
     int       tp_int_cmp(const tp_int *a, const tp_int *b, int op);           /* op = Py_EQ..Py_GE; 0 / 1, -1 error */
 
 ## Global cache (ir.Global; SPEC N-13)
@@ -492,7 +497,7 @@ for the epoch's increment. `tp_runtime.h` needs the GCC/Clang `__atomic` builtin
 
 ## Parallel regions (SPEC N-15, issues #151, #277)
 A `ForRange` the verifier marked `par` (`ir.ParInfo`; marked function, `a[i] = F64 expression` stores
-or i64 `+ *` reductions) runs its iterations on per-region C threads above a work threshold. Workers touch no Python
+or i64 `+ * & | ^` reductions, or min/max `if e < acc: acc = e` on an i64 or f64) runs its iterations on per-region C threads above a work threshold. Workers touch no Python
 object and no Python API, are not Python threads and never outlive the call.
     #define TP_PAR_MIN_WORK 65536          /* PLACEHOLDER, to be measured on #151: weighted iterations (trip count * ParInfo.weight) */
     #define TP_PAR_MAX_THREADS 8           /* default cap; TYPEDPYTHON_THREADS overrides (1 disables), hard cap 64 */
@@ -507,7 +512,7 @@ object and no Python API, are not Python threads and never outlive the call.
     void tp_par_stats(int64_t out[4]);                           /* regions with workers, workers started, failed creations, reduction reruns */
     #define TP_PAR_NONE 0 / TP_PAR_OK 1 / TP_PAR_BAD 2    /* per-chunk state of a reduction chunk (zero-initialised array of TP_PAR_HARD_CAP) */
     #define TP_PAR_OP_ADD 0 / TP_PAR_OP_MUL 1
-    int  tp_par_combine(int op, int64_t *acc, const int64_t *part, const unsigned char *st);  /* acc op= part[0], part[1], ... in chunk order, checked; 1 if a chunk was BAD or it overflowed (acc untouched) */
+    int  tp_par_combine(int op, int64_t *acc, const int64_t *part, const unsigned char *st);  /* op: TP_PAR_OP_ADD/MUL/AND/OR/XOR; acc op= part[0], part[1], ... in chunk order, checked (AND/OR/XOR never overflow); 1 if a chunk was BAD or it overflowed (acc untouched) */
     void tp_par_rerun_note(void);                                /* counts a discarded reduction region */
 `tp_par_run` always completes the whole range. The calling thread runs the first chunk; a chunk whose
 `pthread_create` failed runs on the calling thread after it (fewer workers, down to none: the sequential
@@ -526,7 +531,14 @@ writes `part[ci]` and `st[ci] = TP_PAR_OK`; a failed check sets `st[ci] = TP_PAR
 After `tp_par_run` the caller combines every accumulator with `tp_par_combine`; if any accumulator fails
 (a BAD chunk or an overflow in the combination) no accumulator and no loop variable is written, the rerun
 counter is incremented and the sequential loop runs from the loop's start state, which deopts or not
-exactly as today. (`& | ^` and min/max are not reductions yet: the compiled subset has no bitwise operator.)
+exactly as today. (`& | ^` are not reductions yet: the compiled subset has no bitwise operator.)
+    int  tp_par_combine_ext_i64(int is_max, int64_t *acc, const int64_t *part, const unsigned char *st);
+    int  tp_par_combine_ext_f64(int is_max, double *acc, const double *part, const unsigned char *st);
+A min/max accumulator (`if e < acc: acc = e`, `>` for max) is folded per chunk from the chunk's own first element with the
+same strict comparison and combined in chunk order with the earlier value on the left, which equals the sequential chain
+for i64 and for f64 without NaN (ties and signed zeros keep the first). An f64 chunk that meets a NaN element sets
+`TP_PAR_BAD`, and `tp_par_combine_ext_f64` returns 1 for a NaN initial accumulator: the loop then runs sequentially
+(`[1.0] | [nan, 0.0]` is the case a chunked fold gets wrong).
 
 ## Development-mode import gate (Python API, not C; SPEC N-7b)
     typedpython.importgate.install(source_roots)   # meta path finder; checks project modules before they run
