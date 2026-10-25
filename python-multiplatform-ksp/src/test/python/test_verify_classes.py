@@ -429,7 +429,10 @@ def test_a_caller_of_a_check_exact_function_inherits_its_deopt():
              callee)
 
 
-def test_a_call_whose_callee_guards_a_class_param_may_deopt_unless_the_argument_is_proved():
+def test_a_call_whose_callee_guards_a_class_param_may_deopt_even_for_a_proved_argument():
+    """#275: the callee's guard `type(x) is C` runs again at the call, and on free-threaded 3.15t
+    another thread can reach even a fresh or already-guarded object (gc.get_objects()) and assign
+    `__class__`, so no argument proof exempts it; this matches cgen's `_can_deopt`."""
     callee = fn("g", params=[pt()], body=[Return(fget(lo("p"), "x"))])
     unproved = fn("f", params=[obj()], may_deopt=True, body=[Return(Call(OBJ, "g", (lo("q"),)))])
     accepted(unproved, callee)
@@ -437,22 +440,16 @@ def test_a_call_whose_callee_guards_a_class_param_may_deopt_unless_the_argument_
     rejected(DEOPT, fn("f", params=[obj()], pure=False, body=[IMPURE,
                                                               Return(Call(OBJ, "g", (lo("q"),)))]),
              callee)
-    # proved arguments cannot fail the callee's guard: no deopt
     for arg, params in ((lo("p"), [pt()]), (new(g_("a"), g_("b")), [])):
-        accepted(fn("f", params=params, may_deopt=False, body=[Return(Call(OBJ, "g", (arg,)))]),
+        accepted(fn("f", params=params, may_deopt=True, body=[Return(Call(OBJ, "g", (arg,)))]),
                  callee)
-    accepted(fn("f", params=[obj()], may_deopt=True,
-                body=[Return(Call(OBJ, "g", (check(lo("q")),)))]), callee)     # the CheckExact deopts
-    accepted(fn("f", params=[pt()], pure=False, body=[IMPURE, Return(Call(OBJ, "g", (lo("p"),)))]),
+        rejected(FLAG_DEOPT, fn("f", params=params, may_deopt=False,
+                                body=[Return(Call(OBJ, "g", (arg,)))]), callee)
+    rejected(DEOPT, fn("f", params=[pt()], pure=False, body=[IMPURE, Return(Call(OBJ, "g", (lo("p"),)))]),
              callee)
-    # the wrong class proves nothing for this callee
-    rejected(FLAG_DEOPT, fn("f", params=[pt("p", cls="Other")], may_deopt=False,
-                            body=[Return(Call(OBJ, "g", (lo("p"),)))]), callee)
-    # an optional class param is satisfied by a proved exact argument too, not by an unproved one
     opt = fn("g", params=[pt(optional=True)], body=[Return(g_("a"))])
-    accepted(fn("f", params=[pt()], may_deopt=False, body=[Return(Call(OBJ, "g", (lo("p"),)))]), opt)
-    rejected(FLAG_DEOPT, fn("f", params=[obj()], may_deopt=False,
-                            body=[Return(Call(OBJ, "g", (lo("q"),)))]), opt)
+    rejected(FLAG_DEOPT, fn("f", params=[pt()], may_deopt=False, body=[Return(Call(OBJ, "g", (lo("p"),)))]),
+             opt)
 
 
 def test_field_set_is_an_effect():
