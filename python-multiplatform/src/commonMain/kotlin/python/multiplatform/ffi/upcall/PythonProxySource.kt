@@ -438,6 +438,11 @@ object PythonProxySource {
                 (_pm_types.ModuleType,),
                 {'_pm_owned': True},
             )
+            # Issue #323: the binding layer's write guard, so `import pkg.Owner` cannot replace the
+            # proxy class `pkg.Owner` on this module. Writes only; reads are unchanged.
+            _guard = getattr(_pm_sys.modules.get('python_multiplatform.binding'), 'guarded_setattr', None)
+            if _guard is not None:
+                _t.__setattr__ = _guard
             _mod.__class__ = _t
             return _t
 

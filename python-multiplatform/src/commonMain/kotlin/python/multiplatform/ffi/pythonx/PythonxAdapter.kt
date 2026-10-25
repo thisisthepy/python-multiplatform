@@ -2325,6 +2325,7 @@ object PythonxAdapter {
             # Names adapted by a previous install are stale with it; the fresh `__getattr__` below
             # re-resolves each on first use. Only this layer's own -- see `_drop_adapted`.
             _drop_adapted(module)
+            _guard_parent(module)
             if kotlin_package is None:
                 # A step on the way to a package that has bindings, carrying none of its own.
                 return module
@@ -2333,6 +2334,32 @@ object PythonxAdapter {
             module.__dir__ = _module_dir(kotlin_package)
             _make_callable(module, kotlin_package)
             return module
+
+
+        def guarded_setattr(self, name, value):
+            '''`__setattr__` of a package module (issue #323). The import system binds a freshly
+            imported submodule onto its parent *after* the loader returns
+            (`importlib._bootstrap._find_and_load_unlocked`), so `import pkg.Owner` would replace the
+            proxy class `pkg.Owner` with the module of statics. When `class_wins_over_module` holds
+            for that name, the class is bound instead; the module stays in `sys.modules`. Only
+            writes pay for this; reads never reach it.'''
+            if isinstance(value, _types.ModuleType):
+                qualified = self.__name__ + '.' + name
+                if value.__name__ == qualified and class_wins_over_module(qualified):
+                    value = _proxy_type(qualified)
+            _types.ModuleType.__setattr__(self, name, value)
+
+
+        def _guard_parent(module):
+            kind = type(module)
+            if not getattr(kind, '_pm_owned', False):
+                kind = type(
+                    '_PmModule_' + module.__name__.replace('.', '_'),
+                    (kind,),
+                    {'_pm_owned': True},
+                )
+                module.__class__ = kind
+            kind.__setattr__ = guarded_setattr
 
 
         def adapt_existing_modules():
