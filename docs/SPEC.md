@@ -176,9 +176,13 @@ fail, then implement.
 - **C-3** Android binds through `RegisterNatives` with the calling convention chosen per function;
   re-entrant functions are never `@CriticalNative`. `Status: implemented`,
   `PM/desktopTest/.../ffi/JniCallConventionClassificationTest.kt`, `PM/androidInstrumentedTest/.../JniWiringTest.kt`.
-- **C-4** Every C API call holds the GIL. `Status: partial`, enforced by convention and README rules;
-  the only direct test (`PM/commonTest/.../GilParkingTest.kt`) asserts only "does not crash". Releasing
-  the GIL after initialisation is not enabled.
+- **C-4** Every C API call holds the GIL. `Status: partial`, enforced by convention and README rules.
+  The GIL is released once `Python3.initialize` returns (it saves the main thread state with
+  `PyEval_SaveThread`), so every entry into Python goes through `withGIL`, and `withoutGIL` gives it
+  up while waiting in Kotlin. Tests: `PM/jvmTest/.../ffi/GilReleaseTest.kt` (desktop and Android
+  instrumented), `PM/nativeTest/.../ffi/GilReleaseNativeTest.kt` (iOS simulator, androidNative); a
+  second thread runs Python while the first waits in Kotlin, with bounded waits. The "every call holds
+  the GIL" half has only `PM/commonTest/.../GilParkingTest.kt` (asserts "does not crash").
 - **C-5** A thread CPython creates can upcall into ART: it is attached once per thread and detached when
   it dies. `Status: implemented` on Android, `PM/androidInstrumentedTest/.../UpcallThreadAttachTest.kt`.
 - **C-6** wasm: `Py_ssize_t` boundaries and the `-1` error return are handled at the 32-bit ABI.
@@ -586,7 +590,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 ## 7. Threading and builds
 
 - **T-1** GIL builds: Kotlin threads attach a thread state and serialise on the GIL. `Status: partial`
-  (see C-4).
+  (see C-4; the release after initialisation is tested by `GilReleaseTest` / `GilReleaseNativeTest`).
 - **T-2** Free-threaded builds selected with `-PpythonFreeThreaded=true` download a different CPython
   asset. `Status: partial` (desktop only, opt-in; default is `pythonFreeThreaded=false` in `gradle.properties`)
  , `GP/PythonHomeStagingTest.kt`, `PM/desktopTest/.../FreeThreadedGCGateTest.kt`, `VersionsTest.kt`.
