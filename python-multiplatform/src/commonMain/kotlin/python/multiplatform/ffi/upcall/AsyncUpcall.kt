@@ -275,8 +275,8 @@ internal object AsyncUpcall {
                 }
                 callSoonThreadsafe.invoke(settle, future, PyBool.from(true), marshalled)
             } finally {
-                // The completion half of the handle's lifetime; see [armCancellationNotice]. Under
-                // the GIL, which is the rule every HandleTable mutation lives under, and in a
+                // The completion half of the handle's lifetime; see [armCancellationNotice]. The
+                // table takes its own mutex (the GIL is not what protects it), and this sits in a
                 // `finally` so a delivery that raised does not turn into a permanent root. A
                 // release the Future's done callback already performed is a no-op.
                 if (handle != null) HandleTable.release(handle)
