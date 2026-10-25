@@ -651,6 +651,22 @@ class While(Stmt):
 
 
 @dataclass(frozen=True)
+class ParInfo:
+    """Why a `ForRange` may run its iterations on several threads (SPEC N-15, step 1): the body is
+    only `a[var] = <F64 expression>` stores, `stored` are the arrays stored into (each at the loop
+    variable, proven in bounds, so distinct iterations write distinct elements) and `read` the arrays
+    read, all at the loop variable and proven in bounds. The expression nodes are Const, scalar
+    Local (not assigned in the body), ToFloat of an I64, F64 + - * and negation, so no node can fail,
+    deopt or touch a Python object, and `weight` is their count (the cost rule's per-iteration work).
+    Arrays are distinct objects (entry guard), so a store at `var` cannot alias a read of another
+    array."""
+
+    stored: tuple[str, ...]
+    read: tuple[str, ...]
+    weight: int = 1
+
+
+@dataclass(frozen=True)
 class ForRange(Stmt):
     """`for var in range(start, stop, step)`: `step` is a non-zero I64 Const; `start`/`stop` are
     evaluated once before the loop, as range() does. `var` is I64 and is not assigned in the body
@@ -663,6 +679,10 @@ class ForRange(Stmt):
     stop: Expr
     step: Const
     body: tuple[Stmt, ...]
+    # SPEC N-15 (#151, #277): set only by `verify` (like `proven`), which recomputes it from the body
+    # and rejects a loop whose declared value differs (`verify/par-loop`). The front end leaves it
+    # None. Not None: the iterations may run on several C threads (see `ParInfo`). None: sequential.
+    par: ParInfo | None = None
 
 
 @dataclass(frozen=True)
@@ -783,6 +803,9 @@ class Function:
     # rejects a function whose declared entries differ (`verify/virtual-escape`). The front end
     # leaves it empty.
     virtual: tuple[str, ...] = ()
+    # SPEC N-15: the user marked this function with the comment line `# typedpython: parallel`
+    # directly above its `def`. Only a marked function can hold a `ForRange.par`.
+    parallel: bool = False
 
 
 @dataclass(frozen=True)

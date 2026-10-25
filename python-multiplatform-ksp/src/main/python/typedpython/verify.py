@@ -47,6 +47,9 @@ Rules (the `rule` of a Diagnostic):
   verify/array-open           a function with an ArrayParam runs user code (#203)
   verify/buffer               a malformed `ArrayParam.buffer` (only None and "array"), or a
                               CopyArray of a buffer array (#149)
+  verify/par-loop             a `ForRange.par` (SPEC N-15, #277) that the verifier does not recompute to
+                              the same value: the function is not marked `parallel`, or the loop is
+                              not eligible (see "Parallel loops" below)
   verify/class                a class named by FieldGet/FieldSet/New/IsExact/CheckExact/Param.cls is not
                               a (valid) ClassDecl of the module, a field is not one of its fields, a
                               New names a class without trivial_init or has the wrong arity, or a
@@ -192,6 +195,26 @@ native array the function owns. The verifier proves, never trusting the front en
     proves constant indices and bounded index expressions; a negative index is never proven (the
     `proven` flag means 0 <= index < len). An array assigned twice or more has no known length.
 
+Parallel loops (SPEC N-15, #277; step 1). `ForRange.par` is never trusted: `_par_info` recomputes it
+for every loop; a declared value (the front end declares none) must equal it, else `verify/par-loop`. A loop
+is eligible only if ALL of these hold:
+  * the function is marked (`Function.parallel`);
+  * the loop is `range(c >= 0, len(A), step > 0)` over an array `A` the body does not reassign (the
+    same condition that lets the verifier prove bounds, so every access below is `proven`);
+  * the body is a non-empty sequence of `StoreIndex` statements and nothing else (no Assign, no
+    nested loop, no If, no Break/Continue/Return, no call);
+  * every store is `a[var] = value` with the loop variable itself as index, `proven`, into an F64
+    list or local array (not a buffer), so distinct iterations write distinct elements;
+  * `value` is built from F64 Const, an F64 scalar Local (nothing in the body assigns it), a ToFloat
+    of an I64 Const or Local, `Index(b, var)` proven on an F64 non-buffer array, F64 ADD/SUB/MUL
+    (not `np`), and F64 NEG. No division (ZeroDivisionError), no I64 arithmetic (overflow), no
+    comparison, no call, no object. So no node can fail, deopt or touch a Python object, and a read
+    of `b[var]` where `b` is another array cannot alias a written element (array parameters are
+    distinct lists by the entry guard, local arrays are distinct allocations), and a read of the
+    stored array itself is the same element the iteration writes.
+Anything else compiles sequentially, unchanged. This cannot find other eligible shapes (reductions,
+stencils, calls, nested tiles); those are later steps.
+
 Tuple. `Tuple(OBJ, elements)`: a tuple of OBJ expressions (a scalar needs Box), result OBJ, a
 reference creator in the ownership rule. Building one is not an effect.
 
@@ -243,6 +266,7 @@ from .ir import (
 )
 from .ir import CheckExact, CheckMethod, ClassDecl, FieldGet, FieldSet, Is, IsExact, New
 from .ir import BuildString, Contains, ForObj, Format, GetItem, NewDict, NewList, StoreItem
+from .ir import ParInfo
 
 DA = "verify/definite-assignment"
 MISSING_RETURN = "verify/missing-return"
@@ -267,6 +291,7 @@ ARRAY_OPEN = "verify/array-open"
 BUFFER = "verify/buffer"
 CLASS = "verify/class"
 FIELD = "verify/field-unproved"
+PAR_LOOP = "verify/par-loop"
 
 
 @dataclass(frozen=True)
@@ -1609,7 +1634,65 @@ class _Checker:
         after: _State = state
         for br in loop.breaks:
             after = _meet(after, br)
-        return dataclasses.replace(s, start=start, stop=stop, body=body), after
+        par = self._par_info(s, step_ok, body, loop)
+        if s.par is not None and s.par != par:
+            self.error(PAR_LOOP, f"ForRange over '{var}' declares par={s.par!r}, but the verifier "
+                                 f"computes {par!r} (SPEC N-15)")
+        return dataclasses.replace(s, start=start, stop=stop, body=body, par=par), after
+
+    def _par_info(self, s: ForRange, step_ok: bool, body: tuple, loop: _Loop) -> ParInfo | None:
+        """SPEC N-15 step 1: the ParInfo of this loop, or None (see "Parallel loops" above)."""
+        if self.fn.parallel is not True or not step_ok or loop.bounds_array is None:
+            return None
+        if self.diags or not isinstance(body, tuple) or not body:
+            return None
+        var = s.var
+        stored: list[str] = []
+        read: list[str] = []
+        weight = [0]
+
+        def array_ok(name: str) -> bool:
+            t = self.arrays.get(name) or self.larrays.get(name)
+            return t is Type.F64_ARRAY and name not in self.buffers
+
+        def at_var(ix: object, proven: object) -> bool:
+            return proven is True and type(ix) is Local and ix.name == var and ix.type is Type.I64
+
+        def ok(e: object) -> bool:
+            weight[0] += 1
+            t = type(e)
+            if t is Const:
+                return e.type is Type.F64 and type(e.value) is float
+            if t is Local:
+                return (e.type is Type.F64 and e.name != var and e.name not in self.arrays
+                        and e.name not in self.larrays and (e.name in self.scalars or e.name in self.entry))
+            if t is ToFloat:
+                o = e.operand
+                return (e.type is Type.F64 and getattr(o, "type", None) is Type.I64
+                        and ((type(o) is Local and o.name not in self.arrays
+                              and o.name not in self.larrays)
+                             or (type(o) is Const and type(o.value) is int)))
+            if t is Index:
+                if e.type is Type.F64 and array_ok(e.array) and at_var(e.index, e.proven):
+                    read.append(e.array)
+                    return True
+                return False
+            if t is BinOp:
+                return (e.type is Type.F64 and e.left.type is Type.F64 and e.right.type is Type.F64
+                        and e.op in (BinOpKind.ADD, BinOpKind.SUB, BinOpKind.MUL) and not e.np
+                        and e.inplace is False and ok(e.left) and ok(e.right))
+            if t is UnaryOp:
+                return e.type is Type.F64 and e.op is UnaryOpKind.NEG and ok(e.operand)
+            return False
+
+        for st in body:
+            if type(st) is not StoreIndex or not array_ok(st.array) or not at_var(st.index, st.proven):
+                return None
+            weight[0] += 2
+            if not ok(st.value) or st.value.type is not Type.F64:
+                return None
+            stored.append(st.array)
+        return ParInfo(tuple(sorted(set(stored))), tuple(sorted(set(read))), weight[0])
 
     def s_Return(self, s: Return, state: _State):
         returns = self.fn.returns

@@ -512,6 +512,9 @@ class _ModGen:
         self.module = module
         self.display_path = ""
         self.functions = {f.name: f for f in module.functions}
+        # SPEC N-15: any ForRange.par in the module (the module then exports __typedpython_parallel__)
+        self.has_par = any(isinstance(st, ir.ForRange) and st.par is not None
+                           for f in module.functions for st in _walk_stmts(f.body))
         if len(self.functions) != len(module.functions):
             raise CGenError("duplicate compiled function names")
         self.names: list[str] = []
@@ -758,6 +761,8 @@ def generate(module: ir.Module, source_path: Path, display_path: str | None = No
     w("")
     if module.classes:
         w(_class_info_function(mg))
+    if mg.has_par:
+        w(_par_stats_function())
     w(_exec_function(mg))
     w(_state_functions(mg))
     w("static PyModuleDef_Slot tp_slots[] = {")
@@ -929,6 +934,7 @@ class _FnGen:
         self.depth = 1
         self.temps: list[tuple[str, str]] = []      # (C type, name)
         self.arrays = {p.name: p for p in f.params if isinstance(p, ir.ArrayParam)}
+        self.par_defs: list[str] = []               # outlined region bodies (SPEC N-15), emitted before the impl
         self.local_arrays: dict[str, Type] = {}       # name -> F64_ARRAY / I64_ARRAY
         self.brk: list = []                    # per open loop: goto label for `break`, or None
         self.label_n = 0
@@ -2062,6 +2068,9 @@ class _FnGen:
             self.emit(f"    {tn} = ((uint64_t){ts} - (uint64_t){te} - 1u) / {mag} + 1u;")
             sign = "-"
         self.depth += 1
+        par_open = s.par is not None
+        if par_open:
+            self._emit_region(s, ts, tn, abs(step))
         vec = self._vec_plan(s) if step == 1 else None
         if self.snapshot:
             # no polling in a snapshot holder: a plain loop
@@ -2095,8 +2104,110 @@ class _FnGen:
             self.emit("}")
             if label in self.used_labels:
                 self.emit(f"{label}: ;")
+        if par_open:
+            self.emit("}")                  # the sequential `else` of the parallel region
         self.depth -= 1
         self.emit("}")
+
+    def _par_collect(self, e: ir.Expr, scalars: set, arrays: set) -> None:
+        if isinstance(e, ir.Local):
+            scalars.add(e.name)
+        elif isinstance(e, ir.Index):
+            arrays.add(e.array)
+            self._par_collect(e.index, scalars, arrays)
+        elif isinstance(e, ir.ToFloat):
+            self._par_collect(e.operand, scalars, arrays)
+        elif isinstance(e, ir.BinOp):
+            self._par_collect(e.left, scalars, arrays)
+            self._par_collect(e.right, scalars, arrays)
+        elif isinstance(e, ir.UnaryOp):
+            self._par_collect(e.operand, scalars, arrays)
+        elif not isinstance(e, ir.Const):
+            raise CGenError(f"{self.f.name}: {type(e).__name__} in a parallel loop body")
+
+    def _emit_region(self, s: ir.ForRange, ts: str, tn: str, mag: int) -> None:
+        """SPEC N-15: opens `if (<big enough and threads> ) { region } else {`; the caller closes the
+        else with the sequential loop it emits next. The body is the verified `par` loop body
+        (StoreIndex statements of F64 arithmetic), outlined into `tp_pbody_*`, which declares the
+        names it uses as locals copied from a context struct, so the existing statement and
+        expression emitters produce its code unchanged. Nothing in it can fail, deopt or build an
+        exception (the verifier's rule); cgen refuses text that tries."""
+        f, info = self.f, s.par
+        if not f.parallel or not isinstance(info, ir.ParInfo) or s.step.value <= 0:
+            raise CGenError(f"{f.name}: ForRange.par on a loop that cannot be parallel (unmarked "
+                            "function, bad step or no ParInfo)")
+        scalars: set[str] = set()
+        arrays: set[str] = set()
+        for st in s.body:
+            if not isinstance(st, ir.StoreIndex):
+                raise CGenError(f"{f.name}: parallel loop body has a {type(st).__name__}")
+            arrays.add(st.array)
+            self._par_collect(st.value, scalars, arrays)
+        scalars.discard(s.var)
+        for a in arrays:
+            if a not in self.arrays and a not in self.local_arrays:
+                raise CGenError(f"{f.name}: parallel loop array {a} is not an array")
+            if a in self.arrays and self.arrays[a].buffer:
+                raise CGenError(f"{f.name}: parallel loop over buffer array {a}")
+        for x in scalars:
+            if self.types.get(x) not in (Type.F64, Type.I64):
+                raise CGenError(f"{f.name}: parallel loop scalar {x} is not f64/i64")
+        k = len(self.par_defs)
+        tag = _ident("tp_par", f"{f.name}{'_fast' if self.fast else ''}_{k}")
+        ctx_t, body_f = f"{tag}_ctx", f"{tag}_body"
+        fields = ["    int64_t tp_ts;"]
+        decls = ["    int64_t " + _ident("l", s.var) + " = 0;"]
+        sets = []
+        for a in sorted(arrays):
+            at = self.arrays[a].type if a in self.arrays else self.local_arrays[a]
+            ident = _ident("l", a)
+            fields.append(f"    {_ARRAY_CT[at]} *{ident};")
+            if a in self.arrays:                           # a parameter is already a pointer
+                decls.append(f"    {_ARRAY_CT[at]} *{ident} = c->{ident};")
+                sets.append(f"tp_pr.{ident} = {ident};")
+            else:                                          # a local array is a struct: the worker's copy
+                decls.append(f"    {_ARRAY_CT[at]} {ident} = *c->{ident};")
+                sets.append(f"tp_pr.{ident} = &{ident};")
+        for x in sorted(scalars):
+            ident, ct = _ident("l", x), _CT[self.types[x]]
+            fields.append(f"    {ct} {ident};")
+            decls.append(f"    {ct} {ident} = c->{ident};")
+            sets.append(f"tp_pr.{ident} = {ident};")
+        saved = (self.lines, self.temps, self.depth, self.brk)
+        self.lines, self.temps, self.depth, self.brk = [], [], 2, []
+        try:
+            self.stmts(s.body)
+            body_lines, body_temps = self.lines, self.temps
+        finally:
+            self.lines, self.temps, self.depth, self.brk = saved
+        text = "\n".join(body_lines)
+        for banned in ("goto", "tp_rc", "tp_s ", "return", "tp_st", "tp_dict", "PyObject", "tp_release"):
+            if banned in text:
+                raise CGenError(f"{f.name}: parallel loop body emitted `{banned}`")
+        sign_var = _ident("l", s.var)
+        out = [f"typedef struct {{", *fields, f"}} {ctx_t};", "",
+               f"static void {body_f}(const void *tp_c, uint64_t tp_k0, uint64_t tp_k1)", "{",
+               f"    const {ctx_t} *c = (const {ctx_t} *)tp_c;",
+               "    uint64_t tp_k;", *decls]
+        for ct, n in body_temps:
+            out.append(f"    {ct}{'' if ct.endswith('*') else ' '}{n} = 0;")
+        out.append("    (void)c;" + "".join(f" (void){_ident('l', x)};" for x in sorted(scalars)))
+        out.append(f"    for (tp_k = tp_k0; tp_k < tp_k1; tp_k++) {{")
+        out.append(f"        {sign_var} = (int64_t)((uint64_t)c->tp_ts + tp_k * UINT64_C({mag}));")
+        out += body_lines
+        out += ["    }", "}", ""]
+        self.par_defs.append("\n".join(out))
+        w = max(1, info.weight)
+        self.emit(f"if ({tn} >= (uint64_t)((TP_PAR_MIN_WORK + {w - 1}) / {w}) && tp_par_threads() > 1) {{")
+        self.depth += 1
+        self.emit(f"{ctx_t} tp_pr;")
+        self.emit(f"tp_pr.tp_ts = {ts};")
+        for line in sets:
+            self.emit(line)
+        self.emit(f"(void)tp_par_run({body_f}, &tp_pr, {tn});")
+        self.emit(f"{_ident('l', s.var)} = (int64_t)((uint64_t){ts} + ({tn} - 1u) * UINT64_C({mag}));")
+        self.depth -= 1
+        self.emit("} else {")
 
     def st_Return(self, s: ir.Return) -> None:
         rt = self.f.returns
@@ -2217,8 +2328,13 @@ class _FnGen:
         """The impl (preceded by its fast twin when bounded) and the wrapper."""
         parts = []
         if self.f.name in self.mg.bounded:
-            parts.append(_FnGen(self.mg, self.f, fast=True).impl())
-        parts.append(self.impl())
+            twin = _FnGen(self.mg, self.f, fast=True)
+            twin_text = twin.impl()
+            parts += twin.par_defs
+            parts.append(twin_text)
+        impl_text = self.impl()
+        parts += self.par_defs
+        parts.append(impl_text)
         parts.append(self.wrapper())
         return "\n".join(parts)
 
@@ -2631,6 +2747,23 @@ def _state_functions(mg: _ModGen) -> str:
     return "\n".join(L)
 
 
+def _par_stats_function() -> str:
+    """`__typedpython_parallel__()`: (regions that used workers, workers started, failed thread
+    creations) since import, so a test can prove the parallel path ran (SPEC N-15)."""
+    return "\n".join([
+        "static PyObject *tp_par_stats_fn(PyObject *tp_module, PyObject *tp_unused)",
+        "{",
+        "    int64_t tp_v[3];",
+        "    (void)tp_module; (void)tp_unused;",
+        "    tp_par_stats(tp_v);",
+        "    return Py_BuildValue(\"(LLL)\", (long long)tp_v[0], (long long)tp_v[1], (long long)tp_v[2]);",
+        "}",
+        "",
+        "static PyMethodDef tp_par_stats_def = {\"__typedpython_parallel__\", tp_par_stats_fn, METH_NOARGS, NULL};",
+        "",
+    ])
+
+
 def _class_info_function(mg: _ModGen) -> str:
     """`__typedpython_class_info__()`: {class name: {compiled, captured_tag, tag, current, slow,
     refreshed, watched}}, introspection of the guards (module docstring)."""
@@ -2790,6 +2923,12 @@ def _exec_function(mg: _ModGen) -> str:
         L += [
             "    tp_cf = PyCFunction_NewEx(&tp_class_info_def, tp_module, NULL);",
             "    if (tp_cf == NULL || PyDict_SetItemString(tp_dict, \"__typedpython_class_info__\", tp_cf) < 0) goto tp_done;",
+            "    tp_release(&tp_cf);",
+        ]
+    if mg.has_par:
+        L += [
+            "    tp_cf = PyCFunction_NewEx(&tp_par_stats_def, tp_module, NULL);",
+            "    if (tp_cf == NULL || PyDict_SetItemString(tp_dict, \"__typedpython_parallel__\", tp_cf) < 0) goto tp_done;",
             "    tp_release(&tp_cf);",
         ]
     L += [
