@@ -136,7 +136,7 @@ def test_the_fast_impl_calls_only_fast_impls_and_never_counts(traced):
     fast = fn_text(c, "static inline int tp_fimpl_mid")
     assert "tp_fimpl_leaf(" in fast and "tp_impl_leaf(" not in fast
     assert "tp_enter_call" not in fast and "tp_leave_call" not in fast
-    assert "tp_poll(tp_st->breaker)" not in fast          # no entry poll
+    assert "tp_poll(tp_t, tp_st->breaker)" not in fast          # no entry poll
     loop = fn_text(c, "static inline int tp_fimpl_loopy")
     assert "tp_poll(" in loop or "tp_pc" in loop          # loop polls stay
 
@@ -144,11 +144,11 @@ def test_the_fast_impl_calls_only_fast_impls_and_never_counts(traced):
 def test_the_normal_impl_prechecks_and_still_counts(traced):
     c = traced[1]
     normal = fn_text(c, "static int tp_impl_mid")
-    assert "tp_depth_room(2)" in normal
-    assert normal.index("tp_depth_room(2)") < normal.index("tp_enter_call()")
+    assert "tp_depth_room(tp_ts, tp_t, 2)" in normal
+    assert normal.index("tp_depth_room(tp_ts, tp_t, 2)") < normal.index("tp_enter_call(tp_ts, tp_t)")
     assert "tp_impl_leaf(" in normal and "tp_fimpl_leaf(" not in normal
     top = fn_text(c, "static int tp_impl_top")
-    assert "tp_depth_room(3)" in top
+    assert "tp_depth_room(tp_ts, tp_t, 3)" in top
     assert "tp_depth_room" not in fn_text(c, "static int tp_impl_rec")
 
 
@@ -354,7 +354,7 @@ def test_a_redo_inside_a_fast_tree_sees_the_exact_depth(traced, tmp_path):
     for x in ("3", "3000000"):
         assert r["ok"][x] > 100 and r["rec"][x] >= 1, (x, r)
     assert r["deopts"] >= r["deopt_ok"] > 100           # the redo really ran at every ok depth
-    assert "tp_depth_py_begin(tp_fd);" in fn_text(c, "static inline int tp_fimpl_fill")
+    assert "tp_depth_py_begin(tp_t, tp_fd);" in fn_text(c, "static inline int tp_fimpl_fill")
 
 
 def test_a_signal_handler_in_a_fast_tree_poll_sees_the_exact_depth(traced, tmp_path):
@@ -367,7 +367,7 @@ def test_a_signal_handler_in_a_fast_tree_poll_sees_the_exact_depth(traced, tmp_p
     assert r["mismatch"] == [], r["mismatch"][:5]
     assert len({v[0] for v in r["values"]}) > 5            # the measured depth tracks the stack depth
     loop = fn_text(c, "static inline int tp_fimpl_loopy")
-    assert "tp_depth_py_begin(tp_fd);" in loop and "tp_depth_py_end(tp_fd);" in loop
+    assert "tp_depth_py_begin(tp_t, tp_fd);" in loop and "tp_depth_py_end(tp_t, tp_fd);" in loop
 
 
 def test_the_fast_path_is_taken_when_there_is_room(tmp_path):

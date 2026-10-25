@@ -223,8 +223,20 @@ Same structs as above with `list == NULL` and `dirty == NULL`. 0 ok, -1 MemoryEr
     PyObject *tp_tuple(PyObject *const *items, Py_ssize_t n);           /* new tuple; steals nothing */
 
 ## Call depth (every compiled impl function: enter at entry, leave at every exit; issue #57)
-    int  tp_enter_call(void);   /* 0 ok; -1 RecursionError set, nothing counted (the caller must NOT call leave) */
-    void tp_leave_call(void);   /* undoes one successful tp_enter_call; exactly once per success, on ok, error and deopt exits alike */
+    int  tp_enter_call(PyThreadState *ts, tp_tls *t);  /* 0 ok; -1 RecursionError set, nothing counted (the caller must NOT call leave) */
+    void tp_leave_call(tp_tls *t);   /* undoes one successful tp_enter_call; exactly once per success, on ok, error and deopt exits alike */
+Thread state (#125): the wrapper calls `PyThreadState_GetUnchecked()` once and passes it as `tp_ts` to the
+impl, which passes it to `tp_enter_call`, `tp_depth_room`, `tp_traced` and to its direct compiled callees,
+so a compiled call and its C-to-C callees do one TLS lookup of the thread state per call. Likewise the per-thread state (call depth, poll countdown, snapshot depth) is one `__thread` struct
+`tp_tls`: the wrapper takes `tp_tls_get()` once and passes `tp_t` down. `Py_EnterRecursiveCall`,
+`Py_LeaveRecursiveCall` and `Py_GetRecursionLimit` have no public tstate-taking variant and are kept.
+
+Thread state (#125): the wrapper calls `PyThreadState_GetUnchecked()` once and passes it as `tp_ts` to the
+impl, which passes it to `tp_enter_call`, `tp_depth_room`, `tp_traced` and to its direct compiled callees,
+so a compiled call and its C-to-C callees do no further thread-state lookup. Likewise the per-thread state (call depth, poll countdown, snapshot depth) is one `__thread` struct
+`tp_tls`: the wrapper takes `tp_tls_get()` once and passes `tp_t` down. `Py_EnterRecursiveCall`,
+`Py_LeaveRecursiveCall` and `Py_GetRecursionLimit` have no public tstate-taking variant and are kept.
+
 `tp_enter_call` makes compiled recursion fail where interpreted recursion fails. It counts, per thread,
 the compiled frames in flight (they have no Python frame), adds the current Python frame depth
 (`PyThreadState_GetFrame` / `PyFrame_GetBack`, public API only; cached while the top frame is the same
@@ -237,34 +249,33 @@ compiled module that sit between two frames of this one are not counted, and ano
 frames never are.
 
 ## Fast entry (bounded functions; issue #147)
-    int  tp_depth_room(Py_ssize_t k);   /* 1 iff tp_python_depth() + count + k <= Py_GetRecursionLimit() */
+    int  tp_depth_room(PyThreadState *ts, tp_tls *t, Py_ssize_t k);   /* 1 iff tp_python_depth(ts) + count + k <= Py_GetRecursionLimit() */
     void tp_trace_fast_hit(void);       /* counts a fast entry; a no-op unless -DTP_TRACE_FAST */
-    void tp_depth_py_begin(int fd);     /* count += fd, around code a fast tree may run (redo, poll) */
-    void tp_depth_py_end(int fd);       /* count -= fd; drops the cached frame at count 0 */
-    void tp_depth_done(void);           /* after a fast tree: drop the cached top frame when count is 0 */
+    void tp_depth_py_begin(tp_tls *t, int fd);     /* count += fd, around code a fast tree may run (redo, poll) */
+    void tp_depth_py_end(tp_tls *t, int fd);       /* count -= fd; drops the cached frame at count 0 */
+    void tp_depth_done(tp_tls *t);           /* after a fast tree: drop the cached top frame when count is 0 */
 A function is *bounded* when it is in no call cycle, every function it Calls is bounded, and its body
 has no node that can run Python code (CallObject, GetAttr, Truth, CompareObj, ObjToFloat, FieldGet,
 FieldSet, New, any OBJ-typed expression except Box of a scalar). A `redo` Call to a bounded callee is allowed. Its k is `1 + max(k(callee))` (1 with no
 callees). cgen emits, per bounded `f`, `static inline int tp_fimpl_f(...)` (the impl body without
 tp_enter_call / tp_leave_call and without the entry poll, Calls to the callees' `tp_fimpl_*`) and, at
-the top of `tp_impl_f` after the Param.cls guards, `if (tp_depth_room(k)) { r = tp_fimpl_f(...);
+the top of `tp_impl_f` after the Param.cls guards, `if (tp_depth_room(tp_ts, tp_t, k)) { r = tp_fimpl_f(...);
 tp_depth_done(); return r; }`. No room: the counted path runs and raises RecursionError exactly where
 it raised before. `tp_enter_call` compares `depth + count + 1`; the fast tree has at most k frames, so
 `depth + count + k` is the same comparison at its deepest frame. Py_EnterRecursiveCall is skipped on
 the fast path: the tree is bounded, so it adds at most k small C frames. A twin takes `int tp_fd`
 (the tree's active frames, itself included; the precheck passes 1, a Call passes `tp_fd + 1`). The
 two points where a fast tree can run Python code, a `redo` Call and the loop poll's `tp_poll_slow`,
-are wrapped in `tp_depth_py_begin(tp_fd)` / `tp_depth_py_end(tp_fd)`, so everything run from there
+are wrapped in `tp_depth_py_begin(tp_t, tp_fd)` / `tp_depth_py_end(tp_t, tp_fd)`, so everything run from there
 (interpreted frames, signal handlers, compiled calls through their precheck) sees the exact count.
 `-DTP_TRACE_FAST`
 (tests only) adds `__tp_trace_fast_hits__()` to the module: the number of entries that took the fast path.
 
 ## Eval breaker (top of every loop iteration and impl entry; issue #141)
-    int  tp_poll(PyObject *breaker);        /* 0 continue; -1 exception set (a signal handler raised) */
-    int  tp_poll_slow(PyObject *breaker);   /* every TP_POLL_INTERVAL polls: call the breaker */
+    int  tp_poll(tp_tls *t, PyObject *breaker);        /* 0 continue; -1 exception set (a signal handler raised) */
+    int  tp_poll_slow(tp_tls *t, PyObject *breaker);   /* every TP_POLL_INTERVAL polls: call the breaker */
     int  tp_pc_tick(int *pc);               /* loop countdown: 1 (and reset) when the slow path is due */
-    Py_ssize_t tp_snapshot_depth;           /* THREAD-LOCAL; ++ at entry, -- at tp_exit of a snapshot-holding impl */
-    int        tp_poll_countdown;           /* THREAD-LOCAL */
+    tp_tls *tp_tls_get(void);               /* address of the one THREAD-LOCAL struct: depth, poll_countdown, snapshot_depth (++ at entry, -- at tp_exit of a snapshot-holding impl) */
 `breaker` is the module state's `lambda: None`. Calling it runs CPython's own eval-breaker handling
 in its RESUME: signals, pending calls, stop-the-world requests of other threads (the free-threaded
 GC), async exceptions and scheduled collections, exactly as between two bytecodes. A function that holds an array copy-in
@@ -272,7 +283,7 @@ GC), async exceptions and scheduled collections, exactly as between two bytecode
 nothing: the event stays pending and is handled after it returns.
 
 ## Tracing, profiling and monitoring (entry of every function; issue #142, SPEC N-14)
-    int  tp_traced(PyObject *module, PyCodeObject *code);       /* 1: run the interpreted original */
+    int  tp_traced(PyObject *module, PyThreadState *ts, PyCodeObject *code);       /* 1: run the interpreted original */
     PyObject *tp_state.orig_code[];  /* GENERATED, module state: STRONG ref to the original's code, per interned name */
 `tp_traced` is true when the calling thread has a `sys.settrace` / `sys.setprofile` function
 (`PyThreadState.c_tracefunc` / `c_profilefunc`), when any `sys.monitoring` tool has a global event
@@ -440,8 +451,8 @@ static or module-state field must be added here):
 | State | Where | Class | How |
 |---|---|---|---|
 | `tp_depth` (compiled frames in flight, cached frame) | tp_runtime.h static | thread-local | `TP_THREAD_LOCAL` |
-| `tp_poll_countdown` | tp_runtime.h static | thread-local | `TP_THREAD_LOCAL` |
-| `tp_snapshot_depth` | tp_runtime.h static | thread-local | `TP_THREAD_LOCAL`: one thread's array function never silences another thread's polls |
+| `tp_tls_v.poll_countdown` | tp_runtime.h static | thread-local | `TP_THREAD_LOCAL` struct `tp_tls` |
+| `tp_tls_v.snapshot_depth` | tp_runtime.h static | thread-local | `TP_THREAD_LOCAL`: one thread's array function never silences another thread's polls |
 | `tp_pc` (loop countdown) | local of each impl | per call | a C local |
 | `tp_globals_epoch` | tp_runtime.h static | atomic | relaxed loads, acq_rel add in the watcher callback (any thread); the epoch + dict lookup that remember a binding run in the module dict's critical section |
 | `cls_rt[k].tag`, `.bad_tag`, `.gepoch` | module state | atomic | relaxed `tp_atomic_*`; a stale tag is never reused (tags only grow), so a lost or reordered refresh costs one more refresh |

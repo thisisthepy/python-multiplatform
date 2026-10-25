@@ -2630,19 +2630,36 @@ typedef struct {
     Py_ssize_t pydepth;     /* Python frames below and including `frame` */
 } tp_depth_state;
 
-static TP_THREAD_LOCAL tp_depth_state tp_depth = {0, NULL, 0};
+#ifndef TP_POLL_INTERVAL
+#define TP_POLL_INTERVAL 4096
+#endif
+
+/* All per-thread state of the compiled code in ONE thread-local, so a compiled call looks its address
+ * up once (tp_tls_get, in the wrapper) and passes the pointer down (#125). */
+typedef struct {
+    tp_depth_state depth;           /* compiled frames in flight (see above) */
+    int poll_countdown;             /* eval-breaker poll countdown (#141) */
+    Py_ssize_t snapshot_depth;      /* snapshot-holding functions in flight (#141) */
+} tp_tls;
+
+static TP_THREAD_LOCAL tp_tls tp_tls_v = {{0, NULL, 0}, TP_POLL_INTERVAL, 0};
+
+static inline tp_tls *tp_tls_get(void)
+{
+    return &tp_tls_v;
+}
 
 /* Python frame depth of the running thread: public API only. The walk is O(depth), so it is
  * cached by the identity of the top frame (kept alive while compiled frames are in flight). */
-static inline Py_ssize_t tp_python_depth(void)
+static inline Py_ssize_t tp_python_depth(PyThreadState *ts, tp_tls *t)
 {
-    PyFrameObject *top = PyThreadState_GetFrame(PyThreadState_Get());    /* new ref or NULL */
+    PyFrameObject *top = PyThreadState_GetFrame(ts);    /* new ref or NULL */
     if (top == NULL) {
         return 0;
     }
-    if (tp_depth.frame == (PyObject *)top) {
+    if (t->depth.frame == (PyObject *)top) {
         Py_DECREF(top);
-        return tp_depth.pydepth;
+        return t->depth.pydepth;
     }
     Py_ssize_t depth = 0;
     PyFrameObject *cur = top;
@@ -2653,31 +2670,31 @@ static inline Py_ssize_t tp_python_depth(void)
         Py_DECREF(cur);
         cur = back;
     }
-    PyObject *old = tp_depth.frame;
-    tp_depth.frame = (PyObject *)top;       /* takes the reference from GetFrame */
-    tp_depth.pydepth = depth;
+    PyObject *old = t->depth.frame;
+    t->depth.frame = (PyObject *)top;       /* takes the reference from GetFrame */
+    t->depth.pydepth = depth;
     Py_XDECREF(old);
     return depth;
 }
 
-static inline int tp_enter_call(void)
+static inline int tp_enter_call(PyThreadState *ts, tp_tls *t)
 {
-    if (tp_python_depth() + tp_depth.count + 1 > Py_GetRecursionLimit()) {
+    if (tp_python_depth(ts, t) + t->depth.count + 1 > Py_GetRecursionLimit()) {
         PyErr_SetString(PyExc_RecursionError, "maximum recursion depth exceeded");
         return -1;
     }
     if (Py_EnterRecursiveCall(" in compiled code")) {
         return -1;
     }
-    tp_depth.count++;
+    t->depth.count++;
     return 0;
 }
 
-static inline void tp_leave_call(void)
+static inline void tp_leave_call(tp_tls *t)
 {
     Py_LeaveRecursiveCall();
-    if (--tp_depth.count == 0) {
-        Py_CLEAR(tp_depth.frame);
+    if (--t->depth.count == 0) {
+        Py_CLEAR(t->depth.frame);
     }
 }
 
@@ -2699,32 +2716,32 @@ static inline void tp_leave_call(void)
  * tp_depth_py_begin(tp_fd) / tp_depth_py_end(tp_fd), `tp_fd` being the tree's active frames (itself
  * included), so the count is exactly what the counted path would have there: Python frames and
  * compiled calls started from it see the true depth. */
-static inline int tp_depth_room(Py_ssize_t k)
+static inline int tp_depth_room(PyThreadState *ts, tp_tls *t, Py_ssize_t k)
 {
-    return tp_python_depth() + tp_depth.count + k <= Py_GetRecursionLimit();
+    return tp_python_depth(ts, t) + t->depth.count + k <= Py_GetRecursionLimit();
 }
 
 /* After a fast tree: tp_python_depth may have cached the top frame (a strong reference) and, with
  * no counted frame in flight, nothing else would drop it, as tp_leave_call does at count 0. */
-static inline void tp_depth_done(void)
+static inline void tp_depth_done(tp_tls *t)
 {
-    if (tp_depth.count == 0) {
-        Py_CLEAR(tp_depth.frame);
+    if (t->depth.count == 0) {
+        Py_CLEAR(t->depth.frame);
     }
 }
 
 /* Around a point of a fast tree that can run Python code: the count includes the tree's `fd` active
  * frames. begin/end are balanced. end also drops the cached top frame when no compiled frame is
  * counted any more (the code in between may have cached another frame, as tp_leave_call would). */
-static inline void tp_depth_py_begin(int fd)
+static inline void tp_depth_py_begin(tp_tls *t, int fd)
 {
-    tp_depth.count += fd;
+    t->depth.count += fd;
 }
 
-static inline void tp_depth_py_end(int fd)
+static inline void tp_depth_py_end(tp_tls *t, int fd)
 {
-    tp_depth.count -= fd;
-    tp_depth_done();
+    t->depth.count -= fd;
+    tp_depth_done(t);
 }
 
 #ifdef TP_TRACE_FAST
@@ -2762,8 +2779,6 @@ static inline void tp_trace_fast_hit(void) {}
 
 /* Per thread (#159): a shared counter would make threads poll for each other and, worse, let one
  * thread's snapshot-holding function suppress another thread's polls. */
-static TP_THREAD_LOCAL int tp_poll_countdown = TP_POLL_INTERVAL;
-static TP_THREAD_LOCAL Py_ssize_t tp_snapshot_depth = 0;
 
 /* Kept out of line and marked cold: inlined into every loop body it bloated short inner loops
  * (fannkuch paid ~11% with it inline). */
@@ -2775,11 +2790,11 @@ static TP_THREAD_LOCAL Py_ssize_t tp_snapshot_depth = 0;
 #define TP_UNLIKELY(x) (x)
 #endif
 
-static TP_COLD int tp_poll_slow(PyObject *breaker)
+static TP_COLD int tp_poll_slow(tp_tls *t, PyObject *breaker)
 {
     PyObject *r;
-    tp_poll_countdown = TP_POLL_INTERVAL;
-    if (tp_snapshot_depth > 0 || breaker == NULL) {
+    t->poll_countdown = TP_POLL_INTERVAL;
+    if (t->snapshot_depth > 0 || breaker == NULL) {
         return 0;
     }
     r = PyObject_CallNoArgs(breaker);
@@ -2802,12 +2817,12 @@ static inline int tp_pc_tick(int *pc)
 }
 
 /* 0 = continue, -1 = exception set (e.g. KeyboardInterrupt from a signal handler). */
-static inline int tp_poll(PyObject *breaker)
+static inline int tp_poll(tp_tls *t, PyObject *breaker)
 {
-    if (!TP_UNLIKELY(--tp_poll_countdown <= 0)) {
+    if (!TP_UNLIKELY(--t->poll_countdown <= 0)) {
         return 0;
     }
-    return tp_poll_slow(breaker);
+    return tp_poll_slow(t, breaker);
 }
 
 /* Tracing, profiling and monitoring (issue #142, SPEC N-14). A compiled function has no Python
@@ -2870,10 +2885,9 @@ static TP_COLD int tp_mon_scan(PyObject *module)
     return on;
 }
 
-static inline int tp_traced(PyObject *module, PyCodeObject *code)
+static inline int tp_traced(PyObject *module, PyThreadState *ts, PyCodeObject *code)
 {
     uint64_t v = tp_mon_ver;
-    PyThreadState *ts = PyThreadState_Get();
     /* sys.settrace / sys.setprofile (and PyEval_SetTrace / SetProfile): per thread, as in CPython.
      * c_tracefunc / c_profilefunc are public members of PyThreadState (cpython/pystate.h; coverage's
      * C tracer and Cython read them), the only internal-looking read here. */

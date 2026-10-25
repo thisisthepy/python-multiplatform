@@ -375,7 +375,7 @@ def _all_exprs(f: ir.Function):
 def _traced_call(k: int) -> str:
     """tp_traced for the function whose interpreted original is `names[k]` (SPEC N-14). The code
     object is a strong reference in the module state, filled at module exec."""
-    return (f"tp_traced(tp_module, (PyCodeObject *)((tp_state *)PyModule_GetState(tp_module))->orig_code[{k}])")
+    return (f"tp_traced(tp_module, tp_ts, (PyCodeObject *)((tp_state *)PyModule_GetState(tp_module))->orig_code[{k}])")
 
 
 def _can_deopt(e: ir.Expr, functions: dict[str, ir.Function]) -> bool:
@@ -887,6 +887,9 @@ def _impl_signature(f: ir.Function, fast: bool = False) -> str:
     params = ["PyObject *tp_module"]
     if fast:
         params.append("int tp_fd")              # compiled frames of this fast tree, itself included
+    else:
+        params.append("PyThreadState *tp_ts")   # the caller's one thread-state lookup (#125)
+    params.append("tp_tls *tp_t")               # its one TLS-address lookup (#125)
     for p in f.params:
         if isinstance(p, ir.ArrayParam):
             params.append(f"{'tp_buf' if p.buffer else _ARRAY_CT[p.type]} *{_ident('l', p.name)}")
@@ -907,7 +910,7 @@ def _impl_signature(f: ir.Function, fast: bool = False) -> str:
 def _impl_call_args(f: ir.Function, fd: str | None = None) -> str:
     """The arguments that forward an impl's own parameters to another impl of the same signature
     (`fd`: the value of a fast twin's `tp_fd`)."""
-    args = ["tp_module"] + ([fd] if fd is not None else [])
+    args = ["tp_module"] + ([fd] if fd is not None else []) + ["tp_t"]
     for p in f.params:
         args.append(_ident("l" if isinstance(p, ir.ArrayParam) or p.type is not Type.OBJ else "p", p.name))
     args += [_ident("l", g.name) for g in f.entry_globals]
@@ -1327,9 +1330,9 @@ class _FnGen:
         # Depth is counted by the callee itself (tp_enter_call at its entry, issue #57).
         if self.fast:
             # the fast twin's callees are bounded too (_bounded_functions): their fast twins, uncounted
-            self.emit(f"tp_s = {_ident('tp_fimpl', e.function)}(tp_module, tp_fd + 1{''.join(', ' + x for x in args)});")
+            self.emit(f"tp_s = {_ident('tp_fimpl', e.function)}(tp_module, tp_fd + 1, tp_t{''.join(', ' + x for x in args)});")
         else:
-            self.emit(f"tp_s = {_ident('tp_impl', e.function)}(tp_module{''.join(', ' + x for x in args)});")
+            self.emit(f"tp_s = {_ident('tp_impl', e.function)}(tp_module, tp_ts, tp_t{''.join(', ' + x for x in args)});")
         self.depth -= 1
         self.emit("}")
         if ti is not None:
@@ -1393,9 +1396,9 @@ class _FnGen:
         # In a fast twin the interpreted callee (a Python frame) and whatever it calls must see the
         # frames of this fast tree: count them for exactly the span that can run Python code, from
         # the call to the release of its result (module docstring, "Fast entry").
-        end = "tp_depth_py_end(tp_fd); " if self.fast else ""
+        end = "tp_depth_py_end(tp_t, tp_fd); " if self.fast else ""
         if self.fast:
-            self.emit("tp_depth_py_begin(tp_fd);")
+            self.emit("tp_depth_py_begin(tp_t, tp_fd);")
         if av:
             self.emit(f"{{ PyObject *tp_av[{len(av)}] = {{{', '.join(av)}}};")
             self.emit(f"  {rr} = tp_cg_redo(tp_module, {k}, tp_av, {len(av)}, NULL); }}")
@@ -1419,7 +1422,7 @@ class _FnGen:
             what = {Type.F64: "a float", Type.BOOL: "True or False", Type.I64: "an int in i64"}[rt]
         self._own_release(rr)
         if self.fast:
-            self.emit("tp_depth_py_end(tp_fd);")
+            self.emit("tp_depth_py_end(tp_t, tp_fd);")
         msg = c_string(f"typedpython: the interpreted redo of {callee.name} did not return {what}")
         self.emit(f"if (tp_s != 0) {{ PyErr_SetString(PyExc_SystemError, {msg}); tp_rc = -1; goto tp_exit; }}")
         self.depth -= 1
@@ -1935,11 +1938,11 @@ class _FnGen:
             # store of a global on every iteration of a short inner loop cost fannkuch ~38%.
             if self.fast:
                 # the poll can run a signal handler or another compiled call: count this fast tree
-                self.emit("if (tp_pc_tick(&tp_pc)) { tp_depth_py_begin(tp_fd); "
-                          "tp_s = tp_poll_slow(tp_st->breaker); tp_depth_py_end(tp_fd); "
+                self.emit("if (tp_pc_tick(&tp_pc)) { tp_depth_py_begin(tp_t, tp_fd); "
+                          "tp_s = tp_poll_slow(tp_t, tp_st->breaker); tp_depth_py_end(tp_t, tp_fd); "
                           "if (tp_s != 0) { tp_rc = -1; goto tp_exit; } }")
                 return
-            self.emit("if (tp_pc_tick(&tp_pc) && tp_poll_slow(tp_st->breaker) != 0) "
+            self.emit("if (tp_pc_tick(&tp_pc) && tp_poll_slow(tp_t, tp_st->breaker) != 0) "
                       "{ tp_rc = -1; goto tp_exit; }")
 
     def st_While(self, s: ir.While) -> None:
@@ -2163,7 +2166,7 @@ class _FnGen:
             out.append(f"    {ct}{sep}{n} = {init};")
         # (a fast twin declares tp_st / tp_dict only when its body reads them: PyModule_GetState and
         # PyModule_GetDict are external calls, and a leaf must stay free of them to inline well)
-        out.append("    (void)tp_s; (void)tp_pc;" + (" (void)tp_fd;" if self.fast else "")
+        out.append("    (void)tp_s; (void)tp_pc;" + (" (void)tp_fd;" if self.fast else " (void)tp_ts;") + " (void)tp_t;"
                    + (" (void)tp_st;" if not self.fast or "tp_st" in body_text else "")
                    + (" (void)tp_dict;" if not self.fast or "tp_dict" in body_text else "")
                    + "".join(f" (void){_ident('l', n)};" for n in self.types if n not in params)
@@ -2184,27 +2187,27 @@ class _FnGen:
                 # Precheck: room for the k frames of this whole call tree, then run its uncounted
                 # twin. Without room, fall through to the counted path below, which raises
                 # RecursionError at exactly the call where the interpreter would.
-                out.append(f"    if (tp_depth_room({k_bound})) {{")
+                out.append(f"    if (tp_depth_room(tp_ts, tp_t, {k_bound})) {{")
                 out.append("        int tp_fr;")
                 out.append("        tp_trace_fast_hit();")
                 out.append(f"        tp_fr = {_ident('tp_fimpl', f.name)}({_impl_call_args(f, '1')});")
-                out.append("        tp_depth_done();")
+                out.append("        tp_depth_done(tp_t);")
                 out.append("        return tp_fr;")
                 out.append("    }")
-            out.append("    if (tp_enter_call() != 0) return -1;")
+            out.append("    if (tp_enter_call(tp_ts, tp_t) != 0) return -1;")
         # Eval breaker (#141): a snapshot-holding function never polls and defers others' polls.
         if self.snapshot:
-            out.append("    tp_snapshot_depth++;")
+            out.append("    tp_t->snapshot_depth++;")
         elif not self.fast:
-            out.append("    if (tp_poll(tp_st->breaker) != 0) { tp_rc = -1; goto tp_exit; }")
+            out.append("    if (tp_poll(tp_t, tp_st->breaker) != 0) { tp_rc = -1; goto tp_exit; }")
         out += prologue
         out += self.lines
         out.append("tp_exit:")
         out += self._own_release_all()
         if self.snapshot:
-            out.append("    tp_snapshot_depth--;")
+            out.append("    tp_t->snapshot_depth--;")
         if not self.fast:
-            out.append("    tp_leave_call();")
+            out.append("    tp_leave_call(tp_t);")
         out.append("    return tp_rc;")
         out.append("}")
         out.append("")
@@ -2225,7 +2228,9 @@ class _FnGen:
         n = len(f.params)
         L = [f"static PyObject *{_ident('tp_wrap', f.name)}(PyObject *tp_module, PyObject *const *tp_args, "
              "Py_ssize_t tp_nargs, PyObject *tp_kwnames)", "{",
-             "    int tp_s = 0, tp_x = 0;"]
+             "    int tp_s = 0, tp_x = 0;",
+             "    PyThreadState *tp_ts = PyThreadState_GetUnchecked(); /* the one lookup of this call (#125) */",
+             "    tp_tls *tp_t = tp_tls_get(); /* and its one TLS-address lookup (#125) */"]
         if f.returns not in (Type.NONE,):
             init = "NULL" if f.returns is Type.OBJ else "0"
             L.append(f"    {_CT[f.returns]} tp_r = {init};")
@@ -2333,7 +2338,7 @@ class _FnGen:
         if gnames:
             at = len(args) - (1 if f.returns is not Type.NONE else 0)
             args[at:at] = gnames
-        L.append(f"    tp_s = {_ident('tp_impl', f.name)}(tp_module{''.join(', ' + a for a in args)});")
+        L.append(f"    tp_s = {_ident('tp_impl', f.name)}(tp_module, tp_ts, tp_t{''.join(', ' + a for a in args)});")
         if f.pure:
             L.append("    if (tp_s == 1) goto tp_deopt;")
         else:
