@@ -6,11 +6,6 @@ import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 import org.jetbrains.kotlin.gradle.ExperimentalWasmDsl
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.targets.js.webpack.KotlinWebpackConfig
-import org.jetbrains.kotlin.konan.target.KonanTarget.ANDROID_ARM64
-import org.jetbrains.kotlin.konan.target.KonanTarget.ANDROID_X64
-import org.jetbrains.kotlin.konan.target.KonanTarget.IOS_ARM64
-import org.jetbrains.kotlin.konan.target.KonanTarget.IOS_SIMULATOR_ARM64
-import org.jetbrains.kotlin.konan.target.KonanTarget.IOS_X64
 
 
 plugins {
@@ -84,20 +79,12 @@ kotlin {
         iosArm64(),
         iosSimulatorArm64()
     ).forEach { iosTarget ->
-        val targetABI = when(iosTarget.konanTarget) {
-            ANDROID_ARM64 -> "arm64-v8a"
-            ANDROID_X64 -> "x86_64"
-            IOS_ARM64 -> "ios-arm64"
-            IOS_X64 -> "ios-arm64_x86_64-simulator"
-            IOS_SIMULATOR_ARM64 -> "ios-arm64_x86_64-simulator"
-            else -> throw RuntimeException("Unsupported ABI: ${iosTarget.konanTarget}")
-        }
         iosTarget.binaries.framework {
             baseName = "Demo"
 
-            linkerOpts.addAll(listOf(
-                "-framework", "Python", "-F$projectDir/build/xcode-frameworks/Python.xcframework/$targetABI", "-Objc"
-            ))
+            // `-framework Python -F...` and the link task's dependency on preparePythonXcframework come
+            // from the bindings plugin (issue #321); only the non-Python option stays here.
+            linkerOpts.add("-Objc")
 
             //export(projects.pythonMultiplatform)
         }
@@ -258,20 +245,6 @@ tasks.withType<org.jetbrains.kotlin.gradle.targets.js.webpack.KotlinWebpack>().c
     doFirst {
         patchWasmOutputForCPython(syncedDir.get().asFile, modulePrefix = "${rootProject.name}-${project.name}")
     }
-}
-
-val prepareIosFrameworks by tasks.registering(Sync::class) {
-    dependsOn(":python-multiplatform:downloadPython_ios")
-    
-    val samplePythonVersion = project.findProperty("pythonVersion")?.toString() ?: rootProject.version.toString()
-    val extractedIosDir = project(":python-multiplatform").layout.buildDirectory.dir("python-standalone/extracted/$samplePythonVersion/ios")
-    
-    from(extractedIosDir)
-    into(layout.buildDirectory.dir("xcode-frameworks"))
-}
-
-tasks.matching { it.name.startsWith("link") && it.name.contains("Ios") }.configureEach {
-    dependsOn(prepareIosFrameworks)
 }
 
 android {
