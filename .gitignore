@@ -57,3 +57,4 @@ google-services.json
 
 # Local Claude Code settings: per machine, not part of the repository.
 .claude/
+.cache/

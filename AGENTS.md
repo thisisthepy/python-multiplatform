@@ -20,7 +20,7 @@ files, lives **inside this repository's root directory.**
 | What | Where |
 |---|---|
 | Worktrees | `.worktrees/<name>` (git-ignored) |
-| Temporary files | `.tmp/` (git-ignored); delete when done |
+| Temporary files | the session scratchpad directory, or `.cache/` (git-ignored); delete when done |
 | Benchmarks | `benchmarks/` |
 | Developer tooling | `.github/scripts/` (CI-only), or beside the module it serves |
 
@@ -36,7 +36,7 @@ Writing to *another* repository is not an exception either. Do it only when told
 **Never add a new directory (or a new file) at the repository root on your own.** The root layout is
 the maintainer's: source modules, `docs/`, `gradle/`, `.github/` and the files that tools require
 there. Work belongs inside an existing module or directory, sources under `src/<sourceSet>/`,
-CI-only scripts under `.github/scripts/`, temporary files under the git-ignored `.tmp/`. If you think
+CI-only scripts under `.github/scripts/`, temporary files under the git-ignored `.cache/`. If you think
 a new top-level entry is needed, propose it (what, why, which alternatives inside existing
 directories you ruled out) and wait for approval. This was added after unapproved root folders
 (`ksp-fixtures/`, `tools/`, `kotlin-js-store/`, `iosApp/`, `sample/python`) had to be dismantled.
@@ -271,7 +271,7 @@ Rule 5 applies. In addition:
 ### Build commands
 
 ```bash
-./gradlew <task> --console=plain > .tmp/build.log 2>&1; echo "EXIT=$?"
+./gradlew <task> --console=plain > .cache/build.log 2>&1; echo "EXIT=$?"
 ```
 
 - Compile errors are lines starting with `e: `. Most `w: ` warnings (inlining in particular) are
@@ -440,7 +440,7 @@ more than the tier.
 ### What every agent prompt contains
 
 - Rule 2 restated with the absolute paths the agent may write to; temporary files go in the
-  worktree's `.tmp/`.
+  session scratchpad or the worktree's `.cache/`.
 - "Do the work yourself; do not delegate to another agent."
 - "Run long commands in the **foreground**. You have no next turn." (Three headless agents were lost
   to a backgrounded command, one of them an `xcodebuild`.)
