@@ -328,16 +328,17 @@ def test_range_loop_polls_once_per_chunk(chunk_module):
     path, _ = chunk_module
     body = _function_c(_generated_c(path), "down1")
     # one poll site, outside the innermost (per-iteration) loop
-    assert body.count("tp_pc_tick") == 1, body
+    assert body.count("tp_poll_slow") == 1, body
     assert "TP_POLL_INTERVAL" in body, body
+    assert "tp_pc_tick" not in body, body            # #280: the chunk is the countdown
     lines = body.splitlines()
-    poll = next(i for i, l in enumerate(lines) if "tp_pc_tick" in l)
+    poll = next(i for i, l in enumerate(lines) if "tp_poll_slow" in l)
     fors = [i for i, l in enumerate(lines) if l.lstrip().startswith("for (") or l.lstrip().startswith("while (")]
     assert len([i for i in fors if i < poll]) >= 1, body            # the chunk loop encloses the poll
     assert len([i for i in fors if i > poll]) >= 1, body            # the per-iteration loop follows it
     # the per-iteration loop has no poll inside it
     inner = lines[max(i for i in fors if i > poll):]
-    assert not any("tp_pc_tick" in l for l in inner), body
+    assert not any("tp_poll_slow" in l for l in inner), body
 
 
 def test_while_loop_keeps_its_per_iteration_countdown(tmp_path):
@@ -372,3 +373,45 @@ def test_keyboard_interrupt_reaches_a_long_range_loop_in_chunks(extension):
     """)
     assert r["out"] == "interrupted"
     assert r["elapsed"] < 1.0, r
+
+
+MID_SOURCE = """\
+# typedpython: compiled
+
+
+def mid(n: int) -> float:
+    x: float = 1.0
+    for k in range(n):
+        x = x * 0.9999999 + 1.0 / (k + 1.0)
+    return x
+"""
+
+
+def test_signal_reaches_a_range_loop_shorter_than_interval_squared(tmp_path):
+    # #280: a chunk of TP_POLL_INTERVAL iterations must end in a slow poll, not in a countdown that
+    # also counts TP_POLL_INTERVAL (one poll per 4096*4096 = 16.7M iterations). 12M iterations is
+    # under that, so the old code never polled and the signal was seen only after the loop ended.
+    path = tmp_path / "loops.py"
+    path.write_text(MID_SOURCE)
+    result = pipeline.compile_module(path, tmp_path / "out")
+    assert result.extension is not None, result.skipped
+    r = run_child(result.extension, """
+        def handler(signum, frame):
+            raise KeyboardInterrupt
+        signal.signal(signal.SIGALRM, handler)
+        n = 12_000_000
+        t0 = time.perf_counter()
+        m.mid(n)
+        full = time.perf_counter() - t0
+        signal.setitimer(signal.ITIMER_REAL, full / 10)
+        t0 = time.perf_counter()
+        try:
+            m.mid(n)
+            out = "completed"
+        except KeyboardInterrupt:
+            out = "interrupted"
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        print(json.dumps({"out": out, "full": full, "elapsed": time.perf_counter() - t0}))
+    """)
+    assert r["out"] == "interrupted", r
+    assert r["elapsed"] < r["full"] * 0.5, r
