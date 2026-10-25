@@ -126,7 +126,7 @@ fail, then implement.
   `libpython*.dylib`, or the top-level packages `test`, `idlelib`, `tkinter`, `turtledemo` and
   `ensurepip`; `stageIosPythonHomeForXcode` picks the slice from Xcode's `EFFECTIVE_PLATFORM_NAME`
   and `ARCHS` and prints `PYTHON_HOME_DIR=` and `PYTHON_DYLIB_INFO_TEMPLATE=`. An Xcode Run Script
-  phase (`python-multiplatform-gradle-plugin/src/main/resources/xcode/install-python.sh`, after Copy Bundle Resources and before Embed Frameworks)
+  phase (the plugin's `install-python.sh`, installed by `installPythonXcodeScript`, after Copy Bundle Resources and before Embed Frameworks)
   copies that prefix into `<app>/python-multiplatform-home/` and the consumer's payload (L-6) into
   `<app>/python/`, and moves every `.so` under either into `Frameworks/<dotted.name>.framework`,
   leaving a `.fwork` placeholder, as CPython's `AppleFrameworkLoader` and Apple's rule against loose

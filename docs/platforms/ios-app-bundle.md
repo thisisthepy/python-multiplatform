@@ -11,9 +11,10 @@ prefix and payload, why, and how to check it.
 
 ## What happens
 
-**Gradle** (`python-multiplatform/build.gradle.kts`, rules in the plugin's `IosPythonHomeLayout`).
-One task per slice, `stageIosPythonHome_<sdk>_<arch>` (`iphoneos_arm64`, `iphonesimulator_arm64`,
-`iphonesimulator_x86_64`), writes `python-multiplatform/build/python-ios-home/<sdk>-<arch>/`:
+**Gradle** (the bindings plugin, `IosConsumerWiring.kt`; rules in `IosPythonHomeLayout`). The app module
+applies `io.github.thisisthepy.python.multiplatform.bindings`, which registers one task per slice,
+`stageIosPythonHome_<sdk>_<arch>` (`iphoneos_arm64`, `iphonesimulator_arm64`, `iphonesimulator_x86_64`),
+and writes `<module>/build/python-ios-home/<sdk>-<arch>/` (for the sample, `sample/build/python-ios-home/...`):
 
 | Path | From `Python.xcframework/` |
 |---|---|
@@ -26,8 +27,8 @@ the 2,407 files of the 3.14 stdlib), `idlelib`, `tkinter`, `turtledemo` (no `_tk
 and `ARCHS` from the environment Xcode gives a Run Script phase, stages only that slice and prints:
 
 ```
-PYTHON_HOME_DIR=<abs>/python-multiplatform/build/python-ios-home/iphonesimulator-arm64/home
-PYTHON_DYLIB_INFO_TEMPLATE=<abs>/python-multiplatform/build/python-ios-home/iphonesimulator-arm64/dylib-Info-template.plist
+PYTHON_HOME_DIR=<abs>/sample/build/python-ios-home/iphonesimulator-arm64/home
+PYTHON_DYLIB_INFO_TEMPLATE=<abs>/sample/build/python-ios-home/iphonesimulator-arm64/dylib-Info-template.plist
 ```
 
 A universal `ARCHS` (`arm64 x86_64`) is refused with the fix (`ONLY_ACTIVE_ARCH=YES` or `ARCHS=arm64`):
@@ -36,7 +37,7 @@ one prefix holds one `lib-dynload`. Upstream's `utils.sh` has the same limit wit
 **Xcode** (`python-multiplatform-gradle-plugin/src/main/resources/xcode/install-python.sh`, a Run Script phase after Copy Bundle Resources and before
 Embed Frameworks; `ENABLE_USER_SCRIPT_SANDBOXING = NO`).
 
-1. Runs Gradle as above. The output is captured, then parsed, then checked to be a directory, a
+1. Runs `<module>:stageIosPythonHomeForXcode` through Gradle as above (`:sample:installPythonXcodeScript` copies the script to `build/python-multiplatform/xcode/install-python.sh` and bakes in that task path). The output is captured, then parsed, then checked to be a directory, a
    failing Gradle stops the phase and never leaves `rsync` an empty source (issue #59's comment).
 2. `rsync -a --delete` the prefix to `<app>/python-multiplatform-home/`.
 3. The payload, if configured, to `<app>/python/` (`--delete`, without `__pycache__`):
@@ -96,8 +97,9 @@ The sample's project is `sample/src/iosMain/app.xcodeproj` (target `app`, produc
 ```sh
 set -e
 cd "$SRCROOT/../../.."
+./gradlew -q :sample:installPythonXcodeScript
 export PYTHON_PAYLOAD_DIR="$SRCROOT/../commonMain/python"
-/bin/bash python-multiplatform-gradle-plugin/src/main/resources/xcode/install-python.sh
+/bin/bash sample/build/python-multiplatform/xcode/install-python.sh
 ```
 
 It replaced two phases: "Install Target Specific Python Standard Library", which rsynced the slice's
@@ -113,9 +115,12 @@ tasks first (`:python-multiplatform:embedAndSignAppleFrameworkForXcode`,
 `:sample:embedAndSignAppleFrameworkForXcode`), then compiles, then installs Python, then embeds
 `Python.xcframework`.
 
-A consumer outside this repository cannot call `:python-multiplatform:stageIosPythonHomeForXcode`:
-the iOS archive download lives in this repository's build script, not in the published plugin. That
-is the next step if consumers are to get this without copying the sample.
+The sample uses the same plugin path as any consumer (issue #321): `:sample:downloadPython_ios` and
+`:sample:preparePythonXcframework` provide `sample/build/xcode-frameworks/Python.xcframework`, the plugin adds
+`-framework Python -F...` to the `Demo` framework binaries, and `:sample:stageIosPythonHomeForXcode` /
+`:sample:installPythonXcodeScript` provide the stdlib staging and the script. The library keeps only its own
+iOS download for its cinterop and simulator tests. The same wiring for an app outside this repository:
+`python-multiplatform-gradle-plugin/fixtures/ios-consumer/README.md`.
 
 ## Checking it (completion criterion of #59)
 
@@ -129,16 +134,16 @@ df -h /     # the installed app (~60 MB) goes into CoreSimulator on the internal
 
 # 0. Stage once by hand and look at it
 EFFECTIVE_PLATFORM_NAME=-iphonesimulator ARCHS=arm64 \
-  ./gradlew -q :python-multiplatform:stageIosPythonHomeForXcode > .tmp/stage.out 2>&1; echo "EXIT=$?"
+  ./gradlew -q :sample:stageIosPythonHomeForXcode > .tmp/stage.out 2>&1; echo "EXIT=$?"
 cat .tmp/stage.out          # two lines: PYTHON_HOME_DIR=..., PYTHON_DYLIB_INFO_TEMPLATE=...
-ls python-multiplatform/build/python-ios-home/iphonesimulator-arm64/home/lib/python3.14/lib-dynload | head
-test ! -e python-multiplatform/build/python-ios-home/iphonesimulator-arm64/home/lib/python3.14/test && echo "test/ excluded"
+ls sample/build/python-ios-home/iphonesimulator-arm64/home/lib/python3.14/lib-dynload | head
+test ! -e sample/build/python-ios-home/iphonesimulator-arm64/home/lib/python3.14/test && echo "test/ excluded"
 # must fail, naming ONLY_ACTIVE_ARCH:
 EFFECTIVE_PLATFORM_NAME=-iphonesimulator ARCHS="arm64 x86_64" \
-  ./gradlew -q :python-multiplatform:stageIosPythonHomeForXcode > .tmp/stage-universal.out 2>&1; echo "EXIT=$?"
+  ./gradlew -q :sample:stageIosPythonHomeForXcode > .tmp/stage-universal.out 2>&1; echo "EXIT=$?"
 
 # 1. Frameworks the Xcode project links against
-./gradlew :sample:prepareIosFrameworks --console=plain > .tmp/prepare.log 2>&1; echo "EXIT=$?"
+./gradlew :sample:preparePythonXcframework :sample:installPythonXcodeScript --console=plain > .tmp/prepare.log 2>&1; echo "EXIT=$?"
 
 # 2. Build the app (flags from the last verified run, ROADMAP history 2026-08-13: actool cannot
 #    compile the app icon against this machine's simulator runtimes, and -target avoids

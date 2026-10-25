@@ -42,7 +42,7 @@ internal const val STAGE_IOS_HOME_FOR_XCODE_TASK = "stageIosPythonHomeForXcode"
 internal const val INSTALL_XCODE_SCRIPT_TASK = "installPythonXcodeScript"
 
 /** The default the shipped script carries; the install task replaces it with the consumer's task path. */
-internal const val SCRIPT_LIBRARY_HOME_TASK = ":python-multiplatform:stageIosPythonHomeForXcode"
+internal const val SCRIPT_LIBRARY_HOME_TASK = "@PYTHON_HOME_TASK@"   // the placeholder install-python.sh carries (#321)
 
 /** `ios_arm64` to `ios-arm64`, as the sample does; null for a konan target that is not iOS. */
 internal fun xcframeworkSliceForKonanTarget(konanName: String): String? = when (konanName) {

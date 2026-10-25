@@ -4,7 +4,8 @@
 #
 # Place the phase AFTER "Copy Bundle Resources" and BEFORE "Embed Frameworks", in a target whose
 # ENABLE_USER_SCRIPT_SANDBOXING is NO (the phase reads the Gradle build directory). It:
-#   1. runs `<gradlew> -q :python-multiplatform:stageIosPythonHomeForXcode`, which stages the stdlib
+#   1. runs `<gradlew> -q <project>:stageIosPythonHomeForXcode` (baked in by the plugin's
+#      installPythonXcodeScript), which stages the stdlib
 #      for the slice Xcode is building (EFFECTIVE_PLATFORM_NAME + ARCHS) and prints
 #      PYTHON_HOME_DIR= and PYTHON_DYLIB_INFO_TEMPLATE=;
 #   2. copies that prefix to <app>/python-multiplatform-home/ (IosPythonHome looks there);
@@ -15,7 +16,7 @@
 #
 # Environment (all optional except what Xcode sets):
 #   GRADLEW              Gradle wrapper, default ./gradlew (the phase cd's to the Gradle root first)
-#   PYTHON_HOME_TASK     default :python-multiplatform:stageIosPythonHomeForXcode
+#   PYTHON_HOME_TASK     default: the task installPythonXcodeScript bakes in for its project
 #   PYTHON_PAYLOAD_DIR   a directory whose *contents* become <app>/python/ (e.g. the app's own
 #                        Python sources, or toolchain's build/pythonStaging/ios/python)
 #   PYTHON_PAYLOAD_TASK  instead: a Gradle task printing PYTHON_PAYLOAD_DIR=<abs> under -q, e.g.
@@ -39,7 +40,12 @@ if [ "$(cd "$bundle" && pwd -P)" != "$(cd "$resources" && pwd -P)" ]; then
 fi
 
 gradlew="${GRADLEW:-./gradlew}"
-home_task="${PYTHON_HOME_TASK:-:python-multiplatform:stageIosPythonHomeForXcode}"
+home_task="${PYTHON_HOME_TASK:-@PYTHON_HOME_TASK@}"
+# The sentinel is split so the bake (which rewrites the placeholder above) leaves this test alone.
+if [ "$home_task" = "@PYTHON_HOME""_TASK@" ]; then
+    echo "error: run the copy installPythonXcodeScript writes to build/python-multiplatform/xcode/, or set PYTHON_HOME_TASK" >&2
+    exit 1
+fi
 
 # Captured first, parsed second: a failing Gradle must stop the phase here (set -e on the
 # assignment), never leave an empty string for rsync to treat as "/".

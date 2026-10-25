@@ -264,7 +264,7 @@ trampolines exist. GraalVM native image upcalls are verified by hand
 
 - **13.1 The iOS app bundle carries no Python standard library, implemented, simulator proof
   open.** SPEC L-11, issue #59, `docs/platforms/ios-app-bundle.md`: per-slice staging
-  (`stageIosPythonHome_*`, `stageIosPythonHomeForXcode`), `python-multiplatform-gradle-plugin/src/main/resources/xcode/install-python.sh` (stdlib to
+  (the plugin's `stageIosPythonHome_*`, `stageIosPythonHomeForXcode`; #321 moved them out of `python-multiplatform/build.gradle.kts`), `python-multiplatform-gradle-plugin/src/main/resources/xcode/install-python.sh` (stdlib to
   `<app>/python-multiplatform-home/`, payload to `<app>/python/`, `.so` wrapped as frameworks with
   `.fwork` placeholders) replacing the two broken phases of the old root `iosApp/` (now `sample/src/iosMain/app.xcodeproj`, #107), and `IosPythonHome` +
   `Py_SetPythonHome` at run time. Left: the installed-app run on the simulator with no
