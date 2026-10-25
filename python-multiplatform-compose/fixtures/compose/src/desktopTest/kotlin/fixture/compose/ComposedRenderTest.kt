@@ -1,7 +1,6 @@
 package fixture.compose
 
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.unit.Density
@@ -111,8 +110,7 @@ class ComposedRenderTest {
             scene.render()
             for (pass in 1 until PASSES) {
                 body.value = sizingBody(70.0, pass = pass)
-                Snapshot.sendApplyNotifications()
-                scene.render()
+                scene.renderAfterWrite()
             }
             val slot = ComposedInvocationSlot.lastCreated
                 ?: error("pythonComposed's composed{} lambda never ran")

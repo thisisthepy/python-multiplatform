@@ -1,6 +1,5 @@
 package fixture.compose
 
-import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.unit.Density
 import org.jetbrains.skia.Bitmap
@@ -92,7 +91,7 @@ class PythonAppViewRenderTest {
 
             // Python replaces the root. Nothing on the Kotlin side is called.
             Python3.exec("_root_state.value = _root_b")
-            inkB = inkOfImage(nextFrame(scene))
+            inkB = inkOfImage(scene.renderAfterWriteImage())
             assertEquals(1, pyInt("_calls['b']"), "the root Python wrote was not composed on the next frame")
             assertEquals(1, pyInt("_calls['a']"), "the replaced root was composed again")
             assertNotEquals(inkA, inkB, "the frame after the write drew the old root's content")
@@ -101,7 +100,7 @@ class PythonAppViewRenderTest {
 
             // And back.
             Python3.exec("_root_state.value = _root_a")
-            inkABack = inkOfImage(nextFrame(scene))
+            inkABack = inkOfImage(scene.renderAfterWriteImage())
             assertEquals(2, pyInt("_calls['a']"), "switching back did not compose root A again")
             assertEquals(1, pyInt("_calls['b']"), "root B ran after it was replaced")
             assertEquals(inkA, inkABack, "switching back did not draw root A's content")
@@ -258,15 +257,6 @@ class PythonAppViewRenderTest {
         assertTrue(Python3.isInitialized)
         assertTrue(ink > 0, "the content of the launcher drew nothing")
         assertEquals(1, pyInt("_calls['a']"))
-    }
-
-    /**
-     * What a window's frame clock does by itself: deliver the global snapshot's pending writes to the
-     * recomposer, then draw. `ImageComposeScene` has no clock, so the test is the clock.
-     */
-    private fun nextFrame(scene: ImageComposeScene): Image {
-        Snapshot.sendApplyNotifications()
-        return scene.render()
     }
 
     private fun inkOfImage(image: Image): Int {

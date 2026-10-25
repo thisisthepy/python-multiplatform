@@ -3,7 +3,6 @@ package fixture.compose
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.saveable.LocalSaveableStateRegistry
 import androidx.compose.runtime.saveable.SaveableStateRegistry
-import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.unit.Density
 import python.multiplatform.compose.PythonWidget
@@ -111,8 +110,7 @@ class RememberSaveableRenderTest {
             scene.render()
             assertEquals(INITIAL, snapshotOfStates(), "the states did not start at the values Python passed")
             Python3.exec("_rs_states['i'].value = 8; _rs_states['l'].value = 6000000000; _rs_states['f'].value = 2.5; _rs_states['b'].value = False; _rs_states['s'].value = 'xyz'")
-            Snapshot.sendApplyNotifications()
-            scene.render()
+            scene.renderAfterWrite()
             assertEquals(WRITTEN, snapshotOfStates(), "the write from Python was not read back")
             return registry?.performSave() ?: emptyMap()
         } finally {

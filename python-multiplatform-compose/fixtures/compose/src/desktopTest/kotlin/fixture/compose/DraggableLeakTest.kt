@@ -1,7 +1,6 @@
 package fixture.compose
 
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.unit.Density
 import python.multiplatform.ffi.Python3
@@ -94,8 +93,7 @@ class DraggableLeakTest {
             scene.render()
             for (pass in 1 until passes) {
                 body.value = pass
-                Snapshot.sendApplyNotifications()
-                scene.render()
+                scene.renderAfterWrite()
             }
         } finally {
             scene.close()

@@ -1,7 +1,6 @@
 package fixture.compose
 
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.unit.Density
 import org.jetbrains.skia.Bitmap
@@ -338,8 +337,7 @@ class RecompositionAccumulationTest {
             previouslyServed = servedPerPass[0]
             for (pass in 1 until SHORT_PASSES) {
                 body.value = nested(pass)
-                Snapshot.sendApplyNotifications()
-                scene.render()
+                scene.renderAfterWrite()
                 val served = arena.scope.liveCount + arena.scope.reuseCount
                 servedPerPass += served - previouslyServed
                 previouslyServed = served
@@ -428,8 +426,7 @@ class RecompositionAccumulationTest {
             ink += inkOfImage(scene.render())
             for (pass in 1 until PASSES) {
                 body.value = source(pass)
-                Snapshot.sendApplyNotifications()
-                ink += inkOfImage(scene.render())
+                ink += inkOfImage(scene.renderAfterWriteImage())
             }
             assertEquals(1, CountingCallableArena.created, "the arena was rebuilt instead of remembered")
             val arena = CountingCallableArena.latest ?: error("no arena was remembered")

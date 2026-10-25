@@ -3,7 +3,6 @@ package fixture.compose
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.unit.Density
 import python.multiplatform.ffi.Python3
@@ -171,8 +170,7 @@ class RetainedSlotSweepPreconditionTest {
                     // stored and this pass's handle is dropped on the floor -- by Compose, not by
                     // anything here.
                     handleState.value = handle
-                    Snapshot.sendApplyNotifications()
-                    scene.render()
+                    scene.renderAfterWrite()
                     retainedAfterPass += RetainedHandleProbe.current
                     liveAfterPass += scope.liveCount
                     reusedAfterPass += scope.reuseCount
