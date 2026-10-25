@@ -231,6 +231,16 @@ interface PythonBindingsExtension {
      * needs per environment.
      */
     val generateStubs: Property<Boolean>
+
+    /**
+     * iOS settings (issue #90): `pythonBindings { ios { linkPythonFramework.set(false) } }`. The
+     * iOS tasks exist only in a module that declares Kotlin/Native iOS targets.
+     */
+    @get:org.gradle.api.tasks.Nested
+    val ios: PythonBindingsIosExtension
+
+    /** The `ios { }` block itself: without it the nested property is reachable only as `ios.x`. */
+    fun ios(action: org.gradle.api.Action<in PythonBindingsIosExtension>) = action.execute(ios)
 }
 
 /**
@@ -287,6 +297,11 @@ class PythonBindingsPlugin : Plugin<Project> {
         }
 
         configurePythonHomeStaging(project, extension)
+        // After evaluation, because the targets and their framework binaries are declared in the
+        // consumer's own `kotlin { }` block. A module without iOS targets gets no task.
+        project.pluginManager.withPlugin("org.jetbrains.kotlin.multiplatform") {
+            project.afterEvaluate { configureIosConsumer(this, extension) }
+        }
         configureWasmBrowserRuntimeStaging(project, extension)
 
         project.afterEvaluate {
