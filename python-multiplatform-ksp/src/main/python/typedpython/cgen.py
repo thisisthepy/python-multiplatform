@@ -697,6 +697,10 @@ def generate(module: ir.Module, source_path: Path, display_path: str | None = No
     source_path = Path(source_path)
     display_path = source_path.name if display_path is None else display_path
     source = source_path.read_text(encoding="utf-8")
+    # SPEC N-8 / #152: the continuations of every snapshot holder's loops run at import beside the
+    # module's own code, so an OSR-style exit finds them in the module dict
+    from typedpython import resume as _resume
+    source = source + _resume.resume_sources(module)
     mg = _ModGen(module)
     mg.display_path = display_path       # the file name of a compiled numpy RuntimeWarning (#220)
     for f in module.functions:
@@ -1060,6 +1064,12 @@ class _FnGen:
             self.virtual[x] = next(iter(classes))
             for k in range(len(mg.cls(f.name, self.virtual[x]).fields)):
                 self.types[_vfield(x, k)] = Type.OBJ
+        # SPEC N-8 / #152: a snapshot holder polls with an OSR-style exit when every loop has a
+        # continuation and every continuation parameter maps to a live C value. Otherwise it keeps
+        # the #141 rule (no poll), which is correct but starves other threads during its loops.
+        self.osr_sites: dict[int, ir.Resume] = {}
+        self.osr_ctx: list[tuple[int, str, str, int]] = []   # enclosing ForRange: (site, var, stop, step)
+        self.osr = self._osr_plan()
 
     # emit primitives
 
@@ -2208,10 +2218,159 @@ class _FnGen:
             self.emit("if (tp_pc_tick(&tp_pc) && tp_poll_slow(tp_t, tp_st->breaker) != 0) "
                       "{ tp_rc = -1; goto tp_exit; }")
 
+    def _osr_plan(self) -> bool:
+        f = self.f
+        if not (self.snapshot and f.resumes) or f.virtual or getattr(f, "regions", ()) or self.rmode:
+            return False
+        from typedpython import resume as _resume
+        loops = list(_resume.ir_loops(f.body))
+        by_site = {r.site: r for r in f.resumes}
+        if len(loops) != len(by_site) or any(k not in by_site for k in range(len(loops))):
+            return False
+        for k, st in enumerate(loops):
+            if isinstance(st, ir.ForRange) and st.par is not None:
+                return False                       # a parallel region does not poll
+            if not isinstance(st, (ir.ForRange, ir.While)):
+                return False
+            for name in by_site[k].params:
+                if not self._osr_mappable(name):
+                    return False
+            self.osr_sites[id(st)] = by_site[k]
+        self.osr_sites_by_site = by_site
+        return True
+
+    def _osr_mappable(self, name: str) -> bool:
+        if name.startswith(("__tp_cur_", "__tp_stop_", "__tp_step_")):
+            return True
+        if name in self.arrays or self.local_arrays.get(name) in _ARRAY_CT:
+            return True
+        return self.types.get(name) in (Type.I64, Type.F64, Type.BOOL, Type.OBJ, Type.INT) \
+            and name not in {g.name for g in self.f.entry_globals}
+
+    def _list_params(self) -> list[ir.ArrayParam]:
+        return [p for p in self.f.params if isinstance(p, ir.ArrayParam) and p.buffer is None]
+
+    def _osr_value(self, name: str, site: int, cur: str, stop: str = "0", step: int = 0) -> str:
+        """A new reference to [name]'s value for the continuation of [site] (NULL on failure)."""
+        for prefix in ("__tp_cur_", "__tp_stop_", "__tp_step_"):
+            if name.startswith(prefix):
+                k = int(name[len(prefix):])
+                if k == site:
+                    value = {"__tp_cur_": cur, "__tp_stop_": stop, "__tp_step_": str(step)}[prefix]
+                    return f"PyLong_FromLongLong((long long)({value}))"
+                ctx = next(c for c in self.osr_ctx if c[0] == k)
+                value = {"__tp_cur_": ctx[1], "__tp_stop_": ctx[2], "__tp_step_": str(ctx[3])}[prefix]
+                return f"PyLong_FromLongLong((long long)({value}))"
+        if name in self.arrays:
+            p = self.arrays[name]
+            if p.buffer is not None:
+                return f"Py_NewRef({_ident('l', name)}->view.obj)"
+            j = self._list_params().index(p)
+            return f"Py_NewRef(tp_my->lists[{j}])"
+        if name in self.local_arrays:
+            sfx = "f64" if self.local_arrays[name] is Type.F64_ARRAY else "i64"
+            v = _ident("l", name)
+            return f"tp_list_from_{sfx}({v}.data, {v}.len)"
+        t = self.types[name]
+        is_param = any(q.name == name for q in self.f.params)
+        if t is Type.OBJ:
+            v = _ident("p" if is_param else "l", name)
+            return f"Py_NewRef({v} != NULL ? {v} : tp_osent)"
+        v = _ident("l", name)
+        if t is Type.INT:
+            return f"tp_int_box(&{v})"
+        if t is Type.F64:
+            return f"PyFloat_FromDouble({v})"
+        if t is Type.BOOL:
+            return f"PyBool_FromLong({v})"
+        return f"PyLong_FromLongLong((long long){v})"
+
+    def snap_poll(self, site: int, cur: str, stop: str = "0", step: int = 0) -> None:
+        """The poll of a snapshot holder (#152): write the lists back, end their critical section,
+        poll, take it again, copy the lists in again and re-check every entry guard. Unchanged:
+        continue. Changed: free the fresh copies, end the section and leave for the continuation of
+        [site] (the impl returns 2 with tp_my->result set). Only the call its wrapper entered polls."""
+        r = self.osr_sites_by_site[site]
+        lists = self._list_params()
+        self.emit("if (tp_my != NULL) {   /* #152: poll inside a snapshot holder */")
+        self.depth += 1
+        self.emit("int tp_och = 0;")
+        for j, p in enumerate(lists):
+            ptr = _ident("l", p.name)
+            self.emit(f"Py_ssize_t tp_ol{j} = {ptr}->len;")
+            self.emit(f"if ({_ARRAY_PFX[p.type]}_exit({ptr}) < 0) {{ tp_rc = -1; goto tp_exit; }}")
+        if lists:
+            self.emit("tp_cs_end(tp_my->lock);")
+        self.emit("tp_t->snapshot_depth--;")
+        self.emit("tp_s = tp_poll_slow(tp_t, tp_st->breaker);")
+        # Tests only (-DTP_TEST_SNAP_HOOK): a module-level `__tp_test_snap_hook__()` runs here, in the
+        # window where the lists are released, so a test can change them at an exact poll.
+        self.emit("#ifdef TP_TEST_SNAP_HOOK")
+        self.emit("if (tp_s == 0) { PyObject *tp_hk = NULL;")
+        self.emit("    if (PyDict_GetItemStringRef(tp_dict, \"__tp_test_snap_hook__\", &tp_hk) > 0) {")
+        self.emit("        PyObject *tp_hr = PyObject_CallNoArgs(tp_hk); Py_DECREF(tp_hk);")
+        self.emit("        if (tp_hr == NULL) tp_s = -1; else Py_DECREF(tp_hr); } }")
+        self.emit("#endif")
+        self.emit("tp_t->snapshot_depth++;")
+        self.emit("if (tp_s != 0) { tp_rc = -1; goto tp_exit; }")
+        if lists:
+            self.emit("tp_cs_begin(tp_my->lock, tp_my->lists[0], tp_my->lists[1]);")
+        for j, p in enumerate(lists):
+            ptr = _ident("l", p.name)
+            self.emit(f"tp_s = {_ARRAY_PFX[p.type]}_enter(tp_my->lists[{j}], {ptr});")
+            self.emit("if (tp_s < 0) { tp_cs_end(tp_my->lock); tp_rc = -1; goto tp_exit; }")
+            self.emit(f"if (tp_s != 0 || {ptr}->len != tp_ol{j}) tp_och = 1;")
+        for g in self.f.entry_globals:
+            k = self.mg.name_index(g.name)
+            lv = _ident("l", g.name)
+            self.emit(f"{{ PyObject *tp_go = tp_global(tp_dict, tp_st->names[{k}]);")
+            self.emit("  if (tp_go == NULL) {")
+            self.emit("      if (!PyErr_ExceptionMatches(PyExc_NameError)) { tp_cs_end(tp_my->lock); tp_rc = -1; goto tp_exit; }"
+                      if lists else "      if (!PyErr_ExceptionMatches(PyExc_NameError)) { tp_rc = -1; goto tp_exit; }")
+            self.emit("      PyErr_Clear(); tp_och = 1; }")
+            self.emit(f"  else {{ {_CT[g.type]} tp_gv = 0; tp_s = {_UNBOX[g.type]}(tp_go, &tp_gv); Py_DECREF(tp_go);")
+            self.emit(f"         if (tp_s < 0) {{ {'tp_cs_end(tp_my->lock); ' if lists else ''}tp_rc = -1; goto tp_exit; }}")
+            self.emit(f"         if (tp_s != 0 || memcmp(&tp_gv, &{lv}, sizeof tp_gv) != 0) tp_och = 1; }} }}")
+        self.emit("if (tp_och) {   /* leave for the interpreter at this iteration (OSR-style exit) */")
+        self.depth += 1
+        for j, p in enumerate(lists):
+            # fresh copies hold no dirty element: this exit only frees them
+            self.emit(f"(void){_ARRAY_PFX[p.type]}_exit({_ident('l', p.name)});")
+        if lists:
+            self.emit("tp_cs_end(tp_my->lock);")
+        n = len(r.params)
+        self.emit(f"PyObject *tp_ofn = NULL, *tp_osent = NULL, *tp_oa[{max(n, 1)}] = {{0}};")
+        self.emit(f"int tp_oe = PyDict_GetItemStringRef(tp_dict, \"{r.name}\", &tp_ofn) <= 0;")
+        self.emit("if (!tp_oe) tp_oe = PyDict_GetItemStringRef(tp_dict, \"__tp_unbound\", &tp_osent) <= 0;")
+        for i, name in enumerate(r.params):
+            self.emit(f"if (!tp_oe) {{ tp_oa[{i}] = {self._osr_value(name, site, cur, stop, step)}; tp_oe = tp_oa[{i}] == NULL; }}")
+        self.emit("if (!tp_oe) {")
+        self.emit("    tp_t->snapshot_depth--;")
+        self.emit(f"    tp_my->result = PyObject_Vectorcall(tp_ofn, tp_oa, {n}, NULL);")
+        self.emit("    tp_t->snapshot_depth++;")
+        self.emit("}")
+        self.emit(f"for (int tp_oi = 0; tp_oi < {n}; tp_oi++) Py_XDECREF(tp_oa[tp_oi]);")
+        self.emit("Py_XDECREF(tp_ofn); Py_XDECREF(tp_osent);")
+        self.emit("if (tp_oe && !PyErr_Occurred()) PyErr_SetString(PyExc_SystemError, \"typedpython: continuation missing\");")
+        self.emit("tp_rc = tp_my->result != NULL ? 2 : -1;")
+        self.emit("goto tp_exit;")
+        self.depth -= 1
+        self.emit("}")
+        self.depth -= 1
+        self.emit("}")
+
     def st_While(self, s: ir.While) -> None:
         self.emit("for (;;) {")
         self.depth += 1
-        self.poll()
+        r = self.osr_sites.get(id(s)) if self.osr else None
+        if r is not None:
+            self.emit("if (tp_pc_tick(&tp_pc)) {")
+            self.depth += 1
+            self.snap_poll(r.site, "0")
+            self.depth -= 1
+            self.emit("}")
+        else:
+            self.poll()
         c = self._cond(s.cond)
         self.emit(f"if (!({c})) break;")
         self.brk.append(None)
@@ -2330,8 +2489,9 @@ class _FnGen:
         if par_open:
             self._emit_region(s, ts, tn, abs(step))
         vec = self._vec_plan(s) if step == 1 else None
-        if self.snapshot:
-            # no polling in a snapshot holder: a plain loop
+        r = self.osr_sites.get(id(s)) if self.osr and not par_open else None
+        if self.snapshot and r is None:
+            # no polling in a snapshot holder without an OSR-style exit (#141): a plain loop
             self.emit(f"{tk} = 0;")
             if vec is not None:
                 self._emit_vec_loop(vec, ts, tk, tn)
@@ -2345,7 +2505,16 @@ class _FnGen:
             self.label_n += 1
             self.emit(f"for ({tk} = 0; {tk} < {tn}; ) {{")
             self.depth += 1
-            self.poll(every_time=True)
+            if r is not None:
+                # Not before the first chunk: a loop shorter than TP_POLL_INTERVAL keeps its whole
+                # critical section (still an execution CPython can produce); only a long loop detaches.
+                self.emit(f"if ({tk} != 0) {{")
+                self.depth += 1
+                self.snap_poll(r.site, f"(int64_t)((uint64_t){ts} {sign} {tk} * {mag})", te, step)
+                self.depth -= 1
+                self.emit("}")
+            else:
+                self.poll(every_time=True)
             self.emit(f"{te2} = {tn} - {tk} > (uint64_t)TP_POLL_INTERVAL ? {tk} + (uint64_t)TP_POLL_INTERVAL : {tn};")
             if vec is not None:
                 self._emit_vec_loop(vec, ts, tk, te2)
@@ -2353,7 +2522,12 @@ class _FnGen:
             self.depth += 1
             self.brk.append(label)
         self.emit(f"{var} = (int64_t)((uint64_t){ts} {sign} {tk} * {mag});")
+        site = self.osr_sites.get(id(s)).site if self.osr and id(s) in self.osr_sites else None
+        if site is not None:
+            self.osr_ctx.append((site, var, te, step))
         self.stmts(s.body)
+        if site is not None:
+            self.osr_ctx.pop()
         label = self.brk.pop()
         self.depth -= 1
         self.emit("}")
@@ -2679,6 +2853,9 @@ class _FnGen:
         # Eval breaker (#141): a snapshot-holding function never polls and defers others' polls.
         if self.snapshot:
             out.append("    tp_t->snapshot_depth++;")
+            if self.osr:
+                # #152: only the call the wrapper just entered gets the context; internal callees see NULL
+                out.append("    tp_osr *tp_my = tp_t->osr; tp_t->osr = NULL;")
         elif not self.fast:
             out.append("    if (tp_poll(tp_t, tp_st->breaker) != 0) { tp_rc = -1; goto tp_exit; }")
         out += prologue
@@ -2828,7 +3005,22 @@ class _FnGen:
         if gnames:
             at = len(args) - (1 if f.returns is not Type.NONE else 0)
             args[at:at] = gnames
+        osr = self.osr
+        if osr:
+            lst = [i for i, p in arrays]
+            l0 = f"tp_args[{lst[0]}]" if lst else "NULL"
+            l1 = f"tp_args[{lst[1]}]" if len(lst) > 1 else "NULL"
+            lock = "&tp_lock" if lst else "NULL"
+            L.append(f"    tp_osr tp_ox = {{{lock}, {{{l0}, {l1}}}, NULL}};")
+            L.append("    tp_t->osr = &tp_ox;      /* #152: taken by the impl at entry */")
         L.append(f"    tp_s = {_ident('tp_impl', f.name)}(tp_module, tp_ts, tp_t{''.join(', ' + a for a in args)});")
+        if osr:
+            L.append("    tp_t->osr = NULL;")
+            L.append("    if (tp_s == 2) {           /* left for the continuation: its result, lists already final */")
+            L += ["  " + e for e in exits]
+            L.append("        if (tp_x < 0) { Py_CLEAR(tp_ox.result); return NULL; }")
+            L.append("        return tp_ox.result;")
+            L.append("    }")
         if f.pure:
             L.append("    if (tp_s == 1) goto tp_deopt;")
         else:

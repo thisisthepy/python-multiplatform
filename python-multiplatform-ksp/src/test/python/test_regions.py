@@ -337,7 +337,8 @@ def test_gc_and_allocation_counts_are_unchanged_by_a_call_GREEN(built):
         built.m.tree_sum(8)
     gc.collect()
     assert nodes() == n0           # no Node is left behind (counting all objects saw pytest's own)
-    assert abs(sys.getallocatedblocks() - b0) < 1000   # a leaked tree is ~2300 blocks per call
+    # one-sided: a leaked tree adds ~2300 blocks per call; a call may also free other tests' garbage
+    assert sys.getallocatedblocks() - b0 < 1000
 
 
 def test_tracing_runs_the_interpreted_function_GREEN(built):

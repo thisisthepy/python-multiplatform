@@ -234,6 +234,13 @@ Same structs as above with `list == NULL` and `dirty == NULL`. 0 ok, -1 MemoryEr
 Thread state (#125): the wrapper calls `PyThreadState_GetUnchecked()` once and passes it as `tp_ts` to the
 impl, which passes it to `tp_enter_call`, `tp_depth_room`, `tp_traced` and to its direct compiled callees,
 so a compiled call and its C-to-C callees do one TLS lookup of the thread state per call. Likewise the per-thread state (call depth, poll countdown, snapshot depth) is one `__thread` struct
+`tp_osr` (#152, OSR-style exit): `{ tp_cs *lock; PyObject *lists[2]; PyObject *result; }`. A snapshot-holding
+function's wrapper sets `tp_t->osr` to its own context right before calling the impl; the impl takes it at entry
+and sets `tp_t->osr` back to NULL. The impl returns 2 when it left for the continuation, with `result` set (strong).
+
+    PyObject *tp_list_from_f64(const double *d, Py_ssize_t n);   /* new list; NULL + exception */
+    PyObject *tp_list_from_i64(const int64_t *d, Py_ssize_t n);  /* new list; NULL + exception */
+
 `tp_tls`: the wrapper takes `tp_tls_get()` once and passes `tp_t` down. `Py_EnterRecursiveCall`,
 `Py_LeaveRecursiveCall` and `Py_GetRecursionLimit` have no public tstate-taking variant and are kept.
 
