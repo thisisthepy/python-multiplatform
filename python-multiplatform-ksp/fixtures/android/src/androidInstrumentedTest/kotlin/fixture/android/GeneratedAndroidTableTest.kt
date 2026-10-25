@@ -31,7 +31,7 @@ class GeneratedAndroidTableTest {
 
     @Test
     fun theAndroidModulesFragmentIsInTheAggregatedTable() {
-        assertEquals(setOf("io_github_thisisthepy_python_multiplatform_ksp_fixtures_android"), UpcallTable.moduleNames)
+        assertEquals(setOf("org_thisisthepy_python_multiplatform_ksp_fixtures_android"), UpcallTable.moduleNames)
         assertTrue(UpcallTable.resolve("fixture.android.androidDouble").isValid)
     }
 
@@ -115,7 +115,7 @@ class GeneratedAndroidTableTest {
         val count = installAndCountEntries()
 
         assertTrue(count > 0)
-        assertEquals(setOf("io_github_thisisthepy_python_multiplatform_ksp_fixtures_android"), UpcallTable.moduleNames)
+        assertEquals(setOf("org_thisisthepy_python_multiplatform_ksp_fixtures_android"), UpcallTable.moduleNames)
         assertTrue(UpcallTable.resolve("fixture.android.androidDouble").isValid)
         assertFalse(
             UpcallTable.resolve("fixture.android.installGeneratedUpcallTable").isValid,

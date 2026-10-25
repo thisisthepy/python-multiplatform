@@ -16,7 +16,7 @@ plugins {
 val publishedVersion = "${property("pythonVersion")}-${property("libraryVersionSuffix")}"
 
 allprojects {
-    group = "io.github.thisisthepy"
+    group = "org.thisisthepy"
     version = publishedVersion
 }
 

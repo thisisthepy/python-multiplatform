@@ -54,7 +54,7 @@ fun deleteWithoutFollowingLinks(path: File) {
 plugins {
     alias(libs.plugins.kotlin.multiplatform)
     alias(libs.plugins.android.library)
-    id("io.github.thisisthepy.python.multiplatform.bindings") apply false
+    id("org.thisisthepy.python.multiplatform.bindings") apply false
     id("com.codingfeline.buildkonfig").version("0.15.2")
     //id("org.jetbrains.dokka")
     id("maven-publish")
@@ -1174,7 +1174,7 @@ kotlin {
         // was not fine for the CPython libraries, hence the name guard below.
         //
         // `allMetadataJar` is the artifact published at the root coordinate
-        // `io.github.thisisthepy:python-multiplatform`, which is what every Kotlin Multiplatform
+        // `org.thisisthepy:python-multiplatform`, which is what every Kotlin Multiplatform
         // consumer resolves in order to compile against `commonMain`. Measured on the mavenLocal
         // publication while enabling the Android one (§15d): **87.4 MB, of which 83.0 MB was four
         // host platforms' libpython** (`lib/linux-x86_64` alone 64.7 MB compressed, 240 MB raw)
@@ -2042,7 +2042,7 @@ val requireWasmRuntime: Boolean =
 fun Task.wasmRuntimePresent(marker: File): Boolean {
     if (marker.isFile) return true
     val remedy = "Unpack the published runtime " +
-        "(io.github.thisisthepy:python-multiplatform-wasm-runtime:$libraryVersion) and point " +
+        "(org.thisisthepy:python-multiplatform-wasm-runtime:$libraryVersion) and point " +
         "-PwasmPythonDir / PMP_PYTHON_DIR at it, or build one into the default location with " +
         "./gradlew :python-multiplatform:buildWasmPython (python-multiplatform/scripts/wasm/build-cpython.sh)."
     val what = "$name: no CPython Emscripten build at ${marker.parentFile} " +
@@ -2150,7 +2150,7 @@ val stageWasmBrowserRuntime by tasks.registering {
 // ROADMAP §10 -- the other half of "the wiring is not in python-multiplatform-gradle-plugin". The
 // plugin cannot hand a consumer a directory that only exists on this machine; it can only resolve a
 // Maven coordinate. So `stageWasmBrowserRuntime`'s output is zipped and published under its own
-// artifact ID, at this library's own version, so `implementation("io.github.thisisthepy:
+// artifact ID, at this library's own version, so `implementation("org.thisisthepy:
 // python-multiplatform:$version")` and the runtime it needs stay paired by construction -- there is
 // no second version string for a consumer to get out of step.
 //
@@ -2727,7 +2727,7 @@ publishing {
         // version, and a consumer who never builds a browser bundle should not need to resolve it
         // as a side effect of resolving the library at all.
         create<MavenPublication>("wasmRuntime") {
-            groupId = "io.github.thisisthepy"
+            groupId = "org.thisisthepy"
             artifactId = "python-multiplatform-wasm-runtime"
             version = libraryVersion
             artifact(wasmBrowserRuntimeZip)

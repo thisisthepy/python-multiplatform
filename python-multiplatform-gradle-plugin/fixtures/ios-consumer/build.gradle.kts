@@ -3,7 +3,7 @@
  * `:python-multiplatform`.
  *
  * This module declares no `downloadPython_ios`, no linker option and no Xcode script of its own. All
- * of it comes from `io.github.thisisthepy.python.multiplatform.bindings`:
+ * of it comes from `org.thisisthepy.python.multiplatform.bindings`:
  *
  *  - `downloadPython_ios` and `preparePythonXcframework` (into this module's `build/`),
  *  - `-framework Python -F...` on the two `Probe` framework binaries below,
@@ -14,7 +14,7 @@
  */
 plugins {
     alias(libs.plugins.kotlin.multiplatform)
-    id("io.github.thisisthepy.python.multiplatform.bindings")
+    id("org.thisisthepy.python.multiplatform.bindings")
 }
 
 kotlin {

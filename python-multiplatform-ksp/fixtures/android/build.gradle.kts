@@ -4,7 +4,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 /**
  * The fixture that carries an Android plugin.
  *
- * ROADMAP §13: `id("io.github.thisisthepy.python.multiplatform.bindings")` applies
+ * ROADMAP §13: `id("org.thisisthepy.python.multiplatform.bindings")` applies
  * `com.google.devtools.ksp`, and KSP declares `MINIMUM_SUPPORTED_AGP_VERSION`. Below that AGP the
  * plugin dies at configuration time with
  *
@@ -24,7 +24,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 plugins {
     alias(libs.plugins.kotlin.multiplatform)
     alias(libs.plugins.android.library)
-    id("io.github.thisisthepy.python.multiplatform.bindings")
+    id("org.thisisthepy.python.multiplatform.bindings")
 }
 
 kotlin {

@@ -12,7 +12,7 @@ prefix and payload, why, and how to check it.
 ## What happens
 
 **Gradle** (the bindings plugin, `IosConsumerWiring.kt`; rules in `IosPythonHomeLayout`). The app module
-applies `io.github.thisisthepy.python.multiplatform.bindings`, which registers one task per slice,
+applies `org.thisisthepy.python.multiplatform.bindings`, which registers one task per slice,
 `stageIosPythonHome_<sdk>_<arch>` (`iphoneos_arm64`, `iphonesimulator_arm64`, `iphonesimulator_x86_64`),
 and writes `<module>/build/python-ios-home/<sdk>-<arch>/` (for the sample, `sample/build/python-ios-home/...`):
 
@@ -92,7 +92,7 @@ before. `PyConfig.home` is the non-deprecated route, but the library carries no 
 ## Wiring an app
 
 The sample's project is `sample/src/iosMain/app.xcodeproj` (target `app`, product `PythonDemo.app`, bundle id
-`org.thisisthepy.python.multiplatform.demo`). Its phase:
+`io.github.thisisthepy.python.multiplatform.demo`). Its phase:
 
 ```sh
 set -e
@@ -165,10 +165,10 @@ codesign --verify --deep --strict "$APP" && echo SIGNED_OK
 # 3. Install and launch with no SIMCTL_CHILD_* variable
 UDID=$(xcrun simctl list devices booted | grep -oE '[0-9A-F-]{36}' | head -n 1); echo "$UDID"
 env | grep '^SIMCTL_CHILD_' && echo "unset these first"     # must print nothing
-xcrun simctl uninstall "$UDID" org.thisisthepy.python.multiplatform.demo
+xcrun simctl uninstall "$UDID" io.github.thisisthepy.python.multiplatform.demo
 xcrun simctl install "$UDID" "$APP"
 xcrun simctl launch --console-pty --terminate-running-process "$UDID" \
-    org.thisisthepy.python.multiplatform.demo > .tmp/launch.log 2>&1 &
+    io.github.thisisthepy.python.multiplatform.demo > .tmp/launch.log 2>&1 &
 LAUNCH=$!
 # wait for the DEMO block (Monitor/until-loop; no sleep in this shell), then:
 kill "$LAUNCH"

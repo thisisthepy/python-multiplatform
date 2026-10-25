@@ -249,7 +249,7 @@ interface PythonBindingsExtension {
  * target, is now one plugin.
  *
  *     plugins {
- *         id("io.github.thisisthepy.python.multiplatform.bindings")
+ *         id("org.thisisthepy.python.multiplatform.bindings")
  *     }
  *
  * A module that produces the final binary adds `pythonBindings { role.set("app") }` unless it

@@ -46,7 +46,7 @@ class GeneratedTableTest {
         // group and path -- neither fixture states a module name any more, and the group is in
         // there because every fragment object in every artifact shares one package.
         assertEquals(
-            setOf("io_github_thisisthepy_python_multiplatform_ksp_fixtures_library", "io_github_thisisthepy_python_multiplatform_ksp_fixtures_app"),
+            setOf("org_thisisthepy_python_multiplatform_ksp_fixtures_library", "org_thisisthepy_python_multiplatform_ksp_fixtures_app"),
             UpcallTable.moduleNames,
         )
         assertTrue(UpcallTable.resolve("fixture.library.add").isValid)

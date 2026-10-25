@@ -6,7 +6,7 @@ plugins {
     // One line in place of the KSP plugin, two per-target `add("ksp<Target>", ...)` lines and a
     // `ksp { arg(...) }` block. The role defaults to `library`; the module name is derived from
     // the project's group and path.
-    id("io.github.thisisthepy.python.multiplatform.bindings")
+    id("org.thisisthepy.python.multiplatform.bindings")
 }
 
 kotlin {

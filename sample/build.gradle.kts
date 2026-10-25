@@ -31,7 +31,7 @@ plugins {
     //
     // `python-multiplatform-ksp/fixtures/android` is the regression test. It is the first fixture to apply an Android
     // plugin, which is exactly why nothing caught this.
-    id("io.github.thisisthepy.python.multiplatform.bindings")
+    id("org.thisisthepy.python.multiplatform.bindings")
 }
 
 kotlin {
@@ -248,11 +248,11 @@ tasks.withType<org.jetbrains.kotlin.gradle.targets.js.webpack.KotlinWebpack>().c
 }
 
 android {
-    namespace = "org.thisisthepy.python.multiplatform.demo"
+    namespace = "io.github.thisisthepy.python.multiplatform.demo"
     compileSdk = libs.versions.android.compileSdk.get().toInt()
 
     defaultConfig {
-        applicationId = "org.thisisthepy.python.multiplatform.demo"
+        applicationId = "io.github.thisisthepy.python.multiplatform.demo"
         minSdk = libs.versions.android.minSdk.get().toInt()
         targetSdk = libs.versions.android.targetSdk.get().toInt()
         versionCode = 1
@@ -303,7 +303,7 @@ compose.desktop {
 
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
-            packageName = "org.thisisthepy.python.multiplatform.demo"
+            packageName = "io.github.thisisthepy.python.multiplatform.demo"
             packageVersion = "1.0.0"
         }
     }

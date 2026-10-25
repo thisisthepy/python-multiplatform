@@ -54,7 +54,16 @@ fail, then implement.
   into a catchable `IllegalStateException` naming the path and version, instead of CPython's process
   abort. `Status: implemented` on desktop (`PM/desktopTest/.../env/PythonHomeCheckTest.kt`);
   smoke-tested on all targets (`PM/commonTest/.../PythonHomeCheckSmokeTest.kt`).
-- **L-4** Desktop: applying the Gradle plugin `io.github.thisisthepy.python.multiplatform.bindings`
+- **L-0** Coordinates (#95, maintainer decision 2026-10-03, following JetBrains): libraries and the Gradle
+  plugin are published under the Maven group `org.thisisthepy` (`org.thisisthepy:python-multiplatform`,
+  `-ksp`, `-compose`, `-gradle-plugin`; plugin ID `org.thisisthepy.python.multiplatform.bindings`), shipped
+  apps under `io.github.thisisthepy` (the sample's application and bundle ID
+  `io.github.thisisthepy.python.multiplatform.demo`). Kotlin code packages (`python.*`, the sample's
+  `org.thisisthepy.python.multiplatform.demo.*`) do not change. The generated table fragment of a module is
+  named from its Maven group and project path (`deriveModuleName`), so since #95 it is
+  `Fragment_org_thisisthepy_<path>` (before: `Fragment_io_github_thisisthepy_<path>`); discovery scans the
+  whole package, so only the name changed. `Status: implemented`, `GP/PublishedVersionTest.kt`, `GP/WiringTest.kt`.
+- **L-4** Desktop: applying the Gradle plugin `org.thisisthepy.python.multiplatform.bindings`
   registers `stagePythonHome`, which downloads the matching CPython, verifies it against the release
   `SHA256SUMS`, caches it machine-wide and sets `PYTHONHOME` on `run`/`test`. A user-set `PYTHONHOME`
   is never overridden; `pythonBindings { stagePythonHome.set(false) }` disables it.

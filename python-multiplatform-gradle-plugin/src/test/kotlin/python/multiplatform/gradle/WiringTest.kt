@@ -147,8 +147,8 @@ class WiringTest {
         // Two independent libraries both called `:core` would otherwise both emit
         // `python.multiplatform.generated.fragments.Fragment_core` and collide on one classpath.
         assertEquals(
-            "io_github_thisisthepy_python_multiplatform_ksp_fixtures_app",
-            deriveModuleName(group = "io.github.thisisthepy", path = ":python-multiplatform-ksp:fixtures:app", name = "app"),
+            "org_thisisthepy_python_multiplatform_ksp_fixtures_app",
+            deriveModuleName(group = "org.thisisthepy", path = ":python-multiplatform-ksp:fixtures:app", name = "app"),
         )
         assertEquals(
             "com_example_core",
