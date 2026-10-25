@@ -57,6 +57,25 @@ class ProxyClassArgumentRenderTest {
         assertEquals(viaInstance, viaClass, "the class spelling must draw what the instance spelling draws")
     }
 
+    /**
+     * Issue #322: the empty value is `Modifier.Companion` itself, read from Python (no Kotlin
+     * `emptyModifier` helper): `register_empty(Modifier, lambda: Modifier.Companion)`.
+     */
+    @Test
+    fun aModifierClassPassedToCardIsTheCompanionRegisteredFromPython() {
+        val setup = """
+            import python_multiplatform.binding as _pm_binding
+            from androidx.compose.ui import Modifier
+            from androidx.compose.material3 import Card, Text
+            _pm_binding.register_empty(Modifier, lambda: Modifier.Companion)
+        """.trimIndent()
+        val viaClass = inkOf(setup + "\nCard(modifier=Modifier, content=lambda scope: Text('hi'))")
+        val withoutModifier = inkOf(setup + "\nCard(content=lambda scope: Text('hi'))")
+        println("compose render: Card(modifier=Modifier) -> $viaClass px, Card() -> $withoutModifier px")
+        assertTrue(viaClass > 0, "Card(modifier=Modifier) drew nothing")
+        assertEquals(withoutModifier, viaClass, "the class spelling must draw what Card() draws")
+    }
+
     private fun inkOf(body: String): Int {
         val scene = ImageComposeScene(width = 200, height = 80, density = Density(1f)) {
             PythonComposition(body)

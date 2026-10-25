@@ -368,6 +368,28 @@ object PythonCallables {
                 paramHasDefault = listOf(false),
                 callable = { args -> unboxScalar(args[0] as Long) },
             ),
+            // SPEC U-4: two proxies are `==` when they hold the same Kotlin object (identity), and hash by
+            // its identity hash; Kotlin `equals`/`hashCode` are not used. Both take raw handle numbers (INT) and release nothing.
+            ExposedCallable(
+                name = SAME_OBJECT,
+                arity = 2,
+                paramTypes = listOf(TypeTag.INT, TypeTag.INT),
+                returnType = TypeTag.BOOLEAN,
+                paramNames = listOf("left", "right"),
+                paramTypeNames = listOf("kotlin.Long", "kotlin.Long"),
+                paramHasDefault = listOf(false, false),
+                callable = { args -> sameObject(args[0] as Long, args[1] as Long) },
+            ),
+            ExposedCallable(
+                name = HASH_OF,
+                arity = 1,
+                paramTypes = listOf(TypeTag.INT),
+                returnType = TypeTag.INT,
+                paramNames = listOf("handle"),
+                paramTypeNames = listOf("kotlin.Long"),
+                paramHasDefault = listOf(false),
+                callable = { args -> hashOf(args[0] as Long) },
+            ),
         )
 
         private fun boxEntry(name: String, tag: TypeTag, typeName: String, box: (Any?) -> Any): ExposedCallable =
@@ -421,6 +443,17 @@ object PythonCallables {
         return python.multiplatform.ffi.upcall.ScalarResult(held)
     }
 
+    /** Reference identity (`===`) of the objects two live handles name; a stale or null handle is nothing. */
+    internal fun sameObject(left: Long, right: Long): Boolean {
+        val a = HandleTable.resolveRaw(left) ?: return false
+        val b = HandleTable.resolveRaw(right) ?: return false
+        return a === b
+    }
+
+    /** Identity hash of the object a live handle names; a stale handle hashes to 0. Kotlin `hashCode` is not used. */
+    internal fun hashOf(raw: Long): Long =
+        (HandleTable.resolveRaw(raw)?.let { python.multiplatform.reflection.identityHashOf(it) } ?: 0).toLong()
+
     /** The name the binding layer resolves. Shared so the Python source and the entry cannot drift. */
     internal const val NEW_FUNCTION: String = "python.multiplatform.ffi.pythonx.PythonCallables.newFunction"
 
@@ -441,6 +474,12 @@ object PythonCallables {
 
     /** @see boxScalar */
     internal const val BOX_STRING: String = "python.multiplatform.ffi.pythonx.PythonCallables.boxString"
+
+    /** @see sameObject */
+    internal const val SAME_OBJECT: String = "python.multiplatform.ffi.pythonx.PythonCallables.sameObject"
+
+    /** @see hashOf */
+    internal const val HASH_OF: String = "python.multiplatform.ffi.pythonx.PythonCallables.hashOf"
 
     /** @see unboxScalar */
     internal const val UNBOX_SCALAR: String = "python.multiplatform.ffi.pythonx.PythonCallables.unboxScalar"

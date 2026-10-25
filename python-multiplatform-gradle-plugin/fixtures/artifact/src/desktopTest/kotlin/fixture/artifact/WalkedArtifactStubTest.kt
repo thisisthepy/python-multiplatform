@@ -249,12 +249,23 @@ class WalkedArtifactStubTest {
         assertEquals(emptySet(), members - memberKeys, "a member stub names no member key")
         assertEquals(emptySet(), memberKeys - members, "a member key has no stub")
 
+        // A sixth shape (issue #322): a companion handle (`pkg.Owner.Companion`) is a class attribute of its
+        // owner's stub class, or a comment saying why not; either way it carries its key after
+        // `Kotlin companion: `. Matched by key, like a property.
+        val companions = generatedPaths()
+            .filter { it.endsWith(".pyi") }
+            .flatMap { path ->
+                Regex("""Kotlin companion: ([^\s"]+)""").findAll(stub(path)).map { it.groupValues[1] }.toList()
+            }
+            .toSet()
+        assertEquals(emptySet(), companions - installed, "a companion stub names no table key")
+
         // The base name of an overload set (`padding` for `padding__Dp`, ...) is served by the binding
         // layer's dispatcher and is stubbed as `@overload`s; it is not itself a table key.
         val overloadBases = installed.map { it.substringBeforeLast('.') + "." + it.substringAfterLast('.').substringBefore("__") }
             .filter { it !in installed }.toSet()
         assertEquals(emptySet(), stubbed - installed - overloadBases, "stubbed but not callable")
-        assertEquals(emptySet(), installed - propertyKeys - memberKeys - stubbed - constructors, "callable but not stubbed")
+        assertEquals(emptySet(), installed - propertyKeys - memberKeys - stubbed - constructors - companions, "callable but not stubbed")
     }
 
     /**

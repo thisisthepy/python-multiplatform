@@ -252,6 +252,24 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   statics, abstract classes (no constructor), nested classes. Not exposed: annotation classes,
   generic declarations, data-class synthetics. `Status: implemented` on desktop,
   `GeneratedDeclarationKindsTest.kt`.
+  **A companion object is a value** (#322): the public companion object of a public class is the value
+  `Owner.Companion` (`Owner.<CompanionName>` for a named companion), read as an attribute of the owner's
+  proxy class or of its module. When the companion lists the owner as a direct supertype in its Kotlin
+  metadata (`Modifier.Companion : Modifier`) the value is an `Owner` proxy instance (`isinstance` holds),
+  otherwise a proxy of the companion's own type. Each read returns a new handle to the same Kotlin object. Two proxies are `==` when they hold the same
+  Kotlin object (reference identity) and hash by its identity hash; `is` is not guaranteed; Kotlin
+  `equals` and `hashCode` are not used (value equality is not provided). On wasmJs, which has no
+  identity hash, the hash is the object's `hashCode()`, so there a mutable object that overrides it
+  should not be used as a dict key or set member. A non-public companion
+  binds nothing; a generic owner is named without type arguments. A class-level constant of the
+  companion is reachable through the proxy class (`Owner.Default`). `register_empty(type, factory)`
+  takes the type as its Kotlin name or its proxy class, and the factory as a Kotlin function name (string)
+  or a Python callable returning an owned proxy (`register_empty(Modifier, lambda: Modifier.Companion)`);
+  both forms work. `Status: implemented` on desktop,
+  `GP/artifact/CompanionHandleBindingTest.kt` (walker), `GP/stubs/CompanionHandleStubTest.kt` (stub),
+  `PM/desktopTest/.../pythonx/CompanionHandleTest.kt` (runtime),
+  `python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactCompanionHandleTest.kt`,
+  `python-multiplatform-compose/fixtures/compose/.../ProxyClassArgumentRenderTest.kt`.
 - **U-5** `suspend` functions are awaitable from Python (`await g.greetNow(1)`); a function that never
   suspends completes without a Future; cancelling the Python future cancels the Kotlin coroutine.
   `Status: implemented` on desktop and Kotlin/Native, `PM/desktopTest/.../upcall/AsyncUpcallDeliveryTest.kt`,

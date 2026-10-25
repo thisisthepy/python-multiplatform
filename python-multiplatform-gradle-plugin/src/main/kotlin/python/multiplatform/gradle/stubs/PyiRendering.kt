@@ -121,6 +121,12 @@ internal const val CONSTRUCTOR_MARKER = "Kotlin constructor: "
  */
 internal const val METHOD_MARKER = "Kotlin member: "
 
+/**
+ * What precedes a companion handle's table key (`pkg.Owner.Companion`, issue #322) in the docstring of
+ * the class attribute it is stubbed as, or in the comment that says why there is none.
+ */
+internal const val COMPANION_MARKER = "Kotlin companion: "
+
 private val PROPERTY_KINDS = setOf("GETTER", "SETTER")
 private const val METHOD_KIND = "METHOD"
 
@@ -201,7 +207,13 @@ private enum class Role { PARAM, RESULT }
 private class StubRenderer(declarations: List<DeclarationModel>) {
 
     /** Everything that is a module attribute; properties and member functions are attributes of a proxy instead. */
-    private val bound: List<DeclarationModel> = declarations.filter { it.kind !in PROPERTY_KINDS && it.kind != METHOD_KIND }
+    private val bound: List<DeclarationModel> =
+        declarations.filter { it.kind !in PROPERTY_KINDS && it.kind != METHOD_KIND && !it.isCompanionHandle }
+
+    /** owner class -> its companion object handles (`Owner.Companion`), each a class attribute of the owner's stub. */
+    private val companionHandles: Map<String, List<DeclarationModel>> = declarations
+        .filter { it.isCompanionHandle && it.bindingName != null }
+        .groupBy { it.owner }
 
     /** receiver type -> its bound member functions (issue #215), each a method of the receiver's stub class. */
     private val methods: Map<String, List<DeclarationModel>> = declarations
@@ -694,6 +706,17 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
         }
         stubBasesOf(qualifiedName, ctx).takeIf { it.isNotEmpty() }?.let { node.bases = it.joinToString(", ") }
 
+        // The companion object, a class attribute (`Modifier.Companion`). Typed as the owner when the
+        // companion is one (`Companion: Modifier`), else as the companion's own type.
+        companionHandles[qualifiedName].orEmpty().forEach { d ->
+            val name = d.simpleName
+            if (!isIdentifier(name) || name in node.children) {
+                node.members += "# $COMPANION_MARKER${d.bindingName} is not stubbed: '$name' cannot be written as an attribute here"
+                return@forEach
+            }
+            node.members += "$name: ${result(d, ctx)}\n\"\"\"$COMPANION_MARKER${d.bindingName} (${kotlinSignatureOf(d)})\"\"\""
+        }
+
         constructorsByClass[qualifiedName]?.let { group ->
             group.forEachIndexed { index, d ->
                 node.members += if (group.size == 1) {
@@ -849,6 +872,26 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
         }
     }
 
+    /**
+     * Every owner with a companion handle gets its stub class. One whose name is a module (it also
+     * publishes companion constants) cannot have a class, so the handle is a module attribute there,
+     * as the constants are; one whose class is taken by a function gets a comment instead.
+     */
+    private fun registerCompanionOwners() {
+        companionHandles.forEach { (owner, handles) ->
+            val ref = classRefOf(owner)
+            val home = ref?.pkg ?: owner.substringBeforeLast('.', "")
+            val ctx = out(home)
+            if (ref != null && classReference(owner, null, ctx) != ANY) return@forEach
+            if (owner in moduleNames) {
+                val moduleCtx = out(owner)
+                handles.forEach { moduleCtx.defs += renderDef(it, moduleCtx) }
+            } else {
+                handles.forEach { ctx.defs += "# $COMPANION_MARKER${it.bindingName} is not stubbed: ${owner.substringAfterLast('.')} has no stub class" }
+            }
+        }
+    }
+
     private fun renderClasses() {
         val done = mutableSetOf<String>()
         while (true) {
@@ -875,6 +918,7 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
         renderModuleDefs()
         registerPropertyOwners()
         registerMethodOwners()
+        registerCompanionOwners()
         renderClasses()
         return modules.filterValues { it.defs.isNotEmpty() || it.classes.isNotEmpty() }
             .mapValues { (_, ctx) ->

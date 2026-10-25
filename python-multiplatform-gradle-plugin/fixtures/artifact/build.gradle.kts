@@ -131,6 +131,9 @@ pythonBindings {
             // so it can only ever be held in Python as a boxed handle (issue #168).
             "androidx.compose.ui.unit.TextUnitKt",
             "androidx.compose.ui.unit.TextUnitType",
+            // `Modifier` is an interface whose companion is itself a `Modifier` (issue #322): the
+            // companion handle `Modifier.Companion` is what `WalkedArtifactCompanionHandleTest` reads.
+            "androidx.compose.ui.Modifier",
         ),
     )
 }

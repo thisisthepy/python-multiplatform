@@ -1049,7 +1049,9 @@ object PythonxAdapter {
             one. Registering the factory by name is the seam; a proxy type with none refuses the
             class-object spelling with a message that says so rather than guessing.
             '''
-            _EMPTY_FACTORIES[kotlin_type_name] = kotlin_factory_name
+            # The type may be given as its proxy class (`Modifier`), and the factory as a Python callable
+            # (`lambda: Modifier.Companion`) that answers an owned proxy, instead of a Kotlin function name.
+            _EMPTY_FACTORIES[getattr(kotlin_type_name, '_kotlin_type_name', kotlin_type_name)] = kotlin_factory_name
 
 
         _MEMBER_RESOLVERS = []
@@ -1227,6 +1229,13 @@ object PythonxAdapter {
                     if resolved is None:
                         kotlin = _member_aliases(cls._kotlin_type_name).get(name)
                         if kotlin is None:
+                            # A Kotlin class and the module of the same name share one name: what the
+                            # module holds (a companion object, `Owner.Companion`, or a companion's
+                            # constants) is also reachable on the class. Answered as `_adapt` answers
+                            # it; a constant is read on every access, never cached on the class.
+                            statics = _BY_PACKAGE.get(cls._kotlin_type_name, {}).get(name)
+                            if statics:
+                                return _adapt(cls._kotlin_type_name, name)[0]
                             raise AttributeError(
                                 'no Kotlin extension named ' + name + ' on ' + cls._kotlin_type_name
                             )
@@ -1427,6 +1436,24 @@ object PythonxAdapter {
             def __repr__(self):
                 return '<' + _simple_name(kotlin_type_name) + ' handle=' + repr(self._pm_handle) + '>'
 
+            def __eq__(self, other):
+                # Reference identity of the two Kotlin objects the handles name (SPEC U-4), never Kotlin `equals`:
+                # a companion read twice is two handles to one object, so identity of the wrappers cannot answer.
+                if other is self:
+                    return True
+                mine = self.__dict__.get('_pm_handle')
+                theirs = getattr(other, '__dict__', {}).get('_pm_handle')
+                # Only two live object handles reach Kotlin; anything else (a non-proxy, a handle-less
+                # wrapper) is not this proxy's equal and is left to the other side.
+                if not isinstance(mine, int) or not isinstance(theirs, int) or mine <= 0 or theirs <= 0:
+                    return NotImplemented
+                if mine == theirs:
+                    return True
+                return bool(_boundary()['invoke'](_resolve('${PythonCallables.SAME_OBJECT}'), (mine, theirs)))
+
+            def __hash__(self):
+                return hash(_boundary()['invoke'](_resolve('${PythonCallables.HASH_OF}'), (int(self._pm_handle),)))
+
             @classmethod
             def empty(cls):
                 factory = _EMPTY_FACTORIES.get(kotlin_type_name)
@@ -1436,6 +1463,8 @@ object PythonxAdapter {
                         "python_multiplatform.binding.register_empty('" + kotlin_type_name + "', '<kotlin function name>') "
                         'or start the chain from a value Kotlin handed you'
                     )
+                if callable(factory):
+                    return factory()
                 return _wrap(_boundary()['invoke'](_resolve(factory), ()), kotlin_type_name)
 
             body = {
@@ -1444,6 +1473,8 @@ object PythonxAdapter {
                 '__getattr__': __getattr__,
                 '__setattr__': __setattr__,
                 '__repr__': __repr__,
+                '__eq__': __eq__,
+                '__hash__': __hash__,
                 'empty': empty,
                 '_kotlin_type_name': kotlin_type_name,
                 '_kotlin_attached': [],
@@ -2315,6 +2346,28 @@ object PythonxAdapter {
                 module = _sys.modules.get(name)
                 if module is not None:
                     _adapt_module(module, name)
+            # Issue #322: one Python name cannot be both a module and a class (PythonProxySource's
+            # rule), and the class wins. A companion bound as `pkg.Owner.Companion` makes
+            # `pkg.Owner` a module too; the proxy layer binds that module onto `pkg` by name, which
+            # shadowed the proxy class `pkg.Owner`. The class goes back, and its `__getattr__`
+            # serves the module's statics (`Owner.Companion`).
+            for name in list(_PACKAGES_SEEN):
+                if class_wins_over_module(name):
+                    parent, _, leaf = name.rpartition('.')
+                    holder = _sys.modules.get(parent)
+                    if holder is not None and isinstance(holder.__dict__.get(leaf), _types.ModuleType):
+                        setattr(holder, leaf, _proxy_type(name))
+
+
+        def class_wins_over_module(qualified):
+            '''Whether the parent package's attribute [qualified] must be the proxy class rather than a
+            module of that name: exactly when `_adapt` would answer the class. A declaration bound under
+            the same name in the parent wins first, as in `_adapt` -- issue #78's callable module
+            (`TextRange(2)` beside `TextRange.Zero`) stays the module that answers both.'''
+            parent, _, leaf = qualified.rpartition('.')
+            if _BY_PACKAGE.get(parent, {}).get(leaf):
+                return False
+            return leaf[:1].isupper() and (qualified in _BY_RECEIVER or qualified in _PROXY_TYPES)
 
 
         class _Loader:
