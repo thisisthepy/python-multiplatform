@@ -504,6 +504,7 @@ def _class_decl(node: ast.ClassDef, tree: ast.Module, info: _ModuleInfo) -> ir.C
     slots: ast.expr | None = None
     annotated: list[str] = []
     init: ast.FunctionDef | None = None
+    has_del = False
     for st in node.body:
         if isinstance(st, ast.Expr) and isinstance(st.value, ast.Constant) \
                 and isinstance(st.value.value, str):
@@ -520,6 +521,8 @@ def _class_decl(node: ast.ClassDef, tree: ast.Module, info: _ModuleInfo) -> ir.C
                 return f"{at}: defines `{st.name}`, which runs user code on slot access"
             if st.name == "__init__":
                 init = st
+            if st.name == "__del__":
+                has_del = True
         else:
             return (f"{at}: class body statement `{_src(st).splitlines()[0]}` (line {st.lineno}) "
                     "is not supported (only `__slots__`, bare field annotations and methods)")
@@ -535,7 +538,7 @@ def _class_decl(node: ast.ClassDef, tree: ast.Module, info: _ModuleInfo) -> ir.C
     if set(fields) != set(annotated):
         return (f"{at}: `__slots__` {fields} does not equal its annotated fields "
                 f"{tuple(dict.fromkeys(annotated))}")
-    return ir.ClassDecl(name, fields, init is not None and _trivial_init(init, fields))
+    return ir.ClassDecl(name, fields, init is not None and _trivial_init(init, fields), has_del)
 
 
 def _assigned_attributes(n: ast.AST) -> list[ast.Attribute]:

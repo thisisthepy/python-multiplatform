@@ -3273,4 +3273,134 @@ static inline void tp_par_rerun_note(void)
     __atomic_fetch_add(&tp_par_reruns_v, 1, __ATOMIC_RELAXED);
 }
 
+/* ---- Regions (SPEC N-12b, #268; API.md "Regions") ----
+ * The objects of a region class that a pure compiled host builds and consumes inside one statement are
+ * C structs of 8-byte slots in bump chunks: no PyObject header, no refcount, no GC, no thread but the
+ * host's can reach them. A region is a C stack value of the host (one per site); the chunks it grew
+ * are reused by the next statement execution and freed once, on the host's exit. Counters are relaxed
+ * atomics (the only shared state). */
+typedef union tp_rslot { int64_t i; double f; union tp_rslot *p; } tp_rslot;
+typedef tp_rslot *tp_rptr;
+typedef struct tp_rchunk { struct tp_rchunk *next; size_t cap; size_t used; } tp_rchunk;   /* slots follow */
+typedef struct { tp_rchunk *head; tp_rchunk *cur; uint64_t objs; int open; } tp_region;
+
+#define TP_REGION_FIRST_SLOTS 512u            /* first chunk: 4 KiB */
+#define TP_REGION_MAX_SLOTS (1u << 20)        /* chunks double up to 8 MiB */
+
+static uint64_t tp_region_opened_v = 0, tp_region_freed_v = 0, tp_region_objs_v = 0;
+static uint64_t tp_region_chunks_v = 0, tp_region_chunks_freed_v = 0;   /* chunks malloc'd / freed */
+static int64_t tp_region_fail_v = -1;         /* test hook: the nth allocation fails; -1 off */
+
+static inline void tp_region_stats(uint64_t out[3])
+{
+    out[0] = __atomic_load_n(&tp_region_opened_v, __ATOMIC_RELAXED);
+    out[1] = __atomic_load_n(&tp_region_freed_v, __ATOMIC_RELAXED);
+    out[2] = __atomic_load_n(&tp_region_objs_v, __ATOMIC_RELAXED);
+}
+
+static inline void tp_region_chunk_stats(uint64_t out[2])
+{
+    out[0] = __atomic_load_n(&tp_region_chunks_v, __ATOMIC_RELAXED);
+    out[1] = __atomic_load_n(&tp_region_chunks_freed_v, __ATOMIC_RELAXED);
+}
+
+static inline void tp_region_set_fail(int64_t n)
+{
+    __atomic_store_n(&tp_region_fail_v, n, __ATOMIC_RELAXED);
+}
+
+static inline void tp_region_open(tp_region *r)
+{
+    r->cur = r->head;
+    if (r->cur != NULL) {
+        r->cur->used = 0;
+    }
+    r->objs = 0;
+    r->open = 1;
+    (void)__atomic_fetch_add(&tp_region_opened_v, 1, __ATOMIC_RELAXED);
+}
+
+/* The next chunk with room for n slots (reused when the list has one, else a new malloc'd one), or NULL. */
+static inline tp_rptr tp_region_grow(tp_region *r, size_t n)
+{
+    tp_rchunk *c = r->cur;
+    tp_rchunk *nx = c != NULL ? c->next : r->head;
+    size_t cap;
+    if (nx != NULL && nx->cap >= n) {
+        nx->used = 0;
+    } else {
+        cap = c == NULL ? TP_REGION_FIRST_SLOTS : c->cap * 2u;
+        if (cap > TP_REGION_MAX_SLOTS) {
+            cap = TP_REGION_MAX_SLOTS;
+        }
+        if (cap < n) {
+            cap = n;
+        }
+        nx = (tp_rchunk *)malloc(sizeof(tp_rchunk) + cap * sizeof(tp_rslot));
+        if (nx == NULL) {
+            return NULL;
+        }
+        nx->cap = cap;
+        nx->used = 0;
+        (void)__atomic_fetch_add(&tp_region_chunks_v, 1, __ATOMIC_RELAXED);
+        if (c != NULL) {
+            nx->next = c->next;          /* keep the chunks that were already grown */
+            c->next = nx;
+        } else {
+            nx->next = r->head;
+            r->head = nx;
+        }
+    }
+    r->cur = nx;
+    nx->used = n;
+    r->objs++;
+    return (tp_rslot *)(void *)(nx + 1);
+}
+
+/* n slots (one object), or NULL on failure: the caller deopts and the interpreter redoes the call. */
+static inline tp_rptr tp_region_alloc(tp_region *r, size_t n)
+{
+    tp_rchunk *c = r->cur;
+    tp_rslot *p;
+    if (__builtin_expect(__atomic_load_n(&tp_region_fail_v, __ATOMIC_RELAXED) >= 0, 0)) {
+        if (__atomic_sub_fetch(&tp_region_fail_v, 1, __ATOMIC_RELAXED) == 0) {
+            __atomic_store_n(&tp_region_fail_v, -1, __ATOMIC_RELAXED);
+            return NULL;
+        }
+    }
+    if (c != NULL && c->cap - c->used >= n) {
+        p = (tp_rslot *)(void *)(c + 1) + c->used;
+        c->used += n;
+        r->objs++;
+        return p;
+    }
+    return tp_region_grow(r, n);
+}
+
+/* The statement is over: count it. The chunks stay for the next execution. Idempotent. */
+static inline void tp_region_end(tp_region *r)
+{
+    if (r->open) {
+        r->open = 0;
+        (void)__atomic_fetch_add(&tp_region_freed_v, 1, __ATOMIC_RELAXED);
+        (void)__atomic_fetch_add(&tp_region_objs_v, r->objs, __ATOMIC_RELAXED);
+        r->objs = 0;
+    }
+}
+
+/* Every exit of the host: end the open statement, if any, and free all chunks. Idempotent. */
+static inline void tp_region_free(tp_region *r)
+{
+    tp_rchunk *c = r->head;
+    tp_region_end(r);
+    while (c != NULL) {
+        tp_rchunk *nx = c->next;
+        free(c);
+        (void)__atomic_fetch_add(&tp_region_chunks_freed_v, 1, __ATOMIC_RELAXED);
+        c = nx;
+    }
+    r->head = NULL;
+    r->cur = NULL;
+}
+
 #endif /* TP_RUNTIME_H */

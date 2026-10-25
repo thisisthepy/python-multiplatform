@@ -540,6 +540,32 @@ for i64 and for f64 without NaN (ties and signed zeros keep the first). An f64 c
 `TP_PAR_BAD`, and `tp_par_combine_ext_f64` returns 1 for a NaN initial accumulator: the loop then runs sequentially
 (`[1.0] | [nan, 0.0]` is the case a chunked fold gets wrong).
 
+## Regions (SPEC N-12b, issue #268)
+The objects of a region class that a pure compiled host builds and consumes inside one statement
+(`check(make(d))`) are C structs of 8-byte slots in bump-allocated chunks: no `PyObject` header, no
+refcount, no GC, so nothing but the host's C stack can reach them. Only the internal region entries
+(`tp_rimpl_<name>`, no Python name) use them; the Python-visible entry of a producer or consumer is
+unchanged and still builds real objects.
+    typedef union tp_rslot { int64_t i; double f; union tp_rslot *p; } tp_rslot;   /* one field: i64 or bool in .i, f64 in .f, a pointer (NULL is None) in .p */
+    typedef tp_rslot *tp_rptr;                                   /* an object of a region class: its first slot */
+    typedef struct { tp_rchunk *head; tp_rchunk *cur; uint64_t objs; int open; } tp_region;   /* zero-initialised C local of the host, one per site */
+    #define TP_REGION_FIRST_SLOTS 512u        /* 4 KiB; chunks double up to TP_REGION_MAX_SLOTS (1 << 20 slots) */
+    void    tp_region_open(tp_region *r);                        /* a statement starts: reuse the chunks grown before, count one opened */
+    tp_rptr tp_region_alloc(tp_region *r, size_t n);             /* n slots, NULL when malloc fails (or the test hook fires): the caller deopts, the interpreter redoes the call and raises its own MemoryError */
+    tp_rptr tp_region_grow(tp_region *r, size_t n);              /* the slow path of tp_region_alloc: the next chunk */
+    void    tp_region_end(tp_region *r);                         /* the statement is over: count one freed and the objects built; chunks stay; idempotent */
+    void    tp_region_free(tp_region *r);                        /* every exit of the host (the common exit block): tp_region_end, then free all chunks; idempotent */
+    void    tp_region_stats(uint64_t out[3]);                    /* opened, freed, objects since import */
+    void    tp_region_chunk_stats(uint64_t out[2]);              /* chunks malloc'd, chunks freed since import: equal whenever no host is running */
+    void    tp_region_set_fail(int64_t n);                       /* test hook: the nth allocation from now fails once; -1 off (the default) */
+A module with a region variant exports `__typedpython_region_stats__()` returning `(opened, freed,
+objects)`, `__typedpython_region_chunks__()` returning `(allocated, freed)` chunks, and
+`__typedpython_region_fail_after__(n)` (the hook). Reference convention: a `tp_rptr` is
+never a counted reference; it is valid until the `tp_region_open` of the same region var or its free.
+The region holds scalars, `None` and region pointers only (the verifier's region class rule), so
+freeing runs no finalizer and drops no reference. Free-threaded state: the three counters and the hook
+are relaxed atomics; a region is reachable from one thread's C stack only.
+
 ## Development-mode import gate (Python API, not C; SPEC N-7b)
     typedpython.importgate.install(source_roots)   # meta path finder; checks project modules before they run
     typedpython.importgate.uninstall()

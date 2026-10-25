@@ -788,6 +788,54 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   N-11. **Known difference:** an object whose allocation was removed raises no `MemoryError` where
   CPython's allocation would (same nature as escape analysis in PyPy). Impure functions, `FieldSet` on a
   virtual object, escape with materialisation, borrowed reads and regions are not part of N-12a.
+  **N-12b (#268): regions for unbounded virtual objects.** `Status: first step implemented` (design:
+  `docs/design/typedpython-regions.md`; tests: `test_regions.py`). N-12a
+  cannot hold an unbounded number of objects (a tree built by recursion). In a **pure** compiled host,
+  objects of a region class that are built by compiled producers and consumed by compiled consumers live
+  as C structs in a bump region owned by one statement of that host; no PyObject exists for them, so no
+  other thread, `gc.get_objects()`, `gc.get_referrers()` or `tracemalloc` can find one. Real objects are
+  never placed in a region (N-12), so a tree that escapes (returned, stored, passed to unknown code, kept
+  in a global or container, interpreted caller) is built by the ordinary N-11 entry as before. Facts the
+  verifier recomputes (never trusted from the front end; a forged entry is `verify/region-escape`):
+  - a **region class** is an N-11 class without `__del__` and `__weakref__`, no `FieldSet` anywhere in the
+    project, whose every `New` argument is a scalar `Box`, a `None` Const or a value of a region class
+    (fields are scalars, `None` and region pointers only; no other object reference is ever stored, so
+    freeing the region runs no user code and needs no refcount; a field that mixes kinds, or points to two
+    classes, is not a region class);
+  - a **producer** is a pure function returning a region class whose every `Return` is a `New` or a
+    `Call` of a producer; a **consumer** is a pure function with a region-class parameter that returns a
+    scalar, reads that parameter only through `FieldGet`, `Is None`, and passes it or its fields only to
+    consumers; both use no node outside `_REGION_OK` (the `_VIRTUAL_OK` set plus `Call` of a pure
+    compiled function and `Return`, no unknown code);
+  - a **host** is a pure function (only pure functions host a region) in which a producer `Call` result is used only as the region argument
+    of consumer `Call`s in the same statement (`check(make(d))`; the local form
+    `t = make(d); ... check(t)` is a later step), and the statement's value is a scalar. The region is
+    opened at the producer call and freed when the statement ends, on every exit (return, exception, deopt).
+  A producer and a consumer get a second, internal entry that takes the region (producer) or a region
+  pointer (consumer); their Python-visible entry is unchanged, so an interpreted caller always gets real
+  objects. Cases:
+  - **Deopt.** The host is pure, so a deopt anywhere in the span (a guard, an overflow, a changed class
+    checked by every region `New`, an allocation failure) frees the region, discards its objects (none
+    was ever observable) and redoes the host call interpreted from its arguments.
+  - **MemoryError.** A failed region allocation is a deopt, so the interpreter's redo raises `MemoryError`
+    itself where CPython would. **Known difference** (same nature as N-12a, maintainer decision
+    2026-10-25): a region node is smaller than a PyObject, so a call may succeed where CPython's
+    allocation would fail. **Known difference** (same decision): `tracemalloc` peak and
+    `sys.getallocatedblocks` during the call differ, because no PyObject exists for the tree (region
+    memory is plain `malloc`); both return to their starting values after the call.
+  - **Free-threading.** Region memory is reachable only from the host's C stack. No atomics, critical
+    sections or refcounts are involved because no region object holds a reference. The host span is
+    atomic for other threads (they observe the state before the first node or after the last free), which
+    is a valid CPython interleaving.
+  - **N-14.** A traced call enters the interpreted host, so events are CPython's; internal region entries
+    are not re-checked (the host is pure, as for any pure callee).
+  - **Differential tests.** `id`, `is` between nodes, default `hash`/`repr`: not applicable, a host
+    using any of them is not a region (negative cases in `test_regions.py`, with a mutation test).
+    `gc.get_objects` count and order, `gc.get_referrers`: unchanged before and after a call, and a
+    thread scanning `gc.get_objects()` during calls never finds a node. `sys.getrefcount`: no object
+    reference is stored in a region node, so no refcount changes. `tracemalloc`: current memory returns to
+    the start; the peak is the known difference above. `MemoryError` during construction: injected
+    allocation failure equals the interpreter. Results equal the interpreter for every depth.
 - **N-13** TypedPython native ints in impure functions (#232; INTENT §1.4: compiled code computes what
   CPython computes). An impure function cannot deopt after an effect, so its `int` locals were CPython
   objects and every `+`, `//`, `%` and comparison was a generic `PyNumber_*` / `PyObject_RichCompare`

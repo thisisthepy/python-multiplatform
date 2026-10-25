@@ -560,6 +560,37 @@ class _ModGen:
         self.gnames: list[str] = []              # cached global/builtin reads, one tp_gslot each
         self._uses: dict[str, set[str]] = {}
         self.bounded = _bounded_functions(self.functions)     # name -> k (module docstring, "Fast entry")
+        # SPEC N-12b: producers and consumers that get an internal region entry, and per region class the
+        # kind of each field ("i64", "f64", "bool", "ref"), read off the producers' `New`s.
+        self.rvariants: set[str] = set()
+        self.rfield: dict[str, tuple[str, ...]] = {}
+        self._init_regions()
+
+    def _init_regions(self) -> None:
+        cand = {n for n in self.module.region_variants if n in self.functions}
+        used: set[str] = set()
+        todo: list[str] = []
+
+        def add(e) -> None:
+            if isinstance(e, ir.Call) and e.function in cand and e.function not in used:
+                used.add(e.function)
+                todo.append(e.function)
+
+        for f in self.module.functions:
+            if f.regions:
+                for e in _all_exprs(f):
+                    add(e)
+        while todo:
+            for e in _all_exprs(self.functions[todo.pop()]):
+                add(e)
+        self.rvariants = used
+        for n in sorted(used):
+            for e in _all_exprs(self.functions[n]):
+                if isinstance(e, ir.New):
+                    kinds = tuple(ir.REGION_SCALAR_KINDS.get(a.operand.type) if isinstance(a, ir.Box)
+                                  else "ref" for a in e.args)
+                    if None in kinds or self.rfield.setdefault(e.cls, kinds) != kinds:
+                        raise CGenError(f"{n}: New {e.cls} has no single region layout")
 
     def cls(self, fname: str, name: str) -> ir.ClassDecl:
         cd = self.classes.get(name)
@@ -673,6 +704,8 @@ def generate(module: ir.Module, source_path: Path, display_path: str | None = No
     for f in module.functions:
         mg.name_index(f.name)
     bodies = [_FnGen(mg, f).generate() for f in module.functions]
+    bodies += [_FnGen(mg, mg.functions[n], rmode="p" if mg.functions[n].returns is Type.OBJ else "c").generate()
+               for n in sorted(mg.rvariants)]
     init_name = module.name.rpartition(".")[2]
     if not (init_name.isascii() and init_name.isidentifier()):
         raise CGenError(f"module name {module.name!r} cannot name a PyInit_ function")
@@ -748,6 +781,8 @@ def generate(module: ir.Module, source_path: Path, display_path: str | None = No
         w(_impl_signature(f) + ";")
         if f.name in mg.bounded:
             w(_impl_signature(f, fast=True) + ";")
+    for n in sorted(mg.rvariants):
+        w(_region_signature(mg.functions[n]) + ";")
     w("")
     w(_TEMPLATE_REDO)
     for b in bodies:
@@ -767,6 +802,8 @@ def generate(module: ir.Module, source_path: Path, display_path: str | None = No
         w(_class_info_function(mg))
     if mg.has_par:
         w(_par_stats_function())
+    if mg.rvariants:
+        w(_region_stats_functions())
     w(_exec_function(mg))
     w(_state_functions(mg))
     w("static PyModuleDef_Slot tp_slots[] = {")
@@ -928,12 +965,65 @@ def _impl_call_args(f: ir.Function, fd: str | None = None) -> str:
     return ", ".join(args)
 
 
+def _region_signature(f: ir.Function) -> str:
+    """The internal entry of a region producer (takes the region, returns a region pointer) or consumer
+    (takes region pointers): no Python name, no wrapper, reachable only from compiled pure code
+    (SPEC N-12b)."""
+    params = ["PyObject *tp_module", "PyThreadState *tp_ts", "tp_tls *tp_t"]
+    if f.returns is Type.OBJ:
+        params.append("tp_region *tp_r")
+    for p in f.params:
+        params.append(f"tp_rptr {_ident('l', p.name)}" if p.type is Type.OBJ
+                      else f"{_CT[p.type]} {_ident('l', p.name)}")
+    params.append("tp_rptr *tp_out" if f.returns is Type.OBJ else f"{_CT[f.returns]} *tp_out")
+    return f"static int {_ident('tp_rimpl', f.name)}({', '.join(params)})"
+
+
+def _region_stats_functions() -> str:
+    return "\n".join([
+        "static PyObject *tp_region_stats_fn(PyObject *tp_module, PyObject *tp_unused)",
+        "{",
+        "    uint64_t tp_v[3];",
+        "    (void)tp_module; (void)tp_unused;",
+        "    tp_region_stats(tp_v);",
+        "    return Py_BuildValue(\"(KKK)\", (unsigned long long)tp_v[0], (unsigned long long)tp_v[1], (unsigned long long)tp_v[2]);",
+        "}",
+        "",
+        "static PyObject *tp_region_chunks_fn(PyObject *tp_module, PyObject *tp_unused)",
+        "{",
+        "    uint64_t tp_v[2];",
+        "    (void)tp_module; (void)tp_unused;",
+        "    tp_region_chunk_stats(tp_v);",
+        "    return Py_BuildValue(\"(KK)\", (unsigned long long)tp_v[0], (unsigned long long)tp_v[1]);",
+        "}",
+        "",
+        "static PyObject *tp_region_fail_fn(PyObject *tp_module, PyObject *tp_n)",
+        "{",
+        "    long long tp_v = PyLong_AsLongLong(tp_n);",
+        "    (void)tp_module;",
+        "    if (tp_v == -1 && PyErr_Occurred()) return NULL;",
+        "    tp_region_set_fail((int64_t)tp_v);",
+        "    Py_RETURN_NONE;",
+        "}",
+        "",
+        "static PyMethodDef tp_region_stats_def = {\"__typedpython_region_stats__\", tp_region_stats_fn, METH_NOARGS, NULL};",
+        "static PyMethodDef tp_region_chunks_def = {\"__typedpython_region_chunks__\", tp_region_chunks_fn, METH_NOARGS, NULL};",
+        "static PyMethodDef tp_region_fail_def = {\"__typedpython_region_fail_after__\", tp_region_fail_fn, METH_O, NULL};",
+        "",
+    ])
+
+
 # --- function bodies -----------------------------------------------------------------------------
 
 class _FnGen:
-    def __init__(self, mg: _ModGen, f: ir.Function, fast: bool = False):
+    def __init__(self, mg: _ModGen, f: ir.Function, fast: bool = False, rmode: str | None = None):
         self.mg, self.f = mg, f
         self.fast = fast                            # the uncounted twin of a bounded function
+        # SPEC N-12b: "p" / "c": the internal region entry of a producer / consumer (OBJ values are
+        # region pointers, never counted references); `rgs`: the region variables of a host's sites
+        self.rmode = rmode
+        self.rgs: list[str] = []
+        self.host = bool(f.regions) and not fast and rmode is None and bool(mg.rvariants)
         self.lines: list[str] = []
         self.depth = 1
         self.temps: list[tuple[str, str]] = []      # (C type, name)
@@ -1017,6 +1107,8 @@ class _FnGen:
             self.emit(f"tp_release(&{t});")
 
     def _own_release_all(self) -> list[str]:
+        if self.rmode:                       # region pointers are not counted references
+            return []
         objs = [_ident("l", n) for n, t in self.types.items() if t is Type.OBJ]
         objs += [n for ct, n in self.temps if ct == "PyObject *"]
         out = [f"    tp_release(&{n});" for n in objs]
@@ -1033,6 +1125,8 @@ class _FnGen:
     # OBJ results are always owned temporaries.
 
     def ev(self, e: ir.Expr) -> str:
+        if self.rmode and e.type is Type.OBJ:
+            return self._rev(e)
         m = getattr(self, "ev_" + type(e).__name__, None)
         if m is None:
             raise CGenError(f"{self.f.name}: no lowering for {type(e).__name__}")
@@ -1294,6 +1388,19 @@ class _FnGen:
         return self._own_new(f"{_BOX[ot]}({v})")
 
     def ev_Unbox(self, e: ir.Unbox) -> str:
+        if self.rmode:
+            op = e.operand
+            if not isinstance(op, ir.FieldGet):
+                raise CGenError(f"{self.f.name}: region Unbox of {type(op).__name__}")
+            idx = self.mg.cls(self.f.name, op.cls).fields.index(op.field)
+            kind = self.mg.rfield.get(op.cls, ())[idx:idx + 1]
+            if kind != (ir.REGION_SCALAR_KINDS.get(e.type),):
+                raise CGenError(f"{self.f.name}: region field {op.cls}.{op.field} is {kind}, read as {e.type}")
+            p = self._r_ptr_name(op.obj)
+            self._rguard(op.cls)
+            t = self.tmp(_CT[e.type])
+            self.emit(f"{t} = {p}[{idx}].{'f' if e.type is Type.F64 else 'i'};")
+            return t
         if e.operand.type is not Type.OBJ or e.type not in _UNBOX:
             raise CGenError(f"{self.f.name}: Unbox {e.operand.type} -> {e.type}")
         o = self.ev(e.operand)
@@ -1313,6 +1420,13 @@ class _FnGen:
 
     def ev_Call(self, e: ir.Call) -> str | None:
         callee = self.mg.functions[e.function]
+        if e.function in self.mg.rvariants:
+            if self.rmode:
+                return self._rcall(e)
+            if self.host and callee.returns is not Type.OBJ and any(
+                    isinstance(a, ir.Call) and a.function in self.mg.rvariants and a.type is Type.OBJ
+                    for a in e.args):
+                return self._host_call(e)
         if len(e.args) != len(callee.params):
             raise CGenError(f"{self.f.name}: Call of {e.function} with {len(e.args)} args")
         args = []
@@ -1463,6 +1577,11 @@ class _FnGen:
         return self.ev(e)
 
     def ev_Is(self, e: ir.Is) -> str:
+        if self.rmode:
+            a, b = self._r_ptr_name(e.left), self._r_ptr_name(e.right)
+            t = self.tmp("int")
+            self.emit(f"{t} = ({a} {'!=' if e.negate else '=='} {b});")
+            return t
         a = self._obj_operand(e.left, "Is")
         b = self._obj_operand(e.right, "Is")
         t = self.tmp("int")
@@ -1488,6 +1607,11 @@ class _FnGen:
             self.emit("tp_rc = 1; goto tp_exit;")
 
     def ev_IsExact(self, e: ir.IsExact) -> str:
+        if self.rmode:                      # a region pointer has one class: exact means not None
+            p = self._r_ptr_name(e.obj)
+            t = self.tmp("int")
+            self.emit(f"{t} = ({p} != NULL);")
+            return t
         k = self._class(e.cls)
         o = self._obj_operand(e.obj, "IsExact")
         t = self.tmp("int")
@@ -1621,6 +1745,107 @@ class _FnGen:
             self._own_release(g)
         self.emit(f"if ({t} == NULL) {{ tp_rc = -1; goto tp_exit; }}")
         return t
+
+    # -- regions (SPEC N-12b) --
+
+    def _rguard(self, cls: str) -> None:
+        """The per-access class check of a real FieldGet (`ev_FieldGet`): the class is still the one
+        captured at init (version tag, slot descriptors). A change (a property installed by a signal
+        handler that tp_poll ran, or by another thread) is a deopt: the host is pure, so it frees its
+        region and the call is redone interpreted."""
+        self.emit(f"tp_s = {self._current('NULL', cls)};")
+        self.emit("if (tp_s < 0) { tp_rc = -1; goto tp_exit; }")
+        self.emit("if (!tp_s) { tp_class_note_slow(&tp_st->cls_rt[%d]); tp_rc = 1; goto tp_exit; }" % self._class(cls))
+
+    def _rev(self, e: ir.Expr) -> str:
+        """An OBJ-typed expression of a region variant: a region pointer (never a counted reference)."""
+        if isinstance(e, ir.New):
+            return self._rnew(e)
+        if isinstance(e, ir.Call):
+            return self._rcall(e)
+        return self._r_ptr_name(e)
+
+    def _r_ptr_name(self, e: ir.Expr) -> str:
+        if isinstance(e, ir.Local) and self.types.get(e.name) is Type.OBJ:
+            return _ident("l", e.name)
+        if isinstance(e, ir.Const) and e.type is Type.OBJ and e.value is None:
+            return "NULL"
+        if isinstance(e, ir.CheckExact):         # type(p) is C for a pointer of one class: not None
+            p = self._r_ptr_name(e.obj)
+            self.emit(f"if ({p} == NULL) {{ tp_rc = 1; goto tp_exit; }}")
+            return p
+        if isinstance(e, ir.FieldGet):
+            idx = self.mg.cls(self.f.name, e.cls).fields.index(e.field)
+            if self.mg.rfield.get(e.cls, ())[idx:idx + 1] != ("ref",):
+                raise CGenError(f"{self.f.name}: region field {e.cls}.{e.field} is not a pointer")
+            p = self._r_ptr_name(e.obj)
+            self._rguard(e.cls)
+            return f"{p}[{idx}].p"
+        raise CGenError(f"{self.f.name}: {type(e).__name__} is not a region pointer expression")
+
+    def _rnew(self, e: ir.New) -> str:
+        """`New(C, args)` of a producer's region variant: the same class guards and argument order as
+        `_assign_virtual`, then the node comes from the region. A failed allocation is a deopt."""
+        kinds = self.mg.rfield.get(e.cls)
+        if self.rmode != "p" or kinds is None or len(e.args) != len(kinds):
+            raise CGenError(f"{self.f.name}: New {e.cls} is not a region New")
+        k = self._class(e.cls)
+        self.emit(f"tp_s = {self._global_ok(e.cls)};")
+        self.emit("if (tp_s < 0) { tp_rc = -1; goto tp_exit; }")
+        self.emit("if (!tp_s) { tp_class_note_slow(&tp_st->cls_rt[%d]); tp_rc = 1; goto tp_exit; }" % k)
+        vals = [self._rev(a) if kind == "ref" else self.ev(a.operand) for a, kind in zip(e.args, kinds)]
+        self.emit(f"tp_s = {self._current('NULL', e.cls)};")
+        self.emit("if (tp_s < 0) { tp_rc = -1; goto tp_exit; }")
+        self.emit("if (!tp_s) { tp_class_note_slow(&tp_st->cls_rt[%d]); tp_rc = 1; goto tp_exit; }" % k)
+        t = self.tmp("tp_rptr")
+        self.emit(f"{t} = tp_region_alloc(tp_r, {len(kinds)});")
+        self.emit(f"if ({t} == NULL) {{ tp_rc = 1; goto tp_exit; }}")        # allocation failure: deopt
+        for i, (v, kind) in enumerate(zip(vals, kinds)):
+            self.emit(f"{t}[{i}].{'p' if kind == 'ref' else 'f' if kind == 'f64' else 'i'} = {v};")
+        return t
+
+    def _rcall(self, e: ir.Call) -> str:
+        """A Call of a region variant from a region variant: producers share the caller's region."""
+        callee = self.mg.functions[e.function]
+        args = ["tp_r"] if callee.returns is Type.OBJ else []
+        for p, a in zip(callee.params, e.args):
+            args.append(self._r_ptr_name(a) if p.type is Type.OBJ else self.ev(a))
+        t = self.tmp("tp_rptr" if callee.returns is Type.OBJ else _CT[callee.returns])
+        self.emit(f"tp_s = {_ident('tp_rimpl', e.function)}(tp_module, tp_ts, tp_t"
+                  f"{''.join(', ' + x for x in args)}, &{t});")
+        self.emit("if (tp_s != 0) { tp_rc = tp_s; goto tp_exit; }")
+        return t
+
+    def _host_call(self, e: ir.Call) -> str:
+        """A region site: consumer call `check(make(d))` of a pure host. Each producer call argument gets
+        a region variable of its own, opened right before the producer runs, ended right after the
+        consumer returned (the value is a scalar, so no pointer outlives it) and freed on every exit by
+        the common exit block."""
+        callee = self.mg.functions[e.function]
+        args, opened = [], []
+        for p, a in zip(callee.params, e.args):
+            if p.type is not Type.OBJ:
+                args.append(self.ev(a))
+                continue
+            if not (isinstance(a, ir.Call) and a.function in self.mg.rvariants):
+                raise CGenError(f"{self.f.name}: region argument of {e.function} is not a producer call")
+            rg = f"tp_rg{len(self.rgs)}"
+            self.rgs.append(rg)
+            pargs = [self.ev(x) for x in a.args]
+            t = self.tmp("tp_rptr")
+            self.emit(f"tp_region_open(&{rg});")
+            self.emit(f"tp_s = {_ident('tp_rimpl', a.function)}(tp_module, tp_ts, tp_t, &{rg}"
+                      f"{''.join(', ' + x for x in pargs)}, &{t});")
+            self.emit("if (tp_s != 0) { tp_rc = tp_s; goto tp_exit; }")
+            args.append(t)
+            opened.append(rg)
+        out = self.tmp(_CT[callee.returns])
+        self.emit(f"tp_s = {_ident('tp_rimpl', e.function)}(tp_module, tp_ts, tp_t"
+                  f"{''.join(', ' + x for x in args)}, &{out});")
+        for rg in opened:
+            self.emit(f"tp_region_end(&{rg});")
+        self.emit("if (tp_s != 0) { tp_rc = tp_s; goto tp_exit; }")
+        return out
 
     def _class(self, name: str) -> int:
         self.mg.cls(self.f.name, name)
@@ -1841,7 +2066,9 @@ class _FnGen:
         if s.value.type is not t:
             raise CGenError(f"{self.f.name}: {s.target} is {t}, assigned {s.value.type}")
         v = self.ev(s.value)
-        if t is Type.OBJ:
+        if t is Type.OBJ and self.rmode:
+            self.emit(f"{_ident('l', s.target)} = {v};")
+        elif t is Type.OBJ:
             self._own_move(_ident("l", s.target), v)
         elif t is Type.INT:
             self.emit(f"tp_int_assign(&{_ident('l', s.target)}, &{v});")
@@ -2355,7 +2582,9 @@ class _FnGen:
         if s.value is None or s.value.type is not rt:
             raise CGenError(f"{self.f.name}: Return type mismatch (function returns {rt})")
         v = self.ev(s.value)
-        if rt is Type.OBJ:
+        if rt is Type.OBJ and self.rmode:
+            self.emit(f"*tp_out = {v};")
+        elif rt is Type.OBJ:
             self._own_move_out(v)
         else:
             self.emit(f"*tp_out = {v};")
@@ -2376,7 +2605,7 @@ class _FnGen:
         f = self.f
         prologue = []
         for p in f.params:
-            if not isinstance(p, ir.ArrayParam) and p.type is Type.OBJ:
+            if not isinstance(p, ir.ArrayParam) and p.type is Type.OBJ and not self.rmode:
                 # adopt the borrowed argument: the local owns its own reference (rule 1)
                 prologue.append(f"    {_ident('l', p.name)} = Py_NewRef({_ident('p', p.name)});")
         self.stmts(f.body)
@@ -2387,7 +2616,7 @@ class _FnGen:
             self.emit("tp_rc = -1;")
         self.emit("goto tp_exit;")
 
-        out = [_impl_signature(f, fast=self.fast), "{",
+        out = [_region_signature(f) if self.rmode else _impl_signature(f, fast=self.fast), "{",
                "    int tp_rc = 0;",
                "    int tp_s = 0;",
                "    int tp_pc = TP_POLL_INTERVAL; /* loop poll countdown (#141) */",
@@ -2401,16 +2630,18 @@ class _FnGen:
         for name, t in self.local_arrays.items():
             out.append(f"    {_ARRAY_CT[t]} {_ident('l', name)} = {{0}};")
         for name, t in self.types.items():
-            if name in params and t is not Type.OBJ:
+            if name in params and (t is not Type.OBJ or self.rmode):
                 continue
             init = "NULL" if t is Type.OBJ else "{0, NULL}" if t is Type.INT else "0"
-            ct = _CT[t]
+            ct = "tp_rptr" if self.rmode and t is Type.OBJ else _CT[t]
             out.append(f"    {ct}{'' if ct.endswith('*') else ' '}{_ident('l', name)} = {init};")
         for ct, n in self.temps:
-            init = ("NULL" if ct == "PyObject *" else "{0}" if ct in _CT_ARRAY_REV
+            init = ("NULL" if ct in ("PyObject *", "tp_rptr") else "{0}" if ct in _CT_ARRAY_REV
                     else "{0, NULL}" if ct == "tp_int" else "0")
             sep = "" if ct.endswith("*") else " "
             out.append(f"    {ct}{sep}{n} = {init};")
+        for rg in self.rgs:                    # SPEC N-12b: one region variable per site of a host
+            out.append(f"    tp_region {rg} = {{0}};")
         # (a fast twin declares tp_st / tp_dict only when its body reads them: PyModule_GetState and
         # PyModule_GetDict are external calls, and a leaf must stay free of them to inline well)
         out.append("    (void)tp_s; (void)tp_pc;" + (" (void)tp_fd;" if self.fast else " (void)tp_ts;") + " (void)tp_t;"
@@ -2421,10 +2652,13 @@ class _FnGen:
         # Depth guard (issue #57): nothing is owned yet, so a refusal returns directly and counts
         # nothing; every other exit goes through tp_exit, which leaves exactly once.
         for p in f.params:
-            if isinstance(p, ir.Param) and p.cls is not None:
+            if isinstance(p, ir.Param) and p.cls is not None and self.rmode:
+                # a region pointer is of the one class the verifier proved; None is the only other value
+                out.append(f"    if ({_ident('l', p.name)} == NULL) return 1;")
+            elif isinstance(p, ir.Param) and p.cls is not None:
                 k = self._class(p.cls)
                 out.append(f"    if ({_param_cls_fail(_ident('p', p.name), k, p.optional, f.owner is not None and p is f.params[0])}) return 1;")
-        k_bound = self.mg.bounded.get(f.name)
+        k_bound = None if self.rmode else self.mg.bounded.get(f.name)
         if self.fast:
             # Fast twin of a bounded function (module docstring, "Fast entry"): the caller proved
             # room for every frame this call tree can have, so there is nothing to count or refuse.
@@ -2451,6 +2685,7 @@ class _FnGen:
         out += self.lines
         out.append("tp_exit:")
         out += self._own_release_all()
+        out += [f"    tp_region_free(&{rg});" for rg in self.rgs]
         if self.snapshot:
             out.append("    tp_t->snapshot_depth--;")
         if not self.fast:
@@ -2463,6 +2698,8 @@ class _FnGen:
     def generate(self) -> str:
         """The impl (preceded by its fast twin when bounded) and the wrapper."""
         parts = []
+        if self.rmode:
+            return self.impl()
         if self.f.name in self.mg.bounded:
             twin = _FnGen(self.mg, self.f, fast=True)
             twin_text = twin.impl()
@@ -3059,6 +3296,18 @@ def _exec_function(mg: _ModGen) -> str:
         L += [
             "    tp_cf = PyCFunction_NewEx(&tp_class_info_def, tp_module, NULL);",
             "    if (tp_cf == NULL || PyDict_SetItemString(tp_dict, \"__typedpython_class_info__\", tp_cf) < 0) goto tp_done;",
+            "    tp_release(&tp_cf);",
+        ]
+    if mg.rvariants:
+        L += [
+            "    tp_cf = PyCFunction_NewEx(&tp_region_stats_def, tp_module, NULL);",
+            "    if (tp_cf == NULL || PyDict_SetItemString(tp_dict, \"__typedpython_region_stats__\", tp_cf) < 0) goto tp_done;",
+            "    tp_release(&tp_cf);",
+            "    tp_cf = PyCFunction_NewEx(&tp_region_chunks_def, tp_module, NULL);",
+            "    if (tp_cf == NULL || PyDict_SetItemString(tp_dict, \"__typedpython_region_chunks__\", tp_cf) < 0) goto tp_done;",
+            "    tp_release(&tp_cf);",
+            "    tp_cf = PyCFunction_NewEx(&tp_region_fail_def, tp_module, NULL);",
+            "    if (tp_cf == NULL || PyDict_SetItemString(tp_dict, \"__typedpython_region_fail_after__\", tp_cf) < 0) goto tp_done;",
             "    tp_release(&tp_cf);",
         ]
     if mg.has_par:
