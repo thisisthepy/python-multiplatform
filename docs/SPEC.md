@@ -396,9 +396,12 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   part in overload naming or in a constructor's name check; a property key another binding already
   holds is declined, and so is a property or an extension function whose receiver has a supertype missing from the consumer's compile classpath (kotlinc cannot build its member scope; the reason names the missing supertype, #66). `Status: implemented`, `GP/artifact/PropertyBindingTest.kt` (properties and, #66, extension functions).
   The public instance functions of a Kotlin-public `object` bind under the object's name like a
-  static (`Arrangement.spacedBy`, #53), except `Any`'s members, ones that also exist as a
-  `@JvmStatic` static, and `@Composable` ones (declined); an `internal` or file-private object is
-  skipped. `Status: implemented`, `GP/artifact/ObjectMemberBindingTest.kt`.
+  static (`Arrangement.spacedBy`, #53), except `Any`'s members and ones that also exist as a
+  `@JvmStatic` static; an `internal` or file-private object is skipped. A `@Composable` one
+  (`ButtonDefaults.buttonColors`, `CardDefaults.cardColors`, #307) binds like a top-level composable,
+  synthetic `$composer`/`$changed`/`$default` slots included, through a generated thunk that loads the
+  object's `INSTANCE` and calls the member with `INVOKEVIRTUAL` (the name and descriptor are copied from
+  the walked method, never looked up); its return value crosses as any other. `Status: implemented`, `GP/artifact/ObjectMemberBindingTest.kt`.
   The public, non-suspend **member functions** of a Kotlin-public `class`, `interface` or `enum class`
   that crosses as an object handle bind as `METHOD` entries `Owner.name` (#215), the shape KSP's
   members already have: `args[0]` is the receiver, uncounted in `arity`, and the generated call is

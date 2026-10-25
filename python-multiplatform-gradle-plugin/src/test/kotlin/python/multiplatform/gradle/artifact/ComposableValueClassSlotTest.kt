@@ -98,7 +98,9 @@ class ComposableValueClassSlotTest {
             includePrefixes = listOf("androidx.compose.material3"),
             classpath = composeClasspath(),
         )
-        val icons = entries.filter { it.name.substringAfterLast('.').substringBefore("__") == "Icon" }
+        // The top-level `androidx.compose.material3.Icon` overloads only: an object's composable member
+        // named Icon (SegmentedButtonDefaults.Icon, bound since #307) has no tint.
+        val icons = entries.filter { it.name.substringBefore("__") == "androidx.compose.material3.Icon" }
         assertTrue(icons.isNotEmpty(), "no Icon binding among ${entries.size} entries")
 
         // Not every `Icon` overload tints with a `Color`: 1.7.0 added one taking a

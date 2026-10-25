@@ -620,7 +620,8 @@ internal object ArtifactScanner {
         val bySignature = functions.associateBy { it.jvmSignature.name to it.jvmSignature.descriptor }
         // A Kotlin `object`'s functions are instance methods of its singleton (issue #53:
         // `Arrangement.spacedBy`); generated source reaches them as `Owner.name(...)`, so they bind
-        // like a static. A composable one is declined below -- its thunk is a static call.
+        // like a static. A composable one binds through a thunk that loads `INSTANCE` first and calls
+        // the member with INVOKEVIRTUAL ([ThunkSpec.onObjectInstance]).
         val isObject = ownerIsClass && bindObjectMembers && ownerNode.fields.any { it.name == "INSTANCE" && it.access.hasFlag(Opcodes.ACC_STATIC) }
         val staticSignatures = ownerNode.methods.filter { it.access.hasFlag(Opcodes.ACC_STATIC) }.map { it.name to it.desc }.toSet()
         return ownerNode.methods
@@ -661,12 +662,6 @@ internal object ArtifactScanner {
                             declinedCandidate(owner, ownerIsClass, suspending, classpath, "suspend", isComposable(method))
                         }
                 if (function.isSuspend) return@mapNotNull declinedCandidate(owner, ownerIsClass, function, classpath, "suspend", isComposable(method))
-                if (!method.access.hasFlag(Opcodes.ACC_STATIC) && isComposable(method)) {
-                    return@mapNotNull declinedCandidate(
-                        owner, ownerIsClass, function, classpath,
-                        "a @Composable member of an object: its generated call is a static invocation", true,
-                    )
-                }
                 // A member whose Kotlin-declared parameter count does not match its JVM parameter
                 // count has an implicit JVM parameter metadata does not account for -- a value
                 // class's own instance turned into an unboxed receiver, or a composable's synthetic
@@ -683,7 +678,7 @@ internal object ArtifactScanner {
                     if (isComposable(method)) {
                         composableCandidate(
                             owner, ownerIsClass, function, classpath, paramDescriptors, returnDescriptor, method.name,
-                            ownerNode.name,
+                            ownerNode.name, onObjectInstance = !method.access.hasFlag(Opcodes.ACC_STATIC),
                         )?.let { return@mapNotNull it }
                     }
                     return@mapNotNull declinedCandidate(
@@ -1575,6 +1570,7 @@ internal object ArtifactScanner {
         returnDescriptor: String,
         jvmMethodName: String,
         ownerInternalName: String,
+        onObjectInstance: Boolean = false,
     ): Candidate? {
         // A composable's bounded type parameter is left exactly as it was before issue #38: its
         // declared slots are typed from the erased descriptor where metadata names no class, and its
@@ -1633,6 +1629,7 @@ internal object ArtifactScanner {
                     jvmMethodName,
                     "(${paramDescriptors.joinToString("")})$returnDescriptor",
                     valueClassUnboxOwners = declaredSlots.map { it.unboxOwner } + List(syntheticTags.size) { null },
+                    onObjectInstance = onObjectInstance,
                 ),
             ),
             // `paramTags` is slot-aligned, so an extension's receiver is slot 0 and `model.parameters`
