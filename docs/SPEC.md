@@ -892,9 +892,24 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     `min(a, b)` compares with `<` and keeps the first element in iteration order on ties (including
     `+0.0` versus `-0.0`), NaN behaviour depends on position because comparisons with NaN are false,
     and chunked combination must reproduce that chain bit for bit; if an implementation cannot, they
-    are left to a later step. Step 2 implements `+` and `*` only: the compiled subset has no bitwise
+    are left to a later step. Step 2 implements `+` and `*` only (min/max follow in step 3 below): the compiled subset has no bitwise
     operator (the front end skips a function using `&`, `|` or `^` on ints, there is no IR operation),
     so `& | ^` are left until the subset has them.
+    **`min`/`max` (step 3).** The compiled subset has no `min(a, b)` / `max(a, b)` call (it stays a
+    generic object call, sequential). What it does compile is Python's own definition of
+    `min(acc, e)`, the conditional update `if e < acc: acc = e` (`e > acc` for max; `acc > e` and
+    `acc < e` are the same comparisons; no `else`, one statement, the assigned value is the compared
+    `e`). `<=` and `>=` are not min/max (the last of equal elements wins) and stay sequential. The
+    accumulator is a function-local i64 or f64 read nowhere else in the loop and assigned before it, `e` has
+    the accumulator's type and is built as for `+`/`*` (f64: constants, locals, `float(i)`, `b[i]`, `+ - *`,
+    negation). A loop may mix `+ *` and min/max statements. Each chunk folds from its own first element
+    with the same strict comparison; the partials combine in chunk order on the calling thread with the
+    earlier value on the left, so ties keep the first element in iteration order (including `+0.0` versus
+    `-0.0`). i64 is exact under any such grouping. **f64 is chunked only when no NaN is involved**: the
+    chain is not associative with a NaN (`[1.0] | [nan, 0.0]` folds to 1.0 chunked, 0.0 sequentially), so a
+    chunk that meets a NaN element (including one produced by `e`), or a NaN initial accumulator, discards
+    the region and the sequential loop runs, exactly as for an i64 overflow. Result and exception are
+    therefore Python's bit for bit for every NaN and signed-zero placement and thread count.
     A reduction loop is `acc = acc op e` statements only (no element-wise stores in the same loop, so
     a rerun needs no restore), each `acc` a function-local i64 read nowhere else in the loop and
     assigned before it, `e` built from i64 constants, locals, `b[i]` of a list or local int array
@@ -926,7 +941,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     chunk, NaN/inf/-0.0), identical bytes for every thread count, failure at first/middle/last
     iteration, negative qualification cases, disabled-path test, reductions, race and GC tests,
     TSan/ASan, N-14, signals, fork and shutdown, and measurement tests for the threshold.
-  `Status: steps 1 and 2 implemented (#277): element-wise F64 stores a[i] = <F64 + - * and negation of constants, locals and b[i]> into list copy-in or local arrays (no failure path: eligible loops cannot fail or deopt); i64 reductions acc += e and acc *= e with the overflow rerun above (stores and reductions never in one loop); & | ^ and min/max reductions, float reductions, the poll inside a region and the rest planned (design)`.
+  `Status: steps 1, 2 and 3a implemented (#277): element-wise F64 stores a[i] = <F64 + - * and negation of constants, locals and b[i]> into list copy-in or local arrays (no failure path: eligible loops cannot fail or deopt); i64 reductions acc += e and acc *= e with the overflow rerun above (stores and reductions never in one loop); i64 and f64 min/max as `if e < acc: acc = e` (f64 with a NaN reruns sequentially); fork, signal and shutdown tests; & | ^ reductions, float + and * reductions, the poll inside a region and the rest planned (design)`.
 
 ---
 

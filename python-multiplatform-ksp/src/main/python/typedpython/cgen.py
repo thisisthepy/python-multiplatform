@@ -2150,7 +2150,19 @@ class _FnGen:
         if info.reduce:
             if info.stored or len(info.reduce) != len(s.body):
                 raise CGenError(f"{f.name}: parallel reduction loop with stores or a missing reduction")
-            for st, (acc, opn) in zip(sorted(s.body, key=lambda x: getattr(x, "target", "")), info.reduce):
+            def key(x):
+                return x.then[0].target if isinstance(x, ir.If) and len(x.then) == 1 else getattr(x, "target", "")
+            for st, (acc, opn) in zip(sorted(s.body, key=key), info.reduce):
+                if opn in ("MIN", "MAX"):
+                    c = st.cond if isinstance(st, ir.If) else None
+                    a = st.then[0] if isinstance(st, ir.If) and len(st.then) == 1 else None
+                    if (not isinstance(c, ir.Compare) or not isinstance(a, ir.Assign) or st.orelse
+                            or a.target != acc or acc == s.var or a.value.type not in (Type.I64, Type.F64)
+                            or self.types.get(acc) is not a.value.type):
+                        raise CGenError(f"{f.name}: parallel min/max statement is not `if e < acc: acc = e`")
+                    reds.append((acc, opn, a.value))
+                    self._par_collect(a.value, scalars, arrays)
+                    continue
                 v = st.value if isinstance(st, ir.Assign) else None
                 if (not isinstance(v, ir.BinOp) or st.target != acc or v.op.name != opn
                         or opn not in ("ADD", "MUL") or v.type is not Type.I64
@@ -2203,15 +2215,35 @@ class _FnGen:
             decls.append(f"    {ct} {ident} = c->{ident};")
             sets.append(f"tp_pr.{ident} = {ident};")
         if reds:
-            fields += ["    unsigned char *tp_pst;"] + [f"    int64_t *tp_part{j};" for j in range(len(reds))]
+            fields += ["    unsigned char *tp_pst;"] + [f"    {_CT[self.types[a]]} *tp_part{j};"
+                                                       for j, (a, _, _) in enumerate(reds)]
         saved = (self.lines, self.temps, self.depth, self.brk)
         self.lines, self.temps, self.depth, self.brk = [], [], 2, []
         try:
-            self.stmts(s.body)
+            if reds:
+                # Assign statements go through the ordinary emitter; a MIN/MAX statement is emitted
+                # here: the chunk folds from its own first element with strict < (> for max), and a
+                # NaN element marks the chunk bad (the region is rerun sequentially, see tp_runtime.h).
+                by_acc = {acc: (opn, e) for acc, opn, e in reds}
+                for st in s.body:
+                    if isinstance(st, ir.If):
+                        acc = st.then[0].target
+                        opn, e = by_acc[acc]
+                        j = [r[0] for r in reds].index(acc)
+                        v = self.ev(e)
+                        ident, cmp = _ident("l", acc), "<" if opn == "MIN" else ">"
+                        if e.type is Type.F64:
+                            self.emit(f"if ({v} != {v}) {{ tp_rc = 1; goto tp_exit; }} /*tpmm*/")
+                        self.emit(f"if (!tp_has{j}) {{ {ident} = {v}; tp_has{j} = 1; }} /*tpmm*/")
+                        self.emit(f"else if ({v} {cmp} {ident}) {{ {ident} = {v}; }} /*tpmm*/")
+                    else:
+                        self.stmts((st,))
+            else:
+                self.stmts(s.body)
             body_lines, body_temps = self.lines, self.temps
         finally:
             self.lines, self.temps, self.depth, self.brk = saved
-        text = "\n".join(body_lines)
+        text = "\n".join(ln for ln in body_lines if "/*tpmm*/" not in ln)
         if reds:
             # the one failure path a reduction body has: the sequential overflow check, which here
             # marks the chunk bad (the worker's own tp_rc / tp_exit); nothing else may remain
@@ -2227,7 +2259,9 @@ class _FnGen:
                "    uint64_t tp_k;", *decls]
         if reds:
             out += ["    int tp_rc = 0;", "    int tp_s = 0;"]
-            out += [f"    int64_t {_ident('l', acc)} = {'1' if opn == 'MUL' else '0'};" for acc, opn, _ in reds]
+            out += [f"    {_CT[self.types[acc]]} {_ident('l', acc)} = {'1' if opn == 'MUL' else '0'};"
+                    for acc, opn, _ in reds]
+            out += [f"    int tp_has{j} = 0;" for j, (_, opn, _) in enumerate(reds) if opn in ("MIN", "MAX")]
             out.append("    (void)tp_rc; (void)tp_s;")
         for ct, n in body_temps:
             out.append(f"    {ct}{'' if ct.endswith('*') else ' '}{n} = 0;")
@@ -2238,6 +2272,7 @@ class _FnGen:
         out.append("    }")
         if reds:
             out += [f"    c->tp_part{j}[tp_ci] = {_ident('l', acc)};" for j, (acc, _, _) in enumerate(reds)]
+            out += [f"    if (!tp_has{j}) goto tp_exit;" for j, (_, opn, _) in enumerate(reds) if opn in ("MIN", "MAX")]
             out += ["    c->tp_pst[tp_ci] = TP_PAR_OK;", "    return;", "tp_exit:",
                     "    c->tp_pst[tp_ci] = TP_PAR_BAD;"]
         out += ["}", ""]
@@ -2251,8 +2286,8 @@ class _FnGen:
         self.emit(f"{ctx_t} tp_pr;")
         if reds:
             self.emit("unsigned char tp_pst[TP_PAR_HARD_CAP] = {0};")
-            for j in range(len(reds)):
-                self.emit(f"int64_t tp_pp{j}[TP_PAR_HARD_CAP];")
+            for j, (acc, _, _) in enumerate(reds):
+                self.emit(f"{_CT[self.types[acc]]} tp_pp{j}[TP_PAR_HARD_CAP];")
         self.emit(f"tp_pr.tp_ts = {ts};")
         for line in sets:
             self.emit(line)
@@ -2266,8 +2301,12 @@ class _FnGen:
             # (a chunk, or here) leaves every accumulator untouched and the sequential loop runs.
             self.emit(f"{pok} = 1;")
             for j, (acc, opn, _) in enumerate(reds):
-                self.emit(f"int64_t tp_rv{j} = {_ident('l', acc)};")
-                self.emit(f"{pok} = {pok} && tp_par_combine(TP_PAR_OP_{opn}, &tp_rv{j}, tp_pp{j}, tp_pst) == 0;")
+                self.emit(f"{_CT[self.types[acc]]} tp_rv{j} = {_ident('l', acc)};")
+                if opn in ("MIN", "MAX"):
+                    fn = "tp_par_combine_ext_f64" if self.types[acc] is Type.F64 else "tp_par_combine_ext_i64"
+                    self.emit(f"{pok} = {pok} && {fn}({1 if opn == 'MAX' else 0}, &tp_rv{j}, tp_pp{j}, tp_pst) == 0;")
+                else:
+                    self.emit(f"{pok} = {pok} && tp_par_combine(TP_PAR_OP_{opn}, &tp_rv{j}, tp_pp{j}, tp_pst) == 0;")
             self.emit(f"if ({pok}) {{")
             for j, (acc, _, _) in enumerate(reds):
                 self.emit(f"    {_ident('l', acc)} = tp_rv{j};")
