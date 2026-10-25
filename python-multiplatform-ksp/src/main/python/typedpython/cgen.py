@@ -186,7 +186,7 @@ _CT = {Type.I64: "int64_t", Type.F64: "double", Type.BOOL: "int", Type.OBJ: "PyO
 _ARRAY_CT = {Type.F64_ARRAY: "tp_f64_array", Type.I64_ARRAY: "tp_i64_array"}
 # Buffer arrays (#149): `ArrayParam.buffer` -> the exact type the guard compares against (the index
 # into the module state's `buf_types`), and the format strings the export must carry.
-_BUFFER_KINDS = {None: None, "array": 0, "numpy": 1}
+_BUFFER_KINDS = {None: None, "array": 0, "numpy": 1, "memoryview": None}
 # buf_types slots 2..4: the numpy scalar types a Box.np makes (np.float64, np.int64, np.bool_)
 _NP_SLOT = {Type.F64: 2, Type.I64: 3, Type.BOOL: 4}
 _BUFFER_FMT = {Type.F64_ARRAY: ('"d"', "NULL"), Type.I64_ARRAY: ('"q"', '"l"'), Type.BOOL_ARRAY: ('"?"', "NULL")}
@@ -2784,9 +2784,10 @@ class _FnGen:
         for i, p in buffers:
             fmt1, fmt2 = _BUFFER_FMT[p.type]
             kind = _BUFFER_KINDS[p.buffer]
-            enter = "tp_buf_enter_np" if p.buffer == "numpy" else "tp_buf_enter"
-            L.append(f"    tp_s = {enter}(tp_args[{i}], "
-                     f"((tp_state *)PyModule_GetState(tp_module))->buf_types[{kind}], "
+            enter = {"numpy": "tp_buf_enter_np", "memoryview": "tp_buf_enter_mv"}.get(p.buffer, "tp_buf_enter")
+            exact = ("(PyObject *)&PyMemoryView_Type" if p.buffer == "memoryview"
+                     else f"((tp_state *)PyModule_GetState(tp_module))->buf_types[{kind}]")
+            L.append(f"    tp_s = {enter}(tp_args[{i}], {exact}, "
                      f"{fmt1}, {fmt2}, {int(p.stored)}, &tp_a{i});")
             L.append("    if (tp_s < 0) goto tp_error;")
             L.append("    if (tp_s != 0) goto tp_deopt;")

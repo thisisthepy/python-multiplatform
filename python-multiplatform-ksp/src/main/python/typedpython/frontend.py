@@ -326,7 +326,7 @@ def _qualified(node: ast.expr, info: _ModuleInfo) -> str | None:
 def _buffer_kind(annotation: ast.expr, info: _ModuleInfo) -> tuple[Type, str] | None:
     """The buffer-array reading of an annotation (#149), else None (an ordinary object parameter):
     `array.array[float]` / `array.array[int]` (any spelling that resolves, through this module's
-    own imports, to `array.array`). A bare `array.array`, another element type, a numpy
+    own imports, to `array.array`), and the builtin `memoryview[float]` / `memoryview[int]`. A bare `array.array`, another element type, a numpy
     `NDArray[...]` (not supported: its element arithmetic is numpy's), or a name bound more than
     once is not one."""
     if not isinstance(annotation, ast.Subscript):
@@ -336,6 +336,10 @@ def _buffer_kind(annotation: ast.expr, info: _ModuleInfo) -> tuple[Type, str] | 
     if base == "array.array" and isinstance(arg, ast.Name) and arg.id in ("float", "int") \
             and not info.bound(arg.id):
         return ARRAY_KIND[f"list[{arg.id}]"], "array"
+    if isinstance(annotation.value, ast.Name) and annotation.value.id == "memoryview" \
+            and not info.bound("memoryview") and isinstance(arg, ast.Name) \
+            and arg.id in ("float", "int") and not info.bound(arg.id):
+        return ARRAY_KIND[f"list[{arg.id}]"], "memoryview"
     if base == "numpy.typing.NDArray":
         dtype = _qualified(arg, info)
         if dtype in _NUMPY_DTYPE:

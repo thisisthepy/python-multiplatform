@@ -45,7 +45,7 @@ Rules (the `rule` of a Diagnostic):
   verify/redo                 `Call.redo` where it is not legal (see below)
   verify/entry-global-open    a function with entry_globals is not closed
   verify/array-open           a function with an ArrayParam runs user code (#203)
-  verify/buffer               a malformed `ArrayParam.buffer` (only None and "array"), or a
+  verify/buffer               a malformed `ArrayParam.buffer` (None, "array", "numpy", "memoryview"), or a
                               CopyArray of a buffer array (#149)
   verify/par-loop             a `ForRange.par` (SPEC N-15, #277) that the verifier does not recompute to
                               the same value: the function is not marked `parallel`, or the loop is
@@ -450,7 +450,7 @@ class _Checker:
                     self.error(TYPE, f"array parameter '{p.name}' has non-array type {p.type}")
                 elif not isinstance(p.stored, bool):
                     self.error(TYPE, f"array parameter '{p.name}' has a non-bool `stored`")
-                elif p.buffer not in (None, "array", "numpy"):
+                elif p.buffer not in (None, "array", "numpy", "memoryview"):
                     self.error(BUFFER, f"array parameter '{p.name}' has buffer kind {p.buffer!r}")
                 else:
                     self.arrays[p.name] = p.type

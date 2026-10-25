@@ -95,8 +95,9 @@ An exact `array.array` argument (`array.array[float]` / `array.array[int]`; the 
 through the module's own top-level imports) is not copied.
     typedef struct { Py_buffer view; Py_ssize_t len; void *data; int held; } tp_buf;
     int  tp_buf_enter(PyObject *obj, PyObject *exact, const char *fmt1, const char *fmt2, int writable, tp_buf *b);
+    int  tp_buf_enter_mv(PyObject *obj, PyObject *exact, const char *fmt1, const char *fmt2, int writable, tp_buf *b);   /* memoryview (#149): memoryview's IndexError text */
     void tp_buf_exit(tp_buf *b);          /* PyBuffer_Release if held; zeroes b; idempotent */
-    int  tp_buf_slot(const tp_buf *b, int64_t i, int store, Py_ssize_t *slot);   /* 0 / -1, array.array's IndexError text */
+    int  tp_buf_slot(const tp_buf *b, int64_t i, int store, Py_ssize_t *slot);   /* 0 / -1, array.array's, numpy's or memoryview's IndexError text */
     double  tp_buf_ld_f64(const tp_buf *b, Py_ssize_t i);   void tp_buf_st_f64(const tp_buf *b, Py_ssize_t i, double v);
     int64_t tp_buf_ld_i64(const tp_buf *b, Py_ssize_t i);   void tp_buf_st_i64(const tp_buf *b, Py_ssize_t i, int64_t v);
     int  tp_import_attr(const char *mod, const char *attr, PyObject **out);   /* exec slot: new ref or NULL (cleared); -1 MemoryError */

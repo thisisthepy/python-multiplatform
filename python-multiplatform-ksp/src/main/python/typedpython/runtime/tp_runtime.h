@@ -1224,8 +1224,22 @@ static inline int tp_buf_enter_np(PyObject *obj, PyObject *exact, const char *fm
     return rc;
 }
 
+/* A memoryview (#149): the same guard on the exact builtin memoryview (the export is taken on the
+ * view itself, so its release() raises BufferError while the call runs); `np` 2 selects
+ * memoryview's IndexError text. Elements are Python floats / ints, as for array.array. */
+static inline int tp_buf_enter_mv(PyObject *obj, PyObject *exact, const char *fmt1, const char *fmt2,
+                                  int writable, tp_buf *b)
+{
+    int rc = tp_buf_enter(obj, exact, fmt1, fmt2, writable, b);
+    if (rc == 0) {
+        b->np = 2;
+    }
+    return rc;
+}
+
 /* index: a negative index counts from the end; out of range -> IndexError with the text CPython's
- * own array.array uses ("array index out of range" / "array assignment index out of range") */
+ * own array.array uses ("array index out of range" / "array assignment index out of range"),
+ * numpy's (np 1) or memoryview's (np 2) */
 static inline int tp_buf_slot(const tp_buf *b, int64_t i, int store, Py_ssize_t *slot)
 {
     int64_t orig = i;
@@ -1239,6 +1253,10 @@ static inline int tp_buf_slot(const tp_buf *b, int64_t i, int store, Py_ssize_t 
     *slot = (Py_ssize_t)i;
     return 0;
 out_of_range:
+    if (b->np == 2) {
+        PyErr_SetString(PyExc_IndexError, "index out of bounds on dimension 1");
+        return -1;
+    }
     if (b->np) {
         PyErr_Format(PyExc_IndexError, "index %lld is out of bounds for axis 0 with size %zd",
                      (long long)orig, b->len);
