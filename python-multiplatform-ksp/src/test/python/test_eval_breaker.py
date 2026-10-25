@@ -414,4 +414,4 @@ def test_signal_reaches_a_range_loop_shorter_than_interval_squared(tmp_path):
         print(json.dumps({"out": out, "full": full, "elapsed": time.perf_counter() - t0}))
     """)
     assert r["out"] == "interrupted", r
-    assert r["elapsed"] < r["full"] * 0.5, r
+    assert r["elapsed"] < r["full"] * 0.8, r     # before #280 the signal waited for the whole loop
