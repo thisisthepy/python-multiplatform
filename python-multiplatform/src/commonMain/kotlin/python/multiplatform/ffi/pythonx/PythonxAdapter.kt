@@ -1574,6 +1574,15 @@ object PythonxAdapter {
                     pass
 
 
+        class _EmptyArgument(int):
+            '''The handle of a proxy class's empty value, holding the owner that keeps it alive (#308).'''
+
+            def __new__(cls, owner):
+                self = int.__new__(cls, owner._pm_handle)
+                self._owner = owner
+                return self
+
+
         def _box_scalar(value, strict):
             '''A Python scalar for a `kotlin.Any` slot, as the handle of the Kotlin box it means (#69).
 
@@ -1680,6 +1689,25 @@ object PythonxAdapter {
                     # `FunctionN` back out for Python to pass in again, so a handle is not the answer
                     # here and saying so would send the caller looking for one.
                     return _refuse(strict, 'expected a callable of ' + _simple_name(type_name))
+                if isinstance(value, _ProxyMeta):
+                    # A proxy CLASS written where a value goes (`Card(modifier=Modifier)`): the class
+                    # stands for its registered empty value, exactly `Cls.empty()` (issue #308). A type
+                    # that is not the slot's, or a subtype of it, is refused like any other mismatch.
+                    # No factory registered: `empty()` raises its TypeError naming `register_empty`.
+                    kind = value._kotlin_type_name
+                    if type_name is not None and not _is_a(kind, type_name):
+                        return _refuse(
+                            strict,
+                            'expected ' + _simple_name(type_name) + ' but got the class ' + _simple_name(kind),
+                        )
+                    if not strict:
+                        # A trial bind only asks whether the type fits; it must not call Kotlin.
+                        return _SCALAR_PENDING
+                    # Reference convention: `empty()` returns an OWNED wrapper that releases its handle
+                    # when collected. The handle goes to the boundary as a bare int, so the wrapper is
+                    # pinned on an int subclass that lives in the argument tuple, i.e. for the call
+                    # that tuple was built for (as `_BoxedArgument` does), and released after it.
+                    return _EmptyArgument(value.empty())
                 handle = getattr(value, '_pm_handle', None)
                 if handle is not None:
                     declared = _declared_type_name(value)
