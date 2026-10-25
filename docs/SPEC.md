@@ -753,13 +753,15 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     without being passed it. At such a call every live virtual object is materialised, in allocation order.
   `is`, `type()` and `isinstance` on virtual objects are decided statically. An increment/decrement pair is
   elided only when another owned reference keeps the object alive throughout and no unknown code runs in
-  between, so every refcount that can be observed is exact. **On free-threaded 3.15t (no GIL) both
-  borrowed field reads and pair elision apply only to objects proven thread-local** (never escaped to a
-  global, a container, another thread or unknown code; #193, decision D5): another thread could otherwise
-  write the slot and free the child between the read and its use. Every other field read takes a real
-  reference, or reads inside CPython's per-object critical section (`Py_BEGIN_CRITICAL_SECTION`) when a
+  between, so every refcount that can be observed is exact. **On free-threaded 3.15t (no GIL), the only build (#158), no real object is thread-local** (#143 step 2,
+  #193, decision D5 revisited 2026-10-25): even an object the function has just allocated and never passed
+  anywhere is reachable from another thread through `gc.get_objects()` or `gc.get_referrers()`, which can
+  replace its fields and free the old value between a borrowed read and its use. So every field read of a
+  real object takes a strong reference (`PyMember_GetOne`) and no increment/decrement pair on a real object
+  is elided; borrowed reads and pair elision apply only to N-12a virtual objects, which have no object a
+  collector can find. There is no separate GIL-build path. A field read takes a real reference, or reads inside CPython's per-object critical section (`Py_BEGIN_CRITICAL_SECTION`) when a
   sequence of reads must be consistent. A free-threaded stress test (one thread reading a field, another
-  replacing it) under ASan/TSan is part of N-12's tests. Virtual objects whose count is unbounded live in
+  replacing it) under ASan/TSan is part of N-12's tests. A second one has a thread find a function's freshly allocated object through `gc.get_objects()` and replace its field while the function reads it; a borrowed-read mutant of the field read must fail it. Virtual objects whose count is unbounded live in
   a region tied to one activation (the innermost scope that bounds their lifetime) and are freed together;
   real objects are never placed in a region. A failed region allocation raises `MemoryError` where CPython
   would. The verifier proves non-escape, materialisation before every observation point, a keeping

@@ -68,6 +68,20 @@ def mk(a: object, b: object) -> Cell:
     return Cell(a, b)
 
 
+def fresh(a: object, n: int) -> object:
+    c = Cell(a, None)
+    keep: object = c                    # read as a value: c is a real object, not virtual (N-12a)
+    s: object = None
+    for i in range(n):
+        s = c.a
+    return s
+
+
+def vpick(a: object, b: object) -> object:
+    c = Cell(a, b)
+    return c.b
+
+
 def total(xs: list[float], rounds: int) -> float:
     s: float = 0.0
     for r in range(rounds):
@@ -165,8 +179,10 @@ def built(tmp_path_factory):
     assert result.extension is not None, result.skipped
     compiled = {f.name for f in result.module.functions}
     wanted = {"geta", "seta", "mk", "total", "fill", "edge", "fill_int", "edge_int", "rotate", "zero2",
-              "pair_edge", "usek"}
+              "pair_edge", "usek", "fresh", "vpick"}
     assert wanted <= compiled, {n: result.skipped.get(n) for n in wanted - compiled}
+    fns = {f.name: f for f in result.module.functions}
+    assert fns["vpick"].virtual == ("c",) and fns["fresh"].virtual == ()   # #143: one virtual, one real
     return result, path, d
 
 
@@ -667,14 +683,93 @@ def test_mutant_with_a_borrowed_field_read_is_caught(built, tmp_path):
     caught = False
     for _ in range(3):
         try:
-            r = run_child(so, body)
-        except AssertionError:          # the child crashed on a freed object: caught
+            r = run_child(so, body, timeout=40)
+        except (AssertionError, subprocess.TimeoutExpired):   # crashed or hung on a freed object: caught
             caught = True
             break
         if r["bad"] or r["errs"]:
             caught = True
             break
     assert caught, "the mutant (borrowed field read) was not caught"
+
+
+@pytest.mark.race_mutant
+def test_mutant_with_a_borrowed_read_of_a_fresh_object_is_caught(built, tmp_path):
+    """#143 step 2, #193 (SPEC N-12): a real object the function has just allocated and never
+    passed anywhere is still not thread-local on 3.15t, because another thread reaches it through
+    gc.get_objects() and replaces its fields. Its field reads must take a strong reference too; the
+    borrowed-read mutant of tp_field_get must be caught by this test.
+
+    gc.get_objects() stops the world, so the compiled loop must reach a safepoint. A loop polls the
+    eval breaker once per TP_POLL_INTERVAL chunks of TP_POLL_INTERVAL iterations (4096 * 4096 = 16.7M
+    iterations by default), which is too rare to find an object in a short test. Both builds below
+    (the real header and the mutant) therefore use TP_POLL_INTERVAL 32, a poll every 1024 iterations."""
+    result, path, _ = built
+    h = (cbuild.RUNTIME_DIR / "tp_runtime.h").read_text()
+    good = "    return PyMember_GetOne((const char *)obj, m);\n"
+    assert good in h
+    racy = ("    PyObject *v = *(PyObject *volatile *)((char *)obj + m->offset);\n"
+            "    for (volatile int i = 0; i < 200; i++) { }\n"
+            "    return Py_NewRef(v);\n")
+    frequent = h.replace("#define TP_POLL_INTERVAL 4096", "#define TP_POLL_INTERVAL 32")
+    assert frequent != h
+    c_text = cgen.generate(result.module, path)
+    rt_real = tmp_path / "rt_real"
+    rt_real.mkdir()
+    (rt_real / "tp_runtime.h").write_text(frequent)
+    real = cbuild.build(c_text, "ftmod", tmp_path / "real", runtime_dir=rt_real)
+    rt_mut = tmp_path / "rt_mut"
+    rt_mut.mkdir()
+    (rt_mut / "tp_runtime.h").write_text(frequent.replace(good, racy))
+    so = cbuild.build(c_text, "ftmod", tmp_path / "mut", runtime_dir=rt_mut)
+    body = """
+        import gc
+        stop = False
+        bad = []
+        hits = [0]
+        def ok(v):
+            return (type(v) is tuple and len(v) == 2 and v[0] == "fresh"
+                    and type(v[1]) is list and len(v[1]) == 1 and type(v[1][0]) is int)
+        def scavenger():
+            # gc.get_objects() stops the world; fresh() polls every 4096 loop iterations, so it can.
+            # Once the Cell is found, keep replacing its field (and recycling the freed memory with
+            # other shapes) for as long as fresh() is reading it.
+            while not stop:
+                for o in gc.get_objects():
+                    if type(o) is m.Cell and type(o.a) is tuple and o.a and o.a[0] == "fresh":
+                        hits[0] += 1
+                        # fresh() holds two references (l_c, l_keep): write until it has returned
+                        r0 = sys.getrefcount(o)
+                        t_end = time.time() + 5
+                        k = 0
+                        while sys.getrefcount(o) > r0 - 2 and time.time() < t_end:
+                            o.a = ("fresh", [k])
+                            junk = [("x", k), {k: k}, [k, k], "s%d" % k]
+                            k += 1
+        def reader():
+            for _ in range(2 * STRESS):
+                v = m.fresh(("fresh", [0]), NITER)
+                if not ok(v):
+                    bad.append(1)
+        st = threading.Thread(target=scavenger); st.start()
+        errs = run_threads([reader] * 3)
+        stop = True
+        st.join()
+        print(json.dumps({"bad": len(bad), "errs": len(errs), "found": hits[0] > 0}))
+    """
+    r = run_child(real, body.replace("NITER", "20_000_000"))
+    assert r == {"bad": 0, "errs": 0, "found": True}, r   # the real read is sound, and the object was reachable
+    caught = False
+    for _ in range(5):          # a crash on a freed object counts as caught
+        try:
+            r = run_child(so, body.replace("NITER", "300_000"), timeout=40)
+        except (AssertionError, subprocess.TimeoutExpired):   # crashed or hung on a freed object: caught
+            caught = True
+            break
+        if r["bad"] or r["errs"]:
+            caught = True
+            break
+    assert caught, "the mutant (borrowed read of a fresh real object) was not caught"
 
 
 # --- ThreadSanitizer (best effort) --------------------------------------------------------------------
@@ -686,7 +781,7 @@ cell = m.Cell(1, 2)
 stop = False
 def hammer():
     while not stop:
-        c = m.mk(1, 2); m.geta(cell); m.seta(cell, 5)
+        c = m.mk(1, 2); m.geta(cell); m.seta(cell, 5); m.vpick(c, cell); m.fresh(c, 3)
 ht = threading.Thread(target=lambda: run_threads([hammer] * 3)); ht.start()
 orig = m.Cell
 for i in range(300):
