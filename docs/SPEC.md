@@ -866,6 +866,49 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `__typedpython_deopts__`, and clearing the events returns calls to the compiled path.
   `Status: implemented` -- `test_tracing.py` (events equal between compiled and
   interpreted for settrace, setprofile and monitoring; the `known_difference` test pins the one difference; local-only tools and their clearing).
+- **N-15** TypedPython parallel execution of order-independent loops on free-threaded CPython (#151;
+  `docs/design/typedpython-parallel-loops.md`). A compiled `for ... in range(...)` loop may run its
+  iterations on several threads only if its result cannot depend on iteration order, in a function the
+  user marked (the spelling of the marking is settled at implementation), and then the
+  result, the exception, the partial writes and the deopt behaviour are bit-for-bit those of the
+  sequential loop (INTENT §1.4; N-12: every execution is indistinguishable from some valid CPython
+  execution).
+  - **Qualifying loop** (proved by the verifier, recomputed and rejected on mismatch like `proven`;
+    anything unproved stays sequential, with a diagnostic): the function is closed and the loop body
+    calls nothing; each stored array element is written by one iteration only (affine index `c*i+k`,
+    `c` non-zero, no overflow) and read only at the same index; locals assigned in the body are
+    iteration-private and dead after the loop; no `break`, no `return`; stored arrays do not alias.
+    Only `list` (copy-in) and local-array loops are parallel: loops over an `array.array` buffer stay
+    sequential.
+  - **Failure rule.** Workers touch no Python object. Any exception, deopt, overflow or `INT` promotion
+    in a worker abandons the region, restores the arrays it wrote (a `list` is untouched until
+    write-back; a local array is snapshotted if it is read) and reruns the loop sequentially, so the
+    first failing iteration and the writes before it are CPython's. A buffer array is written in place
+    and cannot be restored, which is why buffer loops are not parallelised.
+  - **Reductions.** Only operations that are exactly associative and commutative are chunked: i64
+    `+ * & | ^` and `min`/`max`, the latter only if exactly equal to Python's:
+    `min(a, b)` compares with `<` and keeps the first element in iteration order on ties (including
+    `+0.0` versus `-0.0`), NaN behaviour depends on position because comparisons with NaN are false,
+    and chunked combination must reproduce that chain bit for bit; if an implementation cannot, they
+    are left to a later step. **Float `+` and `*` reductions are excluded in v1**: chunked evaluation
+    is a different expression tree and not bit-identical. This is not permanent: a fastmath opt-in
+    (#153) awaits the owner's decision, and N-15 follows it. Partials combine in chunk order.
+  - **Observability.** N-14 holds (a traced call runs the interpreted function, never a region);
+    workers are not Python threads; the calling thread stays attached and polls the eval breaker
+    between micro-chunks when the function polls today; list writes become visible only at the
+    existing write-back. Outside the identity (like N-12's cyclic GC timing): the OS thread count, CPU
+    time versus wall time, the multi-thread `os.fork()` warning while a region is active, and
+    profilers seeing non-Python threads.
+  - **Threads and cost.** v1 creates workers per region and joins them before the call returns (no
+    pool, no thread outlives the call: nothing at fork or interpreter shutdown). Cap
+    `TYPEDPYTHON_THREADS` (1 disables; default 8 or the core count if lower). A region runs only above
+    a measured work threshold (`TP_PAR_MIN_WORK`), measured together with thread creation cost in a
+    quiet window and recorded on #151; below it the sequential code runs. Platforms without threads compile it out.
+  - **Tests** (written first): differential vs the interpreter (bit-exact, boundaries of trip count and
+    chunk, NaN/inf/-0.0), identical bytes for every thread count, failure at first/middle/last
+    iteration, negative qualification cases, disabled-path test, reductions, race and GC tests,
+    TSan/ASan, N-14, signals, fork and shutdown, and measurement tests for the threshold.
+  `Status: planned (design)`.
 
 ---
 
