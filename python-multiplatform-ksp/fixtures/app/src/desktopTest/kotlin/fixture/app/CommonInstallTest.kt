@@ -38,7 +38,7 @@ class CommonInstallTest {
 
         assertTrue(UpcallTable.callableCount > 0, "commonMain installed nothing: $summary")
         assertEquals(
-            setOf("io_github_thisisthepy_python_multiplatform_ksp_fixtures_library", "io_github_thisisthepy_python_multiplatform_ksp_fixtures_app"),
+            setOf("org_thisisthepy_python_multiplatform_ksp_fixtures_library", "org_thisisthepy_python_multiplatform_ksp_fixtures_app"),
             UpcallTable.moduleNames,
             "the seam must install the same aggregate FunctionTable.fragments does",
         )

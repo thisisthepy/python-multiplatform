@@ -44,7 +44,7 @@ class GeneratedAndroidTableTest {
         // The name the gradle plugin derives from this module's group and path. Its presence is
         // what says KSP ran here at all -- the state ROADMAP §13 describes has no fragment
         // because the build never got past configuration.
-        assertEquals(setOf("io_github_thisisthepy_python_multiplatform_ksp_fixtures_android"), UpcallTable.moduleNames)
+        assertEquals(setOf("org_thisisthepy_python_multiplatform_ksp_fixtures_android"), UpcallTable.moduleNames)
         assertTrue(UpcallTable.resolve("fixture.android.androidDouble").isValid)
     }
 
@@ -132,7 +132,7 @@ class GeneratedAndroidTableTest {
         val count = installAndCountEntries()
 
         assertTrue(count > 0)
-        assertEquals(setOf("io_github_thisisthepy_python_multiplatform_ksp_fixtures_android"), UpcallTable.moduleNames)
+        assertEquals(setOf("org_thisisthepy_python_multiplatform_ksp_fixtures_android"), UpcallTable.moduleNames)
         assertTrue(UpcallTable.resolve("fixture.android.androidDouble").isValid)
         assertFalse(
             UpcallTable.resolve("fixture.android.installGeneratedUpcallTable").isValid,

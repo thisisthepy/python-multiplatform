@@ -69,7 +69,7 @@ jobs:
             echo "This job compiled \`wasmJsMain\` and \`wasmJsTest\`. **No wasm test was executed.**"
             echo
             echo "Running them needs a CPython Emscripten build, which this repository publishes as"
-            echo "\`io.github.thisisthepy:python-multiplatform-wasm-runtime\` (a 7 MB zip built by"
+            echo "\`org.thisisthepy:python-multiplatform-wasm-runtime\` (a 7 MB zip built by"
             echo "\`:python-multiplatform:wasmBrowserRuntimeZip\`) but has never pushed to a remote"
             echo "repository -- it exists only in the maintainer's \`mavenLocal\`."
             echo

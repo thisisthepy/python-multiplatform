@@ -3,7 +3,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     alias(libs.plugins.kotlin.multiplatform)
-    id("io.github.thisisthepy.python.multiplatform.bindings")
+    id("org.thisisthepy.python.multiplatform.bindings")
 }
 
 kotlin {

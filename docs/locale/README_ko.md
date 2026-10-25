@@ -123,7 +123,7 @@ async def main():
 plugins {
     kotlin("jvm")
     application
-    id("io.github.thisisthepy.python.multiplatform.bindings") version "<version>"
+    id("org.thisisthepy.python.multiplatform.bindings") version "<version>"
 }
 ```
 

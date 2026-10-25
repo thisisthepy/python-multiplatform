@@ -7,7 +7,7 @@ plugins {
     `maven-publish`
 }
 
-group = "io.github.thisisthepy"
+group = "org.thisisthepy"
 // Same published version as the library and the KSP processor (#70): "$pythonVersion-$suffix" from
 // the root's gradle.properties, a -P override winning as it does in the root build (Gradle hands
 // start-parameter properties to included builds too).
@@ -221,7 +221,7 @@ dependencies {
 gradlePlugin {
     plugins {
         create("pythonMultiplatformBindings") {
-            id = "io.github.thisisthepy.python.multiplatform.bindings"
+            id = "org.thisisthepy.python.multiplatform.bindings"
             implementationClass = "python.multiplatform.gradle.PythonBindingsPlugin"
             displayName = "Python Multiplatform bindings"
             description = "Wires the python-multiplatform KSP processor into every Kotlin target of a module."

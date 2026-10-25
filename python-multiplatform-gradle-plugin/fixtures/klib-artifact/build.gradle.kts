@@ -36,7 +36,7 @@
  */
 plugins {
     alias(libs.plugins.kotlin.multiplatform)
-    id("io.github.thisisthepy.python.multiplatform.bindings")
+    id("org.thisisthepy.python.multiplatform.bindings")
 }
 
 val pythonDownloadDir = project(":python-multiplatform").layout.buildDirectory.dir("python-standalone").get().asFile

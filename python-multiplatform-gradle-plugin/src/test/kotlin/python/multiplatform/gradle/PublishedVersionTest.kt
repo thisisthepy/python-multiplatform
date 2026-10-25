@@ -22,7 +22,7 @@ class PublishedVersionTest {
     @Test
     fun theProcessorCoordinateCarriesTheLibraryVersion() {
         assertEquals(
-            "io.github.thisisthepy:python-multiplatform-ksp:$expected",
+            "org.thisisthepy:python-multiplatform-ksp:$expected",
             DEFAULT_PROCESSOR_COORDINATES,
         )
     }
@@ -30,7 +30,7 @@ class PublishedVersionTest {
     @Test
     fun theWasmRuntimeCoordinateCarriesTheLibraryVersion() {
         assertEquals(
-            "io.github.thisisthepy:python-multiplatform-wasm-runtime:$expected",
+            "org.thisisthepy:python-multiplatform-wasm-runtime:$expected",
             DEFAULT_WASM_RUNTIME_COORDINATES,
         )
     }

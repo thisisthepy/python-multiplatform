@@ -3,7 +3,7 @@ enableFeaturePreview("TYPESAFE_PROJECT_ACCESSORS")
 pluginManagement {
     // The convenience plugin of ROADMAP §7 lives in its own build so that an outside consumer
     // resolves it by id like any other plugin. Including it here is what makes
-    // `id("io.github.thisisthepy.python.multiplatform.bindings")` resolve inside this repo.
+    // `id("org.thisisthepy.python.multiplatform.bindings")` resolve inside this repo.
     includeBuild("python-multiplatform-gradle-plugin")
 
     repositories {

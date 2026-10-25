@@ -459,7 +459,7 @@
 					"-framework",
 					Demo,
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = org.thisisthepy.python.multiplatform.demo;
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.thisisthepy.python.multiplatform.demo;
 				PRODUCT_NAME = PythonDemo;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.0;
@@ -494,7 +494,7 @@
 					"-framework",
 					Demo,
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = org.thisisthepy.python.multiplatform.demo;
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.thisisthepy.python.multiplatform.demo;
 				PRODUCT_NAME = PythonDemo;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";

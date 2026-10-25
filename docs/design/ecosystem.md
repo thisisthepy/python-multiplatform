@@ -232,7 +232,7 @@ This section documents the current state, language/build system/distribution art
 - **Language / Build System / Distribution**:
   - Kotlin Multiplatform (Kotlin `2.4.20-Beta2` pinned in `gradle/libs.versions.toml` as of 2026-10-03), Compose Multiplatform 1.11.1 for the sample and fixtures, Java 21, C/C++ FFI.
   - Gradle (`build.gradle.kts`, `settings.gradle.kts`, included build `python-multiplatform-gradle-plugin`).
-  - Maven artifact publication (`id("maven-publish")` in `python-multiplatform/build.gradle.kts`, published under group `io.github.thisisthepy:python-multiplatform`).
+  - Maven artifact publication (`id("maven-publish")` in `python-multiplatform/build.gradle.kts`, published under group `org.thisisthepy:python-multiplatform`).
 - **Goal in Ecosystem**:
   - Core language boundary and binder between Kotlin Multiplatform and CPython.
   - Manages low-level FFI, object reference handles, upcall/downcall function tables, GIL lifecycle, and proxy injection into CPython `sys.modules`.
