@@ -1937,16 +1937,23 @@ class _FnGen:
         """Holds an array copy-in or an entry-globals snapshot, so must not run user code (#141)."""
         return bool(self.f.entry_globals) or any(isinstance(p, ir.ArrayParam) for p in self.f.params)
 
-    def poll(self) -> None:
-        """At the top of each loop iteration (#141): signals, pending calls, GIL hand-off."""
+    def poll(self, every_time: bool = False) -> None:
+        """At the top of each loop iteration (#141): signals, pending calls, GIL hand-off.
+
+        `every_time` skips the countdown: the caller already runs it once per TP_POLL_INTERVAL
+        iterations (a chunked range loop, #206/#280), so the slow poll is due at every call."""
         if not self.snapshot:
             # A function-local countdown (kept in a register), not the module counter: a load and
             # store of a global on every iteration of a short inner loop cost fannkuch ~38%.
             if self.fast:
                 # the poll can run a signal handler or another compiled call: count this fast tree
-                self.emit("if (tp_pc_tick(&tp_pc)) { tp_depth_py_begin(tp_t, tp_fd); "
-                          "tp_s = tp_poll_slow(tp_t, tp_st->breaker); tp_depth_py_end(tp_t, tp_fd); "
-                          "if (tp_s != 0) { tp_rc = -1; goto tp_exit; } }")
+                body = ("tp_depth_py_begin(tp_t, tp_fd); "
+                        "tp_s = tp_poll_slow(tp_t, tp_st->breaker); tp_depth_py_end(tp_t, tp_fd); "
+                        "if (tp_s != 0) { tp_rc = -1; goto tp_exit; }")
+                self.emit(f"{{ {body} }}" if every_time else f"if (tp_pc_tick(&tp_pc)) {{ {body} }}")
+                return
+            if every_time:
+                self.emit("if (tp_poll_slow(tp_t, tp_st->breaker) != 0) { tp_rc = -1; goto tp_exit; }")
                 return
             self.emit("if (tp_pc_tick(&tp_pc) && tp_poll_slow(tp_t, tp_st->breaker) != 0) "
                       "{ tp_rc = -1; goto tp_exit; }")
@@ -2087,7 +2094,7 @@ class _FnGen:
             self.label_n += 1
             self.emit(f"for ({tk} = 0; {tk} < {tn}; ) {{")
             self.depth += 1
-            self.poll()
+            self.poll(every_time=True)
             self.emit(f"{te2} = {tn} - {tk} > (uint64_t)TP_POLL_INTERVAL ? {tk} + (uint64_t)TP_POLL_INTERVAL : {tn};")
             if vec is not None:
                 self._emit_vec_loop(vec, ts, tk, te2)
