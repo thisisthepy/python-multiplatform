@@ -467,7 +467,7 @@ static inline double tp_np_divmod(double a, double b, double *modulus)
     }
     div = (a - mod) / b;
     if (mod) {
-        if ((b < 0) != (mod < 0)) {
+        if (isless(b, 0.0) != isless(mod, 0.0)) {
             mod += b;
             div -= 1.0;
         }
@@ -477,7 +477,7 @@ static inline double tp_np_divmod(double a, double b, double *modulus)
     }
     if (div) {
         floordiv = floor(div);
-        if (div - floordiv > 0.5) {
+        if (isgreater(div - floordiv, 0.5)) {
             floordiv += 1.0;
         }
     }
@@ -488,13 +488,27 @@ static inline double tp_np_divmod(double a, double b, double *modulus)
     return floordiv;
 }
 
+static inline double tp_np_mod_only(double a, double b)
+{
+    double mod = fmod(a, b);
+    if (mod) {
+        if (isless(b, 0.0) != isless(mod, 0.0)) {
+            mod += b;
+        }
+    }
+    else {
+        mod = copysign(0.0, b);
+    }
+    return mod;
+}
+
 /* The volatile operands and result keep the compiler from moving, folding or sharing the operation
  * across the flag clear and test (the function is also noinline). */
 static TP_NOINLINE int tp_np_f64(int op, double a, double b, double *out)
 {
     volatile double va = a, vb = b, vr = 0.0, vd = 0.0;
     double mod;
-    int flags, force = 0, clear = 0;
+    int flags;
     feclearexcept(FE_ALL_EXCEPT);
     switch (op) {
     case TP_NP_ADD: vr = va + vb; break;
@@ -503,11 +517,7 @@ static TP_NOINLINE int tp_np_f64(int op, double a, double b, double *out)
     case TP_NP_DIV: vr = va / vb; break;
     case TP_NP_FLOORDIV:
         if (!vb) {
-            feclearexcept(FE_ALL_EXCEPT);
-            vr = va / vb;
-            if (!va) {
-                force = TP_NP_INVALID;
-            }
+            vr = va / vb;                        /* numpy: plain division, only its flags */
         }
         else {
             vr = tp_np_divmod(va, vb, &mod);
@@ -515,24 +525,31 @@ static TP_NOINLINE int tp_np_f64(int op, double a, double b, double *out)
         break;
     default:
         if (!vb) {
-            vr = fmod(va, vb);
-            clear = 1;
+            vr = fmod(va, vb);                   /* numpy: plain fmod, the platform libm's flags */
         }
         else {
-            vd = tp_np_divmod(va, vb, &mod);     /* numpy computes the quotient too: its flags count */
+            /* numpy's npy_remainder returns only the modulus of npy_divmod. Whether the dead quotient
+             * (a - mod) / b still runs depends on numpy's own build: the macOS wheel (clang) keeps it, so
+             * 1.0 % 1e-310 warns overflow + invalid there; the Linux wheel (gcc) drops it and is silent.
+             * Observed with numpy 2.5.4; mirror each. */
+#if defined(__APPLE__)
+            vd = tp_np_divmod(va, vb, &mod);     /* volatile: the quotient must really run */
             (void)vd;
             vr = mod;
+#else
+            vr = tp_np_mod_only(va, vb);
+#endif
         }
         break;
     }
     flags = 0;
-    if (!clear) {
+    {
         int f = fetestexcept(FE_DIVBYZERO | FE_OVERFLOW | FE_INVALID);
         flags = ((f & FE_DIVBYZERO) ? TP_NP_DIVZERO : 0) | ((f & FE_OVERFLOW) ? TP_NP_OVERFLOW : 0)
                 | ((f & FE_INVALID) ? TP_NP_INVALID : 0);
     }
     *out = vr;
-    return flags | force;
+    return flags;
 }
 
 /* numpy's RuntimeWarning for each bit of `flags`, in numpy's order, attributed to `file`:`line` (the
