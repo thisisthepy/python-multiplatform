@@ -163,6 +163,12 @@ internal data class Candidate(
      */
     val plan: ArtifactScanner.DefaultOmissionPlan? = null,
     val isConstructor: Boolean = false,
+    /**
+     * True only for the candidate that publishes a companion object itself (`Owner.Companion`). It
+     * shares the owner's name as a prefix, which the constructor-collision rule would otherwise
+     * read as a constant hiding the constructor; the owner stays constructible beside its companion.
+     */
+    val isCompanionHandle: Boolean = false,
 )
 
 internal object ArtifactScanner {
@@ -342,7 +348,8 @@ internal object ArtifactScanner {
         for (candidate in bound) {
             if (!candidate.isConstructor) continue
             val name = candidate.callable!!.name
-            if (boundNames.any { it != name && it.startsWith("$name.") }) {
+            val others = bound.filter { !it.isCompanionHandle }.map { it.callable!!.name }
+            if (others.any { it != name && it.startsWith("$name.") }) {
                 dropReasons.putIfAbsent(candidate, "constructor name collides with a constant this class publishes under its own name")
             }
         }
@@ -767,10 +774,12 @@ internal object ArtifactScanner {
         // never read as an entry. It is loaded from here instead, by the name the outer class's own
         // metadata gives it -- which is also why the bound name can drop `Companion` while the
         // generated call keeps it.
+        var companionHandle: Candidate? = null
         val companionProperties = kmClass.companionObject?.let { companionName ->
             val companionNode = classpath.classNode(ownerNode.name + "\$" + companionName) ?: return@let null
             val companionMetadata = kotlinClassMetadataOf(companionNode) as? KotlinClassMetadata.Class ?: return@let null
             if (companionMetadata.kmClass.visibility != Visibility.PUBLIC) return@let null
+            companionHandle = companionHandleCandidate(qualified, ownerNode, companionName, companionMetadata.kmClass, classpath)
             constantsOf(
                 companionMetadata.kmClass,
                 companionNode,
@@ -780,7 +789,71 @@ internal object ArtifactScanner {
             )
         }.orEmpty()
 
-        return ownProperties + companionProperties
+        return ownProperties + companionProperties + listOfNotNull(companionHandle)
+    }
+
+    /**
+     * The companion object itself, bound as `Owner.<CompanionName>` (a zero-argument getter).
+     *
+     * The generated body names the companion in Kotlin source (`Owner.Companion`), which kotlinc
+     * compiles to a field read; no JVM member is looked up by name. The value is typed as the owner
+     * when the companion lists the owner as a direct supertype (`Modifier.Companion : Modifier`), so
+     * it is an instance of the owner's proxy; otherwise as the companion's own type. A generic owner
+     * is named without type arguments.
+     */
+    private fun companionHandleCandidate(
+        qualified: String,
+        ownerNode: ClassNode,
+        companionName: String,
+        companionClass: kotlin.metadata.KmClass,
+        classpath: ArtifactClasspath,
+    ): Candidate {
+        val ownerMetadataName = ownerNode.name.replace('$', '.')
+        val companionMetadataName = "$ownerMetadataName.$companionName"
+        val ownerIsSupertype = companionClass.supertypes.any {
+            (it.classifier as? KmClassifier.Class)?.name == ownerMetadataName
+        }
+        val typeName = (if (ownerIsSupertype) ownerMetadataName else companionMetadataName).replace('/', '.')
+        val name = "$qualified.$companionName"
+        val boundary = BoundaryType("OBJECT", "(%s as $typeName)", "(%s)")
+        val supertypes = classpath.nameablePublicSupertypesOf(
+            if (ownerIsSupertype) ownerMetadataName else companionMetadataName,
+        )
+        return Candidate(
+            callable = ArtifactCallable(
+                name = name,
+                arity = 0,
+                paramTags = emptyList(),
+                returnTag = boundary.tag,
+                lambdaBody = "{ ${boundary.wrapReturn(name)} }",
+                returnTypeName = typeName,
+                returnSupertypes = supertypes,
+                paramNames = emptyList(),
+                paramTypeNames = emptyList(),
+                paramHasDefault = emptyList(),
+                kind = "STATIC_GETTER",
+            ),
+            declaration = DeclarationModel(
+                simpleName = companionName,
+                owner = qualified,
+                ownerIsClass = true,
+                receiver = null,
+                parameters = emptyList(),
+                returnType = python.multiplatform.gradle.model.KotlinTypeModel(
+                    qualifiedName = typeName,
+                    isNullable = false,
+                    arguments = emptyList(),
+                    valueClass = null,
+                ),
+                isComposable = false,
+                isSuspend = false,
+                kind = "STATIC_GETTER",
+                bindingName = name,
+                returnBoundaryTag = boundary.tag,
+                isCompanionHandle = true,
+            ),
+            isCompanionHandle = true,
+        )
     }
 
     /**

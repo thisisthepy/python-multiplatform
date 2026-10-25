@@ -103,6 +103,13 @@ internal data class DeclarationModel(
      * the `Any` rule.
      */
     val isConstructor: Boolean = false,
+    /**
+     * The declaration is a companion object itself (`Owner.Companion`): [owner] is the class and
+     * [simpleName] the companion's name. A stub renders it as a class attribute of the owner's stub
+     * class rather than as a module attribute, which would turn the owner into a module and drop
+     * its class stub.
+     */
+    val isCompanionHandle: Boolean = false,
 ) : Serializable
 
 /** @param name `null` when the producer could not read one (§3.2); never a synthesised `arg0`. */

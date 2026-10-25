@@ -362,7 +362,15 @@ object PythonProxySource {
                 _pm_sys.modules[_name] = _m
                 if '.' in _name:
                     _parent, _, _leaf = _name.rpartition('.')
-                    setattr(_pm_module(_parent), _leaf, _m)
+                    # Issue #322: a name the binding layer serves as a proxy class stays that class on
+                    # its parent; this module is still in sys.modules and the class's __getattr__
+                    # reaches its statics. One Python name is not both a module and a class.
+                    _binding = _pm_sys.modules.get('python_multiplatform.binding')
+                    _is_type = getattr(_binding, 'class_wins_over_module', None)
+                    if _is_type is None or not _is_type(_name):
+                        setattr(_pm_module(_parent), _leaf, _m)
+                    else:
+                        _pm_module(_parent)
             return _m
 
 
