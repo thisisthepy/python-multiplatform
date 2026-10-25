@@ -506,7 +506,7 @@ static inline double tp_np_mod_only(double a, double b)
  * across the flag clear and test (the function is also noinline). */
 static TP_NOINLINE int tp_np_f64(int op, double a, double b, double *out)
 {
-    volatile double va = a, vb = b, vr = 0.0, vd = 0.0;
+    volatile double va = a, vb = b, vr = 0.0;
     double mod;
     int flags;
     feclearexcept(FE_ALL_EXCEPT);
@@ -533,7 +533,7 @@ static TP_NOINLINE int tp_np_f64(int op, double a, double b, double *out)
              * 1.0 % 1e-310 warns overflow + invalid there; the Linux wheel (gcc) drops it and is silent.
              * Observed with numpy 2.5.4; mirror each. */
 #if defined(__APPLE__)
-            vd = tp_np_divmod(va, vb, &mod);     /* volatile: the quotient must really run */
+            volatile double vd = tp_np_divmod(va, vb, &mod);   /* volatile: the quotient must really run */
             (void)vd;
             vr = mod;
 #else
