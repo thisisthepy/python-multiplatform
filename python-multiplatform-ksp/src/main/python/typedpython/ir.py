@@ -653,7 +653,7 @@ class While(Stmt):
 @dataclass(frozen=True)
 class ParInfo:
     """Why a `ForRange` may run its iterations on several threads (SPEC N-15, step 1): the body is
-    only `a[var] = <F64 expression>` stores, `stored` are the arrays stored into (each at the loop
+    only `a[var] = <F64 expression>` stores (or, step 2, only i64 `acc op= e` reductions: see `reduce`), `stored` are the arrays stored into (each at the loop
     variable, proven in bounds, so distinct iterations write distinct elements) and `read` the arrays
     read, all at the loop variable and proven in bounds. The expression nodes are Const, scalar
     Local (not assigned in the body), ToFloat of an I64, F64 + - * and negation, so no node can fail,
@@ -664,6 +664,11 @@ class ParInfo:
     stored: tuple[str, ...]
     read: tuple[str, ...]
     weight: int = 1
+    # Step 2 (#277): the i64 reductions `acc = acc op e` of a loop whose body is only such statements,
+    # as sorted (acc, BinOpKind name) pairs, op ADD or MUL. Then `stored` is empty. Each chunk computes
+    # its partial from the op's identity with the sequential code's overflow checks; an overflow in any
+    # chunk or in the combination discards the region and the sequential loop runs from its start.
+    reduce: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)

@@ -212,8 +212,16 @@ is eligible only if ALL of these hold:
     of `b[var]` where `b` is another array cannot alias a written element (array parameters are
     distinct lists by the entry guard, local arrays are distinct allocations), and a read of the
     stored array itself is the same element the iteration writes.
-Anything else compiles sequentially, unchanged. This cannot find other eligible shapes (reductions,
-stencils, calls, nested tiles); those are later steps.
+  * Step 2 (reductions): or the body is a non-empty sequence of `acc = acc op e` (`_par_reduce`): op
+    ADD or MUL, each `acc` a distinct i64 local, definitely assigned before the loop, not an array,
+    loop variable or entry global, and read nowhere else in the body (not in any `e`); `e` built from
+    i64 Const, i64 Local (the loop variable, or a scalar nothing in the body assigns), `b[var]`
+    proven on an i64 non-buffer list or local array, and i64 + - *. Stores and reductions are never
+    mixed in one loop. Those nodes can overflow, which is not a failure of the region: the runtime
+    discards it and reruns the loop sequentially. (& | ^ are not in the compiled subset: the front
+    end lowers no bitwise operator, so there is no such reduction to mark; min/max are later.)
+Anything else compiles sequentially, unchanged. This cannot find other eligible shapes (stencils,
+calls, nested tiles, min/max); those are later steps.
 
 Tuple. `Tuple(OBJ, elements)`: a tuple of OBJ expressions (a scalar needs Box), result OBJ, a
 reference creator in the ownership rule. Building one is not an effect.
@@ -1634,14 +1642,15 @@ class _Checker:
         after: _State = state
         for br in loop.breaks:
             after = _meet(after, br)
-        par = self._par_info(s, step_ok, body, loop)
+        par = self._par_info(s, step_ok, body, loop, state)
         if s.par is not None and s.par != par:
             self.error(PAR_LOOP, f"ForRange over '{var}' declares par={s.par!r}, but the verifier "
                                  f"computes {par!r} (SPEC N-15)")
         return dataclasses.replace(s, start=start, stop=stop, body=body, par=par), after
 
-    def _par_info(self, s: ForRange, step_ok: bool, body: tuple, loop: _Loop) -> ParInfo | None:
-        """SPEC N-15 step 1: the ParInfo of this loop, or None (see "Parallel loops" above)."""
+    def _par_info(self, s: ForRange, step_ok: bool, body: tuple, loop: _Loop,
+                  state: _State = None) -> ParInfo | None:
+        """SPEC N-15 steps 1 and 2: the ParInfo of this loop, or None (see "Parallel loops" above)."""
         if self.fn.parallel is not True or not step_ok or loop.bounds_array is None:
             return None
         if self.diags or not isinstance(body, tuple) or not body:
@@ -1651,9 +1660,9 @@ class _Checker:
         read: list[str] = []
         weight = [0]
 
-        def array_ok(name: str) -> bool:
+        def array_ok(name: str, want: Type = Type.F64_ARRAY) -> bool:
             t = self.arrays.get(name) or self.larrays.get(name)
-            return t is Type.F64_ARRAY and name not in self.buffers
+            return t is want and name not in self.buffers
 
         def at_var(ix: object, proven: object) -> bool:
             return proven is True and type(ix) is Local and ix.name == var and ix.type is Type.I64
@@ -1685,6 +1694,8 @@ class _Checker:
                 return e.type is Type.F64 and e.op is UnaryOpKind.NEG and ok(e.operand)
             return False
 
+        if type(body[0]) is Assign:
+            return self._par_reduce(s, body, state, weight, array_ok, at_var)
         for st in body:
             if type(st) is not StoreIndex or not array_ok(st.array) or not at_var(st.index, st.proven):
                 return None
@@ -1693,6 +1704,64 @@ class _Checker:
                 return None
             stored.append(st.array)
         return ParInfo(tuple(sorted(set(stored))), tuple(sorted(set(read))), weight[0])
+
+    def _par_reduce(self, s: ForRange, body: tuple, state: _State, weight: list, array_ok,
+                    at_var) -> ParInfo | None:
+        """SPEC N-15 step 2: a body of only `acc = acc op e` (op ADD or MUL, either operand order), each
+        `acc` a distinct i64 local of this function (not a loop variable, array or entry global) that
+        is definitely assigned before the loop and appears nowhere else in the body, and `e` built
+        from i64 Const, i64 Local (the loop variable, or any scalar the body does not assign), `b[var]`
+        proven on an i64 non-buffer list or local array, and i64 + - * . Any of those nodes can overflow:
+        the runtime then discards the region and reruns the loop sequentially. No store is allowed in
+        the same loop (a rerun then needs no restore)."""
+        var = s.var
+        if state is None:
+            return None
+        accs: dict[str, str] = {}
+        for st in body:
+            if (type(st) is not Assign or type(st.value) is not BinOp or st.value.type is not Type.I64
+                    or st.value.op not in (BinOpKind.ADD, BinOpKind.MUL) or st.value.np
+                    or st.target in accs):
+                return None
+            accs[st.target] = st.value.op.name
+        for acc in accs:
+            if (self.scalars.get(acc) is not Type.I64 or acc == var or acc in self.arrays
+                    or acc in self.larrays or acc in self.entry or acc not in state):
+                return None
+        read: list[str] = []
+
+        def ok(e: object) -> bool:
+            weight[0] += 1
+            t = type(e)
+            if t is Const:
+                return e.type is Type.I64 and type(e.value) is int
+            if t is Local:
+                return (e.type is Type.I64 and e.name not in accs and e.name not in self.arrays
+                        and e.name not in self.larrays
+                        and (e.name == var or e.name in self.scalars or e.name in self.entry))
+            if t is Index:
+                if e.type is Type.I64 and array_ok(e.array, Type.I64_ARRAY) and at_var(e.index, e.proven):
+                    read.append(e.array)
+                    return True
+                return False
+            if t is BinOp:
+                return (e.type is Type.I64 and e.left.type is Type.I64 and e.right.type is Type.I64
+                        and e.op in (BinOpKind.ADD, BinOpKind.SUB, BinOpKind.MUL) and not e.np
+                        and ok(e.left) and ok(e.right))
+            return False
+
+        for st in body:
+            weight[0] += 2
+            b = st.value
+            if type(b.left) is Local and b.left.name == st.target and b.left.type is Type.I64:
+                other = b.right
+            elif type(b.right) is Local and b.right.name == st.target and b.right.type is Type.I64:
+                other = b.left
+            else:
+                return None
+            if not ok(other):
+                return None
+        return ParInfo((), tuple(sorted(set(read))), weight[0], tuple(sorted(accs.items())))
 
     def s_Return(self, s: Return, state: _State):
         returns = self.fn.returns

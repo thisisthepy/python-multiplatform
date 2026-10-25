@@ -892,7 +892,19 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     `min(a, b)` compares with `<` and keeps the first element in iteration order on ties (including
     `+0.0` versus `-0.0`), NaN behaviour depends on position because comparisons with NaN are false,
     and chunked combination must reproduce that chain bit for bit; if an implementation cannot, they
-    are left to a later step. **Float `+` and `*` reductions are excluded in v1**: chunked evaluation
+    are left to a later step. Step 2 implements `+` and `*` only: the compiled subset has no bitwise
+    operator (the front end skips a function using `&`, `|` or `^` on ints, there is no IR operation),
+    so `& | ^` are left until the subset has them.
+    A reduction loop is `acc = acc op e` statements only (no element-wise stores in the same loop, so
+    a rerun needs no restore), each `acc` a function-local i64 read nowhere else in the loop and
+    assigned before it, `e` built from i64 constants, locals, `b[i]` of a list or local int array
+    and i64 `+ - *`. Each chunk computes its partial from the identity with the sequential code's
+    overflow checks; an overflow in any chunk, in an element expression, or in the combination
+    discards the region (no accumulator written) and the sequential loop runs from its start state,
+    which deopts or promotes exactly as it does today, so the result is Python's unbounded int. The
+    exact integer result of a region that does not overflow equals the sequential one; a region may
+    complete where the sequential order would have overflowed in an intermediate prefix and the
+    interpreter's redo would have given the same value (the deopt counter is not part of the identity). **Float `+` and `*` reductions are excluded in v1**: chunked evaluation
     is a different expression tree and not bit-identical. This is not permanent: a fastmath opt-in
     (#153) awaits the owner's decision, and N-15 follows it. Partials combine in chunk order.
   - **Observability.** N-14 holds (a traced call runs the interpreted function, never a region);
@@ -914,7 +926,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     chunk, NaN/inf/-0.0), identical bytes for every thread count, failure at first/middle/last
     iteration, negative qualification cases, disabled-path test, reductions, race and GC tests,
     TSan/ASan, N-14, signals, fork and shutdown, and measurement tests for the threshold.
-  `Status: step 1 implemented (#277): element-wise F64 stores a[i] = <F64 + - * and negation of constants, locals and b[i]> into list copy-in or local arrays; no reductions, no failure path (eligible loops cannot fail or deopt); the rest planned (design)`.
+  `Status: steps 1 and 2 implemented (#277): element-wise F64 stores a[i] = <F64 + - * and negation of constants, locals and b[i]> into list copy-in or local arrays (no failure path: eligible loops cannot fail or deopt); i64 reductions acc += e and acc *= e with the overflow rerun above (stores and reductions never in one loop); & | ^ and min/max reductions, float reductions, the poll inside a region and the rest planned (design)`.
 
 ---
 
