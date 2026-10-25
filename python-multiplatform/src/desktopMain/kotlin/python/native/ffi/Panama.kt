@@ -128,6 +128,10 @@ internal object Panama {
 
     /** Create a Panama upcall stub for a (Long, Long, Long) -> Int MethodHandle */
     val createUpcallStubIII_I: (MethodHandle) -> Long
+
+    /** Create a Panama upcall stub for a (Long, Long) -> Int MethodHandle: a C `int (*)(const void *,
+     *  const void *)`, a comparator (#161: the pinning trampoline in GILScope.desktop.kt). */
+    val createUpcallStubII_I: (MethodHandle) -> Long
     
     /** Create a Panama upcall stub for a (Long) -> Int MethodHandle */
     val createUpcallStubI_I: (MethodHandle) -> Long
@@ -165,6 +169,7 @@ internal object Panama {
                 createUpcallStubLongToLong = data.createUpcallStubLongToLong
                 createUpcallStubII_L = data.createUpcallStubII_L
                 createUpcallStubIII_I = data.createUpcallStubIII_I
+                createUpcallStubII_I = data.createUpcallStubII_I
                 createUpcallStubI_I = data.createUpcallStubI_I
                 createUpcallStubI_V = data.createUpcallStubI_V
             }
@@ -185,6 +190,7 @@ internal object Panama {
                 createUpcallStubLongToLong = data.createUpcallStubLongToLong
                 createUpcallStubII_L = data.createUpcallStubII_L
                 createUpcallStubIII_I = data.createUpcallStubIII_I
+                createUpcallStubII_I = data.createUpcallStubII_I
                 createUpcallStubI_I = data.createUpcallStubI_I
                 createUpcallStubI_V = data.createUpcallStubI_V
             }
@@ -209,6 +215,7 @@ internal object Panama {
         val createUpcallStubLongToLong: (MethodHandle) -> Long,
         val createUpcallStubII_L: (MethodHandle) -> Long,
         val createUpcallStubIII_I: (MethodHandle) -> Long,
+        val createUpcallStubII_I: (MethodHandle) -> Long,
         val createUpcallStubI_I: (MethodHandle) -> Long,
         val createUpcallStubI_V: (MethodHandle) -> Long
     )
@@ -592,6 +599,16 @@ internal object Panama {
             segmentAddressExact.invokeExact(stub) as Long
         }
 
+        // @UpcallShape(returnType = "int", parameterTypes = ["long", "long"])
+        val buildUpcallStubII_I: (MethodHandle) -> Long = { handle ->
+            val layoutParams = java.lang.reflect.Array.newInstance(memoryLayoutClass, 2)
+            java.lang.reflect.Array.set(layoutParams, 0, javaLong)
+            java.lang.reflect.Array.set(layoutParams, 1, javaLong)
+            val fd = fdOfMethod.invoke(null, javaInt, layoutParams)
+            val stub: Any = upcallStubMethod.invoke(linker, handle, fd, globalArena, emptyOptions)
+            segmentAddressExact.invokeExact(stub) as Long
+        }
+
         // @UpcallShape(returnType = "int", parameterTypes = ["long"])
         val buildUpcallStubI_I: (MethodHandle) -> Long = { handle ->
             val layoutParams = java.lang.reflect.Array.newInstance(memoryLayoutClass, 1)
@@ -610,7 +627,7 @@ internal object Panama {
             segmentAddressExact.invokeExact(stub) as Long
         }
 
-        return ModernData(allocStr, readStr, findSym, findAddr, allocFreeable, freeAddr, allocSlot, readSlot, writeSlot, freeSlot, allocBytes, buildShape, buildUpcallStub, buildUpcallStubII_L, buildUpcallStubIII_I, buildUpcallStubI_I, buildUpcallStubI_V)
+        return ModernData(allocStr, readStr, findSym, findAddr, allocFreeable, freeAddr, allocSlot, readSlot, writeSlot, freeSlot, allocBytes, buildShape, buildUpcallStub, buildUpcallStubII_L, buildUpcallStubIII_I, buildUpcallStubII_I, buildUpcallStubI_I, buildUpcallStubI_V)
     }
 
     private fun adaptModernHandle(
@@ -688,6 +705,7 @@ internal object Panama {
         val createUpcallStubLongToLong: (MethodHandle) -> Long,
         val createUpcallStubII_L: (MethodHandle) -> Long,
         val createUpcallStubIII_I: (MethodHandle) -> Long,
+        val createUpcallStubII_I: (MethodHandle) -> Long,
         val createUpcallStubI_I: (MethodHandle) -> Long,
         val createUpcallStubI_V: (MethodHandle) -> Long
     )
@@ -954,6 +972,16 @@ internal object Panama {
             toRawLongMethod.invoke(segAddressMethod.invoke(stub)) as Long
         }
 
+        // @UpcallShape(returnType = "int", parameterTypes = ["long", "long"])
+        val buildUpcallStubII_I: (MethodHandle) -> Long = { handle ->
+            val layoutParams = java.lang.reflect.Array.newInstance(memoryLayoutClass, 2)
+            java.lang.reflect.Array.set(layoutParams, 0, cLongLong)
+            java.lang.reflect.Array.set(layoutParams, 1, cLongLong)
+            val fd = fdOfMethod.invoke(null, cInt, layoutParams)
+            val stub = upcallStubMethod.invoke(clinker, handle, fd)
+            toRawLongMethod.invoke(segAddressMethod.invoke(stub)) as Long
+        }
+
         // @UpcallShape(returnType = "int", parameterTypes = ["long"])
         val buildUpcallStubI_I: (MethodHandle) -> Long = { handle ->
             val layoutParams = java.lang.reflect.Array.newInstance(memoryLayoutClass, 1)
@@ -972,7 +1000,7 @@ internal object Panama {
             toRawLongMethod.invoke(segAddressMethod.invoke(stub)) as Long
         }
 
-        return IncubatorData(allocStr, readStr, findSym, findAddr, allocFreeable, freeAddr, allocSlot, readSlot, writeSlot, freeSlot, allocBytes, buildShape, buildUpcallStub, buildUpcallStubII_L, buildUpcallStubIII_I, buildUpcallStubI_I, buildUpcallStubI_V)
+        return IncubatorData(allocStr, readStr, findSym, findAddr, allocFreeable, freeAddr, allocSlot, readSlot, writeSlot, freeSlot, allocBytes, buildShape, buildUpcallStub, buildUpcallStubII_L, buildUpcallStubIII_I, buildUpcallStubII_I, buildUpcallStubI_I, buildUpcallStubI_V)
     }
 
     private fun adaptIncubatorHandle(

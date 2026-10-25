@@ -20,7 +20,7 @@ object Python3 {
     /**
      * Ensure Python is initialized
      */
-    inline fun <T> withPython(block: () -> T): T {
+    inline fun <T> withPython(crossinline block: () -> T): T {
         if (!isInitialized) throw IllegalStateException("Python is not initialized")
         return withGIL {
             memScoped {

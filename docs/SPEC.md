@@ -644,12 +644,15 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 
 - **T-1** GIL builds: Kotlin threads attach a thread state and serialise on the GIL. `Status: partial`
   (see C-4; the release after initialisation is tested by `GilReleaseTest` / `GilReleaseNativeTest`).
-- **T-1a** On desktop, entering Python from a JVM virtual thread (the outermost `withGIL`) raises
-  `IllegalStateException` before `PyGILState_Ensure`: the GIL thread state is bound to the OS carrier
-  thread, and a virtual thread can unmount and resume on another carrier inside the scope. Run Python on
-  platform threads. Android, native and wasm are unaffected. Pinning the virtual thread instead (issue #161
-  option B) needs a public API change and is pending a decision. `Status: implemented`,
-  `PM/desktopTest/.../VirtualThreadGILTest.kt`.
+- **T-1a** On desktop, Python may be entered from a JVM virtual thread (#161 option B, user decision):
+  the outermost `withGIL` runs pinned to its OS carrier from `PyGILState_Ensure` to `Release`, so a
+  virtual thread that parks inside the scope (sleep, lock, blocking I/O) stays on the OS thread that
+  holds the thread state. The pin is a native frame (the block runs as the comparator of C's `bsearch`
+  over one element, an FFM upcall); its result or exception is passed through. `withGIL`'s and
+  `Python3.withPython`'s blocks are therefore `crossinline` (no non-local `return` from them).
+  Platform threads, Android, native and wasm run the block directly. A pinned virtual thread holds its
+  carrier while it waits inside the scope, as any pinned virtual thread does. `Status: implemented`,
+  `PM/desktopTest/.../VirtualThreadGILTest.kt` (without the pin the JVM aborts in `PyGILState_Release`).
 - **T-2** Free-threaded builds selected with `-PpythonFreeThreaded=true` download a different CPython
   asset. `Status: partial` (desktop only, opt-in; default is `pythonFreeThreaded=false` in `gradle.properties`)
  , `GP/PythonHomeStagingTest.kt`, `PM/desktopTest/.../FreeThreadedGCGateTest.kt`, `VersionsTest.kt`.
