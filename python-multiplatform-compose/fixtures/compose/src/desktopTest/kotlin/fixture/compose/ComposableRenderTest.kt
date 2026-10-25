@@ -838,10 +838,10 @@ class ComposableRenderTest {
      */
     @Test
     fun colorSchemeCopyIsBoundWithEveryParameterRequired() {
+        // The prelude is multi-line, so it is joined rather than interpolated into an indented block,
+        // where trimIndent would see its unindented lines and keep the rest indented.
         Python3.exec(
-            """
-            from androidx.compose.ui.graphics import Color__Int_Int_Int_Int as _Color
-            ${schemePrelude()}
+            schemePrelude() + "\n" + """
             _base = ColorScheme(**_written(255, 0, 0))
             try:
                 _base.copy(primary=_Color(0, 0, 255))
