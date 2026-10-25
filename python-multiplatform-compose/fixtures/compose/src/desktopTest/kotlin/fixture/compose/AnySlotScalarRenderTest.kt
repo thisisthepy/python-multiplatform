@@ -1,7 +1,6 @@
 package fixture.compose
 
 import androidx.compose.runtime.MutableState
-import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.unit.Density
 import python.multiplatform.compose.PythonWidget
@@ -93,11 +92,11 @@ class AnySlotScalarRenderTest {
 
             Python3.exec("_asr_counter.value = _asr_counter.value + 1")
             assertEquals(1, kotlinValue(), "the increment is not a Kotlin Int 1")
-            nextFrame(scene)
+            scene.renderAfterWrite()
             assertEquals("[0, 1]", pyStr("repr(_asr_seen)"), "the increment did not recompose the root")
 
             Python3.exec("_asr_counter.value = _asr_counter.value + 1")
-            nextFrame(scene)
+            scene.renderAfterWrite()
             assertEquals("[0, 1, 2]", pyStr("repr(_asr_seen)"), "the second increment did not recompose the root")
             assertTrue(
                 pyStr("all(type(_asr_x) is int for _asr_x in _asr_seen)") == "True",
@@ -119,11 +118,6 @@ class AnySlotScalarRenderTest {
         val raw = pyStr("_asr_counter._pm_handle").toLong()
         val state = HandleTable.resolveRaw(raw) as MutableState<*>
         return state.value
-    }
-
-    private fun nextFrame(scene: ImageComposeScene) {
-        Snapshot.sendApplyNotifications()
-        scene.render()
     }
 
     private fun pyStr(expression: String): String = Python3.import("__main__").getAttr("__dict__").let { globals ->
