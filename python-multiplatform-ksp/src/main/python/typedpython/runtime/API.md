@@ -497,7 +497,7 @@ for the epoch's increment. `tp_runtime.h` needs the GCC/Clang `__atomic` builtin
 
 ## Parallel regions (SPEC N-15, issues #151, #277)
 A `ForRange` the verifier marked `par` (`ir.ParInfo`; marked function, `a[i] = F64 expression` stores
-or i64 `+ *` reductions) runs its iterations on per-region C threads above a work threshold. Workers touch no Python
+or i64 `+ *` reductions, or min/max `if e < acc: acc = e` on an i64 or f64) runs its iterations on per-region C threads above a work threshold. Workers touch no Python
 object and no Python API, are not Python threads and never outlive the call.
     #define TP_PAR_MIN_WORK 65536          /* PLACEHOLDER, to be measured on #151: weighted iterations (trip count * ParInfo.weight) */
     #define TP_PAR_MAX_THREADS 8           /* default cap; TYPEDPYTHON_THREADS overrides (1 disables), hard cap 64 */
@@ -531,7 +531,14 @@ writes `part[ci]` and `st[ci] = TP_PAR_OK`; a failed check sets `st[ci] = TP_PAR
 After `tp_par_run` the caller combines every accumulator with `tp_par_combine`; if any accumulator fails
 (a BAD chunk or an overflow in the combination) no accumulator and no loop variable is written, the rerun
 counter is incremented and the sequential loop runs from the loop's start state, which deopts or not
-exactly as today. (`& | ^` and min/max are not reductions yet: the compiled subset has no bitwise operator.)
+exactly as today. (`& | ^` are not reductions yet: the compiled subset has no bitwise operator.)
+    int  tp_par_combine_ext_i64(int is_max, int64_t *acc, const int64_t *part, const unsigned char *st);
+    int  tp_par_combine_ext_f64(int is_max, double *acc, const double *part, const unsigned char *st);
+A min/max accumulator (`if e < acc: acc = e`, `>` for max) is folded per chunk from the chunk's own first element with the
+same strict comparison and combined in chunk order with the earlier value on the left, which equals the sequential chain
+for i64 and for f64 without NaN (ties and signed zeros keep the first). An f64 chunk that meets a NaN element sets
+`TP_PAR_BAD`, and `tp_par_combine_ext_f64` returns 1 for a NaN initial accumulator: the loop then runs sequentially
+(`[1.0] | [nan, 0.0]` is the case a chunked fold gets wrong).
 
 ## Development-mode import gate (Python API, not C; SPEC N-7b)
     typedpython.importgate.install(source_roots)   # meta path finder; checks project modules before they run

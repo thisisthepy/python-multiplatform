@@ -3194,6 +3194,53 @@ static inline int tp_par_combine(int op, int64_t *acc, const int64_t *part, cons
     return 0;
 }
 
+/* min / max (the conditional update `if e < acc: acc = e`, `>` for max). Each part[k] is its chunk's
+ * extreme taken from the chunk's own first element with the same strict comparison. Combining in chunk
+ * order with the earlier value on the left gives the sequential chain's result exactly for an i64 (a
+ * total order: the first of equal elements wins in either grouping) and for an f64 WITHOUT NaN (ties,
+ * including +0.0 / -0.0, keep the earlier chunk's element because the comparison is strict). With a NaN
+ * the chain is not associative ([1.0] | [nan, 0.0]: chunks give 1.0, the sequential loop gives 0.0), so
+ * a chunk that saw a NaN element is marked bad by the worker, and a NaN initial accumulator is refused
+ * here: both return 1 and the caller reruns the loop sequentially. */
+static inline int tp_par_combine_ext_i64(int is_max, int64_t *acc, const int64_t *part, const unsigned char *st)
+{
+    int64_t v = *acc;
+    int k;
+    for (k = 0; k < TP_PAR_HARD_CAP; k++) {
+        if (st[k] == TP_PAR_BAD) {
+            return 1;
+        }
+    }
+    for (k = 0; k < TP_PAR_HARD_CAP && st[k] == TP_PAR_OK; k++) {
+        if (is_max ? part[k] > v : part[k] < v) {
+            v = part[k];
+        }
+    }
+    *acc = v;
+    return 0;
+}
+
+static inline int tp_par_combine_ext_f64(int is_max, double *acc, const double *part, const unsigned char *st)
+{
+    double v = *acc;
+    int k;
+    if (v != v) {
+        return 1;
+    }
+    for (k = 0; k < TP_PAR_HARD_CAP; k++) {
+        if (st[k] == TP_PAR_BAD) {
+            return 1;
+        }
+    }
+    for (k = 0; k < TP_PAR_HARD_CAP && st[k] == TP_PAR_OK; k++) {
+        if (is_max ? part[k] > v : part[k] < v) {
+            v = part[k];
+        }
+    }
+    *acc = v;
+    return 0;
+}
+
 static inline void tp_par_rerun_note(void)
 {
     __atomic_fetch_add(&tp_par_reruns_v, 1, __ATOMIC_RELAXED);

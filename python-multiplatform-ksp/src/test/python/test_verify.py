@@ -453,6 +453,8 @@ def test_i64_add_in_an_impure_function_is_rejected():
     BinOp(F64, BinOpKind.TRUEDIV, Local(I64, "n"), Const(I64, 2)),
     UnaryOp(I64, UnaryOpKind.NEG, Local(I64, "n")),
     Unbox(I64, Box(OBJ, Local(I64, "n"))),
+    Unbox(F64, Box(OBJ, Local(I64, "n"))),         # #271: every Unbox can deopt, as cgen says
+    Unbox(BOOL, Box(OBJ, Local(I64, "n"))),
 ])
 def test_every_deopting_node_is_rejected_in_an_impure_function(node):
     assert_rejected(DEOPT, fn(params=[Param("n", I64)], body=[ExprStmt(node), Return()]))
@@ -465,7 +467,6 @@ def test_non_deopting_nodes_are_fine_in_an_impure_function():
                        body=[
         ExprStmt(pycall("print", Box(OBJ, lf("x")))),
         ExprStmt(UnaryOp(I64, UnaryOpKind.POS, li("n"))),
-        ExprStmt(Unbox(F64, Box(OBJ, lf("x")))),
         ExprStmt(ObjToFloat(F64, GetAttr(OBJ, lo("o"), "x"))),
         ExprStmt(BinOp(OBJ, BinOpKind.MUL, lo("o"), lo("o"))),
         Return(BinOp(F64, BinOpKind.FLOORDIV, lf("x"), f(2.0))),
@@ -627,7 +628,7 @@ def test_box_callobject_unbox_pipeline_is_accepted():
     assert_accepted(fn(params=[Param("x", F64), Param("o", OBJ)], locals_={"r": OBJ}, returns=F64,
                        body=[Assign("r", pycall("f2", Box(OBJ, lf("x")), lo("o"))),
                              Assign("r", BinOp(OBJ, BinOpKind.ADD, lo("r"), lo("o"))),
-                             Return(Unbox(F64, lo("r")))]))
+                             Return(ObjToFloat(F64, lo("r")))]))   # impure: ObjToFloat, not Unbox (#271)
 
 
 def test_obj_into_a_scalar_slot_without_unbox_is_rejected():
@@ -1089,7 +1090,7 @@ def _base_functions():
                     Assign("a", na(F64A, i(4), f(1.0))),
                     Assign("r", call_obj(GetAttr(OBJ, g_("Modifier"), "padding"),
                                          Box(OBJ, lf("x")), lo("o"), kw=("dp",))),
-                    Assign("y", Unbox(F64, lo("r"))),
+                    Assign("y", ObjToFloat(F64, lo("r"))),
                     If(Truth(BOOL, lo("r")), (Assign("y", ObjToFloat(F64, lo("o"))),)),
                     ForRange("k", i(0), Len(I64, "a"), i(1), (
                         StoreIndex("a", li("k"), BinOp(F64, BinOpKind.MUL,
