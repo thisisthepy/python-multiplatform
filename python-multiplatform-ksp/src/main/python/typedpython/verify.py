@@ -219,9 +219,12 @@ is eligible only if ALL of these hold:
     proven on an i64 non-buffer list or local array, and i64 + - *. Stores and reductions are never
     mixed in one loop. Those nodes can overflow, which is not a failure of the region: the runtime
     discards it and reruns the loop sequentially. (& | ^ are not in the compiled subset: the front
-    end lowers no bitwise operator, so there is no such reduction to mark; min/max are later.)
+    end lowers no bitwise operator, so there is no such reduction to mark.)
+  * Step 3 (min/max): a statement of the reduction body may be `if e < acc: acc = e` / `e > acc` (either
+    operand order, no else), `acc` an i64 or f64 local, `e` of its type (`_par_minmax`). That is Python's
+    `min(acc, e)`; the f64 NaN case reruns sequentially at run time (SPEC N-15).
 Anything else compiles sequentially, unchanged. This cannot find other eligible shapes (stencils,
-calls, nested tiles, min/max); those are later steps.
+calls, nested tiles, `min()` calls); those are later steps.
 
 Tuple. `Tuple(OBJ, elements)`: a tuple of OBJ expressions (a scalar needs Box), result OBJ, a
 reference creator in the ownership rule. Building one is not an effect.
@@ -1694,8 +1697,8 @@ class _Checker:
                 return e.type is Type.F64 and e.op is UnaryOpKind.NEG and ok(e.operand)
             return False
 
-        if type(body[0]) is Assign:
-            return self._par_reduce(s, body, state, weight, array_ok, at_var)
+        if type(body[0]) in (Assign, If):
+            return self._par_reduce(s, body, state, weight, array_ok, at_var, ok)
         for st in body:
             if type(st) is not StoreIndex or not array_ok(st.array) or not at_var(st.index, st.proven):
                 return None
@@ -1706,26 +1709,41 @@ class _Checker:
         return ParInfo(tuple(sorted(set(stored))), tuple(sorted(set(read))), weight[0])
 
     def _par_reduce(self, s: ForRange, body: tuple, state: _State, weight: list, array_ok,
-                    at_var) -> ParInfo | None:
+                    at_var, ok_f64=None) -> ParInfo | None:
         """SPEC N-15 step 2: a body of only `acc = acc op e` (op ADD or MUL, either operand order), each
         `acc` a distinct i64 local of this function (not a loop variable, array or entry global) that
         is definitely assigned before the loop and appears nowhere else in the body, and `e` built
         from i64 Const, i64 Local (the loop variable, or any scalar the body does not assign), `b[var]`
         proven on an i64 non-buffer list or local array, and i64 + - * . Any of those nodes can overflow:
         the runtime then discards the region and reruns the loop sequentially. No store is allowed in
-        the same loop (a rerun then needs no restore)."""
+        the same loop (a rerun then needs no restore).
+
+        Step 3 (min/max): a statement may instead be `if e < acc: acc = e` (MIN) or `if e > acc: acc = e`
+        (MAX), either operand order, no else, the assigned value equal to the compared `e`, `acc` an
+        I64 or F64 local like the others and `e` of the accumulator's type (F64: the step 1 float
+        expression set). That is Python's `min(acc, e)` / `max(acc, e)`: strict `<` keeps the first
+        element on ties. `<=` / `>=` are not it (the last of equal elements, which differs for -0.0)."""
         var = s.var
         if state is None:
             return None
         accs: dict[str, str] = {}
+        mm: dict[str, object] = {}                     # acc -> e, for MIN / MAX statements
         for st in body:
+            if type(st) is If:
+                hit = self._par_minmax(st)
+                if hit is None or hit[0] in accs:
+                    return None
+                accs[hit[0]] = hit[1]
+                mm[hit[0]] = hit[2]
+                continue
             if (type(st) is not Assign or type(st.value) is not BinOp or st.value.type is not Type.I64
                     or st.value.op not in (BinOpKind.ADD, BinOpKind.MUL) or st.value.np
                     or st.target in accs):
                 return None
             accs[st.target] = st.value.op.name
         for acc in accs:
-            if (self.scalars.get(acc) is not Type.I64 or acc == var or acc in self.arrays
+            want = mm[acc].type if acc in mm else Type.I64
+            if (self.scalars.get(acc) is not want or acc == var or acc in self.arrays
                     or acc in self.larrays or acc in self.entry or acc not in state):
                 return None
         read: list[str] = []
@@ -1750,8 +1768,18 @@ class _Checker:
                         and ok(e.left) and ok(e.right))
             return False
 
+        def reads_acc(e: object) -> bool:
+            if type(e) is Local:
+                return e.name in accs
+            return any(reads_acc(x) for x in _exprs_of(e))
+
         for st in body:
             weight[0] += 2
+            if type(st) is If:
+                e = mm[st.then[0].target]
+                if reads_acc(e) or not (ok(e) if e.type is Type.I64 else (ok_f64 is not None and ok_f64(e))):
+                    return None
+                continue
             b = st.value
             if type(b.left) is Local and b.left.name == st.target and b.left.type is Type.I64:
                 other = b.right
@@ -1762,6 +1790,25 @@ class _Checker:
             if not ok(other):
                 return None
         return ParInfo((), tuple(sorted(set(read))), weight[0], tuple(sorted(accs.items())))
+
+    @staticmethod
+    def _par_minmax(st: If):
+        """(acc, "MIN" | "MAX", e) for `if e < acc: acc = e` and its mirrored spellings, else None."""
+        c = st.cond
+        if (type(c) is not Compare or st.orelse or len(st.then) != 1 or type(st.then[0]) is not Assign
+                or c.op not in (CompareKind.LT, CompareKind.GT)):
+            return None
+        a = st.then[0]
+        if type(c.right) is Local and c.right.name == a.target:
+            e, kind = c.left, "MIN" if c.op is CompareKind.LT else "MAX"       # e < acc, e > acc
+        elif type(c.left) is Local and c.left.name == a.target:
+            e, kind = c.right, "MIN" if c.op is CompareKind.GT else "MAX"      # acc > e, acc < e
+        else:
+            return None
+        if e != a.value or e.type is not c.left.type or e.type is not c.right.type \
+                or e.type not in (Type.I64, Type.F64):
+            return None
+        return a.target, kind, e
 
     def s_Return(self, s: Return, state: _State):
         returns = self.fn.returns
