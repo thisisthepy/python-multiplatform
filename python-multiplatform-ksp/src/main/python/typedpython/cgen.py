@@ -1954,6 +1954,83 @@ class _FnGen:
         self.depth -= 1
         self.emit("}")
 
+    def _vec_plan(self, s: ir.ForRange):
+        """The element-wise buffer store loop `for i in range(a, b): x[i] = f(y[i], ..., k)` that
+        may run two F64 lanes at a time (TP_BUF_VEC2, tp_runtime.h; design/typedpython.md
+        "Vectorised buffer loops"). Returns the store statement, or None. Only step 1, one
+        statement, a proven store at the loop variable into an F64 buffer array, and a value built
+        from proven loads at the same variable, F64 locals and constants, + - * and negation.
+        No division (it raises), no I64 (checked overflow), no other statement."""
+        if s.step.value != 1 or len(s.body) != 1 or not isinstance(s.body[0], ir.StoreIndex):
+            return None
+        st = s.body[0]
+
+        def at_var(ix, proven):
+            return proven and isinstance(ix, ir.Local) and ix.name == s.var
+
+        def ok(e):
+            if e.type is not Type.F64:
+                return False
+            if isinstance(e, ir.Const):
+                return True
+            if isinstance(e, ir.Local):
+                return e.name != s.var and self.types.get(e.name) is Type.F64
+            if isinstance(e, ir.Index):
+                a = self.arrays.get(e.array)
+                return (a is not None and a.buffer and a.type is Type.F64_ARRAY
+                        and at_var(e.index, e.proven))
+            if isinstance(e, ir.BinOp):
+                return (e.op in (ir.BinOpKind.ADD, ir.BinOpKind.SUB, ir.BinOpKind.MUL)
+                        and ok(e.left) and ok(e.right))
+            if isinstance(e, ir.UnaryOp):
+                return e.op is ir.UnaryOpKind.NEG and ok(e.operand)
+            return False
+
+        a = self.arrays.get(st.array)
+        if a is None or not a.buffer or a.type is not Type.F64_ARRAY or not a.stored:
+            return None
+        if not at_var(st.index, st.proven) or not ok(st.value):
+            return None
+        return st
+
+    def _vec_expr(self, e: ir.Expr, base: str, hoist: list[str]) -> str:
+        if isinstance(e, (ir.Const, ir.Local)):
+            v = self.tmp("double")
+            hoist.append(f"{v} = {self.ev(e)};")
+            return f"vdupq_n_f64({v})"
+        if isinstance(e, ir.Index):
+            _, ptr = self._array(e.array)
+            return f"tp_buf_ld2_f64({ptr}, {base})"
+        if isinstance(e, ir.UnaryOp):
+            return f"vnegq_f64({self._vec_expr(e.operand, base, hoist)})"
+        fn = {ir.BinOpKind.ADD: "vaddq_f64", ir.BinOpKind.SUB: "vsubq_f64",
+              ir.BinOpKind.MUL: "vmulq_f64"}[e.op]
+        return f"{fn}({self._vec_expr(e.left, base, hoist)}, {self._vec_expr(e.right, base, hoist)})"
+
+    def _emit_vec_loop(self, st: ir.StoreIndex, ts: str, tk: str, limit: str) -> None:
+        """Four lanes per step (two independent 2-lane loads, then two stores) while tk + 4 <=
+        limit, then two lanes while tk + 2 <= limit; the scalar loop that follows takes the rest."""
+        hoist: list[str] = []
+        self.emit("#ifdef TP_BUF_VEC2")
+        base = f"(Py_ssize_t)((uint64_t){ts} + {tk})"
+        base2 = f"(Py_ssize_t)((uint64_t){ts} + {tk} + 2u)"
+        e1 = self._vec_expr(st.value, base, hoist)
+        e2 = self._vec_expr(st.value, base2, hoist)
+        for h in hoist:
+            self.emit(h)
+        _, ptr = self._array(st.array)
+        v1, v2 = "tp_vv1", "tp_vv2"
+        self.emit(f"for (; {tk} + 4u <= {limit}; {tk} += 4u) {{")
+        self.emit(f"    float64x2_t {v1} = {e1};")
+        self.emit(f"    float64x2_t {v2} = {e2};")
+        self.emit(f"    tp_buf_st2_f64({ptr}, {base}, {v1});")
+        self.emit(f"    tp_buf_st2_f64({ptr}, {base2}, {v2});")
+        self.emit("}")
+        self.emit(f"for (; {tk} + 2u <= {limit}; {tk} += 2u) {{")
+        self.emit(f"    tp_buf_st2_f64({ptr}, {base}, {e1});")
+        self.emit("}")
+        self.emit("#endif")
+
     def st_ForRange(self, s: ir.ForRange) -> None:
         if self.types.get(s.var) is not Type.I64:
             raise CGenError(f"{self.f.name}: range variable {s.var} must be an I64 local")
@@ -1982,9 +2059,13 @@ class _FnGen:
             self.emit(f"    {tn} = ((uint64_t){ts} - (uint64_t){te} - 1u) / {mag} + 1u;")
             sign = "-"
         self.depth += 1
+        vec = self._vec_plan(s) if step == 1 else None
         if self.snapshot:
             # no polling in a snapshot holder: a plain loop
-            self.emit(f"for ({tk} = 0; {tk} < {tn}; {tk}++) {{")
+            self.emit(f"{tk} = 0;")
+            if vec is not None:
+                self._emit_vec_loop(vec, ts, tk, tn)
+            self.emit(f"for (; {tk} < {tn}; {tk}++) {{")
             self.depth += 1
             self.brk.append(None)
         else:
@@ -1996,6 +2077,8 @@ class _FnGen:
             self.depth += 1
             self.poll()
             self.emit(f"{te2} = {tn} - {tk} > (uint64_t)TP_POLL_INTERVAL ? {tk} + (uint64_t)TP_POLL_INTERVAL : {tn};")
+            if vec is not None:
+                self._emit_vec_loop(vec, ts, tk, te2)
             self.emit(f"for (; {tk} < {te2}; {tk}++) {{")
             self.depth += 1
             self.brk.append(label)

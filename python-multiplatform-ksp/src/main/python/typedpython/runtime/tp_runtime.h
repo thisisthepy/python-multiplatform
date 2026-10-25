@@ -1240,6 +1240,33 @@ static inline void tp_buf_st_i64(const tp_buf *b, Py_ssize_t i, int64_t v)
     memcpy(&u, &v, sizeof u);
     __atomic_store_n((uint64_t *)b->data + i, u, __ATOMIC_RELAXED);
 }
+
+/* Two-lane F64 access for the vectorised element-wise store loop (cgen.py _vec_plan; issue #226;
+ * design/typedpython.md "Vectorised buffer loops"). aarch64 only: LDR/STR Qt on an address
+ * aligned to the 8-byte element (tp_buf_enter guarantees 8-byte alignment of the data) is two
+ * element accesses, each single-copy atomic (Arm ARM DDI 0487 B2.2.1: a 64-bit aligned read/write of
+ * a 128-bit SIMD&FP register is a pair of single-copy atomic 64-bit accesses; check the wording
+ * against the manual revision). Written as inline asm (ldr/str q), not NEON intrinsics, so the
+ * compiler sees no plain C access it could split, merge or reorder. Neither lane is
+ * ever split below 8 bytes. Other targets (x86-64 included: the Intel SDM Vol. 3A 8.1.1 lists
+ * 128-bit SSE accesses as NOT guaranteed atomic) get no TP_BUF_VEC2 and keep the scalar relaxed
+ * atomic loop above. */
+#if defined(__aarch64__) && defined(__ARM_NEON) && !defined(TP_NO_BUF_VEC)
+#include <arm_neon.h>
+#define TP_BUF_VEC2 1
+static inline float64x2_t tp_buf_ld2_f64(const tp_buf *b, Py_ssize_t i)
+{
+    float64x2_t v;                  /* inline asm: no C-level non-atomic access exists to split or merge */
+    const double *p = (const double *)b->data + i;
+    __asm__ volatile("ldr %q0, %1" : "=w"(v) : "Q"(*(const double (*)[2])p));
+    return v;
+}
+static inline void tp_buf_st2_f64(const tp_buf *b, Py_ssize_t i, float64x2_t v)
+{
+    double *p = (double *)b->data + i;
+    __asm__ volatile("str %q1, %0" : "=Q"(*(double (*)[2])p) : "w"(v));
+}
+#endif
 #endif
 
 /* ------------------------------------------------------------------------------------------
