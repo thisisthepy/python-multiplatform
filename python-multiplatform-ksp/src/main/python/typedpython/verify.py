@@ -85,7 +85,7 @@ Fixed-layout classes (SPEC N-11). The verifier never trusts the front end for th
   * A `Call` of a compiled callee whose parameter has cls=C (the callee's entry guard) with an
     argument not proved exact-C by the forms above can fail that guard in the middle of the caller:
     it counts toward `may_deopt` (so it is legal only in a pure function) unless it is a legal redo.
-  * Purity/deopt: CheckExact can deopt (like Unbox to i64): only in a pure function, and it counts
+  * Purity/deopt: CheckExact can deopt (like every Unbox): only in a pure function, and it counts
     toward `may_deopt` even when redundant. FieldSet is an effect (and makes the function not
     *closed*: replacing a slot may drop the last reference to the old value, whose `__del__` is user
     code). FieldGet, Is, IsExact, New are not effects.
@@ -975,8 +975,8 @@ class _Checker:
             self.error(TYPE, f"Unbox of {getattr(ot, 'value', ot)}")
         if e.type not in ir.SCALARS:
             self.error(TYPE, f"Unbox gives a scalar, node says {e.type.value}")
-        elif e.type is Type.I64:
-            self.can_deopt = True
+        else:
+            self.can_deopt = True       # every Unbox checks its operand's exact type (#271)
         return dataclasses.replace(e, operand=operand)
 
     def e_MathCall(self, e: MathCall, state: _State) -> ir.Expr:
