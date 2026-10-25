@@ -591,6 +591,12 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 
 - **T-1** GIL builds: Kotlin threads attach a thread state and serialise on the GIL. `Status: partial`
   (see C-4; the release after initialisation is tested by `GilReleaseTest` / `GilReleaseNativeTest`).
+- **T-1a** On desktop, entering Python from a JVM virtual thread (the outermost `withGIL`) raises
+  `IllegalStateException` before `PyGILState_Ensure`: the GIL thread state is bound to the OS carrier
+  thread, and a virtual thread can unmount and resume on another carrier inside the scope. Run Python on
+  platform threads. Android, native and wasm are unaffected. Pinning the virtual thread instead (issue #161
+  option B) needs a public API change and is pending a decision. `Status: implemented`,
+  `PM/desktopTest/.../VirtualThreadGILTest.kt`.
 - **T-2** Free-threaded builds selected with `-PpythonFreeThreaded=true` download a different CPython
   asset. `Status: partial` (desktop only, opt-in; default is `pythonFreeThreaded=false` in `gradle.properties`)
  , `GP/PythonHomeStagingTest.kt`, `PM/desktopTest/.../FreeThreadedGCGateTest.kt`, `VersionsTest.kt`.

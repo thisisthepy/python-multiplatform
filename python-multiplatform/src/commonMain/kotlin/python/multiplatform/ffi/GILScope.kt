@@ -50,6 +50,14 @@ internal fun maybeReachEvalCheckpoint(tState: ThreadGILState) {
     }
 }
 
+/**
+ * Called by the outermost [withGIL] before `PyGILState_Ensure`. Desktop throws
+ * [IllegalStateException] on a JVM virtual thread (issue #161); every other target does nothing.
+ * Not inline, so that [withGIL], which is, can call it.
+ */
+@PublishedApi
+internal expect fun checkGILThread()
+
 public expect fun getThreadGILState(): ThreadGILState
 public expect fun setThreadGILState(state: ThreadGILState?)
 
@@ -75,6 +83,7 @@ public inline fun <T> withGIL(block: () -> T): T {
     val tState = getThreadGILState()
     val isOutermost = tState.depth == 0
     if (isOutermost) {
+        checkGILThread()
         tState.state = PyGILState_Ensure()
     }
     tState.depth++
