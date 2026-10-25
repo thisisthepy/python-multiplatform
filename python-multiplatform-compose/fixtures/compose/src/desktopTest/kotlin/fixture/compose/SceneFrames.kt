@@ -2,6 +2,7 @@ package fixture.compose
 
 import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.ImageComposeScene
+import org.jetbrains.skia.Image
 
 /**
  * Renders the frame that a state write made just before this call must produce (#157).
@@ -15,10 +16,15 @@ import androidx.compose.ui.ImageComposeScene
  * timeout.
  */
 internal fun ImageComposeScene.renderAfterWrite(timeoutMillis: Long = 5_000) {
+    renderAfterWriteImage(timeoutMillis)
+}
+
+/** [renderAfterWrite] that returns the rendered frame. */
+internal fun ImageComposeScene.renderAfterWriteImage(timeoutMillis: Long = 5_000): Image {
     Snapshot.sendApplyNotifications()
     val deadline = System.nanoTime() + timeoutMillis * 1_000_000
     while (!hasInvalidations() && System.nanoTime() < deadline) {
         Thread.sleep(1)
     }
-    render()
+    return render()
 }

@@ -1,7 +1,6 @@
 package fixture.compose
 
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.unit.Density
 import org.jetbrains.skia.Bitmap
@@ -455,8 +454,7 @@ class ComposableRenderTest {
         try {
             firstInk = inkOfImage(scene.render())
             body.value = columnCalling("_second")
-            Snapshot.sendApplyNotifications()
-            secondInk = inkOfImage(scene.render())
+            secondInk = inkOfImage(scene.renderAfterWriteImage())
             Python3.exec("_held_first = sys.getrefcount(_first)")
             assertEquals(1, CountingCallableArena.created, "the arena was rebuilt instead of remembered")
             assertEquals(0, CountingCallableArena.released, "something released a callable before disposal")
