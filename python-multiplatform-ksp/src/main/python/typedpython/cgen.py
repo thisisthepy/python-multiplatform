@@ -1997,8 +1997,9 @@ class _FnGen:
                 return (a is not None and a.buffer and a.type is Type.F64_ARRAY
                         and at_var(e.index, e.proven))
             if isinstance(e, ir.BinOp):
+                # a numpy operation reports FP flags per element (tp_np_f64); NEON lanes do not
                 return (e.op in (ir.BinOpKind.ADD, ir.BinOpKind.SUB, ir.BinOpKind.MUL)
-                        and ok(e.left) and ok(e.right))
+                        and not e.np and ok(e.left) and ok(e.right))
             if isinstance(e, ir.UnaryOp):
                 return e.op is ir.UnaryOpKind.NEG and ok(e.operand)
             return False
