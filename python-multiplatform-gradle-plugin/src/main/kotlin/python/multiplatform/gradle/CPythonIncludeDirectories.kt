@@ -53,7 +53,9 @@ object CPythonIncludeLayout {
                 "$dir/python/include/python$tag"
             }
             in androidTargets -> "$target/prefix/include/python$tag"
-            else -> "ios/Python.xcframework/$target/include/python$tag"
+            // The framework's own Headers, which is also what the library's iOS cinterop reads: the
+            // 3.15 iOS support archive no longer ships `<abi>/include/python3.15` beside it (#313).
+            else -> "ios/Python.xcframework/$target/Python.framework/Headers"
         }
     }
 
