@@ -490,6 +490,46 @@ class PythonxAdapterTest {
     }
 
     /**
+     * Issue #308: a proxy CLASS written where an OBJECT value goes stands for its registered empty
+     * value, exactly `Cls.empty()` (SPEC U-7). (a) the class reaches Kotlin as the empty value, in a
+     * plain call and as the receiver in an overload vote; (b) a class with no factory registered
+     * propagates `empty()`'s TypeError, which names `register_empty`; (c) a class of an unrelated type
+     * is refused; (d) the vote still picks the overload by the other arguments.
+     */
+    @Test
+    fun aProxyClassPassedAsAnObjectArgumentIsItsEmptyValue() = withAdapter {
+        Python3.exec(
+            """
+            from androidx.compose.foundation.layout import padding, paddingValuesOf
+            from androidx.compose.ui import Modifier, emptyModifier, describeModifier
+            _pv = paddingValuesOf(2)
+            _pv_class = type(_pv)
+            _px = {
+                'class': describeModifier(Modifier),
+                'instance': describeModifier(Modifier.empty()),
+                'voted': describeModifier(padding(Modifier, 16)),
+            }
+            try:
+                padding(emptyModifier(), _pv_class)
+                _px['nofactory'] = 'called'
+            except TypeError as e:
+                _px['nofactory'] = str(e)
+            try:
+                describeModifier(_pv_class)
+                _px['unrelated'] = 'called'
+            except TypeError as e:
+                _px['unrelated'] = str(e)
+            """.trimIndent(),
+        )
+
+        assertEquals(eval("_px['instance']"), eval("_px['class']"))
+        assertEquals("padding(16.0)", eval("_px['voted']"))
+        assertTrue(eval("_px['nofactory']").contains("register_empty"), eval("_px['nofactory']"))
+        val unrelated = eval("_px['unrelated']")
+        assertTrue(unrelated != "called" && !unrelated.contains("register_empty"), unrelated)
+    }
+
+    /**
      * The same chain under the Pythonic method names (issue #131): `fill_max_width` and `z_index`
      * are the Kotlin members `fillMaxWidth` and `zIndex`, from the class object and from an instance,
      * with a snake_case keyword (`z_index=` is `zIndex`'s own parameter `zIndex`). The proxy class
