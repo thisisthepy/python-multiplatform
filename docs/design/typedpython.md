@@ -402,6 +402,32 @@ i64/f64 지역)는 **컴파일된 구간 안의 임시 값**만 줄인다. 컨�
 **선행 조건:** 스텁 생성기가 픽스처 대역이 아닌 실제 `pythonx-map.toml` 을 읽고, 생성된 스텁이
 IDE·타입 체커가 찾는 자리(pythonx-compose 배포본)에 설치돼야 한다. 2026-10 현재 미완료.
 
+### 4.x 벡터화된 버퍼 루프 (#226)
+
+`array.array[float]` 버퍼 인자(#149)의 원소 접근은 원소 하나당 relaxed atomic 8바이트 접근이다. 컴파일러는 atomic 접근을
+벡터화하지 않으므로 `a[i] = a[i] * k` 형태의 저장 루프가 느렸다(측정: 평범한 접근 대비 2.54배,
+`benchmarks/typedpython/results/2026-10-17-buffer-atomic-vs-plain.txt`). 해결은 두 레인 벡터 접근 도우미다.
+
+- **적용 모양**: `for i in range(a, b)` (step 1), 본문이 문장 하나, 증명된(`proven`) `x[i] = f(...)` 로 F64 버퍼에 저장하고,
+  `f` 는 같은 `i` 에서 증명된 F64 버퍼 읽기, F64 지역, 상수, `+ - *`, 단항 `-` 만 쓴다. 나눗셈(예외 가능), I64(검사된 오버플로),
+  증명되지 않은 읽기는 스칼라 경로를 유지한다. 벡터 루프는 두 원소씩 처리하고 나머지는 기존 스칼라 루프(폴링 청크 안)가 맡는다.
+- **도우미**: `tp_buf_ld2_f64` / `tp_buf_st2_f64` (`tp_runtime.h`), `TP_BUF_VEC2` 가 정의된 빌드에서만 존재한다.
+  `-DTP_NO_BUF_VEC` 는 도우미를 끄고(스칼라 relaxed atomic 으로 되돌림), `-DTP_BUFFER_PLAIN` 빌드에도 없다.
+- **대상별로 원소 접근이 단일 복사 원자적인 이유 (8바이트 미만으로 찢어지지 않음)**:
+  - aarch64: Arm ARM (DDI 0487), B2.2.1 "Requirements for single-copy atomicity": a read/write of a 128-bit SIMD&FP register
+    that is 64-bit aligned is treated as a pair of single-copy atomic 64-bit accesses. The helper is inline asm (`ldr q` / `str q`
+    with precise "Q" memory operands, no clobber), so the compiler sees no non-atomic C access and cannot split, merge or reorder it as a plain one;
+    the per-element guarantee comes from the architecture. It needs 8-byte alignment, which `tp_buf_enter` already checks.
+    **Check the exact wording against the manual revision**: this environment had no copy of the manual, the summary is from memory.
+  - x86-64: SDM Vol. 3A 8.1.1 이 보장하는 것은 64비트 경계에 정렬된 쿼드워드 읽기/쓰기까지다. 128비트 SSE/AVX 접근의
+    원소별 원자성은 SDM 이 보장하지 않으므로(벤더 별도 문서에만 있음) **인용할 보장이 없어** 구현하지 않았다. x86-64 는
+    스칼라 relaxed atomic 경로를 쓴다.
+  - 그 밖의 대상(wasm 등): 스칼라 relaxed atomic.
+- **C 메모리 모델**: 벡터 접근은 인라인 어셈블리라 C 컴파일러가 보는 비원자 C 접근이 없다. 보장은 C 표준이 아니라 위 아키텍처
+  규칙에 있고, 도우미 한 곳에 모아 두어 대상 판별이 한 줄(`#if`)로 드러난다. N-9 의 의미(찢어진 값 없음)는 유지된다.
+- **측정** (`benchmarks/typedpython/results/2026-10-25-buffer-vec-scale.txt`): scale 커널, 인라인 어셈블리 도우미로 로드 약 9 에서 평범한 접근 대비
+  atomic 스칼라 1.25배, 새 경로(정밀 메모리 피연산자, 4원소 언롤) 0.94배.
+
 ## 5. 등급 2, 별도 언어 없는 커널
 
 > **결정 (2026-10-04, 메인테이너):** GPU 커널과 CPU SIMD 는 탐색이 아니라 **약속**이다 (INTENT §1.5).
