@@ -137,6 +137,8 @@ still deopts. The interval rules, exactly:
                                unproven one is clamped to i64 (a result outside it deopts, so only
                                in-range values flow on)
   NEG / POS                    [-hi, -lo] / [lo, hi]
+  INVERT                       [~hi, ~lo] (~x == -x - 1, always in i64)
+  AND                          an operand with lo >= 0: [0, min of the hi of the non-negative operands]
   MOD                          divisor interval > 0: [0, hi(b) - 1]; < 0: [lo(b) + 1, 0]; else
                                [-(d - 1), d - 1] with d = max |b|
   FLOORDIV                     divisor interval that keeps its sign: the min/max of the four
@@ -246,12 +248,15 @@ left the i64 range, a PyLong. It lives only in locals and temporaries (never a p
 or return value). It is produced only by `ToInt` (of an I64), by BinOp/UnaryOp over INT operands, by
 an INT local, and by a redo Call of an I64-returning callee (an INT argument may stand for an I64
 parameter of a redo callee: a promoted value does not fit, which is the callee's deopt, redone).
-BinOp on INT: both operands INT, ADD/SUB/MUL/FLOORDIV/MOD/LSHIFT/RSHIFT, result INT; TRUEDIV of ints is an
+BinOp on INT: both operands INT, ADD/SUB/MUL/FLOORDIV/MOD/LSHIFT/RSHIFT/AND/OR/XOR, result INT; TRUEDIV of ints is an
 OBJ operation on boxed values; `proven` is never legal on it. UnaryOp NEG/POS of INT is INT. Compare of two
 INTs is BOOL. An INT crosses into an object slot only through `Box`, and an I64 into an INT slot only
 through `ToInt`; an INT never flows into an I64 slot. None of these nodes can deopt (they promote), run
 user code or make a function impure, so an impure function may contain them freely, and they do not
-affect `may_deopt`, `pure` or closedness. The shifts exist only on INT and OBJ.
+affect `may_deopt`, `pure` or closedness. Bitwise operators (SPEC N-16, #289): I64 AND/OR/XOR and
+UnaryOp INVERT of I64 / INT are legal and cannot deopt; I64 LSHIFT/RSHIFT are unproven deopting ops
+(overflow, a negative count), so a function holding one is not impure-safe unless it is pure; they
+are built in pure functions only (an impure function shifts INTs). None exists on F64.
 
 Function.entry_globals. Scalar `Param`s (I64/F64/BOOL), read once at entry as part of the guards;
 assigned at entry for definite assignment; the body reads them as `Local(name)` of that type and may
@@ -335,11 +340,13 @@ _RETURN_TYPES = _VALUE_TYPES + (Type.NONE,)
 # The nodes that produce an INT (an owned tp_int: native, or a PyLong once promoted).
 _INT_PRODUCERS = frozenset({ToInt, BinOp, UnaryOp, Local, Call})
 _INT_OPS = frozenset({BinOpKind.ADD, BinOpKind.SUB, BinOpKind.MUL, BinOpKind.FLOORDIV,
-                      BinOpKind.MOD, BinOpKind.LSHIFT, BinOpKind.RSHIFT})
+                      BinOpKind.MOD, BinOpKind.LSHIFT, BinOpKind.RSHIFT, BinOpKind.AND,
+                      BinOpKind.OR, BinOpKind.XOR})
+_BITWISE_OPS = frozenset({BinOpKind.AND, BinOpKind.OR, BinOpKind.XOR})   # SPEC N-16
 _ELEMENT = {Type.F64_ARRAY: Type.F64, Type.I64_ARRAY: Type.I64, Type.BOOL_ARRAY: Type.BOOL}
 _MATH_ARITY = {MathFunc.ATAN2: 2, MathFunc.HYPOT: 2}            # every other MathFunc: 1
 _I64_DEOPT_OPS = frozenset({BinOpKind.ADD, BinOpKind.SUB, BinOpKind.MUL, BinOpKind.FLOORDIV,
-                            BinOpKind.MOD, BinOpKind.TRUEDIV})
+                            BinOpKind.MOD, BinOpKind.TRUEDIV, BinOpKind.LSHIFT, BinOpKind.RSHIFT})
 _I64_MIN, _I64_MAX = -2 ** 63, 2 ** 63 - 1
 _FULL = (_I64_MIN, _I64_MAX)
 _LEN_MAX = 2 ** 62
@@ -718,6 +725,13 @@ class _Checker:
         if cls is BinOp and e.op in _POW2_OPS:
             lo, hi = _div_interval(e.op, self.interval(e.left), self.interval(e.right))
             return (max(lo, _I64_MIN), min(hi, _I64_MAX))
+        if cls is BinOp and e.op is BinOpKind.AND:
+            # SPEC N-16: a non-negative operand bounds an AND to [0, its hi] (the sign bit clears)
+            his = [iv[1] for iv in (self.interval(e.left), self.interval(e.right)) if iv[0] >= 0]
+            return (0, min(his)) if his else _FULL
+        if cls is UnaryOp and e.op is UnaryOpKind.INVERT:
+            lo, hi = self.interval(e.operand)          # ~x == -x - 1, monotone decreasing
+            return (~hi, ~lo)
         if cls is UnaryOp and e.op in (UnaryOpKind.NEG, UnaryOpKind.POS):
             lo, hi = self.interval(e.operand)
             lo, hi = (-hi, -lo) if e.op is UnaryOpKind.NEG else (lo, hi)
@@ -839,8 +853,9 @@ class _Checker:
                        f"BinOp {e.op.value} on {getattr(lt, 'value', lt)} operands")
         elif lt is not rt:
             self.slot(right, lt, f"right operand of {e.op.value}")
-        elif shift and lt is not Type.OBJ:
-            self.error(TYPE, f"{e.op.value} on {lt.value} operands: only int (INT) and OBJ shift")
+        elif (shift or e.op in _BITWISE_OPS) and lt is Type.F64:
+            self.error(TYPE, f"{e.op.value} on f64 operands: CPython raises TypeError (an OBJ "
+                             f"operation)")
         else:
             want = Type.F64 if (lt is Type.I64 and e.op is BinOpKind.TRUEDIV) else lt
             if e.type is not want:
@@ -887,6 +902,8 @@ class _Checker:
             elif e.type is not ot:
                 self.error(TYPE, f"unary {e.op.value} of {ot.value} is {ot.value}, node says "
                                  f"{e.type.value}")
+            elif ot is Type.F64 and e.op is UnaryOpKind.INVERT:
+                self.error(TYPE, "unary ~ on f64")
             elif ot is Type.I64 and e.op is UnaryOpKind.NEG and not proven:
                 self.can_deopt = True
         return dataclasses.replace(e, operand=operand)

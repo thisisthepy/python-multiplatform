@@ -155,6 +155,12 @@ static inline void tp_cs_end(tp_cs *c)
 #define TP_BINOP_RSHIFT 13
 #define TP_BINOP_ILSHIFT 14
 #define TP_BINOP_IRSHIFT 15
+#define TP_BINOP_AND 16
+#define TP_BINOP_OR 17
+#define TP_BINOP_XOR 18
+#define TP_BINOP_IAND 19
+#define TP_BINOP_IOR 20
+#define TP_BINOP_IXOR 21
 
 /* ------------------------------------------------------------------------------------------
  * Integers (int64_t)
@@ -227,6 +233,39 @@ static inline int tp_neg_i64(int64_t a, int64_t *out)
         return 1;
     }
     *out = -a;
+    return 0;
+}
+
+/* Shifts of i64 (SPEC N-16, ir.BinOp LSHIFT / RSHIFT on I64). Return 0, or 1 = deopt: a negative count
+ * (the interpreter raises ValueError("negative shift count")) and, for <<, a result outside i64 (the
+ * interpreter computes the big int). Never shift by a count outside [0, 63] and never left-shift a
+ * signed value: the shift runs on uint64_t, and the overflow test shifts the result back. */
+static inline int tp_lshift_i64(int64_t a, int64_t b, int64_t *out)
+{
+    if (b < 0) {
+        return 1;
+    }
+    if (a == 0) {
+        *out = 0;
+        return 0;
+    }
+    if (b >= 64) {
+        return 1;                 /* a != 0: bit 63 or more is lost */
+    }
+    uint64_t r = (uint64_t)a << b;
+    if ((int64_t)r >> b != a) {
+        return 1;
+    }
+    *out = (int64_t)r;
+    return 0;
+}
+
+static inline int tp_rshift_i64(int64_t a, int64_t b, int64_t *out)
+{
+    if (b < 0) {
+        return 1;
+    }
+    *out = b >= 64 ? (a < 0 ? -1 : 0) : (a >> b);
     return 0;
 }
 
@@ -1567,6 +1606,12 @@ static inline PyObject *tp_binop_obj(PyObject *a, PyObject *b, int op)
     case TP_BINOP_RSHIFT: return PyNumber_Rshift(a, b);
     case TP_BINOP_ILSHIFT: return PyNumber_InPlaceLshift(a, b);
     case TP_BINOP_IRSHIFT: return PyNumber_InPlaceRshift(a, b);
+    case TP_BINOP_AND: return PyNumber_And(a, b);
+    case TP_BINOP_OR: return PyNumber_Or(a, b);
+    case TP_BINOP_XOR: return PyNumber_Xor(a, b);
+    case TP_BINOP_IAND: return PyNumber_InPlaceAnd(a, b);
+    case TP_BINOP_IOR: return PyNumber_InPlaceOr(a, b);
+    case TP_BINOP_IXOR: return PyNumber_InPlaceXor(a, b);
     }
     PyErr_SetString(PyExc_SystemError, "tp_binop_obj: unknown operator");
     return NULL;
@@ -1937,6 +1982,39 @@ static inline int tp_int_rshift(const tp_int *a, const tp_int *b, tp_int *out)
         return 0;
     }
     return tp_int_binop_slow(TP_BINOP_RSHIFT, a, b, out);
+}
+
+/* & | ^ (SPEC N-16): native two's complement when both are native (it equals Python's infinite one),
+ * else CPython's own operator */
+#define TP_INT_BITWISE(name, OPCODE, CEXPR)                                                       \
+static inline int tp_int_##name(const tp_int *a, const tp_int *b, tp_int *out)                    \
+{                                                                                                  \
+    if (TP_INT_NATIVE2(a, b)) {                                                                    \
+        out->v = CEXPR;                                                                            \
+        out->big = NULL;                                                                           \
+        return 0;                                                                                  \
+    }                                                                                              \
+    return tp_int_binop_slow(OPCODE, a, b, out);                                                   \
+}
+TP_INT_BITWISE(and, TP_BINOP_AND, a->v & b->v)
+TP_INT_BITWISE(or, TP_BINOP_OR, a->v | b->v)
+TP_INT_BITWISE(xor, TP_BINOP_XOR, a->v ^ b->v)
+
+static inline int tp_int_invert(const tp_int *a, tp_int *out)
+{
+    PyObject *x, *r;
+    if (a->big == NULL) {
+        out->v = ~a->v;
+        out->big = NULL;
+        return 0;
+    }
+    x = tp_int_box(a);
+    if (x == NULL) {
+        return -1;
+    }
+    r = PyNumber_Invert(x);
+    Py_DECREF(x);
+    return tp_int_take(out, r);
 }
 
 static inline int tp_int_neg(const tp_int *a, tp_int *out)

@@ -200,7 +200,9 @@ _PYCMP = {ir.CompareKind.EQ: "Py_EQ", ir.CompareKind.NE: "Py_NE", ir.CompareKind
           ir.CompareKind.LE: "Py_LE", ir.CompareKind.GT: "Py_GT", ir.CompareKind.GE: "Py_GE"}
 _I64_OP = {ir.BinOpKind.ADD: "tp_add_i64", ir.BinOpKind.SUB: "tp_sub_i64",
            ir.BinOpKind.MUL: "tp_mul_i64", ir.BinOpKind.FLOORDIV: "tp_floordiv_i64",
-           ir.BinOpKind.MOD: "tp_mod_i64", ir.BinOpKind.TRUEDIV: "tp_truediv_i64"}
+           ir.BinOpKind.MOD: "tp_mod_i64", ir.BinOpKind.TRUEDIV: "tp_truediv_i64",
+           ir.BinOpKind.LSHIFT: "tp_lshift_i64", ir.BinOpKind.RSHIFT: "tp_rshift_i64"}
+_I64_BITWISE = {ir.BinOpKind.AND: "&", ir.BinOpKind.OR: "|", ir.BinOpKind.XOR: "^"}   # SPEC N-16
 _F64_OP = {ir.BinOpKind.TRUEDIV: "tp_truediv_f64", ir.BinOpKind.FLOORDIV: "tp_floordiv_f64",
            ir.BinOpKind.MOD: "tp_mod_f64"}
 _NP_I64_OP = {ir.BinOpKind.TRUEDIV: "tp_np_truediv_i64", ir.BinOpKind.FLOORDIV: "tp_np_floordiv_i64",
@@ -218,13 +220,14 @@ _OBJ_OP = {k: f"TP_BINOP_{k.name}" for k in ir.BinOpKind}
 _INT_OP = {ir.BinOpKind.ADD: "tp_int_add", ir.BinOpKind.SUB: "tp_int_sub",
            ir.BinOpKind.MUL: "tp_int_mul", ir.BinOpKind.FLOORDIV: "tp_int_floordiv",
            ir.BinOpKind.MOD: "tp_int_mod", ir.BinOpKind.LSHIFT: "tp_int_lshift",
-           ir.BinOpKind.RSHIFT: "tp_int_rshift"}
+           ir.BinOpKind.RSHIFT: "tp_int_rshift", ir.BinOpKind.AND: "tp_int_and",
+           ir.BinOpKind.OR: "tp_int_or", ir.BinOpKind.XOR: "tp_int_xor"}
 _MATH = {ir.MathFunc.SQRT: 1, ir.MathFunc.EXP: 1, ir.MathFunc.LOG: 1, ir.MathFunc.SIN: 1,
          ir.MathFunc.COS: 1, ir.MathFunc.TAN: 1, ir.MathFunc.FABS: 1, ir.MathFunc.ATAN2: 2,
          ir.MathFunc.HYPOT: 2}
 # I64 operations whose helper can return 1 (API.md): MOD never overflows (MIN % -1 == 0).
 _I64_DEOPT = {ir.BinOpKind.ADD, ir.BinOpKind.SUB, ir.BinOpKind.MUL, ir.BinOpKind.FLOORDIV,
-              ir.BinOpKind.TRUEDIV}
+              ir.BinOpKind.TRUEDIV, ir.BinOpKind.LSHIFT, ir.BinOpKind.RSHIFT}
 _INT64_MIN, _INT64_MAX = -(2 ** 63), 2 ** 63 - 1
 # `proven` on an I64 op (ir.BinOp.proven): ADD/SUB/MUL cannot overflow; FLOORDIV/MOD by a Const
 # power of two of a value >= 0 become a shift / mask.
@@ -1080,8 +1083,15 @@ class _FnGen:
             self.emit(f"tp_int_release(&{a}); tp_int_release(&{b});")
             self.emit("if (tp_s != 0) { tp_rc = -1; goto tp_exit; }")
             return t
-        if lt in (Type.I64, Type.F64) and e.op in (ir.BinOpKind.LSHIFT, ir.BinOpKind.RSHIFT):
-            raise CGenError(f"{self.f.name}: {e.op.value} on {lt} operands (only INT and OBJ shift)")
+        if lt is Type.F64 and (e.op in _I64_BITWISE or e.op in (ir.BinOpKind.LSHIFT,
+                                                                 ir.BinOpKind.RSHIFT)):
+            raise CGenError(f"{self.f.name}: {e.op.value} on {lt} operands (an OBJ operation)")
+        if lt is Type.I64 and e.op in _I64_BITWISE:
+            if e.proven or e.type is not Type.I64:
+                raise CGenError(f"{self.f.name}: BinOp {e.op.name} on I64 operands")
+            t = self.tmp("int64_t")                 # SPEC N-16: no overflow, no deopt
+            self.emit(f"{t} = {a} {_I64_BITWISE[e.op]} {b};")
+            return t
         if lt is Type.I64:
             t = self.tmp("double" if e.op is ir.BinOpKind.TRUEDIV else "int64_t")
             if e.proven and e.op in _SHIFT_OPS:
@@ -1137,6 +1147,18 @@ class _FnGen:
                 return v                    # the operand's temporary is the result
             t = self.tmp("tp_int")
             self.emit(f"tp_s = tp_int_neg(&{v}, &{t});")
+            self.emit(f"tp_int_release(&{v});")
+            self.emit("if (tp_s != 0) { tp_rc = -1; goto tp_exit; }")
+            return t
+        if e.op is ir.UnaryOpKind.INVERT:      # SPEC N-16
+            if e.proven or e.type is not ot or ot not in (Type.I64, Type.INT):
+                raise CGenError(f"{self.f.name}: INVERT of {ot}")
+            if ot is Type.I64:
+                t = self.tmp("int64_t")
+                self.emit(f"{t} = ~({v});")
+                return t
+            t = self.tmp("tp_int")
+            self.emit(f"tp_s = tp_int_invert(&{v}, &{t});")
             self.emit(f"tp_int_release(&{v});")
             self.emit("if (tp_s != 0) { tp_rc = -1; goto tp_exit; }")
             return t
