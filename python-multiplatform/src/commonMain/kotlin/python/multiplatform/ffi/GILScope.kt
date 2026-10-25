@@ -51,12 +51,22 @@ internal fun maybeReachEvalCheckpoint(tState: ThreadGILState) {
 }
 
 /**
- * Called by the outermost [withGIL] before `PyGILState_Ensure`. Desktop throws
- * [IllegalStateException] on a JVM virtual thread (issue #161); every other target does nothing.
- * Not inline, so that [withGIL], which is, can call it.
+ * Whether this thread must be pinned to its OS carrier for the outermost [withGIL] (#161): true only
+ * for a JVM virtual thread on desktop. `PyGILState_Ensure` binds the CPython thread state to the OS
+ * thread, while [withGIL]'s depth lives in the (virtual) thread's own state; a virtual thread that
+ * parked inside the scope could resume on another carrier and Release there.
  */
 @PublishedApi
-internal expect fun checkGILThread()
+internal expect fun needsCarrierPin(): Boolean
+
+/**
+ * Runs [body] with the calling (virtual) thread pinned to its current carrier, so it cannot unmount
+ * until [body] returns; [body]'s result or exception is passed through. Only called when
+ * [needsCarrierPin] is true; every other target runs [body] directly.
+ */
+@PublishedApi
+internal expect fun <R> runOnPinnedCarrier(body: () -> R): R
+
 
 public expect fun getThreadGILState(): ThreadGILState
 public expect fun setThreadGILState(state: ThreadGILState?)
@@ -79,11 +89,20 @@ public expect fun setThreadGILState(state: ThreadGILState?)
  * that penalty. The nesting counter here already makes inner scopes cheap; on a free-threaded
  * build the outermost one stops being a bottleneck as well.
  */
-public inline fun <T> withGIL(block: () -> T): T {
+public inline fun <T> withGIL(crossinline block: () -> T): T =
+    // #161 option B: on a JVM virtual thread the outermost scope runs pinned to its carrier, from
+    // PyGILState_Ensure to Release, so a park inside it cannot move it to another OS thread. That is
+    // why `block` is crossinline: it is called from the pinned trampoline, not inlined into a frame
+    // that could return from the caller.
+    if (getThreadGILState().depth == 0 && needsCarrierPin()) runOnPinnedCarrier { gilScope(block) }
+    else gilScope(block)
+
+/** [withGIL]'s scope itself: attach on the outermost entry, count the nesting, release on the last exit. */
+@PublishedApi
+internal inline fun <T> gilScope(crossinline block: () -> T): T {
     val tState = getThreadGILState()
     val isOutermost = tState.depth == 0
     if (isOutermost) {
-        checkGILThread()
         tState.state = PyGILState_Ensure()
     }
     tState.depth++
