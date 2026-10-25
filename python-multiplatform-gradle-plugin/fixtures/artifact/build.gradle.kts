@@ -60,9 +60,9 @@ kotlin {
                 // `Composer` anywhere. Composables are a different problem
                 // (`docs/archive/pythonx-adapter-design.md` §5) and are not touched here.
                 //
-                // Version pinned to the catalog's `compose-plugin`, which is what the rest of this
+                // Version pinned to the catalog's `compose-libraries`, which is what the rest of this
                 // build resolves, so no second Compose version enters the cache.
-                val composeVersion = libs.versions.compose.plugin.get()
+                val composeVersion = libs.versions.compose.libraries.get()
                 implementation("org.thisisthepy.compose.ui:ui-desktop:$composeVersion")
                 implementation("org.thisisthepy.compose.ui:ui-unit-desktop:$composeVersion")
                 implementation("org.thisisthepy.compose.foundation:foundation-layout-desktop:$composeVersion")
