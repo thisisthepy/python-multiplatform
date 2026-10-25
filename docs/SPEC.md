@@ -892,9 +892,16 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     `min(a, b)` compares with `<` and keeps the first element in iteration order on ties (including
     `+0.0` versus `-0.0`), NaN behaviour depends on position because comparisons with NaN are false,
     and chunked combination must reproduce that chain bit for bit; if an implementation cannot, they
-    are left to a later step. Step 2 implements `+` and `*` only (min/max follow in step 3 below): the compiled subset has no bitwise
-    operator (the front end skips a function using `&`, `|` or `^` on ints, there is no IR operation),
-    so `& | ^` are left until the subset has them.
+    are left to a later step. Step 2 implements `+` and `*` (min/max follow in step 3, `& | ^` in step 4 below).
+    **Bitwise (step 4).** `acc = acc & e`, `acc | e`, `acc ^ e` (either operand order; the augmented
+    `acc &= e` lowers to the same shape) on an i64 accumulator, with `e` the step 2 i64 expression set
+    extended with the N-16 operators `& | ^` and `~`. Shifts are not accepted in `e`: their overflow
+    and negative-count deopt is not a worker failure, so such a loop stays sequential. A chunk folds
+    from the identity (-1 for `&`, 0 for `|` and `^`) and the partials combine in chunk order; these
+    operators are exactly associative and commutative and never overflow, so the combination cannot
+    fail. Only an overflow inside `e` (for example `xs[i] * c`) discards the region and reruns the loop
+    sequentially, as for `+`. They may share a loop with `+ *` and min/max accumulators. The accumulator
+    rules are step 2's (read nowhere else in the body, one operator per accumulator).
     **`min`/`max` (step 3).** The compiled subset has no `min(a, b)` / `max(a, b)` call (it stays a
     generic object call, sequential). What it does compile is Python's own definition of
     `min(acc, e)`, the conditional update `if e < acc: acc = e` (`e > acc` for max; `acc > e` and
@@ -941,7 +948,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     chunk, NaN/inf/-0.0), identical bytes for every thread count, failure at first/middle/last
     iteration, negative qualification cases, disabled-path test, reductions, race and GC tests,
     TSan/ASan, N-14, signals, fork and shutdown, and measurement tests for the threshold.
-  `Status: steps 1, 2 and 3a implemented (#277): element-wise F64 stores a[i] = <F64 + - * and negation of constants, locals and b[i]> into list copy-in or local arrays (no failure path: eligible loops cannot fail or deopt); i64 reductions acc += e and acc *= e with the overflow rerun above (stores and reductions never in one loop); i64 and f64 min/max as `if e < acc: acc = e` (f64 with a NaN reruns sequentially); fork, signal and shutdown tests; & | ^ reductions, float + and * reductions, the poll inside a region and the rest planned (design)`.
+  `Status: steps 1, 2, 3a and 4 implemented (#277): element-wise F64 stores a[i] = <F64 + - * and negation of constants, locals and b[i]> into list copy-in or local arrays (no failure path: eligible loops cannot fail or deopt); i64 reductions acc += e and acc *= e with the overflow rerun above (stores and reductions never in one loop); i64 and f64 min/max as `if e < acc: acc = e` (f64 with a NaN reruns sequentially); i64 bitwise reductions acc &= e, |= e, ^= e (identity -1 for &, 0 for | and ^; no shifts in e; test_parallel_loops.py bitwise tests); fork, signal and shutdown tests; float + and * reductions, the poll inside a region and the rest planned (design)`.
 
 - **N-16** TypedPython bitwise operators on ints (#289; INTENT §1.4: compiled code computes what CPython
   computes). `&`, `|`, `^`, unary `~`, `<<`, `>>` and the augmented forms `&= |= ^= <<= >>=` are in the compiled

@@ -2188,7 +2188,7 @@ class _FnGen:
                     continue
                 v = st.value if isinstance(st, ir.Assign) else None
                 if (not isinstance(v, ir.BinOp) or st.target != acc or v.op.name != opn
-                        or opn not in ("ADD", "MUL") or v.type is not Type.I64
+                        or opn not in ("ADD", "MUL", "AND", "OR", "XOR") or v.type is not Type.I64
                         or self.types.get(acc) is not Type.I64 or acc == s.var):
                     raise CGenError(f"{f.name}: parallel reduction statement is not `acc = acc op e`")
                 if isinstance(v.left, ir.Local) and v.left.name == acc:
@@ -2282,7 +2282,7 @@ class _FnGen:
                "    uint64_t tp_k;", *decls]
         if reds:
             out += ["    int tp_rc = 0;", "    int tp_s = 0;"]
-            out += [f"    {_CT[self.types[acc]]} {_ident('l', acc)} = {'1' if opn == 'MUL' else '0'};"
+            out += [f"    {_CT[self.types[acc]]} {_ident('l', acc)} = { {'MUL': '1', 'AND': '-1'}.get(opn, '0') };"
                     for acc, opn, _ in reds]
             out += [f"    int tp_has{j} = 0;" for j, (_, opn, _) in enumerate(reds) if opn in ("MIN", "MAX")]
             out.append("    (void)tp_rc; (void)tp_s;")

@@ -674,7 +674,7 @@ class ParInfo:
     read: tuple[str, ...]
     weight: int = 1
     # Step 2 (#277): the i64 reductions `acc = acc op e` of a loop whose body is only such statements,
-    # as sorted (acc, BinOpKind name) pairs, op ADD or MUL. Then `stored` is empty. Each chunk computes
+    # as sorted (acc, BinOpKind name) pairs, op ADD, MUL, AND, OR or XOR (min/max as MIN, MAX). Then `stored` is empty. Each chunk computes
     # its partial from the op's identity with the sequential code's overflow checks; an overflow in any
     # chunk or in the combination discards the region and the sequential loop runs from its start.
     reduce: tuple[tuple[str, str], ...] = ()
