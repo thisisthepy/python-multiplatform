@@ -475,6 +475,16 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   interface whose method returns a value, or a generic one, is left as it was: a handle parameter
   (Compose's `Alignment` is one). `Status: implemented` on desktop, `GP/artifact/SamParameterBindingTest.kt`,
   `python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactSamParameterTest.kt`.
+- **B-5a** The ambient pythonx callable scope (`PythonCallables.withScope`) is per thread (#301). A
+  Python callable crossing into Kotlin on a thread with no open scope gets the "no pythonx callable
+  scope is open" error, even while another thread has a scope open, and `PythonCallables.current`
+  answers `null` there. One scope may be added to, reused, invoked and closed from different
+  threads: `close()` releases every root and body exactly once, a callable added after the close is
+  rejected (`IllegalStateException`, its body released), and an invocation holds a reference of its
+  own on the body, so a concurrent close cannot free it mid-call. `Status: implemented`,
+  `PM/desktopTest/.../pythonx/PythonCallablesConcurrencyTest.kt`
+  (`twoThreadsOpeningScopesConcurrentlyKeepTheirOwnStacks`, `aThreadWithNoScopeSeesNoneWhileAnotherHasOneOpen`,
+  `concurrentAddAndReuseAgainstCloseReleasesEveryRootOnce`).
 - **B-6** `@Composable` functions are callable from Python inside a composition; a Python click reaches
   a Kotlin callback and the redraw shows it. `Status: implemented` on desktop,
   `python-multiplatform-compose/fixtures/compose/src/desktopTest/` (`ComposableRenderTest.kt`, `M3ProofRenderTest.kt`,
