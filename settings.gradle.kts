@@ -15,7 +15,7 @@ pluginManagement {
             }
         }
         mavenCentral {
-            // `org.thisisthepy.compose.*:1.11.1-ext.1` POMs on Maven Central omit Gradle's
+            // `org.thisisthepy.compose.*:1.11.1-ext.2` POMs on Maven Central omit Gradle's
             // `published-with-gradle-metadata` marker comment, so Gradle must be told to read `.module`
             // metadata alongside `.pom` to resolve KMP platform variants and plugin runtime elements.
             metadataSources {
@@ -41,7 +41,7 @@ dependencyResolutionManagement {
             }
         }
         mavenCentral {
-            // `org.thisisthepy.compose.*:1.11.1-ext.1` POMs on Maven Central omit Gradle's
+            // `org.thisisthepy.compose.*:1.11.1-ext.2` POMs on Maven Central omit Gradle's
             // `published-with-gradle-metadata` marker comment, so Gradle must be told to read `.module`
             // metadata alongside `.pom` to resolve KMP platform variants and plugin runtime elements.
             metadataSources {
