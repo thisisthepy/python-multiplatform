@@ -587,6 +587,7 @@ def _with_property_installed_by_handler(fn, node_cls, delay):
     def boom(*_):
         node_cls.left = property(lambda self: None, lambda self, v: None)   # what `n.left` means changes
 
+    slot = node_cls.__dict__["left"]
     old = signal.signal(signal.SIGALRM, boom)
     try:
         signal.setitimer(signal.ITIMER_REAL, delay)
@@ -594,6 +595,7 @@ def _with_property_installed_by_handler(fn, node_cls, delay):
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, old)
+        node_cls.left = slot          # the next attempt starts from the original slot descriptor
 
 
 def test_a_class_change_by_a_signal_handler_in_the_consumer_deopts_the_region_host(tmp_path):
@@ -614,11 +616,18 @@ def test_a_class_change_by_a_signal_handler_in_the_consumer_deopts_the_region_ho
     t0 = time.perf_counter()
     assert m.tree_sum(d) == nodes(d)
     delay = 0.85 * (time.perf_counter() - t0)
-    d0 = m.__typedpython_deopts__
-    o0, f0, _ = m.__typedpython_region_stats__()
-    got = _with_property_installed_by_handler(lambda: m.tree_sum(d), m.Node, delay)
-    assert m.__typedpython_deopts__ > d0                  # the host noticed and redid the call
-    o1, f1, _ = m.__typedpython_region_stats__()
-    assert o1 - o0 == f1 - f0
-    # the redo ran interpreted with the property in place: `left` is None, so check returns 1
-    assert got == 1
+    caught = False
+    for k in range(5):           # under load the timer can land after the call; then try again
+        d0 = m.__typedpython_deopts__
+        o0, f0, _ = m.__typedpython_region_stats__()
+        got = _with_property_installed_by_handler(lambda: m.tree_sum(d), m.Node,
+                                                  delay * (0.85, 0.8, 0.9, 0.75, 0.7)[k] / 0.85)
+        o1, f1, _ = m.__typedpython_region_stats__()
+        assert o1 - o0 == f1 - f0
+        if m.__typedpython_deopts__ > d0:                 # the host noticed and redid the call
+            # the redo ran interpreted with the property in place: `left` is None, so check returns 1
+            assert got == 1
+            caught = True
+            break
+        assert got == nodes(d)                            # no deopt: the handler ran after the call
+    assert caught, "the handler never landed inside the call (or the class guard is missing)"
