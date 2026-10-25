@@ -267,6 +267,13 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `anExtensionIsAMethodOnItsReceiverAndTheChainComposes`) and against the real Compose jars through
   the artifact walker (`python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactComposeModifierTest.kt`); not
   asserted for KSP-generated proxies.
+  A proxy **class** written where an object value goes (`describeModifier(Modifier)`,
+  `Card(modifier=Modifier)`) is that type's registered empty value: for a type whose class is the
+  parameter's type or a subtype of it, passing the class == passing `Cls.empty()`; it equals omitting the
+  argument only where Kotlin's own default is that empty value. Without a registered factory the
+  `TypeError` of `empty()` (naming `register_empty`) propagates; a class of an unrelated type is refused;
+  an overload vote counts only the type match. `PM/commonTest/.../pythonx/PythonxAdapterTest.kt`
+  `aProxyClassPassedAsAnObjectArgumentIsItsEmptyValue`.
 - **U-8** A function on a Kotlin-named module carries Kotlin's surface: the Kotlin declaration name,
   keyword arguments by **Kotlin parameter names**, Kotlin defaults for omitted parameters, overload sets
   under the base name, and its signature as public metadata (`inspect.signature`,
