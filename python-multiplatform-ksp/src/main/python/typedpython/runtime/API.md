@@ -472,6 +472,8 @@ static or module-state field must be added here):
 | module globals (class names, entry globals) | module dict | strong reads | `tp_global` and `tp_class_global_ok` use `PyDict_GetItemRef` |
 | a compiled class's instances | other threads' objects | CPython | `PyMember_GetOne` / `SetOne` are what the interpreter's member descriptors call (they take the object's lock on free-threaded builds); `tp_new_fixed` writes only its own fresh object |
 | `errno` (math helpers) | C library | thread-local | per thread by POSIX |
+| `tp_par_cap_v`, `tp_par_regions_v`, `tp_par_started_v`, `tp_par_failed_v` | static in the module | atomic | relaxed loads and stores; the cap is computed identically by any thread that finds it unset and never changes after |
+| a parallel region's arrays (`ForRange.par`) | caller's copied-in arrays | disjoint ranges | each worker writes `data[slot]` and `dirty[slot]` only for its own iterations (verifier: store index is the loop variable); the caller holds the list's critical section and joins every worker before the write-back |
 
 Borrowed references are never held across anything another thread can free. Replaced in this change:
 `tp_global`: `PyDict_GetItemWithError` (module globals, builtins) and `PyDict_GetItemString`
@@ -487,6 +489,32 @@ kwnames tuple, `PyTuple` items.
 Memory orders: relaxed loads and stores for the tags and the epoch (the synchronisation that
 publishes a class or global change to another thread, a lock or an event, orders them), acquire-release
 for the epoch's increment. `tp_runtime.h` needs the GCC/Clang `__atomic` builtins.
+
+## Parallel regions (SPEC N-15, issues #151, #277)
+A `ForRange` the verifier marked `par` (`ir.ParInfo`; marked function, `a[i] = F64 expression` stores
+only) runs its iterations on per-region C threads above a work threshold. Workers touch no Python
+object and no Python API, are not Python threads and never outlive the call.
+    #define TP_PAR_MIN_WORK 65536          /* PLACEHOLDER, to be measured on #151: weighted iterations (trip count * ParInfo.weight) */
+    #define TP_PAR_MAX_THREADS 8           /* default cap; TYPEDPYTHON_THREADS overrides (1 disables), hard cap 64 */
+    #define TP_PAR_HARD_CAP 64
+    #define TP_PAR_MIN_CHUNK 1024u         /* fewest iterations worth a thread (placeholder) */
+    #define TP_PAR_ALIGN 8u                /* chunk starts are multiples of 8 iterations (one cache line of doubles) */
+    #define TP_PAR_HAVE_THREADS            /* defined with pthreads; -DTP_NO_THREADS compiles the threads out */
+    #define TP_PAR_TEST_FAIL_CREATE        /* test hook: every pthread_create reports failure */
+    typedef void (*tp_par_fn)(const void *ctx, uint64_t lo, uint64_t hi);
+    int  tp_par_threads(void);                                   /* the cap, read once from TYPEDPYTHON_THREADS, else min(cores, 8) */
+    int  tp_par_run(tp_par_fn fn, const void *ctx, uint64_t n);  /* runs [0, n) in contiguous chunks, joined before return; returns workers started */
+    void tp_par_stats(int64_t out[3]);                           /* regions with workers, workers started, failed creations */
+`tp_par_run` always completes the whole range. The calling thread runs the first chunk; a chunk whose
+`pthread_create` failed runs on the calling thread after it (fewer workers, down to none: the sequential
+loop, no exception, not a semantic event). Workers start with all signals blocked, so Python signal
+handlers run on Python threads only. The chunk function must be safe for any chunk on any thread;
+generated code passes a context struct of raw array pointers and scalar copies. A module with a
+`par` loop also exports `__typedpython_parallel__()` returning `(regions, workers_started,
+failed_creations)`, so tests can prove the parallel path ran. Free-threaded state: the four counters and
+the thread cap are atomics (relaxed); a region's chunk bounds, jobs and thread handles live on the
+caller's stack. The caller does not poll the eval breaker inside a region (array functions do not poll
+anyway, #152).
 
 ## Development-mode import gate (Python API, not C; SPEC N-7b)
     typedpython.importgate.install(source_roots)   # meta path finder; checks project modules before they run

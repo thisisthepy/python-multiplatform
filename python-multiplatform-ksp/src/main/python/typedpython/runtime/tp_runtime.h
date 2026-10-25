@@ -2915,4 +2915,167 @@ static inline int tp_traced(PyObject *module, PyThreadState *ts, PyCodeObject *c
     }
 }
 
+/* ---- Parallel regions (SPEC N-15, #151, #277; runtime/API.md "Parallel regions") ------------------
+ * A generated `ForRange` the verifier marked `par` hands its trip count to `tp_par_run`, which splits
+ * it into contiguous chunks and runs them on per-region C threads, joined before it returns. The
+ * chunk function touches no Python object and calls no Python API (the verifier proves the body is
+ * F64 arithmetic on raw arrays), so the workers need no thread state. The calling thread keeps its
+ * attached thread state, its critical section and its place in the call: it runs the first chunk
+ * itself. A thread that cannot be created is not an error: its chunk runs on the calling thread.
+ * Without pthreads (TP_NO_THREADS, wasm, Windows) tp_par_threads() is 1 and the region is dead code. */
+#ifndef TP_PAR_MIN_WORK
+/* PLACEHOLDER, not a measurement: units are "weighted loop iterations" (trip count times the loop's
+ * node count `ParInfo.weight`). It is to be measured together with thread creation cost in a quiet
+ * window and recorded on #151 (design/typedpython-parallel-loops.md, decision 7). */
+#define TP_PAR_MIN_WORK 65536
+#endif
+#ifndef TP_PAR_MAX_THREADS
+#define TP_PAR_MAX_THREADS 8        /* default cap; TYPEDPYTHON_THREADS overrides, up to TP_PAR_HARD_CAP */
+#endif
+#define TP_PAR_HARD_CAP 64
+#define TP_PAR_MIN_CHUNK 1024u      /* fewest iterations worth a thread of their own (placeholder, #151) */
+#define TP_PAR_ALIGN 8u             /* chunk starts are multiples of 8 iterations = one 64-byte line of doubles */
+
+#if !defined(TP_NO_THREADS) && (defined(__unix__) || defined(__APPLE__)) && !defined(__EMSCRIPTEN__)
+#define TP_PAR_HAVE_THREADS 1
+#include <pthread.h>
+#include <signal.h>
+#include <unistd.h>
+#endif
+
+typedef void (*tp_par_fn)(const void *ctx, uint64_t lo, uint64_t hi);
+
+static int tp_par_cap_v = 0;                  /* 0: not read yet; then the thread cap (>= 1), set once */
+static int64_t tp_par_regions_v = 0;          /* regions that ran with at least one worker */
+static int64_t tp_par_started_v = 0;          /* worker threads started */
+static int64_t tp_par_failed_v = 0;           /* pthread_create calls that failed (their chunk ran on the caller) */
+
+/* The thread cap: TYPEDPYTHON_THREADS (a positive integer, 1 disables), else min(cores, 8); read once,
+ * immutable afterwards. Two threads racing on the first call compute the same value. */
+static inline int tp_par_threads(void)
+{
+    int c = __atomic_load_n(&tp_par_cap_v, __ATOMIC_RELAXED);
+    if (c != 0) {
+        return c;
+    }
+    c = 1;
+#ifdef TP_PAR_HAVE_THREADS
+    {
+        const char *e = getenv("TYPEDPYTHON_THREADS");
+        long v = 0;
+        if (e != NULL && e[0] != '\0') {
+            char *end = NULL;
+            v = strtol(e, &end, 10);
+            if (end == e || *end != '\0' || v < 1) {
+                v = 0;                         /* not a positive integer: the default */
+            }
+        }
+        if (v == 0) {
+            long cores = sysconf(_SC_NPROCESSORS_ONLN);
+            v = cores < 1 ? 1 : cores;
+            if (v > TP_PAR_MAX_THREADS) {
+                v = TP_PAR_MAX_THREADS;
+            }
+        }
+        if (v > TP_PAR_HARD_CAP) {
+            v = TP_PAR_HARD_CAP;
+        }
+        c = (int)v;
+    }
+#endif
+    __atomic_store_n(&tp_par_cap_v, c, __ATOMIC_RELAXED);
+    return c;
+}
+
+/* out[0] regions that used workers, out[1] workers started, out[2] failed thread creations */
+static inline void tp_par_stats(int64_t out[3])
+{
+    out[0] = __atomic_load_n(&tp_par_regions_v, __ATOMIC_RELAXED);
+    out[1] = __atomic_load_n(&tp_par_started_v, __ATOMIC_RELAXED);
+    out[2] = __atomic_load_n(&tp_par_failed_v, __ATOMIC_RELAXED);
+}
+
+#ifdef TP_PAR_HAVE_THREADS
+typedef struct { tp_par_fn fn; const void *ctx; uint64_t lo, hi; } tp_par_job;
+
+static void *tp_par_worker(void *p)
+{
+    const tp_par_job *j = (const tp_par_job *)p;
+    j->fn(j->ctx, j->lo, j->hi);
+    return NULL;
+}
+#endif
+
+/* Runs fn(ctx, lo, hi) over [0, n) in contiguous chunks and returns after every chunk is done (always
+ * the whole range, whatever the thread creation does). Returns the number of workers started (0: the
+ * range ran on the calling thread alone). The chunks are disjoint and `fn` must be safe to run on
+ * any thread for any chunk; results do not depend on the chunking. */
+static inline int tp_par_run(tp_par_fn fn, const void *ctx, uint64_t n)
+{
+#ifdef TP_PAR_HAVE_THREADS
+    int t = tp_par_threads();
+    uint64_t maxt = n / TP_PAR_MIN_CHUNK;
+    if ((uint64_t)t > maxt) {
+        t = (int)maxt;
+    }
+    if (t > 1) {
+        tp_par_job jobs[TP_PAR_HARD_CAP];
+        pthread_t th[TP_PAR_HARD_CAP];
+        unsigned char live[TP_PAR_HARD_CAP];
+        uint64_t chunk = (n + (uint64_t)t - 1u) / (uint64_t)t;
+        int k, started = 0, jn = 0;
+        sigset_t all, old;
+        chunk = (chunk + (TP_PAR_ALIGN - 1u)) & ~(uint64_t)(TP_PAR_ALIGN - 1u);
+        for (k = 0; k < t; k++) {
+            uint64_t lo = (uint64_t)k * chunk;
+            if (lo >= n) {
+                break;
+            }
+            jobs[jn].fn = fn;
+            jobs[jn].ctx = ctx;
+            jobs[jn].lo = lo;
+            jobs[jn].hi = lo + chunk < n ? lo + chunk : n;
+            live[jn] = 0;
+            jn++;
+        }
+        /* workers start with every signal blocked, so a handler only ever runs on a Python thread */
+        sigfillset(&all);
+        pthread_sigmask(SIG_SETMASK, &all, &old);
+        for (k = 1; k < jn; k++) {
+            int rc;
+#ifdef TP_PAR_TEST_FAIL_CREATE
+            rc = 11;                           /* EAGAIN: tests make every creation fail */
+#else
+            rc = pthread_create(&th[k], NULL, tp_par_worker, &jobs[k]);
+#endif
+            if (rc == 0) {
+                live[k] = 1;
+                started++;
+            } else {
+                __atomic_fetch_add(&tp_par_failed_v, 1, __ATOMIC_RELAXED);
+            }
+        }
+        pthread_sigmask(SIG_SETMASK, &old, NULL);
+        fn(ctx, jobs[0].lo, jobs[0].hi);
+        for (k = 1; k < jn; k++) {
+            if (!live[k]) {
+                fn(ctx, jobs[k].lo, jobs[k].hi);   /* creation failed: this chunk runs here */
+            }
+        }
+        for (k = 1; k < jn; k++) {
+            if (live[k]) {
+                pthread_join(th[k], NULL);
+            }
+        }
+        if (started > 0) {
+            __atomic_fetch_add(&tp_par_regions_v, 1, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&tp_par_started_v, started, __ATOMIC_RELAXED);
+        }
+        return started;
+    }
+#endif
+    fn(ctx, 0, n);
+    return 0;
+}
+
 #endif /* TP_RUNTIME_H */

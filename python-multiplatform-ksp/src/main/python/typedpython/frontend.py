@@ -237,7 +237,26 @@ def lower(path: Path) -> ir.Module:
         else:
             skipped[name] = result
     functions.sort(key=lambda f: f.source_line)
+    marked = _parallel_marked(tree, source)
+    functions = [dataclasses.replace(f, parallel=True) if f.name in marked else f for f in functions]
     return ir.Module(path.stem, tuple(functions), skipped, tuple(class_decls.values()))
+
+
+PARALLEL_MARKER = "# typedpython: parallel"
+
+
+def _parallel_marked(tree: ast.Module, source: str) -> set[str]:
+    """Module-level functions the user marked for SPEC N-15: the comment line `# typedpython: parallel`
+    directly above the `def` (above its decorators if it has any). A comment, like the module marker,
+    so the interpreted module is unchanged and needs no runtime name."""
+    lines = source.splitlines()
+    out: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef):
+            first = min([node.lineno] + [d.lineno for d in node.decorator_list])
+            if first >= 2 and lines[first - 2].strip() == PARALLEL_MARKER:
+                out.add(node.name)
+    return out
 
 
 def _module_info(tree: ast.Module) -> _ModuleInfo:

@@ -869,7 +869,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 - **N-15** TypedPython parallel execution of order-independent loops on free-threaded CPython (#151;
   `docs/design/typedpython-parallel-loops.md`). A compiled `for ... in range(...)` loop may run its
   iterations on several threads only if its result cannot depend on iteration order, in a function the
-  user marked (the spelling of the marking is settled at implementation), and then the
+  user marked with a `# typedpython: parallel` comment line directly above the `def` (above its decorators if any); module-level functions only, and then the
   result, the exception, the partial writes and the deopt behaviour are bit-for-bit those of the
   sequential loop (INTENT §1.4; N-12: every execution is indistinguishable from some valid CPython
   execution).
@@ -895,20 +895,24 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     (#153) awaits the owner's decision, and N-15 follows it. Partials combine in chunk order.
   - **Observability.** N-14 holds (a traced call runs the interpreted function, never a region);
     workers are not Python threads; the calling thread stays attached and polls the eval breaker
-    between micro-chunks when the function polls today; list writes become visible only at the
-    existing write-back. Outside the identity (like N-12's cyclic GC timing): the OS thread count, CPU
+    between micro-chunks when the function polls today (step 1 does not poll inside a region: a
+    signal waits until the region ends); the calling thread stays attached for the whole region, so a
+    stop-the-world waits for it too; list writes become visible only at the existing write-back. Outside the identity (like N-12's cyclic GC timing): the OS thread count, CPU
     time versus wall time, the multi-thread `os.fork()` warning while a region is active, and
     profilers seeing non-Python threads.
   - **Threads and cost.** v1 creates workers per region and joins them before the call returns (no
     pool, no thread outlives the call: nothing at fork or interpreter shutdown). Cap
-    `TYPEDPYTHON_THREADS` (1 disables; default 8 or the core count if lower). A region runs only above
-    a measured work threshold (`TP_PAR_MIN_WORK`), measured together with thread creation cost in a
-    quiet window and recorded on #151; below it the sequential code runs. Platforms without threads compile it out.
+    `TYPEDPYTHON_THREADS` (positive integer, 1 disables; default min(cores, 8); hard cap 64). A thread
+    that cannot be created is not an error: its chunk runs on the calling thread. Workers start with all
+    signals blocked. A region runs only above a measured work threshold (`TP_PAR_MIN_WORK`), which counts
+    weighted iterations (the trip count times the loop body's node count); a region also needs at least
+    1024 iterations per thread. The threshold is measured together with thread creation cost in a quiet
+    window and recorded on #151; below it the sequential code runs. Platforms without threads compile it out.
   - **Tests** (written first): differential vs the interpreter (bit-exact, boundaries of trip count and
     chunk, NaN/inf/-0.0), identical bytes for every thread count, failure at first/middle/last
     iteration, negative qualification cases, disabled-path test, reductions, race and GC tests,
     TSan/ASan, N-14, signals, fork and shutdown, and measurement tests for the threshold.
-  `Status: planned (design)`.
+  `Status: step 1 implemented (#277): element-wise F64 stores a[i] = <F64 + - * and negation of constants, locals and b[i]> into list copy-in or local arrays; no reductions, no failure path (eligible loops cannot fail or deopt); the rest planned (design)`.
 
 ---
 
