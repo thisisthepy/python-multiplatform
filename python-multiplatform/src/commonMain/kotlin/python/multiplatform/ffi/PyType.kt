@@ -19,11 +19,16 @@ import python.native.ffi.PyType_IsSubtype
 import python.native.ffi.PyUnicode_AsUTF8
 import python.native.ffi.Py_DecRef
 import python.native.ffi.Py_IncRef
+import kotlin.concurrent.atomics.AtomicReference
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 
 class PyType private constructor(pointer: NativePointer): PyObject(pointer, false) {
     companion object {
-        private val cachedObjects: MutableMap<NativePointer, PyType> = mutableMapOf()
+        // Copy-on-write snapshot: readers never lock, writers publish a fresh immutable map by
+        // compare-and-set. See the threading note on getInstance.
+        @OptIn(ExperimentalAtomicApi::class)
+        private val cachedObjects = AtomicReference<Map<NativePointer, PyType>>(emptyMap())
 
         /**
          * The [PyType] for [pointer], which the caller must hand over as a **new reference**.
@@ -36,20 +41,37 @@ class PyType private constructor(pointer: NativePointer): PyObject(pointer, fals
          *   It used to be dropped on the floor instead, on the argument that types are immortal
          *   builtins -- true of `int` and `list`, false of every user-defined class, which then
          *   leaked one reference per `PyObject.Type` read.
+         * - lost race: two threads missed together and both constructed a [PyType]. Only one is
+         *   published. The loser's instance owns its adopted reference through its own cleaner
+         *   and releases it when collected, so nothing is released by hand here (that would be
+         *   a double free) and nothing leaks. The winner is returned to both callers.
          * - not a type at all: rejected *before* anything is constructed, so no cleaner has been
          *   registered for [pointer] and the caller's `adoptingNewReference` is the only thing
          *   that will release it. Validating inside `init` instead would leave a queued release
          *   behind on the half-built object and turn that into a double free.
+         *
+         * Threading: on a free-threaded CPython several Kotlin threads call this at once, and a
+         * plain map corrupts under concurrent writes. There is deliberately no Kotlin lock: a
+         * thread blocked on one while attached to a free-threaded interpreter can stall a
+         * stop-the-world pause if the holder calls into Python. The cache is therefore an
+         * immutable snapshot replaced by compare-and-set. The check that calls Python
+         * ([isTypeObject]) runs outside the loop, so a retry never re-enters the interpreter,
+         * and the [PyType] constructor only registers a cleaner (no Python call), so building
+         * one before the CAS is safe.
          */
+        @OptIn(ExperimentalAtomicApi::class)
         fun getInstance(pointer: NativePointer): PyType {
-            cachedObjects[pointer]?.let { cached ->
+            cachedObjects.load()[pointer]?.let { cached ->
                 releaseUnownedReference(pointer)
                 return cached
             }
             if (!isTypeObject(pointer)) throw PyException("Object is not a type")
             val created = PyType(pointer)
-            cachedObjects[pointer] = created
-            return created
+            while (true) {
+                val current = cachedObjects.load()
+                current[pointer]?.let { winner -> return winner }
+                if (cachedObjects.compareAndSet(current, current + (pointer to created))) return created
+            }
         }
 
         private fun isTypeObject(pointer: NativePointer): Boolean {
