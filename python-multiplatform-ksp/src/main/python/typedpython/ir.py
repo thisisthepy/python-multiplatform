@@ -51,7 +51,7 @@ globals and classes as compiled code.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from enum import Enum
 
 
@@ -820,6 +820,11 @@ class Function:
     # SPEC N-15: the user marked this function with the comment line `# typedpython: parallel`
     # directly above its `def`. Only a marked function can hold a `ForRange.par`.
     parallel: bool = False
+    # SPEC N-12b (#268): the producers whose result this pure function keeps inside one statement
+    # (`check(make(d))`), so each such call builds its objects in a region. Set only by `verify`,
+    # which recomputes it and rejects a function whose declared entries differ
+    # (`verify/region-escape`). The front end leaves it empty.
+    regions: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -832,6 +837,9 @@ class ClassDecl:
     name: str
     fields: tuple[str, ...]
     trivial_init: bool      # __init__(self, *fields-in-order) doing exactly `self.f = f` once each
+    # The class defines `__del__` (a finalizer): its objects are never placed in a region (SPEC N-12b),
+    # freeing a region would skip the finalizer.
+    has_del: bool = False
 
 
 @dataclass(frozen=True)
@@ -841,3 +849,70 @@ class Module:
     # Functions the front end left interpreted, with the reason (for `demo` and the coverage table).
     skipped: dict[str, str] = field(default_factory=dict)
     classes: tuple[ClassDecl, ...] = ()
+    # SPEC N-12b: the producers and consumers that get a second, internal entry taking a region.
+    # Set only by `verify`, which recomputes it (a declared set that differs is `verify/region-escape`).
+    region_variants: tuple[str, ...] = ()
+
+
+# --- region field kinds (SPEC N-12b), shared by `verify` (proof) and `cgen` (layout) ---------------------
+
+REGION_SCALAR_KINDS = {Type.I64: "i64", Type.F64: "f64", Type.BOOL: "bool"}
+
+
+def region_arg_kind(a: object, ref_class) -> object:
+    """The region kind one `New` argument gives its field: "i64" / "f64" / "bool" for a `Box` of that
+    scalar, "null" for the `None` constant, ("ref", class) for a value of a region class (`ref_class(a)`
+    names the class of a `New` or a producer `Call`, or is None). None: the argument cannot be stored in a
+    region at all (any other object reference)."""
+    if type(a) is Box and a.np is None:
+        return REGION_SCALAR_KINDS.get(a.operand.type)
+    if type(a) is Const and a.type is Type.OBJ and a.value is None:
+        return "null"
+    c = ref_class(a)
+    return ("ref", c) if c is not None else None
+
+
+def region_field_kinds(functions, ref_class) -> dict[str, list[set]]:
+    """class -> per field the set of kinds observed over every `New` of the class in `functions`
+    (a kind of None means an argument that cannot live in a region)."""
+    out: dict[str, list[set]] = {}
+
+    def visit(e: object) -> None:
+        if type(e) is New:
+            slots = out.setdefault(e.cls, [set() for _ in e.args])
+            if len(slots) == len(e.args):
+                for s, a in zip(slots, e.args):
+                    s.add(region_arg_kind(a, ref_class))
+        for x in _children_of(e):
+            visit(x)
+
+    for f in functions:
+        for st in f.body:
+            visit(st)
+    return out
+
+
+def _children_of(node: object):
+    for fl in fields(node):
+        v = getattr(node, fl.name)
+        for x in (v if isinstance(v, tuple) else (v,)):
+            if isinstance(x, (Expr, Stmt)):
+                yield x
+
+
+def region_field_layout(kinds: list[set]) -> tuple | None:
+    """The one kind of each field, or None when some field mixes kinds (a scalar and a pointer, two
+    scalar types, pointers to two classes) or holds an argument a region cannot store. A field that is
+    only ever `None` is ("ref", None)."""
+    out = []
+    for s in kinds:
+        real = s - {"null"}
+        if None in s or len(real) > 1:
+            return None
+        if real:
+            out.append(next(iter(real)))
+        elif "null" in s:
+            out.append(("ref", None))
+        else:
+            return None
+    return tuple(out)

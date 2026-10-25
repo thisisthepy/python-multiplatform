@@ -55,6 +55,9 @@ Rules (the `rule` of a Diagnostic):
                               New names a class without trivial_init or has the wrong arity, or a
                               ClassDecl itself is malformed (bad name/fields, duplicates)
   verify/field-unproved       a FieldGet/FieldSet whose object is not proved to be exactly the class
+  verify/region-escape        `Function.regions` (or `Module.region_variants`) names a producer the
+                              analysis of SPEC N-12b does not find confined to one statement of a pure
+                              host (see "Regions" below `_REGION_OK`)
 
 Fixed-layout classes (SPEC N-11). The verifier never trusts the front end for them either:
 
@@ -301,6 +304,7 @@ STRUCTURE = "verify/structure"
 CONDITION_ONLY = "verify/condition-only"
 PROVEN = "verify/proven-overflow"
 VIRTUAL = "verify/virtual-escape"
+REGION_ESCAPE = "verify/region-escape"
 REDO = "verify/redo"
 ENTRY_OPEN = "verify/entry-global-open"
 ARRAY_OPEN = "verify/array-open"
@@ -1992,6 +1996,344 @@ def _virtual_arg(a: object, params: set[str]) -> bool:
     return type(a) is Local and a.type is Type.OBJ and a.name in params
 
 
+# --- regions (SPEC N-12b, #268) --------------------------------------------------------------------------
+
+# The nodes a producer, a consumer or a host may contain: the virtual-object set plus a Call of a pure
+# compiled function. None of them runs user code, so nothing can observe a region object. The scan
+# below narrows it further (no array node, no OBJ value outside the three allowed shapes).
+_REGION_OK = _VIRTUAL_OK | frozenset({Call})
+_REGION_STMTS = frozenset({Assign, If, While, ForRange, Return, Break, Continue})
+_REGION_SCALARS = (Type.I64, Type.F64, Type.BOOL)
+_REGION_ARRAY_NODES = frozenset({Len, Index, NewArray, CopyArray})
+
+
+def _nodes(x: object):
+    """Every ir node under `x` (an expression, a statement or a tuple of them), `x` itself first."""
+    if isinstance(x, tuple):
+        for y in x:
+            yield from _nodes(y)
+    elif isinstance(x, (ir.Expr, ir.Stmt)):
+        yield x
+        for f in dataclasses.fields(x):
+            yield from _nodes(getattr(x, f.name))
+
+
+def _is_none(x: object) -> bool:
+    return type(x) is Const and x.type is Type.OBJ and x.value is None
+
+
+class _RegionScan:
+    """One function checked against one role: "p" producer, "c" consumer, "h" host. `ok` is False as
+    soon as something outside the shapes of SPEC N-12b appears. That is the escape rule: a value of a
+    region class may be built by a producer (`New`, `Call` of a producer, as a `Return` value or a `New`
+    argument), passed by a host straight to a consumer, and read by a consumer (`FieldGet`, `Is None`,
+    passed on to a consumer); nothing else, so it is never returned, stored, boxed, compared by identity
+    or handed to unknown code. `sites` are the (producer, consumer) calls a host makes."""
+
+    def __init__(self, fn: Function, role: str, funcs: dict[str, Function], cds: dict[str, ClassDecl],
+                 R: dict[str, tuple], P: dict[str, str], K: set[str]):
+        self.fn, self.role, self.funcs, self.cds, self.R, self.P, self.K = fn, role, funcs, cds, R, P, K
+        self.ok = True
+        self.sites: list[tuple[str, str]] = []
+        self.ptr: dict[str, str | None] = {}            # consumer: pointer parameter / local -> class
+        self.scalars = {p.name: p.type for p in fn.params if isinstance(p, Param)}
+        self.scalars.update(fn.locals)
+
+    def fail(self) -> None:
+        self.ok = False
+
+    def field_kind(self, cls: str, field: str):
+        lay, cd = self.R.get(cls), self.cds.get(cls)
+        if lay is None or cd is None or field not in cd.fields:
+            return None
+        return lay[cd.fields.index(field)]
+
+    # -- pointer expressions (consumer only) --
+
+    def ptrclass(self, e: object) -> tuple[bool, str | None]:
+        """(True, class | None) when `e` is a pointer expression of a consumer: a pointer parameter or
+        local, a `CheckExact` of one (a NULL test), or a pointer-kind `FieldGet` of one."""
+        t = type(e)
+        if self.role != "c":
+            return False, None
+        if t is Local and e.type is Type.OBJ and e.name in self.ptr:
+            return True, self.ptr[e.name]
+        if t is CheckExact:
+            ok, c = self.ptrclass(e.obj)
+            return (True, c) if ok and c is not None and c == e.cls else (False, None)
+        if t is FieldGet:
+            ok, c = self.ptrclass(e.obj)
+            kind = self.field_kind(e.cls, e.field) if ok and c == e.cls else None
+            if kind is not None and kind[0] == "ref":
+                return True, kind[1]
+        return False, None
+
+    def infer_ptrs(self) -> None:
+        for p in self.fn.params:
+            if isinstance(p, Param) and p.type is Type.OBJ:
+                if p.cls in self.R and not p.optional:
+                    self.ptr[p.name] = p.cls
+                else:
+                    self.fail()
+        for _ in range(8):
+            changed = False
+            for st in _nodes(self.fn.body):
+                if type(st) is Assign and self.scalars.get(st.target) is Type.OBJ and st.target not in self.ptr:
+                    ok, c = self.ptrclass(st.value)
+                    if ok:
+                        self.ptr[st.target] = c
+                        changed = True
+            if not changed:
+                break
+        for st in _nodes(self.fn.body):          # every assignment agrees with the one class of its target
+            if type(st) is Assign and self.scalars.get(st.target) is Type.OBJ:
+                ok, c = self.ptrclass(st.value)
+                if not ok or self.ptr.get(st.target, "?") != c:
+                    self.fail()
+        for name, t in self.scalars.items():
+            if t is Type.OBJ and name not in self.ptr:
+                self.fail()
+
+    # -- expressions --
+
+    def sc(self, e: object) -> None:
+        """A scalar-valued expression."""
+        t = type(e)
+        et = getattr(e, "type", None)
+        if t not in _REGION_OK or t in _REGION_ARRAY_NODES or et not in _REGION_SCALARS:
+            self.fail()
+            return
+        if t is Const or t is Local:
+            return
+        if t is Unbox:
+            op = e.operand
+            if type(op) is FieldGet:
+                ok, c = self.ptrclass(op.obj)
+                kind = self.field_kind(op.cls, op.field) if ok and c == op.cls else None
+                if kind is not None and kind == ir.REGION_SCALAR_KINDS.get(e.type):
+                    return
+            self.fail()
+            return
+        if t is Call:
+            self.call(e)
+            return
+        if t is Is:
+            if (_is_none(e.right) and self.ptrclass(e.left)[0]) or (_is_none(e.left) and self.ptrclass(e.right)[0]):
+                return
+            self.fail()
+            return
+        if t is IsExact:
+            ok, c = self.ptrclass(e.obj)
+            if not (ok and c == e.cls):
+                self.fail()
+            return
+        for x in _exprs_of(e):
+            self.sc(x)
+
+    def call(self, e: Call) -> None:
+        g = self.funcs.get(e.function)
+        if g is None or e.redo or len(e.args) != len(g.params) or e.function in self.P:
+            self.fail()                         # (a producer's value is only a New / Return / site argument)
+            return
+        if e.function in self.K:
+            if self.role == "p":
+                self.fail()
+                return
+            for p, a in zip(g.params, e.args):
+                if not isinstance(p, Param):
+                    self.fail()
+                elif p.type is Type.OBJ:
+                    if self.role == "c":
+                        ok, c = self.ptrclass(a)
+                        if not (ok and c == p.cls):
+                            self.fail()
+                    elif (type(a) is Call and a.function in self.P and self.P[a.function] == p.cls
+                          and a.type is Type.OBJ and not a.redo
+                          and len(a.args) == len(self.funcs[a.function].params)):
+                        for x in a.args:
+                            self.sc(x)
+                        self.sites.append((a.function, e.function))
+                    else:
+                        self.fail()
+                else:
+                    self.sc(a)
+            return
+        # any other pure compiled function with scalar parameters and a scalar result
+        if not (g.pure is True and g.returns in _REGION_SCALARS
+                and all(isinstance(p, Param) and p.type in _REGION_SCALARS for p in g.params)):
+            self.fail()
+            return
+        for a in e.args:
+            self.sc(a)
+
+    def ref(self, e: object, cls: str | None) -> None:
+        """A value of a region class built here (a producer's `Return`, a `New` argument): a `New`, or a
+        `Call` of a producer, of class `cls`."""
+        t = type(e)
+        if t is New and e.cls in self.R and (cls is None or e.cls == cls):
+            lay = self.R[e.cls]
+            if len(e.args) != len(lay):
+                self.fail()
+                return
+            for a, kind in zip(e.args, lay):
+                if isinstance(kind, str):
+                    if type(a) is Box and a.np is None and ir.REGION_SCALAR_KINDS.get(a.operand.type) == kind:
+                        self.sc(a.operand)
+                    else:
+                        self.fail()
+                elif not _is_none(a):
+                    self.ref(a, kind[1])
+            return
+        if t is Call and e.function in self.P and (cls is None or self.P[e.function] == cls) \
+                and e.type is Type.OBJ and not e.redo and len(e.args) == len(self.funcs[e.function].params):
+            for a in e.args:
+                self.sc(a)
+            return
+        self.fail()
+
+    # -- statements --
+
+    def block(self, body: object) -> None:
+        if not isinstance(body, tuple):
+            self.fail()
+            return
+        for st in body:
+            t = type(st)
+            if t not in _REGION_STMTS:
+                self.fail()
+            elif t is Assign:
+                target = self.scalars.get(st.target)
+                if target is Type.OBJ:
+                    if not self.ptrclass(st.value)[0]:
+                        self.fail()
+                elif target in _REGION_SCALARS:
+                    self.sc(st.value)
+                else:
+                    self.fail()
+            elif t is If:
+                self.sc(st.cond)
+                self.block(st.then)
+                self.block(st.orelse)
+            elif t is While:
+                self.sc(st.cond)
+                self.block(st.body)
+            elif t is ForRange:
+                if st.par is not None or self.scalars.get(st.var) not in _REGION_SCALARS:
+                    self.fail()
+                self.sc(st.start)
+                self.sc(st.stop)
+                self.block(st.body)
+            elif t is Return:
+                if st.value is None:
+                    self.fail()
+                elif self.role == "p":
+                    self.ref(st.value, self.P.get(self.fn.name))
+                else:
+                    self.sc(st.value)
+
+    def run(self) -> "_RegionScan":
+        """Every condition is checked, none returns early: `fail` is the one place a function is refused."""
+        fn = self.fn
+        if fn.pure is not True or fn.owner is not None or (fn.entry_globals and self.role != "h"):
+            self.fail()
+        for p in fn.params:
+            if not isinstance(p, Param) or (p.type not in _REGION_SCALARS and not (
+                    p.type is Type.OBJ and self.role == "c" and p.cls is not None)):
+                self.fail()
+        if any(t not in _REGION_SCALARS and not (t is Type.OBJ and self.role == "c")
+               for t in fn.locals.values()):
+            self.fail()
+        if (fn.returns is Type.OBJ) != (self.role == "p") or (
+                self.role != "p" and fn.returns not in _REGION_SCALARS):
+            self.fail()
+        if self.role == "c":
+            self.infer_ptrs()
+        self.block(fn.body)
+        return self
+
+
+def _producer_class(fn: Function, known: dict[str, str]) -> str | None:
+    """The one class every `Return` of `fn` builds: a `New`, or a `Call` of a producer whose class is
+    already `known`; a `Call` of a not yet known one is skipped, anything else is no producer."""
+    classes: set = set()
+    for st in _nodes(fn.body):
+        if type(st) is Return:
+            v = st.value
+            if type(v) is New:
+                classes.add(v.cls)
+            elif type(v) is Call:
+                if v.function in known:
+                    classes.add(known[v.function])
+            else:
+                return None
+    return next(iter(classes)) if len(classes) == 1 else None
+
+
+def _region_analysis(funcs: dict[str, Function], cds: dict[str, ClassDecl]
+                     ) -> tuple[dict[str, tuple[str, ...]], tuple[str, ...]]:
+    """(host -> the producers it opens a region for, the producers and consumers that need a region
+    entry), recomputed from the proved functions alone (SPEC N-12b). A greatest fixpoint: start from every
+    class and function of the right shape, remove what fails a scan, repeat until nothing changes."""
+    written = {n.cls for f in funcs.values() for n in _nodes(f.body) if type(n) is FieldSet}
+    R: dict[str, tuple] = {n: () for n, cd in cds.items()
+                           if cd.trivial_init and cd.fields and not cd.has_del and n not in written}
+    P: dict[str, str] = {}
+    K: set[str] = set()
+    for n, f in funcs.items():
+        if f.pure is True and f.owner is None and isinstance(f.body, tuple):
+            if f.returns is Type.OBJ and all(isinstance(p, Param) and p.type in _REGION_SCALARS
+                                             for p in f.params):
+                P[n] = ""
+            elif f.returns in _REGION_SCALARS and any(isinstance(p, Param) and p.type is Type.OBJ
+                                                      for p in f.params):
+                K.add(n)
+    while True:
+        before = (frozenset(R), frozenset(P), frozenset(K))
+        known: dict[str, str] = {}
+        for _ in range(len(P) + 1):
+            for n in P:
+                c = _producer_class(funcs[n], known)
+                if c is not None:
+                    known[n] = c
+        P = {n: c for n, c in known.items() if c in R and n in P}
+
+        def ref_class(a: object):
+            if type(a) is New:
+                return a.cls if a.cls in R else None
+            return P.get(a.function) if type(a) is Call else None
+
+        kinds = ir.region_field_kinds(funcs.values(), ref_class)
+        for c in list(R):
+            lay = ir.region_field_layout(kinds[c]) if c in kinds else None
+            if lay is None or any(isinstance(k, tuple) and k[1] is not None and k[1] not in R for k in lay):
+                del R[c]
+            else:
+                R[c] = lay
+        for n in list(P):
+            if not _RegionScan(funcs[n], "p", funcs, cds, R, P, K).run().ok:
+                del P[n]
+        for n in list(K):
+            if not _RegionScan(funcs[n], "c", funcs, cds, R, P, K).run().ok:
+                K.discard(n)
+        if before == (frozenset(R), frozenset(P), frozenset(K)):
+            break
+    hosts: dict[str, tuple[str, ...]] = {}
+    used: set[str] = set()
+    if P and K:
+        for n, f in funcs.items():
+            s = _RegionScan(f, "h", funcs, cds, R, P, K).run()
+            if s.ok and s.sites:
+                hosts[n] = tuple(sorted({p for p, _ in s.sites}))
+                used.update(x for site in s.sites for x in site)
+    todo = list(used)
+    while todo:
+        for x in _nodes(funcs[todo.pop()].body):
+            if type(x) is Call and (x.function in P or x.function in K) and x.function not in used:
+                used.add(x.function)
+                todo.append(x.function)
+    return hosts, tuple(sorted(used))
+
+
 def _assigned(body: object, counts: dict[str, int] | None = None) -> dict[str, int]:
     """Every name assigned by an Assign statement anywhere in `body` (nested blocks included), with
     the number of Assign statements. Tolerates a malformed body (the checker reports it)."""
@@ -2264,25 +2606,48 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
     # through any Call: each flag is proved on the function's own body against its callees'
     # declared flags, so a cycle through a may_deopt callee is legal only in a pure function.
 
-    # A call into a function that is not compiled cannot be a C call: propagate to a fixpoint.
-    changed = True
-    while changed:
-        changed = False
-        for name, cs in callees.items():
-            if name in reasons:
-                continue
-            bad = sorted(c for c in cs if c in reasons)
-            if bad:
-                reject(name, sigs[name].source_line, UNVERIFIED,
-                       f"calls '{bad[0]}', which is not compiled ({reasons[bad[0]]})")
-                changed = True
-
-    kept = tuple(checked[g.name] for g in functions
+    # A call into a function that is not compiled cannot be a C call: propagate to a fixpoint. Then the
+    # regions (SPEC N-12b) are recomputed over the survivors; a function that declares regions the
+    # analysis does not find is rejected, which can reject its callers, so both repeat until stable.
+    region_hosts: dict[str, tuple[str, ...]] = {}
+    region_variants: tuple[str, ...] = ()
+    while True:
+        changed = True
+        while changed:
+            changed = False
+            for name, cs in callees.items():
+                if name in reasons:
+                    continue
+                bad = sorted(c for c in cs if c in reasons)
+                if bad:
+                    reject(name, sigs[name].source_line, UNVERIFIED,
+                           f"calls '{bad[0]}', which is not compiled ({reasons[bad[0]]})")
+                    changed = True
+        alive = {n: checked[n] for n in checked if n not in reasons}
+        region_hosts, region_variants = _region_analysis(alive, classes)
+        forged = [n for n, g in alive.items()
+                  if isinstance(g.regions, tuple) and g.regions and g.regions != region_hosts.get(n, ())]
+        for n in forged:
+            reject(n, alive[n].source_line, REGION_ESCAPE,
+                   f"regions {sorted(alive[n].regions)} declared, but only "
+                   f"{sorted(region_hosts.get(n, ()))} are provably confined to one statement (SPEC N-12b)")
+        if not forged:
+            break
+    if isinstance(module.region_variants, tuple) and module.region_variants \
+            and module.region_variants != region_variants:
+        d = Diagnostic(module.name, REGION_ESCAPE,
+                       f"region_variants {sorted(module.region_variants)} declared, but the analysis finds "
+                       f"{sorted(region_variants)} (SPEC N-12b)", 0)
+        if d not in diags:
+            diags.append(d)
+    kept = tuple(dataclasses.replace(checked[g.name], regions=region_hosts.get(g.name, ()))
+                 if region_hosts.get(g.name) else checked[g.name]
+                 for g in functions
                  if type(g) is Function and g.name in checked and g.name not in reasons)
     skipped = dict(module.skipped)
     for name, reason in {**skipped_classes, **reasons}.items():
         skipped.setdefault(name, reason)
-    return Module(module.name, kept, skipped, tuple(classes.values())), diags
+    return Module(module.name, kept, skipped, tuple(classes.values()), region_variants), diags
 
 
 def _owner_problem(g: Function, classes: dict[str, ClassDecl]) -> str | None:
