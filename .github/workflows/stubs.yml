@@ -2,7 +2,7 @@ name: Kotlin-name stubs
 
 # Issue #32: pythonx-compose consumes the binder's Kotlin-name `.pyi` stubs for the real Compose jars
 # but cannot run this repository's Gradle build. This job runs the stub task over the Compose version the
-# build resolves (`compose-plugin` in gradle/libs.versions.toml) and publishes the result.
+# build resolves (`compose-libraries` in gradle/libs.versions.toml) and publishes the result.
 #
 #   - every push to develop and every pull request: the stubs are generated, type-checked against
 #     .github/scripts/stubs/consumer.py with mypy (issue #31), and uploaded as the workflow artifact `kotlin-stubs`;
@@ -54,7 +54,7 @@ jobs:
       - name: Assemble the artifact
         run: |
           set -euo pipefail
-          compose_version="$(sed -nE 's/^compose-plugin = "([^"]+)".*/\1/p' gradle/libs.versions.toml)"
+          compose_version="$(sed -nE 's/^compose-libraries = "([^"]+)".*/\1/p' gradle/libs.versions.toml)"
           test -n "$compose_version"
           out=build/kotlin-stubs
           rm -rf "$out"
