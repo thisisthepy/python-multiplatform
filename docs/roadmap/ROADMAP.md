@@ -304,13 +304,10 @@ Old §15a, §15b, §15d, §15f, §15g, §15h are closed; §15e item 4 is closed 
   configured (`signing { }` is commented out in `python-multiplatform/build.gradle.kts`), and
   `repo1.maven.org/maven2/io/github/thisisthepy/python-multiplatform/` returns 404 (2026-10-03).
   Every consumer verification so far used `mavenLocal()`. 10.1 depends on this or on a release asset.
-- **15.2 The KSP processor and plugin versions are hand-copied literals, open.** Root
-  `build.gradle.kts` `allprojects { version = "3.13.0" }` (inherited by `python-multiplatform-ksp`) and
-  `python-multiplatform-gradle-plugin/build.gradle.kts` `version = "3.13.0"` agree only by hand, while
-  the library publishes `3.14.7-alpha01` from `gradle.properties`. The plugin bakes
-  `DEFAULT_PROCESSOR_COORDINATES` from its own version, so the two literals drifting would reproduce
-  the "processor coordinate that exists nowhere" defect with no configuration-time error. A check, or
-  one source for both, is what is left.
+- **15.2 The library, KSP processor and plugin publish under one version, done (#70).** Each build
+  derives it from `gradle.properties` (`$pythonVersion-$libraryVersionSuffix`, a `-P` override included);
+  the root build fails when a project's version differs, and `PublishedVersionTest` pins the processor
+  and wasm-runtime coordinates the plugin bakes to that version.
 - **15.3 `stagePythonHome` has run only on `macos-aarch64`, partial.** Linux-x86_64, macOS-x86_64 and
   Windows-x86_64 are pinned as string assertions in `PythonHomeStagingTest`; Windows' `Lib/`+`DLLs/`
   layout and `linux-aarch64` (no `libpython` in `desktopJar`, relies on `manager.loadFromSidecar`) have

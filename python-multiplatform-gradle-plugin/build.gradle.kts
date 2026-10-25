@@ -8,7 +8,17 @@ plugins {
 }
 
 group = "io.github.thisisthepy"
-version = "3.13.0" // kept in step with the root build's version, which the processor is published under
+// Same published version as the library and the KSP processor (#70): "$pythonVersion-$suffix" from
+// the root's gradle.properties, a -P override winning as it does in the root build (Gradle hands
+// start-parameter properties to included builds too).
+val rootGradleProperties = Properties().apply {
+    val file = rootDir.resolve("../gradle.properties")
+    if (file.isFile) file.inputStream().use { load(it) }
+}
+fun rootProperty(name: String, fallback: String): String =
+    findProperty(name)?.toString() ?: rootGradleProperties.getProperty(name) ?: fallback
+val publishedVersion = "${rootProperty("pythonVersion", "3.15.0")}-${rootProperty("libraryVersionSuffix", "alpha01")}"
+version = publishedVersion
 
 /**
  * `KlibScanner`'s reader, named once because three places have to agree on it: this module's own
@@ -239,20 +249,13 @@ val generateCoordinates = tasks.register("generateCoordinates") {
     // second copy of these values that drifted would pair a stdlib with an interpreter from a
     // different build. The fallbacks match `python-multiplatform/build.gradle.kts`'s own, for the
     // case where this build is checked out without the root's properties beside it.
-    val rootProperties = Properties().apply {
-        val file = rootDir.resolve("../gradle.properties")
-        if (file.isFile) file.inputStream().use { load(it) }
-    }
-    val pythonVersionValue = rootProperties.getProperty("pythonVersion") ?: "3.15.0"
-    val pbsReleaseValue = rootProperties.getProperty("pythonBuildStandaloneRelease") ?: "20261013"
-    val freeThreadedValue = rootProperties.getProperty("pythonFreeThreaded")?.toBoolean() ?: false
+    val pythonVersionValue = rootProperty("pythonVersion", "3.15.0")
+    val pbsReleaseValue = rootProperty("pythonBuildStandaloneRelease", "20261013")
+    val freeThreadedValue = rootProperty("pythonFreeThreaded", "false").toBoolean()
 
-    // `python-multiplatform` itself is versioned "$pythonVersion-alpha01" -- see that build's own
-    // `val libraryVersion` -- which is *not* this plugin build's `project.version` (kept in step by
-    // hand, see the top of this file). The wasm-runtime zip is published under the library's
-    // version, alongside the library artifact it has to pair with, so the coordinate has to be
-    // built the same way rather than reusing this plugin's own version.
-    val libraryVersionValue = "$pythonVersionValue-alpha01"
+    // The library and this plugin publish under one version since #70, so the wasm-runtime zip
+    // (published beside the library artifact) is at this build's own version.
+    val libraryVersionValue = publishedVersion
     val wasmRuntimeCoordinatesValue = "${project.group}:python-multiplatform-wasm-runtime:$libraryVersionValue"
 
     val klibWorkerValue = klibWorkerCoordinates
