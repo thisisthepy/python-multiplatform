@@ -320,6 +320,8 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
         var bases: String? = null
         var doc: String? = null
         val members = mutableListOf<String>()
+        /** Companion attributes (name to text), decided in [renderNode] once every nested class is known. */
+        val companionAttributes = mutableListOf<Pair<String, String>>()
     }
 
     private inner class ModuleOut(val module: String) {
@@ -708,13 +710,19 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
 
         // The companion object, a class attribute (`Modifier.Companion`). Typed as the owner when the
         // companion is one (`Companion: Modifier`), else as the companion's own type.
+        // A stub name is a type or a value, not both: a companion typed as its own type keeps that type's
+        // path (signatures name it as a type), so only a companion typed as the owner becomes an attribute,
+        // and only if no nested class of that name is rendered (decided in renderNode).
         companionHandles[qualifiedName].orEmpty().forEach { d ->
             val name = d.simpleName
-            if (!isIdentifier(name) || name in node.children) {
-                node.members += "# $COMPANION_MARKER${d.bindingName} is not stubbed: '$name' cannot be written as an attribute here"
-                return@forEach
+            val marker = "# $COMPANION_MARKER${d.bindingName} is not stubbed"
+            when {
+                !isIdentifier(name) -> node.members += "$marker: '$name' cannot be written as an attribute here"
+                d.returnType.qualifiedName != qualifiedName ->
+                    node.members += "$marker: its type ${d.returnType.qualifiedName} is a type path here, not a value"
+                else -> node.companionAttributes += name to
+                    "$name: ${result(d, ctx)}\n\"\"\"$COMPANION_MARKER${d.bindingName} (${kotlinSignatureOf(d)})\"\"\""
             }
-            node.members += "$name: ${result(d, ctx)}\n\"\"\"$COMPANION_MARKER${d.bindingName} (${kotlinSignatureOf(d)})\"\"\""
         }
 
         constructorsByClass[qualifiedName]?.let { group ->
@@ -768,7 +776,7 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
                 group.filter { leafOf(it) == name }.forEach { node.members += methodNotStubbed(it, "'$name' cannot be written as an attribute here") }
                 return@forEach
             }
-            val rendered = renderMethods(name, group, ctx)
+            val rendered = renderMethods(name, withInherited(qualifiedName, name, group), ctx)
             node.members += rendered
             stubbedMethods[name] = name
         }
@@ -786,8 +794,47 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
             if (!isIdentifier(alias) || alias in node.children) return@forEach
             protocols[kotlin]?.let { node.members += "$alias: $TYPING.ClassVar[$it]" }
             stubbedProperties[kotlin]?.let { (getter, setter) -> node.members += renderProperty(alias, getter, setter, ctx) }
-            if (kotlin in stubbedMethods && alias !in memberFunctions) node.members += renderMethods(alias, memberFunctions.getValue(kotlin), ctx)
+            if (kotlin in stubbedMethods && alias !in memberFunctions) node.members += renderMethods(alias, withInherited(qualifiedName, kotlin, memberFunctions.getValue(kotlin)), ctx)
         }
+    }
+
+    /**
+     * A subclass that overrides one overload of an inherited name would, as a lone `def`, hide the
+     * inherited overload set from a type checker (an incompatible override), while Kotlin resolution
+     * still sees every inherited signature. So the set rendered for [name] on [qualifiedName] is its
+     * own declarations first, then each signature a stub supertype declares under [name] whose
+     * parameter types no earlier entry already has (nearest supertype first). Only a base name
+     * (not a suffixed explicit key) is widened, because only it is shared across the hierarchy.
+     */
+    private fun withInherited(qualifiedName: String, name: String, own: List<DeclarationModel>): List<DeclarationModel> {
+        if (isSuffixed(name)) return own
+        return orderedOverloads(qualifiedName, name, own)
+    }
+
+    private fun overloadKey(d: DeclarationModel) = d.parameters.map { it.type.qualifiedName }
+
+    /** [type]'s own declarations under [name], in the order its own stub groups them. */
+    private fun ownOverloads(type: String, name: String): List<DeclarationModel> =
+        methods[type].orEmpty().sortedBy { it.bindingName }
+            .filter { leafOf(it) == name || (isSuffixed(leafOf(it)) && baseOf(leafOf(it)) == name) }
+
+    /**
+     * The overload set [type] renders under [name], in an order every subclass can keep: a type checker
+     * requires an overriding overload set to list the supertype's variants in the supertype's order.
+     * So it starts from the nearest stub supertype's own ordered set, puts [own]'s override in place of
+     * any signature it redeclares (same parameter types), and appends [own]'s other signatures. The
+     * same function orders every level, so a supertype and its subclasses always agree.
+     */
+    private fun orderedOverloads(type: String, name: String, own: List<DeclarationModel>): List<DeclarationModel> {
+        val parent = supertypes[type].orEmpty()
+            .filter { it != type && classRefOf(it) != null }
+            .asSequence()
+            .map { orderedOverloads(it, name, ownOverloads(it, name)) }
+            .firstOrNull { it.isNotEmpty() }
+            ?: return own
+        val parentKeys = parent.map(::overloadKey).toSet()
+        return parent.map { p -> own.firstOrNull { overloadKey(it) == overloadKey(p) } ?: p } +
+            own.filter { overloadKey(it) !in parentKeys }
     }
 
     /**
@@ -885,7 +932,15 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
             if (ref != null && classReference(owner, null, ctx) != ANY) return@forEach
             if (owner in moduleNames) {
                 val moduleCtx = out(owner)
-                handles.forEach { moduleCtx.defs += renderDef(it, moduleCtx) }
+                handles.forEach { d ->
+                    // Same rule as the class path: a companion typed as its own type keeps that type's
+                    // name (the module renders the class `Companion`), so it is no module attribute too.
+                    if (d.returnType.qualifiedName != owner) {
+                        moduleCtx.defs += "# $COMPANION_MARKER${d.bindingName} is not stubbed: its type ${d.returnType.qualifiedName} is a type path here, not a value"
+                    } else {
+                        moduleCtx.defs += renderDef(d, moduleCtx)
+                    }
+                }
             } else {
                 handles.forEach { ctx.defs += "# $COMPANION_MARKER${it.bindingName} is not stubbed: ${owner.substringAfterLast('.')} has no stub class" }
             }
@@ -906,7 +961,11 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
         node.bases?.let { into.append('(').append(it).append(')') }
         into.appendLine(":")
         into.append(indent).append("    \"\"\"").append(node.doc ?: "Kotlin: container of nested classes").appendLine("\"\"\"")
-        node.members.forEach { member ->
+        val companions = node.companionAttributes.map { (name, text) ->
+            if (name in node.children) "# $COMPANION_MARKER${node.qualifiedName}.$name is not stubbed: a nested class '$name' is rendered here"
+            else text
+        }
+        (node.members + companions).forEach { member ->
             member.lines().forEach { into.append(indent).append("    ").appendLine(it) }
         }
         node.children.values.forEach { renderNode(it, "$indent    ", into) }
