@@ -613,15 +613,16 @@ def test_a_class_change_by_a_signal_handler_in_the_consumer_deopts_the_region_ho
     so = cbuild.build(text, "regsig", tmp_path / "out", runtime_dir=runtime_dir())
     m = cbuild.load("regsig", so)
     d = 21
-    t0 = time.perf_counter()
-    assert m.tree_sum(d) == nodes(d)
-    delay = 0.85 * (time.perf_counter() - t0)
     caught = False
-    for k in range(5):           # under load the timer can land after the call; then try again
+    for k in range(12):          # under load the timer can land after the call; then try again
+        # Re-measured before every attempt: on a shared CI runner one baseline does not predict the
+        # next call's length, so a single measurement put every timer after the call (#331 run).
+        t0 = time.perf_counter()
+        assert m.tree_sum(d) == nodes(d)
+        delay = (0.85, 0.8, 0.75, 0.7)[k % 4] * (time.perf_counter() - t0)
         d0 = m.__typedpython_deopts__
         o0, f0, _ = m.__typedpython_region_stats__()
-        got = _with_property_installed_by_handler(lambda: m.tree_sum(d), m.Node,
-                                                  delay * (0.85, 0.8, 0.9, 0.75, 0.7)[k] / 0.85)
+        got = _with_property_installed_by_handler(lambda: m.tree_sum(d), m.Node, delay)
         o1, f1, _ = m.__typedpython_region_stats__()
         assert o1 - o0 == f1 - f0
         if m.__typedpython_deopts__ > d0:                 # the host noticed and redid the call
