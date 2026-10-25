@@ -798,6 +798,97 @@ class ComposableRenderTest {
     }
 
     /**
+     * Issue #309: a colour scheme from Python without `lightColorScheme`'s 48 defaults.
+     *
+     * `lightColorScheme` / `darkColorScheme` / `ColorScheme.copy` each declare 48 defaulted
+     * parameters, past `ArtifactScanner.MAX_OMITTABLE_PARAMETERS` (6), so they bind with every
+     * parameter required (a keyword factory that fills the rest is pythonx-compose's job; defaults
+     * depend on each other, e.g. `surfaceTint` defaults to `primary`, so "call defaults then copy"
+     * was rejected). What Python can do today is call the `ColorScheme` constructor, the public
+     * 48-argument one (no defaults; the 36- and 29-argument ones are `@Deprecated(HIDDEN)` and
+     * declined), and pass the handle to `MaterialTheme(colorScheme=...)`.
+     *
+     * Rendered, not just constructed: every slot black except `primary`, so a shifted argument would
+     * paint a different slot's black.
+     */
+    @Test
+    fun aColorSchemeBuiltByItsConstructorPaintsThePrimaryItWasGiven() {
+        Python3.exec(
+            """
+            import python_multiplatform.binding as _pm_binding
+            _ctors = [d for d in _pm_binding._BY_PACKAGE['androidx.compose.material3']['ColorScheme']
+                      if d.declared_arity() == 48]
+            assert len(_ctors) == 1, repr(_ctors)
+            assert all(_ctors[0].param_has_default[i] is False for i in range(48)), 'ColorScheme(...) has no defaults'
+            """.trimIndent(),
+        )
+        val red = distinctColorsOf(schemeButton(constructed(255, 0, 0)))
+        val green = distinctColorsOf(schemeButton(constructed(0, 255, 0)))
+        println("compose render: MaterialTheme(ColorScheme(48 args, primary=red)) -> ${red.size} colors, green -> ${green.size}")
+        assertTrue(0xFFFF0000.toInt() in red, "the constructor's primary never reached the Button's container: $red")
+        assertTrue(0xFF00FF00.toInt() in green, "the green primary never reached the Button's container: $green")
+        assertTrue(0xFFFF0000.toInt() !in green, "a green scheme painted red: $green")
+    }
+
+    /**
+     * `ColorScheme.copy` is a member with 48 defaulted parameters: past the cap, so every parameter is
+     * required. Expected today: `copy(primary=...)` alone raises `TypeError: ... no value for ...`,
+     * and `copy` with all 48 works and paints the new primary. If either half flips (the cap grew, or
+     * `copy` is not bound at all and this raises `AttributeError`), this test says which.
+     */
+    @Test
+    fun colorSchemeCopyIsBoundWithEveryParameterRequired() {
+        // The prelude is multi-line, so it is joined rather than interpolated into an indented block,
+        // where trimIndent would see its unindented lines and keep the rest indented.
+        Python3.exec(
+            schemePrelude() + "\n" + """
+            _base = ColorScheme(**_written(255, 0, 0))
+            try:
+                _base.copy(primary=_Color(0, 0, 255))
+                raise AssertionError('copy(primary=) alone must not be callable: 48 defaults are past the omission cap')
+            except TypeError as _e:
+                assert 'no value for' in str(_e), str(_e)
+            """.trimIndent(),
+        )
+        val blue = distinctColorsOf(
+            schemeButton(
+                """
+                _base = ColorScheme(**_written(255, 0, 0))
+                _scheme = _base.copy(**_written(0, 0, 255))
+                """.trimIndent(),
+            ),
+        )
+        assertTrue(0xFF0000FF.toInt() in blue, "copy(all 48) did not paint the copied primary: $blue")
+        assertTrue(0xFFFF0000.toInt() !in blue, "copy(all 48) kept the original primary: $blue")
+    }
+
+    private fun schemePrelude(): String =
+        """
+        import python_multiplatform.binding as _pm_binding
+        from androidx.compose.ui.graphics import Color__Int_Int_Int_Int as _Color
+        from androidx.compose.material3 import ColorScheme, MaterialTheme, Button
+        _slots = list([d for d in _pm_binding._BY_PACKAGE['androidx.compose.material3']['ColorScheme']
+                       if d.declared_arity() == 48][0].param_names)
+        def _written(r, g, b):
+            _w = dict((_s, _Color(0, 0, 0)) for _s in _slots)
+            _w['primary'] = _Color(r, g, b)
+            return _w
+        """.trimIndent()
+
+    private fun constructed(red: Int, green: Int, blue: Int): String =
+        "_scheme = ColorScheme(**_written($red, $green, $blue))"
+
+    /** [schemeBuild] must leave the scheme in `_scheme`. */
+    private fun schemeButton(schemeBuild: String): String =
+        schemePrelude() + "\n" + schemeBuild + """
+
+        MaterialTheme(
+            colorScheme=_scheme,
+            content=lambda: Button(onClick=lambda: None, content=lambda: None),
+        )
+        """.trimIndent()
+
+    /**
      * **`Icon`, which the same commit pinned as unreachable -- two of its three overloads are not.**
      *
      * The pin was right about the table and wrong about what that measured. Nothing in the walk
