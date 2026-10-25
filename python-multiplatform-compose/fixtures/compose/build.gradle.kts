@@ -98,6 +98,8 @@ pythonBindings {
         listOf(
             "androidx.compose.material3",
             "androidx.compose.foundation.layout",
+            // `RoundedCornerShape` for `Button(shape=...)` / `Card(shape=...)` (issue #307).
+            "androidx.compose.foundation.shape",
             "androidx.compose.ui.graphics",
             "androidx.compose.ui.res",
             "androidx.compose.ui",

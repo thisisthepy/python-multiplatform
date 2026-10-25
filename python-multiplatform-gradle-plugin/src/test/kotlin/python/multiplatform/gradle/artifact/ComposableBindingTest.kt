@@ -215,6 +215,74 @@ class ComposableBindingTest {
     }
 
     /**
+     * Issue #307: a `@Composable` member of a Kotlin `object` (`ButtonDefaults.buttonColors`,
+     * `CardDefaults.cardColors`) binds like a top-level composable, and returns a value. It was
+     * declined ("a @Composable member of an object: its generated call is a static invocation").
+     * The thunk loads the object's `INSTANCE` and calls the member with `INVOKEVIRTUAL`.
+     */
+    @Test
+    fun aComposableMemberOfAnObjectBindsThroughAnInstanceThunkAndReturnsAValue() {
+        val material3 = jarUnder("org.jetbrains.compose.material3", "material3-desktop") ?: return
+        val entries = ArtifactScanner.scanJar(
+            material3,
+            includePrefixes = listOf("androidx.compose.material3"),
+            classpath = composeClasspath(),
+        )
+        for ((owner, member) in listOf("ButtonDefaults" to "buttonColors", "CardDefaults" to "cardColors")) {
+            val bound = entries.filter {
+                it.name.substringBeforeLast('.').endsWith(".$owner") &&
+                    it.name.substringAfterLast('.').substringBefore("__") == member
+            }
+            assertTrue(bound.isNotEmpty(), "no $owner.$member among ${entries.size} entries")
+            bound.forEach { entry ->
+                val thunk = assertNotNull(entry.thunk, "${entry.name} must carry a thunk spec")
+                assertTrue(thunk.onObjectInstance, "${entry.name}: an object member is called on INSTANCE")
+                assertEquals("androidx/compose/material3/$owner", thunk.ownerInternalName)
+                assertTrue(thunk.methodName.startsWith(member), thunk.methodName)
+                assertEquals("OBJECT", entry.returnTag, "${entry.name} returns ButtonColors/CardColors")
+                assertTrue("\$composer" in entry.paramNames, entry.paramNames.toString())
+            }
+        }
+    }
+
+    /** The instance thunk really links: `INSTANCE` is pushed, then the arguments, then `INVOKEVIRTUAL`. */
+    @Test
+    fun aGeneratedInstanceThunkCallsAnInstanceMethodOfTheSingleton() {
+        val targetInternal = "fixture/thunk/InstanceProbe"
+        val writer = org.objectweb.asm.ClassWriter(org.objectweb.asm.ClassWriter.COMPUTE_MAXS)
+        writer.visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC or Opcodes.ACC_FINAL, targetInternal, null, "java/lang/Object", null)
+        writer.visitField(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC or Opcodes.ACC_FINAL, "INSTANCE", "L$targetInternal;", null, null).visitEnd()
+        writer.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null).apply {
+            visitCode(); visitVarInsn(Opcodes.ALOAD, 0)
+            visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false)
+            visitInsn(Opcodes.RETURN); visitMaxs(0, 0); visitEnd()
+        }
+        writer.visitMethod(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null).apply {
+            visitCode()
+            visitTypeInsn(Opcodes.NEW, targetInternal); visitInsn(Opcodes.DUP)
+            visitMethodInsn(Opcodes.INVOKESPECIAL, targetInternal, "<init>", "()V", false)
+            visitFieldInsn(Opcodes.PUTSTATIC, targetInternal, "INSTANCE", "L$targetInternal;")
+            visitInsn(Opcodes.RETURN); visitMaxs(0, 0); visitEnd()
+        }
+        // `plus-abc123(int, long): long` is an instance method, so a static call could not reach it.
+        writer.visitMethod(Opcodes.ACC_PUBLIC, "plus-abc123", "(IJ)J", null, null).apply {
+            visitCode()
+            visitVarInsn(Opcodes.ILOAD, 1); visitInsn(Opcodes.I2L)
+            visitVarInsn(Opcodes.LLOAD, 2); visitInsn(Opcodes.LADD)
+            visitInsn(Opcodes.LRETURN); visitMaxs(0, 0); visitEnd()
+        }
+        writer.visitEnd()
+        val bytes = generateThunkClass("InstanceProbe", listOf(ThunkSpec(targetInternal, "plus-abc123", "(IJ)J", onObjectInstance = true)))
+        val loader = object : ClassLoader(javaClass.classLoader) {
+            fun define(name: String, data: ByteArray): Class<*> = defineClass(name, data, 0, data.size)
+        }
+        loader.define(targetInternal.replace('/', '.'), writer.toByteArray())
+        val cls = loader.define("$THUNK_PACKAGE.InstanceProbeThunks", bytes)
+        val t0 = cls.getMethod(thunkMethodName(0), Array<Any?>::class.java)
+        assertEquals(5L + 6L, t0.invoke(null, arrayOf<Any?>(5L, 6L)))
+    }
+
+    /**
      * A class whose static method is called `sum-abc123`. Emitted rather than compiled on purpose:
      * a hyphen is Kotlin's value-class mangling suffix, is not a Java identifier, and the exact
      * suffix `kotlinc` would pick is not something a test may assume -- so the name is *chosen* here
