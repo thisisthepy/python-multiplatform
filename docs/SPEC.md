@@ -453,6 +453,12 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 - **B-3** Default arguments can be omitted from Python (a call per subset of defaulted parameters,
   ambiguous omissions refused). `Status: implemented`, `GP/artifact/DefaultOmissionTest.kt`,
   `python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactDefaultOmissionTest.kt`, `PM/commonTest/.../PythonxDefaultsTest.kt`.
+  A declaration with more than 6 defaulted parameters (`lightColorScheme`, `darkColorScheme`,
+  `ColorScheme.copy`, 48 each) binds with every parameter required, because the omission plan is
+  `2^n` (`ArtifactScanner.MAX_OMITTABLE_PARAMETERS`). A colour scheme is built from Python with the
+  `ColorScheme` constructor, all 48 arguments (`ComposableRenderTest.aColorSchemeBuiltByItsConstructorPaintsThePrimaryItWasGiven`,
+  `colorSchemeCopyIsBoundWithEveryParameterRequired`); a keyword factory that fills the rest is
+  pythonx-compose's job (#309).
 - **B-4** Value classes round-trip; only allow-listed ones (e.g. `Dp`) may be written as their raw
   primitive. `Status: implemented`, `GP/artifact/ComposableValueClassSlotTest.kt`,
   `WalkedArtifactPythonImportTest.kt`. A value class is opened as its raw primitive only when both its
