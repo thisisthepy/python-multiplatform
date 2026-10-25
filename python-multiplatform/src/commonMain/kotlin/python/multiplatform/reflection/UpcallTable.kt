@@ -35,7 +35,7 @@ interface FunctionTableFragment {
  * resolution even though both come from the same fragments.
  *
  * ### Threading
- * Not synchronised, for the same reason as [HandleTable]: installation happens once at start-up,
+ * Not synchronised (unlike [HandleTable], which locks): installation happens once at start-up,
  * or under the GIL for an upcall-driven [register], never concurrently with a lookup.
  */
 object UpcallTable {
