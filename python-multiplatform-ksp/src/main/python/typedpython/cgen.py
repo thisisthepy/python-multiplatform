@@ -270,6 +270,19 @@ def _ident(prefix: str, name: str) -> str:
     return f"{prefix}x_{name.encode('utf-8').hex()}"
 
 
+def _vfield(local: str, k: int) -> str:
+    """The name of field `k` of the virtual object held by `local` (not a Python identifier)."""
+    return f"{local}\x00v{k}"
+
+
+def _assigns(body):
+    for s in body:
+        if isinstance(s, ir.Assign):
+            yield s
+        for nested in (getattr(s, "then", ()), getattr(s, "orelse", ()), getattr(s, "body", ())):
+            yield from _assigns(nested)
+
+
 def _i64_lit(v: int) -> str:
     if isinstance(v, bool) or not isinstance(v, int) or not (_INT64_MIN <= v <= _INT64_MAX):
         raise CGenError(f"I64 constant out of range or not an int: {v!r}")
@@ -937,6 +950,16 @@ class _FnGen:
             if t not in _CT:
                 raise CGenError(f"{f.name}: local {name} has type {t}")
             self.types[name] = t
+        # SPEC N-12a: a virtual object lives as one OBJ C local per field (`_vfield`), no object
+        self.virtual: dict[str, str] = {}
+        for x in f.virtual:
+            classes = {e.value.cls for e in _assigns(f.body) if e.target == x
+                       and isinstance(e.value, ir.New)}
+            if len(classes) != 1 or self.types.get(x) is not Type.OBJ:
+                raise CGenError(f"{f.name}: virtual local {x} is not assigned one New class")
+            self.virtual[x] = next(iter(classes))
+            for k in range(len(mg.cls(f.name, self.virtual[x]).fields)):
+                self.types[_vfield(x, k)] = Type.OBJ
 
     # emit primitives
 
@@ -1478,6 +1501,11 @@ class _FnGen:
         return o
 
     def ev_FieldGet(self, e: ir.FieldGet) -> str:
+        if isinstance(e.obj, ir.Local) and e.obj.name in self.virtual:
+            cd = self.mg.cls(self.f.name, e.cls)
+            if e.cls != self.virtual[e.obj.name] or e.field not in cd.fields:
+                raise CGenError(f"{self.f.name}: FieldGet {e.cls}.{e.field} on virtual {e.obj.name}")
+            return self._own_copy(_ident("l", _vfield(e.obj.name, cd.fields.index(e.field))))
         slot = self.mg.slot(self.f.name, e.cls, e.field)
         o = self._obj_operand(e.obj, "FieldGet")
         t = self.tmp("PyObject *")
@@ -1495,6 +1523,26 @@ class _FnGen:
         self._own_release(o)
         self.emit(f"if ({t} == NULL) {{ tp_rc = -1; goto tp_exit; }}")
         return t
+
+    def _assign_virtual(self, s: ir.Assign) -> None:
+        """`x = New(C, args)` of a virtual local: the same guards and argument order as `ev_New`
+        (LOAD_GLOBAL C first, then the arguments, then the class check; a failure is a deopt, the
+        function is pure), but no object: each argument moves into the field local of `x`."""
+        e = s.value
+        cd = self.mg.cls(self.f.name, e.cls)
+        if not isinstance(e, ir.New) or len(e.args) != len(cd.fields) or not self.f.pure:
+            raise CGenError(f"{self.f.name}: virtual {s.target} needs a New of {len(cd.fields)} "
+                            f"fields in a pure function")
+        k = self._class(e.cls)
+        self.emit(f"tp_s = {self._global_ok(e.cls)};")
+        self.emit("if (tp_s < 0) { tp_rc = -1; goto tp_exit; }")
+        self.emit("if (!tp_s) { tp_class_note_slow(&tp_st->cls_rt[%d]); tp_rc = 1; goto tp_exit; }" % k)
+        items = [self._obj_operand(a, "New argument") for a in e.args]
+        self.emit(f"tp_s = {self._current('NULL', e.cls)};")
+        self.emit("if (tp_s < 0) { tp_rc = -1; goto tp_exit; }")
+        self.emit("if (!tp_s) { tp_class_note_slow(&tp_st->cls_rt[%d]); tp_rc = 1; goto tp_exit; }" % k)
+        for i, t in enumerate(items):
+            self._own_move(_ident("l", _vfield(s.target, i)), t)
 
     def ev_New(self, e: ir.New) -> str:
         cd = self.mg.cls(self.f.name, e.cls)
@@ -1755,6 +1803,9 @@ class _FnGen:
         if s.target in self.local_arrays:
             self._assign_array(s, self.local_arrays[s.target])
             return
+        if s.target in self.virtual:
+            self._assign_virtual(s)
+            return
         t = self.types.get(s.target)
         if t is None:
             raise CGenError(f"{self.f.name}: assignment to unknown local {s.target}")
@@ -1906,6 +1957,83 @@ class _FnGen:
         self.depth -= 1
         self.emit("}")
 
+    def _vec_plan(self, s: ir.ForRange):
+        """The element-wise buffer store loop `for i in range(a, b): x[i] = f(y[i], ..., k)` that
+        may run two F64 lanes at a time (TP_BUF_VEC2, tp_runtime.h; design/typedpython.md
+        "Vectorised buffer loops"). Returns the store statement, or None. Only step 1, one
+        statement, a proven store at the loop variable into an F64 buffer array, and a value built
+        from proven loads at the same variable, F64 locals and constants, + - * and negation.
+        No division (it raises), no I64 (checked overflow), no other statement."""
+        if s.step.value != 1 or len(s.body) != 1 or not isinstance(s.body[0], ir.StoreIndex):
+            return None
+        st = s.body[0]
+
+        def at_var(ix, proven):
+            return proven and isinstance(ix, ir.Local) and ix.name == s.var
+
+        def ok(e):
+            if e.type is not Type.F64:
+                return False
+            if isinstance(e, ir.Const):
+                return True
+            if isinstance(e, ir.Local):
+                return e.name != s.var and self.types.get(e.name) is Type.F64
+            if isinstance(e, ir.Index):
+                a = self.arrays.get(e.array)
+                return (a is not None and a.buffer and a.type is Type.F64_ARRAY
+                        and at_var(e.index, e.proven))
+            if isinstance(e, ir.BinOp):
+                return (e.op in (ir.BinOpKind.ADD, ir.BinOpKind.SUB, ir.BinOpKind.MUL)
+                        and ok(e.left) and ok(e.right))
+            if isinstance(e, ir.UnaryOp):
+                return e.op is ir.UnaryOpKind.NEG and ok(e.operand)
+            return False
+
+        a = self.arrays.get(st.array)
+        if a is None or not a.buffer or a.type is not Type.F64_ARRAY or not a.stored:
+            return None
+        if not at_var(st.index, st.proven) or not ok(st.value):
+            return None
+        return st
+
+    def _vec_expr(self, e: ir.Expr, base: str, hoist: list[str]) -> str:
+        if isinstance(e, (ir.Const, ir.Local)):
+            v = self.tmp("double")
+            hoist.append(f"{v} = {self.ev(e)};")
+            return f"vdupq_n_f64({v})"
+        if isinstance(e, ir.Index):
+            _, ptr = self._array(e.array)
+            return f"tp_buf_ld2_f64({ptr}, {base})"
+        if isinstance(e, ir.UnaryOp):
+            return f"vnegq_f64({self._vec_expr(e.operand, base, hoist)})"
+        fn = {ir.BinOpKind.ADD: "vaddq_f64", ir.BinOpKind.SUB: "vsubq_f64",
+              ir.BinOpKind.MUL: "vmulq_f64"}[e.op]
+        return f"{fn}({self._vec_expr(e.left, base, hoist)}, {self._vec_expr(e.right, base, hoist)})"
+
+    def _emit_vec_loop(self, st: ir.StoreIndex, ts: str, tk: str, limit: str) -> None:
+        """Four lanes per step (two independent 2-lane loads, then two stores) while tk + 4 <=
+        limit, then two lanes while tk + 2 <= limit; the scalar loop that follows takes the rest."""
+        hoist: list[str] = []
+        self.emit("#ifdef TP_BUF_VEC2")
+        base = f"(Py_ssize_t)((uint64_t){ts} + {tk})"
+        base2 = f"(Py_ssize_t)((uint64_t){ts} + {tk} + 2u)"
+        e1 = self._vec_expr(st.value, base, hoist)
+        e2 = self._vec_expr(st.value, base2, hoist)
+        for h in hoist:
+            self.emit(h)
+        _, ptr = self._array(st.array)
+        v1, v2 = "tp_vv1", "tp_vv2"
+        self.emit(f"for (; {tk} + 4u <= {limit}; {tk} += 4u) {{")
+        self.emit(f"    float64x2_t {v1} = {e1};")
+        self.emit(f"    float64x2_t {v2} = {e2};")
+        self.emit(f"    tp_buf_st2_f64({ptr}, {base}, {v1});")
+        self.emit(f"    tp_buf_st2_f64({ptr}, {base2}, {v2});")
+        self.emit("}")
+        self.emit(f"for (; {tk} + 2u <= {limit}; {tk} += 2u) {{")
+        self.emit(f"    tp_buf_st2_f64({ptr}, {base}, {e1});")
+        self.emit("}")
+        self.emit("#endif")
+
     def st_ForRange(self, s: ir.ForRange) -> None:
         if self.types.get(s.var) is not Type.I64:
             raise CGenError(f"{self.f.name}: range variable {s.var} must be an I64 local")
@@ -1934,9 +2062,13 @@ class _FnGen:
             self.emit(f"    {tn} = ((uint64_t){ts} - (uint64_t){te} - 1u) / {mag} + 1u;")
             sign = "-"
         self.depth += 1
+        vec = self._vec_plan(s) if step == 1 else None
         if self.snapshot:
             # no polling in a snapshot holder: a plain loop
-            self.emit(f"for ({tk} = 0; {tk} < {tn}; {tk}++) {{")
+            self.emit(f"{tk} = 0;")
+            if vec is not None:
+                self._emit_vec_loop(vec, ts, tk, tn)
+            self.emit(f"for (; {tk} < {tn}; {tk}++) {{")
             self.depth += 1
             self.brk.append(None)
         else:
@@ -1948,6 +2080,8 @@ class _FnGen:
             self.depth += 1
             self.poll()
             self.emit(f"{te2} = {tn} - {tk} > (uint64_t)TP_POLL_INTERVAL ? {tk} + (uint64_t)TP_POLL_INTERVAL : {tn};")
+            if vec is not None:
+                self._emit_vec_loop(vec, ts, tk, te2)
             self.emit(f"for (; {tk} < {te2}; {tk}++) {{")
             self.depth += 1
             self.brk.append(label)

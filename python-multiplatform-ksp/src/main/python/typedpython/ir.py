@@ -778,6 +778,11 @@ class Function:
     # back end does not replace a module global with it; it installs a descriptor in the class dict
     # (cgen.py "Methods"). None: a module-level function.
     owner: str | None = None
+    # SPEC N-12a: OBJ locals that are virtual objects (scalar-replaced `New(C, ...)`: no object is
+    # allocated, the fields live in C locals). Set only by `verify`, which recomputes the set and
+    # rejects a function whose declared entries differ (`verify/virtual-escape`). The front end
+    # leaves it empty.
+    virtual: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
