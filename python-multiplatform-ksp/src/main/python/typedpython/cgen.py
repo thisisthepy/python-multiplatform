@@ -170,6 +170,7 @@ Generated arithmetic is in separate C statements and the file sets `#pragma STDC
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from typedpython import ir
@@ -2145,11 +2146,32 @@ class _FnGen:
                             "function, bad step or no ParInfo)")
         scalars: set[str] = set()
         arrays: set[str] = set()
-        for st in s.body:
-            if not isinstance(st, ir.StoreIndex):
-                raise CGenError(f"{f.name}: parallel loop body has a {type(st).__name__}")
-            arrays.add(st.array)
-            self._par_collect(st.value, scalars, arrays)
+        reds: list[tuple[str, str, ir.Expr]] = []         # (accumulator, op name, the other operand)
+        if info.reduce:
+            if info.stored or len(info.reduce) != len(s.body):
+                raise CGenError(f"{f.name}: parallel reduction loop with stores or a missing reduction")
+            for st, (acc, opn) in zip(sorted(s.body, key=lambda x: getattr(x, "target", "")), info.reduce):
+                v = st.value if isinstance(st, ir.Assign) else None
+                if (not isinstance(v, ir.BinOp) or st.target != acc or v.op.name != opn
+                        or opn not in ("ADD", "MUL") or v.type is not Type.I64
+                        or self.types.get(acc) is not Type.I64 or acc == s.var):
+                    raise CGenError(f"{f.name}: parallel reduction statement is not `acc = acc op e`")
+                if isinstance(v.left, ir.Local) and v.left.name == acc:
+                    other = v.right
+                elif isinstance(v.right, ir.Local) and v.right.name == acc:
+                    other = v.left
+                else:
+                    raise CGenError(f"{f.name}: parallel reduction of {acc} does not read {acc}")
+                reds.append((acc, opn, other))
+                self._par_collect(other, scalars, arrays)
+            if any(x in scalars for x, _, _ in reds):
+                raise CGenError(f"{f.name}: a parallel reduction reads its accumulator")
+        else:
+            for st in s.body:
+                if not isinstance(st, ir.StoreIndex):
+                    raise CGenError(f"{f.name}: parallel loop body has a {type(st).__name__}")
+                arrays.add(st.array)
+                self._par_collect(st.value, scalars, arrays)
         scalars.discard(s.var)
         for a in arrays:
             if a not in self.arrays and a not in self.local_arrays:
@@ -2180,6 +2202,8 @@ class _FnGen:
             fields.append(f"    {ct} {ident};")
             decls.append(f"    {ct} {ident} = c->{ident};")
             sets.append(f"tp_pr.{ident} = {ident};")
+        if reds:
+            fields += ["    unsigned char *tp_pst;"] + [f"    int64_t *tp_part{j};" for j in range(len(reds))]
         saved = (self.lines, self.temps, self.depth, self.brk)
         self.lines, self.temps, self.depth, self.brk = [], [], 2, []
         try:
@@ -2188,30 +2212,73 @@ class _FnGen:
         finally:
             self.lines, self.temps, self.depth, self.brk = saved
         text = "\n".join(body_lines)
+        if reds:
+            # the one failure path a reduction body has: the sequential overflow check, which here
+            # marks the chunk bad (the worker's own tp_rc / tp_exit); nothing else may remain
+            text = re.sub(r"^\s*tp_s = tp_(add|sub|mul)_i64\(.*\);\n?", "", text, flags=re.M)
+            text = re.sub(r"^\s*if \(tp_s != 0\) \{ tp_rc = tp_s; goto tp_exit; \}\n?", "", text, flags=re.M)
         for banned in ("goto", "tp_rc", "tp_s ", "return", "tp_st", "tp_dict", "PyObject", "tp_release"):
             if banned in text:
                 raise CGenError(f"{f.name}: parallel loop body emitted `{banned}`")
         sign_var = _ident("l", s.var)
         out = [f"typedef struct {{", *fields, f"}} {ctx_t};", "",
-               f"static void {body_f}(const void *tp_c, uint64_t tp_k0, uint64_t tp_k1)", "{",
+               f"static void {body_f}(const void *tp_c, unsigned tp_ci, uint64_t tp_k0, uint64_t tp_k1)", "{",
                f"    const {ctx_t} *c = (const {ctx_t} *)tp_c;",
                "    uint64_t tp_k;", *decls]
+        if reds:
+            out += ["    int tp_rc = 0;", "    int tp_s = 0;"]
+            out += [f"    int64_t {_ident('l', acc)} = {'1' if opn == 'MUL' else '0'};" for acc, opn, _ in reds]
+            out.append("    (void)tp_rc; (void)tp_s;")
         for ct, n in body_temps:
             out.append(f"    {ct}{'' if ct.endswith('*') else ' '}{n} = 0;")
         out.append("    (void)c;" + "".join(f" (void){_ident('l', x)};" for x in sorted(scalars)))
         out.append(f"    for (tp_k = tp_k0; tp_k < tp_k1; tp_k++) {{")
         out.append(f"        {sign_var} = (int64_t)((uint64_t)c->tp_ts + tp_k * UINT64_C({mag}));")
         out += body_lines
-        out += ["    }", "}", ""]
+        out.append("    }")
+        if reds:
+            out += [f"    c->tp_part{j}[tp_ci] = {_ident('l', acc)};" for j, (acc, _, _) in enumerate(reds)]
+            out += ["    c->tp_pst[tp_ci] = TP_PAR_OK;", "    return;", "tp_exit:",
+                    "    c->tp_pst[tp_ci] = TP_PAR_BAD;"]
+        out += ["}", ""]
         self.par_defs.append("\n".join(out))
         w = max(1, info.weight)
+        pok = self.tmp("int") if reds else None
+        if reds:
+            self.emit(f"{pok} = 0;")
         self.emit(f"if ({tn} >= (uint64_t)((TP_PAR_MIN_WORK + {w - 1}) / {w}) && tp_par_threads() > 1) {{")
         self.depth += 1
         self.emit(f"{ctx_t} tp_pr;")
+        if reds:
+            self.emit("unsigned char tp_pst[TP_PAR_HARD_CAP] = {0};")
+            for j in range(len(reds)):
+                self.emit(f"int64_t tp_pp{j}[TP_PAR_HARD_CAP];")
         self.emit(f"tp_pr.tp_ts = {ts};")
         for line in sets:
             self.emit(line)
+        if reds:
+            self.emit("tp_pr.tp_pst = tp_pst;")
+            for j in range(len(reds)):
+                self.emit(f"tp_pr.tp_part{j} = tp_pp{j};")
         self.emit(f"(void)tp_par_run({body_f}, &tp_pr, {tn});")
+        if reds:
+            # Combine in chunk order with the sequential checks. All or none: an overflow anywhere
+            # (a chunk, or here) leaves every accumulator untouched and the sequential loop runs.
+            self.emit(f"{pok} = 1;")
+            for j, (acc, opn, _) in enumerate(reds):
+                self.emit(f"int64_t tp_rv{j} = {_ident('l', acc)};")
+                self.emit(f"{pok} = {pok} && tp_par_combine(TP_PAR_OP_{opn}, &tp_rv{j}, tp_pp{j}, tp_pst) == 0;")
+            self.emit(f"if ({pok}) {{")
+            for j, (acc, _, _) in enumerate(reds):
+                self.emit(f"    {_ident('l', acc)} = tp_rv{j};")
+            self.emit(f"    {_ident('l', s.var)} = (int64_t)((uint64_t){ts} + ({tn} - 1u) * UINT64_C({mag}));")
+            self.emit("} else {")
+            self.emit("    tp_par_rerun_note();")
+            self.emit("}")
+            self.depth -= 1
+            self.emit("}")
+            self.emit(f"if (!{pok}) {{")
+            return
         self.emit(f"{_ident('l', s.var)} = (int64_t)((uint64_t){ts} + ({tn} - 1u) * UINT64_C({mag}));")
         self.depth -= 1
         self.emit("} else {")
@@ -2756,14 +2823,14 @@ def _state_functions(mg: _ModGen) -> str:
 
 def _par_stats_function() -> str:
     """`__typedpython_parallel__()`: (regions that used workers, workers started, failed thread
-    creations) since import, so a test can prove the parallel path ran (SPEC N-15)."""
+    creations, reduction regions rerun sequentially after an overflow) since import, so a test can prove the parallel path ran (SPEC N-15)."""
     return "\n".join([
         "static PyObject *tp_par_stats_fn(PyObject *tp_module, PyObject *tp_unused)",
         "{",
-        "    int64_t tp_v[3];",
+        "    int64_t tp_v[4];",
         "    (void)tp_module; (void)tp_unused;",
         "    tp_par_stats(tp_v);",
-        "    return Py_BuildValue(\"(LLL)\", (long long)tp_v[0], (long long)tp_v[1], (long long)tp_v[2]);",
+        "    return Py_BuildValue(\"(LLLL)\", (long long)tp_v[0], (long long)tp_v[1], (long long)tp_v[2], (long long)tp_v[3]);",
         "}",
         "",
         "static PyMethodDef tp_par_stats_def = {\"__typedpython_parallel__\", tp_par_stats_fn, METH_NOARGS, NULL};",

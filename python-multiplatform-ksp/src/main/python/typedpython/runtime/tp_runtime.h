@@ -2943,12 +2943,13 @@ static inline int tp_traced(PyObject *module, PyThreadState *ts, PyCodeObject *c
 #include <unistd.h>
 #endif
 
-typedef void (*tp_par_fn)(const void *ctx, uint64_t lo, uint64_t hi);
+typedef void (*tp_par_fn)(const void *ctx, unsigned ci, uint64_t lo, uint64_t hi);
 
 static int tp_par_cap_v = 0;                  /* 0: not read yet; then the thread cap (>= 1), set once */
 static int64_t tp_par_regions_v = 0;          /* regions that ran with at least one worker */
 static int64_t tp_par_started_v = 0;          /* worker threads started */
 static int64_t tp_par_failed_v = 0;           /* pthread_create calls that failed (their chunk ran on the caller) */
+static int64_t tp_par_reruns_v = 0;           /* reduction regions discarded (overflow) and rerun sequentially */
 
 /* The thread cap: TYPEDPYTHON_THREADS (a positive integer, 1 disables), else min(cores, 8); read once,
  * immutable afterwards. Two threads racing on the first call compute the same value. */
@@ -2987,21 +2988,23 @@ static inline int tp_par_threads(void)
     return c;
 }
 
-/* out[0] regions that used workers, out[1] workers started, out[2] failed thread creations */
-static inline void tp_par_stats(int64_t out[3])
+/* out[0] regions that used workers, out[1] workers started, out[2] failed thread creations,
+ * out[3] reduction regions discarded and rerun sequentially */
+static inline void tp_par_stats(int64_t out[4])
 {
+    out[3] = __atomic_load_n(&tp_par_reruns_v, __ATOMIC_RELAXED);
     out[0] = __atomic_load_n(&tp_par_regions_v, __ATOMIC_RELAXED);
     out[1] = __atomic_load_n(&tp_par_started_v, __ATOMIC_RELAXED);
     out[2] = __atomic_load_n(&tp_par_failed_v, __ATOMIC_RELAXED);
 }
 
 #ifdef TP_PAR_HAVE_THREADS
-typedef struct { tp_par_fn fn; const void *ctx; uint64_t lo, hi; } tp_par_job;
+typedef struct { tp_par_fn fn; const void *ctx; unsigned ci; uint64_t lo, hi; } tp_par_job;
 
 static void *tp_par_worker(void *p)
 {
     const tp_par_job *j = (const tp_par_job *)p;
-    j->fn(j->ctx, j->lo, j->hi);
+    j->fn(j->ctx, j->ci, j->lo, j->hi);
     return NULL;
 }
 #endif
@@ -3033,6 +3036,7 @@ static inline int tp_par_run(tp_par_fn fn, const void *ctx, uint64_t n)
             }
             jobs[jn].fn = fn;
             jobs[jn].ctx = ctx;
+            jobs[jn].ci = (unsigned)jn;
             jobs[jn].lo = lo;
             jobs[jn].hi = lo + chunk < n ? lo + chunk : n;
             live[jn] = 0;
@@ -3056,10 +3060,10 @@ static inline int tp_par_run(tp_par_fn fn, const void *ctx, uint64_t n)
             }
         }
         pthread_sigmask(SIG_SETMASK, &old, NULL);
-        fn(ctx, jobs[0].lo, jobs[0].hi);
+        fn(ctx, 0, jobs[0].lo, jobs[0].hi);
         for (k = 1; k < jn; k++) {
             if (!live[k]) {
-                fn(ctx, jobs[k].lo, jobs[k].hi);   /* creation failed: this chunk runs here */
+                fn(ctx, (unsigned)k, jobs[k].lo, jobs[k].hi);   /* creation failed: this chunk runs here */
             }
         }
         for (k = 1; k < jn; k++) {
@@ -3074,8 +3078,47 @@ static inline int tp_par_run(tp_par_fn fn, const void *ctx, uint64_t n)
         return started;
     }
 #endif
-    fn(ctx, 0, n);
+    fn(ctx, 0, 0, n);
     return 0;
+}
+
+/* Reductions (step 2, #277). A reduction chunk function writes its partial (the op applied from the
+ * op's identity, with the sequential code's overflow checks) into part[ci] and sets st[ci] to
+ * TP_PAR_OK, or sets st[ci] = TP_PAR_BAD when a check failed (the partial is then meaningless).
+ * st[] is zero-initialised by the caller, so chunks that never ran stay TP_PAR_NONE. Chunks are a
+ * prefix 0..m-1 of the 64 slots. */
+#define TP_PAR_NONE 0
+#define TP_PAR_OK 1
+#define TP_PAR_BAD 2
+#define TP_PAR_OP_ADD 0
+#define TP_PAR_OP_MUL 1
+
+static inline int64_t tp_par_identity(int op) { return op == TP_PAR_OP_MUL ? 1 : 0; }
+
+/* acc = acc op part[0] op part[1] ... in chunk order, checked like the sequential code. Returns 0 and
+ * stores the result in *acc, or 1 (a chunk failed or the combination overflowed) leaving *acc alone. */
+static inline int tp_par_combine(int op, int64_t *acc, const int64_t *part, const unsigned char *st)
+{
+    int64_t v = *acc, w;
+    int k;
+    for (k = 0; k < TP_PAR_HARD_CAP; k++) {
+        if (st[k] == TP_PAR_BAD) {
+            return 1;
+        }
+    }
+    for (k = 0; k < TP_PAR_HARD_CAP && st[k] == TP_PAR_OK; k++) {
+        if (op == TP_PAR_OP_MUL ? tp_mul_i64(v, part[k], &w) : tp_add_i64(v, part[k], &w)) {
+            return 1;
+        }
+        v = w;
+    }
+    *acc = v;
+    return 0;
+}
+
+static inline void tp_par_rerun_note(void)
+{
+    __atomic_fetch_add(&tp_par_reruns_v, 1, __ATOMIC_RELAXED);
 }
 
 #endif /* TP_RUNTIME_H */

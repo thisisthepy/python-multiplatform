@@ -492,7 +492,7 @@ for the epoch's increment. `tp_runtime.h` needs the GCC/Clang `__atomic` builtin
 
 ## Parallel regions (SPEC N-15, issues #151, #277)
 A `ForRange` the verifier marked `par` (`ir.ParInfo`; marked function, `a[i] = F64 expression` stores
-only) runs its iterations on per-region C threads above a work threshold. Workers touch no Python
+or i64 `+ *` reductions) runs its iterations on per-region C threads above a work threshold. Workers touch no Python
 object and no Python API, are not Python threads and never outlive the call.
     #define TP_PAR_MIN_WORK 65536          /* PLACEHOLDER, to be measured on #151: weighted iterations (trip count * ParInfo.weight) */
     #define TP_PAR_MAX_THREADS 8           /* default cap; TYPEDPYTHON_THREADS overrides (1 disables), hard cap 64 */
@@ -501,20 +501,32 @@ object and no Python API, are not Python threads and never outlive the call.
     #define TP_PAR_ALIGN 8u                /* chunk starts are multiples of 8 iterations (one cache line of doubles) */
     #define TP_PAR_HAVE_THREADS            /* defined with pthreads; -DTP_NO_THREADS compiles the threads out */
     #define TP_PAR_TEST_FAIL_CREATE        /* test hook: every pthread_create reports failure */
-    typedef void (*tp_par_fn)(const void *ctx, uint64_t lo, uint64_t hi);
+    typedef void (*tp_par_fn)(const void *ctx, unsigned ci, uint64_t lo, uint64_t hi);   /* ci: chunk index, 0.. */
     int  tp_par_threads(void);                                   /* the cap, read once from TYPEDPYTHON_THREADS, else min(cores, 8) */
     int  tp_par_run(tp_par_fn fn, const void *ctx, uint64_t n);  /* runs [0, n) in contiguous chunks, joined before return; returns workers started */
-    void tp_par_stats(int64_t out[3]);                           /* regions with workers, workers started, failed creations */
+    void tp_par_stats(int64_t out[4]);                           /* regions with workers, workers started, failed creations, reduction reruns */
+    #define TP_PAR_NONE 0 / TP_PAR_OK 1 / TP_PAR_BAD 2    /* per-chunk state of a reduction chunk (zero-initialised array of TP_PAR_HARD_CAP) */
+    #define TP_PAR_OP_ADD 0 / TP_PAR_OP_MUL 1
+    int  tp_par_combine(int op, int64_t *acc, const int64_t *part, const unsigned char *st);  /* acc op= part[0], part[1], ... in chunk order, checked; 1 if a chunk was BAD or it overflowed (acc untouched) */
+    void tp_par_rerun_note(void);                                /* counts a discarded reduction region */
 `tp_par_run` always completes the whole range. The calling thread runs the first chunk; a chunk whose
 `pthread_create` failed runs on the calling thread after it (fewer workers, down to none: the sequential
 loop, no exception, not a semantic event). Workers start with all signals blocked, so Python signal
 handlers run on Python threads only. The chunk function must be safe for any chunk on any thread;
 generated code passes a context struct of raw array pointers and scalar copies. A module with a
 `par` loop also exports `__typedpython_parallel__()` returning `(regions, workers_started,
-failed_creations)`, so tests can prove the parallel path ran. Free-threaded state: the four counters and
+failed_creations, reduction_reruns)`, so tests can prove the parallel path ran. Free-threaded state: the four counters and
 the thread cap are atomics (relaxed); a region's chunk bounds, jobs and thread handles live on the
 caller's stack. The caller does not poll the eval breaker inside a region (array functions do not poll
 anyway, #152).
+
+Reduction regions (step 2). The chunk function starts each accumulator at the op's identity (0 for `+`,
+1 for `*`), runs the sequential statements `acc = acc op e` with the sequential overflow checks, and
+writes `part[ci]` and `st[ci] = TP_PAR_OK`; a failed check sets `st[ci] = TP_PAR_BAD` and stops the chunk.
+After `tp_par_run` the caller combines every accumulator with `tp_par_combine`; if any accumulator fails
+(a BAD chunk or an overflow in the combination) no accumulator and no loop variable is written, the rerun
+counter is incremented and the sequential loop runs from the loop's start state, which deopts or not
+exactly as today. (`& | ^` and min/max are not reductions yet: the compiled subset has no bitwise operator.)
 
 ## Development-mode import gate (Python API, not C; SPEC N-7b)
     typedpython.importgate.install(source_roots)   # meta path finder; checks project modules before they run

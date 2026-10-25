@@ -417,3 +417,424 @@ def test_concurrent_calls_from_several_python_threads(built):
     assert r["gil"] is False
     if (os.cpu_count() or 1) > 1:
         assert r["regions"] >= 6 * 6
+
+
+# =====================================================================================================
+# Step 2 (SPEC N-15, #277): i64 reductions `acc op= expr`, op in + and *.
+# (& | ^ are not in the compiled subset: the front end skips `s &= x`, the IR has no bitwise BinOpKind.)
+#
+# Scope chosen: the body of a reduction loop is only reductions (no element-wise stores in the same
+# loop), so a rerun needs no array restore. Each chunk computes its partial from the op's identity with
+# the sequential code's own overflow checks; any chunk overflow or a combination overflow discards the
+# whole region and the sequential loop runs from its start state (it deopts as today).
+#
+# Red record: written before the implementation. Before it, `ir.ParInfo` had no `reduce`, reduction
+# loops were never `par` (so the region counter did not move and `__typedpython_parallel__()` had
+# three fields, no rerun counter); see the report in #277.
+# =====================================================================================================
+
+RSOURCE = '''\
+# typedpython: compiled
+
+# typedpython: parallel
+def r_sum(xs: list[int]) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s += xs[i]
+    return s
+
+
+# typedpython: parallel
+def r_sum_init(xs: list[int], s0: int) -> int:
+    s: int = s0
+    for i in range(len(xs)):
+        s += xs[i]
+    return s
+
+
+# typedpython: parallel
+def r_prod(xs: list[int], c: int) -> int:
+    s: int = 1
+    for i in range(len(xs)):
+        s *= xs[i] * c
+    return s
+
+
+# typedpython: parallel
+def r_sum_mul(xs: list[int], c: int) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s += xs[i] * c
+    return s
+
+
+# typedpython: parallel
+def r_two(xs: list[int]) -> int:
+    a: int = 0
+    b: int = 7
+    for i in range(len(xs)):
+        a += xs[i]
+        b += xs[i] * 2
+    return a * 3 + b
+
+
+# typedpython: parallel
+def r_range_sum(xs: list[int]) -> int:
+    s: int = 5
+    for i in range(len(xs)):
+        s += i - 2
+    return s
+
+
+# typedpython: parallel
+def r_local(n: int) -> int:
+    t = [0] * n
+    for i in range(len(t)):
+        t[i] = i * 3 + 1
+    s: int = 0
+    for i in range(len(t)):
+        s += t[i]
+    return s
+
+
+def r_unmarked(xs: list[int]) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s += xs[i]
+    return s
+
+
+# typedpython: parallel
+def n_acc_read(xs: list[int]) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s += xs[i] + s
+    return s
+
+
+# typedpython: parallel
+def n_two_ops(xs: list[int]) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s += xs[i]
+        s *= xs[i]
+    return s
+
+
+# typedpython: parallel
+def n_float(xs: list[float]) -> float:
+    s: float = 0.0
+    for i in range(len(xs)):
+        s += xs[i]
+    return s
+
+
+# typedpython: parallel
+def n_copy(xs: list[int]) -> int:
+    s: int = 0
+    w: int = 0
+    for i in range(len(xs)):
+        s += xs[i]
+        w = s
+    return s + w
+
+
+# typedpython: parallel
+def n_mixed(xs: list[int]) -> int:
+    t = [0.0] * len(xs)
+    s: int = 0
+    for i in range(len(xs)):
+        t[i] = t[i] + 1.5
+        s += xs[i]
+    return s
+
+
+# typedpython: parallel
+def n_div(xs: list[int], d: int) -> int:
+    s: int = 0
+    for i in range(len(xs)):
+        s += xs[i] // d
+    return s
+
+
+# typedpython: parallel
+def n_shift_step(xs: list[int]) -> int:
+    s: int = 0
+    for i in range(0, len(xs), 2):
+        s += xs[i + 1]
+    return s
+'''
+
+RSIZES = [0, 1, 2, 7, 1000, 200003, 1048576]
+I64_MAX = 2**63 - 1
+I64_MIN = -(2**63)
+
+
+@pytest.fixture(scope="module")
+def rbuilt(tmp_path_factory):
+    return build(tmp_path_factory.mktemp("rpar"), RSOURCE, name="rparmod")
+
+
+@pytest.fixture(scope="module")
+def rmod(rbuilt):
+    return cbuild.load("rparmod", rbuilt[2])
+
+
+def rdata(n, seed=5, lo=-1000, hi=1000):
+    import random
+    r = random.Random(seed)
+    return [r.randint(lo, hi) for _ in range(n)]
+
+
+def reruns(m):
+    return m.__typedpython_parallel__()[3]
+
+
+def same(rmod, name, *args):
+    """compiled result == interpreter result (exact Python int), with fresh copies of list arguments"""
+    want = rmod.__typedpython_interpreted__[name](*[list(a) if isinstance(a, list) else a for a in args])
+    got = getattr(rmod, name)(*[list(a) if isinstance(a, list) else a for a in args])
+    assert got == want and type(got) is type(want), (name, got, want)
+    return got
+
+
+RED = ["r_sum", "r_sum_init", "r_prod", "r_sum_mul", "r_two", "r_range_sum", "r_local"]
+EXPECT_REDUCE = {
+    "r_sum": (("s", "ADD"),), "r_prod": (("s", "MUL"),), "r_sum_mul": (("s", "ADD"),),
+    "r_two": (("a", "ADD"), ("b", "ADD")),
+}
+
+
+@pytest.mark.parametrize("name", RED)
+def test_reduction_loops_are_marked_par(rbuilt, name):
+    f = fn(rbuilt, name)
+    loops = [l for l in par_loops(f) if l.par is not None]
+    assert loops, name
+    for nm, want in EXPECT_REDUCE.items():
+        if nm == name:
+            assert loops[-1].par.reduce == want and loops[-1].par.stored == ()
+
+
+@pytest.mark.parametrize("name", ["n_acc_read", "n_two_ops", "n_float", "n_copy", "n_mixed", "n_div",
+                                  "n_shift_step"])
+def test_ineligible_reductions_stay_sequential(rbuilt, name):
+    f = fn(rbuilt, name)
+    assert f.parallel is True
+    loops = par_loops(f)
+    assert loops and all(l.par is None for l in loops), name
+
+
+def test_unmarked_reduction_never_parallel(rbuilt):
+    assert all(l.par is None for l in par_loops(fn(rbuilt, "r_unmarked")))
+
+
+def test_c_regions_only_for_eligible_reductions(rbuilt):
+    import re
+    owners = set(re.findall(r"static void tp_par_(\w+?)(?:_fast)?_\d+_body\(", rbuilt[1]))
+    assert owners == set(RED), owners
+
+
+def _forge(rbuilt, name, par):
+    f = fn(rbuilt, name)
+    loop = par_loops(f)[-1]
+    fake = dataclasses.replace(loop, par=par)
+    bad = dataclasses.replace(f, body=tuple(fake if s is loop else s for s in f.body))
+    return verify.verify(dataclasses.replace(rbuilt[3], functions=(bad,), skipped={}))
+
+
+def test_verifier_rejects_a_forged_reduction(rbuilt):
+    good = par_loops(fn(rbuilt, "r_sum"))[-1].par
+    # forged on an ineligible loop (the accumulator is read in the body)
+    for name in ("n_acc_read", "n_two_ops", "n_copy", "n_mixed", "n_div"):
+        proved, diags = _forge(rbuilt, name, ir.ParInfo((), (), 3, (("s", "ADD"),)))
+        assert not proved.functions and any(d.rule == PAR_RULE for d in diags), name
+    # right loop, wrong reduction operator
+    proved, diags = _forge(rbuilt, "r_sum", dataclasses.replace(good, reduce=(("s", "MUL"),)))
+    assert not proved.functions and any(d.rule == PAR_RULE for d in diags)
+    # right loop, reduction dropped
+    proved, diags = _forge(rbuilt, "r_sum", dataclasses.replace(good, reduce=()))
+    assert not proved.functions and any(d.rule == PAR_RULE for d in diags)
+    # the honest value passes
+    proved, diags = _forge(rbuilt, "r_sum", good)
+    assert proved.functions and not diags
+
+
+@pytest.mark.parametrize("n", RSIZES)
+def test_reductions_match_interpreter_no_overflow(rmod, n):
+    xs, ys = rdata(n, 1), rdata(n, 2)
+    for name in ("r_sum", "r_range_sum"):
+        same(rmod, name, xs)
+    same(rmod, "r_sum_init", xs, 12345)
+    same(rmod, "r_sum_mul", xs, 977)
+    same(rmod, "r_two", xs)
+    same(rmod, "r_prod", [1, -1] * (n // 2) + [1] * (n % 2), 1)     # +-1: never overflows
+
+
+@pytest.mark.parametrize("n", RSIZES)
+def test_sums_with_large_values_that_fit(rmod, n):
+    xs = rdata(n, 3, -(2**62) // max(n, 1), 2**62 // max(n, 1))      # partial sums stay inside i64
+    same(rmod, "r_sum", xs)
+    same(rmod, "r_sum_mul", rdata(n, 4, -5, 5), 2**40)
+
+
+def test_product_with_zero_and_small_values(rmod):
+    n = 300000
+    xs = [1] * n
+    xs[10], xs[200000] = 7, -3
+    same(rmod, "r_prod", xs, 1)
+    xs[150000] = 0
+    same(rmod, "r_prod", xs, 1)
+    same(rmod, "r_prod", [2] * 62 + [1] * (n - 62), 1)                 # 2**62 fits
+    same(rmod, "r_prod", [-2] * 63 + [1] * (n - 63), 1)                # -2**63 fits exactly
+
+
+def test_local_array_reduction(rmod):
+    for n in (0, 1, 5, 300000):
+        same(rmod, "r_local", n)
+
+
+# overflow partway: the whole region is discarded and the sequential rerun produces Python's int
+
+@pytest.mark.skipif((os.cpu_count() or 1) < 2, reason="needs a second core to start a region")
+def test_sum_overflow_in_a_chunk_reruns_and_equals_python(rmod):
+    n = 400000
+    base = rdata(n, 6, -3, 3)
+    xs = list(base)
+    xs[0] = xs[1] = 2**62                                       # chunk 0 overflows, and the prefix
+    xs[n - 1] = -(2**62)
+    r0, rr0 = regions(rmod), reruns(rmod)
+    got = same(rmod, "r_sum", xs)
+    assert got == sum(xs)
+    assert regions(rmod) == r0 + 1 and reruns(rmod) == rr0 + 1
+    # not representable in i64 at the end: Python's big int
+    xs2 = list(base)
+    xs2[0] = xs2[n - 1] = I64_MAX
+    got = same(rmod, "r_sum", xs2)
+    assert got == sum(xs2) and got > I64_MAX
+
+
+@pytest.mark.skipif((os.cpu_count() or 1) < 2, reason="needs a second core to start a region")
+def test_sum_overflow_only_in_the_combination_reruns(rmod):
+    n = 400000
+    xs = [0] * n
+    xs[0] = 2**62                                               # first chunk partial: 2**62
+    xs[n - 1] = 2**62                                           # last chunk partial: 2**62; total 2**63
+    rr0 = reruns(rmod)
+    got = same(rmod, "r_sum", xs)
+    assert got == 2**63
+    assert reruns(rmod) == rr0 + 1
+
+
+@pytest.mark.skipif((os.cpu_count() or 1) < 2, reason="needs a second core to start a region")
+def test_sum_that_overflows_and_comes_back_equals_python(rmod):
+    n = 400000
+    xs = [0] * n
+    xs[1], xs[2], xs[3] = 2**62, 2**62, -(2**62)                # prefix passes 2**63, ends at 2**62
+    got = same(rmod, "r_sum", xs)
+    assert got == 2**62
+    xs = rdata(n, 7, -5, 5)
+    xs[100], xs[101], xs[n - 5] = I64_MAX, I64_MAX, I64_MIN
+    got = same(rmod, "r_sum", xs)
+    assert got == sum(xs)
+
+
+@pytest.mark.skipif((os.cpu_count() or 1) < 2, reason="needs a second core to start a region")
+def test_product_overflow_reruns_and_equals_python(rmod):
+    n = 400000
+    xs = [1] * n
+    for k in (3, 150000, 399999):
+        xs[k] = 2**22
+    rr0 = reruns(rmod)
+    got = same(rmod, "r_prod", xs, 1)                           # 2**66
+    assert got == 2**66 and reruns(rmod) == rr0 + 1
+    got = same(rmod, "r_prod", [3] * 60 + [1] * (n - 60), 1)    # 3**60 > 2**63
+    assert got == 3**60
+    xs = [1] * n
+    xs[0] = xs[n - 1] = 2**40
+    xs[7] = 0
+    got = same(rmod, "r_prod", xs, 1)                           # intermediate overflow, result 0
+    assert got == 0
+
+
+@pytest.mark.skipif((os.cpu_count() or 1) < 2, reason="needs a second core to start a region")
+def test_element_expression_overflow_reruns(rmod):
+    n = 400000
+    xs = rdata(n, 8, -9, 9)
+    xs[250000] = 2**30
+    rr0 = reruns(rmod)
+    got = same(rmod, "r_sum_mul", xs, 2**40)                    # xs[i] * c overflows at one element
+    assert reruns(rmod) == rr0 + 1
+    assert got == __import__("functools").reduce(lambda a, b: a + (b * 2**40), xs, 0)
+
+
+@pytest.mark.skipif((os.cpu_count() or 1) < 2, reason="needs a second core to start a region")
+def test_region_and_rerun_counters(rmod):
+    r0, rr0 = regions(rmod), reruns(rmod)
+    rmod.r_sum([1] * 10)
+    assert regions(rmod) == r0                                  # below threshold: sequential
+    assert rmod.r_sum([1] * 1048576) == 1048576
+    assert regions(rmod) == r0 + 1 and reruns(rmod) == rr0      # above: a region, no rerun
+    r1 = regions(rmod)
+    for name in ("r_unmarked",):
+        getattr(rmod, name)([1] * 1048576)
+    rmod.n_acc_read([0] * 1048576)
+    rmod.n_two_ops([1] * 1048576)
+    rmod.n_float([1.0] * 1048576)
+    rmod.n_copy([1] * 1048576)
+    rmod.n_mixed([1] * 1048576)
+    assert regions(rmod) == r1
+
+
+def test_negative_cases_correct(rmod):
+    xs = rdata(300000, 9, -5, 5)
+    for name, args in (("n_acc_read", (xs,)), ("n_two_ops", (xs,)), ("n_float", ([float(v) for v in xs],)),
+                       ("n_copy", (xs,)), ("n_mixed", (xs,)), ("n_div", (xs, 3)),
+                       ("n_shift_step", (xs,)), ("r_unmarked", (xs,))):
+        want = rmod.__typedpython_interpreted__[name](*[list(a) if isinstance(a, list) else a for a in args])
+        got = getattr(rmod, name)(*[list(a) if isinstance(a, list) else a for a in args])
+        assert got == want, name
+
+
+RTHREAD_BODY = """
+    import random
+    r = random.Random(11)
+    n = 400001
+    small = [r.randint(-1000, 1000) for _ in range(n)]
+    ovf = list(small); ovf[0] = ovf[1] = 2**62; ovf[n - 1] = -(2**62)
+    ones = [1] * n; ones[5] = ones[200000] = ones[n - 1] = 2**22
+    out = {
+        "sum": m.r_sum(small), "ovf": m.r_sum(ovf), "prod": m.r_prod(ones, 1), "two": m.r_two(small),
+        "mul": m.r_sum_mul(small, 2**40),
+        "regions": m.__typedpython_parallel__()[0], "reruns": m.__typedpython_parallel__()[3],
+    }
+    print(json.dumps(out))
+"""
+
+
+def test_reduction_results_identical_for_every_thread_count(rbuilt):
+    import random
+    import functools
+    r = random.Random(11)
+    n = 400001
+    small = [r.randint(-1000, 1000) for _ in range(n)]
+    ovf = list(small)
+    ovf[0] = ovf[1] = 2**62
+    ovf[n - 1] = -(2**62)
+    ones = [1] * n
+    ones[5] = ones[200000] = ones[n - 1] = 2**22
+    want = {"sum": sum(small), "ovf": sum(ovf), "prod": 2**66, "mul": sum(small) * 2**40,
+            "two": sum(small) * 3 + 7 + sum(small) * 2}
+    results = {t: run_child(rbuilt[2], RTHREAD_BODY, {"TYPEDPYTHON_THREADS": str(t)}) for t in (1, 2, 3, 7)}
+    for t, res in results.items():
+        for k, v in want.items():
+            assert res[k] == v, (t, k)
+    assert results[1]["regions"] == 0 and results[1]["reruns"] == 0       # 1 disables the feature
+    if (os.cpu_count() or 1) > 1:
+        assert results[2]["regions"] > 0 and results[7]["regions"] > 0
+        assert results[2]["reruns"] == 2 and results[7]["reruns"] == 2     # ovf and prod rerun, once each
+
+
+def test_no_reduction_region_without_a_marker(tmp_path):
+    src = RSOURCE.replace("# typedpython: parallel\n", "")
+    _, c_text, _, _ = build(tmp_path, src, name="rnomark")
+    assert "tp_par_run(" not in c_text and "__typedpython_parallel__" not in c_text
