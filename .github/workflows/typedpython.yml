@@ -31,7 +31,7 @@ jobs:
           # Windows builds the compiled modules with MSVC (cl.exe, found through vswhere and
           # vcvars64.bat by cbuild.py), so the C runtime header is compiled by a second compiler family.
           - os: windows-latest
-            venv_python: .venv/Scripts/python
+            venv_python: .venv/Scripts/python.exe
     defaults:
       run:
         shell: bash
