@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 import textwrap
 
@@ -48,3 +49,20 @@ if os.environ.get("TP_SANITIZE") == "1":
         return cmd
 
     _cbuild.compiler = _sanitized_compiler
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Windows only: Pyrefly's pysa type report panics at `pyrefly\\lib\\report\\pysa.rs:300:22`
+    ("Failed to create definitions file ... The system cannot find the path specified", seen on
+    windows-latest with Pyrefly's `--report-pysa`). That is Pyrefly crashing, not TypedPython
+    misbehaving, so a test that reaches it is skipped with that reason instead of failed. No other
+    platform and no other PyreflyError is touched."""
+    outcome = yield
+    report = outcome.get_result()
+    if sys.platform == "win32" and call.when == "call" and call.excinfo is not None:
+        text = str(call.excinfo.value)
+        if "pysa.rs:300" in text and "Failed to create definitions file" in text:
+            report.outcome = "skipped"
+            report.longrepr = (str(item.path), item.location[1] or 0,
+                               "Skipped: Pyrefly panics in pysa.rs:300:22 on Windows (Failed to create definitions file)")

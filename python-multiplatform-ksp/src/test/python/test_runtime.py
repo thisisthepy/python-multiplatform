@@ -81,6 +81,16 @@ def _build(variant: str):
     name = f"tp_shim_{variant}" + ("_san" if sanitize else "")
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
     out = BUILD_DIR / (name + suffix)
+    if sys.platform == "win32":
+        from typedpython import cbuild
+        # MSVC through cbuild (a mingw gcc on PATH cannot link against the python3NN.lib import library)
+        extra = [f"-DTP_SHIM_NAME={name}"] + (["-DTP_RUNTIME_FORCE_PORTABLE_OVERFLOW"] if variant == "portable" else [])
+        built = cbuild.build(SHIM_C.read_text(encoding="utf-8"), name, BUILD_DIR,
+                             flags=list(cbuild.DEFAULT_FLAGS) + extra, runtime_dir=RUNTIME_DIR)
+        spec = importlib.util.spec_from_file_location(name, built)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
     cc = shlex.split(sysconfig.get_config_var("CC") or "cc")
     cmd = cc + ["-std=c99", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
                 "-shared", "-fPIC", f"-DTP_SHIM_NAME={name}",

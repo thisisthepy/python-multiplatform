@@ -13,6 +13,7 @@ import importlib.machinery
 import importlib.util
 import os
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -84,7 +85,11 @@ def _msvc_flags(flags: list[str] | tuple[str, ...]) -> list[str]:
     if tuple(flags) == DEFAULT_FLAGS:
         return list(MSVC_DEFAULT_FLAGS)
     out: list[str] = []
-    for f in flags:
+    rest = list(flags)
+    if tuple(rest[:len(DEFAULT_FLAGS)]) == DEFAULT_FLAGS:   # the defaults plus extra flags
+        out = list(MSVC_DEFAULT_FLAGS)
+        rest = rest[len(DEFAULT_FLAGS):]
+    for f in rest:
         if f.startswith("/"):
             out.append(f)
         elif f[:2] in ("-D", "-U", "-I"):
@@ -102,17 +107,31 @@ def msvc_libs_dir(include: Path) -> Path:
     return Path(sys.base_prefix) / "libs"
 
 
+def free_threaded(ext_suffix: str | None = None) -> bool:
+    """Whether the target CPython is the free-threaded build: the `t` ABI tag of an explicit
+    extension suffix (`.cp315t-win_amd64.pyd`), else the host interpreter's `Py_GIL_DISABLED`."""
+    if ext_suffix:
+        return re.search(r"\.cp\d+t-", ext_suffix) is not None
+    return bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
+
+
 def msvc_command(cl: str, c_file: Path, so: Path, include: Path, runtime: Path,
                  flags: list[str] | tuple[str, ...] = DEFAULT_FLAGS,
-                 libs_dir: Path | None = None) -> list[str]:
+                 libs_dir: Path | None = None, gil_disabled: bool | None = None) -> list[str]:
     """`cl /nologo <flags> /LD /I<include> /I<runtime> <c_file> /Fo<obj> /link /LIBPATH:<libs> /OUT:<so>`.
 
     The object file goes next to the source; `/OUT` names the extension (`<name><EXT_SUFFIX>`,
     .pyd on Windows). Pure: no filesystem or process access beyond `libs_dir` when it is None.
+
+    On a free-threaded CPython `/DPy_GIL_DISABLED=1` is added: the Windows pyconfig.h does not
+    define it, and without it `#pragma comment(lib, ...)` auto-links python3NN.lib instead of
+    python3NNt.lib (LNK1104 on a free-threaded install, which has only the latter).
     """
     libs = libs_dir if libs_dir is not None else msvc_libs_dir(include)
     obj = Path(c_file).with_suffix(".obj")
-    return ([cl, "/nologo"] + _msvc_flags(flags)
+    ft = free_threaded() if gil_disabled is None else gil_disabled
+    gil = ["/DPy_GIL_DISABLED=1"] if ft else []
+    return ([cl, "/nologo"] + _msvc_flags(flags) + gil
             + ["/LD", f"/I{include}", f"/I{runtime}", str(c_file), f"/Fo{obj}",
                "/link", f"/LIBPATH:{libs}", f"/OUT:{so}"])
 
@@ -208,7 +227,8 @@ def build(c_source: str, module_name: str, out_dir: Path, runtime_dir: Path | No
     so = out_dir / f"{stem}{suffix}"
     if _is_msvc():
         env = msvc_env()
-        cmd = msvc_command(_msvc_cl(env), c_file, so, include, runtime, flags)
+        cmd = msvc_command(_msvc_cl(env), c_file, so, include, runtime, flags,
+                           gil_disabled=free_threaded(ext_suffix))
         run = subprocess.run(cmd, capture_output=True, text=True, env=env)
         if run.returncode != 0 or not so.is_file():
             # cl.exe reports its errors on stdout

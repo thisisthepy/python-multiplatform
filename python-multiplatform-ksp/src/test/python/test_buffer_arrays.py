@@ -627,6 +627,9 @@ def test_concurrent_reader_sees_no_torn_element(vec_built):
 
 def test_no_vec_build_does_not_use_the_helper(vec_built, tmp_path):
     import subprocess
+    import sys
+    if sys.platform == "win32":
+        pytest.skip("runs the GCC/Clang preprocessor (cc -E -P); the vector helper is aarch64-only anyway")
     c = tmp_path / "v.c"
     c.write_text(vec_built[0].c)
     import sysconfig
