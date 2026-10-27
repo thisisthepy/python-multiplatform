@@ -22,9 +22,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            venv_python: .venv/bin/python
+          - os: macos-latest
+            venv_python: .venv/bin/python
+          # Windows builds the compiled modules with MSVC (cl.exe, found through vswhere and
+          # vcvars64.bat by cbuild.py), so the C runtime header is compiled by a second compiler family.
+          - os: windows-latest
+            venv_python: .venv/Scripts/python
     defaults:
       run:
+        shell: bash
         working-directory: python-multiplatform-ksp
     steps:
       - uses: actions/checkout@v4
@@ -35,14 +45,14 @@ jobs:
         # pyrefly is pinned exactly: the gate reads its versioned type-report format.
         run: |
           uv venv .venv --python 3.15t
-          uv pip install --python .venv/bin/python "pyrefly==1.3.2" pytest numpy
+          uv pip install --python ${{ matrix.venv_python }} "pyrefly==1.3.2" pytest numpy
 
       - name: Behaviour tests
-        run: .venv/bin/python -m pytest -q -m "not measurement and not race_mutant"
+        run: ${{ matrix.venv_python }} -m pytest -q -m "not measurement and not race_mutant"
 
       - name: Measurements (recorded, sanity bounds only)
         # A shared runner is not an idle machine (AGENTS.md §8): read ratios, not absolute times.
-        run: .venv/bin/python -m pytest -q -s -m measurement
+        run: ${{ matrix.venv_python }} -m pytest -q -s -m measurement
 
   sanitizers:
     # SPEC N-8: ASan/UBSan runs are the safety net outside the proof. Every extension TypedPython

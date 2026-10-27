@@ -266,6 +266,20 @@ def c_string(data: str | bytes) -> str:
     return "\n    ".join(pieces)
 
 
+# cl.exe rejects a string literal longer than 65535 bytes (C2026); stay well under it.
+MSVC_LITERAL_LIMIT = 60000
+
+
+def c_source_init(data: str) -> str:
+    """The initialiser of `tp_source`: a string literal, or for a source too long for MSVC's
+    literal limit a brace list of byte values (still NUL-terminated, so `Py_CompileString` reads it)."""
+    raw = data.encode("utf-8")
+    if len(raw) <= MSVC_LITERAL_LIMIT:
+        return c_string(data)
+    rows = [", ".join(str(b) for b in raw[i:i + 24]) for i in range(0, len(raw), 24)]
+    return "{\n    " + ",\n    ".join(rows) + ",\n    0\n}"
+
+
 def _ident(prefix: str, name: str) -> str:
     """A C identifier for a Python name: ASCII names keep their spelling, others are hex-encoded
     under a distinct prefix so the two forms cannot collide."""
@@ -726,9 +740,11 @@ def generate(module: ir.Module, source_path: Path, display_path: str | None = No
     w("#if PY_VERSION_HEX < 0x030D0000")
     w('#error "typedpython extensions need CPython 3.13 or newer (PyDict_GetItemRef)"')
     w("#endif")
+    w("#if !defined(_MSC_VER) || defined(__clang__)    /* cl.exe warns on an unknown pragma */")
     w("#pragma STDC FP_CONTRACT OFF")
+    w("#endif")
     w("")
-    w(f"static const char tp_source[] =\n    {c_string(source)};")
+    w(f"static const char tp_source[] =\n    {c_source_init(source)};")
     w(f"static const char tp_source_path[] = {c_string(display_path)};")
     w("")
     n_names, n_kw = len(mg.names), len(mg.kwtuples)
