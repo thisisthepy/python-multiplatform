@@ -48,7 +48,7 @@ def test_msvc_command_shape(tmp_path):
 def test_gcc_flags_translate():
     assert cbuild._msvc_flags(cbuild.DEFAULT_FLAGS) == list(cbuild.MSVC_DEFAULT_FLAGS)
     got = cbuild._msvc_flags(list(cbuild.DEFAULT_FLAGS) + ["-DTP_BUFFER_PLAIN", "-Ifoo", "/W4", "-fsanitize=address"])
-    assert got == ["/DTP_BUFFER_PLAIN", "/Ifoo", "/W4"]
+    assert got == list(cbuild.MSVC_DEFAULT_FLAGS) + ["/DTP_BUFFER_PLAIN", "/Ifoo", "/W4"]
 
 
 def test_build_on_windows_runs_cl_and_returns_the_pyd(tmp_path, include, monkeypatch):
@@ -189,3 +189,54 @@ def test_the_runtime_has_an_msvc_path():
     for needle in ("TP_MSVC_ATOMICS", "_InterlockedExchangeAdd64", "__iso_volatile_load64",
                    "__declspec(noinline)", "tp_add_i64((a), (b), (r))"):
         assert needle in text, needle
+
+
+def test_free_threaded_build_defines_py_gil_disabled(tmp_path):
+    # the Windows pyconfig.h of a free-threaded CPython does not define Py_GIL_DISABLED, so the
+    # auto-link pragma would name python315.lib (absent there) instead of python315t.lib
+    ft = cbuild.msvc_command("cl", tmp_path / "m.c", tmp_path / "m.pyd", tmp_path / "inc", tmp_path / "rt",
+                             libs_dir=tmp_path / "libs", gil_disabled=True)
+    gil = cbuild.msvc_command("cl", tmp_path / "m.c", tmp_path / "m.pyd", tmp_path / "inc", tmp_path / "rt",
+                              libs_dir=tmp_path / "libs", gil_disabled=False)
+    assert "/DPy_GIL_DISABLED=1" in ft and ft.index("/DPy_GIL_DISABLED=1") < ft.index("/LD")
+    assert not [a for a in gil if "Py_GIL_DISABLED" in a]
+
+
+def test_free_threaded_follows_the_suffix_else_sysconfig(monkeypatch):
+    assert cbuild.free_threaded(".cp315t-win_amd64.pyd")
+    assert not cbuild.free_threaded(".cp315-win_amd64.pyd")
+    monkeypatch.setattr(cbuild.sysconfig, "get_config_var", lambda n: 1 if n == "Py_GIL_DISABLED" else None)
+    assert cbuild.free_threaded()
+    monkeypatch.setattr(cbuild.sysconfig, "get_config_var", lambda n: 0 if n == "Py_GIL_DISABLED" else None)
+    assert not cbuild.free_threaded()
+
+
+def test_build_passes_py_gil_disabled_for_a_free_threaded_suffix(tmp_path, include, monkeypatch):
+    monkeypatch.setattr(cbuild.sys, "platform", "win32")
+    monkeypatch.setattr(cbuild.shutil, "which", lambda name, path=None: "cl.exe")
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        Path(next(a for a in cmd if a.startswith("/OUT:"))[5:]).write_text("pyd")
+        return FakeCompleted()
+
+    monkeypatch.setattr(cbuild.subprocess, "run", fake_run)
+    cbuild.build(SRC, "mod", tmp_path / "a", python_include=include, ext_suffix=".cp315t-win_amd64.pyd")
+    assert "/DPy_GIL_DISABLED=1" in seen["cmd"]
+    cbuild.build(SRC, "mod", tmp_path / "b", python_include=include, ext_suffix=".cp315-win_amd64.pyd")
+    assert not [a for a in seen["cmd"] if "Py_GIL_DISABLED" in a]
+
+
+def test_the_libs_dir_is_the_include_siblings_else_the_base_prefix(tmp_path, monkeypatch):
+    root = tmp_path / "cpython-3.15+freethreaded"
+    (root / "Include").mkdir(parents=True)
+    (root / "libs").mkdir()
+    assert cbuild.msvc_libs_dir(root / "Include") == root / "libs"
+    monkeypatch.setattr(cbuild.sys, "base_prefix", str(tmp_path / "base"))
+    assert cbuild.msvc_libs_dir(tmp_path / "elsewhere" / "include") == tmp_path / "base" / "libs"
+
+
+def test_default_flags_with_extras_keep_the_msvc_defaults():
+    got = cbuild._msvc_flags(list(cbuild.DEFAULT_FLAGS) + ["-DTP_SHIM_NAME=x", "-Wall"])
+    assert got == list(cbuild.MSVC_DEFAULT_FLAGS) + ["/DTP_SHIM_NAME=x"]
