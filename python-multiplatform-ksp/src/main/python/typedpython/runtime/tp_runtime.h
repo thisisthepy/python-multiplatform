@@ -575,10 +575,10 @@ static TP_NOINLINE int tp_np_f64(int op, double a, double b, double *out)
         }
         else {
             /* numpy's npy_remainder returns only the modulus of npy_divmod. Whether the dead quotient
-             * (a - mod) / b still runs depends on numpy's own build: the macOS wheel (clang) keeps it, so
-             * 1.0 % 1e-310 warns overflow + invalid there; the Linux wheel (gcc) drops it and is silent.
+             * (a - mod) / b still runs depends on numpy's own build: the macOS wheel (clang) keeps it, and so
+             * does the Windows wheel (CI, numpy on windows-latest), so 1.0 % 1e-310 warns overflow + invalid there; the Linux wheel (gcc) drops it and is silent.
              * Observed with numpy 2.5.4; mirror each. */
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(_WIN32)
             volatile double vd = tp_np_divmod(va, vb, &mod);   /* volatile: the quotient must really run */
             (void)vd;
             vr = mod;
@@ -3143,7 +3143,7 @@ static inline int tp_traced(PyObject *module, PyThreadState *ts, PyCodeObject *c
  * F64 arithmetic on raw arrays), so the workers need no thread state. The calling thread keeps its
  * attached thread state, its critical section and its place in the call: it runs the first chunk
  * itself. A thread that cannot be created is not an error: its chunk runs on the calling thread.
- * Without pthreads (TP_NO_THREADS, wasm, Windows) tp_par_threads() is 1 and the region is dead code. */
+ * Without pthreads (TP_NO_THREADS, wasm) tp_par_threads() is 1 and the region is dead code. */
 #ifndef TP_PAR_MIN_WORK
 /* PLACEHOLDER, not a measurement: units are "weighted loop iterations" (trip count times the loop's
  * node count `ParInfo.weight`). It is to be measured together with thread creation cost in a quiet
@@ -3162,6 +3162,16 @@ static inline int tp_traced(PyObject *module, PyThreadState *ts, PyCodeObject *c
 #include <pthread.h>
 #include <signal.h>
 #include <unistd.h>
+#elif !defined(TP_NO_THREADS) && defined(_WIN32)
+#define TP_PAR_HAVE_THREADS 1
+#define TP_PAR_WIN32 1
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #endif
 
 typedef void (*tp_par_fn)(const void *ctx, unsigned ci, uint64_t lo, uint64_t hi);
@@ -3193,7 +3203,14 @@ static inline int tp_par_threads(void)
             }
         }
         if (v == 0) {
+#ifdef TP_PAR_WIN32
+            SYSTEM_INFO si;
+            long cores;
+            GetSystemInfo(&si);
+            cores = (long)si.dwNumberOfProcessors;
+#else
             long cores = sysconf(_SC_NPROCESSORS_ONLN);
+#endif
             v = cores < 1 ? 1 : cores;
             if (v > TP_PAR_MAX_THREADS) {
                 v = TP_PAR_MAX_THREADS;
@@ -3222,12 +3239,21 @@ static inline void tp_par_stats(int64_t out[4])
 #ifdef TP_PAR_HAVE_THREADS
 typedef struct { tp_par_fn fn; const void *ctx; unsigned ci; uint64_t lo, hi; } tp_par_job;
 
+#ifdef TP_PAR_WIN32
+static DWORD WINAPI tp_par_worker(LPVOID p)
+{
+    const tp_par_job *j = (const tp_par_job *)p;
+    j->fn(j->ctx, j->ci, j->lo, j->hi);
+    return 0;
+}
+#else
 static void *tp_par_worker(void *p)
 {
     const tp_par_job *j = (const tp_par_job *)p;
     j->fn(j->ctx, j->ci, j->lo, j->hi);
     return NULL;
 }
+#endif
 #endif
 
 /* Runs fn(ctx, lo, hi) over [0, n) in contiguous chunks and returns after every chunk is done (always
@@ -3244,11 +3270,17 @@ static inline int tp_par_run(tp_par_fn fn, const void *ctx, uint64_t n)
     }
     if (t > 1) {
         tp_par_job jobs[TP_PAR_HARD_CAP];
+#ifdef TP_PAR_WIN32
+        HANDLE th[TP_PAR_HARD_CAP];
+#else
         pthread_t th[TP_PAR_HARD_CAP];
+#endif
         unsigned char live[TP_PAR_HARD_CAP];
         uint64_t chunk = (n + (uint64_t)t - 1u) / (uint64_t)t;
         int k, started = 0, jn = 0;
+#ifndef TP_PAR_WIN32
         sigset_t all, old;
+#endif
         chunk = (chunk + (TP_PAR_ALIGN - 1u)) & ~(uint64_t)(TP_PAR_ALIGN - 1u);
         for (k = 0; k < t; k++) {
             uint64_t lo = (uint64_t)k * chunk;
@@ -3264,14 +3296,21 @@ static inline int tp_par_run(tp_par_fn fn, const void *ctx, uint64_t n)
             jn++;
         }
         /* workers start with every signal blocked, so a handler only ever runs on a Python thread */
+#ifndef TP_PAR_WIN32
         sigfillset(&all);
         pthread_sigmask(SIG_SETMASK, &all, &old);
+#endif
         for (k = 1; k < jn; k++) {
             int rc;
 #ifdef TP_PAR_TEST_FAIL_CREATE
             rc = 11;                           /* EAGAIN: tests make every creation fail */
 #else
+#ifdef TP_PAR_WIN32
+            th[k] = CreateThread(NULL, 0, tp_par_worker, &jobs[k], 0, NULL);
+            rc = th[k] != NULL ? 0 : 11;
+#else
             rc = pthread_create(&th[k], NULL, tp_par_worker, &jobs[k]);
+#endif
 #endif
             if (rc == 0) {
                 live[k] = 1;
@@ -3280,7 +3319,9 @@ static inline int tp_par_run(tp_par_fn fn, const void *ctx, uint64_t n)
                 __atomic_fetch_add(&tp_par_failed_v, 1, __ATOMIC_RELAXED);
             }
         }
+#ifndef TP_PAR_WIN32
         pthread_sigmask(SIG_SETMASK, &old, NULL);
+#endif
         fn(ctx, 0, jobs[0].lo, jobs[0].hi);
         for (k = 1; k < jn; k++) {
             if (!live[k]) {
@@ -3289,7 +3330,12 @@ static inline int tp_par_run(tp_par_fn fn, const void *ctx, uint64_t n)
         }
         for (k = 1; k < jn; k++) {
             if (live[k]) {
+#ifdef TP_PAR_WIN32
+                WaitForSingleObject(th[k], INFINITE);
+                CloseHandle(th[k]);
+#else
                 pthread_join(th[k], NULL);
+#endif
             }
         }
         if (started > 0) {

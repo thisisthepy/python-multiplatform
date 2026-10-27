@@ -119,7 +119,8 @@ def rt(request):
     the overflow builtins so both code paths of the header are exercised."""
     mod = _build(request.param)
     info = mod.info()
-    assert bool(info["portable"]) == (request.param == "portable")
+    # without the GNU overflow builtins (MSVC) the default build already is the portable one
+    assert bool(info["portable"]) == (request.param == "portable" or not info["has_builtins"])
     return mod
 
 
