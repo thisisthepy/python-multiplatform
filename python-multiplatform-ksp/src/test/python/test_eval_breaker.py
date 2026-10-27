@@ -20,6 +20,8 @@ import pytest
 
 from typedpython import pipeline
 
+posix_signals = pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX signals (SIGALRM/SIGUSR1/setitimer) or fork; Windows has none")
+
 SOURCE = """\
 # typedpython: compiled
 
@@ -130,6 +132,7 @@ def test_another_thread_runs_while_a_compiled_loop_runs(extension):
     assert r["inside"] > 0, f"the worker thread never ran during the compiled call: {r}"
 
 
+@posix_signals
 def test_a_handler_is_deferred_while_an_array_copy_is_live(extension):
     # total() reads its list through a copy-in. A handler that writes the list mid-call would be
     # invisible to the copy, a result no CPython execution can give. So the handler must run after
@@ -387,6 +390,7 @@ def mid(n: int) -> float:
 """
 
 
+@posix_signals
 def test_signal_reaches_a_range_loop_shorter_than_interval_squared(tmp_path):
     # #280: a chunk of TP_POLL_INTERVAL iterations must end in a slow poll, not in a countdown that
     # also counts TP_POLL_INTERVAL (one poll per 4096*4096 = 16.7M iterations). 12M iterations is

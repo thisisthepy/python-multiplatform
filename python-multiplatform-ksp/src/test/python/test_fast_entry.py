@@ -22,6 +22,8 @@ import pytest
 
 from typedpython import cbuild, cgen, frontend, verify
 
+posix_signals = pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX signals (SIGALRM/SIGUSR1/setitimer) or fork; Windows has none")
+
 SOURCE = """\
 # typedpython: compiled
 
@@ -357,6 +359,7 @@ def test_a_redo_inside_a_fast_tree_sees_the_exact_depth(traced, tmp_path):
     assert "tp_depth_py_begin(tp_t, tp_fd);" in fn_text(c, "static inline int tp_fimpl_fill")
 
 
+@posix_signals
 def test_a_signal_handler_in_a_fast_tree_poll_sees_the_exact_depth(traced, tmp_path):
     # a compiled recursive call made by a signal handler that the poll of a loop two frames deep
     # in a fast tree runs reaches RecursionError at the interpreter's depth

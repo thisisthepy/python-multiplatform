@@ -573,7 +573,13 @@ static PyObject *s_release(PyObject *self, PyObject *o)
 
 static PyObject *s_info(PyObject *self, PyObject *unused)
 {
-    return Py_BuildValue("{s:i,s:i}", "portable", TP_RUNTIME_PORTABLE_OVERFLOW,
+    #if defined(__GNUC__) || defined(__clang__)
+    int has_builtins = 1;
+#else
+    int has_builtins = 0;
+#endif
+    return Py_BuildValue("{s:i,s:i,s:i}", "portable", TP_RUNTIME_PORTABLE_OVERFLOW,
+                         "has_builtins", has_builtins,
                          "py_version_hex", (int)PY_VERSION_HEX);
 }
 

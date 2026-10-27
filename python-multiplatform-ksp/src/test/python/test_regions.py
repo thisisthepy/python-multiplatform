@@ -27,6 +27,8 @@ import pytest
 from test_cgen import runtime_dir, need_runtime
 from typedpython import cbuild, cgen, cost, frontend, verify
 
+posix_signals = pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX signals (SIGALRM/SIGUSR1/setitimer) or fork; Windows has none")
+
 REGION_ESCAPE = "verify/region-escape"
 FN_FIELD = "regions"                 # Function.regions: the region scopes the function opens
 MOD_FIELD = "region_variants"        # Module.region_variants: functions that get a hidden-region clone
@@ -547,6 +549,7 @@ def test_every_chunk_is_freed_on_every_exit_edge(built):
     assert a1 - a0 >= 3 and a1 - a0 == f1 - f0                         # chunks were used, and all came back
 
 
+@posix_signals
 def test_an_exception_raised_while_the_tree_is_being_built_frees_the_region(built):
     """The error edge (-1) after nodes were allocated: a signal handler raises at the eval-breaker poll
     that every compiled entry makes, in the middle of building a tree of 8M nodes."""
@@ -599,6 +602,7 @@ def _with_property_installed_by_handler(fn, node_cls, delay):
         node_cls.left = slot          # the next attempt starts from the original slot descriptor
 
 
+@posix_signals
 def test_a_class_change_by_a_signal_handler_in_the_consumer_deopts_the_region_host(tmp_path):
     """The handler runs at a tp_poll inside the call and installs a property `left` on Node. The timer is
     set to 85% of a measured call, so it lands mostly in `check` (the producer's per-New guard cannot

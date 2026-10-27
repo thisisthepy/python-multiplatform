@@ -27,6 +27,8 @@ import pytest
 
 from typedpython import cbuild, cgen, frontend, ir, verify
 
+posix_signals = pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX signals (SIGALRM/SIGUSR1/setitimer) or fork; Windows has none")
+
 FREE_THREADED = bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
 PAR_RULE = "verify/par-loop"
 
@@ -326,7 +328,7 @@ def test_list_untouched_when_the_call_raises_before_the_loop(mod):
 CHILD = """\
 import importlib.machinery, importlib.util, json, struct, sys, threading
 path = sys.argv[1]
-name = path.rsplit("/", 1)[-1].split(".")[0]
+name = path.replace(chr(92), "/").rsplit("/", 1)[-1].split(".")[0]
 loader = importlib.machinery.ExtensionFileLoader(name, path)
 spec = importlib.util.spec_from_file_location(name, path, loader=loader)
 m = importlib.util.module_from_spec(spec)
@@ -1272,6 +1274,7 @@ def _threads_env():
     return {"TYPEDPYTHON_THREADS": "4"}
 
 
+@posix_signals
 def test_fork_from_a_python_thread_while_another_thread_runs_a_region(built):
     r = run_child(built[2], """
         import os, time, warnings, signal
@@ -1343,6 +1346,7 @@ SIGNAL_BODY = """
 """
 
 
+@posix_signals
 def test_signal_handlers_run_on_the_main_thread_after_the_region(built):
     r = run_child(built[2], SIGNAL_BODY % (BIG, "pass", "") + """
     marks = []
@@ -1368,6 +1372,7 @@ def test_signal_handlers_run_on_the_main_thread_after_the_region(built):
         assert all(k["after_region"] for k in r["marks"]), r["marks"]   # no handler ran inside the region
 
 
+@posix_signals
 def test_repeating_signals_never_run_a_handler_on_a_worker(built):
     r = run_child(built[2], SIGNAL_BODY % (BIG, "pass", "") + """
     signal.setitimer(signal.ITIMER_REAL, 0.001, 0.001)
@@ -1382,6 +1387,7 @@ def test_repeating_signals_never_run_a_handler_on_a_worker(built):
     assert r["ok"] and r["all_main"] and r["n"] >= 1
 
 
+@posix_signals
 def test_keyboardinterrupt_during_a_region_matches_the_sequential_semantics(built):
     """The interrupt is raised by the handler after the region ended: the list is either completely
     scaled or untouched (the call raised before write-back), never partly written, and the exception
@@ -1409,6 +1415,7 @@ def test_keyboardinterrupt_during_a_region_matches_the_sequential_semantics(buil
         assert o["full"] != o["untouched"], o               # exactly one: all or nothing
 
 
+@posix_signals
 def test_keyboardinterrupt_in_a_reduction_region(rbuilt):
     r = run_child(rbuilt[2], SIGNAL_BODY % (BIG, "raise KeyboardInterrupt", "") + """
     ints = [k %% 1000 for k in range(%d)]

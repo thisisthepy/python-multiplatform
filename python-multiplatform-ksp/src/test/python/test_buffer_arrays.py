@@ -244,7 +244,9 @@ def wrapper_text(c, name):
 
 @pytest.mark.parametrize("name,make", [
     ("sum_ad", lambda: (AD(),)), ("sum_aq", lambda: (AQ(),)),
-    ("sum_ad", lambda: (AD([]),)), ("sum_aq", lambda: (array.array("l", I),)),
+    ("sum_ad", lambda: (AD([]),)),
+    pytest.param("sum_aq", lambda: (array.array("l", I),), marks=pytest.mark.skipif(
+        array.array("l").itemsize != 8, reason="array('l') is 4 bytes on LLP64 (Windows), not an int64 buffer")),
     ("length_ad", lambda: (AD(),)), ("length_ad", lambda: (AD([]),)),
 ])
 def test_reads_and_len(built, name, make):
