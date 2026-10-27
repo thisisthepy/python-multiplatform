@@ -36,7 +36,51 @@
  * and a borrowed reference is never held across anything another thread could free: containers
  * are read through the strong-reference API (PyDict_GetItemRef ...) or under a critical section.
  * ------------------------------------------------------------------------------------------ */
-#if defined(__GNUC__) || defined(__clang__)
+/* MSVC (cl.exe, not clang-cl) has no __atomic builtins. These macros give it the few forms used
+ * below, with the GCC names, so every call site stays the same. The size of the pointee picks the
+ * access width; loads return unsigned __int64 (cast at a site that needs a signed or pointer
+ * result), stores take any integer or pointer. Memory orders are all treated as sequentially
+ * consistent fences around volatile accesses (x64 needs only the compiler barrier; ARM64 gets a
+ * real DMB). Windows on x64 and ARM64 are the only targets; both have 8-byte pointers. */
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>
+#define TP_MSVC_ATOMICS 1
+#define __ATOMIC_RELAXED 0
+#define __ATOMIC_ACQUIRE 2
+#define __ATOMIC_RELEASE 3
+#define __ATOMIC_ACQ_REL 4
+static __forceinline void tp_msvc_fence(void)
+{
+    _ReadWriteBarrier();
+#if defined(_M_ARM64) || defined(_M_ARM)
+    __dmb(0xB);
+#endif
+}
+static __forceinline unsigned __int64 tp_msvc_ld8(const volatile void *p)
+{ unsigned __int64 v = (unsigned char)__iso_volatile_load8((const volatile char *)p); tp_msvc_fence(); return v; }
+static __forceinline unsigned __int64 tp_msvc_ld32(const volatile void *p)
+{ unsigned __int64 v = (unsigned int)__iso_volatile_load32((const volatile int *)p); tp_msvc_fence(); return v; }
+static __forceinline unsigned __int64 tp_msvc_ld64(const volatile void *p)
+{ unsigned __int64 v = (unsigned __int64)__iso_volatile_load64((const volatile __int64 *)p); tp_msvc_fence(); return v; }
+static __forceinline void tp_msvc_st8(volatile void *p, unsigned __int64 v)
+{ tp_msvc_fence(); __iso_volatile_store8((volatile char *)p, (char)v); tp_msvc_fence(); }
+static __forceinline void tp_msvc_st32(volatile void *p, unsigned __int64 v)
+{ tp_msvc_fence(); __iso_volatile_store32((volatile int *)p, (int)v); tp_msvc_fence(); }
+static __forceinline void tp_msvc_st64(volatile void *p, unsigned __int64 v)
+{ tp_msvc_fence(); __iso_volatile_store64((volatile __int64 *)p, (__int64)v); tp_msvc_fence(); }
+#define __atomic_load_n(p, mo) \
+    (sizeof(*(p)) == 8 ? tp_msvc_ld64(p) : sizeof(*(p)) == 4 ? tp_msvc_ld32(p) : tp_msvc_ld8(p))
+#define __atomic_store_n(p, v, mo) \
+    (sizeof(*(p)) == 8 ? tp_msvc_st64((p), (unsigned __int64)(v)) \
+     : sizeof(*(p)) == 4 ? tp_msvc_st32((p), (unsigned __int64)(v)) \
+     : tp_msvc_st8((p), (unsigned __int64)(v)))
+#define __atomic_fetch_add(p, v, mo) \
+    (sizeof(*(p)) == 8 ? (unsigned __int64)_InterlockedExchangeAdd64((volatile __int64 *)(p), (__int64)(v)) \
+     : (unsigned __int64)(unsigned int)_InterlockedExchangeAdd((volatile long *)(p), (long)(v)))
+#define __atomic_sub_fetch(p, v, mo) (__atomic_fetch_add((p), -(v), (mo)) - (unsigned __int64)(v))
+#endif
+
+#if defined(__GNUC__) || defined(__clang__) || defined(TP_MSVC_ATOMICS)
 static inline unsigned int tp_atomic_load_u32(const unsigned int *p)
 { return __atomic_load_n(p, __ATOMIC_RELAXED); }
 static inline void tp_atomic_store_u32(unsigned int *p, unsigned int v)
@@ -52,7 +96,7 @@ static inline Py_ssize_t tp_atomic_load_ssize(const Py_ssize_t *p)
 static inline void tp_atomic_add_ssize(Py_ssize_t *p, Py_ssize_t v)
 { (void)__atomic_fetch_add(p, v, __ATOMIC_RELAXED); }
 #else
-#error "tp_runtime.h needs the GCC/Clang __atomic builtins (the build uses cc, see cbuild.py)"
+#error "tp_runtime.h needs the GCC/Clang __atomic builtins or MSVC (see cbuild.py)"
 #endif
 
 /* cls->tp_version_tag: CPython clears and reassigns it from any thread (PyType_Modified, under the
@@ -453,6 +497,8 @@ enum { TP_NP_ADD, TP_NP_SUB, TP_NP_MUL, TP_NP_DIV, TP_NP_FLOORDIV, TP_NP_MOD };
 
 #if defined(__GNUC__) || defined(__clang__)
 #define TP_NOINLINE __attribute__((noinline, unused))
+#elif defined(_MSC_VER)
+#define TP_NOINLINE __declspec(noinline)
 #else
 #define TP_NOINLINE
 #endif
@@ -1843,9 +1889,16 @@ typedef struct {
 
 /* The single mutation points of the overflow checks (the mutation tests in test_native_int_impure.py
  * replace each by a wrapping operation and must fail). */
+#if defined(__GNUC__) || defined(__clang__)
 #define TP_INT_ADD_OVF(a, b, r) __builtin_add_overflow((a), (b), (r))
 #define TP_INT_SUB_OVF(a, b, r) __builtin_sub_overflow((a), (b), (r))
 #define TP_INT_MUL_OVF(a, b, r) __builtin_mul_overflow((a), (b), (r))
+#else
+/* no builtin (MSVC): the portable checks above; *r is read only when they report no overflow */
+#define TP_INT_ADD_OVF(a, b, r) tp_add_i64((a), (b), (r))
+#define TP_INT_SUB_OVF(a, b, r) tp_sub_i64((a), (b), (r))
+#define TP_INT_MUL_OVF(a, b, r) tp_mul_i64((a), (b), (r))
+#endif
 
 static inline void tp_int_release(tp_int *a)
 {
@@ -2231,7 +2284,7 @@ static inline PyObject *tp_gcache_global(tp_gslot *slot, PyObject *module_dict, 
     if (watched && TP_GCACHE_AVAILABLE) {
         uint64_t e = __atomic_load_n(&tp_globals_epoch, __ATOMIC_ACQUIRE);
         if (TP_GCACHE_FRESH(__atomic_load_n(&slot->epoch, __ATOMIC_ACQUIRE), e)) {
-            PyObject *p = __atomic_load_n(&slot->obj, __ATOMIC_ACQUIRE);
+            PyObject *p = (PyObject *)__atomic_load_n(&slot->obj, __ATOMIC_ACQUIRE);
 #if defined(Py_GIL_DISABLED) && PY_VERSION_HEX >= 0x030E0000
             if (p != NULL && PyUnstable_TryIncRef(p)) {
                 if (__atomic_load_n(&tp_globals_epoch, __ATOMIC_ACQUIRE) == e) {
@@ -2950,7 +3003,11 @@ static inline void tp_trace_fast_hit(void) {}
 #define TP_COLD __attribute__((noinline, cold, unused))
 #define TP_UNLIKELY(x) __builtin_expect(!!(x), 0)
 #else
+#if defined(_MSC_VER)
+#define TP_COLD __declspec(noinline)
+#else
 #define TP_COLD
+#endif
 #define TP_UNLIKELY(x) (x)
 #endif
 
@@ -3431,7 +3488,7 @@ static inline tp_rptr tp_region_alloc(tp_region *r, size_t n)
 {
     tp_rchunk *c = r->cur;
     tp_rslot *p;
-    if (__builtin_expect(__atomic_load_n(&tp_region_fail_v, __ATOMIC_RELAXED) >= 0, 0)) {
+    if (TP_UNLIKELY((int64_t)__atomic_load_n(&tp_region_fail_v, __ATOMIC_RELAXED) >= 0)) {
         if (__atomic_sub_fetch(&tp_region_fail_v, 1, __ATOMIC_RELAXED) == 0) {
             __atomic_store_n(&tp_region_fail_v, -1, __ATOMIC_RELAXED);
             return NULL;
