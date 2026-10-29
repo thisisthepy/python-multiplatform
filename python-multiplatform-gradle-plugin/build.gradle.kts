@@ -17,7 +17,7 @@ val rootGradleProperties = Properties().apply {
 }
 fun rootProperty(name: String, fallback: String): String =
     findProperty(name)?.toString() ?: rootGradleProperties.getProperty(name) ?: fallback
-val publishedVersion = "${rootProperty("pythonVersion", "3.15.0")}-${rootProperty("libraryVersionSuffix", "alpha01")}"
+val publishedVersion = "${rootProperty("pythonVersion", "3.15.0")}-${rootProperty("libraryVersionSuffix", "alpha02")}"
 version = publishedVersion
 
 /**
