@@ -41,9 +41,9 @@ CPython interpreter inside a Kotlin Multiplatform application so that:
    the embedded CPython, as an extension module (`docs/design/typedpython.md`).
 
    TypedPython reaches plain Python users as a **distribution**, not as a new interpreter (maintainer,
-   2026-10-30: "배포판 방식을 생각했다는거야. 근데 일단 그렇게 하더라도 typedpython 패키지 형태라면 pypi
-   배포를 해야겠지"). The thisisthepy CPython build ships with TypedPython in it, and the same
-   compiler is an ordinary `typedpython` package on PyPI (`uv add typedpython`).
+   2026-10-30: "배포판 방식을 생각했다는거야"). The thisisthepy CPython build ships with TypedPython in
+   it. The `typedpython` wheel is attached to the GitHub Release and is not published to PyPI
+   ("그냥 github release로만 해도 충분한거라는거지 ... 그냥 우리 배포판으로 배포하면 되는거").
 
 5. **High-performance kernels are written in Python too** (TypedPython tier 2). The maintainer first
    asked to explore it ("GPU 관련 최적화까지도 별도 언어 없이 지원할 방안을 모색해보자") and on
