@@ -33,26 +33,29 @@ FREE_THREADED = bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
 PAR_RULE = "verify/par-loop"
 
 SOURCE = '''\
-# typedpython: compiled
 
 # typedpython: parallel
+@compiled
 def scale(xs: list[float], a: float, b: float) -> None:
     for i in range(len(xs)):
         xs[i] = xs[i] * a + b
 
 
+@compiled
 def scale_unmarked(xs: list[float], a: float, b: float) -> None:
     for i in range(len(xs)):
         xs[i] = xs[i] * a + b
 
 
 # typedpython: parallel
+@compiled
 def ramp(xs: list[float], a: float) -> None:
     for i in range(len(xs)):
         xs[i] = -(float(i) * a) + xs[i]
 
 
 # typedpython: parallel
+@compiled
 def two_stores(xs: list[float], ys: list[float], a: float) -> None:
     for i in range(len(xs)):
         xs[i] = xs[i] + a
@@ -60,12 +63,14 @@ def two_stores(xs: list[float], ys: list[float], a: float) -> None:
 
 
 # typedpython: parallel
+@compiled
 def neighbour(xs: list[float]) -> None:
     for i in range(len(xs) - 1):
         xs[i] = xs[i + 1]
 
 
 # typedpython: parallel
+@compiled
 def total(xs: list[float]) -> float:
     s: float = 0.0
     for i in range(len(xs)):
@@ -73,23 +78,27 @@ def total(xs: list[float]) -> float:
     return s
 
 
+@compiled
 def helper(x: float) -> float:
     return x * 2.0
 
 
 # typedpython: parallel
+@compiled
 def with_call(xs: list[float]) -> None:
     for i in range(len(xs)):
         xs[i] = helper(xs[i])
 
 
 # typedpython: parallel
+@compiled
 def divides(xs: list[float], d: float) -> None:
     for i in range(len(xs)):
         xs[i] = xs[i] / d
 
 
 # typedpython: parallel
+@compiled
 def local_fill(a: float) -> float:
     t = [0.0] * 300000
     for i in range(len(t)):
@@ -98,6 +107,7 @@ def local_fill(a: float) -> float:
 
 
 # typedpython: parallel
+@compiled
 def local_dyn(n: int, a: float) -> float:
     t = [1.0] * n
     for i in range(len(t)):
@@ -438,9 +448,9 @@ def test_concurrent_calls_from_several_python_threads(built):
 # =====================================================================================================
 
 RSOURCE = '''\
-# typedpython: compiled
 
 # typedpython: parallel
+@compiled
 def r_sum(xs: list[int]) -> int:
     s: int = 0
     for i in range(len(xs)):
@@ -449,6 +459,7 @@ def r_sum(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def r_sum_init(xs: list[int], s0: int) -> int:
     s: int = s0
     for i in range(len(xs)):
@@ -457,6 +468,7 @@ def r_sum_init(xs: list[int], s0: int) -> int:
 
 
 # typedpython: parallel
+@compiled
 def r_prod(xs: list[int], c: int) -> int:
     s: int = 1
     for i in range(len(xs)):
@@ -465,6 +477,7 @@ def r_prod(xs: list[int], c: int) -> int:
 
 
 # typedpython: parallel
+@compiled
 def r_sum_mul(xs: list[int], c: int) -> int:
     s: int = 0
     for i in range(len(xs)):
@@ -473,6 +486,7 @@ def r_sum_mul(xs: list[int], c: int) -> int:
 
 
 # typedpython: parallel
+@compiled
 def r_two(xs: list[int]) -> int:
     a: int = 0
     b: int = 7
@@ -483,6 +497,7 @@ def r_two(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def r_range_sum(xs: list[int]) -> int:
     s: int = 5
     for i in range(len(xs)):
@@ -491,6 +506,7 @@ def r_range_sum(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def r_local(n: int) -> int:
     t = [0] * n
     for i in range(len(t)):
@@ -501,6 +517,7 @@ def r_local(n: int) -> int:
     return s
 
 
+@compiled
 def r_unmarked(xs: list[int]) -> int:
     s: int = 0
     for i in range(len(xs)):
@@ -509,6 +526,7 @@ def r_unmarked(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def n_acc_read(xs: list[int]) -> int:
     s: int = 0
     for i in range(len(xs)):
@@ -517,6 +535,7 @@ def n_acc_read(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def n_two_ops(xs: list[int]) -> int:
     s: int = 0
     for i in range(len(xs)):
@@ -526,6 +545,7 @@ def n_two_ops(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def n_float(xs: list[float]) -> float:
     s: float = 0.0
     for i in range(len(xs)):
@@ -534,6 +554,7 @@ def n_float(xs: list[float]) -> float:
 
 
 # typedpython: parallel
+@compiled
 def n_copy(xs: list[int]) -> int:
     s: int = 0
     w: int = 0
@@ -544,6 +565,7 @@ def n_copy(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def n_mixed(xs: list[int]) -> int:
     t = [0.0] * len(xs)
     s: int = 0
@@ -554,6 +576,7 @@ def n_mixed(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def n_div(xs: list[int], d: int) -> int:
     s: int = 0
     for i in range(len(xs)):
@@ -562,6 +585,7 @@ def n_div(xs: list[int], d: int) -> int:
 
 
 # typedpython: parallel
+@compiled
 def n_shift_step(xs: list[int]) -> int:
     s: int = 0
     for i in range(0, len(xs), 2):
@@ -859,9 +883,9 @@ def test_no_reduction_region_without_a_marker(tmp_path):
 # =====================================================================================================
 
 MSOURCE = '''\
-# typedpython: compiled
 
 # typedpython: parallel
+@compiled
 def mn_i(xs: list[int]) -> int:
     m = xs[0]
     for i in range(len(xs)):
@@ -871,6 +895,7 @@ def mn_i(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def mx_i(xs: list[int]) -> int:
     m = xs[0]
     for i in range(len(xs)):
@@ -880,6 +905,7 @@ def mx_i(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def mn_f(xs: list[float]) -> float:
     m = xs[0]
     for i in range(len(xs)):
@@ -889,6 +915,7 @@ def mn_f(xs: list[float]) -> float:
 
 
 # typedpython: parallel
+@compiled
 def mx_f(xs: list[float]) -> float:
     m = xs[0]
     for i in range(len(xs)):
@@ -898,6 +925,7 @@ def mx_f(xs: list[float]) -> float:
 
 
 # typedpython: parallel
+@compiled
 def mn_f_flipped(xs: list[float], init: float) -> float:
     m = init
     for i in range(len(xs)):
@@ -907,6 +935,7 @@ def mn_f_flipped(xs: list[float], init: float) -> float:
 
 
 # typedpython: parallel
+@compiled
 def mx_f_flipped(xs: list[float], init: float) -> float:
     m = init
     for i in range(len(xs)):
@@ -916,6 +945,7 @@ def mx_f_flipped(xs: list[float], init: float) -> float:
 
 
 # typedpython: parallel
+@compiled
 def mn_i_expr(xs: list[int], c: int) -> int:
     m = c
     for i in range(len(xs)):
@@ -925,6 +955,7 @@ def mn_i_expr(xs: list[int], c: int) -> int:
 
 
 # typedpython: parallel
+@compiled
 def mn_f_expr(xs: list[float], a: float) -> float:
     m = a
     for i in range(len(xs)):
@@ -934,6 +965,7 @@ def mn_f_expr(xs: list[float], a: float) -> float:
 
 
 # typedpython: parallel
+@compiled
 def mn_and_sum(xs: list[int]) -> int:
     m = xs[0]
     s = 0
@@ -945,6 +977,7 @@ def mn_and_sum(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def two_ext(xs: list[float]) -> float:
     lo = xs[0]
     hi = xs[0]
@@ -957,6 +990,7 @@ def two_ext(xs: list[float]) -> float:
 
 
 # typedpython: parallel
+@compiled
 def mn_i_init(xs: list[int], init: int) -> int:
     m = init
     for i in range(len(xs)):
@@ -966,6 +1000,7 @@ def mn_i_init(xs: list[int], init: int) -> int:
 
 
 # typedpython: parallel
+@compiled
 def mn_i_big_e(xs: list[int], c: int) -> int:
     m = 0
     for i in range(len(xs)):
@@ -974,6 +1009,7 @@ def mn_i_big_e(xs: list[int], c: int) -> int:
     return m
 
 
+@compiled
 def mn_unmarked(xs: list[int]) -> int:
     m = xs[0]
     for i in range(len(xs)):
@@ -983,6 +1019,7 @@ def mn_unmarked(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def n_le(xs: list[float]) -> float:
     m = xs[0]
     for i in range(len(xs)):
@@ -992,6 +1029,7 @@ def n_le(xs: list[float]) -> float:
 
 
 # typedpython: parallel
+@compiled
 def n_other_value(xs: list[int]) -> int:
     m = xs[0]
     for i in range(len(xs)):
@@ -1001,6 +1039,7 @@ def n_other_value(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def n_else(xs: list[int]) -> int:
     m = xs[0]
     s = 0
@@ -1013,6 +1052,7 @@ def n_else(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def n_two_in_then(xs: list[int]) -> int:
     m = xs[0]
     s = 0
@@ -1024,6 +1064,7 @@ def n_two_in_then(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def n_acc_in_value(xs: list[int]) -> int:
     m = xs[0]
     for i in range(len(xs)):
@@ -1034,6 +1075,7 @@ def n_acc_in_value(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def n_cond_other(xs: list[int], t: int) -> int:
     m = xs[0]
     for i in range(len(xs)):
@@ -1043,6 +1085,7 @@ def n_cond_other(xs: list[int], t: int) -> int:
 
 
 # typedpython: parallel
+@compiled
 def n_mixed_types(xs: list[int], init: float) -> float:
     m = init
     for i in range(len(xs)):
@@ -1052,6 +1095,7 @@ def n_mixed_types(xs: list[int], init: float) -> float:
 
 
 # typedpython: parallel
+@compiled
 def n_acc_reads_acc(xs: list[int]) -> int:
     m = xs[0]
     for i in range(len(xs)):
@@ -1063,6 +1107,7 @@ def n_acc_reads_acc(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def n_div(xs: list[float], d: float) -> float:
     m = xs[0]
     for i in range(len(xs)):
@@ -1490,9 +1535,9 @@ def test_interpreter_shutdown_with_a_daemon_reduction_region(rbuilt):
 # =====================================================================================================
 
 BSOURCE = '''\
-# typedpython: compiled
 
 # typedpython: parallel
+@compiled
 def b_and(xs: list[int]) -> int:
     s: int = -1
     for i in range(len(xs)):
@@ -1501,6 +1546,7 @@ def b_and(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def b_or(xs: list[int]) -> int:
     s: int = 0
     for i in range(len(xs)):
@@ -1509,6 +1555,7 @@ def b_or(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def b_xor(xs: list[int]) -> int:
     s: int = 0
     for i in range(len(xs)):
@@ -1517,6 +1564,7 @@ def b_xor(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def b_and_swapped(xs: list[int], s0: int) -> int:
     s: int = s0
     for i in range(len(xs)):
@@ -1525,6 +1573,7 @@ def b_and_swapped(xs: list[int], s0: int) -> int:
 
 
 # typedpython: parallel
+@compiled
 def b_or_swapped(xs: list[int]) -> int:
     s: int = 0
     for i in range(len(xs)):
@@ -1533,6 +1582,7 @@ def b_or_swapped(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def b_xor_expr(xs: list[int], c: int) -> int:
     s: int = 0
     for i in range(len(xs)):
@@ -1541,6 +1591,7 @@ def b_xor_expr(xs: list[int], c: int) -> int:
 
 
 # typedpython: parallel
+@compiled
 def b_or_not(xs: list[int]) -> int:
     s: int = 0
     for i in range(len(xs)):
@@ -1549,6 +1600,7 @@ def b_or_not(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def b_mix(xs: list[int]) -> int:
     a: int = 0
     x: int = 5
@@ -1564,6 +1616,7 @@ def b_mix(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def b_local(n: int) -> int:
     t = [0] * n
     for i in range(len(t)):
@@ -1574,6 +1627,7 @@ def b_local(n: int) -> int:
     return s
 
 
+@compiled
 def b_unmarked(xs: list[int]) -> int:
     s: int = 0
     for i in range(len(xs)):
@@ -1582,6 +1636,7 @@ def b_unmarked(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def nb_acc_read(xs: list[int]) -> int:
     s: int = 0
     for i in range(len(xs)):
@@ -1590,6 +1645,7 @@ def nb_acc_read(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def nb_two_ops(xs: list[int]) -> int:
     s: int = 0
     for i in range(len(xs)):
@@ -1599,6 +1655,7 @@ def nb_two_ops(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def nb_and_then_add(xs: list[int]) -> int:
     s: int = 0
     for i in range(len(xs)):
@@ -1608,6 +1665,7 @@ def nb_and_then_add(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def nb_shift(xs: list[int]) -> int:
     s: int = 0
     for i in range(len(xs)):
@@ -1616,6 +1674,7 @@ def nb_shift(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def nb_rshift(xs: list[int], k: int) -> int:
     s: int = 0
     for i in range(len(xs)):
@@ -1624,6 +1683,7 @@ def nb_rshift(xs: list[int], k: int) -> int:
 
 
 # typedpython: parallel
+@compiled
 def nb_copy(xs: list[int]) -> int:
     s: int = 0
     w: int = 0
@@ -1634,6 +1694,7 @@ def nb_copy(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def nb_div(xs: list[int], d: int) -> int:
     s: int = 0
     for i in range(len(xs)):
@@ -1794,15 +1855,16 @@ def test_bitwise_equals_interpreter_for_every_thread_count(bbuilt, threads):
 # =====================================================================================================
 
 TSOURCE = '''\
-# typedpython: compiled
 
 # typedpython: parallel
+@compiled
 def t_scale(xs: list[float], a: float, b: float) -> None:
     for i in range(len(xs)):
         xs[i] = xs[i] * a + b
 
 
 # typedpython: parallel
+@compiled
 def t_sum(xs: list[int]) -> int:
     s: int = 0
     for i in range(len(xs)):
@@ -1811,6 +1873,7 @@ def t_sum(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def t_prod(xs: list[int], c: int) -> int:
     s: int = 1
     for i in range(len(xs)):
@@ -1819,6 +1882,7 @@ def t_prod(xs: list[int], c: int) -> int:
 
 
 # typedpython: parallel
+@compiled
 def t_min(xs: list[int]) -> int:
     m = xs[0]
     for i in range(len(xs)):
@@ -1828,6 +1892,7 @@ def t_min(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def t_max(xs: list[float]) -> float:
     m = xs[0]
     for i in range(len(xs)):
@@ -1837,6 +1902,7 @@ def t_max(xs: list[float]) -> float:
 
 
 # typedpython: parallel
+@compiled
 def t_and(xs: list[int]) -> int:
     s: int = -1
     for i in range(len(xs)):
@@ -1845,6 +1911,7 @@ def t_and(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def t_or(xs: list[int]) -> int:
     s: int = 0
     for i in range(len(xs)):
@@ -1853,6 +1920,7 @@ def t_or(xs: list[int]) -> int:
 
 
 # typedpython: parallel
+@compiled
 def t_xor(xs: list[int]) -> int:
     s: int = 0
     for i in range(len(xs)):

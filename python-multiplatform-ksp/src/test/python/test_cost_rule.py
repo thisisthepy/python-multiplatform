@@ -12,20 +12,19 @@ import textwrap
 
 import pytest
 
+from conftest import decorate_compiled
 from typedpython import cost, pipeline
 
-HEADER = "# typedpython: compiled\n"
-
-OBJECT_ONLY = HEADER + textwrap.dedent('''
+OBJECT_ONLY = decorate_compiled(textwrap.dedent('''
     def copy_words(src: list[str], dst: list[str]) -> str:
         w: str = ""
         for x in src:
             w = x + w
             dst.append(w)
         return w
-''')
+'''))
 
-INT_LOOP = HEADER + textwrap.dedent('''
+INT_LOOP = decorate_compiled(textwrap.dedent('''
     def word_of(word_id: int) -> str:
         x: int = word_id + 17576
         w: str = ""
@@ -33,7 +32,7 @@ INT_LOOP = HEADER + textwrap.dedent('''
             w = chr(97 + x % 26) + w
             x //= 26
         return w
-''')
+'''))
 
 
 def build(tmp_path, source, **kw):
@@ -67,7 +66,7 @@ def test_the_opt_out_compiles_the_same_function(tmp_path):
     assert names(r) == {"copy_words"} and r.extension is not None
 
 
-MIXED = HEADER + textwrap.dedent('''
+MIXED = decorate_compiled(textwrap.dedent('''
     def mixed(n: int, xs: list[str]) -> float:
         total: float = 0.0
         for i in range(n):
@@ -106,7 +105,7 @@ MIXED = HEADER + textwrap.dedent('''
             for k in range(3):
                 total += 0.5 * 2.0
         return total
-''')
+'''))
 
 
 def test_one_native_loop_with_object_operations_compiles(tmp_path):
@@ -148,10 +147,10 @@ def test_the_rule_is_what_keeps_it_interpreted(tmp_path, monkeypatch):
         test_an_object_only_loop_stays_interpreted_with_the_reason(tmp_path)
 
 
-STRAIGHT_LINE = HEADER + textwrap.dedent('''
+STRAIGHT_LINE = decorate_compiled(textwrap.dedent('''
     def label(n: int, name: str) -> str:
         return f"{name}:{n + 1}"
-''')
+'''))
 
 
 def test_a_straight_line_impure_function_still_compiles(tmp_path):

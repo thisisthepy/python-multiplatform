@@ -19,14 +19,15 @@ import pytest
 from typedpython import pipeline
 
 SOURCE = """\
-# typedpython: compiled
 from typing import Callable
 
 
+@compiled
 def sq(x: float) -> float:
     return x * x
 
 
+@compiled
 def loop(n: int) -> float:
     acc: float = 0.0
     for k in range(n):
@@ -34,11 +35,13 @@ def loop(n: int) -> float:
     return acc
 
 
+@compiled
 def leaf(cb: Callable[[], None], n: float) -> float:
     cb()
     return n + 1.0
 
 
+@compiled
 def outer(cb: Callable[[], None], n: float) -> float:
     cb()
     return leaf(cb, n) + leaf(cb, n)

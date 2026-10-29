@@ -37,12 +37,12 @@ STATS = "__typedpython_region_stats__"          # () -> (opened, freed, objects)
 FAIL_AFTER = "__typedpython_region_fail_after__"  # (n) -> the nth region object allocation fails; -1 off
 
 SOURCE = textwrap.dedent('''\
-    # typedpython: compiled
     """typedpython region test module."""
 
     KEPT = None
 
 
+    @compiled
     class Node:
         __slots__ = ("left", "right")
         left: "Node | None"
@@ -53,12 +53,14 @@ SOURCE = textwrap.dedent('''\
             self.right = right
 
 
+    @compiled
     def make(depth: int) -> Node:
         if depth > 0:
             return Node(make(depth - 1), make(depth - 1))
         return Node(None, None)
 
 
+    @compiled
     def check(node: Node) -> int:
         left: Node | None = node.left
         right: Node | None = node.right
@@ -67,10 +69,12 @@ SOURCE = textwrap.dedent('''\
         return 1 + check(left) + check(right)
 
 
+    @compiled
     def tree_sum(d: int) -> int:
         return check(make(d))
 
 
+    @compiled
     def repeat(d: int, n: int) -> int:
         t: int = 0
         for _ in range(n):
@@ -78,35 +82,42 @@ SOURCE = textwrap.dedent('''\
         return t
 
 
+    @compiled
     def escapes(d: int) -> Node:
         return make(d)
 
 
+    @compiled
     def keeps(d: int) -> int:
         global KEPT
         KEPT = make(d)
         return check(KEPT)
 
 
+    @compiled
     def prints(d: int) -> int:
         n = make(d)
         print("unknown code while the tree is alive")
         return check(n)
 
 
+    @compiled
     def ident(d: int) -> int:
         return id(make(d)) * 0
 
 
+    @compiled
     def same(d: int) -> bool:
         return make(d) is make(d)
 
 
+    @compiled
     def mixed(d: int) -> int:
         t = make(d)
         return check(make(d)) + check(t)
 
 
+    @compiled
     def noisy(d: int) -> object:
         print("unknown code")
         return check(make(d))

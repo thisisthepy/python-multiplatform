@@ -1,7 +1,7 @@
-# typedpython: compiled
 import array
 
 
+@compiled
 def dot_arr(a: array.array[float], b: array.array[float]) -> float:
     s: float = 0.0
     for i in range(len(a)):
@@ -9,11 +9,13 @@ def dot_arr(a: array.array[float], b: array.array[float]) -> float:
     return s
 
 
+@compiled
 def scale_arr(a: array.array[float], k: float) -> None:
     for i in range(len(a)):
         a[i] = a[i] * k
 
 
+@compiled
 def dot_list(a: list[float], b: list[float]) -> float:
     s: float = 0.0
     for i in range(len(a)):

@@ -3,8 +3,7 @@
 `lower(path)` reads one module and returns an `ir.Module`:
 
 - Which functions: module-level `def`s decorated with the builtin `@compiled` (a bare name, no
-  import, #42), or every module-level `def` when the first non-empty line is
-  `# typedpython: compiled`.
+  import, #42). That decorator is the only mark; there is no module-level pragma (#353).
 - A function is lowered only when **all** of it is expressible in the IR; otherwise it is left out
   and `Module.skipped[name]` says why, with the line. There is no partial lowering.
 - Types: parameters and returns from their annotations (`int`/`float`/`bool`, `list[float]` and
@@ -79,8 +78,6 @@ from pathlib import Path
 
 from typedpython import gate, ir, pyrefly, rebinding, resume, taint
 from typedpython.ir import Type
-
-MARKER = "# typedpython: compiled"
 
 I64_MIN, I64_MAX = -2**63, 2**63 - 1
 TOP = (I64_MIN, I64_MAX)
@@ -249,7 +246,7 @@ PARALLEL_MARKER = "# typedpython: parallel"
 
 def _parallel_marked(tree: ast.Module, source: str) -> set[str]:
     """Module-level functions the user marked for SPEC N-15: the comment line `# typedpython: parallel`
-    directly above the `def` (above its decorators if it has any). A comment, like the module marker,
+    directly above the `def` (above its decorators if it has any). A comment,
     so the interpreted module is unchanged and needs no runtime name."""
     lines = source.splitlines()
     out: set[str] = set()
@@ -434,17 +431,10 @@ def _binding_targets(stmt: ast.stmt) -> list[ast.expr]:
 SLOT_ACCESS_DUNDERS = ("__getattribute__", "__getattr__", "__setattr__", "__delattr__", "__new__")
 
 
-def _whole_module(source: str) -> bool:
-    return next((line.strip() for line in source.splitlines() if line.strip()), "") == MARKER
-
-
 def is_opted_in(path: Path) -> bool:
-    """Whether the front end considers the module for compilation at all: the `# typedpython: compiled`
-    marker as its first non-empty line, or a module-level `def` / `class` decorated `@compiled`
-    (the same tests `_targets` and `_classes` apply)."""
+    """Whether the front end considers the module for compilation at all: a module-level `def` / `class`
+    decorated `@compiled` (the same test `_targets` and `_classes` apply)."""
     source = Path(path).read_text()
-    if _whole_module(source):
-        return True
     return any(
         isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
         and any(isinstance(d, ast.Name) and d.id == "compiled" for d in node.decorator_list)
@@ -454,14 +444,13 @@ def is_opted_in(path: Path) -> bool:
 def _classes(
     tree: ast.Module, source: str, info: _ModuleInfo,
 ) -> tuple[dict[str, ir.ClassDecl], dict[str, str]]:
-    whole = _whole_module(source)
     decls: dict[str, ir.ClassDecl] = {}
     skipped: dict[str, str] = {}
     for node in tree.body:
         if not isinstance(node, ast.ClassDef):
             continue
         marked = any(isinstance(d, ast.Name) and d.id == "compiled" for d in node.decorator_list)
-        if not (whole or marked):
+        if not marked:
             continue
         result = _class_decl(node, tree, info)
         if isinstance(result, str):
@@ -608,13 +597,12 @@ def _class_of(kind: str, classes: dict[str, ir.ClassDecl]) -> tuple[str, bool] |
 def _targets(
     tree: ast.Module, source: str, info: _ModuleInfo,
 ) -> list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str | None]]:
-    whole_module = _whole_module(source)
     found: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str | None]] = []
     for node in tree.body:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         marked = [d for d in node.decorator_list if isinstance(d, ast.Name) and d.id == "compiled"]
-        if not (whole_module or marked):
+        if not marked:
             continue
         reason = None
         if marked and info.bound("compiled"):
@@ -2499,4 +2487,4 @@ def _breaks(body: tuple[ir.Stmt, ...]) -> bool:
     return False
 
 
-__all__ = ["lower", "MARKER"]
+__all__ = ["lower"]

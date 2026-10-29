@@ -9,25 +9,24 @@ from pathlib import Path
 
 import pytest
 
+from conftest import decorate_compiled
 from typedpython import cbuild, frontend, pipeline
 
-HEADER = "# typedpython: compiled\n"
-
-B = HEADER + textwrap.dedent("""\
+B = decorate_compiled(textwrap.dedent("""\
     def twice(n: int) -> int:
         return n * 2
-    """)
-A = HEADER + textwrap.dedent("""\
+    """))
+A = decorate_compiled(textwrap.dedent("""\
     import b
 
 
     def inc(n: int) -> int:
         return n + 1
-    """)
-C = HEADER + textwrap.dedent("""\
+    """))
+C = decorate_compiled(textwrap.dedent("""\
     def half(x: float) -> float:
         return x * 0.5
-    """)
+    """))
 
 
 def interpreted(path: Path):
@@ -133,7 +132,7 @@ def test_rebuilt_and_reused_extensions_compute_the_interpreted_results(project, 
 def test_module_with_nothing_compiled_has_no_extension_and_is_reused(tmp_path):
     root = tmp_path / "proj"
     root.mkdir()
-    (root / "plain.py").write_text(HEADER + "def f(s: str) -> str:\n    return s[1:]\n")
+    (root / "plain.py").write_text("@compiled\ndef f(s: str) -> str:\n    return s[1:]\n")
     cache = tmp_path / "cache"
     first = pipeline.compile_project([root / "plain.py"], root, cache)
     m = first.modules[0]
@@ -151,7 +150,7 @@ def test_interface_describes_the_verified_module_not_the_lowered_one(tmp_path, m
 
     root = tmp_path / "proj"
     root.mkdir()
-    (root / "dep.py").write_text(HEADER + "def ok(n: int) -> int:\n    return n + 1\n")
+    (root / "dep.py").write_text("@compiled\ndef ok(n: int) -> int:\n    return n + 1\n")
     real_lower = frontend.lower
     seen = {}
 

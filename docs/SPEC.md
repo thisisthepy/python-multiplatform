@@ -724,7 +724,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   with `.diagnostics`) before the module runs. Results are cached in memory by file content hash, failures
   included. `Status: implemented`, `python-multiplatform-ksp/src/test/python/test_importgate.py`.
 - **N-8** TypedPython compilation to C (INTENT §1.4; design §4.3; #41). `@compiled` (a builtin name, no
-  import, #42) and a first-line `# typedpython: compiled` mark functions; the compiler lowers them
+  import, #42) is the only mark for functions (the first-line module pragma was removed, #353); the compiler lowers them
   through the typed IR (`typedpython/ir.py`) to C against the CPython C API and builds an extension with
   the platform C compiler. Compiled functions return what CPython returns (IR contract: checked i64
   with deopt to the interpreted function, Python floor division/modulo, exact int/float comparison,
