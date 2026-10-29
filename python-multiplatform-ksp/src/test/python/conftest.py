@@ -1,10 +1,34 @@
+import ast
+import builtins
 import sys
 from pathlib import Path
 import textwrap
 
 import pytest
 
+# The `typedpython_builtins.pth` of an installed wheel; the test interpreter has no such install.
+builtins.compiled = getattr(builtins, "compiled", lambda f, /: f)
+
+# Prepended to every child-process script that loads a module whose source uses `@compiled`: a plain
+# CPython has the builtin only when `typedpython_builtins.pth` is installed, so the child installs it.
+COMPILED_SHIM = "import builtins\nif not hasattr(builtins, 'compiled'):\n    builtins.compiled = lambda f: f\n"
+
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def decorate_compiled(source: str) -> str:
+    """`source` with `@compiled` put above every module-level def / class (above its other decorators),
+    the set a whole-module mark used to cover. A source that does not parse is returned unchanged."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return source
+    lines = source.split("\n")
+    firsts = [min([n.lineno] + [d.lineno for d in n.decorator_list]) for n in tree.body
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
+    for first in reversed(firsts):
+        lines.insert(first - 1, "@compiled")
+    return "\n".join(lines)
 
 
 @pytest.fixture

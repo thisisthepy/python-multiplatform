@@ -20,9 +20,9 @@ def interpreted(path: Path):
 
 
 SCALAR = """\
-# typedpython: compiled
 
 
+@compiled
 def total(n: int) -> float:
     acc: float = 0.0
     for k in range(n):
@@ -30,6 +30,7 @@ def total(n: int) -> float:
     return acc
 
 
+@compiled
 def fact(n: int) -> int:
     r: int = 1
     for k in range(2, n + 1):
@@ -53,6 +54,7 @@ def test_scalar_module_compiles_and_matches_cpython(write, tmp_path):
 def test_unsupported_functions_stay_interpreted_with_a_reason(write, tmp_path):
     path = write("mixed.py", SCALAR + """
 
+@compiled
 def greet(name: str) -> str:
     return name[1:]
 """)
@@ -68,16 +70,16 @@ def test_a_module_with_nothing_to_compile_produces_no_extension(write, tmp_path)
 
 
 def test_gate_errors_block_compilation(write, tmp_path):
-    path = write("bad.py", "# typedpython: compiled\n\ndef f(x):\n    return x\n")
+    path = write("bad.py", "@compiled\ndef f(x):\n    return x\n")
     with pytest.raises(pipeline.CompileError, match="implicit-any-parameter"):
         pipeline.compile_module(path, tmp_path / "out")
 
 
 DEMO = """\
-# typedpython: compiled
 import sys
 
 
+@compiled
 def total(n: int) -> float:
     acc: float = 0.0
     for k in range(n):
@@ -85,6 +87,7 @@ def total(n: int) -> float:
     return acc
 
 
+@compiled
 def main() -> None:
     print(f"{total(int(sys.argv[1])):.3f}")
 """
@@ -103,15 +106,16 @@ def test_demo_reports_identical_output(write, tmp_path):
 
 
 ARRAY_CALLBACK = """\
-# typedpython: compiled
 from typing import Callable
 
 
+@compiled
 def first_after(xs: list[float], cb: Callable[[], None]) -> float:
     cb()
     return xs[0]
 
 
+@compiled
 def fill_then(xs: list[float], cb: Callable[[], None]) -> None:
     xs[1] = 5.0
     cb()
@@ -138,9 +142,9 @@ def test_array_function_with_a_callback_matches_cpython(write, tmp_path):
 
 
 GC_REACHABLE = """\
-# typedpython: compiled
 
 
+@compiled
 class Cell:
     a: object
     b: object
@@ -151,10 +155,12 @@ class Cell:
         self.b = b
 
 
+@compiled
 def seta(c: Cell, v: object) -> None:
     c.a = v
 
 
+@compiled
 def fresh(a: object, n: int) -> object:
     c = Cell(None, None)
     seta(c, a)

@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import decorate_compiled
 from typedpython import frontend
 from typedpython.ir import (
     And, ArrayParam, Assign, BinOp, BinOpKind, Box, Break, Call, CallObject, Compare, CompareKind,
@@ -54,7 +55,7 @@ def nodes(root, cls):
 
 def test_scalar_loop_lowers_to_for_range(tmp_path):
     m = lower(tmp_path, """
-        # typedpython: compiled
+        @compiled
         def total(n: int, x: float) -> float:
             acc: float = 0.0
             for k in range(n):
@@ -633,16 +634,18 @@ def f(x: float) -> object:
     assert Global(OBJ, "K") in nodes(f, Global)
 
 
-def test_module_marker_compiles_every_module_level_def(tmp_path):
+def test_compiled_marks_every_decorated_module_level_def(tmp_path):
     m = lower(tmp_path, """
 
-        # typedpython: compiled
+        @compiled
         def a(x: float) -> float:
             return x
 
+        @compiled
         def b(x: float) -> float:
             return -x
 
+        @compiled
         @staticmethod
         def c(x: float) -> float:
             return x
@@ -651,7 +654,19 @@ def test_module_marker_compiles_every_module_level_def(tmp_path):
     assert set(m.skipped) == {"c"} and "decorator" in m.skipped["c"]
 
 
-def test_without_marker_only_compiled_functions_are_lowered(tmp_path):
+def test_the_former_module_pragma_comment_compiles_nothing(tmp_path):
+    m = lower(tmp_path, """
+        # typedpython: compiled
+        def a(x: float) -> float:
+            return x
+
+        def b(x: float) -> float:
+            return -x
+    """)
+    assert m.functions == () and m.skipped == {}
+
+
+def test_without_a_decorator_only_compiled_functions_are_lowered(tmp_path):
     m = lower(tmp_path, """
         x: int = 1
         # typedpython: compiled
@@ -828,7 +843,7 @@ def test_locals_exclude_parameters(tmp_path):
 def test_nbody_kernels_lower(tmp_path):
     path = tmp_path / "nbody.py"
     shutil.copy(BENCH / "nbody.py", path)
-    path.write_text("# typedpython: compiled\n" + path.read_text())
+    path.write_text(decorate_compiled(path.read_text()))
     m = frontend.lower(path)
     for name in ("advance", "energy", "offset_momentum"):
         function(m, name)
@@ -847,7 +862,7 @@ def test_nbody_kernels_lower(tmp_path):
 @pytest.mark.skipif(not BENCH.exists(), reason="benchmark worktree not present")
 def test_spectral_norm_kernels_lower(tmp_path):
     path = tmp_path / "spectral_norm.py"
-    path.write_text("# typedpython: compiled\n" + (BENCH / "spectral_norm.py").read_text())
+    path.write_text(decorate_compiled((BENCH / "spectral_norm.py").read_text()))
     m = frontend.lower(path)
     eval_a = function(m, "eval_a")
     assert eval_a.pure and eval_a.may_deopt
@@ -1048,7 +1063,7 @@ def test_tuple_return_must_match_its_annotation(tmp_path, annotation, value, sni
 @pytest.mark.skipif(not BENCH.exists(), reason="benchmark worktree not present")
 def test_fannkuch_lowers(tmp_path):
     path = tmp_path / "fannkuch.py"
-    path.write_text("# typedpython: compiled\n" + (BENCH / "fannkuch.py").read_text())
+    path.write_text(decorate_compiled((BENCH / "fannkuch.py").read_text()))
     m = frontend.lower(path)
     assert "fannkuch" in [f.name for f in m.functions], m.skipped.get("fannkuch")
     f = function(m, "fannkuch")

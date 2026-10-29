@@ -18,14 +18,15 @@ from pathlib import Path
 
 import pytest
 
+from conftest import COMPILED_SHIM
 from typedpython import pipeline
 
 posix_signals = pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX signals (SIGALRM/SIGUSR1/setitimer) or fork; Windows has none")
 
 SOURCE = """\
-# typedpython: compiled
 
 
+@compiled
 def spin(n: int) -> float:
     acc: float = 0.0
     for k in range(n):
@@ -33,12 +34,14 @@ def spin(n: int) -> float:
     return acc
 
 
+@compiled
 def fib(n: int) -> int:
     if n < 2:
         return n
     return fib(n - 1) + fib(n - 2)
 
 
+@compiled
 def total(xs: list[float], rounds: int) -> float:
     s: float = 0.0
     for r in range(rounds):
@@ -47,7 +50,7 @@ def total(xs: list[float], rounds: int) -> float:
     return s
 """
 
-LOADER = """\
+LOADER = COMPILED_SHIM + """\
 import importlib.machinery, importlib.util, json, signal, sys, threading, time
 path = sys.argv[1]
 loader = importlib.machinery.ExtensionFileLoader("loops", path)
@@ -165,9 +168,9 @@ def test_a_handler_is_deferred_while_an_array_copy_is_live(extension):
 # ---- chunked polling for range loops (#206, SPEC N-8) ---------------------------------------------
 
 CHUNK_SOURCE = """\
-# typedpython: compiled
 
 
+@compiled
 def brk(n: int, k: int) -> int:
     s: int = 0
     last: int = -1
@@ -179,6 +182,7 @@ def brk(n: int, k: int) -> int:
     return s * 3 + last
 
 
+@compiled
 def cont(n: int, m: int) -> int:
     s: int = 0
     for i in range(n):
@@ -188,6 +192,7 @@ def cont(n: int, m: int) -> int:
     return s
 
 
+@compiled
 def ret(n: int, k: int) -> int:
     for i in range(n):
         if i == k:
@@ -195,6 +200,7 @@ def ret(n: int, k: int) -> int:
     return -1
 
 
+@compiled
 def down(n: int) -> int:
     s: int = 0
     for i in range(n, 0, -3):
@@ -202,6 +208,7 @@ def down(n: int) -> int:
     return s
 
 
+@compiled
 def down1(n: int) -> int:
     s: int = 0
     for i in range(n, -1, -1):
@@ -209,6 +216,7 @@ def down1(n: int) -> int:
     return s
 
 
+@compiled
 def up3(a: int, b: int) -> int:
     s: int = 0
     for i in range(a, b, 3):
@@ -216,6 +224,7 @@ def up3(a: int, b: int) -> int:
     return s
 
 
+@compiled
 def nested(n: int, m: int) -> int:
     s: int = 0
     for i in range(n):
@@ -226,6 +235,7 @@ def nested(n: int, m: int) -> int:
     return s
 
 
+@compiled
 def brk_in_while(n: int) -> int:
     s: int = 0
     for i in range(n):
@@ -238,6 +248,7 @@ def brk_in_while(n: int) -> int:
     return s
 
 
+@compiled
 def huge(a: int, b: int, cap: int) -> int:
     c: int = 0
     for i in range(a, b):
@@ -247,6 +258,7 @@ def huge(a: int, b: int, cap: int) -> int:
     return c
 
 
+@compiled
 def huge_last(a: int, b: int, cap: int) -> int:
     c: int = 0
     last: int = 0
@@ -346,7 +358,7 @@ def test_range_loop_polls_once_per_chunk(chunk_module):
 
 def test_while_loop_keeps_its_per_iteration_countdown(tmp_path):
     path = tmp_path / "w.py"
-    path.write_text("# typedpython: compiled\n\n\ndef w(n: int) -> int:\n    i: int = 0\n    while i < n:\n"
+    path.write_text("\n\n@compiled\ndef w(n: int) -> int:\n    i: int = 0\n    while i < n:\n"
                     "        i += 1\n    return i\n")
     body = _function_c(_generated_c(path), "w")
     lines = body.splitlines()
@@ -379,9 +391,9 @@ def test_keyboard_interrupt_reaches_a_long_range_loop_in_chunks(extension):
 
 
 MID_SOURCE = """\
-# typedpython: compiled
 
 
+@compiled
 def mid(n: int) -> float:
     x: float = 1.0
     for k in range(n):
