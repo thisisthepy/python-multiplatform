@@ -164,7 +164,7 @@ def _find_vcvars() -> Path:
             f"with C++' workload ({MSVC_COMPONENT}), or run from a 'x64 Native Tools' prompt.")
     run = subprocess.run(
         [str(vswhere), "-latest", "-products", "*", "-requires", MSVC_COMPONENT,
-         "-property", "installationPath"], capture_output=True, text=True)
+         "-property", "installationPath"], capture_output=True, encoding="oem", errors="replace")
     root = run.stdout.strip().splitlines()[0].strip() if run.returncode == 0 and run.stdout.strip() else ""
     if not root:
         raise CBuildError(
@@ -229,7 +229,8 @@ def build(c_source: str, module_name: str, out_dir: Path, runtime_dir: Path | No
         env = msvc_env()
         cmd = msvc_command(_msvc_cl(env), c_file, so, include, runtime, flags,
                            gil_disabled=free_threaded(ext_suffix))
-        run = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        # cl.exe writes in the console code page (CP949 on Korean Windows), not UTF-8
+        run = subprocess.run(cmd, capture_output=True, encoding="oem", errors="replace", env=env)
         if run.returncode != 0 or not so.is_file():
             # cl.exe reports its errors on stdout
             raise CBuildError(f"C compiler failed ({run.returncode}): {subprocess.list2cmdline(cmd)}\n"
