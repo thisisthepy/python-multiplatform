@@ -1,0 +1,78 @@
+name: TypedPython to PyPI
+
+# Publishes the `typedpython` package (python-multiplatform-ksp/pyproject.toml) to PyPI. The package
+# is versioned on its own, so it has its own tag: `typedpython-v<version>`, pushed by the coordinator
+# on a commit of main. PyPI trusted publishing: no token is stored; the `pypi` environment and the
+# PyPI project's trusted publisher (this repository, this workflow file, environment `pypi`) must match.
+# Only a wheel is published: it is pure Python (`py3-none-any`), and an sdist would carry the whole
+# Kotlin module next to it.
+
+on:
+  push:
+    tags:
+      - 'typedpython-v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and publish (e.g. typedpython-v0.1.0)'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and check the wheel
+    runs-on: macos-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: The tag names the package version
+        run: |
+          set -euo pipefail
+          version="$(sed -nE 's/^version = "(.*)"$/\1/p' python-multiplatform-ksp/pyproject.toml | head -1)"
+          test "$TAG" = "typedpython-v$version" || { echo "error: tag $TAG does not match typedpython $version" >&2; exit 1; }
+
+      - name: Build
+        run: uv build --wheel --out-dir dist python-multiplatform-ksp
+
+      - name: The wheel alone compiles the release example
+        run: |
+          set -euo pipefail
+          uv venv -q -p 3.15t "$RUNNER_TEMP/tpenv"
+          uv pip install -q --python "$RUNNER_TEMP/tpenv/bin/python" dist/typedpython-*.whl
+          "$RUNNER_TEMP/tpenv/bin/typedpython" demo --out "$RUNNER_TEMP/tpbuild" docs/release/desktop/typedpython/kernels.py 400000 | tee "$RUNNER_TEMP/tp.log"
+          grep -q '^compiled functions: .*dot' "$RUNNER_TEMP/tp.log"
+          grep -q '^identical output' "$RUNNER_TEMP/tp.log"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Publish
+        run: uv publish --trusted-publishing always dist/*
