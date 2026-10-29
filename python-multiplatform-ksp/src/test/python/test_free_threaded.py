@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import COMPILED_SHIM
 from typedpython import cbuild, cgen, frontend, pipeline, verify
 
 STRESS = max(1, int(os.environ.get("TP_FT_STRESS", "1")))
@@ -155,7 +156,7 @@ def usek(x: int) -> int:
     return x + K
 '''
 
-LOADER = """\
+LOADER = COMPILED_SHIM + """\
 import faulthandler, importlib.machinery, importlib.util, json, sys, threading, time
 faulthandler.enable()
 path = sys.argv[1]

@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import COMPILED_SHIM
 from typedpython import pipeline
 
 posix_signals = pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX signals (SIGALRM/SIGUSR1/setitimer) or fork; Windows has none")
@@ -49,7 +50,7 @@ def total(xs: list[float], rounds: int) -> float:
     return s
 """
 
-LOADER = """\
+LOADER = COMPILED_SHIM + """\
 import importlib.machinery, importlib.util, json, signal, sys, threading, time
 path = sys.argv[1]
 loader = importlib.machinery.ExtensionFileLoader("loops", path)

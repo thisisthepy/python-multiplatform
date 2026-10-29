@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import COMPILED_SHIM
 from typedpython import cbuild, cgen, frontend, verify
 
 posix_signals = pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX signals (SIGALRM/SIGUSR1/setitimer) or fork; Windows has none")
@@ -170,7 +171,7 @@ def test_the_fast_impl_is_never_addressed(traced):
     assert "&tp_fimpl_" not in c and "(tp_fimpl_" not in c
 
 
-LOAD = """\
+LOAD = COMPILED_SHIM + """\
 import importlib.machinery, importlib.util, json, sys
 def load(name, path, ext):
     if ext:

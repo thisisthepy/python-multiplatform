@@ -25,6 +25,7 @@ import types
 import pytest
 
 from test_cgen import runtime_dir, need_runtime
+from conftest import COMPILED_SHIM
 from typedpython import cbuild, cgen, cost, frontend, verify
 
 posix_signals = pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX signals (SIGALRM/SIGUSR1/setitimer) or fork; Windows has none")
@@ -392,10 +393,11 @@ def test_a_forged_module_level_variant_set_is_reported(built):
 
 
 def test_a_finalizer_or_a_field_store_keeps_the_class_out_of_a_region(tmp_path):
-    base = SOURCE.split("def escapes")[0]
+    base = SOURCE.split("@compiled\ndef escapes")[0]
     with_del = base.replace("        self.right = right\n",
                             "        self.right = right\n\n    def __del__(self) -> None:\n        pass\n", 1)
     with_store = base + textwrap.dedent('''\
+        @compiled
         def poke(node: Node) -> int:
             node.left = None
             return 0

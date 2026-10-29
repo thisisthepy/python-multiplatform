@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import COMPILED_SHIM
 from typedpython import pipeline
 
 SOURCE = """\
@@ -47,7 +48,7 @@ def outer(cb: Callable[[], None], n: float) -> float:
     return leaf(cb, n) + leaf(cb, n)
 """
 
-LOADER = """\
+LOADER = COMPILED_SHIM + """\
 import importlib.machinery, importlib.util, json, sys, threading
 path = sys.argv[1]
 loader = importlib.machinery.ExtensionFileLoader("tmod", path)

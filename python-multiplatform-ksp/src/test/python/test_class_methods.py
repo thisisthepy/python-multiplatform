@@ -40,7 +40,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import decorate_compiled
+from conftest import COMPILED_SHIM, decorate_compiled
 from typedpython import cbuild, cgen, cost, frontend, pipeline, verify
 
 HERE = Path(__file__).resolve().parent
@@ -553,7 +553,7 @@ def test_class_info_reports_the_methods(built):
 
 # --- class state changed after import: child processes --------------------------------------------
 
-CHILD = '''
+CHILD = COMPILED_SHIM + '''
 import json, sys
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -736,7 +736,7 @@ def test_reference_counts_are_flat_over_many_calls(built):
 
 # --- free-threaded concurrency --------------------------------------------------------------------
 
-THREADS = '''
+THREADS = COMPILED_SHIM + '''
 import sys, threading
 from pathlib import Path
 sys.path.insert(0, {main!r})
@@ -800,7 +800,7 @@ def test_concurrent_calls_on_shared_and_private_instances(built):
 
 # --- mutation: the exact-type guard of `self` -------------------------------------------------------
 
-GUARD_PROBE = '''
+GUARD_PROBE = COMPILED_SHIM + '''
 import sys
 from pathlib import Path
 sys.path.insert(0, {main!r})

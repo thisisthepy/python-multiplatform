@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import COMPILED_SHIM
 from typedpython import cbuild, cgen, frontend, ir, verify
 
 posix_signals = pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX signals (SIGALRM/SIGUSR1/setitimer) or fork; Windows has none")
@@ -335,7 +336,7 @@ def test_list_untouched_when_the_call_raises_before_the_loop(mod):
 
 # --- child processes: thread counts, creation failure, concurrency -----------------------------------
 
-CHILD = """\
+CHILD = COMPILED_SHIM + """\
 import importlib.machinery, importlib.util, json, struct, sys, threading
 path = sys.argv[1]
 name = path.replace(chr(92), "/").rsplit("/", 1)[-1].split(".")[0]

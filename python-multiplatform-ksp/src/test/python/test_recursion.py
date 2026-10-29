@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import COMPILED_SHIM
 from typedpython import pipeline
 
 PACKAGE = Path(__file__).resolve().parents[2] / "main" / "python"
@@ -239,7 +240,7 @@ def test_depth_at_which_recursion_error_fires_is_recorded(mod, capsys):
 
 # --- sanitizers: the RecursionError path ---------------------------------------------------------
 
-ASAN_SCRIPT = textwrap.dedent('''\
+ASAN_SCRIPT = COMPILED_SHIM + textwrap.dedent('''\
     import sys
     sys.path.insert(0, {pkg!r})
     from typedpython import cbuild

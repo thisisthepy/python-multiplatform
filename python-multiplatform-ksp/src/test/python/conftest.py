@@ -9,6 +9,10 @@ import pytest
 # The `typedpython_builtins.pth` of an installed wheel; the test interpreter has no such install.
 builtins.compiled = getattr(builtins, "compiled", lambda f, /: f)
 
+# Prepended to every child-process script that loads a module whose source uses `@compiled`: a plain
+# CPython has the builtin only when `typedpython_builtins.pth` is installed, so the child installs it.
+COMPILED_SHIM = "import builtins\nif not hasattr(builtins, 'compiled'):\n    builtins.compiled = lambda f: f\n"
+
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
