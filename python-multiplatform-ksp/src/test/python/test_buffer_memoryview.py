@@ -199,7 +199,9 @@ def v_numpy_q(vals=I):
 
 
 FLOAT_VIEWS = [v_array_d, v_bytearray_d, v_numpy_d]
-INT_VIEWS = [v_array_q, v_array_l, v_bytearray_q, v_numpy_q]
+# array("l") is 4 bytes on LLP64 (Windows): not an int64 buffer, so the compiled path rightly declines it
+INT_VIEWS = [v for v in (v_array_q, v_array_l, v_bytearray_q, v_numpy_q)
+             if v is not v_array_l or array.array("l").itemsize == 8]
 
 
 # --- what is compiled ------------------------------------------------------------------------------

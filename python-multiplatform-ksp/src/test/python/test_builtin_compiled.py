@@ -59,7 +59,7 @@ def installed():
                    check=True, capture_output=True)
     wheel = next(wheels.glob("typedpython-*.whl"))
     subprocess.run(["uv", "venv", "--python", "3.13", str(root)], check=True, capture_output=True)
-    python = root / "bin" / "python"
+    python = root / "Scripts" / "python.exe" if sys.platform == "win32" else root / "bin" / "python"
     subprocess.run(["uv", "pip", "install", "--python", str(python), "--no-deps", str(wheel)],
                    check=True, capture_output=True)
     return python, wheel
@@ -88,7 +88,8 @@ def test_compiled_is_the_identity(installed):
 
 def test_the_pth_does_not_overwrite_the_runtime(installed):
     python, _ = installed
-    site = next((python.parent.parent / "lib").glob("python3*/site-packages"))
+    site = (python.parent.parent / "Lib" / "site-packages" if sys.platform == "win32"
+            else next((python.parent.parent / "lib").glob("python3*/site-packages")))
     code = (
         "import builtins, site\n"
         "sentinel = object()\n"

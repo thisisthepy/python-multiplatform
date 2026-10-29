@@ -625,8 +625,12 @@ def mutant_runtime(tmp_path, old, new):
 
 def test_a_wrapping_add_is_caught(tmp_path):
     """Mutation: the native add does not check for overflow. The boundary test must fail."""
+    # the GNU branch of the header defines the macro with the builtin, the MSVC branch with the portable check
+    builtin = "#define TP_INT_ADD_OVF(a, b, r) __builtin_add_overflow((a), (b), (r))"
+    portable = "#define TP_INT_ADD_OVF(a, b, r) tp_add_i64((a), (b), (r))"
+    old = builtin if sys.platform != "win32" else portable
     rt = mutant_runtime(
-        tmp_path, "#define TP_INT_ADD_OVF(a, b, r) __builtin_add_overflow((a), (b), (r))",
+        tmp_path, old,
         "#define TP_INT_ADD_OVF(a, b, r) ((*(r) = (int64_t)((uint64_t)(a) + (uint64_t)(b))), 0)")
     (tmp_path / "bad").mkdir()
     _, _, _, bad = build_source(tmp_path / "bad", SOURCE, runtime_dir=rt)

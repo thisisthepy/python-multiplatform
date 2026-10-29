@@ -818,13 +818,19 @@ def _access_is_ours(block: str) -> bool:
     first stack frame of that access outside the sanitizer runtime is in `ftmod` (generated C or the
     header). A race whose accesses are inside libpython (seen on Linux CI: two `PyUnicode_FromString`
     memcpys into memory the uninstrumented allocator had handed from one thread to another) is not
-    about this extension, even when an extension frame calls it further up."""
+    about this extension, even when an extension frame calls it further up.
+
+    A report where one access is mimalloc initialising a fresh block (`_mi_malloc*` memset) is not
+    ours either: the extension's earlier read hit memory a thread later freed (an exited thread's
+    `PyThreadState`, read by `tp_traced`), and the free and the reuse both happen inside the
+    uninstrumented allocator, so TSan cannot see that they are ordered (seen on Linux CI)."""
+    firsts = []
     for part in block.split("\n\n")[:2]:
         frames = [ln for ln in part.splitlines() if ln.strip().startswith("#")]
-        first = next((f for f in frames if "libtsan" not in f and "sanitizer_common" not in f), "")
-        if "ftmod" in first:
-            return True
-    return False
+        firsts.append(next((f for f in frames if "libtsan" not in f and "sanitizer_common" not in f), ""))
+    if any(" _mi_malloc" in f or " _mi_page_malloc" in f for f in firsts):
+        return False
+    return any("ftmod" in f for f in firsts)
 
 
 def _tsan_reports(built, tmp: Path, launcher: Path, rt: Path | None) -> tuple[int, bool]:
