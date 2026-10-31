@@ -23,10 +23,10 @@ from test_buffer_arrays import (Built, build_source, deopts, interp, load_so, ou
                                 same_value)
 
 SOURCE = textwrap.dedent('''
-    # typedpython: compiled
     import array
 
 
+    @compiled
     def sum_mf(m: memoryview[float]) -> float:
         s = 0.0
         for i in range(len(m)):
@@ -34,6 +34,7 @@ SOURCE = textwrap.dedent('''
         return s
 
 
+    @compiled
     def sum_mi(m: memoryview[int]) -> int:
         s = 0
         for i in range(len(m)):
@@ -41,31 +42,38 @@ SOURCE = textwrap.dedent('''
         return s
 
 
+    @compiled
     def get_mf(m: memoryview[float], i: int) -> float:
         return m[i]
 
 
+    @compiled
     def get_mi(m: memoryview[int], i: int) -> int:
         return m[i]
 
 
+    @compiled
     def set_mf(m: memoryview[float], i: int, v: float) -> None:
         m[i] = v
 
 
+    @compiled
     def set_mi(m: memoryview[int], i: int, v: int) -> None:
         m[i] = v
 
 
+    @compiled
     def length_mf(m: memoryview[float]) -> int:
         return len(m)
 
 
+    @compiled
     def scale_mf(m: memoryview[float], k: float) -> None:
         for i in range(len(m)):
             m[i] = m[i] * k
 
 
+    @compiled
     def spin_mf(m: memoryview[float], n: int) -> float:
         s = 0.0
         L = len(m)
@@ -74,6 +82,7 @@ SOURCE = textwrap.dedent('''
         return s
 
 
+    @compiled
     def spin_af(a: array.array[float], n: int) -> float:
         s = 0.0
         L = len(a)

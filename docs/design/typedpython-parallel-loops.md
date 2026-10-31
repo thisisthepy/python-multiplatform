@@ -30,8 +30,7 @@ checkable on the existing IR (`typedpython/ir.py`), and says where that rule giv
    (§7, decision 3). Thread creation cost is measured together with the threshold.
 6. A cost rule decides, at run time, whether a region is worth its fixed cost; below the threshold
    the sequential code runs (§8). The threshold is measured, not guessed here.
-7. v1 parallelises only functions the user marks (decision 5). The spelling of the marking is a design
-   detail settled at implementation. Widening to unmarked functions later is easy; narrowing is hard.
+7. v1 parallelises only functions the user marks `@compiled(parallel=True)` (decision 5, #358). Widening to unmarked functions later is easy; narrowing is hard.
 
 ## 2. What exists today (the facts this design stands on)
 
@@ -78,7 +77,7 @@ condition that failed (like `verify/array-open`), so users can see why.
 - The function holds a copy-in list array, a local array, or only scalars
   (a pure scalar loop, e.g. a reduction over `range`). A function whose loop touches a buffer array
   (`array.array`) is not parallelised (decision 1).
-- The user marked the function (decision 5).
+- The user marked the function `@compiled(parallel=True)` (decision 5, #358).
 - Not under `entry_globals` mutation: entry globals are read once at entry and are locals in the body,
   so they are read-only and fine.
 
@@ -503,9 +502,11 @@ Recorded 2026-10-25 from the maintainer. The body and SPEC N-15 follow them.
    measured together with the threshold (`TP_PAR_MIN_WORK`).
 4. **Float `+` and `*` reductions are excluded in v1.** Not permanently: a fastmath opt-in (#153)
    awaits the owner's decision, and N-15 follows that decision. Until then they stay sequential.
-5. **Only functions the user marks are parallelised in v1.** How the marking is spelled (decorator
-   argument, comment, other) is a design detail to settle at implementation. Widening later (implicit
-   parallelisation) is easy; narrowing later is hard, so v1 starts narrow.
+5. **Only functions the user marks are parallelised in v1.** Marked with `@compiled(parallel=True)`
+   (maintainer decision 2026-10-30, #358: `@compiled` is the only compilation mark, and options are
+   keyword arguments on `@compiled`, matching `#332` `@compiled(fastmath=True)`; the earlier
+   `# typedpython: parallel` comment marker was removed). Widening later (implicit parallelisation) is
+   easy; narrowing later is hard, so v1 starts narrow.
 6. **`min`/`max` reductions are in v1 only if exactly equal to Python's** (§6). If an implementation
    cannot match it, they move to a later step and v1 keeps the integer and bitwise reductions only.
 7. **Thresholds are measured, not chosen here.** `TP_PAR_MIN_WORK` and the thread cap (default 8) are
@@ -516,4 +517,4 @@ Recorded 2026-10-25 from the maintainer. The body and SPEC N-15 follow them.
 - (Settled: free-threaded 3.15t is the only build, #158, so there is no GIL-build variant.)
 - Which devices the threshold is measured on (the Mac mini only, or also an Android device). The
   measurement itself is decided (item 7); the device set is not.
-- The spelling of the marking (item 5), settled at implementation.
+- (Settled 2026-10-30, #358: the marking is `@compiled(parallel=True)`.)

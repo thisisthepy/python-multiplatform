@@ -84,7 +84,7 @@ def _build(paths: list[Path], cache: Path, out: Path | None) -> int:
         print(f"{m.status:7} {m.name}: {what}{why}")
         rel = m.path.relative_to(root).as_posix()
         if m.kind == "not_marked":
-            print(f"          {rel}: not marked for compilation (no `# typedpython: compiled`, no @compiled)")
+            print(f"          {rel}: not marked for compilation (no @compiled)")
         for item in m.skipped_items:
             where = f"{item.file}:{item.line}" if item.line is not None else item.file
             print(f"          {where}: {item.name}: {item.message}")
@@ -112,6 +112,8 @@ def _demo(module: Path, module_argv: list[str], out: Path) -> int:
         return EXIT_FAILURE
 
     def interpreted() -> object:
+        import builtins  # the module's `@compiled` is a builtin name; typedpython_builtins.pth installs it
+        builtins.compiled = getattr(builtins, "compiled", lambda f=None, /, **_k: (lambda g: g) if f is None else f)
         spec = importlib.util.spec_from_file_location(module.stem + "_interpreted", module)
         assert spec is not None and spec.loader is not None
         mod = importlib.util.module_from_spec(spec)

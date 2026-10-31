@@ -21,13 +21,13 @@ from typedpython import cbuild, ir  # noqa: E402
 from test_buffer_arrays import build_source, load_so  # noqa: E402
 
 SOURCE = textwrap.dedent('''
-    # typedpython: compiled
     import array
     import math
     import numpy as np
     import numpy.typing as npt
 
 
+    @compiled
     def sum_ad(a: array.array[float]) -> float:
         s = 0.0
         for i in range(len(a)):
@@ -35,18 +35,22 @@ SOURCE = textwrap.dedent('''
         return s
 
 
+    @compiled
     def nd_first(x: npt.NDArray[np.float64]) -> object:
         return x[0]
 
 
+    @compiled
     def nd_first_f(x: npt.NDArray[np.float64]) -> float:
         return x[0]
 
 
+    @compiled
     def nd_first_i(x: npt.NDArray[np.int64]) -> int:
         return x[0]
 
 
+    @compiled
     def nd_sum(x: npt.NDArray[np.float64]) -> float:
         s = 0.0
         for i in range(len(x)):
@@ -54,6 +58,7 @@ SOURCE = textwrap.dedent('''
         return s
 
 
+    @compiled
     def nd_sum_from_first(x: npt.NDArray[np.float64]) -> float:
         s = x[0]
         for i in range(1, len(x)):
@@ -61,6 +66,7 @@ SOURCE = textwrap.dedent('''
         return s
 
 
+    @compiled
     def nd_isum(x: npt.NDArray[np.int64]) -> int:
         s = 0
         for i in range(len(x)):
@@ -68,64 +74,79 @@ SOURCE = textwrap.dedent('''
         return s
 
 
+    @compiled
     def nd_gt(x: npt.NDArray[np.float64]) -> object:
         return x[0] > x[1]
 
 
+    @compiled
     def nd_flag(x: npt.NDArray[np.float64]) -> object:
         b = x[0] > 0.0
         return b
 
 
+    @compiled
     def nd_plain(x: npt.NDArray[np.float64]) -> object:
         return float(x[0])
 
 
+    @compiled
     def nd_mixed(x: npt.NDArray[np.float64], k: float) -> object:
         return k + 1.0
 
 
+    @compiled
     def nd_sqrt(x: npt.NDArray[np.float64]) -> object:
         return math.sqrt(x[0] * x[0])
 
 
+    @compiled
     def nd_neg(x: npt.NDArray[np.float64]) -> object:
         return -x[1]
 
 
+    @compiled
     def nd_len(x: npt.NDArray[np.float64]) -> int:
         return len(x)
 
 
+    @compiled
     def nd_set(x: npt.NDArray[np.float64], i: int, v: float) -> None:
         x[i] = v
 
 
+    @compiled
     def nd_copy(dst: npt.NDArray[np.float64], src: npt.NDArray[np.float64]) -> None:
         for i in range(len(dst)):
             dst[i] = src[i]
 
 
+    @compiled
     def nd_iset(x: npt.NDArray[np.int64], i: int, v: int) -> None:
         x[i] = v
 
 
+    @compiled
     def nd_get(x: npt.NDArray[np.float64], i: int) -> object:
         return x[i]
 
 
+    @compiled
     def nd_overflow(x: npt.NDArray[np.float64]) -> object:
         return x[0] * x[1]
 
 
+    @compiled
     def nd_invalid(x: npt.NDArray[np.float64]) -> object:
         return x[0] - x[1]
 
 
+    @compiled
     def nd_iover(x: npt.NDArray[np.int64]) -> object:
         return x[0] + x[1]
 
 
+    @compiled
     def nd_energy(x: npt.NDArray[np.float64], y: npt.NDArray[np.float64], z: npt.NDArray[np.float64],
                   vx: npt.NDArray[np.float64], vy: npt.NDArray[np.float64],
                   vz: npt.NDArray[np.float64], m: npt.NDArray[np.float64]) -> float:
@@ -135,6 +156,7 @@ SOURCE = textwrap.dedent('''
         return e
 
 
+    @compiled
     def nd_copy7(x: npt.NDArray[np.float64], y: npt.NDArray[np.float64], z: npt.NDArray[np.float64],
                  vx: npt.NDArray[np.float64], vy: npt.NDArray[np.float64],
                  vz: npt.NDArray[np.float64], m: npt.NDArray[np.float64]) -> None:
@@ -145,20 +167,24 @@ SOURCE = textwrap.dedent('''
             m[i] = x[i]
 
 
+    @compiled
     def nd_div(x: npt.NDArray[np.float64]) -> object:
         return x[0] / x[1]
 
 
+    @compiled
     def nd_idiv(x: npt.NDArray[np.int64]) -> object:
         return x[0] // x[1]
 
 
+    @compiled
     def nd_param(x: npt.NDArray[np.float64], k: float, use: bool) -> object:
         if use:
             k = x[0]
         return k
 
 
+    @compiled
     def nd_branch(x: npt.NDArray[np.float64], use: bool) -> object:
         if use:
             v = x[0]
@@ -167,36 +193,44 @@ SOURCE = textwrap.dedent('''
         return v
 
 
+    @compiled
     def nd_tuple(x: npt.NDArray[np.int64]) -> tuple[int, int, bool]:
         return (x[0], 3, x[1] > 0)
 
 
+    @compiled
     def nd_abs(x: npt.NDArray[np.float64]) -> object:
         return abs(x[1])
 
 
+    @compiled
     def nd_to_list(x: npt.NDArray[np.float64], dst: list[float]) -> None:
         dst[0] = x[0]
 
 
+    @compiled
     def nd_mixed_cmp(x: npt.NDArray[np.int64], f: float) -> object:
         if x[0] < f:
             return 1
         return 0
 
 
+    @compiled
     def whole_sum(x: npt.NDArray[np.float64]) -> object:
         return np.sum(x)
 
 
+    @compiled
     def whole_attr(x: npt.NDArray[np.float64]) -> object:
         return x.size
 
 
+    @compiled
     def whole_pass(x: npt.NDArray[np.float64]) -> object:
         return np.add(x, 1.0).sum()
 
 
+    @compiled
     def nd_int_impure(x: npt.NDArray[np.int64]) -> object:
         s = 0
         for i in range(len(x)):
@@ -205,83 +239,103 @@ SOURCE = textwrap.dedent('''
         return s
 
 
+    @compiled
     def nd_scale(x: npt.NDArray[np.float64], k: float) -> None:
         for i in range(len(x)):
             x[i] = x[i] * k
 
+    @compiled
     def p_div(x: npt.NDArray[np.float64]) -> object:
         return x[0] / x[1]
 
 
+    @compiled
     def p_fdiv(x: npt.NDArray[np.float64]) -> object:
         return x[0] // x[1]
 
 
+    @compiled
     def p_mod(x: npt.NDArray[np.float64]) -> object:
         return x[0] % x[1]
 
 
+    @compiled
     def p_add(x: npt.NDArray[np.float64]) -> object:
         return x[0] + x[1]
 
 
+    @compiled
     def p_sub(x: npt.NDArray[np.float64]) -> object:
         return x[0] - x[1]
 
 
+    @compiled
     def p_mul(x: npt.NDArray[np.float64]) -> object:
         return x[0] * x[1]
 
 
+    @compiled
     def p_pdiv(x: npt.NDArray[np.float64], k: float) -> object:
         return k / x[0]
 
 
+    @compiled
     def p_idiv(x: npt.NDArray[np.int64]) -> object:
         return x[0] / x[1]
 
 
+    @compiled
     def p_ifdiv(x: npt.NDArray[np.int64]) -> object:
         return x[0] // x[1]
 
 
+    @compiled
     def p_imod(x: npt.NDArray[np.int64]) -> object:
         return x[0] % x[1]
 
 
+    @compiled
     def p_imixed(x: npt.NDArray[np.int64]) -> object:
         return x[0] // 3 + x[1] % 4
 
 
+    @compiled
     def i_div(x: npt.NDArray[np.float64]) -> None:
         x[2] = x[0] / x[1]
 
 
+    @compiled
     def i_fdiv(x: npt.NDArray[np.float64]) -> None:
         x[2] = x[0] // x[1]
 
 
+    @compiled
     def i_mod(x: npt.NDArray[np.float64]) -> None:
         x[2] = x[0] % x[1]
 
 
+    @compiled
     def i_add(x: npt.NDArray[np.float64]) -> None:
         x[2] = x[0] + x[1]
 
 
+    @compiled
     def i_sub(x: npt.NDArray[np.float64]) -> None:
         x[2] = x[0] - x[1]
 
 
+    @compiled
     def i_mul(x: npt.NDArray[np.float64]) -> None:
         x[2] = x[0] * x[1]
 
 
+    @compiled
     def i_plain(x: npt.NDArray[np.float64], k: float) -> None:
         x[2] = k / x[1]
         x[3] = k * 2.0
 
 
+    @compiled
     def i_multiline(x: npt.NDArray[np.float64]) -> None:
         x[2] = (x[0] *
                 x[1])
@@ -290,12 +344,14 @@ SOURCE = textwrap.dedent('''
                 + x[0] * x[1])
 
 
+    @compiled
     def i_aug(x: npt.NDArray[np.float64]) -> None:
         x[0] *= x[1]
         x[1] /= x[2]
         x[2] += x[3]
 
 
+    @compiled
     def i_loop(x: npt.NDArray[np.float64], y: npt.NDArray[np.float64]) -> float:
         s = 0.0
         for i in range(len(x)):
@@ -304,21 +360,25 @@ SOURCE = textwrap.dedent('''
         return s
 
 
+    @compiled
     def i_mixed(x: npt.NDArray[np.float64], n: int) -> None:
         x[0] = n / x[1]
         x[2] = x[3] * n
 
 
+    @compiled
     def i_ret(x: npt.NDArray[np.float64]) -> object:
         x[2] = x[0] * x[1]
         return x[0] / x[1]
 
 
+    @compiled
     def i_ifdiv(x: npt.NDArray[np.int64]) -> object:
         x[2] = x[0] // x[1]
         return x[2]
 
 
+    @compiled
     def nd_advance(dt: float, steps: int, x: npt.NDArray[np.float64], y: npt.NDArray[np.float64],
                    z: npt.NDArray[np.float64], vx: npt.NDArray[np.float64],
                    vy: npt.NDArray[np.float64], vz: npt.NDArray[np.float64],
@@ -343,6 +403,7 @@ SOURCE = textwrap.dedent('''
                 z[i] += dt * vz[i]
 
 
+    @compiled
     def nd_energy_full(x: npt.NDArray[np.float64], y: npt.NDArray[np.float64],
                        z: npt.NDArray[np.float64], vx: npt.NDArray[np.float64],
                        vy: npt.NDArray[np.float64], vz: npt.NDArray[np.float64],
@@ -357,10 +418,12 @@ SOURCE = textwrap.dedent('''
                 e -= mass[i] * mass[j] / math.sqrt(dx * dx + dy * dy + dz * dz)
         return e
     # #261: np.bool_ arrays (1-byte items, format "?")
+    @compiled
     def nd_b_get(x: npt.NDArray[np.bool_], i: int) -> object:
         return x[i]
 
 
+    @compiled
     def nd_b_any(x: npt.NDArray[np.bool_]) -> bool:
         for i in range(len(x)):
             if x[i]:
@@ -368,6 +431,7 @@ SOURCE = textwrap.dedent('''
         return False
 
 
+    @compiled
     def nd_b_count(x: npt.NDArray[np.bool_]) -> int:
         c = 0
         for i in range(len(x)):
@@ -376,45 +440,55 @@ SOURCE = textwrap.dedent('''
         return c
 
 
+    @compiled
     def nd_b_set(x: npt.NDArray[np.bool_], i: int, v: bool) -> None:
         x[i] = v
 
 
+    @compiled
     def nd_b_flip(x: npt.NDArray[np.bool_]) -> None:
         for i in range(len(x)):
             x[i] = not x[i]
 
 
+    @compiled
     def nd_b_copy(a: npt.NDArray[np.bool_], b: npt.NDArray[np.bool_]) -> None:
         for i in range(len(a)):
             b[i] = a[i]
 
 
+    @compiled
     def nd_b_eq(x: npt.NDArray[np.bool_], y: npt.NDArray[np.bool_], i: int) -> object:
         return x[i] == y[i]
 
 
+    @compiled
     def nd_b_gt(x: npt.NDArray[np.float64], m: npt.NDArray[np.bool_]) -> None:
         for i in range(len(x)):
             m[i] = x[i] > 2.0
 
 
+    @compiled
     def nd_b_len(x: npt.NDArray[np.bool_]) -> int:
         return len(x)
 
 
+    @compiled
     def nd_b_store_int(x: npt.NDArray[np.bool_], i: int, v: int) -> None:
         x[i] = v
 
 
+    @compiled
     def nd_b_store_float(x: npt.NDArray[np.bool_], i: int, v: float) -> None:
         x[i] = v
 
 
+    @compiled
     def nd_b_arith(x: npt.NDArray[np.bool_], i: int) -> object:
         return x[i] + 1
 
 
+    @compiled
     def nd_b_whole(x: npt.NDArray[np.bool_]) -> object:
         return np.sum(x)
 ''')

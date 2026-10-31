@@ -62,7 +62,7 @@ TypedPython 의 목표는 **새 언어를 만들지 않고, 파이썬 문법 그
 |---|---|---|---|
 | 0 | 서드파티 패키지 (의존성) | 없음, 검사하지 않는다 | 바이트코드 (pypackpack 이 받은 그대로) |
 | 1 `checked` | **사용자 프로젝트의 파이썬 코드 전부, 기본값** | 빌드 타임 타입 오류, `Any` 유출 0 (§4.2) | 바이트코드 |
-| 1 `compiled` | `@compiled` (내장 이름, import 없음) 또는 모듈 선언 `# typedpython: compiled` | `checked` + §3.1 금지 목록 | C 확장 모듈 (NEON · AVX 벡터화, §5.3) |
+| 1 `compiled` | `@compiled` (내장 이름, import 없음) | `checked` + §3.1 금지 목록 | C 확장 모듈 (NEON · AVX 벡터화, §5.3) |
 | 2 `kernel` | `@kernel` | 객체·힙 할당 없음, 고정 dtype | SPIR-V / MSL (직접) / WGSL / PTX, 빌드 타임 (§5) |
 
 - **사용자 코드는 표시하지 않아도 검사된다.** 타입 오류가 있으면 Kotlin 컴파일 에러처럼 빌드가
@@ -685,9 +685,7 @@ upstream 대비 수치 오차와 커널 시간을 기준선으로 박아 둔다.
    인터프리터 시작 시 `builtins.compiled` 를 설치하고(#42), 일반 CPython 에서는 `typedpython` wheel 의
    `typedpython_builtins.pth` 가 `builtins` 에 없을 때만 항등 함수를 설치한다(런타임이 넣은 것을 덮어쓰지
    않는다). 타입 검사기에는 `__builtins__.pyi` 로 알린다, Pyrefly 1.3.2 는 검색 경로의 그 파일을 추가
-   내장으로 읽는다(실측). 모듈 단위 표기는 `# typedpython: compiled` 주석을 유지한다: `# pyright: strict` 와 같은
-   도구 pragma 형태이고, 실행 시 이름 조회가 필요 없어 일반 CPython 에서 부작용이 없으며, 데코레이터 없이
-   모듈 전체를 지정할 수 있다.
+   내장으로 읽는다(실측). 모듈 단위 pragma(`# typedpython: compiled`)는 2026-10-30 메인테이너 결정으로 제거했다(#353). `@compiled` 가 컴파일 대상을 표시하는 유일한 수단이다.
 2. ~~고정폭 정수의 오버플로 의미~~, **결정됨:** `int` 는 i64 로 컴파일하고 오버플로 시 인터프리터 재실행으로 큰 정수로 승격(의미 보존).
 3. ~~pypackpack Cython 슬롯 인터페이스 소유~~, **결정됨:** pypackpack 이 정한다. TypedPython 은 생성한 C 소스, 빌드 플래그, C 를 낸 모듈 목록을 넘긴다. 확장이 원본 소스를 품으므로 별도 `.py` 폴백은 없다(Cython 폐기 후 갱신).
 4. ~~GPU 착지를 torchnative 커스텀 op 로 할 것인가~~, **결정됨 (2026-10-04, 메인테이너):** 커널은
