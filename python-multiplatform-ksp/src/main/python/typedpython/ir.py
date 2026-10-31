@@ -820,6 +820,9 @@ class Function:
     # SPEC N-15: the user marked this function `@compiled(parallel=True)` (#358).
     # Only a marked function can hold a `ForRange.par`.
     parallel: bool = False
+    # SPEC N-8 (#153, #332): the user marked this function `@compiled(fastmath=True)` (reassociation
+    # and FMA contraction enabled for this function only; NOT CPython-identical).
+    fastmath: bool = False
     # SPEC N-12b (#268): the producers whose result this pure function keeps inside one statement
     # (`check(make(d))`), so each such call builds its objects in a region. Set only by `verify`,
     # which recomputes it and rejects a function whose declared entries differ

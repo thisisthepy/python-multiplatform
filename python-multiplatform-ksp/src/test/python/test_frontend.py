@@ -677,6 +677,43 @@ def test_compiled_parallel_option_and_former_comment_marker(tmp_path):
     assert set(m.skipped) == {"bad"} and "parallel" in m.skipped["bad"]
 
 
+def test_compiled_fastmath_option_and_validation(tmp_path):
+    m = lower(tmp_path, """
+        @compiled(fastmath=True)
+        def fm(x: float) -> float:
+            return x
+
+        @compiled(fastmath=False)
+        def exact(x: float) -> float:
+            return -x
+
+        @compiled(parallel=True, fastmath=True)
+        def both(x: float) -> float:
+            return x * 2.0
+
+        @compiled
+        def plain(x: float) -> float:
+            return x + 1.0
+
+        @compiled(fastmath=1)
+        def bad_val(x: float) -> float:
+            return x
+
+        @compiled(other=True)
+        def bad_kw(x: float) -> float:
+            return x
+    """)
+    assert [(f.name, f.parallel, f.fastmath) for f in m.functions] == [
+        ("fm", False, True),
+        ("exact", False, False),
+        ("both", True, True),
+        ("plain", False, False),
+    ]
+    assert set(m.skipped) == {"bad_val", "bad_kw"}
+    assert "fastmath" in m.skipped["bad_val"]
+    assert "fastmath" in m.skipped["bad_kw"] and "parallel" in m.skipped["bad_kw"]
+
+
 def test_the_former_module_pragma_comment_compiles_nothing(tmp_path):
     m = lower(tmp_path, """
         # typedpython: compiled

@@ -185,3 +185,56 @@ def test_a_fresh_local_does_not_exempt_the_callee_class_guard(tmp_path):
     c = mod.Cell(None, None)
     mod.seta(c, 7)
     assert c.a == 7
+
+
+def test_default_fp_flags_stay_exact_and_fastmath_is_per_function_only(write, tmp_path):
+    """#153 / #332: by default, `-ffp-contract=off` and `-fno-fast-math` on GCC/Clang and
+    `/fp:precise` on MSVC are pinned so floating-point arithmetic is bit-identical to CPython.
+    `@compiled(fastmath=True)` opts in for that function only (not CPython-identical), leaving
+    sibling `@compiled` functions in the same module exact."""
+    from typedpython import cbuild, cgen, frontend, verify
+
+    assert "-ffp-contract=off" in cbuild.DEFAULT_FLAGS
+    assert "-fno-fast-math" in cbuild.DEFAULT_FLAGS
+    assert "/fp:precise" in cbuild.MSVC_DEFAULT_FLAGS
+    assert not any("fast" in f for f in cbuild.MSVC_DEFAULT_FLAGS)
+
+    path = write(
+        "fp_mod.py",
+        """
+        @compiled
+        def fma_exact(a: float, b: float, c: float) -> float:
+            return a * b + c
+
+        @compiled(fastmath=True)
+        def fma_fast(a: float, b: float, c: float) -> float:
+            return a * b + c
+
+        @compiled
+        def calls_fast_and_adds(a: float, b: float, c: float) -> float:
+            # caller is exact: its own `a * b + c` must not contract even though it calls `fma_fast`
+            _ = fma_fast(1.0, 2.0, 3.0)
+            return a * b + c
+        """,
+    )
+    proved, _ = verify.verify(frontend.lower(path))
+    c_text = cgen.generate(proved, path)
+    assert "#pragma STDC FP_CONTRACT OFF" in c_text
+    assert "\nTP_FASTMATH_BEGIN\n" in c_text and "\nTP_FASTMATH_END\n" in c_text
+    # Only `fma_fast` is wrapped in standalone TP_FASTMATH_BEGIN / TP_FASTMATH_END lines:
+    assert c_text.count("\nTP_FASTMATH_BEGIN\n") == 1
+    assert c_text.count("\nTP_FASTMATH_END\n") == 1
+
+    res = pipeline.compile_module(path, tmp_path / "out", cost_rule=False)
+    mod = pipeline.load(res)
+    ref = interpreted(path)
+    # 1 + 2**-27 squared: exact double product rounds to 1 + 2**-26, while FMA(a, a, -1.0) keeps 2**-54
+    a = 1.0 + 2.0**-27
+    c = -1.0
+    want_exact = ref.fma_exact(a, a, c)
+    assert mod.fma_exact(a, a, c) == want_exact
+    assert mod.calls_fast_and_adds(a, a, c) == want_exact
+    # fma_fast runs and returns a float (on targets with FMA it equals 2**-26 + 2**-54; either is valid under fastmath)
+    got_fast = mod.fma_fast(a, a, c)
+    assert isinstance(got_fast, float)
+

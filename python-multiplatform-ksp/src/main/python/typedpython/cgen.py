@@ -494,10 +494,19 @@ def _runs_no_python(f: ir.Function) -> bool:
 def _bounded_functions(functions: dict[str, ir.Function]) -> dict[str, int]:
     """name -> k for every bounded function (module docstring, "Fast entry"): in no call cycle,
     every callee bounded, `_runs_no_python`. k(f) = 1 + max(k(callee)), 1 without callees: the most
-    compiled frames a call of `f` can have in flight at once."""
+    compiled frames a call of `f` can have in flight at once.
+    A `fastmath` function is never given an `inline` fast twin (`tp_fimpl_*`) when some other
+    function in the module calls it without `fastmath`, so a non-fastmath caller can never inline
+    a fastmath body (#332)."""
     callees: dict[str, set[str]] = {}
     for name, f in functions.items():
         callees[name] = {e.function for e in _all_exprs(f) if isinstance(e, ir.Call)}
+    called_from_exact = {
+        c
+        for caller_name, cs in callees.items()
+        if not functions[caller_name].fastmath
+        for c in cs
+    }
     k: dict[str, int | None] = {}                 # None: not bounded (also while on the DFS stack)
 
     def visit(name: str) -> int | None:
@@ -505,7 +514,7 @@ def _bounded_functions(functions: dict[str, ir.Function]) -> dict[str, int]:
             return k[name]
         k[name] = None                            # on the stack: reaching it again is a cycle
         f = functions[name]
-        if not _runs_no_python(f):
+        if not _runs_no_python(f) or (f.fastmath and name in called_from_exact):
             return None
         deepest = 0
         for c in callees[name]:
@@ -743,6 +752,21 @@ def generate(module: ir.Module, source_path: Path, display_path: str | None = No
     w("#if !defined(_MSC_VER) || defined(__clang__)    /* cl.exe warns on an unknown pragma */")
     w("#pragma STDC FP_CONTRACT OFF")
     w("#endif")
+    if any(f.fastmath for f in module.functions):
+        w("/* SPEC N-8 (#153, #332): per-function `@compiled(fastmath=True)` opt-in (NOT CPython-identical). */")
+        w("#if defined(__clang__)")
+        w("#define TP_FASTMATH_BEGIN _Pragma(\"clang fp reassociate(on) contract(fast)\")")
+        w("#define TP_FASTMATH_END _Pragma(\"clang fp reassociate(off) contract(off)\")")
+        w("#elif defined(__GNUC__)")
+        w("#define TP_FASTMATH_BEGIN _Pragma(\"GCC push_options\") _Pragma(\"GCC optimize(\\\"fast-math\\\")\")")
+        w("#define TP_FASTMATH_END _Pragma(\"GCC pop_options\")")
+        w("#elif defined(_MSC_VER)")
+        w("#define TP_FASTMATH_BEGIN __pragma(float_control(precise, off, push)) __pragma(fp_contract(on))")
+        w("#define TP_FASTMATH_END __pragma(fp_contract(off)) __pragma(float_control(pop))")
+        w("#else")
+        w("#define TP_FASTMATH_BEGIN")
+        w("#define TP_FASTMATH_END")
+        w("#endif")
     w("")
     w(f"static const char tp_source[] =\n    {c_source_init(source)};")
     w(f"static const char tp_source_path[] = {c_string(display_path)};")
@@ -2892,7 +2916,8 @@ class _FnGen:
         """The impl (preceded by its fast twin when bounded) and the wrapper."""
         parts = []
         if self.rmode:
-            return self.impl()
+            text = self.impl()
+            return f"TP_FASTMATH_BEGIN\n{text}TP_FASTMATH_END\n" if self.f.fastmath else text
         if self.f.name in self.mg.bounded:
             twin = _FnGen(self.mg, self.f, fast=True)
             twin_text = twin.impl()
@@ -2901,6 +2926,8 @@ class _FnGen:
         impl_text = self.impl()
         parts += self.par_defs
         parts.append(impl_text)
+        if self.f.fastmath:
+            parts = ["TP_FASTMATH_BEGIN", *parts, "TP_FASTMATH_END"]
         parts.append(self.wrapper())
         return "\n".join(parts)
 

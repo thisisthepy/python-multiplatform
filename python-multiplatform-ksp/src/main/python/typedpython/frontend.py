@@ -191,7 +191,8 @@ def lower(path: Path) -> ir.Module:
     skipped.update(class_skips)
     signatures: dict[str, _Signature] = {}
     marked: set[str] = set()
-    for node, reason, parallel in _targets(tree, source, info):
+    fastmath_marked: set[str] = set()
+    for node, reason, parallel, fastmath in _targets(tree, source, info):
         if reason is not None:
             skipped[node.name] = reason
             continue
@@ -203,6 +204,8 @@ def lower(path: Path) -> ir.Module:
         else:
             if parallel:
                 marked.add(node.name)
+            if fastmath:
+                fastmath_marked.add(node.name)
     for owner, node, reason in _method_targets(tree, info):
         q = f"{owner}.{node.name}"
         if reason is not None:
@@ -240,7 +243,11 @@ def lower(path: Path) -> ir.Module:
         else:
             skipped[name] = result
     functions.sort(key=lambda f: f.source_line)
-    functions = [dataclasses.replace(f, parallel=True) if f.name in marked else f for f in functions]
+    functions = [
+        dataclasses.replace(f, parallel=f.name in marked, fastmath=f.name in fastmath_marked)
+        if (f.name in marked or f.name in fastmath_marked) else f
+        for f in functions
+    ]
     return ir.Module(path.stem, tuple(functions), skipped, tuple(class_decls.values()))
 
 
@@ -423,30 +430,34 @@ def _is_compiled_decorator(d: ast.expr) -> bool:
     )
 
 
-def _compiled_decorator_options(d: ast.expr) -> tuple[bool, str | None]:
-    """Parse `@compiled` or `@compiled(parallel=...)` -> (parallel, error_reason_or_None)."""
+def _compiled_decorator_options(d: ast.expr) -> tuple[bool, bool, str | None]:
+    """Parse `@compiled` or `@compiled(parallel=..., fastmath=...)` -> (parallel, fastmath, error_reason_or_None)."""
     if isinstance(d, ast.Name):
-        return False, None
+        return False, False, None
     assert isinstance(d, ast.Call)
     if d.args:
-        return False, (f"line {d.lineno}: `@compiled` takes keyword arguments only "
-                       f"(got positional `{_src(d.args[0])}`)")
+        return False, False, (f"line {d.lineno}: `@compiled` takes keyword arguments only "
+                              f"(got positional `{_src(d.args[0])}`)")
     parallel = False
+    fastmath = False
     seen: set[str] = set()
     for kw in d.keywords:
         if kw.arg is None:
-            return False, f"line {d.lineno}: `**{_src(kw.value)}` in `@compiled(...)` is not supported"
-        if kw.arg != "parallel":
-            return False, (f"line {d.lineno}: `@compiled` keyword argument `{kw.arg}` is not "
-                           "supported (only `parallel=True` or `parallel=False`)")
+            return False, False, f"line {d.lineno}: `**{_src(kw.value)}` in `@compiled(...)` is not supported"
+        if kw.arg not in ("parallel", "fastmath"):
+            return False, False, (f"line {d.lineno}: `@compiled` keyword argument `{kw.arg}` is not "
+                                  "supported (only `parallel` and `fastmath` with literal `True` or `False`)")
         if kw.arg in seen:
-            return False, f"line {d.lineno}: `@compiled` keyword argument `{kw.arg}` is repeated"
+            return False, False, f"line {d.lineno}: `@compiled` keyword argument `{kw.arg}` is repeated"
         seen.add(kw.arg)
         if not (isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, bool)):
-            return False, (f"line {d.lineno}: `@compiled(parallel=...)` requires a literal `True` "
-                           f"or `False`, got `{_src(kw.value)}`")
-        parallel = kw.value.value
-    return parallel, None
+            return False, False, (f"line {d.lineno}: `@compiled({kw.arg}=...)` requires a literal `True` "
+                                  f"or `False`, got `{_src(kw.value)}`")
+        if kw.arg == "parallel":
+            parallel = kw.value.value
+        else:
+            fastmath = kw.value.value
+    return parallel, fastmath, None
 
 
 def is_opted_in(path: Path) -> bool:
@@ -614,8 +625,8 @@ def _class_of(kind: str, classes: dict[str, ir.ClassDecl]) -> tuple[str, bool] |
 
 def _targets(
     tree: ast.Module, source: str, info: _ModuleInfo,
-) -> list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str | None, bool]]:
-    found: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str | None, bool]] = []
+) -> list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str | None, bool, bool]]:
+    found: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str | None, bool, bool]] = []
     for node in tree.body:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
@@ -624,6 +635,7 @@ def _targets(
             continue
         reason = None
         parallel = False
+        fastmath = False
         if marked and info.bound("compiled"):
             line = info.bindings["compiled"][0][0]
             reason = (f"line {node.lineno}: `compiled` is bound in this module (line {line}), "
@@ -633,18 +645,19 @@ def _targets(
                       "(only `@compiled`)")
         else:
             for d in marked:
-                par, r = _compiled_decorator_options(d)
+                par, fm, r = _compiled_decorator_options(d)
                 if r is not None:
                     reason = r
                     break
                 parallel = parallel or par
+                fastmath = fastmath or fm
         if reason is None:
             if isinstance(node, ast.AsyncFunctionDef):
                 reason = f"line {node.lineno}: async function is not supported"
             elif len(info.bindings.get(node.name, [])) > 1:
                 lines = ", ".join(str(line) for line, _ in info.bindings[node.name])
                 reason = f"line {node.lineno}: `{node.name}` is bound more than once (lines {lines})"
-        found.append((node, reason, parallel))
+        found.append((node, reason, parallel, fastmath))
     return found
 
 
