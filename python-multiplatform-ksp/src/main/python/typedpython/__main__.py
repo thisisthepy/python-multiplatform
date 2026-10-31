@@ -113,7 +113,7 @@ def _demo(module: Path, module_argv: list[str], out: Path) -> int:
 
     def interpreted() -> object:
         import builtins  # the module's `@compiled` is a builtin name; typedpython_builtins.pth installs it
-        builtins.compiled = getattr(builtins, "compiled", lambda f, /: f)
+        builtins.compiled = getattr(builtins, "compiled", lambda f=None, /, **_k: (lambda g: g) if f is None else f)
         spec = importlib.util.spec_from_file_location(module.stem + "_interpreted", module)
         assert spec is not None and spec.loader is not None
         mod = importlib.util.module_from_spec(spec)

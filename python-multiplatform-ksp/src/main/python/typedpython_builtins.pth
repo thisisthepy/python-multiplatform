@@ -1,1 +1,1 @@
-import builtins; builtins.compiled = getattr(builtins, "compiled", lambda f, /: f)
+import builtins; builtins.compiled = getattr(builtins, "compiled", lambda f=None, /, **_k: (lambda g: g) if f is None else f)
