@@ -840,12 +840,14 @@ def _access_is_ours(block: str) -> bool:
     A report where one access is mimalloc initialising a fresh block (`_mi_malloc*` memset) is not
     ours either: the extension's earlier read hit memory a thread later freed (an exited thread's
     `PyThreadState`, read by `tp_traced`), and the free and the reuse both happen inside the
-    uninstrumented allocator, so TSan cannot see that they are ordered (seen on Linux CI)."""
+    uninstrumented allocator, so TSan cannot see that they are ordered (seen on Linux CI). The same
+    holds when the reused block is filled by libpython's `new_threadstate` (a memcpy of the template
+    thread state into the block an exited thread's state was freed from, seen on Linux CI)."""
     firsts = []
     for part in block.split("\n\n")[:2]:
         frames = [ln for ln in part.splitlines() if ln.strip().startswith("#")]
         firsts.append(next((f for f in frames if "libtsan" not in f and "sanitizer_common" not in f), ""))
-    if any(" _mi_malloc" in f or " _mi_page_malloc" in f for f in firsts):
+    if any(" _mi_malloc" in f or " _mi_page_malloc" in f or " new_threadstate " in f for f in firsts):
         return False
     return any("ftmod" in f for f in firsts)
 
