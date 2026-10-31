@@ -80,7 +80,7 @@ fail, then implement.
   extracts it. `Status: partial`, exercised by the shared suite on the simulator; no iOS-specific
   lifecycle test beyond `PM/iosSimulatorArm64Test/.../AsyncioAvailabilityProbeTest.kt`. An installed
   app carries its own stdlib: L-11.
-- **L-8** Initialisation sets `builtins.compiled` to an identity decorator (an existing one is kept), so `@compiled` needs no import on any platform (N-7, issue #42). `Status: implemented`, `PM/commonTest/.../ffi/BuiltinCompiledTest.kt`.
+- **L-8** Initialisation sets `builtins.compiled` to an identity decorator accepting both `@compiled` (`compiled(f)`) and `@compiled(**opts)` (`compiled(**opts)(f)`), leaving an existing `builtins.compiled` alone, so `@compiled` needs no import on any platform (N-7, issue #42, #358). `Status: implemented`, `PM/commonTest/.../ffi/BuiltinCompiledTest.kt`.
 - **L-9** Desktop: a packaged application starts with no `PYTHONHOME` in its environment (issue #60,
   ROADMAP §15.4). The Gradle plugin copies the prefix `stagePythonHome` stages into Compose Desktop's
   application resources (every `prepare*AppResources` task, so `createDistributable` and the
@@ -985,7 +985,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 - **N-15** TypedPython parallel execution of order-independent loops on free-threaded CPython (#151;
   `docs/design/typedpython-parallel-loops.md`). A compiled `for ... in range(...)` loop may run its
   iterations on several threads only if its result cannot depend on iteration order, in a function the
-  user marked with a `# typedpython: parallel` comment line directly above the `def` (above its decorators if any); module-level functions only, and then the
+  user marked `@compiled(parallel=True)` (#358; the earlier `# typedpython: parallel` comment line was removed); module-level functions only, and then the
   result, the exception, the partial writes and the deopt behaviour are bit-for-bit those of the
   sequential loop (INTENT §1.4; N-12: every execution is indistinguishable from some valid CPython
   execution).

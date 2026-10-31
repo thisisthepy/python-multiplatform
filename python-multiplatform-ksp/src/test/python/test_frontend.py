@@ -654,6 +654,29 @@ def test_compiled_marks_every_decorated_module_level_def(tmp_path):
     assert set(m.skipped) == {"c"} and "decorator" in m.skipped["c"]
 
 
+def test_compiled_parallel_option_and_former_comment_marker(tmp_path):
+    m = lower(tmp_path, """
+        @compiled(parallel=True)
+        def p(x: float) -> float:
+            return x
+
+        @compiled(parallel=False)
+        def s(x: float) -> float:
+            return -x
+
+        # typedpython: parallel
+        @compiled
+        def c(x: float) -> float:
+            return x * 2.0
+
+        @compiled(unknown=True)
+        def bad(x: float) -> float:
+            return x
+    """)
+    assert [(f.name, f.parallel) for f in m.functions] == [("p", True), ("s", False), ("c", False)]
+    assert set(m.skipped) == {"bad"} and "parallel" in m.skipped["bad"]
+
+
 def test_the_former_module_pragma_comment_compiles_nothing(tmp_path):
     m = lower(tmp_path, """
         # typedpython: compiled

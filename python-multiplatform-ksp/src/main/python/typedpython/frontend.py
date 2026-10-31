@@ -190,7 +190,8 @@ def lower(path: Path) -> ir.Module:
     info.classes = class_decls
     skipped.update(class_skips)
     signatures: dict[str, _Signature] = {}
-    for node, reason in _targets(tree, source, info):
+    marked: set[str] = set()
+    for node, reason, parallel in _targets(tree, source, info):
         if reason is not None:
             skipped[node.name] = reason
             continue
@@ -199,6 +200,9 @@ def lower(path: Path) -> ir.Module:
             signatures[node.name] = _signature(node, info.classes, info)
         except Skip as e:
             skipped[node.name] = e.reason
+        else:
+            if parallel:
+                marked.add(node.name)
     for owner, node, reason in _method_targets(tree, info):
         q = f"{owner}.{node.name}"
         if reason is not None:
@@ -236,26 +240,8 @@ def lower(path: Path) -> ir.Module:
         else:
             skipped[name] = result
     functions.sort(key=lambda f: f.source_line)
-    marked = _parallel_marked(tree, source)
     functions = [dataclasses.replace(f, parallel=True) if f.name in marked else f for f in functions]
     return ir.Module(path.stem, tuple(functions), skipped, tuple(class_decls.values()))
-
-
-PARALLEL_MARKER = "# typedpython: parallel"
-
-
-def _parallel_marked(tree: ast.Module, source: str) -> set[str]:
-    """Module-level functions the user marked for SPEC N-15: the comment line `# typedpython: parallel`
-    directly above the `def` (above its decorators if it has any). A comment,
-    so the interpreted module is unchanged and needs no runtime name."""
-    lines = source.splitlines()
-    out: set[str] = set()
-    for node in tree.body:
-        if isinstance(node, ast.FunctionDef):
-            first = min([node.lineno] + [d.lineno for d in node.decorator_list])
-            if first >= 2 and lines[first - 2].strip() == PARALLEL_MARKER:
-                out.add(node.name)
-    return out
 
 
 def _module_info(tree: ast.Module) -> _ModuleInfo:
@@ -431,13 +417,45 @@ def _binding_targets(stmt: ast.stmt) -> list[ast.expr]:
 SLOT_ACCESS_DUNDERS = ("__getattribute__", "__getattr__", "__setattr__", "__delattr__", "__new__")
 
 
+def _is_compiled_decorator(d: ast.expr) -> bool:
+    return (isinstance(d, ast.Name) and d.id == "compiled") or (
+        isinstance(d, ast.Call) and isinstance(d.func, ast.Name) and d.func.id == "compiled"
+    )
+
+
+def _compiled_decorator_options(d: ast.expr) -> tuple[bool, str | None]:
+    """Parse `@compiled` or `@compiled(parallel=...)` -> (parallel, error_reason_or_None)."""
+    if isinstance(d, ast.Name):
+        return False, None
+    assert isinstance(d, ast.Call)
+    if d.args:
+        return False, (f"line {d.lineno}: `@compiled` takes keyword arguments only "
+                       f"(got positional `{_src(d.args[0])}`)")
+    parallel = False
+    seen: set[str] = set()
+    for kw in d.keywords:
+        if kw.arg is None:
+            return False, f"line {d.lineno}: `**{_src(kw.value)}` in `@compiled(...)` is not supported"
+        if kw.arg != "parallel":
+            return False, (f"line {d.lineno}: `@compiled` keyword argument `{kw.arg}` is not "
+                           "supported (only `parallel=True` or `parallel=False`)")
+        if kw.arg in seen:
+            return False, f"line {d.lineno}: `@compiled` keyword argument `{kw.arg}` is repeated"
+        seen.add(kw.arg)
+        if not (isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, bool)):
+            return False, (f"line {d.lineno}: `@compiled(parallel=...)` requires a literal `True` "
+                           f"or `False`, got `{_src(kw.value)}`")
+        parallel = kw.value.value
+    return parallel, None
+
+
 def is_opted_in(path: Path) -> bool:
     """Whether the front end considers the module for compilation at all: a module-level `def` / `class`
     decorated `@compiled` (the same test `_targets` and `_classes` apply)."""
     source = Path(path).read_text()
     return any(
         isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-        and any(isinstance(d, ast.Name) and d.id == "compiled" for d in node.decorator_list)
+        and any(_is_compiled_decorator(d) for d in node.decorator_list)
         for node in ast.parse(source, filename=str(path)).body)
 
 
@@ -596,15 +614,16 @@ def _class_of(kind: str, classes: dict[str, ir.ClassDecl]) -> tuple[str, bool] |
 
 def _targets(
     tree: ast.Module, source: str, info: _ModuleInfo,
-) -> list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str | None]]:
-    found: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str | None]] = []
+) -> list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str | None, bool]]:
+    found: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str | None, bool]] = []
     for node in tree.body:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        marked = [d for d in node.decorator_list if isinstance(d, ast.Name) and d.id == "compiled"]
+        marked = [d for d in node.decorator_list if _is_compiled_decorator(d)]
         if not marked:
             continue
         reason = None
+        parallel = False
         if marked and info.bound("compiled"):
             line = info.bindings["compiled"][0][0]
             reason = (f"line {node.lineno}: `compiled` is bound in this module (line {line}), "
@@ -612,12 +631,20 @@ def _targets(
         elif other := [d for d in node.decorator_list if d not in marked]:
             reason = (f"line {other[0].lineno}: decorator `@{_src(other[0])}` is not supported "
                       "(only `@compiled`)")
-        elif isinstance(node, ast.AsyncFunctionDef):
-            reason = f"line {node.lineno}: async function is not supported"
-        elif len(info.bindings.get(node.name, [])) > 1:
-            lines = ", ".join(str(line) for line, _ in info.bindings[node.name])
-            reason = f"line {node.lineno}: `{node.name}` is bound more than once (lines {lines})"
-        found.append((node, reason))
+        else:
+            for d in marked:
+                par, r = _compiled_decorator_options(d)
+                if r is not None:
+                    reason = r
+                    break
+                parallel = parallel or par
+        if reason is None:
+            if isinstance(node, ast.AsyncFunctionDef):
+                reason = f"line {node.lineno}: async function is not supported"
+            elif len(info.bindings.get(node.name, [])) > 1:
+                lines = ", ".join(str(line) for line, _ in info.bindings[node.name])
+                reason = f"line {node.lineno}: `{node.name}` is bound more than once (lines {lines})"
+        found.append((node, reason, parallel))
     return found
 
 
