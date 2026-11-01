@@ -411,10 +411,14 @@ val nativeImageJavaLauncher = javaToolchains.launcherFor {
 
 val nativeImageOutputDir = layout.buildDirectory.dir("native/nativeCompile")
 
+pythonBindings {
+    nativeImageDirectory.set(nativeImageOutputDir)
+}
+
 val nativeCompile by tasks.registering(Exec::class) {
     group = "native"
     description = "Builds upcall-native-demo with GraalVM native-image from NativeImageMain.kt"
-    dependsOn(desktopMainCompilation.compileTaskProvider, pythonMultiplatformDesktopJar)
+    dependsOn(desktopMainCompilation.compileTaskProvider, pythonMultiplatformDesktopJar, "stageNativeImagePythonHome")
 
     val classpathProvider = files(
         desktopMainCompilation.output.allOutputs,
@@ -425,7 +429,7 @@ val nativeCompile by tasks.registering(Exec::class) {
     val launcher = nativeImageJavaLauncher
 
     inputs.files(classpathProvider)
-    outputs.dir(outDir)
+    outputs.file(outDir.map { it.file("upcall-native-demo") })
 
     doFirst {
         outDir.get().asFile.mkdirs()
@@ -445,8 +449,10 @@ tasks.register<Exec>("runNativeUpcallDemo") {
     group = "verification"
     description = "Runs the native-image binary built by nativeCompile and checks the upcall path"
     dependsOn(nativeCompile)
+    workingDir(nativeImageOutputDir)
     executable = nativeImageOutputDir.get().asFile.resolve("upcall-native-demo").absolutePath
-    environment("PYTHONHOME", pythonHomeForHost.get().asFile.absolutePath)
+    environment.remove("JAVA_HOME")
+    environment.remove("PYTHONHOME")
 
     // A zero exit status is not the same as a working upcall path. `PyRun_SimpleString` reports
     // failure for an exception raised inside the script, but a Python interpreter that never got
