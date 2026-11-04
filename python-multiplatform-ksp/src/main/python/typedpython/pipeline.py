@@ -154,27 +154,24 @@ class ModuleResult:
     interface: str = ""
     kind: str = "compiled"                  # "compiled" | "nothing_compiled" | "not_marked"
     skipped_items: list[SkippedItem] = field(default_factory=list)   # `skipped`, structured
+    c_source: Path | None = None            # generate_project only: the module's one `.c` (#113)
 
 
 @dataclass
 class ProjectResult:
     modules: list[ModuleResult]
+    runtime_include: Path | None = None     # generate_project only: the dir holding tp_runtime.h
 
     @property
     def rebuilt(self) -> list[ModuleResult]:
         return [m for m in self.modules if m.status == "rebuilt"]
 
 
-def compile_project(
-    sources: list[Path],
-    project_root: Path,
-    cache_dir: Path,
-    *,
-    python_include: Path | None = None,
-    ext_suffix: str | None = None,
-    runtime_dir: Path | None = None,
-    cost_rule: bool = True,
-) -> ProjectResult:
+def _project(sources: list[Path], project_root: Path, cache_dir: Path, *, cost_rule: bool,
+             compile_c, compiler_version: str, platform: str, flags: list[str],
+             c_mode: bool) -> list[ModuleResult]:
+    """The cached source -> artefact walk shared by compile_project (artefact: the extension) and
+    generate_project (artefact: the `.c`)."""
     sources = [Path(s).resolve() for s in sources]
     cache_dir = Path(cache_dir)
     verified: dict[Path, list[SkippedItem]] = {}
@@ -193,27 +190,12 @@ def compile_project(
     def generate(module: ir.Module, path: Path) -> str:
         return cgen.generate(module, path, _relative(path, root)) if module.functions else ""
 
-    def compile_c(c_source: str, name: str, out_dir: Path) -> Path:
-        if not c_source:
-            marker = Path(out_dir) / (name.rpartition(".")[2] + _NO_EXTENSION)
-            marker.write_text("nothing compiled\n")
-            return marker
-        return cbuild.build(c_source, name, out_dir, runtime_dir=runtime_dir, flags=cbuild.DEFAULT_FLAGS,
-                            python_include=python_include, ext_suffix=ext_suffix)
-
-    version = COMPILER_VERSION
-    if runtime_dir is not None:
-        version += ":" + _tree_hash(Path(runtime_dir))
     if not cost_rule:
-        version += ":nocost"
-    suffix = ext_suffix if ext_suffix is not None else sysconfig.get_config_var("EXT_SUFFIX")
-    include = cbuild._python_include(python_include)
-    flags = [*cbuild.DEFAULT_FLAGS, f"-I{include}"]
-
+        compiler_version += ":nocost"
     cache = incremental.BuildCache(cache_dir)
     report = cache.build_project(
         sources, project_root, lower=lower, generate=generate, compile_c=compile_c,
-        compiler_version=version, platform=f"{sysconfig.get_platform()} {suffix}", flags=flags)
+        compiler_version=compiler_version, platform=platform, flags=flags)
 
     side = cache_dir / "skipped"
     side.mkdir(exist_ok=True)
@@ -230,9 +212,78 @@ def compile_project(
             items = [SkippedItem(**i) for i in data["items"]]
         except (OSError, ValueError, KeyError, TypeError):
             skipped, items = {}, []
-        ext = None if m.artifact is None or m.artifact.suffix == _NO_EXTENSION else m.artifact
+        art = None if m.artifact is None or m.artifact.suffix == _NO_EXTENSION else m.artifact
+        ext, c_file = (None, art) if c_mode else (art, None)
         kind = ("not_marked" if not frontend.is_opted_in(m.path)
-                else "compiled" if ext is not None else "nothing_compiled")
+                else "compiled" if art is not None else "nothing_compiled")
         out.append(ModuleResult(m.path, m.name, ext, m.status, list(m.reasons), skipped, m.interface,
-                                kind, items))
-    return ProjectResult(out)
+                                kind, items, c_file))
+    return out
+
+
+def _no_c_marker(name: str, out_dir: Path) -> Path:
+    marker = Path(out_dir) / (name.rpartition(".")[2] + _NO_EXTENSION)
+    marker.write_text("nothing compiled\n")
+    return marker
+
+
+def compile_project(
+    sources: list[Path],
+    project_root: Path,
+    cache_dir: Path,
+    *,
+    python_include: Path | None = None,
+    ext_suffix: str | None = None,
+    runtime_dir: Path | None = None,
+    cost_rule: bool = True,
+) -> ProjectResult:
+    def compile_c(c_source: str, name: str, out_dir: Path) -> Path:
+        if not c_source:
+            return _no_c_marker(name, out_dir)
+        return cbuild.build(c_source, name, out_dir, runtime_dir=runtime_dir, flags=cbuild.DEFAULT_FLAGS,
+                            python_include=python_include, ext_suffix=ext_suffix)
+
+    version = COMPILER_VERSION
+    if runtime_dir is not None:
+        version += ":" + _tree_hash(Path(runtime_dir))
+    suffix = ext_suffix if ext_suffix is not None else sysconfig.get_config_var("EXT_SUFFIX")
+    include = cbuild._python_include(python_include)
+    flags = [*cbuild.DEFAULT_FLAGS, f"-I{include}"]
+    return ProjectResult(_project(
+        sources, project_root, cache_dir, cost_rule=cost_rule, compile_c=compile_c,
+        compiler_version=version, platform=f"{sysconfig.get_platform()} {suffix}", flags=flags,
+        c_mode=False))
+
+
+# The platform component of a generated-C cache key. The C does not depend on the host, the target,
+# the C compiler or its flags (cgen reads none of them; the target's headers and the toolchain are
+# the compile slot's inputs and its own cache key, pypackpack docs/design/compile-slot.md §9), so
+# one constant stands for all of them and a `.c` built on one machine is reused on another.
+GENERATED_C_PLATFORM = "generated-c"
+
+
+def generate_project(
+    sources: list[Path],
+    project_root: Path,
+    cache_dir: Path,
+    *,
+    cost_rule: bool = True,
+) -> ProjectResult:
+    """Source -> C for every module, cached (#113): the input of pypackpack's native compile slot,
+    which builds the extensions and caches C -> extension itself. Each compiled module gets exactly
+    one `.c` (`ModuleResult.c_source`, named after the module's last dotted part); a module with
+    nothing compiled gets none and ships as Python. `runtime_include` is the directory holding the
+    header-only `tp_runtime.h`, for the slot's include dirs. The key is the source, the dependency
+    interfaces and COMPILER_VERSION (which covers the runtime header); no toolchain flag enters it.
+    An unchanged module is reused with a byte-identical `.c`."""
+    def write_c(c_source: str, name: str, out_dir: Path) -> Path:
+        if not c_source:
+            return _no_c_marker(name, out_dir)
+        c_file = Path(out_dir) / (name.rpartition(".")[2] + ".c")
+        c_file.write_text(c_source)
+        return c_file
+
+    return ProjectResult(_project(
+        sources, project_root, cache_dir, cost_rule=cost_rule, compile_c=write_c,
+        compiler_version=COMPILER_VERSION, platform=GENERATED_C_PLATFORM, flags=[], c_mode=True),
+        runtime_include=cbuild.RUNTIME_DIR)

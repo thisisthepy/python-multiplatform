@@ -784,7 +784,16 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   the compile step. `Status: partial`: the per-module cache and its key are implemented in Python
   (`incremental.py`, `pipeline.compile_project`; `test_incremental.py`, `test_pipeline_incremental.py`);
   the Gradle task with declared inputs and outputs does not exist yet, because compiled modules are built
-  through pypackpack's compile slot (#25, #113).
+  through pypackpack's compile slot (#25).
+  For that slot, `pipeline.generate_project` caches source to C instead of source to extension (#113):
+  one `.c` per compiled module plus the directory of the header-only `tp_runtime.h`; its key is the
+  source, the dependency interface hashes and the compiler version (which covers the runtime header),
+  with no platform, C compiler or flag in it, because the C depends on none of them. The slot caches
+  C to extension itself. Tests (`test_generate_project.py`): an unchanged module is reused with a
+  byte-identical `.c`, a fresh cache produces the same bytes, a body change regenerates that module
+  only, changing toolchain flags or platform reuses every entry, the C compiler is never run, and the
+  emitted `.c` built by `cbuild` behaves as `compile_project`'s extension. `compile_project` keeps
+  building in process.
 - **N-11** TypedPython fixed-layout classes (M2b, 2026-11-21; design §4.3.3). A class compiles to fixed
   field access only when its layout is fixed **in CPython too**: it declares `__slots__` listing exactly
   its annotated instance fields, has no base but `object`, no metaclass, no decorator but `@compiled`,
