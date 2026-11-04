@@ -196,15 +196,13 @@ jobs:
 
       # Records Compose and skiko's configuration against the fork version this run uses, then builds
       # the image and runs it with JAVA_HOME and PYTHONHOME removed: 20 of 20 and no libjvm.
-      # `setup-graalvm` installs Liberica NIK under `GRAALVM_HOME` in the runner toolcache, whereas
-      # macOS runner images also pre-install Temurin 25 in `/Library/Java/JavaVirtualMachines`.
-      # Disable toolchain auto-detection and pass `org.gradle.java.installations.paths="$GRAALVM_HOME"`
-      # so Gradle's JavaLanguageVersion(25) launcher selects Liberica NIK 25 instead of Temurin 25.
+      # `setup-graalvm` installs Liberica NIK under `GRAALVM_HOME` in the runner toolcache outside
+      # `/Users/runner/hostedtoolcache/Java_*`, so pass `org.gradle.java.installations.paths`
+      # explicitly so Gradle's BellSoft JDK 25 toolchain resolution finds it.
       - name: Build and run the native image
         run: >
           ./gradlew :python-multiplatform-compose:fixtures:notebook-e2e:notebookE2eNativeAgent
           :python-multiplatform-compose:fixtures:notebook-e2e:notebookE2eNativeRun
           -PpythonxComposeWheel="$WHEEL_DIR"
-          -Porg.gradle.java.installations.auto-detect=false
           -Porg.gradle.java.installations.paths="$GRAALVM_HOME"
           --console=plain

@@ -407,6 +407,7 @@ tasks.matching { it.name == "run" }.configureEach {
 
 val nativeImageJavaLauncher = javaToolchains.launcherFor {
     languageVersion.set(JavaLanguageVersion.of(25))
+    vendor.set(JvmVendorSpec.BELLSOFT)
 }
 
 val nativeImageOutputDir = layout.buildDirectory.dir("native/nativeCompile")

@@ -280,7 +280,10 @@ val e2eMainClass = "fixture.notebook.NotebookE2eMainKt"
 val e2eNativeConfig = layout.projectDirectory.dir("src/desktopTest/native-image")
 val e2eNativeDir = layout.buildDirectory.dir("native/notebook-e2e")
 val e2eAppDir = layout.projectDirectory.dir("src/desktopTest/python")
-val e2eJdk25 = javaToolchains.launcherFor { languageVersion.set(JavaLanguageVersion.of(25)) }
+val e2eJdk25 = javaToolchains.launcherFor {
+    languageVersion.set(JavaLanguageVersion.of(25))
+    vendor.set(JvmVendorSpec.BELLSOFT)
+}
 
 fun JavaExec.notebookE2eOnTheJvm() {
     dependsOn(e2eTestCompilation.compileTaskProvider, installPythonxComposeWheel)
