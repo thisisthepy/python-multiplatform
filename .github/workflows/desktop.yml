@@ -196,9 +196,13 @@ jobs:
 
       # Records Compose and skiko's configuration against the fork version this run uses, then builds
       # the image and runs it with JAVA_HOME and PYTHONHOME removed: 20 of 20 and no libjvm.
+      # `setup-graalvm` installs Liberica NIK under `GRAALVM_HOME` in the runner toolcache outside
+      # `/Users/runner/hostedtoolcache/Java_*`, so pass `org.gradle.java.installations.paths`
+      # explicitly instead of picking up the runner's pre-installed Temurin 25.
       - name: Build and run the native image
         run: >
           ./gradlew :python-multiplatform-compose:fixtures:notebook-e2e:notebookE2eNativeAgent
           :python-multiplatform-compose:fixtures:notebook-e2e:notebookE2eNativeRun
           -PpythonxComposeWheel="$WHEEL_DIR"
+          -Porg.gradle.java.installations.paths="$GRAALVM_HOME"
           --console=plain
