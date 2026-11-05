@@ -168,6 +168,52 @@ pypackpack 의 native compile slot 이 C 를 확장으로 빌드하므로 캐시
 않으므로 그것들은 키에 넣지 않는다. 바뀌지 않은 모듈은 바이트가 같은 `.c` 로 재사용되어 slot 의 C → 확장
 캐시도 맞는다. 테스트가 쓰는 `compile_project`(프로세스 안에서 빌드)는 그대로 둔다.
 
+### 4.3.2a `emit-c` manifest (SPEC N-10, #25 1단계)
+
+Gradle 쪽(#25 2단계, python-multiplatform-gradle-plugin)은 TypedPython 을 이 CLI 로 돌리고 manifest 를
+pypackpack `BundleRequest` 로 옮긴다. pypackpack 은 TypedPython 을 실행하지 않는다.
+
+    python -m typedpython emit-c PATHS... --root DIR --cache DIR --manifest FILE
+
+- `PATHS`: 파일 또는 디렉터리(재귀, `typedpython check` 와 같은 규칙). `--root`: 모듈 이름의 기준
+  디렉터리(ppp 패키지의 `python/` 루트에 해당). `--cache`: `generate_project` 의 소스 → C 캐시.
+  `--manifest`: 쓸 파일. 상위 디렉터리는 만든다.
+- 종료 코드: 0 manifest 를 씀, 1 게이트 오류(manifest 를 쓰지 않음, 원인은 stderr), 2 게이트를 실행할 수 없음.
+  C 컴파일러는 실행하지 않는다.
+
+형식(버전 1). 키 이름은 pypackpack `docs/design/compile-slot.md` 의 Kotlin 필드 이름과 같다.
+
+```json
+{
+  "format": "typedpython-emit-c",
+  "version": 1,
+  "compilerVersion": "<pipeline.COMPILER_VERSION>",
+  "projectRoot": "/abs/proj",
+  "runtimeInclude": "/abs/.../typedpython/runtime",
+  "nativeModules": [
+    {"moduleName": "app.physics.nbody", "file": "app/physics/nbody.py",
+     "sources": ["/abs/cache/.../nbody.c"], "includeDirs": ["/abs/.../typedpython/runtime"],
+     "defines": {}, "status": "rebuilt",
+     "skippedItems": [{"name": "main", "file": "app/physics/nbody.py", "line": 30, "message": "..."}]}
+  ],
+  "notNativeModules": [
+    {"module": "app.util", "file": "app/util.py", "kind": "NOT_MARKED", "items": []},
+    {"module": "app.text", "file": "app/text.py", "kind": "NOTHING_COMPILED",
+     "items": [{"name": "f", "file": "app/text.py", "line": 2, "message": "..."}]}
+  ]
+}
+```
+
+- `nativeModules[i]` → `ExtensionModuleSource(moduleName, sources, includeDirs, defines)`. `file`, `status`,
+  `skippedItems` 는 보고용이다(일부 함수가 인터프리트로 남는 것은 경고가 아니다, compile-slot.md §4).
+- `notNativeModules[i]` → `NotNativeModule(module, kind, items)`, `items[j]` → `SkippedItem(name, file, line, message)`.
+  `line` 은 없으면 `null`.
+- 모든 경로는 절대 경로(`/` 구분). `file` 만 `projectRoot` 기준 상대 경로다.
+- 패키지 `__init__.py` 는 어느 목록에도 넣지 않는다(compile-slot.md: TypedPython 은 `__init__` 을 넘기지 않는다).
+  그 밖의 모듈은 정확히 한 목록에 들어간다. 순서는 입력 파일 순서(디렉터리는 정렬)다.
+- `sources` 는 캐시 안의 `.c` 를 가리킨다. 바뀌지 않은 모듈은 같은 경로, 같은 바이트다.
+- 버전을 올리는 변경: 키 제거나 의미 변경. 키 추가는 버전을 올리지 않는다.
+
 ### 4.3.3 고정 레이아웃 클래스 (SPEC N-11, M2b)
 
 **레이아웃이 CPython 에서도 고정일 때만** 고정 접근으로 컴파일한다, 사용자가 `__slots__` 를 직접 쓴 클래스.

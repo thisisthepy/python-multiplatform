@@ -795,6 +795,15 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   only, changing toolchain flags or platform reuses every entry, the C compiler is never run, and the
   emitted `.c` built by `cbuild` behaves as `compile_project`'s extension. `compile_project` keeps
   building in process.
+  `python -m typedpython emit-c PATHS... --root DIR --cache DIR --manifest FILE` (#25, step 1) runs
+  `generate_project` and writes a JSON manifest that maps one to one onto pypackpack's
+  `BundleRequest.nativeModules` (`ExtensionModuleSource`: `moduleName`, `sources`, `includeDirs`,
+  `defines`) and `notNativeModules` (`NotNativeModule`: `module`, `kind` `NOT_MARKED` or
+  `NOTHING_COMPILED`, `items`). Every developer module given is in exactly one list except a package
+  `__init__`, which is in neither; a compiled module's `sources` is its one `.c` and its
+  `includeDirs` the runtime header directory; paths are absolute. Exit status 0 (manifest written), 1
+  (a gate error; no manifest), 2 (the gate could not run). The C compiler is never run. The format is
+  fixed in `docs/design/typedpython.md` §4.3.2a. Tests: `test_emit_c.py`.
 - **N-11** TypedPython fixed-layout classes (M2b, 2026-11-21; design §4.3.3). A class compiles to fixed
   field access only when its layout is fixed **in CPython too**: it declares `__slots__` listing exactly
   its annotated instance fields, has no base but `object`, no metaclass, no decorator but `@compiled`,
