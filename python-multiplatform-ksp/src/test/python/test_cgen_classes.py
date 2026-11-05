@@ -428,6 +428,20 @@ def test_gen_uses_only_the_runtime_helpers_for_slots():
     assert "PyMember_" not in text and "tp_alloc" not in text and "->tp_dictoffset" not in text
 
 
+def test_new_fixed_fills_its_fresh_object_with_direct_release_stores():
+    """#125: a New allocates its object and fills every slot before control can reach a safepoint, so
+    no other thread holds the object yet. tp_new_fixed stores each new reference straight into the
+    slot (release store, as PyMember_SetOne's free-threaded store) instead of taking the member
+    protocol's per-object critical section for every slot."""
+    from typedpython import cbuild
+    h = (cbuild.RUNTIME_DIR / "tp_runtime.h").read_text()
+    start = h.index("static inline PyObject *tp_new_fixed(")
+    body = h[start:h.index("\n}\n", start)]
+    assert "PyMember_SetOne" not in body and "CRITICAL_SECTION" not in body, body
+    assert "__atomic_store_n(" in body and "__ATOMIC_RELEASE" in body, body
+    assert "Py_NewRef(" in body, body                     # the slot owns its own reference
+
+
 # --- refcounts ---------------------------------------------------------------------------------------------
 
 def test_reference_counts_are_unchanged_over_many_calls(m):
