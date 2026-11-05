@@ -758,7 +758,11 @@ def generate(module: ir.Module, source_path: Path, display_path: str | None = No
         w("#define TP_FASTMATH_BEGIN _Pragma(\"clang fp reassociate(on) contract(fast)\")")
         w("#define TP_FASTMATH_END _Pragma(\"clang fp reassociate(off) contract(off)\")")
         w("#elif defined(__GNUC__)")
-        w("#define TP_FASTMATH_BEGIN _Pragma(\"GCC push_options\") _Pragma(\"GCC optimize(\\\"fast-math\\\")\")")
+        # The same scope as clang and MSVC (#368): reassociation and FMA contraction only.
+        # associative-math takes effect only with no-signed-zeros and no-trapping-math; never
+        # fast-math, whose finite-math-only folds `x != x` and isnan away.
+        w("#define TP_FASTMATH_BEGIN _Pragma(\"GCC push_options\") _Pragma(\"GCC optimize("
+          "\\\"associative-math,no-signed-zeros,no-trapping-math,fp-contract=fast\\\")\")")
         w("#define TP_FASTMATH_END _Pragma(\"GCC pop_options\")")
         w("#elif defined(_MSC_VER)")
         w("#define TP_FASTMATH_BEGIN __pragma(float_control(precise, off, push)) __pragma(fp_contract(on))")
