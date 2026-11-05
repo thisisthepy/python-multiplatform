@@ -749,6 +749,15 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   caller without fastmath): **this is the one path in TypedPython that is explicitly NOT
   CPython-identical** (a sum or fused multiply-add in a `@compiled(fastmath=True)` function may round
   differently from the interpreter so float reductions and FMA loops can vectorise).
+  No compiler goes beyond reassociation and FMA contraction (#368). Clang uses
+  `#pragma clang fp reassociate(on) contract(fast)`, GCC
+  `optimize("associative-math,no-signed-zeros,no-trapping-math,fp-contract=fast")` (the two extra
+  options are what associative-math needs to take effect), MSVC `fp_contract(on)` only: cl.exe has no
+  reassociation-only switch, and `float_control(precise, off)` (`/fp:fast`) also folds `x != x`
+  away, so on MSVC a fastmath function contracts but does not reassociate. None of them assumes finite
+  values, so a NaN check (`x != x`, `isnan`) in a fastmath function still works; GCC's `fast-math` is
+  not used (`test_pipeline.py`: the macro test, the NaN-check test on the host compiler of every CI OS
+  including MSVC on Windows, and the same under a real GCC on Linux CI).
   `Status: implemented` for desktop host builds
   (`test_pipeline.py`, `test_cgen*.py`, `test_recursion.py`, `test_eval_breaker.py`, `test_fast_entry.py`,
   `test_free_threaded.py`; free-threaded 3.15t, #159). Not yet: shipping compiled modules in an app through

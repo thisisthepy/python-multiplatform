@@ -238,3 +238,100 @@ def test_default_fp_flags_stay_exact_and_fastmath_is_per_function_only(write, tm
     got_fast = mod.fma_fast(a, a, c)
     assert isinstance(got_fast, float)
 
+
+
+_NAN_SRC = """
+@compiled(fastmath=True)
+def nan_count(xs: list[float]) -> int:
+    n = 0
+    for i in range(len(xs)):
+        x = xs[i]
+        if x != x:
+            n += 1
+    return n
+
+@compiled(fastmath=True)
+def is_nan(x: float) -> bool:
+    return x != x
+"""
+
+
+def _real_gcc():
+    """A GCC driver that is really GCC (macOS `gcc` is clang), or None."""
+    import shutil
+    import subprocess
+    for name in ("gcc", "gcc-15", "gcc-14", "gcc-13"):
+        exe = shutil.which(name)
+        if exe:
+            out = subprocess.run([exe, "--version"], capture_output=True, text=True).stdout
+            if "clang" not in out.lower():
+                return exe
+    return None
+
+
+def test_gcc_fastmath_scope_is_reassociation_and_contract_only(write):
+    """#368: GCC's fastmath macro allows the same scope as clang and MSVC, reassociation and FMA
+    contraction (plus the no-signed-zeros / no-trapping-math that associative-math needs); never
+    `fast-math`, whose finite-math-only folds `x != x` to false."""
+    from typedpython import cgen, frontend, verify
+
+    path = write("fm_scope.py", _NAN_SRC)
+    proved, _ = verify.verify(frontend.lower(path))
+    c_text = cgen.generate(proved, path)
+    gcc_line = next(l for l in c_text.splitlines() if "define TP_FASTMATH_BEGIN" in l and "GCC" in l)
+    assert "fast-math" not in gcc_line
+    for opt in ("associative-math", "no-signed-zeros", "no-trapping-math", "fp-contract=fast"):
+        assert opt in gcc_line, (opt, gcc_line)
+    assert "finite-math" not in gcc_line
+
+
+def test_fastmath_keeps_nan_checks(write, tmp_path):
+    """#368: `x != x` inside a fastmath function still detects NaN (host compiler)."""
+    path = write("fm_nan.py", _NAN_SRC)
+    res = pipeline.compile_module(path, tmp_path / "out", cost_rule=False)
+    assert {f.name for f in res.module.functions} == {"nan_count", "is_nan"}, res.skipped
+    mod = pipeline.load(res)
+    nan = float("nan")
+    assert mod.is_nan(nan) is True and mod.is_nan(1.0) is False
+    assert mod.nan_count([1.0, nan, 2.0, nan]) == 2
+
+
+def test_fastmath_keeps_nan_checks_under_gcc(write, tmp_path, monkeypatch):
+    """#368: the same under a real GCC (Linux CI); skipped where no GCC is installed."""
+    import sys
+    from typedpython import cbuild
+    gcc = _real_gcc()
+    if gcc is None or sys.platform == "win32":
+        pytest.skip("no real GCC on this host")
+    monkeypatch.setattr(cbuild, "compiler", lambda: [gcc])
+    path = write("fm_nan_gcc.py", _NAN_SRC)
+    # GCC only warns on an optimize option it does not know; make that an error so a dropped
+    # option cannot pass silently.
+    from typedpython import cgen, frontend, verify
+    proved, _ = verify.verify(frontend.lower(path))
+    c_file = tmp_path / "fm_nan_gcc.c"
+    c_file.write_text(cgen.generate(proved, path))
+    chk = subprocess.run([gcc, "-fsyntax-only", "-Werror=pragmas", "-Werror=attributes",
+                          f"-I{cbuild._python_include(None)}", f"-I{cbuild.RUNTIME_DIR}", str(c_file)],
+                         capture_output=True, text=True)
+    assert chk.returncode == 0, chk.stderr
+    res = pipeline.compile_module(path, tmp_path / "out", cost_rule=False)
+    assert {f.name for f in res.module.functions} == {"nan_count", "is_nan"}, res.skipped
+    mod = pipeline.load(res)
+    nan = float("nan")
+    assert mod.is_nan(nan) is True
+    assert mod.nan_count([1.0, nan, 2.0, nan]) == 2
+
+
+def test_msvc_fastmath_scope_is_contract_only(write):
+    """#368: cl.exe has no reassociation-only switch; `float_control(precise, off)` is /fp:fast and
+    folds `x != x` (seen on Windows CI). MSVC's fastmath macro enables FMA contraction only."""
+    from typedpython import cgen, frontend, verify
+
+    path = write("fm_msvc.py", _NAN_SRC)
+    proved, _ = verify.verify(frontend.lower(path))
+    lines = cgen.generate(proved, path).splitlines()
+    i = lines.index("#elif defined(_MSC_VER)", next(k for k, l in enumerate(lines) if "TP_FASTMATH_BEGIN" in l))
+    begin = next(l for l in lines[i:] if "define TP_FASTMATH_BEGIN" in l)
+    assert "fp_contract(on)" in begin, begin
+    assert "float_control" not in begin and "precise" not in begin, begin
