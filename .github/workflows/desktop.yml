@@ -51,6 +51,31 @@ jobs:
         # Using --console=plain so logs are readable in GitHub Actions
         run: ./gradlew :python-multiplatform:desktopTest --console=plain
 
+  desktop-native-linux:
+    name: Desktop Kotlin/Native Tests (Linux x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'zulu'
+          cache: 'gradle'
+
+      - name: Cache Konan
+        uses: actions/cache@v4
+        with:
+          path: ~/.konan
+          key: ${{ runner.os }}-konan-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-konan-
+
+      - name: Run Linux x86_64 Kotlin/Native Tests
+        run: ./gradlew :python-multiplatform:linuxX64Test --rerun --console=plain
+
   # The dev agent's protocol on the other desktop OSes (#238). Its socket options differ per platform
   # (SO_EXCLUSIVEADDRUSE on Windows, SO_REUSEADDR on POSIX), and the port-takeover and restart tests are
   # what check them. Stdlib only: no JDK, no Gradle.

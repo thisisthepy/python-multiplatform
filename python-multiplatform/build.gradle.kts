@@ -89,6 +89,7 @@ buildkonfig {
 }
 
 val libVersion = pythonVersion.split('.').subList(0, 2).joinToString(".")
+val abiSuffix = if (pythonFreeThreaded) "t" else ""
 
 /**
  * The `ftp/python/<dir>/` directory holding a release, which drops any pre-release suffix:
@@ -1245,7 +1246,8 @@ kotlin {
      */
     listOf(
         iosArm64(), iosSimulatorArm64(), iosX64(),
-        androidNativeArm64(), androidNativeX64()
+        androidNativeArm64(), androidNativeX64(),
+        macosArm64(), linuxX64()
     ).forEach { nativeTarget ->
         nativeTarget.apply {
             val targetABI = when(konanTarget) {
@@ -1254,16 +1256,20 @@ kotlin {
                 IOS_ARM64 -> "ios-arm64"
                 IOS_X64 -> "ios-arm64_x86_64-simulator"
                 IOS_SIMULATOR_ARM64 -> "ios-arm64_x86_64-simulator"
+                MACOS_ARM64 -> "macos-aarch64"
+                LINUX_X64 -> "linux-x86_64"
                 else -> throw RuntimeException("Unsupported ABI: $konanTarget")
             }
             val targetExtractDir = when(konanTarget.family) {
                 Family.ANDROID -> "$extractedDir/android-${if (targetABI == "arm64-v8a") "aarch64" else "x86_64"}/prefix"
                 Family.IOS -> "$extractedDir/ios/Python.xcframework"
+                Family.OSX, Family.LINUX -> "$extractedDir/$targetABI$desktopFlavourSuffix/python"
                 else -> throw RuntimeException("Unsupported target family: ${konanTarget.family}")
             }
             val targetIncludePath = when(konanTarget.family) {
                 Family.ANDROID -> "$targetExtractDir/include/python$libVersion"
                 Family.IOS -> "$targetExtractDir/$targetABI/Python.framework/Headers"
+                Family.OSX, Family.LINUX -> "$targetExtractDir/include/python$libVersion$abiSuffix"
                 else -> throw RuntimeException("Unsupported target family: ${konanTarget.family}")
             }
 
@@ -1331,6 +1337,28 @@ kotlin {
                         "-framework", "Python", "-F$targetExtractDir/$targetABI",
                         "-rpath", "$targetExtractDir/$targetABI"
                     ))
+                } else if (konanTarget.family == Family.OSX) {
+                    getTest(NativeBuildType.DEBUG).linkerOpts.addAll(listOf(
+                        "-L$targetExtractDir/lib",
+                        "-lpython$libVersion$abiSuffix",
+                        "-Wl,-rpath,$targetExtractDir/lib"
+                    ))
+                } else if (konanTarget.family == Family.LINUX) {
+                    // python-build-standalone ships libpythonX.Y.so as a symlink to libpythonX.Y.so.1.0,
+                    // which Gradle's tarTree extracts as a 0-byte file; stageDesktopLibraries resolves
+                    // it into a real libpythonX.Y.so under build/desktop-libs/lib/linux-x86_64.
+                    val stagedLinuxLibDir = layout.buildDirectory.dir("desktop-libs/lib/linux-x86_64").get().asFile.absolutePath
+                    getTest(NativeBuildType.DEBUG).apply {
+                        linkerOpts.addAll(listOf(
+                            "-L$stagedLinuxLibDir",
+                            "-L$targetExtractDir/lib",
+                            "-lpython$libVersion$abiSuffix",
+                            "-Wl,-rpath,$targetExtractDir/lib"
+                        ))
+                        linkTaskProvider.configure {
+                            dependsOn("stageDesktopLibraries")
+                        }
+                    }
                 }
             }
         }
@@ -1426,6 +1454,15 @@ kotlin {
         androidNativeX64Main.dependsOn(artMain)
         androidNativeArm64Main.dependsOn(artMain)
 
+        val desktopNativeMain by creating {
+            kotlin.srcDir("src/desktopNativeMain/kotlin")
+        }
+        val macosArm64Main by getting
+        val linuxX64Main by getting
+        desktopNativeMain.dependsOn(nativeMain)
+        macosArm64Main.dependsOn(desktopNativeMain)
+        linuxX64Main.dependsOn(desktopNativeMain)
+
         // `src/nativeTest` existed as a directory long before this line, and nothing pointed at
         // it -- so its `GCLeakTest.native.kt` was dead source, and the same file had been copied
         // byte-for-byte into all five target test source sets to compensate. This is the mirror of
@@ -1439,6 +1476,13 @@ kotlin {
             "androidNativeX64Test", "androidNativeArm64Test",
         ).forEach { getByName(it).dependsOn(nativeTest) }
 
+        val desktopNativeTest by creating {
+            kotlin.srcDir("src/desktopNativeTest/kotlin")
+        }
+        desktopNativeTest.dependsOn(nativeTest)
+        listOf("macosArm64Test", "linuxX64Test")
+            .forEach { getByName(it).dependsOn(desktopNativeTest) }
+
         // ...and `artTest` completes the mirror for the other half: things true of androidNative
         // but not of iOS. Without it such a test has nowhere to live except duplicated into both
         // androidNative target source sets, which is the arrangement the comment above describes
@@ -1450,6 +1494,18 @@ kotlin {
         listOf("androidNativeX64Test", "androidNativeArm64Test")
             .forEach { getByName(it).dependsOn(artTest) }
     }
+}
+
+tasks.named<org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeHostTest>("macosArm64Test") {
+    dependsOn("downloadPython_macos_aarch64")
+    val pythonHome = file("$extractedDir/macos-aarch64$desktopFlavourSuffix/python").absolutePath
+    environment("PYTHONHOME", pythonHome)
+}
+
+tasks.named<org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeHostTest>("linuxX64Test") {
+    dependsOn("downloadPython_linux_x86_64")
+    val pythonHome = file("$extractedDir/linux-x86_64$desktopFlavourSuffix/python").absolutePath
+    environment("PYTHONHOME", pythonHome)
 }
 
 /**

@@ -26,12 +26,13 @@ fail, then implement.
 | Platform | Kotlin target(s) | Downcall mechanism | Upcall entry | Test path |
 |---|---|---|---|---|
 | Desktop JVM (macOS; Linux/Windows wired, unverified) | `jvm("desktop")` | Panama FFM, `invokeExact` | FFM upcall stub | `desktopTest → jvmTest → commonTest` |
+| Desktop native (macOS Arm64, Linux x86_64) | `macosArm64`, `linuxX64` | cinterop | `@CName` symbol | `{macosArm64Test, linuxX64Test} → desktopNativeTest → nativeTest → commonTest` |
 | Android (ART) | `androidTarget` | JNI via `RegisterNatives` | JNI upcall | `androidInstrumentedTest → jvmTest → commonTest` (device) |
 | iOS | `iosArm64`, `iosSimulatorArm64`, `iosX64` | cinterop | `@CName` symbol | `iosSimulatorArm64Test → nativeTest → commonTest` |
 | Android native | `androidNativeArm64`, `androidNativeX64` | cinterop | `@CName` symbol | `androidNativeArm64Test → artTest → nativeTest → commonTest` (device, via adb) |
 | Web (experimental) | `wasmJs` (Node, browser) | JS / Emscripten CPython | `@WasmExport` | `wasmJsTest` (Node suite; browser subset) |
 
-- **P-1** The library compiles for every target above. `Status: implemented` for desktop, Android,
+- **P-1** The library compiles for every target above. `Status: implemented` for desktop, `macosArm64`, `linuxX64`, Android,
   iosSimulatorArm64, androidNativeArm64 and wasmJs (each has a test source set). `partial` for
   `iosArm64`, `iosX64`, `androidNativeX64` (compile-wired, no tests run there).
 - **P-2** Linux and Windows desktop: the build downloads and links the right CPython archive.
