@@ -498,7 +498,12 @@ def probe_during_call(call, probes, attempts=3):
                     except Exception as e:  # noqa: BLE001
                         seen[name][1].append(repr(e))
                     else:
-                        seen[name][1].append("succeeded")
+                        # The call can return between the `done` check above and this probe;
+                        # the buffer is then legitimately free. A probe that succeeds while the
+                        # buffer is really unheld does so ~0.05 s into a ~0.6 s call, so `done`
+                        # stays unset for far longer than this grace period.
+                        if not done.wait(0.05):
+                            seen[name][1].append("succeeded")
                         return
                 time.sleep(0.001)
 
