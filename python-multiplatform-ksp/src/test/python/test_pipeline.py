@@ -321,3 +321,17 @@ def test_fastmath_keeps_nan_checks_under_gcc(write, tmp_path, monkeypatch):
     nan = float("nan")
     assert mod.is_nan(nan) is True
     assert mod.nan_count([1.0, nan, 2.0, nan]) == 2
+
+
+def test_msvc_fastmath_scope_is_contract_only(write):
+    """#368: cl.exe has no reassociation-only switch; `float_control(precise, off)` is /fp:fast and
+    folds `x != x` (seen on Windows CI). MSVC's fastmath macro enables FMA contraction only."""
+    from typedpython import cgen, frontend, verify
+
+    path = write("fm_msvc.py", _NAN_SRC)
+    proved, _ = verify.verify(frontend.lower(path))
+    lines = cgen.generate(proved, path).splitlines()
+    i = lines.index("#elif defined(_MSC_VER)", next(k for k, l in enumerate(lines) if "TP_FASTMATH_BEGIN" in l))
+    begin = next(l for l in lines[i:] if "define TP_FASTMATH_BEGIN" in l)
+    assert "fp_contract(on)" in begin, begin
+    assert "float_control" not in begin and "precise" not in begin, begin
