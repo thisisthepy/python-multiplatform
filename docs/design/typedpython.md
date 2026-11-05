@@ -221,6 +221,34 @@ GC 추적), refcount 증감, 해제(`subtype_dealloc`)를 그대로 치르기 �
 더 가려면 객체를 아예 만들지 않거나(가상 객체), 증감을 빼거나(refcount 생략), 한꺼번에 할당·해제해야
 한다(영역 할당). 셋 다 `id()`, `__del__` 시점, `gc` 관측과 부딪칠 수 있다.
 
+**실제 객체(N-11)의 생성 비용 (#125, 2026-11-05).** 프로파일(`benchmarks/typedpython/results/2026-10-25-binary-trees-alloc-profile.md`)
+가운데 관측을 바꾸지 않고 줄일 수 있는 것은 다음과 같이 처리했다.
+- 호출마다 스레드 상태를 한 번만 읽는다(#273).
+- `tp_new_fixed` 는 새 객체의 슬롯을 `PyMember_SetOne` 대신 release store 로 직접 채운다. `SetOne` 이
+  `Py_T_OBJECT_EX` 슬롯에 하는 일(객체 critical section 안에서 `Py_XNewRef(v)` 의 release store, 그 뒤 옛 값
+  `Py_XDECREF`)에서 critical section 과 옛 값 해제만 뺀 것이다. 옛 값은 `tp_alloc` 이 0 으로 채웠으므로 NULL 이다.
+  critical section 을 빼도 되는 근거: `tp_alloc` 부터 마지막 슬롯 저장까지 스레드 상태를 놓는 호출도, eval
+  breaker 검사도 없어서 safepoint 가 없다. 그래서 stop-the-world 가 필요한 `gc.get_objects()` /
+  `gc.get_referrers()` 는 채우기가 끝나기 전에 이 객체를 다른 스레드에 줄 수 없다. 오히려 기존 critical
+  section 은 경합 시 스레드 상태를 놓을 수 있어서, 반쯤 채운 객체가 보이는 실행이 가능했다(그것도 인터프리터의
+  `__init__` 실행과 같은 상태라 유효했다). 슬롯의 종류·쓰기 가능·오프셋 범위는 `tp_class_capture` 가 init 에서
+  확인한다. 참조 수: 슬롯은 `Py_NewRef` 로 자기 참조를 갖는다(이것을 빼는 변이는 `test_cgen_classes.py` 에서
+  segfault 로 잡힌다). 측정(참고용, load 24~27): binary-trees `check(make(18))` 의 CPU 시간 중앙값이 develop
+  대비 1.08배 빠르다. 같은 부하에서 벽시계 시간은 한 회차 안에서도 2~22초로 흔들려 쓸 수 없었다.
+
+하지 않은 것과 이유:
+- **타입별 freelist.** 해제된 객체의 메모리를 붙잡으려면 클래스의 `tp_dealloc` 를 바꿔야 한다. 이것은
+  2026-10-25 결정(#125 댓글)에서 미뤘다: 클래스가 뒤에 `__del__`, `__weakref__`, 서브클래스를 얻으면 바뀐 dealloc 이
+  관측된다. free-threaded 빌드에서는 해제된 GC 객체의 메모리를 다른 스레드가 lock-free 로 읽을 수 있어서
+  (`_Py_TryIncref` 계열) CPython 은 mimalloc 의 지연 해제(QSBR)에 기댄다. 확장이 따로 붙잡는 freelist 는 이 보장
+  밖에 있으므로, 이 결정을 다시 열 때 그 근거도 함께 써야 한다.
+- **GC 추적을 늦추기/생략.** 아직 사이클을 만들 수 없는 노드(자식이 `None`)를 추적하지 않는 방식은
+  `gc.is_tracked`, `gc.get_objects()` 로 관측된다. 그리고 인터프리터가 나중에 슬롯에 자기 자신을 넣으면
+  (`PyMember_SetOne` 은 추적을 다시 켜지 않는다) 사이클이 수거되지 않는다. 컬렉션 횟수를 줄이는 방식(할당 계수
+  묶기, 임계값 조정)은 컬렉션 시점을 바꾼다. 둘 다 SPEC N-12 의 "GC 시점" 판단에 속하므로 오너 결정 사항이다.
+- binary-trees 의 `main` 은 정책(#150)으로 컴파일되지 않고 순수하지도 않아서(`print`, `sys.argv`), 실제 객체를
+  아예 없애는 N-12b 영역이 이 벤치마크에는 적용되지 않는다.
+
 **동일성의 정의.** 컴파일된 코드의 모든 실행은 **어떤 유효한 CPython 실행과 구별할 수 없어야 한다.**
 구별은 관측으로만 할 수 있으므로, 설계는 "관측 지점" 목록과 "관측 지점에 닿기 전에 실제 객체로 되돌린다"는
 규칙으로 이루어진다. CPython 자체가 정하지 않는 것(스레드 전환 시점)은 CPython 이 고를 수 있는 실행 중
