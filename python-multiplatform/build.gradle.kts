@@ -1067,7 +1067,11 @@ kotlin {
         }
         afterEvaluate {
             val abiList = listOf("arm64-v8a", "x86_64")
-            val copyAndroidPythonBinaries by tasks.creating(Copy::class) {
+            // A Sync, not a Copy: a Copy never removes what it stopped copying, so a jniLibs tree
+            // staged under an older pythonVersion (libpython3.14.so beside libpython3.15.so) kept
+            // shipping in the AAR. Nothing else writes this directory (the link task stages into
+            // `$androidBuildDir/<type>/jniLibs`), so the Sync owns all of it.
+            val copyAndroidPythonBinaries by tasks.creating(Sync::class) {
                 dependsOn(
                     tasks.named("linkAndroidNativeArm64"),
                     tasks.named("linkAndroidNativeX64"),
@@ -1301,7 +1305,14 @@ kotlin {
                             // outputFile. That is why a changed .def or source produced an APK with
                             // a stale library and an UnsatisfiedLinkError that looked like a code
                             // bug -- the fix had to be built twice for the second run to pick it up.
+                            // A library linked under an older pythonVersion
+                            // (libmultiplatform_python3.14.so) is removed first, or it keeps
+                            // shipping in the AAR beside the current one.
                             doLast {
+                                val current = outputFile.get().name
+                                dest.listFiles { f ->
+                                    f.name.startsWith("libmultiplatform_python") && f.name.endsWith(".so") && f.name != current
+                                }?.forEach { it.delete() }
                                 copy {
                                     from(outputFile)
                                     into(dest)
