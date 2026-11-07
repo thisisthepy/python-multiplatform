@@ -106,6 +106,19 @@ val typedPythonSkipReason: String? = when {
     else -> null
 }
 
+pythonBindings {
+    typedPythonSourceDir.set(file("src/desktopTest/typedpython"))
+    typedPythonExecutable.set(typedPythonHost?.absolutePath ?: "python3")
+    typedPythonPath.from(rootDir.resolve("python-multiplatform-ksp/src/main/python"))
+}
+
+val typedPythonEmitCManifest = layout.buildDirectory.file("typedpython/emit-c-manifest.json")
+
+tasks.matching { it.name == "emitTypedPythonC" }.configureEach {
+    val skip = typedPythonSkipReason
+    onlyIf("TypedPython emit-c: ${skip ?: "enabled"}") { skip == null }
+}
+
 @Suppress("UNCHECKED_CAST")
 val typedPythonIncludeDir: Provider<Directory>? = typedPythonMacTarget?.let { target ->
     val includes = project(":python-multiplatform").extensions.getByName("cpythonIncludeDirectories")
@@ -156,6 +169,7 @@ val buildTypedPythonBridge by tasks.registering(Exec::class) {
 
 tasks.named<Test>("desktopTest") {
     dependsOn(buildTypedPythonBridge)
+    dependsOn("emitTypedPythonC")
     // The tests import tp_kotlin_bridge.py from src/; without this the interpreter leaves a
     // __pycache__ in the source tree.
     environment("PYTHONDONTWRITEBYTECODE", "1")
@@ -165,9 +179,14 @@ tasks.named<Test>("desktopTest") {
     }
     if (typedPythonSkipReason == null) {
         inputs.dir(typedPythonBridgeDir).withPropertyName("typedPythonBridge")
+        inputs.file(typedPythonEmitCManifest).withPropertyName("typedPythonEmitCManifest")
         systemProperty(
             "typedpython.bridge.properties",
             typedPythonBridgeDir.get().file("bridge.properties").asFile.absolutePath,
+        )
+        systemProperty(
+            "typedpython.emitC.manifest",
+            typedPythonEmitCManifest.get().asFile.absolutePath,
         )
     } else {
         systemProperty("typedpython.bridge.skip", typedPythonSkipReason)

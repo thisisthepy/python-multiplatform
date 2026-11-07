@@ -26,6 +26,9 @@ const val TYPEDPYTHON_EMIT_C_FORMAT = "typedpython-emit-c"
 /** `docs/design/typedpython.md` section 4.3.2a (`emit-c` manifest version). */
 const val TYPEDPYTHON_EMIT_C_VERSION = 1
 
+/** Task name registered by [PythonBindingsPlugin] when [PythonBindingsExtension.typedPythonSourceDir] is set. */
+const val EMIT_TYPEDPYTHON_C_TASK = "emitTypedPythonC"
+
 /**
  * One extension module's generated C and header/define metadata for pypackpack's compile slot
  * (`pypackpack` `ExtensionCompiler.kt`, `BundleRequest.nativeModules`).
