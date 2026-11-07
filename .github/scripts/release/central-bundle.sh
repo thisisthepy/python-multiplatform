@@ -48,6 +48,14 @@ while IFS= read -r pom; do
         [[ -e "$dir/$base-sources.jar" ]] || { echo "error: $art has no sources jar" >&2; fail=1; }
     fi
 done < <(find "$staging" -name '*.pom')
+# An AAR must carry the native libraries of this pythonVersion only. A Copy-staged jniLibs tree once
+# kept libpython3.14.so beside libpython3.15.so after a version bump. libpython3.so (the stable-ABI
+# stub) carries no minor version and is allowed.
+py_mm="$(sed -nE 's/^pythonVersion=([0-9]+\.[0-9]+).*$/\1/p' gradle.properties)"
+while IFS= read -r aar; do
+    stale="$(unzip -Z1 "$aar" | grep -E '(^|/)lib(multiplatform_)?python[0-9]+\.[0-9]+[^/]*\.so$' | grep -vE "(^|/)lib(multiplatform_)?python${py_mm//./\\.}(t)?\.so$" || true)"
+    [[ -z "$stale" ]] || { echo "error: $aar carries native libraries for another python than $py_mm:" >&2; echo "$stale" >&2; fail=1; }
+done < <(find "$staging" -name '*.aar')
 if $signed; then
     while IFS= read -r f; do
         case "$f" in *.asc|*.md5|*.sha1|*.sha256|*.sha512) continue ;; esac

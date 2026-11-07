@@ -1,5 +1,5 @@
-// Maven Central publishing, applied by the three published components (the library, the KSP
-// processor and the Gradle plugin, which is an included build):
+// Maven Central publishing, applied by the published components (the library, the KSP processor,
+// the Compose host and the Gradle plugin, which is an included build):
 //
 //     apply(from = rootProject.file("gradle/central-publishing.gradle.kts"))   // root build
 //     apply(from = rootDir.resolve("../gradle/central-publishing.gradle.kts")) // plugin build

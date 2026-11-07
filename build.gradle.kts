@@ -34,27 +34,30 @@ gradle.projectsEvaluated {
 // (see `pluginManagement { includeBuild(...) }` in settings.gradle.kts), so its tasks never join
 // the root task graph -- `./gradlew tasks --all` from here lists none of them, and a coordinator
 // publishing only what the root build shows would silently skip it. This task does not change how
-// any of the three components publish (each already has its own `maven-publish` config); it only
-// gives the root build one entry point that reaches all three.
+// any component publishes (each already has its own `maven-publish` config); it only gives the root
+// build one entry point that reaches all of them (the Compose host included).
 tasks.register("publishAllToMavenLocal") {
     group = "publishing"
-    description = "Publishes python-multiplatform, python-multiplatform-ksp, and " +
+    description = "Publishes python-multiplatform, python-multiplatform-ksp, python-multiplatform-compose and " +
         "python-multiplatform-gradle-plugin (including its plugin-marker publication) to mavenLocal()."
     dependsOn(":python-multiplatform:publishToMavenLocal")
     dependsOn(":python-multiplatform-ksp:publishToMavenLocal")
+    dependsOn(":python-multiplatform-compose:publishToMavenLocal")
     dependsOn(gradle.includedBuild("python-multiplatform-gradle-plugin").task(":publishToMavenLocal"))
 }
 
-// Maven Central (ROADMAP 15.1): one entry point that fills build/central-staging with all three
-// components. Signed when MAVEN_GPG_PRIVATE_KEY is set (gradle/central-publishing.gradle.kts).
+// Maven Central (ROADMAP 15.1): one entry point that fills build/central-staging with every
+// component (library, KSP processor, Compose host, Gradle plugin). Signed when MAVEN_GPG_PRIVATE_KEY
+// is set (gradle/central-publishing.gradle.kts).
 // It does not clean the directory (the plugin build is another build, so ordering cannot reach
 // it): .github/scripts/release/central-bundle.sh empties it first.
 tasks.register("publishAllToCentralStaging") {
     group = "publishing"
-    description = "Publishes python-multiplatform, python-multiplatform-ksp and " +
+    description = "Publishes python-multiplatform, python-multiplatform-ksp, python-multiplatform-compose and " +
         "python-multiplatform-gradle-plugin (with its plugin marker) to build/central-staging."
     dependsOn(":python-multiplatform:publishAllToCentralStaging")
     dependsOn(":python-multiplatform-ksp:publishAllToCentralStaging")
+    dependsOn(":python-multiplatform-compose:publishAllToCentralStaging")
     dependsOn(gradle.includedBuild("python-multiplatform-gradle-plugin").task(":publishAllToCentralStaging"))
 }
 
