@@ -15,10 +15,14 @@ plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.jetpack.compose)
     alias(libs.plugins.compose.compiler)
+    id("maven-publish")
 }
 
 kotlin {
     androidTarget {
+        // Without a named variant KMP creates no Android publication (ROADMAP 15d, same as the library).
+        publishLibraryVariants("release")
+
         @OptIn(ExperimentalKotlinGradlePluginApi::class)
         compilerOptions {
             jvmTarget.set(JvmTarget.JVM_17)
@@ -52,3 +56,8 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 }
+
+// Published to Maven Central beside the library as org.thisisthepy:python-multiplatform-compose, at the
+// root's one version (#70): POM fields, sources/javadoc jars, centralStaging repository and in-memory
+// signing come from the shared script (ROADMAP 15.1).
+apply(from = rootProject.file("gradle/central-publishing.gradle.kts"))

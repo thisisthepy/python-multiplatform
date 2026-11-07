@@ -27,15 +27,16 @@ from pathlib import Path
 
 import pytest
 
+from conftest import COMPILED_SHIM
 from typedpython import cbuild, cgen, frontend, pipeline, verify
 
 STRESS = max(1, int(os.environ.get("TP_FT_STRESS", "1")))
 FREE_THREADED = bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
 
 SOURCE = '''\
-# typedpython: compiled
 
 
+@compiled
 class Cell:
     __slots__ = ("a", "b")
     a: object
@@ -46,6 +47,7 @@ class Cell:
         self.b = b
 
 
+@compiled
 class Twin:
     __slots__ = ("a", "b")
     a: object
@@ -56,18 +58,22 @@ class Twin:
         self.b = b
 
 
+@compiled
 def geta(c: Cell) -> object:
     return c.a
 
 
+@compiled
 def seta(c: Cell, v: object) -> None:
     c.a = v
 
 
+@compiled
 def mk(a: object, b: object) -> Cell:
     return Cell(a, b)
 
 
+@compiled
 def fresh(a: object, n: int) -> object:
     c = Cell(a, None)
     keep: object = c                    # read as a value: c is a real object, not virtual (N-12a)
@@ -77,11 +83,13 @@ def fresh(a: object, n: int) -> object:
     return s
 
 
+@compiled
 def vpick(a: object, b: object) -> object:
     c = Cell(a, b)
     return c.b
 
 
+@compiled
 def total(xs: list[float], rounds: int) -> float:
     s: float = 0.0
     for r in range(rounds):
@@ -90,24 +98,29 @@ def total(xs: list[float], rounds: int) -> float:
     return s
 
 
+@compiled
 def fill(xs: list[float], v: float) -> None:
     for i in range(len(xs)):
         xs[i] = v
 
 
+@compiled
 def edge(xs: list[float]) -> float:
     return xs[0] - xs[len(xs) - 1]
 
 
+@compiled
 def fill_int(xs: list[int], v: int) -> None:
     for i in range(len(xs)):
         xs[i] = v
 
 
+@compiled
 def edge_int(xs: list[int]) -> int:
     return xs[0] - xs[len(xs) - 1]
 
 
+@compiled
 def rotate(xs: list[float]) -> None:
     if len(xs) > 1:
         first: float = xs[0]
@@ -116,6 +129,7 @@ def rotate(xs: list[float]) -> None:
         xs[len(xs) - 1] = first
 
 
+@compiled
 def zero2(xs: list[int], ys: list[int]) -> int:
     for i in range(len(xs)):
         xs[i] = 0
@@ -124,10 +138,12 @@ def zero2(xs: list[int], ys: list[int]) -> int:
     return 0
 
 
+@compiled
 def pair_edge(xs: list[int], ys: list[int]) -> int:
     return xs[0] - ys[len(ys) - 1]
 
 
+@compiled
 def three(a: list[int], b: list[int], c: list[int]) -> int:
     return len(a) + len(b) + len(c)
 
@@ -135,11 +151,12 @@ def three(a: list[int], b: list[int], c: list[int]) -> int:
 K: int = 3
 
 
+@compiled
 def usek(x: int) -> int:
     return x + K
 '''
 
-LOADER = """\
+LOADER = COMPILED_SHIM + """\
 import faulthandler, importlib.machinery, importlib.util, json, sys, threading, time
 faulthandler.enable()
 path = sys.argv[1]
@@ -244,7 +261,7 @@ def test_three_list_parameters_stay_interpreted(built):
 
 def test_front_end_gives_a_clear_reason(tmp_path):
     p = tmp_path / "m.py"
-    p.write_text("# typedpython: compiled\n\n\ndef f(a: list[int], b: list[float], c: list[int]) -> int:\n"
+    p.write_text("\n\n@compiled\ndef f(a: list[int], b: list[float], c: list[int]) -> int:\n"
                  "    return len(a)\n")
     m = frontend.lower(p)
     assert not m.functions
@@ -823,12 +840,14 @@ def _access_is_ours(block: str) -> bool:
     A report where one access is mimalloc initialising a fresh block (`_mi_malloc*` memset) is not
     ours either: the extension's earlier read hit memory a thread later freed (an exited thread's
     `PyThreadState`, read by `tp_traced`), and the free and the reuse both happen inside the
-    uninstrumented allocator, so TSan cannot see that they are ordered (seen on Linux CI)."""
+    uninstrumented allocator, so TSan cannot see that they are ordered (seen on Linux CI). The same
+    holds when the reused block is filled by libpython's `new_threadstate` (a memcpy of the template
+    thread state into the block an exited thread's state was freed from, seen on Linux CI)."""
     firsts = []
     for part in block.split("\n\n")[:2]:
         frames = [ln for ln in part.splitlines() if ln.strip().startswith("#")]
         firsts.append(next((f for f in frames if "libtsan" not in f and "sanitizer_common" not in f), ""))
-    if any(" _mi_malloc" in f or " _mi_page_malloc" in f for f in firsts):
+    if any(" _mi_malloc" in f or " _mi_page_malloc" in f or " new_threadstate " in f for f in firsts):
         return False
     return any("ftmod" in f for f in firsts)
 

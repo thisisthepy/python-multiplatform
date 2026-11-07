@@ -89,6 +89,7 @@ buildkonfig {
 }
 
 val libVersion = pythonVersion.split('.').subList(0, 2).joinToString(".")
+val abiSuffix = if (pythonFreeThreaded) "t" else ""
 
 /**
  * The `ftp/python/<dir>/` directory holding a release, which drops any pre-release suffix:
@@ -1066,7 +1067,11 @@ kotlin {
         }
         afterEvaluate {
             val abiList = listOf("arm64-v8a", "x86_64")
-            val copyAndroidPythonBinaries by tasks.creating(Copy::class) {
+            // A Sync, not a Copy: a Copy never removes what it stopped copying, so a jniLibs tree
+            // staged under an older pythonVersion (libpython3.14.so beside libpython3.15.so) kept
+            // shipping in the AAR. Nothing else writes this directory (the link task stages into
+            // `$androidBuildDir/<type>/jniLibs`), so the Sync owns all of it.
+            val copyAndroidPythonBinaries by tasks.creating(Sync::class) {
                 dependsOn(
                     tasks.named("linkAndroidNativeArm64"),
                     tasks.named("linkAndroidNativeX64"),
@@ -1245,7 +1250,8 @@ kotlin {
      */
     listOf(
         iosArm64(), iosSimulatorArm64(), iosX64(),
-        androidNativeArm64(), androidNativeX64()
+        androidNativeArm64(), androidNativeX64(),
+        macosArm64(), linuxX64()
     ).forEach { nativeTarget ->
         nativeTarget.apply {
             val targetABI = when(konanTarget) {
@@ -1254,16 +1260,20 @@ kotlin {
                 IOS_ARM64 -> "ios-arm64"
                 IOS_X64 -> "ios-arm64_x86_64-simulator"
                 IOS_SIMULATOR_ARM64 -> "ios-arm64_x86_64-simulator"
+                MACOS_ARM64 -> "macos-aarch64"
+                LINUX_X64 -> "linux-x86_64"
                 else -> throw RuntimeException("Unsupported ABI: $konanTarget")
             }
             val targetExtractDir = when(konanTarget.family) {
                 Family.ANDROID -> "$extractedDir/android-${if (targetABI == "arm64-v8a") "aarch64" else "x86_64"}/prefix"
                 Family.IOS -> "$extractedDir/ios/Python.xcframework"
+                Family.OSX, Family.LINUX -> "$extractedDir/$targetABI$desktopFlavourSuffix/python"
                 else -> throw RuntimeException("Unsupported target family: ${konanTarget.family}")
             }
             val targetIncludePath = when(konanTarget.family) {
                 Family.ANDROID -> "$targetExtractDir/include/python$libVersion"
                 Family.IOS -> "$targetExtractDir/$targetABI/Python.framework/Headers"
+                Family.OSX, Family.LINUX -> "$targetExtractDir/include/python$libVersion$abiSuffix"
                 else -> throw RuntimeException("Unsupported target family: ${konanTarget.family}")
             }
 
@@ -1295,7 +1305,14 @@ kotlin {
                             // outputFile. That is why a changed .def or source produced an APK with
                             // a stale library and an UnsatisfiedLinkError that looked like a code
                             // bug -- the fix had to be built twice for the second run to pick it up.
+                            // A library linked under an older pythonVersion
+                            // (libmultiplatform_python3.14.so) is removed first, or it keeps
+                            // shipping in the AAR beside the current one.
                             doLast {
+                                val current = outputFile.get().name
+                                dest.listFiles { f ->
+                                    f.name.startsWith("libmultiplatform_python") && f.name.endsWith(".so") && f.name != current
+                                }?.forEach { it.delete() }
                                 copy {
                                     from(outputFile)
                                     into(dest)
@@ -1331,6 +1348,28 @@ kotlin {
                         "-framework", "Python", "-F$targetExtractDir/$targetABI",
                         "-rpath", "$targetExtractDir/$targetABI"
                     ))
+                } else if (konanTarget.family == Family.OSX) {
+                    getTest(NativeBuildType.DEBUG).linkerOpts.addAll(listOf(
+                        "-L$targetExtractDir/lib",
+                        "-lpython$libVersion$abiSuffix",
+                        "-Wl,-rpath,$targetExtractDir/lib"
+                    ))
+                } else if (konanTarget.family == Family.LINUX) {
+                    // python-build-standalone ships libpythonX.Y.so as a symlink to libpythonX.Y.so.1.0,
+                    // which Gradle's tarTree extracts as a 0-byte file; stageDesktopLibraries resolves
+                    // it into a real libpythonX.Y.so under build/desktop-libs/lib/linux-x86_64.
+                    val stagedLinuxLibDir = layout.buildDirectory.dir("desktop-libs/lib/linux-x86_64").get().asFile.absolutePath
+                    getTest(NativeBuildType.DEBUG).apply {
+                        linkerOpts.addAll(listOf(
+                            "-L$stagedLinuxLibDir",
+                            "-L$targetExtractDir/lib",
+                            "-lpython$libVersion$abiSuffix",
+                            "-Wl,-rpath,$targetExtractDir/lib"
+                        ))
+                        linkTaskProvider.configure {
+                            dependsOn("stageDesktopLibraries")
+                        }
+                    }
                 }
             }
         }
@@ -1426,6 +1465,15 @@ kotlin {
         androidNativeX64Main.dependsOn(artMain)
         androidNativeArm64Main.dependsOn(artMain)
 
+        val desktopNativeMain by creating {
+            kotlin.srcDir("src/desktopNativeMain/kotlin")
+        }
+        val macosArm64Main by getting
+        val linuxX64Main by getting
+        desktopNativeMain.dependsOn(nativeMain)
+        macosArm64Main.dependsOn(desktopNativeMain)
+        linuxX64Main.dependsOn(desktopNativeMain)
+
         // `src/nativeTest` existed as a directory long before this line, and nothing pointed at
         // it -- so its `GCLeakTest.native.kt` was dead source, and the same file had been copied
         // byte-for-byte into all five target test source sets to compensate. This is the mirror of
@@ -1439,6 +1487,13 @@ kotlin {
             "androidNativeX64Test", "androidNativeArm64Test",
         ).forEach { getByName(it).dependsOn(nativeTest) }
 
+        val desktopNativeTest by creating {
+            kotlin.srcDir("src/desktopNativeTest/kotlin")
+        }
+        desktopNativeTest.dependsOn(nativeTest)
+        listOf("macosArm64Test", "linuxX64Test")
+            .forEach { getByName(it).dependsOn(desktopNativeTest) }
+
         // ...and `artTest` completes the mirror for the other half: things true of androidNative
         // but not of iOS. Without it such a test has nowhere to live except duplicated into both
         // androidNative target source sets, which is the arrangement the comment above describes
@@ -1450,6 +1505,18 @@ kotlin {
         listOf("androidNativeX64Test", "androidNativeArm64Test")
             .forEach { getByName(it).dependsOn(artTest) }
     }
+}
+
+tasks.named<org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeHostTest>("macosArm64Test") {
+    dependsOn("downloadPython_macos_aarch64")
+    val pythonHome = file("$extractedDir/macos-aarch64$desktopFlavourSuffix/python").absolutePath
+    environment("PYTHONHOME", pythonHome)
+}
+
+tasks.named<org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeHostTest>("linuxX64Test") {
+    dependsOn("downloadPython_linux_x86_64")
+    val pythonHome = file("$extractedDir/linux-x86_64$desktopFlavourSuffix/python").absolutePath
+    environment("PYTHONHOME", pythonHome)
 }
 
 /**
@@ -2733,47 +2800,11 @@ publishing {
             artifact(wasmBrowserRuntimeZip)
         }
     }
-    publications.withType<MavenPublication>().configureEach {
-        //artifact(javadocJar)
-        groupId = groupId
-        artifactId = artifactId
-        version = version
-
-        pom {
-            name.set("python-multiplatform")
-            description.set("A multiplatform solution to use Python with Kotlin interoperably.")
-            url.set("https://github.com/thisisthepy/python-multiplatform-mobile")
-            licenses {
-                license {
-                    name.set("The Apache License, Version 2.0")
-                    url.set("https://www.apache.org/licenses/LICENSE-2.0.txt")
-                }
-            }
-            developers {
-                developer {
-                    id.set("thisisthepy")
-                    name.set("thisisthepy")
-                    email.set("thisisthepy@gmail.com")
-                }
-            }
-            scm {
-                connection.set("scm:git:github.com/thisisthepy/python-multiplatform-mobile.git")
-                developerConnection.set("scm:git:ssh://github.com/thisisthepy/python-multiplatform-mobile.git")
-                url.set("https://github.com/thisisthepy/python-multiplatform-mobile")
-            }
-        }
-    }
 }
 
-//signing {
-//    useInMemoryPgpKeys(
-//        rootProject.extra["signing_key_id"] as String,
-//        rootProject.extra["signing_secret_key"] as String,
-//        rootProject.extra["signing_password"] as String
-//    )
-//    sign(publishing.publications)
-//}
-
+// POM metadata, the sources and javadoc jars, the centralStaging repository and the in-memory GPG
+// signing (only when MAVEN_GPG_PRIVATE_KEY is set) for Maven Central: ROADMAP 15.1.
+apply(from = rootProject.file("gradle/central-publishing.gradle.kts"))
 
 fun downloadPythonBuilds() {
     // Moved to task `downloadAllPythonBuilds`

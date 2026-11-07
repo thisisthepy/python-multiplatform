@@ -1,0 +1,144 @@
+name: Maven Central
+
+# Publishes python-multiplatform (library for every target, KSP processor, Gradle plugin and its
+# plugin marker) to Maven Central through the Sonatype Central Portal, as ONE deployment.
+#
+# - A version tag (v<pythonVersion>-<libraryVersionSuffix>, the tag desktop-release.yml also reads)
+#   builds, signs with the release key and uploads.
+# - A manual run is a dry run unless "dry_run" is turned off: it builds and signs with a key made in
+#   the job and thrown away, checks the bundle and keeps it as a workflow artifact. Nothing is
+#   uploaded. With dry_run off, pick the tag to publish in "tag".
+#
+# macOS is required: the Apple targets (iosArm64, iosSimulatorArm64, iosX64, macosArm64) only build
+# there. Secrets read by a real upload, nothing else reads them:
+#   MAVEN_GPG_PRIVATE_KEY   signing key, ASCII armoured (gpg --armor --export-secret-keys)
+#   MAVEN_GPG_PASSPHRASE    its passphrase
+#   CENTRAL_TOKEN_USERNAME  Central Portal user token, username half
+#   CENTRAL_TOKEN_PASSWORD  Central Portal user token, password half
+# The upload runs in the environment "maven-central", where required reviewers can be set.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  # A pull request that touches the publishing setup runs the dry run, so the bundle is checked
+  # before the first tag depends on it.
+  pull_request:
+    paths:
+      - '.github/workflows/maven-central.yml'
+      - '.github/scripts/release/central-*.sh'
+      - 'gradle/central-publishing.gradle.kts'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build and sign with a throwaway key, upload nothing'
+        type: boolean
+        default: true
+      tag:
+        description: 'Tag to publish when dry_run is off (e.g. v3.15.0-alpha02); ignored for a dry run'
+        required: false
+        default: ''
+      publishing_type:
+        description: 'USER_MANAGED waits in the Central Portal for someone to press Publish; AUTOMATIC publishes once validated'
+        type: choice
+        options: [USER_MANAGED, AUTOMATIC]
+        default: USER_MANAGED
+
+permissions:
+  contents: read
+
+concurrency:
+  group: maven-central-${{ github.event.inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bundle:
+    name: Build and sign the bundle (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 180
+    env:
+      DRY_RUN: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ (github.event_name == 'push' || inputs.dry_run == false) && (github.event.inputs.tag || github.ref) || github.ref }}
+          # The tag's own gradle.properties decides the version, not the branch it was cut from.
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'zulu'
+
+      - name: Setup uv
+        # The KSP processor's typedpython-gate bundle is built with uv build.
+        uses: astral-sh/setup-uv@v6
+
+      - name: The tag names this build's version
+        if: env.DRY_RUN != 'true'
+        run: |
+          set -euo pipefail
+          version="$(sed -nE 's/^pythonVersion=(.*)$/\1/p' gradle.properties)-$(sed -nE 's/^libraryVersionSuffix=(.*)$/\1/p' gradle.properties)"
+          test "$TAG" = "v$version" || { echo "error: tag $TAG does not match version $version" >&2; exit 1; }
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Build and sign the bundle (dry run, throwaway key)
+        if: env.DRY_RUN == 'true'
+        run: .github/scripts/release/central-bundle.sh "$RUNNER_TEMP/central-bundle.zip" --throwaway-key
+
+      - name: Build and sign the bundle (release key)
+        if: env.DRY_RUN != 'true'
+        env:
+          MAVEN_GPG_PRIVATE_KEY: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          [[ -n "$MAVEN_GPG_PRIVATE_KEY" ]] || { echo "::error::the MAVEN_GPG_PRIVATE_KEY secret is not set"; exit 1; }
+          .github/scripts/release/central-bundle.sh "$RUNNER_TEMP/central-bundle.zip"
+
+      - name: Keep the bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: central-bundle
+          path: ${{ runner.temp }}/central-bundle.zip
+          retention-days: 14
+
+
+  upload:
+    name: Upload to the Central Portal
+    needs: bundle
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    # Required reviewers can be set on this environment, so even a pushed tag waits for a person
+    # before anything reaches Central. A dry run never gets here.
+    environment: maven-central
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          sparse-checkout: |
+            .github/scripts/release
+            gradle.properties
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: central-bundle
+          path: ${{ runner.temp }}
+
+      - name: Upload
+        env:
+          CENTRAL_TOKEN_USERNAME: ${{ secrets.CENTRAL_TOKEN_USERNAME }}
+          CENTRAL_TOKEN_PASSWORD: ${{ secrets.CENTRAL_TOKEN_PASSWORD }}
+          TYPE: ${{ inputs.publishing_type || 'USER_MANAGED' }}
+        run: |
+          set -euo pipefail
+          version="$(sed -nE 's/^pythonVersion=(.*)$/\1/p' gradle.properties)-$(sed -nE 's/^libraryVersionSuffix=(.*)$/\1/p' gradle.properties)"
+          .github/scripts/release/central-upload.sh "$RUNNER_TEMP/central-bundle.zip" \
+            "python-multiplatform $version" "$TYPE"

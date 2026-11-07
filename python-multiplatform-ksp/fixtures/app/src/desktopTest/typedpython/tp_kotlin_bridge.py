@@ -1,4 +1,3 @@
-# typedpython: compiled
 """Issue #45: compiled TypedPython code calling Kotlin through the binder.
 
 Every name imported below is a binder proxy (`fixture/app/TypedPythonBridge.kt`, published by
@@ -21,6 +20,7 @@ for a KSP-scanned module). Nothing at run time reads that stub: the binder's mod
 from fixture.app import TpSample, tpAccumulate, tpCheck, tpTouch
 
 
+@compiled
 def drive(n: int, scale: float, token: object) -> float:
     """Per step: a Kotlin constructor call that returns a typed proxy, a method call on that proxy,
     the proxy handed back to a Kotlin function, and a PyObject handed to Kotlin -- inside native
@@ -35,6 +35,7 @@ def drive(n: int, scale: float, token: object) -> float:
     return total
 
 
+@compiled
 def checked(n: int, limit: float) -> float:
     """`tpCheck` throws in Kotlin once `acc` passes `limit`; the caller sees what Python sees."""
     acc: float = 0.0

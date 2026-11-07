@@ -20,33 +20,39 @@ from typedpython import frontend, ir
 from test_native_int_impure import build_source
 
 SOURCE = textwrap.dedent('''
-    # typedpython: compiled
 
 
+    @compiled
     def p_and(a: int, b: int) -> int:
         return a & b
 
 
+    @compiled
     def p_or(a: int, b: int) -> int:
         return a | b
 
 
+    @compiled
     def p_xor(a: int, b: int) -> int:
         return a ^ b
 
 
+    @compiled
     def p_inv(a: int) -> int:
         return ~a
 
 
+    @compiled
     def p_shl(a: int, b: int) -> int:
         return a << b
 
 
+    @compiled
     def p_shr(a: int, b: int) -> int:
         return a >> b
 
 
+    @compiled
     def p_aug(a: int, b: int) -> int:
         x: int = a
         x ^= b
@@ -55,22 +61,26 @@ SOURCE = textwrap.dedent('''
         return x
 
 
+    @compiled
     def p_augshl(a: int, b: int) -> int:
         x: int = a
         x <<= b
         return x
 
 
+    @compiled
     def p_augshr(a: int, b: int) -> int:
         x: int = a
         x >>= b
         return x
 
 
+    @compiled
     def p_mix(a: int, b: int) -> int:
         return (((a & 255) << 3) | (b >> 2)) ^ ~a
 
 
+    @compiled
     def p_mask_loop(n: int) -> int:
         h: int = 0
         for i in range(n):
@@ -78,6 +88,7 @@ SOURCE = textwrap.dedent('''
         return h
 
 
+    @compiled
     def p_array(xs: list[int]) -> None:
         for i in range(len(xs)):
             xs[i] &= 0xFF
@@ -85,10 +96,12 @@ SOURCE = textwrap.dedent('''
             xs[i] ^= i
 
 
+    @compiled
     def p_iv(a: int, b: int) -> int:
         return (a & 0xFFFF) * (b & 0xFFFF) + ~(a & 7)
 
 
+    @compiled
     def i_and(log: list[object], a: int, b: int) -> object:
         log.append("start")
         r: int = a & b
@@ -96,6 +109,7 @@ SOURCE = textwrap.dedent('''
         return r
 
 
+    @compiled
     def i_or(log: list[object], a: int, b: int) -> object:
         log.append("start")
         r: int = a | b
@@ -103,6 +117,7 @@ SOURCE = textwrap.dedent('''
         return r
 
 
+    @compiled
     def i_xor(log: list[object], a: int, b: int) -> object:
         log.append("start")
         r: int = a ^ b
@@ -110,6 +125,7 @@ SOURCE = textwrap.dedent('''
         return r
 
 
+    @compiled
     def i_inv(log: list[object], a: int) -> object:
         log.append("start")
         r: int = ~a
@@ -117,6 +133,7 @@ SOURCE = textwrap.dedent('''
         return r
 
 
+    @compiled
     def i_shl(log: list[object], a: int, b: int) -> object:
         log.append("start")
         r: int = a << b
@@ -124,6 +141,7 @@ SOURCE = textwrap.dedent('''
         return r
 
 
+    @compiled
     def i_shr(log: list[object], a: int, b: int) -> object:
         log.append("start")
         r: int = a >> b
@@ -131,6 +149,7 @@ SOURCE = textwrap.dedent('''
         return r
 
 
+    @compiled
     def i_aug(log: list[object], a: int, b: int) -> object:
         log.append("start")
         x: int = a
@@ -143,6 +162,7 @@ SOURCE = textwrap.dedent('''
         return x
 
 
+    @compiled
     def i_big(log: list[object], a: int, b: int, c: int) -> object:
         log.append("start")
         r: int = (a * b) & c
@@ -156,6 +176,7 @@ SOURCE = textwrap.dedent('''
         return r
 
 
+    @compiled
     def o_ops(log: list[object], x: object, y: object) -> object:
         log.append("start")
         r: object = x | y
@@ -164,21 +185,25 @@ SOURCE = textwrap.dedent('''
         return r
 
 
+    @compiled
     def o_inplace(log: list[object], x: object, y: object) -> object:
         log.append("start")
         x |= y
         return x
 
 
+    @compiled
     def f_and(log: list[object], a: float, b: int) -> object:
         log.append("start")
         return a & b
 
 
+    @compiled
     def b_and(a: bool, b: bool) -> bool:
         return a & b
 
 
+    @compiled
     def b_inv(a: bool) -> int:
         return ~a
 ''')

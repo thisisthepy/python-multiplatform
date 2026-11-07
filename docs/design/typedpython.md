@@ -62,7 +62,7 @@ TypedPython 의 목표는 **새 언어를 만들지 않고, 파이썬 문법 그
 |---|---|---|---|
 | 0 | 서드파티 패키지 (의존성) | 없음, 검사하지 않는다 | 바이트코드 (pypackpack 이 받은 그대로) |
 | 1 `checked` | **사용자 프로젝트의 파이썬 코드 전부, 기본값** | 빌드 타임 타입 오류, `Any` 유출 0 (§4.2) | 바이트코드 |
-| 1 `compiled` | `@compiled` (내장 이름, import 없음) 또는 모듈 선언 `# typedpython: compiled` | `checked` + §3.1 금지 목록 | C 확장 모듈 (NEON · AVX 벡터화, §5.3) |
+| 1 `compiled` | `@compiled` (내장 이름, import 없음) | `checked` + §3.1 금지 목록 | C 확장 모듈 (NEON · AVX 벡터화, §5.3) |
 | 2 `kernel` | `@kernel` | 객체·힙 할당 없음, 고정 dtype | SPIR-V / MSL (직접) / WGSL / PTX, 빌드 타임 (§5) |
 
 - **사용자 코드는 표시하지 않아도 검사된다.** 타입 오류가 있으면 Kotlin 컴파일 에러처럼 빌드가
@@ -162,6 +162,58 @@ API 안정성을 확인한 뒤로 미룬다.
 인터페이스 해시가 그대로라 의존 모듈은 다시 컴파일하지 않는다. C 오브젝트는 모듈별로 캐시한다.
 Gradle 태스크는 입력·출력을 정확히 선언해 up-to-date 판정과 빌드 캐시가 함께 작동한다.
 
+pypackpack 의 native compile slot 이 C 를 확장으로 빌드하므로 캐시는 두 층으로 나뉜다(#113).
+`pipeline.generate_project` 는 소스 → C 만 캐시한다: 모듈마다 `.c` 하나, 그리고 `tp_runtime.h` 가 있는
+디렉터리. 키는 소스 + 의존 모듈 인터페이스 해시 + 컴파일러 버전이고, C 는 플랫폼·컴파일러·플래그를 읽지
+않으므로 그것들은 키에 넣지 않는다. 바뀌지 않은 모듈은 바이트가 같은 `.c` 로 재사용되어 slot 의 C → 확장
+캐시도 맞는다. 테스트가 쓰는 `compile_project`(프로세스 안에서 빌드)는 그대로 둔다.
+
+### 4.3.2a `emit-c` manifest (SPEC N-10, #25 1단계)
+
+Gradle 쪽(#25 2단계, python-multiplatform-gradle-plugin)은 TypedPython 을 이 CLI 로 돌리고 manifest 를
+pypackpack `BundleRequest` 로 옮긴다. pypackpack 은 TypedPython 을 실행하지 않는다.
+
+    python -m typedpython emit-c PATHS... --root DIR --cache DIR --manifest FILE
+
+- `PATHS`: 파일 또는 디렉터리(재귀, `typedpython check` 와 같은 규칙). `--root`: 모듈 이름의 기준
+  디렉터리(ppp 패키지의 `python/` 루트에 해당). `--cache`: `generate_project` 의 소스 → C 캐시.
+  `--manifest`: 쓸 파일. 상위 디렉터리는 만든다.
+- 종료 코드: 0 manifest 를 씀, 1 게이트 오류(manifest 를 쓰지 않음, 원인은 stderr), 2 게이트를 실행할 수 없음.
+  C 컴파일러는 실행하지 않는다.
+
+형식(버전 1). 키 이름은 pypackpack `docs/design/compile-slot.md` 의 Kotlin 필드 이름과 같다.
+
+```json
+{
+  "format": "typedpython-emit-c",
+  "version": 1,
+  "compilerVersion": "<pipeline.COMPILER_VERSION>",
+  "projectRoot": "/abs/proj",
+  "runtimeInclude": "/abs/.../typedpython/runtime",
+  "nativeModules": [
+    {"moduleName": "app.physics.nbody", "file": "app/physics/nbody.py",
+     "sources": ["/abs/cache/.../nbody.c"], "includeDirs": ["/abs/.../typedpython/runtime"],
+     "defines": {}, "status": "rebuilt",
+     "skippedItems": [{"name": "main", "file": "app/physics/nbody.py", "line": 30, "message": "..."}]}
+  ],
+  "notNativeModules": [
+    {"module": "app.util", "file": "app/util.py", "kind": "NOT_MARKED", "items": []},
+    {"module": "app.text", "file": "app/text.py", "kind": "NOTHING_COMPILED",
+     "items": [{"name": "f", "file": "app/text.py", "line": 2, "message": "..."}]}
+  ]
+}
+```
+
+- `nativeModules[i]` → `ExtensionModuleSource(moduleName, sources, includeDirs, defines)`. `file`, `status`,
+  `skippedItems` 는 보고용이다(일부 함수가 인터프리트로 남는 것은 경고가 아니다, compile-slot.md §4).
+- `notNativeModules[i]` → `NotNativeModule(module, kind, items)`, `items[j]` → `SkippedItem(name, file, line, message)`.
+  `line` 은 없으면 `null`.
+- 모든 경로는 절대 경로(`/` 구분). `file` 만 `projectRoot` 기준 상대 경로다.
+- 패키지 `__init__.py` 는 어느 목록에도 넣지 않는다(compile-slot.md: TypedPython 은 `__init__` 을 넘기지 않는다).
+  그 밖의 모듈은 정확히 한 목록에 들어간다. 순서는 입력 파일 순서(디렉터리는 정렬)다.
+- `sources` 는 캐시 안의 `.c` 를 가리킨다. 바뀌지 않은 모듈은 같은 경로, 같은 바이트다.
+- 버전을 올리는 변경: 키 제거나 의미 변경. 키 추가는 버전을 올리지 않는다.
+
 ### 4.3.3 고정 레이아웃 클래스 (SPEC N-11, M2b)
 
 **레이아웃이 CPython 에서도 고정일 때만** 고정 접근으로 컴파일한다, 사용자가 `__slots__` 를 직접 쓴 클래스.
@@ -214,6 +266,34 @@ Gradle 태스크는 입력·출력을 정확히 선언해 up-to-date 판정과 �
 GC 추적), refcount 증감, 해제(`subtype_dealloc`)를 그대로 치르기 때문이다(#125, 아직 프로파일로 확정 전).
 더 가려면 객체를 아예 만들지 않거나(가상 객체), 증감을 빼거나(refcount 생략), 한꺼번에 할당·해제해야
 한다(영역 할당). 셋 다 `id()`, `__del__` 시점, `gc` 관측과 부딪칠 수 있다.
+
+**실제 객체(N-11)의 생성 비용 (#125, 2026-11-05).** 프로파일(`benchmarks/typedpython/results/2026-10-25-binary-trees-alloc-profile.md`)
+가운데 관측을 바꾸지 않고 줄일 수 있는 것은 다음과 같이 처리했다.
+- 호출마다 스레드 상태를 한 번만 읽는다(#273).
+- `tp_new_fixed` 는 새 객체의 슬롯을 `PyMember_SetOne` 대신 release store 로 직접 채운다. `SetOne` 이
+  `Py_T_OBJECT_EX` 슬롯에 하는 일(객체 critical section 안에서 `Py_XNewRef(v)` 의 release store, 그 뒤 옛 값
+  `Py_XDECREF`)에서 critical section 과 옛 값 해제만 뺀 것이다. 옛 값은 `tp_alloc` 이 0 으로 채웠으므로 NULL 이다.
+  critical section 을 빼도 되는 근거: `tp_alloc` 부터 마지막 슬롯 저장까지 스레드 상태를 놓는 호출도, eval
+  breaker 검사도 없어서 safepoint 가 없다. 그래서 stop-the-world 가 필요한 `gc.get_objects()` /
+  `gc.get_referrers()` 는 채우기가 끝나기 전에 이 객체를 다른 스레드에 줄 수 없다. 오히려 기존 critical
+  section 은 경합 시 스레드 상태를 놓을 수 있어서, 반쯤 채운 객체가 보이는 실행이 가능했다(그것도 인터프리터의
+  `__init__` 실행과 같은 상태라 유효했다). 슬롯의 종류·쓰기 가능·오프셋 범위는 `tp_class_capture` 가 init 에서
+  확인한다. 참조 수: 슬롯은 `Py_NewRef` 로 자기 참조를 갖는다(이것을 빼는 변이는 `test_cgen_classes.py` 에서
+  segfault 로 잡힌다). 측정(참고용, load 24~27): binary-trees `check(make(18))` 의 CPU 시간 중앙값이 develop
+  대비 1.08배 빠르다. 같은 부하에서 벽시계 시간은 한 회차 안에서도 2~22초로 흔들려 쓸 수 없었다.
+
+하지 않은 것과 이유:
+- **타입별 freelist.** 해제된 객체의 메모리를 붙잡으려면 클래스의 `tp_dealloc` 를 바꿔야 한다. 이것은
+  2026-10-25 결정(#125 댓글)에서 미뤘다: 클래스가 뒤에 `__del__`, `__weakref__`, 서브클래스를 얻으면 바뀐 dealloc 이
+  관측된다. free-threaded 빌드에서는 해제된 GC 객체의 메모리를 다른 스레드가 lock-free 로 읽을 수 있어서
+  (`_Py_TryIncref` 계열) CPython 은 mimalloc 의 지연 해제(QSBR)에 기댄다. 확장이 따로 붙잡는 freelist 는 이 보장
+  밖에 있으므로, 이 결정을 다시 열 때 그 근거도 함께 써야 한다.
+- **GC 추적을 늦추기/생략.** 아직 사이클을 만들 수 없는 노드(자식이 `None`)를 추적하지 않는 방식은
+  `gc.is_tracked`, `gc.get_objects()` 로 관측된다. 그리고 인터프리터가 나중에 슬롯에 자기 자신을 넣으면
+  (`PyMember_SetOne` 은 추적을 다시 켜지 않는다) 사이클이 수거되지 않는다. 컬렉션 횟수를 줄이는 방식(할당 계수
+  묶기, 임계값 조정)은 컬렉션 시점을 바꾼다. 둘 다 SPEC N-12 의 "GC 시점" 판단에 속하므로 오너 결정 사항이다.
+- binary-trees 의 `main` 은 정책(#150)으로 컴파일되지 않고 순수하지도 않아서(`print`, `sys.argv`), 실제 객체를
+  아예 없애는 N-12b 영역이 이 벤치마크에는 적용되지 않는다.
 
 **동일성의 정의.** 컴파일된 코드의 모든 실행은 **어떤 유효한 CPython 실행과 구별할 수 없어야 한다.**
 구별은 관측으로만 할 수 있으므로, 설계는 "관측 지점" 목록과 "관측 지점에 닿기 전에 실제 객체로 되돌린다"는
@@ -685,9 +765,7 @@ upstream 대비 수치 오차와 커널 시간을 기준선으로 박아 둔다.
    인터프리터 시작 시 `builtins.compiled` 를 설치하고(#42), 일반 CPython 에서는 `typedpython` wheel 의
    `typedpython_builtins.pth` 가 `builtins` 에 없을 때만 항등 함수를 설치한다(런타임이 넣은 것을 덮어쓰지
    않는다). 타입 검사기에는 `__builtins__.pyi` 로 알린다, Pyrefly 1.3.2 는 검색 경로의 그 파일을 추가
-   내장으로 읽는다(실측). 모듈 단위 표기는 `# typedpython: compiled` 주석을 유지한다: `# pyright: strict` 와 같은
-   도구 pragma 형태이고, 실행 시 이름 조회가 필요 없어 일반 CPython 에서 부작용이 없으며, 데코레이터 없이
-   모듈 전체를 지정할 수 있다.
+   내장으로 읽는다(실측). 모듈 단위 pragma(`# typedpython: compiled`)는 2026-10-30 메인테이너 결정으로 제거했다(#353). `@compiled` 가 컴파일 대상을 표시하는 유일한 수단이다.
 2. ~~고정폭 정수의 오버플로 의미~~, **결정됨:** `int` 는 i64 로 컴파일하고 오버플로 시 인터프리터 재실행으로 큰 정수로 승격(의미 보존).
 3. ~~pypackpack Cython 슬롯 인터페이스 소유~~, **결정됨:** pypackpack 이 정한다. TypedPython 은 생성한 C 소스, 빌드 플래그, C 를 낸 모듈 목록을 넘긴다. 확장이 원본 소스를 품으므로 별도 `.py` 폴백은 없다(Cython 폐기 후 갱신).
 4. ~~GPU 착지를 torchnative 커스텀 op 로 할 것인가~~, **결정됨 (2026-10-04, 메인테이너):** 커널은

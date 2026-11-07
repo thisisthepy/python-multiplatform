@@ -2756,7 +2756,22 @@ static inline int tp_setattr(PyObject *obj, PyObject *name, PyObject *v)
 
 /* The observable result of a trivial __init__: allocate with cls's tp_alloc and set slots[i] to
  * values[i] (new references; the caller keeps its own). NULL with the error set on failure; the
- * half-built object is released (its unset slots are NULL, which dealloc handles). */
+ * half-built object is released (its unset slots are NULL, which dealloc handles).
+ *
+ * Issue #125: each slot is filled by a release store of a new reference, which is what
+ * PyMember_SetOne does for a Py_T_OBJECT_EX slot (FT_ATOMIC_STORE_PTR_RELEASE of Py_XNewRef(v)
+ * under the object's critical section, then Py_XDECREF of the old value), minus the critical section
+ * and the old value. Why that is the same result:
+ *  - every slot was checked at capture (tp_class_capture): Py_T_OBJECT_EX, writable, offset inside
+ *    tp_basicsize; so SetOne's READONLY and type dispatch are decided already;
+ *  - tp_alloc zeroed the object, so the old value is NULL and there is nothing to release;
+ *  - nothing between tp_alloc and the last store can reach a safepoint (no call that detaches the
+ *    thread state, no eval-breaker check), so no stop-the-world (gc.get_objects, gc.get_referrers)
+ *    can hand the object to another thread before it is filled. The critical section, which could
+ *    detach when contended, protected nothing here. A reader that did find it (none can) would see
+ *    NULL or the stored value, as with SetOne's release store.
+ * A NULL value (the generator never passes one) keeps SetOne's result: AttributeError for deleting
+ * an unset Py_T_OBJECT_EX slot. */
 static inline PyObject *tp_new_fixed(PyTypeObject *cls, PyMemberDef *const *slots,
                                      PyObject *const *values, Py_ssize_t n)
 {
@@ -2767,10 +2782,13 @@ static inline PyObject *tp_new_fixed(PyTypeObject *cls, PyMemberDef *const *slot
         return NULL;
     }
     for (i = 0; i < n; i++) {
-        if (PyMember_SetOne((char *)obj, slots[i], values[i]) < 0) {
+        if (values[i] == NULL) {
+            PyErr_SetString(PyExc_AttributeError, slots[i]->name);
             Py_DECREF(obj);
             return NULL;
         }
+        __atomic_store_n((PyObject **)((char *)obj + slots[i]->offset), Py_NewRef(values[i]),
+                         __ATOMIC_RELEASE);
     }
     return obj;
 }

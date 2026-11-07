@@ -29,10 +29,10 @@ import pytest
 from typedpython import cbuild, cgen, frontend, ir, verify
 
 SOURCE = textwrap.dedent('''
-    # typedpython: compiled
     import array
 
 
+    @compiled
     def sum_ad(a: array.array[float]) -> float:
         s = 0.0
         for i in range(len(a)):
@@ -40,6 +40,7 @@ SOURCE = textwrap.dedent('''
         return s
 
 
+    @compiled
     def sum_aq(a: array.array[int]) -> int:
         s = 0
         for i in range(len(a)):
@@ -47,70 +48,85 @@ SOURCE = textwrap.dedent('''
         return s
 
 
+    @compiled
     def get_ad(a: array.array[float], i: int) -> float:
         return a[i]
 
 
+    @compiled
     def get_aq(a: array.array[int], i: int) -> int:
         return a[i]
 
 
+    @compiled
     def set_ad(a: array.array[float], i: int, v: float) -> None:
         a[i] = v
 
 
+    @compiled
     def set_aq(a: array.array[int], i: int, v: int) -> None:
         a[i] = v
 
 
+    @compiled
     def length_ad(a: array.array[float]) -> int:
         return len(a)
 
 
+    @compiled
     def scale_ad(a: array.array[float], k: float) -> None:
         for i in range(len(a)):
             a[i] = a[i] * k
 
 
+    @compiled
     def iota_aq(a: array.array[int]) -> None:
         for i in range(len(a)):
             a[i] = i
 
 
+    @compiled
     def copy_ad(dst: array.array[float], src: array.array[float]) -> None:
         for i in range(len(dst)):
             dst[i] = src[i]
 
 
+    @compiled
     def cascade_ad(a: array.array[float], b: array.array[float]) -> None:
         for i in range(len(a)):
             a[i] = b[i] + 1.0
 
 
+    @compiled
     def fill_n(a: array.array[float], n: int) -> None:
         for i in range(n):
             a[i] = 1.0
 
 
+    @compiled
     def mixed(l: list[float], a: array.array[float]) -> None:
         for i in range(len(a)):
             a[i] = l[i]
 
 
+    @compiled
     def four(a: array.array[float], b: array.array[float], c: array.array[float],
              d: array.array[float]) -> None:
         for i in range(len(a)):
             a[i] = b[i] + c[i] + d[i]
 
 
+    @compiled
     def div_ad(a: array.array[float]) -> float:
         return a[0] / a[1]
 
 
+    @compiled
     def open_ad(a: array.array[float], o: object) -> float:
         return a[0] + float(o.v)
 
 
+    @compiled
     def rebind_view(a: array.array[float]) -> None:
         y = a[:]
         y[0] = 5.0
@@ -505,30 +521,34 @@ def test_verifier_buffer_params_are_not_limited_but_lists_still_are():
 # --- vectorised element-wise store loops (#226) ---------------------------------------------------
 
 VEC_SOURCE = textwrap.dedent('''
-    # typedpython: compiled
     import array
 
 
+    @compiled
     def vscale(a: array.array[float], k: float) -> None:
         for i in range(len(a)):
             a[i] = a[i] * k
 
 
+    @compiled
     def vmix(a: array.array[float], k: float) -> None:
         for i in range(len(a)):
             a[i] = -(a[i] - k) * 2.5 + k
 
 
+    @compiled
     def vtwo(a: array.array[float], b: array.array[float]) -> None:
         for i in range(len(a)):
             a[i] = a[i] + b[i]
 
 
+    @compiled
     def vfill(a: array.array[float], k: float) -> None:
         for i in range(len(a)):
             a[i] = k
 
 
+    @compiled
     def vdiv(a: array.array[float], k: float) -> None:
         for i in range(len(a)):
             a[i] = a[i] / k

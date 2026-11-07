@@ -1,7 +1,7 @@
-# typedpython: compiled
 import sys
 
 
+@compiled
 def dot(n: int) -> float:
     s = 0.0
     for i in range(n):
@@ -10,6 +10,7 @@ def dot(n: int) -> float:
     return s
 
 
+@compiled
 def collatz_steps(limit: int) -> int:
     total = 0
     for start in range(1, limit):

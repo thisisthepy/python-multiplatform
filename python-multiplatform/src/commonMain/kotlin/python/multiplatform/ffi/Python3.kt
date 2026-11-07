@@ -124,7 +124,9 @@ object Python3 {
             def _pm_install_compiled():
                 import builtins
                 if not hasattr(builtins, "compiled"):
-                    def compiled(f):
+                    def compiled(f=None, /, **_opts):
+                        if f is None:
+                            return lambda g: g
                         return f
                     builtins.compiled = compiled
             _pm_install_compiled()

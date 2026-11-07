@@ -17,7 +17,7 @@ val rootGradleProperties = Properties().apply {
 }
 fun rootProperty(name: String, fallback: String): String =
     findProperty(name)?.toString() ?: rootGradleProperties.getProperty(name) ?: fallback
-val publishedVersion = "${rootProperty("pythonVersion", "3.15.0")}-${rootProperty("libraryVersionSuffix", "alpha02")}"
+val publishedVersion = "${rootProperty("pythonVersion", "3.15.0")}-${rootProperty("libraryVersionSuffix", "alpha03")}"
 version = publishedVersion
 
 /**
@@ -418,3 +418,5 @@ tasks.test {
     inputs.files(walkerFixtureKlib).withPropertyName("walkerFixtureKlib").withPathSensitivity(PathSensitivity.NAME_ONLY)
     systemProperty("python.multiplatform.walkerFixtureKlib", walkerFixtureKlib.singleFile.absolutePath)
 }
+
+apply(from = rootDir.resolve("../gradle/central-publishing.gradle.kts"))

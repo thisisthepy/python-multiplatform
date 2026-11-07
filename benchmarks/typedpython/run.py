@@ -10,7 +10,7 @@ pre-compiled classes (javac -d java-out), so javac time is excluded; JVM startup
 The "TypedPython @compiled" column runs only with `--typedpython <dir>` (the directory that holds
 the `typedpython` package, python-multiplatform-ksp/src/main/python) and `--typedpython-python` (an
 interpreter with the gate's dependencies, e.g. that module's .venv): each benchmark is copied with
-the `# typedpython: compiled` marker, compiled through `typedpython.pipeline`, and its `main()` is
+`@compiled` above every top-level def and class, compiled through `typedpython.pipeline`, and its `main()` is
 run from the built extension. Without the option the column reports n/a.
 
 binary-trees declares `__slots__` (TypedPython compiles fixed-layout classes only, SPEC N-11). The
@@ -18,6 +18,7 @@ speedup is reported against that CPython version; `CPython (no __slots__)` runs 
 with the `__slots__` line removed, so what adding the slots changes in CPython is recorded too.
 """
 import argparse
+import ast
 import datetime
 import json
 import os
@@ -87,6 +88,17 @@ mod.main()
 """
 
 
+def with_compiled(source: str) -> str:
+    """`source` with `@compiled` above every top-level def and class (above their other decorators)."""
+    tree = ast.parse(source)
+    lines = source.split("\n")
+    firsts = [min([n.lineno] + [d.lineno for d in n.decorator_list]) for n in tree.body
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
+    for first in reversed(firsts):
+        lines.insert(first - 1, "@compiled")
+    return "\n".join(lines)
+
+
 def build_compiled(tp_dir: Path, tp_python: str) -> dict[str, tuple[str, list[str]] | str]:
     """Compile each benchmark with TypedPython; name -> (extension, compiled functions) or a reason."""
     built: dict[str, tuple[str, list[str]] | str] = {}
@@ -95,7 +107,7 @@ def build_compiled(tp_dir: Path, tp_python: str) -> dict[str, tuple[str, list[st
         work = TP_BUILD / name
         work.mkdir(parents=True, exist_ok=True)
         source = work / py
-        source.write_text("# typedpython: compiled\n" + (ROOT / "py" / py).read_text())
+        source.write_text(with_compiled((ROOT / "py" / py).read_text()))
         result = subprocess.run([tp_python, "-c", COMPILE_SNIPPET, str(source), str(work / "out")],
                                 capture_output=True, text=True, env=env)
         if result.returncode != 0:

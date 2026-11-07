@@ -300,10 +300,17 @@ stripped), the root metadata jar is 382 KB, `PythonBootstrap` stages the Android
 desktop stdlib (`GP/test/kotlin/python/multiplatform/gradle/PythonHomeStagingTest.kt`, SPEC L-4).
 Old §15a, §15b, §15d, §15f, §15g, §15h are closed; §15e item 4 is closed by §15h.
 
-- **15.1 Nothing is published to a remote repository, open.** No publishing repository or signing is
-  configured (`signing { }` is commented out in `python-multiplatform/build.gradle.kts`), and
-  `repo1.maven.org/maven2/io/github/thisisthepy/python-multiplatform/` returns 404 (2026-10-03).
-  Every consumer verification so far used `mavenLocal()`. 10.1 depends on this or on a release asset.
+- **15.1 Maven Central publishing, implemented, first upload pending (#375).** All three components
+  (the library for every target, the KSP processor, the Gradle plugin with its plugin marker) carry
+  Central POM metadata, sources and javadoc jars and in-memory GPG signing
+  (`gradle/central-publishing.gradle.kts`, signing only when `MAVEN_GPG_PRIVATE_KEY` is set, so
+  `publishToMavenLocal` still works without keys). `./gradlew publishAllToCentralStaging` fills
+  `build/central-staging`; `.github/scripts/release/central-bundle.sh` signs, checks and zips it, and
+  `.github/workflows/maven-central.yml` (version tag, or manual with a `dry_run` input) builds on macOS and
+  uploads one deployment to the Central Portal (`central-upload.sh`, environment `maven-central`). The
+  dry run signs with a throwaway key and uploads nothing. Open: the first real upload (needs the
+  secrets, only CI can show Central accepting the deployment), and `repo1.maven.org/maven2/org/thisisthepy/`
+  does not list the artifacts until then. 10.1 depends on this or on a release asset.
 - **15.2 The library, KSP processor and plugin publish under one version, done (#70).** Each build
   derives it from `gradle.properties` (`$pythonVersion-$libraryVersionSuffix`, a `-P` override included);
   the root build fails when a project's version differs, and `PublishedVersionTest` pins the processor

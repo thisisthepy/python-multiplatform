@@ -34,7 +34,7 @@
 <div class="page-head"><div class="wrap">
   <div class="eyebrow"><span data-lang="en">Getting started</span><span data-lang="ko">시작하기</span></div>
   <h1><span data-lang="en">From clone to a running sample</span><span data-lang="ko">클론부터 샘플 실행까지</span></h1>
-  <p><span data-lang="en">No release is published yet, so you build from source. The sample app is the shortest path to seeing both directions work.</span><span data-lang="ko">아직 배포된 릴리스가 없으므로 소스에서 빌드한다. 두 방향이 동작하는 것을 보는 가장 짧은 길은 샘플 앱이다.</span></p>
+  <p><span data-lang="en">Releases are on Maven Central (section 04). To work on the library itself, build from source: the sample app is the shortest path to seeing both directions work.</span><span data-lang="ko">릴리스는 Maven Central 에 있다(04 절). 라이브러리 자체를 고치려면 소스에서 빌드한다. 두 방향이 동작하는 것을 보는 가장 짧은 길은 샘플 앱이다.</span></p>
 </div></div>
 <main><div class="wrap"><div class="prose">
   <h2><span class="num">01</span><span data-lang="en">Requirements</span><span data-lang="ko">준비물</span></h2>
@@ -69,9 +69,62 @@ fun main() {
 }</code></pre>
   <div class="note"><p><span data-lang="en">There is no <code>close()</code> in that code, and none is missing: every wrapper releases its Python reference when the Kotlin object is collected.</span><span data-lang="ko">위 코드에는 <code>close()</code> 가 없고, 빠진 것도 아니다. 모든 래퍼는 Kotlin 객체가 수거될 때 Python 참조를 놓는다.</span></p></div>
 
-  <h2><span class="num">04</span><span data-lang="en">Verify a change</span><span data-lang="ko">변경 검증하기</span></h2>
-  <pre translate="no"><code class="language-bash">./gradlew :python-multiplatform:compileKotlinAndroidNativeArm64 --console=plain &gt; .tmp/build.log 2&gt;&amp;1; echo &quot;EXIT=$?&quot;
-./gradlew :python-multiplatform:desktopTest --rerun --console=plain &gt; .tmp/test.log 2&gt;&amp;1; echo &quot;EXIT=$?&quot;
+  <h2><span class="num">04</span><span data-lang="en">Use it from Maven Central</span><span data-lang="ko">Maven Central 에서 쓰기</span></h2>
+  <p><span data-lang="en">Consumers must build with Kotlin <code>2.4.20-Beta2</code>, the version the artifacts are compiled with. A desktop app that Python calls back into:</span><span data-lang="ko">소비자는 아티팩트가 컴파일된 Kotlin <code>2.4.20-Beta2</code> 로 빌드해야 한다. Python 이 다시 호출하는 데스크톱 앱:</span></p>
+  <pre translate="no"><code class="language-kotlin">// settings.gradle.kts
+pluginManagement { repositories { mavenCentral(); gradlePluginPortal() } }
+dependencyResolutionManagement { repositories { mavenCentral(); google() } }
+
+// build.gradle.kts of a Kotlin Multiplatform app
+plugins {
+    kotlin(&quot;multiplatform&quot;) version &quot;2.4.20-Beta2&quot;
+    id(&quot;org.thisisthepy.python.multiplatform.bindings&quot;) version &quot;3.15.0-alpha03&quot;
+}
+kotlin {
+    jvm(&quot;desktop&quot;) {
+        @OptIn(org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi::class)
+        binaries { executable { mainClass.set(&quot;app.MainKt&quot;) } }
+    }
+    sourceSets.commonMain.dependencies {
+        implementation(&quot;org.thisisthepy:python-multiplatform:3.15.0-alpha03&quot;)
+        // Compose hosts (PythonAppView, PythonWidget, PythonLauncher):
+        // implementation(&quot;org.thisisthepy:python-multiplatform-compose:3.15.0-alpha03&quot;)
+    }
+}
+// A KMP executable is otherwise treated as a library and gets no FunctionTable.
+pythonBindings { role.set(&quot;app&quot;) }</code></pre>
+  <pre translate="no"><code class="language-kotlin">// src/desktopMain/kotlin/app/Main.kt
+package app
+
+import python.multiplatform.ffi.Python3
+import python.multiplatform.ffi.upcall.PythonProxySource
+import python.native.ffi.UpcallStub
+
+class Greeter(val subject: String) {
+    fun greet(times: Long): String = List(times.toInt()) { &quot;hello $subject&quot; }.joinToString(&quot;, &quot;)
+}
+
+fun main() {
+    Python3.initialize()
+    // Upcalls: install the generated table, bind the entry points, install the proxies.
+    python.multiplatform.generated.FunctionTable.installInto()
+    Python3.exec(
+        &quot;&quot;&quot;
+        import ctypes
+        _pm_resolve = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_char_p)(${UpcallStub.resolveHandleStubAddr})
+        _pm_invoke = ctypes.CFUNCTYPE(ctypes.py_object, ctypes.c_long, ctypes.py_object)(${UpcallStub.invokeWithArgsStubAddr})
+        _pm_release = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_long)(${UpcallStub.releaseObjectStubAddr})
+        _pm_cancel = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_long)(${UpcallStub.cancelCallStubAddr})
+        &quot;&quot;&quot;.trimIndent(),
+    )
+    PythonProxySource.install()
+    Python3.exec(&quot;from app import Greeter\nprint(Greeter('Kotlin').greet(2), flush=True)&quot;)
+}</code></pre>
+  <p><span data-lang="en">The library, the KSP processor, the Compose host and the Gradle plugin share one version, <code>$pythonVersion-$libraryVersionSuffix</code>, and are published together on Maven Central; the current release is <code>3.15.0-alpha03</code>. <code>google()</code> is needed for Android targets.</span><span data-lang="ko">라이브러리, KSP 프로세서, Compose 호스트, Gradle 플러그인은 <code>$pythonVersion-$libraryVersionSuffix</code> 라는 한 버전을 쓰고 Maven Central 에 함께 올라간다. 현재 릴리스는 <code>3.15.0-alpha03</code> 이다. Android 타깃에는 <code>google()</code> 이 필요하다.</span></p>
+
+  <h2><span class="num">05</span><span data-lang="en">Verify a change</span><span data-lang="ko">변경 검증하기</span></h2>
+  <pre translate="no"><code class="language-bash">./gradlew :python-multiplatform:compileKotlinAndroidNativeArm64 --console=plain &gt; .cache/build.log 2&gt;&amp;1; echo &quot;EXIT=$?&quot;
+./gradlew :python-multiplatform:desktopTest --rerun --console=plain &gt; .cache/test.log 2&gt;&amp;1; echo &quot;EXIT=$?&quot;
 ./gradlew :python-multiplatform-ksp:fixtures:app:desktopTest --rerun
 ./gradlew :python-multiplatform-compose:fixtures:compose:desktopTest --rerun
 ./gradlew :python-multiplatform-gradle-plugin-fixtures:artifact:desktopTest --rerun</code></pre>

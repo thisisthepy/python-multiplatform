@@ -51,6 +51,31 @@ jobs:
         # Using --console=plain so logs are readable in GitHub Actions
         run: ./gradlew :python-multiplatform:desktopTest --console=plain
 
+  desktop-native-linux:
+    name: Desktop Kotlin/Native Tests (Linux x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'zulu'
+          cache: 'gradle'
+
+      - name: Cache Konan
+        uses: actions/cache@v4
+        with:
+          path: ~/.konan
+          key: ${{ runner.os }}-konan-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-konan-
+
+      - name: Run Linux x86_64 Kotlin/Native Tests
+        run: ./gradlew :python-multiplatform:linuxX64Test --rerun --console=plain
+
   # The dev agent's protocol on the other desktop OSes (#238). Its socket options differ per platform
   # (SO_EXCLUSIVEADDRUSE on Windows, SO_REUSEADDR on POSIX), and the port-takeover and restart tests are
   # what check them. Stdlib only: no JDK, no Gradle.
@@ -151,26 +176,15 @@ jobs:
             python-multiplatform-compose/fixtures/notebook-e2e/build/reports/tests/desktopTest
             python-multiplatform-compose/fixtures/notebook-e2e/build/test-results/desktopTest
 
-  # The notebook E2E in a GraalVM native image on macOS (#249, #251). It takes `ui`, `ui-text` and
-  # `foundation` from compose-multiplatform-core-extended, which a runner reads from the fork's GitHub
-  # Packages registry; until the repository variable COMPOSE_EXTENDED_VERSION names a published
-  # development version (`1.11.1-ext.N-dev.<sha>`) the job is skipped.
+  # The notebook E2E in a GraalVM native image on macOS (#249, #251). It takes the fork's Compose
+  # (`org.thisisthepy.compose.*:1.11.1-ext.2`, `composeExtended.*` in `gradle.properties`) from
+  # Maven Central, builds the 20-scenario executable with Liberica NIK 25, and runs it with
+  # JAVA_HOME and PYTHONHOME removed.
   notebook-e2e-native-image:
     name: Notebook E2E in a native image (macOS)
-    if: ${{ vars.COMPOSE_EXTENDED_VERSION != '' }}
     runs-on: macos-latest
-    permissions:
-      contents: read
-      packages: read
     env:
       WHEEL_DIR: ${{ github.workspace }}/.tmp/pythonx-compose-dist
-      COMPOSE_EXTENDED_VERSION: ${{ vars.COMPOSE_EXTENDED_VERSION }}
-      COMPOSE_EXTENDED_GROUP_PREFIX: ${{ vars.COMPOSE_EXTENDED_GROUP_PREFIX || 'org.thisisthepy.compose' }}
-      COMPOSE_EXTENDED_REPOSITORY: ${{ vars.COMPOSE_EXTENDED_REPOSITORY || 'https://maven.pkg.github.com/thisisthepy/compose-multiplatform-core-extended' }}
-      # GitHub Packages asks for a token even for a public package. A read:packages PAT in the secret
-      # GH_PACKAGES_TOKEN is used when it exists; otherwise this repository's own token.
-      GITHUB_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}
-      TOKEN_SOURCE: ${{ secrets.GH_PACKAGES_TOKEN != '' && 'GH_PACKAGES_TOKEN' || 'GITHUB_TOKEN' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -182,19 +196,6 @@ jobs:
           ref: develop
           path: .tmp/pythonx-compose
           fetch-depth: 1
-
-      # Before any build: can this token read the fork's packages? One known POM, so a refusal is
-      # reported as what it is rather than as a dependency resolution error minutes later.
-      - name: Check access to the fork's packages
-        run: |
-          group_path="${COMPOSE_EXTENDED_GROUP_PREFIX//.//}/ui"
-          pom="$COMPOSE_EXTENDED_REPOSITORY/$group_path/ui-desktop/$COMPOSE_EXTENDED_VERSION/ui-desktop-$COMPOSE_EXTENDED_VERSION.pom"
-          status=$(curl -s -o /dev/null -w '%{http_code}' -u "${GITHUB_ACTOR}:${GITHUB_TOKEN}" "$pom")
-          echo "reading $pom with $TOKEN_SOURCE: HTTP $status"
-          if [ "$status" != "200" ]; then
-            echo "::error::The fork's packages could not be read with $TOKEN_SOURCE (HTTP $status at $pom). Add a personal access token (classic) with read:packages as the repository secret GH_PACKAGES_TOKEN, or check COMPOSE_EXTENDED_VERSION / COMPOSE_EXTENDED_REPOSITORY."
-            exit 1
-          fi
 
       - name: Setup uv
         uses: astral-sh/setup-uv@v6
@@ -220,13 +221,13 @@ jobs:
 
       # Records Compose and skiko's configuration against the fork version this run uses, then builds
       # the image and runs it with JAVA_HOME and PYTHONHOME removed: 20 of 20 and no libjvm.
+      # `setup-graalvm` installs Liberica NIK under `GRAALVM_HOME` in the runner toolcache outside
+      # `/Users/runner/hostedtoolcache/Java_*`, so pass `org.gradle.java.installations.paths`
+      # explicitly so Gradle's BellSoft JDK 25 toolchain resolution finds it.
       - name: Build and run the native image
         run: >
           ./gradlew :python-multiplatform-compose:fixtures:notebook-e2e:notebookE2eNativeAgent
           :python-multiplatform-compose:fixtures:notebook-e2e:notebookE2eNativeRun
           -PpythonxComposeWheel="$WHEEL_DIR"
-          -PcomposeExtended.version="$COMPOSE_EXTENDED_VERSION"
-          -PcomposeExtended.groupPrefix="$COMPOSE_EXTENDED_GROUP_PREFIX"
-          -PcomposeExtended.mavenLocal=false
-          -PcomposeExtended.repository="$COMPOSE_EXTENDED_REPOSITORY"
+          -Porg.gradle.java.installations.paths="$GRAALVM_HOME"
           --console=plain

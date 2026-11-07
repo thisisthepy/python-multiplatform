@@ -20,50 +20,59 @@ from pathlib import Path
 
 import pytest
 
+from conftest import COMPILED_SHIM
 from typedpython import cbuild, cgen, frontend, verify
 
 posix_signals = pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX signals (SIGALRM/SIGUSR1/setitimer) or fork; Windows has none")
 
 SOURCE = """\
-# typedpython: compiled
 
 
+@compiled
 def helper(x: int) -> float:
     d: dict[str, int] = {}
     d['a'] = x
     return d['a'] * 2.5
 
 
+@compiled
 def leaf(i: int) -> float:
     return 1.0 / (i + 1)
 
 
+@compiled
 def mid(i: int) -> float:
     return leaf(i) + leaf(i + 1)
 
 
+@compiled
 def top(i: int) -> float:
     return mid(i) * 2.0
 
 
+@compiled
 def objy(i: int) -> float:
     return float(helper(i)) + leaf(i)
 
 
+@compiled
 def viaobj(i: int) -> float:
     return objy(i) + 1.0
 
 
+@compiled
 def rec(n: int) -> int:
     if n == 0:
         return 0
     return 1 + rec(n - 1)
 
 
+@compiled
 def callrec(n: int) -> int:
     return rec(n) + 1
 
 
+@compiled
 def loopy(n: int) -> float:
     s: float = 0.0
     for i in range(n):
@@ -71,14 +80,17 @@ def loopy(n: int) -> float:
     return s
 
 
+@compiled
 def outer(n: int) -> float:
     return loopy(n) + 1.0
 
 
+@compiled
 def cube(x: int) -> float:
     return float(x * x * x) + leaf(x)
 
 
+@compiled
 def fill(x: int, out: list[float]) -> None:
     out[0] = cube(x)
 """
@@ -159,7 +171,7 @@ def test_the_fast_impl_is_never_addressed(traced):
     assert "&tp_fimpl_" not in c and "(tp_fimpl_" not in c
 
 
-LOAD = """\
+LOAD = COMPILED_SHIM + """\
 import importlib.machinery, importlib.util, json, sys
 def load(name, path, ext):
     if ext:

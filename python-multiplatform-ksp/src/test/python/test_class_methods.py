@@ -40,6 +40,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import COMPILED_SHIM, decorate_compiled
 from typedpython import cbuild, cgen, cost, frontend, pipeline, verify
 
 HERE = Path(__file__).resolve().parent
@@ -51,10 +52,10 @@ REPO = HERE.parents[3]
 BINARY_TREES = REPO / "benchmarks" / "typedpython" / "py" / "binary_trees.py"
 
 SOURCE = textwrap.dedent('''\
-    # typedpython: compiled
     """typedpython class-method test module."""
 
 
+    @compiled
     class Node:
         __slots__ = ("left", "right")
         left: "Node | None"
@@ -135,21 +136,25 @@ SOURCE = textwrap.dedent('''\
             return 1
 
 
+    @compiled
     class Plain:
         def check(self) -> int:
             return 5
 
 
+    @compiled
     def make(depth: int) -> Node:
         if depth > 0:
             return Node(make(depth - 1), make(depth - 1))
         return Node(None, None)
 
 
+    @compiled
     def check_of(n: Node) -> int:
         return n.check()
 
 
+    @compiled
     def leaf_of(n: Node) -> bool:
         return n.leaf()
 ''')
@@ -231,6 +236,7 @@ def test_the_methods_of_a_class_that_is_not_fixed_layout_are_not_considered(tmp_
 def test_a_method_named_like_a_module_function_does_not_collide(tmp_path):
     m = lower(tmp_path, SOURCE + textwrap.dedent('''\
 
+        @compiled
         def height(n: Node) -> int:
             return n.height()
     '''))
@@ -240,7 +246,7 @@ def test_a_method_named_like_a_module_function_does_not_collide(tmp_path):
 
 def test_a_method_with_a_foreign_self_annotation_stays_interpreted(tmp_path):
     src = textwrap.dedent('''\
-        # typedpython: compiled
+        @compiled
         class A:
             __slots__ = ("x",)
             x: int
@@ -258,7 +264,7 @@ def test_a_method_with_a_foreign_self_annotation_stays_interpreted(tmp_path):
 
 def test_a_method_defined_twice_in_the_class_body_stays_interpreted(tmp_path):
     src = textwrap.dedent('''\
-        # typedpython: compiled
+        @compiled
         class A:
             __slots__ = ("x",)
             x: int
@@ -277,7 +283,7 @@ def test_a_method_defined_twice_in_the_class_body_stays_interpreted(tmp_path):
     assert "more than once" in m.skipped["A.get"]
 
 
-def test_an_at_compiled_class_compiles_its_methods_without_the_module_marker(tmp_path):
+def test_an_at_compiled_class_compiles_its_methods(tmp_path):
     src = textwrap.dedent('''\
         @compiled
         class A:
@@ -547,7 +553,7 @@ def test_class_info_reports_the_methods(built):
 
 # --- class state changed after import: child processes --------------------------------------------
 
-CHILD = '''
+CHILD = COMPILED_SHIM + '''
 import json, sys
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -730,7 +736,7 @@ def test_reference_counts_are_flat_over_many_calls(built):
 
 # --- free-threaded concurrency --------------------------------------------------------------------
 
-THREADS = '''
+THREADS = COMPILED_SHIM + '''
 import sys, threading
 from pathlib import Path
 sys.path.insert(0, {main!r})
@@ -794,7 +800,7 @@ def test_concurrent_calls_on_shared_and_private_instances(built):
 
 # --- mutation: the exact-type guard of `self` -------------------------------------------------------
 
-GUARD_PROBE = '''
+GUARD_PROBE = COMPILED_SHIM + '''
 import sys
 from pathlib import Path
 sys.path.insert(0, {main!r})
@@ -887,7 +893,7 @@ def run_main(path_or_module, n):
 
 
 def test_binary_trees_with_check_as_a_method_compiles_and_matches(tmp_path):
-    text = "# typedpython: compiled\n" + method_form(BINARY_TREES.read_text())
+    text = decorate_compiled(method_form(BINARY_TREES.read_text()))
     path = tmp_path / "bt_method.py"
     path.write_text(text)
     result = pipeline.compile_module(path, tmp_path / "out")
@@ -921,8 +927,8 @@ EXPECTED = {
 @pytest.mark.parametrize("name", sorted(EXPECTED))
 def test_the_benchmarks_compile_the_same_functions_as_before(tmp_path, name):
     path = tmp_path / f"{name}.py"
-    path.write_text("# typedpython: compiled\n" + (REPO / "benchmarks" / "typedpython" / "py"
-                                                    / f"{name}.py").read_text())
+    path.write_text(decorate_compiled((REPO / "benchmarks" / "typedpython" / "py"
+                                       / f"{name}.py").read_text()))
     proved, diags = verify.verify(frontend.lower(path))
     proved, diags = cost.apply(proved, diags)
     assert {f.name for f in proved.functions} == EXPECTED[name]
