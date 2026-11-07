@@ -45,6 +45,19 @@ tasks.register("publishAllToMavenLocal") {
     dependsOn(gradle.includedBuild("python-multiplatform-gradle-plugin").task(":publishToMavenLocal"))
 }
 
+// Maven Central (ROADMAP 15.1): one entry point that fills build/central-staging with all three
+// components. Signed when MAVEN_GPG_PRIVATE_KEY is set (gradle/central-publishing.gradle.kts).
+// It does not clean the directory (the plugin build is another build, so ordering cannot reach
+// it): .github/scripts/release/central-bundle.sh empties it first.
+tasks.register("publishAllToCentralStaging") {
+    group = "publishing"
+    description = "Publishes python-multiplatform, python-multiplatform-ksp and " +
+        "python-multiplatform-gradle-plugin (with its plugin marker) to build/central-staging."
+    dependsOn(":python-multiplatform:publishAllToCentralStaging")
+    dependsOn(":python-multiplatform-ksp:publishAllToCentralStaging")
+    dependsOn(gradle.includedBuild("python-multiplatform-gradle-plugin").task(":publishAllToCentralStaging"))
+}
+
 // The build's single Kotlin/Wasm npm lock (one workspace for every wasm module) lives next to the
 // version catalog instead of a root `kotlin-js-store/` (issue #110). KGP only allows this on the
 // root project; the `*Property` forms are the non-deprecated API from Kotlin 2.4 on. Mismatch

@@ -2789,47 +2789,11 @@ publishing {
             artifact(wasmBrowserRuntimeZip)
         }
     }
-    publications.withType<MavenPublication>().configureEach {
-        //artifact(javadocJar)
-        groupId = groupId
-        artifactId = artifactId
-        version = version
-
-        pom {
-            name.set("python-multiplatform")
-            description.set("A multiplatform solution to use Python with Kotlin interoperably.")
-            url.set("https://github.com/thisisthepy/python-multiplatform-mobile")
-            licenses {
-                license {
-                    name.set("The Apache License, Version 2.0")
-                    url.set("https://www.apache.org/licenses/LICENSE-2.0.txt")
-                }
-            }
-            developers {
-                developer {
-                    id.set("thisisthepy")
-                    name.set("thisisthepy")
-                    email.set("thisisthepy@gmail.com")
-                }
-            }
-            scm {
-                connection.set("scm:git:github.com/thisisthepy/python-multiplatform-mobile.git")
-                developerConnection.set("scm:git:ssh://github.com/thisisthepy/python-multiplatform-mobile.git")
-                url.set("https://github.com/thisisthepy/python-multiplatform-mobile")
-            }
-        }
-    }
 }
 
-//signing {
-//    useInMemoryPgpKeys(
-//        rootProject.extra["signing_key_id"] as String,
-//        rootProject.extra["signing_secret_key"] as String,
-//        rootProject.extra["signing_password"] as String
-//    )
-//    sign(publishing.publications)
-//}
-
+// POM metadata, the sources and javadoc jars, the centralStaging repository and the in-memory GPG
+// signing (only when MAVEN_GPG_PRIVATE_KEY is set) for Maven Central: ROADMAP 15.1.
+apply(from = rootProject.file("gradle/central-publishing.gradle.kts"))
 
 fun downloadPythonBuilds() {
     // Moved to task `downloadAllPythonBuilds`

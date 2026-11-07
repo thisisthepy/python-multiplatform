@@ -418,3 +418,5 @@ tasks.test {
     inputs.files(walkerFixtureKlib).withPropertyName("walkerFixtureKlib").withPathSensitivity(PathSensitivity.NAME_ONLY)
     systemProperty("python.multiplatform.walkerFixtureKlib", walkerFixtureKlib.singleFile.absolutePath)
 }
+
+apply(from = rootDir.resolve("../gradle/central-publishing.gradle.kts"))

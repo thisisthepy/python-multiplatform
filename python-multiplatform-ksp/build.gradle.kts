@@ -48,3 +48,5 @@ publishing {
         }
     }
 }
+
+apply(from = rootProject.file("gradle/central-publishing.gradle.kts"))
