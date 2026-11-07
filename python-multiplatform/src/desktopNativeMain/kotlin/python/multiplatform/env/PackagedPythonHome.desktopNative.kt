@@ -1,12 +1,8 @@
 package python.multiplatform.env
 
 import kotlinx.cinterop.ExperimentalForeignApi
-import kotlinx.cinterop.alloc
-import kotlinx.cinterop.memScoped
-import kotlinx.cinterop.ptr
-import platform.posix.S_IFDIR
-import platform.posix.S_IFMT
-import platform.posix.stat
+import platform.posix.closedir
+import platform.posix.opendir
 
 /**
  * The directory containing the running executable, or null when the OS cannot report it.
@@ -67,12 +63,16 @@ internal object DesktopNativePythonHome {
         return null
     }
 
-    /** `stat(2)`'s answer: a directory exists at [path] (a regular file there is not one). */
+    /**
+     * A directory exists at [path] (a regular file there is not one): `opendir(3)` succeeds only on
+     * a directory. Not `stat(2)`: `st_mode` is 16 bits on macOS and 32 on Linux, and the metadata
+     * compilation of this shared source set, which publishing runs, rejects that mismatch.
+     */
     @OptIn(ExperimentalForeignApi::class)
-    internal fun isDirectory(path: String): Boolean = memScoped {
-        val info = alloc<stat>()
-        if (stat(path, info.ptr) != 0) return false
-        (info.st_mode.toInt() and S_IFMT) == S_IFDIR
+    internal fun isDirectory(path: String): Boolean {
+        val dir = opendir(path) ?: return false
+        closedir(dir)
+        return true
     }
 }
 
