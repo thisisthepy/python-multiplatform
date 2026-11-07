@@ -792,9 +792,11 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   The Gradle task declares exact inputs and outputs so up-to-date checks and the build cache apply.
   Tests: changing one function body recompiles that module only; an unchanged rebuild spends ~0 s in
   the compile step. `Status: partial`: the per-module cache and its key are implemented in Python
-  (`incremental.py`, `pipeline.compile_project`; `test_incremental.py`, `test_pipeline_incremental.py`);
-  the Gradle task with declared inputs and outputs does not exist yet, because compiled modules are built
-  through pypackpack's compile slot (#25).
+  (`incremental.py`, `pipeline.compile_project`; `test_incremental.py`, `test_pipeline_incremental.py`),
+  and the Gradle `emit-c` task with declared inputs and outputs is implemented in
+  `python-multiplatform-gradle-plugin` (#25, step 2; `TypedPythonEmitCTask.kt`,
+  `TypedPythonEmitCTaskTest.kt`); wiring the resulting `nativeModules` / `notNativeModules` into
+  pypackpack's compile slot in the bundler (#25, step 3) remains.
   For that slot, `pipeline.generate_project` caches source to C instead of source to extension (#113):
   one `.c` per compiled module plus the directory of the header-only `tp_runtime.h`; its key is the
   source, the dependency interface hashes and the compiler version (which covers the runtime header),
@@ -813,6 +815,15 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `includeDirs` the runtime header directory; paths are absolute. Exit status 0 (manifest written), 1
   (a gate error; no manifest), 2 (the gate could not run). The C compiler is never run. The format is
   fixed in `docs/design/typedpython.md` §4.3.2a. Tests: `test_emit_c.py`.
+  `TypedPythonEmitCTask` in `python-multiplatform-gradle-plugin` (#25, step 2) runs
+  `python -m typedpython emit-c` with declared Gradle inputs (`@InputFiles` `sources` with
+  `PathSensitivity.RELATIVE` and `@SkipWhenEmpty`, `@Input` `pythonExecutable` and `@Optional @InputFiles`
+  `pythonPath` with `PathSensitivity.RELATIVE`) and outputs (`@OutputDirectory` `cacheDirectory` and
+  `@OutputFile` `manifestFile`), fails with `GradleException` naming the stderr diagnostics on exit 1 or 2,
+  and parses the written v1 manifest into `TypedPythonEmitCManifest` (`nativeModules` mapped to
+  `ExtensionModuleSource(moduleName, sources, includeDirs, defines)` and `notNativeModules` mapped to
+  `NotNativeModule(module, kind, items)` with `SkippedItem(name, file, line, message)`). Tests:
+  `TypedPythonEmitCTaskTest.kt`.
 - **N-11** TypedPython fixed-layout classes (M2b, 2026-11-21; design §4.3.3). A class compiles to fixed
   field access only when its layout is fixed **in CPython too**: it declares `__slots__` listing exactly
   its annotated instance fields, has no base but `object`, no metaclass, no decorator but `@compiled`,
