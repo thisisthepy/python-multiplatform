@@ -428,6 +428,20 @@ def test_gen_uses_only_the_runtime_helpers_for_slots():
     assert "PyMember_" not in text and "tp_alloc" not in text and "->tp_dictoffset" not in text
 
 
+def test_new_fixed_fills_its_fresh_object_with_direct_release_stores():
+    """#125: a New allocates its object and fills every slot before control can reach a safepoint, so
+    no other thread holds the object yet. tp_new_fixed stores each new reference straight into the
+    slot (release store, as PyMember_SetOne's free-threaded store) instead of taking the member
+    protocol's per-object critical section for every slot."""
+    from typedpython import cbuild
+    h = (cbuild.RUNTIME_DIR / "tp_runtime.h").read_text()
+    start = h.index("static inline PyObject *tp_new_fixed(")
+    body = h[start:h.index("\n}\n", start)]
+    assert "PyMember_SetOne" not in body and "CRITICAL_SECTION" not in body, body
+    assert "__atomic_store_n(" in body and "__ATOMIC_RELEASE" in body, body
+    assert "Py_NewRef(" in body, body                     # the slot owns its own reference
+
+
 # --- refcounts ---------------------------------------------------------------------------------------------
 
 def test_reference_counts_are_unchanged_over_many_calls(m):
@@ -454,8 +468,14 @@ def test_reference_counts_are_unchanged_over_many_calls(m):
                 pass
 
     churn(20)                                               # warm up caches, then measure
-    counts = lambda: (sys.getrefcount(shared), sys.getrefcount(node), sys.getrefcount(m.Node),
-                      sys.getrefcount(m.Sub), sys.getrefcount(bare))
+    def counts():
+        # Free-threaded CPython (#159): a heap type is deferred-refcounted, and sys.getrefcount of it
+        # returns a flagged value (bit 60) whose count moves as thread-local counts are merged, with
+        # no change in what holds the type. Only a value without the flag is a real count.
+        deferred = 1 << 60
+        types = tuple(None if (n := sys.getrefcount(t)) >= deferred else n for t in (m.Node, m.Sub))
+        return (sys.getrefcount(shared), sys.getrefcount(node), sys.getrefcount(bare)) + types
+
     base = counts()
     churn(3000)
     assert counts() == base, (base, counts())

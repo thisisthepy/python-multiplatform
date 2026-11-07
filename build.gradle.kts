@@ -4,30 +4,61 @@ plugins {
     alias(libs.plugins.android.application).apply(false)
     alias(libs.plugins.android.library).apply(false)
     alias(libs.plugins.jetpack.compose).apply(false)
+    alias(libs.plugins.kotlin.native.desktop).apply(false)
     alias(libs.plugins.compose.compiler).apply(false)
     alias(libs.plugins.kotlin.multiplatform).apply(false)
     alias(libs.plugins.kotlin.jvm).apply(false)
     alias(libs.plugins.ksp).apply(false)
 }
 
+// One published version for every artifact (#70): "$pythonVersion-$libraryVersionSuffix", the same
+// value python-multiplatform and the included Gradle-plugin build derive from gradle.properties.
+val publishedVersion = "${property("pythonVersion")}-${property("libraryVersionSuffix")}"
+
 allprojects {
-    group = "io.github.thisisthepy"
-    version = "3.13.0"  // Official Python release version
+    group = "org.thisisthepy"
+    version = publishedVersion
+}
+
+// Fails the build when any project in this build publishes under another version; the plugin build
+// checks its own the same way (python-multiplatform-gradle-plugin/build.gradle.kts).
+gradle.projectsEvaluated {
+    val wrong = rootProject.allprojects.filter { it.version.toString() != publishedVersion }
+    check(wrong.isEmpty()) {
+        "published versions disagree (#70): expected $publishedVersion, got " +
+            wrong.joinToString { "${it.path}=${it.version}" }
+    }
 }
 
 // ROADMAP §15a/§15e item 3: `python-multiplatform-gradle-plugin` is a separate included build
 // (see `pluginManagement { includeBuild(...) }` in settings.gradle.kts), so its tasks never join
 // the root task graph -- `./gradlew tasks --all` from here lists none of them, and a coordinator
 // publishing only what the root build shows would silently skip it. This task does not change how
-// any of the three components publish (each already has its own `maven-publish` config); it only
-// gives the root build one entry point that reaches all three.
+// any component publishes (each already has its own `maven-publish` config); it only gives the root
+// build one entry point that reaches all of them (the Compose host included).
 tasks.register("publishAllToMavenLocal") {
     group = "publishing"
-    description = "Publishes python-multiplatform, python-multiplatform-ksp, and " +
+    description = "Publishes python-multiplatform, python-multiplatform-ksp, python-multiplatform-compose and " +
         "python-multiplatform-gradle-plugin (including its plugin-marker publication) to mavenLocal()."
     dependsOn(":python-multiplatform:publishToMavenLocal")
     dependsOn(":python-multiplatform-ksp:publishToMavenLocal")
+    dependsOn(":python-multiplatform-compose:publishToMavenLocal")
     dependsOn(gradle.includedBuild("python-multiplatform-gradle-plugin").task(":publishToMavenLocal"))
+}
+
+// Maven Central (ROADMAP 15.1): one entry point that fills build/central-staging with every
+// component (library, KSP processor, Compose host, Gradle plugin). Signed when MAVEN_GPG_PRIVATE_KEY
+// is set (gradle/central-publishing.gradle.kts).
+// It does not clean the directory (the plugin build is another build, so ordering cannot reach
+// it): .github/scripts/release/central-bundle.sh empties it first.
+tasks.register("publishAllToCentralStaging") {
+    group = "publishing"
+    description = "Publishes python-multiplatform, python-multiplatform-ksp, python-multiplatform-compose and " +
+        "python-multiplatform-gradle-plugin (with its plugin marker) to build/central-staging."
+    dependsOn(":python-multiplatform:publishAllToCentralStaging")
+    dependsOn(":python-multiplatform-ksp:publishAllToCentralStaging")
+    dependsOn(":python-multiplatform-compose:publishAllToCentralStaging")
+    dependsOn(gradle.includedBuild("python-multiplatform-gradle-plugin").task(":publishAllToCentralStaging"))
 }
 
 // The build's single Kotlin/Wasm npm lock (one workspace for every wasm module) lives next to the

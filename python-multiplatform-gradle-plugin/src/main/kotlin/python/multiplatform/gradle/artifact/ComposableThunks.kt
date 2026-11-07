@@ -71,6 +71,12 @@ internal data class ThunkSpec(
      * the carrier's, read off its own class file together with the descriptor that method returns.
      */
     val valueClassUnboxOwners: List<String?> = emptyList(),
+    /**
+     * The target is an instance method of a Kotlin `object` (`ButtonDefaults.buttonColors`): the thunk
+     * pushes the owner's static `INSTANCE` first and calls with `INVOKEVIRTUAL`. The name and
+     * descriptor are still copied from the walked `MethodNode`, never looked up.
+     */
+    val onObjectInstance: Boolean = false,
 ) : Serializable
 
 /** Where generated thunk classes live. Under [ARTIFACTS_PACKAGE] so that
@@ -203,6 +209,9 @@ internal fun generateThunkClass(fragmentObjectName: String, specs: List<ThunkSpe
         )
         method.visitCode()
         val (parameters, returns) = splitMethodDescriptor(spec.descriptor)
+        if (spec.onObjectInstance) {
+            method.visitFieldInsn(Opcodes.GETSTATIC, spec.ownerInternalName, "INSTANCE", "L${spec.ownerInternalName};")
+        }
         parameters.forEachIndexed { slot, descriptor ->
             method.visitVarInsn(Opcodes.ALOAD, 0)
             method.pushInt(slot)
@@ -220,7 +229,10 @@ internal fun generateThunkClass(fragmentObjectName: String, specs: List<ThunkSpe
                 )
             }
         }
-        method.visitMethodInsn(Opcodes.INVOKESTATIC, spec.ownerInternalName, spec.methodName, spec.descriptor, false)
+        method.visitMethodInsn(
+            if (spec.onObjectInstance) Opcodes.INVOKEVIRTUAL else Opcodes.INVOKESTATIC,
+            spec.ownerInternalName, spec.methodName, spec.descriptor, false,
+        )
         method.box(returns)
         method.visitInsn(Opcodes.ARETURN)
         method.visitMaxs(0, 0)

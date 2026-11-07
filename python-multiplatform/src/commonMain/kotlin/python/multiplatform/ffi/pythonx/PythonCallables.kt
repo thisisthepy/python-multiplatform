@@ -8,7 +8,10 @@ import python.multiplatform.ffi.types.basic.PyNone
 import python.multiplatform.ffi.types.basic.PyString
 import python.multiplatform.reflection.ExposedCallable
 import python.multiplatform.reflection.FunctionTableFragment
+import python.multiplatform.ffi.withGIL
 import python.multiplatform.reflection.HandleTable
+import python.multiplatform.reflection.PlatformMutex
+import python.multiplatform.reflection.withLock
 import python.multiplatform.reflection.ObjectReference
 import python.multiplatform.reflection.TypeTag
 
@@ -64,7 +67,7 @@ import python.multiplatform.reflection.TypeTag
  *
  * So this file owns the first three quarters of that -- creating, holding and releasing -- and the
  * one Compose type involved, `RememberObserver`, stays in the module that has Compose
- * (`:ksp-fixtures:compose`'s `PythonComposition`). `docs/archive/pythonx-adapter-design.md` §6 item 1 names
+ * (`:python-multiplatform-compose:fixtures:compose`'s `PythonComposition`). `docs/archive/pythonx-adapter-design.md` §6 item 1 names
  * `onForgotten` as "the one that fails silently and should be tested first"; the seam is here and the
  * test is there.
  *
@@ -106,7 +109,7 @@ import python.multiplatform.reflection.TypeTag
  * else. Interning bounds the case that actually recurs; the sweep needed that measurement first.
  *
  * **That measurement now exists, and the verdict is that a same-pass sweep is unsafe.**
- * `:ksp-fixtures:compose`'s `RetainedSlotSweepPreconditionTest
+ * `:python-multiplatform-compose:fixtures:compose`'s `RetainedSlotSweepPreconditionTest
  * .aRetainingSlotKeepsPassZerosWrapperWhileLaterPassesCrossAndGoUntouched` drives a real
  * `remember(key)` (the mechanism `LaunchedEffect(key)` is built on) with a constant key across six
  * recompositions of one composition, each supplying a callable with a distinct capture -- so each
@@ -140,11 +143,18 @@ import python.multiplatform.reflection.TypeTag
  */
 object PythonCallables {
 
-    /** The scopes currently open, innermost last. Not synchronised, for [HandleTable]'s reason:
-     * every mutation happens on a thread that holds the GIL. */
-    private val open = ArrayList<PythonCallableScope>()
+    /**
+     * The scopes currently open **on the calling thread**, innermost last.
+     *
+     * Per thread, not global: composition runs on one thread and a scope is ambient for the extent
+     * of one `withScope` block on it. A global stack let two threads composing at once interleave
+     * their pushes and pops ("closed out of order") and made [current] answer another thread's
+     * scope. A thread with no scope open sees no scope, even while another thread has one open.
+     * The list itself is only ever touched by its own thread, so it needs no lock.
+     */
+    private val open: ArrayList<PythonCallableScope> get() = ambientScopeStack()
 
-    /** The scope a callable crossing right now belongs to, or `null` if none is open. */
+    /** The scope a callable crossing right now on this thread belongs to, or `null` if this thread has none open. */
     val current: PythonCallableScope? get() = open.lastOrNull()
 
     /** How many scopes are open. A composition that leaked one leaves this non-zero. */
@@ -358,6 +368,28 @@ object PythonCallables {
                 paramHasDefault = listOf(false),
                 callable = { args -> unboxScalar(args[0] as Long) },
             ),
+            // SPEC U-4: two proxies are `==` when they hold the same Kotlin object (identity), and hash by
+            // its identity hash; Kotlin `equals`/`hashCode` are not used. Both take raw handle numbers (INT) and release nothing.
+            ExposedCallable(
+                name = SAME_OBJECT,
+                arity = 2,
+                paramTypes = listOf(TypeTag.INT, TypeTag.INT),
+                returnType = TypeTag.BOOLEAN,
+                paramNames = listOf("left", "right"),
+                paramTypeNames = listOf("kotlin.Long", "kotlin.Long"),
+                paramHasDefault = listOf(false, false),
+                callable = { args -> sameObject(args[0] as Long, args[1] as Long) },
+            ),
+            ExposedCallable(
+                name = HASH_OF,
+                arity = 1,
+                paramTypes = listOf(TypeTag.INT),
+                returnType = TypeTag.INT,
+                paramNames = listOf("handle"),
+                paramTypeNames = listOf("kotlin.Long"),
+                paramHasDefault = listOf(false),
+                callable = { args -> hashOf(args[0] as Long) },
+            ),
         )
 
         private fun boxEntry(name: String, tag: TypeTag, typeName: String, box: (Any?) -> Any): ExposedCallable =
@@ -411,6 +443,17 @@ object PythonCallables {
         return python.multiplatform.ffi.upcall.ScalarResult(held)
     }
 
+    /** Reference identity (`===`) of the objects two live handles name; a stale or null handle is nothing. */
+    internal fun sameObject(left: Long, right: Long): Boolean {
+        val a = HandleTable.resolveRaw(left) ?: return false
+        val b = HandleTable.resolveRaw(right) ?: return false
+        return a === b
+    }
+
+    /** Identity hash of the object a live handle names; a stale handle hashes to 0. Kotlin `hashCode` is not used. */
+    internal fun hashOf(raw: Long): Long =
+        (HandleTable.resolveRaw(raw)?.let { python.multiplatform.reflection.identityHashOf(it) } ?: 0).toLong()
+
     /** The name the binding layer resolves. Shared so the Python source and the entry cannot drift. */
     internal const val NEW_FUNCTION: String = "python.multiplatform.ffi.pythonx.PythonCallables.newFunction"
 
@@ -432,6 +475,12 @@ object PythonCallables {
     /** @see boxScalar */
     internal const val BOX_STRING: String = "python.multiplatform.ffi.pythonx.PythonCallables.boxString"
 
+    /** @see sameObject */
+    internal const val SAME_OBJECT: String = "python.multiplatform.ffi.pythonx.PythonCallables.sameObject"
+
+    /** @see hashOf */
+    internal const val HASH_OF: String = "python.multiplatform.ffi.pythonx.PythonCallables.hashOf"
+
     /** @see unboxScalar */
     internal const val UNBOX_SCALAR: String = "python.multiplatform.ffi.pythonx.PythonCallables.unboxScalar"
 }
@@ -444,6 +493,13 @@ object PythonCallables {
  * only hook that reports a slot being dropped.
  */
 class PythonCallableScope internal constructor() {
+
+    // Threading rules: every field below is guarded by [lock]. Composition (add, reuse), invocation
+    // and close() reach one scope from different threads. A critical section touches only Kotlin
+    // collections and counters, plus HandleTable.register (its own mutex, taken inside this one,
+    // never the reverse). It never calls Python and never closes a PyObject: those happen after the
+    // lock is released, so the scope lock is never held while waiting for the GIL.
+    private val lock = PlatformMutex()
 
     private val bodies = ArrayList<PyObject>()
     private val roots = ArrayList<ObjectReference>()
@@ -476,7 +532,7 @@ class PythonCallableScope internal constructor() {
     private var reused = 0
 
     /** How many callables this scope is currently holding a Python reference for. */
-    val liveCount: Int get() = bodies.size
+    val liveCount: Int get() = lock.withLock { bodies.size }
 
     /**
      * How many crossings were answered out of [interned] instead of building a wrapper.
@@ -485,52 +541,104 @@ class PythonCallableScope internal constructor() {
      * a `content=` that stopped reaching Kotlin would leave [liveCount] at 1 as well, and only this
      * says the later passes were served rather than skipped.
      */
-    val reuseCount: Int get() = reused
+    val reuseCount: Int get() = lock.withLock { reused }
 
     /** Whether [close] has already run. A wrapper checks this before touching its `PyObject`. */
-    val isClosed: Boolean get() = closed
+    val isClosed: Boolean get() = lock.withLock { closed }
 
     /** The handle already issued for [internKey], or [ObjectReference.NONE_RAW]. */
-    internal fun reuse(internKey: String): Long {
+    internal fun reuse(internKey: String): Long = lock.withLock { reuseLocked(internKey) }
+
+    private fun reuseLocked(internKey: String): Long {
         if (internKey.isEmpty() || closed) return ObjectReference.NONE_RAW
         val found = interned[internKey] ?: return ObjectReference.NONE_RAW
         reused++
         return found
     }
 
+    /**
+     * Stores [body] and its wrapper, and answers the handle.
+     *
+     * Reference convention: this call takes ownership of [body]'s reference only when it stores it.
+     * In the two cases where it does not, it closes [body] itself (outside the lock): the key was
+     * filled by a concurrent add, in which case the existing handle is answered; or the scope was
+     * closed before this call got the lock, in which case it throws [IllegalStateException] and
+     * nothing was registered (the same failure a callable gets with no scope open).
+     */
     internal fun add(body: PyObject, erased: Any, internKey: String): Long {
-        val root = HandleTable.register(erased)
-        bodies.add(body)
-        roots.add(root)
-        // An empty key is "this callable has no structure to key on" -- a C builtin, say. It gets a
-        // wrapper per crossing, which is what everything got before this table existed.
-        if (internKey.isNotEmpty()) interned[internKey] = root.raw
-        return root.raw
+        var existing = ObjectReference.NONE_RAW
+        var rejected = false
+        var raw = ObjectReference.NONE_RAW
+        lock.withLock {
+            if (closed) {
+                rejected = true
+            } else {
+                existing = reuseLocked(internKey)
+                if (existing == ObjectReference.NONE_RAW) {
+                    val root = HandleTable.register(erased)
+                    bodies.add(body)
+                    roots.add(root)
+                    // An empty key is "this callable has no structure to key on" -- a C builtin, say. It gets a
+                    // wrapper per crossing, which is what everything got before this table existed.
+                    if (internKey.isNotEmpty()) interned[internKey] = root.raw
+                    raw = root.raw
+                }
+            }
+        }
+        if (rejected) {
+            body.close()
+            throw IllegalStateException(
+                "the pythonx callable scope was closed while a Python callable was being added to it",
+            )
+        }
+        if (existing != ObjectReference.NONE_RAW) {
+            body.close()
+            return existing
+        }
+        return raw
     }
 
     /**
-     * Gives every Python reference back and unroots every wrapper.
+     * Takes a reference of the caller's own on the body, or
+     * throws if the scope is closed. The closed check and the reference are taken under one lock
+     * hold, so [close] cannot decref [body] between them. The caller must be attached to Python
+     * (it is inside [withGIL]) and owns the returned wrapper: it must close it.
+     */
+    internal fun acquire(body: PyObject): PyObject = lock.withLock {
+        check(!closed) {
+            "this Python callable was released with its composition and cannot be invoked: the " +
+                "scope that held it is closed"
+        }
+        // borrowed = true: the constructor takes a new reference for this wrapper.
+        PyObject(body.pointer, borrowed = true)
+    }
+
+    /**
+     * Releases every wrapper and body. Idempotent, safe from any thread; the call that wins the
+     * lock does the releasing and answers the count, every other answers `0`.
      *
-     * @return how many callables this call actually released -- `0` for every call after the first.
-     *   A count rather than a `Boolean` so that a test can assert both "the scope held what it said
-     *   it held" and "the second close released nothing", which are different failures.
+     * Under the lock only the state is taken (flag set, collections snapshotted and cleared); the
+     * releases run after it, so no Python call happens while the lock is held.
      */
     fun close(): Int {
-        if (closed) return 0
-        closed = true
-        val released = bodies.size
-        for (root in roots) HandleTable.release(root)
+        var rootsSnapshot: List<ObjectReference> = emptyList()
+        var bodiesSnapshot: List<PyObject> = emptyList()
+        lock.withLock {
+            if (closed) return 0
+            closed = true
+            rootsSnapshot = ArrayList(roots)
+            bodiesSnapshot = ArrayList(bodies)
+            roots.clear()
+            bodies.clear()
+            // Cleared in the same hold: a key left behind would name a released root.
+            interned.clear()
+        }
+        for (root in rootsSnapshot) HandleTable.release(root)
         // `PyObject.close()` runs the registered cleanup action, which every platform's cleaner
         // performs at most once -- so the decref here cannot be doubled by a later collection of the
         // same wrapper.
-        for (body in bodies) body.close()
-        roots.clear()
-        bodies.clear()
-        // Cleared last and unconditionally: a key left behind would name a released root, and
-        // `reuse` would hand it out. The `closed` guard in `reuse` covers the same case twice on
-        // purpose -- one of them is a policy and the other is the thing that makes it true.
-        interned.clear()
-        return released
+        for (body in bodiesSnapshot) body.close()
+        return bodiesSnapshot.size
     }
 }
 
@@ -577,11 +685,13 @@ internal class PythonFunction(
     }
 
     private fun invoke(args: Array<Any?>) {
-        check(!scope.isClosed) {
-            "this Python callable was released with its composition and cannot be invoked: the " +
-                "scope that held it is closed"
-        }
-        PythonCallables.withScope(scope) {
+        // Attached before the scope lock is taken, so the lock is never waited on while holding the
+        // GIL's attach in the other order. The extra reference (a wrapper of this frame's own, taken
+        // under the scope lock together with the closed check) keeps the body alive across the call
+        // even if close() runs now; it is closed in the finally below.
+        val held = withGIL { scope.acquire(body) }
+        try {
+          PythonCallables.withScope(scope) {
             // The composer Compose established for *this* invocation, which is not necessarily the
             // one that was ambient when the lambda crossed. `$changed` -- the last argument -- is
             // the caller's claim about argument staticness and is not Python's to read. Everything
@@ -602,13 +712,17 @@ internal class PythonFunction(
                     // the call it guards.
                     if (composerRoot != null) marshalled += PyInt.from(composerRoot.raw)
                     for (i in argTags.indices) marshalled += marshalAn(argTags[i], args[i])
-                    body(*marshalled.toTypedArray()).close()
+                    held(*marshalled.toTypedArray()).close()
                 } finally {
                     for (value in marshalled) value.close()
                 }
             } finally {
                 if (composerRoot != null) HandleTable.release(composerRoot)
             }
+          }
+        } finally {
+            // Closes the wrapper made by acquire: the extra reference is released exactly once.
+            held.close()
         }
     }
 

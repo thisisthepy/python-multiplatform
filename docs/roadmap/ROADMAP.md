@@ -99,20 +99,20 @@ String-carrying operations: **closed**, interning beats composing on every API l
 
 Closed in its core: build-time table, KSP generator, one entry point per platform, generated proxies,
 `tp_traverse` handle slot on all five targets, GraalVM native image (SPEC U-1…U-6, M-3, M-4;
-`ksp-fixtures/app/src/desktopTest/`, `PM/commonTest/.../reflection/UpcallTableTest.kt`,
+`python-multiplatform-ksp/fixtures/app/src/desktopTest/`, `PM/commonTest/.../reflection/UpcallTableTest.kt`,
 `PM/*Test/.../ref/CycleCollectionTest.kt`). Upcall cost is measured
 (`PM/commonTest/.../reflection/UpcallOverheadTest.kt`, `PM/commonTest/.../ffi/upcall/GeneratedProxyCostTest.kt`).
 
 - **7.1 Generated proxies exercised outside desktop, partial.** SPEC U-3: the full proxy behaviour
   (construct, methods, properties, companions) is asserted on desktop only; outside it there are
-  `ksp-fixtures/app/src/androidNativeArm64Test/.../NativeSmokeTest.kt` and
-  `ksp-fixtures/android/.../GeneratedAndroidTableTest.kt`. The KSP-generated-proxy cycle proof
-  (`ksp-fixtures/app/src/desktopTest/.../RefHolderCycleCollectionTest.kt`) likewise exists on desktop
-  only, because `ksp-fixtures/app` has no iOS or device leaf; other targets prove the slot with a
+  `python-multiplatform-ksp/fixtures/app/src/androidNativeArm64Test/.../NativeSmokeTest.kt` and
+  `python-multiplatform-ksp/fixtures/android/.../GeneratedAndroidTableTest.kt`. The KSP-generated-proxy cycle proof
+  (`python-multiplatform-ksp/fixtures/app/src/desktopTest/.../RefHolderCycleCollectionTest.kt`) likewise exists on desktop
+  only, because `python-multiplatform-ksp/fixtures/app` has no iOS or device leaf; other targets prove the slot with a
   hand-built subclass (`PM/nativeTest/.../CycleCollectionTest.kt`).
 - **7.2 Extension functions as methods on KSP-generated proxies, partial.** SPEC U-7: asserted for a
   hand-written table (`PM/commonTest/.../pythonx/PythonxAdapterTest.kt`) and for walked jars
-  (`ksp-fixtures/artifact/.../WalkedArtifactComposeModifierTest.kt`); not for a table KSP generated.
+  (`python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactComposeModifierTest.kt`); not for a table KSP generated.
 - **7.3 Incremental KSP, open (deferred design change).** A one-file change regenerates the
   module's whole `Fragment_<module>` (100 % dirty, measured with `ksp.incremental.log`). The only
   route is per-file fragments, which changes fragment naming and `UpcallTable`'s duplicate detection;
@@ -187,7 +187,7 @@ cycles, interning and `Py_ssize_t` are closed (`PM/wasmJsTest/`: `WasmFinalizati
 `WasmCycleCollectionTest`, `WasmPySsizeTBoundaryTest`, `WasmBrowserRuntimeTest`,
 `WasmSelectorsImportTest`); the plugin stages the runtime for consumers
 (`GP/main/kotlin/python/multiplatform/gradle/WasmBrowserRuntimeStaging.kt`,
-`GenerateWasmProxyExportsTask.kt`). The interpreter is built by `tools/wasm/build-cpython.sh`
+`GenerateWasmProxyExportsTask.kt`). The interpreter is built by `python-multiplatform/scripts/wasm/build-cpython.sh`
 (`docs/platforms/wasm-design.md`). Old §10c/§10d (browser test, CI split) are closed; their open
 remainder is 10.1.
 
@@ -212,7 +212,7 @@ remainder is 10.1.
   staged by the plugin; it was never run in a browser, and no production bundler other than the
   Kotlin Gradle webpack setup was tried (also `docs/design/ecosystem.md` §5 "Unverified").
 - **10.5 The wasm CPython build lacks lzma, zstd and OpenSSL, open.** Listed as "NOT DONE" in
-  `tools/wasm/build-cpython.sh`'s header; ABI-sensitive per the Pyodide flag list, though they did not
+  `python-multiplatform/scripts/wasm/build-cpython.sh`'s header; ABI-sensitive per the Pyodide flag list, though they did not
   gate the one compiled wheel tested (`WasmCompiledWheelTest`).
 - **10.6 The sample's wasm upcall line (`presses x3 = 0`) was never cross-checked against desktop,
   unverified, minor.**
@@ -257,16 +257,16 @@ pre-release URL, `PyList.subList` (a live `PySubList`), the `TODO` triage, `runM
 ## 13. The sample, and the AGP version that shapes it
 
 The sample runs on desktop, Android (both emulators), the iOS simulator and in a browser; the bindings
-plugin applies to Android modules (AGP 8.10.1); `ksp-fixtures/android` exists; the generated
+plugin applies to Android modules (AGP 8.10.1); `python-multiplatform-ksp/fixtures/android` exists; the generated
 `installGeneratedUpcallTable` `actual` reaches intermediate source sets; the per-platform upcall
 trampolines exist. GraalVM native image upcalls are verified by hand
 (`docs/platforms/graal-native-image-verification.md`, `PM/desktopTest/.../ReachabilityMetadataTest.kt`).
 
 - **13.1 The iOS app bundle carries no Python standard library, implemented, simulator proof
   open.** SPEC L-11, issue #59, `docs/platforms/ios-app-bundle.md`: per-slice staging
-  (`stageIosPythonHome_*`, `stageIosPythonHomeForXcode`), `tools/xcode/install-python.sh` (stdlib to
+  (the plugin's `stageIosPythonHome_*`, `stageIosPythonHomeForXcode`; #321 moved them out of `python-multiplatform/build.gradle.kts`), `python-multiplatform-gradle-plugin/src/main/resources/xcode/install-python.sh` (stdlib to
   `<app>/python-multiplatform-home/`, payload to `<app>/python/`, `.so` wrapped as frameworks with
-  `.fwork` placeholders) replacing `iosApp/`'s two broken phases, and `IosPythonHome` +
+  `.fwork` placeholders) replacing the two broken phases of the old root `iosApp/` (now `sample/src/iosMain/app.xcodeproj`, #107), and `IosPythonHome` +
   `Py_SetPythonHome` at run time. Left: the installed-app run on the simulator with no
   `SIMCTL_CHILD_*` (the page's "Checking it"); a device run; and a way for consumers outside this
   repository to stage the stdlib (the iOS archive download is in this build script, not the plugin).
@@ -300,17 +300,21 @@ stripped), the root metadata jar is 382 KB, `PythonBootstrap` stages the Android
 desktop stdlib (`GP/test/kotlin/python/multiplatform/gradle/PythonHomeStagingTest.kt`, SPEC L-4).
 Old §15a, §15b, §15d, §15f, §15g, §15h are closed; §15e item 4 is closed by §15h.
 
-- **15.1 Nothing is published to a remote repository, open.** No publishing repository or signing is
-  configured (`signing { }` is commented out in `python-multiplatform/build.gradle.kts`), and
-  `repo1.maven.org/maven2/io/github/thisisthepy/python-multiplatform/` returns 404 (2026-10-03).
-  Every consumer verification so far used `mavenLocal()`. 10.1 depends on this or on a release asset.
-- **15.2 The KSP processor and plugin versions are hand-copied literals, open.** Root
-  `build.gradle.kts` `allprojects { version = "3.13.0" }` (inherited by `python-multiplatform-ksp`) and
-  `python-multiplatform-gradle-plugin/build.gradle.kts` `version = "3.13.0"` agree only by hand, while
-  the library publishes `3.14.7-alpha01` from `gradle.properties`. The plugin bakes
-  `DEFAULT_PROCESSOR_COORDINATES` from its own version, so the two literals drifting would reproduce
-  the "processor coordinate that exists nowhere" defect with no configuration-time error. A check, or
-  one source for both, is what is left.
+- **15.1 Maven Central publishing, implemented, first upload pending (#375).** All three components
+  (the library for every target, the KSP processor, the Gradle plugin with its plugin marker) carry
+  Central POM metadata, sources and javadoc jars and in-memory GPG signing
+  (`gradle/central-publishing.gradle.kts`, signing only when `MAVEN_GPG_PRIVATE_KEY` is set, so
+  `publishToMavenLocal` still works without keys). `./gradlew publishAllToCentralStaging` fills
+  `build/central-staging`; `.github/scripts/release/central-bundle.sh` signs, checks and zips it, and
+  `.github/workflows/maven-central.yml` (version tag, or manual with a `dry_run` input) builds on macOS and
+  uploads one deployment to the Central Portal (`central-upload.sh`, environment `maven-central`). The
+  dry run signs with a throwaway key and uploads nothing. Open: the first real upload (needs the
+  secrets, only CI can show Central accepting the deployment), and `repo1.maven.org/maven2/org/thisisthepy/`
+  does not list the artifacts until then. 10.1 depends on this or on a release asset.
+- **15.2 The library, KSP processor and plugin publish under one version, done (#70).** Each build
+  derives it from `gradle.properties` (`$pythonVersion-$libraryVersionSuffix`, a `-P` override included);
+  the root build fails when a project's version differs, and `PublishedVersionTest` pins the processor
+  and wasm-runtime coordinates the plugin bakes to that version.
 - **15.3 `stagePythonHome` has run only on `macos-aarch64`, partial.** Linux-x86_64, macOS-x86_64 and
   Windows-x86_64 are pinned as string assertions in `PythonHomeStagingTest`; Windows' `Lib/`+`DLLs/`
   layout and `linux-aarch64` (no `libpython` in `desktopJar`, relies on `manager.loadFromSidecar`) have
@@ -334,7 +338,7 @@ Old §15a, §15b, §15d, §15f, §15g, §15h are closed; §15e item 4 is closed 
 
 The walker binds jar declarations, statics, top-level functions, extensions, constructors, value
 classes, defaults, callbacks, `@Composable`s, by generating Kotlin source (SPEC B-1, B-3, B-4, B-6;
-`GP/test/.../artifact/ArtifactScannerTest.kt`, `ksp-fixtures/artifact/`, `ksp-fixtures/compose/`),
+`GP/test/.../artifact/ArtifactScannerTest.kt`, `python-multiplatform-gradle-plugin/fixtures/artifact/`, `python-multiplatform-compose/fixtures/compose/`),
 reads Kotlin metadata (`GP/main/.../artifact/KotlinMetadata.kt`), walks klibs through an isolated
 worker (`KlibScanner.kt`, `KlibScanWorkAction.kt`), and takes several targets (`artifactTargets`,
 `GP/test/.../ArtifactTargetsWiringTest.kt`). Consumers bootstrap `_pm_resolve`/`_pm_invoke` through
@@ -342,11 +346,11 @@ worker (`KlibScanner.kt`, `KlibScanWorkAction.kt`), and takes several targets (`
 description, §16e/§16f's open remainder is below.
 
 - **16.1 klib declarations bound at run time, partial.** SPEC B-2/N-3. `KlibScannerTest` reads real
-  klibs and declines with reasons; `ksp-fixtures/klib-artifact` walks
+  klibs and declines with reasons; `python-multiplatform-gradle-plugin/fixtures/klib-artifact` walks
   `androidNativeArm64CompileKlibraries` through the plugin, but the namespace it walks
   (`kotlinx.coroutines`) yields **zero** bindings by design, so a successful read and a silently
   failed one still produce the same empty `ArtifactTable`
-  (`ksp-fixtures/klib-artifact/src/androidNativeArm64Test/.../WalkedKlibArtifactTableTest.kt`). And no
+  (`python-multiplatform-gradle-plugin/fixtures/klib-artifact/src/androidNativeArm64Test/.../WalkedKlibArtifactTableTest.kt`). And no
   Gradle task runs that fixture's tests, they are compiled and linked, and run only by pushing
   `test.kexe` by hand. Next: a namespace that yields at least one binding, and a run task.
 - **16.2 The product klib path under a Kotlin version skew, open.** `KlibScannerTest` reads klibs
@@ -361,7 +365,7 @@ description, §16e/§16f's open remainder is below.
   SPEC B-5; pinned red-by-design by `M3ProofRenderTest.aValueReturningFunctionSlotDoesNotYetAcceptAPythonCallable`.
 - **16.6 `.pyi` stubs for handle-returning functions are not wrapped, open.** SPEC B-7.
 - **16.7 Compose through Python on Android, iOS and wasm, open.** SPEC B-6/N-2: the render proofs
-  (`ksp-fixtures/compose/src/desktopTest/`) are desktop only.
+  (`python-multiplatform-compose/fixtures/compose/src/desktopTest/`) are desktop only.
 - **16.8 Two material3 components not reachable from Python, open.** The dynamic `ColorScheme`
   factory is Android-only. Since #73 the class name resolves to `ColorScheme`'s own constructor (its
   `Color` parameters no longer hide it), which needs every colour written out; nothing renders with one
@@ -375,7 +379,7 @@ From `docs/design/ecosystem.md` §5, "What each repository owes, PythonMultiplat
 the `@Composable` callable shape, the `sys.meta_path` finder (`_Finder` in
 `PM/commonMain/kotlin/python/multiplatform/ffi/pythonx/PythonxAdapter.kt`, tested in
 `PythonxAdapterTest.kt`), the `Composer` hand-off and Python-callable lifetime across recompositions
-(`ksp-fixtures/compose/src/desktopTest/.../ComposableRenderTest.kt`, `RecompositionAccumulationTest.kt`)
+(`python-multiplatform-compose/fixtures/compose/src/desktopTest/.../ComposableRenderTest.kt`, `RecompositionAccumulationTest.kt`)
 are done on desktop; the other platforms are 16.7. The production-bundler question is 10.4.
 
 - **17.1 Retire `stagePythonHome` in favour of pypackpack's Python distribution, open (cross-repo).**
@@ -389,6 +393,6 @@ are done on desktop; the other platforms are 16.7. The production-bundler questi
   pythonx-compose (SPEC "Outside intent" item 4). It no longer synthesises a `pythonx` module
   (it installs `python_multiplatform.binding`); whether it stays here as a service is unstated.
 - **17.4 The committed CPython 3.13 trees, decision.** `python-multiplatform/src/nativeInterop/cinterop/lib`
-  (15 555 tracked files, Android/desktop/iOS) and `binary/` (3.13.0 archives) are read only by the
-  `-PpythonVersion=3.13.0` desktop branch; the Android 3.13 stdlib trees by nothing. INTENT §3 says the
+  (15 555 tracked files, Android/desktop/iOS) is read only by the
+  `-PpythonVersion=3.13.0` desktop branch (`binary/`, unreferenced 3.13.0 archives, was removed on 2026-10-04); the Android 3.13 stdlib trees by nothing. INTENT §3 says the
   interpreter is not vendored. Removing them is a repository-size decision (`ecosystem.md` §5).

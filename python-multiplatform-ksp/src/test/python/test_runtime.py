@@ -81,6 +81,16 @@ def _build(variant: str):
     name = f"tp_shim_{variant}" + ("_san" if sanitize else "")
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
     out = BUILD_DIR / (name + suffix)
+    if sys.platform == "win32":
+        from typedpython import cbuild
+        # MSVC through cbuild (a mingw gcc on PATH cannot link against the python3NN.lib import library)
+        extra = [f"-DTP_SHIM_NAME={name}"] + (["-DTP_RUNTIME_FORCE_PORTABLE_OVERFLOW"] if variant == "portable" else [])
+        built = cbuild.build(SHIM_C.read_text(encoding="utf-8"), name, BUILD_DIR,
+                             flags=list(cbuild.DEFAULT_FLAGS) + extra, runtime_dir=RUNTIME_DIR)
+        spec = importlib.util.spec_from_file_location(name, built)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
     cc = shlex.split(sysconfig.get_config_var("CC") or "cc")
     cmd = cc + ["-std=c99", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
                 "-shared", "-fPIC", f"-DTP_SHIM_NAME={name}",
@@ -109,7 +119,8 @@ def rt(request):
     the overflow builtins so both code paths of the header are exercised."""
     mod = _build(request.param)
     info = mod.info()
-    assert bool(info["portable"]) == (request.param == "portable")
+    # without the GNU overflow builtins (MSVC) the default build already is the portable one
+    assert bool(info["portable"]) == (request.param == "portable" or not info["has_builtins"])
     return mod
 
 
@@ -1203,4 +1214,4 @@ def test_binop_obj_maps_the_six_kinds_to_the_python_operators(rt):
     assert rt.binop_obj(I64_MAX, 1, 0) == 2**63
     assert rt.binop_obj(I64_MIN, -1, 4) == 2**63
     assert exc_of(rt.binop_obj, 1, 0, 4)[1:3] == (ZeroDivisionError, str(exc_of(operator.floordiv, 1, 0)[2]))
-    assert exc_of(rt.binop_obj, 1, 2, 9)[1] is SystemError
+    assert exc_of(rt.binop_obj, 1, 2, 22)[1] is SystemError       # 6..11 in-place (#150), 12..15 shifts (#232), 16..21 bitwise (#289)

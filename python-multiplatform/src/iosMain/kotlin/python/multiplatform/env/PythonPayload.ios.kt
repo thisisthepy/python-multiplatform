@@ -7,7 +7,7 @@ import platform.Foundation.NSBundle
  * directory.
  *
  * `toolchain` produces the payload (`build/pythonStaging/ios/python`, or the app's own sources);
- * `tools/xcode/install-python.sh`, an Xcode Run Script phase, copies it there and wraps any
+ * `python-multiplatform-gradle-plugin/src/main/resources/xcode/install-python.sh`, an Xcode Run Script phase, copies it there and wraps any
  * extension module in it as a framework (SPEC L-11, `docs/platforms/ios-app-bundle.md`). An app
  * built without that phase has no `python/`, and this returns an empty list.
  *

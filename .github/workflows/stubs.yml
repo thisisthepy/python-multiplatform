@@ -2,24 +2,18 @@ name: Kotlin-name stubs
 
 # Issue #32: pythonx-compose consumes the binder's Kotlin-name `.pyi` stubs for the real Compose jars
 # but cannot run this repository's Gradle build. This job runs the stub task over the Compose version the
-# build resolves (`compose-plugin` in gradle/libs.versions.toml) and publishes the result.
+# build resolves (`compose-libraries` in gradle/libs.versions.toml) and publishes the result.
 #
 #   - every push to develop and every pull request: the stubs are generated, type-checked against
-#     tools/stubs/consumer.py with mypy (issue #31), and uploaded as the workflow artifact `kotlin-stubs`;
+#     .github/scripts/stubs/consumer.py with mypy (issue #31), and uploaded as the workflow artifact `kotlin-stubs`;
 #   - every `v*` tag: the same stubs are also attached to the tag's GitHub release as `kotlin-stubs.zip`.
 
 on:
+  # Checked on develop after merging, not on every pull request (user decision,
+  # 2026-10-17). A red develop is fixed forward by its own pull request.
   push:
     branches: [ "develop" ]
     tags: [ "v*" ]
-  pull_request:
-    branches: [ "develop" ]
-    paths:
-      - "python-multiplatform-gradle-plugin/**"
-      - "ksp-fixtures/compose/**"
-      - "tools/stubs/**"
-      - "gradle/libs.versions.toml"
-      - ".github/workflows/stubs.yml"
   workflow_dispatch:
 
 permissions:
@@ -27,7 +21,7 @@ permissions:
 
 concurrency:
   group: stubs-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   stubs:
@@ -52,20 +46,20 @@ jobs:
           python-version: '3.13'
 
       - name: Generate the stubs over the Compose jars
-        run: ./gradlew :ksp-fixtures:compose:generatePythonStubs --console=plain
+        run: ./gradlew :python-multiplatform-compose:fixtures:compose:generatePythonStubs --console=plain
 
       - name: Type-check a consumer against them (mypy)
-        run: tools/stubs/check-stubs.sh ksp-fixtures/compose/build/generated/pythonStubs/desktopMain
+        run: .github/scripts/stubs/check-stubs.sh python-multiplatform-compose/fixtures/compose/build/generated/pythonStubs/desktopMain
 
       - name: Assemble the artifact
         run: |
           set -euo pipefail
-          compose_version="$(sed -nE 's/^compose-plugin = "([^"]+)".*/\1/p' gradle/libs.versions.toml)"
+          compose_version="$(sed -nE 's/^compose-libraries = "([^"]+)".*/\1/p' gradle/libs.versions.toml)"
           test -n "$compose_version"
           out=build/kotlin-stubs
           rm -rf "$out"
           mkdir -p "$out"
-          cp -R ksp-fixtures/compose/build/generated/pythonStubs/desktopMain/. "$out/"
+          cp -R python-multiplatform-compose/fixtures/compose/build/generated/pythonStubs/desktopMain/. "$out/"
           cat > "$out/README.md" <<README
           # Kotlin-name stubs for Compose ${compose_version}
 
@@ -79,14 +73,14 @@ jobs:
           | python-multiplatform commit | ${GITHUB_SHA} |
           | ref | ${GITHUB_REF} |
           | workflow run | ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} |
-          | generator | \`:ksp-fixtures:compose:generatePythonStubs\` |
+          | generator | \`:python-multiplatform-compose:fixtures:compose:generatePythonStubs\` |
 
-          Packages stubbed: the \`artifactIncludePackages\` of \`ksp-fixtures/compose/build.gradle.kts\` at
+          Packages stubbed: the \`artifactIncludePackages\` of \`python-multiplatform-compose/fixtures/compose/build.gradle.kts\` at
           that commit.
 
           Use: put this directory on the type checker's path (\`MYPYPATH=<this directory>\`, or the
           IDE's "stub path" / interpreter paths). It is checked with mypy against
-          \`tools/stubs/consumer.py\` in the commit above.
+          \`.github/scripts/stubs/consumer.py\` in the commit above.
           README
           (cd build && zip -qr kotlin-stubs.zip kotlin-stubs)
 
@@ -129,11 +123,11 @@ jobs:
           python-version: '3.13'
 
       - name: Generate the stubs over the Compose jars
-        run: ./gradlew :ksp-fixtures:compose:generatePythonStubs --console=plain
+        run: ./gradlew :python-multiplatform-compose:fixtures:compose:generatePythonStubs --console=plain
 
       - name: No two stub paths are equal under case folding
         run: |
-          python3 - ksp-fixtures/compose/build/generated/pythonStubs/desktopMain <<'PY'
+          python3 - python-multiplatform-compose/fixtures/compose/build/generated/pythonStubs/desktopMain <<'PY'
           import os, sys
           seen = {}
           for root, dirs, files in os.walk(sys.argv[1]):
@@ -146,4 +140,4 @@ jobs:
           PY
 
       - name: Type-check a consumer against them (mypy)
-        run: tools/stubs/check-stubs.sh ksp-fixtures/compose/build/generated/pythonStubs/desktopMain
+        run: .github/scripts/stubs/check-stubs.sh python-multiplatform-compose/fixtures/compose/build/generated/pythonStubs/desktopMain

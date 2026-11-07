@@ -1,5 +1,6 @@
 package python.multiplatform.gradle.artifact
 
+import python.multiplatform.gradle.deleteWithoutFollowingLinks
 import org.gradle.api.DefaultTask
 import org.gradle.api.file.ConfigurableFileCollection
 import org.gradle.api.file.DirectoryProperty
@@ -61,6 +62,10 @@ abstract class PythonArtifactBindingsTask : DefaultTask() {
     @get:Input
     abstract val includePrefixes: ListProperty<String>
 
+    /** Packages to leave out (`pythonBindings.excludePackages`), on top of every `internal` package; SPEC B-11. */
+    @get:Input
+    abstract val excludePackages: ListProperty<String>
+
     /**
      * The whole classpath of the isolated worker that runs [KlibScanner], bar this plugin's own jar:
      * the klib reader plus what [ArtifactScanner] needs, resolved by the consumer's project. See
@@ -97,14 +102,15 @@ abstract class PythonArtifactBindingsTask : DefaultTask() {
         val destination = outputDirectory.get().asFile.resolve(ARTIFACTS_PACKAGE.replace('.', '/'))
         // Rebuilt from scratch: a dependency that was removed, or an include prefix that stopped
         // matching, must take its fragment file with it or the next compilation still sees it.
-        outputDirectory.get().asFile.deleteRecursively()
+        deleteWithoutFollowingLinks(outputDirectory.get().asFile)
         destination.mkdirs()
         val thunkRoot = thunkDirectory.get().asFile
-        thunkRoot.deleteRecursively()
+        deleteWithoutFollowingLinks(thunkRoot)
         val thunkDestination = thunkRoot.resolve(THUNK_PACKAGE.replace('.', '/'))
         thunkDestination.mkdirs()
 
         val includes = includePrefixes.get()
+        val excludes = excludePackages.get()
         val coordinates = coordinatesByFileName.get()
         val objectNames = mutableListOf<String>()
 
@@ -119,7 +125,7 @@ abstract class PythonArtifactBindingsTask : DefaultTask() {
             .sortedBy { it.name }
             .forEach { file ->
                 val entries = if (file.name.endsWith(".jar")) {
-                    ArtifactScanner.scanJar(file, includes, classpath = resolvedJars)
+                    ArtifactScanner.scanJar(file, includes, classpath = resolvedJars, excludePackages = excludes)
                 } else {
                     // The klib path takes no classpath yet, and whether it needs one is open
                     // rather than overlooked: the jar path needs other artefacts because an
@@ -128,7 +134,7 @@ abstract class PythonArtifactBindingsTask : DefaultTask() {
                     //
                     // Not a direct `KlibScanner.scanKlib` call: see this class's KDoc, "The klib
                     // branch runs behind a worker classloader boundary".
-                    workerExecutor.scanKlibIsolated(file, includes, temporaryDir, klibReaderClasspath.files).callables
+                    workerExecutor.scanKlibIsolated(file, includes, excludes, temporaryDir, klibReaderClasspath.files).callables
                 }
                 // An artefact that contributed nothing gets no fragment: a fragment with no entries
                 // would still take a `moduleName` in `UpcallTable`'s installed set, which is the one

@@ -192,6 +192,7 @@ class ReachabilityMetadataTest {
                 "createUpcallStubI_V",
                 "createUpcallStubII_L",
                 "createUpcallStubIII_I",
+                "createUpcallStubII_I",          // #161: the pinning trampoline's comparator
                 "createUpcallStubLongToLong",
             ),
             entryPoints.toSet(),
@@ -209,6 +210,8 @@ class ReachabilityMetadataTest {
                 Descriptor("long", listOf("long", "long")),
                 Descriptor("int", listOf("long")),
                 Descriptor("int", listOf("long", "long", "long")),
+                // #161: C's `int (*)(const void *, const void *)` comparator, the virtual-thread pin
+                Descriptor("int", listOf("long", "long")),
                 // tp_dealloc: destructor returns void, so this shape exists as of the
                 // handle-leak fix. The int shape only survived that mismatch by ABI accident.
                 Descriptor("void", listOf("long")),

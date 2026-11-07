@@ -8,7 +8,7 @@ import kotlin.coroutines.suspendCoroutine
  * The Kotlin surface this app offers to Python.
  *
  * **Nothing here is registered by hand.** This module applies
- * `id("io.github.thisisthepy.python.multiplatform.bindings")`, which runs `python-multiplatform-ksp`
+ * `id("org.thisisthepy.python.multiplatform.bindings")`, which runs `python-multiplatform-ksp`
  * over these sources at build time; every public declaration it finds becomes an entry in the
  * generated `python.multiplatform.generated.FunctionTable`, which [installGeneratedUpcallTable]
  * hands to [python.multiplatform.reflection.UpcallTable]. Exposure is a blacklist (ROADMAP §7,

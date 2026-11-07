@@ -21,7 +21,16 @@ def test_gate_accepts_compiled_without_an_import(write):
         def f(x: int) -> int:
             return x + 1
 
-        y: int = f(1)
+        @compiled(parallel=True)
+        def g(x: int) -> int:
+            return x + 2
+
+        @compiled(fastmath=True)
+        def h(x: float) -> float:
+            return x * 2.0
+
+        y: int = f(1) + g(2)
+        z: float = h(1.5)
     """)
     assert errors(gate.check([path])) == []
 
@@ -59,7 +68,7 @@ def installed():
                    check=True, capture_output=True)
     wheel = next(wheels.glob("typedpython-*.whl"))
     subprocess.run(["uv", "venv", "--python", "3.13", str(root)], check=True, capture_output=True)
-    python = root / "bin" / "python"
+    python = root / "Scripts" / "python.exe" if sys.platform == "win32" else root / "bin" / "python"
     subprocess.run(["uv", "pip", "install", "--python", str(python), "--no-deps", str(wheel)],
                    check=True, capture_output=True)
     return python, wheel
@@ -82,13 +91,14 @@ def test_decorator_works_with_no_import(installed):
 
 def test_compiled_is_the_identity(installed):
     python, _ = installed
-    r = py(python, "-c", "def f(): pass\nprint(compiled(f) is f)")
+    r = py(python, "-c", "def f(): pass\nprint(compiled(f) is f and compiled(parallel=True)(f) is f and compiled()(f) is f)")
     assert r.stdout.strip() == "True", r.stderr
 
 
 def test_the_pth_does_not_overwrite_the_runtime(installed):
     python, _ = installed
-    site = next((python.parent.parent / "lib").glob("python3*/site-packages"))
+    site = (python.parent.parent / "Lib" / "site-packages" if sys.platform == "win32"
+            else next((python.parent.parent / "lib").glob("python3*/site-packages")))
     code = (
         "import builtins, site\n"
         "sentinel = object()\n"

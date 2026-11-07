@@ -5,7 +5,7 @@ Kotlin/Wasm reaching CPython 3.14 built for `wasm32-emscripten`, through `@WasmI
 the data path.
 
 Everything below is measured. The standalone `wasm-experiment/` that first took the measurements
-was retired into this source set and `tools/wasm/` (it remains in git history: `git log --
+was retired into this source set and `python-multiplatform/scripts/wasm/` (it remains in git history: `git log --
 wasm-experiment`); `docs/platforms/wasm-design.md` holds the current decisions and numbers, and
 `docs/archive/wasm-design-experiment-log.md` records how they were arrived at, including the several
 conclusions that were wrong before they were run. Everything the experiment proved that this file
@@ -17,7 +17,7 @@ stands on is now a test in `wasmJsTest/.../emscripten/`, run against the real in
 | the shared memory survives CPython growing it | `WasmSharedMemoryGrowthTest` |
 | Kotlin-only work neither grows nor writes that memory | `WasmKotlinLeavesLinearMemoryAloneTest` |
 | the interpreter carries the `pyemscripten_2026_0` ABI | `WasmInterpreterAbiTest` |
-| ... and a real compiled wheel loads and runs in it | `WasmCompiledWheelTest` (wheels: `tools/wasm/build-cpython.sh wheels`) |
+| ... and a real compiled wheel loads and runs in it | `WasmCompiledWheelTest` (wheels: `python-multiplatform/scripts/wasm/build-cpython.sh wheels`) |
 | direct calls beat a JS frame; hoisting beats a shim; strings and bulk reads | `WasmCrossingOverheadTest` |
 | `Table.set` beats `addFunction` + a JS closure for upcalls | `WasmUpcallRouteOverheadTest` |
 | `PY_CALL_TRAMPOLINE`'s JS fallback is live; `pmp_invoke` survives the wasm one | `WasmCallTrampolineTest` |
@@ -25,7 +25,7 @@ stands on is now a test in `wasmJsTest/.../emscripten/`, run against the real in
 The measurement tests print their rows and assert only orderings that held by a wide margin; the
 figures quoted below are the experiment's, and the tests' own output is the current reading.
 
-`tools/wasm/build-cpython.sh stock` builds the unpatched PEP 776 interpreter (plus only the runtime
+`python-multiplatform/scripts/wasm/build-cpython.sh stock` builds the unpatched PEP 776 interpreter (plus only the runtime
 methods the library binds through) as the negative control for the ABI tests: against it,
 `WasmInterpreterAbiTest` and `WasmCompiledWheelTest` must fail.
 
@@ -456,7 +456,7 @@ karma, `webpackCopy` for the glue (the bundle's directory is a fresh temp path e
 proxy for the document-relative stdlib zip.
 
 Needs a CPython Emscripten build. The default location is `<repo>/.caches/wasm-runtime`, which
-`./gradlew :python-multiplatform:buildWasmPython` (that is, `tools/wasm/build-cpython.sh`) fills;
+`./gradlew :python-multiplatform:buildWasmPython` (that is, `python-multiplatform/scripts/wasm/build-cpython.sh`) fills;
 `-PwasmPythonDir=` or `PMP_PYTHON_DIR` override it. The task **skips with a message** rather than
 failing when it is absent. The script matches `pyemscripten_2026_0` (PEP 783) closely enough to load
 a compiled PyPI wheel, and its `verify` step checks the stdlib zip as well as `python.wasm` -- the

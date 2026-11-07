@@ -230,7 +230,7 @@ import python.multiplatform.reflection.UpcallTable
  * A class with static members already has a metaclass, and the two requirements do not both fit in
  * a base list: Python has no syntax for a base *after* a keyword, so the only spelling available is
  * `class Foo(_PmObject, metaclass=_pm_t_1):` -- which separates the class from the metaclass a
- * reader is pairing it with, and did more than that. `ksp-fixtures:app` locates a companion by
+ * reader is pairing it with, and did more than that. `python-multiplatform-ksp:fixtures:app` locates a companion by
  * matching `class (_pm_t_\d+)\(type\):` lazily through to `class Foo\(metaclass=\1\):`, and once
  * that terminator no longer existed the match could not complete: `java.util.regex`'s lazy loop
  * recurses once per character, so it scanned the rest of a 30 KB module and raised
@@ -362,7 +362,15 @@ object PythonProxySource {
                 _pm_sys.modules[_name] = _m
                 if '.' in _name:
                     _parent, _, _leaf = _name.rpartition('.')
-                    setattr(_pm_module(_parent), _leaf, _m)
+                    # Issue #322: a name the binding layer serves as a proxy class stays that class on
+                    # its parent; this module is still in sys.modules and the class's __getattr__
+                    # reaches its statics. One Python name is not both a module and a class.
+                    _binding = _pm_sys.modules.get('python_multiplatform.binding')
+                    _is_type = getattr(_binding, 'class_wins_over_module', None)
+                    if _is_type is None or not _is_type(_name):
+                        setattr(_pm_module(_parent), _leaf, _m)
+                    else:
+                        _pm_module(_parent)
             return _m
 
 
@@ -430,6 +438,11 @@ object PythonProxySource {
                 (_pm_types.ModuleType,),
                 {'_pm_owned': True},
             )
+            # Issue #323: the binding layer's write guard, so `import pkg.Owner` cannot replace the
+            # proxy class `pkg.Owner` on this module. Writes only; reads are unchanged.
+            _guard = getattr(_pm_sys.modules.get('python_multiplatform.binding'), 'guarded_setattr', None)
+            if _guard is not None:
+                _t.__setattr__ = _guard
             _mod.__class__ = _t
             return _t
 

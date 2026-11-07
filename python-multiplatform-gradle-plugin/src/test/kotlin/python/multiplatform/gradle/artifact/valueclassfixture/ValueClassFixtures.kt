@@ -90,7 +90,7 @@ fun Meters.tagged(): String = "meters"
  * `Function0` has no class file to name, and `DeclarationModelTest` used it for the other half of
  * `docs/design/pyi-generation-design.md` §2.2's third property. It binds now, so the declined witness moved
  * to [withSuspendCallback] and this one records the positive: a declaration that **invokes** what it
- * is handed, which is what `:ksp-fixtures:artifact` exercises against `kotlin.system.measureTimeMillis`
+ * is handed, which is what `:python-multiplatform-gradle-plugin-fixtures:artifact` exercises against `kotlin.system.measureTimeMillis`
  * for real.
  */
 fun withCallback(action: () -> Unit): Int {

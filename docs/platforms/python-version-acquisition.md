@@ -62,7 +62,7 @@ The project currently uses `python-build-standalone` (maintained by Astral). For
 ## 6. WebAssembly
 
 No distributor ships a `python.wasm` that exports `wasmExports` and `wasmMemory` to JavaScript, which the
-`wasmJs` target needs. CPython is therefore **built**, not downloaded: `tools/wasm/build-cpython.sh` builds
+`wasmJs` target needs. CPython is therefore **built**, not downloaded: `python-multiplatform/scripts/wasm/build-cpython.sh` builds
 CPython 3.14.2 for `wasm32-emscripten` (Emscripten 5.0.3, matched to the `pyemscripten_2026_0` platform of
 PEP 783) under the git-ignored `.caches/`, and `python-multiplatform-wasm-runtime` is the published zip of
 the result. This is deliberately a different patch release from the native `pythonVersion`; see

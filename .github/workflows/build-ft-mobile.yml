@@ -1,0 +1,80 @@
+name: Build free-threaded CPython for mobile
+
+# Builds CPython with --disable-gil ("3.15t") for Android arm64 and iOS with
+# CPython's own tooling (Platforms/Android, Platforms/Apple). Manual only: the
+# builds take a long time and the archives are inputs to later work (#163).
+# See docs/platforms/free-threaded-mobile.md.
+
+on:
+  # Runs on develop when the build itself changes (workflow_dispatch needs the file on the
+  # default branch, main, which develop reaches only through a release).
+  push:
+    branches: [develop]
+    paths:
+      - ".github/workflows/build-ft-mobile.yml"
+      - ".github/scripts/ft-mobile/**"
+  workflow_dispatch:
+    inputs:
+      python_version:
+        description: CPython version to build (a python.org source release)
+        default: "3.15.0"
+        required: true
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  android:
+    name: Android aarch64 (free-threaded)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      FT_WORK: ${{ github.workspace }}/.tmp/ft-mobile
+      FT_OUT: ${{ github.workspace }}/.tmp/ft-mobile-out
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install build Python prerequisites
+        run: >
+          sudo apt-get update && sudo apt-get install -y
+          build-essential pkg-config libssl-dev zlib1g-dev libffi-dev
+          libbz2-dev liblzma-dev libsqlite3-dev libzstd-dev
+
+      - name: Build
+        run: .github/scripts/ft-mobile/build-android.sh "${{ inputs.python_version || '3.15.0' }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-${{ inputs.python_version || '3.15.0' }}t-android-aarch64
+          path: ${{ env.FT_OUT }}/*.tar.gz
+          if-no-files-found: error
+
+  ios:
+    name: iOS XCframework (free-threaded)
+    runs-on: macos-15
+    timeout-minutes: 180
+    env:
+      FT_WORK: ${{ github.workspace }}/.tmp/ft-mobile
+      FT_OUT: ${{ github.workspace }}/.tmp/ft-mobile-out
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build
+        run: .github/scripts/ft-mobile/build-ios.sh "${{ inputs.python_version || '3.15.0' }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-${{ inputs.python_version || '3.15.0' }}t-ios-xcframework
+          path: ${{ env.FT_OUT }}/*.tar.gz
+          if-no-files-found: error

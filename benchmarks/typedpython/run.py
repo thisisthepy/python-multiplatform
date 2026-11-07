@@ -10,7 +10,7 @@ pre-compiled classes (javac -d java-out), so javac time is excluded; JVM startup
 The "TypedPython @compiled" column runs only with `--typedpython <dir>` (the directory that holds
 the `typedpython` package, python-multiplatform-ksp/src/main/python) and `--typedpython-python` (an
 interpreter with the gate's dependencies, e.g. that module's .venv): each benchmark is copied with
-the `# typedpython: compiled` marker, compiled through `typedpython.pipeline`, and its `main()` is
+`@compiled` above every top-level def and class, compiled through `typedpython.pipeline`, and its `main()` is
 run from the built extension. Without the option the column reports n/a.
 
 Cython and numba columns (issue: compare TypedPython fairly against them). They need a harness venv
@@ -39,6 +39,7 @@ speedup is reported against that CPython version; `CPython (no __slots__)` runs 
 with the `__slots__` line removed, so what adding the slots changes in CPython is recorded too.
 """
 import argparse
+import ast
 import datetime
 import json
 import os
@@ -133,6 +134,17 @@ mod.main()
 """
 
 
+def with_compiled(source: str) -> str:
+    """`source` with `@compiled` above every top-level def and class (above their other decorators)."""
+    tree = ast.parse(source)
+    lines = source.split("\n")
+    firsts = [min([n.lineno] + [d.lineno for d in n.decorator_list]) for n in tree.body
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
+    for first in reversed(firsts):
+        lines.insert(first - 1, "@compiled")
+    return "\n".join(lines)
+
+
 def build_compiled(tp_dir: Path, tp_python: str) -> dict[str, tuple[str, list[str]] | str]:
     """Compile each benchmark with TypedPython; name -> (extension, compiled functions) or a reason."""
     built: dict[str, tuple[str, list[str]] | str] = {}
@@ -141,7 +153,7 @@ def build_compiled(tp_dir: Path, tp_python: str) -> dict[str, tuple[str, list[st
         work = TP_BUILD / name
         work.mkdir(parents=True, exist_ok=True)
         source = work / py
-        source.write_text("# typedpython: compiled\n" + (ROOT / "py" / py).read_text())
+        source.write_text(with_compiled((ROOT / "py" / py).read_text()))
         result = subprocess.run([tp_python, "-c", COMPILE_SNIPPET, str(source), str(work / "out")],
                                 capture_output=True, text=True, env=env)
         if result.returncode != 0:
@@ -256,6 +268,14 @@ def commands(name: str, size: str, python: str, java_source: bool,
             cmd.env = {"NUMBA_CACHE_DIR": str(cmd.cache_dir)}
             cmds[NUMBA] = cmd
     return cmds
+
+
+def source_commit() -> str:
+    """The commit the harness (and the TypedPython sources beside it) was measured at."""
+    result = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True)
+    dirty = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"],
+                           capture_output=True, text=True).stdout.strip()
+    return result.stdout.strip() + ("+dirty" if dirty else "") if result.returncode == 0 else "unknown"
 
 
 class RunFailed(Exception):
@@ -488,6 +508,7 @@ def measure(args: argparse.Namespace) -> int:
         out_dir.mkdir(exist_ok=True)
         path = out_dir / f"{datetime.date.today().isoformat()}-{socket.gethostname()}.json"
         payload = {"date": datetime.datetime.now().isoformat(timespec="seconds"),
+                   "commit": source_commit(),
                    "host": socket.gethostname(), "load_average": load, "repeat": args.repeat,
                    "python": subprocess.run([args.python, "--version"], capture_output=True, text=True).stdout.strip(),
                    "tools": report, "results": results}
@@ -575,6 +596,7 @@ def interleaved(args: argparse.Namespace) -> int:
         out_dir.mkdir(exist_ok=True)
         path = out_dir / f"{datetime.date.today().isoformat()}-{socket.gethostname()}-interleaved.json"
         path.write_text(json.dumps({"date": datetime.datetime.now().isoformat(timespec="seconds"),
+                                    "commit": source_commit(),
                                     "host": socket.gethostname(), "method": "interleaved A/B",
                                     "pairs": args.pairs, "tools": report, "results": results}, indent=2) + "\n")
         print(f"wrote {path}")

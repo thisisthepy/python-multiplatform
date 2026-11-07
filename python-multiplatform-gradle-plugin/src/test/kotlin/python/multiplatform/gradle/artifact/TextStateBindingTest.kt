@@ -25,7 +25,7 @@ import kotlin.test.assertTrue
  *    file, so the object-handle case could not name it and `TextFieldState.text` was declined
  *    ("no boundary type for property type kotlin.CharSequence").
  *
- * (The third cause, that `:ksp-fixtures:compose` did not walk `androidx.compose.foundation.text.input`
+ * (The third cause, that `:python-multiplatform-compose:fixtures:compose` did not walk `androidx.compose.foundation.text.input`
  * at all, is configuration, and `TextFieldStateRenderTest` there is its test.)
  *
  * ### Red before the implementation
@@ -168,7 +168,7 @@ class TextStateBindingTest {
      * A value class the boundary opens (`Meters(value: Double)`, bound as `FLOAT`) is built and returned
      * as its raw number, so its constructor must stay a module function returning that number: an
      * `__init__` would promise a `Meters` instance the runtime never gives. Found by
-     * `:ksp-fixtures:artifact`'s `everyStubbedFunctionIsATableKeyAndEveryTableKeyIsStubbed` reporting
+     * `:python-multiplatform-gradle-plugin-fixtures:artifact`'s `everyStubbedFunctionIsATableKeyAndEveryTableKeyIsStubbed` reporting
      * `fixture.valueclass.Meters` as "callable but not stubbed" after the first version of this change.
      */
     @Test

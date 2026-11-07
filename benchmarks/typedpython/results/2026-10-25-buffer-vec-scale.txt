@@ -1,0 +1,8 @@
+# scale_arr (a[i] = a[i] * k), n=2,000,000 doubles, 3.15.0rc1t, aarch64, 11 interleaved rounds, median; ONE quick run
+# load before 13.15, after 12.82 (NOT quiet; the 2026-10-17 quiet-window run measured atomic/plain 2.54)
+plain 0.990 ms, atomic scalar (-DTP_NO_BUF_VEC) 1.162 ms, vectorised 0.900 ms
+atomic/plain 1.173, vectorised/plain 0.909
+# re-run with the inline-asm helper (ldr/str q), load 8.9: plain 0.782, atomic scalar 0.981, vectorised 0.962 ms
+atomic/plain 1.255, vectorised/plain 1.230  (the 0.91 above was the NEON-intrinsic helper, withdrawn)
+# third run: precise "Q" memory operands, no clobber, 4 elements per step; load 8.73 -> 8.73, one run
+plain 0.684 ms, atomic scalar 0.853 ms, vectorised 0.646 ms; atomic/plain 1.246, vectorised/plain 0.945

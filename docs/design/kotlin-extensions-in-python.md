@@ -648,9 +648,9 @@ it is why composables remain blocked while the `Modifier` chain of §3.2 runs.
   descriptor copied from the walked `MethodNode` at build time; no runtime lookup.
 - The binding layer (`python_multiplatform.binding`) computes the `$default` mask from which
   arguments the Python call wrote and threads the composer from a stack that one hand-written
-  `@Composable` entry pushes (`PythonComposition` in `ksp-fixtures/compose`).
+  `@Composable` entry pushes (`PythonComposition` in `python-multiplatform-compose/fixtures/compose`).
 
-Proven by `ksp-fixtures/compose`'s render tests (`ComposableRenderTest`, `M3ProofRenderTest`,
+Proven by `python-multiplatform-compose/fixtures/compose`'s render tests (`ComposableRenderTest`, `M3ProofRenderTest`,
 `CallbackDrivenRenderTest`) on desktop only; Android, iOS and wasm are planned (SPEC N-2). Extension
 composables and recomposition skipping remain open.
 

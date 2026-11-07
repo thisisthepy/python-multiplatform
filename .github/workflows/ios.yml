@@ -1,15 +1,16 @@
 name: iOS CI
 
 on:
+  # Checked on develop after merging, not on every pull request (user decision,
+  # 2026-10-17). A red develop is fixed forward by its own pull request.
   push:
     branches: [ "develop", "main" ]
-  pull_request:
-    branches: [ "develop", "main" ]
-
+  workflow_dispatch:
 concurrency:
-  # A newer push to the same ref supersedes this run; frees the shared macOS runners.
+  # A run in progress finishes; a newer push replaces only the queued run (frequent merges
+  # to develop otherwise cancelled every run before it reported).
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   compile:
@@ -38,3 +39,55 @@ jobs:
       - name: Compile iOS Simulator Arm64
         # Compile iOS Simulator which includes commonMain + nativeMain + iosMain
         run: ./gradlew :python-multiplatform:compileKotlinIosSimulatorArm64 --console=plain
+
+  # The klib walker on Kotlin/Native (#234, #237, #240): object handles, their lifetime and member
+  # functions, called from Python on the iOS simulator. Its own job and Gradle invocation.
+  klib-fixture:
+    name: Klib fixture on the iOS simulator
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'zulu'
+          cache: 'gradle'
+
+      - name: Cache Konan
+        uses: actions/cache@v4
+        with:
+          path: ~/.konan
+          key: ${{ runner.os }}-konan-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-konan-
+
+      - name: Run the klib fixture's suite
+        run: ./gradlew :python-multiplatform-gradle-plugin-fixtures:klib-artifact:iosSimulatorArm64Test --rerun --console=plain
+
+      - name: Count the tests
+        if: always()
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import glob, xml.etree.ElementTree as ET
+          files = glob.glob("python-multiplatform-gradle-plugin/fixtures/klib-artifact/build/test-results/iosSimulatorArm64Test/*.xml")
+          total = failed = skipped = 0
+          for f in files:
+              suite = ET.parse(f).getroot()
+              total += int(suite.get("tests", 0))
+              failed += int(suite.get("failures", 0)) + int(suite.get("errors", 0))
+              skipped += int(suite.get("skipped", 0))
+          print(f"Klib fixture (iOS simulator): {total} tests, {total - failed - skipped} passed, {failed} failed, {skipped} skipped ({len(files)} suites)")
+          PY
+          cat "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: klib-fixture-ios-reports
+          path: |
+            python-multiplatform-gradle-plugin/fixtures/klib-artifact/build/reports/tests/iosSimulatorArm64Test
+            python-multiplatform-gradle-plugin/fixtures/klib-artifact/build/test-results/iosSimulatorArm64Test

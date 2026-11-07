@@ -100,7 +100,7 @@ Kotlin 제약 때문에 다이어그램대로 갈 수 없던 지점들:
 ## 검증 수단
 
 명령 목록과 어떤 소스셋을 덮는지는 AGENTS.md §15 가 기준이다 (`compileKotlinAndroidNativeArm64`,
-`compileKotlinIosSimulatorArm64`, `compileKotlinDesktop`, 그리고 `ksp-fixtures` 세 모듈을 각각 따로).
+`compileKotlinIosSimulatorArm64`, `compileKotlinDesktop`, 그리고 `fixtures/` 아래 세 모듈을 각각 따로).
 테스트는 컴파일 검증만이 아니다, 데스크톱(`desktopTest`), iOS 시뮬레이터, 안드로이드 기기, wasm(Node)
 에서 실제 CPython 을 구동하는 스위트가 있다 (SPEC §0 의 "Test path" 열).
 

@@ -1,0 +1,90 @@
+name: Desktop release
+
+# A desktop-only preview release: the assets are files on a GitHub Release, nothing is published to
+# Maven Central. Triggered by pushing a version tag (the coordinator tags after release -> main), or
+# by hand for an existing tag. The assets are assembled by .github/scripts/release/assemble-desktop-release.sh,
+# and both examples of docs/release/desktop run against those assets before anything is uploaded.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and attach the assets to (e.g. v3.15.0-alpha01)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  desktop-release:
+    name: Assemble, check and attach (macOS)
+    runs-on: macos-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'zulu'
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Assemble the assets
+        run: .github/scripts/release/assemble-desktop-release.sh build/desktop-release
+
+      - name: The tag names this build's version
+        run: |
+          set -euo pipefail
+          version="$(sed -nE 's/^pythonVersion=(.*)$/\1/p' gradle.properties)-$(sed -nE 's/^libraryVersionSuffix=(.*)$/\1/p' gradle.properties)"
+          test "$TAG" = "v$version" || { echo "error: tag $TAG does not match version $version" >&2; exit 1; }
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Example 1, Kotlin desktop app, from the assets only
+        run: |
+          set -euo pipefail
+          u="$RUNNER_TEMP/user"
+          rm -rf "$u" && mkdir -p "$u" && cd "$u"
+          unzip -q "$GITHUB_WORKSPACE/build/desktop-release/python-multiplatform-maven-repo-$VERSION.zip"
+          unzip -q "$GITHUB_WORKSPACE/build/desktop-release/python-multiplatform-examples-$VERSION.zip"
+          cd examples/kotlin-hello
+          "$GITHUB_WORKSPACE/gradlew" -q run -PpmpRepo="$u/maven-repo" -Dmaven.repo.local="$u/empty-m2" --console=plain | tee "$u/run.log"
+          grep -q '^Python 3\.' "$u/run.log"
+          grep -q '^{"sum": 45}$' "$u/run.log"
+          grep -q '^Kotlin sees: 42$' "$u/run.log"
+
+      - name: Example 2, TypedPython, from the wheel only
+        run: |
+          set -euo pipefail
+          u="$RUNNER_TEMP/user"
+          cd "$u"
+          uv venv -q -p 3.15t tpenv
+          uv pip install -q --python tpenv/bin/python "$GITHUB_WORKSPACE"/build/desktop-release/typedpython-*.whl
+          tpenv/bin/typedpython demo --out build examples/typedpython/kernels.py 400000 | tee tp.log
+          grep -q '^compiled functions: .*dot' tp.log
+          grep -q '^identical output' tp.log
+
+      - name: Attach to the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          d=build/desktop-release
+          sed "s/@VERSION@/$VERSION/g" docs/release/desktop/README.md > "$d/NOTES.md"
+          assets=("$d"/python-multiplatform-maven-repo-*.zip "$d"/typedpython-*.whl \
+                  "$d"/python-multiplatform-ksp-*-typedpython-gate.zip "$d"/python-multiplatform-examples-*.zip "$d"/SHA256SUMS)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$TAG" --prerelease --title "python-multiplatform $VERSION (desktop preview)" \
+              --notes-file "$d/NOTES.md" "${assets[@]}"
+          fi

@@ -1,0 +1,302 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 54;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		9A0000000000000000000002 /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A0000000000000000000003 /* App.swift */; };
+		9A0000000000000000000006 /* Python.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9A0000000000000000000005 /* Python.xcframework */; };
+		9A0000000000000000000007 /* Python.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 9A0000000000000000000005 /* Python.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		9A000000000000000000001E /* libz.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 9A0000000000000000000014 /* libz.tbd */; };
+		9A000000000000000000001F /* libsqlite3.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 9A0000000000000000000015 /* libsqlite3.tbd */; };
+		9A0000000000000000000020 /* libbz2.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 9A0000000000000000000016 /* libbz2.tbd */; };
+		9A0000000000000000000021 /* libc++.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 9A0000000000000000000017 /* libc++.tbd */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		9A0000000000000000000037 /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				9A0000000000000000000007 /* Python.xcframework in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		9A0000000000000000000001 /* IosConsumer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = IosConsumer.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		9A0000000000000000000003 /* App.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
+		9A0000000000000000000004 /* Info.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		9A0000000000000000000005 /* Python.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Python.xcframework; path = "../build/xcode-frameworks/Python.xcframework"; sourceTree = "<group>"; };
+		9A0000000000000000000014 /* libz.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = "libz.tbd"; path = usr/lib/libz.tbd; sourceTree = SDKROOT; };
+		9A0000000000000000000015 /* libsqlite3.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = "libsqlite3.tbd"; path = usr/lib/libsqlite3.tbd; sourceTree = SDKROOT; };
+		9A0000000000000000000016 /* libbz2.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = "libbz2.tbd"; path = usr/lib/libbz2.tbd; sourceTree = SDKROOT; };
+		9A0000000000000000000017 /* libc++.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = "libc++.tbd"; path = "usr/lib/libc++.tbd"; sourceTree = SDKROOT; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		9A0000000000000000000034 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9A0000000000000000000006 /* Python.xcframework in Frameworks */,
+				9A000000000000000000001E /* libz.tbd in Frameworks */,
+				9A000000000000000000001F /* libsqlite3.tbd in Frameworks */,
+				9A0000000000000000000020 /* libbz2.tbd in Frameworks */,
+				9A0000000000000000000021 /* libc++.tbd in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		9A0000000000000000000028 = {
+			isa = PBXGroup;
+			children = (
+				9A0000000000000000000029 /* Sources */,
+				9A000000000000000000002A /* Products */,
+				9A000000000000000000002B /* Frameworks */,
+			);
+			sourceTree = "<group>";
+		};
+		9A0000000000000000000029 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				9A0000000000000000000003 /* App.swift */,
+				9A0000000000000000000004 /* Info.plist */,
+			);
+			name = Sources;
+			sourceTree = "<group>";
+		};
+		9A000000000000000000002A /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				9A0000000000000000000001 /* IosConsumer.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		9A000000000000000000002B /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				9A0000000000000000000005 /* Python.xcframework */,
+				9A0000000000000000000014 /* libz.tbd */,
+				9A0000000000000000000015 /* libsqlite3.tbd */,
+				9A0000000000000000000016 /* libbz2.tbd */,
+				9A0000000000000000000017 /* libc++.tbd */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		9A000000000000000000003C /* app */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 9A000000000000000000003F /* Build configuration list for PBXNativeTarget "app" */;
+			buildPhases = (
+				9A0000000000000000000032 /* Compile Kotlin Framework */,
+				9A0000000000000000000033 /* Sources */,
+				9A0000000000000000000034 /* Frameworks */,
+				9A0000000000000000000035 /* Resources */,
+				9A0000000000000000000036 /* Install Python Standard Library and Payload */,
+				9A0000000000000000000037 /* Embed Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = app;
+			productName = app;
+			productReference = 9A0000000000000000000001 /* IosConsumer.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		9A000000000000000000003D /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				LastUpgradeCheck = 1520;
+			};
+			buildConfigurationList = 9A000000000000000000003E /* Build configuration list for PBXProject "app" */;
+			compatibilityVersion = "Xcode 9.3";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 9A0000000000000000000028;
+			productRefGroup = 9A000000000000000000002A /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				9A000000000000000000003C /* app */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		9A0000000000000000000035 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		9A0000000000000000000032 /* Compile Kotlin Framework */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			name = "Compile Kotlin Framework";
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "if [ \"YES\" = \"$OVERRIDE_KOTLIN_BUILD_IDE_SUPPORTED\" ]; then\n  exit 0\nfi\ncd \"$SRCROOT/../../../..\"\n./gradlew :python-multiplatform-gradle-plugin-fixtures:ios-consumer:embedAndSignAppleFrameworkForXcode\n";
+		};
+		9A0000000000000000000036 /* Install Python Standard Library and Payload */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			name = "Install Python Standard Library and Payload";
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -e\n# Issue #90: the stdlib and this app's python/ payload into the .app, using only the script the plugin installs.\ncd \"$SRCROOT/../../../..\"\n./gradlew -q :python-multiplatform-gradle-plugin-fixtures:ios-consumer:installPythonXcodeScript\nexport PYTHON_PAYLOAD_DIR=\"$SRCROOT/../python\"\n/bin/bash python-multiplatform-gradle-plugin/fixtures/ios-consumer/build/python-multiplatform/xcode/install-python.sh\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		9A0000000000000000000033 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9A0000000000000000000002 /* App.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		9A0000000000000000000046 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.3;
+				SDKROOT = iphoneos;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				ONLY_ACTIVE_ARCH = YES;
+			};
+			name = Debug;
+		};
+		9A0000000000000000000047 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.3;
+				SDKROOT = iphoneos;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		9A0000000000000000000048 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/../build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)",
+				);
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					Probe,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = org.thisisthepy.python.multiplatform.iosconsumer;
+				PRODUCT_NAME = IosConsumer;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		9A0000000000000000000049 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/../build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)",
+				);
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					Probe,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = org.thisisthepy.python.multiplatform.iosconsumer;
+				PRODUCT_NAME = IosConsumer;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		9A000000000000000000003E /* Build configuration list for PBXProject "app" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				9A0000000000000000000046 /* Debug */,
+				9A0000000000000000000047 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		9A000000000000000000003F /* Build configuration list for PBXNativeTarget "app" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				9A0000000000000000000048 /* Debug */,
+				9A0000000000000000000049 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 9A000000000000000000003D /* Project object */;
+}

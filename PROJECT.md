@@ -48,7 +48,7 @@ Kotlin Multiplatform 에 CPython 을 임베딩해 **Kotlin 과 Python 이 서로
 | `python-multiplatform/` | 라이브러리, FFI 계층(`python/native/ffi/`), 객체 모델(`python/multiplatform/ffi/`), 업콜 런타임 |
 | `python-multiplatform-ksp/` | 업콜 테이블을 생성하는 KSP 프로세서 |
 | `python-multiplatform-gradle-plugin/` | `stagePythonHome`, 아티팩트 워커(빌드된 jar/klib 바인딩), `.pyi` 스텁 생성 |
-| `ksp-fixtures/` | 생성기 산출물을 실제로 쓰는 소비자 모듈 (`app`, `compose`, `artifact`, …) |
+| `python-multiplatform-ksp/fixtures/`, `python-multiplatform-gradle-plugin/fixtures/`, `python-multiplatform-compose/fixtures/` | 생성기 산출물을 실제로 쓰는 소비자 모듈, 검증 대상 모듈 안에 둔다 (`app`, `compose`, `artifact`, ...) |
 | `sample/` | Compose Multiplatform 데모 앱 (데스크톱·Android·iOS·wasmJs·GraalVM 네이티브 이미지) |
 | `python_for_kotlin_binding.mermaid` | 사용자가 그린 객체 모델 스케치 (확정 스펙 아님) |
 | `docs/` | `INTENT.md`, `SPEC.md`, `design/`, `platforms/`, `investigations/`, `roadmap/`, `guide/`, `locale/` |
@@ -68,8 +68,8 @@ Kotlin Multiplatform 에 CPython 을 임베딩해 **Kotlin 과 Python 이 서로
 
 - 컴파일 확인은 세 타깃: `compileKotlinAndroidNativeArm64`(기본 루프), `compileKotlinIosSimulatorArm64`,
   `compileKotlinDesktop`. **androidNative 를 빼먹지 않는다**, `nativeMain` 을 iOS 와 공유한다.
-- 생성기 소비자 검증은 **모듈마다 따로**: `:ksp-fixtures:app:desktopTest`,
-  `:ksp-fixtures:compose:desktopTest`, `:ksp-fixtures:artifact:desktopTest`.
+- 생성기 소비자 검증은 **모듈마다 따로**: `:python-multiplatform-ksp:fixtures:app:desktopTest`,
+  `:python-multiplatform-compose:fixtures:compose:desktopTest`, `:python-multiplatform-gradle-plugin-fixtures:artifact:desktopTest`.
 - 결과는 `build/test-results/<target>/*.xml` 을 지우고 `--rerun` 으로 다시 돌려 센다.
 - 종료 코드는 파이프로 읽지 않는다. 상세 규정은 `AGENTS.md` §15.
 - CPython 은 저장소에 벤더링하지 않는다. Gradle 이 플랫폼별로 내려받아 검증·추출한다

@@ -17,7 +17,7 @@ import python.multiplatform.reflection.UpcallTable
  * `@InstallsUpcallTable expect fun installGeneratedUpcallTable()` and every leaf gets its own
  * one-liner generated into it. The constraint is unchanged -- the generated table is reachable
  * only from the source set of the target that generated it -- but nothing shared code writes has
- * to know that any more. `ksp-fixtures/app`'s `androidNativeMain` pins the same shape.
+ * to know that any more. `python-multiplatform-ksp/fixtures/app`'s `androidNativeMain` pins the same shape.
  */
 
 /**

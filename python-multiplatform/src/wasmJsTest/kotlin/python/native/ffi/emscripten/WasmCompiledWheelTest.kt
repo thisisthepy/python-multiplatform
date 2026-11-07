@@ -16,12 +16,12 @@ import python.multiplatform.ffi.PythonTestFixture
  * PyPI) is `dlopen`ed as an Emscripten side module, links against `python.wasm`, and runs.
  *
  * Measured in the former `wasm-experiment/` (Test G) through CPython's own `python.sh`, with no
- * Kotlin in the process. Against a stock PEP 776 build (`tools/wasm/build-cpython.sh stock`) the same
+ * Kotlin in the process. Against a stock PEP 776 build (`python-multiplatform/scripts/wasm/build-cpython.sh stock`) the same
  * import fails at load:
  *
  *     LinkError: Import #204 "env" "__cpp_exception": tag import requires a WebAssembly.Tag
  *
- * The wheels are not in the repository. `tools/wasm/build-cpython.sh wheels` downloads them by URL
+ * The wheels are not in the repository. `python-multiplatform/scripts/wasm/build-cpython.sh wheels` downloads them by URL
  * with pinned sha256 into `.caches/wasm-wheels`, and the test task extracts them next to the test
  * bundle. Without them this test skips with that instruction, and under `-PrequireWasmRuntime=true`
  * it fails instead -- the same contract every other wasm prerequisite has.
@@ -39,7 +39,7 @@ class WasmCompiledWheelTest {
         val site = PMP_TEST_SITE_PACKAGES?.toString()
         if (site == null) {
             val message = "no pyemscripten_2026_0 wheels found in ${PMP_TEST_WHEELS_DIR?.toString()}. " +
-                "Run tools/wasm/build-cpython.sh wheels -- it downloads the pinned pydantic-core and " +
+                "Run python-multiplatform/scripts/wasm/build-cpython.sh wheels -- it downloads the pinned pydantic-core and " +
                 "typing-extensions wheels there -- and re-run this task."
             if (required.toBoolean()) {
                 fail("$message -PrequireWasmRuntime=true was passed, so this is a failure rather than a skip.")

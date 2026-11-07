@@ -48,11 +48,16 @@ package python.multiplatform.reflection
  *
  * ### Threading
  *
- * Not synchronised. Every mutation happens on a thread that holds the GIL: an upcall arrives
- * with it held, and handing a Kotlin object to Python requires it to build the proxy. That is
- * the same rule the rest of the boundary already lives under (`commonMain/README.md`), and it
- * is what makes the plain `ArrayList`s here safe. It stops being true under free-threading
- * (ROADMAP §9), where this needs a real lock.
+ * Every read and write of the table runs under the table's own [PlatformMutex]. The GIL was
+ * never a guarantee here, even on the default GIL build: on desktop `_pm_release` and
+ * `_pm_resolve` are bound through `ctypes.CFUNCTYPE`, and ctypes releases the GIL around a
+ * `CFUNCTYPE` foreign call, so `UpcallTrampoline.releaseObject` reaches [release] with no GIL
+ * while another thread registers. Under free-threading (ROADMAP §9) there is no GIL at all.
+ *
+ * Holding the mutex cannot deadlock a free-threaded stop-the-world pause: each critical section
+ * is bounded array and counter work and never calls Python, user code, a cleaner or a callback,
+ * so a thread holding it never waits on a thread that is parked for a pause. The mutex is not
+ * re-entrant on every platform, so no critical section takes it twice.
  */
 object HandleTable {
 
@@ -67,11 +72,13 @@ object HandleTable {
 
     private var live = 0
 
+    private val mutex = PlatformMutex()
+
     /** How many handles are currently rooting an object. The leak counter. */
-    val liveCount: Int get() = live
+    val liveCount: Int get() = mutex.withLock { live }
 
     /** How many slots the backing array holds. Bounded by peak [liveCount], not by total issued. */
-    val slotCount: Int get() = objects.size
+    val slotCount: Int get() = mutex.withLock { objects.size }
 
     /**
      * Roots [obj] and returns the handle Python will hold.
@@ -82,17 +89,19 @@ object HandleTable {
      * identity across the boundary -- is the Python side's question and is not settled here.)
      */
     fun register(obj: Any): ObjectReference {
-        val slot: Int
-        if (freeSlots.isEmpty()) {
-            slot = objects.size
-            objects.add(obj)
-            generations.add(1)
-        } else {
-            slot = freeSlots.removeAt(freeSlots.size - 1)
-            objects[slot] = obj
+        return mutex.withLock {
+            val slot: Int
+            if (freeSlots.isEmpty()) {
+                slot = objects.size
+                objects.add(obj)
+                generations.add(1)
+            } else {
+                slot = freeSlots.removeAt(freeSlots.size - 1)
+                objects[slot] = obj
+            }
+            live++
+            ObjectReference.encode(slot, generations[slot])
         }
-        live++
-        return ObjectReference.encode(slot, generations[slot])
     }
 
     /** The object [ref] roots, or `null` if the handle is [ObjectReference.NONE] or stale. */
@@ -108,9 +117,12 @@ object HandleTable {
     fun resolveRaw(raw: Long): Any? {
         if (raw == ObjectReference.NONE_RAW) return null
         val slot = (raw and ObjectReference.SLOT_MASK).toInt()
-        if (slot < 0 || slot >= objects.size) return null
-        if (generations[slot] != (raw ushr ObjectReference.GENERATION_SHIFT).toInt()) return null
-        return objects[slot]
+        val generation = (raw ushr ObjectReference.GENERATION_SHIFT).toInt()
+        return mutex.withLock {
+            if (slot < 0 || slot >= objects.size) null
+            else if (generations[slot] != generation) null
+            else objects[slot]
+        }
     }
 
     /**
@@ -133,11 +145,16 @@ object HandleTable {
         val raw = ref.raw
         if (raw == ObjectReference.NONE_RAW) return false
         val slot = (raw and ObjectReference.SLOT_MASK).toInt()
-        if (slot < 0 || slot >= objects.size) return false
-        if (generations[slot] != (raw ushr ObjectReference.GENERATION_SHIFT).toInt()) return false
-        if (objects[slot] == null) return false
-        releaseSlot(slot)
-        return true
+        val generation = (raw ushr ObjectReference.GENERATION_SHIFT).toInt()
+        return mutex.withLock {
+            if (slot < 0 || slot >= objects.size) false
+            else if (generations[slot] != generation) false
+            else if (objects[slot] == null) false
+            else {
+                releaseSlot(slot)
+                true
+            }
+        }
     }
 
     /**
@@ -147,11 +164,14 @@ object HandleTable {
      * handles issued before the call stay unresolvable afterwards.
      */
     fun releaseAll() {
-        for (slot in objects.indices) {
-            if (objects[slot] != null) releaseSlot(slot)
+        mutex.withLock {
+            for (slot in objects.indices) {
+                if (objects[slot] != null) releaseSlot(slot)
+            }
         }
     }
 
+    /** Caller holds [mutex]. */
     private fun releaseSlot(slot: Int) {
         objects[slot] = null
         generations[slot] = nextGeneration(generations[slot])

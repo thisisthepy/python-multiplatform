@@ -254,7 +254,7 @@ internal object ClasspathPayload {
         if (stamp.isFile && stamp.readText() == key) return root
 
         stamp.delete()
-        root.deleteRecursively()
+        deleteWithoutFollowingLinks(root)
         if (!root.mkdirs() && !root.isDirectory) {
             throw IOException("could not create $root to extract the Python payload from ${archive.name} into")
         }

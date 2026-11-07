@@ -2,6 +2,7 @@ package python.multiplatform.ffi
 
 import python.multiplatform.BuildConfig
 import python.multiplatform.env.PythonHomeCheck
+import python.multiplatform.env.PythonDevAgent
 import python.multiplatform.env.PythonPayload
 import python.multiplatform.env.applyPackagedPythonHome
 import python.multiplatform.ffi.exceptions.PyException
@@ -19,7 +20,7 @@ object Python3 {
     /**
      * Ensure Python is initialized
      */
-    inline fun <T> withPython(block: () -> T): T {
+    inline fun <T> withPython(crossinline block: () -> T): T {
         if (!isInitialized) throw IllegalStateException("Python is not initialized")
         return withGIL {
             memScoped {
@@ -51,6 +52,7 @@ object Python3 {
             // does its work at most once per process, so arriving here repeatedly is free.
             PythonPayload.installStagedRootsOnStartup()
             installBuiltinCompiledOnce()
+            PythonDevAgent.startIfRequested()
             return
         }
         // Runs once per process, before the call whose own failure mode is either an uncatchable
@@ -94,6 +96,9 @@ object Python3 {
         // is a separate mechanism entirely -- see PythonPayload for the whole reasoning, and for
         // the `autoInstall` switch that turns this off.
         PythonPayload.installStagedRootsOnStartup()
+        // The dev agent (SPEC L-12): only when a debug launch asked for it, after the payload is on
+        // sys.path so its overlay can go in front of it.
+        PythonDevAgent.startIfRequested()
     }
 
     private var builtinCompiledInstalled = false
@@ -119,7 +124,9 @@ object Python3 {
             def _pm_install_compiled():
                 import builtins
                 if not hasattr(builtins, "compiled"):
-                    def compiled(f):
+                    def compiled(f=None, /, **_opts):
+                        if f is None:
+                            return lambda g: g
                         return f
                     builtins.compiled = compiled
             _pm_install_compiled()

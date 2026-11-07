@@ -12,11 +12,12 @@ from pathlib import Path
 
 import pytest
 
+from conftest import decorate_compiled
 from typedpython import frontend
 from typedpython.ir import (
     And, ArrayParam, Assign, BinOp, BinOpKind, Box, Break, Call, CallObject, Compare, CompareKind,
     CompareObj, Const, CopyArray, NewArray, Tuple, ExprStmt, While, ForRange, GetAttr, Global, If, Index, Len, Local, MathCall,
-    MathFunc, ObjToFloat, Param, Return, StoreIndex, ToFloat, Truth, Type, UnaryOp, UnaryOpKind,
+    MathFunc, ObjToFloat, Param, Return, StoreIndex, ToFloat, ToInt, Truth, Type, UnaryOp, UnaryOpKind,
 )
 
 I64, F64, BOOL, OBJ = Type.I64, Type.F64, Type.BOOL, Type.OBJ
@@ -54,7 +55,7 @@ def nodes(root, cls):
 
 def test_scalar_loop_lowers_to_for_range(tmp_path):
     m = lower(tmp_path, """
-        # typedpython: compiled
+        @compiled
         def total(n: int, x: float) -> float:
             acc: float = 0.0
             for k in range(n):
@@ -103,8 +104,9 @@ def test_unannotated_local_with_two_types_is_skipped(tmp_path):
     assert "`c`" in m.skipped["f"] and "line " in m.skipped["f"]
 
 
-def test_impure_function_keeps_an_unbounded_int_local_as_a_python_int(tmp_path):
-    # Impure: a deopt could not be redone, so `m` is a CPython int object, not a checked i64.
+def test_impure_function_keeps_an_unbounded_int_local_as_a_native_int(tmp_path):
+    # Impure: a deopt could not be redone, so `m` is an INT (SPEC N-13): native i64, promoted in place
+    # to a PyLong on overflow, not a checked i64.
     m = lower(tmp_path, """
         @compiled
         def g(a: list[float], n: int) -> None:
@@ -113,10 +115,11 @@ def test_impure_function_keeps_an_unbounded_int_local_as_a_python_int(tmp_path):
             a[0] = 1.0
     """)
     f = function(m, "g")
-    assert f.locals == {"m": OBJ}
+    INT = Type.INT
+    assert f.locals == {"m": INT}
     assert f.body[:2] == (
-        Assign("m", Box(OBJ, Local(I64, "n"))),
-        Assign("m", BinOp(OBJ, BinOpKind.ADD, Local(OBJ, "m"), Box(OBJ, Const(I64, 1)))),
+        Assign("m", ToInt(INT, Local(I64, "n"))),
+        Assign("m", BinOp(INT, BinOpKind.ADD, Local(INT, "m"), ToInt(INT, Const(I64, 1)))),
     )
     assert not f.pure and not f.may_deopt
 
@@ -185,10 +188,11 @@ def test_float_arithmetic_is_never_marked_proven(tmp_path):
     assert not any(n.proven for n in nodes(f, BinOp) + nodes(f, UnaryOp))
 
 
-@pytest.mark.parametrize("expr", ["i // 2", "i / 2"])
+@pytest.mark.parametrize("expr", ["i // 3", "i / 2"])
 def test_int_division_cannot_be_recorded_as_proven_so_it_deopts(tmp_path, expr):
-    # ir.BinOp.proven exists for ADD/SUB/MUL only; the verifier cannot re-prove // and / on i64,
-    # so they count as deopting: in a pure function may_deopt, in an impure one a CPython int.
+    # ir.BinOp.proven exists for ADD/SUB/MUL and for // and % by a power of two of a value >= 0
+    # (#148, test_interval_proofs.py); the verifier cannot re-prove // by 3 or / on i64, so they
+    # count as deopting: in a pure function may_deopt, in an impure one a CPython int.
     m = lower(tmp_path, f"""
 @compiled
 def f(n: int) -> float:
@@ -320,14 +324,15 @@ def test_augmented_store_evaluates_a_computed_index_once(tmp_path):
 def test_list_params_become_array_params_with_stored(tmp_path):
     m = lower(tmp_path, """
         @compiled
-        def scale(a: list[float], b: list[float], k: float, c: list[int]) -> None:
+        def scale(a: list[float], b: list[float], k: float) -> None:
             for i in range(len(a)):
                 a[i] = b[i] * k
     """)
     f = function(m, "scale")
+    # two list parameters at most (#159: the lists are locked from copy-in to write-back; CPython
+    # has no three-object critical section). A third one is test_free_threaded.py's.
     assert f.params == (
-        ArrayParam("a", Type.F64_ARRAY, True), ArrayParam("b", Type.F64_ARRAY, False),
-        Param("k", F64), ArrayParam("c", Type.I64_ARRAY, False),
+        ArrayParam("a", Type.F64_ARRAY, True), ArrayParam("b", Type.F64_ARRAY, False), Param("k", F64),
     )
     assert f.body[0].stop == Len(I64, "a")
 
@@ -428,8 +433,8 @@ def fill(n: int, out: list[float]) -> None:
     assert call.function == "tri" and call.redo
 
 
-def test_impure_caller_of_an_int_returning_deopting_callee_calls_the_global(tmp_path):
-    # An I64 result of a redo could be a big int: such a callee is still called as an object.
+def test_impure_caller_of_an_int_returning_deopting_callee_redoes_it_as_an_int(tmp_path):
+    # SPEC N-13: an I64 result of a redo may be a big int, so the direct Call has type INT.
     m = lower(tmp_path, """
         @compiled
         def add(i: int, j: int) -> int:
@@ -442,9 +447,9 @@ def test_impure_caller_of_an_int_returning_deopting_callee_calls_the_global(tmp_
     """)
     fill = function(m, "fill")
     assert not fill.pure and not fill.may_deopt
-    assert nodes(fill, Call) == []
-    assert nodes(fill, CallObject) == [
-        CallObject(OBJ, Global(OBJ, "add"), (Box(OBJ, Local(I64, "i")), Box(OBJ, Local(I64, "i"))))]
+    assert nodes(fill, CallObject) == []
+    assert nodes(fill, Call) == [
+        Call(Type.INT, "add", (Local(I64, "i"), Local(I64, "i")), redo=True)]
 
 
 def test_pure_caller_of_a_deopting_callee_does_not_redo(tmp_path):
@@ -629,16 +634,18 @@ def f(x: float) -> object:
     assert Global(OBJ, "K") in nodes(f, Global)
 
 
-def test_module_marker_compiles_every_module_level_def(tmp_path):
+def test_compiled_marks_every_decorated_module_level_def(tmp_path):
     m = lower(tmp_path, """
 
-        # typedpython: compiled
+        @compiled
         def a(x: float) -> float:
             return x
 
+        @compiled
         def b(x: float) -> float:
             return -x
 
+        @compiled
         @staticmethod
         def c(x: float) -> float:
             return x
@@ -647,7 +654,79 @@ def test_module_marker_compiles_every_module_level_def(tmp_path):
     assert set(m.skipped) == {"c"} and "decorator" in m.skipped["c"]
 
 
-def test_without_marker_only_compiled_functions_are_lowered(tmp_path):
+def test_compiled_parallel_option_and_former_comment_marker(tmp_path):
+    m = lower(tmp_path, """
+        @compiled(parallel=True)
+        def p(x: float) -> float:
+            return x
+
+        @compiled(parallel=False)
+        def s(x: float) -> float:
+            return -x
+
+        # typedpython: parallel
+        @compiled
+        def c(x: float) -> float:
+            return x * 2.0
+
+        @compiled(unknown=True)
+        def bad(x: float) -> float:
+            return x
+    """)
+    assert [(f.name, f.parallel) for f in m.functions] == [("p", True), ("s", False), ("c", False)]
+    assert set(m.skipped) == {"bad"} and "parallel" in m.skipped["bad"]
+
+
+def test_compiled_fastmath_option_and_validation(tmp_path):
+    m = lower(tmp_path, """
+        @compiled(fastmath=True)
+        def fm(x: float) -> float:
+            return x
+
+        @compiled(fastmath=False)
+        def exact(x: float) -> float:
+            return -x
+
+        @compiled(parallel=True, fastmath=True)
+        def both(x: float) -> float:
+            return x * 2.0
+
+        @compiled
+        def plain(x: float) -> float:
+            return x + 1.0
+
+        @compiled(fastmath=1)
+        def bad_val(x: float) -> float:
+            return x
+
+        @compiled(other=True)
+        def bad_kw(x: float) -> float:
+            return x
+    """)
+    assert [(f.name, f.parallel, f.fastmath) for f in m.functions] == [
+        ("fm", False, True),
+        ("exact", False, False),
+        ("both", True, True),
+        ("plain", False, False),
+    ]
+    assert set(m.skipped) == {"bad_val", "bad_kw"}
+    assert "fastmath" in m.skipped["bad_val"]
+    assert "fastmath" in m.skipped["bad_kw"] and "parallel" in m.skipped["bad_kw"]
+
+
+def test_the_former_module_pragma_comment_compiles_nothing(tmp_path):
+    m = lower(tmp_path, """
+        # typedpython: compiled
+        def a(x: float) -> float:
+            return x
+
+        def b(x: float) -> float:
+            return -x
+    """)
+    assert m.functions == () and m.skipped == {}
+
+
+def test_without_a_decorator_only_compiled_functions_are_lowered(tmp_path):
     m = lower(tmp_path, """
         x: int = 1
         # typedpython: compiled
@@ -695,7 +774,7 @@ def test_compiled_code_calls_imported_callables_around_native_float_math(tmp_pat
     """)
     f = function(m, "render")
     assert not f.pure and not f.may_deopt
-    assert f.locals == {"canvas": OBJ, "total": F64, "hits": OBJ, "i": I64, "x": F64}
+    assert f.locals == {"canvas": OBJ, "total": F64, "hits": Type.INT, "i": I64, "x": F64}
     assert f.body[0] == Assign("canvas", CallObject(
         OBJ, Global(OBJ, "make_canvas"), (Box(OBJ, Local(I64, "n")),)))
     loop = f.body[3]
@@ -707,8 +786,9 @@ def test_compiled_code_calls_imported_callables_around_native_float_math(tmp_pat
         ExprStmt(CallObject(OBJ, Global(OBJ, "draw"), (
             Local(OBJ, "canvas"), Box(OBJ, Local(F64, "x")), Box(OBJ, Const(F64, 0.5)),
         ), ("alpha",))),
-        Assign("hits", BinOp(OBJ, BinOpKind.ADD, Local(OBJ, "hits"), Box(OBJ, Const(I64, 1)))),
-        If(CompareObj(BOOL, CompareKind.GT, Local(OBJ, "hits"), Box(OBJ, Local(I64, "n"))),
+        Assign("hits", BinOp(Type.INT, BinOpKind.ADD, Local(Type.INT, "hits"),
+                             ToInt(Type.INT, Const(I64, 1)))),          # native int (SPEC N-13)
+        If(Compare(BOOL, CompareKind.GT, Local(Type.INT, "hits"), ToInt(Type.INT, Local(I64, "n"))),
            (Break(),)),
     )
 
@@ -823,7 +903,7 @@ def test_locals_exclude_parameters(tmp_path):
 def test_nbody_kernels_lower(tmp_path):
     path = tmp_path / "nbody.py"
     shutil.copy(BENCH / "nbody.py", path)
-    path.write_text("# typedpython: compiled\n" + path.read_text())
+    path.write_text(decorate_compiled(path.read_text()))
     m = frontend.lower(path)
     for name in ("advance", "energy", "offset_momentum"):
         function(m, name)
@@ -842,7 +922,7 @@ def test_nbody_kernels_lower(tmp_path):
 @pytest.mark.skipif(not BENCH.exists(), reason="benchmark worktree not present")
 def test_spectral_norm_kernels_lower(tmp_path):
     path = tmp_path / "spectral_norm.py"
-    path.write_text("# typedpython: compiled\n" + (BENCH / "spectral_norm.py").read_text())
+    path.write_text(decorate_compiled((BENCH / "spectral_norm.py").read_text()))
     m = frontend.lower(path)
     eval_a = function(m, "eval_a")
     assert eval_a.pure and eval_a.may_deopt
@@ -1043,7 +1123,7 @@ def test_tuple_return_must_match_its_annotation(tmp_path, annotation, value, sni
 @pytest.mark.skipif(not BENCH.exists(), reason="benchmark worktree not present")
 def test_fannkuch_lowers(tmp_path):
     path = tmp_path / "fannkuch.py"
-    path.write_text("# typedpython: compiled\n" + (BENCH / "fannkuch.py").read_text())
+    path.write_text(decorate_compiled((BENCH / "fannkuch.py").read_text()))
     m = frontend.lower(path)
     assert "fannkuch" in [f.name for f in m.functions], m.skipped.get("fannkuch")
     f = function(m, "fannkuch")

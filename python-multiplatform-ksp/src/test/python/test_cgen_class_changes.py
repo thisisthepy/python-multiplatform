@@ -112,9 +112,9 @@ SOURCE = textwrap.dedent('''\
         cb()
         return type(x) is Node
 
-    def fill(a, n):
+    def fill(n):
         x = n.left
-        a[0] = SCALE
+        return SCALE
     ''')
 
 NODE = ClassDecl("Node", ("left", "right"), True)
@@ -199,12 +199,13 @@ def f_is_node():
 
 
 def f_fill():
-    # closed (no user code), impure (an array store), with an entry global
-    return fn("fill", [ArrayParam("a", Type.F64_ARRAY, True), Param("n", OBJ, cls="Node")], NONE,
+    # closed (no user code) with an entry global. Not an array function any more: a slot read's
+    # slow path can run a property, which must not run while a list copy-in is live (#203)
+    return fn("fill", [Param("n", OBJ, cls="Node")], F64,
               {"x": OBJ},
               [Assign("x", FieldGet(OBJ, _o("n"), "Node", "left")),
-               StoreIndex("a", c(0), L("SCALE", F64)), Return()],
-              pure=False, may_deopt=False, entry_globals=(Param("SCALE", F64),))
+               Return(L("SCALE", F64))],
+              pure=True, may_deopt=False, entry_globals=(Param("SCALE", F64),))
 
 
 def functions():
@@ -270,8 +271,7 @@ def sc_unchanged(M, call, P):
            call("pair", 1, 2), call("mid_get", NOOP, n), call("mid_set", NOOP, n, "y"),
            call("mid_new", NOOP, 3, 4), call("arg_new", lambda: "a", 5), call("via_pair", NOOP, 6, 7),
            call("is_node", NOOP, n), call("is_node", NOOP, M.Twin(1, 2))]
-    a = [0.0]
-    out += [call("fill", a, n), a]
+    out += [call("fill", n)]
     P("after")
     return out
 
@@ -456,16 +456,14 @@ def sc_exhaust(M, call, P):
 
 def sc_entry_global(M, call, P):
     n = M.Node(1, 2)
-    a = [0.0]
-    out = [call("fill", a, n), list(a)]
+    out = [call("fill", n)]
     P("before")
 
     def getter(s):
         M.SCALE = 5.0
         return "p"
     M.Node.left = property(getter)
-    b = [0.0]
-    out += [call("fill", b, n), list(b), M.SCALE]
+    out += [call("fill", n), M.SCALE]
     P("after")
     return out
 
@@ -601,12 +599,12 @@ def child_refcounts(so, name, rounds):
             M.via_pair(cb, shared, shared)
             M.arg_new(cb, shared)
             M.is_node(cb, n)
-            M.fill([0.0], n)
+            M.fill(n)
         A2.get_left(n2)
         A2.mid_get(cb, n2)
         A2.setl(n2, shared)
         A2.mid_set(cb, n2, shared)
-        A2.fill([0.0], n2)
+        A2.fill(n2)
         try:
             A2.check(n2)
         except AttributeError:
@@ -780,7 +778,8 @@ def test_exhausted_version_tags_take_the_slow_path(report):
 
 def test_closed_function_with_an_entry_global_sees_the_rebinding(report):
     r = same(report, "entry_global")
-    assert r["compiled"][1] == [2.0] and r["compiled"][3] == [5.0]
+    # fill returns SCALE: the old value before, the value the property getter set after
+    assert r["compiled"][0] == 2.0 and r["compiled"][1] == 5.0
 
 
 # --- behaviour: no dict watcher available ------------------------------------------------------------

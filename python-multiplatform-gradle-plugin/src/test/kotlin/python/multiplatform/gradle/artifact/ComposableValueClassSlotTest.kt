@@ -51,8 +51,13 @@ class ComposableValueClassSlotTest {
         File("/Volumes/macMini/caches/.gradle/caches/modules-2/files-2.1"),
     ).firstOrNull { it.isDirectory }
 
-    private fun jarUnder(group: String, artifact: String): File? = caches?.resolve(group)?.resolve(artifact)
-        ?.walkTopDown()?.firstOrNull { it.isFile && it.name.endsWith(".jar") && "sources" !in it.name }
+    private fun jarUnder(group: String, artifact: String): File? = listOf(
+        group,
+        group.replaceFirst("org.jetbrains.compose", "org.thisisthepy.compose"),
+    ).firstNotNullOfOrNull { g ->
+        caches?.resolve(g)?.resolve(artifact)
+            ?.walkTopDown()?.firstOrNull { it.isFile && it.name.endsWith(".jar") && "sources" !in it.name }
+    }
 
     private val kotlinStdlibJar: File
         get() = File(Class.forName("kotlin.text.Regex").protectionDomain.codeSource.location.toURI())
@@ -93,7 +98,9 @@ class ComposableValueClassSlotTest {
             includePrefixes = listOf("androidx.compose.material3"),
             classpath = composeClasspath(),
         )
-        val icons = entries.filter { it.name.substringAfterLast('.').substringBefore("__") == "Icon" }
+        // The top-level `androidx.compose.material3.Icon` overloads only: an object's composable member
+        // named Icon (SegmentedButtonDefaults.Icon, bound since #307) has no tint.
+        val icons = entries.filter { it.name.substringBefore("__") == "androidx.compose.material3.Icon" }
         assertTrue(icons.isNotEmpty(), "no Icon binding among ${entries.size} entries")
 
         // Not every `Icon` overload tints with a `Color`: 1.7.0 added one taking a

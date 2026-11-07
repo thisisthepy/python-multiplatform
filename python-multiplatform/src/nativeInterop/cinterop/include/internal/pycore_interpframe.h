@@ -27,7 +27,7 @@ static inline PyCodeObject *_PyFrame_GetCode(_PyInterpreterFrame *f) {
 // Similar to _PyFrame_GetCode(), but return NULL if the frame is invalid or
 // freed. Used by dump_frame() in Python/traceback.c. The function uses
 // heuristics to detect freed memory, it's not 100% reliable.
-static inline PyCodeObject*
+static inline PyCodeObject* _Py_NO_SANITIZE_THREAD
 _PyFrame_SafeGetCode(_PyInterpreterFrame *f)
 {
     // globals and builtins may be NULL on a legit frame, but it's unlikely.
@@ -70,7 +70,7 @@ _PyFrame_GetBytecode(_PyInterpreterFrame *f)
 // Similar to PyUnstable_InterpreterFrame_GetLasti(), but return NULL if the
 // frame is invalid or freed. Used by dump_frame() in Python/traceback.c. The
 // function uses heuristics to detect freed memory, it's not 100% reliable.
-static inline int
+static inline int _Py_NO_SANITIZE_THREAD
 _PyFrame_SafeGetLasti(struct _PyInterpreterFrame *f)
 {
     // Code based on _PyFrame_GetBytecode() but replace _PyFrame_GetCode()
@@ -102,14 +102,14 @@ static inline _PyStackRef *_PyFrame_Stackbase(_PyInterpreterFrame *f) {
     return (f->localsplus + _PyFrame_GetCode(f)->co_nlocalsplus);
 }
 
-static inline _PyStackRef _PyFrame_StackPeek(_PyInterpreterFrame *f) {
-    assert(f->stackpointer >  f->localsplus + _PyFrame_GetCode(f)->co_nlocalsplus);
-    assert(!PyStackRef_IsNull(f->stackpointer[-1]));
-    return f->stackpointer[-1];
+static inline _PyStackRef _PyFrame_StackPeek(_PyInterpreterFrame *f, int depth) {
+    assert(f->stackpointer > _PyFrame_Stackbase(f));
+    assert(!PyStackRef_IsNull(f->stackpointer[-depth]));
+    return f->stackpointer[-depth];
 }
 
 static inline _PyStackRef _PyFrame_StackPop(_PyInterpreterFrame *f) {
-    assert(f->stackpointer >  f->localsplus + _PyFrame_GetCode(f)->co_nlocalsplus);
+    assert(f->stackpointer > _PyFrame_Stackbase(f));
     f->stackpointer--;
     return *f->stackpointer;
 }
@@ -282,9 +282,26 @@ _PyThreadState_GetFrame(PyThreadState *tstate)
     return _PyFrame_GetFirstComplete(tstate->current_frame);
 }
 
+// Update last_profiled_frame for remote profiler frame caching.
+// Only update if we're removing the exact frame that was last profiled.
+// This avoids corrupting the cache when transient frames (called and returned
+// between profiler samples) update last_profiled_frame to addresses the
+// profiler never saw.
+// The sequence distinguishes this anchor from a later frame that reuses the
+// same _PyInterpreterFrame address.
+#define _PyThreadState_UpdateLastProfiledFrame(tstate, frame, previous) \
+    do { \
+        PyThreadState *tstate_ = (tstate); \
+        _PyInterpreterFrame *frame_ = (frame); \
+        if (tstate_->last_profiled_frame == frame_) { \
+            tstate_->last_profiled_frame = (previous); \
+            tstate_->last_profiled_frame_seq++; \
+        } \
+    } while (0)
+
 /* For use by _PyFrame_GetFrameObject
   Do not call directly. */
-PyFrameObject *
+PyAPI_FUNC(PyFrameObject *)
 _PyFrame_MakeAndSetFrameObject(_PyInterpreterFrame *frame);
 
 /* Gets the PyFrameObject for this frame, lazily
@@ -302,7 +319,8 @@ _PyFrame_GetFrameObject(_PyInterpreterFrame *frame)
     return _PyFrame_MakeAndSetFrameObject(frame);
 }
 
-void
+// Exported for external JIT support
+PyAPI_FUNC(void)
 _PyFrame_ClearLocals(_PyInterpreterFrame *frame);
 
 /* Clears all references in the frame.
@@ -313,8 +331,10 @@ _PyFrame_ClearLocals(_PyInterpreterFrame *frame);
  * in the frame.
  * take should  be set to 1 for heap allocated
  * frames like the ones in generators and coroutines.
+ *
+ * Exported for external JIT support
  */
-void
+ PyAPI_FUNC(void)
 _PyFrame_ClearExceptCode(_PyInterpreterFrame * frame);
 
 int
@@ -338,7 +358,8 @@ _PyThreadState_HasStackSpace(PyThreadState *tstate, int size)
         size < tstate->datastack_limit - tstate->datastack_top;
 }
 
-extern _PyInterpreterFrame *
+// Exported for external JIT support
+PyAPI_FUNC(_PyInterpreterFrame *)
 _PyThreadState_PushFrame(PyThreadState *tstate, size_t size);
 
 PyAPI_FUNC(void) _PyThreadState_PopFrame(PyThreadState *tstate, _PyInterpreterFrame *frame);
@@ -399,6 +420,10 @@ _PyEvalFramePushAndInit(PyThreadState *tstate, _PyStackRef func,
                         PyObject *locals, _PyStackRef const *args,
                         size_t argcount, PyObject *kwnames,
                         _PyInterpreterFrame *previous);
+
+PyAPI_FUNC(_PyInterpreterFrame *)
+_PyEvalFramePushAndInit_Ex(PyThreadState *tstate, _PyStackRef func,
+    PyObject *locals, Py_ssize_t nargs, PyObject *callargs, PyObject *kwargs, _PyInterpreterFrame *previous);
 
 #ifdef __cplusplus
 }

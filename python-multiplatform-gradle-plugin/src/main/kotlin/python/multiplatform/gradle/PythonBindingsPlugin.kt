@@ -12,7 +12,7 @@ import python.multiplatform.gradle.stubs.PythonStubsTask
  * KSP option names. Copied rather than imported: these are the processor's
  * `python.multiplatform.ksp.Constants`, and this plugin ships as a separate build so that a
  * consumer resolves it from the plugin portal without also resolving the processor's compile
- * classpath. Changing one without the other shows up in `ksp-fixtures` as an unwired module.
+ * classpath. Changing one without the other shows up in the `fixtures/` modules as an unwired module.
  */
 private const val OPTION_ROLE = "python.multiplatform.role"
 private const val OPTION_MODULE_NAME = "python.multiplatform.moduleName"
@@ -53,7 +53,7 @@ private const val TYPEDPYTHON_STUBS_CONFIGURATION = "typedpythonStubs"
  * and a second `FunctionTable` -- into the test compilation, where they shadowed the real ones
  * from `main`, because a compilation's own generated sources win over its classpath. The symptom
  * is a table holding the test classes and nothing the module actually exposes.
- * `ksp-fixtures/android` is what surfaced this; no module without an Android plugin can.
+ * `python-multiplatform-ksp/fixtures/android` is what surfaced this; no module without an Android plugin can.
  *
  * `Test` is therefore matched as a camel-case *word* rather than as a suffix: it must start a word
  * and end one. A target or product flavour genuinely named `testing` is not a test compilation and
@@ -96,7 +96,7 @@ internal fun deriveModuleName(group: String, path: String, name: String): String
  * package, so two of them collide. Gradle has no general notion of "the module that ships", and
  * a Kotlin Multiplatform module that builds a framework or a native executable carries no plugin
  * that distinguishes it -- hence the explicit `role` override on the extension, which is what
- * `ksp-fixtures/app` uses.
+ * `python-multiplatform-ksp/fixtures/app` uses.
  */
 internal fun inferRole(hasApplicationPlugin: Boolean, hasAndroidApplicationPlugin: Boolean): String =
     if (hasApplicationPlugin || hasAndroidApplicationPlugin) ROLE_APP else ROLE_LIBRARY
@@ -145,6 +145,14 @@ interface PythonBindingsExtension {
      */
     val packagePythonHome: Property<Boolean>
 
+    /**
+     * SPEC L-9 (issue #246): the directory a GraalVM native image of this app is written to. When it
+     * is set, `stageNativeImagePythonHome` copies the same pruned prefix Compose packaging gets into
+     * `<this>/python-multiplatform-home`, where the library finds it at run time beside the
+     * executable. Unset, the task copies nothing.
+     */
+    val nativeImageDirectory: org.gradle.api.file.DirectoryProperty
+
     /** CPython version to stage. Defaults to the one this library was built against. */
     val pythonVersion: Property<String>
 
@@ -186,7 +194,7 @@ interface PythonBindingsExtension {
      * Named explicitly rather than derived, because this plugin carries no Kotlin Gradle Plugin
      * types (see [TEST_WORD]) and so cannot ask a target what its compile classpath is called. One
      * configuration and one source set is also the honest scope of what has been verified: see
-     * `ksp-fixtures/artifact`, and ROADMAP §16 for the generalisation.
+     * `python-multiplatform-gradle-plugin/fixtures/artifact`, and ROADMAP §16 for the generalisation.
      */
     val artifactConfiguration: Property<String>
 
@@ -223,6 +231,35 @@ interface PythonBindingsExtension {
      * needs per environment.
      */
     val generateStubs: Property<Boolean>
+
+    /**
+     * iOS settings (issue #90): `pythonBindings { ios { linkPythonFramework.set(false) } }`. The
+     * iOS tasks exist only in a module that declares Kotlin/Native iOS targets.
+     */
+    @get:org.gradle.api.tasks.Nested
+    val ios: PythonBindingsIosExtension
+
+    /** The `ios { }` block itself: without it the nested property is reachable only as `ios.x`. */
+    fun ios(action: org.gradle.api.Action<in PythonBindingsIosExtension>) = action.execute(ios)
+
+    /**
+     * SPEC N-10 (`python-multiplatform#25` step 2): directory of developer `.py` files to compile
+     * to C with `python -m typedpython emit-c`. When set, registers [EMIT_TYPEDPYTHON_C_TASK]
+     * ([TypedPythonEmitCTask]); unset (the default) registers no task.
+     */
+    val typedPythonSourceDir: org.gradle.api.file.DirectoryProperty
+
+    /**
+     * The directory module names are derived relative to (`--root`). Defaults to
+     * [typedPythonSourceDir].
+     */
+    val typedPythonRootDir: org.gradle.api.file.DirectoryProperty
+
+    /** The Python interpreter executable that runs `-m typedpython emit-c` (defaults to `"python3"`). */
+    val typedPythonExecutable: Property<String>
+
+    /** Optional `PYTHONPATH` entries for locating the `typedpython` package when not installed in [typedPythonExecutable]. */
+    val typedPythonPath: org.gradle.api.file.ConfigurableFileCollection
 }
 
 /**
@@ -231,7 +268,7 @@ interface PythonBindingsExtension {
  * target, is now one plugin.
  *
  *     plugins {
- *         id("io.github.thisisthepy.python.multiplatform.bindings")
+ *         id("org.thisisthepy.python.multiplatform.bindings")
  *     }
  *
  * A module that produces the final binary adds `pythonBindings { role.set("app") }` unless it
@@ -279,6 +316,11 @@ class PythonBindingsPlugin : Plugin<Project> {
         }
 
         configurePythonHomeStaging(project, extension)
+        // After evaluation, because the targets and their framework binaries are declared in the
+        // consumer's own `kotlin { }` block. A module without iOS targets gets no task.
+        project.pluginManager.withPlugin("org.jetbrains.kotlin.multiplatform") {
+            project.afterEvaluate { configureIosConsumer(this, extension) }
+        }
         configureWasmBrowserRuntimeStaging(project, extension)
 
         project.afterEvaluate {
@@ -303,6 +345,34 @@ class PythonBindingsPlugin : Plugin<Project> {
             // `plugins { ... }` and so do not exist while this plugin is being applied.
             configureArtifactBindings(this, extension)
             configureWasmProxyExports(this)
+            configureTypedPythonEmitC(this, extension)
+        }
+    }
+
+    /**
+     * SPEC N-10 (`python-multiplatform#25` step 2): registers [EMIT_TYPEDPYTHON_C_TASK]
+     * ([TypedPythonEmitCTask]) when [PythonBindingsExtension.typedPythonSourceDir] is set.
+     *
+     * A no-op when [PythonBindingsExtension.typedPythonSourceDir] is unset, so projects that do not
+     * compile developer Python modules with TypedPython get no task.
+     */
+    internal fun configureTypedPythonEmitC(project: Project, extension: PythonBindingsExtension) {
+        if (!extension.typedPythonSourceDir.isPresent) return
+        val srcDir = extension.typedPythonSourceDir.get().asFile
+        project.tasks.register(EMIT_TYPEDPYTHON_C_TASK, TypedPythonEmitCTask::class.java) {
+            group = "python"
+            description = "Runs python -m typedpython emit-c over pythonBindings.typedPythonSourceDir and writes the compile-slot manifest."
+            sources.from(
+                project.fileTree(srcDir) {
+                    include("**/*.py")
+                    exclude("**/__pycache__/**", "**/.*", "**/build/**")
+                },
+            )
+            rootDirectory.set(extension.typedPythonRootDir.orElse(extension.typedPythonSourceDir))
+            pythonExecutable.set(extension.typedPythonExecutable.orElse("python3"))
+            pythonPath.from(extension.typedPythonPath)
+            cacheDirectory.set(project.layout.buildDirectory.dir("typedpython/c-cache"))
+            manifestFile.set(project.layout.buildDirectory.file("typedpython/emit-c-manifest.json"))
         }
     }
 
@@ -362,6 +432,7 @@ class PythonBindingsPlugin : Plugin<Project> {
                     },
                 )
                 includePrefixes.set(includes)
+                excludePackages.set(extension.excludePackages.getOrElse(emptyList()))
                 this.klibReaderClasspath.from(klibReader)
                 outputDirectory.set(
                     project.layout.buildDirectory.dir("generated/pythonArtifactBindings/$sourceSetName"),
@@ -508,6 +579,7 @@ class PythonBindingsPlugin : Plugin<Project> {
             description = "Emits .pyi stubs for the declarations the artefact walker bound."
             artifacts.from(resolved.artifactFiles)
             includePrefixes.set(includes)
+            excludePackages.set(extension.excludePackages.getOrElse(emptyList()))
             klibReaderClasspath.from(klibReader)
             outputDirectory.set(project.layout.buildDirectory.dir("generated/pythonStubs/$sourceSetName"))
         }
@@ -682,6 +754,21 @@ class PythonBindingsPlugin : Plugin<Project> {
                     requireNoEmptyLibraries(destinationDir.resolve(PACKAGED_HOME_DIRECTORY))
                 }
             }
+
+        // SPEC L-9 (issue #246): the same prefix beside a native image, wherever the app writes one.
+        val besideImage = project.provider { extension.nativeImageDirectory.isPresent }
+        project.tasks.register("stageNativeImagePythonHome", org.gradle.api.tasks.Sync::class.java) {
+            group = "python"
+            description = "Copies the CPython prefix beside a GraalVM native image (pythonBindings.nativeImageDirectory)."
+            dependsOn(java.util.concurrent.Callable { if (besideImage.get()) listOf(stage) else emptyList() })
+            from(java.util.concurrent.Callable { if (besideImage.get()) stagedPrefix else emptyList<Any>() }) {
+                include(includes)
+                exclude(PACKAGED_PREFIX_EXCLUDES)
+            }
+            into(extension.nativeImageDirectory.dir(PACKAGED_HOME_DIRECTORY).orElse(project.layout.buildDirectory.dir("tmp/stageNativeImagePythonHome-unset")))
+            onlyIf("pythonBindings.nativeImageDirectory is set") { besideImage.get() }
+            doLast { requireNoEmptyLibraries(destinationDir) }
+        }
     }
 
     /**

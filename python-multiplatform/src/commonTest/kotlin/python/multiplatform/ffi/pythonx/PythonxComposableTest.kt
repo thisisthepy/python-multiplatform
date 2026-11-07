@@ -40,7 +40,7 @@ import kotlin.test.assertTrue
  *
  * It is not a proof that Compose draws anything. The fragment behind it is Kotlin this repository
  * owns ([ComposableShapedFragment]), because `commonTest` runs on Kotlin/Native where there is no
- * Compose runtime and no generated thunk class. `:ksp-fixtures:compose`'s `ComposableRenderTest` is
+ * Compose runtime and no generated thunk class. `:python-multiplatform-compose:fixtures:compose`'s `ComposableRenderTest` is
  * the other half, and it renders a real `Text` through a real `Composer`.
  */
 class PythonxComposableTest {

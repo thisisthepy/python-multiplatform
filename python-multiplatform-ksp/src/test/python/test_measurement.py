@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from typedpython import gate
+from typedpython import gate, pyrefly
 
 FUNCTIONS = 300
 
@@ -44,7 +44,9 @@ def test_gate_cost_against_plain_pyrefly(write):
     found = gate.check([path])
     gated = time.perf_counter() - start
 
-    print(f"\n[measure] {lines} lines: plain pyrefly {plain * 1000:.0f} ms, "
+    parts = ", ".join(f"{k} {v:.0f}" for k, v in pyrefly.last_timings.items())
+    print(f"\n[breakdown] {parts}, other {gated * 1000 - sum(pyrefly.last_timings.values()):.0f} ms")
+    print(f"[measure] {lines} lines: plain pyrefly {plain * 1000:.0f} ms, "
           f"gate {gated * 1000:.0f} ms, ratio {gated / plain:.2f}x")
     assert found == []
     assert gated < 60

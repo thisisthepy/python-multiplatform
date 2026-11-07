@@ -11,7 +11,7 @@ import kotlin.test.assertTrue
  * existed, a consumer outside `python-multiplatform` had no route to the four names
  * [PythonProxySource.install]'s entry-point guard requires -- only this module's own **test**
  * source (`UpcallEntryBridge.desktop.kt`) rebuilt them, by hand, from the public
- * `python.native.ffi.UpcallStub` addresses. `ksp-fixtures/artifact`'s
+ * `python.native.ffi.UpcallStub` addresses. `python-multiplatform-gradle-plugin/fixtures/artifact`'s
  * `WalkedArtifactPythonImportTest` copied that workaround because there was nothing else to call;
  * it now calls this instead.
  */

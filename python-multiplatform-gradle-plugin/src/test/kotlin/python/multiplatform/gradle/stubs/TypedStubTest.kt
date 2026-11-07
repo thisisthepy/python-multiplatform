@@ -272,17 +272,19 @@ class TypedStubTest {
     // ---------------------------------------------------------------------- name collisions
 
     /** A Kotlin factory function and the class it makes share a name (`PaddingValues(...)`). One
-     * Python module cannot define both, and the runtime resolves that name to the function. */
+     * Python module cannot define both, and the runtime resolves that name to the function, so the
+     * class is the stub-private `_PaddingValues` (issue #217) -- not `Any`, as it was before. */
     @Test
-    fun aClassWhoseNameIsAFunctionInItsModuleFallsBackToAny() {
+    fun aClassWhoseNameIsAFunctionInItsModuleIsStubbedUnderAPrivateName() {
         val factory = DeclarationModel(
             simpleName = "PaddingValues", owner = pkgLayout, ownerIsClass = false, receiver = null,
             parameters = listOf(p("all", dp, "FLOAT")), returnType = paddingValues, returnBoundaryTag = "OBJECT",
             bindingName = "$pkgLayout.PaddingValues",
         )
         val layout = file(files(factory), pkgLayout)
-        assertTrue("def PaddingValues(all: androidx.compose.ui.unit.Dp | float) -> _t.Any:" in layout, layout)
+        assertTrue("def PaddingValues(all: androidx.compose.ui.unit.Dp | float) -> _PaddingValues:" in layout, layout)
         assertFalse("class PaddingValues" in layout, layout)
+        assertTrue("class _PaddingValues:" in layout, layout)
     }
 
     // ------------------------------------------------------------------------ Kotlin names only

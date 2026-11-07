@@ -147,7 +147,7 @@ object PythonBootstrap {
         }
 
         stampFile.delete()
-        payloadDir.deleteRecursively()
+        deleteWithoutFollowingLinks(payloadDir)
         if (!payloadDir.mkdirs() && !payloadDir.isDirectory) {
             throw IOException("could not create $payloadDir to unpack the Python payload into")
         }
@@ -225,7 +225,7 @@ object PythonBootstrap {
         stampFile(prefix).delete()
         // Whatever is there is either from another build or unfinished; neither can be merged
         // into safely, because a file that used to exist and no longer does would survive.
-        stdlibDir.deleteRecursively()
+        deleteWithoutFollowingLinks(stdlibDir)
         if (!stdlibDir.mkdirs() && !stdlibDir.isDirectory) {
             throw IOException("could not create $stdlibDir to unpack the CPython standard library into")
         }

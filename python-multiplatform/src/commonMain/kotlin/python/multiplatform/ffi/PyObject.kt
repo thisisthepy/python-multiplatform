@@ -356,7 +356,7 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
      * Builds an argument tuple of [size], lets [fill] populate it, and calls this object with it.
      * The whole sequence runs under a single GIL acquisition rather than one per C API call.
      */
-    private inline fun callWithTuple(size: Int, fill: (NativePointer) -> Unit): PyObject =
+    private inline fun callWithTuple(size: Int, crossinline fill: (NativePointer) -> Unit): PyObject =
         python.multiplatform.ffi.Python3.withPython {
             val argTuple = PyTuple_New(size.toLong()) ?: throw pyErrorOrGeneric("Failed to build argument tuple")
             try {

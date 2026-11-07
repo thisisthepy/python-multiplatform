@@ -96,6 +96,10 @@ the plugin's KMP support, not a native-image limitation.
 Finished generating 'upcall-native-demo' in 43.5s.
 ```
 
+The "registered for reflection" line counts everything in the image, the JDK's, Kotlin's and
+every library's shipped metadata included, not what this repository registers. Of it, this
+repository contributes one class, `UpcallTarget` (see the result table; corrected in #244).
+
 Artifact: `sample/build/native/nativeCompile/upcall-native-demo`, **26,317,504 bytes (25.1 MB)**,
 `Mach-O 64-bit executable arm64`.
 
@@ -217,7 +221,7 @@ rather than been produced silently.
 | Generated Python proxy layer works | **YES** (`PROXY_OK`, including `await` over a `suspend fun` settled from a Kotlin thread) |
 | `@PythonInternal` opt-out still enforced | **YES** (resolves to `-1`) |
 | Behaviour differs from JVM | **NO** (29/32 lines identical; the 3 differing lines are runtime addresses) |
-| Reflection registration needed for the upcall path | **NO**, the path uses none, which is the §7 design premise holding |
+| Reflection registration needed for the upcall path | **One class, by hand** (corrected in #244): the generated function table, which is every Kotlin declaration Python calls, needs none, which is the §7 premise holding; the upcall *bootstrap* finds its five FFM entry points by name on one fixed class of this repository (`UpcallStub.kt`, `UpcallTarget::class.java.methods`), so `python.native.ffi.UpcallTarget` is registered with `allPublicMethods` in `python-multiplatform/native-image/reachability-metadata.base.json` |
 
 Nothing is outstanding on the desktop target. The untested surface is other targets: this verifies
 **desktop only**, as `sample/build.gradle.kts` wires `nativeCompile` from the `desktop` compilation.

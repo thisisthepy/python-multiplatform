@@ -15,20 +15,22 @@ from pathlib import Path
 
 import pytest
 
+from conftest import COMPILED_SHIM
 from typedpython import pipeline
 
 PACKAGE = Path(__file__).resolve().parents[2] / "main" / "python"
 
 SOURCE = """\
-# typedpython: compiled
 
 
+@compiled
 def fib(n: int) -> int:
     if n < 2:
         return n
     return fib(n - 1) + fib(n - 2)
 
 
+@compiled
 def ack(m: int, n: int) -> int:
     if m == 0:
         return n + 1
@@ -37,30 +39,35 @@ def ack(m: int, n: int) -> int:
     return ack(m - 1, ack(m, n - 1))
 
 
+@compiled
 def is_even(n: int) -> bool:
     if n == 0:
         return True
     return is_odd(n - 1)
 
 
+@compiled
 def is_odd(n: int) -> bool:
     if n == 0:
         return False
     return is_even(n - 1)
 
 
+@compiled
 def down(n: int) -> int:
     if n == 0:
         return 0
     return 1 + down(n - 1)
 
 
+@compiled
 def pow2(n: int) -> int:
     if n == 0:
         return 1
     return 2 * pow2(n - 1)
 
 
+@compiled
 def fact(n: int) -> int:
     if n < 2:
         return 1
@@ -233,7 +240,7 @@ def test_depth_at_which_recursion_error_fires_is_recorded(mod, capsys):
 
 # --- sanitizers: the RecursionError path ---------------------------------------------------------
 
-ASAN_SCRIPT = textwrap.dedent('''\
+ASAN_SCRIPT = COMPILED_SHIM + textwrap.dedent('''\
     import sys
     sys.path.insert(0, {pkg!r})
     from typedpython import cbuild
@@ -304,5 +311,29 @@ def test_every_compiled_function_enters_and_leaves(built):
     from typedpython import cgen
     result = built[0]
     c = cgen.generate(result.module, result.source)
-    assert c.count("tp_enter_call()") >= len(NAMES)
-    assert c.count("tp_leave_call()") >= len(NAMES)
+    assert c.count("tp_enter_call(tp_ts, tp_t)") >= len(NAMES)
+    assert c.count("tp_leave_call(tp_t)") >= len(NAMES)
+
+
+def test_a_compiled_call_looks_up_the_thread_state_at_most_once(built):
+    """#125: the wrapper does the one lookup; impls and fast twins only receive tp_ts."""
+    import re
+    from typedpython import cgen
+    result = built[0]
+    c = cgen.generate(result.module, result.source)
+    lookups = re.compile(r"PyThreadState_Get(?:Unchecked)?\s*\(|tp_tls_get\s*\(|\btp_tls_v\b")
+    tstate = re.compile(r"PyThreadState_Get(?:Unchecked)?\s*\(")
+    tlsre = re.compile(r"tp_tls_get\s*\(|\btp_tls_v\b")
+    # strip the comment that mentions the lookup, then count call sites per generated function
+    bodies = re.split(r"\n(?=static (?:inline )?(?:int|PyObject \*) ?tp_(?:wrap|impl|fimpl)_)", c)
+    seen = 0
+    for b in bodies:
+        head = b.split("(", 1)[0]
+        if "tp_wrap_" in head:
+            seen += 1
+            assert len(tstate.findall(b)) <= 1 and len(tlsre.findall(b)) <= 1, head
+        elif "tp_impl_" in head or "tp_fimpl_" in head:
+            seen += 1
+            assert not lookups.findall(b), head
+    assert seen >= len(NAMES)
+    assert "tp_enter_call(tp_ts, tp_t)" in c

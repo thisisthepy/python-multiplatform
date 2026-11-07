@@ -13,15 +13,16 @@ name: WasmJS CI
 # `test` runs the real suite, and runs only when there is a runtime to run it against.
 
 on:
+  # Checked on develop after merging, not on every pull request (user decision,
+  # 2026-10-17). A red develop is fixed forward by its own pull request.
   push:
     branches: [ "develop", "main" ]
-  pull_request:
-    branches: [ "develop", "main" ]
-
+  workflow_dispatch:
 concurrency:
-  # A newer push to the same ref supersedes this run; frees the shared macOS runners.
+  # A run in progress finishes; a newer push replaces only the queued run (frequent merges
+  # to develop otherwise cancelled every run before it reported).
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   compile:
@@ -68,7 +69,7 @@ jobs:
             echo "This job compiled \`wasmJsMain\` and \`wasmJsTest\`. **No wasm test was executed.**"
             echo
             echo "Running them needs a CPython Emscripten build, which this repository publishes as"
-            echo "\`io.github.thisisthepy:python-multiplatform-wasm-runtime\` (a 7 MB zip built by"
+            echo "\`org.thisisthepy:python-multiplatform-wasm-runtime\` (a 7 MB zip built by"
             echo "\`:python-multiplatform:wasmBrowserRuntimeZip\`) but has never pushed to a remote"
             echo "repository -- it exists only in the maintainer's \`mavenLocal\`."
             echo
@@ -129,7 +130,7 @@ jobs:
       # `-PrequireWasmRuntime` a missing wheel is a failure, not a skip, so fetch them first: by URL,
       # each accepted only against the sha256 the script pins.
       - name: Fetch the pinned wasm wheels
-        run: bash tools/wasm/build-cpython.sh wheels
+        run: bash python-multiplatform/scripts/wasm/build-cpython.sh wheels
 
       # `-PrequireWasmRuntime` is the second half of the guard, and it is what makes this job unable
       # to repeat the original defect: if either task would skip -- no interpreter, or no

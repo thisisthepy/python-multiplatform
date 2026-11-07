@@ -573,7 +573,13 @@ static PyObject *s_release(PyObject *self, PyObject *o)
 
 static PyObject *s_info(PyObject *self, PyObject *unused)
 {
-    return Py_BuildValue("{s:i,s:i}", "portable", TP_RUNTIME_PORTABLE_OVERFLOW,
+    #if defined(__GNUC__) || defined(__clang__)
+    int has_builtins = 1;
+#else
+    int has_builtins = 0;
+#endif
+    return Py_BuildValue("{s:i,s:i,s:i}", "portable", TP_RUNTIME_PORTABLE_OVERFLOW,
+                         "has_builtins", has_builtins,
                          "py_version_hex", (int)PY_VERSION_HEX);
 }
 
@@ -608,4 +614,16 @@ static PyMethodDef methods[] = {
 static struct PyModuleDef moddef = {PyModuleDef_HEAD_INIT, TP_STR(TP_SHIM_NAME), NULL, -1, methods,
                                     NULL, NULL, NULL, NULL};
 
-PyMODINIT_FUNC TP_CAT(PyInit_, TP_SHIM_NAME)(void) { return PyModule_Create(&moddef); }
+PyMODINIT_FUNC TP_CAT(PyInit_, TP_SHIM_NAME)(void)
+{
+    PyObject *m = PyModule_Create(&moddef);
+#ifdef Py_GIL_DISABLED
+    /* #159: the helpers are thread-safe; do not let importing the shim switch the GIL back on for
+       the rest of the test process */
+    if (m != NULL && PyUnstable_Module_SetGIL(m, Py_MOD_GIL_NOT_USED) < 0) {
+        Py_DECREF(m);
+        return NULL;
+    }
+#endif
+    return m;
+}

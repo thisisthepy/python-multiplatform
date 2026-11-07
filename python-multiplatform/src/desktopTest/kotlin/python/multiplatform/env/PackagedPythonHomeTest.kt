@@ -40,6 +40,60 @@ class PackagedPythonHomeTest {
 
     // ---- resolution order ----
 
+    // ---- beside a native-image executable (issue #246) ----
+
+    private val inNativeImage = PackagedPythonHome.NATIVE_IMAGE_CODE_PROPERTY to "runtime"
+
+    @Test
+    fun aNativeImageFindsThePrefixBesideItsExecutable() {
+        // A native image has no java.home, no Compose resources directory and no launcher to set
+        // PYTHONHOME; the prefix ships beside the executable, as an iOS app's ships in its bundle.
+        val resolved = PackagedPythonHome.resolve(
+            environmentHome = null,
+            property = properties(inNativeImage),
+            isDirectory = { it == "/apps/demo/python-multiplatform-home" },
+            executablePath = { "/apps/demo/demo" },
+        )
+        assertEquals("/apps/demo/python-multiplatform-home", resolved?.path)
+    }
+
+    @Test
+    fun aJvmIgnoresADirectoryBesideItsExecutableAndNeverAsksForIt() {
+        // On a JVM the executable is `java`: a directory beside it belongs to the JDK, not to the app.
+        // And it is not even asked for: `ProcessHandle` does not exist on older Android.
+        var asked = false
+        val resolved = PackagedPythonHome.resolve(
+            environmentHome = null,
+            property = properties(),
+            isDirectory = { true },
+            executablePath = { asked = true; "/jdk/bin/java" },
+        )
+        assertNull(resolved)
+        assertEquals(false, asked, "the executable must not be looked up outside a native image")
+    }
+
+    @Test
+    fun aNativeImageWithNoPrefixBesideItResolvesToNothing() {
+        val resolved = PackagedPythonHome.resolve(
+            environmentHome = null,
+            property = properties(inNativeImage),
+            isDirectory = { false },
+            executablePath = { "/apps/demo/demo" },
+        )
+        assertNull(resolved)
+    }
+
+    @Test
+    fun anEnvironmentPythonHomeStillWinsInANativeImage() {
+        val resolved = PackagedPythonHome.resolve(
+            environmentHome = "/from/env",
+            property = properties(inNativeImage),
+            isDirectory = { true },
+            executablePath = { "/apps/demo/demo" },
+        )
+        assertNull(resolved)
+    }
+
     @Test
     fun anEnvironmentPythonHomeWinsAndNothingElseIsDone() {
         // CPython reads PYTHONHOME itself, and L-3 checks it; a second source would only be a

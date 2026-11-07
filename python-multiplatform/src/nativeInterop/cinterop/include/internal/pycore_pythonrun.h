@@ -28,6 +28,12 @@ extern const char* _Py_SourceAsString(
     PyCompilerFlags *cf,
     PyObject **cmd_copy);
 
+extern PyObject * _Py_CompileString(
+    const char *str,
+    PyObject *filename, int start,
+    PyCompilerFlags *flags, int optimize,
+    PyObject *module);
+
 // Export for special main.c string compiling with source tracebacks
 extern PyObject* _PyRun_SimpleString(
     const char *command,

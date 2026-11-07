@@ -20,9 +20,9 @@ files, lives **inside this repository's root directory.**
 | What | Where |
 |---|---|
 | Worktrees | `.worktrees/<name>` (git-ignored) |
-| Temporary files | `.tmp/` (git-ignored); delete when done |
+| Temporary files | the session scratchpad directory, or `.cache/` (git-ignored); delete when done |
 | Benchmarks | `benchmarks/` |
-| Developer tooling | `tools/` |
+| Developer tooling | `.github/scripts/` (CI-only), or beside the module it serves |
 
 Before writing a file, check that its absolute path starts with this repository's root. If it does
 not, stop. The only exceptions are a path the user names explicitly, and caches that build tools
@@ -36,7 +36,7 @@ Writing to *another* repository is not an exception either. Do it only when told
 **Never add a new directory (or a new file) at the repository root on your own.** The root layout is
 the maintainer's: source modules, `docs/`, `gradle/`, `.github/` and the files that tools require
 there. Work belongs inside an existing module or directory, sources under `src/<sourceSet>/`,
-CI-only scripts under `.github/scripts/`, temporary files under the git-ignored `.tmp/`. If you think
+CI-only scripts under `.github/scripts/`, temporary files under the git-ignored `.cache/`. If you think
 a new top-level entry is needed, propose it (what, why, which alternatives inside existing
 directories you ruled out) and wait for approval. This was added after unapproved root folders
 (`ksp-fixtures/`, `tools/`, `kotlin-js-store/`, `iosApp/`, `sample/python`) had to be dismantled.
@@ -50,8 +50,14 @@ build caches, model weights, `node_modules`) into every worktree is how 86 workt
 - Create worktrees under `.worktrees/<name>`.
 - **Symlink** large untracked directories from the main checkout instead of copying or rebuilding
   them. If `tools/worktree-add.sh` exists, use it, it does the linking.
-- Delete a worktree once its branch is merged: `git worktree remove .worktrees/<name>`.
-- Periodically delete `build/` directories inside worktrees; they only grow.
+- **When a branch merges, clean up in the same step**: remove its worktree
+  (`git worktree remove .worktrees/<name>`), delete the local and remote branch, and delete every
+  build output, cache or target directory created for that work (per-branch `build/`, a
+  `CARGO_TARGET_DIR`, a venv, a scratch directory). Work is not finished while any of these remain.
+  This was added after 32 per-agent cargo target directories (33 GB) were left behind in one
+  repository.
+- Never create a per-agent or per-branch build cache (a separate `CARGO_TARGET_DIR`, a copied
+  `.gradle`, a private venv). Use the repository's one canonical location.
 
 ## 4. Branches
 
@@ -70,7 +76,7 @@ landed or reported, not left. Branches named `release-*` are preserved snapshots
 
 `main` carries a reduced layout: of the Markdown files, only `README.md` stays at the repository
 root, and `docs/` keeps only its subdirectories (no Markdown files directly under `docs/`).
-CI runs `tools/release/sync-release.sh` (`.github/workflows/release-sync.yml`) to produce that layout; do not hand-edit `release` or `main`.
+CI runs `.github/scripts/release/sync-release.sh` (`.github/workflows/release-sync.yml`) to produce that layout; do not hand-edit `release` or `main`.
 
 ### Issues and pull requests
 
@@ -120,6 +126,27 @@ never force-push without the user's explicit approval.
 When a rule and backward compatibility conflict, **the rule wins.** List the callers that break and
 fix them; do not keep the forbidden thing "so nothing breaks".
 
+### What counts as the owner's decision
+
+Added after an agent turned the owner's question "should ExecuTorch be the NPU back end?" into an
+offline per-model `.pte` pipeline with its own CI, recorded it as "decided, do not re-discuss" and
+later as project intent. The owner had approved none of it (torchnative, 2026-08 to 2026-11).
+
+- **A question is not a decision.** "X를 쓰는게 좋을까?", "should we use X?" opens a decision. If the
+  owner did not answer, it stays open; never record it as settled.
+- **Approving a goal is not approving a means.** "Make the Snapdragon NPU work, go ahead" approves
+  the goal. The engine, the dependencies, the pipeline, the CI workflow and the artefact types an
+  agent picks to reach it are separate decisions.
+- **Never restate the owner's question as a different one.** When asking for a decision, quote the
+  owner's words and the constraint behind them (for example "NNAPI is deprecated, so what
+  abstraction reaches every vendor's NPU?"), and give options that answer that question.
+- **Ask before adding** a dependency, a pipeline, a CI workflow or a kind of artefact the owner did
+  not name. Show the options and wait.
+- **Docs keep provenance.** A line in INTENT, SPEC, AGENTS or a design doc that states a direction
+  cites the owner's words (date and source). Anything else is marked "agent proposal, not
+  confirmed". Never write "decided", "settled" or "do not re-discuss" for a choice the owner did not
+  make, and keep that mark when a doc is restructured.
+
 ## 8. Verification that can fail
 
 - Never read a build's exit code through a pipe (`| tail`, `| grep`). Redirect to a file, then read
@@ -160,10 +187,13 @@ to implement", say what you counted against.
   counts, lifetimes, class loaders) gets the strongest tier; work a test will catch can use a
   cheaper one.
 - Give every agent prompt the absolute paths it may write to, and repeat rule 2 in it.
-- **Subagents do not run heavy local builds.** Subagents write code, design, investigate, review
-  and document. Gradle builds, cargo builds, the test gate and model runs are done by the session
-  itself, one at a time on this machine, or by CI (GitHub Actions) on a pushed branch. Several
-  sessions share one machine; parallel local builds slow every one of them.
+- **Agents do not build.** Every agent, teammate sessions and subagents alike, may check that code
+  compiles and nothing more: `cargo check`, a Gradle `compile*` task, `python -m py_compile`, a
+  type checker or linter. Full builds (`cargo build`, `assemble`, wheels, native images, app
+  packages), test suites, gates, benchmarks and model runs go to CI (GitHub Actions) on a pushed
+  branch. The only local exceptions are device tests and measurements the coordinating session
+  runs itself, one at a time, and says why. Several sessions share one machine, and agent builds
+  once filled the disk and slowed every session.
 
 ---
 
@@ -184,9 +214,8 @@ interoperability in both directions:
 | `python-multiplatform/` | The library: FFI layer, object model, upcall runtime |
 | `python-multiplatform-ksp/` | KSP processor that generates the upcall table from Kotlin sources |
 | `python-multiplatform-gradle-plugin/` | Gradle plugin: `PYTHONHOME` staging, artifact walker (binds prebuilt jars/klibs), `.pyi` stub generation |
-| `ksp-fixtures/` | Consumer modules that exercise what the generators produce |
+| `<module>/fixtures/` | Consumer modules that exercise what the generators produce, each inside the module whose output it checks (`python-multiplatform-ksp`, `python-multiplatform-gradle-plugin`, `python-multiplatform-compose`) |
 | `sample/` | Compose Multiplatform demo app (desktop, Android, iOS, wasmJs, GraalVM native image) |
-| `binary/` | Source archives of per-platform CPython distributions |
 | `python_for_kotlin_binding.mermaid` | User-authored sketch of the object model (see rule 14) |
 | `docs/INTENT.md`, `docs/SPEC.md` | Intent and behavioural contract (rule 5) |
 | `docs/design/`, `docs/platforms/`, `docs/investigations/`, `docs/roadmap/` | Current design records (one per topic), platform notes, investigation conclusions, the work left to do |
@@ -272,7 +301,7 @@ Rule 5 applies. In addition:
 ### Build commands
 
 ```bash
-./gradlew <task> --console=plain > .tmp/build.log 2>&1; echo "EXIT=$?"
+./gradlew <task> --console=plain > .cache/build.log 2>&1; echo "EXIT=$?"
 ```
 
 - Compile errors are lines starting with `e: `. Most `w: ` warnings (inlining in particular) are
@@ -296,16 +325,22 @@ Rule 5 applies. In addition:
 checking only iOS lets androidNative break unnoticed (an `actual` placed only in `iosMain` once did,
 for days).
 
-### The generator consumers: `ksp-fixtures`
+### The generator consumers: `<module>/fixtures`
 
 `:python-multiplatform-gradle-plugin:test` alone does not verify the code that **uses** what the
 generators emit. Run each fixture module as a **separate** Gradle invocation (rule 8):
 
 | Task | Catches |
 |---|---|
-| `:ksp-fixtures:app:desktopTest` | Upcall and proxy runtime |
-| `:ksp-fixtures:compose:desktopTest` | Compose bindings and render proofs |
-| `:ksp-fixtures:artifact:desktopTest` | Artifact walker and `.pyi` stubs |
+| `:python-multiplatform-ksp:fixtures:app:desktopTest` | Upcall and proxy runtime |
+| `:python-multiplatform-compose:fixtures:compose:desktopTest` | Compose bindings and render proofs |
+| `:python-multiplatform-gradle-plugin-fixtures:artifact:desktopTest` | Artifact walker and `.pyi` stubs |
+
+Where each lives: `python-multiplatform-ksp/fixtures/{library,app,android}` (KSP processor),
+`python-multiplatform-gradle-plugin/fixtures/{artifact,artifact-valueclass,klib-artifact}` (artifact
+walker; the plugin is an included build, so their Gradle path is
+`:python-multiplatform-gradle-plugin-fixtures:<name>`) and
+`python-multiplatform-compose/fixtures/{compose,notebook-e2e}` (Compose host).
 
 Forgetting `artifact` has put red tests on `develop` twice; plugin unit tests cannot see them.
 Running the three in one invocation once hid 24 failures caused by an ordering dependency.
@@ -435,7 +470,7 @@ more than the tier.
 ### What every agent prompt contains
 
 - Rule 2 restated with the absolute paths the agent may write to; temporary files go in the
-  worktree's `.tmp/`.
+  session scratchpad or the worktree's `.cache/`.
 - "Do the work yourself; do not delegate to another agent."
 - "Run long commands in the **foreground**. You have no next turn." (Three headless agents were lost
   to a backgrounded command, one of them an `xcodebuild`.)

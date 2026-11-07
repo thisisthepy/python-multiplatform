@@ -51,15 +51,17 @@ internal abstract class KlibScanWorkAction : WorkAction<KlibScanWorkAction.Param
     internal interface Params : WorkParameters {
         val klibFile: RegularFileProperty
         val includePrefixes: ListProperty<String>
+        val excludePackages: ListProperty<String>
         val resultFile: RegularFileProperty
     }
 
     override fun execute() {
         val klib = parameters.klibFile.get().asFile
         val includes = parameters.includePrefixes.get()
+        val excludes = parameters.excludePackages.get()
         val result = KlibScanResult(
-            callables = KlibScanner.scanKlib(klib, includes),
-            declarations = KlibScanner.scanKlibDeclarations(klib, includes),
+            callables = KlibScanner.scanKlib(klib, includes, excludes),
+            declarations = KlibScanner.scanKlibDeclarations(klib, includes, excludes),
         )
         ObjectOutputStream(parameters.resultFile.get().asFile.outputStream()).use { it.writeObject(result) }
     }
@@ -99,7 +101,7 @@ internal data class KlibScanResult(
  * list into the worker copied the collision in with it, and
  * `:generatePythonArtifactBindings` failed with the same
  * `NoSuchMethodError: KotlinLibraryImplKt.createKotlinLibrary$default` the isolation was introduced to
- * fix. In this repository it happened to work: `ksp-fixtures` resolves the plugin from an *included
+ * fix. In this repository it happened to work: the `fixtures/` modules resolve the plugin from an *included
  * build*, which does get a scope of its own, so no in-repo fixture can see this.
  *
  * The worker classpath is therefore built from an explicit coordinate list
@@ -138,6 +140,7 @@ private fun pluginCodeSource(): File {
 internal fun WorkerExecutor.scanKlibIsolated(
     klib: File,
     includes: List<String>,
+    excludes: List<String>,
     scratchDirectory: File,
     readerClasspath: Collection<File>,
 ): KlibScanResult {
@@ -153,6 +156,7 @@ internal fun WorkerExecutor.scanKlibIsolated(
     queue.submit(KlibScanWorkAction::class.java) {
         klibFile.set(klib)
         includePrefixes.set(includes)
+        excludePackages.set(excludes)
         this.resultFile.set(resultFile)
     }
     queue.await()

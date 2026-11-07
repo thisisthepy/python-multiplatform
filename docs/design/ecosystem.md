@@ -174,7 +174,7 @@ leave chaquopy until this is designed. *(read from source; not runtime-verified.
 smallest and most blocking item, and it is entirely inside this repository.
 
 > **Closed, see `docs/archive/pythonx-adapter-design.md` §5.6.** `Text('hi')` written in Python now draws
-> through the real `androidx.compose.material3.Text` (`:ksp-fixtures:compose`'s
+> through the real `androidx.compose.material3.Text` (`:python-multiplatform-compose:fixtures:compose`'s
 > `ComposableRenderTest`: 71 non-background pixels against 0 for an empty body). The paragraph above
 > is right that a *generated Kotlin* entry for a widget cannot compile, and that is not the route
 > taken: an artefact composable's call site is emitted as **bytecode**, with `$composer`, `$changed`
@@ -232,14 +232,14 @@ This section documents the current state, language/build system/distribution art
 - **Language / Build System / Distribution**:
   - Kotlin Multiplatform (Kotlin `2.4.20-Beta2` pinned in `gradle/libs.versions.toml` as of 2026-10-03), Compose Multiplatform 1.11.1 for the sample and fixtures, Java 21, C/C++ FFI.
   - Gradle (`build.gradle.kts`, `settings.gradle.kts`, included build `python-multiplatform-gradle-plugin`).
-  - Maven artifact publication (`id("maven-publish")` in `python-multiplatform/build.gradle.kts`, published under group `io.github.thisisthepy:python-multiplatform`).
+  - Maven artifact publication (`id("maven-publish")` in `python-multiplatform/build.gradle.kts`, published under group `org.thisisthepy:python-multiplatform`).
 - **Goal in Ecosystem**:
   - Core language boundary and binder between Kotlin Multiplatform and CPython.
   - Manages low-level FFI, object reference handles, upcall/downcall function tables, GIL lifecycle, and proxy injection into CPython `sys.modules`.
 - **Gap to Goal** (status notes added 2026-10-03, read from code and SPEC, not re-run):
   - `@Composable`-capable callable shape: `ExposedCallable` typed `(Array<Any?>) -> Any?` cannot invoke `@Composable` functions taking synthetic `$composer` / `$changed` parameters. Needs dedicated `CallableKind` or opt-in annotation handling., *Closed on desktop by bytecode thunks (`ComposableThunks.kt`), SPEC B-6; Android, iOS and wasm planned (SPEC N-2).*
   - Python-side `sys.meta_path` finder for lazy import resolution of Kotlin namespaces ~~(`pythonx.*` or FQCNs)~~ upon import., *Exists for Kotlin FQNs in `python_multiplatform.binding` (SPEC U-8). `pythonx.*` is not the binder's to resolve (`AGENTS.md` §12.2).*
-  - Opaque Kotlin object round-tripping for Compose `Composer` (`HandleTable` and `ObjectReference` exist, but runtime hand-off to Python needs verification)., *Done on desktop: one hand-written `@Composable` pushes the live composer as a handle onto the binding layer's stack (`push_composer`), proven by the `ksp-fixtures/compose` render tests.*
+  - Opaque Kotlin object round-tripping for Compose `Composer` (`HandleTable` and `ObjectReference` exist, but runtime hand-off to Python needs verification)., *Done on desktop: one hand-written `@Composable` pushes the live composer as a handle onto the binding layer's stack (`push_composer`), proven by the `python-multiplatform-compose/fixtures/compose` render tests.*
   - Lifetime and storage of Python callables passed into Kotlin across Compose recompositions (`content=lambda: ...`, `onClick=...`)., *Partly addressed: `PythonCallableScope` (`PythonCallables.kt`) holds the callables a composition hands to Kotlin and is closed by a Compose-side `RememberObserver` in `onForgotten`; several hand-written fixture wrappers (`pythonDraggable`, `pythonComposed`, the swipe/anchor wrappers) still leak their callbacks by design, pinned by `DraggableLeakTest`. Not verified here beyond reading the sources.*
   - Retire `stagePythonHome` in favor of `pypackpack`'s Python distribution management.
   - Hand `stageWasmBrowserRuntime` logic to `toolchain`.
@@ -247,7 +247,7 @@ This section documents the current state, language/build system/distribution art
   - `PythonMultiplatform` has no dependencies on other repos in the ecosystem.
   - `pythonx-compose` and consumer applications depend on `PythonMultiplatform` runtime and its Gradle/KSP bindings plugin.
 - **Unverified**:
-  - Behavior of WASM browser runtime under production web bundlers. (*2026-10-03:* the former `wasm-experiment/` is folded into the library, `wasmJsMain`/`wasmJsTest`, CPython built by `tools/wasm/build-cpython.sh`, commit `6e54f617`; the bundler question is unchanged.)
+  - Behavior of WASM browser runtime under production web bundlers. (*2026-10-03:* the former `wasm-experiment/` is folded into the library, `wasmJsMain`/`wasmJsTest`, CPython built by `python-multiplatform/scripts/wasm/build-cpython.sh`, commit `6e54f617`; the bundler question is unchanged.)
 
 **Version check (2026-08-17): "3.14 runtime vs. 3.13 header, never checked", could not find the
 sentence, checked the claim anyway.** The literal sentence was searched for across every `.md` file
@@ -272,10 +272,8 @@ still carry CPython 3.13 and are not read by the default build. `python-multipla
 is a vendored header tree whose `PY_VERSION` reads `"3.13.0+"`, `git log` shows it landed with
 `b184cba5` (pre-dates `pythonVersion` becoming a Gradle property) and `build.gradle.kts` never
 references `nativeInterop/cinterop/include` at all; cinterop reads headers from the version-keyed
-extraction tree instead (table above). `binary/` holds five committed CPython 3.13.0 archives from
-`python-build-standalone` release `20241008` (`binary/download.md`); they are consumed only by the
-special-cased branch `if (configuredPythonVersion == "3.13.0" && !pythonFreeThreaded)` in the
-`desktopJar` task (`build.gradle.kts:1049`), i.e. only if a consumer explicitly builds with
+extraction tree instead (table above). `binary/`, which held five unreferenced CPython 3.13.0 archives, was removed on 2026-10-04. The
+`-PpythonVersion=3.13.0` branch of the `desktopJar` task reads the vendored tree above, only if a consumer explicitly builds with
 `-PpythonVersion=3.13.0`. That legacy path has no `Py_LIMITED_API`/header dependency either (desktop
 never compiles against headers), so even under `-PpythonVersion=3.13.0` there is no header/runtime
 split, but `python-checksums.properties` has **no 3.13.0 entries for Android or iOS**, so that flag
@@ -634,7 +632,7 @@ to at runtime with no JVM underneath, is the open question, not AndroidX.
 
 **Update, the walker now exists on one path, and both of those questions have answers.**
 `python-multiplatform-gradle-plugin` gained `generatePythonArtifactBindings`, and
-`ksp-fixtures/artifact` carries a resolved `junit:junit:4.13.2` through ASM, a generated
+`python-multiplatform-gradle-plugin/fixtures/artifact` carries a resolved `junit:junit:4.13.2` through ASM, a generated
 `FunctionTableFragment`, `UpcallTable` and `PythonProxySource` to
 `from junit.runner.Version import id` answering `"4.13.2"`. ROADMAP §16 records it in full; three
 things in it change what this section says:
@@ -642,7 +640,7 @@ things in it change what this section says:
 - **The walker's fragments are a second aggregator (`ArtifactTable`), not additions to KSP's
   `FunctionTable`.** One `UpcallTable`, one fragment interface, one Python namespace, but
   `FunctionTable` keeps meaning "every module in this graph compiled with the processor", which is
-  what `ksp-fixtures/app` asserts and what a consumer's own table should not silently outgrow.
+  what `python-multiplatform-ksp/fixtures/app` asserts and what a consumer's own table should not silently outgrow.
   Install site: `UpcallTable.install(FunctionTable.fragments + ArtifactTable.fragments)`.
 - **ASM alone does not reach `androidx.compose.material3`.** It reaches Java statics and Kotlin
   `@JvmStatic`s. A Kotlin *top-level* function compiles onto a package-private multi-file part
@@ -853,3 +851,24 @@ each repository's block). Two kinds of mismatch, kept separate rather than merge
 It describes five repositories and sits in one of them, because that is the only one with an
 active working copy and a documentation habit. If the organisation grows a place for cross-repo
 documents, this belongs there, and what stays here is the last section's first entry.
+
+## 7. Priorities and the pythonx family (decided 2026-10-04)
+
+The maintainer focuses on darkpyonix for a while; thisisthepy proceeds **linearly** in this order:
+torchnative, then python-multiplatform (TypedPython included), then pypackpack and toolchain-lite,
+then pythonx-compose, then the other pythonx packages and Gemstone. Each repository first records its
+decisions as issues, finishes document updates and folder cleanup, and lists what is left until its
+next release; lower-priority repositories then hold new heavy work until their turn.
+
+| Package | Decision | Where it is recorded |
+|---|---|---|
+| `pythonx-concurrent` | Structured concurrency bridging asyncio and Kotlin coroutines. Spec written in detail, implementation deferred. Python coroutines may run on JVM virtual threads and on any Kotlin dispatcher by being stepped from Kotlin ("Kotlin mode"); blocking-style Python on virtual threads is not offered. | its `docs/SPEC.md` (§7); binder requests #164, #161, #162 |
+| `pythonx-platform` | Device features from Python (plyer-like): camera, sensors, notifications, file picker, permissions. The Kotlin implementations belong in `compose-multiplatform-core-extended` as multiplatform `androidx.*` libraries; Python reaches them through the binder's names (snake_case aliases included); `pythonx-platform` is at most a thin Pythonic layer. Repository and spec to be created in its turn. | OS notifications: compose-multiplatform-core-extended#13 |
+| `pythonx-game` | Direction open. Recommended, not measured: Filament as the 3D renderer (scene level, the height of three.js, PBR and glTF, Vulkan/Metal/GL, Android Kotlin API, Apache-2.0) with a Python declarative layer on top; Compose's Skia canvas for 2D; wgpu only where custom GPU compute is needed (its per-call validation costs CPU, and it is a GPU API, not a scene engine). | this section |
+| `pythonx-native` | Not a repository. Building Rust crates as Python extension modules for the app is pypackpack's Cargo backend; Kotlin reaches the crate through python-multiplatform. | pypackpack#65 |
+
+TypedPython decisions of the same day: GC collection timing is outside the CPython-equivalence
+guarantee (option (b), SPEC N-12); the gap-closing items of the Cython/numba/LPython comparison are
+approved (#147 to #151, #143); open decisions are #152 (yielding the GIL in array loops), #153
+(fastmath opt-in) and whether the first usable release may compile on desktop only. Free-threaded
+readiness across repositories is #158 (GIL stays the default until decided), with #159 to #163.
