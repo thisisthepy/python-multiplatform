@@ -77,11 +77,11 @@ dependencyResolutionManagement { repositories { mavenCentral() } }
 // build.gradle.kts of a Kotlin Multiplatform module
 plugins {
     kotlin(&quot;multiplatform&quot;)
-    id(&quot;org.thisisthepy.python.multiplatform.bindings&quot;) version &quot;3.15.0-alpha02&quot;
+    id(&quot;org.thisisthepy.python.multiplatform.bindings&quot;) version &quot;3.15.0-alpha03&quot;
 }
 kotlin {
     sourceSets.commonMain.dependencies {
-        implementation(&quot;org.thisisthepy:python-multiplatform:3.15.0-alpha02&quot;)
+        implementation(&quot;org.thisisthepy:python-multiplatform:3.15.0-alpha03&quot;)
     }
 }</code></pre>
   <p><span data-lang="en">The library, the KSP processor and the Gradle plugin share one version, <code>$pythonVersion-$libraryVersionSuffix</code>. A version tag publishes them in one deployment through <code>.github/workflows/maven-central.yml</code>; until a release has been published there, resolve from <code>mavenLocal()</code> after <code>./gradlew publishAllToMavenLocal</code>.</span><span data-lang="ko">라이브러리, KSP 프로세서, Gradle 플러그인은 <code>$pythonVersion-$libraryVersionSuffix</code> 라는 한 버전을 쓴다. 버전 태그를 달면 <code>.github/workflows/maven-central.yml</code> 이 셋을 한 번의 배포로 올린다. 릴리스가 올라가기 전에는 <code>./gradlew publishAllToMavenLocal</code> 뒤에 <code>mavenLocal()</code> 에서 가져온다.</span></p>
