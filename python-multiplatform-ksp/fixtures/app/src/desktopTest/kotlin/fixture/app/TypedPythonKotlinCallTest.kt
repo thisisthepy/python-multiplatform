@@ -291,6 +291,19 @@ class TypedPythonKotlinCallTest {
         )
     }
 
+    @Test
+    fun emitTypedPythonCTaskWritesManifestForTpKotlinBridge() {
+        val manifestPath = System.getProperty("typedpython.emitC.manifest")
+        assertTrue(manifestPath != null, "system property typedpython.emitC.manifest is unset")
+        val manifestFile = File(manifestPath!!)
+        assertTrue(manifestFile.isFile, "emitTypedPythonC ran but $manifestFile does not exist")
+        val text = manifestFile.readText()
+        assertTrue("\"format\": \"typedpython-emit-c\"" in text, text)
+        assertTrue("\"moduleName\": \"tp_kotlin_bridge\"" in text, text)
+        assertTrue("tp_kotlin_bridge.c" in text, text)
+        assertTrue("\"notNativeModules\": []" in text, text)
+    }
+
     /**
      * The watched reference counts once the JVM has collected the `PyObject` wrappers the binder made
      * and their cleaners have handed the references back.

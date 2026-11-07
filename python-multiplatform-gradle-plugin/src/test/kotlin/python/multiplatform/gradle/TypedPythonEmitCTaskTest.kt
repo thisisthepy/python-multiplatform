@@ -318,4 +318,90 @@ class TypedPythonEmitCTaskTest {
         assertTrue("exit 1" in err.message.orEmpty(), err.message)
         assertTrue("broken.py does not pass the gate" in err.message.orEmpty(), err.message)
     }
+
+    @Test
+    fun pluginDoesNotRegisterEmitTypedPythonCWhenSourceDirIsUnset() {
+        val project = ProjectBuilder.builder().build()
+        val extension = project.extensions.create("pythonBindings", PythonBindingsExtension::class.java)
+        PythonBindingsPlugin().configureTypedPythonEmitC(project, extension)
+
+        assertEquals(null, project.tasks.findByName(EMIT_TYPEDPYTHON_C_TASK))
+    }
+
+    @Test
+    fun pluginRegistersEmitTypedPythonCFromExtensionAndExecutesIt() {
+        val project = ProjectBuilder.builder().build()
+        val pkgRoot = project.file("pkg/src/main").apply { mkdirs() }
+        val pyFile = File(pkgRoot, "app/fast.py").apply {
+            parentFile.mkdirs()
+            writeText("@compiled\ndef f(x: int) -> int:\n    return x + 1\n")
+        }
+        File(pkgRoot, "app/__init__.pyi").writeText("")
+        val fakeStubRoot = project.file("fake-tp-plugin").apply { mkdirs() }
+        val tpPkg = File(fakeStubRoot, "typedpython").apply { mkdirs() }
+        File(tpPkg, "__init__.py").writeText("")
+        File(tpPkg, "__main__.py").writeText(
+            """
+            import argparse, json
+            from pathlib import Path
+            p = argparse.ArgumentParser()
+            p.add_argument("cmd")
+            p.add_argument("paths", nargs="+")
+            p.add_argument("--root", required=True)
+            p.add_argument("--cache", required=True)
+            p.add_argument("--manifest", required=True)
+            a = p.parse_args()
+            assert all(not x.endswith(".pyi") for x in a.paths), a.paths
+            cache = Path(a.cache).resolve()
+            cache.mkdir(parents=True, exist_ok=True)
+            c_file = cache / "fast.c"
+            c_file.write_text("/* generated C */\n")
+            runtime = (Path(__file__).resolve().parent / "runtime").as_posix()
+            doc = {
+                "format": "typedpython-emit-c",
+                "version": 1,
+                "compilerVersion": "stub-1",
+                "projectRoot": Path(a.root).resolve().as_posix(),
+                "runtimeInclude": runtime,
+                "nativeModules": [{
+                    "moduleName": "app.fast",
+                    "file": "app/fast.py",
+                    "sources": [c_file.as_posix()],
+                    "includeDirs": [runtime],
+                    "defines": {},
+                    "status": "rebuilt",
+                    "skippedItems": [],
+                }],
+                "notNativeModules": [],
+            }
+            mf = Path(a.manifest)
+            mf.parent.mkdir(parents=True, exist_ok=True)
+            mf.write_text(json.dumps(doc))
+            """.trimIndent() + "\n",
+        )
+
+        val extension = project.extensions.create("pythonBindings", PythonBindingsExtension::class.java)
+        extension.typedPythonSourceDir.set(pkgRoot)
+        extension.typedPythonExecutable.set("python3")
+        extension.typedPythonPath.from(fakeStubRoot)
+
+        PythonBindingsPlugin().configureTypedPythonEmitC(project, extension)
+
+        val task = project.tasks.findByName(EMIT_TYPEDPYTHON_C_TASK) as? TypedPythonEmitCTask
+            ?: error("expected $EMIT_TYPEDPYTHON_C_TASK to be registered by PythonBindingsPlugin")
+        assertEquals(listOf(pyFile.canonicalFile), task.sources.files.map { it.canonicalFile })
+        assertEquals(pkgRoot.canonicalFile, task.rootDirectory.get().asFile.canonicalFile)
+        assertEquals(
+            project.layout.buildDirectory.dir("typedpython/c-cache").get().asFile.canonicalFile,
+            task.cacheDirectory.get().asFile.canonicalFile,
+        )
+        assertEquals(
+            project.layout.buildDirectory.file("typedpython/emit-c-manifest.json").get().asFile.canonicalFile,
+            task.manifestFile.get().asFile.canonicalFile,
+        )
+
+        task.emitC()
+        val parsed = task.readManifest()
+        assertEquals("app.fast", parsed.toExtensionModuleSources().single().moduleName)
+    }
 }

@@ -822,8 +822,12 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `@OutputFile` `manifestFile`), fails with `GradleException` naming the stderr diagnostics on exit 1 or 2,
   and parses the written v1 manifest into `TypedPythonEmitCManifest` (`nativeModules` mapped to
   `ExtensionModuleSource(moduleName, sources, includeDirs, defines)` and `notNativeModules` mapped to
-  `NotNativeModule(module, kind, items)` with `SkippedItem(name, file, line, message)`). Tests:
-  `TypedPythonEmitCTaskTest.kt`.
+  `NotNativeModule(module, kind, items)` with `SkippedItem(name, file, line, message)`). Setting
+  `pythonBindings.typedPythonSourceDir` registers `emitTypedPythonC` (`TypedPythonEmitCTask`, with
+  `typedPythonRootDir` defaulting to `typedPythonSourceDir`, `typedPythonExecutable` defaulting to
+  `"python3"`, optional `typedPythonPath`, `cacheDirectory` at `build/typedpython/c-cache` and
+  `manifestFile` at `build/typedpython/emit-c-manifest.json`); leaving `typedPythonSourceDir` unset
+  registers no task. Tests: `TypedPythonEmitCTaskTest.kt`, `TypedPythonKotlinCallTest.kt`.
 - **N-11** TypedPython fixed-layout classes (M2b, 2026-11-21; design §4.3.3). A class compiles to fixed
   field access only when its layout is fixed **in CPython too**: it declares `__slots__` listing exactly
   its annotated instance fields, has no base but `object`, no metaclass, no decorator but `@compiled`,
