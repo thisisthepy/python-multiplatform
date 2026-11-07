@@ -72,6 +72,10 @@ jobs:
           java-version: '21'
           distribution: 'zulu'
 
+      - name: Setup uv
+        # The KSP processor's typedpython-gate bundle is built with uv build.
+        uses: astral-sh/setup-uv@v6
+
       - name: The tag names this build's version
         if: env.DRY_RUN != 'true'
         run: |
