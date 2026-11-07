@@ -50,8 +50,14 @@ build caches, model weights, `node_modules`) into every worktree is how 86 workt
 - Create worktrees under `.worktrees/<name>`.
 - **Symlink** large untracked directories from the main checkout instead of copying or rebuilding
   them. If `tools/worktree-add.sh` exists, use it, it does the linking.
-- Delete a worktree once its branch is merged: `git worktree remove .worktrees/<name>`.
-- Periodically delete `build/` directories inside worktrees; they only grow.
+- **When a branch merges, clean up in the same step**: remove its worktree
+  (`git worktree remove .worktrees/<name>`), delete the local and remote branch, and delete every
+  build output, cache or target directory created for that work (per-branch `build/`, a
+  `CARGO_TARGET_DIR`, a venv, a scratch directory). Work is not finished while any of these remain.
+  This was added after 32 per-agent cargo target directories (33 GB) were left behind in one
+  repository.
+- Never create a per-agent or per-branch build cache (a separate `CARGO_TARGET_DIR`, a copied
+  `.gradle`, a private venv). Use the repository's one canonical location.
 
 ## 4. Branches
 
@@ -181,10 +187,13 @@ to implement", say what you counted against.
   counts, lifetimes, class loaders) gets the strongest tier; work a test will catch can use a
   cheaper one.
 - Give every agent prompt the absolute paths it may write to, and repeat rule 2 in it.
-- **Subagents do not run heavy local builds.** Subagents write code, design, investigate, review
-  and document. Gradle builds, cargo builds, the test gate and model runs are done by the session
-  itself, one at a time on this machine, or by CI (GitHub Actions) on a pushed branch. Several
-  sessions share one machine; parallel local builds slow every one of them.
+- **Agents do not build.** Every agent, teammate sessions and subagents alike, may check that code
+  compiles and nothing more: `cargo check`, a Gradle `compile*` task, `python -m py_compile`, a
+  type checker or linter. Full builds (`cargo build`, `assemble`, wheels, native images, app
+  packages), test suites, gates, benchmarks and model runs go to CI (GitHub Actions) on a pushed
+  branch. The only local exceptions are device tests and measurements the coordinating session
+  runs itself, one at a time, and says why. Several sessions share one machine, and agent builds
+  once filled the disk and slowed every session.
 
 ---
 
