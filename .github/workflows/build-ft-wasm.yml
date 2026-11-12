@@ -1,0 +1,85 @@
+name: Build free-threaded CPython for wasm
+
+# Builds CPython with --disable-gil and pthreads ("3.15t") for wasm32-emscripten with
+# CPython's own driver (Platforms/emscripten), then runs it under node with four threads.
+# Step one of #175, a build experiment; job approved by the owner on 2026-11-13 ("#175 may
+# add the new wasm 3.15t CI build job"). It does not touch wasm.yml or the runtime the
+# wasmJs suite uses. See docs/platforms/free-threaded-wasm.md.
+#
+# Experiment choices (agent proposal, not decisions): Emscripten defaults to the version
+# CPython itself pins (Platforms/emscripten/config.toml, 4.0.19 for 3.15.0), not the 5.0.3
+# of python-multiplatform/scripts/wasm/build-cpython.sh; the compile/link flags are the
+# #175 investigation's; the call trampoline is patched to fall back to its JS path under
+# shared memory (trampoline_patch=skip runs without it).
+
+on:
+  # Runs on develop when the build itself changes (workflow_dispatch needs the file on the
+  # default branch, main, which develop reaches only through a release).
+  push:
+    branches: [develop]
+    paths:
+      - ".github/workflows/build-ft-wasm.yml"
+      - ".github/scripts/ft-wasm/**"
+      - ".github/scripts/ft-mobile/common.sh"
+  # And on a pull request that changes it, so a change is built before it merges (a new workflow
+  # cannot be dispatched until it reaches main).
+  pull_request:
+    paths:
+      - ".github/workflows/build-ft-wasm.yml"
+      - ".github/scripts/ft-wasm/**"
+      - ".github/scripts/ft-mobile/common.sh"
+  workflow_dispatch:
+    inputs:
+      python_version:
+        description: CPython version to build (a python.org source release, 3.15 or later)
+        default: "3.15.0"
+        required: true
+        type: string
+      emscripten_version:
+        description: Emscripten to use (empty = the version CPython pins in Platforms/emscripten/config.toml)
+        default: ""
+        required: false
+        type: string
+      trampoline_patch:
+        description: Call-trampoline shared-memory patch (skip = observe the unpatched build)
+        default: apply
+        required: true
+        type: choice
+        options: [apply, skip]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  wasm:
+    name: wasm32-emscripten pthreads (free-threaded)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      FT_WORK: ${{ github.workspace }}/.tmp/ft-wasm
+      FT_OUT: ${{ github.workspace }}/.tmp/ft-wasm-out
+      FT_WASM_EMSDK_VERSION: ${{ inputs.emscripten_version || '' }}
+      FT_WASM_TRAMPOLINE_PATCH: ${{ inputs.trampoline_patch || 'apply' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # CPython 3.15.0 pins node 24 (Platforms/emscripten/config.toml, node-version).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install build Python prerequisites
+        run: >
+          sudo apt-get update && sudo apt-get install -y
+          build-essential pkg-config libssl-dev zlib1g-dev libffi-dev
+          libbz2-dev liblzma-dev libsqlite3-dev libzstd-dev
+
+      - name: Build and verify
+        run: .github/scripts/ft-wasm/build-wasm.sh "${{ inputs.python_version || '3.15.0' }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-${{ inputs.python_version || '3.15.0' }}t-wasm32-emscripten
+          path: ${{ env.FT_OUT }}/*.tar.gz
+          if-no-files-found: error
