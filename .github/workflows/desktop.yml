@@ -76,6 +76,11 @@ jobs:
       - name: Run Linux x86_64 Kotlin/Native Tests
         run: ./gradlew :python-multiplatform:linuxX64Test --rerun --console=plain
 
+      # The Compose host's linuxX64 target (#386): compiled here, since only the fork publishes the
+      # Compose UI klibs for linuxX64.
+      - name: Compile the Compose host for Linux x86_64 Kotlin/Native
+        run: ./gradlew :python-multiplatform-compose:compileKotlinLinuxX64 --rerun --console=plain
+
   # The dev agent's protocol on the other desktop OSes (#238). Its socket options differ per platform
   # (SO_EXCLUSIVEADDRUSE on Windows, SO_REUSEADDR on POSIX), and the port-takeover and restart tests are
   # what check them. Stdlib only: no JDK, no Gradle.
