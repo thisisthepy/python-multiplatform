@@ -112,42 +112,11 @@ static inline unsigned int tp_type_tag(const PyTypeObject *cls)
 #define TP_THREAD_LOCAL __thread
 #endif
 
-/* Locks for list parameters (tp_cs_*): from before the copy-in to after the write-back, on every
- * exit path. With a GIL they are no-ops.
- *
- * One list or two: CPython's own critical section (PyCriticalSection / PyCriticalSection2, ordered
- * by address). Three or more (#255, design/typedpython.md 4.3.6; agent proposal, not confirmed):
- * CPython has no section for more than two objects, and a nested third may suspend the outer ones
- * (Include/critical_section.h), so tp_cs_begin_n holds one list through a critical section and the
- * others through their own mutex (ob_mutex):
- *   - it never blocks while it holds a mutex directly: each round begins a critical section on one
- *     list (which waits, if it must, the way CPython requires: this thread's own outer sections are
- *     suspended while it waits, and a list held by this thread's top-most section is not locked
- *     again), then only TRIES the other lists' mutexes (the compare-and-swap of PyMutex_LockFast
- *     and of the interpreter's LOCK_OBJECT). If one is taken it releases what it got, ends the
- *     section and begins the next round with a critical section on that list;
- *   - a list that a caller of this thread holds (list.sort holds its list while it calls the key)
- *     is either the round's own list (the top-most section holds it: not locked again) or is freed
- *     when the round's section waits (the wait suspends the caller's sections). Two lists held by
- *     one section of a caller (a PyCriticalSection2 that is top-most) can never both be had, so
- *     after TP_CS_ROUNDS rounds it gives up with nothing held and the call runs interpreted (a
- *     deopt, before any effect); contention alone ends a round only when another thread took a
- *     list between two of its attempts;
- *   - while they are held nothing may wait (the verifier's verify/array-locks: closed, no entry
- *     global, no redo Call): the section is not suspended (that needs a detach or a blocking nested
- *     section), and no thread can wait for this one while this one waits for it;
- *   - the write-back stores through tp__list_store_held, not PyList_SetItem, which would begin a
- *     critical section on a directly held list and wait for this very thread (listobject.c).
- * Other threads' critical sections, and the interpreter's LOCK_OBJECT fast paths, on these lists
- * see the same mutexes locked and wait (or take their locking path), as for a critical section. */
-#ifndef TP_CS_ROUNDS
-#define TP_CS_ROUNDS 64
-#endif
-
+/* Critical sections for array parameters (tp_cs_*): from before the copy-in to after the
+ * write-back, on every exit path. One list or two (CPython offers one- and two-object sections
+ * only; a function with more list parameters stays interpreted). With a GIL they are no-ops. */
 typedef struct {
-    int n;                       /* 0 = not held; 1 or 2: a critical section; >= 3: n lists held */
-    int w;                       /* n >= 3: the index in objs held through the critical section */
-    PyObject **objs;             /* n >= 3: the lists in address order (the wrapper's array, borrowed) */
+    int n;                       /* 0 = not held, 1 or 2 objects locked */
 #ifdef Py_GIL_DISABLED
     PyCriticalSection2 cs;
 #endif
@@ -170,66 +139,6 @@ static inline void tp_cs_begin(tp_cs *c, PyObject *a, PyObject *b)
 #endif
 }
 
-#ifdef Py_GIL_DISABLED
-/* one non-blocking attempt: the first step of _PyMutex_LockTimed (Python/lock.c), which keeps the
- * "has parked" bit; the bit values are those of Include/cpython/pylock.h */
-static inline int tp__mutex_try(PyMutex *m)
-{
-    uint8_t v = _Py_atomic_load_uint8_relaxed(&m->_bits);
-    while ((v & _Py_LOCKED) == 0) {
-        if (_Py_atomic_compare_exchange_uint8(&m->_bits, &v, (uint8_t)(v | _Py_LOCKED))) {
-            return 1;
-        }
-    }
-    return 0;
-}
-#endif
-
-/* n >= 3 distinct exact lists (the wrapper's aliasing guard ran): sorts objs by address in place and
- * takes every list's lock. 0 = all held (end with tp_cs_end); 1 = not taken, nothing held. */
-static inline int tp_cs_begin_n(tp_cs *c, PyObject **objs, int n)
-{
-    int i, j;
-    for (i = 1; i < n; i++) {           /* the order PyCriticalSection2 uses: lower address first */
-        PyObject *o = objs[i];
-        for (j = i; j > 0 && (uintptr_t)objs[j - 1] > (uintptr_t)o; j--) {
-            objs[j] = objs[j - 1];
-        }
-        objs[j] = o;
-    }
-    c->objs = objs;
-#ifdef Py_GIL_DISABLED
-    int w = 0;
-    for (int round = 0; round < TP_CS_ROUNDS; round++) {
-        int k;
-        PyCriticalSection_Begin((PyCriticalSection *)&c->cs, objs[w]);
-        for (k = 0; k < n; k++) {
-            if (k != w && !tp__mutex_try(&objs[k]->ob_mutex)) {
-                break;
-            }
-        }
-        if (k == n) {
-            c->w = w;
-            c->n = n;
-            return 0;
-        }
-        for (i = k - 1; i >= 0; i--) {
-            if (i != w) {
-                PyMutex_Unlock(&objs[i]->ob_mutex);
-            }
-        }
-        PyCriticalSection_End((PyCriticalSection *)&c->cs);
-        w = k;                          /* nothing held: the next round waits for the taken one */
-    }
-    c->n = 0;
-    return 1;
-#else
-    c->w = 0;
-    c->n = n;
-    return 0;
-#endif
-}
-
 /* idempotent: a no-op when nothing is held */
 static inline void tp_cs_end(tp_cs *c)
 {
@@ -239,16 +148,6 @@ static inline void tp_cs_end(tp_cs *c)
     }
     else if (c->n == 2) {
         PyCriticalSection2_End(&c->cs);
-    }
-    else if (c->n > 2) {
-        /* the directly held mutexes first: ending the section may resume an outer one, which can
-         * wait, and nothing may be held directly then */
-        for (int i = c->n - 1; i >= 0; i--) {
-            if (i != c->w) {
-                PyMutex_Unlock(&c->objs[i]->ob_mutex);
-            }
-        }
-        PyCriticalSection_End((PyCriticalSection *)&c->cs);
     }
 #endif
     c->n = 0;
@@ -1101,8 +1000,7 @@ static inline int tp_unbox_bool(PyObject *o, int *out)
  * enter: rc 0 -> the struct holds the copy; rc 1 or -1 -> the struct is zeroed (so exit is a safe
  * no-op) and nothing was changed. `list` is borrowed: the caller keeps the argument alive.
  *
- * Free-threaded (#159): the CALLER holds the list's critical section (tp_cs_begin) or, with three
- * or more lists, its mutex (tp_cs_begin_n, #255; then it ends with exit_held) from before
+ * Free-threaded (#159): the CALLER holds the list's critical section (tp_cs_begin) from before
  * enter to after exit, on every exit path. enter and exit read and write the list's items through
  * borrowed references (PyList_GET_ITEM) and rely on that lock: no other thread can change the list
  * between the copy-in and the write-back, so the whole call is one atomic step as far as lists are
@@ -1215,36 +1113,7 @@ static inline int tp_i64_array_slot(const tp_i64_array *a, int64_t i, int store,
     return tp__array_slot(a->len, i, store, slot);
 }
 
-/* The store of PyList_SetItem (listobject.c) for a list whose mutex this thread holds directly
- * (tp_cs_begin_n): the same index check, release store and decref of the old item, without the
- * critical section PyList_SetItem begins, which would wait for this very thread. The old item is an
- * exact float or int (the copy-in checked, and the lock was held since), so its decref runs no code.
- * Steals v. With a GIL: PyList_SetItem. */
-static inline int tp__list_store_held(PyObject *list, Py_ssize_t i, PyObject *v)
-{
-#ifdef Py_GIL_DISABLED
-    PyListObject *l = (PyListObject *)list;
-    PyObject *old;
-    if (i < 0 || i >= Py_SIZE(l)) {
-        Py_DECREF(v);
-        PyErr_SetString(PyExc_IndexError, "list assignment index out of range");
-        return -1;
-    }
-    old = l->ob_item[i];
-    _Py_atomic_store_ptr_release(&l->ob_item[i], v);
-    Py_XDECREF(old);
-    return 0;
-#else
-    return PyList_SetItem(list, i, v);
-#endif
-}
-
-static inline int tp__list_store(PyObject *list, Py_ssize_t i, PyObject *v, int held)
-{
-    return held ? tp__list_store_held(list, i, v) : PyList_SetItem(list, i, v);
-}
-
-static inline int tp__f64_array_exit(tp_f64_array *a, int held)
+static inline int tp_f64_array_exit(tp_f64_array *a)
 {
     int rc = 0;
     if (a->data != NULL && a->dirty != NULL && a->list != NULL) {
@@ -1255,7 +1124,7 @@ static inline int tp__f64_array_exit(tp_f64_array *a, int held)
                 continue;
             }
             v = PyFloat_FromDouble(a->data[i]);
-            if (v == NULL || tp__list_store(a->list, i, v, held) < 0) {
+            if (v == NULL || PyList_SetItem(a->list, i, v) < 0) {
                 rc = -1; /* SetItem consumed v on failure; the error is set */
                 break;
             }
@@ -1270,7 +1139,7 @@ static inline int tp__f64_array_exit(tp_f64_array *a, int held)
     return rc;
 }
 
-static inline int tp__i64_array_exit(tp_i64_array *a, int held)
+static inline int tp_i64_array_exit(tp_i64_array *a)
 {
     int rc = 0;
     if (a->data != NULL && a->dirty != NULL && a->list != NULL) {
@@ -1281,7 +1150,7 @@ static inline int tp__i64_array_exit(tp_i64_array *a, int held)
                 continue;
             }
             v = PyLong_FromLongLong((long long)a->data[i]);
-            if (v == NULL || tp__list_store(a->list, i, v, held) < 0) {
+            if (v == NULL || PyList_SetItem(a->list, i, v) < 0) {
                 rc = -1;
                 break;
             }
@@ -1296,12 +1165,55 @@ static inline int tp__i64_array_exit(tp_i64_array *a, int held)
     return rc;
 }
 
-/* exit: the list's critical section is held (one or two lists); exit_held: its mutex is held
- * directly (three or more lists, tp_cs_begin_n) */
-static inline int tp_f64_array_exit(tp_f64_array *a) { return tp__f64_array_exit(a, 0); }
-static inline int tp_i64_array_exit(tp_i64_array *a) { return tp__i64_array_exit(a, 0); }
-static inline int tp_f64_array_exit_held(tp_f64_array *a) { return tp__f64_array_exit(a, 1); }
-static inline int tp_i64_array_exit_held(tp_i64_array *a) { return tp__i64_array_exit(a, 1); }
+/* ------------------------------------------------------------------------------------------
+ * Lists read element by element (#255, ir.direct_lists): a pure function with three or more list
+ * parameters does not copy them in. The wrapper sets only `list` of each tp_*_array (borrowed; the
+ * call's arguments keep it alive) and every Index is one of these, in program order: the list's own
+ * PyList_GetItemRef, which is the read the interpreter's `a[i]` does (Objects/listobject.c
+ * list_get_item_ref; Python/bytecodes.c _BINARY_OP_SUBSCR_LIST_INT), so each read is atomic and no
+ * lock is held between two reads. A negative index counts from the length at that read, as in the
+ * interpreter. rc 0 = *out set; -1 = IndexError("list index out of range"); 1 = deopt (the element
+ * is not exactly float / not exactly an int within i64; nothing has happened: the function is pure).
+ * Len is PyList_GET_SIZE at that point (an atomic load on free-threaded builds).
+ * ------------------------------------------------------------------------------------------ */
+static inline PyObject *tp__list_item_ref(PyObject *list, int64_t i)
+{
+    if (i < 0) {
+        i += (int64_t)PyList_GET_SIZE(list);
+    }
+    if (i < 0 || i > (int64_t)PY_SSIZE_T_MAX) {
+        PyErr_SetString(PyExc_IndexError, "list index out of range");
+        return NULL;
+    }
+    return PyList_GetItemRef(list, (Py_ssize_t)i);    /* new reference, or NULL + IndexError */
+}
+
+static inline int tp_list_ld_f64(PyObject *list, int64_t i, double *out)
+{
+    PyObject *v = tp__list_item_ref(list, i);
+    if (v == NULL) {
+        return -1;
+    }
+    if (!PyFloat_CheckExact(v)) {
+        Py_DECREF(v);
+        return 1;
+    }
+    *out = PyFloat_AS_DOUBLE(v);
+    Py_DECREF(v);
+    return 0;
+}
+
+static inline int tp_list_ld_i64(PyObject *list, int64_t i, int64_t *out)
+{
+    int rc;
+    PyObject *v = tp__list_item_ref(list, i);
+    if (v == NULL) {
+        return -1;
+    }
+    rc = tp_unbox_i64(v, out);
+    Py_DECREF(v);
+    return rc < 0 ? -1 : rc > 0 ? 1 : 0;
+}
 
 /* ------------------------------------------------------------------------------------------
  * Buffer arrays (issue #149; ir.ArrayParam.buffer): an exact array.array argument
@@ -3004,7 +2916,7 @@ static inline PyObject *tp_list_from_i64(const int64_t *d, Py_ssize_t n)
  * returned 2; the wrapper then returns it, with its write-back already done. */
 typedef struct tp_osr {
     tp_cs *lock;                    /* the wrapper's critical section, or NULL (no list parameter) */
-    PyObject *const *lists;         /* the list arguments in parameter order (the wrapper's, borrowed), or NULL */
+    PyObject *lists[2];             /* the list arguments in critical-section order (borrowed), or NULL */
     PyObject *result;               /* strong, after an exit: what the continuation returned */
 } tp_osr;
 

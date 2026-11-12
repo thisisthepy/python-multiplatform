@@ -73,31 +73,25 @@ Python error set, nothing to undo), `-1` Python error set (CPython's exception t
     /* aliasing guard: 1 if any two of the n objects are the same object */
     int  tp_any_same(PyObject *const *objs, Py_ssize_t n);
 
-    /* Free-threaded CPython (#159): the wrapper holds the lists' locks from before the first enter
-       to after the last exit, on every path (ok, error, deopt). tp_cs is zero-initialised
-       (`tp_cs c = {0};`). tp_cs_begin: b == NULL locks one list, else both (PyCriticalSection2:
-       ordered by address, so two threads locking (a, b) and (b, a) cannot deadlock).
-       tp_cs_begin_n (#255; agent proposal, not confirmed): three or more distinct exact lists;
-       sorts objs by address in place (objs stays the lock's, for the re-take after a poll) and holds
-       one list through a critical section and the others through their own mutex (ob_mutex), never
-       blocking while it holds a mutex directly; 0 = all held, 1 = not taken (nothing held: the
-       wrapper deopts, a poll leaves for the continuation) after TP_CS_ROUNDS (64) rounds, which
-       happens when two of the lists are held by this thread's own top-most PyCriticalSection2. With
-       a GIL all three are no-ops (tp_cs_begin_n returns 0). */
-    typedef struct { int n, w; PyObject **objs; /* + a PyCriticalSection2 on free-threaded builds */ } tp_cs;
+    /* Free-threaded CPython (#159): the wrapper holds the lists' critical section from before the
+       first enter to after the last exit, on every path (ok, error, deopt). tp_cs is zero-initialised
+       (`tp_cs c = {0};`). b == NULL locks one list, else both (PyCriticalSection2: ordered by
+       address, so two threads locking (a, b) and (b, a) cannot deadlock). More than two list
+       parameters are not compiled (frontend.Skip, verify/structure, CGenError): CPython has no
+       three-object section and a nested third would suspend the others. With a GIL both are no-ops. */
+    typedef struct { int n; /* + a PyCriticalSection2 on free-threaded builds */ } tp_cs;
     void tp_cs_begin(tp_cs *c, PyObject *a, PyObject *b);
-    int  tp_cs_begin_n(tp_cs *c, PyObject **objs, int n);
     void tp_cs_end(tp_cs *c);      /* idempotent: a no-op when nothing is held */
-    /* exit with three or more lists: the list's mutex is held directly, so the write-back is
-       PyList_SetItem's store without its critical section (which would wait for this thread) */
-    int  tp_f64_array_exit_held(tp_f64_array *a);
-    int  tp_i64_array_exit_held(tp_i64_array *a);
+    /* #255, ir.direct_lists: a pure function with three or more list parameters does not copy them
+       in and takes no lock (the exception to "more than two ... not compiled" above). The wrapper
+       checks PyList_CheckExact and sets only `list` of each tp_*_array; every Index is one of these
+       (PyList_GetItemRef, the interpreter's read; a negative index counts from the length at that
+       read): 0 = *out set, -1 = IndexError "list index out of range", 1 = deopt (not exactly float /
+       not exactly an int within i64). Len is PyList_GET_SIZE at that point. */
+    int  tp_list_ld_f64(PyObject *list, int64_t i, double *out);
+    int  tp_list_ld_i64(PyObject *list, int64_t i, int64_t *out);
 `tp_*_array_enter` / `_exit` read and write the list through borrowed references (`PyList_GET_ITEM`,
-`PyList_SetItem`) and REQUIRE the caller to hold that critical section (`_exit_held`: the list's
-mutex, held by `tp_cs_begin_n`). With three or more lists nothing between enter and exit may wait
-(a detach or a blocking lock would keep the directly held mutexes while this thread waits):
-verify/array-locks refuses an entry global or a redo Call anywhere in the call tree, and cgen
-refuses them again (CGenError). Between enter and exit no
+`PyList_SetItem`) and REQUIRE the caller to hold that critical section. Between enter and exit no
 other thread can change the list, so the whole call is one atomic step as far as lists go (an
 interleaving CPython can produce: each list operation takes the same lock). A long compiled array
 loop does not poll (below), so it delays other threads' stop-the-world requests (the free-threaded
@@ -128,8 +122,8 @@ call by the export.
 
 Rules that go with it (verifier / front end):
 * Closed (#203) like a list: a function with a buffer runs no user code (`verify/array-open`).
-* No limit on the number of buffer parameters (no critical section), nor of list parameters since #255
-  (three or more: `tp_cs_begin_n`, with the verify/array-locks condition).
+* No limit on the number of buffer parameters (no critical section); lists keep the limit of two in a
+  function with an effect (a pure function reads three or more element by element, #255).
   A buffer and a list cannot alias (different types). Two buffers may share memory (the same array
   passed twice): per-element access makes reads see earlier writes in program order, as in
   the interpreter, which a copy-in could not.
@@ -249,8 +243,7 @@ Same structs as above with `list == NULL` and `dirty == NULL`. 0 ok, -1 MemoryEr
 Thread state (#125): the wrapper calls `PyThreadState_GetUnchecked()` once and passes it as `tp_ts` to the
 impl, which passes it to `tp_enter_call`, `tp_depth_room`, `tp_traced` and to its direct compiled callees,
 so a compiled call and its C-to-C callees do one TLS lookup of the thread state per call. Likewise the per-thread state (call depth, poll countdown, snapshot depth) is one `__thread` struct
-`tp_osr` (#152, OSR-style exit): `{ tp_cs *lock; PyObject *const *lists; PyObject *result; }` (`lists`: the
-wrapper's array of the list arguments in parameter order, any number since #255). A snapshot-holding
+`tp_osr` (#152, OSR-style exit): `{ tp_cs *lock; PyObject *lists[2]; PyObject *result; }`. A snapshot-holding
 function's wrapper sets `tp_t->osr` to its own context right before calling the impl; the impl takes it at entry
 and sets `tp_t->osr` back to NULL. The impl returns 2 when it left for the continuation, with `result` set (strong).
 
@@ -499,7 +492,7 @@ static or module-state field must be added here):
 | `buf_types` (array.array) | module state | immutable after init | written by `tp_exec` (and `tp_clear`); read-only type pointers compared by identity |
 | buffer arguments of array parameters | caller's array.array memory | atomic | relaxed 8-byte `__atomic_load_n` / `__atomic_store_n` per element; the Py_buffer export is held for the call (open point on concurrent resize, #149) |
 | list arguments of array parameters | caller's lists | critical section | `tp_cs_begin` before the copy-in, `tp_cs_end` after the write-back, on every path |
-| list arguments, three or more (#255) | caller's lists | each list's lock | `tp_cs_begin_n`: one list through a critical section, the others' `ob_mutex` tried without blocking (a taken one ends the round and is waited for through a critical section, nothing held); every lock held from copy-in to write-back, write-back by `_exit_held`; nothing in that window waits (verify/array-locks). Agent proposal, not confirmed (design/typedpython.md 4.3.6) |
+| list arguments of a pure function with three or more (#255) | caller's lists | CPython | not copied, no lock: every element read is `PyList_GetItemRef` (atomic, a strong reference), in program order; the wrapper's arguments keep the lists alive |
 | module globals (class names, entry globals) | module dict | strong reads | `tp_global` and `tp_class_global_ok` use `PyDict_GetItemRef` |
 | a compiled class's instances | other threads' objects | CPython | `PyMember_GetOne` / `SetOne` are what the interpreter's member descriptors call (they take the object's lock on free-threaded builds); `tp_new_fixed` writes only its own fresh object |
 | `errno` (math helpers) | C library | thread-local | per thread by POSIX |
@@ -513,7 +506,7 @@ a module is kept alive by an own reference while it is read; `PyEval_GetBuiltins
 `PyEval_GetFrameBuiltins` (a new reference). `tp_class_global_ok`: `PyDict_GetItemWithError` became
 `PyDict_GetItemRef` inside the dict's critical section. `tp_cg_redo`: the counter update is under the
 module dict's critical section. `PyList_GET_ITEM` in `tp_*_array_enter` stays a borrow: it is read
-under the list's critical section the caller holds (with three or more lists, the list's lock). Borrows that cannot race: `PyModule_GetDict` (the
+under the list's critical section the caller holds. Borrows that cannot race: `PyModule_GetDict` (the
 dict lives as long as the module, which the running function keeps alive), `PyTuple_GET_SIZE` of a
 kwnames tuple, `PyTuple` items.
 

@@ -886,6 +886,22 @@ class Module:
 REGION_SCALAR_KINDS = {Type.I64: "i64", Type.F64: "f64", Type.BOOL: "bool"}
 
 
+def direct_lists(f: object) -> bool:
+    """#255 (design/typedpython.md 4.3.6): a pure function with three or more list parameters reads
+    them element by element, without copy-in or critical section. CPython's critical sections lock
+    one or two objects, and copying three or more lists in at one instant needs them all locked (the
+    leader decision of 2026-11-13 excludes any lock outside that API). A pure function only reads
+    its lists, so each `Index` is one `PyList_GetItemRef` in program order, the interpreter's own
+    atomic read, and an element of the wrong type deopts (legal: nothing has happened yet); `Len` is
+    the current length. No entry global (a snapshot read at entry could disagree with later list
+    reads), no buffer parameter, no CopyArray of a list parameter and no parallel loop: the verifier
+    (`verify/array-direct`) and cgen refuse them. An impure function with more than two list
+    parameters stays interpreted (#209)."""
+    params = getattr(f, "params", ())
+    lists = sum(isinstance(p, ArrayParam) and p.buffer is None for p in params)
+    return getattr(f, "pure", False) is True and lists > 2
+
+
 def region_arg_kind(a: object, ref_class) -> object:
     """The region kind one `New` argument gives its field: "i64" / "f64" / "bool" for a `Box` of that
     scalar, "null" for the `None` constant, ("ref", class) for a value of a region class (`ref_class(a)`

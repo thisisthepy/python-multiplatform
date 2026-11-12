@@ -467,137 +467,125 @@ i64/f64 지역)는 **컴파일된 구간 안의 임시 값**만 줄인다. 컨�
 - 효과가 작아 하지 않는 것: `-OO`(0.35~0.8 MB, `assert` 도 사라짐), deopt 원본 지연 로딩(함수 1000 개당 약
   0.4 MB), 동결 모듈 끄기(오히려 4.4 MB 증가).
 
-### 4.3.6 리스트 매개변수 세 개 이상: 리스트마다 잠금 (#255, 조사와 제안)
+### 4.3.6 리스트 매개변수 세 개 이상 (#255, 조사 기록과 제안)
 
-**출처.** 이슈 #255 본문: "User decision (2026-10-17): research option (C) for the nbody regression from #209."
-같은 본문: "Until (C) is settled, (B) stays." 오너가 정한 것은 (C) 를 **조사한다**는 것이고, 아래의 방식
-(C') 과 그 조건은 **에이전트 제안, 확인되지 않음**이다.
+**출처.**
+- 이슈 #255 본문: "User decision (2026-10-17): research option (C) for the nbody regression from #209."
+  같은 본문: "Until (C) is settled, (B) stays."
+- **리더 결정 (2026-11-13, 리더, 코디네이터 경유):** #255 는 리스트의 `ob_mutex` 에 기대지 않는다(critical
+  section API 전용으로 예약된 필드). 공개 critical section API 만 쓴다.
+- 아래의 후보 판정과 (d1) 의 채택은 **에이전트 제안, 확인되지 않음**이다.
 
 **문제.** #209 이후 리스트 매개변수가 셋 이상인 함수는 3.15t 에서 해석 실행된다. copy-in 부터 write-back 까지
 모든 리스트의 잠금을 쥐어야 하는데, 공개 critical section API 는 객체 하나(`PyCriticalSection`) 또는 둘
 (`PyCriticalSection2`)만 잠근다. nbody 의 `offset_momentum`(리스트 4개), `advance`·`energy`(7개)가 31배에서
-1배로 떨어졌다. (A) copy-in 과 write-back 때만 잠그기는 그 사이 다른 스레드의 원소 쓰기를 잃고, (B) 지금처럼
-거절하기가 현재 상태다.
+1배로 떨어졌다. 기준은 동일성이다: 컴파일된 실행 하나하나가 CPython 의 어떤 interleaving 과 같아야 한다.
 
 #### 가. CPython 3.15.0rc1 의 근거
 
-venv 의 3.15.0rc1t 헤더와, python/cpython 의 태그 `v3.15.0rc1` 소스(설치된 `pycore_lock.h` 와 바이트 단위로
-같음을 확인)에서 읽었다. 줄 번호는 그 태그 기준이다.
+venv 의 3.15.0rc1t 헤더와 python/cpython 의 태그 `v3.15.0rc1` 소스(설치된 `pycore_lock.h` 와 바이트 단위로 같음을
+확인)에서 읽었다. 줄 번호는 그 태그 기준이다.
 
 1. **Begin.** 빠른 경로는 mutex 를 CAS 로 한 번 잡고 스레드의 섹션 스택에 올린다
    (`Include/internal/pycore_critical_section.h:106-117`). 실패하면 `_PyCriticalSection_BeginSlow`
-   (`Python/critical_section.c:20-62`): 같은 mutex 를 **맨 위** 섹션이 이미 쥐었으면 다시 잠그지 않고 돌아간다
-   (29-45), world 가 멈춰 있으면 잠그지 않는다(46-54), 아니면 **새 섹션을 먼저 스택에 올리고** `PyMutex_Lock`
-   으로 기다린다(55-60). 두 객체는 주소 순으로 잡고(`pycore_critical_section.h:163-170`), 느린 경로는 첫 mutex 를
-   쥔 채 둘째를 기다린다(`critical_section.c:91-101`).
-2. **Detach 와 중단.** `PyMutex_Lock` 은 기다릴 때 스레드 상태를 놓는다(`Python/lock.c:654-656`, 138-139;
-   `Python/parking_lot.c:328-337`). 놓을 때 `detach_thread` 가 `_PyCriticalSection_SuspendAll` 을 불러
-   (`Python/pystate.c:2285-2296`) **활성 섹션 전부**의 mutex 를 푼다(`critical_section.c:106-130`). 다시 붙을 때는
-   **맨 위 섹션 하나만** 다시 잡는다(`pystate.c:2269-2273`, `critical_section.c:132-165`). 그래서 세 번째 섹션을
-   중첩하면 경합 때 바깥 둘이 풀린 채로 남는다(`Include/critical_section.h:16-22`: "This API does not provide a
-   way to lock more than two objects at once").
-3. **Stop-the-world.** `stop_the_world` 는 놓인(detached) 스레드를 SUSPENDED 로 바꾸고 붙어 있는 스레드에는
-   eval breaker 비트만 세운다(`pystate.c:2385-2408`, 2409-2470). 기다리는 스레드는 놓인 상태이므로 GC 를 막지
-   않는다. world 가 멈춘 동안의 Begin 은 잠그지 않는다(`critical_section.c:46-54`, 69-74). GC 는 할당에서 예약만
-   하고(`Python/gc_free_threading.c:2031-2035`, 2696-2702) eval breaker 에서 돈다.
-4. **`ob_mutex` 의 지위.** `PyObject` 의 필드다(`Include/object.h:162`, `Py_GIL_DISABLED` 일 때만;
-   `_Py_OPAQUE_PYOBJECT`, 곧 abi3t 에서는 숨겨진다). 문서는 "reserved for use by the critical section API ... Do
-   not lock it directly with `PyMutex_Lock`; doing so can cause deadlocks" 라고 한다
-   (`Doc/c-api/structures.rst:58-66`, `Doc/howto/free-threading-extensions.rst:391-410`). `PyMutex` 의 비트(0b01
-   잠김, 0b10 대기자 있음)는 공개 헤더에 "not part of the public API, but described" 로 적혀 있다
-   (`Include/cpython/pylock.h:26-35`). 한편 인터프리터 자신이 `ob_mutex` 를 섹션 밖에서 **시도만** 하고 실패하면
-   일반 경로로 간다: `LOCK_OBJECT` = `PyMutex_LockFast(&op->ob_mutex)` (`Python/ceval_macros.h:318-319`),
-   `STORE_SUBSCR_LIST_INT` (`Python/bytecodes.c:1431`), `list.append` 특수화(5114). 3.15.0rc1 에서 그 밖의 직접
-   사용은 faulthandler 덤프의 시간 제한 0 시도(`Python/pylifecycle.c:3517-3540`)와 섹션 API 를 거치는
-   `typeobject.c:83` 뿐이다(`grep ob_mutex`).
-5. **섹션을 여는 CPython 연산.** `PyList_SetItem` 은 리스트의 섹션을 연다(`Objects/listobject.c:454-479`).
-   dict 읽기는 실패 경로에서 dict 의 섹션을 연다(`Objects/dictobject.c:1647-1660`). `list.extend(dict)` 는
-   `PyCriticalSection2(list, dict)` 다(`listobject.c:1489`). `list.sort` 는 key 를 부르는 동안 리스트의 섹션을
-   쥔다(`listobject.c:2925` `@critical_section`, 2993 의 key 호출).
-6. **잠그지 않는 읽기.** 3.15 의 리스트 원소 읽기는 잠그지 않는다(`listobject.c:354-379`, `bytecodes.c:1148-1151`).
+   (`Python/critical_section.c:20-62`): 같은 mutex 를 **맨 위** 섹션이 이미 쥐었으면 다시 잠그지 않고(29-45),
+   world 가 멈춰 있으면 잠그지 않고(46-54), 아니면 새 섹션을 먼저 올리고 `PyMutex_Lock` 으로 기다린다(55-60). 두
+   객체는 주소 순으로 잡고(`pycore_critical_section.h:163-170`), 느린 경로는 첫 mutex 를 쥔 채 둘째를 기다린다
+   (`critical_section.c:91-101`).
+2. **Detach 와 중단.** `PyMutex_Lock` 은 기다릴 때 스레드 상태를 놓는다(`Python/lock.c:654-656`;
+   `Python/parking_lot.c:328-337`). 놓을 때 활성 섹션 전부를 풀고(`Python/pystate.c:2285-2296`,
+   `critical_section.c:106-130`), 다시 붙을 때 **맨 위 하나만** 다시 잡는다(`pystate.c:2269-2273`,
+   `critical_section.c:132-165`). 그래서 세 번째 섹션을 중첩하면 경합 때 바깥 둘이 풀린 채 남는다
+   (`Include/critical_section.h:16-22`: "This API does not provide a way to lock more than two objects at once").
+3. **섹션 구조체는 비공개.** "the contents of the structures are private"
+   (`Doc/c-api/synchronization.rst:225-232`, `Include/critical_section.h:39-40`). 스레드의 섹션 스택
+   (`PyThreadState.critical_section`)을 읽는 공개 함수는 없다. `PyMutex_IsLocked` 는 잠겼는지만 알려 주고 누가
+   쥐었는지는 모른다. 3.14 의 `PyCriticalSection*_BeginMutex` 도 mutex 둘까지다
+   (`Include/cpython/critical_section.h:38-42`).
+4. **`ob_mutex`.** 문서: "reserved for use by the critical section API ... Do not lock it directly with
+   `PyMutex_Lock`" (`Doc/c-api/structures.rst:58-66`, `Doc/howto/free-threading-extensions.rst:391-410`).
+5. **잠그는 CPython 연산과 잠그지 않는 읽기.** `PyList_SetItem` 은 리스트의 섹션을 연다
+   (`Objects/listobject.c:454-479`). `list + list` 는 두 리스트를 함께 잠근다(`listobject.c:813`). `list.sort` 는
+   key 를 부르는 동안 리스트의 섹션을 쥐고 리스트를 비워 둔다(`listobject.c:2925`, 2993). 원소 읽기
+   `PyList_GetItemRef` 는 잠그지 않는 원자적 읽기이고(`listobject.c:354-379`, 405-419), 인터프리터의 `a[i]` 가 바로
+   그 읽기다(`Python/bytecodes.c:1148-1151`). dict 읽기는 실패 경로에서 dict 의 섹션을 연다
+   (`Objects/dictobject.c:1647-1660`). `len` 은 원자적 길이 읽기다(3.15t `Include/cpython/listobject.h:30-36`).
 
-#### 나. 판정
+#### 나. 앞선 조사: `ob_mutex` 를 쓰는 방안 (리더 결정으로 제외)
 
-- **`PyMutex_Lock(&list->ob_mutex)` 를 주소 순으로 (원안 C): 건전하지 않다.** 두 가지가 깨진다.
-  (1) 자기 교착: 호출자가 그 리스트의 섹션을 쥔 채 우리를 부르면(`lst.sort(key=lambda v: f(lst, b, c))`)
-  `PyMutex_Lock` 이 기다리며 놓을 때 SuspendAll 이 그 섹션을 풀고, 다시 붙을 때 Resume 이 같은 mutex 를 잡으려 한다.
-  공정성 handoff 로 mutex 가 이미 우리 몫이 되었으면 Resume 의 `PyMutex_Lock` 은 영원히 기다린다(그 안에서 다시
-  놓아도 맨 위 섹션이 비활성이라 풀 것이 없다, `critical_section.c:113`). handoff 가 없으면 깨어날 때마다 Resume 이 그 mutex 를 다시 잡아 우리 시도가 또 실패하는 일을 되풀이한다. 문서의 경고가 이 경우다.
-  (2) 잠근 채 기다림: 앞 리스트를 직접 쥔 채 다음 리스트를 기다리면 SuspendAll 은 직접 쥔 것을 풀지 않고, 다시 붙을
-  때 Resume 이 호출자 섹션의 mutex 를 주소 순서와 무관하게 잡는다. 주소 순 체인이 깨져 순환이 생길 수 있다.
-- **공개 API 만으로: 같은 보장을 얻는 방법을 찾지 못했다.** 섹션을 중첩한 뒤 하나도 중단되지 않았는지 확인하려면
-  섹션 태그(`_cs_prev`, 비공개 필드)를 읽어야 한다. 내용 비교(double collect)는 리스트에 버전 번호가 없어 ABA 를
-  배제하지 못한다. `PyCriticalSection*_BeginMutex`(3.14 부터 공개, `Include/cpython/critical_section.h:38-42`)도
-  mutex 둘까지다. 이 판단이 놓칠 수 있는 것: 3.15 이후에 다객체 섹션 API 가 생기면 이 절은 그 API 로 바꾼다.
-- **제안 (C'), 에이전트 제안, 확인되지 않음.** `tp_cs_begin_n` (tp_runtime.h). 리스트를 주소 순으로 정렬하고
-  라운드마다
-  1. 리스트 하나(`w`)에 **CPython 섹션**을 연다. 기다려야 하면 CPython 규칙대로 기다린다(위 1, 2: 호출자 섹션은
-     기다리는 동안 풀리고, 맨 위 섹션이 쥔 리스트는 다시 잠그지 않는다);
-  2. 나머지 리스트의 `ob_mutex` 는 **시도만** 한다(`_PyMutex_LockTimed` 의 첫 CAS, `lock.c:58-62`, 대기자 비트 유지);
-  3. 하나라도 잡혀 있으면 직접 잡은 것을 풀고 섹션을 닫고, 다음 라운드는 그 리스트로 1 을 한다. 64 라운드
-     (`TP_CS_ROUNDS`) 안에 못 가지면 아무것도 쥐지 않은 채 deopt 한다(효과 전, 해석 실행).
-  write-back 은 `PyList_SetItem` 대신 그 본문(색인 확인, release store, 옛 항목 해제)을 섹션 없이 한다
-  (`tp_*_array_exit_held`): `PyList_SetItem` 은 직접 쥔 리스트에 섹션을 열어 자기 스레드를 기다린다(위 5).
-  리스트 하나, 둘은 바뀌지 않는다(`PyCriticalSection`, `PyCriticalSection2`).
-- **조건 (verifier `verify/array-locks`, cgen 도 다시 거절).** 리스트가 셋 이상인 함수는 호출 트리 전체에
-  entry global 도 redo Call 도 없어야 한다. entry global 읽기는 dict 섹션을 기다릴 수 있고(위 5), redo Call 은
-  해석 실행이다. 잠금을 쥔 창 안에서 그런 대기가 생기면, 예를 들어 다른 스레드가 `lst.extend(globals())` 로 dict
-  를 먼저 쥐고 `lst` 를 기다리는 동안 우리는 `lst` 를 쥐고 dict 를 기다린다. closed (#203) 는 이미 요구된다.
+- **원안 (C), `PyMutex_Lock(&list->ob_mutex)` 를 주소 순으로: 건전하지 않다.** 호출자 섹션이 쥔 리스트
+  (`lst.sort(key=lambda v: f(lst, b, c))`)에서 자기 교착한다: 기다리며 놓을 때 SuspendAll 이 그 섹션을 풀고, 다시
+  붙을 때 Resume 이 같은 mutex 를 잡으려 한다. 공정성 handoff 로 mutex 가 이미 우리 몫이면 그 Resume 은 영원히
+  기다린다(`critical_section.c:113`: 비활성 맨 위 섹션은 다시 풀지 않는다). 또 직접 쥔 채 기다리면 Resume 이 호출자
+  섹션의 mutex 를 주소 순서와 무관하게 잡아 순환이 생길 수 있고, write-back 의 `PyList_SetItem` 이 자기 스레드를
+  기다린다.
+- **변형 (C'), 섹션 하나 + 나머지는 `ob_mutex` 시도만 (커밋 89e9bfae):** 위 결함은 피했지만 `ob_mutex` 를 문서의
+  "reserved" 를 넘어 쓴다. 리더 결정(2026-11-13)으로 제외했고 코드에서 지웠다(`ob_mutex`, `PyMutex` 비트를 직접 쓰는
+  곳이 남아 있지 않다).
 
-#### 다. 증명한 것과 가정한 것
+#### 다. 공개 API 만으로 본 후보와 판정
 
-증명(위 소스에 근거한 논증):
+- **(a) copy-in 전에 섹션을 중첩해 잡고, 하나도 중단되지 않았음을 확인: 불가.** 확인하려면 섹션 태그(`_cs_prev`
+  의 INACTIVE 비트)나 스레드의 섹션 스택을 읽어야 하는데 둘 다 비공개다(위 3). 중단은 우리가 기다리는 순간(Begin
+  의 느린 경로)에 일어나므로 시점을 피할 수도 없다(위 1, 2).
+- **(b) 낙관적 검증: 리스트마다 자기 섹션 안에서 copy-in 하고 읽은 항목의 강한 참조를 쥔 뒤, 커밋 때 읽은 칸의
+  동일성을 다시 보고 write-back: 일반적으로 건전하지 않다.**
+  - 커밋이 원자적이지 않다. 섹션은 둘까지라, 세 리스트 이상에 쓰는 함수의 write-back 은 리스트별로 나뉜다. 예:
+    `a[0] = 1; b[0] = 1; a[0] = 2`. 인터프리터에서 다른 스레드가 볼 수 있는 상태는 (0,0), (1,0), (1,1), (2,1) 이다.
+    a 를 먼저 커밋하면 (2,0) 이, b 를 먼저 커밋하면 (0,1) 이 보인다. 둘 다 CPython 이 만들지 않는 상태이고,
+    `a + b`(두 리스트를 함께 잠근다, 위 5)나 2 리스트 컴파일 함수가 그것을 관측한다. 어떤 커밋 순서도 이것을 막지
+    못한다. 쓰는 리스트가 둘 이하면 `PyCriticalSection2` 하나로 원자적으로 커밋할 수 있다.
+  - 읽기 검증에는 한 순간이 필요하다. 쓰기와 프로그램 순서로 섞인 읽기는 커밋 순간의 값이어야 하는데, 커밋에서
+    잠글 수 없는 리스트는 그 순간에 볼 수 없다. 커밋 전과 후에 같은 객체를 다시 보는 것(double collect)은 ABA 를
+    막지 못한다: 다른 스레드가 `t = r[0]; r[0] = 5.0; r[0] = t` 로 같은 객체를 되돌릴 수 있고, 리스트에는 공개
+    버전 번호가 없다.
+  - 그러니 (b) 가 건전한 경우는 쓰기 구간 동안 손대는 리스트가 둘 이하인 경우뿐이고, 그것은 (c) 의 특수 경우다.
+- **(c) 컴파일 타임에 리스트를 읽기 전용/쓰기 전용으로 나누거나 함수를 나눠 한 번에 섹션이 둘 이하가 되게: 쓰는
+  함수에는 지금 기반으로 불가.**
+  - 읽기 전용이라도 여러 리스트를 한 순간에 copy-in 할 필요는 남는다. 반례: 다른 스레드가 `a[1] = 1` 다음
+    `b[0] = 1` 을 하고, 프로그램이 `a[0]`, `b[0]`, `a[1]` 순으로 읽는다. a 를 t1 에, b 를 t2 > t1 에 따로 copy-in 하면
+    (`b[0]` = 1, `a[1]` = 0) 을 볼 수 있는데, 인터프리터는 `b[0]` 에서 1 을 보면 뒤의 `a[1]` 에서도 1 을 본다.
+  - 함수를 프로그램 지점에서 구간으로 나누고(각 구간이 리스트 둘 이하), 경계에서 write-back 하고 다시 copy-in 하는
+    것은 #152 의 poll 과 같은 논리로 건전하다. 하지만 경계에서 리스트가 바뀌었으면(길이, 원소 타입) 그 지점에서
+    인터프리터로 넘어가야 하고, 효과 뒤에는 deopt 할 수 없다. 지금 OSR 출구는 루프 poll 지점에만 있다. 임의
+    문장 지점의 연속(continuation)이 생기기 전에는 쓰는 함수에 쓸 수 없다(nbody `advance` 는 안쪽 루프 한 바퀴가
+    일곱 리스트를 모두 건드린다).
+- **(d1) 순수 함수: copy-in 없이 원소마다 공개 API 로 읽기: 건전하다 (채택, 에이전트 제안, 확인되지 않음).**
+  - 순수 함수는 리스트를 읽기만 한다. 각 `a[i]` 를 `PyList_GetItemRef`(인터프리터의 읽기 그 자체, 원자적, 위 5)
+    한 번으로, IR 의 프로그램 순서대로(문장마다 임시 변수에 순서대로 emit) 읽는다. 음수 색인은 그 읽기 때의 길이로
+    센다(인터프리터와 같음). `len(a)` 는 그 지점의 길이다. 이 실행은 인터프리터의 읽기를 같은 순서로 하는 것이므로
+    다른 스레드의 연산이 읽기 사이 어디에 끼든 그 interleaving 과 같다. 잠금을 쥐지 않으므로 교착도, 호출자 섹션
+    문제도, stop-the-world 지연도 없다.
+  - 원소 타입이 다르면(다른 스레드가 int 를 넣었다) deopt 한다. 순수 함수는 아직 아무 효과도 내지 않았으므로
+    해석 실행으로 다시 하는 것이 그대로 한 실행이다. 리스트가 줄었으면 그 지점에서 인터프리터와 같은
+    `IndexError("list index out of range")`. 길이가 호출 중 바뀔 수 있으므로 증명된(검사 없는) 색인은 쓰지 않는다.
+  - 조건(verifier `verify/array-direct`, cgen 도 다시 거절): entry global 없음(입구에서 한 번 읽은 전역과 나중의 원소
+    읽기가 어떤 순서와도 안 맞을 수 있다, 위 (c) 의 반례와 같은 꼴), 버퍼 매개변수 없음, 리스트 매개변수의
+    `a[:]` 없음(한 순간의 사본이 필요), 병렬 루프 없음(작업자는 Python API 를 쓰지 않는다).
+  - 리스트 하나, 둘의 경로는 그대로다: 같은 입력에 develop 과 바이트 단위로 같은 C 를 만든다(생성 C 비교로 확인).
+  - **비용(측정 전):** 읽기마다 함수 호출 하나와 참조 증감 한 쌍이다. copy-in 경로보다 느리고, 얼마나 빠른지는 CI
+    측정을 기다린다.
+- **(d2) 쓰는 함수의 원소별 접근: 불가(지금).** 쓰기는 `PyList_SetItem` 하나로 원자적이지만, 효과 뒤의 읽기가 다른
+  타입을 만나면 인터프리터는 계속 실행하는데 우리는 그 지점의 연속이 없다(위 (c) 와 같은 한계). 임의 지점 OSR 출구가
+  생기면 (d2) 가 nbody `advance` 를 푼다.
 
-- **배제.** 다른 스레드의 섹션과 `LOCK_OBJECT` 는 같은 mutex 비트를 보므로, 우리가 쥔 리스트에서 기다리거나
-  (`critical_section.c:59`) 일반 경로로 간다(`bytecodes.c:1431`). 잠그는 리스트 연산은 모두 호출 앞이나 뒤에 놓인다.
-- **교착 없음.** 이 스레드는 mutex 를 직접 쥔 채로는 기다리지 않는다: 직접 잡기는 시도뿐이고, 기다림은 직접 쥔 것을
-  모두 푼 뒤 섹션 하나로만 한다. 창 안에는 기다리는 연산이 없다(조건 + closed + write-back 직접 저장). 그러니 창
-  동안 이 스레드에서 나가는 대기 간선이 없어 순환에 들 수 없다. 끝낼 때는 직접 쥔 것을 먼저 풀고 섹션을 닫는다
-  (닫기가 바깥 섹션을 다시 잡으며 기다릴 수 있기 때문, `pycore_critical_section.h:128-137`).
-- **섹션이 창 동안 중단되지 않음.** 중단은 detach(`pystate.c:2290-2292`) 와 기다리는 Begin 에서만 일어나고, 창
-  안에는 둘 다 없다.
-- **재진입.** 호출자의 맨 위 섹션이 쥔 리스트는 그 섹션이 계속 쥔다(Begin 이 다시 잠그지 않음, 위 1). 아래 섹션이
-  쥔 리스트는 우리가 기다리는 동안 풀려 우리 것이 된다(CPython 의 중첩 의미 그대로). 맨 위의
-  `PyCriticalSection2` 하나가 두 리스트를 쥔 경우만 영원히 못 가지며, 64 라운드 뒤 deopt 로 끝난다.
-- **#152 의 성질 유지.** 긴 루프의 poll 은 write-back 하고 모든 잠금을 푼 뒤 poll 하고 다시 잡는다. 다시 못 잡으면
-  리스트가 바뀐 때처럼 해석 실행으로 넘어간다(OSR 출구). 창 안에서 detach 하지 않으므로 GC stop-the-world 는 그
-  호출(또는 다음 poll)을 기다린다: 1~2 리스트와 같은 liveness 지연이다.
-- **GIL 빌드.** 모두 no-op 이다(`tp_cs_begin_n` 은 0 을 돌려준다). 두 헤더 집합(3.15t, 3.15)에 대해
-  `clang -fsyntax-only` 로 생성 C 를 확인했다.
+#### 라. 판정과 결과
 
-가정(증명 아님):
-
-- **A1.** `ob_mutex` 의 위치와 `PyMutex` 비트 의미가 3.15 동안 바뀌지 않는다. 문서는 직접 사용을 금한다(위 4).
-  우리는 문서가 경고하는 `PyMutex_Lock` 은 쓰지 않고, 인터프리터의 `LOCK_OBJECT` 와 같은 시도만 쓴다. 그래도
-  "reserved" 를 넘는 사용이므로 **오너 결정이 필요하다.**
-- **A2.** 창 안의 C 코드(복사, malloc, float/int 생성과 해제, 예외 객체 생성)는 기다리지 않는다. 소스 감사에
-  근거한 가정이고, 3.15 판이 바뀌면 다시 본다.
-- **A3.** CPython 의 다른 코드는 `ob_mutex` 를 섹션 API 밖에서 기다리며 잡지 않는다(위 4 의 grep 결과).
-
-이 변경 범위 밖에서 찾은 것(1~2 리스트 경로에도 #255 이전부터 있는 성질, 별도 이슈 제안):
-
-- 1~2 리스트 함수가 창 안에서 entry global 을 읽다가 dict 섹션을 기다리면(위 5) 리스트의 섹션이 중단되어, 그 사이
-  다른 스레드의 쓰기를 write-back 이 덮어쓸 수 있다. redo Call 도 같다.
-- 리스트 원소 읽기는 잠그지 않으므로(위 6) write-back 도중의 다른 스레드 읽기는 일부만 쓰인 상태를 볼 수 있다.
-  "호출 하나가 원자 단계" 는 잠그는 연산에 대해서만 성립한다.
-
-#### 라. 시험과 결과
-
-- `test_free_threaded.py`: 리스트 3개·7개 함수가 컴파일되고 인터프리터와 같은 결과(빈 리스트, 별칭, 리스트가 아닌
-  인자 포함); 리스트 3개를 네 스레드가 서로 다른 순서와 1·2 리스트 함수로 동시에 더해도 증가를 하나도 잃지 않음;
-  `list.sort` 의 key 에서 부르는 경우(맨 위 섹션, 아래 섹션, 가운데 매개변수) 교착 없이 인터프리터와 같음;
-  entry global 이 있는 3 리스트 함수는 해석 실행. 변형 시험(`race_mutant`, CI 의 기본 실행 밖): 옵션 (A)
-  (copy-in 과 write-back 때만 잠금)는 같은 동시 시험에서 증가를 잃어야 한다.
-- nbody: `advance`, `energy` 가 컴파일되고 `offset_momentum` 은 `SOLAR_MASS` (entry global) 때문에 해석 실행이다
-  (`test_class_methods.py` 의 EXPECTED). 측정은 CI 의 결과를 기다린다.
+- 셋 이상의 리스트에 **쓰는** 함수는 (B) 그대로 해석 실행이다(develop 과 같은 frontend/verify/cgen 거절).
+- **순수** 함수는 (d1) 로 컴파일된다. nbody: `energy` 가 컴파일되고, `advance`·`offset_momentum` 은 해석
+  실행이다(`test_class_methods.py` 의 EXPECTED). nbody 전체 속도는 `advance` 가 정하므로 거의 그대로일 것이다(측정 전).
+- 시험(`test_free_threaded.py`): 순수 3·7 리스트 함수의 컴파일, 인터프리터와 같은 결과(빈 리스트, 별칭, 다른 타입
+  원소의 deopt, 리스트가 아닌 인자, 짧은 리스트의 IndexError); 쓰는 3 리스트 함수와 entry global 이 있는 3 리스트
+  함수는 해석 실행; 프로그램 순서 시험(쓰는 스레드가 `c[0]` 다음 `a[0]` 을 쓰고, `a[0]`, `c[0]` 순으로 읽는 함수가
+  늘 `c[0] >= a[0]` 을 본다); 동시에 int 와 float 를 바꿔 넣어도 결과가 늘 인터프리터의 것; `list.sort` key 에서
+  부르기. 변형 시험: 읽기 순서를 바꾼 변형(`race_mutant`, CI 기본 실행 밖)과 원소 타입 검사를 뺀 런타임(결정적,
+  CI 에서 실행)이 잡혀야 한다. 옵션 (A) 변형은 3 리스트 쓰기 경로가 없어져 대상이 없으므로 지웠다.
 
 #### 마. 오너 결정이 필요한 점
 
-1. (C') 를 받아들일지: `ob_mutex` 를 문서의 "reserved" 를 넘어 시도로 잡는다(A1). 받아들이지 않으면 (B) 로
-   돌린다(frontend/verify/cgen 의 조건 하나).
-2. entry global 이 있는 3 리스트 이상 함수(nbody `offset_momentum`): 잠그기 전에 읽고 copy-in 뒤 전역 epoch 로
-   재검증하는 방안이 있으나 메모리 순서 논증이 끝나지 않았다. 지금은 해석 실행.
-3. `TP_CS_ROUNDS` = 64 (에이전트 제안).
+1. (d1) 을 받아들일지(에이전트 제안). 받아들이지 않으면 순수 함수도 (B) 로 돌린다(`ir.direct_lists` 하나).
+2. 쓰는 함수(nbody `advance`)를 위해 임의 문장 지점의 OSR 출구를 만들지: (c) 의 구간 나누기와 (d2) 가 둘 다 그것에
+   걸려 있다.
 
 ### 4.4 Kotlin 경계의 직접 호출
 

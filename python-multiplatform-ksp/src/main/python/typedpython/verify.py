@@ -37,16 +37,17 @@ Rules (the `rule` of a Diagnostic):
   verify/structure            break/continue outside a loop, the ForRange var assigned in its body,
                               a zero or non-constant step, duplicate names, bad declarations, an
                               entry global that collides with a parameter/local/other entry global or
-                              is assigned in the body
+                              is assigned in the body, or more than two array parameters in a
+                              function that is not pure (the lists are locked from copy-in to
+                              write-back: one- and two-object critical sections only, #159)
   verify/proven-overflow      `proven` is set on an op the verifier cannot prove stays inside i64 (or
                               on a node `proven` does not apply to, or it is not a bool)
   verify/redo                 `Call.redo` where it is not legal (see below)
   verify/entry-global-open    a function with entry_globals is not closed
   verify/array-open           a function with an ArrayParam runs user code (#203)
-  verify/array-locks          a function with three or more list ArrayParams (#255: it holds every
-                              list's own lock from copy-in to write-back, outside CPython's
-                              critical-section stack, so nothing in that window may wait) has an
-                              entry global or a redo Call, itself or anywhere in its call tree
+  verify/array-direct         a pure function with three or more list parameters (#255,
+                              `ir.direct_lists`: read element by element) has an entry global, a
+                              buffer parameter, a CopyArray of a list parameter or a parallel loop
   verify/buffer               a malformed `ArrayParam.buffer` (None, "array", "numpy", "memoryview"), or a
                               CopyArray of a buffer array (#149)
   verify/par-loop             a `ForRange.par` (SPEC N-15, #277) that the verifier does not recompute to
@@ -310,7 +311,7 @@ REGION_ESCAPE = "verify/region-escape"
 REDO = "verify/redo"
 ENTRY_OPEN = "verify/entry-global-open"
 ARRAY_OPEN = "verify/array-open"
-ARRAY_LOCKS = "verify/array-locks"
+ARRAY_DIRECT = "verify/array-direct"
 BUFFER = "verify/buffer"
 CLASS = "verify/class"
 FIELD = "verify/field-unproved"
@@ -405,6 +406,7 @@ class _Checker:
                  classes: dict[str, ClassDecl] | None = None,
                  var_ivs: dict[str, tuple[int, int]] | None = None, fixing: bool = False):
         self.fn = function
+        self.direct = ir.direct_lists(function)   # #255: lists read element by element
         # Local intervals (module docstring "Local variables and guards"): `var_ivs` is the interval
         # of every eligible local; `fixing` says this walk is a round of the fixpoint that computes
         # them (a local without an interval yet is then "bottom": `bottom` is set when one is read).
@@ -436,7 +438,6 @@ class _Checker:
         self.entry: dict[str, Type] = {}     # name -> type of every entry global
         self.opens: list[str] = []           # reasons the function is not closed
         self.slow_user: list[str] = []       # slow paths that can run user code (FieldGet, New)
-        self.redo_calls: list[str] = []      # callees of the legal redo Calls (#255: they can wait)
 
     def error(self, rule: str, message: str) -> None:
         d = Diagnostic(self.fn.name, rule, message, self.fn.source_line)
@@ -473,6 +474,18 @@ class _Checker:
             if p.name in params:
                 self.error(STRUCTURE, f"parameter '{p.name}' appears twice")
             params.add(p.name)
+        if self.direct:
+            self.can_deopt = True      # every element read checks the element's type (#255)
+            if isinstance(fn.entry_globals, tuple) and fn.entry_globals:
+                self.error(ARRAY_DIRECT, "three or more list parameters are read element by element "
+                                         "(#255), so an entry global cannot be read once at entry")
+            if any(type(p) is ArrayParam and p.buffer is not None for p in fn.params):
+                self.error(ARRAY_DIRECT, "three or more list parameters are read element by element "
+                                         "(#255); a buffer parameter beside them is not supported")
+        elif sum(type(p) is ArrayParam and p.buffer is None for p in fn.params) > 2:
+            self.error(STRUCTURE, "more than two array parameters: compiled code holds each list's "
+                                  "critical section from copy-in to write-back, and free-threaded "
+                                  "CPython has no section for more than two objects (#159)")
         eg = fn.entry_globals
         if not isinstance(eg, tuple):
             self.error(STRUCTURE, "entry_globals is not a tuple")
@@ -1071,7 +1084,6 @@ class _Checker:
                                  f"(the redone value may be a big int)")
             else:
                 redo = True
-                self.redo_calls.append(e.function)
         if not redo:
             for p in callee.params:
                 # The callee's entry guard `type(x) is C` may fail, even for an argument that is a
@@ -1195,6 +1207,11 @@ class _Checker:
 
     def e_Index(self, e: Index, state: _State) -> ir.Expr:
         idx, element, proven = self.index(e.array, e.index, state, "index")
+        if self.direct and e.array in self.arrays and e.array not in self.buffers:
+            # #255: another thread can resize the list between two reads, so no bound is proved,
+            # and an element of another type deopts
+            proven = False
+            self.can_deopt = True
         if element is not None and e.type is not element and e.type is not Type.OBJ:
             self.error(TYPE, f"element of '{e.array}' is {element.value}, node says "
                              f"{e.type.value}")
@@ -1373,6 +1390,9 @@ class _Checker:
             elif e.src in self.buffers:
                 self.error(BUFFER, f"CopyArray of buffer array '{e.src}': a buffer array is never "
                                    "copied)")
+            elif self.direct and e.src in self.arrays:
+                self.error(ARRAY_DIRECT, f"CopyArray of list parameter '{e.src}' in a function that reads "
+                                         "its three or more lists element by element (#255)")
             else:
                 self.array(e.src, "copy", state)
                 if src is not e.type:
@@ -1674,7 +1694,11 @@ class _Checker:
         for br in loop.breaks:
             after = _meet(after, br)
         par = self._par_info(s, step_ok, body, loop, state)
-        if s.par is not None and s.par != par:
+        if self.direct and (par is not None or s.par is not None):
+            self.error(ARRAY_DIRECT, "a parallel loop in a function that reads its three or more lists "
+                                     "element by element (#255)")
+            par = None
+        elif s.par is not None and s.par != par:
             self.error(PAR_LOOP, f"ForRange over '{var}' declares par={s.par!r}, but the verifier "
                                  f"computes {par!r} (SPEC N-15)")
         return dataclasses.replace(s, start=start, stop=stop, body=body, par=par), after
@@ -2555,7 +2579,6 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
     callees: dict[str, set[str]] = {}
     open_why: dict[str, str] = {}          # a function that runs user code -> why
     slow_why: dict[str, str] = {}          # a function whose slow paths can run user code -> why
-    wait_why: dict[str, str] = {}          # a function that can wait (#255: entry global, redo) -> why
     for name, g in sigs.items():
         c, rebuilt = _prove(g, sigs, classes)
         for d in c.diags:
@@ -2566,12 +2589,6 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
             open_why[name] = c.opens[0]
         if c.slow_user:
             slow_why[name] = c.slow_user[0]
-        if isinstance(g.entry_globals, tuple) and g.entry_globals:
-            wait_why[name] = (f"reads entry global '{getattr(g.entry_globals[0], 'name', '?')}' (the "
-                              "read can take the module dict's critical section)")
-        elif c.redo_calls:
-            wait_why[name] = (f"has a redo Call of '{c.redo_calls[0]}' (the interpreted callee can "
-                              "take critical sections)")
 
     # Closedness (entry_globals): a fixpoint over the call graph.
     changed = True
@@ -2607,28 +2624,6 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
         if name in array_why and any(isinstance(p, ArrayParam) for p in g.params):
             reject(name, g.source_line, ARRAY_OPEN,
                    f"holds a list copy-in but can run user code: {array_why[name]}")
-
-    # Three or more list parameters (#255, design/typedpython.md 4.3.6): the wrapper holds every list's
-    # own lock (ob_mutex) from the copy-in to the write-back, outside CPython's critical-section stack.
-    # A detach or a blocking lock in that window would keep those locks while this thread waits, and a
-    # thread waiting for one of them while holding what this one waits for (PyCriticalSection2 keeps
-    # its first lock while it waits for the second) would never wake. So nothing in the window may
-    # wait: closed (above), and no entry global and no redo Call in the whole call tree.
-    changed = True
-    while changed:
-        changed = False
-        for name, cs in callees.items():
-            if name not in wait_why:
-                bad = sorted(c for c in cs if c in wait_why)
-                if bad:
-                    wait_why[name] = f"calls '{bad[0]}', which {wait_why[bad[0]]}"
-                    changed = True
-    for name, g in sigs.items():
-        n_lists = sum(isinstance(p, ArrayParam) and p.buffer is None for p in g.params)
-        if n_lists > 2 and name in wait_why:
-            reject(name, g.source_line, ARRAY_LOCKS,
-                   f"three or more list parameters ({n_lists}) hold every list's lock from copy-in "
-                   f"to write-back, so nothing in the call may wait, but it {wait_why[name]}")
 
     # A call cycle (direct or mutual recursion) is legal: every compiled impl function counts its
     # frame at entry (tp_enter_call), so recursion ends in RecursionError where CPython raises it

@@ -920,9 +920,9 @@ EXPECTED = {
     "fannkuch": {"fannkuch"},
     "spectral_norm": {"eval_a", "mul_atv", "mul_av"},
     "wordfreq": {"next_state", "word_of", "main"},   # word_of and main: native ints, #232
-    # #255: three or more lists hold every list's lock; offset_momentum (4 lists) reads the entry
-    # global SOLAR_MASS, which could wait while they are held (verify/array-locks): interpreted
-    "nbody": {"advance", "energy"},
+    # #255: a pure function reads its three or more lists element by element (energy); advance and
+    # offset_momentum store into theirs and stay interpreted (no lock for more than two objects)
+    "nbody": {"energy"},
 }
 
 

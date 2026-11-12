@@ -5,7 +5,7 @@ Free-threaded 3.15t is the only build (maintainer decision 2026-10-04). A genera
   * keep its shared mutable state thread-safe (runtime/API.md "Free-threaded CPython");
   * read nothing through a borrowed reference that another thread can free;
   * hold the list's critical section from before the copy-in to after the write-back (array params);
-    with three or more list parameters, hold every list's lock for that whole window (#255).
+    a pure function with three or more list parameters reads them element by element instead (#255).
 
 Every concurrency scenario runs in a CHILD interpreter with a timeout (a crash or a deadlock fails
 one test, not the run). Iteration counts scale with TP_FT_STRESS (default 1).
@@ -14,9 +14,10 @@ Red record (before the change, on the 3.15t venv): the GIL test and the three mo
 failed (`Py_mod_gil` absent, the GIL came back at import), the concurrent counters lost updates, and
 a three-list function was compiled.
 
-#255 (three or more lists, design/typedpython.md 4.3.6): red before the change, the functions with three
-and seven list parameters (`three`, `bump3`, `seven`) were not compiled, so `built` failed and every test
-of this file using it errored; the front-end, verifier and cgen tests of the 3-list section failed.
+#255 (three or more lists, design/typedpython.md 4.3.6): red before the change, the pure functions with
+three and seven list parameters (`three`, `seven`, `order3`, `sum3`) were not compiled, so `built` failed
+and every test of this file using it errored; the front-end, verifier and cgen tests of the 3-list
+section failed (verify.ARRAY_DIRECT did not exist).
 """
 from __future__ import annotations
 
@@ -182,11 +183,26 @@ def seven(x: list[float], y: list[float], z: list[float], vx: list[float], vy: l
           vz: list[float], w: list[float]) -> float:
     e: float = 0.0
     for i in range(len(x)):
-        vx[i] += x[i] * w[i]
-        vy[i] -= y[i] * w[i]
-        vz[i] += z[i] * w[i] * 0.5
-        e += vx[i] * vx[i] + vy[i] * vy[i] + vz[i] * vz[i]
+        e += 0.5 * w[i] * (vx[i] * vx[i] + vy[i] * vy[i] + vz[i] * vz[i])
+        for j in range(i + 1, len(x)):
+            dx: float = x[i] - x[j]
+            dy: float = y[i] - y[j]
+            dz: float = z[i] - z[j]
+            e -= w[i] * w[j] * (dx * dx + dy * dy + dz * dz)
     return e
+
+
+@compiled
+def order3(a: list[float], b: list[float], c: list[float]) -> float:
+    x: float = a[0]
+    y: float = b[0]
+    z: float = c[0]
+    return z - x + 0.0 * y
+
+
+@compiled
+def sum3(a: list[float], b: list[float], c: list[float]) -> float:
+    return a[0] + b[0] + c[0]
 
 
 K: int = 3
@@ -242,7 +258,7 @@ def built(tmp_path_factory):
     assert result.extension is not None, result.skipped
     compiled = {f.name for f in result.module.functions}
     wanted = {"geta", "seta", "mk", "total", "fill", "edge", "fill_int", "edge_int", "rotate", "zero2",
-              "pair_edge", "usek", "fresh", "vpick", "three", "bump1", "bump2", "bump3", "seven"}
+              "pair_edge", "usek", "fresh", "vpick", "three", "bump1", "bump2", "seven", "order3", "sum3"}
     assert wanted <= compiled, {n: result.skipped.get(n) for n in wanted - compiled}
     fns = {f.name: f for f in result.module.functions}
     assert fns["vpick"].virtual == ("c",) and fns["fresh"].virtual == ()   # #143: one virtual, one real
@@ -297,21 +313,48 @@ def test_no_runtime_warning_about_the_gil(extension):
 
 
 # --- three or more list parameters (#255) -----------------------------------------------------------
-# Since #209 a function with more than two list parameters stayed interpreted (CPython's critical
-# sections cover one or two objects). #255 holds every list's own lock for the whole call instead
-# (design/typedpython.md 4.3.6). Red before #255: all of the tests below.
+# CPython's critical sections lock one or two objects, and the leader decision of 2026-11-13 excludes any
+# other lock (design/typedpython.md 4.3.6). A function with an effect and more than two lists stays
+# interpreted, as since #209. A pure one (ir.direct_lists) reads its lists element by element with
+# PyList_GetItemRef, in program order, without copy-in or lock; an element of another type deopts.
 
-def test_three_and_seven_list_parameters_compile(built):
+def test_pure_three_and_seven_list_functions_compile(built):
     result, _, _ = built
-    assert {"three", "bump3", "seven"} <= {f.name for f in result.module.functions}, result.skipped
+    assert {"three", "seven", "order3", "sum3"} <= {f.name for f in result.module.functions}, \
+        result.skipped
 
 
-def test_front_end_lowers_three_list_parameters(tmp_path):
+def test_three_list_parameters_with_an_effect_stay_interpreted(built):
+    result, _, _ = built
+    assert "bump3" not in {f.name for f in result.module.functions}
+    reason = result.skipped["bump3"]
+    assert "more than two list parameters" in reason, reason
+
+
+def test_front_end_gives_a_clear_reason(tmp_path):
+    p = tmp_path / "m.py"
+    p.write_text("\n\n@compiled\ndef f(a: list[int], b: list[float], c: list[int]) -> None:\n"
+                 "    a[0] = 1\n")
+    m = frontend.lower(p)
+    assert not m.functions
+    assert "more than two list parameters" in m.skipped["f"], m.skipped["f"]
+
+
+def test_front_end_lowers_three_list_parameters_of_a_pure_function(tmp_path):
     p = tmp_path / "m.py"
     p.write_text("\n\n@compiled\ndef f(a: list[int], b: list[float], c: list[int]) -> int:\n"
                  "    return len(a)\n")
     m = frontend.lower(p)
-    assert [f.name for f in m.functions] == ["f"], m.skipped
+    assert [(f.name, f.pure, f.may_deopt) for f in m.functions] == [("f", True, True)], m.skipped
+
+
+def test_three_lists_with_an_entry_global_stay_interpreted(built):
+    """A module global is read once at entry; the lists are read later, one element at a time, so the
+    two reads could disagree with any interpreted order."""
+    result, _, _ = built
+    assert "three_k" not in {f.name for f in result.module.functions}
+    reason = result.skipped["three_k"]
+    assert "more than two list parameters" in reason and "global" in reason, reason
 
 
 def test_two_list_parameters_still_compile(built):
@@ -319,64 +362,63 @@ def test_two_list_parameters_still_compile(built):
     assert {"zero2", "pair_edge", "bump2"} <= {f.name for f in result.module.functions}
 
 
-def test_two_lists_keep_the_critical_section_and_three_take_the_locks(built):
-    """One or two lists: CPython's own PyCriticalSection / PyCriticalSection2, unchanged. Three or
-    more: tp_cs_begin_n, which takes every list's lock (and can refuse, then the call deopts)."""
+def _wrapper(c_text: str, name: str) -> str:
+    start = c_text.index(f"static PyObject *tp_wrap_{name}(")
+    return c_text[start:c_text.index("\n}\n", start)]
+
+
+def test_direct_lists_take_no_lock_and_are_not_copied(built):
     result, path, _ = built
     c_text = cgen.generate(result.module, path)
-    def wrapper(name):
-        start = c_text.index(f"static PyObject *tp_wrap_{name}(")
-        return c_text[start:c_text.index("\n}\n", start)]
-    assert "tp_cs_begin(&tp_lock" in wrapper("zero2") and "tp_cs_begin_n" not in wrapper("zero2")
-    assert "tp_cs_begin(&tp_lock" in wrapper("fill") and "tp_cs_begin_n" not in wrapper("fill")
-    for name, n in (("bump3", 3), ("seven", 7)):
-        w = wrapper(name)
-        assert f"if (tp_cs_begin_n(&tp_lock, tp_lobjs, {n}) != 0) goto tp_deopt;" in w, w
-        assert "_exit_held(&tp_a" in w and "_array_exit(&tp_a" not in w, w
+    assert "tp_cs_begin(&tp_lock" in _wrapper(c_text, "zero2")          # two lists: unchanged
+    for name in ("three", "seven", "order3"):
+        w = _wrapper(c_text, name)
+        assert "tp_cs_" not in w and "_array_enter" not in w and "_array_exit" not in w, w
+        assert "PyList_CheckExact" in w, w
+    assert "tp_list_ld_f64(l_a->list" in c_text
 
 
-def test_three_lists_with_an_entry_global_stay_interpreted(built):
-    """Nothing between the copy-in and the write-back may wait while three or more list locks are held
-    (an entry global read can take the module dict's critical section)."""
-    result, _, _ = built
-    assert "three_k" not in {f.name for f in result.module.functions}
-    reason = result.skipped["three_k"]
-    assert "entry global" in reason and "three or more list" in reason, reason
-
-
-def _with_third_list(result, *, entry_global: bool = False):
+def test_verifier_rejects_three_array_params(built):
     from typedpython import ir
+    result, _, _ = built
     f = next(f for f in result.module.functions if f.name == "zero2")
     third = ir.ArrayParam("zs", ir.Type.I64_ARRAY, False)
     bad = dataclasses.replace(f, params=f.params + (third,))
-    if entry_global:
-        bad = dataclasses.replace(bad, entry_globals=(ir.Param("K", ir.Type.I64),))
+    mod = dataclasses.replace(result.module, functions=type(result.module.functions)([bad]), skipped={})
+    proved, diags = verify.verify(mod)
+    assert not proved.functions
+    assert any("array" in d.message and "two" in d.message for d in diags), diags
+
+
+def test_cgen_refuses_three_array_params(built):
+    from typedpython import ir
+    result, path, _ = built
+    f = next(f for f in result.module.functions if f.name == "zero2")
+    third = ir.ArrayParam("zs", ir.Type.I64_ARRAY, False)
+    bad = dataclasses.replace(f, params=f.params + (third,))
+    mod = dataclasses.replace(result.module, functions=type(result.module.functions)([bad]), skipped={})
+    with pytest.raises(cgen.CGenError, match="two"):
+        cgen.generate(mod, path)
+
+
+def _three_with_entry_global(result):
+    from typedpython import ir
+    f = next(f for f in result.module.functions if f.name == "three")
+    bad = dataclasses.replace(f, entry_globals=(ir.Param("K", ir.Type.I64),))
     return dataclasses.replace(result.module, functions=type(result.module.functions)([bad]), skipped={})
 
 
-def test_verifier_accepts_three_array_params(built):
+def test_verifier_rejects_direct_lists_with_an_entry_global(built):
     result, _, _ = built
-    proved, diags = verify.verify(_with_third_list(result))
-    assert [f.name for f in proved.functions] == ["zero2"], diags
-
-
-def test_verifier_rejects_three_array_params_with_an_entry_global(built):
-    result, _, _ = built
-    proved, diags = verify.verify(_with_third_list(result, entry_global=True))
+    proved, diags = verify.verify(_three_with_entry_global(result))
     assert not proved.functions
-    assert any(d.rule == verify.ARRAY_LOCKS and "entry global" in d.message for d in diags), diags
+    assert any(d.rule == verify.ARRAY_DIRECT and "entry global" in d.message for d in diags), diags
 
 
-def test_cgen_takes_three_locks(built):
-    result, path, _ = built
-    c_text = cgen.generate(_with_third_list(result), path)
-    assert "tp_cs_begin_n(&tp_lock, tp_lobjs, 3)" in c_text
-
-
-def test_cgen_refuses_three_array_params_with_an_entry_global(built):
+def test_cgen_refuses_direct_lists_with_an_entry_global(built):
     result, path, _ = built
     with pytest.raises(cgen.CGenError, match="entry global"):
-        cgen.generate(_with_third_list(result, entry_global=True), path)
+        cgen.generate(_three_with_entry_global(result), path)
 
 
 def test_three_and_seven_lists_match_the_interpreter(extension):
@@ -384,36 +426,43 @@ def test_three_and_seven_lists_match_the_interpreter(extension):
         import random
         rng = random.Random(255)
         interp = m.__typedpython_interpreted__
+        def both(name, *args):
+            out = []
+            for fn in (getattr(m, name), interp[name]):
+                try:
+                    out.append(("ok", fn(*[list(a) if type(a) is list else a for a in args])))
+                except Exception as e:
+                    out.append((type(e).__name__, str(e)))
+            return out
         before = m.__typedpython_deopts__
         bad = []
-        for n in (0, 1, 5, 300):
+        for n in (0, 1, 2, 5, 40):
             ls = [[rng.uniform(-3.0, 3.0) for _ in range(n)] for _ in range(7)]
-            a = [list(l) for l in ls]
-            b = [list(l) for l in ls]
-            ra, rb = m.seven(*a), interp["seven"](*b)
-            if ra != rb or a != b:
-                bad.append(("seven", n))
-            a = [list(l) for l in ls[:3]]
-            b = [list(l) for l in ls[:3]]
-            m.bump3(*a)
-            interp["bump3"](*b)
-            if a != b:
-                bad.append(("bump3", n))
-            ints = [list(range(n)), list(range(n + 1)), []]
-            if m.three(*ints) != interp["three"](*ints):
-                bad.append(("three", n))
+            for name, args in (("seven", ls), ("three", [list(range(n)), list(range(n + 1)), []]),
+                               ("order3", ls[:3]), ("sum3", ls[:3])):
+                c, i = both(name, *args)
+                if c != i:
+                    bad.append((name, n, c, i))
+        same_list = [1.0, 2.0]
+        if m.order3(same_list, same_list, same_list) != interp["order3"](same_list, same_list, same_list):
+            bad.append("alias")
         compiled_deopts = m.__typedpython_deopts__ - before
-        # deopts before any lock: a non-list argument and an aliased list run interpreted
-        x, y = [1.0, 2.0], [3.0]
-        m.bump3(x, x, y)
-        x2, y2 = [1.0, 2.0], [3.0]
-        interp["bump3"](x2, x2, y2)
-        same_alias = (x, y) == (x2, y2)
-        tup = m.three([1], (2, 3), [4])
-        print(json.dumps({"bad": bad, "deopts": compiled_deopts, "alias": same_alias, "tuple": tup,
+        # deopts (then interpreted): an element of another type met by a read, a non-list argument
+        ls = [[1.0, 2.0, 3.0] for _ in range(7)]
+        ls[6] = [1.0, 2, 3.0]
+        for name, args in (("seven", ls), ("three", [[1], (2, 3), [4]])):
+            c, i = both(name, *args)
+            if c != i:
+                bad.append((name, "deopt", c, i))
+        # an IndexError where the interpreter raises it (a shorter list), not a deopt
+        for args in ([[1.0], [], [2.0]], [[], [1.0], [2.0]]):
+            c, i = both("sum3", *args)
+            if c != i or c[0] != "IndexError":
+                bad.append(("sum3", "index", c, i))
+        print(json.dumps({"bad": repr(bad), "deopts": compiled_deopts,
                           "deopted": m.__typedpython_deopts__ - before - compiled_deopts}))
     """)
-    assert r == {"bad": [], "deopts": 0, "alias": True, "tuple": 4, "deopted": 2}
+    assert r == {"bad": "[]", "deopts": 0, "deopted": 2}, r
 
 
 # --- concurrent calls --------------------------------------------------------------------------------
@@ -555,129 +604,161 @@ def test_two_shared_lists(extension):
     assert r == {"bad": [], "errs": []}
 
 
-# Three shared lists (#255). Every call adds 1.0 to every element of every list it is given, and each
-# list is given to exactly three calls per round, so after R rounds every element is 3R exactly. A call
-# whose lists are not all held from the copy-in to the write-back loses the increments another thread
-# made in between (the write-back overwrites them): option (A) of #255, the mutant below. The lists stay
-# below TP_POLL_INTERVAL, so no call polls (a poll writes back and copies in again, which keeps the
-# count exact too, but would make the mutant's window smaller).
-THREE_LISTS_BODY = """
-    n = 3000
-    a = [0.0] * n
-    b = [0.0] * n
-    c = [0.0] * n
-    R = ROUNDS
-    before = m.__typedpython_deopts__
-    def t3():
-        for _ in range(R):
-            m.bump3(a, b, c)
-    def t3r():
-        for _ in range(R):
-            m.bump3(c, a, b)          # another parameter order: the locks are taken in address order
-    def t1():
-        for _ in range(R):
-            m.bump1(a)                # a one-list critical section on a list held by bump3
-    def t2():
-        for _ in range(R):
-            m.bump2(c, b)             # a two-list critical section (PyCriticalSection2)
-    errs = run_threads([t3, t3r, t1, t2])
-    want = float(3 * R)
-    bad = [name for name, l in (("a", a), ("b", b), ("c", c)) if l != [want] * n]
-    lost = sum(int(want - v) for l in (a, b, c) for v in l)
-    print(json.dumps({"bad": bad, "lost": lost, "errs": errs,
-                      "deopts": m.__typedpython_deopts__ - before}))
+# Three shared lists read element by element (#255). The writer stores c[0] and then a[0], each one
+# atomic store, with a growing value; order3 reads a[0] and then c[0]. The interpreter (and every
+# compiled execution equal to an interleaving of it) sees c[0] >= a[0]: having seen the writer's a[0]
+# it must see its earlier c[0]. A read out of program order (a copy of c taken before the read of a,
+# as a per-list copy-in would do) can see a new a[0] with an old c[0]: the mutant below.
+ORDER_BODY = """
+    a = [0.0]
+    b = [0.0]
+    c = [0.0]
+    stop = False
+    N = WRITES
+    def writer():
+        global stop
+        for k in range(1, N):
+            c[0] = float(k)
+            a[0] = float(k)
+        stop = True
+    bad = []
+    calls = [0]
+    def reader():
+        while True:
+            done = stop
+            d = m.order3(a, b, c)
+            calls[0] += 1
+            if d < 0.0:
+                bad.append(d)
+            if done:
+                break
+    errs = run_threads([writer, reader, reader, reader])
+    print(json.dumps({"bad": len(bad), "calls": calls[0], "errs": errs}))
 """
 
 
-def test_three_shared_lists_with_concurrent_writers(extension):
-    r = run_child(extension, THREE_LISTS_BODY.replace("ROUNDS", "(150 * STRESS)"))
-    assert r == {"bad": [], "lost": 0, "errs": [], "deopts": 0}, r
+def test_three_lists_are_read_in_program_order(extension):
+    r = run_child(extension, ORDER_BODY.replace("WRITES", "(200000 * STRESS)"))
+    assert r["bad"] == 0 and r["errs"] == [] and r["calls"] > 0, r
 
 
-def test_seven_lists_and_a_concurrent_writer(extension):
-    """nbody's shape: one thread steps seven lists, another adds to one of them through a one-list
-    critical section; the result equals running the same calls one after the other in that order."""
-    r = run_child(extension, """
-        n = 2000
-        ls = [[1.0] * n for _ in range(7)]
-        R = 100 * STRESS
-        before = m.__typedpython_deopts__
-        def stepper():
-            for _ in range(R):
-                m.bump3(ls[0], ls[3], ls[6])
-                m.seven(*ls)
-        def writer():
-            for _ in range(R):
-                m.bump1(ls[6])
-        errs = run_threads([stepper, writer])
-        print(json.dumps({"w": sorted(set(ls[6])), "errs": errs, "deopts": m.__typedpython_deopts__ - before}))
-    """)
-    assert r == {"w": [float(1 + 2 * 100 * STRESS)], "errs": [], "deopts": 0}, r
-
-
-def _option_a_mutant(built, tmp: Path) -> Path:
-    """Option (A) of #255: bump3 holds its lists' locks at the copy-in and at the write-back only (the
-    wrapper drops them for the impl and takes them again before the write-back)."""
+def _read_order_mutant(built, tmp: Path) -> Path:
+    """order3 with its reads of a[0] and c[0] swapped (c first), in its impl and its fast twin."""
     result, path, _ = built
     c_text = cgen.generate(result.module, path)
-    pat = re.compile(r"^(    tp_s = tp_impl_bump3\(.*\);)$", re.M)
-    assert len(pat.findall(c_text)) == 1, "bump3's impl call not found in the generated C"
-    mutated = pat.sub(lambda mo: "    tp_cs_end(&tp_lock);\n" + mo.group(1)
-                      + "\n    (void)tp_cs_begin_n(&tp_lock, tp_lobjs, 3);", c_text)
-    return cbuild.build(mutated, "ftmod", tmp / "option_a", ext_suffix=None)
+    ra = "    tp_s = tp_list_ld_f64(l_a->list, INT64_C(0), &tp_t0);\n"
+    rc = "    tp_s = tp_list_ld_f64(l_c->list, INT64_C(0), &tp_t2);\n"
+    out, pos, done = [], 0, 0
+    for head in re.finditer(r"^static (?:inline )?int tp_f?impl_order3\([^\n]*\)\n\{\n", c_text, re.M):
+        end = c_text.index("\n}\n", head.end())
+        body = c_text[head.end():end]
+        assert body.count(ra) == 1 and body.count(rc) == 1 and body.count("    l_x = tp_t0;\n") == 1, body
+        body = (body.replace(ra, "@A@").replace(rc, ra).replace("@A@", rc)       # c read first, a last
+                .replace("    l_x = tp_t0;\n", "").replace("    l_z = tp_t2;\n", "")
+                .replace("    tp_t3 = l_z - l_x;\n", "    l_z = tp_t2;\n    l_x = tp_t0;\n    tp_t3 = l_z - l_x;\n"))
+        assert "    l_x = tp_t0;\n" in body, body
+        out += [c_text[pos:head.end()], body]
+        pos = end
+        done += 1
+    assert done >= 1, "order3's impl not found in the generated C"
+    out.append(c_text[pos:])
+    return cbuild.build("".join(out), "ftmod", tmp / "read_order", ext_suffix=None)
 
 
 @pytest.mark.race_mutant
-def test_mutant_option_a_locks_at_copy_in_and_write_back_only_is_caught(built, tmp_path):
-    so = _option_a_mutant(built, tmp_path)
-    lost = 0
+def test_mutant_reading_out_of_program_order_is_caught(built, tmp_path):
+    so = _read_order_mutant(built, tmp_path)
+    caught = False
     for _ in range(3):
-        r = run_child(so, THREE_LISTS_BODY.replace("ROUNDS", "300"))
-        lost = r["lost"]
-        if lost or r["bad"]:
+        r = run_child(so, ORDER_BODY.replace("WRITES", "400000"))
+        if r["bad"]:
+            caught = True
             break
-    assert lost > 0, "the option (A) mutant (no lock between copy-in and write-back) was not caught"
+    assert caught, "the mutant (c[0] read before a[0]) was not caught"
 
 
-def test_caller_held_critical_section_does_not_deadlock(extension):
+def test_element_of_another_type_deopts_under_a_concurrent_writer(extension):
+    """b[0] flips between 1 and 1.0 while sum3 reads it: every result is 3.0 (the interpreter's, after
+    a deopt when the read meets the int), never a float read out of an int."""
+    r = run_child(extension, """
+        a, b, c = [1.0], [1], [1.0]
+        stop = False
+        def writer():
+            global stop
+            for k in range(100000 * STRESS):
+                b[0] = 1 if k % 2 else 1.0
+            stop = True
+        bad = []
+        before = m.__typedpython_deopts__
+        def reader():
+            while True:
+                done = stop
+                v = m.sum3(a, b, c)
+                if v != 3.0:
+                    bad.append(v)
+                if done:
+                    break
+        errs = run_threads([writer, reader, reader])
+        print(json.dumps({"bad": bad[:3], "errs": errs, "deopted": m.__typedpython_deopts__ > before}))
+    """)
+    assert r == {"bad": [], "errs": [], "deopted": True}, r
+
+
+def test_mutant_without_the_element_type_check_is_caught(built, tmp_path):
+    """The weakest point of the element-by-element read: tp_list_ld_f64's exact-float check. Without
+    it an int element is read as a double (deterministic, no race needed)."""
+    result, path, _ = built
+    h = (cbuild.RUNTIME_DIR / "tp_runtime.h").read_text()
+    check = ("    if (!PyFloat_CheckExact(v)) {\n        Py_DECREF(v);\n        return 1;\n    }\n"
+             "    *out = PyFloat_AS_DOUBLE(v);\n")
+    assert h.count(check) == 1
+    d = tmp_path / "rt"
+    d.mkdir()
+    (d / "tp_runtime.h").write_text(h.replace(check, "    *out = PyFloat_AS_DOUBLE(v);\n"))
+    so = cbuild.build(cgen.generate(result.module, path), "ftmod", tmp_path / "mut", runtime_dir=d)
+    body = """
+        print(json.dumps({"v": m.sum3([1.0], [1], [1.0])}))
+    """
+    assert run_child(result.extension, body) == {"v": 3.0}
+    try:
+        caught = run_child(so, body, timeout=60)["v"] != 3.0
+    except (AssertionError, subprocess.TimeoutExpired):
+        caught = True
+    assert caught, "the mutant (no exact-float check) was not caught"
+
+
+def test_caller_held_critical_section(extension):
     """list.sort holds the list's critical section while it calls the key (listobject.c, @critical_section
-    on list_sort_impl). A key that calls a three-list function with that list (the top-most section of
-    this thread) or with a list held by an outer, not top-most section must not wait for its own thread.
-    Results equal the interpreted function's in the same situation."""
+    on list_sort_impl, and it empties the list meanwhile). A key that calls a three-list function with
+    that list, with a list of an outer sort, or with other lists, must not wait for its own thread, and
+    every call returns or raises what the interpreted function does in the same situation."""
     r = run_child(extension, """
         interp = m.__typedpython_interpreted__
         def run(fn):
-            out = {}
-            # (1) the sorted list itself, held by the top-most section of this thread
+            log = []
+            def call(*args):
+                try:
+                    log.append(("ok", fn(*args)))
+                except Exception as e:
+                    log.append((type(e).__name__, str(e)))
             a = [3.0, 1.0, 2.0]
-            b = [0.0] * 4
-            c = [0.0] * 4
-            a.sort(key=lambda v: (fn(a, b, c), v)[1])
-            out["top"] = (a, b, c)
-            # (2) a list held by an outer section while an inner sort's section is the top-most
+            b = [5.0] * 4
+            c = [7.0] * 4
+            a.sort(key=lambda v: (call(a, b, c), call(b, a, c), call(b, c, b), v)[3])
             outer = [2.0, 1.0]
             inner = [5.0, 4.0, 6.0]
-            b2 = [0.0] * 3
-            b3 = [0.0] * 2
-            c3 = [0.0] * 5
             def k_inner(w):
-                fn(outer, b2, inner)          # both sorted lists: one held by the top-most section
-                fn(outer, b3, c3)             # only the outer one: held by a section below the top
+                call(outer, b, inner)
+                call(b, c, b)
                 return w
             def k_outer(v):
                 inner.sort(key=k_inner)
+                call(c, b, c)
                 return v
             outer.sort(key=k_outer)
-            out["nested"] = (outer, inner, b2, b3, c3)
-            # (3) the list in the middle of the parameter list
-            d = [0.0] * 2
-            e = [9.0, 8.0]
-            f = [0.0] * 2
-            e.sort(key=lambda v: (fn(d, e, f), v)[1])
-            out["middle"] = (d, e, f)
-            return out
-        got = run(m.bump3)
-        want = run(interp["bump3"])
+            return log, a, b, c, outer, inner
+        got = run(m.order3)
+        want = run(interp["order3"])
         print(json.dumps({"same": got == want, "got": repr(got)}))
     """, timeout=120)
     assert r["same"], r["got"]
