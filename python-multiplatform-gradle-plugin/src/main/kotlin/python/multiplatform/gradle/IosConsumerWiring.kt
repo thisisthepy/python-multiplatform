@@ -48,7 +48,7 @@ internal object FreeThreadedMobileRelease {
 
     fun iosArchiveName(pythonVersion: String): String = "python-${pythonVersion}t-iOS-XCframework.tar.gz"
 
-    /** `aarch64` is the only Android architecture the release carries (no x86_64 build exists). */
+    /** `aarch64` and `x86_64` (#396; the owner approved the x86_64 3.15t build on 2026-11-13). The library build reads them. */
     fun androidArchiveName(pythonVersion: String, arch: String): String = "python-${pythonVersion}t-$arch-linux-android.tar.gz"
 
     fun url(pythonVersion: String, assetName: String): String =

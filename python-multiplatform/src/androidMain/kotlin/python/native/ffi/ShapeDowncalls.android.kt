@@ -6,7 +6,7 @@ import java.nio.ByteBuffer
  * Android (ART) actuals for the shape vocabulary declared in `jvmMain/.../ShapeDowncalls.kt`.
  *
  * Each shape is one JNI native-method call into a `@CName`-exported trampoline compiled into
- * `libmultiplatform_python3.13.so` (see `nativeMain/.../EmbedAPI.native.kt`), which casts the
+ * `libmultiplatform_python3.15t.so` (see `nativeMain/.../EmbedAPI.native.kt`), which casts the
  * `fn` address to a typed `CFunction` pointer and invokes it directly. This is "path 1" from
  * `docs/design/downcall-design.md`: ordinary JNI -> trampoline -> indirect call. ART cannot synthesize
  * an arbitrary native call at runtime the way Kotlin/Native's cinterop can at compile time, so

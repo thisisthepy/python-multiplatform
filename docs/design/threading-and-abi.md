@@ -13,7 +13,7 @@ the build differs by platform (SPEC T-1):
 | Platform | Interpreter | Threading behaviour |
 |---|---|---|
 | Desktop JVM, `macosArm64`, `linuxX64` | `python3.15t` (free-threaded), the only desktop build | Each Kotlin thread talks to its own free-running Python thread |
-| Android (ART, androidNative), iOS | `python3.15` (GIL) until #328 | Kotlin threads each attach a thread state and serialise on the GIL |
+| Android (ART, androidNative; arm64-v8a and x86_64), iOS | `python3.15t` (free-threaded), the project's own build, the only mobile build since #328 | Each Kotlin thread talks to its own free-running Python thread (not yet run on an emulator or simulator) |
 | wasmJs | GIL until #175 | single-threaded |
 
 The per-platform fact is `embedsFreeThreadedPython` (commonMain `EmbeddedPythonBuild.kt`, an
@@ -99,10 +99,10 @@ Design for two artefacts, but keep the split shallow enough to collapse later.
 
 Desktop (macOS arm64/x86_64, Linux x86_64, Windows x86_64) has GIL and free-threaded builds on the
 python-build-standalone releases; the build uses only the `-freethreaded` archive (#158).
-**Android (python.org) and iOS (Python-Apple-support) publish no free-threaded build**, so those
-platforms stay GIL until the project's own builds land (#163, #328). Until then the threading model,
-and the object-lifetime and thread-state design layered on top, are split across platforms; that is
-the accepted cost of moving desktop first. The maintainer accepted the wheel-coverage cost on #158
+**Android (python.org) and iOS (Python-Apple-support) publish no free-threaded build**, so the project
+builds its own (#163, release `cpython-3.15.0t-mobile`), and since #328 the library embeds those on
+Android, androidNative and iOS. Only wasm still has a GIL build (#175), so the threading model is split
+between wasm and everything else. The maintainer accepted the wheel-coverage cost on #158
 ("third-party cp315t / abi3t wheels lag the release for a while; pypackpack builds from sdist where
 they are missing"). Table as of the 20260807 release, kept in the archive note above.
 

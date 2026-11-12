@@ -271,8 +271,10 @@ around one.
    (2026-10-04): "Free-threaded is the default and the only build. The GIL build is not kept as an
    option. Baseline is CPython 3.15t." Desktop (JVM, `macosArm64`, `linuxX64`) embeds 3.15t with no
    GIL option since the leader's instruction of 2026-11-13 ("flip the desktop default to 3.15t now");
-   Android and iOS still embed the GIL 3.15 until #328, wasm until #175. Which build a platform embeds
-   is the per-platform `embedsFreeThreadedPython`, never one build-wide flag (SPEC T-1, ROADMAP §9).
+   Android (arm64-v8a and x86_64), androidNative and iOS embed the project's own 3.15t builds with no
+   opt-in flag (#328; leader decision 2026-11-13, owner approval of the x86_64 build the same day);
+   wasm embeds a GIL build until #175. Which build a platform embeds is the per-platform
+   `embedsFreeThreadedPython`, never one build-wide flag (SPEC T-1, ROADMAP §9).
 9. **Do not add PanamaPort as a dependency** (licence and dependence on ART internals).
 
 ## 13. Upcalls must work in a GraalVM native image
