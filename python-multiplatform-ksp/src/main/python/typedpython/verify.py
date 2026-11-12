@@ -37,14 +37,16 @@ Rules (the `rule` of a Diagnostic):
   verify/structure            break/continue outside a loop, the ForRange var assigned in its body,
                               a zero or non-constant step, duplicate names, bad declarations, an
                               entry global that collides with a parameter/local/other entry global or
-                              is assigned in the body, or more than two array parameters (the lists
-                              are locked from copy-in to write-back: one- and two-object critical
-                              sections only, #159)
+                              is assigned in the body
   verify/proven-overflow      `proven` is set on an op the verifier cannot prove stays inside i64 (or
                               on a node `proven` does not apply to, or it is not a bool)
   verify/redo                 `Call.redo` where it is not legal (see below)
   verify/entry-global-open    a function with entry_globals is not closed
   verify/array-open           a function with an ArrayParam runs user code (#203)
+  verify/array-locks          a function with three or more list ArrayParams (#255: it holds every
+                              list's own lock from copy-in to write-back, outside CPython's
+                              critical-section stack, so nothing in that window may wait) has an
+                              entry global or a redo Call, itself or anywhere in its call tree
   verify/buffer               a malformed `ArrayParam.buffer` (None, "array", "numpy", "memoryview"), or a
                               CopyArray of a buffer array (#149)
   verify/par-loop             a `ForRange.par` (SPEC N-15, #277) that the verifier does not recompute to
@@ -308,6 +310,7 @@ REGION_ESCAPE = "verify/region-escape"
 REDO = "verify/redo"
 ENTRY_OPEN = "verify/entry-global-open"
 ARRAY_OPEN = "verify/array-open"
+ARRAY_LOCKS = "verify/array-locks"
 BUFFER = "verify/buffer"
 CLASS = "verify/class"
 FIELD = "verify/field-unproved"
@@ -433,6 +436,7 @@ class _Checker:
         self.entry: dict[str, Type] = {}     # name -> type of every entry global
         self.opens: list[str] = []           # reasons the function is not closed
         self.slow_user: list[str] = []       # slow paths that can run user code (FieldGet, New)
+        self.redo_calls: list[str] = []      # callees of the legal redo Calls (#255: they can wait)
 
     def error(self, rule: str, message: str) -> None:
         d = Diagnostic(self.fn.name, rule, message, self.fn.source_line)
@@ -469,10 +473,6 @@ class _Checker:
             if p.name in params:
                 self.error(STRUCTURE, f"parameter '{p.name}' appears twice")
             params.add(p.name)
-        if sum(type(p) is ArrayParam and p.buffer is None for p in fn.params) > 2:
-            self.error(STRUCTURE, "more than two array parameters: compiled code holds each list's "
-                                  "critical section from copy-in to write-back, and free-threaded "
-                                  "CPython has no section for more than two objects (#159)")
         eg = fn.entry_globals
         if not isinstance(eg, tuple):
             self.error(STRUCTURE, "entry_globals is not a tuple")
@@ -1071,6 +1071,7 @@ class _Checker:
                                  f"(the redone value may be a big int)")
             else:
                 redo = True
+                self.redo_calls.append(e.function)
         if not redo:
             for p in callee.params:
                 # The callee's entry guard `type(x) is C` may fail, even for an argument that is a
@@ -2554,6 +2555,7 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
     callees: dict[str, set[str]] = {}
     open_why: dict[str, str] = {}          # a function that runs user code -> why
     slow_why: dict[str, str] = {}          # a function whose slow paths can run user code -> why
+    wait_why: dict[str, str] = {}          # a function that can wait (#255: entry global, redo) -> why
     for name, g in sigs.items():
         c, rebuilt = _prove(g, sigs, classes)
         for d in c.diags:
@@ -2564,6 +2566,12 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
             open_why[name] = c.opens[0]
         if c.slow_user:
             slow_why[name] = c.slow_user[0]
+        if isinstance(g.entry_globals, tuple) and g.entry_globals:
+            wait_why[name] = (f"reads entry global '{getattr(g.entry_globals[0], 'name', '?')}' (the "
+                              "read can take the module dict's critical section)")
+        elif c.redo_calls:
+            wait_why[name] = (f"has a redo Call of '{c.redo_calls[0]}' (the interpreted callee can "
+                              "take critical sections)")
 
     # Closedness (entry_globals): a fixpoint over the call graph.
     changed = True
@@ -2599,6 +2607,28 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
         if name in array_why and any(isinstance(p, ArrayParam) for p in g.params):
             reject(name, g.source_line, ARRAY_OPEN,
                    f"holds a list copy-in but can run user code: {array_why[name]}")
+
+    # Three or more list parameters (#255, design/typedpython.md 4.3.6): the wrapper holds every list's
+    # own lock (ob_mutex) from the copy-in to the write-back, outside CPython's critical-section stack.
+    # A detach or a blocking lock in that window would keep those locks while this thread waits, and a
+    # thread waiting for one of them while holding what this one waits for (PyCriticalSection2 keeps
+    # its first lock while it waits for the second) would never wake. So nothing in the window may
+    # wait: closed (above), and no entry global and no redo Call in the whole call tree.
+    changed = True
+    while changed:
+        changed = False
+        for name, cs in callees.items():
+            if name not in wait_why:
+                bad = sorted(c for c in cs if c in wait_why)
+                if bad:
+                    wait_why[name] = f"calls '{bad[0]}', which {wait_why[bad[0]]}"
+                    changed = True
+    for name, g in sigs.items():
+        n_lists = sum(isinstance(p, ArrayParam) and p.buffer is None for p in g.params)
+        if n_lists > 2 and name in wait_why:
+            reject(name, g.source_line, ARRAY_LOCKS,
+                   f"three or more list parameters ({n_lists}) hold every list's lock from copy-in "
+                   f"to write-back, so nothing in the call may wait, but it {wait_why[name]}")
 
     # A call cycle (direct or mutual recursion) is legal: every compiled impl function counts its
     # frame at entry (tp_enter_call), so recursion ends in RecursionError where CPython raises it

@@ -743,13 +743,9 @@ def _signature(fn: ast.FunctionDef, classes: dict[str, ir.ClassDecl] | None = No
             params.append(ir.Param(a.arg, Type.OBJ, c[0], c[1]))
         else:
             params.append(ir.Param(a.arg, SCALAR_KIND.get(kind, Type.OBJ)))
-    n_lists = sum(isinstance(p, ir.ArrayParam) and p.buffer is None for p in params)
-    if n_lists > 2:
-        # Free-threaded CPython (#159): the lists are locked from copy-in to write-back, and CPython
-        # offers one- and two-object critical sections only (a nested third could suspend the others).
-        raise Skip(line, f"more than two list parameters ({n_lists}) are not supported: compiled code "
-                         "holds each list's lock from copy-in to write-back, and free-threaded CPython "
-                         "has no lock for more than two objects at once")
+    # Any number of list parameters (#255): one or two are held by CPython's critical section, three
+    # or more by every list's own lock (cgen.py, design/typedpython.md 4.3.6); the verifier refuses the
+    # latter when something in the call could wait (verify/array-locks).
     if fn.returns is None:
         raise Skip(line, "no return annotation")
     if isinstance(fn.returns, ast.Constant) and fn.returns.value is None:
