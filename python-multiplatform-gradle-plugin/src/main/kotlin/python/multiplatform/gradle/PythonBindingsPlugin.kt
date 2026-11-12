@@ -159,7 +159,11 @@ interface PythonBindingsExtension {
     /** python-build-standalone release tag to stage from. Defaults to the one this library used. */
     val pythonBuildStandaloneRelease: Property<String>
 
-    /** Whether to stage a free-threaded build. Defaults to what this library was built against. */
+    /**
+     * Whether to stage a free-threaded build. Defaults to `true`, what the desktop library embeds
+     * (issue #158: desktop is free-threaded CPython 3.15t only). `false` stages a GIL prefix whose
+     * `lib/python3.15/` the desktop jar's `libpython3.15t` does not look for.
+     */
     val pythonFreeThreaded: Property<Boolean>
 
     /**

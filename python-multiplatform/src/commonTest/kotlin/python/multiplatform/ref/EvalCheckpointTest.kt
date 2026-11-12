@@ -1,6 +1,6 @@
 package python.multiplatform.ref
 
-import python.multiplatform.BuildConfig
+import python.multiplatform.embedsFreeThreadedPython
 import python.multiplatform.ffi.PyObject
 import python.multiplatform.ffi.Python3
 import python.multiplatform.ffi.ReleaseCounter
@@ -210,7 +210,7 @@ class EvalCheckpointTest {
                     // With the global lock, `refNow` is the reading that belongs to this test and
                     // to nothing else, so it is not enough for the counter alone to be satisfied.
                     cleanerReleases >= OUTER &&
-                        (BuildConfig.pythonFreeThreaded || refNow <= refBefore)
+                        (embedsFreeThreadedPython || refNow <= refBefore)
                 }
             }, finish = {
                 try {
@@ -234,7 +234,7 @@ class EvalCheckpointTest {
 
                     val refAfterCleaner = refCount(target)
 
-                    if (BuildConfig.pythonFreeThreaded) {
+                    if (embedsFreeThreadedPython) {
                         assertEquals(
                             refAfterBuild,
                             refAfterCleaner,
@@ -319,7 +319,7 @@ class EvalCheckpointTest {
             val gcCollectNs = timeNs(100) { withGIL { PyGC_Collect() } }
 
             println(
-                "\n--- eval-loop checkpoint cost (freeThreaded=${BuildConfig.pythonFreeThreaded}) ---\n" +
+                "\n--- eval-loop checkpoint cost (freeThreaded=${embedsFreeThreadedPython}) ---\n" +
                     "withGIL { }                     ${emptyScopeNs.format()} ns/op\n" +
                     "Python3.drainPendingReleases()  ${drainNs.format()} ns/op\n" +
                     "withGIL { Py_MakePendingCalls } ${makePendingNs.format()} ns/op   (does NOT merge)\n" +

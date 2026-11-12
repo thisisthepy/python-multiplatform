@@ -23,6 +23,12 @@ The project currently uses `python-build-standalone` (maintained by Astral). For
 *   **Naming:** The string `freethreaded` is injected into the asset name before the flavour, e.g., `cpython-3.14.7+20260807-aarch64-apple-darwin-freethreaded-install_only.tar.gz`.
 *   **ABI and Libraries:** The ABI suffix is `t`, meaning the shared libraries will be named `libpython3.14t.dylib` or `libpython3.14t.so`.
 *   **Availability:** They are available for all major desktop targets (macOS, Linux, Windows).
+*   **Acquired: the free-threaded build only, on desktop** (issue #158; maintainer 2026-10-04: "Free-threaded
+    is the default and the only build. The GIL build is not kept as an option. Baseline is CPython 3.15t";
+    leader 2026-11-13: "flip the desktop default to 3.15t now"). Every desktop `downloadPython_*` task fetches
+    `...-freethreaded-install_only_stripped.tar.gz` and unpacks it under `<ver>/<target>-freethreaded/`.
+    The `-PpythonFreeThreaded` property that used to choose between the two is removed; passing it fails the
+    build. Android and iOS (section 3) are still GIL until #328.
 
 ## 3. Android and iOS Support
 
@@ -38,15 +44,17 @@ The project currently uses `python-build-standalone` (maintained by Astral). For
 *   **The constraint:** the ~330 bindings target the CPython Stable ABI, and CPython's Limited API /
     `abi3` is not offered by free-threaded builds in 3.13 and 3.14 (3.15 adds `abi3t`, PEP 803).
 *   **Why it does not block free-threading here:** the bindings are symbols resolved dynamically at run
-    time and `Py_LIMITED_API` is not defined, so no compile-time ABI contract applies. 3.14t works on
-    desktop with `-PpythonFreeThreaded=true` (the whole desktop suite: 236 tests, 0 failures, at the time
-    of ROADMAP §9; SPEC T-2). An earlier version of this section concluded the opposite ("fails or crashes
+    time and `Py_LIMITED_API` is not defined, so no compile-time ABI contract applies. 3.14t worked on
+    desktop when it was an opt-in (the whole desktop suite: 236 tests, 0 failures, at the time of ROADMAP
+    §9; SPEC T-2); desktop now embeds 3.15t only (section 2). An earlier version of this section concluded the opposite ("fails or crashes
     due to opaque structural changes", "wait for 3.15t") and was wrong; see
     [`../design/threading-and-abi.md`](../design/threading-and-abi.md) and
     [`../archive/threading-and-abi-3.15t-gate.md`](../archive/threading-and-abi-3.15t-gate.md).
 *   **Scope:** free-threaded prebuilts exist only for the desktop targets (section 2); Android (python.org)
-    and iOS (Python-Apple-support) publish none, so the flag is desktop-only and defaults to `false`
-    (`gradle.properties`). The interpreter version is `pythonVersion` in `gradle.properties`.
+    and iOS (Python-Apple-support) publish none, so desktop is free-threaded and Android and iOS stay GIL
+    until the project's own builds land (#163, #328). Which build each platform embeds is the library's
+    per-platform `embedsFreeThreadedPython` (SPEC T-1). The interpreter version is `pythonVersion` in
+    `gradle.properties`.
 
 ## 5. Security and Integrity Verification
 
@@ -76,24 +84,26 @@ Compiling a C extension against the embedded CPython needs that CPython's header
 
 *   **Key:** `(target, flavour)`. Targets: `macos-aarch64`, `macos-x86_64`, `linux-x86_64`,
     `windows-x86_64`, `android-aarch64`, `android-x86_64`, `ios-arm64`, `ios-arm64_x86_64-simulator`
-    (the iOS names are XCFramework slices). Flavour: `CPythonFlavour.GIL` (default) or `FREE_THREADED`
-    (desktop only).
+    (the iOS names are XCFramework slices). Flavour: `CPythonFlavour.FREE_THREADED` or `GIL`; the default
+    is the one the library embeds for that target, `CPythonIncludeLayout.embeddedFlavour(target)`:
+    `FREE_THREADED` on desktop (#158), `GIL` on Android and iOS. (Making the default per target, rather
+    than `GIL` everywhere, is an agent proposal, not confirmed: with `GIL` the documented
+    `includeDir("macos-aarch64")` would throw on every desktop build.)
 *   **Value:** `Provider<Directory>` of the directory that directly contains `Python.h`, i.e. the `-I`
     directory: `<ver>/<target>[-freethreaded]/python/include/python3.14[t]` on desktop (Windows has no
     `python3.14` level), `<ver>/android-*/prefix/include/python3.14`,
     `<ver>/ios/Python.xcframework/<slice>/include/python3.14`.
 *   **Task dependency:** the provider carries the matching `downloadPython_*` task; using it as a task
     input makes Gradle download and extract first.
-*   **Only the configured flavour is extracted.** `-PpythonFreeThreaded=true` selects the free-threaded
-    desktop tree; asking for the other flavour throws a `GradleException` naming that property
-    (`isAvailable` tests it without throwing).
+*   **Only the embedded flavour is extracted.** Desktop extracts the free-threaded tree only; asking for the
+    other flavour throws a `GradleException` naming #158 (`isAvailable` tests it without throwing).
 
 ```kotlin
 // consumer build.gradle.kts
 evaluationDependsOn(":python-multiplatform")
 val includes = project(":python-multiplatform").extensions.getByType<CPythonIncludeDirectories>()
 tasks.register<Exec>("compileExt") {
-    val inc = includes.includeDir("macos-aarch64")   // or ("linux-x86_64", CPythonFlavour.FREE_THREADED)
+    val inc = includes.includeDir("macos-aarch64")   // the free-threaded tree, .../include/python3.15t
     inputs.dir(inc)
     commandLine("cc", "-I${inc.get().asFile}", "-c", "ext.c")
 }
@@ -112,22 +122,30 @@ The same extension exposes the library to link against (issue #56):
 | `windows-x86_64` free-threaded | `windows-x86_64-freethreaded/python/libs/python314t.lib` |
 | macOS, Linux, iOS | none -- `isLinkRequired(target)` is false; `libraryDir`/`libraryFile` throw `GradleException` |
 
-Android has no free-threaded build, so that combination throws. `isLinkAvailable(target, flavour)`
-tests without throwing; the other flavour fails naming `-PpythonFreeThreaded`, as for `includeDir`.
+Android has no free-threaded build, so that combination throws. On Windows the default is the
+free-threaded `python315t.lib`; the GIL one is not extracted. `isLinkAvailable(target, flavour)`
+tests without throwing; the other flavour fails naming #158, as for `includeDir`.
 
 ## Published version
 
 A consumer that builds against `python-multiplatform` must know which CPython it embeds (issue #61).
-The answer is published three ways, all derived from `pythonVersion` / `pythonFreeThreaded` in
-`gradle.properties`.
+The answer is published three ways. The version is `pythonVersion` in `gradle.properties`; whether
+the build is free-threaded differs by platform (#158: desktop 3.15t, Android and iOS GIL 3.15 until
+#328, wasm GIL until #175), so each published artefact states its own.
 
 *   **Extension** `pythonMultiplatform` (`python.multiplatform.gradle.EmbeddedPythonVersion`):
-    `pythonVersion` (`3.14.7`), `majorMinor` (`3.14`), `freeThreaded`.
+    `pythonVersion` (`3.15.0`), `majorMinor` (`3.15`), `freeThreaded`. One value per project: the
+    desktop one (`true`; agent proposal, not confirmed). For any other platform, read its variant's
+    attribute or its resource.
 *   **Gradle attributes** on every consumable `*Elements` configuration (so they land in the published
     module metadata): `org.thisisthepy.python.version` and `org.thisisthepy.python.free-threaded`
-    (both `String`; the latter is `"true"`/`"false"`).
+    (both `String`; the latter is `"true"`/`"false"`). The free-threaded one is per variant: `"true"` on
+    `desktop*`, `macosArm64*` and `linuxX64*` variants, `"false"` on the Android, iOS, androidNative and
+    wasm variants, and absent on shared metadata variants, which carry no CPython of their own (the
+    metadata rule is an agent proposal, not confirmed).
 *   **Resource** `META-INF/python-multiplatform/python.properties` (`pythonVersion=`, `freeThreaded=`),
-    inside the desktop jar and the Android AAR's `classes.jar`.
+    inside the desktop jar (`freeThreaded=true`, from `generateDesktopPythonProperties`) and the Android
+    AAR's `classes.jar` (`freeThreaded=false`, from `generateAndroidPythonProperties`).
 
 ```kotlin
 // composite build (includeBuild): read the extension
@@ -142,6 +160,6 @@ val embedded = EmbeddedPythonVersion.parse(text)
 
 // published artefact: require a matching variant through the attributes
 configurations.named("desktopRuntimeClasspath") {
-    attributes.attribute(Attribute.of("org.thisisthepy.python.version", String::class.java), "3.14.7")
+    attributes.attribute(Attribute.of("org.thisisthepy.python.version", String::class.java), "3.15.0")
 }
 ```

@@ -68,7 +68,7 @@ pythonBindings {
 //
 // - headers: `python-multiplatform`'s `cpythonIncludeDirectories` provider
 //   (`docs/platforms/python-version-acquisition.md` §7), for this host's macOS target and the
-//   flavour `-PpythonFreeThreaded` selects. The provider carries the `downloadPython_*` task.
+//   free-threaded flavour, the only one desktop embeds (#158). The provider carries the `downloadPython_*` task.
 // - extension suffix: `typedpython/build_bridge.py` reads `EXT_SUFFIX` from the `_sysconfigdata_*.py`
 //   of that same extracted tree and cross-checks `Py_GIL_DISABLED` against its `pyconfig.h`.
 //
@@ -123,8 +123,8 @@ tasks.matching { it.name == "emitTypedPythonC" }.configureEach {
 val typedPythonIncludeDir: Provider<Directory>? = typedPythonMacTarget?.let { target ->
     val includes = project(":python-multiplatform").extensions.getByName("cpythonIncludeDirectories")
     val flavourClass = includes.javaClass.classLoader.loadClass("python.multiplatform.gradle.CPythonFlavour")
-    val freeThreaded = (findProperty("pythonFreeThreaded") as String?)?.toBoolean() ?: false
-    val flavour = flavourClass.enumConstants.single { (it as Enum<*>).name == if (freeThreaded) "FREE_THREADED" else "GIL" }
+    // Desktop embeds only the free-threaded build (#158).
+    val flavour = flavourClass.enumConstants.single { (it as Enum<*>).name == "FREE_THREADED" }
     includes.javaClass.getMethod("includeDir", String::class.java, flavourClass)
         .invoke(includes, target, flavour) as Provider<Directory>
 }

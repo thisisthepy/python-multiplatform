@@ -13,15 +13,19 @@ import kotlin.test.assertTrue
  * therefore does not degrade gracefully: `manager.loadLibPython` throws `UnsatisfiedLinkError` for
  * a file that was downloaded and is sitting right there under a different name.
  *
- * These assertions are written against [BuildConfig.pythonFreeThreaded] rather than hard-coding one
- * flavour, so the same suite is meaningful under `-PpythonFreeThreaded=true`.
+ * These assertions are written against the per-platform [embedsFreeThreadedPython] rather than
+ * hard-coding one flavour, because the flavour differs by platform (issue #158): desktop embeds
+ * 3.15t, Android and iOS the GIL 3.15 until #328. The platform test source sets pin the literal
+ * value for their platform (`DesktopFreeThreadedBuildTest`, `DesktopNativeFreeThreadedBuildTest`,
+ * `AndroidGilBuildTest`, `AndroidNativeGilBuildTest`, `IosGilBuildTest`), which is what a wrong
+ * actual would fail.
  */
 class VersionsTest {
 
     @Test
     fun abiFlagsFollowsTheConfiguredFlavour() {
         assertEquals(
-            if (BuildConfig.pythonFreeThreaded) "t" else "",
+            if (embedsFreeThreadedPython) "t" else "",
             Versions.currentVersion.abiFlags,
             "abiFlags must be CPython's flags suffix: 't' free-threaded (PEP 703), empty otherwise"
         )
@@ -31,7 +35,7 @@ class VersionsTest {
     fun taggedVersionStringNamesTheArtefactsOnDisk() {
         val v = Versions.currentVersion
         assertEquals(v.compactVersionString + v.abiFlags, v.taggedVersionString)
-        if (BuildConfig.pythonFreeThreaded) {
+        if (embedsFreeThreadedPython) {
             assertTrue(
                 v.taggedVersionString.endsWith("t"),
                 "a free-threaded build must ask for libpython${v.compactVersionString}t, " +

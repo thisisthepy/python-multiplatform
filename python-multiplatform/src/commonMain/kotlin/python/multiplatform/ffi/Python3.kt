@@ -1,6 +1,6 @@
 package python.multiplatform.ffi
 
-import python.multiplatform.BuildConfig
+import python.multiplatform.embedsFreeThreadedPython
 import python.multiplatform.env.PythonHomeCheck
 import python.multiplatform.env.PythonDevAgent
 import python.multiplatform.env.PythonPayload
@@ -809,6 +809,10 @@ def __pmp_run_file__(path, argv):
      * to take none automatically. A checkpoint is additionally skipped when nothing has been
      * released since the previous one, so a workload that never drops a wrapper never pays.
      *
+     * Which build that is depends on the platform ([python.multiplatform.embedsFreeThreadedPython]):
+     * desktop embeds 3.15t since issue #158, so this defaults to on there; Android and iOS embed the
+     * GIL build until #328, so it defaults to off there.
+     *
      * Defaults to on for free-threaded builds, where deferred release is the defect described on
      * [drainPendingReleases], a build with the global lock frees a *plain* reference the
      * cleaner's `Py_DecRef` immediately, with no queue to drain, so that half of the checkpoint's
@@ -827,7 +831,7 @@ def __pmp_run_file__(path, argv):
      * call [PyGC_Collect] directly for an immediate, unconditional collection, [drainPendingReleases]
      * and `PyGC_Collect` both work regardless of this setting.
      */
-    var autoDrainInterval: Int = if (BuildConfig.pythonFreeThreaded) DEFAULT_AUTO_DRAIN_INTERVAL else 0
+    var autoDrainInterval: Int = if (embedsFreeThreadedPython) DEFAULT_AUTO_DRAIN_INTERVAL else 0
 
     /** Diagnostic counters for the checkpoint machinery. Test-visible. */
     internal object CheckpointCounter {
