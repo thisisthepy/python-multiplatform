@@ -542,7 +542,10 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   the next frame with no host call; Python callables a root passed into composables are released when
   that root is replaced or the composition is disposed. The entry point names no library.
   `Status: implemented` on desktop, `python-multiplatform-compose/fixtures/compose/.../PythonAppViewRenderTest.kt`; the module
-  compiles for Android, nothing runs there yet.
+  compiles for Android, nothing runs there yet. It also compiles for the Kotlin/Native desktop targets
+  `macosArm64` and `linuxX64` (#386, `commonMain -> desktopNativeMain -> {macosArm64Main, linuxX64Main}`;
+  `linuxX64` exists only on the fork, upstream Compose publishes no `ui` klib for it); nothing runs there yet
+  (#191 Phase B: the klib walker and a K/N app).
 - **B-9** A Python root keeps state across the recreation of its composition with
   `python.multiplatform.compose.rememberSaveableWrapper(initial)` (the pycomposeui function of that name),
   callable from Python inside a composition. A Python `int` (32 bit) becomes `rememberSaveable { mutableIntStateOf }`,
