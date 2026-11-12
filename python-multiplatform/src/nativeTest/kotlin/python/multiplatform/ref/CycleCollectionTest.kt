@@ -4,6 +4,7 @@ package python.multiplatform.ref
 
 import kotlinx.cinterop.*
 import python.multiplatform.currentThreadId
+import python.multiplatform.embedsFreeThreadedPython
 import python.multiplatform.ffi.ProxyTypeFactory
 import python.multiplatform.ffi.PyObject
 import python.multiplatform.ffi.PythonTestFixture
@@ -173,20 +174,37 @@ class CycleCollectionTest {
      *   proxy, and the number of proxies that were still owed if one stops doing so.
      */
     private fun settleKotlinFinalisation(typeAddr: Long): Long {
-        val header = typeAddr.toCPointer<LongVar>() ?: return 0L
-        val started = header.pointed.value
+        if (typeAddr == 0L) return 0L
+        val started = typeRefCount(typeAddr)
         var last = started
         var quiet = 0
         var turns = 0
         while (quiet < 3 && turns < 50) {
             kotlin.native.runtime.GC.collect()
             platform.posix.usleep(2_000u)
-            val now = header.pointed.value
+            val now = typeRefCount(typeAddr)
             if (now == last) quiet++ else { quiet = 0; last = now }
             turns++
         }
         return started - last
     }
+
+    /**
+     * `Py_REFCNT` of the object at [addr], for whichever object header this build has. On a GIL
+     * build `ob_refcnt` is the first field. On the free-threaded 3.15t, which desktop Kotlin/Native
+     * embeds since #158 (iOS and androidNative from #328), offset 0 is `ob_tid` and the
+     * count is `ob_ref_local` (uint32 at +12) plus `ob_ref_shared` (at +16) shifted right by
+     * `_Py_REF_SHARED_SHIFT` (2). Same probe as the desktop `CycleCollectionTest.typeRefCount`.
+     * A plain, racy load, which is all the callers need.
+     */
+    private fun typeRefCount(addr: Long): Long =
+        if (!embedsFreeThreadedPython) {
+            assertNotNull(addr.toCPointer<LongVar>()).pointed.value
+        } else {
+            val local = assertNotNull((addr + 12).toCPointer<UIntVar>()).pointed.value.toLong()
+            val shared = assertNotNull((addr + 16).toCPointer<LongVar>()).pointed.value
+            local + (shared shr 2)
+        }
 
     @Test
     fun testCycleCollectionByGC() = PythonTestFixture.withInterpreter {
@@ -320,8 +338,15 @@ class CycleCollectionTest {
      * releases it. Kotlin/Native's `proxyDealloc` hand-writes that (`PyObject_Type` for the
      * temporary, then two `Py_DecRef`s), so it can leak one type reference per instance by
      * forgetting, or free the type out from under the process by doing it twice. Both are checked
-     * by reading `ob_refcnt`, the first field of `PyObject` and fixed there by the stable ABI --
-     * `sys.getrefcount` cannot be used because it counts its own argument's temporary.
+     * by reading the type's reference count out of its object header -- `sys.getrefcount` cannot
+     * be used because it counts its own argument's temporary.
+     *
+     * The header depends on the build. On a GIL build `ob_refcnt` is the first field. Desktop
+     * Kotlin/Native embeds the free-threaded 3.15t since #158 (iOS and androidNative from #328),
+     * where offset 0 is `ob_tid` and the count is `ob_ref_local` (uint32 at +12) plus
+     * `ob_ref_shared` (at +16) shifted right by 2, and where a heap type's references are deferred
+     * until a collection materialises them, so one is taken on either side of the instantiation
+     * loop. Same probe and same reasoning as the desktop `CycleCollectionTest`.
      *
      * The "rises while alive" assertion is not decoration: it is what proves the probe reads a
      * real refcount, so the "returns afterwards" assertion cannot pass vacuously on an address
@@ -334,12 +359,12 @@ class CycleCollectionTest {
             assertTrue(proxyTypeAddr != 0L, "Proxy type creation failed")
             val proxyType = assertNotNull(proxyTypeAddr.toCPointer<PyTypeObject>())
 
-            // The type object's own ob_refcnt, as a plain 64-bit load at the type's address.
-            val typeHeader = assertNotNull(proxyTypeAddr.toCPointer<LongVar>())
-            fun typeRefCount(): Long = typeHeader.pointed.value
+            // Free-threaded: materialise the deferred references the type already carries, so that
+            // `before` and `alive` are read in the same state.
+            if (embedsFreeThreadedPython) python.native.ffi.PyGC_Collect()
 
             val liveBefore = HandleTable.liveCount
-            val typeRefBefore = typeRefCount()
+            val typeRefBefore = typeRefCount(proxyTypeAddr)
 
             val rounds = 100
             val proxies = LongArray(rounds)
@@ -364,7 +389,10 @@ class CycleCollectionTest {
                 liveBefore + rounds, HandleTable.liveCount,
                 "setup failed: $rounds handles should be rooted while the proxies are alive",
             )
-            val typeRefAlive = typeRefCount()
+            // The instantiations above were deferred on a free-threaded build; a collection is
+            // what turns them into countable references.
+            if (embedsFreeThreadedPython) python.native.ffi.PyGC_Collect()
+            val typeRefAlive = typeRefCount(proxyTypeAddr)
             assertEquals(
                 typeRefBefore + rounds, typeRefAlive,
                 "each live instance of a heap type holds one reference to that type, so the count " +
@@ -390,7 +418,7 @@ class CycleCollectionTest {
                 "the table should be back to its starting size once every proxy is gone",
             )
             assertEquals(
-                typeRefBefore, typeRefCount(),
+                typeRefBefore, typeRefCount(proxyTypeAddr),
                 "tp_dealloc must release the instance's reference to its heap type exactly once: " +
                     "a count above $typeRefBefore means it was never released and the type leaks " +
                     "per instance, below means it was released twice and the type will be freed " +
@@ -440,10 +468,18 @@ class CycleCollectionTest {
         withGIL {
             val proxyTypeAddr = ProxyTypeFactory.createProxyType()
             val proxyType = assertNotNull(proxyTypeAddr.toCPointer<PyTypeObject>())
-            val typeHeader = assertNotNull(proxyTypeAddr.toCPointer<LongVar>())
+
+            // Free-threaded: an instance takes its type reference through this thread's per-thread
+            // refcount array (`_Py_INCREF_TYPE`), while proxyDealloc gives it back with a header
+            // `Py_DecRef`, so the type is cached across tests and earlier instantiations on this
+            // thread can still be unmerged here. The worker's gc.collect() below merges every
+            // thread's array (`gc_free_threading.c:2090` at v3.15.0); collecting first puts the
+            // opening reading in that same merged state, so the comparison is instantiation and
+            // dealloc and nothing left over.
+            if (embedsFreeThreadedPython) python.native.ffi.PyGC_Collect()
 
             val liveBefore = HandleTable.liveCount
-            val typeRefBefore = typeHeader.pointed.value
+            val typeRefBefore = typeRefCount(proxyTypeAddr)
 
             val pyObjPtr = assertNotNull(
                 PyObject_CallObject(proxyTypeAddr.toCPointer<CPyObject>(), null),
@@ -514,7 +550,7 @@ class CycleCollectionTest {
             )
             assertEquals(liveBefore, HandleTable.liveCount, "the table did not return to its starting size")
             assertEquals(
-                typeRefBefore, typeHeader.pointed.value,
+                typeRefBefore, typeRefCount(proxyTypeAddr),
                 "tp_dealloc ran on a CPython-created thread but did not balance the instance's " +
                     "reference to its heap type",
             )
