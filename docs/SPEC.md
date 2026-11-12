@@ -661,20 +661,20 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   python.org and python-build-standalone publish free-threaded prebuilts for desktop only; for Android
   and iOS this project builds its own (#163, release `cpython-3.15.0t-mobile`), see T-2a.
   `Py_LIMITED_API` is not defined, so `abi3t` is not a blocker.
-- **T-2a** Free-threaded CPython on mobile through the Gradle plugin (#328 step 1; direction: the
-  maintainer's #158 decision of 2026-10-04, "Free-threaded is the default and the only build", baseline
-  3.15t). The plugin's iOS consumer wiring (#90, L-11) can acquire the project's own free-threaded
-  `Python.xcframework`, `python-<version>t-iOS-XCframework.tar.gz` from the GitHub release
-  `cpython-<version>t-mobile` of `thisisthepy/python-multiplatform`, verified against the SHA-256 pinned in
-  `python-checksums.properties` under `ios-<version>-freethreaded` and baked into the plugin at plugin build
-  time (a mismatch, or a missing pin, fails `downloadPython_ios`). It is selected per consumer with
-  `pythonBindings { ios { freeThreaded.set(true) } }`; the default stays `false`, the python.org GIL
-  archive and `lib/python<X.Y>/`, until #328 step 3 switches the mobile default (the separate switch,
-  and its default, are an agent proposal, not confirmed). With it set, every per-slice prefix holds
-  `lib/python<X.Y>t/`: the shared `Python.xcframework/lib/python<X.Y>t/` merged with
-  `<slice>/lib-<arch>/python<X.Y>t/`, with L-11's exclusions (so no `libpython<X.Y>t.dylib`), and the
-  staging task fails unless `lib/python<X.Y>t/os.py` is staged. Android: the plugin stages nothing for
-  Android (libpython and the stdlib travel inside the library's AAR, L-5); the Android archive's pin
+- **T-2a** Free-threaded CPython on mobile through the Gradle plugin (#328 step 1; owner decision #158 of
+  2026-10-04, "Free-threaded is the default and the only build", baseline 3.15t; leader decision of
+  2026-11-13 on #328: no opt-in `pythonBindings.ios.freeThreaded` flag, 3.15t is the only build). There
+  is no switch and no GIL iOS archive in the plugin. The plugin's iOS consumer wiring (#90, L-11) always
+  acquires the project's own free-threaded `Python.xcframework`, `python-<version>t-iOS-XCframework.tar.gz`
+  from the GitHub release `cpython-<version>t-mobile` of `thisisthepy/python-multiplatform`, verified
+  against the SHA-256 pinned in `python-checksums.properties` under `ios-<version>-freethreaded` and baked
+  into the plugin at plugin build time (a missing pin fails the plugin build, a mismatch fails
+  `downloadPython_ios`). Every per-slice prefix holds `lib/python<X.Y>t/`: the shared
+  `Python.xcframework/lib/python<X.Y>t/` merged with `<slice>/lib-<arch>/python<X.Y>t/`, with L-11's
+  exclusions (so no `libpython<X.Y>t.dylib`), and the staging task fails unless `lib/python<X.Y>t/os.py` is
+  staged. The library's own iOS klib must also be built against the 3.15t headers before a consumer app
+  runs on this framework (#328 step 2, done separately). Android: the plugin stages nothing for Android
+  (libpython and the stdlib travel inside the library's AAR, L-5); the Android archive's pin
   (`android-aarch64-<version>-freethreaded`) is recorded in `python-checksums.properties`, and acquiring it
   is a library-build change left to #328 steps 2 and 3. `Status: partial` (unit tests only,
   `GP/IosConsumerWiringTest.kt`, `GP/IosPythonHomeLayoutTest.kt`; no simulator run, and the library's own

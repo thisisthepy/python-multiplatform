@@ -11,7 +11,6 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
-import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -147,8 +146,8 @@ class IosConsumerWiringTest {
         val build = project.layout.buildDirectory.get().asFile
         assertEquals(File(build, "python-standalone"), task.workDirectory.get().asFile)
         assertTrue(task.extractDirectory.startsWith(File(build, "python-standalone")))
-        assertEquals(DEFAULT_IOS_ARCHIVE_SHA256, task.expectedSha256.get())
-        assertEquals(64, DEFAULT_IOS_ARCHIVE_SHA256.length)
+        assertEquals(DEFAULT_IOS_FREE_THREADED_ARCHIVE_SHA256, task.expectedSha256.get())
+        assertEquals(64, DEFAULT_IOS_FREE_THREADED_ARCHIVE_SHA256.length)
     }
 
     @Test
@@ -160,27 +159,12 @@ class IosConsumerWiringTest {
         assertEquals(File(build, "python-ios-home/${IosPythonHomeLayout.slices[0].name}"), stage.destinationDir.get().asFile)
     }
 
-    // ---- free-threaded archive (SPEC T-2a, #328 step 1) ---------------------------------------
+    // ---- the 3.15t archive is the only one (SPEC T-2a, owner decision #158) --------------------
 
     @Test
-    fun theDefaultIsStillTheGilArchiveAndLayout() {
-        // Guard, not a red test: step 1 must not switch the mobile default (#328 step 3 does).
+    fun theDefaultIsTheProjectsOwn315tArchiveAndLayout() {
         val project = project()
         wire(project)
-        val task = project.tasks.getByName(DOWNLOAD_IOS_TASK) as DownloadPythonIosTask
-        assertEquals(DEFAULT_IOS_ARCHIVE_URL, task.archiveUrl.get())
-        assertEquals(DEFAULT_IOS_ARCHIVE_NAME, task.archiveName.get())
-        assertEquals(DEFAULT_IOS_ARCHIVE_SHA256, task.expectedSha256.get())
-        for (slice in IosPythonHomeLayout.slices) {
-            val stage = project.tasks.getByName(slice.stageTaskName) as StageIosPythonHomeTask
-            assertEquals(false, stage.freeThreaded.get(), slice.name)
-        }
-    }
-
-    @Test
-    fun freeThreadedSelectsTheProjectsOwnReleaseArchive() {
-        val project = project()
-        wire(project) { ios { freeThreaded.set(true) } }
         val v = DEFAULT_PYTHON_VERSION
         val task = project.tasks.getByName(DOWNLOAD_IOS_TASK) as DownloadPythonIosTask
         assertEquals(
@@ -191,8 +175,9 @@ class IosConsumerWiringTest {
         assertEquals(DEFAULT_IOS_FREE_THREADED_ARCHIVE_SHA256, task.expectedSha256.get())
         for (slice in IosPythonHomeLayout.slices) {
             val stage = project.tasks.getByName(slice.stageTaskName) as StageIosPythonHomeTask
-            assertEquals(true, stage.freeThreaded.get(), slice.name)
+            assertEquals(v, stage.pythonVersion.get(), slice.name)
         }
+        assertTrue(IosPythonHomeLayout.stdlibTag(v).endsWith("t"), "the staged stdlib is lib/python<X.Y>t/")
     }
 
     @Test
@@ -280,7 +265,7 @@ class IosConsumerWiringTest {
 
     @Test
     fun aMissingPinFailsBeforeAnyDownload() {
-        // A plugin built from a python-checksums.properties without the free-threaded key bakes "".
+        // A plugin built from a python-checksums.properties without the iOS key bakes "".
         val bytes = tarGz(mapOf("Python.xcframework/Info.plist" to "plist"))
         val (task, _) = downloadTask(bytes, "")
         val e = assertFailsWith<GradleException> { task.provision() }
@@ -316,6 +301,5 @@ class IosConsumerWiringTest {
         assertEquals("ios-arm64_x86_64-simulator", xcframeworkSliceForKonanTarget("ios_simulator_arm64"))
         assertEquals("ios-arm64_x86_64-simulator", xcframeworkSliceForKonanTarget("ios_x64"))
         assertNull(xcframeworkSliceForKonanTarget("linux_x64"))
-        assertNotNull(DEFAULT_IOS_ARCHIVE_URL)
     }
 }

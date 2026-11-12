@@ -19,12 +19,12 @@ import kotlin.test.assertTrue
  * The two share no code, so each pins the directory name as a literal.
  *
  * What this cannot find: whether CPython on a device really loads the result. The fake tree below
- * mirrors the observed 3.14 archive's *shape*; the installed-app run in
+ * mirrors the observed 3.15.0t archive's *shape*; the installed-app run in
  * `docs/platforms/ios-app-bundle.md` is the check for the rest.
  */
 class IosPythonHomeLayoutTest {
 
-    private val version = "3.14.7"
+    private val version = "3.15.0"
     // Under this module's build directory (the test task's working directory), not the system
     // temporary directory: AGENTS.md rule 2.
     private val scratch: File =
@@ -94,7 +94,7 @@ class IosPythonHomeLayoutTest {
     fun theSharedStdlibComesFirstAndTheSliceTreeSecond() {
         val sim = IosPythonHomeLayout.sliceFor("-iphonesimulator", "x86_64")
         assertEquals(
-            listOf("lib/python3.14", "ios-arm64_x86_64-simulator/lib-x86_64/python3.14"),
+            listOf("lib/python3.15t", "ios-arm64_x86_64-simulator/lib-x86_64/python3.15t"),
             IosPythonHomeLayout.sourceDirectories(sim, version),
         )
     }
@@ -105,8 +105,8 @@ class IosPythonHomeLayoutTest {
         assertTrue(staged("os.py"))
         assertTrue(staged("encodings/__init__.py"))
         assertTrue(staged("json/decoder.py"))
-        assertTrue(staged("lib-dynload/_json.cpython-314-iphonesimulator.so"))
-        assertTrue(staged("_sysconfigdata__ios_arm64-iphonesimulator.py"))
+        assertTrue(staged("lib-dynload/_json.cpython-315t-iphonesimulator.so"))
+        assertTrue(staged("_sysconfigdata_t_ios_arm64-iphonesimulator.py"))
         assertTrue(staged("site-packages/README.txt"))
         // A package *named like* an excluded one deeper down is not excluded.
         assertTrue(staged("email/test/__init__.py"))
@@ -117,9 +117,9 @@ class IosPythonHomeLayoutTest {
         assertFalse(staged("idlelib/idle.py"))
         assertFalse(staged("turtledemo/__main__.py"))
         assertFalse(staged("ensurepip/_bundled/pip.whl"))
-        assertFalse(staged("encodings/__pycache__/aliases.cpython-314.pyc"))
+        assertFalse(staged("encodings/__pycache__/aliases.cpython-315t.pyc"))
         assertFalse(staged("__pycache__"))
-        assertFalse(staged("libpython3.14.dylib"))
+        assertFalse(staged("libpython3.15t.dylib"))
     }
 
     @Test
@@ -129,10 +129,10 @@ class IosPythonHomeLayoutTest {
         val plan = IosPythonHomeLayout.plan(xcframework, slice, version)
         assertEquals(
             listOf(
-                "lib/python3.14/_sysconfigdata__ios_arm64-iphonesimulator.py",
-                "lib/python3.14/encodings/__init__.py",
-                "lib/python3.14/lib-dynload/_json.cpython-314-iphonesimulator.so",
-                "lib/python3.14/os.py",
+                "lib/python3.15t/_sysconfigdata_t_ios_arm64-iphonesimulator.py",
+                "lib/python3.15t/encodings/__init__.py",
+                "lib/python3.15t/lib-dynload/_json.cpython-315t-iphonesimulator.so",
+                "lib/python3.15t/os.py",
             ),
             plan.keys.toList(),
         )
@@ -160,7 +160,7 @@ class IosPythonHomeLayoutTest {
             .build()
         val out = File(scratch, "out")
         // Left over from a previous run with a wider selection; must not survive.
-        File(out, "home/lib/python3.14/test/stale.py").apply { parentFile.mkdirs(); writeText("") }
+        File(out, "home/lib/python3.15t/test/stale.py").apply { parentFile.mkdirs(); writeText("") }
 
         val task = project.tasks.create("stage", StageIosPythonHomeTask::class.java)
         task.xcframework.set(xcframework)
@@ -173,10 +173,10 @@ class IosPythonHomeLayoutTest {
             .map { it.relativeTo(File(out, "home")).invariantSeparatorsPath }.sorted().toList()
         assertEquals(
             listOf(
-                "lib/python3.14/_sysconfigdata__ios_arm64-iphonesimulator.py",
-                "lib/python3.14/encodings/__init__.py",
-                "lib/python3.14/lib-dynload/_json.cpython-314-iphonesimulator.so",
-                "lib/python3.14/os.py",
+                "lib/python3.15t/_sysconfigdata_t_ios_arm64-iphonesimulator.py",
+                "lib/python3.15t/encodings/__init__.py",
+                "lib/python3.15t/lib-dynload/_json.cpython-315t-iphonesimulator.so",
+                "lib/python3.15t/os.py",
             ),
             staged,
         )
@@ -184,113 +184,42 @@ class IosPythonHomeLayoutTest {
         assertFalse(File(out, "home/${StageIosPythonHomeTask.TEMPLATE_NAME}").exists())
     }
 
-    // ---- free-threaded (SPEC T-2a, #328) ----
+    // ---- the layout is always free-threaded (SPEC T-2a, owner decision #158) ----
 
     @Test
-    fun freeThreadedSourceDirectoriesCarryTheTSuffix() {
-        val sim = IosPythonHomeLayout.sliceFor("-iphonesimulator", "x86_64")
-        assertEquals(
-            listOf("lib/python3.15t", "ios-arm64_x86_64-simulator/lib-x86_64/python3.15t"),
-            IosPythonHomeLayout.sourceDirectories(sim, "3.15.0", freeThreaded = true),
-        )
-        assertEquals("3.15t", IosPythonHomeLayout.stdlibTag("3.15.0", freeThreaded = true))
-        assertEquals("3.15", IosPythonHomeLayout.stdlibTag("3.15.0"))
+    fun theStdlibTagAlwaysCarriesTheTSuffix() {
+        assertEquals("3.15t", IosPythonHomeLayout.stdlibTag("3.15.0"))
+        assertEquals("3.15t", IosPythonHomeLayout.stdlibTag(version))
     }
 
     @Test
-    fun aFreeThreadedPlanStagesLibPython315t() {
-        val xcframework = fakeFreeThreadedXcframework()
-        val slice = IosPythonHomeLayout.sliceFor("-iphonesimulator", "arm64")
-        val plan = IosPythonHomeLayout.plan(xcframework, slice, "3.15.0", freeThreaded = true)
-        assertEquals(
-            listOf(
-                "lib/python3.15t/_sysconfigdata_t_ios_arm64-iphonesimulator.py",
-                "lib/python3.15t/encodings/__init__.py",
-                "lib/python3.15t/lib-dynload/_json.cpython-315t-iphonesimulator.so",
-                "lib/python3.15t/os.py",
-            ),
-            plan.keys.toList(),
-        )
-        assertFalse(plan.values.any { it.name.startsWith("libpython") }, "no libpython*.dylib: ${plan.values}")
-    }
-
-    @Test
-    fun aGilPlanAgainstAFreeThreadedTreeFails() {
-        // Guard, not a red test: the GIL tag must not silently find a free-threaded tree.
-        val xcframework = fakeFreeThreadedXcframework()
+    fun aGilShapedTreeIsNotFoundByThePlan() {
+        // Guard: a framework with only lib/python3.15 (no t suffix) must fail loudly, not stage.
+        val root = File(scratch, "gil/Python.xcframework")
+        fun file(path: String) = File(root, path).apply { parentFile.mkdirs(); writeText(path) }
+        file("lib/python3.15/os.py")
+        file("ios-arm64/lib-arm64/python3.15/lib-dynload/_json.cpython-315-iphoneos.so")
         assertFailsWith<GradleException> {
-            IosPythonHomeLayout.plan(xcframework, IosPythonHomeLayout.sliceFor("-iphoneos", "arm64"), "3.15.0")
+            IosPythonHomeLayout.plan(root, IosPythonHomeLayout.sliceFor("-iphoneos", "arm64"), version)
         }
     }
 
-    @Test
-    fun theTaskStagesAFreeThreadedPrefix() {
-        val xcframework = fakeFreeThreadedXcframework()
-        val project = ProjectBuilder.builder()
-            .withProjectDir(File(scratch, "project").apply { mkdirs() })
-            .withGradleUserHomeDir(File(scratch, "gradle-home"))
-            .build()
-        val out = File(scratch, "out-ft")
-        val task = project.tasks.create("stageFt", StageIosPythonHomeTask::class.java)
-        task.xcframework.set(xcframework)
-        task.sliceName.set("iphoneos-arm64")
-        task.pythonVersion.set("3.15.0")
-        task.freeThreaded.set(true)
-        task.destinationDir.set(out)
-        task.stage()
-
-        val staged = File(out, "home").walkTopDown().filter { it.isFile }
-            .map { it.relativeTo(File(out, "home")).invariantSeparatorsPath }.sorted().toList()
-        assertEquals(
-            listOf(
-                "lib/python3.15t/_sysconfigdata_t_ios_arm64-iphoneos.py",
-                "lib/python3.15t/encodings/__init__.py",
-                "lib/python3.15t/lib-dynload/_json.cpython-315t-iphoneos.so",
-                "lib/python3.15t/os.py",
-            ),
-            staged,
-        )
-    }
-
-    /**
-     * The shape of `python-3.15.0t-iOS-XCframework.tar.gz` (release `cpython-3.15.0t-mobile`), taken
-     * from `tar tzf` of the published archive: `lib/python3.15t` shared, `lib-<arch>/python3.15t` per
-     * slice, `libpython3.15t.dylib` beside them.
-     */
-    private fun fakeFreeThreadedXcframework(): File {
-        val root = File(scratch, "ft/Python.xcframework")
-        fun file(path: String) = File(root, path).apply { parentFile.mkdirs(); writeText(path) }
-        file("lib/python3.15t/os.py")
-        file("lib/python3.15t/encodings/__init__.py")
-        file("lib/python3.15t/test/test_os/test_os.py")
-        file("ios-arm64/lib/libpython3.15t.dylib")
-        file("ios-arm64/lib-arm64/libpython3.15t.dylib")
-        file("ios-arm64/lib-arm64/python3.15t/_sysconfigdata_t_ios_arm64-iphoneos.py")
-        file("ios-arm64/lib-arm64/python3.15t/lib-dynload/_json.cpython-315t-iphoneos.so")
-        file("ios-arm64_x86_64-simulator/lib/libpython3.15t.dylib")
-        file("ios-arm64_x86_64-simulator/lib-arm64/python3.15t/_sysconfigdata_t_ios_arm64-iphonesimulator.py")
-        file("ios-arm64_x86_64-simulator/lib-arm64/python3.15t/lib-dynload/_json.cpython-315t-iphonesimulator.so")
-        file("ios-arm64_x86_64-simulator/lib-x86_64/python3.15t/lib-dynload/_json.cpython-315t-iphonesimulator.so")
-        file("build/iOS-dylib-Info-template.plist")
-        return root
-    }
-
-    /** The observed 3.14 archive's shape, a few files deep. */
+    /** The observed 3.15.0t archive's shape, a few files deep. */
     private fun fakeXcframework(): File {
         val root = File(scratch, "Python.xcframework")
         fun file(path: String) = File(root, path).apply { parentFile.mkdirs(); writeText(path) }
-        file("lib/python3.14/os.py")
-        file("lib/python3.14/encodings/__init__.py")
-        file("lib/python3.14/encodings/__pycache__/__init__.cpython-314.pyc")
-        file("lib/python3.14/test/test_os.py")
-        file("lib/python3.14/tkinter/__init__.py")
-        file("ios-arm64/lib-arm64/python3.14/lib-dynload/_json.cpython-314-iphoneos.so")
-        file("ios-arm64/lib-arm64/python3.14/_sysconfigdata__ios_arm64-iphoneos.py")
-        file("ios-arm64/lib/libpython3.14.dylib")
-        file("ios-arm64_x86_64-simulator/lib-arm64/python3.14/lib-dynload/_json.cpython-314-iphonesimulator.so")
-        file("ios-arm64_x86_64-simulator/lib-arm64/python3.14/_sysconfigdata__ios_arm64-iphonesimulator.py")
-        file("ios-arm64_x86_64-simulator/lib-x86_64/python3.14/lib-dynload/_json.cpython-314-iphonesimulator.so")
-        file("ios-arm64_x86_64-simulator/lib/libpython3.14.dylib")
+        file("lib/python3.15t/os.py")
+        file("lib/python3.15t/encodings/__init__.py")
+        file("lib/python3.15t/encodings/__pycache__/__init__.cpython-315t.pyc")
+        file("lib/python3.15t/test/test_os.py")
+        file("lib/python3.15t/tkinter/__init__.py")
+        file("ios-arm64/lib-arm64/python3.15t/lib-dynload/_json.cpython-315t-iphoneos.so")
+        file("ios-arm64/lib-arm64/python3.15t/_sysconfigdata_t_ios_arm64-iphoneos.py")
+        file("ios-arm64/lib/libpython3.15t.dylib")
+        file("ios-arm64_x86_64-simulator/lib-arm64/python3.15t/lib-dynload/_json.cpython-315t-iphonesimulator.so")
+        file("ios-arm64_x86_64-simulator/lib-arm64/python3.15t/_sysconfigdata_t_ios_arm64-iphonesimulator.py")
+        file("ios-arm64_x86_64-simulator/lib-x86_64/python3.15t/lib-dynload/_json.cpython-315t-iphonesimulator.so")
+        file("ios-arm64_x86_64-simulator/lib/libpython3.15t.dylib")
         file("build/iOS-dylib-Info-template.plist")
         return root
     }
