@@ -155,6 +155,16 @@ API 안정성을 확인한 뒤로 미룬다.
 않고** 인터프리터에 남기며 이유를 진단으로 낸다. 생성 C 는 `tp_runtime.h` 헬퍼로만 메모리와 `PyObject`
 를 다룬다. 증명 밖의 안전망: ASan/UBSan, 인터프리터와의 차등 테스트, IR 수준 퍼징.
 
+차등 테스트의 위치 (#41 M2 기준, 경로는 `python-multiplatform-ksp/src/test/python/`):
+
+| 경우 | 테스트 |
+|---|---|
+| i64 오버플로 경계 | `test_runtime.py::test_checked_arithmetic_matches_bigint_and_deopts_exactly_on_overflow`, `test_neg_i64_deopts_only_for_int64_min`, `test_fuzz_checked_arithmetic_against_bigint`; 컴파일된 함수에서 `test_cgen.py::test_i64_overflow_in_a_pure_function_deopts_to_the_big_int_result`, `test_native_int_impure.py::test_binary_ops_at_the_i64_boundary_equal_cpython`, `test_min_floordiv_minus_one_promotes` |
+| 음수 floor 나눗셈과 나머지 | `test_runtime.py::test_floordiv_i64_is_python_floor_division`, `test_mod_i64_has_the_sign_of_the_divisor`, `test_fuzz_floordiv_mod_i64`, `test_floor_mod_sign_and_zero_cases_spelled_out`, `test_fuzz_float_floordiv_mod` |
+| 0 으로 나누기 | `test_runtime.py::test_int_division_by_zero_messages_are_cpythons`, `test_float_division_by_signed_zero_raises_cpythons_message`; `test_cgen.py::test_integer_division_by_zero_has_cpythons_message`, `test_native_int_impure.py::test_division_by_zero_after_a_side_effect` |
+| NaN 과 inf | `test_runtime.py::test_float_division_family_is_bit_exact_with_cpython`, `test_int_float_comparison_named_hard_cases`, `test_math_named_error_cases`, `test_math_one_argument_fuzz_is_bit_exact` (NaN 은 "어떤 NaN", 그 밖은 IEEE 비트 비교); `test_pipeline.py::test_fastmath_keeps_nan_checks` |
+| 벤치마크 출력 | `test_benchmark_outputs.py`: 다섯 벤치마크를 `run.py verify` 크기로 컴파일 실행해 인터프리터 출력과 비교, TypedPython CI 가 develop 의 매 push 마다 돌린다 |
+
 ### 4.3.2 증분 컴파일 (SPEC N-10)
 
 사용자 결정: "증분 컴파일도 지원하도록 해. 빌드 속도 너무 오래 안걸리게". 단위는 모듈. 키는 소스 해시 +

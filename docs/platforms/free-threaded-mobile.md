@@ -12,7 +12,7 @@ CPython's own mobile tooling.
 
 | Platform | Host | Tooling | Output |
 |---|---|---|---|
-| Android | `aarch64-linux-android` | `Platforms/Android` | `python-3.15.0-aarch64-linux-android.tar.gz` |
+| Android | `aarch64-linux-android`, `x86_64-linux-android` (owner approval 2026-11-13, #328: both ABIs the library packages) | `Platforms/Android` | `python-3.15.0-<host>.tar.gz`, one per host |
 | iOS | `arm64-apple-ios` (device), `arm64-apple-ios-simulator`, `x86_64-apple-ios-simulator` | `Platforms/Apple` | `python-3.15.0-iOS-XCframework.tar.gz` |
 
 The iOS tooling only builds an XCframework from all of its slices, so the simulator
@@ -96,13 +96,13 @@ Each script fails the job unless:
 
 - the build Python reports `Py_GIL_DISABLED == 1`;
 - Android: `include/python3.15t/pyconfig.h` has `#define Py_GIL_DISABLED 1`,
-  `lib/libpython3.15t*.so` exists and is an aarch64 ELF, `lib/python3.15t` exists;
+  `lib/libpython3.15t*.so` exists and is an ELF of the host's architecture (aarch64 or x86-64), `lib/python3.15t` exists;
 - iOS: every slice has `Headers/pyconfig-<arch>.h` with `#define Py_GIL_DISABLED 1`,
   `lib/libpython3.15t.dylib`, and a `Python.framework/Python` binary (`lipo -info`
   is logged); the XCframework has `lib/python3.15t` and exactly two slices.
 
 The sha256 of each archive is written to the job summary and the archives are uploaded
-as workflow artifacts (`python-<version>t-android-aarch64`,
+as workflow artifacts (`python-<version>t-aarch64-linux-android`, `python-<version>t-x86_64-linux-android`,
 `python-<version>t-ios-xcframework`).
 
 ## Not verified
