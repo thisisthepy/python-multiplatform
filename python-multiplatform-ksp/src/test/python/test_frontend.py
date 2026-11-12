@@ -329,8 +329,7 @@ def test_list_params_become_array_params_with_stored(tmp_path):
                 a[i] = b[i] * k
     """)
     f = function(m, "scale")
-    # two list parameters at most (#159: the lists are locked from copy-in to write-back; CPython
-    # has no three-object critical section). A third one is test_free_threaded.py's.
+    # (#255: any number of list parameters; three or more are test_free_threaded.py's)
     assert f.params == (
         ArrayParam("a", Type.F64_ARRAY, True), ArrayParam("b", Type.F64_ARRAY, False), Param("k", F64),
     )
