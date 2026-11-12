@@ -1,6 +1,6 @@
 name: Build free-threaded CPython for mobile
 
-# Builds CPython with --disable-gil ("3.15t") for Android arm64 and iOS with
+# Builds CPython with --disable-gil ("3.15t") for Android (aarch64 and x86_64) and iOS with
 # CPython's own tooling (Platforms/Android, Platforms/Apple). Manual only: the
 # builds take a long time and the archives are inputs to later work (#163).
 # See docs/platforms/free-threaded-mobile.md.
@@ -27,7 +27,12 @@ concurrency:
 
 jobs:
   android:
-    name: Android aarch64 (free-threaded)
+    # Both ABIs the library packages (arm64-v8a, x86_64); x86_64 approved by the owner 2026-11-13 (#328).
+    name: Android ${{ matrix.host }} (free-threaded)
+    strategy:
+      fail-fast: false
+      matrix:
+        host: [aarch64-linux-android, x86_64-linux-android]
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
@@ -48,11 +53,11 @@ jobs:
           libbz2-dev liblzma-dev libsqlite3-dev libzstd-dev
 
       - name: Build
-        run: .github/scripts/ft-mobile/build-android.sh "${{ inputs.python_version || '3.15.0' }}"
+        run: .github/scripts/ft-mobile/build-android.sh "${{ inputs.python_version || '3.15.0' }}" "${{ matrix.host }}"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: python-${{ inputs.python_version || '3.15.0' }}t-android-aarch64
+          name: python-${{ inputs.python_version || '3.15.0' }}t-${{ matrix.host }}
           path: ${{ env.FT_OUT }}/*.tar.gz
           if-no-files-found: error
 
