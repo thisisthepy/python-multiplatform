@@ -251,7 +251,10 @@ val generateCoordinates = tasks.register("generateCoordinates") {
     // case where this build is checked out without the root's properties beside it.
     val pythonVersionValue = rootProperty("pythonVersion", "3.15.0")
     val pbsReleaseValue = rootProperty("pythonBuildStandaloneRelease", "20261013")
-    val freeThreadedValue = rootProperty("pythonFreeThreaded", "false").toBoolean()
+    // Desktop embeds the free-threaded build only (issue #158, maintainer 2026-10-04: "Free-threaded
+    // is the default and the only build. The GIL build is not kept as an option."), so there is no
+    // root property to read any more: the library's `desktopJar` always carries `libpython3.15t`.
+    val freeThreadedValue = true
 
     // The library and this plugin publish under one version since #70, so the wasm-runtime zip
     // (published beside the library artifact) is at this build's own version.

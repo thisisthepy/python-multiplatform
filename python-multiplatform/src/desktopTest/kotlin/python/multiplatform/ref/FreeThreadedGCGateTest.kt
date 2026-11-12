@@ -1,6 +1,6 @@
 package python.multiplatform.ref
 
-import python.multiplatform.BuildConfig
+import python.multiplatform.embedsFreeThreadedPython
 import python.multiplatform.ffi.PyObject
 import python.multiplatform.ffi.Python3
 import python.multiplatform.ffi.PythonTestFixture
@@ -113,7 +113,7 @@ class FreeThreadedGCGateTest {
         buildAndDropCycles(builtins, cyclesCreated / 2)
         val residue = countTrackedObjects(gc) - initial
         println(
-            "GATE[$label] freeThreaded=${BuildConfig.pythonFreeThreaded} residue=$residue/$totalObjects " +
+            "GATE[$label] freeThreaded=${embedsFreeThreadedPython} residue=$residue/$totalObjects " +
                 "collectionsThatActuallyRan=${gen0Collections(gc) - collectionsBefore}"
         )
         forceCollect(gc)
@@ -162,7 +162,7 @@ class FreeThreadedGCGateTest {
                             "short-circuits gc_should_collect on old[0].threshold == 0"
                     )
 
-                    if (!BuildConfig.pythonFreeThreaded) {
+                    if (!embedsFreeThreadedPython) {
                         // gc.c:1866 schedules on generations[0].count alone and gc.c:1258 selects
                         // generation 0 on count alone, so generation 1's threshold cannot matter.
                         assertTrue(
@@ -220,7 +220,7 @@ class FreeThreadedGCGateTest {
                     Python3.exec("del __pm_ballast")
                     val dropped = arm(gc, builtins, "ballast-dropped")
 
-                    if (BuildConfig.pythonFreeThreaded) {
+                    if (embedsFreeThreadedPython) {
                         // The whole finding: JVM memory growth, and nothing else, collected Python
                         // cycles. Deliberately not a tight bound -- how much a single collection
                         // takes depends on where in the workload the footprint crossed the bar.

@@ -50,12 +50,13 @@ class Versions private constructor(val versionString: String) {
     /**
      * CPython's ABI flags suffix: `t` on a free-threaded build (PEP 703), empty otherwise.
      *
-     * This is a property of the *build*, not of the version -- 3.14 ships in both flavours out of
-     * the same source tree -- so it comes from [BuildConfig.pythonFreeThreaded] rather than from
-     * [versionString].
+     * This is a property of the *build*, not of the version -- 3.15 ships in both flavours out of
+     * the same source tree -- and of the *platform*: desktop (JVM and Kotlin/Native) embeds 3.15t,
+     * while Android and iOS still embed the GIL build until #328 (issue #158). So it comes from the
+     * per-platform [embedsFreeThreadedPython] rather than from [versionString].
      */
     val abiFlags: String
-        get() = if (BuildConfig.pythonFreeThreaded) "t" else ""
+        get() = if (embedsFreeThreadedPython) "t" else ""
 
     /**
      * `major.minor` plus [abiFlags]: `3.14` on a default build, `3.14t` free-threaded.

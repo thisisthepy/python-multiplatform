@@ -52,6 +52,34 @@ class EmbeddedPythonVersionTest {
         }
     }
 
+    /**
+     * Issue #158: desktop embeds 3.15t while Android and iOS embed the GIL 3.15 until #328, so the
+     * free-threaded attribute is decided per variant. Red before: `register` took no per-variant
+     * function and stamped one value on every variant, so the AAR's variants claimed what the
+     * desktop jar's did (this test then does not compile, which is the pre-implementation state).
+     */
+    @Test
+    fun freeThreadedIsDecidedPerVariant() {
+        val project = ProjectBuilder.builder().build()
+        val names = listOf("desktopRuntimeElements", "releaseRuntimeElements", "iosArm64ApiElements", "metadataApiElements")
+        val configs = names.associateWith { n -> project.configurations.create(n) { isCanBeConsumed = true } }
+        EmbeddedPythonVersion("3.15.0", true).register(project) { name ->
+            when {
+                name.startsWith("metadata") -> null
+                name.startsWith("desktop") -> true
+                else -> false
+            }
+        }
+        val ft = attr(EmbeddedPythonVersion.ATTRIBUTE_FREE_THREADED)
+        assertEquals("true", configs.getValue("desktopRuntimeElements").attributes.getAttribute(ft))
+        assertEquals("false", configs.getValue("releaseRuntimeElements").attributes.getAttribute(ft))
+        assertEquals("false", configs.getValue("iosArm64ApiElements").attributes.getAttribute(ft))
+        assertNull(configs.getValue("metadataApiElements").attributes.getAttribute(ft))
+        for (c in configs.values) {
+            assertEquals("3.15.0", c.attributes.getAttribute(attr(EmbeddedPythonVersion.ATTRIBUTE_VERSION)))
+        }
+    }
+
     @Test
     fun nonConsumableConfigurationsAreLeftAlone() {
         val project = ProjectBuilder.builder().build()

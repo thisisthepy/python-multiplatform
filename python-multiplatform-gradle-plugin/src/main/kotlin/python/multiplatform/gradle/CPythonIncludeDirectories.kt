@@ -28,6 +28,14 @@ object CPythonIncludeLayout {
 
     val allTargets: List<String> = desktopTargets + androidTargets + iosTargets
 
+    /**
+     * The flavour `python-multiplatform` embeds for [target], which is the only one its build
+     * extracts: free-threaded on desktop (issue #158, maintainer 2026-10-04: "Free-threaded is the
+     * default and the only build"), GIL on Android and iOS until #328.
+     */
+    fun embeddedFlavour(target: String): CPythonFlavour =
+        if (target in desktopTargets) CPythonFlavour.FREE_THREADED else CPythonFlavour.GIL
+
     fun supports(target: String, flavour: CPythonFlavour): Boolean =
         target in allTargets && (flavour == CPythonFlavour.GIL || target in desktopTargets)
 
@@ -97,9 +105,9 @@ object CPythonIncludeLayout {
  * task as its build dependency, so anything that wires it as an input (`-I`, an `@InputDirectory`)
  * triggers the download and unpack.
  *
- * Only the flavour the build was configured for (`-PpythonFreeThreaded`) has an extraction task;
- * asking for the other one fails with a message naming the property, rather than returning a path
- * nothing will ever create.
+ * Only the flavour the library embeds ([CPythonIncludeLayout.embeddedFlavour]: free-threaded on
+ * desktop, GIL on Android and iOS) has an extraction task, and it is the default `flavour`; asking
+ * for the other one fails loudly rather than returning a path nothing will ever create.
  *
  * @param extractedRoot the version-keyed extraction directory
  * @param extractionTask the task that fills [extractedRoot] for a target+flavour, or null when this build does not extract it
@@ -112,11 +120,11 @@ class CPythonIncludeDirectories(
     val targets: List<String> get() = CPythonIncludeLayout.allTargets
 
     /** Whether [includeDir] would succeed for this pair in this build. */
-    fun isAvailable(target: String, flavour: CPythonFlavour = CPythonFlavour.GIL): Boolean =
+    fun isAvailable(target: String, flavour: CPythonFlavour = CPythonIncludeLayout.embeddedFlavour(target)): Boolean =
         CPythonIncludeLayout.supports(target, flavour) && extractionTask(target, flavour) != null
 
     /** The directory holding `Python.h` for [target]; resolving it makes Gradle run the extraction task first. */
-    fun includeDir(target: String, flavour: CPythonFlavour = CPythonFlavour.GIL): Provider<Directory> {
+    fun includeDir(target: String, flavour: CPythonFlavour = CPythonIncludeLayout.embeddedFlavour(target)): Provider<Directory> {
         if (!CPythonIncludeLayout.supports(target, flavour)) {
             throw GradleException(
                 "No $flavour CPython include directory for '$target'. Targets: ${CPythonIncludeLayout.allTargets}; " +
@@ -125,7 +133,7 @@ class CPythonIncludeDirectories(
         }
         val task = extractionTask(target, flavour) ?: throw GradleException(
             "The $flavour CPython for '$target' is not extracted by this build. " +
-                "Only the flavour selected with -PpythonFreeThreaded is downloaded.",
+                "Only the flavour the library embeds is downloaded: free-threaded on desktop (#158), GIL on Android and iOS.",
         )
         val relative = CPythonIncludeLayout.relativePath(target, flavour, pythonVersion)
         // `TaskProvider.map` keeps the task as the producer, so the dependency travels with the value.
@@ -136,7 +144,7 @@ class CPythonIncludeDirectories(
     fun isLinkRequired(target: String): Boolean = CPythonIncludeLayout.isLinkRequired(target)
 
     /** Whether [libraryDir]/[libraryFile] would succeed for this pair in this build. */
-    fun isLinkAvailable(target: String, flavour: CPythonFlavour = CPythonFlavour.GIL): Boolean =
+    fun isLinkAvailable(target: String, flavour: CPythonFlavour = CPythonIncludeLayout.embeddedFlavour(target)): Boolean =
         CPythonIncludeLayout.supportsLinkLibrary(target, flavour) && extractionTask(target, flavour) != null
 
     private fun linkTask(target: String, flavour: CPythonFlavour): TaskProvider<*> {
@@ -148,19 +156,19 @@ class CPythonIncludeDirectories(
         }
         return extractionTask(target, flavour) ?: throw GradleException(
             "The $flavour CPython for '$target' is not extracted by this build. " +
-                "Only the flavour selected with -PpythonFreeThreaded is downloaded.",
+                "Only the flavour the library embeds is downloaded: free-threaded on desktop (#158), GIL on Android and iOS.",
         )
     }
 
     /** The directory holding the link library (the `-L` directory); resolving it runs the extraction task first. */
-    fun libraryDir(target: String, flavour: CPythonFlavour = CPythonFlavour.GIL): Provider<Directory> {
+    fun libraryDir(target: String, flavour: CPythonFlavour = CPythonIncludeLayout.embeddedFlavour(target)): Provider<Directory> {
         val task = linkTask(target, flavour)
         val relative = CPythonIncludeLayout.linkLibraryDirRelativePath(target, flavour)
         return task.map { extractedRoot.dir(relative) }
     }
 
     /** The link library file itself (`libpython3.14.so` / `python314.lib`); carries the extraction task. */
-    fun libraryFile(target: String, flavour: CPythonFlavour = CPythonFlavour.GIL): Provider<RegularFile> {
+    fun libraryFile(target: String, flavour: CPythonFlavour = CPythonIncludeLayout.embeddedFlavour(target)): Provider<RegularFile> {
         val task = linkTask(target, flavour)
         val relative = CPythonIncludeLayout.linkLibraryDirRelativePath(target, flavour) + "/" +
             CPythonIncludeLayout.linkLibraryFileName(target, flavour, pythonVersion)

@@ -24,7 +24,6 @@ import org.jetbrains.kotlin.gradle.tasks.KotlinNativeLink
 import org.jetbrains.kotlin.konan.target.Family
 import org.jetbrains.kotlin.konan.target.KonanTarget.*
 import org.jetbrains.kotlin.konan.target.linker
-import python.multiplatform.gradle.CPythonFlavour
 import python.multiplatform.gradle.CPythonIncludeDirectories
 import python.multiplatform.gradle.CPythonIncludeLayout
 import python.multiplatform.gradle.EmbeddedPythonVersion
@@ -63,7 +62,18 @@ plugins {
 
 
 val configuredPythonVersion = project.property("pythonVersion").toString()
-val pythonFreeThreaded = project.findProperty("pythonFreeThreaded")?.toString()?.toBoolean() ?: false
+// Issue #158, maintainer 2026-10-04: "Free-threaded is the default and the only build. The GIL
+// build is not kept as an option. Baseline is CPython 3.15t." Desktop (JVM, macosArm64, linuxX64)
+// therefore always acquires python-build-standalone's free-threaded build, and the
+// `-PpythonFreeThreaded` switch that used to choose it is gone. Android and iOS still embed
+// python.org's GIL build until #328, wasm until #175; which build each platform embeds is the
+// `embedsFreeThreadedPython` expect/actual in the library, not a build-wide flag.
+if (project.findProperty("pythonFreeThreaded") != null) {
+    throw GradleException(
+        "-PpythonFreeThreaded was removed (issue #158): desktop always embeds the free-threaded " +
+            "CPython, and the GIL desktop build is not kept as an option. Remove the property.",
+    )
+}
 val pbsRelease = project.findProperty("pythonBuildStandaloneRelease")?.toString() ?: "20261013"
 val pythonAppleSupportBuild = project.findProperty("pythonAppleSupportBuild")?.toString() ?: "b11"
 
@@ -78,18 +88,16 @@ buildkonfig {
     defaultConfigs {
         buildConfigField(FieldSpec.Type.STRING, "pythonVersion", pythonVersion)
         buildConfigField(FieldSpec.Type.STRING, "libraryVersion", libraryVersion)
-        // The free-threaded build is not merely a differently-compiled binary: it renames every
-        // artefact the runtime looks up by name. The shared library is `libpython3.14t.dylib`, not
-        // `libpython3.14.dylib`, and the stdlib sits in `lib/python3.14t/`. Without this flag
-        // reaching Kotlin, `manager.loadLibPython` asks for a file that a free-threaded install
-        // does not contain, and the failure looks like a missing download rather than a flavour
-        // mismatch. See `Versions.abiFlags`.
-        buildConfigField(FieldSpec.Type.BOOLEAN, "pythonFreeThreaded", pythonFreeThreaded.toString())
+        // No free-threaded field: which build a platform embeds differs by platform (#158), so it
+        // is the `embedsFreeThreadedPython` expect/actual (commonMain `EmbeddedPythonBuild.kt`),
+        // which `Versions.abiFlags` reads. One BuildConfig field shared by every target could not
+        // say "desktop 3.15t, Android 3.15".
     }
 }
 
 val libVersion = pythonVersion.split('.').subList(0, 2).joinToString(".")
-val abiSuffix = if (pythonFreeThreaded) "t" else ""
+/** ABI flags of the desktop CPython (macOS, Linux, Windows; JVM and Kotlin/Native): `t`, free-threaded (#158). */
+val desktopAbiSuffix = "t"
 
 /**
  * The `ftp/python/<dir>/` directory holding a release, which drops any pre-release suffix:
@@ -114,7 +122,6 @@ println()
 
 val licensePath = "src/nativeInterop/cinterop/license"
 val libPath = "src/nativeInterop/cinterop/lib"
-val libPathForDesktop = "$libPath/desktop"
 
 val downloadDir = layout.buildDirectory.dir("python-standalone").get().asFile
 
@@ -132,13 +139,14 @@ val downloadDir = layout.buildDirectory.dir("python-standalone").get().asFile
 val extractedDir = file("$downloadDir/extracted/$configuredPythonVersion")
 
 /**
- * Suffix that keeps the two desktop flavours apart within [extractedDir].
+ * Suffix of the desktop trees within [extractedDir].
  *
- * The GIL and free-threaded builds of the *same* version are different trees containing
- * differently-named libraries (`libpython3.14.dylib` vs `libpython3.14t.dylib`), so they need
- * separating for the same reason the version does.
+ * Desktop acquires only the free-threaded build (#158). The suffix stays in the path because the
+ * GIL and free-threaded builds of the *same* version are different trees containing
+ * differently-named libraries (`libpython3.15.dylib` vs `libpython3.15t.dylib`), and a GIL tree
+ * unpacked by an older checkout must never be mistaken for the free-threaded one.
  */
-val desktopFlavourSuffix = if (pythonFreeThreaded) "-freethreaded" else ""
+val desktopFlavourSuffix = "-freethreaded"
 
 /**
  * Fails the build when the extracted CPython's own headers report a version other than
@@ -464,7 +472,7 @@ val desktopTargets = mapOf(
 )
 
 val downloadTasks = desktopTargets.map { (platform, pbsTarget) ->
-    val flavour = if (pythonFreeThreaded) "freethreaded-install_only_stripped" else "install_only_stripped"
+    val flavour = "freethreaded-install_only_stripped"
     val assetName = "cpython-$configuredPythonVersion+$pbsRelease-$pbsTarget-$flavour.tar.gz"
     val url = "https://github.com/astral-sh/python-build-standalone/releases/download/$pbsRelease/$assetName"
     val archive = file("$downloadDir/$assetName")
@@ -683,8 +691,8 @@ val downloadAllPythonBuilds by tasks.registering {
  * target and flavour, each carrying its extraction task. Consumers (pypackpack's compile slot,
  * TypedPython's C build) read it with
  * `project(":python-multiplatform").extensions.getByType<CPythonIncludeDirectories>().includeDir("macos-aarch64")`
- * after `evaluationDependsOn(":python-multiplatform")`. Only the desktop flavour selected with
- * `-PpythonFreeThreaded` has a task; Android and iOS are always GIL. See
+ * after `evaluationDependsOn(":python-multiplatform")`. Only the flavour the library embeds has a
+ * task: free-threaded on desktop (#158), GIL on Android and iOS (#328). See
  * `docs/platforms/python-version-acquisition.md` §7.
  */
 extensions.add(
@@ -693,9 +701,7 @@ extensions.add(
         layout.projectDirectory.dir(extractedDir.absolutePath),
         configuredPythonVersion,
     ) { target, flavour ->
-        val desktop = target in CPythonIncludeLayout.desktopTargets
-        val extractedFlavour = if (desktop && pythonFreeThreaded) CPythonFlavour.FREE_THREADED else CPythonFlavour.GIL
-        if (flavour == extractedFlavour) tasks.named(CPythonIncludeLayout.downloadTaskName(target)) else null
+        if (flavour == CPythonIncludeLayout.embeddedFlavour(target)) tasks.named(CPythonIncludeLayout.downloadTaskName(target)) else null
     },
 )
 
@@ -704,13 +710,29 @@ extensions.add(
  * extension, as Gradle attributes on the published variants, and as a classpath resource
  * (`META-INF/python-multiplatform/python.properties`) in the jar and the AAR. See
  * `docs/platforms/python-version-acquisition.md` "Published version".
+ *
+ * Per platform since #158: the desktop jar (and the macosArm64/linuxX64 klibs) embed 3.15t, the AAR,
+ * the iOS and androidNative klibs the GIL 3.15 until #328, wasm GIL until #175. So the
+ * free-threaded attribute is decided per published variant, and the jar and the AAR each get
+ * their own resource. Shared metadata variants carry no CPython and get no free-threaded attribute.
+ * The `pythonMultiplatform` extension holds one value; it is the desktop one (what composite-build
+ * consumers that compile against the desktop CPython read), and the per-variant attributes are the
+ * per-platform truth. (Extension and metadata rules: agent proposal, not confirmed.)
  */
-val embeddedPythonVersion = EmbeddedPythonVersion(configuredPythonVersion, pythonFreeThreaded)
-embeddedPythonVersion.register(project)
+val desktopEmbeddedPythonVersion = EmbeddedPythonVersion(configuredPythonVersion, freeThreaded = true)
+val androidEmbeddedPythonVersion = EmbeddedPythonVersion(configuredPythonVersion, freeThreaded = false)
+val freeThreadedVariantPrefixes = listOf("desktop", "macosArm64", "linuxX64")
+desktopEmbeddedPythonVersion.register(project) { configurationName ->
+    when {
+        freeThreadedVariantPrefixes.any { configurationName.startsWith(it) } -> true
+        configurationName.startsWith("metadata") || "Metadata" in configurationName -> null
+        else -> false
+    }
+}
 
-val generatePythonProperties by tasks.registering {
-    val outputDir = layout.buildDirectory.dir("generated/python-properties")
-    val content = embeddedPythonVersion.renderProperties()
+fun registerPythonProperties(name: String, embedded: EmbeddedPythonVersion) = tasks.register(name) {
+    val outputDir = layout.buildDirectory.dir("generated/python-properties/$name")
+    val content = embedded.renderProperties()
     inputs.property("content", content)
     outputs.dir(outputDir)
     doLast {
@@ -719,6 +741,12 @@ val generatePythonProperties by tasks.registering {
         file.writeText(content)
     }
 }
+
+/** `freeThreaded=true`: the desktop jar's resource. */
+val generateDesktopPythonProperties = registerPythonProperties("generateDesktopPythonProperties", desktopEmbeddedPythonVersion)
+
+/** `freeThreaded=false`: the AAR's resource (GIL until #328). */
+val generateAndroidPythonProperties = registerPythonProperties("generateAndroidPythonProperties", androidEmbeddedPythonVersion)
 
 /**
  * The dev agent (SPEC L-12, #233) is Python, kept as a real file -- `src/commonMain/python/
@@ -1215,8 +1243,6 @@ kotlin {
                 include("linux-*$desktopFlavourSuffix/python/lib/libpython*.so*")
                 include("windows-*$desktopFlavourSuffix/python/python*.dll")
                 include("windows-*$desktopFlavourSuffix/python/vcruntime*.dll")
-                // `macos-*` matches `macos-aarch64-freethreaded` too.
-                if (!pythonFreeThreaded) exclude("*-freethreaded/**")
                 eachFile {
                     if (file.length() == 0L) { exclude(); return@eachFile }
                     val platform = relativePath.segments[0].removeSuffix(desktopFlavourSuffix)
@@ -1227,20 +1253,13 @@ kotlin {
             }
         }
         tasks.withType<Jar>().matching { it.name == "desktopJar" }.configureEach {
-            if (configuredPythonVersion == "3.13.0" && !pythonFreeThreaded) {
-                from(libPathForDesktop) {
-                    include("windows-*/*")
-                    include("linux-*/*")
-                    include("macos-*/*")
-                    into("lib")
-                }
-            } else {
-                // Issue #74: the libraries are packed from the staged tree, not straight from the
-                // extraction, so that symlinks are resolved and the linux library is stripped.
-                dependsOn(stageDesktopLibraries)
-                from(stageDesktopLibraries.map { it.destinationDir }) {
-                    include("lib/**")
-                }
+            // Issue #74: the libraries are packed from the staged tree, not straight from the
+            // extraction, so that symlinks are resolved and the linux library is stripped. (A
+            // branch for checked-in 3.13.0 GIL binaries under `lib/desktop` used to sit here; the
+            // desktop build is free-threaded only since #158, so it could not be reached.)
+            dependsOn(stageDesktopLibraries)
+            from(stageDesktopLibraries.map { it.destinationDir }) {
+                include("lib/**")
             }
         }
     }
@@ -1273,7 +1292,7 @@ kotlin {
             val targetIncludePath = when(konanTarget.family) {
                 Family.ANDROID -> "$targetExtractDir/include/python$libVersion"
                 Family.IOS -> "$targetExtractDir/$targetABI/Python.framework/Headers"
-                Family.OSX, Family.LINUX -> "$targetExtractDir/include/python$libVersion$abiSuffix"
+                Family.OSX, Family.LINUX -> "$targetExtractDir/include/python$libVersion$desktopAbiSuffix"
                 else -> throw RuntimeException("Unsupported target family: ${konanTarget.family}")
             }
 
@@ -1351,7 +1370,7 @@ kotlin {
                 } else if (konanTarget.family == Family.OSX) {
                     getTest(NativeBuildType.DEBUG).linkerOpts.addAll(listOf(
                         "-L$targetExtractDir/lib",
-                        "-lpython$libVersion$abiSuffix",
+                        "-lpython$libVersion$desktopAbiSuffix",
                         "-Wl,-rpath,$targetExtractDir/lib"
                     ))
                 } else if (konanTarget.family == Family.LINUX) {
@@ -1363,7 +1382,7 @@ kotlin {
                         linkerOpts.addAll(listOf(
                             "-L$stagedLinuxLibDir",
                             "-L$targetExtractDir/lib",
-                            "-lpython$libVersion$abiSuffix",
+                            "-lpython$libVersion$desktopAbiSuffix",
                             "-Wl,-rpath,$targetExtractDir/lib"
                         ))
                         linkTaskProvider.configure {
@@ -1389,7 +1408,7 @@ kotlin {
         jvmTest.dependsOn(commonTest)
         val desktopMain by getting {
             resources.srcDirs("src/desktopMain/resources")
-            resources.srcDir(generatePythonProperties)
+            resources.srcDir(generateDesktopPythonProperties)
             // `reachability-metadata.json` is generated, not checked in -- see
             // GenerateReachabilityMetadata above. Wiring it as a resource srcDir (through the
             // task's own output provider, so the dependency is inferred) is what puts it on the
@@ -2742,12 +2761,12 @@ android {
 
     sourceSets["main"].assets.srcDirs("src/androidMain/assets", "$androidBuildDir/assets")
     // KMP androidMain resources do not reach the AAR's classes.jar; AGP's main resources do.
-    sourceSets["main"].resources.srcDir(generatePythonProperties)
+    sourceSets["main"].resources.srcDir(generateAndroidPythonProperties)
     // AGP's legacy source-set API resolves that provider to files and drops the task dependency
     // (issue #72: `processReleaseJavaRes` read the output with no declared dependency), so it is
     // declared on every AGP java-resources task explicitly.
     tasks.matching { Regex("""process\w*JavaRes""").matches(it.name) }
-        .configureEach { dependsOn(generatePythonProperties) }
+        .configureEach { dependsOn(generateAndroidPythonProperties) }
     sourceSets["androidTest"].assets.srcDirs("$androidBuildDir/assets")
     sourceSets["debug"].jniLibs.srcDirs("src/androidMain/jniLibs",
         "$androidBuildDir/jniLibs", "$androidBuildDir/debug/jniLibs")
