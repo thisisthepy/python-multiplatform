@@ -9,6 +9,13 @@ on:
     branches: [ "develop", "main" ]
     paths: [ "python-multiplatform-ksp/**", "python-multiplatform-ksp/fixtures/app/**", ".github/workflows/typedpython.yml" ]
   workflow_dispatch:
+    inputs:
+      race_mutant:
+        # The race_mutant tests show that a concurrency test catches a planted mutant; each depends
+        # on the race firing, so they run only when asked (leader decision 2026-11-13, #394).
+        description: "Also run the race_mutant tests (a missed race fails the step)"
+        type: boolean
+        default: false
 concurrency:
   # A run in progress finishes; a newer push replaces only the queued run (frequent merges
   # to develop otherwise cancelled every run before it reported).
@@ -49,6 +56,10 @@ jobs:
 
       - name: Behaviour tests
         run: ${{ matrix.venv_python }} -m pytest -q -m "not measurement and not race_mutant"
+
+      - name: Race mutants (dispatch input race_mutant)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.race_mutant }}
+        run: ${{ matrix.venv_python }} -m pytest -q -rA -m race_mutant
 
       - name: Measurements (recorded, sanity bounds only)
         # A shared runner is not an idle machine (AGENTS.md §8): read ratios, not absolute times.
