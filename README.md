@@ -74,12 +74,16 @@ fun main() {
     val numbers = PyList.fromList(listOf(2L, 3L, 5L, 7L, 11L).map { PyInt.from(it) })
     Python3.import("__main__").setAttr("kotlin_numbers", numbers)
 
-    val globals = Python3.import("__main__").dict
-    val result: PyObject = Python3.eval("sum(kotlin_numbers) * 2", 258 /* Py_eval_input */, globals, globals)
+    // One expression, evaluated in __main__.
+    val result: PyObject = Python3.eval("sum(kotlin_numbers) * 2")
     println("${result.Type.name}: $result")   // int: 56
 
     Python3.exec("print('hello from python')")
     // No close() anywhere: each wrapper releases its reference when it is collected.
+
+    // Python buffers sys.stdout. finalize() flushes it and ends the interpreter (call it on the
+    // thread that called initialize()); Python3.flush() flushes without ending it.
+    Python3.finalize()
 }
 ```
 

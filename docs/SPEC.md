@@ -48,6 +48,18 @@ fail, then implement.
   `PyObject`, `Python3.import(name)` returns a `PyModule`. Python errors surface as `PyException`
   carrying the real Python exception (not a printed-and-cleared one).
   `Status: implemented`, `PM/commonTest/.../ffi/Python3Test.kt`, `SmokeTest.kt`, `VersionsTest.kt`.
+- **L-1a** (issue #339) A consumer can end the interpreter and get the one-argument evaluation it
+  needs without reaching for C API constants. `Python3.eval(expression)` evaluates one expression in
+  `__main__`'s namespace (`Py_eval_input`) and returns a new `PyObject`. `Python3.flush()` flushes
+  `sys.stdout` and `sys.stderr` (a stream that is `None` or has no `flush` is skipped; an error in
+  `flush` surfaces as `PyException`), so output Python buffered is not lost when the process exits
+  without finalizing. `Python3.finalize()` is public: it runs `Py_FinalizeEx()` (which flushes the
+  standard streams itself), returns its status (0, or -1 when flushing buffered data failed), sets
+  `isInitialized` to false, and does nothing (returns 0) when the interpreter is not running. It must
+  run on the thread that called `initialize()`; from any other thread, or when this binding did not
+  start the interpreter, it throws `IllegalStateException` and leaves the interpreter running. Starting
+  the interpreter again in the same process after it is not supported.
+  `Status: implemented`, `PM/commonTest/.../ffi/Python3Test.kt`, `PM/desktopTest/.../ffi/InterpreterShutdownTest.kt`.
 - **L-2** `Python3.runMain` / `runApp` run a module or `-c` source with argv, map `sys.exit` status to
   a return value, restore argv, and do not finalize the shared interpreter.
   `Status: implemented`, `PM/commonTest/.../RunMainTest.kt`, `RunAppTest.kt`.
