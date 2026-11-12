@@ -509,13 +509,16 @@ def test_verifier_buffer_params_are_not_limited_but_lists_still_are():
     from test_verify import F64 as VF64, F64A as VF64A, assert_accepted, assert_rejected, fn
     from typedpython.ir import ArrayParam, Const, Index, Return, Type
 
-    def many(n, buffer):
+    def many(n, buffer, pure=True, may_deopt=False):
         return fn("f", params=[ArrayParam(f"a{k}", VF64A, False, buffer) for k in range(n)],
-                  returns=VF64, pure=True,
+                  returns=VF64, pure=pure, may_deopt=may_deopt,
                   body=[Return(Index(VF64, "a0", Const(Type.I64, 0)))])
 
     assert_accepted(many(5, "array"))
-    assert_rejected("verify/structure", many(3, None))
+    # #255 (d1): a pure function reads 3+ lists element by element (it may deopt on an element of
+    # another type); a function with effects keeps the limit of two lists
+    assert_accepted(many(3, None, may_deopt=True))
+    assert_rejected("verify/structure", many(3, None, pure=False))
 
 
 # --- vectorised element-wise store loops (#226) ---------------------------------------------------
