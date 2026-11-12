@@ -658,8 +658,27 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   asset. `Status: partial` (desktop only, opt-in; default is `pythonFreeThreaded=false` in `gradle.properties`)
  , `GP/PythonHomeStagingTest.kt`, `PM/desktopTest/.../FreeThreadedGCGateTest.kt`, `VersionsTest.kt`.
   3.14t runs the whole desktop suite with `-PpythonFreeThreaded=true` (236 tests, 0 failures; ROADMAP §9).
-  Only desktop has free-threaded prebuilts; Android and iOS do not. `Py_LIMITED_API` is not defined, so
-  `abi3t` is not a blocker.
+  python.org and python-build-standalone publish free-threaded prebuilts for desktop only; for Android
+  and iOS this project builds its own (#163, release `cpython-3.15.0t-mobile`), see T-2a.
+  `Py_LIMITED_API` is not defined, so `abi3t` is not a blocker.
+- **T-2a** Free-threaded CPython on mobile through the Gradle plugin (#328 step 1; direction: the
+  maintainer's #158 decision of 2026-10-04, "Free-threaded is the default and the only build", baseline
+  3.15t). The plugin's iOS consumer wiring (#90, L-11) can acquire the project's own free-threaded
+  `Python.xcframework`, `python-<version>t-iOS-XCframework.tar.gz` from the GitHub release
+  `cpython-<version>t-mobile` of `thisisthepy/python-multiplatform`, verified against the SHA-256 pinned in
+  `python-checksums.properties` under `ios-<version>-freethreaded` and baked into the plugin at plugin build
+  time (a mismatch, or a missing pin, fails `downloadPython_ios`). It is selected per consumer with
+  `pythonBindings { ios { freeThreaded.set(true) } }`; the default stays `false`, the python.org GIL
+  archive and `lib/python<X.Y>/`, until #328 step 3 switches the mobile default (the separate switch,
+  and its default, are an agent proposal, not confirmed). With it set, every per-slice prefix holds
+  `lib/python<X.Y>t/`: the shared `Python.xcframework/lib/python<X.Y>t/` merged with
+  `<slice>/lib-<arch>/python<X.Y>t/`, with L-11's exclusions (so no `libpython<X.Y>t.dylib`), and the
+  staging task fails unless `lib/python<X.Y>t/os.py` is staged. Android: the plugin stages nothing for
+  Android (libpython and the stdlib travel inside the library's AAR, L-5); the Android archive's pin
+  (`android-aarch64-<version>-freethreaded`) is recorded in `python-checksums.properties`, and acquiring it
+  is a library-build change left to #328 steps 2 and 3. `Status: partial` (unit tests only,
+  `GP/IosConsumerWiringTest.kt`, `GP/IosPythonHomeLayoutTest.kt`; no simulator run, and the library's own
+  iOS klib is still compiled against the GIL headers).
 - **T-3** `python-multiplatform` publishes per-target, per-flavour CPython include directories as
   `Provider<Directory>` carrying the extraction task (`cpythonIncludeDirectories` extension; see
   `docs/platforms/python-version-acquisition.md` §7). `Status: partial` (only the configured flavour is

@@ -116,11 +116,14 @@ object IosPythonHomeLayout {
             )
     }
 
-    /** `3.14` from `3.14.7`. */
-    fun stdlibTag(pythonVersion: String): String {
+    /**
+     * `3.14` from `3.14.7`; `3.15t` from `3.15.0` for a free-threaded framework (SPEC T-2a), whose
+     * standard library is `lib/python3.15t/` and whose slices carry `lib-<arch>/python3.15t/`.
+     */
+    fun stdlibTag(pythonVersion: String, freeThreaded: Boolean = false): String {
         val parts = pythonVersion.split('.')
         require(parts.size >= 2) { "python version '$pythonVersion' has no major.minor" }
-        return "${parts[0]}.${parts[1]}"
+        return "${parts[0]}.${parts[1]}" + if (freeThreaded) "t" else ""
     }
 
     /**
@@ -128,8 +131,8 @@ object IosPythonHomeLayout {
      * first: the slice tree only adds files (`lib-dynload/`, `_sysconfigdata__ios_*`), but if it ever
      * overlapped, the slice-specific file is the one that must win, as in `install_stdlib`.
      */
-    fun sourceDirectories(slice: Slice, pythonVersion: String): List<String> {
-        val tag = stdlibTag(pythonVersion)
+    fun sourceDirectories(slice: Slice, pythonVersion: String, freeThreaded: Boolean = false): List<String> {
+        val tag = stdlibTag(pythonVersion, freeThreaded)
         return listOf("lib/python$tag", "${slice.xcframeworkSlice}/lib-${slice.arch}/python$tag")
     }
 
@@ -158,10 +161,10 @@ object IosPythonHomeLayout {
      * ([sourceDirectories]' order). Fails when a source tree is missing, rather than staging half a
      * prefix that would abort `Py_Initialize()` on the device.
      */
-    fun plan(xcframework: File, slice: Slice, pythonVersion: String): Map<String, File> {
-        val tag = stdlibTag(pythonVersion)
+    fun plan(xcframework: File, slice: Slice, pythonVersion: String, freeThreaded: Boolean = false): Map<String, File> {
+        val tag = stdlibTag(pythonVersion, freeThreaded)
         val result = sortedMapOf<String, File>()
-        for (relative in sourceDirectories(slice, pythonVersion)) {
+        for (relative in sourceDirectories(slice, pythonVersion, freeThreaded)) {
             val root = File(xcframework, relative)
             if (!root.isDirectory) {
                 throw GradleException(
@@ -204,6 +207,14 @@ abstract class StageIosPythonHomeTask : DefaultTask() {
     @get:Input
     abstract val pythonVersion: Property<String>
 
+    /**
+     * Whether [xcframework] is a free-threaded build (`lib/python<X.Y>t/`, SPEC T-2a). Unset means
+     * false, the GIL layout.
+     */
+    @get:Input
+    @get:org.gradle.api.tasks.Optional
+    abstract val freeThreaded: Property<Boolean>
+
     @get:OutputDirectory
     abstract val destinationDir: DirectoryProperty
 
@@ -213,7 +224,8 @@ abstract class StageIosPythonHomeTask : DefaultTask() {
             ?: throw GradleException("unknown iOS slice '${sliceName.get()}'")
         val framework = xcframework.get().asFile
         val version = pythonVersion.get()
-        val plan = IosPythonHomeLayout.plan(framework, slice, version)
+        val ft = freeThreaded.getOrElse(false)
+        val plan = IosPythonHomeLayout.plan(framework, slice, version, ft)
 
         val root = destinationDir.get().asFile
         val home = File(root, PREFIX_DIRECTORY)
@@ -233,7 +245,7 @@ abstract class StageIosPythonHomeTask : DefaultTask() {
         Files.copy(template.toPath(), File(root, TEMPLATE_NAME).toPath(), StandardCopyOption.REPLACE_EXISTING)
 
         // The marker PythonHomeCheck probes on the device, checked here where it is cheap to fail.
-        val marker = File(home, "lib/python${IosPythonHomeLayout.stdlibTag(version)}/os.py")
+        val marker = File(home, "lib/python${IosPythonHomeLayout.stdlibTag(version, ft)}/os.py")
         if (!marker.isFile) {
             throw GradleException("staged ${slice.name} into $home but $marker is missing; the app would abort at Py_Initialize().")
         }

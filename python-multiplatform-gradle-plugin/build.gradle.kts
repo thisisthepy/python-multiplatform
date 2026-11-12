@@ -289,6 +289,16 @@ val generateCoordinates = tasks.register("generateCoordinates") {
             "python-checksums.properties (${checksumsFile.path}) has no '$iosLockKeyValue'; the plugin bakes the iOS support archive's SHA-256 from it.",
         )
 
+    // The project's own free-threaded iOS build (#163, #328 step 1): release `cpython-<version>t-mobile`
+    // of thisisthepy/python-multiplatform. Pinned under `ios-<version>-freethreaded`; the 3.15.0 value
+    // is the release's SHA256SUMS line, equal to the GitHub asset digest and to `shasum -a 256` of the
+    // downloaded archive (checked 2026-11-13). Optional: a missing pin bakes "" and only a consumer
+    // that selects the free-threaded archive fails, in `downloadPython_ios`, naming the key.
+    val iosFreeThreadedLockKeyValue = "ios-$pythonVersionValue-freethreaded"
+    val iosFreeThreadedSha256Value = Properties().apply {
+        if (checksumsFile.isFile) checksumsFile.inputStream().use { load(it) }
+    }.getProperty(iosFreeThreadedLockKeyValue).orEmpty()
+
     inputs.property("coordinates", coordinates)
     inputs.property("klibWorkerCoordinates", klibWorkerValue)
     inputs.property("pythonVersion", pythonVersionValue)
@@ -299,6 +309,8 @@ val generateCoordinates = tasks.register("generateCoordinates") {
     inputs.property("iosArchiveName", iosArchiveNameValue)
     inputs.property("iosLockKey", iosLockKeyValue)
     inputs.property("iosSha256", iosSha256Value)
+    inputs.property("iosFreeThreadedLockKey", iosFreeThreadedLockKeyValue)
+    inputs.property("iosFreeThreadedSha256", iosFreeThreadedSha256Value)
     outputs.dir(outputDir)
     doLast {
         val file = outputDir.get().file("python/multiplatform/gradle/ProcessorCoordinates.kt").asFile
@@ -327,6 +339,12 @@ val generateCoordinates = tasks.register("generateCoordinates") {
 
             /** Its SHA-256, read from `python-checksums.properties` when this plugin was built. */
             internal const val DEFAULT_IOS_ARCHIVE_SHA256: String = "$iosSha256Value"
+
+            /** The key of the free-threaded iOS archive (SPEC T-2a) in `python-checksums.properties`. */
+            internal const val DEFAULT_IOS_FREE_THREADED_LOCK_KEY: String = "$iosFreeThreadedLockKeyValue"
+
+            /** Its SHA-256, or "" when `python-checksums.properties` had no such key at plugin build time. */
+            internal const val DEFAULT_IOS_FREE_THREADED_ARCHIVE_SHA256: String = "$iosFreeThreadedSha256Value"
 
             internal const val DEFAULT_PYTHON_FREE_THREADED: Boolean = $freeThreadedValue
 
