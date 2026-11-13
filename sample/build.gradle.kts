@@ -350,8 +350,8 @@ val hostPlatform = when {
 // the same way rather than hardcoding a flat path -- otherwise the sample points PYTHONHOME at a
 // directory that only exists for the default configuration.
 val samplePythonVersion = project.findProperty("pythonVersion")?.toString() ?: rootProject.version.toString()
-val sampleFlavourSuffix =
-    if (project.findProperty("pythonFreeThreaded")?.toString()?.toBoolean() == true) "-freethreaded" else ""
+// Desktop acquires only the free-threaded build (#158), unpacked under `<platform>-freethreaded`.
+val sampleFlavourSuffix = "-freethreaded"
 val pythonHomeForHost = project(":python-multiplatform").layout.buildDirectory
     .dir("python-standalone/extracted/$samplePythonVersion/$hostPlatform$sampleFlavourSuffix/python")
 

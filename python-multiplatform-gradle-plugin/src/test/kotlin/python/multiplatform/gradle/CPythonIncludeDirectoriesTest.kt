@@ -80,7 +80,8 @@ class CPythonIncludeDirectoriesTest {
 
     @Test
     fun everyTargetResolvesToADistinctDirectoryHoldingPythonH() {
-        val (project, dirs) = fixture(CPythonFlavour.GIL)
+        // FREE_THREADED is the desktop flavour the library build extracts (#158).
+        val (project, dirs) = fixture(CPythonFlavour.FREE_THREADED)
         val seen = mutableSetOf<File>()
         for (t in dirs.targets) {
             val producer = project.tasks.getByName("fake_${t.replace('-', '_')}")
@@ -99,12 +100,35 @@ class CPythonIncludeDirectoriesTest {
     }
 
     @Test
-    fun theOtherFlavourFailsLoudlyNamingTheProperty() {
-        val (_, dirs) = fixture(CPythonFlavour.GIL)
-        assertFalse(dirs.isAvailable("macos-aarch64", CPythonFlavour.FREE_THREADED))
-        val e = assertFailsWith<GradleException> { dirs.includeDir("macos-aarch64", CPythonFlavour.FREE_THREADED) }
-        assertTrue("pythonFreeThreaded" in e.message.orEmpty())
+    fun theOtherFlavourFailsLoudlyNamingTheDecision() {
+        val (_, dirs) = fixture(CPythonFlavour.FREE_THREADED)
+        assertFalse(dirs.isAvailable("macos-aarch64", CPythonFlavour.GIL))
+        val e = assertFailsWith<GradleException> { dirs.includeDir("macos-aarch64", CPythonFlavour.GIL) }
+        assertTrue("#158" in e.message.orEmpty(), e.message)
         assertFailsWith<GradleException> { dirs.includeDir("ios-arm64", CPythonFlavour.FREE_THREADED) }
+    }
+
+    /**
+     * Issue #158: desktop embeds only the free-threaded build, so the default flavour of every
+     * accessor is the one the library embeds for that target. Red before: the default was
+     * `CPythonFlavour.GIL` for every target, so `includeDir("macos-aarch64")` asked for a tree the
+     * free-threaded build does not extract and threw (and `embeddedFlavour` did not exist, so this
+     * does not compile against the old source).
+     */
+    @Test
+    fun theDefaultFlavourIsTheOneTheLibraryEmbeds() {
+        for (t in CPythonIncludeLayout.desktopTargets) {
+            assertEquals(CPythonFlavour.FREE_THREADED, CPythonIncludeLayout.embeddedFlavour(t), t)
+        }
+        for (t in CPythonIncludeLayout.androidTargets + CPythonIncludeLayout.iosTargets) {
+            assertEquals(CPythonFlavour.GIL, CPythonIncludeLayout.embeddedFlavour(t), t)
+        }
+        val (_, dirs) = fixture(CPythonFlavour.FREE_THREADED)
+        assertTrue(dirs.isAvailable("macos-aarch64"))
+        val root = dirs.includeDir("macos-aarch64").get().asFile.parentFile.parentFile.parentFile.parentFile
+        assertEquals(File(root, "macos-aarch64-freethreaded/python/include/python3.14t"), dirs.includeDir("macos-aarch64").get().asFile)
+        assertEquals(File(root, "android-aarch64/prefix/include/python3.14"), dirs.includeDir("android-aarch64").get().asFile)
+        assertEquals("python314t.lib", dirs.libraryFile("windows-x86_64").get().asFile.name)
     }
 
     @Test
@@ -148,7 +172,7 @@ class CPythonIncludeDirectoriesTest {
 
     @Test
     fun linkLibraryProvidersCarryTheExtractionTaskAndResolve() {
-        val (project, dirs) = fixture(CPythonFlavour.GIL)
+        val (project, dirs) = fixture(CPythonFlavour.FREE_THREADED)
         val root = project.layout.projectDirectory.dir("extracted/$version")
         for (t in dirs.targets.filter { dirs.isLinkRequired(it) }) {
             val producer = project.tasks.getByName("fake_${t.replace('-', '_')}")
@@ -159,23 +183,24 @@ class CPythonIncludeDirectoriesTest {
             val fileConsumer = project.tasks.register("linkf_${t.replace('-', '_')}") { inputs.file(fileProvider) }.get()
             assertTrue(producer in fileConsumer.taskDependencies.getDependencies(fileConsumer), "$t: libraryFile lacks task")
             // Simulate the extraction creating the library.
-            val expected = root.dir(CPythonIncludeLayout.linkLibraryDirRelativePath(t, CPythonFlavour.GIL)).asFile
+            val flavour = CPythonIncludeLayout.embeddedFlavour(t)
+            val expected = root.dir(CPythonIncludeLayout.linkLibraryDirRelativePath(t, flavour)).asFile
             expected.mkdirs()
-            File(expected, CPythonIncludeLayout.linkLibraryFileName(t, CPythonFlavour.GIL, version)).writeText("lib")
+            File(expected, CPythonIncludeLayout.linkLibraryFileName(t, flavour, version)).writeText("lib")
             assertEquals(expected, dirProvider.get().asFile)
-            assertEquals(expected.resolve(CPythonIncludeLayout.linkLibraryFileName(t, CPythonFlavour.GIL, version)), fileProvider.get().asFile)
+            assertEquals(expected.resolve(CPythonIncludeLayout.linkLibraryFileName(t, flavour, version)), fileProvider.get().asFile)
         }
     }
 
     @Test
     fun linkLibraryFailsLoudlyWhenNotRequiredOrWrongFlavour() {
-        val (_, dirs) = fixture(CPythonFlavour.GIL)
+        val (_, dirs) = fixture(CPythonFlavour.FREE_THREADED)
         assertFalse(dirs.isLinkRequired("macos-aarch64"))
         assertFailsWith<GradleException> { dirs.libraryDir("macos-aarch64") }
         assertFailsWith<GradleException> { dirs.libraryFile("ios-arm64") }
-        assertFalse(dirs.isLinkAvailable("windows-x86_64", CPythonFlavour.FREE_THREADED))
-        val e = assertFailsWith<GradleException> { dirs.libraryDir("windows-x86_64", CPythonFlavour.FREE_THREADED) }
-        assertTrue("pythonFreeThreaded" in e.message.orEmpty())
+        assertFalse(dirs.isLinkAvailable("windows-x86_64", CPythonFlavour.GIL))
+        val e = assertFailsWith<GradleException> { dirs.libraryDir("windows-x86_64", CPythonFlavour.GIL) }
+        assertTrue("#158" in e.message.orEmpty(), e.message)
         assertFailsWith<GradleException> { dirs.libraryDir("android-aarch64", CPythonFlavour.FREE_THREADED) }
     }
 

@@ -1,6 +1,6 @@
 package python.multiplatform.ref
 
-import python.multiplatform.BuildConfig
+import python.multiplatform.embedsFreeThreadedPython
 import python.multiplatform.ffi.PyObject
 import python.multiplatform.ffi.Python3
 import python.multiplatform.ffi.ReleaseCounter
@@ -21,10 +21,13 @@ import kotlin.time.measureTime
  * and friends therefore never merges the free-threaded build's biased reference-counting queue,
  * never processes QSBR-deferred frees and never runs a scheduled cyclic collection.
  *
- * The consequence measured in §9 is that references handed back by the cleaner *stay* handed back
- * and never freed: the counts are correct, the memory is not returned. These tests pin the shape
- * of that, the fact that the obvious Stable ABI candidate does not fix it, and the cost of the one
- * that does.
+ * The consequence measured in §9 on 3.14t is that references handed back by the cleaner *stay*
+ * handed back and never freed: the counts are correct, the memory is not returned. CPython 3.15
+ * narrowed that: `_Py_brc_queue_object` (`Python/brc.c:118` at v3.15.0) now merges the owner's
+ * whole queue on its behalf when the owning thread is *detached*, which a Kotlin thread is between
+ * two `withGIL` scopes. What is left for the checkpoint is what was queued while the owner was
+ * attached. These tests pin the shape of that, the fact that the obvious Stable ABI candidate does
+ * not merge, and the cost of the one that does.
  */
 class EvalCheckpointTest {
 
@@ -125,8 +128,28 @@ class EvalCheckpointTest {
      *  * where a reading exists that belongs to this test alone, the loop waits on that instead of
      *    on the counter. With the global lock a released outer wrapper frees its list and hands the
      *    target back a reference, so the target's own count says how many of *ours* the cleaner has
-     *    reached. The free-threaded build has no such reading -- that it has none is the very thing
-     *    the branch below asserts -- and there the drained counter is the evidence.
+     *    reached. Free-threaded 3.15 has that reading too for every release that arrived while this
+     *    thread was detached, but not for one that arrived while it was attached: that one sits in
+     *    this thread's queue until a checkpoint, and the count never reaches the baseline on its
+     *    own. So there the loop also stops once the cleaner has gone quiet, and the drain below is
+     *    what has to finish the job.
+     *
+     * ### What the free-threaded branch asserts, and why it changed with 3.15
+     *
+     * On 3.14t this branch asserted that the cleaner's $OUTER decrefs left the target's count
+     * exactly where it was: every one was queued to the owning thread. 3.15.0 added the detached
+     * owner case to `_Py_brc_queue_object` (`Python/brc.c:118`, `_PyThreadState_TrySuspendDetached`):
+     * if the owner is detached, the queuing thread suspends it, merges its whole queue and frees
+     * what reached zero. That is the state this thread is in while [collectorTest] waits, so the
+     * outer lists are now freed by the cleaner itself. What still holds, and is asserted:
+     *
+     *  * the count dropped before any checkpoint was taken (the 3.15 merge exists; a return to the
+     *    3.14 queue-only behaviour reads `after the cleaner == after the build` and fails here);
+     *  * `Py_MakePendingCalls`, inside one attached window so that no on-behalf merge can happen
+     *    during it, does not move the count;
+     *  * after [Python3.drainPendingReleases] every one of the $OUTER lists is gone, the same
+     *    `<= refBefore` bound the global-lock branch is held to, which a drain that merged only
+     *    part of the queue cannot pass.
      */
     @Test
     fun testDrainPendingReleasesReclaimsWhatTheCleanerGaveBack(): CollectorTestResult {
@@ -179,6 +202,11 @@ class EvalCheckpointTest {
             var attempts = 0
             var cleanerReleases = 0
             var refNow = refAfterBuild
+            // Free-threaded only: consecutive attempts in which the cleaner released nothing of
+            // its own, so that a straggler parked in this thread's queue cannot hold the loop open
+            // until the budget runs out.
+            var lastCleanerReleases = -1
+            var cleanerQuietTurns = 0
 
             // Driven rather than spun. On wasmJs the cleaner is a host finalisation callback that
             // arrives on a task, so a `while` loop here would ask 200 times inside one job and see
@@ -207,10 +235,15 @@ class EvalCheckpointTest {
                     refNow = refCount(target)
                     attempts++
                     cleanerReleases = ReleaseCounter.released - releasedBefore - attempts * releasesPerProbe
-                    // With the global lock, `refNow` is the reading that belongs to this test and
-                    // to nothing else, so it is not enough for the counter alone to be satisfied.
+                    if (cleanerReleases == lastCleanerReleases) cleanerQuietTurns++
+                    else { cleanerQuietTurns = 0; lastCleanerReleases = cleanerReleases }
+                    // `refNow` is the reading that belongs to this test and to nothing else, so it
+                    // is not enough for the counter alone to be satisfied. Free-threaded, a release
+                    // that arrived while this thread was attached is queued, not freed, so a
+                    // cleaner that has gone quiet ends the wait as well (see the KDoc).
                     cleanerReleases >= OUTER &&
-                        (BuildConfig.pythonFreeThreaded || refNow <= refBefore)
+                        (refNow <= refBefore ||
+                            (embedsFreeThreadedPython && cleanerQuietTurns >= QUIET_TURNS_TO_SETTLE))
                 }
             }, finish = {
                 try {
@@ -234,25 +267,34 @@ class EvalCheckpointTest {
 
                     val refAfterCleaner = refCount(target)
 
-                    if (BuildConfig.pythonFreeThreaded) {
-                        assertEquals(
-                            refAfterBuild,
-                            refAfterCleaner,
-                            "free-threaded: a Py_DecRef from a thread that does not own the object is " +
-                                "queued to its owner rather than run, so $OUTER completed decrefs must " +
-                                "leave the count exactly where it was. If this now differs, the runtime " +
-                                "has started merging somewhere else and the rest of this test is stale."
+                    if (embedsFreeThreadedPython) {
+                        // 3.15's on-behalf merge (Python/brc.c:118): this thread was detached for
+                        // almost all of the wait, so the cleaner itself freed the outer lists.
+                        assertTrue(
+                            refAfterCleaner < refAfterBuild,
+                            "free-threaded 3.15: a Py_DecRef from another thread while the owner is " +
+                                "detached merges the owner's queue on its behalf, so the cleaner " +
+                                "alone should have freed outer lists and lowered the count. It did " +
+                                "not move (before the build: $refBefore, after it: $refAfterBuild, " +
+                                "after the cleaner: $refAfterCleaner; $diagnosis): the runtime is back " +
+                                "to queuing every cross-thread release for the owner's next checkpoint"
                         )
 
-                        // Py_MakePendingCalls is the Stable ABI function that looks like it should do
-                        // this. It does not: it handles _PY_CALLS_TO_DO_BIT and _PY_SIGNALS_PENDING_BIT
-                        // and returns, while the merge hangs off _PY_EVAL_EXPLICIT_MERGE_BIT, which only
-                        // _Py_HandlePending clears.
-                        val pendingResult = withGIL { Py_MakePendingCalls() }
+                        // Py_MakePendingCalls is the Stable ABI function that looks like it should
+                        // merge. It does not: it handles _PY_CALLS_TO_DO_BIT and
+                        // _PY_SIGNALS_PENDING_BIT and returns, while the merge hangs off
+                        // _PY_EVAL_EXPLICIT_MERGE_BIT, which only _Py_HandlePending clears. All
+                        // three steps run in one attached window: while this thread is attached no
+                        // other thread can merge its queue for it, so a change here is the call's.
+                        val (beforePending, pendingResult, afterPending) = withGIL {
+                            val a = refCount(target)
+                            val r = Py_MakePendingCalls()
+                            Triple(a, r, refCount(target))
+                        }
                         assertEquals(0, pendingResult, "Py_MakePendingCalls should not have failed")
                         assertEquals(
-                            refAfterBuild,
-                            refCount(target),
+                            beforePending,
+                            afterPending,
                             "Py_MakePendingCalls must not be mistaken for a checkpoint: it does not merge " +
                                 "the biased reference-counting queue"
                         )
@@ -260,9 +302,12 @@ class EvalCheckpointTest {
                         Python3.drainPendingReleases()
                         val refAfterDrain = refCount(target)
                         assertTrue(
-                            refAfterDrain < refAfterBuild,
-                            "reaching an eval-loop checkpoint should have merged all $OUTER queued " +
-                                "releases (before: $refAfterBuild, after: $refAfterDrain)"
+                            refAfterDrain <= refBefore,
+                            "after an eval-loop checkpoint every one of the $OUTER outer lists should " +
+                                "be gone, the ones the cleaner freed and the ones queued while this " +
+                                "thread was attached (before the build: $refBefore, after it: " +
+                                "$refAfterBuild, after the cleaner: $refAfterCleaner, after the " +
+                                "drain: $refAfterDrain; $diagnosis)"
                         )
                     } else {
                         // `<= refBefore`, not merely `< refAfterBuild`: every one of the $OUTER
@@ -319,7 +364,7 @@ class EvalCheckpointTest {
             val gcCollectNs = timeNs(100) { withGIL { PyGC_Collect() } }
 
             println(
-                "\n--- eval-loop checkpoint cost (freeThreaded=${BuildConfig.pythonFreeThreaded}) ---\n" +
+                "\n--- eval-loop checkpoint cost (freeThreaded=${embedsFreeThreadedPython}) ---\n" +
                     "withGIL { }                     ${emptyScopeNs.format()} ns/op\n" +
                     "Python3.drainPendingReleases()  ${drainNs.format()} ns/op\n" +
                     "withGIL { Py_MakePendingCalls } ${makePendingNs.format()} ns/op   (does NOT merge)\n" +
