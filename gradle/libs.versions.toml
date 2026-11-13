@@ -12,6 +12,10 @@ androidx-material = "1.12.0"
 androidx-test-junit = "1.2.1"
 compose-plugin = "1.11.1-ext.3"
 compose-libraries = "1.11.1-ext.2"
+# The fork's design systems (issue #408). They build against the fork's Compose at their own version,
+# so a classpath that takes them resolves the fork's Compose at this version too (Gradle picks the
+# highest); moving every Compose library to it is a separate change.
+compose-design-systems = "1.11.1-ext.3"
 # JetBrains stopped publishing material-icons with Compose after 1.7.3 (Maven Central: newest is 1.7.3);
 # it is the version Compose Multiplatform 1.11.x points to, resolved against 1.11.1's ui/ui-graphics.
 compose-material-icons = "1.7.3"
@@ -38,6 +42,15 @@ androidx-lifecycle-viewmodel = { group = "org.thisisthepy.compose.androidx.lifec
 androidx-lifecycle-runtime-compose = { group = "org.thisisthepy.compose.androidx.lifecycle", name = "lifecycle-runtime-compose", version.ref = "compose-libraries" }
 kotlinx-coroutines-swing = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-swing", version.ref = "kotlinx-coroutines" }
 kotlinx-browser = { group = "org.jetbrains.kotlinx", name = "kotlinx-browser", version.ref = "kotlinx-browser" }
+# The fork's design systems (compose-multiplatform-core-extended `extended/design-systems`, issue #408).
+designsystem = { group = "org.thisisthepy.compose.designsystem", name = "designsystem", version.ref = "compose-design-systems" }
+designsystem-material3 = { group = "org.thisisthepy.compose.designsystem", name = "designsystem-material3", version.ref = "compose-design-systems" }
+designsystem-breeze = { group = "org.thisisthepy.compose.designsystem", name = "designsystem-breeze", version.ref = "compose-design-systems" }
+designsystem-cupertino = { group = "org.thisisthepy.compose.designsystem", name = "designsystem-cupertino", version.ref = "compose-design-systems" }
+designsystem-deepin = { group = "org.thisisthepy.compose.designsystem", name = "designsystem-deepin", version.ref = "compose-design-systems" }
+designsystem-fluent = { group = "org.thisisthepy.compose.designsystem", name = "designsystem-fluent", version.ref = "compose-design-systems" }
+designsystem-gnome = { group = "org.thisisthepy.compose.designsystem", name = "designsystem-gnome", version.ref = "compose-design-systems" }
+designsystem-liquid-glass = { group = "org.thisisthepy.compose.designsystem", name = "designsystem-liquid-glass", version.ref = "compose-design-systems" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
