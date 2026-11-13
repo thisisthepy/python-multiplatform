@@ -458,7 +458,7 @@ def test_mutation_copying_instead_of_moving_is_caught():
     """tp_new_fixed_move takes a new reference as tp_new_fixed did, while the caller still drops its
     temporaries without releasing them: one leaked reference per slot."""
     from typedpython import cbuild
-    flags = list(cbuild.DEFAULT_FLAGS) + ["-DTP_MOVED_REF(v)=Py_NewRef(v)"]
+    flags = list(cbuild.DEFAULT_FLAGS) + ["-DTP_MUTANT_COPY_MOVED"]   # object-like: cl.exe too
     need_runtime()
     src = generate("tp_alloc_mut_copy")
     so = cbuild.build(src, "tp_alloc_mut_copy", OUT_ROOT / "tp_alloc_mut_copy",

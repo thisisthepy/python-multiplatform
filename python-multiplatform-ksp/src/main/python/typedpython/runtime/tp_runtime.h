@@ -2854,10 +2854,15 @@ static inline PyObject *tp_new_fixed(PyTypeObject *cls, PyMemberDef *const *slot
  * no observation tells the two apart; the count after the call is the same. On failure the slots
  * already written are emptied again before the half-built object is released, so its dealloc drops
  * no reference the caller still owns.
- * TP_MOVED_REF is the single mutation point: test_alloc_preserving.py builds with it defined as
- * Py_NewRef (a copy instead of a move), which leaks one reference per slot and must fail. */
+ * TP_MOVED_REF is the single mutation point: test_alloc_preserving.py builds with -DTP_MUTANT_COPY_MOVED,
+ * which defines it as Py_NewRef (a copy instead of a move), leaks one reference per slot and must fail. */
 #ifndef TP_MOVED_REF
+#ifdef TP_MUTANT_COPY_MOVED   /* the mutation: a copy instead of a move (an object-like switch, as cl.exe
+                                * cannot define a function-like macro on its command line) */
+#define TP_MOVED_REF(v) Py_NewRef(v)
+#else
 #define TP_MOVED_REF(v) (v)
+#endif
 #endif
 static inline PyObject *tp_new_fixed_move(PyTypeObject *cls, PyMemberDef *const *slots,
                                           PyObject *const *values, Py_ssize_t n)
