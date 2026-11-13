@@ -1005,10 +1005,10 @@ static inline int tp_unbox_bool(PyObject *o, int *out)
  * borrowed references (PyList_GET_ITEM) and rely on that lock: no other thread can change the list
  * between the copy-in and the write-back, so the whole call is one atomic step as far as lists are
  * concerned (CPython can produce that interleaving: every list operation takes the same lock).
- * Liveness note (issue #152): a function holding an array does not poll the eval breaker, so a long
- * compiled array loop delays other threads' stop-the-world requests (the free-threaded GC) until it
- * returns; results are unaffected. Polls inside such functions need the re-validation decided in
- * #152 (after a poll the critical section is re-taken and the list may have changed).
+ * Polls (issue #152, #335, SPEC N-8): a function holding an array polls once per TP_POLL_INTERVAL
+ * at the top of a loop iteration: it writes the array back with exit, ends the critical section,
+ * polls, and enters again (re-taking the section and re-checking the list), so each poll costs a
+ * full write-back and copy-in of the list (#406).
  * exit: writes the dirty slots back as new objects (PyList_SetItem steals the new reference and, on
  * failure, drops it), always frees, and zeroes the struct. On a write-back failure it stops,
  * frees, and returns -1 with that error set (MemoryError, or IndexError if the list shrank).
@@ -2843,6 +2843,51 @@ static inline PyObject *tp_new_fixed(PyTypeObject *cls, PyMemberDef *const *slot
     return obj;
 }
 
+/* tp_new_fixed with the caller's references moved into the slots (#125, design 4.3.4 "참조 옮기기"):
+ * on success the object owns values[i] (the caller drops its pointers without releasing them); on
+ * failure nothing was taken and the caller still owns every values[i].
+ *
+ * Same stores, same object, same allocation as tp_new_fixed; what is gone is a Py_NewRef of each
+ * value here and the caller's Py_CLEAR of its temporary right after, a +1/-1 pair on the same object
+ * with nothing in between that can run code or reach a safepoint. Every reference count another
+ * thread can read during the call is one it could read with the pair (outside the pair's window), so
+ * no observation tells the two apart; the count after the call is the same. On failure the slots
+ * already written are emptied again before the half-built object is released, so its dealloc drops
+ * no reference the caller still owns.
+ * TP_MOVED_REF is the single mutation point: test_alloc_preserving.py builds with -DTP_MUTANT_COPY_MOVED,
+ * which defines it as Py_NewRef (a copy instead of a move), leaks one reference per slot and must fail. */
+#ifndef TP_MOVED_REF
+#ifdef TP_MUTANT_COPY_MOVED   /* the mutation: a copy instead of a move (an object-like switch, as cl.exe
+                                * cannot define a function-like macro on its command line) */
+#define TP_MOVED_REF(v) Py_NewRef(v)
+#else
+#define TP_MOVED_REF(v) (v)
+#endif
+#endif
+static inline PyObject *tp_new_fixed_move(PyTypeObject *cls, PyMemberDef *const *slots,
+                                          PyObject *const *values, Py_ssize_t n)
+{
+    Py_ssize_t i, j;
+    PyObject *obj = cls->tp_alloc(cls, 0);
+
+    if (obj == NULL) {
+        return NULL;
+    }
+    for (i = 0; i < n; i++) {
+        if (values[i] == NULL) {
+            for (j = 0; j < i; j++) {       /* give the moved references back to the caller */
+                *(PyObject **)((char *)obj + slots[j]->offset) = NULL;
+            }
+            PyErr_SetString(PyExc_AttributeError, slots[i]->name);
+            Py_DECREF(obj);
+            return NULL;
+        }
+        __atomic_store_n((PyObject **)((char *)obj + slots[i]->offset), TP_MOVED_REF(values[i]),
+                         __ATOMIC_RELEASE);
+    }
+    return obj;
+}
+
 /* type(obj) is cls */
 static inline int tp_is_exact(PyObject *obj, PyTypeObject *cls)
 {
@@ -3052,11 +3097,11 @@ static inline void tp_trace_fast_hit(void) {}
  * (forced GIL switching to a waiting thread, KeyboardInterrupt, gc). Public API only.
  *
  * Signal handlers, pending calls and other threads are user code that may change lists and
- * globals. A function holding an array copy-in or an entry-globals snapshot runs no user code by
- * contract (ir.ArrayParam, ir.Function.entry_globals), so such a function does not poll, and while
- * one is active (`tp_snapshot_depth > 0`, counted at its entry and exit) the slow path does nothing:
- * the event stays pending and is handled at the next poll or bytecode after it returns, which is the
- * CPython execution in which it arrived late.
+ * globals. A function holding an array copy-in or an entry-globals snapshot runs no user code while
+ * it holds them (ir.ArrayParam, ir.Function.entry_globals): while one is active
+ * (`tp_snapshot_depth > 0`, counted at its entry and exit) the slow path does nothing and the event
+ * stays pending. Its own polls (#152, #335) first write the arrays back and lower the depth, so the
+ * handler runs there with the lists up to date, and the function copies them in again after.
  * ------------------------------------------------------------------------------------------ */
 #ifndef TP_POLL_INTERVAL
 #define TP_POLL_INTERVAL 4096
