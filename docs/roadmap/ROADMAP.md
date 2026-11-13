@@ -166,9 +166,14 @@ kept as an option. Baseline is CPython 3.15t"; leader, 2026-11-13: "flip the des
 now, before the #377 alpha03 release"). `-PpythonFreeThreaded` is removed; the build fails if it is
 passed. Android (arm64-v8a, x86_64), androidNative and iOS embed the project's own 3.15t with no
 opt-in flag (#328 step 2; leader 2026-11-13), compiled but not yet run on an emulator, device or
-simulator (9.2); wasm is GIL (#175); the per-platform fact is `embedsFreeThreadedPython` (SPEC T-1). The 3.15t default has not yet been observed running the desktop
-suite; the last recorded free-threaded run is 3.14t as an opt-in: 236 tests, 0 failures, 1 skipped, the
-same count as the GIL build (table at `4ed98143:docs/roadmap/ROADMAP.md`:1013; SPEC T-2). Deferred deallocation is
+simulator (9.2); wasm is GIL (#175); the per-platform fact is `embedsFreeThreadedPython` (SPEC T-1).
+The 3.15t default first ran the desktop suites in CI on 2026-11-13: Desktop CI
+run 43306301208 counted `desktopTest` 647 tests, 3 failed, 1 skipped, and `linuxX64Test` 497 tests, 3 failed.
+All six failures were tests asserting GIL-build or 3.14t behaviour (a `sys.getrefcount` that includes the
+deferred-refcount bias, 3.15.0's detached-owner merge in `brc.c`, the removed GC memory gate, a probe
+reading `ob_tid` as the refcount). They were corrected in #398 with no product change, and run 43329515729
+passed (Gradle prints no count on success). The earlier free-threaded record is 3.14t as an opt-in: 236
+tests, 0 failures, 1 skipped (table at `4ed98143:docs/roadmap/ROADMAP.md`:1013; SPEC T-2). Deferred deallocation is
 drained by the eval-loop checkpoint (`PM/commonTest/.../ref/EvalCheckpointTest.kt`,
 `docs/investigations/gc-scheduling-investigation.md`); `FreeThreadedGCGateTest` guards the GC probe.
 The 3.15 migration (`PyWeakref_GetRef`, the two removed functions) is done

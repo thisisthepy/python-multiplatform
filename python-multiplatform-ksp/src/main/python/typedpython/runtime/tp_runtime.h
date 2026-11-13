@@ -1166,6 +1166,56 @@ static inline int tp_i64_array_exit(tp_i64_array *a)
 }
 
 /* ------------------------------------------------------------------------------------------
+ * Lists read element by element (#255, ir.direct_lists): a pure function with three or more list
+ * parameters does not copy them in. The wrapper sets only `list` of each tp_*_array (borrowed; the
+ * call's arguments keep it alive) and every Index is one of these, in program order: the list's own
+ * PyList_GetItemRef, which is the read the interpreter's `a[i]` does (Objects/listobject.c
+ * list_get_item_ref; Python/bytecodes.c _BINARY_OP_SUBSCR_LIST_INT), so each read is atomic and no
+ * lock is held between two reads. A negative index counts from the length at that read, as in the
+ * interpreter. rc 0 = *out set; -1 = IndexError("list index out of range"); 1 = deopt (the element
+ * is not exactly float / not exactly an int within i64; nothing has happened: the function is pure).
+ * Len is PyList_GET_SIZE at that point (an atomic load on free-threaded builds).
+ * ------------------------------------------------------------------------------------------ */
+static inline PyObject *tp__list_item_ref(PyObject *list, int64_t i)
+{
+    if (i < 0) {
+        i += (int64_t)PyList_GET_SIZE(list);
+    }
+    if (i < 0 || i > (int64_t)PY_SSIZE_T_MAX) {
+        PyErr_SetString(PyExc_IndexError, "list index out of range");
+        return NULL;
+    }
+    return PyList_GetItemRef(list, (Py_ssize_t)i);    /* new reference, or NULL + IndexError */
+}
+
+static inline int tp_list_ld_f64(PyObject *list, int64_t i, double *out)
+{
+    PyObject *v = tp__list_item_ref(list, i);
+    if (v == NULL) {
+        return -1;
+    }
+    if (!PyFloat_CheckExact(v)) {
+        Py_DECREF(v);
+        return 1;
+    }
+    *out = PyFloat_AS_DOUBLE(v);
+    Py_DECREF(v);
+    return 0;
+}
+
+static inline int tp_list_ld_i64(PyObject *list, int64_t i, int64_t *out)
+{
+    int rc;
+    PyObject *v = tp__list_item_ref(list, i);
+    if (v == NULL) {
+        return -1;
+    }
+    rc = tp_unbox_i64(v, out);
+    Py_DECREF(v);
+    return rc < 0 ? -1 : rc > 0 ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------------------------------
  * Buffer arrays (issue #149; ir.ArrayParam.buffer): an exact array.array argument
  * is NOT copied. tp_buf_enter takes one Py_buffer export and tp_buf_exit releases it; the wrapper
  * calls exit on every path (ok, error, deopt), so the export, which forbids a resize of the

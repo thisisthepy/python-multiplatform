@@ -37,14 +37,17 @@ Rules (the `rule` of a Diagnostic):
   verify/structure            break/continue outside a loop, the ForRange var assigned in its body,
                               a zero or non-constant step, duplicate names, bad declarations, an
                               entry global that collides with a parameter/local/other entry global or
-                              is assigned in the body, or more than two array parameters (the lists
-                              are locked from copy-in to write-back: one- and two-object critical
-                              sections only, #159)
+                              is assigned in the body, or more than two array parameters in a
+                              function that is not pure (the lists are locked from copy-in to
+                              write-back: one- and two-object critical sections only, #159)
   verify/proven-overflow      `proven` is set on an op the verifier cannot prove stays inside i64 (or
                               on a node `proven` does not apply to, or it is not a bool)
   verify/redo                 `Call.redo` where it is not legal (see below)
   verify/entry-global-open    a function with entry_globals is not closed
   verify/array-open           a function with an ArrayParam runs user code (#203)
+  verify/array-direct         a pure function with three or more list parameters (#255,
+                              `ir.direct_lists`: read element by element) has an entry global, a
+                              buffer parameter, a CopyArray of a list parameter or a parallel loop
   verify/buffer               a malformed `ArrayParam.buffer` (None, "array", "numpy", "memoryview"), or a
                               CopyArray of a buffer array (#149)
   verify/par-loop             a `ForRange.par` (SPEC N-15, #277) that the verifier does not recompute to
@@ -308,6 +311,7 @@ REGION_ESCAPE = "verify/region-escape"
 REDO = "verify/redo"
 ENTRY_OPEN = "verify/entry-global-open"
 ARRAY_OPEN = "verify/array-open"
+ARRAY_DIRECT = "verify/array-direct"
 BUFFER = "verify/buffer"
 CLASS = "verify/class"
 FIELD = "verify/field-unproved"
@@ -402,6 +406,7 @@ class _Checker:
                  classes: dict[str, ClassDecl] | None = None,
                  var_ivs: dict[str, tuple[int, int]] | None = None, fixing: bool = False):
         self.fn = function
+        self.direct = ir.direct_lists(function)   # #255: lists read element by element
         # Local intervals (module docstring "Local variables and guards"): `var_ivs` is the interval
         # of every eligible local; `fixing` says this walk is a round of the fixpoint that computes
         # them (a local without an interval yet is then "bottom": `bottom` is set when one is read).
@@ -469,7 +474,15 @@ class _Checker:
             if p.name in params:
                 self.error(STRUCTURE, f"parameter '{p.name}' appears twice")
             params.add(p.name)
-        if sum(type(p) is ArrayParam and p.buffer is None for p in fn.params) > 2:
+        if self.direct:
+            self.can_deopt = True      # every element read checks the element's type (#255)
+            if isinstance(fn.entry_globals, tuple) and fn.entry_globals:
+                self.error(ARRAY_DIRECT, "three or more list parameters are read element by element "
+                                         "(#255), so an entry global cannot be read once at entry")
+            if any(type(p) is ArrayParam and p.buffer is not None for p in fn.params):
+                self.error(ARRAY_DIRECT, "three or more list parameters are read element by element "
+                                         "(#255); a buffer parameter beside them is not supported")
+        elif sum(type(p) is ArrayParam and p.buffer is None for p in fn.params) > 2:
             self.error(STRUCTURE, "more than two array parameters: compiled code holds each list's "
                                   "critical section from copy-in to write-back, and free-threaded "
                                   "CPython has no section for more than two objects (#159)")
@@ -1194,6 +1207,11 @@ class _Checker:
 
     def e_Index(self, e: Index, state: _State) -> ir.Expr:
         idx, element, proven = self.index(e.array, e.index, state, "index")
+        if self.direct and e.array in self.arrays and e.array not in self.buffers:
+            # #255: another thread can resize the list between two reads, so no bound is proved,
+            # and an element of another type deopts
+            proven = False
+            self.can_deopt = True
         if element is not None and e.type is not element and e.type is not Type.OBJ:
             self.error(TYPE, f"element of '{e.array}' is {element.value}, node says "
                              f"{e.type.value}")
@@ -1372,6 +1390,9 @@ class _Checker:
             elif e.src in self.buffers:
                 self.error(BUFFER, f"CopyArray of buffer array '{e.src}': a buffer array is never "
                                    "copied)")
+            elif self.direct and e.src in self.arrays:
+                self.error(ARRAY_DIRECT, f"CopyArray of list parameter '{e.src}' in a function that reads "
+                                         "its three or more lists element by element (#255)")
             else:
                 self.array(e.src, "copy", state)
                 if src is not e.type:
@@ -1673,7 +1694,11 @@ class _Checker:
         for br in loop.breaks:
             after = _meet(after, br)
         par = self._par_info(s, step_ok, body, loop, state)
-        if s.par is not None and s.par != par:
+        if self.direct and (par is not None or s.par is not None):
+            self.error(ARRAY_DIRECT, "a parallel loop in a function that reads its three or more lists "
+                                     "element by element (#255)")
+            par = None
+        elif s.par is not None and s.par != par:
             self.error(PAR_LOOP, f"ForRange over '{var}' declares par={s.par!r}, but the verifier "
                                  f"computes {par!r} (SPEC N-15)")
         return dataclasses.replace(s, start=start, stop=stop, body=body, par=par), after
