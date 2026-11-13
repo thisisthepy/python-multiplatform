@@ -743,13 +743,6 @@ def _signature(fn: ast.FunctionDef, classes: dict[str, ir.ClassDecl] | None = No
             params.append(ir.Param(a.arg, Type.OBJ, c[0], c[1]))
         else:
             params.append(ir.Param(a.arg, SCALAR_KIND.get(kind, Type.OBJ)))
-    n_lists = sum(isinstance(p, ir.ArrayParam) and p.buffer is None for p in params)
-    if n_lists > 2:
-        # Free-threaded CPython (#159): the lists are locked from copy-in to write-back, and CPython
-        # offers one- and two-object critical sections only (a nested third could suspend the others).
-        raise Skip(line, f"more than two list parameters ({n_lists}) are not supported: compiled code "
-                         "holds each list's lock from copy-in to write-back, and free-threaded CPython "
-                         "has no lock for more than two objects at once")
     if fn.returns is None:
         raise Skip(line, "no return annotation")
     if isinstance(fn.returns, ast.Constant) and fn.returns.value is None:
@@ -1078,6 +1071,22 @@ class _Lowerer:
         pure = not self.impure
         assert pure or not self.deopts or not self.impure_mode, \
             "impure mode emitted a deopting node"
+        n_lists = sum(isinstance(p, ir.ArrayParam) and p.buffer is None for p in params)
+        if n_lists > 2:
+            # Free-threaded CPython (#159): an impure function's lists are locked from copy-in to
+            # write-back, and CPython offers one- and two-object critical sections only (a nested
+            # third could suspend the others). A pure one reads them element by element (#255,
+            # ir.direct_lists), and a read of an element of another type deopts.
+            if not pure:
+                raise Skip(self.fn.lineno, f"more than two list parameters ({n_lists}) are not supported "
+                                           "in a function with an effect: compiled code holds each list's "
+                                           "lock from copy-in to write-back, and free-threaded CPython has "
+                                           "no lock for more than two objects at once")
+            if self.entry_used:
+                raise Skip(self.fn.lineno, f"more than two list parameters ({n_lists}) and a module global "
+                                           "read: the lists are read element by element, so the global "
+                                           "cannot be read once at entry (#255)")
+            self.deopts = True
         fn = ir.Function(
             name=self.sig.qname, params=params, returns=self.sig.returns, locals=locals_, body=body,
             pure=pure, may_deopt=self.deopts, source_line=self.fn.lineno,

@@ -82,6 +82,14 @@ Python error set, nothing to undo), `-1` Python error set (CPython's exception t
     typedef struct { int n; /* + a PyCriticalSection2 on free-threaded builds */ } tp_cs;
     void tp_cs_begin(tp_cs *c, PyObject *a, PyObject *b);
     void tp_cs_end(tp_cs *c);      /* idempotent: a no-op when nothing is held */
+    /* #255, ir.direct_lists: a pure function with three or more list parameters does not copy them
+       in and takes no lock (the exception to "more than two ... not compiled" above). The wrapper
+       checks PyList_CheckExact and sets only `list` of each tp_*_array; every Index is one of these
+       (PyList_GetItemRef, the interpreter's read; a negative index counts from the length at that
+       read): 0 = *out set, -1 = IndexError "list index out of range", 1 = deopt (not exactly float /
+       not exactly an int within i64). Len is PyList_GET_SIZE at that point. */
+    int  tp_list_ld_f64(PyObject *list, int64_t i, double *out);
+    int  tp_list_ld_i64(PyObject *list, int64_t i, int64_t *out);
 `tp_*_array_enter` / `_exit` read and write the list through borrowed references (`PyList_GET_ITEM`,
 `PyList_SetItem`) and REQUIRE the caller to hold that critical section. Between enter and exit no
 other thread can change the list, so the whole call is one atomic step as far as lists go (an
@@ -114,7 +122,8 @@ call by the export.
 
 Rules that go with it (verifier / front end):
 * Closed (#203) like a list: a function with a buffer runs no user code (`verify/array-open`).
-* No limit on the number of buffer parameters (no critical section); lists keep the limit of two.
+* No limit on the number of buffer parameters (no critical section); lists keep the limit of two in a
+  function with an effect (a pure function reads three or more element by element, #255).
   A buffer and a list cannot alias (different types). Two buffers may share memory (the same array
   passed twice): per-element access makes reads see earlier writes in program order, as in
   the interpreter, which a copy-in could not.
@@ -483,6 +492,7 @@ static or module-state field must be added here):
 | `buf_types` (array.array) | module state | immutable after init | written by `tp_exec` (and `tp_clear`); read-only type pointers compared by identity |
 | buffer arguments of array parameters | caller's array.array memory | atomic | relaxed 8-byte `__atomic_load_n` / `__atomic_store_n` per element; the Py_buffer export is held for the call (open point on concurrent resize, #149) |
 | list arguments of array parameters | caller's lists | critical section | `tp_cs_begin` before the copy-in, `tp_cs_end` after the write-back, on every path |
+| list arguments of a pure function with three or more (#255) | caller's lists | CPython | not copied, no lock: every element read is `PyList_GetItemRef` (atomic, a strong reference), in program order; the wrapper's arguments keep the lists alive |
 | module globals (class names, entry globals) | module dict | strong reads | `tp_global` and `tp_class_global_ok` use `PyDict_GetItemRef` |
 | a compiled class's instances | other threads' objects | CPython | `PyMember_GetOne` / `SetOne` are what the interpreter's member descriptors call (they take the object's lock on free-threaded builds); `tp_new_fixed` writes only its own fresh object |
 | `errno` (math helpers) | C library | thread-local | per thread by POSIX |

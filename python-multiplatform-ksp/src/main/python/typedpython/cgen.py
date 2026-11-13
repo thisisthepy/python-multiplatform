@@ -29,7 +29,10 @@ parameters holds the lists' critical section (`tp_cs_begin`, one list or two) fr
 copy-in to after the last write-back: `tp_cs_end` is part of the same `exits` that run the write-back
 on every path (ok, error, deopt, the last before the interpreted redo), and is a no-op on a path
 that left before locking. More than two list parameters are refused here (`CGenError`), as in the
-front end and the verifier: CPython has no three-object critical section. A function that holds an
+front end and the verifier: CPython has no three-object critical section; except in a pure function
+(#255, `ir.direct_lists`): its lists are not copied, every Index is `tp_list_ld_*`
+(`PyList_GetItemRef` in program order, an element of another type deopts), every Len the current
+length, and no lock is taken. A function that holds an
 array does not poll the eval breaker (#141, open decision #152), so a long compiled array loop
 delays other threads' stop-the-world requests until it returns: a liveness delay, results
 unaffected. The `__typedpython_deopts__` read-add-write of `tp_cg_redo` runs in the module dict's
@@ -921,7 +924,9 @@ def _check_function(f: ir.Function, functions: dict[str, ir.Function]) -> None:
     if f.entry_globals:
         _check_entry_globals(f, functions)
     n_arrays = sum(isinstance(p, ir.ArrayParam) and p.buffer is None for p in f.params)
-    if n_arrays > 2:
+    if ir.direct_lists(f):
+        _check_direct_lists(f)
+    elif n_arrays > 2:
         raise CGenError(f"{f.name}: {n_arrays} array parameters; at most two (CPython offers one- and "
                         "two-object critical sections only, and a third lock could suspend the others)")
     for p in f.params:
@@ -957,6 +962,26 @@ def _is_closed(f: ir.Function, functions: dict[str, ir.Function], seen=None) -> 
             if callee is None or not _is_closed(callee, functions, seen):
                 return False
     return True
+
+
+def _check_direct_lists(f: ir.Function) -> None:
+    """#255 (ir.direct_lists): what a pure function with three or more lists read element by element
+    may not have."""
+    why = None
+    if not f.may_deopt:
+        why = "may_deopt is False (every element read can deopt)"
+    elif f.entry_globals:
+        why = f"entry global {f.entry_globals[0].name} (it would be read once at entry)"
+    elif any(isinstance(p, ir.ArrayParam) and (p.buffer is not None or p.stored
+                                                or p.type not in _ARRAY_PFX) for p in f.params):
+        why = "a buffer parameter, a stored list or a list of another element type"
+    elif any(isinstance(e, ir.CopyArray) and any(q.name == e.src for q in f.params) for e in _all_exprs(f)):
+        why = "a CopyArray of a list parameter"
+    elif any(isinstance(s, ir.ForRange) and s.par is not None for s in _walk_stmts(f.body)):
+        why = "a parallel loop"
+    if why is not None:
+        raise CGenError(f"{f.name}: three or more list parameters are read element by element (#255), "
+                        f"which rules out {why}")
 
 
 def _check_entry_globals(f: ir.Function, functions: dict[str, ir.Function]) -> None:
@@ -1078,6 +1103,9 @@ class _FnGen:
         self.depth = 1
         self.temps: list[tuple[str, str]] = []      # (C type, name)
         self.arrays = {p.name: p for p in f.params if isinstance(p, ir.ArrayParam)}
+        # #255: a pure function with three or more lists reads them element by element (no copy-in)
+        self.direct = {p.name for p in f.params if isinstance(p, ir.ArrayParam) and p.buffer is None} \
+            if ir.direct_lists(f) else set()
         self.par_defs: list[str] = []               # outlined region bodies (SPEC N-15), emitted before the impl
         self.local_arrays: dict[str, Type] = {}       # name -> F64_ARRAY / I64_ARRAY
         self.brk: list = []                    # per open loop: goto label for `break`, or None
@@ -1958,6 +1986,9 @@ class _FnGen:
     def ev_Len(self, e: ir.Len) -> str:
         _, ptr = self._array(e.array)
         t = self.tmp("int64_t")
+        if e.array in self.direct:
+            self.emit(f"{t} = (int64_t)PyList_GET_SIZE({ptr}->list);   /* #255: the current length */")
+            return t
         self.emit(f"{t} = (int64_t){ptr}->len;")
         return t
 
@@ -1984,6 +2015,17 @@ class _FnGen:
         at, ptr = self._array(e.array)
         if e.type is not _ARRAY_ELEM[at]:
             raise CGenError(f"{self.f.name}: Index of {at} typed {e.type}")
+        if e.array in self.direct:
+            # #255: one PyList_GetItemRef (the interpreter's read), in program order; IndexError, or a
+            # deopt for an element of another type
+            if e.index.type is not Type.I64:
+                raise CGenError(f"{self.f.name}: index of type {e.index.type}")
+            i = self.ev(e.index)
+            t = self.tmp(_CT[e.type])
+            sfx = "f64" if at is Type.F64_ARRAY else "i64"
+            self.emit(f"tp_s = tp_list_ld_{sfx}({ptr}->list, {i}, &{t});")
+            self.emit("if (tp_s != 0) { tp_rc = tp_s; goto tp_exit; }")
+            return t
         buffer = self._buffer(e.array)
         slot = self._slot(at, ptr, e.index, e.proven, 0, buffer)
         t = self.tmp(_CT[e.type])
@@ -2241,7 +2283,8 @@ class _FnGen:
     @property
     def snapshot(self) -> bool:
         """Holds an array copy-in or an entry-globals snapshot, so must not run user code (#141)."""
-        return bool(self.f.entry_globals) or any(isinstance(p, ir.ArrayParam) for p in self.f.params)
+        return bool(self.f.entry_globals) or any(isinstance(p, ir.ArrayParam) and p.name not in self.direct
+                                                 for p in self.f.params)
 
     def poll(self, every_time: bool = False) -> None:
         """At the top of each loop iteration (#141): signals, pending calls, GIL hand-off.
@@ -2952,13 +2995,15 @@ class _FnGen:
         args = []
         arrays = []         # list parameters: copy-in / write-back under a critical section
         buffers = []        # buffer parameters: a Py_buffer export held for the whole call (#149)
-        if any(isinstance(p, ir.ArrayParam) and p.buffer is None for p in f.params):
+        direct = []         # #255: lists read element by element (ir.direct_lists), no copy-in, no lock
+        is_direct = ir.direct_lists(f)
+        if any(isinstance(p, ir.ArrayParam) and p.buffer is None for p in f.params) and not is_direct:
             L.append("    tp_cs tp_lock = {0};")
         for i, p in enumerate(f.params):
             if isinstance(p, ir.ArrayParam):
                 L.append(f"    {'tp_buf' if p.buffer else _ARRAY_CT[p.type]} tp_a{i} = {{0}};")
                 args.append(f"&tp_a{i}")
-                (buffers if p.buffer else arrays).append((i, p))
+                (buffers if p.buffer else direct if is_direct else arrays).append((i, p))
             elif p.type is Type.OBJ:
                 args.append(f"tp_args[{i}]")            # borrowed for the call's duration
             else:
@@ -3017,6 +3062,13 @@ class _FnGen:
                      f"{fmt1}, {fmt2}, {int(p.stored)}, &tp_a{i});")
             L.append("    if (tp_s < 0) goto tp_error;")
             L.append("    if (tp_s != 0) goto tp_deopt;")
+        if direct:
+            # #255: exact lists (a subclass may override __getitem__ / __len__), not copied; the
+            # wrapper's arguments keep them alive for the call
+            L.append("    if (" + " || ".join(f"!PyList_CheckExact(tp_args[{i}])" for i, _ in direct)
+                     + ") goto tp_deopt;")
+            for i, _ in direct:
+                L.append(f"    tp_a{i}.list = tp_args[{i}];   /* borrowed; read by tp_list_ld_* */")
         # aliasing guard, then copy-in
         if len(arrays) > 1:
             objs = ", ".join(f"tp_args[{i}]" for i, _ in arrays)
