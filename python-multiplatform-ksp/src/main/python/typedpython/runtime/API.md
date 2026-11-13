@@ -270,6 +270,21 @@ per module (the header is `static`) and per thread (`TP_THREAD_LOCAL`): frames o
 compiled module that sit between two frames of this one are not counted, and another thread's
 frames never are.
 
+    Py_ssize_t tp_seg_depth(PyThreadState *ts, tp_tls *t);   /* the segment's Python depth: measured (tp_python_depth) at its first check, then reused */
+    void tp_depth_seg_begin(tp_tls *t);    /* seg = -1; the wrapper, right before its impl call */
+    void tp_depth_seg_end(tp_tls *t);      /* seg = -1; the wrapper, right after its impl call */
+Segments (#125, agent proposal, not confirmed): `tp_enter_call` and `tp_depth_room` take the Python
+depth from `tp_seg_depth`, so one impl call from its wrapper reads the top frame
+(`PyThreadState_GetFrame`) once, not once per compiled frame. Sound because the Python frames below
+compiled frames cannot change while they run: Python code started from compiled code (callback,
+`__del__`, signal handler, redo) pops every frame it pushed before it returns. The wrapper's two
+resets make a nested wrapper measure its own depth and make the outer segment measure again at its
+next check after a nested wrapper returned, which is where `tp_python_depth` would have found a
+different top frame before; the frame cache therefore changes at exactly the same points.
+`Py_GetRecursionLimit()` and `Py_EnterRecursiveCall` stay per frame (a `__del__` can change the limit
+between two frames; the C-stack guard compares each frame's stack address). `-DTP_TRACE_DEPTH`
+(tests only) adds `__tp_trace_frame_reads__()`: the number of top-frame reads.
+
 ## Fast entry (bounded functions; issue #147)
     int  tp_depth_room(PyThreadState *ts, tp_tls *t, Py_ssize_t k);   /* 1 iff tp_python_depth(ts) + count + k <= Py_GetRecursionLimit() */
     void tp_trace_fast_hit(void);       /* counts a fast entry; a no-op unless -DTP_TRACE_FAST */
