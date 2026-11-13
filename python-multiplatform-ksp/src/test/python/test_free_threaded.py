@@ -18,6 +18,13 @@ a three-list function was compiled.
 three and seven list parameters (`three`, `seven`, `order3`, `sum3`) were not compiled, so `built` failed
 and every test of this file using it errored; the front-end, verifier and cgen tests of the 3-list
 section failed (verify.ARRAY_DIRECT did not exist).
+
+#391 (stores seen by element reads that take no lock, design/typedpython.md 4.3.6 사): expected red
+before the change, `test_list_stores_reach_lock_free_readers_in_program_order` (bad > 0: the write-back
+stored the dirty slots in index order at the end, so a reader saw the new xs[0] of `fill_down_int` with
+the old xs[-1]; a race, so it can pass by chance) and
+`test_list_parameter_stores_are_written_through` (no `tp_i64_array_st` in the generated C). Not run by
+the agent that wrote them (agents do not run test suites, AGENTS.md 10): CI records the result.
 """
 from __future__ import annotations
 
@@ -118,6 +125,12 @@ def edge(xs: list[float]) -> float:
 @compiled
 def fill_int(xs: list[int], v: int) -> None:
     for i in range(len(xs)):
+        xs[i] = v
+
+
+@compiled
+def fill_down_int(xs: list[int], v: int) -> None:
+    for i in range(len(xs) - 1, -1, -1):
         xs[i] = v
 
 
@@ -257,7 +270,7 @@ def built(tmp_path_factory):
     result = pipeline.compile_module(path, d / "out", cost_rule=False)  # object-only setters: the cost policy would skip them (#150)
     assert result.extension is not None, result.skipped
     compiled = {f.name for f in result.module.functions}
-    wanted = {"geta", "seta", "mk", "total", "fill", "edge", "fill_int", "edge_int", "rotate", "zero2",
+    wanted = {"geta", "seta", "mk", "total", "fill", "edge", "fill_int", "fill_down_int", "edge_int", "rotate", "zero2",
               "pair_edge", "usek", "fresh", "vpick", "three", "bump1", "bump2", "seven", "order3", "sum3"}
     assert wanted <= compiled, {n: result.skipped.get(n) for n in wanted - compiled}
     fns = {f.name: f for f in result.module.functions}
@@ -602,6 +615,91 @@ def test_two_shared_lists(extension):
         print(json.dumps({"bad": bad, "errs": errs}))
     """)
     assert r == {"bad": [], "errs": []}
+
+
+# Stores of a compiled function seen by element reads that take no lock (#391, design/typedpython.md
+# 4.3.6 사). `fill_down_int` stores xs[n-1], ..., xs[0] (program order, top index first) with a value
+# that grows from call to call; a reader reads xs[0] and then xs[-1] with the interpreter's a[i], a
+# seq_cst load without the list's lock, of slots the writer stores with release stores. Having seen a
+# call's xs[0] (its last store) the reader must see that call's xs[-1] (an earlier store) or a later
+# one: y >= x, in every interleaving of the interpreted function. A write-back of the dirty slots in
+# index order at the end of the call stores xs[0] first and can show x > y. The values are small ints
+# (0..199), immortal objects, so the reader's lock-free increment never fails; a fresh float or a big
+# int created by the writer would make it fall back to the list's lock (shared refcount 0), which waits
+# for the call and hides the order. The list stays below TP_POLL_INTERVAL: one call, one section.
+DOWN_BODY = """
+    N = 4000
+    box = [None]
+    stop = False
+    def writer():
+        global stop
+        for r in range(ROUNDS):
+            xs = [0] * N
+            box[0] = xs
+            for v in range(1, 200):
+                m.fill_down_int(xs, v)
+        stop = True
+    bad = []
+    seen = [0]
+    def reader():
+        while True:
+            done = stop
+            xs = box[0]
+            if xs is not None:
+                x = xs[0]
+                y = xs[-1]
+                seen[0] += 1
+                if y < x:
+                    bad.append((x, y))
+            if done:
+                break
+    d0 = m.__typedpython_deopts__
+    errs = run_threads([writer, reader, reader, reader])
+    print(json.dumps({"bad": len(bad), "first": bad[:3], "seen": seen[0], "errs": errs,
+                      "deopts": m.__typedpython_deopts__ - d0}))
+"""
+
+
+def test_list_stores_reach_lock_free_readers_in_program_order(extension):
+    r = run_child(extension, DOWN_BODY.replace("ROUNDS", "(20 * STRESS)"))
+    assert r["bad"] == 0 and r["errs"] == [] and r["seen"] > 0 and r["deopts"] == 0, r   # compiled calls
+
+
+def test_list_parameter_stores_are_written_through(built):
+    """Every store into a list parameter goes through tp_i64_array_st / tp_f64_array_st, which writes
+    it into the list at once on a free-threaded build (TP_LIST_WRITE_THROUGH); no store only sets a
+    dirty bit outside a parallel region's worker."""
+    result, path, _ = built
+    c_text = cgen.generate(result.module, path)
+    for name in ("fill_down_int", "fill", "rotate", "zero2"):
+        head = re.search(rf"^static int tp_impl_{name}\([^\n]*\)\n\{{\n", c_text, re.M)
+        assert head is not None, name
+        impl = c_text[head.end():c_text.index("\n}\n", head.end())]
+        assert "_array_st(l_" in impl and "->dirty[" not in impl, impl
+    h = (cbuild.RUNTIME_DIR / "tp_runtime.h").read_text()
+    assert "#if defined(Py_GIL_DISABLED)\n#define TP_LIST_WRITE_THROUGH 1" in h
+
+
+@pytest.mark.race_mutant
+def test_mutant_without_write_through_is_caught(built, tmp_path):
+    """The mutation of #391: the runtime with TP_LIST_WRITE_THROUGH off (the deferred write-back in
+    index order, as before the change) must be caught by the program-order test."""
+    result, path, _ = built
+    h = (cbuild.RUNTIME_DIR / "tp_runtime.h").read_text()
+    g = h.replace("#if defined(Py_GIL_DISABLED)\n#define TP_LIST_WRITE_THROUGH 1",
+                  "#if 0\n#define TP_LIST_WRITE_THROUGH 1")
+    assert g != h
+    d = tmp_path / "rt"
+    d.mkdir()
+    (d / "tp_runtime.h").write_text(g)
+    so = cbuild.build(cgen.generate(result.module, path), "ftmod", tmp_path / "mut", runtime_dir=d)
+    caught = False
+    for _ in range(3):
+        r = run_child(so, DOWN_BODY.replace("ROUNDS", "40"))
+        if r["bad"]:
+            caught = True
+            break
+    assert caught, "the mutant (deferred write-back in index order) was not caught"
 
 
 # Three shared lists read element by element (#255). The writer stores c[0] and then a[0], each one

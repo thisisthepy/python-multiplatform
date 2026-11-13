@@ -70,6 +70,15 @@ Python error set, nothing to undo), `-1` Python error set (CPython's exception t
        when it fails (then -1 with MemoryError). Safe to call on a zeroed struct. */
     int  tp_f64_array_exit(tp_f64_array *a);
     int  tp_i64_array_exit(tp_i64_array *a);
+    /* #391: every StoreIndex into a list parameter (outside a parallel region's worker). data[slot] = v;
+       with TP_LIST_WRITE_THROUGH (defined on free-threaded builds) also PyList_SetItem(list, slot, box(v))
+       at once, else dirty[slot] = 1 for the write-back. 0, or -1 with MemoryError. */
+    int  tp_f64_array_st(tp_f64_array *a, Py_ssize_t slot, double v);
+    int  tp_i64_array_st(tp_i64_array *a, Py_ssize_t slot, int64_t v);
+    /* after a parallel region's join: write one slot the workers stored (dirty) through and clear its
+       dirty bit; a no-op without TP_LIST_WRITE_THROUGH. 0, or -1 with MemoryError. */
+    int  tp_f64_array_flush1(tp_f64_array *a, Py_ssize_t slot);
+    int  tp_i64_array_flush1(tp_i64_array *a, Py_ssize_t slot);
     /* aliasing guard: 1 if any two of the n objects are the same object */
     int  tp_any_same(PyObject *const *objs, Py_ssize_t n);
 
@@ -91,12 +100,31 @@ Python error set, nothing to undo), `-1` Python error set (CPython's exception t
     int  tp_list_ld_f64(PyObject *list, int64_t i, double *out);
     int  tp_list_ld_i64(PyObject *list, int64_t i, int64_t *out);
 `tp_*_array_enter` / `_exit` read and write the list through borrowed references (`PyList_GET_ITEM`,
-`PyList_SetItem`) and REQUIRE the caller to hold that critical section. Between enter and exit no
-other thread can change the list, so the whole call is one atomic step as far as lists go (an
-interleaving CPython can produce: each list operation takes the same lock). A long compiled array
-loop does not poll (below), so it delays other threads' stop-the-world requests (the free-threaded
-GC) until it returns: a liveness delay, results unaffected. Polls inside array-holding functions
-need the re-validation decided in issue #152 and are not added.
+`PyList_SetItem`) and REQUIRE the caller to hold that critical section, as do `tp_*_array_st` and
+`tp_*_array_flush1`. Between enter and exit (or between two polls, #152) no other thread can store
+into the list. What another thread sees of the call (#391, design/typedpython.md 4.3.6 사; CPython
+v3.15.0rc1):
+* Operations that take the list's lock see the call as one step: they run before the copy-in or
+  after the write-back (or at a poll). These are `list(a)` / `list.extend(a)` (`_list_extend`,
+  `Objects/listobject.c:1468`), slicing (`list_slice_wrap`, 3652-3667), comparisons
+  (`list_richcompare`, 3501-3507), `a + b` (`_PyList_Concat`, 802-816), every store, and another
+  compiled function's copy-in. Holding the lock longer than the interpreter's stores would is an
+  interleaving CPython can produce (no other thread's locked operation fell between them).
+* Element reads that take no lock do not: `a[i]` (`_PyList_GetItemRef`, `Python/bytecodes.c:1149`),
+  iteration (`listiter_next`, `listobject.c:4074`, so `for x in a`, `sum(a)`, `in`), `PyList_GetItemRef`
+  and a #255 function. They are seq_cst loads (`_Py_TryXGetRef`, `pycore_object.h:610`) of slots
+  stored with release stores (`listobject.c:473`, `bytecodes.c:1444`), so a reader that sees one of the
+  interpreter's stores sees every earlier store of that thread. On free-threaded builds every store is
+  therefore written through at once in program order (`tp_*_array_st`; a parallel region's slots
+  after its join, in the body's store order), and such a reader sees a state the interpreter's
+  one-by-one stores pass through. Before #391 the write-back stored the dirty slots in index order
+  at the end, and a reader could see `a[0]` of `a[1] = x; a[0] = y` without `a[1]`.
+* A reader that fails the lock-free increment (an element another thread created, shared refcount 0,
+  `_Py_TryIncRefShared`, `pycore_object.h:548-555`) falls back to the list's lock
+  (`list_item_impl`, `listobject.c:335-351`) and waits for the call, as in the first case.
+With a GIL no other thread runs during the call (polls write back first), so stores are only marked
+dirty and written back at exit. A function holding an array polls (#152, SPEC N-8): at a poll it
+writes back, ends its sections, polls and takes them again.
 
 ## Buffer arrays (issue #149; `ArrayParam.buffer` = "array")
 An exact `array.array` argument (`array.array[float]` / `array.array[int]`; the names must resolve
@@ -491,9 +519,9 @@ static or module-state field must be added here):
 | `__typedpython_deopts__` | module dict entry | critical section | the read-add-write of `tp_cg_redo` runs in `Py_BEGIN_CRITICAL_SECTION(module dict)`: concurrent deopts lose no count |
 | `buf_types` (array.array) | module state | immutable after init | written by `tp_exec` (and `tp_clear`); read-only type pointers compared by identity |
 | buffer arguments of array parameters | caller's array.array memory | atomic | relaxed 8-byte `__atomic_load_n` / `__atomic_store_n` per element; the Py_buffer export is held for the call (open point on concurrent resize, #149) |
-| list arguments of array parameters | caller's lists | critical section | `tp_cs_begin` before the copy-in, `tp_cs_end` after the write-back, on every path |
+| list arguments of array parameters | caller's lists | critical section | `tp_cs_begin` before the copy-in, `tp_cs_end` after the write-back, on every path; every store written through at once in program order (`tp_*_array_st`, #391): lock-taking operations see the call as one step, lock-free element reads see the interpreter's store order ("Native arrays" above) |
 | list arguments of a pure function with three or more (#255) | caller's lists | CPython | not copied, no lock: every element read is `PyList_GetItemRef` (atomic, a strong reference), in program order; the wrapper's arguments keep the lists alive |
-| module globals (class names, entry globals) | module dict | strong reads | `tp_global` and `tp_class_global_ok` use `PyDict_GetItemRef` |
+| module globals (class names, entry globals) | module dict | strong reads | `tp_global` and `tp_class_global_ok` use `PyDict_GetItemRef`. OPEN (#414, design/typedpython.md 4.3.6 아): an entry global is read once at entry, so a later shared read (a callee's entry global, a field another thread writes, a second entry global used before the first) can see that thread's writes after a rebinding while the function keeps the old value; no interleaving does that |
 | a compiled class's instances | other threads' objects | CPython | `PyMember_GetOne` / `SetOne` are what the interpreter's member descriptors call (they take the object's lock on free-threaded builds); `tp_new_fixed` writes only its own fresh object |
 | `errno` (math helpers) | C library | thread-local | per thread by POSIX |
 | `tp_par_cap_v`, `tp_par_regions_v`, `tp_par_started_v`, `tp_par_failed_v` | static in the module | atomic | relaxed loads and stores; the cap is computed identically by any thread that finds it unset and never changes after |

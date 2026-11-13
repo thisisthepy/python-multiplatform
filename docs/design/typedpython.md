@@ -597,6 +597,111 @@ venv 의 3.15.0rc1t 헤더와 python/cpython 의 태그 `v3.15.0rc1` 소스(설�
 2. 쓰는 함수(nbody `advance`)를 위해 임의 문장 지점의 OSR 출구를 만들지: (c) 의 구간 나누기와 (d2) 가 둘 다 그것에
    걸려 있다.
 
+#### 사. 잠그지 않는 원소 읽기가 보는 저장 순서 (#391)
+
+**출처.** 이슈 #391 본문 ("Done when: API.md and SPEC N-8 state exactly which operations see the call as atomic,
+with that argument"). 지킨 제약: GIL 전용 기능 없음, Python 동작 변화 없음, 공개 critical section API 만(리더,
+2026-11-13). 아래 판정의 근거는 CPython `v3.15.0rc1` 소스를 읽은 것이고, 수정 방식은 **에이전트 제안, 확인되지
+않음**이다. 시험은 이 글을 쓴 에이전트가 돌리지 않았다(AGENTS.md 10, CI 가 결과를 남긴다).
+
+**판정: CPython 이 만들 수 없는 결과가 있었다(읽어서 확인, 실행으로는 아직 보지 못함).**
+- 쓰기는 release store 다: `PyList_SetItem`(`Objects/listobject.c:473`), 인터프리터의 `STORE_SUBSCR_LIST_INT`
+  (`Python/bytecodes.c:1444`). 잠그지 않는 원소 읽기는 seq_cst load 다: `a[i]` 는 `_PyList_GetItemRef`
+  (`bytecodes.c:1149`) → `list_get_item_ref`(`listobject.c:353-378`) → `_Py_TryXGetRef`
+  (`Include/internal/pycore_object.h:610`). 반복(`listiter_next`, `listobject.c:4074`)도 같으므로 `for x in a`,
+  `sum(a)`(`Python/bltinmodule.c:2884` 의 `PyObject_GetIter`), `in`(`list_contains`)도 잠그지 않는다. 그래서 다른
+  스레드가 인터프리터의 저장 하나를 보면 그 스레드의 앞선 저장도 모두 본다(release/acquire 의 메시지 전달).
+- 리스트를 잠그는 연산은 호출 전체를 한 단계로 본다: `list(a)`·`extend`(`_list_extend`, `listobject.c:1468`),
+  슬라이스(`list_slice_wrap`, 3652-3667), 비교(`list_richcompare`, 3501-3507), `a + b`(`_PyList_Concat`, 802-816),
+  저장, 다른 compiled 함수의 copy-in. 이것은 유효하다: 인터프리터의 저장 사이에 다른 스레드의 잠금 연산이 하나도
+  끼지 않은 실행과 같다. (단, 창 안에서 기다리는 지점이 없을 때다. 그 결함은 #390, 위 바(#413) 에서 다룬다.)
+- 잠그지 않는 읽기에는 반례가 있었다. develop(9376f96a)의 write-back 은 끝에서 dirty 칸을 **색인 순서로** 저장한다.
+  `a[1] = x; a[0] = y` 를 컴파일하면 write-back 은 a[0] 을 먼저 쓰고, 그 사이에 `a[0]` 다음 `a[1]` 을 읽는 스레드는
+  새 a[0] 과 옛 a[1] 을 볼 수 있다. 인터프리터에서 a[0] 의 저장은 a[1] 의 저장 뒤이므로 새 a[0] 을 본 읽기 뒤의
+  a[1] 읽기는 새 값을 본다. 이 결과는 어떤 interleaving 에도 없다.
+- 저장 순서를 바꿔서는 고칠 수 없다. 같은 칸을 다른 칸 사이에 두 번 쓰면(`a[0] = 1; a[1] = 1; a[0] = 2`, 루프에서
+  흔하다) 최종값 (2, 1) 만 쓰는 write-back 은 a[0] 을 먼저 쓰면 (2, 0) 을, a[1] 을 먼저 쓰면 (0, 1) 을 보인다.
+  인터프리터는 둘 다 지나지 않는다.
+- rc1 에서 실제로 보이는 범위: 새 원소의 잠금 없는 incref 가 성공해야 한다. write-back 이 만든 새 float 나 큰 int 는
+  공유 refcount 가 0 이라 `_Py_TryIncRefShared` 가 실패하고(`pycore_object.h:548-555`), 읽기는 리스트 섹션으로
+  떨어져(`list_item_impl`, `listobject.c:335-351`) 호출이 끝나기를 기다린다. 그래서 rc1 에서 반례가 보이는 것은
+  immortal small int(-5..256)를 저장한 `list[int]` 다. 이것은 refcount 구현의 세부라 수정은 여기에 기대지 않는다.
+
+**수정 (에이전트 제안, 확인되지 않음): free-threaded 빌드에서 저장을 그때그때 리스트에 쓴다(write-through).**
+- `StoreIndex` 는 `tp_*_array_st` 가 된다: copy 의 칸을 쓰고, `TP_LIST_WRITE_THROUGH`(free-threaded 빌드에서 1)이면
+  같은 값을 `PyList_SetItem` 으로 바로 리스트에 쓴다. wrapper 가 쥔 섹션 안이므로 `PyList_SetItem` 의 섹션은 건너뛴다
+  (`Python/critical_section.c:29-45`, 맨 위 섹션이 같은 mutex). 다른 스레드는 섹션이 있는 동안 리스트에 쓸 수 없으므로
+  copy 는 계속 읽기의 근거로 맞다.
+- 왜 유효한가: 저장의 순서와 값이 인터프리터의 것과 같고 각각 release store 다. 잠그지 않는 읽기는 인터프리터의
+  저장이 하나씩 지나가는 상태를 본다. 잠그는 연산은 여전히 호출 전체(또는 poll 사이)를 한 단계로 본다. 값을 만들다
+  실패하면(MemoryError) 그 칸은 옛 값으로 남고 오류로 끝난다: 인터프리터도 값을 만들 때 실패하고 저장하지 않는다.
+  예외로 끝나는 호출에서 그때까지의 저장이 보이는 것은 develop 의 write-back 과 같다.
+- 병렬 영역(SPEC N-15): 작업 스레드는 Python 객체를 만지지 않으므로 칸을 dirty 로만 표시하고, 호출 스레드가 join 뒤에
+  반복 순서대로, 몸통의 저장 순서대로 `tp_*_array_flush1` 로 쓴다(연속한 같은 리스트 저장은 하나로 본다: 앞의 값을
+  놓친 읽기는 인터프리터에서도 가능하다). 다른 리스트 저장 사이에 같은 리스트를 다시 쓰는 몸통(a, b, a)은 최종값으로
+  보일 수 없는 상태가 있어 free-threaded 에서는 영역을 쓰지 않고 순차 루프로 돈다. 지금의 경계 증명으로는 몸통이
+  리스트 매개변수 하나에만 저장하므로(루프 자신의 리스트만 증명된다) 이 경우는 생기지 않는다.
+- GIL 빌드: 호출 중에 다른 스레드가 돌지 않고 poll 은 먼저 write-back 하므로, 저장은 dirty 표시만 하고 끝에서
+  write-back 한다(#391 전과 같다). 결과가 다른 기능이 아니라 같은 결과를 내는 두 구현이다.
+- 비용(측정 전): 저장마다 객체 하나와 `PyList_SetItem` 하나. 칸마다 한 번 쓰는 루프(spectral_norm `mul_av`·
+  `mul_atv`)는 write-back 과 같은 수이고, 같은 칸을 여러 번 쓰는 루프는 그만큼 더 든다. 다섯 벤치마크의 컴파일 함수
+  집합은 같다(front end + verifier + cost 를 develop 과 이 변경에서 돌려 비교). 생성 C 가 달라진 것은 spectral_norm 의
+  저장 세 곳뿐이다.
+- 남은 점(고치지 않음): (1) 위 바 의 6(write-back 의 `PyList_SetItem` 이 다른 스레드 소유 원소를 decref 하며 bucket
+  mutex 에서 detach)은 write-through 에서도 같은 횟수로 생기지만 호출 중간에 생긴다. 그 사이 다른 스레드가 쓰면
+  copy 가 낡는다. 바 의 5(redo Call)도 같다. (2) `array.array` 버퍼는 rc1 의 CPython 자체가 잠금도 atomic 도 없이
+  읽고 쓴다(`Modules/arraymodule.c:664-681`). CPython 이 순서를 보장하지 않으므로 이 논증 밖이다.
+- 시험(`test_free_threaded.py`): `fill_down_int`(높은 색인부터 저장)를 부르는 스레드와 `xs[0]` 다음 `xs[-1]` 을 읽는
+  스레드 셋, 늘 `xs[-1] >= xs[0]`(develop 에서 빨강 예상, 경합이라 우연히 통과할 수 있다); 리스트 저장이 모두
+  `tp_*_array_st` 를 거치는지(develop 에서 빨강, 생성 C 로 확인함); 변형 시험(`race_mutant`, CI 밖): 런타임의
+  `TP_LIST_WRITE_THROUGH` 를 끈 빌드가 잡혀야 한다.
+
+#### 아. 입구에서 한 번 읽는 entry global (#414)
+
+**출처.** 이슈 #414 본문 ("Done when: either an argument that every such outcome is a valid interleaving, or a test
+that shows the disagreement and a fix"). 판정과 제안은 **에이전트 제안, 확인되지 않음**이다. 구현하지 않았다: 아래
+이유로 작지 않고, #413 의 장치 위에 올려야 한다.
+
+**판정: 유효하지 않은 실행이 있다(읽어서 확인, 재현하지 않음).** 근거: `G = 2`(STORE_GLOBAL) 는 dict watcher 를
+먼저 부르고(`Objects/dictobject.c:2009`) 값을 release store 한다(`STORE_VALUE`, 322, 2017). 인터프리터의
+`LOAD_GLOBAL` 은 consume load(`bytecodes.c:2360`), `PyDict_GetItemRef` 는 잠그지 않는 조회다. 객체 슬롯 저장은
+release store(`Python/structmember.c:326`). 그래서 인터프리터에서 다른 스레드 B 의 나중 쓰기를 본 읽기 뒤의 전역
+읽기는 B 의 앞선 재바인딩을 본다. 컴파일된 함수 f 는 entry global 을 입구에서 한 번 읽는다(wrapper, 또는 Call
+지점의 callee 입구). 경우(처음 값은 모두 1, B 는 프로그램 순서로 두 줄을 쓴다):
+1. **callee 의 entry global.** B: `G = 2; H = 2`. f(entry G): `return g() * 10 + G`, g(entry H, 순수, redo Call):
+   `return H`. 인터프리터: g 의 H 읽기 다음 f 의 G 읽기 → 11, 12, 22. 컴파일: G 는 입구(1), H 는 Call 지점(2) → 21.
+   유효하지 않다.
+2. **객체 필드.** B: `G = 2; o.x = 2`. f(o: C, entry G): `return o.x * 10 + G` → 같은 꼴로 21. 유효하지 않다.
+3. **entry global 둘.** 입구는 `entry_globals` 순서로 G 다음 H 를 읽는다. B: `G = 2; H = 2`. f: `return H * 10 + G`
+   (프로그램은 H 를 먼저 읽는다). 컴파일은 (G = 1, H = 2) 를 읽을 수 있고 21 을 낸다. 인터프리터는 H = 2 를 보면 G = 2
+   를 본다. 유효하지 않다. 다른 공유 읽기가 없고 프로그램이 입구와 같은 순서로 한 번씩만 읽으면 유효하다.
+4. **유효한 경우.** entry global 하나에 입구 뒤의 다른 공유 읽기가 없으면, 모든 읽기를 입구 시각에 둔 실행과 같다
+   (wordfreq `next_state` 의 `MOD`). 리스트 매개변수의 원소는 섹션 안에서 바뀌지 않고 develop 의 wrapper 는 entry
+   global 을 copy-in 뒤, 섹션 안에서 읽으므로 둘은 한 순간의 값이다(#413 은 이 읽기를 섹션 앞으로 옮기고 epoch 로
+   검증한다). 3 리스트 이상의 순수 함수는 entry global 을 가질 수 없다(`verify/array-direct`). `array.array` 버퍼는
+   위 사 (2) 처럼 CPython 이 순서를 보장하지 않는다.
+5. 같은 꼴로 보이나 확인하지 않은 것: 클래스 이름 전역(module docstring 의 규칙 8: impure 함수는 입구에서 한 번
+   확인한다)을 `New`·`IsExact` 가 쓰는 경우.
+
+**제안 (에이전트 제안, 확인되지 않음, 구현하지 않음).**
+- **순수 함수:** entry global 의 이름을 `tp_watch_names` 에 넣고(#413 이 리스트를 쥔 함수에 대해 이미 한다), 입구의
+  읽기 **전에** `tp_globals_epoch` 를 E0 로 읽고, ok 로 돌아가기 전에 epoch 가 E0 그대로인지 본다. 바뀌었으면
+  deopt(아직 아무 효과가 없으니 해석 실행으로 다시 하는 것이 그대로 한 실행이다). 근거: epoch 는 늘기만 하고,
+  watcher 는 저장 전에 올린다. B 의 재바인딩 뒤의 쓰기를 본 읽기가 있으면 그 뒤의 epoch 읽기는 바뀐 값을 본다.
+  그대로면 [E0, 끝] 동안 감시하는 전역이 하나도 바뀌지 않았으므로 인터프리터의 모든 전역 읽기를 프로그램 위치에
+  둘 수 있다. 호출당 atomic load 하나. watcher id 가 없는 모듈은 늘 deopt(#413 과 같다). 값 비교로는 안 된다:
+  B 가 `G = 2; x = 2; y = 7; G = 1` 이고 f 가 x 를 읽고, G 를 쓰고, y 를 읽으면, 컴파일은 (x = 2, G = 1, y = 0) 을 내고
+  끝에서 다시 읽은 G 도 1 이다. 인터프리터는 x = 2 를 본 뒤 G = 1 을 보려면 B 의 마지막 줄을 본 것이므로 y = 7 을 본다.
+- **impure 함수:** 효과 뒤에는 deopt 할 수 없다(사 이후 리스트 저장은 바로 보이고, 버퍼 저장도 그렇다). 후보:
+  (가) 입구 뒤의 공유 읽기(entry global 이 있는 callee, FieldGet, 또는 그런 것을 하는 callee)가 있거나 entry global 이
+  둘 이상인 impure 함수를 해석 실행으로 둔다(verifier 규칙). 다섯 벤치마크에는 해당 함수가 없다(entry global 이 있는
+  컴파일 함수는 `next_state` 하나, 순수). (나) 첫 효과 전에 epoch 를 확인하고 첫 효과 뒤의 공유 읽기를 금지. (다) 임의
+  지점의 OSR 출구(위 다 의 (c), (d2) 와 같은 한계). **오너 결정 사항.**
+- **#413 과의 관계:** #413(브랜치 feat/tp-390-section-window, 머지 전)은 리스트를 쥔 함수에 `tp_eg_snapshot`
+  (모듈 dict 섹션 안의 epoch + 값)과 `tp_eg_current`(copy-in 뒤 epoch 확인), 이름의 `tp_watch_names` 등록을 넣는다.
+  위 순수 함수 수정은 같은 E0 를 쓰고 확인 지점을 호출 끝까지 늘리는 것이다. 지금 따로 구현하면 그 장치를 겹쳐 만들고
+  충돌하므로, #413 이 머지된 뒤에 그 위에 올리는 것을 제안한다.
+
 ### 4.4 Kotlin 경계의 직접 호출
 
 이 플랫폼에서만 가능한 이점이다.

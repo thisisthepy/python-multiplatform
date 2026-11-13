@@ -1003,12 +1003,15 @@ static inline int tp_unbox_bool(PyObject *o, int *out)
  * Free-threaded (#159): the CALLER holds the list's critical section (tp_cs_begin) from before
  * enter to after exit, on every exit path. enter and exit read and write the list's items through
  * borrowed references (PyList_GET_ITEM) and rely on that lock: no other thread can change the list
- * between the copy-in and the write-back, so the whole call is one atomic step as far as lists are
- * concerned (CPython can produce that interleaving: every list operation takes the same lock).
- * Liveness note (issue #152): a function holding an array does not poll the eval breaker, so a long
- * compiled array loop delays other threads' stop-the-world requests (the free-threaded GC) until it
- * returns; results are unaffected. Polls inside such functions need the re-validation decided in
- * #152 (after a poll the critical section is re-taken and the list may have changed).
+ * between the copy-in and the write-back, and an operation that takes the list's lock (list(a),
+ * slicing, comparison, a + b, another compiled call) sees the call as one step (CPython can produce
+ * that interleaving). Element reads that take no lock (a[i], iteration, sum(), `in`) do see stores
+ * made inside the call, so on free-threaded builds every store is written through at once, in
+ * program order (tp_*_array_st, #391): such a reader sees what it would see of the interpreter's
+ * one-by-one stores.
+ * Polls (issue #152): a function holding an array polls only at loop tops with an OSR-style exit,
+ * where it writes back, ends the section, polls, takes it again and copies in again; a loop without
+ * one delays other threads' stop-the-world requests (the free-threaded GC) until the call returns.
  * exit: writes the dirty slots back as new objects (PyList_SetItem steals the new reference and, on
  * failure, drops it), always frees, and zeroes the struct. On a write-back failure it stops,
  * frees, and returns -1 with that error set (MemoryError, or IndexError if the list shrank).
@@ -1163,6 +1166,97 @@ static inline int tp_i64_array_exit(tp_i64_array *a)
     a->data = NULL;
     a->dirty = NULL;
     return rc;
+}
+
+/* ------------------------------------------------------------------------------------------
+ * Stores into a list parameter (#391; design/typedpython.md 4.3.6 사).
+ *
+ * Free-threaded builds read list elements without the list's lock (PyList_GetItemRef, the
+ * interpreter's a[i], list iteration): a release store in PyList_SetItem / STORE_SUBSCR_LIST_INT and
+ * a seq_cst load in _Py_TryXGetRef. A reader that sees one store of the interpreter therefore sees
+ * every earlier store of the same thread. A deferred write-back in index order breaks that when the
+ * function stored a higher index first (`a[1] = x; a[0] = y`: a reader could see the new a[0] with
+ * the old a[1]). So with TP_LIST_WRITE_THROUGH every store also goes into the list at once, in
+ * program order, under the critical section the wrapper already holds (PyList_SetItem's own section
+ * is skipped: the top section holds that mutex, Python/critical_section.c:29-45). The copy stays the
+ * source of reads: no other thread can store while the section is held.
+ * With a GIL no other thread runs during the call, so the store only marks the slot dirty and the
+ * write-back at exit stores it (as before #391).
+ * st: 0, or -1 with MemoryError (the list keeps its old element; the interpreter would fail when
+ * creating the value, before its store). flush1: writes one slot a parallel region stored (dirty) and
+ * clears its dirty bit; a no-op without TP_LIST_WRITE_THROUGH. Both REQUIRE the critical section.
+ * TP_LIST_WRITE_THROUGH is the single mutation point the tests turn off and must see fail.
+ * ------------------------------------------------------------------------------------------ */
+#if defined(Py_GIL_DISABLED)
+#define TP_LIST_WRITE_THROUGH 1
+#else
+#define TP_LIST_WRITE_THROUGH 0
+#endif
+
+static inline int tp_f64_array_st(tp_f64_array *a, Py_ssize_t slot, double v)
+{
+    a->data[slot] = v;
+#if TP_LIST_WRITE_THROUGH
+    {
+        PyObject *o = PyFloat_FromDouble(v);
+        if (o == NULL || PyList_SetItem(a->list, slot, o) < 0) {
+            return -1;          /* SetItem consumed o on failure; the error is set */
+        }
+    }
+#else
+    a->dirty[slot] = 1;
+#endif
+    return 0;
+}
+
+static inline int tp_i64_array_st(tp_i64_array *a, Py_ssize_t slot, int64_t v)
+{
+    a->data[slot] = v;
+#if TP_LIST_WRITE_THROUGH
+    {
+        PyObject *o = PyLong_FromLongLong((long long)v);
+        if (o == NULL || PyList_SetItem(a->list, slot, o) < 0) {
+            return -1;
+        }
+    }
+#else
+    a->dirty[slot] = 1;
+#endif
+    return 0;
+}
+
+static inline int tp_f64_array_flush1(tp_f64_array *a, Py_ssize_t slot)
+{
+#if TP_LIST_WRITE_THROUGH
+    if (a->dirty[slot]) {
+        PyObject *o = PyFloat_FromDouble(a->data[slot]);
+        a->dirty[slot] = 0;
+        if (o == NULL || PyList_SetItem(a->list, slot, o) < 0) {
+            return -1;
+        }
+    }
+#else
+    (void)a;
+    (void)slot;
+#endif
+    return 0;
+}
+
+static inline int tp_i64_array_flush1(tp_i64_array *a, Py_ssize_t slot)
+{
+#if TP_LIST_WRITE_THROUGH
+    if (a->dirty[slot]) {
+        PyObject *o = PyLong_FromLongLong((long long)a->data[slot]);
+        a->dirty[slot] = 0;
+        if (o == NULL || PyList_SetItem(a->list, slot, o) < 0) {
+            return -1;
+        }
+    }
+#else
+    (void)a;
+    (void)slot;
+#endif
+    return 0;
 }
 
 /* ------------------------------------------------------------------------------------------

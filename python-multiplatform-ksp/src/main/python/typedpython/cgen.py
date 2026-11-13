@@ -26,18 +26,21 @@ Free-threaded CPython 3.15t (issue #159; runtime/API.md "Free-threaded CPython" 
 every piece of shared state). The module slots declare `{Py_mod_gil, Py_MOD_GIL_NOT_USED}` (under
 `#ifdef Py_GIL_DISABLED`), so importing it keeps the GIL off. In `tp_wrap_f`, a function with list
 parameters holds the lists' critical section (`tp_cs_begin`, one list or two) from before the first
-copy-in to after the last write-back: `tp_cs_end` is part of the same `exits` that run the write-back
-on every path (ok, error, deopt, the last before the interpreted redo), and is a no-op on a path
-that left before locking. More than two list parameters are refused here (`CGenError`), as in the
-front end and the verifier: CPython has no three-object critical section; except in a pure function
-(#255, `ir.direct_lists`): its lists are not copied, every Index is `tp_list_ld_*`
-(`PyList_GetItemRef` in program order, an element of another type deopts), every Len the current
-length, and no lock is taken. A function that holds an
-array does not poll the eval breaker (#141, open decision #152), so a long compiled array loop
-delays other threads' stop-the-world requests until it returns: a liveness delay, results
-unaffected. The `__typedpython_deopts__` read-add-write of `tp_cg_redo` runs in the module dict's
-critical section. Module state is written only by the exec slot; the class guards are atomic
-(tp_runtime.h).
+copy-in to after the last write-back: `tp_cs_end` is part of the same `exits` that run the
+write-back on every path (ok, error, deopt, the last before the interpreted redo), and is a no-op on
+a path that left before locking. Every StoreIndex into a list parameter is `tp_*_array_st` (#391):
+on a free-threaded build it also stores into the list at once, so element reads of other threads,
+which take no lock, see the stores in program order; a parallel region's worker only marks its slots
+and the caller writes them through after the join (`_emit_region`). More than two list parameters
+are refused here (`CGenError`), as in the front end and the verifier: CPython has no three-object
+critical section; except in a pure function (#255, `ir.direct_lists`): its lists are not copied,
+every Index is `tp_list_ld_*` (`PyList_GetItemRef` in program order, an element of another type
+deopts), every Len the current length, and no lock is taken. A function that holds an array polls
+only at loop tops that have an OSR-style exit (#152, `snap_poll`: write back, end the sections,
+poll, take them again, copy in again); a loop without one does not poll, so it delays other threads'
+stop-the-world requests until it returns: a liveness delay, results unaffected. The
+`__typedpython_deopts__` read-add-write of `tp_cg_redo` runs in the module dict's critical section.
+Module state is written only by the exec slot; the class guards are atomic (tp_runtime.h).
 
 Buffer arrays (issue #149, identity-safe part). A parameter annotated `array.array[float]`,
 `array.array[int]` is an `ArrayParam` with `buffer` "array"; `NDArray[np.float64]` / `NDArray[np.int64]`
@@ -1107,6 +1110,7 @@ class _FnGen:
         self.direct = {p.name for p in f.params if isinstance(p, ir.ArrayParam) and p.buffer is None} \
             if ir.direct_lists(f) else set()
         self.par_defs: list[str] = []               # outlined region bodies (SPEC N-15), emitted before the impl
+        self.in_par = False                         # emitting a region worker's body (no Python API)
         self.local_arrays: dict[str, Type] = {}       # name -> F64_ARRAY / I64_ARRAY
         self.brk: list = []                    # per open loop: goto label for `break`, or None
         self.label_n = 0
@@ -2186,9 +2190,17 @@ class _FnGen:
         if buffer:
             self.emit(f"tp_buf_st_{_BUFFER_SFX[at]}({ptr}, {slot}, {v});")
             return
-        self.emit(f"{ptr}->data[{slot}] = {v};")
-        if not local:                           # a local array has no list to write back to
+        if local:                               # a local array has no list to write back to
+            self.emit(f"{ptr}->data[{slot}] = {v};")
+        elif self.in_par:
+            # a parallel region's worker touches no Python object: it marks the slot, and the caller
+            # writes the region's slots through after the join, in program order (_emit_region)
+            self.emit(f"{ptr}->data[{slot}] = {v};")
             self.emit(f"{ptr}->dirty[{slot}] = 1;")
+        else:
+            # #391: written through at once on free-threaded builds (program order for readers that
+            # take no lock), marked dirty for the write-back with a GIL (runtime/API.md)
+            self.check(f"{_ARRAY_PFX[at]}_st({ptr}, {slot}, {v})")
 
     def st_StoreItem(self, s: ir.StoreItem) -> None:
         v = self._obj_operand(s.value, "StoreItem value")          # STORE_SUBSCR: value, container, index
@@ -2730,8 +2742,8 @@ class _FnGen:
         if reds:
             fields += ["    unsigned char *tp_pst;"] + [f"    {_CT[self.types[a]]} *tp_part{j};"
                                                        for j, (a, _, _) in enumerate(reds)]
-        saved = (self.lines, self.temps, self.depth, self.brk)
-        self.lines, self.temps, self.depth, self.brk = [], [], 2, []
+        saved = (self.lines, self.temps, self.depth, self.brk, self.in_par)
+        self.lines, self.temps, self.depth, self.brk, self.in_par = [], [], 2, [], True
         try:
             if reds:
                 # Assign statements go through the ordinary emitter; a MIN/MAX statement is emitted
@@ -2755,7 +2767,7 @@ class _FnGen:
                 self.stmts(s.body)
             body_lines, body_temps = self.lines, self.temps
         finally:
-            self.lines, self.temps, self.depth, self.brk = saved
+            self.lines, self.temps, self.depth, self.brk, self.in_par = saved
         text = "\n".join(ln for ln in body_lines if "/*tpmm*/" not in ln)
         if reds:
             # the one failure path a reduction body has: the sequential overflow check, which here
@@ -2794,7 +2806,21 @@ class _FnGen:
         pok = self.tmp("int") if reds else None
         if reds:
             self.emit(f"{pok} = 0;")
-        self.emit(f"if ({tn} >= (uint64_t)((TP_PAR_MIN_WORK + {w - 1}) / {w}) && tp_par_threads() > 1) {{")
+        # #391: the list parameters the body stores, in statement order, consecutive stores into the
+        # same list taken as one (a reader may miss the first value: the interpreter state after the
+        # last is a state it can see). After the join the caller writes each iteration's slots through
+        # in that order, which is the interpreter's store order. A list stored again after a store
+        # into another list (a, b, a) has a state no final-value write can show (new a with old b, or
+        # the reverse), so then the region is not taken where stores are written through
+        # (free-threaded) and the sequential loop runs. With the bound proof a body stores into one
+        # list parameter at most (only the loop's own list is proven), so this gate is defensive.
+        wlists: list[str] = []
+        for st in ([] if reds else s.body):
+            if st.array in self.arrays and (not wlists or wlists[-1] != st.array):
+                wlists.append(st.array)
+        twice = len(set(wlists)) != len(wlists)
+        gate = "!TP_LIST_WRITE_THROUGH && " if twice else ""
+        self.emit(f"if ({gate}{tn} >= (uint64_t)((TP_PAR_MIN_WORK + {w - 1}) / {w}) && tp_par_threads() > 1) {{")
         self.depth += 1
         self.emit(f"{ctx_t} tp_pr;")
         if reds:
@@ -2831,6 +2857,16 @@ class _FnGen:
             self.emit("}")
             self.emit(f"if (!{pok}) {{")
             return
+        if wlists and not twice:
+            self.emit("#if TP_LIST_WRITE_THROUGH")
+            self.emit("{ uint64_t tp_kf;")
+            self.emit(f"  for (tp_kf = 0; tp_kf < {tn}; tp_kf++) {{")
+            self.emit(f"    Py_ssize_t tp_sf = (Py_ssize_t)((uint64_t){ts} + tp_kf * UINT64_C({mag}));")
+            for a in wlists:
+                at, ptr = self._array(a)
+                self.emit(f"    if ({_ARRAY_PFX[at]}_flush1({ptr}, tp_sf) < 0) {{ tp_rc = -1; goto tp_exit; }}")
+            self.emit("  } }")
+            self.emit("#endif")
         self.emit(f"{_ident('l', s.var)} = (int64_t)((uint64_t){ts} + ({tn} - 1u) * UINT64_C({mag}));")
         self.depth -= 1
         self.emit("} else {")
