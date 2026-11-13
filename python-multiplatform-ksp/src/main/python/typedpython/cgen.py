@@ -84,12 +84,23 @@ Ownership rule (ir.py "Safety"), implemented by the `_own_*` emit helpers below 
   2. every OBJ-typed expression evaluates into a fresh temporary that owns a new reference;
      temporaries are NULL at every statement boundary;
   3. a temporary is consumed exactly once: moved into a local (the local's old reference is
-     released), moved into `*tp_out` by Return, or released (`tp_release`) right after the helper
-     that borrowed it returns;
+     released), moved into `*tp_out` by Return, moved into the slots of a fresh object by
+     `tp_new_fixed_move` (then emptied, `_moved_temps`), or released (`tp_release`) right after the
+     helper that borrowed it returns;
+  3a. an operand that a helper only borrows for its own duration, the two sides of Is, the object of
+     a FieldGet or IsExact and the OBJ arguments of a C to C Call, names a plain OBJ local itself
+     (`l_x`, or `Py_None` for the None constant) instead of a copy: no Py_NewRef, no release
+     (`_borrow_operand`, `_operand_release`). The local's own reference keeps the object alive for
+     the helper's whole duration, whatever other threads do (it is this frame's reference), and a
+     local changes only at a statement boundary (the IR has no assignment expression), so reading
+     the name when the helper runs is reading it when the operand was evaluated. CPython 3.14+ does
+     the same for these operands (LOAD_FAST_BORROW). Issue #125;
+     design 4.3.4 "참조 옮기기와 빌린 피연산자";
   4. every exit of the impl, return, error, deopt, goes through one exit block that releases
      every OBJ local and temporary.
   The generated code never decrements a reference except through `tp_release` (API.md); the only
-  increment is `Py_NewRef` when an OBJ local is read or an OBJ parameter is adopted.
+  increment is `Py_NewRef` when an OBJ local is read as a value (not as a borrowed operand, 3a) or
+  an OBJ parameter is adopted.
 
 Local arrays (ir.NewArray / CopyArray, `Function` docstring "Local arrays"). A local of an array type
 is a `tp_i64_array` / `tp_f64_array` struct held by value in the impl, zero-initialised at entry
@@ -120,7 +131,8 @@ any check is "not compiled" (`cls_ok = 0`) and is never touched through memory:
      impure functions (whose impl may never return 1), the impl's copy serves C to C Calls, where a
      failure is a deopt, so a Call of a function with a `Param.cls` parameter counts as a node that
      can deopt (`_can_deopt`), exactly like a callee with entry_globals;
-  3. FieldGet / FieldSet / New go through `tp_field_get` / `tp_field_set` / `tp_new_fixed` with the
+  3. FieldGet / FieldSet / New go through `tp_field_get` / `tp_field_set` / `tp_new_fixed_move`
+     (tp_new_fixed's stores, with the argument temporaries' references moved in, #125) with the
      captured descriptors; CheckExact deopts (return 1) on mismatch and is legal only in a pure
      function; Is is a plain BOOL.
 
@@ -450,6 +462,20 @@ def _class_current_expr(obj_c: str, k: int, fields_c: str, n: int, descrs_c: str
     1 current, 0 slow path, -1 error (module docstring, rules 4 and 5)."""
     return (f"tp_class_current({obj_c}, tp_st->classes[{k}], &tp_st->cls_rt[{k}], "
             f"{fields_c}, {n}, {descrs_c})")
+
+
+def _moved_temps(items: list[str]) -> str:
+    """After `tp_new_fixed_move` succeeded: the object owns the argument temporaries' references, so
+    the temporaries are emptied instead of released (module docstring, rule 3; #125). The single
+    mutation point of the move: returning "" releases them anyway and must fail the tests."""
+    return " ".join(f"{t} = NULL;" for t in items)
+
+
+def _operand_release(name: str, owned: bool) -> str | None:
+    """The temporary to release after a helper borrowed operand `name`: an owned temporary, never a
+    borrowed OBJ local (rule 3a; #125). The single mutation point of the borrow: releasing every
+    operand drops a reference the local still owns and must fail the tests."""
+    return name if owned else None
 
 
 def _watch_event_stmt() -> str:
@@ -1524,15 +1550,18 @@ class _FnGen:
             int_arg = a.type is Type.INT and p.type is Type.I64 and e.redo
             if a.type is not p.type and not int_arg:
                 raise CGenError(f"{self.f.name}: Call {e.function} arg {p.name}: {a.type} for {p.type}")
-            v = self.ev(a)
+            if a.type is Type.OBJ:
+                vo = self._borrow_operand(a, "Call argument")      # rule 3a
+                v = vo[0]
+                owned.append(vo)
+            else:
+                v = self.ev(a)
             values.append(v)
             if int_arg:
                 args.append(f"{v}.v")
                 int_args.append(v)
             else:
                 args.append(v)
-            if a.type is Type.OBJ:
-                owned.append(v)
         t = ti = None
         self.emit("tp_s = 0;")
         if not self.f.pure and not self.fast:
@@ -1573,7 +1602,7 @@ class _FnGen:
             # a pure callee using classes returns 1 when a class check fails (module docstring,
             # rule 7): redo it interpreted; this impure caller must not deopt
             self._redo_call(callee, e.args, values, t)
-        self._own_release(*owned)
+        self._release_operands(*owned)
         for v in int_args:
             self.emit(f"tp_int_release(&{v});")
         self.emit("if (tp_s != 0) { tp_rc = tp_s; goto tp_exit; }")
@@ -1663,17 +1692,35 @@ class _FnGen:
             raise CGenError(f"{self.f.name}: {what} on {e.type}")
         return self.ev(e)
 
+    def _borrow_operand(self, e: ir.Expr, what: str) -> tuple[str, bool]:
+        """An OBJ operand the helper only borrows (module docstring, rule 3a): (C name, owned).
+        A plain OBJ local (not virtual, not a region pointer) names itself and the None constant
+        names Py_None, both borrowed; anything else is an owned temporary as `_obj_operand`."""
+        if e.type is not Type.OBJ:
+            raise CGenError(f"{self.f.name}: {what} on {e.type}")
+        if not self.rmode:
+            if (isinstance(e, ir.Local) and e.name not in self.virtual
+                    and self.types.get(e.name) is Type.OBJ):
+                return _ident("l", e.name), False
+            if isinstance(e, ir.Const) and e.value is None:
+                return "Py_None", False
+        return self.ev(e), True
+
+    def _release_operands(self, *ops: tuple[str, bool]) -> None:
+        self._own_release(*[n for n in (_operand_release(name, owned) for name, owned in ops)
+                            if n is not None])
+
     def ev_Is(self, e: ir.Is) -> str:
         if self.rmode:
             a, b = self._r_ptr_name(e.left), self._r_ptr_name(e.right)
             t = self.tmp("int")
             self.emit(f"{t} = ({a} {'!=' if e.negate else '=='} {b});")
             return t
-        a = self._obj_operand(e.left, "Is")
-        b = self._obj_operand(e.right, "Is")
+        ao = self._borrow_operand(e.left, "Is")
+        bo = self._borrow_operand(e.right, "Is")
         t = self.tmp("int")
-        self.emit(f"{t} = ({a} {'!=' if e.negate else '=='} {b});")
-        self._own_release(a, b)
+        self.emit(f"{t} = ({ao[0]} {'!=' if e.negate else '=='} {bo[0]});")
+        self._release_operands(ao, bo)
         return t
 
     def _current(self, obj_c: str, cls: str) -> str:
@@ -1700,7 +1747,8 @@ class _FnGen:
             self.emit(f"{t} = ({p} != NULL);")
             return t
         k = self._class(e.cls)
-        o = self._obj_operand(e.obj, "IsExact")
+        oo = self._borrow_operand(e.obj, "IsExact")
+        o = oo[0]
         t = self.tmp("int")
         self.emit(f"tp_s = {self._global_ok(e.cls)};")
         self.emit("if (tp_s < 0) { tp_rc = -1; goto tp_exit; }")
@@ -1715,7 +1763,7 @@ class _FnGen:
             self._own_release(g)
         self.depth -= 1
         self.emit("}")
-        self._own_release(o)
+        self._release_operands(oo)
         return t
 
     def ev_CheckExact(self, e: ir.CheckExact) -> str:
@@ -1747,7 +1795,8 @@ class _FnGen:
                 raise CGenError(f"{self.f.name}: FieldGet {e.cls}.{e.field} on virtual {e.obj.name}")
             return self._own_copy(_ident("l", _vfield(e.obj.name, cd.fields.index(e.field))))
         slot = self.mg.slot(self.f.name, e.cls, e.field)
-        o = self._obj_operand(e.obj, "FieldGet")
+        oo = self._borrow_operand(e.obj, "FieldGet")
+        o = oo[0]
         t = self.tmp("PyObject *")
         self.emit(f"tp_s = {self._current(o, e.cls)};")
         self.emit("if (tp_s < 0) { tp_rc = -1; goto tp_exit; }")
@@ -1760,7 +1809,7 @@ class _FnGen:
             self.emit(f"{t} = tp_getattr({o}, tp_st->names[{self.mg.name_index(e.field)}]);")
         self.depth -= 1
         self.emit("}")
-        self._own_release(o)
+        self._release_operands(oo)
         self.emit(f"if ({t} == NULL) {{ tp_rc = -1; goto tp_exit; }}")
         return t
 
@@ -1814,8 +1863,10 @@ class _FnGen:
         self.emit("if (tp_s < 0) { tp_rc = -1; goto tp_exit; }")
         self.emit(av)
         self.emit("  if (tp_s) {")
-        self.emit(f"      {t} = tp_new_fixed((PyTypeObject *)tp_st->classes[{k}], "
+        self.emit(f"      {t} = tp_new_fixed_move((PyTypeObject *)tp_st->classes[{k}], "
                   f"{f'&tp_st->slots[{base}]' if items else 'NULL'}, tp_av, {len(items)});")
+        if items:                           # the object owns them now (rule 3)
+            self.emit(f"      if ({t} != NULL) {{ {_moved_temps(items)} }}")
         self.emit("  } else {")
         self.depth += 1
         if self.f.pure:
@@ -1827,7 +1878,7 @@ class _FnGen:
             self.emit(f"  {t} = tp_call({gk} ? tp_st->classes[{k}] : {g}, tp_av, {len(items)}, NULL);")
         self.depth -= 1
         self.emit("  } }")
-        self._own_release(*items)                           # the slots took their own references
+        self._own_release(*items)       # emptied when moved into the slots; released on the slow path
         if g is not None:
             self._own_release(g)
         self.emit(f"if ({t} == NULL) {{ tp_rc = -1; goto tp_exit; }}")

@@ -51,6 +51,54 @@ jobs:
         # Using --console=plain so logs are readable in GitHub Actions
         run: ./gradlew :python-multiplatform:desktopTest --console=plain
 
+  plugin-unit:
+    # The Gradle plugin's own unit tests (#403). Only its fixtures ran in CI before, so plugin
+    # unit tests were never executed (leader decision 2026-11-13). Linux: the tests use fake
+    # trees and need no Xcode or simulator.
+    name: Gradle plugin unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'zulu'
+          cache: 'gradle'
+
+      - name: Run the plugin's unit tests
+        # --rerun: never read an earlier result as this run's (AGENTS.md rule 8).
+        run: ./gradlew :python-multiplatform-gradle-plugin:test --rerun --console=plain
+
+      - name: Count the tests
+        if: always()
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import glob, xml.etree.ElementTree as ET
+          files = glob.glob("python-multiplatform-gradle-plugin/build/test-results/test/*.xml")
+          total = failed = skipped = 0
+          for f in files:
+              suite = ET.parse(f).getroot()
+              total += int(suite.get("tests", 0))
+              failed += int(suite.get("failures", 0)) + int(suite.get("errors", 0))
+              skipped += int(suite.get("skipped", 0))
+          print(f"Gradle plugin unit tests: {total} tests, {total - failed - skipped} passed, {failed} failed, {skipped} skipped ({len(files)} suites)")
+          if not files:
+              raise SystemExit("no plugin test results were written")
+          PY
+          cat "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-plugin-unit-reports
+          path: |
+            python-multiplatform-gradle-plugin/build/reports/tests/test
+            python-multiplatform-gradle-plugin/build/test-results/test
+
   desktop-native-linux:
     name: Desktop Kotlin/Native Tests (Linux x86_64)
     runs-on: ubuntu-latest

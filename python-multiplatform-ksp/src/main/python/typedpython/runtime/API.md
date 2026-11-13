@@ -415,6 +415,10 @@ Slot access and the slow paths:
     PyObject *tp_new_fixed(PyTypeObject *cls, PyMemberDef *const *slots, PyObject *const *values, Py_ssize_t n);
               /* cls->tp_alloc(cls, 0) then a release store of a new reference into each slot
                  (the fresh object is unreachable until it returns, #125); NULL + MemoryError */
+    PyObject *tp_new_fixed_move(PyTypeObject *cls, PyMemberDef *const *slots, PyObject *const *values, Py_ssize_t n);
+              /* the same stores with values[i] moved in, not copied: on success the object owns them
+                 and the caller empties its temporaries; on failure nothing was taken (#125).
+                 This is what the generator emits for New */
     int       tp_is_exact(PyObject *obj, PyTypeObject *cls);         /* Py_IS_TYPE */
 FieldGet's slow path is `tp_getattr`, New's is `tp_global` + `tp_call` (the binding loaded before
 the arguments), IsExact's compares with `tp_global`; in a pure function every slow path is a deopt.
