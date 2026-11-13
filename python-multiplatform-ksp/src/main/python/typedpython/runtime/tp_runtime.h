@@ -2843,6 +2843,51 @@ static inline PyObject *tp_new_fixed(PyTypeObject *cls, PyMemberDef *const *slot
     return obj;
 }
 
+/* tp_new_fixed with the caller's references moved into the slots (#125, design 4.3.4 "참조 옮기기"):
+ * on success the object owns values[i] (the caller drops its pointers without releasing them); on
+ * failure nothing was taken and the caller still owns every values[i].
+ *
+ * Same stores, same object, same allocation as tp_new_fixed; what is gone is a Py_NewRef of each
+ * value here and the caller's Py_CLEAR of its temporary right after, a +1/-1 pair on the same object
+ * with nothing in between that can run code or reach a safepoint. Every reference count another
+ * thread can read during the call is one it could read with the pair (outside the pair's window), so
+ * no observation tells the two apart; the count after the call is the same. On failure the slots
+ * already written are emptied again before the half-built object is released, so its dealloc drops
+ * no reference the caller still owns.
+ * TP_MOVED_REF is the single mutation point: test_alloc_preserving.py builds with -DTP_MUTANT_COPY_MOVED,
+ * which defines it as Py_NewRef (a copy instead of a move), leaks one reference per slot and must fail. */
+#ifndef TP_MOVED_REF
+#ifdef TP_MUTANT_COPY_MOVED   /* the mutation: a copy instead of a move (an object-like switch, as cl.exe
+                                * cannot define a function-like macro on its command line) */
+#define TP_MOVED_REF(v) Py_NewRef(v)
+#else
+#define TP_MOVED_REF(v) (v)
+#endif
+#endif
+static inline PyObject *tp_new_fixed_move(PyTypeObject *cls, PyMemberDef *const *slots,
+                                          PyObject *const *values, Py_ssize_t n)
+{
+    Py_ssize_t i, j;
+    PyObject *obj = cls->tp_alloc(cls, 0);
+
+    if (obj == NULL) {
+        return NULL;
+    }
+    for (i = 0; i < n; i++) {
+        if (values[i] == NULL) {
+            for (j = 0; j < i; j++) {       /* give the moved references back to the caller */
+                *(PyObject **)((char *)obj + slots[j]->offset) = NULL;
+            }
+            PyErr_SetString(PyExc_AttributeError, slots[i]->name);
+            Py_DECREF(obj);
+            return NULL;
+        }
+        __atomic_store_n((PyObject **)((char *)obj + slots[i]->offset), TP_MOVED_REF(values[i]),
+                         __ATOMIC_RELEASE);
+    }
+    return obj;
+}
+
 /* type(obj) is cls */
 static inline int tp_is_exact(PyObject *obj, PyTypeObject *cls)
 {
