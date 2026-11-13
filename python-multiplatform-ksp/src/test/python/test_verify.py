@@ -995,7 +995,11 @@ def test_the_same_open_node_without_entry_globals_is_accepted():
 
 
 def test_global_read_and_box_keep_a_function_closed():
-    assert_accepted(_closed(extra=[ExprStmt(Global(OBJ, "m")), ExprStmt(Box(OBJ, li("N")))]))
+    # without a list: `_closed` holds one, and a Global read there is verify/array-wait (#390)
+    assert_accepted(fn(entry_globals=[Param("N", I64)], returns=F64, body=[
+        ExprStmt(Global(OBJ, "m")), ExprStmt(Box(OBJ, li("N"))), Return(f(0.0))]))
+    out, diags = assert_rejected(ARRAY_WAIT, _closed(extra=[ExprStmt(Global(OBJ, "m"))]))
+    assert ENTRY_OPEN not in rules_for(diags, "f")         # still closed: only the window refuses it
 
 
 def test_entry_global_needs_every_callee_closed_transitively():
@@ -1072,7 +1076,7 @@ def _base_functions():
               may_deopt=True, line=3, body=[
                   Assign("s", f(0.0)),
                   Assign("c", i(0)),
-                  Assign("t", g_("TOLERANCE")),
+                  Assign("t", Const(OBJ, None)),    # not a Global: dot holds lists (#390)
                   ForRange("k", i(0), Len(I64, "a"), i(1), (
                       If(And(BOOL, lt(li("k"), li("n")), lt(Index(F64, "a", li("k")), f(1e9))),
                          (Assign("s", add(lf("s"), BinOp(F64, BinOpKind.MUL,
@@ -1914,7 +1918,7 @@ def _array_functions():
                 Assign("p", na(I64A, i(8), None, True)),
                 Assign("q", CopyArray(I64A, "p")),
                 Assign("s", i(0)),
-                Assign("o", g_("OBJECT")),
+                Assign("o", Const(OBJ, None)),    # not a Global: fk holds a list (#390)
                 ForRange("k", i(0), Len(I64, "p"), i(1), (
                     StoreIndex("q", li("k"), add(Index(I64, "p", li("k")), i(1))),
                     Assign("s", add(li("s"), Index(I64, "q", li("k")))),
@@ -2073,3 +2077,38 @@ def test_closed_array_function_is_still_accepted():
     g = fn("g", params=[Param("x", F64)], returns=F64, body=[Return(lf("x"))])
     caller = _arr_fn("f", [Return(Call(F64, "g", (Index(F64, "a", i(0)),)))])
     assert_accepted(caller, g)
+
+
+# --- #390: nothing in a list function's call tree waits for another object's lock ----------------
+
+ARRAY_WAIT = "verify/array-wait"
+
+
+def test_array_function_reading_a_global_is_rejected():
+    # the cached read's fill (and tp_global) can wait for the module dict's lock
+    body = [ExprStmt(Global(OBJ, "m")), Return(Index(F64, "a", i(0)))]
+    out, diags = assert_rejected(ARRAY_WAIT, _arr_fn("f", body))
+    assert "critical section" in out.skipped["f"]
+
+
+def test_array_function_calling_a_function_that_reads_a_global_is_rejected():
+    g = fn("g", returns=NONE, body=[ExprStmt(Global(OBJ, "m")), Return()])
+    caller = _arr_fn("f", [ExprStmt(Call(NONE, "g", ())), Return(Index(F64, "a", i(0)))])
+    out, diags = assert_rejected(ARRAY_WAIT, caller, g)
+    assert "g" in kept(out)                                    # g holds no list: it is fine alone
+
+
+def test_array_function_and_a_callee_entry_global():
+    g = fn("g", entry_globals=[Param("G", F64)], returns=F64, pure=True, body=[Return(lf("G"))])
+    read_at_call = fn("f", params=[ArrayParam("a", F64A, stored=False)], returns=F64, pure=True,
+                      may_deopt=True, body=[Return(Call(F64, "g", ()))])
+    assert_rejected(ARRAY_WAIT, read_at_call, g)
+    covered = dataclasses.replace(read_at_call, entry_globals=(Param("G", F64),), may_deopt=False)
+    assert_accepted(covered, g)                                # passed from f's own snapshot
+
+
+def test_a_buffer_or_direct_list_function_holds_no_section():
+    buf = fn("f", params=[ArrayParam("a", F64A, stored=False, buffer="array")], returns=F64,
+             body=[ExprStmt(Global(OBJ, "m")), Return(Index(F64, "a", i(0)))])
+    out, diags = run(buf)
+    assert ARRAY_WAIT not in rules_for(diags, "f"), diags

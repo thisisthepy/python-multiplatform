@@ -45,6 +45,11 @@ Rules (the `rule` of a Diagnostic):
   verify/redo                 `Call.redo` where it is not legal (see below)
   verify/entry-global-open    a function with entry_globals is not closed
   verify/array-open           a function with an ArrayParam runs user code (#203)
+  verify/array-wait           a function that holds one or two lists in a critical section has, in
+                              its call tree, a node that can wait for another object's critical
+                              section inside that window (#390): an OBJ Global, IsExact, CheckMethod,
+                              or a Call of a function with an entry global the caller does not
+                              hold itself (read at the call)
   verify/array-direct         a pure function with three or more list parameters (#255,
                               `ir.direct_lists`: read element by element) has an entry global, a
                               buffer parameter, a CopyArray of a list parameter or a parallel loop
@@ -311,6 +316,7 @@ REGION_ESCAPE = "verify/region-escape"
 REDO = "verify/redo"
 ENTRY_OPEN = "verify/entry-global-open"
 ARRAY_OPEN = "verify/array-open"
+ARRAY_WAIT = "verify/array-wait"
 ARRAY_DIRECT = "verify/array-direct"
 BUFFER = "verify/buffer"
 CLASS = "verify/class"
@@ -438,6 +444,7 @@ class _Checker:
         self.entry: dict[str, Type] = {}     # name -> type of every entry global
         self.opens: list[str] = []           # reasons the function is not closed
         self.slow_user: list[str] = []       # slow paths that can run user code (FieldGet, New)
+        self.waits: list[str] = []           # nodes that can wait for another object's lock (#390)
 
     def error(self, rule: str, message: str) -> None:
         d = Diagnostic(self.fn.name, rule, message, self.fn.source_line)
@@ -1047,6 +1054,10 @@ class _Checker:
                                    f"this module")
             return dataclasses.replace(e, args=args)
         self.callees.add(e.function)
+        if isinstance(callee.entry_globals, tuple) and callee.entry_globals and not self.covers(callee):
+            # read at the call (cgen ev_Call); a covered one is passed from this function's snapshot
+            g0 = getattr(callee.entry_globals[0], "name", "?")
+            self.waits.append(f"a call of '{e.function}', whose entry global {g0} is read at the call")
         if len(args) != len(callee.params):
             self.error(TYPE, f"'{e.function}' takes {len(callee.params)} argument(s), got "
                              f"{len(args)}")
@@ -1122,6 +1133,8 @@ class _Checker:
         if not isinstance(e.name, str):
             self.error(TYPE, f"Global name {e.name!r} is not a str")
         self.result(e, Type.OBJ)
+        # #390: the cached read's fill (and tp_global) can wait for the module dict's lock
+        self.waits.append(f"global {e.name}")
         return e        # a read alone has no effect (ir.Global)
 
     def e_GetAttr(self, e: GetAttr, state: _State) -> ir.Expr:
@@ -1296,6 +1309,7 @@ class _Checker:
     def e_IsExact(self, e: IsExact, state: _State) -> ir.Expr:
         obj = self.obj_operand(e.obj, state, "operand of IsExact")
         self.known_class(e.cls, "IsExact")
+        self.waits.append(f"IsExact of {e.cls} (looks the class up in the module dict)")
         self.result(e, Type.BOOL)
         return dataclasses.replace(e, obj=obj)
 
@@ -1313,6 +1327,7 @@ class _Checker:
         obj = self.obj_operand(e.obj, state, "operand of CheckMethod")
         self.result(e, Type.OBJ)
         self.can_deopt = True
+        self.waits.append(f"CheckMethod of {e.cls} (looks the method up in the class dict)")
         if self.known_class(e.cls, "CheckMethod"):
             q = f"{e.cls}.{e.method}" if isinstance(e.method, str) else None
             callee = self.sigs.get(q) if q is not None else None
@@ -2579,6 +2594,7 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
     callees: dict[str, set[str]] = {}
     open_why: dict[str, str] = {}          # a function that runs user code -> why
     slow_why: dict[str, str] = {}          # a function whose slow paths can run user code -> why
+    wait_why: dict[str, str] = {}          # a function with a node that can wait for a lock (#390)
     for name, g in sigs.items():
         c, rebuilt = _prove(g, sigs, classes)
         for d in c.diags:
@@ -2589,6 +2605,8 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
             open_why[name] = c.opens[0]
         if c.slow_user:
             slow_why[name] = c.slow_user[0]
+        if c.waits:
+            wait_why[name] = c.waits[0]
 
     # Closedness (entry_globals): a fixpoint over the call graph.
     changed = True
@@ -2624,6 +2642,28 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
         if name in array_why and any(isinstance(p, ArrayParam) for p in g.params):
             reject(name, g.source_line, ARRAY_OPEN,
                    f"holds a list copy-in but can run user code: {array_why[name]}")
+
+    # #390: a function holding one or two lists keeps their critical section from the copy-in to the
+    # write-back. A wait for another object's lock inside that window detaches the thread, which
+    # suspends the section (CPython releases it), so another thread could write the list and the
+    # write-back would overwrite it. Its own entry globals are read before the lock (cgen); nothing in
+    # its call tree may look up a dict. A redo Call also runs inside the window: an open defect
+    # (design/typedpython.md 4.3.6), not refused here (it would change spectral_norm).
+    changed = True
+    while changed:
+        changed = False
+        for name, cs in callees.items():
+            if name not in wait_why:
+                bad = sorted(c for c in cs if c in wait_why)
+                if bad:
+                    wait_why[name] = f"{wait_why[bad[0]]}, in '{bad[0]}'"
+                    changed = True
+    for name, g in sigs.items():
+        if name in wait_why and not ir.direct_lists(g) and any(
+                isinstance(p, ArrayParam) and p.buffer is None for p in g.params):
+            reject(name, g.source_line, ARRAY_WAIT,
+                   f"holds its lists' critical section, and {wait_why[name]} can wait for another "
+                   f"object's critical section inside it, which would suspend it")
 
     # A call cycle (direct or mutual recursion) is legal: every compiled impl function counts its
     # frame at entry (tp_enter_call), so recursion ends in RecursionError where CPython raises it

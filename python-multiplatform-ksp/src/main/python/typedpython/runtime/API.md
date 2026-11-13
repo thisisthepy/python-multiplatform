@@ -90,6 +90,15 @@ Python error set, nothing to undo), `-1` Python error set (CPython's exception t
        not exactly an int within i64). Len is PyList_GET_SIZE at that point. */
     int  tp_list_ld_f64(PyObject *list, int64_t i, double *out);
     int  tp_list_ld_i64(PyObject *list, int64_t i, int64_t *out);
+    /* #390: nothing inside the lists' section may wait for another lock (a wait detaches the thread
+       and CPython suspends every section it holds). Entry globals of a function that holds lists are
+       read BEFORE tp_cs_begin: tp_eg_snapshot looks the n names up in the module dict only (absent:
+       1 = deopt), inside the dict's critical section together with tp_globals_epoch, and returns
+       strong references (NULL-filled unless 0); -1 = error. After the copy-in, tp_eg_current(epoch)
+       must be true (no watched name changed since: the values are current inside the lists' section),
+       else deopt. The names are in tp_watch_names; an unwatched module (watch_id1 == 0) deopts. */
+    int  tp_eg_snapshot(PyObject *module_dict, PyObject *const *names, Py_ssize_t n, PyObject **out, uint64_t *epoch);
+    int  tp_eg_current(uint64_t epoch);
 `tp_*_array_enter` / `_exit` read and write the list through borrowed references (`PyList_GET_ITEM`,
 `PyList_SetItem`) and REQUIRE the caller to hold that critical section. Between enter and exit no
 other thread can change the list, so the whole call is one atomic step as far as lists go (an
@@ -494,6 +503,7 @@ static or module-state field must be added here):
 | list arguments of array parameters | caller's lists | critical section | `tp_cs_begin` before the copy-in, `tp_cs_end` after the write-back, on every path |
 | list arguments of a pure function with three or more (#255) | caller's lists | CPython | not copied, no lock: every element read is `PyList_GetItemRef` (atomic, a strong reference), in program order; the wrapper's arguments keep the lists alive |
 | module globals (class names, entry globals) | module dict | strong reads | `tp_global` and `tp_class_global_ok` use `PyDict_GetItemRef` |
+| entry globals of a function holding lists (#390) | module dict | critical section + epoch | `tp_eg_snapshot` reads them and `tp_globals_epoch` in the module dict's section BEFORE the lists' section; `tp_eg_current` after the copy-in, else deopt. Nothing else in that window looks a dict up (`verify/array-wait`); open: a redo Call runs the interpreted callee inside it (design 4.3.6) |
 | a compiled class's instances | other threads' objects | CPython | `PyMember_GetOne` / `SetOne` are what the interpreter's member descriptors call (they take the object's lock on free-threaded builds); `tp_new_fixed` writes only its own fresh object |
 | `errno` (math helpers) | C library | thread-local | per thread by POSIX |
 | `tp_par_cap_v`, `tp_par_regions_v`, `tp_par_started_v`, `tp_par_failed_v` | static in the module | atomic | relaxed loads and stores; the cap is computed identically by any thread that finds it unset and never changes after |
