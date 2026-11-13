@@ -2,9 +2,10 @@
 signals reach Python (KeyboardInterrupt), and other threads get the GIL.
 
 A Python signal handler, a pending call and another thread are user code that can change lists and
-globals. A function that holds an array copy-in (ArrayParam) or an entry-globals snapshot runs no
-user code by contract, so while such a function is active the poll is deferred: the result is then
-the CPython execution in which the signal arrived after the call.
+globals. A function that holds an array copy-in (ArrayParam) or an entry-globals snapshot polls
+too (#152, #335, SPEC N-8): at a poll it writes its lists back, runs the handler, copies them in
+again and re-checks its entry guards, so the result includes what the handler wrote (or, after a
+poll it cannot continue from, it leaves for the interpreted continuation).
 
 Each scenario runs in a child interpreter, so a broken build cannot take pytest down and signal
 handlers stay out of the test process. Timing thresholds are generous; they separate "polled"
@@ -136,12 +137,17 @@ def test_another_thread_runs_while_a_compiled_loop_runs(extension):
 
 
 @posix_signals
-def test_a_handler_is_deferred_while_an_array_copy_is_live(extension):
+def test_a_handler_during_an_array_copy_is_seen_by_the_result(extension):
     # total() reads its list through a copy-in. A handler that writes the list mid-call would be
-    # invisible to the copy, a result no CPython execution can give. So the handler must run after
-    # the call (the execution where the signal arrived late), or the result must include its write.
+    # invisible to a stale copy, a result no CPython execution can give. So either the handler runs
+    # after the call (the execution where the signal arrived late) or the result includes its write
+    # (a poll wrote the list back, ran the handler and copied it in again, #152/#335).
+    # Size (#406): each poll inside the call re-copies the whole list, so the list stays under
+    # TP_POLL_INTERVAL (4096) and the inner loop never polls; with 100_000 elements a call made
+    # 480_000 full re-copies and timed out at 120 s on slow macOS runners. The outer loop still polls
+    # (once per 4096 rounds); the inner-loop poll and the OSR exit are covered by test_osr_exit.py.
     r = run_child(extension, """
-        xs = [1.0] * 100_000
+        xs = [1.0] * 4_000
         seen = {}
         def handler(signum, frame):
             seen["t"] = time.perf_counter()
@@ -150,10 +156,10 @@ def test_a_handler_is_deferred_while_an_array_copy_is_live(extension):
         import os
         threading.Timer(0.05, lambda: os.kill(os.getpid(), signal.SIGUSR1)).start()
         t0 = time.perf_counter()
-        s = m.total(xs, 20_000)
+        s = m.total(xs, 500_000)          # 2e9 additions, as before
         t1 = time.perf_counter()
         time.sleep(0.01)                  # let a deferred handler run
-        print(json.dumps({"s": s, "plain": 100_000 * 20_000 * 1.0, "t0": t0, "t1": t1,
+        print(json.dumps({"s": s, "plain": 4_000 * 500_000 * 1.0, "t0": t0, "t1": t1,
                           "handler": seen.get("t")}))
     """)
     assert r["handler"] is not None, "the handler never ran"
