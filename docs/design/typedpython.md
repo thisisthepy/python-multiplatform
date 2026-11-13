@@ -410,6 +410,116 @@ PyPy·GraalVM 과 같은 방식이다. N-11 클래스의 객체를 PyObject 대�
 
 이 셋은 N-12 이전부터 있는 경계도 포함한다. 1번이 결정되어 N-12 구현을 시작한다. 2번은 #141(1단계 완료), 3번은 #142.
 
+#### 바. 관측을 바꾸지 않는 할당·해제·refcount 비용 (#125, 조사 2026-11-13)
+
+**제약 (리더 경유, 2026-11-13, 오너의 상시 의도):** "All three GC options listed before are REJECTED:
+per-type freelist (replaces tp_dealloc, id reuse), deferring or skipping GC tracking (gc.is_tracked /
+gc.get_objects observable), batching GC allocation counts or adjusting thresholds (changes when
+collections run). The rule behind it: no GIL-only features (everything must work on free-threaded
+3.15t), and no change to any observable Python behaviour (gc module, ids, weakrefs, __del__ timing,
+collection timing, sys.getrefcount, tracemalloc, subclassing, later class changes)."
+
+> 이 제약의 "collection timing" 은 마.1 의 결정 (2026-10-04, 사용자: GC 수집 시점은 동일성 범위에서 뺀다)보다
+> 좁다. 이 절의 후보는 둘 다 만족하도록 골랐다(수집 시점을 바꾸는 후보는 모두 뺐다). 두 문장 중 어느 쪽이
+> N-12a/b 의 가상 객체에도 적용되는지는 이 조사가 정하지 않는다(리더에게 확인할 점).
+
+**출발점.** 프로파일(`benchmarks/typedpython/results/2026-10-25-binary-trees-alloc-profile.md`, 3.15.0rc1t,
+macOS arm64)은 #273 과 #371 이전 것이다. 몫은 그때의 전체에 대한 비율이고, 아래의 기대 이득은 그 몫에서 어림한
+**추정**이다(측정 아님). 컴파일 함수는 `make`, `check` 그대로다(`test_class_methods.py` EXPECTED).
+CPython 출처는 v3.15.0rc1 태그의 파일과 함수 이름이다.
+
+**후보별 결론.**
+
+1. **같은 할당 경로를 단계만 줄이기.** `PyType_GenericAlloc` (`Objects/typeobject.c`) 은
+   `_PyType_AllocNoTrack` 에서 크기 계산(`_PyObject_VAR_SIZE(type, nitems+1)`, itemsize 0 이면 basicsize),
+   `_PyObject_MallocWithType`, `_PyObject_GC_Link` (= `record_allocation(tstate)`, 할당 계수), 헤더 뒤 전체
+   `memset`, `_PyObject_Init` (3.15t 에서는 heap type 의 참조를 `_Py_INCREF_TYPE`, 즉 스레드별 표에 센다,
+   `Include/internal/pycore_object.h`) 을 하고 마지막에 `_PyObject_GC_TRACK` 한다. 고정 레이아웃 정확 타입에서
+   남는 중복은 `memset` 하나다(모든 슬롯을 곧 쓴다). 공개 API `PyObject_GC_New` + `PyObject_GC_Track` 은
+   `gc_alloc` (`Python/gc_free_threading.c`) 로 같은 할당기·같은 크기·같은 `record_allocation`·같은
+   `_PyObject_Init` 를 거치고 `memset` 만 없다. 그래서 gc, tracemalloc, 할당 계수 어느 것도 다르지 않다.
+   다만 객체의 모든 바이트를 컴파일 코드가 써야 하므로 클래스의 모든 슬롯이 필드여야 한다. 기대 이득:
+   memset 17 샘플, 약 1% (추정). **하지 않음:** 이득이 작다. 직접 할당(`tp_alloc` 를 건너뛰고 헤더를 손으로
+   채우기)은 비공개 API 이고, `Py_INCREF(type)` 로 바꾸면 3.15t 의 스레드별 type refcount 와 달라져
+   `sys.getrefcount(Node)` 의 회계가 바뀌므로 기각.
+   할당 하나에 CPython 안에서 스레드 상태 읽기가 셋 이상 있다(`gc_alloc`/`_PyObject_MallocWithType` 의 힙,
+   `record_allocation`, `_Py_INCREF_TYPE`), 해제 하나에도 셋(`_Py_Dealloc` 의 trashcan 여유 확인,
+   `PyObject_GC_Del` 의 `record_deallocation`, `_Py_DECREF_TYPE`). tstate 를 받는 공개 변형이 없으므로 공개
+   API 로는 줄일 수 없다. 프로파일의 `_tlv_get_addr` 몫은 macOS 의 TLS 접근 방식 때문에 큰 것으로 보인다(추정).
+2. **스레드 지역 객체의 refcount 피하기(3.15t biased refcounting).** `Py_INCREF` (`Include/refcount.h`) 는
+   3.15t 에서 `ob_ref_local` 을 relaxed 로 읽고, immortal 이면 끝, 소유 스레드(`ob_tid == _Py_ThreadId()`,
+   arm64 에서는 레지스터 읽기)면 원자 연산 없이 저장, 아니면 `ob_ref_shared` 에 원자 덧셈이다. `Py_DECREF` 도
+   같고, 0 이 되면 `_Py_MergeZeroLocalRefcount` 가 `ob_ref_shared == 0` 이면 바로 `_Py_Dealloc` 한다. 이 스레드가
+   만든 노드는 이미 싼 경로를 탄다. 그래서 "스레드 지역이면 refcount 를 다르게" 는 연산 하나당 더 얻을 것이
+   없다. 얻을 것은 **증감 쌍 자체를 없애는 것**이고, 그 조건은 스레드 지역성이 아니라 "다른 참조가 그동안
+   살려 둔다" 이다(아래 구현). 스레드 지역 증명은 슬롯 값을 빌려 읽을 때만 필요하다(나., D5, 바뀌지 않음).
+3. **임시 객체 없애기(N-12a 가상 객체).** binary-trees 가 이득을 못 보는 이유: `make` 의 객체는 반환으로
+   탈출하고, `check` 는 아무것도 할당하지 않는다. 두 함수가 만나는 곳은 `check(make(d))` 를 부르는 `main`
+   뿐인데, `main` 은 비용 정책(#150)으로 컴파일되지 않고 순수하지도 않다(`print`, `sys.argv`). 그래서 N-12b
+   영역의 host 가 없고(별도 벤치 `binary_trees_region.py` 가 그 경우를 잰다), `make` 와 `check` 를 합치거나
+   (`check∘make` 를 트리 없이 세기) `check` 를 호출자에 inline 하는 것도 호출 지점이 인터프리터 안이라 할
+   수 없다. `main` 을 컴파일하면 벤치의 컴파일 함수 집합이 바뀌므로 이 조사의 범위 밖이다.
+4. **해제를 타입의 tp_dealloc 그대로, 간접 호출만 줄이기.** 지금 경로: `Py_DECREF` →
+   `_Py_MergeZeroLocalRefcount` → `_Py_Dealloc` (`Objects/object.c`: tstate 읽기, 재귀 여유가 작으면 trashcan,
+   reftracer) → `subtype_dealloc` (`PyObject_GC_UnTrack`, 베이스 사슬, finalizer·weaklist 확인, `clear_slots`
+   가 자식마다 `Py_DECREF`, 재추적) → `object_dealloc` → `tp_free = PyObject_GC_Del` → `_Py_DECREF_TYPE`. 간접
+   호출은 둘셋이고 비용은 그 안의 일이다. 같은 일을 컴파일 코드가 하려면 비공개 API(`_PyTrash_*`,
+   `_Py_DECREF_TYPE`)가 필요하고 `tp_dealloc` 를 우회하게 되어 2026-10-25 결정(미룸)의 문제와 같다. 해제
+   순서를 바꾸면(예: 재귀 대신 반복) 이후 할당의 주소 재사용, 곧 `id()` 값이 달라진다. **하지 않음.**
+5. **스레드 상태 몫 가운데 #273 이 남긴 것.** 컴파일 프레임마다 `tp_enter_call` 이 `PyThreadState_GetFrame`
+   (`Python/pystate.c`: 프레임 객체를 얻고 `Py_XNewRef`, 호출 하나와 증감 한 쌍), `Py_GetRecursionLimit`
+   (`Python/ceval.c`: `_PyInterpreterState_GET()`, TLS 읽기), `Py_EnterRecursiveCall` (TLS 읽기와 스택 주소
+   비교, `pycore_ceval.h` `_Py_EnterRecursiveCallTstate`) 를, 나갈 때 `Py_LeaveRecursiveCall` (3.15 에서 빈 함수)
+   을 부른다.
+   - **파이썬 깊이:** 컴파일 프레임이 도는 동안 그 밑의 파이썬 프레임은 바뀌지 않는다(사이에 도는 파이썬
+     코드는 쌓았던 프레임을 다 걷고 돌아온다). 그래서 wrapper 가 한 번 재고 `tp_tls` 에 "구간 깊이" 로 두고
+     나갈 때 되돌리면, 프레임마다의 `PyThreadState_GetFrame` 이 없어진다. 첫 측정이 프레임 객체를 이미
+     만들고 붙잡으므로 새로 생기는 프레임 객체는 없다. 기대 이득: 프로파일의 `PyThreadState_GetFrame` 83 샘플,
+     약 5% (추정, #273 전 몫). **에이전트 제안, 확인되지 않음.** `tp_tls`, wrapper, 빠른 진입(#147)을 함께
+     바꾸므로 이 단계에서는 하지 않았다.
+   - **재귀 한도:** `Py_SetRecursionLimit` 는 3.15t 에서 stop-the-world 로, GIL 빌드에서는 GIL 을 쥐고 바꾼다.
+     그래서 다른 스레드는 이 스레드가 safepoint 에 닿기 전에는 바꿀 수 없다. 하지만 이 스레드 안에서는 어느
+     `Py_DECREF` 든 `__del__` 을 부를 수 있고, 거기서 한도를 바꿀 수 있다. 바뀐 것을 알 공개 수단이 없으므로
+     프레임마다 읽는 것을 그대로 둔다.
+   - **C 스택 가드:** tstate 를 받는 공개 변형이 없다. 몇 프레임마다만 부르면 C 스택이 먼저 닿는 경우
+     RecursionError 가 나는 프레임이 달라진다. 그대로 둔다.
+6. **기각된 것(위 제약).** 타입별 freelist, GC 추적 늦추기·생략, 할당 계수 묶기·임계값 조정. 참고로 3.15t 는
+   이미 스스로 할당 계수를 스레드별로 묶는다(`record_allocation`, `LOCAL_ALLOC_COUNT_THRESHOLD` 512). 이것은
+   CPython 자신의 동작이고 컴파일 코드는 그대로 따른다.
+
+**구현한 것: 참조 옮기기와 빌린 피연산자 (#125, 에이전트 제안, 확인되지 않음).** 생성 C 에서 두 종류의 +1/-1
+쌍을 뺐다. 객체·할당·GC 추적·슬롯 값은 하나도 바뀌지 않는다.
+
+- **New 의 참조 옮기기.** `Node(make(d-1), make(d-1))` 는 인자 임시값을 `tp_new_fixed` 가 `Py_NewRef` 로
+  슬롯에 복사하고 호출자가 바로 놓았다. 이제 `tp_new_fixed_move` 가 임시값의 참조를 슬롯으로 옮기고
+  호출자는 임시값을 비운다(`_moved_temps`). 실패하면 아무것도 가져가지 않는다: 이미 쓴 슬롯은 반쯤 만든
+  객체를 놓기 전에 NULL 로 되돌린다. 비순수 함수의 느린 경로(`tp_call`)는 그대로 복사·해제한다.
+- **빌린 피연산자.** Is 의 두 쪽, FieldGet·IsExact 의 객체, C 간 Call 의 OBJ 인자가 일반 OBJ 지역이면 복사
+  (`Py_NewRef` + 해제) 없이 지역 이름(`l_x`)을, None 상수면 `Py_None` 을 바로 쓴다(`_borrow_operand`,
+  `_operand_release`). 지역의 자기 참조가 그 helper 가 끝날 때까지 객체를 살려 둔다. 이것은 이 프레임의
+  참조이므로 다른 스레드가 무엇을 해도 그렇다. IR 에는 대입식이 없어서 지역은 문장 경계에서만 바뀌고,
+  그래서 helper 가 돌 때 읽는 지역은 피연산자를 평가할 때의 지역과 같다. 슬롯 **값**은 여전히
+  `tp_field_get` (`PyMember_GetOne`) 으로 새 참조를 잡는다(D5 그대로).
+- **관측되지 않는 근거.** 뺀 쌍은 모두 "다른 참조가 그동안 살려 두는 객체의 +1 뒤 -1" 이고, 그 사이에는 이
+  스레드에서 코드가 돌지도 safepoint 에 닿지도 않는다(New 의 근거는 위 #371 과 같다). 같은 스레드는 그 사이를
+  볼 수 없다. 다른 스레드(3.15t)가 그 사이에 `sys.getrefcount` 를 읽을 수 있었다면, 이제 읽는 값은 원래
+  실행에서도 그 창 밖에서 읽었을 값이다. 그래서 새 실행의 관측은 원래 실행에서 가능한 관측의 부분집합이다.
+  호출 경계의 refcount, `gc.is_tracked`, `gc.get_objects`, `tp_traverse` 가 보는 슬롯, weakref, `__del__`
+  순서, `id()` 는 변하지 않는다. 인터프리터 쪽 근거: 3.15.0rc1t 의 `dis` 로 `check` 를 보면 이 피연산자들이
+  모두 `LOAD_FAST_BORROW` 다(2026-11-13 관측). 인터프리터도 여기서 증감하지 않는다.
+- **양.** binary-trees 의 `check` 한 번에 8쌍(FieldGet 의 `node` 2, Is 의 지역 2와 None 2, 재귀 인자 2),
+  `make` 의 노드 하나에 2쌍(자식 두 개, 잎에서는 None 두 개)이 빠진다. 기대 이득: 프로파일의 "compiled code"
+  26% 가 이 증감을 포함한다. 3~8% 로 어림한다(추정, 측정 안 함). 측정은 CI 또는 조용한 창에서 리더가 한다.
+- **남은 다음 단계(에이전트 제안, 확인되지 않음):** 대입되지 않는 OBJ 매개변수의 입양(`l_x = Py_NewRef(p_x)`,
+  규칙 1)도 뺄 수 있다. 호출자가 호출 내내 인자를 살려 둔다(vectorcall 규약, C 간 호출은 호출자의 지역이나
+  임시값). `check` 한 번에 1쌍. 규칙 1 과 exit 블록을 바꾸므로 이 단계에서는 하지 않았다.
+- **시험:** `python-multiplatform-ksp/src/test/python/test_alloc_preserving.py`. 생성 C 구조 시험 셋(구현 전
+  빨강), 인터프리터와 비교하는 관측 시험(`gc.is_tracked`, `gc.get_objects`, 살아 있는 동안 `id` 유일성,
+  weakref 콜백 순서, `__del__` 순서와 횟수, 뒤에 `__del__` 을 얻는 클래스, `__del__` 있는 서브클래스, 호출 경계의
+  `sys.getrefcount`, 많은 호출 뒤 refcount, 4 스레드 동시 실행 뒤 refcount; 구현 전에도 초록, 보존을 지키는
+  시험), 변이 시험 셋(옮긴 임시값을 또 놓기, 옮기지 않고 복사하기 `-DTP_MOVED_REF(v)=Py_NewRef(v)`, 빌린
+  지역을 놓기: 각각 refcount 나 `__del__` 시점으로 잡혀야 한다).
+
 ### 4.3.5 소유권 추론, 메모리, 인터프리터 최소 상주 (설계, 결정 2026-10-05)
 
 사용자 질문 (2026-10-05): "GC의 동작을 smart pointer로 전환하는 컴파일러를 개발하는게 가능할까?", 그리고
