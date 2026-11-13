@@ -117,6 +117,44 @@ The script stops at the first failed check, in this order:
 The archive is uploaded as the workflow artifact `python-<version>t-wasm32-emscripten`. No
 release is published or changed.
 
+## Embedding probe (step 2 of #175)
+
+Agent proposal toward #175 step 2, not a decision. It answers, on CI, whether the library's way
+of using CPython (load `python.mjs` as a factory with `noInitialRun`, never call `main`, call
+exports from the JS main thread) works against this pthreads build.
+
+`build-wasm.sh` now appends `wasmExports,wasmMemory,wasmTable` to every
+`-sEXPORTED_RUNTIME_METHODS` list in the host Makefile before `make-host` (the same edit as
+`patch_makefile_reachability` in `python-multiplatform/scripts/wasm/build-cpython.sh`, as a
+regex because the 3.15 Makefile text was not checked) and asserts the result. If the Makefile
+has a `-sEXPORTED_FUNCTIONS=` list it also ensures `_malloc,_free,_Py_Version` are in it. A
+missing list is only logged: whether 3.15 still exports C symbols through `-sMAIN_MODULE`
+(as 3.14 does) is unverified, and the probe fails loudly if an export it needs is absent.
+
+The workflow step `Embedding probe (no main)` runs after the archive upload, so a probe
+failure or hang does not lose the archive:
+`timeout 600 node .github/scripts/ft-wasm/embed-probe.mjs <unpacked archive>`. It prints one
+`[x] PASS|FAIL` line per check and `FT-WASM-EMBED-PROBE-OK` only if all pass; on a timeout
+(exit 124) the step reports the last check line printed.
+
+- `a`: the factory loads with `noInitialRun`, `Module.wasmMemory.buffer` is a
+  `SharedArrayBuffer` (page count printed).
+- `b`: two hand-assembled modules import `intrinsics.memory` (the name Kotlin/Wasm uses).
+  A1 imports a non-shared memory and must fail with `LinkError`; A2 imports a shared one with
+  maximum 65536 pages and must instantiate, and `A2.load(&Py_Version)` must equal the value
+  read through a view of `wasmMemory`. A2 passing keeps the post-link import patch (investigation
+  options 2a/2b) open; A1 not failing would mean the blocker is not real.
+- `c`: `Py_Initialize`, `PyEval_SaveThread`, then `PyGILState_Ensure` and `PyRun_SimpleString`
+  (strings placed with the exported `malloc`) of a script that starts four threads which print
+  and read `os.py`, joins them, asserts `sys._is_gil_enabled()` is False, and runs
+  `gc.collect()` inside a worker thread. This exercises the main thread blocking in `join`
+  while Workers need it to service proxied syscalls.
+
+Node only. Node's main thread uses a real `Atomics.wait`; a browser's main thread busy-waits
+and services proxied calls, so a pass here does not show the browser works, and a Node deadlock
+may not occur in a browser. It does not involve Kotlin at all (no upcalls, no proxies, no
+Kotlin-side memory import).
+
 ## Not verified
 
 - The workflow has not run yet. Whether 3.15.0 configures, compiles and links with

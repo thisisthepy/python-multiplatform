@@ -150,6 +150,59 @@ grep -Eq '^CONFIGURE_LDFLAGS_NODIST=.*-sUSE_PTHREADS' "$hostdir/Makefile" \
 grep -Eq '^ABIFLAGS=[[:space:]]*t$' "$hostdir/Makefile" || die "host Makefile ABIFLAGS is not t"
 log "ok: host configured with --disable-gil --enable-wasm-pthreads, ABIFLAGS=t"
 
+# ---- patch: JS reachability for the embedding probe -----------------------
+# Same substitution as patch_makefile_reachability in python-multiplatform/scripts/wasm/build-cpython.sh:
+# the library reaches CPython without main through Module.wasmExports / Module.wasmMemory, which
+# the stock link line does not expose (3.15 default: FS,callMain,ENV,HEAPU32,TTY). Written as a
+# regex over the whole comma list rather than a fixed string, because the 3.15 Makefile was not
+# available when this was written. The result is asserted, so a changed link line fails the
+# build here instead of producing an archive the probe cannot use.
+# The C functions: CPython's LINKFORSHARED lists -sEXPORTED_FUNCTIONS explicitly
+# (3.14: _main,_Py_Version,__PyRuntime,...) next to -sMAIN_MODULE. Whether 3.15 still does is
+# unverified, so _malloc,_free,_Py_Version are appended to that list when it exists (harmless if
+# MAIN_MODULE already exports everything); the probe then checks the exports it needs and
+# fails loudly if one is missing.
+patch_makefile_exports() {
+    python3 - "$hostdir/Makefile" <<'PATCH'
+import re
+import sys
+from pathlib import Path
+p = Path(sys.argv[1]); t = p.read_text()
+
+def add_runtime_methods(m):
+    items = m.group(2).split(",")
+    for extra in ("wasmExports", "wasmMemory", "wasmTable"):
+        if extra not in items:
+            items.append(extra)
+    return m.group(1) + ",".join(items)
+
+t, n = re.subn(r"(-sEXPORTED_RUNTIME_METHODS=)(\S+)", add_runtime_methods, t)
+assert n >= 1, "no -sEXPORTED_RUNTIME_METHODS= in the host Makefile; the link line changed shape, re-check the patch"
+for m in re.finditer(r"-sEXPORTED_RUNTIME_METHODS=(\S+)", t):
+    methods = m.group(1).split(",")
+    assert all(x in methods for x in ("wasmExports", "wasmMemory", "wasmTable")), "wasmExports/wasmMemory/wasmTable missing after the patch: " + m.group(0)
+print(f"Makefile: wasmExports,wasmMemory,wasmTable added to {n} -sEXPORTED_RUNTIME_METHODS list(s)")
+
+def add_functions(m):
+    items = m.group(2).split(",")
+    for extra in ("_malloc", "_free", "_Py_Version"):
+        if extra not in items:
+            items.append(extra)
+    return m.group(1) + ",".join(items)
+
+t, k = re.subn(r"(-sEXPORTED_FUNCTIONS=)(\S+)", add_functions, t)
+if k:
+    print(f"Makefile: _malloc,_free,_Py_Version ensured in {k} -sEXPORTED_FUNCTIONS list(s)")
+else:
+    print("Makefile: NOTE no -sEXPORTED_FUNCTIONS= found; relying on the link exporting C symbols another way (the probe checks)")
+p.write_text(t)
+for line in t.splitlines():
+    if "-sEXPORTED_RUNTIME_METHODS" in line or "-sEXPORTED_FUNCTIONS" in line or "-sMAIN_MODULE" in line:
+        print("Makefile link line:", line.strip()[:2000])
+PATCH
+}
+patch_makefile_exports
+
 # ---- host build -----------------------------------------------------------
 # make-host also runs `python.sh --version`, so a startup failure (for example the trampoline
 # instantiation above, with FT_WASM_TRAMPOLINE_PATCH=skip) fails this step.
@@ -222,6 +275,7 @@ cp "$hostdir/pyconfig.h" "$stage/include/$stdlib_name/"
     echo "CFLAGS=$HOST_CFLAGS"
     echo "LDFLAGS=$HOST_LDFLAGS"
     echo "trampoline patch: $TRAMPOLINE_PATCH"
+    echo "link patch: wasmExports,wasmMemory,wasmTable in EXPORTED_RUNTIME_METHODS (embedding probe)"
     echo "built from https://www.python.org/ftp/python/ (Python-$PY_VERSION.tgz)"
 } > "$stage/BUILD-INFO.txt"
 
