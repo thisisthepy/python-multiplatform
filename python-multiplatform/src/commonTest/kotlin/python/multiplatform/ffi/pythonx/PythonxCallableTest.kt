@@ -144,7 +144,12 @@ class PythonxCallableTest {
             _px_base = sys.getrefcount(_px_body)
             """.trimIndent(),
         )
-        val base = eval("_px_base").toInt()
+        // Long, not Int. On the free-threaded build a module-level function is created with
+        // deferred reference counting (`func_new`: `_PyObject_SetDeferredRefcount` when the code is
+        // not nested), and `sys.getrefcount` reports the deferred bias with it: 2**60 + 1 on
+        // 3.15t, measured. That does not fit an Int. The bias is a constant, so every delta below
+        // still measures exactly the references the Kotlin side took and gave back.
+        val base = eval("_px_base").toLong()
 
         PythonCallables.withScope(scope) {
             pushComposer()
@@ -160,19 +165,19 @@ class PythonxCallableTest {
                 popComposer()
             }
         }
-        val held = eval("_px_held").toInt()
+        val held = eval("_px_held").toLong()
         assertTrue(held > base, "nothing on the Kotlin side took a reference: $base -> $held")
         assertEquals(1, scope.liveCount, "the scope did not record the callable it created")
 
         assertEquals(1, scope.close(), "closing the scope released nothing")
         Python3.exec("_px_released = sys.getrefcount(_px_body)")
-        assertEquals(base, eval("_px_released").toInt(), "the scope did not give the reference back")
+        assertEquals(base, eval("_px_released").toLong(), "the scope did not give the reference back")
 
         // The half a leak test does not cover. A second close must be a no-op, not a second decref:
         // one reference over-released here is a use-after-free somewhere unrelated later.
         assertEquals(0, scope.close(), "closing twice released something twice")
         Python3.exec("_px_twice = sys.getrefcount(_px_body)")
-        assertEquals(base, eval("_px_twice").toInt(), "a second close dropped the reference again")
+        assertEquals(base, eval("_px_twice").toLong(), "a second close dropped the reference again")
     }
 
     /**

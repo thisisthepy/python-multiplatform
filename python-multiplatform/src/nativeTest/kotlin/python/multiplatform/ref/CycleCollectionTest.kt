@@ -469,6 +469,15 @@ class CycleCollectionTest {
             val proxyTypeAddr = ProxyTypeFactory.createProxyType()
             val proxyType = assertNotNull(proxyTypeAddr.toCPointer<PyTypeObject>())
 
+            // Free-threaded: an instance takes its type reference through this thread's per-thread
+            // refcount array (`_Py_INCREF_TYPE`), while proxyDealloc gives it back with a header
+            // `Py_DecRef`, so the type is cached across tests and earlier instantiations on this
+            // thread can still be unmerged here. The worker's gc.collect() below merges every
+            // thread's array (`gc_free_threading.c:2090` at v3.15.0); collecting first puts the
+            // opening reading in that same merged state, so the comparison is instantiation and
+            // dealloc and nothing left over.
+            if (embedsFreeThreadedPython) python.native.ffi.PyGC_Collect()
+
             val liveBefore = HandleTable.liveCount
             val typeRefBefore = typeRefCount(proxyTypeAddr)
 

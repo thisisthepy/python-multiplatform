@@ -136,50 +136,97 @@ object Python3 {
     }
 
     /**
-     * Finalize Python (Will not be able to re-initialize after this | Let this function be internal)
+     * Ends the interpreter (SPEC L-1a, issue #339) and returns `Py_FinalizeEx()`'s status: `0`, or
+     * `-1` when flushing buffered data failed. `Py_FinalizeEx()` flushes `sys.stdout` and
+     * `sys.stderr` itself, so output Python buffered reaches the process's streams.
+     *
+     * - Returns `0` and does nothing when the interpreter is not running.
+     * - Must be called on the thread that called [initialize]. From any other thread it throws
+     *   [IllegalStateException] and the interpreter keeps running: `Py_FinalizeEx()` runs on the
+     *   initialising thread's state, and adopting that state on another thread would leave two OS
+     *   threads believing they own it.
+     * - Throws [IllegalStateException] as well when something other than [initialize] started the
+     *   interpreter, since there is then no parked thread state to finalize on.
+     * - Afterwards [isInitialized] is false. Starting the interpreter again in the same process is
+     *   not supported (extension modules and this binding's cached objects do not survive it).
+     * - Threads still inside [withPython] or [withGIL] are not waited for here; stop them first.
      */
-    internal fun finalize(silent: Boolean = false) {
-        if (!isInitialized) return
-        // Py_Finalize() requires the GIL. Reclaim the state parked by initialize().
-        mainThreadState?.let {
-            PyEval_RestoreThread(it)
-            mainThreadState = null
+    fun finalize(silent: Boolean = false): Int {
+        if (!isInitialized) return 0
+        val parked = mainThreadState
+            ?: throw IllegalStateException(
+                "Python3.finalize(): the interpreter was not started by Python3.initialize(), so there is no thread state to finalize on"
+            )
+        // PyGILState_GetThisThreadState needs no GIL and returns the state CPython associates with
+        // the calling OS thread. On the initialising thread that is the state parked by
+        // initialize(); on any other thread it is null or that thread's own state.
+        if (PyGILState_GetThisThreadState() != parked) {
+            throw IllegalStateException(
+                "Python3.finalize() must be called on the thread that called Python3.initialize()"
+            )
         }
-        // Lowered BEFORE Py_Finalize(), not after. Cleaner threads consult this flag to decide
+        // Py_FinalizeEx() requires the GIL. Reclaim the state parked by initialize().
+        PyEval_RestoreThread(parked)
+        mainThreadState = null
+        // Lowered BEFORE Py_FinalizeEx(), not after. Cleaner threads consult this flag to decide
         // whether releasing a reference is still legal, and finalization is exactly the window
         // where it stops being legal -- leaving the flag up until afterwards let a cleaner pass
-        // the check and call Py_DecRef while Py_Finalize() was tearing the interpreter down,
+        // the check and call Py_DecRef while finalization was tearing the interpreter down,
         // which crashed the process inside _PyObject_ClearFreeLists.
         //
         // With the flag down first, a cleaner arriving from here on returns without touching the
-        // C API at all. One already inside its GIL scope still holds the GIL, and Py_Finalize()
+        // C API at all. One already inside its GIL scope still holds the GIL, and finalization
         // waits for it, so that case finishes safely before teardown begins.
         isInitialized = false
-        // The checkpoint function dies with the interpreter; drop the pointer so a later
-        // initialize() rebuilds it instead of calling through a dangling one. Same for the
-        // runMain/runApp helpers, which are cached the same way and would dangle the same way.
+        // The checkpoint function dies with the interpreter; drop the pointer so nothing calls
+        // through a dangling one. Same for the runMain/runApp helpers, which are cached the same way.
         checkpointCallable = null
         builtinCompiledInstalled = false
         runModuleCallable = null
         runTopLevelCallable = null
         runFileCallable = null
-        memScoped {
-            Py_Finalize()
-            // No error message is printable here, and that is a property of the C API rather than
-            // an omission. `Py_Finalize()` returns void; by the time it returns there is no
-            // interpreter left to hold an error indicator, so `PyErr_*` cannot be consulted. The
-            // only status available at all is `Py_FinalizeEx()`'s `int` -- 0, or -1 when flushing
-            // buffered data failed -- which carries no message either. Switching to it is a real
-            // (small) improvement and is recorded in ROADMAP §12 rather than done here, because
-            // finalization is untested: the only caller is `artMain/JniExport.kt`, and a test
-            // that exercises it destroys the interpreter the rest of the suite shares.
-            if (Py_IsInitialized() != 0) {
-                isInitialized = true
-                throw IllegalStateException("Python finalization failed")
+        // No error message is available after this, and that is a property of the C API: once
+        // Py_FinalizeEx() returns there is no interpreter left to hold an error indicator. Its int
+        // status is the whole report.
+        val status = Py_FinalizeEx()
+        if (Py_IsInitialized() != 0) {
+            isInitialized = true
+            throw IllegalStateException("Python finalization failed")
+        }
+        if (!silent) println("INFO: Python finalized (status $status)")
+        return status
+    }
+
+    /**
+     * Flushes `sys.stdout` and `sys.stderr` (SPEC L-1a, issue #339). Python buffers its standard
+     * streams, and a process that exits without [finalize] loses what is still in the buffer. A
+     * stream that is `None` or has no `flush` is skipped; an exception raised by `flush` surfaces
+     * as a [PyException].
+     *
+     * Runs in a fresh dictionary, so it leaves no names behind in `__main__`.
+     */
+    fun flush() {
+        withPython {
+            // PyDict_New: new reference, released below.
+            val globals = PyDict_New() ?: throw pyErrorOrGeneric("Failed to allocate the flush namespace")
+            try {
+                // PyRun_String: new reference (None) on success, null + exception set on failure.
+                val result = PyRun_String(FLUSH_SOURCE, PY_FILE_INPUT, globals, globals)
+                    ?: throw pyErrorOrGeneric("Flushing Python's standard streams failed")
+                Py_DecRef(result)
+            } finally {
+                Py_DecRef(globals)
             }
-            if (!silent) println("INFO: Python finalized successfully!")
         }
     }
+
+    private const val FLUSH_SOURCE = """
+import sys
+for _s in (sys.stdout, sys.stderr):
+    _f = getattr(_s, "flush", None)
+    if _f is not None:
+        _f()
+"""
 
     /**
      * Runs the module [moduleName] as `__main__`, the way `python -m <moduleName>` does, in an
@@ -725,6 +772,9 @@ def __pmp_run_file__(path, argv):
     /** `Py_file_input`, the compiler-mode token for a sequence of statements (as opposed to a single expression). */
     private const val PY_FILE_INPUT: Int = 257
 
+    /** `Py_eval_input`, the start symbol of the one-argument [eval]. */
+    private const val PY_EVAL_INPUT: Int = 258
+
     /**
      * Outermost [withGIL] scopes between automatic checkpoints when they are enabled.
      *
@@ -946,6 +996,35 @@ def __pmp_run_file__(path, argv):
                 }
             } finally {
                 python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(modulePointer) }
+            }
+        }
+    }
+
+    /**
+     * Evaluates one expression in `__main__`'s namespace and returns the result as a new
+     * [PyObject] (SPEC L-1a, issue #339). The common case of the four-argument form, with
+     * `Py_eval_input`: a statement is a `SyntaxError`, raised as a [PyException]. Use [exec] for
+     * statements.
+     */
+    fun eval(expression: String): PyObject {
+        return withPython {
+            // PyImport_AddModuleRef: new/strong reference to the __main__ module.
+            val modulePointer = PyImport_AddModuleRef("__main__")
+                ?: throw pyErrorOrGeneric("Failed to access the __main__ module")
+            try {
+                // PyObject_GetAttrString: new reference to __main__'s globals dict.
+                val globalsPointer = PyObject_GetAttrString(modulePointer, "__dict__")
+                    ?: throw pyErrorOrGeneric("Failed to access __main__.__dict__")
+                try {
+                    // PyRun_String: new reference on success, adopted by the wrapper.
+                    val result = PyRun_String(expression, PY_EVAL_INPUT, globalsPointer, globalsPointer)
+                        ?: throw pyErrorOrGeneric("Python eval failed")
+                    PyObject(result, false)
+                } finally {
+                    Py_DecRef(globalsPointer)
+                }
+            } finally {
+                Py_DecRef(modulePointer)
             }
         }
     }

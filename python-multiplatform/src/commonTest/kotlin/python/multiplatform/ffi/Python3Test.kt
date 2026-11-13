@@ -58,6 +58,56 @@ class Python3Test {
         }
     }
 
+    // SPEC L-1a (#339): the one-argument eval. Red before #339 as a compile error (no such
+    // overload), which cannot be mistaken for a behavioural regression.
+
+    @Test
+    fun evalWithOneArgumentReadsMainNamespace() = PythonTestFixture.withInterpreter {
+        Python3.exec("x_for_one_arg_eval = 20")
+        val result = Python3.eval("x_for_one_arg_eval + 22")
+        assertEquals("42", result.toString())
+    }
+
+    @Test
+    fun evalWithOneArgumentRejectsAStatement() = PythonTestFixture.withInterpreter {
+        // Py_eval_input, not Py_file_input: an assignment is a SyntaxError, not a silent None.
+        assertFailsWith<PyException> { Python3.eval("y_for_one_arg_eval = 1") }
+    }
+
+    // SPEC L-1a (#339): flush(). The end-to-end proof that buffered output reaches the process's
+    // stdout is desktopTest's InterpreterShutdownTest; these pin the edge cases in-process.
+
+    @Test
+    fun flushSkipsAMissingStream() = PythonTestFixture.withInterpreter {
+        Python3.exec("import sys as _pm_t_sys; _pm_t_saved = _pm_t_sys.stdout; _pm_t_sys.stdout = None")
+        try {
+            Python3.flush()
+        } finally {
+            Python3.exec("_pm_t_sys.stdout = _pm_t_saved; del _pm_t_saved, _pm_t_sys")
+        }
+    }
+
+    @Test
+    fun flushReportsAFailingStreamAsPyException() = PythonTestFixture.withInterpreter {
+        Python3.exec(
+            """
+            import sys as _pm_t_sys
+            class _PmFailingStream:
+                def write(self, s): return len(s)
+                def flush(self): raise ValueError("flush failed on purpose")
+            _pm_t_saved = _pm_t_sys.stderr
+            _pm_t_sys.stderr = _PmFailingStream()
+            """.trimIndent()
+        )
+        try {
+            val error = assertFailsWith<PyException> { Python3.flush() }
+            // The real ValueError, not a generic failure.
+            assertTrue("flush failed on purpose" in error.value.toString(), "got: ${error.value} / ${error.message}")
+        } finally {
+            Python3.exec("_pm_t_sys.stderr = _pm_t_saved; del _pm_t_saved, _pm_t_sys, _PmFailingStream")
+        }
+    }
+
     @Test
     fun importReturnsAUsableModule() = PythonTestFixture.withInterpreter {
         val math = Python3.import("math")

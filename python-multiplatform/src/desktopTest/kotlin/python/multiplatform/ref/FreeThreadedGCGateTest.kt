@@ -34,6 +34,18 @@ import kotlin.test.assertTrue
  * Both tests below are matched pairs: each manipulates something that the free-threaded source
  * says is load-bearing and the global-lock source says is irrelevant, and asserts exactly that
  * split. If CPython changes either gate, they fail and say which one.
+ *
+ * ### CPython 3.15 removed the process-memory gate
+ *
+ * Desktop embeds 3.15.0t since issue #158, and [freeThreadedSchedulingTracksWholeProcessFootprintNotThePythonHeap]
+ * did what it was written to do: it failed when the gate changed. At the v3.15.0 tag
+ * `gc_should_collect_mem_usage`, `get_process_mem_usage`, `last_mem` and `deferred_count` are gone
+ * (`Python/gc_free_threading.c`, `Include/internal/pycore_interp_structs.h`), and
+ * `gc_should_collect` (`:1996`) returns true once `young.count` clears the threshold and
+ * `long_lived_total / 4` (`:2009`). The `old[0].threshold == 0` short circuit is still there
+ * (`:2004`), and `gc_collect_main` still re-asks `gc_should_collect` for a heap-triggered
+ * collection (`:2217`). The table above is the 3.14.7 record; the first test's assertions hold on
+ * both, the second asserts the 3.15 shape.
  */
 class FreeThreadedGCGateTest {
 
@@ -57,10 +69,10 @@ class FreeThreadedGCGateTest {
     /**
      * `gc.collect()`.
      *
-     * Free-threaded this also **resets `last_mem` to the current process footprint**
-     * (`gc_free_threading.c:2301`, reached because `_Py_GC_REASON_MANUAL` skips the gate at
-     * `:2328`), which is what makes the arms below independent of each other: every arm starts
-     * from a freshly pinned memory baseline.
+     * It resets `young.count` and sets `long_lived_total` to what survived, which is what makes
+     * the arms below independent of each other: every arm starts from the same scheduling state.
+     * On 3.14t it also reset `last_mem` to the current process footprint (`gc_free_threading.c:2301`
+     * at 3.14.7), the memory baseline the second test's 3.14 form depended on.
      */
     private fun forceCollect(gc: PyObject) {
         val collect = gc.getAttr("collect")
@@ -69,7 +81,8 @@ class FreeThreadedGCGateTest {
     }
 
     /** `gc.get_stats()[0]['collections']` -- incremented only *past* the gate at
-     *  `gc_free_threading.c:2328`, so it counts collections that actually ran, not bits set. */
+     *  `gc_free_threading.c:2217` (v3.15.0; `:2328` at 3.14.7), so it counts collections that
+     *  actually ran, not bits set. */
     private fun gen0Collections(gc: PyObject): Long {
         val f = gc.getAttr("get_stats")
         val t = f.invoke()
@@ -124,7 +137,7 @@ class FreeThreadedGCGateTest {
      * `gc.set_threshold(_, 0, _)` -- a setting about **generation 1** -- is what decides whether
      * **generation 0** is collectable at all on the free-threaded build.
      *
-     * `gc_free_threading.c:2126` short-circuits `gc_should_collect` to `true` when
+     * `gc_free_threading.c:2004` (v3.15.0; `:2126` at 3.14.7) short-circuits `gc_should_collect` to `true` when
      * `old[0].threshold == 0`, skipping both `long_lived_total/4` and the process-memory gate.
      * Nothing in `gc.c` reads that field while scheduling, so the same change must be a no-op with
      * the global lock. Run A/B/A in one JVM so the §8b latch cannot account for the difference.
@@ -152,13 +165,13 @@ class FreeThreadedGCGateTest {
                     setThreshold(2000, 10, 10)
                     val defaultAfter = arm(gc, builtins, "default-thresholds-again")
 
-                    // Holds on both builds, for different reasons: free-threaded because :2126
+                    // Holds on both builds, for different reasons: free-threaded because :2004
                     // skips the gates, GIL-side because there was never a gate to skip.
                     assertTrue(
                         bypassed < reclaimedBound,
                         "with gc.set_threshold(2000, 0, 0) the eval-loop checkpoint should reclaim " +
                             "the bulk of $totalObjects dropped objects, but $bypassed remained. " +
-                            "Free-threaded that means gc_free_threading.c:2126 no longer " +
+                            "Free-threaded that means gc_free_threading.c:2004 (v3.15.0) no longer " +
                             "short-circuits gc_should_collect on old[0].threshold == 0"
                     )
 
@@ -183,27 +196,33 @@ class FreeThreadedGCGateTest {
         }
 
     /**
-     * Free-threaded, whether the Python cyclic collector runs is a function of the **JVM's**
-     * memory, not of Python's.
+     * Whether the Python cyclic collector runs must not depend on the **JVM's** memory.
      *
-     * `gc_should_collect_mem_usage` (`gc_free_threading.c:2080`) asks whether the *whole process*
-     * footprint has grown by more than `last_mem / 10` since the last collection. So faulting in
-     * 400 MB of ballast partway through the workload -- changing no threshold, allocating no extra
-     * Python container, touching nothing the collector tracks -- should open the gate, and
-     * dropping the ballast should shut it again. `gc.c` has no such gate, so the identical
-     * manipulation must be a no-op with the global lock.
+     * Faulting in 400 MB of ballast partway through the workload changes no threshold, allocates
+     * no extra Python container and touches nothing the collector tracks. On 3.14t that opened
+     * `gc_should_collect_mem_usage` (`gc_free_threading.c:2080` at 3.14.7), which asked whether
+     * the *whole process* footprint had grown by more than `last_mem / 10` since the last
+     * collection. Measured on 3.14t (3 consecutive JVMs, identical to the object), residue out of
+     * 20,000:
      *
-     * Measured (3 consecutive JVMs, identical to the object), residue out of 20,000:
-     *
-     * | arm | free-threaded | global lock |
+     * | arm | free-threaded 3.14t | global lock |
      * |---|---:|---:|
      * | baseline | 20,000 (0 collections) | 1,972 (9 collections) |
      * | 400 MB faulted in midway | **9,754 (1 collection)** | 1,988 (9 collections) |
      * | ballast dropped | 20,000 (0 collections) | 1,968 (9 collections) |
      *
-     * The 400 MB figure assumes the test JVM's footprint is under ~4 GB, so that 400 MB clears the
-     * `last_mem / 10` bar; the failure message says so, because a much larger heap would make this
-     * test wrong rather than the mechanism wrong.
+     * 3.15.0 deleted that gate (see the class KDoc), so on the 3.15t desktop embeds the ballast
+     * must be a no-op, as it always was with the global lock. Each arm starts from a forced
+     * collection and runs the identical workload, so the scheduling inputs that remain
+     * (`young.count`, the threshold, `long_lived_total`) are the same in all three and so is the
+     * outcome. What is asserted free-threaded is exactly that: the ballast arm and the
+     * ballast-dropped arm land within a quarter of the workload of the baseline. The bound is not
+     * "everything was reclaimed", because whether `long_lived_total / 4` lets this process collect
+     * at all depends on how many objects the test JVM's interpreter already holds, which this test
+     * does not control.
+     *
+     * What it still catches: a process-memory gate coming back. The 3.14t row above differs from
+     * its own baseline by 10,246 objects, more than twice the 5,000 allowed.
      */
     @Test
     fun freeThreadedSchedulingTracksWholeProcessFootprintNotThePythonHeap() =
@@ -221,18 +240,19 @@ class FreeThreadedGCGateTest {
                     val dropped = arm(gc, builtins, "ballast-dropped")
 
                     if (embedsFreeThreadedPython) {
-                        // The whole finding: JVM memory growth, and nothing else, collected Python
-                        // cycles. Deliberately not a tight bound -- how much a single collection
-                        // takes depends on where in the workload the footprint crossed the bar.
+                        // 3.15: no process-memory input, so the ballast must not change the
+                        // outcome. A quarter of the workload absorbs a collection landing a few
+                        // objects earlier or later in one arm; it does not absorb 3.14t's 10,246.
+                        val tolerance = totalObjects / 4
                         assertTrue(
-                            withBallast < baseline,
-                            "faulting in 400 MB of process memory partway through the workload " +
-                                "should have opened gc_should_collect_mem_usage " +
-                                "(gc_free_threading.c:2100) and let the checkpoint collect, but " +
-                                "the ballast arm left $withBallast against the baseline's " +
-                                "$baseline out of $totalObjects. Either that gate is gone, or " +
-                                "this JVM's footprint is large enough (>~4 GB) that 400 MB no " +
-                                "longer clears last_mem/10"
+                            kotlin.math.abs(withBallast - baseline) < tolerance &&
+                                kotlin.math.abs(dropped - baseline) < tolerance,
+                            "free-threaded 3.15.0 has no process-memory gate (gc_should_collect, " +
+                                "gc_free_threading.c:1996), so faulting in and dropping 400 MB of " +
+                                "process memory should not change what the checkpoint collects, but " +
+                                "the arms left $baseline / $withBallast / $dropped out of " +
+                                "$totalObjects (allowed spread: $tolerance). A gate on whole-process " +
+                                "memory, like 3.14's gc_should_collect_mem_usage, is back"
                         )
                     } else {
                         // gc.c never calls get_process_mem_usage and has no last_mem field at all.

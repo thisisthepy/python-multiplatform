@@ -101,13 +101,13 @@ Each script fails the job unless:
 
 - the build Python reports `Py_GIL_DISABLED == 1`;
 - Android: `include/python3.15t/pyconfig.h` has `#define Py_GIL_DISABLED 1`,
-  `lib/libpython3.15t*.so` exists and is an aarch64 ELF, `lib/python3.15t` exists;
+  `lib/libpython3.15t*.so` exists and is an ELF of the host's architecture (aarch64 or x86-64), `lib/python3.15t` exists;
 - iOS: every slice has `Headers/pyconfig-<arch>.h` with `#define Py_GIL_DISABLED 1`,
   `lib/libpython3.15t.dylib`, and a `Python.framework/Python` binary (`lipo -info`
   is logged); the XCframework has `lib/python3.15t` and exactly two slices.
 
 The sha256 of each archive is written to the job summary and the archives are uploaded
-as workflow artifacts (`python-<version>t-android-aarch64`,
+as workflow artifacts (`python-<version>t-aarch64-linux-android`, `python-<version>t-x86_64-linux-android`,
 `python-<version>t-ios-xcframework`).
 
 ## How the library uses them (#328 step 2)
