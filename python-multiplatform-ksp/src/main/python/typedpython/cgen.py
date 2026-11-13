@@ -60,7 +60,10 @@ the eval breaker (it counts as a snapshot holder, conservatively).
 
 Depth (issue #57): every impl function calls `tp_enter_call()` before it owns anything (a refusal
 returns -1 directly: RecursionError set, nothing counted) and `tp_leave_call()` in the one exit
-block, so ok, error and deopt exits all leave exactly once.
+block, so ok, error and deopt exits all leave exactly once. The wrapper brackets its impl call with
+`tp_depth_seg_begin` / `tp_depth_seg_end` (#125): the Python depth is measured at the first check of
+that call and reused by every later check until a wrapper of this module returns inside it
+(tp_runtime.h "Segments"); the recursion limit and the C-stack guard are still read per frame.
 
 Fast entry (issue #147). A *bounded* function (`_bounded_functions`: no call cycle, every callee
 bounded, no node that can run Python code) has a call tree of at most k compiled frames. Its
@@ -3114,7 +3117,10 @@ class _FnGen:
             lock = "&tp_lock" if lst else "NULL"
             L.append(f"    tp_osr tp_ox = {{{lock}, {{{l0}, {l1}}}, NULL}};")
             L.append("    tp_t->osr = &tp_ox;      /* #152: taken by the impl at entry */")
+        # #125: the impl call is one depth segment (tp_runtime.h "Segments"): reset before and after
+        L.append("    tp_depth_seg_begin(tp_t);")
         L.append(f"    tp_s = {_ident('tp_impl', f.name)}(tp_module, tp_ts, tp_t{''.join(', ' + a for a in args)});")
+        L.append("    tp_depth_seg_end(tp_t);")
         if osr:
             L.append("    tp_t->osr = NULL;")
             L.append("    if (tp_s == 2) {           /* left for the continuation: its result, lists already final */")
@@ -3631,6 +3637,11 @@ def _exec_function(mg: _ModGen) -> str:
         "#ifdef TP_TRACE_FAST",
         f"    tp_cf = PyCFunction_NewEx(&tp_methods[{len(mg.plain)}], tp_module, tp_modname);",
         "    if (tp_cf == NULL || PyDict_SetItemString(tp_dict, \"__tp_trace_fast_hits__\", tp_cf) < 0) goto tp_done;",
+        "    tp_release(&tp_cf);",
+        "#endif",
+        "#ifdef TP_TRACE_DEPTH",
+        "    tp_cf = PyCFunction_NewEx(&tp_trace_frame_reads_def, tp_module, NULL);",
+        "    if (tp_cf == NULL || PyDict_SetItemString(tp_dict, \"__tp_trace_frame_reads__\", tp_cf) < 0) goto tp_done;",
         "    tp_release(&tp_cf);",
         "#endif",
         # SPEC N-14: strong references to the originals' code objects, read by tp_traced at every entry

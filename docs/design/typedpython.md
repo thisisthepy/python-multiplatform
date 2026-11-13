@@ -267,6 +267,53 @@ pypackpack `BundleRequest` 로 옮긴다. pypackpack 은 TypedPython 을 실행�
 프레임이 끼면 그 프레임은 세지 않는다. 테스트는 두 경우 모두 "둘 다 예외를 내고 죽지 않는다" 만 단언하고
 깊이를 기록한다(`test_recursion.py`).
 
+### 4.3.3b 파이썬 깊이는 구간마다 한 번 잰다 (#125, 에이전트 제안, 확인되지 않음)
+
+4.3.3a 의 진입 검사는 컴파일 프레임마다 세 가지를 부른다: `PyThreadState_GetFrame` (`tp_python_depth`,
+최상위 프레임 동일성 캐시를 위해), `Py_GetRecursionLimit`, `Py_EnterRecursiveCall`. 출처는 CPython
+v3.15.0rc1 태그다.
+
+- **파이썬 깊이: 옮긴다.** wrapper 의 impl 호출 하나를 *구간* 으로 본다. 구간 안에서 컴파일 프레임 밑의
+  파이썬 프레임은 바뀌지 않는다. 사이에 도는 파이썬 코드(콜백, `__del__`, 시그널 처리기, redo)는 쌓은
+  프레임을 모두 걷고 C 로 돌아오고, 그 밑의 프레임은 위에서 C 가 도는 동안 끝날 수 없다.
+  `PyThreadState_GetFrame` (`Python/pystate.c:2120`) 이 보는 `_PyThreadState_GetFrame`
+  (`Include/internal/pycore_interpframe.h:280`, 미완성 프레임을 건너뜀)과 `PyFrame_GetBack`
+  (`Objects/frameobject.c:2398`) 의 결과도 그래서 같다. 구간의 첫 검사가 재고(`tp_seg_depth`), 이후 검사는
+  그 값을 쓴다. wrapper 는 impl 호출 바로 앞과 바로 뒤에서 값을 지운다(`tp_depth_seg_begin` / `_end`).
+  앞의 리셋이 없으면 안쪽 wrapper 가 바깥 구간의 얕은 깊이를 쓰고, 뒤의 리셋이 없으면 바깥 구간이 안쪽의
+  깊은 깊이를 계속 쓴다. 뒤의 리셋 덕에 바깥 구간은 안쪽 wrapper 가 돌아온 뒤 다음 검사에서 다시 재는데,
+  이것은 예전에 `tp_python_depth` 가 다른 최상위 프레임을 보고 캐시를 바꾸던 바로 그 지점이다. 그래서
+  캐시가 붙잡는 프레임 객체와 그 수명(아래)도 그대로다. 검사 값은 예전 값과 같은 수이므로
+  RecursionError 가 나는 깊이와 프레임은 바뀌지 않는다. 스레드마다 `tp_tls` 에 있고, `count` 처럼 한
+  스레드의 C 스택에서 호출이 LIFO 로 포개진다고 가정한다(greenlet 처럼 C 스택을 바꾸는 경우는 `count` 도
+  이미 맞지 않는다).
+- **재귀 한도: 옮기지 않는다.** `Py_GetRecursionLimit` (`Python/ceval.c:7`) 은 interp 의 값을 읽는다.
+  `Py_SetRecursionLimit` (`Python/ceval.c:14`) 는 stop-the-world 로 바꾸지만, 같은 스레드에서는 컴파일 코드의
+  어느 `Py_DECREF` 든 `__del__` 을, 어느 호출이든 콜백을 돌릴 수 있고 거기서 `sys.setrecursionlimit` 을
+  부를 수 있다. 인터프리터는 다음 프레임에서 새 한도를 본다(`_Py_EnterRecursivePy`,
+  `Python/ceval_macros.h:406`, `py_recursion_remaining` 은 `Py_SetRecursionLimit` 이 고친다). 바뀐 것을 알 공개
+  수단이 없으므로 프레임마다 읽는다.
+- **C 스택 가드: 옮기지 않는다.** 3.15 의 `Py_EnterRecursiveCall` (`Python/ceval.c:3576` →
+  `_Py_EnterRecursiveCallTstate`, `Include/internal/pycore_ceval.h:233`) 은 계수기가 아니라 이 프레임의 스택
+  주소를 `c_stack_soft_limit` 와 비교한다(`_Py_MakeRecCheck`, 같은 파일 211행). 깊은 프레임일수록 주소가
+  다르므로 한 번만 부르면 한도를 올린 깊은 재귀가 C 스택을 넘는다. `Py_LeaveRecursiveCall` 은 빈 함수다
+  (같은 파일 256행).
+
+**관측되지 않는 근거와 시험.** `python-multiplatform-ksp/src/test/python/test_depth_once.py`. 구현 전 빨강:
+생성 C 구조 시험 둘(wrapper 의 리셋, 헤더의 `tp_seg_depth`; 2026-11-13 cgen 을 일반 Python 으로 돌려 관측),
+`-DTP_TRACE_DEPTH` 의 `__tp_trace_frame_reads__` 가 `down(100)` 에서 1 (예전 101, 추정). 구현 전에도
+초록인 보존 시험: 한도 주변 모든 파이썬 깊이와 재귀 깊이에서 인터프리터와 비교, 콜백 안의 중첩 컴파일
+호출(안쪽과 바깥쪽), 재귀 도중 `__del__` 과 콜백이 한도를 낮추고 올리기, 4 스레드, `sys._getframe` 이 보는
+프레임, 프레임 수명. 변이 셋: 앞 리셋 없음, 뒤 리셋 없음, 한도를 첫 프레임에서만 읽기. 빌드와 실행은 CI
+에서 한다(에이전트는 빌드하지 않는다).
+
+**기존의 차이 둘(이 변경이 만든 것이 아니고 바꾸지도 않는다, 확인할 점).** (1) 컴파일 프레임 위에서
+돌아가는 순수 파이썬 프레임은 `py_recursion_remaining` 만으로 검사되므로 컴파일 프레임을 세지 않는다. 그
+위치에서 한도에 닿으면 인터프리터보다 늦게 실패한다. (2) 캐시가 안쪽 구간의 최상위 프레임(콜백 g)을 강한
+참조로 쥐므로, g 가 돌아올 때 프레임 객체가 지역 변수를 넘겨받고(`take_ownership`,
+`Python/frame.c:48`, `:119`) 그 지역은 바깥 구간이 다시 잴 때 죽는다. 인터프리터에서는 g 가 돌아올 때
+죽는다. 시험은 이 시점을 develop 그대로 고정한다.
+
 ### 4.3.4 객체 비용: 가상 객체, refcount 생략, 영역 할당 (SPEC N-12, 설계)
 
 사용자 지시 (2026-10-03): "Rust 쪽으로 더 가는 방법을 적용하되 cpython과 동일성을 보장할 방법을 찾아."
