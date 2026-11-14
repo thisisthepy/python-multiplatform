@@ -223,7 +223,7 @@ jobs:
             python-multiplatform-compose/fixtures/notebook-e2e/build/test-results/desktopTest
 
   # The notebook E2E in a GraalVM native image on macOS (#249, #251). It takes the fork's Compose
-  # (`org.thisisthepy.compose.*:1.11.1-ext.3`, `composeExtended.*` in `gradle.properties`) from
+  # (`org.thisisthepy.compose.*:1.11.1-ext.2`, `composeExtended.*` in `gradle.properties`) from
   # Maven Central, builds the 20-scenario executable with Liberica NIK 25, and runs it with
   # JAVA_HOME and PYTHONHOME removed.
   notebook-e2e-native-image:

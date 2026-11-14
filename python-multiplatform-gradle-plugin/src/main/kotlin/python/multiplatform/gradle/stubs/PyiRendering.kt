@@ -280,22 +280,49 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
     /** Class qualified name -> its bound constructors, in table-key order; filled by [renderModuleDefs]. */
     private val constructorsByClass = sortedMapOf<String, MutableList<DeclarationModel>>()
 
+    private val supertypes: Map<String, List<String>> = bound
+        .filter { it.returnSupertypes.isNotEmpty() }
+        .groupBy { it.returnType.qualifiedName }
+        .mapValues { (_, entries) -> entries.first().returnSupertypes }
+
     /**
-     * Module prefixes (every module and every directory above it) that name one directory on a
-     * case-insensitive filesystem together with a sibling (issue #44). In each such group the
-     * all-lower-case spelling keeps its path -- a Kotlin package -- and every other spelling is a
-     * class module that is emitted inside its parent package's `__init__.pyi` instead.
+     * Module prefixes folded into their parent package's `__init__.pyi`.
+     *
+     * Two reasons fold a class module into its parent:
+     * (a) Case-insensitive path collision with a sibling (issue #44): in each such group the
+     *     all-lower-case spelling keeps its path -- a Kotlin package -- and every other spelling
+     *     is a class module emitted inside its parent package's `__init__.pyi`.
+     * (b) A receiver class (with instance methods or properties and a companion handle) whose companion
+     *     module only publishes constants (`Material3DesignSystem.Dark`), where the runtime
+     *     (`class_wins_over_module`, issue #322) serves the class on the parent package and the constants
+     *     on the class, provided `module` is not a supertype of another bound type (so an interface like
+     *     `DrawScope` stays a module while a concrete receiver class like `Material3DesignSystem` is folded).
      */
     private val foldedPrefixes: Set<String> = run {
         val prefixes = byModule.keys.flatMap { module ->
             val parts = module.split('.')
             parts.indices.map { parts.take(it + 1).joinToString(".") }
         }.toSet()
-        prefixes.groupBy { it.lowercase() }.values
+        val caseColliding = prefixes.groupBy { it.lowercase() }.values
             .filter { it.size > 1 }
             .flatten()
             .filter { '.' in it && it.substringAfterLast('.') != it.substringAfterLast('.').lowercase() }
             .toSet()
+        val allSupertypes = supertypes.values.flatten().toSet()
+        val companionConstantClasses = byModule.keys.filter { module ->
+            module !in allSupertypes &&
+                module in companionHandles &&
+                (module in methods || module in properties) &&
+                byModule[module]?.all { it.kind == "STATIC_GETTER" } == true &&
+                module.substringAfterLast('.') !in takenNames[module.substringBeforeLast('.', "")].orEmpty() &&
+                run {
+                    val prefix = "$module."
+                    bound.none { it.returnType.qualifiedName.startsWith(prefix) || it.owner.startsWith(prefix) } &&
+                        methods.keys.none { it.startsWith(prefix) } &&
+                        properties.keys.none { it.startsWith(prefix) }
+                }
+        }.toSet()
+        caseColliding + companionConstantClasses
     }
 
     /** The shortest folded prefix of [module] (the module itself included), or `null` if it keeps its own path. */
@@ -306,11 +333,6 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
 
     /** The modules that are still files: a folded class module is a class, not a module, for `classReference`. */
     private val moduleNames: Set<String> = byModule.keys.filter { foldedPrefixOf(it) == null }.toSet()
-
-    private val supertypes: Map<String, List<String>> = bound
-        .filter { it.returnSupertypes.isNotEmpty() }
-        .groupBy { it.returnType.qualifiedName }
-        .mapValues { (_, entries) -> entries.first().returnSupertypes }
 
     // ----------------------------------------------------------------------- per-module output
 
