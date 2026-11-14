@@ -472,38 +472,53 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `toString()` of it; `null` stays `None` for `CharSequence?`); a `CharSequence` parameter is still
   declined (#73). `Status: implemented`, `GP/artifact/TextStateBindingTest.kt`,
   `python-multiplatform-compose/fixtures/compose/.../TextFieldStateRenderTest.kt`.
-- **B-2** The walker on **klibs** (Kotlin/Native libraries). `Status: partial`. It reads
-  top-level functions, **member functions** (#237), **member properties** (`GETTER` and `SETTER`),
-  **constructors** of final classes, and **`object` / `Companion` handles, constants (`STATIC_GETTER`)
-  and functions (`FUNCTION`)** (#191 Phase B). A member function binds as #215's `METHOD` `Owner.name`
+- **B-2** The walker on **klibs** (Kotlin/Native libraries). `Status: partial`. It reads `.knm`
+  (`linkdata/`) metadata through `KlibKnmScanner` (`ToolingSingleFileKlibResolveStrategy` +
+  `parseModuleHeader`/`parsePackageFragment` in the pinned `kotlin-compiler-embeddable:2.0.20`), falling
+  back to `LibraryAbiReader` when `.knm` metadata is unavailable, and binds top-level functions (including
+  extension functions and `@Composable` functions with at most 6 defaulted parameters), top-level
+  constants (`STATIC_GETTER`) and extension properties (`GETTER`), **member functions** (#237), **member
+  properties** (`GETTER` and `SETTER`), **constructors** of non-abstract, non-sealed classes, **`object`
+  / `Companion` handles, constants (`STATIC_GETTER`) and functions (`FUNCTION`)**, and `@JvmInline value
+  class` parameters and returns (#191 Phase B). A member function binds as #215's `METHOD` `Owner.name`
   (receiver in `args[0]`, `(args[0] as Owner).name(...)`, served on the proxy, never a module attribute)
   and a member property binds as #38's `GETTER` `Owner.prop` (and `SETTER` `Owner.prop=` when writable)
-  when its class can cross as a handle and is an interface, a final class or an enum class: the pinned
-  compiler's klib ABI records modality but no visibility, so a member or constructor of an open,
-  abstract or sealed class, which may be `protected`, is declined with that reason. An `object`'s
-  constants and functions bind under the object's qualified name (`Dispatchers.Default`,
-  `NonDisposableHandle.dispose`), and a nested `Companion` object binds its singleton handle as
+  when its class is public and can cross as a handle: `.knm` metadata carries exact `PUBLIC` vs
+  `PROTECTED` visibility (`Flags.VISIBILITY`), so public members and constructors of `open` and
+  `abstract` classes bind while `protected` ones are skipped. An `object`'s constants and functions bind
+  under the object's qualified name (`Dispatchers.Default`, `NonDisposableHandle.dispose`), and a nested
+  `Companion` object (`ProtoBuf.Class.Kind.COMPANION_OBJECT`) binds its singleton handle as
   `Owner.Companion` (`isCompanionHandle = true`) and its constants and factory functions under `Owner`
-  (`SharingStarted.Eagerly`, `SharingStarted.WhileSubscribed`). Also declined, with reasons: members of
-  a generic class, `suspend`, `@Deprecated`, `@PublishedApi` (including declarations inside an
-  `@PublishedApi internal` class), `@Composable`, member extensions and context receivers, a member
-  named like a property, data-class `copy`/`componentN`, and anything without a klib boundary type;
-  `Any`'s members and an enum's static `valueOf`/`values`/`entries` are not bound. From
-  `kotlinx-coroutines-core` this binds `CompletableJob.complete`, `Job.start`, `Job.isActive`,
-  `CoroutineName`, `CoroutineName.name`, `Dispatchers.Default`, `SharingStarted.Eagerly`,
-  `Semaphore.availablePermits`, `Semaphore.tryAcquire`/`release` and others;
+  (`SharingStarted.Eagerly`, `SharingStarted.WhileSubscribed`). Parameter names (`parameterNamesKnown =
+  true`) and default-value flags (`Flags.DECLARES_DEFAULT_VALUE`) come from `.knm`, enabling keyword
+  dispatch and default-argument omission (`<= 6` defaults, B-3). A `@JvmInline value class` whose single
+  constructor and underlying property are both `public` (`Dp`) unboxes to its underlying boundary tag,
+  while one with a non-public constructor (`Color`, `TextUnit`, `Duration`) crosses as an `OBJECT`
+  handle. A `@Composable` top-level or `object` function with at most 6 defaulted parameters binds in
+  pure Kotlin source (`@androidx.compose.runtime.Composable () -> R` cast to
+  `kotlin.Function2<androidx.compose.runtime.Composer?, kotlin.Int, R>`, B1); a `@Composable` function
+  with more than 6 defaulted parameters is declined with that reason pending an IR lowering bridge (B3).
+  Also declined, with reasons: members of a generic class, `suspend`, `@Deprecated`, `@PublishedApi`
+  (including declarations inside an `@PublishedApi internal` class), a `@Composable` member function or
+  getter, member extensions and context receivers, a member named like a property, data-class
+  `copy`/`componentN`, and anything without a klib boundary type; `Any`'s members and an enum's static
+  `valueOf`/`values`/`entries` are not bound. From `kotlinx-coroutines-core` this binds
+  `CompletableJob.complete`, `Job.start`, `Job.isActive`, `CoroutineName`, `CoroutineName.name`,
+  `Dispatchers.Default`, `Dispatchers.IO`, `SharingStarted.Eagerly`, `SharingStarted.WhileSubscribed`,
+  `Semaphore.availablePermits`, `Semaphore.tryAcquire`/`release`, `CloseableCoroutineDispatcher.close`,
+  `CoroutineScope.ensureActive`, `CoroutineScope.isActive` and others;
   `GP/artifact/KlibMemberFunctionTest.kt`, `GP/artifact/KlibClassAndObjectBindingTest.kt`, and on the
   iOS simulator `WalkedKlibArtifactMemberFunctionTest`.
-  Since #234 a **Kotlin object crosses as a handle**: a type whose class is a public, non-generic,
-  non-value `class`, `interface`, `enum class` or `object` of the walked klib (or of any `.klib` on its
-  resolved `classpath`, #191 Phase B) is an `OBJECT` slot or result, non-null or nullable, cast in
+  Since #234 a **Kotlin object crosses as a handle**: a type whose class is a public, non-generic
+  `class`, `interface`, `enum class` or `object` of the walked klib (or of any `.klib` on its resolved
+  `classpath`, #191 Phase B) that does not unbox as a primitive value class is an `OBJECT` slot or
+  result, non-null or nullable (except nullable value classes, which box and stay declined), cast in
   generated source as the jar producer casts one, and a handle result carries its ancestry from the
   klib classpath's supertypes. Handles are the common trampoline's and `HandleTable`'s, under the jar
   side's rules: passing one back into Kotlin takes no second slot, and dropping it releases it exactly
   once. Still declined, each with its reason: a type not on the klib `classpath`, a class of package
-  `kotlin` other than the boundary's primitives, an extension (the pinned compiler's klib ABI has no
-  receiver type), and any `@Deprecated` declaration (the ABI has no level, and a `HIDDEN` one, such as
-  `kotlinx.coroutines.Job0`, cannot be called from source). From `kotlinx-coroutines-core` this binds
+  `kotlin` other than the boundary's primitives, and any `@Deprecated` declaration (a `HIDDEN` one, such
+  as `kotlinx.coroutines.Job0`, cannot be called from source). From `kotlinx-coroutines-core` this binds
   `Job`, `SupervisorJob`, `MainScope`, `Mutex`, `Semaphore`, `newSingleThreadContext` and
   `newFixedThreadPoolContext`. `GP/artifact/KlibScannerTest.kt`, `GP/artifact/KlibObjectHandleTest.kt`,
   `GP/artifact/KlibClassAndObjectBindingTest.kt`;

@@ -73,7 +73,7 @@ class KlibScannerTest {
         }
         val entries = KlibScanner.scanKlib(konanStdlibKlib, includePrefixes = listOf("kotlin.math"))
         assertTrue(entries.isNotEmpty(), "kotlin.math yielded nothing; the package-prefix match regressed")
-        assertEquals(68, entries.size)
+        assertEquals(90, entries.size)
     }
 
     /**
@@ -143,16 +143,18 @@ class KlibScannerTest {
     @Test
     fun aRealThirdPartyKlibIsScannedWithoutCrashingAndBindsItsHandleFactoriesAndMembers() {
         // Zero before issue #234, when no Kotlin object could cross the klib boundary. Since then the
-        // non-extension factories whose types are this klib's own classes bind, and since #237 the
-        // members of its interfaces and final classes; the extensions, the suspend functions, the
-        // members of open classes and anything typed by another klib (`CoroutineContext`) are declined.
+        // non-extension factories whose types are this klib's own classes bind, since #237 the members
+        // of its interfaces and classes, and since #191 Phase B (A1) `.knm` metadata adds top-level
+        // constants, extension functions/properties on handle receivers, and public members of open
+        // and abstract classes while declining `@Deprecated(level = ERROR)` types (`ChildHandle`,
+        // `ChildJob`).
         val entries = KlibScanner.scanKlib(coroutinesKlib, includePrefixes = emptyList())
         assertEquals(
             listOf(
-                "kotlinx.coroutines.ChildHandle.parent",
-                "kotlinx.coroutines.ChildJob.parentCancelled",
+                "kotlinx.coroutines.CloseableCoroutineDispatcher.close",
                 "kotlinx.coroutines.CompletableJob.complete",
                 "kotlinx.coroutines.CoroutineDispatcher.Key",
+                "kotlinx.coroutines.CoroutineDispatcher.limitedParallelism",
                 "kotlinx.coroutines.CoroutineExceptionHandler.Key",
                 "kotlinx.coroutines.CoroutineName",
                 "kotlinx.coroutines.CoroutineName.Key",
@@ -162,15 +164,17 @@ class KlibScannerTest {
                 "kotlinx.coroutines.Dispatchers.Main",
                 "kotlinx.coroutines.Dispatchers.Unconfined",
                 "kotlinx.coroutines.DisposableHandle.dispose",
+                "kotlinx.coroutines.IO",
                 "kotlinx.coroutines.Job",
                 "kotlinx.coroutines.Job.Key",
-                "kotlinx.coroutines.Job.attachChild",
                 "kotlinx.coroutines.Job.isActive",
                 "kotlinx.coroutines.Job.isCancelled",
                 "kotlinx.coroutines.Job.isCompleted",
                 "kotlinx.coroutines.Job.onJoin",
                 "kotlinx.coroutines.Job.parent",
                 "kotlinx.coroutines.Job.start",
+                "kotlinx.coroutines.MainCoroutineDispatcher.immediate",
+                "kotlinx.coroutines.MainCoroutineDispatcher.limitedParallelism",
                 "kotlinx.coroutines.MainScope",
                 "kotlinx.coroutines.NonDisposableHandle.dispose",
                 "kotlinx.coroutines.NonDisposableHandle.parent",
@@ -184,10 +188,15 @@ class KlibScannerTest {
                 "kotlinx.coroutines.channels.Channel.Factory.RENDEZVOUS",
                 "kotlinx.coroutines.channels.Channel.Factory.UNLIMITED",
                 "kotlinx.coroutines.channels.ChannelResult.Companion",
+                "kotlinx.coroutines.ensureActive__CoroutineScope",
+                "kotlinx.coroutines.ensureActive__Job",
+                "kotlinx.coroutines.flow.DEFAULT_CONCURRENCY",
+                "kotlinx.coroutines.flow.DEFAULT_CONCURRENCY_PROPERTY_NAME",
                 "kotlinx.coroutines.flow.SharingStarted.Companion",
                 "kotlinx.coroutines.flow.SharingStarted.Eagerly",
                 "kotlinx.coroutines.flow.SharingStarted.Lazily",
                 "kotlinx.coroutines.flow.SharingStarted.WhileSubscribed",
+                "kotlinx.coroutines.isActive",
                 "kotlinx.coroutines.newFixedThreadPoolContext",
                 "kotlinx.coroutines.newSingleThreadContext",
                 "kotlinx.coroutines.sync.Mutex",
@@ -253,20 +262,24 @@ class KlibScannerTest {
         val bound = declarations.filter { it.bindingName != null }
         val declined = declarations.filter { it.bindingName == null }
 
-        assertEquals(68, bound.size, "the bound half must still be exactly what scanKlib returns")
-        assertTrue(declined.isNotEmpty(), "kotlin.math's extensions must be recorded, not dropped")
+        assertEquals(90, bound.size, "the bound half must still be exactly what scanKlib returns")
+        assertTrue(declined.isNotEmpty(), "kotlin.math's declined declarations must be recorded, not dropped")
         assertTrue(
             declined.all { it.declineReason != null },
             "a declined declaration with no reason is the silent drop this replaces",
         )
-        // The one klib cannot answer and the JVM producer can: the receiver's own type.
-        val pow = declined.filter { it.simpleName == "pow" }
-        assertTrue(pow.isNotEmpty(), "kotlin.math.pow is an extension on Double and must appear declined")
+        // With `.knm` metadata (Step 2 / A1), `kotlin.math.pow` and the other extension functions on
+        // `Double`/`Float` now bind with their receiver type, while extension properties on primitive
+        // receivers (`Double.ulp`, `Double.sign`, `Int.sign`) are declined with their receiver reason.
+        val pow = bound.filter { it.simpleName == "pow" }
+        assertEquals(4, pow.size, "kotlin.math.pow's four Double/Float extension overloads now bind via .knm")
+        assertTrue(pow.all { it.receiver != null }, "pow must carry its Double/Float receiver model")
+        val ulp = declined.filter { it.simpleName == "ulp" }
+        assertTrue(ulp.isNotEmpty(), "kotlin.math.ulp is an extension property on a primitive and must appear declined")
         assertTrue(
-            pow.all { it.declineReason!!.contains("extension receiver") },
-            "expected an extension-receiver reason, got ${pow.map { it.declineReason }}",
+            ulp.all { it.declineReason!!.contains("receiver crosses as FLOAT") },
+            "expected a primitive-receiver property decline reason, got ${ulp.map { it.declineReason }}",
         )
-        assertTrue(pow.all { it.receiver == null }, "klib cannot name the receiver, so it must not claim one")
     }
 
     /** The two halves come out of one walk, exactly as `DeclarationModelTest
@@ -318,15 +331,15 @@ class KlibScannerTest {
      * `parameterNamesKnown` is what says so rather than a synthesised `arg0`.
      */
     @Test
-    fun aKlibSuppliesTypesAndDefaultsButNoParameterNames() {
+    fun aKlibSuppliesTypesAndDefaultsAndParameterNamesViaKnm() {
         if (!konanStdlibKlib.isDirectory) {
             println("skipped: no .konan cache at $konanStdlibKlib")
             return
         }
         val absInt = KlibScanner.scanKlibDeclarations(konanStdlibKlib, includePrefixes = listOf("kotlin.math"))
             .single { it.bindingName == "kotlin.math.abs__Int" }
-        assertEquals(false, absInt.parameterNamesKnown)
-        assertEquals(listOf<String?>(null), absInt.parameters.map { it.name })
+        assertEquals(true, absInt.parameterNamesKnown)
+        assertEquals(listOf<String?>("n"), absInt.parameters.map { it.name })
         assertEquals(listOf("kotlin.Int"), absInt.parameters.map { it.type.qualifiedName })
         assertEquals(listOf("INT"), absInt.parameters.map { it.boundaryTag })
         assertEquals("kotlin.Int", absInt.returnType.qualifiedName)
@@ -383,7 +396,7 @@ class KlibScannerTest {
      * test currently cannot observe, and this assertion would be the one to fail and say so.
      */
     @Test
-    fun boundDeclarationWithADefaultDoesNotOccurInAvailableRealKlibs() {
+    fun boundDeclarationsWithDefaultsOccurInRealKlibsViaKnm() {
         if (!konanStdlibKlib.isDirectory) {
             println("skipped: no .konan cache at $konanStdlibKlib")
             return
@@ -391,9 +404,8 @@ class KlibScannerTest {
         val declarations = KlibScanner.scanKlibDeclarations(konanStdlibKlib, includePrefixes = emptyList())
         val boundWithDefault = declarations.filter { it.bindingName != null && it.parameters.any { p -> p.declaresDefault } }
         assertTrue(
-            boundWithDefault.isEmpty(),
-            "expected no bound declaration to declare a default in the available real klibs, found: " +
-                boundWithDefault.map { it.bindingName },
+            boundWithDefault.isNotEmpty(),
+            "expected bound declarations with omittable defaults in kotlin-stdlib once .knm metadata is read",
         )
     }
 

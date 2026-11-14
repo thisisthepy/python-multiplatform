@@ -199,6 +199,8 @@ internal object KlibScanner {
         excludePackages: List<String>,
         classpath: List<File>,
     ): List<Candidate> {
+        KlibKnmScanner.scan(klib, includePrefixes, excludePackages, classpath)?.let { return it }
+
         val abi = try {
             LibraryAbiReader.readAbiInfo(klib)
         } catch (e: Exception) {

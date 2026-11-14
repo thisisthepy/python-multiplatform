@@ -1,6 +1,8 @@
 # KLIB `.knm` Metadata, `@Composable` Calls, and Default Arguments on Kotlin/Native
 
-Status: **Agent proposal, not confirmed** (owner decision required before implementing Step 2 or Step 3).
+Status:
+- **Step 1 (A3) & Step 2 (A1 `.knm` metadata reader) & Step 3 (B1 pure-source `@Composable` for `<= 6` defaults):** Implemented (`KlibScanner.kt`, `KlibKnmScanner.kt`, `ArtifactRendering.kt`; leader decision 2026-11-15: "B1(순수 소스 생성, 기본값 6개 이하)만 진행하세요. 새 의존성·플러그인 없이 기존 생성 경로 안에서 끝나므로 제가 결정합니다.").
+- **Step 3 (B3 consumer `IrGenerationExtension` for `@Composable` with `> 6` defaults):** **Agent proposal, not confirmed** (owner decision required before introducing a compiler plugin artefact, per AGENTS.md §7).
 
 Related issue: `thisisthepy/python-multiplatform#191` (Phase B: Kotlin/Native and Wasm `.klib` artifact scanner parity with JVM `.jar` artifacts), `thisisthepy/pythonx-compose#110` (Compose Multiplatform on Kotlin/Native and GraalVM native image).
 
@@ -61,8 +63,8 @@ We verified this in `jshell` against `kotlinx-coroutines-core-androidnativearm64
 - Companion objects carry `Flags.CLASS_KIND.get(cls.flags) == ProtoBuf.Class.Kind.COMPANION_OBJECT`, distinguishing named companions (`Job.Key`, `Channel.Factory`) from regular nested `object`s.
 - Annotations (`@Composable`, `@Deprecated(level = HIDDEN)`, `@PublishedApi`) are readable directly from the `KlibMetadataProtoBuf.*Annotation` extensions on each `ProtoBuf.Class`, `ProtoBuf.Constructor`, `ProtoBuf.Function`, and `ProtoBuf.Property`.
 
-**Step 2 Proposal (Agent proposal, not confirmed):**
-Use `KlibMetadataDeserializationUtilsKt.parsePackageFragment` + `NameResolverImpl` + `Flags` from the existing `kotlin-compiler-embeddable:2.0.20` dependency (zero new dependencies, zero custom protobuf parsers) to enrich `KlibScanner` with parameter names, extension receivers, value-class underlying types, exact `PUBLIC` visibility on open/abstract classes, and `COMPANION_OBJECT` kind.
+**Step 2 Status (Implemented, 2026-11-15):**
+`KlibKnmScanner.kt` uses `ToolingSingleFileKlibResolveStrategy` + `parseModuleHeader` / `parsePackageFragment` + `NameResolverImpl` + `Flags` from the existing `kotlin-compiler-embeddable:2.0.20` dependency (zero new dependencies, zero custom protobuf parsers) to enrich `KlibScanner` with parameter names, default-argument omission (`<= 6` defaults), extension functions and properties, value-class underlying types, exact `PUBLIC` visibility on open/abstract classes, and `COMPANION_OBJECT` kind. It also reads Kotlin 2.1+ KLIBs (`org.thisisthepy.compose.*:1.11.1-ext.4`) whose `ir/` tables `LibraryAbiReader` (`2.0.20`) cannot deserialize.
 
 ---
 
@@ -163,12 +165,10 @@ Let's check how Kotlin compiles default arguments when calling a function from K
 | `@Composable` with `> 6` defaulted params (`Text` (15), `Button` (9), `TextField` (16), `Scaffold` (10)) | Cannot emit `2^15` branches in source | Supported | **Supported (O(1) single `IrCall` to lowered `$default` symbol)** |
 | Value-class parameters (`Dp`, `Color`, `TextUnit`) | **Handled automatically by Kotlin compiler** | Must manually box/unbox in KLIB IR | Handled by IR lowering |
 
-### 3.5 Phased Recommendation (Agent proposal, not confirmed)
+### 3.5 Phased Status and Remaining Proposal
 
-1. **Immediate (Step 1, in this PR):** Land A3 in `KlibScanner` (cross-klib `classpath`, constructors, `object`/`Companion` handles, constants & functions, and member properties) using `LibraryAbiReader`.
-2. **Next (Step 2 / A1):** Add `.knm` `ProtoBuf.PackageFragment` enrichment in `KlibScanner` using `KlibMetadataDeserializationUtilsKt.parsePackageFragment` (already in `kotlin-compiler-embeddable:2.0.20`) to recover parameter names, extension receivers (`Modifier.*`), value-class underlying types (`Dp`, `Color`, `TextUnit`), `PUBLIC` vs `PROTECTED` visibility, and `COMPANION_OBJECT` kind.
-3. **Then (Step 3 / Blocker B):**
-   - **Option 3A (Two-stage: B1 first, then B3):** Implement B1 (`@Composable` lambda cast in `ArtifactRendering.kt` when targeting K/N) immediately so `@Composable` functions with `<= 6` defaults work in pure Kotlin source, and follow with B3 (`IrGenerationExtension`) for `> 6` defaulted parameters (`Text`, `Button`, `Scaffold`, `TextField`).
-   - **Option 3B (Direct B3):** Implement B3 directly so both `<= 6` and `> 6` defaulted `@Composable` and regular functions use the same lowered `$default` IR call on K/N, matching JVM's `ComposableThunks` 1:1.
-
-Owner / leader decision requested between **Option 3A** and **Option 3B** before implementing Step 3.
+1. **Step 1 (A3, implemented):** `KlibScanner` supports cross-klib `classpath`, constructors, `object`/`Companion` handles, constants and functions, and member properties.
+2. **Step 2 (A1, implemented):** `KlibKnmScanner` reads `.knm` (`linkdata/`) `ProtoBuf.PackageFragment` metadata using `parseModuleHeader`/`parsePackageFragment` (already in `kotlin-compiler-embeddable:2.0.20`) to recover parameter names, default-argument omission (`<= 6` defaults), extension functions and properties (`Modifier.*`), value-class underlying types (`Dp`, `Color`, `TextUnit`), `PUBLIC` vs `PROTECTED` visibility, and `COMPANION_OBJECT` kind.
+3. **Step 3 (Blocker B):**
+   - **Stage 1 (B1, implemented; leader decision 2026-11-15):** Pure-source `@Composable` lambda cast in `KlibKnmScanner.kt` + `ArtifactRendering.kt` binds `@Composable` top-level and `object` functions with `<= 6` defaulted parameters (`Column`, `Row`, `Box`, `BoxWithConstraints`, `Spacer`, `HorizontalDivider`, `MaterialTheme`, etc.), and declines `@Composable` functions with `> 6` defaulted parameters with a clear reason (`"more than 6 defaulted parameters on a klib @Composable: requires an IR lowering bridge"`).
+   - **Stage 2 (B3, Agent proposal, not confirmed; awaiting owner decision per AGENTS.md §7):** Introduce a consumer `IrGenerationExtension` so `@Composable` functions with `> 6` defaulted parameters (`Text`, `Button`, `Scaffold`, `TextField`) invoke their lowered `$default` IR symbol directly on Kotlin/Native, matching JVM's `ComposableThunks` 1:1.
