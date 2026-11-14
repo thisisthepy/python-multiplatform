@@ -282,7 +282,9 @@ impl, which passes it to `tp_enter_call`, `tp_depth_room`, `tp_traced` and to it
 so a compiled call and its C-to-C callees do one TLS lookup of the thread state per call. Likewise the per-thread state (call depth, poll countdown, snapshot depth) is one `__thread` struct
 `tp_osr` (#152, OSR-style exit): `{ tp_cs *lock; PyObject *lists[2]; PyObject *result; }`. A snapshot-holding
 function's wrapper sets `tp_t->osr` to its own context right before calling the impl; the impl takes it at entry
-and sets `tp_t->osr` back to NULL. The impl returns 2 when it left for the continuation, with `result` set (strong).
+and sets `tp_t->osr` back to NULL. The impl returns 2 when it left for the continuation, with `result` set (strong):
+after a poll found a list or entry global changed, or (#390 item 5) through a statement exit, when a Call of a function
+holding lists got its callee's deopt (the lists are written back and the section ended before the continuation runs).
 
     PyObject *tp_list_from_f64(const double *d, Py_ssize_t n);   /* new list; NULL + exception */
     PyObject *tp_list_from_i64(const int64_t *d, Py_ssize_t n);  /* new list; NULL + exception */
@@ -550,7 +552,7 @@ static or module-state field must be added here):
 | list arguments of array parameters | caller's lists | critical section | `tp_cs_begin` before the copy-in, `tp_cs_end` after the write-back, on every path; every store written through at once in program order (`tp_*_array_st`, #391): lock-taking operations see the call as one step, lock-free element reads see the interpreter's store order ("Native arrays" above) |
 | list arguments of a pure function with three or more (#255) | caller's lists | CPython | not copied, no lock: every element read is `PyList_GetItemRef` (atomic, a strong reference), in program order; the wrapper's arguments keep the lists alive |
 | module globals (class names, entry globals) | module dict | strong reads | `tp_global` and `tp_class_global_ok` use `PyDict_GetItemRef`. OPEN (#414, design/typedpython.md 4.3.6 아): an entry global is read once at entry, so a later shared read (a callee's entry global, a field another thread writes, a second entry global used before the first) can see that thread's writes after a rebinding while the function keeps the old value; no interleaving does that |
-| entry globals of a function holding lists (#390) | module dict | critical section + epoch | `tp_eg_snapshot` reads them and `tp_globals_epoch` in the module dict's section BEFORE the lists' section; `tp_eg_current` after the copy-in, else deopt. Nothing else in that window looks a dict up (`verify/array-wait`); open: a redo Call runs the interpreted callee inside it (design 4.3.6) |
+| entry globals of a function holding lists (#390) | module dict | critical section + epoch | `tp_eg_snapshot` reads them and `tp_globals_epoch` in the module dict's section BEFORE the lists' section; `tp_eg_current` after the copy-in, else deopt. Nothing else in that window looks a dict up (`verify/array-wait`); no interpreted callee runs inside it either: a callee's deopt leaves through a statement exit (#390 item 5, design 4.3.6 바) |
 | a compiled class's instances | other threads' objects | CPython | `PyMember_GetOne` / `SetOne` are what the interpreter's member descriptors call (they take the object's lock on free-threaded builds); `tp_new_fixed` writes only its own fresh object |
 | `errno` (math helpers) | C library | thread-local | per thread by POSIX |
 | `tp_par_cap_v`, `tp_par_regions_v`, `tp_par_started_v`, `tp_par_failed_v` | static in the module | atomic | relaxed loads and stores; the cap is computed identically by any thread that finds it unset and never changes after |

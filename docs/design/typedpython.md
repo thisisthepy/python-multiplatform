@@ -734,7 +734,8 @@ venv 의 3.15.0rc1t 헤더와 python/cpython 의 태그 `v3.15.0rc1` 소스(설�
   - **비용(측정 전):** 읽기마다 함수 호출 하나와 참조 증감 한 쌍이다. copy-in 경로보다 느리고, 얼마나 빠른지는 CI
     측정을 기다린다.
 - **(d2) 쓰는 함수의 원소별 접근: 불가(지금).** 쓰기는 `PyList_SetItem` 하나로 원자적이지만, 효과 뒤의 읽기가 다른
-  타입을 만나면 인터프리터는 계속 실행하는데 우리는 그 지점의 연속이 없다(위 (c) 와 같은 한계). 임의 지점 OSR 출구가
+  타입을 만나면 인터프리터는 계속 실행하는데 우리는 그 지점의 연속이 없다(위 (c) 와 같은 한계; 바 의 5 이후 문장
+  시작 지점의 연속은 있지만, 효과 뒤의 출구에 쓰는 것은 구현하지 않았다). 임의 지점 OSR 출구가
   생기면 (d2) 가 nbody `advance` 를 푼다.
 
 #### 라. 판정과 결과
@@ -802,12 +803,75 @@ section API 만 씀(리더, 2026-11-13).
 - 3: 호출자가 같은 이름·타입의 entry global 을 가진 경우(verify `covers`)는 호출자의 snapshot 값을 넘긴다(다시
   읽지 않는다). 아닌 경우와 4 는 리스트를 쥔 함수의 호출 트리에서 거절한다(`verify/array-wait`, cgen
   `_window_wait`). 다섯 벤치마크의 컴파일 함수 집합과 생성 C 는 바뀌지 않는다(바이트 단위로 확인).
-- **열린 결함 5 (오너 결정 필요):** spectral_norm `mul_av`·`mul_atv` 는 리스트 둘을 쥔 채 `eval_a` 를 redo Call 로
-  부른다. 거절하면 이 둘이 해석 실행으로 바뀌어 `test_class_methods.py` 의 EXPECTED 가 달라지므로 하지 않았다.
-  후보: (가) 거절(EXPECTED 변경), (나) redo 대신 호출 전체를 중단하고 wrapper 에서 해석 실행(쓰기가 아직 copy 안에만
-  있을 때만 건전, poll 이 이미 write-back 했으면 효과가 반복되므로 마지막 poll 지점으로 되돌아가는 연속이 필요),
-  (다) poll 처럼 write-back·섹션 해제 후 redo 하고 다시 copy-in(리스트 길이·원소 타입이 바뀌면 그 지점의 연속이 없다,
-  가 (c) 와 같은 한계). redo 는 callee 가 실제로 deopt 할 때(i64 넘침, 호출 중 추적 시작)만 일어난다.
+- **5 (redo Call): 문장 출구로 고쳤다 (에이전트 제안, 확인되지 않음; 코디네이터의 설계를 구현).** spectral_norm
+  `mul_av`·`mul_atv` 는 리스트 둘을 쥔 채 `eval_a` 를 Call 로 부른다. 앞에서는 callee 가 deopt 를 알리면(`tp_s == 1`:
+  i64 넘침, 클래스 검사, impure 호출자의 추적 검사) 창 안에서 `tp_cg_redo` 로 해석 callee 를 불렀다. 해석 프레임은 eval
+  breaker 에서 stop-the-world 요청에 detach 하고(`Python/ceval_gil.c:1362-1367`), detach 는 섹션을 푼다(위 근거와 같은
+  줄). GIL 빌드에서는 해석 코드가 copy 가 살아 있는 동안 GIL 을 넘긴다. 둘 다 다른 스레드의 리스트 쓰기를 copy 가
+  덮거나 copy 의 낡은 값을 읽게 해, 어떤 interleaving 과도 맞지 않는다.
+  - **수정: 문장 출구(statement exit).** #152 의 OSR 출구를 "루프 한 바퀴의 처음"에서 "문장의 처음"으로 넓혔다.
+    효과가 있고 리스트를 쥔 함수의 Call 이 `tp_s == 1` 을 받으면 redo 하지 않고: 리스트를 `tp_*_array_exit` 로
+    write-back 하고(GIL 빌드의 dirty 칸, 섹션이 끝나기 전, Python 코드가 돌기 전. free-threaded 빌드는 저장마다 이미
+    write-through, 위 사), 섹션을 끝내고, 그 Call 을 담은 원래 문장을 처음부터 다시 실행하는 연속
+    `__tp_resume_<f>_s<k>`(resume.py)를 부른다. impl 은 poll 출구처럼 2 를 돌려주고 `tp_my->result` 를 둔다. 두 출구는
+    꼬리 하나(`cgen._osr_leave`)를 쓴다: wrapper 의 `exits` 는 다시 돌지만 copy 는 이미 비었고 `tp_cs_end` 는 멱등이라
+    두 번 write-back 하거나 두 번 풀지 않는다. 연속은 callee 를 모듈 전역(compiled wrapper)으로 다시 부르고, 그
+    wrapper 가 창 밖에서 deopt 를 세고 해석 실행한다(`__typedpython_deopts__` 는 앞과 같은 수: 넘치는 호출마다 하나).
+    GIL·free-threaded 빌드가 같은 경로다. 순수 함수는 그대로다: deopt 가 wrapper 까지 올라가고 wrapper 가 write-back
+    뒤에 호출 전체를 redo 한다. cgen 은 문장 출구 없는 창 안 redo 를 만들라고 하면 CGenError 를 낸다.
+  - **연속.** 문장 S 의 연속 = S 의 사본, S 뒤의 같은 블록 문장들, 감싸는 루프마다(안쪽부터) 현재 바퀴의 나머지와
+    남은 바퀴, 가장 바깥 루프 뒤의 문장들. 매개변수 규약은 루프 연속과 같고, 감싸는 루프만 숨은 상태를 갖는다. `for`
+    문장 S 는 `range` 경계를 다시 계산하고(경계는 문장 시작에 한 번 계산된다) 그 변수는 보통 지역이다. `while` 문장
+    S 는 시험을 다시 계산하므로 루프 연속과 같다(바퀴마다 다시 시작하므로 몸통에서 처음 묶인 지역도 넘긴다). S 는 루프
+    지점과 같은 규칙으로 닿아야 한다(평범한 if/for/while 만, 루프 else·try·with·match 안이 아님). 연속은 원래 파일, 줄,
+    함수 이름을 지킨다.
+  - **문장 위치(IR 과 AST 의 대응).** IR 문장마다 `ir.Stmt.stmt` = 원래 소스 문장 번호(`resume.statements` 순서,
+    함수 자신의 문장 전위 순회)를 둔다. front end 의 `block` 이 문장의 임시 변수 Assign 까지 붙인다(시험에 임시 변수가
+    필요한 `while` 의 합성 If·Break 는 그 while 의 번호). 같음·hash·repr 에는 들어가지 않으므로(`compare=False`) IR 을
+    비교하는 단계(verify 의 재계산, cost, taint, rebinding, 영역, 병렬 루프)는 그대로이고 `dataclasses.replace` 가
+    유지한다. taint 가 덧붙이는 플래그 Assign 도 같은 번호를 받는다. resume 은 번호가 AST 와 맞는지(종류, 순서가 줄지
+    않음) 보고, 안 맞으면 문장 연속을 만들지 않는다(그러면 verifier 가 거절). 기각한 대안: `ir.Call` 에만 번호(그
+    문장의 임시 변수가 어디서 시작하는지 verifier 가 볼 수 없다), id 로 잇는 별도 표(verify 가 노드를 새로 만들면 끊김),
+    IR 과 AST 를 구조로 맞추기(임시 변수와 while 재작성에 약함), 문장을 감싸는 새 IR 노드(문장을 걷는 모든 단계가
+    배워야 함). incremental cache(SPEC N-10)의 키에는 컴파일러 소스 트리의 hash(`pipeline.COMPILER_VERSION`)가
+    있으므로 이 변경 뒤에 옛 C 가 나오지 않는다.
+  - **건전성 조건 (`verify/array-wait` 확장, `verify._stmt_exit_problem`).** 효과가 있고 리스트를 쥔 함수에서 Call 을
+    스스로 계산하는 IR 문장 T 마다(번호 k = 원래 문장 S): (1) S 에 문장 출구가 있다(`resume.exit_problem`: 함수에 OSR
+    출구가 있고(병렬 루프·연속 없는 루프·객체 루프·대응 없는 지역이 없음), S 의 연속이 있고, 그 매개변수 모두에 C 값이
+    있다); (2) T 가 계산하는 노드에 효과나 사용자 코드가 없다(순수 callee 의 Call 만. impure 로 선언된 callee 는 그것이
+    T 의 유일한 Call 일 때만: 그 deopt 신호는 첫 효과 전, 입구 guard 나 호출자의 추적 검사에서만 온다); (3) S 의 IR 이 T
+    앞에서 한 일은 임시 변수뿐이다: T 의 블록에서 번호 k 인 문장들은 T 바로 앞의 한 덩어리이고, 각각 연속이 받지 않는
+    이름의 Assign 이며 효과가 없다. T 를 담은 문장도 k 면(임시 변수가 필요한 while) 그 몸통에서 T 앞의 문장은 모두
+    그 덩어리여야 하고 한 단계 위에서 같은 검사를 한다. 리스트를 쥔 함수의 호출 트리는 user code 가 없고(array-open)
+    callee 에는 배열을 넘길 수 없으므로 callee 는 모두 순수하다: (2) 와 (3) 은 front end 가 만들지 않는 IR 을 막는
+    보호다. 왜 유효한가: S 가 Call 전에 한 것은 읽기와 순수 계산뿐이고 그 결과는 버린다. 읽기는 효과가 없고,
+    인터프리터가 나중에 다시 읽는 것은 다른 스레드의 연산이 S 의 시작 바로 앞에 낀 interleaving 이다. S 앞의 문장은
+    모두 섹션 안에서 끝났다.
+  - **문장 종류별.** Assign / 주석 붙은 Assign / AugAssign(`s += f(i) * v[j]`: s 를 읽고 부르고 v[j] 를 읽고 저장):
+    받음. StoreIndex(`out[i] = f(x) * v[j]`: 값, 그 다음 색인, 저장은 마지막): 받음. `a[i] += f(x)`: CPython 은 색인을
+    계산하고 `a[i]` 를 읽은 뒤 부르고 저장은 마지막이다. 색인이 이름이나 상수가 아니면 임시 변수 Assign 이 T 앞에 온다:
+    받음(시험 `test_augmented_subscript_with_a_temporary_index_is_accepted`). Return, 식 문장: 받음. `if` 의 시험: 지점은
+    그 If 문장(elif 는 안쪽 If). `while` 의 시험(어느 바퀴든): 지점은 그 while 문장, 연속은 루프 연속과 같다. `for` 의
+    `range` 경계: 지점은 그 for 문장, 단순 사본. `and` / `or` / 조건식 / 비교 사슬의 피연산자: 문장 전체를 다시 실행.
+    한 문장의 두 Call(`f(a) + f(b)`): 뒤의 것이 deopt 하면 앞의 순수 결과를 버리고 다시 계산(관측되지 않음). 거절:
+    루프 else·try·with·match 안의 문장(front end 가 받지 않는다), 병렬 루프가 있는 함수, 그리고 (2)·(3) 을 어기는 IR.
+  - **snapshot 은 있으나 리스트 copy 가 없는 함수**(entry global 만, 버퍼만): 앞과 같이 그 자리에서 redo 한다. 같은
+    결함(copy 를 덮어씀)은 없다: 버퍼는 copy 가 없고 저장이 바로 메모리에 간다. 관찰(고치지 않음): GIL 빌드에서 entry
+    global 을 가진 impure 함수의 redo 는 해석 callee 가 GIL 을 넘기는 지점이 되어, 아 의 경우 2 와 같은 꼴(다른 스레드의
+    `G = 2; o.x = 2` 뒤에 옛 G 와 새 o.x)을 GIL 빌드에서도 만들 수 있다. free-threaded 빌드에서는 redo 와 무관하게 아 의
+    결함이다. #414 에 속한다.
+  - **결과.** 다섯 벤치마크의 컴파일 함수 집합은 develop 과 같다. 생성 C 가 바뀐 것은 spectral_norm 뿐이다: `mul_av`·
+    `mul_atv` 의 impl 과 fast twin 에서 Call 의 redo 가 문장 출구가 되었고, 연속 두 개(`__tp_resume_mul_av_s3`,
+    `__tp_resume_mul_atv_s3`)가 모듈 소스에 붙었다(`clang -fsyntax-only` 통과). 루프 연속과 poll 의 C 는 그대로다.
+  - **시험(`test_stmt_exit.py`).** resume 의 문장 지점 차분 시험(계측한 사본이 S 의 n 번째 시작에서 `locals()` 와 루프
+    상태를 들고 예외를 던지고, 그 상태로 부른 연속이 끝까지 돈 원래 실행과 결과·예외·리스트가 같아야 한다; 현재 바퀴의
+    나머지를 뺀 변형 연속은 잡혀야 한다), front end 의 번호, verifier 의 거절과 수락, 생성 C 의 구조(창 안에 `tp_cg_redo`
+    가 없음, write-back 이 `tp_cs_end` 앞), 그리고 컴파일한 확장의 동작(CI): callee 가 첫·중간·마지막 바퀴, 중첩 루프,
+    if 시험, while 시험, return 에서 넘칠 때 인터프리터와 같은 결과·리스트; 해석 callee 가 도는 순간 리스트가
+    인터프리터의 값을 가짐(callee 의 해석 실행이 같은 스레드에서, 또는 다른 스레드를 띄우고 join 해서 `v[5]` 를 쓴다:
+    창 안 redo 는 copy 의 낡은 값을 읽어 빨강); 연속 안의 traceback 이 원래 함수 이름과 줄; 변형(`cgen._redo_inside_window`
+    를 켠 빌드)이 잡힘. 컴파일이 필요한 시험은 이 글을 쓴 에이전트가 돌리지 않았다(AGENTS.md 10).
+  - 앞에서 #390 의 5 를 거절하지 않은 이유였던 `test_class_methods.py` 의 EXPECTED 는 바뀌지 않는다.
 - 6 은 고치지 않았다(드묾, 고치려면 원소마다 참조를 하나 더 쥐어야 한다).
 - 관련 관찰(이 이슈 밖): entry global 을 입구에서 한 번 읽는 것은 다른 스레드가 그 전역을 바꾸는 경우, 함수가
   나중에 다른 공유 상태(다른 entry global 의 Call 지점 읽기, 객체 필드)를 읽으면 interleaving 과 안 맞을 수 있다.
@@ -865,7 +929,7 @@ with that argument"). 지킨 제약: GIL 전용 기능 없음, Python 동작 변
   저장 세 곳뿐이다.
 - 남은 점(고치지 않음): (1) 위 바 의 6(write-back 의 `PyList_SetItem` 이 다른 스레드 소유 원소를 decref 하며 bucket
   mutex 에서 detach)은 write-through 에서도 같은 횟수로 생기지만 호출 중간에 생긴다. 그 사이 다른 스레드가 쓰면
-  copy 가 낡는다. 바 의 5(redo Call)도 같다. (2) `array.array` 버퍼는 rc1 의 CPython 자체가 잠금도 atomic 도 없이
+  copy 가 낡는다. 바 의 5(redo Call)는 문장 출구로 고쳤다. (2) `array.array` 버퍼는 rc1 의 CPython 자체가 잠금도 atomic 도 없이
   읽고 쓴다(`Modules/arraymodule.c:664-681`). CPython 이 순서를 보장하지 않으므로 이 논증 밖이다.
 - 시험(`test_free_threaded.py`): `fill_down_int`(높은 색인부터 저장)를 부르는 스레드와 `xs[0]` 다음 `xs[-1]` 을 읽는
   스레드 셋, 늘 `xs[-1] >= xs[0]`(develop 에서 빨강 예상, 경합이라 우연히 통과할 수 있다); 리스트 저장이 모두

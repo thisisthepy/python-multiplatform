@@ -49,7 +49,8 @@ Rules (the `rule` of a Diagnostic):
                               its call tree, a node that can wait for another object's critical
                               section inside that window (#390): an OBJ Global, IsExact, CheckMethod,
                               or a Call of a function with an entry global the caller does not
-                              hold itself (read at the call)
+                              hold itself (read at the call); or it has an effect and a Call without
+                              a statement exit (#390 item 5, `_stmt_exit_problem`)
   verify/array-direct         a pure function with three or more list parameters (#255,
                               `ir.direct_lists`: read element by element) has an entry global, a
                               buffer parameter, a CopyArray of a list parameter or a parallel loop
@@ -284,7 +285,7 @@ from __future__ import annotations
 import dataclasses
 from dataclasses import dataclass
 
-from . import ir
+from . import ir, resume
 from .ir import (
     And, ArrayParam, Assign, BinOp, BinOpKind, Box, Break, Call, CallObject, Compare, CompareKind,
     CompareObj, Const, Continue, CopyArray, ExprStmt, ForRange, Function, GetAttr, Global, If, Index, Len,
@@ -2647,8 +2648,9 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
     # write-back. A wait for another object's lock inside that window detaches the thread, which
     # suspends the section (CPython releases it), so another thread could write the list and the
     # write-back would overwrite it. Its own entry globals are read before the lock (cgen); nothing in
-    # its call tree may look up a dict. A redo Call also runs inside the window: an open defect
-    # (design/typedpython.md 4.3.6), not refused here (it would change spectral_norm).
+    # its call tree may look up a dict. A Call whose callee deopts must not redo it interpreted inside
+    # the window either (item 5): such a function with an effect leaves through a statement exit, and
+    # one that has none for a Call stays interpreted (`_stmt_exit_problem`).
     changed = True
     while changed:
         changed = False
@@ -2664,6 +2666,13 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
             reject(name, g.source_line, ARRAY_WAIT,
                    f"holds its lists' critical section, and {wait_why[name]} can wait for another "
                    f"object's critical section inside it, which would suspend it")
+
+    for name, g in checked.items():
+        if resume.needs_stmt_exits(g):
+            why = _stmt_exit_problem(g, sigs)
+            if why is not None:
+                reject(name, g.source_line, ARRAY_WAIT,
+                       f"holds its lists' critical section and {why}")
 
     # A call cycle (direct or mutual recursion) is legal: every compiled impl function counts its
     # frame at entry (tp_enter_call), so recursion ends in RecursionError where CPython raises it
@@ -2713,6 +2722,98 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
     for name, reason in {**skipped_classes, **reasons}.items():
         skipped.setdefault(name, reason)
     return Module(module.name, kept, skipped, tuple(classes.values()), region_variants), diags
+
+
+# Nodes that are an effect or run user code (an impure Call is checked against the callee's signature).
+_EFFECT_NODES = (GetAttr, CallObject, Truth, CompareObj, ObjToFloat, GetItem, Contains, Format)
+
+
+def _effect_node(exprs, sigs: dict[str, Function], one_call_ok: bool = False) -> str | None:
+    """An effect among `exprs`, or None. `one_call_ok`: a Call of a callee that is not pure is
+    allowed when it is the only Call there (the statement's own Call: its deopt signal comes before
+    the callee's first effect, from the callee's entry guards or the caller's trace check, so the
+    exit repeats nothing; another Call deopting after it had run would repeat its effect)."""
+    calls = [e for e in exprs if type(e) is Call]
+    for e in exprs:
+        if isinstance(e, _EFFECT_NODES) or (type(e) is BinOp and e.type is Type.OBJ):
+            return type(e).__name__
+        if type(e) is Call and getattr(sigs.get(e.function), "pure", None) is not True \
+                and not (one_call_ok and len(calls) == 1):
+            return f"a call of '{e.function}', which is not pure"
+    return None
+
+
+def _stmt_exit_problem(g: Function, sigs: dict[str, Function]) -> str | None:
+    """#390 item 5 (SPEC N-8 "statement exit"; agent proposal, not confirmed). In a function with an
+    effect that holds list copies, every C to C Call can come back with the callee's deopt (an i64
+    overflow, a class check, tracing started, cgen `ev_Call`), and the interpreted redo must not run
+    inside the lists' critical section. The function leaves instead at the start of the source
+    statement S holding the Call (`ir.Stmt.stmt` of the IR statement T that evaluates the Call) and
+    the interpreter re-executes S. Sound when nothing S did before the Call is observable. Required,
+    for every IR statement T that evaluates a Call itself:
+      1. S has a statement exit (`resume.exit_problem`: the function has OSR-style exits, S has a
+         continuation, each of its parameters has a C value);
+      2. no node T evaluates is an effect or runs user code: Calls only of pure callees, except one
+         Call of a callee declared impure when it is T's only Call (it signals a deopt only before its
+         first effect: its entry guards, or the caller's trace check, run first). In a function
+         holding lists anything else is refused as user code already, so this guards against IR the
+         front end does not produce (its callees there are pure);
+      3. what S's IR ran before T is only temporaries: the statements of T's block before T that carry
+         S's number form one run right before T, each an Assign of a name the continuation does not
+         receive, with no effect node; when the statement whose body holds T also carries S's number
+         (a `while` whose test needs temporaries), every statement before T in that body is in the run
+         and the same holds one level up.
+    A store of S (`out[i] = f(x)`, `a[i] += f(x)`) is T itself and happens after its expressions, as
+    in CPython's evaluation order. Reads done before the Call are discarded: a read has no effect and
+    the interpreter's re-read at a later instant is an interleaving. Returns why not, or None."""
+
+    def walk(block, owners):
+        for i, s in enumerate(block):
+            yield s, block, i, owners
+            for fl in dataclasses.fields(s):
+                v = getattr(s, fl.name)
+                if isinstance(v, tuple) and v and all(isinstance(x, ir.Stmt) for x in v):
+                    yield from walk(v, owners + ((s, block, i),))
+
+    for s, block, i, owners in walk(g.body, ()):
+        exprs = resume.own_exprs(s)
+        calls = [e for e in exprs if type(e) is Call]
+        if not calls:
+            continue
+        what = f"calls '{calls[0].function}', whose deopt would run interpreted code inside it"
+        k = s.stmt
+        why = resume.exit_problem(g, k)
+        if why is not None:
+            return f"{what}; the call has no statement exit: {why}"
+        received = set(next(r for r in g.resumes if r.stmt == k).params)
+        bad = _effect_node(exprs, sigs, one_call_ok=True)
+        if bad is not None:
+            return f"{what}; its statement exit needs a statement without effects, but it has {bad}"
+        level, chain = (s, block, i), list(owners)
+        while True:
+            _, blk, j = level
+            run = j
+            while run > 0 and blk[run - 1].stmt == k:
+                run -= 1
+            if any(x.stmt == k for x in blk[:run]):
+                return f"{what}; statement {k} is not one run of IR statements"
+            owner = chain.pop() if chain else None
+            if owner is not None and owner[0].stmt == k and run != 0:
+                return f"{what}; statement {k} runs other statements before the call"
+            for x in blk[run:j]:
+                if type(x) is not Assign or x.target in received:
+                    return (f"{what}; statement {k} stores or assigns {getattr(x, 'target', type(x).__name__)} "
+                            "before the call, which the statement exit would repeat")
+                bad = _effect_node(resume.own_exprs(x), sigs)
+                if bad is not None:
+                    return f"{what}; statement {k} evaluates {bad} before the call"
+            if owner is None or owner[0].stmt != k:
+                break
+            bad = _effect_node(resume.own_exprs(owner[0]), sigs)
+            if bad is not None:
+                return f"{what}; statement {k} evaluates {bad} before the call"
+            level = owner
+    return None
 
 
 def _owner_problem(g: Function, classes: dict[str, ClassDecl]) -> str | None:

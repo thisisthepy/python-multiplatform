@@ -96,6 +96,39 @@ def rules_for(diags, name):
     return {d.rule for d in diags if d.function == name}
 
 
+def with_stmt_exits(g):
+    """`g`, a function with an effect that holds lists, built by hand, given what the front end gives
+    it (#390 item 5, SPEC N-8 statement exits): a source position on every statement (pre-order) and
+    the continuations its exits need, one per loop and one per statement that evaluates a Call. The
+    continuations' sources are left empty: the verifier reads only their parameters."""
+    from typedpython import resume
+    counter = [0]
+
+    def tag(body):
+        out = []
+        for st in body:
+            k = counter[0]
+            counter[0] += 1
+            changes = {}
+            for f in dataclasses.fields(st):
+                v = getattr(st, f.name)
+                if isinstance(v, tuple) and v and all(isinstance(x, ir.Stmt) for x in v):
+                    changes[f.name] = tag(v)
+            out.append(dataclasses.replace(st, stmt=k, **changes))
+        return tuple(out)
+
+    body = tag(g.body)
+    names = tuple(sorted({p.name for p in g.params} | set(g.locals)))
+    loops = list(resume.ir_loops(body))
+    rs = [ir.Resume(k, f"__tp_resume_{g.name}_{k}",
+                    names + (f"__tp_cur_{k}", f"__tp_stop_{k}", f"__tp_step_{k}"), "")
+          for k in range(len(loops))]
+    g = dataclasses.replace(g, body=body)
+    rs += [ir.Resume(-1, f"__tp_resume_{g.name}_s{k}", names, "", stmt=k)
+           for k in sorted(resume.exit_stmts(g))]
+    return dataclasses.replace(g, resumes=tuple(rs))
+
+
 def assert_accepted(*functions, skipped=None):
     out, diags = run(*functions, skipped=skipped)
     assert kept(out) == [g.name for g in functions], [dataclasses.astuple(d) for d in diags]
@@ -1006,7 +1039,7 @@ def test_entry_global_needs_every_callee_closed_transitively():
     h_open = fn("h", body=[IMPURE, Return()])
     h_closed = fn("h", body=[Return()])
     g = fn("g", body=[ExprStmt(Call(NONE, "h", ())), Return()])
-    caller = _closed(extra=[ExprStmt(Call(NONE, "g", ()))])
+    caller = with_stmt_exits(_closed(extra=[ExprStmt(Call(NONE, "g", ()))]))
     assert_accepted(caller, g, h_closed)
     out, _ = assert_rejected(ENTRY_OPEN, caller, g, h_open)
     assert "g" in kept(out) and "h" in kept(out)
@@ -1054,9 +1087,9 @@ def test_call_of_a_function_with_entry_globals_from_an_impure_caller():
     g = fn("g", entry_globals=[Param("G", F64)], returns=F64, pure=True, body=[Return(lf("G"))])
     impure = fn("f", returns=F64, body=[IMPURE, Return(Call(F64, "g", ()))])
     assert_rejected(DEOPT, impure, g)
-    covered = fn("f", params=[ArrayParam("a", F64A, stored=True)],
-                 entry_globals=[Param("G", F64)], returns=F64,
-                 body=[StoreIndex("a", i(0), Call(F64, "g", ())), Return(lf("G"))])
+    covered = with_stmt_exits(fn("f", params=[ArrayParam("a", F64A, stored=True)],
+                                 entry_globals=[Param("G", F64)], returns=F64,
+                                 body=[StoreIndex("a", i(0), Call(F64, "g", ())), Return(lf("G"))]))
     assert_accepted(covered, g)
     wrong_type = dataclasses.replace(covered, entry_globals=(Param("G", I64),),
                                      body=(StoreIndex("a", i(0), Call(F64, "g", ())),
@@ -1281,7 +1314,7 @@ def _proof_functions():
            body=[Return(add(li("n"), i(1)))])
     pc = fn("pc", returns=F64, pure=True, may_deopt=True, line=3,
             body=[Return(Call(F64, "h", (i(3),)))])
-    fill = fn("fill", params=[ArrayParam("a", F64A, stored=True)],
+    fill = with_stmt_exits(fn("fill", params=[ArrayParam("a", F64A, stored=True)],
               entry_globals=[Param("N", I64), Param("S", F64)],
               locals_={"k": I64, "t": I64, "v": I64, "u": F64}, returns=F64, line=4, body=[
                   ForRange("k", i(0), Len(I64, "a"), i(1), (
@@ -1293,7 +1326,7 @@ def _proof_functions():
                   Assign("u", Call(F64, "h", (i(3),), redo=True)),
                   Return(BinOp(F64, BinOpKind.ADD, BinOp(F64, BinOpKind.ADD, lf("u"), lf("S")),
                                ToFloat(F64, li("N")))),
-              ])
+              ]))
     talk = fn("talk", returns=NONE, line=5, body=[IMPURE, Return()])
     return {x.name: x for x in (h, q, pc, fill, talk)}
 
@@ -2075,7 +2108,7 @@ def test_array_function_calling_an_open_function_is_rejected():
 
 def test_closed_array_function_is_still_accepted():
     g = fn("g", params=[Param("x", F64)], returns=F64, body=[Return(lf("x"))])
-    caller = _arr_fn("f", [Return(Call(F64, "g", (Index(F64, "a", i(0)),)))])
+    caller = with_stmt_exits(_arr_fn("f", [Return(Call(F64, "g", (Index(F64, "a", i(0)),)))]))
     assert_accepted(caller, g)
 
 

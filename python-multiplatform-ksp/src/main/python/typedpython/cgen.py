@@ -46,9 +46,18 @@ section, with `tp_globals_epoch`), and the epoch is re-checked after the copy-in
 else deopt; the names are in `tp_watch_names`, and an unwatched module deopts); the snapshot poll
 does the same. A covered callee entry global is passed from the caller's snapshot; any other dict
 lookup in the call tree (Global, IsExact, CheckMethod, a callee entry global read at the call) is
-refused (`_window_wait`, `verify/array-wait`). Open: a redo Call still runs the interpreted callee
-inside the section (design/typedpython.md 4.3.6). The `__typedpython_deopts__` read-add-write of
-`tp_cg_redo` runs in the module dict's critical section. Module state is written only by the exec
+refused (`_window_wait`, `verify/array-wait`). No interpreted callee runs inside the section either
+(#390 item 5): in a function with an effect that holds lists, a Call whose callee reports a deopt
+(tp_s == 1: an overflow, a class check, the trace check of an impure caller) leaves through a
+statement exit (`_stmt_exit`): the lists are written back with `tp_*_array_exit` (with a GIL the dirty
+elements; free-threaded builds stored through already), the section ends, and the statement's
+continuation (`ir.Resume.stmt`, resume.py) re-executes the statement holding the Call, interpreted,
+then the rest of the function; the impl returns 2 with `tp_my->result` set, as after a poll exit
+(`_osr_leave` is the tail both use). The callee's own wrapper then counts its deopt, outside any
+window. Asked for an in-window redo (a Call without a statement exit, which the verifier refuses),
+cgen raises CGenError. A pure function holding lists propagates the deopt: its wrapper redoes the
+whole call after the write-back. The `__typedpython_deopts__` read-add-write of `tp_cg_redo` runs in
+the module dict's critical section. Module state is written only by the exec
 slot; the class guards are atomic (tp_runtime.h).
 
 Buffer arrays (issue #149, identity-safe part). A parameter annotated `array.array[float]`,
@@ -203,7 +212,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from typedpython import ir
+from typedpython import ir, resume
 from typedpython.ir import Type
 
 
@@ -493,6 +502,13 @@ def _operand_release(name: str, owned: bool) -> str | None:
 def _watch_event_stmt() -> str:
     """The body of the module's dict-watcher callback (module docstring, rule 5)."""
     return "return tp_globals_watch_event(event, key, tp_watch_names);"
+
+
+def _redo_inside_window() -> bool:
+    """#390 item 5: the single mutation point of the statement exit. True emits the old in-window
+    interpreted redo in a function holding lists; tests set it to see the window observations fail.
+    Always False in a build."""
+    return False
 
 
 def _is_effect(e: ir.Expr) -> bool:
@@ -1014,8 +1030,8 @@ def _window_wait(f: ir.Function, functions: dict[str, ir.Function], seen=None) -
     cached read's fill and tp_global lock the module dict), IsExact and CheckMethod (their slow paths
     look the class or method up in a dict), or a Call of a function with an entry global the caller
     does not hold itself (read at the call; a held one is passed, `ev_Call`). The root's own entry
-    globals are read before the lock (tp_eg_snapshot). A redo Call is not
-    in the list: it is an open defect (design 4.3.6), refusing it would change spectral_norm."""
+    globals are read before the lock (tp_eg_snapshot). A redo of a deopting callee is not a wait
+    here: it never runs inside the window (#390 item 5, `_FnGen._stmt_exit`)."""
     seen = set() if seen is None else seen
     if f.name in seen:
         return None
@@ -1239,6 +1255,10 @@ class _FnGen:
         self.osr_sites: dict[int, ir.Resume] = {}
         self.osr_ctx: list[tuple[int, str, str, int]] = []   # enclosing ForRange: (site, var, stop, step)
         self.osr = self._osr_plan()
+        # #390 item 5: every Call of a function with an effect that holds lists leaves through the
+        # statement exit of the source statement being emitted (`cur_stmt`, ir.Stmt.stmt)
+        self.stmt_exits = rmode is None and resume.needs_stmt_exits(f)
+        self.cur_stmt: int | None = None
 
     # emit primitives
 
@@ -1669,7 +1689,9 @@ class _FnGen:
         self.emit("}")
         if ti is not None:
             self.emit(f"if (tp_s == 0) {{ {ti}.v = {t}; {ti}.big = NULL; }}")
-        if e.redo:
+        if self.stmt_exits and not _redo_inside_window():
+            self._stmt_exit(callee)             # #390 item 5: never redo inside the lists' window
+        elif e.redo:
             self._redo_call(callee, e.args, values, t, ti)
         elif not self.f.pure:
             # a pure callee using classes returns 1 when a class check fails (module docstring,
@@ -1757,6 +1779,27 @@ class _FnGen:
             self.emit("tp_depth_py_end(tp_t, tp_fd);")
         msg = c_string(f"typedpython: the interpreted redo of {callee.name} did not return {what}")
         self.emit(f"if (tp_s != 0) {{ PyErr_SetString(PyExc_SystemError, {msg}); tp_rc = -1; goto tp_exit; }}")
+        self.depth -= 1
+        self.emit("}")
+
+    def _stmt_exit(self, callee: ir.Function) -> None:
+        """#390 item 5 (SPEC N-8 "statement exit"): on the callee's deopt (tp_s == 1) leave at the start
+        of the source statement being emitted, for its continuation (`ir.Resume.stmt`), instead of
+        redoing the callee interpreted inside the lists' critical section. Owned temporaries are
+        released by the exit block, as on every `goto tp_exit`."""
+        k = self.cur_stmt
+        why = resume.exit_problem(self.f, k)
+        if why is None and not self.osr:
+            why = "the function has no OSR-style exit"
+        if why is not None:
+            raise CGenError(f"{self.f.name}: a deopt of {callee.name} would be redone interpreted inside "
+                            f"the lists' critical section (#390 item 5): {why}")
+        r = next(x for x in self.f.resumes if x.stmt == k)
+        self.emit("if (tp_s == 1) {   /* #390: leave at the start of this statement (statement exit) */")
+        self.depth += 1
+        self.emit("if (tp_my == NULL) { PyErr_SetString(PyExc_SystemError, "
+                  "\"typedpython: a statement exit without its context\"); tp_rc = -1; goto tp_exit; }")
+        self._osr_leave(r, -1, "0", write_back=True)
         self.depth -= 1
         self.emit("}")
 
@@ -2276,7 +2319,9 @@ class _FnGen:
             m = getattr(self, "st_" + type(s).__name__, None)
             if m is None:
                 raise CGenError(f"{self.f.name}: no lowering for {type(s).__name__}")
+            outer, self.cur_stmt = self.cur_stmt, s.stmt
             m(s)
+            self.cur_stmt = outer
 
     def st_Assign(self, s: ir.Assign) -> None:
         if s.target in self.local_arrays:
@@ -2443,33 +2488,15 @@ class _FnGen:
                       "{ tp_rc = -1; goto tp_exit; }")
 
     def _osr_plan(self) -> bool:
+        """OSR-style exits (#152): `resume.osr_problem` is the one rule (the verifier uses it too)."""
         f = self.f
-        if not (self.snapshot and f.resumes) or f.virtual or getattr(f, "regions", ()) or self.rmode:
+        if self.rmode or resume.osr_problem(f) is not None:
             return False
-        from typedpython import resume as _resume
-        loops = list(_resume.ir_loops(f.body))
-        by_site = {r.site: r for r in f.resumes}
-        if len(loops) != len(by_site) or any(k not in by_site for k in range(len(loops))):
-            return False
-        for k, st in enumerate(loops):
-            if isinstance(st, ir.ForRange) and st.par is not None:
-                return False                       # a parallel region does not poll
-            if not isinstance(st, (ir.ForRange, ir.While)):
-                return False
-            for name in by_site[k].params:
-                if not self._osr_mappable(name):
-                    return False
+        by_site = {r.site: r for r in f.resumes if r.stmt is None}     # the loop continuations
+        for k, st in enumerate(resume.ir_loops(f.body)):
             self.osr_sites[id(st)] = by_site[k]
         self.osr_sites_by_site = by_site
         return True
-
-    def _osr_mappable(self, name: str) -> bool:
-        if name.startswith(("__tp_cur_", "__tp_stop_", "__tp_step_")):
-            return True
-        if name in self.arrays or self.local_arrays.get(name) in _ARRAY_CT:
-            return True
-        return self.types.get(name) in (Type.I64, Type.F64, Type.BOOL, Type.OBJ, Type.INT) \
-            and name not in {g.name for g in self.f.entry_globals}
 
     def _list_params(self) -> list[ir.ArrayParam]:
         return [p for p in self.f.params if isinstance(p, ir.ArrayParam) and p.buffer is None]
@@ -2578,9 +2605,29 @@ class _FnGen:
             self.emit(f"         if (tp_s != 0 || memcmp(&tp_gv, &{lv}, sizeof tp_gv) != 0) tp_och = 1; }} }}")
         self.emit("if (tp_och) {   /* leave for the interpreter at this iteration (OSR-style exit) */")
         self.depth += 1
+        self._osr_leave(r, site, cur, stop, step, write_back=False)   # fresh copies: only freed
+        self.depth -= 1
+        self.emit("}")
+        self.depth -= 1
+        self.emit("}")
+
+    def _osr_leave(self, r: ir.Resume, site: int, cur: str, stop: str = "0", step: int = 0,
+                   write_back: bool = True) -> None:
+        """The tail of an OSR-style exit (#152) and of a statement exit (#390 item 5): end the lists'
+        copies and critical section, box every parameter of continuation `r` (`_osr_value`, `site`
+        -1 for a statement continuation: all its hidden state is that of enclosing loops), call it
+        with the snapshot depth released, set tp_my->result and return 2 (the wrapper's `exits` then
+        find the copies freed and the section ended: both are idempotent). `write_back`: the copies
+        may hold dirty elements (a GIL build defers list stores), so they are written back here,
+        before the section ends and before any Python code runs; a failure there is an error exit
+        (the wrapper writes back the rest and ends the section). Without it (a poll's fresh copies,
+        which hold nothing dirty) the copies are only freed."""
+        lists = self._list_params()
         for j, p in enumerate(lists):
-            # fresh copies hold no dirty element: this exit only frees them
-            self.emit(f"(void){_ARRAY_PFX[p.type]}_exit({_ident('l', p.name)});")
+            if write_back:
+                self.emit(f"if ({_ARRAY_PFX[p.type]}_exit({_ident('l', p.name)}) < 0) {{ tp_rc = -1; goto tp_exit; }}")
+            else:
+                self.emit(f"(void){_ARRAY_PFX[p.type]}_exit({_ident('l', p.name)});")
         if lists:
             self.emit("tp_cs_end(tp_my->lock);")
         n = len(r.params)
@@ -2599,10 +2646,6 @@ class _FnGen:
         self.emit("if (tp_oe && !PyErr_Occurred()) PyErr_SetString(PyExc_SystemError, \"typedpython: continuation missing\");")
         self.emit("tp_rc = tp_my->result != NULL ? 2 : -1;")
         self.emit("goto tp_exit;")
-        self.depth -= 1
-        self.emit("}")
-        self.depth -= 1
-        self.emit("}")
 
     def st_While(self, s: ir.While) -> None:
         self.emit("for (;;) {")

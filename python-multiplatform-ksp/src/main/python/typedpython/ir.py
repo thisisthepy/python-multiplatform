@@ -578,7 +578,16 @@ class Index(Expr):
 
 @dataclass(frozen=True)
 class Stmt:
-    pass
+    """`stmt` (SPEC N-8, #390 item 5): the number of the source statement this IR statement was
+    lowered from, in `resume.statements` order (the function's own AST statements in pre-order), or
+    None (IR built by hand, or a statement no source statement produced). The front end sets it on
+    every statement it emits, the temporaries a statement needs included (`frontend.block`); a
+    `while` whose test needs temporaries gives its synthetic exit test and `break` the while's
+    number. It is only a position: it takes no part in equality, hashing or repr, so passes that
+    compare IR are unaffected, and `dataclasses.replace` keeps it. A function holding list copies
+    uses it to leave through a statement exit (`cgen`, `verify/array-wait`)."""
+
+    stmt: int | None = field(default=None, kw_only=True, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -831,6 +840,8 @@ class Function:
     # SPEC N-8 (#152, option (i)): one entry per loop of a snapshot-holding function (see `resume.py`),
     # in IR pre-order. Empty for a function that holds no snapshot. A loop whose continuation cannot
     # be generated (an enclosing `with`/`try`, say) has no entry: its `site` is missing from the tuple.
+    # After the loop entries, a function with an effect that holds list copies has one statement
+    # entry (`Resume.stmt` set) per source statement holding a Call (#390 item 5, statement exits).
     resumes: tuple["Resume", ...] = ()
 
 
@@ -845,13 +856,20 @@ class Resume:
     `source`: the Python source of the `def`, followed by a line replacing `co_name`/`co_qualname`
     with the interpreted function's. `linemap`: for each line of `source` (index = line - 1) the
     original (lineno, end_lineno, col_offset, end_col_offset); `resume.resume_sources` uses it so
-    the continuation's code object carries the original line numbers."""
+    the continuation's code object carries the original line numbers.
+
+    A statement continuation (#390 item 5, SPEC N-8 "statement exit") has `stmt` set to the number
+    of a source statement (`Stmt.stmt`), `site` -1 and `name` `__tp_resume_<function>_s<stmt>`: it
+    re-executes that statement from its start, then runs the rest of the function, with the same
+    parameter contract except that the statement itself has no hidden state (only its enclosing
+    loops do). `stmt` None: a loop continuation as above."""
 
     site: int
     name: str
     params: tuple[str, ...]
     source: str
     linemap: tuple[tuple[int, int, int, int], ...] = ()
+    stmt: int | None = None
 
 
 @dataclass(frozen=True)

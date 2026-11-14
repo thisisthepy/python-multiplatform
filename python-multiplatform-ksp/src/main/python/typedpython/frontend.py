@@ -1038,6 +1038,7 @@ class _Lowerer:
         self.deopts = False      # a node that can deopt
         self.stored: set[str] = set()
         self.current: ast.stmt | None = None   # the statement being lowered (for messages)
+        self._numbers: dict[int, int] | None = None   # id(source statement) -> its number (`block`)
         self._new_locals: dict[str, str] | None = None
 
     # --- entry ---
@@ -1245,9 +1246,15 @@ class _Lowerer:
     # --- statements ---
 
     def block(self, stmts: Iterable[ast.stmt]) -> tuple[ir.Stmt, ...]:
+        """The IR of `stmts`. Every IR statement carries the number of the source statement it was
+        lowered from (`ir.Stmt.stmt`, `resume.statements` order), its temporaries included (#390
+        item 5: the statement exit of a function holding lists re-executes that statement)."""
+        if self._numbers is None:
+            self._numbers = resume.stmt_numbers(self.fn)
         out: list[ir.Stmt] = []
         for s in stmts:
-            out += self.stmt(s)
+            k = self._numbers.get(id(s))
+            out += [_at(x, k) for x in self.stmt(s)]
         return tuple(out)
 
     def start(self) -> None:
@@ -2413,6 +2420,21 @@ def _stored_names(stmts: Iterable[ast.stmt]) -> set[str]:
     """Every name stored (assigned, augmented, loop target) anywhere in `stmts`."""
     return {n.id for st in stmts for n in ast.walk(st)
             if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+
+
+def _at(s: ir.Stmt, k: int | None) -> ir.Stmt:
+    """`s` with source statement number `k` on it and on each statement of its body that has none
+    yet (a statement lowered from a nested source statement already has its own)."""
+    changes: dict = {}
+    for fl in dataclasses.fields(s):
+        v = getattr(s, fl.name)
+        if isinstance(v, tuple) and v and all(isinstance(x, ir.Stmt) for x in v):
+            nv = tuple(x if x.stmt is not None else _at(x, k) for x in v)
+            if any(a is not b for a, b in zip(nv, v)):
+                changes[fl.name] = nv
+    if s.stmt is None and k is not None:
+        changes["stmt"] = k
+    return dataclasses.replace(s, **changes) if changes else s
 
 
 def _diverges(body: tuple[ir.Stmt, ...]) -> bool:

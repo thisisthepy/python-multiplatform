@@ -235,8 +235,8 @@ SOURCE = textwrap.dedent('''\
         xs[0] = xs[0] + g
         return g
 
-    def fill_lie(xs: list[float], n: int) -> float:
-        xs[0] = xs[0] * 2.0
+    def fill_lie(n: int) -> float:
+        record(n)
         return growth_lie(n)
 
     def big(n: int) -> bool:
@@ -516,32 +516,47 @@ def f_big():
     return _growth_ir("big", BOOL)
 
 
+def _source_exits(f):
+    """#390 item 5: what the front end gives a function with an effect that holds lists, its
+    continuations, built here from SOURCE's own def (the IR below carries the statement numbers
+    `stmt=k` of that def, `resume.statements` order), so cgen can emit its statement exits."""
+    import ast
+    import dataclasses
+    from typedpython import resume
+    node = next(n for n in ast.parse(SOURCE).body if isinstance(n, ast.FunctionDef) and n.name == f.name)
+    return dataclasses.replace(f, resumes=resume.resumes_for(node, f))
+
+
 def f_fill():
     i, g = L("i", I64), L("g", F64)
-    return fn("fill", [ArrayParam("xs", Type.F64_ARRAY, stored=True), Param("n", I64)], F64,
-              {"i": I64, "g": F64},
-              [ForRange("i", c(0), Len(I64, "xs"), c(1),
-                        (StoreIndex("xs", i, binop(BinOpKind.MUL, Index(F64, "xs", i, proven=True), c(2.0)),
-                                    proven=True),)),
-               Assign("g", Call(F64, "growth", (L("n", I64),), redo=True)),
-               StoreIndex("xs", c(0), binop(BinOpKind.ADD, Index(F64, "xs", c(0)), g)),
-               Return(g)],
-              pure=False, may_deopt=False)
+    return _source_exits(fn(
+        "fill", [ArrayParam("xs", Type.F64_ARRAY, stored=True), Param("n", I64)], F64,
+        {"i": I64, "g": F64},
+        [ForRange("i", c(0), Len(I64, "xs"), c(1),
+                  (StoreIndex("xs", i, binop(BinOpKind.MUL, Index(F64, "xs", i, proven=True), c(2.0)),
+                              proven=True, stmt=1),), stmt=0),
+         Assign("g", Call(F64, "growth", (L("n", I64),), redo=True), stmt=2),
+         StoreIndex("xs", c(0), binop(BinOpKind.ADD, Index(F64, "xs", c(0)), g), stmt=3),
+         Return(g, stmt=4)],
+        pure=False, may_deopt=False))
 
 
 def f_fill_lie():
-    return fn("fill_lie", [ArrayParam("xs", Type.F64_ARRAY, stored=True), Param("n", I64)], F64, {},
-              [StoreIndex("xs", c(0), binop(BinOpKind.MUL, Index(F64, "xs", c(0)), c(2.0))),
+    # holds no list (#390 item 5: a list holder no longer redoes in place), so the redo's result check
+    # is still reached
+    return fn("fill_lie", [Param("n", I64)], F64, {},
+              [ExprStmt(call("record", Box(OBJ, L("n", I64)))),
                Return(Call(F64, "growth_lie", (L("n", I64),), redo=True))],
               pure=False, may_deopt=False)
 
 
 def f_flag():
-    return fn("flag", [ArrayParam("xs", Type.F64_ARRAY, stored=True), Param("n", I64)], F64, {},
-              [StoreIndex("xs", c(0), binop(BinOpKind.ADD, Index(F64, "xs", c(0)), c(1.0))),
-               If(Call(BOOL, "big", (L("n", I64),), redo=True), (Return(c(1.0)),)),
-               Return(c(0.0))],
-              pure=False, may_deopt=False)
+    return _source_exits(fn(
+        "flag", [ArrayParam("xs", Type.F64_ARRAY, stored=True), Param("n", I64)], F64, {},
+        [StoreIndex("xs", c(0), binop(BinOpKind.ADD, Index(F64, "xs", c(0)), c(1.0)), stmt=0),
+         If(Call(BOOL, "big", (L("n", I64),), redo=True), (Return(c(1.0), stmt=2),), stmt=1),
+         Return(c(0.0), stmt=3)],
+        pure=False, may_deopt=False))
 
 
 def f_selfeq():
@@ -1030,12 +1045,12 @@ def test_redo_of_a_bool_callee(mod):
 
 
 def test_redo_result_of_the_wrong_type_is_a_system_error_naming_the_callee(mod):
-    xs = [1.0]
-    assert mod.fill_lie(xs, 10) == float(3 ** 10) and xs == [2.0]
-    xs = [1.0]
+    mod.calls.clear()
+    assert mod.fill_lie(10) == float(3 ** 10) and mod.calls == [10]
+    mod.calls.clear()
     with pytest.raises(SystemError, match="growth_lie"):
-        mod.fill_lie(xs, 45)
-    assert xs == [2.0]                                # the caller's store is written back once
+        mod.fill_lie(45)
+    assert mod.calls == [45]                          # the caller's effect happens once
 
 
 def test_redo_releases_its_temporaries(mod):
@@ -1050,9 +1065,10 @@ def test_redo_releases_its_temporaries(mod):
             mod.fill(xs, 45)
             mod.flag(xs, 45)
             try:
-                mod.fill_lie(xs, 45)
+                mod.fill_lie(45)
             except SystemError:
                 pass
+            mod.calls.clear()                         # fill_lie records its argument
 
     run(200)                                          # warm free lists and caches
     tracemalloc.start()
@@ -1451,7 +1467,7 @@ ASAN_SCRIPT = textwrap.dedent('''\
     for _ in range(50):
         xs = [1.0, 2.0]; m.fill(xs, 45); m.flag(xs, 45)
         try:
-            m.fill_lie([1.0], 45)
+            m.fill_lie(45)
         except SystemError:
             pass
     assert m.scaled(2.0) == 5.0 and m.selfeq(float("nan")) is False
