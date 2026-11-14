@@ -93,9 +93,10 @@ abstract class PythonStubsTask : DefaultTask() {
         val includes = includePrefixes.get()
         val excludes = excludePackages.get()
         val jars = artifacts.files.filter { it.isFile && it.name.endsWith(".jar") }
+        val klibs = artifacts.files.filter { it.isFile && it.name.endsWith(".klib") }
         val declarations = jars.sortedBy { it.name }.flatMap { jar ->
             ArtifactScanner.scanDeclarations(jar, includes, classpath = jars, excludePackages = excludes)
-        } + artifacts.files.filter { it.isFile && it.name.endsWith(".klib") }.sortedBy { it.name }.flatMap { klib ->
+        } + klibs.sortedBy { it.name }.flatMap { klib ->
             // A Kotlin/Native target resolves klibs where a JVM target resolves jars, and both
             // producers now build the same `DeclarationModel` -- so a stub is not a JVM-only product.
             // `KlibScanner`'s KDoc lists what a klib can and cannot fill; the fields it cannot are
@@ -103,7 +104,14 @@ abstract class PythonStubsTask : DefaultTask() {
             //
             // Not a direct `KlibScanner.scanKlibDeclarations` call: same classloader-scope collision
             // `PythonArtifactBindingsTask`'s KDoc documents, worked around the same way.
-            workerExecutor.scanKlibIsolated(klib, includes, excludes, temporaryDir, klibReaderClasspath.files).declarations
+            workerExecutor.scanKlibIsolated(
+                klib,
+                includes,
+                excludes,
+                temporaryDir,
+                klibReaderClasspath.files,
+                klibClasspath = klibs,
+            ).declarations
         }
 
         val files = renderKotlinFqnStubs(declarations)
