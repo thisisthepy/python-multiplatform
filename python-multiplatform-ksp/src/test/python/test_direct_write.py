@@ -30,7 +30,10 @@ implementation; compiled-extension tests not run by it, AGENTS.md 10: CI).
 from __future__ import annotations
 
 import dataclasses
+import os
 import re
+import subprocess
+import sys
 import textwrap
 import traceback
 from pathlib import Path
@@ -735,6 +738,23 @@ def test_the_mutant_read_without_the_type_check_is_caught(tmp_path_factory):
     def strip(h):
         assert h.count(check) == 1
         return h.replace(check, "    *out = PyFloat_AS_DOUBLE(v);\n")
-    m, ref, _ = _build(tmp_path_factory, "dwnocheck", runtime=strip)
-    got, want = _both(m, ref, "adv3", _adv_make(1, 2, 3))
-    assert got != want, "a read that does not check the element type was not caught"
+    m, _, path = _build(tmp_path_factory, "dwnocheck", runtime=strip)
+    # The mutant reads an int as a float: undefined behaviour, and PyFloat_AS_DOUBLE's own assertion
+    # aborts where assertions are compiled in. It runs in a child, so an abort counts as caught and
+    # does not take the test run with it (CI run 43580524047).
+    script = (
+        "import sys\n"
+        "from typedpython import cbuild\n"
+        "import test_direct_write as t\n"
+        f"m = cbuild.load('dwnocheck', {m.__file__!r})\n"
+        "ref = {}\n"
+        f"exec(compile(t.SOURCE, {path.name!r}, 'exec'), ref)\n"
+        "print('READY', flush=True)\n"
+        "got, want = t._both(m, ref, 'adv3', t._adv_make(1, 2, 3))\n"
+        "print('SAME' if got == want else 'DIFFERENT')\n")
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(p for p in sys.path if p))
+    r = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=120,
+                       env=env)
+    assert r.stdout.startswith("READY"), r.stdout + r.stderr[-800:]      # the child got as far as the call
+    assert r.returncode != 0 or r.stdout.split() == ["READY", "DIFFERENT"], \
+        "a read that does not check the element type was not caught: " + r.stdout + r.stderr[-400:]
