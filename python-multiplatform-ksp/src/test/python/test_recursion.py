@@ -15,20 +15,22 @@ from pathlib import Path
 
 import pytest
 
+from conftest import COMPILED_SHIM
 from typedpython import pipeline
 
 PACKAGE = Path(__file__).resolve().parents[2] / "main" / "python"
 
 SOURCE = """\
-# typedpython: compiled
 
 
+@compiled
 def fib(n: int) -> int:
     if n < 2:
         return n
     return fib(n - 1) + fib(n - 2)
 
 
+@compiled
 def ack(m: int, n: int) -> int:
     if m == 0:
         return n + 1
@@ -37,30 +39,35 @@ def ack(m: int, n: int) -> int:
     return ack(m - 1, ack(m, n - 1))
 
 
+@compiled
 def is_even(n: int) -> bool:
     if n == 0:
         return True
     return is_odd(n - 1)
 
 
+@compiled
 def is_odd(n: int) -> bool:
     if n == 0:
         return False
     return is_even(n - 1)
 
 
+@compiled
 def down(n: int) -> int:
     if n == 0:
         return 0
     return 1 + down(n - 1)
 
 
+@compiled
 def pow2(n: int) -> int:
     if n == 0:
         return 1
     return 2 * pow2(n - 1)
 
 
+@compiled
 def fact(n: int) -> int:
     if n < 2:
         return 1
@@ -233,7 +240,7 @@ def test_depth_at_which_recursion_error_fires_is_recorded(mod, capsys):
 
 # --- sanitizers: the RecursionError path ---------------------------------------------------------
 
-ASAN_SCRIPT = textwrap.dedent('''\
+ASAN_SCRIPT = COMPILED_SHIM + textwrap.dedent('''\
     import sys
     sys.path.insert(0, {pkg!r})
     from typedpython import cbuild

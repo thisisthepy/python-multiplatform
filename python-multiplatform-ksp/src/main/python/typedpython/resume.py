@@ -54,7 +54,11 @@ def __tp_resume_def(src, lmap):
 
 def has_snapshot(f: ir.Function) -> bool:
     """Same rule as `cgen._FnGen.snapshot` (cgen.py, property `snapshot`, ~line 2186): any
-    entry global, or any ArrayParam (buffer or not; the property does not look at `buffer`)."""
+    entry global, or any ArrayParam (buffer or not; the property does not look at `buffer`), except
+    the lists of a function that reads them element by element (`ir.direct_lists`, #255)."""
+    if ir.direct_lists(f):
+        return bool(f.entry_globals) or any(isinstance(p, ir.ArrayParam) and p.buffer is not None
+                                            for p in f.params)
     return bool(f.entry_globals) or any(isinstance(p, ir.ArrayParam) for p in f.params)
 
 

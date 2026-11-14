@@ -10,6 +10,11 @@ import org.gradle.api.Project
  *  - as the Gradle attributes [ATTRIBUTE_VERSION] / [ATTRIBUTE_FREE_THREADED] on every consumable
  *    `*Elements` configuration (published Gradle module metadata),
  *  - as the classpath resource [RESOURCE_PATH] (read from the jar/AAR, no Gradle needed).
+ *
+ * One instance describes one build of CPython. A project whose platforms embed different builds
+ * (issues #158, #328: desktop, Android and iOS 3.15t, wasm a GIL build until #175) passes a per-variant
+ * `freeThreadedFor` to [publishAttributes] / [register], so each published variant states the build
+ * it really carries, and renders one resource per artefact.
  */
 class EmbeddedPythonVersion(val pythonVersion: String, val freeThreaded: Boolean) {
 
@@ -23,22 +28,30 @@ class EmbeddedPythonVersion(val pythonVersion: String, val freeThreaded: Boolean
 
     fun renderProperties(): String = "pythonVersion=$pythonVersion\nfreeThreaded=$freeThreaded\n"
 
-    /** Adds the two attributes to every consumable `*Elements` configuration, including ones created later. */
-    fun publishAttributes(project: Project) {
+    /**
+     * Adds the attributes to every consumable `*Elements` configuration, including ones created later.
+     *
+     * [ATTRIBUTE_VERSION] is [pythonVersion] everywhere. [ATTRIBUTE_FREE_THREADED] is
+     * `freeThreadedFor(configurationName)`: by default [freeThreaded] for every variant; a
+     * multi-platform project passes a function that answers per variant, and `null` leaves the
+     * attribute off a variant that carries no CPython of its own (shared metadata).
+     */
+    fun publishAttributes(project: Project, freeThreadedFor: (configurationName: String) -> Boolean? = { freeThreaded }) {
         project.configurations
             .matching { it.isCanBeConsumed && it.name.endsWith("Elements") }
             .configureEach {
                 attributes.attribute(org.gradle.api.attributes.Attribute.of(ATTRIBUTE_VERSION, String::class.java), pythonVersion)
+                val ft = freeThreadedFor(name) ?: return@configureEach
                 attributes.attribute(
                     org.gradle.api.attributes.Attribute.of(ATTRIBUTE_FREE_THREADED, String::class.java),
-                    freeThreaded.toString(),
+                    ft.toString(),
                 )
             }
     }
 
-    fun register(project: Project) {
+    fun register(project: Project, freeThreadedFor: (configurationName: String) -> Boolean? = { freeThreaded }) {
         project.extensions.add(EXTENSION_NAME, this)
-        publishAttributes(project)
+        publishAttributes(project, freeThreadedFor)
     }
 
     companion object {

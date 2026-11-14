@@ -60,6 +60,13 @@ return and that the refcount did not move).
 
 ## 2. Free-threading: biased reference counting, and the queue only the eval loop drains
 
+> **Update for 3.15.0 (2026-11-13, #398).** This section describes 3.14.7. In CPython 3.15.0,
+> `_Py_brc_queue_object` gained a second path (`Python/brc.c:118`, `_PyThreadState_TrySuspendDetached`):
+> when the owning thread is detached, the queuing thread merges the owner's queue on its behalf and frees
+> what reaches zero. An embedder's thread is detached between `withGIL` scopes, so on 3.15t a cleaner's
+> releases can be reclaimed without the owner reaching the eval loop. `EvalCheckpointTest` asserts the
+> 3.15.0 behaviour. Whether this lowers the need for `autoDrainInterval` (ROADMAP 9.1) is not measured.
+
 On a free-threaded build `Py_DECREF` branches on whether the thread owns the object (`ob_tid`):
 owner decrements `ob_ref_local` and may `tp_dealloc` at once; a non-owner decrements
 `ob_ref_shared` atomically, and if that takes it to zero the object is queued to its owner by
@@ -187,6 +194,12 @@ interval 32 per-100-rounds still reclaim ~90%** (residue 1,600–3,200). Three c
 the finding.
 
 ### 8d. Answered: the checkpoint is fine, the collector asks a second question
+
+> **Update for 3.15.0 (2026-11-13, #398).** The table below is v3.14.7. In v3.15.0 the process-memory gate
+> is gone (`gc_should_collect_mem_usage`, `get_process_mem_usage`, `last_mem` and `deferred_count` were
+> removed): `gc_should_collect` (`Python/gc_free_threading.c:1996`) checks only the young threshold,
+> `old[0].threshold == 0` (`:2004`) and `long_lived_total / 4` (`:2009`). `FreeThreadedGCGateTest` asserts
+> that process footprint no longer moves the gate. The 8a to 8c measurements were not repeated on 3.15t.
 
 Source-confirmed asymmetry (v3.14.7):
 

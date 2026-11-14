@@ -359,9 +359,13 @@ class CycleCollectionTest {
      * releases it. `pmp_proxy_dealloc` in `jni_onload.def` hand-writes that (`PyObject_Type` for
      * the temporary, then two `Py_DecRef`s), so it can leak one type reference per instance by
      * forgetting, or free the type out from under the process by doing it twice. Both are checked
-     * by reading `ob_refcnt` through [bindings.obRefCnt] -- the first field of `PyObject`, fixed
-     * there by the stable ABI. `sys.getrefcount` cannot answer this: it counts its own argument's
-     * temporary reference.
+     * by reading the type's reference count through [bindings.obRefCnt], which sums the
+     * free-threaded header's `ob_ref_local` and `ob_ref_shared` (Android embeds 3.15t, #328).
+     * `sys.getrefcount` cannot answer this: it counts its own argument's temporary reference.
+     *
+     * A heap type's references are deferred on the free-threaded build until a collection
+     * materialises them, so one is taken on either side of the instantiation loop, as in the
+     * desktop `CycleCollectionTest`.
      *
      * The "rises while alive" assertion is not decoration: it is what proves the probe reads a
      * real refcount, so the "returns afterwards" assertion cannot pass vacuously on an address
@@ -372,6 +376,9 @@ class CycleCollectionTest {
         withGIL {
             val proxyTypeAddr = ProxyTypeFactory.createProxyType()
             assertTrue(proxyTypeAddr != 0L, "Proxy type creation failed")
+
+            // Materialise the deferred references the type already carries (free-threaded build).
+            python.native.ffi.PyGC_Collect()
 
             val liveBefore = HandleTable.liveCount
             val typeRefBefore = bindings.obRefCnt(proxyTypeAddr)
@@ -395,6 +402,8 @@ class CycleCollectionTest {
                 liveBefore + rounds, HandleTable.liveCount,
                 "setup failed: $rounds handles should be rooted while the proxies are alive",
             )
+            // The instantiations above were deferred; a collection makes them countable.
+            python.native.ffi.PyGC_Collect()
             val typeRefAlive = bindings.obRefCnt(proxyTypeAddr)
             assertEquals(
                 typeRefBefore + rounds, typeRefAlive,

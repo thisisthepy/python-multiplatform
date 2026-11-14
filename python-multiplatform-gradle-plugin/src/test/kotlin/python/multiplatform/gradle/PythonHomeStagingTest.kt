@@ -75,9 +75,24 @@ class PythonHomeStagingTest {
         )
     }
 
+    /**
+     * Issue #158: the desktop library embeds only the free-threaded CPython 3.15t, so the prefix a
+     * consumer stages by default must be the free-threaded one. Red before: the default was read
+     * from the root's `pythonFreeThreaded=false`, and the staged `lib/python3.15/` was a directory
+     * the desktop jar's `libpython3.15t` does not look in.
+     */
+    @Test
+    fun theStagedPrefixDefaultsToTheFreeThreadedBuild() {
+        assertTrue(DEFAULT_PYTHON_FREE_THREADED, "desktop is free-threaded only (#158)")
+        assertEquals(
+            "cpython-$DEFAULT_PYTHON_VERSION+$DEFAULT_PBS_RELEASE-aarch64-apple-darwin-freethreaded-install_only_stripped.tar.gz",
+            pbsAssetName(DEFAULT_PYTHON_VERSION, DEFAULT_PBS_RELEASE, "macos-aarch64", DEFAULT_PYTHON_FREE_THREADED),
+        )
+    }
+
     @Test
     fun aFreeThreadedBuildIsADifferentAssetNotAFlagOnTheSameOne() {
-        // `-PpythonFreeThreaded=true` selects a different tarball upstream, and the resulting
+        // The free-threaded build is a different tarball upstream, and the resulting
         // prefix holds `lib/python3.14t/` rather than `lib/python3.14/`. Staging the default
         // tarball for a free-threaded consumer produces a prefix `PythonHomeCheck` rejects.
         assertEquals(

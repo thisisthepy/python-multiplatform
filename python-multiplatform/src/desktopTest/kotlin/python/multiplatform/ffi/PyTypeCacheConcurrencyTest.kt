@@ -18,8 +18,8 @@ import kotlin.test.assertTrue
  * Before the copy-on-write cache the memo was a plain `mutableMapOf`. Two threads putting at once
  * could lose an entry (a later lookup then builds a second [PyType] for the same pointer, so
  * identity differs across threads) or corrupt the map outright (an exception). That needs real
- * parallel writers, so it can fail only on a free-threaded CPython (`-PpythonFreeThreaded=true`);
- * under the default GIL, getInstance's own `withPython` calls serialise most of the interleaving
+ * parallel writers, so it can fail only on a free-threaded CPython (desktop's build since issue
+ * #158); under a GIL build, getInstance's own `withPython` calls serialise most of the interleaving
  * and the test is a regression guard rather than a reproducer.
  *
  * Asserted: no thread throws; for each type every thread was handed the same instance; a final

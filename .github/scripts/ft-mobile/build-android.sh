@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build free-threaded CPython (--disable-gil) for aarch64-linux-android with
-# CPython's own tooling (Platforms/Android). Usage: build-android.sh [VERSION]
+# CPython's own tooling (Platforms/Android). Usage: build-android.sh [VERSION] [HOST]
+# HOST is aarch64-linux-android (default) or x86_64-linux-android.
 # Needs ANDROID_HOME (SDK with cmdline-tools/latest) and a JDK 17, 21 or 25.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -8,7 +9,12 @@ here="$(cd "$(dirname "$0")" && pwd)"
 source "$here/common.sh"
 
 PY_VERSION="${1:-3.15.0}"
-HOST=aarch64-linux-android
+HOST="${2:-aarch64-linux-android}"
+case "$HOST" in
+    aarch64-linux-android) elf_arch="ARM aarch64" ;;
+    x86_64-linux-android) elf_arch="x86-64" ;;
+    *) echo "unsupported HOST: $HOST" >&2; exit 2 ;;
+esac
 : "${ANDROID_HOME:?ANDROID_HOME must point at the Android SDK}"
 
 src="$(fetch_source "$PY_VERSION")"
@@ -55,9 +61,9 @@ require_gil_disabled "$check/prefix/include/python${minor}t/pyconfig.h"
 lib="$(ls "$check"/prefix/lib/libpython${minor}t*.so* 2>/dev/null | head -n 1 || true)"
 [ -n "$lib" ] || die "no libpython${minor}t*.so in the package"
 log "ok: $lib"
-file "$lib" | tee /dev/stderr | grep -q 'ARM aarch64' || die "$lib is not an aarch64 ELF"
+file "$lib" | tee /dev/stderr | grep -q "$elf_arch" || die "$lib is not an $elf_arch ELF"
 [ -d "$check/prefix/lib/python${minor}t" ] || die "no lib/python${minor}t in the package"
 
 cp "$archive" "$FT_OUT/"
-echo "Android archive:" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+echo "Android archive ($HOST):" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 record_sha256 "$FT_OUT/$(basename "$archive")"

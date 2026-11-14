@@ -28,13 +28,13 @@ from pathlib import Path
 
 import pytest
 
+from conftest import decorate_compiled
 from typedpython import cbuild, cgen, cost, frontend, ir, verify
 
 REPO = Path(__file__).resolve().parents[4]
 WORDFREQ = REPO / "benchmarks" / "typedpython" / "py" / "wordfreq.py"
 
 SOURCE = textwrap.dedent('''
-    # typedpython: compiled
 
     import math as GMOD
 
@@ -42,14 +42,17 @@ SOURCE = textwrap.dedent('''
     MOD: int = 2147483647
 
 
+    @compiled
     def _one() -> int:
         return 1
 
 
+    @compiled
     def _two() -> int:
         return 2
 
 
+    @compiled
     class GTYPE:
         pass
 
@@ -57,6 +60,7 @@ SOURCE = textwrap.dedent('''
     GFN = _one
 
 
+    @compiled
     def add2(log: list[object], a: int, b: int) -> object:
         log.append("start")
         r: int = a + b
@@ -66,6 +70,7 @@ SOURCE = textwrap.dedent('''
         return r
 
 
+    @compiled
     def sub2(log: list[object], a: int, b: int) -> object:
         log.append("start")
         r: int = a - b
@@ -75,6 +80,7 @@ SOURCE = textwrap.dedent('''
         return r
 
 
+    @compiled
     def mul2(log: list[object], a: int, b: int) -> object:
         log.append("start")
         r: int = a * b
@@ -84,6 +90,7 @@ SOURCE = textwrap.dedent('''
         return r
 
 
+    @compiled
     def neg2(log: list[object], a: int) -> object:
         log.append("start")
         r: int = -a
@@ -93,6 +100,7 @@ SOURCE = textwrap.dedent('''
         return r
 
 
+    @compiled
     def floordiv2(log: list[object], a: int, b: int) -> object:
         log.append("start")
         r: int = a + 1
@@ -104,6 +112,7 @@ SOURCE = textwrap.dedent('''
         return r
 
 
+    @compiled
     def mod2(log: list[object], a: int, b: int) -> object:
         log.append("start")
         r: int = a - 1
@@ -115,6 +124,7 @@ SOURCE = textwrap.dedent('''
         return r
 
 
+    @compiled
     def lsh(log: list[object], a: int, b: int) -> object:
         log.append("start")
         r: int = a << b
@@ -122,6 +132,7 @@ SOURCE = textwrap.dedent('''
         return r
 
 
+    @compiled
     def rsh(log: list[object], a: int, b: int) -> object:
         log.append("start")
         r: int = a + 1
@@ -131,6 +142,7 @@ SOURCE = textwrap.dedent('''
         return r
 
 
+    @compiled
     def roundtrip(log: list[object], a: int) -> object:
         log.append(a)
         x: int = a
@@ -145,6 +157,7 @@ SOURCE = textwrap.dedent('''
         return x
 
 
+    @compiled
     def compare(log: list[object], a: int, b: int) -> None:
         log.append("start")
         x: int = a + 1
@@ -167,6 +180,7 @@ SOURCE = textwrap.dedent('''
             log.append("y-zero")
 
 
+    @compiled
     def fact(log: list[object], n: int) -> object:
         log.append(n)
         f: int = 1
@@ -176,6 +190,7 @@ SOURCE = textwrap.dedent('''
         return f
 
 
+    @compiled
     def grow(log: list[object], a: int, k: int) -> object:
         x: int = a
         i: int = 0
@@ -186,16 +201,19 @@ SOURCE = textwrap.dedent('''
         return x
 
 
+    @compiled
     def consts(log: list[object]) -> None:
         log.append(7000000000)
         log.append(5)
         log.append(-7000000000)
 
 
+    @compiled
     def next_state(s: int) -> int:
         return (s * 48271) % MOD
 
 
+    @compiled
     def drive(log: list[object], seed: int, n: int) -> object:
         s: int = seed + 1
         for _ in range(n):
@@ -204,37 +222,44 @@ SOURCE = textwrap.dedent('''
         return s
 
 
+    @compiled
     def read_limit(log: list[object]) -> object:
         log.append(1)
         return LIMIT
 
 
+    @compiled
     def read_twice(log: list[object], cb: object) -> None:
         log.append(LIMIT)
         cb()
         log.append(LIMIT)
 
 
+    @compiled
     def use_builtin(log: list[object], s: str) -> object:
         log.append(1)
         return len(s)
 
 
+    @compiled
     def read_fn(log: list[object]) -> object:
         log.append(1)
         return GFN
 
 
+    @compiled
     def read_type(log: list[object]) -> object:
         log.append(1)
         return GTYPE
 
 
+    @compiled
     def read_mod(log: list[object]) -> object:
         log.append(1)
         return GMOD
 
 
+    @compiled
     def call_g(x: object) -> object:
         return GFN()
 ''')
@@ -314,7 +339,7 @@ def test_int_locals_of_impure_functions_are_native(built):
 
 def test_an_int_fed_from_an_object_stays_an_object(tmp_path):
     src = textwrap.dedent('''
-        # typedpython: compiled
+        @compiled
         def f(log: list[object], g: object) -> object:
             log.append(1)
             n: int = g()
@@ -656,7 +681,7 @@ def test_a_cache_that_is_never_invalidated_is_caught(tmp_path):
 
 def test_an_int_loop_is_native_work_for_the_cost_rule(tmp_path):
     src = textwrap.dedent('''
-        # typedpython: compiled
+        @compiled
         def digits(log: list[object], n: int) -> None:
             x: int = n + 1
             while x > 0:
@@ -672,7 +697,7 @@ def test_an_int_loop_is_native_work_for_the_cost_rule(tmp_path):
 
 def test_an_object_only_loop_is_still_rejected(tmp_path):
     src = textwrap.dedent('''
-        # typedpython: compiled
+        @compiled
         def words(xs: list[object], ys: list[object]) -> None:
             for x in xs:
                 ys.append(x)
@@ -688,7 +713,7 @@ def test_an_object_only_loop_is_still_rejected(tmp_path):
 @pytest.fixture(scope="module")
 def wordfreq(tmp_path_factory):
     d = tmp_path_factory.mktemp("wordfreq")
-    src = "# typedpython: compiled\n" + WORDFREQ.read_text()
+    src = decorate_compiled(WORDFREQ.read_text())
     path = d / "wordfreq.py"
     path.write_text(src)
     proved, diags = verify.verify(frontend.lower(path))

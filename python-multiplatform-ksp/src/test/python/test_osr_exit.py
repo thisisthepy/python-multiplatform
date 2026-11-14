@@ -17,11 +17,11 @@ from test_cgen import need_runtime, runtime_dir
 from typedpython import cbuild, cgen, frontend, verify
 
 SOURCE = textwrap.dedent('''
-    # typedpython: compiled
 
     SCALE = 2.0
 
 
+    @compiled
     def scale_all(x: list[float]) -> float:
         s = 0.0
         for i in range(len(x)):
@@ -30,6 +30,7 @@ SOURCE = textwrap.dedent('''
         return s
 
 
+    @compiled
     def nested(x: list[float], n: int) -> int:
         hits = 0
         for r in range(n):
@@ -43,6 +44,7 @@ SOURCE = textwrap.dedent('''
         return hits
 
 
+    @compiled
     def countdown(x: list[int]) -> int:
         k = 0
         total = 0

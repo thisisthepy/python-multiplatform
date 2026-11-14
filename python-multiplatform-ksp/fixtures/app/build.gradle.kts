@@ -23,10 +23,11 @@ kotlin {
         val downloadDir = project(":python-multiplatform").layout.buildDirectory.dir("python-standalone").get().asFile
         val pyVersion = project.findProperty("pythonVersion")?.toString() ?: project.rootProject.version.toString()
         val libVersion = pyVersion.split('.').subList(0, 2).joinToString(".")
-        // Version-keyed, matching python-multiplatform's `extractedDir`.
-        val targetExtractDir = "$downloadDir/extracted/$pyVersion/android-aarch64/prefix"
+        // Version-keyed, matching python-multiplatform's `extractedDir`; the free-threaded 3.15t
+        // tree (`android-aarch64-freethreaded`, `libpython3.15t.so`), the only Android build (#328).
+        val targetExtractDir = "$downloadDir/extracted/$pyVersion/android-aarch64-freethreaded/prefix"
         binaries.getTest(org.jetbrains.kotlin.gradle.plugin.mpp.NativeBuildType.DEBUG).linkerOpts.addAll(
-            listOf("-L$targetExtractDir/lib/", "-lpython$libVersion", "-Wl,--allow-shlib-undefined"),
+            listOf("-L$targetExtractDir/lib/", "-lpython${libVersion}t", "-Wl,--allow-shlib-undefined"),
         )
     }
     // The *second* Native leaf, and it is here for one reason: two of them make the default
@@ -68,7 +69,7 @@ pythonBindings {
 //
 // - headers: `python-multiplatform`'s `cpythonIncludeDirectories` provider
 //   (`docs/platforms/python-version-acquisition.md` §7), for this host's macOS target and the
-//   flavour `-PpythonFreeThreaded` selects. The provider carries the `downloadPython_*` task.
+//   free-threaded flavour, the only one desktop embeds (#158). The provider carries the `downloadPython_*` task.
 // - extension suffix: `typedpython/build_bridge.py` reads `EXT_SUFFIX` from the `_sysconfigdata_*.py`
 //   of that same extracted tree and cross-checks `Py_GIL_DISABLED` against its `pyconfig.h`.
 //
@@ -106,12 +107,25 @@ val typedPythonSkipReason: String? = when {
     else -> null
 }
 
+pythonBindings {
+    typedPythonSourceDir.set(file("src/desktopTest/typedpython"))
+    typedPythonExecutable.set(typedPythonHost?.absolutePath ?: "python3")
+    typedPythonPath.from(rootDir.resolve("python-multiplatform-ksp/src/main/python"))
+}
+
+val typedPythonEmitCManifest = layout.buildDirectory.file("typedpython/emit-c-manifest.json")
+
+tasks.matching { it.name == "emitTypedPythonC" }.configureEach {
+    val skip = typedPythonSkipReason
+    onlyIf("TypedPython emit-c: ${skip ?: "enabled"}") { skip == null }
+}
+
 @Suppress("UNCHECKED_CAST")
 val typedPythonIncludeDir: Provider<Directory>? = typedPythonMacTarget?.let { target ->
     val includes = project(":python-multiplatform").extensions.getByName("cpythonIncludeDirectories")
     val flavourClass = includes.javaClass.classLoader.loadClass("python.multiplatform.gradle.CPythonFlavour")
-    val freeThreaded = (findProperty("pythonFreeThreaded") as String?)?.toBoolean() ?: false
-    val flavour = flavourClass.enumConstants.single { (it as Enum<*>).name == if (freeThreaded) "FREE_THREADED" else "GIL" }
+    // Desktop embeds only the free-threaded build (#158).
+    val flavour = flavourClass.enumConstants.single { (it as Enum<*>).name == "FREE_THREADED" }
     includes.javaClass.getMethod("includeDir", String::class.java, flavourClass)
         .invoke(includes, target, flavour) as Provider<Directory>
 }
@@ -156,6 +170,7 @@ val buildTypedPythonBridge by tasks.registering(Exec::class) {
 
 tasks.named<Test>("desktopTest") {
     dependsOn(buildTypedPythonBridge)
+    dependsOn("emitTypedPythonC")
     // The tests import tp_kotlin_bridge.py from src/; without this the interpreter leaves a
     // __pycache__ in the source tree.
     environment("PYTHONDONTWRITEBYTECODE", "1")
@@ -165,9 +180,14 @@ tasks.named<Test>("desktopTest") {
     }
     if (typedPythonSkipReason == null) {
         inputs.dir(typedPythonBridgeDir).withPropertyName("typedPythonBridge")
+        inputs.file(typedPythonEmitCManifest).withPropertyName("typedPythonEmitCManifest")
         systemProperty(
             "typedpython.bridge.properties",
             typedPythonBridgeDir.get().file("bridge.properties").asFile.absolutePath,
+        )
+        systemProperty(
+            "typedpython.emitC.manifest",
+            typedPythonEmitCManifest.get().asFile.absolutePath,
         )
     } else {
         systemProperty("typedpython.bridge.skip", typedPythonSkipReason)

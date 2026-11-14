@@ -28,8 +28,8 @@ class SidecarLibraryLookupTest {
             "PYTHONHOME is unset for desktopTest; the sidecar lookup has nothing to resolve against"
         )
 
-        // `taggedVersionString`, not `compactVersionString`: under `-PpythonFreeThreaded=true`
-        // PYTHONHOME contains `libpython3.14t.dylib` and no `libpython3.14.dylib`, so asking for
+        // `taggedVersionString`, not `compactVersionString`: desktop embeds the free-threaded
+        // build (issue #158), so PYTHONHOME contains `libpython3.15t.dylib` and no `libpython3.15.dylib`, so asking for
         // the un-suffixed name resolves nothing. This mirrors what `manager.loadLibPython` builds.
         val tagged = Versions.currentVersion.taggedVersionString
         val libraryName = if (currentPlatform.os == OSType.Windows) {

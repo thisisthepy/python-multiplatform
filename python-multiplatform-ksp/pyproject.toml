@@ -4,10 +4,16 @@
 [project]
 name = "typedpython"
 version = "0.1.0"
+description = "TypedPython: statically checked Python, with marked functions compiled to CPython extension modules"
+license = "Apache-2.0"
+authors = [{ name = "thisisthepy" }]
 requires-python = ">=3.13"
 # Pinned exactly: the gate reads Pyrefly's per-expression type report (--report-pysa), whose
 # format is versioned by Pyrefly, not by a public API.
 dependencies = ["pyrefly==1.3.2"]
+
+[project.urls]
+Homepage = "https://github.com/thisisthepy/python-multiplatform"
 
 [project.scripts]
 typedpython = "typedpython.__main__:cli"
@@ -32,5 +38,5 @@ pythonpath = ["src/main/python"]
 addopts = "--basetemp=.pytest_tmp"
 markers = [
     "measurement: records cost; asserts only sanity bounds",
-    "race_mutant: shows a concurrency test catches a mutant; depends on the race firing, so local only (not in CI)",
+    "race_mutant: shows a concurrency test catches a mutant; depends on the race firing, so not in push CI; run with the TypedPython CI dispatch input race_mutant (#394)",
 ]

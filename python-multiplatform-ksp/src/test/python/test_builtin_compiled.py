@@ -21,7 +21,16 @@ def test_gate_accepts_compiled_without_an_import(write):
         def f(x: int) -> int:
             return x + 1
 
-        y: int = f(1)
+        @compiled(parallel=True)
+        def g(x: int) -> int:
+            return x + 2
+
+        @compiled(fastmath=True)
+        def h(x: float) -> float:
+            return x * 2.0
+
+        y: int = f(1) + g(2)
+        z: float = h(1.5)
     """)
     assert errors(gate.check([path])) == []
 
@@ -82,7 +91,7 @@ def test_decorator_works_with_no_import(installed):
 
 def test_compiled_is_the_identity(installed):
     python, _ = installed
-    r = py(python, "-c", "def f(): pass\nprint(compiled(f) is f)")
+    r = py(python, "-c", "def f(): pass\nprint(compiled(f) is f and compiled(parallel=True)(f) is f and compiled()(f) is f)")
     assert r.stdout.strip() == "True", r.stderr
 
 

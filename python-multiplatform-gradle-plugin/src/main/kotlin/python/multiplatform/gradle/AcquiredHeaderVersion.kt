@@ -14,9 +14,11 @@ object AcquiredHeaderVersion {
         requireNotNull(pyVersion.find(patchlevelText)) { "no PY_VERSION in patchlevel.h" }.groupValues[1]
 
     fun patchlevelFile(extractedRoot: File, target: String, pythonVersion: String): File =
-        extractedRoot.resolve(CPythonIncludeLayout.relativePath(target, CPythonFlavour.GIL, pythonVersion)).resolve("patchlevel.h")
+        extractedRoot.resolve(
+            CPythonIncludeLayout.relativePath(target, CPythonIncludeLayout.embeddedFlavour(target), pythonVersion),
+        ).resolve("patchlevel.h")
 
-    /** target -> description, for every GIL target whose headers exist and report a different version. */
+    /** target -> description, for every target whose embedded headers exist and report a different version. */
     fun mismatches(extractedRoot: File, pythonVersion: String): Map<String, String> =
         CPythonIncludeLayout.allTargets.mapNotNull { t ->
             val f = patchlevelFile(extractedRoot, t, pythonVersion)

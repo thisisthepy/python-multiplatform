@@ -28,6 +28,7 @@ from androidx.compose.material.icons import Icons
 from androidx.compose.material3 import Checkbox, Icon, Text
 from androidx.compose.ui import Modifier
 from androidx.compose.ui.graphics.vector import ImageVector
+from org.thisisthepy.compose.material3 import Material3DesignSystem, material_design_system
 
 # A chain started from the class, the way Kotlin writes `Modifier.padding(16.dp)`.
 chain: Modifier = Modifier.fillMaxWidth().padding(16.0).size(24.0)
@@ -42,6 +43,10 @@ by_extension: Modifier = fillMaxWidth(chain, fraction=0.5)
 by_alias: Modifier = fill_max_width(chain, fraction=0.5)
 assert_type(fill_max_width(chain), Modifier)
 pythonic_chain: Modifier = Modifier.fill_max_width().padding(16.0).fill_max_width(0.5)
+
+# Issue #408: the fork's design systems are walked too, under their own Kotlin packages.
+dark: Material3DesignSystem = material_design_system(True)
+assert_type(material_design_system(is_dark=False), Material3DesignSystem)
 
 checked = True
 

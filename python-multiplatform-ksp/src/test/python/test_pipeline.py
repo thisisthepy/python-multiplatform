@@ -20,9 +20,9 @@ def interpreted(path: Path):
 
 
 SCALAR = """\
-# typedpython: compiled
 
 
+@compiled
 def total(n: int) -> float:
     acc: float = 0.0
     for k in range(n):
@@ -30,6 +30,7 @@ def total(n: int) -> float:
     return acc
 
 
+@compiled
 def fact(n: int) -> int:
     r: int = 1
     for k in range(2, n + 1):
@@ -53,6 +54,7 @@ def test_scalar_module_compiles_and_matches_cpython(write, tmp_path):
 def test_unsupported_functions_stay_interpreted_with_a_reason(write, tmp_path):
     path = write("mixed.py", SCALAR + """
 
+@compiled
 def greet(name: str) -> str:
     return name[1:]
 """)
@@ -68,16 +70,16 @@ def test_a_module_with_nothing_to_compile_produces_no_extension(write, tmp_path)
 
 
 def test_gate_errors_block_compilation(write, tmp_path):
-    path = write("bad.py", "# typedpython: compiled\n\ndef f(x):\n    return x\n")
+    path = write("bad.py", "@compiled\ndef f(x):\n    return x\n")
     with pytest.raises(pipeline.CompileError, match="implicit-any-parameter"):
         pipeline.compile_module(path, tmp_path / "out")
 
 
 DEMO = """\
-# typedpython: compiled
 import sys
 
 
+@compiled
 def total(n: int) -> float:
     acc: float = 0.0
     for k in range(n):
@@ -85,6 +87,7 @@ def total(n: int) -> float:
     return acc
 
 
+@compiled
 def main() -> None:
     print(f"{total(int(sys.argv[1])):.3f}")
 """
@@ -103,15 +106,16 @@ def test_demo_reports_identical_output(write, tmp_path):
 
 
 ARRAY_CALLBACK = """\
-# typedpython: compiled
 from typing import Callable
 
 
+@compiled
 def first_after(xs: list[float], cb: Callable[[], None]) -> float:
     cb()
     return xs[0]
 
 
+@compiled
 def fill_then(xs: list[float], cb: Callable[[], None]) -> None:
     xs[1] = 5.0
     cb()
@@ -138,9 +142,9 @@ def test_array_function_with_a_callback_matches_cpython(write, tmp_path):
 
 
 GC_REACHABLE = """\
-# typedpython: compiled
 
 
+@compiled
 class Cell:
     a: object
     b: object
@@ -151,10 +155,12 @@ class Cell:
         self.b = b
 
 
+@compiled
 def seta(c: Cell, v: object) -> None:
     c.a = v
 
 
+@compiled
 def fresh(a: object, n: int) -> object:
     c = Cell(None, None)
     seta(c, a)
@@ -179,3 +185,153 @@ def test_a_fresh_local_does_not_exempt_the_callee_class_guard(tmp_path):
     c = mod.Cell(None, None)
     mod.seta(c, 7)
     assert c.a == 7
+
+
+def test_default_fp_flags_stay_exact_and_fastmath_is_per_function_only(write, tmp_path):
+    """#153 / #332: by default, `-ffp-contract=off` and `-fno-fast-math` on GCC/Clang and
+    `/fp:precise` on MSVC are pinned so floating-point arithmetic is bit-identical to CPython.
+    `@compiled(fastmath=True)` opts in for that function only (not CPython-identical), leaving
+    sibling `@compiled` functions in the same module exact."""
+    from typedpython import cbuild, cgen, frontend, verify
+
+    assert "-ffp-contract=off" in cbuild.DEFAULT_FLAGS
+    assert "-fno-fast-math" in cbuild.DEFAULT_FLAGS
+    assert "/fp:precise" in cbuild.MSVC_DEFAULT_FLAGS
+    assert not any("fast" in f for f in cbuild.MSVC_DEFAULT_FLAGS)
+
+    path = write(
+        "fp_mod.py",
+        """
+        @compiled
+        def fma_exact(a: float, b: float, c: float) -> float:
+            return a * b + c
+
+        @compiled(fastmath=True)
+        def fma_fast(a: float, b: float, c: float) -> float:
+            return a * b + c
+
+        @compiled
+        def calls_fast_and_adds(a: float, b: float, c: float) -> float:
+            # caller is exact: its own `a * b + c` must not contract even though it calls `fma_fast`
+            _ = fma_fast(1.0, 2.0, 3.0)
+            return a * b + c
+        """,
+    )
+    proved, _ = verify.verify(frontend.lower(path))
+    c_text = cgen.generate(proved, path)
+    assert "#pragma STDC FP_CONTRACT OFF" in c_text
+    assert "\nTP_FASTMATH_BEGIN\n" in c_text and "\nTP_FASTMATH_END\n" in c_text
+    # Only `fma_fast` is wrapped in standalone TP_FASTMATH_BEGIN / TP_FASTMATH_END lines:
+    assert c_text.count("\nTP_FASTMATH_BEGIN\n") == 1
+    assert c_text.count("\nTP_FASTMATH_END\n") == 1
+
+    res = pipeline.compile_module(path, tmp_path / "out", cost_rule=False)
+    mod = pipeline.load(res)
+    ref = interpreted(path)
+    # 1 + 2**-27 squared: exact double product rounds to 1 + 2**-26, while FMA(a, a, -1.0) keeps 2**-54
+    a = 1.0 + 2.0**-27
+    c = -1.0
+    want_exact = ref.fma_exact(a, a, c)
+    assert mod.fma_exact(a, a, c) == want_exact
+    assert mod.calls_fast_and_adds(a, a, c) == want_exact
+    # fma_fast runs and returns a float (on targets with FMA it equals 2**-26 + 2**-54; either is valid under fastmath)
+    got_fast = mod.fma_fast(a, a, c)
+    assert isinstance(got_fast, float)
+
+
+
+_NAN_SRC = """
+@compiled(fastmath=True)
+def nan_count(xs: list[float]) -> int:
+    n = 0
+    for i in range(len(xs)):
+        x = xs[i]
+        if x != x:
+            n += 1
+    return n
+
+@compiled(fastmath=True)
+def is_nan(x: float) -> bool:
+    return x != x
+"""
+
+
+def _real_gcc():
+    """A GCC driver that is really GCC (macOS `gcc` is clang), or None."""
+    import shutil
+    import subprocess
+    for name in ("gcc", "gcc-15", "gcc-14", "gcc-13"):
+        exe = shutil.which(name)
+        if exe:
+            out = subprocess.run([exe, "--version"], capture_output=True, text=True).stdout
+            if "clang" not in out.lower():
+                return exe
+    return None
+
+
+def test_gcc_fastmath_scope_is_reassociation_and_contract_only(write):
+    """#368: GCC's fastmath macro allows the same scope as clang and MSVC, reassociation and FMA
+    contraction (plus the no-signed-zeros / no-trapping-math that associative-math needs); never
+    `fast-math`, whose finite-math-only folds `x != x` to false."""
+    from typedpython import cgen, frontend, verify
+
+    path = write("fm_scope.py", _NAN_SRC)
+    proved, _ = verify.verify(frontend.lower(path))
+    c_text = cgen.generate(proved, path)
+    gcc_line = next(l for l in c_text.splitlines() if "define TP_FASTMATH_BEGIN" in l and "GCC" in l)
+    assert "fast-math" not in gcc_line
+    for opt in ("associative-math", "no-signed-zeros", "no-trapping-math", "fp-contract=fast"):
+        assert opt in gcc_line, (opt, gcc_line)
+    assert "finite-math" not in gcc_line
+
+
+def test_fastmath_keeps_nan_checks(write, tmp_path):
+    """#368: `x != x` inside a fastmath function still detects NaN (host compiler)."""
+    path = write("fm_nan.py", _NAN_SRC)
+    res = pipeline.compile_module(path, tmp_path / "out", cost_rule=False)
+    assert {f.name for f in res.module.functions} == {"nan_count", "is_nan"}, res.skipped
+    mod = pipeline.load(res)
+    nan = float("nan")
+    assert mod.is_nan(nan) is True and mod.is_nan(1.0) is False
+    assert mod.nan_count([1.0, nan, 2.0, nan]) == 2
+
+
+def test_fastmath_keeps_nan_checks_under_gcc(write, tmp_path, monkeypatch):
+    """#368: the same under a real GCC (Linux CI); skipped where no GCC is installed."""
+    import sys
+    from typedpython import cbuild
+    gcc = _real_gcc()
+    if gcc is None or sys.platform == "win32":
+        pytest.skip("no real GCC on this host")
+    monkeypatch.setattr(cbuild, "compiler", lambda: [gcc])
+    path = write("fm_nan_gcc.py", _NAN_SRC)
+    # GCC only warns on an optimize option it does not know; make that an error so a dropped
+    # option cannot pass silently.
+    from typedpython import cgen, frontend, verify
+    proved, _ = verify.verify(frontend.lower(path))
+    c_file = tmp_path / "fm_nan_gcc.c"
+    c_file.write_text(cgen.generate(proved, path))
+    chk = subprocess.run([gcc, "-fsyntax-only", "-Werror=pragmas", "-Werror=attributes",
+                          f"-I{cbuild._python_include(None)}", f"-I{cbuild.RUNTIME_DIR}", str(c_file)],
+                         capture_output=True, text=True)
+    assert chk.returncode == 0, chk.stderr
+    res = pipeline.compile_module(path, tmp_path / "out", cost_rule=False)
+    assert {f.name for f in res.module.functions} == {"nan_count", "is_nan"}, res.skipped
+    mod = pipeline.load(res)
+    nan = float("nan")
+    assert mod.is_nan(nan) is True
+    assert mod.nan_count([1.0, nan, 2.0, nan]) == 2
+
+
+def test_msvc_fastmath_scope_is_contract_only(write):
+    """#368: cl.exe has no reassociation-only switch; `float_control(precise, off)` is /fp:fast and
+    folds `x != x` (seen on Windows CI). MSVC's fastmath macro enables FMA contraction only."""
+    from typedpython import cgen, frontend, verify
+
+    path = write("fm_msvc.py", _NAN_SRC)
+    proved, _ = verify.verify(frontend.lower(path))
+    lines = cgen.generate(proved, path).splitlines()
+    i = lines.index("#elif defined(_MSC_VER)", next(k for k, l in enumerate(lines) if "TP_FASTMATH_BEGIN" in l))
+    begin = next(l for l in lines[i:] if "define TP_FASTMATH_BEGIN" in l)
+    assert "fp_contract(on)" in begin, begin
+    assert "float_control" not in begin and "precise" not in begin, begin

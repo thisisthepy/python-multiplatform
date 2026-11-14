@@ -1,6 +1,7 @@
 package python.multiplatform.gradle.stubs
 
 import python.multiplatform.gradle.model.DeclarationModel
+import python.multiplatform.gradle.model.DeclaredParameter
 import python.multiplatform.gradle.model.KotlinTypeModel
 import kotlin.test.Test
 import kotlin.test.assertFalse
@@ -59,5 +60,101 @@ class CompanionHandleStubTest {
         assertFalse(stubs.keys.any { it.startsWith("androidx/compose/ui/Modifier/") }, stubs.keys.toString())
         val body = stubs.getValue("androidx/compose/ui/__init__.pyi")
         assertFalse("receiver: _t.Any" in body, body)
+    }
+
+    @Test
+    fun classWithCompanionHandleInstanceMembersAndCompanionConstantsIsFoldedIntoClassStub() {
+        val m3Pkg = "androidx.compose.material3"
+        val designSystem = "$m3Pkg.Material3DesignSystem"
+        val designSystemType = KotlinTypeModel(designSystem)
+        val colorSchemeType = KotlinTypeModel("$m3Pkg.ColorScheme")
+
+        val companionHandle = DeclarationModel(
+            simpleName = "Companion",
+            owner = designSystem,
+            ownerIsClass = true,
+            receiver = null,
+            parameters = emptyList(),
+            returnType = designSystemType,
+            returnBoundaryTag = "OBJECT",
+            kind = "STATIC_GETTER",
+            bindingName = "$designSystem.Companion",
+            isCompanionHandle = true,
+        )
+
+        val dark = DeclarationModel(
+            simpleName = "Dark",
+            owner = designSystem,
+            ownerIsClass = true,
+            receiver = null,
+            parameters = emptyList(),
+            returnType = designSystemType,
+            returnBoundaryTag = "OBJECT",
+            kind = "STATIC_GETTER",
+            bindingName = "$designSystem.Dark",
+        )
+
+        val light = DeclarationModel(
+            simpleName = "Light",
+            owner = designSystem,
+            ownerIsClass = true,
+            receiver = null,
+            parameters = emptyList(),
+            returnType = designSystemType,
+            returnBoundaryTag = "OBJECT",
+            kind = "STATIC_GETTER",
+            bindingName = "$designSystem.Light",
+        )
+
+        val method = DeclarationModel(
+            simpleName = "validate",
+            owner = designSystem,
+            ownerIsClass = true,
+            receiver = designSystemType,
+            receiverBoundaryTag = "OBJECT",
+            parameters = emptyList(),
+            returnType = KotlinTypeModel("kotlin.Unit"),
+            returnBoundaryTag = "UNIT",
+            kind = "METHOD",
+            bindingName = "$designSystem.validate",
+        )
+
+        val property = DeclarationModel(
+            simpleName = "colorScheme",
+            owner = designSystem,
+            ownerIsClass = true,
+            receiver = designSystemType,
+            receiverBoundaryTag = "OBJECT",
+            parameters = emptyList(),
+            returnType = colorSchemeType,
+            returnBoundaryTag = "OBJECT",
+            kind = "GETTER",
+            bindingName = "$designSystem.colorScheme",
+        )
+
+        val usage = DeclarationModel(
+            simpleName = "useSystem",
+            owner = m3Pkg,
+            ownerIsClass = false,
+            receiver = null,
+            parameters = listOf(DeclaredParameter("system", designSystemType, declaresDefault = false, boundaryTag = "OBJECT")),
+            returnType = designSystemType,
+            returnBoundaryTag = "OBJECT",
+            kind = "FUNCTION",
+            bindingName = "$m3Pkg.useSystem",
+        )
+
+        val files = renderKotlinFqnStubs(listOf(companionHandle, dark, light, method, property, usage))
+        assertFalse(files.keys.any { it.startsWith("androidx/compose/material3/Material3DesignSystem") }, files.keys.toString())
+
+        val body = files.getValue("androidx/compose/material3/__init__.pyi")
+        assertTrue("class Material3DesignSystem:" in body, body)
+        assertTrue("    Dark: Material3DesignSystem" in body, body)
+        assertTrue("    Light: Material3DesignSystem" in body, body)
+        assertTrue("    def validate(self) -> None:" in body, body)
+        assertTrue("    @property\n    def colorScheme(self) -> ColorScheme:" in body, body)
+        assertTrue("def useSystem(system: Material3DesignSystem) -> Material3DesignSystem:" in body, body)
+        assertFalse("system: _t.Any" in body, body)
+        assertFalse("-> _t.Any" in body, body)
     }
 }

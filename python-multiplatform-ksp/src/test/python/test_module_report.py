@@ -8,16 +8,17 @@ import traceback
 import textwrap
 from pathlib import Path
 
+from conftest import decorate_compiled
 from typedpython import cbuild, cgen, frontend, pipeline, verify
 
-SRC = "# typedpython: compiled\n" + textwrap.dedent("""\
+SRC = decorate_compiled(textwrap.dedent("""\
     def twice(n: int) -> int:
         return n * 2
 
 
     def boom(s: str) -> str:
         raise ValueError("boom " + s)
-    """)
+    """))
 
 
 def make_project(root: Path) -> Path:
@@ -95,14 +96,14 @@ def test_a_moved_file_with_the_same_content_does_not_reuse_the_extension(tmp_pat
 
 # --- #128 ----------------------------------------------------------------------------------------
 
-MIXED = "# typedpython: compiled\n" + textwrap.dedent("""\
+MIXED = decorate_compiled(textwrap.dedent("""\
     def ok(n: int) -> int:
         return n + 1
 
 
     def greet(name: str) -> str:
         return name[1:]
-    """)
+    """))
 
 
 def build_one(tmp_path, rel, source, cache="cache"):
@@ -119,20 +120,20 @@ def test_kind_compiled(tmp_path):
     assert m.kind == "compiled" and m.extension is not None
     [item] = m.skipped_items
     assert item.name == "greet" and item.file == "pkg/mixed.py"
-    assert item.line == 7 and not item.message.startswith("line ")
-    assert m.skipped["greet"].startswith("line 7: ")        # ModuleResult.skipped unchanged
+    assert item.line == 8 and not item.message.startswith("line ")
+    assert m.skipped["greet"].startswith("line 8: ")        # ModuleResult.skipped unchanged
 
 
 def test_kind_nothing_compiled_with_structured_items(tmp_path):
     _, _, m = build_one(tmp_path, "pkg/plain.py",
-                        "# typedpython: compiled\n\ndef f(s: str) -> str:\n    return s[1:]\n")
+                        "@compiled\ndef f(s: str) -> str:\n    return s[1:]\n")
     assert m.kind == "nothing_compiled" and m.extension is None
     [item] = m.skipped_items
-    assert (item.name, item.file, item.line) == ("f", "pkg/plain.py", 4)
+    assert (item.name, item.file, item.line) == ("f", "pkg/plain.py", 3)
     assert item.message and not re.match(r"line \d+", item.message)
 
 
-def test_kind_not_marked_when_there_is_neither_marker_nor_decorator(tmp_path):
+def test_kind_not_marked_when_there_is_no_decorator(tmp_path):
     _, _, m = build_one(tmp_path, "pkg/unmarked.py", "def f(x: int) -> int:\n    return x\n")
     assert m.kind == "not_marked" and m.extension is None and m.skipped_items == []
 
@@ -145,15 +146,15 @@ def test_a_compiled_decorator_alone_opts_in(tmp_path):
 
 
 def test_class_items_carry_name_and_line(tmp_path):
-    src = ("# typedpython: compiled\n\n\nclass Node:\n    __slots__ = ('a',)\n"
+    src = ("@compiled\nclass Node:\n    __slots__ = ('a',)\n"
            "    def __init__(self, a: int) -> None:\n        self.a = a\n")
     _, _, m = build_one(tmp_path, "pkg/cls.py", src)
     cls = [i for i in m.skipped_items if i.name == "Node"]
-    assert cls and cls[0].line == 4 and cls[0].file == "pkg/cls.py"
+    assert cls and cls[0].line == 2 and cls[0].file == "pkg/cls.py"
 
 
 def test_verifier_skips_carry_a_line_and_no_prefix(tmp_path):
-    src = "# typedpython: compiled\n\n\ndef f(x: int) -> int:\n    return g(x)\n\n\ndef g(x: int) -> int:\n    return x\n"
+    src = "@compiled\ndef f(x: int) -> int:\n    return g(x)\n\n\n@compiled\ndef g(x: int) -> int:\n    return x\n"
     _, _, m = build_one(tmp_path, "pkg/v.py", src)
     for i in m.skipped_items:
         assert isinstance(i.line, int) and not i.message.startswith("line ")
@@ -170,7 +171,7 @@ def test_structure_round_trips_through_the_cache_for_reused_modules(tmp_path):
 
 def test_not_marked_and_nothing_compiled_survive_reuse(tmp_path):
     root, path, _ = build_one(tmp_path, "pkg/plain.py",
-                              "# typedpython: compiled\n\ndef f(s: str) -> str:\n    return s[1:]\n")
+                              "@compiled\ndef f(s: str) -> str:\n    return s[1:]\n")
     again = pipeline.compile_project([path], root, tmp_path / "cache").modules[0]
     assert again.status == "reused" and again.kind == "nothing_compiled" and again.skipped_items
     root2, path2, _ = build_one(tmp_path, "pkg/un.py", "def f(x: int) -> int:\n    return x\n")
@@ -191,5 +192,5 @@ def test_cli_build_prints_file_line_name_message_and_not_marked(tmp_path):
         [sys.executable, "-m", "typedpython", "build", str(root), "--cache", str(tmp_path / "c")],
         capture_output=True, text=True, env=dict(os.environ, PYTHONPATH=str(src)))
     assert out.returncode == 0, out.stdout + out.stderr
-    assert re.search(r"^\s*pkg/mixed\.py:7: greet: \S", out.stdout, re.M), out.stdout
+    assert re.search(r"^\s*pkg/mixed\.py:8: greet: \S", out.stdout, re.M), out.stdout
     assert re.search(r"pkg/un\.py.*not marked for compilation", out.stdout), out.stdout

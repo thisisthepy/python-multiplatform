@@ -1,4 +1,5 @@
 """`python -m typedpython check [--mode checked|compiled] [--format text|json] PATHS...`
+`python -m typedpython emit-c PATHS... --root DIR [--cache DIR] --manifest FILE`
 
 Exit status: 0 no errors (warnings allowed), 1 errors, 2 the gate itself could not run.
 """
@@ -36,8 +37,17 @@ def main(argv: list[str]) -> int:
                        help="incremental cache directory (default: build/typedpython-cache)")
     build.add_argument("--out", type=Path, default=None,
                        help="copy the built extensions here (default: leave them in the cache)")
+    emit = commands.add_parser(
+        "emit-c", help="generate C per module (cached) and a manifest for pypackpack's compile slot")
+    emit.add_argument("paths", nargs="+", type=Path, help="files, or directories to scan recursively")
+    emit.add_argument("--root", type=Path, required=True, help="directory module names are relative to")
+    emit.add_argument("--cache", type=Path, default=Path("build/typedpython-c-cache"),
+                      help="source -> C cache directory (default: build/typedpython-c-cache)")
+    emit.add_argument("--manifest", type=Path, required=True, help="the JSON manifest to write")
     args = parser.parse_args(argv)
 
+    if args.command == "emit-c":
+        return _emit_c(args.paths, args.root, args.cache, args.manifest)
     if args.command == "build":
         return _build(args.paths, args.cache, args.out)
     if args.command == "demo":
@@ -84,13 +94,64 @@ def _build(paths: list[Path], cache: Path, out: Path | None) -> int:
         print(f"{m.status:7} {m.name}: {what}{why}")
         rel = m.path.relative_to(root).as_posix()
         if m.kind == "not_marked":
-            print(f"          {rel}: not marked for compilation (no `# typedpython: compiled`, no @compiled)")
+            print(f"          {rel}: not marked for compilation (no @compiled)")
         for item in m.skipped_items:
             where = f"{item.file}:{item.line}" if item.line is not None else item.file
             print(f"          {where}: {item.name}: {item.message}")
         if out is not None and m.extension is not None:
             out.mkdir(parents=True, exist_ok=True)
             shutil.copy2(m.extension, out / m.extension.name)
+    return EXIT_CLEAN
+
+
+MANIFEST_FORMAT, MANIFEST_VERSION = "typedpython-emit-c", 1
+
+
+def _emit_c(paths: list[Path], root: Path, cache: Path, manifest: Path) -> int:
+    """SPEC N-10 / #25 step 1; the manifest format is docs/design/typedpython.md section 4.3.2a."""
+    from typedpython import pipeline
+
+    sources = python_files(paths)
+    if not sources:
+        print("typedpython: no Python files to emit", file=sys.stderr)
+        return EXIT_FAILURE
+    try:
+        result = pipeline.generate_project(sources, root, cache)
+    except pipeline.CompileError as e:
+        print(f"typedpython: {e}", file=sys.stderr)
+        return EXIT_ERRORS
+    except PyreflyError as e:
+        print(f"typedpython: {e}", file=sys.stderr)
+        return EXIT_FAILURE
+    root = root.resolve()
+    runtime = Path(result.runtime_include).resolve().as_posix()
+
+    def items(m: "pipeline.ModuleResult") -> list[dict]:
+        return [{"name": i.name, "file": i.file, "line": i.line, "message": i.message}
+                for i in m.skipped_items]
+
+    native, other = [], []
+    for m in result.modules:
+        if m.path.name == "__init__.py":
+            continue                        # never listed (pypackpack compile-slot.md)
+        rel = m.path.resolve().relative_to(root).as_posix()
+        if m.kind == "compiled":
+            assert m.c_source is not None
+            native.append({"moduleName": m.name, "file": rel,
+                           "sources": [Path(m.c_source).resolve().as_posix()],
+                           "includeDirs": [runtime], "defines": {}, "status": m.status,
+                           "skippedItems": items(m)})
+        else:
+            other.append({"module": m.name, "file": rel,
+                          "kind": "NOT_MARKED" if m.kind == "not_marked" else "NOTHING_COMPILED",
+                          "items": items(m)})
+    doc = {"format": MANIFEST_FORMAT, "version": MANIFEST_VERSION,
+           "compilerVersion": pipeline.COMPILER_VERSION, "projectRoot": root.as_posix(),
+           "runtimeInclude": runtime, "nativeModules": native, "notNativeModules": other}
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = manifest.with_name(manifest.name + ".tmp")
+    tmp.write_text(json.dumps(doc, indent=2) + "\n")
+    tmp.replace(manifest)
     return EXIT_CLEAN
 
 
@@ -112,6 +173,8 @@ def _demo(module: Path, module_argv: list[str], out: Path) -> int:
         return EXIT_FAILURE
 
     def interpreted() -> object:
+        import builtins  # the module's `@compiled` is a builtin name; typedpython_builtins.pth installs it
+        builtins.compiled = getattr(builtins, "compiled", lambda f=None, /, **_k: (lambda g: g) if f is None else f)
         spec = importlib.util.spec_from_file_location(module.stem + "_interpreted", module)
         assert spec is not None and spec.loader is not None
         mod = importlib.util.module_from_spec(spec)

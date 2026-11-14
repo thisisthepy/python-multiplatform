@@ -125,6 +125,10 @@ Details and the postcondition that guards the entry-module ordering are in the w
 - Whether compiled wheels other than pydantic-core load.
 - Compose (`@Composable` from Python) on wasm is `planned` (SPEC B-6, N-2); `suspend` upcalls are
   `planned` on wasm because there are no threads (SPEC U-5).
+- Threads (#175): a free-threaded CPython 3.15t build with pthreads is a CI experiment
+  (`.github/workflows/build-ft-wasm.yml`), separate from the build above and not used by the library.
+  What it checks, and the Kotlin-side work it does not do (shared memory import, worker pool,
+  per-Worker function tables), is in [`free-threaded-wasm.md`](free-threaded-wasm.md).
 - Absolute wasmJs nanoseconds depend on suite scope and host lifetime (a filtered run is 55–74%
   slower in pure-Python rows); quote ratios, or full-suite figures labelled as such
   ([`downcall-design.md`](../design/downcall-design.md), "Warmup").

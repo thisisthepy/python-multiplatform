@@ -1,0 +1,80 @@
+name: CI
+
+# The one development CI of this repository. It is started by hand only (owner, 2026-11-14:
+# "개발 테스트 ci는 명시적으로 실행하기", "한 ci에서 최대한 여러개를 확인하기"), and one run checks
+# every platform: each suite below is a reusable workflow, on by default.
+#
+#   gh workflow run ci.yml --ref <branch>
+#
+# The concurrency group is shared with the CPython builds (build-ft-*.yml): a run in progress
+# finishes, a newer dispatch replaces the waiting one, and nothing else runs beside it (owner:
+# "제일 최신꺼만 도는게 맞지", "여러 ci를 한번에 돌리는거도 허용할 생각이 난 없어").
+
+on:
+  workflow_dispatch:
+    inputs:
+      desktop:
+        description: "Desktop (JVM, macosArm64, linuxX64) and the generator fixtures"
+        type: boolean
+        default: true
+      android:
+        description: "Android and androidNative"
+        type: boolean
+        default: true
+      ios:
+        description: "iOS"
+        type: boolean
+        default: true
+      wasm:
+        description: "WasmJS"
+        type: boolean
+        default: true
+      typedpython:
+        description: "TypedPython gate and compiler"
+        type: boolean
+        default: true
+      race_mutant:
+        description: "TypedPython: also run the race_mutant tests"
+        type: boolean
+        default: false
+      stubs:
+        description: "Kotlin-name .pyi stubs"
+        type: boolean
+        default: true
+
+concurrency:
+  group: dev-ci
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  desktop:
+    if: ${{ inputs.desktop }}
+    uses: ./.github/workflows/desktop.yml
+    secrets: inherit
+  android:
+    if: ${{ inputs.android }}
+    uses: ./.github/workflows/android-native.yml
+    secrets: inherit
+  ios:
+    if: ${{ inputs.ios }}
+    uses: ./.github/workflows/ios.yml
+    secrets: inherit
+  wasm:
+    if: ${{ inputs.wasm }}
+    uses: ./.github/workflows/wasm.yml
+    secrets: inherit
+  typedpython:
+    if: ${{ inputs.typedpython }}
+    uses: ./.github/workflows/typedpython.yml
+    with:
+      race_mutant: ${{ inputs.race_mutant }}
+    secrets: inherit
+  stubs:
+    if: ${{ inputs.stubs }}
+    uses: ./.github/workflows/stubs.yml
+    permissions:
+      contents: write
+    secrets: inherit

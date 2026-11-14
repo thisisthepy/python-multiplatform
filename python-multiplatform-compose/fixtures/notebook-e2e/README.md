@@ -68,11 +68,12 @@ JAVA_HOME=<JDK 21> ./gradlew :python-multiplatform-compose:fixtures:notebook-e2e
   `site-packages/` (the wheel) and `app/`. The image finds them there with no environment.
 - `notebookE2eNativeRun` removes `JAVA_HOME` and `PYTHONHOME`, requires 20 passed, and fails if
   `otool -L` shows `libjvm`.
-- The image takes `ui`, `ui-text` and `foundation` from compose-multiplatform-core-extended's mavenLocal
-  build (`composeExtended.*` in the root `gradle.properties`): upstream Compose sends its main-thread
+- The image takes `ui`, `ui-text` and `foundation` from compose-multiplatform-core-extended on Maven
+  Central (`composeExtended.*` in the root `gradle.properties`): upstream Compose sends its main-thread
   work to skiko's Swing queue, which needs AWT, and AWT needs `libjvm`. The fork sends it to
   `Dispatchers.Main` under `compose.main.dispatcher=coroutines`, which `NotebookE2eMainDispatcherFactory`
   supplies (registered by `src/desktopTest/native-image-main/` on the image's classpath only).
+  CI runs `notebookE2eNativeAgent` and `notebookE2eNativeRun` in `.github/workflows/desktop.yml` (`notebook-e2e-native-image`, #251).
 
 ## Scenarios
 

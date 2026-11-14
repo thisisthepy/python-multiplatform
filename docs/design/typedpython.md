@@ -62,7 +62,7 @@ TypedPython 의 목표는 **새 언어를 만들지 않고, 파이썬 문법 그
 |---|---|---|---|
 | 0 | 서드파티 패키지 (의존성) | 없음, 검사하지 않는다 | 바이트코드 (pypackpack 이 받은 그대로) |
 | 1 `checked` | **사용자 프로젝트의 파이썬 코드 전부, 기본값** | 빌드 타임 타입 오류, `Any` 유출 0 (§4.2) | 바이트코드 |
-| 1 `compiled` | `@compiled` (내장 이름, import 없음) 또는 모듈 선언 `# typedpython: compiled` | `checked` + §3.1 금지 목록 | C 확장 모듈 (NEON · AVX 벡터화, §5.3) |
+| 1 `compiled` | `@compiled` (내장 이름, import 없음) | `checked` + §3.1 금지 목록 | C 확장 모듈 (NEON · AVX 벡터화, §5.3) |
 | 2 `kernel` | `@kernel` | 객체·힙 할당 없음, 고정 dtype | SPIR-V / MSL (직접) / WGSL / PTX, 빌드 타임 (§5) |
 
 - **사용자 코드는 표시하지 않아도 검사된다.** 타입 오류가 있으면 Kotlin 컴파일 에러처럼 빌드가
@@ -155,12 +155,74 @@ API 안정성을 확인한 뒤로 미룬다.
 않고** 인터프리터에 남기며 이유를 진단으로 낸다. 생성 C 는 `tp_runtime.h` 헬퍼로만 메모리와 `PyObject`
 를 다룬다. 증명 밖의 안전망: ASan/UBSan, 인터프리터와의 차등 테스트, IR 수준 퍼징.
 
+차등 테스트의 위치 (#41 M2 기준, 경로는 `python-multiplatform-ksp/src/test/python/`):
+
+| 경우 | 테스트 |
+|---|---|
+| i64 오버플로 경계 | `test_runtime.py::test_checked_arithmetic_matches_bigint_and_deopts_exactly_on_overflow`, `test_neg_i64_deopts_only_for_int64_min`, `test_fuzz_checked_arithmetic_against_bigint`; 컴파일된 함수에서 `test_cgen.py::test_i64_overflow_in_a_pure_function_deopts_to_the_big_int_result`, `test_native_int_impure.py::test_binary_ops_at_the_i64_boundary_equal_cpython`, `test_min_floordiv_minus_one_promotes` |
+| 음수 floor 나눗셈과 나머지 | `test_runtime.py::test_floordiv_i64_is_python_floor_division`, `test_mod_i64_has_the_sign_of_the_divisor`, `test_fuzz_floordiv_mod_i64`, `test_floor_mod_sign_and_zero_cases_spelled_out`, `test_fuzz_float_floordiv_mod` |
+| 0 으로 나누기 | `test_runtime.py::test_int_division_by_zero_messages_are_cpythons`, `test_float_division_by_signed_zero_raises_cpythons_message`; `test_cgen.py::test_integer_division_by_zero_has_cpythons_message`, `test_native_int_impure.py::test_division_by_zero_after_a_side_effect` |
+| NaN 과 inf | `test_runtime.py::test_float_division_family_is_bit_exact_with_cpython`, `test_int_float_comparison_named_hard_cases`, `test_math_named_error_cases`, `test_math_one_argument_fuzz_is_bit_exact` (NaN 은 "어떤 NaN", 그 밖은 IEEE 비트 비교); `test_pipeline.py::test_fastmath_keeps_nan_checks` |
+| 벤치마크 출력 | `test_benchmark_outputs.py`: 다섯 벤치마크를 `run.py verify` 크기로 컴파일 실행해 인터프리터 출력과 비교, TypedPython CI 가 develop 의 매 push 마다 돌린다 |
+
 ### 4.3.2 증분 컴파일 (SPEC N-10)
 
 사용자 결정: "증분 컴파일도 지원하도록 해. 빌드 속도 너무 오래 안걸리게". 단위는 모듈. 키는 소스 해시 +
 의존 모듈의 **인터페이스** 해시(타입 시그니처) + 컴파일러 버전 + 플랫폼 + 빌드 플래그. 본문만 바뀌면
 인터페이스 해시가 그대로라 의존 모듈은 다시 컴파일하지 않는다. C 오브젝트는 모듈별로 캐시한다.
 Gradle 태스크는 입력·출력을 정확히 선언해 up-to-date 판정과 빌드 캐시가 함께 작동한다.
+
+pypackpack 의 native compile slot 이 C 를 확장으로 빌드하므로 캐시는 두 층으로 나뉜다(#113).
+`pipeline.generate_project` 는 소스 → C 만 캐시한다: 모듈마다 `.c` 하나, 그리고 `tp_runtime.h` 가 있는
+디렉터리. 키는 소스 + 의존 모듈 인터페이스 해시 + 컴파일러 버전이고, C 는 플랫폼·컴파일러·플래그를 읽지
+않으므로 그것들은 키에 넣지 않는다. 바뀌지 않은 모듈은 바이트가 같은 `.c` 로 재사용되어 slot 의 C → 확장
+캐시도 맞는다. 테스트가 쓰는 `compile_project`(프로세스 안에서 빌드)는 그대로 둔다.
+
+### 4.3.2a `emit-c` manifest (SPEC N-10, #25 1단계)
+
+Gradle 쪽(#25 2단계, python-multiplatform-gradle-plugin)은 TypedPython 을 이 CLI 로 돌리고 manifest 를
+pypackpack `BundleRequest` 로 옮긴다. pypackpack 은 TypedPython 을 실행하지 않는다.
+
+    python -m typedpython emit-c PATHS... --root DIR --cache DIR --manifest FILE
+
+- `PATHS`: 파일 또는 디렉터리(재귀, `typedpython check` 와 같은 규칙). `--root`: 모듈 이름의 기준
+  디렉터리(ppp 패키지의 `python/` 루트에 해당). `--cache`: `generate_project` 의 소스 → C 캐시.
+  `--manifest`: 쓸 파일. 상위 디렉터리는 만든다.
+- 종료 코드: 0 manifest 를 씀, 1 게이트 오류(manifest 를 쓰지 않음, 원인은 stderr), 2 게이트를 실행할 수 없음.
+  C 컴파일러는 실행하지 않는다.
+
+형식(버전 1). 키 이름은 pypackpack `docs/design/compile-slot.md` 의 Kotlin 필드 이름과 같다.
+
+```json
+{
+  "format": "typedpython-emit-c",
+  "version": 1,
+  "compilerVersion": "<pipeline.COMPILER_VERSION>",
+  "projectRoot": "/abs/proj",
+  "runtimeInclude": "/abs/.../typedpython/runtime",
+  "nativeModules": [
+    {"moduleName": "app.physics.nbody", "file": "app/physics/nbody.py",
+     "sources": ["/abs/cache/.../nbody.c"], "includeDirs": ["/abs/.../typedpython/runtime"],
+     "defines": {}, "status": "rebuilt",
+     "skippedItems": [{"name": "main", "file": "app/physics/nbody.py", "line": 30, "message": "..."}]}
+  ],
+  "notNativeModules": [
+    {"module": "app.util", "file": "app/util.py", "kind": "NOT_MARKED", "items": []},
+    {"module": "app.text", "file": "app/text.py", "kind": "NOTHING_COMPILED",
+     "items": [{"name": "f", "file": "app/text.py", "line": 2, "message": "..."}]}
+  ]
+}
+```
+
+- `nativeModules[i]` → `ExtensionModuleSource(moduleName, sources, includeDirs, defines)`. `file`, `status`,
+  `skippedItems` 는 보고용이다(일부 함수가 인터프리트로 남는 것은 경고가 아니다, compile-slot.md §4).
+- `notNativeModules[i]` → `NotNativeModule(module, kind, items)`, `items[j]` → `SkippedItem(name, file, line, message)`.
+  `line` 은 없으면 `null`.
+- 모든 경로는 절대 경로(`/` 구분). `file` 만 `projectRoot` 기준 상대 경로다.
+- 패키지 `__init__.py` 는 어느 목록에도 넣지 않는다(compile-slot.md: TypedPython 은 `__init__` 을 넘기지 않는다).
+  그 밖의 모듈은 정확히 한 목록에 들어간다. 순서는 입력 파일 순서(디렉터리는 정렬)다.
+- `sources` 는 캐시 안의 `.c` 를 가리킨다. 바뀌지 않은 모듈은 같은 경로, 같은 바이트다.
+- 버전을 올리는 변경: 키 제거나 의미 변경. 키 추가는 버전을 올리지 않는다.
 
 ### 4.3.3 고정 레이아웃 클래스 (SPEC N-11, M2b)
 
@@ -205,6 +267,53 @@ Gradle 태스크는 입력·출력을 정확히 선언해 up-to-date 판정과 �
 프레임이 끼면 그 프레임은 세지 않는다. 테스트는 두 경우 모두 "둘 다 예외를 내고 죽지 않는다" 만 단언하고
 깊이를 기록한다(`test_recursion.py`).
 
+### 4.3.3b 파이썬 깊이는 구간마다 한 번 잰다 (#125, 에이전트 제안, 확인되지 않음)
+
+4.3.3a 의 진입 검사는 컴파일 프레임마다 세 가지를 부른다: `PyThreadState_GetFrame` (`tp_python_depth`,
+최상위 프레임 동일성 캐시를 위해), `Py_GetRecursionLimit`, `Py_EnterRecursiveCall`. 출처는 CPython
+v3.15.0rc1 태그다.
+
+- **파이썬 깊이: 옮긴다.** wrapper 의 impl 호출 하나를 *구간* 으로 본다. 구간 안에서 컴파일 프레임 밑의
+  파이썬 프레임은 바뀌지 않는다. 사이에 도는 파이썬 코드(콜백, `__del__`, 시그널 처리기, redo)는 쌓은
+  프레임을 모두 걷고 C 로 돌아오고, 그 밑의 프레임은 위에서 C 가 도는 동안 끝날 수 없다.
+  `PyThreadState_GetFrame` (`Python/pystate.c:2120`) 이 보는 `_PyThreadState_GetFrame`
+  (`Include/internal/pycore_interpframe.h:280`, 미완성 프레임을 건너뜀)과 `PyFrame_GetBack`
+  (`Objects/frameobject.c:2398`) 의 결과도 그래서 같다. 구간의 첫 검사가 재고(`tp_seg_depth`), 이후 검사는
+  그 값을 쓴다. wrapper 는 impl 호출 바로 앞과 바로 뒤에서 값을 지운다(`tp_depth_seg_begin` / `_end`).
+  앞의 리셋이 없으면 안쪽 wrapper 가 바깥 구간의 얕은 깊이를 쓰고, 뒤의 리셋이 없으면 바깥 구간이 안쪽의
+  깊은 깊이를 계속 쓴다. 뒤의 리셋 덕에 바깥 구간은 안쪽 wrapper 가 돌아온 뒤 다음 검사에서 다시 재는데,
+  이것은 예전에 `tp_python_depth` 가 다른 최상위 프레임을 보고 캐시를 바꾸던 바로 그 지점이다. 그래서
+  캐시가 붙잡는 프레임 객체와 그 수명(아래)도 그대로다. 검사 값은 예전 값과 같은 수이므로
+  RecursionError 가 나는 깊이와 프레임은 바뀌지 않는다. 스레드마다 `tp_tls` 에 있고, `count` 처럼 한
+  스레드의 C 스택에서 호출이 LIFO 로 포개진다고 가정한다(greenlet 처럼 C 스택을 바꾸는 경우는 `count` 도
+  이미 맞지 않는다).
+- **재귀 한도: 옮기지 않는다.** `Py_GetRecursionLimit` (`Python/ceval.c:7`) 은 interp 의 값을 읽는다.
+  `Py_SetRecursionLimit` (`Python/ceval.c:14`) 는 stop-the-world 로 바꾸지만, 같은 스레드에서는 컴파일 코드의
+  어느 `Py_DECREF` 든 `__del__` 을, 어느 호출이든 콜백을 돌릴 수 있고 거기서 `sys.setrecursionlimit` 을
+  부를 수 있다. 인터프리터는 다음 프레임에서 새 한도를 본다(`_Py_EnterRecursivePy`,
+  `Python/ceval_macros.h:406`, `py_recursion_remaining` 은 `Py_SetRecursionLimit` 이 고친다). 바뀐 것을 알 공개
+  수단이 없으므로 프레임마다 읽는다.
+- **C 스택 가드: 옮기지 않는다.** 3.15 의 `Py_EnterRecursiveCall` (`Python/ceval.c:3576` →
+  `_Py_EnterRecursiveCallTstate`, `Include/internal/pycore_ceval.h:233`) 은 계수기가 아니라 이 프레임의 스택
+  주소를 `c_stack_soft_limit` 와 비교한다(`_Py_MakeRecCheck`, 같은 파일 211행). 깊은 프레임일수록 주소가
+  다르므로 한 번만 부르면 한도를 올린 깊은 재귀가 C 스택을 넘는다. `Py_LeaveRecursiveCall` 은 빈 함수다
+  (같은 파일 256행).
+
+**관측되지 않는 근거와 시험.** `python-multiplatform-ksp/src/test/python/test_depth_once.py`. 구현 전 빨강:
+생성 C 구조 시험 둘(wrapper 의 리셋, 헤더의 `tp_seg_depth`; 2026-11-13 cgen 을 일반 Python 으로 돌려 관측),
+`-DTP_TRACE_DEPTH` 의 `__tp_trace_frame_reads__` 가 `down(100)` 에서 1 (예전 101, 추정). 구현 전에도
+초록인 보존 시험: 한도 주변 모든 파이썬 깊이와 재귀 깊이에서 인터프리터와 비교, 콜백 안의 중첩 컴파일
+호출(안쪽과 바깥쪽), 재귀 도중 `__del__` 과 콜백이 한도를 낮추고 올리기, 4 스레드, `sys._getframe` 이 보는
+프레임, 프레임 수명. 변이 셋: 앞 리셋 없음, 뒤 리셋 없음, 한도를 첫 프레임에서만 읽기. 빌드와 실행은 CI
+에서 한다(에이전트는 빌드하지 않는다).
+
+**기존의 차이 둘(이 변경이 만든 것이 아니고 바꾸지도 않는다, 확인할 점).** (1) 컴파일 프레임 위에서
+돌아가는 순수 파이썬 프레임은 `py_recursion_remaining` 만으로 검사되므로 컴파일 프레임을 세지 않는다. 그
+위치에서 한도에 닿으면 인터프리터보다 늦게 실패한다. (2) 캐시가 안쪽 구간의 최상위 프레임(콜백 g)을 강한
+참조로 쥐므로, g 가 돌아올 때 프레임 객체가 지역 변수를 넘겨받고(`take_ownership`,
+`Python/frame.c:48`, `:119`) 그 지역은 바깥 구간이 다시 잴 때 죽는다. 인터프리터에서는 g 가 돌아올 때
+죽는다. 시험은 이 시점을 develop 그대로 고정한다.
+
 ### 4.3.4 객체 비용: 가상 객체, refcount 생략, 영역 할당 (SPEC N-12, 설계)
 
 사용자 지시 (2026-10-03): "Rust 쪽으로 더 가는 방법을 적용하되 cpython과 동일성을 보장할 방법을 찾아."
@@ -214,6 +323,34 @@ Gradle 태스크는 입력·출력을 정확히 선언해 up-to-date 판정과 �
 GC 추적), refcount 증감, 해제(`subtype_dealloc`)를 그대로 치르기 때문이다(#125, 아직 프로파일로 확정 전).
 더 가려면 객체를 아예 만들지 않거나(가상 객체), 증감을 빼거나(refcount 생략), 한꺼번에 할당·해제해야
 한다(영역 할당). 셋 다 `id()`, `__del__` 시점, `gc` 관측과 부딪칠 수 있다.
+
+**실제 객체(N-11)의 생성 비용 (#125, 2026-11-05).** 프로파일(`benchmarks/typedpython/results/2026-10-25-binary-trees-alloc-profile.md`)
+가운데 관측을 바꾸지 않고 줄일 수 있는 것은 다음과 같이 처리했다.
+- 호출마다 스레드 상태를 한 번만 읽는다(#273).
+- `tp_new_fixed` 는 새 객체의 슬롯을 `PyMember_SetOne` 대신 release store 로 직접 채운다. `SetOne` 이
+  `Py_T_OBJECT_EX` 슬롯에 하는 일(객체 critical section 안에서 `Py_XNewRef(v)` 의 release store, 그 뒤 옛 값
+  `Py_XDECREF`)에서 critical section 과 옛 값 해제만 뺀 것이다. 옛 값은 `tp_alloc` 이 0 으로 채웠으므로 NULL 이다.
+  critical section 을 빼도 되는 근거: `tp_alloc` 부터 마지막 슬롯 저장까지 스레드 상태를 놓는 호출도, eval
+  breaker 검사도 없어서 safepoint 가 없다. 그래서 stop-the-world 가 필요한 `gc.get_objects()` /
+  `gc.get_referrers()` 는 채우기가 끝나기 전에 이 객체를 다른 스레드에 줄 수 없다. 오히려 기존 critical
+  section 은 경합 시 스레드 상태를 놓을 수 있어서, 반쯤 채운 객체가 보이는 실행이 가능했다(그것도 인터프리터의
+  `__init__` 실행과 같은 상태라 유효했다). 슬롯의 종류·쓰기 가능·오프셋 범위는 `tp_class_capture` 가 init 에서
+  확인한다. 참조 수: 슬롯은 `Py_NewRef` 로 자기 참조를 갖는다(이것을 빼는 변이는 `test_cgen_classes.py` 에서
+  segfault 로 잡힌다). 측정(참고용, load 24~27): binary-trees `check(make(18))` 의 CPU 시간 중앙값이 develop
+  대비 1.08배 빠르다. 같은 부하에서 벽시계 시간은 한 회차 안에서도 2~22초로 흔들려 쓸 수 없었다.
+
+하지 않은 것과 이유:
+- **타입별 freelist.** 해제된 객체의 메모리를 붙잡으려면 클래스의 `tp_dealloc` 를 바꿔야 한다. 이것은
+  2026-10-25 결정(#125 댓글)에서 미뤘다: 클래스가 뒤에 `__del__`, `__weakref__`, 서브클래스를 얻으면 바뀐 dealloc 이
+  관측된다. free-threaded 빌드에서는 해제된 GC 객체의 메모리를 다른 스레드가 lock-free 로 읽을 수 있어서
+  (`_Py_TryIncref` 계열) CPython 은 mimalloc 의 지연 해제(QSBR)에 기댄다. 확장이 따로 붙잡는 freelist 는 이 보장
+  밖에 있으므로, 이 결정을 다시 열 때 그 근거도 함께 써야 한다.
+- **GC 추적을 늦추기/생략.** 아직 사이클을 만들 수 없는 노드(자식이 `None`)를 추적하지 않는 방식은
+  `gc.is_tracked`, `gc.get_objects()` 로 관측된다. 그리고 인터프리터가 나중에 슬롯에 자기 자신을 넣으면
+  (`PyMember_SetOne` 은 추적을 다시 켜지 않는다) 사이클이 수거되지 않는다. 컬렉션 횟수를 줄이는 방식(할당 계수
+  묶기, 임계값 조정)은 컬렉션 시점을 바꾼다. 둘 다 SPEC N-12 의 "GC 시점" 판단에 속하므로 오너 결정 사항이다.
+- binary-trees 의 `main` 은 정책(#150)으로 컴파일되지 않고 순수하지도 않아서(`print`, `sys.argv`), 실제 객체를
+  아예 없애는 N-12b 영역이 이 벤치마크에는 적용되지 않는다.
 
 **동일성의 정의.** 컴파일된 코드의 모든 실행은 **어떤 유효한 CPython 실행과 구별할 수 없어야 한다.**
 구별은 관측으로만 할 수 있으므로, 설계는 "관측 지점" 목록과 "관측 지점에 닿기 전에 실제 객체로 되돌린다"는
@@ -310,7 +447,8 @@ PyPy·GraalVM 과 같은 방식이다. N-11 클래스의 객체를 PyObject 대�
    eval breaker 처리를 그대로 돌린다. 배열 copy-in·전역 스냅샷을 쥔 함수가 실행 중이면 미룬다. 그 함수 안에서의
    GIL 넘기기는 2단계(#154)이고, 방식은 결정 대기(#152).
    **비용 (2026-10-17, 조용한 창, develop 대비 교대 11쌍):** fannkuch +8.2% (중앙값 1.082, 범위 1.043~1.191),
-   nbody 0.995 (배열 스냅샷 함수는 폴링하지 않음). 루프 폴링을 뺀 실험판은 fannkuch 1.000 이므로 남은 비용은
+   nbody 0.995 (배열 스냅샷 함수는 폴링하지 않음; 이 측정 당시. #335(2026-10-25) 이후 스냅샷 함수도 폴링하며 폴링마다
+   리스트를 되쓰고 다시 복사한다, SPEC N-8, #406). 루프 폴링을 뺀 실험판은 fannkuch 1.000 이므로 남은 비용은
    전부 짧은 안쪽 루프의 매 반복 카운트다운이다. CPython 도 모든 back-edge 에서 eval breaker 를 검사하므로 같은
    종류의 비용이고, 시그널·스레드 굶김과 3.15t 의 GC stop-the-world 차단을 고치는 대가로 받아들였다(리더 결정).
    range 루프의 묶음 폴링은 후속 이슈다. 원자료: `benchmarks/typedpython/results/2026-10-17-eval-breaker-*.json`.
@@ -319,6 +457,116 @@ PyPy·GraalVM 과 같은 방식이다. N-11 클래스의 객체를 PyObject 대�
    **구현 (#142, SPEC N-14):** 진입과 비순수 함수의 C 간 직접 호출에서 확인한다. 알려진 차이 두 가지는 SPEC N-14 에 있다.
 
 이 셋은 N-12 이전부터 있는 경계도 포함한다. 1번이 결정되어 N-12 구현을 시작한다. 2번은 #141(1단계 완료), 3번은 #142.
+
+#### 바. 관측을 바꾸지 않는 할당·해제·refcount 비용 (#125, 조사 2026-11-13)
+
+**제약 (리더 경유, 2026-11-13, 오너의 상시 의도):** "All three GC options listed before are REJECTED:
+per-type freelist (replaces tp_dealloc, id reuse), deferring or skipping GC tracking (gc.is_tracked /
+gc.get_objects observable), batching GC allocation counts or adjusting thresholds (changes when
+collections run). The rule behind it: no GIL-only features (everything must work on free-threaded
+3.15t), and no change to any observable Python behaviour (gc module, ids, weakrefs, __del__ timing,
+collection timing, sys.getrefcount, tracemalloc, subclassing, later class changes)."
+
+> 이 제약의 "collection timing" 은 마.1 의 결정 (2026-10-04, 사용자: GC 수집 시점은 동일성 범위에서 뺀다)보다
+> 좁다. 이 절의 후보는 둘 다 만족하도록 골랐다(수집 시점을 바꾸는 후보는 모두 뺐다). 두 문장 중 어느 쪽이
+> N-12a/b 의 가상 객체에도 적용되는지는 이 조사가 정하지 않는다(리더에게 확인할 점).
+
+**출발점.** 프로파일(`benchmarks/typedpython/results/2026-10-25-binary-trees-alloc-profile.md`, 3.15.0rc1t,
+macOS arm64)은 #273 과 #371 이전 것이다. 몫은 그때의 전체에 대한 비율이고, 아래의 기대 이득은 그 몫에서 어림한
+**추정**이다(측정 아님). 컴파일 함수는 `make`, `check` 그대로다(`test_class_methods.py` EXPECTED).
+CPython 출처는 v3.15.0rc1 태그의 파일과 함수 이름이다.
+
+**후보별 결론.**
+
+1. **같은 할당 경로를 단계만 줄이기.** `PyType_GenericAlloc` (`Objects/typeobject.c`) 은
+   `_PyType_AllocNoTrack` 에서 크기 계산(`_PyObject_VAR_SIZE(type, nitems+1)`, itemsize 0 이면 basicsize),
+   `_PyObject_MallocWithType`, `_PyObject_GC_Link` (= `record_allocation(tstate)`, 할당 계수), 헤더 뒤 전체
+   `memset`, `_PyObject_Init` (3.15t 에서는 heap type 의 참조를 `_Py_INCREF_TYPE`, 즉 스레드별 표에 센다,
+   `Include/internal/pycore_object.h`) 을 하고 마지막에 `_PyObject_GC_TRACK` 한다. 고정 레이아웃 정확 타입에서
+   남는 중복은 `memset` 하나다(모든 슬롯을 곧 쓴다). 공개 API `PyObject_GC_New` + `PyObject_GC_Track` 은
+   `gc_alloc` (`Python/gc_free_threading.c`) 로 같은 할당기·같은 크기·같은 `record_allocation`·같은
+   `_PyObject_Init` 를 거치고 `memset` 만 없다. 그래서 gc, tracemalloc, 할당 계수 어느 것도 다르지 않다.
+   다만 객체의 모든 바이트를 컴파일 코드가 써야 하므로 클래스의 모든 슬롯이 필드여야 한다. 기대 이득:
+   memset 17 샘플, 약 1% (추정). **하지 않음:** 이득이 작다. 직접 할당(`tp_alloc` 를 건너뛰고 헤더를 손으로
+   채우기)은 비공개 API 이고, `Py_INCREF(type)` 로 바꾸면 3.15t 의 스레드별 type refcount 와 달라져
+   `sys.getrefcount(Node)` 의 회계가 바뀌므로 기각.
+   할당 하나에 CPython 안에서 스레드 상태 읽기가 셋 이상 있다(`gc_alloc`/`_PyObject_MallocWithType` 의 힙,
+   `record_allocation`, `_Py_INCREF_TYPE`), 해제 하나에도 셋(`_Py_Dealloc` 의 trashcan 여유 확인,
+   `PyObject_GC_Del` 의 `record_deallocation`, `_Py_DECREF_TYPE`). tstate 를 받는 공개 변형이 없으므로 공개
+   API 로는 줄일 수 없다. 프로파일의 `_tlv_get_addr` 몫은 macOS 의 TLS 접근 방식 때문에 큰 것으로 보인다(추정).
+2. **스레드 지역 객체의 refcount 피하기(3.15t biased refcounting).** `Py_INCREF` (`Include/refcount.h`) 는
+   3.15t 에서 `ob_ref_local` 을 relaxed 로 읽고, immortal 이면 끝, 소유 스레드(`ob_tid == _Py_ThreadId()`,
+   arm64 에서는 레지스터 읽기)면 원자 연산 없이 저장, 아니면 `ob_ref_shared` 에 원자 덧셈이다. `Py_DECREF` 도
+   같고, 0 이 되면 `_Py_MergeZeroLocalRefcount` 가 `ob_ref_shared == 0` 이면 바로 `_Py_Dealloc` 한다. 이 스레드가
+   만든 노드는 이미 싼 경로를 탄다. 그래서 "스레드 지역이면 refcount 를 다르게" 는 연산 하나당 더 얻을 것이
+   없다. 얻을 것은 **증감 쌍 자체를 없애는 것**이고, 그 조건은 스레드 지역성이 아니라 "다른 참조가 그동안
+   살려 둔다" 이다(아래 구현). 스레드 지역 증명은 슬롯 값을 빌려 읽을 때만 필요하다(나., D5, 바뀌지 않음).
+3. **임시 객체 없애기(N-12a 가상 객체).** binary-trees 가 이득을 못 보는 이유: `make` 의 객체는 반환으로
+   탈출하고, `check` 는 아무것도 할당하지 않는다. 두 함수가 만나는 곳은 `check(make(d))` 를 부르는 `main`
+   뿐인데, `main` 은 비용 정책(#150)으로 컴파일되지 않고 순수하지도 않다(`print`, `sys.argv`). 그래서 N-12b
+   영역의 host 가 없고(별도 벤치 `binary_trees_region.py` 가 그 경우를 잰다), `make` 와 `check` 를 합치거나
+   (`check∘make` 를 트리 없이 세기) `check` 를 호출자에 inline 하는 것도 호출 지점이 인터프리터 안이라 할
+   수 없다. `main` 을 컴파일하면 벤치의 컴파일 함수 집합이 바뀌므로 이 조사의 범위 밖이다.
+4. **해제를 타입의 tp_dealloc 그대로, 간접 호출만 줄이기.** 지금 경로: `Py_DECREF` →
+   `_Py_MergeZeroLocalRefcount` → `_Py_Dealloc` (`Objects/object.c`: tstate 읽기, 재귀 여유가 작으면 trashcan,
+   reftracer) → `subtype_dealloc` (`PyObject_GC_UnTrack`, 베이스 사슬, finalizer·weaklist 확인, `clear_slots`
+   가 자식마다 `Py_DECREF`, 재추적) → `object_dealloc` → `tp_free = PyObject_GC_Del` → `_Py_DECREF_TYPE`. 간접
+   호출은 둘셋이고 비용은 그 안의 일이다. 같은 일을 컴파일 코드가 하려면 비공개 API(`_PyTrash_*`,
+   `_Py_DECREF_TYPE`)가 필요하고 `tp_dealloc` 를 우회하게 되어 2026-10-25 결정(미룸)의 문제와 같다. 해제
+   순서를 바꾸면(예: 재귀 대신 반복) 이후 할당의 주소 재사용, 곧 `id()` 값이 달라진다. **하지 않음.**
+5. **스레드 상태 몫 가운데 #273 이 남긴 것.** 컴파일 프레임마다 `tp_enter_call` 이 `PyThreadState_GetFrame`
+   (`Python/pystate.c`: 프레임 객체를 얻고 `Py_XNewRef`, 호출 하나와 증감 한 쌍), `Py_GetRecursionLimit`
+   (`Python/ceval.c`: `_PyInterpreterState_GET()`, TLS 읽기), `Py_EnterRecursiveCall` (TLS 읽기와 스택 주소
+   비교, `pycore_ceval.h` `_Py_EnterRecursiveCallTstate`) 를, 나갈 때 `Py_LeaveRecursiveCall` (3.15 에서 빈 함수)
+   을 부른다.
+   - **파이썬 깊이:** 컴파일 프레임이 도는 동안 그 밑의 파이썬 프레임은 바뀌지 않는다(사이에 도는 파이썬
+     코드는 쌓았던 프레임을 다 걷고 돌아온다). 그래서 wrapper 가 한 번 재고 `tp_tls` 에 "구간 깊이" 로 두고
+     나갈 때 되돌리면, 프레임마다의 `PyThreadState_GetFrame` 이 없어진다. 첫 측정이 프레임 객체를 이미
+     만들고 붙잡으므로 새로 생기는 프레임 객체는 없다. 기대 이득: 프로파일의 `PyThreadState_GetFrame` 83 샘플,
+     약 5% (추정, #273 전 몫). **에이전트 제안, 확인되지 않음.** `tp_tls`, wrapper, 빠른 진입(#147)을 함께
+     바꾸므로 이 단계에서는 하지 않았다. 다음 단계에서 구현: 4.3.3b (#412).
+   - **재귀 한도:** `Py_SetRecursionLimit` 는 3.15t 에서 stop-the-world 로, GIL 빌드에서는 GIL 을 쥐고 바꾼다.
+     그래서 다른 스레드는 이 스레드가 safepoint 에 닿기 전에는 바꿀 수 없다. 하지만 이 스레드 안에서는 어느
+     `Py_DECREF` 든 `__del__` 을 부를 수 있고, 거기서 한도를 바꿀 수 있다. 바뀐 것을 알 공개 수단이 없으므로
+     프레임마다 읽는 것을 그대로 둔다.
+   - **C 스택 가드:** tstate 를 받는 공개 변형이 없다. 몇 프레임마다만 부르면 C 스택이 먼저 닿는 경우
+     RecursionError 가 나는 프레임이 달라진다. 그대로 둔다.
+6. **기각된 것(위 제약).** 타입별 freelist, GC 추적 늦추기·생략, 할당 계수 묶기·임계값 조정. 참고로 3.15t 는
+   이미 스스로 할당 계수를 스레드별로 묶는다(`record_allocation`, `LOCAL_ALLOC_COUNT_THRESHOLD` 512). 이것은
+   CPython 자신의 동작이고 컴파일 코드는 그대로 따른다.
+
+**구현한 것: 참조 옮기기와 빌린 피연산자 (#125, 에이전트 제안, 확인되지 않음).** 생성 C 에서 두 종류의 +1/-1
+쌍을 뺐다. 객체·할당·GC 추적·슬롯 값은 하나도 바뀌지 않는다.
+
+- **New 의 참조 옮기기.** `Node(make(d-1), make(d-1))` 는 인자 임시값을 `tp_new_fixed` 가 `Py_NewRef` 로
+  슬롯에 복사하고 호출자가 바로 놓았다. 이제 `tp_new_fixed_move` 가 임시값의 참조를 슬롯으로 옮기고
+  호출자는 임시값을 비운다(`_moved_temps`). 실패하면 아무것도 가져가지 않는다: 이미 쓴 슬롯은 반쯤 만든
+  객체를 놓기 전에 NULL 로 되돌린다. 비순수 함수의 느린 경로(`tp_call`)는 그대로 복사·해제한다.
+- **빌린 피연산자.** Is 의 두 쪽, FieldGet·IsExact 의 객체, C 간 Call 의 OBJ 인자가 일반 OBJ 지역이면 복사
+  (`Py_NewRef` + 해제) 없이 지역 이름(`l_x`)을, None 상수면 `Py_None` 을 바로 쓴다(`_borrow_operand`,
+  `_operand_release`). 지역의 자기 참조가 그 helper 가 끝날 때까지 객체를 살려 둔다. 이것은 이 프레임의
+  참조이므로 다른 스레드가 무엇을 해도 그렇다. IR 에는 대입식이 없어서 지역은 문장 경계에서만 바뀌고,
+  그래서 helper 가 돌 때 읽는 지역은 피연산자를 평가할 때의 지역과 같다. 슬롯 **값**은 여전히
+  `tp_field_get` (`PyMember_GetOne`) 으로 새 참조를 잡는다(D5 그대로).
+- **관측되지 않는 근거.** 뺀 쌍은 모두 "다른 참조가 그동안 살려 두는 객체의 +1 뒤 -1" 이고, 그 사이에는 이
+  스레드에서 코드가 돌지도 safepoint 에 닿지도 않는다(New 의 근거는 위 #371 과 같다). 같은 스레드는 그 사이를
+  볼 수 없다. 다른 스레드(3.15t)가 그 사이에 `sys.getrefcount` 를 읽을 수 있었다면, 이제 읽는 값은 원래
+  실행에서도 그 창 밖에서 읽었을 값이다. 그래서 새 실행의 관측은 원래 실행에서 가능한 관측의 부분집합이다.
+  호출 경계의 refcount, `gc.is_tracked`, `gc.get_objects`, `tp_traverse` 가 보는 슬롯, weakref, `__del__`
+  순서, `id()` 는 변하지 않는다. 인터프리터 쪽 근거: 3.15.0rc1t 의 `dis` 로 `check` 를 보면 이 피연산자들이
+  모두 `LOAD_FAST_BORROW` 다(2026-11-13 관측). 인터프리터도 여기서 증감하지 않는다.
+- **양.** binary-trees 의 `check` 한 번에 8쌍(FieldGet 의 `node` 2, Is 의 지역 2와 None 2, 재귀 인자 2),
+  `make` 의 노드 하나에 2쌍(자식 두 개, 잎에서는 None 두 개)이 빠진다. 기대 이득: 프로파일의 "compiled code"
+  26% 가 이 증감을 포함한다. 3~8% 로 어림한다(추정, 측정 안 함). 측정은 CI 또는 조용한 창에서 리더가 한다.
+- **남은 다음 단계(에이전트 제안, 확인되지 않음):** 대입되지 않는 OBJ 매개변수의 입양(`l_x = Py_NewRef(p_x)`,
+  규칙 1)도 뺄 수 있다. 호출자가 호출 내내 인자를 살려 둔다(vectorcall 규약, C 간 호출은 호출자의 지역이나
+  임시값). `check` 한 번에 1쌍. 규칙 1 과 exit 블록을 바꾸므로 이 단계에서는 하지 않았다.
+- **시험:** `python-multiplatform-ksp/src/test/python/test_alloc_preserving.py`. 생성 C 구조 시험 셋(구현 전
+  빨강), 인터프리터와 비교하는 관측 시험(`gc.is_tracked`, `gc.get_objects`, 살아 있는 동안 `id` 유일성,
+  weakref 콜백 순서, `__del__` 순서와 횟수, 뒤에 `__del__` 을 얻는 클래스, `__del__` 있는 서브클래스, 호출 경계의
+  `sys.getrefcount`, 많은 호출 뒤 refcount, 4 스레드 동시 실행 뒤 refcount; 구현 전에도 초록, 보존을 지키는
+  시험), 변이 시험 셋(옮긴 임시값을 또 놓기, 옮기지 않고 복사하기 `-DTP_MUTANT_COPY_MOVED`, 빌린
+  지역을 놓기: 각각 refcount 나 `__del__` 시점으로 잡혀야 한다).
 
 ### 4.3.5 소유권 추론, 메모리, 인터프리터 최소 상주 (설계, 결정 2026-10-05)
 
@@ -386,6 +634,126 @@ i64/f64 지역)는 **컴파일된 구간 안의 임시 값**만 줄인다. 컨�
   크고, 같은 문제를 lazy import 가 더 싸게 줄인다.
 - 효과가 작아 하지 않는 것: `-OO`(0.35~0.8 MB, `assert` 도 사라짐), deopt 원본 지연 로딩(함수 1000 개당 약
   0.4 MB), 동결 모듈 끄기(오히려 4.4 MB 증가).
+
+### 4.3.6 리스트 매개변수 세 개 이상 (#255, 조사 기록과 제안)
+
+**출처.**
+- 이슈 #255 본문: "User decision (2026-10-17): research option (C) for the nbody regression from #209."
+  같은 본문: "Until (C) is settled, (B) stays."
+- **리더 결정 (2026-11-13, 리더, 코디네이터 경유):** #255 는 리스트의 `ob_mutex` 에 기대지 않는다(critical
+  section API 전용으로 예약된 필드). 공개 critical section API 만 쓴다.
+- 아래의 후보 판정과 (d1) 의 채택은 **에이전트 제안, 확인되지 않음**이다.
+
+**문제.** #209 이후 리스트 매개변수가 셋 이상인 함수는 3.15t 에서 해석 실행된다. copy-in 부터 write-back 까지
+모든 리스트의 잠금을 쥐어야 하는데, 공개 critical section API 는 객체 하나(`PyCriticalSection`) 또는 둘
+(`PyCriticalSection2`)만 잠근다. nbody 의 `offset_momentum`(리스트 4개), `advance`·`energy`(7개)가 31배에서
+1배로 떨어졌다. 기준은 동일성이다: 컴파일된 실행 하나하나가 CPython 의 어떤 interleaving 과 같아야 한다.
+
+#### 가. CPython 3.15.0rc1 의 근거
+
+venv 의 3.15.0rc1t 헤더와 python/cpython 의 태그 `v3.15.0rc1` 소스(설치된 `pycore_lock.h` 와 바이트 단위로 같음을
+확인)에서 읽었다. 줄 번호는 그 태그 기준이다.
+
+1. **Begin.** 빠른 경로는 mutex 를 CAS 로 한 번 잡고 스레드의 섹션 스택에 올린다
+   (`Include/internal/pycore_critical_section.h:106-117`). 실패하면 `_PyCriticalSection_BeginSlow`
+   (`Python/critical_section.c:20-62`): 같은 mutex 를 **맨 위** 섹션이 이미 쥐었으면 다시 잠그지 않고(29-45),
+   world 가 멈춰 있으면 잠그지 않고(46-54), 아니면 새 섹션을 먼저 올리고 `PyMutex_Lock` 으로 기다린다(55-60). 두
+   객체는 주소 순으로 잡고(`pycore_critical_section.h:163-170`), 느린 경로는 첫 mutex 를 쥔 채 둘째를 기다린다
+   (`critical_section.c:91-101`).
+2. **Detach 와 중단.** `PyMutex_Lock` 은 기다릴 때 스레드 상태를 놓는다(`Python/lock.c:654-656`;
+   `Python/parking_lot.c:328-337`). 놓을 때 활성 섹션 전부를 풀고(`Python/pystate.c:2285-2296`,
+   `critical_section.c:106-130`), 다시 붙을 때 **맨 위 하나만** 다시 잡는다(`pystate.c:2269-2273`,
+   `critical_section.c:132-165`). 그래서 세 번째 섹션을 중첩하면 경합 때 바깥 둘이 풀린 채 남는다
+   (`Include/critical_section.h:16-22`: "This API does not provide a way to lock more than two objects at once").
+3. **섹션 구조체는 비공개.** "the contents of the structures are private"
+   (`Doc/c-api/synchronization.rst:225-232`, `Include/critical_section.h:39-40`). 스레드의 섹션 스택
+   (`PyThreadState.critical_section`)을 읽는 공개 함수는 없다. `PyMutex_IsLocked` 는 잠겼는지만 알려 주고 누가
+   쥐었는지는 모른다. 3.14 의 `PyCriticalSection*_BeginMutex` 도 mutex 둘까지다
+   (`Include/cpython/critical_section.h:38-42`).
+4. **`ob_mutex`.** 문서: "reserved for use by the critical section API ... Do not lock it directly with
+   `PyMutex_Lock`" (`Doc/c-api/structures.rst:58-66`, `Doc/howto/free-threading-extensions.rst:391-410`).
+5. **잠그는 CPython 연산과 잠그지 않는 읽기.** `PyList_SetItem` 은 리스트의 섹션을 연다
+   (`Objects/listobject.c:454-479`). `list + list` 는 두 리스트를 함께 잠근다(`listobject.c:813`). `list.sort` 는
+   key 를 부르는 동안 리스트의 섹션을 쥐고 리스트를 비워 둔다(`listobject.c:2925`, 2993). 원소 읽기
+   `PyList_GetItemRef` 는 잠그지 않는 원자적 읽기이고(`listobject.c:354-379`, 405-419), 인터프리터의 `a[i]` 가 바로
+   그 읽기다(`Python/bytecodes.c:1148-1151`). dict 읽기는 실패 경로에서 dict 의 섹션을 연다
+   (`Objects/dictobject.c:1647-1660`). `len` 은 원자적 길이 읽기다(3.15t `Include/cpython/listobject.h:30-36`).
+
+#### 나. 앞선 조사: `ob_mutex` 를 쓰는 방안 (리더 결정으로 제외)
+
+- **원안 (C), `PyMutex_Lock(&list->ob_mutex)` 를 주소 순으로: 건전하지 않다.** 호출자 섹션이 쥔 리스트
+  (`lst.sort(key=lambda v: f(lst, b, c))`)에서 자기 교착한다: 기다리며 놓을 때 SuspendAll 이 그 섹션을 풀고, 다시
+  붙을 때 Resume 이 같은 mutex 를 잡으려 한다. 공정성 handoff 로 mutex 가 이미 우리 몫이면 그 Resume 은 영원히
+  기다린다(`critical_section.c:113`: 비활성 맨 위 섹션은 다시 풀지 않는다). 또 직접 쥔 채 기다리면 Resume 이 호출자
+  섹션의 mutex 를 주소 순서와 무관하게 잡아 순환이 생길 수 있고, write-back 의 `PyList_SetItem` 이 자기 스레드를
+  기다린다.
+- **변형 (C'), 섹션 하나 + 나머지는 `ob_mutex` 시도만 (커밋 89e9bfae):** 위 결함은 피했지만 `ob_mutex` 를 문서의
+  "reserved" 를 넘어 쓴다. 리더 결정(2026-11-13)으로 제외했고 코드에서 지웠다(`ob_mutex`, `PyMutex` 비트를 직접 쓰는
+  곳이 남아 있지 않다).
+
+#### 다. 공개 API 만으로 본 후보와 판정
+
+- **(a) copy-in 전에 섹션을 중첩해 잡고, 하나도 중단되지 않았음을 확인: 불가.** 확인하려면 섹션 태그(`_cs_prev`
+  의 INACTIVE 비트)나 스레드의 섹션 스택을 읽어야 하는데 둘 다 비공개다(위 3). 중단은 우리가 기다리는 순간(Begin
+  의 느린 경로)에 일어나므로 시점을 피할 수도 없다(위 1, 2).
+- **(b) 낙관적 검증: 리스트마다 자기 섹션 안에서 copy-in 하고 읽은 항목의 강한 참조를 쥔 뒤, 커밋 때 읽은 칸의
+  동일성을 다시 보고 write-back: 일반적으로 건전하지 않다.**
+  - 커밋이 원자적이지 않다. 섹션은 둘까지라, 세 리스트 이상에 쓰는 함수의 write-back 은 리스트별로 나뉜다. 예:
+    `a[0] = 1; b[0] = 1; a[0] = 2`. 인터프리터에서 다른 스레드가 볼 수 있는 상태는 (0,0), (1,0), (1,1), (2,1) 이다.
+    a 를 먼저 커밋하면 (2,0) 이, b 를 먼저 커밋하면 (0,1) 이 보인다. 둘 다 CPython 이 만들지 않는 상태이고,
+    `a + b`(두 리스트를 함께 잠근다, 위 5)나 2 리스트 컴파일 함수가 그것을 관측한다. 어떤 커밋 순서도 이것을 막지
+    못한다. 쓰는 리스트가 둘 이하면 `PyCriticalSection2` 하나로 원자적으로 커밋할 수 있다.
+  - 읽기 검증에는 한 순간이 필요하다. 쓰기와 프로그램 순서로 섞인 읽기는 커밋 순간의 값이어야 하는데, 커밋에서
+    잠글 수 없는 리스트는 그 순간에 볼 수 없다. 커밋 전과 후에 같은 객체를 다시 보는 것(double collect)은 ABA 를
+    막지 못한다: 다른 스레드가 `t = r[0]; r[0] = 5.0; r[0] = t` 로 같은 객체를 되돌릴 수 있고, 리스트에는 공개
+    버전 번호가 없다.
+  - 그러니 (b) 가 건전한 경우는 쓰기 구간 동안 손대는 리스트가 둘 이하인 경우뿐이고, 그것은 (c) 의 특수 경우다.
+- **(c) 컴파일 타임에 리스트를 읽기 전용/쓰기 전용으로 나누거나 함수를 나눠 한 번에 섹션이 둘 이하가 되게: 쓰는
+  함수에는 지금 기반으로 불가.**
+  - 읽기 전용이라도 여러 리스트를 한 순간에 copy-in 할 필요는 남는다. 반례: 다른 스레드가 `a[1] = 1` 다음
+    `b[0] = 1` 을 하고, 프로그램이 `a[0]`, `b[0]`, `a[1]` 순으로 읽는다. a 를 t1 에, b 를 t2 > t1 에 따로 copy-in 하면
+    (`b[0]` = 1, `a[1]` = 0) 을 볼 수 있는데, 인터프리터는 `b[0]` 에서 1 을 보면 뒤의 `a[1]` 에서도 1 을 본다.
+  - 함수를 프로그램 지점에서 구간으로 나누고(각 구간이 리스트 둘 이하), 경계에서 write-back 하고 다시 copy-in 하는
+    것은 #152 의 poll 과 같은 논리로 건전하다. 하지만 경계에서 리스트가 바뀌었으면(길이, 원소 타입) 그 지점에서
+    인터프리터로 넘어가야 하고, 효과 뒤에는 deopt 할 수 없다. 지금 OSR 출구는 루프 poll 지점에만 있다. 임의
+    문장 지점의 연속(continuation)이 생기기 전에는 쓰는 함수에 쓸 수 없다(nbody `advance` 는 안쪽 루프 한 바퀴가
+    일곱 리스트를 모두 건드린다).
+- **(d1) 순수 함수: copy-in 없이 원소마다 공개 API 로 읽기: 건전하다 (채택, 에이전트 제안, 확인되지 않음).**
+  - 순수 함수는 리스트를 읽기만 한다. 각 `a[i]` 를 `PyList_GetItemRef`(인터프리터의 읽기 그 자체, 원자적, 위 5)
+    한 번으로, IR 의 프로그램 순서대로(문장마다 임시 변수에 순서대로 emit) 읽는다. 음수 색인은 그 읽기 때의 길이로
+    센다(인터프리터와 같음). `len(a)` 는 그 지점의 길이다. 이 실행은 인터프리터의 읽기를 같은 순서로 하는 것이므로
+    다른 스레드의 연산이 읽기 사이 어디에 끼든 그 interleaving 과 같다. 잠금을 쥐지 않으므로 교착도, 호출자 섹션
+    문제도, stop-the-world 지연도 없다.
+  - 원소 타입이 다르면(다른 스레드가 int 를 넣었다) deopt 한다. 순수 함수는 아직 아무 효과도 내지 않았으므로
+    해석 실행으로 다시 하는 것이 그대로 한 실행이다. 리스트가 줄었으면 그 지점에서 인터프리터와 같은
+    `IndexError("list index out of range")`. 길이가 호출 중 바뀔 수 있으므로 증명된(검사 없는) 색인은 쓰지 않는다.
+  - 조건(verifier `verify/array-direct`, cgen 도 다시 거절): entry global 없음(입구에서 한 번 읽은 전역과 나중의 원소
+    읽기가 어떤 순서와도 안 맞을 수 있다, 위 (c) 의 반례와 같은 꼴), 버퍼 매개변수 없음, 리스트 매개변수의
+    `a[:]` 없음(한 순간의 사본이 필요), 병렬 루프 없음(작업자는 Python API 를 쓰지 않는다).
+  - 리스트 하나, 둘의 경로는 그대로다: 같은 입력에 develop 과 바이트 단위로 같은 C 를 만든다(생성 C 비교로 확인).
+  - **비용(측정 전):** 읽기마다 함수 호출 하나와 참조 증감 한 쌍이다. copy-in 경로보다 느리고, 얼마나 빠른지는 CI
+    측정을 기다린다.
+- **(d2) 쓰는 함수의 원소별 접근: 불가(지금).** 쓰기는 `PyList_SetItem` 하나로 원자적이지만, 효과 뒤의 읽기가 다른
+  타입을 만나면 인터프리터는 계속 실행하는데 우리는 그 지점의 연속이 없다(위 (c) 와 같은 한계). 임의 지점 OSR 출구가
+  생기면 (d2) 가 nbody `advance` 를 푼다.
+
+#### 라. 판정과 결과
+
+- 셋 이상의 리스트에 **쓰는** 함수는 (B) 그대로 해석 실행이다(develop 과 같은 frontend/verify/cgen 거절).
+- **순수** 함수는 (d1) 로 컴파일된다. nbody: `energy` 가 컴파일되고, `advance`·`offset_momentum` 은 해석
+  실행이다(`test_class_methods.py` 의 EXPECTED). nbody 전체 속도는 `advance` 가 정하므로 거의 그대로일 것이다(측정 전).
+- 시험(`test_free_threaded.py`): 순수 3·7 리스트 함수의 컴파일, 인터프리터와 같은 결과(빈 리스트, 별칭, 다른 타입
+  원소의 deopt, 리스트가 아닌 인자, 짧은 리스트의 IndexError); 쓰는 3 리스트 함수와 entry global 이 있는 3 리스트
+  함수는 해석 실행; 프로그램 순서 시험(쓰는 스레드가 `c[0]` 다음 `a[0]` 을 쓰고, `a[0]`, `c[0]` 순으로 읽는 함수가
+  늘 `c[0] >= a[0]` 을 본다); 동시에 int 와 float 를 바꿔 넣어도 결과가 늘 인터프리터의 것; `list.sort` key 에서
+  부르기. 변형 시험: 읽기 순서를 바꾼 변형(`race_mutant`, CI 기본 실행 밖)과 원소 타입 검사를 뺀 런타임(결정적,
+  CI 에서 실행)이 잡혀야 한다. 옵션 (A) 변형은 3 리스트 쓰기 경로가 없어져 대상이 없으므로 지웠다.
+
+#### 마. 오너 결정이 필요한 점
+
+1. (d1) 을 받아들일지(에이전트 제안). 받아들이지 않으면 순수 함수도 (B) 로 돌린다(`ir.direct_lists` 하나).
+2. 쓰는 함수(nbody `advance`)를 위해 임의 문장 지점의 OSR 출구를 만들지: (c) 의 구간 나누기와 (d2) 가 둘 다 그것에
+   걸려 있다.
 
 ### 4.4 Kotlin 경계의 직접 호출
 
@@ -685,9 +1053,7 @@ upstream 대비 수치 오차와 커널 시간을 기준선으로 박아 둔다.
    인터프리터 시작 시 `builtins.compiled` 를 설치하고(#42), 일반 CPython 에서는 `typedpython` wheel 의
    `typedpython_builtins.pth` 가 `builtins` 에 없을 때만 항등 함수를 설치한다(런타임이 넣은 것을 덮어쓰지
    않는다). 타입 검사기에는 `__builtins__.pyi` 로 알린다, Pyrefly 1.3.2 는 검색 경로의 그 파일을 추가
-   내장으로 읽는다(실측). 모듈 단위 표기는 `# typedpython: compiled` 주석을 유지한다: `# pyright: strict` 와 같은
-   도구 pragma 형태이고, 실행 시 이름 조회가 필요 없어 일반 CPython 에서 부작용이 없으며, 데코레이터 없이
-   모듈 전체를 지정할 수 있다.
+   내장으로 읽는다(실측). 모듈 단위 pragma(`# typedpython: compiled`)는 2026-10-30 메인테이너 결정으로 제거했다(#353). `@compiled` 가 컴파일 대상을 표시하는 유일한 수단이다.
 2. ~~고정폭 정수의 오버플로 의미~~, **결정됨:** `int` 는 i64 로 컴파일하고 오버플로 시 인터프리터 재실행으로 큰 정수로 승격(의미 보존).
 3. ~~pypackpack Cython 슬롯 인터페이스 소유~~, **결정됨:** pypackpack 이 정한다. TypedPython 은 생성한 C 소스, 빌드 플래그, C 를 낸 모듈 목록을 넘긴다. 확장이 원본 소스를 품으므로 별도 `.py` 폴백은 없다(Cython 폐기 후 갱신).
 4. ~~GPU 착지를 torchnative 커스텀 op 로 할 것인가~~, **결정됨 (2026-10-04, 메인테이너):** 커널은

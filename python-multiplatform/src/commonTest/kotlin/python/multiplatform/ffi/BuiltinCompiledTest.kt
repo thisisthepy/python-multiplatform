@@ -11,7 +11,9 @@ class BuiltinCompiledTest {
     @Test
     fun compiledResolvesWithoutImportAndIsIdentity() = PythonTestFixture.withInterpreter {
         assertEquals("True", evalStr("compiled(len) is len"))
-        Python3.exec("def _bc_f(): return 1\n_bc_r = compiled(_bc_f) is _bc_f")
+        assertEquals("True", evalStr("compiled(parallel=True)(len) is len"))
+        assertEquals("True", evalStr("compiled()(len) is len"))
+        Python3.exec("def _bc_f(): return 1\n_bc_r = compiled(_bc_f) is _bc_f and compiled(parallel=True)(_bc_f) is _bc_f")
         assertEquals("True", evalStr("_bc_r"))
         // It must live in builtins, not leak into __main__.
         assertEquals("False", evalStr("'compiled' in globals()"))

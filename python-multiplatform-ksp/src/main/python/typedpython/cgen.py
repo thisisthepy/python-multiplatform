@@ -29,7 +29,10 @@ parameters holds the lists' critical section (`tp_cs_begin`, one list or two) fr
 copy-in to after the last write-back: `tp_cs_end` is part of the same `exits` that run the write-back
 on every path (ok, error, deopt, the last before the interpreted redo), and is a no-op on a path
 that left before locking. More than two list parameters are refused here (`CGenError`), as in the
-front end and the verifier: CPython has no three-object critical section. A function that holds an
+front end and the verifier: CPython has no three-object critical section; except in a pure function
+(#255, `ir.direct_lists`): its lists are not copied, every Index is `tp_list_ld_*`
+(`PyList_GetItemRef` in program order, an element of another type deopts), every Len the current
+length, and no lock is taken. A function that holds an
 array does not poll the eval breaker (#141, open decision #152), so a long compiled array loop
 delays other threads' stop-the-world requests until it returns: a liveness delay, results
 unaffected. The `__typedpython_deopts__` read-add-write of `tp_cg_redo` runs in the module dict's
@@ -57,7 +60,10 @@ the eval breaker (it counts as a snapshot holder, conservatively).
 
 Depth (issue #57): every impl function calls `tp_enter_call()` before it owns anything (a refusal
 returns -1 directly: RecursionError set, nothing counted) and `tp_leave_call()` in the one exit
-block, so ok, error and deopt exits all leave exactly once.
+block, so ok, error and deopt exits all leave exactly once. The wrapper brackets its impl call with
+`tp_depth_seg_begin` / `tp_depth_seg_end` (#125): the Python depth is measured at the first check of
+that call and reused by every later check until a wrapper of this module returns inside it
+(tp_runtime.h "Segments"); the recursion limit and the C-stack guard are still read per frame.
 
 Fast entry (issue #147). A *bounded* function (`_bounded_functions`: no call cycle, every callee
 bounded, no node that can run Python code) has a call tree of at most k compiled frames. Its
@@ -78,12 +84,23 @@ Ownership rule (ir.py "Safety"), implemented by the `_own_*` emit helpers below 
   2. every OBJ-typed expression evaluates into a fresh temporary that owns a new reference;
      temporaries are NULL at every statement boundary;
   3. a temporary is consumed exactly once: moved into a local (the local's old reference is
-     released), moved into `*tp_out` by Return, or released (`tp_release`) right after the helper
-     that borrowed it returns;
+     released), moved into `*tp_out` by Return, moved into the slots of a fresh object by
+     `tp_new_fixed_move` (then emptied, `_moved_temps`), or released (`tp_release`) right after the
+     helper that borrowed it returns;
+  3a. an operand that a helper only borrows for its own duration, the two sides of Is, the object of
+     a FieldGet or IsExact and the OBJ arguments of a C to C Call, names a plain OBJ local itself
+     (`l_x`, or `Py_None` for the None constant) instead of a copy: no Py_NewRef, no release
+     (`_borrow_operand`, `_operand_release`). The local's own reference keeps the object alive for
+     the helper's whole duration, whatever other threads do (it is this frame's reference), and a
+     local changes only at a statement boundary (the IR has no assignment expression), so reading
+     the name when the helper runs is reading it when the operand was evaluated. CPython 3.14+ does
+     the same for these operands (LOAD_FAST_BORROW). Issue #125;
+     design 4.3.4 "참조 옮기기와 빌린 피연산자";
   4. every exit of the impl, return, error, deopt, goes through one exit block that releases
      every OBJ local and temporary.
   The generated code never decrements a reference except through `tp_release` (API.md); the only
-  increment is `Py_NewRef` when an OBJ local is read or an OBJ parameter is adopted.
+  increment is `Py_NewRef` when an OBJ local is read as a value (not as a borrowed operand, 3a) or
+  an OBJ parameter is adopted.
 
 Local arrays (ir.NewArray / CopyArray, `Function` docstring "Local arrays"). A local of an array type
 is a `tp_i64_array` / `tp_f64_array` struct held by value in the impl, zero-initialised at entry
@@ -114,7 +131,8 @@ any check is "not compiled" (`cls_ok = 0`) and is never touched through memory:
      impure functions (whose impl may never return 1), the impl's copy serves C to C Calls, where a
      failure is a deopt, so a Call of a function with a `Param.cls` parameter counts as a node that
      can deopt (`_can_deopt`), exactly like a callee with entry_globals;
-  3. FieldGet / FieldSet / New go through `tp_field_get` / `tp_field_set` / `tp_new_fixed` with the
+  3. FieldGet / FieldSet / New go through `tp_field_get` / `tp_field_set` / `tp_new_fixed_move`
+     (tp_new_fixed's stores, with the argument temporaries' references moved in, #125) with the
      captured descriptors; CheckExact deopts (return 1) on mismatch and is legal only in a pure
      function; Is is a plain BOOL.
 
@@ -446,6 +464,20 @@ def _class_current_expr(obj_c: str, k: int, fields_c: str, n: int, descrs_c: str
             f"{fields_c}, {n}, {descrs_c})")
 
 
+def _moved_temps(items: list[str]) -> str:
+    """After `tp_new_fixed_move` succeeded: the object owns the argument temporaries' references, so
+    the temporaries are emptied instead of released (module docstring, rule 3; #125). The single
+    mutation point of the move: returning "" releases them anyway and must fail the tests."""
+    return " ".join(f"{t} = NULL;" for t in items)
+
+
+def _operand_release(name: str, owned: bool) -> str | None:
+    """The temporary to release after a helper borrowed operand `name`: an owned temporary, never a
+    borrowed OBJ local (rule 3a; #125). The single mutation point of the borrow: releasing every
+    operand drops a reference the local still owns and must fail the tests."""
+    return name if owned else None
+
+
 def _watch_event_stmt() -> str:
     """The body of the module's dict-watcher callback (module docstring, rule 5)."""
     return "return tp_globals_watch_event(event, key, tp_watch_names);"
@@ -494,10 +526,19 @@ def _runs_no_python(f: ir.Function) -> bool:
 def _bounded_functions(functions: dict[str, ir.Function]) -> dict[str, int]:
     """name -> k for every bounded function (module docstring, "Fast entry"): in no call cycle,
     every callee bounded, `_runs_no_python`. k(f) = 1 + max(k(callee)), 1 without callees: the most
-    compiled frames a call of `f` can have in flight at once."""
+    compiled frames a call of `f` can have in flight at once.
+    A `fastmath` function is never given an `inline` fast twin (`tp_fimpl_*`) when some other
+    function in the module calls it without `fastmath`, so a non-fastmath caller can never inline
+    a fastmath body (#332)."""
     callees: dict[str, set[str]] = {}
     for name, f in functions.items():
         callees[name] = {e.function for e in _all_exprs(f) if isinstance(e, ir.Call)}
+    called_from_exact = {
+        c
+        for caller_name, cs in callees.items()
+        if not functions[caller_name].fastmath
+        for c in cs
+    }
     k: dict[str, int | None] = {}                 # None: not bounded (also while on the DFS stack)
 
     def visit(name: str) -> int | None:
@@ -505,7 +546,7 @@ def _bounded_functions(functions: dict[str, ir.Function]) -> dict[str, int]:
             return k[name]
         k[name] = None                            # on the stack: reaching it again is a cycle
         f = functions[name]
-        if not _runs_no_python(f):
+        if not _runs_no_python(f) or (f.fastmath and name in called_from_exact):
             return None
         deepest = 0
         for c in callees[name]:
@@ -743,6 +784,27 @@ def generate(module: ir.Module, source_path: Path, display_path: str | None = No
     w("#if !defined(_MSC_VER) || defined(__clang__)    /* cl.exe warns on an unknown pragma */")
     w("#pragma STDC FP_CONTRACT OFF")
     w("#endif")
+    if any(f.fastmath for f in module.functions):
+        w("/* SPEC N-8 (#153, #332): per-function `@compiled(fastmath=True)` opt-in (NOT CPython-identical). */")
+        w("#if defined(__clang__)")
+        w("#define TP_FASTMATH_BEGIN _Pragma(\"clang fp reassociate(on) contract(fast)\")")
+        w("#define TP_FASTMATH_END _Pragma(\"clang fp reassociate(off) contract(off)\")")
+        w("#elif defined(__GNUC__)")
+        # The same scope as clang (#368): reassociation and FMA contraction only.
+        # associative-math takes effect only with no-signed-zeros and no-trapping-math; never
+        # fast-math, whose finite-math-only folds `x != x` and isnan away.
+        w("#define TP_FASTMATH_BEGIN _Pragma(\"GCC push_options\") _Pragma(\"GCC optimize("
+          "\\\"associative-math,no-signed-zeros,no-trapping-math,fp-contract=fast\\\")\")")
+        w("#define TP_FASTMATH_END _Pragma(\"GCC pop_options\")")
+        w("#elif defined(_MSC_VER)")
+        # cl.exe has no reassociation-only switch: float_control(precise, off) is /fp:fast, which also
+        # folds `x != x` away (Windows CI, #368). So MSVC gets FMA contraction only.
+        w("#define TP_FASTMATH_BEGIN __pragma(fp_contract(on))")
+        w("#define TP_FASTMATH_END __pragma(fp_contract(off))")
+        w("#else")
+        w("#define TP_FASTMATH_BEGIN")
+        w("#define TP_FASTMATH_END")
+        w("#endif")
     w("")
     w(f"static const char tp_source[] =\n    {c_source_init(source)};")
     w(f"static const char tp_source_path[] = {c_string(display_path)};")
@@ -891,7 +953,9 @@ def _check_function(f: ir.Function, functions: dict[str, ir.Function]) -> None:
     if f.entry_globals:
         _check_entry_globals(f, functions)
     n_arrays = sum(isinstance(p, ir.ArrayParam) and p.buffer is None for p in f.params)
-    if n_arrays > 2:
+    if ir.direct_lists(f):
+        _check_direct_lists(f)
+    elif n_arrays > 2:
         raise CGenError(f"{f.name}: {n_arrays} array parameters; at most two (CPython offers one- and "
                         "two-object critical sections only, and a third lock could suspend the others)")
     for p in f.params:
@@ -927,6 +991,26 @@ def _is_closed(f: ir.Function, functions: dict[str, ir.Function], seen=None) -> 
             if callee is None or not _is_closed(callee, functions, seen):
                 return False
     return True
+
+
+def _check_direct_lists(f: ir.Function) -> None:
+    """#255 (ir.direct_lists): what a pure function with three or more lists read element by element
+    may not have."""
+    why = None
+    if not f.may_deopt:
+        why = "may_deopt is False (every element read can deopt)"
+    elif f.entry_globals:
+        why = f"entry global {f.entry_globals[0].name} (it would be read once at entry)"
+    elif any(isinstance(p, ir.ArrayParam) and (p.buffer is not None or p.stored
+                                                or p.type not in _ARRAY_PFX) for p in f.params):
+        why = "a buffer parameter, a stored list or a list of another element type"
+    elif any(isinstance(e, ir.CopyArray) and any(q.name == e.src for q in f.params) for e in _all_exprs(f)):
+        why = "a CopyArray of a list parameter"
+    elif any(isinstance(s, ir.ForRange) and s.par is not None for s in _walk_stmts(f.body)):
+        why = "a parallel loop"
+    if why is not None:
+        raise CGenError(f"{f.name}: three or more list parameters are read element by element (#255), "
+                        f"which rules out {why}")
 
 
 def _check_entry_globals(f: ir.Function, functions: dict[str, ir.Function]) -> None:
@@ -1048,6 +1132,9 @@ class _FnGen:
         self.depth = 1
         self.temps: list[tuple[str, str]] = []      # (C type, name)
         self.arrays = {p.name: p for p in f.params if isinstance(p, ir.ArrayParam)}
+        # #255: a pure function with three or more lists reads them element by element (no copy-in)
+        self.direct = {p.name for p in f.params if isinstance(p, ir.ArrayParam) and p.buffer is None} \
+            if ir.direct_lists(f) else set()
         self.par_defs: list[str] = []               # outlined region bodies (SPEC N-15), emitted before the impl
         self.local_arrays: dict[str, Type] = {}       # name -> F64_ARRAY / I64_ARRAY
         self.brk: list = []                    # per open loop: goto label for `break`, or None
@@ -1463,15 +1550,18 @@ class _FnGen:
             int_arg = a.type is Type.INT and p.type is Type.I64 and e.redo
             if a.type is not p.type and not int_arg:
                 raise CGenError(f"{self.f.name}: Call {e.function} arg {p.name}: {a.type} for {p.type}")
-            v = self.ev(a)
+            if a.type is Type.OBJ:
+                vo = self._borrow_operand(a, "Call argument")      # rule 3a
+                v = vo[0]
+                owned.append(vo)
+            else:
+                v = self.ev(a)
             values.append(v)
             if int_arg:
                 args.append(f"{v}.v")
                 int_args.append(v)
             else:
                 args.append(v)
-            if a.type is Type.OBJ:
-                owned.append(v)
         t = ti = None
         self.emit("tp_s = 0;")
         if not self.f.pure and not self.fast:
@@ -1512,7 +1602,7 @@ class _FnGen:
             # a pure callee using classes returns 1 when a class check fails (module docstring,
             # rule 7): redo it interpreted; this impure caller must not deopt
             self._redo_call(callee, e.args, values, t)
-        self._own_release(*owned)
+        self._release_operands(*owned)
         for v in int_args:
             self.emit(f"tp_int_release(&{v});")
         self.emit("if (tp_s != 0) { tp_rc = tp_s; goto tp_exit; }")
@@ -1602,17 +1692,35 @@ class _FnGen:
             raise CGenError(f"{self.f.name}: {what} on {e.type}")
         return self.ev(e)
 
+    def _borrow_operand(self, e: ir.Expr, what: str) -> tuple[str, bool]:
+        """An OBJ operand the helper only borrows (module docstring, rule 3a): (C name, owned).
+        A plain OBJ local (not virtual, not a region pointer) names itself and the None constant
+        names Py_None, both borrowed; anything else is an owned temporary as `_obj_operand`."""
+        if e.type is not Type.OBJ:
+            raise CGenError(f"{self.f.name}: {what} on {e.type}")
+        if not self.rmode:
+            if (isinstance(e, ir.Local) and e.name not in self.virtual
+                    and self.types.get(e.name) is Type.OBJ):
+                return _ident("l", e.name), False
+            if isinstance(e, ir.Const) and e.value is None:
+                return "Py_None", False
+        return self.ev(e), True
+
+    def _release_operands(self, *ops: tuple[str, bool]) -> None:
+        self._own_release(*[n for n in (_operand_release(name, owned) for name, owned in ops)
+                            if n is not None])
+
     def ev_Is(self, e: ir.Is) -> str:
         if self.rmode:
             a, b = self._r_ptr_name(e.left), self._r_ptr_name(e.right)
             t = self.tmp("int")
             self.emit(f"{t} = ({a} {'!=' if e.negate else '=='} {b});")
             return t
-        a = self._obj_operand(e.left, "Is")
-        b = self._obj_operand(e.right, "Is")
+        ao = self._borrow_operand(e.left, "Is")
+        bo = self._borrow_operand(e.right, "Is")
         t = self.tmp("int")
-        self.emit(f"{t} = ({a} {'!=' if e.negate else '=='} {b});")
-        self._own_release(a, b)
+        self.emit(f"{t} = ({ao[0]} {'!=' if e.negate else '=='} {bo[0]});")
+        self._release_operands(ao, bo)
         return t
 
     def _current(self, obj_c: str, cls: str) -> str:
@@ -1639,7 +1747,8 @@ class _FnGen:
             self.emit(f"{t} = ({p} != NULL);")
             return t
         k = self._class(e.cls)
-        o = self._obj_operand(e.obj, "IsExact")
+        oo = self._borrow_operand(e.obj, "IsExact")
+        o = oo[0]
         t = self.tmp("int")
         self.emit(f"tp_s = {self._global_ok(e.cls)};")
         self.emit("if (tp_s < 0) { tp_rc = -1; goto tp_exit; }")
@@ -1654,7 +1763,7 @@ class _FnGen:
             self._own_release(g)
         self.depth -= 1
         self.emit("}")
-        self._own_release(o)
+        self._release_operands(oo)
         return t
 
     def ev_CheckExact(self, e: ir.CheckExact) -> str:
@@ -1686,7 +1795,8 @@ class _FnGen:
                 raise CGenError(f"{self.f.name}: FieldGet {e.cls}.{e.field} on virtual {e.obj.name}")
             return self._own_copy(_ident("l", _vfield(e.obj.name, cd.fields.index(e.field))))
         slot = self.mg.slot(self.f.name, e.cls, e.field)
-        o = self._obj_operand(e.obj, "FieldGet")
+        oo = self._borrow_operand(e.obj, "FieldGet")
+        o = oo[0]
         t = self.tmp("PyObject *")
         self.emit(f"tp_s = {self._current(o, e.cls)};")
         self.emit("if (tp_s < 0) { tp_rc = -1; goto tp_exit; }")
@@ -1699,7 +1809,7 @@ class _FnGen:
             self.emit(f"{t} = tp_getattr({o}, tp_st->names[{self.mg.name_index(e.field)}]);")
         self.depth -= 1
         self.emit("}")
-        self._own_release(o)
+        self._release_operands(oo)
         self.emit(f"if ({t} == NULL) {{ tp_rc = -1; goto tp_exit; }}")
         return t
 
@@ -1753,8 +1863,10 @@ class _FnGen:
         self.emit("if (tp_s < 0) { tp_rc = -1; goto tp_exit; }")
         self.emit(av)
         self.emit("  if (tp_s) {")
-        self.emit(f"      {t} = tp_new_fixed((PyTypeObject *)tp_st->classes[{k}], "
+        self.emit(f"      {t} = tp_new_fixed_move((PyTypeObject *)tp_st->classes[{k}], "
                   f"{f'&tp_st->slots[{base}]' if items else 'NULL'}, tp_av, {len(items)});")
+        if items:                           # the object owns them now (rule 3)
+            self.emit(f"      if ({t} != NULL) {{ {_moved_temps(items)} }}")
         self.emit("  } else {")
         self.depth += 1
         if self.f.pure:
@@ -1766,7 +1878,7 @@ class _FnGen:
             self.emit(f"  {t} = tp_call({gk} ? tp_st->classes[{k}] : {g}, tp_av, {len(items)}, NULL);")
         self.depth -= 1
         self.emit("  } }")
-        self._own_release(*items)                           # the slots took their own references
+        self._own_release(*items)       # emptied when moved into the slots; released on the slow path
         if g is not None:
             self._own_release(g)
         self.emit(f"if ({t} == NULL) {{ tp_rc = -1; goto tp_exit; }}")
@@ -1928,6 +2040,9 @@ class _FnGen:
     def ev_Len(self, e: ir.Len) -> str:
         _, ptr = self._array(e.array)
         t = self.tmp("int64_t")
+        if e.array in self.direct:
+            self.emit(f"{t} = (int64_t)PyList_GET_SIZE({ptr}->list);   /* #255: the current length */")
+            return t
         self.emit(f"{t} = (int64_t){ptr}->len;")
         return t
 
@@ -1954,6 +2069,17 @@ class _FnGen:
         at, ptr = self._array(e.array)
         if e.type is not _ARRAY_ELEM[at]:
             raise CGenError(f"{self.f.name}: Index of {at} typed {e.type}")
+        if e.array in self.direct:
+            # #255: one PyList_GetItemRef (the interpreter's read), in program order; IndexError, or a
+            # deopt for an element of another type
+            if e.index.type is not Type.I64:
+                raise CGenError(f"{self.f.name}: index of type {e.index.type}")
+            i = self.ev(e.index)
+            t = self.tmp(_CT[e.type])
+            sfx = "f64" if at is Type.F64_ARRAY else "i64"
+            self.emit(f"tp_s = tp_list_ld_{sfx}({ptr}->list, {i}, &{t});")
+            self.emit("if (tp_s != 0) { tp_rc = tp_s; goto tp_exit; }")
+            return t
         buffer = self._buffer(e.array)
         slot = self._slot(at, ptr, e.index, e.proven, 0, buffer)
         t = self.tmp(_CT[e.type])
@@ -2211,7 +2337,8 @@ class _FnGen:
     @property
     def snapshot(self) -> bool:
         """Holds an array copy-in or an entry-globals snapshot, so must not run user code (#141)."""
-        return bool(self.f.entry_globals) or any(isinstance(p, ir.ArrayParam) for p in self.f.params)
+        return bool(self.f.entry_globals) or any(isinstance(p, ir.ArrayParam) and p.name not in self.direct
+                                                 for p in self.f.params)
 
     def poll(self, every_time: bool = False) -> None:
         """At the top of each loop iteration (#141): signals, pending calls, GIL hand-off.
@@ -2892,7 +3019,8 @@ class _FnGen:
         """The impl (preceded by its fast twin when bounded) and the wrapper."""
         parts = []
         if self.rmode:
-            return self.impl()
+            text = self.impl()
+            return f"TP_FASTMATH_BEGIN\n{text}TP_FASTMATH_END\n" if self.f.fastmath else text
         if self.f.name in self.mg.bounded:
             twin = _FnGen(self.mg, self.f, fast=True)
             twin_text = twin.impl()
@@ -2901,6 +3029,8 @@ class _FnGen:
         impl_text = self.impl()
         parts += self.par_defs
         parts.append(impl_text)
+        if self.f.fastmath:
+            parts = ["TP_FASTMATH_BEGIN", *parts, "TP_FASTMATH_END"]
         parts.append(self.wrapper())
         return "\n".join(parts)
 
@@ -2919,13 +3049,15 @@ class _FnGen:
         args = []
         arrays = []         # list parameters: copy-in / write-back under a critical section
         buffers = []        # buffer parameters: a Py_buffer export held for the whole call (#149)
-        if any(isinstance(p, ir.ArrayParam) and p.buffer is None for p in f.params):
+        direct = []         # #255: lists read element by element (ir.direct_lists), no copy-in, no lock
+        is_direct = ir.direct_lists(f)
+        if any(isinstance(p, ir.ArrayParam) and p.buffer is None for p in f.params) and not is_direct:
             L.append("    tp_cs tp_lock = {0};")
         for i, p in enumerate(f.params):
             if isinstance(p, ir.ArrayParam):
                 L.append(f"    {'tp_buf' if p.buffer else _ARRAY_CT[p.type]} tp_a{i} = {{0}};")
                 args.append(f"&tp_a{i}")
-                (buffers if p.buffer else arrays).append((i, p))
+                (buffers if p.buffer else direct if is_direct else arrays).append((i, p))
             elif p.type is Type.OBJ:
                 args.append(f"tp_args[{i}]")            # borrowed for the call's duration
             else:
@@ -2984,6 +3116,13 @@ class _FnGen:
                      f"{fmt1}, {fmt2}, {int(p.stored)}, &tp_a{i});")
             L.append("    if (tp_s < 0) goto tp_error;")
             L.append("    if (tp_s != 0) goto tp_deopt;")
+        if direct:
+            # #255: exact lists (a subclass may override __getitem__ / __len__), not copied; the
+            # wrapper's arguments keep them alive for the call
+            L.append("    if (" + " || ".join(f"!PyList_CheckExact(tp_args[{i}])" for i, _ in direct)
+                     + ") goto tp_deopt;")
+            for i, _ in direct:
+                L.append(f"    tp_a{i}.list = tp_args[{i}];   /* borrowed; read by tp_list_ld_* */")
         # aliasing guard, then copy-in
         if len(arrays) > 1:
             objs = ", ".join(f"tp_args[{i}]" for i, _ in arrays)
@@ -3029,7 +3168,10 @@ class _FnGen:
             lock = "&tp_lock" if lst else "NULL"
             L.append(f"    tp_osr tp_ox = {{{lock}, {{{l0}, {l1}}}, NULL}};")
             L.append("    tp_t->osr = &tp_ox;      /* #152: taken by the impl at entry */")
+        # #125: the impl call is one depth segment (tp_runtime.h "Segments"): reset before and after
+        L.append("    tp_depth_seg_begin(tp_t);")
         L.append(f"    tp_s = {_ident('tp_impl', f.name)}(tp_module, tp_ts, tp_t{''.join(', ' + a for a in args)});")
+        L.append("    tp_depth_seg_end(tp_t);")
         if osr:
             L.append("    tp_t->osr = NULL;")
             L.append("    if (tp_s == 2) {           /* left for the continuation: its result, lists already final */")
@@ -3546,6 +3688,11 @@ def _exec_function(mg: _ModGen) -> str:
         "#ifdef TP_TRACE_FAST",
         f"    tp_cf = PyCFunction_NewEx(&tp_methods[{len(mg.plain)}], tp_module, tp_modname);",
         "    if (tp_cf == NULL || PyDict_SetItemString(tp_dict, \"__tp_trace_fast_hits__\", tp_cf) < 0) goto tp_done;",
+        "    tp_release(&tp_cf);",
+        "#endif",
+        "#ifdef TP_TRACE_DEPTH",
+        "    tp_cf = PyCFunction_NewEx(&tp_trace_frame_reads_def, tp_module, NULL);",
+        "    if (tp_cf == NULL || PyDict_SetItemString(tp_dict, \"__tp_trace_frame_reads__\", tp_cf) < 0) goto tp_done;",
         "    tp_release(&tp_cf);",
         "#endif",
         # SPEC N-14: strong references to the originals' code objects, read by tp_traced at every entry

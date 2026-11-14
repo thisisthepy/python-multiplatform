@@ -13,8 +13,8 @@ platform-only file actually needs to be there, and one promotion that was tried 
 
 | Execution path | Gradle task | Source-set chain |
 |---|---|---|
-| desktop | `:python-multiplatform:desktopTest` | `desktopTest -> jvmTest -> commonTest` |
-| desktop, free-threaded | same task, `-PpythonFreeThreaded=true` | same chain, linked against `libpython3.14t` instead of `libpython3.14` |
+| desktop | `:python-multiplatform:desktopTest` | `desktopTest -> jvmTest -> commonTest`, against the free-threaded `libpython3.15t` (the only desktop build since #158) |
+| desktop native | `:python-multiplatform:macosArm64Test`, `linuxX64Test` | `{macosArm64Test, linuxX64Test} -> desktopNativeTest -> nativeTest -> commonTest`, linked against `libpython3.15t` |
 | iOS simulator | `:python-multiplatform:iosSimulatorArm64Test` | `iosSimulatorArm64Test -> nativeTest -> commonTest` |
 | androidNative | `:python-multiplatform:androidNative{Arm64,X64}Test` (custom `adb`-driving task; `compileTestKotlinAndroidNativeArm64` for a device-free check) | `androidNative*Test -> artTest -> nativeTest -> commonTest` |
 | Android (ART) | `connectedAndroidTest` (instrumented, needs a device/emulator) | `androidInstrumentedTest -> jvmTest -> commonTest` |

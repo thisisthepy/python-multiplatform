@@ -519,7 +519,7 @@ def lower(tmp_path, source):
 
 def test_frontend_gives_a_snapshot_holder_one_resume_per_loop(tmp_path):
     module = lower(tmp_path, """
-        # typedpython: compiled
+        @compiled
         def f(xs: list[float], n: int) -> float:
             t = 0.0
             for i in range(n):
@@ -572,7 +572,7 @@ def test_frontend_gives_a_snapshot_holder_one_resume_per_loop(tmp_path):
 
 def test_frontend_function_without_a_snapshot_has_no_resumes(tmp_path):
     module = lower(tmp_path, """
-        # typedpython: compiled
+        @compiled
         def g(n: int) -> int:
             t = 0
             for i in range(n):

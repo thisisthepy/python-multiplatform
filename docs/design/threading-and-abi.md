@@ -5,17 +5,22 @@
 Parallelism comes from **free-threaded CPython**, not from per-interpreter GIL sub-interpreters
 (AGENTS.md §12.8).
 
-The library supports **two flavours**, chosen at build time:
+Maintainer, #158 (2026-10-04): "Free-threaded is the default and the only build. The GIL build is
+not kept as an option. Baseline is CPython 3.15t." Desktop moved first (leader, 2026-11-13: "flip the
+desktop default to 3.15t now, before the #377 alpha03 release"); the other platforms follow, so today
+the build differs by platform (SPEC T-1):
 
-| Interpreter | Threading behaviour | Status |
+| Platform | Interpreter | Threading behaviour |
 |---|---|---|
-| `python3.X` (GIL) | Kotlin threads each attach a thread state and serialise on the GIL | default (`pythonFreeThreaded=false` in `gradle.properties`) |
-| `python3.Xt` (free-threaded) | Each Kotlin thread talks to its own free-running Python thread | **3.14t works on desktop**, opt-in with `-PpythonFreeThreaded=true` |
+| Desktop JVM, `macosArm64`, `linuxX64` | `python3.15t` (free-threaded), the only desktop build | Each Kotlin thread talks to its own free-running Python thread |
+| Android (ART, androidNative; arm64-v8a and x86_64), iOS | `python3.15t` (free-threaded), the project's own build, the only mobile build since #328 | Each Kotlin thread talks to its own free-running Python thread (not yet run on an emulator or simulator) |
+| wasmJs | GIL until #175 | single-threaded |
 
-The interpreter version is pinned by `pythonVersion` in `gradle.properties` (3.14.7 at the time of
-writing). Free-threading is **not** gated on 3.15t: the whole desktop suite runs on 3.14.7t
-(236 tests, 0 failures, 1 skipped, ROADMAP §9; SPEC T-2). Only desktop has free-threaded
-prebuilts; Android and iOS have none, so the opt-in is desktop-only. How the earlier "from 3.15t"
+The per-platform fact is `embedsFreeThreadedPython` (commonMain `EmbeddedPythonBuild.kt`, an
+`expect`/`actual`); `-PpythonFreeThreaded` is removed. The interpreter version is pinned by
+`pythonVersion` in `gradle.properties` (3.15.0). Before #158 free-threading was a desktop opt-in, and
+the whole desktop suite ran on 3.14.7t (236 tests, 0 failures, 1 skipped, ROADMAP §9; SPEC T-2); the
+3.15t default has not yet been observed running the suite. How the earlier "from 3.15t"
 conclusion was reached, and why it did not hold, is in
 [`../archive/threading-and-abi-3.15t-gate.md`](../archive/threading-and-abi-3.15t-gate.md).
 
@@ -93,13 +98,13 @@ Design for two artefacts, but keep the split shallow enough to collapse later.
 ## Prebuilt availability
 
 Desktop (macOS arm64/x86_64, Linux x86_64, Windows x86_64) has GIL and free-threaded builds on the
-python-build-standalone releases; the build uses the `-freethreaded` archive when
-`pythonFreeThreaded=true`. **Android (python.org) and iOS (Python-Apple-support) publish no
-free-threaded build**, so free-threading stays a desktop-only opt-in, and enabling it by default
-would split the threading model, and the object-lifetime and thread-state design layered on top,
-across platforms. Switching the default would additionally need adequate free-threaded wheel
-coverage for the C extensions users care about. Table as of the 20260807 release, kept in the
-archive note above.
+python-build-standalone releases; the build uses only the `-freethreaded` archive (#158).
+**Android (python.org) and iOS (Python-Apple-support) publish no free-threaded build**, so the project
+builds its own (#163, release `cpython-3.15.0t-mobile`), and since #328 the library embeds those on
+Android, androidNative and iOS. Only wasm still has a GIL build (#175), so the threading model is split
+between wasm and everything else. The maintainer accepted the wheel-coverage cost on #158
+("third-party cp315t / abi3t wheels lag the release for a while; pypackpack builds from sdist where
+they are missing"). Table as of the 20260807 release, kept in the archive note above.
 
 ## Thread-state management
 

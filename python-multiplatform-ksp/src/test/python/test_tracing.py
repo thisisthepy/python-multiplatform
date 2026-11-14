@@ -16,17 +16,19 @@ from pathlib import Path
 
 import pytest
 
+from conftest import COMPILED_SHIM
 from typedpython import pipeline
 
 SOURCE = """\
-# typedpython: compiled
 from typing import Callable
 
 
+@compiled
 def sq(x: float) -> float:
     return x * x
 
 
+@compiled
 def loop(n: int) -> float:
     acc: float = 0.0
     for k in range(n):
@@ -34,17 +36,19 @@ def loop(n: int) -> float:
     return acc
 
 
+@compiled
 def leaf(cb: Callable[[], None], n: float) -> float:
     cb()
     return n + 1.0
 
 
+@compiled
 def outer(cb: Callable[[], None], n: float) -> float:
     cb()
     return leaf(cb, n) + leaf(cb, n)
 """
 
-LOADER = """\
+LOADER = COMPILED_SHIM + """\
 import importlib.machinery, importlib.util, json, sys, threading
 path = sys.argv[1]
 loader = importlib.machinery.ExtensionFileLoader("tmod", path)

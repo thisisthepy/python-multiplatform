@@ -1,16 +1,9 @@
 name: Android Native CI
 
 on:
-  # Checked on develop after merging, not on every pull request (user decision,
-  # 2026-10-17). A red develop is fixed forward by its own pull request.
-  push:
-    branches: [ "develop", "main" ]
-  workflow_dispatch:
-concurrency:
-  # A run in progress finishes; a newer push replaces only the queued run (frequent merges
-  # to develop otherwise cancelled every run before it reported).
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  # Runs only as part of ci.yml, which is started by hand (owner, 2026-11-14: "개발 테스트 ci는
+  # 명시적으로 실행하기"). ci.yml holds the one concurrency group for the repository.
+  workflow_call:
 
 jobs:
   compile:
