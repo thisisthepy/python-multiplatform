@@ -495,13 +495,13 @@ def test_one_and_two_list_functions_keep_the_copy_in_window(tmp_path):
 
 # --- the compiled extension (CI: needs a C compiler) --------------------------------------------------------
 
-def _build(tmp_path_factory, name, skip_statement=False, runtime=None):
+def _build(tmp_path_factory, name, skip_statement=False, runtime=None, source=None):
     from test_cgen import need_runtime, runtime_dir
     from typedpython import cbuild
     need_runtime()
     d = tmp_path_factory.mktemp(name)
     path = d / f"{name}.py"
-    path.write_text(SOURCE)
+    path.write_text(SOURCE if source is None else source)
     saved = resume._reexecute_the_statement
     if skip_statement:
         resume._reexecute_the_statement = lambda: False
@@ -693,21 +693,22 @@ def test_nbody_matches_the_interpreter(tmp_path):
     assert m.__typedpython_deopts__ == before
 
 
-def test_stores_reach_lock_free_readers_in_program_order(dwmod):
+def _reader_order_violations(m, rounds, stop_at_first=False):
     """fill3i stores c[0], a[0], b[0] (small ints, immortal: a reader's lock-free read never falls back
     to the list's lock). An interpreted reader that sees a call's a[0] must then see that call's c[0]
-    or a later one: c[0] >= a[0] in every interleaving."""
+    or a later one: c[0] >= a[0] in every interleaving. Returns the (a[0], c[0]) pairs that break it."""
     import threading
-    m, _, _ = dwmod
     a, b, c = [0], [0], [0]
     stop = [False]
     gen = [0]                  # odd while the writer resets the lists between rounds
     bad = []
 
     def writer():
-        for r in range(20):
+        for r in range(rounds):
             for v in range(1, 200):
                 m.fill3i(a, b, c, v + 0 * r)
+            if stop_at_first and bad:
+                break
             # The reset is not a fill3i call and lowers c[0]: a reader that took a[0] before it and
             # c[0] after it sees c[0] < a[0] with nothing wrong (CI run 43650072636: (199, 0)). Readers
             # drop every pair that overlaps a reset.
@@ -728,7 +729,27 @@ def test_stores_reach_lock_free_readers_in_program_order(dwmod):
         t.start()
     for t in ts:
         t.join()
-    assert bad == []
+    return bad
+
+
+def test_stores_reach_lock_free_readers_in_program_order(dwmod):
+    m, _, _ = dwmod
+    assert _reader_order_violations(m, 20) == []
+
+
+@pytest.mark.race_mutant
+def test_the_mutant_that_stores_out_of_program_order_is_caught(tmp_path_factory):
+    """The pair of the test above (it depends on the race firing: dispatch input race_mutant). The same
+    checker, with its reset filter, on a module whose fill3i stores a[0] before c[0]: a reader between the
+    two stores sees a call's a[0] with the previous call's c[0]. If the filter had made the check blind,
+    nothing would be reported here."""
+    order = "    c[0] = v\n    a[0] = v\n    b[0] = v\n"
+    assert SOURCE.count(order) == 1
+    m, _, _ = _build(tmp_path_factory, "dworder",
+                     source=SOURCE.replace(order, "    a[0] = v\n    b[0] = v\n    c[0] = v\n"))
+    bad = _reader_order_violations(m, 2000, stop_at_first=True)
+    assert bad, "stores that arrive out of program order were not caught"
+    assert all(y < x for x, y in bad)
 
 
 def test_the_mutant_exit_that_skips_its_statement_is_caught(tmp_path_factory):
