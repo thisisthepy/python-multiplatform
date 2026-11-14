@@ -661,14 +661,14 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 - **B-12** (#408) The Compose fixtures (`python-multiplatform-compose/fixtures/compose`, whose stubs are the
   `kotlin-stubs` artefact of B-8, and `fixtures/notebook-e2e`) depend on the fork's design systems,
   `org.thisisthepy.compose.designsystem:designsystem` and `designsystem-{material3, breeze, cupertino, deepin,
-  fluent, gnome, liquid-glass}` at `compose-design-systems` (`gradle/libs.versions.toml`, 1.11.1-ext.3), and walk
+  fluent, gnome, liquid-glass}` at `compose-libraries` (`gradle/libs.versions.toml`, `1.11.1-ext.3`), and walk
   their Kotlin packages `org.thisisthepy.compose.{designsystem, material3, breeze, cupertino, deepin, fluent,
   gnome, liquidglass}` under those names (decision 12.1). pythonx-compose puts `org.thisisthepy.compose.material3`
   in front of `androidx.compose.material3` and exposes each design system as `pythonx.compose.<name>`
   (pythonx-compose #152; leader decision 2026-11-13 on pythonx-compose #54 that they become a dependency here once
   published). The design systems build against the fork's Compose at their own version, so these two fixtures
-  resolve the fork's Compose at 1.11.1-ext.3 while the rest of the build stays on `compose-libraries`.
-  `Status: planned`, blocked on the fork publishing 1.11.1-ext.3 (compose-multiplatform-core-extended #212):
+  resolve the fork's Compose at 1.11.1-ext.3.
+  `Status: implemented`:
   `fixtures/compose/.../DesignSystemBindingTest.kt` and the `org.thisisthepy.compose.material3` lines of
   `.github/scripts/stubs/consumer.py`.
 
