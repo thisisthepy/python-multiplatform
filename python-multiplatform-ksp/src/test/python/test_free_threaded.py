@@ -425,27 +425,35 @@ def test_direct_lists_take_no_lock_and_are_not_copied(built):
     assert "tp_list_ld_f64(l_a->list" in c_text
 
 
-def test_verifier_rejects_three_array_params(built):
+def _zero2_with_a_third_list(result):
+    from typedpython import ir
+    f = next(f for f in result.module.functions if f.name == "zero2")
+    third = ir.ArrayParam("zs", ir.Type.I64_ARRAY, False)
+    wide = dataclasses.replace(f, params=f.params + (third,))
+    return wide, dataclasses.replace(result.module, functions=type(result.module.functions)([wide]), skipped={})
+
+
+# Until #255 (d2) a third list parameter of a function with an effect was refused by the verifier and by
+# cgen ("more than two": PyCriticalSection2 covers two objects). SPEC N-8 now compiles such a function
+# element by element with no lock and no copy; what is still refused for three or more lists is pinned by
+# the entry-global tests below (verify/array-direct).
+def test_verifier_accepts_a_third_list_parameter_as_a_direct_writer(built):
     from typedpython import ir
     result, _, _ = built
-    f = next(f for f in result.module.functions if f.name == "zero2")
-    third = ir.ArrayParam("zs", ir.Type.I64_ARRAY, False)
-    bad = dataclasses.replace(f, params=f.params + (third,))
-    mod = dataclasses.replace(result.module, functions=type(result.module.functions)([bad]), skipped={})
+    wide, mod = _zero2_with_a_third_list(result)
+    assert ir.direct_writer(wide) and not ir.direct_writer(next(
+        f for f in result.module.functions if f.name == "zero2"))
     proved, diags = verify.verify(mod)
-    assert not proved.functions
-    assert any("array" in d.message and "two" in d.message for d in diags), diags
+    assert [f.name for f in proved.functions] == ["zero2"], diags
+    assert not any("two" in d.message and "list" in d.message for d in diags), diags
 
 
-def test_cgen_refuses_three_array_params(built):
-    from typedpython import ir
+def test_cgen_compiles_a_third_list_parameter_without_lock_or_copy(built):
     result, path, _ = built
-    f = next(f for f in result.module.functions if f.name == "zero2")
-    third = ir.ArrayParam("zs", ir.Type.I64_ARRAY, False)
-    bad = dataclasses.replace(f, params=f.params + (third,))
-    mod = dataclasses.replace(result.module, functions=type(result.module.functions)([bad]), skipped={})
-    with pytest.raises(cgen.CGenError, match="two"):
-        cgen.generate(mod, path)
+    _, mod = _zero2_with_a_third_list(result)
+    w = _wrapper(cgen.generate(mod, path), "zero2")
+    assert "tp_cs_" not in w and "_array_enter" not in w and "_array_exit" not in w, w
+    assert w.count("PyList_CheckExact") >= 3, w
 
 
 def _three_with_entry_global(result):

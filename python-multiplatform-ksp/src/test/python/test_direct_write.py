@@ -469,14 +469,15 @@ def test_the_writer_polls_like_a_function_without_lists(dw_c):
     assert impl.index("tp_osr *tp_my = tp_t->osr; tp_t->osr = NULL;") < impl.index("tp_poll(tp_t")
 
 
-def test_a_fast_twin_counts_its_frames_around_the_continuation(dw_c):
+def test_a_fast_twin_counts_its_trees_other_frames_around_the_continuation(dw_c):
     c, out = dw_c
     if "static inline int tp_fimpl_adv3(" not in c:
         pytest.skip("adv3 has no fast twin")
     twin = _function_text(c, "static inline int tp_fimpl_adv3(")
     for mt in re.finditer(r"tp_my->result = PyObject_Vectorcall", twin):
         before = twin[:mt.start()]
-        assert before.rstrip().endswith("tp_depth_py_begin(tp_t, tp_fd);"), before[-200:]
+        # the continuation's own frame stands for adv3: the tree's other frames are counted
+        assert before.rstrip().endswith("tp_depth_py_begin(tp_t, tp_fd - 1);"), before[-200:]
 
 
 def test_one_and_two_list_functions_keep_the_copy_in_window(tmp_path):
@@ -582,8 +583,10 @@ def test_root3_raises_where_the_interpreter_does(dwmod):
         assert got == want and got[0][0] == "raise", got
 
 
-@pytest.mark.parametrize("lens", [(4, 4, 2), (4, 1, 4), (2, 4, 4), (0, 0, 0)])
-@pytest.mark.parametrize("planted", [False, True])
+# planted: an int at a[0]; not with empty lists, which have no a[0] to plant it in
+@pytest.mark.parametrize("planted,lens", [(pl, ln) for pl in (False, True)
+                                          for ln in [(4, 4, 2), (4, 1, 4), (2, 4, 4), (0, 0, 0)]
+                                          if not (pl and ln[0] == 0)])
 def test_a_short_list_raises_index_error_after_partial_effects(dwmod, lens, planted):
     m, ref, _ = dwmod
     got, want = _both(m, ref, "adv3", _adv_make(0 if planted else None, 0, 7, 4, lens))
@@ -698,20 +701,27 @@ def test_stores_reach_lock_free_readers_in_program_order(dwmod):
     m, _, _ = dwmod
     a, b, c = [0], [0], [0]
     stop = [False]
+    gen = [0]                  # odd while the writer resets the lists between rounds
     bad = []
 
     def writer():
         for r in range(20):
             for v in range(1, 200):
                 m.fill3i(a, b, c, v + 0 * r)
+            # The reset is not a fill3i call and lowers c[0]: a reader that took a[0] before it and
+            # c[0] after it sees c[0] < a[0] with nothing wrong (CI run 43650072636: (199, 0)). Readers
+            # drop every pair that overlaps a reset.
+            gen[0] += 1
             a[0] = b[0] = c[0] = 0
+            gen[0] += 1
         stop[0] = True
 
     def reader():
         while not stop[0]:
+            g = gen[0]
             x = a[0]
             y = c[0]
-            if y < x:
+            if g % 2 == 0 and gen[0] == g and y < x:
                 bad.append((x, y))
     ts = [threading.Thread(target=writer)] + [threading.Thread(target=reader) for _ in range(3)]
     for t in ts:
