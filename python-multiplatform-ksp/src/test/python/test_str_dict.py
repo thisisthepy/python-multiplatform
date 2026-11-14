@@ -26,70 +26,84 @@ from pathlib import Path
 
 import pytest
 
+from conftest import decorate_compiled
 from typedpython import cbuild, cgen, frontend, verify
 
 REPO = Path(__file__).resolve().parents[4]
 WORDFREQ = REPO / "benchmarks" / "typedpython" / "py" / "wordfreq.py"
 
 SOURCE = textwrap.dedent('''
-    # typedpython: compiled
     from typing import SupportsIndex
 
 
+    @compiled
     def get(d: dict[object, object], k: object) -> object:
         return d[k]
 
 
+    @compiled
     def get_list(xs: list[object], i: int) -> object:
         return xs[i]
 
 
+    @compiled
     def get_index(xs: list[object], i: SupportsIndex) -> object:
         return xs[i]
 
 
+    @compiled
     def get_str(s: str, i: int) -> str:
         return s[i]
 
 
+    @compiled
     def get_nested(d: dict[object, dict[object, object]], a: object, b: object) -> object:
         return d[a][b]
 
 
+    @compiled
     def put(d: dict[object, object], k: object, v: object) -> None:
         d[k] = v
 
 
+    @compiled
     def put_list(xs: list[object], i: int, v: object) -> None:
         xs[i] = v
 
 
+    @compiled
     def has(c: list[object], x: object) -> bool:
         return x in c
 
 
+    @compiled
     def has_not(c: list[object], x: object) -> bool:
         return x not in c
 
 
+    @compiled
     def has_dict(c: dict[object, object], x: object) -> bool:
         return x in c
 
 
+    @compiled
     def has_str(c: str, x: str) -> bool:
         return x in c
 
 
+    @compiled
     def has_branch(c: list[object], x: object) -> str:
         if x in c:
             return "yes"
         return "no"
 
 
+    @compiled
     def has_chain(c: list[object], x: object, y: object) -> bool:
         return x in c in y
 
 
+    @compiled
     def pairs(xs: list[tuple[object, ...]]) -> list[object]:
         out: list[object] = []
         for a, b in xs:
@@ -98,6 +112,7 @@ SOURCE = textwrap.dedent('''
         return out
 
 
+    @compiled
     def triples(xs: list[tuple[object, ...]]) -> list[object]:
         out: list[object] = []
         for a, b, c in xs:
@@ -106,6 +121,7 @@ SOURCE = textwrap.dedent('''
         return out
 
 
+    @compiled
     def each(xs: list[object]) -> list[object]:
         out: list[object] = []
         for x in xs:
@@ -115,6 +131,7 @@ SOURCE = textwrap.dedent('''
         return out
 
 
+    @compiled
     def first_after(xs: list[object], stop: object) -> object:
         found: object = None
         for x in xs:
@@ -124,12 +141,14 @@ SOURCE = textwrap.dedent('''
         return found
 
 
+    @compiled
     def return_inside(xs: list[object]) -> object:
         for x in xs:
             return x
         return None
 
 
+    @compiled
     def nested(xs: list[list[object]]) -> list[object]:
         out: list[object] = []
         for row in xs:
@@ -140,6 +159,7 @@ SOURCE = textwrap.dedent('''
         return out
 
 
+    @compiled
     def items_of(d: dict[str, object]) -> list[object]:
         out: list[object] = []
         for k, v in d.items():
@@ -148,6 +168,7 @@ SOURCE = textwrap.dedent('''
         return out
 
 
+    @compiled
     def mutate_while_iterating(d: dict[str, object]) -> object:
         n: int = 0
         for k in d:
@@ -156,30 +177,37 @@ SOURCE = textwrap.dedent('''
         return n
 
 
+    @compiled
     def fmt(x: object, y: float, n: int) -> str:
         return f"{x}|{x!r}|{x!s}|{x!a}|{y:.3f}|{n:05d}|{x:>5}|{n}"
 
 
+    @compiled
     def fmt_one(x: object) -> str:
         return f"{x}"
 
 
+    @compiled
     def fmt_text(x: object) -> str:
         return f"a{x}b{x!r}c"
 
 
+    @compiled
     def fmt_empty() -> str:
         return f""
 
 
+    @compiled
     def fmt_debug(x: object) -> str:
         return f"{x=}"
 
 
+    @compiled
     def cat(a: str, b: str) -> str:
         return a + b
 
 
+    @compiled
     def cat_in_place(a: str, b: str) -> str:
         s: str = ""
         s += a
@@ -187,6 +215,7 @@ SOURCE = textwrap.dedent('''
         return s
 
 
+    @compiled
     def grow(xs: list[object], ys: list[object]) -> list[object]:
         out: list[object] = []
         out += xs
@@ -194,6 +223,7 @@ SOURCE = textwrap.dedent('''
         return out
 
 
+    @compiled
     def empties() -> object:
         d: dict[object, object] = {}
         xs: list[object] = []
@@ -201,6 +231,7 @@ SOURCE = textwrap.dedent('''
         return xs
 
 
+    @compiled
     class Acc:
         def __init__(self, log: list[object]) -> None:
             self.log = log
@@ -230,6 +261,7 @@ SOURCE = textwrap.dedent('''
             return self
 
 
+    @compiled
     def aug_ops(a: Acc, b: int) -> Acc:
         a += b
         a -= b
@@ -240,12 +272,14 @@ SOURCE = textwrap.dedent('''
         return a
 
 
+    @compiled
     def aug_list(xs: list[str], n: int) -> list[str]:
         xs *= n
         xs += xs
         return xs
 
 
+    @compiled
     def lookup_default(d: dict[str, int], k: str) -> object:
         counts: dict[str, int] = {}
         counts[k] = counts.get(k, 0) + 1
@@ -905,7 +939,7 @@ def run_main(main, n):
 @pytest.fixture(scope="module")
 def wordfreq(tmp_path_factory):
     d = tmp_path_factory.mktemp("wordfreq")
-    src = "# typedpython: compiled\n" + WORDFREQ.read_text()
+    src = decorate_compiled(WORDFREQ.read_text())
     proved, diags, m = build_source(d, src, name="wordfreq")
     spec = importlib.util.spec_from_file_location("wordfreq_plain", WORDFREQ)
     plain = importlib.util.module_from_spec(spec)

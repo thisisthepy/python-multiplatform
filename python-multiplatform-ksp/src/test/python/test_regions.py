@@ -25,6 +25,7 @@ import types
 import pytest
 
 from test_cgen import runtime_dir, need_runtime
+from conftest import COMPILED_SHIM
 from typedpython import cbuild, cgen, cost, frontend, verify
 
 posix_signals = pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX signals (SIGALRM/SIGUSR1/setitimer) or fork; Windows has none")
@@ -37,12 +38,12 @@ STATS = "__typedpython_region_stats__"          # () -> (opened, freed, objects)
 FAIL_AFTER = "__typedpython_region_fail_after__"  # (n) -> the nth region object allocation fails; -1 off
 
 SOURCE = textwrap.dedent('''\
-    # typedpython: compiled
     """typedpython region test module."""
 
     KEPT = None
 
 
+    @compiled
     class Node:
         __slots__ = ("left", "right")
         left: "Node | None"
@@ -53,12 +54,14 @@ SOURCE = textwrap.dedent('''\
             self.right = right
 
 
+    @compiled
     def make(depth: int) -> Node:
         if depth > 0:
             return Node(make(depth - 1), make(depth - 1))
         return Node(None, None)
 
 
+    @compiled
     def check(node: Node) -> int:
         left: Node | None = node.left
         right: Node | None = node.right
@@ -67,10 +70,12 @@ SOURCE = textwrap.dedent('''\
         return 1 + check(left) + check(right)
 
 
+    @compiled
     def tree_sum(d: int) -> int:
         return check(make(d))
 
 
+    @compiled
     def repeat(d: int, n: int) -> int:
         t: int = 0
         for _ in range(n):
@@ -78,35 +83,42 @@ SOURCE = textwrap.dedent('''\
         return t
 
 
+    @compiled
     def escapes(d: int) -> Node:
         return make(d)
 
 
+    @compiled
     def keeps(d: int) -> int:
         global KEPT
         KEPT = make(d)
         return check(KEPT)
 
 
+    @compiled
     def prints(d: int) -> int:
         n = make(d)
         print("unknown code while the tree is alive")
         return check(n)
 
 
+    @compiled
     def ident(d: int) -> int:
         return id(make(d)) * 0
 
 
+    @compiled
     def same(d: int) -> bool:
         return make(d) is make(d)
 
 
+    @compiled
     def mixed(d: int) -> int:
         t = make(d)
         return check(make(d)) + check(t)
 
 
+    @compiled
     def noisy(d: int) -> object:
         print("unknown code")
         return check(make(d))
@@ -381,10 +393,11 @@ def test_a_forged_module_level_variant_set_is_reported(built):
 
 
 def test_a_finalizer_or_a_field_store_keeps_the_class_out_of_a_region(tmp_path):
-    base = SOURCE.split("def escapes")[0]
+    base = SOURCE.split("@compiled\ndef escapes")[0]
     with_del = base.replace("        self.right = right\n",
                             "        self.right = right\n\n    def __del__(self) -> None:\n        pass\n", 1)
     with_store = base + textwrap.dedent('''\
+        @compiled
         def poke(node: Node) -> int:
             node.left = None
             return 0

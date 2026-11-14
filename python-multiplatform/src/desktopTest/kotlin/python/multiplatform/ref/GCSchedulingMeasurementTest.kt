@@ -1,6 +1,6 @@
 package python.multiplatform.ref
 
-import python.multiplatform.BuildConfig
+import python.multiplatform.embedsFreeThreadedPython
 import python.multiplatform.ffi.Python3
 import python.multiplatform.ffi.PythonTestFixture
 import kotlin.test.Test
@@ -11,9 +11,11 @@ import kotlin.test.assertTrue
  * build specifically: `_PY_GC_SCHEDULED_BIT` is read only by the eval-loop checkpoint, on both
  * builds, so an embedder that never runs Python bytecode never runs the cyclic collector either
  * -- with or without free threading. `autoDrainInterval` is saved and restored around each test;
- * the default (0 on this build) is never changed by running this file.
+ * the default (0 on a GIL build, 32 on the free-threaded one) is never changed by running this file.
  *
- * Also runs, unmodified, on `-PpythonFreeThreaded=true`, where the automatic checkpoint reliably
+ * Desktop embeds the free-threaded build since issue #158, so the GIL branches below no longer run
+ * on desktop; they are kept for the record of what the GIL build measured. On the free-threaded
+ * build the automatic checkpoint reliably
  * fires but does not reliably reclaim: under this heavy single-thread, C-API-only workload the
  * residue swings between the GIL build's ~1,970 and the full ~20,000, run to run, so only the GIL
  * build gets a bound here. That swing is not a mystery any more -- it tracks the *JVM's* memory
@@ -165,7 +167,7 @@ class GCSchedulingMeasurementTest {
      * The residue bound is pinned on the GIL build only, where it is stable at ~1,920-1,970 out of
      * ~20,000 in every configuration measured.
      *
-     * Free-threaded (`-PpythonFreeThreaded=true`, where `autoDrainInterval = 32` is already the
+     * Free-threaded (desktop's only build since issue #158, where `autoDrainInterval = 32` is already the
      * shipped default rather than something this test turns on) it is not stable, and no bound is
      * asserted. `CheckpointCounter.reached` climbs by an identical, deterministic amount on every
      * run, but the residue does not: measured 20,000 -- i.e. nothing reclaimed at all -- in 10 of
@@ -222,7 +224,7 @@ class GCSchedulingMeasurementTest {
 
             val delta = after - initial
             println(
-                "--- MEASUREMENT 2: Interval 32 (freeThreaded=${BuildConfig.pythonFreeThreaded}) --- " +
+                "--- MEASUREMENT 2: Interval 32 (freeThreaded=${embedsFreeThreadedPython}) --- " +
                     "initial=$initial after=$after delta=$delta checkpointsReached=$reachedDelta"
             )
 
@@ -232,7 +234,7 @@ class GCSchedulingMeasurementTest {
                     "$cyclesCreated outermost withGIL scopes, but none were reached"
             )
 
-            if (!BuildConfig.pythonFreeThreaded) {
+            if (!embedsFreeThreadedPython) {
                 // Each outermost withGIL scope inside buildAndDropCycles counts down; at interval
                 // 32 that is thousands of checkpoints over 10,000 rounds, each one able to run the
                 // scheduled collection. The residue should be bounded by roughly one interval's

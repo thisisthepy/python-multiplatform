@@ -15,7 +15,7 @@ import kotlin.test.BeforeTest
 import python.native.ffi.bindings
 import python.native.ffi.Panama
 import python.native.ffi.toNativePointer
-import python.multiplatform.BuildConfig
+import python.multiplatform.embedsFreeThreadedPython
 
 class Node(var ref: PyObject? = null) {
     var rawPtr: Long = 0L
@@ -146,7 +146,7 @@ class CycleCollectionTest {
      * with the global lock, and why the free-threaded branch is not just an offset fix.
      */
     private fun typeRefCount(addr: Long): Long =
-        if (!BuildConfig.pythonFreeThreaded) {
+        if (!embedsFreeThreadedPython) {
             getLongMethod.invoke(theUnsafe, addr) as Long
         } else {
             val local = (getIntMethod.invoke(theUnsafe, addr + 12) as Int).toLong() and 0xFFFF_FFFFL
@@ -383,7 +383,7 @@ class CycleCollectionTest {
             // `Py_REFCNT`, for whichever object header this build actually has. See the KDoc above:
             // offset 0 is `ob_refcnt` only on a build with the global lock.
             fun typeRefCount(): Long =
-                if (!BuildConfig.pythonFreeThreaded) {
+                if (!embedsFreeThreadedPython) {
                     getLong.invoke(theUnsafe, proxyTypeAddr) as Long
                 } else {
                     val local = (getInt.invoke(theUnsafe, proxyTypeAddr + 12) as Int).toLong() and 0xFFFF_FFFFL
@@ -395,7 +395,7 @@ class CycleCollectionTest {
             // carries, so that `before` and `alive` are read in the same state and the difference
             // between them is the instantiation loop and nothing else. On a build with the global
             // lock the count is always accurate and this would only cost a heap walk.
-            if (BuildConfig.pythonFreeThreaded) python.native.ffi.PyGC_Collect()
+            if (embedsFreeThreadedPython) python.native.ffi.PyGC_Collect()
 
             val liveBefore = HandleTable.liveCount
             val typeRefBefore = typeRefCount()
@@ -421,7 +421,7 @@ class CycleCollectionTest {
             )
             // The instantiations above were deferred on a free-threaded build; this is what turns
             // them into countable references. Without it `alive` reads exactly `before`.
-            if (BuildConfig.pythonFreeThreaded) python.native.ffi.PyGC_Collect()
+            if (embedsFreeThreadedPython) python.native.ffi.PyGC_Collect()
 
             val typeRefAlive = typeRefCount()
             assertEquals(

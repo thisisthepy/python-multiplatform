@@ -160,9 +160,20 @@ JNI callee names). Re-opening it means redesigning Android's convention selectio
 
 ## 9. Free-threading
 
-3.14t runs the whole desktop suite with `-PpythonFreeThreaded=true` (opt-in; `gradle.properties`
-default `pythonFreeThreaded=false`): 236 tests, 0 failures, 1 skipped when last recorded, the same
-count as the GIL build (table at `4ed98143:docs/roadmap/ROADMAP.md`:1013; SPEC T-2). Deferred deallocation is
+Desktop (JVM, `macosArm64`, `linuxX64`) embeds the free-threaded CPython 3.15t and only that build
+(maintainer, #158, 2026-10-04: "Free-threaded is the default and the only build. The GIL build is not
+kept as an option. Baseline is CPython 3.15t"; leader, 2026-11-13: "flip the desktop default to 3.15t
+now, before the #377 alpha03 release"). `-PpythonFreeThreaded` is removed; the build fails if it is
+passed. Android (arm64-v8a, x86_64), androidNative and iOS embed the project's own 3.15t with no
+opt-in flag (#328 step 2; leader 2026-11-13), compiled but not yet run on an emulator, device or
+simulator (9.2); wasm is GIL (#175); the per-platform fact is `embedsFreeThreadedPython` (SPEC T-1).
+The 3.15t default first ran the desktop suites in CI on 2026-11-13: Desktop CI
+run 43306301208 counted `desktopTest` 647 tests, 3 failed, 1 skipped, and `linuxX64Test` 497 tests, 3 failed.
+All six failures were tests asserting GIL-build or 3.14t behaviour (a `sys.getrefcount` that includes the
+deferred-refcount bias, 3.15.0's detached-owner merge in `brc.c`, the removed GC memory gate, a probe
+reading `ob_tid` as the refcount). They were corrected in #398 with no product change, and run 43329515729
+passed (Gradle prints no count on success). The earlier free-threaded record is 3.14t as an opt-in: 236
+tests, 0 failures, 1 skipped (table at `4ed98143:docs/roadmap/ROADMAP.md`:1013; SPEC T-2). Deferred deallocation is
 drained by the eval-loop checkpoint (`PM/commonTest/.../ref/EvalCheckpointTest.kt`,
 `docs/investigations/gc-scheduling-investigation.md`); `FreeThreadedGCGateTest` guards the GC probe.
 The 3.15 migration (`PyWeakref_GetRef`, the two removed functions) is done
@@ -170,15 +181,23 @@ The 3.15 migration (`PyWeakref_GetRef`, the two removed functions) is done
 free-threaded ones, are pinned in `python-checksums.properties`.
 
 - **9.1 `autoDrainInterval`'s default on the GIL build, open (decision).** Today
-  `if (BuildConfig.pythonFreeThreaded) 32 else 0` (`Python3.kt`). Off means a pure C-API embedder never
+  `if (embedsFreeThreadedPython) 32 else 0` (`Python3.kt`), so on by default on desktop, Android and
+  iOS (#328) and off only on wasm until #175; once wasm is free-threaded this question closes. Off means a pure C-API embedder never
   runs the cyclic collector: 20 000+ cyclic objects left with the automatic path off against ~1 970
   with it on (`docs/investigations/gc-scheduling-investigation.md` §6–§7). On means a `__del__` or
   weakref callback can run at a `withGIL` exit the caller did not ask to yield from. The checkpoint
   costs ~128 ns over a 154.6 ns `withGIL` floor, ~4 ns amortised
   (`EvalCheckpointTest.testCheckpointCostAgainstTheAlternatives`). A one-line change once decided.
-- **9.2 Free-threading beyond desktop, open (blocked upstream).** No free-threaded CPython prebuilt
+- **9.2 Free-threading beyond desktop, open (#328 run, wasm #175).** No free-threaded CPython prebuilt
   exists for Android (python.org ships `libpython3.14.so`/`3.15.so` only) or iOS (neither BeeWare
-  nor python.org defines `Py_GIL_DISABLED`), checked 2026-08-12. SPEC N-1.
+  nor python.org defines `Py_GIL_DISABLED`), checked 2026-08-12; the project builds its own (#163,
+  `.github/workflows/build-ft-mobile.yml`, release `cpython-3.15.0t-mobile`). #328 step 2 moved the
+  library: Android (arm64-v8a and x86_64), androidNative and iOS acquire those archives, link
+  `libpython3.15t`, package `lib/python3.15t`, report `abiFlags = "t"`, and publish
+  `freeThreaded=true`; the python.org and BeeWare GIL mobile archives and their pins are gone. Left:
+  an Android emulator run (`AndroidFreeThreadedBuildTest`, the instrumented suite, the androidNative
+  suite) and an iOS simulator run (`IosFreeThreadedBuildTest`, the ios-consumer fixture, sample DEMO
+  1/8) with `Py_GIL_DISABLED` observed at run time; then wasm (#175). SPEC N-1.
 
 ## 10. WASM
 
@@ -300,10 +319,17 @@ stripped), the root metadata jar is 382 KB, `PythonBootstrap` stages the Android
 desktop stdlib (`GP/test/kotlin/python/multiplatform/gradle/PythonHomeStagingTest.kt`, SPEC L-4).
 Old §15a, §15b, §15d, §15f, §15g, §15h are closed; §15e item 4 is closed by §15h.
 
-- **15.1 Nothing is published to a remote repository, open.** No publishing repository or signing is
-  configured (`signing { }` is commented out in `python-multiplatform/build.gradle.kts`), and
-  `repo1.maven.org/maven2/io/github/thisisthepy/python-multiplatform/` returns 404 (2026-10-03).
-  Every consumer verification so far used `mavenLocal()`. 10.1 depends on this or on a release asset.
+- **15.1 Maven Central publishing, implemented, first upload pending (#375).** All three components
+  (the library for every target, the KSP processor, the Gradle plugin with its plugin marker) carry
+  Central POM metadata, sources and javadoc jars and in-memory GPG signing
+  (`gradle/central-publishing.gradle.kts`, signing only when `MAVEN_GPG_PRIVATE_KEY` is set, so
+  `publishToMavenLocal` still works without keys). `./gradlew publishAllToCentralStaging` fills
+  `build/central-staging`; `.github/scripts/release/central-bundle.sh` signs, checks and zips it, and
+  `.github/workflows/maven-central.yml` (version tag, or manual with a `dry_run` input) builds on macOS and
+  uploads one deployment to the Central Portal (`central-upload.sh`, environment `maven-central`). The
+  dry run signs with a throwaway key and uploads nothing. Open: the first real upload (needs the
+  secrets, only CI can show Central accepting the deployment), and `repo1.maven.org/maven2/org/thisisthepy/`
+  does not list the artifacts until then. 10.1 depends on this or on a release asset.
 - **15.2 The library, KSP processor and plugin publish under one version, done (#70).** Each build
   derives it from `gradle.properties` (`$pythonVersion-$libraryVersionSuffix`, a `-P` override included);
   the root build fails when a project's version differs, and `PublishedVersionTest` pins the processor

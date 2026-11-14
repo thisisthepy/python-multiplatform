@@ -330,39 +330,44 @@ def test_a_mod_result_can_feed_a_proof():
 # --- 2. end to end ---------------------------------------------------------------------------------
 
 SOURCE = '''\
-# typedpython: compiled
 
 
+@compiled
 def dec_if_positive(n: int) -> int:
     if n > 0:
         return n - 1
     return -1
 
 
+@compiled
 def dec_after_guard(n: int) -> int:
     if n <= 0:
         return 0
     return n - 1
 
 
+@compiled
 def inc_below_max(n: int) -> int:
     if n < 9223372036854775807:
         return n + 1
     return 0
 
 
+@compiled
 def inc_below_100(n: int) -> int:
     if n < 100:
         return n + 1
     return 0
 
 
+@compiled
 def inc_if_positive(n: int) -> int:
     if n > 0:
         return n + 1
     return 0
 
 
+@compiled
 def reverse_gap(a: int, b: int) -> int:
     lo: int = a
     hi: int = b
@@ -374,6 +379,7 @@ def reverse_gap(a: int, b: int) -> int:
     return hi - lo + steps
 
 
+@compiled
 def killed_guard(n: int, a: list[int]) -> int:
     if n < 100:
         n = a[0]
@@ -381,6 +387,7 @@ def killed_guard(n: int, a: list[int]) -> int:
     return 0
 
 
+@compiled
 def killed_in_loop(c: int, a: list[int]) -> int:
     n: int = a[0]
     t: int = 0
@@ -391,6 +398,7 @@ def killed_in_loop(c: int, a: list[int]) -> int:
     return t
 
 
+@compiled
 def parity(n: int) -> int:
     k: int = 0
     s: int = 0
@@ -401,11 +409,13 @@ def parity(n: int) -> int:
     return s
 
 
+@compiled
 def const_local() -> int:
     x: int = 41
     return x + 1
 
 
+@compiled
 def range_shifts(a: int, b: int) -> int:
     if a < 0:
         return 0
@@ -415,26 +425,31 @@ def range_shifts(a: int, b: int) -> int:
     return t
 
 
+@compiled
 def guarded_shift(n: int) -> int:
     if n >= 0:
         return n // 16 + n % 16
     return 0
 
 
+@compiled
 def negative_shift(n: int) -> int:
     return n // 4 + n % 8
 
 
+@compiled
 def odd_divisor(n: int) -> int:
     if n >= 0:
         return n // 3 + n % 6
     return 0
 
 
+@compiled
 def mod_then_add(n: int) -> int:
     return n % 10 + 1
 
 
+@compiled
 def pair_sums(a: list[int]) -> int:
     best: int = 0
     for i in range(len(a)):

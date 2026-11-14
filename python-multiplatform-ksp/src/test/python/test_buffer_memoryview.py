@@ -23,10 +23,10 @@ from test_buffer_arrays import (Built, build_source, deopts, interp, load_so, ou
                                 same_value)
 
 SOURCE = textwrap.dedent('''
-    # typedpython: compiled
     import array
 
 
+    @compiled
     def sum_mf(m: memoryview[float]) -> float:
         s = 0.0
         for i in range(len(m)):
@@ -34,6 +34,7 @@ SOURCE = textwrap.dedent('''
         return s
 
 
+    @compiled
     def sum_mi(m: memoryview[int]) -> int:
         s = 0
         for i in range(len(m)):
@@ -41,31 +42,38 @@ SOURCE = textwrap.dedent('''
         return s
 
 
+    @compiled
     def get_mf(m: memoryview[float], i: int) -> float:
         return m[i]
 
 
+    @compiled
     def get_mi(m: memoryview[int], i: int) -> int:
         return m[i]
 
 
+    @compiled
     def set_mf(m: memoryview[float], i: int, v: float) -> None:
         m[i] = v
 
 
+    @compiled
     def set_mi(m: memoryview[int], i: int, v: int) -> None:
         m[i] = v
 
 
+    @compiled
     def length_mf(m: memoryview[float]) -> int:
         return len(m)
 
 
+    @compiled
     def scale_mf(m: memoryview[float], k: float) -> None:
         for i in range(len(m)):
             m[i] = m[i] * k
 
 
+    @compiled
     def spin_mf(m: memoryview[float], n: int) -> float:
         s = 0.0
         L = len(m)
@@ -74,6 +82,7 @@ SOURCE = textwrap.dedent('''
         return s
 
 
+    @compiled
     def spin_af(a: array.array[float], n: int) -> float:
         s = 0.0
         L = len(a)
@@ -471,11 +480,13 @@ def calibrated_spin(built):
 
 def probe_during_call(call, probes, attempts=3):
     """Run call() on the main thread while a worker applies each probe in a loop. Returns
-    (result, {probe_name: (BufferError count, other outcomes)}). Retries `attempts` times when a
-    probe never observed the call (machine too fast or too loaded)."""
+    (result, {probe_name: (BufferError count, other outcomes, late successes)}). Retries `attempts`
+    times when a probe never observed the call (machine too fast or too loaded). A late success is a
+    probe that succeeded only after the call returned: it is not a failure, but its effect stays (an
+    append left one more element), so callers that check sizes add it back (#401)."""
     for _ in range(attempts):
         go, done = threading.Event(), threading.Event()
-        seen = {name: [0, []] for name in probes}
+        seen = {name: [0, [], 0] for name in probes}
 
         def worker():
             go.wait()
@@ -489,7 +500,14 @@ def probe_during_call(call, probes, attempts=3):
                     except Exception as e:  # noqa: BLE001
                         seen[name][1].append(repr(e))
                     else:
-                        seen[name][1].append("succeeded")
+                        # The call can return between the `done` check above and this probe;
+                        # the buffer is then legitimately free. A probe that succeeds while the
+                        # buffer is really unheld does so ~0.05 s into a ~0.6 s call, so `done`
+                        # stays unset for far longer than this grace period.
+                        if not done.wait(0.05):
+                            seen[name][1].append("succeeded")
+                        else:
+                            seen[name][2] += 1
                         return
                 time.sleep(0.001)
 
@@ -519,7 +537,7 @@ def test_other_thread_release_and_append_get_bufferror_during_a_memoryview_call(
     assert result == float(n)
     assert seen["release"][0] > 0 and seen["release"][1] == [], seen
     assert seen["append"][0] > 0 and seen["append"][1] == [], seen
-    assert len(a) == N                                   # nothing resized under the call
+    assert len(a) == N + seen["append"][2]               # nothing resized under the call (#401)
     assert release_ok(v) and can_resize(a)               # held only during the call
 
 
@@ -533,7 +551,8 @@ def test_other_thread_append_gets_bufferror_during_an_array_call(built):
     assert result == float(n)
     for name in ("append", "extend", "pop"):
         assert seen[name][0] > 0 and seen[name][1] == [], (name, seen)
-    assert len(a) == N
+    # nothing resized under the call; a probe that succeeded after it returned stays applied (#401)
+    assert len(a) == N + seen["append"][2] + seen["extend"][2] - seen["pop"][2]
     assert can_resize(a)
 
 

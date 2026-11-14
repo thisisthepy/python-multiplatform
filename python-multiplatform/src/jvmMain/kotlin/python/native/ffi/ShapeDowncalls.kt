@@ -24,7 +24,7 @@ import java.util.concurrent.ConcurrentHashMap
  *
  * `desktopMain` implements these over cached, unbound Panama `MethodHandle`s (one per
  * shape, see `Panama.kt`). `androidMain` implements these by delegating through
- * JNI to Kotlin/Native trampolines compiled into `libmultiplatform_python3.13.so` (see
+ * JNI to Kotlin/Native trampolines compiled into `libmultiplatform_python3.15t.so` (see
  * `nativeMain/.../EmbedAPI.native.kt`), which invoke the target function pointer directly
  * via a `CFunction` cast -- no NDK, no C project, no ART entry-point patching.
  *

@@ -1,0 +1,94 @@
+name: Build free-threaded CPython for wasm
+
+# Builds CPython with --disable-gil and pthreads ("3.15t") for wasm32-emscripten with
+# CPython's own driver (Platforms/emscripten), then runs it under node with four threads.
+# Step one of #175, a build experiment; job approved by the owner on 2026-11-13 ("#175 may
+# add the new wasm 3.15t CI build job"). It does not touch wasm.yml or the runtime the
+# wasmJs suite uses. See docs/platforms/free-threaded-wasm.md.
+#
+# Experiment choices (agent proposal, not decisions): Emscripten defaults to the version
+# CPython itself pins (Platforms/emscripten/config.toml, 4.0.19 for 3.15.0), not the 5.0.3
+# of python-multiplatform/scripts/wasm/build-cpython.sh; the compile/link flags are the
+# #175 investigation's; the call trampoline is patched to fall back to its JS path under
+# shared memory (trampoline_patch=skip runs without it).
+
+on:
+  # Started by hand only (owner, 2026-11-14: "개발 테스트 ci는 명시적으로 실행하기").
+  workflow_dispatch:
+    inputs:
+      python_version:
+        description: CPython version to build (a python.org source release, 3.15 or later)
+        default: "3.15.0"
+        required: true
+        type: string
+      emscripten_version:
+        description: Emscripten to use (empty = the version CPython pins in Platforms/emscripten/config.toml)
+        default: ""
+        required: false
+        type: string
+      trampoline_patch:
+        description: Call-trampoline shared-memory patch (skip = observe the unpatched build)
+        default: apply
+        required: true
+        type: choice
+        options: [apply, skip]
+
+concurrency:
+  # One development run per repository: a run in progress finishes, and a newer dispatch replaces
+  # the waiting one (owner, 2026-11-14: "제일 최신꺼만 도는게 맞지").
+  group: dev-ci
+  cancel-in-progress: false
+
+jobs:
+  wasm:
+    name: wasm32-emscripten pthreads (free-threaded)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      FT_WORK: ${{ github.workspace }}/.tmp/ft-wasm
+      FT_OUT: ${{ github.workspace }}/.tmp/ft-wasm-out
+      FT_WASM_EMSDK_VERSION: ${{ inputs.emscripten_version || '' }}
+      FT_WASM_TRAMPOLINE_PATCH: ${{ inputs.trampoline_patch || 'apply' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # CPython 3.15.0 pins node 24 (Platforms/emscripten/config.toml, node-version).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install build Python prerequisites
+        run: >
+          sudo apt-get update && sudo apt-get install -y
+          build-essential pkg-config libssl-dev zlib1g-dev libffi-dev
+          libbz2-dev liblzma-dev libsqlite3-dev libzstd-dev
+
+      - name: Build and verify
+        run: .github/scripts/ft-wasm/build-wasm.sh "${{ inputs.python_version || '3.15.0' }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-${{ inputs.python_version || '3.15.0' }}t-wasm32-emscripten
+          path: ${{ env.FT_OUT }}/*.tar.gz
+          if-no-files-found: error
+
+      # Step 2 of #175 (agent proposal): embed CPython without main from the node main thread, as
+      # the library does. A separate step after the upload, so a probe failure or hang does not
+      # lose the archive. Node only: node uses a real Atomics.wait on the main thread, a browser
+      # busy-waits, so this says nothing about the browser.
+      - name: Embedding probe (no main)
+        run: |
+          root="$(ls -d "$FT_WORK"/wasm-check/python-*t-wasm32-emscripten | head -n 1)"
+          [ -d "$root" ] || { echo "no unpacked archive under $FT_WORK/wasm-check"; exit 1; }
+          log="$FT_WORK/embed-probe.log"
+          set +e
+          timeout 600 node .github/scripts/ft-wasm/embed-probe.mjs "$root" > "$log" 2>&1
+          rc=$?
+          set -e
+          cat "$log"
+          if [ "$rc" -ne 0 ]; then
+            last="$(grep -E '^\[[a-z0-9]+\]' "$log" | tail -n 1)"
+            echo "::error::embedding probe exited $rc (124 = timed out, a hang); last check printed: ${last:-none}"
+            exit "$rc"
+          fi
+          grep -q '^FT-WASM-EMBED-PROBE-OK$' "$log"

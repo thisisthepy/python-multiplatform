@@ -817,9 +817,12 @@ class Function:
     # rejects a function whose declared entries differ (`verify/virtual-escape`). The front end
     # leaves it empty.
     virtual: tuple[str, ...] = ()
-    # SPEC N-15: the user marked this function with the comment line `# typedpython: parallel`
-    # directly above its `def`. Only a marked function can hold a `ForRange.par`.
+    # SPEC N-15: the user marked this function `@compiled(parallel=True)` (#358).
+    # Only a marked function can hold a `ForRange.par`.
     parallel: bool = False
+    # SPEC N-8 (#153, #332): the user marked this function `@compiled(fastmath=True)` (reassociation
+    # and FMA contraction enabled for this function only; NOT CPython-identical).
+    fastmath: bool = False
     # SPEC N-12b (#268): the producers whose result this pure function keeps inside one statement
     # (`check(make(d))`), so each such call builds its objects in a region. Set only by `verify`,
     # which recomputes it and rejects a function whose declared entries differ
@@ -881,6 +884,22 @@ class Module:
 # --- region field kinds (SPEC N-12b), shared by `verify` (proof) and `cgen` (layout) ---------------------
 
 REGION_SCALAR_KINDS = {Type.I64: "i64", Type.F64: "f64", Type.BOOL: "bool"}
+
+
+def direct_lists(f: object) -> bool:
+    """#255 (design/typedpython.md 4.3.6): a pure function with three or more list parameters reads
+    them element by element, without copy-in or critical section. CPython's critical sections lock
+    one or two objects, and copying three or more lists in at one instant needs them all locked (the
+    leader decision of 2026-11-13 excludes any lock outside that API). A pure function only reads
+    its lists, so each `Index` is one `PyList_GetItemRef` in program order, the interpreter's own
+    atomic read, and an element of the wrong type deopts (legal: nothing has happened yet); `Len` is
+    the current length. No entry global (a snapshot read at entry could disagree with later list
+    reads), no buffer parameter, no CopyArray of a list parameter and no parallel loop: the verifier
+    (`verify/array-direct`) and cgen refuse them. An impure function with more than two list
+    parameters stays interpreted (#209)."""
+    params = getattr(f, "params", ())
+    lists = sum(isinstance(p, ArrayParam) and p.buffer is None for p in params)
+    return getattr(f, "pure", False) is True and lists > 2
 
 
 def region_arg_kind(a: object, ref_class) -> object:

@@ -350,8 +350,8 @@ val hostPlatform = when {
 // the same way rather than hardcoding a flat path -- otherwise the sample points PYTHONHOME at a
 // directory that only exists for the default configuration.
 val samplePythonVersion = project.findProperty("pythonVersion")?.toString() ?: rootProject.version.toString()
-val sampleFlavourSuffix =
-    if (project.findProperty("pythonFreeThreaded")?.toString()?.toBoolean() == true) "-freethreaded" else ""
+// Desktop acquires only the free-threaded build (#158), unpacked under `<platform>-freethreaded`.
+val sampleFlavourSuffix = "-freethreaded"
 val pythonHomeForHost = project(":python-multiplatform").layout.buildDirectory
     .dir("python-standalone/extracted/$samplePythonVersion/$hostPlatform$sampleFlavourSuffix/python")
 
@@ -407,14 +407,19 @@ tasks.matching { it.name == "run" }.configureEach {
 
 val nativeImageJavaLauncher = javaToolchains.launcherFor {
     languageVersion.set(JavaLanguageVersion.of(25))
+    vendor.set(JvmVendorSpec.BELLSOFT)
 }
 
 val nativeImageOutputDir = layout.buildDirectory.dir("native/nativeCompile")
 
+pythonBindings {
+    nativeImageDirectory.set(nativeImageOutputDir)
+}
+
 val nativeCompile by tasks.registering(Exec::class) {
     group = "native"
     description = "Builds upcall-native-demo with GraalVM native-image from NativeImageMain.kt"
-    dependsOn(desktopMainCompilation.compileTaskProvider, pythonMultiplatformDesktopJar)
+    dependsOn(desktopMainCompilation.compileTaskProvider, pythonMultiplatformDesktopJar, "stageNativeImagePythonHome")
 
     val classpathProvider = files(
         desktopMainCompilation.output.allOutputs,
@@ -425,7 +430,7 @@ val nativeCompile by tasks.registering(Exec::class) {
     val launcher = nativeImageJavaLauncher
 
     inputs.files(classpathProvider)
-    outputs.dir(outDir)
+    outputs.file(outDir.map { it.file("upcall-native-demo") })
 
     doFirst {
         outDir.get().asFile.mkdirs()
@@ -445,8 +450,10 @@ tasks.register<Exec>("runNativeUpcallDemo") {
     group = "verification"
     description = "Runs the native-image binary built by nativeCompile and checks the upcall path"
     dependsOn(nativeCompile)
+    workingDir(nativeImageOutputDir)
     executable = nativeImageOutputDir.get().asFile.resolve("upcall-native-demo").absolutePath
-    environment("PYTHONHOME", pythonHomeForHost.get().asFile.absolutePath)
+    environment.remove("JAVA_HOME")
+    environment.remove("PYTHONHOME")
 
     // A zero exit status is not the same as a working upcall path. `PyRun_SimpleString` reports
     // failure for an exception raised inside the script, but a Python interpreter that never got

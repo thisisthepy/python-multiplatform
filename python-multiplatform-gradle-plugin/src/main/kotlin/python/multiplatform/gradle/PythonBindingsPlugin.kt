@@ -159,7 +159,11 @@ interface PythonBindingsExtension {
     /** python-build-standalone release tag to stage from. Defaults to the one this library used. */
     val pythonBuildStandaloneRelease: Property<String>
 
-    /** Whether to stage a free-threaded build. Defaults to what this library was built against. */
+    /**
+     * Whether to stage a free-threaded build. Defaults to `true`, what the desktop library embeds
+     * (issue #158: desktop is free-threaded CPython 3.15t only). `false` stages a GIL prefix whose
+     * `lib/python3.15/` the desktop jar's `libpython3.15t` does not look for.
+     */
     val pythonFreeThreaded: Property<Boolean>
 
     /**
@@ -241,6 +245,25 @@ interface PythonBindingsExtension {
 
     /** The `ios { }` block itself: without it the nested property is reachable only as `ios.x`. */
     fun ios(action: org.gradle.api.Action<in PythonBindingsIosExtension>) = action.execute(ios)
+
+    /**
+     * SPEC N-10 (`python-multiplatform#25` step 2): directory of developer `.py` files to compile
+     * to C with `python -m typedpython emit-c`. When set, registers [EMIT_TYPEDPYTHON_C_TASK]
+     * ([TypedPythonEmitCTask]); unset (the default) registers no task.
+     */
+    val typedPythonSourceDir: org.gradle.api.file.DirectoryProperty
+
+    /**
+     * The directory module names are derived relative to (`--root`). Defaults to
+     * [typedPythonSourceDir].
+     */
+    val typedPythonRootDir: org.gradle.api.file.DirectoryProperty
+
+    /** The Python interpreter executable that runs `-m typedpython emit-c` (defaults to `"python3"`). */
+    val typedPythonExecutable: Property<String>
+
+    /** Optional `PYTHONPATH` entries for locating the `typedpython` package when not installed in [typedPythonExecutable]. */
+    val typedPythonPath: org.gradle.api.file.ConfigurableFileCollection
 }
 
 /**
@@ -326,6 +349,34 @@ class PythonBindingsPlugin : Plugin<Project> {
             // `plugins { ... }` and so do not exist while this plugin is being applied.
             configureArtifactBindings(this, extension)
             configureWasmProxyExports(this)
+            configureTypedPythonEmitC(this, extension)
+        }
+    }
+
+    /**
+     * SPEC N-10 (`python-multiplatform#25` step 2): registers [EMIT_TYPEDPYTHON_C_TASK]
+     * ([TypedPythonEmitCTask]) when [PythonBindingsExtension.typedPythonSourceDir] is set.
+     *
+     * A no-op when [PythonBindingsExtension.typedPythonSourceDir] is unset, so projects that do not
+     * compile developer Python modules with TypedPython get no task.
+     */
+    internal fun configureTypedPythonEmitC(project: Project, extension: PythonBindingsExtension) {
+        if (!extension.typedPythonSourceDir.isPresent) return
+        val srcDir = extension.typedPythonSourceDir.get().asFile
+        project.tasks.register(EMIT_TYPEDPYTHON_C_TASK, TypedPythonEmitCTask::class.java) {
+            group = "python"
+            description = "Runs python -m typedpython emit-c over pythonBindings.typedPythonSourceDir and writes the compile-slot manifest."
+            sources.from(
+                project.fileTree(srcDir) {
+                    include("**/*.py")
+                    exclude("**/__pycache__/**", "**/.*", "**/build/**")
+                },
+            )
+            rootDirectory.set(extension.typedPythonRootDir.orElse(extension.typedPythonSourceDir))
+            pythonExecutable.set(extension.typedPythonExecutable.orElse("python3"))
+            pythonPath.from(extension.typedPythonPath)
+            cacheDirectory.set(project.layout.buildDirectory.dir("typedpython/c-cache"))
+            manifestFile.set(project.layout.buildDirectory.file("typedpython/emit-c-manifest.json"))
         }
     }
 

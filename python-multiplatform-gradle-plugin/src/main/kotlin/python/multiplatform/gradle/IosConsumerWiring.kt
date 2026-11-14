@@ -35,6 +35,42 @@ interface PythonBindingsIosExtension {
     val linkPythonFramework: Property<Boolean>
 }
 
+/**
+ * The project's own free-threaded CPython builds for Android and iOS (#163, `build-ft-mobile.yml`),
+ * published on the GitHub release `cpython-<version>t-mobile` of `thisisthepy/python-multiplatform`
+ * because neither python.org nor BeeWare publishes a free-threaded mobile build. Names only; the
+ * SHA-256 pins live in the root `python-checksums.properties` under [lockKey].
+ */
+internal object FreeThreadedMobileRelease {
+    const val REPOSITORY: String = "thisisthepy/python-multiplatform"
+
+    fun tag(pythonVersion: String): String = "cpython-${pythonVersion}t-mobile"
+
+    fun iosArchiveName(pythonVersion: String): String = "python-${pythonVersion}t-iOS-XCframework.tar.gz"
+
+    /** `aarch64` and `x86_64` (#396; the owner approved the x86_64 3.15t build on 2026-11-13). The library build reads them. */
+    fun androidArchiveName(pythonVersion: String, arch: String): String = "python-${pythonVersion}t-$arch-linux-android.tar.gz"
+
+    fun url(pythonVersion: String, assetName: String): String =
+        "https://github.com/$REPOSITORY/releases/download/${tag(pythonVersion)}/$assetName"
+
+    /** `ios-3.15.0-freethreaded`, `android-aarch64-3.15.0-freethreaded`. */
+    fun lockKey(platform: String, pythonVersion: String): String = "$platform-$pythonVersion-freethreaded"
+}
+
+/** One iOS support archive the consumer wiring can download: where from, under which name, which pin. */
+internal data class IosArchive(val url: String, val name: String, val sha256: String)
+
+/**
+ * The archive [configureIosConsumer] downloads: the project's own free-threaded `3.15t` build of
+ * [DEFAULT_PYTHON_VERSION]. It is the only iOS build (owner decision #158, SPEC T-2a); there is no
+ * GIL archive and no switch.
+ */
+internal fun iosArchive(): IosArchive {
+    val name = FreeThreadedMobileRelease.iosArchiveName(DEFAULT_PYTHON_VERSION)
+    return IosArchive(FreeThreadedMobileRelease.url(DEFAULT_PYTHON_VERSION, name), name, DEFAULT_IOS_FREE_THREADED_ARCHIVE_SHA256)
+}
+
 internal const val DOWNLOAD_IOS_TASK = "downloadPython_ios"
 internal const val PREPARE_XCFRAMEWORK_TASK = "preparePythonXcframework"
 internal const val STAGE_IOS_HOME_TASK = "stageIosPythonHome"
@@ -106,6 +142,13 @@ abstract class DownloadPythonIosTask : DefaultTask() {
         work.mkdirs()
         val archive = File(work, archiveName.get())
         val expected = expectedSha256.get().lowercase()
+        if (expected.isBlank()) {
+            throw GradleException(
+                "There is no pinned SHA-256 for ${archiveName.get()}: the root python-checksums.properties had no " +
+                    "entry for it ('$DEFAULT_IOS_FREE_THREADED_LOCK_KEY') when this plugin was built. " +
+                    "Nothing was downloaded.",
+            )
+        }
 
         if (archive.isFile && sha256Hex(archive) != expected) {
             logger.lifecycle("The cached ${archive.name} does not match its pinned SHA-256; deleting it and downloading once more.")
@@ -202,13 +245,14 @@ internal fun PythonBindingsPlugin.configureIosConsumer(project: Project, extensi
     if (iosTargets.isEmpty()) return
 
     val build = project.layout.buildDirectory
+    val archive = iosArchive()
 
     val download = project.tasks.register(DOWNLOAD_IOS_TASK, DownloadPythonIosTask::class.java) {
         group = "python"
-        description = "Downloads and verifies the pinned CPython iOS support archive into build/python-standalone (issue #90)"
-        archiveUrl.convention(DEFAULT_IOS_ARCHIVE_URL)
-        archiveName.convention(DEFAULT_IOS_ARCHIVE_NAME)
-        expectedSha256.convention(DEFAULT_IOS_ARCHIVE_SHA256)
+        description = "Downloads and verifies the pinned free-threaded CPython 3.15t iOS support archive into build/python-standalone (issue #90)"
+        archiveUrl.convention(archive.url)
+        archiveName.convention(archive.name)
+        expectedSha256.convention(archive.sha256)
         workDirectory.convention(build.dir("python-standalone"))
     }
     val xcframeworkSource = download.flatMap { task -> task.workDirectory.dir("extracted/ios/Python.xcframework") }
