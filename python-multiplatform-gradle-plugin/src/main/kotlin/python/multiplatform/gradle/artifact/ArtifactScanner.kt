@@ -327,7 +327,7 @@ internal object ArtifactScanner {
      * Both must run BEFORE [applyDefaultOmission] so a dropped constructor's presence doesn't cost
      * the surviving bound declaration its omittable defaults.
      */
-    private fun dropCollidingConstructors(candidates: List<Candidate>): List<Candidate> {
+    internal fun dropCollidingConstructors(candidates: List<Candidate>): List<Candidate> {
         // A property never claims a constructor's name (issue #38): `TextStyle.color` is read off a
         // `TextStyle` value, it is not a constant `TextStyle` publishes under its own name. [scan]
         // already keeps them out of this pass; this keeps the rule true for any other caller.
@@ -1061,7 +1061,7 @@ internal object ArtifactScanner {
      * of the same name is already excluded where the member is built, so what is left here is a nested
      * object's or a companion's binding under the same dotted name. The other binding keeps it.
      */
-    private fun settleMethodNames(methods: List<Candidate>, settled: List<Candidate>): List<Candidate> {
+    internal fun settleMethodNames(methods: List<Candidate>, settled: List<Candidate>): List<Candidate> {
         val taken = settled.mapNotNullTo(HashSet()) { it.callable?.name }
         return methods.map { candidate ->
             val name = candidate.callable?.name ?: return@map candidate
@@ -1394,7 +1394,7 @@ internal object ArtifactScanner {
      * is declined, by name and with the reason, rather than shadowing or being shadowed. A setter
      * whose getter was declined goes with it: a write-only property is not a Kotlin shape.
      */
-    private fun settlePropertyNames(properties: List<Candidate>, settled: List<Candidate>): List<Candidate> {
+    internal fun settlePropertyNames(properties: List<Candidate>, settled: List<Candidate>): List<Candidate> {
         val taken = settled.mapNotNullTo(HashSet()) { it.callable?.name }
         val counts = properties.mapNotNull { it.callable?.name }.groupingBy { it }.eachCount()
         val firstPass = properties.map { candidate ->
@@ -1430,7 +1430,7 @@ internal object ArtifactScanner {
      * fully carry. Declined rather than bound, because the alternative is not a failing entry but a
      * generated file `kotlinc` rejects as a whole -- every other binding of the artefact with it.
      */
-    private fun unreachableReceiverReason(missing: String, receiver: String): String =
+    internal fun unreachableReceiverReason(missing: String, receiver: String): String =
         "its receiver $receiver has a supertype, $missing, that is not on the compile classpath, " +
             "so generated Kotlin cannot read a member of it"
 
@@ -2589,7 +2589,7 @@ internal object ArtifactScanner {
      * the declaration and saying what to write, which is the same answer
      * [disambiguateOverloads] gives one level up for the same reason.
      */
-    private fun applyDefaultOmission(candidates: List<Candidate>): List<Candidate> {
+    internal fun applyDefaultOmission(candidates: List<Candidate>): List<Candidate> {
         if (candidates.none { it.plan != null }) return candidates
         val byName = candidates.filter { it.callable != null }.groupBy { it.callable!!.name }
         return candidates.map { candidate ->
@@ -2618,6 +2618,8 @@ internal object ArtifactScanner {
                         parameter.copy(declaresDefault = plan.valueIndices[index] in omittableNow)
                     },
                 ),
+                isConstructor = candidate.isConstructor,
+                isCompanionHandle = candidate.isCompanionHandle,
             )
         }
     }
@@ -2634,7 +2636,8 @@ internal object ArtifactScanner {
         return siblings.any { sibling ->
             val other = sibling.callable ?: return@any false
             if (other.receiverTypeName != callable.receiverTypeName) return@any false
-            val otherValues = other.paramNames.indices
+            val otherDeclaredEnd = other.paramNames.indexOf(COMPOSER_PARAMETER_NAME).takeIf { it >= 0 } ?: other.paramNames.size
+            val otherValues = (0 until otherDeclaredEnd)
                 .filter { other.paramNames[it] != RECEIVER_PARAMETER_NAME }
                 .map { Triple(other.paramNames[it], other.paramTypeNames.getOrNull(it), plan.siblingDeclares(sibling, it)) }
             written.all { (name, type) -> otherValues.any { it.first == name && it.second == type } } &&
@@ -2726,11 +2729,11 @@ internal object ArtifactScanner {
         "try", "typealias", "typeof", "val", "var", "when", "while",
     )
 
-    private fun isWritableParameterName(name: String): Boolean =
+    internal fun isWritableParameterName(name: String): Boolean =
         name.isNotEmpty() && name.first().let { it.isLetter() || it == '_' } &&
             name.all { it.isLetterOrDigit() || it == '_' }
 
-    private fun writeParameterName(name: String): String =
+    internal fun writeParameterName(name: String): String =
         if (name in KOTLIN_HARD_KEYWORDS) "`$name`" else name
 
     private fun candidateFromDescriptor(owner: String, methodName: String, descriptor: String): Candidate? {

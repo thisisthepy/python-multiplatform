@@ -152,7 +152,11 @@ internal fun artifactFragmentObjectName(coordinates: String): String =
  * rule stays "derived from the body", with two bodies to derive from rather than one.
  */
 internal fun omittableSlotsOf(entry: ArtifactCallable): List<Boolean> =
-    if ("== null" in entry.lambdaBody || entry.thunk != null) entry.paramHasDefault else entry.paramHasDefault.map { false }
+    if ("== null" in entry.lambdaBody || entry.thunk != null || "@androidx.compose.runtime.Composable" in entry.lambdaBody) {
+        entry.paramHasDefault
+    } else {
+        entry.paramHasDefault.map { false }
+    }
 
 /**
  * What separates a declared return type from the types it **is a**, inside the one string the

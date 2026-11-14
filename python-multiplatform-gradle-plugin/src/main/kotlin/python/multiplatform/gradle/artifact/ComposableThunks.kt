@@ -137,10 +137,10 @@ internal class ComposableShape(
         /** Compose's `BITS_PER_INT`: one `$default` bit per parameter, 31 to an `int`. */
         private const val BITS_PER_INT = 31
 
-        private fun changedCountFor(declared: Int): Int =
+        internal fun changedCountFor(declared: Int): Int =
             if (declared == 0) 1 else ceil(declared / SLOTS_PER_INT.toDouble()).toInt()
 
-        private fun defaultCountFor(declared: Int): Int =
+        internal fun defaultCountFor(declared: Int): Int =
             if (declared == 0) 0 else ceil(declared / BITS_PER_INT.toDouble()).toInt()
 
         /**
