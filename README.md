@@ -8,7 +8,7 @@ English | [한국어](docs/locale/README_ko.md)
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Kotlin Multiplatform](https://img.shields.io/badge/Kotlin-Multiplatform-7F52FF.svg?logo=kotlin&logoColor=white)](https://kotlinlang.org/docs/multiplatform.html)
-[![CPython](https://img.shields.io/badge/CPython-3.14-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
+[![CPython](https://img.shields.io/badge/CPython-3.15-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![Platforms](https://img.shields.io/badge/platforms-JVM%20%7C%20Android%20%7C%20iOS%20%7C%20Android%20native%20%7C%20wasm%20(exp.)-lightgrey.svg)](#-platforms)
 
 [Guide](https://thisisthepy.github.io/python-multiplatform/) ·
