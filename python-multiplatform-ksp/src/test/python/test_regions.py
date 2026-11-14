@@ -565,27 +565,44 @@ def test_every_chunk_is_freed_on_every_exit_edge(built):
 @posix_signals
 def test_an_exception_raised_while_the_tree_is_being_built_frees_the_region(built):
     """The error edge (-1) after nodes were allocated: a signal handler raises at the eval-breaker poll
-    that every compiled entry makes, in the middle of building a tree of 8M nodes."""
+    that every compiled entry makes, in the middle of building a tree of 8M nodes.
+
+    When the timer fires relative to the build depends on the machine (#416: a fast runner built all
+    8388607 nodes before a 0.02 s timer was handled, and the handler raised in `check` instead). So
+    several delays are tried. Every attempt must free what it allocated, whenever the handler ran:
+    before the call (nothing opened), during the build, or after it. At least one attempt must have
+    raised during the build, which is the edge this test is about."""
     import signal
 
     def boom(*_):
         raise TimeoutError("tick")
 
     m = built.m
-    a0, f0 = _chunks(m)
-    o0, fr0, k0 = m.__typedpython_region_stats__()
+    built_counts = []
     old = signal.signal(signal.SIGALRM, boom)
     try:
-        signal.setitimer(signal.ITIMER_REAL, 0.02)
-        with pytest.raises(TimeoutError):
-            m.tree_sum(22)
+        for delay in (0.0005, 0.001, 0.002, 0.005, 0.01, 0.02):
+            a0, f0 = _chunks(m)
+            o0, fr0, k0 = m.__typedpython_region_stats__()
+            try:
+                with pytest.raises(TimeoutError):
+                    signal.setitimer(signal.ITIMER_REAL, delay)    # inside: the handler may run at once
+                    m.tree_sum(22)
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+            a1, f1 = _chunks(m)
+            o1, fr1, k1 = m.__typedpython_region_stats__()
+            opened, objects = o1 - o0, k1 - k0
+            assert a1 - a0 == f1 - f0, delay                           # every chunk came back
+            assert (opened, fr1 - fr0) in ((0, 0), (1, 1)), delay      # the region, if opened, was freed
+            assert 0 <= objects <= nodes(22), delay
+            assert (opened == 0) == (objects == 0), delay
+            if objects:
+                assert a1 - a0 >= 1, delay
+            built_counts.append(objects)
     finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, old)
-    a1, f1 = _chunks(m)
-    o1, fr1, k1 = m.__typedpython_region_stats__()
-    assert a1 - a0 >= 1 and a1 - a0 == f1 - f0
-    assert (o1 - o0, fr1 - fr0) == (1, 1) and 0 < k1 - k0 < nodes(22)
+    assert any(0 < k < nodes(22) for k in built_counts), built_counts  # raised while the tree was being built
 
 
 def test_a_loop_grows_the_region_once_not_per_statement(built):
