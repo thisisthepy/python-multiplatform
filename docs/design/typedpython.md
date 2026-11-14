@@ -1048,14 +1048,18 @@ release store(`Python/structmember.c:326`). 그래서 인터프리터에서 다�
 - **A. 순수 함수 (`cgen._needs_epoch`).** 리스트 copy 가 없고, 호출 트리가 entry global 이름을 둘 이상 읽거나, 하나와
   다른 공유 읽기를 하는 순수 함수. wrapper 가 watcher id 가 없으면 deopt, 있으면 자기 entry global 과 epoch E0 를 모듈
   dict 섹션 안에서 읽고(`tp_eg_snapshot`, 모듈 dict 만, 이름이 없으면 deopt; 자기 entry global 이 없어도 n = 0 으로
-  섹션 안에서 epoch 만 읽는다), 호출 동안 snapshot depth 를 올리고(poll 이 사용자 코드를 돌리지 않는다; OSR 출구도
-  끈다), impl 이 돌아오면 결과(ok)이든 예외(-1)이든 `tp_eg_unchanged(E0)`(acquire fence 뒤 epoch 비교)가 참일 때만
-  그대로 낸다. 거짓이면 결과를 버리고(OBJ 는 놓고) 예외는 지우고 deopt 한다. 트리 안의 모든 entry global 이름은
+  섹션 안에서 epoch 만 읽는다), OSR 출구는 끄고(호출 안의 poll 은 아래 D 처럼 epoch 를 비교해 deopt 한다), impl 이
+  돌아오면 결과(ok)이든 예외(-1)이든 `tp_eg_unchanged(E0)`(acquire fence 뒤 epoch 비교)가 참일 때만 그대로 낸다.
+  거짓이면 결과를 버리고(OBJ 는 놓고) 예외는 지우고 deopt 한다(poll 이 낸 예외는 지우지 않는다, D).
+  (처음 구현은 호출 동안 snapshot depth 를 올려 poll 이 사용자 코드를 돌리지 않게 했다. 리더 결정 2026-11-15 로
+  바뀌었다: D.) 트리 안의 모든 entry global 이름은
   `tp_watch_names` 에 들어간다. 순수 호출자 안의 callee entry global 은 모듈 dict 에서만 읽는다(`tp_eg_read`; 없으면
-  callee 의 deopt). 이름 하나에 다른 공유 읽기가 없으면(경우 4, wordfreq `next_state`) 아무것도 바꾸지 않는다.
+  callee 의 deopt). 이름 하나에 다른 공유 읽기가 없으면(경우 4, wordfreq `next_state`) 아무것도 바꾸지 않는다(그런
+  함수가 A 의 트리 안에 있으면 그 함수도 A 다: D 의 2).
   - **확인은 어느 프레임에서 하는가.** 트리에 밖에서 들어오는 프레임 하나: wrapper(그 아래 impl 과 fast twin, C to C
     callee 는 모두 그 구간 안), 그리고 자기 entry global 이 없는 impure 호출자의 그 Call 지점(같은 snapshot, 같은
-    depth, 같은 확인; 바뀌었으면 tp_s = 1 로 callee 를 해석 redo). impl 안에서는 확인하지 않는다. 순수 호출자 안의
+    확인, D 의 같은 트리 epoch 내놓기; 바뀌었으면 tp_s = 1 로 callee 를 해석 redo). impl 안의 끝 확인은 없다(poll 의
+    비교는 D). 순수 호출자 안의
     callee 는 루트의 구간이 덮는다. entry global 을 쥔 impure 호출자(아래 B)는 callee 의 이름을 모두 쥐어 넘겨야 하고
     다른 공유 읽기가 없어야 하므로 그 Call 에는 확인이 필요 없다(있으면 오히려 틀린다: 해석 redo 가 새 값을 읽고
     호출자는 옛 값을 계속 쓴다).
@@ -1070,15 +1074,14 @@ release store(`Python/structmember.c:326`). 그래서 인터프리터에서 다�
     잠그지 않고 읽어도 된다: 잠긴 E0 뒤의 저장은 모두 E0 뒤에 올린다. builtins dict 는 이 이름에 대해 감시하지 않으므로
     모듈 dict 만 읽는다. (4) 예외도 결과다: 섞인 상태가 ZeroDivisionError 를 낼 수 있고(시험 `err2`: 옛 G 와 새 o.x
     로 0 으로 나눔, 어떤 interleaving 도 내지 않는다) 그래서 오류 경로도 확인한다. 바뀌었으면 예외를 지우고 redo 하는
-    것이 합법인 이유: 순수 함수라 효과가 없고, snapshot depth 때문에 호출 안에서 poll 이 사용자 코드(시그널 처리기,
-    pending call)를 돌리지 않으므로 그 예외는 이 호출의 계산에서만 나온다(KeyboardInterrupt 같은 사용자 코드의 예외를
-    지우는 일이 없다). 그래서 버린 실행은 관측되지 않고, 해석 redo 가 그대로 한 실행이다. 남는 사용자 코드는 놓은
-    객체의 `__del__` 뿐이고 그 예외는 unraisable 이라 전해지지 않는다. (5) 값 비교로는 안 된다: B 가 `G = 2; x = 2;
+    것이 합법인 이유: 순수 함수라 효과가 없고, 지우는 예외는 이 호출의 계산에서 나온 것뿐이다. poll 이 돌린 사용자
+    코드(시그널 처리기, pending call)가 낸 예외는 `poll_raised` 로 표시되어 지우지 않는다(D). 그래서 버린 실행은
+    관측되지 않고, 해석 redo 가 그대로 한 실행이다. 놓은 객체의 `__del__` 이 낸 예외는 unraisable 이라 전해지지 않는다. (5) 값 비교로는 안 된다: B 가 `G = 2; x = 2;
     y = 7; G = 1` 이면 끝에서 다시 읽은 G 는 1 이지만, x = 2 를 본 실행이 y = 7 을 놓친 것을 알 수 없다. epoch 은 두 번
     올라 E0 와 다르다. (6) watcher id 가 없는 모듈은 늘 해석 실행이다(느릴 뿐 같은 결과).
   - **비용.** 해당 함수마다 호출당 모듈 dict 섹션 한 번(경합하면 기다린다: 여러 스레드가 같은 함수를 부르면 섞일 수
-    있다), acquire fence 와 atomic load 하나, 호출 안의 poll 없음(시그널과 stop-the-world 가 돌아올 때까지 미뤄지는
-    liveness 지연). 감시하는 이름이 자주 바뀌면 redo 가 잦다. 다섯 벤치마크에는 해당 함수가 없다.
+    있다), acquire fence 와 atomic load 하나, thread-local 저장 넷(D). poll 은 그대로 돌고 느린 경로(TP_POLL_INTERVAL
+    마다)에 epoch 비교 하나가 더 든다. 감시하는 이름이 자주 바뀌면 redo 가 잦다. 다섯 벤치마크에는 해당 함수가 없다.
 - **B. 효과가 있는 함수.** 첫 효과 뒤에는 deopt 할 수 없다.
   - (1) 리스트 셋 이상에 효과(`ir.direct_writer`): entry global 이 없다(`verify/array-direct`), 스칼라 전역은 쓸 때
     읽고(`Unbox(Global)`, 9c847a10) 문장 출구로 나간다, callee 트리에 entry global 이 없다(`_writer_callee_problem`).
@@ -1098,8 +1101,8 @@ release store(`Python/structmember.c:326`). 그래서 인터프리터에서 다�
     해석 실행으로 남음): entry global 이 둘 이상이면 한 snapshot 에서 읽고(입구와 poll 모두 `tp_eg_snapshot`, 한 순간),
     호출 트리에 공유 읽기(쥐지 않은 callee entry global 포함)가 있으면 거절. 다섯 벤치마크의 해당 함수: 없음.
   - GIL 빌드: 같은 코드, 같은 논증이다. 다른 스레드가 끼는 곳은 Python 코드가 돌거나 poll 이 GIL 을 넘기는 곳뿐이다.
-    A 의 호출은 poll 이 아무것도 하지 않으므로(snapshot depth) 끝까지 다른 스레드가 끼지 않고 epoch 확인은 늘 통과한다
-    (같은 스레드의 `__del__` 이 전역을 바꾼 경우만 redo). B (2) 는 창 안에 사용자 코드도 redo 도 없고 poll 이 창을
+    A 의 호출 안의 poll 은 GIL 을 넘길 수 있으므로 거기서 다른 스레드가 낄 수 있고, 그 poll 의 epoch 비교와 끝의 확인이
+    free-threaded 와 같은 방식으로 다룬다(D). B (2) 는 창 안에 사용자 코드도 redo 도 없고 poll 이 창을
     나눈다. B (3) 와 경우 4 의 함수는 snapshot holder 라 자기 poll(값을 다시 읽어 바뀌면 OSR 출구)에서만 넘긴다.
 - **C. 클래스 이름 전역(경우 5) 판정: 같은 결함이 아니다(읽어서 확인).** `New` 와 `IsExact` 는 클래스 전역을 쓸 때
   읽는다: `tp_class_global_ok` 의 캐시된 1 은 epoch 가 그 뒤로 움직이지 않은 동안만 쓰이고, 캐시는 dict 섹션 안에서
@@ -1111,16 +1114,68 @@ release store(`Python/structmember.c:326`). 그래서 인터프리터에서 다�
 - **결과.** 다섯 벤치마크의 컴파일 함수 집합과 생성 C 는 바이트 단위로 같다(`.cache/boost/ft-sets/sets.py` 로
   9c847a10 과 비교). 시험 파일의 소스 문자열 355 개(front end + verifier + cgen)도 컴파일 집합과 생성 C 가 같다:
   기존 front end 출력에는 A 나 B (3) 에 걸리는 함수가 없다.
-- **시험.** `test_entry_epoch.py`: 생성 C 구조(wrapper 의 snapshot, 끝의 두 확인, snapshot depth, 한 순간의 두
-  entry global, impure 호출자의 Call 지점, 모듈 dict 만 읽는 callee 전역, 감시 이름, 경우 4 는 그대로, 변형 지점)와,
+- **시험.** `test_entry_epoch.py`: 생성 C 구조(wrapper 의 snapshot, 끝의 두 확인, snapshot depth(D 이후: 없음), 한
+  순간의 두 entry global, impure 호출자의 Call 지점, 모듈 dict 만 읽는 callee 전역, 감시 이름, 경우 4 는 그대로, 변형 지점)와,
   `-DTP_TEST_EG_HOOK` 로 만든 결정적 동작 시험(CI): wrapper 의 입구 읽기 뒤, 본문 앞에서 hook 이 B 의 두 쓰기를 하고,
   결과는 interleaving 이 허락하는 집합 안이어야 한다(경우 1, 2, impure 호출자, 예외 경로; 경우 3 은 두 읽기가 한
   섹션 안이라 사이에 hook 을 넣을 수 없어 구조 시험과 집합 시험만). 변형(`cgen._epoch_check` 를 끈 빌드)은 정확히
   21.0, 21.0, 21.0, ZeroDivisionError 를 내야 한다. `test_verify.py`: `verify/entry-global-order` 의 거절과 수락.
   컴파일이 필요한 시험은 이 글을 쓴 에이전트가 돌리지 않았다(AGENTS.md 10).
 - **남은 점 (고치지 않음).** 리스트 하나, 둘의 순수 함수(창)는 A 에서 빠진다: 창 규칙으로 공유 읽기가 없기 때문이다.
-  A 의 함수에서 OSR 출구를 끈 것은 liveness 비용이다(대안: poll 앞에서 epoch 를 보고 바뀌었으면 deopt, 뒤에서 보고
-  바뀌었으면 OSR 출구; 만들지 않았다).
+  A 의 함수에 OSR 출구가 없는 것은 D 이후 liveness 비용이 아니다: poll 은 돌고, 바뀌면 deopt 가 호출 전체를 다시 한다.
+- **D. 호출 안의 poll (리더 결정 2026-11-15: "시그널(Ctrl-C)과 stop-the-world 요청을 호출이 돌아올 때까지 미루는 것은
+  Python 의 동작을 바꾸므로 받아들이지 않는다", 대안으로 epoch 를 poll 마다 확인한다. 아래 수단은 에이전트 제안, 오너
+  확인 안 됨).** 지킨 제약(오너): GIL 전용 기능 없음, 관측되는 Python 동작 변화 없음(종료, 예외, 처리기가 돌 수 있는
+  지점: 인터프리터가 돌릴 수 있는 지점이면 된다), 공개 C API 만, 새 잠금 없음.
+  1. **snapshot depth 를 올리지 않는다.** wrapper 와 impure 호출자의 Call 지점에서 뺐다. 트리 안의 poll
+     (`tp_epoch_poll_slow`)이 breaker 를 부르므로 시그널 처리기, pending call, stop-the-world 가 호출 안에서 돈다.
+  2. **A 의 함수는 entry global 때문에 snapshot holder 가 되지 않는다** (`_FnGen.snapshot`). A 의 impl 에 들어오는
+     길: 루트의 wrapper, 자기 entry global 이 없는 impure 호출자의 Call(둘 다 들어오는 프레임), 순수 호출자(그 호출자도
+     A 이거나 리스트를 쥔 함수), entry global 을 쥔 impure 호출자. 뒤의 두 경우는 들어오는 프레임이 없지만 호출자가
+     snapshot holder 라 이 스레드에서 사용자 코드가 돌지 않고(snapshot depth), 호출자가 트리의 모든 이름을 한 순간에
+     쥐어 넘기며 다른 공유 읽기가 없다(`verify/entry-global-order`). 그래서 "늘 epoch 확인 아래" 라는 가정은 틀렸고,
+     확인이 없는 두 경우는 확인이 필요 없는 경우다. 또 A 의 트리 안에 entry global 을 가진 순수 함수(예: 시험의
+     `callee_h`)는 holder 라 poll 이 breaker 를 돌리지 않았다. 그래서 그런 함수도 A 로 둔다(`_init_epoch`: 루트의 트리
+     구성원 중 리스트 copy 가 없고 entry global 이 있는 순수 함수). 트리 밖에서 불려도 poll 이 돌므로 epoch 가 필요하다.
+     새 루트의 트리는 원래 루트의 트리 안에 있으므로 한 번에 닫힌다. 비용은 그 함수의 직접 호출에만 든다(모듈 dict
+     섹션과 끝의 확인; watcher id 가 없거나 이름이 builtins 에만 있으면 해석 실행).
+  3. **poll 이 낸 예외는 지우지 않는다.** 들어오는 프레임이 `tp_tls.poll_raised` 를 저장하고 0 으로 두고 impl 을 부른 뒤
+     읽고 되돌린다. `tp_epoch_poll_slow` 는 breaker 가 NULL 을 내면 1 로 둔다. 끝의 확인은 이 표시가 있으면 epoch 가
+     바뀌었어도 예외를 그대로 낸다(순수 함수이고, 인터프리터가 그 지점에서 같은 예외를 낼 수 있다). 처리기나 finalizer
+     가 돌린 다른 컴파일 호출은 자기 들어오는 프레임에서 저장, 되돌리므로 바깥 값을 흐리지 않는다. 트리 epoch 가 0 인
+     곳의 poll 은 표시를 건드리지 않는다. 순수 함수에는 예외를 잡는 노드가 없으므로 표시가 선 뒤 다른 예외로 바뀌는 일이
+     없다.
+  4. **종료.** 들어오는 프레임이 E0 를 `tp_tls.tree_epoch` 로 내놓는다(저장, 설정, 되돌림). poll 은 breaker 를
+     `tree_epoch = 0` 으로 부르고(처리기가 돌린 것은 이 호출의 일부가 아니다) 되돌린 뒤, 0 이 아니면 E0 와 비교해 바뀌었으면
+     1(deopt)을 낸다. 순수 함수라 deopt 는 늘 가능하다: 해석 redo 가 호출 전체를 다시 하고, 이미 돈 처리기는 다시 돌지
+     않는다(호출의 첫 바이트코드 전에 돈 실행과 같다; 순수 호출이 남긴 관측 가능한 것이 없다). 그래서 `while not STOP:`
+     처럼 입구에서 한 번 읽은 전역에 걸린 루프도, 같은 스레드의 처리기나 다른 스레드가 다시 묶으면 끝난다. #414 전의
+     holder(OSR 출구)와 비교: OSR 출구는 연속 함수로 나머지를 해석 실행한다. A 에서는 연속이 없어도 되고(epoch 이 바뀌면
+     앞부분이 섞인 상태일 수 있어 그 자리에서 이어 갈 수 없다), deopt 가 더 단순하다. 그래서 OSR 은 계속 끈다.
+     `may_deopt` 와 무관하다: 1 은 트리 epoch 가 내놓인 동안, 곧 들어오는 프레임 아래의 순수 프레임에서만 나오고, 순수
+     호출자는 `tp_rc = tp_s` 로 올리고, 들어오는 프레임(wrapper 또는 impure Call 의 redo)이 받는다.
+  5. **들어온 프레임이 없는 callee.** 트리의 구성원(`_ModGen.tree_member`)은 모두 순수이고 entry global 이 없으면
+     holder 가 아니므로 보통 poll 자리(impl 입구 `tp_epoch_poll`, 루프 `tp_epoch_poll_slow`)에서 비교한다. 그래서 낡은
+     snapshot 에서 계산한 인자로 도는 callee 의 루프도 끝난다. impure 함수는 트리 구성원이 아니고 그 poll 은 비교하지
+     않는다. 트리 안에서 처리기나 finalizer(순수 트리의 decref 가 부른 `__del__`)가 컴파일 코드를 부르면 그 wrapper 를
+     지난다: 루트의 wrapper 는 자기 값을 내놓고 되돌리며, 트리 구성원에 닿는 다른 wrapper(`touches_tree`)는 impl 동안
+     `tree_epoch = 0` 으로 둔다. 그래서 impure 호출자는 자기가 받을 수 없는 poll 의 deopt 를 보지 않는다. 트리에 닿지
+     않는 wrapper 와 poll 은 바뀌지 않는다. 3.15t 의 GC 는 할당 지점이 아니라 eval breaker 에서 돌므로(이 글을 쓴 에이전트가
+     CPython 소스로 다시 확인하지 않았다) GC 의 finalizer 는 poll 의 breaker 안에서 돈다.
+  6. **poll 자리.** impl 입구(셈 경로), While 과 청크 range 루프(셈 impl, fast twin, region 변형 모두 `poll()` 을
+     지난다). 트리 안에서 닿지 않는 자리: `snap_poll`(OSR, 루트는 OSR 이 꺼졌고 다른 구성원은 snapshot 이 없다),
+     ForObj(효과라 순수 함수에 없다), 문장 출구와 OSR 연속(효과가 있거나 리스트를 쥔 함수), 병렬 region 의 일꾼(poll 이
+     없고 유한하다). 트리 안의 holder 는 버퍼를 쥔 루트뿐이다(callee 는 배열 매개변수를 받을 수 없다): #149 의 보수적
+     규칙대로 breaker 는 돌리지 않고(그 호출 동안 시그널은 돌아올 때까지 미뤄진다, #414 와 무관하게 전부터) 루프에서
+     `tp_epoch_moved` 로 비교만 해 끝나게 한다.
+  7. **비용.** epoch 비교는 느린 경로(TP_POLL_INTERVAL 마다)에만 있다. 트리 밖의 함수는 생성 C 가 같다: 다섯 벤치마크의
+     컴파일 집합과 생성 C 는 `.cache/boost/ft-sets/pr415-414.json` 과 바이트 단위로 같다.
+  - **시험.** `test_entry_epoch.py` 의 "(poll)" 구조 시험(로컬에서 빨강 확인)과, C 호출 hook
+    (`functools.partial(_thread.interrupt_main, SIGINT)`: 바이트코드 없이 시그널을 걸어 두므로 처리기는 호출 안의 poll
+    이나 호출 뒤에서만 돈다)으로 만든 동작 시험(CI): (a) 처리기가 바꾼 필드를 호출의 나머지가 본다, (b) 처리기의
+    KeyboardInterrupt 가 전해진다(전역을 먼저 다시 묶어도, impure 호출자를 거쳐도), (c) `STOP` 루프가 끝나고 해석 결과를
+    낸다. 변형 지점 `cgen._poll_epoch_check` 를 끄면 (b) 의 다시 묶는 경우가 15.0 을 내고(예외를 잃음) (c) 가 끝나지
+    않는다. 이 글을 쓴 에이전트는 컴파일이 필요한 시험을 돌리지 않았다(AGENTS.md 10).
 
 ### 4.4 Kotlin 경계의 직접 호출
 

@@ -79,14 +79,32 @@ element by element, a callee entry global the caller does not hold). A pure func
 list copy and whose call tree reads two or more entry-global names, or one and any shared read
 (`_needs_epoch`), runs under the dict-watcher epoch: its wrapper (or, for a Call from an impure
 caller without entry globals of its own, that Call site) reads the epoch and its entry globals in
-the module dict's critical section (`tp_eg_snapshot`; an unwatched module deopts), raises the
-snapshot depth around the call so no poll runs user code inside it (no OSR-style exit either), and
-requires `tp_eg_unchanged` before the result or the exception counts; a change deopts (the
-exception is cleared): the interpreted redo is then the whole execution. Inside a pure caller a
-callee's entry global is read from the module dict only (`tp_eg_read`); every name of an epoch tree
-is in `tp_watch_names`. The check sits at the frame that entered the tree from outside (wrapper,
-impure Call site), never in an impl, so the fast twin and every C to C callee inside are covered by
-it. A function with entry globals that cannot redo (an effect, or list copies) reads them at one
+the module dict's critical section (`tp_eg_snapshot`; an unwatched module deopts), and requires
+`tp_eg_unchanged` before the result or the exception counts; a change deopts (the exception is
+cleared, unless a poll raised it, below): the interpreted redo is then the whole execution. Inside a
+pure caller a callee's entry global is read from the module dict only (`tp_eg_read`); every name of an
+epoch tree is in `tp_watch_names`. The check sits at the frame that entered the tree from outside
+(wrapper, impure Call site), never in an impl, so the fast twin and every C to C callee inside are
+covered by it.
+Polls inside such a call (leader decision 2026-11-15: postponing signals and stop-the-world requests
+until the call returns changes Python's behaviour and is not accepted; the means are an agent proposal,
+not owner-confirmed). No snapshot depth is raised around the call, and its entry globals do not make a
+function that runs under the epoch a snapshot holder (`snapshot`), so every poll in the tree runs the eval
+breaker. The entering frame publishes the epoch it read in `tp_tls.tree_epoch` (with `poll_raised`
+cleared) for the impl call and restores the outer values right after it. Every member of an epoch tree
+(`_ModGen.tree_member`: pure, in a root's call tree; `_FnGen.tree`) polls with `tp_epoch_poll` (impl
+entry) / `tp_epoch_poll_slow` (loops, fast twins and region variants alike): the breaker runs with the
+tree epoch hidden, then a moved epoch returns 1, a deopt the member propagates (it is pure) up to the
+entering frame, which redoes the call interpreted, so a loop whose exit depends on a global a handler or
+another thread rebinds ends; an exception the breaker raised sets `poll_raised`, and the end check keeps
+it even when the epoch moved (the interpreter could raise it at that point). A holder inside a tree (a
+root holding a buffer, #149) runs no breaker but still compares (`tp_epoch_moved`). A pure function
+without list copies that has an entry global and is a member of an epoch tree runs under the epoch
+itself (`_init_epoch`): it polls in the tree, so outside one its polls need the epoch too. Any other
+wrapper whose call tree reaches a member sets the tree epoch to 0 around its impl (`touches_tree`), since a
+finalizer can run it inside a tree. Wrappers and polls of functions outside every epoch tree are
+unchanged (the benchmarks' generated C is byte-identical). `_poll_epoch_check` is the mutation point.
+A function with entry globals that cannot redo (an effect, or list copies) reads them at one
 instant (the #390 snapshot validated after the copy-in, or one `tp_eg_snapshot` for two or more, also
 at a poll) and has no shared read after entry anywhere in its call tree (`_check_entry_order`,
 CGenError; the verifier's `verify/entry-global-order`). `_epoch_check` is the mutation point.
@@ -108,7 +126,8 @@ buffers that share memory see each other's writes in program order. Closedness (
 for lists. OPEN POINT (decision pending in #149): holding the export makes another thread's `append`
 / `resize` of the same array.array raise BufferError during the call; what a concurrent resize
 should observe is not decided here and nothing relies on it. A function holding a buffer does not poll
-the eval breaker (it counts as a snapshot holder, conservatively).
+the eval breaker (it counts as a snapshot holder, conservatively); inside an epoch tree (#414) its loops
+still compare the tree's epoch.
 
 Depth (issue #57): every impl function calls `tp_enter_call()` before it owns anything (a refusal
 returns -1 directly: RecursionError set, nothing counted) and `tp_leave_call()` in the one exit
@@ -126,7 +145,8 @@ without room the counted path runs and raises RecursionError exactly where it al
 of a fast tree are not in `tp_depth.count`, so every twin takes `int tp_fd`, the number of the
 tree's frames active including itself (1 from the precheck, `tp_fd + 1` into a callee twin), and
 the two points where a fast tree can run Python code, a `redo` Call and the loop poll's
-`tp_poll_slow` (a signal handler, a finalizer, another compiled call), are wrapped in
+`tp_poll_slow` (`tp_epoch_poll_slow` in an epoch tree, #414) (a signal handler, a finalizer, another
+compiled call), are wrapped in
 `tp_depth_py_begin(tp_fd)` / `tp_depth_py_end(tp_fd)`, which add and remove `tp_fd` from the count:
 whatever runs there sees the count the counted path would have had.
 
@@ -678,7 +698,11 @@ class _ModGen:
         self.int_consts: list[int] = []          # module-state boxed int constants (SPEC N-13)
         self.gnames: list[str] = []              # cached global/builtin reads, one tp_gslot each
         self._uses: dict[str, set[str]] = {}
-        self._epoch: dict[str, bool] = {}        # #414: name -> runs under the dict-watcher epoch
+        # #414: functions that run under the dict-watcher epoch, the members of their call trees, and
+        # per function whether its call tree reaches a member (`_init_epoch`, computed on first use)
+        self._roots: set[str] | None = None
+        self._members: set[str] = set()
+        self._touches: dict[str, bool] = {}
         self.bounded = _bounded_functions(self.functions)     # name -> k (module docstring, "Fast entry")
         # SPEC N-12b: producers and consumers that get an internal region entry, and per region class the
         # kind of each field ("i64", "f64", "bool", "ref"), read off the producers' `New`s.
@@ -798,11 +822,40 @@ class _ModGen:
                 out += _tree_globals(f, self.functions)
         return list(dict.fromkeys(out))
 
+    def _init_epoch(self) -> None:
+        """#414: the roots (functions that run under the epoch) and the members of their call trees.
+        A root is `_needs_epoch`, or a pure function without list copies that has an entry global and is
+        a member of a root's tree: inside the tree it must poll (leader decision 2026-11-15), which a
+        snapshot holder does not, and outside a tree a function that polls with an entry global needs
+        the epoch to notice a handler rebinding it. A new root's tree lies inside the tree it is a
+        member of, so one pass is the closure."""
+        base = [f for f in self.module.functions if _needs_epoch(f, self.functions)]
+        members = {g.name for f in base for g in _tree(f, self.functions) if g.pure is True}
+        self._roots = {f.name for f in base} | {
+            n for n in members if self.functions[n].entry_globals and not _holds_lists(self.functions[n])}
+        self._members = members
+
     def needs_epoch(self, f: ir.Function) -> bool:
-        """#414: `_needs_epoch`, once per function."""
-        if f.name not in self._epoch:
-            self._epoch[f.name] = _needs_epoch(f, self.functions)
-        return self._epoch[f.name]
+        """#414: `f` runs under the dict-watcher epoch (`_init_epoch`)."""
+        if self._roots is None:
+            self._init_epoch()
+        return f.name in self._roots
+
+    def tree_member(self, f: ir.Function) -> bool:
+        """#414: `f` is pure and in the call tree of a function that runs under the epoch, so its polls
+        compare the tree epoch when one is published (`_FnGen.tree`)."""
+        if self._roots is None:
+            self._init_epoch()
+        return f.name in self._members
+
+    def touches_tree(self, f: ir.Function) -> bool:
+        """#414: `f`'s call tree has a member of an epoch tree, so a wrapper of `f` that is not a root hides
+        any outer epoch tree from it (a finalizer can run that wrapper inside one)."""
+        if self._roots is None:
+            self._init_epoch()
+        if f.name not in self._touches:
+            self._touches[f.name] = any(g.name in self._members for g in _tree(f, self.functions))
+        return self._touches[f.name]
 
     def int_index(self, v: int) -> int:
         if v not in self.int_consts:
@@ -1129,8 +1182,23 @@ def _is_closed(f: ir.Function, functions: dict[str, ir.Function], seen=None) -> 
 def _epoch_check() -> bool:
     """#414: the single mutation point of the epoch check at the end of a call that runs under the
     epoch (wrapper and impure Call site). Tests set it to False to see the deterministic observations
-    fail. Always True in a build."""
+    fail; False also turns off the same comparison at the polls (`_tree_polls`), so the mutant has no
+    epoch check anywhere. Always True in a build."""
     return True
+
+
+def _poll_epoch_check() -> bool:
+    """#414 polls (leader decision 2026-11-15; agent proposal, not owner-confirmed): the single mutation
+    point of the epoch comparison at the polls of an epoch tree and of the flag that keeps an exception a
+    poll raised. False: polls in the tree run the breaker without comparing (a loop on a stale snapshot
+    does not end), nothing publishes the tree epoch, and the end check clears any exception after a
+    change (a handler's KeyboardInterrupt is lost). Tests set it to False; always True in a build."""
+    return True
+
+
+def _tree_polls() -> bool:
+    """#414: the polls of an epoch tree compare its epoch (both mutation points on)."""
+    return _poll_epoch_check() and _epoch_check()
 
 
 def _tree(f: ir.Function, functions: dict[str, ir.Function]) -> list[ir.Function]:
@@ -1402,11 +1470,16 @@ class _FnGen:
         self.osr_sites: dict[int, ir.Resume] = {}
         self.osr_ctx: list[tuple[int, str, str, int]] = []   # enclosing ForRange: (site, var, stop, step)
         self.osr = self._osr_plan()
-        # #414: a call that runs under the epoch runs no user code (its exception is redone, not raised,
-        # when the epoch moved): no poll with an OSR-style exit, and the wrapper holds the snapshot depth
+        # #414: a call that runs under the epoch is not a snapshot holder for its entry globals (`snapshot`):
+        # its polls run the eval breaker (leader decision 2026-11-15) and a moved epoch deopts the whole
+        # call there (it is pure), so it needs no OSR-style exit
         self.epoch = rmode is None and mg.needs_epoch(f)
         if self.epoch:
             self.osr = False
+        # #414: a member of an epoch tree polls with the epoch comparison (`tp_epoch_poll_slow`): a deopt
+        # return is legal in it (pure), and it returns 1 only while a tree epoch is published, that is
+        # inside an epoch-checked call whose entering frame takes the 1 (`_poll_epoch_check` is the mutant)
+        self.tree = _tree_polls() and f.pure is True and mg.tree_member(f)
         # #390 item 5: every Call of a function with an effect that holds lists leaves through the
         # statement exit of the source statement being emitted (`cur_stmt`, ir.Stmt.stmt)
         self.stmt_exits = rmode is None and resume.needs_stmt_exits(f)
@@ -1864,11 +1937,16 @@ class _FnGen:
             ti = self.tmp("tp_int")
         self.emit("if (tp_s == 0) {")
         self.depth += 1
+        enter = epoch and _tree_polls()
         if epoch:
             self._eg_test_hook("tp_s = -1;")
             self.emit("if (tp_s == 0) {")
             self.depth += 1
-            self.emit("tp_t->snapshot_depth++;      /* #414: no poll runs user code inside the callee */")
+            if enter:
+                # #414 polls: this Call enters the epoch tree, as a root's wrapper does (`wrapper`)
+                te, tx, px = self.tmp("uint64_t"), self.tmp("int"), self.tmp("int")
+                self.emit(f"{te} = tp_t->tree_epoch; {tx} = tp_t->poll_raised;   /* #414: the outer tree */")
+                self.emit(f"tp_t->tree_epoch = {ce}; tp_t->poll_raised = 0;")
         # Depth is counted by the callee itself (tp_enter_call at its entry, issue #57).
         if self.fast:
             # the fast twin's callees are bounded too (_bounded_functions): their fast twins, uncounted
@@ -1876,13 +1954,16 @@ class _FnGen:
         else:
             self.emit(f"tp_s = {_ident('tp_impl', e.function)}(tp_module, tp_ts, tp_t{''.join(', ' + x for x in args)});")
         if epoch:
-            self.emit("tp_t->snapshot_depth--;")
+            if enter:
+                self.emit(f"{px} = tp_t->poll_raised; tp_t->tree_epoch = {te}; tp_t->poll_raised = {tx};")
             if _epoch_check():
                 # #414: a result or an exception of the callee counts only if no watched global changed
-                # since the snapshot; else the callee runs interpreted (it is pure: nothing happened)
+                # since the snapshot; else the callee runs interpreted (it is pure: nothing happened). An
+                # exception a poll raised (a handler's) is kept
                 drop = f"tp_release(&{t}); " if callee.returns is Type.OBJ else ""
                 self.emit(f"if (tp_s == 0 && !tp_eg_unchanged({ce})) {{ {drop}tp_s = 1; }}")
-                self.emit(f"else if (tp_s < 0 && !tp_eg_unchanged({ce})) {{ PyErr_Clear(); tp_s = 1; }}")
+                kept = f"!{px} && " if enter else ""
+                self.emit(f"else if (tp_s < 0 && {kept}!tp_eg_unchanged({ce})) {{ PyErr_Clear(); tp_s = 1; }}")
             self.depth -= 1
             self.emit("}")
         self.depth -= 1
@@ -2767,15 +2848,34 @@ class _FnGen:
 
     @property
     def snapshot(self) -> bool:
-        """Holds an array copy-in or an entry-globals snapshot, so must not run user code (#141)."""
-        return bool(self.f.entry_globals) or any(isinstance(p, ir.ArrayParam) and p.name not in self.direct
-                                                 for p in self.f.params)
+        """Holds an array copy-in or an entry-globals snapshot, so must not run user code (#141). Not for
+        its entry globals a function that runs under the epoch (#414): a handler that rebinds one moves
+        the epoch, which its polls compare (`tree`), and the call is then redone."""
+        return (bool(self.f.entry_globals) and not self.epoch) or any(
+            isinstance(p, ir.ArrayParam) and p.name not in self.direct for p in self.f.params)
 
     def poll(self, every_time: bool = False) -> None:
         """At the top of each loop iteration (#141): signals, pending calls, GIL hand-off.
 
         `every_time` skips the countdown: the caller already runs it once per TP_POLL_INTERVAL
-        iterations (a chunked range loop, #206/#280), so the slow poll is due at every call."""
+        iterations (a chunked range loop, #206/#280), so the slow poll is due at every call.
+
+        A member of an epoch tree (#414, `tree`) polls with `tp_epoch_poll_slow`: -1 (an exception, its
+        flag set) and 1 (the tree's epoch moved: a deopt) are both returned as they are. A snapshot holder
+        among them (a pure function holding a buffer, #149) runs no breaker and only compares
+        (`tp_epoch_moved`), so its loops still end after a change."""
+        if self.tree:
+            if self.snapshot:
+                body = "if (tp_epoch_moved(tp_t)) { tp_rc = 1; goto tp_exit; }"
+            elif self.fast:
+                body = ("tp_depth_py_begin(tp_t, tp_fd); "
+                        "tp_s = tp_epoch_poll_slow(tp_t, tp_st->breaker); tp_depth_py_end(tp_t, tp_fd); "
+                        "if (tp_s != 0) { tp_rc = tp_s; goto tp_exit; }")
+            else:
+                body = ("int tp_pq = tp_epoch_poll_slow(tp_t, tp_st->breaker); "
+                        "if (tp_pq != 0) { tp_rc = tp_pq; goto tp_exit; }")
+            self.emit(f"{{ {body} }}" if every_time else f"if (tp_pc_tick(&tp_pc)) {{ {body} }}")
+            return
         if not self.snapshot:
             # A function-local countdown (kept in a register), not the module counter: a load and
             # store of a global on every iteration of a short inner loop cost fannkuch ~38%.
@@ -3116,8 +3216,9 @@ class _FnGen:
             self._emit_region(s, ts, tn, abs(step))
         vec = self._vec_plan(s) if step == 1 else None
         r = self.osr_sites.get(id(s)) if self.osr and self.snapshot and not par_open else None
-        if self.snapshot and r is None:
-            # no polling in a snapshot holder without an OSR-style exit (#141): a plain loop
+        if self.snapshot and r is None and not self.tree:
+            # no polling in a snapshot holder without an OSR-style exit (#141): a plain loop (a holder in
+            # an epoch tree takes the chunked loop: its chunks compare the epoch, `poll`)
             self.emit(f"{tk} = 0;")
             if vec is not None:
                 self._emit_vec_loop(vec, ts, tk, tn)
@@ -3510,7 +3611,11 @@ class _FnGen:
             if self.writer and self.osr:
                 # #255 (d2): the statement exits' context, taken before the poll can run Python code
                 out.append("    tp_osr *tp_my = tp_t->osr; tp_t->osr = NULL;")
-            if not self.fast:
+            if not self.fast and self.tree:
+                # #414: a member of an epoch tree: -1 an exception, 1 the tree's epoch moved (a deopt)
+                out.append("    { int tp_pq = tp_epoch_poll(tp_t, tp_st->breaker); "
+                           "if (tp_pq != 0) { tp_rc = tp_pq; goto tp_exit; } }")
+            elif not self.fast:
                 out.append("    if (tp_poll(tp_t, tp_st->breaker) != 0) { tp_rc = -1; goto tp_exit; }")
         out += prologue
         out += self.lines
@@ -3729,7 +3834,7 @@ class _FnGen:
             L.append("    tp_t->osr = &tp_ox;      /* #152: taken by the impl at entry */")
         if self.epoch:
             # #414: tests only, the point where another thread could rebind a global and then write what
-            # the body reads (-DTP_TEST_EG_HOOK); then no poll may run user code inside the call
+            # the body reads (-DTP_TEST_EG_HOOK)
             L.append("#ifdef TP_TEST_EG_HOOK")
             L.append("    { PyObject *tp_hk = NULL;")
             L.append("      if (PyDict_GetItemStringRef(tp_dict, \"__tp_test_eg_hook__\", &tp_hk) > 0) {")
@@ -3737,19 +3842,38 @@ class _FnGen:
             L.append("          if (tp_hr == NULL) goto tp_error;")
             L.append("          Py_DECREF(tp_hr); } }")
             L.append("#endif")
-            L.append("    tp_t->snapshot_depth++;      /* #414: no poll runs user code inside the call */")
+        # #414 polls (leader decision 2026-11-15): the polls inside the call run the eval breaker. This frame
+        # enters the epoch tree: it publishes the epoch it read for the tree's polls (`tp_epoch_poll_slow`
+        # compares it) with a cleared poll flag, and restores the outer values after the impl. A wrapper
+        # that is no root but whose call tree reaches a tree member hides any outer tree from it (a
+        # finalizer can run this wrapper inside one; its polls must not compare a tree it is not part of)
+        enter = self.epoch and _tree_polls()
+        hide = not self.epoch and _tree_polls() and self.mg.touches_tree(f)
+        if enter:
+            L.append("    uint64_t tp_te = tp_t->tree_epoch; int tp_tx = tp_t->poll_raised;   /* #414: the outer tree */")
+            L.append("    tp_t->tree_epoch = tp_ge; tp_t->poll_raised = 0;")
+        elif hide:
+            L.append("    uint64_t tp_te = tp_t->tree_epoch; tp_t->tree_epoch = 0;   /* #414: in no epoch tree */")
         # #125: the impl call is one depth segment (tp_runtime.h "Segments"): reset before and after
         L.append("    tp_depth_seg_begin(tp_t);")
         L.append(f"    tp_s = {_ident('tp_impl', f.name)}(tp_module, tp_ts, tp_t{''.join(', ' + a for a in args)});")
         L.append("    tp_depth_seg_end(tp_t);")
+        if enter:
+            L.append("    int tp_px = tp_t->poll_raised;")
+            L.append("    tp_t->tree_epoch = tp_te; tp_t->poll_raised = tp_tx;")
+        elif hide:
+            L.append("    tp_t->tree_epoch = tp_te;")
         if self.epoch:
-            L.append("    tp_t->snapshot_depth--;")
             if _epoch_check():
                 # #414: a result or an exception counts only if no watched global changed since the
-                # snapshot (every read the call made is then a read at its own place); else redo
+                # snapshot (every read the call made is then a read at its own place); else redo. An
+                # exception a poll raised (a handler's) is kept: the interpreter could raise it there
                 drop = "tp_release(&tp_r); " if f.returns is Type.OBJ else ""
                 L.append(f"    if (tp_s == 0 && !tp_eg_unchanged(tp_ge)) {{ {drop}goto tp_deopt; }}   /* #414 */")
-                L.append("    if (tp_s < 0 && !tp_eg_unchanged(tp_ge)) { PyErr_Clear(); goto tp_deopt; }")
+                if enter:
+                    L.append("    if (tp_s < 0 && !tp_px && !tp_eg_unchanged(tp_ge)) { PyErr_Clear(); goto tp_deopt; }")
+                else:
+                    L.append("    if (tp_s < 0 && !tp_eg_unchanged(tp_ge)) { PyErr_Clear(); goto tp_deopt; }")
         if osr:
             L.append("    tp_t->osr = NULL;")
             L.append("    if (tp_s == 2) {           /* left for the continuation: its result, lists already final */")

@@ -122,9 +122,10 @@ Python error set, nothing to undo), `-1` Python error set (CPython's exception t
        NULL arrays: the epoch alone, still inside the dict's section, so no store whose watcher already
        moved it is pending) and, before its result or its exception counts, requires
        tp_eg_unchanged(epoch): an acquire fence, then the epoch compared. 0 = a watched global changed:
-       the caller discards the result (or clears the exception) and runs the call interpreted. A
-       callee's entry global read at a Call of a pure caller is tp_eg_read (module dict only,
-       PyDict_GetItemRef: 1 found, 0 absent = the callee's deopt, -1 error). */
+       the caller discards the result (or clears the exception, unless a poll of the call raised it:
+       tp_tls.poll_raised, "Eval breaker" below) and runs the call interpreted. A callee's entry global
+       read at a Call of a pure caller is tp_eg_read (module dict only, PyDict_GetItemRef: 1 found,
+       0 absent = the callee's deopt, -1 error). */
     int  tp_eg_unchanged(uint64_t epoch);
     int  tp_eg_read(PyObject *module_dict, PyObject *name, PyObject **out);
 `tp_*_array_enter` / `_exit` read and write the list through borrowed references (`PyList_GET_ITEM`,
@@ -361,8 +362,8 @@ it raised before. `tp_enter_call` compares `depth + count + 1`; the fast tree ha
 `depth + count + k` is the same comparison at its deepest frame. Py_EnterRecursiveCall is skipped on
 the fast path: the tree is bounded, so it adds at most k small C frames. A twin takes `int tp_fd`
 (the tree's active frames, itself included; the precheck passes 1, a Call passes `tp_fd + 1`). The
-two points where a fast tree can run Python code, a `redo` Call and the loop poll's `tp_poll_slow`,
-are wrapped in `tp_depth_py_begin(tp_t, tp_fd)` / `tp_depth_py_end(tp_t, tp_fd)`, so everything run from there
+two points where a fast tree can run Python code, a `redo` Call and the loop poll's `tp_poll_slow`
+(`tp_epoch_poll_slow` in an epoch tree, #414), are wrapped in `tp_depth_py_begin(tp_t, tp_fd)` / `tp_depth_py_end(tp_t, tp_fd)`, so everything run from there
 (interpreted frames, signal handlers, compiled calls through their precheck) sees the exact count.
 `-DTP_TRACE_FAST`
 (tests only) adds `__tp_trace_fast_hits__()` to the module: the number of entries that took the fast path.
@@ -371,12 +372,30 @@ are wrapped in `tp_depth_py_begin(tp_t, tp_fd)` / `tp_depth_py_end(tp_t, tp_fd)`
     int  tp_poll(tp_tls *t, PyObject *breaker);        /* 0 continue; -1 exception set (a signal handler raised) */
     int  tp_poll_slow(tp_tls *t, PyObject *breaker);   /* every TP_POLL_INTERVAL polls: call the breaker */
     int  tp_pc_tick(int *pc);               /* loop countdown: 1 (and reset) when the slow path is due */
-    tp_tls *tp_tls_get(void);               /* address of the one THREAD-LOCAL struct: depth, poll_countdown, snapshot_depth (++ at entry, -- at tp_exit of a snapshot-holding impl) */
+    tp_tls *tp_tls_get(void);               /* address of the one THREAD-LOCAL struct: depth, poll_countdown, snapshot_depth (++ at entry, -- at tp_exit of a snapshot-holding impl), tree_epoch and poll_raised (#414) */
+    /* #414 (leader decision 2026-11-15; the means are an agent proposal, not owner-confirmed): the polls
+       of a member of an epoch tree (a pure function in the call tree of one that runs under the epoch).
+       0 continue; -1 exception set (and t->poll_raised = 1 inside an epoch-checked call); 1 deopt: the
+       epoch moved since the entering frame's snapshot (t->tree_epoch != 0). The breaker runs with
+       t->tree_epoch = 0 (what a handler runs is outside this call). tp_epoch_moved: the comparison
+       alone, for a snapshot holder in a tree (a pure function holding a buffer), which runs no breaker. */
+    int  tp_epoch_poll(tp_tls *t, PyObject *breaker);         /* impl entry: the countdown, then the slow path */
+    int  tp_epoch_poll_slow(tp_tls *t, PyObject *breaker);    /* loop polls (once per TP_POLL_INTERVAL) */
+    int  tp_epoch_moved(tp_tls *t);                           /* 1 = the tree's epoch moved */
 `breaker` is the module state's `lambda: None`. Calling it runs CPython's own eval-breaker handling
 in its RESUME: signals, pending calls, stop-the-world requests of other threads (the free-threaded
 GC), async exceptions and scheduled collections, exactly as between two bytecodes. A function that holds an array copy-in
 (ir.ArrayParam) or an entry-globals snapshot never polls, and while one is active the slow path does
-nothing: the event stays pending and is handled after it returns.
+nothing: the event stays pending and is handled after it returns (#152 gives list and entry-global
+holders their own polls at loop tops with an OSR-style exit). A call that runs under the dict-watcher
+epoch (#414) is not such a holder for its entry globals and does not hold the snapshot depth: its
+entering frame (wrapper, or the impure caller's Call) saves `tree_epoch` / `poll_raised`, sets them to
+its snapshot's epoch and 0 for the impl call, and restores them; every poll in its call tree runs the
+breaker and then compares the epoch (`tp_epoch_poll_slow`), a move deopting the call (it is pure, so it
+is redone interpreted; a handler that ran is then as if it had run before the call's first bytecode).
+An exception a poll raised is kept by the end check even when the epoch moved. A wrapper that is no
+such root but whose call tree reaches a member of an epoch tree sets `tree_epoch` to 0 around its impl
+(a finalizer can run it inside a tree). Functions outside every epoch tree poll as before.
 
 ## Tracing, profiling and monitoring (entry of every function; issue #142, SPEC N-14)
     int  tp_traced(PyObject *module, PyThreadState *ts, PyCodeObject *code);       /* 1: run the interpreted original */
@@ -554,6 +573,7 @@ static or module-state field must be added here):
 | `tp_depth` (compiled frames in flight, cached frame) | tp_runtime.h static | thread-local | `TP_THREAD_LOCAL` |
 | `tp_tls_v.poll_countdown` | tp_runtime.h static | thread-local | `TP_THREAD_LOCAL` struct `tp_tls` |
 | `tp_tls_v.snapshot_depth` | tp_runtime.h static | thread-local | `TP_THREAD_LOCAL`: one thread's array function never silences another thread's polls |
+| `tp_tls_v.tree_epoch`, `.poll_raised` (#414) | tp_runtime.h static | thread-local | `TP_THREAD_LOCAL`; saved, set and restored by the frame that enters an epoch-checked call (LIFO on the thread's C stack), zeroed around another wrapper's impl whose tree reaches an epoch tree and around a poll's breaker call |
 | `tp_pc` (loop countdown) | local of each impl | per call | a C local |
 | `tp_globals_epoch` | tp_runtime.h static | atomic | relaxed loads, acq_rel add in the watcher callback (any thread); the epoch + dict lookup that remember a binding run in the module dict's critical section |
 | `cls_rt[k].tag`, `.bad_tag`, `.gepoch` | module state | atomic | relaxed `tp_atomic_*`; a stale tag is never reused (tags only grow), so a lost or reordered refresh costs one more refresh |
@@ -572,7 +592,7 @@ static or module-state field must be added here):
 | list arguments of array parameters | caller's lists | critical section | `tp_cs_begin` before the copy-in, `tp_cs_end` after the write-back, on every path; every store written through at once in program order (`tp_*_array_st`, #391): lock-taking operations see the call as one step, lock-free element reads see the interpreter's store order ("Native arrays" above) |
 | list arguments of a function with three or more (#255) | caller's lists | CPython | not copied, no lock: every element read is `PyList_GetItemRef` (atomic, a strong reference), in program order; with an effect (#255 (d2)) every store is `PyList_SetItem` (`tp_list_st_*`) at once, in program order, so lock-taking and lock-free operations of other threads both see the interpreter's one-by-one reads and stores; the same list passed twice needs no guard; the wrapper's arguments keep the lists alive |
 | scalar module globals of a function with an effect and three or more lists (#255 (d2)) | module dict | strong reads | read at each use through the global cache (`tp_gcache_global`: the epoch, else a lookup in the dicts' sections; no lists are locked, so the wait is harmless), unboxed; NULL with NameError or another type: the statement exit, the interpreter then raises or computes |
-| module globals (class names, entry globals) | module dict | strong reads (+ epoch, #414) | `tp_global` and `tp_class_global_ok` use `PyDict_GetItemRef`. An entry global is read once at entry, the interpreter at every use (#414, design/typedpython.md 4.3.6 아; agent proposal, not confirmed): a pure function without lists whose call tree reads two or more entry-global names, or one and any other shared state, runs under the epoch (`tp_eg_snapshot` at entry or at the impure caller's Call, the names watched, `tp_eg_read` for a callee's at a Call, no user-code poll inside, `tp_eg_unchanged` before its result or exception counts, else the call runs interpreted; unwatched: always interpreted). A function with an effect or holding lists reads its entry globals at one instant (`tp_eg_snapshot` for two or more) and nothing else shared after entry (`verify/entry-global-order`). One name and no other shared read keeps `tp_global`. Class-name globals are read at each use (`tp_class_global_ok`: the cached 1 holds only while the epoch has not moved, so it is a read at that point) |
+| module globals (class names, entry globals) | module dict | strong reads (+ epoch, #414) | `tp_global` and `tp_class_global_ok` use `PyDict_GetItemRef`. An entry global is read once at entry, the interpreter at every use (#414, design/typedpython.md 4.3.6 아; agent proposal, not confirmed): a pure function without lists whose call tree reads two or more entry-global names, or one and any other shared state, runs under the epoch (`tp_eg_snapshot` at entry or at the impure caller's Call, the names watched, `tp_eg_read` for a callee's at a Call, polls inside that run the eval breaker and then compare the epoch (`tp_epoch_poll_slow`: a move deopts the call; an exception a poll raised is kept), `tp_eg_unchanged` before its result or exception counts, else the call runs interpreted; unwatched: always interpreted; a function with an entry global inside such a call tree runs under the epoch itself). A function with an effect or holding lists reads its entry globals at one instant (`tp_eg_snapshot` for two or more) and nothing else shared after entry (`verify/entry-global-order`). One name and no other shared read keeps `tp_global`. Class-name globals are read at each use (`tp_class_global_ok`: the cached 1 holds only while the epoch has not moved, so it is a read at that point) |
 | entry globals of a function holding lists (#390) | module dict | critical section + epoch | `tp_eg_snapshot` reads them and `tp_globals_epoch` in the module dict's section BEFORE the lists' section; `tp_eg_current` after the copy-in, else deopt. Nothing else in that window looks a dict up (`verify/array-wait`); no interpreted callee runs inside it either: a callee's deopt leaves through a statement exit (#390 item 5, design 4.3.6 바) |
 | a compiled class's instances | other threads' objects | CPython | `PyMember_GetOne` / `SetOne` are what the interpreter's member descriptors call (they take the object's lock on free-threaded builds); `tp_new_fixed` writes only its own fresh object |
 | `errno` (math helpers) | C library | thread-local | per thread by POSIX |

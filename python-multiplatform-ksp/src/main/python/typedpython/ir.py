@@ -821,7 +821,9 @@ class Function:
     # (#414, SPEC N-8). So a pure function without lists whose call tree reads two or more entry-global
     # names, or one and any other shared state, runs under the dict-watcher epoch (cgen `_needs_epoch`),
     # and a function with an effect or list copies has no shared read after entry
-    # (`verify/entry-global-order`).
+    # (`verify/entry-global-order`). A signal handler on this thread is user code too: an epoch call's
+    # polls run it and then compare the epoch, so a rebinding there redoes the call (cgen
+    # `tp_epoch_poll_slow`, leader decision 2026-11-15; the means are an agent proposal).
     entry_globals: tuple[Param, ...] = ()
     # A method of the compiled fixed-layout class `owner` (SPEC N-11, #155): `name` is
     # "<owner>.<method>" and params[0] is `self` as Param(OBJ, cls=owner, optional=False). The

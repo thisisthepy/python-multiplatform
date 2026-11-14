@@ -27,7 +27,8 @@
  * Free-threaded CPython (3.15t is the only supported build; issue #159, runtime/API.md
  * "Free-threaded CPython"). Without a GIL every static, every module-state field and every
  * object another thread can reach is shared. Each piece of shared mutable state is one of:
- *   thread-local   TP_THREAD_LOCAL (tp_depth, tp_poll_countdown, tp_snapshot_depth)
+ *   thread-local   TP_THREAD_LOCAL (tp_depth, tp_poll_countdown, tp_snapshot_depth, and the #414
+ *                  tree_epoch / poll_raised of tp_tls)
  *   atomic         tp_atomic_* below (tp_globals_epoch, tp_class_rt tag / bad_tag / gepoch /
  *                  counters, tp_version_tag reads)
  *   immutable      written only by the module's exec slot (or by tp_clear, when no call can run)
@@ -2867,7 +2868,9 @@ static inline int tp_eg_current(uint64_t epoch)
  * until it is done). The acquire fence orders every read the call made before it (a slot, a list
  * element, a dict lookup) before the epoch load: if one of them saw a write that another thread made
  * after rebinding a watched global, the watcher's move, which came before that rebinding's store and so
- * before the write, is visible here. 1 = no watched global changed since the snapshot. */
+ * before the write, is visible here. 1 = no watched global changed since the snapshot. The polls inside
+ * such a call make the same comparison (tp_epoch_poll_slow, below), so a call that does not end still
+ * leaves after a change. */
 static inline int tp_eg_unchanged(uint64_t epoch)
 {
 #if defined(TP_MSVC_ATOMICS)
@@ -3171,9 +3174,15 @@ typedef struct {
     int poll_countdown;             /* eval-breaker poll countdown (#141) */
     Py_ssize_t snapshot_depth;      /* snapshot-holding functions in flight (#141) */
     tp_osr *osr;                    /* the OSR context for the impl about to be entered (#152), or NULL */
+    /* #414 polls (tp_epoch_poll_slow): the epoch E0 of the epoch-checked call this thread runs inside, 0
+     * outside every one. Written only by the frame that enters such a call (wrapper or impure Call site:
+     * saved, set, restored after the impl) and set to 0 around the impl of any other wrapper whose call
+     * tree reaches a member of an epoch tree, and around the breaker call of a poll. */
+    uint64_t tree_epoch;
+    int poll_raised;                /* #414: a poll of that call raised (its handler's exception); same owner */
 } tp_tls;
 
-static TP_THREAD_LOCAL tp_tls tp_tls_v = {{0, NULL, 0, -1}, TP_POLL_INTERVAL, 0, NULL};
+static TP_THREAD_LOCAL tp_tls tp_tls_v = {{0, NULL, 0, -1}, TP_POLL_INTERVAL, 0, NULL, 0, 0};
 
 static inline tp_tls *tp_tls_get(void)
 {
@@ -3348,6 +3357,18 @@ static PyMethodDef tp_trace_frame_reads_def = {"__tp_trace_frame_reads__", tp_tr
  * (`tp_snapshot_depth > 0`, counted at its entry and exit) the slow path does nothing and the event
  * stays pending. Its own polls (#152, #335) first write the arrays back and lower the depth, so the
  * handler runs there with the lists up to date, and the function copies them in again after.
+ *
+ * Epoch-checked calls (#414; leader decision 2026-11-15: postponing signals and stop-the-world requests
+ * until such a call returns is not accepted; the means below are an agent proposal, not owner-confirmed).
+ * A pure function that runs under the dict-watcher epoch is not a snapshot holder for its entry globals:
+ * every poll in its call tree is tp_epoch_poll (impl entry) or tp_epoch_poll_slow (loop tops, once per
+ * TP_POLL_INTERVAL iterations), which runs the breaker as tp_poll_slow does and then, when this thread is
+ * inside an epoch-checked call (tp_tls.tree_epoch != 0), compares the epoch with that call's E0: moved,
+ * it returns 1 and the call deopts (it is pure: redone interpreted from the start; a handler that already
+ * ran is as if it had run before the call's first bytecode), so a loop that exits on a global a handler or
+ * another thread rebinds ends. An exception the breaker raised sets tp_tls.poll_raised; the entering
+ * frame keeps that exception even when the epoch moved (the interpreter could raise it at that point),
+ * while an exception of the call's own computation after a change is still cleared and redone.
  * ------------------------------------------------------------------------------------------ */
 #ifndef TP_POLL_INTERVAL
 #define TP_POLL_INTERVAL 4096
@@ -3403,6 +3424,47 @@ static inline int tp_poll(tp_tls *t, PyObject *breaker)
         return 0;
     }
     return tp_poll_slow(t, breaker);
+}
+
+/* #414: the slow poll of a function that is a member of an epoch tree (cgen `_FnGen.tree`; agent
+ * proposal, not owner-confirmed). Outside an epoch-checked call (tree_epoch 0) it is tp_poll_slow. Inside
+ * one: the breaker runs with tree_epoch set to 0 (what a handler runs, a compiled call included, is not
+ * part of this call), then tree_epoch is restored; an exception it raised marks poll_raised and returns
+ * -1; else the epoch is compared with E0 (tp_eg_unchanged: an acquire fence, then the load), and a move
+ * returns 1, the caller's deopt. Cold: once per TP_POLL_INTERVAL iterations, so the comparison costs
+ * nothing in the per-iteration path. 0 = continue, -1 = exception set, 1 = deopt. */
+static TP_COLD int tp_epoch_poll_slow(tp_tls *t, PyObject *breaker)
+{
+    uint64_t e = t->tree_epoch;
+    int rc;
+    if (e == 0) {
+        return tp_poll_slow(t, breaker);
+    }
+    t->tree_epoch = 0;
+    rc = tp_poll_slow(t, breaker);
+    t->tree_epoch = e;
+    if (rc != 0) {
+        t->poll_raised = 1;
+        return -1;
+    }
+    return tp_eg_unchanged(e) ? 0 : 1;
+}
+
+/* #414: tp_poll of an epoch-tree member (its impl entry): the countdown, then tp_epoch_poll_slow. */
+static inline int tp_epoch_poll(tp_tls *t, PyObject *breaker)
+{
+    if (!TP_UNLIKELY(--t->poll_countdown <= 0)) {
+        return 0;
+    }
+    return tp_epoch_poll_slow(t, breaker);
+}
+
+/* #414: the loop poll of a snapshot holder inside an epoch tree (a pure function holding a buffer, which
+ * runs no user code, #149): no breaker, only the comparison, so its loop still ends when the epoch moved.
+ * 1 = moved (the caller's deopt). Cold, once per TP_POLL_INTERVAL iterations. */
+static TP_COLD int tp_epoch_moved(tp_tls *t)
+{
+    return t->tree_epoch != 0 && !tp_eg_unchanged(t->tree_epoch);
 }
 
 /* Tracing, profiling and monitoring (issue #142, SPEC N-14). A compiled function has no Python
