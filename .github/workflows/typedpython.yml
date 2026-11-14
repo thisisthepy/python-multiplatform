@@ -3,12 +3,9 @@ name: TypedPython CI
 # The TypedPython gate and compiler are Python (python-multiplatform-ksp/src/{main,test}/python).
 # Gradle does not run them; this workflow does.
 on:
-  # Checked on develop after merging, not on every pull request (user decision,
-  # 2026-10-17). A red develop is fixed forward by its own pull request.
-  push:
-    branches: [ "develop", "main" ]
-    paths: [ "python-multiplatform-ksp/**", "python-multiplatform-ksp/fixtures/app/**", ".github/workflows/typedpython.yml" ]
-  workflow_dispatch:
+  # Runs only as part of ci.yml, which is started by hand (owner, 2026-11-14: "개발 테스트 ci는
+  # 명시적으로 실행하기"). ci.yml holds the one concurrency group for the repository.
+  workflow_call:
     inputs:
       race_mutant:
         # The race_mutant tests show that a concurrency test catches a planted mutant; each depends
@@ -16,11 +13,6 @@ on:
         description: "Also run the race_mutant tests (a missed race fails the step)"
         type: boolean
         default: false
-concurrency:
-  # A run in progress finishes; a newer push replaces only the queued run (frequent merges
-  # to develop otherwise cancelled every run before it reported).
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
 
 jobs:
   test:
@@ -58,7 +50,7 @@ jobs:
         run: ${{ matrix.venv_python }} -m pytest -q -m "not measurement and not race_mutant"
 
       - name: Race mutants (dispatch input race_mutant)
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.race_mutant }}
+        if: ${{ inputs.race_mutant }}
         run: ${{ matrix.venv_python }} -m pytest -q -rA -m race_mutant
 
       - name: Measurements (recorded, sanity bounds only)

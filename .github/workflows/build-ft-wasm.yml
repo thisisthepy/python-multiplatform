@@ -13,21 +13,7 @@ name: Build free-threaded CPython for wasm
 # shared memory (trampoline_patch=skip runs without it).
 
 on:
-  # Runs on develop when the build itself changes (workflow_dispatch needs the file on the
-  # default branch, main, which develop reaches only through a release).
-  push:
-    branches: [develop]
-    paths:
-      - ".github/workflows/build-ft-wasm.yml"
-      - ".github/scripts/ft-wasm/**"
-      - ".github/scripts/ft-mobile/common.sh"
-  # And on a pull request that changes it, so a change is built before it merges (a new workflow
-  # cannot be dispatched until it reaches main).
-  pull_request:
-    paths:
-      - ".github/workflows/build-ft-wasm.yml"
-      - ".github/scripts/ft-wasm/**"
-      - ".github/scripts/ft-mobile/common.sh"
+  # Started by hand only (owner, 2026-11-14: "개발 테스트 ci는 명시적으로 실행하기").
   workflow_dispatch:
     inputs:
       python_version:
@@ -48,7 +34,9 @@ on:
         options: [apply, skip]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # One development run per repository: a run in progress finishes, and a newer dispatch replaces
+  # the waiting one (owner, 2026-11-14: "제일 최신꺼만 도는게 맞지").
+  group: dev-ci
   cancel-in-progress: false
 
 jobs:
