@@ -2293,7 +2293,7 @@ object PythonxAdapter {
             def __dir__():
                 names = set(_BY_PACKAGE.get(kotlin_package, {}))
                 names.update(_CHILDREN.get(kotlin_package, ()))
-                for served in (_BY_RECEIVER, _METHODS):
+                for served in (_BY_RECEIVER, _METHODS, _PROPERTIES):
                     for type_name in served:
                         package, _, leaf = type_name.rpartition('.')
                         if package == kotlin_package:

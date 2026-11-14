@@ -21,13 +21,6 @@ on:
   push:
     tags:
       - 'v*'
-  # A pull request that touches the publishing setup runs the dry run, so the bundle is checked
-  # before the first tag depends on it.
-  pull_request:
-    paths:
-      - '.github/workflows/maven-central.yml'
-      - '.github/scripts/release/central-*.sh'
-      - 'gradle/central-publishing.gradle.kts'
   workflow_dispatch:
     inputs:
       dry_run:

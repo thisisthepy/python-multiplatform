@@ -263,33 +263,20 @@ val generateCoordinates = tasks.register("generateCoordinates") {
 
     val klibWorkerValue = klibWorkerCoordinates
 
-    // The CPython iOS support archive the library build downloads, derived with the same rule as
-    // `python-multiplatform/build.gradle.kts` (`downloadPython_ios`): python.org from 3.15, BeeWare
-    // before. The SHA-256 is read from the root `python-checksums.properties` under the library's
-    // own lock key and baked into the plugin, so a consumer verifies against the pin this plugin
-    // was built with and needs no lockfile of its own.
-    val iosVersionParts = pythonVersionValue.split(".")
-    val iosFromPythonOrgValue = iosVersionParts[0].toInt() > 3 || (iosVersionParts[0].toInt() == 3 && iosVersionParts[1].toInt() >= 15)
-    val iosLibVersion = "${iosVersionParts[0]}.${iosVersionParts[1]}"
-    val iosReleaseDir = "$iosLibVersion.${iosVersionParts.getOrNull(2)?.takeWhile { it.isDigit() } ?: "0"}"
-    val appleSupportBuild = rootProperty("pythonAppleSupportBuild", "b11")
-    val iosArchiveNameValue = if (iosFromPythonOrgValue) {
-        "python-$pythonVersionValue-iOS-XCframework.tar.gz"
-    } else {
-        "Python-$iosLibVersion-iOS-support.$appleSupportBuild.tar.gz"
-    }
-    val iosUrlValue = if (iosFromPythonOrgValue) {
-        "https://www.python.org/ftp/python/$iosReleaseDir/$iosArchiveNameValue"
-    } else {
-        "https://github.com/beeware/Python-Apple-support/releases/download/$iosLibVersion-$appleSupportBuild/$iosArchiveNameValue"
-    }
-    val iosLockKeyValue = if (iosFromPythonOrgValue) "ios-$pythonVersionValue-pythonorg" else "ios-$iosLibVersion-$appleSupportBuild"
+    // The iOS support archive is the project's own free-threaded 3.15t build (#163, #328; owner
+    // decision #158: free-threaded 3.15t is the only build, no GIL archive is kept). Release
+    // `cpython-<version>t-mobile` of thisisthepy/python-multiplatform, pinned under
+    // `ios-<version>-freethreaded` in the root `python-checksums.properties` and baked into the plugin,
+    // so a consumer verifies against the pin this plugin was built with and needs no lockfile of its
+    // own. The 3.15.0 value is the release's SHA256SUMS line, equal to the GitHub asset digest and to
+    // `shasum -a 256` of the downloaded archive (checked 2026-11-13).
     val checksumsFile = project.rootDir.resolve("../python-checksums.properties")
-    val iosSha256Value = Properties().apply {
+    val iosFreeThreadedLockKeyValue = "ios-$pythonVersionValue-freethreaded"
+    val iosFreeThreadedSha256Value = Properties().apply {
         if (checksumsFile.isFile) checksumsFile.inputStream().use { load(it) }
-    }.getProperty(iosLockKeyValue)
+    }.getProperty(iosFreeThreadedLockKeyValue)
         ?: throw GradleException(
-            "python-checksums.properties (${checksumsFile.path}) has no '$iosLockKeyValue'; the plugin bakes the iOS support archive's SHA-256 from it.",
+            "python-checksums.properties (${checksumsFile.path}) has no '$iosFreeThreadedLockKeyValue'; the plugin bakes the iOS support archive's SHA-256 from it.",
         )
 
     inputs.property("coordinates", coordinates)
@@ -298,10 +285,8 @@ val generateCoordinates = tasks.register("generateCoordinates") {
     inputs.property("pbsRelease", pbsReleaseValue)
     inputs.property("pythonFreeThreaded", freeThreadedValue)
     inputs.property("wasmRuntimeCoordinates", wasmRuntimeCoordinatesValue)
-    inputs.property("iosUrl", iosUrlValue)
-    inputs.property("iosArchiveName", iosArchiveNameValue)
-    inputs.property("iosLockKey", iosLockKeyValue)
-    inputs.property("iosSha256", iosSha256Value)
+    inputs.property("iosFreeThreadedLockKey", iosFreeThreadedLockKeyValue)
+    inputs.property("iosFreeThreadedSha256", iosFreeThreadedSha256Value)
     outputs.dir(outputDir)
     doLast {
         val file = outputDir.get().file("python/multiplatform/gradle/ProcessorCoordinates.kt").asFile
@@ -319,17 +304,11 @@ val generateCoordinates = tasks.register("generateCoordinates") {
             /** The python-build-standalone release tag that published it. */
             internal const val DEFAULT_PBS_RELEASE: String = "$pbsReleaseValue"
 
-            /** The pinned CPython iOS support archive: where it is downloaded from. */
-            internal const val DEFAULT_IOS_ARCHIVE_URL: String = "$iosUrlValue"
-
-            /** Its file name, which is also the file's name under the consumer's `build/python-standalone/`. */
-            internal const val DEFAULT_IOS_ARCHIVE_NAME: String = "$iosArchiveNameValue"
-
-            /** The key it has in the root `python-checksums.properties`, kept for messages. */
-            internal const val DEFAULT_IOS_LOCK_KEY: String = "$iosLockKeyValue"
+            /** The key of the iOS support archive (the 3.15t build, SPEC T-2a) in `python-checksums.properties`. */
+            internal const val DEFAULT_IOS_FREE_THREADED_LOCK_KEY: String = "$iosFreeThreadedLockKeyValue"
 
             /** Its SHA-256, read from `python-checksums.properties` when this plugin was built. */
-            internal const val DEFAULT_IOS_ARCHIVE_SHA256: String = "$iosSha256Value"
+            internal const val DEFAULT_IOS_FREE_THREADED_ARCHIVE_SHA256: String = "$iosFreeThreadedSha256Value"
 
             internal const val DEFAULT_PYTHON_FREE_THREADED: Boolean = $freeThreadedValue
 

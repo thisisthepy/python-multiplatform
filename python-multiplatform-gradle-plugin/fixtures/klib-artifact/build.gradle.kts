@@ -52,9 +52,10 @@ kotlin {
         // Mirrors `:python-multiplatform-ksp:fixtures:app`'s own androidNativeArm64 linker config: the test binary needs
         // the same CPython symbols resolved at final link time, since `python-multiplatform`'s klib
         // only declares them via cinterop and does not itself embed a static libpython.
-        val targetExtractDir = "$pythonDownloadDir/extracted/$fixturePythonVersion/android-aarch64/prefix"
+        // The free-threaded 3.15t tree, the only Android build (#328).
+        val targetExtractDir = "$pythonDownloadDir/extracted/$fixturePythonVersion/android-aarch64-freethreaded/prefix"
         binaries.getTest(org.jetbrains.kotlin.gradle.plugin.mpp.NativeBuildType.DEBUG).linkerOpts.addAll(
-            listOf("-L$targetExtractDir/lib/", "-lpython$fixturePythonLibVersion", "-Wl,--allow-shlib-undefined"),
+            listOf("-L$targetExtractDir/lib/", "-lpython${fixturePythonLibVersion}t", "-Wl,--allow-shlib-undefined"),
         )
     }
     // Issue #234: the simulator target, so the suite runs through Gradle (`iosSimulatorArm64Test`)

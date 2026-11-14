@@ -36,7 +36,7 @@ class AcquiredHeaderVersionTest {
         try {
             for (t in CPythonIncludeLayout.allTargets) {
                 val v = if (t.startsWith("ios")) "3.14.6" else "3.14.7"
-                root.resolve(CPythonIncludeLayout.relativePath(t, CPythonFlavour.GIL, "3.14.7"))
+                root.resolve(CPythonIncludeLayout.relativePath(t, CPythonIncludeLayout.embeddedFlavour(t), "3.14.7"))
                     .also { it.mkdirs() }.resolve("patchlevel.h").writeText(patchlevel(v))
             }
             val failures = AcquiredHeaderVersion.mismatches(root, "3.14.7")

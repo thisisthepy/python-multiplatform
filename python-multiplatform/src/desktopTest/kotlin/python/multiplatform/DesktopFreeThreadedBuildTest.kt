@@ -18,8 +18,9 @@ import kotlin.test.assertTrue
  * `Py_GIL_DISABLED = 0` and `autoDrainInterval` defaulted to 0. Each assertion below fails on that
  * build with its own message.
  *
- * What this cannot find: whether Android or iOS were left alone. Their literal values are pinned in
- * their own test source sets (`AndroidGilBuildTest`, `AndroidNativeGilBuildTest`, `IosGilBuildTest`).
+ * What this cannot find: what Android, androidNative, iOS and wasm embed. Their literal values are
+ * pinned in their own test source sets (`AndroidFreeThreadedBuildTest`,
+ * `AndroidNativeFreeThreadedBuildTest`, `IosFreeThreadedBuildTest`, `WasmGilBuildTest`).
  */
 class DesktopFreeThreadedBuildTest {
 

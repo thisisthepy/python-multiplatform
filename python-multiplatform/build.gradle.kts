@@ -65,9 +65,11 @@ val configuredPythonVersion = project.property("pythonVersion").toString()
 // Issue #158, maintainer 2026-10-04: "Free-threaded is the default and the only build. The GIL
 // build is not kept as an option. Baseline is CPython 3.15t." Desktop (JVM, macosArm64, linuxX64)
 // therefore always acquires python-build-standalone's free-threaded build, and the
-// `-PpythonFreeThreaded` switch that used to choose it is gone. Android and iOS still embed
-// python.org's GIL build until #328, wasm until #175; which build each platform embeds is the
-// `embedsFreeThreadedPython` expect/actual in the library, not a build-wide flag.
+// `-PpythonFreeThreaded` switch that used to choose it is gone. Android (arm64-v8a, x86_64),
+// androidNative and iOS embed the project's own 3.15t builds from the GitHub release
+// `cpython-<version>t-mobile` (#328; leader 2026-11-13: no opt-in flag on mobile, 3.15t is the
+// only build). Only wasm still embeds a GIL build, until #175. Which build each platform embeds is
+// the `embedsFreeThreadedPython` expect/actual in the library, not a build-wide flag.
 if (project.findProperty("pythonFreeThreaded") != null) {
     throw GradleException(
         "-PpythonFreeThreaded was removed (issue #158): desktop always embeds the free-threaded " +
@@ -75,7 +77,6 @@ if (project.findProperty("pythonFreeThreaded") != null) {
     )
 }
 val pbsRelease = project.findProperty("pythonBuildStandaloneRelease")?.toString() ?: "20261013"
-val pythonAppleSupportBuild = project.findProperty("pythonAppleSupportBuild")?.toString() ?: "b11"
 
 val pythonVersion = configuredPythonVersion
 val libraryVersion = "$pythonVersion-${project.property("libraryVersionSuffix")}"   // the root's publishedVersion (#70)
@@ -91,7 +92,7 @@ buildkonfig {
         // No free-threaded field: which build a platform embeds differs by platform (#158), so it
         // is the `embedsFreeThreadedPython` expect/actual (commonMain `EmbeddedPythonBuild.kt`),
         // which `Versions.abiFlags` reads. One BuildConfig field shared by every target could not
-        // say "desktop 3.15t, Android 3.15".
+        // say "every native platform 3.15t, wasm GIL".
     }
 }
 
@@ -100,19 +101,60 @@ val libVersion = pythonVersion.split('.').subList(0, 2).joinToString(".")
 val desktopAbiSuffix = "t"
 
 /**
- * The `ftp/python/<dir>/` directory holding a release, which drops any pre-release suffix:
- * `3.15.0rc1` is published under `3.15.0`. Identical to the version itself for a final release,
- * so it is always the right thing to build a python.org URL from.
- *
- * Declared here, above every consumer, because both the Android and the iOS download tasks need
- * it. It used to sit below the Android tasks, which therefore built their URLs from the raw
- * version and 404'd on any pre-release -- `ftp/python/3.15.0rc1/` does not exist. That stayed
- * invisible because the archives were already sitting in the download directory, so the fetch was
- * skipped; adding the `.sigstore` fetch is what surfaced it.
+ * ABI flags of the Android, androidNative and iOS CPython: `t`. They embed the project's own
+ * free-threaded builds (#163, #328); there is no GIL mobile build (#158).
  */
-val pythonOrgReleaseDir = pythonVersion.split(".").let { parts ->
-    val patch = parts.getOrNull(2)?.takeWhile { it.isDigit() } ?: "0"
-    "${parts[0]}.${parts[1]}.$patch"
+val mobileAbiSuffix = "t"
+
+/** `3.15t`: the name of the mobile `libpython3.15t.so`, `lib/python3.15t/` and `include/python3.15t/`. */
+val mobileTag = "$libVersion$mobileAbiSuffix"
+
+/**
+ * Where the project's own free-threaded Android and iOS archives are published (#163,
+ * `build-ft-mobile.yml`): the GitHub release `cpython-<version>t-mobile`, because neither
+ * python.org nor BeeWare publishes a free-threaded mobile build. The plugin's iOS consumer wiring
+ * (`FreeThreadedMobileRelease` in `IosConsumerWiring.kt`) reads the same release.
+ */
+val freeThreadedMobileReleaseUrl =
+    "https://github.com/thisisthepy/python-multiplatform/releases/download/cpython-${configuredPythonVersion}t-mobile"
+
+/**
+ * Suffix of the mobile lock keys (`android-aarch64-3.15.0-freethreaded`, `ios-3.15.0-freethreaded`)
+ * and of the Android extraction directories. The suffix is in the directory name for the same
+ * reason as [desktopFlavourSuffix]: an `android-aarch64/` GIL tree unpacked by an older checkout
+ * must never be mistaken for the free-threaded one.
+ */
+val mobileFlavourSuffix = "-freethreaded"
+
+/** Lock-key suffix of the mobile archives in `python-checksums.properties`. */
+val mobileLockKeySuffix = "-freethreaded"
+
+/**
+ * Fails the build when an extracted mobile CPython is not a free-threaded build: every `pyconfig`
+ * header in it must define `Py_GIL_DISABLED 1`. The archive name and the lockfile say what was
+ * meant to be downloaded; this says what was unpacked.
+ *
+ * The iOS framework's `Headers/pyconfig.h` is a 107-byte wrapper that includes
+ * `pyconfig-arm64.h` / `pyconfig-x86_64.h` by architecture (observed in the 3.15t archive), so a
+ * header that only includes another `pyconfig-*` is skipped and the per-architecture ones checked.
+ */
+fun requireFreeThreadedHeaders(label: String, extracted: File) {
+    val name = Regex("""pyconfig(-[A-Za-z0-9_]+)?\.h""")
+    val wrapper = Regex("""#\s*include\s+["<]pyconfig-""")
+    val configs = extracted.walkTopDown()
+        .filter { it.isFile && name.matches(it.name) }
+        .filterNot { wrapper.containsMatchIn(it.readText()) }
+        .toList()
+    if (configs.isEmpty()) throw GradleException("$label: no pyconfig header under $extracted, cannot verify that it is free-threaded")
+    val re = Regex("""^\s*#\s*define\s+Py_GIL_DISABLED\s+1\b""", RegexOption.MULTILINE)
+    for (h in configs) {
+        if (!re.containsMatchIn(h.readText())) {
+            throw GradleException(
+                "$label: $h does not define Py_GIL_DISABLED 1. Android and iOS embed only the free-threaded " +
+                    "CPython ${mobileTag} (#158, #328).",
+            )
+        }
+    }
 }
 
 println("----------------------------------------------------------------------------------------")
@@ -205,13 +247,13 @@ fun verifyChecksum(key: String, archive: File) {
 }
 
 // =================================================================================================
-// Sigstore verification of the python.org archives (ROADMAP §12, "Download integrity").
+// Sigstore verification of the downloaded CPython archives (ROADMAP §12, "Download integrity").
 //
 // This is a SECOND gate, not a replacement for `verifyChecksum` above. The two prove different
 // things and neither implies the other:
 //
 //   the lockfile  "these are the exact bytes this repository reviewed and pinned"
-//   Sigstore      "these are the bytes the CPython release manager actually signed"
+//   Sigstore      "these are the bytes the publisher's release workflow actually signed"
 //
 // The lockfile is also the only one of the two that works offline, and the only one that covers
 // every source. So it stays unconditional and Sigstore is layered on top of it.
@@ -228,21 +270,18 @@ fun verifyChecksum(key: String, archive: File) {
 //
 // ### What is covered, and what is not
 //
-//   python.org Android aarch64/x86_64   COVERED -- sibling `<archive>.sigstore` bundle
-//   python.org iOS XCframework (3.15+)  COVERED -- same
-//   astral-sh/python-build-standalone   NOT covered. It publishes no sibling signature at all:
-//                                       853 release assets, and the only non-archive among them
-//                                       is `SHA256SUMS` (checked directly against the release).
-//                                       Its provenance lives in GitHub's attestations API, keyed
-//                                       by artifact *digest* rather than filename, and that API
-//                                       is rate-limited to 60 requests/hour unauthenticated. That
-//                                       is a different mechanism, not this one. The desktop path
-//                                       already verifies against the release's own SHA256SUMS in
-//                                       addition to the lockfile.
-//   beeware/Python-Apple-support        NOT coverable. The release publishes five tar.gz assets
-//                                       and nothing else -- no checksums, no signatures -- and it
-//                                       has no attestations either. The SHA-256 pin is the only
-//                                       honest instrument available for iOS <= 3.14.
+//   astral-sh/python-build-standalone   COVERED through GitHub's attestations API, keyed by the
+//   (desktop)                           artifact digest (`maybeVerifyPbsSigstore` below). The
+//                                       release also publishes `SHA256SUMS`, which the desktop
+//                                       path checks unconditionally in addition to the lockfile.
+//   thisisthepy cpython-<v>t-mobile     NOT covered. The project's own free-threaded Android and
+//   (Android, iOS; #163, #328)          iOS archives carry no `.sigstore` bundle; the release has a
+//                                       `SHA256SUMS`, and the lockfile pins the same values (checked
+//                                       when the pins were written). The SHA-256 pin is the gate.
+//
+// python.org's Android and iOS archives used to be covered here through their sibling
+// `<archive>.sigstore` bundles. They were GIL builds, and the library no longer acquires them
+// (#158: "The GIL build is not kept as an option"; #328), so that path is gone.
 val verifySigstore = project.findProperty("verifyPythonSignatures")?.toString()?.toBoolean() ?: false
 
 val sigstoreVerifierClasspath: Configuration by configurations.creating {
@@ -255,32 +294,8 @@ dependencies {
     add("sigstoreVerifierClasspath", "dev.sigstore:sigstore-java:2.2.0")
 }
 
-/** The Fulcio certificate identity a python.org bundle must carry. */
+/** The Fulcio certificate identity a Sigstore bundle must carry. */
 data class SigstoreIdentity(val subjectAlternativeName: String, val issuer: String)
-
-/**
- * Which release manager signed a given CPython version, per https://www.python.org/download/sigstore/
- *
- * This is a map rather than a constant on purpose. The signing identity is a property of the
- * *release manager*, and it changes between release series: 3.13 was Thomas Wouters signing via
- * Google, 3.14 and 3.15 are Hugo van Kemenade signing via GitHub. A hardcoded identity would keep
- * verifying happily on the version it was written for and then either fail confusingly or -- far
- * worse -- be loosened by the next person to "just make it pass" on an older one.
- *
- * An unknown series is a hard failure rather than a skip. A verification step that silently
- * declines to verify is the thing this whole section exists to avoid.
- */
-fun pythonOrgSigstoreIdentity(version: String): SigstoreIdentity {
-    val series = version.split(".").take(2).joinToString(".")
-    return when (series) {
-        "3.14", "3.15" -> SigstoreIdentity("hugo@python.org", "https://github.com/login/oauth")
-        "3.12", "3.13" -> SigstoreIdentity("thomas@python.org", "https://accounts.google.com")
-        else -> throw GradleException(
-            "No Sigstore signing identity is recorded for CPython $series. Add it from " +
-                "https://www.python.org/download/sigstore/ rather than disabling verification."
-        )
-    }
-}
 
 /**
  * Verifies `archive` against its sibling `.sigstore` bundle, pinning the signer identity.
@@ -368,17 +383,6 @@ fun verifySigstoreBundle(archive: File, bundleUrl: String?, bundleFile: File, id
         Thread.currentThread().contextClassLoader = previousContextLoader
         loader.close()
     }
-}
-
-/** Verifies a python.org archive if `-PverifyPythonSignatures=true`, otherwise says it skipped. */
-fun maybeVerifySigstore(archive: File, archiveUrl: String) {
-    if (!verifySigstore) return
-    verifySigstoreBundle(
-        archive = archive,
-        bundleUrl = "$archiveUrl.sigstore",
-        bundleFile = file("$downloadDir/${archive.name}.sigstore"),
-        identity = pythonOrgSigstoreIdentity(configuredPythonVersion)
-    )
 }
 
 /** Verifies a python-build-standalone archive using GitHub Attestations API if `-PverifyPythonSignatures=true`. */
@@ -547,18 +551,27 @@ val androidTargets = mapOf(
     "android-x86_64" to "x86_64"
 )
 
+/**
+ * Android embeds the project's own free-threaded CPython 3.15t for both ABIs it supports,
+ * arm64-v8a and x86_64 (#328; the owner approved the x86_64 3.15t build on 2026-11-13, #396, so
+ * both ABIs stay supported). The archives are the release `cpython-<version>t-mobile`'s
+ * `python-<version>t-<arch>-linux-android.tar.gz`: a `prefix/` with `libpython3.15t.so`,
+ * `include/python3.15t` and `lib/python3.15t`, the same layout python.org's GIL archives had with
+ * the `t` added. There is no GIL Android build (#158).
+ */
 val androidDownloadTasks = androidTargets.map { (platform, arch) ->
-    val url = "https://www.python.org/ftp/python/$pythonOrgReleaseDir/python-$configuredPythonVersion-$arch-linux-android.tar.gz"
-    val archive = file("$downloadDir/python-$configuredPythonVersion-$arch-linux-android.tar.gz")
-    val extractDir = file("$extractedDir/$platform")
-    val lockKey = "$platform-$configuredPythonVersion"
+    val archiveName = "python-${configuredPythonVersion}t-$arch-linux-android.tar.gz"
+    val url = "$freeThreadedMobileReleaseUrl/$archiveName"
+    val archive = file("$downloadDir/$archiveName")
+    val extractDir = file("$extractedDir/$platform$mobileFlavourSuffix")
+    val lockKey = "$platform-$configuredPythonVersion$mobileLockKeySuffix"
     pythonArchiveKeys[lockKey] = archive
-    
+
     val taskName = "downloadPython_${platform.replace("-", "_")}"
     tasks.register(taskName) {
         inputs.property("url", url)
         outputs.dir(extractDir)
-        
+
         doLast {
             if (!archive.exists()) {
                 println("Downloading $url")
@@ -569,16 +582,11 @@ val androidDownloadTasks = androidTargets.map { (platform, arch) ->
                     }
                 }
             }
-            
-            // python.org publishes no SHA256SUMS, so the lockfile is what pins these bytes. It also
-            // publishes a sibling `<archive>.sigstore` bundle, which `maybeVerifySigstore` checks
-            // against the release manager's pinned identity when `-PverifyPythonSignatures=true`.
-            // (An earlier comment here claimed Sigstore verification was "unreasonable in pure
-            // Gradle". It is not -- `dev.sigstore:sigstore-java` does it in-process; see the
-            // section above `updatePythonChecksums` for why it is opt-in rather than always on.)
+
+            // The lockfile is the gate (see "What is covered" above): the release carries no
+            // Sigstore bundle, and its SHA256SUMS agrees with the pinned values.
             verifyChecksum(lockKey, archive)
-            maybeVerifySigstore(archive, url)
-            
+
             val isEmpty = extractDir.list()?.isEmpty() ?: true
             if (isEmpty) {
                 println("Extracting $archive to $extractDir")
@@ -588,51 +596,34 @@ val androidDownloadTasks = androidTargets.map { (platform, arch) ->
                 }
             }
             requireHeaderVersion(platform, extractDir)
+            requireFreeThreadedHeaders(platform, extractDir)
         }
     }
 }
 
 /**
- * Which project publishes the iOS `Python.xcframework` for the configured version.
+ * iOS embeds the project's own free-threaded `Python.xcframework` (#163, #328): the release
+ * `cpython-<version>t-mobile`'s `python-<version>t-iOS-XCframework.tar.gz`, the archive the
+ * plugin's iOS consumer wiring also downloads (SPEC T-2a), so a consumer never pairs this klib with
+ * a different framework. Slices `ios-arm64` and `ios-arm64_x86_64-simulator`, each with
+ * `Python.framework/Headers` (a `pyconfig.h` that includes `pyconfig-<arch>.h`, which defines
+ * `Py_GIL_DISABLED 1`) and `lib-<arch>/python3.15t/`; the pure-Python stdlib is
+ * `Python.xcframework/lib/python3.15t/`.
  *
- * python.org began publishing an official iOS XCframework with 3.15 (the first entries in
- * `ftp/python/3.15.0/` are the 3.15.0b1 betas). BeeWare's Python-Apple-support, which was the
- * only source before that, stops at `3.14-b11` (3.14.7) and has no 3.15 tag. The two do not overlap:
- * 3.14 and earlier can only come from BeeWare, 3.15 and later only from python.org. So this is a
- * hard switch on the version, not a preference.
- *
- * Swapping is otherwise cheap, because the trees are layout-compatible everywhere this build
- * reaches into them -- `Python.xcframework/<abi>/Python.framework/Headers`, `-F .../<abi>`,
- * `Python.xcframework/lib/pythonX.Y` and `.../<abi>/lib-arm64/pythonX.Y` all exist in both.
- * The differences are in parts nothing here reads: BeeWare adds a `platform-config/` directory
- * (cross-compilation sysconfig data for building wheels) and a `VERSIONS` file, and its headers
- * still carry `module.modulemap`, `lock.h`, `monitoring.h` and `typeslots.h` where 3.15 has
- * `pyabi.h`, `slots.h` and `slots_generated.h` instead -- a 3.14-vs-3.15 difference, not a
- * packaging one. Both ship a GIL-enabled build; neither publishes a free-threaded iOS variant.
+ * There is no GIL iOS build and no switch (#158; leader 2026-11-13). The python.org (3.15) and
+ * BeeWare (3.14 and earlier) GIL sources this build used to choose between are gone.
  */
-val iosFromPythonOrg = pythonVersion.split(".").let {
-    it[0].toInt() > 3 || (it[0].toInt() == 3 && it[1].toInt() >= 15)
-}
-
-val iosArchiveName = if (iosFromPythonOrg) {
-    "python-$pythonVersion-iOS-XCframework.tar.gz"
-} else {
-    "Python-$libVersion-iOS-support.$pythonAppleSupportBuild.tar.gz"
-}
-val iosUrl = if (iosFromPythonOrg) {
-    "https://www.python.org/ftp/python/$pythonOrgReleaseDir/$iosArchiveName"
-} else {
-    "https://github.com/beeware/Python-Apple-support/releases/download/$libVersion-$pythonAppleSupportBuild/$iosArchiveName"
-}
+val iosArchiveName = "python-${configuredPythonVersion}t-iOS-XCframework.tar.gz"
+val iosUrl = "$freeThreadedMobileReleaseUrl/$iosArchiveName"
 val iosArchive = file("$downloadDir/$iosArchiveName")
 val iosExtractDir = file("$extractedDir/ios")
-val iosLockKey = if (iosFromPythonOrg) "ios-$pythonVersion-pythonorg" else "ios-$libVersion-$pythonAppleSupportBuild"
+val iosLockKey = "ios-$configuredPythonVersion$mobileLockKeySuffix"
 pythonArchiveKeys[iosLockKey] = iosArchive
 
 val downloadPython_ios = tasks.register("downloadPython_ios") {
     inputs.property("url", iosUrl)
     outputs.dir(iosExtractDir)
-    
+
     doLast {
         if (!iosArchive.exists()) {
             println("Downloading $iosUrl")
@@ -643,24 +634,14 @@ val downloadPython_ios = tasks.register("downloadPython_ios") {
                 }
             }
         }
-        
-        // The two iOS sources are not equally verifiable, and the difference is worth stating.
-        //
-        // BeeWare (<= 3.14) publishes five tar.gz assets and nothing else -- no checksums, no
-        // signatures, no GitHub attestations. The lockfile pin is the only honest instrument
-        // there, and no amount of build wiring changes that.
-        //
-        // python.org (3.15+) publishes a sibling `<archive>.sigstore` bundle, which IS verifiable
-        // here. An earlier comment claimed otherwise; it was wrong.
-        //
-        // The lockfile applies to both regardless, because it is the only check that works
-        // offline and the only one that covers every source.
-        verifyChecksum(iosLockKey, iosArchive)
-        if (iosFromPythonOrg) maybeVerifySigstore(iosArchive, iosUrl)
 
-        // The iOS extract dir is keyed by pythonVersion, not by archive, so bumping the pinned
-        // archive (b10 -> b11) would otherwise keep the old tree: "not empty, skip". A stamp of the
-        // archive's lock key + digest tells a stale tree from a current one (issue #47).
+        // The lockfile is the gate (see "What is covered" above).
+        verifyChecksum(iosLockKey, iosArchive)
+
+        // The iOS extract dir is keyed by pythonVersion, not by archive, so changing the pinned
+        // archive (python.org's GIL framework -> the 3.15t one) would otherwise keep the old tree:
+        // "not empty, skip". A stamp of the archive's lock key and name tells a stale tree from a
+        // current one (issue #47).
         val iosStamp = file("$iosExtractDir/.archive-stamp")
         val iosWanted = "$iosLockKey ${iosArchive.name}"
         if (iosExtractDir.exists() && (!iosStamp.exists() || iosStamp.readText().trim() != iosWanted)) {
@@ -677,6 +658,7 @@ val downloadPython_ios = tasks.register("downloadPython_ios") {
             iosStamp.writeText(iosWanted + "\n")
         }
         requireHeaderVersion("ios", iosExtractDir)
+        requireFreeThreadedHeaders("ios", iosExtractDir)
     }
 }
 
@@ -692,7 +674,7 @@ val downloadAllPythonBuilds by tasks.registering {
  * TypedPython's C build) read it with
  * `project(":python-multiplatform").extensions.getByType<CPythonIncludeDirectories>().includeDir("macos-aarch64")`
  * after `evaluationDependsOn(":python-multiplatform")`. Only the flavour the library embeds has a
- * task: free-threaded on desktop (#158), GIL on Android and iOS (#328). See
+ * task, and that is free-threaded on every target: desktop (#158), Android and iOS (#328). See
  * `docs/platforms/python-version-acquisition.md` §7.
  */
 extensions.add(
@@ -711,18 +693,19 @@ extensions.add(
  * (`META-INF/python-multiplatform/python.properties`) in the jar and the AAR. See
  * `docs/platforms/python-version-acquisition.md` "Published version".
  *
- * Per platform since #158: the desktop jar (and the macosArm64/linuxX64 klibs) embed 3.15t, the AAR,
- * the iOS and androidNative klibs the GIL 3.15 until #328, wasm GIL until #175. So the
- * free-threaded attribute is decided per published variant, and the jar and the AAR each get
- * their own resource. Shared metadata variants carry no CPython and get no free-threaded attribute.
- * The `pythonMultiplatform` extension holds one value; it is the desktop one (what composite-build
- * consumers that compile against the desktop CPython read), and the per-variant attributes are the
+ * Per platform since #158: the desktop jar, the AAR and every Kotlin/Native klib (macosArm64,
+ * linuxX64, iOS, androidNative) embed 3.15t (#158, #328); only wasm still embeds a GIL build, until
+ * #175. So the free-threaded attribute is decided per published variant (false on the wasm ones),
+ * and the jar and the AAR each get their own resource. Shared metadata variants carry no CPython and
+ * get no free-threaded attribute. The `pythonMultiplatform` extension holds one value, the
+ * free-threaded one every non-wasm platform embeds, and the per-variant attributes are the
  * per-platform truth. (Extension and metadata rules: agent proposal, not confirmed.)
  */
-val desktopEmbeddedPythonVersion = EmbeddedPythonVersion(configuredPythonVersion, freeThreaded = true)
-val androidEmbeddedPythonVersion = EmbeddedPythonVersion(configuredPythonVersion, freeThreaded = false)
-val freeThreadedVariantPrefixes = listOf("desktop", "macosArm64", "linuxX64")
-desktopEmbeddedPythonVersion.register(project) { configurationName ->
+val embeddedPythonVersion = EmbeddedPythonVersion(configuredPythonVersion, freeThreaded = true)
+// `android` covers the AAR's variants and androidNativeArm64/X64, `ios` iosArm64, iosX64 and
+// iosSimulatorArm64. Anything else that is not metadata (the wasmJs variants) is GIL.
+val freeThreadedVariantPrefixes = listOf("desktop", "macosArm64", "linuxX64", "android", "ios")
+embeddedPythonVersion.register(project) { configurationName ->
     when {
         freeThreadedVariantPrefixes.any { configurationName.startsWith(it) } -> true
         configurationName.startsWith("metadata") || "Metadata" in configurationName -> null
@@ -743,10 +726,10 @@ fun registerPythonProperties(name: String, embedded: EmbeddedPythonVersion) = ta
 }
 
 /** `freeThreaded=true`: the desktop jar's resource. */
-val generateDesktopPythonProperties = registerPythonProperties("generateDesktopPythonProperties", desktopEmbeddedPythonVersion)
+val generateDesktopPythonProperties = registerPythonProperties("generateDesktopPythonProperties", embeddedPythonVersion)
 
-/** `freeThreaded=false`: the AAR's resource (GIL until #328). */
-val generateAndroidPythonProperties = registerPythonProperties("generateAndroidPythonProperties", androidEmbeddedPythonVersion)
+/** `freeThreaded=true`: the AAR's resource (3.15t since #328). */
+val generateAndroidPythonProperties = registerPythonProperties("generateAndroidPythonProperties", embeddedPythonVersion)
 
 /**
  * The dev agent (SPEC L-12, #233) is Python, kept as a real file -- `src/commonMain/python/
@@ -1108,7 +1091,7 @@ kotlin {
                 into("$androidBuildDir/jniLibs/")
                 abiList.forEach { abi ->
                     val arch = if (abi == "arm64-v8a") "aarch64" else "x86_64"
-                    from("$extractedDir/android-$arch/prefix/lib") {
+                    from("$extractedDir/android-$arch$mobileFlavourSuffix/prefix/lib") {
                         include("libpython*.so")
                         include("lib*_python.so")
                         into(abi)
@@ -1129,7 +1112,7 @@ kotlin {
             // The library itself is 0.49 MB of that. Two of the entries above are payload nothing
             // on a device ever reads, and both are dropped here:
             //
-            // - `include/python$libVersion` is CPython's C headers. cinterop reads them from the
+            // - `include/python$mobileTag` is CPython's C headers. cinterop reads them from the
             //   extraction tree (`targetIncludePath`), never from assets, and no Kotlin source in
             //   `androidMain`, `artMain`, `androidInstrumentedTest` or `sample` opens an asset
             //   under `include/`. They were being shipped to every device for nothing.
@@ -1154,10 +1137,12 @@ kotlin {
                 doFirst { delete("$androidBuildDir/assets/") }
                 abiList.forEach { abi ->
                     val arch = if (abi == "arm64-v8a") "aarch64" else "x86_64"
-                    from("$extractedDir/android-$arch/prefix/lib/python$libVersion") {
-                        exclude("config-$libVersion-$arch-linux-android/")
+                    // `lib/python3.15t`: the free-threaded stdlib, which is where
+                    // `PythonBootstrap.stdlibRelativePath()` (taggedVersionString) looks (#328).
+                    from("$extractedDir/android-$arch$mobileFlavourSuffix/prefix/lib/python$mobileTag") {
+                        exclude("config-$mobileTag-$arch-linux-android/")
                         exclude("test/")
-                        into("$abi/lib/python$libVersion")
+                        into("$abi/lib/python$mobileTag")
                     }
                 }
             }
@@ -1284,13 +1269,13 @@ kotlin {
                 else -> throw RuntimeException("Unsupported ABI: $konanTarget")
             }
             val targetExtractDir = when(konanTarget.family) {
-                Family.ANDROID -> "$extractedDir/android-${if (targetABI == "arm64-v8a") "aarch64" else "x86_64"}/prefix"
+                Family.ANDROID -> "$extractedDir/android-${if (targetABI == "arm64-v8a") "aarch64" else "x86_64"}$mobileFlavourSuffix/prefix"
                 Family.IOS -> "$extractedDir/ios/Python.xcframework"
                 Family.OSX, Family.LINUX -> "$extractedDir/$targetABI$desktopFlavourSuffix/python"
                 else -> throw RuntimeException("Unsupported target family: ${konanTarget.family}")
             }
             val targetIncludePath = when(konanTarget.family) {
-                Family.ANDROID -> "$targetExtractDir/include/python$libVersion"
+                Family.ANDROID -> "$targetExtractDir/include/python$mobileTag"
                 Family.IOS -> "$targetExtractDir/$targetABI/Python.framework/Headers"
                 Family.OSX, Family.LINUX -> "$targetExtractDir/include/python$libVersion$desktopAbiSuffix"
                 else -> throw RuntimeException("Unsupported target family: ${konanTarget.family}")
@@ -1313,8 +1298,11 @@ kotlin {
 
             binaries {
                 if (konanTarget.family == Family.ANDROID) {
-                    sharedLib("multiplatform_python$libVersion") {
-                        linkerOpts.addAll(listOf("-L$targetExtractDir/lib/", "-lpython$libVersion", "-u", "JNI_OnLoad"))
+                    // `libmultiplatform_python3.15t.so`: the name `manager.loadLibPython` asks for on
+                    // Android ("multiplatform_python" + taggedVersionString), linked against the
+                    // free-threaded `libpython3.15t.so` (#328).
+                    sharedLib("multiplatform_python$mobileTag") {
+                        linkerOpts.addAll(listOf("-L$targetExtractDir/lib/", "-lpython$mobileTag", "-u", "JNI_OnLoad"))
 
                         linkTaskProvider.configure {
                             val type = if (buildType == NativeBuildType.DEBUG) "debug" else "release"
@@ -1344,8 +1332,8 @@ kotlin {
                         }
                     }
                     getTest(NativeBuildType.DEBUG).linkerOpts.addAll(listOf(
-                        "-L$targetExtractDir/lib/", 
-                        "-lpython$libVersion",
+                        "-L$targetExtractDir/lib/",
+                        "-lpython$mobileTag",
                         "-Wl,--allow-shlib-undefined",
                         "-u", "JNI_OnLoad"
                     ))
@@ -1542,18 +1530,18 @@ tasks.named<org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeHostTes
  * The iOS `Python.framework` ships only the interpreter binary and headers, it carries no
  * standard library. `Py_Initialize()` therefore aborts the process with
  * "Fatal Python error: Failed to import encodings module" unless PYTHONHOME points at a
- * prefix containing `lib/python3.13`.
+ * prefix containing `lib/python3.15t` (the free-threaded build's stdlib directory, #328).
  *
  * The simulator distribution archive does contain that stdlib, so unpack it into the build
  * directory and hand its location to the test binary.
  */
 val extractIosSimulatorStdlib by tasks.registering(Copy::class) {
     dependsOn(downloadAllPythonBuilds)
-    from("$extractedDir/ios/Python.xcframework/lib/python$libVersion") {
-        into("lib/python$libVersion")
+    from("$extractedDir/ios/Python.xcframework/lib/python$mobileTag") {
+        into("lib/python$mobileTag")
     }
-    from("$extractedDir/ios/Python.xcframework/ios-arm64_x86_64-simulator/lib-arm64/python$libVersion") {
-        into("lib/python$libVersion")
+    from("$extractedDir/ios/Python.xcframework/ios-arm64_x86_64-simulator/lib-arm64/python$mobileTag") {
+        into("lib/python$mobileTag")
     }
     into(layout.buildDirectory.dir("python-stdlib/ios-simulator"))
     includeEmptyDirs = false
@@ -1585,8 +1573,8 @@ tasks.withType<org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeSimu
 //
 //   1. **The binary itself.** `test.kexe` is a normal ELF executable; `adb push` + `chmod 755` +
 //      exec from `/data/local/tmp` is enough. No APK, no instrumentation, no JVM.
-//   2. **libpython.** The test binary is linked `-lpython3.14` (see `getTest(DEBUG).linkerOpts`
-//      above), so `libpython3.14.so` and the extension modules' shared objects have to sit
+//   2. **libpython.** The test binary is linked `-lpython3.15t` (see `getTest(DEBUG).linkerOpts`
+//      above), so `libpython3.15t.so` and the extension modules' shared objects have to sit
 //      somewhere the dynamic loader looks -- hence `LD_LIBRARY_PATH`.
 //   3. **A standard library.** `Py_Initialize()` does not fail without one, it *aborts the
 //      process* ("Failed to import encodings module"), which would be reported as a run that
@@ -1827,14 +1815,14 @@ listOf("Arm64" to "arm64-v8a", "X64" to "x86_64").forEach { (targetSuffix, abi) 
     // compiling extensions, not runtime.
     val stagePayload = tasks.register<Sync>("stageAndroidNative${targetSuffix}TestPayload") {
         dependsOn(downloadAllPythonBuilds)
-        from("$extractedDir/android-$arch/prefix/lib") {
+        from("$extractedDir/android-$arch$mobileFlavourSuffix/prefix/lib") {
             include("*.so")
             include("*.so.*")
             into("lib")
         }
-        from("$extractedDir/android-$arch/prefix/lib/python$libVersion") {
-            exclude("config-$libVersion-*/")
-            into("lib/python$libVersion")
+        from("$extractedDir/android-$arch$mobileFlavourSuffix/prefix/lib/python$mobileTag") {
+            exclude("config-$mobileTag-*/")
+            into("lib/python$mobileTag")
         }
         into(stagingDir)
         includeEmptyDirs = false
