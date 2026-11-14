@@ -11,7 +11,6 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
-import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -147,8 +146,8 @@ class IosConsumerWiringTest {
         val build = project.layout.buildDirectory.get().asFile
         assertEquals(File(build, "python-standalone"), task.workDirectory.get().asFile)
         assertTrue(task.extractDirectory.startsWith(File(build, "python-standalone")))
-        assertEquals(DEFAULT_IOS_ARCHIVE_SHA256, task.expectedSha256.get())
-        assertEquals(64, DEFAULT_IOS_ARCHIVE_SHA256.length)
+        assertEquals(DEFAULT_IOS_FREE_THREADED_ARCHIVE_SHA256, task.expectedSha256.get())
+        assertEquals(64, DEFAULT_IOS_FREE_THREADED_ARCHIVE_SHA256.length)
     }
 
     @Test
@@ -158,6 +157,49 @@ class IosConsumerWiringTest {
         val build = project.layout.buildDirectory.get().asFile
         val stage = project.tasks.getByName(IosPythonHomeLayout.slices[0].stageTaskName) as StageIosPythonHomeTask
         assertEquals(File(build, "python-ios-home/${IosPythonHomeLayout.slices[0].name}"), stage.destinationDir.get().asFile)
+    }
+
+    // ---- the 3.15t archive is the only one (SPEC T-2a, owner decision #158) --------------------
+
+    @Test
+    fun theDefaultIsTheProjectsOwn315tArchiveAndLayout() {
+        val project = project()
+        wire(project)
+        val v = DEFAULT_PYTHON_VERSION
+        val task = project.tasks.getByName(DOWNLOAD_IOS_TASK) as DownloadPythonIosTask
+        assertEquals(
+            "https://github.com/thisisthepy/python-multiplatform/releases/download/cpython-${v}t-mobile/python-${v}t-iOS-XCframework.tar.gz",
+            task.archiveUrl.get(),
+        )
+        assertEquals("python-${v}t-iOS-XCframework.tar.gz", task.archiveName.get())
+        assertEquals(DEFAULT_IOS_FREE_THREADED_ARCHIVE_SHA256, task.expectedSha256.get())
+        for (slice in IosPythonHomeLayout.slices) {
+            val stage = project.tasks.getByName(slice.stageTaskName) as StageIosPythonHomeTask
+            assertEquals(v, stage.pythonVersion.get(), slice.name)
+        }
+        assertTrue(IosPythonHomeLayout.stdlibTag(v).endsWith("t"), "the staged stdlib is lib/python<X.Y>t/")
+    }
+
+    @Test
+    fun theFreeThreadedPinIsTheReleasesDigest() {
+        // The value the release's SHA256SUMS and the GitHub asset digest both give for
+        // python-3.15.0t-iOS-XCframework.tar.gz (cpython-3.15.0t-mobile, run 39014667720, #163).
+        assertEquals("ios-$DEFAULT_PYTHON_VERSION-freethreaded", DEFAULT_IOS_FREE_THREADED_LOCK_KEY)
+        assertEquals(DEFAULT_IOS_FREE_THREADED_LOCK_KEY, FreeThreadedMobileRelease.lockKey("ios", DEFAULT_PYTHON_VERSION))
+        if (DEFAULT_PYTHON_VERSION == "3.15.0") {
+            assertEquals("b8c0a4b32d31738f6ead7ace28acee0cb2a590bd0ca7015e9c32af613445e6b5", DEFAULT_IOS_FREE_THREADED_ARCHIVE_SHA256)
+        }
+    }
+
+    @Test
+    fun theReleaseNamesFollowTheTSuffix() {
+        assertEquals("cpython-3.15.0t-mobile", FreeThreadedMobileRelease.tag("3.15.0"))
+        assertEquals("python-3.15.0t-iOS-XCframework.tar.gz", FreeThreadedMobileRelease.iosArchiveName("3.15.0"))
+        assertEquals(
+            "https://github.com/thisisthepy/python-multiplatform/releases/download/cpython-3.15.0t-mobile/python-3.15.0t-aarch64-linux-android.tar.gz",
+            FreeThreadedMobileRelease.url("3.15.0", FreeThreadedMobileRelease.androidArchiveName("3.15.0", "aarch64")),
+        )
+        assertEquals("android-aarch64-3.15.0-freethreaded", FreeThreadedMobileRelease.lockKey("android-aarch64", "3.15.0"))
     }
 
     // ---- download task ------------------------------------------------------------------------
@@ -221,6 +263,16 @@ class IosConsumerWiringTest {
         assertFalse(File(task.extractDirectory, "Python.xcframework").exists())
     }
 
+    @Test
+    fun aMissingPinFailsBeforeAnyDownload() {
+        // A plugin built from a python-checksums.properties without the iOS key bakes "".
+        val bytes = tarGz(mapOf("Python.xcframework/Info.plist" to "plist"))
+        val (task, _) = downloadTask(bytes, "")
+        val e = assertFailsWith<GradleException> { task.provision() }
+        assertTrue("no pinned SHA-256" in e.message.orEmpty(), e.message)
+        assertFalse(File(task.workDirectory.get().asFile, "fake-ios.tar.gz").exists())
+    }
+
     // ---- script -------------------------------------------------------------------------------
 
     @Test
@@ -249,6 +301,5 @@ class IosConsumerWiringTest {
         assertEquals("ios-arm64_x86_64-simulator", xcframeworkSliceForKonanTarget("ios_simulator_arm64"))
         assertEquals("ios-arm64_x86_64-simulator", xcframeworkSliceForKonanTarget("ios_x64"))
         assertNull(xcframeworkSliceForKonanTarget("linux_x64"))
-        assertNotNull(DEFAULT_IOS_ARCHIVE_URL)
     }
 }

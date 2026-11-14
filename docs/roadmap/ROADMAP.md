@@ -164,8 +164,10 @@ Desktop (JVM, `macosArm64`, `linuxX64`) embeds the free-threaded CPython 3.15t a
 (maintainer, #158, 2026-10-04: "Free-threaded is the default and the only build. The GIL build is not
 kept as an option. Baseline is CPython 3.15t"; leader, 2026-11-13: "flip the desktop default to 3.15t
 now, before the #377 alpha03 release"). `-PpythonFreeThreaded` is removed; the build fails if it is
-passed. Android and iOS still embed the GIL 3.15 (9.2), wasm GIL (#175); the per-platform fact is
-`embedsFreeThreadedPython` (SPEC T-1). The 3.15t default first ran the suites in CI on 2026-11-13: Desktop CI
+passed. Android (arm64-v8a, x86_64), androidNative and iOS embed the project's own 3.15t with no
+opt-in flag (#328 step 2; leader 2026-11-13), compiled but not yet run on an emulator, device or
+simulator (9.2); wasm is GIL (#175); the per-platform fact is `embedsFreeThreadedPython` (SPEC T-1).
+The 3.15t default first ran the desktop suites in CI on 2026-11-13: Desktop CI
 run 43306301208 counted `desktopTest` 647 tests, 3 failed, 1 skipped, and `linuxX64Test` 497 tests, 3 failed.
 All six failures were tests asserting GIL-build or 3.14t behaviour (a `sys.getrefcount` that includes the
 deferred-refcount bias, 3.15.0's detached-owner merge in `brc.c`, the removed GC memory gate, a probe
@@ -179,19 +181,23 @@ The 3.15 migration (`PyWeakref_GetRef`, the two removed functions) is done
 free-threaded ones, are pinned in `python-checksums.properties`.
 
 - **9.1 `autoDrainInterval`'s default on the GIL build, open (decision).** Today
-  `if (embedsFreeThreadedPython) 32 else 0` (`Python3.kt`), so on by default on desktop and off on
-  Android and iOS until they move (9.2); once every platform is free-threaded this question closes. Off means a pure C-API embedder never
+  `if (embedsFreeThreadedPython) 32 else 0` (`Python3.kt`), so on by default on desktop, Android and
+  iOS (#328) and off only on wasm until #175; once wasm is free-threaded this question closes. Off means a pure C-API embedder never
   runs the cyclic collector: 20 000+ cyclic objects left with the automatic path off against ~1 970
   with it on (`docs/investigations/gc-scheduling-investigation.md` §6–§7). On means a `__del__` or
   weakref callback can run at a `withGIL` exit the caller did not ask to yield from. The checkpoint
   costs ~128 ns over a 154.6 ns `withGIL` floor, ~4 ns amortised
   (`EvalCheckpointTest.testCheckpointCostAgainstTheAlternatives`). A one-line change once decided.
-- **9.2 Free-threading beyond desktop, open (#328, wasm #175).** No free-threaded CPython prebuilt
+- **9.2 Free-threading beyond desktop, open (#328 run, wasm #175).** No free-threaded CPython prebuilt
   exists for Android (python.org ships `libpython3.14.so`/`3.15.so` only) or iOS (neither BeeWare
   nor python.org defines `Py_GIL_DISABLED`), checked 2026-08-12; the project builds its own (#163,
-  `.github/workflows/build-ft-mobile.yml`). Moving a platform means flipping its
-  `embedsFreeThreadedPython` actual together with its acquisition, its `python.properties` resource
-  and its variant attributes. SPEC N-1.
+  `.github/workflows/build-ft-mobile.yml`, release `cpython-3.15.0t-mobile`). #328 step 2 moved the
+  library: Android (arm64-v8a and x86_64), androidNative and iOS acquire those archives, link
+  `libpython3.15t`, package `lib/python3.15t`, report `abiFlags = "t"`, and publish
+  `freeThreaded=true`; the python.org and BeeWare GIL mobile archives and their pins are gone. Left:
+  an Android emulator run (`AndroidFreeThreadedBuildTest`, the instrumented suite, the androidNative
+  suite) and an iOS simulator run (`IosFreeThreadedBuildTest`, the ios-consumer fixture, sample DEMO
+  1/8) with `Py_GIL_DISABLED` observed at run time; then wasm (#175). SPEC N-1.
 
 ## 10. WASM
 

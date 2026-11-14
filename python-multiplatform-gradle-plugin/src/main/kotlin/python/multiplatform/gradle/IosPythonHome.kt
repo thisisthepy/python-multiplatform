@@ -23,8 +23,8 @@ import java.nio.file.StandardCopyOption
  *
  * ```
  * Python.xcframework/
- *   lib/python3.14/                              pure-Python stdlib, shared by every slice
- *   ios-arm64/lib-arm64/python3.14/              lib-dynload/ (the .so files), _sysconfigdata (device)
+ *   lib/python3.15t/                             pure-Python stdlib, shared by every slice
+ *   ios-arm64/lib-arm64/python3.15t/             lib-dynload/ (the .so files), _sysconfigdata (device)
  *   ios-arm64_x86_64-simulator/lib-arm64/...     the same for the arm64 simulator
  *   ios-arm64_x86_64-simulator/lib-x86_64/...    ...and the x86_64 simulator
  *   build/iOS-dylib-Info-template.plist          Info.plist for an extension-module framework
@@ -116,15 +116,18 @@ object IosPythonHomeLayout {
             )
     }
 
-    /** `3.14` from `3.14.7`. */
+    /**
+     * `3.15t` from `3.15.0`: the iOS framework is always free-threaded (SPEC T-2a), so its standard
+     * library is `lib/python3.15t/` and its slices carry `lib-<arch>/python3.15t/`.
+     */
     fun stdlibTag(pythonVersion: String): String {
         val parts = pythonVersion.split('.')
         require(parts.size >= 2) { "python version '$pythonVersion' has no major.minor" }
-        return "${parts[0]}.${parts[1]}"
+        return "${parts[0]}.${parts[1]}t"
     }
 
     /**
-     * The trees merged into `lib/python<X.Y>/` for [slice], relative to the xcframework, shared tree
+     * The trees merged into `lib/python<X.Y>t/` for [slice], relative to the xcframework, shared tree
      * first: the slice tree only adds files (`lib-dynload/`, `_sysconfigdata__ios_*`), but if it ever
      * overlapped, the slice-specific file is the one that must win, as in `install_stdlib`.
      */
@@ -134,7 +137,7 @@ object IosPythonHomeLayout {
     }
 
     /**
-     * Whether a file or directory at [stdlibRelativePath] -- relative to `lib/python<X.Y>/`, `/`
+     * Whether a file or directory at [stdlibRelativePath] -- relative to `lib/python<X.Y>t/`, `/`
      * separated -- goes into the app.
      *
      * Not copied: any `__pycache__` (bytecode from whatever ran against the extracted tree, so the
@@ -183,7 +186,7 @@ object IosPythonHomeLayout {
 }
 
 /**
- * Stages one slice's prefix for an iOS app bundle (SPEC L-11): `<destination>/home/lib/python<X.Y>/`
+ * Stages one slice's prefix for an iOS app bundle (SPEC L-11): `<destination>/home/lib/python<X.Y>t/`
  * as [IosPythonHomeLayout.plan] lists it, plus `<destination>/dylib-Info-template.plist` *beside*
  * the prefix -- it is an input to the Xcode phase, not part of what the app carries.
  *

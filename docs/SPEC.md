@@ -677,18 +677,25 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 - **T-1** Which CPython build each platform embeds. Maintainer decision on #158 (2026-10-04): "Free-threaded
   is the default and the only build. The GIL build is not kept as an option. Baseline is CPython 3.15t."
   Leader instruction (2026-11-13): "flip the desktop default to 3.15t now, before the #377 alpha03
-  release"; mobile follows under #328, wasm under #175. So today:
+  release"; mobile follows under #328 (leader decision 2026-11-13 on #328: no opt-in flag on mobile,
+  3.15t is the only build; the owner approved the x86_64 Android 3.15t build on 2026-11-13, so
+  arm64-v8a and x86_64 both stay supported), wasm under #175. So today:
   desktop JVM, `macosArm64` and `linuxX64` embed the free-threaded CPython 3.15t, with no GIL option
-  (`-PpythonFreeThreaded` is removed and the build fails if it is passed); Android (ART and
-  androidNative) and iOS embed python.org's GIL CPython 3.15 and wasm a GIL CPython until those
-  issues land. The fact is per platform (`embedsFreeThreadedPython`, an `expect`/`actual`), and
-  `Versions.abiFlags` (`t` or empty) and every name derived from it (`libpython3.15t`, `lib/python3.15t/`)
-  follow it. On the GIL platforms Kotlin threads attach a thread state and serialise on the GIL.
-  `Status: partial` (desktop only; Android and iOS remain GIL until #328),
+  (`-PpythonFreeThreaded` is removed and the build fails if it is passed); Android (ART on arm64-v8a
+  and x86_64, and androidNative) and iOS embed the project's own free-threaded CPython 3.15t (T-2), with
+  no GIL option either; wasm embeds a GIL CPython until #175. The fact is per platform
+  (`embedsFreeThreadedPython`, an `expect`/`actual`, kept while wasm is the exception), and
+  `Versions.abiFlags` (`t` or empty) and every name derived from it (`libpython3.15t`, `lib/python3.15t/`,
+  `libmultiplatform_python3.15t.so`) follow it. On the GIL platform Kotlin threads attach a thread state
+  and serialise on the GIL.
+  `Status: partial` (desktop observed; Android, androidNative and iOS are compiled against 3.15t but
+  have not been run on an emulator, device or simulator in this revision),
   `PM/desktopTest/.../DesktopFreeThreadedBuildTest.kt` (ABI flags, `Py_GIL_DISABLED` of the loaded
   interpreter, checkpoint default), `PM/desktopNativeTest/.../DesktopNativeFreeThreadedBuildTest.kt`,
-  `PM/androidInstrumentedTest/.../AndroidGilBuildTest.kt`, `PM/artTest/.../AndroidNativeGilBuildTest.kt`,
-  `PM/iosSimulatorArm64Test/.../IosGilBuildTest.kt`, `PM/wasmJsTest/.../WasmGilBuildTest.kt`,
+  `PM/androidInstrumentedTest/.../AndroidFreeThreadedBuildTest.kt` (ABI flags, stdlib path, the AAR's
+  `python.properties`, `Py_GIL_DISABLED` of the loaded interpreter, checkpoint default),
+  `PM/artTest/.../AndroidNativeFreeThreadedBuildTest.kt`, `PM/iosSimulatorArm64Test/.../IosFreeThreadedBuildTest.kt`,
+  `PM/wasmJsTest/.../WasmGilBuildTest.kt`,
   `PM/commonTest/.../VersionsTest.kt`; the release after initialisation is tested by `GilReleaseTest` /
   `GilReleaseNativeTest` (see C-4).
 - **T-1a** On desktop, Python may be entered from a JVM virtual thread (#161 option B, user decision):
@@ -707,25 +714,53 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   T-1), `GP/PythonHomeStagingTest.kt`, `PM/desktopTest/.../FreeThreadedGCGateTest.kt`,
   `PM/desktopTest/.../DesktopFreeThreadedBuildTest.kt`. When it was an opt-in, 3.14t ran the whole
   desktop suite (236 tests, 0 failures; ROADMAP §9); the 3.15t default has not been observed running the
-  suite in this revision. Android and iOS free-threaded builds are #163/#328. `Py_LIMITED_API` is not
-  defined, so `abi3t` is not a blocker.
+  suite in this revision. `Py_LIMITED_API` is not defined, so `abi3t` is not a blocker.
+  The library's Android and iOS builds (#328 step 2) acquire the project's own free-threaded archives
+  from the GitHub release `cpython-<version>t-mobile` (#163, `build-ft-mobile.yml`), each verified against
+  its SHA-256 in `python-checksums.properties` (`android-aarch64-<version>-freethreaded`,
+  `android-x86_64-<version>-freethreaded`, `ios-<version>-freethreaded`; the release's `SHA256SUMS` agrees)
+  and against its own headers (`PY_VERSION`, and `Py_GIL_DISABLED 1` in every `pyconfig` header).
+  Android unpacks under `android-<arch>-freethreaded/`, links androidNative against `-lpython3.15t`
+  (`include/python3.15t`), names its JNI library `libmultiplatform_python3.15t.so` and packages
+  `libpython3.15t.so` and `assets/<abi>/lib/python3.15t/` into the AAR for arm64-v8a and x86_64; iOS
+  compiles and links against the 3.15t `Python.xcframework` and gives the simulator test binary
+  `lib/python3.15t/`. python.org's and BeeWare's GIL mobile archives are no longer acquired.
+  `Status: partial` (compiled; not run on an emulator, device or simulator in this revision).
+- **T-2a** Free-threaded CPython on mobile through the Gradle plugin (#328 step 1; owner decision #158 of
+  2026-10-04, "Free-threaded is the default and the only build", baseline 3.15t; leader decision of
+  2026-11-13 on #328: no opt-in `pythonBindings.ios.freeThreaded` flag, 3.15t is the only build). There
+  is no switch and no GIL iOS archive in the plugin. The plugin's iOS consumer wiring (#90, L-11) always
+  acquires the project's own free-threaded `Python.xcframework`, `python-<version>t-iOS-XCframework.tar.gz`
+  from the GitHub release `cpython-<version>t-mobile` of `thisisthepy/python-multiplatform`, verified
+  against the SHA-256 pinned in `python-checksums.properties` under `ios-<version>-freethreaded` and baked
+  into the plugin at plugin build time (a missing pin fails the plugin build, a mismatch fails
+  `downloadPython_ios`). Every per-slice prefix holds `lib/python<X.Y>t/`: the shared
+  `Python.xcframework/lib/python<X.Y>t/` merged with `<slice>/lib-<arch>/python<X.Y>t/`, with L-11's
+  exclusions (so no `libpython<X.Y>t.dylib`), and the staging task fails unless `lib/python<X.Y>t/os.py` is
+  staged. The library's own iOS klib is built against the same 3.15t framework (T-2, #328 step 2), so a
+  consumer never pairs a GIL klib with a 3.15t framework. Android: the plugin stages nothing for Android
+  (libpython and the stdlib travel inside the library's AAR, L-5); the library acquires both Android
+  archives itself (T-2). `Status: partial` (unit tests only, `GP/IosConsumerWiringTest.kt`,
+  `GP/IosPythonHomeLayoutTest.kt`; no simulator run).
 - **T-3** `python-multiplatform` publishes per-target, per-flavour CPython include directories as
   `Provider<Directory>` carrying the extraction task (`cpythonIncludeDirectories` extension; see
   `docs/platforms/python-version-acquisition.md` §7). The default flavour of every accessor is the one
-  the library embeds for that target (`CPythonIncludeLayout.embeddedFlavour`: free-threaded on desktop,
-  GIL on Android and iOS; agent proposal, not confirmed). `Status: partial` (only the embedded flavour is extracted),
+  the library embeds for that target (`CPythonIncludeLayout.embeddedFlavour`: free-threaded on every
+  target; agent proposal, not confirmed). Android and iOS have no GIL layout. `Status: partial` (only the
+  embedded flavour is extracted),
   `GP/CPythonIncludeDirectoriesTest.kt`.
 - **T-4** `python-multiplatform` publishes the CPython version it embeds: extension `pythonMultiplatform`,
   Gradle attributes `org.thisisthepy.python.version` / `org.thisisthepy.python.free-threaded` on every
   consumable `*Elements` configuration, and the resource `META-INF/python-multiplatform/python.properties`
   in the jar and AAR (see `docs/platforms/python-version-acquisition.md` "Published version"),
   `GP/EmbeddedPythonVersionTest.kt`. Per T-1 the free-threaded claim is per variant: `true` on the
-  desktop, `macosArm64` and `linuxX64` variants and in the jar's resource, `false` on the Android, iOS,
-  androidNative and wasm variants and in the AAR's resource, absent on shared metadata variants; the
-  extension carries the desktop value (the metadata and extension rules are agent proposals, not
+  desktop, `macosArm64`, `linuxX64`, Android, androidNative and iOS variants and in the jar's and the
+  AAR's resources, `false` on the wasm variants, absent on shared metadata variants; the extension
+  carries the free-threaded value (the metadata and extension rules are agent proposals, not
   confirmed). `Status: partial`, `GP/EmbeddedPythonVersionTest.kt`
-  (`freeThreadedIsDecidedPerVariant`), `PM/desktopTest/.../PublishedPythonVersionResourceTest.kt`; no
-  test reads the AAR's resource.
+  (`freeThreadedIsDecidedPerVariant`), `PM/desktopTest/.../PublishedPythonVersionResourceTest.kt`,
+  `PM/androidInstrumentedTest/.../AndroidFreeThreadedBuildTest.kt` (`theAarSaysItIsFreeThreaded`, not
+  yet run on an emulator).
 - **T-5** Every acquired CPython reports the pinned version: `PY_VERSION` in each target's `patchlevel.h`
   equals `pythonVersion`, and a `downloadPython_*` task fails the build, naming the target and both
   versions, when it does not (issue #47: iOS shipped 3.14.6 under `pythonVersion=3.14.7`). The iOS
@@ -745,8 +780,9 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 
 ## 9. Planned
 
-- **N-1** Sub-interpreter-free parallelism on free-threaded CPython on every platform (today desktop only,
-  3.15t by default since #158; Android and iOS under #328; see T-1, T-2 and ROADMAP §9). `Status: partial`.
+- **N-1** Sub-interpreter-free parallelism on free-threaded CPython on every platform (3.15t only on
+  desktop since #158, and on Android, androidNative and iOS since #328, compiled but not yet run on an
+  emulator or simulator; wasm under #175; see T-1, T-2 and ROADMAP §9). `Status: partial`.
 - **N-2** Compose through Python on Android, iOS and wasm. `Status: planned`.
 - **N-3** Binding Kotlin/Native klib declarations at run time (B-2). `Status: planned`.
 - **N-4** Linux and Windows desktop runs in CI (P-2). `Status: planned`.

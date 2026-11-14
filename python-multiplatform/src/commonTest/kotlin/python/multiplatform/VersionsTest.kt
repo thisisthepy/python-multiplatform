@@ -14,11 +14,12 @@ import kotlin.test.assertTrue
  * a file that was downloaded and is sitting right there under a different name.
  *
  * These assertions are written against the per-platform [embedsFreeThreadedPython] rather than
- * hard-coding one flavour, because the flavour differs by platform (issue #158): desktop embeds
- * 3.15t, Android and iOS the GIL 3.15 until #328. The platform test source sets pin the literal
- * value for their platform (`DesktopFreeThreadedBuildTest`, `DesktopNativeFreeThreadedBuildTest`,
- * `AndroidGilBuildTest`, `AndroidNativeGilBuildTest`, `IosGilBuildTest`), which is what a wrong
- * actual would fail.
+ * hard-coding one flavour, because the flavour differs by platform: desktop, Android,
+ * androidNative and iOS embed 3.15t (issues #158, #328), wasm a GIL build until #175. The platform
+ * test source sets pin the literal value for their platform (`DesktopFreeThreadedBuildTest`,
+ * `DesktopNativeFreeThreadedBuildTest`, `AndroidFreeThreadedBuildTest`,
+ * `AndroidNativeFreeThreadedBuildTest`, `IosFreeThreadedBuildTest`, `WasmGilBuildTest`), which is
+ * what a wrong actual would fail.
  */
 class VersionsTest {
 

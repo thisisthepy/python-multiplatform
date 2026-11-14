@@ -686,12 +686,14 @@ object bindings {
     @JvmStatic external fun proxySetHandle(proxy: Long, handle: Long)
 
     /**
-     * `ob_refcnt` of the object at [obj], read straight out of the header.
+     * `Py_REFCNT` of the object at [obj], read straight out of the header.
      *
      * `Py_REFCNT` is a macro and `sys.getrefcount` adds its argument's own temporary to the
      * answer, so neither can say whether `tp_dealloc` released the instance's reference to its
-     * heap type exactly once. `ob_refcnt` is the first field of `PyObject` and its offset is
-     * fixed by the stable ABI, which is the one layout fact this file is allowed to know.
+     * heap type exactly once. Android embeds the free-threaded 3.15t (#328), whose `PyObject`
+     * header splits the count into `uint32 ob_ref_local` at +12 and `Py_ssize_t ob_ref_shared` at
+     * +16 (shifted left by 2); offset 0 is the owning thread id. The C side sums the two, as the
+     * desktop `CycleCollectionTest.typeRefCount` does.
      *
      * Composed on the C side for the same reason [proxySetHandle] is: reading 8 bytes at a raw
      * address from Kotlin/JVM would need `sun.misc.Unsafe`, a restricted non-SDK interface here.

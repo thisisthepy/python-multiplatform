@@ -30,14 +30,19 @@ object CPythonIncludeLayout {
 
     /**
      * The flavour `python-multiplatform` embeds for [target], which is the only one its build
-     * extracts: free-threaded on desktop (issue #158, maintainer 2026-10-04: "Free-threaded is the
-     * default and the only build"), GIL on Android and iOS until #328.
+     * extracts: free-threaded on every target (issue #158, maintainer 2026-10-04: "Free-threaded is
+     * the default and the only build"; desktop since #398, Android and iOS since #328).
      */
-    fun embeddedFlavour(target: String): CPythonFlavour =
-        if (target in desktopTargets) CPythonFlavour.FREE_THREADED else CPythonFlavour.GIL
+    @Suppress("UNUSED_PARAMETER")
+    fun embeddedFlavour(target: String): CPythonFlavour = CPythonFlavour.FREE_THREADED
 
+    /**
+     * Whether a layout exists for [target] in [flavour]. Free-threaded exists everywhere. A GIL
+     * layout is kept for the desktop targets only (python-build-standalone publishes both, and the
+     * paths differ); Android and iOS have no GIL build to lay out since #328.
+     */
     fun supports(target: String, flavour: CPythonFlavour): Boolean =
-        target in allTargets && (flavour == CPythonFlavour.GIL || target in desktopTargets)
+        target in allTargets && (flavour == CPythonFlavour.FREE_THREADED || target in desktopTargets)
 
     /** The extraction task that produces [target] -- the name `python-multiplatform/build.gradle.kts` registers. */
     fun downloadTaskName(target: String): String = when (target) {
@@ -60,9 +65,11 @@ object CPythonIncludeLayout {
                 val dir = if (flavour == CPythonFlavour.FREE_THREADED) "$target-freethreaded" else target
                 "$dir/python/include/python$tag"
             }
-            in androidTargets -> "$target/prefix/include/python$tag"
+            // `-freethreaded` in the directory name, as on desktop: a GIL `android-aarch64/` tree from
+            // an older checkout must never be mistaken for the 3.15t one (#328).
+            in androidTargets -> "$target-freethreaded/prefix/include/python$tag"
             // The framework's own Headers, which is also what the library's iOS cinterop reads: the
-            // 3.15 iOS support archive no longer ships `<abi>/include/python3.15` beside it (#313).
+            // iOS support archive ships no `<abi>/include/python3.15t` beside it (#313).
             else -> "ios/Python.xcframework/$target/Python.framework/Headers"
         }
     }
@@ -72,9 +79,12 @@ object CPythonIncludeLayout {
     /** Android links `libpython3.x.so`, Windows links the import library; macOS/Linux/iOS need none. */
     fun isLinkRequired(target: String): Boolean = target in androidTargets || target == "windows-x86_64"
 
-    /** Free-threaded link libraries exist on Windows only (`python314t.lib`); Android has no free-threaded build. */
+    /**
+     * Android links `libpython3.15t.so` (free-threaded only since #328); Windows has both
+     * `python315.lib` and `python315t.lib`.
+     */
     fun supportsLinkLibrary(target: String, flavour: CPythonFlavour): Boolean =
-        isLinkRequired(target) && (flavour == CPythonFlavour.GIL || target == "windows-x86_64")
+        isLinkRequired(target) && (flavour == CPythonFlavour.FREE_THREADED || target == "windows-x86_64")
 
     /** Directory holding the link library, relative to the version-keyed extraction root. */
     fun linkLibraryDirRelativePath(target: String, flavour: CPythonFlavour): String {
@@ -83,11 +93,11 @@ object CPythonIncludeLayout {
             "windows-x86_64" ->
                 (if (flavour == CPythonFlavour.FREE_THREADED) "windows-x86_64-freethreaded" else "windows-x86_64") +
                     "/python/libs"
-            else -> "$target/prefix/lib"
+            else -> "$target-freethreaded/prefix/lib"
         }
     }
 
-    /** File name of the link library, e.g. `libpython3.14.so` or `python314.lib` (`python314t.lib` free-threaded). */
+    /** File name of the link library, e.g. `libpython3.15t.so` or `python315.lib` (`python315t.lib` free-threaded). */
     fun linkLibraryFileName(target: String, flavour: CPythonFlavour, pythonVersion: String): String {
         require(supportsLinkLibrary(target, flavour)) { "no $flavour link library for target '$target'" }
         val parts = pythonVersion.split('.')
@@ -95,7 +105,7 @@ object CPythonIncludeLayout {
         return if (target == "windows-x86_64") {
             "python${parts[0]}${parts[1]}" + (if (flavour == CPythonFlavour.FREE_THREADED) "t" else "") + ".lib"
         } else {
-            "libpython${parts[0]}.${parts[1]}.so"
+            "libpython${parts[0]}.${parts[1]}t.so"
         }
     }
 }
@@ -106,8 +116,8 @@ object CPythonIncludeLayout {
  * triggers the download and unpack.
  *
  * Only the flavour the library embeds ([CPythonIncludeLayout.embeddedFlavour]: free-threaded on
- * desktop, GIL on Android and iOS) has an extraction task, and it is the default `flavour`; asking
- * for the other one fails loudly rather than returning a path nothing will ever create.
+ * every target since #328) has an extraction task, and it is the default `flavour`; asking for the
+ * other one fails loudly rather than returning a path nothing will ever create.
  *
  * @param extractedRoot the version-keyed extraction directory
  * @param extractionTask the task that fills [extractedRoot] for a target+flavour, or null when this build does not extract it
@@ -128,12 +138,12 @@ class CPythonIncludeDirectories(
         if (!CPythonIncludeLayout.supports(target, flavour)) {
             throw GradleException(
                 "No $flavour CPython include directory for '$target'. Targets: ${CPythonIncludeLayout.allTargets}; " +
-                    "free-threaded exists for desktop targets only.",
+                    "Android and iOS have no GIL build (#328).",
             )
         }
         val task = extractionTask(target, flavour) ?: throw GradleException(
             "The $flavour CPython for '$target' is not extracted by this build. " +
-                "Only the flavour the library embeds is downloaded: free-threaded on desktop (#158), GIL on Android and iOS.",
+                "Only the flavour the library embeds is downloaded: free-threaded on every target (#158, #328).",
         )
         val relative = CPythonIncludeLayout.relativePath(target, flavour, pythonVersion)
         // `TaskProvider.map` keeps the task as the producer, so the dependency travels with the value.
@@ -151,12 +161,12 @@ class CPythonIncludeDirectories(
         if (!CPythonIncludeLayout.supportsLinkLibrary(target, flavour)) {
             throw GradleException(
                 "No $flavour CPython link library for '$target'. Only android-* and windows-x86_64 link against " +
-                    "CPython; macOS, Linux and iOS need none (isLinkRequired=false); free-threaded exists on Windows only.",
+                    "CPython; macOS, Linux and iOS need none (isLinkRequired=false); Android has no GIL build (#328).",
             )
         }
         return extractionTask(target, flavour) ?: throw GradleException(
             "The $flavour CPython for '$target' is not extracted by this build. " +
-                "Only the flavour the library embeds is downloaded: free-threaded on desktop (#158), GIL on Android and iOS.",
+                "Only the flavour the library embeds is downloaded: free-threaded on every target (#158, #328).",
         )
     }
 
@@ -167,7 +177,7 @@ class CPythonIncludeDirectories(
         return task.map { extractedRoot.dir(relative) }
     }
 
-    /** The link library file itself (`libpython3.14.so` / `python314.lib`); carries the extraction task. */
+    /** The link library file itself (`libpython3.15t.so` / `python315t.lib`); carries the extraction task. */
     fun libraryFile(target: String, flavour: CPythonFlavour = CPythonIncludeLayout.embeddedFlavour(target)): Provider<RegularFile> {
         val task = linkTask(target, flavour)
         val relative = CPythonIncludeLayout.linkLibraryDirRelativePath(target, flavour) + "/" +

@@ -194,6 +194,16 @@ to implement", say what you counted against.
   branch. The only local exceptions are device tests and measurements the coordinating session
   runs itself, one at a time, and says why. Several sessions share one machine, and agent builds
   once filled the disk and slowed every session.
+- **CI runs only when started by hand, one run at a time.** Owner, 2026-11-14: "여러 ci를
+  쌓아두는거도 말이 안되잖아. 제일 최신꺼만 도는게 맞지. 애초에 여러 ci를 한번에 돌리는거도 허용할
+  생각이 난 없어." Development test workflows have no `push`, `pull_request` or `schedule` trigger.
+  The coordinating session starts the repository's one development workflow with
+  `gh workflow run <file> --ref <branch>` on the latest commit; agents and teammates never start,
+  re-run or queue CI themselves, they ask the coordinator. One run checks as much as it can: every
+  suite in one dispatch, and several pull requests merged onto one branch rather than one run each.
+  A run in progress finishes and a newer dispatch replaces the waiting one (one `dev-ci`
+  concurrency group per repository). Release workflows (tags, published releases, release-sync,
+  pages) keep their triggers.
 
 ---
 
@@ -271,8 +281,10 @@ around one.
    (2026-10-04): "Free-threaded is the default and the only build. The GIL build is not kept as an
    option. Baseline is CPython 3.15t." Desktop (JVM, `macosArm64`, `linuxX64`) embeds 3.15t with no
    GIL option since the leader's instruction of 2026-11-13 ("flip the desktop default to 3.15t now");
-   Android and iOS still embed the GIL 3.15 until #328, wasm until #175. Which build a platform embeds
-   is the per-platform `embedsFreeThreadedPython`, never one build-wide flag (SPEC T-1, ROADMAP §9).
+   Android (arm64-v8a and x86_64), androidNative and iOS embed the project's own 3.15t builds with no
+   opt-in flag (#328; leader decision 2026-11-13, owner approval of the x86_64 build the same day);
+   wasm embeds a GIL build until #175. Which build a platform embeds is the per-platform
+   `embedsFreeThreadedPython`, never one build-wide flag (SPEC T-1, ROADMAP §9).
 9. **Do not add PanamaPort as a dependency** (licence and dependence on ART internals).
 
 ## 13. Upcalls must work in a GraalVM native image
