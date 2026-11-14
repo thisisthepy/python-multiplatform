@@ -1239,9 +1239,13 @@ def _racy_runtime(tmp: Path, *, drop_dict_lock: bool, plain_epoch: bool, hold_wa
     h = (cbuild.RUNTIME_DIR / "tp_runtime.h").read_text()
     g = h
     if drop_dict_lock:
-        g = g.replace("    Py_BEGIN_CRITICAL_SECTION(module_dict);\n", "")
-        g = g.replace("    Py_END_CRITICAL_SECTION();\n    if (rc <= 0) {\n        return rc;",
-                      "    if (rc <= 0) {\n        return rc;")
+        # only tp_class_global_ok's section: tp_eg_snapshot (#390) opens the same dict's section too
+        locked = ("    Py_BEGIN_CRITICAL_SECTION(module_dict);\n"
+                  "    epoch = tp_atomic_load_u64(&tp_globals_epoch);\n"
+                  "    rc = PyDict_GetItemRef(module_dict, name, &v);     /* strong */\n"
+                  "    Py_END_CRITICAL_SECTION();\n")
+        assert g.count(locked) == 1
+        g = g.replace(locked, "".join(line + "\n" for line in locked.split("\n")[1:3]))
     if plain_epoch:
         g = g.replace("tp_atomic_add_u64(&tp_globals_epoch, 1);", "tp_globals_epoch++;")
         g = g.replace("tp_atomic_load_u64(&tp_globals_epoch)", "tp_globals_epoch")
