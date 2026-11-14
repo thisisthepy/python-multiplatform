@@ -9,8 +9,9 @@ import kotlin.test.assertNotNull
  * Issue #61: the published jar carries the CPython version it embeds, agreeing with BuildConfig.
  *
  * Issue #158: the desktop jar embeds the free-threaded 3.15t, so its resource says
- * `freeThreaded=true`. The AAR carries its own resource (`freeThreaded=false`, GIL until #328);
- * the two are generated separately in `python-multiplatform/build.gradle.kts`.
+ * `freeThreaded=true`. The AAR carries its own resource, generated separately in
+ * `python-multiplatform/build.gradle.kts`; it says `freeThreaded=true` too since #328
+ * (`AndroidFreeThreadedBuildTest.theAarSaysItIsFreeThreaded`).
  *
  * Red before #158: one resource served the jar and the AAR, rendered from
  * `-PpythonFreeThreaded` (default false), so the desktop jar said `freeThreaded=false`.

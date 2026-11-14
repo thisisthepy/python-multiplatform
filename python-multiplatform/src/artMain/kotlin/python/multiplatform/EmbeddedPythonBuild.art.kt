@@ -1,4 +1,4 @@
 package python.multiplatform
 
-/** androidNative links python.org's GIL CPython until #328. See the `expect` in commonMain. */
-internal actual val embedsFreeThreadedPython: Boolean = false
+/** androidNative links the project's own free-threaded CPython 3.15t (#328). See the `expect` in commonMain. */
+internal actual val embedsFreeThreadedPython: Boolean = true

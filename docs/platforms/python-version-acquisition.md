@@ -28,16 +28,31 @@ The project currently uses `python-build-standalone` (maintained by Astral). For
     leader 2026-11-13: "flip the desktop default to 3.15t now"). Every desktop `downloadPython_*` task fetches
     `...-freethreaded-install_only_stripped.tar.gz` and unpacks it under `<ver>/<target>-freethreaded/`.
     The `-PpythonFreeThreaded` property that used to choose between the two is removed; passing it fails the
-    build. Android and iOS (section 3) are still GIL until #328.
+    build. Android and iOS (section 3) embed the project's own 3.15t builds since #328.
 
 ## 3. Android and iOS Support
 
-*   **Android:** Prebuilt artifacts for Android are provided natively by python.org. These archives are plain NDK cross-compilations (e.g., CPython's own build tree). They can be found at `https://www.python.org/ftp/python/<version>/python-<version>-<arch>-linux-android.tar.gz`.
-*   **iOS (3.14):** pinned to BeeWare `3.14-b11` (Python 3.14.7). `3.14-b10`, pinned earlier, shipped 3.14.6 while every other target shipped 3.14.7 (issue #47); b11 is the first 3.14 build with 3.14.7 (release 2026-09-04; its `VERSIONS` file and all four `patchlevel.h` say 3.14.7). The build now checks `PY_VERSION` in the extracted headers against `pythonVersion` for every target and fails if they differ. python.org's own iOS XCframework starts at 3.15 (section 5), so there is no alternative 3.14 source.
-*   **iOS:** Prebuilt artifacts for iOS are provided by the BeeWare project via their `Python-Apple-support` repository, which are CPython's own iOS build layouts (e.g. `prefix: iOS/Frameworks/...`). They are located at `https://github.com/beeware/Python-Apple-support/releases`. The kivy toolchains are **not** the source of these artifacts.
-*   **python-build-standalone Status:** `python-build-standalone` has moved from indygreg to Astral (`https://github.com/astral-sh/python-build-standalone`). It **does not** publish prebuilt binaries for `android` or `ios`. 
+*   **Acquired: the project's own free-threaded 3.15t builds, and only those** (#328 step 2; maintainer on
+    #158, 2026-10-04: "Free-threaded is the default and the only build. The GIL build is not kept as an
+    option"; leader decision 2026-11-13 on #328: no opt-in flag on mobile; the owner approved the x86_64
+    Android 3.15t build the same day, so arm64-v8a and x86_64 both stay supported). They are built by
+    `.github/workflows/build-ft-mobile.yml` (#163, `free-threaded-mobile.md`) and published on the GitHub
+    release `cpython-<version>t-mobile` of `thisisthepy/python-multiplatform`:
+    `python-<version>t-aarch64-linux-android.tar.gz`, `python-<version>t-x86_64-linux-android.tar.gz` and
+    `python-<version>t-iOS-XCframework.tar.gz`, at
+    `https://github.com/thisisthepy/python-multiplatform/releases/download/cpython-<version>t-mobile/<asset>`.
+*   **Layout.** Android: `prefix/lib/libpython3.15t.so`, `prefix/include/python3.15t/`,
+    `prefix/lib/python3.15t/` (with `config-3.15t-<arch>-linux-android/`), unpacked under
+    `<ver>/android-<arch>-freethreaded/`. iOS: `Python.xcframework/<slice>/Python.framework/Headers`
+    (`pyconfig.h` wraps `pyconfig-<arch>.h`), `Python.xcframework/lib/python3.15t/` and
+    `<slice>/lib-<arch>/python3.15t/`, unpacked under `<ver>/ios/`.
+*   **Checks.** The lockfile pin (section 5), `PY_VERSION` against `pythonVersion` (issue #47), and
+    `Py_GIL_DISABLED 1` in every `pyconfig` header of the unpacked tree.
+*   **Not acquired any more:** python.org's GIL Android archives and GIL iOS XCframework (3.15), and BeeWare's
+    `Python-Apple-support` (3.14 and earlier, GIL). Neither publishes a free-threaded mobile build, and
+    the GIL build is not kept (#158). Their pins and the `pythonAppleSupportBuild` property are removed.
+*   **python-build-standalone Status:** `python-build-standalone` has moved from indygreg to Astral (`https://github.com/astral-sh/python-build-standalone`). It **does not** publish prebuilt binaries for `android` or `ios`.
 *   **Prebuilt-cpython Status:** The `python/prebuilt-cpython` repository is currently a planning repository containing no artifacts, so it is not a source.
-*   **Conclusion:** We acquire Android artifacts directly from python.org, and iOS artifacts from BeeWare's Python-Apple-support, eliminating the need for kivy toolchain dependency.
 
 ## 4. Stable ABI and free-threaded builds
 
@@ -50,22 +65,27 @@ The project currently uses `python-build-standalone` (maintained by Astral). For
     due to opaque structural changes", "wait for 3.15t") and was wrong; see
     [`../design/threading-and-abi.md`](../design/threading-and-abi.md) and
     [`../archive/threading-and-abi-3.15t-gate.md`](../archive/threading-and-abi-3.15t-gate.md).
-*   **Scope:** free-threaded prebuilts exist only for the desktop targets (section 2); Android (python.org)
-    and iOS (Python-Apple-support) publish none, so desktop is free-threaded and Android and iOS stay GIL
-    until the project's own builds land (#163, #328). Which build each platform embeds is the library's
-    per-platform `embedsFreeThreadedPython` (SPEC T-1). The interpreter version is `pythonVersion` in
+*   **Scope:** free-threaded prebuilts from third parties exist only for the desktop targets (section 2);
+    Android and iOS use the project's own 3.15t builds (section 3, #163, #328), and wasm stays GIL until
+    #175. Which build each platform embeds is the library's per-platform `embedsFreeThreadedPython`
+    (SPEC T-1). The interpreter version is `pythonVersion` in
     `gradle.properties`.
 
 ## 5. Security and Integrity Verification
 
 *   **Desktop:** `python-build-standalone` provides a `SHA256SUMS` file with every release. The build script verifies the downloaded archive against this manifest.
-*   **Android (python.org) and iOS (python.org, 3.15+), Sigstore verified.** This bullet used to say that "full Sigstore verification directly inside Gradle is unreasonable without shelling out to external tools (like `sigstore-python` or the `cosign` CLI)". **That was wrong**, and it is now implemented. `dev.sigstore:sigstore-java` does the whole verification in-process, certificate chain, Rekor inclusion and OIDC identity, with no external binary. python.org publishes a sibling `<archive>.sigstore` bundle for both Android tarballs and, from 3.15, the iOS XCframework. (The extension is `.sigstore`; `.sigstore.json` returns 404.) There is still no plain checksum manifest, so the lockfile continues to pin the digest as well.
-*   **The signer identity is pinned, and has to be version-keyed.** Verifying a bundle *without* pinning an identity proves only that somebody holding a Sigstore certificate signed the bytes, which anyone can arrange. The build pins the Fulcio SAN and OIDC issuer of the actual CPython release manager, per <https://www.python.org/download/sigstore/>. That must be a map rather than a constant, because it changes per release series: 3.14/3.15 are `hugo@python.org` via `https://github.com/login/oauth`, whereas 3.12/3.13 are `thomas@python.org` via `https://accounts.google.com`. An unrecorded series is a hard build failure, never a silent skip.
-*   **Opt-in, `-PverifyPythonSignatures=true`.** Off by default because `sigstore-java` pulls in grpc-netty-shaded, protobuf, bouncycastle and guava, and because fetching the TUF trust root needs network access, which would turn an offline build from working into failing. Gradle resolves the configuration lazily, so a default build downloads none of it (measured: a default `downloadPython_android_*` run mentions Sigstore zero times).
+*   **Android and iOS (the project's `cpython-<version>t-mobile` release): the lockfile pin.** The release
+    carries a `SHA256SUMS` and no Sigstore bundle; the pins `android-aarch64-<v>-freethreaded`,
+    `android-x86_64-<v>-freethreaded` and `ios-<v>-freethreaded` were checked against it and against a
+    local `shasum` when they were written (2026-11-13). The build checks the lockfile only.
+*   **python.org's Android and iOS archives used to be Sigstore verified** through their sibling
+    `<archive>.sigstore` bundles, with the release manager's identity pinned per series. Those archives are
+    GIL builds and are no longer acquired (section 3), so that verification path and its identity map
+    were removed from the build. The record is in git history.
+*   **Opt-in, `-PverifyPythonSignatures=true`.** Off by default because `sigstore-java` pulls in grpc-netty-shaded, protobuf, bouncycastle and guava, and because fetching the TUF trust root needs network access, which would turn an offline build from working into failing. Gradle resolves the configuration lazily, so a default build downloads none of it.
 *   **Desktop (`python-build-standalone`), Sigstore verified via GitHub Attestations.** The release carries 853 assets and the only non-archive among them is `SHA256SUMS`: there is no `.sigstore` file. Provenance is published through GitHub's *attestations* API instead, keyed by artifact **digest** rather than filename, and that endpoint is rate-limited to 60 requests/hour unauthenticated. Because of this rate limit and the bundle size (~212KB each), the build does not check these bundles into the repository. Instead, when `-PverifyPythonSignatures=true` is set, it fetches the DSSE bundle from the API, caches it locally as `.sigstore`, and uses `sigstore-java` to verify it against the pinned `astral-sh/python-build-standalone` workflow identity. Desktop is therefore protected by the lockfile, the release's own `SHA256SUMS`, and Sigstore.
-*   **iOS (BeeWare, ≤ 3.14; `3.14-b11` pin `b591f330...ab7b`, taken from GitHub's asset digest and recomputed locally), nothing exists to verify against.** The `Python-Apple-support` releases publish five `tar.gz` assets and nothing else: no checksums, no signatures, and no GitHub attestations. The lockfile pin is the only honest instrument available here, and no amount of build wiring changes that.
 *   **The lockfile is not superseded by any of this.** The two gates prove different things, the lockfile says "these are the exact bytes this repository reviewed and pinned", Sigstore says "these are the bytes the release manager actually signed". The lockfile is also the only check that works offline and the only one covering every source, so it stays unconditional and Sigstore is layered on top of it.
-*   **The verification is known to fail when it should**, which is the only thing that makes it worth having. Two negative controls were run against the real 3.14.7 Android bundle: flipping one base64 character in `messageSignature.signature` gave `KeylessVerificationException: Artifact signature was not valid`, and pointing the identity map at the 3.13 release manager gave `No provided certificate identities matched values in certificate`. Both failed the build with a non-zero exit.
+*   **The verification is known to fail when it should**, which is the only thing that makes it worth having. Two negative controls were run against the real 3.14.7 Android bundle (python.org, before #328 removed that source): flipping one base64 character in `messageSignature.signature` gave `KeylessVerificationException: Artifact signature was not valid`, and pointing the identity map at the 3.13 release manager gave `No provided certificate identities matched values in certificate`. Both failed the build with a non-zero exit.
 
 ## 6. WebAssembly
 
@@ -86,17 +106,19 @@ Compiling a C extension against the embedded CPython needs that CPython's header
     `windows-x86_64`, `android-aarch64`, `android-x86_64`, `ios-arm64`, `ios-arm64_x86_64-simulator`
     (the iOS names are XCFramework slices). Flavour: `CPythonFlavour.FREE_THREADED` or `GIL`; the default
     is the one the library embeds for that target, `CPythonIncludeLayout.embeddedFlavour(target)`:
-    `FREE_THREADED` on desktop (#158), `GIL` on Android and iOS. (Making the default per target, rather
-    than `GIL` everywhere, is an agent proposal, not confirmed: with `GIL` the documented
-    `includeDir("macos-aarch64")` would throw on every desktop build.)
+    `FREE_THREADED` on every target (desktop #158, Android and iOS #328). Android and iOS have no `GIL`
+    layout at all. (Making the default follow the embedded build, rather than `GIL` everywhere, is an
+    agent proposal, not confirmed: with `GIL` the documented `includeDir("macos-aarch64")` would throw
+    on every build.)
 *   **Value:** `Provider<Directory>` of the directory that directly contains `Python.h`, i.e. the `-I`
     directory: `<ver>/<target>[-freethreaded]/python/include/python3.14[t]` on desktop (Windows has no
-    `python3.14` level), `<ver>/android-*/prefix/include/python3.14`,
-    `<ver>/ios/Python.xcframework/<slice>/include/python3.14`.
+    `python3.14` level), `<ver>/android-*-freethreaded/prefix/include/python3.15t`,
+    `<ver>/ios/Python.xcframework/<slice>/Python.framework/Headers`.
 *   **Task dependency:** the provider carries the matching `downloadPython_*` task; using it as a task
     input makes Gradle download and extract first.
-*   **Only the embedded flavour is extracted.** Desktop extracts the free-threaded tree only; asking for the
-    other flavour throws a `GradleException` naming #158 (`isAvailable` tests it without throwing).
+*   **Only the embedded flavour is extracted.** Every target extracts the free-threaded tree only; asking for
+    the other flavour throws a `GradleException` naming #158 (desktop) or #328 (Android, iOS);
+    `isAvailable` tests it without throwing.
 
 ```kotlin
 // consumer build.gradle.kts
@@ -117,12 +139,12 @@ The same extension exposes the library to link against (issue #56):
 
 | Target | Link library (under `<ver>/`) |
 |---|---|
-| `android-aarch64`, `android-x86_64` | `<target>/prefix/lib/libpython3.14.so` |
+| `android-aarch64`, `android-x86_64` | `<target>-freethreaded/prefix/lib/libpython3.15t.so` |
 | `windows-x86_64` | `windows-x86_64/python/libs/python314.lib` (`python3.lib` is the stable-ABI one) |
 | `windows-x86_64` free-threaded | `windows-x86_64-freethreaded/python/libs/python314t.lib` |
 | macOS, Linux, iOS | none -- `isLinkRequired(target)` is false; `libraryDir`/`libraryFile` throw `GradleException` |
 
-Android has no free-threaded build, so that combination throws. On Windows the default is the
+Android has no GIL build since #328, so that combination throws. On Windows the default is the
 free-threaded `python315t.lib`; the GIL one is not extracted. `isLinkAvailable(target, flavour)`
 tests without throwing; the other flavour fails naming #158, as for `includeDir`.
 
@@ -130,22 +152,22 @@ tests without throwing; the other flavour fails naming #158, as for `includeDir`
 
 A consumer that builds against `python-multiplatform` must know which CPython it embeds (issue #61).
 The answer is published three ways. The version is `pythonVersion` in `gradle.properties`; whether
-the build is free-threaded differs by platform (#158: desktop 3.15t, Android and iOS GIL 3.15 until
-#328, wasm GIL until #175), so each published artefact states its own.
+the build is free-threaded differs by platform (desktop 3.15t since #158, Android, androidNative and
+iOS 3.15t since #328, wasm GIL until #175), so each published artefact states its own.
 
 *   **Extension** `pythonMultiplatform` (`python.multiplatform.gradle.EmbeddedPythonVersion`):
     `pythonVersion` (`3.15.0`), `majorMinor` (`3.15`), `freeThreaded`. One value per project: the
-    desktop one (`true`; agent proposal, not confirmed). For any other platform, read its variant's
+    free-threaded one every non-wasm platform embeds (`true`; agent proposal, not confirmed). For any other platform, read its variant's
     attribute or its resource.
 *   **Gradle attributes** on every consumable `*Elements` configuration (so they land in the published
     module metadata): `org.thisisthepy.python.version` and `org.thisisthepy.python.free-threaded`
     (both `String`; the latter is `"true"`/`"false"`). The free-threaded one is per variant: `"true"` on
-    `desktop*`, `macosArm64*` and `linuxX64*` variants, `"false"` on the Android, iOS, androidNative and
-    wasm variants, and absent on shared metadata variants, which carry no CPython of their own (the
+    `desktop*`, `macosArm64*`, `linuxX64*`, `android*` (the AAR and androidNative) and `ios*` variants,
+    `"false"` on the wasm variants, and absent on shared metadata variants, which carry no CPython of their own (the
     metadata rule is an agent proposal, not confirmed).
 *   **Resource** `META-INF/python-multiplatform/python.properties` (`pythonVersion=`, `freeThreaded=`),
     inside the desktop jar (`freeThreaded=true`, from `generateDesktopPythonProperties`) and the Android
-    AAR's `classes.jar` (`freeThreaded=false`, from `generateAndroidPythonProperties`).
+    AAR's `classes.jar` (`freeThreaded=true` since #328, from `generateAndroidPythonProperties`).
 
 ```kotlin
 // composite build (includeBuild): read the extension

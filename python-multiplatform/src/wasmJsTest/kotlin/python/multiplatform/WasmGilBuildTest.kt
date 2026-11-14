@@ -4,8 +4,8 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 
 /**
- * Issue #158 moved desktop to the free-threaded CPython 3.15t; wasmJs still embeds the GIL build until
- * #175. This pins that the desktop change did not leak here.
+ * Issue #158 moved desktop to the free-threaded CPython 3.15t, and #328 moved Android, androidNative
+ * and iOS; wasmJs still embeds the GIL build until #175. This pins that neither change leaked here.
  *
  * Not red before the change: wasmJs was GIL before and is GIL after. It is the guard against the
  * naive implementation (flipping one shared `BuildConfig.pythonFreeThreaded`), under which

@@ -462,7 +462,8 @@ internal object ArtifactScanner {
                     functions = functionsOf(metadata.kmPackage),
                     ownerNode = node,
                     classpath = classpath,
-                ) + extensionPropertyCandidates(metadata.kmPackage, node, owner, classpath)
+                ) + extensionPropertyCandidates(metadata.kmPackage, node, owner, classpath) +
+                    constantsOf(metadata.kmPackage.properties, node, boundOwner = owner, callOwner = owner, classpath = classpath, ownerIsClass = false)
             }
             is KotlinClassMetadata.MultiFileClassFacade -> metadata.partClassNames.flatMap { partBinaryName ->
                 val partNode = classpath.classNode(partBinaryName) ?: return@flatMap emptyList()
@@ -475,7 +476,8 @@ internal object ArtifactScanner {
                     functions = functionsOf(partMetadata.kmPackage),
                     ownerNode = partNode,
                     classpath = classpath,
-                ) + extensionPropertyCandidates(partMetadata.kmPackage, partNode, owner, classpath)
+                ) + extensionPropertyCandidates(partMetadata.kmPackage, partNode, owner, classpath) +
+                    constantsOf(partMetadata.kmPackage.properties, partNode, boundOwner = owner, callOwner = owner, classpath = classpath, ownerIsClass = false)
             }
             // A lone part is package-private and never reaches here on its own (the `ACC_PUBLIC`
             // guard above already excluded it) -- only through the facade case, which fetches it by
@@ -875,7 +877,23 @@ internal object ArtifactScanner {
         boundOwner: String,
         callOwner: String,
         classpath: ArtifactClasspath,
-    ): List<Candidate> = kmClass.properties.mapNotNull { property ->
+    ): List<Candidate> = constantsOf(
+        properties = kmClass.properties,
+        declaringNode = declaringNode,
+        boundOwner = boundOwner,
+        callOwner = callOwner,
+        classpath = classpath,
+        ownerIsClass = true,
+    )
+
+    private fun constantsOf(
+        properties: List<kotlin.metadata.KmProperty>,
+        declaringNode: ClassNode,
+        boundOwner: String,
+        callOwner: String,
+        classpath: ArtifactClasspath,
+        ownerIsClass: Boolean = true,
+    ): List<Candidate> = properties.mapNotNull { property ->
         if (property.visibility != Visibility.PUBLIC) return@mapNotNull null
         if (property.receiverParameterType != null) return@mapNotNull null
         // A `@Composable get()` reads the composition, so its value does not exist outside one --
@@ -928,7 +946,7 @@ internal object ArtifactScanner {
             declaration = DeclarationModel(
                 simpleName = property.name,
                 owner = boundOwner,
-                ownerIsClass = true,
+                ownerIsClass = ownerIsClass,
                 receiver = null,
                 parameters = emptyList(),
                 returnType = returnModel,
