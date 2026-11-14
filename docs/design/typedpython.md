@@ -755,6 +755,64 @@ venv 의 3.15.0rc1t 헤더와 python/cpython 의 태그 `v3.15.0rc1` 소스(설�
 2. 쓰는 함수(nbody `advance`)를 위해 임의 문장 지점의 OSR 출구를 만들지: (c) 의 구간 나누기와 (d2) 가 둘 다 그것에
    걸려 있다.
 
+#### 바. 리스트 하나, 둘의 창 안에서 기다리는 연산 (#390)
+
+**출처.** 이슈 #390 (#255 조사 중 읽어서 발견). 아래의 판정 근거는 CPython 소스와 생성 C 를 읽은 것이고, 수정 방식과
+거절 범위는 **에이전트 제안, 확인되지 않음**이다. 지킨 제약: GIL 전용 기능 없음, Python 동작 변화 없음, 공개 critical
+section API 만 씀(리더, 2026-11-13).
+
+**판정: 결함이 있다(읽어서 확인, 실행으로는 아직 보지 못함).** 줄 번호는 `v3.15.0rc1`.
+- 창 안에서 다른 잠금을 기다리면 섹션이 풀린다. `PyMutex_Lock` 은 `_PY_LOCK_DETACH` 로 기다리고
+  (`Python/lock.c:656`, `Python/parking_lot.c:328-337`), detach 는 활성 섹션을 모두 푼다(`Python/pystate.c:2290-2292`,
+  `Python/critical_section.c:109-131`). 중첩 섹션의 느린 경로는 새 섹션을 먼저 올리고 기다린다
+  (`critical_section.c:55-59`). 다시 붙으면 맨 위 섹션만 다시 잡고(`pystate.c:2269-2273`), 바깥 섹션은 안쪽이 끝날 때
+  다시 잡힌다(`Include/internal/pycore_critical_section.h:129-137`). 그 사이에 다른 스레드가 리스트에 쓸 수 있고,
+  write-back 이 그 값을 copy-in 때의 값으로 덮는다.
+- develop(9376f96a)의 생성 C 에서 창 안에 있던 대기 지점:
+  1. **wrapper 의 entry global 읽기**: `tp_cs_begin` 과 copy-in 다음에 `tp_global` → `PyDict_GetItemRef`. 잠금 없는
+     읽기가 값의 참조를 못 얻으면(다른 스레드가 만든, 공유 refcount 0 인 객체, 또는 동시 변경) dict 의 섹션으로
+     떨어진다(`Objects/dictobject.c:1647-1660`). 이 스레드가 처음 읽는 공유 안 된 dict 도 섹션을 잡는다
+     (`dictobject.c:1391-1403`). 이름이 모듈에 없으면 builtins dict 도 같다.
+  2. **snapshot poll 의 entry global 다시 읽기**(#152): 리스트 섹션을 다시 잡은 뒤 `tp_global`. 1 과 같다.
+  3. **callee 의 entry global**: Call 지점에서 `tp_global`(`_read_entry_global`). 1 과 같다.
+  4. **OBJ `Global` 읽기**: 캐시가 비면 `tp_gcache_fill` 이 모듈·builtins dict 의 섹션을 잡는다. `IsExact`
+     (`tp_class_global_ok` 의 dict 섹션), `CheckMethod`(클래스 dict 조회)도 같은 종류다.
+  5. **redo Call**: `tp_cg_redo` 가 모듈 dict 섹션에서 deopt 카운터를 올리고(경합하면 대기), 해석 함수를 부른다.
+     해석 코드는 eval breaker 에서 stop-the-world 요청에 detach 하고(`Python/ceval_gil.c:1362-1367`), GC 의
+     finalizer 나 추적 함수 같은 사용자 코드가 아직 write-back 안 된 리스트를 볼 수도 있다.
+  6. 드문 경우: write-back 의 `PyList_SetItem` 이 다른 스레드 소유 원소를 decref 할 때 `_Py_brc_queue_object` 가
+     bucket mutex 를 `PyMutex_Lock` 으로 잡는다(`Python/brc.c:67`, 경합해 park 하면 detach). 영향을 받는 impure 함수의
+     Call 앞 `tp_traced` 는 `sys.monitoring` 버전이 바뀐 직후 한 번 `tp_mon_scan`(import, 속성 조회, 호출)을 한다.
+  copy-in 의 `malloc`·unbox, Box 할당, 리스트 섹션 안의 `PyList_SetItem` 재진입(맨 위 섹션이 같은 mutex 라 건너뜀,
+  `critical_section.c:31`)은 기다리지 않는다.
+- 결정적 재현 방법(시험): 한 스레드가 모듈 dict 의 섹션을 쥔다(dict setitem 은 섹션 안에서 key 의 `__hash__` 를
+  부르고, 그 `__hash__` 가 붙은 채 돈다, `dictobject.c:2784-2790`). entry global 값은 다른 스레드가 만든 새 int 라
+  잠금 없는 읽기가 실패한다. 이때 쓰는 스레드의 `a[1] = 99; a[0] = 99` 가 지나가고, write-back 뒤 `a == [G1, 99, 0]`
+  이 남는다. 어떤 interleaving 도 만들지 않는 결과다(시험 `test_list_window_does_not_wait_for_the_module_dict`).
+
+**수정 (에이전트 제안, 확인되지 않음).**
+- 1, 2: 리스트를 쥔 함수의 entry global 은 리스트 섹션 **전에** 읽는다. `tp_eg_snapshot` 이 모듈 dict 의 섹션 안에서
+  `tp_globals_epoch` 와 함께 모듈 dict 만 조회한다(그 섹션을 이미 쥐었으므로 dict 의 대체 경로는 기다리지 않는다,
+  `critical_section.c:31`). watcher 는 같은 잠금 안에서 저장 **전에** epoch 를 올리므로(`dictobject.c:2009`,
+  `tp_class_global_ok` 와 같은 논리) 값과 epoch 는 한 순간의 것이다. copy-in 뒤 `tp_eg_current` 로 epoch 가 그대로임을
+  확인하면 그 값은 리스트 섹션 안의 그 순간에도 현재 값이다. 바뀌었으면 deopt(아직 아무 효과 없음). 그 이름들은
+  `tp_watch_names` 에 들어가고, watcher id 가 없는 모듈에서는 늘 deopt 한다(속도만 다르다). poll 도 같은 순서로
+  다시 읽는다. 리스트를 쥐기 전에 읽은 뒤 검증 없이 쓰면 새 이상이 생긴다(다른 스레드의 `G = 1; a[0] = 1` 에서
+  옛 G 와 새 a[0] 을 함께 보는 실행): 그래서 epoch 검증이 필요하다.
+- 3: 호출자가 같은 이름·타입의 entry global 을 가진 경우(verify `covers`)는 호출자의 snapshot 값을 넘긴다(다시
+  읽지 않는다). 아닌 경우와 4 는 리스트를 쥔 함수의 호출 트리에서 거절한다(`verify/array-wait`, cgen
+  `_window_wait`). 다섯 벤치마크의 컴파일 함수 집합과 생성 C 는 바뀌지 않는다(바이트 단위로 확인).
+- **열린 결함 5 (오너 결정 필요):** spectral_norm `mul_av`·`mul_atv` 는 리스트 둘을 쥔 채 `eval_a` 를 redo Call 로
+  부른다. 거절하면 이 둘이 해석 실행으로 바뀌어 `test_class_methods.py` 의 EXPECTED 가 달라지므로 하지 않았다.
+  후보: (가) 거절(EXPECTED 변경), (나) redo 대신 호출 전체를 중단하고 wrapper 에서 해석 실행(쓰기가 아직 copy 안에만
+  있을 때만 건전, poll 이 이미 write-back 했으면 효과가 반복되므로 마지막 poll 지점으로 되돌아가는 연속이 필요),
+  (다) poll 처럼 write-back·섹션 해제 후 redo 하고 다시 copy-in(리스트 길이·원소 타입이 바뀌면 그 지점의 연속이 없다,
+  가 (c) 와 같은 한계). redo 는 callee 가 실제로 deopt 할 때(i64 넘침, 호출 중 추적 시작)만 일어난다.
+- 6 은 고치지 않았다(드묾, 고치려면 원소마다 참조를 하나 더 쥐어야 한다).
+- 관련 관찰(이 이슈 밖): entry global 을 입구에서 한 번 읽는 것은 다른 스레드가 그 전역을 바꾸는 경우, 함수가
+  나중에 다른 공유 상태(다른 entry global 의 Call 지점 읽기, 객체 필드)를 읽으면 interleaving 과 안 맞을 수 있다.
+  리스트 섹션 안에서는 위 검증으로 막힌다.
+
 #### 사. 잠그지 않는 원소 읽기가 보는 저장 순서 (#391)
 
 **출처.** 이슈 #391 본문 ("Done when: API.md and SPEC N-8 state exactly which operations see the call as atomic,

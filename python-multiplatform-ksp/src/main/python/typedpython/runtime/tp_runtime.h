@@ -2782,6 +2782,49 @@ static inline int tp_class_global_ok(PyObject *module_dict, PyObject *name, PyOb
     return rc;
 }
 
+/* The entry globals of a function that holds lists (#390), read BEFORE the lists' critical section:
+ * nothing may wait inside that section, and a dict read can (its lock-free path falls back to the
+ * dict's critical section, dictobject.c _Py_dict_lookup_threadsafe `read_failed` and
+ * ensure_shared_on_read; a wait detaches and suspends every section the thread holds). The n names
+ * are looked up in module_dict (not in builtins) inside the dict's critical section, together with
+ * tp_globals_epoch, so the values and *epoch belong to one moment: the watcher moves the epoch under
+ * the same lock before a change is stored (as in tp_class_global_ok). The caller unboxes out[] (strong
+ * references, NULL-filled on a non-zero return), takes the lists' section, copies in, and then
+ * requires the epoch to be unchanged: no watched name changed since the read, so the values are still
+ * current at that point, inside the lists' section. The names must be watched (tp_watch_names) and the
+ * dict must be watched (watch_id1 > 0), else the caller deopts. Returns 0, 1 = deopt (a name is not a
+ * module global: the interpreted function looks in builtins or raises NameError), -1 = error. */
+static inline int tp_eg_snapshot(PyObject *module_dict, PyObject *const *names, Py_ssize_t n,
+                                 PyObject **out, uint64_t *epoch)
+{
+    Py_ssize_t i;
+    int rc = 0;
+    for (i = 0; i < n; i++) {
+        out[i] = NULL;
+    }
+    Py_BEGIN_CRITICAL_SECTION(module_dict);
+    *epoch = __atomic_load_n(&tp_globals_epoch, __ATOMIC_ACQUIRE);
+    /* the dict's own fallback section on the mutex we hold is skipped, not waited for
+       (critical_section.c _PyCriticalSection_BeginSlow: the top-most section holds it) */
+    for (i = 0; i < n && rc == 0; i++) {
+        int found = PyDict_GetItemRef(module_dict, names[i], &out[i]);
+        rc = found < 0 ? -1 : found == 0 ? 1 : 0;
+    }
+    Py_END_CRITICAL_SECTION();
+    if (rc != 0) {
+        for (i = 0; i < n; i++) {
+            Py_CLEAR(out[i]);
+        }
+    }
+    return rc;
+}
+
+/* After the copy-in, inside the lists' section: the epoch read by tp_eg_snapshot is still current. */
+static inline int tp_eg_current(uint64_t epoch)
+{
+    return __atomic_load_n(&tp_globals_epoch, __ATOMIC_ACQUIRE) == epoch;
+}
+
 /* The body of a module's PyDict_WatchCallback: move tp_globals_epoch when `key` is one of the
  * NULL-terminated class `names` (an exact str compared by content), may equal one (any other key
  * type, a str subclass), or is NULL (cleared / cloned / deallocated). Never raises; returns 0. */

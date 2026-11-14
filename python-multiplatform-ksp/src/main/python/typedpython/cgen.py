@@ -38,9 +38,18 @@ every Index is `tp_list_ld_*` (`PyList_GetItemRef` in program order, an element 
 deopts), every Len the current length, and no lock is taken. A function that holds an array polls
 only at loop tops that have an OSR-style exit (#152, `snap_poll`: write back, end the sections,
 poll, take them again, copy in again); a loop without one does not poll, so it delays other threads'
-stop-the-world requests until it returns: a liveness delay, results unaffected. The
-`__typedpython_deopts__` read-add-write of `tp_cg_redo` runs in the module dict's critical section.
-Module state is written only by the exec slot; the class guards are atomic (tp_runtime.h).
+stop-the-world requests until it returns: a liveness delay, results unaffected. Nothing inside the
+lists' critical section may wait for another lock (#390): a wait detaches the thread, which suspends
+the section, and another thread's list write would then be overwritten by the write-back. So the
+entry globals of such a function are read before the section (`tp_eg_snapshot`: in the module dict's
+section, with `tp_globals_epoch`), and the epoch is re-checked after the copy-in (`tp_eg_current`,
+else deopt; the names are in `tp_watch_names`, and an unwatched module deopts); the snapshot poll
+does the same. A covered callee entry global is passed from the caller's snapshot; any other dict
+lookup in the call tree (Global, IsExact, CheckMethod, a callee entry global read at the call) is
+refused (`_window_wait`, `verify/array-wait`). Open: a redo Call still runs the interpreted callee
+inside the section (design/typedpython.md 4.3.6). The `__typedpython_deopts__` read-add-write of
+`tp_cg_redo` runs in the module dict's critical section. Module state is written only by the exec
+slot; the class guards are atomic (tp_runtime.h).
 
 Buffer arrays (issue #149, identity-safe part). A parameter annotated `array.array[float]`,
 `array.array[int]` is an `ArrayParam` with `buffer` "array"; `NDArray[np.float64]` / `NDArray[np.int64]`
@@ -718,8 +727,18 @@ class _ModGen:
                    for f in self.module.functions for e in _all_exprs(f))
 
     def needs_watch(self) -> bool:
-        """A dict watcher on the module dict (and the builtins dict): class guards or cached reads."""
-        return self.watches_globals() or bool(self.gnames)
+        """A dict watcher on the module dict (and the builtins dict): class guards, cached reads, or the
+        entry globals of a function that holds lists (#390, re-checked through the epoch)."""
+        return self.watches_globals() or bool(self.gnames) or bool(self.window_globals())
+
+    def window_globals(self) -> list[str]:
+        """#390: entry-global names of the functions that hold lists in a critical section (read
+        before it, then re-checked by tp_globals_epoch, so the watcher must report their changes)."""
+        out: list[str] = []
+        for f in self.module.functions:
+            if f.entry_globals and _holds_lists(f):
+                out += [g.name for g in f.entry_globals]
+        return list(dict.fromkeys(out))
 
     def int_index(self, v: int) -> int:
         if v not in self.int_consts:
@@ -848,7 +867,8 @@ def generate(module: ir.Module, source_path: Path, display_path: str | None = No
         w(f"static const char *const tp_mnames_{mg.class_index[cd.name]}[] = {{{items}NULL}};")
     names = "".join(f"{c_string(cd.name)}, " for cd in module.classes)
     w(f"static const char *const tp_class_names[] = {{{names}NULL}};")
-    watch = [cd.name for cd in module.classes] + list(mg.gnames) + (["__builtins__"] if mg.gnames else [])
+    watch = ([cd.name for cd in module.classes] + list(mg.gnames) + (["__builtins__"] if mg.gnames else [])
+             + mg.window_globals())
     w("static const char *const tp_watch_names[] = {" + "".join(f"{c_string(x)}, " for x in dict.fromkeys(watch)) + "NULL};")
     w("")
     if mg.n_methods:
@@ -961,6 +981,11 @@ def _check_function(f: ir.Function, functions: dict[str, ir.Function]) -> None:
     elif n_arrays > 2:
         raise CGenError(f"{f.name}: {n_arrays} array parameters; at most two (CPython offers one- and "
                         "two-object critical sections only, and a third lock could suspend the others)")
+    if _holds_lists(f):
+        why = _window_wait(f, functions)
+        if why is not None:
+            raise CGenError(f"{f.name}: {why} can wait inside the lists' critical section, which "
+                            "would suspend it (#390)")
     for p in f.params:
         if isinstance(p, ir.ArrayParam):
             if p.type not in ir.ARRAYS:
@@ -975,6 +1000,43 @@ def _check_function(f: ir.Function, functions: dict[str, ir.Function]) -> None:
             raise CGenError(f"{f.name}: param {p.name} has a class guard but type {p.type}")
         elif p.optional and p.cls is None:
             raise CGenError(f"{f.name}: param {p.name} is optional without a class")
+
+
+def _holds_lists(f: ir.Function) -> bool:
+    """The wrapper copies list parameters in and holds their critical section (not ir.direct_lists)."""
+    return not ir.direct_lists(f) and any(isinstance(p, ir.ArrayParam) and p.buffer is None
+                                          for p in f.params)
+
+
+def _window_wait(f: ir.Function, functions: dict[str, ir.Function], seen=None) -> str | None:
+    """#390: a node in `f`'s call tree that can wait for another object's critical section while the
+    caller holds its lists' section (a wait detaches and suspends that section): an OBJ Global (the
+    cached read's fill and tp_global lock the module dict), IsExact and CheckMethod (their slow paths
+    look the class or method up in a dict), or a Call of a function with an entry global the caller
+    does not hold itself (read at the call; a held one is passed, `ev_Call`). The root's own entry
+    globals are read before the lock (tp_eg_snapshot). A redo Call is not
+    in the list: it is an open defect (design 4.3.6), refusing it would change spectral_norm."""
+    seen = set() if seen is None else seen
+    if f.name in seen:
+        return None
+    seen.add(f.name)
+    for e in _all_exprs(f):
+        if isinstance(e, ir.Global):
+            return f"global {e.name}"
+        if isinstance(e, (ir.IsExact, ir.CheckMethod)):
+            return f"{type(e).__name__} of {e.cls}"
+        if isinstance(e, ir.Call):
+            callee = functions.get(e.function)
+            if callee is None:
+                continue
+            own = {g.name: g.type for g in f.entry_globals}
+            read = [g for g in callee.entry_globals if own.get(g.name) is not g.type]
+            if read:
+                return f"a call of {e.function}, whose entry global {read[0].name} is read there"
+            why = _window_wait(callee, functions, seen)
+            if why is not None:
+                return f"{why} in {e.function}"
+    return None
 
 
 def _is_closed(f: ir.Function, functions: dict[str, ir.Function], seen=None) -> bool:
@@ -1577,9 +1639,16 @@ class _FnGen:
             self.emit(f"if ({v}.big != NULL) tp_s = 1;")
         # The callee's entry globals (ir.Function.entry_globals) are its entry guards: read them
         # here, at the callee's entry. A mismatch is the callee's deopt (tp_s = 1), handled below
-        # exactly as a deopt inside the callee.
+        # exactly as a deopt inside the callee. One this caller also holds as an entry global of the
+        # same type (verify `covers`) is passed from the caller's snapshot: not read again, so it
+        # cannot wait for the module dict inside a lists' critical section (#390) and the callee sees
+        # the value the caller sees.
+        own = {g.name: g.type for g in self.f.entry_globals}
         for g in callee.entry_globals:
-            args.append(self._read_entry_global(g, "tp_s = 1;"))
+            if own.get(g.name) is g.type:
+                args.append(_ident("l", g.name))
+            else:
+                args.append(self._read_entry_global(g, "tp_s = 1;"))
         if callee.returns is not Type.NONE:
             t = self.tmp(_CT[callee.returns])
             args.append(f"&{t}")
@@ -2468,6 +2537,25 @@ class _FnGen:
         self.emit("#endif")
         self.emit("tp_t->snapshot_depth++;")
         self.emit("if (tp_s != 0) { tp_rc = -1; goto tp_exit; }")
+        eg = self.f.entry_globals
+        if lists and eg:
+            # #390: as in the wrapper, the entry globals are re-read before the lists are locked again
+            # (tp_eg_snapshot, nothing waits inside their section), and the epoch is re-checked after
+            # the copy-in; unwatched, the poll leaves for the interpreter
+            n_g = len(eg)
+            names = ", ".join(f"tp_st->names[{self.mg.name_index(g.name)}]" for g in eg)
+            self.emit("uint64_t tp_pe = 0;")
+            self.emit("if (tp_st->watch_id1 <= 0) tp_och = 1;")
+            self.emit(f"else {{ PyObject *const tp_gn[{n_g}] = {{{names}}};")
+            self.emit(f"    PyObject *tp_go[{n_g}];")
+            self.emit(f"    tp_s = tp_eg_snapshot(tp_dict, tp_gn, {n_g}, tp_go, &tp_pe);")
+            self.emit("    if (tp_s > 0) tp_och = 1;")
+            for j, g in enumerate(eg):
+                lv = _ident("l", g.name)
+                self.emit(f"    if (tp_s == 0) {{ {_CT[g.type]} tp_gv = 0; tp_s = {_UNBOX[g.type]}(tp_go[{j}], &tp_gv);")
+                self.emit(f"        if (tp_s > 0 || (tp_s == 0 && memcmp(&tp_gv, &{lv}, sizeof tp_gv) != 0)) {{ tp_och = 1; tp_s = 0; }} }}")
+            self.emit(f"    for (int tp_gi = 0; tp_gi < {n_g}; tp_gi++) Py_XDECREF(tp_go[tp_gi]);")
+            self.emit("    if (tp_s < 0) { tp_rc = -1; goto tp_exit; } }")
         if lists:
             self.emit("tp_cs_begin(tp_my->lock, tp_my->lists[0], tp_my->lists[1]);")
         for j, p in enumerate(lists):
@@ -2475,7 +2563,9 @@ class _FnGen:
             self.emit(f"tp_s = {_ARRAY_PFX[p.type]}_enter(tp_my->lists[{j}], {ptr});")
             self.emit("if (tp_s < 0) { tp_cs_end(tp_my->lock); tp_rc = -1; goto tp_exit; }")
             self.emit(f"if (tp_s != 0 || {ptr}->len != tp_ol{j}) tp_och = 1;")
-        for g in self.f.entry_globals:
+        if lists and eg:
+            self.emit("if (!tp_och && !tp_eg_current(tp_pe)) tp_och = 1;   /* #390 */")
+        for g in (eg if not lists else ()):
             k = self.mg.name_index(g.name)
             lv = _ident("l", g.name)
             self.emit(f"{{ PyObject *tp_go = tp_global(tp_dict, tp_st->names[{k}]);")
@@ -3159,6 +3249,32 @@ class _FnGen:
                      + ") goto tp_deopt;")
             for i, _ in direct:
                 L.append(f"    tp_a{i}.list = tp_args[{i}];   /* borrowed; read by tp_list_ld_* */")
+        gnames = []
+        if f.entry_globals:
+            L.insert(3, "    PyObject *tp_dict = PyModule_GetDict(tp_module); /* borrowed */")
+            if not classes:
+                L.insert(3, "    tp_state *tp_st = (tp_state *)PyModule_GetState(tp_module);")
+        if f.entry_globals and arrays:
+            # #390: nothing inside the lists' critical section may wait (a wait detaches and suspends
+            # the section), and a dict read can. So the entry globals are read here, before the lists
+            # are locked, in the module dict's section with the epoch (tp_eg_snapshot); after the
+            # copy-in the epoch must be unchanged (tp_eg_current), which makes the values current
+            # inside the lists' section. Unwatched (no dict-watcher id): nothing to re-check, deopt.
+            n_g = len(f.entry_globals)
+            L.append("    uint64_t tp_ge = 0;")
+            for j, g in enumerate(f.entry_globals):
+                L.append(f"    {_CT[g.type]} tp_g{j} = 0;")
+                gnames.append(f"tp_g{j}")
+            L.append("    if (tp_st->watch_id1 <= 0) goto tp_deopt;")
+            names = ", ".join(f"tp_st->names[{self.mg.name_index(g.name)}]" for g in f.entry_globals)
+            L.append(f"    {{ PyObject *const tp_gn[{n_g}] = {{{names}}};")
+            L.append(f"      PyObject *tp_go[{n_g}];")
+            L.append(f"      tp_s = tp_eg_snapshot(tp_dict, tp_gn, {n_g}, tp_go, &tp_ge);")
+            for j, g in enumerate(f.entry_globals):
+                L.append(f"      if (tp_s == 0) tp_s = {_UNBOX[g.type]}(tp_go[{j}], &tp_g{j});")
+            L.append(f"      for (int tp_gi = 0; tp_gi < {n_g}; tp_gi++) Py_XDECREF(tp_go[tp_gi]); }}")
+            L.append("    if (tp_s < 0) goto tp_error;")
+            L.append("    if (tp_s != 0) goto tp_deopt;")
         # aliasing guard, then copy-in
         if len(arrays) > 1:
             objs = ", ".join(f"tp_args[{i}]" for i, _ in arrays)
@@ -3176,12 +3292,9 @@ class _FnGen:
             L.append(f"    tp_s = {_ARRAY_PFX[p.type]}_enter(tp_args[{i}], &tp_a{i});")
             L.append("    if (tp_s < 0) goto tp_error;")
             L.append("    if (tp_s != 0) goto tp_deopt;")
-        gnames = []
-        if f.entry_globals:
-            L.insert(3, "    PyObject *tp_dict = PyModule_GetDict(tp_module); /* borrowed */")
-            if not classes:
-                L.insert(3, "    tp_state *tp_st = (tp_state *)PyModule_GetState(tp_module);")
-        for j, g in enumerate(f.entry_globals):
+        if f.entry_globals and arrays:
+            L.append("    if (!tp_eg_current(tp_ge)) goto tp_deopt;   /* #390: a watched global changed */")
+        for j, g in enumerate(f.entry_globals if not arrays else ()):
             # entry read of a module global: exact type or deopt (still before any effect)
             k = self.mg.name_index(g.name)
             L.append(f"    {_CT[g.type]} tp_g{j} = 0;")

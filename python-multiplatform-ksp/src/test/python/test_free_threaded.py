@@ -229,6 +229,36 @@ def three_k(a: list[int], b: list[int], c: list[int]) -> int:
 @compiled
 def usek(x: int) -> int:
     return x + K
+
+
+_hold = None
+G1: int = 5
+
+
+@compiled
+def win1(a: list[int]) -> None:
+    a[0] = G1
+    a[2] = a[1]
+
+
+@compiled
+def win2(a: list[int], b: list[int]) -> None:
+    a[0] = G1
+    b[0] = a[1]
+
+
+SENT = None
+
+
+@compiled
+def glob_win(a: list[int], o: object) -> bool:
+    a[0] = 1
+    return o is SENT
+
+
+@compiled
+def callee_eg_win(a: list[int]) -> int:
+    return usek(a[0])
 '''
 
 LOADER = COMPILED_SHIM + """\
@@ -271,7 +301,8 @@ def built(tmp_path_factory):
     assert result.extension is not None, result.skipped
     compiled = {f.name for f in result.module.functions}
     wanted = {"geta", "seta", "mk", "total", "fill", "edge", "fill_int", "fill_down_int", "edge_int", "rotate", "zero2",
-              "pair_edge", "usek", "fresh", "vpick", "three", "bump1", "bump2", "seven", "order3", "sum3"}
+              "pair_edge", "usek", "fresh", "vpick", "three", "bump1", "bump2", "seven", "order3", "sum3",
+              "win1", "win2"}
     assert wanted <= compiled, {n: result.skipped.get(n) for n in wanted - compiled}
     fns = {f.name: f for f in result.module.functions}
     assert fns["vpick"].virtual == ("c",) and fns["fresh"].virtual == ()   # #143: one virtual, one real
@@ -989,6 +1020,135 @@ def test_entry_global_rebinding_in_another_thread(extension):
         print(json.dumps({"bad": bad[:3], "errs": errs_r}))
     """)
     assert r == {"bad": [], "errs": []}
+
+
+# --- #390: nothing in the lists' window waits for another object's lock ----------------------------
+# A function with one or two list parameters holds their critical section from the copy-in to the
+# write-back. A wait for any other lock inside that window detaches the thread (PyMutex_Lock,
+# Python/lock.c), and detaching releases every critical section the thread holds
+# (Python/pystate.c, _PyCriticalSection_SuspendAll in Python/critical_section.c): another thread can
+# then write the list, and the write-back overwrites that write with the value copied in before it.
+#
+# win1 stores a[0] and then reads a[1] into a[2] (win2: into b[0]); the writer stores a[1] and then
+# a[0]. If the final a[0] is the function's (its store came after the writer's a[0], so after the
+# writer's a[1]), its later read of a[1] must see 99. a[0] == G1 with a[2] (b[0]) == 0 is a lost
+# write: no interleaving of the interpreted function gives it.
+#
+# The wait is forced, not timed: a thread holds the module dict's critical section (dict setitem
+# hashes the key inside it, dictobject.c _PyDict_SetItem_Take2 / setitem_take2_lock_held; the key's
+# __hash__ spins there, attached, then raises so nothing is inserted). G1 is a fresh int made by the
+# main thread, so its shared refcount is 0: another thread's lock-free dict read of it cannot take a
+# reference and falls back to the dict's critical section (dictobject.c _Py_dict_lookup_threadsafe,
+# `read_failed`), which is held.
+#
+# Red before the fix (develop 9376f96a, read from the generated C, not run here): the wrapper took the
+# list's section, copied the list in, then read G1 with tp_global; that read waited for the held dict,
+# the list's section was suspended, the writer's two stores went through, and the write-back left
+# a == [G1, 99, 0] (win2: b == [0]). After the fix the wrapper reads G1 in the module dict's section
+# BEFORE it takes the lists' section, so it waits holding nothing and copies in the writer's values.
+WINDOW_BODY = """
+    import gc
+    gc.disable()                       # a stop-the-world collection would make the holder let go
+    st = [0, 0]
+    class Hold:
+        def __hash__(self):
+            st[0] = 1
+            while not st[1]:
+                pass
+            raise RuntimeError("released")
+    def hold():
+        try:
+            vars(m)[Hold()] = 0
+        except Exception:
+            pass
+    out = []
+    for k in range(ROUNDS):
+        for two in (False, True):
+            a = [0, 0, 0]
+            b = [0]
+            g = int(str(10 ** 12 + k))     # made here: shared refcount 0
+            m.G1 = g
+            st[0] = st[1] = 0
+            h = threading.Thread(target=hold)
+            h.start()
+            while not st[0]:
+                time.sleep(0.001)
+            done = []
+            def call():
+                if two:
+                    m.win2(a, b)
+                else:
+                    m.win1(a)
+                done.append(1)
+            w = threading.Thread(target=call)
+            w.start()
+            time.sleep(0.2)
+            blocked = not done              # the call waits for the module dict
+            wrote = []
+            def writer():
+                a[1] = 99
+                a[0] = 99
+                wrote.append(1)
+            x = threading.Thread(target=writer)
+            x.start()
+            x.join(5)
+            in_time = bool(wrote)           # the writer was not held up by the call
+            st[1] = 1
+            h.join()
+            w.join()
+            x.join()
+            second = b[0] if two else a[2]
+            out.append({"two": two, "blocked": blocked, "in_time": in_time, "a0_is_g": a[0] == g,
+                        "second": second})
+    print(json.dumps({"rounds": out}))
+"""
+
+
+def test_list_window_does_not_wait_for_the_module_dict(extension):
+    r = run_child(extension, WINDOW_BODY.replace("ROUNDS", str(3 * STRESS)), timeout=120)["rounds"]
+    # preconditions: each call met the held dict, and the writer wrote while the call waited
+    assert r and all(x["blocked"] and x["in_time"] for x in r), r
+    lost = [x for x in r if x["a0_is_g"] and x["second"] == 0]
+    assert not lost, r
+
+
+def test_list_window_reads_entry_globals_before_the_lock(built):
+    """The C behind the test above: in a wrapper that holds lists, the entry globals are read (in the
+    module dict's section, with the epoch) before tp_cs_begin, never with tp_global inside the window,
+    and the epoch is compared after the copy-in. A function without lists keeps tp_global (usek)."""
+    result, path, _ = built
+    c_text = cgen.generate(result.module, path)
+    for name in ("win1", "win2"):
+        w = _wrapper(c_text, name)
+        lock = w.index("tp_cs_begin(&tp_lock")
+        assert "tp_global(" not in w, w
+        assert w.index("tp_eg_snapshot(") < lock, w
+        assert w.index("tp_eg_current(", lock) > w.index("_array_enter(", lock), w
+    assert "tp_global(" in _wrapper(c_text, "usek")
+    assert '"G1"' in c_text[c_text.index("tp_watch_names[]"):][:400]     # G1 moves the epoch
+
+
+def test_list_functions_that_could_wait_in_the_window_stay_interpreted(built):
+    """An OBJ global read (the cached read's fill locks the module and builtins dicts) and a call of a
+    function with entry globals (read at the call) would run inside the lists' window."""
+    result, _, _ = built
+    names = {f.name for f in result.module.functions}
+    for name in ("glob_win", "callee_eg_win"):
+        assert name not in names
+        assert "critical section" in result.skipped[name], result.skipped[name]
+
+
+def test_verifier_and_cgen_refuse_a_wait_in_the_window(built):
+    result, path, _ = built
+    lowered = frontend.lower(path)
+    for name in ("glob_win", "callee_eg_win"):
+        keep = [f for f in lowered.functions if f.name in (name, "usek")]
+        mod = dataclasses.replace(lowered, functions=type(lowered.functions)(keep), skipped={})
+        proved, diags = verify.verify(mod)
+        assert name not in {f.name for f in proved.functions}
+        assert any(d.function == name and d.rule == verify.ARRAY_WAIT for d in diags), diags
+        with pytest.raises(cgen.CGenError, match="critical section"):
+            cgen.generate(mod, path)
 
 
 # --- the mutation: without the list's critical section the shared-list test must fail ----------------
