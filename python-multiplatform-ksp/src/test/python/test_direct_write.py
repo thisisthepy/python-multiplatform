@@ -744,6 +744,13 @@ def test_the_mutant_read_without_the_type_check_is_caught(tmp_path_factory):
     # does not take the test run with it (CI run 43580524047).
     script = (
         "import sys\n"
+        # windows: no error dialog on abort or a fault (a dialog would hang the child until the timeout)
+        "if sys.platform == 'win32':\n"
+        "    import ctypes, msvcrt\n"
+        "    ctypes.windll.kernel32.SetErrorMode(0x8003)\n"
+        "    if hasattr(msvcrt, 'CrtSetReportMode'):\n"
+        "        for k in (msvcrt.CRT_WARN, msvcrt.CRT_ERROR, msvcrt.CRT_ASSERT):\n"
+        "            msvcrt.CrtSetReportMode(k, 0)\n"
         "from typedpython import cbuild\n"
         "import test_direct_write as t\n"
         f"m = cbuild.load('dwnocheck', {m.__file__!r})\n"
