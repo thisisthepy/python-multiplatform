@@ -58,6 +58,17 @@ kotlin {
                     exclude(group = "org.jetbrains.compose.runtime")
                     exclude(group = "org.jetbrains.compose.ui")
                 }
+                // The fork's design systems (issue #408): `pythonx.compose.material3` puts
+                // `org.thisisthepy.compose.material3` in front of `androidx.compose.material3`, and
+                // `pythonx.compose.<name>` is each of these (pythonx-compose `pythonx-map.toml`).
+                implementation(libs.designsystem)
+                implementation(libs.designsystem.material3)
+                implementation(libs.designsystem.breeze)
+                implementation(libs.designsystem.cupertino)
+                implementation(libs.designsystem.deepin)
+                implementation(libs.designsystem.fluent)
+                implementation(libs.designsystem.gnome)
+                implementation(libs.designsystem.liquid.glass)
                 implementation(compose.desktop.currentOs)
             }
         }
@@ -123,6 +134,15 @@ pythonBindings {
             //    Python calls inside a composition. Its file facade, not the package, so that the host
             //    composables (`PythonAppView` and friends) stay out of the table.
             "python.multiplatform.compose.RememberSaveableKt",
+            // 8. The fork's design systems (issue #408), one package each.
+            "org.thisisthepy.compose.designsystem",
+            "org.thisisthepy.compose.material3",
+            "org.thisisthepy.compose.breeze",
+            "org.thisisthepy.compose.cupertino",
+            "org.thisisthepy.compose.deepin",
+            "org.thisisthepy.compose.fluent",
+            "org.thisisthepy.compose.gnome",
+            "org.thisisthepy.compose.liquidglass",
         ),
     )
     // Stubs on: `generatePythonStubs` over the real Compose jars is what `.github/scripts/stubs/check-stubs.sh` (the mypy
