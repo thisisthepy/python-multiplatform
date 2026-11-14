@@ -194,6 +194,16 @@ to implement", say what you counted against.
   branch. The only local exceptions are device tests and measurements the coordinating session
   runs itself, one at a time, and says why. Several sessions share one machine, and agent builds
   once filled the disk and slowed every session.
+- **CI runs only when started by hand, one run at a time.** Owner, 2026-11-14: "여러 ci를
+  쌓아두는거도 말이 안되잖아. 제일 최신꺼만 도는게 맞지. 애초에 여러 ci를 한번에 돌리는거도 허용할
+  생각이 난 없어." Development test workflows have no `push`, `pull_request` or `schedule` trigger.
+  The coordinating session starts the repository's one development workflow with
+  `gh workflow run <file> --ref <branch>` on the latest commit; agents and teammates never start,
+  re-run or queue CI themselves, they ask the coordinator. One run checks as much as it can: every
+  suite in one dispatch, and several pull requests merged onto one branch rather than one run each.
+  A run in progress finishes and a newer dispatch replaces the waiting one (one `dev-ci`
+  concurrency group per repository). Release workflows (tags, published releases, release-sync,
+  pages) keep their triggers.
 
 ---
 

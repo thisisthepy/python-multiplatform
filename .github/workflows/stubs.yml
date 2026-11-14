@@ -4,17 +4,16 @@ name: Kotlin-name stubs
 # but cannot run this repository's Gradle build. This job runs the stub task over the Compose version the
 # build resolves (`compose-libraries` in gradle/libs.versions.toml) and publishes the result.
 #
-#   - every push to develop and every pull request: the stubs are generated, type-checked against
+#   - every ci.yml run: the stubs are generated, type-checked against
 #     .github/scripts/stubs/consumer.py with mypy (issue #31), and uploaded as the workflow artifact `kotlin-stubs`;
 #   - every `v*` tag: the same stubs are also attached to the tag's GitHub release as `kotlin-stubs.zip`.
 
 on:
-  # Checked on develop after merging, not on every pull request (user decision,
-  # 2026-10-17). A red develop is fixed forward by its own pull request.
+  # Development runs come only through ci.yml, which is started by hand (owner, 2026-11-14:
+  # "개발 테스트 ci는 명시적으로 실행하기"). A release tag still attaches the stubs.
   push:
-    branches: [ "develop" ]
     tags: [ "v*" ]
-  workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
