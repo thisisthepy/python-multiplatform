@@ -23,10 +23,11 @@ kotlin {
         val downloadDir = project(":python-multiplatform").layout.buildDirectory.dir("python-standalone").get().asFile
         val pyVersion = project.findProperty("pythonVersion")?.toString() ?: project.rootProject.version.toString()
         val libVersion = pyVersion.split('.').subList(0, 2).joinToString(".")
-        // Version-keyed, matching python-multiplatform's `extractedDir`.
-        val targetExtractDir = "$downloadDir/extracted/$pyVersion/android-aarch64/prefix"
+        // Version-keyed, matching python-multiplatform's `extractedDir`; the free-threaded 3.15t
+        // tree (`android-aarch64-freethreaded`, `libpython3.15t.so`), the only Android build (#328).
+        val targetExtractDir = "$downloadDir/extracted/$pyVersion/android-aarch64-freethreaded/prefix"
         binaries.getTest(org.jetbrains.kotlin.gradle.plugin.mpp.NativeBuildType.DEBUG).linkerOpts.addAll(
-            listOf("-L$targetExtractDir/lib/", "-lpython$libVersion", "-Wl,--allow-shlib-undefined"),
+            listOf("-L$targetExtractDir/lib/", "-lpython${libVersion}t", "-Wl,--allow-shlib-undefined"),
         )
     }
     // The *second* Native leaf, and it is here for one reason: two of them make the default

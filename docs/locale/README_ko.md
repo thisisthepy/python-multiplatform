@@ -196,7 +196,7 @@ Python → Kotlin 바인딩 코드가 없다. 자세한 내용: [설계 문서](
 | 빌드된 jar 바인딩, Python 에서 Compose | ✅ 데스크톱 · ⏳ Android / iOS / wasm |
 | Kotlin/Native klib 바인딩 | 🟡 스캐너만 |
 | `.pyi` 스텁 생성 | 🟡 부분 |
-| free-threaded CPython 3.15t (#158 이후 데스크톱의 유일한 빌드; Android / iOS 는 #328 까지 GIL) | 🟡 데스크톱 · ⏳ Android / iOS / wasm |
+| free-threaded CPython 3.15t (데스크톱은 #158, Android / iOS 는 #328 이후 유일한 빌드; wasm 은 #175 까지 GIL) | 🟡 데스크톱 · 🟡 Android / iOS (컴파일만 확인, 에뮬레이터·시뮬레이터 실행 전) · ⏳ wasm |
 
 ## 🧱 생태계
 

@@ -9,8 +9,8 @@ import kotlin.test.assertEquals
  *
  * Red before the change: `abiFlags` came from the one `BuildConfig.pythonFreeThreaded` (default
  * false), so it was `""` here, and the cinterop compiled against `include/python3.15` and linked
- * `-lpython3.15`. This source set shares `nativeMain` with iOS and androidNative, which must stay
- * GIL (`IosGilBuildTest`, `AndroidNativeGilBuildTest`), so a single shared flag cannot pass both.
+ * `-lpython3.15`. This source set shares `nativeMain` with iOS and androidNative, which embed 3.15t
+ * as well since #328 (`IosFreeThreadedBuildTest`, `AndroidNativeFreeThreadedBuildTest`).
  */
 class DesktopNativeFreeThreadedBuildTest {
 

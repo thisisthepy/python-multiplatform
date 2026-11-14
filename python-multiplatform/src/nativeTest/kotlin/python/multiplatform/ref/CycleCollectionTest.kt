@@ -191,8 +191,8 @@ class CycleCollectionTest {
 
     /**
      * `Py_REFCNT` of the object at [addr], for whichever object header this build has. On a GIL
-     * build `ob_refcnt` is the first field. On the free-threaded 3.15t, which desktop Kotlin/Native
-     * embeds since #158 (iOS and androidNative from #328), offset 0 is `ob_tid` and the
+     * build `ob_refcnt` is the first field. On the free-threaded 3.15t, which every Kotlin/Native
+     * target here embeds (desktop #158, iOS and androidNative #328), offset 0 is `ob_tid` and the
      * count is `ob_ref_local` (uint32 at +12) plus `ob_ref_shared` (at +16) shifted right by
      * `_Py_REF_SHARED_SHIFT` (2). Same probe as the desktop `CycleCollectionTest.typeRefCount`.
      * A plain, racy load, which is all the callers need.
@@ -341,9 +341,9 @@ class CycleCollectionTest {
      * by reading the type's reference count out of its object header -- `sys.getrefcount` cannot
      * be used because it counts its own argument's temporary.
      *
-     * The header depends on the build. On a GIL build `ob_refcnt` is the first field. Desktop
-     * Kotlin/Native embeds the free-threaded 3.15t since #158 (iOS and androidNative from #328),
-     * where offset 0 is `ob_tid` and the count is `ob_ref_local` (uint32 at +12) plus
+     * The header depends on the build. On a GIL build `ob_refcnt` is the first field. Every
+     * Kotlin/Native target here embeds the free-threaded 3.15t (desktop #158, iOS and androidNative
+     * #328), where offset 0 is `ob_tid` and the count is `ob_ref_local` (uint32 at +12) plus
      * `ob_ref_shared` (at +16) shifted right by 2, and where a heap type's references are deferred
      * until a collection materialises them, so one is taken on either side of the instantiation
      * loop. Same probe and same reasoning as the desktop `CycleCollectionTest`.
