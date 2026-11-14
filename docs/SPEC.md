@@ -507,8 +507,8 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `Dispatchers.Default`, `Dispatchers.IO`, `SharingStarted.Eagerly`, `SharingStarted.WhileSubscribed`,
   `Semaphore.availablePermits`, `Semaphore.tryAcquire`/`release`, `CloseableCoroutineDispatcher.close`,
   `CoroutineScope.ensureActive`, `CoroutineScope.isActive` and others;
-  `GP/artifact/KlibMemberFunctionTest.kt`, `GP/artifact/KlibClassAndObjectBindingTest.kt`, and on the
-  iOS simulator `WalkedKlibArtifactMemberFunctionTest`.
+  `GP/artifact/KlibMemberFunctionTest.kt`, `GP/artifact/KlibClassAndObjectBindingTest.kt`,
+  `GP/artifact/KlibKnmScannerTest.kt`, and on the iOS simulator `WalkedKlibArtifactMemberFunctionTest`.
   Since #234 a **Kotlin object crosses as a handle**: a type whose class is a public, non-generic
   `class`, `interface`, `enum class` or `object` of the walked klib (or of any `.klib` on its resolved
   `classpath`, #191 Phase B) that does not unbox as a primitive value class is an `OBJECT` slot or

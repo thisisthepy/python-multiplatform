@@ -448,7 +448,7 @@ internal object KlibKnmScanner {
 
     // ------------------------------------------------------------------ constructors
 
-    private fun constructorCandidatesOf(
+    internal fun constructorCandidatesOf(
         cls: KnmClassRecord,
         ownClasses: Map<String, KnmClassRecord>,
         classes: Map<String, KnmClassRecord>,
@@ -770,7 +770,7 @@ internal object KlibKnmScanner {
         ProtoBuf.Class.Kind.ENUM_CLASS,
     )
 
-    private fun memberPropertyCandidatesOf(
+    internal fun memberPropertyCandidatesOf(
         cls: KnmClassRecord,
         ownClasses: Map<String, KnmClassRecord>,
         classes: Map<String, KnmClassRecord>,
@@ -920,7 +920,7 @@ internal object KlibKnmScanner {
         return listOfNotNull(getterCandidate, setterCandidate)
     }
 
-    private fun memberCandidatesOf(
+    internal fun memberCandidatesOf(
         cls: KnmClassRecord,
         ownClasses: Map<String, KnmClassRecord>,
         classes: Map<String, KnmClassRecord>,

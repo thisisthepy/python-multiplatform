@@ -214,8 +214,19 @@ val walkerFixtureKlib: Configuration by configurations.creating {
     isCanBeResolved = true
 }
 
+/**
+ * A Kotlin 2.1+ `.klib` (`org.thisisthepy.compose.designsystem:designsystem-breeze-macosarm64:1.11.1-ext.4`)
+ * whose `ir/` protobuf tables cannot be deserialized by `LibraryAbiReader` in `kotlin-compiler-embeddable:2.0.20`,
+ * pinning that `KlibKnmScanner` reads `linkdata/` (`.knm`) directly across Kotlin 2.1+ KLIBs.
+ */
+val walkerFixtureComposeKlib: Configuration by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+}
+
 dependencies {
     walkerFixtureKlib("org.jetbrains.kotlinx:kotlinx-coroutines-core-androidnativearm64:1.8.1") { isTransitive = false }
+    walkerFixtureComposeKlib("org.thisisthepy.compose.designsystem:designsystem-breeze-macosarm64:1.11.1-ext.4") { isTransitive = false }
 }
 
 gradlePlugin {
@@ -399,6 +410,8 @@ tasks.test {
     systemProperty("python.multiplatform.walkerFixtureJar", walkerFixtureJar.singleFile.absolutePath)
     inputs.files(walkerFixtureKlib).withPropertyName("walkerFixtureKlib").withPathSensitivity(PathSensitivity.NAME_ONLY)
     systemProperty("python.multiplatform.walkerFixtureKlib", walkerFixtureKlib.singleFile.absolutePath)
+    inputs.files(walkerFixtureComposeKlib).withPropertyName("walkerFixtureComposeKlib").withPathSensitivity(PathSensitivity.NAME_ONLY)
+    systemProperty("python.multiplatform.walkerFixtureComposeKlib", walkerFixtureComposeKlib.singleFile.absolutePath)
 }
 
 apply(from = rootDir.resolve("../gradle/central-publishing.gradle.kts"))
