@@ -2907,6 +2907,7 @@ typedef struct {
     Py_ssize_t count;       /* compiled frames in flight on this thread (this module) */
     PyObject *frame;        /* strong ref: the top Python frame when `pydepth` was measured */
     Py_ssize_t pydepth;     /* Python frames below and including `frame` */
+    Py_ssize_t seg;         /* Python depth of the current segment, -1 until measured (tp_seg_depth) */
 } tp_depth_state;
 
 #ifndef TP_POLL_INTERVAL
@@ -2972,17 +2973,26 @@ typedef struct {
     tp_osr *osr;                    /* the OSR context for the impl about to be entered (#152), or NULL */
 } tp_tls;
 
-static TP_THREAD_LOCAL tp_tls tp_tls_v = {{0, NULL, 0}, TP_POLL_INTERVAL, 0, NULL};
+static TP_THREAD_LOCAL tp_tls tp_tls_v = {{0, NULL, 0, -1}, TP_POLL_INTERVAL, 0, NULL};
 
 static inline tp_tls *tp_tls_get(void)
 {
     return &tp_tls_v;
 }
 
+#ifdef TP_TRACE_DEPTH
+/* Test builds only (-DTP_TRACE_DEPTH): how many times tp_python_depth read the top frame. */
+static Py_ssize_t tp_trace_frame_reads_count = 0;
+#define TP_TRACE_FRAME_READ() (tp_trace_frame_reads_count++)
+#else
+#define TP_TRACE_FRAME_READ() ((void)0)
+#endif
+
 /* Python frame depth of the running thread: public API only. The walk is O(depth), so it is
  * cached by the identity of the top frame (kept alive while compiled frames are in flight). */
 static inline Py_ssize_t tp_python_depth(PyThreadState *ts, tp_tls *t)
 {
+    TP_TRACE_FRAME_READ();
     PyFrameObject *top = PyThreadState_GetFrame(ts);    /* new ref or NULL */
     if (top == NULL) {
         return 0;
@@ -3007,9 +3017,35 @@ static inline Py_ssize_t tp_python_depth(PyThreadState *ts, tp_tls *t)
     return depth;
 }
 
+/* Segments (#125, design 4.3.3b, agent proposal, not confirmed). A segment is one impl call made
+ * by its wrapper, up to the return of any wrapper of this module called inside it. Within a
+ * segment the Python frames below the compiled frames do not change: whatever Python code runs in
+ * between (a callback, a __del__, a signal handler, a redo) pushes frames and pops every one of them
+ * before it returns to C, and the frames below cannot return while C above them runs. So the first
+ * depth check of a segment measures (tp_python_depth: one PyThreadState_GetFrame, and the walk when
+ * the top frame changed) and every later check reuses `seg`: exactly the value tp_python_depth would
+ * return there, with the frame cache in exactly the state it would leave. The wrapper resets `seg`
+ * right before its impl call (a nested wrapper must not take the outer segment's depth) and right
+ * after it (the outer segment then measures again at its next check, where it measured before
+ * segments existed: the cached frame, and so the lifetime of a returned callee's frame object, is
+ * unchanged). Not moved, per frame as before: Py_GetRecursionLimit (a __del__ or a callback can call
+ * sys.setrecursionlimit between two frames) and Py_EnterRecursiveCall (the C-stack guard compares
+ * this frame's stack address). Thread-local like `count`; both assume calls nest in LIFO order on a
+ * thread's C stack. */
+static inline Py_ssize_t tp_seg_depth(PyThreadState *ts, tp_tls *t)
+{
+    if (t->depth.seg < 0) {
+        t->depth.seg = tp_python_depth(ts, t);
+    }
+    return t->depth.seg;
+}
+
+static inline void tp_depth_seg_begin(tp_tls *t) { t->depth.seg = -1; }
+static inline void tp_depth_seg_end(tp_tls *t) { t->depth.seg = -1; }
+
 static inline int tp_enter_call(PyThreadState *ts, tp_tls *t)
 {
-    if (tp_python_depth(ts, t) + t->depth.count + 1 > Py_GetRecursionLimit()) {
+    if (tp_seg_depth(ts, t) + t->depth.count + 1 > Py_GetRecursionLimit()) {
         PyErr_SetString(PyExc_RecursionError, "maximum recursion depth exceeded");
         return -1;
     }
@@ -3048,7 +3084,7 @@ static inline void tp_leave_call(tp_tls *t)
  * compiled calls started from it see the true depth. */
 static inline int tp_depth_room(PyThreadState *ts, tp_tls *t, Py_ssize_t k)
 {
-    return tp_python_depth(ts, t) + t->depth.count + k <= Py_GetRecursionLimit();
+    return tp_seg_depth(ts, t) + t->depth.count + k <= Py_GetRecursionLimit();
 }
 
 /* After a fast tree: tp_python_depth may have cached the top frame (a strong reference) and, with
@@ -3085,6 +3121,16 @@ static PyObject *tp_trace_fast_hits(PyObject *tp_module, PyObject *tp_unused)
 }
 #else
 static inline void tp_trace_fast_hit(void) {}
+#endif
+
+#ifdef TP_TRACE_DEPTH
+/* Test builds only: `__tp_trace_frame_reads__()`, installed by the exec slot. */
+static PyObject *tp_trace_frame_reads(PyObject *tp_module, PyObject *tp_unused)
+{
+    (void)tp_module; (void)tp_unused;
+    return PyLong_FromSsize_t(tp_trace_frame_reads_count);
+}
+static PyMethodDef tp_trace_frame_reads_def = {"__tp_trace_frame_reads__", tp_trace_frame_reads, METH_NOARGS, NULL};
 #endif
 
 /* ------------------------------------------------------------------------------------------
