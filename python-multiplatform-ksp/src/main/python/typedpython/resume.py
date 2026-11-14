@@ -28,6 +28,30 @@ Contract (the C side builds the call from `ir.Resume.params`):
   (defined by `resume_sources`); the continuation first `del`s it, so a later read raises
   UnboundLocalError exactly as CPython would.
 * Returns what the rest of the function returns (falling off the end gives None) or raises.
+
+Statement continuations (#390 item 5, SPEC N-8 "statement exit"; agent proposal, not confirmed). A
+function with an effect that holds list copies (`needs_stmt_exits`) must not run interpreted code
+while the copies are live, so a C to C Call whose callee reports a deopt leaves for the interpreter
+at the start of the statement holding it. For each such statement S (`exit_stmts`: the source
+statements whose IR holds a Call, numbered as `statements` numbers them) this module generates a
+continuation `__tp_resume_<function>_s<k>` (`ir.Resume.stmt` = k, `site` -1) that re-executes S from
+its start, then the statements after S in its block, then for each enclosing loop (innermost first)
+the rest of that loop's current iteration and its remaining iterations, then the statements after
+the outermost loop: the loop construction above with S in place of the site loop. Parameters follow
+the contract above, with S's enclosing loops only: S itself has no hidden state (a `for` statement
+re-evaluates its `range` bounds and its variable is an ordinary local; a `while` re-evaluates its
+test, which makes the continuation of a `while` statement the same as its loop continuation). The
+statement must be reached through plain `if` / `for` / `while` statements (no loop `else`, not inside
+try / with / match), as a loop site.
+
+Direct writers (#255 (d2), `ir.direct_writer`; agent proposal, not confirmed): a function with an
+effect and three or more lists holds no snapshot (it polls as a function without lists) but gets
+continuations too (`has_exits`): its element reads, Unboxes and Calls (`exit_nodes`) leave through
+the statement exit of their statement, so `exit_stmts` lists every statement holding one.
+
+`osr_problem`, `mappable`, `exit_nodes` and `exit_problem` are the one definition of "this function
+has OSR-style exits", "this node leaves" and "this statement has a statement exit" that `cgen` and
+`verify` both use.
 """
 from __future__ import annotations
 
@@ -62,12 +86,189 @@ def has_snapshot(f: ir.Function) -> bool:
     return bool(f.entry_globals) or any(isinstance(p, ir.ArrayParam) for p in f.params)
 
 
+def has_exits(f: ir.Function) -> bool:
+    """`f` gets continuations: it holds a snapshot (`has_snapshot`), or it has an effect and reads and
+    stores three or more lists element by element (`ir.direct_writer`, #255 (d2)), which holds no
+    snapshot and polls as a function without lists, but leaves through statement exits."""
+    return has_snapshot(f) or ir.direct_writer(f)
+
+
 def resumes_for(fn: ast.FunctionDef, f: ir.Function) -> tuple[ir.Resume, ...]:
-    """The resumes of `f`, lowered from `fn`; () when `f` holds no snapshot."""
-    if not has_snapshot(f):
+    """The resumes of `f`, lowered from `fn`; () when `f` has no exits (`has_exits`). Loop
+    continuations first; then, when `f` needs statement exits and its statement positions agree with
+    `fn` (`_attribution_ok`), one statement continuation per statement in `exit_stmts(f)`."""
+    if not has_exits(f):
         return ()
     kinds = [_kind(s) for s in ir_loops(f.body)]
-    return build(fn, kinds, f.name)
+    stmts: tuple[int, ...] = ()
+    if needs_stmt_exits(f) and _attribution_ok(fn, f):
+        stmts = tuple(sorted(k for k in exit_stmts(f) if isinstance(k, int)))
+    return build(fn, kinds, f.name, stmts)
+
+
+# --- statement exits (#390 item 5): the predicates cgen and verify share ----------------------------
+
+_HIDDEN = ("__tp_cur_", "__tp_stop_", "__tp_step_")
+
+
+def holds_lists(f: ir.Function) -> bool:
+    """The wrapper copies list parameters in and holds their critical section (cgen `_holds_lists`)."""
+    return not ir.direct_lists(f) and any(isinstance(p, ir.ArrayParam) and p.buffer is None
+                                          for p in f.params)
+
+
+def needs_stmt_exits(f: ir.Function) -> bool:
+    """Every exit node of `f` (`exit_nodes`) leaves through a statement exit: `f` has an effect (a
+    pure function propagates the deopt to its wrapper, which redoes the call after the write-back)
+    and holds list copies, or it is a direct writer (#255 (d2))."""
+    return f.pure is not True and (holds_lists(f) or ir.direct_writer(f))
+
+
+def exit_nodes(f: ir.Function, s: ir.Stmt) -> list:
+    """The nodes IR statement `s` evaluates itself (`own_exprs`) that can leave through its statement
+    exit, in a function that needs statement exits: every Call (the callee's deopt, #390 item 5); in a
+    direct writer (#255 (d2)) also every Index of a list parameter (an element of another type) and
+    every Unbox (a global missing or of another type). The per-statement rule (verify
+    `_stmt_exit_problem`, cgen `_stmt_exit`): all of them come before the statement's first effect."""
+    writer = ir.direct_writer(f)
+    lists = {p.name for p in f.params if isinstance(p, ir.ArrayParam) and p.buffer is None}
+    return [e for e in own_exprs(s)
+            if isinstance(e, ir.Call)
+            or (writer and (isinstance(e, ir.Unbox) or (isinstance(e, ir.Index) and e.array in lists)))]
+
+
+def own_exprs(s: ir.Stmt):
+    """The expressions an IR statement evaluates itself (not those of the statements in its body),
+    every node of each, in field order."""
+    stack = []
+    for fl in s.__dataclass_fields__.values():
+        v = getattr(s, fl.name)
+        for x in (v if isinstance(v, tuple) else (v,)):
+            if isinstance(x, ir.Expr):
+                stack.append(x)
+    out = []
+    while stack:
+        e = stack.pop(0)
+        out.append(e)
+        for fl in e.__dataclass_fields__.values():
+            v = getattr(e, fl.name)
+            for x in (v if isinstance(v, tuple) else (v,)):
+                if isinstance(x, ir.Expr):
+                    stack.append(x)
+    return out
+
+
+def ir_stmts(stmts: Iterable[ir.Stmt]):
+    """Every IR statement in pre-order (a statement before the statements in its body)."""
+    for s in stmts:
+        yield s
+        for fl in s.__dataclass_fields__.values():
+            v = getattr(s, fl.name)
+            if isinstance(v, tuple) and v and all(isinstance(x, ir.Stmt) for x in v):
+                yield from ir_stmts(v)
+
+
+def exit_stmts(f: ir.Function) -> set:
+    """The `stmt` of every IR statement that evaluates an exit node itself (`exit_nodes`: a Call; in
+    a direct writer also an element read or an Unbox), None included when one has no source
+    position."""
+    return {s.stmt for s in ir_stmts(f.body) if exit_nodes(f, s)}
+
+
+def mappable(f: ir.Function, name: str) -> bool:
+    """A continuation parameter the C side can pass (cgen `_osr_value`): the hidden loop state, an
+    array parameter (its list or buffer object), a local f64 / i64 array (a new list), or a scalar,
+    object or native-int local or parameter that is not an entry global."""
+    if name.startswith(_HIDDEN):
+        return True
+    if any(isinstance(p, ir.ArrayParam) and p.name == name for p in f.params):
+        return True
+    params = {p.name: p.type for p in f.params if not isinstance(p, ir.ArrayParam)}
+    t = params.get(name, f.locals.get(name))
+    if name not in params and t in (ir.Type.F64_ARRAY, ir.Type.I64_ARRAY):
+        return True
+    return t in (ir.Type.I64, ir.Type.F64, ir.Type.BOOL, ir.Type.OBJ, ir.Type.INT) \
+        and name not in {g.name for g in f.entry_globals}
+
+
+def osr_problem(f: ir.Function) -> str | None:
+    """Why `f` has no OSR-style exits (cgen `_osr_plan`), or None. Every loop needs its continuation
+    with every parameter mappable; virtual objects, regions, a parallel ForRange or a ForObj loop
+    rule exits out."""
+    if not has_exits(f):
+        return "it holds no snapshot"
+    if not f.resumes:
+        return "it has no continuation"
+    if f.virtual:
+        return "it has virtual objects"
+    if getattr(f, "regions", ()):
+        return "it builds objects in a region"
+    loops = list(ir_loops(f.body))
+    by_site = {r.site: r for r in f.resumes if r.stmt is None}
+    if len(loops) != len(by_site) or any(k not in by_site for k in range(len(loops))):
+        return "a loop has no continuation"
+    for k, st in enumerate(loops):
+        if isinstance(st, ir.ForRange) and st.par is not None:
+            return "it has a parallel loop (a parallel region has no exit)"
+        if not isinstance(st, (ir.ForRange, ir.While)):
+            return "it has a loop over an object"
+        for name in by_site[k].params:
+            if not mappable(f, name):
+                return f"the continuation of loop {k} takes {name}, which has no C value"
+    return None
+
+
+def exit_problem(f: ir.Function, k: object) -> str | None:
+    """Why the statement numbered `k` of `f` has no statement exit, or None."""
+    why = osr_problem(f)
+    if why is not None:
+        return f"the function has no OSR-style exit ({why})"
+    if not isinstance(k, int) or isinstance(k, bool):
+        return "the statement has no source position"
+    r = next((r for r in f.resumes if r.stmt == k), None)
+    if r is None:
+        return f"statement {k} has no continuation"
+    for name in r.params:
+        if not mappable(f, name):
+            return f"the continuation of statement {k} takes {name}, which has no C value"
+    return None
+
+
+# IR statement kind -> the source statements it may be lowered from (`_attribution_ok`). An Assign may
+# be the temporary of any statement; a `while` whose test needs temporaries also gives an If and a
+# Break (frontend `stmt`, the While case).
+_LOWERED_FROM = {
+    ir.Assign: (ast.stmt,),
+    ir.StoreIndex: (ast.Assign, ast.AnnAssign, ast.AugAssign),
+    ir.FieldSet: (ast.Assign, ast.AnnAssign, ast.AugAssign),
+    ir.StoreItem: (ast.Assign, ast.AnnAssign, ast.AugAssign),
+    ir.ExprStmt: (ast.Expr,),
+    ir.Return: (ast.Return,),
+    ir.If: (ast.If, ast.While),
+    ir.While: (ast.While,),
+    ir.ForRange: (ast.For,),
+    ir.ForObj: (ast.For,),
+    ir.Break: (ast.Break, ast.While),
+    ir.Continue: (ast.Continue,),
+}
+
+
+def _attribution_ok(fn: ast.FunctionDef, f: ir.Function) -> bool:
+    """The IR's statement positions are consistent with `fn`: each names a statement of `fn` of a
+    kind it can be lowered from, and they never decrease in IR pre-order. Otherwise no statement
+    continuation is generated (and the function, needing them, stays interpreted)."""
+    stmts = statements(fn)
+    last = -1
+    for s in ir_stmts(f.body):
+        k = s.stmt
+        if k is None:
+            continue
+        if not isinstance(k, int) or isinstance(k, bool) or not 0 <= k < len(stmts) or k < last:
+            return False
+        if not isinstance(stmts[k], _LOWERED_FROM.get(type(s), ())):
+            return False
+        last = k
+    return True
 
 
 def ir_loops(stmts: Iterable[ir.Stmt]):
@@ -86,6 +287,16 @@ def _kind(s: ir.Stmt) -> str:
 
 
 # --- the AST side ---------------------------------------------------------------------------------
+
+def statements(fn: ast.FunctionDef) -> list[ast.stmt]:
+    """The function's own statements in pre-order (not those of a nested def or class): index =
+    statement number (`ir.Stmt.stmt`, `ir.Resume.stmt`)."""
+    return list(_own_stmts(fn.body))
+
+
+def stmt_numbers(fn: ast.FunctionDef) -> dict[int, int]:
+    """id(statement) -> its number."""
+    return {id(st): i for i, st in enumerate(statements(fn))}
 
 class _Site:
     def __init__(self, node: ast.stmt, number: int, chain: list, ok: bool) -> None:
@@ -118,6 +329,20 @@ def _collect(stmts: list, chain: list, ok: bool, out: list) -> None:
             isinstance(st, (ast.For, ast.While)) and st.orelse)
         for _, lst in _sub_lists(st):
             _collect(lst, here, sub_ok, out)
+
+
+def _collect_stmts(stmts: list, chain: list, ok: bool, out: dict) -> None:
+    """id(statement) -> (statement, chain, ok) for every statement of this scope (`ok` as `_collect`:
+    reached through plain if / for / while only)."""
+    for i, st in enumerate(stmts):
+        here = [*chain, (stmts, i)]
+        out[id(st)] = (st, here, ok)
+        if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        sub_ok = ok and isinstance(st, (ast.If, ast.For, ast.While)) and not (
+            isinstance(st, (ast.For, ast.While)) and st.orelse)
+        for _, lst in _sub_lists(st):
+            _collect_stmts(lst, here, sub_ok, out)
 
 
 def _names(e: ast.AST, out: set[str]) -> None:
@@ -212,9 +437,11 @@ def _copy_all(stmts) -> list[ast.stmt]:
     return [copy.deepcopy(s) for s in stmts]
 
 
-def build(fn: ast.FunctionDef, kinds: list[str], qname: str) -> tuple[ir.Resume, ...]:
-    """Continuations for every loop of `fn`. `kinds[i]` is "range", "obj" or "while" for loop `i` in
-    pre-order (from the IR). Returns () when the AST's loops do not match `kinds`."""
+def build(fn: ast.FunctionDef, kinds: list[str], qname: str,
+          stmts: Iterable[int] = ()) -> tuple[ir.Resume, ...]:
+    """Continuations for every loop of `fn`, then for every statement numbered in `stmts` that can
+    have one (statement continuations, module docstring). `kinds[i]` is "range", "obj" or "while"
+    for loop `i` in pre-order (from the IR). Returns () when the AST's loops do not match `kinds`."""
     sites: list[_Site] = []
     _collect(fn.body, [], True, sites)
     if len(sites) != len(kinds):
@@ -234,14 +461,30 @@ def build(fn: ast.FunctionDef, kinds: list[str], qname: str) -> tuple[ir.Resume,
         r = _one(fn, qname, s, sites, kinds, binders, globals_)
         if r is not None:
             out.append(r)
+    wanted = sorted(set(stmts))
+    if wanted:
+        numbered = statements(fn)
+        where: dict = {}
+        _collect_stmts(fn.body, [], True, where)
+        for k in wanted:
+            if not 0 <= k < len(numbered):
+                continue
+            node, chain, ok = where[id(numbered[k])]
+            if ok:
+                out.append(_one(fn, qname, _Site(node, k, chain, ok), sites, kinds, binders, globals_,
+                                stmt=True))
     return tuple(out)
 
 
-def _one(fn, qname, site, sites, kinds, binders, globals_):
+def _one(fn, qname, site, sites, kinds, binders, globals_, stmt=False):
+    """The continuation of a loop site, or (`stmt`) of the statement `site.node` numbered
+    `site.number`: then the statement is re-executed from its start and only its enclosing loops
+    have hidden state."""
     n = len(site.chain)
     by_node = {id(s.node): s for s in sites}
-    # loops on the path, outermost first, the site last
-    loops = [by_node[id(lst[i])] for lst, i in site.chain if id(lst[i]) in by_node]
+    # loops on the path, outermost first, the site last (a statement site: its enclosing loops only)
+    path = [lst[i] for lst, i in site.chain]
+    loops = [by_node[id(x)] for x in (path[:-1] if stmt else path) if id(x) in by_node]
     ref = site.node
 
     # --- parameters
@@ -261,6 +504,10 @@ def _one(fn, qname, site, sites, kinds, binders, globals_):
     in_loop_ids: set[int] = set()
     for lp in loops:
         in_loop_ids |= {id(x) for x in _own_stmts([lp.node])}
+    if stmt and isinstance(site.node, ast.While):
+        # a while statement starts again at every test: its body may have run (a `for` statement
+        # starts once, before its body, so its own body cannot have bound anything yet)
+        in_loop_ids |= {id(x) for x in _own_stmts([site.node])}
     order = {id(st): i for i, st in enumerate(_own_stmts(fn.body))}
     site_order = order[id(site.node)]
     args = set(_arg_names(fn))
@@ -288,6 +535,9 @@ def _one(fn, qname, site, sites, kinds, binders, globals_):
         return enclosing(node, rest(k + 1))
 
     def site_construct(node) -> list[ast.stmt]:
+        if stmt:
+            # the statement itself, from its start
+            return [copy.deepcopy(node)] if _reexecute_the_statement() else []
         kind, num = kinds[site.number], site.number
         if kind == "while":
             return [copy.deepcopy(node)]
@@ -346,7 +596,7 @@ def _one(fn, qname, site, sites, kinds, binders, globals_):
         pre.append(_skeleton("global " + ", ".join(sorted(globals_)), fn).body[0])
     for p in locals_:
         pre.extend(_skeleton(f"if {p} is __tp_unbound: del {p}", fn).body)
-    name = f"__tp_resume_{qname.replace('.', '_')}_{site.number}"
+    name = f"__tp_resume_{qname.replace('.', '_')}_{'s' if stmt else ''}{site.number}"
     func = _skeleton(f"def {name}({', '.join(params)}): pass", fn).body[0]
     func.body = [*pre, *stmts]
     ast.fix_missing_locations(func)
@@ -354,7 +604,16 @@ def _one(fn, qname, site, sites, kinds, binders, globals_):
     short = qname.split(".")[-1]
     source = (f"{text}\n{name}.__code__ = {name}.__code__.replace("
               f"co_name={short!r}, co_qualname={qname!r})\n")
+    if stmt:
+        return ir.Resume(-1, name, params, source, _linemap(func, text, fn), stmt=site.number)
     return ir.Resume(site.number, name, params, source, _linemap(func, text, fn))
+
+
+def _reexecute_the_statement() -> bool:
+    """The single mutation point of the statement continuation (#255 (d2) tests): False builds
+    continuations that start AFTER the statement they leave, which the tests must catch. Always True
+    in a build."""
+    return True
 
 
 def _entry(st: ast.stmt) -> tuple[int, int, int, int]:

@@ -18,6 +18,13 @@ a three-list function was compiled.
 three and seven list parameters (`three`, `seven`, `order3`, `sum3`) were not compiled, so `built` failed
 and every test of this file using it errored; the front-end, verifier and cgen tests of the 3-list
 section failed (verify.ARRAY_DIRECT did not exist).
+
+#391 (stores seen by element reads that take no lock, design/typedpython.md 4.3.6 사): expected red
+before the change, `test_list_stores_reach_lock_free_readers_in_program_order` (bad > 0: the write-back
+stored the dirty slots in index order at the end, so a reader saw the new xs[0] of `fill_down_int` with
+the old xs[-1]; a race, so it can pass by chance) and
+`test_list_parameter_stores_are_written_through` (no `tp_i64_array_st` in the generated C). Not run by
+the agent that wrote them (agents do not run test suites, AGENTS.md 10): CI records the result.
 """
 from __future__ import annotations
 
@@ -122,6 +129,12 @@ def fill_int(xs: list[int], v: int) -> None:
 
 
 @compiled
+def fill_down_int(xs: list[int], v: int) -> None:
+    for i in range(len(xs) - 1, -1, -1):
+        xs[i] = v
+
+
+@compiled
 def edge_int(xs: list[int]) -> int:
     return xs[0] - xs[len(xs) - 1]
 
@@ -216,6 +229,36 @@ def three_k(a: list[int], b: list[int], c: list[int]) -> int:
 @compiled
 def usek(x: int) -> int:
     return x + K
+
+
+_hold = None
+G1: int = 5
+
+
+@compiled
+def win1(a: list[int]) -> None:
+    a[0] = G1
+    a[2] = a[1]
+
+
+@compiled
+def win2(a: list[int], b: list[int]) -> None:
+    a[0] = G1
+    b[0] = a[1]
+
+
+SENT = None
+
+
+@compiled
+def glob_win(a: list[int], o: object) -> bool:
+    a[0] = 1
+    return o is SENT
+
+
+@compiled
+def callee_eg_win(a: list[int]) -> int:
+    return usek(a[0])
 '''
 
 LOADER = COMPILED_SHIM + """\
@@ -257,8 +300,9 @@ def built(tmp_path_factory):
     result = pipeline.compile_module(path, d / "out", cost_rule=False)  # object-only setters: the cost policy would skip them (#150)
     assert result.extension is not None, result.skipped
     compiled = {f.name for f in result.module.functions}
-    wanted = {"geta", "seta", "mk", "total", "fill", "edge", "fill_int", "edge_int", "rotate", "zero2",
-              "pair_edge", "usek", "fresh", "vpick", "three", "bump1", "bump2", "seven", "order3", "sum3"}
+    wanted = {"geta", "seta", "mk", "total", "fill", "edge", "fill_int", "fill_down_int", "edge_int", "rotate", "zero2",
+              "pair_edge", "usek", "fresh", "vpick", "three", "bump1", "bump2", "seven", "order3", "sum3",
+              "win1", "win2"}
     assert wanted <= compiled, {n: result.skipped.get(n) for n in wanted - compiled}
     fns = {f.name: f for f in result.module.functions}
     assert fns["vpick"].virtual == ("c",) and fns["fresh"].virtual == ()   # #143: one virtual, one real
@@ -314,9 +358,10 @@ def test_no_runtime_warning_about_the_gil(extension):
 
 # --- three or more list parameters (#255) -----------------------------------------------------------
 # CPython's critical sections lock one or two objects, and the leader decision of 2026-11-13 excludes any
-# other lock (design/typedpython.md 4.3.6). A function with an effect and more than two lists stays
-# interpreted, as since #209. A pure one (ir.direct_lists) reads its lists element by element with
-# PyList_GetItemRef, in program order, without copy-in or lock; an element of another type deopts.
+# other lock (design/typedpython.md 4.3.6). A function with three or more lists (ir.direct_lists) reads
+# them element by element with PyList_GetItemRef, in program order, without copy-in or lock; in a pure
+# one an element of another type deopts. One with an effect (ir.direct_writer, #255 (d2), agent
+# proposal) stores element by element too and leaves through statement exits (test_direct_write.py).
 
 def test_pure_three_and_seven_list_functions_compile(built):
     result, _, _ = built
@@ -324,20 +369,22 @@ def test_pure_three_and_seven_list_functions_compile(built):
         result.skipped
 
 
-def test_three_list_parameters_with_an_effect_stay_interpreted(built):
+def test_three_list_parameters_with_an_effect_compile(built):
+    # #255 (d2): was "stay interpreted" (#209) before the element-by-element stores
     result, _, _ = built
-    assert "bump3" not in {f.name for f in result.module.functions}
-    reason = result.skipped["bump3"]
-    assert "more than two list parameters" in reason, reason
+    assert "bump3" in {f.name for f in result.module.functions}, result.skipped.get("bump3")
 
 
-def test_front_end_gives_a_clear_reason(tmp_path):
+def test_front_end_lowers_three_list_parameters_of_a_function_with_an_effect(tmp_path):
+    # #255 (d2): was "gives a clear reason" (the function stayed interpreted) before
+    from typedpython import ir
     p = tmp_path / "m.py"
     p.write_text("\n\n@compiled\ndef f(a: list[int], b: list[float], c: list[int]) -> None:\n"
                  "    a[0] = 1\n")
     m = frontend.lower(p)
-    assert not m.functions
-    assert "more than two list parameters" in m.skipped["f"], m.skipped["f"]
+    [f] = m.functions
+    assert (f.name, f.pure, f.may_deopt, f.entry_globals) == ("f", False, False, ()), m.skipped
+    assert ir.direct_writer(f)
 
 
 def test_front_end_lowers_three_list_parameters_of_a_pure_function(tmp_path):
@@ -602,6 +649,91 @@ def test_two_shared_lists(extension):
         print(json.dumps({"bad": bad, "errs": errs}))
     """)
     assert r == {"bad": [], "errs": []}
+
+
+# Stores of a compiled function seen by element reads that take no lock (#391, design/typedpython.md
+# 4.3.6 사). `fill_down_int` stores xs[n-1], ..., xs[0] (program order, top index first) with a value
+# that grows from call to call; a reader reads xs[0] and then xs[-1] with the interpreter's a[i], a
+# seq_cst load without the list's lock, of slots the writer stores with release stores. Having seen a
+# call's xs[0] (its last store) the reader must see that call's xs[-1] (an earlier store) or a later
+# one: y >= x, in every interleaving of the interpreted function. A write-back of the dirty slots in
+# index order at the end of the call stores xs[0] first and can show x > y. The values are small ints
+# (0..199), immortal objects, so the reader's lock-free increment never fails; a fresh float or a big
+# int created by the writer would make it fall back to the list's lock (shared refcount 0), which waits
+# for the call and hides the order. The list stays below TP_POLL_INTERVAL: one call, one section.
+DOWN_BODY = """
+    N = 4000
+    box = [None]
+    stop = False
+    def writer():
+        global stop
+        for r in range(ROUNDS):
+            xs = [0] * N
+            box[0] = xs
+            for v in range(1, 200):
+                m.fill_down_int(xs, v)
+        stop = True
+    bad = []
+    seen = [0]
+    def reader():
+        while True:
+            done = stop
+            xs = box[0]
+            if xs is not None:
+                x = xs[0]
+                y = xs[-1]
+                seen[0] += 1
+                if y < x:
+                    bad.append((x, y))
+            if done:
+                break
+    d0 = m.__typedpython_deopts__
+    errs = run_threads([writer, reader, reader, reader])
+    print(json.dumps({"bad": len(bad), "first": bad[:3], "seen": seen[0], "errs": errs,
+                      "deopts": m.__typedpython_deopts__ - d0}))
+"""
+
+
+def test_list_stores_reach_lock_free_readers_in_program_order(extension):
+    r = run_child(extension, DOWN_BODY.replace("ROUNDS", "(20 * STRESS)"))
+    assert r["bad"] == 0 and r["errs"] == [] and r["seen"] > 0 and r["deopts"] == 0, r   # compiled calls
+
+
+def test_list_parameter_stores_are_written_through(built):
+    """Every store into a list parameter goes through tp_i64_array_st / tp_f64_array_st, which writes
+    it into the list at once on a free-threaded build (TP_LIST_WRITE_THROUGH); no store only sets a
+    dirty bit outside a parallel region's worker."""
+    result, path, _ = built
+    c_text = cgen.generate(result.module, path)
+    for name in ("fill_down_int", "fill", "rotate", "zero2"):
+        head = re.search(rf"^static int tp_impl_{name}\([^\n]*\)\n\{{\n", c_text, re.M)
+        assert head is not None, name
+        impl = c_text[head.end():c_text.index("\n}\n", head.end())]
+        assert "_array_st(l_" in impl and "->dirty[" not in impl, impl
+    h = (cbuild.RUNTIME_DIR / "tp_runtime.h").read_text()
+    assert "#if defined(Py_GIL_DISABLED)\n#define TP_LIST_WRITE_THROUGH 1" in h
+
+
+@pytest.mark.race_mutant
+def test_mutant_without_write_through_is_caught(built, tmp_path):
+    """The mutation of #391: the runtime with TP_LIST_WRITE_THROUGH off (the deferred write-back in
+    index order, as before the change) must be caught by the program-order test."""
+    result, path, _ = built
+    h = (cbuild.RUNTIME_DIR / "tp_runtime.h").read_text()
+    g = h.replace("#if defined(Py_GIL_DISABLED)\n#define TP_LIST_WRITE_THROUGH 1",
+                  "#if 0\n#define TP_LIST_WRITE_THROUGH 1")
+    assert g != h
+    d = tmp_path / "rt"
+    d.mkdir()
+    (d / "tp_runtime.h").write_text(g)
+    so = cbuild.build(cgen.generate(result.module, path), "ftmod", tmp_path / "mut", runtime_dir=d)
+    caught = False
+    for _ in range(3):
+        r = run_child(so, DOWN_BODY.replace("ROUNDS", "40"))
+        if r["bad"]:
+            caught = True
+            break
+    assert caught, "the mutant (deferred write-back in index order) was not caught"
 
 
 # Three shared lists read element by element (#255). The writer stores c[0] and then a[0], each one
@@ -893,6 +1025,135 @@ def test_entry_global_rebinding_in_another_thread(extension):
     assert r == {"bad": [], "errs": []}
 
 
+# --- #390: nothing in the lists' window waits for another object's lock ----------------------------
+# A function with one or two list parameters holds their critical section from the copy-in to the
+# write-back. A wait for any other lock inside that window detaches the thread (PyMutex_Lock,
+# Python/lock.c), and detaching releases every critical section the thread holds
+# (Python/pystate.c, _PyCriticalSection_SuspendAll in Python/critical_section.c): another thread can
+# then write the list, and the write-back overwrites that write with the value copied in before it.
+#
+# win1 stores a[0] and then reads a[1] into a[2] (win2: into b[0]); the writer stores a[1] and then
+# a[0]. If the final a[0] is the function's (its store came after the writer's a[0], so after the
+# writer's a[1]), its later read of a[1] must see 99. a[0] == G1 with a[2] (b[0]) == 0 is a lost
+# write: no interleaving of the interpreted function gives it.
+#
+# The wait is forced, not timed: a thread holds the module dict's critical section (dict setitem
+# hashes the key inside it, dictobject.c _PyDict_SetItem_Take2 / setitem_take2_lock_held; the key's
+# __hash__ spins there, attached, then raises so nothing is inserted). G1 is a fresh int made by the
+# main thread, so its shared refcount is 0: another thread's lock-free dict read of it cannot take a
+# reference and falls back to the dict's critical section (dictobject.c _Py_dict_lookup_threadsafe,
+# `read_failed`), which is held.
+#
+# Red before the fix (develop 9376f96a, read from the generated C, not run here): the wrapper took the
+# list's section, copied the list in, then read G1 with tp_global; that read waited for the held dict,
+# the list's section was suspended, the writer's two stores went through, and the write-back left
+# a == [G1, 99, 0] (win2: b == [0]). After the fix the wrapper reads G1 in the module dict's section
+# BEFORE it takes the lists' section, so it waits holding nothing and copies in the writer's values.
+WINDOW_BODY = """
+    import gc
+    gc.disable()                       # a stop-the-world collection would make the holder let go
+    st = [0, 0]
+    class Hold:
+        def __hash__(self):
+            st[0] = 1
+            while not st[1]:
+                pass
+            raise RuntimeError("released")
+    def hold():
+        try:
+            vars(m)[Hold()] = 0
+        except Exception:
+            pass
+    out = []
+    for k in range(ROUNDS):
+        for two in (False, True):
+            a = [0, 0, 0]
+            b = [0]
+            g = int(str(10 ** 12 + k))     # made here: shared refcount 0
+            m.G1 = g
+            st[0] = st[1] = 0
+            h = threading.Thread(target=hold)
+            h.start()
+            while not st[0]:
+                time.sleep(0.001)
+            done = []
+            def call():
+                if two:
+                    m.win2(a, b)
+                else:
+                    m.win1(a)
+                done.append(1)
+            w = threading.Thread(target=call)
+            w.start()
+            time.sleep(0.2)
+            blocked = not done              # the call waits for the module dict
+            wrote = []
+            def writer():
+                a[1] = 99
+                a[0] = 99
+                wrote.append(1)
+            x = threading.Thread(target=writer)
+            x.start()
+            x.join(5)
+            in_time = bool(wrote)           # the writer was not held up by the call
+            st[1] = 1
+            h.join()
+            w.join()
+            x.join()
+            second = b[0] if two else a[2]
+            out.append({"two": two, "blocked": blocked, "in_time": in_time, "a0_is_g": a[0] == g,
+                        "second": second})
+    print(json.dumps({"rounds": out}))
+"""
+
+
+def test_list_window_does_not_wait_for_the_module_dict(extension):
+    r = run_child(extension, WINDOW_BODY.replace("ROUNDS", str(3 * STRESS)), timeout=120)["rounds"]
+    # preconditions: each call met the held dict, and the writer wrote while the call waited
+    assert r and all(x["blocked"] and x["in_time"] for x in r), r
+    lost = [x for x in r if x["a0_is_g"] and x["second"] == 0]
+    assert not lost, r
+
+
+def test_list_window_reads_entry_globals_before_the_lock(built):
+    """The C behind the test above: in a wrapper that holds lists, the entry globals are read (in the
+    module dict's section, with the epoch) before tp_cs_begin, never with tp_global inside the window,
+    and the epoch is compared after the copy-in. A function without lists keeps tp_global (usek)."""
+    result, path, _ = built
+    c_text = cgen.generate(result.module, path)
+    for name in ("win1", "win2"):
+        w = _wrapper(c_text, name)
+        lock = w.index("tp_cs_begin(&tp_lock")
+        assert "tp_global(" not in w, w
+        assert w.index("tp_eg_snapshot(") < lock, w
+        assert w.index("tp_eg_current(", lock) > w.index("_array_enter(", lock), w
+    assert "tp_global(" in _wrapper(c_text, "usek")
+    assert '"G1"' in c_text[c_text.index("tp_watch_names[]"):][:400]     # G1 moves the epoch
+
+
+def test_list_functions_that_could_wait_in_the_window_stay_interpreted(built):
+    """An OBJ global read (the cached read's fill locks the module and builtins dicts) and a call of a
+    function with entry globals (read at the call) would run inside the lists' window."""
+    result, _, _ = built
+    names = {f.name for f in result.module.functions}
+    for name in ("glob_win", "callee_eg_win"):
+        assert name not in names
+        assert "critical section" in result.skipped[name], result.skipped[name]
+
+
+def test_verifier_and_cgen_refuse_a_wait_in_the_window(built):
+    result, path, _ = built
+    lowered = frontend.lower(path)
+    for name in ("glob_win", "callee_eg_win"):
+        keep = [f for f in lowered.functions if f.name in (name, "usek")]
+        mod = dataclasses.replace(lowered, functions=type(lowered.functions)(keep), skipped={})
+        proved, diags = verify.verify(mod)
+        assert name not in {f.name for f in proved.functions}
+        assert any(d.function == name and d.rule == verify.ARRAY_WAIT for d in diags), diags
+        with pytest.raises(cgen.CGenError, match="critical section"):
+            cgen.generate(mod, path)
+
+
 # --- the mutation: without the list's critical section the shared-list test must fail ----------------
 
 def _mutant(built, tmp: Path, drop: str) -> Path:
@@ -981,9 +1242,13 @@ def _racy_runtime(tmp: Path, *, drop_dict_lock: bool, plain_epoch: bool, hold_wa
     h = (cbuild.RUNTIME_DIR / "tp_runtime.h").read_text()
     g = h
     if drop_dict_lock:
-        g = g.replace("    Py_BEGIN_CRITICAL_SECTION(module_dict);\n", "")
-        g = g.replace("    Py_END_CRITICAL_SECTION();\n    if (rc <= 0) {\n        return rc;",
-                      "    if (rc <= 0) {\n        return rc;")
+        # only tp_class_global_ok's section: tp_eg_snapshot (#390) opens the same dict's section too
+        locked = ("    Py_BEGIN_CRITICAL_SECTION(module_dict);\n"
+                  "    epoch = tp_atomic_load_u64(&tp_globals_epoch);\n"
+                  "    rc = PyDict_GetItemRef(module_dict, name, &v);     /* strong */\n"
+                  "    Py_END_CRITICAL_SECTION();\n")
+        assert g.count(locked) == 1
+        g = g.replace(locked, "".join(line + "\n" for line in locked.split("\n")[1:3]))
     if plain_epoch:
         g = g.replace("tp_atomic_add_u64(&tp_globals_epoch, 1);", "tp_globals_epoch++;")
         g = g.replace("tp_atomic_load_u64(&tp_globals_epoch)", "tp_globals_epoch")

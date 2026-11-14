@@ -268,7 +268,8 @@ class Box(Expr):
 class Unbox(Expr):
     """An OBJ converted to a scalar. The runtime checks the exact type (`tp_unbox_*`) and the i64
     range; anything else → deopt. Because it can deopt, it is legal only in a pure function (the
-    verifier enforces this); impure code converts objects with `ObjToFloat` instead."""
+    verifier enforces this); impure code converts objects with `ObjToFloat` instead. Exception
+    (#255 (d2), `direct_writer`): there a mismatch leaves through the statement exit instead."""
 
     operand: Expr
 
@@ -578,7 +579,17 @@ class Index(Expr):
 
 @dataclass(frozen=True)
 class Stmt:
-    pass
+    """`stmt` (SPEC N-8, #390 item 5): the number of the source statement this IR statement was
+    lowered from, in `resume.statements` order (the function's own AST statements in pre-order), or
+    None (IR built by hand, or a statement no source statement produced). The front end sets it on
+    every statement it emits, the temporaries a statement needs included (`frontend.block`); a
+    `while` whose test needs temporaries gives its synthetic exit test and `break` the while's
+    number. It is only a position: it takes no part in equality, hashing or repr, so passes that
+    compare IR are unaffected, and `dataclasses.replace` keeps it. A function holding list copies
+    uses it to leave through a statement exit (`cgen`, `verify/array-wait`), and so does a function
+    with an effect and three or more lists (`direct_writer`, `verify/array-direct`)."""
+
+    stmt: int | None = field(default=None, kw_only=True, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -806,6 +817,11 @@ class Function:
     # Truth, CompareObj, ObjToFloat, OBJ BinOp, GetItem, Contains, Format, StoreItem, ForObj; Calls
     # only to closed functions), so nothing can
     # rebind the global between entry and use, and reading it once equals reading it at each use.
+    # That holds for this thread only: another thread can rebind it and then write state read later
+    # (#414, SPEC N-8). So a pure function without lists whose call tree reads two or more entry-global
+    # names, or one and any other shared state, runs under the dict-watcher epoch (cgen `_needs_epoch`),
+    # and a function with an effect or list copies has no shared read after entry
+    # (`verify/entry-global-order`).
     entry_globals: tuple[Param, ...] = ()
     # A method of the compiled fixed-layout class `owner` (SPEC N-11, #155): `name` is
     # "<owner>.<method>" and params[0] is `self` as Param(OBJ, cls=owner, optional=False). The
@@ -831,6 +847,8 @@ class Function:
     # SPEC N-8 (#152, option (i)): one entry per loop of a snapshot-holding function (see `resume.py`),
     # in IR pre-order. Empty for a function that holds no snapshot. A loop whose continuation cannot
     # be generated (an enclosing `with`/`try`, say) has no entry: its `site` is missing from the tuple.
+    # After the loop entries, a function with an effect that holds list copies has one statement
+    # entry (`Resume.stmt` set) per source statement holding a Call (#390 item 5, statement exits).
     resumes: tuple["Resume", ...] = ()
 
 
@@ -845,13 +863,20 @@ class Resume:
     `source`: the Python source of the `def`, followed by a line replacing `co_name`/`co_qualname`
     with the interpreted function's. `linemap`: for each line of `source` (index = line - 1) the
     original (lineno, end_lineno, col_offset, end_col_offset); `resume.resume_sources` uses it so
-    the continuation's code object carries the original line numbers."""
+    the continuation's code object carries the original line numbers.
+
+    A statement continuation (#390 item 5, SPEC N-8 "statement exit") has `stmt` set to the number
+    of a source statement (`Stmt.stmt`), `site` -1 and `name` `__tp_resume_<function>_s<stmt>`: it
+    re-executes that statement from its start, then runs the rest of the function, with the same
+    parameter contract except that the statement itself has no hidden state (only its enclosing
+    loops do). `stmt` None: a loop continuation as above."""
 
     site: int
     name: str
     params: tuple[str, ...]
     source: str
     linemap: tuple[tuple[int, int, int, int], ...] = ()
+    stmt: int | None = None
 
 
 @dataclass(frozen=True)
@@ -887,19 +912,30 @@ REGION_SCALAR_KINDS = {Type.I64: "i64", Type.F64: "f64", Type.BOOL: "bool"}
 
 
 def direct_lists(f: object) -> bool:
-    """#255 (design/typedpython.md 4.3.6): a pure function with three or more list parameters reads
-    them element by element, without copy-in or critical section. CPython's critical sections lock
-    one or two objects, and copying three or more lists in at one instant needs them all locked (the
-    leader decision of 2026-11-13 excludes any lock outside that API). A pure function only reads
-    its lists, so each `Index` is one `PyList_GetItemRef` in program order, the interpreter's own
-    atomic read, and an element of the wrong type deopts (legal: nothing has happened yet); `Len` is
-    the current length. No entry global (a snapshot read at entry could disagree with later list
-    reads), no buffer parameter, no CopyArray of a list parameter and no parallel loop: the verifier
-    (`verify/array-direct`) and cgen refuse them. An impure function with more than two list
-    parameters stays interpreted (#209)."""
+    """#255 (design/typedpython.md 4.3.6): a function with three or more list parameters reads them
+    element by element, without copy-in or critical section. CPython's critical sections lock one or
+    two objects, and copying three or more lists in at one instant needs them all locked (the leader
+    decision of 2026-11-13 excludes any lock outside that API). Each `Index` is one
+    `PyList_GetItemRef` in program order, the interpreter's own atomic read; `Len` is the current
+    length. In a pure function (d1) an element of the wrong type deopts (legal: nothing has happened
+    yet). A function with an effect is `direct_writer` (d2). No entry global (a snapshot read at
+    entry could disagree with later list reads), no buffer parameter, no CopyArray of a list
+    parameter and no parallel loop: the verifier (`verify/array-direct`) and cgen refuse them."""
     params = getattr(f, "params", ())
-    lists = sum(isinstance(p, ArrayParam) and p.buffer is None for p in params)
-    return getattr(f, "pure", False) is True and lists > 2
+    return sum(isinstance(p, ArrayParam) and p.buffer is None for p in params) > 2
+
+
+def direct_writer(f: object) -> bool:
+    """#255 (d2), agent proposal, not confirmed: a function with an effect and three or more list
+    parameters (`direct_lists`, not pure). Every `StoreIndex` into a list parameter is one
+    `PyList_SetItem` of a new object at once, in program order. Nothing deopts the call after entry:
+    an element read that finds another type, an `Unbox` that fails (a module global of a scalar type
+    is `Unbox(Global)`, read at its use) and a Call whose callee reports a deopt leave through the
+    statement exit of the source statement being executed (`Stmt.stmt`, `Resume.stmt`), which
+    re-executes that statement, interpreted, from its start. Sound only by the per-statement rule
+    (`resume.exit_nodes`, verifier `verify/array-direct`, cgen CGenError): in each source statement
+    every node that can leave comes before the statement's first effect."""
+    return direct_lists(f) and getattr(f, "pure", False) is not True
 
 
 def region_arg_kind(a: object, ref_class) -> object:

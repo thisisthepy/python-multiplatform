@@ -516,9 +516,11 @@ def test_verifier_buffer_params_are_not_limited_but_lists_still_are():
 
     assert_accepted(many(5, "array"))
     # #255 (d1): a pure function reads 3+ lists element by element (it may deopt on an element of
-    # another type); a function with effects keeps the limit of two lists
+    # another type). (d2): one with effects too, but its reads leave through statement exits; this
+    # hand-built one has no continuation, so it is refused for that (it was `verify/structure`, the
+    # limit of two lists, before (d2))
     assert_accepted(many(3, None, may_deopt=True))
-    assert_rejected("verify/structure", many(3, None, pure=False))
+    assert_rejected("verify/array-direct", many(3, None, pure=False))
 
 
 # --- vectorised element-wise store loops (#226) ---------------------------------------------------

@@ -733,27 +733,394 @@ venv 의 3.15.0rc1t 헤더와 python/cpython 의 태그 `v3.15.0rc1` 소스(설�
   - 리스트 하나, 둘의 경로는 그대로다: 같은 입력에 develop 과 바이트 단위로 같은 C 를 만든다(생성 C 비교로 확인).
   - **비용(측정 전):** 읽기마다 함수 호출 하나와 참조 증감 한 쌍이다. copy-in 경로보다 느리고, 얼마나 빠른지는 CI
     측정을 기다린다.
-- **(d2) 쓰는 함수의 원소별 접근: 불가(지금).** 쓰기는 `PyList_SetItem` 하나로 원자적이지만, 효과 뒤의 읽기가 다른
-  타입을 만나면 인터프리터는 계속 실행하는데 우리는 그 지점의 연속이 없다(위 (c) 와 같은 한계). 임의 지점 OSR 출구가
-  생기면 (d2) 가 nbody `advance` 를 푼다.
+- **(d2) 쓰는 함수의 원소별 접근: 구현했다 (에이전트 제안, 확인되지 않음; 코디네이터의 설계를 구현).** 앞에서는
+  효과 뒤의 읽기가 다른 타입을 만나면 그 지점의 연속이 없어 불가였다. 바 의 5 의 문장 출구가 생겨서 그것을 쓴다.
+  - **접근.** `ir.direct_writer` = 리스트 매개변수 셋 이상, 효과 있음. copy-in, critical section, snapshot 이
+    없다. 읽기는 (d1) 과 같은 `tp_list_ld_*`, 저장 `a[i] = v` 는 `tp_list_st_*`: 새 float / int 를 먼저 만들고, 음수
+    색인을 그 순간의 길이로 고친 뒤 `PyList_SetItem`(리스트 자신의 섹션 안에서 범위를 보고 release store, 실패해도
+    참조를 훔친다). 범위 밖은 인터프리터와 같은 `IndexError("list assignment index out of range")`. `a[i] op= e` 는
+    읽기, 계산, 저장이고 색인은 한 번 계산한다(인터프리터에서도 원자적이지 않다). 이것은 인터프리터의 공유 읽기와
+    쓰기를 같은 순서로 하는 것이므로, 다른 스레드의 연산이 그 사이 어디에 끼든 CPython 이 만드는 interleaving 이다.
+    같은 리스트를 두 번 넘겨도(별칭) 연산이 리스트에 바로 가므로 특별한 처리가 없다.
+  - **나가기.** 효과 뒤에는 호출 전체를 deopt 할 수 없다. 그래서 읽기가 다른 타입의 원소(또는 i64 밖의 int)를 만나면,
+    실행 중인 문장의 문장 출구로 나간다: 그 문장을 처음부터 해석 실행으로 다시 하고 함수의 나머지를 이어 간다. 첫 효과
+    전이라도 같은 길 하나만 쓴다(호출 전체 deopt 를 두지 않는다). 순수 함수(d1) 는 deopt 그대로다. 출구 꼬리는 IR 문장마다
+    하나를 그 문장 뒤에 두고 읽기들이 `goto` 로 간다(읽기마다 꼬리를 두면 nbody 의 생성 C 가 7070 줄, 공유하면 6305 줄;
+    대부분은 모듈 소스에 붙는 연속의 파이썬 소스다). 효과가 있고 리스트를 쥔 함수(바 의 5)의 C 는 바뀌지 않는다.
+  - **문장마다의 규칙 (verifier `verify/array-direct`, `_stmt_exit_problem`; cgen 은 `_stmt_exit` 에서 다시 보고
+    CGenError).** 나갈 수 있는 노드(`resume.exit_nodes`: Call, 리스트 매개변수의 원소 읽기, Unbox)를 스스로 계산하는
+    IR 문장 T(원래 문장 S)마다: (1) S 에 문장 출구가 있다(`resume.exit_problem`); (2) T 의 노드에 효과나 사용자 코드가
+    없다, Call 은 순수 callee 만; (3) S 의 IR 이 T 앞에서 한 일은 연속이 받지 않는 이름의 Assign(임시 변수)뿐이다. cgen
+    은 방출 순서로 "S 가 이미 저장했거나 받는 지역을 묶었다"(`_commits`)를 적어 두고, 그 뒤 S 의 출구를 만들라고 하면
+    CGenError 를 낸다. 즉 각 원래 문장에서 나갈 수 있는 노드는 모두 그 문장의 첫 효과 전, 연속이 받는 지역의 대입 전에
+    계산된다. 왜 유효한가: S 가 나가기 전에 한 일은 읽기와 순수 계산뿐이고 그 결과는 버린다. 다시 하는 읽기는 다른
+    스레드의 연산이 S 의 시작 뒤에 낀 interleaving 이다. 앞의 문장들의 저장은 이미 리스트에 있다.
+  - **문장 종류별.** Assign / 주석 붙은 Assign(`dx: float = x[i] - x[j]`), AugAssign(`px += vx[i] * mass[i]`),
+    StoreIndex(`vx[0] = -px / SOLAR_MASS`, `vx[i] -= dx * mass[j] * mag`: 값, 색인, 저장이 마지막), Return, 식 문장,
+    `if` / `while` 의 시험, `for` 의 `range` 경계: 구조상 받음(저장이나 묶기가 그 문장에서 CPython 이 하는 마지막
+    일이다). 같은 원래 문장의 IR 에서 저장 뒤의 IR 문장이 나갈 수 있는 노드를 가지면 거절(프론트엔드는 만들지 않는다,
+    손으로 만든 IR 시험). 거절: 효과가 있는 callee 의 Call(규칙을 세울 수 있으나 프론트엔드가 만들지 않으므로 받지
+    않았다), 호출 트리에 entry global 이 있는 callee(그 callee 는 입구에서 한 번 읽는다: 아 의 #414 와 같은 꼴, 넘겨 줄
+    호출자 snapshot 도 없다), 버퍼 매개변수, 리스트 매개변수의 `a[:]`, 병렬 루프(원소별 리스트는 경계를 증명하지 않으므로
+    프론트엔드의 IR 에서는 병렬 루프가 생기지 않고 `parallel=True` 도 순차로 컴파일된다; 선언된 `par` 는 거절), 문장 연속이
+    없는 문장(`resume.exit_problem`: 루프 else, try, with, match 안, 대응 없는 지역), 가상 객체와 영역(`osr_problem`;
+    리스트 함수에서는 array-open 이 먼저 막는다).
+  - **모듈 전역 (`offset_momentum` 의 `SOLAR_MASS`).** 이런 함수에는 entry global 이 없다(입구에서 한 번 읽은 값은 뒤의
+    공유 읽기와 맞지 않을 수 있다, 아). 프론트엔드는 impure 모드에서 리스트가 셋 이상이면 entry global 후보인 이름을
+    `Unbox(Global(name))` 으로 낮춘다(가장 작은 변경: `_Lowerer.name` 한 곳). cgen 은 그 자리에서 LOAD_GLOBAL 처럼
+    읽는다(전역 캐시 `tp_gcache_global`: 모듈 dict, 다음 builtins; 잠근 리스트가 없으므로 dict 섹션에서 기다려도
+    무해). 이름이 없거나(NameError) 다른 타입이면 문장 출구로 나가고, 인터프리터가 NameError 를 내거나 그 타입으로
+    계산한다. 비용(측정 전): 쓰임마다 epoch 비교와 캐시 hit 의 참조 증감, 캐시가 비면 dict 조회 한 번.
+  - **오류.** 인터프리터도 그 연산에서 내는 오류(읽기·저장의 IndexError, ZeroDivisionError, math domain error)는
+    앞의 저장 뒤에 그 자리에서 낸다. 다른 impure 함수와 같은 방식이다.
+  - **eval breaker.** snapshot 이 없으므로 리스트 없는 함수처럼 poll 한다(입구의 `tp_poll`, 루프의 chunk poll). poll
+    에는 연속이 필요 없다. 문장 출구의 문맥 `tp_my` 는 poll 이 파이썬 코드를 돌리기 전에 입구에서 받는다. fast twin
+    은 연속을 부르는 동안 자기 트리의 프레임을 센다(`tp_depth_py_begin`).
+  - **비용(측정 전).** 읽기마다 `PyList_GetItemRef` 와 참조 증감, 저장마다 객체 하나와 `PyList_SetItem` 하나. nbody
+    `advance` 의 안쪽 루프는 읽기 18 번과 저장 6 번이다. copy-in 경로보다 느리고, 해석 실행보다 얼마나 빠른지는 CI
+    측정을 기다린다. 모듈 import 때 연속 수만큼 파이썬 소스를 컴파일한다(nbody: `advance` 의 루프 연속 4 개와 문장 연속 12 개, `offset_momentum` 의 1 개와 6 개).
 
 #### 라. 판정과 결과
 
-- 셋 이상의 리스트에 **쓰는** 함수는 (B) 그대로 해석 실행이다(develop 과 같은 frontend/verify/cgen 거절).
-- **순수** 함수는 (d1) 로 컴파일된다. nbody: `energy` 가 컴파일되고, `advance`·`offset_momentum` 은 해석
-  실행이다(`test_class_methods.py` 의 EXPECTED). nbody 전체 속도는 `advance` 가 정하므로 거의 그대로일 것이다(측정 전).
-- 시험(`test_free_threaded.py`): 순수 3·7 리스트 함수의 컴파일, 인터프리터와 같은 결과(빈 리스트, 별칭, 다른 타입
-  원소의 deopt, 리스트가 아닌 인자, 짧은 리스트의 IndexError); 쓰는 3 리스트 함수와 entry global 이 있는 3 리스트
-  함수는 해석 실행; 프로그램 순서 시험(쓰는 스레드가 `c[0]` 다음 `a[0]` 을 쓰고, `a[0]`, `c[0]` 순으로 읽는 함수가
-  늘 `c[0] >= a[0]` 을 본다); 동시에 int 와 float 를 바꿔 넣어도 결과가 늘 인터프리터의 것; `list.sort` key 에서
-  부르기. 변형 시험: 읽기 순서를 바꾼 변형(`race_mutant`, CI 기본 실행 밖)과 원소 타입 검사를 뺀 런타임(결정적,
-  CI 에서 실행)이 잡혀야 한다. 옵션 (A) 변형은 3 리스트 쓰기 경로가 없어져 대상이 없으므로 지웠다.
+- 셋 이상의 리스트에 **쓰는** 함수는 (d2) 로 컴파일된다(에이전트 제안, 확인되지 않음). 앞에서는 (B) 그대로 해석
+  실행이었다.
+- **순수** 함수는 (d1) 로 컴파일된다. nbody: `energy`, `advance`, `offset_momentum` 이 컴파일된다
+  (`test_class_methods.py` 의 EXPECTED). 다른 네 벤치마크의 컴파일 함수 집합과 생성 C 는 바이트 단위로 같다
+  (binary_trees, fannkuch, spectral_norm, wordfreq; front end + verifier + cost + cgen 을 이 변경 전후에 돌려 비교).
+  nbody 의 생성 C 는 704 줄에서 6305 줄이 되었고 `clang -fsyntax-only` 를 통과한다. 속도는 측정 전이다.
+- 시험(`test_free_threaded.py`, d1): 순수 3·7 리스트 함수의 컴파일, 인터프리터와 같은 결과(빈 리스트, 별칭, 다른 타입
+  원소의 deopt, 리스트가 아닌 인자, 짧은 리스트의 IndexError); entry global 이 있는 순수 3 리스트 함수는 해석 실행;
+  프로그램 순서 시험(쓰는 스레드가 `c[0]` 다음 `a[0]` 을 쓰고, `a[0]`, `c[0]` 순으로 읽는 함수가 늘 `c[0] >= a[0]` 을
+  본다); 동시에 int 와 float 를 바꿔 넣어도 결과가 늘 인터프리터의 것; `list.sort` key 에서 부르기. 변형 시험: 읽기
+  순서를 바꾼 변형(`race_mutant`, CI 기본 실행 밖)과 원소 타입 검사를 뺀 런타임(결정적, CI 에서 실행)이 잡혀야 한다.
+  옵션 (A) 변형은 3 리스트 쓰기 경로가 없어져 대상이 없으므로 지웠다.
+- 시험(`test_direct_write.py`, d2): 프론트엔드(nbody 꼴의 함수, 전역의 `Unbox(Global)`), verifier 의 수락과 거절
+  (`a[:]`, 선언된 병렬 루프, 버퍼, entry global 이 있는 callee, 효과 있는 callee, 연속 없는 문장, 손으로 만든 IR 에서
+  저장 뒤의 읽기), cgen 의 CGenError, resume 의 차분 시험(쓰는 문장마다; 문장을 건너뛰는 변형 연속이 잡힘), 생성 C 의
+  구조(잠금·copy 없음, 읽기와 저장이 원래 순서의 `tp_list_ld_*` / `tp_list_st_*`, 다른 타입은 문장 출구, 전역은 쓰는
+  자리에서 읽음, poll), 그리고 컴파일한 확장의 동작(CI): 모든 위치에 심은 다른 타입 원소, 부분 효과 뒤의 IndexError,
+  전역의 재바인딩·삭제·다른 타입, 별칭, 빈 리스트, 음수 색인, callee 넘침, nbody 전체, 프로그램 순서 스레드 시험, 결정적
+  변형 둘(문장을 건너뛰는 연속, 타입 검사 없는 읽기). 컴파일이 필요한 시험은 이 글을 쓴 에이전트가 돌리지 않았다
+  (AGENTS.md 10).
 
 #### 마. 오너 결정이 필요한 점
 
 1. (d1) 을 받아들일지(에이전트 제안). 받아들이지 않으면 순수 함수도 (B) 로 돌린다(`ir.direct_lists` 하나).
-2. 쓰는 함수(nbody `advance`)를 위해 임의 문장 지점의 OSR 출구를 만들지: (c) 의 구간 나누기와 (d2) 가 둘 다 그것에
-   걸려 있다.
+2. (d2) 를 받아들일지(에이전트 제안): 쓰는 함수의 원소별 저장과 문장 출구, 그리고 그 함수에서 모듈 전역을 쓰는
+   자리에서 읽는 것. 받아들이지 않으면 `ir.direct_writer` 인 함수를 다시 해석 실행으로 둔다.
+3. 순수 (d1) 함수도 전역을 쓰는 자리에서 읽을지(지금은 entry global 이 있으면 해석 실행). 같은 `Unbox(Global)` 로
+   가능하고 deopt 는 아직 효과가 없을 때만 일어난다.
+4. (c) 의 구간 나누기는 이제 필요 없다(d2 가 nbody `advance` 를 푼다).
+
+#### 바. 리스트 하나, 둘의 창 안에서 기다리는 연산 (#390)
+
+**출처.** 이슈 #390 (#255 조사 중 읽어서 발견). 아래의 판정 근거는 CPython 소스와 생성 C 를 읽은 것이고, 수정 방식과
+거절 범위는 **에이전트 제안, 확인되지 않음**이다. 지킨 제약: GIL 전용 기능 없음, Python 동작 변화 없음, 공개 critical
+section API 만 씀(리더, 2026-11-13).
+
+**판정: 결함이 있다(읽어서 확인, 실행으로는 아직 보지 못함).** 줄 번호는 `v3.15.0rc1`.
+- 창 안에서 다른 잠금을 기다리면 섹션이 풀린다. `PyMutex_Lock` 은 `_PY_LOCK_DETACH` 로 기다리고
+  (`Python/lock.c:656`, `Python/parking_lot.c:328-337`), detach 는 활성 섹션을 모두 푼다(`Python/pystate.c:2290-2292`,
+  `Python/critical_section.c:109-131`). 중첩 섹션의 느린 경로는 새 섹션을 먼저 올리고 기다린다
+  (`critical_section.c:55-59`). 다시 붙으면 맨 위 섹션만 다시 잡고(`pystate.c:2269-2273`), 바깥 섹션은 안쪽이 끝날 때
+  다시 잡힌다(`Include/internal/pycore_critical_section.h:129-137`). 그 사이에 다른 스레드가 리스트에 쓸 수 있고,
+  write-back 이 그 값을 copy-in 때의 값으로 덮는다.
+- develop(9376f96a)의 생성 C 에서 창 안에 있던 대기 지점:
+  1. **wrapper 의 entry global 읽기**: `tp_cs_begin` 과 copy-in 다음에 `tp_global` → `PyDict_GetItemRef`. 잠금 없는
+     읽기가 값의 참조를 못 얻으면(다른 스레드가 만든, 공유 refcount 0 인 객체, 또는 동시 변경) dict 의 섹션으로
+     떨어진다(`Objects/dictobject.c:1647-1660`). 이 스레드가 처음 읽는 공유 안 된 dict 도 섹션을 잡는다
+     (`dictobject.c:1391-1403`). 이름이 모듈에 없으면 builtins dict 도 같다.
+  2. **snapshot poll 의 entry global 다시 읽기**(#152): 리스트 섹션을 다시 잡은 뒤 `tp_global`. 1 과 같다.
+  3. **callee 의 entry global**: Call 지점에서 `tp_global`(`_read_entry_global`). 1 과 같다.
+  4. **OBJ `Global` 읽기**: 캐시가 비면 `tp_gcache_fill` 이 모듈·builtins dict 의 섹션을 잡는다. `IsExact`
+     (`tp_class_global_ok` 의 dict 섹션), `CheckMethod`(클래스 dict 조회)도 같은 종류다.
+  5. **redo Call**: `tp_cg_redo` 가 모듈 dict 섹션에서 deopt 카운터를 올리고(경합하면 대기), 해석 함수를 부른다.
+     해석 코드는 eval breaker 에서 stop-the-world 요청에 detach 하고(`Python/ceval_gil.c:1362-1367`), GC 의
+     finalizer 나 추적 함수 같은 사용자 코드가 아직 write-back 안 된 리스트를 볼 수도 있다.
+  6. 드문 경우: write-back 의 `PyList_SetItem` 이 다른 스레드 소유 원소를 decref 할 때 `_Py_brc_queue_object` 가
+     bucket mutex 를 `PyMutex_Lock` 으로 잡는다(`Python/brc.c:67`, 경합해 park 하면 detach). 영향을 받는 impure 함수의
+     Call 앞 `tp_traced` 는 `sys.monitoring` 버전이 바뀐 직후 한 번 `tp_mon_scan`(import, 속성 조회, 호출)을 한다.
+  copy-in 의 `malloc`·unbox, Box 할당, 리스트 섹션 안의 `PyList_SetItem` 재진입(맨 위 섹션이 같은 mutex 라 건너뜀,
+  `critical_section.c:31`)은 기다리지 않는다.
+- 결정적 재현 방법(시험): 한 스레드가 모듈 dict 의 섹션을 쥔다(dict setitem 은 섹션 안에서 key 의 `__hash__` 를
+  부르고, 그 `__hash__` 가 붙은 채 돈다, `dictobject.c:2784-2790`). entry global 값은 다른 스레드가 만든 새 int 라
+  잠금 없는 읽기가 실패한다. 이때 쓰는 스레드의 `a[1] = 99; a[0] = 99` 가 지나가고, write-back 뒤 `a == [G1, 99, 0]`
+  이 남는다. 어떤 interleaving 도 만들지 않는 결과다(시험 `test_list_window_does_not_wait_for_the_module_dict`).
+
+**수정 (에이전트 제안, 확인되지 않음).**
+- 1, 2: 리스트를 쥔 함수의 entry global 은 리스트 섹션 **전에** 읽는다. `tp_eg_snapshot` 이 모듈 dict 의 섹션 안에서
+  `tp_globals_epoch` 와 함께 모듈 dict 만 조회한다(그 섹션을 이미 쥐었으므로 dict 의 대체 경로는 기다리지 않는다,
+  `critical_section.c:31`). watcher 는 같은 잠금 안에서 저장 **전에** epoch 를 올리므로(`dictobject.c:2009`,
+  `tp_class_global_ok` 와 같은 논리) 값과 epoch 는 한 순간의 것이다. copy-in 뒤 `tp_eg_current` 로 epoch 가 그대로임을
+  확인하면 그 값은 리스트 섹션 안의 그 순간에도 현재 값이다. 바뀌었으면 deopt(아직 아무 효과 없음). 그 이름들은
+  `tp_watch_names` 에 들어가고, watcher id 가 없는 모듈에서는 늘 deopt 한다(속도만 다르다). poll 도 같은 순서로
+  다시 읽는다. 리스트를 쥐기 전에 읽은 뒤 검증 없이 쓰면 새 이상이 생긴다(다른 스레드의 `G = 1; a[0] = 1` 에서
+  옛 G 와 새 a[0] 을 함께 보는 실행): 그래서 epoch 검증이 필요하다.
+- 3: 호출자가 같은 이름·타입의 entry global 을 가진 경우(verify `covers`)는 호출자의 snapshot 값을 넘긴다(다시
+  읽지 않는다). 아닌 경우와 4 는 리스트를 쥔 함수의 호출 트리에서 거절한다(`verify/array-wait`, cgen
+  `_window_wait`). 다섯 벤치마크의 컴파일 함수 집합과 생성 C 는 바뀌지 않는다(바이트 단위로 확인).
+- **5 (redo Call): 문장 출구로 고쳤다 (에이전트 제안, 확인되지 않음; 코디네이터의 설계를 구현).** spectral_norm
+  `mul_av`·`mul_atv` 는 리스트 둘을 쥔 채 `eval_a` 를 Call 로 부른다. 앞에서는 callee 가 deopt 를 알리면(`tp_s == 1`:
+  i64 넘침, 클래스 검사, impure 호출자의 추적 검사) 창 안에서 `tp_cg_redo` 로 해석 callee 를 불렀다. 해석 프레임은 eval
+  breaker 에서 stop-the-world 요청에 detach 하고(`Python/ceval_gil.c:1362-1367`), detach 는 섹션을 푼다(위 근거와 같은
+  줄). GIL 빌드에서는 해석 코드가 copy 가 살아 있는 동안 GIL 을 넘긴다. 둘 다 다른 스레드의 리스트 쓰기를 copy 가
+  덮거나 copy 의 낡은 값을 읽게 해, 어떤 interleaving 과도 맞지 않는다.
+  - **수정: 문장 출구(statement exit).** #152 의 OSR 출구를 "루프 한 바퀴의 처음"에서 "문장의 처음"으로 넓혔다.
+    효과가 있고 리스트를 쥔 함수의 Call 이 `tp_s == 1` 을 받으면 redo 하지 않고: 리스트를 `tp_*_array_exit` 로
+    write-back 하고(GIL 빌드의 dirty 칸, 섹션이 끝나기 전, Python 코드가 돌기 전. free-threaded 빌드는 저장마다 이미
+    write-through, 위 사), 섹션을 끝내고, 그 Call 을 담은 원래 문장을 처음부터 다시 실행하는 연속
+    `__tp_resume_<f>_s<k>`(resume.py)를 부른다. impl 은 poll 출구처럼 2 를 돌려주고 `tp_my->result` 를 둔다. 두 출구는
+    꼬리 하나(`cgen._osr_leave`)를 쓴다: wrapper 의 `exits` 는 다시 돌지만 copy 는 이미 비었고 `tp_cs_end` 는 멱등이라
+    두 번 write-back 하거나 두 번 풀지 않는다. 연속은 callee 를 모듈 전역(compiled wrapper)으로 다시 부르고, 그
+    wrapper 가 창 밖에서 deopt 를 세고 해석 실행한다(`__typedpython_deopts__` 는 앞과 같은 수: 넘치는 호출마다 하나).
+    GIL·free-threaded 빌드가 같은 경로다. 순수 함수는 그대로다: deopt 가 wrapper 까지 올라가고 wrapper 가 write-back
+    뒤에 호출 전체를 redo 한다. cgen 은 문장 출구 없는 창 안 redo 를 만들라고 하면 CGenError 를 낸다.
+  - **연속.** 문장 S 의 연속 = S 의 사본, S 뒤의 같은 블록 문장들, 감싸는 루프마다(안쪽부터) 현재 바퀴의 나머지와
+    남은 바퀴, 가장 바깥 루프 뒤의 문장들. 매개변수 규약은 루프 연속과 같고, 감싸는 루프만 숨은 상태를 갖는다. `for`
+    문장 S 는 `range` 경계를 다시 계산하고(경계는 문장 시작에 한 번 계산된다) 그 변수는 보통 지역이다. `while` 문장
+    S 는 시험을 다시 계산하므로 루프 연속과 같다(바퀴마다 다시 시작하므로 몸통에서 처음 묶인 지역도 넘긴다). S 는 루프
+    지점과 같은 규칙으로 닿아야 한다(평범한 if/for/while 만, 루프 else·try·with·match 안이 아님). 연속은 원래 파일, 줄,
+    함수 이름을 지킨다.
+  - **문장 위치(IR 과 AST 의 대응).** IR 문장마다 `ir.Stmt.stmt` = 원래 소스 문장 번호(`resume.statements` 순서,
+    함수 자신의 문장 전위 순회)를 둔다. front end 의 `block` 이 문장의 임시 변수 Assign 까지 붙인다(시험에 임시 변수가
+    필요한 `while` 의 합성 If·Break 는 그 while 의 번호). 같음·hash·repr 에는 들어가지 않으므로(`compare=False`) IR 을
+    비교하는 단계(verify 의 재계산, cost, taint, rebinding, 영역, 병렬 루프)는 그대로이고 `dataclasses.replace` 가
+    유지한다. taint 가 덧붙이는 플래그 Assign 도 같은 번호를 받는다. resume 은 번호가 AST 와 맞는지(종류, 순서가 줄지
+    않음) 보고, 안 맞으면 문장 연속을 만들지 않는다(그러면 verifier 가 거절). 기각한 대안: `ir.Call` 에만 번호(그
+    문장의 임시 변수가 어디서 시작하는지 verifier 가 볼 수 없다), id 로 잇는 별도 표(verify 가 노드를 새로 만들면 끊김),
+    IR 과 AST 를 구조로 맞추기(임시 변수와 while 재작성에 약함), 문장을 감싸는 새 IR 노드(문장을 걷는 모든 단계가
+    배워야 함). incremental cache(SPEC N-10)의 키에는 컴파일러 소스 트리의 hash(`pipeline.COMPILER_VERSION`)가
+    있으므로 이 변경 뒤에 옛 C 가 나오지 않는다.
+  - **건전성 조건 (`verify/array-wait` 확장, `verify._stmt_exit_problem`).** 효과가 있고 리스트를 쥔 함수에서 Call 을
+    스스로 계산하는 IR 문장 T 마다(번호 k = 원래 문장 S): (1) S 에 문장 출구가 있다(`resume.exit_problem`: 함수에 OSR
+    출구가 있고(병렬 루프·연속 없는 루프·객체 루프·대응 없는 지역이 없음), S 의 연속이 있고, 그 매개변수 모두에 C 값이
+    있다); (2) T 가 계산하는 노드에 효과나 사용자 코드가 없다(순수 callee 의 Call 만. impure 로 선언된 callee 는 그것이
+    T 의 유일한 Call 일 때만: 그 deopt 신호는 첫 효과 전, 입구 guard 나 호출자의 추적 검사에서만 온다); (3) S 의 IR 이 T
+    앞에서 한 일은 임시 변수뿐이다: T 의 블록에서 번호 k 인 문장들은 T 바로 앞의 한 덩어리이고, 각각 연속이 받지 않는
+    이름의 Assign 이며 효과가 없다. T 를 담은 문장도 k 면(임시 변수가 필요한 while) 그 몸통에서 T 앞의 문장은 모두
+    그 덩어리여야 하고 한 단계 위에서 같은 검사를 한다. 리스트를 쥔 함수의 호출 트리는 user code 가 없고(array-open)
+    callee 에는 배열을 넘길 수 없으므로 callee 는 모두 순수하다: (2) 와 (3) 은 front end 가 만들지 않는 IR 을 막는
+    보호다. 왜 유효한가: S 가 Call 전에 한 것은 읽기와 순수 계산뿐이고 그 결과는 버린다. 읽기는 효과가 없고,
+    인터프리터가 나중에 다시 읽는 것은 다른 스레드의 연산이 S 의 시작 바로 앞에 낀 interleaving 이다. S 앞의 문장은
+    모두 섹션 안에서 끝났다.
+  - **문장 종류별.** Assign / 주석 붙은 Assign / AugAssign(`s += f(i) * v[j]`: s 를 읽고 부르고 v[j] 를 읽고 저장):
+    받음. StoreIndex(`out[i] = f(x) * v[j]`: 값, 그 다음 색인, 저장은 마지막): 받음. `a[i] += f(x)`: CPython 은 색인을
+    계산하고 `a[i]` 를 읽은 뒤 부르고 저장은 마지막이다. 색인이 이름이나 상수가 아니면 임시 변수 Assign 이 T 앞에 온다:
+    받음(시험 `test_augmented_subscript_with_a_temporary_index_is_accepted`). Return, 식 문장: 받음. `if` 의 시험: 지점은
+    그 If 문장(elif 는 안쪽 If). `while` 의 시험(어느 바퀴든): 지점은 그 while 문장, 연속은 루프 연속과 같다. `for` 의
+    `range` 경계: 지점은 그 for 문장, 단순 사본. `and` / `or` / 조건식 / 비교 사슬의 피연산자: 문장 전체를 다시 실행.
+    한 문장의 두 Call(`f(a) + f(b)`): 뒤의 것이 deopt 하면 앞의 순수 결과를 버리고 다시 계산(관측되지 않음). 거절:
+    루프 else·try·with·match 안의 문장(front end 가 받지 않는다), 병렬 루프가 있는 함수, 그리고 (2)·(3) 을 어기는 IR.
+  - **snapshot 은 있으나 리스트 copy 가 없는 함수**(entry global 만, 버퍼만): 앞과 같이 그 자리에서 redo 한다. 같은
+    결함(copy 를 덮어씀)은 없다: 버퍼는 copy 가 없고 저장이 바로 메모리에 간다. 관찰(고치지 않음): GIL 빌드에서 entry
+    global 을 가진 impure 함수의 redo 는 해석 callee 가 GIL 을 넘기는 지점이 되어, 아 의 경우 2 와 같은 꼴(다른 스레드의
+    `G = 2; o.x = 2` 뒤에 옛 G 와 새 o.x)을 GIL 빌드에서도 만들 수 있다. free-threaded 빌드에서는 redo 와 무관하게 아 의
+    결함이다. #414 에 속한다.
+  - **결과.** 다섯 벤치마크의 컴파일 함수 집합은 develop 과 같다. 생성 C 가 바뀐 것은 spectral_norm 뿐이다: `mul_av`·
+    `mul_atv` 의 impl 과 fast twin 에서 Call 의 redo 가 문장 출구가 되었고, 연속 두 개(`__tp_resume_mul_av_s3`,
+    `__tp_resume_mul_atv_s3`)가 모듈 소스에 붙었다(`clang -fsyntax-only` 통과). 루프 연속과 poll 의 C 는 그대로다.
+  - **시험(`test_stmt_exit.py`).** resume 의 문장 지점 차분 시험(계측한 사본이 S 의 n 번째 시작에서 `locals()` 와 루프
+    상태를 들고 예외를 던지고, 그 상태로 부른 연속이 끝까지 돈 원래 실행과 결과·예외·리스트가 같아야 한다; 현재 바퀴의
+    나머지를 뺀 변형 연속은 잡혀야 한다), front end 의 번호, verifier 의 거절과 수락, 생성 C 의 구조(창 안에 `tp_cg_redo`
+    가 없음, write-back 이 `tp_cs_end` 앞), 그리고 컴파일한 확장의 동작(CI): callee 가 첫·중간·마지막 바퀴, 중첩 루프,
+    if 시험, while 시험, return 에서 넘칠 때 인터프리터와 같은 결과·리스트; 해석 callee 가 도는 순간 리스트가
+    인터프리터의 값을 가짐(callee 의 해석 실행이 같은 스레드에서, 또는 다른 스레드를 띄우고 join 해서 `v[5]` 를 쓴다:
+    창 안 redo 는 copy 의 낡은 값을 읽어 빨강); 연속 안의 traceback 이 원래 함수 이름과 줄; 변형(`cgen._redo_inside_window`
+    를 켠 빌드)이 잡힘. 컴파일이 필요한 시험은 이 글을 쓴 에이전트가 돌리지 않았다(AGENTS.md 10).
+  - 앞에서 #390 의 5 를 거절하지 않은 이유였던 `test_class_methods.py` 의 EXPECTED 는 바뀌지 않는다.
+- 6 은 고치지 않았다(드묾, 고치려면 원소마다 참조를 하나 더 쥐어야 한다).
+- 관련 관찰(이 이슈 밖): entry global 을 입구에서 한 번 읽는 것은 다른 스레드가 그 전역을 바꾸는 경우, 함수가
+  나중에 다른 공유 상태(다른 entry global 의 Call 지점 읽기, 객체 필드)를 읽으면 interleaving 과 안 맞을 수 있다.
+  리스트 섹션 안에서는 위 검증으로 막힌다.
+
+#### 사. 잠그지 않는 원소 읽기가 보는 저장 순서 (#391)
+
+**출처.** 이슈 #391 본문 ("Done when: API.md and SPEC N-8 state exactly which operations see the call as atomic,
+with that argument"). 지킨 제약: GIL 전용 기능 없음, Python 동작 변화 없음, 공개 critical section API 만(리더,
+2026-11-13). 아래 판정의 근거는 CPython `v3.15.0rc1` 소스를 읽은 것이고, 수정 방식은 **에이전트 제안, 확인되지
+않음**이다. 시험은 이 글을 쓴 에이전트가 돌리지 않았다(AGENTS.md 10, CI 가 결과를 남긴다).
+
+**판정: CPython 이 만들 수 없는 결과가 있었다(읽어서 확인, 실행으로는 아직 보지 못함).**
+- 쓰기는 release store 다: `PyList_SetItem`(`Objects/listobject.c:473`), 인터프리터의 `STORE_SUBSCR_LIST_INT`
+  (`Python/bytecodes.c:1444`). 잠그지 않는 원소 읽기는 seq_cst load 다: `a[i]` 는 `_PyList_GetItemRef`
+  (`bytecodes.c:1149`) → `list_get_item_ref`(`listobject.c:353-378`) → `_Py_TryXGetRef`
+  (`Include/internal/pycore_object.h:610`). 반복(`listiter_next`, `listobject.c:4074`)도 같으므로 `for x in a`,
+  `sum(a)`(`Python/bltinmodule.c:2884` 의 `PyObject_GetIter`), `in`(`list_contains`)도 잠그지 않는다. 그래서 다른
+  스레드가 인터프리터의 저장 하나를 보면 그 스레드의 앞선 저장도 모두 본다(release/acquire 의 메시지 전달).
+- 리스트를 잠그는 연산은 호출 전체를 한 단계로 본다: `list(a)`·`extend`(`_list_extend`, `listobject.c:1468`),
+  슬라이스(`list_slice_wrap`, 3652-3667), 비교(`list_richcompare`, 3501-3507), `a + b`(`_PyList_Concat`, 802-816),
+  저장, 다른 compiled 함수의 copy-in. 이것은 유효하다: 인터프리터의 저장 사이에 다른 스레드의 잠금 연산이 하나도
+  끼지 않은 실행과 같다. (단, 창 안에서 기다리는 지점이 없을 때다. 그 결함은 #390, 위 바(#413) 에서 다룬다.)
+- 잠그지 않는 읽기에는 반례가 있었다. develop(9376f96a)의 write-back 은 끝에서 dirty 칸을 **색인 순서로** 저장한다.
+  `a[1] = x; a[0] = y` 를 컴파일하면 write-back 은 a[0] 을 먼저 쓰고, 그 사이에 `a[0]` 다음 `a[1]` 을 읽는 스레드는
+  새 a[0] 과 옛 a[1] 을 볼 수 있다. 인터프리터에서 a[0] 의 저장은 a[1] 의 저장 뒤이므로 새 a[0] 을 본 읽기 뒤의
+  a[1] 읽기는 새 값을 본다. 이 결과는 어떤 interleaving 에도 없다.
+- 저장 순서를 바꿔서는 고칠 수 없다. 같은 칸을 다른 칸 사이에 두 번 쓰면(`a[0] = 1; a[1] = 1; a[0] = 2`, 루프에서
+  흔하다) 최종값 (2, 1) 만 쓰는 write-back 은 a[0] 을 먼저 쓰면 (2, 0) 을, a[1] 을 먼저 쓰면 (0, 1) 을 보인다.
+  인터프리터는 둘 다 지나지 않는다.
+- rc1 에서 실제로 보이는 범위: 새 원소의 잠금 없는 incref 가 성공해야 한다. write-back 이 만든 새 float 나 큰 int 는
+  공유 refcount 가 0 이라 `_Py_TryIncRefShared` 가 실패하고(`pycore_object.h:548-555`), 읽기는 리스트 섹션으로
+  떨어져(`list_item_impl`, `listobject.c:335-351`) 호출이 끝나기를 기다린다. 그래서 rc1 에서 반례가 보이는 것은
+  immortal small int(-5..256)를 저장한 `list[int]` 다. 이것은 refcount 구현의 세부라 수정은 여기에 기대지 않는다.
+
+**수정 (에이전트 제안, 확인되지 않음): free-threaded 빌드에서 저장을 그때그때 리스트에 쓴다(write-through).**
+- `StoreIndex` 는 `tp_*_array_st` 가 된다: copy 의 칸을 쓰고, `TP_LIST_WRITE_THROUGH`(free-threaded 빌드에서 1)이면
+  같은 값을 `PyList_SetItem` 으로 바로 리스트에 쓴다. wrapper 가 쥔 섹션 안이므로 `PyList_SetItem` 의 섹션은 건너뛴다
+  (`Python/critical_section.c:29-45`, 맨 위 섹션이 같은 mutex). 다른 스레드는 섹션이 있는 동안 리스트에 쓸 수 없으므로
+  copy 는 계속 읽기의 근거로 맞다.
+- 왜 유효한가: 저장의 순서와 값이 인터프리터의 것과 같고 각각 release store 다. 잠그지 않는 읽기는 인터프리터의
+  저장이 하나씩 지나가는 상태를 본다. 잠그는 연산은 여전히 호출 전체(또는 poll 사이)를 한 단계로 본다. 값을 만들다
+  실패하면(MemoryError) 그 칸은 옛 값으로 남고 오류로 끝난다: 인터프리터도 값을 만들 때 실패하고 저장하지 않는다.
+  예외로 끝나는 호출에서 그때까지의 저장이 보이는 것은 develop 의 write-back 과 같다.
+- 병렬 영역(SPEC N-15): 작업 스레드는 Python 객체를 만지지 않으므로 칸을 dirty 로만 표시하고, 호출 스레드가 join 뒤에
+  반복 순서대로, 몸통의 저장 순서대로 `tp_*_array_flush1` 로 쓴다(연속한 같은 리스트 저장은 하나로 본다: 앞의 값을
+  놓친 읽기는 인터프리터에서도 가능하다). 다른 리스트 저장 사이에 같은 리스트를 다시 쓰는 몸통(a, b, a)은 최종값으로
+  보일 수 없는 상태가 있어 free-threaded 에서는 영역을 쓰지 않고 순차 루프로 돈다. 지금의 경계 증명으로는 몸통이
+  리스트 매개변수 하나에만 저장하므로(루프 자신의 리스트만 증명된다) 이 경우는 생기지 않는다.
+- GIL 빌드: 호출 중에 다른 스레드가 돌지 않고 poll 은 먼저 write-back 하므로, 저장은 dirty 표시만 하고 끝에서
+  write-back 한다(#391 전과 같다). 결과가 다른 기능이 아니라 같은 결과를 내는 두 구현이다.
+- 비용(측정 전): 저장마다 객체 하나와 `PyList_SetItem` 하나. 칸마다 한 번 쓰는 루프(spectral_norm `mul_av`·
+  `mul_atv`)는 write-back 과 같은 수이고, 같은 칸을 여러 번 쓰는 루프는 그만큼 더 든다. 다섯 벤치마크의 컴파일 함수
+  집합은 같다(front end + verifier + cost 를 develop 과 이 변경에서 돌려 비교). 생성 C 가 달라진 것은 spectral_norm 의
+  저장 세 곳뿐이다.
+- 남은 점(고치지 않음): (1) 위 바 의 6(write-back 의 `PyList_SetItem` 이 다른 스레드 소유 원소를 decref 하며 bucket
+  mutex 에서 detach)은 write-through 에서도 같은 횟수로 생기지만 호출 중간에 생긴다. 그 사이 다른 스레드가 쓰면
+  copy 가 낡는다. 바 의 5(redo Call)는 문장 출구로 고쳤다. (2) `array.array` 버퍼는 rc1 의 CPython 자체가 잠금도 atomic 도 없이
+  읽고 쓴다(`Modules/arraymodule.c:664-681`). CPython 이 순서를 보장하지 않으므로 이 논증 밖이다.
+- 시험(`test_free_threaded.py`): `fill_down_int`(높은 색인부터 저장)를 부르는 스레드와 `xs[0]` 다음 `xs[-1]` 을 읽는
+  스레드 셋, 늘 `xs[-1] >= xs[0]`(develop 에서 빨강 예상, 경합이라 우연히 통과할 수 있다); 리스트 저장이 모두
+  `tp_*_array_st` 를 거치는지(develop 에서 빨강, 생성 C 로 확인함); 변형 시험(`race_mutant`, CI 밖): 런타임의
+  `TP_LIST_WRITE_THROUGH` 를 끈 빌드가 잡혀야 한다.
+
+#### 아. 입구에서 한 번 읽는 entry global (#414)
+
+**출처.** 이슈 #414 본문 ("Done when: either an argument that every such outcome is a valid interleaving, or a test
+that shows the disagreement and a fix"). 판정과 제안은 **에이전트 제안, 확인되지 않음**이다. 아래 "구현" 이
+#413 의 장치 위에 올린 수정이다(코디네이터의 설계를 구현, 에이전트 제안, 확인되지 않음).
+
+**판정: 유효하지 않은 실행이 있다(읽어서 확인, 재현하지 않음).** 근거: `G = 2`(STORE_GLOBAL) 는 dict watcher 를
+먼저 부르고(`Objects/dictobject.c:2009`) 값을 release store 한다(`STORE_VALUE`, 322, 2017). 인터프리터의
+`LOAD_GLOBAL` 은 consume load(`bytecodes.c:2360`), `PyDict_GetItemRef` 는 잠그지 않는 조회다. 객체 슬롯 저장은
+release store(`Python/structmember.c:326`). 그래서 인터프리터에서 다른 스레드 B 의 나중 쓰기를 본 읽기 뒤의 전역
+읽기는 B 의 앞선 재바인딩을 본다. 컴파일된 함수 f 는 entry global 을 입구에서 한 번 읽는다(wrapper, 또는 Call
+지점의 callee 입구). 경우(처음 값은 모두 1, B 는 프로그램 순서로 두 줄을 쓴다):
+1. **callee 의 entry global.** B: `G = 2; H = 2`. f(entry G): `return g() * 10 + G`, g(entry H, 순수, redo Call):
+   `return H`. 인터프리터: g 의 H 읽기 다음 f 의 G 읽기 → 11, 12, 22. 컴파일: G 는 입구(1), H 는 Call 지점(2) → 21.
+   유효하지 않다.
+2. **객체 필드.** B: `G = 2; o.x = 2`. f(o: C, entry G): `return o.x * 10 + G` → 같은 꼴로 21. 유효하지 않다.
+3. **entry global 둘.** 입구는 `entry_globals` 순서로 G 다음 H 를 읽는다. B: `G = 2; H = 2`. f: `return H * 10 + G`
+   (프로그램은 H 를 먼저 읽는다). 컴파일은 (G = 1, H = 2) 를 읽을 수 있고 21 을 낸다. 인터프리터는 H = 2 를 보면 G = 2
+   를 본다. 유효하지 않다. 다른 공유 읽기가 없고 프로그램이 입구와 같은 순서로 한 번씩만 읽으면 유효하다.
+4. **유효한 경우.** entry global 하나에 입구 뒤의 다른 공유 읽기가 없으면, 모든 읽기를 입구 시각에 둔 실행과 같다
+   (wordfreq `next_state` 의 `MOD`). 리스트 매개변수의 원소는 섹션 안에서 바뀌지 않고 develop 의 wrapper 는 entry
+   global 을 copy-in 뒤, 섹션 안에서 읽으므로 둘은 한 순간의 값이다(#413 은 이 읽기를 섹션 앞으로 옮기고 epoch 로
+   검증한다). 3 리스트 이상의 순수 함수는 entry global 을 가질 수 없다(`verify/array-direct`). `array.array` 버퍼는
+   위 사 (2) 처럼 CPython 이 순서를 보장하지 않는다.
+5. 같은 꼴로 보이나 확인하지 않은 것: 클래스 이름 전역(module docstring 의 규칙 8: impure 함수는 입구에서 한 번
+   확인한다)을 `New`·`IsExact` 가 쓰는 경우.
+
+**제안 (에이전트 제안, 확인되지 않음, 구현하지 않음).**
+- **순수 함수:** entry global 의 이름을 `tp_watch_names` 에 넣고(#413 이 리스트를 쥔 함수에 대해 이미 한다), 입구의
+  읽기 **전에** `tp_globals_epoch` 를 E0 로 읽고, ok 로 돌아가기 전에 epoch 가 E0 그대로인지 본다. 바뀌었으면
+  deopt(아직 아무 효과가 없으니 해석 실행으로 다시 하는 것이 그대로 한 실행이다). 근거: epoch 는 늘기만 하고,
+  watcher 는 저장 전에 올린다. B 의 재바인딩 뒤의 쓰기를 본 읽기가 있으면 그 뒤의 epoch 읽기는 바뀐 값을 본다.
+  그대로면 [E0, 끝] 동안 감시하는 전역이 하나도 바뀌지 않았으므로 인터프리터의 모든 전역 읽기를 프로그램 위치에
+  둘 수 있다. 호출당 atomic load 하나. watcher id 가 없는 모듈은 늘 deopt(#413 과 같다). 값 비교로는 안 된다:
+  B 가 `G = 2; x = 2; y = 7; G = 1` 이고 f 가 x 를 읽고, G 를 쓰고, y 를 읽으면, 컴파일은 (x = 2, G = 1, y = 0) 을 내고
+  끝에서 다시 읽은 G 도 1 이다. 인터프리터는 x = 2 를 본 뒤 G = 1 을 보려면 B 의 마지막 줄을 본 것이므로 y = 7 을 본다.
+- **impure 함수:** 효과 뒤에는 deopt 할 수 없다(사 이후 리스트 저장은 바로 보이고, 버퍼 저장도 그렇다). 후보:
+  (가) 입구 뒤의 공유 읽기(entry global 이 있는 callee, FieldGet, 또는 그런 것을 하는 callee)가 있거나 entry global 이
+  둘 이상인 impure 함수를 해석 실행으로 둔다(verifier 규칙). 다섯 벤치마크에는 해당 함수가 없다(entry global 이 있는
+  컴파일 함수는 `next_state` 하나, 순수). (나) 첫 효과 전에 epoch 를 확인하고 첫 효과 뒤의 공유 읽기를 금지. (다) 임의
+  지점의 OSR 출구(위 다 의 (c), (d2) 와 같은 한계). **오너 결정 사항.**
+- **#413 과의 관계:** #413(브랜치 feat/tp-390-section-window, 머지 전)은 리스트를 쥔 함수에 `tp_eg_snapshot`
+  (모듈 dict 섹션 안의 epoch + 값)과 `tp_eg_current`(copy-in 뒤 epoch 확인), 이름의 `tp_watch_names` 등록을 넣는다.
+  위 순수 함수 수정은 같은 E0 를 쓰고 확인 지점을 호출 끝까지 늘리는 것이다. 지금 따로 구현하면 그 장치를 겹쳐 만들고
+  충돌하므로, #413 이 머지된 뒤에 그 위에 올리는 것을 제안한다.
+
+**구현 (#414, 에이전트 제안, 확인되지 않음; 코디네이터의 설계 A, B, C 를 이 위에 구현).** 지킨 제약: GIL 전용 기능
+없음, Python 동작 변화 없음(모든 실행이 CPython 이 만들 수 있는 interleaving), 공개 API 만.
+- **"입구 뒤의 공유 읽기" (cgen `_shared_reads`, verify `_Checker.shared`).** 다른 스레드가 바꿀 수 있는 상태를
+  프로그램 위치에서 읽는 노드: OBJ `Global`, `IsExact`·`New` 의 클래스 전역, `CheckMethod` 의 클래스 dict, `FieldGet`
+  의 슬롯, 원소 단위로 읽는 리스트(`ir.direct_lists`)의 `Index`·`Len`, 호출자가 쥐지 않은 callee entry global(Call
+  에서 읽음). 세지 않는 것: 리스트 copy(섹션이 얼린다), `array.array`·numpy 버퍼 원소(위 사 (2): CPython 자체가 순서를
+  주지 않는다), 실패하면 해석 경로를 고를 뿐인 guard(`Param.cls`, `CheckExact`).
+- **A. 순수 함수 (`cgen._needs_epoch`).** 리스트 copy 가 없고, 호출 트리가 entry global 이름을 둘 이상 읽거나, 하나와
+  다른 공유 읽기를 하는 순수 함수. wrapper 가 watcher id 가 없으면 deopt, 있으면 자기 entry global 과 epoch E0 를 모듈
+  dict 섹션 안에서 읽고(`tp_eg_snapshot`, 모듈 dict 만, 이름이 없으면 deopt; 자기 entry global 이 없어도 n = 0 으로
+  섹션 안에서 epoch 만 읽는다), 호출 동안 snapshot depth 를 올리고(poll 이 사용자 코드를 돌리지 않는다; OSR 출구도
+  끈다), impl 이 돌아오면 결과(ok)이든 예외(-1)이든 `tp_eg_unchanged(E0)`(acquire fence 뒤 epoch 비교)가 참일 때만
+  그대로 낸다. 거짓이면 결과를 버리고(OBJ 는 놓고) 예외는 지우고 deopt 한다. 트리 안의 모든 entry global 이름은
+  `tp_watch_names` 에 들어간다. 순수 호출자 안의 callee entry global 은 모듈 dict 에서만 읽는다(`tp_eg_read`; 없으면
+  callee 의 deopt). 이름 하나에 다른 공유 읽기가 없으면(경우 4, wordfreq `next_state`) 아무것도 바꾸지 않는다.
+  - **확인은 어느 프레임에서 하는가.** 트리에 밖에서 들어오는 프레임 하나: wrapper(그 아래 impl 과 fast twin, C to C
+    callee 는 모두 그 구간 안), 그리고 자기 entry global 이 없는 impure 호출자의 그 Call 지점(같은 snapshot, 같은
+    depth, 같은 확인; 바뀌었으면 tp_s = 1 로 callee 를 해석 redo). impl 안에서는 확인하지 않는다. 순수 호출자 안의
+    callee 는 루트의 구간이 덮는다. entry global 을 쥔 impure 호출자(아래 B)는 callee 의 이름을 모두 쥐어 넘겨야 하고
+    다른 공유 읽기가 없어야 하므로 그 Call 에는 확인이 필요 없다(있으면 오히려 틀린다: 해석 redo 가 새 값을 읽고
+    호출자는 옛 값을 계속 쓴다).
+  - **논증.** (1) watcher 는 저장마다 dict 의 잠금 안에서 저장 **전에** epoch 를 올린다(`Objects/dictobject.c:2009`,
+    `tp_class_global_ok` 의 근거와 같다). E0 를 같은 잠금 안에서 읽으므로 E0 때 epoch 만 올리고 저장은 아직인 저장은
+    없다. 그래서 E0 를 잠그지 않고 읽으면 틀린다: B 의 watcher 가 E0 전에 올리고 저장이 f 의 읽기 뒤에 오면, f 는 옛 G 와
+    B 의 나중 쓰기를 같이 보고 epoch 는 그대로다. (2) 끝의 `tp_eg_unchanged` 가 E0 를 보면 [E0, 끝] 동안 감시하는 전역의
+    저장이 시작되지 않았다: f 의 어떤 읽기가 B 의 나중 쓰기를 보았다면(release store 를 읽었다면) 그 앞의 watcher 의
+    올림은 acquire fence 뒤의 epoch 읽기에 보인다. 그러면 감시하는 전역은 구간 내내 snapshot 의 값이므로, 인터프리터가
+    전역을 프로그램 위치에서 읽어도 같은 값이고, 다른 공유 읽기(필드, d1 리스트 원소, callee 전역)는 각자 실제 시각에
+    프로그램 순서로 일어났다. 각 읽기를 실제 시각에 둔 interleaving 이 그 실행이다. (3) callee entry global 을 Call 에서
+    잠그지 않고 읽어도 된다: 잠긴 E0 뒤의 저장은 모두 E0 뒤에 올린다. builtins dict 는 이 이름에 대해 감시하지 않으므로
+    모듈 dict 만 읽는다. (4) 예외도 결과다: 섞인 상태가 ZeroDivisionError 를 낼 수 있고(시험 `err2`: 옛 G 와 새 o.x
+    로 0 으로 나눔, 어떤 interleaving 도 내지 않는다) 그래서 오류 경로도 확인한다. 바뀌었으면 예외를 지우고 redo 하는
+    것이 합법인 이유: 순수 함수라 효과가 없고, snapshot depth 때문에 호출 안에서 poll 이 사용자 코드(시그널 처리기,
+    pending call)를 돌리지 않으므로 그 예외는 이 호출의 계산에서만 나온다(KeyboardInterrupt 같은 사용자 코드의 예외를
+    지우는 일이 없다). 그래서 버린 실행은 관측되지 않고, 해석 redo 가 그대로 한 실행이다. 남는 사용자 코드는 놓은
+    객체의 `__del__` 뿐이고 그 예외는 unraisable 이라 전해지지 않는다. (5) 값 비교로는 안 된다: B 가 `G = 2; x = 2;
+    y = 7; G = 1` 이면 끝에서 다시 읽은 G 는 1 이지만, x = 2 를 본 실행이 y = 7 을 놓친 것을 알 수 없다. epoch 은 두 번
+    올라 E0 와 다르다. (6) watcher id 가 없는 모듈은 늘 해석 실행이다(느릴 뿐 같은 결과).
+  - **비용.** 해당 함수마다 호출당 모듈 dict 섹션 한 번(경합하면 기다린다: 여러 스레드가 같은 함수를 부르면 섞일 수
+    있다), acquire fence 와 atomic load 하나, 호출 안의 poll 없음(시그널과 stop-the-world 가 돌아올 때까지 미뤄지는
+    liveness 지연). 감시하는 이름이 자주 바뀌면 redo 가 잦다. 다섯 벤치마크에는 해당 함수가 없다.
+- **B. 효과가 있는 함수.** 첫 효과 뒤에는 deopt 할 수 없다.
+  - (1) 리스트 셋 이상에 효과(`ir.direct_writer`): entry global 이 없다(`verify/array-direct`), 스칼라 전역은 쓸 때
+    읽고(`Unbox(Global)`, 9c847a10) 문장 출구로 나간다, callee 트리에 entry global 이 없다(`_writer_callee_problem`).
+    고칠 것 없음. 시험: `test_direct_write.py` 의 `test_writers_lower_without_copy_in_or_entry_globals`,
+    `test_a_scalar_global_is_read_at_its_use`, `test_a_callee_with_an_entry_global_is_refused`.
+  - (2) 리스트 하나, 둘(창): entry global 은 copy-in 뒤 epoch 로 검증한 한 순간의 값이고(#390), 창 안에서 바뀔 수
+    있는 공유 읽기는 위 목록 중 하나도 닿을 수 없다: OBJ `Global`, `IsExact`, `CheckMethod`, 쥐지 않은 callee entry
+    global 은 `verify/array-wait`, `FieldGet`·`New` 는 `verify/array-open`, 원소 단위 리스트는 callee 가 배열을 받지
+    못하므로 없다. 쥔 callee entry global 은 같은 snapshot 에서 넘긴다. poll 은 창을 끝내고 다시 snapshot 과 epoch
+    확인을 하므로 창마다 한 순간이다. 그래서 창 안의 모든 읽기를 그 창의 copy-in 순간에 둘 수 있다. 이것을 지키는
+    verifier 규칙: `verify/entry-global-order`(entry global 이 있고 리스트를 쥐거나 순수하지 않은 함수의 호출 트리에
+    공유 읽기가 있으면 거절; cgen `_check_entry_order` 도 CGenError). 지금은 array-wait / array-open 과 겹치지만, 그것이
+    풀려도 이 구멍이 조용히 열리지 않는다.
+  - (3) 리스트 매개변수 없이 효과와 entry global: closed 함수의 효과는 배열 매개변수에 대한 저장뿐이므로(배열은 Call
+    로 넘길 수 없다) 이것은 버퍼만 쥔 함수다. 문장 출구는 리스트를 쥔 함수와 direct writer 에만 있어 "쓸 때 읽기" 로
+    바꾸려면 버퍼 함수에 연속과 출구를 새로 만들어야 한다: 작지 않다. 그래서 거절한다(`verify/entry-global-order`,
+    해석 실행으로 남음): entry global 이 둘 이상이면 한 snapshot 에서 읽고(입구와 poll 모두 `tp_eg_snapshot`, 한 순간),
+    호출 트리에 공유 읽기(쥐지 않은 callee entry global 포함)가 있으면 거절. 다섯 벤치마크의 해당 함수: 없음.
+  - GIL 빌드: 같은 코드, 같은 논증이다. 다른 스레드가 끼는 곳은 Python 코드가 돌거나 poll 이 GIL 을 넘기는 곳뿐이다.
+    A 의 호출은 poll 이 아무것도 하지 않으므로(snapshot depth) 끝까지 다른 스레드가 끼지 않고 epoch 확인은 늘 통과한다
+    (같은 스레드의 `__del__` 이 전역을 바꾼 경우만 redo). B (2) 는 창 안에 사용자 코드도 redo 도 없고 poll 이 창을
+    나눈다. B (3) 와 경우 4 의 함수는 snapshot holder 라 자기 poll(값을 다시 읽어 바뀌면 OSR 출구)에서만 넘긴다.
+- **C. 클래스 이름 전역(경우 5) 판정: 같은 결함이 아니다(읽어서 확인).** `New` 와 `IsExact` 는 클래스 전역을 쓸 때
+  읽는다: `tp_class_global_ok` 의 캐시된 1 은 epoch 가 그 뒤로 움직이지 않은 동안만 쓰이고, 캐시는 dict 섹션 안에서
+  epoch 와 함께 채워지므로 그 시각의 dict 읽기와 같다. 입구로 당겨 읽지 않으므로 그 자체로는 #414 가 아니다. entry
+  global 과 함께 있으면 위의 "다른 공유 읽기" 이고 같은 장치로 다룬다(A 는 epoch, B 는 거절). 덧붙여: 규칙 8(효과가
+  있는 entry-global 함수는 입구에서 클래스를 확인하므로 안에서 slow path 가 돌지 않는다)의 전제는 free-threaded 에서
+  성립하지 않는다(다른 스레드가 확인 뒤에 클래스를 바꿀 수 있다). 지금은 `FieldGet`·`New`·`IsExact` 가 그런 함수에
+  있을 수 없으므로(위 B 규칙, 그리고 배열을 쥔 함수의 array-open) slow path 에 닿지 않는다.
+- **결과.** 다섯 벤치마크의 컴파일 함수 집합과 생성 C 는 바이트 단위로 같다(`.cache/boost/ft-sets/sets.py` 로
+  9c847a10 과 비교). 시험 파일의 소스 문자열 355 개(front end + verifier + cgen)도 컴파일 집합과 생성 C 가 같다:
+  기존 front end 출력에는 A 나 B (3) 에 걸리는 함수가 없다.
+- **시험.** `test_entry_epoch.py`: 생성 C 구조(wrapper 의 snapshot, 끝의 두 확인, snapshot depth, 한 순간의 두
+  entry global, impure 호출자의 Call 지점, 모듈 dict 만 읽는 callee 전역, 감시 이름, 경우 4 는 그대로, 변형 지점)와,
+  `-DTP_TEST_EG_HOOK` 로 만든 결정적 동작 시험(CI): wrapper 의 입구 읽기 뒤, 본문 앞에서 hook 이 B 의 두 쓰기를 하고,
+  결과는 interleaving 이 허락하는 집합 안이어야 한다(경우 1, 2, impure 호출자, 예외 경로; 경우 3 은 두 읽기가 한
+  섹션 안이라 사이에 hook 을 넣을 수 없어 구조 시험과 집합 시험만). 변형(`cgen._epoch_check` 를 끈 빌드)은 정확히
+  21.0, 21.0, 21.0, ZeroDivisionError 를 내야 한다. `test_verify.py`: `verify/entry-global-order` 의 거절과 수락.
+  컴파일이 필요한 시험은 이 글을 쓴 에이전트가 돌리지 않았다(AGENTS.md 10).
+- **남은 점 (고치지 않음).** 리스트 하나, 둘의 순수 함수(창)는 A 에서 빠진다: 창 규칙으로 공유 읽기가 없기 때문이다.
+  A 의 함수에서 OSR 출구를 끈 것은 liveness 비용이다(대안: poll 앞에서 epoch 를 보고 바뀌었으면 deopt, 뒤에서 보고
+  바뀌었으면 OSR 출구; 만들지 않았다).
 
 ### 4.4 Kotlin 경계의 직접 호출
 
