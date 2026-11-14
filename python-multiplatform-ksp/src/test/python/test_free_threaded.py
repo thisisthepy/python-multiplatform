@@ -1037,8 +1037,45 @@ def test_mutant_without_the_array_critical_section_is_caught(built, tmp_path):
     assert detected, "the mutant (no critical section around copy-in) was not caught"
 
 
-def _racy_runtime(tmp: Path, *, drop_dict_lock: bool, plain_epoch: bool) -> Path:
-    """A copy of tp_runtime.h with one #159 protection removed (the mutation of that protection)."""
+# Mutant-build-only scheduling helpers (#399). A mutant of the real header may contain these; the real
+# header never does. TP_MUT_YIELD gives up the CPU (POSIX sched_yield, Windows SwitchToThread) so the
+# thread a mutant waits for can run even when the runner has fewer vCPUs than runnable threads.
+# TP_MUT_SPIN_MAX bounds every wait, so a mutant never hangs: it only loses the widened window.
+_MUT_PRELUDE = """#include <Python.h>
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#define TP_MUT_YIELD() ((void)SwitchToThread())
+#else
+#include <sched.h>
+#define TP_MUT_YIELD() ((void)sched_yield())
+#endif
+#define TP_MUT_SPIN_MAX 4000000L
+"""
+
+
+def _with_mut_prelude(h: str) -> str:
+    assert h.count("#include <Python.h>\n") == 1
+    return h.replace("#include <Python.h>\n", _MUT_PRELUDE, 1)
+
+
+def _racy_runtime(tmp: Path, *, drop_dict_lock: bool, plain_epoch: bool, hold_watch_open: bool = False) -> Path:
+    """A copy of tp_runtime.h with one #159 protection removed (the mutation of that protection).
+
+    hold_watch_open (the dict-lock mutant only) makes the window deterministic. The real code is
+    sound because the watcher (which moves tp_globals_epoch) and the store of the new binding both
+    run under the dict's lock, which tp_class_global_ok also takes. Without that lock the race needs
+    bump < reader's epoch load < reader's lookup < store, and the writer's bump-to-store gap is a few
+    tens of nanoseconds: a reader gets into it only by luck, and on a 3-4 vCPU runner with seven
+    runnable threads it rarely does. So the mutant build itself holds the gap open: right after the
+    watcher moves the epoch it waits (bounded, yielding) until another thread has looked the old
+    binding up under the new epoch AND remembered it in rt->gepoch. Only then does the store of the
+    new binding go ahead. The remembered binding is then stale by construction."""
     h = (cbuild.RUNTIME_DIR / "tp_runtime.h").read_text()
     g = h
     if drop_dict_lock:
@@ -1050,6 +1087,22 @@ def _racy_runtime(tmp: Path, *, drop_dict_lock: bool, plain_epoch: bool) -> Path
         g = g.replace("tp_atomic_load_u64(&tp_globals_epoch)", "tp_globals_epoch")
         g = g.replace("tp_atomic_load_u64(&rt->gepoch)", "rt->gepoch")
         g = g.replace("tp_atomic_store_u64(&rt->gepoch, epoch)", "rt->gepoch = epoch")
+    if hold_watch_open:
+        assert drop_dict_lock and not plain_epoch
+        g = _with_mut_prelude(g)
+        decl = "static uint64_t tp_globals_epoch = 1;\n"
+        assert g.count(decl) == 1
+        g = g.replace(decl, decl + "static uint64_t tp_mut_looked = 0;   /* mutant only: last epoch a reader remembered */\n"
+            "#define TP_MUT_HOLD_OPEN() do { uint64_t want_ = tp_atomic_load_u64(&tp_globals_epoch); long n_; \\\n"
+            "    for (n_ = 0; n_ < TP_MUT_SPIN_MAX && tp_atomic_load_u64(&tp_mut_looked) < want_; n_++) { \\\n"
+            "        if ((n_ & 63) == 63) { TP_MUT_YIELD(); } } } while (0)\n")
+        bump = "tp_atomic_add_u64(&tp_globals_epoch, 1);\n"
+        assert g.count(bump) == 2
+        g = g.replace(bump, "tp_atomic_add_u64(&tp_globals_epoch, 1);\n    TP_MUT_HOLD_OPEN();\n")
+        remember = "        tp_atomic_store_u64(&rt->gepoch, epoch);\n    }\n    return rc;"
+        assert g.count(remember) == 1
+        g = g.replace(remember, "        tp_atomic_store_u64(&rt->gepoch, epoch);\n"
+                      "        tp_atomic_store_u64(&tp_mut_looked, epoch);\n    }\n    return rc;")
     assert g != h
     d = tmp / "rt"
     d.mkdir(parents=True, exist_ok=True)
@@ -1062,7 +1115,7 @@ def test_mutant_without_the_dict_critical_section_is_caught(built, tmp_path):
     """Without the critical section around the epoch read and the global lookup, a thread can
     remember a binding the rebinding thread has already replaced (the watcher fires before the store)."""
     result, path, _ = built
-    rt = _racy_runtime(tmp_path, drop_dict_lock=True, plain_epoch=False)
+    rt = _racy_runtime(tmp_path, drop_dict_lock=True, plain_epoch=False, hold_watch_open=True)
     so = cbuild.build(cgen.generate(result.module, path), "ftmod", tmp_path / "mut", runtime_dir=rt)
     body = """
         stop = False
@@ -1077,6 +1130,7 @@ def test_mutant_without_the_dict_critical_section_is_caught(built, tmp_path):
             m.Cell = m.Twin if i % 2 == 0 else orig
             if type(m.mk(1, 2)).__name__ != ("Twin" if i % 2 == 0 else "Cell"):
                 bad.append(i)
+                break
         stop = True
         ht.join()
         print(json.dumps({"stale": len(bad)}))
@@ -1098,15 +1152,21 @@ def test_mutant_with_a_borrowed_field_read_is_caught(built, tmp_path):
     h = (cbuild.RUNTIME_DIR / "tp_runtime.h").read_text()
     good = "    return PyMember_GetOne((const char *)obj, m);\n"
     assert good in h
+    # The window is held open until the writer has replaced the slot (bounded, yielding), so the old
+    # value has lost the slot's reference before the borrowed pointer is turned into a reference: the
+    # mutant always resurrects a dead object (and every later release of it is a second dealloc),
+    # instead of relying on a writer that happens to run inside a fixed-length spin.
     racy = ("    PyObject *v = *(PyObject *volatile *)((char *)obj + m->offset);\n"
-            "    for (volatile int i = 0; i < 2000; i++) { }\n"
+            "    { long n_; for (n_ = 0; n_ < TP_MUT_SPIN_MAX\n"
+            "                && *(PyObject *volatile *)((char *)obj + m->offset) == v; n_++) {\n"
+            "          if ((n_ & 63) == 63) { TP_MUT_YIELD(); } } }\n"
             "    return Py_NewRef(v);\n")
     d = tmp_path / "rt"
     d.mkdir()
-    (d / "tp_runtime.h").write_text(h.replace(good, racy))
+    (d / "tp_runtime.h").write_text(_with_mut_prelude(h.replace(good, racy)))
     so = cbuild.build(cgen.generate(result.module, path), "ftmod", tmp_path / "mut", runtime_dir=d)
     body = """
-        cell = m.Cell((0, 0), None)
+        cell = m.Cell((0, [0]), None)
         stop = False
         bad = []
         def writer():
@@ -1117,8 +1177,10 @@ def test_mutant_with_a_borrowed_field_read_is_caught(built, tmp_path):
         def reader():
             for _ in range(20000):
                 v = m.geta(cell)
-                if type(v) is not tuple or len(v) != 2:
+                if (type(v) is not tuple or len(v) != 2 or type(v[1]) is not list
+                        or len(v[1]) != 1 or v[1][0] != v[0]):
                     bad.append(1)
+                    break
         wt = threading.Thread(target=writer); wt.start()
         errs = run_threads([reader] * 3)
         stop = True

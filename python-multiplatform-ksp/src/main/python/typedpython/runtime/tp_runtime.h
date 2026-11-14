@@ -1009,9 +1009,10 @@ static inline int tp_unbox_bool(PyObject *o, int *out)
  * made inside the call, so on free-threaded builds every store is written through at once, in
  * program order (tp_*_array_st, #391): such a reader sees what it would see of the interpreter's
  * one-by-one stores.
- * Polls (issue #152): a function holding an array polls only at loop tops with an OSR-style exit,
- * where it writes back, ends the section, polls, takes it again and copies in again; a loop without
- * one delays other threads' stop-the-world requests (the free-threaded GC) until the call returns.
+ * Polls (issue #152, #335, SPEC N-8): a function holding an array polls once per TP_POLL_INTERVAL
+ * at the top of a loop iteration: it writes the array back with exit, ends the critical section,
+ * polls, and enters again (re-taking the section and re-checking the list), so each poll costs a
+ * full write-back and copy-in of the list (#406).
  * exit: writes the dirty slots back as new objects (PyList_SetItem steals the new reference and, on
  * failure, drops it), always frees, and zeroes the struct. On a write-back failure it stops,
  * frees, and returns -1 with that error set (MemoryError, or IndexError if the list shrank).
@@ -2937,6 +2938,51 @@ static inline PyObject *tp_new_fixed(PyTypeObject *cls, PyMemberDef *const *slot
     return obj;
 }
 
+/* tp_new_fixed with the caller's references moved into the slots (#125, design 4.3.4 "참조 옮기기"):
+ * on success the object owns values[i] (the caller drops its pointers without releasing them); on
+ * failure nothing was taken and the caller still owns every values[i].
+ *
+ * Same stores, same object, same allocation as tp_new_fixed; what is gone is a Py_NewRef of each
+ * value here and the caller's Py_CLEAR of its temporary right after, a +1/-1 pair on the same object
+ * with nothing in between that can run code or reach a safepoint. Every reference count another
+ * thread can read during the call is one it could read with the pair (outside the pair's window), so
+ * no observation tells the two apart; the count after the call is the same. On failure the slots
+ * already written are emptied again before the half-built object is released, so its dealloc drops
+ * no reference the caller still owns.
+ * TP_MOVED_REF is the single mutation point: test_alloc_preserving.py builds with -DTP_MUTANT_COPY_MOVED,
+ * which defines it as Py_NewRef (a copy instead of a move), leaks one reference per slot and must fail. */
+#ifndef TP_MOVED_REF
+#ifdef TP_MUTANT_COPY_MOVED   /* the mutation: a copy instead of a move (an object-like switch, as cl.exe
+                                * cannot define a function-like macro on its command line) */
+#define TP_MOVED_REF(v) Py_NewRef(v)
+#else
+#define TP_MOVED_REF(v) (v)
+#endif
+#endif
+static inline PyObject *tp_new_fixed_move(PyTypeObject *cls, PyMemberDef *const *slots,
+                                          PyObject *const *values, Py_ssize_t n)
+{
+    Py_ssize_t i, j;
+    PyObject *obj = cls->tp_alloc(cls, 0);
+
+    if (obj == NULL) {
+        return NULL;
+    }
+    for (i = 0; i < n; i++) {
+        if (values[i] == NULL) {
+            for (j = 0; j < i; j++) {       /* give the moved references back to the caller */
+                *(PyObject **)((char *)obj + slots[j]->offset) = NULL;
+            }
+            PyErr_SetString(PyExc_AttributeError, slots[i]->name);
+            Py_DECREF(obj);
+            return NULL;
+        }
+        __atomic_store_n((PyObject **)((char *)obj + slots[i]->offset), TP_MOVED_REF(values[i]),
+                         __ATOMIC_RELEASE);
+    }
+    return obj;
+}
+
 /* type(obj) is cls */
 static inline int tp_is_exact(PyObject *obj, PyTypeObject *cls)
 {
@@ -2956,6 +3002,7 @@ typedef struct {
     Py_ssize_t count;       /* compiled frames in flight on this thread (this module) */
     PyObject *frame;        /* strong ref: the top Python frame when `pydepth` was measured */
     Py_ssize_t pydepth;     /* Python frames below and including `frame` */
+    Py_ssize_t seg;         /* Python depth of the current segment, -1 until measured (tp_seg_depth) */
 } tp_depth_state;
 
 #ifndef TP_POLL_INTERVAL
@@ -3021,17 +3068,26 @@ typedef struct {
     tp_osr *osr;                    /* the OSR context for the impl about to be entered (#152), or NULL */
 } tp_tls;
 
-static TP_THREAD_LOCAL tp_tls tp_tls_v = {{0, NULL, 0}, TP_POLL_INTERVAL, 0, NULL};
+static TP_THREAD_LOCAL tp_tls tp_tls_v = {{0, NULL, 0, -1}, TP_POLL_INTERVAL, 0, NULL};
 
 static inline tp_tls *tp_tls_get(void)
 {
     return &tp_tls_v;
 }
 
+#ifdef TP_TRACE_DEPTH
+/* Test builds only (-DTP_TRACE_DEPTH): how many times tp_python_depth read the top frame. */
+static Py_ssize_t tp_trace_frame_reads_count = 0;
+#define TP_TRACE_FRAME_READ() (tp_trace_frame_reads_count++)
+#else
+#define TP_TRACE_FRAME_READ() ((void)0)
+#endif
+
 /* Python frame depth of the running thread: public API only. The walk is O(depth), so it is
  * cached by the identity of the top frame (kept alive while compiled frames are in flight). */
 static inline Py_ssize_t tp_python_depth(PyThreadState *ts, tp_tls *t)
 {
+    TP_TRACE_FRAME_READ();
     PyFrameObject *top = PyThreadState_GetFrame(ts);    /* new ref or NULL */
     if (top == NULL) {
         return 0;
@@ -3056,9 +3112,35 @@ static inline Py_ssize_t tp_python_depth(PyThreadState *ts, tp_tls *t)
     return depth;
 }
 
+/* Segments (#125, design 4.3.3b, agent proposal, not confirmed). A segment is one impl call made
+ * by its wrapper, up to the return of any wrapper of this module called inside it. Within a
+ * segment the Python frames below the compiled frames do not change: whatever Python code runs in
+ * between (a callback, a __del__, a signal handler, a redo) pushes frames and pops every one of them
+ * before it returns to C, and the frames below cannot return while C above them runs. So the first
+ * depth check of a segment measures (tp_python_depth: one PyThreadState_GetFrame, and the walk when
+ * the top frame changed) and every later check reuses `seg`: exactly the value tp_python_depth would
+ * return there, with the frame cache in exactly the state it would leave. The wrapper resets `seg`
+ * right before its impl call (a nested wrapper must not take the outer segment's depth) and right
+ * after it (the outer segment then measures again at its next check, where it measured before
+ * segments existed: the cached frame, and so the lifetime of a returned callee's frame object, is
+ * unchanged). Not moved, per frame as before: Py_GetRecursionLimit (a __del__ or a callback can call
+ * sys.setrecursionlimit between two frames) and Py_EnterRecursiveCall (the C-stack guard compares
+ * this frame's stack address). Thread-local like `count`; both assume calls nest in LIFO order on a
+ * thread's C stack. */
+static inline Py_ssize_t tp_seg_depth(PyThreadState *ts, tp_tls *t)
+{
+    if (t->depth.seg < 0) {
+        t->depth.seg = tp_python_depth(ts, t);
+    }
+    return t->depth.seg;
+}
+
+static inline void tp_depth_seg_begin(tp_tls *t) { t->depth.seg = -1; }
+static inline void tp_depth_seg_end(tp_tls *t) { t->depth.seg = -1; }
+
 static inline int tp_enter_call(PyThreadState *ts, tp_tls *t)
 {
-    if (tp_python_depth(ts, t) + t->depth.count + 1 > Py_GetRecursionLimit()) {
+    if (tp_seg_depth(ts, t) + t->depth.count + 1 > Py_GetRecursionLimit()) {
         PyErr_SetString(PyExc_RecursionError, "maximum recursion depth exceeded");
         return -1;
     }
@@ -3097,7 +3179,7 @@ static inline void tp_leave_call(tp_tls *t)
  * compiled calls started from it see the true depth. */
 static inline int tp_depth_room(PyThreadState *ts, tp_tls *t, Py_ssize_t k)
 {
-    return tp_python_depth(ts, t) + t->depth.count + k <= Py_GetRecursionLimit();
+    return tp_seg_depth(ts, t) + t->depth.count + k <= Py_GetRecursionLimit();
 }
 
 /* After a fast tree: tp_python_depth may have cached the top frame (a strong reference) and, with
@@ -3136,6 +3218,16 @@ static PyObject *tp_trace_fast_hits(PyObject *tp_module, PyObject *tp_unused)
 static inline void tp_trace_fast_hit(void) {}
 #endif
 
+#ifdef TP_TRACE_DEPTH
+/* Test builds only: `__tp_trace_frame_reads__()`, installed by the exec slot. */
+static PyObject *tp_trace_frame_reads(PyObject *tp_module, PyObject *tp_unused)
+{
+    (void)tp_module; (void)tp_unused;
+    return PyLong_FromSsize_t(tp_trace_frame_reads_count);
+}
+static PyMethodDef tp_trace_frame_reads_def = {"__tp_trace_frame_reads__", tp_trace_frame_reads, METH_NOARGS, NULL};
+#endif
+
 /* ------------------------------------------------------------------------------------------
  * Eval breaker (issue #141). The interpreter checks between bytecodes for signals, pending calls,
  * GIL drop requests, async exceptions and scheduled collections; compiled code has no bytecodes.
@@ -3146,11 +3238,11 @@ static inline void tp_trace_fast_hit(void) {}
  * (forced GIL switching to a waiting thread, KeyboardInterrupt, gc). Public API only.
  *
  * Signal handlers, pending calls and other threads are user code that may change lists and
- * globals. A function holding an array copy-in or an entry-globals snapshot runs no user code by
- * contract (ir.ArrayParam, ir.Function.entry_globals), so such a function does not poll, and while
- * one is active (`tp_snapshot_depth > 0`, counted at its entry and exit) the slow path does nothing:
- * the event stays pending and is handled at the next poll or bytecode after it returns, which is the
- * CPython execution in which it arrived late.
+ * globals. A function holding an array copy-in or an entry-globals snapshot runs no user code while
+ * it holds them (ir.ArrayParam, ir.Function.entry_globals): while one is active
+ * (`tp_snapshot_depth > 0`, counted at its entry and exit) the slow path does nothing and the event
+ * stays pending. Its own polls (#152, #335) first write the arrays back and lower the depth, so the
+ * handler runs there with the lists up to date, and the function copies them in again after.
  * ------------------------------------------------------------------------------------------ */
 #ifndef TP_POLL_INTERVAL
 #define TP_POLL_INTERVAL 4096

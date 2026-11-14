@@ -83,3 +83,24 @@ jobs:
           name: python-${{ inputs.python_version || '3.15.0' }}t-wasm32-emscripten
           path: ${{ env.FT_OUT }}/*.tar.gz
           if-no-files-found: error
+
+      # Step 2 of #175 (agent proposal): embed CPython without main from the node main thread, as
+      # the library does. A separate step after the upload, so a probe failure or hang does not
+      # lose the archive. Node only: node uses a real Atomics.wait on the main thread, a browser
+      # busy-waits, so this says nothing about the browser.
+      - name: Embedding probe (no main)
+        run: |
+          root="$(ls -d "$FT_WORK"/wasm-check/python-*t-wasm32-emscripten | head -n 1)"
+          [ -d "$root" ] || { echo "no unpacked archive under $FT_WORK/wasm-check"; exit 1; }
+          log="$FT_WORK/embed-probe.log"
+          set +e
+          timeout 600 node .github/scripts/ft-wasm/embed-probe.mjs "$root" > "$log" 2>&1
+          rc=$?
+          set -e
+          cat "$log"
+          if [ "$rc" -ne 0 ]; then
+            last="$(grep -E '^\[[a-z0-9]+\]' "$log" | tail -n 1)"
+            echo "::error::embedding probe exited $rc (124 = timed out, a hang); last check printed: ${last:-none}"
+            exit "$rc"
+          fi
+          grep -q '^FT-WASM-EMBED-PROBE-OK$' "$log"

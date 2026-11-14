@@ -38,5 +38,5 @@ pythonpath = ["src/main/python"]
 addopts = "--basetemp=.pytest_tmp"
 markers = [
     "measurement: records cost; asserts only sanity bounds",
-    "race_mutant: shows a concurrency test catches a mutant; depends on the race firing, so local only (not in CI)",
+    "race_mutant: shows a concurrency test catches a mutant; depends on the race firing, so not in push CI; run with the TypedPython CI dispatch input race_mutant (#394)",
 ]
