@@ -782,6 +782,13 @@ def test_the_mutant_read_without_the_type_check_is_caught(tmp_path_factory):
         "    if hasattr(msvcrt, 'CrtSetReportMode'):\n"
         "        for k in (msvcrt.CRT_WARN, msvcrt.CRT_ERROR, msvcrt.CRT_ASSERT):\n"
         "            msvcrt.CrtSetReportMode(k, 0)\n"
+        "    try:\n"
+        "        ctypes.CDLL('ucrtbase')._set_abort_behavior(0, 3)\n"
+        "    except Exception:\n"
+        "        pass\n"
+        # where the child is if it is still running after 20 s (stderr, shown by the parent)
+        "import faulthandler\n"
+        "faulthandler.dump_traceback_later(20, exit=False)\n"
         "from typedpython import cbuild\n"
         "import test_direct_write as t\n"
         f"m = cbuild.load('dwnocheck', {m.__file__!r})\n"
@@ -791,8 +798,20 @@ def test_the_mutant_read_without_the_type_check_is_caught(tmp_path_factory):
         "got, want = t._both(m, ref, 'adv3', t._adv_make(1, 2, 3))\n"
         "print('SAME' if got == want else 'DIFFERENT')\n")
     env = dict(os.environ, PYTHONPATH=os.pathsep.join(p for p in sys.path if p))
-    r = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=120,
-                       env=env)
+    # Undefined behaviour has three outcomes here, and each of them is "not the interpreter's result":
+    # an abort (ubuntu, macOS: run 43580524047), a different result, or a call that never returns
+    # (windows: 6 hours in run 43580524047, the 120 s limit in run 43650072636). All count as caught, but
+    # only after the child printed READY, so a child that fails or hangs before the call is a failure.
+    def text(x):
+        return x.decode(errors="replace") if isinstance(x, bytes) else (x or "")
+    try:
+        r = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=45,
+                           env=env)
+    except subprocess.TimeoutExpired as e:
+        out, err = text(e.stdout), text(e.stderr)
+        assert out.startswith("READY"), "the child hung before the mutant call:\n" + out + err[-2000:]
+        print("caught by a call that did not return; the child's stack after 20 s:\n" + err[-2000:])
+        return
     assert r.stdout.startswith("READY"), r.stdout + r.stderr[-800:]      # the child got as far as the call
     assert r.returncode != 0 or r.stdout.split() == ["READY", "DIFFERENT"], \
         "a read that does not check the element type was not caught: " + r.stdout + r.stderr[-400:]
