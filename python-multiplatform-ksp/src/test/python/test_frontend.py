@@ -915,8 +915,9 @@ def test_nbody_kernels_lower(tmp_path):
     assert energy.pure and not energy.may_deopt
     offset = function(m, "offset_momentum")
     assert not offset.pure and not offset.may_deopt
-    assert offset.entry_globals == (Param("SOLAR_MASS", F64),)
-    assert nodes(offset, Global) == []
+    # #255 (d2): four lists, read and stored element by element: SOLAR_MASS is read at each use
+    assert offset.entry_globals == ()
+    assert nodes(offset, Global) == [Global(OBJ, "SOLAR_MASS")] * 3
 
 
 @pytest.mark.skipif(not BENCH.exists(), reason="benchmark worktree not present")

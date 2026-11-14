@@ -733,28 +733,84 @@ venv 의 3.15.0rc1t 헤더와 python/cpython 의 태그 `v3.15.0rc1` 소스(설�
   - 리스트 하나, 둘의 경로는 그대로다: 같은 입력에 develop 과 바이트 단위로 같은 C 를 만든다(생성 C 비교로 확인).
   - **비용(측정 전):** 읽기마다 함수 호출 하나와 참조 증감 한 쌍이다. copy-in 경로보다 느리고, 얼마나 빠른지는 CI
     측정을 기다린다.
-- **(d2) 쓰는 함수의 원소별 접근: 불가(지금).** 쓰기는 `PyList_SetItem` 하나로 원자적이지만, 효과 뒤의 읽기가 다른
-  타입을 만나면 인터프리터는 계속 실행하는데 우리는 그 지점의 연속이 없다(위 (c) 와 같은 한계; 바 의 5 이후 문장
-  시작 지점의 연속은 있지만, 효과 뒤의 출구에 쓰는 것은 구현하지 않았다). 임의 지점 OSR 출구가
-  생기면 (d2) 가 nbody `advance` 를 푼다.
+- **(d2) 쓰는 함수의 원소별 접근: 구현했다 (에이전트 제안, 확인되지 않음; 코디네이터의 설계를 구현).** 앞에서는
+  효과 뒤의 읽기가 다른 타입을 만나면 그 지점의 연속이 없어 불가였다. 바 의 5 의 문장 출구가 생겨서 그것을 쓴다.
+  - **접근.** `ir.direct_writer` = 리스트 매개변수 셋 이상, 효과 있음. copy-in, critical section, snapshot 이
+    없다. 읽기는 (d1) 과 같은 `tp_list_ld_*`, 저장 `a[i] = v` 는 `tp_list_st_*`: 새 float / int 를 먼저 만들고, 음수
+    색인을 그 순간의 길이로 고친 뒤 `PyList_SetItem`(리스트 자신의 섹션 안에서 범위를 보고 release store, 실패해도
+    참조를 훔친다). 범위 밖은 인터프리터와 같은 `IndexError("list assignment index out of range")`. `a[i] op= e` 는
+    읽기, 계산, 저장이고 색인은 한 번 계산한다(인터프리터에서도 원자적이지 않다). 이것은 인터프리터의 공유 읽기와
+    쓰기를 같은 순서로 하는 것이므로, 다른 스레드의 연산이 그 사이 어디에 끼든 CPython 이 만드는 interleaving 이다.
+    같은 리스트를 두 번 넘겨도(별칭) 연산이 리스트에 바로 가므로 특별한 처리가 없다.
+  - **나가기.** 효과 뒤에는 호출 전체를 deopt 할 수 없다. 그래서 읽기가 다른 타입의 원소(또는 i64 밖의 int)를 만나면,
+    실행 중인 문장의 문장 출구로 나간다: 그 문장을 처음부터 해석 실행으로 다시 하고 함수의 나머지를 이어 간다. 첫 효과
+    전이라도 같은 길 하나만 쓴다(호출 전체 deopt 를 두지 않는다). 순수 함수(d1) 는 deopt 그대로다. 출구 꼬리는 IR 문장마다
+    하나를 그 문장 뒤에 두고 읽기들이 `goto` 로 간다(읽기마다 꼬리를 두면 nbody 의 생성 C 가 7070 줄, 공유하면 6305 줄;
+    대부분은 모듈 소스에 붙는 연속의 파이썬 소스다). 효과가 있고 리스트를 쥔 함수(바 의 5)의 C 는 바뀌지 않는다.
+  - **문장마다의 규칙 (verifier `verify/array-direct`, `_stmt_exit_problem`; cgen 은 `_stmt_exit` 에서 다시 보고
+    CGenError).** 나갈 수 있는 노드(`resume.exit_nodes`: Call, 리스트 매개변수의 원소 읽기, Unbox)를 스스로 계산하는
+    IR 문장 T(원래 문장 S)마다: (1) S 에 문장 출구가 있다(`resume.exit_problem`); (2) T 의 노드에 효과나 사용자 코드가
+    없다, Call 은 순수 callee 만; (3) S 의 IR 이 T 앞에서 한 일은 연속이 받지 않는 이름의 Assign(임시 변수)뿐이다. cgen
+    은 방출 순서로 "S 가 이미 저장했거나 받는 지역을 묶었다"(`_commits`)를 적어 두고, 그 뒤 S 의 출구를 만들라고 하면
+    CGenError 를 낸다. 즉 각 원래 문장에서 나갈 수 있는 노드는 모두 그 문장의 첫 효과 전, 연속이 받는 지역의 대입 전에
+    계산된다. 왜 유효한가: S 가 나가기 전에 한 일은 읽기와 순수 계산뿐이고 그 결과는 버린다. 다시 하는 읽기는 다른
+    스레드의 연산이 S 의 시작 뒤에 낀 interleaving 이다. 앞의 문장들의 저장은 이미 리스트에 있다.
+  - **문장 종류별.** Assign / 주석 붙은 Assign(`dx: float = x[i] - x[j]`), AugAssign(`px += vx[i] * mass[i]`),
+    StoreIndex(`vx[0] = -px / SOLAR_MASS`, `vx[i] -= dx * mass[j] * mag`: 값, 색인, 저장이 마지막), Return, 식 문장,
+    `if` / `while` 의 시험, `for` 의 `range` 경계: 구조상 받음(저장이나 묶기가 그 문장에서 CPython 이 하는 마지막
+    일이다). 같은 원래 문장의 IR 에서 저장 뒤의 IR 문장이 나갈 수 있는 노드를 가지면 거절(프론트엔드는 만들지 않는다,
+    손으로 만든 IR 시험). 거절: 효과가 있는 callee 의 Call(규칙을 세울 수 있으나 프론트엔드가 만들지 않으므로 받지
+    않았다), 호출 트리에 entry global 이 있는 callee(그 callee 는 입구에서 한 번 읽는다: 아 의 #414 와 같은 꼴, 넘겨 줄
+    호출자 snapshot 도 없다), 버퍼 매개변수, 리스트 매개변수의 `a[:]`, 병렬 루프(원소별 리스트는 경계를 증명하지 않으므로
+    프론트엔드의 IR 에서는 병렬 루프가 생기지 않고 `parallel=True` 도 순차로 컴파일된다; 선언된 `par` 는 거절), 문장 연속이
+    없는 문장(`resume.exit_problem`: 루프 else, try, with, match 안, 대응 없는 지역), 가상 객체와 영역(`osr_problem`;
+    리스트 함수에서는 array-open 이 먼저 막는다).
+  - **모듈 전역 (`offset_momentum` 의 `SOLAR_MASS`).** 이런 함수에는 entry global 이 없다(입구에서 한 번 읽은 값은 뒤의
+    공유 읽기와 맞지 않을 수 있다, 아). 프론트엔드는 impure 모드에서 리스트가 셋 이상이면 entry global 후보인 이름을
+    `Unbox(Global(name))` 으로 낮춘다(가장 작은 변경: `_Lowerer.name` 한 곳). cgen 은 그 자리에서 LOAD_GLOBAL 처럼
+    읽는다(전역 캐시 `tp_gcache_global`: 모듈 dict, 다음 builtins; 잠근 리스트가 없으므로 dict 섹션에서 기다려도
+    무해). 이름이 없거나(NameError) 다른 타입이면 문장 출구로 나가고, 인터프리터가 NameError 를 내거나 그 타입으로
+    계산한다. 비용(측정 전): 쓰임마다 epoch 비교와 캐시 hit 의 참조 증감, 캐시가 비면 dict 조회 한 번.
+  - **오류.** 인터프리터도 그 연산에서 내는 오류(읽기·저장의 IndexError, ZeroDivisionError, math domain error)는
+    앞의 저장 뒤에 그 자리에서 낸다. 다른 impure 함수와 같은 방식이다.
+  - **eval breaker.** snapshot 이 없으므로 리스트 없는 함수처럼 poll 한다(입구의 `tp_poll`, 루프의 chunk poll). poll
+    에는 연속이 필요 없다. 문장 출구의 문맥 `tp_my` 는 poll 이 파이썬 코드를 돌리기 전에 입구에서 받는다. fast twin
+    은 연속을 부르는 동안 자기 트리의 프레임을 센다(`tp_depth_py_begin`).
+  - **비용(측정 전).** 읽기마다 `PyList_GetItemRef` 와 참조 증감, 저장마다 객체 하나와 `PyList_SetItem` 하나. nbody
+    `advance` 의 안쪽 루프는 읽기 18 번과 저장 6 번이다. copy-in 경로보다 느리고, 해석 실행보다 얼마나 빠른지는 CI
+    측정을 기다린다. 모듈 import 때 연속 수만큼 파이썬 소스를 컴파일한다(nbody: `advance` 의 루프 연속 4 개와 문장 연속 12 개, `offset_momentum` 의 1 개와 6 개).
 
 #### 라. 판정과 결과
 
-- 셋 이상의 리스트에 **쓰는** 함수는 (B) 그대로 해석 실행이다(develop 과 같은 frontend/verify/cgen 거절).
-- **순수** 함수는 (d1) 로 컴파일된다. nbody: `energy` 가 컴파일되고, `advance`·`offset_momentum` 은 해석
-  실행이다(`test_class_methods.py` 의 EXPECTED). nbody 전체 속도는 `advance` 가 정하므로 거의 그대로일 것이다(측정 전).
-- 시험(`test_free_threaded.py`): 순수 3·7 리스트 함수의 컴파일, 인터프리터와 같은 결과(빈 리스트, 별칭, 다른 타입
-  원소의 deopt, 리스트가 아닌 인자, 짧은 리스트의 IndexError); 쓰는 3 리스트 함수와 entry global 이 있는 3 리스트
-  함수는 해석 실행; 프로그램 순서 시험(쓰는 스레드가 `c[0]` 다음 `a[0]` 을 쓰고, `a[0]`, `c[0]` 순으로 읽는 함수가
-  늘 `c[0] >= a[0]` 을 본다); 동시에 int 와 float 를 바꿔 넣어도 결과가 늘 인터프리터의 것; `list.sort` key 에서
-  부르기. 변형 시험: 읽기 순서를 바꾼 변형(`race_mutant`, CI 기본 실행 밖)과 원소 타입 검사를 뺀 런타임(결정적,
-  CI 에서 실행)이 잡혀야 한다. 옵션 (A) 변형은 3 리스트 쓰기 경로가 없어져 대상이 없으므로 지웠다.
+- 셋 이상의 리스트에 **쓰는** 함수는 (d2) 로 컴파일된다(에이전트 제안, 확인되지 않음). 앞에서는 (B) 그대로 해석
+  실행이었다.
+- **순수** 함수는 (d1) 로 컴파일된다. nbody: `energy`, `advance`, `offset_momentum` 이 컴파일된다
+  (`test_class_methods.py` 의 EXPECTED). 다른 네 벤치마크의 컴파일 함수 집합과 생성 C 는 바이트 단위로 같다
+  (binary_trees, fannkuch, spectral_norm, wordfreq; front end + verifier + cost + cgen 을 이 변경 전후에 돌려 비교).
+  nbody 의 생성 C 는 704 줄에서 6305 줄이 되었고 `clang -fsyntax-only` 를 통과한다. 속도는 측정 전이다.
+- 시험(`test_free_threaded.py`, d1): 순수 3·7 리스트 함수의 컴파일, 인터프리터와 같은 결과(빈 리스트, 별칭, 다른 타입
+  원소의 deopt, 리스트가 아닌 인자, 짧은 리스트의 IndexError); entry global 이 있는 순수 3 리스트 함수는 해석 실행;
+  프로그램 순서 시험(쓰는 스레드가 `c[0]` 다음 `a[0]` 을 쓰고, `a[0]`, `c[0]` 순으로 읽는 함수가 늘 `c[0] >= a[0]` 을
+  본다); 동시에 int 와 float 를 바꿔 넣어도 결과가 늘 인터프리터의 것; `list.sort` key 에서 부르기. 변형 시험: 읽기
+  순서를 바꾼 변형(`race_mutant`, CI 기본 실행 밖)과 원소 타입 검사를 뺀 런타임(결정적, CI 에서 실행)이 잡혀야 한다.
+  옵션 (A) 변형은 3 리스트 쓰기 경로가 없어져 대상이 없으므로 지웠다.
+- 시험(`test_direct_write.py`, d2): 프론트엔드(nbody 꼴의 함수, 전역의 `Unbox(Global)`), verifier 의 수락과 거절
+  (`a[:]`, 선언된 병렬 루프, 버퍼, entry global 이 있는 callee, 효과 있는 callee, 연속 없는 문장, 손으로 만든 IR 에서
+  저장 뒤의 읽기), cgen 의 CGenError, resume 의 차분 시험(쓰는 문장마다; 문장을 건너뛰는 변형 연속이 잡힘), 생성 C 의
+  구조(잠금·copy 없음, 읽기와 저장이 원래 순서의 `tp_list_ld_*` / `tp_list_st_*`, 다른 타입은 문장 출구, 전역은 쓰는
+  자리에서 읽음, poll), 그리고 컴파일한 확장의 동작(CI): 모든 위치에 심은 다른 타입 원소, 부분 효과 뒤의 IndexError,
+  전역의 재바인딩·삭제·다른 타입, 별칭, 빈 리스트, 음수 색인, callee 넘침, nbody 전체, 프로그램 순서 스레드 시험, 결정적
+  변형 둘(문장을 건너뛰는 연속, 타입 검사 없는 읽기). 컴파일이 필요한 시험은 이 글을 쓴 에이전트가 돌리지 않았다
+  (AGENTS.md 10).
 
 #### 마. 오너 결정이 필요한 점
 
 1. (d1) 을 받아들일지(에이전트 제안). 받아들이지 않으면 순수 함수도 (B) 로 돌린다(`ir.direct_lists` 하나).
-2. 쓰는 함수(nbody `advance`)를 위해 임의 문장 지점의 OSR 출구를 만들지: (c) 의 구간 나누기와 (d2) 가 둘 다 그것에
-   걸려 있다.
+2. (d2) 를 받아들일지(에이전트 제안): 쓰는 함수의 원소별 저장과 문장 출구, 그리고 그 함수에서 모듈 전역을 쓰는
+   자리에서 읽는 것. 받아들이지 않으면 `ir.direct_writer` 인 함수를 다시 해석 실행으로 둔다.
+3. 순수 (d1) 함수도 전역을 쓰는 자리에서 읽을지(지금은 entry global 이 있으면 해석 실행). 같은 `Unbox(Global)` 로
+   가능하고 deopt 는 아직 효과가 없을 때만 일어난다.
+4. (c) 의 구간 나누기는 이제 필요 없다(d2 가 nbody `advance` 를 푼다).
 
 #### 바. 리스트 하나, 둘의 창 안에서 기다리는 연산 (#390)
 

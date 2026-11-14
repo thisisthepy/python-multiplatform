@@ -920,9 +920,10 @@ EXPECTED = {
     "fannkuch": {"fannkuch"},
     "spectral_norm": {"eval_a", "mul_atv", "mul_av"},
     "wordfreq": {"next_state", "word_of", "main"},   # word_of and main: native ints, #232
-    # #255: a pure function reads its three or more lists element by element (energy); advance and
-    # offset_momentum store into theirs and stay interpreted (no lock for more than two objects)
-    "nbody": {"energy"},
+    # #255: three or more lists are read element by element, no lock (CPython has none for more than
+    # two objects): energy (pure, d1); advance and offset_momentum store element by element too and
+    # leave through statement exits (d2, agent proposal, not confirmed)
+    "nbody": {"advance", "energy", "offset_momentum"},
 }
 
 

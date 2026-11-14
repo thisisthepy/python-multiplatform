@@ -65,7 +65,8 @@ Entry globals (ir.Function.entry_globals). A module-level name assigned once at 
 float/int/bool (annotated, or literals and arithmetic of such names), never rebound or deleted in
 the module, and read in a *closed* function (one that runs no user code, decided after lowering)
 is read once at entry: a `Param` of the function and `Local(name)` at every read. Elsewhere it is a
-`Global` (OBJ).
+`Global` (OBJ). In a function with an effect and three or more list parameters (#255 (d2),
+`ir.direct_writer`, agent proposal) such a name is `Unbox(Global(name))` instead, read at each use.
 """
 from __future__ import annotations
 
@@ -1002,6 +1003,11 @@ class _Lowerer:
         self.arrays = {p.name: p.type for p in sig.params if isinstance(p, ir.ArrayParam)}
         self.numpy = {p.name for p in sig.params
                       if isinstance(p, ir.ArrayParam) and p.buffer == "numpy"}
+        # #255 (d2), agent proposal, not confirmed: in impure mode a function with three or more list
+        # parameters reads and stores them element by element (ir.direct_writer) and has no entry
+        # global: a scalar module global is read at each use (`name`)
+        self.direct_write = impure and sum(isinstance(p, ir.ArrayParam) and p.buffer is None
+                                           for p in sig.params) > 2
         self.bindings: dict[str, list[_Binding]] = {}
         self.annotations: dict[str, list[tuple[int, str]]] = {}
         self._collect_bindings()
@@ -1074,20 +1080,20 @@ class _Lowerer:
             "impure mode emitted a deopting node"
         n_lists = sum(isinstance(p, ir.ArrayParam) and p.buffer is None for p in params)
         if n_lists > 2:
-            # Free-threaded CPython (#159): an impure function's lists are locked from copy-in to
+            # Free-threaded CPython (#159): copying lists in needs them locked from copy-in to
             # write-back, and CPython offers one- and two-object critical sections only (a nested
-            # third could suspend the others). A pure one reads them element by element (#255,
-            # ir.direct_lists), and a read of an element of another type deopts.
-            if not pure:
-                raise Skip(self.fn.lineno, f"more than two list parameters ({n_lists}) are not supported "
-                                           "in a function with an effect: compiled code holds each list's "
-                                           "lock from copy-in to write-back, and free-threaded CPython has "
-                                           "no lock for more than two objects at once")
-            if self.entry_used:
+            # third could suspend the others). So three or more are read element by element (#255,
+            # ir.direct_lists). A pure function deopts on an element of another type (d1). One with
+            # an effect (ir.direct_writer, d2) stores element by element too and leaves through
+            # statement exits; lowered in impure mode it reads globals at their use (`name`), so it
+            # has no entry global. (A pure-mode lowering with an effect is discarded by
+            # `_lower_function`, which lowers the function again in impure mode.)
+            if pure and self.entry_used:
                 raise Skip(self.fn.lineno, f"more than two list parameters ({n_lists}) and a module global "
                                            "read: the lists are read element by element, so the global "
                                            "cannot be read once at entry (#255)")
-            self.deopts = True
+            if pure:
+                self.deopts = True
         fn = ir.Function(
             name=self.sig.qname, params=params, returns=self.sig.returns, locals=locals_, body=body,
             pure=pure, may_deopt=self.deopts, source_line=self.fn.lineno,
@@ -1858,6 +1864,10 @@ class _Lowerer:
                     b.how == "annotation" for b in self.bindings[name]):
                 raise Skip(node.lineno, f"`{name}` is read but never assigned")
             return ir.Local(self.local_type(name, node.lineno), name)
+        if name in self.candidates and self.direct_write:
+            # #255 (d2): read at this use, as LOAD_GLOBAL does; a missing name or a value of another
+            # type leaves through the statement exit (ir.direct_writer), so this is not a deopt
+            return ir.Unbox(self.candidates[name], ir.Global(Type.OBJ, name))
         if name in self.candidates:
             self.entry_used.setdefault(name, self.candidates[name])
             return ir.Local(self.candidates[name], name)

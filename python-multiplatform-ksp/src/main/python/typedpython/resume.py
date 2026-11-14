@@ -44,8 +44,14 @@ test, which makes the continuation of a `while` statement the same as its loop c
 statement must be reached through plain `if` / `for` / `while` statements (no loop `else`, not inside
 try / with / match), as a loop site.
 
-`osr_problem`, `mappable` and `exit_problem` are the one definition of "this function has OSR-style
-exits" and "this statement has a statement exit" that `cgen` and `verify` both use.
+Direct writers (#255 (d2), `ir.direct_writer`; agent proposal, not confirmed): a function with an
+effect and three or more lists holds no snapshot (it polls as a function without lists) but gets
+continuations too (`has_exits`): its element reads, Unboxes and Calls (`exit_nodes`) leave through
+the statement exit of their statement, so `exit_stmts` lists every statement holding one.
+
+`osr_problem`, `mappable`, `exit_nodes` and `exit_problem` are the one definition of "this function
+has OSR-style exits", "this node leaves" and "this statement has a statement exit" that `cgen` and
+`verify` both use.
 """
 from __future__ import annotations
 
@@ -80,11 +86,18 @@ def has_snapshot(f: ir.Function) -> bool:
     return bool(f.entry_globals) or any(isinstance(p, ir.ArrayParam) for p in f.params)
 
 
+def has_exits(f: ir.Function) -> bool:
+    """`f` gets continuations: it holds a snapshot (`has_snapshot`), or it has an effect and reads and
+    stores three or more lists element by element (`ir.direct_writer`, #255 (d2)), which holds no
+    snapshot and polls as a function without lists, but leaves through statement exits."""
+    return has_snapshot(f) or ir.direct_writer(f)
+
+
 def resumes_for(fn: ast.FunctionDef, f: ir.Function) -> tuple[ir.Resume, ...]:
-    """The resumes of `f`, lowered from `fn`; () when `f` holds no snapshot. Loop continuations
-    first; then, when `f` needs statement exits and its statement positions agree with `fn`
-    (`_attribution_ok`), one statement continuation per statement in `exit_stmts(f)`."""
-    if not has_snapshot(f):
+    """The resumes of `f`, lowered from `fn`; () when `f` has no exits (`has_exits`). Loop
+    continuations first; then, when `f` needs statement exits and its statement positions agree with
+    `fn` (`_attribution_ok`), one statement continuation per statement in `exit_stmts(f)`."""
+    if not has_exits(f):
         return ()
     kinds = [_kind(s) for s in ir_loops(f.body)]
     stmts: tuple[int, ...] = ()
@@ -105,10 +118,23 @@ def holds_lists(f: ir.Function) -> bool:
 
 
 def needs_stmt_exits(f: ir.Function) -> bool:
-    """Every Call of `f` leaves through a statement exit on the callee's deopt: `f` has an effect
-    (a pure function propagates the deopt to its wrapper, which redoes the call after the write-back)
-    and holds list copies."""
-    return f.pure is not True and holds_lists(f)
+    """Every exit node of `f` (`exit_nodes`) leaves through a statement exit: `f` has an effect (a
+    pure function propagates the deopt to its wrapper, which redoes the call after the write-back)
+    and holds list copies, or it is a direct writer (#255 (d2))."""
+    return f.pure is not True and (holds_lists(f) or ir.direct_writer(f))
+
+
+def exit_nodes(f: ir.Function, s: ir.Stmt) -> list:
+    """The nodes IR statement `s` evaluates itself (`own_exprs`) that can leave through its statement
+    exit, in a function that needs statement exits: every Call (the callee's deopt, #390 item 5); in a
+    direct writer (#255 (d2)) also every Index of a list parameter (an element of another type) and
+    every Unbox (a global missing or of another type). The per-statement rule (verify
+    `_stmt_exit_problem`, cgen `_stmt_exit`): all of them come before the statement's first effect."""
+    writer = ir.direct_writer(f)
+    lists = {p.name for p in f.params if isinstance(p, ir.ArrayParam) and p.buffer is None}
+    return [e for e in own_exprs(s)
+            if isinstance(e, ir.Call)
+            or (writer and (isinstance(e, ir.Unbox) or (isinstance(e, ir.Index) and e.array in lists)))]
 
 
 def own_exprs(s: ir.Stmt):
@@ -143,9 +169,10 @@ def ir_stmts(stmts: Iterable[ir.Stmt]):
 
 
 def exit_stmts(f: ir.Function) -> set:
-    """The `stmt` of every IR statement that evaluates a Call itself (None included when one has no
-    source position)."""
-    return {s.stmt for s in ir_stmts(f.body) if any(isinstance(e, ir.Call) for e in own_exprs(s))}
+    """The `stmt` of every IR statement that evaluates an exit node itself (`exit_nodes`: a Call; in
+    a direct writer also an element read or an Unbox), None included when one has no source
+    position."""
+    return {s.stmt for s in ir_stmts(f.body) if exit_nodes(f, s)}
 
 
 def mappable(f: ir.Function, name: str) -> bool:
@@ -168,7 +195,7 @@ def osr_problem(f: ir.Function) -> str | None:
     """Why `f` has no OSR-style exits (cgen `_osr_plan`), or None. Every loop needs its continuation
     with every parameter mappable; virtual objects, regions, a parallel ForRange or a ForObj loop
     rule exits out."""
-    if not has_snapshot(f):
+    if not has_exits(f):
         return "it holds no snapshot"
     if not f.resumes:
         return "it has no continuation"
@@ -509,7 +536,8 @@ def _one(fn, qname, site, sites, kinds, binders, globals_, stmt=False):
 
     def site_construct(node) -> list[ast.stmt]:
         if stmt:
-            return [copy.deepcopy(node)]            # the statement itself, from its start
+            # the statement itself, from its start
+            return [copy.deepcopy(node)] if _reexecute_the_statement() else []
         kind, num = kinds[site.number], site.number
         if kind == "while":
             return [copy.deepcopy(node)]
@@ -579,6 +607,13 @@ def _one(fn, qname, site, sites, kinds, binders, globals_, stmt=False):
     if stmt:
         return ir.Resume(-1, name, params, source, _linemap(func, text, fn), stmt=site.number)
     return ir.Resume(site.number, name, params, source, _linemap(func, text, fn))
+
+
+def _reexecute_the_statement() -> bool:
+    """The single mutation point of the statement continuation (#255 (d2) tests): False builds
+    continuations that start AFTER the statement they leave, which the tests must catch. Always True
+    in a build."""
+    return True
 
 
 def _entry(st: ast.stmt) -> tuple[int, int, int, int]:

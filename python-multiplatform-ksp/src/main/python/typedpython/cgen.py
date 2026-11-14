@@ -32,10 +32,20 @@ a path that left before locking. Every StoreIndex into a list parameter is `tp_*
 on a free-threaded build it also stores into the list at once, so element reads of other threads,
 which take no lock, see the stores in program order; a parallel region's worker only marks its slots
 and the caller writes them through after the join (`_emit_region`). More than two list parameters
-are refused here (`CGenError`), as in the front end and the verifier: CPython has no three-object
-critical section; except in a pure function (#255, `ir.direct_lists`): its lists are not copied,
-every Index is `tp_list_ld_*` (`PyList_GetItemRef` in program order, an element of another type
-deopts), every Len the current length, and no lock is taken. A function that holds an array polls
+are never copied in (CPython has no three-object critical section): with three or more (#255,
+`ir.direct_lists`) the lists are not copied, every Index is `tp_list_ld_*` (`PyList_GetItemRef` in
+program order), every Len the current length, and no lock is taken; in a pure function an element
+of another type deopts. In a function with an effect (`ir.direct_writer`, #255 (d2), agent
+proposal, not confirmed) every StoreIndex into such a list is `tp_list_st_*` (`PyList_SetItem` of a
+new object at once, in program order), a scalar module global is `Unbox(Global)` read at its use
+(`tp_gcache_global`), and an element of another type, a failed Unbox and a callee's deopt all leave
+through the statement exit of the statement being emitted (`_stmt_exit`; one shared exit tail per IR
+statement, emitted after it): no snapshot, no write-back, the impl returns 2 with `tp_my->result`
+set. The per-statement rule is re-checked here: an exit of a source statement that has already
+stored or bound a local its continuation receives (`_commits`) is a CGenError, and so is a callee
+that is not pure or has an entry global (`_check_direct_lists`). Such a function polls the eval
+breaker as one without lists (no snapshot); a fast twin counts its frames around the continuation
+call (`tp_depth_py_begin`). A function that holds an array polls
 only at loop tops that have an OSR-style exit (#152, `snap_poll`: write back, end the sections,
 poll, take them again, copy in again); a loop without one does not poll, so it delays other threads'
 stop-the-world requests until it returns: a liveness delay, results unaffected. Nothing inside the
@@ -946,6 +956,9 @@ def generate(module: ir.Module, source_path: Path, display_path: str | None = No
 
 def _check_function(f: ir.Function, functions: dict[str, ir.Function]) -> None:
     deopting = [e for e in _all_exprs(f) if _can_deopt(e, functions)]
+    if ir.direct_writer(f):
+        # #255 (d2): a failed Unbox leaves through the statement exit (`_FnGen._stmt_exit`)
+        deopting = [e for e in deopting if not isinstance(e, ir.Unbox)]
     if deopting and not f.pure:
         raise CGenError(f"{f.name}: a node that can deopt ({type(deopting[0]).__name__}) in an "
                         "impure function (ir.py: only a pure function may deopt after entry)")
@@ -993,7 +1006,7 @@ def _check_function(f: ir.Function, functions: dict[str, ir.Function]) -> None:
         _check_entry_globals(f, functions)
     n_arrays = sum(isinstance(p, ir.ArrayParam) and p.buffer is None for p in f.params)
     if ir.direct_lists(f):
-        _check_direct_lists(f)
+        _check_direct_lists(f, functions)
     elif n_arrays > 2:
         raise CGenError(f"{f.name}: {n_arrays} array parameters; at most two (CPython offers one- and "
                         "two-object critical sections only, and a third lock could suspend the others)")
@@ -1074,17 +1087,25 @@ def _is_closed(f: ir.Function, functions: dict[str, ir.Function], seen=None) -> 
     return True
 
 
-def _check_direct_lists(f: ir.Function) -> None:
-    """#255 (ir.direct_lists): what a pure function with three or more lists read element by element
-    may not have."""
+def _check_direct_lists(f: ir.Function, functions: dict[str, ir.Function]) -> None:
+    """#255 (ir.direct_lists): what a function with three or more lists read element by element may
+    not have. A pure one (d1) deopts on an element of another type; one with an effect
+    (`ir.direct_writer`, d2) never deopts after entry and calls only pure callees without entry
+    globals (the per-statement rule itself is checked where each exit is emitted, `_stmt_exit`)."""
     why = None
-    if not f.may_deopt:
+    writer = ir.direct_writer(f)
+    calls = [functions.get(e.function) for e in _all_exprs(f) if isinstance(e, ir.Call)]
+    if writer and f.may_deopt:
+        why = "may_deopt is True (nothing may deopt after an effect; a failed read leaves instead)"
+    elif not writer and not f.may_deopt:
         why = "may_deopt is False (every element read can deopt)"
     elif f.entry_globals:
         why = f"entry global {f.entry_globals[0].name} (it would be read once at entry)"
-    elif any(isinstance(p, ir.ArrayParam) and (p.buffer is not None or p.stored
+    elif any(isinstance(p, ir.ArrayParam) and (p.buffer is not None or (p.stored and not writer)
                                                 or p.type not in _ARRAY_PFX) for p in f.params):
         why = "a buffer parameter, a stored list or a list of another element type"
+    elif writer and any(c is None or c.pure is not True or c.entry_globals for c in calls):
+        why = "a call of a callee that is not pure or has an entry global"
     elif any(isinstance(e, ir.CopyArray) and any(q.name == e.src for q in f.params) for e in _all_exprs(f)):
         why = "a CopyArray of a list parameter"
     elif any(isinstance(s, ir.ForRange) and s.par is not None for s in _walk_stmts(f.body)):
@@ -1216,6 +1237,8 @@ class _FnGen:
         # #255: a pure function with three or more lists reads them element by element (no copy-in)
         self.direct = {p.name for p in f.params if isinstance(p, ir.ArrayParam) and p.buffer is None} \
             if ir.direct_lists(f) else set()
+        # #255 (d2): with an effect too; then a failed element read or Unbox leaves (`_stmt_exit`)
+        self.writer = ir.direct_writer(f)
         self.par_defs: list[str] = []               # outlined region bodies (SPEC N-15), emitted before the impl
         self.in_par = False                         # emitting a region worker's body (no Python API)
         self.local_arrays: dict[str, Type] = {}       # name -> F64_ARRAY / I64_ARRAY
@@ -1259,6 +1282,10 @@ class _FnGen:
         # statement exit of the source statement being emitted (`cur_stmt`, ir.Stmt.stmt)
         self.stmt_exits = rmode is None and resume.needs_stmt_exits(f)
         self.cur_stmt: int | None = None
+        # the per-statement rule (#255 (d2), #390 item 5): source statements that have already
+        # stored or bound a received local (in emission order); an exit of one of them is refused
+        self.committed: set = set()
+        self.exit_label: str | None = None    # the shared exit tail of the IR statement being emitted
 
     # emit primitives
 
@@ -1602,10 +1629,27 @@ class _FnGen:
             return t
         if e.operand.type is not Type.OBJ or e.type not in _UNBOX:
             raise CGenError(f"{self.f.name}: Unbox {e.operand.type} -> {e.type}")
+        if self.writer and isinstance(e.operand, ir.Global):
+            # #255 (d2): a scalar module global read at its use (LOAD_GLOBAL: the module dict, then
+            # builtins). Missing or of another type: leave at the start of this statement; the
+            # interpreter then raises NameError or computes with the other type itself.
+            k = self.mg.name_index(e.operand.name)
+            g = self.mg.gslot_index(e.operand.name)
+            o, t = self.tmp("PyObject *"), self.tmp(_CT[e.type])
+            self.emit(f"{o} = tp_gcache_global(&tp_st->gc[{g}], tp_dict, tp_st->builtins, "
+                      f"tp_st->names[{k}], tp_st->watch_id1 > 0);")
+            self.emit(f"if ({o} == NULL) {{ if (!PyErr_ExceptionMatches(PyExc_NameError)) {{ tp_rc = -1; goto tp_exit; }} "
+                      "PyErr_Clear(); tp_s = 1; }")
+            self.emit(f"else {{ tp_s = {_UNBOX[e.type]}({o}, &{t}); tp_release(&{o}); }}")
+            self._stmt_exit(f"the global {e.operand.name}")
+            self.emit("if (tp_s != 0) { tp_rc = tp_s; goto tp_exit; }")
+            return t
         o = self.ev(e.operand)
         t = self.tmp(_CT[e.type])
         self.emit(f"tp_s = {_UNBOX[e.type]}({o}, &{t});")
         self._own_release(o)
+        if self.writer:
+            self._stmt_exit("an Unbox")        # #255 (d2): leave, never deopt after an effect
         self.emit("if (tp_s != 0) { tp_rc = tp_s; goto tp_exit; }")
         return t
 
@@ -1690,7 +1734,7 @@ class _FnGen:
         if ti is not None:
             self.emit(f"if (tp_s == 0) {{ {ti}.v = {t}; {ti}.big = NULL; }}")
         if self.stmt_exits and not _redo_inside_window():
-            self._stmt_exit(callee)             # #390 item 5: never redo inside the lists' window
+            self._stmt_exit(f"a deopt of {callee.name}")   # #390 item 5: never redo inside the lists' window
         elif e.redo:
             self._redo_call(callee, e.args, values, t, ti)
         elif not self.f.pure:
@@ -1782,18 +1826,37 @@ class _FnGen:
         self.depth -= 1
         self.emit("}")
 
-    def _stmt_exit(self, callee: ir.Function) -> None:
+    def _stmt_exit(self, what: str) -> None:
         """#390 item 5 (SPEC N-8 "statement exit"): on the callee's deopt (tp_s == 1) leave at the start
         of the source statement being emitted, for its continuation (`ir.Resume.stmt`), instead of
-        redoing the callee interpreted inside the lists' critical section. Owned temporaries are
-        released by the exit block, as on every `goto tp_exit`."""
+        redoing the callee interpreted inside the lists' critical section. In a direct writer (#255
+        (d2)) also on an element read of another type and a failed Unbox (`what` names the node).
+        The per-statement rule: the statement must not have stored or bound a received local yet
+        (`committed`), else re-executing it would repeat that. Owned temporaries are released by the
+        exit block, as on every `goto tp_exit`."""
         k = self.cur_stmt
         why = resume.exit_problem(self.f, k)
         if why is None and not self.osr:
             why = "the function has no OSR-style exit"
+        if why is None and k in self.committed:
+            why = f"statement {k} has already stored or bound a local its continuation receives (#255)"
         if why is not None:
-            raise CGenError(f"{self.f.name}: a deopt of {callee.name} would be redone interpreted inside "
+            if self.writer:
+                raise CGenError(f"{self.f.name}: {what} would have no statement exit (#255 (d2)): {why}")
+            raise CGenError(f"{self.f.name}: {what} would be redone interpreted inside "
                             f"the lists' critical section (#390 item 5): {why}")
+        if self.writer:
+            # #255 (d2): one exit tail per IR statement, shared by its reads (`stmts` emits it after
+            # the statement: the enclosing loops' state, all the continuation takes, is the same)
+            if self.exit_label is None:
+                self.exit_label = f"tp_sx{self.label_n}"
+                self.label_n += 1
+            self.emit(f"if (tp_s == 1) goto {self.exit_label};   /* #255: leave at the start of this statement */")
+            return
+        self._exit_block(k)
+
+    def _exit_block(self, k: int) -> None:
+        """The statement exit of source statement `k`: its continuation called, impl returns 2."""
         r = next(x for x in self.f.resumes if x.stmt == k)
         self.emit("if (tp_s == 1) {   /* #390: leave at the start of this statement (statement exit) */")
         self.depth += 1
@@ -2194,6 +2257,8 @@ class _FnGen:
             t = self.tmp(_CT[e.type])
             sfx = "f64" if at is Type.F64_ARRAY else "i64"
             self.emit(f"tp_s = tp_list_ld_{sfx}({ptr}->list, {i}, &{t});")
+            if self.writer:
+                self._stmt_exit(f"a read of {e.array}")   # #255 (d2): an element of another type
             self.emit("if (tp_s != 0) { tp_rc = tp_s; goto tp_exit; }")
             return t
         buffer = self._buffer(e.array)
@@ -2320,8 +2385,38 @@ class _FnGen:
             if m is None:
                 raise CGenError(f"{self.f.name}: no lowering for {type(s).__name__}")
             outer, self.cur_stmt = self.cur_stmt, s.stmt
+            label, self.exit_label = self.exit_label, None
             m(s)
+            if self.exit_label is not None:          # #255 (d2): the shared exit tail of `s`
+                end = f"{self.exit_label}_e"
+                self.emit(f"goto {end};")
+                self.emit(f"{self.exit_label}: {{")
+                self.depth += 1
+                self.emit("tp_s = 1;")
+                self._exit_block(s.stmt)
+                self.depth -= 1
+                self.emit("}")
+                self.emit(f"{end}: ;")
+            self.exit_label = label
+            if self.stmt_exits and self._commits(s):
+                self.committed.add(s.stmt)
             self.cur_stmt = outer
+
+    def _commits(self, s: ir.Stmt) -> bool:
+        """IR statement `s` does something a re-execution of its source statement would repeat: a
+        store into a parameter, a FieldSet / StoreItem, a Call of a callee that is not pure, or an
+        Assign of a name the statement's continuation receives (the per-statement rule)."""
+        if isinstance(s, ir.StoreIndex):
+            return s.array not in self.local_arrays
+        if isinstance(s, (ir.FieldSet, ir.StoreItem)):
+            return True
+        if any(isinstance(e, ir.Call) and self.mg.functions[e.function].pure is not True
+               for e in resume.own_exprs(s)):
+            return True
+        if isinstance(s, ir.Assign):
+            r = next((x for x in self.f.resumes if x.stmt == s.stmt and s.stmt is not None), None)
+            return r is not None and s.target in r.params
+        return False
 
     def st_Assign(self, s: ir.Assign) -> None:
         if s.target in self.local_arrays:
@@ -2353,6 +2448,13 @@ class _FnGen:
         if s.value.type is not _ARRAY_ELEM[at]:
             raise CGenError(f"{self.f.name}: store of {s.value.type} into {at}")
         v = self.ev(s.value)                    # CPython: value, then container, then index
+        if s.array in self.direct:
+            # #255 (d2): one PyList_SetItem of a new object, now, in program order (no copy)
+            if s.index.type is not Type.I64:
+                raise CGenError(f"{self.f.name}: index of type {s.index.type}")
+            i = self.ev(s.index)
+            self.check(f"tp_list_st_{'f64' if at is Type.F64_ARRAY else 'i64'}({ptr}->list, {i}, {v})")
+            return
         buffer = self._buffer(s.array)
         slot = self._slot(at, ptr, s.index, s.proven, 1, buffer)
         if buffer:
@@ -2512,6 +2614,8 @@ class _FnGen:
                 ctx = next(c for c in self.osr_ctx if c[0] == k)
                 value = {"__tp_cur_": ctx[1], "__tp_stop_": ctx[2], "__tp_step_": str(ctx[3])}[prefix]
                 return f"PyLong_FromLongLong((long long)({value}))"
+        if name in self.direct:
+            return f"Py_NewRef({_ident('l', name)}->list)"     # #255: the list itself, never copied
         if name in self.arrays:
             p = self.arrays[name]
             if p.buffer is not None:
@@ -2622,7 +2726,7 @@ class _FnGen:
         before the section ends and before any Python code runs; a failure there is an error exit
         (the wrapper writes back the rest and ends the section). Without it (a poll's fresh copies,
         which hold nothing dirty) the copies are only freed."""
-        lists = self._list_params()
+        lists = [] if self.direct else self._list_params()      # #255: no copies, no section
         for j, p in enumerate(lists):
             if write_back:
                 self.emit(f"if ({_ARRAY_PFX[p.type]}_exit({_ident('l', p.name)}) < 0) {{ tp_rc = -1; goto tp_exit; }}")
@@ -2637,9 +2741,23 @@ class _FnGen:
         for i, name in enumerate(r.params):
             self.emit(f"if (!tp_oe) {{ tp_oa[{i}] = {self._osr_value(name, site, cur, stop, step)}; tp_oe = tp_oa[{i}] == NULL; }}")
         self.emit("if (!tp_oe) {")
-        self.emit("    tp_t->snapshot_depth--;")
-        self.emit(f"    tp_my->result = PyObject_Vectorcall(tp_ofn, tp_oa, {n}, NULL);")
-        self.emit("    tp_t->snapshot_depth++;")
+        if self.writer:
+            # #255 (d2): no snapshot; a fast twin counts its frames while Python code runs
+            if self.fast:
+                self.emit("    tp_depth_py_begin(tp_t, tp_fd);")
+            self.emit(f"    tp_my->result = PyObject_Vectorcall(tp_ofn, tp_oa, {n}, NULL);")
+            if self.fast:
+                self.emit("    tp_depth_py_end(tp_t, tp_fd);")
+        else:
+            self.emit("    tp_t->snapshot_depth--;")
+            if self.fast:
+                # the continuation is Python code: it must see the frames of this fast tree
+                # (module docstring, "Fast entry"), as the in-window redo it replaces did
+                self.emit("    tp_depth_py_begin(tp_t, tp_fd);")
+            self.emit(f"    tp_my->result = PyObject_Vectorcall(tp_ofn, tp_oa, {n}, NULL);")
+            if self.fast:
+                self.emit("    tp_depth_py_end(tp_t, tp_fd);")
+            self.emit("    tp_t->snapshot_depth++;")
         self.emit("}")
         self.emit(f"for (int tp_oi = 0; tp_oi < {n}; tp_oi++) Py_XDECREF(tp_oa[tp_oi]);")
         self.emit("Py_XDECREF(tp_ofn); Py_XDECREF(tp_osent);")
@@ -2650,7 +2768,7 @@ class _FnGen:
     def st_While(self, s: ir.While) -> None:
         self.emit("for (;;) {")
         self.depth += 1
-        r = self.osr_sites.get(id(s)) if self.osr else None
+        r = self.osr_sites.get(id(s)) if self.osr and self.snapshot else None
         if r is not None:
             self.emit("if (tp_pc_tick(&tp_pc)) {")
             self.depth += 1
@@ -2777,7 +2895,7 @@ class _FnGen:
         if par_open:
             self._emit_region(s, ts, tn, abs(step))
         vec = self._vec_plan(s) if step == 1 else None
-        r = self.osr_sites.get(id(s)) if self.osr and not par_open else None
+        r = self.osr_sites.get(id(s)) if self.osr and self.snapshot and not par_open else None
         if self.snapshot and r is None:
             # no polling in a snapshot holder without an OSR-style exit (#141): a plain loop
             self.emit(f"{tk} = 0;")
@@ -3168,8 +3286,12 @@ class _FnGen:
             if self.osr:
                 # #152: only the call the wrapper just entered gets the context; internal callees see NULL
                 out.append("    tp_osr *tp_my = tp_t->osr; tp_t->osr = NULL;")
-        elif not self.fast:
-            out.append("    if (tp_poll(tp_t, tp_st->breaker) != 0) { tp_rc = -1; goto tp_exit; }")
+        else:
+            if self.writer and self.osr:
+                # #255 (d2): the statement exits' context, taken before the poll can run Python code
+                out.append("    tp_osr *tp_my = tp_t->osr; tp_t->osr = NULL;")
+            if not self.fast:
+                out.append("    if (tp_poll(tp_t, tp_st->breaker) != 0) { tp_rc = -1; goto tp_exit; }")
         out += prologue
         out += self.lines
         out.append("tp_exit:")

@@ -51,9 +51,14 @@ Rules (the `rule` of a Diagnostic):
                               or a Call of a function with an entry global the caller does not
                               hold itself (read at the call); or it has an effect and a Call without
                               a statement exit (#390 item 5, `_stmt_exit_problem`)
-  verify/array-direct         a pure function with three or more list parameters (#255,
+  verify/array-direct         a function with three or more list parameters (#255,
                               `ir.direct_lists`: read element by element) has an entry global, a
-                              buffer parameter, a CopyArray of a list parameter or a parallel loop
+                              buffer parameter, a CopyArray of a list parameter or a parallel loop;
+                              or, with an effect (`ir.direct_writer`, (d2)), a node that can leave
+                              (element read, Unbox, Call) without a statement exit or after the first
+                              effect of its source statement (`_stmt_exit_problem`), a Call of a
+                              callee that is not pure, or a callee with an entry global in its call
+                              tree (`_writer_callee_problem`)
   verify/buffer               a malformed `ArrayParam.buffer` (None, "array", "numpy", "memoryview"), or a
                               CopyArray of a buffer array (#149)
   verify/par-loop             a `ForRange.par` (SPEC N-15, #277) that the verifier does not recompute to
@@ -414,6 +419,9 @@ class _Checker:
                  var_ivs: dict[str, tuple[int, int]] | None = None, fixing: bool = False):
         self.fn = function
         self.direct = ir.direct_lists(function)   # #255: lists read element by element
+        # #255 (d2): with an effect a node that fails to continue natively leaves through the
+        # statement exit instead of deopting (checked after the walk, `_stmt_exit_problem`)
+        self.writer = ir.direct_writer(function)
         # Local intervals (module docstring "Local variables and guards"): `var_ivs` is the interval
         # of every eligible local; `fixing` says this walk is a round of the fixpoint that computes
         # them (a local without an interval yet is then "bottom": `bottom` is set when one is read).
@@ -483,7 +491,8 @@ class _Checker:
                 self.error(STRUCTURE, f"parameter '{p.name}' appears twice")
             params.add(p.name)
         if self.direct:
-            self.can_deopt = True      # every element read checks the element's type (#255)
+            if not self.writer:
+                self.can_deopt = True  # every element read checks the element's type (#255)
             if isinstance(fn.entry_globals, tuple) and fn.entry_globals:
                 self.error(ARRAY_DIRECT, "three or more list parameters are read element by element "
                                          "(#255), so an entry global cannot be read once at entry")
@@ -1023,8 +1032,9 @@ class _Checker:
             self.error(TYPE, f"Unbox of {getattr(ot, 'value', ot)}")
         if e.type not in ir.SCALARS:
             self.error(TYPE, f"Unbox gives a scalar, node says {e.type.value}")
-        else:
+        elif not self.writer:
             self.can_deopt = True       # every Unbox checks its operand's exact type (#271)
+        # (in a direct writer a mismatch leaves through the statement exit, #255 (d2))
         return dataclasses.replace(e, operand=operand)
 
     def e_MathCall(self, e: MathCall, state: _State) -> ir.Expr:
@@ -1223,9 +1233,10 @@ class _Checker:
         idx, element, proven = self.index(e.array, e.index, state, "index")
         if self.direct and e.array in self.arrays and e.array not in self.buffers:
             # #255: another thread can resize the list between two reads, so no bound is proved,
-            # and an element of another type deopts
+            # and an element of another type deopts (a direct writer: leaves, `_stmt_exit_problem`)
             proven = False
-            self.can_deopt = True
+            if not self.writer:
+                self.can_deopt = True
         if element is not None and e.type is not element and e.type is not Type.OBJ:
             self.error(TYPE, f"element of '{e.array}' is {element.value}, node says "
                              f"{e.type.value}")
@@ -1509,6 +1520,8 @@ class _Checker:
 
     def s_StoreIndex(self, s: StoreIndex, state: _State):
         idx, element, proven = self.index(s.array, s.index, state, "store")
+        if self.direct and s.array in self.arrays and s.array not in self.buffers:
+            proven = False      # #255 (d2): the length can change between two accesses
         value = self.expr(s.value, state)
         if element is not None:
             self.slot(value, element, f"value stored into '{s.array}'")
@@ -2670,7 +2683,13 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
     for name, g in checked.items():
         if resume.needs_stmt_exits(g):
             why = _stmt_exit_problem(g, sigs)
-            if why is not None:
+            if ir.direct_writer(g):
+                # #255 (d2): the same statement exits, for element reads and globals too
+                why = why if why is not None else _writer_callee_problem(name, callees, sigs)
+                if why is not None:
+                    reject(name, g.source_line, ARRAY_DIRECT,
+                           f"reads and stores its three or more lists element by element and {why}")
+            elif why is not None:
                 reject(name, g.source_line, ARRAY_WAIT,
                        f"holds its lists' critical section and {why}")
 
@@ -2765,7 +2784,14 @@ def _stmt_exit_problem(g: Function, sigs: dict[str, Function]) -> str | None:
          and the same holds one level up.
     A store of S (`out[i] = f(x)`, `a[i] += f(x)`) is T itself and happens after its expressions, as
     in CPython's evaluation order. Reads done before the Call are discarded: a read has no effect and
-    the interpreter's re-read at a later instant is an interleaving. Returns why not, or None."""
+    the interpreter's re-read at a later instant is an interleaving.
+    In a direct writer (#255 (d2), `ir.direct_writer`; agent proposal, not confirmed) the same three
+    conditions hold for every IR statement T that evaluates any exit node (`resume.exit_nodes`: a
+    Call, an element read of a list parameter, an Unbox), with 2 strict: every Call there is of a
+    pure callee. Together they are the per-statement rule: in each source statement every node that
+    can leave is evaluated before the statement's first effect (a store, which is always the last
+    thing its IR statement does) and before any assignment of a local the continuation receives.
+    Returns why not, or None."""
 
     def walk(block, owners):
         for i, s in enumerate(block):
@@ -2775,18 +2801,25 @@ def _stmt_exit_problem(g: Function, sigs: dict[str, Function]) -> str | None:
                 if isinstance(v, tuple) and v and all(isinstance(x, ir.Stmt) for x in v):
                     yield from walk(v, owners + ((s, block, i),))
 
+    writer = ir.direct_writer(g)
     for s, block, i, owners in walk(g.body, ()):
         exprs = resume.own_exprs(s)
-        calls = [e for e in exprs if type(e) is Call]
-        if not calls:
+        leaving = resume.exit_nodes(g, s)
+        if not leaving:
             continue
-        what = f"calls '{calls[0].function}', whose deopt would run interpreted code inside it"
+        first = leaving[0]
+        if type(first) is Call:
+            what = (f"calls '{first.function}', whose deopt " +
+                    ("cannot deopt the call after an effect" if writer
+                     else "would run interpreted code inside it"))
+        else:
+            what = f"evaluates {_leaving_what(first)}, which leaves for the interpreter when it fails"
         k = s.stmt
         why = resume.exit_problem(g, k)
         if why is not None:
-            return f"{what}; the call has no statement exit: {why}"
+            return f"{what}; it has no statement exit: {why}"
         received = set(next(r for r in g.resumes if r.stmt == k).params)
-        bad = _effect_node(exprs, sigs, one_call_ok=True)
+        bad = _effect_node(exprs, sigs, one_call_ok=not writer)
         if bad is not None:
             return f"{what}; its statement exit needs a statement without effects, but it has {bad}"
         level, chain = (s, block, i), list(owners)
@@ -2802,17 +2835,45 @@ def _stmt_exit_problem(g: Function, sigs: dict[str, Function]) -> str | None:
                 return f"{what}; statement {k} runs other statements before the call"
             for x in blk[run:j]:
                 if type(x) is not Assign or x.target in received:
-                    return (f"{what}; statement {k} stores or assigns {getattr(x, 'target', type(x).__name__)} "
-                            "before the call, which the statement exit would repeat")
+                    return (f"{what}; statement {k} stores or assigns {getattr(x, 'target', getattr(x, 'array', type(x).__name__))} "
+                            "before it, which the statement exit would repeat")
                 bad = _effect_node(resume.own_exprs(x), sigs)
                 if bad is not None:
-                    return f"{what}; statement {k} evaluates {bad} before the call"
+                    return f"{what}; statement {k} evaluates {bad} before it"
             if owner is None or owner[0].stmt != k:
                 break
             bad = _effect_node(resume.own_exprs(owner[0]), sigs)
             if bad is not None:
-                return f"{what}; statement {k} evaluates {bad} before the call"
+                return f"{what}; statement {k} evaluates {bad} before it"
             level = owner
+    return None
+
+
+def _leaving_what(e) -> str:
+    if type(e) is Index:
+        return f"an element of '{e.array}'"
+    if type(e) is Unbox and type(e.operand) is Global:
+        return f"the global '{e.operand.name}'"
+    return type(e).__name__
+
+
+def _writer_callee_problem(name: str, callees: dict[str, set[str]], sigs: dict[str, Function]) -> str | None:
+    """#255 (d2): a direct writer's call tree has no entry global. A callee reads its entry globals
+    once at its entry (at the Call); with other shared reads around them in the caller (the lists)
+    that read can disagree with every interpreted order when another thread rebinds the global (#414,
+    open), and the caller has no snapshot of its own to pass. Returns why not, or None."""
+    seen, todo = {name}, sorted(callees.get(name, ()))
+    while todo:
+        c = todo.pop()
+        if c in seen:
+            continue
+        seen.add(c)
+        callee = sigs.get(c)
+        eg = getattr(callee, "entry_globals", ())
+        if isinstance(eg, tuple) and eg:
+            return (f"calls '{c}', whose entry global '{getattr(eg[0], 'name', '?')}' would be read once at "
+                    "its entry, not at its use (#414)")
+        todo.extend(sorted(callees.get(c, ())))
     return None
 
 

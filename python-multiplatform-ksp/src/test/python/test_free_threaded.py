@@ -358,9 +358,10 @@ def test_no_runtime_warning_about_the_gil(extension):
 
 # --- three or more list parameters (#255) -----------------------------------------------------------
 # CPython's critical sections lock one or two objects, and the leader decision of 2026-11-13 excludes any
-# other lock (design/typedpython.md 4.3.6). A function with an effect and more than two lists stays
-# interpreted, as since #209. A pure one (ir.direct_lists) reads its lists element by element with
-# PyList_GetItemRef, in program order, without copy-in or lock; an element of another type deopts.
+# other lock (design/typedpython.md 4.3.6). A function with three or more lists (ir.direct_lists) reads
+# them element by element with PyList_GetItemRef, in program order, without copy-in or lock; in a pure
+# one an element of another type deopts. One with an effect (ir.direct_writer, #255 (d2), agent
+# proposal) stores element by element too and leaves through statement exits (test_direct_write.py).
 
 def test_pure_three_and_seven_list_functions_compile(built):
     result, _, _ = built
@@ -368,20 +369,22 @@ def test_pure_three_and_seven_list_functions_compile(built):
         result.skipped
 
 
-def test_three_list_parameters_with_an_effect_stay_interpreted(built):
+def test_three_list_parameters_with_an_effect_compile(built):
+    # #255 (d2): was "stay interpreted" (#209) before the element-by-element stores
     result, _, _ = built
-    assert "bump3" not in {f.name for f in result.module.functions}
-    reason = result.skipped["bump3"]
-    assert "more than two list parameters" in reason, reason
+    assert "bump3" in {f.name for f in result.module.functions}, result.skipped.get("bump3")
 
 
-def test_front_end_gives_a_clear_reason(tmp_path):
+def test_front_end_lowers_three_list_parameters_of_a_function_with_an_effect(tmp_path):
+    # #255 (d2): was "gives a clear reason" (the function stayed interpreted) before
+    from typedpython import ir
     p = tmp_path / "m.py"
     p.write_text("\n\n@compiled\ndef f(a: list[int], b: list[float], c: list[int]) -> None:\n"
                  "    a[0] = 1\n")
     m = frontend.lower(p)
-    assert not m.functions
-    assert "more than two list parameters" in m.skipped["f"], m.skipped["f"]
+    [f] = m.functions
+    assert (f.name, f.pure, f.may_deopt, f.entry_globals) == ("f", False, False, ()), m.skipped
+    assert ir.direct_writer(f)
 
 
 def test_front_end_lowers_three_list_parameters_of_a_pure_function(tmp_path):

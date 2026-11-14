@@ -1310,6 +1310,41 @@ static inline int tp_list_ld_i64(PyObject *list, int64_t i, int64_t *out)
     return rc < 0 ? -1 : rc > 0 ? 1 : 0;
 }
 
+/* Stores element by element (#255 (d2), ir.direct_writer; agent proposal, not confirmed): a function
+ * with an effect and three or more list parameters stores each `a[i] = v` at once, in program order,
+ * as the interpreter does (STORE_SUBSCR: the value exists first; list_ass_subscript normalises a
+ * negative index against the length at that moment; list_ass_item / PyList_SetItem checks the bounds
+ * inside the list's own critical section and stores with a release store). The new object is made
+ * first, then the index is normalised, then PyList_SetItem, which steals the reference also when it
+ * fails. rc 0 = stored; -1 = MemoryError, or IndexError("list assignment index out of range"). Never
+ * 1: a store cannot deopt. Dropping the old element can run its finalizer, at the same point as in
+ * the interpreter. */
+static inline int tp__list_store(PyObject *list, int64_t i, PyObject *o)
+{
+    if (o == NULL) {
+        return -1;
+    }
+    if (i < 0) {
+        i += (int64_t)PyList_GET_SIZE(list);
+    }
+    if (i < 0 || i > (int64_t)PY_SSIZE_T_MAX) {
+        Py_DECREF(o);
+        PyErr_SetString(PyExc_IndexError, "list assignment index out of range");
+        return -1;
+    }
+    return PyList_SetItem(list, (Py_ssize_t)i, o) < 0 ? -1 : 0;   /* steals o, also on failure */
+}
+
+static inline int tp_list_st_f64(PyObject *list, int64_t i, double v)
+{
+    return tp__list_store(list, i, PyFloat_FromDouble(v));
+}
+
+static inline int tp_list_st_i64(PyObject *list, int64_t i, int64_t v)
+{
+    return tp__list_store(list, i, PyLong_FromLongLong((long long)v));
+}
+
 /* ------------------------------------------------------------------------------------------
  * Buffer arrays (issue #149; ir.ArrayParam.buffer): an exact array.array argument
  * is NOT copied. tp_buf_enter takes one Py_buffer export and tp_buf_exit releases it; the wrapper

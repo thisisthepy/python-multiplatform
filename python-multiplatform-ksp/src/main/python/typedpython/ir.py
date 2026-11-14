@@ -268,7 +268,8 @@ class Box(Expr):
 class Unbox(Expr):
     """An OBJ converted to a scalar. The runtime checks the exact type (`tp_unbox_*`) and the i64
     range; anything else → deopt. Because it can deopt, it is legal only in a pure function (the
-    verifier enforces this); impure code converts objects with `ObjToFloat` instead."""
+    verifier enforces this); impure code converts objects with `ObjToFloat` instead. Exception
+    (#255 (d2), `direct_writer`): there a mismatch leaves through the statement exit instead."""
 
     operand: Expr
 
@@ -585,7 +586,8 @@ class Stmt:
     `while` whose test needs temporaries gives its synthetic exit test and `break` the while's
     number. It is only a position: it takes no part in equality, hashing or repr, so passes that
     compare IR are unaffected, and `dataclasses.replace` keeps it. A function holding list copies
-    uses it to leave through a statement exit (`cgen`, `verify/array-wait`)."""
+    uses it to leave through a statement exit (`cgen`, `verify/array-wait`), and so does a function
+    with an effect and three or more lists (`direct_writer`, `verify/array-direct`)."""
 
     stmt: int | None = field(default=None, kw_only=True, compare=False, repr=False)
 
@@ -905,19 +907,30 @@ REGION_SCALAR_KINDS = {Type.I64: "i64", Type.F64: "f64", Type.BOOL: "bool"}
 
 
 def direct_lists(f: object) -> bool:
-    """#255 (design/typedpython.md 4.3.6): a pure function with three or more list parameters reads
-    them element by element, without copy-in or critical section. CPython's critical sections lock
-    one or two objects, and copying three or more lists in at one instant needs them all locked (the
-    leader decision of 2026-11-13 excludes any lock outside that API). A pure function only reads
-    its lists, so each `Index` is one `PyList_GetItemRef` in program order, the interpreter's own
-    atomic read, and an element of the wrong type deopts (legal: nothing has happened yet); `Len` is
-    the current length. No entry global (a snapshot read at entry could disagree with later list
-    reads), no buffer parameter, no CopyArray of a list parameter and no parallel loop: the verifier
-    (`verify/array-direct`) and cgen refuse them. An impure function with more than two list
-    parameters stays interpreted (#209)."""
+    """#255 (design/typedpython.md 4.3.6): a function with three or more list parameters reads them
+    element by element, without copy-in or critical section. CPython's critical sections lock one or
+    two objects, and copying three or more lists in at one instant needs them all locked (the leader
+    decision of 2026-11-13 excludes any lock outside that API). Each `Index` is one
+    `PyList_GetItemRef` in program order, the interpreter's own atomic read; `Len` is the current
+    length. In a pure function (d1) an element of the wrong type deopts (legal: nothing has happened
+    yet). A function with an effect is `direct_writer` (d2). No entry global (a snapshot read at
+    entry could disagree with later list reads), no buffer parameter, no CopyArray of a list
+    parameter and no parallel loop: the verifier (`verify/array-direct`) and cgen refuse them."""
     params = getattr(f, "params", ())
-    lists = sum(isinstance(p, ArrayParam) and p.buffer is None for p in params)
-    return getattr(f, "pure", False) is True and lists > 2
+    return sum(isinstance(p, ArrayParam) and p.buffer is None for p in params) > 2
+
+
+def direct_writer(f: object) -> bool:
+    """#255 (d2), agent proposal, not confirmed: a function with an effect and three or more list
+    parameters (`direct_lists`, not pure). Every `StoreIndex` into a list parameter is one
+    `PyList_SetItem` of a new object at once, in program order. Nothing deopts the call after entry:
+    an element read that finds another type, an `Unbox` that fails (a module global of a scalar type
+    is `Unbox(Global)`, read at its use) and a Call whose callee reports a deopt leave through the
+    statement exit of the source statement being executed (`Stmt.stmt`, `Resume.stmt`), which
+    re-executes that statement, interpreted, from its start. Sound only by the per-statement rule
+    (`resume.exit_nodes`, verifier `verify/array-direct`, cgen CGenError): in each source statement
+    every node that can leave comes before the statement's first effect."""
+    return direct_lists(f) and getattr(f, "pure", False) is not True
 
 
 def region_arg_kind(a: object, ref_class) -> object:
