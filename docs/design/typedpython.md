@@ -995,8 +995,8 @@ with that argument"). 지킨 제약: GIL 전용 기능 없음, Python 동작 변
 #### 아. 입구에서 한 번 읽는 entry global (#414)
 
 **출처.** 이슈 #414 본문 ("Done when: either an argument that every such outcome is a valid interleaving, or a test
-that shows the disagreement and a fix"). 판정과 제안은 **에이전트 제안, 확인되지 않음**이다. 구현하지 않았다: 아래
-이유로 작지 않고, #413 의 장치 위에 올려야 한다.
+that shows the disagreement and a fix"). 판정과 제안은 **에이전트 제안, 확인되지 않음**이다. 아래 "구현" 이
+#413 의 장치 위에 올린 수정이다(코디네이터의 설계를 구현, 에이전트 제안, 확인되지 않음).
 
 **판정: 유효하지 않은 실행이 있다(읽어서 확인, 재현하지 않음).** 근거: `G = 2`(STORE_GLOBAL) 는 dict watcher 를
 먼저 부르고(`Objects/dictobject.c:2009`) 값을 release store 한다(`STORE_VALUE`, 322, 2017). 인터프리터의
@@ -1037,6 +1037,90 @@ release store(`Python/structmember.c:326`). 그래서 인터프리터에서 다�
   (모듈 dict 섹션 안의 epoch + 값)과 `tp_eg_current`(copy-in 뒤 epoch 확인), 이름의 `tp_watch_names` 등록을 넣는다.
   위 순수 함수 수정은 같은 E0 를 쓰고 확인 지점을 호출 끝까지 늘리는 것이다. 지금 따로 구현하면 그 장치를 겹쳐 만들고
   충돌하므로, #413 이 머지된 뒤에 그 위에 올리는 것을 제안한다.
+
+**구현 (#414, 에이전트 제안, 확인되지 않음; 코디네이터의 설계 A, B, C 를 이 위에 구현).** 지킨 제약: GIL 전용 기능
+없음, Python 동작 변화 없음(모든 실행이 CPython 이 만들 수 있는 interleaving), 공개 API 만.
+- **"입구 뒤의 공유 읽기" (cgen `_shared_reads`, verify `_Checker.shared`).** 다른 스레드가 바꿀 수 있는 상태를
+  프로그램 위치에서 읽는 노드: OBJ `Global`, `IsExact`·`New` 의 클래스 전역, `CheckMethod` 의 클래스 dict, `FieldGet`
+  의 슬롯, 원소 단위로 읽는 리스트(`ir.direct_lists`)의 `Index`·`Len`, 호출자가 쥐지 않은 callee entry global(Call
+  에서 읽음). 세지 않는 것: 리스트 copy(섹션이 얼린다), `array.array`·numpy 버퍼 원소(위 사 (2): CPython 자체가 순서를
+  주지 않는다), 실패하면 해석 경로를 고를 뿐인 guard(`Param.cls`, `CheckExact`).
+- **A. 순수 함수 (`cgen._needs_epoch`).** 리스트 copy 가 없고, 호출 트리가 entry global 이름을 둘 이상 읽거나, 하나와
+  다른 공유 읽기를 하는 순수 함수. wrapper 가 watcher id 가 없으면 deopt, 있으면 자기 entry global 과 epoch E0 를 모듈
+  dict 섹션 안에서 읽고(`tp_eg_snapshot`, 모듈 dict 만, 이름이 없으면 deopt; 자기 entry global 이 없어도 n = 0 으로
+  섹션 안에서 epoch 만 읽는다), 호출 동안 snapshot depth 를 올리고(poll 이 사용자 코드를 돌리지 않는다; OSR 출구도
+  끈다), impl 이 돌아오면 결과(ok)이든 예외(-1)이든 `tp_eg_unchanged(E0)`(acquire fence 뒤 epoch 비교)가 참일 때만
+  그대로 낸다. 거짓이면 결과를 버리고(OBJ 는 놓고) 예외는 지우고 deopt 한다. 트리 안의 모든 entry global 이름은
+  `tp_watch_names` 에 들어간다. 순수 호출자 안의 callee entry global 은 모듈 dict 에서만 읽는다(`tp_eg_read`; 없으면
+  callee 의 deopt). 이름 하나에 다른 공유 읽기가 없으면(경우 4, wordfreq `next_state`) 아무것도 바꾸지 않는다.
+  - **확인은 어느 프레임에서 하는가.** 트리에 밖에서 들어오는 프레임 하나: wrapper(그 아래 impl 과 fast twin, C to C
+    callee 는 모두 그 구간 안), 그리고 자기 entry global 이 없는 impure 호출자의 그 Call 지점(같은 snapshot, 같은
+    depth, 같은 확인; 바뀌었으면 tp_s = 1 로 callee 를 해석 redo). impl 안에서는 확인하지 않는다. 순수 호출자 안의
+    callee 는 루트의 구간이 덮는다. entry global 을 쥔 impure 호출자(아래 B)는 callee 의 이름을 모두 쥐어 넘겨야 하고
+    다른 공유 읽기가 없어야 하므로 그 Call 에는 확인이 필요 없다(있으면 오히려 틀린다: 해석 redo 가 새 값을 읽고
+    호출자는 옛 값을 계속 쓴다).
+  - **논증.** (1) watcher 는 저장마다 dict 의 잠금 안에서 저장 **전에** epoch 를 올린다(`Objects/dictobject.c:2009`,
+    `tp_class_global_ok` 의 근거와 같다). E0 를 같은 잠금 안에서 읽으므로 E0 때 epoch 만 올리고 저장은 아직인 저장은
+    없다. 그래서 E0 를 잠그지 않고 읽으면 틀린다: B 의 watcher 가 E0 전에 올리고 저장이 f 의 읽기 뒤에 오면, f 는 옛 G 와
+    B 의 나중 쓰기를 같이 보고 epoch 는 그대로다. (2) 끝의 `tp_eg_unchanged` 가 E0 를 보면 [E0, 끝] 동안 감시하는 전역의
+    저장이 시작되지 않았다: f 의 어떤 읽기가 B 의 나중 쓰기를 보았다면(release store 를 읽었다면) 그 앞의 watcher 의
+    올림은 acquire fence 뒤의 epoch 읽기에 보인다. 그러면 감시하는 전역은 구간 내내 snapshot 의 값이므로, 인터프리터가
+    전역을 프로그램 위치에서 읽어도 같은 값이고, 다른 공유 읽기(필드, d1 리스트 원소, callee 전역)는 각자 실제 시각에
+    프로그램 순서로 일어났다. 각 읽기를 실제 시각에 둔 interleaving 이 그 실행이다. (3) callee entry global 을 Call 에서
+    잠그지 않고 읽어도 된다: 잠긴 E0 뒤의 저장은 모두 E0 뒤에 올린다. builtins dict 는 이 이름에 대해 감시하지 않으므로
+    모듈 dict 만 읽는다. (4) 예외도 결과다: 섞인 상태가 ZeroDivisionError 를 낼 수 있고(시험 `err2`: 옛 G 와 새 o.x
+    로 0 으로 나눔, 어떤 interleaving 도 내지 않는다) 그래서 오류 경로도 확인한다. 바뀌었으면 예외를 지우고 redo 하는
+    것이 합법인 이유: 순수 함수라 효과가 없고, snapshot depth 때문에 호출 안에서 poll 이 사용자 코드(시그널 처리기,
+    pending call)를 돌리지 않으므로 그 예외는 이 호출의 계산에서만 나온다(KeyboardInterrupt 같은 사용자 코드의 예외를
+    지우는 일이 없다). 그래서 버린 실행은 관측되지 않고, 해석 redo 가 그대로 한 실행이다. 남는 사용자 코드는 놓은
+    객체의 `__del__` 뿐이고 그 예외는 unraisable 이라 전해지지 않는다. (5) 값 비교로는 안 된다: B 가 `G = 2; x = 2;
+    y = 7; G = 1` 이면 끝에서 다시 읽은 G 는 1 이지만, x = 2 를 본 실행이 y = 7 을 놓친 것을 알 수 없다. epoch 은 두 번
+    올라 E0 와 다르다. (6) watcher id 가 없는 모듈은 늘 해석 실행이다(느릴 뿐 같은 결과).
+  - **비용.** 해당 함수마다 호출당 모듈 dict 섹션 한 번(경합하면 기다린다: 여러 스레드가 같은 함수를 부르면 섞일 수
+    있다), acquire fence 와 atomic load 하나, 호출 안의 poll 없음(시그널과 stop-the-world 가 돌아올 때까지 미뤄지는
+    liveness 지연). 감시하는 이름이 자주 바뀌면 redo 가 잦다. 다섯 벤치마크에는 해당 함수가 없다.
+- **B. 효과가 있는 함수.** 첫 효과 뒤에는 deopt 할 수 없다.
+  - (1) 리스트 셋 이상에 효과(`ir.direct_writer`): entry global 이 없다(`verify/array-direct`), 스칼라 전역은 쓸 때
+    읽고(`Unbox(Global)`, 9c847a10) 문장 출구로 나간다, callee 트리에 entry global 이 없다(`_writer_callee_problem`).
+    고칠 것 없음. 시험: `test_direct_write.py` 의 `test_writers_lower_without_copy_in_or_entry_globals`,
+    `test_a_scalar_global_is_read_at_its_use`, `test_a_callee_with_an_entry_global_is_refused`.
+  - (2) 리스트 하나, 둘(창): entry global 은 copy-in 뒤 epoch 로 검증한 한 순간의 값이고(#390), 창 안에서 바뀔 수
+    있는 공유 읽기는 위 목록 중 하나도 닿을 수 없다: OBJ `Global`, `IsExact`, `CheckMethod`, 쥐지 않은 callee entry
+    global 은 `verify/array-wait`, `FieldGet`·`New` 는 `verify/array-open`, 원소 단위 리스트는 callee 가 배열을 받지
+    못하므로 없다. 쥔 callee entry global 은 같은 snapshot 에서 넘긴다. poll 은 창을 끝내고 다시 snapshot 과 epoch
+    확인을 하므로 창마다 한 순간이다. 그래서 창 안의 모든 읽기를 그 창의 copy-in 순간에 둘 수 있다. 이것을 지키는
+    verifier 규칙: `verify/entry-global-order`(entry global 이 있고 리스트를 쥐거나 순수하지 않은 함수의 호출 트리에
+    공유 읽기가 있으면 거절; cgen `_check_entry_order` 도 CGenError). 지금은 array-wait / array-open 과 겹치지만, 그것이
+    풀려도 이 구멍이 조용히 열리지 않는다.
+  - (3) 리스트 매개변수 없이 효과와 entry global: closed 함수의 효과는 배열 매개변수에 대한 저장뿐이므로(배열은 Call
+    로 넘길 수 없다) 이것은 버퍼만 쥔 함수다. 문장 출구는 리스트를 쥔 함수와 direct writer 에만 있어 "쓸 때 읽기" 로
+    바꾸려면 버퍼 함수에 연속과 출구를 새로 만들어야 한다: 작지 않다. 그래서 거절한다(`verify/entry-global-order`,
+    해석 실행으로 남음): entry global 이 둘 이상이면 한 snapshot 에서 읽고(입구와 poll 모두 `tp_eg_snapshot`, 한 순간),
+    호출 트리에 공유 읽기(쥐지 않은 callee entry global 포함)가 있으면 거절. 다섯 벤치마크의 해당 함수: 없음.
+  - GIL 빌드: 같은 코드, 같은 논증이다. 다른 스레드가 끼는 곳은 Python 코드가 돌거나 poll 이 GIL 을 넘기는 곳뿐이다.
+    A 의 호출은 poll 이 아무것도 하지 않으므로(snapshot depth) 끝까지 다른 스레드가 끼지 않고 epoch 확인은 늘 통과한다
+    (같은 스레드의 `__del__` 이 전역을 바꾼 경우만 redo). B (2) 는 창 안에 사용자 코드도 redo 도 없고 poll 이 창을
+    나눈다. B (3) 와 경우 4 의 함수는 snapshot holder 라 자기 poll(값을 다시 읽어 바뀌면 OSR 출구)에서만 넘긴다.
+- **C. 클래스 이름 전역(경우 5) 판정: 같은 결함이 아니다(읽어서 확인).** `New` 와 `IsExact` 는 클래스 전역을 쓸 때
+  읽는다: `tp_class_global_ok` 의 캐시된 1 은 epoch 가 그 뒤로 움직이지 않은 동안만 쓰이고, 캐시는 dict 섹션 안에서
+  epoch 와 함께 채워지므로 그 시각의 dict 읽기와 같다. 입구로 당겨 읽지 않으므로 그 자체로는 #414 가 아니다. entry
+  global 과 함께 있으면 위의 "다른 공유 읽기" 이고 같은 장치로 다룬다(A 는 epoch, B 는 거절). 덧붙여: 규칙 8(효과가
+  있는 entry-global 함수는 입구에서 클래스를 확인하므로 안에서 slow path 가 돌지 않는다)의 전제는 free-threaded 에서
+  성립하지 않는다(다른 스레드가 확인 뒤에 클래스를 바꿀 수 있다). 지금은 `FieldGet`·`New`·`IsExact` 가 그런 함수에
+  있을 수 없으므로(위 B 규칙, 그리고 배열을 쥔 함수의 array-open) slow path 에 닿지 않는다.
+- **결과.** 다섯 벤치마크의 컴파일 함수 집합과 생성 C 는 바이트 단위로 같다(`.cache/boost/ft-sets/sets.py` 로
+  9c847a10 과 비교). 시험 파일의 소스 문자열 355 개(front end + verifier + cgen)도 컴파일 집합과 생성 C 가 같다:
+  기존 front end 출력에는 A 나 B (3) 에 걸리는 함수가 없다.
+- **시험.** `test_entry_epoch.py`: 생성 C 구조(wrapper 의 snapshot, 끝의 두 확인, snapshot depth, 한 순간의 두
+  entry global, impure 호출자의 Call 지점, 모듈 dict 만 읽는 callee 전역, 감시 이름, 경우 4 는 그대로, 변형 지점)와,
+  `-DTP_TEST_EG_HOOK` 로 만든 결정적 동작 시험(CI): wrapper 의 입구 읽기 뒤, 본문 앞에서 hook 이 B 의 두 쓰기를 하고,
+  결과는 interleaving 이 허락하는 집합 안이어야 한다(경우 1, 2, impure 호출자, 예외 경로; 경우 3 은 두 읽기가 한
+  섹션 안이라 사이에 hook 을 넣을 수 없어 구조 시험과 집합 시험만). 변형(`cgen._epoch_check` 를 끈 빌드)은 정확히
+  21.0, 21.0, 21.0, ZeroDivisionError 를 내야 한다. `test_verify.py`: `verify/entry-global-order` 의 거절과 수락.
+  컴파일이 필요한 시험은 이 글을 쓴 에이전트가 돌리지 않았다(AGENTS.md 10).
+- **남은 점 (고치지 않음).** 리스트 하나, 둘의 순수 함수(창)는 A 에서 빠진다: 창 규칙으로 공유 읽기가 없기 때문이다.
+  A 의 함수에서 OSR 출구를 끈 것은 liveness 비용이다(대안: poll 앞에서 epoch 를 보고 바뀌었으면 deopt, 뒤에서 보고
+  바뀌었으면 OSR 출구; 만들지 않았다).
 
 ### 4.4 Kotlin 경계의 직접 호출
 

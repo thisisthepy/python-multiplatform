@@ -70,6 +70,27 @@ whole call after the write-back. The `__typedpython_deopts__` read-add-write of 
 the module dict's critical section. Module state is written only by the exec
 slot; the class guards are atomic (tp_runtime.h).
 
+Entry globals and later shared reads (#414, SPEC N-8, design 4.3.6 아; agent proposal, not
+confirmed). An entry global is read once at entry (a callee's at the Call); the interpreter reads it
+at every use, so another thread that rebinds it and then writes something the function reads later
+could make the function combine the old value with the new state. `_shared_reads` lists those later
+reads (an OBJ Global, IsExact / New / CheckMethod, FieldGet, an element or length of a list read
+element by element, a callee entry global the caller does not hold). A pure function that holds no
+list copy and whose call tree reads two or more entry-global names, or one and any shared read
+(`_needs_epoch`), runs under the dict-watcher epoch: its wrapper (or, for a Call from an impure
+caller without entry globals of its own, that Call site) reads the epoch and its entry globals in
+the module dict's critical section (`tp_eg_snapshot`; an unwatched module deopts), raises the
+snapshot depth around the call so no poll runs user code inside it (no OSR-style exit either), and
+requires `tp_eg_unchanged` before the result or the exception counts; a change deopts (the
+exception is cleared): the interpreted redo is then the whole execution. Inside a pure caller a
+callee's entry global is read from the module dict only (`tp_eg_read`); every name of an epoch tree
+is in `tp_watch_names`. The check sits at the frame that entered the tree from outside (wrapper,
+impure Call site), never in an impl, so the fast twin and every C to C callee inside are covered by
+it. A function with entry globals that cannot redo (an effect, or list copies) reads them at one
+instant (the #390 snapshot validated after the copy-in, or one `tp_eg_snapshot` for two or more, also
+at a poll) and has no shared read after entry anywhere in its call tree (`_check_entry_order`,
+CGenError; the verifier's `verify/entry-global-order`). `_epoch_check` is the mutation point.
+
 Buffer arrays (issue #149, identity-safe part). A parameter annotated `array.array[float]`,
 `array.array[int]` is an `ArrayParam` with `buffer` "array"; `NDArray[np.float64]` / `NDArray[np.int64]`
 (#220) is one with `buffer` "numpy" (exact `numpy.ndarray`, an out-of-range index raises numpy's
@@ -196,6 +217,11 @@ re-proves what it relies on, right where CPython would look:
      checks at entry, in the wrapper, that every class it reaches is current and every class global
      it reads is still bound: then no check inside can fail, so no slow path can run user code that
      rebinds an entry global after its snapshot. A failure there is a deopt before any effect.
+     (#414: on a free-threaded build another thread can still change a class after this check, so
+     the premise does not hold by itself. What keeps the slow paths out: FieldGet, New and IsExact
+     are shared reads such a function may not have anywhere in its call tree (_check_entry_order);
+     and a closed function's only effect is a store into an array parameter, whose holder refuses
+     FieldGet and New anyway (verify/array-open).)
   `__typedpython_class_info__()` reports, per class, the captured and current tags, the slow-path
   and refresh counters and whether the module dict is watched (introspection for tests).
 
@@ -652,6 +678,7 @@ class _ModGen:
         self.int_consts: list[int] = []          # module-state boxed int constants (SPEC N-13)
         self.gnames: list[str] = []              # cached global/builtin reads, one tp_gslot each
         self._uses: dict[str, set[str]] = {}
+        self._epoch: dict[str, bool] = {}        # #414: name -> runs under the dict-watcher epoch
         self.bounded = _bounded_functions(self.functions)     # name -> k (module docstring, "Fast entry")
         # SPEC N-12b: producers and consumers that get an internal region entry, and per region class the
         # kind of each field ("i64", "f64", "bool", "ref"), read off the producers' `New`s.
@@ -759,12 +786,23 @@ class _ModGen:
 
     def window_globals(self) -> list[str]:
         """#390: entry-global names of the functions that hold lists in a critical section (read
-        before it, then re-checked by tp_globals_epoch, so the watcher must report their changes)."""
+        before it, then re-checked by tp_globals_epoch, so the watcher must report their changes).
+        #414: and every entry-global name in the call tree of a function that runs under the epoch
+        (`_needs_epoch`)."""
         out: list[str] = []
         for f in self.module.functions:
             if f.entry_globals and _holds_lists(f):
                 out += [g.name for g in f.entry_globals]
+        for f in self.module.functions:
+            if self.needs_epoch(f):
+                out += _tree_globals(f, self.functions)
         return list(dict.fromkeys(out))
+
+    def needs_epoch(self, f: ir.Function) -> bool:
+        """#414: `_needs_epoch`, once per function."""
+        if f.name not in self._epoch:
+            self._epoch[f.name] = _needs_epoch(f, self.functions)
+        return self._epoch[f.name]
 
     def int_index(self, v: int) -> int:
         if v not in self.int_consts:
@@ -1015,6 +1053,7 @@ def _check_function(f: ir.Function, functions: dict[str, ir.Function]) -> None:
         if why is not None:
             raise CGenError(f"{f.name}: {why} can wait inside the lists' critical section, which "
                             "would suspend it (#390)")
+    _check_entry_order(f, functions)
     for p in f.params:
         if isinstance(p, ir.ArrayParam):
             if p.type not in ir.ARRAYS:
@@ -1085,6 +1124,91 @@ def _is_closed(f: ir.Function, functions: dict[str, ir.Function], seen=None) -> 
             if callee is None or not _is_closed(callee, functions, seen):
                 return False
     return True
+
+
+def _epoch_check() -> bool:
+    """#414: the single mutation point of the epoch check at the end of a call that runs under the
+    epoch (wrapper and impure Call site). Tests set it to False to see the deterministic observations
+    fail. Always True in a build."""
+    return True
+
+
+def _tree(f: ir.Function, functions: dict[str, ir.Function]) -> list[ir.Function]:
+    """`f` and every function its C to C Calls reach (each once)."""
+    out, seen, todo = [], set(), [f]
+    while todo:
+        g = todo.pop()
+        if g.name in seen:
+            continue
+        seen.add(g.name)
+        out.append(g)
+        todo += [functions[e.function] for e in _all_exprs(g)
+                 if isinstance(e, ir.Call) and e.function in functions]
+    return out
+
+
+def _shared_reads(g: ir.Function, functions: dict[str, ir.Function]) -> list[str]:
+    """#414: the nodes of `g`'s own body, other than its entry globals, that read state another thread
+    can change, at their place in program order: an OBJ Global, the class global of IsExact and New, a
+    class dict (CheckMethod), an object slot (FieldGet), an element or the length of a list read element
+    by element (ir.direct_lists), and a Call of a callee with an entry global `g` does not hold itself
+    (read at the Call). Not counted: list copies (their critical section freezes them), the buffer
+    elements of `array.array` / numpy (CPython does not order them, design 4.3.6 사 (2)), guards whose
+    failure only selects the interpreted path (Param.cls, CheckExact)."""
+    out = []
+    direct = {p.name for p in g.params if isinstance(p, ir.ArrayParam) and p.buffer is None} \
+        if ir.direct_lists(g) else set()
+    own = {p.name: p.type for p in g.entry_globals}
+    for e in _all_exprs(g):
+        if isinstance(e, ir.Global):
+            out.append(f"the global {e.name}")
+        elif isinstance(e, (ir.IsExact, ir.New, ir.CheckMethod)):
+            out.append(f"{type(e).__name__} of {e.cls}")
+        elif isinstance(e, ir.FieldGet):
+            out.append(f"the field {e.cls}.{e.field}")
+        elif isinstance(e, (ir.Index, ir.Len)) and e.array in direct:
+            out.append(f"the list {e.array}")
+        elif isinstance(e, ir.Call) and e.function in functions:
+            read = [p for p in functions[e.function].entry_globals if own.get(p.name) is not p.type]
+            if read:
+                out.append(f"the entry global {read[0].name} of {e.function}, read at the call")
+    return out
+
+
+def _tree_globals(f: ir.Function, functions: dict[str, ir.Function]) -> list[str]:
+    """Every entry-global name read in `f`'s call tree (at its entry or at a Call)."""
+    return list(dict.fromkeys(p.name for g in _tree(f, functions) for p in g.entry_globals))
+
+
+def _needs_epoch(f: ir.Function, functions: dict[str, ir.Function]) -> bool:
+    """#414 (SPEC N-8; agent proposal, not confirmed): `f` is pure, holds no list copy, and its call
+    tree reads more than one entry-global name, or one and any other shared state (`_shared_reads`,
+    callee entry globals not counted twice). Such a call runs under the dict-watcher epoch and is redone
+    interpreted when the epoch moved. One name and nothing else needs nothing: every read can be placed
+    at the instant it was made (design 4.3.6 아, case 4)."""
+    if f.pure is not True or _holds_lists(f):
+        return False
+    names = _tree_globals(f, functions)
+    if not names:
+        return False
+    if len(names) > 1:
+        return True
+    return any(not why.startswith("the entry global ")
+               for g in _tree(f, functions) for why in _shared_reads(g, functions))
+
+
+def _check_entry_order(f: ir.Function, functions: dict[str, ir.Function]) -> None:
+    """#414: a function with entry globals that cannot redo (it holds list copies, or has an effect)
+    reads nothing else another thread can change after entry, anywhere in its call tree (the verifier's
+    `verify/entry-global-order`, re-checked here)."""
+    if not f.entry_globals or (f.pure is True and not _holds_lists(f)):
+        return
+    for g in _tree(f, functions):
+        why = _shared_reads(g, functions)
+        if why:
+            where = "" if g is f else f" (in {g.name})"
+            raise CGenError(f"{f.name}: its entry globals are read once at entry and {why[0]}{where} is "
+                            "read after it, which another thread can write after rebinding one of them (#414)")
 
 
 def _check_direct_lists(f: ir.Function, functions: dict[str, ir.Function]) -> None:
@@ -1278,6 +1402,11 @@ class _FnGen:
         self.osr_sites: dict[int, ir.Resume] = {}
         self.osr_ctx: list[tuple[int, str, str, int]] = []   # enclosing ForRange: (site, var, stop, step)
         self.osr = self._osr_plan()
+        # #414: a call that runs under the epoch runs no user code (its exception is redone, not raised,
+        # when the epoch moved): no poll with an OSR-style exit, and the wrapper holds the snapshot depth
+        self.epoch = rmode is None and mg.needs_epoch(f)
+        if self.epoch:
+            self.osr = False
         # #390 item 5: every Call of a function with an effect that holds lists leaves through the
         # statement exit of the source statement being emitted (`cur_stmt`, ir.Stmt.stmt)
         self.stmt_exits = rmode is None and resume.needs_stmt_exits(f)
@@ -1708,11 +1837,23 @@ class _FnGen:
         # cannot wait for the module dict inside a lists' critical section (#390) and the callee sees
         # the value the caller sees.
         own = {g.name: g.type for g in self.f.entry_globals}
-        for g in callee.entry_globals:
-            if own.get(g.name) is g.type:
-                args.append(_ident("l", g.name))
-            else:
-                args.append(self._read_entry_global(g, "tp_s = 1;"))
+        # #414: an impure caller with no entry global of its own calling a function that runs under the
+        # epoch: the epoch and the callee's entry globals are read here, in the module dict's section,
+        # and checked when the callee returns (a change: the callee's deopt, redone below)
+        epoch = (self.f.pure is not True and not self.f.entry_globals and not _holds_lists(self.f)
+                 and self.mg.needs_epoch(callee))
+        ce = None
+        if epoch:
+            ce = self.tmp("uint64_t")
+            args += self._eg_snapshot(callee.entry_globals, ce)
+        else:
+            for g in callee.entry_globals:
+                if own.get(g.name) is g.type:
+                    args.append(_ident("l", g.name))
+                else:
+                    # #414: inside a pure caller the read is the module dict's only (an epoch tree
+                    # watches the module dict, not builtins); a missing name is the callee's deopt
+                    args.append(self._read_entry_global(g, "tp_s = 1;", module_only=self.f.pure is True))
         if callee.returns is not Type.NONE:
             t = self.tmp(_CT[callee.returns])
             args.append(f"&{t}")
@@ -1723,12 +1864,27 @@ class _FnGen:
             ti = self.tmp("tp_int")
         self.emit("if (tp_s == 0) {")
         self.depth += 1
+        if epoch:
+            self._eg_test_hook("tp_s = -1;")
+            self.emit("if (tp_s == 0) {")
+            self.depth += 1
+            self.emit("tp_t->snapshot_depth++;      /* #414: no poll runs user code inside the callee */")
         # Depth is counted by the callee itself (tp_enter_call at its entry, issue #57).
         if self.fast:
             # the fast twin's callees are bounded too (_bounded_functions): their fast twins, uncounted
             self.emit(f"tp_s = {_ident('tp_fimpl', e.function)}(tp_module, tp_fd + 1, tp_t{''.join(', ' + x for x in args)});")
         else:
             self.emit(f"tp_s = {_ident('tp_impl', e.function)}(tp_module, tp_ts, tp_t{''.join(', ' + x for x in args)});")
+        if epoch:
+            self.emit("tp_t->snapshot_depth--;")
+            if _epoch_check():
+                # #414: a result or an exception of the callee counts only if no watched global changed
+                # since the snapshot; else the callee runs interpreted (it is pure: nothing happened)
+                drop = f"tp_release(&{t}); " if callee.returns is Type.OBJ else ""
+                self.emit(f"if (tp_s == 0 && !tp_eg_unchanged({ce})) {{ {drop}tp_s = 1; }}")
+                self.emit(f"else if (tp_s < 0 && !tp_eg_unchanged({ce})) {{ PyErr_Clear(); tp_s = 1; }}")
+            self.depth -= 1
+            self.emit("}")
         self.depth -= 1
         self.emit("}")
         if ti is not None:
@@ -1748,18 +1904,26 @@ class _FnGen:
         return ti if ti is not None else t
 
     def _read_entry_global(self, g: ir.Param, on_mismatch: str, on_error: str = "tp_rc = -1; goto tp_exit;",
-                           guard: str = "tp_s == 0") -> str:
+                           guard: str = "tp_s == 0", module_only: bool = False) -> str:
         """Emit the entry read of module global `g` (tp_global, exact-type unbox, release) guarded
         by `tp_s == 0`; on a wrong type or an unbound name run `on_mismatch` (a deopt: the
         interpreted function then sees the same binding and raises CPython's own NameError where
-        CPython would). Returns the C scalar holding the value."""
+        CPython would). `module_only` (#414, a pure caller): the module dict only, a name that is
+        not a module global is a mismatch. Returns the C scalar holding the value."""
         k = self.mg.name_index(g.name)
         gv, go = self.tmp(_CT[g.type]), self.tmp("PyObject *")
         self.emit(f"if ({guard}) {{")
-        self.emit(f"    {go} = tp_global(tp_dict, tp_st->names[{k}]);")
-        self.emit(f"    if ({go} == NULL) {{")
-        self.emit(f"        if (!PyErr_ExceptionMatches(PyExc_NameError)) {{ {on_error} }}")
-        self.emit(f"        PyErr_Clear(); {on_mismatch}")
+        if module_only:
+            # #414: the module dict only (tp_eg_read): absent is a mismatch, an error is an error
+            self.emit(f"    int tp_gf = tp_eg_read(tp_dict, tp_st->names[{k}], &{go});")
+            self.emit(f"    if (tp_gf <= 0) {{")
+            self.emit(f"        if (tp_gf < 0) {{ {on_error} }}")
+            self.emit(f"        {on_mismatch}")
+        else:
+            self.emit(f"    {go} = tp_global(tp_dict, tp_st->names[{k}]);")
+            self.emit(f"    if ({go} == NULL) {{")
+            self.emit(f"        if (!PyErr_ExceptionMatches(PyExc_NameError)) {{ {on_error} }}")
+            self.emit(f"        PyErr_Clear(); {on_mismatch}")
         self.emit("    } else {")
         self.emit(f"        tp_s = {_UNBOX[g.type]}({go}, &{gv});")
         self.emit(f"        tp_release(&{go});")
@@ -1768,6 +1932,45 @@ class _FnGen:
         self.emit("    }")
         self.emit("}")
         return gv
+
+    def _eg_snapshot(self, eg, epoch: str) -> list[str]:
+        """#414, at a Call (guarded by `tp_s == 0`): `epoch` and the entry globals `eg` read in the module
+        dict's critical section (`tp_eg_snapshot`; none: the epoch alone, still in the section). An
+        unwatched module, a name that is not a module global or a value of another type is the callee's
+        deopt (tp_s = 1). Returns the C scalars holding the values."""
+        vals = [self.tmp(_CT[g.type]) for g in eg]
+        self.emit("if (tp_s == 0) {")
+        self.depth += 1
+        self.emit("if (tp_st->watch_id1 <= 0) tp_s = 1;   /* #414: unwatched, the callee runs interpreted */")
+        self.emit("else {")
+        self.depth += 1
+        if eg:
+            names = ", ".join(f"tp_st->names[{self.mg.name_index(g.name)}]" for g in eg)
+            self.emit(f"PyObject *const tp_gn[{len(eg)}] = {{{names}}};")
+            self.emit(f"PyObject *tp_go[{len(eg)}];")
+            self.emit(f"tp_s = tp_eg_snapshot(tp_dict, tp_gn, {len(eg)}, tp_go, &{epoch});")
+            for j, (g, v) in enumerate(zip(eg, vals)):
+                self.emit(f"if (tp_s == 0) tp_s = {_UNBOX[g.type]}(tp_go[{j}], &{v});")
+            self.emit(f"for (int tp_gi = 0; tp_gi < {len(eg)}; tp_gi++) Py_XDECREF(tp_go[tp_gi]);")
+        else:
+            self.emit(f"tp_s = tp_eg_snapshot(tp_dict, NULL, 0, NULL, &{epoch});")
+        self.emit("if (tp_s < 0) { tp_rc = -1; goto tp_exit; }")
+        self.depth -= 1
+        self.emit("}")
+        self.depth -= 1
+        self.emit("}")
+        return vals
+
+    def _eg_test_hook(self, on_error: str) -> None:
+        """Tests only (-DTP_TEST_EG_HOOK, #414): run the module-level `__tp_test_eg_hook__()` after the
+        entry read of a call that runs under the epoch and before its body, where another thread could
+        rebind a global and then write what the body reads. Guarded by `tp_s == 0`."""
+        self.emit("#ifdef TP_TEST_EG_HOOK")
+        self.emit("if (tp_s == 0) { PyObject *tp_hk = NULL;")
+        self.emit("    if (PyDict_GetItemStringRef(tp_dict, \"__tp_test_eg_hook__\", &tp_hk) > 0) {")
+        self.emit("        PyObject *tp_hr = PyObject_CallNoArgs(tp_hk); Py_DECREF(tp_hk);")
+        self.emit(f"        if (tp_hr == NULL) {{ {on_error} }} else Py_DECREF(tp_hr); }} }}")
+        self.emit("#endif")
 
     def _redo_call(self, callee: ir.Function, arg_exprs, values: list[str], t: str | None,
                    ti: str | None = None) -> None:
@@ -2696,7 +2899,24 @@ class _FnGen:
             self.emit(f"if (tp_s != 0 || {ptr}->len != tp_ol{j}) tp_och = 1;")
         if lists and eg:
             self.emit("if (!tp_och && !tp_eg_current(tp_pe)) tp_och = 1;   /* #390 */")
-        for g in (eg if not lists else ()):
+        if not lists and len(eg) > 1:
+            # #414: as at entry, two or more are re-read at one instant (tp_eg_snapshot); any value
+            # that differs, or a name that is not a module global, leaves for the interpreter
+            n_g = len(eg)
+            names = ", ".join(f"tp_st->names[{self.mg.name_index(g.name)}]" for g in eg)
+            self.emit(f"{{ PyObject *const tp_gn[{n_g}] = {{{names}}};")
+            self.emit(f"  PyObject *tp_go[{n_g}]; uint64_t tp_pe = 0;")
+            self.emit(f"  tp_s = tp_eg_snapshot(tp_dict, tp_gn, {n_g}, tp_go, &tp_pe);")
+            self.emit("  if (tp_s > 0) { tp_och = 1; tp_s = 0; }")
+            self.emit("  else if (tp_s == 0) {")
+            for j, g in enumerate(eg):
+                lv = _ident("l", g.name)
+                self.emit(f"    if (tp_s == 0) {{ {_CT[g.type]} tp_gv = 0; tp_s = {_UNBOX[g.type]}(tp_go[{j}], &tp_gv);")
+                self.emit(f"        if (tp_s > 0 || (tp_s == 0 && memcmp(&tp_gv, &{lv}, sizeof tp_gv) != 0)) {{ tp_och = 1; tp_s = 0; }} }}")
+            self.emit("  }")
+            self.emit(f"  for (int tp_gi = 0; tp_gi < {n_g}; tp_gi++) Py_XDECREF(tp_go[tp_gi]);")
+            self.emit("  if (tp_s < 0) { tp_rc = -1; goto tp_exit; } }")
+        for g in (eg if not lists and len(eg) <= 1 else ()):
             k = self.mg.name_index(g.name)
             lv = _ident("l", g.name)
             self.emit(f"{{ PyObject *tp_go = tp_global(tp_dict, tp_st->names[{k}]);")
@@ -3415,10 +3635,35 @@ class _FnGen:
             for i, _ in direct:
                 L.append(f"    tp_a{i}.list = tp_args[{i}];   /* borrowed; read by tp_list_ld_* */")
         gnames = []
-        if f.entry_globals:
+        if f.entry_globals or self.epoch:
             L.insert(3, "    PyObject *tp_dict = PyModule_GetDict(tp_module); /* borrowed */")
             if not classes:
                 L.insert(3, "    tp_state *tp_st = (tp_state *)PyModule_GetState(tp_module);")
+        # #414: one instant for the entry globals: a call that runs under the epoch reads them with the
+        # epoch (an unwatched module: always interpreted); an impure function holding no list reads two
+        # or more in one snapshot too (it has no other shared read after entry, `_check_entry_order`)
+        one_instant = not arrays and (self.epoch or len(f.entry_globals) > 1)
+        if one_instant:
+            n_g = len(f.entry_globals)
+            L.append("    uint64_t tp_ge = 0;")
+            for j, g in enumerate(f.entry_globals):
+                L.append(f"    {_CT[g.type]} tp_g{j} = 0;")
+                gnames.append(f"tp_g{j}")
+            if self.epoch:
+                L.append("    if (tp_st->watch_id1 <= 0) goto tp_deopt;")
+            if n_g:
+                names = ", ".join(f"tp_st->names[{self.mg.name_index(g.name)}]" for g in f.entry_globals)
+                L.append(f"    {{ PyObject *const tp_gn[{n_g}] = {{{names}}};")
+                L.append(f"      PyObject *tp_go[{n_g}];")
+                L.append(f"      tp_s = tp_eg_snapshot(tp_dict, tp_gn, {n_g}, tp_go, &tp_ge);")
+                for j, g in enumerate(f.entry_globals):
+                    L.append(f"      if (tp_s == 0) tp_s = {_UNBOX[g.type]}(tp_go[{j}], &tp_g{j});")
+                L.append(f"      for (int tp_gi = 0; tp_gi < {n_g}; tp_gi++) Py_XDECREF(tp_go[tp_gi]); }}")
+            else:
+                L.append("    tp_s = tp_eg_snapshot(tp_dict, NULL, 0, NULL, &tp_ge);")
+            L.append("    if (tp_s < 0) goto tp_error;")
+            L.append("    if (tp_s != 0) goto tp_deopt;")
+            L.append("    (void)tp_ge;")
         if f.entry_globals and arrays:
             # #390: nothing inside the lists' critical section may wait (a wait detaches and suspends
             # the section), and a dict read can. So the entry globals are read here, before the lists
@@ -3459,7 +3704,7 @@ class _FnGen:
             L.append("    if (tp_s != 0) goto tp_deopt;")
         if f.entry_globals and arrays:
             L.append("    if (!tp_eg_current(tp_ge)) goto tp_deopt;   /* #390: a watched global changed */")
-        for j, g in enumerate(f.entry_globals if not arrays else ()):
+        for j, g in enumerate(f.entry_globals if not arrays and not one_instant else ()):
             # entry read of a module global: exact type or deopt (still before any effect)
             k = self.mg.name_index(g.name)
             L.append(f"    {_CT[g.type]} tp_g{j} = 0;")
@@ -3482,10 +3727,29 @@ class _FnGen:
             lock = "&tp_lock" if lst else "NULL"
             L.append(f"    tp_osr tp_ox = {{{lock}, {{{l0}, {l1}}}, NULL}};")
             L.append("    tp_t->osr = &tp_ox;      /* #152: taken by the impl at entry */")
+        if self.epoch:
+            # #414: tests only, the point where another thread could rebind a global and then write what
+            # the body reads (-DTP_TEST_EG_HOOK); then no poll may run user code inside the call
+            L.append("#ifdef TP_TEST_EG_HOOK")
+            L.append("    { PyObject *tp_hk = NULL;")
+            L.append("      if (PyDict_GetItemStringRef(tp_dict, \"__tp_test_eg_hook__\", &tp_hk) > 0) {")
+            L.append("          PyObject *tp_hr = PyObject_CallNoArgs(tp_hk); Py_DECREF(tp_hk);")
+            L.append("          if (tp_hr == NULL) goto tp_error;")
+            L.append("          Py_DECREF(tp_hr); } }")
+            L.append("#endif")
+            L.append("    tp_t->snapshot_depth++;      /* #414: no poll runs user code inside the call */")
         # #125: the impl call is one depth segment (tp_runtime.h "Segments"): reset before and after
         L.append("    tp_depth_seg_begin(tp_t);")
         L.append(f"    tp_s = {_ident('tp_impl', f.name)}(tp_module, tp_ts, tp_t{''.join(', ' + a for a in args)});")
         L.append("    tp_depth_seg_end(tp_t);")
+        if self.epoch:
+            L.append("    tp_t->snapshot_depth--;")
+            if _epoch_check():
+                # #414: a result or an exception counts only if no watched global changed since the
+                # snapshot (every read the call made is then a read at its own place); else redo
+                drop = "tp_release(&tp_r); " if f.returns is Type.OBJ else ""
+                L.append(f"    if (tp_s == 0 && !tp_eg_unchanged(tp_ge)) {{ {drop}goto tp_deopt; }}   /* #414 */")
+                L.append("    if (tp_s < 0 && !tp_eg_unchanged(tp_ge)) { PyErr_Clear(); goto tp_deopt; }")
         if osr:
             L.append("    tp_t->osr = NULL;")
             L.append("    if (tp_s == 2) {           /* left for the continuation: its result, lists already final */")

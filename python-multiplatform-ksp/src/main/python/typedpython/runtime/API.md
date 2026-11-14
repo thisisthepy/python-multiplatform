@@ -116,6 +116,17 @@ Python error set, nothing to undo), `-1` Python error set (CPython's exception t
        else deopt. The names are in tp_watch_names; an unwatched module (watch_id1 == 0) deopts. */
     int  tp_eg_snapshot(PyObject *module_dict, PyObject *const *names, Py_ssize_t n, PyObject **out, uint64_t *epoch);
     int  tp_eg_current(uint64_t epoch);
+    /* #414 (agent proposal, not confirmed): a call that runs under the epoch (a pure function whose
+       call tree reads two or more entry-global names, or one and any other shared state, and holds no
+       list copy; cgen `_needs_epoch`) reads its own entry globals with tp_eg_snapshot (n may be 0, with
+       NULL arrays: the epoch alone, still inside the dict's section, so no store whose watcher already
+       moved it is pending) and, before its result or its exception counts, requires
+       tp_eg_unchanged(epoch): an acquire fence, then the epoch compared. 0 = a watched global changed:
+       the caller discards the result (or clears the exception) and runs the call interpreted. A
+       callee's entry global read at a Call of a pure caller is tp_eg_read (module dict only,
+       PyDict_GetItemRef: 1 found, 0 absent = the callee's deopt, -1 error). */
+    int  tp_eg_unchanged(uint64_t epoch);
+    int  tp_eg_read(PyObject *module_dict, PyObject *name, PyObject **out);
 `tp_*_array_enter` / `_exit` read and write the list through borrowed references (`PyList_GET_ITEM`,
 `PyList_SetItem`) and REQUIRE the caller to hold that critical section, as do `tp_*_array_st` and
 `tp_*_array_flush1`. Between enter and exit (or between two polls, #152) no other thread can store
@@ -561,7 +572,7 @@ static or module-state field must be added here):
 | list arguments of array parameters | caller's lists | critical section | `tp_cs_begin` before the copy-in, `tp_cs_end` after the write-back, on every path; every store written through at once in program order (`tp_*_array_st`, #391): lock-taking operations see the call as one step, lock-free element reads see the interpreter's store order ("Native arrays" above) |
 | list arguments of a function with three or more (#255) | caller's lists | CPython | not copied, no lock: every element read is `PyList_GetItemRef` (atomic, a strong reference), in program order; with an effect (#255 (d2)) every store is `PyList_SetItem` (`tp_list_st_*`) at once, in program order, so lock-taking and lock-free operations of other threads both see the interpreter's one-by-one reads and stores; the same list passed twice needs no guard; the wrapper's arguments keep the lists alive |
 | scalar module globals of a function with an effect and three or more lists (#255 (d2)) | module dict | strong reads | read at each use through the global cache (`tp_gcache_global`: the epoch, else a lookup in the dicts' sections; no lists are locked, so the wait is harmless), unboxed; NULL with NameError or another type: the statement exit, the interpreter then raises or computes |
-| module globals (class names, entry globals) | module dict | strong reads | `tp_global` and `tp_class_global_ok` use `PyDict_GetItemRef`. OPEN (#414, design/typedpython.md 4.3.6 아): an entry global is read once at entry, so a later shared read (a callee's entry global, a field another thread writes, a second entry global used before the first) can see that thread's writes after a rebinding while the function keeps the old value; no interleaving does that |
+| module globals (class names, entry globals) | module dict | strong reads (+ epoch, #414) | `tp_global` and `tp_class_global_ok` use `PyDict_GetItemRef`. An entry global is read once at entry, the interpreter at every use (#414, design/typedpython.md 4.3.6 아; agent proposal, not confirmed): a pure function without lists whose call tree reads two or more entry-global names, or one and any other shared state, runs under the epoch (`tp_eg_snapshot` at entry or at the impure caller's Call, the names watched, `tp_eg_read` for a callee's at a Call, no user-code poll inside, `tp_eg_unchanged` before its result or exception counts, else the call runs interpreted; unwatched: always interpreted). A function with an effect or holding lists reads its entry globals at one instant (`tp_eg_snapshot` for two or more) and nothing else shared after entry (`verify/entry-global-order`). One name and no other shared read keeps `tp_global`. Class-name globals are read at each use (`tp_class_global_ok`: the cached 1 holds only while the epoch has not moved, so it is a read at that point) |
 | entry globals of a function holding lists (#390) | module dict | critical section + epoch | `tp_eg_snapshot` reads them and `tp_globals_epoch` in the module dict's section BEFORE the lists' section; `tp_eg_current` after the copy-in, else deopt. Nothing else in that window looks a dict up (`verify/array-wait`); no interpreted callee runs inside it either: a callee's deopt leaves through a statement exit (#390 item 5, design 4.3.6 바) |
 | a compiled class's instances | other threads' objects | CPython | `PyMember_GetOne` / `SetOne` are what the interpreter's member descriptors call (they take the object's lock on free-threaded builds); `tp_new_fixed` writes only its own fresh object |
 | `errno` (math helpers) | C library | thread-local | per thread by POSIX |

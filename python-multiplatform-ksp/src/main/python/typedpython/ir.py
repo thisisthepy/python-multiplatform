@@ -817,6 +817,11 @@ class Function:
     # Truth, CompareObj, ObjToFloat, OBJ BinOp, GetItem, Contains, Format, StoreItem, ForObj; Calls
     # only to closed functions), so nothing can
     # rebind the global between entry and use, and reading it once equals reading it at each use.
+    # That holds for this thread only: another thread can rebind it and then write state read later
+    # (#414, SPEC N-8). So a pure function without lists whose call tree reads two or more entry-global
+    # names, or one and any other shared state, runs under the dict-watcher epoch (cgen `_needs_epoch`),
+    # and a function with an effect or list copies has no shared read after entry
+    # (`verify/entry-global-order`).
     entry_globals: tuple[Param, ...] = ()
     # A method of the compiled fixed-layout class `owner` (SPEC N-11, #155): `name` is
     # "<owner>.<method>" and params[0] is `self` as Param(OBJ, cls=owner, optional=False). The

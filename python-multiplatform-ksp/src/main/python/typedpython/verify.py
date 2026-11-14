@@ -59,6 +59,10 @@ Rules (the `rule` of a Diagnostic):
                               effect of its source statement (`_stmt_exit_problem`), a Call of a
                               callee that is not pure, or a callee with an entry global in its call
                               tree (`_writer_callee_problem`)
+  verify/entry-global-order   a function with entry globals that holds list copies or is not pure reads,
+                              anywhere in its call tree, other state another thread can change after
+                              entry (a Global, IsExact, New, CheckMethod, FieldGet, or a callee's entry
+                              global it does not hold itself, #414)
   verify/buffer               a malformed `ArrayParam.buffer` (None, "array", "numpy", "memoryview"), or a
                               CopyArray of a buffer array (#149)
   verify/par-loop             a `ForRange.par` (SPEC N-15, #277) that the verifier does not recompute to
@@ -324,6 +328,7 @@ ENTRY_OPEN = "verify/entry-global-open"
 ARRAY_OPEN = "verify/array-open"
 ARRAY_WAIT = "verify/array-wait"
 ARRAY_DIRECT = "verify/array-direct"
+ENTRY_ORDER = "verify/entry-global-order"
 BUFFER = "verify/buffer"
 CLASS = "verify/class"
 FIELD = "verify/field-unproved"
@@ -454,6 +459,7 @@ class _Checker:
         self.opens: list[str] = []           # reasons the function is not closed
         self.slow_user: list[str] = []       # slow paths that can run user code (FieldGet, New)
         self.waits: list[str] = []           # nodes that can wait for another object's lock (#390)
+        self.shared: list[str] = []          # reads of state another thread can change (#414)
 
     def error(self, rule: str, message: str) -> None:
         d = Diagnostic(self.fn.name, rule, message, self.fn.source_line)
@@ -1069,6 +1075,7 @@ class _Checker:
             # read at the call (cgen ev_Call); a covered one is passed from this function's snapshot
             g0 = getattr(callee.entry_globals[0], "name", "?")
             self.waits.append(f"a call of '{e.function}', whose entry global {g0} is read at the call")
+            self.shared.append(f"the entry global {g0} of '{e.function}', read at the call")
         if len(args) != len(callee.params):
             self.error(TYPE, f"'{e.function}' takes {len(callee.params)} argument(s), got "
                              f"{len(args)}")
@@ -1146,6 +1153,7 @@ class _Checker:
         self.result(e, Type.OBJ)
         # #390: the cached read's fill (and tp_global) can wait for the module dict's lock
         self.waits.append(f"global {e.name}")
+        self.shared.append(f"the global {e.name}")
         return e        # a read alone has no effect (ir.Global)
 
     def e_GetAttr(self, e: GetAttr, state: _State) -> ir.Expr:
@@ -1322,6 +1330,7 @@ class _Checker:
         obj = self.obj_operand(e.obj, state, "operand of IsExact")
         self.known_class(e.cls, "IsExact")
         self.waits.append(f"IsExact of {e.cls} (looks the class up in the module dict)")
+        self.shared.append(f"the class global of IsExact {e.cls}")
         self.result(e, Type.BOOL)
         return dataclasses.replace(e, obj=obj)
 
@@ -1340,6 +1349,7 @@ class _Checker:
         self.result(e, Type.OBJ)
         self.can_deopt = True
         self.waits.append(f"CheckMethod of {e.cls} (looks the method up in the class dict)")
+        self.shared.append(f"the class dict of CheckMethod {e.cls}")
         if self.known_class(e.cls, "CheckMethod"):
             q = f"{e.cls}.{e.method}" if isinstance(e.method, str) else None
             callee = self.sigs.get(q) if q is not None else None
@@ -1358,10 +1368,12 @@ class _Checker:
         # a slot read runs no user code: not an effect. Its slow path after a class change (getattr)
         # can, which matters to array functions (#203).
         self.slow_user.append(f"FieldGet .{e.field} (generic getattr after a class change)")
+        self.shared.append(f"the field .{e.field}")
         return dataclasses.replace(e, obj=obj)
 
     def e_New(self, e: New, state: _State) -> ir.Expr:
         self.slow_user.append(f"New {e.cls} (calls the class after a class change)")
+        self.shared.append(f"the class global of New {e.cls}")
         args = self.args(e.args, state, f"New {e.cls}")
         for k, a in enumerate(args):
             self.slot(a, Type.OBJ, f"argument {k + 1} of New {e.cls}")
@@ -2609,6 +2621,7 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
     open_why: dict[str, str] = {}          # a function that runs user code -> why
     slow_why: dict[str, str] = {}          # a function whose slow paths can run user code -> why
     wait_why: dict[str, str] = {}          # a function with a node that can wait for a lock (#390)
+    shared_why: dict[str, str] = {}        # a function that reads state another thread can change (#414)
     for name, g in sigs.items():
         c, rebuilt = _prove(g, sigs, classes)
         for d in c.diags:
@@ -2621,6 +2634,8 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
             slow_why[name] = c.slow_user[0]
         if c.waits:
             wait_why[name] = c.waits[0]
+        if c.shared:
+            shared_why[name] = c.shared[0]
 
     # Closedness (entry_globals): a fixpoint over the call graph.
     changed = True
@@ -2679,6 +2694,30 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
             reject(name, g.source_line, ARRAY_WAIT,
                    f"holds its lists' critical section, and {wait_why[name]} can wait for another "
                    f"object's critical section inside it, which would suspend it")
+
+    # #414 (SPEC N-8, agent proposal, not confirmed): entry globals are read once at entry, the
+    # interpreter reads a global at every use. A function that cannot redo its call (it holds list
+    # copies, or has an effect) may therefore read nothing else that another thread can change after
+    # entry, anywhere in its call tree: a thread that rebinds the global and then writes that state would
+    # let it combine the old value with the new state. A pure function without lists is checked at run
+    # time instead (cgen: the dict-watcher epoch around the call). With lists every such read is refused
+    # by array-wait / array-open already; this rule keeps that true if those are relaxed.
+    changed = True
+    while changed:
+        changed = False
+        for name, cs in callees.items():
+            if name not in shared_why:
+                bad = sorted(c for c in cs if c in shared_why)
+                if bad:
+                    shared_why[name] = f"{shared_why[bad[0]]}, in '{bad[0]}'"
+                    changed = True
+    for name, g in sigs.items():
+        eg = g.entry_globals if isinstance(g.entry_globals, tuple) else ()
+        if eg and name in shared_why and (g.pure is not True or resume.holds_lists(g)):
+            reject(name, g.source_line, ENTRY_ORDER,
+                   f"reads its entry globals once at entry and {shared_why[name]} after it, which another "
+                   f"thread can write after rebinding one of them; this function cannot redo the call "
+                   f"(#414)")
 
     for name, g in checked.items():
         if resume.needs_stmt_exits(g):

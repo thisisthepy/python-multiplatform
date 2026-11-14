@@ -1028,8 +1028,9 @@ def test_the_same_open_node_without_entry_globals_is_accepted():
 
 
 def test_global_read_and_box_keep_a_function_closed():
-    # without a list: `_closed` holds one, and a Global read there is verify/array-wait (#390)
-    assert_accepted(fn(entry_globals=[Param("N", I64)], returns=F64, body=[
+    # without a list: `_closed` holds one, and a Global read there is verify/array-wait (#390). Pure:
+    # #414 refuses a Global read after the entry read in a function that cannot redo (entry-global-order)
+    assert_accepted(fn(entry_globals=[Param("N", I64)], returns=F64, pure=True, body=[
         ExprStmt(Global(OBJ, "m")), ExprStmt(Box(OBJ, li("N"))), Return(f(0.0))]))
     out, diags = assert_rejected(ARRAY_WAIT, _closed(extra=[ExprStmt(Global(OBJ, "m"))]))
     assert ENTRY_OPEN not in rules_for(diags, "f")         # still closed: only the window refuses it
@@ -2145,3 +2146,85 @@ def test_a_buffer_or_direct_list_function_holds_no_section():
              body=[ExprStmt(Global(OBJ, "m")), Return(Index(F64, "a", i(0)))])
     out, diags = run(buf)
     assert ARRAY_WAIT not in rules_for(diags, "f"), diags
+
+
+# --- #414: an entry global read once at entry, and shared reads after it -----------------------------
+# The interpreter reads a global at every use. A compiled function reads its entry globals once at entry
+# (a callee's at the Call). If another thread rebinds G and then writes state the function reads later,
+# a function that cannot deopt any more (an effect, or the lists' window) would combine the old G with the
+# newer state. So such a function may read nothing else that another thread can change after entry
+# (`verify/entry-global-order`). A pure function without lists is checked at run time instead (the
+# dict-watcher epoch, cgen), so the verifier accepts it. Agent proposal, not confirmed (design 4.3.6 아).
+# Red before the change: the rule did not exist, so every "rejected" case below was accepted.
+
+ENTRY_ORDER = "verify/entry-global-order"
+
+
+def _buf_writer(extra=(), entry=(Param("N", I64),), name="f"):
+    """An impure function holding only a buffer: a[0] = N (and `extra` before it)."""
+    a = ArrayParam("a", F64A, stored=True, buffer="array")
+    reads = [li(p.name) for p in entry if p.type is I64] or [i(0)]
+    value = ToFloat(F64, reads[0])
+    for r in reads[1:]:
+        value = BinOp(F64, BinOpKind.ADD, value, ToFloat(F64, r))
+    return fn(name, params=[a], entry_globals=entry, returns=NONE,
+              body=[*extra, StoreIndex("a", i(0), value), Return()])
+
+
+def test_an_impure_buffer_function_with_one_entry_global_and_nothing_else_is_accepted():
+    assert_accepted(_buf_writer())
+
+
+def test_two_entry_globals_alone_are_accepted():
+    # cgen reads both in one snapshot (one instant), so their order of use does not matter
+    assert_accepted(_buf_writer(entry=(Param("N", I64), Param("M", I64))))
+
+
+def test_an_impure_function_with_an_entry_global_and_a_global_read_is_rejected():
+    out, diags = assert_rejected(ENTRY_ORDER, _buf_writer(extra=[ExprStmt(Global(OBJ, "m"))]))
+    assert "#414" in out.skipped["f"]
+
+
+def test_an_impure_function_with_an_entry_global_and_an_uncovered_callee_global_is_rejected():
+    g = fn("g", entry_globals=[Param("H", F64)], returns=F64, pure=True, body=[Return(lf("H"))])
+    caller = _buf_writer(extra=[ExprStmt(Call(F64, "g", (), redo=True))])
+    g = dataclasses.replace(g, may_deopt=True)
+    assert_rejected(ENTRY_ORDER, caller, g)
+    # the same callee global held by the caller is passed from its own entry read: one instant
+    held = _buf_writer(extra=[ExprStmt(Call(F64, "g", ()))], entry=(Param("N", I64), Param("H", F64)))
+    assert_accepted(held, dataclasses.replace(g, may_deopt=False))
+
+
+def test_an_impure_function_whose_callee_reads_a_global_is_rejected():
+    h = fn("h", returns=NONE, pure=True, body=[ExprStmt(Global(OBJ, "m")), Return()])
+    out, diags = assert_rejected(ENTRY_ORDER, _buf_writer(extra=[ExprStmt(Call(NONE, "h", ()))]), h)
+    assert "h" in kept(out)                                    # h alone is fine
+
+
+def test_an_impure_function_with_an_entry_global_and_is_exact_is_rejected():
+    cd = ir.ClassDecl("C", ("x",), True)
+    f = _buf_writer(extra=[ExprStmt(ir.IsExact(BOOL, Const(OBJ, None), "C"))])
+    out, diags = _verify().verify(Module("m", (f,), {}, (cd,)))
+    assert "f" not in kept(out)
+    assert ENTRY_ORDER in rules_for(diags, "f"), diags
+
+
+def test_a_window_function_with_an_entry_global_and_a_global_read_names_the_rule_too():
+    # #390 refuses it already (verify/array-wait); the #414 rule keeps refusing it if that is relaxed
+    out, diags = assert_rejected(ARRAY_WAIT, _closed(extra=[ExprStmt(Global(OBJ, "m"))]))
+    assert ENTRY_ORDER in rules_for(diags, "f"), diags
+
+
+def test_a_pure_function_with_an_entry_global_and_later_shared_reads_is_accepted():
+    # checked at run time (cgen: the dict-watcher epoch around the call), not refused
+    g = fn("g", entry_globals=[Param("H", F64)], returns=F64, pure=True, body=[Return(lf("H"))])
+    f1 = fn("f", entry_globals=[Param("G", F64)], returns=F64, pure=True, may_deopt=True,
+            body=[ExprStmt(Global(OBJ, "m")), Return(BinOp(F64, BinOpKind.ADD, Call(F64, "g", ()), lf("G")))])
+    assert_accepted(f1, g)
+
+
+def test_a_declared_impure_function_without_an_effect_is_refused_the_same_way():
+    # declared impure without an effect: cgen cannot deopt it either, so it is refused the same way
+    f1 = fn("f", entry_globals=[Param("N", I64)], returns=F64,
+            body=[ExprStmt(Global(OBJ, "m")), Return(f(0.0))])
+    assert_rejected(ENTRY_ORDER, f1)

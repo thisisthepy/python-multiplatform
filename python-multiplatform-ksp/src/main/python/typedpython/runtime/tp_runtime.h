@@ -2860,6 +2860,33 @@ static inline int tp_eg_current(uint64_t epoch)
     return __atomic_load_n(&tp_globals_epoch, __ATOMIC_ACQUIRE) == epoch;
 }
 
+/* #414 (SPEC N-8 "Entry globals and later shared reads"; agent proposal, not confirmed): at the end of
+ * a call that runs under the epoch, before its result or exception is returned. `epoch` was read by
+ * tp_eg_snapshot (n may be 0: then it only reads the epoch, still inside the module dict's section, so
+ * no store whose watcher already moved the epoch can still be pending: that store holds the same lock
+ * until it is done). The acquire fence orders every read the call made before it (a slot, a list
+ * element, a dict lookup) before the epoch load: if one of them saw a write that another thread made
+ * after rebinding a watched global, the watcher's move, which came before that rebinding's store and so
+ * before the write, is visible here. 1 = no watched global changed since the snapshot. */
+static inline int tp_eg_unchanged(uint64_t epoch)
+{
+#if defined(TP_MSVC_ATOMICS)
+    tp_msvc_fence();
+#else
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+#endif
+    return __atomic_load_n(&tp_globals_epoch, __ATOMIC_ACQUIRE) == epoch;
+}
+
+/* #414: a callee's entry global read at the Call inside a call that runs under the epoch: the module
+ * dict only (the builtins dict is not watched for it). PyDict_GetItemRef: 1 found (*out strong),
+ * 0 absent (the caller deopts: the interpreted function then looks in builtins or raises NameError),
+ * -1 error. No lock: the epoch read in the dict's section before it covers this read (tp_eg_unchanged). */
+static inline int tp_eg_read(PyObject *module_dict, PyObject *name, PyObject **out)
+{
+    return PyDict_GetItemRef(module_dict, name, out);
+}
+
 /* The body of a module's PyDict_WatchCallback: move tp_globals_epoch when `key` is one of the
  * NULL-terminated class `names` (an exact str compared by content), may equal one (any other key
  * type, a str subclass), or is NULL (cleared / cloned / deallocated). Never raises; returns 0. */
