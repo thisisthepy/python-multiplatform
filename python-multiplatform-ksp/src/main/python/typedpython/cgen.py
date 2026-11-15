@@ -150,7 +150,8 @@ compiled call), are wrapped in
 `tp_depth_py_begin(tp_fd)` / `tp_depth_py_end(tp_fd)`, which add and remove `tp_fd` from the count:
 whatever runs there sees the count the counted path would have had.
 An exit to a continuation (OSR-style or statement exit) counts `tp_fd - 1`: the continuation's own
-Python frame stands for the function that leaves.
+Python frame stands for the function that leaves. On the counted path the same exit takes this
+function's frame out of the count for the continuation call (`tp_depth_py_begin(-1)`, #426).
 
 Ownership rule (ir.py "Safety"), implemented by the `_own_*` emit helpers below and nowhere else:
   1. every OBJ local, including each OBJ parameter, which the impl copies with a new reference at
@@ -3063,25 +3064,19 @@ class _FnGen:
         for i, name in enumerate(r.params):
             self.emit(f"if (!tp_oe) {{ tp_oa[{i}] = {self._osr_value(name, site, cur, stop, step)}; tp_oe = tp_oa[{i}] == NULL; }}")
         self.emit("if (!tp_oe) {")
-        if self.writer:
-            # #255 (d2): no snapshot; a fast twin counts its tree's other frames while Python code runs
-            # (tp_fd - 1: see below)
-            if self.fast:
-                self.emit("    tp_depth_py_begin(tp_t, tp_fd - 1);")
-            self.emit(f"    tp_my->result = PyObject_Vectorcall(tp_ofn, tp_oa, {n}, NULL);")
-            if self.fast:
-                self.emit("    tp_depth_py_end(tp_t, tp_fd - 1);")
-        else:
-            self.emit("    tp_t->snapshot_depth--;")
-            if self.fast:
-                # the continuation is Python code: it must see the frames of this fast tree (module
-                # docstring, "Fast entry"). Its own Python frame stands for this function, so the
-                # tree's other tp_fd - 1 frames are counted: with tp_fd the function counted twice and
-                # RecursionError came one frame early (CI run 43650072636, test_fast_entry)
-                self.emit("    tp_depth_py_begin(tp_t, tp_fd - 1);")
-            self.emit(f"    tp_my->result = PyObject_Vectorcall(tp_ofn, tp_oa, {n}, NULL);")
-            if self.fast:
-                self.emit("    tp_depth_py_end(tp_t, tp_fd - 1);")
+        # The continuation is Python code, and its own Python frame stands for this function. While it
+        # runs the depth count must hold the compiled frames around this one and not this one: the tree's
+        # other tp_fd - 1 frames in a fast twin (none of them is counted), one less than now on the
+        # counted path (tp_enter_call counted this frame; tp_leave_call in the exit block still pairs
+        # with it). Counted twice, a compiled call made under the continuation raised RecursionError one
+        # frame before the interpreter (CI run 43650072636 for the twin, #426 for the counted path).
+        own = "tp_fd - 1" if self.fast else "-1"
+        if not self.writer:
+            self.emit("    tp_t->snapshot_depth--;")       # #255 (d2): a direct writer holds no snapshot
+        self.emit(f"    tp_depth_py_begin(tp_t, {own});")
+        self.emit(f"    tp_my->result = PyObject_Vectorcall(tp_ofn, tp_oa, {n}, NULL);")
+        self.emit(f"    tp_depth_py_end(tp_t, {own});")
+        if not self.writer:
             self.emit("    tp_t->snapshot_depth++;")
         self.emit("}")
         self.emit(f"for (int tp_oi = 0; tp_oi < {n}; tp_oi++) Py_XDECREF(tp_oa[tp_oi]);")
