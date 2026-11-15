@@ -77,6 +77,15 @@ CPython interpreter inside a Kotlin Multiplatform application so that:
      compiled code is allocated in a region with no GC header (§4.3.4). Anything observable stays a real
      CPython object.
 
+   **An opt-in AOT mode with no interpreter** (maintainer, 2026-11-16: "너가 제시한 AoT모드 좋은거 같아.
+   도입하도록 해."). Because the default mode always ships CPython for its interpreted fallback, its binary
+   size and baseline memory stay above Rust's. The AOT mode is chosen per build: when the whole program
+   passes the verifier, it is emitted as a standalone binary that does not ship the interpreter, and code
+   the verifier cannot prove is a **compile error** instead of an interpreted fallback. Its aim is binary
+   size and baseline memory near Rust's. The default stays as it is: any Python runs, unprovable code is
+   interpreted. A program accepted by the AOT mode must compute what CPython computes for it; the mode
+   narrows which programs are accepted, never what an accepted program means.
+
 5. **High-performance kernels are written in Python too** (TypedPython tier 2). The maintainer first
    asked to explore it ("GPU 관련 최적화까지도 별도 언어 없이 지원할 방안을 모색해보자") and on
    2026-10-04 made it a commitment ("GPU 커널 등 탐색을 약속으로 올려"), so that TypedPython can stand
