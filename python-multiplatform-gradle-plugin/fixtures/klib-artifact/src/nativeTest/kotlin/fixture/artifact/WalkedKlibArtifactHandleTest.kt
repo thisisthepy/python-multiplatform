@@ -81,4 +81,42 @@ class WalkedKlibArtifactHandleTest {
             """.trimIndent(),
         )
     }
+
+    @Test
+    fun aChildModuleSharingAFunctionsNameIsReachedThroughSysModulesWhileParentAttributeStaysTheFunction() {
+        // Under PythonProxySource alone (without PythonxAdapter), `kotlinx.coroutines.Job` on the
+        // parent package stays the factory function `Job(parent)` and `Channel.Factory` on
+        // `kotlinx.coroutines.channels.Channel` stays the companion-handle static property, while
+        // the child modules that hold `Job.Key` and `Channel.Factory.BUFFERED` are registered in
+        // `sys.modules`. They are reached through `sys.modules` (`from ... import ...`,
+        // `importlib.import_module`, or `sys.modules[...]`), whereas dotted attribute access
+        // through the parent module looks up the attribute on the function or companion handle and
+        // raises `AttributeError`.
+        Python3.exec(
+            """
+            import importlib
+            import sys
+            import kotlinx.coroutines
+            import kotlinx.coroutines.channels.Channel as _kh_channel_mod
+            from kotlinx.coroutines import Job
+            from kotlinx.coroutines.channels.Channel.Factory import BUFFERED as _kh_from_buffered
+
+            _kh_job = Job(None)
+            assert _kh_job is not None
+            assert 'kotlinx.coroutines.Job' in sys.modules
+            assert 'Key' in type(sys.modules['kotlinx.coroutines.Job']).__dict__
+            assert _kh_from_buffered == -2
+            assert sys.modules['kotlinx.coroutines.channels.Channel.Factory'].BUFFERED == -2
+
+            try:
+                _ = kotlinx.coroutines.Job.Key
+            except AttributeError:
+                _kh_dotted_failed = True
+            else:
+                _kh_dotted_failed = False
+            assert _kh_dotted_failed, 'kotlinx.coroutines.Job on the parent module is the function, so .Key must raise AttributeError'
+            del _kh_job, _kh_from_buffered, _kh_channel_mod
+            """.trimIndent(),
+        )
+    }
 }
