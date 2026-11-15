@@ -130,8 +130,9 @@ class _Pass:
             stmt = dataclasses.replace(x, value=value)
             if x.target in self.flagged:
                 t = self.taint(x.value)
+                # the flag belongs to the same source statement (ir.Stmt.stmt, #390 item 5)
                 return [stmt, ir.Assign(flag_name(x.target), t if t is not None
-                                        else ir.Const(Type.BOOL, False))]
+                                        else ir.Const(Type.BOOL, False), stmt=x.stmt)]
             return stmt
         if isinstance(x, ir.Box) and x.operand.type in ir.SCALARS:
             return dataclasses.replace(x, operand=self.rewrite(x.operand), np=self.taint(x.operand))

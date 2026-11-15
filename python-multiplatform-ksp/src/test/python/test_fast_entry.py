@@ -368,7 +368,9 @@ def test_a_redo_inside_a_fast_tree_sees_the_exact_depth(traced, tmp_path):
     for x in ("3", "3000000"):
         assert r["ok"][x] > 100 and r["rec"][x] >= 1, (x, r)
     assert r["deopts"] >= r["deopt_ok"] > 100           # the redo really ran at every ok depth
-    assert "tp_depth_py_begin(tp_t, tp_fd);" in fn_text(c, "static inline int tp_fimpl_fill")
+    # fill leaves through a statement exit (#390): its continuation's Python frame stands for fill
+    # itself, so the tree's other frames are counted (tp_fd - 1), not tp_fd
+    assert "tp_depth_py_begin(tp_t, tp_fd - 1);" in fn_text(c, "static inline int tp_fimpl_fill")
 
 
 @posix_signals

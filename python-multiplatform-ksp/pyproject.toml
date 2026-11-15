@@ -36,6 +36,9 @@ test = ["pytest"]
 testpaths = ["src/test/python"]
 pythonpath = ["src/main/python"]
 addopts = "--basetemp=.pytest_tmp"
+# A test still running after this many seconds gets every thread's stack printed (the test is not
+# stopped; the CI job's timeout-minutes ends it). Added after a windows job hung for 6 hours.
+faulthandler_timeout = 300
 markers = [
     "measurement: records cost; asserts only sanity bounds",
     "race_mutant: shows a concurrency test catches a mutant; depends on the race firing, so not in push CI; run with the TypedPython CI dispatch input race_mutant (#394)",

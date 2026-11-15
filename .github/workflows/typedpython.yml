@@ -18,6 +18,9 @@ jobs:
   test:
     name: TypedPython tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # A normal run takes 6 to 24 minutes (windows is the slowest). Run 43580524047 hung on windows until
+    # GitHub's 6 hour limit; pytest's faulthandler_timeout (pyproject.toml) prints where a test is stuck.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -65,6 +68,7 @@ jobs:
     # sanitizer test has a launcher-based macOS path of its own).
     name: TypedPython tests under ASan + UBSan (ubuntu-latest)
     runs-on: ubuntu-latest
+    timeout-minutes: 20      # about 1 minute normally
     defaults:
       run:
         working-directory: python-multiplatform-ksp
@@ -102,6 +106,7 @@ jobs:
     # dynamic_lookup extension cannot resolve the C API (python-multiplatform-ksp/fixtures/app/build.gradle.kts).
     name: TypedPython from Kotlin, app fixture (macos-latest)
     runs-on: macos-latest
+    timeout-minutes: 30      # about 3 minutes normally
     steps:
       - uses: actions/checkout@v4
 
