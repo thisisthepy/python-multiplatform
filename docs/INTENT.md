@@ -45,6 +45,38 @@ CPython interpreter inside a Kotlin Multiplatform application so that:
    it. The `typedpython` wheel is attached to the GitHub Release and is not published to PyPI
    ("그냥 github release로만 해도 충분한거라는거지 ... 그냥 우리 배포판으로 배포하면 되는거").
 
+   **Develop interpreted, deploy compiled** (maintainer, 2026-11-16). Building Rust costs so much compute
+   that many agents building at once exhaust a machine, so the model the maintainer wants is the one Dart
+   has (tests on an interpreter, deployment ahead of time) without Dart's handicap of being chosen less for
+   having a GC:
+
+   > "개발은 일반 파이썬으로 여러 에이전트로 돌려도 문제 없고, 다 끝나면 배포는 rust만큼 최적화가
+   > 가능하다면 최상인거지"
+   >, *Development runs as plain Python, fine for many agents at once; once it is done, deployment
+   > optimised as far as Rust would be the best outcome.*
+
+   So TypedPython source is always valid Python that runs unchanged on the interpreter, which is how it
+   is developed and tested with no build step; compiling it is the deployment step. The maintainer asked
+   (2026-11-16, "그래 인텐트에 추가해") to record the safety and memory stance that goes with it, as the
+   design already has it:
+
+   - **Memory safety: compile only what is proven.** Not Rust's whole-program ownership proof, which
+     Python's shared mutable aliasing would turn into `Rc<RefCell>` and `unsafe` (the reason C was chosen
+     over Rust, `docs/design/typedpython.md` §4.3). The IR verifier proves a function safe before any C is
+     emitted (definition before use, matching types, array bounds proven or checked at run time, one
+     ownership rule for object references); a function it cannot prove stays interpreted, with the reason
+     reported. Generated C touches memory and `PyObject` only through the runtime helpers, and leaving an
+     assumption (overflow, a failed guard) falls back to the interpreter with CPython's result (§4.3.1).
+     Sanitizers, differential tests against the interpreter, fuzzing and planted-mutant tests are the net
+     outside the proof.
+   - **GC: kept for Python's behaviour, avoided where it cannot be observed.** Compiled code computes what
+     CPython computes, so the GC and reference counting are not removed. Their cost is avoided only where
+     no Python code can tell the difference (`id`, `gc.get_objects`, `__del__` timing,
+     `sys.getrefcount`): scalars and arrays are unboxed, objects local to a function are not created,
+     reference counting is skipped for objects proven thread-local, and a tree that lives and dies inside
+     compiled code is allocated in a region with no GC header (§4.3.4). Anything observable stays a real
+     CPython object.
+
 5. **High-performance kernels are written in Python too** (TypedPython tier 2). The maintainer first
    asked to explore it ("GPU 관련 최적화까지도 별도 언어 없이 지원할 방안을 모색해보자") and on
    2026-10-04 made it a commitment ("GPU 커널 등 탐색을 약속으로 올려"), so that TypedPython can stand
