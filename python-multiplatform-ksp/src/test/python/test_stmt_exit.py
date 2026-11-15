@@ -1453,7 +1453,7 @@ def _lv_same(m, name, *args):
 
 
 LV_CASES = [
-    ("lv_ret", (), "np"), ("lv_zero", (0,), "np"), ("lv_zero", (4,), "int"),
+    ("lv_ret", (), "int"), ("lv_zero", (0,), "np"), ("lv_zero", (4,), "int"),
     ("lv_brk", (0, -1), "np"), ("lv_brk", (5, -1), "int"), ("lv_brk", (5, 2), "int"),
     ("lv_in", (0, 1), "np"), ("lv_in", (5, 2), "int"), ("lv_in", (3, -1), "int"),
 ]
