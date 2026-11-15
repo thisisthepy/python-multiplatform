@@ -1056,3 +1056,363 @@ def test_generated_c_of_the_behaviour_module_has_statement_exits(stmod):
     c = cgen.generate(proved, path, path.name)
     for name in ("fill", "acc2", "iftest", "whiletest", "ret"):
         assert re.search(rf'"__tp_resume_{name}_s\d+"', c), name
+
+
+# --- numpy scalars at an exit (#426) ----------------------------------------------------------------
+#
+# In a function with a numpy buffer parameter (#220) a local derived from an element is an np.float64 /
+# np.int64 / np.bool in the interpreter, decided per value at run time by the shadow flag `<name>__np`
+# (taint.py). A continuation is interpreted code: it must receive that numpy scalar, not a float / int /
+# bool, or `type(x)`, the returned object and numpy's arithmetic rules (inf and a RuntimeWarning where a
+# float raises ZeroDivisionError) differ after the exit.
+#
+# Red record (the agent that wrote these, 2026-11-15, before the fix, by inspection of the generated C
+# only: no test was run, AGENTS.md 10): the statement exit and the poll exit of `np_stmt` / `np_poll`
+# boxed `s` with `PyFloat_FromDouble(l_s)`, `e` with `PyLong_FromLongLong((long long)l_e)` and `b` with
+# `PyBool_FromLong(l_b)` although `l_s__np` / `l_e__np` / `l_b__np` existed; `rng_var` and `named` below
+# were lowered. Everything here is unobserved until CI runs it.
+
+NP_EXIT = '''
+import numpy as np
+import numpy.typing as npt
+
+
+@compiled
+def g(i: int, k: int) -> float:
+    t = 1
+    if i == k:
+        t = 4611686018427387904
+    return float(t * 4)
+
+
+@compiled
+def np_stmt(x: npt.NDArray[np.float64], out: list[float], k: int, w: int) -> object:
+    s = 0.0
+    b = False
+    p = 1.5
+    for i in range(len(out)):
+        if i == 2:
+            s = x[0]
+            b = x[0] > x[1]
+        out[i] = g(i, k)
+    if w == 0:
+        return s
+    if w == 1:
+        return b
+    return p
+
+
+@compiled
+def np_div(x: npt.NDArray[np.float64], out: list[float], k: int, d: float) -> object:
+    s = x[0]
+    for i in range(len(out)):
+        out[i] = g(i, k)
+    return s / d
+
+
+@compiled
+def np_poll(x: npt.NDArray[np.float64], y: npt.NDArray[np.int64], v: list[float], w: int) -> object:
+    s = 0.0
+    e = 0
+    b = False
+    p = 1.5
+    for i in range(len(v)):
+        if i == 40:
+            s = x[0]
+            e = y[0]
+            b = x[0] > x[1]
+        p = p + v[i]
+    if w == 0:
+        return s
+    if w == 1:
+        return e
+    if w == 2:
+        return b
+    return p
+'''
+
+NP_EXIT_NAMES = {"g", "np_stmt", "np_div", "np_poll"}
+
+
+def _np_lower(d, name="npexit"):
+    path = d / f"{name}.py"
+    path.write_text(NP_EXIT)
+    proved, diags = verify.verify(frontend.lower(path))
+    assert NP_EXIT_NAMES <= {f.name for f in proved.functions}, (diags, proved.skipped)
+    return proved, path
+
+
+def _np_generate(proved, path, mutant=False):
+    saved = cgen._exit_numpy_scalars
+    if mutant:
+        cgen._exit_numpy_scalars = lambda: False
+    try:
+        return cgen.generate(proved, path, path.name)
+    finally:
+        cgen._exit_numpy_scalars = saved
+
+
+def _exit_tails(c: str, signature_start: str) -> dict[str, str]:
+    """continuation name -> the text of each exit tail of that function that calls it (joined)."""
+    body = _function_text(c, signature_start)
+    out: dict[str, str] = {}
+    for m in re.finditer(r'PyDict_GetItemStringRef\(tp_dict, "(__tp_resume_\w+)", &tp_ofn\)', body):
+        end = body.index("PyObject_Vectorcall(tp_ofn", m.start())
+        out[m.group(1)] = out.get(m.group(1), "") + body[m.start():end]
+    return out
+
+
+@pytest.mark.parametrize("sig", ["static int tp_impl_np_stmt(", "static inline int tp_fimpl_np_stmt("])
+def test_a_statement_exit_and_a_poll_exit_box_a_flagged_local_as_its_numpy_scalar(tmp_path, sig):
+    proved, path = _np_lower(tmp_path)
+    c = _np_generate(proved, path)
+    if sig not in c:                       # no fast twin for this function: nothing to check there
+        assert "fimpl" in sig
+        return
+    tails = _exit_tails(c, sig)
+    assert "__tp_resume_np_stmt_0" in tails                       # the loop's poll exit
+    stmt = [k for k in tails if re.fullmatch(r"__tp_resume_np_stmt_s\d+", k)]
+    assert stmt, sorted(tails)
+    for name in ["__tp_resume_np_stmt_0", *stmt]:
+        tail = tails[name]
+        # the same run-time types Box.np uses: buf_types[2] np.float64, [4] np.bool_
+        assert ("(l_s__np ? tp_box_np(tp_st->buf_types[2], PyFloat_FromDouble(l_s)) "
+                ": PyFloat_FromDouble(l_s))") in tail, name
+        assert ("(l_b__np ? tp_box_np(tp_st->buf_types[4], PyBool_FromLong(l_b)) "
+                ": PyBool_FromLong(l_b))") in tail, name
+        # a local that is never derived from an element has no flag and is boxed as before
+        assert "= PyFloat_FromDouble(l_p);" in tail and "l_p__np" not in c, name
+        # parameters and the hidden loop state are ints
+        assert "= PyLong_FromLongLong((long long)l_k);" in tail, name
+
+
+def test_a_poll_exit_boxes_an_int64_derived_local_as_np_int64(tmp_path):
+    proved, path = _np_lower(tmp_path)
+    c = _np_generate(proved, path)
+    tail = _exit_tails(c, "static int tp_impl_np_poll(")["__tp_resume_np_poll_0"]
+    assert ("(l_e__np ? tp_box_np(tp_st->buf_types[3], PyLong_FromLongLong((long long)l_e)) "
+            ": PyLong_FromLongLong((long long)l_e))") in tail
+    assert "(l_s__np ? tp_box_np(tp_st->buf_types[2], PyFloat_FromDouble(l_s))" in tail
+    assert "(l_b__np ? tp_box_np(tp_st->buf_types[4], PyBool_FromLong(l_b))" in tail
+    # nothing else is: p, the parameters and the loop state the continuation's `range` takes
+    assert tail.count("tp_box_np(") == 3
+
+
+def test_the_mutation_point_emits_the_plain_boxes(tmp_path):
+    proved, path = _np_lower(tmp_path)
+    c = _np_generate(proved, path, mutant=True)
+    for sig in ("static int tp_impl_np_stmt(", "static int tp_impl_np_poll("):
+        for name, tail in _exit_tails(c, sig).items():
+            assert "tp_box_np(" not in tail and "= PyFloat_FromDouble(l_s);" in tail, (sig, name)
+
+
+def test_functions_without_a_numpy_buffer_are_boxed_as_before(spectral_c):
+    for sig in ("static int tp_impl_mul_av(", "static inline int tp_fimpl_mul_av("):
+        for name, tail in _exit_tails(spectral_c, sig).items():
+            assert "tp_box_np(" not in tail, (sig, name)
+
+
+NP_REFUSED = '''
+import numpy as np
+import numpy.typing as npt
+
+
+@compiled
+def rng_var(y: npt.NDArray[np.int64], v: list[float]) -> object:
+    i = y[0]
+    for i in range(3):
+        pass
+    t = 0.0
+    for j in range(len(v)):
+        t += v[j]
+    return i
+
+
+@compiled
+def named(x: npt.NDArray[np.float64], s__np: bool) -> object:
+    s = 1.0
+    if s__np:
+        s = x[0]
+    return s
+
+
+@compiled
+def kept(x: npt.NDArray[np.float64]) -> object:
+    s = 0.0
+    for i in range(len(x)):
+        s = s + x[i]
+    return s
+'''
+
+
+def test_a_flag_that_would_not_follow_the_value_keeps_the_function_interpreted(tmp_path):
+    """The shadow flag is exact only if every binding of the local sets it. A `for ... in range`
+    variable is bound by the loop, not by an assignment, so one that is also assigned a numpy-derived
+    value would keep a stale flag (an np.int64 where the interpreter has an int): refused. A name
+    ending in `__np` would be taken for a flag: refused in a function with a numpy buffer."""
+    m, _ = _lower(tmp_path, NP_REFUSED, "nprefused.py")
+    assert {f.name for f in m.functions} == {"kept"}, m.skipped
+    assert "loop variable `i`" in m.skipped["rng_var"] and "numpy" in m.skipped["rng_var"]
+    assert "`s__np`" in m.skipped["named"]
+
+
+def _np_build(tmp_path_factory, name, mutant=False):
+    from test_cgen import need_runtime, runtime_dir
+    from typedpython import cbuild
+    pytest.importorskip("numpy")
+    need_runtime()
+    d = tmp_path_factory.mktemp(name)
+    proved, path = _np_lower(d, name)
+    c = _np_generate(proved, path, mutant)
+    # as test_osr_exit: a poll every 32 iterations, with `__tp_test_snap_hook__()` run in its window
+    so = cbuild.build(c, name, d / "out", runtime_dir=runtime_dir(),
+                      flags=(*cbuild.DEFAULT_FLAGS, "-DTP_POLL_INTERVAL=32", "-DTP_TEST_SNAP_HOOK"))
+    return cbuild.load(name, so)
+
+
+@pytest.fixture(scope="module")
+def npmod(tmp_path_factory):
+    return _np_build(tmp_path_factory, "npexit")
+
+
+@pytest.fixture(scope="module")
+def npmutant(tmp_path_factory):
+    return _np_build(tmp_path_factory, "npexitmut", mutant=True)
+
+
+def _np_args(n=N):
+    import numpy as np
+    return np.array([1.5, -2.25, 3.0], dtype=np.float64), np.array([3, -5, 7], dtype=np.int64), n
+
+
+def _np_run(call):
+    import warnings
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            r = ("ok", call())
+        except Exception as e:      # noqa: BLE001 - compared by type and text
+            r = ("raise", type(e).__name__, str(e))
+    return r, [(x.category, str(x.message)) for x in w]
+
+
+def _spied(m, pattern, call):
+    """Run `call` with every continuation of `m` whose name matches `pattern` wrapped: returns the
+    outcome and, per continuation call, {parameter name: type of the argument}."""
+    import inspect
+    seen = []
+    saved = {k: v for k, v in vars(m).items() if re.fullmatch(pattern, k)}
+    assert saved, pattern
+
+    def spy(orig):
+        names = list(inspect.signature(orig).parameters)
+
+        def run(*a):
+            seen.append({n: type(v) for n, v in zip(names, a)})
+            return orig(*a)
+        return run
+
+    for k, v in saved.items():
+        setattr(m, k, spy(v))
+    try:
+        return _np_run(call), seen
+    finally:
+        for k, v in saved.items():
+            setattr(m, k, v)
+
+
+def _stmt_case(m, k, w):
+    """np_stmt compiled (continuations spied) and interpreted; the callee overflows at i == k."""
+    x, _, n = _np_args()
+    a, b = [0.0] * n, [0.0] * n
+    got, seen = _spied(m, r"__tp_resume_np_stmt_s\d+", lambda: m.np_stmt(x, a, k, w))
+    want = _np_run(lambda: m.__typedpython_interpreted__["np_stmt"](x.copy(), b, k, w))
+    return got, want, seen, (a, b)
+
+
+@pytest.mark.parametrize("w", [0, 1, 2])
+@pytest.mark.parametrize("k", [-1, 1, 5])
+def test_a_statement_exit_hands_over_the_interpreters_numpy_scalars(npmod, k, w):
+    """k == 1: the exit comes before `s = x[0]` (s and b are still a float and a bool); k == 5: after
+    (an np.float64 and an np.bool); k == -1: no exit. The flag is a run-time value, so one build
+    covers both."""
+    import numpy as np
+    got, want, seen, (a, b) = _stmt_case(npmod, k, w)
+    assert got == want and a == b
+    assert got[0][0] == "ok" and type(got[0][1]) is type(want[0][1]), (got, want)
+    assert type(got[0][1]) is {0: np.float64, 1: np.bool_, 2: float}[w]
+    if k == -1:
+        assert seen == []
+        return
+    [types] = seen                                             # one exit, at i == k
+    assert types["p"] is float and types["k"] is int and types["x"] is np.ndarray
+    if k == 1:
+        assert types["s"] is float and types["b"] is bool
+    else:
+        assert types["s"] is np.float64 and types["b"] is np.bool_
+
+
+def test_numpys_division_rules_hold_after_a_statement_exit(npmod):
+    """`s / 0.0` of an np.float64 is inf with numpy's RuntimeWarning; of a float it raises
+    ZeroDivisionError. With and without the exit the compiled call must do what the interpreter does."""
+    m = npmod
+    x, _, n = _np_args()
+    for k in (-1, 3):
+        got = _np_run(lambda: m.np_div(x, [0.0] * n, k, 0.0))
+        want = _np_run(lambda: m.__typedpython_interpreted__["np_div"](x.copy(), [0.0] * n, k, 0.0))
+        assert got == want, k
+        assert got[0] == ("ok", float("inf")) and type(got[0][1]) is type(want[0][1])
+        assert [c for c, _ in got[1]] == [RuntimeWarning], got
+
+
+def _poll_case(m, calls, w):
+    """np_poll compiled, a hook appending to `v` at its `calls`-th poll (polls at i = 32, 64, ...: a
+    length change, so that poll leaves), against the interpreted function. The loop's bounds are
+    evaluated before the loop and the appended element is never read, so the reference needs no hook."""
+    x, y, _ = _np_args()
+    v = [0.5] * 100
+    state = {"n": 0}
+
+    def hook():
+        state["n"] += 1
+        if state["n"] == calls:
+            v.append(0.0)
+
+    m.__tp_test_snap_hook__ = hook
+    try:
+        got, seen = _spied(m, r"__tp_resume_np_poll_0", lambda: m.np_poll(x, y, v, w))
+    finally:
+        del m.__tp_test_snap_hook__
+    want = _np_run(lambda: m.__typedpython_interpreted__["np_poll"](x.copy(), y.copy(), [0.5] * 100, w))
+    return got, want, seen
+
+
+@pytest.mark.parametrize("w", [0, 1, 2, 3])
+@pytest.mark.parametrize("calls", [1, 2])
+def test_a_poll_exit_hands_over_the_interpreters_numpy_scalars(npmod, calls, w):
+    """calls == 1: the poll at i == 32, before the locals take element values at i == 40; calls == 2:
+    the poll at i == 64, after."""
+    import numpy as np
+    got, want, seen = _poll_case(npmod, calls, w)
+    assert got == want
+    assert got[0][0] == "ok" and type(got[0][1]) is type(want[0][1]), (got, want)
+    [types] = seen                                             # the poll that saw the change left
+    assert types["p"] is float and types["w"] is int
+    assert all(types[h] is int for h in ("__tp_cur_0", "__tp_stop_0", "__tp_step_0"))
+    if calls == 1:
+        assert (types["s"], types["e"], types["b"]) == (float, int, bool)
+    else:
+        assert (types["s"], types["e"], types["b"]) == (np.float64, np.int64, np.bool_)
+
+
+def test_plain_boxes_at_an_exit_are_caught(npmutant):
+    """The mutant (`cgen._exit_numpy_scalars` False: every local boxed as a float / int / bool) must
+    fail the comparisons above: the returned object and the division differ from the interpreter's."""
+    m = npmutant
+    got, want, seen, _ = _stmt_case(m, 5, 0)
+    assert seen and seen[0]["s"] is float
+    assert type(got[0][1]) is float and type(want[0][1]) is not float
+    got, want, seen = _poll_case(m, 2, 1)
+    assert seen and type(got[0][1]) is int and type(want[0][1]) is not int
+    x, _, n = _np_args()
+    assert _np_run(lambda: m.np_div(x, [0.0] * n, 3, 0.0))[0][:2] == ("raise", "ZeroDivisionError")

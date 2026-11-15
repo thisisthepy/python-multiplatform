@@ -1065,7 +1065,8 @@ class _Lowerer:
             try:
                 body, flags, deopts = taint.apply(
                     body, self.numpy, not self.impure,
-                    frozenset(p.name for p in self.sig.params if isinstance(p, ir.Param)))
+                    frozenset(p.name for p in self.sig.params if isinstance(p, ir.Param)),
+                    frozenset(locals_) | frozenset(p.name for p in self.sig.params))
             except taint.Refuse as why:
                 raise Skip(self.fn.lineno, str(why)) from None
             locals_.update(flags)

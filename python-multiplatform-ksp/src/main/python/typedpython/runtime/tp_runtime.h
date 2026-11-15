@@ -3308,6 +3308,9 @@ static inline void tp_depth_done(tp_tls *t)
 /* Around a point of a fast tree that can run Python code: the count includes the tree's `fd` active
  * frames. begin/end are balanced. end also drops the cached top frame when no compiled frame is
  * counted any more (the code in between may have cached another frame, as tp_leave_call would). */
+/* `fd` is -1 at an exit of a counted frame to its continuation (#426): the continuation's Python frame
+ * stands for that frame, so it leaves the count for the call and returns to it after (the count never
+ * goes below 0: the frame itself was counted by tp_enter_call). */
 static inline void tp_depth_py_begin(tp_tls *t, int fd)
 {
     t->depth.count += fd;
