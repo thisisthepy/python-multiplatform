@@ -1306,6 +1306,22 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     `<<` overflow equals Python's big int, with the deopt counter moving in the pure case and not in the
     impure one; `ValueError` with the same message; augmented forms; INT and object operands; `bool` and
     float operands skipped or `TypeError`. `Status: implemented`.
+- **N-17** TypedPython AOT mode: a standalone build with no interpreter (#443; INTENT §1.4, maintainer
+  decision 2026-11-16). `Status: planned, not implemented; design first`.
+  - **Selection.** Opt-in per build; the default mode (N-1 to N-16, interpreted fallback) is unchanged.
+  - **Acceptance.** The whole program must pass the verifier. Every construct that the default mode would
+    leave interpreted or deopt from (unknown calls, unproven bounds or overflow without a compiled
+    fallback, dynamic attributes, `eval`/`exec`, imports outside the accepted set) is a compile error that
+    names the construct and its location, instead of a fallback.
+  - **Output.** A standalone binary that does not ship CPython. What an accepted program computes equals
+    what CPython computes for it; the mode only narrows which programs are accepted.
+  - **To be fixed by the design note before any code** (agent proposal, not confirmed): the accepted
+    subset (types, classes, containers, exceptions, the standard-library modules provided); the runtime
+    that replaces CPython for that subset (allocation, strings, exceptions, threads on the free-threaded
+    model); how a guard or overflow that deopts in the default mode is handled without an interpreter
+    (proved away, or a compile error); how N-12 objects are laid out when nothing can observe them.
+  - **Measurement.** Binary size, baseline and peak RSS, CPU time and thread scaling, each beside the best
+    safe Rust and beside the default mode, on the N-12c benchmarks.
 
 ---
 
