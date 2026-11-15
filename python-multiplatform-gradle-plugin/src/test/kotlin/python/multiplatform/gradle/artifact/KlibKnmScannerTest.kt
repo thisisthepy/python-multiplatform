@@ -502,7 +502,7 @@ class KlibKnmScannerTest {
         val ofFn = entries.single { it.name == "org.thisisthepy.compose.breeze.BreezeDesignSystem.of" }
         assertEquals("FUNCTION", ofFn.kind)
         assertEquals(listOf("BOOLEAN"), ofFn.paramTags)
-        assertEquals(listOf("dark"), ofFn.paramNames)
+        assertEquals(listOf("isDark"), ofFn.paramNames)
         assertEquals("OBJECT", ofFn.returnTag)
         assertEquals("org.thisisthepy.compose.breeze.BreezeDesignSystem", ofFn.returnTypeName)
 
