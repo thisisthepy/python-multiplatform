@@ -366,12 +366,18 @@ object PythonProxySource {
                     # its parent; this module is still in sys.modules and the class's __getattr__
                     # reaches its statics. One Python name is not both a module and a class.
                     # Likewise, a top-level function already published under `_leaf` on `_parent`
-                    # (`kotlinx.coroutines.Job` alongside `kotlinx.coroutines.Job.Key`) stays callable on
-                    # `_parent` while `_m` remains in `sys.modules` for `from pkg.Name import Const`.
+                    # (`kotlinx.coroutines.Job` alongside `kotlinx.coroutines.Job.Key`) or a static
+                    # property descriptor already installed on `type(_parent)` (`Channel.Factory`
+                    # alongside `Channel.Factory.BUFFERED`) stays on `_parent` while `_m` remains in
+                    # `sys.modules` for `from pkg.Name import Const`.
                     _parent_mod = _pm_module(_parent)
                     _binding = _pm_sys.modules.get('python_multiplatform.binding')
                     _is_type = getattr(_binding, 'class_wins_over_module', None)
-                    if (_is_type is None or not _is_type(_name)) and _leaf not in _parent_mod.__dict__:
+                    if (
+                        (_is_type is None or not _is_type(_name)) and
+                        _leaf not in _parent_mod.__dict__ and
+                        _leaf not in type(_parent_mod).__dict__
+                    ):
                         setattr(_parent_mod, _leaf, _m)
             return _m
 

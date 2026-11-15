@@ -270,13 +270,15 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 - **U-3** Generated Python proxies let Python write ordinary Python against Kotlin: construct a class,
   call methods, get/set properties (a `private set` is read-only), read companion / static members.
   A Kotlin package is importable under its own name. Under `PythonProxySource` alone (without
-  `PythonxAdapter`), a child module that shares its name with a function already published on the parent
-  package (`kotlinx.coroutines.Job` alongside `kotlinx.coroutines.Job.Key`) is reachable only through
-  `sys.modules` (`from kotlinx.coroutines.Job import Key`, `importlib.import_module('kotlinx.coroutines.Job').Key`,
-  `sys.modules['kotlinx.coroutines.Job'].Key`), while the parent attribute stays the function so dotted
-  access (`kotlinx.coroutines.Job.Key`, and `import kotlinx.coroutines.Job as m; m.Key` which CPython
-  compiles to `getattr(kotlinx.coroutines, 'Job')`) raises `AttributeError` (when `PythonxAdapter` is
-  installed, U-8 makes the child module itself callable). `Status: implemented` on desktop,
+  `PythonxAdapter`), a child module that shares its name with a function or static property already
+  published on the parent module (`kotlinx.coroutines.Job` alongside `kotlinx.coroutines.Job.Key`, or
+  `kotlinx.coroutines.channels.Channel.Factory` alongside `Channel.Factory.BUFFERED`) is reachable only
+  through `sys.modules` (`from kotlinx.coroutines.channels.Channel.Factory import BUFFERED`,
+  `importlib.import_module(...)`, `sys.modules[...]`), while the parent attribute stays the function or
+  static property descriptor so dotted access (`kotlinx.coroutines.Job.Key`, and
+  `import kotlinx.coroutines.Job as m; m.Key` which CPython compiles to `getattr(kotlinx.coroutines, 'Job')`)
+  raises `AttributeError` (when `PythonxAdapter` is installed, U-8 makes the child module itself callable).
+  `Status: implemented` on desktop,
   `PM/commonTest/.../upcall/PythonProxyInstallTest.kt`, `PM/commonTest/.../upcall/PythonProxySourceTest.kt`,
   `python-multiplatform-ksp/fixtures/app/.../GeneratedDeclarationKindsTest.kt`,
   `GeneratedStaticPropertyProxyTest.kt`, and on the iOS simulator
@@ -499,11 +501,13 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `Companion` object (`ProtoBuf.Class.Kind.COMPANION_OBJECT`) binds its singleton handle as
   `Owner.Companion` (`isCompanionHandle = true`) and its constants and factory functions under `Owner`
   (`SharingStarted.Eagerly`, `SharingStarted.WhileSubscribed`). Under `PythonProxySource` alone (without
-  `PythonxAdapter`), when a child module shares its name with a top-level function in the parent package
-  (`kotlinx.coroutines.Job` and `kotlinx.coroutines.Job.Key`), the parent attribute stays the function
-  (`kotlinx.coroutines.Job(None)`) so dotted access (`kotlinx.coroutines.Job.Key`) raises
+  `PythonxAdapter`), when a child module shares its name with a top-level function or static property on
+  the parent module (`kotlinx.coroutines.Job` and `kotlinx.coroutines.Job.Key`, or
+  `kotlinx.coroutines.channels.Channel.Factory` and `Channel.Factory.BUFFERED`), the parent attribute
+  stays the function or static property descriptor so dotted access (`kotlinx.coroutines.Job.Key`) raises
   `AttributeError`, and the child module is reached only through `sys.modules`
-  (`from kotlinx.coroutines.Job import Key`, `sys.modules['kotlinx.coroutines.Job'].Key`). Parameter names (`parameterNamesKnown =
+  (`from kotlinx.coroutines.channels.Channel.Factory import BUFFERED`,
+  `sys.modules['kotlinx.coroutines.channels.Channel.Factory'].BUFFERED`). Parameter names (`parameterNamesKnown =
   true`) and default-value flags (`Flags.DECLARES_DEFAULT_VALUE`) come from `.knm`, enabling keyword
   dispatch and default-argument omission (`<= 6` defaults, B-3). A `@JvmInline value class` whose single
   constructor and underlying property are both `public` (`Dp`) unboxes to its underlying boundary tag,

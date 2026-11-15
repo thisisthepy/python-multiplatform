@@ -482,25 +482,44 @@ class KlibKnmScannerTest {
         }
 
         // 2. `KlibKnmScanner` reads `linkdata/` (`.knm`) directly and binds `BreezeDesignSystem`'s
-        //    companion constants (`Light`, `Dark`) and properties (`isDark`) without touching `ir/`.
+        //    companion handle (`Companion`), constants (`Light`, `Dark`) and factory function (`of`)
+        //    without touching `ir/`.
         val entries = KlibScanner.scanKlib(
             composeKlib,
             includePrefixes = listOf("org.thisisthepy.compose.breeze"),
         )
         val names = entries.map { it.name }
+        assertTrue("org.thisisthepy.compose.breeze.BreezeDesignSystem.Companion" in names, "expected BreezeDesignSystem.Companion in $names")
         assertTrue("org.thisisthepy.compose.breeze.BreezeDesignSystem.Light" in names, "expected BreezeDesignSystem.Light in $names")
         assertTrue("org.thisisthepy.compose.breeze.BreezeDesignSystem.Dark" in names, "expected BreezeDesignSystem.Dark in $names")
-        assertTrue("org.thisisthepy.compose.breeze.BreezeDesignSystem.isDark" in names, "expected BreezeDesignSystem.isDark in $names")
+        assertTrue("org.thisisthepy.compose.breeze.BreezeDesignSystem.of" in names, "expected BreezeDesignSystem.of in $names")
 
         val light = entries.single { it.name == "org.thisisthepy.compose.breeze.BreezeDesignSystem.Light" }
         assertEquals("STATIC_GETTER", light.kind)
         assertEquals("OBJECT", light.returnTag)
         assertEquals("org.thisisthepy.compose.breeze.BreezeDesignSystem", light.returnTypeName)
 
-        val isDark = entries.single { it.name == "org.thisisthepy.compose.breeze.BreezeDesignSystem.isDark" }
-        assertEquals("GETTER", isDark.kind)
-        assertEquals("BOOLEAN", isDark.returnTag)
-        assertEquals("org.thisisthepy.compose.breeze.BreezeDesignSystem", isDark.receiverTypeName)
+        val ofFn = entries.single { it.name == "org.thisisthepy.compose.breeze.BreezeDesignSystem.of" }
+        assertEquals("FUNCTION", ofFn.kind)
+        assertEquals(listOf("BOOLEAN"), ofFn.paramTags)
+        assertEquals(listOf("dark"), ofFn.paramNames)
+        assertEquals("OBJECT", ofFn.returnTag)
+        assertEquals("org.thisisthepy.compose.breeze.BreezeDesignSystem", ofFn.returnTypeName)
+
+        // `BreezeDesignSystem` implements `org.thisisthepy.compose.designsystem.DesignSystem` (from
+        // `designsystem-core`); when walked without `designsystem-core` on `classpath`, its own
+        // member property `isDark` is declined with the unreachable supertype reason.
+        val declarations = KlibScanner.scanKlibDeclarations(
+            composeKlib,
+            includePrefixes = listOf("org.thisisthepy.compose.breeze"),
+        )
+        val isDarkDecl = declarations.single {
+            it.owner == "org.thisisthepy.compose.breeze.BreezeDesignSystem" && it.simpleName == "isDark"
+        }
+        assertEquals(
+            "supertype org.thisisthepy.compose.designsystem.DesignSystem of org.thisisthepy.compose.breeze.BreezeDesignSystem is not on the compile classpath",
+            isDarkDecl.declineReason,
+        )
     }
 }
 
