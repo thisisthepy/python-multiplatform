@@ -920,4 +920,20 @@ class PythonProxySourceTest {
             "the guard has to run before the first bind",
         )
     }
+
+    @Test
+    fun aChildModuleSharingAFunctionsNameKeepsTheParentFunctionAndStaysInSysModules() {
+        // `kotlinx.coroutines.Job` (FUNCTION) and `kotlinx.coroutines.Job.Key` (STATIC_GETTER) share
+        // the leaf name `Job` on `kotlinx.coroutines`. Functions are emitted before module statics, so
+        // `_pm_module('kotlinx.coroutines.Job')` registers the child module in `sys.modules` without
+        // overwriting `kotlinx.coroutines.Job` in `_parent_mod.__dict__`.
+        val fn = objectEntry("kotlinx.coroutines.Job", arity = 1, returnTypeName = "kotlinx.coroutines.CompletableJob")
+        val key = objectEntry("kotlinx.coroutines.Job.Key", kind = CallableKind.STATIC_GETTER, returnTypeName = "kotlinx.coroutines.Job.Key")
+        val source = PythonProxySource.render(listOf(fn, key))
+
+        assertContains(source, "if (_is_type is None or not _is_type(_name)) and _leaf not in _parent_mod.__dict__:")
+        val fnIdx = source.indexOf("setattr(_pm_module('kotlinx.coroutines'), 'Job',")
+        val keyIdx = source.indexOf("_pm_module_type(_pm_module('kotlinx.coroutines.Job')).Key = property(")
+        assertTrue(fnIdx >= 0 && keyIdx > fnIdx, "the function is bound on the parent before the child module static:\n$source")
+    }
 }

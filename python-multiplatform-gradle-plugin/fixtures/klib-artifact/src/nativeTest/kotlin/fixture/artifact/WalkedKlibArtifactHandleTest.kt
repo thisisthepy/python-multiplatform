@@ -81,4 +81,38 @@ class WalkedKlibArtifactHandleTest {
             """.trimIndent(),
         )
     }
+
+    @Test
+    fun aChildModuleSharingAFunctionsNameIsReachedThroughSysModulesWhileParentAttributeStaysTheFunction() {
+        // Under PythonProxySource alone (without PythonxAdapter), `kotlinx.coroutines.Job` on the
+        // parent package stays the factory function `Job(parent)`, while the child module that holds
+        // `Job.Key` is registered in `sys.modules['kotlinx.coroutines.Job']`. It is reached through
+        // `sys.modules` (`from kotlinx.coroutines.Job import Key`, `importlib.import_module`, or
+        // `sys.modules[...]`), whereas dotted attribute access through the parent module
+        // (`kotlinx.coroutines.Job.Key`) looks up `.Key` on the function and raises `AttributeError`.
+        Python3.exec(
+            """
+            import importlib
+            import sys
+            import kotlinx.coroutines
+            from kotlinx.coroutines import Job
+            from kotlinx.coroutines.Job import Key as _kh_from_key
+
+            _kh_job = Job(None)
+            assert _kh_job is not None
+            assert _kh_from_key is not None
+            assert sys.modules['kotlinx.coroutines.Job'].Key is not None
+            assert importlib.import_module('kotlinx.coroutines.Job').Key is not None
+
+            try:
+                _ = kotlinx.coroutines.Job.Key
+            except AttributeError:
+                _kh_dotted_failed = True
+            else:
+                _kh_dotted_failed = False
+            assert _kh_dotted_failed, 'kotlinx.coroutines.Job on the parent module is the function, so .Key must raise AttributeError'
+            del _kh_job, _kh_from_key
+            """.trimIndent(),
+        )
+    }
 }

@@ -269,9 +269,18 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `PM/nativeTest/.../UpcallRawEntryPointTest.kt`.
 - **U-3** Generated Python proxies let Python write ordinary Python against Kotlin: construct a class,
   call methods, get/set properties (a `private set` is read-only), read companion / static members.
-  A Kotlin package is importable under its own name. `Status: implemented` on desktop,
-  `PM/commonTest/.../upcall/PythonProxyInstallTest.kt`, `python-multiplatform-ksp/fixtures/app/.../GeneratedDeclarationKindsTest.kt`,
-  `GeneratedStaticPropertyProxyTest.kt`; `partial` elsewhere, only `python-multiplatform-ksp/fixtures/app/.../NativeSmokeTest.kt`
+  A Kotlin package is importable under its own name. Under `PythonProxySource` alone (without
+  `PythonxAdapter`), a child module that shares its name with a function already published on the parent
+  package (`kotlinx.coroutines.Job` alongside `kotlinx.coroutines.Job.Key`) is reachable only through
+  `sys.modules` (`from kotlinx.coroutines.Job import Key`, `importlib.import_module('kotlinx.coroutines.Job').Key`,
+  `sys.modules['kotlinx.coroutines.Job'].Key`), while the parent attribute stays the function so dotted
+  access (`kotlinx.coroutines.Job.Key`, and `import kotlinx.coroutines.Job as m; m.Key` which CPython
+  compiles to `getattr(kotlinx.coroutines, 'Job')`) raises `AttributeError` (when `PythonxAdapter` is
+  installed, U-8 makes the child module itself callable). `Status: implemented` on desktop,
+  `PM/commonTest/.../upcall/PythonProxyInstallTest.kt`, `PM/commonTest/.../upcall/PythonProxySourceTest.kt`,
+  `python-multiplatform-ksp/fixtures/app/.../GeneratedDeclarationKindsTest.kt`,
+  `GeneratedStaticPropertyProxyTest.kt`, and on the iOS simulator
+  `python-multiplatform-gradle-plugin/fixtures/klib-artifact/.../WalkedKlibArtifactHandleTest.kt`; `partial` elsewhere, only `python-multiplatform-ksp/fixtures/app/.../NativeSmokeTest.kt`
   (androidNative) and `python-multiplatform-ksp/fixtures/android/.../GeneratedAndroidTableTest.kt` run outside desktop.
 - **U-4** Declaration kinds: objects, companions, interfaces (not constructible), enum entries as
   statics, abstract classes (no constructor), nested classes. Not exposed: annotation classes,
@@ -489,7 +498,12 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   under the object's qualified name (`Dispatchers.Default`, `NonDisposableHandle.dispose`), and a nested
   `Companion` object (`ProtoBuf.Class.Kind.COMPANION_OBJECT`) binds its singleton handle as
   `Owner.Companion` (`isCompanionHandle = true`) and its constants and factory functions under `Owner`
-  (`SharingStarted.Eagerly`, `SharingStarted.WhileSubscribed`). Parameter names (`parameterNamesKnown =
+  (`SharingStarted.Eagerly`, `SharingStarted.WhileSubscribed`). Under `PythonProxySource` alone (without
+  `PythonxAdapter`), when a child module shares its name with a top-level function in the parent package
+  (`kotlinx.coroutines.Job` and `kotlinx.coroutines.Job.Key`), the parent attribute stays the function
+  (`kotlinx.coroutines.Job(None)`) so dotted access (`kotlinx.coroutines.Job.Key`) raises
+  `AttributeError`, and the child module is reached only through `sys.modules`
+  (`from kotlinx.coroutines.Job import Key`, `sys.modules['kotlinx.coroutines.Job'].Key`). Parameter names (`parameterNamesKnown =
   true`) and default-value flags (`Flags.DECLARES_DEFAULT_VALUE`) come from `.knm`, enabling keyword
   dispatch and default-argument omission (`<= 6` defaults, B-3). A `@JvmInline value class` whose single
   constructor and underlying property are both `public` (`Dp`) unboxes to its underlying boundary tag,
