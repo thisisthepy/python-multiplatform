@@ -1430,7 +1430,7 @@ internal object ArtifactScanner {
      * fully carry. Declined rather than bound, because the alternative is not a failing entry but a
      * generated file `kotlinc` rejects as a whole -- every other binding of the artefact with it.
      */
-    private fun unreachableReceiverReason(missing: String, receiver: String): String =
+    internal fun unreachableReceiverReason(missing: String, receiver: String): String =
         "its receiver $receiver has a supertype, $missing, that is not on the compile classpath, " +
             "so generated Kotlin cannot read a member of it"
 
@@ -2589,7 +2589,7 @@ internal object ArtifactScanner {
      * the declaration and saying what to write, which is the same answer
      * [disambiguateOverloads] gives one level up for the same reason.
      */
-    private fun applyDefaultOmission(candidates: List<Candidate>): List<Candidate> {
+    internal fun applyDefaultOmission(candidates: List<Candidate>): List<Candidate> {
         if (candidates.none { it.plan != null }) return candidates
         val byName = candidates.filter { it.callable != null }.groupBy { it.callable!!.name }
         return candidates.map { candidate ->
@@ -2618,6 +2618,8 @@ internal object ArtifactScanner {
                         parameter.copy(declaresDefault = plan.valueIndices[index] in omittableNow)
                     },
                 ),
+                isConstructor = candidate.isConstructor,
+                isCompanionHandle = candidate.isCompanionHandle,
             )
         }
     }
@@ -2634,7 +2636,8 @@ internal object ArtifactScanner {
         return siblings.any { sibling ->
             val other = sibling.callable ?: return@any false
             if (other.receiverTypeName != callable.receiverTypeName) return@any false
-            val otherValues = other.paramNames.indices
+            val otherDeclaredEnd = other.paramNames.indexOf(COMPOSER_PARAMETER_NAME).takeIf { it >= 0 } ?: other.paramNames.size
+            val otherValues = (0 until otherDeclaredEnd)
                 .filter { other.paramNames[it] != RECEIVER_PARAMETER_NAME }
                 .map { Triple(other.paramNames[it], other.paramTypeNames.getOrNull(it), plan.siblingDeclares(sibling, it)) }
             written.all { (name, type) -> otherValues.any { it.first == name && it.second == type } } &&

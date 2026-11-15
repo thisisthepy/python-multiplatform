@@ -920,4 +920,29 @@ class PythonProxySourceTest {
             "the guard has to run before the first bind",
         )
     }
+
+    @Test
+    fun aChildModuleSharingAFunctionsOrStaticPropertysNameKeepsTheParentAttributeAndStaysInSysModules() {
+        // `kotlinx.coroutines.Job` (FUNCTION) and `kotlinx.coroutines.Job.Key` (STATIC_GETTER) share
+        // the leaf name `Job` on `kotlinx.coroutines`; `kotlinx.coroutines.channels.Channel.Factory`
+        // (STATIC_GETTER) and `kotlinx.coroutines.channels.Channel.Factory.BUFFERED` (STATIC_GETTER)
+        // share `Factory` on `kotlinx.coroutines.channels.Channel`, where `Factory` is a read-only
+        // property descriptor on `type(_parent_mod)`. `_pm_module` checks both `_parent_mod.__dict__`
+        // and `type(_parent_mod).__dict__` so creating the child module neither overwrites the parent
+        // function nor triggers the read-only property's `_pm_no_setter`.
+        val fn = objectEntry("kotlinx.coroutines.Job", arity = 1, returnTypeName = "kotlinx.coroutines.CompletableJob")
+        val key = objectEntry("kotlinx.coroutines.Job.Key", kind = CallableKind.STATIC_GETTER, returnTypeName = "kotlinx.coroutines.Job.Key")
+        val factory = objectEntry("kotlinx.coroutines.channels.Channel.Factory", kind = CallableKind.STATIC_GETTER, returnTypeName = "kotlinx.coroutines.channels.Channel.Factory")
+        val buffered = entry("kotlinx.coroutines.channels.Channel.Factory.BUFFERED", kind = CallableKind.STATIC_GETTER)
+        val source = PythonProxySource.render(listOf(fn, key, factory, buffered))
+
+        assertContains(source, "_leaf not in _parent_mod.__dict__ and")
+        assertContains(source, "_leaf not in type(_parent_mod).__dict__")
+        val fnIdx = source.indexOf("setattr(_pm_module('kotlinx.coroutines'), 'Job',")
+        val keyIdx = source.indexOf("_pm_static_property(_pm_module('kotlinx.coroutines.Job'), 'Key',")
+        val factoryIdx = source.indexOf("_pm_static_property(_pm_module('kotlinx.coroutines.channels.Channel'), 'Factory',")
+        val bufferedIdx = source.indexOf("_pm_static_property(_pm_module('kotlinx.coroutines.channels.Channel.Factory'), 'BUFFERED',")
+        assertTrue(fnIdx >= 0 && keyIdx > fnIdx, "the function is bound on the parent before the child module static:\n$source")
+        assertTrue(factoryIdx >= 0 && bufferedIdx > factoryIdx, "the parent static property is bound before the nested constant:\n$source")
+    }
 }
