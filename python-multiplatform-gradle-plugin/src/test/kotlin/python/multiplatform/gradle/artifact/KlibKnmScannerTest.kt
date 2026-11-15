@@ -517,7 +517,9 @@ class KlibKnmScannerTest {
             it.owner == "org.thisisthepy.compose.breeze.BreezeDesignSystem" && it.simpleName == "isDark"
         }
         assertEquals(
-            "supertype org.thisisthepy.compose.designsystem.DesignSystem of org.thisisthepy.compose.breeze.BreezeDesignSystem is not on the compile classpath",
+            "its receiver org.thisisthepy.compose.breeze.BreezeDesignSystem has a supertype, " +
+                "org.thisisthepy.compose.designsystem.DesignSystem, that is not on the compile classpath, " +
+                "so generated Kotlin cannot read a member of it",
             isDarkDecl.declineReason,
         )
     }
