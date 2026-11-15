@@ -1443,16 +1443,23 @@ def test_mutant_with_a_borrowed_read_of_a_fresh_object_is_caught(built, tmp_path
     r = run_child(real, body.replace("NITER", "20_000_000"))
     assert r == {"bad": 0, "errs": 0, "found": True}, r   # the real read is sound, and the object was reachable
     caught = False
-    for _ in range(5):          # a crash on a freed object counts as caught
-        try:
-            r = run_child(so, body.replace("NITER", "300_000"), timeout=40)
+    found = []                  # per attempt: did the scavenger reach a fresh Cell at all
+    # The race needs the scavenger to find the Cell while fresh() still reads it. Five attempts of
+    # 300_000 iterations missed on a macOS runner (the CI run on 78c88cb7) and once on
+    # windows (run 43574258267), so later attempts give each call a longer window.
+    for niter in ("300_000",) * 4 + ("2_000_000",) * 4 + ("20_000_000",) * 2:
+        try:                    # a crash on a freed object counts as caught
+            r = run_child(so, body.replace("NITER", niter), timeout=120)
         except (AssertionError, subprocess.TimeoutExpired):   # crashed or hung on a freed object: caught
             caught = True
             break
+        found.append(r["found"])
         if r["bad"] or r["errs"]:
             caught = True
             break
-    assert caught, "the mutant (borrowed read of a fresh real object) was not caught"
+    # found all False: the race never had a chance (the object was not reached); found mostly True and
+    # still not caught: the check itself no longer sees the borrowed read
+    assert caught, f"the mutant (borrowed read of a fresh real object) was not caught; Cell found per attempt: {found}"
 
 
 # --- ThreadSanitizer (best effort) --------------------------------------------------------------------
