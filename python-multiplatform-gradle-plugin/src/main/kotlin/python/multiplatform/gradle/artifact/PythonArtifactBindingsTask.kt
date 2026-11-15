@@ -119,6 +119,7 @@ abstract class PythonArtifactBindingsTask : DefaultTask() {
         // `androidx.compose.foundation.layout`'s `Modifier.padding(Dp)` needs `Dp`, which is
         // `androidx.compose.ui.unit`'s. See `ArtifactScanner.scanJar`'s `classpath` parameter.
         val resolvedJars = artifacts.files.filter { it.isFile && it.name.endsWith(".jar") }
+        val resolvedKlibs = artifacts.files.filter { it.isFile && it.name.endsWith(".klib") }
 
         artifacts.files
             .filter { it.isFile && (it.name.endsWith(".jar") || it.name.endsWith(".klib")) }
@@ -127,14 +128,16 @@ abstract class PythonArtifactBindingsTask : DefaultTask() {
                 val entries = if (file.name.endsWith(".jar")) {
                     ArtifactScanner.scanJar(file, includes, classpath = resolvedJars, excludePackages = excludes)
                 } else {
-                    // The klib path takes no classpath yet, and whether it needs one is open
-                    // rather than overlooked: the jar path needs other artefacts because an
-                    // erased descriptor cannot name the class it erased, and a klib records
-                    // Kotlin types directly. Settle it before trusting a cross-artefact type here.
-                    //
                     // Not a direct `KlibScanner.scanKlib` call: see this class's KDoc, "The klib
                     // branch runs behind a worker classloader boundary".
-                    workerExecutor.scanKlibIsolated(file, includes, excludes, temporaryDir, klibReaderClasspath.files).callables
+                    workerExecutor.scanKlibIsolated(
+                        file,
+                        includes,
+                        excludes,
+                        temporaryDir,
+                        klibReaderClasspath.files,
+                        klibClasspath = resolvedKlibs,
+                    ).callables
                 }
                 // An artefact that contributed nothing gets no fragment: a fragment with no entries
                 // would still take a `moduleName` in `UpcallTable`'s installed set, which is the one

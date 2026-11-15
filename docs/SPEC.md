@@ -473,31 +473,40 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   declined (#73). `Status: implemented`, `GP/artifact/TextStateBindingTest.kt`,
   `python-multiplatform-compose/fixtures/compose/.../TextFieldStateRenderTest.kt`.
 - **B-2** The walker on **klibs** (Kotlin/Native libraries). `Status: partial`. It reads
-  top-level functions and, since #237, the **member functions** of the klib's classes; no class
-  constructor or property yet. A member binds as #215's `METHOD` `Owner.name` (receiver in `args[0]`,
-  `(args[0] as Owner).name(...)`, served on the proxy, never a module attribute) when its class can
-  cross as a handle and is an interface, a final class or an enum class: the pinned compiler's klib
-  ABI records modality but no visibility, so a member of an open, abstract or sealed class, which
-  may be `protected`, is declined with that reason, and an `object`'s functions (statics on the jar
-  side, #53) are declined too. Also declined, with reasons: members of a generic class, `suspend`,
-  `@Deprecated`, `@PublishedApi`, `@Composable`, member extensions and context receivers, a member
+  top-level functions, **member functions** (#237), **member properties** (`GETTER` and `SETTER`),
+  **constructors** of final classes, and **`object` / `Companion` handles, constants (`STATIC_GETTER`)
+  and functions (`FUNCTION`)** (#191 Phase B). A member function binds as #215's `METHOD` `Owner.name`
+  (receiver in `args[0]`, `(args[0] as Owner).name(...)`, served on the proxy, never a module attribute)
+  and a member property binds as #38's `GETTER` `Owner.prop` (and `SETTER` `Owner.prop=` when writable)
+  when its class can cross as a handle and is an interface, a final class or an enum class: the pinned
+  compiler's klib ABI records modality but no visibility, so a member or constructor of an open,
+  abstract or sealed class, which may be `protected`, is declined with that reason. An `object`'s
+  constants and functions bind under the object's qualified name (`Dispatchers.Default`,
+  `NonDisposableHandle.dispose`), and a nested `Companion` object binds its singleton handle as
+  `Owner.Companion` (`isCompanionHandle = true`) and its constants and factory functions under `Owner`
+  (`SharingStarted.Eagerly`, `SharingStarted.WhileSubscribed`). Also declined, with reasons: members of
+  a generic class, `suspend`, `@Deprecated`, `@PublishedApi` (including declarations inside an
+  `@PublishedApi internal` class), `@Composable`, member extensions and context receivers, a member
   named like a property, data-class `copy`/`componentN`, and anything without a klib boundary type;
   `Any`'s members and an enum's static `valueOf`/`values`/`entries` are not bound. From
-  `kotlinx-coroutines-core` this binds `CompletableJob.complete`, `Job.start`,
-  `Semaphore.tryAcquire`/`release` and others; `GP/artifact/KlibMemberFunctionTest.kt`, and on the iOS
-  simulator `WalkedKlibArtifactMemberFunctionTest`.
+  `kotlinx-coroutines-core` this binds `CompletableJob.complete`, `Job.start`, `Job.isActive`,
+  `CoroutineName`, `CoroutineName.name`, `Dispatchers.Default`, `SharingStarted.Eagerly`,
+  `Semaphore.availablePermits`, `Semaphore.tryAcquire`/`release` and others;
+  `GP/artifact/KlibMemberFunctionTest.kt`, `GP/artifact/KlibClassAndObjectBindingTest.kt`, and on the
+  iOS simulator `WalkedKlibArtifactMemberFunctionTest`.
   Since #234 a **Kotlin object crosses as a handle**: a type whose class is a public, non-generic,
-  non-value `class`, `interface`, `enum class` or `object` of the walked klib is an `OBJECT` slot
-  or result, non-null or nullable, cast in generated source as the jar producer casts one, and a
-  handle result carries its ancestry from the klib's supertypes. Handles are the common
-  trampoline's and `HandleTable`'s, under the jar side's rules: passing one back into Kotlin takes
-  no second slot, and dropping it releases it exactly once. Still declined, each with its reason:
-  a type of another klib (`kotlin.coroutines.CoroutineContext`), a class of package `kotlin` other
-  than the boundary's primitives, an extension (the pinned compiler's klib ABI has no receiver type),
-  and any `@Deprecated` declaration (the ABI has no level, and a `HIDDEN` one, such as
+  non-value `class`, `interface`, `enum class` or `object` of the walked klib (or of any `.klib` on its
+  resolved `classpath`, #191 Phase B) is an `OBJECT` slot or result, non-null or nullable, cast in
+  generated source as the jar producer casts one, and a handle result carries its ancestry from the
+  klib classpath's supertypes. Handles are the common trampoline's and `HandleTable`'s, under the jar
+  side's rules: passing one back into Kotlin takes no second slot, and dropping it releases it exactly
+  once. Still declined, each with its reason: a type not on the klib `classpath`, a class of package
+  `kotlin` other than the boundary's primitives, an extension (the pinned compiler's klib ABI has no
+  receiver type), and any `@Deprecated` declaration (the ABI has no level, and a `HIDDEN` one, such as
   `kotlinx.coroutines.Job0`, cannot be called from source). From `kotlinx-coroutines-core` this binds
   `Job`, `SupervisorJob`, `MainScope`, `Mutex`, `Semaphore`, `newSingleThreadContext` and
-  `newFixedThreadPoolContext`. `GP/artifact/KlibScannerTest.kt`, `GP/artifact/KlibObjectHandleTest.kt`;
+  `newFixedThreadPoolContext`. `GP/artifact/KlibScannerTest.kt`, `GP/artifact/KlibObjectHandleTest.kt`,
+  `GP/artifact/KlibClassAndObjectBindingTest.kt`;
   `python-multiplatform-gradle-plugin/fixtures/klib-artifact` builds `androidNativeArm64` and
   `iosSimulatorArm64` from one table in `nativeMain`, and its suite (`WalkedKlibArtifactHandleTest`,
   `WalkedKlibArtifactTableTest`, `WalkedKlibArtifactPythonImportTest`) runs through Gradle on the iOS

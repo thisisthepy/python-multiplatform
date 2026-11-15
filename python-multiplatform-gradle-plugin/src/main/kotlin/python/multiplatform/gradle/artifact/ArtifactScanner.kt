@@ -327,7 +327,7 @@ internal object ArtifactScanner {
      * Both must run BEFORE [applyDefaultOmission] so a dropped constructor's presence doesn't cost
      * the surviving bound declaration its omittable defaults.
      */
-    private fun dropCollidingConstructors(candidates: List<Candidate>): List<Candidate> {
+    internal fun dropCollidingConstructors(candidates: List<Candidate>): List<Candidate> {
         // A property never claims a constructor's name (issue #38): `TextStyle.color` is read off a
         // `TextStyle` value, it is not a constant `TextStyle` publishes under its own name. [scan]
         // already keeps them out of this pass; this keeps the rule true for any other caller.
@@ -1061,7 +1061,7 @@ internal object ArtifactScanner {
      * of the same name is already excluded where the member is built, so what is left here is a nested
      * object's or a companion's binding under the same dotted name. The other binding keeps it.
      */
-    private fun settleMethodNames(methods: List<Candidate>, settled: List<Candidate>): List<Candidate> {
+    internal fun settleMethodNames(methods: List<Candidate>, settled: List<Candidate>): List<Candidate> {
         val taken = settled.mapNotNullTo(HashSet()) { it.callable?.name }
         return methods.map { candidate ->
             val name = candidate.callable?.name ?: return@map candidate
@@ -1394,7 +1394,7 @@ internal object ArtifactScanner {
      * is declined, by name and with the reason, rather than shadowing or being shadowed. A setter
      * whose getter was declined goes with it: a write-only property is not a Kotlin shape.
      */
-    private fun settlePropertyNames(properties: List<Candidate>, settled: List<Candidate>): List<Candidate> {
+    internal fun settlePropertyNames(properties: List<Candidate>, settled: List<Candidate>): List<Candidate> {
         val taken = settled.mapNotNullTo(HashSet()) { it.callable?.name }
         val counts = properties.mapNotNull { it.callable?.name }.groupingBy { it }.eachCount()
         val firstPass = properties.map { candidate ->
@@ -2726,11 +2726,11 @@ internal object ArtifactScanner {
         "try", "typealias", "typeof", "val", "var", "when", "while",
     )
 
-    private fun isWritableParameterName(name: String): Boolean =
+    internal fun isWritableParameterName(name: String): Boolean =
         name.isNotEmpty() && name.first().let { it.isLetter() || it == '_' } &&
             name.all { it.isLetterOrDigit() || it == '_' }
 
-    private fun writeParameterName(name: String): String =
+    internal fun writeParameterName(name: String): String =
         if (name in KOTLIN_HARD_KEYWORDS) "`$name`" else name
 
     private fun candidateFromDescriptor(owner: String, methodName: String, descriptor: String): Candidate? {
