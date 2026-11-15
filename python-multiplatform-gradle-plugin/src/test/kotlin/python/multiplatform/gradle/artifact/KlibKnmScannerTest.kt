@@ -481,22 +481,26 @@ class KlibKnmScannerTest {
             LibraryAbiReader.readAbiInfo(composeKlib)
         }
 
-        // 2. `KlibKnmScanner` reads `linkdata/` (`.knm`) directly and binds `BreezeTheme`,
-        //    `breezeLightColorScheme`, and `breezeDarkColorScheme` without touching `ir/`.
+        // 2. `KlibKnmScanner` reads `linkdata/` (`.knm`) directly and binds `BreezeDesignSystem`'s
+        //    companion constants (`Light`, `Dark`) and properties (`isDark`) without touching `ir/`.
         val entries = KlibScanner.scanKlib(
             composeKlib,
-            includePrefixes = listOf("androidx.compose.designsystem.breeze"),
+            includePrefixes = listOf("org.thisisthepy.compose.breeze"),
         )
         val names = entries.map { it.name }
-        assertTrue("androidx.compose.designsystem.breeze.BreezeTheme" in names, "expected BreezeTheme in $names")
-        assertTrue("androidx.compose.designsystem.breeze.breezeLightColorScheme" in names, "expected breezeLightColorScheme in $names")
-        assertTrue("androidx.compose.designsystem.breeze.breezeDarkColorScheme" in names, "expected breezeDarkColorScheme in $names")
+        assertTrue("org.thisisthepy.compose.breeze.BreezeDesignSystem.Light" in names, "expected BreezeDesignSystem.Light in $names")
+        assertTrue("org.thisisthepy.compose.breeze.BreezeDesignSystem.Dark" in names, "expected BreezeDesignSystem.Dark in $names")
+        assertTrue("org.thisisthepy.compose.breeze.BreezeDesignSystem.isDark" in names, "expected BreezeDesignSystem.isDark in $names")
 
-        val breezeTheme = entries.single { it.name == "androidx.compose.designsystem.breeze.BreezeTheme" }
-        assertEquals(listOf("darkTheme", "highContrast", "content", "\$composer", "\$changed", "\$default"), breezeTheme.paramNames)
-        assertEquals(listOf(true, true, false, false, false, false), breezeTheme.paramHasDefault)
-        assertEquals(listOf(true, true, false, false, false, false), omittableSlotsOf(breezeTheme))
-        assertTrue("@androidx.compose.runtime.Composable" in breezeTheme.lambdaBody)
+        val light = entries.single { it.name == "org.thisisthepy.compose.breeze.BreezeDesignSystem.Light" }
+        assertEquals("STATIC_GETTER", light.kind)
+        assertEquals("OBJECT", light.returnTag)
+        assertEquals("org.thisisthepy.compose.breeze.BreezeDesignSystem", light.returnTypeName)
+
+        val isDark = entries.single { it.name == "org.thisisthepy.compose.breeze.BreezeDesignSystem.isDark" }
+        assertEquals("GETTER", isDark.kind)
+        assertEquals("BOOLEAN", isDark.returnTag)
+        assertEquals("org.thisisthepy.compose.breeze.BreezeDesignSystem", isDark.receiverTypeName)
     }
 }
 
