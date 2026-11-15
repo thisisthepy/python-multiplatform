@@ -674,7 +674,10 @@ def test_a_class_change_at_a_poll_in_the_consumer_deopts_the_region_host(tmp_pat
     d = 4
     got, deopts, calls = _run_with_class_change_at_a_poll(m, d)
     assert calls == HOOK_CALL                   # the hook acted exactly once, inside the consumer
-    assert deopts == 1, "the class change before a region field read was not a deopt"
+    # At least one: the host's redo. Not exactly one: the interpreted tree_sum of the redo calls the
+    # compiled make and check, and their wrappers deopt too while the property is in place (every
+    # tp_cg_redo counts). `deopts == 1` failed in CI run 43674819173 with the guard present.
+    assert deopts >= 1, f"the class change before a region field read was not a deopt (deopts: {deopts})"
     assert got == 1, got                        # the interpreter's answer with the property in place
 
 
