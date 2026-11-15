@@ -8,10 +8,10 @@ fun main() {
         import sys, json
         print("Python", sys.version.split()[0], "from Kotlin")
         print(json.dumps({"sum": sum(range(10))}))
-        sys.stdout.flush()  # Python buffers stdout; the JVM does not flush it for us on exit
         """.trimIndent(),
     )
-    // eval(expression, Py_eval_input = 258, globals, locals): the result is a Python object
-    val globals = Python3.import("__main__").getAttr("__dict__")
-    println("Kotlin sees: " + Python3.eval("6 * 7", 258, globals, globals))
+    // eval(expression) evaluates in __main__; the result is a Python object.
+    println("Kotlin sees: " + Python3.eval("6 * 7"))
+    // Python buffers sys.stdout; finalize() flushes it and ends the interpreter.
+    Python3.finalize()
 }
