@@ -1092,6 +1092,22 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     reference is stored in a region node, so no refcount changes. `tracemalloc`: current memory returns to
     the start; the peak is the known difference above. `MemoryError` during construction: injected
     allocation failure equals the interpreter. Results equal the interpreter for every depth.
+  **N-12c (#440): compile-time placement inside proven regions.** `Status: planned, not implemented`
+  (maintainer, 2026-11-16: "스펙으로만 넣어놔줘", after reviewing the Goose language, which has no heap
+  and places dynamic data on compiler-managed stacks). Goose's restrictions (no closures, no dynamic
+  dispatch, no shared memory between threads, nested lifetimes only) cannot be imposed on Python, so these
+  techniques apply **only where N-12b already proves no Python code can observe the objects**; every other
+  object stays a CPython object and nothing in this item changes what CPython would compute:
+  - **Scope-bump regions.** A region is owned by a scope of the host (a statement, a block, the host body)
+    rather than only one statement; allocation bumps a pointer and the whole region is reset when that
+    scope ends, on every exit. This widens N-12b's host form (for example `t = make(d); ... check(t)`).
+  - **Destination-passing returns.** A producer called by a host writes its result directly where the
+    host will hold it, so a returned region value is neither copied nor separately allocated.
+  - **Compact layout.** Region nodes carry no PyObject header; fields are laid out contiguously, and
+    links between nodes of one region may be 1-, 2- or 4-byte offsets checked against the region's extent
+    instead of 8-byte pointers.
+  Measurement target when implemented: binary-trees and an object-heavy benchmark against the best safe
+  Rust, beside the interpreter, with the N-12b differential tests unchanged.
 - **N-13** TypedPython native ints in impure functions (#232; INTENT §1.4: compiled code computes what
   CPython computes). An impure function cannot deopt after an effect, so its `int` locals were CPython
   objects and every `+`, `//`, `%` and comparison was a generic `PyNumber_*` / `PyObject_RichCompare`
