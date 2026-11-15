@@ -1245,15 +1245,316 @@ def kept(x: npt.NDArray[np.float64]) -> object:
 '''
 
 
-def test_a_flag_that_would_not_follow_the_value_keeps_the_function_interpreted(tmp_path):
-    """The shadow flag is exact only if every binding of the local sets it. A `for ... in range`
-    variable is bound by the loop, not by an assignment, so one that is also assigned a numpy-derived
-    value would keep a stale flag (an np.int64 where the interpreter has an int): refused. A name
-    ending in `__np` would be taken for a flag: refused in a function with a numpy buffer."""
+def test_a_name_ending_in_np_keeps_the_function_interpreted_and_a_loop_variable_compiles(tmp_path):
+    """The shadow flag is exact only if every binding of the local sets it. A name ending in `__np`
+    would be taken for a flag: refused in a function with a numpy buffer (leader decision 2026-11-15).
+    A `for ... in range` variable that is also assigned a numpy-derived value was refused by #426 (the
+    loop binds it without an Assign); since #428 each iteration's binding also resets its flag
+    (taint.py), so `rng_var` compiles (its behaviour: the #428 tests below)."""
     m, _ = _lower(tmp_path, NP_REFUSED, "nprefused.py")
-    assert {f.name for f in m.functions} == {"kept"}, m.skipped
-    assert "loop variable `i`" in m.skipped["rng_var"] and "numpy" in m.skipped["rng_var"]
+    assert {f.name for f in m.functions} == {"kept", "rng_var"}, m.skipped
     assert "`s__np`" in m.skipped["named"]
+
+
+# --- a loop variable that is also a numpy-derived value (#428) ---------------------------------------
+#
+# `i = y[0]` makes `i` an np.int64 in the interpreter; `for i in range(n)` rebinds it to an int at every
+# iteration, and a loop that runs zero times leaves the np.int64. The front end compiles the loop
+# variable's flag `i__np` exactly by an `Assign(i__np, False)` at the top of each iteration's body
+# (taint.py; `taint._reset_loop_flags` is the mutation point). Where the flag is read: a Box (a return
+# inside or after the loop) and a poll exit of a loop in which `i` is an ordinary local (a later loop,
+# an outer loop around the one that binds it). At the poll exit of the loop that binds `i`, `i` is not
+# handed over at all: the continuation's own `for` binds it from `__tp_cur_<k>` (resume.py).
+#
+# A statement exit cannot meet such a variable: statement exits exist only in functions with an effect
+# (resume.needs_stmt_exits), and there a `for` variable that is also assigned elsewhere is a CPython
+# int, which the front end does not compile as a range index (`lv_stmt` below stays interpreted for
+# that reason, unrelated to numpy).
+#
+# Red record (the agent that wrote these, 2026-11-15, before the change, by running the front end on
+# the source only: no test was run, AGENTS.md 10): `lv_ret`, `lv_zero`, `lv_brk`, `lv_in`, `lv_poll` and
+# `lv_nest` were skipped with "loop variable `i` is also assigned a value derived from a numpy element".
+# Everything else here is unobserved until CI runs it.
+
+NP_LOOP = '''
+import numpy as np
+import numpy.typing as npt
+
+
+@compiled
+def g(i: int, k: int) -> float:
+    t = 1
+    if i == k:
+        t = 4611686018427387904
+    return float(t * 4)
+
+
+@compiled
+def lv_ret(y: npt.NDArray[np.int64]) -> object:
+    i = y[0]
+    for i in range(3):
+        pass
+    return i
+
+
+@compiled
+def lv_zero(y: npt.NDArray[np.int64], n: int) -> object:
+    i = y[0]
+    for i in range(n):
+        pass
+    return i * 2
+
+
+@compiled
+def lv_brk(y: npt.NDArray[np.int64], n: int, b: int) -> object:
+    i = y[0]
+    for i in range(n):
+        if i == b:
+            break
+    return i
+
+
+@compiled
+def lv_in(y: npt.NDArray[np.int64], n: int, b: int) -> object:
+    i = y[0]
+    for i in range(n):
+        if i == b:
+            return i
+    return i
+
+
+@compiled
+def lv_poll(y: npt.NDArray[np.int64], v: list[float], n: int) -> object:
+    i = y[0]
+    for i in range(n):
+        pass
+    p = 1.5
+    for j in range(len(v)):
+        p = p + v[j]
+    return i
+
+
+@compiled
+def lv_nest(y: npt.NDArray[np.int64], v: list[float], n: int, w: int) -> object:
+    i = 0
+    p = 1.5
+    for j in range(len(v)):
+        for i in range(n):
+            pass
+        if j == w:
+            i = y[1]
+        p = p + v[j]
+    return i
+
+
+@compiled
+def lv_stmt(y: npt.NDArray[np.int64], out: list[float], k: int) -> object:
+    i = y[0]
+    for i in range(len(out)):
+        out[i] = g(i, k)
+    return i
+'''
+
+NP_LOOP_NAMES = {"g", "lv_ret", "lv_zero", "lv_brk", "lv_in", "lv_poll", "lv_nest"}
+
+
+def _lv_lower(d, name="nploop", mutant=False):
+    from typedpython import taint
+    path = d / f"{name}.py"
+    path.write_text(NP_LOOP)
+    saved = taint._reset_loop_flags
+    if mutant:
+        taint._reset_loop_flags = lambda: False
+    try:
+        proved, diags = verify.verify(frontend.lower(path))
+    finally:
+        taint._reset_loop_flags = saved
+    assert NP_LOOP_NAMES <= {f.name for f in proved.functions}, (diags, proved.skipped)
+    return proved, path
+
+
+def test_a_numpy_loop_variable_compiles_and_the_impure_one_stays_interpreted(tmp_path):
+    proved, _ = _lv_lower(tmp_path)
+    assert "lv_stmt" not in {f.name for f in proved.functions}
+    why = proved.skipped["lv_stmt"]
+    assert "in an impure function that makes it a CPython int" in why, why
+    assert all("numpy" not in why for why in proved.skipped.values()), proved.skipped
+
+
+def _ir_walk(body):
+    for s in body:
+        yield s
+        for name in ("then", "orelse", "body"):
+            v = getattr(s, name, ())
+            if isinstance(v, tuple):
+                yield from _ir_walk(v)
+
+
+def test_each_iteration_of_a_flagged_loop_variable_resets_its_flag(tmp_path):
+    """IR: the first statement of the body of every loop binding a flagged variable is the reset, with
+    the `for` statement's source position; a loop whose variable has no flag gets none. C: the reset
+    follows the binding of the variable before any statement of the body."""
+    proved, path = _lv_lower(tmp_path)
+    fns = {f.name: f for f in proved.functions}
+    for name in ("lv_ret", "lv_zero", "lv_brk", "lv_in", "lv_poll", "lv_nest"):
+        f = fns[name]
+        assert f.locals.get("i__np") is ir.Type.BOOL, name
+        loops = [s for s in _ir_walk(f.body) if isinstance(s, ir.ForRange)]
+        for s in loops:
+            first = s.body[0] if s.body else None
+            if s.var == "i":
+                assert first == ir.Assign("i__np", ir.Const(ir.Type.BOOL, False)), (name, s)
+                assert first.stmt == s.stmt and s.stmt is not None, name
+            else:
+                assert not (isinstance(first, ir.Assign) and first.target.endswith("__np")), (name, s)
+    c = cgen.generate(proved, path, path.name)
+    body = _function_text(c, "static int tp_impl_lv_ret(")
+    assert re.search(r"l_i = \(int64_t\)\(\(uint64_t\)\w+ \+ \w+ \* UINT64_C\(1\)\);\s*l_i__np = 0;",
+                     body), body
+
+
+def test_the_loop_flag_mutation_point_drops_the_reset(tmp_path):
+    proved, _ = _lv_lower(tmp_path, "nploopmut", mutant=True)
+    f = next(f for f in proved.functions if f.name == "lv_ret")
+    loop = next(s for s in _ir_walk(f.body) if isinstance(s, ir.ForRange))
+    assert not any(isinstance(s, ir.Assign) and s.target == "i__np" for s in loop.body)
+
+
+def _lv_build(tmp_path_factory, name, mutant=False):
+    from test_cgen import need_runtime, runtime_dir
+    from typedpython import cbuild
+    pytest.importorskip("numpy")
+    need_runtime()
+    d = tmp_path_factory.mktemp(name)
+    proved, path = _lv_lower(d, name, mutant)
+    c = cgen.generate(proved, path, path.name)
+    so = cbuild.build(c, name, d / "out", runtime_dir=runtime_dir(),
+                      flags=(*cbuild.DEFAULT_FLAGS, "-DTP_POLL_INTERVAL=32", "-DTP_TEST_SNAP_HOOK"))
+    return cbuild.load(name, so)
+
+
+@pytest.fixture(scope="module")
+def lvmod(tmp_path_factory):
+    return _lv_build(tmp_path_factory, "nploop")
+
+
+@pytest.fixture(scope="module")
+def lvmutant(tmp_path_factory):
+    return _lv_build(tmp_path_factory, "nploopmut", mutant=True)
+
+
+def _lv_same(m, name, *args):
+    """`name` compiled against interpreted on the same arguments: outcome, value and exact type."""
+    import numpy as np
+    y = np.array([3, -5, 7], dtype=np.int64)
+    got = _np_run(lambda: getattr(m, name)(y, *args))
+    want = _np_run(lambda: m.__typedpython_interpreted__[name](y.copy(), *args))
+    return got, want
+
+
+LV_CASES = [
+    ("lv_ret", (), "int"), ("lv_zero", (0,), "np"), ("lv_zero", (4,), "int"),
+    ("lv_brk", (0, -1), "np"), ("lv_brk", (5, -1), "int"), ("lv_brk", (5, 2), "int"),
+    ("lv_in", (0, 1), "np"), ("lv_in", (5, 2), "int"), ("lv_in", (3, -1), "int"),
+]
+
+
+@pytest.mark.parametrize("name,args,kind", LV_CASES)
+def test_a_numpy_loop_variable_has_the_interpreters_type_and_value(lvmod, name, args, kind):
+    """lv_ret is #428's example (the interpreter returns the int 2). A loop that runs zero times keeps
+    the np.int64 (`lv_zero(0)`: np.int64(6), `i * 2` follows the flag); after a `break` and from a
+    `return` inside the body the variable is the loop's int."""
+    import numpy as np
+    got, want = _lv_same(lvmod, name, *args)
+    assert got == want and got[0][0] == "ok", (got, want)
+    assert type(got[0][1]) is type(want[0][1]), (got, want)
+    assert type(got[0][1]) is {"np": np.int64, "int": int}[kind], (got, want)
+
+
+def _lv_poll(m, name, calls, *args):
+    """`name` compiled with a hook appending to `v` at its `calls`-th poll (polls at j = 32, 64, ...:
+    that poll leaves), continuations spied, against the interpreted function."""
+    import numpy as np
+    y = np.array([3, -5, 7], dtype=np.int64)
+    v = [0.5] * 100
+    state = {"n": 0}
+
+    def hook():
+        state["n"] += 1
+        if state["n"] == calls:
+            v.append(0.0)
+
+    m.__tp_test_snap_hook__ = hook
+    try:
+        got, seen = _spied(m, rf"__tp_resume_{name}_\d+", lambda: getattr(m, name)(y, v, *args))
+    finally:
+        del m.__tp_test_snap_hook__
+    want = _np_run(lambda: m.__typedpython_interpreted__[name](y.copy(), [0.5] * 100, *args))
+    return got, want, seen
+
+
+@pytest.mark.parametrize("n,kind", [(0, "np"), (3, "int")])
+def test_a_poll_exit_after_the_loop_hands_over_the_loop_variable_as_the_interpreter_has_it(
+        lvmod, n, kind):
+    """lv_poll leaves at a poll of its second loop: `i` is an ordinary parameter of that continuation,
+    boxed from its flag. n == 0: the first loop never ran, `i` is still y[0], an np.int64."""
+    import numpy as np
+    got, want, seen = _lv_poll(lvmod, "lv_poll", 1, n)
+    assert got == want and got[0][0] == "ok", (got, want)
+    assert type(got[0][1]) is type(want[0][1]) is {"np": np.int64, "int": int}[kind], (got, want)
+    [types] = seen
+    assert types["i"] is {"np": np.int64, "int": int}[kind], types
+
+
+# (n, w, calls) -> the type of `i` the poll at j = 32 * calls hands over, and the type returned: the inner
+# loop rebinds `i` at each outer iteration when n > 0; `i = y[1]` at j == w makes it an np.int64 again
+LV_NEST = [
+    ((0, -1, 1), "int", "int"),        # i = 0, never rebound
+    ((0, 10, 1), "np", "np"),          # y[1] at j == 10, no inner iteration rebinds it
+    ((2, 31, 1), "np", "int"),         # y[1] at j == 31, the poll at 32 sees it; j == 32 rebinds it
+    ((2, 31, 2), "int", "int"),        # the poll at 64: rebound by the inner loop since j == 32
+    ((2, 99, 2), "int", "np"),         # assigned only in the last outer iteration, after the poll
+]
+
+
+@pytest.mark.parametrize("args,at_poll,result", LV_NEST)
+def test_a_poll_exit_around_the_loop_hands_over_the_loop_variable_as_the_interpreter_has_it(
+        lvmod, args, at_poll, result):
+    """lv_nest's outer loop polls; `i`, the inner loop's variable, is an ordinary parameter of the
+    outer loop's continuation. Its flag is reset by every inner iteration and set by `i = y[1]`."""
+    import numpy as np
+    kinds = {"np": np.int64, "int": int}
+    n, w, calls = args
+    got, want, seen = _lv_poll(lvmod, "lv_nest", calls, n, w)
+    assert got == want and got[0][0] == "ok", (got, want)
+    assert type(got[0][1]) is type(want[0][1]) is kinds[result], (got, want)
+    [types] = seen                                             # the outer loop's continuation
+    assert types["i"] is kinds[at_poll], types
+    assert all(types[h] is int for h in ("__tp_cur_0", "__tp_stop_0", "__tp_step_0"))
+
+
+def test_a_poll_exit_of_the_loop_that_binds_the_variable_does_not_hand_it_over(lvmod):
+    """At the poll of the loop that binds `i` the continuation's own `for` binds it (resume.py), so
+    `i` is not one of its parameters (its flag is never read there); a loop where `i` is an ordinary
+    local takes it."""
+    import inspect
+    assert "i" not in inspect.signature(lvmod.__tp_resume_lv_poll_0).parameters
+    assert "i" in inspect.signature(lvmod.__tp_resume_lv_poll_1).parameters
+    assert "i" in inspect.signature(lvmod.__tp_resume_lv_nest_0).parameters
+
+
+def test_a_stale_loop_variable_flag_is_caught(lvmutant):
+    """The mutant (`taint._reset_loop_flags` False: no reset, the flag keeps the np.int64 of `y[0]`)
+    must fail the comparisons above: #428's example returns np.int64(2) where the interpreter
+    returns 2, and both poll exits hand over an np.int64 where the interpreter has an int."""
+    import numpy as np
+    m = lvmutant
+    got, want = _lv_same(m, "lv_ret")
+    assert got == want and type(got[0][1]) is np.int64 and type(want[0][1]) is int, (got, want)
+    got, want, seen = _lv_poll(m, "lv_poll", 1, 3)
+    assert seen and seen[0]["i"] is np.int64 and type(want[0][1]) is int, (seen, want)
+    got, want, seen = _lv_poll(m, "lv_nest", 2, 2, 31)
+    assert seen and seen[0]["i"] is np.int64 and type(want[0][1]) is int, (seen, want)
 
 
 def _np_build(tmp_path_factory, name, mutant=False):

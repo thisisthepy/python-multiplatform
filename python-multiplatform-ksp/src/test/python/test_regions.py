@@ -615,17 +615,27 @@ def test_a_loop_grows_the_region_once_not_per_statement(built):
 
 # --- a class change while a consumer runs (signal handler at a poll) ----------------------------------
 
-def _with_property_installed_by_handler(fn, node_cls, delay):
+def _with_property_installed_by_handler(fn, node_cls, delay, landed=None):
     import signal
+    running = [False]
 
     def boom(*_):
+        if landed is not None and running[0]:
+            landed.append(delay)                  # the handler ran while fn was running
         node_cls.left = property(lambda self: None, lambda self, v: None)   # what `n.left` means changes
+
+    def call():
+        running[0] = True
+        try:
+            return fn()
+        finally:
+            running[0] = False
 
     slot = node_cls.__dict__["left"]
     old = signal.signal(signal.SIGALRM, boom)
     try:
         signal.setitimer(signal.ITIMER_REAL, delay)
-        return fn()
+        return call()
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, old)
@@ -649,15 +659,19 @@ def test_a_class_change_by_a_signal_handler_in_the_consumer_deopts_the_region_ho
     m = cbuild.load("regsig", so)
     d = 21
     caught = False
-    for k in range(12):          # under load the timer can land after the call; then try again
+    landed = []                  # attempts whose handler ran inside the call
+    # Under load the timer can land after the call; then try again. 12 attempts were not enough on a
+    # macOS runner (run 43664864901: every timer missed the call), so more attempts and earlier points.
+    fractions = (0.85, 0.8, 0.75, 0.7, 0.6, 0.5, 0.4)
+    for k in range(42):
         # Re-measured before every attempt: on a shared CI runner one baseline does not predict the
         # next call's length, so a single measurement put every timer after the call (#331 run).
         t0 = time.perf_counter()
         assert m.tree_sum(d) == nodes(d)
-        delay = (0.85, 0.8, 0.75, 0.7)[k % 4] * (time.perf_counter() - t0)
+        delay = fractions[k % len(fractions)] * (time.perf_counter() - t0)
         d0 = m.__typedpython_deopts__
         o0, f0, _ = m.__typedpython_region_stats__()
-        got = _with_property_installed_by_handler(lambda: m.tree_sum(d), m.Node, delay)
+        got = _with_property_installed_by_handler(lambda: m.tree_sum(d), m.Node, delay, landed)
         o1, f1, _ = m.__typedpython_region_stats__()
         assert o1 - o0 == f1 - f0
         if m.__typedpython_deopts__ > d0:                 # the host noticed and redid the call
@@ -666,4 +680,7 @@ def test_a_class_change_by_a_signal_handler_in_the_consumer_deopts_the_region_ho
             caught = True
             break
         assert got == nodes(d)                            # no deopt: the handler ran after the call
-    assert caught, "the handler never landed inside the call (or the class guard is missing)"
+    # Which of the two it is: a handler that ran inside the call after the last field read changes
+    # nothing, so one or two such attempts without a deopt can happen; many of them mean the guard is gone.
+    assert caught, (f"no deopt in 42 attempts; the handler ran inside the call in {len(landed)} of them "
+                    "(0: the timer always missed the call; many: the class guard is missing)")
