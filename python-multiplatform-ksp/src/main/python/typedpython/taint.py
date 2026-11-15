@@ -17,6 +17,13 @@ Conservative rules (decision 2026-10-25): whatever the pass cannot reproduce exa
     fill of a local array (the object stored or passed would have to be the numpy scalar),
   * a comparison of an I64 with an F64 where one side is tainted (numpy converts the int to double,
     CPython compares exactly), `And` / `Or` of values that are not all plain.
+  * a `for ... in range` variable (or a `for` target) that is also assigned a numpy-derived value:
+    the loop binds it without an Assign, so its flag would not follow it (#426),
+  * a parameter or local whose name ends in `__np`: it would be taken for a flag (#426).
+The flags are exact: every binding of a flagged local is an Assign (a loop variable is refused), and
+each one is followed by the Assign of its flag. `flags` gives them to cgen, which boxes a live local
+for a continuation (an OSR-style or statement exit, cgen `_osr_value`) the way `Box.np` does (#426;
+agent proposal, not owner-confirmed).
 What this cannot find: a numpy semantic not listed above that the front end lowers to an IR node
 (there is none today for + - * unary, compares, math.*, len, index); the tests pin each.
 """
@@ -37,6 +44,33 @@ TRUE = ir.Const(Type.BOOL, True)
 
 def flag_name(name: str) -> str:
     return f"{name}__np"
+
+
+def flags(f: ir.Function) -> dict[str, str]:
+    """Flagged scalar local or parameter of a lowered `f` -> its shadow flag local. Empty for a
+    function without a numpy buffer parameter. Exact because `apply` refuses a function that already
+    has a name ending in `__np`: a BOOL local of that name is a flag."""
+    if not any(isinstance(p, ir.ArrayParam) and p.buffer == "numpy" for p in f.params):
+        return {}
+    names = set(f.locals) | {p.name for p in f.params if not isinstance(p, ir.ArrayParam)}
+    return {n: flag_name(n) for n in names if f.locals.get(flag_name(n)) is Type.BOOL}
+
+
+def _loop_bound(x, out: set[str]) -> set[str]:
+    """Names a loop header binds (ForRange.var, ForObj.targets): bound without an Assign."""
+    if isinstance(x, (tuple, list)):
+        for y in x:
+            _loop_bound(y, out)
+    elif isinstance(x, ir.Stmt):
+        if isinstance(x, ir.ForRange):
+            out.add(x.var)
+        elif isinstance(x, ir.ForObj):
+            out.update(x.targets)
+        for f in dataclasses.fields(x):
+            v = getattr(x, f.name)
+            if isinstance(v, tuple):
+                _loop_bound(v, out)
+    return out
 
 
 def _or(a: ir.Expr | None, b: ir.Expr | None) -> ir.Expr | None:
@@ -167,11 +201,21 @@ class _Pass:
 
 
 def apply(body: tuple, numpy: set[str], pure: bool,
-          scalar_params: frozenset[str] = frozenset()) -> tuple[tuple, dict[str, Type], bool]:
+          scalar_params: frozenset[str] = frozenset(),
+          names: frozenset[str] = frozenset()) -> tuple[tuple, dict[str, Type], bool]:
     """Rewrite a lowered body: shadow flags and `Box.np` / `BinOp.np`. Returns the new body and the
-    new locals (the flags, BOOL) and whether the body now can deopt. Raises Refuse."""
+    new locals (the flags, BOOL) and whether the body now can deopt. `names`: every parameter and
+    local of the function before the rewrite. Raises Refuse."""
+    taken = sorted(n for n in names if n.endswith("__np"))
+    if taken:
+        raise Refuse(f"the name `{taken[0]}` ends in `__np`, which is reserved for the numpy flags of "
+                     "a function with a numpy array parameter")
     p = _Pass(numpy, pure)
     p.discover(body)
+    stale = sorted(p.flagged & _loop_bound(body, set()))
+    if stale:
+        raise Refuse(f"loop variable `{stale[0]}` is also assigned a value derived from a numpy "
+                     "element (the loop makes it an int again, which the numpy flag would not follow)")
     new = p.rewrite(body)
     # a parameter that is reassigned from a numpy element: its flag starts False
     first = tuple(ir.Assign(flag_name(n), ir.Const(Type.BOOL, False))

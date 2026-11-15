@@ -113,7 +113,9 @@ Buffer arrays (issue #149, identity-safe part). A parameter annotated `array.arr
 `array.array[int]` is an `ArrayParam` with `buffer` "array"; `NDArray[np.float64]` / `NDArray[np.int64]`
 (#220) is one with `buffer` "numpy" (exact `numpy.ndarray`, an out-of-range index raises numpy's
 IndexError text). A numpy element is an np.float64 / np.int64 in the interpreter: `Box.np` boxes
-the matching numpy scalar when its run-time flag is true, and `BinOp.np` deopts a non-finite float
+the matching numpy scalar when its run-time flag is true, a local handed to a continuation at a poll
+exit or a statement exit is boxed the same way from its own flag (`_osr_value`, #426;
+`_exit_numpy_scalars` is the mutation point), and `BinOp.np` deopts a non-finite float
 `+ - *` result so the interpreter emits numpy's RuntimeWarning (taint.py). `tp_wrap_f` does not copy it: after the scalar guards, `tp_buf_enter`
 checks the exact type (captured in `tp_state.buf_types` by the exec slot), takes one `Py_buffer`
 export (C-contiguous, 1-D, 8-byte items, format `d` / `q` / `l`, aligned, writable when the function
@@ -271,7 +273,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from typedpython import ir, resume
+from typedpython import ir, resume, taint
 from typedpython.ir import Type
 
 
@@ -568,6 +570,13 @@ def _redo_inside_window() -> bool:
     interpreted redo in a function holding lists; tests set it to see the window observations fail.
     Always False in a build."""
     return False
+
+
+def _exit_numpy_scalars() -> bool:
+    """#426: the single mutation point of the numpy scalars a continuation receives (`_osr_value`).
+    False boxes every scalar local as a float / int / bool whatever its taint flag says; tests set it to
+    see the type comparisons after an exit fail. Always True in a build."""
+    return True
 
 
 def _is_effect(e: ir.Expr) -> bool:
@@ -1491,6 +1500,8 @@ class _FnGen:
         # stored or bound a received local (in emission order); an exit of one of them is refused
         self.committed: set = set()
         self.exit_label: str | None = None    # the shared exit tail of the IR statement being emitted
+        # #426: scalar local -> its numpy taint flag (taint.py); empty without a numpy buffer parameter
+        self.np_flags = taint.flags(f) if _exit_numpy_scalars() else {}
 
     # emit primitives
 
@@ -2941,10 +2952,22 @@ class _FnGen:
         if t is Type.INT:
             return f"tp_int_box(&{v})"
         if t is Type.F64:
-            return f"PyFloat_FromDouble({v})"
-        if t is Type.BOOL:
-            return f"PyBool_FromLong({v})"
-        return f"PyLong_FromLongLong((long long){v})"
+            plain = f"PyFloat_FromDouble({v})"
+        elif t is Type.BOOL:
+            plain = f"PyBool_FromLong({v})"
+        else:
+            plain = f"PyLong_FromLongLong((long long){v})"
+        flag = self.np_flags.get(name)
+        if flag is None:
+            return plain
+        # #426 (#220): a value derived from a numpy element is an np.float64 / np.int64 / np.bool in
+        # the interpreter, so the continuation takes that scalar, as `ev_Box` boxes it for `Box.np`.
+        # The flag is the local's own run-time flag: every Assign of the local is followed by the
+        # Assign of its flag (taint.py), a poll exit sits between statements, and a statement exit
+        # comes before its statement binds any local the continuation receives (`committed`).
+        if t not in _NP_SLOT or self.types.get(flag) is not Type.BOOL:
+            raise CGenError(f"{self.f.name}: numpy flag {flag} of {name} ({t}) at an exit (#426)")
+        return f"({_ident('l', flag)} ? tp_box_np(tp_st->buf_types[{_NP_SLOT[t]}], {plain}) : {plain})"
 
     def snap_poll(self, site: int, cur: str, stop: str = "0", step: int = 0) -> None:
         """The poll of a snapshot holder (#152): write the lists back, end their critical section,
