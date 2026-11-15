@@ -3640,6 +3640,19 @@ class _FnGen:
                            "if (tp_pq != 0) { tp_rc = tp_pq; goto tp_exit; } }")
             elif not self.fast:
                 out.append("    if (tp_poll(tp_t, tp_st->breaker) != 0) { tp_rc = -1; goto tp_exit; }")
+        if self.rmode == "c":
+            # #431: tests only (-DTP_TEST_REGION_HOOK). The entry poll of a region consumer is where a
+            # signal handler or another thread could change a class; it runs before any field read of
+            # this activation. The module-level `__tp_test_region_hook__()` runs right after it, so a
+            # test can make that change at an exact call, with no timer. It fires on every entry while
+            # the module dict holds it (the test removes it once it has acted); an exception is an error.
+            out += ["#ifdef TP_TEST_REGION_HOOK",
+                    "    { PyObject *tp_hk = NULL;",
+                    "      if (PyDict_GetItemStringRef(tp_dict, \"__tp_test_region_hook__\", &tp_hk) > 0) {",
+                    "          PyObject *tp_hr = PyObject_CallNoArgs(tp_hk); Py_DECREF(tp_hk);",
+                    "          if (tp_hr == NULL) { tp_rc = -1; goto tp_exit; }",
+                    "          Py_DECREF(tp_hr); } }",
+                    "#endif"]
         out += prologue
         out += self.lines
         out.append("tp_exit:")
