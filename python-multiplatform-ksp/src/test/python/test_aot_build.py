@@ -19,12 +19,14 @@ Under the CI sanitizer job (TP_SANITIZE=1) every executable is built with ASan a
 
 Everything here is an agent proposal, not owner-confirmed.
 """
+import io
 import os
 import re
 import shutil
 import subprocess
 import sys
 import textwrap
+import tokenize
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -952,7 +954,7 @@ def selector(tmp_path_factory):
     need_cc()
     tmp = tmp_path_factory.mktemp("selector")
     src = write(tmp, selector_source(), "selector")
-    exe = exe_path(aot.build(src, tmp / "selector"))
+    exe = aot.build(src, tmp / "selector")          # build returns the real path (`.exe` on windows)
     return SimpleNamespace(src=src, exe=exe)
 
 
@@ -1022,7 +1024,7 @@ def nbody(tmp_path_factory):
     need_cc()
     tmp = tmp_path_factory.mktemp("nbody")
     src = nbody_variant(tmp)
-    return SimpleNamespace(src=src, exe=exe_path(aot.build(src, tmp / "nbody")))
+    return SimpleNamespace(src=src, exe=aot.build(src, tmp / "nbody"))
 
 
 def test_nbody_prints_what_cpython_prints(nbody):
@@ -1166,8 +1168,149 @@ REJECTED = {
 }
 
 
-@pytest.mark.parametrize("name", sorted(REJECTED))
-def test_rejection_table(tmp_path, name):
+# Most rows are checked from a few merged programs instead of one program each: `aot.generate` starts the
+# type inferencer (a subprocess, slow on windows) for every program that gets past the source-level checker.
+# A merged program holds each row's chunk once, its functions and module constants renamed with a suffix
+# of their own (`f` becomes `f_r12`), so that no two rows share a name; every row's test then looks its
+# (rule, line, name) up in the findings of the shared program, with the line moved to the merged file.
+#
+#  - SINGLE_ROWS stay one program each: the entry block is what they are about (a missing one, text
+#    after it, an assignment in it).
+#  - SOURCE_LEVEL_ROWS are the findings of the source-level checker (aot/program.py). When that checker
+#    finds anything, only its findings are reported and the front end and the back end do not run, so
+#    these rows must not share a program with the others.
+#  - every other row is a finding of the front end, the verifier or the back end.
+# A row filed in the wrong group is not found in its program, so its own test fails.
+SINGLE_ROWS = frozenset({
+    "no entry", "statements after the entry block", "assignment to a module name in the entry block"})
+SOURCE_LEVEL_ROWS = frozenset({
+    "annotated constant outside 64 bits",
+    "annotated constant without a value",
+    "annotation outside int float bool",
+    "bitwise operator",
+    "class",
+    "decorator",
+    "empty list display",
+    "f-string as a value",
+    "f-string conversion",
+    "f-string equals",
+    "f-string nested field",
+    "f-string other type",
+    "f-string precision too large",
+    "f-string width",
+    "float annotation on an int value",
+    "from import",
+    "import twice",
+    "int annotation on a bool value",
+    "int builtin",
+    "int literal outside 64 bits",
+    "int of a string literal",
+    "list in a tuple return",
+    "list iteration",
+    "list method",
+    "list module constant",
+    "list of bool annotation",
+    "list of lists annotation",
+    "list slice",
+    "math attribute",
+    "math function",
+    "min of three",
+    "missing annotation",
+    "module constant outside 64 bits",
+    "module constant that is a call",
+    "module loop",
+    "module statement",
+    "print as a value",
+    "print keyword",
+    "second import",
+    "string variable",
+    "sys argv as a string",
+    "sys argv slice",
+    "sys attribute",
+    "sys exit",
+    "tuple annotation of a parameter",
+    "tuple display",
+    "tuple unpack of a display",
+    "unknown builtin",
+})
+IMPORT_ROWS = frozenset({"second import", "import twice", "from import"})      # their imports are the point
+RENAMED_NAMES = frozenset({"f", "g", "N", "X", "A"})
+HOISTED_IMPORTS = ("import math", "import sys")
+
+
+def rename_names(source: str, suffix: str) -> str:
+    """`source` with every name token in RENAMED_NAMES given `suffix` (tokens, so strings and the
+    format specs of f-strings are not touched)."""
+    lines = source.splitlines(keepends=True)
+    edits = []
+    for tok in tokenize.generate_tokens(io.StringIO(source).readline):
+        if tok.type == tokenize.NAME and tok.string in RENAMED_NAMES:
+            edits.append(tok.start)
+    for row, col in sorted(edits, reverse=True):
+        line = lines[row - 1]
+        name_end = col + 1
+        lines[row - 1] = line[:name_end] + suffix + line[name_end:]
+    return "".join(lines)
+
+
+def merged_rejection_source(names: list[str]):
+    """One program holding the chunks of the rows `names`; returns its text and, per row, the finding
+    to look for: (rule, line in the merged file, name)."""
+    parts = ["import math\nimport sys\n"]
+    line_of_next_chunk = 3
+    expected = {}
+    for i, name in enumerate(names):
+        source, (rule, line, what) = REJECTED[name]
+        lines = source.splitlines(keepends=True)
+        dropped = 0
+        if name not in IMPORT_ROWS:
+            while lines and lines[0].rstrip("\n") in HOISTED_IMPORTS:       # the merged file imports once, on top
+                lines.pop(0)
+                dropped += 1
+        suffix = f"_r{i}"
+        chunk = rename_names("".join(lines), suffix)
+        if what in RENAMED_NAMES:
+            what += suffix
+        expected[name] = (rule, line_of_next_chunk + line - 1 - dropped, what)
+        parts.append(chunk + "\n")
+        line_of_next_chunk += chunk.count("\n") + 1
+    return "".join(parts) + MAIN, expected
+
+
+def rejection_groups() -> dict[str, list[str]]:
+    rows = sorted(set(REJECTED) - SINGLE_ROWS)
+    return {"source": [n for n in rows if n in SOURCE_LEVEL_ROWS],
+            "later": [n for n in rows if n not in SOURCE_LEVEL_ROWS]}
+
+
+@pytest.fixture(scope="module")
+def rejections(tmp_path_factory):
+    """Each merged program generated once: row name -> (the finding to look for, the program's findings)."""
+    results = {}
+    for group, names in rejection_groups().items():
+        source, expected = merged_rejection_source(names)
+        path = write(tmp_path_factory.mktemp(f"rejected_{group}"), source)
+        try:
+            aot.generate(path)
+            findings = None
+        except aot.AotError as e:
+            findings = e.findings
+        for name in names:
+            results[name] = (expected[name], findings)
+    return results
+
+
+@pytest.mark.parametrize("name", sorted(set(REJECTED) - SINGLE_ROWS))
+def test_rejection_table(rejections, name):
+    want, findings = rejections[name]
+    assert findings is not None, "the merged program was accepted"
+    found = [(f.rule, f.line, f.name) for f in findings]
+    assert want in found, found
+    assert all(f.path == "prog.py" for f in findings)
+
+
+@pytest.mark.parametrize("name", sorted(SINGLE_ROWS))
+def test_rejection_table_entry_rows(tmp_path, name):
     source, (rule, line, what) = REJECTED[name]
     if rule not in ("aot/entry",) and "__main__" not in source:
         source += MAIN
