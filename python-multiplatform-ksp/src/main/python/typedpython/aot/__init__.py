@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from typedpython.aotcheck import Finding
@@ -33,9 +34,11 @@ def format_finding(f: Finding) -> str:
 _LINE = re.compile(r"\bline (\d+)")
 
 
-def _lower(program) -> tuple[str | None, list[Finding]]:
+def _lower(program, library=None) -> tuple[str | None, list[Finding]]:
     """Run the front end and the verifier in their AOT mode on the program's file; emit C or return
-    the findings. Every line number is the file's own."""
+    the findings. Every line number is the file's own. `library` (`aot.library`, #455) is None for a program
+    with an entry: what `aot-build` has always done. For a library it names the functions to compile (the
+    exports and what they reach) and the emitter of the library's C; the entry is then not expected."""
     from typedpython import frontend, verify
     from typedpython.aot import emit as emit_mod
     from typedpython.aot.program import MAIN
@@ -56,7 +59,12 @@ def _lower(program) -> tuple[str | None, list[Finding]]:
             return None, [finding(1, "aot/front-end", type(e).__name__,
                                   f"the front end failed on this program ({type(e).__name__}: {first})", None)]
 
-    expected = [f.name for f in program.functions] + [MAIN]
+    if library is None:
+        expected = [f.name for f in program.functions] + [MAIN]
+        emit_fn = emit_mod.emit
+    else:
+        expected = [f.name for f in program.functions if f.name in library.reachable]
+        emit_fn = library.emit
     proved_names = {f.name for f in proved.functions}
     found: list[Finding] = []
     for name in expected:
@@ -76,12 +84,12 @@ def _lower(program) -> tuple[str | None, list[Finding]]:
         # The functions that did pass are still emitted, to report what the back end finds in them too: a
         # program's findings are all reported at once, not one function's at a time. (A function that calls
         # one of the rejected is rejected with it, so what is emitted here is closed.)
-        _, more = emit_mod.emit(proved, program)
+        _, more = emit_fn(proved, program)
         entry_missing = [f for f in more if f.rule == "aot/entry"]
         seen = {(f.line, f.rule, f.name) for f in found}
         found += [f for f in more if f not in entry_missing and (f.line, f.rule, f.name) not in seen]
         return None, found
-    return emit_mod.emit(proved, program)
+    return emit_fn(proved, program)
 
 
 def generate(entry: Path) -> str:
@@ -108,3 +116,32 @@ def build(entry: Path, out: Path, *, emit_c: Path | None = None) -> Path:
         emit_c.parent.mkdir(parents=True, exist_ok=True)
         emit_c.write_text(c_text, encoding="utf-8")
     return cc.compile_executable(c_text, Path(out), keep=emit_c)
+
+
+@dataclass(frozen=True)
+class LibraryFiles:
+    """What `build_library` wrote: the shared library, the C header `<prefix>.h` and the description
+    `<prefix>.json` (all in the output directory)."""
+
+    library: Path
+    header: Path
+    description: Path
+
+
+def generate_library(module: Path, *, exports: list[str], prefix: str) -> tuple[str, str, dict]:
+    """The C text of the library, its header and its description for `module` (a module with no entry; an
+    `if __name__ == "__main__":` block is not compiled) exporting the functions `exports` under `prefix`;
+    raises AotError. See `typedpython.aot.library`."""
+    from typedpython.aot import library
+
+    return library.generate_library(Path(module), exports=exports, prefix=prefix)
+
+
+def build_library(module: Path, out_dir: Path, *, exports: list[str], prefix: str,
+                  emit_c: Path | None = None) -> LibraryFiles:
+    """Compile `module` to the shared library `lib<prefix>.so` (`.dylib` on macOS, `<prefix>.dll` on Windows)
+    and write `<prefix>.h` and `<prefix>.json` beside it in `out_dir`. `emit_c` also keeps the generated C
+    there. See `typedpython.aot.library`."""
+    from typedpython.aot import library
+
+    return library.build_library(Path(module), Path(out_dir), exports=exports, prefix=prefix, emit_c=emit_c)

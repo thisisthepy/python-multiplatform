@@ -477,12 +477,30 @@ def _op_symbol(op: ast.operator) -> str:
 
 # --- the module ----------------------------------------------------------------------------------
 
-def analyze(entry: Path) -> Program:
+def _without_main_guards(source: str, tree: ast.Module) -> str:
+    """The source with every `if __name__ == "__main__":` block of the module level blanked, line by line, so
+    every other statement keeps its line number. A library (`analyze(library=True)`) has no entry."""
+    lines = source.split("\n")
+    for s in tree.body:
+        if frontend.is_main_guard(s) and s.end_lineno is not None:
+            for i in range(s.lineno - 1, s.end_lineno):
+                lines[i] = ""
+    return "\n".join(lines)
+
+
+def analyze(entry: Path, *, library: bool = False) -> Program:
+    """Read the program. `library=True` (`typedpython aot-lib`, #455; agent proposal, not owner-confirmed): the
+    module has no entry, so a missing `if __name__ == "__main__":` block is not a finding, and a block that is
+    there is not part of the program (it is blanked before anything reads the source, `program.source` is the
+    blanked text, the line numbers are the file's). `analyze(entry)` is what `aot-build` has always called."""
     entry = Path(entry).resolve()
     source = entry.read_text(encoding="utf-8")
     rep = _Report(entry.name)
     try:
         tree = ast.parse(source, filename=str(entry))
+        if library:
+            source = _without_main_guards(source, tree)
+            tree = ast.parse(source, filename=str(entry))
     except SyntaxError as e:
         rep.error(e.lineno or 1, "aot/syntax", "SyntaxError", f"the module does not parse ({e.msg})")
         return Program(entry, entry.name, source, ast.Module(body=[], type_ignores=[]), findings=rep.findings)
@@ -539,7 +557,9 @@ def analyze(entry: Path) -> Program:
                       f"`import sys`, "
                       "defs, `NAME = <constant expression>` (also `NAME: int | float | bool = ...`) and one "
                       "`if __name__ == \"__main__\"` block")
-    if len(main_guards) != 1:
+    if library:
+        assert not main_guards          # blanked above
+    elif len(main_guards) != 1:
         rep.error(main_guards[1] if len(main_guards) > 1 else 1, "aot/entry", "__main__",
                   "a program has exactly one `if __name__ == \"__main__\":` block" +
                   (f" (found {len(main_guards)})" if main_guards else ""))

@@ -903,3 +903,20 @@ def emit(module: ir.Module, program: Program) -> tuple[str | None, list[Finding]
         "",
     ]
     return "\n".join(out), []
+
+
+def emit_functions(module: ir.Module, program: Program, names: set[str]) -> tuple[_Gen, list[list[str]], list[Finding]]:
+    """The library's share of the emitter (#455; agent proposal, not owner-confirmed): only the functions named
+    in `names` (the exports and what they reach) are emitted, each as the same `static int tpf_<name>(...)` an
+    executable has, and there is no entry. Returns the generator (its `fns` are the emitted functions), the
+    function bodies, and every finding of those functions."""
+    g = _Gen(module, program)
+    g.fns = {n: f for n, f in g.fns.items() if n in names}
+    bodies: list[list[str]] = []
+    for f in g.fns.values():
+        fn = _Fn(g, f)
+        text = fn.run()
+        g.findings.extend(fn.found)
+        if text is not None:
+            bodies.append(text)
+    return g, bodies, g.findings

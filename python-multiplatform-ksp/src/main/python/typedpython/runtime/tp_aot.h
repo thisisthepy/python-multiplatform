@@ -9,12 +9,19 @@
  * Contents: the current-exception record, checked-free i64 helpers (floor division and modulo with
  * CPython's sign rules), float helpers, exact int/float comparison, the nine native `math` functions
  * with CPython's error rules, `repr(float)`, native lists of floats and ints (counted, non-atomic: the
- * single-threaded tier), the program argument count and the `print`
+ * single-threaded tier; atomic in a library build), the program argument count and the `print`
  * pieces including `format(x, '.Nf')`.
  *
  * A compiled function returns 0 (ok) or -1 (an exception is recorded in `tpa_exc`) and writes its
  * result through an out pointer. Nothing here unwinds: every function leaves through one cleanup
  * point that releases its lists, so an exception that reaches `main` leaves nothing allocated.
+ *
+ * Library build (`-DTPA_LIBRARY`, `typedpython aot-lib`; owner decision D5 (2026-11-16) for the existence of
+ * the library output, leader decision 2026-11-16, not owner-confirmed, for the shape below): the same
+ * source, with (1) ATOMIC list counts (through TPA_THREADS: any thread of the host may hold a list),
+ * (2) no program-argument state (a library has no `main`), (3) the export macro and the pieces the exported
+ * wrappers use (the thread's error record, the null-handle error). An executable build does not define
+ * TPA_LIBRARY and gets exactly the code it had before: non-atomic counts, `tpa_argc` and `tpa_argv`.
  */
 #ifndef TP_AOT_H
 #define TP_AOT_H
@@ -39,6 +46,48 @@
 #define TPA_THREAD_LOCAL __thread
 #endif
 
+/* TPA_THREADS: more than one thread may run this code, so list counts are atomic. This block is the one
+ * place that decides it (leader, 2026-11-16: the condition is "threads may exist", not "is a library"):
+ * a library build always (any thread of the host may call it); an executable build is single-threaded
+ * today and defines TPA_THREADS itself from the day it can start threads (a parallel loop). */
+#if defined(TPA_LIBRARY) && !defined(TPA_THREADS)
+#define TPA_THREADS 1
+#endif
+
+/* With TPA_THREADS the list count is atomic; without it the plain 64-bit count stays.
+ *   GCC, Clang (also clang-cl): C11 <stdatomic.h>, a relaxed add to retain and an acquire-release subtract
+ *     to release (the release that sees 1 frees, exactly once however many threads release together).
+ *   cl.exe: _InterlockedIncrement64 and _InterlockedDecrement64 on the same 64-bit field (each is a full
+ *     barrier, so it is at least acquire-release). tp_runtime.h lines 40 to 82 take <intrin.h> and the
+ *     _InterlockedExchangeAdd64 intrinsics for its own atomic helpers in the same way.
+ * TPA_EXPORT marks an exported symbol; the library is built with -fvisibility=hidden (GCC, Clang), so
+ * nothing else is visible. */
+#if defined(TPA_THREADS)
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>
+typedef int64_t tpa_rc_t;
+#define TPA_RC_INC(l) ((void)_InterlockedIncrement64((volatile __int64 *)&(l)->rc))
+#define TPA_RC_DEC_IS_ZERO(l) (_InterlockedDecrement64((volatile __int64 *)&(l)->rc) == 0)
+#else
+#include <stdatomic.h>
+typedef _Atomic int64_t tpa_rc_t;
+#define TPA_RC_INC(l) ((void)atomic_fetch_add_explicit(&(l)->rc, 1, memory_order_relaxed))
+#define TPA_RC_DEC_IS_ZERO(l) (atomic_fetch_sub_explicit(&(l)->rc, 1, memory_order_acq_rel) == 1)
+#endif
+#else
+typedef int64_t tpa_rc_t;
+#define TPA_RC_INC(l) ((l)->rc += 1)
+#define TPA_RC_DEC_IS_ZERO(l) (--(l)->rc == 0)
+#endif
+
+#if defined(TPA_LIBRARY)
+#if defined(_WIN32) || defined(__CYGWIN__)
+#define TPA_EXPORT __declspec(dllexport)
+#else
+#define TPA_EXPORT __attribute__((visibility("default")))
+#endif
+#endif
+
 /* ------------------------------------------------------------------------------------------
  * The current exception: a class of the built-ins this runtime raises and a message.
  * ------------------------------------------------------------------------------------------ */
@@ -47,6 +96,7 @@
 #define TPA_OverflowError 3
 #define TPA_IndexError 4
 #define TPA_MemoryError 5
+#define TPA_TypeError 6          /* library build: a NULL list handle (an ABI-level check, no counterpart in the source language) */
 
 typedef struct {
     int kind;
@@ -63,6 +113,7 @@ static inline const char *tpa_exc_name(int kind)
     case TPA_OverflowError: return "OverflowError";
     case TPA_IndexError: return "IndexError";
     case TPA_MemoryError: return "MemoryError";
+    case TPA_TypeError: return "TypeError";
     }
     return "SystemError";
 }
@@ -94,6 +145,42 @@ static inline int tpa_report_uncaught(void)
     fflush(stderr);
     return 1;
 }
+
+#if defined(TPA_LIBRARY)
+/* The exported wrappers' share of the thread's record (`tpa_exc` is thread-local, so no thread sees another's).
+ * kind 0 is "no failure": a successful exported call clears the record, a failing one leaves the class and
+ * message `tpa_raise` wrote. The strings `last_error` hands out are this thread's own storage (the class name
+ * is a literal), valid until that thread's next call that records or clears. */
+static inline void tpa_lib_clear_error(void)
+{
+    tpa_exc.kind = 0;
+    tpa_exc.msg[0] = '\0';
+}
+
+/* A NULL list handle passed to an exported function: an ABI-level check with no counterpart in the source
+ * language, reported as a TypeError that names the argument. */
+static inline int tpa_lib_null_handle(const char *arg)
+{
+    char m[256];
+    snprintf(m, sizeof m, "argument '%s' is a null list handle", arg);
+    return tpa_raise(TPA_TypeError, m);
+}
+
+/* 0 and both strings set when this thread's last exported call failed, 1 when it succeeded or none was made. */
+static inline int tpa_lib_last_error(const char **class_name, const char **message)
+{
+    if (tpa_exc.kind == 0) {
+        return 1;
+    }
+    if (class_name != NULL) {
+        *class_name = tpa_exc_name(tpa_exc.kind);
+    }
+    if (message != NULL) {
+        *message = tpa_exc.msg;
+    }
+    return 0;
+}
+#endif
 
 /* CPython 3.14 and 3.15 (tp_runtime.h lines 167 to 171, 179): every division by zero says this. */
 #define TPA_MSG_DIVISION_ZERO "division by zero"
@@ -714,14 +801,15 @@ static inline int tpa_math_hypot(double x, double y, double *out)
  * Native lists (design note 4.1, 6.2, 6.3; agent proposal, not owner-confirmed). A `list[float]` /
  * `list[int]` is a counted heap object: the count, the length, the elements. It never changes length,
  * so an element access needs one bounds test and nothing else. The count is NON-ATOMIC: this is the
- * single-threaded tier (design 6.3 and 7; a list shared by threads needs atomic counts).
+ * single-threaded tier (design 6.3 and 7; a list shared by threads needs atomic counts): a library build
+ * (which defines TPA_THREADS) has atomic counts, an executable build keeps this plain one.
  * A fresh list has count 1. `retain` adds an owner, `release` removes one and frees at 0 (a NULL
  * list is a no-op, which is what lets a function release every local at its one exit). A function
  * parameter is borrowed: the caller keeps it alive for the call, and two parameters may be the same
  * list, as two names of one list are in the source language.
  * ------------------------------------------------------------------------------------------ */
-typedef struct tpa_f64_list { int64_t rc; int64_t len; double d[]; } tpa_f64_list;
-typedef struct tpa_i64_list { int64_t rc; int64_t len; int64_t d[]; } tpa_i64_list;
+typedef struct tpa_f64_list { tpa_rc_t rc; int64_t len; double d[]; } tpa_f64_list;
+typedef struct tpa_i64_list { tpa_rc_t rc; int64_t len; int64_t d[]; } tpa_i64_list;
 
 /* tp_runtime.h lines 1583 to 1599, tp__local_alloc: a negative length is an empty list (CPython's
  * `[x] * -1 == []`), and a size that overflows is a MemoryError, never a wrapped small allocation. */
@@ -801,12 +889,12 @@ out_of_range:
     static inline void tpa_##NAME##_retain(tpa_##NAME##_list *l)                                  \
     {                                                                                             \
         if (l != NULL) {                                                                          \
-            l->rc += 1;                                                                           \
+            TPA_RC_INC(l);                                                                        \
         }                                                                                         \
     }                                                                                             \
     static inline void tpa_##NAME##_release(tpa_##NAME##_list *l)                                 \
     {                                                                                             \
-        if (l != NULL && --l->rc == 0) {                                                          \
+        if (l != NULL && TPA_RC_DEC_IS_ZERO(l)) {                                                 \
             free(l);                                                                              \
         }                                                                                         \
     }
@@ -831,8 +919,10 @@ static inline int tpa_i64_iota(int64_t n, tpa_i64_list **out)
  * The program arguments: only `len(sys.argv)` is compiled (a string has no other use yet; `int()` of one
  * needs big integers, so it is a compile error, aot/int-unproven).
  * ------------------------------------------------------------------------------------------ */
+#if !defined(TPA_LIBRARY)       /* a library has no `main` and no program arguments: no static mutable data */
 static int tpa_argc = 0;
 static char **tpa_argv = NULL;
+#endif
 
 /* ------------------------------------------------------------------------------------------
  * print: positional arguments only, separated by one space, ended by a newline, written to standard

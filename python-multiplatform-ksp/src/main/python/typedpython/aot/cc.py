@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -73,6 +74,59 @@ def command(c_file: Path, out: Path, obj_dir: Path | None = None) -> tuple[list[
     if sanitizing():
         cc = _sanitized(cc)
     return (cc + list(FLAGS) + [f"-I{RUNTIME_DIR}", str(c_file), "-o", str(out), "-lm"]), None
+
+
+def library_command(c_file: Path, out: Path, obj_dir: Path | None = None) -> tuple[list[str], dict[str, str] | None]:
+    """The compiler command line (and environment) of a shared library (#455; agent proposal, not
+    owner-confirmed): the executable's optimisation and floating-point flags, `-DTPA_LIBRARY` (atomic list
+    counts, no program-argument state, the export macro), hidden visibility so only the exported symbols are
+    visible, and `-shared -fPIC` (`-dynamiclib` with the install name `@rpath/<file name>` on macOS, `/LD`
+    on MSVC). `command` is not touched: the executable's line is what it was."""
+    flags = list(FLAGS) + ["-DTPA_LIBRARY"]
+    if cbuild._is_msvc():
+        env = cbuild.msvc_env()
+        obj = (obj_dir or c_file.parent) / (c_file.stem + ".obj")
+        implib = obj.with_suffix(".lib")            # (the import library and the .exp stay with the object)
+        if sanitizing():
+            flags.append("-DTP_CHECK_PROVEN")
+        cmd = ([cbuild._msvc_cl(env), "/nologo"] + cbuild._msvc_flags(flags)
+               + [f"/I{RUNTIME_DIR}", "/LD", str(c_file), f"/Fo{obj}", f"/Fe{out}", "/link", f"/IMPLIB:{implib}"])
+        return cmd, env
+    cc = cbuild.compiler()
+    if sanitizing():
+        cc = _sanitized(cc)
+    shared = ["-dynamiclib", "-install_name", f"@rpath/{Path(out).name}"] if sys.platform == "darwin" else ["-shared"]
+    return (cc + flags + ["-fPIC", "-fvisibility=hidden"] + shared
+            + [f"-I{RUNTIME_DIR}", str(c_file), "-o", str(out), "-lm"]), None
+
+
+def compile_library(c_text: str, out_dir: Path, file_name: str, keep: Path | None = None) -> Path:
+    """Compile `c_text` to the shared library `out_dir/file_name` and return its path. With MSVC the compiler
+    writes the object, the import library and the export file beside the library, so the build runs in a
+    scratch directory and only the library is copied to `out_dir`; with GCC and Clang there is nothing else."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / file_name
+    with tempfile.TemporaryDirectory(prefix="typedpython-aot-lib-") as work:
+        work_dir = Path(work)
+        if keep is not None:
+            c_file = Path(keep)
+        else:
+            c_file = work_dir / "library.c"
+            c_file.write_text(c_text, encoding="utf-8")
+        msvc = cbuild._is_msvc()
+        target = work_dir / file_name if msvc else out
+        cmd, env = library_command(c_file, target, work_dir)
+        run = subprocess.run(cmd, capture_output=True, encoding="oem" if sys.platform == "win32" else None,
+                             text=sys.platform != "win32", errors="replace", env=env)
+        if run.returncode != 0 or not target.is_file():
+            raise cbuild.CBuildError(f"C compiler failed ({run.returncode}): "
+                                     f"{subprocess.list2cmdline(cmd) if sys.platform == 'win32' else shlex.join(cmd)}\n"
+                                     f"{run.stdout}{run.stderr}")
+        if msvc:
+            out.unlink(missing_ok=True)
+            shutil.copy2(target, out)
+    return out
 
 
 def _compile(c_file: Path, out: Path, obj_dir: Path | None = None) -> Path:

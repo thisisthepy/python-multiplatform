@@ -295,7 +295,7 @@ calling rules of AGENTS.md 16.
 
 ### 8.1 What the library exports
 
-- One C function per exported Python function, `<prefix>_<module>_<function>`, with a C signature
+- One C function per exported Python function, `<prefix>_<function>` (as built by #455), with a C signature
   derived from the Python annotations. Which functions are exported is stated in the build (a list of
   entry functions); everything they reach is compiled, the rest of the program is dropped by the linker.
 - `<prefix>_init()` runs the module initialisers of section 3 once (idempotent, safe to call from any
@@ -310,20 +310,28 @@ calling rules of AGENTS.md 16.
 | `int` proved inside i64, `float`, `bool` | `int64_t`, `double`, `uint8_t` | `Long`, `Double`, `Boolean` |
 | `int` not proved inside i64 | not exportable in a signature (compile error naming the parameter); the export must narrow it or return it as a string | |
 | `str` | pointer and length of UTF-8 bytes; an argument is borrowed for the call, a result is owned by the caller and released with `<prefix>_free` | `String`, copied at the boundary |
-| `list[float]` / `list[int]` argument | pointer and length, borrowed for the call | `DoubleArray` / `LongArray`, pinned or copied as the platform requires |
+| `list[float]` / `list[int]`, as an argument and as a result | an opaque counted handle (`<prefix>_f64_list`, `<prefix>_i64_list`) made and read through exported list functions (`_new`, `_len`, `_data`, `_retain`, `_release`); an argument is borrowed for the call, a returned handle is owned by the caller | a class holding the handle, with `DoubleArray` / `LongArray` copied from or to the `_data` address as the app needs |
 | an instance of a compiled class, or any other container | an opaque handle (a counted reference) with `<prefix>_release(handle)` | a Kotlin class holding the handle, released deterministically (`close`) with a cleaner as a safety net |
 | `None` result | `void` | `Unit` |
+
+The list row is a leader decision of 2026-11-16, not owner-confirmed. Reason: an AOT list carries a 16-byte
+header (count and length) before its elements, so a foreign array cannot be passed as it is; a handle
+also keeps Python's list identity across calls (a function that returns its argument returns the same list,
+and two parameters may be one list, as two names are in the source).
 
 Errors: every exported function returns a status; on failure the exception's class name and message
 are read with `<prefix>_last_error` on the same thread, and the generated Kotlin wrapper throws a
 Kotlin exception carrying both. Nothing unwinds across the boundary.
 
-Threads: an exported function may be called from any Kotlin thread; the runtime's per-thread state is
-created on first use. Two Kotlin threads calling into the library at once are two threads of the
-program in the sense of section 7, so objects reachable from handles and globals are "shared" for the
-thread-escape analysis even before tier T exists. Until that analysis exists, a library whose exports
-can reach shared mutable state takes one library lock around each exported call (correct, not
-parallel); this is the conservative first step and is stated in the generated header.
+Threads (leader decision 2026-11-16, not owner-confirmed; the library output is owner decision D5):
+there is no library-wide lock and TypedPython has no GIL-like single lock. An exported function may be
+called from any Kotlin thread and from several at once, so exported functions are reentrant. The error
+record behind `<prefix>_last_error` is thread-local. List counts are atomic in a library build (and stay
+non-atomic in an executable build). Module-level mutable state is refused for a library (`aot/library-state`):
+tier K has none, since module constants are folded at compile time and a function that assigns a
+module-level name makes a local. Concurrent writes to the elements of one list from several threads are the
+caller's responsibility, exactly as with a Kotlin array, and the generated header says so. This replaces the
+earlier proposal of one library lock around each exported call.
 
 ### 8.3 Kotlin calling Python (the downcall)
 
@@ -444,6 +452,8 @@ no behaviour and reports every construct of a program that would be an AOT compi
   own.
 - `lru_cache` is the second object-heavy benchmark.
 - Packaging of the library artefact stays open: it waits for the same owner decision as #25 step 3.
+- Verifying the Kotlin downcall inside a GraalVM native image is issue #456 and a completion condition of tier K
+  (leader, 2026-11-16, not owner-confirmed; AGENTS.md 13 applies to the library as it does to upcalls).
 
 ## 11. What this note does not establish
 
