@@ -674,6 +674,99 @@ class Print(Stmt):
     args: tuple[Expr, ...]
 
 
+# --- AOT-only nodes (SPEC N-17, #451; agent proposal, not owner-confirmed) -----------------------------
+#
+# The nodes below are produced only by `frontend.lower(path, aot=True)` and accepted only by
+# `verify.verify(m, aot=True)` (the default mode never builds one; its verifier reports them as unknown
+# nodes). They are the AOT mode's forms of what the default mode leaves to CPython objects: a list that
+# lives as a native counted array and is passed and returned by name, a fixed tuple of scalars returned
+# and unpacked, one `int(sys.argv[i])`, a formatted `print` argument and the conditional expression.
+
+@dataclass(frozen=True)
+class ListDisplay(Expr):
+    """`[e0, e1, ...]` of scalar expressions of one element type: a fresh native array (type F64_ARRAY
+    or I64_ARRAY, one element per expression, at least one). Like NewArray and CopyArray it is a
+    creation: the value of an `Assign` to a local array, or of a `Return`."""
+
+    elements: tuple[Expr, ...]
+
+
+@dataclass(frozen=True)
+class Cond(Expr):
+    """`then if cond else orelse` on two scalars of one type (the type of the node). Only the chosen
+    branch is evaluated."""
+
+    cond: Expr                 # BOOL
+    then: Expr
+    orelse: Expr
+
+
+@dataclass(frozen=True)
+class ArgvInt(Expr):
+    """`int(sys.argv[index])` (type I64), `index` I64. CPython's `int()` of a string can be any int, so the AOT
+    back end has no form for it until big integers exist: it reports `aot/int-unproven` naming the
+    expression. The node exists so the program is lowered, verified and every other finding is reported."""
+
+    index: Expr
+
+
+@dataclass(frozen=True)
+class ArgvLen(Expr):
+    """`len(sys.argv)` (type I64)."""
+
+
+@dataclass(frozen=True)
+class FormatField(Expr):
+    """One replacement field of an f-string given to `print`, in an `FString` (type OBJ, no use
+    elsewhere). `value` is I64, F64 or BOOL. `precision` None: `str(value)` (what `print(value)`
+    writes). A number: `format(value, '.<precision>f')`, F64 only."""
+
+    value: Expr
+    precision: int | None = None
+
+
+@dataclass(frozen=True)
+class FString(Expr):
+    """A formatted string argument of `Print` (type OBJ; nowhere else, it is not a string value):
+    `parts` are `Const` OBJ strs and `FormatField`s, written one after another with nothing between.
+    Every field is evaluated, in order, before any part is written."""
+
+    parts: tuple[Expr, ...]
+
+
+@dataclass(frozen=True)
+class ReturnTuple(Stmt):
+    """`return a, b, ...` of scalars in a function declared `-> tuple[T0, T1, ...]` (AOT mode). The
+    function's IR return type is OBJ, as in the default mode; the element types are those of its
+    `ReturnTuple` statements (`aot_tuple_kinds`), all of which must agree."""
+
+    values: tuple[Expr, ...]       # I64, F64 or BOOL
+
+
+@dataclass(frozen=True)
+class Unpack(Stmt):
+    """`t0, t1, ... = f(args)` where `f` returns a fixed tuple of scalars (AOT mode): the call, then each
+    element into its local. `call` is a `Call` of type OBJ; the targets are scalar locals of the
+    element types. A tuple has no other use in AOT mode."""
+
+    targets: tuple[str, ...]
+    call: "Call"
+
+
+def aot_tuple_kinds(f: "Function") -> tuple[Type, ...] | None:
+    """The element types of the tuple `f` returns (its first `ReturnTuple`), or None."""
+    stack = list(f.body)
+    while stack:
+        s = stack.pop(0)
+        if isinstance(s, ReturnTuple):
+            return tuple(v.type for v in s.values)
+        for fl in fields(s):
+            v = getattr(s, fl.name)
+            if isinstance(v, tuple) and v and all(isinstance(x, Stmt) for x in v):
+                stack[0:0] = list(v)
+    return None
+
+
 @dataclass(frozen=True)
 class If(Stmt):
     cond: Expr                 # BOOL

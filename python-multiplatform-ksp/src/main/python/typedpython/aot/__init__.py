@@ -1,10 +1,11 @@
 """TypedPython AOT mode, first build step (SPEC N-17, #448, #451; agent proposal, not owner-confirmed).
 
-`generate(entry)` returns the C text of a single-module program of scalar functions with an
+`generate(entry)` returns the C text of a single-module program (scalar functions, native lists of floats
+and ints, fixed tuples of scalars, `print` with f-strings, `sys.argv` through `int()`) with an
 `if __name__ == "__main__":` entry; `build(entry, out)` compiles it with the platform C compiler into
 a standalone executable that contains and loads no CPython. A program the mode cannot compile exactly
-as CPython computes it raises `AotError` with one finding per construct (design:
-docs/design/typedpython-aot.md).
+as CPython computes it raises `AotError` with EVERY finding of the program, one per construct, in every
+function (design: docs/design/typedpython-aot.md).
 """
 from __future__ import annotations
 
@@ -20,7 +21,8 @@ class AotError(Exception):
     `aotcheck.Finding` (path, line, rule, name, message)."""
 
     def __init__(self, findings: list[Finding]) -> None:
-        self.findings = sorted(findings, key=lambda f: (f.line, f.rule, f.name))
+        unique = {(f.path, f.line, f.rule, f.name, f.message): f for f in findings}     # the same finding once
+        self.findings = sorted(unique.values(), key=lambda f: (f.line, f.rule, f.name))
         super().__init__("\n".join(format_finding(f) for f in self.findings))
 
 
@@ -71,6 +73,13 @@ def _lower(program) -> tuple[str | None, list[Finding]]:
         line = int(m.group(1)) if m else program.bodies()[name].lineno if name in program.bodies() else 1
         found.append(finding(line, "aot/front-end", shown, f"the front end left `{shown}` uncompiled: {why}", shown))
     if found:
+        # The functions that did pass are still emitted, to report what the back end finds in them too: a
+        # program's findings are all reported at once, not one function's at a time. (A function that calls
+        # one of the rejected is rejected with it, so what is emitted here is closed.)
+        _, more = emit_mod.emit(proved, program)
+        entry_missing = [f for f in more if f.rule == "aot/entry"]
+        seen = {(f.line, f.rule, f.name) for f in found}
+        found += [f for f in more if f not in entry_missing and (f.line, f.rule, f.name) not in seen]
         return None, found
     return emit_mod.emit(proved, program)
 

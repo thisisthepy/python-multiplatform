@@ -290,7 +290,7 @@ the same way (it lists the same name and type as an entry global, and being clos
 rebound) or the call is a legal `redo`.
 
 AOT mode (`verify(module, aot=True)`, SPEC N-17, #451; agent proposal, not owner-confirmed). The
-standalone build of `typedpython.aot` has no interpreter to redo a call in. Two things differ, and
+standalone build of `typedpython.aot` has no interpreter to redo a call in. These things differ, and
 nothing else (with the flag off every rule above is exactly as it was):
 
   * the `Print` statement is defined (it is an unknown node otherwise): arguments are I64, F64, BOOL
@@ -299,7 +299,20 @@ nothing else (with the flag off every rule above is exactly as it was):
   * `verify/deopt-impure` is not raised. That rule keeps a deopting node out of an impure function
     because the redo in the interpreter would repeat the function's effects. With no interpreter
     there is no redo: an int operation not proved to stay inside 64 bits, or an operation the back
-    end cannot compute exactly, is the back end's own finding (`aot/int-unproven`, `aot/call`, ...).
+    end cannot compute exactly, is the back end's own finding (`aot/int-unproven`, `aot/call`, ...);
+  * the AOT-only nodes are defined (`ir.py` "AOT-only nodes"): `ReturnTuple`, `Unpack`, `ListDisplay`, `Cond`
+    (checked under the guard facts of its test, as the branches of an `If`), `ArgvInt`, `ArgvLen`, and the
+    `FString` argument of a `Print`;
+  * a list is a value where `array_value` allows one: the right-hand side of an assignment to a list local
+    (a list name or a call that returns a list; the creations go through `allocation`), a `Return` of a
+    list-returning function, an argument for a list parameter (a list name of the parameter's type). A
+    list local or parameter read anywhere else is still `verify/array-use` / `verify/array-escape`;
+  * lists are never copied in, so the rules that exist because of a copy-in are off: reading three or more
+    list parameters element by element (`verify/array-direct`), more than two array parameters, a list
+    holding user code open (`verify/array-open`), a lock wait inside a copy-in (`verify/array-wait`) and the
+    statement exits (an AOT build has no interpreter to leave for);
+  * a name assigned by an `Unpack` is not an interval-tracked local: its value is whatever the callee
+    returned.
 
 Every other rule is on in AOT mode, among them types, definite assignment, ownership, structure,
 `proven` re-proof (the interval proof is what makes an int operation acceptable to the AOT back end),
@@ -317,7 +330,7 @@ from .ir import (
     Local, MathCall, MathFunc, Module, NewArray, ObjToFloat, Or, Param, Return, StoreIndex, ToFloat,
     ToInt, Truth, Tuple, Type, Unbox, UnaryOp, UnaryOpKind, While,
 )
-from .ir import Print
+from .ir import ArgvInt, ArgvLen, Cond, FormatField, FString, ListDisplay, Print, ReturnTuple, Unpack
 from .ir import CheckExact, CheckMethod, ClassDecl, FieldGet, FieldSet, Is, IsExact, New
 from .ir import BuildString, Contains, ForObj, Format, GetItem, NewDict, NewList, StoreItem
 from .ir import ParInfo
@@ -374,8 +387,10 @@ _EXPRS = frozenset({Const, Local, BinOp, UnaryOp, Compare, And, Or, ToFloat, ToI
                     GetItem, Contains, NewList, NewDict, Format, BuildString})
 _STMTS = frozenset({Assign, StoreIndex, ExprStmt, If, While, ForRange, Return, Break, Continue,
                     FieldSet, StoreItem, ForObj})
-# The statements only the AOT mode (`verify(m, aot=True)`) accepts.
-_AOT_STMTS = frozenset({Print})
+# The statements and expressions only the AOT mode (`verify(m, aot=True)`) accepts. (An `FString` and its
+# `FormatField`s are checked by `s_Print`, which is the only place one may stand.)
+_AOT_STMTS = frozenset({Print, ReturnTuple, Unpack})
+_AOT_EXPRS = frozenset({ListDisplay, Cond, ArgvInt, ArgvLen})
 # Nodes whose OBJ result is a new reference (ir.py "ownership": Box, Global, GetAttr, CallObject,
 # OBJ BinOp, Tuple), plus reads of an OBJ local (the local owns its reference; the back end increfs or
 # borrows under that rule) and Calls of a compiled function returning OBJ (which returns a new
@@ -444,10 +459,14 @@ class _Checker:
                  aot: bool = False):
         self.fn = function
         self.aot = aot      # AOT mode (module docstring "AOT mode"); False: every rule as it always was
-        self.direct = ir.direct_lists(function)   # #255: lists read element by element
+        # AOT mode: a list is the caller's own array, never copied in, so no list is "read element by element"
+        self.direct = ir.direct_lists(function) and not aot   # #255: lists read element by element
         # #255 (d2): with an effect a node that fails to continue natively leaves through the
         # statement exit instead of deopting (checked after the walk, `_stmt_exit_problem`)
-        self.writer = ir.direct_writer(function)
+        self.writer = ir.direct_writer(function) and not aot
+        self.array_ok = False       # AOT mode: the next expression may be a list value (see `array_value`)
+        self.arr_here = False       # ... as read by the expression being checked
+        self.unpacking = False      # AOT mode: checking the call of an `Unpack`
         # Local intervals (module docstring "Local variables and guards"): `var_ivs` is the interval
         # of every eligible local; `fixing` says this walk is a round of the fixpoint that computes
         # them (a local without an interval yet is then "bottom": `bottom` is set when one is read).
@@ -526,7 +545,7 @@ class _Checker:
             if any(type(p) is ArrayParam and p.buffer is not None for p in fn.params):
                 self.error(ARRAY_DIRECT, "three or more list parameters are read element by element "
                                          "(#255); a buffer parameter beside them is not supported")
-        elif sum(type(p) is ArrayParam and p.buffer is None for p in fn.params) > 2:
+        elif not self.aot and sum(type(p) is ArrayParam and p.buffer is None for p in fn.params) > 2:
             self.error(STRUCTURE, "more than two array parameters: compiled code holds each list's "
                                   "critical section from copy-in to write-back, and free-threaded "
                                   "CPython has no section for more than two objects (#159)")
@@ -575,7 +594,7 @@ class _Checker:
                                  f"{self.scalars[name]}")
             else:
                 self.scalars[name] = t
-        if fn.returns not in _RETURN_TYPES:
+        if fn.returns not in _RETURN_TYPES and not (self.aot and fn.returns in (Type.F64_ARRAY, Type.I64_ARRAY)):
             self.error(TYPE, f"return type {fn.returns} is not a value type")
         for flag in ("pure", "may_deopt"):
             if not isinstance(getattr(fn, flag), bool):
@@ -708,7 +727,8 @@ class _Checker:
         assigned set at this point; `cond` says `e` is used only for its truth value (an If/While
         condition, or an And/Or operand in one)."""
         cls = type(e)
-        if cls not in _EXPRS:
+        self.arr_here, self.array_ok = self.array_ok, False
+        if cls not in _EXPRS and not (self.aot and cls in _AOT_EXPRS):
             self.error(UNKNOWN, f"expression node {cls.__name__} is not defined by ir")
             return e  # type: ignore[return-value]
         t = e.type
@@ -744,6 +764,15 @@ class _Checker:
 
     def e_Local(self, e: Local, state: _State) -> ir.Expr:
         name = e.name
+        if self.aot and self.arr_here and (name in self.arrays or name in self.larrays):
+            # AOT mode: a list name is a value where `array_value` allows one (the right-hand side of an
+            # assignment to a list local, a return value, an argument for a list parameter)
+            t = self.arrays.get(name) or self.larrays.get(name)
+            if e.type is not t:
+                self.error(TYPE, f"list '{name}' is {t.value} but read as {e.type.value}")
+            if name in self.larrays and state is not None and name not in state:
+                self.error(DA, f"local array '{name}' may be read before it is assigned")
+            return e
         if name in self.arrays:
             self.error(ARRAY_USE, f"array parameter '{name}' is used as a value (only Index, "
                                   f"StoreIndex and Len may use it)")
@@ -786,6 +815,9 @@ class _Checker:
             return _meet_interval(base, self.refine.get(e.name))
         if cls is Len:
             return self.lens.get(e.array, (0, _LEN_MAX))
+        if cls is Cond:          # AOT mode: either branch
+            a, b = self.interval(e.then), self.interval(e.orelse)
+            return (min(a[0], b[0]), max(a[1], b[1]))
         if cls is BinOp and e.op in _PROVABLE_OPS:
             lo, hi = _exact(e.op, self.interval(e.left), self.interval(e.right))
             return (max(lo, _I64_MIN), min(hi, _I64_MAX))
@@ -1084,9 +1116,31 @@ class _Checker:
             return ()
         return tuple(self.expr(a, state) for a in args)
 
+    def array_value(self, e: object, state: _State) -> ir.Expr:
+        """AOT mode: check `e` where a list value is allowed (the right-hand side of an assignment to a list
+        local, a return value, an argument for a list parameter): a list name or a `Call` that returns a
+        list. The creations (NewArray, CopyArray, ListDisplay) go through `allocation` instead."""
+        self.array_ok = True
+        out = self.expr(e, state)
+        self.array_ok = False
+        return out
+
     def e_Call(self, e: Call, state: _State) -> ir.Expr:
-        args = self.args(e.args, state, f"call of '{e.function}'")
+        here = self.arr_here
         callee = self.sigs.get(e.function)
+        if (self.aot and callee is not None and isinstance(e.args, tuple)
+                and len(e.args) == len(callee.params)):
+            # AOT mode: an argument for a list parameter is a list name (the caller's own list is passed)
+            args = tuple(self.array_value(a, state) if type(p) is ArrayParam else self.expr(a, state)
+                         for a, p in zip(e.args, callee.params))
+        else:
+            args = self.args(e.args, state, f"call of '{e.function}'")
+        if self.aot and callee is not None:
+            if callee.returns in ir.ARRAYS and not here:
+                self.error(ESCAPE, f"the list '{e.function}' returns is used as a value (a returned list may only be "
+                                   f"assigned to a list local or returned)")
+            if callee.returns is Type.OBJ and not self.unpacking:
+                self.error(TYPE, f"'{e.function}' returns a tuple, which only an Unpack may use")
         if callee is None:
             self.error(UNRESOLVED, f"call of '{e.function}', which is not a compiled function of "
                                    f"this module")
@@ -1102,7 +1156,10 @@ class _Checker:
                              f"{len(args)}")
         redo_ok = type(e.redo) is bool and e.redo and self.fn.pure is not True
         for k, (a, p) in enumerate(zip(args, callee.params)):
-            if type(p) is ArrayParam:
+            if type(p) is ArrayParam and self.aot:
+                if type(a) is not Local or a.type is not p.type:
+                    self.error(ARRAY_USE, f"argument {k + 1} of '{e.function}' must be a {p.type.value} list name")
+            elif type(p) is ArrayParam:
                 self.error(ARRAY_USE, f"'{e.function}' takes array parameter '{p.name}'; an array "
                                       f"cannot be passed by Call (the entry guard and write-back "
                                       f"belong to the Python-level call)")
@@ -1426,6 +1483,46 @@ class _Checker:
     def e_CopyArray(self, e: CopyArray, state: _State) -> ir.Expr:
         return self.stray(e, state)
 
+    def e_ListDisplay(self, e: ListDisplay, state: _State) -> ir.Expr:
+        return self.stray(e, state)
+
+    # --- AOT-only expressions (module docstring "AOT mode") --------------------------------------
+
+    def e_Cond(self, e: Cond, state: _State) -> ir.Expr:
+        """`then if cond else orelse`: scalars of the node's type. Each branch is checked under the guard
+        facts the test gives, as the branches of an `If` are."""
+        cond = self.expr(e.cond, state, cond=True)
+        self.slot(cond, Type.BOOL, "condition of a conditional expression")
+        entry, base = self.refine, self.facts
+        self.facts = {**base, **self.facts_if(cond, True)}
+        self.refine, dead = self.narrowed(cond, True)
+        self.dead += dead
+        then = self.expr(e.then, state)
+        self.dead -= dead
+        self.facts = {**base, **self.facts_if(cond, False)}
+        self.refine = entry
+        self.refine, dead = self.narrowed(cond, False)
+        self.dead += dead
+        orelse = self.expr(e.orelse, state)
+        self.dead -= dead
+        self.refine, self.facts = entry, base
+        if e.type not in ir.SCALARS:
+            self.error(TYPE, f"a conditional expression is a scalar, node says {getattr(e.type, 'value', e.type)}")
+        else:
+            self.slot(then, e.type, "the value of a conditional expression")
+            self.slot(orelse, e.type, "the else value of a conditional expression")
+        return dataclasses.replace(e, cond=cond, then=then, orelse=orelse)
+
+    def e_ArgvInt(self, e: ArgvInt, state: _State) -> ir.Expr:
+        index = self.expr(e.index, state)
+        self.slot(index, Type.I64, "index of sys.argv")
+        self.result(e, Type.I64)
+        return dataclasses.replace(e, index=index)
+
+    def e_ArgvLen(self, e: ArgvLen, state: _State) -> ir.Expr:
+        self.result(e, Type.I64)
+        return e
+
     def stray(self, e: NewArray | CopyArray, state: _State) -> ir.Expr:
         self.error(ESCAPE, f"{type(e).__name__} is only legal as the value of an Assign to a local "
                            f"array")
@@ -1443,6 +1540,15 @@ class _Checker:
             self.error(TYPE, f"{name} gives {e.type.value} but local array '{target}' is "
                              f"{want.value}")
         element = _ELEMENT.get(e.type)
+        if type(e) is ListDisplay:
+            if not (isinstance(e.elements, tuple) and e.elements):
+                self.error(STRUCTURE, "ListDisplay has no elements")
+                return e
+            elements = tuple(self.expr(x, state) for x in e.elements)
+            for k, x in enumerate(elements):
+                if element is not None:
+                    self.slot(x, element, f"element {k + 1} of ListDisplay")
+            return dataclasses.replace(e, elements=elements)
         if type(e) is CopyArray:
             src = self.arrays.get(e.src) or self.larrays.get(e.src)
             if not isinstance(e.src, str) or src is None:
@@ -1480,6 +1586,8 @@ class _Checker:
         """The interval of the length of the array `e` creates (the operands are checked)."""
         if type(e) is CopyArray:
             return self.lens.get(e.src, (0, _LEN_MAX))
+        if type(e) is ListDisplay:
+            return (len(e.elements), len(e.elements))
         if getattr(e.length, "type", None) is not Type.I64:
             return (0, _LEN_MAX)
         lo, hi = self.interval(e.length)
@@ -1506,7 +1614,7 @@ class _Checker:
 
     def s_Assign(self, s: Assign, state: _State):
         target = s.target
-        alloc = type(s.value) in (NewArray, CopyArray)
+        alloc = type(s.value) in (NewArray, CopyArray) or (self.aot and type(s.value) is ListDisplay)
         if alloc:
             if target in self.larrays:
                 value = self.allocation(s.value, target, state)
@@ -1516,11 +1624,23 @@ class _Checker:
                 value = self.allocation(s.value, target, state)
                 self.error(ESCAPE, f"{type(s.value).__name__} is assigned to '{target}', which is "
                                    f"not a local array")
+        elif self.aot and target in self.larrays:
+            # AOT mode: also another list's name (both names then mean the one list) or a call that
+            # returns a list
+            value = self.array_value(s.value, state)
+            if type(value) not in (Local, Call):
+                self.error(ESCAPE, f"local array '{target}' may be assigned a creation, a list name or a call, "
+                                   f"not {type(value).__name__}")
+            elif getattr(value, "type", None) is not self.larrays[target]:
+                self.error(TYPE, f"local array '{target}' is {self.larrays[target].value} but is assigned "
+                                 f"{getattr(getattr(value, 'type', None), 'value', '?')}")
         else:
             value = self.expr(s.value, state)
             if target in self.larrays:
                 self.error(TYPE, f"local array '{target}' may only be assigned NewArray or "
                                  f"CopyArray")
+            if self.aot and getattr(value, "type", None) in ir.ARRAYS:
+                self.error(TYPE, f"a list is assigned to '{target}', which is not a list local")
         if target in self.larrays:
             pass
         elif target in self.arrays:
@@ -1564,6 +1684,9 @@ class _Checker:
         return dataclasses.replace(s, index=idx, value=value, proven=proven), state
 
     def s_ExprStmt(self, s: ExprStmt, state: _State):
+        if self.aot and type(s.value) is Call:
+            # AOT mode: a call whose list result nobody binds (the back end releases it)
+            return dataclasses.replace(s, value=self.array_value(s.value, state)), state
         return dataclasses.replace(s, value=self.expr(s.value, state)), state
 
     def s_Print(self, s: Print, state: _State):
@@ -1576,6 +1699,9 @@ class _Checker:
             return s, state
         args = []
         for k, a in enumerate(s.args):
+            if type(a) is FString:
+                args.append(self.fstring(a, state))
+                continue
             a2 = self.expr(a, state)
             t = getattr(a2, "type", None)
             if t not in ir.SCALARS and t is not Type.OBJ:
@@ -1583,6 +1709,89 @@ class _Checker:
                                  f"f64, bool or obj")
             args.append(a2)
         return dataclasses.replace(s, args=tuple(args)), state
+
+    def fstring(self, f: FString, state: _State) -> ir.Expr:
+        """An f-string argument of Print (AOT mode): constant text and fields, each field an I64, F64 or BOOL
+        value (printed as `str` of it) or an F64 with a precision from 0 to 20 (`format(x, '.Nf')`)."""
+        if f.type is not Type.OBJ or not isinstance(f.parts, tuple):
+            self.error(STRUCTURE, "FString is an obj with a tuple of parts")
+            return f
+        parts = []
+        for k, part in enumerate(f.parts):
+            if type(part) is Const and part.type is Type.OBJ and _plain_str(part.value):
+                parts.append(part)
+            elif type(part) is FormatField and part.type is Type.OBJ:
+                value = self.expr(part.value, state)
+                t = getattr(value, "type", None)
+                p = part.precision
+                if t not in ir.SCALARS:
+                    self.error(TYPE, f"field {k + 1} of an f-string is {getattr(t, 'value', t)}, not an i64, f64 or bool")
+                elif p is not None:
+                    if type(p) is not int or isinstance(p, bool) or not 0 <= p <= 20:
+                        self.error(TYPE, f"field {k + 1} of an f-string has the precision {p!r}, not an int from 0 to 20")
+                    elif t is not Type.F64:
+                        self.error(TYPE, f"field {k + 1} of an f-string takes `.{p}f` but is {t.value}, not f64")
+                parts.append(dataclasses.replace(part, value=value))
+            else:
+                self.error(TYPE, f"part {k + 1} of an f-string is neither a str Const nor a FormatField")
+                parts.append(part)
+        return dataclasses.replace(f, parts=tuple(parts))
+
+    def s_ReturnTuple(self, s: ReturnTuple, state: _State):
+        """`return a, b` (AOT mode): scalars, in a function whose IR return type is OBJ; every ReturnTuple
+        of the function has the same element types."""
+        if not (isinstance(s.values, tuple) and s.values):
+            self.error(STRUCTURE, "ReturnTuple has no values")
+            return s, None
+        values = tuple(self.expr(v, state) for v in s.values)
+        for k, v in enumerate(values):
+            if getattr(v, "type", None) not in ir.SCALARS:
+                self.error(TYPE, f"value {k + 1} of ReturnTuple is {getattr(getattr(v, 'type', None), 'value', '?')}, "
+                                 "not an i64, f64 or bool")
+        if self.fn.returns is not Type.OBJ:
+            self.error(TYPE, f"ReturnTuple in a function returning {getattr(self.fn.returns, 'value', self.fn.returns)}")
+        first = ir.aot_tuple_kinds(self.fn)
+        if first is not None and first != tuple(getattr(v, "type", None) for v in values):
+            self.error(TYPE, "the ReturnTuples of a function return tuples of different element types")
+        return dataclasses.replace(s, values=values), None
+
+    def s_Unpack(self, s: Unpack, state: _State):
+        """`a, b = f(args)` (AOT mode): `f` returns a tuple of scalars; each target is a scalar local of
+        the element type."""
+        targets = s.targets
+        if not (isinstance(targets, tuple) and targets and all(isinstance(t, str) for t in targets)
+                and len(set(targets)) == len(targets)):
+            self.error(STRUCTURE, f"Unpack targets {targets!r} are not distinct names")
+            return s, state
+        if type(s.call) is not Call:
+            self.error(STRUCTURE, "Unpack of something that is not a Call")
+            return s, state
+        self.unpacking = True
+        call = self.expr(s.call, state)
+        self.unpacking = False
+        callee = self.sigs.get(s.call.function)
+        kinds = ir.aot_tuple_kinds(callee) if callee is not None else None
+        if kinds is None:
+            self.error(TYPE, f"Unpack of '{s.call.function}', which does not return a tuple")
+        elif len(kinds) != len(targets):
+            self.error(TYPE, f"Unpack of {len(targets)} names from the {len(kinds)} values of "
+                             f"'{s.call.function}'")
+        for k, t in enumerate(targets):
+            if t in self.arrays or t in self.larrays:
+                self.error(ARRAY_USE, f"Unpack target '{t}' is a list")
+            elif self.scalars.get(t) not in ir.SCALARS:
+                self.error(TYPE, f"Unpack target '{t}' is not a declared scalar local")
+            elif kinds is not None and k < len(kinds) and self.scalars[t] is not kinds[k]:
+                self.error(TYPE, f"Unpack target '{t}' is {self.scalars[t].value} but '{s.call.function}' returns "
+                                 f"{kinds[k].value} there")
+            if t in self.entry:
+                self.error(STRUCTURE, f"entry global '{t}' is assigned by an Unpack")
+            for loop in self.loops:
+                if loop.var == t:
+                    self.error(STRUCTURE, f"loop variable '{t}' is assigned in its loop body")
+            self.refine.pop(t, None)
+            self.facts.pop(t, None)
+        return dataclasses.replace(s, call=call), (None if state is None else state | set(targets))
 
     def cond(self, c: object, state: _State, what: str) -> ir.Expr:
         c2 = self.expr(c, state, cond=True)
@@ -1951,9 +2160,23 @@ class _Checker:
                 self.error(TYPE, f"return without a value in a function returning "
                                  f"{getattr(returns, 'value', returns)}")
             return s, None
+        if self.aot and returns in (Type.F64_ARRAY, Type.I64_ARRAY):
+            if type(s.value) in (NewArray, CopyArray, ListDisplay):
+                value = self.allocation(s.value, None, state)       # a fresh list, handed to the caller
+            else:
+                value = self.array_value(s.value, state)             # a list name or a call that returns one
+                if type(value) not in (Local, Call):
+                    self.error(ESCAPE, f"a list return value is a creation, a list name or a call, not "
+                                       f"{type(value).__name__}")
+            if getattr(value, "type", None) is not returns:
+                self.error(TYPE, f"returning {getattr(getattr(value, 'type', None), 'value', '?')} from a function "
+                                 f"returning {returns.value}")
+            return dataclasses.replace(s, value=value), None
         value = self.expr(s.value, state)
         if isinstance(returns, Type):
             self.slot(value, returns, "return value")
+        if self.aot and getattr(value, "type", None) in ir.ARRAYS:
+            self.error(TYPE, f"a list is returned from a function returning {getattr(returns, 'value', returns)}")
         return dataclasses.replace(s, value=value), None
 
     def _jump(self, s: Break | Continue, state: _State):
@@ -1975,10 +2198,12 @@ class _Checker:
         assigned: dict[str, list[object]] = {}
         _assigned_values(fn.body, assigned)
         loop_vars = _loop_vars(fn.body)
+        unpacked = {t for vs in assigned.values() for v in vs if type(v) is Unpack for t in v.targets
+                    if isinstance(v.targets, tuple)}
         self.eligible = frozenset(
             n for n in assigned
             if self.scalars.get(n) is Type.I64 and n not in params and n not in loop_vars
-            and n not in self.arrays and n not in self.larrays)
+            and n not in self.arrays and n not in self.larrays and n not in unpacked)
         self.new_only = self.new_only_locals(params)
         if self.larrays:
             counts: dict[str, int] = {}
@@ -2465,6 +2690,9 @@ def _assigned_values(body: object, out: dict[str, list[object]]) -> None:
             cls = type(st)
             if cls is Assign:
                 out.setdefault(st.target, []).append(st.value)
+            elif cls is Unpack:
+                for t in st.targets if isinstance(st.targets, tuple) else ():
+                    out.setdefault(t, []).append(st)    # AOT mode: not an expression, no interval of its own
             elif cls is If:
                 _assigned_values(st.then, out)
                 _assigned_values(st.orelse, out)
@@ -2499,6 +2727,8 @@ def _assigned_names(body: object) -> set[str]:
             cls = type(st)
             if cls is Assign:
                 out.add(st.target)
+            elif cls is Unpack:
+                out |= set(st.targets) if isinstance(st.targets, tuple) else set()
             elif cls is If:
                 out |= _assigned_names(st.then) | _assigned_names(st.orelse)
             elif cls is While:
@@ -2710,7 +2940,7 @@ def verify(module: Module, *, aot: bool = False) -> tuple[Module, list[Diagnosti
                     array_why[name] = f"calls '{bad[0]}', which can run user code ({array_why[bad[0]]})"
                     changed = True
     for name, g in sigs.items():
-        if name in array_why and any(isinstance(p, ArrayParam) for p in g.params):
+        if not aot and name in array_why and any(isinstance(p, ArrayParam) for p in g.params):
             reject(name, g.source_line, ARRAY_OPEN,
                    f"holds a list copy-in but can run user code: {array_why[name]}")
 
@@ -2731,7 +2961,7 @@ def verify(module: Module, *, aot: bool = False) -> tuple[Module, list[Diagnosti
                     wait_why[name] = f"{wait_why[bad[0]]}, in '{bad[0]}'"
                     changed = True
     for name, g in sigs.items():
-        if name in wait_why and not ir.direct_lists(g) and any(
+        if not aot and name in wait_why and not ir.direct_lists(g) and any(
                 isinstance(p, ArrayParam) and p.buffer is None for p in g.params):
             reject(name, g.source_line, ARRAY_WAIT,
                    f"holds its lists' critical section, and {wait_why[name]} can wait for another "
@@ -2762,7 +2992,7 @@ def verify(module: Module, *, aot: bool = False) -> tuple[Module, list[Diagnosti
                    f"(#414)")
 
     for name, g in checked.items():
-        if resume.needs_stmt_exits(g):
+        if not aot and resume.needs_stmt_exits(g):
             why = _stmt_exit_problem(g, sigs)
             if ir.direct_writer(g):
                 # #255 (d2): the same statement exits, for element reads and globals too
