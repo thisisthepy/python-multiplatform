@@ -370,6 +370,32 @@ produce.
 The first version has parallel loops only; `threading` is tier T (leader decision D7, not
 owner-confirmed).
 
+**Lists that may hold big ints (#465), the one shared container that exists today.** A library build
+(`TPA_THREADS`) lets any host thread hold the same list handle. For a raw `i64_list` or an `f64_list` a
+racing read and write yields the old or the new value, the same as a C array. For a big-capable
+`tpa_int_list` the element is a small int or a counted pointer to a big integer, and the two steps of a
+read (load the word, then retain it) and of a store (put the new word, release the old one, freeing it at
+zero) are not atomic as a pair: a reader could retain what a writer had just freed, and two writers
+could free the old element twice. CPython stays memory-safe under the same race, so AOT must too. The
+rule of this section (per-container locking for shared containers) is applied with one small lock inside
+each `tpa_int_list` (agent proposal, not owner-confirmed; the rule it serves is the per-container lock
+above and the leader's decision of 2026-11-16 that there is no library-wide lock):
+
+- Only under `TPA_THREADS`; the lock field exists only there, so an executable has the layout and the
+  code it had, and the code for raw and float lists is unchanged.
+- A spin lock on one flag (atomic exchange to take, atomic store of 0 to release, a CPU pause and, after
+  64 tries, a yield of the time slice where the platform has a portable one). It cannot deadlock: it is per
+  list, no operation holds two (a copy locks only its source), and the code between lock and unlock is
+  one load, one count increment or one word exchange, with no allocation, no free, no callback and no
+  other lock.
+- Element read: under the lock, load the word and retain it; unlock. Element store: take the new
+  reference first, under the lock exchange the slot's word, unlock, then release the OLD word (a release
+  may free memory, which is not done under the lock). `a[:]` of a big-capable list holds the source's lock
+  for its loop of loads and retains; the conversions from a raw list and `[v] * n`, `range` and displays
+  write a list no other thread can see yet and take none; the release at count zero has no other owner.
+- Result: a reader sees the old or the new element; nothing is freed twice or used after free. Which of
+  two writers to the same slot wins is still the caller's business.
+
 ## 8. The C-ABI library and the Kotlin call path
 
 Owner decision D5 (2026-11-16): besides the executable, an AOT build produces a C-ABI library that a
@@ -400,7 +426,7 @@ calling rules of AGENTS.md 16.
 | `int` held as a big-integer-capable value inside the function (#462) | A parameter arrives as `int64_t` and is converted where the compiled function holds it so. A result (also an element of a tuple) is converted back with a fit check: one that does not fit `int64_t` fails the call with -1 and the error record `OverflowError`, message "the int result of `<function>` does not fit in 64 bits", and no out value is written. The same call with smaller inputs succeeds | `Long`; the failed call throws `TypedPythonAotException` as for any other error |
 | `str` | pointer and length of UTF-8 bytes; an argument is borrowed for the call, a result is owned by the caller and released with `<prefix>_free` | `String`, copied at the boundary |
 | `list[float]` / `list[int]`, as an argument and as a result | an opaque counted handle (`<prefix>_f64_list`, `<prefix>_i64_list`) made and read through exported list functions (`_new`, `_len`, `_data`, `_retain`, `_release`); an argument is borrowed for the call, a returned handle is owned by the caller | a class holding the handle, with `DoubleArray` / `LongArray` copied from or to the `_data` address as the app needs |
-| a `list[int]` that the classification finds big-capable (#465), as an argument and as a result | the opaque counted handle `<prefix>_int_list`, with `_new` (n zeros), `_len`, `_retain`, `_release` as above and, because its elements are not `int64_t` in memory, `_get(l, i, &v)` and `_set(l, i, v)` instead of `_data`; both return 0 or -1 with the error record: an index out of range (a negative one counts from the end) is the source language's `IndexError` with its two messages, and `_get` of an element that does not fit `int64_t` fails with an `OverflowError` whose fixed message is "the element of the list does not fit in 64 bits" (nothing is written; after a `_set` of a smaller value the same element reads). Which kind a signature has follows from the classification: a list that crosses the boundary is one group with the outside, so the caller can only pass a handle of the kind the signature names | a class holding the handle with `get(i)` / `set(i, v)` (the generator's matching class is the next step) |
+| a `list[int]` that the classification finds big-capable (#465), as an argument and as a result | the opaque counted handle `<prefix>_int_list`, with `_new` (n zeros), `_len`, `_retain`, `_release` as above and, because its elements are not `int64_t` in memory, `_get(l, i, &v)` and `_set(l, i, v)` instead of `_data`; both return 0 or -1 with the error record: an index out of range (a negative one counts from the end) is the source language's `IndexError` with its two messages, and `_get` of an element that does not fit `int64_t` fails with an `OverflowError` whose fixed message is "the element of the list does not fit in 64 bits" (nothing is written; after a `_set` of a smaller value the same element reads). Which kind a signature has follows from the classification: a list that crosses the boundary is one group with the outside, so the caller can only pass a handle of the kind the signature names, and a change in a helper that several exports share can change another export's list kind, so a header is regenerated and its callers rebuilt together. The two handle kinds are not interchangeable (a wrong one is memory corruption; only the C types prevent it). `_get` and `_set` take the list's own lock (section 7) | a class holding the handle with `get(i)` / `set(i, v)` (the generator's matching class is the next step) |
 | an instance of a compiled class, or any other container | an opaque handle (a counted reference) with `<prefix>_release(handle)` | a Kotlin class holding the handle, released deterministically (`close`) with a cleaner as a safety net |
 | `None` result | `void` | `Unit` |
 
@@ -427,9 +453,13 @@ called from any Kotlin thread and from several at once, so exported functions ar
 record behind `<prefix>_last_error` is thread-local. List counts are atomic in a library build (and stay
 non-atomic in an executable build). Module-level mutable state is refused for a library (`aot/library-state`):
 tier K has none, since module constants are folded at compile time and a function that assigns a
-module-level name makes a local. Concurrent writes to the elements of one list from several threads are the
-caller's responsibility, exactly as with a Kotlin array, and the generated header says so. This replaces the
-earlier proposal of one library lock around each exported call.
+module-level name makes a local. Concurrent reads and writes of the elements of one list from several threads are
+memory-safe for every list kind (agent proposal, not owner-confirmed; the correction of #465): for `i64_list` and
+`f64_list` they are what a C or Kotlin array gives, a racing read sees the old or the new value; for `int_list` the
+library takes a small per-list lock inside the list for each element access (section 7), because a big element is a
+counted object that a racing write could free under a reader. Which of two writers to the same element wins is the
+caller's business for every kind, and the generated header says so. This replaces the earlier proposal of one library
+lock around each exported call and the earlier text that left every element race to the caller.
 
 ### 8.3 Kotlin calling Python (the downcall)
 

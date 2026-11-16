@@ -36,6 +36,7 @@ import importlib.util
 import io
 import json
 import os
+import random
 import re
 import shutil
 import struct
@@ -1471,6 +1472,104 @@ def test_a_null_int_list_handle_is_a_type_error_not_a_crash(biglib):
     assert lib.raw("store_product", None, 0, 1, 1)[0] == -1
     status, outs = lib.raw("copy_with", None, 1)
     assert status == -1 and outs == [None], "a list out handle is NULL on failure"
+
+
+def test_several_threads_share_one_int_list_and_the_race_is_memory_safe(biglib):
+    """Issue #465 (the lock inside the list is an agent proposal, not owner-confirmed; design note section 7). Writers
+    store small values (`set`) and a big one (`store_product`, 2**40 * 2**40) into slot 0 of the SAME handle while
+    readers call `get` and the compiled `diff` (slot 0 minus slot 1; slot 1 is never written, so it is 0). Every
+    observed value must be one a writer stored (or 0 from the start), or the documented overflow error of the call. A
+    reader that retained an object the writer had just freed (or two writers freeing the same old element) would
+    crash or leave the live counter of big objects away from 0 once everything is released. Fixed seeds."""
+    lib = biglib.lib
+    h = lib.new_int_list([0, 0, 0])
+    stored = {0, 1, 2, 3, 4}
+    diff_error = ("OverflowError", "the int result of `diff` does not fit in 64 bits")
+    writes_each, writers_done = 12000, threading.Barrier(2 + 3, timeout=120)
+    problems, stop = [], threading.Event()
+    seen = {"value": 0, "overflow": 0}
+
+    def writer(seed):
+        try:
+            rng = random.Random(seed)
+            writers_done.wait()
+            for _ in range(writes_each):
+                if rng.random() < 0.5:
+                    assert lib.il.set(h, 0, rng.randint(1, 4)) == 0
+                else:
+                    assert lib.raw("store_product", h, 0, 2**40, 2**40) == (0, [])
+        except BaseException as e:          # reported below, in the test's own thread
+            problems.append(f"writer {seed}: {e!r}")
+
+    def reader(seed):
+        try:
+            rng = random.Random(seed)
+            writers_done.wait()
+            while not stop.is_set():
+                if rng.random() < 0.5:
+                    status, v = lib.get(h, 0)
+                    if status == 0:
+                        assert v in stored, f"get read {v}, which no writer stored"
+                        seen["value"] += 1
+                    else:
+                        assert (status, v) == (-1, -12345) and lib.error() == ELEMENT_OVERFLOW, (status, v, lib.error())
+                        seen["overflow"] += 1
+                else:
+                    status, [v] = lib.raw("diff", h, 0, 1)
+                    if status == 0:
+                        assert v in stored, f"diff read {v}, which no writer stored"
+                    else:
+                        assert lib.error() == diff_error, lib.error()
+        except BaseException as e:
+            problems.append(f"reader {seed}: {e!r}")
+
+    writers = [threading.Thread(target=writer, args=(1000 + k,)) for k in range(2)]
+    readers = [threading.Thread(target=reader, args=(2000 + k,)) for k in range(3)]
+    for t in writers + readers:
+        t.start()
+    for t in writers:
+        t.join(timeout=120)
+    stop.set()
+    for t in readers:
+        t.join(timeout=120)
+    assert not any(t.is_alive() for t in writers + readers), "a thread did not finish"
+    assert problems == [], problems
+    assert seen["value"] > 0, "no read ever saw a small value, so the test proves nothing"
+    assert lib.il.set(h, 0, 0) == 0                                    # the last big element is given back by the store
+    lib.il.release(h)
+    balanced(biglib)
+
+
+def test_the_big_list_elements_are_read_and_written_only_through_the_locking_helpers(biglib):
+    """Text only: the generated C of a library with a big-capable list reads and stores elements through
+    `tpa_int_list_load` / `tpa_int_list_store` and never touches `->d[` of that kind itself; the exported `_get` and `_set`
+    go through the runtime's `_get_i64` / `_set_i64`, which use them; and the runtime header selects the plain versions
+    when TPA_THREADS is not defined (an executable) and the locking ones when it is (every library)."""
+    c = biglib.c
+    assert "tpa_int_list_load(" in c and "tpa_int_list_store(" in c
+    bodies = re.findall(r"^(?:static|TPA_EXPORT)[^\n]*\)\n\{.*?^\}", c, flags=re.S | re.M)
+    checked = 0
+    for body in bodies:                      # per function: a name such as `v_w` is a raw list in one and a big one in another
+        for name in set(re.findall(r"tpa_int_list \*(\w+)", body)):
+            checked += 1
+            assert not re.search(rf"\b{name}->d\[", body), f"direct element access of the big-capable list {name}:\n{body}"
+    assert checked >= 5, "the library has big-capable lists"
+    assert "tpa_int_list_get_i64(l, i, out)" in c and "tpa_int_list_set_i64(l, i, v)" in c
+    runtime = (Path(aot.__file__).parent.parent / "runtime" / "tp_aot_int.h").read_text(encoding="utf-8")
+    load = runtime[runtime.index("static inline void tpa_int_list_load("):]
+    load = load[:load.index("\n}\n")]
+    assert "#if defined(TPA_THREADS)" in load and "tpa_int_list__lock(l);" in load and "#else\n    tpa_int_set(out, l->d[slot]);" in load
+    store = runtime[runtime.index("static inline void tpa_int_list_store("):]
+    store = store[:store.index("\n}\n")]
+    assert store.index("tpa_int_list__lock(l);") < store.index("tpa_int_list__unlock(l);") < store.index("tpa_int_release(old);")
+    assert store.index("tpa_int_retain(v);") < store.index("tpa_int_list__lock(l);"), "the new reference is taken before the lock"
+    assert "#else\n    tpa_int_set(&l->d[slot], v);" in store
+    layout = runtime[runtime.index("typedef struct tpa_int_list {"):]
+    layout = layout[:layout.index("} tpa_int_list;")]
+    assert "#if defined(TPA_THREADS)\n    tpa_int_list_lock_t lock;" in layout, "the lock field exists only with TPA_THREADS"
+    assert "memory-safe for every list kind" in biglib.header
+    assert "as with a C or Kotlin array" not in biglib.header
+    assert chr(0x2014) not in runtime
 
 
 def test_every_big_integer_of_the_big_list_tests_was_given_back(biglib):

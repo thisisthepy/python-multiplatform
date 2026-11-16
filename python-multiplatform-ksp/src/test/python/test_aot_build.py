@@ -1502,7 +1502,8 @@ def test_a_program_with_a_big_capable_list_uses_the_big_list_runtime_and_one_wit
     c = bigint.c_file.read_text()
     for call in BIG_LIST_CALLS[:-1]:
         assert call in c, call
-    assert "tpa_int_list_retain(" in c and "tpa_int_set(&v_" in c and "->d[" in c
+    assert "tpa_int_list_retain(" in c and "tpa_int_set(&v_" in c and "tpa_int_list_load(" in c
+    assert "tpa_int_list_store(" in c and "tpa_int_list_init(" in c, "element access of a big-capable list uses the helpers"
     for other in (merged.c_file.read_text(), nbody_variant_generated[1], generate_benchmark("spectral_norm.py"),
                   generate_benchmark("nbody.py")):
         assert "tpa_int_list" not in other
@@ -1535,7 +1536,7 @@ def test_a_big_capable_list_is_created_stored_read_and_released_at_the_cleanup_p
         """))
     [body] = re.findall(r"^static int tpf_f\([^)]*\)\n\{.*?^\}", c, flags=re.S | re.M)
     assert "tpa_int_list *v_a" in body
-    assert "tpa_int_list_fill(" in body and body.count("tpa_int_set(&v_a->d[") == 1
+    assert "tpa_int_list_fill(" in body and body.count("tpa_int_list_store(v_a, ") == 1 and "v_a->d[" not in body
     assert "tpa_slot(" in body                                    # the bounds checks are the raw list's
     assert body.count("tp_cleanup:") == 1 and "return -1" not in body
     cleanup = body[body.index("tp_cleanup:"):]
@@ -2324,7 +2325,8 @@ def test_fannkuch_generates_with_no_finding_and_only_count_is_a_big_capable_list
     assert "tpa_int_list *v_count" in body and "tpa_int_list_fill(" in body and "tpa_int_list_release(v_count)" in body
     assert "tpa_i64_list *v_perm1" in body and "tpa_i64_list *v_perm " in body
     assert "tpa_i64_iota(" in body and "tpa_i64_copy(" in body
-    assert "tpa_int_set(&v_count->d[" in body                      # an element store takes the new reference
+    assert "tpa_int_list_store(v_count, " in body                  # an element store takes the new reference
+    assert "tpa_int_list_load(v_count, " in body and "v_count->d[" not in body   # and every access is a locking helper
     assert "v_perm1->d[" in body and "tpa_int_set(&v_perm" not in body
     assert body.count("tp_cleanup:") == 1
 

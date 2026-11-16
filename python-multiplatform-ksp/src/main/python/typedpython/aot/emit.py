@@ -745,18 +745,20 @@ class _Fn:
         return out
 
     def index_big(self, e: ir.Index, arr: str, idx: str) -> str:
-        """`a[i]` of a big-capable list: the element is a new reference, held by a TAGGED slot."""
+        """`a[i]` of a big-capable list: the element is a new reference, held by a TAGGED slot. The read goes through
+        `tpa_int_list_load` (tp_aot_int.h), which takes the list's lock in a library build (agent proposal, not
+        owner-confirmed; design note section 7)."""
         out = self.tslot()
         if self.rep(e.index) == TAGGED:
             slot = self.tmp("int64_t")
             self.emit(f"if (tpa_slot_int({arr}->len, {idx}, 0, &{slot})) {self.fail()}")
-            self.emit(f"tpa_int_set(&{out}, {arr}->d[{slot}]);")
+            self.emit(f"tpa_int_list_load({arr}, {slot}, &{out});")
         elif e.proven and self.trusted(e):
-            self.emit(f"tpa_int_set(&{out}, {arr}->d[{idx}]);")
+            self.emit(f"tpa_int_list_load({arr}, {idx}, &{out});")
         else:
             slot = self.tmp("int64_t")
             self.emit(f"if (tpa_slot({arr}->len, {idx}, 0, &{slot})) {self.fail()}")
-            self.emit(f"tpa_int_set(&{out}, {arr}->d[{slot}]);")
+            self.emit(f"tpa_int_list_load({arr}, {slot}, &{out});")
         return out
 
     def ev_NewArray(self, e: ir.NewArray) -> str:
@@ -827,7 +829,7 @@ class _Fn:
         t = self.list_tmp(kind)
         self.emit(f"if ({lfn(kind, 'alloc')}({len(vals)}, &{t})) {self.fail()}")
         for i, v in enumerate(vals):
-            self.emit(f"tpa_int_set(&{t}->d[{i}], {v});" if kind == "int" else f"{t}->d[{i}] = {v};")
+            self.emit(f"tpa_int_list_init({t}, {i}, {v});" if kind == "int" else f"{t}->d[{i}] = {v};")
         return t
 
     def call_args(self, callee: ir.Function, e: ir.Call) -> list[str] | None:
@@ -991,8 +993,9 @@ class _Fn:
             return
 
         def put(at: str) -> None:
-            # a big-capable list takes a new reference to the element and gives up the one it held
-            self.emit(f"tpa_int_set(&{arr}->d[{at}], {val});" if big else f"{arr}->d[{at}] = {val};")
+            # a big-capable list takes a new reference to the element and gives up the one it held (under the list's
+            # lock in a library build, `tpa_int_list_store`)
+            self.emit(f"tpa_int_list_store({arr}, {at}, {val});" if big else f"{arr}->d[{at}] = {val};")
         if self.rep(s.index) == TAGGED:
             slot = self.tmp("int64_t")
             self.emit(f"if (tpa_slot_int({arr}->len, {idx}, 1, &{slot})) {self.fail()}")

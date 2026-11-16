@@ -679,10 +679,12 @@ _HEADER_TOP = """\
  * Threads
  *   There is no library-wide lock. Exported functions are reentrant and may run on several threads at once;
  *   the error record is per thread; list counts (retain, release, and the retains the library does) are
- *   atomic, so a handle may be shared and released from several threads. Writes to the same list's elements
- *   from several threads are the caller's responsibility, exactly as with a C or Kotlin array: the library
- *   itself writes only the lists a function stores into, and only those it was given or made. The library
- *   holds no module-level state.
+ *   atomic, so a handle may be shared and released from several threads. Reading and writing the elements of
+ *   one list from several threads is memory-safe for every list kind. For {name}_i64_list and {name}_f64_list
+ *   (through _data, or inside the library) it is what a C array gives: a racing read sees the old or the new
+ *   value, and two writers to one element leave one of the two values. Which of two writers to the same
+ *   element wins is the caller's business, for every kind. The library itself writes only the lists a function
+ *   stores into, and only those it was given or made. The library holds no module-level state.
  *   A function that prints writes to the process's standard output through the C runtime's stdio. Output
  *   of several threads may interleave per call (stdio locks each call); the buffering is the C runtime's.
  *
@@ -721,6 +723,15 @@ _HEADER_INT_LIST = """\
  *   and has no counterpart in the source language. {name}_int_list_new(n) makes n zeros (an empty list for n < 0)
  *   and, like the other _new functions, clears the error record; a NULL handle passed to _get or _set is a
  *   TypeError as for an exported function. _len, _retain and _release are as for the other lists.
+ *   Which kind a list has in a signature follows from the whole program, not from the function alone: a change in a
+ *   helper that several exports share can change another export's parameter or result from {name}_i64_list to
+ *   {name}_int_list (or back), so regenerate the header and rebuild the callers together. The two handle kinds are
+ *   not interchangeable: passing an i64 handle where an int handle is expected (or the reverse) corrupts memory, and
+ *   only the C types, which differ, prevent it. Threads: _get and _set (and the compiled functions) take the list's
+ *   own lock for each element access (a small lock inside the list, one per list, held only for a load or a swap of
+ *   one element and never while anything is allocated or freed), so concurrent reads and writes of the elements are
+ *   memory-safe: a reader sees the old or the new element, and nothing is freed twice or used after being freed. Which
+ *   of two writers to the same element wins is the caller's business.
 """
 
 

@@ -429,6 +429,62 @@ class AotLibraryCallTest {
         }
     }
 
+    /**
+     * One IntList shared by a writer thread and a reader thread (issue #465; the lock inside the list is an agent
+     * proposal, not owner-confirmed; design note section 7). The writer alternates `fill_factorials`, which stores 1! to
+     * 25! (21! and beyond are big objects), with `set` of small values into the slots 20 to 24. Without the lock inside
+     * the list a read of a slot that is being overwritten could use a freed big object. Only memory-safe outcomes are
+     * asserted: a slot below 20 always reads its factorial (every writer stores that same value there), a slot from 20
+     * on reads 0 (the start), a small value some writer stored, or the documented overflow error; and the list closes.
+     */
+    @Test
+    fun oneIntListWrittenByOneThreadAndReadByAnotherStaysMemorySafe() {
+        val expected = factorials(20)
+        fun allowed(i: Int, v: Long) = if (i < 20) v == expected[i] else v == 0L || v == 1000L + i
+        IntList(25).use { l ->
+            val pool = Executors.newFixedThreadPool(2)
+            val start = CountDownLatch(1)
+            val stop = java.util.concurrent.atomic.AtomicBoolean(false)
+            try {
+                val writer = pool.submit<Int> {
+                    start.await()
+                    var rounds = 0
+                    while (rounds < 3000) {
+                        Bigints.fill_factorials(l)
+                        for (i in 20..24) l[i] = 1000L + i
+                        rounds++
+                    }
+                    stop.set(true)
+                    rounds
+                }
+                val reader = pool.submit<Int> {
+                    start.await()
+                    var reads = 0
+                    while (!stop.get()) {
+                        for (i in 0 until 25) {
+                            try {
+                                val v = l[i]
+                                assertTrue(allowed(i, v), "l[$i] read $v, which no writer stored")
+                            } catch (e: BigsException) {
+                                assertTrue(i >= 20, "l[$i] raised ${e.className}, but only a big slot may")
+                                assertOverflowElement(e)
+                            }
+                            reads++
+                        }
+                    }
+                    reads
+                }
+                start.countDown()
+                assertEquals(3000, writer.get(120, TimeUnit.SECONDS))
+                assertTrue(reader.get(120, TimeUnit.SECONDS) > 0)
+            } finally {
+                stop.set(true)
+                pool.shutdownNow()
+            }
+            for (i in 0 until 20) assertEquals(expected[i], l[i])
+        }
+    }
+
     // --- no CPython ----------------------------------------------------------------------------------------
 
     @Test

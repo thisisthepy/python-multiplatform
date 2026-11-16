@@ -2107,15 +2107,150 @@ static TPA_UNUSED int tpa_argv_int(int64_t i, tpa_int *out)
  *                                           needs nothing); a failed creation leaves nothing allocated
  *   retain / release                        as for the other lists; the release that frees the list releases every
  *                                           element first
- *   element read (generated code)           `tpa_int_set(&slot, l->d[i])`: a new reference into the caller's slot
- *   element store (generated code)          `tpa_int_set(&l->d[i], v)`: the new reference is taken, then the old one
+ *   element read (generated code)           `tpa_int_list_load`: a new reference into the caller's slot
+ *   element store (generated code)          `tpa_int_list_store`: the new reference is taken, then the old one
  *                                           released (the order keeps `v` being the old element safe)
  * A fresh element is the small int 0 (`TPA_INT_ZERO`), never a null word, so releasing a list that is half built
- * releases nothing dangling. Under TPA_THREADS the list count is atomic (the macros of tp_aot.h) and the elements are
- * immutable values with atomic counts; writes to the same list's elements from several threads are the caller's
- * responsibility, as for every list.
+ * releases nothing dangling.
+ *
+ * Threads (agent proposal, not owner-confirmed; the rule it serves is design note section 7, per-container locking for
+ * shared containers, and the leader's decision of 2026-11-16 that there is no library-wide lock). Under TPA_THREADS
+ * the list count is atomic (the macros of tp_aot.h) and the elements are immutable values with atomic counts, but
+ * the SLOT of an element is read ("load the word, then retain it") and written ("put the new word, release the old
+ * one") by several steps, and a reader that retains an object a writer has just freed, or two writers that release the
+ * same old element, corrupt memory. So under TPA_THREADS each big-capable list carries a small lock and every access
+ * to its elements goes through the helpers below; generated code never touches `l->d[i]` of this kind itself:
+ *   tpa_int_list_load(l, slot, &out)    under the lock: load the word and retain it; then unlock; `out` takes the new
+ *                                       reference and gives up the one it held (as `tpa_int_set` does)
+ *   tpa_int_list_store(l, slot, v)      the new reference to `v` is taken before the lock; under the lock the slot's
+ *                                       word is exchanged; the OLD word is released after the unlock (a release may
+ *                                       free memory, which is not done under the lock)
+ *   tpa_int_list_init(l, slot, v)       for a list that no other thread can see yet (a display being built): plain
+ * The result of a race is well defined: a reader sees the old or the new element, nothing is freed twice or used
+ * after free. Two writers to the same slot still race on which value wins; that is the caller's business.
+ * The lock (`tpa_int_list__lock`) is a spin lock on one flag in the list: an atomic exchange to acquire (acquire
+ * order), an atomic store of 0 to release (release order); a waiting thread pauses the CPU, and after 64 failed tries
+ * yields its time slice where the platform has a portable yield (not on Windows, where it only pauses). It cannot
+ * deadlock: the lock is per list; no operation holds two (a copy locks only its source); and the code between lock and
+ * unlock is a load, a count increment, or an exchange of one word, with no call that can block, wait for another
+ * thread or take a lock again (no allocation, no free, no callback, no error record). Every holder therefore leaves
+ * the critical section in a bounded number of steps and the waiter always gets in. The lock field is in the struct only
+ * under TPA_THREADS, so an executable build (no threads) has the layout and the code it had: the helpers are the plain
+ * statements.
  * ------------------------------------------------------------------------------------------ */
-typedef struct tpa_int_list { tpa_rc_t rc; int64_t len; tpa_int d[]; } tpa_int_list;
+#if defined(TPA_THREADS)
+#if defined(_MSC_VER) && !defined(__clang__)
+typedef volatile long tpa_int_list_lock_t;
+#define TPA_INT_LIST__LOCK_TRY(f) (_InterlockedExchange((f), 1) == 0)
+#define TPA_INT_LIST__LOCK_CLEAR(f) ((void)_InterlockedExchange((f), 0))
+#if defined(_M_ARM64)
+#define TPA_INT_LIST__RELAX() __yield()
+#else
+#define TPA_INT_LIST__RELAX() _mm_pause()
+#endif
+#else
+typedef _Atomic int tpa_int_list_lock_t;
+#define TPA_INT_LIST__LOCK_TRY(f) (atomic_exchange_explicit((f), 1, memory_order_acquire) == 0)
+#define TPA_INT_LIST__LOCK_CLEAR(f) atomic_store_explicit((f), 0, memory_order_release)
+#if defined(__x86_64__) || defined(__i386__)
+#define TPA_INT_LIST__RELAX() __builtin_ia32_pause()
+#elif defined(__aarch64__)
+#define TPA_INT_LIST__RELAX() __asm__ volatile("yield" ::: "memory")
+#else
+#define TPA_INT_LIST__RELAX() ((void)0)
+#endif
+#endif
+#if !defined(_WIN32)
+#include <sched.h>
+#define TPA_INT_LIST__YIELD() ((void)sched_yield())
+#else
+#define TPA_INT_LIST__YIELD() ((void)0)
+#endif
+#endif
+
+typedef struct tpa_int_list {
+    tpa_rc_t rc;
+    int64_t len;
+#if defined(TPA_THREADS)
+    tpa_int_list_lock_t lock;               /* 0 free, 1 held; see the Threads paragraph above */
+#endif
+    tpa_int d[];
+} tpa_int_list;
+
+#if defined(TPA_THREADS)
+static inline void tpa_int_list__lock(const tpa_int_list *l)
+{
+    tpa_int_list_lock_t *f = &((tpa_int_list *)l)->lock;      /* the lock is not part of the list's value */
+    unsigned spins = 0;
+    while (!TPA_INT_LIST__LOCK_TRY(f)) {
+        TPA_INT_LIST__RELAX();
+        if (++spins >= 64u) {
+            TPA_INT_LIST__YIELD();
+            spins = 0;
+        }
+    }
+}
+
+static inline void tpa_int_list__unlock(const tpa_int_list *l)
+{
+    TPA_INT_LIST__LOCK_CLEAR(&((tpa_int_list *)l)->lock);
+}
+#endif
+
+/* The element of `slot` (already range checked) as a new reference in `*out`; `*out` gives up the one it held. */
+static inline void tpa_int_list_load(const tpa_int_list *l, int64_t slot, tpa_int *out)
+{
+#if defined(TPA_THREADS)
+    tpa_int w;
+    tpa_int_list__lock(l);
+    w = l->d[slot];
+    tpa_int_retain(w);
+    tpa_int_list__unlock(l);
+    tpa_int_release(*out);
+    *out = w;
+#else
+    tpa_int_set(out, l->d[slot]);
+#endif
+}
+
+/* `l[slot] = v` (already range checked) for a `v` the caller owns a reference to and keeps: the list takes a new one
+ * and gives up the one the slot held. */
+static inline void tpa_int_list_store(tpa_int_list *l, int64_t slot, tpa_int v)
+{
+#if defined(TPA_THREADS)
+    tpa_int old;
+    tpa_int_retain(v);
+    tpa_int_list__lock(l);
+    old = l->d[slot];
+    l->d[slot] = v;
+    tpa_int_list__unlock(l);
+    tpa_int_release(old);
+#else
+    tpa_int_set(&l->d[slot], v);
+#endif
+}
+
+/* The same for a `v` whose reference the caller hands over (no retain: the list owns it from here). */
+static inline void tpa_int_list__store_owned(tpa_int_list *l, int64_t slot, tpa_int v)
+{
+#if defined(TPA_THREADS)
+    tpa_int old;
+    tpa_int_list__lock(l);
+    old = l->d[slot];
+    l->d[slot] = v;
+    tpa_int_list__unlock(l);
+    tpa_int_release(old);
+#else
+    tpa_int_release(l->d[slot]);
+    l->d[slot] = v;
+#endif
+}
+
+/* An element of a list no other thread can see yet (a display being built): the list takes a new reference to `v`. */
+static inline void tpa_int_list_init(tpa_int_list *l, int64_t slot, tpa_int v)
+{
+    tpa_int_set(&l->d[slot], v);
+}
 
 static inline void tpa_int_list_retain(tpa_int_list *l)
 {
@@ -2145,6 +2280,9 @@ static inline int tpa_int_list_alloc(int64_t n, tpa_int_list **out)
     }
     l->rc = 1;
     l->len = len;
+#if defined(TPA_THREADS)
+    l->lock = 0;
+#endif
     for (i = 0; i < len; i++) {
         l->d[i] = TPA_INT_ZERO;
     }
@@ -2166,17 +2304,25 @@ static inline int tpa_int_list_fill(int64_t n, tpa_int v, tpa_int_list **out)
     return 0;
 }
 
-/* `a[:]` of a big-capable list: every element retained. */
+/* `a[:]` of a big-capable list: every element retained. The new list is private to this call; the source may be
+ * written by another thread, so its lock is held for the loop (only loads and count increments: the length never
+ * changes, so the allocation above needs none). */
 static inline int tpa_int_list_copy(const tpa_int_list *src, tpa_int_list **out)
 {
     int64_t i;
     if (tpa_int_list_alloc(src->len, out)) {
         return -1;
     }
+#if defined(TPA_THREADS)
+    tpa_int_list__lock(src);
+#endif
     for (i = 0; i < src->len; i++) {
         tpa_int_retain(src->d[i]);
         (*out)->d[i] = src->d[i];
     }
+#if defined(TPA_THREADS)
+    tpa_int_list__unlock(src);
+#endif
     return 0;
 }
 
@@ -2223,10 +2369,15 @@ static inline int tpa_int_list_iota(int64_t n, tpa_int_list **out)
 static inline int tpa_int_list_get_i64(const tpa_int_list *l, int64_t i, int64_t *out)
 {
     int64_t k, v;
+    tpa_int w = TPA_INT_ZERO;
+    int rc;
     if (tpa_slot(l->len, i, 0, &k) != 0) {
         return -1;
     }
-    if (tpa_int_to_i64(l->d[k], &v) != 0) {
+    tpa_int_list_load(l, k, &w);                    /* a reference of our own: a writer may replace the slot at once */
+    rc = tpa_int_to_i64(w, &v);
+    tpa_int_release(w);
+    if (rc != 0) {
         return tpa_raise(TPA_OverflowError, TPA_MSG_LIST_ELEMENT_RANGE);
     }
     *out = v;
@@ -2245,8 +2396,7 @@ static inline int tpa_int_list_set_i64(tpa_int_list *l, int64_t i, int64_t v)
     if (tpa_int_from_i64(v, &nv) != 0) {
         return -1;
     }
-    tpa_int_release(l->d[k]);
-    l->d[k] = nv;
+    tpa_int_list__store_owned(l, k, nv);            /* the list owns the fresh `nv`; the old word is released after the unlock */
     return 0;
 }
 
