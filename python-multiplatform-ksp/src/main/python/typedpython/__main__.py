@@ -44,8 +44,16 @@ def main(argv: list[str]) -> int:
     emit.add_argument("--cache", type=Path, default=Path("build/typedpython-c-cache"),
                       help="source -> C cache directory (default: build/typedpython-c-cache)")
     emit.add_argument("--manifest", type=Path, required=True, help="the JSON manifest to write")
+    aot = commands.add_parser(
+        "aot-check", help="report what an AOT build would refuse in a program (builds nothing, SPEC N-17)")
+    aot.add_argument("entry", type=Path, help="the entry module; the sibling modules it imports are checked too")
+    aot.add_argument("--strict-int", action="store_true",
+                     help="also report an int operation that is not proved to stay inside i64")
+    aot.add_argument("--json", action="store_true", help="print the report as JSON")
     args = parser.parse_args(argv)
 
+    if args.command == "aot-check":
+        return _aot_check(args.entry, args.strict_int, args.json)
     if args.command == "emit-c":
         return _emit_c(args.paths, args.root, args.cache, args.manifest)
     if args.command == "build":
@@ -66,6 +74,22 @@ def main(argv: list[str]) -> int:
             print(f"{d.severity.upper()} {d.path}:{d.line}:{d.column}: {d.message} [{d.rule}]")
 
     return EXIT_ERRORS if any(d.severity == "error" for d in found) else EXIT_CLEAN
+
+
+def _aot_check(entry: Path, strict_int: bool, as_json: bool) -> int:
+    """SPEC N-17 / #446: exit 0 when no finding is an error or pending, 1 otherwise, 2 if it could not run."""
+    from typedpython import aotcheck
+
+    if not entry.is_file():
+        print(f"typedpython: {entry} is not a file", file=sys.stderr)
+        return EXIT_FAILURE
+    report = aotcheck.check(entry, strict_int=strict_int)
+    if as_json:
+        print(json.dumps(report.to_json(), indent=2))
+    else:
+        for line in report.lines():
+            print(line)
+    return EXIT_ERRORS if report.blocking else EXIT_CLEAN
 
 
 def _build(paths: list[Path], cache: Path, out: Path | None) -> int:

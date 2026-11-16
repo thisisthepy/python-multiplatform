@@ -349,16 +349,12 @@ library form serves compute code called from a Kotlin app, not Python-written UI
 A static table of function pointers has no reflection in it, so it fits the GraalVM native-image rule
 (AGENTS.md 13); that it works there has to be shown by building the image, as for every upcall.
 
-### 8.5 Open for the library form
+### 8.5 Platform order, coexistence, packaging
 
-- Which platform is first. Desktop JVM is the cheapest to test in CI; iOS and Android are where an app
-  without a bundled CPython saves the most size.
-- Whether one app may hold both an AOT library and the default mode's embedded CPython. Nothing
-  prevents it technically (separate symbols, separate runtime state), but values cannot pass between
-  the two except by copying through Kotlin.
-- The artefact's packaging (static library, shared library, or both per target) and how pypackpack and
-  the toolchain carry it. That is the same kind of question as #25 step 3 and should be answered
-  together with it.
+Desktop JVM is the first platform of the library form, then iOS and Android; an AOT library and the
+default mode's CPython may coexist in one app (section 10, leader decisions of 2026-11-16). Open: the
+artefact's packaging (static library, shared library, or both per target) and how pypackpack and the
+toolchain carry it, which waits for the owner decision of #25 step 3.
 
 ## 9. Measurement plan
 
@@ -440,9 +436,14 @@ nothing" stays as it is.
 **First code after this note** (agreed by the leader): the check-only mode of section 11, which changes
 no behaviour and reports every construct of a program that would be an AOT compile error.
 
-Still open: the points of section 8.5 (first platform of the library form, coexistence with the
-default mode in one app, packaging), and whether `lru_cache` is accepted as the second object-heavy
-benchmark.
+**Leader decisions on the points left open (2026-11-16, not owner-confirmed).**
+
+- First platform of the library form: desktop JVM (the cheapest to verify in CI); iOS and Android next.
+- One app may hold both an AOT library and the default mode's embedded CPython. Neither passes its
+  objects to the other (the boundary is the types of section 8.2 only) and each is initialised on its
+  own.
+- `lru_cache` is the second object-heavy benchmark.
+- Packaging of the library artefact stays open: it waits for the same owner decision as #25 step 3.
 
 ## 11. What this note does not establish
 
