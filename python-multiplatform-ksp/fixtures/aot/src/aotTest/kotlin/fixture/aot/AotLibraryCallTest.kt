@@ -18,6 +18,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import kotlin.test.fail
 import fixture.aot.errors.F64List as ErrF64List
 import fixture.aot.errors.I64List as ErrI64List
 
@@ -260,7 +261,7 @@ class AotLibraryCallTest {
     // --- no CPython ----------------------------------------------------------------------------------------
 
     @Test
-    fun noClassOfTheCPythonEmbeddingLibraryIsOnTheClasspathAndNoLibpythonIsLoaded() {
+    fun noClassOfTheCPythonEmbeddingLibraryIsOnTheClasspath() {
         for (name in listOf("python.multiplatform.ffi.PyObject", "python.multiplatform.ffi.Python3", "python.native.ffi.Panama")) {
             assertFailsWith<ClassNotFoundException>("$name must not be loadable") { Class.forName(name) }
             assertFalse(
@@ -268,27 +269,41 @@ class AotLibraryCallTest {
                 "$name is on the classpath",
             )
         }
-        // Both libraries are loaded by @BeforeTest, so a libpython they pulled in would show here.
-        val images = loadedImages()
-        if (images == null) {
-            System.err.println("AotLibraryCallTest: the process's loaded libraries could not be listed on this OS; only the classpath is checked")
-        } else {
-            assertTrue(images.contains("libnbody") || images.contains("nbody"), "the listing does not show the library loaded by this test")
-            assertFalse(images.contains("libpython", ignoreCase = true), "a libpython is loaded in the test JVM")
-            assertFalse(images.contains("Python.framework"), "a Python framework is loaded in the test JVM")
-        }
     }
 
-    /** The mapped files of this process: /proc/self/maps on Linux, `vmmap` on macOS where it can examine the JVM; null otherwise. */
+    /**
+     * The process, not only the classpath: no libpython image is mapped into this JVM. Linux reads
+     * /proc/self/maps; macOS asks `vmmap`, then `lsof`, for this process's mapped files (the dyld image
+     * list cannot be read with java.base alone). Where neither answers on Linux or macOS the test FAILS
+     * rather than passing on the classpath check alone; on any other OS it is skipped, and that skip is
+     * the stated limit of this check there.
+     */
+    @Test
+    fun noLibpythonImageIsLoadedInTheProcessLinuxProcMapsMacosVmmapOrLsof() {
+        val os = System.getProperty("os.name").lowercase()
+        assumeTrue("the loaded images of the process cannot be listed on $os", "linux" in os || "mac" in os)
+        // Both libraries are loaded by @BeforeTest, so a libpython they pulled in would show here.
+        val images = loadedImages()
+            ?: fail("the loaded images of this process could not be listed (proc maps, vmmap and lsof all failed)")
+        assertTrue(images.contains("nbody"), "the listing does not show the library loaded by this test, so it proves nothing")
+        assertFalse(images.contains("libpython", ignoreCase = true), "a libpython is loaded in the test JVM")
+        assertFalse(images.contains("Python.framework"), "a Python framework is loaded in the test JVM")
+    }
+
+    /** The mapped files of this process: /proc/self/maps on Linux; on macOS `vmmap -w <pid>`, else `lsof -p <pid>`; null if none worked. */
     private fun loadedImages(): String? {
         val maps = File("/proc/self/maps")
         if (maps.isFile) return maps.readText()
-        val vmmap = File("/usr/bin/vmmap")
-        if (!vmmap.canExecute()) return null
+        val pid = ProcessHandle.current().pid().toString()
+        return toolOutput("/usr/bin/vmmap", "-w", pid) ?: toolOutput("/usr/sbin/lsof", "-p", pid)
+    }
+
+    /** Standard output of a tool that exited 0 within a minute, or null. */
+    private fun toolOutput(vararg command: String): String? {
+        if (!File(command[0]).canExecute()) return null
         val pool = Executors.newSingleThreadExecutor()
         return try {
-            val process = ProcessBuilder(vmmap.path, "-w", ProcessHandle.current().pid().toString())
-                .redirectErrorStream(true).start()
+            val process = ProcessBuilder(*command).redirectErrorStream(true).start()
             val text = pool.submit<String> { process.inputStream.bufferedReader().readText() }.get(60, TimeUnit.SECONDS)
             if (process.waitFor(10, TimeUnit.SECONDS) && process.exitValue() == 0) text else null
         } catch (e: Exception) {
