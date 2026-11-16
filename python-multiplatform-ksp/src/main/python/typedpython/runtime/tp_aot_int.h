@@ -49,7 +49,7 @@
  * limbs in uint64_t arithmetic. The decimal conversions work in chunks of 10**9 and are quadratic in
  * the limb count (acceptable now: the digit limit of 4300 bounds the conversions a program can do).
  * The 64x64 to 128 bit product that a small-by-small multiply needs is done with 32-bit limbs: no
- * __int128 and no compiler builtin, so GCC, Clang and MSVC compile the same code.
+ * 128-bit integer type and no compiler intrinsic, so GCC, Clang and MSVC compile the same code.
  *
  * ---- Test-only live counter -----------------------------------------------------------------------
  * With -DTPA_INT_COUNT_LIVE (the test shim, never a normal build) every big object that is allocated

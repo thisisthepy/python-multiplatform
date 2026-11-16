@@ -635,7 +635,7 @@ def test_comparison_with_a_double_is_exact(shim):
         try:
             f = float(a)
         except OverflowError:
-            f = math.copysign(1.7976931348623157e308, a)
+            f = 1.7976931348623157e308 if a > 0 else -1.7976931348623157e308     # (copysign(x, a) would convert a)
         xs += [f, math.nextafter(f, math.inf), math.nextafter(f, -math.inf)]
         xs.append(struct.unpack("<d", struct.pack("<Q", rng.getrandbits(64)))[0])
         xs.append(rng.uniform(-1e5, 1e5) * rng.choice((1, 1e10, 1e-10)))
@@ -758,7 +758,10 @@ def test_the_digit_limit_in_both_directions_is_the_references(shim):
 
 # --- int(str) --------------------------------------------------------------------------------------------
 
-ASCII_WHITESPACE = [c for c in range(128) if (lambda s: ref_int(s)[0] == "ok")(chr(c) + "5" + chr(c))]
+# The ASCII characters int() strips, MEASURED on the reference: c + "5" + c converts. A digit also passes that
+# probe ("555"), so digits are left out; a sign or an underscore on both sides does not convert.
+ASCII_WHITESPACE = [c for c in range(128)
+                    if chr(c) not in "0123456789" and (lambda s: ref_int(s)[0] == "ok")(chr(c) + "5" + chr(c))]
 UNICODE_WHITESPACE = [0x85, 0xA0, 0x1680, *range(0x2000, 0x200B), 0x2028, 0x2029, 0x202F, 0x205F, 0x3000]
 
 
@@ -775,6 +778,15 @@ def test_the_whitespace_int_strips_is_the_set_the_header_documents():
                     and ref_ok(chr(c) + "7") and unicodedata.category(chr(c)) != "Nd" and chr(c) not in "+-")
     assert ws_all == [9, 10, 11, 12, 13, 32] + UNICODE_WHITESPACE
     assert ASCII_WHITESPACE == [9, 10, 11, 12, 13, 32], "0x1c to 0x1f are not whitespace for int()"
+    # The measurement behind that sentence, on this interpreter (CI run 43816621911 asked for it): str.isspace()
+    # is true for 0x1c to 0x1f, yet int() does not strip them, on either side or both.
+    for c in (0x1c, 0x1d, 0x1e, 0x1f):
+        assert chr(c).isspace(), hex(c)
+        for s in (chr(c) + "5", "5" + chr(c), chr(c) + "5" + chr(c)):
+            assert ref_int(s)[0] != "ok", (hex(c), s, ref_int(s))
+            assert ref_int(s)[1] == "ValueError" and "invalid literal for int() with base 10" in ref_int(s)[2], ref_int(s)
+    for c in (9, 10, 11, 12, 13, 32):
+        assert ref_int(chr(c) + "5" + chr(c)) == ref_int("5"), hex(c)
 
 
 VALID = ["0", "-0", "+0", "00", "007", "-007", "1_000", "-1_0_0", "+1_2", " 12 ", "\t\n\v\f\r 5 \t\n\v\f\r", "+5", "-5",
@@ -961,7 +973,9 @@ def test_the_live_counter_exists_only_under_its_macro():
     """Outside `#if defined(TPA_INT_COUNT_LIVE) ... #else` no code names the counter, and the guarded region
     is the only place that defines it."""
     body = re.sub(r"/\*.*?\*/", "", HEADER.read_text(encoding="utf-8"), flags=re.S)       # comments
-    m = re.search(r"#if defined\(TPA_INT_COUNT_LIVE\)(.*?)\n#else\n(.*?)\n#endif", body, re.S)
+    # the guard's own #else is the one followed by the empty macros (the guarded part has an inner #if / #else)
+    m = re.search(r"#if defined\(TPA_INT_COUNT_LIVE\)(.*?)\n#else\n(#define TPA_INT__LIVE_INC\(\) \(\(void\)0\)\n.*?)\n#endif",
+                  body, re.S)
     assert m, "the counter has a guarded region with an #else"
     outside = body[:m.start()] + body[m.end():]
     assert "tpa_int_live_counter" in m.group(1) and "tpa_int_live(void)" in m.group(1)
