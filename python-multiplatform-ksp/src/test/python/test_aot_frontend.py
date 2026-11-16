@@ -925,6 +925,141 @@ REP_CASES = {
 }
 
 
+# --- which lists are big-capable (aot/rep.py "Lists of ints", #465) -----------------------------------------------
+#
+# The classification of the `list[int]` names at the level of the IR: one group per set of names that may be one list
+# (assignment, argument and parameter, returned list and call result, a name assigned more than once), a copy as a
+# one-way constraint, and the causes that make a group big-capable (a store of a TAGGED value, `[v] * n` or a display
+# with a TAGGED element, a copy of a big-capable list). They are lowered together with the cases above (one module, one
+# front-end run), under suffixes of their own. `n * n` is TAGGED here: the parameter is any int64 (nobody passes more),
+# and the product is not proved. Leader decision 2026-11-16, not owner-confirmed; the rules are agent proposals.
+
+LIST_CASES = {
+    "assign_alias": """
+        def f(n: int) -> int:
+            a = [0] * 3
+            b = a
+            b[0] = n * n
+            return a[0]
+        """,
+    "argument_and_parameter": """
+        def fill(p: list[int], v: int) -> None:
+            p[0] = v * v
+
+        def f(n: int) -> int:
+            a = [0] * 2
+            c = [0] * 2
+            fill(a, n)
+            fill(c, n)
+            b = [0] * 2
+            return a[0] + c[0] + b[0]
+        """,
+    "returned_list_and_call_result": """
+        def make(n: int) -> list[int]:
+            r = [0] * 2
+            r[0] = n * n
+            return r
+
+        def f(n: int) -> int:
+            a = make(n)
+            return a[0]
+        """,
+    "returned_parameter": """
+        def same(p: list[int]) -> list[int]:
+            return p
+
+        def f(n: int) -> int:
+            a = [0] * 2
+            b = same(a)
+            b[1] = n * n
+            return a[1]
+        """,
+    "two_names_and_a_branch": """
+        def f(n: int, flag: bool) -> int:
+            a = [1, 2]
+            b = [3, 4]
+            c = a
+            if flag:
+                c = b
+            c[0] = n * n
+            d = [5, 6]
+            return a[0] + b[0] + d[0]
+        """,
+    "a_name_assigned_twice": """
+        def f(n: int) -> int:
+            a = [0] * 2
+            a = [n * n, 1]
+            return a[0]
+        """,
+    "copies": """
+        def f(n: int) -> int:
+            a = [0] * 2
+            b = a[:]
+            c = [0] * 2
+            d = c[:]
+            d[0] = n * n
+            a[0] = n * n
+            return a[0] + b[0] + c[0] + d[0]
+        """,
+    "two_functions_calling_each_other": """
+        def ping(p: list[int], k: int) -> int:
+            if k <= 0:
+                return p[0]
+            return pong(p, k - 1)
+
+        def pong(p: list[int], k: int) -> int:
+            p[0] = p[0] * 3
+            return ping(p, k - 1)
+
+        def f(k: int) -> int:
+            a = [1, 2]
+            return ping(a, k)
+        """,
+    "creation_with_a_tagged_value": """
+        import sys
+
+        def f() -> int:
+            n = int(sys.argv[1])
+            a = [n] * 2
+            b = [n, 1]
+            c = [1, 2]
+            d = list(range(n))
+            return a[0] + b[0] + c[0] + d[0]
+        """,
+    "raw_lists": """
+        def put(p: list[int], i: int) -> None:
+            p[i] = i % 7
+
+        def f() -> int:
+            a = [0] * 8
+            for i in range(8):
+                put(a, i)
+            b = [0] * 4
+            for i in range(4):
+                b[i] = i * 3 + 1
+            s = 0
+            for i in range(4):
+                s += b[i]
+            return a[3] + s
+        """,
+    "element_reads": """
+        def f(n: int) -> int:
+            a = [0] * 2
+            a[0] = n * n
+            v = a[1]
+            w = 0
+            if v < 100:
+                w = v + 1
+            b = [0] * 2
+            u = b[1]
+            z = 0
+            if u < 100:
+                z = u + 1
+            return w + z
+        """,
+}
+
+
 class _Reps:
     """`rep.Representation` of the merged module, seen through one case's suffix."""
 
@@ -949,6 +1084,29 @@ class _Reps:
     def proved(self, e):
         return self._r.proved(e)
 
+    def list_class(self, fn, name):
+        return self._r.list_class(fn + self._sfx, name)
+
+    def return_class(self, fn):
+        return rep.BIG if self._r.return_big(fn + self._sfx) else rep.RAW
+
+    def groups(self):
+        """`[(class, {(function, name)})]` of this case's groups (the returned list of a function is `(function,
+        rep.RETURN)`), in the order of their first member."""
+        cut = len(self._sfx)
+        out = []
+        for g in self._r.list_groups():
+            if g.members[0][0].endswith(self._sfx):
+                out.append((g.cls, {(fn[:-cut], name) for fn, name in g.members}))
+        return out
+
+    def group_of(self, fn, name):
+        """The set of names in the group of `(fn, name)`, and its class."""
+        for cls, members in self.groups():
+            if (fn, name) in members:
+                return cls, members
+        raise KeyError((fn, name))
+
     @property
     def reps(self):
         return {k[:-len(self._sfx)]: v for k, v in self._r.reps.items() if k.endswith(self._sfx)}
@@ -959,6 +1117,7 @@ def merged_cases(tmp_path_factory):
     cases = dict(REP_CASES)
     cases.update({"guard:" + k: v[0] for k, v in GUARD_PATHS.items()})
     cases.update({"index:" + k: v[0] for k, v in INDEX_PATHS.items()})
+    cases.update({"list:" + k: v for k, v in LIST_CASES.items()})
     source, suffixes = merged(cases)
     proved, r = reps_of(tmp_path_factory.mktemp("merged"), source)
     return proved, r, rep.infer(proved, strict=True), suffixes
@@ -1223,6 +1382,156 @@ def test_a_remainder_and_a_division_by_a_constant_of_raw_values_stay_raw(merged_
 def test_strict_mode_has_nothing_tagged(merged_cases):
     _, r = shared_reps(merged_cases, "accumulator", strict=True)
     assert r.name("f", "s") == rep.RAW and r.returns("f") == rep.RAW
+
+
+def groups_of(merged_cases, key):
+    _, r = shared_reps(merged_cases, "list:" + key)
+    return r, r.groups()
+
+
+def test_a_name_that_is_assigned_from_another_list_is_one_group_with_it(merged_cases):
+    r, groups = groups_of(merged_cases, "assign_alias")
+    assert groups == [(rep.BIG, {("f", "a"), ("f", "b")})]
+
+
+def test_an_argument_and_its_parameter_are_one_group_at_every_call_site(merged_cases):
+    """`a` and `c` are both passed to `fill`, so they are one group with its parameter (and big-capable: `fill` stores
+    a TAGGED value); `b` is never passed and stays raw."""
+    r, groups = groups_of(merged_cases, "argument_and_parameter")
+    assert groups == [(rep.BIG, {("f", "a"), ("f", "c"), ("fill", "p")}), (rep.RAW, {("f", "b")})]
+
+
+def test_a_returned_list_and_its_call_result_are_one_group(merged_cases):
+    r, groups = groups_of(merged_cases, "returned_list_and_call_result")
+    assert groups == [(rep.BIG, {("f", "a"), ("make", "r"), ("make", rep.RETURN)})]
+    assert r.return_class("make") == rep.BIG
+
+
+def test_a_parameter_that_is_returned_joins_the_argument_and_the_call_result(merged_cases):
+    """`b = same(a)`: the list `same` returns is its parameter, so `a` and `b` are one list and the store through `b`
+    makes the group of `a` big-capable."""
+    r, groups = groups_of(merged_cases, "returned_parameter")
+    assert groups == [(rep.BIG, {("f", "a"), ("f", "b"), ("same", "p"), ("same", rep.RETURN)})]
+
+
+def test_a_name_that_holds_two_lists_makes_them_one_group_and_the_others_stay_apart(merged_cases):
+    """`c = a` and, on the other branch, `c = b`: all the lists `c` ever holds are one group with it."""
+    r, groups = groups_of(merged_cases, "two_names_and_a_branch")
+    assert groups == [(rep.BIG, {("f", "a"), ("f", "b"), ("f", "c")}), (rep.RAW, {("f", "d")})]
+
+
+def test_a_name_assigned_a_raw_creation_and_later_a_big_one_is_big_capable(merged_cases):
+    r, groups = groups_of(merged_cases, "a_name_assigned_twice")
+    assert groups == [(rep.BIG, {("f", "a")})]
+
+
+def test_a_copy_is_a_new_group_and_big_capability_goes_one_way_from_the_source(merged_cases):
+    """`b = a[:]` does not merge `b` with `a`, but a copy of a big-capable list is big-capable. `d = c[:]` followed by a
+    store of a TAGGED value into `d` makes `d` big-capable and leaves its source `c` raw."""
+    r, groups = groups_of(merged_cases, "copies")
+    assert groups == [(rep.BIG, {("f", "a")}), (rep.BIG, {("f", "b")}), (rep.RAW, {("f", "c")}), (rep.BIG, {("f", "d")})]
+    assert [r.list_class("f", n) for n in "abcd"] == [rep.BIG, rep.BIG, rep.RAW, rep.BIG]
+
+
+def test_two_functions_that_call_each_other_with_one_list_share_it(merged_cases):
+    r, groups = groups_of(merged_cases, "two_functions_calling_each_other")
+    assert groups == [(rep.BIG, {("f", "a"), ("ping", "p"), ("pong", "p")})]
+
+
+def test_a_creation_from_a_tagged_value_is_big_capable_and_list_of_range_is_not(merged_cases):
+    """`[n] * 2` and `[n, 1]` hold a TAGGED value; `[1, 2]` does not; `list(range(n))` holds values below `n`, which
+    fit int64 (a length that does not fit is an OverflowError before the list exists), so it is raw."""
+    r, groups = groups_of(merged_cases, "creation_with_a_tagged_value")
+    assert [r.list_class("f", n) for n in "abcd"] == [rep.BIG, rep.BIG, rep.RAW, rep.RAW]
+    assert len(groups) == 4, "four creations, four groups"
+
+
+def test_a_list_given_only_proved_values_and_read_into_tagged_arithmetic_stays_raw(merged_cases):
+    """`put` stores `i % 7` (RAW), `b[i] = i * 3 + 1` is proved: the lists are raw, and so are their elements; `s` that
+    sums the elements is TAGGED (the sum is not proved), which does not make `b` big-capable (a read is not a store)."""
+    proved, r = shared_reps(merged_cases, "list:raw_lists")
+    assert [c for c, _ in r.groups()] == [rep.RAW, rep.RAW]
+    assert r.list_class("put", "p") == r.list_class("f", "a") == r.list_class("f", "b") == rep.RAW
+    reads = [n for n in walk(function(proved, "f").body) if isinstance(n, ir.Index)]
+    assert len(reads) == 2 and all(r.of("f", n) == rep.RAW for n in reads)
+    assert r.name("f", "s") == rep.TAGGED
+
+
+def test_an_element_read_is_raw_from_a_raw_group_and_tagged_and_not_re_proved_from_a_big_one(merged_cases):
+    """The same code twice, `v = a[1]; if v < 100: v + 1`, once on the big-capable list `a` and once on the raw list
+    `b`. The verifier proves both additions (it reads every element as an int64); the sound re-proof proves only the
+    second: an element of a big-capable list is any int, so `v + 1` is not RAW, and its list read is TAGGED."""
+    proved, r = shared_reps(merged_cases, "list:element_reads")
+    assert r.list_class("f", "a") == rep.BIG and r.list_class("f", "b") == rep.RAW
+    reads = {n.array: n for n in walk(function(proved, "f").body) if isinstance(n, ir.Index)}
+    assert r.of("f", reads["a"]) == rep.TAGGED and r.of("f", reads["b"]) == rep.RAW
+    adds = {n.left.name: n for n in ops(proved, "f", ir.BinOpKind.ADD) if isinstance(n.left, ir.Local)}
+    assert adds["v"].proven and adds["u"].proven, "the premise: the default-mode rules prove both"
+    assert not r.proved(adds["v"]) and r.of("f", adds["v"]) == rep.TAGGED
+    assert r.proved(adds["u"]) and r.of("f", adds["u"]) == rep.RAW
+    assert r.name("f", "v") == rep.TAGGED and r.name("f", "u") == rep.RAW
+
+
+def test_strict_mode_has_no_big_capable_list(merged_cases):
+    """`--strict-int` has no TAGGED value, so no list is big-capable and every element read is RAW."""
+    proved, r = shared_reps(merged_cases, "list:copies", strict=True)
+    assert [r.list_class("f", n) for n in "abcd"] == [rep.RAW] * 4
+
+
+def test_a_list_name_the_analysis_does_not_know_is_big_capable(merged_cases):
+    """On any doubt, big-capable: a name that is not a list of the function."""
+    r = merged_cases[1]
+    assert r.list_big("nowhere", "x") and r.list_class("nowhere", "x") == rep.BIG
+
+
+EXPLAIN_SOURCE = """
+import sys
+
+def fill(p: list[int], v: int) -> None:
+    p[0] = v
+
+def main() -> None:
+    a = [1, 2]
+    b = a
+    fill(b, int(sys.argv[1]))
+    c = [5]
+    print(a[0], c[0])
+
+if __name__ == "__main__":
+    main()
+"""
+
+EXPLAIN_TEXT = """list group 1: big-capable
+  members: fill.p (line 3), main.a (line 7), main.b (line 8)
+  merged:
+    line 8, in main: `b = a`: main.b and main.a may be the same list (assignment)
+    line 9, in main: `fill(b, int(sys.argv[1]))`: main.b and fill.p may be the same list (the argument and the parameter `p` of the call of `fill`)
+  big-capable because:
+    line 4, in fill: `p[0] = v`: stores a TAGGED value into `p`
+list group 2: raw
+  members: main.c (line 10)
+  merged: nothing
+  raw: no TAGGED value is stored into it, no creation of it holds one, and no copy of a big-capable list reaches it
+"""
+
+
+def test_explain_lists_prints_the_groups_the_merges_and_the_causes_and_builds_nothing(tmp_path, capsys):
+    path = write(tmp_path, EXPLAIN_SOURCE, "explained.py")
+    from typedpython.__main__ import main
+    status = main(["aot-build", str(path), "--explain-lists"])
+    shown = capsys.readouterr()
+    assert status == 0 and shown.err == ""
+    assert shown.out == EXPLAIN_TEXT
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["explained.py"], "nothing was built or written"
+
+
+def test_the_executable_and_the_library_commands_still_need_an_output_without_the_explain_flag(tmp_path):
+    from typedpython.__main__ import main
+    path = write(tmp_path, EXPLAIN_SOURCE, "needs_output.py")
+    for argv in (["aot-build", str(path)], ["aot-lib", str(path), "--export", "main", "--prefix", "p"]):
+        with pytest.raises(SystemExit) as raised:
+            main(argv)
+        assert raised.value.code == 2
 
 
 def test_the_text_of_a_program_names_the_big_integer_runtime_only_where_a_value_is_tagged(tmp_path):

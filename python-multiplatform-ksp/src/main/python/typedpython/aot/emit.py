@@ -25,6 +25,12 @@ pointer to a counted native array (`tpa_f64_list`, `tpa_i64_list`), non-atomic c
   An array-valued temporary (a creation or a call result) is never live across an operation that can
   fail: it is created, then stored or returned at once, so it needs no release of its own.
 
+A `list[int]` is RAW (`tpa_i64_list`, elements `int64_t`, everything above) or BIG-CAPABLE (`tpa_int_list`, elements
+`tpa_int`), decided per group of names by `aot/rep.py` (#465; leader decision 2026-11-16, not owner-confirmed). A
+big-capable list is the same counted heap object: a creation retains each element it takes, an element read is a new
+reference (into a TAGGED slot), an element store takes the new element and releases the old one, and the release of the
+list releases every element and then frees it, at the same cleanup point. A raw list generates exactly what it did.
+
 Ints (#462; design decision D1 (a), representation approved by the leader on 2026-11-16, not owner-confirmed; the
 rest agent proposal, not owner-confirmed). An int is RAW (`int64_t`, as above) or TAGGED (`tpa_int` of
 runtime/tp_aot_int.h), decided per program by `aot/rep.py`. A TAGGED value is an owned reference with the lifetime of a
@@ -58,8 +64,18 @@ LIST = {Type.F64_ARRAY: ("f64", "double", Type.F64), Type.I64_ARRAY: ("i64", "in
 FAIL = "{ rc = -1; goto tp_cleanup; }"
 
 
-def list_ptr(t: Type) -> str:
-    return f"tpa_{LIST[t][0]}_list *"
+# the kinds of list the runtime has: `f64`, `i64` (a raw `list[int]`) and `int` (a big-capable `list[int]`: tagged
+# elements, tp_aot_int.h `tpa_int_list`)
+LIST_C = {"f64": "tpa_f64_list", "i64": "tpa_i64_list", "int": "tpa_int_list"}
+
+
+def list_ptr(kind: str) -> str:
+    return f"{LIST_C[kind]} *"
+
+
+def lfn(kind: str, op: str) -> str:
+    """The runtime function `op` (alloc, fill, copy, iota, retain, release) of a list of `kind`."""
+    return f"tpa_int_list_{op}" if kind == "int" else f"tpa_{kind}_{op}"
 _EXACT_FLOAT = 2**53
 _I64_MIN = -2**63
 
@@ -208,6 +224,18 @@ class _Gen:
         kinds = ir.aot_tuple_kinds(f)
         return kinds if kinds is not None and all(k in CTYPE for k in kinds) else None
 
+    def array_kind(self, fn: str, name: str, t: Type) -> str:
+        """The kind of the list `name` of function `fn` (of array type `t`)."""
+        if t is Type.I64_ARRAY:
+            return "int" if self.reps.list_big(fn, name) else "i64"
+        return LIST[t][0]
+
+    def ret_kind(self, f: ir.Function) -> str:
+        """The kind of the list function `f` returns."""
+        if f.returns is Type.I64_ARRAY:
+            return "int" if self.reps.return_big(f.name) else "i64"
+        return LIST[f.returns][0]
+
     def tagged_param(self, f: ir.Function, p: object) -> bool:
         return isinstance(p, ir.Param) and p.type is Type.I64 and self.reps.name(f.name, p.name) == TAGGED
 
@@ -226,7 +254,7 @@ class _Gen:
         params = []
         for p in f.params:
             if isinstance(p, ir.ArrayParam) and p.type in LIST:
-                params.append(f"{list_ptr(p.type)}v_{mangle(p.name)} TPA_UNUSED")
+                params.append(f"{list_ptr(self.array_kind(f.name, p.name, p.type))}v_{mangle(p.name)} TPA_UNUSED")
             elif isinstance(p, ir.Param) and p.type in CTYPE:
                 ct = "tpa_int" if self.tagged_param(f, p) else CTYPE[p.type]
                 params.append(f"{ct} {self.param_c(f, p)} TPA_UNUSED")
@@ -234,7 +262,7 @@ class _Gen:
                 params.append(f"int v_{mangle(p.name)} TPA_UNUSED")        # reported by `_Fn.run`
         kinds = self.tuple_kinds(f)
         if f.returns in LIST:
-            params.append(f"{list_ptr(f.returns)}*out")
+            params.append(f"{list_ptr(self.ret_kind(f))}*out")
         elif kinds is not None:
             params += [f"{self.out_ctype(f, k, self.reps.element(f.name, i))} *out{i}" for i, k in enumerate(kinds)]
         elif f.returns in CTYPE:
@@ -254,6 +282,7 @@ class _Fn:
         self.temps: list[tuple[str, str, str]] = []        # (C type, name, initialiser)
         self.cur: int | None = None
         self.cleanup_used = False
+        self.bind_kind: str | None = None       # the kind of the list a creation on the right of an assignment or a return becomes
         body = g.bodies.get(f.name)
         self.orig: list[ast.stmt] = resume.statements(body) if body is not None else []   # type: ignore[arg-type]
         self.found: list[Finding] = []
@@ -340,8 +369,32 @@ class _Fn:
         self.temps.append((ctype, n, init))
         return n
 
-    def list_tmp(self, t: Type) -> str:
-        return self.tmp(list_ptr(t).strip(), "NULL")
+    def list_tmp(self, kind: str) -> str:
+        return self.tmp(list_ptr(kind).strip(), "NULL")
+
+    def kind(self, name: str) -> str:
+        """The kind of the list name `name` of this function."""
+        return self.g.array_kind(self.f.name, name, self.types[name])
+
+    def value_kind(self, e: ir.Expr) -> str | None:
+        """The kind of the list a list name or a call gives (None for a creation or a copy, which take their target's)."""
+        if isinstance(e, ir.Local) and e.name in self.types and self.types[e.name] in LIST:
+            return self.kind(e.name)
+        if isinstance(e, ir.Call):
+            callee = self.g.fns.get(e.function)
+            if callee is not None and callee.returns in LIST:
+                return self.g.ret_kind(callee)
+        return None
+
+    def kinds_agree(self, e: ir.Expr, kind: str, what: str) -> bool:
+        """A list name or a call result bound to a list of `kind` must be a list of that kind: the classification merges
+        them, so a mismatch is a defect of the analysis, reported instead of generating a wrong access."""
+        got = self.value_kind(e)
+        if got is not None and got != kind:
+            self.bad("aot/type", what, f"a list of kind {got} is used where one of kind {kind} is needed (the list "
+                     "classification did not merge them)")
+            return False
+        return True
 
     def fail(self) -> str:
         self.cleanup_used = True
@@ -674,6 +727,8 @@ class _Fn:
         if found is None:
             return "0"
         arr, t = found
+        if self.kind(e.array) == "int":
+            return self.index_big(e, arr, idx)
         elem = LIST[t][1]
         out = self.tmp(elem)
         if self.rep(e.index) == TAGGED:
@@ -689,21 +744,42 @@ class _Fn:
             self.emit(f"{out} = {arr}->d[{slot}];")
         return out
 
+    def index_big(self, e: ir.Index, arr: str, idx: str) -> str:
+        """`a[i]` of a big-capable list: the element is a new reference, held by a TAGGED slot."""
+        out = self.tslot()
+        if self.rep(e.index) == TAGGED:
+            slot = self.tmp("int64_t")
+            self.emit(f"if (tpa_slot_int({arr}->len, {idx}, 0, &{slot})) {self.fail()}")
+            self.emit(f"tpa_int_set(&{out}, {arr}->d[{slot}]);")
+        elif e.proven and self.trusted(e):
+            self.emit(f"tpa_int_set(&{out}, {arr}->d[{idx}]);")
+        else:
+            slot = self.tmp("int64_t")
+            self.emit(f"if (tpa_slot({arr}->len, {idx}, 0, &{slot})) {self.fail()}")
+            self.emit(f"tpa_int_set(&{out}, {arr}->d[{slot}]);")
+        return out
+
     def ev_NewArray(self, e: ir.NewArray) -> str:
         if e.type not in LIST:
             return self.bad("aot/type", "list", f"a list of {e.type.value} is outside the AOT mode")
-        x = LIST[e.type][0]
-        t = self.list_tmp(e.type)
+        kind = self.bind_kind
+        if kind is None:
+            return self.bad("aot/type", "list", "a list is created where no list name receives it")
+        t = self.list_tmp(kind)
         if e.iota:
             n = self.length_value(e.length, "tpa_int_to_range_len")
-            self.emit(f"if (tpa_i64_iota({n}, &{t})) {self.fail()}")
+            self.emit(f"if ({lfn(kind, 'iota')}({n}, &{t})) {self.fail()}")
         else:
             assert e.fill is not None
-            fill = self.ev(e.fill)                       # `[v] * n` evaluates v, then n
-            if e.type is Type.I64_ARRAY and e.fill.type is Type.I64 and self.rep(e.fill) == TAGGED:
-                self.list_store_finding(None, "[v] * n")
+            if kind == "int":
+                fill = self.tagged(e.fill)               # `[v] * n` evaluates v, then n
+            else:
+                fill = self.ev(e.fill)
+                if e.type is Type.I64_ARRAY and e.fill.type is Type.I64 and self.rep(e.fill) == TAGGED:
+                    self.bad("aot/type", "list", "a TAGGED value fills a raw list (the list classification did not "
+                             "converge)")
             n = self.length_value(e.length, "tpa_int_to_count")
-            self.emit(f"if (tpa_{x}_fill({n}, {fill}, &{t})) {self.fail()}")
+            self.emit(f"if ({lfn(kind, 'fill')}({n}, {fill}, &{t})) {self.fail()}")
         return t
 
     def length_value(self, e: ir.Expr, convert: str) -> str:
@@ -716,37 +792,42 @@ class _Fn:
         self.emit(f"if ({convert}({n}, &{t})) {self.fail()}")
         return t
 
-    def list_store_finding(self, array: str | None, what: str) -> None:
-        """A TAGGED value stored into a `list[int]`: the elements of a list are int64 in this step."""
-        text = None
-        if self.cur is not None and 0 <= self.cur < len(self.orig):
-            text = ast.get_source_segment(self.g.program.source, self.orig[self.cur])
-        shown = f"`{text}`" if text else f"the store at line {self.line()}"
-        into = f" into the list `{array}`" if array else " into a list"
-        self.bad("aot/int-list-store", array or what,
-                 f"{shown} stores a value that is not proved to fit 64 bits{into}: the elements of a list are 64-bit "
-                 "ints in this step, and lists of big integers arrive in the next step")
-
     def ev_CopyArray(self, e: ir.CopyArray) -> str:
         found = self.list_of(e.src, "a `[:]` copy")
         if found is None:
             return "NULL"
         arr, t = found
-        out = self.list_tmp(t)
-        self.emit(f"if (tpa_{LIST[t][0]}_copy({arr}, &{out})) {self.fail()}")
+        src, dst = self.kind(e.src), self.bind_kind
+        if dst is None:
+            return self.bad("aot/type", "list", "a copy is made where no list name receives it")
+        if src == dst:
+            fn = lfn(dst, "copy")
+        elif (src, dst) == ("i64", "int"):
+            fn = "tpa_int_list_from_i64"                    # a raw list copied into a big-capable one: each element converted
+        else:
+            return self.bad("aot/type", e.src, f"a list of kind {src} is copied into one of kind {dst} (the list "
+                            "classification did not converge)")
+        out = self.list_tmp(dst)
+        self.emit(f"if ({fn}({arr}, &{out})) {self.fail()}")
         return out
 
     def ev_ListDisplay(self, e: ir.ListDisplay) -> str:
         if e.type not in LIST:
             return self.bad("aot/type", "list", f"a list of {e.type.value} is outside the AOT mode")
-        x = LIST[e.type][0]
-        vals = [self.ev(v) for v in e.elements]            # every element is evaluated before the list exists
-        if e.type is Type.I64_ARRAY and any(v.type is Type.I64 and self.rep(v) == TAGGED for v in e.elements):
-            self.list_store_finding(None, "list display")
-        t = self.list_tmp(e.type)
-        self.emit(f"if (tpa_{x}_alloc({len(vals)}, &{t})) {self.fail()}")
+        kind = self.bind_kind
+        if kind is None:
+            return self.bad("aot/type", "list", "a list is created where no list name receives it")
+        if kind == "int":
+            vals = [self.tagged(v) for v in e.elements]      # every element is evaluated before the list exists
+        else:
+            vals = [self.ev(v) for v in e.elements]
+            if e.type is Type.I64_ARRAY and any(v.type is Type.I64 and self.rep(v) == TAGGED for v in e.elements):
+                self.bad("aot/type", "list", "a TAGGED value is displayed in a raw list (the list classification did "
+                         "not converge)")
+        t = self.list_tmp(kind)
+        self.emit(f"if ({lfn(kind, 'alloc')}({len(vals)}, &{t})) {self.fail()}")
         for i, v in enumerate(vals):
-            self.emit(f"{t}->d[{i}] = {v};")
+            self.emit(f"tpa_int_set(&{t}->d[{i}], {v});" if kind == "int" else f"{t}->d[{i}] = {v};")
         return t
 
     def call_args(self, callee: ir.Function, e: ir.Call) -> list[str] | None:
@@ -761,6 +842,10 @@ class _Fn:
                     ok = False
                     self.bad("aot/type", e.function, f"the argument for list parameter `{p.name}` of `{e.function}` "
                              "is not a list of its type")
+                elif self.kind(a.name) != self.g.array_kind(callee.name, p.name, p.type):
+                    ok = False
+                    self.bad("aot/type", e.function, f"the list `{a.name}` and the parameter `{p.name}` of "
+                             f"`{e.function}` are lists of different kinds (the list classification did not merge them)")
                 else:
                     out.append(f"v_{mangle(a.name)}")
             elif not isinstance(p, ir.Param) or p.type is not a.type:
@@ -789,7 +874,7 @@ class _Fn:
             self.emit(f"if ({name}({', '.join(args)})) {self.fail()}")
             return "0"
         if callee.returns in LIST:
-            t = self.list_tmp(callee.returns)
+            t = self.list_tmp(self.g.ret_kind(callee))
             self.emit(f"if ({name}({', '.join(args + ['&' + t])})) {self.fail()}")
             return t                                       # a new reference: the receiver owns it
         if callee.returns in CTYPE:
@@ -861,11 +946,17 @@ class _Fn:
     def st_Assign(self, s: ir.Assign) -> None:
         want = self.types.get(s.target)
         if want in LIST:
-            x = LIST[want][0]
-            val, owned = self.list_value(s.value, want)
+            x = self.kind(s.target)
+            if not self.kinds_agree(s.value, x, s.target):
+                return
+            self.bind_kind = x
+            try:
+                val, owned = self.list_value(s.value, want)
+            finally:
+                self.bind_kind = None
             if not owned:
-                self.emit(f"tpa_{x}_retain({val});")        # a second name for the one list
-            self.emit(f"tpa_{x}_release(v_{mangle(s.target)});")   # the old binding, after the new one is held
+                self.emit(f"{lfn(x, 'retain')}({val});")        # a second name for the one list
+            self.emit(f"{lfn(x, 'release')}(v_{mangle(s.target)});")   # the old binding, after the new one is held
             self.emit(f"v_{mangle(s.target)} = {val};")
             return
         if want is None or want is not s.value.type:
@@ -888,29 +979,39 @@ class _Fn:
         """`a[i] = v`: CPython evaluates the value, then the list, then the index; an out-of-range index
         raises after that (IndexError("list assignment index out of range"))."""
         found = self.list_of(s.array, "an element store")
-        val = self.ev(s.value)
+        big = found is not None and self.kind(s.array) == "int"
+        val = self.tagged(s.value) if big else self.ev(s.value)
         idx = self.ev(s.index)
         if found is None:
             return
         arr, t = found
-        if t is Type.I64_ARRAY and s.value.type is Type.I64 and self.rep(s.value) == TAGGED:
-            self.list_store_finding(s.array, "list store")
+        if not big and t is Type.I64_ARRAY and s.value.type is Type.I64 and self.rep(s.value) == TAGGED:
+            self.bad("aot/type", s.array, f"a TAGGED value is stored into the raw list `{s.array}` (the list "
+                     "classification did not converge)")
             return
+
+        def put(at: str) -> None:
+            # a big-capable list takes a new reference to the element and gives up the one it held
+            self.emit(f"tpa_int_set(&{arr}->d[{at}], {val});" if big else f"{arr}->d[{at}] = {val};")
         if self.rep(s.index) == TAGGED:
             slot = self.tmp("int64_t")
             self.emit(f"if (tpa_slot_int({arr}->len, {idx}, 1, &{slot})) {self.fail()}")
-            self.emit(f"{arr}->d[{slot}] = {val};")
+            put(slot)
         elif s.proven and self.trusted(s):
-            self.emit(f"{arr}->d[{idx}] = {val};")
+            put(idx)
         else:
             slot = self.tmp("int64_t")
             self.emit(f"if (tpa_slot({arr}->len, {idx}, 1, &{slot})) {self.fail()}")
-            self.emit(f"{arr}->d[{slot}] = {val};")
+            put(slot)
 
     def st_ExprStmt(self, s: ir.ExprStmt) -> None:
         v = self.ev(s.value)      # a fallible operation or a call has been emitted; what remains has no effect
         if s.value.type in LIST:
-            self.emit(f"tpa_{LIST[s.value.type][0]}_release({v});")      # a returned list nobody binds
+            callee = self.g.fns.get(s.value.function) if isinstance(s.value, ir.Call) else None
+            if callee is None:
+                self.bad("aot/type", "list", "a list value is dropped that is not a call result")
+                return
+            self.emit(f"{lfn(self.g.ret_kind(callee), 'release')}({v});")      # a returned list nobody binds
 
     def st_Print(self, s: ir.Print) -> None:
         """`print(...)`: every argument (every field of an f-string) is evaluated first, in order (a fallible
@@ -1079,9 +1180,16 @@ class _Fn:
             self.leave()
             return
         if returns in LIST:
-            val, owned = self.list_value(s.value, returns)
+            x = self.g.ret_kind(self.f)
+            if not self.kinds_agree(s.value, x, "return"):
+                return
+            self.bind_kind = x
+            try:
+                val, owned = self.list_value(s.value, returns)
+            finally:
+                self.bind_kind = None
             if not owned:
-                self.emit(f"tpa_{LIST[returns][0]}_retain({val});")   # the caller gets its own reference
+                self.emit(f"{lfn(x, 'retain')}({val});")   # the caller gets its own reference
             self.emit(f"*out = {val};")
             self.leave()
             return
@@ -1203,8 +1311,9 @@ class _Fn:
             releases.append(f"    tpa_int_release(v_{mangle(p.name)});")                       # type: ignore[union-attr]
         for name, t in f.locals.items():
             if t in LIST:
-                decls.append(f"    {list_ptr(t)}v_{mangle(name)} TPA_UNUSED = NULL;")
-                releases.append(f"    tpa_{LIST[t][0]}_release(v_{mangle(name)});")
+                kind = self.kind(name)
+                decls.append(f"    {list_ptr(kind)}v_{mangle(name)} TPA_UNUSED = NULL;")
+                releases.append(f"    {lfn(kind, 'release')}(v_{mangle(name)});")
             elif self.tagged_name(name):
                 decls.append(f"    tpa_int v_{mangle(name)} TPA_UNUSED = TPA_INT_ZERO;")
                 releases.append(f"    tpa_int_release(v_{mangle(name)});")

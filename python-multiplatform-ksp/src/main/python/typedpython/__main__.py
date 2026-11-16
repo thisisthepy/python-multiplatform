@@ -2,6 +2,9 @@
 `python -m typedpython emit-c PATHS... --root DIR [--cache DIR] --manifest FILE`
 `python -m typedpython aot-build ENTRY.py -o EXECUTABLE [--emit-c FILE.c] [--strict-int]` (SPEC N-17, #448: exit 1 on a finding)
 `python -m typedpython aot-lib MODULE.py --export f,g --prefix P -o DIR [--emit-c FILE.c] [--strict-int]` (#455: a C-ABI library)
+`python -m typedpython aot-build ENTRY.py --explain-lists` (also `aot-lib MODULE.py --export f --prefix P --explain-lists`;
+#465, agent proposal, not owner-confirmed): builds nothing and prints, for each group of `list[int]` names, its members,
+why they were merged, its class (raw, or big-capable) and why; no `-o` is needed.
 
 `--strict-int` (#462; design decision D1 (a), leader 2026-11-16, not owner-confirmed): an int not proved inside 64 bits is a
 compile error (`aot/int-unproven`) instead of a big-integer-capable value.
@@ -59,7 +62,9 @@ def main(argv: list[str]) -> int:
         "aot-build", help="compile a single-module program of scalar functions to a standalone executable "
                           "with no CPython (SPEC N-17, first step)")
     aot_build.add_argument("entry", type=Path, help="the entry module (it has an `if __name__ == \"__main__\":` block)")
-    aot_build.add_argument("-o", "--output", type=Path, required=True, help="the executable to write")
+    aot_build.add_argument("-o", "--output", type=Path, default=None, help="the executable to write")
+    aot_build.add_argument("--explain-lists", action="store_true",
+                           help="build nothing; print the groups of list[int] names, their class and why")
     aot_build.add_argument("--emit-c", type=Path, default=None, help="also keep the generated C here")
     aot_build.add_argument("--strict-int", action="store_true",
                            help="an int operation not proved to stay inside 64 bits is a compile error (no big integers)")
@@ -69,13 +74,22 @@ def main(argv: list[str]) -> int:
     aot_lib.add_argument("module", type=Path, help="the module (an `if __name__ == \"__main__\":` block is not compiled)")
     aot_lib.add_argument("--export", required=True, help="the functions to export, separated by commas")
     aot_lib.add_argument("--prefix", required=True, help="the C identifier every exported symbol starts with")
-    aot_lib.add_argument("-o", "--output", type=Path, required=True, help="the directory for the library, "
+    aot_lib.add_argument("-o", "--output", type=Path, default=None, help="the directory for the library, "
                          "<prefix>.h and <prefix>.json")
+    aot_lib.add_argument("--explain-lists", action="store_true",
+                         help="build nothing; print the groups of list[int] names, their class and why")
     aot_lib.add_argument("--emit-c", type=Path, default=None, help="also keep the generated C here")
     aot_lib.add_argument("--strict-int", action="store_true",
                          help="an int operation not proved to stay inside 64 bits is a compile error (no big integers)")
     args = parser.parse_args(argv)
 
+    if args.command in ("aot-lib", "aot-build") and args.output is None and not args.explain_lists:
+        parser.error("the following arguments are required: -o/--output")
+    if args.command == "aot-lib" and args.explain_lists:
+        return _aot_explain(args.module, [n.strip() for n in args.export.split(",") if n.strip()], args.prefix,
+                            args.strict_int)
+    if args.command == "aot-build" and args.explain_lists:
+        return _aot_explain(args.entry, None, None, args.strict_int)
     if args.command == "aot-lib":
         return _aot_lib(args.module, [n.strip() for n in args.export.split(",") if n.strip()], args.prefix,
                         args.output, args.emit_c, args.strict_int)
@@ -119,6 +133,27 @@ def _aot_check(entry: Path, strict_int: bool, as_json: bool) -> int:
         for line in report.lines():
             print(line)
     return EXIT_ERRORS if report.blocking else EXIT_CLEAN
+
+
+def _aot_explain(module: Path, exports: list[str] | None, prefix: str | None, strict_int: bool) -> int:
+    """`--explain-lists`: the groups of `list[int]` names on standard output, nothing built (exit 0; 1 with the findings
+    on standard error when the program cannot be analysed; 2 when it could not run)."""
+    from typedpython import aot
+
+    if not module.is_file():
+        print(f"typedpython: {module} is not a file", file=sys.stderr)
+        return EXIT_FAILURE
+    try:
+        text = aot.explain_lists(module, exports=exports, prefix=prefix, strict_int=strict_int)
+    except aot.AotError as e:
+        for f in e.findings:
+            print(aot.format_finding(f), file=sys.stderr)
+        return EXIT_ERRORS
+    except PyreflyError as e:
+        print(f"typedpython: {e}", file=sys.stderr)
+        return EXIT_FAILURE
+    sys.stdout.write(text)
+    return EXIT_CLEAN
 
 
 def _aot_build(entry: Path, output: Path, emit_c: Path | None, strict_int: bool = False) -> int:

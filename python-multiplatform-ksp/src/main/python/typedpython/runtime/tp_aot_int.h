@@ -2095,4 +2095,159 @@ static TPA_UNUSED int tpa_argv_int(int64_t i, tpa_int *out)
 }
 #endif
 
+/* ------------------------------------------------------------------------------------------
+ * The big-capable list of ints (#465; static classification: leader decision 2026-11-16, not owner-confirmed; the layout
+ * and the names are agent proposals, not owner-confirmed).
+ *
+ * A `list[int]` whose group may hold a value outside 64 bits (aot/rep.py "Lists of ints") is a counted heap object of
+ * the same header as `tpa_i64_list` (the count first, then the length, so `len` and the bounds test read the same
+ * fields) whose elements are `tpa_int`, one word each. The list owns one reference to each of its elements:
+ *   alloc / fill / copy / from_i64 / iota   a fresh list with count 1; an element that is a big has its count raised
+ *                                           for each place it is held (`fill` raises it once per element, a small
+ *                                           needs nothing); a failed creation leaves nothing allocated
+ *   retain / release                        as for the other lists; the release that frees the list releases every
+ *                                           element first
+ *   element read (generated code)           `tpa_int_set(&slot, l->d[i])`: a new reference into the caller's slot
+ *   element store (generated code)          `tpa_int_set(&l->d[i], v)`: the new reference is taken, then the old one
+ *                                           released (the order keeps `v` being the old element safe)
+ * A fresh element is the small int 0 (`TPA_INT_ZERO`), never a null word, so releasing a list that is half built
+ * releases nothing dangling. Under TPA_THREADS the list count is atomic (the macros of tp_aot.h) and the elements are
+ * immutable values with atomic counts; writes to the same list's elements from several threads are the caller's
+ * responsibility, as for every list.
+ * ------------------------------------------------------------------------------------------ */
+typedef struct tpa_int_list { tpa_rc_t rc; int64_t len; tpa_int d[]; } tpa_int_list;
+
+static inline void tpa_int_list_retain(tpa_int_list *l)
+{
+    if (l != NULL) {
+        TPA_RC_INC(l);
+    }
+}
+
+static inline void tpa_int_list_release(tpa_int_list *l)
+{
+    if (l != NULL && TPA_RC_DEC_IS_ZERO(l)) {
+        int64_t i;
+        for (i = 0; i < l->len; i++) {
+            tpa_int_release(l->d[i]);
+        }
+        free(l);
+    }
+}
+
+/* n elements, each the small int 0 (an empty list for n <= 0); MemoryError on failure. */
+static inline int tpa_int_list_alloc(int64_t n, tpa_int_list **out)
+{
+    int64_t len = 0, i;
+    tpa_int_list *l = (tpa_int_list *)tpa__list_alloc(n, sizeof(tpa_int_list), sizeof(tpa_int), &len);
+    if (l == NULL) {
+        return -1;
+    }
+    l->rc = 1;
+    l->len = len;
+    for (i = 0; i < len; i++) {
+        l->d[i] = TPA_INT_ZERO;
+    }
+    *out = l;
+    return 0;
+}
+
+/* `[v] * n`: v is borrowed; each element is a new reference to it. */
+static inline int tpa_int_list_fill(int64_t n, tpa_int v, tpa_int_list **out)
+{
+    int64_t i;
+    if (tpa_int_list_alloc(n, out)) {
+        return -1;
+    }
+    for (i = 0; i < (*out)->len; i++) {
+        tpa_int_retain(v);
+        (*out)->d[i] = v;
+    }
+    return 0;
+}
+
+/* `a[:]` of a big-capable list: every element retained. */
+static inline int tpa_int_list_copy(const tpa_int_list *src, tpa_int_list **out)
+{
+    int64_t i;
+    if (tpa_int_list_alloc(src->len, out)) {
+        return -1;
+    }
+    for (i = 0; i < src->len; i++) {
+        tpa_int_retain(src->d[i]);
+        (*out)->d[i] = src->d[i];
+    }
+    return 0;
+}
+
+/* `a[:]` of a raw list into a big-capable one: every int64 converted (a conversion allocates only for a value outside
+ * the small range, and fails only with MemoryError, which releases what was converted). */
+static inline int tpa_int_list_from_i64(const tpa_i64_list *src, tpa_int_list **out)
+{
+    int64_t i;
+    if (tpa_int_list_alloc(src->len, out)) {
+        return -1;
+    }
+    for (i = 0; i < src->len; i++) {
+        if (tpa_int_from_i64(src->d[i], &(*out)->d[i]) != 0) {
+            tpa_int_list_release(*out);
+            *out = NULL;
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* `list(range(n))` as a big-capable list: 0 .. n-1 (an empty list for n <= 0). */
+static inline int tpa_int_list_iota(int64_t n, tpa_int_list **out)
+{
+    int64_t i;
+    if (tpa_int_list_alloc(n, out)) {
+        return -1;
+    }
+    for (i = 0; i < (*out)->len; i++) {
+        if (tpa_int_from_i64(i, &(*out)->d[i]) != 0) {
+            tpa_int_list_release(*out);
+            *out = NULL;
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* The library boundary's element access (aot/library.py, ABI version 2): the element `i` of `l` as an int64, with the
+ * list's own IndexError when `i` is out of range (negative counts from the end) and, for an element outside 64 bits,
+ * an ABI-level OverflowError that has no counterpart in the source language (TPA_MSG_LIST_ELEMENT_RANGE). */
+#define TPA_MSG_LIST_ELEMENT_RANGE "the element of the list does not fit in 64 bits"
+
+static inline int tpa_int_list_get_i64(const tpa_int_list *l, int64_t i, int64_t *out)
+{
+    int64_t k, v;
+    if (tpa_slot(l->len, i, 0, &k) != 0) {
+        return -1;
+    }
+    if (tpa_int_to_i64(l->d[k], &v) != 0) {
+        return tpa_raise(TPA_OverflowError, TPA_MSG_LIST_ELEMENT_RANGE);
+    }
+    *out = v;
+    return 0;
+}
+
+/* `l[i] = v` for an int64 `v`: IndexError("list assignment index out of range"), or MemoryError when the value needs
+ * a big object and there is none to be had (the list is then unchanged). */
+static inline int tpa_int_list_set_i64(tpa_int_list *l, int64_t i, int64_t v)
+{
+    int64_t k;
+    tpa_int nv = TPA_INT_ZERO;
+    if (tpa_slot(l->len, i, 1, &k) != 0) {
+        return -1;
+    }
+    if (tpa_int_from_i64(v, &nv) != 0) {
+        return -1;
+    }
+    tpa_int_release(l->d[k]);
+    l->d[k] = nv;
+    return 0;
+}
+
 #endif /* TP_AOT_INT_H */

@@ -38,9 +38,11 @@ def format_finding(f: Finding) -> str:
 _LINE = re.compile(r"\bline (\d+)")
 
 
-def _lower(program, library=None, strict_int: bool = False) -> tuple[str | None, list[Finding]]:
+def _lower(program, library=None, strict_int: bool = False, explain: list | None = None
+           ) -> tuple[str | None, list[Finding]]:
     """Run the front end and the verifier in their AOT mode on the program's file; emit C or return
-    the findings. Every line number is the file's own. `library` (`aot.library`, #455) is None for a program
+    the findings. Every line number is the file's own. `explain` (a list, #465): instead of emitting C, the text of
+    `Representation.explain` is appended to it (the groups of `list[int]` names; nothing is generated). `library` (`aot.library`, #455) is None for a program
     with an entry: what `aot-build` has always done. For a library it names the functions to compile (the
     exports and what they reach) and the emitter of the library's C; the entry is then not expected."""
     from typedpython import frontend, verify
@@ -71,6 +73,19 @@ def _lower(program, library=None, strict_int: bool = False) -> tuple[str | None,
     else:
         expected = [f.name for f in program.functions if f.name in library.reachable]
         emit_fn = library.emit
+    if explain is not None:
+        import dataclasses
+
+        from typedpython.aot import rep as rep_mod
+
+        keep = None if library is None else library.reachable
+        shown = list(getattr(library, "nodes", ()) or ())
+
+        def emit_fn(proved, program):
+            module = proved if keep is None else dataclasses.replace(
+                proved, functions=tuple(f for f in proved.functions if f.name in keep))
+            explain.append(rep_mod.infer(module, strict=strict_int).explain(program, exports=shown))
+            return "", []
     proved_names = {f.name for f in proved.functions}
     found: list[Finding] = []
     for name in expected:
@@ -110,6 +125,27 @@ def generate(entry: Path, *, strict_int: bool = False) -> str:
     if findings or c_text is None:
         raise AotError(findings)
     return c_text
+
+
+def explain_lists(entry: Path, *, exports: list[str] | None = None, prefix: str | None = None,
+                  strict_int: bool = False) -> str:
+    """The diagnostic of `--explain-lists` (#465; agent proposal, not owner-confirmed): the groups of `list[int]` names
+    of the program (`exports` and `prefix` given: of the library) with their members, merges, class and reasons, as
+    `aot/rep.py` `Representation.explain` writes them. Nothing is generated; raises AotError as `generate` does."""
+    from typedpython.aot import program as program_mod
+
+    if exports is not None:
+        from typedpython.aot import library
+
+        return library.explain_library(Path(entry), exports=exports, prefix=prefix or "p", strict_int=strict_int)
+    program = program_mod.analyze(Path(entry))
+    if program.findings:
+        raise AotError(program.findings)
+    out: list[str] = []
+    _, findings = _lower(program, strict_int=strict_int, explain=out)
+    if findings or not out:
+        raise AotError(findings)
+    return out[0]
 
 
 def build(entry: Path, out: Path, *, emit_c: Path | None = None, strict_int: bool = False) -> Path:

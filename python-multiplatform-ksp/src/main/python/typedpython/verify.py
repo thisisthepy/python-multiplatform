@@ -326,8 +326,9 @@ nothing above changes. Its interval rules differ from the table above in these, 
   * an interval may be unbounded on either side (`-inf` / `inf`; an endpoint beyond 2**128 is read as unbounded);
   * the base of a local that is not interval-tracked (a parameter, an `Unpack` target, a loop variable after its
     loop) and of a `Call` is the i64 range only when the oracle holds the name / the callee's return as int64,
-    else unbounded; `ArgvInt` is unbounded; `Index` elements, `ArgvLen` and `Len` are as above (a list holds
-    int64 elements, the back end refuses any other store);
+    else unbounded; `ArgvInt` is unbounded; an `Index` element is the i64 range when the oracle holds the
+    list's group as RAW (every value stored into such a list is an int64), else unbounded (#465); `ArgvLen` and
+    `Len` are as above;
   * every read of a local the oracle holds as int64 is also narrowed to the i64 range;
   * ADD / SUB / MUL / NEG are exact and never clamped (no operation deopts; one that leaves 64 bits is a
     big-integer operation and its value is the exact one); FLOORDIV / MOD are clamped to the i64 range only when
@@ -908,8 +909,11 @@ class _Checker:
             return _meet_interval(iv, _FULL) if raw else iv
         if cls is Len:
             return self.lens.get(e.array, (0, _LEN_MAX))
-        if cls in (Index, ArgvLen):
-            return _FULL                    # a list's element is an int64 (aot/int-list-store), so is argc
+        if cls is Index:
+            # an element of a RAW list group is an int64; one of a big-capable group is any int (aot/rep.py "Lists of ints")
+            return _FULL if self.sound.raw_element(self.fn.name, e.array) else _WIDE
+        if cls is ArgvLen:
+            return _FULL                    # argc is an int64
         if cls is Call:
             return _FULL if self.sound.raw_return(e.function) else _WIDE
         if cls is Cond:
@@ -3036,7 +3040,7 @@ def _prove(g: Function, sigs: dict[str, Function], classes: dict[str, ClassDecl]
 def sound_proofs(module: Module, oracle) -> dict[int, bool]:
     """The sound re-proof of the AOT mode (module docstring, #462): `module` is the output of `verify(m, aot=True)`;
     `oracle.raw_name(function, name)` / `oracle.raw_return(function)` say which I64 names and returns hold an
-    int64 (`aot/rep.py`). Returns, for every `proven` int operation and every Index / StoreIndex of the module's
+    int64, `oracle.raw_element(function, list)` whether the elements of a list do (`aot/rep.py`). Returns, for every `proven` int operation and every Index / StoreIndex of the module's
     functions (by `id` of the node), whether it is proved under intervals that hold of unbounded integers. Only
     `aot/rep.py` calls this; `verify()` never does."""
     sigs = {f.name: f for f in module.functions}
