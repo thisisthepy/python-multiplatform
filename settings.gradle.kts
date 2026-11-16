@@ -70,6 +70,9 @@ include(":python-multiplatform-ksp:fixtures:app")
 // KSP/AGP minimum-version wall of ROADMAP §13 stayed invisible to them while it broke every
 // Android consumer of the bindings plugin.
 include(":python-multiplatform-ksp:fixtures:android")
+// TypedPython AOT library called from Kotlin with no CPython on the classpath or in the process (#458). Applies the
+// bindings plugin with `apply false` only, for its Kotlin generator task.
+include(":python-multiplatform-ksp:fixtures:aot")
 
 // The Gradle plugin is an *included build* (see `pluginManagement` above), so it cannot own
 // subprojects of this build. Its fixtures are therefore root-build projects whose directory is

@@ -176,3 +176,27 @@ jobs:
               print("skipped: " + ", ".join(skipped) if skipped else "no TypedPythonKotlinCallTest results")
               sys.exit(1)
           PY
+
+
+      # #458: generated Kotlin wrappers of a TypedPython AOT library, called from the desktop JVM with no CPython.
+      # This fixture does not need macOS (its test JVM loads no libpython); it runs here only because this job
+      # already has JDK 21 and the host Python. A separate Gradle invocation from the app fixture's (AGENTS.md 8).
+      - name: AOT library fixture tests
+        run: |
+          rm -rf python-multiplatform-ksp/fixtures/aot/build/test-results/desktopTest
+          ./gradlew :python-multiplatform-ksp:fixtures:aot:desktopTest --rerun --console=plain \
+            -PtypedpythonPython="$PWD/python-multiplatform-ksp/.venv/bin/python"
+
+      - name: The AOT library tests ran (none skipped)
+        run: |
+          python3 - <<'PY'
+          import glob, sys, xml.etree.ElementTree as ET
+          cases = [c for p in glob.glob("python-multiplatform-ksp/fixtures/aot/build/test-results/desktopTest/*.xml")
+                   for c in ET.parse(p).getroot().iter("testcase")
+                   if c.get("classname") == "fixture.aot.AotLibraryCallTest"]
+          skipped = [c.get("name") for c in cases if c.find("skipped") is not None]
+          print(f"AotLibraryCallTest: {len(cases)} test(s), {len(skipped)} skipped")
+          if not cases or skipped:
+              print("skipped: " + ", ".join(skipped) if skipped else "no AotLibraryCallTest results")
+              sys.exit(1)
+          PY

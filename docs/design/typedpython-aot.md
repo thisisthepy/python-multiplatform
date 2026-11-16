@@ -335,13 +335,52 @@ earlier proposal of one library lock around each exported call.
 
 ### 8.3 Kotlin calling Python (the downcall)
 
-The Gradle plugin, which already generates Kotlin source for bindings, generates one typed
-Kotlin wrapper per exported function from the description of 8.1, and per platform the binding the
-platform rules require: on desktop JVM a downcall handle invoked with `invokeExact`, pointers as
-`JAVA_LONG`; on Android registration through `RegisterNatives` with only primitive types crossing; on
-Kotlin/Native (iOS, androidNative) a cinterop definition over the generated header; wasm when the
-target is taken up. The app then calls `module.function(args)` as ordinary typed Kotlin, with no
-`PyObject`, no interpreter start-up and no `PYTHONHOME`.
+Provenance. That the library output exists is owner decision D5 (2026-11-16). That the desktop JVM
+comes first and that the generated Kotlin is self-contained (it reaches `java.lang.foreign` by
+reflection once at link time, uses pointers as `JAVA_LONG` and calls through `invokeExact`, and does
+not depend on the CPython-embedding library) are leader decisions of 2026-11-16, not owner-confirmed.
+Everything below about the shape of the generated API is an agent proposal, not owner-confirmed.
+
+**What exists (#458, desktop JVM).** `GenerateAotLibraryBindingsTask` in the Gradle plugin reads the
+`<prefix>.json` of 8.1 (`abi_version` must be 1; another version, or a type outside the vocabulary,
+fails the task and names the function) and writes four Kotlin files into one package:
+
+- `AotFfm.kt`, the same text for every library: `TypedPythonAotException(className, message)` and a
+  small runtime over `java.lang.foreign` (JDK 21 with `--enable-preview`, or JDK 22 and later). It
+  resolves the API reflectively once, binds each symbol to a downcall handle whose type is made of
+  `long`, `double`, `byte` and `int` only, and reads and writes native memory through handles bound once.
+  Nothing outside `java.base`. A call afterwards is `invokeExact` and nothing else.
+- `<Object>.kt`: an object with `load(libraryPath)` (idempotent, thread-safe: loads the library,
+  binds every symbol, calls `<prefix>_init`) and one function per export. Names and parameter names
+  are the Python names as they are (snake_case kept; a Kotlin hard keyword is backticked). Types:
+  `Long`, `Double`, `Boolean`, the two list classes, no result type for None, and a generated data
+  class `<Name>Result(v0, v1, ...)` for a tuple (also for two elements, so there is one rule). A failed
+  call (status -1) throws `TypedPythonAotException` built from `<prefix>_last_error` on the same thread.
+- `F64List.kt`, `I64List.kt`: counted native handles with `size`, `get`/`set` (bounds checked on the
+  Kotlin side), `toDoubleArray()`/`toLongArray()`, `of(array)`, and `close()` (releases once; use after
+  close throws `IllegalStateException`). A list an exported function returns is wrapped as an owned
+  handle; the same Kotlin list passed for two parameters is the same handle, so the parameters alias as
+  in Python. An unclosed list is not freed by the garbage collector.
+
+Out pointers are per-thread scratch memory: one 128-byte block per thread, allocated on first use from
+an automatic arena that the garbage collector frees once the thread is gone. A call costs no
+allocation and two threads never share a slot. A function may have at most 16 results.
+The helper and the list classes have fixed names, so each library takes its own package.
+
+**How the fixture uses it.** `python-multiplatform-ksp/fixtures/aot` declares the bindings plugin with
+`apply false` and registers the task class itself, so no KSP, no `PYTHONHOME` staging and no dependency
+on `python-multiplatform` come with it. A front-end-only Python step writes the JSON, the task
+generates Kotlin from it into the test source set, and `python -m typedpython aot-lib` links the
+library as a dependency of the test task only. The test (`fixture.aot.AotLibraryCallTest`) calls
+the `nbody` kernels and a small library of failures and list functions, compares floats bit for bit
+with CPython, checks exception classes and messages, runs two threads, and asserts that no class of
+the CPython-embedding library is on the classpath and that the process loads no libpython (Linux: the
+process's maps; macOS: `vmmap` when it can examine the JVM, otherwise the classpath check only).
+
+**Not done.** Other platforms (Android `RegisterNatives`, Kotlin/Native cinterop, wasm); packaging of
+the library and the generated Kotlin into an app (waits for the owner decision of #25 step 3); the
+GraalVM native image (#456: the descriptors are not yet declared for native-image registration, so the
+generated wrappers are not shown to work there, and tier K stays open until they are, AGENTS.md 13).
 
 ### 8.4 Python calling Kotlin (the upcall)
 
