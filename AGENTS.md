@@ -352,6 +352,7 @@ generators emit. Run each fixture module as a **separate** Gradle invocation (ru
 | `:python-multiplatform-ksp:fixtures:app:desktopTest` | Upcall and proxy runtime |
 | `:python-multiplatform-compose:fixtures:compose:desktopTest` | Compose bindings and render proofs |
 | `:python-multiplatform-gradle-plugin-fixtures:artifact:desktopTest` | Artifact walker and `.pyi` stubs |
+| `:python-multiplatform-ksp:fixtures:aot:desktopTest` | Generated Kotlin wrappers of a TypedPython AOT library on the desktop JVM, with no CPython (bit-exact results, exceptions, lists, threads); needs a host Python, a skip is a failure in CI |
 
 Where each lives: `python-multiplatform-ksp/fixtures/{library,app,android}` (KSP processor),
 `python-multiplatform-gradle-plugin/fixtures/{artifact,artifact-valueclass,klib-artifact}` (artifact
