@@ -8,10 +8,13 @@
  *
  * Contents: the current-exception record, checked-free i64 helpers (floor division and modulo with
  * CPython's sign rules), float helpers, exact int/float comparison, the nine native `math` functions
- * with CPython's error rules, `repr(float)` and the `print` pieces.
+ * with CPython's error rules, `repr(float)`, native lists of floats and ints (counted, non-atomic: the
+ * single-threaded tier), the program argument count and the `print`
+ * pieces including `format(x, '.Nf')`.
  *
  * A compiled function returns 0 (ok) or -1 (an exception is recorded in `tpa_exc`) and writes its
- * result through an out pointer. Nothing here unwinds.
+ * result through an out pointer. Nothing here unwinds: every function leaves through one cleanup
+ * point that releases its lists, so an exception that reaches `main` leaves nothing allocated.
  */
 #ifndef TP_AOT_H
 #define TP_AOT_H
@@ -42,10 +45,12 @@
 #define TPA_ZeroDivisionError 1
 #define TPA_ValueError 2
 #define TPA_OverflowError 3
+#define TPA_IndexError 4
+#define TPA_MemoryError 5
 
 typedef struct {
     int kind;
-    char msg[160];
+    char msg[512];
 } tpa_exc_t;
 
 static TPA_THREAD_LOCAL tpa_exc_t tpa_exc;
@@ -56,6 +61,8 @@ static inline const char *tpa_exc_name(int kind)
     case TPA_ZeroDivisionError: return "ZeroDivisionError";
     case TPA_ValueError: return "ValueError";
     case TPA_OverflowError: return "OverflowError";
+    case TPA_IndexError: return "IndexError";
+    case TPA_MemoryError: return "MemoryError";
     }
     return "SystemError";
 }
@@ -96,10 +103,25 @@ static inline int tpa_report_uncaught(void)
  * (tp_runtime.h lines 322 to 326: tp_padd_i64 and friends); the compiler emits one only where the
  * verifier proved that the result stays inside i64.
  * ------------------------------------------------------------------------------------------ */
+#if defined(TP_CHECK_PROVEN) && (defined(__GNUC__) || defined(__clang__))
+/* tp_runtime.h under -DTP_CHECK_PROVEN: the sanitizer job builds with it, and a proven operation that
+ * does overflow (a wrong proof) stops the program instead of wrapping silently. */
+static inline void tpa__proof_failed(const char *op)
+{
+    fflush(stdout);
+    fprintf(stderr, "SystemError: a proven int operation (%s) overflowed 64 bits\n", op);
+    abort();
+}
+static inline int64_t tpa_padd_i64(int64_t a, int64_t b) { int64_t r; if (__builtin_add_overflow(a, b, &r)) tpa__proof_failed("+"); return r; }
+static inline int64_t tpa_psub_i64(int64_t a, int64_t b) { int64_t r; if (__builtin_sub_overflow(a, b, &r)) tpa__proof_failed("-"); return r; }
+static inline int64_t tpa_pmul_i64(int64_t a, int64_t b) { int64_t r; if (__builtin_mul_overflow(a, b, &r)) tpa__proof_failed("*"); return r; }
+static inline int64_t tpa_pneg_i64(int64_t a) { int64_t r; if (__builtin_sub_overflow((int64_t)0, a, &r)) tpa__proof_failed("-x"); return r; }
+#else
 static inline int64_t tpa_padd_i64(int64_t a, int64_t b) { return (int64_t)((uint64_t)a + (uint64_t)b); }
 static inline int64_t tpa_psub_i64(int64_t a, int64_t b) { return (int64_t)((uint64_t)a - (uint64_t)b); }
 static inline int64_t tpa_pmul_i64(int64_t a, int64_t b) { return (int64_t)((uint64_t)a * (uint64_t)b); }
 static inline int64_t tpa_pneg_i64(int64_t a) { return (int64_t)(0 - (uint64_t)a); }
+#endif
 
 /* CPython floor division (tp_runtime.h lines 350 to 370, tp_floordiv_i64). The compiler emits it only
  * for a divisor that is a constant other than 0 and -1, or for a proven operation (divisor a positive
@@ -689,6 +711,130 @@ static inline int tpa_math_hypot(double x, double y, double *out)
 }
 
 /* ------------------------------------------------------------------------------------------
+ * Native lists (design note 4.1, 6.2, 6.3; agent proposal, not owner-confirmed). A `list[float]` /
+ * `list[int]` is a counted heap object: the count, the length, the elements. It never changes length,
+ * so an element access needs one bounds test and nothing else. The count is NON-ATOMIC: this is the
+ * single-threaded tier (design 6.3 and 7; a list shared by threads needs atomic counts).
+ * A fresh list has count 1. `retain` adds an owner, `release` removes one and frees at 0 (a NULL
+ * list is a no-op, which is what lets a function release every local at its one exit). A function
+ * parameter is borrowed: the caller keeps it alive for the call, and two parameters may be the same
+ * list, as two names of one list are in the source language.
+ * ------------------------------------------------------------------------------------------ */
+typedef struct tpa_f64_list { int64_t rc; int64_t len; double d[]; } tpa_f64_list;
+typedef struct tpa_i64_list { int64_t rc; int64_t len; int64_t d[]; } tpa_i64_list;
+
+/* tp_runtime.h lines 1583 to 1599, tp__local_alloc: a negative length is an empty list (CPython's
+ * `[x] * -1 == []`), and a size that overflows is a MemoryError, never a wrapped small allocation. */
+static inline void *tpa__list_alloc(int64_t n, size_t header, size_t elem, int64_t *len)
+{
+    void *p;
+    if (n < 0) {
+        n = 0;
+    }
+    if ((uint64_t)n > (uint64_t)(SIZE_MAX - header) / elem) {
+        tpa_raise(TPA_MemoryError, "");
+        return NULL;
+    }
+    p = malloc(header + (size_t)n * elem);
+    if (p == NULL) {
+        tpa_raise(TPA_MemoryError, "");
+        return NULL;
+    }
+    *len = n;
+    return p;
+}
+
+/* tp_runtime.h lines 1093 to 1108, tp__array_slot: a negative index counts from the end; out of range
+ * raises IndexError with CPython's text, which differs for a store (line 1107). */
+static inline int tpa_slot(int64_t len, int64_t i, int store, int64_t *slot)
+{
+    if (i < 0) {
+        if (i < -len) {
+            goto out_of_range;
+        }
+        i += len;
+    }
+    else if (i >= len) {
+        goto out_of_range;
+    }
+    *slot = i;
+    return 0;
+out_of_range:
+    return tpa_raise(TPA_IndexError, store ? "list assignment index out of range" : "list index out of range");
+}
+
+#define TPA__DEF_LIST(NAME, CT)                                                                   \
+    static inline int tpa_##NAME##_alloc(int64_t n, tpa_##NAME##_list **out)                      \
+    {                                                                                             \
+        int64_t len = 0;                                                                          \
+        tpa_##NAME##_list *l = (tpa_##NAME##_list *)tpa__list_alloc(n, sizeof(tpa_##NAME##_list), \
+                                                                    sizeof(CT), &len);            \
+        if (l == NULL) {                                                                          \
+            return -1;                                                                            \
+        }                                                                                         \
+        l->rc = 1;                                                                                \
+        l->len = len;                                                                             \
+        *out = l;                                                                                 \
+        return 0;                                                                                 \
+    }                                                                                             \
+    static inline int tpa_##NAME##_fill(int64_t n, CT v, tpa_##NAME##_list **out)                 \
+    {                                                                                             \
+        int64_t i;                                                                                \
+        if (tpa_##NAME##_alloc(n, out)) {                                                         \
+            return -1;                                                                            \
+        }                                                                                         \
+        for (i = 0; i < (*out)->len; i++) {                                                       \
+            (*out)->d[i] = v;                                                                     \
+        }                                                                                         \
+        return 0;                                                                                 \
+    }                                                                                             \
+    static inline int tpa_##NAME##_copy(const tpa_##NAME##_list *src, tpa_##NAME##_list **out)    \
+    {                                                                                             \
+        if (tpa_##NAME##_alloc(src->len, out)) {                                                  \
+            return -1;                                                                            \
+        }                                                                                         \
+        if (src->len > 0) {                                                                       \
+            memcpy((*out)->d, src->d, (size_t)src->len * sizeof(CT));                             \
+        }                                                                                         \
+        return 0;                                                                                 \
+    }                                                                                             \
+    static inline void tpa_##NAME##_retain(tpa_##NAME##_list *l)                                  \
+    {                                                                                             \
+        if (l != NULL) {                                                                          \
+            l->rc += 1;                                                                           \
+        }                                                                                         \
+    }                                                                                             \
+    static inline void tpa_##NAME##_release(tpa_##NAME##_list *l)                                 \
+    {                                                                                             \
+        if (l != NULL && --l->rc == 0) {                                                          \
+            free(l);                                                                              \
+        }                                                                                         \
+    }
+TPA__DEF_LIST(f64, double)
+TPA__DEF_LIST(i64, int64_t)
+#undef TPA__DEF_LIST
+
+/* `list(range(n))`: 0 .. n-1 (an empty list for n <= 0) */
+static inline int tpa_i64_iota(int64_t n, tpa_i64_list **out)
+{
+    int64_t i;
+    if (tpa_i64_alloc(n, out)) {
+        return -1;
+    }
+    for (i = 0; i < (*out)->len; i++) {
+        (*out)->d[i] = i;
+    }
+    return 0;
+}
+
+/* ------------------------------------------------------------------------------------------
+ * The program arguments: only `len(sys.argv)` is compiled (a string has no other use yet; `int()` of one
+ * needs big integers, so it is a compile error, aot/int-unproven).
+ * ------------------------------------------------------------------------------------------ */
+static int tpa_argc = 0;
+static char **tpa_argv = NULL;
+
+/* ------------------------------------------------------------------------------------------
  * print: positional arguments only, separated by one space, ended by a newline, written to standard
  * output (buffered; the entry flushes it at exit and before anything is written to standard error).
  * The caller writes the separator before every argument but the first.
@@ -721,6 +867,31 @@ static inline void tpa_print_bool(int v)
 static inline void tpa_print_str(const char *s, size_t n)
 {
     fwrite(s, 1, n, stdout);
+}
+
+/* format(x, '.<prec>f') of a float: nan and the infinities as CPython writes them (never `-nan`), the
+ * rest through printf("%.*f"), whose result is the correctly rounded decimal expansion on glibc, musl, the
+ * Apple C library and UCRT (the same digits as CPython's own conversion; the dependence on the C
+ * library's exact rounding is issue #450, which the differential tests exercise on every target). */
+static inline void tpa_print_f64_fixed(double v, int prec)
+{
+    char buf[400];
+    int n;
+    if (v != v) {
+        fwrite("nan", 1, 3, stdout);
+        return;
+    }
+    if (v == HUGE_VAL || v == -HUGE_VAL) {
+        if (v > 0) {
+            fwrite("inf", 1, 3, stdout);
+        }
+        else {
+            fwrite("-inf", 1, 4, stdout);
+        }
+        return;
+    }
+    n = snprintf(buf, sizeof buf, "%.*f", prec, v);
+    fwrite(buf, 1, (size_t)n, stdout);
 }
 
 static inline void tpa_print_sep(void) { fputc(' ', stdout); }
