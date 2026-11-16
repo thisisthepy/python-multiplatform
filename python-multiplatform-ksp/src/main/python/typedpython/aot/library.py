@@ -683,7 +683,7 @@ _HEADER_TOP = """\
  *   one list from several threads is memory-safe for every list kind. For {name}_i64_list and {name}_f64_list
  *   (through _data, or inside the library) it is what a C array gives: a racing read sees the old or the new
  *   value, and two writers to one element leave one of the two values. Which of two writers to the same
- *   element wins is the caller's business, for every kind. The library itself writes only the lists a function
+ *   element wins is the caller's responsibility, for every kind. The library itself writes only the lists a function
  *   stores into, and only those it was given or made. The library holds no module-level state.
  *   A function that prints writes to the process's standard output through the C runtime's stdio. Output
  *   of several threads may interleave per call (stdio locks each call); the buffering is the C runtime's.
@@ -731,7 +731,7 @@ _HEADER_INT_LIST = """\
  *   own lock for each element access (a small lock inside the list, one per list, held only for a load or a swap of
  *   one element and never while anything is allocated or freed), so concurrent reads and writes of the elements are
  *   memory-safe: a reader sees the old or the new element, and nothing is freed twice or used after being freed. Which
- *   of two writers to the same element wins is the caller's business.
+ *   of two writers to the same element wins is the caller's responsibility.
 """
 
 

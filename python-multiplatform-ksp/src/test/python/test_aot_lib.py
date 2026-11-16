@@ -1364,9 +1364,10 @@ def test_a_value_that_reaches_int64_max_and_one_more_is_big_and_back(biglib):
         assert lib.raw("bump", h, i) == (0, [])
         ref.bump(mirror, i)
     assert mirror == [2**63 + 1, I64_MIN + 1, 6]
-    assert lib.get(h, 0)[0] == -1 and lib.error() == ELEMENT_OVERFLOW and biglib.live() == 1
+    # the small form has 63 bits, so I64_MIN + 1 in slot 1 is a big object too
+    assert lib.get(h, 0)[0] == -1 and lib.error() == ELEMENT_OVERFLOW and biglib.live() == 2
     assert lib.get(h, 1) == (0, I64_MIN + 1) and lib.get(h, 2) == (0, 6)
-    assert lib.il.set(h, 0, 1) == 0 and lib.get(h, 0) == (0, 1) and biglib.live() == 0
+    assert lib.il.set(h, 0, 1) == 0 and lib.get(h, 0) == (0, 1) and biglib.live() == 1
     for index in (3, -4):                                    # `w[i] + 1` fails on the read, with the list's own message
         with pytest.raises(IndexError) as e:
             ref.bump([0, 0, 0], index)

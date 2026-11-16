@@ -2327,7 +2327,7 @@ def test_fannkuch_generates_with_no_finding_and_only_count_is_a_big_capable_list
     assert "tpa_i64_iota(" in body and "tpa_i64_copy(" in body
     assert "tpa_int_list_store(v_count, " in body                  # an element store takes the new reference
     assert "tpa_int_list_load(v_count, " in body and "v_count->d[" not in body   # and every access is a locking helper
-    assert "v_perm1->d[" in body and "tpa_int_set(&v_perm" not in body
+    assert "v_perm1->d[" in body and not re.search(r"tpa_int_list_(load|store|init)\(v_perm1?\b", body)
     assert body.count("tp_cleanup:") == 1
 
 
@@ -2838,7 +2838,7 @@ def test_generated_c_contains_no_cpython(tmp_path):
     for inc in re.findall(r"#include\s*[<\"]([^>\"]+)", c + header + big):
         # (stdatomic.h and intrin.h: the library build's atomic list counts, tp_aot.h under -DTPA_LIBRARY, #455)
         assert inc in {"tp_aot.h", "errno.h", "math.h", "stdint.h", "stdio.h", "stdlib.h", "string.h",
-                       "stdatomic.h", "intrin.h", "stddef.h", "tp_aot_int.h"}, inc
+                       "stdatomic.h", "intrin.h", "sched.h", "stddef.h", "tp_aot_int.h"}, inc
 
 
 def test_generated_c_uses_the_default_modes_float_flags():

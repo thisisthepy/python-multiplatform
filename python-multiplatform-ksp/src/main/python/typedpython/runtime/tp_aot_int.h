@@ -2153,15 +2153,14 @@ typedef _Atomic int tpa_int_list_lock_t;
 #define TPA_INT_LIST__LOCK_TRY(f) (atomic_exchange_explicit((f), 1, memory_order_acquire) == 0)
 #define TPA_INT_LIST__LOCK_CLEAR(f) atomic_store_explicit((f), 0, memory_order_release)
 #if defined(__x86_64__) || defined(__i386__)
-#define TPA_INT_LIST__RELAX() __builtin_ia32_pause()
+#define TPA_INT_LIST__RELAX() __asm__ volatile("pause")
 #elif defined(__aarch64__)
 #define TPA_INT_LIST__RELAX() __asm__ volatile("yield" ::: "memory")
 #else
 #define TPA_INT_LIST__RELAX() ((void)0)
 #endif
 #endif
-#if !defined(_WIN32)
-#include <sched.h>
+#if !defined(_WIN32)                    /* <sched.h> comes from tp_aot.h, with the other thread headers */
 #define TPA_INT_LIST__YIELD() ((void)sched_yield())
 #else
 #define TPA_INT_LIST__YIELD() ((void)0)
