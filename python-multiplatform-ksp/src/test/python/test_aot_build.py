@@ -1491,7 +1491,9 @@ def test_generated_c_contains_no_cpython(tmp_path):
         assert not re.search(r"\b_?Py[A-Z_a-z]", body), (what, re.findall(r"\b_?Py[A-Z_a-z]\w*", body))
     assert '#include "tp_aot.h"' in c
     for inc in re.findall(r"#include\s*[<\"]([^>\"]+)", c + header):
-        assert inc in {"tp_aot.h", "errno.h", "math.h", "stdint.h", "stdio.h", "stdlib.h", "string.h"}, inc
+        # (stdatomic.h and intrin.h: the library build's atomic list counts, tp_aot.h under -DTPA_LIBRARY, #455)
+        assert inc in {"tp_aot.h", "errno.h", "math.h", "stdint.h", "stdio.h", "stdlib.h", "string.h",
+                       "stdatomic.h", "intrin.h"}, inc
 
 
 def test_generated_c_uses_the_default_modes_float_flags():
