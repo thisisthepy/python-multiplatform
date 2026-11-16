@@ -523,12 +523,12 @@ def test_failure_matches_cpython_class_and_message(lib, ref, name, args):
 
 def test_the_messages_are_the_ones_cpython_raises(lib, ref):
     """Pin three of them literally, so that a change of the reference interpreter shows here."""
-    want = {("rem", (5, 0)): ("ZeroDivisionError", "division by zero"),
-            ("root", (-1.0,)): ("ValueError", "expected a nonnegative input, got -1.0"),
-            ("get_f", ([1.0], 1)): ("IndexError", "list index out of range"),
-            ("set_f", ([1.0], 5, 1.0)): ("IndexError", "list assignment index out of range")}
-    for (name, args), expected in want.items():
-        assert run_row(lib, ref, name, args)[1:] == expected
+    want = [("rem", (5, 0), ("ZeroDivisionError", "division by zero")),         # pairs, not a dict: the
+            ("root", (-1.0,), ("ValueError", "expected a nonnegative input, got -1.0")),   # arguments hold lists
+            ("get_f", ([1.0], 1), ("IndexError", "list index out of range")),
+            ("set_f", ([1.0], 5, 1.0), ("IndexError", "list assignment index out of range"))]
+    for name, args, expected in want:
+        assert run_row(lib, ref, name, args)[1:] == expected, (name, args)
 
 
 def test_a_bool_argument_other_than_0_or_1_is_true(lib, ref):
