@@ -869,9 +869,11 @@ def test_int_from_str_unicode_whitespace_and_digits_by_code_point(shim):
     """Every code point c: the strings c + '7' and '7' + c (the first is valid exactly when c is whitespace or a
     decimal digit; the second when c is whitespace). The runtime either equals the reference or declines an
     invalid literal. The digit table of the header is Unicode 17.0 (the data of 3.15): another version of the
-    interpreter's unicodedata makes this test skip rather than compare with different data."""
-    if unicodedata.unidata_version != PINNED_UNICODE:
-        pytest.skip(f"the digit table is Unicode {PINNED_UNICODE}, this interpreter has {unicodedata.unidata_version}")
+    interpreter's unicodedata means the table is stale, and the test fails saying so (it does not skip: a skip
+    passes silently; leader, 2026-11-16)."""
+    assert unicodedata.unidata_version == PINNED_UNICODE, (
+        f"the digit table of tp_aot_int.h is Unicode {PINNED_UNICODE}, this interpreter has "
+        f"{unicodedata.unidata_version}: regenerate the table and update PINNED_UNICODE")
     bad = []
     accepted = declined = total = 0
     for cp in range(0x110000):

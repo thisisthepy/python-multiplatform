@@ -130,8 +130,13 @@ def need_cc():
 
 
 def need_pinned_unicode():
-    if unicodedata.unidata_version != PINNED_UNICODE:
-        pytest.skip(f"this interpreter's Unicode is {unicodedata.unidata_version}, the table pins {PINNED_UNICODE}")
+    """The runtime's tables hold the Unicode data of the reference interpreter they were generated with. A
+    reference with other data is not a reason to skip (a skip passes silently): it means the tables are stale,
+    so the test fails and says what to do (leader, 2026-11-16)."""
+    assert unicodedata.unidata_version == PINNED_UNICODE, (
+        f"this interpreter's Unicode is {unicodedata.unidata_version}, the runtime's tables hold {PINNED_UNICODE}: "
+        "regenerate them (python-multiplatform-ksp/tools/gen_aot_nonprintable.py --write, and the decimal digit "
+        "table of tp_aot_int.h) and update PINNED_UNICODE")
 
 
 def exe_env():

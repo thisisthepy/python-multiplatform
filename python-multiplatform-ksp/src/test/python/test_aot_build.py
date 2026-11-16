@@ -1312,13 +1312,12 @@ def test_a_program_with_a_big_integer_includes_the_big_integer_header(bigint):
     assert "tpa_int_mul(" in c and "tpa_argv_int(" in c and "tpa_int_release(" in c
 
 
-def test_a_program_whose_ints_are_all_proved_has_no_big_integer_header(merged, tmp_path):
+def test_a_program_whose_ints_are_all_proved_has_no_big_integer_header(merged, nbody_variant_generated):
     """The merged program of CASES has no unproved int: its C does not include tp_aot_int.h, names nothing of
     it, and keeps the `main` it always had. So does the variant of nbody with its size fixed in the source; and
     strict mode generates exactly the same text for both (nothing in them is TAGGED)."""
     assert "tp_aot_int" not in merged.c_file.read_text() and "tpa_int" not in merged.c_file.read_text()
-    variant = nbody_variant(tmp_path)
-    c = aot.generate(variant)
+    variant, c = nbody_variant_generated
     assert "tp_aot_int" not in c and "tpa_int" not in c and "tpa_argv_int" not in c and "wmain" not in c
     assert "int main(int argc, char **argv)\n{\n    int rc;\n    tpa_argc = argc;\n    tpa_argv = argv;\n" in c
     assert aot.generate(variant, strict_int=True) == c
@@ -1826,6 +1825,31 @@ def nbody_variant(tmp_path) -> Path:
 
 
 @pytest.fixture(scope="module")
+def nbody_variant_generated(tmp_path_factory):
+    """The variant of nbody with its size fixed in the source, generated once (default mode): (its path, its C)."""
+    variant = nbody_variant(tmp_path_factory.mktemp("nbody_variant"))
+    return variant, aot.generate(variant)
+
+
+@pytest.fixture(scope="module")
+def generate_benchmark():
+    """`aot.generate(BENCH / name)` (default mode) once per benchmark and module; a finding is raised again to
+    each test that asks."""
+    cache = {}
+
+    def generate(name):
+        if name not in cache:
+            try:
+                cache[name] = aot.generate(BENCH / name)
+            except aot.AotError as e:
+                cache[name] = e
+        if isinstance(cache[name], aot.AotError):
+            raise cache[name]
+        return cache[name]
+    return generate
+
+
+@pytest.fixture(scope="module")
 def nbody(tmp_path_factory):
     need_cc()
     tmp = tmp_path_factory.mktemp("nbody")
@@ -1948,13 +1972,13 @@ def test_an_argument_that_is_not_an_int_ends_with_the_reference_message(spectral
     assert ours.returncode == 1 and last_line(ours.stderr) == "IndexError: list index out of range"
 
 
-def test_nbody_generates_with_a_big_integer_argument():
-    c = aot.generate(BENCH / "nbody.py")
+def test_nbody_generates_with_a_big_integer_argument(generate_benchmark):
+    c = generate_benchmark("nbody.py")
     assert '#include "tp_aot_int.h"' in c and "tpa_argv_int(INT64_C(1)" in c and "wmain" in c
 
 
-def test_nbody_generates_c_with_one_cleanup_point_per_function(tmp_path):
-    c = aot.generate(nbody_variant(tmp_path))
+def test_nbody_generates_c_with_one_cleanup_point_per_function(nbody_variant_generated):
+    _, c = nbody_variant_generated
     bodies = re.findall(r"^static int tpf_\w+\([^)]*\)\n\{.*?^\}", c, flags=re.S | re.M)
     assert len(bodies) == 12                  # the eleven functions of nbody.py and the entry
     for body in bodies:
@@ -1963,9 +1987,9 @@ def test_nbody_generates_c_with_one_cleanup_point_per_function(tmp_path):
     assert "tpa_f64_release(v_x)" in c and "tpf_make_x(&" in c
 
 
-def test_the_benchmarks_that_build_generate_without_a_finding():
+def test_the_benchmarks_that_build_generate_without_a_finding(generate_benchmark):
     for name in ("spectral_norm.py", "nbody.py"):
-        aot.generate(BENCH / name)
+        generate_benchmark(name)
 
 
 def test_fannkuch_is_refused_only_for_the_stores_of_big_values_into_a_list():
