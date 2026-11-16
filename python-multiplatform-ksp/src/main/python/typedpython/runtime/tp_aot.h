@@ -718,7 +718,7 @@ static inline int tpa_math_hypot(double x, double y, double *out)
  * A fresh list has count 1. `retain` adds an owner, `release` removes one and frees at 0 (a NULL
  * list is a no-op, which is what lets a function release every local at its one exit). A function
  * parameter is borrowed: the caller keeps it alive for the call, and two parameters may be the same
- * list, as in Python.
+ * list, as two names of one list are in the source language.
  * ------------------------------------------------------------------------------------------ */
 typedef struct tpa_f64_list { int64_t rc; int64_t len; double d[]; } tpa_f64_list;
 typedef struct tpa_i64_list { int64_t rc; int64_t len; int64_t d[]; } tpa_i64_list;
