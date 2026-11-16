@@ -21,8 +21,29 @@ function holds it as a big-integer-capable value (`aot/rep.py`); inside, the sou
 exactly. An `int` RESULT (also an element of a tuple) that the function holds that way is converted back with a fit
 check: when it does not fit int64 the call fails with -1 and the error record `OverflowError` with the fixed message
 "the int result of `<function>` does not fit in 64 bits". That check belongs to this ABI and has no counterpart in the
-source language (like the null-handle TypeError); the generated header says so. `abi_version` stays 1: no signature
-changes. A library whose ints are all proved inside 64 bits is byte-identical to what the previous step generated.
+source language (like the null-handle TypeError); the generated header says so. A library whose ints are all proved
+inside 64 bits generates the C text, the header and the JSON it did, except that `abi_version` is 2 (and the comment
+at the top of the C text says so).
+
+Lists of big ints (#465, ABI version 2; the static classification and the new list kind: leader decision 2026-11-16,
+not owner-confirmed; the names, the messages and the JSON keys are agent proposals, not owner-confirmed). A `list[int]`
+that `aot/rep.py` finds big-capable (a TAGGED value can be stored into its group) is not an array of int64: the
+parameter or the result of an export that is in such a group has the type `int_list` instead of `i64_list`. Which kind
+a signature has follows from the classification and from nothing else; a list that crosses the boundary is one group
+with the outside, so the caller can only pass a handle of the kind the signature names. `int_list` is an opaque counted
+handle like the others, with these functions and no `_data` (its elements are not int64 in memory):
+
+  <p>_int_list *<p>_int_list_new(int64_t n)                              n zeros (an empty list for n < 0)
+  int64_t <p>_int_list_len(const <p>_int_list *l)
+  void <p>_int_list_retain(<p>_int_list *l), void <p>_int_list_release(<p>_int_list *l)
+  int <p>_int_list_get(const <p>_int_list *l, int64_t i, int64_t *out)   0 or -1 and the error record
+  int <p>_int_list_set(<p>_int_list *l, int64_t i, int64_t v)            0 or -1 and the error record
+
+`get` and `set` take the index as the source language does (a negative one counts from the end); out of range is an
+IndexError with the two messages of the source language ("list index out of range", "list assignment index out of
+range" for `set`). `get` of an element that does not fit int64 is the ABI-level OverflowError "the element of the list
+does not fit in 64 bits" (no value is written; the same element reads fine after a `set` of a smaller value); like the
+int result check above it has no counterpart in the source language, and the header says so.
 
 The exported ABI (every name is `<prefix>_...`; C linkage; default visibility, everything else hidden):
 
@@ -31,25 +52,30 @@ The exported ABI (every name is `<prefix>_...`; C linkage; default visibility, e
                                                folded at compile time); they exist so the ABI does not change
   int <p>_last_error(const char **class_name, const char **message)
   <p>_f64_list / <p>_i64_list: _new, _len, _data, _retain, _release
+  <p>_int_list: _new, _len, _get, _set, _retain, _release      (only in a library whose signatures use it)
 
 with the types `i64` (int64_t), `f64` (double), `bool` (uint8_t, a value other than 0 or 1 is read as true) and the
-opaque counted list handles `f64_list` and `i64_list`.
+opaque counted list handles `f64_list`, `i64_list` and `int_list`.
 
 The description file `<prefix>.json` (the input of the Kotlin generator; the keys and the vocabulary are stable
-while "abi_version" is 1):
+while "abi_version" is 2; version 2 only added the type `int_list` and its entry under "lists"):
 
   {"prefix": "<p>",
    "library": "<file name of the shared library on the platform that built it>",
-   "abi_version": 1,
+   "abi_version": 2,
    "runtime": {"init": "<p>_init", "shutdown": "<p>_shutdown", "last_error": "<p>_last_error"},
    "functions": [{"name": "<python name>", "symbol": "<p>_<name>", "line": <line of the def>,
                   "params": [{"name": "<python name>", "type": "<type>"}, ...],
                   "returns": ["<type>", ...]}],
    "lists": {"f64_list": {"element": "f64", "new": "...", "len": "...", "data": "...", "retain": "...",
                           "release": "..."},
-             "i64_list": {"element": "i64", ...}}}
+             "i64_list": {"element": "i64", ...},
+             "int_list": {"element": "i64", "new": "...", "len": "...", "get": "...", "set": "...", "retain": "...",
+                          "release": "..."}}}
 
-`<type>` is one of `i64`, `f64`, `bool`, `f64_list`, `i64_list` (`VOCABULARY`). "returns" is the list of out
+"lists" has the "int_list" entry (with "get" and "set" and no "data") only when a signature of the library uses that
+type; a library with no big-capable list at its boundary has the JSON it had under version 1 except `abi_version`.
+`<type>` is one of `i64`, `f64`, `bool`, `f64_list`, `i64_list`, `int_list` (`VOCABULARY`). "returns" is the list of out
 pointers after the parameters, in order: empty for a function that returns None, one element for an int, a
 float, a bool or a list, one per element for a fixed tuple. The C signature follows from it: a `<type>` in
 params is passed by value (a list as the handle), a `<type>` in returns is an out pointer to that type (to the
@@ -72,15 +98,15 @@ from typedpython.aot.program import analyze
 from typedpython.aotcheck import Finding
 from typedpython.ir import Type
 
-ABI_VERSION = 1
-VOCABULARY = ("i64", "f64", "bool", "f64_list", "i64_list")
+ABI_VERSION = 2
+VOCABULARY = ("i64", "f64", "bool", "f64_list", "i64_list", "int_list")
 _TYPE_NAME = {Type.I64: "i64", Type.F64: "f64", Type.BOOL: "bool", Type.F64_ARRAY: "f64_list",
               Type.I64_ARRAY: "i64_list"}
 _C_TYPE = {"i64": "int64_t", "f64": "double", "bool": "uint8_t"}
 _ANN_TYPE = {"int": "i64", "float": "f64", "bool": "bool"}
-_LIST_ELEMENT = {"f64_list": "f64", "i64_list": "i64"}
-_RESERVED_EXPORTS = frozenset({"init", "shutdown", "last_error", "f64_list", "i64_list"})
-_RESERVED_EXPORT_PREFIXES = ("f64_list_", "i64_list_")
+_LIST_ELEMENT = {"f64_list": "f64", "i64_list": "i64", "int_list": "int"}      # the runtime's name: tpa_<x>_list
+_RESERVED_EXPORTS = frozenset({"init", "shutdown", "last_error", "f64_list", "i64_list", "int_list"})
+_RESERVED_EXPORT_PREFIXES = ("f64_list_", "i64_list_", "int_list_")
 _RESERVED_PREFIXES = ("tpa", "tpf", "tp")       # the runtime's own names (`tpa_...`, `tpf_...`, `tp_cleanup`)
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
@@ -163,7 +189,7 @@ def export_findings(program, exports: list[str]) -> tuple[list[Finding], dict[st
                 or name.startswith(_RESERVED_EXPORT_PREFIXES)):
             found.append(_finding(rel, fn.lineno, "aot/export", name, f"`{name}` cannot be exported: its C symbol "
                                   "must be an ASCII identifier that is not one of the library's own names "
-                                  "(init, shutdown, last_error, f64_list..., i64_list...)", name))
+                                  "(init, shutdown, last_error, f64_list..., i64_list..., int_list...)", name))
             continue
         problems = []
         a = fn.args
@@ -313,9 +339,13 @@ class _Export:
         self.name = name
         self.node = node
         self.fn = fn
-        self.params = [(p.name, _TYPE_NAME[p.type]) for p in fn.params]          # type: ignore[union-attr]
+        # a list[int] is `int_list` where its group is big-capable (aot/rep.py), `i64_list` where it is raw
+        self.params = [(p.name, "int_list" if p.type is Type.I64_ARRAY and reps is not None
+                        and reps.list_big(name, p.name) else _TYPE_NAME[p.type])          # type: ignore[union-attr]
+                       for p in fn.params]
         if fn.returns in _TYPE_NAME:
-            self.returns = [_TYPE_NAME[fn.returns]]
+            self.returns = ["int_list" if fn.returns is Type.I64_ARRAY and reps is not None and reps.return_big(name)
+                            else _TYPE_NAME[fn.returns]]
         elif kinds is not None:
             self.returns = [_TYPE_NAME[k] for k in kinds]
         else:
@@ -330,6 +360,10 @@ class _Export:
                 self.tagged_results = {0}
             elif kinds is not None:
                 self.tagged_results = {i for i, k in enumerate(kinds) if k is Type.I64 and reps.element(name, i) == "tagged"}
+
+    @property
+    def uses_int_list(self) -> bool:
+        return "int_list" in [t for _, t in self.params] or "int_list" in self.returns
 
     @property
     def tagged_io(self) -> bool:
@@ -513,6 +547,48 @@ def _list_functions(p: str) -> list[str]:
     return out
 
 
+def _int_list_functions(p: str) -> list[str]:
+    """The functions of the `int_list` kind (ABI version 2); only a library whose signatures use the kind has them."""
+    return [
+        f"TPA_EXPORT {p}_int_list *{p}_int_list_new(int64_t n)",
+        "{",
+        f"    {p}_int_list *l = NULL;",
+        "    if (tpa_int_list_alloc(n, &l) != 0) {",
+        "        return NULL;",
+        "    }",
+        "    tpa_lib_clear_error();",
+        "    return l;",
+        "}",
+        f"TPA_EXPORT int64_t {p}_int_list_len(const {p}_int_list *l)",
+        "{",
+        "    return l == NULL ? 0 : l->len;",
+        "}",
+        f"TPA_EXPORT int {p}_int_list_get(const {p}_int_list *l, int64_t i, int64_t *out)",
+        "{",
+        "    if (l == NULL) {",
+        '        return tpa_lib_null_handle("l");',
+        "    }",
+        "    return tpa_int_list_get_i64(l, i, out);",
+        "}",
+        f"TPA_EXPORT int {p}_int_list_set({p}_int_list *l, int64_t i, int64_t v)",
+        "{",
+        "    if (l == NULL) {",
+        '        return tpa_lib_null_handle("l");',
+        "    }",
+        "    return tpa_int_list_set_i64(l, i, v);",
+        "}",
+        f"TPA_EXPORT void {p}_int_list_retain({p}_int_list *l)",
+        "{",
+        "    tpa_int_list_retain(l);",
+        "}",
+        f"TPA_EXPORT void {p}_int_list_release({p}_int_list *l)",
+        "{",
+        "    tpa_int_list_release(l);",
+        "}",
+        "",
+    ]
+
+
 def _c_text(g, bodies: list[list[str]], exports: list[_Export], p: str) -> str:
     out = [
         f"/* Generated by typedpython.aot (SPEC N-17, #455): the library `{p}`, ABI version {ABI_VERSION}. Owner decision D5",
@@ -525,7 +601,7 @@ def _c_text(g, bodies: list[list[str]], exports: list[_Export], p: str) -> str:
         "@INT@",
         f"typedef tpa_f64_list {p}_f64_list;",
         f"typedef tpa_i64_list {p}_i64_list;",
-        "",
+        "@INTLIST@",
     ]
     out += [g.prototype(f) for f in g.fns.values()]
     out.append("")
@@ -534,6 +610,8 @@ def _c_text(g, bodies: list[list[str]], exports: list[_Export], p: str) -> str:
     for e in exports:
         out += [*e.wrapper(p), ""]
     out += _list_functions(p)
+    if any(e.uses_int_list for e in exports):
+        out += _int_list_functions(p)
     out += [
         f"TPA_EXPORT int {p}_init(void)",
         "{",
@@ -552,6 +630,9 @@ def _c_text(g, bodies: list[list[str]], exports: list[_Export], p: str) -> str:
     # the big-integer runtime is included only where the generated text uses it (a library whose ints are all proved
     # inside 64 bits is byte-identical to what the previous step generated); the include line replaces `@INT@`
     # (and an empty line stands where the old text had one)
+    # (the typedef of the `int_list` kind, `@INTLIST@`, is a line of its own only in a library that uses the kind)
+    text = text.replace("@INTLIST@\n", f"typedef tpa_int_list {p}_int_list;\n\n" if any(e.uses_int_list for e in exports)
+                        else "\n")
     if emit_mod.needs_int_runtime(text.replace("@INT@", "")):
         return text.replace("@INT@", '#include "tp_aot_int.h"\n')
     return text.replace("@INT@", "")
@@ -598,10 +679,12 @@ _HEADER_TOP = """\
  * Threads
  *   There is no library-wide lock. Exported functions are reentrant and may run on several threads at once;
  *   the error record is per thread; list counts (retain, release, and the retains the library does) are
- *   atomic, so a handle may be shared and released from several threads. Writes to the same list's elements
- *   from several threads are the caller's responsibility, exactly as with a C or Kotlin array: the library
- *   itself writes only the lists a function stores into, and only those it was given or made. The library
- *   holds no module-level state.
+ *   atomic, so a handle may be shared and released from several threads. Reading and writing the elements of
+ *   one list from several threads is memory-safe for every list kind. For {name}_i64_list and {name}_f64_list
+ *   (through _data, or inside the library) it is what a C array gives: a racing read sees the old or the new
+ *   value, and two writers to one element leave one of the two values. Which of two writers to the same
+ *   element wins is the caller's responsibility, for every kind. The library itself writes only the lists a function
+ *   stores into, and only those it was given or made. The library holds no module-level state.
  *   A function that prints writes to the process's standard output through the C runtime's stdio. Output
  *   of several threads may interleave per call (stdio locks each call); the buffering is the C runtime's.
  *
@@ -623,10 +706,43 @@ _HEADER_ERR_NEW = ("TypeError whose message names the argument.\n"
                    " *   ABI and has no counterpart in the source language.\n *\n * Lists")
 
 
+_HEADER_LISTS_END = " *\n * Threads\n"
+_HEADER_INT_LIST = """\
+ *
+ * Lists that may hold big ints ({name}_int_list)
+ *   Where the compiler found that a list[int] of a function may hold a value outside 64 bits, that function's
+ *   parameter or result is a {name}_int_list instead of a {name}_i64_list (the signatures below say which; a list
+ *   that crosses the boundary is one group with the outside, so you can only pass a handle of the kind a signature
+ *   names). It is an opaque, reference-counted handle with the ownership rules of the other lists, but its elements
+ *   are not int64_t in memory, so there is no _data: read element i with {name}_int_list_get(l, i, &v) and write it
+ *   with {name}_int_list_set(l, i, v). Both return 0 or -1 and the error record. An index out of range (a negative
+ *   one counts from the end, as in the source language) is an IndexError with the source language's messages
+ *   ("list index out of range", and "list assignment index out of range" for _set). _get of an element that does not
+ *   fit int64_t is an OverflowError whose message says that the element of the list does not fit in 64 bits (no
+ *   value is written); after a _set of a smaller value the same element reads fine. That check belongs to this ABI
+ *   and has no counterpart in the source language. {name}_int_list_new(n) makes n zeros (an empty list for n < 0)
+ *   and, like the other _new functions, clears the error record; a NULL handle passed to _get or _set is a
+ *   TypeError as for an exported function. _len, _retain and _release are as for the other lists.
+ *   Which kind a list has in a signature follows from the whole program, not from the function alone: a change in a
+ *   helper that several exports share can change another export's parameter or result from {name}_i64_list to
+ *   {name}_int_list (or back), so regenerate the header and rebuild the callers together. The two handle kinds are
+ *   not interchangeable: passing an i64 handle where an int handle is expected (or the reverse) corrupts memory, and
+ *   only the C types, which differ, prevent it. Threads: _get and _set (and the compiled functions) take the list's
+ *   own lock for each element access (a small lock inside the list, one per list, held only for a load or a swap of
+ *   one element and never while anything is allocated or freed), so concurrent reads and writes of the elements are
+ *   memory-safe: a reader sees the old or the new element, and nothing is freed twice or used after being freed. Which
+ *   of two writers to the same element wins is the caller's responsibility.
+"""
+
+
 def _header_text(p: str, module: str, exports: list[_Export], tagged: bool = False) -> str:
     up = p.upper()
     guard = f"TP_AOT_LIB_{up}_H"
     top = _HEADER_TOP.format(name=p, module=module)
+    int_list = any(e.uses_int_list for e in exports)
+    if int_list:
+        assert _HEADER_LISTS_END in top
+        top = top.replace(_HEADER_LISTS_END, _HEADER_INT_LIST.format(name=p) + _HEADER_LISTS_END)
     if tagged:
         assert _HEADER_INT_OLD in top
         top = top.replace(_HEADER_INT_OLD, _HEADER_INT_NEW)
@@ -643,7 +759,10 @@ def _header_text(p: str, module: str, exports: list[_Export], tagged: bool = Fal
            f"#  define {up}_API __attribute__((visibility(\"default\")))", "#else", f"#  define {up}_API",
            "#endif", "",
            f"typedef struct {p}_f64_list {p}_f64_list;    /* list[float], opaque */",
-           f"typedef struct {p}_i64_list {p}_i64_list;    /* list[int], opaque */", ""]
+           f"typedef struct {p}_i64_list {p}_i64_list;    /* list[int], opaque */"]
+    if int_list:
+        out.append(f"typedef struct {p}_int_list {p}_int_list;    /* list[int] that may hold values outside 64 bits, opaque */")
+    out.append("")
     for e in exports:
         returns = ", ".join(e.returns) or "None"
         out.append(f"/* {e.signature_text()}   ({module}, line {e.node.lineno}); results: {returns} */")
@@ -664,6 +783,20 @@ def _header_text(p: str, module: str, exports: list[_Export], tagged: bool = Fal
                 "/* one more owner / one owner less (NULL is a no-op); the last release frees */",
                 f"{up}_API void {p}_{t}_list_retain({p}_{t}_list *l);",
                 f"{up}_API void {p}_{t}_list_release({p}_{t}_list *l);", ""]
+    if int_list:
+        out += ["/* list[int] that may hold values outside 64 bits: n elements, all zero (an empty list for n < 0); NULL with a",
+                " * MemoryError record on failure */",
+                f"{up}_API {p}_int_list *{p}_int_list_new(int64_t n);",
+                "/* the length (0 for NULL) */",
+                f"{up}_API int64_t {p}_int_list_len(const {p}_int_list *l);",
+                "/* element i (negative counts from the end) as an int64_t: 0, or -1 with an IndexError record, or -1 with the",
+                " * OverflowError record of an element that does not fit in 64 bits (nothing is written to *out then) */",
+                f"{up}_API int {p}_int_list_get(const {p}_int_list *l, int64_t i, int64_t *out);",
+                "/* set element i: 0, or -1 with an IndexError record */",
+                f"{up}_API int {p}_int_list_set({p}_int_list *l, int64_t i, int64_t v);",
+                "/* one more owner / one owner less (NULL is a no-op); the last release frees */",
+                f"{up}_API void {p}_int_list_retain({p}_int_list *l);",
+                f"{up}_API void {p}_int_list_release({p}_int_list *l);", ""]
     out += ["#ifdef __cplusplus", "}", "#endif", "", f"#endif /* {guard} */", ""]
     return "\n".join(out)
 
@@ -674,6 +807,10 @@ def _description(p: str, exports: list[_Export]) -> dict:
         lists[f"{t}_list"] = {"element": t, "new": f"{p}_{t}_list_new", "len": f"{p}_{t}_list_len",
                               "data": f"{p}_{t}_list_data", "retain": f"{p}_{t}_list_retain",
                               "release": f"{p}_{t}_list_release"}
+    if any(e.uses_int_list for e in exports):
+        lists["int_list"] = {"element": "i64", "new": f"{p}_int_list_new", "len": f"{p}_int_list_len",
+                             "get": f"{p}_int_list_get", "set": f"{p}_int_list_set",
+                             "retain": f"{p}_int_list_retain", "release": f"{p}_int_list_release"}
     return {"prefix": p, "library": library_file_name(p), "abi_version": ABI_VERSION,
             "runtime": {"init": f"{p}_init", "shutdown": f"{p}_shutdown", "last_error": f"{p}_last_error"},
             "functions": [e.description(p) for e in exports], "lists": lists}
@@ -730,10 +867,9 @@ class _Plan:
         return c_text, []
 
 
-def generate_library(module: Path, *, exports: list[str], prefix: str,
-                     strict_int: bool = False) -> tuple[str, str, dict]:
-    """See the module docstring. Raises `AotError` with every finding. `strict_int`: an int operation that is not
-    proved inside 64 bits is the finding `aot/int-unproven`, as before #462."""
+def _prepare(module: Path, exports: list[str], prefix: str, strict_int: bool):
+    """The analysed program and the plan of a library; raises `AotError` with every finding of the export list, the
+    prefix and the program's own analysis."""
     module = Path(module)
     exports = list(exports)
     program = analyze(module, library=True)
@@ -745,7 +881,26 @@ def generate_library(module: Path, *, exports: list[str], prefix: str,
     findings += [f for f in program.findings if not any(a <= f.line <= b for a, b in spans)]
     if findings:
         raise AotError(findings)
-    plan = _Plan(program, prefix, nodes, keep, strict_int)
+    return program, _Plan(program, prefix, nodes, keep, strict_int)
+
+
+def explain_library(module: Path, *, exports: list[str], prefix: str, strict_int: bool = False) -> str:
+    """`--explain-lists` for a library (#465): the groups of `list[int]` names of the functions it compiles, with the
+    list parameters and results of the exports marked as crossing the boundary. Raises `AotError` as
+    `generate_library` does."""
+    program, plan = _prepare(module, exports, prefix, strict_int)
+    out: list[str] = []
+    _, found = _lower(program, plan, strict_int, explain=out)
+    if found or not out:
+        raise AotError(found)
+    return out[0]
+
+
+def generate_library(module: Path, *, exports: list[str], prefix: str,
+                     strict_int: bool = False) -> tuple[str, str, dict]:
+    """See the module docstring. Raises `AotError` with every finding. `strict_int`: an int operation that is not
+    proved inside 64 bits is the finding `aot/int-unproven`, as before #462."""
+    program, plan = _prepare(module, exports, prefix, strict_int)
     c_text, found = _lower(program, plan, strict_int)
     if found or c_text is None or plan.result is None:
         raise AotError(found)

@@ -210,10 +210,40 @@ not owner-confirmed).**
   rebound, as lists are; parameters are borrowed; a returned value is owned by the caller). A program decides per name,
   parameter, return and tuple element by a fixpoint over all its functions (`aot/rep.py`, which states the rule and is
   tested at the level of the IR). A value is RAW when it is an int constant, `len(...)`, the loop variable of a `range`
-  loop whose bounds are RAW, an element read from a `list[int]`, a call result whose callee returns RAW, a parameter
+  loop whose bounds are RAW, an element read from a `list[int]` of a RAW list group (below), a call result whose callee returns RAW, a parameter
   whose every call site passes RAW (a library export also receives int64 from outside), or the result of an operation
   the IR marks proved AND the sound re-proof (below) proves AND whose operands are all RAW. Everything else is TAGGED:
-  an unproved operation, any operation with a TAGGED operand, `int(sys.argv[i])`, and what flows from them.
+  an unproved operation, any operation with a TAGGED operand, `int(sys.argv[i])`, an element read from a big-capable
+  list, and what flows from them.
+- *Lists of ints (#465; static classification: leader decision 2026-11-16, not owner-confirmed; the rules are agent
+  proposals, not owner-confirmed).* A `list[int]` is not one kind of list. Each `list[int]` name of the program (a
+  local, a parameter, the list a function returns, a call result, a creation) belongs to a GROUP, and the names that may
+  denote one list object are merged: `b = a`; an argument and the parameter it is passed to, at every call site; the
+  list a function returns and the call result that receives it; all the lists a name ever holds (a name assigned twice,
+  the two branches of a conditional); a list that crosses a library boundary (an export's list parameter and result are
+  nodes like the others, and the class of their group is what the generated signature says). A copy `b = a[:]` is a new
+  object, so it is not merged with `a`, but its elements come from `a`: when the group of `a` is big-capable the group of
+  `b` is too (one-way). A group is BIG-CAPABLE when a TAGGED value can be stored into a member (`a[i] = v`, `a[i] op= v`),
+  when a member is created by `[v] * n` with a TAGGED `v` or by a display with a TAGGED element, when it is a copy of a
+  big-capable list, or when the analysis does not understand how a name is bound; every other group is RAW. On any
+  doubt, big-capable. The class and the int inference are one fixpoint (an element read from a RAW group is a RAW int, one
+  from a big-capable group is TAGGED, and a stored value is TAGGED or not by the int inference); both only rise, so it
+  ends. The sound re-proof asks the same oracle: an element of a RAW group is an int64, one of a big-capable group is
+  unbounded, which is the one place the proof machinery assumed "list elements are int64", and is now conditional.
+  A RAW list is exactly what it was (the array of `int64_t`, the generated C, the ABI's `i64_list`). A big-capable list
+  is the same counted heap object with elements of the tagged value (`tpa_int_list` of `runtime/tp_aot_int.h`): creation
+  retains what it takes, an element read is a new reference, an element store takes the new element and releases the
+  old, and the release of the list releases every element before it frees; all at the same cleanup point as every other
+  owned value. What it costs: a list in a big-capable group pays tagged element access (one
+  word, a retain and a release per read and store, and a call into the big-integer code for the arithmetic on what is
+  read), and one store of a TAGGED value into any list that may alias it makes all of them pay; a list that only ever
+  receives proved values stays a plain `int64_t` array even when its elements are read into TAGGED arithmetic. What the
+  classification cannot find: it is per name and per program, never per object or per path, so a list that receives a
+  big value on one path only makes every list it may alias big-capable (speed, never exactness). The diagnostic
+  `python -m typedpython aot-build ENTRY.py --explain-lists` (also `aot-lib ... --explain-lists`) builds nothing and prints
+  each group with its members (function, name, line), its class, each merge with the statement and line that caused it,
+  and for a big-capable group the statement and line of each cause. fannkuch.py builds with `count` big-capable (`r`
+  starts as the argument, so `count[r - 1] = r` and `count[r] -= 1` store TAGGED values) and `perm1` and `perm` raw.
 - *A proved flag is not enough.* The front end's and the verifier's proofs read every int as one inside 64 bits (an
   operation that is not proved is clamped to int64, "it would have deopted"; a parameter or a call result is "any
   int64"), which is false of a TAGGED value; a guard `if a < b:` cuts the interval of `a` by that false interval of a
@@ -238,11 +268,9 @@ not owner-confirmed).**
   from the reference's documentation, not observed on the machine that wrote it.
 - *Strict mode.* `--strict-int` on `aot-build` and `aot-lib` (`strict_int=True`) makes any int the compiler cannot prove
   inside 64 bits a compile error, `aot/int-unproven`, with the message of the earlier step. It is off by default.
-- *Still refused.* The elements of a `list[int]` are 64-bit ints: a value that is not proved to fit 64 bits stored into
-  one (an element store, `[v] * n`, a list display) is the finding `aot/int-list-store`, and lists of big integers
-  arrive in the next step (a side table for the elements outside 64 bits, ABI version 2, and with them fannkuch.py,
-  which is refused for exactly its two list stores). An int literal or a module constant outside 64 bits is still
-  `aot/int-literal` / `aot/constant`. spectral_norm.py and nbody.py (reading `sys.argv`) build and run.
+- *Still refused.* An int literal or a module constant outside 64 bits is still `aot/int-literal` / `aot/constant`.
+  The finding `aot/int-list-store` no longer exists (a store of a TAGGED value makes its group big-capable).
+  spectral_norm.py, nbody.py (reading `sys.argv`) and fannkuch.py build and run.
 
 CPython limits conversion between an int and a decimal string to 4300 digits by default and raises
 ValueError beyond that, in `str`, `print`, f-strings and `int(str)`. The AOT runtime reproduces that
@@ -278,7 +306,12 @@ choose.
 - Strings: length, a kind (1, 2 or 4 bytes per code point, as CPython's flexible representation, so
   indexing is O(1) and matches CPython's code-point semantics), the characters. Literals live in
   read-only data with no count.
-- Lists: pointer, length, capacity, with unboxed elements for `float`, `int` (when proved) and `bool`.
+- Lists: a counted heap object, count and length and then the elements; `float` elements are unboxed `double`s.
+  A `list[int]` is one of two kinds, decided for each group of list names that may be one list (section 5, "Lists of
+  ints"): RAW, with unboxed `int64_t` elements, or BIG-CAPABLE, with one tagged word per element (the small-int /
+  big-int value of D1, the list owns one reference to each element that is a big). The kind is static, so there is no
+  check per element read for which kind it is, and a raw list pays nothing for the other. (Capacity belongs to the
+  growable lists of tier S: a list of tier K never changes length.)
   Dicts: an insertion-ordered entry array plus an index table, the structure CPython uses, so iteration
   order is identical by construction.
 
@@ -337,6 +370,32 @@ produce.
 The first version has parallel loops only; `threading` is tier T (leader decision D7, not
 owner-confirmed).
 
+**Lists that may hold big ints (#465), the one shared container that exists today.** A library build
+(`TPA_THREADS`) lets any host thread hold the same list handle. For a raw `i64_list` or an `f64_list` a
+racing read and write yields the old or the new value, the same as a C array. For a big-capable
+`tpa_int_list` the element is a small int or a counted pointer to a big integer, and the two steps of a
+read (load the word, then retain it) and of a store (put the new word, release the old one, freeing it at
+zero) are not atomic as a pair: a reader could retain what a writer had just freed, and two writers
+could free the old element twice. CPython stays memory-safe under the same race, so AOT must too. The
+rule of this section (per-container locking for shared containers) is applied with one small lock inside
+each `tpa_int_list` (agent proposal, not owner-confirmed; the rule it serves is the per-container lock
+above and the leader's decision of 2026-11-16 that there is no library-wide lock):
+
+- Only under `TPA_THREADS`; the lock field exists only there, so an executable has the layout and the
+  code it had, and the code for raw and float lists is unchanged.
+- A spin lock on one flag (atomic exchange to take, atomic store of 0 to release, a CPU pause and, after
+  64 tries, a yield of the time slice where the platform has a portable one). It cannot deadlock: it is per
+  list, no operation holds two (a copy locks only its source), and the code between lock and unlock is
+  one load, one count increment or one word exchange, with no allocation, no free, no callback and no
+  other lock.
+- Element read: under the lock, load the word and retain it; unlock. Element store: take the new
+  reference first, under the lock exchange the slot's word, unlock, then release the OLD word (a release
+  may free memory, which is not done under the lock). `a[:]` of a big-capable list holds the source's lock
+  for its loop of loads and retains; the conversions from a raw list and `[v] * n`, `range` and displays
+  write a list no other thread can see yet and take none; the release at count zero has no other owner.
+- Result: a reader sees the old or the new element; nothing is freed twice or used after free. Which of
+  two writers to the same slot wins is still the caller's business.
+
 ## 8. The C-ABI library and the Kotlin call path
 
 Owner decision D5 (2026-11-16): besides the executable, an AOT build produces a C-ABI library that a
@@ -353,16 +412,21 @@ calling rules of AGENTS.md 16.
 - `<prefix>_init()` runs the module initialisers of section 3 once (idempotent, safe to call from any
   thread) and `<prefix>_shutdown()` frees what they allocated.
 - A generated C header and, beside it, a machine-readable description of the same signatures for the
-  Kotlin side (8.3). No symbol is found by name at run time.
+  Kotlin side (8.3). No symbol is found by name at run time. The description's `abi_version` is 2 since #465 (leader
+  decision 2026-11-16, not owner-confirmed): the type vocabulary gained `int_list` (8.2), and its `lists` section has an
+  `int_list` entry only for a library whose signatures use that kind; a library with no big-capable list at its boundary
+  has the C text, the header and the description it had under version 1, except that `abi_version` is 2 (and the comment
+  at the top of the C text says so).
 
 ### 8.2 Types at the boundary
 
 | Python type | C ABI | Kotlin side |
 |---|---|---|
 | `int`, `float`, `bool` | `int64_t`, `double`, `uint8_t` | `Long`, `Double`, `Boolean` |
-| `int` held as a big-integer-capable value inside the function (#462) | A parameter arrives as `int64_t` and is converted where the compiled function holds it so. A result (also an element of a tuple) is converted back with a fit check: one that does not fit `int64_t` fails the call with -1 and the error record `OverflowError`, message "the int result of `<function>` does not fit in 64 bits", and no out value is written. The same call with smaller inputs succeeds. `abi_version` stays 1 (no signature changes) | `Long`; the failed call throws `TypedPythonAotException` as for any other error |
+| `int` held as a big-integer-capable value inside the function (#462) | A parameter arrives as `int64_t` and is converted where the compiled function holds it so. A result (also an element of a tuple) is converted back with a fit check: one that does not fit `int64_t` fails the call with -1 and the error record `OverflowError`, message "the int result of `<function>` does not fit in 64 bits", and no out value is written. The same call with smaller inputs succeeds | `Long`; the failed call throws `TypedPythonAotException` as for any other error |
 | `str` | pointer and length of UTF-8 bytes; an argument is borrowed for the call, a result is owned by the caller and released with `<prefix>_free` | `String`, copied at the boundary |
 | `list[float]` / `list[int]`, as an argument and as a result | an opaque counted handle (`<prefix>_f64_list`, `<prefix>_i64_list`) made and read through exported list functions (`_new`, `_len`, `_data`, `_retain`, `_release`); an argument is borrowed for the call, a returned handle is owned by the caller | a class holding the handle, with `DoubleArray` / `LongArray` copied from or to the `_data` address as the app needs |
+| a `list[int]` that the classification finds big-capable (#465), as an argument and as a result | the opaque counted handle `<prefix>_int_list`, with `_new` (n zeros), `_len`, `_retain`, `_release` as above and, because its elements are not `int64_t` in memory, `_get(l, i, &v)` and `_set(l, i, v)` instead of `_data`; both return 0 or -1 with the error record: an index out of range (a negative one counts from the end) is the source language's `IndexError` with its two messages, and `_get` of an element that does not fit `int64_t` fails with an `OverflowError` whose fixed message is "the element of the list does not fit in 64 bits" (nothing is written; after a `_set` of a smaller value the same element reads). Which kind a signature has follows from the classification: a list that crosses the boundary is one group with the outside, so the caller can only pass a handle of the kind the signature names, and a change in a helper that several exports share can change another export's list kind, so a header is regenerated and its callers rebuilt together. The two handle kinds are not interchangeable (a wrong one is memory corruption; only the C types prevent it). `_get` and `_set` take the list's own lock (section 7) | a class holding the handle with `get(i)` / `set(i, v)` (the generator's matching class is the next step) |
 | an instance of a compiled class, or any other container | an opaque handle (a counted reference) with `<prefix>_release(handle)` | a Kotlin class holding the handle, released deterministically (`close`) with a cleaner as a safety net |
 | `None` result | `void` | `Unit` |
 
@@ -370,7 +434,9 @@ The int rows are an agent proposal, not owner-confirmed (the representation they
 approved by the leader on 2026-11-16, not owner-confirmed). The result rule is an ABI-level rule with no counterpart in
 the source language, like the null-handle `TypeError`: the source language's int has no limit and the C ABI's has, and
 the generated header says so in its Errors paragraph (only for a library that has such a result; the header of a library
-whose ints are all proved inside 64 bits is what it was). Lists of big integers do not cross the boundary in this step.
+whose ints are all proved inside 64 bits is what it was). The `int_list` row and its `OverflowError` are an agent
+proposal, not owner-confirmed, and the element rule is, like the int result rule, ABI-level with no counterpart in the
+source language; the header says so in a paragraph that exists only in a library that uses the kind.
 
 The list row is a leader decision of 2026-11-16, not owner-confirmed. Reason: an AOT list carries a 16-byte
 header (count and length) before its elements, so a foreign array cannot be passed as it is; a handle
@@ -387,9 +453,13 @@ called from any Kotlin thread and from several at once, so exported functions ar
 record behind `<prefix>_last_error` is thread-local. List counts are atomic in a library build (and stay
 non-atomic in an executable build). Module-level mutable state is refused for a library (`aot/library-state`):
 tier K has none, since module constants are folded at compile time and a function that assigns a
-module-level name makes a local. Concurrent writes to the elements of one list from several threads are the
-caller's responsibility, exactly as with a Kotlin array, and the generated header says so. This replaces the
-earlier proposal of one library lock around each exported call.
+module-level name makes a local. Concurrent reads and writes of the elements of one list from several threads are
+memory-safe for every list kind (agent proposal, not owner-confirmed; the correction of #465): for `i64_list` and
+`f64_list` they are what a C or Kotlin array gives, a racing read sees the old or the new value; for `int_list` the
+library takes a small per-list lock inside the list for each element access (section 7), because a big element is a
+counted object that a racing write could free under a reader. Which of two writers to the same element wins is the
+caller's business for every kind, and the generated header says so. This replaces the earlier proposal of one library
+lock around each exported call and the earlier text that left every element race to the caller.
 
 ### 8.3 Kotlin calling Python (the downcall)
 
@@ -400,8 +470,10 @@ not depend on the CPython-embedding library) are leader decisions of 2026-11-16,
 Everything below about the shape of the generated API is an agent proposal, not owner-confirmed.
 
 **What exists (#458, desktop JVM).** `GenerateAotLibraryBindingsTask` in the Gradle plugin reads the
-`<prefix>.json` of 8.1 (`abi_version` must be 1; another version, or a type outside the vocabulary,
-fails the task and names the function) and writes four Kotlin files into one package:
+`<prefix>.json` of 8.1 (`abi_version` must be 2, and every other value, 1 included, fails the task and
+names the supported version: there are no deployed version 1 libraries and the compiler here writes 2 only; a
+type outside the vocabulary, or `int_list` with no `lists.int_list` entry, fails the task and names the
+function) and writes four Kotlin files into one package, five when the library uses `int_list`:
 
 - `AotFfm.kt`, the same text for every library: `TypedPythonAotException(className, message)` and a
   small runtime over `java.lang.foreign` (JDK 21 with `--enable-preview`, or JDK 22 and later). It
@@ -411,7 +483,7 @@ fails the task and names the function) and writes four Kotlin files into one pac
 - `<Object>.kt`: an object with `load(libraryPath)` (idempotent, thread-safe: loads the library,
   binds every symbol, calls `<prefix>_init`) and one function per export. Names and parameter names
   are the Python names as they are (snake_case kept; a Kotlin hard keyword is backticked). Types:
-  `Long`, `Double`, `Boolean`, the two list classes, no result type for None, and a generated data
+  `Long`, `Double`, `Boolean`, the list classes, no result type for None, and a generated data
   class `<Name>Result(v0, v1, ...)` for a tuple (also for two elements, so there is one rule). A failed
   call (status -1) throws `TypedPythonAotException` built from `<prefix>_last_error` on the same thread.
 - `F64List.kt`, `I64List.kt`: counted native handles with `size`, `get`/`set` (bounds checked on the
@@ -419,6 +491,23 @@ fails the task and names the function) and writes four Kotlin files into one pac
   close throws `IllegalStateException`). A list an exported function returns is wrapped as an owned
   handle; the same Kotlin list passed for two parameters is the same handle, so the parameters alias as
   in Python. An unclosed list is not freed by the garbage collector.
+- `IntList.kt`, only for a library whose description has the `int_list` entry (#465; the kind and `abi_version`
+  2 are a leader decision of 2026-11-16, not owner-confirmed; the class is an agent proposal, not
+  owner-confirmed): the Kotlin side of a `list[int]` that may hold values outside 64 bits. It has `size`,
+  `IntList(size)`, `IntList.of(LongArray)`, `get`/`set`, `toLongArray()` and `close()` with the ownership rules
+  of the other two. It has no memory to read: every `get` and `set` is one `invokeExact` call into the
+  library's `<prefix>_int_list_get` / `_set`, so it costs more than `I64List`, which reads native memory
+  directly. A failure of that call is the library's error record as a `TypedPythonAotException`: an index out
+  of range is `IndexError` with the messages of the source language (there is no Kotlin-side bounds check, so
+  the caller sees the same exception as in Python; a negative index counts from the end), an element that does
+  not fit in 64 bits is `OverflowError` "the element of the list does not fit in 64 bits" (also from
+  `toLongArray()`), and use after `close()` stays an `IllegalStateException`. A signature that takes an
+  `int_list` accepts only `IntList`, one that takes an `i64_list` only `I64List`: the classes share no type,
+  because handing the library a handle of the wrong kind is memory corruption, so the Kotlin type system is
+  the protection. A library with no `int_list` in its description generates the Kotlin it did under version 1,
+  except for the `abi_version` number in the comment of the object file. An `int` result that does not fit in
+  64 bits is `OverflowError` "the int result of `<function>` does not fit in 64 bits", through the ordinary
+  status check, with no special case in the generator.
 
 Out pointers are per-thread scratch memory: one 128-byte block per thread, allocated on first use from
 an automatic arena that the garbage collector frees once the thread is gone. A call costs no
@@ -537,6 +626,15 @@ nothing" stays as it is.
   once locally, alone, by the coordinating session.
 - **D10. Runtime language: (a) C.** The leader notes that C rather than Rust is a direction the owner
   had already confirmed.
+
+- **Lists of ints: static classification (leader decision 2026-11-16, not owner-confirmed).** Each group of
+  `list[int]` names is RAW or big-capable by a whole-program classification that runs in the same fixpoint as the int
+  representations (section 5, "Lists of ints"); a big-capable list has tagged elements, and the C ABI gets the
+  `int_list` kind and `abi_version` 2 (section 8.2). The side-table design approved earlier the same day is
+  withdrawn. Reason: a side table on every int list would make every element read a tagged value, which breaks
+  the assumption the representation inference and the sound re-proof rest on (an element of a raw list is an int64, so
+  `a[i] + 1` over a list nothing big ever reached stays plain machine arithmetic), and it would have cost every
+  list, including the ones of spectral_norm, nbody and fannkuch's `perm`, a lookup that only a few lists need.
 
 **First code after this note** (agreed by the leader): the check-only mode of section 11, which changes
 no behaviour and reports every construct of a program that would be an AOT compile error.

@@ -9,13 +9,14 @@ one) and CPython 3.14 or later (the messages of 3.14 and 3.15). The rejection ta
 text checks need no compiler (they need Pyrefly, like test_aot_check.py).
 
 Executables built here (each one runs the type inferencer and the C compiler, which is what made the
-windows job slow): FIVE in all, plus two for the measurement. The merged program (through the command
-line), the merged big-integer program (#462), the exception selector program (one executable, the case chosen by
-`len(sys.argv)`, run once per case with that many dummy arguments), spectral_norm.py as it is and nbody.py as it
-is (each run with several arguments, invalid ones included; the variant of nbody with its size fixed in the source,
-which was built before #462, is now only generated and read as text), and the two size programs of the measurement
-(`test_executable_sizes`). #462 added three (the big-integer program, spectral and the original nbody) and removed
-one (the nbody variant's build). #451's first half built 12 (the exceptions were 9 programs); before it, 22.
+windows job slow): SIX in all, plus two for the measurement. The merged program (through the command
+line), the merged big-integer program (#462; since #465 it also holds the cases of lists of big ints), the exception
+selector program (one executable, the case chosen by `len(sys.argv)`, run once per case with that many dummy
+arguments), spectral_norm.py as it is, nbody.py as it is and fannkuch.py as it is (each run with several arguments,
+invalid ones included; the variant of nbody with its size fixed in the source, which was built before #462, is now only
+generated and read as text), and the two size programs of the measurement (`test_executable_sizes`). #465 added one
+(fannkuch). #462 added three (the big-integer program, spectral and the original nbody) and removed one (the nbody
+variant's build). #451's first half built 12 (the exceptions were 9 programs); before it, 22.
 One more program is built by test_aot_repr.py (the harness of the repr table).
 
 Under the CI sanitizer job (TP_SANITIZE=1) every executable is built with ASan and UBSan
@@ -1257,6 +1258,183 @@ BIGINT_CASES = {
             w = [9223372036854775807, 1]
             print(elem(w), absolute(-9223372036854775807 - 1), absolute(-5), absolute(9223372036854775807))
         """,
+    # lists of ints that hold big values (#465; static classification, leader decision 2026-11-16, not owner-confirmed): the
+    # groups are in aot/rep.py "Lists of ints". Every case below names its functions with a prefix of its own, so no list
+    # parameter is shared with another case (a parameter is one group with every argument it is passed).
+    "list_store_and_creation": """
+        def ls_repeat(n: int) -> list[int]:
+            return [pw(2, 70)] * n
+
+        def ls_display() -> list[int]:
+            return [1, pw(3, 50), -5, pw(7, 30)]
+
+        def ls_sum(a: list[int]) -> int:
+            t = 0
+            for i in range(len(a)):
+                t += a[i]
+            return t
+
+        def case_list_store_and_creation() -> None:
+            a = [0] * 5
+            for i in range(5):
+                a[i] = pw(10, 19 + i) + i
+            print(a[0], a[1], a[2], a[3], a[4], len(a))
+            b = ls_repeat(3)
+            print(b[0], b[2], b[-1], len(b), ls_sum(b))
+            b[1] = b[1] + 1
+            print(b[0] == b[1], b[1] - b[0], b[2] == b[0])
+            c = ls_display()
+            print(c[0], c[1], c[2], c[3], ls_sum(c))
+            print(ls_sum(a) - a[0] - a[1] - a[2] - a[3] - a[4])
+            x = [pw(2, 64)] * 0
+            print(len(x))
+        """,
+    "list_through_parameters_and_returns": """
+        def lp_fill(a: list[int], v: int) -> None:
+            a[0] = v
+            a[1] = v * v
+
+        def lp_read(a: list[int]) -> int:
+            return a[1] + a[0]
+
+        def lp_make(n: int) -> list[int]:
+            r = [0] * n
+            r[0] = pw(2, 66)
+            return r
+
+        def lp_pass(a: list[int]) -> list[int]:
+            return a
+
+        def lp_second(n: int) -> list[int]:
+            a = lp_make(n)
+            a[1] = a[0] + 1
+            return a
+
+        def case_list_through_parameters_and_returns() -> None:
+            a = [1, 2, 3]
+            lp_fill(a, pw(2, 40))
+            print(a[0], a[1], a[2], lp_read(a))
+            r = lp_make(3)
+            print(r[0], r[1], r[2])
+            s = lp_pass(r)
+            s[2] = pw(5, 40)
+            print(r[2], s[2], r[0] == s[0])
+            t = lp_second(2)
+            print(t[0], t[1])
+            u = lp_pass(t)
+            print(u[1] == t[1])
+        """,
+    "list_aliases_and_copies": """
+        def case_list_aliases_and_copies() -> None:
+            a = [1, 2, 3]
+            b = a
+            b[0] = pw(3, 60)
+            print(a[0], b[0], a[1])
+            a[1] = pw(2, 100)
+            print(b[1], a[1])
+            c = a[:]
+            c[2] = pw(2, 200)
+            print(a[2], c[2])
+            a[0] = 5
+            print(a[0], b[0], c[0])
+            c[0] = c[0] + 1
+            print(a[0], b[0], c[0], c[1] == a[1])
+            r = [1, 2, 3]
+            q = r[:]
+            q[0] = pw(2, 70)
+            print(r[0], q[0], r[1] + q[1])
+            d = q[:]
+            d[1] = d[0] * 2
+            print(q[1], d[1], len(d))
+        """,
+    "list_reassigned": """
+        def case_list_reassigned() -> None:
+            a = [0] * 3
+            print(a[0], a[1])
+            a = [pw(2, 80), 1, 2]
+            print(a[0], a[2])
+            a[1] = a[0] * 2
+            print(a[1])
+            a = list(range(4))
+            print(a[3], len(a))
+            a[0] = pw(2, 99)
+            print(a[0], a[1])
+        """,
+    "list_shared_by_two_functions": """
+        def lt_even(a: list[int], n: int) -> int:
+            if n <= 0:
+                return a[0]
+            a[0] = a[0] * 3
+            return lt_odd(a, n - 1)
+
+        def lt_odd(a: list[int], n: int) -> int:
+            if n <= 0:
+                return a[1]
+            a[1] = a[1] + a[0]
+            return lt_even(a, n - 1)
+
+        def case_list_shared_by_two_functions() -> None:
+            a = [5, 7]
+            print(lt_even(a, 100), a[0], a[1])
+            print(lt_odd(a, 3) == a[1])
+        """,
+    "list_values_go_big_and_small_again": """
+        def case_list_values_go_big_and_small_again() -> None:
+            a = [1] * 3
+            a[0] = pw(2, 90)
+            print(a[0])
+            a[0] = a[0] - pw(2, 90) + 4
+            print(a[0], a[0] + a[1])
+            a[1] = pw(2, 62)
+            a[2] = a[1] + a[1] - a[1]
+            print(a[1], a[2], a[2] - a[1])
+            a[1] = -pw(2, 62) - 1
+            print(a[1], a[1] + 1 + pw(2, 62))
+        """,
+    "list_negative_indices_and_totals": """
+        def case_list_negative_indices_and_totals() -> None:
+            a = [pw(3, 45), pw(3, 46), pw(3, 47)]
+            print(a[-1], a[-2], a[-3], len(a))
+            a[-1] = a[-1] + 1
+            t = 0
+            for i in range(len(a)):
+                t += a[i]
+            print(t, a[2])
+            n = 0
+            for x in range(len(a)):
+                n += a[-1 - x]
+            print(n == t)
+            a[-3] = a[-3] * a[-3]
+            print(a[0])
+        """,
+    "list_elements_as_bounds_and_indices": """
+        def case_list_elements_as_bounds_and_indices() -> None:
+            a = [pw(2, 70), 3, 1]
+            z = [0, 0, 0, 0, 0]
+            b = [pw(2, 70) - pw(2, 70) + 2, 0, 1]
+            print(z[b[0]], len(z))
+            z[b[0]] = 9
+            print(z[2], z[b[1]])
+            k = 0
+            for j in range(a[0]):
+                k += j
+                if j == a[1]:
+                    break
+            print(k)
+            for j in range(a[1], a[2] + 2, 1):
+                print(j)
+            print(z[a[2]], z[-a[2]])
+        """,
+    "lists_that_stay_raw": """
+        def case_lists_that_stay_raw() -> None:
+            r = [0] * 4
+            for i in range(4):
+                r[i] = i * 3 + 1
+            s = r[:]
+            s[0] = r[3] % 7
+            big = pw(2, 80)
+            print(r[0] + big, s[0] * big, len(r), r[1] % 5, s[3])
+        """,
 }
 BIGINT_ARGS = ["7"]
 
@@ -1310,6 +1488,60 @@ def test_a_program_with_a_big_integer_includes_the_big_integer_header(bigint):
     c = bigint.c_file.read_text()
     assert '#include "tp_aot.h"\n#include "tp_aot_int.h"\n' in c
     assert "tpa_int_mul(" in c and "tpa_argv_int(" in c and "tpa_int_release(" in c
+
+
+BIG_LIST_CALLS = ("tpa_int_list_fill(", "tpa_int_list_alloc(", "tpa_int_list_copy(", "tpa_int_list_from_i64(",
+                  "tpa_int_list_iota(", "tpa_int_list_release(", "tpa_int_list_retain(")
+
+
+def test_a_program_with_a_big_capable_list_uses_the_big_list_runtime_and_one_without_does_not(
+        bigint, merged, nbody_variant_generated, generate_benchmark):
+    """#465: the list calls of the new runtime appear where a list is big-capable (the big-integer program has one
+    of each kind of creation, a retain for an alias and a release at every cleanup point) and nowhere else: not in the
+    merged program, not in nbody, and not in spectral_norm, whose ints are big-integer-capable but whose lists are raw."""
+    c = bigint.c_file.read_text()
+    for call in BIG_LIST_CALLS[:-1]:
+        assert call in c, call
+    assert "tpa_int_list_retain(" in c and "tpa_int_set(&v_" in c and "tpa_int_list_load(" in c
+    assert "tpa_int_list_store(" in c and "tpa_int_list_init(" in c, "element access of a big-capable list uses the helpers"
+    for other in (merged.c_file.read_text(), nbody_variant_generated[1], generate_benchmark("spectral_norm.py"),
+                  generate_benchmark("nbody.py")):
+        assert "tpa_int_list" not in other
+        assert not any(call in other for call in BIG_LIST_CALLS)
+
+
+def test_a_list_that_only_holds_proved_values_stays_a_raw_list_next_to_big_capable_ones(bigint):
+    """`case_lists_that_stay_raw` reads its lists into big-integer arithmetic and copies one, but never stores a big
+    value: both are `tpa_i64_list`, and the function names nothing of the big list runtime. In `case_list_aliases_and_copies`
+    the copy `q` of the raw list `r` is big-capable and `r` stays raw (the one-way rule)."""
+    c = bigint.c_file.read_text()
+    [body] = re.findall(r"^static int tpf_case_lists_that_stay_raw\([^)]*\)\n\{.*?^\}", c, flags=re.S | re.M)
+    assert "tpa_i64_list *v_r" in body and "tpa_i64_list *v_s" in body and "tpa_i64_copy(" in body
+    assert "tpa_int_list" not in body
+    [body] = re.findall(r"^static int tpf_case_list_aliases_and_copies\([^)]*\)\n\{.*?^\}", c, flags=re.S | re.M)
+    for name, kind in (("a", "int"), ("b", "int"), ("c", "int"), ("r", "i64"), ("q", "int"), ("d", "int")):
+        assert re.search(rf"tpa_{kind}_list \*v_{name} TPA_UNUSED = NULL;", body), name
+    assert "tpa_int_list_from_i64(v_r" in body and "tpa_int_list_copy(v_a" in body
+
+
+def test_a_big_capable_list_is_created_stored_read_and_released_at_the_cleanup_point(tmp_path):
+    c = aot.generate(write(tmp_path, """
+        def f(n: int) -> int:
+            a = [0] * 3
+            a[1] = n * n
+            return a[1] + a[-1]
+
+        if __name__ == "__main__":
+            print(f(4))
+        """))
+    [body] = re.findall(r"^static int tpf_f\([^)]*\)\n\{.*?^\}", c, flags=re.S | re.M)
+    assert "tpa_int_list *v_a" in body
+    assert "tpa_int_list_fill(" in body and body.count("tpa_int_list_store(v_a, ") == 1 and "v_a->d[" not in body
+    assert "tpa_slot(" in body                                    # the bounds checks are the raw list's
+    assert body.count("tp_cleanup:") == 1 and "return -1" not in body
+    cleanup = body[body.index("tp_cleanup:"):]
+    assert "tpa_int_list_release(v_a);" in cleanup
+    assert "tpa_i64_list" not in body
 
 
 def test_a_program_whose_ints_are_all_proved_has_no_big_integer_header(merged, nbody_variant_generated):
@@ -1707,6 +1939,66 @@ RAISING.update({
             print("after", len(a))
         """, ()),
 })
+# lists of big ints (#465): a big-capable list reads and stores through the same bounds checks and messages as a raw one
+# (the stored value is not proved inside 64 bits, which is what makes the list big-capable), and an exception leaves
+# every frame holding such lists through its cleanup point (the leak checker of the sanitizer job reads the balance).
+RAISING.update({
+    "biglist_read_out_of_range": ("""
+        def case_biglist_read_out_of_range() -> None:
+            a = [0] * 3
+            a[0] = pw(2, 70)
+            print("before", a[0], len(a))
+            print(a[3])
+            print("after")
+        """, ()),
+    "biglist_read_negative_out_of_range": ("""
+        def case_biglist_read_negative_out_of_range() -> None:
+            a = [0] * 3
+            a[1] = pw(2, 70)
+            print("before", a[-3] == 0, a[1] > 0)
+            print(a[-4])
+            print("after")
+        """, ()),
+    "biglist_store_out_of_range": ("""
+        def case_biglist_store_out_of_range() -> None:
+            a = [0] * 3
+            a[0] = pw(2, 70)
+            print("before", a[0], len(a))
+            a[3] = pw(2, 71)
+            print("after")
+        """, ()),
+    "biglist_store_negative_out_of_range": ("""
+        def case_biglist_store_negative_out_of_range() -> None:
+            a = [pw(2, 70), 2]
+            print("before", a[0], len(a))
+            a[-3] = 1
+            print("after")
+        """, ()),
+    "biglist_index_too_large": ("""
+        def case_biglist_index_too_large() -> None:
+            a = [pw(2, 70), 2]
+            print("before", a[1])
+            print(a[a[0]])
+            print("after")
+        """, ()),
+    "biglist_oob_through_a_frame": ("""
+        def bl_inner(a: list[int]) -> int:
+            a[0] = a[0] * 3
+            return a[9]
+
+        def bl_outer(a: list[int]) -> int:
+            mine = [pw(3, 50)] * 4
+            mine[1] = mine[0] * a[0]
+            return bl_inner(a) + mine[1]
+
+        def case_biglist_oob_through_a_frame() -> None:
+            keep = [pw(2, 70)] * 2
+            more = [pw(5, 40), 1]
+            print("before", keep[0] > 0, more[0] > 0)
+            print(bl_outer(keep))
+            print("after")
+        """, ()),
+})
 SELECTOR_ORDER = sorted(RAISING)
 
 
@@ -1775,6 +2067,13 @@ def test_the_cases_name_the_exceptions_cpython_raises(selector):
         "argv_negative_index_out_of_range": "IndexError: list index out of range",
         "list_repeat_count_too_large": "OverflowError: cannot fit 'int' into an index-sized integer",
         "list_range_length_too_large": "OverflowError: Python int too large to convert to C ssize_t",
+        # lists of big ints (#465)
+        "biglist_read_out_of_range": "IndexError: list index out of range",
+        "biglist_read_negative_out_of_range": "IndexError: list index out of range",
+        "biglist_store_out_of_range": "IndexError: list assignment index out of range",
+        "biglist_store_negative_out_of_range": "IndexError: list assignment index out of range",
+        "biglist_index_too_large": "IndexError: cannot fit 'int' into an index-sized integer",
+        "biglist_oob_through_a_frame": "IndexError: list index out of range",
         "int_big_floordiv_zero": "ZeroDivisionError: division by zero",
         "int_big_mod_zero": "ZeroDivisionError: division by zero",
         "int_big_truediv_zero": "ZeroDivisionError: division by zero",
@@ -1865,6 +2164,18 @@ def spectral(tmp_path_factory):
     src = tmp / "spectral_norm.py"
     shutil.copy2(BENCH / "spectral_norm.py", src)
     return SimpleNamespace(src=src, exe=aot.build(src, tmp / "spectral"))
+
+
+@pytest.fixture(scope="module")
+def fannkuch(tmp_path_factory):
+    """fannkuch.py as it is (#465): `count` holds values that are not proved inside 64 bits, so it is a big-capable list;
+    `perm1` and `perm` stay raw."""
+    need_cc()
+    tmp = tmp_path_factory.mktemp("fannkuch")
+    src = tmp / "fannkuch.py"
+    shutil.copy2(BENCH / "fannkuch.py", src)
+    c_file = tmp / "fannkuch.c"
+    return SimpleNamespace(src=src, exe=aot.build(src, tmp / "fannkuch", emit_c=c_file), c_file=c_file)
 
 
 def same_run(program, args):
@@ -1987,24 +2298,37 @@ def test_nbody_generates_c_with_one_cleanup_point_per_function(nbody_variant_gen
     assert "tpa_f64_release(v_x)" in c and "tpf_make_x(&" in c
 
 
+@pytest.mark.parametrize("n", ["7", "9"])
+def test_fannkuch_prints_what_cpython_prints(fannkuch, n):
+    ours, theirs = same_run(fannkuch, [n])
+    assert theirs.returncode == 0, text(theirs.stderr)
+    assert re.fullmatch(r"-?\d+ \d+\n", text(theirs.stdout)), text(theirs.stdout)
+
+
+@pytest.mark.parametrize("argument", ["x", "1.5", None, "1", "-3", "0"], ids=["not_an_int", "a_float", "no_argument",
+                                                                            "one", "negative", "zero"])
+def test_fannkuch_with_an_argument_that_is_not_a_usable_size(fannkuch, argument):
+    same_run(fannkuch, argument_list(argument))
+
+
 def test_the_benchmarks_that_build_generate_without_a_finding(generate_benchmark):
-    for name in ("spectral_norm.py", "nbody.py"):
+    for name in ("spectral_norm.py", "nbody.py", "fannkuch.py"):
         generate_benchmark(name)
 
 
-def test_fannkuch_is_refused_only_for_the_stores_of_big_values_into_a_list():
-    """`count[r - 1] = r` and `count[r] -= 1` store a value that is not proved inside 64 bits into a `list[int]`; the
-    elements of a list are int64 in this step (the side table for the others, ABI version 2 and fannkuch are the
-    next PR). Nothing else in fannkuch.py is refused."""
-    lines = (BENCH / "fannkuch.py").read_text().splitlines()
-    first = lines.index("            count[r - 1] = r") + 1
-    second = lines.index("            count[r] -= 1") + 1
-    with pytest.raises(aot.AotError) as raised:
-        aot.generate(BENCH / "fannkuch.py")
-    found = sorted((f.rule, f.line, f.name) for f in raised.value.findings)
-    assert found == [("aot/int-list-store", first, "count"), ("aot/int-list-store", second, "count")], found
-    for f in raised.value.findings:
-        assert "not proved to fit 64 bits" in f.message and "next step" in f.message and "`count" in f.message
+def test_fannkuch_generates_with_no_finding_and_only_count_is_a_big_capable_list(generate_benchmark):
+    """`count[r - 1] = r` and `count[r] -= 1` store a value that is not proved inside 64 bits (`r` starts as the
+    argument), so `count` is a big-capable list (it was the finding `aot/int-list-store` before #465); `perm1` and
+    `perm` only ever hold what is read from `perm1`, so they stay raw (their elements are plain int64)."""
+    c = generate_benchmark("fannkuch.py")
+    [body] = re.findall(r"^static int tpf_fannkuch\([^)]*\)\n\{.*?^\}", c, flags=re.S | re.M)
+    assert "tpa_int_list *v_count" in body and "tpa_int_list_fill(" in body and "tpa_int_list_release(v_count)" in body
+    assert "tpa_i64_list *v_perm1" in body and "tpa_i64_list *v_perm " in body
+    assert "tpa_i64_iota(" in body and "tpa_i64_copy(" in body
+    assert "tpa_int_list_store(v_count, " in body                  # an element store takes the new reference
+    assert "tpa_int_list_load(v_count, " in body and "v_count->d[" not in body   # and every access is a locking helper
+    assert "v_perm1->d[" in body and not re.search(r"tpa_int_list_(load|store|init)\(v_perm1?\b", body)
+    assert body.count("tp_cleanup:") == 1
 
 
 # --- what the mode refuses -------------------------------------------------------------------------
@@ -2514,7 +2838,7 @@ def test_generated_c_contains_no_cpython(tmp_path):
     for inc in re.findall(r"#include\s*[<\"]([^>\"]+)", c + header + big):
         # (stdatomic.h and intrin.h: the library build's atomic list counts, tp_aot.h under -DTPA_LIBRARY, #455)
         assert inc in {"tp_aot.h", "errno.h", "math.h", "stdint.h", "stdio.h", "stdlib.h", "string.h",
-                       "stdatomic.h", "intrin.h", "stddef.h", "tp_aot_int.h"}, inc
+                       "stdatomic.h", "intrin.h", "sched.h", "stddef.h", "tp_aot_int.h"}, inc
 
 
 def test_generated_c_uses_the_default_modes_float_flags():

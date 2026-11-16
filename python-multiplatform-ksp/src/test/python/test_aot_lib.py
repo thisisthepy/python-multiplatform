@@ -12,8 +12,10 @@ and 3.15). The rejection tests and the text tests of the generated C, header and
 (they need Pyrefly, like test_aot_build.py).
 
 Libraries built here (each build runs the type inferencer and the C compiler, which is what made the windows job
-slow): TWO. One, module-scoped, with every exported function of the test source (`built`: its ints are all proved
-inside 64 bits, so it is the library as it was before #462); one small one for the command line (`tiny`, built by
+slow): THREE. One, module-scoped, with every exported function of the test source (`built`: its ints are all proved
+inside 64 bits, so it is the library as it was before #462); one with lists of big ints (`biglib`, #465: its signatures
+use the `int_list` kind of ABI version 2; it is compiled with the test-only live counter of big objects, which the
+reference-balance tests read; every other library here is compiled as a user would); one small one for the command line (`tiny`, built by
 `python -m typedpython aot-lib`), which also holds the functions whose ints are NOT proved inside 64 bits (#462): an
 int result outside 64 bits fails with an ABI-level OverflowError, int parameters arrive as int64 at its extremes, a
 tuple has a result that is outside 64 bits. The paths the build function and the command line return are the paths
@@ -34,6 +36,7 @@ import importlib.util
 import io
 import json
 import os
+import random
 import re
 import shutil
 import struct
@@ -250,7 +253,7 @@ I64_MIN, I64_MAX = -2**63, 2**63 - 1
 # --- the consumer ----------------------------------------------------------------------------------
 
 ARG_CT = {"i64": ctypes.c_int64, "f64": ctypes.c_double, "bool": ctypes.c_uint8,
-          "f64_list": ctypes.c_void_p, "i64_list": ctypes.c_void_p}
+          "f64_list": ctypes.c_void_p, "i64_list": ctypes.c_void_p, "int_list": ctypes.c_void_p}
 LIST_KIND = {"f64_list": "f64", "i64_list": "i64"}
 ELEM_CT = {"f64": ctypes.c_double, "i64": ctypes.c_int64}
 
@@ -274,7 +277,21 @@ class Lib:
                           + [ctypes.POINTER(ARG_CT[t]) for t in f["returns"]])
             self.fn[f["name"]] = (c, f)
         self.lists = {}
+        self.il = None
         for t, syms in self.desc["lists"].items():
+            if t == "int_list":                  # element access through functions (there is no `data`)
+                il = SimpleNamespace(new=getattr(self.cdll, syms["new"]), len=getattr(self.cdll, syms["len"]),
+                                     get=getattr(self.cdll, syms["get"]), set=getattr(self.cdll, syms["set"]),
+                                     retain=getattr(self.cdll, syms["retain"]), release=getattr(self.cdll, syms["release"]))
+                il.new.restype, il.new.argtypes = ctypes.c_void_p, [ctypes.c_int64]
+                il.len.restype, il.len.argtypes = ctypes.c_int64, [ctypes.c_void_p]
+                il.get.restype, il.get.argtypes = ctypes.c_int, [ctypes.c_void_p, ctypes.c_int64,
+                                                                  ctypes.POINTER(ctypes.c_int64)]
+                il.set.restype, il.set.argtypes = ctypes.c_int, [ctypes.c_void_p, ctypes.c_int64, ctypes.c_int64]
+                il.retain.restype, il.retain.argtypes = None, [ctypes.c_void_p]
+                il.release.restype, il.release.argtypes = None, [ctypes.c_void_p]
+                self.il = il
+                continue
             ns = SimpleNamespace(elem=ELEM_CT[syms["element"]])
             ns.new = getattr(self.cdll, syms["new"])
             ns.new.restype, ns.new.argtypes = ctypes.c_void_p, [ctypes.c_int64]
@@ -322,6 +339,19 @@ class Lib:
 
     def release(self, kind, h):
         self.lists[kind].release(h)
+
+    # -- big-capable lists (ABI version 2): element access through functions
+    def get(self, h, i):
+        """`(status, value)` of `int_list_get`; the value is a sentinel that must stay when the call fails."""
+        out = ctypes.c_int64(-12345)
+        return self.il.get(h, i, ctypes.byref(out)), out.value
+
+    def new_int_list(self, values):
+        h = self.il.new(len(values))
+        assert h is not None
+        for i, v in enumerate(values):
+            assert self.il.set(h, i, v) == 0
+        return h
 
     # -- calls and errors
     def raw(self, name, *args):
@@ -1126,6 +1156,447 @@ def test_a_module_level_statement_is_still_refused_in_a_library(tmp_path):
     assert {r for r, _, _ in found} == {"aot/module-statement"}
 
 
+# --- lists that may hold big ints (#465, ABI version 2) ---------------------------------------------------------------
+#
+# A `list[int]` that the compiler finds big-capable (aot/rep.py "Lists of ints": a value not proved inside 64 bits is
+# stored into its group) is passed as the opaque handle `<p>_int_list`; its elements are not int64 in memory, so there is
+# `_get` and `_set` and no `_data`. The consumer here uses ctypes again. Each function of BIGLIB is compared with the
+# same source imported as a plain module; an element that does not fit int64 cannot be read by `_get`, which fails with the
+# ABI-level OverflowError of the header, so the exact value is shown through the functions that return an int that fits
+# (`diff`, `total`). The library is compiled with the live counter of big objects (`TPA_INT_COUNT_LIVE`, test-only, as the
+# shim of test_aot_int.py does): the tests read it after each use to see that every reference was given back. Leader decision
+# 2026-11-16 for the static classification and the new kind, not owner-confirmed; the messages are agent proposals.
+
+BIGLIB = '''
+def store_product(w: list[int], i: int, a: int, b: int) -> None:
+    w[i] = a * b
+
+
+def make_big(n: int, v: int) -> list[int]:
+    r = [0] * n
+    r[0] = v * v
+    return r
+
+
+def repeat_big(n: int, v: int) -> list[int]:
+    return [v * v] * n
+
+
+def twice(n: int, v: int) -> list[int]:
+    a = repeat_big(n, v)
+    b = a[:]
+    b[0] = b[0] + 1
+    return b
+
+
+def copy_with(w: list[int], v: int) -> list[int]:
+    c = w[:]
+    c[0] = v * v
+    return c
+
+
+def bump(w: list[int], i: int) -> None:
+    w[i] = w[i] + 1
+
+
+def total(w: list[int]) -> int:
+    t = 0
+    for i in range(len(w)):
+        t += w[i]
+    return t
+
+
+def diff(w: list[int], i: int, j: int) -> int:
+    return w[i] - w[j]
+
+
+def grow_and_total(n: int, v: int) -> int:
+    r = make_big(n, v)
+    return total(r) + diff(r, 0, 1)
+
+
+def raw_set(w: list[int], i: int, x: int) -> None:
+    w[i] = x
+
+
+def raw_get(w: list[int], i: int) -> int:
+    return w[i]
+
+
+if __name__ == "__main__":
+    print(total([1, 2]))
+'''
+BIG_PREFIX = "big"
+BIG_EXPORTS = ["store_product", "make_big", "repeat_big", "twice", "copy_with", "bump", "total", "diff", "grow_and_total",
+               "raw_set", "raw_get"]
+ELEMENT_OVERFLOW = ("OverflowError", "the element of the list does not fit in 64 bits")
+
+
+@pytest.fixture(scope="module")
+def biglib(tmp_path_factory):
+    """BIGLIB as a library, compiled with the test-only live counter and one more export that reads it, next to the same
+    file imported as a plain module. The generated C, header and description are the ones `generate_library` wrote (the
+    counter and its export are added to a copy of the C text only)."""
+    need_cc()
+    tmp = tmp_path_factory.mktemp("biglib")
+    src = write(tmp, BIGLIB, "biglib")
+    c_text, header, description = aot.generate_library(src, exports=BIG_EXPORTS, prefix=BIG_PREFIX)
+    counting = ("#define TPA_INT_COUNT_LIVE 1\n" + c_text
+                + f"\nTPA_EXPORT int64_t {BIG_PREFIX}_test_live(void)\n{{\n    return tpa_int_live();\n}}\n")
+    out = tmp / "out"
+    lib_path = cc.compile_library(counting, out, library.library_file_name(BIG_PREFIX))
+    header_path, json_path = out / f"{BIG_PREFIX}.h", out / f"{BIG_PREFIX}.json"
+    header_path.write_text(header, encoding="utf-8")
+    json_path.write_text(json.dumps(description, indent=2) + "\n", encoding="utf-8")
+    lib = Lib(aot.LibraryFiles(lib_path, header_path, json_path))
+    live = getattr(lib.cdll, f"{BIG_PREFIX}_test_live")
+    live.restype, live.argtypes = ctypes.c_int64, []
+    return SimpleNamespace(lib=lib, ref=reference(src, "biglib_ref"), c=c_text, header=header, description=description,
+                           live=live, src=src)
+
+
+def balanced(biglib):
+    """Every big integer the library allocated has been given back."""
+    assert biglib.live() == 0, "a big integer is still held (a leaked reference)"
+
+
+def error_of(exc: Exception) -> tuple[str, str]:
+    return type(exc).__name__, str(exc)
+
+
+def test_the_description_and_the_header_name_the_kind_a_signature_uses(biglib):
+    d, h = biglib.description, biglib.header
+    assert d["abi_version"] == 2 and "int_list" in library.VOCABULARY
+    types = {f["name"]: ([p["type"] for p in f["params"]], f["returns"]) for f in d["functions"]}
+    assert types["store_product"] == (["int_list", "i64", "i64", "i64"], [])
+    assert types["make_big"] == (["i64", "i64"], ["int_list"]) and types["twice"] == (["i64", "i64"], ["int_list"])
+    assert types["bump"] == (["int_list", "i64"], []) and types["total"] == (["int_list"], ["i64"])
+    assert types["diff"] == (["int_list", "i64", "i64"], ["i64"])
+    # the raw kind is still there: a parameter nothing big reaches, and a raw list copied into a big-capable result
+    assert types["raw_set"] == (["i64_list", "i64", "i64"], []) and types["raw_get"] == (["i64_list", "i64"], ["i64"])
+    assert types["copy_with"] == (["i64_list", "i64"], ["int_list"])
+    assert set(d["lists"]) == {"f64_list", "i64_list", "int_list"}
+    assert d["lists"]["int_list"] == {
+        "element": "i64", "new": "big_int_list_new", "len": "big_int_list_len", "get": "big_int_list_get",
+        "set": "big_int_list_set", "retain": "big_int_list_retain", "release": "big_int_list_release"}
+    assert "data" not in d["lists"]["int_list"] and d["lists"]["i64_list"]["data"] == "big_i64_list_data"
+    assert "typedef struct big_int_list big_int_list;" in h
+    assert "BIG_API big_int_list *big_int_list_new(int64_t n);" in h
+    assert "BIG_API int big_int_list_get(const big_int_list *l, int64_t i, int64_t *out);" in h
+    assert "BIG_API int big_int_list_set(big_int_list *l, int64_t i, int64_t v);" in h
+    assert "big_int_list_data" not in h and "big_int_list_data" not in biglib.c
+    assert "Lists that may hold big ints (big_int_list)" in h
+    assert "the element of the list does not fit in 64 bits" in h and "no counterpart in the source language" in h
+    assert "BIG_API int big_total(big_int_list *p_w, int64_t *out);" in h
+    assert "BIG_API int big_copy_with(big_i64_list *p_w, int64_t p_v, big_int_list **out);" in h
+    assert chr(0x2014) not in h
+    assert not cpython_api_uses(biglib.c) and not cpython_api_uses(h)
+    assert re.findall(r"#include\s*[<\"]([^>\"]+)", biglib.c) == ["tp_aot.h", "tp_aot_int.h"]
+    syms = [f["symbol"] for f in d["functions"]] + [v for k, v in d["lists"]["int_list"].items() if k != "element"]
+    for sym in syms:
+        assert re.search(rf"^BIG_API [^\n;]*\b{sym}\(", h, re.M), sym
+        assert re.search(rf"^TPA_EXPORT [^\n]*\b{sym}\(", biglib.c, re.M), sym
+
+
+def test_a_new_int_list_has_zeros_a_count_of_one_and_negative_indices_count_from_the_end(biglib):
+    lib = biglib.lib
+    h = lib.il.new(3)
+    assert h is not None and lib.rc(h) == 1 and lib.il.len(h) == 3
+    assert [lib.get(h, i) for i in (0, 1, 2, -1, -3)] == [(0, 0)] * 5
+    assert lib.il.set(h, 1, 7) == 0 and lib.il.set(h, -1, I64_MIN) == 0
+    assert [lib.get(h, i)[1] for i in (0, 1, 2)] == [0, 7, I64_MIN] and lib.get(h, -2) == (0, 7)
+    lib.il.retain(h)
+    assert lib.rc(h) == 2
+    lib.il.release(h)
+    assert lib.rc(h) == 1 and lib.il.len(None) == 0
+    lib.il.retain(None)
+    lib.il.release(None)                                 # NULL is a no-op
+    lib.il.release(h)
+    empty = lib.il.new(-5)                               # n < 0 is an empty list, as `[0] * -5` is
+    assert lib.il.len(empty) == 0 and lib.get(empty, 0)[0] == -1
+    lib.il.release(empty)
+    balanced(biglib)
+
+
+@pytest.mark.parametrize("index", [3, 4, -4, 100, I64_MAX, I64_MIN])
+def test_get_and_set_out_of_range_raise_the_index_errors_cpython_raises(biglib, index):
+    lib = biglib.lib
+    h = lib.new_int_list([1, 2, 3])
+    mirror = [1, 2, 3]
+    with pytest.raises(IndexError) as read:
+        mirror[index]
+    with pytest.raises(IndexError) as write:
+        mirror[index] = 0
+    status, value = lib.get(h, index)
+    assert status == -1 and value == -12345, "nothing is written to *out"
+    assert lib.error() == error_of(read.value) == ("IndexError", "list index out of range")
+    assert lib.il.set(h, index, 9) == -1
+    assert lib.error() == error_of(write.value) == ("IndexError", "list assignment index out of range")
+    assert [lib.get(h, i)[1] for i in range(3)] == [1, 2, 3], "a failed set changes nothing"
+    lib.il.release(h)
+    balanced(biglib)
+
+
+def test_a_callee_stores_a_big_value_and_get_of_that_element_is_the_documented_overflow(biglib):
+    lib, ref = biglib.lib, biglib.ref
+    h = lib.il.new(3)
+    mirror = [0, 0, 0]
+    assert lib.raw("store_product", h, 1, 2**40, 2**40) == (0, [])
+    ref.store_product(mirror, 1, 2**40, 2**40)
+    assert mirror[1] == 2**80, "CPython holds the exact product"
+    assert biglib.live() == 1
+    assert lib.get(h, 1) == (-1, -12345) and lib.error() == ELEMENT_OVERFLOW      # no value is written
+    assert lib.get(h, 0) == (0, 0) and lib.get(h, 2) == (0, 0)                     # the others read fine
+    assert lib.il.set(h, 1, 5) == 0 and lib.get(h, 1) == (0, 5), "the same element reads after a small value is stored"
+    assert biglib.live() == 0, "the store gave the big element back"
+    assert lib.raw("store_product", h, 1, 3, 4) == (0, []) and lib.get(h, 1) == (0, 12), "a product that fits is a small"
+    assert lib.raw("store_product", h, -1, -(2**40), 2**41) == (0, []) and lib.get(h, 2) == (-1, -12345)
+    assert lib.error() == ELEMENT_OVERFLOW and lib.rc(h) == 1, "the argument was borrowed"
+    lib.il.release(h)
+    balanced(biglib)
+
+
+def test_a_value_that_reaches_int64_max_and_one_more_is_big_and_back(biglib):
+    lib, ref = biglib.lib, biglib.ref
+    h = lib.new_int_list([I64_MAX, I64_MIN, 5])
+    mirror = [I64_MAX, I64_MIN, 5]
+    for i in (0, 1, 2, 0):
+        assert lib.raw("bump", h, i) == (0, [])
+        ref.bump(mirror, i)
+    assert mirror == [2**63 + 1, I64_MIN + 1, 6]
+    # the small form has 63 bits, so I64_MIN + 1 in slot 1 is a big object too
+    assert lib.get(h, 0)[0] == -1 and lib.error() == ELEMENT_OVERFLOW and biglib.live() == 2
+    assert lib.get(h, 1) == (0, I64_MIN + 1) and lib.get(h, 2) == (0, 6)
+    assert lib.il.set(h, 0, 1) == 0 and lib.get(h, 0) == (0, 1) and biglib.live() == 1
+    for index in (3, -4):                                    # `w[i] + 1` fails on the read, with the list's own message
+        with pytest.raises(IndexError) as e:
+            ref.bump([0, 0, 0], index)
+        assert lib.raw("bump", h, index)[0] == -1 and lib.error() == error_of(e.value)
+    lib.il.release(h)
+    balanced(biglib)
+
+
+def test_a_returned_big_capable_list_is_owned_by_the_caller_alone(biglib):
+    lib, ref = biglib.lib, biglib.ref
+    status, [h] = lib.raw("make_big", 3, 2**20)
+    assert status == 0 and lib.rc(h) == 1 and lib.il.len(h) == 3
+    assert ref.make_big(3, 2**20)[0] == 2**40 and [lib.get(h, i) for i in range(3)] == [(0, 2**40), (0, 0), (0, 0)]
+    assert biglib.live() == 0, "2**40 is a small int: nothing was allocated"
+    lib.il.release(h)
+    status, [h] = lib.raw("make_big", 3, 2**40)
+    assert status == 0 and ref.make_big(3, 2**40)[0] == 2**80
+    assert lib.get(h, 0)[0] == -1 and lib.error() == ELEMENT_OVERFLOW and lib.get(h, -1) == (0, 0)
+    assert biglib.live() == 1
+    lib.il.release(h)
+    balanced(biglib)
+    status, [h] = lib.raw("repeat_big", 4, 2**40)                 # one big object, held by four elements
+    assert status == 0 and lib.il.len(h) == 4 and biglib.live() == 1
+    assert all(lib.get(h, i)[0] == -1 for i in range(4)) and ref.repeat_big(4, 2**40) == [2**80] * 4
+    lib.il.release(h)
+    balanced(biglib)
+    status, [h] = lib.raw("repeat_big", -2, 2**40)
+    assert status == 0 and lib.il.len(h) == 0 and ref.repeat_big(-2, 2**40) == []
+    lib.il.release(h)
+    balanced(biglib)
+
+
+def test_a_big_capable_copy_keeps_the_elements_of_its_source_and_gives_them_back(biglib):
+    lib, ref = biglib.lib, biglib.ref
+    status, [h] = lib.raw("twice", 3, 2**40)            # a = [v * v] * 3; b = a[:]; b[0] = b[0] + 1; return b
+    want = ref.twice(3, 2**40)
+    assert status == 0 and want == [2**80 + 1, 2**80, 2**80] and biglib.live() == 2
+    assert lib.raw("diff", h, 0, 1) == (0, [1]) and lib.raw("diff", h, 1, 2) == (0, [0]), "exact beyond 64 bits"
+    assert lib.raw("diff", h, -3, -1) == (0, [1])
+    lib.il.release(h)
+    balanced(biglib)
+    w = lib.new_list("i64", [7, 8, 9])                  # a raw list copied into a big-capable one
+    status, [c] = lib.raw("copy_with", w, 2**40)
+    assert status == 0 and ref.copy_with([7, 8, 9], 2**40) == [2**80, 8, 9]
+    assert lib.get(c, 0)[0] == -1 and lib.get(c, 1) == (0, 8) and lib.get(c, 2) == (0, 9)
+    assert lib.read_list("i64", w) == [7, 8, 9] and lib.rc(w) == 1 and lib.rc(c) == 1 and c != w
+    lib.il.release(c)
+    status, [c] = lib.raw("copy_with", w, 3)
+    assert status == 0 and [lib.get(c, i)[1] for i in range(3)] == [9, 8, 9] and biglib.live() == 0
+    lib.il.release(c)
+    big_source = lib.new_list("i64", [I64_MAX, I64_MIN, 0])
+    status, [c] = lib.raw("copy_with", big_source, 2)         # the extremes survive the conversion
+    assert status == 0 and lib.get(c, 1) == (0, I64_MIN) and lib.get(c, 2) == (0, 0) and lib.get(c, 0) == (0, 4)
+    lib.il.release(c)
+    lib.release("i64", big_source)
+    lib.release("i64", w)
+    balanced(biglib)
+
+
+def test_total_and_diff_are_exact_over_elements_that_do_not_fit(biglib):
+    lib, ref = biglib.lib, biglib.ref
+    h = lib.new_int_list([5, 6, 7])
+    assert lib.raw("total", h) == (0, [18]) and ref.total([5, 6, 7]) == 18
+    assert lib.raw("store_product", h, 0, 2**40, 2**40)[0] == 0 and lib.raw("store_product", h, 1, -(2**40), 2**40)[0] == 0
+    assert ref.total([2**80, -(2**80), 7]) == 7
+    assert lib.raw("total", h) == (0, [7]), "2**80 - 2**80 + 7, exact"
+    assert lib.raw("diff", h, 0, 1)[0] == -1 and lib.error() == ("OverflowError", "the int result of `diff` does not fit in 64 bits")
+    assert ref.diff([2**80, -(2**80), 7], 0, 1) == 2**81
+    lib.il.release(h)
+    h = lib.new_int_list([2**62, 2**62, 0])
+    status, _ = lib.raw("total", h)
+    assert status == -1 and lib.error() == ("OverflowError", "the int result of `total` does not fit in 64 bits")
+    assert ref.total([2**62, 2**62, 0]) == 2**63
+    lib.il.release(h)
+    assert lib.raw("grow_and_total", 3, 2**20) == (0, [2**41]) and ref.grow_and_total(3, 2**20) == 2**41
+    status, _ = lib.raw("grow_and_total", 3, 2**40)
+    assert status == -1 and lib.error() == ("OverflowError", "the int result of `grow_and_total` does not fit in 64 bits")
+    assert ref.grow_and_total(3, 2**40) == 2**81
+    balanced(biglib)
+
+
+def test_the_raw_i64_list_functions_of_the_same_library_still_work(biglib):
+    lib, ref = biglib.lib, biglib.ref
+    w = lib.new_list("i64", [1, 2, 3])
+    assert lib.raw("raw_get", w, 2) == (0, [3]) and lib.raw("raw_get", w, -3) == (0, [1])
+    assert lib.raw("raw_set", w, 0, I64_MIN) == (0, []) and lib.raw("raw_set", w, -1, I64_MAX) == (0, [])
+    assert lib.read_list("i64", w) == [I64_MIN, 2, I64_MAX] and lib.rc(w) == 1
+    with pytest.raises(IndexError) as e:
+        ref.raw_get([1, 2, 3], 3)
+    assert lib.raw("raw_get", w, 3)[0] == -1 and lib.error() == error_of(e.value)
+    with pytest.raises(IndexError) as e:
+        ref.raw_set([1, 2, 3], -4, 0)
+    assert lib.raw("raw_set", w, -4, 0)[0] == -1 and lib.error() == error_of(e.value)
+    lib.release("i64", w)
+    balanced(biglib)
+
+
+def test_a_null_int_list_handle_is_a_type_error_not_a_crash(biglib):
+    lib = biglib.lib
+    assert lib.get(None, 0)[0] == -1 and lib.error() == ("TypeError", "argument 'l' is a null list handle")
+    assert lib.il.set(None, 0, 1) == -1 and lib.error() == ("TypeError", "argument 'l' is a null list handle")
+    assert lib.raw("total", None)[0] == -1 and lib.error() == ("TypeError", "argument 'w' is a null list handle")
+    assert lib.raw("store_product", None, 0, 1, 1)[0] == -1
+    status, outs = lib.raw("copy_with", None, 1)
+    assert status == -1 and outs == [None], "a list out handle is NULL on failure"
+
+
+def test_several_threads_share_one_int_list_and_the_race_is_memory_safe(biglib):
+    """Issue #465 (the lock inside the list is an agent proposal, not owner-confirmed; design note section 7). Writers
+    store small values (`set`) and a big one (`store_product`, 2**40 * 2**40) into slot 0 of the SAME handle while
+    readers call `get` and the compiled `diff` (slot 0 minus slot 1; slot 1 is never written, so it is 0). Every
+    observed value must be one a writer stored (or 0 from the start), or the documented overflow error of the call. A
+    reader that retained an object the writer had just freed (or two writers freeing the same old element) would
+    crash or leave the live counter of big objects away from 0 once everything is released. Fixed seeds."""
+    lib = biglib.lib
+    h = lib.new_int_list([0, 0, 0])
+    stored = {0, 1, 2, 3, 4}
+    diff_error = ("OverflowError", "the int result of `diff` does not fit in 64 bits")
+    writes_each, writers_done = 12000, threading.Barrier(2 + 3, timeout=120)
+    problems, stop = [], threading.Event()
+    seen = {"value": 0, "overflow": 0}
+
+    def writer(seed):
+        try:
+            rng = random.Random(seed)
+            writers_done.wait()
+            for _ in range(writes_each):
+                if rng.random() < 0.5:
+                    assert lib.il.set(h, 0, rng.randint(1, 4)) == 0
+                else:
+                    assert lib.raw("store_product", h, 0, 2**40, 2**40) == (0, [])
+        except BaseException as e:          # reported below, in the test's own thread
+            problems.append(f"writer {seed}: {e!r}")
+
+    def reader(seed):
+        try:
+            rng = random.Random(seed)
+            writers_done.wait()
+            while not stop.is_set():
+                if rng.random() < 0.5:
+                    status, v = lib.get(h, 0)
+                    if status == 0:
+                        assert v in stored, f"get read {v}, which no writer stored"
+                        seen["value"] += 1
+                    else:
+                        assert (status, v) == (-1, -12345) and lib.error() == ELEMENT_OVERFLOW, (status, v, lib.error())
+                        seen["overflow"] += 1
+                else:
+                    status, [v] = lib.raw("diff", h, 0, 1)
+                    if status == 0:
+                        assert v in stored, f"diff read {v}, which no writer stored"
+                    else:
+                        assert lib.error() == diff_error, lib.error()
+        except BaseException as e:
+            problems.append(f"reader {seed}: {e!r}")
+
+    writers = [threading.Thread(target=writer, args=(1000 + k,)) for k in range(2)]
+    readers = [threading.Thread(target=reader, args=(2000 + k,)) for k in range(3)]
+    for t in writers + readers:
+        t.start()
+    for t in writers:
+        t.join(timeout=120)
+    stop.set()
+    for t in readers:
+        t.join(timeout=120)
+    assert not any(t.is_alive() for t in writers + readers), "a thread did not finish"
+    assert problems == [], problems
+    assert seen["value"] > 0, "no read ever saw a small value, so the test proves nothing"
+    assert lib.il.set(h, 0, 0) == 0                                    # the last big element is given back by the store
+    lib.il.release(h)
+    balanced(biglib)
+
+
+def test_the_big_list_elements_are_read_and_written_only_through_the_locking_helpers(biglib):
+    """Text only: the generated C of a library with a big-capable list reads and stores elements through
+    `tpa_int_list_load` / `tpa_int_list_store` and never touches `->d[` of that kind itself; the exported `_get` and `_set`
+    go through the runtime's `_get_i64` / `_set_i64`, which use them; and the runtime header selects the plain versions
+    when TPA_THREADS is not defined (an executable) and the locking ones when it is (every library)."""
+    c = biglib.c
+    assert "tpa_int_list_load(" in c and "tpa_int_list_store(" in c
+    bodies = re.findall(r"^(?:static|TPA_EXPORT)[^\n]*\)\n\{.*?^\}", c, flags=re.S | re.M)
+    checked = 0
+    for body in bodies:                      # per function: a name such as `v_w` is a raw list in one and a big one in another
+        for name in set(re.findall(r"tpa_int_list \*(\w+)", body)):
+            checked += 1
+            assert not re.search(rf"\b{name}->d\[", body), f"direct element access of the big-capable list {name}:\n{body}"
+    assert checked >= 5, "the library has big-capable lists"
+    assert "tpa_int_list_get_i64(l, i, out)" in c and "tpa_int_list_set_i64(l, i, v)" in c
+    runtime = (Path(aot.__file__).parent.parent / "runtime" / "tp_aot_int.h").read_text(encoding="utf-8")
+    load = runtime[runtime.index("static inline void tpa_int_list_load("):]
+    load = load[:load.index("\n}\n")]
+    assert "#if defined(TPA_THREADS)" in load and "tpa_int_list__lock(l);" in load and "#else\n    tpa_int_set(out, l->d[slot]);" in load
+    store = runtime[runtime.index("static inline void tpa_int_list_store("):]
+    store = store[:store.index("\n}\n")]
+    assert store.index("tpa_int_list__lock(l);") < store.index("tpa_int_list__unlock(l);") < store.index("tpa_int_release(old);")
+    assert store.index("tpa_int_retain(v);") < store.index("tpa_int_list__lock(l);"), "the new reference is taken before the lock"
+    assert "#else\n    tpa_int_set(&l->d[slot], v);" in store
+    layout = runtime[runtime.index("typedef struct tpa_int_list {"):]
+    layout = layout[:layout.index("} tpa_int_list;")]
+    assert "#if defined(TPA_THREADS)\n    tpa_int_list_lock_t lock;" in layout, "the lock field exists only with TPA_THREADS"
+    assert "memory-safe for every list kind" in biglib.header
+    assert "as with a C or Kotlin array" not in biglib.header
+    assert chr(0x2014) not in runtime
+
+
+def test_every_big_integer_of_the_big_list_tests_was_given_back(biglib):
+    balanced(biglib)
+
+
+def test_a_library_with_no_big_capable_list_has_no_int_list_kind(generated):
+    """The first library (`kit`) has lists only of the raw kind: no `int_list` in its C text, header or description, whose
+    `lists` are what they were (the one thing that differs from ABI version 1 is `abi_version`)."""
+    assert "int_list" not in generated.header and "int_list" not in generated.c
+    assert set(generated.description["lists"]) == {"f64_list", "i64_list"}
+    assert "int_list" not in json.dumps(generated.description) and generated.description["abi_version"] == 2
+
+
+def test_explain_lists_names_the_groups_and_the_boundary_of_a_library_and_builds_nothing(tmp_path, capsys):
+    src = write(tmp_path, BIGLIB, "explained")
+    status = main(["aot-lib", str(src), "--export", ",".join(BIG_EXPORTS), "--prefix", BIG_PREFIX, "--explain-lists"])
+    shown = capsys.readouterr()
+    assert status == 0 and shown.err == ""
+    assert "library boundary (int_list): the parameter `w` of the export `store_product`" in shown.out
+    assert "library boundary (i64_list): the parameter `w` of the export `raw_set`" in shown.out
+    assert "line 2, in store_product: `w[i] = a * b`: stores a TAGGED value into `w`" in shown.out
+    assert "list group 1: big-capable" in shown.out and "raw: no TAGGED value" in shown.out
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["explained.py"]
+
+
 # --- the generated text (no compiler needed) --------------------------------------------------------
 
 @pytest.fixture(scope="module")
@@ -1179,7 +1650,7 @@ def test_the_main_block_with_an_unsupported_construct_is_not_compiled(generated)
 
 def test_the_description_is_complete_and_in_the_vocabulary(generated):
     d = generated.description
-    assert d["prefix"] == PREFIX and d["abi_version"] == 1
+    assert d["prefix"] == PREFIX and d["abi_version"] == 2
     assert d["library"] == library.library_file_name(PREFIX)
     assert d["runtime"] == {"init": "kit_init", "shutdown": "kit_shutdown", "last_error": "kit_last_error"}
     assert [f["name"] for f in d["functions"]] == EXPORTS

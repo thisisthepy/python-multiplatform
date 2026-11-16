@@ -15,7 +15,7 @@ plugins {
 // TypedPython AOT libraries called from Kotlin with no CPython (SPEC N-17, #458)
 // ---------------------------------------------------------------------------------------------
 //
-// Task graph, per library `<p>` (nbody, errors):
+// Task graph, per library `<p>` (nbody, errors, bigints):
 //
 //   describe<P>Library   python describe_library.py: the front end and the generator only, writes <p>.json. No C
 //        |               compiler runs. Needs the host Python (pyrefly).
@@ -59,6 +59,12 @@ val aotLibraries = listOf(
         objectName = "Errors",
         source = file("src/desktopTest/aot/errors.py"),
         exports = "rem,at,triple,flip,largest,same_list,count_up,set_first,keywords,alias_effect",
+    ),
+    AotLibrarySpec(
+        prefix = "bigints",
+        objectName = "Bigints",
+        source = file("src/desktopTest/aot/bigints.py"),
+        exports = "fill_factorials,make,total,total_of_factorials,raw_sum",
     ),
 )
 

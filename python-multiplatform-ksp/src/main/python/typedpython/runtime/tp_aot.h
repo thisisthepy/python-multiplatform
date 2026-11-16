@@ -63,6 +63,9 @@
  * TPA_EXPORT marks an exported symbol; the library is built with -fvisibility=hidden (GCC, Clang), so
  * nothing else is visible. */
 #if defined(TPA_THREADS)
+#if !defined(_WIN32)
+#include <sched.h>             /* sched_yield, for a thread that waits on a list's lock (tp_aot_int.h) */
+#endif
 #if defined(_MSC_VER) && !defined(__clang__)
 #include <intrin.h>
 typedef int64_t tpa_rc_t;

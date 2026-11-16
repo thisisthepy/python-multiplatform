@@ -17,14 +17,19 @@ import org.gradle.api.GradleException
  * (`typedpython/aot/library.py`); nothing else is read. These functions are pure: text in, text out.
  */
 
-/** The `abi_version` of the description this generator reads. */
-const val AOT_LIBRARY_ABI_VERSION = 1
+/**
+ * The `abi_version` of the description this generator reads: 2, the only value, and every other value (1 included) is
+ * rejected. There are no deployed version 1 libraries, and the compiler in this repository (`typedpython/aot/library.py`)
+ * writes 2 only, so no reader of version 1 is kept. Version 2 added the type `int_list` and its `lists` entry (#465;
+ * leader decision 2026-11-16, not owner-confirmed).
+ */
+const val AOT_LIBRARY_ABI_VERSION = 2
 
 /** Out pointers of one function the per-thread scratch block of the helper holds (16 slots of 8 bytes). */
 const val AOT_MAX_RETURNS = 16
 
 /** The boundary vocabulary of `typedpython.aot.library.VOCABULARY`. */
-val AOT_LIBRARY_TYPES: List<String> = listOf("i64", "f64", "bool", "f64_list", "i64_list")
+val AOT_LIBRARY_TYPES: List<String> = listOf("i64", "f64", "bool", "f64_list", "i64_list", "int_list")
 
 data class AotParam(val name: String, val type: String)
 
@@ -32,6 +37,11 @@ data class AotFunction(val name: String, val symbol: String, val params: List<Ao
 
 /** The five C symbols of one list type. */
 data class AotListSymbols(val new: String, val len: String, val data: String, val retain: String, val release: String)
+
+/** The six C symbols of the `int_list` type: it has `get` and `set` and no `data` (its elements are not int64 in memory). */
+data class AotIntListSymbols(
+    val new: String, val len: String, val get: String, val set: String, val retain: String, val release: String,
+)
 
 data class AotLibraryDescription(
     val prefix: String,
@@ -41,6 +51,8 @@ data class AotLibraryDescription(
     val functions: List<AotFunction>,
     val f64List: AotListSymbols,
     val i64List: AotListSymbols,
+    /** Present only when some signature of the library uses the type `int_list`. */
+    val intList: AotIntListSymbols? = null,
 )
 
 private fun fail(message: String): Nothing = throw GradleException(message)
@@ -76,6 +88,13 @@ fun parseAotLibraryDescription(json: String): AotLibraryDescription {
         )
     }
 
+    val intList = (lists["int_list"] as? Map<*, *>)?.let { entry ->
+        AotIntListSymbols(
+            text(entry, "new", "int_list"), text(entry, "len", "int_list"), text(entry, "get", "int_list"),
+            text(entry, "set", "int_list"), text(entry, "retain", "int_list"), text(entry, "release", "int_list"),
+        )
+    }
+
     val rawFunctions = root["functions"] as? List<*> ?: fail("the AOT library description has no \"functions\" array")
     val functions = rawFunctions.map { raw ->
         val f = raw as? Map<*, *> ?: fail("an entry of \"functions\" is not an object")
@@ -97,6 +116,13 @@ fun parseAotLibraryDescription(json: String): AotLibraryDescription {
         }
         AotFunction(name, text(f, "symbol", "function `$name`"), params, returns)
     }
+    if (intList == null) {
+        for (f in functions) {
+            if (f.params.any { it.type == "int_list" } || "int_list" in f.returns) {
+                fail("function `${f.name}` uses the type `int_list`, but the description has no \"int_list\" under \"lists\"")
+            }
+        }
+    }
     return AotLibraryDescription(
         prefix = prefix,
         library = text(root, "library", "the description"),
@@ -105,6 +131,7 @@ fun parseAotLibraryDescription(json: String): AotLibraryDescription {
         functions = functions,
         f64List = listSymbols("f64_list"),
         i64List = listSymbols("i64_list"),
+        intList = intList,
     )
 }
 
@@ -128,12 +155,13 @@ private fun kotlinType(type: String): String = when (type) {
     "bool" -> "Boolean"
     "f64_list" -> "F64List"
     "i64_list" -> "I64List"
+    "int_list" -> "IntList"
     else -> fail("unknown boundary type `$type`")
 }
 
 /** The carrier letter of a parameter in the helper's descriptor strings: `J` long, `D` double, `B` byte (`uint8_t`). */
 internal fun aotCarrier(type: String): Char = when (type) {
-    "i64", "f64_list", "i64_list" -> 'J'
+    "i64", "f64_list", "i64_list", "int_list" -> 'J'
     "f64" -> 'D'
     "bool" -> 'B'
     else -> fail("unknown boundary type `$type`")
@@ -153,7 +181,7 @@ private fun validate(d: AotLibraryDescription, packageName: String, objectName: 
     if (!IDENTIFIER.matches(objectName) || objectName in KOTLIN_HARD_KEYWORDS) {
         fail("the object name `$objectName` is not a Kotlin identifier")
     }
-    if (objectName in setOf("F64List", "I64List", "AotFfm", "AotFfmRuntime", "TypedPythonAotException")) {
+    if (objectName in setOf("F64List", "I64List", "IntList", "AotFfm", "AotFfmRuntime", "TypedPythonAotException")) {
         fail("the object name `$objectName` is one of the generated helper classes")
     }
     val seen = mutableSetOf<String>()
@@ -183,16 +211,19 @@ private const val GENERATED = "// GENERATED by python-multiplatform-gradle-plugi
 
 /**
  * The generated sources of one library, as relative file name to text: `AotFfm.kt` (the helper and the exception, the
- * same text for every library), `<objectName>.kt`, `F64List.kt` and `I64List.kt`, all in [packageName].
+ * same text for every library), `<objectName>.kt`, `F64List.kt` and `I64List.kt`, and `IntList.kt` only when the description has the `int_list` entry, all in
+ * [packageName].
  */
 fun renderAotLibraryBindings(d: AotLibraryDescription, packageName: String, objectName: String): Map<String, String> {
     validate(d, packageName, objectName)
-    return linkedMapOf(
+    val files = linkedMapOf(
         "AotFfm.kt" to renderAotFfmHelper(packageName),
         "$objectName.kt" to renderAotObject(d, packageName, objectName),
         "F64List.kt" to renderAotList(packageName, objectName, "F64List", "f64", "Double", "DoubleArray", "Double", 8, "list[float]"),
         "I64List.kt" to renderAotList(packageName, objectName, "I64List", "i64", "Long", "LongArray", "Long", 8, "list[int]"),
     )
+    if (d.intList != null) files["IntList.kt"] = renderAotIntList(packageName, objectName)
+    return files
 }
 
 /** The text of the FFM helper: the same for every library but its package line. */
@@ -270,6 +301,14 @@ private fun renderAotObject(d: AotLibraryDescription, packageName: String, objec
         line("        val ${prefix}ListRetain: MethodHandle = rt.downcall(\"${s.retain}\", \"(J)V\")")
         line("        val ${prefix}ListRelease: MethodHandle = rt.downcall(\"${s.release}\", \"(J)V\")")
     }
+    d.intList?.let { s ->
+        line("        val intListNew: MethodHandle = rt.downcall(\"${s.new}\", \"(J)J\")")
+        line("        val intListLen: MethodHandle = rt.downcall(\"${s.len}\", \"(J)J\")")
+        line("        val intListGet: MethodHandle = rt.downcall(\"${s.get}\", \"(JJJ)I\")")
+        line("        val intListSet: MethodHandle = rt.downcall(\"${s.set}\", \"(JJJ)I\")")
+        line("        val intListRetain: MethodHandle = rt.downcall(\"${s.retain}\", \"(J)V\")")
+        line("        val intListRelease: MethodHandle = rt.downcall(\"${s.release}\", \"(J)V\")")
+    }
     for (f in d.functions) {
         line("        val f_${f.name}: MethodHandle = rt.downcall(\"${f.symbol}\", \"${aotDescriptor(f)}\")")
     }
@@ -293,7 +332,7 @@ private fun renderAotFunction(f: AotFunction): String {
         val n = aotKotlinName(it.name)
         when (it.type) {
             "bool" -> "(if ($n) 1 else 0).toByte()"
-            "f64_list", "i64_list" -> "$n.pointer()"
+            "f64_list", "i64_list", "int_list" -> "$n.pointer()"
             else -> n
         }
     } + f.returns.indices.map { if (it == 0) "__out" else "__out + ${it * 8}L" }
@@ -305,6 +344,7 @@ private fun renderAotFunction(f: AotFunction): String {
             "bool" -> "__h.rt.readByte($at).toInt() != 0"
             "f64_list" -> "F64List.owned(__h, __h.rt.readLong($at))"
             "i64_list" -> "I64List.owned(__h, __h.rt.readLong($at))"
+            "int_list" -> "IntList.owned(__h, __h.rt.readLong($at))"
             else -> fail("unknown boundary type `$t`")
         }
     }
@@ -359,7 +399,7 @@ private fun renderAotList(
     line(" *   A function that returns its argument gives a new object over the same native list: a write through one is seen")
     line(" *   through the other, and each is closed on its own.")
     line(" * - Element writes from several threads to the same list are the caller's responsibility, exactly as for a Kotlin")
-    line(" *   array. Do not call [close] while another thread is using the list.")
+    line(" *   array: a racing read sees the old or the new value. Do not call [close] while another thread is using the list.")
     line(" */")
     line("class $cls private constructor(private val lib: $objectName.Handles, pointer: Long) : AutoCloseable {")
     line("    private val owner = java.util.concurrent.atomic.AtomicLong(pointer)")
@@ -433,6 +473,130 @@ private fun renderAotList(
     line("        private fun allocate(lib: $objectName.Handles, size: Int): Long {")
     line("            require(size >= 0) { \"size must not be negative: \" + size }")
     line("            val pointer = lib.${h}New.invokeExact(size.toLong()) as Long")
+    line("            if (pointer == 0L) throw lib.rt.lastError(lib.lastError)")
+    line("            return pointer")
+    line("        }")
+    line("    }")
+    line("}")
+    return sb.toString()
+}
+
+/**
+ * `IntList.kt`: the Kotlin side of the library's `int_list` handle, a `list[int]` that may hold values outside 64 bits
+ * (ABI version 2, #465; leader decision 2026-11-16, not owner-confirmed; the shape of the class is an agent proposal,
+ * not owner-confirmed). Unlike the other list classes it has no memory to read: every element access is a call into
+ * the library, and a failure of that call (an index out of range, an element that does not fit in 64 bits) is the
+ * library's own error record as a [TypedPythonAotException], with no bounds check on the Kotlin side.
+ */
+private fun renderAotIntList(packageName: String, objectName: String): String {
+    val sb = StringBuilder()
+    fun line(text: String = "") {
+        sb.append(text).append('\n')
+    }
+    line(GENERATED)
+    line("//")
+    line("// The Kotlin side of the library's counted `list[int]` handle that may hold big ints (abi_version 2). Leader decision")
+    line("// 2026-11-16 for the kind, not owner-confirmed; the shape of this class is an agent proposal, not owner-confirmed.")
+    line("@file:Suppress(\"unused\")")
+    line()
+    line("package $packageName")
+    line()
+    line("/**")
+    line(" * A `list[int]` of the compiled library whose elements may be outside 64 bits: a counted handle with no memory of")
+    line(" * its own that Kotlin can read. A parameter or result the library types as this kind takes and gives only this class.")
+    line(" *")
+    line(" * - Cost: [get] and [set] are each a call into the library through a method handle, slower than [I64List], which reads")
+    line(" *   native memory directly. Use [I64List] where the library's signature says it, and this class where it says this.")
+    line(" * - [get] of an element that does not fit in 64 bits throws [TypedPythonAotException] with class `OverflowError`")
+    line(" *   (the message says the element does not fit in 64 bits); the same element reads fine after a [set] of a smaller")
+    line(" *   value. [toLongArray] fails the same way if any element does not fit. An index out of range, [get] or [set], throws")
+    line(" *   [TypedPythonAotException] with class `IndexError` and the messages of the source language; a negative index counts")
+    line(" *   from the end, as in Python. There is no Kotlin-side bounds check.")
+    line(" * - Create one with `IntList(size)` (all zero) or `IntList.of(array)`; a list an exported function returns is wrapped")
+    line(" *   as an owned handle. The list never changes length.")
+    line(" * - Not interchangeable with [I64List] or [F64List]: the types are the protection. Passing a handle of the wrong kind")
+    line(" *   at the C level is memory corruption, and the generated functions accept only the kind their signature names.")
+    line(" * - [close] gives up this object's ownership, once; calling it again does nothing. Use after [close] throws")
+    line(" *   [IllegalStateException]. An unclosed list is not freed by the garbage collector (agent proposal).")
+    line(" * - Passing the same object for two parameters passes the same handle, so the parameters alias as they do in Python.")
+    line(" * - Threads: [get] and [set] of the same list from several threads are memory-safe. The library takes a small lock")
+    line(" *   inside the list for each element access (agent proposal, not owner-confirmed), so a reader sees the old or the")
+    line(" *   new element and no big integer is freed twice or used after being freed, unlike [I64List] and [F64List], whose")
+    line(" *   racing reads and writes behave as a Kotlin array does. Which of two writers to the same element wins is the")
+    line(" *   caller's responsibility. Do not call [close] while another thread is using the list.")
+    line(" * - Which list kind a signature has follows from the whole program: a change in a helper that several exports share")
+    line(" *   can turn another export's [I64List] into an [IntList], so regenerate and rebuild the callers together.")
+    line(" */")
+    line("class IntList private constructor(private val lib: $objectName.Handles, pointer: Long) : AutoCloseable {")
+    line("    private val owner = java.util.concurrent.atomic.AtomicLong(pointer)")
+    line()
+    line("    /** The number of elements. */")
+    line("    val size: Int = Math.toIntExact(lib.intListLen.invokeExact(pointer) as Long)")
+    line()
+    line("    /** A list of [size] zeros. Needs the library loaded. */")
+    line("    constructor(size: Int) : this($objectName.native(), allocate($objectName.native(), size))")
+    line()
+    line("    /** True once [close] has run. */")
+    line("    val isClosed: Boolean get() = owner.get() == 0L")
+    line()
+    line("    /** The native handle for a call; throws [IllegalStateException] when closed. */")
+    line("    internal fun pointer(): Long {")
+    line("        val p = owner.get()")
+    line("        if (p == 0L) throw IllegalStateException(\"IntList is closed\")")
+    line("        return p")
+    line("    }")
+    line()
+    line("    /** The element at [index] (negative counts from the end); `OverflowError` if it does not fit in 64 bits, `IndexError` out of range. */")
+    line("    operator fun get(index: Int): Long {")
+    line("        val p = pointer()")
+    line("        val out = lib.rt.scratch()")
+    line("        val rc = lib.intListGet.invokeExact(p, index.toLong(), out) as Int")
+    line("        if (rc != 0) throw lib.rt.lastError(lib.lastError)")
+    line("        return lib.rt.readLong(out)")
+    line("    }")
+    line()
+    line("    /** Stores [value] at [index] (negative counts from the end); `IndexError` out of range. */")
+    line("    operator fun set(index: Int, value: Long) {")
+    line("        val p = pointer()")
+    line("        val rc = lib.intListSet.invokeExact(p, index.toLong(), value) as Int")
+    line("        if (rc != 0) throw lib.rt.lastError(lib.lastError)")
+    line("    }")
+    line()
+    line("    /** A copy of the elements; fails with `OverflowError` if any element does not fit in 64 bits. */")
+    line("    fun toLongArray(): LongArray {")
+    line("        pointer()")
+    line("        val out = LongArray(size)")
+    line("        for (i in out.indices) out[i] = get(i)")
+    line("        return out")
+    line("    }")
+    line()
+    line("    /** Gives up this object's ownership of the native list, once. */")
+    line("    override fun close() {")
+    line("        val p = owner.getAndSet(0L)")
+    line("        if (p != 0L) lib.intListRelease.invokeExact(p) as Unit")
+    line("    }")
+    line()
+    line("    override fun toString(): String = \"IntList(size=\" + size + (if (isClosed) \", closed\" else \"\") + \")\"")
+    line()
+    line("    companion object {")
+    line("        /** A new list holding a copy of [values]. Needs the library loaded. */")
+    line("        fun of(values: LongArray): IntList {")
+    line("            val list = IntList(values.size)")
+    line("            try {")
+    line("                for (i in values.indices) list[i] = values[i]")
+    line("            } catch (e: Throwable) {")
+    line("                list.close()")
+    line("                throw e")
+    line("            }")
+    line("            return list")
+    line("        }")
+    line()
+    line("        /** Wraps a handle the library returned: the caller owns one count of it. */")
+    line("        internal fun owned(lib: $objectName.Handles, pointer: Long): IntList = IntList(lib, pointer)")
+    line()
+    line("        private fun allocate(lib: $objectName.Handles, size: Int): Long {")
+    line("            require(size >= 0) { \"size must not be negative: \" + size }")
+    line("            val pointer = lib.intListNew.invokeExact(size.toLong()) as Long")
     line("            if (pointer == 0L) throw lib.rt.lastError(lib.lastError)")
     line("            return pointer")
     line("        }")

@@ -11,7 +11,7 @@ import kotlin.test.assertTrue
 /**
  * The Kotlin generator for a TypedPython AOT library (SPEC N-17, #458): `<prefix>.json` in, Kotlin text out.
  *
- * The description below is written by hand in the format of `typedpython/aot/library.py` (abi_version 1) and holds
+ * The description below is written by hand in the format of `typedpython/aot/library.py` (abi_version 2) and holds
  * every type of the boundary vocabulary: scalars, both lists, a tuple return, a None return, and parameter and
  * function names that are Kotlin hard keywords. The expected text is asserted on signatures, on the carrier
  * descriptor of each symbol, on the status check and exception path, and on the rules the desktop FFM code of this
@@ -20,7 +20,7 @@ import kotlin.test.assertTrue
  */
 class AotLibraryBindingsTest {
 
-    private fun description(abi: Int = 1, extraFunction: String = ""): String = """
+    private fun description(abi: Int = 2, extraFunction: String = ""): String = """
         {
           "prefix": "kit",
           "library": "libkit.dylib",
@@ -214,14 +214,129 @@ class AotLibraryBindingsTest {
         assertFalse(render().values.any { it.contains("python.multiplatform") || it.contains("python.native") })
     }
 
+    // --- int_list (abi_version 2, #465) -----------------------------------------------------------------
+
+    private val intListEntry = """
+        "int_list": {"element": "i64", "new": "kit_int_list_new", "len": "kit_int_list_len", "get": "kit_int_list_get",
+                     "set": "kit_int_list_set", "retain": "kit_int_list_retain", "release": "kit_int_list_release"}
+    """.trimIndent()
+
+    private val intListFunctions = ",\n" + """
+        {"name": "fill_big", "symbol": "kit_fill_big", "line": 11,
+         "params": [{"name": "out", "type": "int_list"}, {"name": "n", "type": "i64"}], "returns": []},
+        {"name": "make_big", "symbol": "kit_make_big", "line": 12,
+         "params": [{"name": "n", "type": "i64"}], "returns": ["int_list"]},
+        {"name": "sum_big", "symbol": "kit_sum_big", "line": 13,
+         "params": [{"name": "xs", "type": "int_list"}, {"name": "raw", "type": "i64_list"}], "returns": ["i64"]}
+    """.trimIndent()
+
+    private fun withIntList(): String = description(extraFunction = intListFunctions)
+        .replace("\"lists\": {", "\"lists\": {\n$intListEntry,")
+
+    @Test
+    fun aDescriptionWithoutTheIntListEntryGeneratesNoIntList() {
+        assertFalse("IntList.kt" in render().keys, render().keys.toString())
+        val all = render().values.joinToString("\n")
+        assertFalse(all.contains("IntList"), "no IntList in a library without int_list")
+        assertFalse(all.contains("intList"), "no int_list handle either")
+        assertEquals(listOf("AotFfm.kt", "Kit.kt", "F64List.kt", "I64List.kt"), render().keys.toList())
+    }
+
+    @Test
+    fun anIntListIsAParameterAndAResultAndTheKindsAreDistinctTypes() {
+        val files = render(json = withIntList())
+        assertEquals(listOf("AotFfm.kt", "Kit.kt", "F64List.kt", "I64List.kt", "IntList.kt"), files.keys.toList())
+        val kit = files.getValue("Kit.kt")
+        assertTrue(kit.contains("    fun fill_big(out: IntList, n: Long) {"), kit)
+        assertTrue(kit.contains("    fun make_big(n: Long): IntList {"), kit)
+        assertTrue(kit.contains("    fun sum_big(xs: IntList, raw: I64List): Long {"), "one library can use both kinds:\n$kit")
+        assertTrue(kit.contains("f_fill_big.invokeExact(out.pointer(), n) as Int"), kit)
+        assertTrue(kit.contains("f_sum_big.invokeExact(xs.pointer(), raw.pointer(), __out) as Int"), kit)
+        assertTrue(kit.contains("return IntList.owned(__h, __h.rt.readLong(__out))"), kit)
+        // the status of an int result is checked like any other (an ABI-level OverflowError arrives as -1)
+        assertTrue(kit.contains("if (__rc != 0) throw __h.rt.lastError(__h.lastError)"), kit)
+        // the kinds share no Kotlin type: the classes are separate and neither extends the other
+        for (cls in listOf("IntList", "I64List", "F64List")) {
+            assertTrue(files.getValue("$cls.kt").contains("class $cls private constructor("), cls)
+            assertFalse(files.getValue("$cls.kt").contains(") : AutoCloseable, "), cls)
+        }
+    }
+
+    @Test
+    fun theIntListHandlesAreBoundWithGetAndSetDescriptorsAndThereIsNoData() {
+        val kit = render(json = withIntList()).getValue("Kit.kt")
+        for ((symbol, descriptor) in mapOf(
+            "kit_int_list_new" to "(J)J",
+            "kit_int_list_len" to "(J)J",
+            "kit_int_list_get" to "(JJJ)I",
+            "kit_int_list_set" to "(JJJ)I",
+            "kit_int_list_retain" to "(J)V",
+            "kit_int_list_release" to "(J)V",
+            "kit_fill_big" to "(JJ)I",
+            "kit_make_big" to "(JJ)I",
+            "kit_sum_big" to "(JJJ)I",
+        )) {
+            assertTrue(kit.contains("rt.downcall(\"$symbol\", \"$descriptor\")"), "$symbol should be bound as $descriptor:\n$kit")
+        }
+        assertFalse(kit.contains("intListData"), "an int_list has no data function")
+        assertFalse(Regex("rt\\.downcall\\(\"[^\"]+\", \"[^\"]*[^JDBIV()][^\"]*\"\\)").containsMatchIn(kit))
+    }
+
+    @Test
+    fun theIntListClassCallsTheLibraryForEveryElementAndKeepsTheLibrarysErrors() {
+        val text = render(json = withIntList()).getValue("IntList.kt")
+        assertTrue(text.contains("class IntList private constructor(private val lib: Kit.Handles, pointer: Long) : AutoCloseable {"), text)
+        assertTrue(text.contains("operator fun get(index: Int): Long {"), text)
+        assertTrue(text.contains("operator fun set(index: Int, value: Long) {"), text)
+        assertTrue(text.contains("fun toLongArray(): LongArray {"), text)
+        assertTrue(text.contains("fun of(values: LongArray): IntList {"), text)
+        assertTrue(text.contains("lib.intListGet.invokeExact(p, index.toLong(), out) as Int"), text)
+        assertTrue(text.contains("lib.intListSet.invokeExact(p, index.toLong(), value) as Int"), text)
+        assertEquals(2, Regex("if \\(rc != 0\\) throw lib\\.rt\\.lastError\\(lib\\.lastError\\)").findAll(text).count(), "get and set check the status")
+        assertTrue(text.contains("lib.intListRelease.invokeExact(p) as Unit"), text)
+        assertTrue(text.contains("throw IllegalStateException(\"IntList is closed\")"), "use after close stays an IllegalStateException")
+        // no Kotlin-side bounds check: the library's IndexError is what the caller sees
+        assertFalse(text.contains("IndexOutOfBoundsException"), text)
+        assertFalse(text.contains("checkIndex"), text)
+        // no direct memory access: the elements are not int64 in memory
+        assertFalse(text.contains("rt.readLong(data"), text)
+        assertFalse(text.contains("ListData"), text)
+        assertTrue(text.contains("slower than [I64List]"), "the cost is documented")
+        assertTrue(text.contains("caller's responsibility"), "the concurrency rule is documented")
+        assertTrue(text.contains("Not interchangeable"), "the type-safety reason is documented")
+        assertFalse(text.contains(".invoke("), "no inexact invoke")
+    }
+
+    @Test
+    fun theObjectNameIntListIsReserved() {
+        assertFailsWith<GradleException> { render(name = "IntList") }
+    }
+
+    @Test
+    fun anIntListTypeWithoutTheListsEntryFailsNamingTheFunction() {
+        val e = assertFailsWith<GradleException> {
+            parseAotLibraryDescription(description(extraFunction = intListFunctions))
+        }
+        assertTrue(e.message!!.contains("`fill_big`") && e.message!!.contains("int_list"), e.message)
+        val resultOnly = description(
+            extraFunction = ",\n" + """{"name": "give", "symbol": "kit_give", "line": 20, "params": [], "returns": ["int_list"]}""",
+        )
+        val r = assertFailsWith<GradleException> { parseAotLibraryDescription(resultOnly) }
+        assertTrue(r.message!!.contains("`give`"), r.message)
+    }
+
     // --- task failures --------------------------------------------------------------------------------
 
     @Test
     fun aWrongAbiVersionIsAClearFailure() {
-        val e = assertFailsWith<GradleException> { parseAotLibraryDescription(description(abi = 2)) }
-        assertTrue(e.message!!.contains("abi_version 2"), e.message)
-        assertTrue(e.message!!.contains("abi_version 1"), e.message)
-        assertFailsWith<GradleException> { parseAotLibraryDescription(description().replace("\"abi_version\": 1,", "")) }
+        // Version 1 is rejected too: no version 1 library is deployed and the compiler writes 2 only.
+        for (wrong in listOf(1, 3)) {
+            val e = assertFailsWith<GradleException> { parseAotLibraryDescription(description(abi = wrong)) }
+            assertTrue(e.message!!.contains("abi_version $wrong"), e.message)
+            assertTrue(e.message!!.contains("reads abi_version 2 only"), e.message)
+        }
+        assertEquals(2, AOT_LIBRARY_ABI_VERSION)
+        assertFailsWith<GradleException> { parseAotLibraryDescription(description().replace("\"abi_version\": 2,", "")) }
     }
 
     @Test
@@ -268,7 +383,7 @@ class AotLibraryBindingsTest {
         task.generate()
         assertFalse(dir.resolve("Old.kt").exists())
 
-        json.writeText(description(abi = 3))
+        json.writeText(description(abi = 1))
         assertFailsWith<GradleException> { task.generate() }
     }
 }
