@@ -985,7 +985,11 @@ def test_the_live_counter_exists_only_under_its_macro():
     assert "#define TPA_INT__LIVE_INC() ((void)0)" in m.group(2) and "#define TPA_INT__LIVE_DEC() ((void)0)" in m.group(2)
 
 
-def test_the_aot_back_end_does_not_use_the_header_yet():
-    for path in AOT_DIR.rglob("*"):
-        if path.is_file() and path.suffix in {".py", ".h", ".c"}:
-            assert "tp_aot_int" not in path.read_text(encoding="utf-8", errors="replace"), path
+def test_the_aot_back_end_includes_the_header_from_its_two_writers():
+    """Until #462 this test pinned that the back end did not use the header at all. It uses it now, and only
+    where a program has an int that is not proved inside 64 bits: one include line in the emitter (executables)
+    and one in the library writer. Which programs get it is pinned by test_aot_build.py and test_aot_lib.py (a
+    program whose ints are all proved has no include)."""
+    lines = [(path.name, line.strip()) for path in sorted(AOT_DIR.rglob("*.py"))
+             for line in path.read_text(encoding="utf-8").splitlines() if '#include "tp_aot_int.h"' in line]
+    assert [name for name, _ in lines] == ["emit.py", "library.py"], lines
