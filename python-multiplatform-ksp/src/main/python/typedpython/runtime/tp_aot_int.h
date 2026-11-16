@@ -1586,7 +1586,7 @@ static TPA_UNUSED int tpa_truediv_i64(int64_t a, int64_t b, double *out)
  *   list(range(10**30)), list(range(2**63))                  OverflowError: TPA_MSG_INT_TO_SSIZE below
  *   list(range(-10**30))                                     [] (a negative length is an empty list) */
 #define TPA_MSG_INT_TO_INDEX "cannot fit 'int' into an index-sized integer"
-#define TPA_MSG_INT_TO_SSIZE "P" "ython int too large to convert to C ssize_t"      /* (split: no header names the interpreter) */
+#define TPA_MSG_INT_TO_SSIZE "Python int too large to convert to C ssize_t"
 
 static inline int tpa_int_to_index(tpa_int a, int64_t *out)
 {

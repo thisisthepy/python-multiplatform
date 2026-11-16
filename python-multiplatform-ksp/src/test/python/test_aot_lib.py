@@ -48,6 +48,7 @@ import pytest
 from typedpython import aot, cbuild, ir
 from typedpython.__main__ import main
 from typedpython.aot import cc, library
+from aot_text_check import cpython_api_uses
 from typedpython.ir import Type
 
 HEADER = cc.RUNTIME_DIR / "tp_aot.h"
@@ -1146,8 +1147,7 @@ def all_symbols(description):
 
 def test_generated_text_contains_no_cpython(generated):
     for what, body in (("library C", generated.c), ("header", generated.header), ("tp_aot.h", HEADER.read_text())):
-        assert "Python.h" not in body, what
-        assert not re.search(r"\b_?Py[A-Z_a-z]", body), (what, re.findall(r"\b_?Py[A-Z_a-z]\w*", body))
+        assert not cpython_api_uses(body), (what, cpython_api_uses(body))
     assert re.findall(r"#include\s*[<\"]([^>\"]+)", generated.c) == ["tp_aot.h"]
     assert re.findall(r"#include\s*[<\"]([^>\"]+)", generated.header) == ["stdint.h"]
 

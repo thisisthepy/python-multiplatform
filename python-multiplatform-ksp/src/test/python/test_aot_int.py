@@ -44,6 +44,7 @@ import pytest
 
 from typedpython import cbuild
 from typedpython.aot import cc, library
+from aot_text_check import cpython_api_uses
 
 HEADER = cc.RUNTIME_DIR / "tp_aot_int.h"
 SHIM = Path(__file__).resolve().parent / "runtime_shim" / "tp_aot_int_shim.c"
@@ -960,8 +961,7 @@ def test_threads_share_read_only_operands_and_compute_on_their_own_values(shim):
 def test_the_header_and_the_shim_contain_no_cpython():
     for what, path in (("tp_aot_int.h", HEADER), ("tp_aot_int_shim.c", SHIM)):
         body = path.read_text(encoding="utf-8")
-        assert "Python.h" not in body, what
-        assert not re.search(r"\b_?Py[A-Z_a-z]", body), (what, re.findall(r"\b_?Py[A-Z_a-z]\w*", body))
+        assert not cpython_api_uses(body), (what, cpython_api_uses(body))
         assert "\u2014" not in body, what
         assert "__int128" not in body and "__builtin" not in body, what
     includes = re.findall(r"#include\s*[<\"]([^>\"]+)", HEADER.read_text(encoding="utf-8"))

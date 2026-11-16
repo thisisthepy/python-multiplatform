@@ -39,6 +39,7 @@ import pytest
 from typedpython import aot, cbuild
 from typedpython.__main__ import main
 from typedpython.aot import cc
+from aot_text_check import cpython_api_uses
 
 HEADER = cc.RUNTIME_DIR / "tp_aot.h"
 BENCH = Path(__file__).resolve().parents[4] / "benchmarks" / "typedpython" / "py"
@@ -2442,15 +2443,50 @@ def test_the_sanitizer_switch_reaches_the_executable_build(monkeypatch, tmp_path
     assert not cc.sanitizing()
 
 
+@pytest.mark.parametrize("text", [
+    'const char *s = "Python and PyObject";',
+    '/* Python, PyObject, Py_INCREF(x) */ int a;',
+    "char c = 'P'; int python_free;",
+    "// PyObject\nint a;",
+    'const char *s = "/* "; int a;',
+    '/* a " quote */ int a;',
+    'const char *s = "a\\"b PyObject"; int a;',
+    'const char *s = "a\\\\"; int a;',
+    '#include "tp_aot.h"\n#include <math.h>\n#include <stdint.h>\n',
+])
+def test_the_cpython_check_accepts(text):
+    assert cpython_api_uses(text) == [], text
+
+
+@pytest.mark.parametrize("text, found", [
+    ("PyObject *o;", ["PyObject"]),
+    ("x = _PyLong_New(1);", ["_PyLong_New"]),
+    ("Py_INCREF(x);", ["Py_INCREF"]),
+    ('const char *s = "/* "; PyObject *o; /* */', ["PyObject"]),
+    ('/* a " quote */ PyObject *o; const char *s = "x";', ["PyObject"]),
+    ('const char *s = "a\\"b PyObject"; PyObject *o;', ["PyObject"]),
+    ('const char *s = "a\\\\"; PyObject *o;', ["PyObject"]),
+    ("char c = 'P'; Py_None;", ["Py_None"]),
+    ('#include "Python.h"\n', ["#include Python.h"]),
+    ("#include <Python.h>\n", ["#include Python.h"]),
+    ("#include <pyconfig.h>\n", ["#include pyconfig.h"]),
+    ("#include <structmember.h>\n", ["#include structmember.h"]),
+    ("#include <frameobject.h>\n", ["#include frameobject.h"]),
+    ("#include <cpython/object.h>\n", ["#include cpython/object.h"]),
+    ("#include <internal/pycore_long.h>\n", ["#include internal/pycore_long.h"]),
+])
+def test_the_cpython_check_rejects(text, found):
+    assert cpython_api_uses(text) == found, text
+
+
 def test_generated_c_contains_no_cpython(tmp_path):
     c = aot.generate(write(tmp_path, merged_source(["math_functions"])))
     header = HEADER.read_text()
     for what, body in (("generated C", c), ("tp_aot.h", header)):
-        assert "Python.h" not in body, what
-        assert not re.search(r"\b_?Py[A-Z_a-z]", body), (what, re.findall(r"\b_?Py[A-Z_a-z]\w*", body))
+        assert not cpython_api_uses(body), (what, cpython_api_uses(body))
     assert '#include "tp_aot.h"' in c
     big = HEADER.with_name("tp_aot_int.h").read_text()
-    assert not re.search(r"\b_?Py[A-Z_a-z]", big) and "Python.h" not in big
+    assert not cpython_api_uses(big), cpython_api_uses(big)
     for inc in re.findall(r"#include\s*[<\"]([^>\"]+)", c + header + big):
         # (stdatomic.h and intrin.h: the library build's atomic list counts, tp_aot.h under -DTPA_LIBRARY, #455)
         assert inc in {"tp_aot.h", "errno.h", "math.h", "stdint.h", "stdio.h", "stdlib.h", "string.h",
