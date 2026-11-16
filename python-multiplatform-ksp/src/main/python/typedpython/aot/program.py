@@ -1,41 +1,33 @@
-"""The program of an AOT build, read from source (SPEC N-17, #448; agent proposal, not owner-confirmed).
+"""The program of an AOT build, read from source (SPEC N-17, #448, #451; agent proposal, not owner-confirmed).
 
 `analyze(entry)` reads the entry module and does what needs no types:
 
 1. checks the shape of the program (module level, imports, `print`, the statements and expressions a
-   function may hold) and collects findings in the original file's lines;
-2. folds the module constants (`NAME = <constant expression>`) with Python's own arithmetic;
-3. writes the text the front end is given. The front end is the default mode's, which compiles a
-   function it can prove pure and keeps it as an object function otherwise, so the text is shaped to be
-   pure and every edit keeps the line count and the line of everything it touches:
-   - the `if __name__ == "__main__":` header becomes `def __tp_main() -> None` and the block is its
-     body (the front end lowers the entry like any function);
-   - each module constant read in a function is replaced by its literal (a recursive function that
-     reads a global would otherwise read it as an object, and the literal also gives the interval proof
-     a value);
-   - each `print(...)` statement calls a stub `__tp_print_<k>(a0: object, ...)` with `pass` as body,
-     appended at the end of the file: a call of a pure function keeps the caller pure, so the integer
-     arithmetic in its arguments is proved exactly as in any function (an impure function's ints are
-     `INT`, which the front end never proves). A string literal argument is replaced by `0` and
-     remembered. `emit` turns each call of a stub back into the print.
+   function may hold) and collects findings in the file's own lines;
+2. folds the module constants (`NAME = <constant expression>`, `NAME: int | float | bool = ...`) with
+   Python's own arithmetic (`frontend.fold_constant`) so a malformed one is reported here, in its own
+   words.
+
+It rewrites nothing: the front end reads the file as it is (`frontend.lower(path, aot=True)`), with
+`print` as a statement of its own, the constants as typed values and the `__main__` block as the entry
+function (frontend module docstring "AOT mode").
 """
 from __future__ import annotations
 
 import ast
 import builtins
-import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 
+from typedpython import frontend
 from typedpython.aotcheck import Finding
 
 I64_MIN, I64_MAX = -2**63, 2**63 - 1
 MATH_FUNCTIONS = {"sqrt": 1, "exp": 1, "log": 1, "sin": 1, "cos": 1, "tan": 1, "fabs": 1, "atan2": 2, "hypot": 2}
 SCALAR_NAMES = ("int", "float", "bool")
 RESERVED_PREFIX = "__tp_"
-MAIN = "__tp_main"
-PRINT_PREFIX = "__tp_print_"
+MAIN = frontend.AOT_ENTRY
 
 _BIN_OPS = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod)
 _CMP_OPS = (ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE)
@@ -53,20 +45,6 @@ _CONTAINER_NAMES = {
 
 
 @dataclass
-class PrintSite:
-    """One `print(...)` statement: per argument, None for an expression the stub receives, else the
-    string literal."""
-
-    index: int
-    line: int
-    template: list[str | None]
-
-    @property
-    def stub(self) -> str:
-        return f"{PRINT_PREFIX}{self.index}"
-
-
-@dataclass
 class Program:
     path: Path
     rel: str
@@ -75,9 +53,7 @@ class Program:
     functions: list[ast.FunctionDef] = field(default_factory=list)
     main: ast.If | None = None
     consts: dict[str, int | float | bool] = field(default_factory=dict)
-    prints: dict[str, PrintSite] = field(default_factory=dict)      # stub name -> site
     findings: list[Finding] = field(default_factory=list)
-    edited: str = ""
 
     def bodies(self) -> dict[str, object]:
         """IR function name -> an object with `.body` (the function's own statements, original nodes)
@@ -101,38 +77,6 @@ class _Report:
         self.findings.append(Finding(self.rel, line, "error", None, rule, name, message, self.function))
 
 
-# --- constants -----------------------------------------------------------------------------------
-
-def _fold(node: ast.expr, known: dict[str, int | float | bool]):
-    """The value of a constant expression: an int, float or bool literal, unary minus (and plus), and
-    `+ - * /` over literals and earlier constants. Raises ValueError with the reason otherwise."""
-    if isinstance(node, ast.Constant):
-        if type(node.value) in (int, float, bool):
-            return node.value
-        raise ValueError(f"a {type(node.value).__name__} literal is not a numeric constant")
-    if isinstance(node, ast.Name):
-        if node.id in known:
-            return known[node.id]
-        raise ValueError(f"`{node.id}` is not an earlier constant")
-    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
-        v = _fold(node.operand, known)
-        return -v if isinstance(node.op, ast.USub) else +v
-    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div)):
-        a, b = _fold(node.left, known), _fold(node.right, known)
-        try:
-            if isinstance(node.op, ast.Add):
-                return a + b
-            if isinstance(node.op, ast.Sub):
-                return a - b
-            if isinstance(node.op, ast.Mult):
-                return a * b
-            return a / b
-        except ArithmeticError as e:
-            raise ValueError(f"the expression raises {type(e).__name__}: {e}") from None
-    raise ValueError(f"a `{type(node).__name__}` is not allowed in a constant expression "
-                     "(only literals, unary minus and + - * / over earlier constants)")
-
-
 # --- the checks ----------------------------------------------------------------------------------
 
 def _bound_names(fn: ast.AST) -> set[str]:
@@ -152,8 +96,6 @@ class _Checker:
         self.rep = rep
         self.arity = arity
         self.has_math = has_math
-        self.edits: list[tuple[ast.AST, ast.AST | None, str]] = []   # (start node, end node, text)
-        self.print_count = 0
         self.consts = program.consts
         self.shadow: set[str] = set()
 
@@ -272,39 +214,22 @@ class _Checker:
             self.rep.error(s, "aot/statement", "expression", "an expression statement must be a call")
 
     def print_stmt(self, s: ast.Expr, call: ast.Call) -> None:
-        ok = True
         for k in call.keywords:
-            ok = False
             self.rep.error(k.value, "aot/print-keyword", k.arg or "**",
                            f"print(..., {k.arg or '**'}=...) is outside the first AOT step "
                            "(positional arguments only; no sep, end, file or flush)")
-        template: list[str | None] = []
         for a in call.args:
             if isinstance(a, ast.Starred):
-                ok = False
                 self.rep.error(a, "aot/print-arg", "*", "a starred argument of print is outside the first AOT step")
             elif isinstance(a, ast.Constant) and isinstance(a.value, str):
                 if "\x00" in a.value or any(0xD800 <= ord(c) <= 0xDFFF for c in a.value):
-                    ok = False
                     self.rep.error(a, "aot/print-arg", "str", "a string literal with a NUL or a lone surrogate is "
                                    "outside the first AOT step")
-                template.append(a.value)
             elif isinstance(a, ast.Constant) and a.value is None:
-                ok = False
                 self.rep.error(a, "aot/print-arg", "None", "print(None) is outside the first AOT step "
                                "(int, float, bool and string literals only)")
             else:
                 self.expr(a)
-                template.append(None)
-        if not ok:
-            return
-        site = PrintSite(self.print_count, s.lineno, template)
-        self.print_count += 1
-        self.p.prints[site.stub] = site
-        self.edits.append((call.func, None, site.stub))
-        for a, t in zip(call.args, template):
-            if t is not None:
-                self.edits.append((a, a, "0"))
 
     # -- expressions
 
@@ -328,10 +253,8 @@ class _Checker:
             if e.id in self.consts and e.id not in self.shadow:
                 v = self.consts[e.id]
                 if isinstance(v, float) and v != v:
-                    self.rep.error(e, "aot/constant", e.id, f"the module constant `{e.id}` is nan, which has no "
-                                   "literal form in the first AOT step")
-                else:
-                    self.edits.append((e, e, _literal(v)))
+                    self.rep.error(e, "aot/constant", e.id, f"the module constant `{e.id}` is nan, which the "
+                                   "first AOT step does not support")
         elif isinstance(e, ast.BinOp):
             if not isinstance(e.op, _BIN_OPS):
                 sym = type(e.op).__name__
@@ -412,29 +335,7 @@ def _op_symbol(op: ast.operator) -> str:
             ast.BitXor: "^", ast.MatMult: "@"}.get(type(op), type(op).__name__)
 
 
-def _literal(v: int | float | bool) -> str:
-    """The source text of a constant's value (parenthesised, so a negative one binds as a unit)."""
-    if isinstance(v, bool):
-        return f"({v})"
-    if isinstance(v, int):
-        return f"({v})"
-    if v != v:
-        raise ValueError("nan")
-    if math.isinf(v):
-        return "(1e999)" if v > 0 else "(-1e999)"
-    return f"({v!r})"
-
-
 # --- the module ----------------------------------------------------------------------------------
-
-def _is_main_guard(node: ast.stmt) -> bool:
-    if not isinstance(node, ast.If):
-        return False
-    t = node.test
-    return (isinstance(t, ast.Compare) and isinstance(t.left, ast.Name) and t.left.id == "__name__"
-            and len(t.ops) == 1 and isinstance(t.ops[0], ast.Eq) and len(t.comparators) == 1
-            and isinstance(t.comparators[0], ast.Constant) and t.comparators[0].value == "__main__")
-
 
 def analyze(entry: Path) -> Program:
     entry = Path(entry).resolve()
@@ -467,14 +368,13 @@ def analyze(entry: Path) -> Program:
             if s.name in seen_names:
                 rep.error(s, "aot/redefinition", s.name, f"`{s.name}` is defined twice (first at line {seen_names[s.name]})")
             seen_names.setdefault(s.name, s.lineno)
-        elif isinstance(s, ast.Assign) and len(s.targets) == 1 and isinstance(s.targets[0], ast.Name):
-            name = s.targets[0].id
+        elif ((isinstance(s, ast.Assign) and len(s.targets) == 1 and isinstance(s.targets[0], ast.Name))
+              or (isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name))):
+            name = s.targets[0].id if isinstance(s, ast.Assign) else s.target.id      # type: ignore[union-attr]
             try:
-                v = _fold(s.value, program.consts)
-                if isinstance(v, int) and not isinstance(v, bool) and not I64_MIN <= v <= I64_MAX:
-                    raise ValueError(f"the int value {v} is outside 64 bits (big integers arrive in a later step)")
+                _, v = frontend.aot_constant(s, program.consts)
             except ValueError as e:
-                rep.error(s, "aot/constant", name, f"the module constant `{name}` is not a constant expression: {e}")
+                rep.error(s, "aot/constant", name, f"the module constant `{name}` {e}")
             else:
                 if name in seen_names:
                     rep.error(s, "aot/redefinition", name, f"`{name}` is bound twice at module level "
@@ -482,7 +382,7 @@ def analyze(entry: Path) -> Program:
                 else:
                     program.consts[name] = v
                 seen_names.setdefault(name, s.lineno)
-        elif _is_main_guard(s):
+        elif frontend.is_main_guard(s):
             assert isinstance(s, ast.If)
             main_guards.append(s)
             if s.orelse:
@@ -491,7 +391,8 @@ def analyze(entry: Path) -> Program:
             kind = _STATEMENT_NAMES.get(type(s).__name__, type(s).__name__)
             rep.error(s, "aot/module-statement", kind,
                       f"a module-level `{kind}` statement is not allowed: a program has a docstring, one `import math`, "
-                      "defs, `NAME = <constant expression>` and one `if __name__ == \"__main__\"` block")
+                      "defs, `NAME = <constant expression>` (also `NAME: int | float | bool = ...`) and one "
+                      "`if __name__ == \"__main__\"` block")
     if len(main_guards) != 1:
         rep.error(main_guards[1] if len(main_guards) > 1 else 1, "aot/entry", "__main__",
                   "a program has exactly one `if __name__ == \"__main__\":` block" +
@@ -536,50 +437,11 @@ def analyze(entry: Path) -> Program:
         checker.function(f.name, f, f.body)
     if program.main is not None:
         checker.function("__main__", None, program.main.body)
-        if _is_main_guard(program.main) and program.main.test.end_lineno != program.main.test.lineno:
+        if program.main.test.end_lineno != program.main.test.lineno:
             rep.error(program.main, "aot/entry", "__main__", "the `__main__` test must be on one line")
 
     unique: dict[tuple[int, str, str], Finding] = {}
     for f in rep.findings:
         unique.setdefault((f.line, f.rule, f.name), f)
     program.findings = list(unique.values())
-    if not program.findings:
-        program.edited = _apply_edits(source, program, checker.edits)
     return program
-
-
-# --- text edits ----------------------------------------------------------------------------------
-
-def _apply_edits(source: str, program: Program, node_edits: list[tuple[ast.AST, ast.AST | None, str]]) -> str:
-    """The text for the front end. Every edit keeps the number of lines: a replaced multi-line literal is
-    followed by as many newlines as it spanned."""
-    data = source.encode("utf-8")
-    starts = [0]
-    for i, b in enumerate(data):
-        if b == 0x0A:
-            starts.append(i + 1)
-
-    def offset(line: int, col: int) -> int:                 # ast columns are UTF-8 byte offsets
-        return starts[line - 1] + col
-
-    edits: list[tuple[int, int, bytes]] = []
-    for start, end, text in node_edits:
-        if end is None:                                      # a Name (the callee `print`): its own span
-            end = start
-        a = offset(start.lineno, start.col_offset)
-        b = offset(end.end_lineno, end.end_col_offset)
-        newlines = end.end_lineno - start.lineno
-        edits.append((a, b, text.encode() + b"\n" * newlines))
-    if program.main is not None:                             # the header: `if __name__ == "__main__"` -> def
-        t = program.main.test
-        edits.append((offset(program.main.lineno, program.main.col_offset),
-                      offset(t.end_lineno, t.end_col_offset), f"def {MAIN}() -> None".encode()))
-    for a, b, text in sorted(edits, key=lambda e: e[0], reverse=True):
-        data = data[:a] + text + data[b:]
-    out = data.decode("utf-8")
-    if not out.endswith("\n"):
-        out += "\n"
-    for site in program.prints.values():
-        params = ", ".join(f"a{i}: object" for i in range(len(site.template)))
-        out += f"def {site.stub}({params}) -> None:\n    pass\n"
-    return out

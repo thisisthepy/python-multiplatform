@@ -67,6 +67,22 @@ the module, and read in a *closed* function (one that runs no user code, decided
 is read once at entry: a `Param` of the function and `Local(name)` at every read. Elsewhere it is a
 `Global` (OBJ). In a function with an effect and three or more list parameters (#255 (d2),
 `ir.direct_writer`, agent proposal) such a name is `Unbox(Global(name))` instead, read at each use.
+
+AOT mode (`lower(path, aot=True)`, SPEC N-17, #451; agent proposal, not owner-confirmed). The standalone
+build of `typedpython.aot` has no interpreter to fall back to, so it reads the same source with these
+differences, and only these (with the flag off nothing below applies):
+
+- every top-level `def` is a candidate, `@compiled` or not (owner decision D6);
+- a function is lowered once, in the pure mode, never as an impure function: there is no deopt, so
+  nothing needs the `INT` type, an int local is `I64`, and each int operation carries its `proven`
+  flag from the interval proof exactly as in a pure function (`print` does not change that);
+- `print(...)` is an `ir.Print` statement (positional scalar or string-literal arguments, `print` not
+  rebound in the module) and is not an effect;
+- a module-level `NAME = <constant expression>` / `NAME: int|float|bool = <constant expression>` bound
+  once is read as `ir.Const(..., name=NAME)` (`fold_constant`), never as a `Global` or an entry global;
+  a function that assigns the name makes it a local;
+- the `if __name__ == "__main__":` block that ends the module is lowered as the function `AOT_ENTRY`
+  (`-> None`, no parameters) with the block's own statements and line numbers.
 """
 from __future__ import annotations
 
@@ -158,6 +174,10 @@ class _ModuleInfo:
     # Top-level `import x [as y]` / `from m import n [as k]` names bound exactly once in the module:
     # local name -> dotted qualified name (`a` -> `array`, `array` -> `array.array`).
     imports: dict[str, str] = field(default_factory=dict)
+    # AOT mode (`lower(path, aot=True)`): the module constants (`aot_constants`), name -> the Const a
+    # read of it lowers to. `aot` is False in the default mode, and `aot_consts` is then empty.
+    aot: bool = False
+    aot_consts: dict[str, ir.Const] = field(default_factory=dict)
 
     def bound(self, name: str) -> bool:
         return name in self.bindings
@@ -180,11 +200,21 @@ class _Signature:
         return f"{self.owner}.{self.node.name}" if self.owner else self.node.name
 
 
-def lower(path: Path) -> ir.Module:
+AOT_ENTRY = "__tp_main"      # the IR name of the `if __name__ == "__main__":` block in AOT mode
+
+
+def lower(path: Path, *, aot: bool = False) -> ir.Module:
+    """The IR of the module at `path`. `aot=True` is the AOT mode (module docstring, `verify.verify(m,
+    aot=True)` is its verifier); it is off by default and nothing differs from the default mode then."""
     path = Path(path).resolve()
     source = path.read_text()
     tree = ast.parse(source, filename=str(path))
+    if aot:
+        aot_entry(tree)
     info = _module_info(tree)
+    if aot:
+        info.aot = True
+        info.aot_consts = aot_constants(tree, info.bindings)
 
     skipped: dict[str, str] = {}
     class_decls, class_skips = _classes(tree, source, info)
@@ -193,7 +223,7 @@ def lower(path: Path) -> ir.Module:
     signatures: dict[str, _Signature] = {}
     marked: set[str] = set()
     fastmath_marked: set[str] = set()
-    for node, reason, parallel, fastmath in _targets(tree, source, info):
+    for node, reason, parallel, fastmath in _targets(tree, source, info, aot):
         if reason is not None:
             skipped[node.name] = reason
             continue
@@ -250,6 +280,134 @@ def lower(path: Path) -> ir.Module:
         for f in functions
     ]
     return ir.Module(path.stem, tuple(functions), skipped, tuple(class_decls.values()))
+
+
+# --- AOT mode: the entry block and the module constants ---------------------------------------------
+
+def is_main_guard(node: ast.stmt) -> bool:
+    """`if __name__ == "__main__":` (the test only)."""
+    if not isinstance(node, ast.If):
+        return False
+    t = node.test
+    return (isinstance(t, ast.Compare) and isinstance(t.left, ast.Name) and t.left.id == "__name__"
+            and len(t.ops) == 1 and isinstance(t.ops[0], ast.Eq) and len(t.comparators) == 1
+            and isinstance(t.comparators[0], ast.Constant) and t.comparators[0].value == "__main__")
+
+
+def aot_entry(tree: ast.Module) -> ast.FunctionDef | None:
+    """AOT mode: replace the `if __name__ == "__main__":` block that ends the module (no `else`) by the
+    function `AOT_ENTRY() -> None` whose body is the block's own statements, so the entry is lowered
+    like any function and every statement keeps the line it has in the file. Nothing in the file is
+    rewritten: this is a change of the parsed tree. Returns the function, or None when the module does
+    not end in such a block."""
+    if not tree.body or not is_main_guard(tree.body[-1]) or tree.body[-1].orelse:     # type: ignore[attr-defined]
+        return None
+    block = tree.body[-1]
+    assert isinstance(block, ast.If)
+    returns = ast.Constant(value=None)
+    fn = ast.FunctionDef(
+        name=AOT_ENTRY,
+        args=ast.arguments(posonlyargs=[], args=[], vararg=None, kwonlyargs=[], kw_defaults=[],
+                           kwarg=None, defaults=[]),
+        body=block.body, decorator_list=[], returns=returns, type_comment=None)
+    if "type_params" in ast.FunctionDef._fields:
+        fn.type_params = []
+    ast.copy_location(returns, block)
+    ast.copy_location(fn, block)
+    fn.end_lineno, fn.end_col_offset = block.end_lineno, block.end_col_offset
+    tree.body[-1] = fn
+    return fn
+
+
+def fold_constant(node: ast.expr, known: dict[str, int | float | bool]) -> int | float | bool:
+    """AOT mode: the value of a constant expression, an int, float or bool literal, unary minus (and
+    plus), and `+ - * /` over literals and earlier constants (`known`), computed with Python's own
+    arithmetic on the folded values (so it is CPython's value, a float stays a float and an int an
+    int). Raises ValueError with the reason otherwise."""
+    if isinstance(node, ast.Constant):
+        if type(node.value) in (int, float, bool):
+            return node.value
+        raise ValueError(f"a {type(node.value).__name__} literal is not a numeric constant")
+    if isinstance(node, ast.Name):
+        if node.id in known:
+            return known[node.id]
+        raise ValueError(f"`{node.id}` is not an earlier constant")
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        v = fold_constant(node.operand, known)
+        return -v if isinstance(node.op, ast.USub) else +v
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div)):
+        a, b = fold_constant(node.left, known), fold_constant(node.right, known)
+        try:
+            if isinstance(node.op, ast.Add):
+                return a + b
+            if isinstance(node.op, ast.Sub):
+                return a - b
+            if isinstance(node.op, ast.Mult):
+                return a * b
+            return a / b
+        except ArithmeticError as e:
+            raise ValueError(f"the expression raises {type(e).__name__}: {e}") from None
+    raise ValueError(f"a `{type(node).__name__}` is not allowed in a constant expression "
+                     "(only literals, unary minus and + - * / over earlier constants)")
+
+
+def aot_constant(stmt: ast.stmt, known: dict[str, int | float | bool]) -> tuple[str, int | float | bool]:
+    """AOT mode: (name, value) of the module-level `NAME = <constant expression>` or `NAME: T =
+    <constant expression>` (T one of int, float, bool). The annotation must agree with the folded
+    value's own type: CPython keeps `PI: float = 3` an int, so that is an error, not a conversion.
+    Raises ValueError; the message completes "the module constant `NAME` ..."."""
+    if isinstance(stmt, ast.AnnAssign):
+        if not isinstance(stmt.target, ast.Name) or stmt.value is None:
+            raise ValueError("needs a value (`NAME: float = <constant expression>`)")
+        name, annotation, value_node = stmt.target.id, stmt.annotation, stmt.value
+    else:
+        assert isinstance(stmt, ast.Assign) and isinstance(stmt.targets[0], ast.Name)
+        name, annotation, value_node = stmt.targets[0].id, None, stmt.value
+    try:
+        v = fold_constant(value_node, known)
+    except ValueError as e:
+        raise ValueError(f"is not a constant expression: {e}") from None
+    if type(v) is int and not I64_MIN <= v <= I64_MAX:
+        raise ValueError(f"is not a constant expression: the int value {v} is outside 64 bits "
+                         "(big integers arrive in a later step)")
+    if annotation is not None:
+        kind = annotation.id if isinstance(annotation, ast.Name) and annotation.id in SCALAR_KIND else None
+        if kind is None:
+            raise ValueError(f"is annotated `{_src(annotation)}`, which is not int, float or bool")
+        if type(v).__name__ != kind:
+            hint = ("; write a float literal such as `1.0`" if kind == "float" and type(v) is int else "")
+            raise ValueError(f"is annotated `{kind}` but its value is {_article(type(v).__name__)}, which "
+                             f"CPython keeps as it is (an annotation converts nothing{hint})")
+    return name, v
+
+
+def _article(word: str) -> str:
+    return f"{'an' if word[:1] in 'aeiou' else 'a'} {word}"
+
+
+def aot_constants(tree: ast.Module, bindings: dict[str, list[tuple[int, str]]]) -> dict[str, ir.Const]:
+    """AOT mode: every module-level typed constant, name -> the `Const` a read of it lowers to. A name
+    bound more than once, or whose statement is not a constant (the AOT build reports those before the
+    front end runs), is not one."""
+    known: dict[str, int | float | bool] = {}
+    out: dict[str, ir.Const] = {}
+    for stmt in tree.body:
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+            name = stmt.targets[0].id
+        elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+            name = stmt.target.id
+        else:
+            continue
+        if len(bindings.get(name, [])) != 1:
+            continue
+        try:
+            _, v = aot_constant(stmt, known)
+        except ValueError:
+            continue
+        known[name] = v
+        t = Type.BOOL if type(v) is bool else Type.I64 if type(v) is int else Type.F64
+        out[name] = ir.Const(t, v, name=name)
+    return out
 
 
 def _module_info(tree: ast.Module) -> _ModuleInfo:
@@ -625,14 +783,14 @@ def _class_of(kind: str, classes: dict[str, ir.ClassDecl]) -> tuple[str, bool] |
 
 
 def _targets(
-    tree: ast.Module, source: str, info: _ModuleInfo,
+    tree: ast.Module, source: str, info: _ModuleInfo, aot: bool = False,
 ) -> list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str | None, bool, bool]]:
     found: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str | None, bool, bool]] = []
     for node in tree.body:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         marked = [d for d in node.decorator_list if _is_compiled_decorator(d)]
-        if not marked:
+        if not marked and not aot:      # AOT mode: every top-level def is a target (owner decision D6)
             continue
         reason = None
         parallel = False
@@ -817,6 +975,14 @@ def _lower_function(
     inferred = kinds.get(sig.qname, {})
     if any(isinstance(p, ir.ArrayParam) and p.buffer == "numpy" for p in sig.params):
         inferred = _numpy_kinds(sig, inferred)
+    if info.aot:
+        # One lowering, in the pure mode, whatever the result's purity: there is no interpreter to
+        # retry in, so no `INT` and no object-int fallback. A function that holds an object operation
+        # (a call that is not direct, say) comes back impure and the back end names the operation.
+        try:
+            return _lower_in_mode(sig, env, info, inferred, impure=False)
+        except Skip as e:
+            return e.reason
     pure_error: Skip | None = None
     try:
         fn = _lower_in_mode(sig, env, info, inferred, impure=False)
@@ -896,6 +1062,9 @@ def _numpy_kinds(sig: _Signature, inferred: dict[str, list[tuple[int, str]]],
 
 
 def _lower_in_mode(sig, env, info, inferred, impure: bool) -> ir.Function:
+    if info.aot:
+        # no entry globals: a module constant is an `ir.Const` (`_Lowerer.name`), never an object read
+        return _lower_with_bounds(sig, env, info, inferred, impure, {})
     fn = _lower_with_bounds(sig, env, info, inferred, impure, info.scalar_globals)
     if fn.entry_globals and not _closed(fn, env):
         # A global read once at entry is only the same as a read at each use if nothing between
@@ -1285,6 +1454,8 @@ class _Lowerer:
         if isinstance(node, ast.Expr):
             if isinstance(node.value, ast.Constant):
                 return []  # a docstring or a bare literal: no effect
+            if self.info.aot and _is_print_call(node.value) and self.builtin("print"):
+                return self.print_stmt(node.value)
             value = self.sub(node.value)
             return self.take() + [ir.ExprStmt(value)]
         if isinstance(node, ast.Assign):
@@ -1347,6 +1518,30 @@ class _Lowerer:
         if isinstance(node, ast.Return):
             return self.return_(node)
         raise _unsupported(node)
+
+    def print_stmt(self, call: ast.Call) -> list[ir.Stmt]:
+        """AOT mode: `print(a, b, ...)` as `ir.Print`. The arguments are lowered in order; each must be
+        an int, float or bool value or a string literal. Not an effect: nothing here changes how the
+        function's ints are typed."""
+        if call.keywords:
+            k = call.keywords[0]
+            raise Skip(k.value.lineno, f"print(..., {k.arg or '**'}=...) is not supported in an AOT "
+                                       "program (positional arguments only)")
+        args: list[ir.Expr] = []
+        for a in call.args:
+            if isinstance(a, ast.Starred):
+                raise Skip(a.lineno, "a starred argument of print is not supported in an AOT program")
+            if isinstance(a, ast.Constant) and isinstance(a.value, str):
+                args.append(self.str_const(a.value, a))
+                continue
+            e = self.value(a)
+            if e.type not in ir.SCALARS and e.type != Type.OBJ:
+                raise Skip(a.lineno, f"print of `{_src(a)}` ({TYPE_NAME[e.type]}) is not supported in an "
+                                     "AOT program (int, float, bool and string literals)")
+            # (an OBJ argument, say a call that is not direct, stays: it has no AOT form and the back
+            # end names the operation that made it)
+            args.append(e)
+        return self.take() + [ir.Print(tuple(args))]
 
     def assign(self, target: ast.expr, value_node: ast.expr, node: ast.stmt) -> list[ir.Stmt]:
         line = node.lineno
@@ -1645,6 +1840,8 @@ class _Lowerer:
         args = call.args
         if len(args) == 3:
             step = _int_literal(args[2])
+            if step is None and self.info.aot:
+                step = self.aot_int(args[2])
             if step is None or step == 0:
                 raise Skip(line, f"range step `{_src(args[2])}` must be a non-zero int literal")
         else:
@@ -1671,6 +1868,19 @@ class _Lowerer:
         body = self.block(node.body)
         self.refined = dict(head)
         return pre + [ir.ForRange(var, start, stop, ir.Const(Type.I64, step), body)]
+
+    def aot_int(self, node: ast.expr) -> int | None:
+        """AOT mode: the value of an int module constant read (`STEP`, `-STEP`) where a range step must
+        be a literal, else None."""
+        sign = 1
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+            sign = -1 if isinstance(node.op, ast.USub) else 1
+            node = node.operand
+        if isinstance(node, ast.Name) and not self.is_local(node.id):
+            c = self.info.aot_consts.get(node.id)
+            if c is not None and c.type == Type.I64:
+                return sign * c.value       # type: ignore[operator]
+        return None
 
     def range_bound(self, node: ast.expr, var: str | None = None) -> ir.Expr:
         e = self.value(node)
@@ -1865,6 +2075,8 @@ class _Lowerer:
                     b.how == "annotation" for b in self.bindings[name]):
                 raise Skip(node.lineno, f"`{name}` is read but never assigned")
             return ir.Local(self.local_type(name, node.lineno), name)
+        if name in self.info.aot_consts:
+            return self.info.aot_consts[name]       # AOT mode: a typed constant, never an object read
         if name in self.candidates and self.direct_write:
             # #255 (d2): read at this use, as LOAD_GLOBAL does; a missing name or a value of another
             # type leaves through the statement exit (ir.direct_writer), so this is not a deopt
@@ -2528,6 +2740,10 @@ def _creation_kind(node: ast.expr) -> str | None:
 
 def _simple(node: ast.expr) -> bool:
     return isinstance(node, (ast.Name, ast.Constant))
+
+
+def _is_print_call(node: ast.expr) -> bool:
+    return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "print"
 
 
 def _is_range_call(node: ast.expr) -> bool:

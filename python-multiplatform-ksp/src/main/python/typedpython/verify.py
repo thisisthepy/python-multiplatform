@@ -288,6 +288,22 @@ rule (conservative, not in ir.py): a Call of a function that has entry globals c
 entry guard in the middle of the caller, which is a deopt there unless the caller is itself guarded
 the same way (it lists the same name and type as an entry global, and being closed cannot see it
 rebound) or the call is a legal `redo`.
+
+AOT mode (`verify(module, aot=True)`, SPEC N-17, #451; agent proposal, not owner-confirmed). The
+standalone build of `typedpython.aot` has no interpreter to redo a call in. Two things differ, and
+nothing else (with the flag off every rule above is exactly as it was):
+
+  * the `Print` statement is defined (it is an unknown node otherwise): arguments are I64, F64, BOOL
+    or OBJ expressions (an OBJ one has no AOT form, the back end names what made it); it is not an effect, so it does not make a function
+    impure;
+  * `verify/deopt-impure` is not raised. That rule keeps a deopting node out of an impure function
+    because the redo in the interpreter would repeat the function's effects. With no interpreter
+    there is no redo: an int operation not proved to stay inside 64 bits, or an operation the back
+    end cannot compute exactly, is the back end's own finding (`aot/int-unproven`, `aot/call`, ...).
+
+Every other rule is on in AOT mode, among them types, definite assignment, ownership, structure,
+`proven` re-proof (the interval proof is what makes an int operation acceptable to the AOT back end),
+`verify/flag-pure` and `verify/flag-may-deopt` (the flags are still recomputed and compared).
 """
 from __future__ import annotations
 
@@ -301,6 +317,7 @@ from .ir import (
     Local, MathCall, MathFunc, Module, NewArray, ObjToFloat, Or, Param, Return, StoreIndex, ToFloat,
     ToInt, Truth, Tuple, Type, Unbox, UnaryOp, UnaryOpKind, While,
 )
+from .ir import Print
 from .ir import CheckExact, CheckMethod, ClassDecl, FieldGet, FieldSet, Is, IsExact, New
 from .ir import BuildString, Contains, ForObj, Format, GetItem, NewDict, NewList, StoreItem
 from .ir import ParInfo
@@ -357,6 +374,8 @@ _EXPRS = frozenset({Const, Local, BinOp, UnaryOp, Compare, And, Or, ToFloat, ToI
                     GetItem, Contains, NewList, NewDict, Format, BuildString})
 _STMTS = frozenset({Assign, StoreIndex, ExprStmt, If, While, ForRange, Return, Break, Continue,
                     FieldSet, StoreItem, ForObj})
+# The statements only the AOT mode (`verify(m, aot=True)`) accepts.
+_AOT_STMTS = frozenset({Print})
 # Nodes whose OBJ result is a new reference (ir.py "ownership": Box, Global, GetAttr, CallObject,
 # OBJ BinOp, Tuple), plus reads of an OBJ local (the local owns its reference; the back end increfs or
 # borrows under that rule) and Calls of a compiled function returning OBJ (which returns a new
@@ -421,8 +440,10 @@ class _Checker:
 
     def __init__(self, function: Function, signatures: dict[str, Function],
                  classes: dict[str, ClassDecl] | None = None,
-                 var_ivs: dict[str, tuple[int, int]] | None = None, fixing: bool = False):
+                 var_ivs: dict[str, tuple[int, int]] | None = None, fixing: bool = False,
+                 aot: bool = False):
         self.fn = function
+        self.aot = aot      # AOT mode (module docstring "AOT mode"); False: every rule as it always was
         self.direct = ir.direct_lists(function)   # #255: lists read element by element
         # #255 (d2): with an effect a node that fails to continue natively leaves through the
         # statement exit instead of deopting (checked after the walk, `_stmt_exit_problem`)
@@ -1478,7 +1499,7 @@ class _Checker:
 
     def stmt(self, s: object, state: _State) -> tuple[ir.Stmt, _State]:
         cls = type(s)
-        if cls not in _STMTS:
+        if cls not in _STMTS and not (self.aot and cls in _AOT_STMTS):
             self.error(UNKNOWN, f"statement node {cls.__name__} is not defined by ir")
             return s, state  # type: ignore[return-value]
         return getattr(self, "s_" + cls.__name__)(s, state)
@@ -1544,6 +1565,24 @@ class _Checker:
 
     def s_ExprStmt(self, s: ExprStmt, state: _State):
         return dataclasses.replace(s, value=self.expr(s.value, state)), state
+
+    def s_Print(self, s: Print, state: _State):
+        """AOT mode: each argument is an I64, F64 or BOOL expression, an OBJ `Const` holding a str, or
+        any other OBJ expression (which has no AOT form: the back end reports the operation that made
+        it, so the verifier lets it through). Not an effect (`self.effects` is not touched): the output cannot be redone, but nothing in an
+        AOT build redoes anything."""
+        if not isinstance(s.args, tuple):
+            self.error(STRUCTURE, "Print arguments are not a tuple")
+            return s, state
+        args = []
+        for k, a in enumerate(s.args):
+            a2 = self.expr(a, state)
+            t = getattr(a2, "type", None)
+            if t not in ir.SCALARS and t is not Type.OBJ:
+                self.error(TYPE, f"argument {k + 1} of Print is {getattr(t, 'value', t)}, not an i64, "
+                                 f"f64, bool or obj")
+            args.append(a2)
+        return dataclasses.replace(s, args=tuple(args)), state
 
     def cond(self, c: object, state: _State, what: str) -> ir.Expr:
         c2 = self.expr(c, state, cond=True)
@@ -1950,7 +1989,9 @@ class _Checker:
             self.error(MISSING_RETURN, f"the end of '{fn.name}' is reachable but it returns "
                                        f"{getattr(fn.returns, 'value', fn.returns)}")
         # deopt placement and flags
-        if self.can_deopt and fn.pure is not True:
+        if self.can_deopt and fn.pure is not True and not self.aot:
+            # (not in AOT mode: there is no interpreter to redo the call in, so where a deopt sits
+            # does not matter; an operation the back end cannot compute is its own finding)
             self.error(DEOPT, "a node that can deopt (checked i64 arithmetic, i64 negation, Unbox to "
                               "i64, or a call of a may_deopt function) is in an impure function; a redo "
                               "would repeat its effects")
@@ -2548,8 +2589,8 @@ def _exact(op: BinOpKind, a: tuple[int, int], b: tuple[int, int]) -> tuple[int, 
     return min(products), max(products)
 
 
-def _prove(g: Function, sigs: dict[str, Function], classes: dict[str, ClassDecl]
-           ) -> tuple[_Checker, Function]:
+def _prove(g: Function, sigs: dict[str, Function], classes: dict[str, ClassDecl],
+           aot: bool = False) -> tuple[_Checker, Function]:
     """Check `g`, first computing the interval of every eligible local (Local variables and
     guards): walks of the body repeat, each reading the intervals found by the one before, until
     they stop growing (a bound still growing from round `_WIDEN_FROM` jumps to the i64 limit). The
@@ -2557,7 +2598,7 @@ def _prove(g: Function, sigs: dict[str, Function], classes: dict[str, ClassDecl]
     not settle in `_ROUNDS` walks, every eligible local is full range."""
     known: dict[str, tuple[int, int]] = {}
     for rnd in range(_ROUNDS):
-        c = _Checker(g, sigs, classes, known, True)
+        c = _Checker(g, sigs, classes, known, True, aot=aot)
         rebuilt = c.run()
         if not c.eligible:
             return c, rebuilt
@@ -2580,13 +2621,14 @@ def _prove(g: Function, sigs: dict[str, Function], classes: dict[str, ClassDecl]
             for name in absent:         # never given an interval: nothing is known about it
                 grown[name] = _FULL
         known = grown
-    c = _Checker(g, sigs, classes, {}, False)
+    c = _Checker(g, sigs, classes, {}, False, aot=aot)
     return c, c.run()
 
 
-def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
+def verify(module: Module, *, aot: bool = False) -> tuple[Module, list[Diagnostic]]:
     """Prove each function of `module`; return the module of proved functions (with proven bounds
-    marked) and every diagnostic. Rejected functions move to `skipped` with the reason."""
+    marked) and every diagnostic. Rejected functions move to `skipped` with the reason. `aot=True` is
+    the AOT mode (module docstring "AOT mode"), for IR from `frontend.lower(path, aot=True)`."""
     diags: list[Diagnostic] = []
     reasons: dict[str, str] = {}
     functions = module.functions if isinstance(module.functions, tuple) else ()
@@ -2623,7 +2665,7 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
     wait_why: dict[str, str] = {}          # a function with a node that can wait for a lock (#390)
     shared_why: dict[str, str] = {}        # a function that reads state another thread can change (#414)
     for name, g in sigs.items():
-        c, rebuilt = _prove(g, sigs, classes)
+        c, rebuilt = _prove(g, sigs, classes, aot)
         for d in c.diags:
             reject(d.function, d.source_line, d.rule, d.message)
         checked[name] = rebuilt

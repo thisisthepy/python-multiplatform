@@ -1,6 +1,7 @@
-"""IR to C for the AOT mode (SPEC N-17, #448; agent proposal, not owner-confirmed).
+"""IR to C for the AOT mode (SPEC N-17, #448, #451; agent proposal, not owner-confirmed).
 
-Input: the verified IR of the default mode's front end (`ir.py`) for scalar functions. Output: one C
+Input: the verified IR of the front end's AOT mode (`frontend.lower(path, aot=True)`,
+`verify.verify(m, aot=True)`, `ir.py`) for scalar functions. Output: one C
 translation unit that includes `runtime/tp_aot.h` and nothing else (no interpreter header, no interpreter API).
 
 The calling convention: a function returns `int` (0 ok, -1 an exception is recorded in `tpa_exc`) and
@@ -16,7 +17,7 @@ import ast
 import re
 
 from typedpython import ir, resume
-from typedpython.aot.program import MAIN, PRINT_PREFIX, Program
+from typedpython.aot.program import MAIN, Program
 from typedpython.aotcheck import Finding
 from typedpython.ir import Type
 
@@ -94,7 +95,7 @@ def _ir_text(e: ir.Expr) -> str:
     if isinstance(e, ir.Local):
         return e.name
     if isinstance(e, ir.Const):
-        return repr(e.value)
+        return e.name if e.name is not None else repr(e.value)
     if isinstance(e, ir.BinOp):
         return f"{_ir_text(e.left)}{e.op.value}{_ir_text(e.right)}"
     if isinstance(e, ir.UnaryOp):
@@ -113,11 +114,10 @@ def _norm(s: str) -> str:
 # --- one function --------------------------------------------------------------------------------
 
 class _Gen:
-    def __init__(self, module: ir.Module, program: Program, firsts: list[int]) -> None:
+    def __init__(self, module: ir.Module, program: Program) -> None:
         self.module = module
         self.program = program
-        self.firsts = firsts
-        self.fns = {f.name: f for f in module.functions if not f.name.startswith(PRINT_PREFIX)}
+        self.fns = {f.name: f for f in module.functions}
         self.bodies = program.bodies()
         self.findings: list[Finding] = []
         self.chunks: list[str] = []
@@ -142,7 +142,7 @@ class _Fn:
         self.cur: int | None = None
         body = g.bodies.get(f.name)
         self.orig: list[ast.stmt] = resume.statements(body) if body is not None else []   # type: ignore[arg-type]
-        self.found: list[tuple[Finding, bool]] = []       # (finding, is the INT noise of an impure function)
+        self.found: list[Finding] = []
         self.types = {p.name: p.type for p in f.params if isinstance(p, ir.Param)}
         self.types.update(f.locals)
 
@@ -151,15 +151,14 @@ class _Fn:
     def line(self) -> int:
         if self.cur is not None and 0 <= self.cur < len(self.orig):
             return self.orig[self.cur].lineno
-        from typedpython.aotcheck import _original_line
-        return _original_line(self.f.source_line, self.g.firsts)
+        return self.f.source_line
 
     def display(self) -> str:
         return "__main__" if self.f.name == MAIN else self.f.name
 
-    def bad(self, rule: str, name: str, message: str, noise: bool = False) -> str:
-        self.found.append((Finding(self.g.program.rel, self.line(), "error", None, rule, name, message,
-                                   self.display()), noise))
+    def bad(self, rule: str, name: str, message: str) -> str:
+        self.found.append(Finding(self.g.program.rel, self.line(), "error", None, rule, name, message,
+                                  self.display()))
         return "0"
 
     def emit(self, s: str) -> None:
@@ -189,11 +188,7 @@ class _Fn:
     def ctype(self, t: Type, what: str) -> str:
         if t in CTYPE:
             return CTYPE[t]
-        if t is Type.INT:
-            self.bad("aot/int-object", what, f"`{what}` is held as a CPython int by the front end (SPEC N-13), "
-                     "which has no form without CPython", noise=True)
-        else:
-            self.bad("aot/type", what, f"`{what}` has the type {t.value}, which is outside the first AOT step")
+        self.bad("aot/type", what, f"`{what}` has the type {t.value}, which is outside the first AOT step")
         return "int64_t"
 
     # -- finding the source text of an operation
@@ -381,7 +376,7 @@ class _Fn:
 
     def ev_Call(self, e: ir.Call) -> str:
         callee = self.g.fns.get(e.function)
-        if e.function.startswith(PRINT_PREFIX) or callee is None or e.redo:
+        if callee is None or e.redo:
             return self.bad("aot/call", e.function, f"the call of `{e.function}` has no AOT form")
         args = [self.ev(a) for a in e.args]
         params = [p for p in callee.params]
@@ -427,26 +422,23 @@ class _Fn:
         self.emit(f"v_{mangle(s.target)} = {self.ev(s.value)};")
 
     def st_ExprStmt(self, s: ir.ExprStmt) -> None:
-        v = s.value
-        if isinstance(v, ir.Call) and v.function.startswith(PRINT_PREFIX):
-            self.print_call(v)
-            return
-        self.ev(v)      # a fallible operation or a call has been emitted; what remains has no effect
+        self.ev(s.value)      # a fallible operation or a call has been emitted; what remains has no effect
 
-    def print_call(self, v: ir.Call) -> None:
-        site = self.g.program.prints.get(v.function)
-        if site is None or len(site.template) != len(v.args):
-            self.bad("aot/print-arg", "print", "this print call does not match the source")
-            return
-        parts: list[tuple[str, str | None]] = []
-        for t, a in zip(site.template, v.args):
-            if t is not None:
-                parts.append(("str", t))
-                continue
-            if not (isinstance(a, ir.Box) and a.operand.type in CTYPE):
-                self.bad("aot/print-arg", "print", "print takes ints, floats, bools and string literals only")
+    def st_Print(self, s: ir.Print) -> None:
+        """`print(...)`: every argument is evaluated first, in order (a fallible one may return), then
+        the text is written."""
+        parts: list[tuple[str, str | int | float | bool]] = []
+        for a in s.args:
+            if isinstance(a, ir.Const) and a.type is Type.OBJ and isinstance(a.value, str):
+                parts.append(("str", a.value))
+            elif a.type in CTYPE:
+                parts.append((CTYPE[a.type], self.ev(a)))
+            else:
+                known = len(self.found)
+                self.ev(a)                 # names the operation that made the object, when it can
+                if len(self.found) == known:
+                    self.bad("aot/print-arg", "print", "print takes ints, floats, bools and string literals only")
                 return
-            parts.append((CTYPE[a.operand.type], self.ev(a.operand)))
         for i, (kind, val) in enumerate(parts):
             if i:
                 self.emit("tpa_print_sep();")
@@ -545,10 +537,6 @@ class _Fn:
         for name, t in f.locals.items():
             self.ctype(t, name)
         self.stmts(f.body)
-        if any(not noise for _, noise in self.found):
-            self.found = [(x, n) for x, n in self.found if not n]
-        elif self.found:
-            self.found = self.found[:1]
         if self.found:
             return None
         decls = []
@@ -562,14 +550,14 @@ class _Fn:
 
 # --- the module ----------------------------------------------------------------------------------
 
-def emit(module: ir.Module, program: Program, firsts: list[int]) -> tuple[str | None, list[Finding]]:
+def emit(module: ir.Module, program: Program) -> tuple[str | None, list[Finding]]:
     """The C text of the module and no findings, or None and the findings."""
-    g = _Gen(module, program, firsts)
+    g = _Gen(module, program)
     bodies: list[list[str]] = []
     for f in g.fns.values():
         fn = _Fn(g, f)
         text = fn.run()
-        g.findings.extend(x for x, _ in fn.found)
+        g.findings.extend(fn.found)
         if text is not None:
             bodies.append(text)
     if MAIN not in g.fns:

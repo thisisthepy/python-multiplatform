@@ -91,6 +91,12 @@ class Const(Expr):
     no NUL and no lone surrogate, so it is exactly the UTF-8 the C source carries)."""
 
     value: int | float | bool | str | None
+    # AOT mode only (SPEC N-17, #451; agent proposal, not owner-confirmed): the module constant this
+    # constant was read from (`PI` for `PI * 2.0`), so a finding can name it. A module constant is
+    # immutable and fully known, so this Const is exactly the one its value spells; the name is
+    # metadata. Like `Stmt.stmt` it takes no part in equality, hashing or repr, so the default mode,
+    # which never sets it, sees the node it always saw.
+    name: str | None = field(default=None, kw_only=True, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -655,6 +661,17 @@ class ForObj(Stmt):
 @dataclass(frozen=True)
 class ExprStmt(Stmt):
     value: Expr
+
+
+@dataclass(frozen=True)
+class Print(Stmt):
+    """AOT mode only (SPEC N-17, #451; agent proposal, not owner-confirmed): `print(a, b, ...)` with
+    positional arguments, standard output, a space between arguments and a newline at the end. Each
+    argument is an I64, F64 or BOOL expression (printed as CPython's `str` of it) or an OBJ `Const`
+    holding a `str` (printed as it is). The default mode never produces it (there `print` is an object
+    call) and the verifier rejects it unless asked for AOT mode (`verify.verify(m, aot=True)`)."""
+
+    args: tuple[Expr, ...]
 
 
 @dataclass(frozen=True)
