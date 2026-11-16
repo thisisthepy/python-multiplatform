@@ -100,7 +100,7 @@ typedef int64_t tpa_rc_t;
 
 typedef struct {
     int kind;
-    char msg[512];
+    char msg[1024];          /* 1024: the invalid-literal message of int() keeps up to 200 characters of a repr, 4 bytes each */
 } tpa_exc_t;
 
 static TPA_THREAD_LOCAL tpa_exc_t tpa_exc;
@@ -916,12 +916,16 @@ static inline int tpa_i64_iota(int64_t n, tpa_i64_list **out)
 }
 
 /* ------------------------------------------------------------------------------------------
- * The program arguments: only `len(sys.argv)` is compiled (a string has no other use yet; `int()` of one
- * needs big integers, so it is a compile error, aot/int-unproven).
+ * The program arguments: `len(sys.argv)` and `int(sys.argv[i])` are compiled (a string has no other use yet;
+ * `int()` of one needs the big-integer runtime, tp_aot_int.h, which reads `tpa_argv`; on Windows the generated
+ * `wmain` sets `tpa_wargv` too, so the arguments keep every character).
  * ------------------------------------------------------------------------------------------ */
 #if !defined(TPA_LIBRARY)       /* a library has no `main` and no program arguments: no static mutable data */
 static int tpa_argc = 0;
 static char **tpa_argv = NULL;
+#if defined(_WIN32)
+static wchar_t **tpa_wargv TPA_UNUSED = NULL;
+#endif
 #endif
 
 /* ------------------------------------------------------------------------------------------

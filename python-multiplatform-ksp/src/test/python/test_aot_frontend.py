@@ -7,13 +7,17 @@ nothing changes: the same text lowered by the default mode gives the IR it alway
 needed here (the front end needs Pyrefly, like test_frontend.py).
 """
 import dataclasses
+import io
 import textwrap
+import tokenize
+import types
 from pathlib import Path
 
 import pytest
 
 from conftest import decorate_compiled
 from typedpython import aot, frontend, ir, verify
+from typedpython.aot import rep
 from typedpython.ir import Type
 
 
@@ -410,19 +414,21 @@ def test_a_tuple_is_unpacked_only(tmp_path):
 def test_a_value_unpacked_from_a_call_has_no_proved_range(tmp_path):
     """The targets of an unpacking are not locals with a recorded interval: `a + 1` stays unproved (a result
     the callee computed may be any int), in the front end and in the verifier alike."""
+    path = write(tmp_path, """
+        def g() -> tuple[int, int]:
+            return 1, 2
+
+        def f() -> int:
+            a, b = g()
+            return a + 1
+
+        if __name__ == "__main__":
+            print(f())
+        """)
     with pytest.raises(aot.AotError) as raised:
-        aot.generate(write(tmp_path, """
-            def g() -> tuple[int, int]:
-                return 1, 2
-
-            def f() -> int:
-                a, b = g()
-                return a + 1
-
-            if __name__ == "__main__":
-                print(f())
-            """))
+        aot.generate(path, strict_int=True)
     assert [(f.rule, f.line) for f in raised.value.findings] == [("aot/int-unproven", 6)]
+    aot.generate(path)                      # (accepted without strict_int: `a + 1` is a TAGGED operation, aot/rep.py)
 
 
 # --- print arguments, f-strings ------------------------------------------------------------------------
@@ -515,14 +521,16 @@ def test_abs_of_an_int_follows_the_strict_rule(tmp_path):
             print(f())
         """, "ok.py"))
     assert "tpa_pneg_i64" in ok
-    with pytest.raises(aot.AotError) as raised:
-        aot.generate(write(tmp_path, """
-            def f(a: int) -> int:
-                return abs(a)
+    bad = write(tmp_path, """
+        def f(a: int) -> int:
+            return abs(a)
 
-            if __name__ == "__main__":
-                print(f(1))
-            """, "bad.py"))
+        if __name__ == "__main__":
+            print(f(1))
+        """, "bad.py")
+    assert "tpa_int_neg(" in aot.generate(bad)          # accepted without strict_int: -(-2**63) is a TAGGED result
+    with pytest.raises(aot.AotError) as raised:
+        aot.generate(bad, strict_int=True)
     [finding] = raised.value.findings
     assert (finding.rule, finding.line) == ("aot/int-unproven", 2) and "`abs(a)`" in finding.message
 
@@ -568,7 +576,7 @@ def test_sys_is_used_only_as_argv_in_int_and_len(tmp_path, source, text):
 
 # --- the flag off: nothing of this changes the default mode ---------------------------------------------
 
-@pytest.mark.parametrize("source, text", [
+DEFAULT_MODE_ROWS = [
     ("def f() -> list[float]:\n    return [1.0, 2.0]\n", "list display is not supported"),
     ("def g(x: float) -> tuple[float, float]:\n    return x, x\n\ndef f(x: float) -> float:\n    a, b = g(x)\n"
      "    return a\n", "tuple unpacking is not supported"),
@@ -578,9 +586,18 @@ def test_sys_is_used_only_as_argv_in_int_and_len(tmp_path, source, text):
     ("def f(n: int) -> float:\n    a = [0.0] * n\n    b = a\n    return b[0]\n", "is used other than by indexing, len()"),
     ("def f(x: float) -> float:\n    return abs(x)\n", "`abs(x)` is object"),
     ("import sys\ndef f() -> int:\n    return int(sys.argv[1])\n", "`int(sys.argv[1])` is object"),
-])
-def test_the_default_mode_still_skips_these_as_before(tmp_path, source, text):
-    m = frontend.lower(write(tmp_path, decorate_compiled(source)))
+]
+
+
+@pytest.fixture(scope="module")
+def default_mode_modules(tmp_path_factory):
+    """The rows below, lowered together by the default mode (one front-end run; `lowered_together`)."""
+    return lowered_together(tmp_path_factory, {text: source for source, text in DEFAULT_MODE_ROWS}, aot_mode=False)
+
+
+@pytest.mark.parametrize("source, text", DEFAULT_MODE_ROWS)
+def test_the_default_mode_still_skips_these_as_before(default_mode_modules, source, text):
+    m = default_mode_modules[text]
     assert any(text in why for why in m.skipped.values()), (m.skipped, [f.name for f in m.functions])
 
 
@@ -708,3 +725,528 @@ def test_an_fstring_field_is_checked():
     assert "verify/type" in rules_of(printing(ir.Const(Type.F64, 1.0)))                # not a part
     # an FString is a Print argument only
     assert "verify/unknown-node" in rules_of(hand([ir.ExprStmt(ir.FString(Type.OBJ, ()))]))
+
+
+# --- which ints are RAW and which TAGGED (aot/rep.py, #462) ------------------------------------------------------
+#
+# The inference at the level of the IR: a name, a parameter, a return and a tuple element is RAW (int64) or TAGGED (a
+# value that may be any integer). The rule is in the module docstring of aot/rep.py. Design decision D1 (a) and the
+# representation: leader, 2026-11-16, not owner-confirmed; the rule itself is an agent proposal.
+
+def reps_of(tmp_path, source, strict=False):
+    m = aot_ir(tmp_path, source)
+    proved, diagnostics = verify.verify(m, aot=True)
+    assert [f.name for f in proved.functions] == [f.name for f in m.functions], (diagnostics, m.skipped)
+    return proved, rep.infer(proved, strict=strict)
+
+
+def suffixed(source: str, suffix: str) -> str:
+    """`source` with every function it defines renamed `name` -> `name + suffix`: NAME tokens only, so a string or a
+    comment is not touched, and an attribute (`x.f`) is left alone."""
+    source = textwrap.dedent(source).lstrip("\n")
+    toks = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    defined = {toks[i + 1].string for i, t in enumerate(toks[:-1]) if t.type == tokenize.NAME and t.string == "def"}
+    starts, pos = [], 0
+    for line in source.splitlines(keepends=True):
+        starts.append(pos)
+        pos += len(line)
+    out = source
+    for i in range(len(toks) - 1, -1, -1):
+        t = toks[i]
+        if t.type == tokenize.NAME and t.string in defined and not (i and toks[i - 1].string == "."):
+            a = starts[t.start[0] - 1] + t.start[1]
+            out = out[:a] + t.string + suffix + out[a + len(t.string):]
+    return out
+
+
+def merged(cases: dict) -> tuple[str, dict]:
+    """One module from independent cases (name -> source): each case's functions get a suffix of their own, so no call
+    and no name is shared between cases (the representation inference is a whole-program fixpoint, and a call between
+    two cases would change a parameter's or a return's representation). The only thing shared is `import sys`.
+    Returns the source and `{case: suffix}`."""
+    parts, suffixes = [], {}
+    for k, (name, source) in enumerate(cases.items()):
+        suffixes[name] = f"_c{k}"
+        body = [ln for ln in suffixed(source, suffixes[name]).splitlines() if ln != "import sys"]
+        parts.append("\n".join(body).strip("\n") + "\n")
+    head = "import sys\n\n" if any("import sys" in textwrap.dedent(s).splitlines() for s in cases.values()) else ""
+    return head + "\n\n".join(parts), suffixes
+
+
+def ops(proved, name, kind):
+    return [n for n in walk(function(proved, name).body) if isinstance(n, ir.BinOp) and n.op is kind]
+
+
+def case_view(module, sfx):
+    """The part of the merged `module` that belongs to the case with suffix `sfx`, under the names its source uses."""
+    cut = len(sfx)
+    own = [dataclasses.replace(f, name=f.name[:-cut]) for f in module.functions if f.name.endswith(sfx)]
+    skipped = {k[:-cut]: v for k, v in module.skipped.items() if k.endswith(sfx)}
+    return types.SimpleNamespace(functions=own, skipped=skipped)
+
+
+def lowered_together(tmp_path_factory, cases, *, aot_mode=True):
+    """One front-end run for several independent sources (`merged`): `{case: its view of the lowered module}`. With
+    `aot_mode=False` the default mode lowers it, `@compiled` above every function as `decorate_compiled` puts it."""
+    source, suffixes = merged(cases)
+    path = write(tmp_path_factory.mktemp("together"), source if aot_mode else decorate_compiled(source))
+    module = frontend.lower(path, aot=True) if aot_mode else frontend.lower(path)
+    return {k: case_view(module, sfx) for k, sfx in suffixes.items()}
+
+
+# The cases below are independent small programs. Lowering one costs a front-end run (the type inferencer is a
+# subprocess, seconds on a slow runner), so they are lowered together, once per test module, as ONE module in which every
+# case's functions carry a suffix of their own (`merged`): no call and no name is shared between cases, so the
+# whole-program fixpoint of `rep.infer` gives each case the facts it has alone. `shared_reps` returns a case's view of
+# the result under the names the case's source uses. (Checked case by case, alone against merged, when this was
+# written; agent proposal, not owner-confirmed.)
+
+REP_CASES = {
+    "loop_counters": """
+        def f() -> int:
+            t = 0
+            for i in range(10):
+                t = i * 2 + 1
+            return t
+        """,
+    "element_read": """
+        def f(a: list[int]) -> int:
+            t = 0
+            for i in range(len(a)):
+                t = a[i] // 2 + i
+            return t
+        """,
+    "accumulator": """
+        def f(n: int) -> int:
+            s = 0
+            for i in range(n):
+                s += i
+            return s
+        """,
+    "int_from_argv": """
+        import sys
+
+        def f() -> int:
+            n = int(sys.argv[1])
+            t = 0
+            for i in range(n):
+                t = i
+            return t
+        """,
+    "proved_with_tagged_operand": """
+        def f(n: int) -> int:
+            x = n * n
+            y = 0
+            if 0 <= x < 100:
+                y = x + 1
+            return y
+        """,
+    "guard_on_tagged": """
+        def step(w: list[int]) -> int:
+            lo = w[0]
+            hi = lo * lo
+            if lo < hi:
+                lo = lo + 1
+            return lo
+        """,
+    "guard_on_raw": """
+        def f(w: list[int]) -> int:
+            lo = w[0]
+            hi = w[1]
+            if lo < hi and lo > 0:
+                lo = lo - 1
+            return lo
+        """,
+    "what_holds_of_any_int": """
+        def g(a: int, t: int) -> int:
+            if a < t:
+                return a + 1
+            return 0
+
+        def pair(w: list[int]) -> tuple[int, int]:
+            return w[1], 0
+
+        def f(w: list[int]) -> int:
+            a = w[0]
+            if a < len(w):
+                a = a + 1
+            t, z = pair(w)
+            if a < t:
+                a = a + 1
+            arr = [0] * 5
+            s = 0
+            for i in range(len(arr)):
+                s = s + arr[i]
+            big = w[1] * w[2]
+            if big > 3:
+                more = [0] * big
+                s = s + more[3]
+            return g(a, w[1]) + arr[4] + z
+        """,
+    "tagged_call_site": """
+        def g(a: int) -> int:
+            return a
+
+        def h(b: int) -> int:
+            return b
+
+        def f(n: int) -> int:
+            x = g(1)
+            y = g(n * n)
+            z = h(2)
+            return z
+        """,
+    "tuple_elements": """
+        def pair(a: int) -> tuple[int, int]:
+            return a * a, 3
+
+        def user() -> int:
+            x, y = pair(2)
+            return y
+        """,
+    "abs": """
+        def f(a: int) -> int:
+            return abs(a)
+
+        def g() -> int:
+            v = 5
+            return abs(v)
+        """,
+    "remainder_and_division": """
+        def f(a: int, b: int) -> int:
+            return a % b
+
+        def g(a: int) -> int:
+            return a // 3
+
+        def h(a: int, b: int) -> int:
+            return a // b
+        """,
+}
+
+
+class _Reps:
+    """`rep.Representation` of the merged module, seen through one case's suffix."""
+
+    def __init__(self, r, sfx):
+        self._r, self._sfx = r, sfx
+
+    def name(self, fn, name):
+        return self._r.name(fn + self._sfx, name)
+
+    def returns(self, fn):
+        return self._r.returns(fn + self._sfx)
+
+    def element(self, fn, i):
+        return self._r.element(fn + self._sfx, i)
+
+    def of(self, fn, e):
+        return self._r.of(fn + self._sfx, e)
+
+    def trusted(self, fn, node):
+        return self._r.trusted(fn + self._sfx, node)
+
+    def proved(self, e):
+        return self._r.proved(e)
+
+    @property
+    def reps(self):
+        return {k[:-len(self._sfx)]: v for k, v in self._r.reps.items() if k.endswith(self._sfx)}
+
+
+@pytest.fixture(scope="module")
+def merged_cases(tmp_path_factory):
+    cases = dict(REP_CASES)
+    cases.update({"guard:" + k: v[0] for k, v in GUARD_PATHS.items()})
+    cases.update({"index:" + k: v[0] for k, v in INDEX_PATHS.items()})
+    source, suffixes = merged(cases)
+    proved, r = reps_of(tmp_path_factory.mktemp("merged"), source)
+    return proved, r, rep.infer(proved, strict=True), suffixes
+
+
+def shared_reps(merged_cases, key, strict=False):
+    """`(proved, r)` of the case `key` as `reps_of` gives them for the case alone: its functions under their own names
+    (the nodes are the merged module's own, so what `r` records about them holds)."""
+    proved, r, r_strict, suffixes = merged_cases
+    sfx = suffixes[key]
+    return case_view(proved, sfx), _Reps(r_strict if strict else r, sfx)
+
+
+def test_loop_counters_and_proved_results_are_raw(merged_cases):
+    proved, r = shared_reps(merged_cases, "loop_counters")
+    assert [r.name("f", n) for n in ("i", "t")] == [rep.RAW, rep.RAW] and r.returns("f") == rep.RAW
+    assert all(o.proven for o in ops(proved, "f", ir.BinOpKind.MUL) + ops(proved, "f", ir.BinOpKind.ADD))
+
+
+def test_an_element_read_and_a_length_are_raw_and_so_is_what_is_proved_from_them(merged_cases):
+    _, r = shared_reps(merged_cases, "element_read")
+    assert [r.name("f", n) for n in ("i", "t")] == [rep.RAW, rep.RAW] and r.returns("f") == rep.RAW
+
+
+def test_an_accumulator_that_is_not_proved_is_tagged_and_so_is_its_return(merged_cases):
+    _, r = shared_reps(merged_cases, "accumulator")
+    assert r.name("f", "n") == rep.RAW and r.name("f", "i") == rep.RAW          # nobody passes a TAGGED n
+    assert r.name("f", "s") == rep.TAGGED and r.returns("f") == rep.TAGGED
+
+
+def test_an_int_read_from_the_arguments_is_tagged_and_so_is_a_loop_over_it(merged_cases):
+    _, r = shared_reps(merged_cases, "int_from_argv")
+    assert [r.name("f", x) for x in ("n", "i", "t")] == [rep.TAGGED] * 3 and r.returns("f") == rep.TAGGED
+
+
+def test_a_proved_operation_with_a_tagged_operand_is_tagged(merged_cases):
+    """The verifier proves `x + 1` (x is narrowed to 0..99 by the guard), but x is a big-integer-capable value: a
+    proved flag assumes its operands fit 64 bits, so the result is TAGGED."""
+    proved, r = shared_reps(merged_cases, "proved_with_tagged_operand")
+    [add] = ops(proved, "f", ir.BinOpKind.ADD)
+    assert add.proven, "the premise: the flag is set"
+    assert r.name("f", "x") == rep.TAGGED and r.name("f", "y") == rep.TAGGED and r.returns("f") == rep.TAGGED
+
+
+def test_a_proof_read_from_a_guard_on_a_tagged_value_is_not_trusted(merged_cases):
+    """`lo + 1` is proved from `lo < hi` and `hi <= INT64_MAX`; hi = lo * lo is TAGGED, so that is not true of its
+    value: the sound re-proof (aot/rep.py, verify.sound_proofs) does not prove `lo + 1`, so it is not RAW."""
+    proved, r = shared_reps(merged_cases, "guard_on_tagged")
+    [add] = ops(proved, "step", ir.BinOpKind.ADD)
+    assert add.proven, "the premise: the verifier proves it"
+    assert not r.proved(add) and r.of("step", add) == rep.TAGGED
+    assert r.name("step", "lo") == rep.TAGGED and r.returns("step") == rep.TAGGED
+
+
+def test_a_guard_on_a_raw_value_taints_nothing(merged_cases):
+    proved, r = shared_reps(merged_cases, "guard_on_raw")
+    [sub] = ops(proved, "f", ir.BinOpKind.SUB)
+    assert sub.proven and r.proved(sub) and r.of("f", sub) == rep.RAW
+    assert r.name("f", "lo") == rep.RAW
+
+
+# Every way a fact about one value enters a proof about another (the front end's interval analysis and the verifier's
+# re-proof), each with a TAGGED value whose int64-only interval would make the proof false: guards of each comparison
+# kind and operand order, `not`, `and`, `or`, `while`, a returning guard, a conditional expression, a copy and a second
+# guard after the first, a join, a TAGGED parameter, call result and unpacked element, `int(sys.argv[i])`, a loop
+# variable, a TAGGED and a guarded loop bound, a conditional expression and `min` as the other side, `abs`, a `%` by a
+# TAGGED divisor. In each, the operation is marked proved (the premise: the default-mode rules prove it) and is not RAW.
+# `t = w[1] * w[2]` is TAGGED (any int); `w[0]` is any int64. The differential cases with values that make each one wrap
+# are `guards_on_big_values` in test_aot_build.py. (Agent proposal, not owner-confirmed.)
+
+_HEAD = """
+def f(w: list[int]) -> int:
+    a = w[0]
+    t = w[1] * w[2]
+"""
+
+GUARD_PATHS = {
+    "lt": (_HEAD + "    if a < t:\n        a = a + 1\n    return a\n", "f", "a + 1"),
+    "gt_swapped": (_HEAD + "    if t > a:\n        a = a + 1\n    return a\n", "f", "a + 1"),
+    "le": (_HEAD + "    u = t - 1\n    if a <= u:\n        a = a + 1\n    return a\n", "f", "a + 1"),
+    "gt": (_HEAD + "    if a > t:\n        a = a - 1\n    return a\n", "f", "a - 1"),
+    "ge": (_HEAD + "    u = t + 1\n    if a >= u:\n        a = a - 1\n    return a\n", "f", "a - 1"),
+    "eq": (_HEAD + "    if t > 0:\n        s = 9223372036854775807 - t\n        if a == s:\n            a = a - 1\n"
+                   "    return a\n", "f", "a - 1"),
+    "returning_guard": (_HEAD + "    if a >= t:\n        return 0\n    return a + 1\n", "f", "a + 1"),
+    "not": (_HEAD + "    if not (a >= t):\n        a = a + 1\n    return a\n", "f", "a + 1"),
+    "and": (_HEAD + "    if a < t and a > -5:\n        a = a + 1\n    return a\n", "f", "a + 1"),
+    "or_false": (_HEAD + "    if a >= t or a < -5:\n        return 0\n    return a + 1\n", "f", "a + 1"),
+    "while": (_HEAD + "    n = 0\n    while a < t and n < 1:\n        a = a + 1\n        n = n + 1\n    return a\n",
+              "f", "a + 1"),
+    "conditional_expression": (_HEAD + "    return a + 1 if a < t else 0\n", "f", "a + 1"),
+    "copy_after_the_guard": (_HEAD + "    if a < t:\n        c = a\n        return c + 1\n    return 0\n", "f", "c + 1"),
+    "second_guard": (_HEAD + "    c = w[3]\n    if a < t:\n        if c <= a:\n            return c + 1\n    return 0\n",
+                     "f", "c + 1"),
+    "join": (_HEAD + "    if a < t:\n        b = a\n    else:\n        b = 0\n    return b + 1\n", "f", "b + 1"),
+    "tagged_parameter": ("""
+def g(a: int, t: int) -> int:
+    if a < t:
+        return a + 1
+    return 0
+
+def f(w: list[int]) -> int:
+    return g(w[0], w[1] * w[2])
+""", "g", "a + 1"),
+    "tagged_call_result": ("""
+def big(w: list[int]) -> int:
+    return w[1] * w[2]
+
+def f(w: list[int]) -> int:
+    a = w[0]
+    t = big(w)
+    if a < t:
+        return a + 1
+    return 0
+""", "f", "a + 1"),
+    "tagged_unpacked_element": ("""
+def pair(w: list[int]) -> tuple[int, int]:
+    return w[1] * w[2], 0
+
+def f(w: list[int]) -> int:
+    a = w[0]
+    t, z = pair(w)
+    if a < t:
+        return a + 1
+    return z
+""", "f", "a + 1"),
+    "argv": ("""
+import sys
+
+def f(w: list[int]) -> int:
+    a = w[0]
+    t = int(sys.argv[1])
+    if a < t:
+        return a + 1
+    return 0
+""", "f", "a + 1"),
+    "loop_variable": ("""
+def f(w: list[int]) -> int:
+    t = w[2] * w[3]
+    r = 0
+    for i in range(w[0], w[1], -1):
+        if i < t:
+            r = i + 1
+            break
+    return r
+""", "f", "i + 1"),
+    "tagged_loop_bound": ("""
+def f(w: list[int]) -> int:
+    t = w[1] * w[2]
+    r = 0
+    for i in range(t):
+        r = i + 1
+        break
+    return r
+""", "f", "i + 1"),
+    "guarded_loop_bound": (_HEAD + "    r = 0\n    if a < t:\n        for i in range(a, 0, -1):\n            r = i + 1\n"
+                                   "            break\n    return r\n", "f", "i + 1"),
+    "conditional_expression_as_the_other_side": (_HEAD + "    if a < (t if a > 0 else 5):\n        return a + 1\n"
+                                                         "    return 0\n", "f", "a + 1"),
+    "min_as_the_other_side": (_HEAD + "    m = min(t, w[3])\n    if a < m:\n        return a + 1\n    return 0\n",
+                              "f", "a + 1"),
+    "abs": (_HEAD + "    if a > t:\n        return abs(a)\n    return 0\n", "f", "-a"),
+    "remainder_by_a_tagged_divisor": (_HEAD + "    m = a % t\n    if a < m:\n        return a + 1\n    return 0\n",
+                                      "f", "a + 1"),
+}
+
+
+def ir_text(e) -> str:
+    """A small printer of int expressions, to name an operation in the tables here."""
+    if isinstance(e, ir.Const):
+        return repr(e.value)
+    if isinstance(e, ir.Local):
+        return e.name
+    if isinstance(e, ir.BinOp):
+        return f"{ir_text(e.left)} {e.op.value} {ir_text(e.right)}"
+    if isinstance(e, ir.UnaryOp):
+        return f"{e.op.value}{ir_text(e.operand)}"
+    return type(e).__name__
+
+
+@pytest.mark.parametrize("name", list(GUARD_PATHS))
+def test_a_proof_that_reads_a_tagged_value_does_not_make_an_operation_raw(merged_cases, name):
+    source, fn, text = GUARD_PATHS[name]
+    proved, r = shared_reps(merged_cases, "guard:" + name)
+    found = [n for n in walk(function(proved, fn).body)
+             if isinstance(n, (ir.BinOp, ir.UnaryOp)) and n.type is Type.I64 and ir_text(n) == text]
+    assert found and all(n.proven for n in found), "the premise: the default-mode rules prove the operation"
+    assert all(not r.proved(n) and r.of(fn, n) == rep.TAGGED for n in found)
+
+
+# A proved index skips its bounds check only if the sound re-proof proves it too. The verifier gives a list created
+# with a length the length's interval; with a TAGGED length (or a RAW one narrowed by a TAGGED value, or the length of
+# such a list) that interval reads the TAGGED value as int64, and a constant index looked in bounds on a list that is
+# shorter (here: empty, since `9223372036854775807 - t` is negative for a big t). Before the sound re-proof every one of
+# these skipped its check. The differential cases are `list_shorter_than_its_proof*` in test_aot_build.py.
+
+_SHORT = _HEAD.replace("    a = w[0]\n", "") + "    n = 9223372036854775807 - t\n    arr = [0] * (n + 5)\n"
+
+INDEX_PATHS = {
+    "tagged_length": (_SHORT + "    return arr[4]\n", "arr"),
+    "store_with_a_tagged_length": (_SHORT + "    arr[4] = 7\n    return len(arr)\n", "arr"),
+    "copy_of_such_a_list": (_SHORT + "    b = arr[:]\n    return b[4]\n", "b"),
+    "length_of_such_a_list": (_SHORT + "    arr2 = [0] * len(arr)\n    return arr2[4]\n", "arr2"),
+    "raw_length_narrowed_by_a_tagged_value": (_HEAD.replace("    a = w[0]\n", "") + """\
+    s = 9223372036854775807 - t
+    n = w[0]
+    if n > s:
+        arr = [0] * n
+        return arr[0]
+    return 0
+""", "arr"),
+}
+
+
+@pytest.mark.parametrize("name", list(INDEX_PATHS))
+def test_a_bound_proof_that_reads_a_tagged_value_keeps_the_check(merged_cases, name):
+    source, array = INDEX_PATHS[name]
+    proved, r = shared_reps(merged_cases, "index:" + name)
+    found = [n for n in walk(function(proved, "f").body)
+             if isinstance(n, (ir.Index, ir.StoreIndex)) and n.array == array]
+    assert found and all(n.proven for n in found), "the premise: the verifier proves the index in bounds"
+    assert not any(r.trusted("f", n) for n in found)
+
+
+def test_what_holds_of_any_int_is_still_raw_and_trusted(merged_cases):
+    """The other side: a guard against a length, an argument every caller passes RAW, an unpacked RAW element, a list of
+    constant length and a list whose TAGGED length is guarded from below keep their proofs (the re-proof is not a
+    blanket TAGGED)."""
+    proved, r = shared_reps(merged_cases, "what_holds_of_any_int")
+    adds = [n for name in ("f", "g") for n in walk(function(proved, name).body)
+            if isinstance(n, ir.BinOp) and n.op is ir.BinOpKind.ADD and ir_text(n) == "a + 1"]
+    assert len(adds) == 3 and all(n.proven and r.proved(n) for n in adds)
+    assert r.name("f", "a") == rep.RAW and r.returns("g") == rep.RAW
+    loads = [n for n in walk(function(proved, "f").body) if isinstance(n, ir.Index) and n.array in ("arr", "more")]
+    assert len(loads) == 3 and all(n.proven and r.trusted("f", n) for n in loads)
+
+
+def test_a_parameter_is_tagged_when_one_call_site_passes_a_tagged_value(merged_cases):
+    _, r = shared_reps(merged_cases, "tagged_call_site")
+    assert r.name("g", "a") == rep.TAGGED and r.returns("g") == rep.TAGGED
+    assert r.name("h", "b") == rep.RAW and r.returns("h") == rep.RAW
+    assert r.name("f", "x") == rep.TAGGED and r.name("f", "y") == rep.TAGGED and r.name("f", "z") == rep.RAW
+    assert r.returns("f") == rep.RAW
+
+
+def test_a_tuple_has_a_representation_per_element(merged_cases):
+    _, r = shared_reps(merged_cases, "tuple_elements")
+    assert r.reps["pair"].tuple_elements == [rep.TAGGED, rep.RAW]
+    assert r.name("user", "x") == rep.TAGGED and r.name("user", "y") == rep.RAW and r.returns("user") == rep.RAW
+
+
+def test_abs_of_an_int_is_tagged_where_the_negation_is_not_proved(merged_cases):
+    _, r = shared_reps(merged_cases, "abs")
+    assert r.returns("f") == rep.TAGGED and r.returns("g") == rep.RAW
+
+
+def test_a_remainder_and_a_division_by_a_constant_of_raw_values_stay_raw(merged_cases):
+    _, r = shared_reps(merged_cases, "remainder_and_division")
+    assert r.returns("f") == rep.RAW and r.returns("g") == rep.RAW and r.returns("h") == rep.TAGGED
+
+
+def test_strict_mode_has_nothing_tagged(merged_cases):
+    _, r = shared_reps(merged_cases, "accumulator", strict=True)
+    assert r.name("f", "s") == rep.RAW and r.returns("f") == rep.RAW
+
+
+def test_the_text_of_a_program_names_the_big_integer_runtime_only_where_a_value_is_tagged(tmp_path):
+    proved = write(tmp_path, """
+        def f(a: list[float], n: int) -> float:
+            s = 0.0
+            for i in range(n):
+                s += a[i]
+            return s
+
+        if __name__ == "__main__":
+            v = [1.0, 2.0]
+            print(f(v, 2))
+        """, "proved.py")
+    assert "tp_aot_int" not in aot.generate(proved)
+    tagged = write(tmp_path, """
+        def f(n: int) -> int:
+            s = 0
+            for i in range(n):
+                s += i
+            return s
+
+        if __name__ == "__main__":
+            print(f(5))
+        """, "tagged.py")
+    c = aot.generate(tagged)
+    assert '#include "tp_aot_int.h"' in c and "tpa_int_add(" in c and "tpa_int_release(v_s)" in c

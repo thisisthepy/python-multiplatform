@@ -12,8 +12,11 @@ and 3.15). The rejection tests and the text tests of the generated C, header and
 (they need Pyrefly, like test_aot_build.py).
 
 Libraries built here (each build runs the type inferencer and the C compiler, which is what made the windows job
-slow): TWO. One, module-scoped, with every exported function of the test source (`built`); one tiny one for the
-command line (`test_command_line_*`). The paths the build function and the command line return are the paths
+slow): TWO. One, module-scoped, with every exported function of the test source (`built`: its ints are all proved
+inside 64 bits, so it is the library as it was before #462); one small one for the command line (`tiny`, built by
+`python -m typedpython aot-lib`), which also holds the functions whose ints are NOT proved inside 64 bits (#462): an
+int result outside 64 bits fails with an ABI-level OverflowError, int parameters arrive as int64 at its extremes, a
+tuple has a result that is outside 64 bits. The paths the build function and the command line return are the paths
 used, no file name is derived here.
 
 Under the CI sanitizer job (TP_SANITIZE=1) the library is built with ASan and UBSan (`aot/cc.py`), and the
@@ -45,6 +48,7 @@ import pytest
 from typedpython import aot, cbuild, ir
 from typedpython.__main__ import main
 from typedpython.aot import cc, library
+from aot_text_check import cpython_api_uses
 from typedpython.ir import Type
 
 HEADER = cc.RUNTIME_DIR / "tp_aot.h"
@@ -754,30 +758,178 @@ def test_several_threads_call_the_library_at_once(lib, ref):
 TINY = '''
 def add_one(x: float) -> float:
     return x + 1.0
+
+
+def inc(a: int) -> int:
+    return a + 1
+
+
+def accumulate(a: int, b: int) -> int:
+    a = a + b
+    return a
+
+
+def big_round_trip(a: int) -> int:
+    return (a * a * a) // (a * a)
+
+
+def pair_big(a: int, b: int) -> tuple[int, int, float]:
+    return a * b, a % 7, float(a * b)
+
+
+def grow(n: int) -> int:
+    r = 1
+    for i in range(n):
+        r = r * 3
+    return r
+
+
+def digit_count(a: int) -> int:
+    d = 0
+    a = abs(a)
+    while a:
+        a = a // 10
+        d += 1
+    return d
 '''
+TINY_EXPORTS = ["add_one", "inc", "accumulate", "big_round_trip", "pair_big", "grow", "digit_count"]
 
 
-def test_command_line_writes_exactly_the_library_the_header_and_the_description(tmp_path):
+@pytest.fixture(scope="module")
+def tiny(tmp_path_factory):
+    """The small library, built through the command line once; with the same file imported as a plain module."""
     need_cc()
-    src = write(tmp_path, TINY, "tiny")
-    out = tmp_path / "out"
-    c_file = tmp_path / "elsewhere" / "tiny.c"
+    tmp = tmp_path_factory.mktemp("tiny")
+    src = write(tmp, TINY, "tiny")
+    out = tmp / "out"
+    c_file = tmp / "elsewhere" / "tiny.c"
     stdout = io.StringIO()
     with contextlib.redirect_stdout(stdout):
-        status = main(["aot-lib", str(src), "--export", "add_one", "--prefix", "tiny", "-o", str(out),
+        status = main(["aot-lib", str(src), "--export", ",".join(TINY_EXPORTS), "--prefix", "tiny", "-o", str(out),
                        "--emit-c", str(c_file)])
-    assert status == 0
     paths = [Path(line) for line in stdout.getvalue().splitlines() if line.strip()]
+    lib = Lib(aot.LibraryFiles(*paths)) if status == 0 and len(paths) == 3 else None
+    return SimpleNamespace(status=status, paths=paths, out=out, c_file=c_file, src=src, lib=lib,
+                           ref=reference(src, "tiny_ref"))
+
+
+def test_command_line_writes_exactly_the_library_the_header_and_the_description(tiny):
+    assert tiny.status == 0
+    paths = tiny.paths
     assert len(paths) == 3 and all(p.is_file() for p in paths), paths
     lib_path, header, description = paths
-    assert lib_path.parent == out and header == out / "tiny.h" and description == out / "tiny.json"
-    names = [n for n in os.listdir(out) if not n.endswith(".dSYM")]       # (a sanitized build on macOS: debug info)
+    assert lib_path.parent == tiny.out and header == tiny.out / "tiny.h" and description == tiny.out / "tiny.json"
+    names = [n for n in os.listdir(tiny.out) if not n.endswith(".dSYM")]       # (a sanitized build on macOS: debug info)
     assert sorted(names) == sorted([lib_path.name, "tiny.h", "tiny.json"]), "no by-products in the output"
-    assert c_file.is_file() and "TPA_EXPORT int tiny_add_one(" in c_file.read_text(encoding="utf-8")
-    lib = Lib(aot.LibraryFiles(lib_path, header, description))
+    assert tiny.c_file.is_file() and "TPA_EXPORT int tiny_add_one(" in tiny.c_file.read_text(encoding="utf-8")
+    lib = tiny.lib
     assert lib.desc["library"] == lib_path.name
     assert lib.raw("add_one", 1.5) == (0, [2.5])
     assert lib.init() == 0
+
+
+# --- ints that are not proved inside 64 bits (#462) ----------------------------------------------------------------
+#
+# Inside the library the source language's integer rules hold exactly (a big integer is a value like any other); at the
+# boundary an `int` is int64. An int parameter arrives as int64 (and may be held as a big-integer-capable value inside:
+# `accumulate` assigns its parameter). An int RESULT, also an element of a tuple, goes back through a fit check, and one
+# that does not fit int64 fails the call with -1 and an OverflowError whose message says that the int result of
+# that function does not fit in 64 bits: an ABI-level rule with no counterpart in the source language (the reference
+# interpreter has no such limit, which the tests show next to the library's answer). Design decision D1 (a), leader
+# 2026-11-16, not owner-confirmed; the boundary rule is an agent proposal, not owner-confirmed.
+
+TINY_ROWS = [
+    ("inc", (5,)), ("inc", (-1,)), ("inc", (I64_MIN,)), ("inc", (I64_MAX - 1,)),
+    ("accumulate", (3, 4)), ("accumulate", (I64_MIN, 5)), ("accumulate", (I64_MAX, I64_MIN)),
+    ("accumulate", (I64_MIN, I64_MAX)), ("accumulate", (I64_MAX, -I64_MAX)), ("accumulate", (I64_MIN, 0)),
+    ("accumulate", (2**62, 2**62 - 1)), ("accumulate", (-(2**62), -(2**62))),
+    ("big_round_trip", (3037000500,)), ("big_round_trip", (-7,)), ("big_round_trip", (I64_MAX // 4,)),
+    ("big_round_trip", (I64_MIN + 1,)),
+    ("pair_big", (3, 4)), ("pair_big", (-3037000499, 3037000499)), ("pair_big", (I64_MIN, 1)), ("pair_big", (0, I64_MAX)),
+    ("grow", (0,)), ("grow", (1,)), ("grow", (39,)),
+    ("digit_count", (0,)), ("digit_count", (I64_MIN,)), ("digit_count", (I64_MAX,)), ("digit_count", (-12345,)),
+]
+TINY_FAIL_ROWS = [("big_round_trip", (0,))]
+TINY_OVERFLOW_ROWS = [
+    ("inc", (I64_MAX,)), ("accumulate", (I64_MAX, 1)), ("accumulate", (I64_MIN, -1)), ("accumulate", (I64_MIN, I64_MIN)),
+    ("grow", (40,)), ("grow", (200,)), ("pair_big", (3037000500, 3037000500)), ("pair_big", (I64_MIN, -1)),
+    ("pair_big", (I64_MAX, I64_MAX)),
+]
+
+
+@pytest.mark.parametrize("name,args", TINY_ROWS, ids=[f"{i}-{row_id(r)}" for i, r in enumerate(TINY_ROWS)])
+def test_a_function_with_big_integers_inside_matches_cpython(tiny, name, args):
+    outcome = run_row(tiny.lib, tiny.ref, name, args)
+    assert outcome[0] == "ok", outcome
+
+
+@pytest.mark.parametrize("name,args", TINY_FAIL_ROWS)
+def test_a_failure_with_big_operands_matches_cpython(tiny, name, args):
+    outcome = run_row(tiny.lib, tiny.ref, name, args)
+    assert outcome[0] == "err" and outcome[1:] == ("ZeroDivisionError", "division by zero")
+
+
+@pytest.mark.parametrize("name,args", TINY_OVERFLOW_ROWS,
+                         ids=[f"{i}-{row_id(r)}" for i, r in enumerate(TINY_OVERFLOW_ROWS)])
+def test_an_int_result_outside_64_bits_fails_with_the_documented_error(tiny, name, args):
+    """CPython answers (the value is an int like any other); the library cannot hand it over in an int64 and says so."""
+    value = getattr(tiny.ref, name)(*args)
+    values = value if isinstance(value, tuple) else (value,)
+    assert any(isinstance(v, int) and not I64_MIN <= v <= I64_MAX for v in values), "the premise: it does not fit"
+    lib = tiny.lib
+    _, f = lib.fn[name]
+    c, _ = lib.fn[name]
+    outs = [ARG_CT[t]() for t in f["returns"]]
+    status = c(*args, *[ctypes.byref(o) for o in outs])
+    assert status == -1
+    assert lib.error() == ("OverflowError", f"the int result of `{name}` does not fit in 64 bits")
+    assert all(o.value in (0, 0.0) for o in outs), "no out value is written on failure"
+    # the record is cleared by the next successful call, and the same function with small inputs succeeds
+    assert lib.raw("inc", 1) == (0, [2])
+    assert lib.error() is None
+    small = {"inc": (1,), "accumulate": (1, 2), "grow": (3,), "pair_big": (2, 3)}[name]
+    assert lib.raw(name, *small)[0] == 0 and lib.error() is None
+
+
+def test_int_parameters_at_the_extremes_are_exact_inside_and_the_header_says_so(tiny):
+    lib = tiny.lib
+    assert lib.raw("accumulate", I64_MIN, I64_MAX) == (0, [-1])
+    assert lib.raw("accumulate", I64_MAX, I64_MIN) == (0, [-1])
+    assert lib.raw("big_round_trip", 3037000500) == (0, [3037000500])        # (3037000500 ** 3 does not fit 64 bits)
+    assert lib.raw("digit_count", I64_MIN) == (0, [19])
+    header = tiny.paths[1].read_text(encoding="utf-8")
+    assert "held as an integer of any size" in header and "A second check of this kind concerns an int RESULT" in header
+    assert "does not fit in 64 bits" in header and "no counterpart in the source language" in header
+    assert chr(0x2014) not in header
+
+
+def test_the_library_with_a_big_integer_includes_the_runtime_and_one_without_does_not(tiny, tmp_path):
+    c = tiny.c_file.read_text(encoding="utf-8")
+    assert re.findall(r"#include\s*[<\"]([^>\"]+)", c) == ["tp_aot.h", "tp_aot_int.h"]
+    assert "tpa_int_to_i64(r0, &v0)" in c and "does not fit in 64 bits" in c
+    plain = write(tmp_path, "def add_one(x: float) -> float:\n    return x + 1.0\n", "plain")
+    c2, header2, _ = aot.generate_library(plain, exports=["add_one"], prefix="p")
+    assert "tp_aot_int" not in c2 and "tpa_int" not in c2
+    assert "held as an integer of any size" not in header2 and "second check" not in header2
+    assert "an operation the compiler could not prove stays inside" in header2
+
+
+def test_strict_int_refuses_the_big_integer_functions_as_before(tmp_path):
+    path = write(tmp_path, TINY, "tiny_strict")
+    with pytest.raises(aot.AotError) as raised:
+        aot.generate_library(path, exports=["inc", "grow"], prefix="p", strict_int=True)
+    found = {(f.rule, f.name) for f in raised.value.findings}
+    assert found == {("aot/int-unproven", "+"), ("aot/int-unproven", "*")}, found
+    aot.generate_library(path, exports=["inc", "grow"], prefix="p")                    # accepted by default
+
+
+def test_command_line_strict_int_is_a_flag_of_aot_lib(tmp_path, capsys):
+    path = write(tmp_path, TINY, "tiny_cli")
+    assert main(["aot-lib", str(path), "--export", "inc", "--prefix", "p", "-o", str(tmp_path / "never"),
+                 "--strict-int"]) == 1
+    err = capsys.readouterr().err.strip().splitlines()
+    assert err and all("error aot/int-unproven:" in line for line in err)
+    assert not (tmp_path / "never").exists()
 
 
 def test_command_line_reports_each_finding_on_one_line_and_writes_nothing(tmp_path, capsys):
@@ -895,22 +1047,22 @@ def test_a_reserved_symbol_name_is_refused(tmp_path):
 def test_an_exported_function_with_a_finding_gives_the_finding_aot_build_gives(tmp_path):
     """`cube` exported: the unproved int operation, with the position and text `aot-build` reports for the same
     function in a program with an entry."""
-    lib_found, _ = findings_of(tmp_path, REJECT_BASE, exports=["cube"], prefix="p")
+    lib_found, _ = findings_of(tmp_path, REJECT_BASE, exports=["cube"], prefix="p", strict_int=True)
     assert {r for r, _, _ in lib_found} == {"aot/int-unproven"}
     exe = write(tmp_path, 'def cube(a: int) -> int:\n    return a * a * a\n\n\nif __name__ == "__main__":\n    print(cube(2))\n',
                 "exe")
     with pytest.raises(aot.AotError) as raised:
-        aot.generate(exe)
+        aot.generate(exe, strict_int=True)
     lib_src = write(tmp_path, 'def cube(a: int) -> int:\n    return a * a * a\n', "libver")
     with pytest.raises(aot.AotError) as lib_raised:
-        aot.generate_library(lib_src, exports=["cube"], prefix="p")
+        aot.generate_library(lib_src, exports=["cube"], prefix="p", strict_int=True)
     def unproven(e):
         return {(f.line, f.rule, f.name, f.message) for f in e.findings if f.rule == "aot/int-unproven"}
     assert unproven(lib_raised.value) == unproven(raised.value) and len(unproven(raised.value)) == 2
 
 
 def test_a_function_reachable_from_an_export_fails_the_library_and_one_that_is_not_does_not(tmp_path):
-    found, _ = findings_of(tmp_path, REJECT_BASE, exports=["calls_cube"], prefix="p")
+    found, _ = findings_of(tmp_path, REJECT_BASE, exports=["calls_cube"], prefix="p", strict_int=True)
     assert {r for r, _, _ in found} == {"aot/int-unproven"}
     c, header, description = aot.generate_library(write(tmp_path, REJECT_BASE, "ok"), exports=["f"], prefix="p")
     assert "tpf_cube" not in c and "tpf_argc" not in c and "cube" not in header     # not emitted: nothing reaches them
@@ -995,8 +1147,7 @@ def all_symbols(description):
 
 def test_generated_text_contains_no_cpython(generated):
     for what, body in (("library C", generated.c), ("header", generated.header), ("tp_aot.h", HEADER.read_text())):
-        assert "Python.h" not in body, what
-        assert not re.search(r"\b_?Py[A-Z_a-z]", body), (what, re.findall(r"\b_?Py[A-Z_a-z]\w*", body))
+        assert not cpython_api_uses(body), (what, cpython_api_uses(body))
     assert re.findall(r"#include\s*[<\"]([^>\"]+)", generated.c) == ["tp_aot.h"]
     assert re.findall(r"#include\s*[<\"]([^>\"]+)", generated.header) == ["stdint.h"]
 

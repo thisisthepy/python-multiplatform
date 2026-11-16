@@ -44,6 +44,7 @@ import pytest
 
 from typedpython import cbuild
 from typedpython.aot import cc, library
+from aot_text_check import cpython_api_uses
 
 HEADER = cc.RUNTIME_DIR / "tp_aot_int.h"
 SHIM = Path(__file__).resolve().parent / "runtime_shim" / "tp_aot_int_shim.c"
@@ -868,9 +869,11 @@ def test_int_from_str_unicode_whitespace_and_digits_by_code_point(shim):
     """Every code point c: the strings c + '7' and '7' + c (the first is valid exactly when c is whitespace or a
     decimal digit; the second when c is whitespace). The runtime either equals the reference or declines an
     invalid literal. The digit table of the header is Unicode 17.0 (the data of 3.15): another version of the
-    interpreter's unicodedata makes this test skip rather than compare with different data."""
-    if unicodedata.unidata_version != PINNED_UNICODE:
-        pytest.skip(f"the digit table is Unicode {PINNED_UNICODE}, this interpreter has {unicodedata.unidata_version}")
+    interpreter's unicodedata means the table is stale, and the test fails saying so (it does not skip: a skip
+    passes silently; leader, 2026-11-16)."""
+    assert unicodedata.unidata_version == PINNED_UNICODE, (
+        f"the digit table of tp_aot_int.h is Unicode {PINNED_UNICODE}, this interpreter has "
+        f"{unicodedata.unidata_version}: regenerate the table and update PINNED_UNICODE")
     bad = []
     accepted = declined = total = 0
     for cp in range(0x110000):
@@ -960,8 +963,7 @@ def test_threads_share_read_only_operands_and_compute_on_their_own_values(shim):
 def test_the_header_and_the_shim_contain_no_cpython():
     for what, path in (("tp_aot_int.h", HEADER), ("tp_aot_int_shim.c", SHIM)):
         body = path.read_text(encoding="utf-8")
-        assert "Python.h" not in body, what
-        assert not re.search(r"\b_?Py[A-Z_a-z]", body), (what, re.findall(r"\b_?Py[A-Z_a-z]\w*", body))
+        assert not cpython_api_uses(body), (what, cpython_api_uses(body))
         assert "\u2014" not in body, what
         assert "__int128" not in body and "__builtin" not in body, what
     includes = re.findall(r"#include\s*[<\"]([^>\"]+)", HEADER.read_text(encoding="utf-8"))
@@ -985,7 +987,11 @@ def test_the_live_counter_exists_only_under_its_macro():
     assert "#define TPA_INT__LIVE_INC() ((void)0)" in m.group(2) and "#define TPA_INT__LIVE_DEC() ((void)0)" in m.group(2)
 
 
-def test_the_aot_back_end_does_not_use_the_header_yet():
-    for path in AOT_DIR.rglob("*"):
-        if path.is_file() and path.suffix in {".py", ".h", ".c"}:
-            assert "tp_aot_int" not in path.read_text(encoding="utf-8", errors="replace"), path
+def test_the_aot_back_end_includes_the_header_from_its_two_writers():
+    """Until #462 this test pinned that the back end did not use the header at all. It uses it now, and only
+    where a program has an int that is not proved inside 64 bits: one include line in the emitter (executables)
+    and one in the library writer. Which programs get it is pinned by test_aot_build.py and test_aot_lib.py (a
+    program whose ints are all proved has no include)."""
+    lines = [(path.name, line.strip()) for path in sorted(AOT_DIR.rglob("*.py"))
+             for line in path.read_text(encoding="utf-8").splitlines() if '#include "tp_aot_int.h"' in line]
+    assert [name for name, _ in lines] == ["emit.py", "library.py"], lines

@@ -1,4 +1,4 @@
-"""TypedPython AOT mode, first build step (SPEC N-17, #448, #451; agent proposal, not owner-confirmed).
+"""TypedPython AOT mode, first build step (SPEC N-17, #448, #451, #462; agent proposal, not owner-confirmed).
 
 `generate(entry)` returns the C text of a single-module program (scalar functions, native lists of floats
 and ints, fixed tuples of scalars, `print` with f-strings, `sys.argv` through `int()`) with an
@@ -6,6 +6,10 @@ and ints, fixed tuples of scalars, `print` with f-strings, `sys.argv` through `i
 a standalone executable that contains and loads no CPython. A program the mode cannot compile exactly
 as CPython computes it raises `AotError` with EVERY finding of the program, one per construct, in every
 function (design: docs/design/typedpython-aot.md).
+
+Ints that are not proved inside 64 bits are compiled (#462, design decision D1 (a), leader 2026-11-16, not
+owner-confirmed) as small-int / big-int values of runtime/tp_aot_int.h; `aot/rep.py` says which. `strict_int=True`
+(`--strict-int`) keeps the earlier rule: an int operation not proved inside 64 bits is `aot/int-unproven`.
 """
 from __future__ import annotations
 
@@ -34,7 +38,7 @@ def format_finding(f: Finding) -> str:
 _LINE = re.compile(r"\bline (\d+)")
 
 
-def _lower(program, library=None) -> tuple[str | None, list[Finding]]:
+def _lower(program, library=None, strict_int: bool = False) -> tuple[str | None, list[Finding]]:
     """Run the front end and the verifier in their AOT mode on the program's file; emit C or return
     the findings. Every line number is the file's own. `library` (`aot.library`, #455) is None for a program
     with an entry: what `aot-build` has always done. For a library it names the functions to compile (the
@@ -61,7 +65,9 @@ def _lower(program, library=None) -> tuple[str | None, list[Finding]]:
 
     if library is None:
         expected = [f.name for f in program.functions] + [MAIN]
-        emit_fn = emit_mod.emit
+
+        def emit_fn(proved, program):
+            return emit_mod.emit(proved, program, strict_int=strict_int)
     else:
         expected = [f.name for f in program.functions if f.name in library.reachable]
         emit_fn = library.emit
@@ -92,25 +98,26 @@ def _lower(program, library=None) -> tuple[str | None, list[Finding]]:
     return emit_fn(proved, program)
 
 
-def generate(entry: Path) -> str:
-    """The C text for the program whose entry module is `entry`; raises AotError."""
+def generate(entry: Path, *, strict_int: bool = False) -> str:
+    """The C text for the program whose entry module is `entry`; raises AotError. `strict_int`: an int
+    operation that is not proved inside 64 bits is the finding `aot/int-unproven` (no big integers)."""
     from typedpython.aot import program as program_mod
 
     program = program_mod.analyze(Path(entry))
     if program.findings:
         raise AotError(program.findings)
-    c_text, findings = _lower(program)
+    c_text, findings = _lower(program, strict_int=strict_int)
     if findings or c_text is None:
         raise AotError(findings)
     return c_text
 
 
-def build(entry: Path, out: Path, *, emit_c: Path | None = None) -> Path:
+def build(entry: Path, out: Path, *, emit_c: Path | None = None, strict_int: bool = False) -> Path:
     """Compile `entry` to the executable `out` (on Windows `.exe` is added when missing); returns its
     path. `emit_c` also keeps the generated C there."""
     from typedpython.aot import cc
 
-    c_text = generate(entry)
+    c_text = generate(entry, strict_int=strict_int)
     if emit_c is not None:
         emit_c = Path(emit_c)
         emit_c.parent.mkdir(parents=True, exist_ok=True)
@@ -128,20 +135,22 @@ class LibraryFiles:
     description: Path
 
 
-def generate_library(module: Path, *, exports: list[str], prefix: str) -> tuple[str, str, dict]:
+def generate_library(module: Path, *, exports: list[str], prefix: str,
+                     strict_int: bool = False) -> tuple[str, str, dict]:
     """The C text of the library, its header and its description for `module` (a module with no entry; an
     `if __name__ == "__main__":` block is not compiled) exporting the functions `exports` under `prefix`;
     raises AotError. See `typedpython.aot.library`."""
     from typedpython.aot import library
 
-    return library.generate_library(Path(module), exports=exports, prefix=prefix)
+    return library.generate_library(Path(module), exports=exports, prefix=prefix, strict_int=strict_int)
 
 
 def build_library(module: Path, out_dir: Path, *, exports: list[str], prefix: str,
-                  emit_c: Path | None = None) -> LibraryFiles:
+                  emit_c: Path | None = None, strict_int: bool = False) -> LibraryFiles:
     """Compile `module` to the shared library `lib<prefix>.so` (`.dylib` on macOS, `<prefix>.dll` on Windows)
     and write `<prefix>.h` and `<prefix>.json` beside it in `out_dir`. `emit_c` also keeps the generated C
     there. See `typedpython.aot.library`."""
     from typedpython.aot import library
 
-    return library.build_library(Path(module), Path(out_dir), exports=exports, prefix=prefix, emit_c=emit_c)
+    return library.build_library(Path(module), Path(out_dir), exports=exports, prefix=prefix, emit_c=emit_c,
+                                 strict_int=strict_int)

@@ -1,7 +1,10 @@
 """`python -m typedpython check [--mode checked|compiled] [--format text|json] PATHS...`
 `python -m typedpython emit-c PATHS... --root DIR [--cache DIR] --manifest FILE`
-`python -m typedpython aot-build ENTRY.py -o EXECUTABLE [--emit-c FILE.c]` (SPEC N-17, #448: exit 1 on a finding)
-`python -m typedpython aot-lib MODULE.py --export f,g --prefix P -o DIR [--emit-c FILE.c]` (#455: a C-ABI library)
+`python -m typedpython aot-build ENTRY.py -o EXECUTABLE [--emit-c FILE.c] [--strict-int]` (SPEC N-17, #448: exit 1 on a finding)
+`python -m typedpython aot-lib MODULE.py --export f,g --prefix P -o DIR [--emit-c FILE.c] [--strict-int]` (#455: a C-ABI library)
+
+`--strict-int` (#462; design decision D1 (a), leader 2026-11-16, not owner-confirmed): an int not proved inside 64 bits is a
+compile error (`aot/int-unproven`) instead of a big-integer-capable value.
 
 Exit status: 0 no errors (warnings allowed), 1 errors, 2 the gate itself could not run.
 """
@@ -58,6 +61,8 @@ def main(argv: list[str]) -> int:
     aot_build.add_argument("entry", type=Path, help="the entry module (it has an `if __name__ == \"__main__\":` block)")
     aot_build.add_argument("-o", "--output", type=Path, required=True, help="the executable to write")
     aot_build.add_argument("--emit-c", type=Path, default=None, help="also keep the generated C here")
+    aot_build.add_argument("--strict-int", action="store_true",
+                           help="an int operation not proved to stay inside 64 bits is a compile error (no big integers)")
     aot_lib = commands.add_parser(
         "aot-lib", help="compile a single-module program to a C-ABI shared library with a header and a JSON "
                         "description, with no CPython (SPEC N-17, #455)")
@@ -67,13 +72,15 @@ def main(argv: list[str]) -> int:
     aot_lib.add_argument("-o", "--output", type=Path, required=True, help="the directory for the library, "
                          "<prefix>.h and <prefix>.json")
     aot_lib.add_argument("--emit-c", type=Path, default=None, help="also keep the generated C here")
+    aot_lib.add_argument("--strict-int", action="store_true",
+                         help="an int operation not proved to stay inside 64 bits is a compile error (no big integers)")
     args = parser.parse_args(argv)
 
     if args.command == "aot-lib":
         return _aot_lib(args.module, [n.strip() for n in args.export.split(",") if n.strip()], args.prefix,
-                        args.output, args.emit_c)
+                        args.output, args.emit_c, args.strict_int)
     if args.command == "aot-build":
-        return _aot_build(args.entry, args.output, args.emit_c)
+        return _aot_build(args.entry, args.output, args.emit_c, args.strict_int)
     if args.command == "aot-check":
         return _aot_check(args.entry, args.strict_int, args.json)
     if args.command == "emit-c":
@@ -114,7 +121,7 @@ def _aot_check(entry: Path, strict_int: bool, as_json: bool) -> int:
     return EXIT_ERRORS if report.blocking else EXIT_CLEAN
 
 
-def _aot_build(entry: Path, output: Path, emit_c: Path | None) -> int:
+def _aot_build(entry: Path, output: Path, emit_c: Path | None, strict_int: bool = False) -> int:
     """SPEC N-17 / #448: exit 0 when the executable was built; 1 with one line per finding on standard error
     (`path:line: error rule: message`) when the program is outside what the mode compiles exactly; 2 when
     the build itself could not run (no such file, no C compiler, the compiler failed)."""
@@ -124,7 +131,7 @@ def _aot_build(entry: Path, output: Path, emit_c: Path | None) -> int:
         print(f"typedpython: {entry} is not a file", file=sys.stderr)
         return EXIT_FAILURE
     try:
-        exe = aot.build(entry, output, emit_c=emit_c)
+        exe = aot.build(entry, output, emit_c=emit_c, strict_int=strict_int)
     except aot.AotError as e:
         for f in e.findings:
             print(aot.format_finding(f), file=sys.stderr)
@@ -136,7 +143,8 @@ def _aot_build(entry: Path, output: Path, emit_c: Path | None) -> int:
     return EXIT_CLEAN
 
 
-def _aot_lib(module: Path, exports: list[str], prefix: str, out_dir: Path, emit_c: Path | None) -> int:
+def _aot_lib(module: Path, exports: list[str], prefix: str, out_dir: Path, emit_c: Path | None,
+             strict_int: bool = False) -> int:
     """SPEC N-17 / #455: exit 0 when the library, its header and its description were written (their paths are
     printed, one per line); 1 with one line per finding on standard error, as `aot-build`; 2 when the build
     itself could not run."""
@@ -146,7 +154,8 @@ def _aot_lib(module: Path, exports: list[str], prefix: str, out_dir: Path, emit_
         print(f"typedpython: {module} is not a file", file=sys.stderr)
         return EXIT_FAILURE
     try:
-        files = aot.build_library(module, out_dir, exports=exports, prefix=prefix, emit_c=emit_c)
+        files = aot.build_library(module, out_dir, exports=exports, prefix=prefix, emit_c=emit_c,
+                                  strict_int=strict_int)
     except aot.AotError as e:
         for f in e.findings:
             print(aot.format_finding(f), file=sys.stderr)
