@@ -799,7 +799,7 @@ def test_a_proved_operation_with_a_tagged_operand_is_tagged(tmp_path):
 
 def test_a_proof_read_from_a_guard_on_a_tagged_value_is_not_trusted(tmp_path):
     """`lo + 1` is proved from `lo < hi` and `hi <= INT64_MAX`; hi = lo * lo is TAGGED, so that is not true of its
-    value: the guard taints `lo` (and `hi`), and nothing read through them is RAW by a proved flag."""
+    value: the sound re-proof (aot/rep.py, verify.sound_proofs) does not prove `lo + 1`, so it is not RAW."""
     proved, r = reps_of(tmp_path, """
         def step(w: list[int]) -> int:
             lo = w[0]
@@ -810,12 +810,12 @@ def test_a_proof_read_from_a_guard_on_a_tagged_value_is_not_trusted(tmp_path):
         """)
     [add] = ops(proved, "step", ir.BinOpKind.ADD)
     assert add.proven, "the premise: the verifier proves it"
-    assert r.tainted("step") == {"lo", "hi"}
+    assert not r.proved(add) and r.of("step", add) == rep.TAGGED
     assert r.name("step", "lo") == rep.TAGGED and r.returns("step") == rep.TAGGED
 
 
 def test_a_guard_on_a_raw_value_taints_nothing(tmp_path):
-    _, r = reps_of(tmp_path, """
+    proved, r = reps_of(tmp_path, """
         def f(w: list[int]) -> int:
             lo = w[0]
             hi = w[1]
@@ -823,7 +823,210 @@ def test_a_guard_on_a_raw_value_taints_nothing(tmp_path):
                 lo = lo - 1
             return lo
         """)
-    assert r.tainted("f") == set() and r.name("f", "lo") == rep.RAW
+    [sub] = ops(proved, "f", ir.BinOpKind.SUB)
+    assert sub.proven and r.proved(sub) and r.of("f", sub) == rep.RAW
+    assert r.name("f", "lo") == rep.RAW
+
+
+# Every way a fact about one value enters a proof about another (the front end's interval analysis and the verifier's
+# re-proof), each with a TAGGED value whose int64-only interval would make the proof false: guards of each comparison
+# kind and operand order, `not`, `and`, `or`, `while`, a returning guard, a conditional expression, a copy and a second
+# guard after the first, a join, a TAGGED parameter, call result and unpacked element, `int(sys.argv[i])`, a loop
+# variable, a TAGGED and a guarded loop bound, a conditional expression and `min` as the other side, `abs`, a `%` by a
+# TAGGED divisor. In each, the operation is marked proved (the premise: the default-mode rules prove it) and is not RAW.
+# `t = w[1] * w[2]` is TAGGED (any int); `w[0]` is any int64. The differential cases with values that make each one wrap
+# are `guards_on_big_values` in test_aot_build.py. (Agent proposal, not owner-confirmed.)
+
+_HEAD = """
+def f(w: list[int]) -> int:
+    a = w[0]
+    t = w[1] * w[2]
+"""
+
+GUARD_PATHS = {
+    "lt": (_HEAD + "    if a < t:\n        a = a + 1\n    return a\n", "f", "a + 1"),
+    "gt_swapped": (_HEAD + "    if t > a:\n        a = a + 1\n    return a\n", "f", "a + 1"),
+    "le": (_HEAD + "    u = t - 1\n    if a <= u:\n        a = a + 1\n    return a\n", "f", "a + 1"),
+    "gt": (_HEAD + "    if a > t:\n        a = a - 1\n    return a\n", "f", "a - 1"),
+    "ge": (_HEAD + "    u = t + 1\n    if a >= u:\n        a = a - 1\n    return a\n", "f", "a - 1"),
+    "eq": (_HEAD + "    if t > 0:\n        s = 9223372036854775807 - t\n        if a == s:\n            a = a - 1\n"
+                   "    return a\n", "f", "a - 1"),
+    "returning_guard": (_HEAD + "    if a >= t:\n        return 0\n    return a + 1\n", "f", "a + 1"),
+    "not": (_HEAD + "    if not (a >= t):\n        a = a + 1\n    return a\n", "f", "a + 1"),
+    "and": (_HEAD + "    if a < t and a > -5:\n        a = a + 1\n    return a\n", "f", "a + 1"),
+    "or_false": (_HEAD + "    if a >= t or a < -5:\n        return 0\n    return a + 1\n", "f", "a + 1"),
+    "while": (_HEAD + "    n = 0\n    while a < t and n < 1:\n        a = a + 1\n        n = n + 1\n    return a\n",
+              "f", "a + 1"),
+    "conditional_expression": (_HEAD + "    return a + 1 if a < t else 0\n", "f", "a + 1"),
+    "copy_after_the_guard": (_HEAD + "    if a < t:\n        c = a\n        return c + 1\n    return 0\n", "f", "c + 1"),
+    "second_guard": (_HEAD + "    c = w[3]\n    if a < t:\n        if c <= a:\n            return c + 1\n    return 0\n",
+                     "f", "c + 1"),
+    "join": (_HEAD + "    if a < t:\n        b = a\n    else:\n        b = 0\n    return b + 1\n", "f", "b + 1"),
+    "tagged_parameter": ("""
+def g(a: int, t: int) -> int:
+    if a < t:
+        return a + 1
+    return 0
+
+def f(w: list[int]) -> int:
+    return g(w[0], w[1] * w[2])
+""", "g", "a + 1"),
+    "tagged_call_result": ("""
+def big(w: list[int]) -> int:
+    return w[1] * w[2]
+
+def f(w: list[int]) -> int:
+    a = w[0]
+    t = big(w)
+    if a < t:
+        return a + 1
+    return 0
+""", "f", "a + 1"),
+    "tagged_unpacked_element": ("""
+def pair(w: list[int]) -> tuple[int, int]:
+    return w[1] * w[2], 0
+
+def f(w: list[int]) -> int:
+    a = w[0]
+    t, z = pair(w)
+    if a < t:
+        return a + 1
+    return z
+""", "f", "a + 1"),
+    "argv": ("""
+import sys
+
+def f(w: list[int]) -> int:
+    a = w[0]
+    t = int(sys.argv[1])
+    if a < t:
+        return a + 1
+    return 0
+""", "f", "a + 1"),
+    "loop_variable": ("""
+def f(w: list[int]) -> int:
+    t = w[2] * w[3]
+    r = 0
+    for i in range(w[0], w[1], -1):
+        if i < t:
+            r = i + 1
+            break
+    return r
+""", "f", "i + 1"),
+    "tagged_loop_bound": ("""
+def f(w: list[int]) -> int:
+    t = w[1] * w[2]
+    r = 0
+    for i in range(t):
+        r = i + 1
+        break
+    return r
+""", "f", "i + 1"),
+    "guarded_loop_bound": (_HEAD + "    r = 0\n    if a < t:\n        for i in range(a, 0, -1):\n            r = i + 1\n"
+                                   "            break\n    return r\n", "f", "i + 1"),
+    "conditional_expression_as_the_other_side": (_HEAD + "    if a < (t if a > 0 else 5):\n        return a + 1\n"
+                                                         "    return 0\n", "f", "a + 1"),
+    "min_as_the_other_side": (_HEAD + "    m = min(t, w[3])\n    if a < m:\n        return a + 1\n    return 0\n",
+                              "f", "a + 1"),
+    "abs": (_HEAD + "    if a > t:\n        return abs(a)\n    return 0\n", "f", "-a"),
+    "remainder_by_a_tagged_divisor": (_HEAD + "    m = a % t\n    if a < m:\n        return a + 1\n    return 0\n",
+                                      "f", "a + 1"),
+}
+
+
+def ir_text(e) -> str:
+    """A small printer of int expressions, to name an operation in the tables here."""
+    if isinstance(e, ir.Const):
+        return repr(e.value)
+    if isinstance(e, ir.Local):
+        return e.name
+    if isinstance(e, ir.BinOp):
+        return f"{ir_text(e.left)} {e.op.value} {ir_text(e.right)}"
+    if isinstance(e, ir.UnaryOp):
+        return f"{e.op.value}{ir_text(e.operand)}"
+    return type(e).__name__
+
+
+@pytest.mark.parametrize("name", list(GUARD_PATHS))
+def test_a_proof_that_reads_a_tagged_value_does_not_make_an_operation_raw(tmp_path, name):
+    source, fn, text = GUARD_PATHS[name]
+    proved, r = reps_of(tmp_path, source)
+    found = [n for n in walk(function(proved, fn).body)
+             if isinstance(n, (ir.BinOp, ir.UnaryOp)) and n.type is Type.I64 and ir_text(n) == text]
+    assert found and all(n.proven for n in found), "the premise: the default-mode rules prove the operation"
+    assert all(not r.proved(n) and r.of(fn, n) == rep.TAGGED for n in found)
+
+
+# A proved index skips its bounds check only if the sound re-proof proves it too. The verifier gives a list created
+# with a length the length's interval; with a TAGGED length (or a RAW one narrowed by a TAGGED value, or the length of
+# such a list) that interval reads the TAGGED value as int64, and a constant index looked in bounds on a list that is
+# shorter (here: empty, since `9223372036854775807 - t` is negative for a big t). Before the sound re-proof every one of
+# these skipped its check. The differential cases are `list_shorter_than_its_proof*` in test_aot_build.py.
+
+_SHORT = _HEAD.replace("    a = w[0]\n", "") + "    n = 9223372036854775807 - t\n    arr = [0] * (n + 5)\n"
+
+INDEX_PATHS = {
+    "tagged_length": (_SHORT + "    return arr[4]\n", "arr"),
+    "store_with_a_tagged_length": (_SHORT + "    arr[4] = 7\n    return len(arr)\n", "arr"),
+    "copy_of_such_a_list": (_SHORT + "    b = arr[:]\n    return b[4]\n", "b"),
+    "length_of_such_a_list": (_SHORT + "    arr2 = [0] * len(arr)\n    return arr2[4]\n", "arr2"),
+    "raw_length_narrowed_by_a_tagged_value": (_HEAD.replace("    a = w[0]\n", "") + """\
+    s = 9223372036854775807 - t
+    n = w[0]
+    if n > s:
+        arr = [0] * n
+        return arr[0]
+    return 0
+""", "arr"),
+}
+
+
+@pytest.mark.parametrize("name", list(INDEX_PATHS))
+def test_a_bound_proof_that_reads_a_tagged_value_keeps_the_check(tmp_path, name):
+    source, array = INDEX_PATHS[name]
+    proved, r = reps_of(tmp_path, source)
+    found = [n for n in walk(function(proved, "f").body)
+             if isinstance(n, (ir.Index, ir.StoreIndex)) and n.array == array]
+    assert found and all(n.proven for n in found), "the premise: the verifier proves the index in bounds"
+    assert not any(r.trusted("f", n) for n in found)
+
+
+def test_what_holds_of_any_int_is_still_raw_and_trusted(tmp_path):
+    """The other side: a guard against a length, an argument every caller passes RAW, an unpacked RAW element, a list of
+    constant length and a list whose TAGGED length is guarded from below keep their proofs (the re-proof is not a
+    blanket TAGGED)."""
+    proved, r = reps_of(tmp_path, """
+        def g(a: int, t: int) -> int:
+            if a < t:
+                return a + 1
+            return 0
+
+        def pair(w: list[int]) -> tuple[int, int]:
+            return w[1], 0
+
+        def f(w: list[int]) -> int:
+            a = w[0]
+            if a < len(w):
+                a = a + 1
+            t, z = pair(w)
+            if a < t:
+                a = a + 1
+            arr = [0] * 5
+            s = 0
+            for i in range(len(arr)):
+                s = s + arr[i]
+            big = w[1] * w[2]
+            if big > 3:
+                more = [0] * big
+                s = s + more[3]
+            return g(a, w[1]) + arr[4] + z
+        """)
+    adds = [n for name in ("f", "g") for n in walk(function(proved, name).body)
+            if isinstance(n, ir.BinOp) and n.op is ir.BinOpKind.ADD and ir_text(n) == "a + 1"]
+    assert len(adds) == 3 and all(n.proven and r.proved(n) for n in adds)
+    assert r.name("f", "a") == rep.RAW and r.returns("g") == rep.RAW
+    loads = [n for n in walk(function(proved, "f").body) if isinstance(n, ir.Index) and n.array in ("arr", "more")]
+    assert len(loads) == 3 and all(n.proven and r.trusted("f", n) for n in loads)
 
 
 def test_a_parameter_is_tagged_when_one_call_site_passes_a_tagged_value(tmp_path):

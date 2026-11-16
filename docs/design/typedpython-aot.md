@@ -212,12 +212,20 @@ not owner-confirmed).**
   tested at the level of the IR). A value is RAW when it is an int constant, `len(...)`, the loop variable of a `range`
   loop whose bounds are RAW, an element read from a `list[int]`, a call result whose callee returns RAW, a parameter
   whose every call site passes RAW (a library export also receives int64 from outside), or the result of an operation
-  the IR marks proved AND whose operands are all RAW AND whose proof does not read a tainted name. Everything else is
-  TAGGED: an unproved operation, any operation with a TAGGED operand, `int(sys.argv[i])`, and what flows from them.
-- *A proved flag is not enough.* The proofs read the intervals of the operands, which are true only of RAW values; and a
-  guard `if a < b:` cuts the interval of `a` by that of `b`, which is false for a TAGGED `b`. So a comparison with a
-  TAGGED operand taints the other local, and an operation that reads a tainted name is TAGGED. The case it exists for
-  (a RAW addition that would wrap) is in the differential tests.
+  the IR marks proved AND the sound re-proof (below) proves AND whose operands are all RAW. Everything else is TAGGED:
+  an unproved operation, any operation with a TAGGED operand, `int(sys.argv[i])`, and what flows from them.
+- *A proved flag is not enough.* The front end's and the verifier's proofs read every int as one inside 64 bits (an
+  operation that is not proved is clamped to int64, "it would have deopted"; a parameter or a call result is "any
+  int64"), which is false of a TAGGED value; a guard `if a < b:` cuts the interval of `a` by that false interval of a
+  TAGGED `b`, and the length the verifier gives a list created with a TAGGED length lets a proved index skip its bounds
+  check on a list that is shorter. So the proved flags are a candidate only: `verify.sound_proofs` walks the verified IR
+  again with intervals that hold of unbounded integers, given the inference as its oracle (a RAW name or return is
+  int64, a TAGGED one, `int(sys.argv[i])` and every operation that is not proved are unbounded, nothing is clamped), and
+  an operation is RAW, and a proved index skips its check, only when it is proved there too. Inference and re-proof are
+  one fixpoint (the re-proof runs again after every rise to TAGGED). This replaced a "taint" rule (a name compared with
+  a TAGGED value could not be trusted) that missed the list-length path. Agent proposal, not owner-confirmed. The cases
+  it exists for (a RAW addition that would wrap for each kind of guard, an index past the end of a shorter list) are in
+  the IR-level and differential tests.
 - *Exactness.* Operations on TAGGED values are the runtime's exact functions (`+ - *`, `//`, `%`, comparison chains,
   `abs`, `min` and `max`, truthiness, `range` loops with TAGGED bounds, list indexing with the reference's IndexError
   for an index that does not fit, `print` and f-strings with the 4300-digit limit's ValueError). `int / int` is accepted

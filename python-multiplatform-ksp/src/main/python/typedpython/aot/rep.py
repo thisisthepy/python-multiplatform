@@ -3,8 +3,8 @@
 Provenance. Design decision D1 (a) (leader, 2026-11-16, not owner-confirmed): an int that is not proved inside 64
 bits is a small-int / big-int value of its own (`runtime/tp_aot_int.h`). The representation below (RAW int64 and
 TAGGED `tpa_int`, decided per program by a fixpoint over all functions) was approved by the leader on 2026-11-16, not
-owner-confirmed. The inference rule written out here, and the taint rule in particular, are agent proposals, not
-owner-confirmed.
+owner-confirmed. The inference rule written out here, and the sound re-proof it rests on in particular, are agent
+proposals, not owner-confirmed.
 
 Two representations of an IR int (a value of type `Type.I64`; the IR calls every int I64 because the front end and
 the verifier prove it fits, the AOT back end now reads that name as "an int the front end typed as an int"):
@@ -26,29 +26,34 @@ representation for the whole function. An expression is RAW only when it is one 
     only RAW values, and (for an export of a library) whatever arrives from outside, which is an int64;
   * a call whose callee returns RAW (every `return` of the callee is RAW);
   * a conditional expression whose two branches are both RAW;
-  * `+ - *` and unary minus that the IR marks `proven` AND whose operands are all RAW AND whose proof is not tainted
-    (below): the verifier's proof reads the intervals of its operands, and an interval is true of a value only when
-    that value is RAW, so a proved flag alone is not enough;
-  * `//` by a constant other than -1 (and `//` the IR marks proven) of a RAW operand, and `%` of two RAW operands
-    (the result lies between zero and the divisor); a `//` by -1 or by a variable is TAGGED (INT64_MIN // -1 is 2**63).
+  * `+ - *` and unary minus that the IR marks `proven` AND that the sound re-proof (below) proves AND whose operands
+    are all RAW;
+  * `//` by a constant other than -1 of a RAW operand, and `%` of two RAW operands (the result lies between zero and
+    the divisor); a `//` by -1 or by a variable is TAGGED (INT64_MIN // -1 is 2**63).
 
 Everything else is TAGGED: the result of an operation that is not proved, of any operation with a TAGGED operand,
 `int(sys.argv[i])`, and every name, parameter, return and tuple element such a value flows into. A name assigned
 both RAW and TAGGED values is TAGGED (a RAW value is converted with `tpa_int_from_i64` where it is stored).
 
-The taint rule (why a proved flag is not enough). The front end and the verifier narrow the interval of a local
-under a guard: in `if a < b:` the interval of `a` is cut by the interval of `b`. Where `b` is TAGGED its interval is
-what the proof machinery assumed (the clamp to int64 of an operation that "would have deopted"), and that is not
-true of the big integer `b` really holds. So `a < b` with a TAGGED `b` (or one derived from a tainted name) TAINTS `a`:
-an operation that reads `a` is not trusted by its proved flag, and is TAGGED unless it can be RAW without a proof. A
-tainted name taints every name assigned from it. Example the rule exists for: `lo = items[0]` (any int64),
+The sound re-proof (why a proved flag is not enough). The front end and the verifier prove an operation from
+intervals that read every int as one inside 64 bits: the interval of an operation that is not proved is its clamp to
+int64 ("it would have deopted"), a parameter or a call result is "any int64", and a guard `a < b` cuts `a` by that
+interval of `b`. Where a value is TAGGED none of that is true of it. Example: `lo = items[0]` (any int64),
 `hi = lo * lo` (TAGGED), `if lo < hi: lo = lo + 1`: the verifier proves `lo + 1` from `lo < hi` and `hi <= INT64_MAX`,
-which is false for the big `hi`, and with `lo == INT64_MAX` a RAW addition would wrap. The same rule decides whether a
-proved index (`Index.proven`, `StoreIndex.proven`) may skip its bounds check (`Representation.trusted`).
+false for the big `hi`, and with `lo == INT64_MAX` a RAW addition would wrap; `n = 9223372036854775807 - hi` then
+`a = [0] * (n + 5)` gives `a` a length of at least 5 to the verifier, and `a[4]` a bounds check it may skip, while the
+list is empty. So the proved flags are only a candidate: `verify.sound_proofs` walks the verified IR again with
+intervals that hold of unbounded integers, given this inference as its oracle (a RAW name or return is an int64, a
+TAGGED one is unbounded, `int(sys.argv[i])` is unbounded, nothing is clamped; verify.py "The sound re-proof of the
+AOT mode"), and an operation is RAW, and a proved index skips its check (`Representation.trusted`), only if it is
+proved there too. The two are one fixpoint: the inference starts with everything RAW, the re-proof runs under it, a
+name rises to TAGGED where a proof fails, and the re-proof runs again until nothing rises. At the end every RAW name
+is an int64 on every path by induction over the execution: each RAW value is a constant, a length, an element, or a
+proved operation whose operands are RAW (int64 by the induction) and whose interval facts hold of unbounded ints.
 
 What this cannot find: it treats every name as one representation for the whole function, so a counter that is RAW
-for its first thousand iterations is TAGGED from the start (speed, never exactness); and a taint is function-wide, not
-scoped to the branch that holds the guard.
+for its first thousand iterations is TAGGED from the start (speed, never exactness); and the re-proof proves less
+than the default mode's rules where a fact needs a TAGGED value's int64 range (`if lo < hi` above).
 
 Strict mode (`infer(..., strict=True)`, `--strict-int`): nothing is ever TAGGED here. The back end then keeps what it
 did before this step: an operation that is not proved is the finding `aot/int-unproven`, so a strict build refuses
@@ -91,7 +96,6 @@ class FunctionReps:
     names: dict[str, str] = field(default_factory=dict)          # I64 name (parameter, local, loop variable) -> rep
     returns: str = RAW                                            # the rep of an int return
     tuple_elements: list[str] = field(default_factory=list)       # the rep of each element of a returned tuple
-    tainted: set[str] = field(default_factory=set)
 
 
 class Representation:
@@ -102,6 +106,8 @@ class Representation:
         self.strict = strict
         self.fns = {f.name: f for f in module.functions}
         self.reps = {f.name: FunctionReps() for f in module.functions}
+        # the sound re-proof (module docstring): id of a node of `module` -> proved under intervals of unbounded ints
+        self.proofs: dict[int, bool] = {}
         if not strict:
             self.run()
 
@@ -117,25 +123,34 @@ class Representation:
         r = self.reps[fn].tuple_elements
         return r[i] if i < len(r) else RAW
 
-    def tainted(self, fn: str) -> set[str]:
-        return self.reps[fn].tainted
-
     def of(self, fn: str, e: ir.Expr) -> str:
         """The representation of the expression `e` of function `fn` (RAW for anything that is not an int)."""
         if self.strict or getattr(e, "type", None) is not Type.I64:
             return RAW
         return self._of(self.reps[fn], e)
 
-    def uses_tainted(self, fn: str, e: ir.Expr) -> bool:
-        return self._uses_tainted(self.reps[fn], e)
-
-    def trusted(self, fn: str, e: ir.Expr) -> bool:
-        """`e` (a proved operation or index) may rely on its proved flag: no operand reads a tainted name."""
+    def trusted(self, fn: str, node: ir.Index | ir.StoreIndex) -> bool:
+        """May the proved index `node` (an `Index` or `StoreIndex` of `fn` the verifier marked `proven`) skip its
+        bounds check? Only if the sound re-proof proves it in bounds too."""
         if self.strict:
             return True
-        return not self._uses_tainted(self.reps[fn], e)
+        return self.proofs.get(id(node), False)
+
+    # -- the oracle of the sound re-proof (verify.sound_proofs)
+
+    def raw_name(self, fn: str, name: str) -> bool:
+        r = self.reps.get(fn)
+        return r is not None and r.names.get(name) == RAW
+
+    def raw_return(self, fn: str) -> bool:
+        r = self.reps.get(fn)
+        return r is not None and r.returns == RAW
 
     # -- the rule
+
+    def proved(self, e: ir.Expr) -> bool:
+        """`e` is marked `proven` and the sound re-proof proves it too."""
+        return bool(getattr(e, "proven", False)) and self.proofs.get(id(e), False)
 
     def _of(self, r: FunctionReps, e: ir.Expr) -> str:
         if getattr(e, "type", None) is not Type.I64:
@@ -157,8 +172,7 @@ class Representation:
             if e.op is ir.UnaryOpKind.POS:
                 return self._of(r, e.operand)
             if e.op is ir.UnaryOpKind.NEG:
-                ok = e.proven and self._of(r, e.operand) == RAW and not self._uses_tainted(r, e.operand)
-                return RAW if ok else TAGGED
+                return RAW if self.proved(e) and self._of(r, e.operand) == RAW else TAGGED
             return TAGGED
         if isinstance(e, ir.BinOp):
             a, b = self._of(r, e.left), self._of(r, e.right)
@@ -166,36 +180,21 @@ class Representation:
                 return TAGGED
             k = e.op
             if k in (ir.BinOpKind.ADD, ir.BinOpKind.SUB, ir.BinOpKind.MUL):
-                tainted = self._uses_tainted(r, e.left) or self._uses_tainted(r, e.right)
-                return RAW if e.proven and not tainted else TAGGED
+                return RAW if self.proved(e) else TAGGED
             if k is ir.BinOpKind.MOD:
                 return RAW
             if k is ir.BinOpKind.FLOORDIV:
                 if isinstance(e.right, ir.Const) and e.right.value != -1:
                     return RAW
-                tainted = self._uses_tainted(r, e.left) or self._uses_tainted(r, e.right)
-                return RAW if e.proven and not tainted else TAGGED
+                return RAW if self.proved(e) else TAGGED
             return TAGGED
         return TAGGED
-
-    def _uses_tainted(self, r: FunctionReps, e: ir.Expr) -> bool:
-        """Does the interval the proofs give `e` read a tainted name? (Mirrors `frontend._Lowerer.interval`: a
-        constant, a length, a call and an element read have an interval of their own, whatever their operands.)"""
-        if isinstance(e, ir.Local):
-            return e.name in r.tainted
-        if isinstance(e, ir.BinOp):
-            return self._uses_tainted(r, e.left) or self._uses_tainted(r, e.right)
-        if isinstance(e, ir.UnaryOp):
-            return self._uses_tainted(r, e.operand)
-        if isinstance(e, ir.Cond):
-            return self._uses_tainted(r, e.then) or self._uses_tainted(r, e.orelse)
-        if isinstance(e, ir.Index):
-            return False
-        return False
 
     # -- the fixpoint
 
     def run(self) -> None:
+        from typedpython import verify      # (verify does not import this module)
+
         for f in self.module.functions:
             r = self.reps[f.name]
             for p in f.params:
@@ -204,11 +203,19 @@ class Representation:
             for name, t in f.locals.items():
                 if t is Type.I64:
                     r.names.setdefault(name, RAW)
-        changed = True
-        while changed:
-            changed = False
-            for f in self.module.functions:
-                changed |= self.scan(f)
+        while True:
+            # the re-proof under the representation as it stands, then raise what it no longer proves; again until
+            # a re-proof raises nothing (a representation only goes up, so this ends)
+            self.proofs = verify.sound_proofs(self.module, self)
+            raised = False
+            changed = True
+            while changed:
+                changed = False
+                for f in self.module.functions:
+                    changed |= self.scan(f)
+                raised |= changed
+            if not raised:
+                return
 
     @staticmethod
     def raise_(d: dict[str, str], key: str, rep: str) -> bool:
@@ -226,15 +233,9 @@ class Representation:
                 if isinstance(n, ir.Assign):
                     if n.value.type is Type.I64:
                         changed |= self.raise_(r.names, n.target, self._of(r, n.value))
-                        if self._uses_tainted(r, n.value) and n.target not in r.tainted:
-                            r.tainted.add(n.target)
-                            changed = True
                 elif isinstance(n, ir.ForRange):
                     rep = join(self._of(r, n.start), self._of(r, n.stop))
                     changed |= self.raise_(r.names, n.var, rep)
-                    if (self._uses_tainted(r, n.start) or self._uses_tainted(r, n.stop)) and n.var not in r.tainted:
-                        r.tainted.add(n.var)
-                        changed = True
                 elif isinstance(n, ir.Return):
                     if n.value is not None and n.value.type is Type.I64 and r.returns != TAGGED \
                             and self._of(r, n.value) == TAGGED:
@@ -254,14 +255,6 @@ class Representation:
                         for i, t in enumerate(n.targets):
                             if i < len(callee.tuple_elements):
                                 changed |= self.raise_(r.names, t, callee.tuple_elements[i])
-                elif isinstance(n, ir.Compare):
-                    if n.left.type is Type.I64 and n.right.type is Type.I64:
-                        for local, other in ((n.left, n.right), (n.right, n.left)):
-                            if isinstance(local, ir.Local) and not isinstance(other, ir.Const):
-                                if (self._of(r, other) == TAGGED or self._uses_tainted(r, other)) \
-                                        and local.name not in r.tainted:
-                                    r.tainted.add(local.name)
-                                    changed = True
                 if isinstance(n, ir.Call):
                     callee_fn = self.fns.get(n.function)
                     callee = self.reps.get(n.function)

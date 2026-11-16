@@ -273,9 +273,9 @@ class _Fn:
     def tagged_name(self, name: str) -> bool:
         return self.types.get(name) is Type.I64 and self.g.reps.name(self.f.name, name) == TAGGED
 
-    def trusted(self, e: ir.Expr) -> bool:
-        """May a proved flag over `e` (an index, an operand) be relied on? (aot/rep.py "taint")"""
-        return self.g.reps.trusted(self.f.name, e)
+    def trusted(self, node: ir.Index | ir.StoreIndex) -> bool:
+        """May the proved index `node` skip its bounds check? (aot/rep.py "The sound re-proof")"""
+        return self.g.reps.trusted(self.f.name, node)
 
     def tslot(self) -> str:
         """A TAGGED temporary: empty until written, released at the cleanup point."""
@@ -681,7 +681,7 @@ class _Fn:
             slot = self.tmp("int64_t")
             self.emit(f"if (tpa_slot_int({arr}->len, {idx}, 0, &{slot})) {self.fail()}")
             self.emit(f"{out} = {arr}->d[{slot}];")
-        elif e.proven and self.trusted(e.index):
+        elif e.proven and self.trusted(e):
             self.emit(f"{out} = {arr}->d[{idx}];")
         else:
             slot = self.tmp("int64_t")
@@ -900,7 +900,7 @@ class _Fn:
             slot = self.tmp("int64_t")
             self.emit(f"if (tpa_slot_int({arr}->len, {idx}, 1, &{slot})) {self.fail()}")
             self.emit(f"{arr}->d[{slot}] = {val};")
-        elif s.proven and self.trusted(s.index):
+        elif s.proven and self.trusted(s):
             self.emit(f"{arr}->d[{idx}] = {val};")
         else:
             slot = self.tmp("int64_t")

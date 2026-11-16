@@ -315,6 +315,34 @@ nothing else (with the flag off every rule above is exactly as it was):
   * a name assigned by an `Unpack` is not an interval-tracked local: its value is whatever the callee
     returned.
 
+The sound re-proof of the AOT mode (`sound_proofs`, #462; agent proposal, not owner-confirmed). `verify(m,
+aot=True)` keeps the interval rules above, which read every I64 value as one inside 64 bits (an operation that
+leaves them "would have deopted"). In an AOT build an int that is not proved is a big-integer-capable value
+(`aot/rep.py`), so those intervals are not true of it, and a proof read from them is not a proof. `sound_proofs`
+walks the verified IR again with the same checker and intervals that hold of unbounded integers, given which names
+and returns `aot/rep.py` holds as int64 (its oracle); it is called by `aot/rep.py` only, never by `verify()`, so
+nothing above changes. Its interval rules differ from the table above in these, and only these:
+
+  * an interval may be unbounded on either side (`-inf` / `inf`; an endpoint beyond 2**128 is read as unbounded);
+  * the base of a local that is not interval-tracked (a parameter, an `Unpack` target, a loop variable after its
+    loop) and of a `Call` is the i64 range only when the oracle holds the name / the callee's return as int64,
+    else unbounded; `ArgvInt` is unbounded; `Index` elements, `ArgvLen` and `Len` are as above (a list holds
+    int64 elements, the back end refuses any other store);
+  * every read of a local the oracle holds as int64 is also narrowed to the i64 range;
+  * ADD / SUB / MUL / NEG are exact and never clamped (no operation deopts; one that leaves 64 bits is a
+    big-integer operation and its value is the exact one); FLOORDIV / MOD are clamped to the i64 range only when
+    both operand intervals lie inside it and `-2**63 // -1` cannot occur, FLOORDIV with an unbounded operand is
+    unbounded; AND of a non-negative operand is [0, its hi]; OR / XOR of two i64 operands is the i64 range,
+    RSHIFT of an i64 operand too, anything else unbounded;
+  * a ForRange var lies between its bounds, not clamped;
+  * a guard `x < e` gives x no lower bound (not the i64 minimum), and so on for each comparison;
+  * the fixed point widens a growing bound first to the i64 limit and then, if it still grows, to unbounded; a
+    local the walks never gave an interval, and every local when the walks do not settle, is unbounded.
+
+It records, for each node of the verified IR (by identity), whether a `proven` ADD / SUB / MUL / NEG (or
+FLOORDIV / MOD) is re-proved under these intervals and whether an Index / StoreIndex is proved in bounds. What
+this cannot find: a fact the ordinary rules cannot prove either (it proves less, never more).
+
 Every other rule is on in AOT mode, among them types, definite assignment, ownership, structure,
 `proven` re-proof (the interval proof is what makes an int operation acceptable to the AOT back end),
 `verify/flag-pure` and `verify/flag-may-deopt` (the flags are still recomputed and compared).
@@ -428,6 +456,11 @@ _SWAP = {CompareKind.EQ: CompareKind.EQ, CompareKind.NE: CompareKind.NE,
          CompareKind.LE: CompareKind.GE, CompareKind.GE: CompareKind.LE}
 _ROUNDS = 16          # rounds of the local-interval fixpoint before every local is full range
 _WIDEN_FROM = 3       # from this round on a bound that still grows jumps to the i64 limit
+# The sound re-proof of the AOT mode (`sound_proofs`, module docstring): an unbounded endpoint, the interval that
+# says nothing, and the magnitude beyond which an endpoint is read as unbounded (keeps the numbers small).
+_INF = float("inf")
+_WIDE = (-_INF, _INF)
+_SOUND_CAP = 2 ** 128
 
 # Definite assignment uses `None` for "unreachable" (bottom: every name counts as assigned).
 _State = frozenset[str] | None
@@ -457,9 +490,13 @@ class _Checker:
     def __init__(self, function: Function, signatures: dict[str, Function],
                  classes: dict[str, ClassDecl] | None = None,
                  var_ivs: dict[str, tuple[int, int]] | None = None, fixing: bool = False,
-                 aot: bool = False):
+                 aot: bool = False, sound=None):
         self.fn = function
         self.aot = aot      # AOT mode (module docstring "AOT mode"); False: every rule as it always was
+        # The sound re-proof (`sound_proofs`; only with aot): the oracle of which names and returns are int64, and
+        # what it found (id of a node of the input IR -> re-proved). None: every interval rule as it always was.
+        self.sound = sound
+        self.sound_ok: dict[int, bool] = {}
         # AOT mode: a list is the caller's own array, never copied in, so no list is "read element by element"
         self.direct = ir.direct_lists(function) and not aot   # #255: lists read element by element
         # #255 (d2): with an effect a node that fails to continue natively leaves through the
@@ -795,6 +832,8 @@ class _Checker:
     def interval(self, e: ir.Expr) -> tuple[int, int]:
         """The interval rules in the module docstring: [lo, hi] bounding every value `e` (an I64
         expression, already checked) can take when it completes without deopting."""
+        if self.sound is not None:
+            return self.sound_interval(e)
         cls = type(e)
         if getattr(e, "type", None) is not Type.I64:
             return _FULL
@@ -838,6 +877,81 @@ class _Checker:
             return (max(lo, _I64_MIN), min(hi, _I64_MAX))
         return _FULL
 
+    def sound_interval(self, e: ir.Expr) -> tuple:
+        """The sound re-proof's interval of `e` (module docstring "The sound re-proof of the AOT mode"): it holds of
+        the exact value of `e` whatever the size of the ints it reads, given the oracle (`self.sound`)."""
+        cls = type(e)
+        if getattr(e, "type", None) is not Type.I64:
+            return _WIDE
+        if cls is Const:
+            return (e.value, e.value) if type(e.value) is int else _WIDE
+        if cls is Local:
+            raw = self.sound.raw_name(self.fn.name, e.name)
+            iv = None
+            for loop in reversed(self.loops):
+                if loop.var == e.name:
+                    if loop.bottom:
+                        self.bottom = True
+                    iv = loop.interval
+                    break
+            if iv is None:
+                iv = _FULL if raw else _WIDE
+                if e.name in self.eligible:
+                    known = self.var_ivs.get(e.name)
+                    if known is not None:
+                        iv = known
+                    else:
+                        iv = _WIDE
+                        if self.fixing:
+                            self.bottom = True
+            iv = _meet_interval(iv, self.refine.get(e.name))
+            return _meet_interval(iv, _FULL) if raw else iv
+        if cls is Len:
+            return self.lens.get(e.array, (0, _LEN_MAX))
+        if cls in (Index, ArgvLen):
+            return _FULL                    # a list's element is an int64 (aot/int-list-store), so is argc
+        if cls is Call:
+            return _FULL if self.sound.raw_return(e.function) else _WIDE
+        if cls is Cond:
+            a, b = self.interval(e.then), self.interval(e.orelse)
+            return (min(a[0], b[0]), max(a[1], b[1]))
+        if cls is BinOp and e.op in _PROVABLE_OPS:
+            return _sound_cap(_exact_sound(e.op, self.interval(e.left), self.interval(e.right)))
+        if cls is BinOp and e.op in _POW2_OPS:
+            a, b = self.interval(e.left), self.interval(e.right)
+            if e.op is BinOpKind.FLOORDIV and _INF in (abs(a[0]), abs(a[1]), abs(b[0]), abs(b[1])):
+                return _WIDE
+            lo, hi = _div_interval(e.op, a, b)
+            if _inside(a) and _inside(b) and not (a[0] == _I64_MIN and b[0] <= -1 <= b[1]):
+                lo, hi = max(lo, _I64_MIN), min(hi, _I64_MAX)     # an int64 result, or an exception
+            return _sound_cap((lo, hi))
+        if cls is BinOp:
+            a, b = self.interval(e.left), self.interval(e.right)
+            if e.op is BinOpKind.AND:
+                his = [iv[1] for iv in (a, b) if iv[0] >= 0]
+                if his:
+                    return (0, min(his))
+                return _FULL if _inside(a) and _inside(b) else _WIDE
+            if e.op in (BinOpKind.OR, BinOpKind.XOR):
+                return _FULL if _inside(a) and _inside(b) else _WIDE
+            if e.op is BinOpKind.RSHIFT:
+                return _FULL if _inside(a) else _WIDE
+            return _WIDE
+        if cls is UnaryOp and e.op is UnaryOpKind.INVERT:
+            lo, hi = self.interval(e.operand)          # ~x == -x - 1, monotone decreasing
+            return _sound_cap((-hi - 1, -lo - 1))
+        if cls is UnaryOp and e.op is UnaryOpKind.NEG:
+            lo, hi = self.interval(e.operand)
+            return _sound_cap((-hi, -lo))
+        if cls is UnaryOp and e.op is UnaryOpKind.POS:
+            return self.interval(e.operand)
+        return _WIDE        # ArgvInt (any int CPython parses), and anything else
+
+    def sound_record(self, node: object, ok: bool) -> None:
+        """The sound re-proof: `node` (of the input IR) is re-proved, or not; a node met twice must hold both times."""
+        if self.sound is not None:
+            self.sound_ok[id(node)] = self.sound_ok.get(id(node), True) and ok
+
     def refinements(self, c: ir.Expr, truth: bool) -> dict[str, tuple[int, int]]:
         """The intervals that hold of locals when condition `c` evaluated to `truth` (module
         docstring "Local variables and guards"). A comparison of two I64 operands one of which is a
@@ -850,10 +964,11 @@ class _Checker:
                 return {}
             kind = c.op if truth else _NEGATE[c.op]
             out: dict[str, tuple[int, int]] = {}
+            bound = _bound if self.sound is None else _bound_sound
             if type(l) is Local:
-                _narrow(out, l.name, _bound(kind, self.interval(r)))
+                _narrow(out, l.name, bound(kind, self.interval(r)))
             if type(r) is Local:
-                _narrow(out, r.name, _bound(_SWAP[kind], self.interval(l)))
+                _narrow(out, r.name, bound(_SWAP[kind], self.interval(l)))
             return out
         if cls is UnaryOp and c.op is UnaryOpKind.NOT:
             return self.refinements(c.operand, not truth)
@@ -921,9 +1036,11 @@ class _Checker:
                 proven = self.check_shift(e.op, left, right)
             else:
                 shape = both and e.op in _PROVABLE_OPS
-                exact = (_exact(e.op, self.interval(left), self.interval(right))
+                exact = ((_exact if self.sound is None else _exact_sound)(e.op, self.interval(left),
+                                                                          self.interval(right))
                          if shape else _FULL)
                 proven = self.check_proven(shape, exact, f"{e.type.value} {e.op.value}")
+            self.sound_record(e, proven)
         if type(e.np) is not bool:
             self.error(TYPE, f"BinOp `np` {e.np!r} is not a bool")
         elif e.np:
@@ -984,6 +1101,7 @@ class _Checker:
             lo, hi = self.interval(operand) if shape else _FULL
             proven = self.check_proven(shape, (-hi, -lo) if shape else _FULL,
                                        f"unary {e.op.value} of {getattr(ot, 'value', ot)}")
+            self.sound_record(e, proven)
         if e.op is UnaryOpKind.NOT:
             self.slot(operand, Type.BOOL, "operand of not")
             if e.type is not Type.BOOL:
@@ -1327,6 +1445,7 @@ class _Checker:
         if element is not None and e.type is not element and e.type is not Type.OBJ:
             self.error(TYPE, f"element of '{e.array}' is {element.value}, node says "
                              f"{e.type.value}")
+        self.sound_record(e, proven)
         return dataclasses.replace(e, index=idx, proven=proven)
 
     def in_bounds(self, array: str, idx: ir.Expr) -> bool:
@@ -1682,6 +1801,7 @@ class _Checker:
         if s.array not in self.larrays:     # a local array is the function's own: not an effect
             self.stored.add(s.array)
             self.effects.append(f"stores into '{s.array}'")
+        self.sound_record(s, proven)
         return dataclasses.replace(s, index=idx, value=value, proven=proven), state
 
     def s_ExprStmt(self, s: ExprStmt, state: _State):
@@ -1967,7 +2087,8 @@ class _Checker:
             else:
                 hi = shi
                 lo = min(hi, elo + 1)
-            loop.interval = (max(lo, _I64_MIN), min(hi, _I64_MAX))
+            # (the sound re-proof: between its bounds, which may lie outside 64 bits; not clamped)
+            loop.interval = (max(lo, _I64_MIN), min(hi, _I64_MAX)) if self.sound is None else (lo, hi)
         self.loops.append(loop)
         head = self.loop_facts(s.body, (var,))
         self.facts = dict(head)
@@ -2820,8 +2941,57 @@ def _exact(op: BinOpKind, a: tuple[int, int], b: tuple[int, int]) -> tuple[int, 
     return min(products), max(products)
 
 
+def _bound_sound(kind: CompareKind, other: tuple) -> tuple | None:
+    """`_bound` for the sound re-proof: the side a comparison does not bound is unbounded."""
+    lo, hi = other
+    if kind is CompareKind.LT:
+        out = (-_INF, hi - 1)
+    elif kind is CompareKind.LE:
+        out = (-_INF, hi)
+    elif kind is CompareKind.GT:
+        out = (lo + 1, _INF)
+    elif kind is CompareKind.GE:
+        out = (lo, _INF)
+    elif kind is CompareKind.EQ:
+        out = (lo, hi)
+    else:
+        return None
+    return out if out[0] <= out[1] else None
+
+
+def _exact_sound(op: BinOpKind, a: tuple, b: tuple) -> tuple:
+    """`_exact` on intervals that may be unbounded (a zero endpoint times an unbounded one is zero: every value of
+    the intervals is an integer, so x * 0 == 0 for each)."""
+    if op is BinOpKind.ADD:
+        return a[0] + b[0], a[1] + b[1]
+    if op is BinOpKind.SUB:
+        return a[0] - b[1], a[1] - b[0]
+
+    def mul(x, y):
+        return 0 if x == 0 or y == 0 else x * y
+    products = (mul(a[0], b[0]), mul(a[0], b[1]), mul(a[1], b[0]), mul(a[1], b[1]))
+    return min(products), max(products)
+
+
+def _sound_cap(iv: tuple) -> tuple:
+    """An endpoint beyond +-2**128 is unbounded (sound: it only widens); a malformed interval says nothing."""
+    lo, hi = iv
+    if lo != lo or hi != hi or lo == _INF or hi == -_INF:      # NaN, or an endpoint on the wrong side
+        return _WIDE
+    if lo < -_SOUND_CAP:
+        lo = -_INF
+    if hi > _SOUND_CAP:
+        hi = _INF
+    return (lo, hi)
+
+
+def _inside(iv: tuple) -> bool:
+    """The interval lies inside the i64 range."""
+    return _I64_MIN <= iv[0] and iv[1] <= _I64_MAX
+
+
 def _prove(g: Function, sigs: dict[str, Function], classes: dict[str, ClassDecl],
-           aot: bool = False) -> tuple[_Checker, Function]:
+           aot: bool = False, sound=None) -> tuple[_Checker, Function]:
     """Check `g`, first computing the interval of every eligible local (Local variables and
     guards): walks of the body repeat, each reading the intervals found by the one before, until
     they stop growing (a bound still growing from round `_WIDEN_FROM` jumps to the i64 limit). The
@@ -2829,7 +2999,7 @@ def _prove(g: Function, sigs: dict[str, Function], classes: dict[str, ClassDecl]
     not settle in `_ROUNDS` walks, every eligible local is full range."""
     known: dict[str, tuple[int, int]] = {}
     for rnd in range(_ROUNDS):
-        c = _Checker(g, sigs, classes, known, True, aot=aot)
+        c = _Checker(g, sigs, classes, known, True, aot=aot, sound=sound)
         rebuilt = c.run()
         if not c.eligible:
             return c, rebuilt
@@ -2842,18 +3012,40 @@ def _prove(g: Function, sigs: dict[str, Function], classes: dict[str, ClassDecl]
             if old is None:
                 grown[name] = iv
                 continue
-            lo = old[0] if iv[0] >= old[0] else (_I64_MIN if rnd >= _WIDEN_FROM else iv[0])
-            hi = old[1] if iv[1] <= old[1] else (_I64_MAX if rnd >= _WIDEN_FROM else iv[1])
+            if sound is None:
+                lo = old[0] if iv[0] >= old[0] else (_I64_MIN if rnd >= _WIDEN_FROM else iv[0])
+                hi = old[1] if iv[1] <= old[1] else (_I64_MAX if rnd >= _WIDEN_FROM else iv[1])
+            else:
+                # the sound re-proof: to the i64 limit while the value found fits, then unbounded
+                lo = old[0] if iv[0] >= old[0] else (iv[0] if rnd < _WIDEN_FROM else
+                                                     _I64_MIN if iv[0] >= _I64_MIN else -_INF)
+                hi = old[1] if iv[1] <= old[1] else (iv[1] if rnd < _WIDEN_FROM else
+                                                     _I64_MAX if iv[1] <= _I64_MAX else _INF)
             grown[name] = (lo, hi)
         if grown == known:
             absent = c.eligible - set(known)
             if not absent:
                 return c, rebuilt
             for name in absent:         # never given an interval: nothing is known about it
-                grown[name] = _FULL
+                grown[name] = _FULL if sound is None else _WIDE
         known = grown
-    c = _Checker(g, sigs, classes, {}, False, aot=aot)
+    c = _Checker(g, sigs, classes, {}, False, aot=aot, sound=sound)
     return c, c.run()
+
+
+def sound_proofs(module: Module, oracle) -> dict[int, bool]:
+    """The sound re-proof of the AOT mode (module docstring, #462): `module` is the output of `verify(m, aot=True)`;
+    `oracle.raw_name(function, name)` / `oracle.raw_return(function)` say which I64 names and returns hold an
+    int64 (`aot/rep.py`). Returns, for every `proven` int operation and every Index / StoreIndex of the module's
+    functions (by `id` of the node), whether it is proved under intervals that hold of unbounded integers. Only
+    `aot/rep.py` calls this; `verify()` never does."""
+    sigs = {f.name: f for f in module.functions}
+    classes, _ = _check_classes(module, set(sigs), [])
+    out: dict[int, bool] = {}
+    for g in module.functions:
+        c, _ = _prove(g, sigs, classes, True, oracle)
+        out.update(c.sound_ok)
+    return out
 
 
 def verify(module: Module, *, aot: bool = False) -> tuple[Module, list[Diagnostic]]:

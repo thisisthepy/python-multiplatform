@@ -794,8 +794,9 @@ def test_float_repr_corpus_is_large_enough(merged):
 # 2026-11-16, not owner-confirmed): growth past 64 and 128 bits and back into the small range, floor division and
 # modulo with every sign, comparisons with each other and with floats (exact), true division, `float()`, mixed
 # arithmetic, `abs` / `min` / `max`, truthiness, range loops (a bound read from the arguments, a loop that leaves
-# early from a range of 10**30 values), printing at the digit-limit boundary, a proof that is not enough (a taint
-# case, aot/rep.py), and the programs of the old rejection table that are accepted now. The executable runs with
+# early from a range of 10**30 values), printing at the digit-limit boundary, a proof that is not enough (aot/rep.py "The
+# sound re-proof"; `guards_on_big_values` has one per way a guard on a big value reaches a proof), and the programs of
+# the old rejection table that are accepted now. The executable runs with
 # the argument 7 and the same file runs under CPython; the outputs must be equal case by case.
 
 BIGINT_PRELUDE = """
@@ -1030,6 +1031,194 @@ BIGINT_CASES = {
             print(step(w))
             w2 = [9223372036854775806, 9223372036854775807]
             print(up_to(w2))
+        """,
+    # Each function below holds an operation that the default-mode rules prove from a guard on (or a value derived
+    # from) a big int `t`, and the arguments make that operation leave 64 bits. Were it RAW (a proved flag trusted
+    # without the sound re-proof, aot/rep.py), it would wrap: each 9223372036854775808 would print as
+    # -9223372036854775808 and each -9223372036854775809 as 9223372036854775807. (Agent proposal, not owner-confirmed.)
+    "guards_on_big_values": """
+        def gd_lt(w: list[int]) -> int:
+            a = w[0]
+            t = w[1] * w[2]
+            if a < t:
+                a = a + 1
+            return a
+
+        def gd_gt_swapped(w: list[int]) -> int:
+            a = w[0]
+            t = w[1] * w[2]
+            if t > a:
+                a = a + 1
+            return a
+
+        def gd_le(w: list[int]) -> int:
+            a = w[0]
+            u = w[1] * w[2] - 1
+            if a <= u:
+                a = a + 1
+            return a
+
+        def gd_gt(w: list[int]) -> int:
+            a = w[0]
+            t = w[1] * w[2]
+            if a > t:
+                a = a - 1
+            return a
+
+        def gd_ge(w: list[int]) -> int:
+            a = w[0]
+            u = w[1] * w[2] + 1
+            if a >= u:
+                a = a - 1
+            return a
+
+        def gd_eq(w: list[int]) -> int:
+            a = w[0]
+            t = w[1] * w[2]
+            if t > 0:
+                s = 9223372036854775807 - t
+                if a == s:
+                    a = a - 1
+            return a
+
+        def gd_returning(w: list[int]) -> int:
+            a = w[0]
+            t = w[1] * w[2]
+            if a >= t:
+                return 0
+            return a + 1
+
+        def gd_not(w: list[int]) -> int:
+            a = w[0]
+            t = w[1] * w[2]
+            if not (a >= t):
+                a = a + 1
+            return a
+
+        def gd_and(w: list[int]) -> int:
+            a = w[0]
+            t = w[1] * w[2]
+            if a < t and a > -5:
+                a = a + 1
+            return a
+
+        def gd_or(w: list[int]) -> int:
+            a = w[0]
+            t = w[1] * w[2]
+            if a >= t or a < -5:
+                return 0
+            return a + 1
+
+        def gd_while(w: list[int]) -> int:
+            a = w[0]
+            t = w[1] * w[2]
+            n = 0
+            while a < t and n < 1:
+                a = a + 1
+                n = n + 1
+            return a
+
+        def gd_cond(w: list[int]) -> int:
+            a = w[0]
+            t = w[1] * w[2]
+            return a + 1 if a < t else 0
+
+        def gd_copy(w: list[int]) -> int:
+            a = w[0]
+            t = w[1] * w[2]
+            if a < t:
+                c = a
+                return c + 1
+            return 0
+
+        def gd_second(w: list[int]) -> int:
+            a = w[0]
+            c = w[3]
+            t = w[1] * w[2]
+            if a < t:
+                if c <= a:
+                    return c + 1
+            return 0
+
+        def gd_join(w: list[int]) -> int:
+            a = w[0]
+            t = w[1] * w[2]
+            if a < t:
+                b = a
+            else:
+                b = 0
+            return b + 1
+
+        def gd_inner(a: int, t: int) -> int:
+            if a < t:
+                return a + 1
+            return 0
+
+        def gd_param(w: list[int]) -> int:
+            return gd_inner(w[0], w[1] * w[2])
+
+        def gd_big(w: list[int]) -> int:
+            return w[1] * w[2]
+
+        def gd_call(w: list[int]) -> int:
+            a = w[0]
+            t = gd_big(w)
+            if a < t:
+                return a + 1
+            return 0
+
+        def gd_pair(w: list[int]) -> tuple[int, int]:
+            return w[1] * w[2], 0
+
+        def gd_unpack(w: list[int]) -> int:
+            a = w[0]
+            t, z = gd_pair(w)
+            if a < t:
+                return a + 1
+            return z
+
+        def gd_loop_var(w: list[int]) -> int:
+            t = w[2] * w[3]
+            r = 0
+            for i in range(w[0], w[1], -1):
+                if i < t:
+                    r = i + 1
+                    break
+            return r
+
+        def gd_guarded_bound(w: list[int]) -> int:
+            a = w[0]
+            t = w[1] * w[2]
+            r = 0
+            if a < t:
+                for i in range(a, 0, -1):
+                    r = i + 1
+                    break
+            return r
+
+        def gd_cond_other(w: list[int]) -> int:
+            a = w[0]
+            t = w[1] * w[2]
+            if a < (t if a > 0 else 5):
+                return a + 1
+            return 0
+
+        def gd_abs(w: list[int]) -> int:
+            a = w[0]
+            t = w[1] * w[2]
+            if a > t:
+                return abs(a)
+            return 0
+
+        def case_guards_on_big_values() -> None:
+            hi = [9223372036854775807, 1099511627776, 1099511627776, 9223372036854775807]
+            lo = [-9223372036854775807 - 1, -1099511627776, 1099511627776]
+            eq = [-9223372036854775807 - 1, 4294967295, 4294967297]
+            down = [9223372036854775807, 9223372036854775805, 1099511627776, 1099511627776]
+            print(gd_lt(hi), gd_gt_swapped(hi), gd_le(hi), gd_gt(lo), gd_ge(lo), gd_eq(eq))
+            print(gd_returning(hi), gd_not(hi), gd_and(hi), gd_or(hi), gd_while(hi), gd_cond(hi))
+            print(gd_copy(hi), gd_second(hi), gd_join(hi), gd_param(hi), gd_call(hi), gd_unpack(hi))
+            print(gd_loop_var(down), gd_guarded_bound(hi), gd_cond_other(hi), gd_abs(lo))
         """,
     "unproved_rows": """
         def counter(n: int) -> int:
@@ -1425,6 +1614,82 @@ RAISING.update({
             print(a[-k])
             print("after")
         """, ()),
+    # A list created with a length the verifier reads as at least 5 (or 1), while it is empty: `9223372036854775807 - t`
+    # is negative for the big t (3037000500 ** 2 is 145474193 more than 2**63 - 1, so the count -145474188 is in the
+    # range where `[0] * n` is the empty list, not an OverflowError). The proved index must keep its check (aot/rep.py "The sound re-proof"); skipping it
+    # reads or writes past the end of the list, printing a garbage value (or crashing under the sanitizer) and "after"
+    # where CPython raises IndexError. (Agent proposal, not owner-confirmed.)
+    "list_shorter_than_its_proof": ("""
+        def short_load(w: list[int]) -> int:
+            t = w[1] * w[2]
+            n = 9223372036854775807 - t
+            arr = [0] * (n + 5)
+            return arr[4]
+
+        def case_list_shorter_than_its_proof() -> None:
+            w = [0, 3037000500, 3037000500]
+            print("before")
+            print(short_load(w))
+            print("after")
+        """, ()),
+    "list_shorter_than_its_proof_store": ("""
+        def short_store(w: list[int]) -> int:
+            t = w[1] * w[2]
+            n = 9223372036854775807 - t
+            arr = [0] * (n + 5)
+            arr[4] = 7
+            return len(arr)
+
+        def case_list_shorter_than_its_proof_store() -> None:
+            w = [0, 3037000500, 3037000500]
+            print("before")
+            print(short_store(w))
+            print("after")
+        """, ()),
+    "list_shorter_than_its_proof_copy": ("""
+        def short_copy(w: list[int]) -> int:
+            t = w[1] * w[2]
+            n = 9223372036854775807 - t
+            arr = [0] * (n + 5)
+            b = arr[:]
+            return b[4]
+
+        def case_list_shorter_than_its_proof_copy() -> None:
+            w = [0, 3037000500, 3037000500]
+            print("before")
+            print(short_copy(w))
+            print("after")
+        """, ()),
+    "list_shorter_than_its_proof_length": ("""
+        def short_length(w: list[int]) -> int:
+            t = w[1] * w[2]
+            n = 9223372036854775807 - t
+            arr = [0] * (n + 5)
+            arr2 = [0] * len(arr)
+            return arr2[4]
+
+        def case_list_shorter_than_its_proof_length() -> None:
+            w = [0, 3037000500, 3037000500]
+            print("before")
+            print(short_length(w))
+            print("after")
+        """, ()),
+    "list_shorter_than_its_proof_narrowed": ("""
+        def short_narrowed(w: list[int]) -> int:
+            t = w[1] * w[2]
+            s = 9223372036854775807 - t
+            n = w[0]
+            if n > s:
+                arr = [0] * n
+                return arr[0]
+            return 0
+
+        def case_list_shorter_than_its_proof_narrowed() -> None:
+            w = [0, 1099511627776, 1099511627776]
+            print("before")
+            print(short_narrowed(w))
+            print("after")
+        """, ()),
     "list_repeat_count_too_large": ("""
         def case_list_repeat_count_too_large() -> None:
             print("before")
@@ -1498,6 +1763,11 @@ def test_the_cases_name_the_exceptions_cpython_raises(selector):
         "list_oob_through_a_frame": "IndexError: list index out of range",
         # big integers (#462): the messages are the reference's own
         "list_index_too_large_read": "IndexError: cannot fit 'int' into an index-sized integer",
+        "list_shorter_than_its_proof": "IndexError: list index out of range",
+        "list_shorter_than_its_proof_store": "IndexError: list assignment index out of range",
+        "list_shorter_than_its_proof_copy": "IndexError: list index out of range",
+        "list_shorter_than_its_proof_length": "IndexError: list index out of range",
+        "list_shorter_than_its_proof_narrowed": "IndexError: list index out of range",
         "list_index_too_large_store": "IndexError: cannot fit 'int' into an index-sized integer",
         "list_negative_index_too_large": "IndexError: cannot fit 'int' into an index-sized integer",
         "argv_index_too_large": "IndexError: cannot fit 'int' into an index-sized integer",
