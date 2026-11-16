@@ -1307,7 +1307,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     impure one; `ValueError` with the same message; augmented forms; INT and object operands; `bool` and
     float operands skipped or `TypeError`. `Status: implemented`.
 - **N-17** TypedPython AOT mode: a standalone build with no interpreter (#443; INTENT §1.4, maintainer
-  decision 2026-11-16). `Status: planned, not implemented; design first`. A check-only mode exists (`python -m typedpython aot-check <entry.py>`): it builds nothing and reports every construct an AOT build would refuse, as an error or as pending with its tier (K, O, S or T), and a ready status per function (#446; agent proposal, not owner-confirmed).
+  decision 2026-11-16). `Status: planned, not implemented; design first`. A check-only mode exists (`python -m typedpython aot-check <entry.py>`): it builds nothing and reports every construct an AOT build would refuse, as an error or as pending with its tier (K, O, S or T), and a ready status per function (#446; agent proposal, not owner-confirmed). A first AOT build step exists (`python -m typedpython aot-build`): single-module programs of scalar functions with an `if __name__ == "__main__"` entry and `print`, strict integers, differential-tested against CPython (#448; agent proposal, not owner-confirmed).
   - **Selection.** Opt-in per build; the default mode (N-1 to N-16, interpreted fallback) is unchanged.
   - **Acceptance.** The whole program must pass the verifier. Every construct that the default mode would
     leave interpreted or deopt from (unknown calls, unproven bounds or overflow without a compiled

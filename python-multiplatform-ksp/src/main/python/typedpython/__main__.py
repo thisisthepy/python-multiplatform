@@ -1,5 +1,6 @@
 """`python -m typedpython check [--mode checked|compiled] [--format text|json] PATHS...`
 `python -m typedpython emit-c PATHS... --root DIR [--cache DIR] --manifest FILE`
+`python -m typedpython aot-build ENTRY.py -o EXECUTABLE [--emit-c FILE.c]` (SPEC N-17, #448: exit 1 on a finding)
 
 Exit status: 0 no errors (warnings allowed), 1 errors, 2 the gate itself could not run.
 """
@@ -50,8 +51,16 @@ def main(argv: list[str]) -> int:
     aot.add_argument("--strict-int", action="store_true",
                      help="also report an int operation that is not proved to stay inside i64")
     aot.add_argument("--json", action="store_true", help="print the report as JSON")
+    aot_build = commands.add_parser(
+        "aot-build", help="compile a single-module program of scalar functions to a standalone executable "
+                          "with no CPython (SPEC N-17, first step)")
+    aot_build.add_argument("entry", type=Path, help="the entry module (it has an `if __name__ == \"__main__\":` block)")
+    aot_build.add_argument("-o", "--output", type=Path, required=True, help="the executable to write")
+    aot_build.add_argument("--emit-c", type=Path, default=None, help="also keep the generated C here")
     args = parser.parse_args(argv)
 
+    if args.command == "aot-build":
+        return _aot_build(args.entry, args.output, args.emit_c)
     if args.command == "aot-check":
         return _aot_check(args.entry, args.strict_int, args.json)
     if args.command == "emit-c":
@@ -90,6 +99,28 @@ def _aot_check(entry: Path, strict_int: bool, as_json: bool) -> int:
         for line in report.lines():
             print(line)
     return EXIT_ERRORS if report.blocking else EXIT_CLEAN
+
+
+def _aot_build(entry: Path, output: Path, emit_c: Path | None) -> int:
+    """SPEC N-17 / #448: exit 0 when the executable was built; 1 with one line per finding on standard error
+    (`path:line: error rule: message`) when the program is outside what the mode compiles exactly; 2 when
+    the build itself could not run (no such file, no C compiler, the compiler failed)."""
+    from typedpython import aot, cbuild
+
+    if not entry.is_file():
+        print(f"typedpython: {entry} is not a file", file=sys.stderr)
+        return EXIT_FAILURE
+    try:
+        exe = aot.build(entry, output, emit_c=emit_c)
+    except aot.AotError as e:
+        for f in e.findings:
+            print(aot.format_finding(f), file=sys.stderr)
+        return EXIT_ERRORS
+    except (cbuild.CBuildError, PyreflyError) as e:
+        print(f"typedpython: {e}", file=sys.stderr)
+        return EXIT_FAILURE
+    print(exe)
+    return EXIT_CLEAN
 
 
 def _build(paths: list[Path], cache: Path, out: Path | None) -> int:
