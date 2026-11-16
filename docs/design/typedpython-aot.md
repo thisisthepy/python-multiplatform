@@ -201,6 +201,15 @@ Adopted: (b), with (a) available as a build option for programs that want a guar
 code; (c) is excluded because its result differs from CPython's (leader decision D1, 2026-11-16, not
 owner-confirmed).
 
+CPython limits conversion between an int and a decimal string to 4300 digits by default and raises
+ValueError beyond that, in `str`, `print`, f-strings and `int(str)`. The AOT runtime reproduces that
+limit and its messages exactly (leader, 2026-11-16). CPython lets a program change the limit with
+`sys.set_int_max_str_digits`, the `-X int_max_str_digits` option or the `PYTHONINTMAXSTRDIGITS`
+environment variable; the provided `sys` has no such function and the executable reads no such setting,
+so an AOT program always runs with 4300. A program that calls `sys.set_int_max_str_digits` is a compile
+error, and a program that relies on the option or the environment variable computes something else
+under CPython than as an AOT binary: that is a stated limit of the mode, not an accepted difference.
+
 ## 6. Objects and memory (N-17 items 2 and 4)
 
 ### 6.1 What can be observed

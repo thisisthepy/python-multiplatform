@@ -841,6 +841,17 @@ def test_int_from_str_random_strings_equal_the_reference(shim):
     assert declined > 100, "the alphabet does exercise the declined inputs"
 
 
+def test_the_generated_cases_and_their_seeds_are_in_the_log(capsys):
+    """The differential cases are generated, not listed, so the log of every run states how many there were and
+    from which seeds (leader, 2026-11-16). Written past pytest's capture so it shows without -s."""
+    seeds = sorted(int(x) for x in re.findall(r"random\.Random\((\d+)\)", Path(__file__).read_text()))
+    assert seeds, "the generators use fixed seeds"
+    with capsys.disabled():
+        print(f"\n[aot int] generated cases: {len(NUMBERS)} numbers, {len(PAIRS)} pairs, {len(gen_truediv_pairs())} true-division "
+              f"pairs; fixed seeds of random.Random: {seeds} (and 1000 + thread index in the threaded test)")
+    assert len(NUMBERS) > 300 and len(PAIRS) > 3000
+
+
 def test_int_from_str_unicode_whitespace_and_digits_by_code_point(shim):
     """Every code point c: the strings c + '7' and '7' + c (the first is valid exactly when c is whitespace or a
     decimal digit; the second when c is whitespace). The runtime either equals the reference or declines an
