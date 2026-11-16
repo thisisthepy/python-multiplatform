@@ -50,7 +50,7 @@ def block() -> str:
     rs = ranges()
     flat = [x for r in rs for x in r]
     lines = [BEGIN,
-             f"#define TPA_INT_UNICODE_VERSION \"{unicodedata.unidata_version}.0\"      /* the Unicode version of the table */",
+             f"#define TPA_INT_UNICODE_VERSION \"{unicodedata.unidata_version}\"      /* the Unicode version of the table */",
              f"#define TPA_INT__NONPRINT_N {len(rs)}                              /* the number of (first, last) pairs */",
              "static const uint32_t tpa_int__nonprint[2 * TPA_INT__NONPRINT_N] = {"]
     for i in range(0, len(flat), 8):

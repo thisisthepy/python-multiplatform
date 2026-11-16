@@ -1655,7 +1655,7 @@ static TPA_UNUSED int tpa_print_int(tpa_int a)
  * The table below is generated: python-multiplatform-ksp/tools/gen_aot_nonprintable.py rewrites it.
  * ------------------------------------------------------------------------------------------ */
 /* BEGIN GENERATED: tpa_int__nonprint (python-multiplatform-ksp/tools/gen_aot_nonprintable.py) */
-#define TPA_INT_UNICODE_VERSION "17.0.0.0"      /* the Unicode version of the table */
+#define TPA_INT_UNICODE_VERSION "17.0.0"      /* the Unicode version of the table */
 #define TPA_INT__NONPRINT_N 741                              /* the number of (first, last) pairs */
 static const uint32_t tpa_int__nonprint[2 * TPA_INT__NONPRINT_N] = {
     0x80, 0xA0, 0xAD, 0xAD, 0x378, 0x379, 0x380, 0x383,
