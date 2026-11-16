@@ -14,6 +14,7 @@ import pytest
 
 from conftest import decorate_compiled
 from typedpython import aot, frontend, ir, verify
+from typedpython.aot import rep
 from typedpython.ir import Type
 
 
@@ -410,19 +411,21 @@ def test_a_tuple_is_unpacked_only(tmp_path):
 def test_a_value_unpacked_from_a_call_has_no_proved_range(tmp_path):
     """The targets of an unpacking are not locals with a recorded interval: `a + 1` stays unproved (a result
     the callee computed may be any int), in the front end and in the verifier alike."""
+    path = write(tmp_path, """
+        def g() -> tuple[int, int]:
+            return 1, 2
+
+        def f() -> int:
+            a, b = g()
+            return a + 1
+
+        if __name__ == "__main__":
+            print(f())
+        """)
     with pytest.raises(aot.AotError) as raised:
-        aot.generate(write(tmp_path, """
-            def g() -> tuple[int, int]:
-                return 1, 2
-
-            def f() -> int:
-                a, b = g()
-                return a + 1
-
-            if __name__ == "__main__":
-                print(f())
-            """))
+        aot.generate(path, strict_int=True)
     assert [(f.rule, f.line) for f in raised.value.findings] == [("aot/int-unproven", 6)]
+    aot.generate(path)                      # (accepted without strict_int: `a + 1` is a TAGGED operation, aot/rep.py)
 
 
 # --- print arguments, f-strings ------------------------------------------------------------------------
@@ -515,14 +518,16 @@ def test_abs_of_an_int_follows_the_strict_rule(tmp_path):
             print(f())
         """, "ok.py"))
     assert "tpa_pneg_i64" in ok
-    with pytest.raises(aot.AotError) as raised:
-        aot.generate(write(tmp_path, """
-            def f(a: int) -> int:
-                return abs(a)
+    bad = write(tmp_path, """
+        def f(a: int) -> int:
+            return abs(a)
 
-            if __name__ == "__main__":
-                print(f(1))
-            """, "bad.py"))
+        if __name__ == "__main__":
+            print(f(1))
+        """, "bad.py")
+    assert "tpa_int_neg(" in aot.generate(bad)          # accepted without strict_int: -(-2**63) is a TAGGED result
+    with pytest.raises(aot.AotError) as raised:
+        aot.generate(bad, strict_int=True)
     [finding] = raised.value.findings
     assert (finding.rule, finding.line) == ("aot/int-unproven", 2) and "`abs(a)`" in finding.message
 
@@ -708,3 +713,211 @@ def test_an_fstring_field_is_checked():
     assert "verify/type" in rules_of(printing(ir.Const(Type.F64, 1.0)))                # not a part
     # an FString is a Print argument only
     assert "verify/unknown-node" in rules_of(hand([ir.ExprStmt(ir.FString(Type.OBJ, ()))]))
+
+
+# --- which ints are RAW and which TAGGED (aot/rep.py, #462) ------------------------------------------------------
+#
+# The inference at the level of the IR: a name, a parameter, a return and a tuple element is RAW (int64) or TAGGED (a
+# value that may be any integer). The rule is in the module docstring of aot/rep.py. Design decision D1 (a) and the
+# representation: leader, 2026-11-16, not owner-confirmed; the rule itself is an agent proposal.
+
+def reps_of(tmp_path, source, strict=False):
+    m = aot_ir(tmp_path, source)
+    proved, diagnostics = verify.verify(m, aot=True)
+    assert [f.name for f in proved.functions] == [f.name for f in m.functions], (diagnostics, m.skipped)
+    return proved, rep.infer(proved, strict=strict)
+
+
+def ops(proved, name, kind):
+    return [n for n in walk(function(proved, name).body) if isinstance(n, ir.BinOp) and n.op is kind]
+
+
+def test_loop_counters_and_proved_results_are_raw(tmp_path):
+    proved, r = reps_of(tmp_path, """
+        def f() -> int:
+            t = 0
+            for i in range(10):
+                t = i * 2 + 1
+            return t
+        """)
+    assert [r.name("f", n) for n in ("i", "t")] == [rep.RAW, rep.RAW] and r.returns("f") == rep.RAW
+    assert all(o.proven for o in ops(proved, "f", ir.BinOpKind.MUL) + ops(proved, "f", ir.BinOpKind.ADD))
+
+
+def test_an_element_read_and_a_length_are_raw_and_so_is_what_is_proved_from_them(tmp_path):
+    _, r = reps_of(tmp_path, """
+        def f(a: list[int]) -> int:
+            t = 0
+            for i in range(len(a)):
+                t = a[i] // 2 + i
+            return t
+        """)
+    assert [r.name("f", n) for n in ("i", "t")] == [rep.RAW, rep.RAW] and r.returns("f") == rep.RAW
+
+
+def test_an_accumulator_that_is_not_proved_is_tagged_and_so_is_its_return(tmp_path):
+    _, r = reps_of(tmp_path, """
+        def f(n: int) -> int:
+            s = 0
+            for i in range(n):
+                s += i
+            return s
+        """)
+    assert r.name("f", "n") == rep.RAW and r.name("f", "i") == rep.RAW          # nobody passes a TAGGED n
+    assert r.name("f", "s") == rep.TAGGED and r.returns("f") == rep.TAGGED
+
+
+def test_an_int_read_from_the_arguments_is_tagged_and_so_is_a_loop_over_it(tmp_path):
+    _, r = reps_of(tmp_path, """
+        import sys
+
+        def f() -> int:
+            n = int(sys.argv[1])
+            t = 0
+            for i in range(n):
+                t = i
+            return t
+        """)
+    assert [r.name("f", x) for x in ("n", "i", "t")] == [rep.TAGGED] * 3 and r.returns("f") == rep.TAGGED
+
+
+def test_a_proved_operation_with_a_tagged_operand_is_tagged(tmp_path):
+    """The verifier proves `x + 1` (x is narrowed to 0..99 by the guard), but x is a big-integer-capable value: a
+    proved flag assumes its operands fit 64 bits, so the result is TAGGED."""
+    proved, r = reps_of(tmp_path, """
+        def f(n: int) -> int:
+            x = n * n
+            y = 0
+            if 0 <= x < 100:
+                y = x + 1
+            return y
+        """)
+    [add] = ops(proved, "f", ir.BinOpKind.ADD)
+    assert add.proven, "the premise: the flag is set"
+    assert r.name("f", "x") == rep.TAGGED and r.name("f", "y") == rep.TAGGED and r.returns("f") == rep.TAGGED
+
+
+def test_a_proof_read_from_a_guard_on_a_tagged_value_is_not_trusted(tmp_path):
+    """`lo + 1` is proved from `lo < hi` and `hi <= INT64_MAX`; hi = lo * lo is TAGGED, so that is not true of its
+    value: the guard taints `lo` (and `hi`), and nothing read through them is RAW by a proved flag."""
+    proved, r = reps_of(tmp_path, """
+        def step(w: list[int]) -> int:
+            lo = w[0]
+            hi = lo * lo
+            if lo < hi:
+                lo = lo + 1
+            return lo
+        """)
+    [add] = ops(proved, "step", ir.BinOpKind.ADD)
+    assert add.proven, "the premise: the verifier proves it"
+    assert r.tainted("step") == {"lo", "hi"}
+    assert r.name("step", "lo") == rep.TAGGED and r.returns("step") == rep.TAGGED
+
+
+def test_a_guard_on_a_raw_value_taints_nothing(tmp_path):
+    _, r = reps_of(tmp_path, """
+        def f(w: list[int]) -> int:
+            lo = w[0]
+            hi = w[1]
+            if lo < hi and lo > 0:
+                lo = lo - 1
+            return lo
+        """)
+    assert r.tainted("f") == set() and r.name("f", "lo") == rep.RAW
+
+
+def test_a_parameter_is_tagged_when_one_call_site_passes_a_tagged_value(tmp_path):
+    _, r = reps_of(tmp_path, """
+        def g(a: int) -> int:
+            return a
+
+        def h(b: int) -> int:
+            return b
+
+        def f(n: int) -> int:
+            x = g(1)
+            y = g(n * n)
+            z = h(2)
+            return z
+        """)
+    assert r.name("g", "a") == rep.TAGGED and r.returns("g") == rep.TAGGED
+    assert r.name("h", "b") == rep.RAW and r.returns("h") == rep.RAW
+    assert r.name("f", "x") == rep.TAGGED and r.name("f", "y") == rep.TAGGED and r.name("f", "z") == rep.RAW
+    assert r.returns("f") == rep.RAW
+
+
+def test_a_tuple_has_a_representation_per_element(tmp_path):
+    _, r = reps_of(tmp_path, """
+        def pair(a: int) -> tuple[int, int]:
+            return a * a, 3
+
+        def user() -> int:
+            x, y = pair(2)
+            return y
+        """)
+    assert r.reps["pair"].tuple_elements == [rep.TAGGED, rep.RAW]
+    assert r.name("user", "x") == rep.TAGGED and r.name("user", "y") == rep.RAW and r.returns("user") == rep.RAW
+
+
+def test_abs_of_an_int_is_tagged_where_the_negation_is_not_proved(tmp_path):
+    _, r = reps_of(tmp_path, """
+        def f(a: int) -> int:
+            return abs(a)
+
+        def g() -> int:
+            v = 5
+            return abs(v)
+        """)
+    assert r.returns("f") == rep.TAGGED and r.returns("g") == rep.RAW
+
+
+def test_a_remainder_and_a_division_by_a_constant_of_raw_values_stay_raw(tmp_path):
+    _, r = reps_of(tmp_path, """
+        def f(a: int, b: int) -> int:
+            return a % b
+
+        def g(a: int) -> int:
+            return a // 3
+
+        def h(a: int, b: int) -> int:
+            return a // b
+        """)
+    assert r.returns("f") == rep.RAW and r.returns("g") == rep.RAW and r.returns("h") == rep.TAGGED
+
+
+def test_strict_mode_has_nothing_tagged(tmp_path):
+    _, r = reps_of(tmp_path, """
+        def f(n: int) -> int:
+            s = 0
+            for i in range(n):
+                s += i
+            return s
+        """, strict=True)
+    assert r.name("f", "s") == rep.RAW and r.returns("f") == rep.RAW
+
+
+def test_the_text_of_a_program_names_the_big_integer_runtime_only_where_a_value_is_tagged(tmp_path):
+    proved = write(tmp_path, """
+        def f(a: list[float], n: int) -> float:
+            s = 0.0
+            for i in range(n):
+                s += a[i]
+            return s
+
+        if __name__ == "__main__":
+            v = [1.0, 2.0]
+            print(f(v, 2))
+        """, "proved.py")
+    assert "tp_aot_int" not in aot.generate(proved)
+    tagged = write(tmp_path, """
+        def f(n: int) -> int:
+            s = 0
+            for i in range(n):
+                s += i
+            return s
+
+        if __name__ == "__main__":
+            print(f(5))
+        """, "tagged.py")
+    c = aot.generate(tagged)
+    assert '#include "tp_aot_int.h"' in c and "tpa_int_add(" in c and "tpa_int_release(v_s)" in c

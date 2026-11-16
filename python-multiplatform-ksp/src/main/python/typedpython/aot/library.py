@@ -15,6 +15,15 @@ nothing reachable calls is not compiled and not emitted, and a finding in it (a 
 unproved int operation, a construct outside the subset) does not fail the library. A finding in anything
 reachable does, exactly as in `aot-build`.
 
+Ints inside the library (#462; design decision D1 (a), leader 2026-11-16, not owner-confirmed; the boundary rule below is
+an agent proposal, not owner-confirmed). An `int` parameter arrives as an int64 and is converted where the compiled
+function holds it as a big-integer-capable value (`aot/rep.py`); inside, the source language's integer rules hold
+exactly. An `int` RESULT (also an element of a tuple) that the function holds that way is converted back with a fit
+check: when it does not fit int64 the call fails with -1 and the error record `OverflowError` with the fixed message
+"the int result of `<function>` does not fit in 64 bits". That check belongs to this ABI and has no counterpart in the
+source language (like the null-handle TypeError); the generated header says so. `abi_version` stays 1: no signature
+changes. A library whose ints are all proved inside 64 bits is byte-identical to what the previous step generated.
+
 The exported ABI (every name is `<prefix>_...`; C linkage; default visibility, everything else hidden):
 
   int <p>_<f>(<params>, <out pointers>)        one per export; 0 on success, -1 on failure
@@ -299,7 +308,8 @@ def static_data_findings(c_text: str, rel: str) -> list[Finding]:
 # --- the C text, the header, the description --------------------------------------------------------
 
 class _Export:
-    def __init__(self, name: str, node: ast.FunctionDef, fn: ir.Function, kinds: tuple[Type, ...] | None) -> None:
+    def __init__(self, name: str, node: ast.FunctionDef, fn: ir.Function, kinds: tuple[Type, ...] | None,
+                 reps=None) -> None:
         self.name = name
         self.node = node
         self.fn = fn
@@ -310,6 +320,20 @@ class _Export:
             self.returns = [_TYPE_NAME[k] for k in kinds]
         else:
             self.returns = []
+        # which int parameters the compiled function holds as TAGGED values, and which int results it hands back so
+        self.tagged_params: set[str] = set()
+        self.tagged_results: set[int] = set()
+        if reps is not None:
+            self.tagged_params = {p.name for p in fn.params
+                                  if isinstance(p, ir.Param) and p.type is Type.I64 and reps.name(name, p.name) == "tagged"}
+            if fn.returns is Type.I64 and reps.returns(name) == "tagged":
+                self.tagged_results = {0}
+            elif kinds is not None:
+                self.tagged_results = {i for i, k in enumerate(kinds) if k is Type.I64 and reps.element(name, i) == "tagged"}
+
+    @property
+    def tagged_io(self) -> bool:
+        return bool(self.tagged_params or self.tagged_results)
 
     def c_params(self, p: str) -> list[str]:
         """The C parameter list: the arguments, then the out pointers."""
@@ -329,8 +353,81 @@ class _Export:
         returns = ast.unparse(self.node.returns) if self.node.returns is not None else "None"
         return f"{self.name}({ast.unparse(self.node.args)}) -> {returns}"
 
+    def wrapper_tagged(self, p: str) -> list[str]:
+        """The exported function of a function whose int parameters or results the compiled code holds as TAGGED
+        values: the same shape as `wrapper`, with the conversions of the boundary (an int parameter arrives as int64;
+        an int result goes back through a fit check, and one that does not fit fails the call with an OverflowError)
+        and one exit that releases what the conversions made."""
+        callee = f"tpf_{mangle(self.name)}"
+        lines = [f"TPA_EXPORT int {p}_{mangle(self.name)}({', '.join(self.c_params(p)) or 'void'})", "{",
+                 "    int rc;"]
+        for name, t in self.params:
+            if name in self.tagged_params:
+                lines.append(f"    tpa_int a_{mangle(name)} TPA_UNUSED = TPA_INT_ZERO;")
+        for i, t in enumerate(self.returns):
+            if t in _LIST_ELEMENT:
+                lines.append(f"    tpa_{_LIST_ELEMENT[t]}_list *r{i} = NULL;")
+            elif i in self.tagged_results:
+                lines.append(f"    tpa_int r{i} = TPA_INT_ZERO;")
+                lines.append(f"    int64_t v{i} = 0;")
+            elif t == "bool":
+                lines.append(f"    int r{i} = 0;")
+            else:
+                lines.append(f"    {_C_TYPE[t]} r{i} = 0;")
+        outs = self.out_names()
+        list_outs = [o for o, t in zip(outs, self.returns) if t in _LIST_ELEMENT]
+
+        def failure(indent: str) -> list[str]:
+            return [f"{indent}*{o} = NULL;" for o in list_outs]
+        for name, t in self.params:
+            if t in _LIST_ELEMENT:
+                lines.append(f"    if (p_{mangle(name)} == NULL) {{")
+                lines += failure("        ")
+                lines.append(f"        return tpa_lib_null_handle(\"{_c_escape(name)}\");")
+                lines.append("    }")
+        call_args: list[str] = []
+        for name, t in self.params:
+            if name in self.tagged_params:
+                lines.append(f"    if (tpa_int_from_i64(p_{mangle(name)}, &a_{mangle(name)}) != 0) {{")
+                lines.append("        rc = -1;")
+                lines += failure("        ")
+                lines.append("        goto tp_done;")
+                lines.append("    }")
+                call_args.append(f"a_{mangle(name)}")
+            else:
+                call_args.append(f"(p_{mangle(name)} != 0)" if t == "bool" else f"p_{mangle(name)}")
+        lines.append(f"    rc = {callee}({', '.join(call_args + [f'&r{i}' for i in range(len(self.returns))])});")
+        lines.append("    if (rc != 0) {")
+        lines += failure("        ")
+        lines.append("        rc = -1;")
+        lines.append("        goto tp_done;")
+        lines.append("    }")
+        for i in sorted(self.tagged_results):
+            lines.append(f"    if (tpa_int_to_i64(r{i}, &v{i}) != 0) {{")
+            lines.append(f"        rc = tpa_raise(TPA_OverflowError, \"{_overflow_message(self.name)}\");")
+            lines += failure("        ")
+            lines.append("        goto tp_done;")
+            lines.append("    }")
+        for i, (o, t) in enumerate(zip(outs, self.returns)):
+            if i in self.tagged_results:
+                lines.append(f"    *{o} = v{i};")
+            elif t == "bool":
+                lines.append(f"    *{o} = (uint8_t)(r{i} != 0);")
+            else:
+                lines.append(f"    *{o} = r{i};")
+        lines += ["    tpa_lib_clear_error();", "    rc = 0;", "tp_done:"]
+        for name, t in self.params:
+            if name in self.tagged_params:
+                lines.append(f"    tpa_int_release(a_{mangle(name)});")
+        for i in sorted(self.tagged_results):
+            lines.append(f"    tpa_int_release(r{i});")
+        lines += ["    return rc;", "}"]
+        return lines
+
     def wrapper(self, p: str) -> list[str]:
         """The exported function: the null-handle checks, the call of the compiled function, the out values."""
+        if self.tagged_io:
+            return self.wrapper_tagged(p)
         callee = f"tpf_{mangle(self.name)}"
         lines = [f"TPA_EXPORT int {p}_{mangle(self.name)}({', '.join(self.c_params(p)) or 'void'})", "{",
                  "    int rc;"]
@@ -377,6 +474,11 @@ def _c_escape(text: str) -> str:
                    for c in text)
 
 
+def _overflow_message(name: str) -> str:
+    """The fixed message of an int result that does not fit int64 (an ABI-level rule, see the module docstring)."""
+    return f"the int result of `{_c_escape(name)}` does not fit in 64 bits"
+
+
 def _list_functions(p: str) -> list[str]:
     out: list[str] = []
     for t, ct, zero in (("f64", "double", "0.0"), ("i64", "int64_t", "INT64_C(0)")):
@@ -420,7 +522,7 @@ def _c_text(g, bodies: list[list[str]], exports: list[_Export], p: str) -> str:
         "#define TPA_LIBRARY 1",
         "#endif",
         '#include "tp_aot.h"',
-        "",
+        "@INT@",
         f"typedef tpa_f64_list {p}_f64_list;",
         f"typedef tpa_i64_list {p}_i64_list;",
         "",
@@ -446,7 +548,13 @@ def _c_text(g, bodies: list[list[str]], exports: list[_Export], p: str) -> str:
         "}",
         "",
     ]
-    return "\n".join(out)
+    text = "\n".join(out)
+    # the big-integer runtime is included only where the generated text uses it (a library whose ints are all proved
+    # inside 64 bits is byte-identical to what the previous step generated); the include line replaces `@INT@`
+    # (and an empty line stands where the old text had one)
+    if emit_mod.needs_int_runtime(text.replace("@INT@", "")):
+        return text.replace("@INT@", '#include "tp_aot_int.h"\n')
+    return text.replace("@INT@", "")
 
 
 _HEADER_TOP = """\
@@ -502,10 +610,30 @@ _HEADER_TOP = """\
 """
 
 
-def _header_text(p: str, module: str, exports: list[_Export]) -> str:
+_HEADER_INT_OLD = ("(an operation the compiler could not prove stays inside\n"
+                   " *   64 bits is not compiled, so there is no wrap-around)")
+_HEADER_INT_NEW = ("(an int the compiler could not prove stays inside\n"
+                   " *   64 bits is held as an integer of any size, so there is no wrap-around)")
+_HEADER_ERR_OLD = "TypeError whose message names the argument.\n *\n * Lists"
+_HEADER_ERR_NEW = ("TypeError whose message names the argument.\n"
+                   " *   A second check of this kind concerns an int RESULT (also an element of a tuple): the source language's\n"
+                   " *   int has no limit, this ABI's is int64_t. A function whose int result does not fit int64_t fails with -1\n"
+                   " *   and an OverflowError whose message says that the int result of that function does not fit in 64 bits (no\n"
+                   " *   out value is written then); the same call with smaller inputs succeeds. That check, too, belongs to this\n"
+                   " *   ABI and has no counterpart in the source language.\n *\n * Lists")
+
+
+def _header_text(p: str, module: str, exports: list[_Export], tagged: bool = False) -> str:
     up = p.upper()
     guard = f"TP_AOT_LIB_{up}_H"
-    out = [_HEADER_TOP.format(name=p, module=module).rstrip("\n"), f"#ifndef {guard}", f"#define {guard}", "",
+    top = _HEADER_TOP.format(name=p, module=module)
+    if tagged:
+        assert _HEADER_INT_OLD in top
+        top = top.replace(_HEADER_INT_OLD, _HEADER_INT_NEW)
+        if any(e.tagged_results for e in exports):
+            assert _HEADER_ERR_OLD in top
+            top = top.replace(_HEADER_ERR_OLD, _HEADER_ERR_NEW)
+    out = [top.rstrip("\n"), f"#ifndef {guard}", f"#define {guard}", "",
            "#include <stdint.h>", "", "#ifdef __cplusplus", 'extern "C" {', "#endif", "",
            "/* Define " + f"{up}_BUILD" + " only when building the library itself on Windows. */",
            "#if defined(_WIN32) || defined(__CYGWIN__)",
@@ -556,7 +684,9 @@ def _description(p: str, exports: list[_Export]) -> dict:
 class _Plan:
     """What `aot._lower` needs of a library: the functions to compile, and the emitter."""
 
-    def __init__(self, program, prefix: str, nodes: dict[str, ast.FunctionDef], keep: set[str]) -> None:
+    def __init__(self, program, prefix: str, nodes: dict[str, ast.FunctionDef], keep: set[str],
+                 strict_int: bool = False) -> None:
+        self.strict_int = strict_int
         self.program = program
         self.prefix = prefix
         self.nodes = nodes                  # export name -> its def, in the order given
@@ -572,7 +702,7 @@ class _Plan:
             if f.name in names:
                 stmts = resume.statements(bodies[f.name]) if f.name in bodies else None     # type: ignore[arg-type]
                 found += state_findings(f, rel, stmts)
-        g, fn_bodies, more = emit_mod.emit_functions(proved, program, names)
+        g, fn_bodies, more = emit_mod.emit_functions(proved, program, names, strict_int=self.strict_int)
         found += more
         exports: list[_Export] = []
         for name, node in self.nodes.items():
@@ -588,19 +718,22 @@ class _Plan:
                                       f"`{name}` cannot be exported: its lowered signature is outside the library "
                                       "boundary", name))
                 continue
-            exports.append(_Export(name, node, fn, kinds))
+            exports.append(_Export(name, node, fn, kinds, g.reps))
         if found:
             return None, found
         c_text = _c_text(g, fn_bodies, exports, self.prefix)
         found = static_data_findings(c_text, rel)
         if found:
             return None, found
-        self.result = (c_text, _header_text(self.prefix, rel, exports), _description(self.prefix, exports))
+        self.result = (c_text, _header_text(self.prefix, rel, exports, emit_mod.needs_int_runtime(c_text)),
+                       _description(self.prefix, exports))
         return c_text, []
 
 
-def generate_library(module: Path, *, exports: list[str], prefix: str) -> tuple[str, str, dict]:
-    """See the module docstring. Raises `AotError` with every finding."""
+def generate_library(module: Path, *, exports: list[str], prefix: str,
+                     strict_int: bool = False) -> tuple[str, str, dict]:
+    """See the module docstring. Raises `AotError` with every finding. `strict_int`: an int operation that is not
+    proved inside 64 bits is the finding `aot/int-unproven`, as before #462."""
     module = Path(module)
     exports = list(exports)
     program = analyze(module, library=True)
@@ -612,20 +745,20 @@ def generate_library(module: Path, *, exports: list[str], prefix: str) -> tuple[
     findings += [f for f in program.findings if not any(a <= f.line <= b for a, b in spans)]
     if findings:
         raise AotError(findings)
-    plan = _Plan(program, prefix, nodes, keep)
-    c_text, found = _lower(program, plan)
+    plan = _Plan(program, prefix, nodes, keep, strict_int)
+    c_text, found = _lower(program, plan, strict_int)
     if found or c_text is None or plan.result is None:
         raise AotError(found)
     return plan.result
 
 
 def build_library(module: Path, out_dir: Path, *, exports: list[str], prefix: str,
-                  emit_c: Path | None = None) -> LibraryFiles:
+                  emit_c: Path | None = None, strict_int: bool = False) -> LibraryFiles:
     """See the module docstring. Writes `lib<prefix>.so` (platform name, `library_file_name`), `<prefix>.h` and
     `<prefix>.json` into `out_dir` and returns their paths; `emit_c` keeps the generated C there too."""
     from typedpython.aot import cc
 
-    c_text, header, description = generate_library(module, exports=exports, prefix=prefix)
+    c_text, header, description = generate_library(module, exports=exports, prefix=prefix, strict_int=strict_int)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     if emit_c is not None:

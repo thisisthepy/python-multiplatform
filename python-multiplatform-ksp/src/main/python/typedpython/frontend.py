@@ -100,7 +100,8 @@ differences, and only these (with the flag off nothing below applies):
   test); `abs(x)` is `fabs` (a float) or `x if x >= 0 else -x` (an int, whose `-x` carries the proof
   flag like any negation); `min(a, b)` / `max(a, b)` are `b if b < a else a` / `b if b > a else a`, which is
   what CPython returns (a tie and a NaN keep the first argument);
-- `int(sys.argv[i])` is `ArgvInt` (the back end refuses it: `aot/int-unproven`) and `len(sys.argv)` is `ArgvLen`
+- `int(sys.argv[i])` is `ArgvInt` (the back end holds its value as a big-integer-capable int, `aot/rep.py`; under
+  `--strict-int` it refuses it: `aot/int-unproven`) and `len(sys.argv)` is `ArgvLen`
   (`import sys` bound once; every other use of `sys` is skipped);
 - no continuation (`resume`) is written: nothing is redone in an interpreter.
 """

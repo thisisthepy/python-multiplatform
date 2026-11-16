@@ -299,7 +299,8 @@ nothing else (with the flag off every rule above is exactly as it was):
   * `verify/deopt-impure` is not raised. That rule keeps a deopting node out of an impure function
     because the redo in the interpreter would repeat the function's effects. With no interpreter
     there is no redo: an int operation not proved to stay inside 64 bits, or an operation the back
-    end cannot compute exactly, is the back end's own finding (`aot/int-unproven`, `aot/call`, ...);
+    end cannot compute exactly, is the back end's own business (since #462 an unproved int is a big-integer-capable
+    value; under `--strict-int` it is the finding `aot/int-unproven`; `aot/call`, ...);
   * the AOT-only nodes are defined (`ir.py` "AOT-only nodes"): `ReturnTuple`, `Unpack`, `ListDisplay`, `Cond`
     (checked under the guard facts of its test, as the branches of an `If`), `ArgvInt`, `ArgvLen`, and the
     `FString` argument of a `Print`;

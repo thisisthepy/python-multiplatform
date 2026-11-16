@@ -9,10 +9,14 @@ one) and CPython 3.14 or later (the messages of 3.14 and 3.15). The rejection ta
 text checks need no compiler (they need Pyrefly, like test_aot_check.py).
 
 Executables built here (each one runs the type inferencer and the C compiler, which is what made the
-windows job slow): FIVE in all, 3 without the measurement: the merged program (through the command
-line), the exception selector program (one executable, the case chosen by `len(sys.argv)`, run once
-per case with that many dummy arguments), a variant of nbody (size fixed in the source), and the two size programs of the measurement. #451's first half
-built 12 (the exceptions were 9 programs); before it, 22.
+windows job slow): FIVE in all, plus two for the measurement. The merged program (through the command
+line), the merged big-integer program (#462), the exception selector program (one executable, the case chosen by
+`len(sys.argv)`, run once per case with that many dummy arguments), spectral_norm.py as it is and nbody.py as it
+is (each run with several arguments, invalid ones included; the variant of nbody with its size fixed in the source,
+which was built before #462, is now only generated and read as text), and the two size programs of the measurement
+(`test_executable_sizes`). #462 added three (the big-integer program, spectral and the original nbody) and removed
+one (the nbody variant's build). #451's first half built 12 (the exceptions were 9 programs); before it, 22.
+One more program is built by test_aot_repr.py (the harness of the repr table).
 
 Under the CI sanitizer job (TP_SANITIZE=1) every executable is built with ASan and UBSan
 (`aot/cc.py`), and `exe_env` runs it with the leak checker on.
@@ -784,6 +788,352 @@ def test_float_repr_corpus_is_large_enough(merged):
     assert len(merged.theirs_cases["float_repr_corpus"].splitlines()) > 300
 
 
+# --- big integers through compiled code: one program, one build (#462) ----------------------------------------
+#
+# The same arrangement as CASES, for ints that are not proved inside 64 bits (design decision D1 (a), leader
+# 2026-11-16, not owner-confirmed): growth past 64 and 128 bits and back into the small range, floor division and
+# modulo with every sign, comparisons with each other and with floats (exact), true division, `float()`, mixed
+# arithmetic, `abs` / `min` / `max`, truthiness, range loops (a bound read from the arguments, a loop that leaves
+# early from a range of 10**30 values), printing at the digit-limit boundary, a proof that is not enough (a taint
+# case, aot/rep.py), and the programs of the old rejection table that are accepted now. The executable runs with
+# the argument 7 and the same file runs under CPython; the outputs must be equal case by case.
+
+BIGINT_PRELUDE = """
+def pw(b: int, e: int) -> int:
+    r = 1
+    for _ in range(e):
+        r = r * b
+    return r
+"""
+
+BIGINT_CASES = {
+    "growth": """
+        def fact(n: int) -> int:
+            r = 1
+            for i in range(1, n + 1):
+                r *= i
+            return r
+
+        def case_growth() -> None:
+            print(fact(20), fact(21), fact(25), fact(34), fact(35), fact(60))
+            print(pw(2, 62), pw(2, 63), pw(2, 64), pw(2, 65), pw(2, 127), pw(2, 128))
+            print(pw(-2, 63), pw(-2, 64), pw(-3, 41), pw(7, 77))
+            p = pw(2, 62)
+            print(p - 1, p, p + 1, -p, -p - 1, -p + 1, p + p, p - p - p)
+            print(fact(30) - fact(30) + 5, fact(25) - fact(25) // 7 * 7, pw(10, 30) - pw(10, 30) + 1)
+            big = pw(3, 80)
+            small = big - big + 12
+            print(small, small * small, big // big)
+        """,
+    "division": """
+        def show(a: int, b: int) -> None:
+            print(a // b, a % b)
+
+        def case_division() -> None:
+            big = pw(10, 30)
+            huge = pw(7, 60)
+            for sa in range(2):
+                for sb in range(2):
+                    a = big if sa == 0 else -big
+                    b = huge if sb == 0 else -huge
+                    show(a, b)
+                    show(b, a)
+                    show(a, 7 if sb == 0 else -7)
+                    show(7 if sa == 0 else -7, b)
+                    show(a * huge, b)
+                    show(a, 3 if sb == 0 else -3)
+            show(pw(2, 62), pw(2, 62))
+            show(-pw(2, 62), -1)
+            show(-pw(2, 62), 1)
+            show(pw(2, 63), -pw(2, 62))
+            show(-pw(2, 63) - 1, 2)
+            show(0, big)
+            show(big * big + 1, big)
+            show(big * big - 1, -big)
+        """,
+    "float_mixing": """
+        def cmps(a: int, x: float) -> None:
+            print(a < x, a <= x, a == x, a != x, a > x, a >= x, x < a, x == a)
+
+        def case_float_mixing() -> None:
+            big = pw(2, 80)
+            inf = 1e308 * 10.0
+            nan = inf - inf
+            cmps(big, 1e24)
+            cmps(big, 1208925819614629174706176.0)
+            cmps(big, 1208925819614629174706177.0)
+            cmps(-big, -1208925819614629174706176.0)
+            cmps(big, inf)
+            cmps(big, -inf)
+            cmps(big, nan)
+            cmps(pw(2, 53) + 1, 9007199254740992.0)
+            cmps(pw(2, 62) + 5, 4611686018427387904.0)
+            cmps(pw(10, 400), 1e308)
+            cmps(-pw(10, 400), -1e308)
+            cmps(big - big, -0.0)
+            a = pw(3, 50)
+            b = pw(3, 51)
+            print(a < b, a <= b, a == b, a != b, a > b, a >= b, a == a, b != b)
+            print(float(big), float(-big), float(pw(10, 22)), float(pw(2, 53) + 1), float(pw(2, 54) + 3))
+            print(float(pw(10, 300)), float(pw(2, 1023)))
+            print(big / 3, 3 / big, big / big, big / -pw(2, 79), pw(10, 400) / pw(10, 399), -pw(10, 400) / pw(10, 100))
+            print(pw(2, 62) / 7, 1 / pw(2, 62), (pw(2, 63) + 1) / 3)
+            x = 2.5
+            print(big + x, x + big, big - x, x - big, big * x, x * big, x / big, big / x)
+            print(big + 0.5 == big, 1e300 * big, -big * 0.5)
+            print(float(pw(2, 63)) == pw(2, 63), pw(2, 63) == float(pw(2, 63)))
+        """,
+    "abs_min_max_truth": """
+        def digits(n: int) -> int:
+            n = abs(n)
+            d = 0
+            while n:
+                n = n // 10
+                d += 1
+            return d
+
+        def flags(n: int) -> None:
+            if n:
+                print("true")
+            else:
+                print("false")
+            print(not n, n != 0)
+
+        def case_abs_min_max_truth() -> None:
+            big = pw(10, 25)
+            nb = -big
+            z = big - big
+            q = pw(2, 62)
+            nq = -q
+            r = pw(2, 63)
+            nr = -r
+            print(abs(big), abs(nb), abs(z), abs(nq), abs(nr), abs(r))
+            big1 = big + 1
+            five = 5
+            nfive = -5
+            print(min(big, nb), max(big, nb), min(big, big1), max(big, big1), min(big, five), max(nb, nfive))
+            a70 = pw(2, 70)
+            a71 = pw(2, 71)
+            print(min(a70, a71), max(a70, a71), min(five, 7), max(five, 7))
+            p3 = -pw(3, 70)
+            print(digits(big), digits(a71), digits(p3), digits(0), digits(7))
+            flags(big)
+            flags(z)
+            flags(nb)
+            flags(0)
+            flags(q - q + 1)
+        """,
+    "ranges": """
+        import sys
+
+        def first(n: int, how_many: int) -> int:
+            t = 0
+            c = 0
+            for i in range(n):
+                t = t + i
+                c += 1
+                if c == how_many:
+                    break
+            return t
+
+        def case_ranges() -> None:
+            n = int(sys.argv[1])
+            total = 0
+            for i in range(n):
+                total += i * i
+            print(n, total)
+            for i in range(n - 3, n + 3):
+                print(i)
+            print(first(pw(10, 30), 5), first(pw(10, 30), 1))
+            for i in range(pw(10, 30), pw(10, 30) + 3):
+                print(i)
+            for i in range(-pw(10, 25), -pw(10, 25) - 3, -1):
+                print(i)
+            for i in range(pw(2, 62) - 2, pw(2, 62) + 2):
+                print(i)
+            for i in range(pw(2, 63) - 2, 9223372036854775807):
+                print(i)
+            for i in range(0, -pw(10, 30), -5):
+                print(i)
+                if i < -12:
+                    break
+            for i in range(pw(10, 30), 0):
+                print("never")
+            s = 0
+            for i in range(pw(2, 64), pw(2, 64) + 2000, 7):
+                s += i
+                continue
+            print(s)
+        """,
+    "print_digits": """
+        def case_print_digits() -> None:
+            a = pw(10, 4299)
+            print(a)
+            print(-a)
+            big = pw(2, 100)
+            print(f"{big} and {big * big} then {-big}", big)
+            print(f"{a - a + 7}|{big - big}|", a - a)
+            print(f"{pw(10, 18)} {pw(10, 19)} {pw(2, 62) - 1} {pw(2, 62)} {-pw(2, 62)} {-pw(2, 62) - 1}")
+        """,
+    "tuples_and_lists": """
+        def both(a: int) -> tuple[int, int]:
+            return a * a, a
+
+        def total(w: list[int]) -> int:
+            t = 0
+            for i in range(len(w)):
+                t += w[i]
+            return t
+
+        def pick(v: list[float], k: int) -> float:
+            return v[k]
+
+        def put(v: list[float], k: int, x: float) -> None:
+            v[k] = x
+
+        def case_tuples_and_lists() -> None:
+            big = pw(10, 20)
+            x, y = both(big)
+            print(x, y, x - x * 0 + y)
+            w = [9223372036854775807, 9223372036854775807, -9223372036854775807]
+            print(total(w), total(w) * 2, total(w) - w[0] - w[1] - w[2])
+            v = [1.5, 2.5, 3.5]
+            k = big - big + 2
+            print(pick(v, k), pick(v, -k), pick(v, k - 2), pick(v, big - big - 3))
+            put(v, k, 9.5)
+            put(v, -big + big - 3, 0.5)
+            print(v[0], v[1], v[2])
+            w2 = [0] * (big - big + 3)
+            w3 = list(range(big - big + 4))
+            w4 = [1.5] * (-big + big - 2)
+            print(len(w2), len(w3), len(w4), w3[big - big + 3])
+        """,
+    "proof_with_a_big_operand": """
+        def step(w: list[int]) -> int:
+            lo = w[0]
+            hi = lo * lo
+            if lo < hi:
+                lo = lo + 1
+            return lo
+
+        def up_to(w: list[int]) -> int:
+            lo = w[0]
+            hi = w[1] * w[1]
+            n = 0
+            while lo < hi and n < 3:
+                lo += 1
+                n += 1
+            return lo
+
+        def case_proof_with_a_big_operand() -> None:
+            w = [9223372036854775807]
+            print(step(w))
+            w2 = [9223372036854775806, 9223372036854775807]
+            print(up_to(w2))
+        """,
+    "unproved_rows": """
+        def counter(n: int) -> int:
+            s = 0
+            i = 0
+            while i < n:
+                s = s + i
+                i = i + 1
+            return s
+
+        def summed(n: int) -> int:
+            s = 0
+            for i in range(n):
+                s += i
+            return s
+
+        def neg(a: int) -> int:
+            return -a
+
+        def fdiv(a: int, b: int) -> int:
+            return a // b
+
+        def tdiv(a: int, b: int) -> float:
+            return a / b
+
+        def elem(a: list[int]) -> int:
+            return a[0] + 1
+
+        def absolute(a: int) -> int:
+            return abs(a)
+
+        def case_unproved_rows() -> None:
+            print(counter(10), summed(100), neg(5), neg(-9223372036854775807 - 1), fdiv(7, 2), fdiv(-9223372036854775807 - 1, -1))
+            print(tdiv(1, 3), tdiv(9007199254740993, 3), tdiv(-9223372036854775807 - 1, 7), tdiv(5, -9223372036854775807))
+            w = [9223372036854775807, 1]
+            print(elem(w), absolute(-9223372036854775807 - 1), absolute(-5), absolute(9223372036854775807))
+        """,
+}
+BIGINT_ARGS = ["7"]
+
+
+def bigint_source() -> str:
+    parts = ["import math\nimport sys\n", textwrap.dedent(BIGINT_PRELUDE).strip("\n") + "\n"]
+    parts += [textwrap.dedent(BIGINT_CASES[n]).replace("import sys\n\n", "", 1).strip("\n") + "\n" for n in BIGINT_CASES]
+    entry = ['if __name__ == "__main__":']
+    for n in BIGINT_CASES:
+        entry.append(f'    print("{MARK}{n}")')
+        entry.append(f"    case_{n}()")
+    return "\n".join(parts) + "\n" + "\n".join(entry) + "\n"
+
+
+@pytest.fixture(scope="module")
+def bigint(tmp_path_factory):
+    """The big-integer program: built once, run once with BIGINT_ARGS, the same file run under CPython."""
+    need_cc()
+    tmp = tmp_path_factory.mktemp("bigint")
+    src = write(tmp, bigint_source(), "bigint")
+    c_file = tmp / "bigint.c"
+    exe = aot.build(src, tmp / "bigint", emit_c=c_file)
+    ours, theirs = run_exe(exe, BIGINT_ARGS, timeout=120), run_py(src, BIGINT_ARGS, timeout=120)
+    return SimpleNamespace(src=src, c_file=c_file, ours=ours, theirs=theirs,
+                           ours_cases=split_cases(text(ours.stdout)), theirs_cases=split_cases(text(theirs.stdout)))
+
+
+def test_the_big_integer_program_runs_and_matches_cpython(bigint):
+    assert bigint.theirs.returncode == 0, text(bigint.theirs.stderr)
+    assert bigint.ours.returncode == 0, text(bigint.ours.stderr)
+    assert text(bigint.ours.stdout) == text(bigint.theirs.stdout)
+    assert text(bigint.ours.stderr) == ""
+
+
+@pytest.mark.parametrize("name", list(BIGINT_CASES))
+def test_big_integer_case_matches_cpython(bigint, name):
+    theirs = bigint.theirs_cases[name]
+    assert theirs.strip(), "the case must print something"
+    assert bigint.ours_cases.get(name) == theirs
+
+
+def test_the_big_integer_cases_ran_in_order_and_cover_the_boundaries(bigint):
+    assert [k for k in bigint.theirs_cases if k in BIGINT_CASES] == list(BIGINT_CASES)
+    assert [k for k in bigint.ours_cases if k in BIGINT_CASES] == list(BIGINT_CASES)
+    first = bigint.ours_cases["print_digits"].splitlines()[0]
+    assert len(first) == 4300 and set(first[1:]) == {"0"}          # 10**4299: the last power of ten that prints
+    assert "9223372036854775808" in bigint.ours_cases["growth"] and "18446744073709551616" in bigint.ours_cases["growth"]
+
+
+def test_a_program_with_a_big_integer_includes_the_big_integer_header(bigint):
+    c = bigint.c_file.read_text()
+    assert '#include "tp_aot.h"\n#include "tp_aot_int.h"\n' in c
+    assert "tpa_int_mul(" in c and "tpa_argv_int(" in c and "tpa_int_release(" in c
+
+
+def test_a_program_whose_ints_are_all_proved_has_no_big_integer_header(merged, tmp_path):
+    """The merged program of CASES has no unproved int: its C does not include tp_aot_int.h, names nothing of
+    it, and keeps the `main` it always had. So does the variant of nbody with its size fixed in the source; and
+    strict mode generates exactly the same text for both (nothing in them is TAGGED)."""
+    assert "tp_aot_int" not in merged.c_file.read_text() and "tpa_int" not in merged.c_file.read_text()
+    variant = nbody_variant(tmp_path)
+    c = aot.generate(variant)
+    assert "tp_aot_int" not in c and "tpa_int" not in c and "tpa_argv_int" not in c and "wmain" not in c
+    assert "int main(int argc, char **argv)\n{\n    int rc;\n    tpa_argc = argc;\n    tpa_argv = argv;\n" in c
+    assert aot.generate(variant, strict_int=True) == c
+
+
 # --- uncaught exceptions ---------------------------------------------------------------------------
 #
 # An uncaught exception ends the process, so each case is its own RUN, but they are all one EXECUTABLE:
@@ -933,13 +1283,172 @@ RAISING = {
             print(keep[0])
         """, ()),
 }
+# big integers (#462): every one is a different runtime path. A case that needs a particular first argument names it
+# in the second element of its tuple (its index in SELECTOR_ORDER is its argument count, so it is never the first).
+SELECTOR_PRELUDE = BIGINT_PRELUDE
+RAISING.update({
+    "argv_index_out_of_range": ("""
+        def case_argv_index_out_of_range() -> None:
+            print("before", len(sys.argv))
+            print(int(sys.argv[5]))
+            print("after")
+        """, ()),
+    "argv_negative_index_out_of_range": ("""
+        def case_argv_negative_index_out_of_range() -> None:
+            print("before", len(sys.argv))
+            print(int(sys.argv[-100]))
+            print("after")
+        """, ()),
+    "argv_index_too_large": ("""
+        def case_argv_index_too_large() -> None:
+            print("before")
+            print(int(sys.argv[pw(10, 30)]))
+            print("after")
+        """, ()),
+    "int_big_floordiv_zero": ("""
+        def case_int_big_floordiv_zero() -> None:
+            big = pw(10, 30)
+            print("before", big // 7)
+            z = big - big
+            print(big // z)
+            print("after")
+        """, ()),
+    "int_big_mod_zero": ("""
+        def case_int_big_mod_zero() -> None:
+            big = pw(10, 30)
+            print("before", big % 7)
+            z = big - big
+            print(big % z)
+            print("after")
+        """, ()),
+    "int_big_truediv_zero": ("""
+        def case_int_big_truediv_zero() -> None:
+            big = pw(10, 30)
+            print("before", big / 7)
+            z = big - big
+            print(big / z)
+            print("after")
+        """, ()),
+    "int_digit_limit_to_str": ("""
+        def case_int_digit_limit_to_str() -> None:
+            print("before", pw(10, 4299) // pw(10, 4290))
+            print(pw(10, 4300))
+            print("after")
+        """, ()),
+    "int_digit_limit_in_an_fstring": ("""
+        def case_int_digit_limit_in_an_fstring() -> None:
+            print("before")
+            print(f"{1} {pw(10, 4300)}")
+            print("after")
+        """, ()),
+    "int_digit_limit_second_argument": ("""
+        def case_int_digit_limit_second_argument() -> None:
+            print("before")
+            print(1, pw(10, 4300))
+            print("after")
+        """, ()),
+    "int_digit_limit_from_str": ("""
+        def case_int_digit_limit_from_str() -> None:
+            print("before")
+            print(int(sys.argv[1]) + 1)
+            print("after")
+        """, ("1" * 4301,)),
+    "int_float_overflow_conversion": ("""
+        def case_int_float_overflow_conversion() -> None:
+            print("before", float(pw(10, 300)))
+            print(float(pw(10, 400)))
+            print("after")
+        """, ()),
+    "int_float_overflow_mixed": ("""
+        def case_int_float_overflow_mixed() -> None:
+            print("before", 1.0 + pw(10, 300))
+            print(1.0 + pw(10, 400))
+            print("after")
+        """, ()),
+    "int_float_overflow_after_the_right_operand": ("""
+        def noisy() -> float:
+            print("the right operand ran")
+            return 1.0
+
+        def case_int_float_overflow_after_the_right_operand() -> None:
+            print("before")
+            big = pw(10, 400)
+            print(big + noisy())
+            print("after")
+        """, ()),
+    "int_float_overflow_truediv": ("""
+        def case_int_float_overflow_truediv() -> None:
+            big = pw(10, 400)
+            print("before", big / pw(10, 399), big / pw(10, 100))
+            print(big / 3)
+            print("after")
+        """, ()),
+    "int_float_overflow_dividing_by_a_big_int": ("""
+        def case_int_float_overflow_dividing_by_a_big_int() -> None:
+            big = pw(10, 400)
+            print("before", 0.0 * 5)
+            print(1.0 / big)
+            print("after")
+        """, ()),
+    "int_invalid_literal_non_ascii": ("""
+        def case_int_invalid_literal_non_ascii() -> None:
+            print("before")
+            print(int(sys.argv[1]))
+            print("after")
+        """, ("5 \u00e9 \U0001f600\u200b",)),
+    "int_invalid_literal_underscore": ("""
+        def case_int_invalid_literal_underscore() -> None:
+            print("before")
+            print(int(sys.argv[1]))
+            print("after")
+        """, ("1__0",)),
+    "list_index_too_large_read": ("""
+        def case_list_index_too_large_read() -> None:
+            a = [1.0, 2.0]
+            print("before", a[1])
+            print(a[pw(10, 30)])
+            print("after")
+        """, ()),
+    "list_index_too_large_store": ("""
+        def case_list_index_too_large_store() -> None:
+            a = [1.0, 2.0]
+            a[1] = 3.0
+            print("before", a[1])
+            a[pw(10, 30)] = 4.0
+            print("after")
+        """, ()),
+    "list_negative_index_too_large": ("""
+        def case_list_negative_index_too_large() -> None:
+            a = [1.0, 2.0]
+            print("before", a[-1])
+            k = pw(10, 30)
+            print(a[-k])
+            print("after")
+        """, ()),
+    "list_repeat_count_too_large": ("""
+        def case_list_repeat_count_too_large() -> None:
+            print("before")
+            a = [1.0] * pw(10, 30)
+            print("after", len(a))
+        """, ()),
+    "list_range_length_too_large": ("""
+        def case_list_range_length_too_large() -> None:
+            big = pw(10, 30)
+            w = list(range(big - big + 3))
+            nb = -big
+            w2 = list(range(nb))
+            print("before", len(w), len(w2))
+            a = list(range(big))
+            print("after", len(a))
+        """, ()),
+})
 SELECTOR_ORDER = sorted(RAISING)
 
 
 def selector_source() -> str:
     """One program: every case of RAISING as a function, and the entry that runs the one `len(sys.argv)`
     selects (case i when the program has i + 1 arguments, itself included)."""
-    parts = ["import math\nimport sys\n"]
+    parts = ["import math\nimport sys\n", textwrap.dedent(SELECTOR_PRELUDE).strip("\n") + "\n"]
     parts += [textwrap.dedent(RAISING[n][0]).strip("\n") + "\n" for n in SELECTOR_ORDER]
     entry = ['if __name__ == "__main__":']
     for i, n in enumerate(SELECTOR_ORDER):
@@ -959,8 +1468,13 @@ def selector(tmp_path_factory):
 
 
 def case_args(name):
-    """The dummy arguments that select the case: `len(sys.argv)` is its index plus one."""
-    return ["x"] * SELECTOR_ORDER.index(name)
+    """The dummy arguments that select the case: `len(sys.argv)` is its index plus one. A case that reads an
+    argument names the first ones (RAISING[name][1])."""
+    args = ["x"] * SELECTOR_ORDER.index(name)
+    for k, a in enumerate(RAISING[name][1]):
+        assert k < len(args), f"{name} needs {k + 1} arguments but sorts too early to get them"
+        args[k] = a
+    return args
 
 
 @pytest.mark.parametrize("name", SELECTOR_ORDER)
@@ -982,6 +1496,34 @@ def test_the_cases_name_the_exceptions_cpython_raises(selector):
         "list_store_negative_out_of_range": "IndexError: list assignment index out of range",
         "list_augmented_store_out_of_range": "IndexError: list index out of range",
         "list_oob_through_a_frame": "IndexError: list index out of range",
+        # big integers (#462): the messages are the reference's own
+        "list_index_too_large_read": "IndexError: cannot fit 'int' into an index-sized integer",
+        "list_index_too_large_store": "IndexError: cannot fit 'int' into an index-sized integer",
+        "list_negative_index_too_large": "IndexError: cannot fit 'int' into an index-sized integer",
+        "argv_index_too_large": "IndexError: cannot fit 'int' into an index-sized integer",
+        "argv_index_out_of_range": "IndexError: list index out of range",
+        "argv_negative_index_out_of_range": "IndexError: list index out of range",
+        "list_repeat_count_too_large": "OverflowError: cannot fit 'int' into an index-sized integer",
+        "list_range_length_too_large": "OverflowError: Python int too large to convert to C ssize_t",
+        "int_big_floordiv_zero": "ZeroDivisionError: division by zero",
+        "int_big_mod_zero": "ZeroDivisionError: division by zero",
+        "int_big_truediv_zero": "ZeroDivisionError: division by zero",
+        "int_digit_limit_to_str": "ValueError: Exceeds the limit (4300 digits) for integer string conversion; "
+                                  "use sys.set_int_max_str_digits() to increase the limit",
+        "int_digit_limit_in_an_fstring": "ValueError: Exceeds the limit (4300 digits) for integer string conversion; "
+                                         "use sys.set_int_max_str_digits() to increase the limit",
+        "int_digit_limit_second_argument": "ValueError: Exceeds the limit (4300 digits) for integer string "
+                                           "conversion; use sys.set_int_max_str_digits() to increase the limit",
+        "int_digit_limit_from_str": "ValueError: Exceeds the limit (4300 digits) for integer string conversion: value "
+                                    "has 4301 digits; use sys.set_int_max_str_digits() to increase the limit",
+        "int_float_overflow_conversion": "OverflowError: int too large to convert to float",
+        "int_float_overflow_mixed": "OverflowError: int too large to convert to float",
+        "int_float_overflow_after_the_right_operand": "OverflowError: int too large to convert to float",
+        "int_float_overflow_truediv": "OverflowError: integer division result too large for a float",
+        "int_float_overflow_dividing_by_a_big_int": "OverflowError: int too large to convert to float",
+        "int_invalid_literal_non_ascii": "ValueError: invalid literal for int() with base 10: "
+                                         "'5 \u00e9 \U0001f600\\u200b'",
+        "int_invalid_literal_underscore": "ValueError: invalid literal for int() with base 10: '1__0'",
     }
     for name, line in want.items():
         args = case_args(name)
@@ -991,12 +1533,15 @@ def test_the_cases_name_the_exceptions_cpython_raises(selector):
         assert last_line(run_py(selector.src, args).stderr) == line, name
 
 
-# --- nbody: a benchmark as a whole program ---------------------------------------------------------
+# --- the benchmarks as whole programs (#462) ----------------------------------------------------------------
 #
-# benchmarks/typedpython/py/nbody.py itself is refused: `n: int = int(sys.argv[1])` is `int()` of a string,
-# whose value is not proved to stay inside 64 bits (big integers arrive in a later step), and that is its
-# ONLY finding. A variant written into tmp_path with that line replaced by `n: int = 1000` (the benchmark
-# file is not touched) is built and prints exactly what CPython prints for the same variant file.
+# benchmarks/typedpython/py/spectral_norm.py and nbody.py are built AS THEY ARE (their size comes from
+# `int(sys.argv[1])`: a big-integer-capable int, aot/rep.py) and run with several arguments, invalid ones included.
+# `sys.argv[1]` is the user's input at run time, so every argument must give what CPython gives: the same output, exit
+# status and last line of standard error, with the SAME raw argument bytes handed to both. fannkuch.py is refused, and
+# only for the stores of values not proved inside 64 bits into a `list[int]` (the elements of a list are int64 in
+# this step: the next PR). A variant of nbody with `n` fixed in the source has no unproved int at all; it is generated
+# (not built) and read as text.
 
 ARGV_LINE = "    n: int = int(sys.argv[1])"
 
@@ -1009,30 +1554,132 @@ def nbody_variant(tmp_path) -> Path:
     return path
 
 
-def test_nbody_is_refused_only_for_int_of_argv():
-    source = (BENCH / "nbody.py").read_text()
-    line = source.splitlines().index(ARGV_LINE) + 1
-    with pytest.raises(aot.AotError) as raised:
-        aot.generate(BENCH / "nbody.py")
-    [f] = raised.value.findings
-    assert (f.rule, f.line) == ("aot/int-unproven", line)
-    assert "`int(sys.argv[1])` is not proved to stay inside 64 bits" in f.message and "later step" in f.message
-
-
 @pytest.fixture(scope="module")
 def nbody(tmp_path_factory):
     need_cc()
     tmp = tmp_path_factory.mktemp("nbody")
-    src = nbody_variant(tmp)
+    src = tmp / "nbody.py"
+    shutil.copy2(BENCH / "nbody.py", src)
     return SimpleNamespace(src=src, exe=aot.build(src, tmp / "nbody"))
 
 
+@pytest.fixture(scope="module")
+def spectral(tmp_path_factory):
+    need_cc()
+    tmp = tmp_path_factory.mktemp("spectral")
+    src = tmp / "spectral_norm.py"
+    shutil.copy2(BENCH / "spectral_norm.py", src)
+    return SimpleNamespace(src=src, exe=aot.build(src, tmp / "spectral"))
+
+
+def same_run(program, args):
+    """Run the executable and the file under CPython with the same arguments (str or raw bytes) and compare."""
+    ours, theirs = run_exe(program.exe, args), run_py(program.src, args)
+    assert text(ours.stdout) == text(theirs.stdout), args
+    assert ours.returncode == theirs.returncode, (args, text(ours.stderr), text(theirs.stderr))
+    if theirs.returncode != 0:
+        assert theirs.returncode == 1
+        assert last_line(ours.stderr) == last_line(theirs.stderr), args
+    else:
+        assert text(ours.stderr) == "", args
+    return ours, theirs
+
+
 def test_nbody_prints_what_cpython_prints(nbody):
-    ours, theirs = run_exe(nbody.exe), run_py(nbody.src)
+    ours, theirs = same_run(nbody, ["1000"])
     assert theirs.returncode == 0, text(theirs.stderr)
     assert re.fullmatch(r"-?\d+\.\d{9} -?\d+\.\d{9}\n", text(theirs.stdout)), text(theirs.stdout)
-    assert text(ours.stdout) == text(theirs.stdout)
-    assert ours.returncode == 0 and text(ours.stderr) == ""
+
+
+@pytest.mark.parametrize("n", ["100", "7"])
+def test_spectral_norm_prints_what_cpython_prints(spectral, n):
+    ours, theirs = same_run(spectral, [n])
+    assert theirs.returncode == 0, text(theirs.stderr)
+    assert re.fullmatch(r"\d\.\d{9}\n", text(theirs.stdout)), text(theirs.stdout)
+
+
+# What the program is given as its argument: (id, the argument; bytes are raw bytes, handed over as they are on POSIX).
+# Most are invalid ints (the message shows the reference's repr of the string); some are valid in ways that are easy to
+# get wrong (underscores, a sign, Unicode digits and spaces).
+ARGUMENTS = [
+    ("empty", ""),
+    ("spaces", "   "),
+    ("underscore_between_digits", "1_0"),
+    ("leading_underscore", "_1"),
+    ("trailing_underscore", "1_"),
+    ("double_underscore", "1__0"),
+    ("a_sign_only", "+"),
+    ("hex", "0x10"),
+    ("a_float", "1.5"),
+    ("single_quote", "a'b"),
+    ("both_quotes", "a'\"b"),
+    ("a_tab", "\t7x"),
+    ("a_backslash", "a\\b"),
+    ("non_ascii_letters", "\u00e9\u4e2d"),
+    ("non_ascii_digits_are_valid", "\u0663\u0662"),
+    ("no_break_space_around_digits_is_valid", "\u00a05\u00a0"),
+    ("a_non_printable_character", "5\u200b"),
+    ("an_emoji", "\U0001f600"),
+    ("a_sign_and_spaces_around_digits", " +6 "),
+    ("leading_zeros", "007"),
+    ("a_negative_number", "-3"),
+    ("digits_4301", "1" * 4301),
+    ("a_number_beyond_64_bits", "9" * 19),
+    ("a_long_invalid_string", "x" * 300),
+    ("an_invalid_utf8_byte", b"\xff"),
+    ("truncated_utf8", b"7\xe2\x82"),
+    ("invalid_utf8_between_digits", b"1\xc3\x28"),
+    ("a_surrogate_as_utf8", b"5\xed\xa0\x80"),
+]
+NO_ARGUMENT = ("no_argument", None)
+
+
+def argument_list(argument):
+    return [] if argument is None else [argument]
+
+
+def usable(argument):
+    if isinstance(argument, bytes) and sys.platform == "win32":
+        pytest.skip("program arguments are UTF-16 on windows: raw bytes are not an argument there")
+
+
+@pytest.mark.parametrize("argument", [a for _, a in [*ARGUMENTS, NO_ARGUMENT]],
+                         ids=[i for i, _ in [*ARGUMENTS, NO_ARGUMENT]])
+def test_spectral_norm_with_every_kind_of_argument(spectral, argument):
+    usable(argument)
+    same_run(spectral, argument_list(argument))
+
+
+# (nbody runs a thousand steps per valid argument under CPython, so its table is the invalid ones and a few valid)
+NBODY_ARGUMENTS = [a for i, a in ARGUMENTS if i not in {"non_ascii_digits_are_valid", "leading_zeros",
+                                                         "no_break_space_around_digits_is_valid",
+                                                         "a_sign_and_spaces_around_digits", "underscore_between_digits",
+                                                         "a_number_beyond_64_bits"}]
+NBODY_IDS = [i for i, a in ARGUMENTS if a in NBODY_ARGUMENTS]
+
+
+@pytest.mark.parametrize("argument", [*NBODY_ARGUMENTS, None, "2", "0", "-5", "1_0", "\u0663"],
+                         ids=[*NBODY_IDS, "no_argument", "two", "zero", "negative", "underscore", "arabic_digit"])
+def test_nbody_with_every_kind_of_argument(nbody, argument):
+    usable(argument)
+    same_run(nbody, argument_list(argument))
+
+
+def test_an_argument_that_is_not_an_int_ends_with_the_reference_message(spectral):
+    """Pin what the table compares: the line itself, for three of them, literally."""
+    for argument, line in (("1_", "ValueError: invalid literal for int() with base 10: '1_'"),
+                           ("\u00e9", "ValueError: invalid literal for int() with base 10: '\u00e9'"),
+                           ("a'b", 'ValueError: invalid literal for int() with base 10: "a\'b"')):
+        ours = run_exe(spectral.exe, [argument])
+        assert ours.returncode == 1 and ours.stdout == b""
+        assert last_line(ours.stderr) == line
+    ours = run_exe(spectral.exe, [])
+    assert ours.returncode == 1 and last_line(ours.stderr) == "IndexError: list index out of range"
+
+
+def test_nbody_generates_with_a_big_integer_argument():
+    c = aot.generate(BENCH / "nbody.py")
+    assert '#include "tp_aot_int.h"' in c and "tpa_argv_int(INT64_C(1)" in c and "wmain" in c
 
 
 def test_nbody_generates_c_with_one_cleanup_point_per_function(tmp_path):
@@ -1043,6 +1690,26 @@ def test_nbody_generates_c_with_one_cleanup_point_per_function(tmp_path):
         assert body.count("tp_cleanup:") <= 1
         assert "return -1" not in body and "return 0" not in body, "a function leaves through its cleanup point only"
     assert "tpa_f64_release(v_x)" in c and "tpf_make_x(&" in c
+
+
+def test_the_benchmarks_that_build_generate_without_a_finding():
+    for name in ("spectral_norm.py", "nbody.py"):
+        aot.generate(BENCH / name)
+
+
+def test_fannkuch_is_refused_only_for_the_stores_of_big_values_into_a_list():
+    """`count[r - 1] = r` and `count[r] -= 1` store a value that is not proved inside 64 bits into a `list[int]`; the
+    elements of a list are int64 in this step (the side table for the others, ABI version 2 and fannkuch are the
+    next PR). Nothing else in fannkuch.py is refused."""
+    lines = (BENCH / "fannkuch.py").read_text().splitlines()
+    first = lines.index("            count[r - 1] = r") + 1
+    second = lines.index("            count[r] -= 1") + 1
+    with pytest.raises(aot.AotError) as raised:
+        aot.generate(BENCH / "fannkuch.py")
+    found = sorted((f.rule, f.line, f.name) for f in raised.value.findings)
+    assert found == [("aot/int-list-store", first, "count"), ("aot/int-list-store", second, "count")], found
+    for f in raised.value.findings:
+        assert "not proved to fit 64 bits" in f.message and "next step" in f.message and "`count" in f.message
 
 
 # --- what the mode refuses -------------------------------------------------------------------------
@@ -1233,6 +1900,13 @@ SOURCE_LEVEL_ROWS = frozenset({
     "tuple unpack of a display",
     "unknown builtin",
 })
+# The rows that were refused for an int not proved inside 64 bits before #462. Without strict_int they are accepted
+# (their programs are among the BIGINT_CASES, compared with CPython); with `strict_int=True` (`--strict-int`, design
+# decision D1 (a), leader 2026-11-16, not owner-confirmed) each is refused exactly as it always was.
+STRICT_ROWS = frozenset({
+    "unproved int op", "unproved augmented op", "int negation", "int floor division by a variable",
+    "int true division", "list element arithmetic is strict", "int of an argument", "int of argument zero",
+    "abs of the most negative int"})
 IMPORT_ROWS = frozenset({"second import", "import twice", "from import"})      # their imports are the point
 RENAMED_NAMES = frozenset({"f", "g", "N", "X", "A"})
 HOISTED_IMPORTS = ("import math", "import sys")
@@ -1280,7 +1954,8 @@ def merged_rejection_source(names: list[str]):
 def rejection_groups() -> dict[str, list[str]]:
     rows = sorted(set(REJECTED) - SINGLE_ROWS)
     return {"source": [n for n in rows if n in SOURCE_LEVEL_ROWS],
-            "later": [n for n in rows if n not in SOURCE_LEVEL_ROWS]}
+            "later": [n for n in rows if n not in SOURCE_LEVEL_ROWS and n not in STRICT_ROWS],
+            "strict": [n for n in rows if n in STRICT_ROWS]}
 
 
 @pytest.fixture(scope="module")
@@ -1291,13 +1966,24 @@ def rejections(tmp_path_factory):
         source, expected = merged_rejection_source(names)
         path = write(tmp_path_factory.mktemp(f"rejected_{group}"), source)
         try:
-            aot.generate(path)
+            aot.generate(path, strict_int=(group == "strict"))
             findings = None
         except aot.AotError as e:
             findings = e.findings
         for name in names:
             results[name] = (expected[name], findings)
+        if group == "strict":                     # the same program without strict_int
+            try:
+                aot.generate(path)
+                results["<strict group, default mode>"] = None
+            except aot.AotError as e:
+                results["<strict group, default mode>"] = e.findings
     return results
+
+
+def test_the_rows_refused_only_by_strict_int_are_accepted_by_default(rejections):
+    """The program of the strict rows, generated without strict_int: no finding (every int is exact)."""
+    assert rejections["<strict group, default mode>"] is None
 
 
 @pytest.mark.parametrize("name", sorted(set(REJECTED) - SINGLE_ROWS))
@@ -1325,8 +2011,9 @@ def test_rejection_table_entry_rows(tmp_path, name):
 def test_unproved_int_message_names_the_expression(tmp_path):
     source, _ = REJECTED["unproved int op"]
     path = write(tmp_path, source + MAIN)
+    aot.generate(path)                                  # accepted without strict_int
     with pytest.raises(aot.AotError) as raised:
-        aot.generate(path)
+        aot.generate(path, strict_int=True)
     [f] = raised.value.findings
     assert (f.rule, f.line) == ("aot/int-unproven", 5)
     assert "`s + i`" in f.message
@@ -1336,8 +2023,9 @@ def test_unproved_int_message_names_the_expression(tmp_path):
 
 def test_int_true_division_message_names_the_expression(tmp_path):
     path = write(tmp_path, "def f(a: int, b: int) -> float:\n    return a / b\n" + MAIN)
+    assert "tpa_truediv_i64(" in aot.generate(path)      # accepted without strict_int
     with pytest.raises(aot.AotError) as raised:
-        aot.generate(path)
+        aot.generate(path, strict_int=True)
     [f] = raised.value.findings
     assert f.rule == "aot/int-true-division" and "`a / b`" in f.message and "2**53" in f.message
 
@@ -1386,17 +2074,15 @@ def test_every_finding_of_a_program_is_reported(tmp_path):
             return p == p
         """) + MAIN)
     with pytest.raises(aot.AotError) as raised:
-        aot.generate(path)
+        aot.generate(path, strict_int=True)
     found = {(f.rule, f.line, f.name) for f in raised.value.findings}
     assert {("aot/int-unproven", 2, "+"), ("aot/int-unproven", 5, "*"), ("aot/front-end", 8, "c"),
             ("aot/int-unproven", 12, "-"), ("aot/front-end", 15, "e")} <= found, found
 
 
-# spectral_norm.py and fannkuch.py need big integers (a later step): they are refused, and ONLY for an
-# int operation not proved inside 64 bits. Everything else they use (lists made by `[v] * n`,
-# `list(range(n))` and `a[:]`, list parameters, a returned tuple and its unpacking, f-strings with `.9f`,
-# `math.sqrt`; `int(sys.argv[1])` is one more of the refused ints) is supported, so no other finding may appear. The exact set of
-# (line, expression) is pinned: a change of these files or of the proofs shows here.
+# With `strict_int=True` (`--strict-int`) the three benchmarks are refused exactly as they were before #462: ONLY for an
+# int operation not proved inside 64 bits (everything else they use is supported). The exact set of (line, expression)
+# is pinned: a change of these files or of the proofs shows here.
 INT_UNPROVEN = {
     "spectral_norm.py": {
         (6, "(i + j) * (i + j + 1)"), (6, "i + j"), (6, "i + j + 1"), (6, "(i + j) * (i + j + 1) // 2 + i"),
@@ -1404,13 +2090,16 @@ INT_UNPROVEN = {
     "fannkuch.py": {
         (13, "r - 1"), (14, "r -= 1"), (27, "flips += 1"), (32, "checksum += flips"), (34, "checksum -= flips"),
         (42, "count[r] -= 1"), (45, "r += 1"), (46, "perm_count += 1"), (50, "int(sys.argv[1])")},
+    "nbody.py": {
+        (next(i for i, ln in enumerate((BENCH / "nbody.py").read_text().splitlines(), 1) if ln == ARGV_LINE),
+         "int(sys.argv[1])")},
 }
 
 
 @pytest.mark.parametrize("name", sorted(INT_UNPROVEN))
-def test_spectral_norm_and_fannkuch_are_refused_only_for_unproved_ints(name):
+def test_strict_int_refuses_the_benchmarks_only_for_unproved_ints(name):
     with pytest.raises(aot.AotError) as raised:
-        aot.generate(BENCH / name)
+        aot.generate(BENCH / name, strict_int=True)
     findings = raised.value.findings
     assert {f.rule for f in findings} == {"aot/int-unproven"}, [str(f) for f in findings]
     got = set()
@@ -1490,10 +2179,12 @@ def test_generated_c_contains_no_cpython(tmp_path):
         assert "Python.h" not in body, what
         assert not re.search(r"\b_?Py[A-Z_a-z]", body), (what, re.findall(r"\b_?Py[A-Z_a-z]\w*", body))
     assert '#include "tp_aot.h"' in c
-    for inc in re.findall(r"#include\s*[<\"]([^>\"]+)", c + header):
+    big = HEADER.with_name("tp_aot_int.h").read_text()
+    assert not re.search(r"\b_?Py[A-Z_a-z]", big) and "Python.h" not in big
+    for inc in re.findall(r"#include\s*[<\"]([^>\"]+)", c + header + big):
         # (stdatomic.h and intrin.h: the library build's atomic list counts, tp_aot.h under -DTPA_LIBRARY, #455)
         assert inc in {"tp_aot.h", "errno.h", "math.h", "stdint.h", "stdio.h", "stdlib.h", "string.h",
-                       "stdatomic.h", "intrin.h"}, inc
+                       "stdatomic.h", "intrin.h", "stddef.h", "tp_aot_int.h"}, inc
 
 
 def test_generated_c_uses_the_default_modes_float_flags():
@@ -1504,7 +2195,7 @@ def test_generated_c_uses_the_default_modes_float_flags():
 
 def test_cli_reports_each_finding_on_one_line(tmp_path, capsys):
     src = write(tmp_path, REJECTED["unproved int op"][0] + MAIN)
-    assert main(["aot-build", str(src), "-o", str(tmp_path / "never")]) == 1
+    assert main(["aot-build", str(src), "-o", str(tmp_path / "never"), "--strict-int"]) == 1
     err = capsys.readouterr().err.strip().splitlines()
     assert len(err) == 1 and err[0].startswith("prog.py:5: error aot/int-unproven: ")
     assert not (tmp_path / "never").exists()
