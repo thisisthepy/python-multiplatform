@@ -440,8 +440,10 @@ not depend on the CPython-embedding library) are leader decisions of 2026-11-16,
 Everything below about the shape of the generated API is an agent proposal, not owner-confirmed.
 
 **What exists (#458, desktop JVM).** `GenerateAotLibraryBindingsTask` in the Gradle plugin reads the
-`<prefix>.json` of 8.1 (`abi_version` must be 1; another version, or a type outside the vocabulary,
-fails the task and names the function) and writes four Kotlin files into one package:
+`<prefix>.json` of 8.1 (`abi_version` must be 2, and every other value, 1 included, fails the task and
+names the supported version: there are no deployed version 1 libraries and the compiler here writes 2 only; a
+type outside the vocabulary, or `int_list` with no `lists.int_list` entry, fails the task and names the
+function) and writes four Kotlin files into one package, five when the library uses `int_list`:
 
 - `AotFfm.kt`, the same text for every library: `TypedPythonAotException(className, message)` and a
   small runtime over `java.lang.foreign` (JDK 21 with `--enable-preview`, or JDK 22 and later). It
@@ -451,7 +453,7 @@ fails the task and names the function) and writes four Kotlin files into one pac
 - `<Object>.kt`: an object with `load(libraryPath)` (idempotent, thread-safe: loads the library,
   binds every symbol, calls `<prefix>_init`) and one function per export. Names and parameter names
   are the Python names as they are (snake_case kept; a Kotlin hard keyword is backticked). Types:
-  `Long`, `Double`, `Boolean`, the two list classes, no result type for None, and a generated data
+  `Long`, `Double`, `Boolean`, the list classes, no result type for None, and a generated data
   class `<Name>Result(v0, v1, ...)` for a tuple (also for two elements, so there is one rule). A failed
   call (status -1) throws `TypedPythonAotException` built from `<prefix>_last_error` on the same thread.
 - `F64List.kt`, `I64List.kt`: counted native handles with `size`, `get`/`set` (bounds checked on the
@@ -459,6 +461,23 @@ fails the task and names the function) and writes four Kotlin files into one pac
   close throws `IllegalStateException`). A list an exported function returns is wrapped as an owned
   handle; the same Kotlin list passed for two parameters is the same handle, so the parameters alias as
   in Python. An unclosed list is not freed by the garbage collector.
+- `IntList.kt`, only for a library whose description has the `int_list` entry (#465; the kind and `abi_version`
+  2 are a leader decision of 2026-11-16, not owner-confirmed; the class is an agent proposal, not
+  owner-confirmed): the Kotlin side of a `list[int]` that may hold values outside 64 bits. It has `size`,
+  `IntList(size)`, `IntList.of(LongArray)`, `get`/`set`, `toLongArray()` and `close()` with the ownership rules
+  of the other two. It has no memory to read: every `get` and `set` is one `invokeExact` call into the
+  library's `<prefix>_int_list_get` / `_set`, so it costs more than `I64List`, which reads native memory
+  directly. A failure of that call is the library's error record as a `TypedPythonAotException`: an index out
+  of range is `IndexError` with the messages of the source language (there is no Kotlin-side bounds check, so
+  the caller sees the same exception as in Python; a negative index counts from the end), an element that does
+  not fit in 64 bits is `OverflowError` "the element of the list does not fit in 64 bits" (also from
+  `toLongArray()`), and use after `close()` stays an `IllegalStateException`. A signature that takes an
+  `int_list` accepts only `IntList`, one that takes an `i64_list` only `I64List`: the classes share no type,
+  because handing the library a handle of the wrong kind is memory corruption, so the Kotlin type system is
+  the protection. A library with no `int_list` in its description generates the Kotlin it did under version 1,
+  except for the `abi_version` number in the comment of the object file. An `int` result that does not fit in
+  64 bits is `OverflowError` "the int result of `<function>` does not fit in 64 bits", through the ordinary
+  status check, with no special case in the generator.
 
 Out pointers are per-thread scratch memory: one 128-byte block per thread, allocated on first use from
 an automatic arena that the garbage collector frees once the thread is gone. A call costs no

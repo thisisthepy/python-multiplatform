@@ -1,5 +1,7 @@
 package fixture.aot
 
+import fixture.aot.bigints.Bigints
+import fixture.aot.bigints.IntList
 import fixture.aot.errors.Errors
 import fixture.aot.errors.TripleResult
 import fixture.aot.errors.TypedPythonAotException
@@ -19,6 +21,8 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlin.test.fail
+import fixture.aot.bigints.I64List as BigI64List
+import fixture.aot.bigints.TypedPythonAotException as BigsException
 import fixture.aot.errors.F64List as ErrF64List
 import fixture.aot.errors.I64List as ErrI64List
 
@@ -252,6 +256,173 @@ class AotLibraryCallTest {
                 start.countDown()
                 assertEquals(2000, failing.get(120, TimeUnit.SECONDS))
                 assertSameRun(single, simulating.get(120, TimeUnit.SECONDS), "the simulating thread")
+            } finally {
+                pool.shutdownNow()
+            }
+        }
+    }
+
+    // --- bigints: lists of ints that can leave 64 bits (ABI version 2, #465) ---------------------------------
+    //
+    // Third library, src/desktopTest/aot/bigints.py. Leader decision 2026-11-16 (not owner-confirmed) for the kind; this
+    // test is an agent proposal, not owner-confirmed. `fill_factorials`, `make`, `total` and `total_of_factorials`
+    // use `int_list` (Kotlin: IntList); `raw_sum` stays an `i64_list` (Kotlin: I64List of the same package). Expected
+    // values are Long arithmetic here (1! to 20! fit in 64 bits, 21! does not), the same numbers CPython gives.
+    //
+    // Not testable at run time: passing a BigI64List where Bigints.total wants an IntList, or the reverse for
+    // Bigints.raw_sum, does not compile (the classes share no type but AutoCloseable); that is the protection against
+    // handing the library a handle of the wrong kind.
+
+    @BeforeTest
+    fun loadBigints() {
+        val skip = System.getProperty("aot.skip")
+        assumeTrue("AOT library tests not run: $skip", skip == null)
+        Bigints.load(libraryPath("bigints"))
+    }
+
+    private fun factorials(count: Int): LongArray {
+        val out = LongArray(count)
+        var f = 1L
+        for (i in 0 until count) {
+            f *= (i + 1)
+            out[i] = f
+        }
+        return out
+    }
+
+    private fun assertOverflowElement(e: BigsException) {
+        assertEquals("OverflowError", e.className)
+        assertEquals("the element of the list does not fit in 64 bits", e.message)
+    }
+
+    @Test
+    fun anIntListReadsBackFactorialsUpTo20AndThen21FactorialIsAnOverflowError() {
+        IntList(25).use { l ->
+            assertEquals(25, l.size)
+            Bigints.fill_factorials(l)
+            val expected = factorials(20)
+            for (i in expected.indices) assertEquals(expected[i], l[i], "${i + 1}!")
+            assertOverflowElement(assertFailsWith<BigsException> { l[20] })
+            assertOverflowElement(assertFailsWith<BigsException> { l[24] })
+            assertOverflowElement(assertFailsWith<BigsException> { l.toLongArray() })
+            assertEquals(expected[19], l[19], "a read after a failed read still works")
+        }
+    }
+
+    @Test
+    fun storingASmallValueOverABigOneMakesItReadable() {
+        IntList(25).use { l ->
+            Bigints.fill_factorials(l)
+            assertFailsWith<BigsException> { l[20] }
+            l[20] = 7L
+            assertEquals(7L, l[20])
+            for (i in 21..24) l[i] = i.toLong()
+            val all = l.toLongArray()
+            assertEquals(25, all.size)
+            assertEquals(2432902008176640000L, all[19])
+            assertEquals(7L, all[20])
+            assertEquals(24L, all[24])
+        }
+    }
+
+    @Test
+    fun aListTheLibraryReturnsHoldsBigValuesAndIsOwnedByTheCaller() {
+        Bigints.make(22).use { l ->
+            assertEquals(22, l.size)
+            val expected = factorials(20)
+            for (i in expected.indices) assertEquals(expected[i], l[i])
+            assertOverflowElement(assertFailsWith<BigsException> { l[20] })
+            assertOverflowElement(assertFailsWith<BigsException> { l[21] })
+        }
+        Bigints.make(0).use { assertEquals(0, it.size) }
+    }
+
+    @Test
+    fun totalOfSmallValuesEqualsTheKotlinSumAndTotalOfABigListIsAnIntResultOverflow() {
+        val small = longArrayOf(3, 9, -2, 4_000_000_000L)
+        IntList.of(small).use { l -> assertEquals(small.sum(), Bigints.total(l)) }
+        Bigints.make(20).use { l -> assertEquals(factorials(20).sum(), Bigints.total(l)) }
+        assertEquals(factorials(20).sum(), Bigints.total_of_factorials(20))
+        Bigints.make(22).use { l ->
+            val e = assertFailsWith<BigsException> { Bigints.total(l) }
+            assertEquals("OverflowError", e.className)
+            assertEquals("the int result of `total` does not fit in 64 bits", e.message)
+            // a failed call leaves the list intact and usable
+            assertEquals(factorials(20)[19], l[19])
+        }
+        val e = assertFailsWith<BigsException> { Bigints.total_of_factorials(21) }
+        assertEquals("OverflowError", e.className)
+        assertEquals("the int result of `total_of_factorials` does not fit in 64 bits", e.message)
+    }
+
+    @Test
+    fun anIndexOutOfRangeIsTheLibrarysIndexErrorWithPythonsMessagesAndNegativeIndexesCountFromTheEnd() {
+        IntList.of(longArrayOf(10, 20, 30)).use { l ->
+            for (i in listOf(3, 100, -4)) {
+                val g = assertFailsWith<BigsException> { l[i] }
+                assertEquals("IndexError", g.className, "get $i")
+                assertEquals("list index out of range", g.message, "get $i")
+                val s = assertFailsWith<BigsException> { l[i] = 1L }
+                assertEquals("IndexError", s.className, "set $i")
+                assertEquals("list assignment index out of range", s.message, "set $i")
+            }
+            assertEquals(30L, l[-1])
+            assertEquals(10L, l[-3])
+            l[-2] = 99L
+            assertEquals(99L, l[1])
+            assertContentEquals(longArrayOf(10, 99, 30), l.toLongArray())
+        }
+        IntList(0).use { empty -> assertEquals("IndexError", assertFailsWith<BigsException> { empty[0] }.className) }
+    }
+
+    @Test
+    fun anIntListIsCreatedFromAndConvertedToALongArray() {
+        val values = longArrayOf(Long.MIN_VALUE, -1, 0, 1, Long.MAX_VALUE)
+        IntList.of(values).use { l ->
+            assertEquals(5, l.size)
+            assertContentEquals(values, l.toLongArray())
+            assertEquals("IntList(size=5)", l.toString())
+        }
+        IntList(3).use { zeros -> assertContentEquals(LongArray(3), zeros.toLongArray()) }
+        assertFailsWith<IllegalArgumentException> { IntList(-1) }
+    }
+
+    @Test
+    fun anIntListIsClosedOnceAndUseAfterCloseIsAnIllegalStateException() {
+        val l = IntList(2)
+        assertFalse(l.isClosed)
+        l.close()
+        assertTrue(l.isClosed)
+        l.close()
+        assertFailsWith<IllegalStateException> { l[0] }
+        assertFailsWith<IllegalStateException> { l[0] = 1L }
+        assertFailsWith<IllegalStateException> { l.toLongArray() }
+        assertFailsWith<IllegalStateException> { Bigints.total(l) }
+        assertEquals("IntList(size=2, closed)", l.toString())
+        // an out-of-range index on a closed list is still the closed-list failure, not an IndexError
+        assertFailsWith<IllegalStateException> { l[5] }
+    }
+
+    @Test
+    fun aRawListOfTheSameLibraryStillUsesI64ListWithDirectMemoryAccess() {
+        BigI64List.of(longArrayOf(1, 2, 3, 4)).use { v ->
+            assertEquals(10L, Bigints.raw_sum(v))
+            v[0] = 100L
+            assertEquals(109L, Bigints.raw_sum(v))
+            assertContentEquals(longArrayOf(100, 2, 3, 4), v.toLongArray())
+            // the Kotlin-side bounds check of the raw kinds is unchanged
+            assertFailsWith<IndexOutOfBoundsException> { v[4] }
+        }
+    }
+
+    @Test
+    fun concurrentReadsOfOneIntListAgree() {
+        Bigints.make(20).use { l ->
+            val expected = factorials(20)
+            val pool = Executors.newFixedThreadPool(4)
+            try {
+                val futures = (0 until 4).map { pool.submit<Boolean> { (0 until 200).all { _ -> l.toLongArray().contentEquals(expected) } } }
+                futures.forEach { assertTrue(it.get(120, TimeUnit.SECONDS)) }
             } finally {
                 pool.shutdownNow()
             }

@@ -22,9 +22,9 @@ import org.gradle.api.tasks.TaskAction
  *
  * ### What it reads and writes
  *
- * Reads only the description file (`abi_version` must be 1). Writes, under [outputDirectory] and in the directory
+ * Reads only the description file (`abi_version` must be 2). Writes, under [outputDirectory] and in the directory
  * of [packageName]: `AotFfm.kt` (the FFM helper and `TypedPythonAotException`), `<objectName>.kt` (the object with
- * `load(libraryPath)` and one function per export), `F64List.kt` and `I64List.kt`. See [renderAotLibraryBindings].
+ * `load(libraryPath)` and one function per export), `F64List.kt` and `I64List.kt`, and `IntList.kt` when the description has an `int_list` entry. See [renderAotLibraryBindings].
  * Give each library its own package: the helper and the list classes have fixed names.
  *
  * ### Using it without the bindings plugin's CPython conventions
