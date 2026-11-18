@@ -1334,6 +1334,23 @@ class _Fn:
 
 # --- the module ----------------------------------------------------------------------------------
 
+# Issue #464: turn floating-point contraction off in the generated C itself (not only by compiler flags),
+# so `--emit-c` or an external build without aot/cc.py flags still computes CPython's floats.
+FP_CONTRACT_PRAGMA: tuple[str, ...] = (
+    "#if defined(__clang__)",
+    "#pragma STDC FP_CONTRACT OFF",
+    "#elif defined(__GNUC__)",
+    "#pragma STDC FP_CONTRACT OFF",
+    '#pragma GCC optimize("fp-contract=off")',
+    "#elif defined(_MSC_VER)",
+    "#pragma float_control(precise, on)",
+    "#pragma fp_contract(off)",
+    "#else",
+    "#pragma STDC FP_CONTRACT OFF",
+    "#endif",
+)
+
+
 def emit(module: ir.Module, program: Program, *, strict_int: bool = False) -> tuple[str | None, list[Finding]]:
     """The C text of the module and no findings, or None and the findings (every finding of every
     function). `strict_int`: no TAGGED int, an operation that is not proved is the finding `aot/int-unproven`."""
@@ -1358,7 +1375,7 @@ def emit(module: ir.Module, program: Program, *, strict_int: bool = False) -> tu
     ]
     if needs_int_runtime(body_text):
         out.append('#include "tp_aot_int.h"')
-    out.append("")
+    out += ["", *FP_CONTRACT_PRAGMA, ""]
     out += prototypes
     out.append("")
     for b in bodies:

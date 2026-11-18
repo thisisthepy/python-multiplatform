@@ -2847,6 +2847,63 @@ def test_generated_c_uses_the_default_modes_float_flags():
     assert "/fp:precise" in cbuild._msvc_flags(list(cc.FLAGS))
 
 
+def test_generated_c_and_header_switch_fp_contraction_off_in_source(tmp_path):
+    """#464: floating-point contraction is turned off in tp_aot.h and in the generated C itself (not only
+    by compiler flags), and -ffast-math / /fp:fast is rejected at compile time."""
+    c = aot.generate(write(tmp_path, """
+        def fma_like(a: float, b: float, c: float) -> float:
+            return a * b + c
+
+        if __name__ == "__main__":
+            print(fma_like(1.0 + 2.0 ** -27, 1.0 + 2.0 ** -27, -1.0))
+        """))
+    header = HEADER.read_text(encoding="utf-8")
+    for body in (header, c):
+        for pragma in ("#pragma STDC FP_CONTRACT OFF", '#pragma GCC optimize("fp-contract=off")',
+                       "#pragma float_control(precise, on)", "#pragma fp_contract(off)"):
+            assert pragma in body, pragma
+    assert "#if defined(__FAST_MATH__) || defined(_M_FP_FAST)" in header
+    assert "#error " in header
+    assert header.index("#pragma STDC FP_CONTRACT OFF") < header.index("tpa_truediv_f64")
+    assert c.index("#pragma STDC FP_CONTRACT OFF") < c.index("tpf_fma_like")
+
+
+def test_generated_c_without_fp_flags_matches_cpython_and_rejects_fast_math(tmp_path):
+    """#464: compiling the generated C without `-ffp-contract=off` / `/fp:precise` (even with `-ffp-contract=on`
+    on GCC/Clang) still computes CPython's double-rounded float result, and `-ffast-math` / `/fp:fast` fails
+    the build at compile time."""
+    need_cc()
+    src = write(tmp_path, """
+        def fma_exact(a: float, b: float, c: float) -> float:
+            return a * b + c
+
+        if __name__ == "__main__":
+            x = 1.0 + 2.0 ** -27
+            print(fma_exact(x, x, -1.0))
+        """)
+    c_file = tmp_path / "fp.c"
+    c_file.write_text(aot.generate(src), encoding="utf-8")
+    exe = exe_path(tmp_path / "fp")
+    cmd, env = cc.command(c_file, exe, obj_dir=tmp_path)
+    idx = cmd.index(str(c_file))
+    no_flag_cmd = [t for t in cmd[:idx] if t not in ("-ffp-contract=off", "-fno-fast-math", "/fp:precise")]
+    if not cbuild._is_msvc():
+        no_flag_cmd += ["-ffp-contract=on", "-Werror=pragmas"]
+    no_flag_cmd += cmd[idx:]
+    res = subprocess.run(no_flag_cmd, capture_output=True, env=env, timeout=60)
+    assert res.returncode == 0, text(res.stderr) + text(res.stdout)
+    assert_same(run_exe(exe), run_py(src))
+
+    if cbuild._is_msvc():
+        fast_cmd = [cbuild._msvc_cl(env), "/nologo", "/Zs", "/O2", "/fp:fast", f"/I{cc.RUNTIME_DIR}", str(c_file)]
+    else:
+        fast_cmd = ([t for t in cmd[:idx] if t not in ("-ffp-contract=off", "-fno-fast-math")]
+                    + ["-fsyntax-only", "-ffast-math", str(c_file)])
+    chk = subprocess.run(fast_cmd, capture_output=True, env=env, timeout=60)
+    assert chk.returncode != 0
+    assert "requires precise IEEE 754 floating-point semantics" in text(chk.stderr) + text(chk.stdout)
+
+
 def test_cli_reports_each_finding_on_one_line(tmp_path, capsys):
     src = write(tmp_path, REJECTED["unproved int op"][0] + MAIN)
     assert main(["aot-build", str(src), "-o", str(tmp_path / "never"), "--strict-int"]) == 1

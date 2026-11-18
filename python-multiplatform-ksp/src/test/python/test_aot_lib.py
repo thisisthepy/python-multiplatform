@@ -1681,6 +1681,15 @@ def test_the_header_states_the_threading_and_ownership_rules_and_has_guards(gene
     assert "/* rem(a: int, b: int) -> int   (kit_mod.py, line" in h
 
 
+def test_generated_library_c_switches_fp_contraction_off_in_source(generated):
+    """#464: the generated library C carries the floating-point contraction-off pragmas before any function."""
+    for pragma in ("#pragma STDC FP_CONTRACT OFF", '#pragma GCC optimize("fp-contract=off")',
+                   "#pragma float_control(precise, on)", "#pragma fp_contract(off)"):
+        assert pragma in generated.c, pragma
+    assert generated.c.index("#pragma STDC FP_CONTRACT OFF") < generated.c.index("static int tpf_")
+    assert library.static_data_findings(generated.c, "kit_mod.py") == []
+
+
 # --- the executable build is unchanged --------------------------------------------------------------
 
 def test_the_executable_command_line_is_what_it_was(monkeypatch, tmp_path):
