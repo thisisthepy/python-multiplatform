@@ -397,142 +397,492 @@ static inline int tpa_cmp_f64_i64(double a, int64_t b, int op)
 }
 
 /* ------------------------------------------------------------------------------------------
- * repr(float): the shortest decimal string that parses back to the same double, laid out as
- * CPython's float_repr (format_float_short with mode 'r'): exponent notation when the decimal
- * exponent of the first digit is below -4 or at least 16, else positional with `.0` when there is no
- * fractional part. nan, inf and -inf as CPython writes them.
+ * Exact binary64 decimal formatting (issue #450): no dependence on the C library's snprintf or
+ * strtod rounding. Both `tpa_repr_f64` (shortest round-trip, Burger-Dybvig / Dragon4 with
+ * CPython's round-half-to-even tie-breaking) and `tpa_format_f64_fixed` (exact fixed-point
+ * rounding `format(v, '.<prec>f')`) operate directly on IEEE-754 bits using fixed-capacity
+ * 32-bit little-endian unsigned big integers (pure C99, uint64_t intermediates, no 128-bit integer).
  *
- * The digits: the smallest precision p in 1..17 for which the correctly rounded p-digit decimal
- * (`%.*e`) parses back to x. Where x is a power of two the interval that rounds to x is asymmetric
- * (half as wide below as above), so the nearest p-digit decimal can fall outside it while the next one
- * up is inside; CPython's David Gay conversion finds that one, so the two neighbours of the nearest
- * decimal are tried too. (A scripted port of exactly this procedure matched repr() on 600000 random
- * doubles and on every power-of-two neighbourhood; the corpus test compares this C with CPython.)
+ * Limb bound: in `tpa_repr_f64`, |k + 1| <= 324, so 5^|k+1| <= 5^324 (< 753 bits) and the
+ * scaled values stay within 780 bits (25 limbs). In `tpa_format_f64_fixed`, exact integer values
+ * m * 2^e2 fit in 1024 bits (32 limbs), and for e2 < 0 with prec <= 20, m * 5^prec fits in 100
+ * bits (4 limbs). 36 limbs (1152 bits) give comfortable headroom for both.
  * ------------------------------------------------------------------------------------------ */
+#define TPA__F64_MAX_LIMBS 36
 
-/* p digits of x > 0 into digs (no point), the decimal exponent of the first digit in *e */
-static inline void tpa__digits(double x, int p, char *digs, int *e)
+typedef struct {
+    int n;
+    uint32_t d[TPA__F64_MAX_LIMBS];
+} tpa__f64_bu;
+
+static inline void tpa__f64_bu_trim(tpa__f64_bu *a)
 {
-    char buf[48];
-    const char *s = buf;
+    while (a->n > 0 && a->d[a->n - 1] == 0) {
+        a->n--;
+    }
+}
+
+static inline void tpa__f64_bu_from_u64(tpa__f64_bu *a, uint64_t v)
+{
+    if (v == 0) {
+        a->n = 0;
+        return;
+    }
+    a->d[0] = (uint32_t)v;
+    if ((v >> 32) != 0) {
+        a->d[1] = (uint32_t)(v >> 32);
+        a->n = 2;
+    }
+    else {
+        a->n = 1;
+    }
+}
+
+static inline int tpa__f64_u64_bitlen(uint64_t v)
+{
     int n = 0;
-    snprintf(buf, sizeof buf, "%.*e", p - 1, x);
-    digs[n++] = *s++;
-    if (*s == '.') {
-        s++;
-        while (*s >= '0' && *s <= '9') {
-            digs[n++] = *s++;
-        }
+    while (v != 0) {
+        n++;
+        v >>= 1;
     }
-    *e = atoi(s + 1);                /* s is at the 'e'; atoi reads the sign and the digits */
-    digs[n] = '\0';
+    return n;
 }
 
-static inline int tpa__roundtrips(const char *digs, int p, int e, double x)
+static inline int tpa__f64_bu_bitlen(const tpa__f64_bu *a)
 {
-    char buf[64];
-    int n = 0, i;
-    buf[n++] = digs[0];
-    if (p > 1) {
-        buf[n++] = '.';
-        for (i = 1; i < p; i++) {
-            buf[n++] = digs[i];
-        }
+    int bl;
+    uint32_t w;
+    if (a->n == 0) {
+        return 0;
     }
-    snprintf(buf + n, sizeof buf - (size_t)n, "e%d", e);
-    return strtod(buf, NULL) == x;
+    bl = (a->n - 1) * 32;
+    w = a->d[a->n - 1];
+    while (w != 0) {
+        bl++;
+        w >>= 1;
+    }
+    return bl;
 }
 
-/* the p-digit decimal one unit in the last place above (d > 0) or below (d < 0) digs; 0 if there is none */
-static inline int tpa__bump(char *digs, int p, int *e, int d)
+static inline int tpa__f64_bu_cmp(const tpa__f64_bu *a, const tpa__f64_bu *b)
 {
     int i;
-    if (d > 0) {
-        for (i = p - 1; i >= 0; i--) {
-            if (digs[i] == '9') {
-                digs[i] = '0';
-            }
-            else {
-                digs[i]++;
-                return 1;
-            }
-        }
-        digs[0] = '1';               /* 99..9 + 1 = 100..0, one exponent up */
-        (*e)++;
-        return 1;
+    if (a->n != b->n) {
+        return a->n < b->n ? -1 : 1;
     }
-    for (i = p - 1; i >= 0; i--) {
-        if (digs[i] == '0') {
-            digs[i] = '9';
-        }
-        else {
-            digs[i]--;
-            if (i == 0 && digs[0] == '0') {
-                int j;               /* 100..0 - 1 = 99..9 with p-1 digits: p digits are 99..90, one exponent down */
-                if (p == 1) {
-                    return 0;
-                }
-                for (j = 0; j < p - 1; j++) {
-                    digs[j] = '9';
-                }
-                digs[p - 1] = '0';
-                (*e)--;
-            }
-            return 1;
+    for (i = a->n - 1; i >= 0; i--) {
+        if (a->d[i] != b->d[i]) {
+            return a->d[i] < b->d[i] ? -1 : 1;
         }
     }
     return 0;
 }
 
+static inline void tpa__f64_bu_add(tpa__f64_bu *dst, const tpa__f64_bu *a, const tpa__f64_bu *b)
+{
+    int n = a->n > b->n ? a->n : b->n;
+    uint64_t carry = 0;
+    int i;
+    for (i = 0; i < n; i++) {
+        uint64_t s = carry + (i < a->n ? (uint64_t)a->d[i] : 0) + (i < b->n ? (uint64_t)b->d[i] : 0);
+        dst->d[i] = (uint32_t)s;
+        carry = s >> 32;
+    }
+    if (carry != 0 && n < TPA__F64_MAX_LIMBS) {
+        dst->d[n++] = (uint32_t)carry;
+    }
+    dst->n = n;
+    tpa__f64_bu_trim(dst);
+}
+
+static inline void tpa__f64_bu_sub(tpa__f64_bu *a, const tpa__f64_bu *b)
+{
+    uint64_t borrow = 0;
+    int i;
+    for (i = 0; i < a->n; i++) {
+        uint64_t ai = (uint64_t)a->d[i];
+        uint64_t bi = (i < b->n ? (uint64_t)b->d[i] : 0) + borrow;
+        if (ai < bi) {
+            a->d[i] = (uint32_t)((ai + (UINT64_C(1) << 32)) - bi);
+            borrow = 1;
+        }
+        else {
+            a->d[i] = (uint32_t)(ai - bi);
+            borrow = 0;
+        }
+    }
+    tpa__f64_bu_trim(a);
+}
+
+static inline void tpa__f64_bu_mul_u32(tpa__f64_bu *a, uint32_t k)
+{
+    uint64_t carry = 0;
+    int i;
+    if (a->n == 0 || k == 0) {
+        a->n = 0;
+        return;
+    }
+    for (i = 0; i < a->n; i++) {
+        uint64_t p = (uint64_t)a->d[i] * (uint64_t)k + carry;
+        a->d[i] = (uint32_t)p;
+        carry = p >> 32;
+    }
+    if (carry != 0 && a->n < TPA__F64_MAX_LIMBS) {
+        a->d[a->n++] = (uint32_t)carry;
+    }
+}
+
+static inline void tpa__f64_bu_mul_pow5(tpa__f64_bu *a, int n)
+{
+    static const uint32_t p5[14] = {
+        1U, 5U, 25U, 125U, 625U, 3125U, 15625U, 78125U,
+        390625U, 1953125U, 9765625U, 48828125U, 244140625U, 1220703125U
+    };
+    while (n >= 13) {
+        tpa__f64_bu_mul_u32(a, p5[13]);
+        n -= 13;
+    }
+    if (n > 0) {
+        tpa__f64_bu_mul_u32(a, p5[n]);
+    }
+}
+
+static inline void tpa__f64_bu_shl(tpa__f64_bu *a, int shift)
+{
+    int ws, bs, i;
+    if (a->n == 0 || shift <= 0) {
+        return;
+    }
+    ws = shift >> 5;
+    bs = shift & 31;
+    if (bs == 0) {
+        for (i = a->n - 1; i >= 0; i--) {
+            if (i + ws < TPA__F64_MAX_LIMBS) {
+                a->d[i + ws] = a->d[i];
+            }
+        }
+        for (i = 0; i < ws && i < TPA__F64_MAX_LIMBS; i++) {
+            a->d[i] = 0;
+        }
+        a->n = (a->n + ws <= TPA__F64_MAX_LIMBS) ? a->n + ws : TPA__F64_MAX_LIMBS;
+    }
+    else {
+        uint32_t top = a->d[a->n - 1] >> (32 - bs);
+        if (top != 0 && a->n + ws < TPA__F64_MAX_LIMBS) {
+            a->d[a->n + ws] = top;
+        }
+        for (i = a->n - 1; i >= 1; i--) {
+            if (i + ws < TPA__F64_MAX_LIMBS) {
+                a->d[i + ws] = (a->d[i] << bs) | (a->d[i - 1] >> (32 - bs));
+            }
+        }
+        if (ws < TPA__F64_MAX_LIMBS) {
+            a->d[ws] = a->d[0] << bs;
+        }
+        for (i = 0; i < ws && i < TPA__F64_MAX_LIMBS; i++) {
+            a->d[i] = 0;
+        }
+        a->n += ws + (top != 0 ? 1 : 0);
+        if (a->n > TPA__F64_MAX_LIMBS) {
+            a->n = TPA__F64_MAX_LIMBS;
+        }
+    }
+    tpa__f64_bu_trim(a);
+}
+
+/* round_half_to_even(a / 2^shift) for shift > 0 */
+static inline void tpa__f64_bu_shr_round_even(tpa__f64_bu *a, int shift)
+{
+    int bl = tpa__f64_bu_bitlen(a);
+    int hw, hb, half_set, sticky = 0, ws, bs, new_n, i;
+    uint32_t mask;
+    if (bl < shift) {
+        a->n = 0;
+        return;
+    }
+    hw = (shift - 1) >> 5;
+    hb = (shift - 1) & 31;
+    mask = (UINT32_C(1) << hb) - 1U;
+    if (bl == shift) {
+        sticky = (a->d[hw] & mask) != 0;
+        for (i = 0; i < hw && !sticky; i++) {
+            if (a->d[i] != 0) {
+                sticky = 1;
+            }
+        }
+        if (sticky) {
+            a->n = 1;
+            a->d[0] = 1U;
+        }
+        else {
+            a->n = 0;
+        }
+        return;
+    }
+    half_set = ((a->d[hw] >> hb) & 1U) != 0;
+    if (half_set) {
+        sticky = (a->d[hw] & mask) != 0;
+        for (i = 0; i < hw && !sticky; i++) {
+            if (a->d[i] != 0) {
+                sticky = 1;
+            }
+        }
+    }
+    ws = shift >> 5;
+    bs = shift & 31;
+    new_n = a->n - ws;
+    if (bs == 0) {
+        for (i = 0; i < new_n; i++) {
+            a->d[i] = a->d[i + ws];
+        }
+    }
+    else {
+        for (i = 0; i < new_n - 1; i++) {
+            a->d[i] = (a->d[i + ws] >> bs) | (a->d[i + ws + 1] << (32 - bs));
+        }
+        a->d[new_n - 1] = a->d[a->n - 1] >> bs;
+    }
+    a->n = new_n;
+    tpa__f64_bu_trim(a);
+    if (half_set && (sticky || (a->n > 0 && (a->d[0] & 1U) != 0))) {
+        uint64_t carry = 1;
+        for (i = 0; i < a->n && carry != 0; i++) {
+            uint64_t s = (uint64_t)a->d[i] + carry;
+            a->d[i] = (uint32_t)s;
+            carry = s >> 32;
+        }
+        if (carry != 0 && a->n < TPA__F64_MAX_LIMBS) {
+            a->d[a->n++] = (uint32_t)carry;
+        }
+    }
+}
+
+static inline uint32_t tpa__f64_bu_divmod_u32(tpa__f64_bu *a, uint32_t k)
+{
+    uint64_t rem = 0;
+    int i;
+    for (i = a->n - 1; i >= 0; i--) {
+        uint64_t cur = (rem << 32) | (uint64_t)a->d[i];
+        a->d[i] = (uint32_t)(cur / k);
+        rem = cur % k;
+    }
+    tpa__f64_bu_trim(a);
+    return (uint32_t)rem;
+}
+
+static inline int tpa__f64_bu_to_dec(tpa__f64_bu *a, char *digs)
+{
+    uint32_t chunks[40];
+    int nchunks = 0, n = 0, i, j;
+    if (a->n == 0) {
+        digs[0] = '0';
+        return 1;
+    }
+    while (a->n > 0) {
+        chunks[nchunks++] = tpa__f64_bu_divmod_u32(a, 1000000000U);
+    }
+    {
+        uint32_t top = chunks[nchunks - 1];
+        char tmp[10];
+        int m = 0;
+        while (top > 0) {
+            tmp[m++] = (char)('0' + (top % 10U));
+            top /= 10U;
+        }
+        for (j = m - 1; j >= 0; j--) {
+            digs[n++] = tmp[j];
+        }
+    }
+    for (i = nchunks - 2; i >= 0; i--) {
+        uint32_t c = chunks[i];
+        for (j = 8; j >= 0; j--) {
+            digs[n + j] = (char)('0' + (c % 10U));
+            c /= 10U;
+        }
+        n += 9;
+    }
+    return n;
+}
+
+/* ------------------------------------------------------------------------------------------
+ * repr(float): the shortest decimal string that parses back to the same double, laid out as
+ * CPython's float_repr (format_float_short with mode 'r'): exponent notation when the decimal
+ * exponent of the first digit is below -4 or at least 16, else positional with `.0` when there is no
+ * fractional part. nan, inf and -inf as CPython writes them.
+ * ------------------------------------------------------------------------------------------ */
+
 /* writes repr(x) into buf (at least 40 bytes) and returns its length */
 static inline int tpa_repr_f64(double x, char *buf)
 {
-    char digs[24], alt[24];
-    int p, e = 0, n = 0, i, ndig, found = 0, ae, d;
-    if (x != x) {
-        memcpy(buf, "nan", 4);
-        return 3;
-    }
-    if (x == HUGE_VAL) {
+    uint64_t bits, mant, m, c;
+    int sign, bexp, e2, even, q, m_minus, m_plus, log2_floor, e, p5, e2_rel;
+    int32_t prod;
+    tpa__f64_bu r, s, mm, mp, tmp;
+    char digs[24];
+    int p = 0, n = 0, i, ndig, ae;
+
+    memcpy(&bits, &x, sizeof bits);
+    sign = (int)(bits >> 63);
+    bexp = (int)((bits >> 52) & 0x7FFU);
+    mant = bits & ((UINT64_C(1) << 52) - 1U);
+
+    if (bexp == 0x7FF) {
+        if (mant != 0) {
+            memcpy(buf, "nan", 4);
+            return 3;
+        }
+        if (sign) {
+            memcpy(buf, "-inf", 5);
+            return 4;
+        }
         memcpy(buf, "inf", 4);
         return 3;
     }
-    if (x == -HUGE_VAL) {
-        memcpy(buf, "-inf", 5);
-        return 4;
-    }
-    if (signbit(x)) {
+    if (sign) {
         buf[n++] = '-';
-        x = -x;
     }
-    if (x == 0.0) {
+    if (bexp == 0 && mant == 0) {
         memcpy(buf + n, "0.0", 4);
         return n + 3;
     }
-    for (p = 1; p <= 17 && !found; p++) {
-        tpa__digits(x, p, digs, &e);
-        if (tpa__roundtrips(digs, p, e, x)) {
-            found = 1;
+
+    if (bexp > 0) {
+        m = (UINT64_C(1) << 52) | mant;
+        e2 = bexp - 1075;
+    }
+    else {
+        m = mant;
+        e2 = -1074;
+    }
+    even = (m & 1U) == 0;
+
+    if (mant == 0 && bexp > 1) {
+        c = m << 2;
+        m_minus = 1;
+        m_plus = 2;
+        q = e2 - 2;
+    }
+    else {
+        c = m << 1;
+        m_minus = 1;
+        m_plus = 1;
+        q = e2 - 1;
+    }
+
+    log2_floor = (tpa__f64_u64_bitlen(c) - 1) + q;
+    prod = (int32_t)log2_floor * (int32_t)315653;
+    if (prod >= 0) {
+        e = (int)((uint32_t)prod >> 20);
+    }
+    else {
+        e = -(int)(((uint32_t)(-prod) + 0xFFFFFU) >> 20);
+    }
+
+    p5 = e + 1;
+    e2_rel = q - p5;
+
+    if (p5 >= 0) {
+        tpa__f64_bu_from_u64(&r, c);
+        tpa__f64_bu_from_u64(&mm, (uint64_t)m_minus);
+        tpa__f64_bu_from_u64(&mp, (uint64_t)m_plus);
+        tpa__f64_bu_from_u64(&s, 1U);
+        tpa__f64_bu_mul_pow5(&s, p5);
+    }
+    else {
+        tpa__f64_bu_from_u64(&r, c);
+        tpa__f64_bu_mul_pow5(&r, -p5);
+        tpa__f64_bu_from_u64(&mm, (uint64_t)m_minus);
+        tpa__f64_bu_mul_pow5(&mm, -p5);
+        tpa__f64_bu_from_u64(&mp, (uint64_t)m_plus);
+        tpa__f64_bu_mul_pow5(&mp, -p5);
+        tpa__f64_bu_from_u64(&s, 1U);
+    }
+
+    if (e2_rel >= 0) {
+        tpa__f64_bu_shl(&r, e2_rel);
+        tpa__f64_bu_shl(&mm, e2_rel);
+        tpa__f64_bu_shl(&mp, e2_rel);
+    }
+    else {
+        tpa__f64_bu_shl(&s, -e2_rel);
+    }
+
+    for (;;) {
+        tmp = r;
+        tpa__f64_bu_mul_u32(&tmp, 10U);
+        if (tpa__f64_bu_cmp(&tmp, &s) >= 0) {
             break;
         }
-        for (d = 1; d >= -1; d -= 2) {
-            int e2 = e;
-            memcpy(alt, digs, (size_t)p + 1);
-            if (tpa__bump(alt, p, &e2, d) && tpa__roundtrips(alt, p, e2, x)) {
-                memcpy(digs, alt, (size_t)p + 1);
-                e = e2;
-                found = 1;
-                break;
+        r = tmp;
+        tpa__f64_bu_mul_u32(&mm, 10U);
+        tpa__f64_bu_mul_u32(&mp, 10U);
+        e--;
+    }
+
+    for (;;) {
+        int cmp;
+        tpa__f64_bu_add(&tmp, &r, &mp);
+        cmp = tpa__f64_bu_cmp(&tmp, &s);
+        if (cmp > 0 || (even && cmp == 0)) {
+            tpa__f64_bu_mul_u32(&s, 10U);
+            e++;
+        }
+        else {
+            break;
+        }
+    }
+
+    for (;;) {
+        int d = 0, cmp_low, cmp_high, low, high;
+        tpa__f64_bu_mul_u32(&r, 10U);
+        while (tpa__f64_bu_cmp(&r, &s) >= 0) {
+            tpa__f64_bu_sub(&r, &s);
+            d++;
+        }
+        tpa__f64_bu_mul_u32(&mm, 10U);
+        tpa__f64_bu_mul_u32(&mp, 10U);
+
+        cmp_low = tpa__f64_bu_cmp(&r, &mm);
+        tpa__f64_bu_add(&tmp, &r, &mp);
+        cmp_high = tpa__f64_bu_cmp(&tmp, &s);
+        if (even) {
+            low = cmp_low <= 0;
+            high = cmp_high >= 0;
+        }
+        else {
+            low = cmp_low < 0;
+            high = cmp_high > 0;
+        }
+
+        if (!low && !high) {
+            digs[p++] = (char)('0' + d);
+        }
+        else if (low && !high) {
+            digs[p++] = (char)('0' + d);
+            break;
+        }
+        else if (high && !low) {
+            digs[p++] = (char)('0' + d + 1);
+            break;
+        }
+        else {
+            int cmp2;
+            tmp = r;
+            tpa__f64_bu_shl(&tmp, 1);
+            cmp2 = tpa__f64_bu_cmp(&tmp, &s);
+            if (cmp2 < 0) {
+                digs[p++] = (char)('0' + d);
             }
-        }
-        if (found) {
+            else if (cmp2 > 0) {
+                digs[p++] = (char)('0' + d + 1);
+            }
+            else {
+                digs[p++] = (char)('0' + ((d & 1) == 0 ? d : d + 1));
+            }
             break;
         }
     }
-    if (!found) {
-        tpa__digits(x, 17, digs, &e);   /* cannot happen: 17 digits always round-trip */
-        p = 17;
-    }
+
     ndig = p;
     while (ndig > 1 && digs[ndig - 1] == '0') {
         ndig--;
@@ -966,29 +1316,133 @@ static inline void tpa_print_str(const char *s, size_t n)
     fwrite(s, 1, n, stdout);
 }
 
-/* format(x, '.<prec>f') of a float: nan and the infinities as CPython writes them (never `-nan`), the
- * rest through printf("%.*f"), whose result is the correctly rounded decimal expansion on glibc, musl, the
- * Apple C library and UCRT (the same digits as CPython's own conversion; the dependence on the C
- * library's exact rounding is issue #450, which the differential tests exercise on every target). */
-static inline void tpa_print_f64_fixed(double v, int prec)
+/* format(x, '.<prec>f') of a float (issue #450): exact round-half-to-even from the IEEE-754 bits
+ * with no dependence on the C library's printf rounding. `buf` must hold at least 320 + prec bytes
+ * (valid for 0 <= prec <= 300; the AOT compiler caps prec at AOT_MAX_PRECISION = 20). */
+static inline int tpa_format_f64_fixed(double v, int prec, char *buf)
 {
-    char buf[400];
-    int n;
-    if (v != v) {
-        fwrite("nan", 1, 3, stdout);
-        return;
+    uint64_t bits, mant, m;
+    int sign, bexp, e2, n = 0;
+    if (prec < 0) {
+        prec = 0;
     }
-    if (v == HUGE_VAL || v == -HUGE_VAL) {
-        if (v > 0) {
-            fwrite("inf", 1, 3, stdout);
+    memcpy(&bits, &v, sizeof bits);
+    sign = (int)(bits >> 63);
+    bexp = (int)((bits >> 52) & 0x7FFU);
+    mant = bits & ((UINT64_C(1) << 52) - 1U);
+
+    if (bexp == 0x7FF) {
+        if (mant != 0) {
+            memcpy(buf, "nan", 4);
+            return 3;
+        }
+        if (sign) {
+            memcpy(buf, "-inf", 5);
+            return 4;
+        }
+        memcpy(buf, "inf", 4);
+        return 3;
+    }
+    if (sign) {
+        buf[n++] = '-';
+    }
+    if (bexp == 0 && mant == 0) {
+        buf[n++] = '0';
+        if (prec > 0) {
+            buf[n++] = '.';
+            memset(buf + n, '0', (size_t)prec);
+            n += prec;
+        }
+        buf[n] = '\0';
+        return n;
+    }
+    if (bexp > 0) {
+        m = (UINT64_C(1) << 52) | mant;
+        e2 = bexp - 1075;
+    }
+    else {
+        m = mant;
+        e2 = -1074;
+    }
+    if (e2 >= 0) {
+        tpa__f64_bu val;
+        tpa__f64_bu_from_u64(&val, m);
+        tpa__f64_bu_shl(&val, e2);
+        n += tpa__f64_bu_to_dec(&val, buf + n);
+        if (prec > 0) {
+            buf[n++] = '.';
+            memset(buf + n, '0', (size_t)prec);
+            n += prec;
+        }
+        buf[n] = '\0';
+        return n;
+    }
+    {
+        int s_exp = e2 + prec;
+        tpa__f64_bu val;
+        char digs[360];
+        int ndig;
+        if (s_exp >= 0) {
+            tpa__f64_bu_from_u64(&val, m);
+            tpa__f64_bu_mul_pow5(&val, prec);
+            tpa__f64_bu_shl(&val, s_exp);
         }
         else {
-            fwrite("-inf", 1, 4, stdout);
+            int shift = -s_exp;
+            if (shift > 54 + 3 * prec) {
+                val.n = 0;
+            }
+            else {
+                tpa__f64_bu_from_u64(&val, m);
+                tpa__f64_bu_mul_pow5(&val, prec);
+                tpa__f64_bu_shr_round_even(&val, shift);
+            }
         }
-        return;
+        ndig = tpa__f64_bu_to_dec(&val, digs);
+        if (prec == 0) {
+            memcpy(buf + n, digs, (size_t)ndig);
+            n += ndig;
+        }
+        else if (ndig <= prec) {
+            buf[n++] = '0';
+            buf[n++] = '.';
+            memset(buf + n, '0', (size_t)(prec - ndig));
+            n += prec - ndig;
+            memcpy(buf + n, digs, (size_t)ndig);
+            n += ndig;
+        }
+        else {
+            int ip = ndig - prec;
+            memcpy(buf + n, digs, (size_t)ip);
+            n += ip;
+            buf[n++] = '.';
+            memcpy(buf + n, digs + ip, (size_t)prec);
+            n += prec;
+        }
+        buf[n] = '\0';
+        return n;
     }
-    n = snprintf(buf, sizeof buf, "%.*f", prec, v);
+}
+
+static inline void tpa_print_f64_fixed(double v, int prec)
+{
+    char stack_buf[400];
+    char *buf = stack_buf;
+    int n;
+    if (prec < 0) {
+        prec = 0;
+    }
+    if (prec > 60) {
+        buf = (char *)malloc((size_t)prec + 320U);
+        if (buf == NULL) {
+            return;
+        }
+    }
+    n = tpa_format_f64_fixed(v, prec, buf);
     fwrite(buf, 1, (size_t)n, stdout);
+    if (buf != stack_buf) {
+        free(buf);
+    }
 }
 
 static inline void tpa_print_sep(void) { fputc(' ', stdout); }
