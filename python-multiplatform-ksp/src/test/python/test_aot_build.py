@@ -2855,7 +2855,8 @@ def test_generated_c_and_header_switch_fp_contraction_off_in_source(tmp_path):
             return a * b + c
 
         if __name__ == "__main__":
-            print(fma_like(1.0 + 2.0 ** -27, 1.0 + 2.0 ** -27, -1.0))
+            x = 1.0 + 1.0 / 134217728.0
+            print(fma_like(x, x, -1.0))
         """))
     header = HEADER.read_text(encoding="utf-8")
     for body in (header, c):
@@ -2878,7 +2879,7 @@ def test_generated_c_without_fp_flags_matches_cpython_and_rejects_fast_math(tmp_
             return a * b + c
 
         if __name__ == "__main__":
-            x = 1.0 + 2.0 ** -27
+            x = 1.0 + 1.0 / 134217728.0
             print(fma_exact(x, x, -1.0))
         """)
     c_file = tmp_path / "fp.c"
