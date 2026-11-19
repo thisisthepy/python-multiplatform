@@ -287,15 +287,10 @@ internal object AsyncUpcall {
     /**
      * The Python exception instance `set_exception` needs.
      *
-     * A [PyException] carries the original Python exception it was built from, so a Python error
-     * that crossed into Kotlin and back out again reaches the awaiting coroutine as *itself*,
-     * traceback and type intact, rather than as a `RuntimeError` wrapping its message. Anything
-     * else becomes a `RuntimeError` with the Kotlin message, which is the same mapping
-     * [UpcallTrampoline]'s synchronous failure path uses.
+     * Delegates to [UpcallTrampoline.pythonExceptionObjectFor] so a failure after suspension maps to
+     * the exact same Python exception type and `__cause__` chain as a synchronous failure or a
+     * failure before the first suspension point (SPEC U-2, U-5; issue #164).
      */
-    private fun pythonExceptionFor(failure: Throwable): PyObject {
-        if (failure is PyException) failure.value?.let { return it }
-        val message = failure.message ?: failure::class.simpleName ?: "the exposed suspending function failed"
-        return UpcallTrampoline.runtimeErrorClass().invoke(PyString.from(message))
-    }
+    private fun pythonExceptionFor(failure: Throwable): PyObject =
+        UpcallTrampoline.pythonExceptionObjectFor(failure)
 }
