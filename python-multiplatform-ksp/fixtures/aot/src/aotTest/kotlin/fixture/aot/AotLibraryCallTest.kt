@@ -539,7 +539,7 @@ class AotLibraryCallTest {
         }
         assertTrue(end > start, "reachability metadata's `downcalls` array is not closed")
         val body = json.substring(start, end)
-        return Regex("""\{\s*"returnType"\s*:\s*"(\w+)"\s*,\s*"parameterTypes"\s*:\s*\[([^]]*)]\s*}""")
+        return Regex("""\{\s*"returnType"\s*:\s*"([^"]+)"\s*,\s*"parameterTypes"\s*:\s*\[([^]]*)]\s*}""")
             .findAll(body)
             .mapTo(LinkedHashSet()) { match ->
                 ForeignDescriptor(
@@ -549,12 +549,13 @@ class AotLibraryCallTest {
             }
     }
 
+    /** GraalVM's canonical layout name for a carrier (`Linker.nativeLinker().canonicalLayouts()`), as the metadata spells it. */
     private fun carrierName(cls: Class<*>): String = when (cls) {
         Void.TYPE -> "void"
-        java.lang.Long.TYPE -> "long"
+        java.lang.Long.TYPE -> "long long"
         Integer.TYPE -> "int"
         java.lang.Double.TYPE -> "double"
-        java.lang.Byte.TYPE -> "byte"
+        java.lang.Byte.TYPE -> "char"
         else -> fail("unexpected MethodHandle carrier type $cls")
     }
 
