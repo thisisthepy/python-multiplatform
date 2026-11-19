@@ -1089,14 +1089,14 @@ object PythonxAdapter {
                 except BaseException as err:
                     invoke_fn(complete_handle, (pending_handle, False, err))
 
+            # Always schedule via `call_soon_threadsafe` / `call_soon` rather than calling
+            # `ensure_future` inline while the upcall frame is still running: on `is_running_here`,
+            # `PendingCall.start` is still inside the synchronous upcall frame, and `call_soon`
+            # defers starting the Python task until the loop's next turn (after `AsyncUpcall.deliver`
+            # has created the outer `Future` and returned it to the caller).
             if is_running_here:
-                _schedule()
+                loop.call_soon(_schedule)
             else:
-                # On a foreign thread, schedule `_schedule()` onto the target loop's thread via
-                # `call_soon_threadsafe`. Keep a strong reference to `awaitable` inside `_schedule`
-                # so the Kotlin caller can release its temporary wrapper immediately after
-                # `submitAwaitableToLoop` returns without closing the coroutine before `_schedule`
-                # runs.
                 loop.call_soon_threadsafe(_schedule)
 
 
