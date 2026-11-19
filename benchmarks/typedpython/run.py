@@ -715,14 +715,32 @@ def binary_sizes(path: Path) -> tuple[int, int]:
 def run_once_with_usage(cmd: list[str], env: dict[str, str] | None = None) -> dict[str, object]:
     """Run one child process and return wall time, CPU time, peak RSS (bytes), exit code, and stdout.
 
-    On POSIX, prefer `os.posix_spawnp` + `os.wait4` over `subprocess.Popen` (`fork` + `exec`): on Linux
-    a forked child inherits the parent Python harness's resident set before `exec`, which inflates
-    `ru_maxrss` to the parent's RSS (#488). `posix_spawnp` uses `vfork`/`clone(CLONE_VFORK)` so the
-    child's `ru_maxrss` reflects only the child binary itself.
+    On Linux, `subprocess.Popen` (`fork` + `exec`) and even `posix_spawnp` (which falls back to
+    `clone`/`vfork` sharing the parent's `mm` until `execve`) can inherit the parent Python
+    harness's peak RSS into `ru_maxrss` (#488). To isolate the child's own peak RSS on Linux,
+    we invoke GNU `/usr/bin/time -f "%M %U %S"` when available (the tiny `time` binary's own
+    RSS is ~2 MiB, independent of the Python harness). On macOS, `os.posix_spawnp` + `os.wait4`
+    measures the child's own `ru_maxrss` directly.
     """
     with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
         start = time.perf_counter()
-        if hasattr(os, "posix_spawnp") and hasattr(os, "wait4"):
+        gnu_time = "/usr/bin/time" if (sys.platform.startswith("linux") and os.path.isfile("/usr/bin/time")) else None
+        if gnu_time is not None:
+            with tempfile.NamedTemporaryFile(mode="r+", encoding="utf-8") as stat_f:
+                wrapped = [gnu_time, "-f", "%M %U %S", "-o", stat_f.name, "--", *cmd]
+                res = subprocess.run(wrapped, stdout=out_f, stderr=err_f, env=env)
+                elapsed = time.perf_counter() - start
+                returncode = res.returncode
+                stat_f.seek(0)
+                stat_text = stat_f.read().strip()
+                parts = stat_text.splitlines()[-1].split() if stat_text else []
+                if len(parts) == 3:
+                    max_rss_bytes = int(parts[0]) * 1024
+                    cpu_s = float(parts[1]) + float(parts[2])
+                else:
+                    max_rss_bytes = 0
+                    cpu_s = elapsed
+        elif hasattr(os, "posix_spawnp") and hasattr(os, "wait4"):
             spawn_env = os.environ if env is None else env
             file_actions = [
                 (os.POSIX_SPAWN_DUP2, out_f.fileno(), 1),
