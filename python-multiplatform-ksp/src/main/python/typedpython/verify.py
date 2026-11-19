@@ -1686,17 +1686,17 @@ class _Checker:
         self.result(e, Type.F64)
         return e
 
-    def s_TimeSleep(self, s: TimeSleep, state: _State) -> ir.Stmt:
+    def s_TimeSleep(self, s: TimeSleep, state: _State):
         secs = self.expr(s.seconds, state)
         self.slot(secs, Type.F64, "argument of time.sleep")
-        return dataclasses.replace(s, seconds=secs)
+        return dataclasses.replace(s, seconds=secs), state
 
-    def s_SysExit(self, s: SysExit, state: _State) -> ir.Stmt:
+    def s_SysExit(self, s: SysExit, state: _State):
         if s.code is None:
-            return s
+            return s, state
         code = self.expr(s.code, state)
         self.slot(code, Type.I64, "argument of sys.exit")
-        return dataclasses.replace(s, code=code)
+        return dataclasses.replace(s, code=code), state
 
     def stray(self, e: NewArray | CopyArray, state: _State) -> ir.Expr:
         self.error(ESCAPE, f"{type(e).__name__} is only legal as the value of an Assign to a local "

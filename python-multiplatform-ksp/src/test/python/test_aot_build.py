@@ -2513,11 +2513,11 @@ REJECTED = {
     "print as a value": ("def f() -> None:\n    x = print(1)\n", ("aot/print-use", 2, "print")),
     "class": ("class C:\n    pass\n", ("aot/module-statement", 1, "class")),
     "unknown builtin": ("def f(x: float) -> int:\n    return round(x)\n", ("aot/builtin", 2, "round")),
-    "int builtin": ("def f(x: float) -> int:\n    return int(x)\n", ("aot/builtin", 2, "int")),
-    "math attribute": ("import math\ndef f() -> float:\n    return math.pi\n", ("aot/attribute", 3, "pi")),
-    "math function": ("import math\ndef f(x: float) -> float:\n    return math.floor(x)\n",
-                      ("aot/math", 3, "math.floor")),
-    "bitwise operator": ("def f(a: int) -> int:\n    return a & 3\n", ("aot/operator", 2, "BitAnd")),
+    "int with base": ("def f() -> int:\n    return int('5', 16)\n", ("aot/builtin", 2, "int")),
+    "math attribute": ("import math\ndef f() -> float:\n    return math.foo\n", ("aot/attribute", 3, "foo")),
+    "math function": ("import math\ndef f(x: float) -> float:\n    return math.gamma(x)\n",
+                      ("aot/math", 3, "math.gamma")),
+    "matmul operator": ("def f(a: int) -> int:\n    return a @ 3\n", ("aot/operator", 2, "MatMult")),
     "decorator": ("@compiled\ndef f() -> None:\n    pass\n", ("aot/decorator", 1, "compiled")),
     "conditional expression of two types": ("def f(a: bool) -> float:\n    return 1 if a else 2.0\n",
                                             ("aot/front-end", 2, "f")),
@@ -2566,15 +2566,13 @@ REJECTED = {
         "def f(a: list[float]) -> float:\n    x, y = a\n    return x\n", ("aot/front-end", 2, "f")),
     "tuple return of the wrong shape": (
         "def f(x: float) -> tuple[float, int]:\n    return x, x\n", ("aot/front-end", 2, "f")),
-    "sys exit": ("import sys\ndef f() -> None:\n    sys.exit(1)\n", ("aot/call", 3, "sys.exit")),
-    "sys attribute": ("import sys\ndef f() -> int:\n    return sys.maxsize\n", ("aot/attribute", 3, "maxsize")),
+    "sys attribute": ("import sys\ndef f() -> int:\n    return sys.version\n", ("aot/attribute", 3, "version")),
     "sys argv slice": ("import sys\ndef f() -> int:\n    x = sys.argv[1:]\n    return 0\n", ("aot/container", 3, "slice")),
     "int of an argument": ("import sys\ndef f() -> int:\n    return int(sys.argv[1])\n", ("aot/int-unproven", 3, "int")),
     "int of argument zero": ("import sys\ndef f() -> int:\n    return int(sys.argv[0])\n", ("aot/int-unproven", 3, "int")),
     "sys argv as a string": ("import sys\ndef f() -> None:\n    x = sys.argv[1]\n", ("aot/container", 3, "subscript")),
     "sys argv with a float index": (
         "import sys\ndef f(x: float) -> int:\n    return int(sys.argv[x])\n", ("aot/front-end", 3, "f")),
-    "int of a string literal": ("def f() -> int:\n    return int('5')\n", ("aot/builtin", 2, "int")),
     "min of three": ("def f(a: float) -> float:\n    return min(a, a, a)\n", ("aot/call", 2, "min")),
     "min of an int and a float": ("def f(a: int, b: float) -> float:\n    return min(a, b)\n", ("aot/front-end", 2, "f")),
     "abs of the most negative int": ("def f(a: int) -> int:\n    return abs(a)\n", ("aot/int-unproven", 2, "-")),
@@ -2617,7 +2615,6 @@ SOURCE_LEVEL_ROWS = frozenset({
     "annotated constant outside 64 bits",
     "annotated constant without a value",
     "annotation outside int float bool",
-    "bitwise operator",
     "class",
     "decorator",
     "empty list display",
@@ -2632,9 +2629,8 @@ SOURCE_LEVEL_ROWS = frozenset({
     "from import",
     "import twice",
     "int annotation on a bool value",
-    "int builtin",
     "int literal outside 64 bits",
-    "int of a string literal",
+    "int with base",
     "list in a tuple return",
     "list iteration",
     "list method",
@@ -2644,6 +2640,7 @@ SOURCE_LEVEL_ROWS = frozenset({
     "list slice",
     "math attribute",
     "math function",
+    "matmul operator",
     "min of three",
     "missing annotation",
     "module constant outside 64 bits",
@@ -2657,7 +2654,6 @@ SOURCE_LEVEL_ROWS = frozenset({
     "sys argv as a string",
     "sys argv slice",
     "sys attribute",
-    "sys exit",
     "tuple annotation of a parameter",
     "tuple display",
     "tuple unpack of a display",
@@ -2980,9 +2976,11 @@ def test_generated_c_contains_no_cpython(tmp_path):
     big = HEADER.with_name("tp_aot_int.h").read_text()
     assert not cpython_api_uses(big), cpython_api_uses(big)
     for inc in re.findall(r"#include\s*[<\"]([^>\"]+)", c + header + big):
-        # (stdatomic.h and intrin.h: the library build's atomic list counts, tp_aot.h under -DTPA_LIBRARY, #455)
+        # (stdatomic.h and intrin.h: the library build's atomic list counts, tp_aot.h under -DTPA_LIBRARY, #455;
+        #  time.h and windows.h: tpa_time_* clocks and sleep in tp_aot.h, #476)
         assert inc in {"tp_aot.h", "errno.h", "math.h", "stdint.h", "stdio.h", "stdlib.h", "string.h",
-                       "stdatomic.h", "intrin.h", "sched.h", "stddef.h", "tp_aot_int.h"}, inc
+                       "stdatomic.h", "intrin.h", "sched.h", "stddef.h", "tp_aot_int.h",
+                       "time.h", "windows.h"}, inc
 
 
 def test_tp_aot_has_no_clib_float_formatting():

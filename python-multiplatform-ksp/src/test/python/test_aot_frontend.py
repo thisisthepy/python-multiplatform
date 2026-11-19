@@ -566,8 +566,8 @@ def test_sys_argv_nodes(tmp_path):
 
 
 @pytest.mark.parametrize("source, text", [
-    ("import sys\ndef f() -> int:\n    return sys.maxsize\n", "only `int(sys.argv[i])` and `len(sys.argv)`"),
-    ("def f() -> int:\n    return int(sys.argv[1])\n", "only supported as `int(sys.argv[i])`"),
+    ("import sys\ndef f() -> int:\n    return sys.version\n", "only `sys.argv`, `sys.maxsize` and `sys.exit`"),
+    ("def f() -> int:\n    return int(sys.argv[1])\n", "int() of a object is not supported in an AOT program"),
 ])
 def test_sys_is_used_only_as_argv_in_int_and_len(tmp_path, source, text):
     m = aot_ir(tmp_path, source)

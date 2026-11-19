@@ -98,6 +98,20 @@ class Const(Expr):
     # which never sets it, sees the node it always saw.
     name: str | None = field(default=None, kw_only=True, compare=False, repr=False)
 
+    def __eq__(self, other: object) -> bool:
+        if type(self) is not type(other):
+            return NotImplemented
+        if self.type != other.type:
+            return False
+        if (isinstance(self.value, float) and isinstance(other.value, float)
+                and self.value != self.value and other.value != other.value):
+            return True
+        return self.value == other.value
+
+    def __hash__(self) -> int:
+        v = "nan" if isinstance(self.value, float) and self.value != self.value else self.value
+        return hash((self.type, v))
+
 
 @dataclass(frozen=True)
 class Local(Expr):
