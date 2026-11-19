@@ -93,6 +93,22 @@ jobs:
           ${{ matrix.venv_python }} -m pytest -q -s -m measurement $TP_TEST_FILES || {
             rc=$?; if [ "$rc" -eq 5 ] && [ -n "$TP_TEST_FILES" ]; then echo "no measurement test in this shard"; else exit "$rc"; fi; }
 
+      - name: AOT measurements (binary size, RSS, CPU time vs Rust)
+        if: ${{ matrix.os == 'ubuntu-latest' && matrix.shard == 'all' }}
+        run: |
+          ${{ matrix.venv_python }} ../benchmarks/typedpython/run.py aot-measure \
+            --python ${{ matrix.venv_python }} \
+            --typedpython src/main/python \
+            --typedpython-python ${{ matrix.venv_python }} \
+            --out ../benchmarks/typedpython/aot-measure-ubuntu.json
+
+      - name: Upload AOT measurement artifact
+        if: ${{ matrix.os == 'ubuntu-latest' && matrix.shard == 'all' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: typedpython-aot-measure-ubuntu
+          path: benchmarks/typedpython/aot-measure-ubuntu.json
+
   sanitizers:
     # SPEC N-8: ASan/UBSan runs are the safety net outside the proof. Every extension TypedPython
     # builds in these tests is compiled with -fsanitize=address,undefined (TP_SANITIZE=1, see
