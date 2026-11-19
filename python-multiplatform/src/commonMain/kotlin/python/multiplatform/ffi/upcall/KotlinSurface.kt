@@ -270,6 +270,72 @@ object KotlinSurface {
             return _DeliveryLoopScope(loop)
 
 
+        # Ambient Kotlin `CoroutineContext` configuration for exposed `suspend` calls
+        # (SPEC U-5b; issue #164, item 1).
+        _coroutine_context_var = _contextvars.ContextVar('python_multiplatform.coroutine_context', default=None)
+        _default_coroutine_context = None
+
+
+        def _validate_coroutine_context(ctx):
+            if ctx is None:
+                return
+            if isinstance(ctx, int) and not isinstance(ctx, bool):
+                return
+            handle = getattr(ctx, '_pm_handle', None)
+            if isinstance(handle, int) and not isinstance(handle, bool):
+                return
+            raise TypeError(
+                'coroutine context must be None, a Kotlin CoroutineContext proxy, or a raw handle int; '
+                'got ' + type(ctx).__name__
+            )
+
+
+        def set_coroutine_context(ctx):
+            '''Sets the process-wide fallback Kotlin `CoroutineContext` for exposed `suspend` upcalls
+            and returns the previous fallback (`None` clears it).
+            '''
+            global _default_coroutine_context
+            _validate_coroutine_context(ctx)
+            previous = _default_coroutine_context
+            _default_coroutine_context = ctx
+            return previous
+
+
+        def get_coroutine_context():
+            '''Returns the task-scoped Kotlin `CoroutineContext` (`use_coroutine_context`) if set in
+            the current `contextvars.Context`, otherwise the process-wide fallback
+            (`set_coroutine_context`), or `None`.
+            '''
+            ctx = _coroutine_context_var.get()
+            return ctx if ctx is not None else _default_coroutine_context
+
+
+        class _CoroutineContextScope:
+            __slots__ = ('_ctx', '_token')
+
+            def __init__(self, ctx):
+                _validate_coroutine_context(ctx)
+                self._ctx = ctx
+                self._token = None
+
+            def __enter__(self):
+                self._token = _coroutine_context_var.set(self._ctx)
+                return self._ctx
+
+            def __exit__(self, _exc_type, _exc_val, _exc_tb):
+                if self._token is not None:
+                    _coroutine_context_var.reset(self._token)
+                    self._token = None
+                return False
+
+
+        def use_coroutine_context(ctx):
+            '''Context manager that binds [ctx] as the Kotlin `CoroutineContext` in the current
+            `contextvars.Context`.
+            '''
+            return _CoroutineContextScope(ctx)
+
+
         class _KotlinDefault:
             '''The `default` of a parameter whose Kotlin declaration has one.
 

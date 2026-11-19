@@ -1,7 +1,12 @@
 package python.multiplatform.ffi.upcall
 
+import python.multiplatform.ffi.Python3
+import python.multiplatform.ffi.exceptions.isNoneObject
+import python.multiplatform.ffi.getThreadGILState
+import python.multiplatform.reflection.HandleTable
 import kotlin.coroutines.Continuation
 import kotlin.coroutines.CoroutineContext
+import kotlin.coroutines.EmptyCoroutineContext
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.coroutines.coroutineContext
 import kotlin.coroutines.startCoroutine
@@ -92,6 +97,14 @@ class PendingCall private constructor() : CoroutineContext.Element {
         private set
 
     /**
+     * First exception thrown by an [onCancelled] listener, if any (SPEC U-5b; #164 item 1).
+     * Captured rather than propagated so a throwing cancellation listener never escapes into C or
+     * prevents remaining listeners from running.
+     */
+    var cancellationFailure: Throwable? = null
+        private set
+
+    /**
      * True once someone on the Python side has stopped waiting for this -- see [cancel].
      *
      * Independent of [isDone]: a cancelled call is normally still running, and a call that
@@ -101,6 +114,8 @@ class PendingCall private constructor() : CoroutineContext.Element {
         private set
 
     private var listener: ((PendingCall) -> Unit)? = null
+
+    private var cancelListeners: MutableList<() -> Unit>? = null
 
     /**
      * Records that whoever was waiting for this call has stopped, and returns whether that was news.
@@ -154,7 +169,44 @@ class PendingCall private constructor() : CoroutineContext.Element {
     fun cancel(): Boolean {
         if (isDone || isCancelled) return false
         isCancelled = true
+        val toNotify = cancelListeners
+        cancelListeners = null
+        if (toNotify != null) {
+            for (action in toNotify) {
+                invokeCancelListener(action)
+            }
+        }
         return true
+    }
+
+    /**
+     * Registers [action] to be called once when [cancel] transitions this call to cancelled, or
+     * immediately inline if [isCancelled] is already `true` (SPEC U-5b; #164 item 1).
+     *
+     * ### Threading, GIL and exception contract
+     *
+     * [action] runs synchronously on whichever thread calls [cancel] (for Python `Future.cancel()`,
+     * that is the asyncio loop thread inside `_pm_cancel` with the GIL held). Therefore [action]
+     * **must be non-blocking** (e.g. calling `job.cancel()` or setting a flag) and must never wait
+     * on another thread that needs the GIL. Any exception thrown by [action] is caught and recorded
+     * in [cancellationFailure] rather than escaping into C or aborting remaining listeners.
+     */
+    fun onCancelled(action: () -> Unit) {
+        if (isCancelled) {
+            invokeCancelListener(action)
+            return
+        }
+        if (isDone) return
+        val list = cancelListeners ?: mutableListOf<() -> Unit>().also { cancelListeners = it }
+        list.add(action)
+    }
+
+    private fun invokeCancelListener(action: () -> Unit) {
+        try {
+            action()
+        } catch (t: Throwable) {
+            if (cancellationFailure == null) cancellationFailure = t
+        }
     }
 
     /**
@@ -216,9 +268,20 @@ class PendingCall private constructor() : CoroutineContext.Element {
          * and intercepts nothing, so the fast path this class exists for is untouched: an element
          * that is not a `ContinuationInterceptor` cannot change where the body runs.
          */
-        fun start(block: suspend () -> Any?): PendingCall {
+        fun start(block: suspend () -> Any?): PendingCall =
+            start(ambientCoroutineContextOrEmpty(), block)
+
+        /**
+         * Starts [block] with `context + call` as its [CoroutineContext] and returns immediately,
+         * complete or not (SPEC U-5b; #164 item 1).
+         *
+         * Direct Kotlin callers outside an active Python upcall should pass an explicit [context]
+         * here; the zero-context [start] overload reads Python's `ContextVar` when running inside
+         * an attached upcall frame holding the GIL.
+         */
+        fun start(context: CoroutineContext, block: suspend () -> Any?): PendingCall {
             val call = PendingCall()
-            val completion = Continuation<Any?>(call) { result -> call.complete(result) }
+            val completion = Continuation<Any?>(context + call) { result -> call.complete(result) }
             try {
                 block.startCoroutine(completion)
             } catch (t: Throwable) {
@@ -227,6 +290,32 @@ class PendingCall private constructor() : CoroutineContext.Element {
                 call.complete(Result.failure(t))
             }
             return call
+        }
+
+        /**
+         * Reads the ambient Kotlin [CoroutineContext] configured in Python via
+         * `python_multiplatform.use_coroutine_context` / `set_coroutine_context` when Python is
+         * initialized and the calling thread already holds the GIL (as in every upcall frame).
+         * Returns [EmptyCoroutineContext] when called from pure Kotlin without an interpreter or
+         * without the GIL held, or when no context is configured.
+         */
+        private fun ambientCoroutineContextOrEmpty(): CoroutineContext {
+            if (!Python3.isInitialized || getThreadGILState().depth <= 0) return EmptyCoroutineContext
+            return try {
+                val sysModules = Python3.import("sys").getAttr("modules")
+                val pmMod = sysModules.getAttr("get").invoke(
+                    python.multiplatform.ffi.types.basic.PyString.from(KotlinSurface.MODULE_NAME),
+                )
+                if (pmMod.pointer.isNoneObject()) return EmptyCoroutineContext
+                val getCtx = pmMod.getAttrOrNull("get_coroutine_context") ?: return EmptyCoroutineContext
+                val ctxObj = getCtx.invoke()
+                if (ctxObj.pointer.isNoneObject()) return EmptyCoroutineContext
+                val handleObj = ctxObj.getAttrOrNull("_pm_handle") ?: ctxObj
+                val raw = handleObj.toString().toLongOrNull() ?: return EmptyCoroutineContext
+                HandleTable.resolveRaw(raw) as? CoroutineContext ?: EmptyCoroutineContext
+            } catch (_: Throwable) {
+                EmptyCoroutineContext
+            }
         }
     }
 }
