@@ -145,7 +145,7 @@ jobs:
         run: |
           env $(.venv/bin/python tools/sanitizers.py env) \
             .venv/bin/python -m pytest -q -m "not measurement and not race_mutant" \
-              src/test/python/test_cgen.py src/test/python/test_runtime.py src/test/python/test_pipeline.py src/test/python/test_interval_proofs.py src/test/python/test_virtual_objects.py src/test/python/test_aot_build.py src/test/python/test_aot_lib.py src/test/python/test_aot_int.py src/test/python/test_aot_repr.py
+              src/test/python/test_cgen.py src/test/python/test_runtime.py src/test/python/test_pipeline.py src/test/python/test_interval_proofs.py src/test/python/test_virtual_objects.py src/test/python/test_aot_build.py src/test/python/test_aot_lib.py src/test/python/test_aot_int.py src/test/python/test_aot_repr.py src/test/python/test_aot_tier_o1.py
 
   app-fixture:
     # #45: a TypedPython-compiled module calling Kotlin through the upcall table, in the app

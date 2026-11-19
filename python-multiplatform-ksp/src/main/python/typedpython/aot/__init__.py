@@ -13,6 +13,7 @@ owner-confirmed) as small-int / big-int values of runtime/tp_aot_int.h; `aot/rep
 """
 from __future__ import annotations
 
+import ast
 import re
 import tempfile
 from dataclasses import dataclass
@@ -66,7 +67,13 @@ def _lower(program, library=None, strict_int: bool = False, explain: list | None
                                   f"the front end failed on this program ({type(e).__name__}: {first})", None)]
 
     if library is None:
-        expected = [f.name for f in program.functions] + [MAIN]
+        method_names = [
+            f"{c.name}.{st.name}"
+            for c in program.classes
+            for st in c.body
+            if isinstance(st, ast.FunctionDef)
+        ]
+        expected = [f.name for f in program.functions] + method_names + [MAIN]
 
         def emit_fn(proved, program):
             return emit_mod.emit(proved, program, strict_int=strict_int)

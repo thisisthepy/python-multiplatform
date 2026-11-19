@@ -102,8 +102,7 @@ TABLE = [
     ("aot/builtin-unavailable", "def f(x: int) -> None:\n    map(None, x)\n", (ERR, None, "map", 2)),
     # aot/builtin (pending K: non-constant module-level statement)
     ("aot/builtin", "x = 1\nfor i in range(3):\n    pass\n", (PEND, "K", "For", 2)),
-    # aot/class (pending O)
-    ("aot/class", "class C:\n    x: int\n", (PEND, "O", "C", 1)),
+    # aot/class-shape (kept above)
     # aot/str, aot/container, aot/exception, aot/builtin (pending S)
     ("aot/str", "def f() -> str:\n    return 'a b'.upper()\n", (PEND, "S", "upper", 2)),
     ("aot/str", "def f(s: str) -> int:\n    return s.find('a')\n", (PEND, "S", "find", 2)),
@@ -132,7 +131,7 @@ def test_every_rule_of_the_table_has_a_row():
     assert rules >= {
         "aot/dynamic-code", "aot/import", "aot/identity", "aot/introspection", "aot/generator", "aot/async",
         "aot/closure", "aot/global", "aot/decorator", "aot/with", "aot/match", "aot/class-shape",
-        "aot/class", "aot/inheritance", "aot/signal", "aot/set-order", "aot/star-args", "aot/numpy",
+        "aot/inheritance", "aot/signal", "aot/set-order", "aot/star-args", "aot/numpy",
         "aot/builtin-unavailable", "aot/builtin", "aot/str", "aot/container", "aot/exception",
         "aot/threading",
     }
@@ -219,8 +218,9 @@ def test_tier_k_benchmarks_are_ready_and_free_of_findings(benchmark):
 
 def test_tier_o_and_s_benchmarks_still_report_pending_findings():
     bt = aotcheck.check(BENCH / "binary_trees.py")
-    assert bt.blocking
-    assert any(f.kind == "pending" and f.tier == "O" and f.rule == "aot/class" for f in bt.findings), bt.lines()
+    assert not bt.blocking, bt.lines()
+    assert not bt.findings, bt.lines()
+    assert all(s.ready for s in bt.functions), [(s.name, s.reasons) for s in bt.functions if not s.ready]
 
     wf = aotcheck.check(BENCH / "wordfreq.py")
     assert wf.blocking
@@ -287,7 +287,6 @@ def test_lines_are_those_of_the_original_file(tmp_path):
     """), front_end=False)
     assert sorted((f.line, f.rule, f.name) for f in report.findings) == [
         (4, "aot/dynamic-code", "eval"),
-        (6, "aot/class", "C"),
         (10, "aot/dynamic-code", "exec"),
         (12, "aot/decorator", "staticmethod"),
         (14, "aot/identity", "id"),
