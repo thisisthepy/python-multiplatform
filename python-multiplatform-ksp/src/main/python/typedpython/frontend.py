@@ -1834,6 +1834,13 @@ class _Lowerer:
                 return e
             if isinstance(e, ir.Call) and e.type in ir.ARRAYS:
                 raise Skip(line, f"`{_src(node)}` returns {TYPE_NAME[e.type]}, but {what} is {TYPE_NAME[want]}")
+        if isinstance(node, ast.Attribute):
+            fg = self.field_get(node)
+            if fg is not None:
+                if fg.type == want:
+                    return fg
+                if fg.type in ir.ARRAYS:
+                    raise Skip(line, f"`{_src(node)}` has type {TYPE_NAME[fg.type]}, but {what} is {TYPE_NAME[want]}")
         raise Skip(line, f"{what} is bound to `{_src(node)}`, which is not a list the AOT mode can make "
                          "(`[a, b]`, `[v] * n`, `n * [v]`, `list(range(n))`, `src[:]`, another list's name, or "
                          "a call of a program function that returns a list)")
@@ -2014,9 +2021,12 @@ class _Lowerer:
         if self.info.aot:
             decl = self.info.classes[cls]
             fd = next((f for f in decl.field_decls if f.name == target.attr), None)
-            value = self.value(value_node)
-            if fd is not None and fd.type == Type.F64 and value.type == Type.I64:
-                value = ir.ToFloat(Type.F64, value)
+            if fd is not None and fd.type in ir.ARRAYS:
+                value = self.array_expr(value_node, fd.type, f"field `{cls}.{target.attr}`")
+            else:
+                value = self.value(value_node)
+                if fd is not None and fd.type == Type.F64 and value.type == Type.I64:
+                    value = ir.ToFloat(Type.F64, value)
             self.impure = True
             return self.take() + [ir.FieldSet(obj, cls, target.attr, value)]
         if not exact:
@@ -2730,7 +2740,13 @@ class _Lowerer:
             if new_cls is not None:
                 self.hoist_ok = False
                 if self.info.aot:
-                    return ir.New(Type.OBJ, new_cls, tuple(self.value(a) for a in node.args))
+                    new_args = []
+                    for a in node.args:
+                        if isinstance(a, ast.Name) and a.id in self.arrays:
+                            new_args.append(ir.Local(self.arrays[a.id], a.id))
+                        else:
+                            new_args.append(self.value(a))
+                    return ir.New(Type.OBJ, new_cls, tuple(new_args))
                 return ir.New(Type.OBJ, new_cls,
                               tuple(self.boxed(self.value(a), a) for a in node.args))
             if not self.is_local(name) and name in self.env:

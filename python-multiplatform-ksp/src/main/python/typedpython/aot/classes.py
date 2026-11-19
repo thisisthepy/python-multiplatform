@@ -160,7 +160,21 @@ class ClassAnalysis:
         return (cls, fname) in self.immutable_fields
 
     def class_immutable_for_library(self, cls: str) -> bool:
-        return cls in self.immutable_all_classes
+        seen: set[str] = set()
+        stack: list[str] = [cls]
+        while stack:
+            cur = stack.pop()
+            if cur in seen:
+                continue
+            seen.add(cur)
+            if cur not in self.immutable_all_classes:
+                return False
+            decl = self.classes.get(cur)
+            if decl is not None:
+                for fd in decl.field_decls:
+                    if fd.type == Type.OBJ and fd.cls is not None and fd.cls in self.classes:
+                        stack.append(fd.cls)
+        return True
 
 
 def analyze_classes(module: ir.Module, rel: str, class_lines: dict[str, int] | None = None,
@@ -176,13 +190,20 @@ def analyze_classes(module: ir.Module, rel: str, class_lines: dict[str, int] | N
         for fd in c.field_decls:
             field_map[(c.name, fd.name)] = fd
 
-    # 1. Find all field stores outside C.__init__
+    # 1. Find all field stores outside C.__init__ (or on a non-self receiver inside C.__init__)
     mutating_stores: dict[tuple[str, str], tuple[str, int]] = {}
     funcs_by_name = {f.name: f for f in module.functions}
     for fn in module.functions:
+        self_name = fn.params[0].name if fn.params else None
         for s in _walk_stmts(fn.body):
             if isinstance(s, ir.FieldSet):
-                if fn.name != f"{s.cls}.__init__":
+                is_self_init = (
+                    fn.name == f"{s.cls}.__init__"
+                    and self_name is not None
+                    and isinstance(s.obj, ir.Local)
+                    and s.obj.name == self_name
+                )
+                if not is_self_init:
                     mutating_stores.setdefault((s.cls, s.field), (fn.name, fn.source_line))
 
     # 2. Check self escape in each C.__init__
@@ -250,7 +271,10 @@ def analyze_classes(module: ir.Module, rel: str, class_lines: dict[str, int] | N
                 ]
                 if mut_fields:
                     fname, (where_fn, where_line) = mut_fields[0]
-                    reason = f"field `{fname}` is mutated outside `__init__` in `{where_fn}` (line {where_line})"
+                    if where_fn == f"{culprit}.__init__":
+                        reason = f"field `{fname}` is mutated on another instance in `{where_fn}` (line {where_line})"
+                    else:
+                        reason = f"field `{fname}` is mutated outside `__init__` in `{where_fn}` (line {where_line})"
                 else:
                     reason = f"class `{culprit}` is not immutable after `__init__`"
             findings.append(Finding(

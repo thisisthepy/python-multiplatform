@@ -75,7 +75,8 @@ def test_fields_methods_and_identity(tmp_path: Path):
         def score(self) -> float:
             total: float = self.y + float(self.x)
             if self.flag:
-                total += float(self.items[0])
+                items: list[int] = self.items
+                total += float(items[0])
             c: Box | None = self.child
             if c is not None:
                 total += c.score()
@@ -300,3 +301,156 @@ def test_library_mutable_class_rejected(tmp_path: Path):
     with pytest.raises(aot.AotError) as exc:
         aot.generate_library(p, exports=["bump"], prefix="mylib")
     assert any(f.rule == "aot/library-mutable-class" and f.name == "Counter" for f in exc.value.findings)
+
+
+def test_adversarial_init_mutating_other_instance_retains_local(tmp_path: Path):
+    """Reproducer 1 (UAF): Holder.__init__ mutates another Holder instance's field while a local holds it."""
+    src = """
+    class Payload:
+        __slots__ = ("val",)
+        val: int
+
+        def __init__(self, val: int) -> None:
+            self.val = val
+
+
+    class Holder:
+        __slots__ = ("item",)
+        item: "Payload | None"
+
+        def __init__(self, other: "Holder | None", item: "Payload | None") -> None:
+            self.item = item
+            if other is not None:
+                other.item = None
+
+
+    def main() -> None:
+        a: Holder = Holder(None, Payload(77))
+        t: Payload | None = a.item
+        b: Holder = Holder(a, Payload(88))
+        bi: Payload | None = b.item
+        if t is not None and bi is not None:
+            print(t.val, bi.val)
+
+
+    if __name__ == "__main__":
+        main()
+    """
+    cp, aot_res = _run_both(tmp_path, src)
+    assert cp.returncode == 0
+    assert aot_res.returncode == 0
+    assert aot_res.stdout == cp.stdout
+
+
+def test_cycle_possible_init_mutating_other_instance_rejected(tmp_path: Path):
+    """Reproducer 2 (Acyclicity bypass): Node.__init__ mutating prev.nxt on another Node is rejected."""
+    p = _write(tmp_path, """
+    class Node:
+        __slots__ = ("v", "nxt")
+        v: int
+        nxt: "Node | None"
+
+        def __init__(self, v: int, prev: "Node | None", nxt: "Node | None") -> None:
+            self.v = v
+            self.nxt = nxt
+            if prev is not None:
+                prev.nxt = nxt
+
+
+    def main() -> None:
+        a: Node = Node(1, None, None)
+        b: Node = Node(2, a, None)
+        print(b.v)
+
+
+    if __name__ == "__main__":
+        main()
+    """)
+    with pytest.raises(aot.AotError) as exc:
+        aot.generate(p)
+    assert any(f.rule == "aot/cycle-possible" and f.name == "Node" for f in exc.value.findings)
+
+
+def test_tagged_int_field_normal_and_partial_init(tmp_path: Path):
+    """TAGGED int fields are initialized to TPA_INT_ZERO (never NULL) for both normal and partial __init__."""
+    src_ok = """
+    import sys
+
+
+    class BigCell:
+        __slots__ = ("big", "extra")
+        big: int
+        extra: int
+
+        def __init__(self, x: int) -> None:
+            self.big = x
+            self.extra = x + (1 << 80)
+
+
+    def main() -> None:
+        n: int = int(sys.argv[1])
+        c: BigCell = BigCell(n)
+        d: BigCell = BigCell(1 << 80)
+        print(c.big, c.extra, d.big, d.extra)
+
+
+    if __name__ == "__main__":
+        main()
+    """
+    cp, aot_res = _run_both(tmp_path, src_ok, args=["123456789012345678901234567890"], name="big_ok.py")
+    assert cp.returncode == 0
+    assert aot_res.returncode == 0
+    assert aot_res.stdout == cp.stdout
+
+    src_fail = """
+    class BigFail:
+        __slots__ = ("a", "b")
+        a: int
+        b: int
+
+        def __init__(self, denom: int) -> None:
+            self.a = 1 << 100
+            self.b = (1 << 100) // denom
+
+
+    def main() -> None:
+        x: BigFail = BigFail(0)
+        print(x.a)
+
+
+    if __name__ == "__main__":
+        main()
+    """
+    cp2, aot_res2 = _run_both(tmp_path, src_fail, name="big_fail.py")
+    assert cp2.returncode != 0
+    assert aot_res2.returncode != 0
+    assert "ZeroDivisionError" in aot_res2.stderr
+
+
+def test_library_transitively_mutable_class_rejected(tmp_path: Path):
+    """Library mode checks transitive immutability across reachable class fields."""
+    p = _write(tmp_path, """
+    class Inner:
+        __slots__ = ("n",)
+        n: int
+
+        def __init__(self, n: int) -> None:
+            self.n = n
+
+
+    class Outer:
+        __slots__ = ("inner",)
+        inner: Inner
+
+        def __init__(self, inner: Inner) -> None:
+            self.inner = inner
+
+
+    def mutate(o: Outer) -> int:
+        inn: Inner = o.inner
+        inn.n = inn.n + 1
+        return inn.n
+    """)
+    with pytest.raises(aot.AotError) as exc:
+        aot.generate_library(p, exports=["mutate"], prefix="mylib")
+    assert any(f.rule == "aot/library-mutable-class" and f.name == "Outer" for f in exc.value.findings)

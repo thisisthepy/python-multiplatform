@@ -1329,7 +1329,7 @@ class _Checker:
                                  f"(the redone value may be a big int)")
             else:
                 redo = True
-        if not redo:
+        if not redo and not self.aot:
             for p in callee.params:
                 # The callee's entry guard `type(x) is C` may fail, even for an argument that is a
                 # just-allocated `New(C)` local: on free-threaded CPython another thread can find
@@ -1599,26 +1599,33 @@ class _Checker:
 
     def e_New(self, e: New, state: _State) -> ir.Expr:
         if self.aot:
-            args = self.args(e.args, state, f"New {e.cls}")
-            self.result(e, Type.OBJ)
+            expected_types: list[Type] = []
             if self.known_class(e.cls, "New"):
                 decl = self.classes[e.cls]
                 init_sig = self.sigs.get(f"{e.cls}.__init__")
                 if init_sig is not None:
-                    expected_params = init_sig.params[1:]
-                    if len(args) != len(expected_params):
-                        self.error(CLASS, f"New of '{e.cls}' has {len(args)} argument(s) for "
-                                          f"{len(expected_params)} parameter(s)")
-                    else:
-                        for k, (a, p) in enumerate(zip(args, expected_params)):
-                            self.slot(a, p.type, f"argument {k + 1} of New {e.cls}")
+                    expected_types = [p.type for p in init_sig.params[1:]]
                 else:
-                    if len(args) != len(decl.field_decls):
-                        self.error(CLASS, f"New of '{e.cls}' has {len(args)} argument(s) for "
-                                          f"{len(decl.field_decls)} field(s)")
+                    expected_types = [fd.type for fd in decl.field_decls]
+            if not isinstance(e.args, tuple):
+                self.error(SHAPE, f"New {e.cls} args {e.args!r} is not a tuple")
+                args: tuple[ir.Expr, ...] = ()
+            else:
+                checked: list[ir.Expr] = []
+                for k, a in enumerate(e.args):
+                    if k < len(expected_types) and expected_types[k] in ir.ARRAYS:
+                        checked.append(self.array_value(a, state))
                     else:
-                        for k, (a, fd) in enumerate(zip(args, decl.field_decls)):
-                            self.slot(a, fd.type, f"argument {k + 1} of New {e.cls}")
+                        checked.append(self.expr(a, state))
+                args = tuple(checked)
+            self.result(e, Type.OBJ)
+            if e.cls in self.classes:
+                if len(args) != len(expected_types):
+                    self.error(CLASS, f"New of '{e.cls}' has {len(args)} argument(s) for "
+                                      f"{len(expected_types)} parameter(s)")
+                else:
+                    for k, (a, et) in enumerate(zip(args, expected_types)):
+                        self.slot(a, et, f"argument {k + 1} of New {e.cls}")
             return dataclasses.replace(e, args=args)
         self.slow_user.append(f"New {e.cls} (calls the class after a class change)")
         self.shared.append(f"the class global of New {e.cls}")
@@ -1834,8 +1841,8 @@ class _Checker:
             # AOT mode: also another list's name (both names then mean the one list) or a call that
             # returns a list
             value = self.array_value(s.value, state)
-            if type(value) not in (Local, Call):
-                self.error(ESCAPE, f"local array '{target}' may be assigned a creation, a list name or a call, "
+            if type(value) not in (Local, Call, FieldGet):
+                self.error(ESCAPE, f"local array '{target}' may be assigned a creation, a list name, a call or a field, "
                                    f"not {type(value).__name__}")
             elif getattr(value, "type", None) is not self.larrays[target]:
                 self.error(TYPE, f"local array '{target}' is {self.larrays[target].value} but is assigned "
@@ -2007,7 +2014,6 @@ class _Checker:
 
     def s_FieldSet(self, s: FieldSet, state: _State):
         obj = self.obj_operand(s.obj, state, f"object of .{s.field} =")
-        value = self.expr(s.value, state)
         if self.aot:
             expected = Type.OBJ
             if self.known_field(s.cls, s.field, f"FieldSet .{s.field}"):
@@ -2015,9 +2021,11 @@ class _Checker:
                 fd = next((f for f in decl.field_decls if f.name == s.field), None)
                 if fd is not None:
                     expected = fd.type
+            value = self.array_value(s.value, state) if expected in ir.ARRAYS else self.expr(s.value, state)
             self.slot(value, expected, f"value stored into .{s.field}")
             self.effects.append(f"FieldSet .{s.field} (a store)")
             return dataclasses.replace(s, obj=obj, value=value), state
+        value = self.expr(s.value, state)
         self.slot(value, Type.OBJ, f"value stored into .{s.field}")
         if self.known_field(s.cls, s.field, f"FieldSet .{s.field}"):
             self.proved(obj, s.cls, f"FieldSet {s.cls}.{s.field}")

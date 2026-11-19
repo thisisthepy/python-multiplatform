@@ -334,15 +334,32 @@ class Representation:
                     self.node((f.name, name), UNSET)
             if f.returns is Type.I64_ARRAY:
                 self.node((f.name, RETURN))
+        for c in self.module.classes:
+            for fd in c.field_decls:
+                if fd.type is Type.I64_ARRAY:
+                    self.node((f"<class:{c.name}>", fd.name))
         for f in self.module.functions:
             for s in f.body:
                 for n, cur in walk_stmts(s):
                     if isinstance(n, ir.Assign) and (f.name, n.target) in self._parent:
                         self.bind((f.name, n.target), n.value, f, cur, "assignment")
+                    elif isinstance(n, ir.FieldSet) and (f"<class:{n.cls}>", n.field) in self._parent:
+                        self.bind((f"<class:{n.cls}>", n.field), n.value, f, cur, "field assignment")
                     elif isinstance(n, ir.Return) and f.returns is Type.I64_ARRAY and n.value is not None:
                         self.bind((f.name, RETURN), n.value, f, cur, "return")
                     elif isinstance(n, ir.Call):
                         self.bind_call(n, f, cur)
+                    elif isinstance(n, ir.New):
+                        init_fn = self.fns.get(f"{n.cls}.__init__")
+                        if init_fn is not None:
+                            for p, a in zip(init_fn.params[1:], n.args):
+                                if isinstance(p, ir.ArrayParam) and p.type is Type.I64_ARRAY:
+                                    if isinstance(a, ir.Local) and a.type is Type.I64_ARRAY:
+                                        self.union((f.name, a.name), (init_fn.name, p.name), f.name, cur,
+                                                   f"the argument and the parameter `{p.name}` of `{init_fn.name}`")
+                                    else:
+                                        self.mark_big((init_fn.name, p.name), f.name, cur,
+                                                      f"an argument of `{init_fn.name}` that is not a list name")
 
     def bind(self, target: Key, value: ir.Expr, f: ir.Function, cur: int | None, how: str) -> None:
         """`target` takes the list `value`: a name (one group), a call result (one group with the callee's returned
@@ -367,6 +384,12 @@ class Representation:
                 self._copies.append((src, target, f.name, cur))
             elif self.types_of(f).get(value.src) is Type.I64_ARRAY:
                 self.mark_big(target, f.name, cur, f"a copy of `{value.src}`, which is not a list of this function")
+        elif isinstance(value, ir.FieldGet):
+            fkey = (f"<class:{value.cls}>", value.field)
+            if fkey in self._parent:
+                self.union(target, fkey, f.name, cur, f"reads list field `{value.cls}.{value.field}`")
+            else:
+                self.mark_big(target, f.name, cur, f"reads unknown list field `{value.cls}.{value.field}`")
         elif not isinstance(value, (ir.NewArray, ir.ListDisplay)):
             self.mark_big(target, f.name, cur, f"{how} of an expression that is not understood")
 
@@ -490,19 +513,6 @@ class Representation:
             return self.field_reps.get((e.cls, e.field), RAW)
         if isinstance(e, (ir.ArgvInt, ir.FloatToInt, ir.StrToInt, ir.MathCall)):
             return TAGGED
-        if isinstance(e, ir.New):
-            init_name = f"{e.cls}.__init__"
-            callee = self.fns.get(init_name)
-            if callee is not None:
-                cr = self.reps[init_name]
-                for a, p in zip(e.args, callee.params[1:]):
-                    if isinstance(p, ir.Param) and p.type is Type.I64 and self._of(r, a) == TAGGED:
-                        if cr.names.get(p.name, RAW) != TAGGED:
-                            cr.names[p.name] = TAGGED
-                            changed = True
-            for a in e.args:
-                changed |= self._expr_calls(r, a)
-            return changed
         if isinstance(e, ir.Call):
             callee = self.reps.get(e.function)
             return callee.returns if callee is not None else TAGGED
@@ -635,6 +645,14 @@ class Representation:
                     callee = self.reps.get(n.function)
                     if callee_fn is not None and callee is not None:
                         for p, a in zip(callee_fn.params, n.args):
+                            if isinstance(p, ir.Param) and p.type is Type.I64:
+                                changed |= self.raise_(callee.names, p.name, self._of(r, a))
+                elif isinstance(n, ir.New):
+                    init_name = f"{n.cls}.__init__"
+                    callee_fn = self.fns.get(init_name)
+                    callee = self.reps.get(init_name)
+                    if callee_fn is not None and callee is not None:
+                        for p, a in zip(callee_fn.params[1:], n.args):
                             if isinstance(p, ir.Param) and p.type is Type.I64:
                                 changed |= self.raise_(callee.names, p.name, self._of(r, a))
         return changed

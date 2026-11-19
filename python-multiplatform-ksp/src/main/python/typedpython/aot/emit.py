@@ -332,6 +332,9 @@ class _Gen:
             out.append("        return -1;")
             out.append("    }")
             out.append("    obj->rc = 1;")
+            for fd in decl.field_decls:
+                if fd.type is Type.I64 and self.reps.field(decl.name, fd.name) == TAGGED:
+                    out.append(f"    obj->f_{mangle(fd.name)} = TPA_INT_ZERO;")
             if init_fn is not None:
                 out.append(f"    if (tpf_{mangle(init_fn.name)}({', '.join(call_args)}) != 0) {{")
                 out.append(f"        tpa_cls_{mc}_release(obj);")
@@ -705,13 +708,29 @@ class _Fn:
         init_fn = self.g.fns.get(f"{e.cls}.__init__")
         args: list[str] = []
         if init_fn is not None:
+            ok = True
             for p, a in zip(init_fn.params[1:], e.args):
                 if isinstance(p, ir.ArrayParam):
-                    args.append(f"v_{mangle(a.name)}" if isinstance(a, ir.Local) else self.ev(a))
+                    if not (isinstance(a, ir.Local) and a.type is p.type and a.name in self.types):
+                        ok = False
+                        self.bad("aot/type", init_fn.name, f"the argument for list parameter `{p.name}` of "
+                                 f"`{init_fn.name}` is not a list of its type")
+                    elif self.kind(a.name) != self.g.array_kind(init_fn.name, p.name, p.type):
+                        ok = False
+                        self.bad("aot/type", init_fn.name, f"the list `{a.name}` and the parameter `{p.name}` of "
+                                 f"`{init_fn.name}` are lists of different kinds")
+                    else:
+                        args.append(f"v_{mangle(a.name)}")
                 elif isinstance(p, ir.Param) and self.g.tagged_param(init_fn, p):
                     args.append(self.tagged(a))
                 else:
                     args.append(self.ev(a))
+                    if a.type is Type.I64 and self.rep(a) == TAGGED:
+                        ok = False
+                        self.bad("aot/type", init_fn.name, f"a TAGGED int is passed for the RAW parameter "
+                                 f"`{p.name}` of `{init_fn.name}` (the representation did not converge)")
+            if not ok:
+                return "NULL"
         else:
             for a in e.args:
                 args.append(self.ev(a))
@@ -1229,8 +1248,8 @@ class _Fn:
         if e.type is not want or want not in LIST:
             self.bad("aot/type", "list", f"a {getattr(e.type, 'value', '?')} is used where a {want.value} list is needed")
             return "NULL", True
-        if isinstance(e, ir.Local):
-            return self.ev_Local(e), False
+        if isinstance(e, (ir.Local, ir.FieldGet)):
+            return self.ev(e), False
         return self.ev(e), True
 
     def st_Assign(self, s: ir.Assign) -> None:
