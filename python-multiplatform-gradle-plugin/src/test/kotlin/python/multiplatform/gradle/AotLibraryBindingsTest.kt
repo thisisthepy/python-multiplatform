@@ -407,12 +407,13 @@ class AotLibraryBindingsTest {
         }
         assertTrue(end > start, "reachability metadata's `downcalls` array is not closed")
         val body = json.substring(start, end)
-        return Regex("""\{\s*"returnType"\s*:\s*"(\w+)"\s*,\s*"parameterTypes"\s*:\s*\[([^]]*)]\s*}""")
+        return Regex("""\{\s*"returnType"\s*:\s*"([\w ]+)"\s*,\s*"parameterTypes"\s*:\s*\[([^]]*)]\s*}""")
             .findAll(body)
             .mapTo(LinkedHashSet()) { match ->
                 AotForeignDescriptor(
-                    match.groupValues[1],
-                    match.groupValues[2].split(',').map { it.trim().trim('"') }.filter { it.isNotEmpty() },
+                    aotCarrierNameOfGraalLayout(match.groupValues[1]),
+                    match.groupValues[2].split(',').map { it.trim().trim('"') }.filter { it.isNotEmpty() }
+                        .map(::aotCarrierNameOfGraalLayout),
                 )
             }
     }
@@ -448,7 +449,7 @@ class AotLibraryBindingsTest {
         assertFalse(ffm.contains("foreign(\""), "AotFfm must use Class.forName string literals for native-image analysis")
         val classLiterals = Regex("""Class\.forName\("([^"]+)"\)""")
             .findAll(ffm)
-            .mapTo(LinkedHashSet()) { it.groupValues[1] }
+            .mapTo(LinkedHashSet()) { it.groupValues[1].replace("\\$", "$") }
         assertEquals(11, classLiterals.size, "expected 11 java.lang.foreign Class.forName literals: $classLiterals")
 
         val metadata = renderAotReachabilityMetadata(parseAotLibraryDescription(description()))

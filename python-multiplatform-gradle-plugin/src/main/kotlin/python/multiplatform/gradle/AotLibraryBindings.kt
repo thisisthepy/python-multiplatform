@@ -225,6 +225,31 @@ fun aotReachabilityMetadataPath(packageName: String, prefix: String): String =
     "META-INF/native-image/$packageName/$prefix/reachability-metadata.json"
 
 /**
+ * The spelling GraalVM's foreign configuration parser accepts for a carrier type. It does not take Java type names:
+ * `MemoryLayoutParser` looks each name up in `Linker.nativeLinker().canonicalLayouts()` (bool, char, short, int, long,
+ * long long, float, double, void*, size_t, wchar_t) and only the return type may also be `void`
+ * (`ForeignFunctionsConfigurationParser`, sources shipped in the NIK as lib/svm/builder/svm-foreign.src.zip).
+ * `long long` is the 64-bit layout on every platform (`long` is 32-bit on Windows); `char` is `JAVA_BYTE`.
+ */
+internal fun aotGraalLayoutName(carrier: String): String = when (carrier) {
+    "long" -> "long long"
+    "double" -> "double"
+    "byte" -> "char"
+    "int" -> "int"
+    "void" -> "void"
+    else -> fail("unknown carrier type `$carrier`")
+}
+
+internal fun aotCarrierNameOfGraalLayout(layout: String): String = when (layout) {
+    "long long" -> "long"
+    "double" -> "double"
+    "char" -> "byte"
+    "int" -> "int"
+    "void" -> "void"
+    else -> fail("unknown GraalVM layout `$layout`")
+}
+
+/**
  * GraalVM `reachability-metadata.json` for [d]: every foreign downcall descriptor bound by `Handles` and every
  * `java.lang.foreign` reflection entry used once at link time by `AotFfmRuntime`.
  */
@@ -234,9 +259,9 @@ fun renderAotReachabilityMetadata(d: AotLibraryDescription): String = buildStrin
     append("  \"foreign\": {\n")
     append("    \"downcalls\": [\n")
     downcalls.forEachIndexed { index, desc ->
-        val params = desc.parameterTypes.joinToString(", ") { "\"$it\"" }
+        val params = desc.parameterTypes.joinToString(", ") { "\"${aotGraalLayoutName(it)}\"" }
         val comma = if (index < downcalls.lastIndex) "," else ""
-        append("      { \"returnType\": \"${desc.returnType}\", \"parameterTypes\": [$params] }$comma\n")
+        append("      { \"returnType\": \"${aotGraalLayoutName(desc.returnType)}\", \"parameterTypes\": [$params] }$comma\n")
     }
     append("    ]\n")
     append("  },\n")
