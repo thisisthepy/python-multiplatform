@@ -74,3 +74,20 @@ def test_format_aot_report():
     assert "cpu_model: Test CPU" in report
     assert "| benchmark | size | AOT stripped | Rust stripped | size ratio | AOT RSS | Rust RSS | CPython RSS | RSS ratio | AOT CPU | Rust CPU | CPU ratio |" in report
     assert "| empty | - | 16.0 KiB | 320.0 KiB | 0.05x | 1.00 MiB | 2.00 MiB | 10.00 MiB | 0.50x | 0.0010s | 0.0010s | 1.00x |" in report
+
+
+def test_run_once_with_usage_isolates_child_rss():
+    """#488: a tiny POSIX child launched via posix_spawnp must not inherit the Python parent's RSS."""
+    if sys.platform == "win32":
+        return
+    mod = _load_run_module()
+    # Inflate parent RSS slightly so any fork-inherited RSS would be unmistakable.
+    pad = bytearray(32 * 1024 * 1024)
+    for i in range(0, len(pad), 4096):
+        pad[i] = 1
+    res = mod.run_once_with_usage(["/bin/echo", "ok"])
+    assert res["returncode"] == 0
+    assert res["stdout"] == "ok"
+    assert isinstance(res["max_rss_bytes"], int)
+    assert 0 < res["max_rss_bytes"] < 20 * 1024 * 1024, f"child RSS inherited parent padding: {res['max_rss_bytes']}"
+    assert pad[0] == 1

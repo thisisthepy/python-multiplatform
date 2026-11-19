@@ -713,10 +713,28 @@ def binary_sizes(path: Path) -> tuple[int, int]:
 
 
 def run_once_with_usage(cmd: list[str], env: dict[str, str] | None = None) -> dict[str, object]:
-    """Run one child process and return wall time, CPU time, peak RSS (bytes), exit code, and stdout."""
+    """Run one child process and return wall time, CPU time, peak RSS (bytes), exit code, and stdout.
+
+    On POSIX, prefer `os.posix_spawnp` + `os.wait4` over `subprocess.Popen` (`fork` + `exec`): on Linux
+    a forked child inherits the parent Python harness's resident set before `exec`, which inflates
+    `ru_maxrss` to the parent's RSS (#488). `posix_spawnp` uses `vfork`/`clone(CLONE_VFORK)` so the
+    child's `ru_maxrss` reflects only the child binary itself.
+    """
     with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
         start = time.perf_counter()
-        if hasattr(os, "wait4"):
+        if hasattr(os, "posix_spawnp") and hasattr(os, "wait4"):
+            spawn_env = os.environ if env is None else env
+            file_actions = [
+                (os.POSIX_SPAWN_DUP2, out_f.fileno(), 1),
+                (os.POSIX_SPAWN_DUP2, err_f.fileno(), 2),
+            ]
+            pid = os.posix_spawnp(cmd[0], cmd, spawn_env, file_actions=file_actions)
+            _, status, rusage = os.wait4(pid, 0)
+            elapsed = time.perf_counter() - start
+            returncode = os.waitstatus_to_exitcode(status)
+            cpu_s = float(rusage.ru_utime) + float(rusage.ru_stime)
+            max_rss_bytes = normalize_ru_maxrss(int(rusage.ru_maxrss))
+        elif hasattr(os, "wait4"):
             proc = subprocess.Popen(cmd, stdout=out_f, stderr=err_f, env=env)
             _, status, rusage = os.wait4(proc.pid, 0)
             elapsed = time.perf_counter() - start
