@@ -2470,7 +2470,7 @@ static TPA_UNUSED int tpa_int_lshift(tpa_int a, tpa_int b, tpa_int *out)
         *out = a;
         return 0;
     }
-    if (!tpa_int_to_i64(b, &shift_i64) || shift_i64 < 0) {
+    if (tpa_int_to_i64(b, &shift_i64) != 0 || shift_i64 < 0) {
         return tpa_raise(TPA_OverflowError, "Python int too large to convert to C ssize_t");
     }
     shift = (uint64_t)shift_i64;
@@ -2541,7 +2541,7 @@ static TPA_UNUSED int tpa_int_rshift(tpa_int a, tpa_int b, tpa_int *out)
         *out = a;
         return 0;
     }
-    if (!tpa_int_to_i64(b, &shift_i64) || shift_i64 < 0) {
+    if (tpa_int_to_i64(b, &shift_i64) != 0 || shift_i64 < 0) {
         *out = tpa_int_small(tpa_int_cmp_i64(a, 0) < 0 ? -1 : 0);
         return 0;
     }
@@ -2692,7 +2692,7 @@ static TPA_UNUSED int tpa_int_pow(tpa_int a, tpa_int b, tpa_int *out)
         *out = tpa_int_small((bn > 0 && (bd[0] & 1u)) ? -1 : 1);
         return 0;
     }
-    if (!tpa_int_to_i64(b, &exp_i64) || exp_i64 < 0) {
+    if (tpa_int_to_i64(b, &exp_i64) != 0 || exp_i64 < 0) {
         return tpa_raise(TPA_MemoryError, "");
     }
     e = (uint64_t)exp_i64;
@@ -2793,7 +2793,7 @@ static inline void tpa_exit_int(tpa_int code)
     int64_t v = 0;
     fflush(stdout);
     fflush(stderr);
-    if (tpa_int_to_i64(code, &v)) {
+    if (tpa_int_to_i64(code, &v) == 0) {
         exit((int)(v & 0xff));
     }
     exit(255);

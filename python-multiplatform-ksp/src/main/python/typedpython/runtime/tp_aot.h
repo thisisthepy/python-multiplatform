@@ -1562,7 +1562,7 @@ static inline int tpa_pow_f64(double iv, double iw, double *out)
     }
     if (iv == 0.0) {
         if (iw < 0.0) {
-            tpa_raise(TPA_ZeroDivisionError, "0.0 cannot be raised to a negative power");
+            tpa_raise(TPA_ZeroDivisionError, "zero to a negative power");
             return -1;
         }
         *out = tpa__f64_is_odd_integer(iw) ? iv : 0.0;
