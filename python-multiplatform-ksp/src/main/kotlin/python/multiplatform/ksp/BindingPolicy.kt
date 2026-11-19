@@ -237,7 +237,7 @@ object BindingPolicy {
      * has nothing behind it.
      */
     fun hasExposableTypes(function: KSFunctionDeclaration): Boolean =
-        function.parameters.all { isExposableType(it.type) } &&
+        function.parameters.all { isExposableParameterType(it.type) } &&
             (function.returnType?.let { isExposableType(it) } ?: true)
 
     /** [hasExposableTypes] for a property's own type. */

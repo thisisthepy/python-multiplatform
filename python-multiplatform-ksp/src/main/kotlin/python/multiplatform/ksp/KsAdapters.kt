@@ -9,10 +9,48 @@ import com.google.devtools.ksp.symbol.Variance
 
 private const val PY_OBJECT_QUALIFIED_NAME = "python.multiplatform.ffi.PyObject"
 
-/** Reduces a resolved KSP type to the plain data [castExpression]/[wrapReturnExpression] work on. */
-fun KSType.toShape(): TypeShape {
+/**
+ * Reduces a resolved KSP type to the plain data [castExpression]/[wrapReturnExpression] work on.
+ *
+ * When [allowTopLevelSuspendFunction] is `true` (parameter positions of functions/constructors,
+ * SPEC U-5a, #164 item 7), a `suspend` function type is rendered as a `suspend (...) -> ...` cast
+ * target and carries `kotlin.coroutines.SuspendFunctionN(Arg1,...)->Ret` as its slot metadata name.
+ */
+fun KSType.toShape(allowTopLevelSuspendFunction: Boolean = false): TypeShape {
+    val expanded = expandTypeAlias(this)
+    if (allowTopLevelSuspendFunction && expanded.isSuspendFunctionType) {
+        val arity = expanded.arguments.size - 1
+        val argTypes = expanded.arguments.dropLast(1).mapNotNull { it.type?.resolve() }
+        val retType = expanded.arguments.lastOrNull()?.type?.resolve()
+        if (arity in 0..MAX_SUSPEND_FUNCTION_ARITY && argTypes.size == arity && retType != null) {
+            val argNames = argTypes.map { expandTypeAlias(it).declaration.qualifiedName?.asString() ?: "kotlin.Any" }
+            val retName = expandTypeAlias(retType).declaration.qualifiedName?.asString() ?: "kotlin.Any"
+            val slotName = "kotlin.coroutines.SuspendFunction$arity(" +
+                argNames.joinToString(",") + ")->" + retName
+            val renderedArgs = argTypes.joinToString(", ") { t ->
+                val inner = t.declaration.qualifiedName?.asString() ?: "kotlin.Any"
+                t.renderWithArguments(inner) + if (t.isMarkedNullable) "?" else ""
+            }
+            val retInner = retType.declaration.qualifiedName?.asString() ?: "kotlin.Any"
+            val renderedRet = retType.renderWithArguments(retInner) + if (retType.isMarkedNullable) "?" else ""
+            val castType = "(suspend ($renderedArgs) -> $renderedRet)"
+            return TypeShape(
+                qualifiedName = castType,
+                nullable = isMarkedNullable || expanded.isMarkedNullable,
+                rendered = castType,
+                slotTypeName = slotName,
+            )
+        }
+    }
     val qualifiedName = declaration.qualifiedName?.asString() ?: "kotlin.Any"
     return TypeShape(qualifiedName, isMarkedNullable, rendered = renderWithArguments(qualifiedName))
+}
+
+private const val MAX_SUSPEND_FUNCTION_ARITY = 5
+
+private tailrec fun expandTypeAlias(type: KSType): KSType {
+    val alias = type.declaration as? KSTypeAlias ?: return type
+    return expandTypeAlias(alias.type.resolve())
 }
 
 /**
@@ -38,7 +76,8 @@ private fun KSType.renderWithArguments(qualifiedName: String): String {
     return "$qualifiedName<$renderedArguments>"
 }
 
-fun KSTypeReference.toShape(): TypeShape = resolve().toShape()
+fun KSTypeReference.toShape(allowTopLevelSuspendFunction: Boolean = false): TypeShape =
+    resolve().toShape(allowTopLevelSuspendFunction)
 
 /**
  * Whether [type] can be named in generated source as a classifier Python can actually reach a
@@ -77,6 +116,30 @@ fun isExposableType(type: KSType): Boolean {
         isExposableType(argumentType)
     }
 }
+
+/**
+ * [isExposableType] for a **parameter** position (SPEC U-5a; #164 item 7): allows a top-level
+ * `suspend` function type of arity `0..5` (including nullable forms and `typealias`es thereof)
+ * whose own argument and return types are exposable. Return types, properties, and `suspend`
+ * function types nested inside generic type arguments remain rejected by [isExposableType].
+ */
+fun isExposableParameterType(type: KSType): Boolean {
+    val expanded = expandTypeAlias(type)
+    if (expanded.isSuspendFunctionType) {
+        // Extension suspend function types (`suspend R.() -> T`) are excluded for now (SPEC U-5a).
+        if (expanded.annotations.any { it.shortName.asString() == "ExtensionFunctionType" }) return false
+        val arity = expanded.arguments.size - 1
+        if (arity !in 0..MAX_SUSPEND_FUNCTION_ARITY) return false
+        return expanded.arguments.all { argument ->
+            val argumentType = argument.type?.resolve() ?: return@all false
+            isExposableType(argumentType)
+        }
+    }
+    return isExposableType(expanded)
+}
+
+/** [isExposableParameterType] from a parameter's [KSTypeReference]. */
+fun isExposableParameterType(typeRef: KSTypeReference): Boolean = isExposableParameterType(typeRef.resolve())
 
 /** [isExposableType] from the [KSTypeReference] a parameter, return type or property carries. */
 fun isExposableType(typeRef: KSTypeReference): Boolean = isExposableType(typeRef.resolve())
