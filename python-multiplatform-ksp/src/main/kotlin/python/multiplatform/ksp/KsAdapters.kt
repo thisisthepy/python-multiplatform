@@ -126,6 +126,8 @@ fun isExposableType(type: KSType): Boolean {
 fun isExposableParameterType(type: KSType): Boolean {
     val expanded = expandTypeAlias(type)
     if (expanded.isSuspendFunctionType) {
+        // Extension suspend function types (`suspend R.() -> T`) are excluded for now (SPEC U-5a).
+        if (expanded.annotations.any { it.shortName.asString() == "ExtensionFunctionType" }) return false
         val arity = expanded.arguments.size - 1
         if (arity !in 0..MAX_SUSPEND_FUNCTION_ARITY) return false
         return expanded.arguments.all { argument ->

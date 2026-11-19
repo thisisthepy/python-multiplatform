@@ -12,6 +12,7 @@ import kotlin.metadata.isSuspend
 import kotlin.metadata.isValue
 import kotlin.metadata.isVar
 import kotlin.metadata.jvm.KotlinClassMetadata
+import kotlin.metadata.jvm.annotations
 import kotlin.metadata.jvm.fieldSignature
 import kotlin.metadata.jvm.getterSignature
 import kotlin.metadata.jvm.setterSignature
@@ -1958,28 +1959,52 @@ internal object ArtifactScanner {
     }
 
     /**
-     * A `suspend` function-typed parameter (SPEC U-5a; #164 item 7): Kotlin metadata records
-     * `suspend (A1, ..., AN) -> R` as `kotlin.FunctionN<A1, ..., AN, R>` with `type.isSuspend == true`
-     * (and compiled JVM descriptor `Lkotlin/jvm/functions/Function(N+1);` taking a `Continuation`).
+     * A `suspend` function-typed parameter (SPEC U-5a; #164 item 7): on the JVM, Kotlin metadata
+     * records `suspend (A1, ..., AN) -> R` as `kotlin.Function(N+1)<A1, ..., AN, Continuation<R>, Any?>`
+     * with `type.isSuspend == true`.
      *
-     * Supported for arities `0..5` (matching `PythonCallables.newSuspendFunction`). Emits the
-     * `kotlin.coroutines.SuspendFunctionN(Arg1,...)->Ret` slot name and a Kotlin `suspend (...) -> ...`
-     * cast target.
+     * Supported for non-extension `suspend` function types of arities `0..5` (matching
+     * `PythonCallables.newSuspendFunction`). Extension `suspend` function types (`suspend R.() -> T`,
+     * marked by `@kotlin.ExtensionFunctionType`) are declined with a reason.
      */
     private fun suspendFunctionSlot(type: KmType, declared: String, classpath: ArtifactClasspath): FunctionSlot {
-        val declaredArity = declared.removePrefix(KOTLIN_FUNCTION_PREFIX).toIntOrNull()
-        if (declaredArity == null || declaredArity !in 0..MAX_SUSPEND_FUNCTION_ARITY) {
+        if (type.annotations.any { it.className == EXTENSION_FUNCTION_TYPE_ANNOTATION }) {
             return FunctionSlot(
-                declineReason = "a suspend function-typed parameter ($declared): only arities 0..$MAX_SUSPEND_FUNCTION_ARITY are supported",
+                declineReason = "a suspend extension function-typed parameter ($declared): receiver-carrying suspend lambdas are not supported yet",
             )
         }
+        val jvmArity = declared.removePrefix(KOTLIN_FUNCTION_PREFIX).toIntOrNull()
         val arguments = type.arguments
-        if (arguments.size != declaredArity + 1) {
+        if (jvmArity == null || arguments.size != jvmArity + 1) {
             return FunctionSlot(
                 declineReason = "a suspend function-typed parameter ($declared): unexpected type argument count ${arguments.size}",
             )
         }
-        val classifierNames = arguments.map { projection ->
+        // On JVM metadata, a suspend function type `suspend (A1, ..., AN) -> R` is stored as
+        // `Function(N+1)<A1, ..., AN, kotlin.coroutines.Continuation<R>, kotlin.Any?>`: the second-to-last
+        // type argument is `Continuation<R>` and the last is `Any?`. Unwrap `Continuation<R>` to
+        // recover the true Kotlin parameter list `(A1, ..., AN)` and return type `R`.
+        val continuationType = arguments.getOrNull(arguments.size - 2)?.type
+        val isLoweredContinuation = continuationType != null &&
+            kotlinClassifierNameOf(continuationType) == CONTINUATION_CLASS_NAME &&
+            continuationType.arguments.size == 1
+        val logicalArgProjections: List<kotlin.metadata.KmTypeProjection>
+        val logicalRetProjection: kotlin.metadata.KmTypeProjection
+        if (isLoweredContinuation) {
+            logicalArgProjections = arguments.dropLast(2)
+            logicalRetProjection = continuationType!!.arguments[0]
+        } else {
+            logicalArgProjections = arguments.dropLast(1)
+            logicalRetProjection = arguments.last()
+        }
+        val logicalArity = logicalArgProjections.size
+        if (logicalArity !in 0..MAX_SUSPEND_FUNCTION_ARITY) {
+            return FunctionSlot(
+                declineReason = "a suspend function-typed parameter ($declared): only arities 0..$MAX_SUSPEND_FUNCTION_ARITY are supported",
+            )
+        }
+        val logicalProjections = logicalArgProjections + logicalRetProjection
+        val classifierNames = logicalProjections.map { projection ->
             val argType = projection.type ?: return FunctionSlot(
                 declineReason = "a suspend function-typed parameter ($declared): a type argument is a star projection",
             )
@@ -1987,7 +2012,7 @@ internal object ArtifactScanner {
                 declineReason = "a suspend function-typed parameter ($declared): a type argument has no name a proxy could be built over",
             )
         }
-        val renderedTypes = arguments.map { projection ->
+        val renderedTypes = logicalProjections.map { projection ->
             if (projection.variance != KmVariance.INVARIANT) {
                 return FunctionSlot(
                     declineReason = "a suspend function-typed parameter ($declared): use-site variance is not supported",
@@ -2000,7 +2025,7 @@ internal object ArtifactScanner {
                 declineReason = "a suspend function-typed parameter ($declared): some part of its signature is not a nameable public type",
             )
         }
-        val slotName = "kotlin.coroutines.SuspendFunction$declaredArity(" +
+        val slotName = "kotlin.coroutines.SuspendFunction$logicalArity(" +
             classifierNames.dropLast(1).joinToString(",") + ")" + FUNCTION_RETURNS + classifierNames.last()
         val renderedArgs = renderedTypes.dropLast(1).joinToString(", ")
         val renderedRet = renderedTypes.last()
@@ -2010,6 +2035,8 @@ internal object ArtifactScanner {
     }
 
     private const val MAX_SUSPEND_FUNCTION_ARITY = 5
+    private const val EXTENSION_FUNCTION_TYPE_ANNOTATION = "kotlin/ExtensionFunctionType"
+    private const val CONTINUATION_CLASS_NAME = "kotlin.coroutines.Continuation"
 
     /**
      * A parameter typed as a **functional interface** (issue #216): a Java interface with one abstract
