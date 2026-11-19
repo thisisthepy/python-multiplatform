@@ -673,6 +673,7 @@ object PythonxAdapter {
         # character in a Kotlin fully-qualified name, which is the same trick `${'$'}composer` plays one
         # layer up: the name is the flag, and it cannot drift out of step with the slot it describes.
         _COMPOSABLE_MARK = '@Composable'
+        _SUSPEND_FUNCTION_PREFIX = 'kotlin.coroutines.SuspendFunction'
 
 
         # `kotlin.Function3@Composable(androidx.compose.foundation.layout.ColumnScope)->kotlin.Unit`:
@@ -712,6 +713,26 @@ object PythonxAdapter {
             inner = type_name[open_at + 1:close_at]
             args = tuple(inner.split(',')) if inner else ()
             return (int(head), composable, args, type_name[close_at + 1 + len(_FUNCTION_RETURNS):])
+
+
+        def _suspend_function_slot(type_name):
+            '''`(arity, arg_type_names, return_type_name)` for a `SuspendFunctionN` slot, or `None`
+            (SPEC U-5a; issue #164, item 7).
+            '''
+            if not type_name or not type_name.startswith(_SUSPEND_FUNCTION_PREFIX):
+                return None
+            open_at = type_name.find('(')
+            close_at = type_name.find(')', open_at + 1) if open_at >= 0 else -1
+            if open_at < 0 or close_at < 0:
+                return None
+            if type_name[close_at + 1:close_at + 1 + len(_FUNCTION_RETURNS)] != _FUNCTION_RETURNS:
+                return None
+            head = type_name[len(_SUSPEND_FUNCTION_PREFIX):open_at]
+            if not head.isdigit():
+                return None
+            inner = type_name[open_at + 1:close_at]
+            args = tuple(inner.split(',')) if inner else ()
+            return (int(head), args, type_name[close_at + 1 + len(_FUNCTION_RETURNS):])
 
 
         def _is_python_callable(value):
@@ -998,6 +1019,80 @@ object PythonxAdapter {
                 _resolve('${PythonCallables.NEW_FUNCTION}'),
                 (body, jvm_arity, composable, ','.join(_arg_tag(t) for t in arg_types), key),
             )
+
+
+        def _make_suspend_function(value, slot):
+            '''Hands [value] to Kotlin as a `SuspendFunctionN` and returns its handle (SPEC U-5a;
+            issue #164, item 7).
+            '''
+            arity, arg_types, return_type = slot
+            key = _intern_key(value, ('suspend',) + slot)
+            if key:
+                found = _boundary()['invoke'](_resolve('${PythonCallables.FIND_FUNCTION}'), (key,))
+                if found:
+                    return found
+            wanted = _positional_capacity(value, len(arg_types))
+            if wanted is None:
+                raise TypeError(
+                    'this suspend slot invokes its callable with ' + str(len(arg_types)) +
+                    ' argument(s) (' + ', '.join(_simple_name(t) for t in arg_types) + '), which ' +
+                    getattr(value, '__name__', repr(value)) + ' does not accept'
+                )
+            body = _callable_thunk(value, False, arg_types, wanted)
+            return _boundary()['invoke'](
+                _resolve('${PythonCallables.NEW_SUSPEND_FUNCTION}'),
+                (body, arity, ','.join(_arg_tag(t) for t in arg_types), return_type, key),
+            )
+
+
+        def _submit_suspend_awaitable(awaitable, pending_handle):
+            '''Submits a Python awaitable returned by a `PythonSuspendFunction` to the resolved
+            asyncio delivery loop (SPEC U-5, U-5a) and wires its done callback to
+            `PythonCallables.completeSuspendCall`.
+            '''
+            import asyncio as _asyncio
+            import python_multiplatform as _pm
+            loop = None
+            is_running_here = False
+            try:
+                loop = _asyncio.get_running_loop()
+                is_running_here = True
+            except RuntimeError:
+                get_loop = getattr(_pm, 'get_delivery_loop', None)
+                if get_loop is not None:
+                    loop = get_loop()
+            if loop is None:
+                raise RuntimeError('no running event loop and no configured delivery loop for suspend callable')
+            if loop.is_closed():
+                raise RuntimeError('delivery event loop is closed')
+            complete_handle = _resolve('${PythonCallables.COMPLETE_SUSPEND_CALL}')
+            invoke_fn = _boundary()['invoke']
+
+            def _on_done(fut):
+                try:
+                    if fut.cancelled():
+                        exc = _asyncio.CancelledError()
+                        invoke_fn(complete_handle, (pending_handle, False, exc))
+                        return
+                    exc = fut.exception()
+                    if exc is not None:
+                        invoke_fn(complete_handle, (pending_handle, False, exc))
+                        return
+                    invoke_fn(complete_handle, (pending_handle, True, fut.result()))
+                except BaseException as err:
+                    invoke_fn(complete_handle, (pending_handle, False, err))
+
+            def _schedule():
+                try:
+                    fut = _asyncio.ensure_future(awaitable, loop=loop)
+                    fut.add_done_callback(_on_done)
+                except BaseException as err:
+                    invoke_fn(complete_handle, (pending_handle, False, err))
+
+            if is_running_here:
+                _schedule()
+            else:
+                loop.call_soon_threadsafe(_schedule)
 
 
         def _is_value_class_over_primitive(tag, type_name):
@@ -1695,6 +1790,13 @@ object PythonxAdapter {
                 # made itself. Everything else in this branch requires a handle, because a Kotlin
                 # object is the only thing a Kotlin parameter can hold; a function is the exception
                 # because Kotlin can be given one that calls back.
+                suspend_slot = _suspend_function_slot(callable_as or type_name)
+                if suspend_slot is not None and _is_python_callable(value):
+                    if not strict:
+                        return _CALLABLE_PENDING
+                    return _make_suspend_function(value, suspend_slot)
+                if suspend_slot is not None and getattr(value, '_pm_handle', None) is None:
+                    return _refuse(strict, 'expected a callable of ' + _simple_name(type_name))
                 slot = _function_slot(callable_as or type_name)
                 if slot is not None and _is_python_callable(value):
                     # A Python callable cannot stand in for a lambda that has to give something back.
