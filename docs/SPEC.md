@@ -1350,6 +1350,13 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     (proved away, or a compile error); how N-12 objects are laid out when nothing can observe them.
   - **Measurement.** Binary size, baseline and peak RSS, CPU time and thread scaling, each beside the best
     safe Rust and beside the default mode, on the N-12c benchmarks.
+  - **Tier K PR5 (#476)** (agent proposal, not confirmed): adds integer bitwise and shift operators
+    (`&`, `|`, `^`, `<<`, `>>`, `~`, and augmented forms), power (`**`, `**=`) on `int` and `float`,
+    `int(x)` for float/int/bool/string literals, `bool(x)` for scalars and lists, `sys.exit([code])`
+    (refused in `aot-lib` as `aot/library-exit`) and `sys.maxsize`, the remaining `math` functions and
+    constants (`floor`, `ceil`, `trunc`, `pow`, `log2`, `log10`, `asin`, `acos`, `atan`, `sinh`, `cosh`,
+    `tanh`, `isnan`, `isinf`, `isfinite`, `copysign`, `fmod`; `pi`, `e`, `inf`, `nan`, `tau`), and the
+    `time` module (`perf_counter`, `monotonic`, `time`, `sleep`).
 
 ---
 

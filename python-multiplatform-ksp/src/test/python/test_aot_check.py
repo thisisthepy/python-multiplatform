@@ -100,28 +100,21 @@ TABLE = [
     # aot/builtin-unavailable
     ("aot/builtin-unavailable", "def f() -> None:\n    open('x')\n", (ERR, None, "open", 2)),
     ("aot/builtin-unavailable", "def f(x: int) -> None:\n    map(None, x)\n", (ERR, None, "map", 2)),
-    # aot/builtin (pending K)
-    ("aot/builtin", "def f() -> None:\n    print(1)\n", (PEND, "K", "print", 2)),
-    ("aot/builtin", "def f(x: float) -> int:\n    return int(x)\n", (PEND, "K", "int", 2)),
-    ("aot/builtin", "def f(a: int, b: int) -> int:\n    return max(a, b)\n", (PEND, "K", "max", 2)),
-    ("aot/builtin", "import sys\n\ndef f() -> None:\n    sys.exit(1)\n", (PEND, "K", "sys.exit", 4)),
-    ("aot/builtin", "import sys\n\ndef f() -> str:\n    return sys.argv[1]\n", (PEND, "K", "sys.argv", 4)),
-    ("aot/builtin", "def f(x: int) -> str:\n    return f'{x}'\n", (PEND, "K", "f-string", 2)),
-    ("aot/builtin", "def f(x: int) -> int:\n    return 1 if x else 2\n", (PEND, "K", "conditional expression", 2)),
-    ("aot/builtin", "def f(t: tuple[int, int]) -> int:\n    a, b = t\n    return a + b\n", (PEND, "K", "tuple unpacking", 2)),
-    ("aot/builtin", "def f() -> list[int]:\n    return [1, 2]\n", (PEND, "K", "list display", 2)),
+    # aot/builtin (pending K: non-constant module-level statement)
     ("aot/builtin", "x = 1\nfor i in range(3):\n    pass\n", (PEND, "K", "For", 2)),
-    # aot/entry (pending K)
-    ("aot/entry", "def main() -> None:\n    pass\n\nif __name__ == \"__main__\":\n    main()\n", (PEND, "K", "__main__", 4)),
+    # aot/class (pending O)
+    ("aot/class", "class C:\n    x: int\n", (PEND, "O", "C", 1)),
     # aot/str, aot/container, aot/exception, aot/builtin (pending S)
     ("aot/str", "def f() -> str:\n    return 'a b'.upper()\n", (PEND, "S", "upper", 2)),
     ("aot/str", "def f(s: str) -> int:\n    return s.find('a')\n", (PEND, "S", "find", 2)),
+    ("aot/str", "def f(x: int) -> str:\n    return f'{x}'\n", (PEND, "S", "f-string", 2)),
     ("aot/container", "def f() -> int:\n    d = {1: 2}\n    return 0\n", (PEND, "S", "dict display", 2)),
     ("aot/container", "def f(n: int) -> int:\n    return len([i for i in range(n)])\n", (PEND, "S", "list comprehension", 2)),
     ("aot/exception", "def f() -> None:\n    raise ValueError('x')\n", (PEND, "S", "raise", 2)),
     ("aot/exception", "def f() -> None:\n    try:\n        pass\n    finally:\n        pass\n", (PEND, "S", "try", 2)),
     ("aot/exception", "def f(x: int) -> None:\n    assert x\n", (PEND, "S", "assert", 2)),
     ("aot/builtin", "def f(a: list[int]) -> list[int]:\n    return sorted(a)\n", (PEND, "S", "sorted", 2)),
+    ("aot/builtin", "def f(x: int) -> str:\n    return str(x)\n", (PEND, "S", "str", 2)),
     # aot/threading (pending T)
     ("aot/threading", "import threading\n", (PEND, "T", "threading", 1)),
 ]
@@ -139,8 +132,8 @@ def test_every_rule_of_the_table_has_a_row():
     assert rules >= {
         "aot/dynamic-code", "aot/import", "aot/identity", "aot/introspection", "aot/generator", "aot/async",
         "aot/closure", "aot/global", "aot/decorator", "aot/with", "aot/match", "aot/class-shape",
-        "aot/inheritance", "aot/signal", "aot/set-order", "aot/star-args", "aot/numpy",
-        "aot/builtin-unavailable", "aot/builtin", "aot/entry", "aot/str", "aot/container", "aot/exception",
+        "aot/class", "aot/inheritance", "aot/signal", "aot/set-order", "aot/star-args", "aot/numpy",
+        "aot/builtin-unavailable", "aot/builtin", "aot/str", "aot/container", "aot/exception",
         "aot/threading",
     }
 
@@ -158,16 +151,20 @@ def test_things_inside_the_subset_are_not_reported(tmp_path):
         def f(n: int, a: list[float]) -> float:
             b: list[float] = [0.0] * n
             c: list[int] = list(range(n))
+            d: list[float] = [1.0, 2.0]
             t: float = math.sqrt(float(len(a)))
-            return t + b[0] + c[0] + time.perf_counter() if False else t
+            print(f"{t:.3f}")
+            return t + b[0] + c[0] + d[0] + time.perf_counter() if False else t
 
         def g(x: int) -> bool:
-            return isinstance(x, int) and type(x) is int
+            return isinstance(x, int) and type(x) is int and bool(abs(min(x, max(x, 0))))
+
+        if __name__ == "__main__":
+            n: int = int(sys.argv[1]) if len(sys.argv) > 1 else 1
+            print(n)
     """)
     report = aotcheck.check(path, front_end=False)
-    names = {(f.rule, f.name) for f in report.findings}
-    # the only finding is the conditional expression in `f`; nothing else is reported
-    assert names == {("aot/builtin", "conditional expression")}, report.lines()
+    assert report.findings == [], report.lines()
 
 
 # --- several findings in one function ---------------------------------------------------------------
@@ -177,14 +174,14 @@ def test_every_finding_of_a_function_is_reported(tmp_path):
         def f(s: str) -> int:
             a = eval(s)
             b = id(a)
-            print(b)
+            sorted(b)
             return hash(a)
     """), front_end=False)
     got = sorted((f.line, f.rule, f.name, f.function) for f in report.findings)
     assert got == [
         (2, "aot/dynamic-code", "eval", "f"),
         (3, "aot/identity", "id", "f"),
-        (4, "aot/builtin", "print", "f"),
+        (4, "aot/builtin", "sorted", "f"),
         (5, "aot/identity", "hash", "f"),
     ]
 
@@ -195,34 +192,45 @@ def test_a_method_finding_names_its_class(tmp_path):
             def m(self) -> int:
                 return id(self)
     """), front_end=False)
-    assert [(f.rule, f.function, f.line) for f in report.findings] == [("aot/identity", "C", 3)]
+    assert [(f.rule, f.function, f.line) for f in report.findings if f.rule == "aot/identity"] == [
+        ("aot/identity", "C", 3)
+    ]
 
 
 # --- the benchmark kernels --------------------------------------------------------------------------
 
-KERNELS = {
-    "nbody": ["advance", "energy", "offset_momentum"],
-    "spectral_norm": ["eval_a", "mul_av", "mul_atv"],
-    "fannkuch": ["fannkuch"],
+TIER_K_BENCHMARKS = {
+    "nbody": ["advance", "energy", "offset_momentum", "main", "__main__"],
+    "spectral_norm": ["eval_a", "mul_av", "mul_atv", "mul_atav", "main", "__main__"],
+    "fannkuch": ["fannkuch", "main", "__main__"],
 }
 
 
-@pytest.mark.parametrize("benchmark", sorted(KERNELS))
-def test_kernels_are_ready_and_free_of_findings(benchmark):
+@pytest.mark.parametrize("benchmark", sorted(TIER_K_BENCHMARKS))
+def test_tier_k_benchmarks_are_ready_and_free_of_findings(benchmark):
     report = aotcheck.check(BENCH / f"{benchmark}.py")
+    assert not report.blocking, report.lines()
+    assert report.findings == [], report.lines()
     status = {s.name: s for s in report.functions}
-    for name in KERNELS[benchmark]:
+    for name in TIER_K_BENCHMARKS[benchmark]:
         assert status[name].ready, (name, status[name].reasons)
-        assert [f for f in report.findings if f.function == name] == []
-    # a checker that reports nothing would pass the lines above: `main` must be seen as not done
-    assert not status["main"].ready
-    assert [f for f in report.findings if f.function == "main"]
+    assert all(s.ready for s in report.functions), [(s.name, s.reasons) for s in report.functions if not s.ready]
+
+
+def test_tier_o_and_s_benchmarks_still_report_pending_findings():
+    bt = aotcheck.check(BENCH / "binary_trees.py")
+    assert bt.blocking
+    assert any(f.kind == "pending" and f.tier == "O" and f.rule == "aot/class" for f in bt.findings), bt.lines()
+
+    wf = aotcheck.check(BENCH / "wordfreq.py")
+    assert wf.blocking
+    assert any(f.kind == "pending" and f.tier == "S" for f in wf.findings), wf.lines()
 
 
 # --- a program of several modules -------------------------------------------------------------------
 
 def test_findings_carry_the_file_they_are_in(tmp_path):
-    write(tmp_path, "def twice(n: int) -> int:\n    print(n)\n    return n * 2\n", "helper.py")
+    write(tmp_path, "def twice(n: int) -> int:\n    sorted([n])\n    return n * 2\n", "helper.py")
     write(tmp_path, "X = eval('1')\n", "other.py")
     entry = write(tmp_path, """
         import helper
@@ -235,7 +243,7 @@ def test_findings_carry_the_file_they_are_in(tmp_path):
     report = aotcheck.check(entry, front_end=False)
     got = sorted((f.path, f.line, f.rule, f.name) for f in report.findings)
     assert got == [
-        ("helper.py", 2, "aot/builtin", "print"),
+        ("helper.py", 2, "aot/builtin", "sorted"),
         ("mod.py", 2, "aot/import", "json"),
         ("other.py", 1, "aot/builtin", "Assign"),        # a module-level call is not a constant assignment
         ("other.py", 1, "aot/dynamic-code", "eval"),
@@ -279,6 +287,7 @@ def test_lines_are_those_of_the_original_file(tmp_path):
     """), front_end=False)
     assert sorted((f.line, f.rule, f.name) for f in report.findings) == [
         (4, "aot/dynamic-code", "eval"),
+        (6, "aot/class", "C"),
         (10, "aot/dynamic-code", "exec"),
         (12, "aot/decorator", "staticmethod"),
         (14, "aot/identity", "id"),
@@ -326,7 +335,7 @@ def test_cli_clean_kernel_only_module(tmp_path, capsys):
 
 
 def test_cli_json_matches_the_report(tmp_path, capsys):
-    path = write(tmp_path, "def f(s: str) -> int:\n    print(s)\n    return eval(s)\n")
+    path = write(tmp_path, "def f(s: str) -> int:\n    sorted(s)\n    return eval(s)\n")
     assert main(["aot-check", str(path), "--json"]) == 1
     doc = json.loads(capsys.readouterr().out)
     report = aotcheck.check(path)

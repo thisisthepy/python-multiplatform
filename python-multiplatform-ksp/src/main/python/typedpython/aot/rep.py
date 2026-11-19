@@ -468,11 +468,11 @@ class Representation:
             return RAW
         if isinstance(e, ir.Local):
             return r.names.get(e.name, RAW)
-        if isinstance(e, (ir.Len, ir.ArgvLen)):
+        if isinstance(e, (ir.Len, ir.ArgvLen, ir.BoolToInt)):
             return RAW
         if isinstance(e, ir.Index):
             return TAGGED if self.list_big(r.name, e.array) else RAW
-        if isinstance(e, ir.ArgvInt):
+        if isinstance(e, (ir.ArgvInt, ir.FloatToInt, ir.StrToInt, ir.MathCall)):
             return TAGGED
         if isinstance(e, ir.Call):
             callee = self.reps.get(e.function)
@@ -480,7 +480,7 @@ class Representation:
         if isinstance(e, ir.Cond):
             return join(self._of(r, e.then), self._of(r, e.orelse))
         if isinstance(e, ir.UnaryOp):
-            if e.op is ir.UnaryOpKind.POS:
+            if e.op in (ir.UnaryOpKind.POS, ir.UnaryOpKind.INVERT):
                 return self._of(r, e.operand)
             if e.op is ir.UnaryOpKind.NEG:
                 return RAW if self.proved(e) and self._of(r, e.operand) == RAW else TAGGED
@@ -490,9 +490,9 @@ class Representation:
             if a == TAGGED or b == TAGGED:
                 return TAGGED
             k = e.op
-            if k in (ir.BinOpKind.ADD, ir.BinOpKind.SUB, ir.BinOpKind.MUL):
+            if k in (ir.BinOpKind.ADD, ir.BinOpKind.SUB, ir.BinOpKind.MUL, ir.BinOpKind.LSHIFT):
                 return RAW if self.proved(e) else TAGGED
-            if k is ir.BinOpKind.MOD:
+            if k in (ir.BinOpKind.MOD, ir.BinOpKind.AND, ir.BinOpKind.OR, ir.BinOpKind.XOR, ir.BinOpKind.RSHIFT):
                 return RAW
             if k is ir.BinOpKind.FLOORDIV:
                 if isinstance(e.right, ir.Const) and e.right.value != -1:

@@ -61,10 +61,10 @@ OBJECT_OPERATIONS: dict[type, str] = {
 _DYNAMIC_CALLS = frozenset({"eval", "exec", "compile", "__import__", "globals", "locals", "vars"})
 _INTROSPECTION_CALLS = frozenset({"getattr", "setattr", "delattr", "hasattr"})
 _INTROSPECTION_ATTRS = frozenset({"__dict__", "__class__", "__slots__", "__bases__", "__mro__"})
-_KERNEL_BUILTINS = frozenset({"print", "int", "abs", "min", "max", "str", "format"})
-_SET_BUILTINS_S = frozenset({"sorted", "sum", "any", "all", "enumerate", "zip", "reversed", "ord", "chr", "repr"})
+_KERNEL_BUILTINS = frozenset()
+_SET_BUILTINS_S = frozenset({"sorted", "sum", "any", "all", "enumerate", "zip", "reversed", "ord", "chr", "repr", "str", "format"})
 _CONTAINER_CALLS = frozenset({"dict", "set", "tuple", "bytes"})
-_SUPPORTED_CALLS = frozenset({"len", "range", "float", "bool", "isinstance", "type", "list"})
+_SUPPORTED_CALLS = frozenset({"len", "range", "float", "bool", "isinstance", "type", "list", "print", "int", "abs", "min", "max"})
 _SIGNAL_EXCEPTIONS = frozenset({"KeyboardInterrupt", "RecursionError"})
 _COMPILED = "compiled"
 
@@ -290,7 +290,7 @@ class _Pass(ast.NodeVisitor):
         self.func: str | None = None
         self.depth = 0                      # enclosing defs
         self.locals: set[str] = set()
-        self.fill_lists: set[int] = set()
+        self.print_fstrings: set[int] = set()
         self.kinds: dict[str, str] = {}     # annotated str / set names of the enclosing top-level def
 
     # -- helpers
@@ -324,9 +324,6 @@ class _Pass(ast.NodeVisitor):
             return                                              # a docstring
         elif _is_main_guard(s):
             assert isinstance(s, ast.If)
-            self.pending("K", "aot/entry", "__main__", s,
-                         "the `if __name__ == \"__main__\"` entry guard is not compiled without CPython yet "
-                         "(its body is checked like a function body)")
             for b in s.body + s.orelse:
                 self.visit(b)
         elif (isinstance(s, ast.Assign) and all(isinstance(t, ast.Name) for t in s.targets)
@@ -417,6 +414,8 @@ class _Pass(ast.NodeVisitor):
                            f"the decorator `@{ast.unparse(d)}` is outside the AOT subset (only `@compiled`)")
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.pending("O", "aot/class", node.name, node,
+                     f"class `{node.name}` is tier O (objects), not compiled without CPython yet")
         self.decorators(node)
         for b in node.bases:
             if not (isinstance(b, ast.Name) and b.id == "object"):
@@ -492,8 +491,6 @@ class _Pass(ast.NodeVisitor):
     def visit_Assign(self, node: ast.Assign) -> None:
         for t in node.targets:
             self.class_attribute_store(t)
-            if isinstance(t, (ast.Tuple, ast.List)):
-                self.pending("K", "aot/builtin", "tuple unpacking", t, "tuple unpacking is not compiled without CPython yet")
         self.generic_visit(node)
 
     def visit_AugAssign(self, node: ast.AugAssign) -> None:
@@ -565,21 +562,9 @@ class _Pass(ast.NodeVisitor):
         self.pending("S", "aot/container", "dict display", node, "a dict display is tier S (general containers), not compiled yet")
         self.generic_visit(node)
 
-    def visit_BinOp(self, node: ast.BinOp) -> None:
-        # `[v] * n` is the fill creation form the front end compiles today (not a list display)
-        if isinstance(node.op, ast.Mult):
-            for side in (node.left, node.right):
-                if isinstance(side, ast.List) and len(side.elts) == 1:
-                    self.fill_lists.add(id(side))
-        self.generic_visit(node)
-
-    def visit_List(self, node: ast.List) -> None:
-        if isinstance(node.ctx, ast.Load) and id(node) not in self.fill_lists:
-            self.pending("K", "aot/builtin", "list display", node, "a list display is not compiled without CPython yet")
-        self.generic_visit(node)
-
     def visit_JoinedStr(self, node: ast.JoinedStr) -> None:
-        self.pending("K", "aot/builtin", "f-string", node, "an f-string is not compiled without CPython yet")
+        if id(node) not in self.print_fstrings:
+            self.pending("S", "aot/str", "f-string", node, "an f-string outside `print()` is tier S (strings), not compiled yet")
         self.generic_visit(node)
 
     def visit_FormattedValue(self, node: ast.FormattedValue) -> None:
@@ -588,10 +573,6 @@ class _Pass(ast.NodeVisitor):
             for v in node.format_spec.values:
                 if isinstance(v, ast.FormattedValue):
                     self.visit_FormattedValue(v)
-
-    def visit_IfExp(self, node: ast.IfExp) -> None:
-        self.pending("K", "aot/builtin", "conditional expression", node, "a conditional expression is not compiled without CPython yet")
-        self.generic_visit(node)
 
     def visit_Compare(self, node: ast.Compare) -> None:
         operands = [node.left, *node.comparators]
@@ -604,9 +585,6 @@ class _Pass(ast.NodeVisitor):
     def visit_Attribute(self, node: ast.Attribute) -> None:
         if node.attr in _INTROSPECTION_ATTRS:
             self.error("aot/introspection", node.attr, node, f"`.{node.attr}` reads the object model at run time")
-        if (node.attr == "argv" and isinstance(node.value, ast.Name) and node.value.id == "sys"
-                and "sys" not in self.locals):
-            self.pending("K", "aot/builtin", "sys.argv", node, "`sys.argv` is not compiled without CPython yet")
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
@@ -616,12 +594,13 @@ class _Pass(ast.NodeVisitor):
         if any(k.arg is None for k in node.keywords):
             self.error("aot/star-args", "**", node, "a `**` argument is outside the AOT subset")
         if isinstance(f, ast.Name) and self.builtin(f.id):
+            if f.id == "print":
+                for a in node.args:
+                    if isinstance(a, ast.JoinedStr):
+                        self.print_fstrings.add(id(a))
             self.builtin_call(f.id, node)
         elif isinstance(f, ast.Attribute):
-            if (f.attr == "exit" and isinstance(f.value, ast.Name) and f.value.id == "sys"
-                    and "sys" not in self.locals):
-                self.pending("K", "aot/builtin", "sys.exit", node, "`sys.exit` is not compiled without CPython yet")
-            elif (isinstance(f.value, ast.Constant) and isinstance(f.value.value, str)) or (
+            if (isinstance(f.value, ast.Constant) and isinstance(f.value.value, str)) or (
                     isinstance(f.value, ast.Name) and self.kinds.get(f.value.id) == "str"):
                 self.pending("S", "aot/str", f.attr, node, f"the string method `{f.attr}` is tier S (strings), not compiled yet "
                                                           "(syntactic: a str literal or a name annotated `str`)")
@@ -730,8 +709,8 @@ def _unproven_i64(x: object) -> str | None:
     return None
 
 
-def _definitions(tree: ast.Module) -> list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef, str | None]]:
-    """(status name, node, enclosing top-level name) for each top-level def, class and method."""
+def _definitions(tree: ast.Module) -> list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.If, str | None]]:
+    """(status name, node, enclosing top-level name) for each top-level def, class, method and __main__."""
     out: list = []
     for n in tree.body:
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -741,6 +720,8 @@ def _definitions(tree: ast.Module) -> list[tuple[str, ast.FunctionDef | ast.Asyn
             for s in n.body:
                 if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     out.append((f"{n.name}.{s.name}", s, n.name))
+        elif _is_main_guard(n):
+            out.append(("__main__", n, None))
     return out
 
 
@@ -749,14 +730,15 @@ def _front_end(modules: list[_Module], strict_int: bool, report: Report) -> None
         for m in modules:
             if m.tree is None:
                 continue
-            text, firsts = _decorate(m.source, m.tree)
+            firsts: list[int] = []
+            text = m.source
             copy = Path(work) / m.rel
             copy.parent.mkdir(parents=True, exist_ok=True)
             copy.write_text(text)
             defs = _definitions(m.tree)
             try:
-                lowered = frontend.lower(copy)
-                proved, diagnostics = verify.verify(lowered)
+                lowered = frontend.lower(copy, aot=True)
+                proved, diagnostics = verify.verify(lowered, aot=True)
             except Exception as e:      # noqa: BLE001 - one module failing must not hide the rest
                 lines = str(e).strip().splitlines()
                 text_ = f"{type(e).__name__}: {lines[0] if lines else ''}"
@@ -770,6 +752,8 @@ def _front_end(modules: list[_Module], strict_int: bool, report: Report) -> None
 
 def _module_status(m: _Module, firsts: list[int], text: str, defs: list, lowered: ir.Module,
                    proved: ir.Module, diagnostics: list, strict_int: bool, report: Report) -> None:
+    from types import SimpleNamespace
+
     decorated = ast.parse(text)
     by_name = {name: node for name, node, _ in _definitions(decorated)}
     lowered_names = {f.name for f in lowered.functions}
@@ -783,19 +767,25 @@ def _module_status(m: _Module, firsts: list[int], text: str, defs: list, lowered
                 why = proved.skipped.get(name) or lowered.skipped.get(name) or "the front end did not accept the class"
                 report.functions.append(FunctionStatus(m.rel, node.lineno, name, False, [_remap_text(why, firsts)]))
             continue
+        ir_name = frontend.AOT_ENTRY if name == "__main__" else name
         reasons: list[str] = []
-        fn = proved_fns.get(name)
+        fn = proved_fns.get(ir_name)
         if fn is None:
-            if name in lowered_names:
-                mine = [d for d in diagnostics if d.function == name]
+            if ir_name in lowered_names:
+                mine = [d for d in diagnostics if d.function == ir_name]
                 reasons = [_remap_text(f"{d.rule}: {d.message} (line {d.source_line})", firsts) for d in mine]
-                reasons = reasons or [_remap_text(proved.skipped.get(name, "the verifier rejected it"), firsts)]
+                reasons = reasons or [_remap_text(proved.skipped.get(ir_name, "the verifier rejected it"), firsts)]
             else:
-                reasons = [_remap_text(lowered.skipped.get(name) or _missing_reason(name, owner, lowered, proved), firsts)]
+                reasons = [_remap_text(lowered.skipped.get(ir_name) or _missing_reason(ir_name, owner, lowered, proved), firsts)]
             report.functions.append(FunctionStatus(m.rel, node.lineno, name, False, reasons))
             continue
         decorated_fn = by_name.get(name)
-        stmts = resume.statements(decorated_fn) if isinstance(decorated_fn, ast.FunctionDef) else []
+        if isinstance(decorated_fn, ast.FunctionDef):
+            stmts = resume.statements(decorated_fn)
+        elif isinstance(decorated_fn, ast.If):
+            stmts = resume.statements(SimpleNamespace(body=decorated_fn.body))
+        else:
+            stmts = []
 
         def line_of(k: int, fallback: int, _stmts=stmts) -> int:
             return _stmts[k].lineno if 0 <= k < len(_stmts) else fallback

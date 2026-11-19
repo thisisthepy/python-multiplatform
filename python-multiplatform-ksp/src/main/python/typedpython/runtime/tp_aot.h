@@ -32,6 +32,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 /* Issue #464: an AOT build must compute the floats CPython computes, even when a caller compiles the
  * generated C (--emit-c, or a packaging step outside aot/cc.py) without our compiler flags. Contraction
@@ -1472,5 +1479,324 @@ static inline void tpa_print_f64_fixed(double v, int prec)
 
 static inline void tpa_print_sep(void) { fputc(' ', stdout); }
 static inline void tpa_print_end(void) { fputc('\n', stdout); }
+
+/* ------------------------------------------------------------------------------------------
+ * Integer shifts (RAW int64_t), float power, additional math, time, and sys.exit (Tier K PR5)
+ * ------------------------------------------------------------------------------------------ */
+
+static inline int tpa_rshift_i64(int64_t a, int64_t b, int64_t *out)
+{
+    if (b < 0) {
+        tpa_raise(TPA_ValueError, "negative shift count");
+        return -1;
+    }
+    if (b >= 64) {
+        *out = (a < 0) ? -1 : 0;
+        return 0;
+    }
+    if (a >= 0) {
+        *out = (int64_t)((uint64_t)a >> (unsigned)b);
+    }
+    else {
+        *out = (int64_t)(~((~(uint64_t)a) >> (unsigned)b));
+    }
+    return 0;
+}
+
+static inline int tpa_plshift_i64(int64_t a, int64_t b, int64_t *out)
+{
+    if (b < 0) {
+        tpa_raise(TPA_ValueError, "negative shift count");
+        return -1;
+    }
+    if (b >= 64) {
+        *out = 0;
+        return 0;
+    }
+    *out = (int64_t)((uint64_t)a << (unsigned)b);
+    return 0;
+}
+
+static inline int tpa__f64_is_odd_integer(double x)
+{
+    return isfinite(x) && floor(x) == x && fmod(fabs(x), 2.0) == 1.0;
+}
+
+/* CPython Objects/floatobject.c float_pow semantics (float ** float). */
+static inline int tpa_pow_f64(double iv, double iw, double *out)
+{
+    double r;
+    int negate_result = 0;
+    if (iw == 0.0) {
+        *out = 1.0;
+        return 0;
+    }
+    if (isnan(iv) || isnan(iw)) {
+        *out = (iv == 1.0) ? 1.0 : NAN;
+        return 0;
+    }
+    if (isinf(iw)) {
+        iv = fabs(iv);
+        if (iv == 1.0) {
+            *out = 1.0;
+            return 0;
+        }
+        else if ((iw > 0.0) == (iv > 1.0)) {
+            *out = fabs(iw);
+            return 0;
+        }
+        else {
+            *out = 0.0;
+            return 0;
+        }
+    }
+    if (isinf(iv)) {
+        int odd = tpa__f64_is_odd_integer(iw);
+        if (iw > 0.0) {
+            *out = odd ? iv : fabs(iv);
+        }
+        else {
+            *out = odd ? copysign(0.0, iv) : 0.0;
+        }
+        return 0;
+    }
+    if (iv == 0.0) {
+        if (iw < 0.0) {
+            tpa_raise(TPA_ZeroDivisionError, "0.0 cannot be raised to a negative power");
+            return -1;
+        }
+        *out = tpa__f64_is_odd_integer(iw) ? iv : 0.0;
+        return 0;
+    }
+    if (iv < 0.0) {
+        if (iw != floor(iw)) {
+            tpa_raise(TPA_ValueError, "negative number cannot be raised to a fractional power");
+            return -1;
+        }
+        iv = -iv;
+        negate_result = tpa__f64_is_odd_integer(iw);
+    }
+    errno = 0;
+    r = pow(iv, iw);
+    if (errno == ERANGE && isinf(r)) {
+        tpa_raise(TPA_OverflowError, "(34, 'Numerical result out of range')");
+        return -1;
+    }
+    if (isinf(r)) {
+        tpa_raise(TPA_OverflowError, "(34, 'Numerical result out of range')");
+        return -1;
+    }
+    *out = negate_result ? -r : r;
+    return 0;
+}
+
+#define TPA_MATH_MSG_UNIT "expected a number in range from -1 up to 1, got "
+
+static inline double tpa__m_log2(double x)
+{
+    if (isfinite(x)) {
+        if (x > 0.0) return log2(x);
+        errno = EDOM;
+        if (x == 0.0) return -HUGE_VAL;
+        return NAN;
+    }
+    else if (isnan(x)) return x;
+    else if (x > 0.0) return x;
+    errno = EDOM;
+    return NAN;
+}
+
+static inline double tpa__m_log10(double x)
+{
+    if (isfinite(x)) {
+        if (x > 0.0) return log10(x);
+        errno = EDOM;
+        if (x == 0.0) return -HUGE_VAL;
+        return NAN;
+    }
+    else if (isnan(x)) return x;
+    else if (x > 0.0) return x;
+    errno = EDOM;
+    return NAN;
+}
+
+#define TPA__DEF_MATH1_K5(NAME, CALL, CAN_OVERFLOW, MSG)                                       \
+    static inline int tpa_math_##NAME(double x, double *out)                                   \
+    {                                                                                          \
+        double r;                                                                              \
+        errno = 0;                                                                             \
+        r = CALL;                                                                              \
+        return tpa__math_1_finish(x, r, CAN_OVERFLOW, MSG, out);                               \
+    }
+TPA__DEF_MATH1_K5(log2, tpa__m_log2(x), 0, TPA_MATH_MSG_POSITIVE)
+TPA__DEF_MATH1_K5(log10, tpa__m_log10(x), 0, TPA_MATH_MSG_POSITIVE)
+TPA__DEF_MATH1_K5(asin, asin(x), 0, TPA_MATH_MSG_UNIT)
+TPA__DEF_MATH1_K5(acos, acos(x), 0, TPA_MATH_MSG_UNIT)
+TPA__DEF_MATH1_K5(atan, atan(x), 0, NULL)
+TPA__DEF_MATH1_K5(sinh, sinh(x), 1, NULL)
+TPA__DEF_MATH1_K5(cosh, cosh(x), 1, NULL)
+TPA__DEF_MATH1_K5(tanh, tanh(x), 0, NULL)
+#undef TPA__DEF_MATH1_K5
+
+static inline int tpa_math_pow(double x, double y, double *out)
+{
+    double r;
+    if (y == 0.0 || x == 1.0) {
+        *out = 1.0;
+        return 0;
+    }
+    if (isnan(x) || isnan(y)) {
+        *out = NAN;
+        return 0;
+    }
+    if (x == 0.0 && y < 0.0) {
+        tpa_raise(TPA_ValueError, "math domain error");
+        return -1;
+    }
+    if (isfinite(x) && x < 0.0 && isfinite(y) && floor(y) != y) {
+        tpa_raise(TPA_ValueError, "math domain error");
+        return -1;
+    }
+    errno = 0;
+    r = pow(x, y);
+    if (isnan(r) && !isnan(x) && !isnan(y)) {
+        tpa_raise(TPA_ValueError, "math domain error");
+        return -1;
+    }
+    if (isinf(r) && isfinite(x) && isfinite(y)) {
+        tpa_raise(TPA_OverflowError, "math range error");
+        return -1;
+    }
+    if (isfinite(r) && errno && tpa__math_is_error(r)) {
+        return -1;
+    }
+    *out = r;
+    return 0;
+}
+
+static inline int tpa_math_copysign(double x, double y, double *out)
+{
+    *out = copysign(x, y);
+    return 0;
+}
+
+static inline int tpa_math_fmod(double x, double y, double *out)
+{
+    double r;
+    if (isnan(x) || isnan(y)) {
+        *out = NAN;
+        return 0;
+    }
+    if (y == 0.0 || isinf(x)) {
+        tpa_raise(TPA_ValueError, "math domain error");
+        return -1;
+    }
+    if (isinf(y)) {
+        *out = x;
+        return 0;
+    }
+    errno = 0;
+    r = fmod(x, y);
+    if (isnan(r)) {
+        tpa_raise(TPA_ValueError, "math domain error");
+        return -1;
+    }
+    *out = r;
+    return 0;
+}
+
+static inline int tpa_math_isnan(double x) { return isnan(x) ? 1 : 0; }
+static inline int tpa_math_isinf(double x) { return isinf(x) ? 1 : 0; }
+static inline int tpa_math_isfinite(double x) { return isfinite(x) ? 1 : 0; }
+
+/* Portable time helpers */
+static inline double tpa_time_perf_counter(void)
+{
+#if defined(_WIN32)
+    LARGE_INTEGER freq, counter;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&counter);
+    return (double)counter.QuadPart / (double)freq.QuadPart;
+#elif defined(CLOCK_MONOTONIC)
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+#else
+    return (double)clock() / (double)CLOCKS_PER_SEC;
+#endif
+}
+
+static inline double tpa_time_monotonic(void)
+{
+#if defined(_WIN32)
+    return (double)GetTickCount64() * 1e-3;
+#elif defined(CLOCK_MONOTONIC)
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+#else
+    return (double)clock() / (double)CLOCKS_PER_SEC;
+#endif
+}
+
+static inline double tpa_time_time(void)
+{
+#if defined(_WIN32)
+    FILETIME ft;
+    ULARGE_INTEGER uli;
+    GetSystemTimeAsFileTime(&ft);
+    uli.LowPart = ft.dwLowDateTime;
+    uli.HighPart = ft.dwHighDateTime;
+    return (double)(uli.QuadPart - 116444736000000000ULL) * 1e-7;
+#elif defined(CLOCK_REALTIME)
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+#else
+    return (double)time(NULL);
+#endif
+}
+
+static inline int tpa_time_sleep(double secs)
+{
+    if (isnan(secs) || secs < 0.0) {
+        tpa_raise(TPA_ValueError, "sleep length must be non-negative");
+        return -1;
+    }
+    if (secs == 0.0) {
+        return 0;
+    }
+#if defined(_WIN32)
+    {
+        double ms = secs * 1000.0;
+        DWORD d = (ms >= (double)0xFFFFFFFEu) ? (DWORD)0xFFFFFFFEu : (DWORD)ms;
+        Sleep(d);
+    }
+#else
+    {
+        struct timespec req, rem;
+        req.tv_sec = (time_t)secs;
+        req.tv_nsec = (long)((secs - (double)req.tv_sec) * 1e9);
+        if (req.tv_nsec < 0) req.tv_nsec = 0;
+        if (req.tv_nsec >= 1000000000L) {
+            req.tv_sec += 1;
+            req.tv_nsec -= 1000000000L;
+        }
+        while (nanosleep(&req, &rem) == -1 && errno == EINTR) {
+            req = rem;
+        }
+    }
+#endif
+    return 0;
+}
+
+#if !defined(TPA_LIBRARY)
+static inline void tpa_exit_i64(int64_t code)
+{
+    fflush(stdout);
+    fflush(stderr);
+    exit((int)(code & 0xff));
+}
+#endif
 
 #endif
