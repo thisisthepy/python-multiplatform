@@ -1,5 +1,6 @@
 package python.multiplatform.gradle.artifact
 
+import org.gradle.api.file.ConfigurableFileCollection
 import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.provider.ListProperty
 import org.gradle.workers.WorkAction
@@ -50,6 +51,7 @@ internal abstract class KlibScanWorkAction : WorkAction<KlibScanWorkAction.Param
 
     internal interface Params : WorkParameters {
         val klibFile: RegularFileProperty
+        val classpathFiles: ConfigurableFileCollection
         val includePrefixes: ListProperty<String>
         val excludePackages: ListProperty<String>
         val resultFile: RegularFileProperty
@@ -57,11 +59,12 @@ internal abstract class KlibScanWorkAction : WorkAction<KlibScanWorkAction.Param
 
     override fun execute() {
         val klib = parameters.klibFile.get().asFile
+        val classpath = parameters.classpathFiles.files.toList().ifEmpty { listOf(klib) }
         val includes = parameters.includePrefixes.get()
         val excludes = parameters.excludePackages.get()
         val result = KlibScanResult(
-            callables = KlibScanner.scanKlib(klib, includes, excludes),
-            declarations = KlibScanner.scanKlibDeclarations(klib, includes, excludes),
+            callables = KlibScanner.scanKlib(klib, includes, excludes, classpath = classpath),
+            declarations = KlibScanner.scanKlibDeclarations(klib, includes, excludes, classpath = classpath),
         )
         ObjectOutputStream(parameters.resultFile.get().asFile.outputStream()).use { it.writeObject(result) }
     }
@@ -143,6 +146,7 @@ internal fun WorkerExecutor.scanKlibIsolated(
     excludes: List<String>,
     scratchDirectory: File,
     readerClasspath: Collection<File>,
+    klibClasspath: Collection<File> = listOf(klib),
 ): KlibScanResult {
     require(readerClasspath.isNotEmpty()) {
         "python-multiplatform-gradle-plugin: no klib reader on the worker classpath. " +
@@ -155,6 +159,7 @@ internal fun WorkerExecutor.scanKlibIsolated(
     val queue = classLoaderIsolation { classpath.from(listOf(pluginCodeSource()) + readerClasspath) }
     queue.submit(KlibScanWorkAction::class.java) {
         klibFile.set(klib)
+        classpathFiles.from(klibClasspath)
         includePrefixes.set(includes)
         excludePackages.set(excludes)
         this.resultFile.set(resultFile)

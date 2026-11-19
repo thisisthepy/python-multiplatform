@@ -15,6 +15,9 @@ import python.multiplatform.gradle.stubs.PythonStubsTask
  * classpath. Changing one without the other shows up in the `fixtures/` modules as an unwired module.
  */
 private const val OPTION_ROLE = "python.multiplatform.role"
+
+/** The Kotlin Gradle Plugin's compiler-plugin classpath for Kotlin/Native compilations (present in KGP 2.4.20-Beta2). */
+private const val NATIVE_COMPILER_PLUGIN_CLASSPATH = "kotlinNativeCompilerPluginClasspath"
 private const val OPTION_MODULE_NAME = "python.multiplatform.moduleName"
 private const val OPTION_EXCLUDE_PACKAGES = "python.multiplatform.excludePackages"
 
@@ -118,6 +121,15 @@ interface PythonBindingsExtension {
      * `pythonBindings { processor.set(projects.pythonMultiplatformKsp) }`.
      */
     val processor: Property<Any>
+
+    /**
+     * The consumer-side compiler plugin artifact (`docs/design/klib-composable-and-defaults.md` B3,
+     * owner decision 2026-11-19 on python-multiplatform#191). Defaults to this plugin's own
+     * group/version coordinates; an in-repo consumer sets it to the project instead:
+     * `pythonBindings { compilerPlugin.set(project(":python-multiplatform-compiler-plugin")) }`.
+     * Read only when the artefact walker is configured.
+     */
+    val compilerPlugin: Property<Any>
 
     /**
      * Whether to stage a CPython prefix for this machine and point `PYTHONHOME` at it on every
@@ -381,6 +393,32 @@ class PythonBindingsPlugin : Plugin<Project> {
     }
 
     /**
+     * Puts the consumer-side compiler plugin on every Kotlin/Native compilation of [project]
+     * (`docs/design/klib-composable-and-defaults.md` B3; owner decision 2026-11-19 on
+     * python-multiplatform#191: "a small consumer-side Kotlin compiler plugin ... applied
+     * automatically by the Gradle plugin").
+     *
+     * Called only when the artefact walker is configured: the plugin rewrites the marker calls the
+     * klib walker generates and nothing else, so a build that walks nothing resolves nothing.
+     *
+     * By configuration name, not through `KotlinCompilerPluginSupportPlugin`: this plugin is compiled
+     * on Gradle's embedded Kotlin and has no Kotlin Gradle Plugin type on its compile classpath (see
+     * `build.gradle.kts`), which is also why `setKspArg` goes by name. The Kotlin Gradle Plugin hands
+     * this configuration's files to the compiler as its plugin classpath, and the compiler finds the
+     * registrar through `META-INF/services`; the plugin takes no options. `matching` is live, so the
+     * configuration is covered whether the Kotlin plugin created it before or after this call.
+     */
+    internal fun applyDefaultCallCompilerPlugin(project: Project, extension: PythonBindingsExtension) {
+        project.configurations.matching { it.name == NATIVE_COMPILER_PLUGIN_CLASSPATH }.configureEach {
+            dependencies.addLater(
+                project.provider {
+                    project.dependencies.create(extension.compilerPlugin.getOrElse(DEFAULT_COMPILER_PLUGIN_COORDINATES))
+                },
+            )
+        }
+    }
+
+    /**
      * Registers the artefact walker -- `docs/design/ecosystem.md` §5b's second producer -- when a consumer
      * has asked for one.
      *
@@ -408,6 +446,7 @@ class PythonBindingsPlugin : Plugin<Project> {
         }
 
         val klibReader = klibReaderClasspath(project)
+        applyDefaultCallCompilerPlugin(project, extension)
 
         for ((configurationName, sourceSetName) in targets) {
             val configuration = project.configurations.findByName(configurationName)

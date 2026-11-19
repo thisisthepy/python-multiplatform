@@ -27,7 +27,8 @@
  * Free-threaded CPython (3.15t is the only supported build; issue #159, runtime/API.md
  * "Free-threaded CPython"). Without a GIL every static, every module-state field and every
  * object another thread can reach is shared. Each piece of shared mutable state is one of:
- *   thread-local   TP_THREAD_LOCAL (tp_depth, tp_poll_countdown, tp_snapshot_depth)
+ *   thread-local   TP_THREAD_LOCAL (tp_depth, tp_poll_countdown, tp_snapshot_depth, and the #414
+ *                  tree_epoch / poll_raised of tp_tls)
  *   atomic         tp_atomic_* below (tp_globals_epoch, tp_class_rt tag / bad_tag / gepoch /
  *                  counters, tp_version_tag reads)
  *   immutable      written only by the module's exec slot (or by tp_clear, when no call can run)
@@ -1003,8 +1004,12 @@ static inline int tp_unbox_bool(PyObject *o, int *out)
  * Free-threaded (#159): the CALLER holds the list's critical section (tp_cs_begin) from before
  * enter to after exit, on every exit path. enter and exit read and write the list's items through
  * borrowed references (PyList_GET_ITEM) and rely on that lock: no other thread can change the list
- * between the copy-in and the write-back, so the whole call is one atomic step as far as lists are
- * concerned (CPython can produce that interleaving: every list operation takes the same lock).
+ * between the copy-in and the write-back, and an operation that takes the list's lock (list(a),
+ * slicing, comparison, a + b, another compiled call) sees the call as one step (CPython can produce
+ * that interleaving). Element reads that take no lock (a[i], iteration, sum(), `in`) do see stores
+ * made inside the call, so on free-threaded builds every store is written through at once, in
+ * program order (tp_*_array_st, #391): such a reader sees what it would see of the interpreter's
+ * one-by-one stores.
  * Polls (issue #152, #335, SPEC N-8): a function holding an array polls once per TP_POLL_INTERVAL
  * at the top of a loop iteration: it writes the array back with exit, ends the critical section,
  * polls, and enters again (re-taking the section and re-checking the list), so each poll costs a
@@ -1166,6 +1171,97 @@ static inline int tp_i64_array_exit(tp_i64_array *a)
 }
 
 /* ------------------------------------------------------------------------------------------
+ * Stores into a list parameter (#391; design/typedpython.md 4.3.6 사).
+ *
+ * Free-threaded builds read list elements without the list's lock (PyList_GetItemRef, the
+ * interpreter's a[i], list iteration): a release store in PyList_SetItem / STORE_SUBSCR_LIST_INT and
+ * a seq_cst load in _Py_TryXGetRef. A reader that sees one store of the interpreter therefore sees
+ * every earlier store of the same thread. A deferred write-back in index order breaks that when the
+ * function stored a higher index first (`a[1] = x; a[0] = y`: a reader could see the new a[0] with
+ * the old a[1]). So with TP_LIST_WRITE_THROUGH every store also goes into the list at once, in
+ * program order, under the critical section the wrapper already holds (PyList_SetItem's own section
+ * is skipped: the top section holds that mutex, Python/critical_section.c:29-45). The copy stays the
+ * source of reads: no other thread can store while the section is held.
+ * With a GIL no other thread runs during the call, so the store only marks the slot dirty and the
+ * write-back at exit stores it (as before #391).
+ * st: 0, or -1 with MemoryError (the list keeps its old element; the interpreter would fail when
+ * creating the value, before its store). flush1: writes one slot a parallel region stored (dirty) and
+ * clears its dirty bit; a no-op without TP_LIST_WRITE_THROUGH. Both REQUIRE the critical section.
+ * TP_LIST_WRITE_THROUGH is the single mutation point the tests turn off and must see fail.
+ * ------------------------------------------------------------------------------------------ */
+#if defined(Py_GIL_DISABLED)
+#define TP_LIST_WRITE_THROUGH 1
+#else
+#define TP_LIST_WRITE_THROUGH 0
+#endif
+
+static inline int tp_f64_array_st(tp_f64_array *a, Py_ssize_t slot, double v)
+{
+    a->data[slot] = v;
+#if TP_LIST_WRITE_THROUGH
+    {
+        PyObject *o = PyFloat_FromDouble(v);
+        if (o == NULL || PyList_SetItem(a->list, slot, o) < 0) {
+            return -1;          /* SetItem consumed o on failure; the error is set */
+        }
+    }
+#else
+    a->dirty[slot] = 1;
+#endif
+    return 0;
+}
+
+static inline int tp_i64_array_st(tp_i64_array *a, Py_ssize_t slot, int64_t v)
+{
+    a->data[slot] = v;
+#if TP_LIST_WRITE_THROUGH
+    {
+        PyObject *o = PyLong_FromLongLong((long long)v);
+        if (o == NULL || PyList_SetItem(a->list, slot, o) < 0) {
+            return -1;
+        }
+    }
+#else
+    a->dirty[slot] = 1;
+#endif
+    return 0;
+}
+
+static inline int tp_f64_array_flush1(tp_f64_array *a, Py_ssize_t slot)
+{
+#if TP_LIST_WRITE_THROUGH
+    if (a->dirty[slot]) {
+        PyObject *o = PyFloat_FromDouble(a->data[slot]);
+        a->dirty[slot] = 0;
+        if (o == NULL || PyList_SetItem(a->list, slot, o) < 0) {
+            return -1;
+        }
+    }
+#else
+    (void)a;
+    (void)slot;
+#endif
+    return 0;
+}
+
+static inline int tp_i64_array_flush1(tp_i64_array *a, Py_ssize_t slot)
+{
+#if TP_LIST_WRITE_THROUGH
+    if (a->dirty[slot]) {
+        PyObject *o = PyLong_FromLongLong((long long)a->data[slot]);
+        a->dirty[slot] = 0;
+        if (o == NULL || PyList_SetItem(a->list, slot, o) < 0) {
+            return -1;
+        }
+    }
+#else
+    (void)a;
+    (void)slot;
+#endif
+    return 0;
+}
+
+/* ------------------------------------------------------------------------------------------
  * Lists read element by element (#255, ir.direct_lists): a pure function with three or more list
  * parameters does not copy them in. The wrapper sets only `list` of each tp_*_array (borrowed; the
  * call's arguments keep it alive) and every Index is one of these, in program order: the list's own
@@ -1213,6 +1309,41 @@ static inline int tp_list_ld_i64(PyObject *list, int64_t i, int64_t *out)
     rc = tp_unbox_i64(v, out);
     Py_DECREF(v);
     return rc < 0 ? -1 : rc > 0 ? 1 : 0;
+}
+
+/* Stores element by element (#255 (d2), ir.direct_writer; agent proposal, not confirmed): a function
+ * with an effect and three or more list parameters stores each `a[i] = v` at once, in program order,
+ * as the interpreter does (STORE_SUBSCR: the value exists first; list_ass_subscript normalises a
+ * negative index against the length at that moment; list_ass_item / PyList_SetItem checks the bounds
+ * inside the list's own critical section and stores with a release store). The new object is made
+ * first, then the index is normalised, then PyList_SetItem, which steals the reference also when it
+ * fails. rc 0 = stored; -1 = MemoryError, or IndexError("list assignment index out of range"). Never
+ * 1: a store cannot deopt. Dropping the old element can run its finalizer, at the same point as in
+ * the interpreter. */
+static inline int tp__list_store(PyObject *list, int64_t i, PyObject *o)
+{
+    if (o == NULL) {
+        return -1;
+    }
+    if (i < 0) {
+        i += (int64_t)PyList_GET_SIZE(list);
+    }
+    if (i < 0 || i > (int64_t)PY_SSIZE_T_MAX) {
+        Py_DECREF(o);
+        PyErr_SetString(PyExc_IndexError, "list assignment index out of range");
+        return -1;
+    }
+    return PyList_SetItem(list, (Py_ssize_t)i, o) < 0 ? -1 : 0;   /* steals o, also on failure */
+}
+
+static inline int tp_list_st_f64(PyObject *list, int64_t i, double v)
+{
+    return tp__list_store(list, i, PyFloat_FromDouble(v));
+}
+
+static inline int tp_list_st_i64(PyObject *list, int64_t i, int64_t v)
+{
+    return tp__list_store(list, i, PyLong_FromLongLong((long long)v));
 }
 
 /* ------------------------------------------------------------------------------------------
@@ -2687,6 +2818,78 @@ static inline int tp_class_global_ok(PyObject *module_dict, PyObject *name, PyOb
     return rc;
 }
 
+/* The entry globals of a function that holds lists (#390), read BEFORE the lists' critical section:
+ * nothing may wait inside that section, and a dict read can (its lock-free path falls back to the
+ * dict's critical section, dictobject.c _Py_dict_lookup_threadsafe `read_failed` and
+ * ensure_shared_on_read; a wait detaches and suspends every section the thread holds). The n names
+ * are looked up in module_dict (not in builtins) inside the dict's critical section, together with
+ * tp_globals_epoch, so the values and *epoch belong to one moment: the watcher moves the epoch under
+ * the same lock before a change is stored (as in tp_class_global_ok). The caller unboxes out[] (strong
+ * references, NULL-filled on a non-zero return), takes the lists' section, copies in, and then
+ * requires the epoch to be unchanged: no watched name changed since the read, so the values are still
+ * current at that point, inside the lists' section. The names must be watched (tp_watch_names) and the
+ * dict must be watched (watch_id1 > 0), else the caller deopts. Returns 0, 1 = deopt (a name is not a
+ * module global: the interpreted function looks in builtins or raises NameError), -1 = error. */
+static inline int tp_eg_snapshot(PyObject *module_dict, PyObject *const *names, Py_ssize_t n,
+                                 PyObject **out, uint64_t *epoch)
+{
+    Py_ssize_t i;
+    int rc = 0;
+    for (i = 0; i < n; i++) {
+        out[i] = NULL;
+    }
+    Py_BEGIN_CRITICAL_SECTION(module_dict);
+    *epoch = __atomic_load_n(&tp_globals_epoch, __ATOMIC_ACQUIRE);
+    /* the dict's own fallback section on the mutex we hold is skipped, not waited for
+       (critical_section.c _PyCriticalSection_BeginSlow: the top-most section holds it) */
+    for (i = 0; i < n && rc == 0; i++) {
+        int found = PyDict_GetItemRef(module_dict, names[i], &out[i]);
+        rc = found < 0 ? -1 : found == 0 ? 1 : 0;
+    }
+    Py_END_CRITICAL_SECTION();
+    if (rc != 0) {
+        for (i = 0; i < n; i++) {
+            Py_CLEAR(out[i]);
+        }
+    }
+    return rc;
+}
+
+/* After the copy-in, inside the lists' section: the epoch read by tp_eg_snapshot is still current. */
+static inline int tp_eg_current(uint64_t epoch)
+{
+    return __atomic_load_n(&tp_globals_epoch, __ATOMIC_ACQUIRE) == epoch;
+}
+
+/* #414 (SPEC N-8 "Entry globals and later shared reads"; agent proposal, not confirmed): at the end of
+ * a call that runs under the epoch, before its result or exception is returned. `epoch` was read by
+ * tp_eg_snapshot (n may be 0: then it only reads the epoch, still inside the module dict's section, so
+ * no store whose watcher already moved the epoch can still be pending: that store holds the same lock
+ * until it is done). The acquire fence orders every read the call made before it (a slot, a list
+ * element, a dict lookup) before the epoch load: if one of them saw a write that another thread made
+ * after rebinding a watched global, the watcher's move, which came before that rebinding's store and so
+ * before the write, is visible here. 1 = no watched global changed since the snapshot. The polls inside
+ * such a call make the same comparison (tp_epoch_poll_slow, below), so a call that does not end still
+ * leaves after a change. */
+static inline int tp_eg_unchanged(uint64_t epoch)
+{
+#if defined(TP_MSVC_ATOMICS)
+    tp_msvc_fence();
+#else
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+#endif
+    return __atomic_load_n(&tp_globals_epoch, __ATOMIC_ACQUIRE) == epoch;
+}
+
+/* #414: a callee's entry global read at the Call inside a call that runs under the epoch: the module
+ * dict only (the builtins dict is not watched for it). PyDict_GetItemRef: 1 found (*out strong),
+ * 0 absent (the caller deopts: the interpreted function then looks in builtins or raises NameError),
+ * -1 error. No lock: the epoch read in the dict's section before it covers this read (tp_eg_unchanged). */
+static inline int tp_eg_read(PyObject *module_dict, PyObject *name, PyObject **out)
+{
+    return PyDict_GetItemRef(module_dict, name, out);
+}
+
 /* The body of a module's PyDict_WatchCallback: move tp_globals_epoch when `key` is one of the
  * NULL-terminated class `names` (an exact str compared by content), may equal one (any other key
  * type, a str subclass), or is NULL (cleared / cloned / deallocated). Never raises; returns 0. */
@@ -2971,9 +3174,15 @@ typedef struct {
     int poll_countdown;             /* eval-breaker poll countdown (#141) */
     Py_ssize_t snapshot_depth;      /* snapshot-holding functions in flight (#141) */
     tp_osr *osr;                    /* the OSR context for the impl about to be entered (#152), or NULL */
+    /* #414 polls (tp_epoch_poll_slow): the epoch E0 of the epoch-checked call this thread runs inside, 0
+     * outside every one. Written only by the frame that enters such a call (wrapper or impure Call site:
+     * saved, set, restored after the impl) and set to 0 around the impl of any other wrapper whose call
+     * tree reaches a member of an epoch tree, and around the breaker call of a poll. */
+    uint64_t tree_epoch;
+    int poll_raised;                /* #414: a poll of that call raised (its handler's exception); same owner */
 } tp_tls;
 
-static TP_THREAD_LOCAL tp_tls tp_tls_v = {{0, NULL, 0, -1}, TP_POLL_INTERVAL, 0, NULL};
+static TP_THREAD_LOCAL tp_tls tp_tls_v = {{0, NULL, 0, -1}, TP_POLL_INTERVAL, 0, NULL, 0, 0};
 
 static inline tp_tls *tp_tls_get(void)
 {
@@ -3099,6 +3308,9 @@ static inline void tp_depth_done(tp_tls *t)
 /* Around a point of a fast tree that can run Python code: the count includes the tree's `fd` active
  * frames. begin/end are balanced. end also drops the cached top frame when no compiled frame is
  * counted any more (the code in between may have cached another frame, as tp_leave_call would). */
+/* `fd` is -1 at an exit of a counted frame to its continuation (#426): the continuation's Python frame
+ * stands for that frame, so it leaves the count for the call and returns to it after (the count never
+ * goes below 0: the frame itself was counted by tp_enter_call). */
 static inline void tp_depth_py_begin(tp_tls *t, int fd)
 {
     t->depth.count += fd;
@@ -3148,6 +3360,18 @@ static PyMethodDef tp_trace_frame_reads_def = {"__tp_trace_frame_reads__", tp_tr
  * (`tp_snapshot_depth > 0`, counted at its entry and exit) the slow path does nothing and the event
  * stays pending. Its own polls (#152, #335) first write the arrays back and lower the depth, so the
  * handler runs there with the lists up to date, and the function copies them in again after.
+ *
+ * Epoch-checked calls (#414; leader decision 2026-11-15: postponing signals and stop-the-world requests
+ * until such a call returns is not accepted; the means below are an agent proposal, not owner-confirmed).
+ * A pure function that runs under the dict-watcher epoch is not a snapshot holder for its entry globals:
+ * every poll in its call tree is tp_epoch_poll (impl entry) or tp_epoch_poll_slow (loop tops, once per
+ * TP_POLL_INTERVAL iterations), which runs the breaker as tp_poll_slow does and then, when this thread is
+ * inside an epoch-checked call (tp_tls.tree_epoch != 0), compares the epoch with that call's E0: moved,
+ * it returns 1 and the call deopts (it is pure: redone interpreted from the start; a handler that already
+ * ran is as if it had run before the call's first bytecode), so a loop that exits on a global a handler or
+ * another thread rebinds ends. An exception the breaker raised sets tp_tls.poll_raised; the entering
+ * frame keeps that exception even when the epoch moved (the interpreter could raise it at that point),
+ * while an exception of the call's own computation after a change is still cleared and redone.
  * ------------------------------------------------------------------------------------------ */
 #ifndef TP_POLL_INTERVAL
 #define TP_POLL_INTERVAL 4096
@@ -3203,6 +3427,47 @@ static inline int tp_poll(tp_tls *t, PyObject *breaker)
         return 0;
     }
     return tp_poll_slow(t, breaker);
+}
+
+/* #414: the slow poll of a function that is a member of an epoch tree (cgen `_FnGen.tree`; agent
+ * proposal, not owner-confirmed). Outside an epoch-checked call (tree_epoch 0) it is tp_poll_slow. Inside
+ * one: the breaker runs with tree_epoch set to 0 (what a handler runs, a compiled call included, is not
+ * part of this call), then tree_epoch is restored; an exception it raised marks poll_raised and returns
+ * -1; else the epoch is compared with E0 (tp_eg_unchanged: an acquire fence, then the load), and a move
+ * returns 1, the caller's deopt. Cold: once per TP_POLL_INTERVAL iterations, so the comparison costs
+ * nothing in the per-iteration path. 0 = continue, -1 = exception set, 1 = deopt. */
+static TP_COLD int tp_epoch_poll_slow(tp_tls *t, PyObject *breaker)
+{
+    uint64_t e = t->tree_epoch;
+    int rc;
+    if (e == 0) {
+        return tp_poll_slow(t, breaker);
+    }
+    t->tree_epoch = 0;
+    rc = tp_poll_slow(t, breaker);
+    t->tree_epoch = e;
+    if (rc != 0) {
+        t->poll_raised = 1;
+        return -1;
+    }
+    return tp_eg_unchanged(e) ? 0 : 1;
+}
+
+/* #414: tp_poll of an epoch-tree member (its impl entry): the countdown, then tp_epoch_poll_slow. */
+static inline int tp_epoch_poll(tp_tls *t, PyObject *breaker)
+{
+    if (!TP_UNLIKELY(--t->poll_countdown <= 0)) {
+        return 0;
+    }
+    return tp_epoch_poll_slow(t, breaker);
+}
+
+/* #414: the loop poll of a snapshot holder inside an epoch tree (a pure function holding a buffer, which
+ * runs no user code, #149): no breaker, only the comparison, so its loop still ends when the epoch moved.
+ * 1 = moved (the caller's deopt). Cold, once per TP_POLL_INTERVAL iterations. */
+static TP_COLD int tp_epoch_moved(tp_tls *t)
+{
+    return t->tree_epoch != 0 && !tp_eg_unchanged(t->tree_epoch);
 }
 
 /* Tracing, profiling and monitoring (issue #142, SPEC N-14). A compiled function has no Python

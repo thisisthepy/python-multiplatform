@@ -20,6 +20,25 @@ esac
 src="$(fetch_source "$PY_VERSION")"
 cd "$src"
 
+# Android's app seccomp filter kills legacy syscalls on x86_64: CPython's vendored mimalloc calls
+# syscall(SYS_access) (and SYS_open) directly whenever those numbers exist, which raised SIGSYS
+# at Py_Initialize on the x86_64 emulator (issue #436, toolchain#145). Make Android take
+# mimalloc's libc branch (bionic uses openat/faccessat). arm64 has no __NR_access and already does.
+prim=Objects/mimalloc/prim/unix/prim.c
+guard='#if defined(MI_HAS_SYSCALL_H) && defined(SYS_open) && defined(SYS_close) && defined(SYS_read) && defined(SYS_access)'
+if ! grep -qF '&& !defined(__ANDROID__)' "$prim"; then
+    grep -qxF "$guard" "$prim" || die "$prim: mimalloc raw-syscall guard not found; recheck issue #436"
+    GUARD="$guard" python3 - "$prim" <<'PY'
+import os, sys
+p = sys.argv[1]
+g = os.environ["GUARD"]
+s = open(p).read()
+assert s.count(g + "\n") == 1, "guard line is not unique"
+open(p, "w").write(s.replace(g + "\n", g + " && !defined(__ANDROID__)\n"))
+PY
+fi
+grep -qF "$guard && !defined(__ANDROID__)" "$prim" || die "$prim: Android seccomp patch did not apply"
+
 # `Platforms/Android package` lists the files to ship with `git ls-files`, so
 # the unpacked tarball needs an index that tracks Platforms/Android.
 if [ ! -d .git ]; then

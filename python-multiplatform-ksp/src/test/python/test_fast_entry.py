@@ -93,10 +93,22 @@ def cube(x: int) -> float:
 @compiled
 def fill(x: int, out: list[float]) -> None:
     out[0] = cube(x)
+
+
+@compiled
+def cuber(x: int, k: int) -> float:
+    if k > 0:
+        return cuber(x, k - 1)
+    return float(x * x * x) + leaf(x)
+
+
+@compiled
+def fillr(x: int, out: list[float]) -> None:
+    out[0] = cuber(x, 0)
 """
 
 BOUNDED = {"leaf": 1, "mid": 2, "top": 3, "loopy": 2, "outer": 3, "cube": 2, "fill": 3}
-NOT_BOUNDED = ("objy", "viaobj", "rec", "callrec")
+NOT_BOUNDED = ("objy", "viaobj", "rec", "callrec", "cuber", "fillr")     # cuber calls itself
 
 
 def build(d: Path, extra: tuple[str, ...] = ()):
@@ -368,7 +380,28 @@ def test_a_redo_inside_a_fast_tree_sees_the_exact_depth(traced, tmp_path):
     for x in ("3", "3000000"):
         assert r["ok"][x] > 100 and r["rec"][x] >= 1, (x, r)
     assert r["deopts"] >= r["deopt_ok"] > 100           # the redo really ran at every ok depth
-    assert "tp_depth_py_begin(tp_t, tp_fd);" in fn_text(c, "static inline int tp_fimpl_fill")
+    # fill leaves through a statement exit (#390): its continuation's Python frame stands for fill
+    # itself, so the tree's other frames are counted (tp_fd - 1), not tp_fd
+    assert "tp_depth_py_begin(tp_t, tp_fd - 1);" in fn_text(c, "static inline int tp_fimpl_fill")
+
+
+def test_a_continuation_of_a_counted_frame_sees_the_exact_depth(traced, tmp_path):
+    # #426. fillr (impure, one list, no fast twin: cuber calls itself) -> cuber deopts on i64 overflow, so
+    # fillr leaves through a statement exit on the counted path. The continuation's Python frame stands
+    # for fillr; with fillr still in the depth count the compiled rec(50) reached from the interpreted
+    # cuber raised RecursionError one frame before the interpreter.
+    proved, c, so = traced
+    plain_src = tmp_path / "fast_mod_plain.py"
+    plain_src.write_text(SOURCE)
+    assert "mod.fill(x, out)" in CHILD_REDO
+    r = run_child(CHILD_REDO.replace("mod.fill(x, out)", "mod.fillr(x, out)"), so, plain_src)
+    assert r["mismatch"] == [], r["mismatch"][:5]
+    for x in ("3", "3000000"):
+        assert r["ok"][x] > 100 and r["rec"][x] >= 1, (x, r)
+    assert r["deopts"] >= r["deopt_ok"] > 100           # the exit really ran at every ok depth
+    assert "static inline int tp_fimpl_fillr(" not in c
+    impl = fn_text(c, "static int tp_impl_fillr")
+    assert "tp_depth_py_begin(tp_t, -1);" in impl and "tp_depth_py_end(tp_t, -1);" in impl
 
 
 @posix_signals

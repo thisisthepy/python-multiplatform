@@ -1,5 +1,13 @@
 """`python -m typedpython check [--mode checked|compiled] [--format text|json] PATHS...`
 `python -m typedpython emit-c PATHS... --root DIR [--cache DIR] --manifest FILE`
+`python -m typedpython aot-build ENTRY.py -o EXECUTABLE [--emit-c FILE.c] [--strict-int]` (SPEC N-17, #448: exit 1 on a finding)
+`python -m typedpython aot-lib MODULE.py --export f,g --prefix P -o DIR [--emit-c FILE.c] [--strict-int]` (#455: a C-ABI library)
+`python -m typedpython aot-build ENTRY.py --explain-lists` (also `aot-lib MODULE.py --export f --prefix P --explain-lists`;
+#465, agent proposal, not owner-confirmed): builds nothing and prints, for each group of `list[int]` names, its members,
+why they were merged, its class (raw, or big-capable) and why; no `-o` is needed.
+
+`--strict-int` (#462; design decision D1 (a), leader 2026-11-16, not owner-confirmed): an int not proved inside 64 bits is a
+compile error (`aot/int-unproven`) instead of a big-integer-capable value.
 
 Exit status: 0 no errors (warnings allowed), 1 errors, 2 the gate itself could not run.
 """
@@ -44,8 +52,51 @@ def main(argv: list[str]) -> int:
     emit.add_argument("--cache", type=Path, default=Path("build/typedpython-c-cache"),
                       help="source -> C cache directory (default: build/typedpython-c-cache)")
     emit.add_argument("--manifest", type=Path, required=True, help="the JSON manifest to write")
+    aot = commands.add_parser(
+        "aot-check", help="report what an AOT build would refuse in a program (builds nothing, SPEC N-17)")
+    aot.add_argument("entry", type=Path, help="the entry module; the sibling modules it imports are checked too")
+    aot.add_argument("--strict-int", action="store_true",
+                     help="also report an int operation that is not proved to stay inside i64")
+    aot.add_argument("--json", action="store_true", help="print the report as JSON")
+    aot_build = commands.add_parser(
+        "aot-build", help="compile a single-module program of scalar functions to a standalone executable "
+                          "with no CPython (SPEC N-17, first step)")
+    aot_build.add_argument("entry", type=Path, help="the entry module (it has an `if __name__ == \"__main__\":` block)")
+    aot_build.add_argument("-o", "--output", type=Path, default=None, help="the executable to write")
+    aot_build.add_argument("--explain-lists", action="store_true",
+                           help="build nothing; print the groups of list[int] names, their class and why")
+    aot_build.add_argument("--emit-c", type=Path, default=None, help="also keep the generated C here")
+    aot_build.add_argument("--strict-int", action="store_true",
+                           help="an int operation not proved to stay inside 64 bits is a compile error (no big integers)")
+    aot_lib = commands.add_parser(
+        "aot-lib", help="compile a single-module program to a C-ABI shared library with a header and a JSON "
+                        "description, with no CPython (SPEC N-17, #455)")
+    aot_lib.add_argument("module", type=Path, help="the module (an `if __name__ == \"__main__\":` block is not compiled)")
+    aot_lib.add_argument("--export", required=True, help="the functions to export, separated by commas")
+    aot_lib.add_argument("--prefix", required=True, help="the C identifier every exported symbol starts with")
+    aot_lib.add_argument("-o", "--output", type=Path, default=None, help="the directory for the library, "
+                         "<prefix>.h and <prefix>.json")
+    aot_lib.add_argument("--explain-lists", action="store_true",
+                         help="build nothing; print the groups of list[int] names, their class and why")
+    aot_lib.add_argument("--emit-c", type=Path, default=None, help="also keep the generated C here")
+    aot_lib.add_argument("--strict-int", action="store_true",
+                         help="an int operation not proved to stay inside 64 bits is a compile error (no big integers)")
     args = parser.parse_args(argv)
 
+    if args.command in ("aot-lib", "aot-build") and args.output is None and not args.explain_lists:
+        parser.error("the following arguments are required: -o/--output")
+    if args.command == "aot-lib" and args.explain_lists:
+        return _aot_explain(args.module, [n.strip() for n in args.export.split(",") if n.strip()], args.prefix,
+                            args.strict_int)
+    if args.command == "aot-build" and args.explain_lists:
+        return _aot_explain(args.entry, None, None, args.strict_int)
+    if args.command == "aot-lib":
+        return _aot_lib(args.module, [n.strip() for n in args.export.split(",") if n.strip()], args.prefix,
+                        args.output, args.emit_c, args.strict_int)
+    if args.command == "aot-build":
+        return _aot_build(args.entry, args.output, args.emit_c, args.strict_int)
+    if args.command == "aot-check":
+        return _aot_check(args.entry, args.strict_int, args.json)
     if args.command == "emit-c":
         return _emit_c(args.paths, args.root, args.cache, args.manifest)
     if args.command == "build":
@@ -66,6 +117,90 @@ def main(argv: list[str]) -> int:
             print(f"{d.severity.upper()} {d.path}:{d.line}:{d.column}: {d.message} [{d.rule}]")
 
     return EXIT_ERRORS if any(d.severity == "error" for d in found) else EXIT_CLEAN
+
+
+def _aot_check(entry: Path, strict_int: bool, as_json: bool) -> int:
+    """SPEC N-17 / #446: exit 0 when no finding is an error or pending, 1 otherwise, 2 if it could not run."""
+    from typedpython import aotcheck
+
+    if not entry.is_file():
+        print(f"typedpython: {entry} is not a file", file=sys.stderr)
+        return EXIT_FAILURE
+    report = aotcheck.check(entry, strict_int=strict_int)
+    if as_json:
+        print(json.dumps(report.to_json(), indent=2))
+    else:
+        for line in report.lines():
+            print(line)
+    return EXIT_ERRORS if report.blocking else EXIT_CLEAN
+
+
+def _aot_explain(module: Path, exports: list[str] | None, prefix: str | None, strict_int: bool) -> int:
+    """`--explain-lists`: the groups of `list[int]` names on standard output, nothing built (exit 0; 1 with the findings
+    on standard error when the program cannot be analysed; 2 when it could not run)."""
+    from typedpython import aot
+
+    if not module.is_file():
+        print(f"typedpython: {module} is not a file", file=sys.stderr)
+        return EXIT_FAILURE
+    try:
+        text = aot.explain_lists(module, exports=exports, prefix=prefix, strict_int=strict_int)
+    except aot.AotError as e:
+        for f in e.findings:
+            print(aot.format_finding(f), file=sys.stderr)
+        return EXIT_ERRORS
+    except PyreflyError as e:
+        print(f"typedpython: {e}", file=sys.stderr)
+        return EXIT_FAILURE
+    sys.stdout.write(text)
+    return EXIT_CLEAN
+
+
+def _aot_build(entry: Path, output: Path, emit_c: Path | None, strict_int: bool = False) -> int:
+    """SPEC N-17 / #448: exit 0 when the executable was built; 1 with one line per finding on standard error
+    (`path:line: error rule: message`) when the program is outside what the mode compiles exactly; 2 when
+    the build itself could not run (no such file, no C compiler, the compiler failed)."""
+    from typedpython import aot, cbuild
+
+    if not entry.is_file():
+        print(f"typedpython: {entry} is not a file", file=sys.stderr)
+        return EXIT_FAILURE
+    try:
+        exe = aot.build(entry, output, emit_c=emit_c, strict_int=strict_int)
+    except aot.AotError as e:
+        for f in e.findings:
+            print(aot.format_finding(f), file=sys.stderr)
+        return EXIT_ERRORS
+    except (cbuild.CBuildError, PyreflyError) as e:
+        print(f"typedpython: {e}", file=sys.stderr)
+        return EXIT_FAILURE
+    print(exe)
+    return EXIT_CLEAN
+
+
+def _aot_lib(module: Path, exports: list[str], prefix: str, out_dir: Path, emit_c: Path | None,
+             strict_int: bool = False) -> int:
+    """SPEC N-17 / #455: exit 0 when the library, its header and its description were written (their paths are
+    printed, one per line); 1 with one line per finding on standard error, as `aot-build`; 2 when the build
+    itself could not run."""
+    from typedpython import aot, cbuild
+
+    if not module.is_file():
+        print(f"typedpython: {module} is not a file", file=sys.stderr)
+        return EXIT_FAILURE
+    try:
+        files = aot.build_library(module, out_dir, exports=exports, prefix=prefix, emit_c=emit_c,
+                                  strict_int=strict_int)
+    except aot.AotError as e:
+        for f in e.findings:
+            print(aot.format_finding(f), file=sys.stderr)
+        return EXIT_ERRORS
+    except (cbuild.CBuildError, PyreflyError) as e:
+        print(f"typedpython: {e}", file=sys.stderr)
+        return EXIT_FAILURE
+    for path in (files.library, files.header, files.description):
+        print(path)
+    return EXIT_CLEAN
 
 
 def _build(paths: list[Path], cache: Path, out: Path | None) -> int:

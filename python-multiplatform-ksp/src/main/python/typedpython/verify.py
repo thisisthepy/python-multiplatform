@@ -45,9 +45,24 @@ Rules (the `rule` of a Diagnostic):
   verify/redo                 `Call.redo` where it is not legal (see below)
   verify/entry-global-open    a function with entry_globals is not closed
   verify/array-open           a function with an ArrayParam runs user code (#203)
-  verify/array-direct         a pure function with three or more list parameters (#255,
+  verify/array-wait           a function that holds one or two lists in a critical section has, in
+                              its call tree, a node that can wait for another object's critical
+                              section inside that window (#390): an OBJ Global, IsExact, CheckMethod,
+                              or a Call of a function with an entry global the caller does not
+                              hold itself (read at the call); or it has an effect and a Call without
+                              a statement exit (#390 item 5, `_stmt_exit_problem`)
+  verify/array-direct         a function with three or more list parameters (#255,
                               `ir.direct_lists`: read element by element) has an entry global, a
-                              buffer parameter, a CopyArray of a list parameter or a parallel loop
+                              buffer parameter, a CopyArray of a list parameter or a parallel loop;
+                              or, with an effect (`ir.direct_writer`, (d2)), a node that can leave
+                              (element read, Unbox, Call) without a statement exit or after the first
+                              effect of its source statement (`_stmt_exit_problem`), a Call of a
+                              callee that is not pure, or a callee with an entry global in its call
+                              tree (`_writer_callee_problem`)
+  verify/entry-global-order   a function with entry globals that holds list copies or is not pure reads,
+                              anywhere in its call tree, other state another thread can change after
+                              entry (a Global, IsExact, New, CheckMethod, FieldGet, or a callee's entry
+                              global it does not hold itself, #414)
   verify/buffer               a malformed `ArrayParam.buffer` (None, "array", "numpy", "memoryview"), or a
                               CopyArray of a buffer array (#149)
   verify/par-loop             a `ForRange.par` (SPEC N-15, #277) that the verifier does not recompute to
@@ -273,19 +288,79 @@ rule (conservative, not in ir.py): a Call of a function that has entry globals c
 entry guard in the middle of the caller, which is a deopt there unless the caller is itself guarded
 the same way (it lists the same name and type as an entry global, and being closed cannot see it
 rebound) or the call is a legal `redo`.
+
+AOT mode (`verify(module, aot=True)`, SPEC N-17, #451; agent proposal, not owner-confirmed). The
+standalone build of `typedpython.aot` has no interpreter to redo a call in. These things differ, and
+nothing else (with the flag off every rule above is exactly as it was):
+
+  * the `Print` statement is defined (it is an unknown node otherwise): arguments are I64, F64, BOOL
+    or OBJ expressions (an OBJ one has no AOT form, the back end names what made it); it is not an effect, so it does not make a function
+    impure;
+  * `verify/deopt-impure` is not raised. That rule keeps a deopting node out of an impure function
+    because the redo in the interpreter would repeat the function's effects. With no interpreter
+    there is no redo: an int operation not proved to stay inside 64 bits, or an operation the back
+    end cannot compute exactly, is the back end's own business (since #462 an unproved int is a big-integer-capable
+    value; under `--strict-int` it is the finding `aot/int-unproven`; `aot/call`, ...);
+  * the AOT-only nodes are defined (`ir.py` "AOT-only nodes"): `ReturnTuple`, `Unpack`, `ListDisplay`, `Cond`
+    (checked under the guard facts of its test, as the branches of an `If`), `ArgvInt`, `ArgvLen`, and the
+    `FString` argument of a `Print`;
+  * a list is a value where `array_value` allows one: the right-hand side of an assignment to a list local
+    (a list name or a call that returns a list; the creations go through `allocation`), a `Return` of a
+    list-returning function, an argument for a list parameter (a list name of the parameter's type). A
+    list local or parameter read anywhere else is still `verify/array-use` / `verify/array-escape`;
+  * lists are never copied in, so the rules that exist because of a copy-in are off: reading three or more
+    list parameters element by element (`verify/array-direct`), more than two array parameters, a list
+    holding user code open (`verify/array-open`), a lock wait inside a copy-in (`verify/array-wait`) and the
+    statement exits (an AOT build has no interpreter to leave for);
+  * a name assigned by an `Unpack` is not an interval-tracked local: its value is whatever the callee
+    returned.
+
+The sound re-proof of the AOT mode (`sound_proofs`, #462; agent proposal, not owner-confirmed). `verify(m,
+aot=True)` keeps the interval rules above, which read every I64 value as one inside 64 bits (an operation that
+leaves them "would have deopted"). In an AOT build an int that is not proved is a big-integer-capable value
+(`aot/rep.py`), so those intervals are not true of it, and a proof read from them is not a proof. `sound_proofs`
+walks the verified IR again with the same checker and intervals that hold of unbounded integers, given which names
+and returns `aot/rep.py` holds as int64 (its oracle); it is called by `aot/rep.py` only, never by `verify()`, so
+nothing above changes. Its interval rules differ from the table above in these, and only these:
+
+  * an interval may be unbounded on either side (`-inf` / `inf`; an endpoint beyond 2**128 is read as unbounded);
+  * the base of a local that is not interval-tracked (a parameter, an `Unpack` target, a loop variable after its
+    loop) and of a `Call` is the i64 range only when the oracle holds the name / the callee's return as int64,
+    else unbounded; `ArgvInt` is unbounded; an `Index` element is the i64 range when the oracle holds the
+    list's group as RAW (every value stored into such a list is an int64), else unbounded (#465); `ArgvLen` and
+    `Len` are as above;
+  * every read of a local the oracle holds as int64 is also narrowed to the i64 range;
+  * ADD / SUB / MUL / NEG are exact and never clamped (no operation deopts; one that leaves 64 bits is a
+    big-integer operation and its value is the exact one); FLOORDIV / MOD are clamped to the i64 range only when
+    both operand intervals lie inside it and `-2**63 // -1` cannot occur, FLOORDIV with an unbounded operand is
+    unbounded; AND of a non-negative operand is [0, its hi]; OR / XOR of two i64 operands is the i64 range,
+    RSHIFT of an i64 operand too, anything else unbounded;
+  * a ForRange var lies between its bounds, not clamped;
+  * a guard `x < e` gives x no lower bound (not the i64 minimum), and so on for each comparison;
+  * the fixed point widens a growing bound first to the i64 limit and then, if it still grows, to unbounded; a
+    local the walks never gave an interval, and every local when the walks do not settle, is unbounded.
+
+It records, for each node of the verified IR (by identity), whether a `proven` ADD / SUB / MUL / NEG (or
+FLOORDIV / MOD) is re-proved under these intervals and whether an Index / StoreIndex is proved in bounds. What
+this cannot find: a fact the ordinary rules cannot prove either (it proves less, never more).
+
+Every other rule is on in AOT mode, among them types, definite assignment, ownership, structure,
+`proven` re-proof (the interval proof is what makes an int operation acceptable to the AOT back end),
+`verify/flag-pure` and `verify/flag-may-deopt` (the flags are still recomputed and compared).
 """
 from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
 
-from . import ir
+from . import ir, resume
 from .ir import (
     And, ArrayParam, Assign, BinOp, BinOpKind, Box, Break, Call, CallObject, Compare, CompareKind,
     CompareObj, Const, Continue, CopyArray, ExprStmt, ForRange, Function, GetAttr, Global, If, Index, Len,
     Local, MathCall, MathFunc, Module, NewArray, ObjToFloat, Or, Param, Return, StoreIndex, ToFloat,
     ToInt, Truth, Tuple, Type, Unbox, UnaryOp, UnaryOpKind, While,
 )
+from .ir import ArgvInt, ArgvLen, Cond, FormatField, FString, ListDisplay, Print, ReturnTuple, Unpack
 from .ir import CheckExact, CheckMethod, ClassDecl, FieldGet, FieldSet, Is, IsExact, New
 from .ir import BuildString, Contains, ForObj, Format, GetItem, NewDict, NewList, StoreItem
 from .ir import ParInfo
@@ -311,7 +386,9 @@ REGION_ESCAPE = "verify/region-escape"
 REDO = "verify/redo"
 ENTRY_OPEN = "verify/entry-global-open"
 ARRAY_OPEN = "verify/array-open"
+ARRAY_WAIT = "verify/array-wait"
 ARRAY_DIRECT = "verify/array-direct"
+ENTRY_ORDER = "verify/entry-global-order"
 BUFFER = "verify/buffer"
 CLASS = "verify/class"
 FIELD = "verify/field-unproved"
@@ -340,6 +417,10 @@ _EXPRS = frozenset({Const, Local, BinOp, UnaryOp, Compare, And, Or, ToFloat, ToI
                     GetItem, Contains, NewList, NewDict, Format, BuildString})
 _STMTS = frozenset({Assign, StoreIndex, ExprStmt, If, While, ForRange, Return, Break, Continue,
                     FieldSet, StoreItem, ForObj})
+# The statements and expressions only the AOT mode (`verify(m, aot=True)`) accepts. (An `FString` and its
+# `FormatField`s are checked by `s_Print`, which is the only place one may stand.)
+_AOT_STMTS = frozenset({Print, ReturnTuple, Unpack})
+_AOT_EXPRS = frozenset({ListDisplay, Cond, ArgvInt, ArgvLen})
 # Nodes whose OBJ result is a new reference (ir.py "ownership": Box, Global, GetAttr, CallObject,
 # OBJ BinOp, Tuple), plus reads of an OBJ local (the local owns its reference; the back end increfs or
 # borrows under that rule) and Calls of a compiled function returning OBJ (which returns a new
@@ -376,6 +457,11 @@ _SWAP = {CompareKind.EQ: CompareKind.EQ, CompareKind.NE: CompareKind.NE,
          CompareKind.LE: CompareKind.GE, CompareKind.GE: CompareKind.LE}
 _ROUNDS = 16          # rounds of the local-interval fixpoint before every local is full range
 _WIDEN_FROM = 3       # from this round on a bound that still grows jumps to the i64 limit
+# The sound re-proof of the AOT mode (`sound_proofs`, module docstring): an unbounded endpoint, the interval that
+# says nothing, and the magnitude beyond which an endpoint is read as unbounded (keeps the numbers small).
+_INF = float("inf")
+_WIDE = (-_INF, _INF)
+_SOUND_CAP = 2 ** 128
 
 # Definite assignment uses `None` for "unreachable" (bottom: every name counts as assigned).
 _State = frozenset[str] | None
@@ -404,9 +490,22 @@ class _Checker:
 
     def __init__(self, function: Function, signatures: dict[str, Function],
                  classes: dict[str, ClassDecl] | None = None,
-                 var_ivs: dict[str, tuple[int, int]] | None = None, fixing: bool = False):
+                 var_ivs: dict[str, tuple[int, int]] | None = None, fixing: bool = False,
+                 aot: bool = False, sound=None):
         self.fn = function
-        self.direct = ir.direct_lists(function)   # #255: lists read element by element
+        self.aot = aot      # AOT mode (module docstring "AOT mode"); False: every rule as it always was
+        # The sound re-proof (`sound_proofs`; only with aot): the oracle of which names and returns are int64, and
+        # what it found (id of a node of the input IR -> re-proved). None: every interval rule as it always was.
+        self.sound = sound
+        self.sound_ok: dict[int, bool] = {}
+        # AOT mode: a list is the caller's own array, never copied in, so no list is "read element by element"
+        self.direct = ir.direct_lists(function) and not aot   # #255: lists read element by element
+        # #255 (d2): with an effect a node that fails to continue natively leaves through the
+        # statement exit instead of deopting (checked after the walk, `_stmt_exit_problem`)
+        self.writer = ir.direct_writer(function) and not aot
+        self.array_ok = False       # AOT mode: the next expression may be a list value (see `array_value`)
+        self.arr_here = False       # ... as read by the expression being checked
+        self.unpacking = False      # AOT mode: checking the call of an `Unpack`
         # Local intervals (module docstring "Local variables and guards"): `var_ivs` is the interval
         # of every eligible local; `fixing` says this walk is a round of the fixpoint that computes
         # them (a local without an interval yet is then "bottom": `bottom` is set when one is read).
@@ -438,6 +537,8 @@ class _Checker:
         self.entry: dict[str, Type] = {}     # name -> type of every entry global
         self.opens: list[str] = []           # reasons the function is not closed
         self.slow_user: list[str] = []       # slow paths that can run user code (FieldGet, New)
+        self.waits: list[str] = []           # nodes that can wait for another object's lock (#390)
+        self.shared: list[str] = []          # reads of state another thread can change (#414)
 
     def error(self, rule: str, message: str) -> None:
         d = Diagnostic(self.fn.name, rule, message, self.fn.source_line)
@@ -475,14 +576,15 @@ class _Checker:
                 self.error(STRUCTURE, f"parameter '{p.name}' appears twice")
             params.add(p.name)
         if self.direct:
-            self.can_deopt = True      # every element read checks the element's type (#255)
+            if not self.writer:
+                self.can_deopt = True  # every element read checks the element's type (#255)
             if isinstance(fn.entry_globals, tuple) and fn.entry_globals:
                 self.error(ARRAY_DIRECT, "three or more list parameters are read element by element "
                                          "(#255), so an entry global cannot be read once at entry")
             if any(type(p) is ArrayParam and p.buffer is not None for p in fn.params):
                 self.error(ARRAY_DIRECT, "three or more list parameters are read element by element "
                                          "(#255); a buffer parameter beside them is not supported")
-        elif sum(type(p) is ArrayParam and p.buffer is None for p in fn.params) > 2:
+        elif not self.aot and sum(type(p) is ArrayParam and p.buffer is None for p in fn.params) > 2:
             self.error(STRUCTURE, "more than two array parameters: compiled code holds each list's "
                                   "critical section from copy-in to write-back, and free-threaded "
                                   "CPython has no section for more than two objects (#159)")
@@ -531,7 +633,7 @@ class _Checker:
                                  f"{self.scalars[name]}")
             else:
                 self.scalars[name] = t
-        if fn.returns not in _RETURN_TYPES:
+        if fn.returns not in _RETURN_TYPES and not (self.aot and fn.returns in (Type.F64_ARRAY, Type.I64_ARRAY)):
             self.error(TYPE, f"return type {fn.returns} is not a value type")
         for flag in ("pure", "may_deopt"):
             if not isinstance(getattr(fn, flag), bool):
@@ -664,7 +766,8 @@ class _Checker:
         assigned set at this point; `cond` says `e` is used only for its truth value (an If/While
         condition, or an And/Or operand in one)."""
         cls = type(e)
-        if cls not in _EXPRS:
+        self.arr_here, self.array_ok = self.array_ok, False
+        if cls not in _EXPRS and not (self.aot and cls in _AOT_EXPRS):
             self.error(UNKNOWN, f"expression node {cls.__name__} is not defined by ir")
             return e  # type: ignore[return-value]
         t = e.type
@@ -700,6 +803,15 @@ class _Checker:
 
     def e_Local(self, e: Local, state: _State) -> ir.Expr:
         name = e.name
+        if self.aot and self.arr_here and (name in self.arrays or name in self.larrays):
+            # AOT mode: a list name is a value where `array_value` allows one (the right-hand side of an
+            # assignment to a list local, a return value, an argument for a list parameter)
+            t = self.arrays.get(name) or self.larrays.get(name)
+            if e.type is not t:
+                self.error(TYPE, f"list '{name}' is {t.value} but read as {e.type.value}")
+            if name in self.larrays and state is not None and name not in state:
+                self.error(DA, f"local array '{name}' may be read before it is assigned")
+            return e
         if name in self.arrays:
             self.error(ARRAY_USE, f"array parameter '{name}' is used as a value (only Index, "
                                   f"StoreIndex and Len may use it)")
@@ -721,6 +833,8 @@ class _Checker:
     def interval(self, e: ir.Expr) -> tuple[int, int]:
         """The interval rules in the module docstring: [lo, hi] bounding every value `e` (an I64
         expression, already checked) can take when it completes without deopting."""
+        if self.sound is not None:
+            return self.sound_interval(e)
         cls = type(e)
         if getattr(e, "type", None) is not Type.I64:
             return _FULL
@@ -742,6 +856,9 @@ class _Checker:
             return _meet_interval(base, self.refine.get(e.name))
         if cls is Len:
             return self.lens.get(e.array, (0, _LEN_MAX))
+        if cls is Cond:          # AOT mode: either branch
+            a, b = self.interval(e.then), self.interval(e.orelse)
+            return (min(a[0], b[0]), max(a[1], b[1]))
         if cls is BinOp and e.op in _PROVABLE_OPS:
             lo, hi = _exact(e.op, self.interval(e.left), self.interval(e.right))
             return (max(lo, _I64_MIN), min(hi, _I64_MAX))
@@ -761,6 +878,84 @@ class _Checker:
             return (max(lo, _I64_MIN), min(hi, _I64_MAX))
         return _FULL
 
+    def sound_interval(self, e: ir.Expr) -> tuple:
+        """The sound re-proof's interval of `e` (module docstring "The sound re-proof of the AOT mode"): it holds of
+        the exact value of `e` whatever the size of the ints it reads, given the oracle (`self.sound`)."""
+        cls = type(e)
+        if getattr(e, "type", None) is not Type.I64:
+            return _WIDE
+        if cls is Const:
+            return (e.value, e.value) if type(e.value) is int else _WIDE
+        if cls is Local:
+            raw = self.sound.raw_name(self.fn.name, e.name)
+            iv = None
+            for loop in reversed(self.loops):
+                if loop.var == e.name:
+                    if loop.bottom:
+                        self.bottom = True
+                    iv = loop.interval
+                    break
+            if iv is None:
+                iv = _FULL if raw else _WIDE
+                if e.name in self.eligible:
+                    known = self.var_ivs.get(e.name)
+                    if known is not None:
+                        iv = known
+                    else:
+                        iv = _WIDE
+                        if self.fixing:
+                            self.bottom = True
+            iv = _meet_interval(iv, self.refine.get(e.name))
+            return _meet_interval(iv, _FULL) if raw else iv
+        if cls is Len:
+            return self.lens.get(e.array, (0, _LEN_MAX))
+        if cls is Index:
+            # an element of a RAW list group is an int64; one of a big-capable group is any int (aot/rep.py "Lists of ints")
+            return _FULL if self.sound.raw_element(self.fn.name, e.array) else _WIDE
+        if cls is ArgvLen:
+            return _FULL                    # argc is an int64
+        if cls is Call:
+            return _FULL if self.sound.raw_return(e.function) else _WIDE
+        if cls is Cond:
+            a, b = self.interval(e.then), self.interval(e.orelse)
+            return (min(a[0], b[0]), max(a[1], b[1]))
+        if cls is BinOp and e.op in _PROVABLE_OPS:
+            return _sound_cap(_exact_sound(e.op, self.interval(e.left), self.interval(e.right)))
+        if cls is BinOp and e.op in _POW2_OPS:
+            a, b = self.interval(e.left), self.interval(e.right)
+            if e.op is BinOpKind.FLOORDIV and _INF in (abs(a[0]), abs(a[1]), abs(b[0]), abs(b[1])):
+                return _WIDE
+            lo, hi = _div_interval(e.op, a, b)
+            if _inside(a) and _inside(b) and not (a[0] == _I64_MIN and b[0] <= -1 <= b[1]):
+                lo, hi = max(lo, _I64_MIN), min(hi, _I64_MAX)     # an int64 result, or an exception
+            return _sound_cap((lo, hi))
+        if cls is BinOp:
+            a, b = self.interval(e.left), self.interval(e.right)
+            if e.op is BinOpKind.AND:
+                his = [iv[1] for iv in (a, b) if iv[0] >= 0]
+                if his:
+                    return (0, min(his))
+                return _FULL if _inside(a) and _inside(b) else _WIDE
+            if e.op in (BinOpKind.OR, BinOpKind.XOR):
+                return _FULL if _inside(a) and _inside(b) else _WIDE
+            if e.op is BinOpKind.RSHIFT:
+                return _FULL if _inside(a) else _WIDE
+            return _WIDE
+        if cls is UnaryOp and e.op is UnaryOpKind.INVERT:
+            lo, hi = self.interval(e.operand)          # ~x == -x - 1, monotone decreasing
+            return _sound_cap((-hi - 1, -lo - 1))
+        if cls is UnaryOp and e.op is UnaryOpKind.NEG:
+            lo, hi = self.interval(e.operand)
+            return _sound_cap((-hi, -lo))
+        if cls is UnaryOp and e.op is UnaryOpKind.POS:
+            return self.interval(e.operand)
+        return _WIDE        # ArgvInt (any int CPython parses), and anything else
+
+    def sound_record(self, node: object, ok: bool) -> None:
+        """The sound re-proof: `node` (of the input IR) is re-proved, or not; a node met twice must hold both times."""
+        if self.sound is not None:
+            self.sound_ok[id(node)] = self.sound_ok.get(id(node), True) and ok
+
     def refinements(self, c: ir.Expr, truth: bool) -> dict[str, tuple[int, int]]:
         """The intervals that hold of locals when condition `c` evaluated to `truth` (module
         docstring "Local variables and guards"). A comparison of two I64 operands one of which is a
@@ -773,10 +968,11 @@ class _Checker:
                 return {}
             kind = c.op if truth else _NEGATE[c.op]
             out: dict[str, tuple[int, int]] = {}
+            bound = _bound if self.sound is None else _bound_sound
             if type(l) is Local:
-                _narrow(out, l.name, _bound(kind, self.interval(r)))
+                _narrow(out, l.name, bound(kind, self.interval(r)))
             if type(r) is Local:
-                _narrow(out, r.name, _bound(_SWAP[kind], self.interval(l)))
+                _narrow(out, r.name, bound(_SWAP[kind], self.interval(l)))
             return out
         if cls is UnaryOp and c.op is UnaryOpKind.NOT:
             return self.refinements(c.operand, not truth)
@@ -844,9 +1040,11 @@ class _Checker:
                 proven = self.check_shift(e.op, left, right)
             else:
                 shape = both and e.op in _PROVABLE_OPS
-                exact = (_exact(e.op, self.interval(left), self.interval(right))
+                exact = ((_exact if self.sound is None else _exact_sound)(e.op, self.interval(left),
+                                                                          self.interval(right))
                          if shape else _FULL)
                 proven = self.check_proven(shape, exact, f"{e.type.value} {e.op.value}")
+            self.sound_record(e, proven)
         if type(e.np) is not bool:
             self.error(TYPE, f"BinOp `np` {e.np!r} is not a bool")
         elif e.np:
@@ -907,6 +1105,7 @@ class _Checker:
             lo, hi = self.interval(operand) if shape else _FULL
             proven = self.check_proven(shape, (-hi, -lo) if shape else _FULL,
                                        f"unary {e.op.value} of {getattr(ot, 'value', ot)}")
+            self.sound_record(e, proven)
         if e.op is UnaryOpKind.NOT:
             self.slot(operand, Type.BOOL, "operand of not")
             if e.type is not Type.BOOL:
@@ -1015,8 +1214,9 @@ class _Checker:
             self.error(TYPE, f"Unbox of {getattr(ot, 'value', ot)}")
         if e.type not in ir.SCALARS:
             self.error(TYPE, f"Unbox gives a scalar, node says {e.type.value}")
-        else:
+        elif not self.writer:
             self.can_deopt = True       # every Unbox checks its operand's exact type (#271)
+        # (in a direct writer a mismatch leaves through the statement exit, #255 (d2))
         return dataclasses.replace(e, operand=operand)
 
     def e_MathCall(self, e: MathCall, state: _State) -> ir.Expr:
@@ -1039,20 +1239,50 @@ class _Checker:
             return ()
         return tuple(self.expr(a, state) for a in args)
 
+    def array_value(self, e: object, state: _State) -> ir.Expr:
+        """AOT mode: check `e` where a list value is allowed (the right-hand side of an assignment to a list
+        local, a return value, an argument for a list parameter): a list name or a `Call` that returns a
+        list. The creations (NewArray, CopyArray, ListDisplay) go through `allocation` instead."""
+        self.array_ok = True
+        out = self.expr(e, state)
+        self.array_ok = False
+        return out
+
     def e_Call(self, e: Call, state: _State) -> ir.Expr:
-        args = self.args(e.args, state, f"call of '{e.function}'")
+        here = self.arr_here
         callee = self.sigs.get(e.function)
+        if (self.aot and callee is not None and isinstance(e.args, tuple)
+                and len(e.args) == len(callee.params)):
+            # AOT mode: an argument for a list parameter is a list name (the caller's own list is passed)
+            args = tuple(self.array_value(a, state) if type(p) is ArrayParam else self.expr(a, state)
+                         for a, p in zip(e.args, callee.params))
+        else:
+            args = self.args(e.args, state, f"call of '{e.function}'")
+        if self.aot and callee is not None:
+            if callee.returns in ir.ARRAYS and not here:
+                self.error(ESCAPE, f"the list '{e.function}' returns is used as a value (a returned list may only be "
+                                   f"assigned to a list local or returned)")
+            if callee.returns is Type.OBJ and not self.unpacking:
+                self.error(TYPE, f"'{e.function}' returns a tuple, which only an Unpack may use")
         if callee is None:
             self.error(UNRESOLVED, f"call of '{e.function}', which is not a compiled function of "
                                    f"this module")
             return dataclasses.replace(e, args=args)
         self.callees.add(e.function)
+        if isinstance(callee.entry_globals, tuple) and callee.entry_globals and not self.covers(callee):
+            # read at the call (cgen ev_Call); a covered one is passed from this function's snapshot
+            g0 = getattr(callee.entry_globals[0], "name", "?")
+            self.waits.append(f"a call of '{e.function}', whose entry global {g0} is read at the call")
+            self.shared.append(f"the entry global {g0} of '{e.function}', read at the call")
         if len(args) != len(callee.params):
             self.error(TYPE, f"'{e.function}' takes {len(callee.params)} argument(s), got "
                              f"{len(args)}")
         redo_ok = type(e.redo) is bool and e.redo and self.fn.pure is not True
         for k, (a, p) in enumerate(zip(args, callee.params)):
-            if type(p) is ArrayParam:
+            if type(p) is ArrayParam and self.aot:
+                if type(a) is not Local or a.type is not p.type:
+                    self.error(ARRAY_USE, f"argument {k + 1} of '{e.function}' must be a {p.type.value} list name")
+            elif type(p) is ArrayParam:
                 self.error(ARRAY_USE, f"'{e.function}' takes array parameter '{p.name}'; an array "
                                       f"cannot be passed by Call (the entry guard and write-back "
                                       f"belong to the Python-level call)")
@@ -1122,6 +1352,9 @@ class _Checker:
         if not isinstance(e.name, str):
             self.error(TYPE, f"Global name {e.name!r} is not a str")
         self.result(e, Type.OBJ)
+        # #390: the cached read's fill (and tp_global) can wait for the module dict's lock
+        self.waits.append(f"global {e.name}")
+        self.shared.append(f"the global {e.name}")
         return e        # a read alone has no effect (ir.Global)
 
     def e_GetAttr(self, e: GetAttr, state: _State) -> ir.Expr:
@@ -1209,12 +1442,14 @@ class _Checker:
         idx, element, proven = self.index(e.array, e.index, state, "index")
         if self.direct and e.array in self.arrays and e.array not in self.buffers:
             # #255: another thread can resize the list between two reads, so no bound is proved,
-            # and an element of another type deopts
+            # and an element of another type deopts (a direct writer: leaves, `_stmt_exit_problem`)
             proven = False
-            self.can_deopt = True
+            if not self.writer:
+                self.can_deopt = True
         if element is not None and e.type is not element and e.type is not Type.OBJ:
             self.error(TYPE, f"element of '{e.array}' is {element.value}, node says "
                              f"{e.type.value}")
+        self.sound_record(e, proven)
         return dataclasses.replace(e, index=idx, proven=proven)
 
     def in_bounds(self, array: str, idx: ir.Expr) -> bool:
@@ -1296,6 +1531,8 @@ class _Checker:
     def e_IsExact(self, e: IsExact, state: _State) -> ir.Expr:
         obj = self.obj_operand(e.obj, state, "operand of IsExact")
         self.known_class(e.cls, "IsExact")
+        self.waits.append(f"IsExact of {e.cls} (looks the class up in the module dict)")
+        self.shared.append(f"the class global of IsExact {e.cls}")
         self.result(e, Type.BOOL)
         return dataclasses.replace(e, obj=obj)
 
@@ -1313,6 +1550,8 @@ class _Checker:
         obj = self.obj_operand(e.obj, state, "operand of CheckMethod")
         self.result(e, Type.OBJ)
         self.can_deopt = True
+        self.waits.append(f"CheckMethod of {e.cls} (looks the method up in the class dict)")
+        self.shared.append(f"the class dict of CheckMethod {e.cls}")
         if self.known_class(e.cls, "CheckMethod"):
             q = f"{e.cls}.{e.method}" if isinstance(e.method, str) else None
             callee = self.sigs.get(q) if q is not None else None
@@ -1331,10 +1570,12 @@ class _Checker:
         # a slot read runs no user code: not an effect. Its slow path after a class change (getattr)
         # can, which matters to array functions (#203).
         self.slow_user.append(f"FieldGet .{e.field} (generic getattr after a class change)")
+        self.shared.append(f"the field .{e.field}")
         return dataclasses.replace(e, obj=obj)
 
     def e_New(self, e: New, state: _State) -> ir.Expr:
         self.slow_user.append(f"New {e.cls} (calls the class after a class change)")
+        self.shared.append(f"the class global of New {e.cls}")
         args = self.args(e.args, state, f"New {e.cls}")
         for k, a in enumerate(args):
             self.slot(a, Type.OBJ, f"argument {k + 1} of New {e.cls}")
@@ -1366,6 +1607,46 @@ class _Checker:
     def e_CopyArray(self, e: CopyArray, state: _State) -> ir.Expr:
         return self.stray(e, state)
 
+    def e_ListDisplay(self, e: ListDisplay, state: _State) -> ir.Expr:
+        return self.stray(e, state)
+
+    # --- AOT-only expressions (module docstring "AOT mode") --------------------------------------
+
+    def e_Cond(self, e: Cond, state: _State) -> ir.Expr:
+        """`then if cond else orelse`: scalars of the node's type. Each branch is checked under the guard
+        facts the test gives, as the branches of an `If` are."""
+        cond = self.expr(e.cond, state, cond=True)
+        self.slot(cond, Type.BOOL, "condition of a conditional expression")
+        entry, base = self.refine, self.facts
+        self.facts = {**base, **self.facts_if(cond, True)}
+        self.refine, dead = self.narrowed(cond, True)
+        self.dead += dead
+        then = self.expr(e.then, state)
+        self.dead -= dead
+        self.facts = {**base, **self.facts_if(cond, False)}
+        self.refine = entry
+        self.refine, dead = self.narrowed(cond, False)
+        self.dead += dead
+        orelse = self.expr(e.orelse, state)
+        self.dead -= dead
+        self.refine, self.facts = entry, base
+        if e.type not in ir.SCALARS:
+            self.error(TYPE, f"a conditional expression is a scalar, node says {getattr(e.type, 'value', e.type)}")
+        else:
+            self.slot(then, e.type, "the value of a conditional expression")
+            self.slot(orelse, e.type, "the else value of a conditional expression")
+        return dataclasses.replace(e, cond=cond, then=then, orelse=orelse)
+
+    def e_ArgvInt(self, e: ArgvInt, state: _State) -> ir.Expr:
+        index = self.expr(e.index, state)
+        self.slot(index, Type.I64, "index of sys.argv")
+        self.result(e, Type.I64)
+        return dataclasses.replace(e, index=index)
+
+    def e_ArgvLen(self, e: ArgvLen, state: _State) -> ir.Expr:
+        self.result(e, Type.I64)
+        return e
+
     def stray(self, e: NewArray | CopyArray, state: _State) -> ir.Expr:
         self.error(ESCAPE, f"{type(e).__name__} is only legal as the value of an Assign to a local "
                            f"array")
@@ -1383,6 +1664,15 @@ class _Checker:
             self.error(TYPE, f"{name} gives {e.type.value} but local array '{target}' is "
                              f"{want.value}")
         element = _ELEMENT.get(e.type)
+        if type(e) is ListDisplay:
+            if not (isinstance(e.elements, tuple) and e.elements):
+                self.error(STRUCTURE, "ListDisplay has no elements")
+                return e
+            elements = tuple(self.expr(x, state) for x in e.elements)
+            for k, x in enumerate(elements):
+                if element is not None:
+                    self.slot(x, element, f"element {k + 1} of ListDisplay")
+            return dataclasses.replace(e, elements=elements)
         if type(e) is CopyArray:
             src = self.arrays.get(e.src) or self.larrays.get(e.src)
             if not isinstance(e.src, str) or src is None:
@@ -1420,6 +1710,8 @@ class _Checker:
         """The interval of the length of the array `e` creates (the operands are checked)."""
         if type(e) is CopyArray:
             return self.lens.get(e.src, (0, _LEN_MAX))
+        if type(e) is ListDisplay:
+            return (len(e.elements), len(e.elements))
         if getattr(e.length, "type", None) is not Type.I64:
             return (0, _LEN_MAX)
         lo, hi = self.interval(e.length)
@@ -1439,14 +1731,14 @@ class _Checker:
 
     def stmt(self, s: object, state: _State) -> tuple[ir.Stmt, _State]:
         cls = type(s)
-        if cls not in _STMTS:
+        if cls not in _STMTS and not (self.aot and cls in _AOT_STMTS):
             self.error(UNKNOWN, f"statement node {cls.__name__} is not defined by ir")
             return s, state  # type: ignore[return-value]
         return getattr(self, "s_" + cls.__name__)(s, state)
 
     def s_Assign(self, s: Assign, state: _State):
         target = s.target
-        alloc = type(s.value) in (NewArray, CopyArray)
+        alloc = type(s.value) in (NewArray, CopyArray) or (self.aot and type(s.value) is ListDisplay)
         if alloc:
             if target in self.larrays:
                 value = self.allocation(s.value, target, state)
@@ -1456,11 +1748,23 @@ class _Checker:
                 value = self.allocation(s.value, target, state)
                 self.error(ESCAPE, f"{type(s.value).__name__} is assigned to '{target}', which is "
                                    f"not a local array")
+        elif self.aot and target in self.larrays:
+            # AOT mode: also another list's name (both names then mean the one list) or a call that
+            # returns a list
+            value = self.array_value(s.value, state)
+            if type(value) not in (Local, Call):
+                self.error(ESCAPE, f"local array '{target}' may be assigned a creation, a list name or a call, "
+                                   f"not {type(value).__name__}")
+            elif getattr(value, "type", None) is not self.larrays[target]:
+                self.error(TYPE, f"local array '{target}' is {self.larrays[target].value} but is assigned "
+                                 f"{getattr(getattr(value, 'type', None), 'value', '?')}")
         else:
             value = self.expr(s.value, state)
             if target in self.larrays:
                 self.error(TYPE, f"local array '{target}' may only be assigned NewArray or "
                                  f"CopyArray")
+            if self.aot and getattr(value, "type", None) in ir.ARRAYS:
+                self.error(TYPE, f"a list is assigned to '{target}', which is not a list local")
         if target in self.larrays:
             pass
         elif target in self.arrays:
@@ -1493,16 +1797,126 @@ class _Checker:
 
     def s_StoreIndex(self, s: StoreIndex, state: _State):
         idx, element, proven = self.index(s.array, s.index, state, "store")
+        if self.direct and s.array in self.arrays and s.array not in self.buffers:
+            proven = False      # #255 (d2): the length can change between two accesses
         value = self.expr(s.value, state)
         if element is not None:
             self.slot(value, element, f"value stored into '{s.array}'")
         if s.array not in self.larrays:     # a local array is the function's own: not an effect
             self.stored.add(s.array)
             self.effects.append(f"stores into '{s.array}'")
+        self.sound_record(s, proven)
         return dataclasses.replace(s, index=idx, value=value, proven=proven), state
 
     def s_ExprStmt(self, s: ExprStmt, state: _State):
+        if self.aot and type(s.value) is Call:
+            # AOT mode: a call whose list result nobody binds (the back end releases it)
+            return dataclasses.replace(s, value=self.array_value(s.value, state)), state
         return dataclasses.replace(s, value=self.expr(s.value, state)), state
+
+    def s_Print(self, s: Print, state: _State):
+        """AOT mode: each argument is an I64, F64 or BOOL expression, an OBJ `Const` holding a str, or
+        any other OBJ expression (which has no AOT form: the back end reports the operation that made
+        it, so the verifier lets it through). Not an effect (`self.effects` is not touched): the output cannot be redone, but nothing in an
+        AOT build redoes anything."""
+        if not isinstance(s.args, tuple):
+            self.error(STRUCTURE, "Print arguments are not a tuple")
+            return s, state
+        args = []
+        for k, a in enumerate(s.args):
+            if type(a) is FString:
+                args.append(self.fstring(a, state))
+                continue
+            a2 = self.expr(a, state)
+            t = getattr(a2, "type", None)
+            if t not in ir.SCALARS and t is not Type.OBJ:
+                self.error(TYPE, f"argument {k + 1} of Print is {getattr(t, 'value', t)}, not an i64, "
+                                 f"f64, bool or obj")
+            args.append(a2)
+        return dataclasses.replace(s, args=tuple(args)), state
+
+    def fstring(self, f: FString, state: _State) -> ir.Expr:
+        """An f-string argument of Print (AOT mode): constant text and fields, each field an I64, F64 or BOOL
+        value (printed as `str` of it) or an F64 with a precision from 0 to 20 (`format(x, '.Nf')`)."""
+        if f.type is not Type.OBJ or not isinstance(f.parts, tuple):
+            self.error(STRUCTURE, "FString is an obj with a tuple of parts")
+            return f
+        parts = []
+        for k, part in enumerate(f.parts):
+            if type(part) is Const and part.type is Type.OBJ and _plain_str(part.value):
+                parts.append(part)
+            elif type(part) is FormatField and part.type is Type.OBJ:
+                value = self.expr(part.value, state)
+                t = getattr(value, "type", None)
+                p = part.precision
+                if t not in ir.SCALARS:
+                    self.error(TYPE, f"field {k + 1} of an f-string is {getattr(t, 'value', t)}, not an i64, f64 or bool")
+                elif p is not None:
+                    if type(p) is not int or isinstance(p, bool) or not 0 <= p <= 20:
+                        self.error(TYPE, f"field {k + 1} of an f-string has the precision {p!r}, not an int from 0 to 20")
+                    elif t is not Type.F64:
+                        self.error(TYPE, f"field {k + 1} of an f-string takes `.{p}f` but is {t.value}, not f64")
+                parts.append(dataclasses.replace(part, value=value))
+            else:
+                self.error(TYPE, f"part {k + 1} of an f-string is neither a str Const nor a FormatField")
+                parts.append(part)
+        return dataclasses.replace(f, parts=tuple(parts))
+
+    def s_ReturnTuple(self, s: ReturnTuple, state: _State):
+        """`return a, b` (AOT mode): scalars, in a function whose IR return type is OBJ; every ReturnTuple
+        of the function has the same element types."""
+        if not (isinstance(s.values, tuple) and s.values):
+            self.error(STRUCTURE, "ReturnTuple has no values")
+            return s, None
+        values = tuple(self.expr(v, state) for v in s.values)
+        for k, v in enumerate(values):
+            if getattr(v, "type", None) not in ir.SCALARS:
+                self.error(TYPE, f"value {k + 1} of ReturnTuple is {getattr(getattr(v, 'type', None), 'value', '?')}, "
+                                 "not an i64, f64 or bool")
+        if self.fn.returns is not Type.OBJ:
+            self.error(TYPE, f"ReturnTuple in a function returning {getattr(self.fn.returns, 'value', self.fn.returns)}")
+        first = ir.aot_tuple_kinds(self.fn)
+        if first is not None and first != tuple(getattr(v, "type", None) for v in values):
+            self.error(TYPE, "the ReturnTuples of a function return tuples of different element types")
+        return dataclasses.replace(s, values=values), None
+
+    def s_Unpack(self, s: Unpack, state: _State):
+        """`a, b = f(args)` (AOT mode): `f` returns a tuple of scalars; each target is a scalar local of
+        the element type."""
+        targets = s.targets
+        if not (isinstance(targets, tuple) and targets and all(isinstance(t, str) for t in targets)
+                and len(set(targets)) == len(targets)):
+            self.error(STRUCTURE, f"Unpack targets {targets!r} are not distinct names")
+            return s, state
+        if type(s.call) is not Call:
+            self.error(STRUCTURE, "Unpack of something that is not a Call")
+            return s, state
+        self.unpacking = True
+        call = self.expr(s.call, state)
+        self.unpacking = False
+        callee = self.sigs.get(s.call.function)
+        kinds = ir.aot_tuple_kinds(callee) if callee is not None else None
+        if kinds is None:
+            self.error(TYPE, f"Unpack of '{s.call.function}', which does not return a tuple")
+        elif len(kinds) != len(targets):
+            self.error(TYPE, f"Unpack of {len(targets)} names from the {len(kinds)} values of "
+                             f"'{s.call.function}'")
+        for k, t in enumerate(targets):
+            if t in self.arrays or t in self.larrays:
+                self.error(ARRAY_USE, f"Unpack target '{t}' is a list")
+            elif self.scalars.get(t) not in ir.SCALARS:
+                self.error(TYPE, f"Unpack target '{t}' is not a declared scalar local")
+            elif kinds is not None and k < len(kinds) and self.scalars[t] is not kinds[k]:
+                self.error(TYPE, f"Unpack target '{t}' is {self.scalars[t].value} but '{s.call.function}' returns "
+                                 f"{kinds[k].value} there")
+            if t in self.entry:
+                self.error(STRUCTURE, f"entry global '{t}' is assigned by an Unpack")
+            for loop in self.loops:
+                if loop.var == t:
+                    self.error(STRUCTURE, f"loop variable '{t}' is assigned in its loop body")
+            self.refine.pop(t, None)
+            self.facts.pop(t, None)
+        return dataclasses.replace(s, call=call), (None if state is None else state | set(targets))
 
     def cond(self, c: object, state: _State, what: str) -> ir.Expr:
         c2 = self.expr(c, state, cond=True)
@@ -1677,7 +2091,8 @@ class _Checker:
             else:
                 hi = shi
                 lo = min(hi, elo + 1)
-            loop.interval = (max(lo, _I64_MIN), min(hi, _I64_MAX))
+            # (the sound re-proof: between its bounds, which may lie outside 64 bits; not clamped)
+            loop.interval = (max(lo, _I64_MIN), min(hi, _I64_MAX)) if self.sound is None else (lo, hi)
         self.loops.append(loop)
         head = self.loop_facts(s.body, (var,))
         self.facts = dict(head)
@@ -1871,9 +2286,23 @@ class _Checker:
                 self.error(TYPE, f"return without a value in a function returning "
                                  f"{getattr(returns, 'value', returns)}")
             return s, None
+        if self.aot and returns in (Type.F64_ARRAY, Type.I64_ARRAY):
+            if type(s.value) in (NewArray, CopyArray, ListDisplay):
+                value = self.allocation(s.value, None, state)       # a fresh list, handed to the caller
+            else:
+                value = self.array_value(s.value, state)             # a list name or a call that returns one
+                if type(value) not in (Local, Call):
+                    self.error(ESCAPE, f"a list return value is a creation, a list name or a call, not "
+                                       f"{type(value).__name__}")
+            if getattr(value, "type", None) is not returns:
+                self.error(TYPE, f"returning {getattr(getattr(value, 'type', None), 'value', '?')} from a function "
+                                 f"returning {returns.value}")
+            return dataclasses.replace(s, value=value), None
         value = self.expr(s.value, state)
         if isinstance(returns, Type):
             self.slot(value, returns, "return value")
+        if self.aot and getattr(value, "type", None) in ir.ARRAYS:
+            self.error(TYPE, f"a list is returned from a function returning {getattr(returns, 'value', returns)}")
         return dataclasses.replace(s, value=value), None
 
     def _jump(self, s: Break | Continue, state: _State):
@@ -1895,10 +2324,12 @@ class _Checker:
         assigned: dict[str, list[object]] = {}
         _assigned_values(fn.body, assigned)
         loop_vars = _loop_vars(fn.body)
+        unpacked = {t for vs in assigned.values() for v in vs if type(v) is Unpack for t in v.targets
+                    if isinstance(v.targets, tuple)}
         self.eligible = frozenset(
             n for n in assigned
             if self.scalars.get(n) is Type.I64 and n not in params and n not in loop_vars
-            and n not in self.arrays and n not in self.larrays)
+            and n not in self.arrays and n not in self.larrays and n not in unpacked)
         self.new_only = self.new_only_locals(params)
         if self.larrays:
             counts: dict[str, int] = {}
@@ -1909,7 +2340,9 @@ class _Checker:
             self.error(MISSING_RETURN, f"the end of '{fn.name}' is reachable but it returns "
                                        f"{getattr(fn.returns, 'value', fn.returns)}")
         # deopt placement and flags
-        if self.can_deopt and fn.pure is not True:
+        if self.can_deopt and fn.pure is not True and not self.aot:
+            # (not in AOT mode: there is no interpreter to redo the call in, so where a deopt sits
+            # does not matter; an operation the back end cannot compute is its own finding)
             self.error(DEOPT, "a node that can deopt (checked i64 arithmetic, i64 negation, Unbox to "
                               "i64, or a call of a may_deopt function) is in an impure function; a redo "
                               "would repeat its effects")
@@ -2383,6 +2816,9 @@ def _assigned_values(body: object, out: dict[str, list[object]]) -> None:
             cls = type(st)
             if cls is Assign:
                 out.setdefault(st.target, []).append(st.value)
+            elif cls is Unpack:
+                for t in st.targets if isinstance(st.targets, tuple) else ():
+                    out.setdefault(t, []).append(st)    # AOT mode: not an expression, no interval of its own
             elif cls is If:
                 _assigned_values(st.then, out)
                 _assigned_values(st.orelse, out)
@@ -2417,6 +2853,8 @@ def _assigned_names(body: object) -> set[str]:
             cls = type(st)
             if cls is Assign:
                 out.add(st.target)
+            elif cls is Unpack:
+                out |= set(st.targets) if isinstance(st.targets, tuple) else set()
             elif cls is If:
                 out |= _assigned_names(st.then) | _assigned_names(st.orelse)
             elif cls is While:
@@ -2507,8 +2945,57 @@ def _exact(op: BinOpKind, a: tuple[int, int], b: tuple[int, int]) -> tuple[int, 
     return min(products), max(products)
 
 
-def _prove(g: Function, sigs: dict[str, Function], classes: dict[str, ClassDecl]
-           ) -> tuple[_Checker, Function]:
+def _bound_sound(kind: CompareKind, other: tuple) -> tuple | None:
+    """`_bound` for the sound re-proof: the side a comparison does not bound is unbounded."""
+    lo, hi = other
+    if kind is CompareKind.LT:
+        out = (-_INF, hi - 1)
+    elif kind is CompareKind.LE:
+        out = (-_INF, hi)
+    elif kind is CompareKind.GT:
+        out = (lo + 1, _INF)
+    elif kind is CompareKind.GE:
+        out = (lo, _INF)
+    elif kind is CompareKind.EQ:
+        out = (lo, hi)
+    else:
+        return None
+    return out if out[0] <= out[1] else None
+
+
+def _exact_sound(op: BinOpKind, a: tuple, b: tuple) -> tuple:
+    """`_exact` on intervals that may be unbounded (a zero endpoint times an unbounded one is zero: every value of
+    the intervals is an integer, so x * 0 == 0 for each)."""
+    if op is BinOpKind.ADD:
+        return a[0] + b[0], a[1] + b[1]
+    if op is BinOpKind.SUB:
+        return a[0] - b[1], a[1] - b[0]
+
+    def mul(x, y):
+        return 0 if x == 0 or y == 0 else x * y
+    products = (mul(a[0], b[0]), mul(a[0], b[1]), mul(a[1], b[0]), mul(a[1], b[1]))
+    return min(products), max(products)
+
+
+def _sound_cap(iv: tuple) -> tuple:
+    """An endpoint beyond +-2**128 is unbounded (sound: it only widens); a malformed interval says nothing."""
+    lo, hi = iv
+    if lo != lo or hi != hi or lo == _INF or hi == -_INF:      # NaN, or an endpoint on the wrong side
+        return _WIDE
+    if lo < -_SOUND_CAP:
+        lo = -_INF
+    if hi > _SOUND_CAP:
+        hi = _INF
+    return (lo, hi)
+
+
+def _inside(iv: tuple) -> bool:
+    """The interval lies inside the i64 range."""
+    return _I64_MIN <= iv[0] and iv[1] <= _I64_MAX
+
+
+def _prove(g: Function, sigs: dict[str, Function], classes: dict[str, ClassDecl],
+           aot: bool = False, sound=None) -> tuple[_Checker, Function]:
     """Check `g`, first computing the interval of every eligible local (Local variables and
     guards): walks of the body repeat, each reading the intervals found by the one before, until
     they stop growing (a bound still growing from round `_WIDEN_FROM` jumps to the i64 limit). The
@@ -2516,7 +3003,7 @@ def _prove(g: Function, sigs: dict[str, Function], classes: dict[str, ClassDecl]
     not settle in `_ROUNDS` walks, every eligible local is full range."""
     known: dict[str, tuple[int, int]] = {}
     for rnd in range(_ROUNDS):
-        c = _Checker(g, sigs, classes, known, True)
+        c = _Checker(g, sigs, classes, known, True, aot=aot, sound=sound)
         rebuilt = c.run()
         if not c.eligible:
             return c, rebuilt
@@ -2529,23 +3016,46 @@ def _prove(g: Function, sigs: dict[str, Function], classes: dict[str, ClassDecl]
             if old is None:
                 grown[name] = iv
                 continue
-            lo = old[0] if iv[0] >= old[0] else (_I64_MIN if rnd >= _WIDEN_FROM else iv[0])
-            hi = old[1] if iv[1] <= old[1] else (_I64_MAX if rnd >= _WIDEN_FROM else iv[1])
+            if sound is None:
+                lo = old[0] if iv[0] >= old[0] else (_I64_MIN if rnd >= _WIDEN_FROM else iv[0])
+                hi = old[1] if iv[1] <= old[1] else (_I64_MAX if rnd >= _WIDEN_FROM else iv[1])
+            else:
+                # the sound re-proof: to the i64 limit while the value found fits, then unbounded
+                lo = old[0] if iv[0] >= old[0] else (iv[0] if rnd < _WIDEN_FROM else
+                                                     _I64_MIN if iv[0] >= _I64_MIN else -_INF)
+                hi = old[1] if iv[1] <= old[1] else (iv[1] if rnd < _WIDEN_FROM else
+                                                     _I64_MAX if iv[1] <= _I64_MAX else _INF)
             grown[name] = (lo, hi)
         if grown == known:
             absent = c.eligible - set(known)
             if not absent:
                 return c, rebuilt
             for name in absent:         # never given an interval: nothing is known about it
-                grown[name] = _FULL
+                grown[name] = _FULL if sound is None else _WIDE
         known = grown
-    c = _Checker(g, sigs, classes, {}, False)
+    c = _Checker(g, sigs, classes, {}, False, aot=aot, sound=sound)
     return c, c.run()
 
 
-def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
+def sound_proofs(module: Module, oracle) -> dict[int, bool]:
+    """The sound re-proof of the AOT mode (module docstring, #462): `module` is the output of `verify(m, aot=True)`;
+    `oracle.raw_name(function, name)` / `oracle.raw_return(function)` say which I64 names and returns hold an
+    int64, `oracle.raw_element(function, list)` whether the elements of a list do (`aot/rep.py`). Returns, for every `proven` int operation and every Index / StoreIndex of the module's
+    functions (by `id` of the node), whether it is proved under intervals that hold of unbounded integers. Only
+    `aot/rep.py` calls this; `verify()` never does."""
+    sigs = {f.name: f for f in module.functions}
+    classes, _ = _check_classes(module, set(sigs), [])
+    out: dict[int, bool] = {}
+    for g in module.functions:
+        c, _ = _prove(g, sigs, classes, True, oracle)
+        out.update(c.sound_ok)
+    return out
+
+
+def verify(module: Module, *, aot: bool = False) -> tuple[Module, list[Diagnostic]]:
     """Prove each function of `module`; return the module of proved functions (with proven bounds
-    marked) and every diagnostic. Rejected functions move to `skipped` with the reason."""
+    marked) and every diagnostic. Rejected functions move to `skipped` with the reason. `aot=True` is
+    the AOT mode (module docstring "AOT mode"), for IR from `frontend.lower(path, aot=True)`."""
     diags: list[Diagnostic] = []
     reasons: dict[str, str] = {}
     functions = module.functions if isinstance(module.functions, tuple) else ()
@@ -2579,8 +3089,10 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
     callees: dict[str, set[str]] = {}
     open_why: dict[str, str] = {}          # a function that runs user code -> why
     slow_why: dict[str, str] = {}          # a function whose slow paths can run user code -> why
+    wait_why: dict[str, str] = {}          # a function with a node that can wait for a lock (#390)
+    shared_why: dict[str, str] = {}        # a function that reads state another thread can change (#414)
     for name, g in sigs.items():
-        c, rebuilt = _prove(g, sigs, classes)
+        c, rebuilt = _prove(g, sigs, classes, aot)
         for d in c.diags:
             reject(d.function, d.source_line, d.rule, d.message)
         checked[name] = rebuilt
@@ -2589,6 +3101,10 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
             open_why[name] = c.opens[0]
         if c.slow_user:
             slow_why[name] = c.slow_user[0]
+        if c.waits:
+            wait_why[name] = c.waits[0]
+        if c.shared:
+            shared_why[name] = c.shared[0]
 
     # Closedness (entry_globals): a fixpoint over the call graph.
     changed = True
@@ -2621,9 +3137,69 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
                     array_why[name] = f"calls '{bad[0]}', which can run user code ({array_why[bad[0]]})"
                     changed = True
     for name, g in sigs.items():
-        if name in array_why and any(isinstance(p, ArrayParam) for p in g.params):
+        if not aot and name in array_why and any(isinstance(p, ArrayParam) for p in g.params):
             reject(name, g.source_line, ARRAY_OPEN,
                    f"holds a list copy-in but can run user code: {array_why[name]}")
+
+    # #390: a function holding one or two lists keeps their critical section from the copy-in to the
+    # write-back. A wait for another object's lock inside that window detaches the thread, which
+    # suspends the section (CPython releases it), so another thread could write the list and the
+    # write-back would overwrite it. Its own entry globals are read before the lock (cgen); nothing in
+    # its call tree may look up a dict. A Call whose callee deopts must not redo it interpreted inside
+    # the window either (item 5): such a function with an effect leaves through a statement exit, and
+    # one that has none for a Call stays interpreted (`_stmt_exit_problem`).
+    changed = True
+    while changed:
+        changed = False
+        for name, cs in callees.items():
+            if name not in wait_why:
+                bad = sorted(c for c in cs if c in wait_why)
+                if bad:
+                    wait_why[name] = f"{wait_why[bad[0]]}, in '{bad[0]}'"
+                    changed = True
+    for name, g in sigs.items():
+        if not aot and name in wait_why and not ir.direct_lists(g) and any(
+                isinstance(p, ArrayParam) and p.buffer is None for p in g.params):
+            reject(name, g.source_line, ARRAY_WAIT,
+                   f"holds its lists' critical section, and {wait_why[name]} can wait for another "
+                   f"object's critical section inside it, which would suspend it")
+
+    # #414 (SPEC N-8, agent proposal, not confirmed): entry globals are read once at entry, the
+    # interpreter reads a global at every use. A function that cannot redo its call (it holds list
+    # copies, or has an effect) may therefore read nothing else that another thread can change after
+    # entry, anywhere in its call tree: a thread that rebinds the global and then writes that state would
+    # let it combine the old value with the new state. A pure function without lists is checked at run
+    # time instead (cgen: the dict-watcher epoch around the call). With lists every such read is refused
+    # by array-wait / array-open already; this rule keeps that true if those are relaxed.
+    changed = True
+    while changed:
+        changed = False
+        for name, cs in callees.items():
+            if name not in shared_why:
+                bad = sorted(c for c in cs if c in shared_why)
+                if bad:
+                    shared_why[name] = f"{shared_why[bad[0]]}, in '{bad[0]}'"
+                    changed = True
+    for name, g in sigs.items():
+        eg = g.entry_globals if isinstance(g.entry_globals, tuple) else ()
+        if eg and name in shared_why and (g.pure is not True or resume.holds_lists(g)):
+            reject(name, g.source_line, ENTRY_ORDER,
+                   f"reads its entry globals once at entry and {shared_why[name]} after it, which another "
+                   f"thread can write after rebinding one of them; this function cannot redo the call "
+                   f"(#414)")
+
+    for name, g in checked.items():
+        if not aot and resume.needs_stmt_exits(g):
+            why = _stmt_exit_problem(g, sigs)
+            if ir.direct_writer(g):
+                # #255 (d2): the same statement exits, for element reads and globals too
+                why = why if why is not None else _writer_callee_problem(name, callees, sigs)
+                if why is not None:
+                    reject(name, g.source_line, ARRAY_DIRECT,
+                           f"reads and stores its three or more lists element by element and {why}")
+            elif why is not None:
+                reject(name, g.source_line, ARRAY_WAIT,
+                       f"holds its lists' critical section and {why}")
 
     # A call cycle (direct or mutual recursion) is legal: every compiled impl function counts its
     # frame at entry (tp_enter_call), so recursion ends in RecursionError where CPython raises it
@@ -2673,6 +3249,140 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
     for name, reason in {**skipped_classes, **reasons}.items():
         skipped.setdefault(name, reason)
     return Module(module.name, kept, skipped, tuple(classes.values()), region_variants), diags
+
+
+# Nodes that are an effect or run user code (an impure Call is checked against the callee's signature).
+_EFFECT_NODES = (GetAttr, CallObject, Truth, CompareObj, ObjToFloat, GetItem, Contains, Format)
+
+
+def _effect_node(exprs, sigs: dict[str, Function], one_call_ok: bool = False) -> str | None:
+    """An effect among `exprs`, or None. `one_call_ok`: a Call of a callee that is not pure is
+    allowed when it is the only Call there (the statement's own Call: its deopt signal comes before
+    the callee's first effect, from the callee's entry guards or the caller's trace check, so the
+    exit repeats nothing; another Call deopting after it had run would repeat its effect)."""
+    calls = [e for e in exprs if type(e) is Call]
+    for e in exprs:
+        if isinstance(e, _EFFECT_NODES) or (type(e) is BinOp and e.type is Type.OBJ):
+            return type(e).__name__
+        if type(e) is Call and getattr(sigs.get(e.function), "pure", None) is not True \
+                and not (one_call_ok and len(calls) == 1):
+            return f"a call of '{e.function}', which is not pure"
+    return None
+
+
+def _stmt_exit_problem(g: Function, sigs: dict[str, Function]) -> str | None:
+    """#390 item 5 (SPEC N-8 "statement exit"; agent proposal, not confirmed). In a function with an
+    effect that holds list copies, every C to C Call can come back with the callee's deopt (an i64
+    overflow, a class check, tracing started, cgen `ev_Call`), and the interpreted redo must not run
+    inside the lists' critical section. The function leaves instead at the start of the source
+    statement S holding the Call (`ir.Stmt.stmt` of the IR statement T that evaluates the Call) and
+    the interpreter re-executes S. Sound when nothing S did before the Call is observable. Required,
+    for every IR statement T that evaluates a Call itself:
+      1. S has a statement exit (`resume.exit_problem`: the function has OSR-style exits, S has a
+         continuation, each of its parameters has a C value);
+      2. no node T evaluates is an effect or runs user code: Calls only of pure callees, except one
+         Call of a callee declared impure when it is T's only Call (it signals a deopt only before its
+         first effect: its entry guards, or the caller's trace check, run first). In a function
+         holding lists anything else is refused as user code already, so this guards against IR the
+         front end does not produce (its callees there are pure);
+      3. what S's IR ran before T is only temporaries: the statements of T's block before T that carry
+         S's number form one run right before T, each an Assign of a name the continuation does not
+         receive, with no effect node; when the statement whose body holds T also carries S's number
+         (a `while` whose test needs temporaries), every statement before T in that body is in the run
+         and the same holds one level up.
+    A store of S (`out[i] = f(x)`, `a[i] += f(x)`) is T itself and happens after its expressions, as
+    in CPython's evaluation order. Reads done before the Call are discarded: a read has no effect and
+    the interpreter's re-read at a later instant is an interleaving.
+    In a direct writer (#255 (d2), `ir.direct_writer`; agent proposal, not confirmed) the same three
+    conditions hold for every IR statement T that evaluates any exit node (`resume.exit_nodes`: a
+    Call, an element read of a list parameter, an Unbox), with 2 strict: every Call there is of a
+    pure callee. Together they are the per-statement rule: in each source statement every node that
+    can leave is evaluated before the statement's first effect (a store, which is always the last
+    thing its IR statement does) and before any assignment of a local the continuation receives.
+    Returns why not, or None."""
+
+    def walk(block, owners):
+        for i, s in enumerate(block):
+            yield s, block, i, owners
+            for fl in dataclasses.fields(s):
+                v = getattr(s, fl.name)
+                if isinstance(v, tuple) and v and all(isinstance(x, ir.Stmt) for x in v):
+                    yield from walk(v, owners + ((s, block, i),))
+
+    writer = ir.direct_writer(g)
+    for s, block, i, owners in walk(g.body, ()):
+        exprs = resume.own_exprs(s)
+        leaving = resume.exit_nodes(g, s)
+        if not leaving:
+            continue
+        first = leaving[0]
+        if type(first) is Call:
+            what = (f"calls '{first.function}', whose deopt " +
+                    ("cannot deopt the call after an effect" if writer
+                     else "would run interpreted code inside it"))
+        else:
+            what = f"evaluates {_leaving_what(first)}, which leaves for the interpreter when it fails"
+        k = s.stmt
+        why = resume.exit_problem(g, k)
+        if why is not None:
+            return f"{what}; it has no statement exit: {why}"
+        received = set(next(r for r in g.resumes if r.stmt == k).params)
+        bad = _effect_node(exprs, sigs, one_call_ok=not writer)
+        if bad is not None:
+            return f"{what}; its statement exit needs a statement without effects, but it has {bad}"
+        level, chain = (s, block, i), list(owners)
+        while True:
+            _, blk, j = level
+            run = j
+            while run > 0 and blk[run - 1].stmt == k:
+                run -= 1
+            if any(x.stmt == k for x in blk[:run]):
+                return f"{what}; statement {k} is not one run of IR statements"
+            owner = chain.pop() if chain else None
+            if owner is not None and owner[0].stmt == k and run != 0:
+                return f"{what}; statement {k} runs other statements before the call"
+            for x in blk[run:j]:
+                if type(x) is not Assign or x.target in received:
+                    return (f"{what}; statement {k} stores or assigns {getattr(x, 'target', getattr(x, 'array', type(x).__name__))} "
+                            "before it, which the statement exit would repeat")
+                bad = _effect_node(resume.own_exprs(x), sigs)
+                if bad is not None:
+                    return f"{what}; statement {k} evaluates {bad} before it"
+            if owner is None or owner[0].stmt != k:
+                break
+            bad = _effect_node(resume.own_exprs(owner[0]), sigs)
+            if bad is not None:
+                return f"{what}; statement {k} evaluates {bad} before it"
+            level = owner
+    return None
+
+
+def _leaving_what(e) -> str:
+    if type(e) is Index:
+        return f"an element of '{e.array}'"
+    if type(e) is Unbox and type(e.operand) is Global:
+        return f"the global '{e.operand.name}'"
+    return type(e).__name__
+
+
+def _writer_callee_problem(name: str, callees: dict[str, set[str]], sigs: dict[str, Function]) -> str | None:
+    """#255 (d2): a direct writer's call tree has no entry global. A callee reads its entry globals
+    once at its entry (at the Call); with other shared reads around them in the caller (the lists)
+    that read can disagree with every interpreted order when another thread rebinds the global (#414,
+    open), and the caller has no snapshot of its own to pass. Returns why not, or None."""
+    seen, todo = {name}, sorted(callees.get(name, ()))
+    while todo:
+        c = todo.pop()
+        if c in seen:
+            continue
+        seen.add(c)
+        callee = sigs.get(c)
+        eg = getattr(callee, "entry_globals", ())
+        if isinstance(eg, tuple) and eg:
+            return (f"calls '{c}', whose entry global '{getattr(eg[0], 'name', '?')}' would be read once at "
+                    "its entry, not at its use (#414)")
+        todo.extend(sorted(callees.get(c, ())))
+    return None
 
 
 def _owner_problem(g: Function, classes: dict[str, ClassDecl]) -> str | None:

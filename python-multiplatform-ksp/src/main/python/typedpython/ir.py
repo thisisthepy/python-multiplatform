@@ -91,6 +91,12 @@ class Const(Expr):
     no NUL and no lone surrogate, so it is exactly the UTF-8 the C source carries)."""
 
     value: int | float | bool | str | None
+    # AOT mode only (SPEC N-17, #451; agent proposal, not owner-confirmed): the module constant this
+    # constant was read from (`PI` for `PI * 2.0`), so a finding can name it. A module constant is
+    # immutable and fully known, so this Const is exactly the one its value spells; the name is
+    # metadata. Like `Stmt.stmt` it takes no part in equality, hashing or repr, so the default mode,
+    # which never sets it, sees the node it always saw.
+    name: str | None = field(default=None, kw_only=True, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -268,7 +274,8 @@ class Box(Expr):
 class Unbox(Expr):
     """An OBJ converted to a scalar. The runtime checks the exact type (`tp_unbox_*`) and the i64
     range; anything else → deopt. Because it can deopt, it is legal only in a pure function (the
-    verifier enforces this); impure code converts objects with `ObjToFloat` instead."""
+    verifier enforces this); impure code converts objects with `ObjToFloat` instead. Exception
+    (#255 (d2), `direct_writer`): there a mismatch leaves through the statement exit instead."""
 
     operand: Expr
 
@@ -578,7 +585,17 @@ class Index(Expr):
 
 @dataclass(frozen=True)
 class Stmt:
-    pass
+    """`stmt` (SPEC N-8, #390 item 5): the number of the source statement this IR statement was
+    lowered from, in `resume.statements` order (the function's own AST statements in pre-order), or
+    None (IR built by hand, or a statement no source statement produced). The front end sets it on
+    every statement it emits, the temporaries a statement needs included (`frontend.block`); a
+    `while` whose test needs temporaries gives its synthetic exit test and `break` the while's
+    number. It is only a position: it takes no part in equality, hashing or repr, so passes that
+    compare IR are unaffected, and `dataclasses.replace` keeps it. A function holding list copies
+    uses it to leave through a statement exit (`cgen`, `verify/array-wait`), and so does a function
+    with an effect and three or more lists (`direct_writer`, `verify/array-direct`)."""
+
+    stmt: int | None = field(default=None, kw_only=True, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -644,6 +661,111 @@ class ForObj(Stmt):
 @dataclass(frozen=True)
 class ExprStmt(Stmt):
     value: Expr
+
+
+@dataclass(frozen=True)
+class Print(Stmt):
+    """AOT mode only (SPEC N-17, #451; agent proposal, not owner-confirmed): `print(a, b, ...)` with
+    positional arguments, standard output, a space between arguments and a newline at the end. Each
+    argument is an I64, F64 or BOOL expression (printed as CPython's `str` of it) or an OBJ `Const`
+    holding a `str` (printed as it is). The default mode never produces it (there `print` is an object
+    call) and the verifier rejects it unless asked for AOT mode (`verify.verify(m, aot=True)`)."""
+
+    args: tuple[Expr, ...]
+
+
+# --- AOT-only nodes (SPEC N-17, #451; agent proposal, not owner-confirmed) -----------------------------
+#
+# The nodes below are produced only by `frontend.lower(path, aot=True)` and accepted only by
+# `verify.verify(m, aot=True)` (the default mode never builds one; its verifier reports them as unknown
+# nodes). They are the AOT mode's forms of what the default mode leaves to CPython objects: a list that
+# lives as a native counted array and is passed and returned by name, a fixed tuple of scalars returned
+# and unpacked, one `int(sys.argv[i])`, a formatted `print` argument and the conditional expression.
+
+@dataclass(frozen=True)
+class ListDisplay(Expr):
+    """`[e0, e1, ...]` of scalar expressions of one element type: a fresh native array (type F64_ARRAY
+    or I64_ARRAY, one element per expression, at least one). Like NewArray and CopyArray it is a
+    creation: the value of an `Assign` to a local array, or of a `Return`."""
+
+    elements: tuple[Expr, ...]
+
+
+@dataclass(frozen=True)
+class Cond(Expr):
+    """`then if cond else orelse` on two scalars of one type (the type of the node). Only the chosen
+    branch is evaluated."""
+
+    cond: Expr                 # BOOL
+    then: Expr
+    orelse: Expr
+
+
+@dataclass(frozen=True)
+class ArgvInt(Expr):
+    """`int(sys.argv[index])` (type I64), `index` I64. CPython's `int()` of a string can be any int, so the AOT
+    back end holds its value as a big-integer-capable (TAGGED) int (`aot/rep.py`, #462); under `--strict-int` it
+    reports `aot/int-unproven` naming the expression instead. The node exists so the program is lowered,
+    verified and every other finding is reported."""
+
+    index: Expr
+
+
+@dataclass(frozen=True)
+class ArgvLen(Expr):
+    """`len(sys.argv)` (type I64)."""
+
+
+@dataclass(frozen=True)
+class FormatField(Expr):
+    """One replacement field of an f-string given to `print`, in an `FString` (type OBJ, no use
+    elsewhere). `value` is I64, F64 or BOOL. `precision` None: `str(value)` (what `print(value)`
+    writes). A number: `format(value, '.<precision>f')`, F64 only."""
+
+    value: Expr
+    precision: int | None = None
+
+
+@dataclass(frozen=True)
+class FString(Expr):
+    """A formatted string argument of `Print` (type OBJ; nowhere else, it is not a string value):
+    `parts` are `Const` OBJ strs and `FormatField`s, written one after another with nothing between.
+    Every field is evaluated, in order, before any part is written."""
+
+    parts: tuple[Expr, ...]
+
+
+@dataclass(frozen=True)
+class ReturnTuple(Stmt):
+    """`return a, b, ...` of scalars in a function declared `-> tuple[T0, T1, ...]` (AOT mode). The
+    function's IR return type is OBJ, as in the default mode; the element types are those of its
+    `ReturnTuple` statements (`aot_tuple_kinds`), all of which must agree."""
+
+    values: tuple[Expr, ...]       # I64, F64 or BOOL
+
+
+@dataclass(frozen=True)
+class Unpack(Stmt):
+    """`t0, t1, ... = f(args)` where `f` returns a fixed tuple of scalars (AOT mode): the call, then each
+    element into its local. `call` is a `Call` of type OBJ; the targets are scalar locals of the
+    element types. A tuple has no other use in AOT mode."""
+
+    targets: tuple[str, ...]
+    call: "Call"
+
+
+def aot_tuple_kinds(f: "Function") -> tuple[Type, ...] | None:
+    """The element types of the tuple `f` returns (its first `ReturnTuple`), or None."""
+    stack = list(f.body)
+    while stack:
+        s = stack.pop(0)
+        if isinstance(s, ReturnTuple):
+            return tuple(v.type for v in s.values)
+        for fl in fields(s):
+            v = getattr(s, fl.name)
+            if isinstance(v, tuple) and v and all(isinstance(x, Stmt) for x in v):
+                stack[0:0] = list(v)
+    return None
 
 
 @dataclass(frozen=True)
@@ -806,6 +928,13 @@ class Function:
     # Truth, CompareObj, ObjToFloat, OBJ BinOp, GetItem, Contains, Format, StoreItem, ForObj; Calls
     # only to closed functions), so nothing can
     # rebind the global between entry and use, and reading it once equals reading it at each use.
+    # That holds for this thread only: another thread can rebind it and then write state read later
+    # (#414, SPEC N-8). So a pure function without lists whose call tree reads two or more entry-global
+    # names, or one and any other shared state, runs under the dict-watcher epoch (cgen `_needs_epoch`),
+    # and a function with an effect or list copies has no shared read after entry
+    # (`verify/entry-global-order`). A signal handler on this thread is user code too: an epoch call's
+    # polls run it and then compare the epoch, so a rebinding there redoes the call (cgen
+    # `tp_epoch_poll_slow`, leader decision 2026-11-15; the means are an agent proposal).
     entry_globals: tuple[Param, ...] = ()
     # A method of the compiled fixed-layout class `owner` (SPEC N-11, #155): `name` is
     # "<owner>.<method>" and params[0] is `self` as Param(OBJ, cls=owner, optional=False). The
@@ -831,6 +960,8 @@ class Function:
     # SPEC N-8 (#152, option (i)): one entry per loop of a snapshot-holding function (see `resume.py`),
     # in IR pre-order. Empty for a function that holds no snapshot. A loop whose continuation cannot
     # be generated (an enclosing `with`/`try`, say) has no entry: its `site` is missing from the tuple.
+    # After the loop entries, a function with an effect that holds list copies has one statement
+    # entry (`Resume.stmt` set) per source statement holding a Call (#390 item 5, statement exits).
     resumes: tuple["Resume", ...] = ()
 
 
@@ -845,13 +976,20 @@ class Resume:
     `source`: the Python source of the `def`, followed by a line replacing `co_name`/`co_qualname`
     with the interpreted function's. `linemap`: for each line of `source` (index = line - 1) the
     original (lineno, end_lineno, col_offset, end_col_offset); `resume.resume_sources` uses it so
-    the continuation's code object carries the original line numbers."""
+    the continuation's code object carries the original line numbers.
+
+    A statement continuation (#390 item 5, SPEC N-8 "statement exit") has `stmt` set to the number
+    of a source statement (`Stmt.stmt`), `site` -1 and `name` `__tp_resume_<function>_s<stmt>`: it
+    re-executes that statement from its start, then runs the rest of the function, with the same
+    parameter contract except that the statement itself has no hidden state (only its enclosing
+    loops do). `stmt` None: a loop continuation as above."""
 
     site: int
     name: str
     params: tuple[str, ...]
     source: str
     linemap: tuple[tuple[int, int, int, int], ...] = ()
+    stmt: int | None = None
 
 
 @dataclass(frozen=True)
@@ -887,19 +1025,30 @@ REGION_SCALAR_KINDS = {Type.I64: "i64", Type.F64: "f64", Type.BOOL: "bool"}
 
 
 def direct_lists(f: object) -> bool:
-    """#255 (design/typedpython.md 4.3.6): a pure function with three or more list parameters reads
-    them element by element, without copy-in or critical section. CPython's critical sections lock
-    one or two objects, and copying three or more lists in at one instant needs them all locked (the
-    leader decision of 2026-11-13 excludes any lock outside that API). A pure function only reads
-    its lists, so each `Index` is one `PyList_GetItemRef` in program order, the interpreter's own
-    atomic read, and an element of the wrong type deopts (legal: nothing has happened yet); `Len` is
-    the current length. No entry global (a snapshot read at entry could disagree with later list
-    reads), no buffer parameter, no CopyArray of a list parameter and no parallel loop: the verifier
-    (`verify/array-direct`) and cgen refuse them. An impure function with more than two list
-    parameters stays interpreted (#209)."""
+    """#255 (design/typedpython.md 4.3.6): a function with three or more list parameters reads them
+    element by element, without copy-in or critical section. CPython's critical sections lock one or
+    two objects, and copying three or more lists in at one instant needs them all locked (the leader
+    decision of 2026-11-13 excludes any lock outside that API). Each `Index` is one
+    `PyList_GetItemRef` in program order, the interpreter's own atomic read; `Len` is the current
+    length. In a pure function (d1) an element of the wrong type deopts (legal: nothing has happened
+    yet). A function with an effect is `direct_writer` (d2). No entry global (a snapshot read at
+    entry could disagree with later list reads), no buffer parameter, no CopyArray of a list
+    parameter and no parallel loop: the verifier (`verify/array-direct`) and cgen refuse them."""
     params = getattr(f, "params", ())
-    lists = sum(isinstance(p, ArrayParam) and p.buffer is None for p in params)
-    return getattr(f, "pure", False) is True and lists > 2
+    return sum(isinstance(p, ArrayParam) and p.buffer is None for p in params) > 2
+
+
+def direct_writer(f: object) -> bool:
+    """#255 (d2), agent proposal, not confirmed: a function with an effect and three or more list
+    parameters (`direct_lists`, not pure). Every `StoreIndex` into a list parameter is one
+    `PyList_SetItem` of a new object at once, in program order. Nothing deopts the call after entry:
+    an element read that finds another type, an `Unbox` that fails (a module global of a scalar type
+    is `Unbox(Global)`, read at its use) and a Call whose callee reports a deopt leave through the
+    statement exit of the source statement being executed (`Stmt.stmt`, `Resume.stmt`), which
+    re-executes that statement, interpreted, from its start. Sound only by the per-statement rule
+    (`resume.exit_nodes`, verifier `verify/array-direct`, cgen CGenError): in each source statement
+    every node that can leave comes before the statement's first effect."""
+    return direct_lists(f) and getattr(f, "pure", False) is not True
 
 
 def region_arg_kind(a: object, ref_class) -> object:

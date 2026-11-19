@@ -565,27 +565,44 @@ def test_every_chunk_is_freed_on_every_exit_edge(built):
 @posix_signals
 def test_an_exception_raised_while_the_tree_is_being_built_frees_the_region(built):
     """The error edge (-1) after nodes were allocated: a signal handler raises at the eval-breaker poll
-    that every compiled entry makes, in the middle of building a tree of 8M nodes."""
+    that every compiled entry makes, in the middle of building a tree of 8M nodes.
+
+    When the timer fires relative to the build depends on the machine (#416: a fast runner built all
+    8388607 nodes before a 0.02 s timer was handled, and the handler raised in `check` instead). So
+    several delays are tried. Every attempt must free what it allocated, whenever the handler ran:
+    before the call (nothing opened), during the build, or after it. At least one attempt must have
+    raised during the build, which is the edge this test is about."""
     import signal
 
     def boom(*_):
         raise TimeoutError("tick")
 
     m = built.m
-    a0, f0 = _chunks(m)
-    o0, fr0, k0 = m.__typedpython_region_stats__()
+    built_counts = []
     old = signal.signal(signal.SIGALRM, boom)
     try:
-        signal.setitimer(signal.ITIMER_REAL, 0.02)
-        with pytest.raises(TimeoutError):
-            m.tree_sum(22)
+        for delay in (0.0005, 0.001, 0.002, 0.005, 0.01, 0.02):
+            a0, f0 = _chunks(m)
+            o0, fr0, k0 = m.__typedpython_region_stats__()
+            try:
+                with pytest.raises(TimeoutError):
+                    signal.setitimer(signal.ITIMER_REAL, delay)    # inside: the handler may run at once
+                    m.tree_sum(22)
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+            a1, f1 = _chunks(m)
+            o1, fr1, k1 = m.__typedpython_region_stats__()
+            opened, objects = o1 - o0, k1 - k0
+            assert a1 - a0 == f1 - f0, delay                           # every chunk came back
+            assert (opened, fr1 - fr0) in ((0, 0), (1, 1)), delay      # the region, if opened, was freed
+            assert 0 <= objects <= nodes(22), delay
+            assert (opened == 0) == (objects == 0), delay
+            if objects:
+                assert a1 - a0 >= 1, delay
+            built_counts.append(objects)
     finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, old)
-    a1, f1 = _chunks(m)
-    o1, fr1, k1 = m.__typedpython_region_stats__()
-    assert a1 - a0 >= 1 and a1 - a0 == f1 - f0
-    assert (o1 - o0, fr1 - fr0) == (1, 1) and 0 < k1 - k0 < nodes(22)
+    assert any(0 < k < nodes(22) for k in built_counts), built_counts  # raised while the tree was being built
 
 
 def test_a_loop_grows_the_region_once_not_per_statement(built):
@@ -596,57 +613,106 @@ def test_a_loop_grows_the_region_once_not_per_statement(built):
     assert a1 - a0 == 1
 
 
-# --- a class change while a consumer runs (signal handler at a poll) ----------------------------------
+# --- a class change while a consumer runs (test hook at the consumer's entry poll) -------------------
 
-def _with_property_installed_by_handler(fn, node_cls, delay):
-    import signal
-
-    def boom(*_):
-        node_cls.left = property(lambda self: None, lambda self, v: None)   # what `n.left` means changes
-
-    slot = node_cls.__dict__["left"]
-    old = signal.signal(signal.SIGALRM, boom)
-    try:
-        signal.setitimer(signal.ITIMER_REAL, delay)
-        return fn()
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, old)
-        node_cls.left = slot          # the next attempt starts from the original slot descriptor
+HOOK = "__tp_test_region_hook__"
+HOOK_FLAG = "-DTP_TEST_REGION_HOOK"
+HOOK_CALL = 4          # the hook acts at the 4th consumer entry: three levels were read before it
 
 
-@posix_signals
-def test_a_class_change_by_a_signal_handler_in_the_consumer_deopts_the_region_host(tmp_path):
-    """The handler runs at a tp_poll inside the call and installs a property `left` on Node. The timer is
-    set to 85% of a measured call, so it lands mostly in `check` (the producer's per-New guard cannot
-    be what catches it). Every read of a region field repeats the class check of a real FieldGet; without
-    it the compiled call returns the full node count, which no CPython execution can (a read of
-    `left` after the handler ran is None, so `check` returns 1 at the first read after it)."""
-    import time
+def _hooked_build(tmp_path, name):
+    """The region module built with -DTP_TEST_REGION_HOOK (#431): every entry of a region consumer runs
+    the module-level `__tp_test_region_hook__()` right after its poll, before its field reads."""
     need_runtime()
-    path = tmp_path / "regsig.py"
+    path = tmp_path / f"{name}.py"
     path.write_text(SOURCE)
     proved, _ = verify.verify(frontend.lower(path))
     text = cgen.generate(proved, path, path.name)
-    so = cbuild.build(text, "regsig", tmp_path / "out", runtime_dir=runtime_dir())
-    m = cbuild.load("regsig", so)
-    d = 21
-    caught = False
-    for k in range(12):          # under load the timer can land after the call; then try again
-        # Re-measured before every attempt: on a shared CI runner one baseline does not predict the
-        # next call's length, so a single measurement put every timer after the call (#331 run).
-        t0 = time.perf_counter()
-        assert m.tree_sum(d) == nodes(d)
-        delay = (0.85, 0.8, 0.75, 0.7)[k % 4] * (time.perf_counter() - t0)
-        d0 = m.__typedpython_deopts__
-        o0, f0, _ = m.__typedpython_region_stats__()
-        got = _with_property_installed_by_handler(lambda: m.tree_sum(d), m.Node, delay)
-        o1, f1, _ = m.__typedpython_region_stats__()
-        assert o1 - o0 == f1 - f0
-        if m.__typedpython_deopts__ > d0:                 # the host noticed and redid the call
-            # the redo ran interpreted with the property in place: `left` is None, so check returns 1
-            assert got == 1
-            caught = True
-            break
-        assert got == nodes(d)                            # no deopt: the handler ran after the call
-    assert caught, "the handler never landed inside the call (or the class guard is missing)"
+    so = cbuild.build(text, name, tmp_path / "out", runtime_dir=runtime_dir(),
+                      flags=(*cbuild.DEFAULT_FLAGS, HOOK_FLAG))
+    return cbuild.load(name, so), text
+
+
+def _run_with_class_change_at_a_poll(m, d):
+    """tree_sum(d) with a property `left` installed on Node by the hook at the HOOK_CALL-th consumer
+    entry (what a signal handler that tp_poll ran would do). The hook removes itself from the module dict
+    once it has acted. Returns (result, deopts, opened - freed regions, hook calls)."""
+    seen = [0]
+    slot = m.Node.__dict__["left"]
+
+    def hook():
+        seen[0] += 1
+        if seen[0] == HOOK_CALL:
+            m.Node.left = property(lambda self: None, lambda self, v: None)   # what `n.left` means changes
+            delattr(m, HOOK)
+
+    setattr(m, HOOK, hook)
+    d0 = m.__typedpython_deopts__
+    o0, f0, _ = m.__typedpython_region_stats__()
+    try:
+        got = m.tree_sum(d)
+    finally:
+        if hasattr(m, HOOK):
+            delattr(m, HOOK)
+        m.Node.left = slot                   # restore the original slot descriptor
+    o1, f1, _ = m.__typedpython_region_stats__()
+    assert o1 - o0 == f1 - f0                # every region that was opened was freed
+    return got, m.__typedpython_deopts__ - d0, seen[0]
+
+
+def test_a_class_change_at_a_poll_in_the_consumer_deopts_the_region_host(tmp_path):
+    """The hook installs a property `left` on Node at an exact entry of `check`, after the tree was built
+    (so the producer's per-New guard cannot be what catches it) and before that entry's first field read.
+    Every read of a region field repeats the class check of a real FieldGet; without it the compiled call
+    returns the full node count, which no CPython execution can (a read of `left` after the change is
+    None, so `check` returns 1 at the first read after it). With it the host deopts and redoes the call
+    interpreted, where `left` is None: the result is 1.
+
+    This replaces a SIGALRM timer armed at a fraction of a measured call (42 attempts, and a missed timer
+    could not be told from a missing guard). One attempt, no timer, so it also runs on Windows."""
+    m, _ = _hooked_build(tmp_path, "regsig")
+    d = 4
+    got, deopts, calls = _run_with_class_change_at_a_poll(m, d)
+    assert calls == HOOK_CALL                   # the hook acted exactly once, inside the consumer
+    # At least one: the host's redo. Not exactly one: the interpreted tree_sum of the redo calls the
+    # compiled make and check, and their wrappers deopt too while the property is in place (every
+    # tp_cg_redo counts). `deopts == 1` failed in CI run 43674819173 with the guard present.
+    assert deopts >= 1, f"the class change before a region field read was not a deopt (deopts: {deopts})"
+    assert got == 1, got                        # the interpreter's answer with the property in place
+
+
+def test_mutation_without_the_per_read_class_guard_the_hook_test_returns_the_full_tree(tmp_path, monkeypatch):
+    """The hook test depends on `_rguard`: with the per-read guard emitting nothing, the same hook at the
+    same entry changes nothing the compiled call notices, no deopt, and `tree_sum` returns every node
+    (2**(d+1)-1), which no CPython execution gives once `left` is a property returning None."""
+    monkeypatch.setattr(cgen._FnGen, "_rguard", lambda self, cls: None)
+    m, _ = _hooked_build(tmp_path, "regsigmut")
+    d = 4
+    got, deopts, calls = _run_with_class_change_at_a_poll(m, d)
+    assert calls == HOOK_CALL
+    assert deopts == 0
+    assert got == nodes(d), got
+
+
+def test_the_region_hook_is_compiled_in_only_under_its_flag_before_the_first_field_read(built):
+    """Generated C text: the hook appears only inside `#ifdef TP_TEST_REGION_HOOK`, only in the region
+    consumer `tp_rimpl_check` (not in the producer, the host or the plain impl), and after that
+    function's entry poll and before its first class guard (`tp_class_current`) and field read."""
+    text = built.text
+    assert HOOK in text and text.count(HOOK) == 1
+    i = text.index(HOOK)
+    start = text.rindex("#ifdef TP_TEST_REGION_HOOK", 0, i)
+    end = text.index("#endif", i)
+    assert start < i < end
+    assert text.rindex("\n", 0, start) < start          # the directive starts its own line
+    head = text.rindex("static int tp_rimpl_check(", 0, start)
+    assert "{\n" in text[head:start] and "static int tp_rimpl_make" not in text[head:start]
+    body = text[head:start]
+    assert "tp_poll(tp_t, tp_st->breaker)" in body       # after the entry poll
+    assert "tp_class_current" not in body                # before the first per-read guard
+    assert "l_node[0].p" not in body
+    after = text[end:text.index("tp_exit:", end)]
+    assert after.index("tp_class_current") < after.index("l_node[0].p")
+    # without the flag nothing of it is outside the guard: strip every guarded block and it is gone
+    unguarded = text[:start] + text[end + len("#endif"):]
+    assert HOOK not in unguarded

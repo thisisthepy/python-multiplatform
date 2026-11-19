@@ -16,27 +16,50 @@ on:
 
 jobs:
   test:
-    name: TypedPython tests (${{ matrix.os }})
+    # ubuntu and macOS run the whole suite in one job. Windows runs it in two shards: MSVC compilation
+    # made one windows job take 40 minutes (CI run 43798264662; the slowest tests are compile-heavy
+    # ones of every area), and the job has to stay under 30. .github/scripts/typedpython/shard.py
+    # deals the test files out and checks, in every shard job, that the shards are disjoint and that
+    # together they are exactly the test files.
+    name: TypedPython tests (${{ matrix.os }}${{ matrix.shard != 'all' && format(', shard {0}', matrix.shard) || '' }})
     runs-on: ${{ matrix.os }}
+    # A normal run takes 6 to 25 minutes. Run 43580524047 hung on windows until GitHub's 6 hour limit;
+    # pytest's faulthandler_timeout (pyproject.toml) prints where a test is stuck.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
         include:
           - os: ubuntu-latest
             venv_python: .venv/bin/python
+            shard: all
           - os: macos-latest
             venv_python: .venv/bin/python
+            shard: all
           # Windows builds the compiled modules with MSVC (cl.exe, found through vswhere and
           # vcvars64.bat by cbuild.py), so the C runtime header is compiled by a second compiler family.
           - os: windows-latest
             venv_python: .venv/Scripts/python.exe
+            shard: 1/2
+          - os: windows-latest
+            venv_python: .venv/Scripts/python.exe
+            shard: 2/2
     defaults:
       run:
         shell: bash
         working-directory: python-multiplatform-ksp
     steps:
       - uses: actions/checkout@v4
+
+      - name: Exclude the build directories from Defender real-time scanning (windows)
+        # Every .obj, .pyd and .exe the tests build is scanned when written. Whether that costs much on
+        # these runners is not known: the step prints the state before, so the job's time with and
+        # without it can be compared. It never fails the job.
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        run: |
+          try { $p = Get-MpPreference; "real-time monitoring disabled: $($p.DisableRealtimeMonitoring)"; "exclusions before: $($p.ExclusionPath -join ';')" } catch { "Get-MpPreference failed: $_" }
+          try { Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE","$env:RUNNER_TEMP","$env:TEMP" -ErrorAction Stop; "exclusions added" } catch { "Add-MpPreference failed, continuing: $_" }
 
       - uses: astral-sh/setup-uv@v5
 
@@ -46,16 +69,29 @@ jobs:
           uv venv .venv --python 3.15t
           uv pip install --python ${{ matrix.venv_python }} "pyrefly==1.3.2" pytest numpy
 
+      - name: Select the test files of this shard
+        # Empty for `all` (pytest collects its configured test paths). For K/N the script first checks
+        # the whole split and fails the job if a test file is in no shard or in two.
+        run: |
+          files=$(${{ matrix.venv_python }} ../.github/scripts/typedpython/shard.py --shard "${{ matrix.shard }}" | tr -d '\r' | tr '\n' ' ')
+          echo "TP_TEST_FILES=$files" >> "$GITHUB_ENV"
+          echo "shard ${{ matrix.shard }}: ${files:-the whole suite}"
+
       - name: Behaviour tests
-        run: ${{ matrix.venv_python }} -m pytest -q -m "not measurement and not race_mutant"
+        run: ${{ matrix.venv_python }} -m pytest -q -m "not measurement and not race_mutant" $TP_TEST_FILES
 
       - name: Race mutants (dispatch input race_mutant)
         if: ${{ inputs.race_mutant }}
-        run: ${{ matrix.venv_python }} -m pytest -q -rA -m race_mutant
+        # (pytest exits with 5 when it collects nothing: a shard may hold no test of this mark)
+        run: |
+          ${{ matrix.venv_python }} -m pytest -q -rA -m race_mutant $TP_TEST_FILES || {
+            rc=$?; if [ "$rc" -eq 5 ] && [ -n "$TP_TEST_FILES" ]; then echo "no race_mutant test in this shard"; else exit "$rc"; fi; }
 
       - name: Measurements (recorded, sanity bounds only)
         # A shared runner is not an idle machine (AGENTS.md §8): read ratios, not absolute times.
-        run: ${{ matrix.venv_python }} -m pytest -q -s -m measurement
+        run: |
+          ${{ matrix.venv_python }} -m pytest -q -s -m measurement $TP_TEST_FILES || {
+            rc=$?; if [ "$rc" -eq 5 ] && [ -n "$TP_TEST_FILES" ]; then echo "no measurement test in this shard"; else exit "$rc"; fi; }
 
   sanitizers:
     # SPEC N-8: ASan/UBSan runs are the safety net outside the proof. Every extension TypedPython
@@ -65,6 +101,7 @@ jobs:
     # sanitizer test has a launcher-based macOS path of its own).
     name: TypedPython tests under ASan + UBSan (ubuntu-latest)
     runs-on: ubuntu-latest
+    timeout-minutes: 20      # about 1 minute normally
     defaults:
       run:
         working-directory: python-multiplatform-ksp
@@ -92,7 +129,7 @@ jobs:
         run: |
           env $(.venv/bin/python tools/sanitizers.py env) \
             .venv/bin/python -m pytest -q -m "not measurement and not race_mutant" \
-              src/test/python/test_cgen.py src/test/python/test_runtime.py src/test/python/test_pipeline.py src/test/python/test_interval_proofs.py src/test/python/test_virtual_objects.py
+              src/test/python/test_cgen.py src/test/python/test_runtime.py src/test/python/test_pipeline.py src/test/python/test_interval_proofs.py src/test/python/test_virtual_objects.py src/test/python/test_aot_build.py src/test/python/test_aot_lib.py src/test/python/test_aot_int.py src/test/python/test_aot_repr.py
 
   app-fixture:
     # #45: a TypedPython-compiled module calling Kotlin through the upcall table, in the app
@@ -102,6 +139,7 @@ jobs:
     # dynamic_lookup extension cannot resolve the C API (python-multiplatform-ksp/fixtures/app/build.gradle.kts).
     name: TypedPython from Kotlin, app fixture (macos-latest)
     runs-on: macos-latest
+    timeout-minutes: 30      # about 3 minutes normally
     steps:
       - uses: actions/checkout@v4
 
@@ -136,5 +174,29 @@ jobs:
           print(f"TypedPythonKotlinCallTest: {len(cases)} test(s), {len(skipped)} skipped")
           if not cases or skipped:
               print("skipped: " + ", ".join(skipped) if skipped else "no TypedPythonKotlinCallTest results")
+              sys.exit(1)
+          PY
+
+
+      # #458: generated Kotlin wrappers of a TypedPython AOT library, called from the desktop JVM with no CPython.
+      # This fixture does not need macOS (its test JVM loads no libpython); it runs here only because this job
+      # already has JDK 21 and the host Python. A separate Gradle invocation from the app fixture's (AGENTS.md 8).
+      - name: AOT library fixture tests
+        run: |
+          rm -rf python-multiplatform-ksp/fixtures/aot/build/test-results/desktopTest
+          ./gradlew :python-multiplatform-ksp:fixtures:aot:desktopTest --rerun --console=plain \
+            -PtypedpythonPython="$PWD/python-multiplatform-ksp/.venv/bin/python"
+
+      - name: The AOT library tests ran (none skipped)
+        run: |
+          python3 - <<'PY'
+          import glob, sys, xml.etree.ElementTree as ET
+          cases = [c for p in glob.glob("python-multiplatform-ksp/fixtures/aot/build/test-results/desktopTest/*.xml")
+                   for c in ET.parse(p).getroot().iter("testcase")
+                   if c.get("classname") == "fixture.aot.AotLibraryCallTest"]
+          skipped = [c.get("name") for c in cases if c.find("skipped") is not None]
+          print(f"AotLibraryCallTest: {len(cases)} test(s), {len(skipped)} skipped")
+          if not cases or skipped:
+              print("skipped: " + ", ".join(skipped) if skipped else "no AotLibraryCallTest results")
               sys.exit(1)
           PY

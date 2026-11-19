@@ -70,6 +70,9 @@ include(":python-multiplatform-ksp:fixtures:app")
 // KSP/AGP minimum-version wall of ROADMAP §13 stayed invisible to them while it broke every
 // Android consumer of the bindings plugin.
 include(":python-multiplatform-ksp:fixtures:android")
+// TypedPython AOT library called from Kotlin with no CPython on the classpath or in the process (#458). Applies the
+// bindings plugin with `apply false` only, for its Kotlin generator task.
+include(":python-multiplatform-ksp:fixtures:aot")
 
 // The Gradle plugin is an *included build* (see `pluginManagement` above), so it cannot own
 // subprojects of this build. Its fixtures are therefore root-build projects whose directory is
@@ -98,6 +101,14 @@ for (name in listOf("artifact", "artifact-valueclass", "klib-artifact", "ios-con
     project(":python-multiplatform-gradle-plugin-fixtures:$name").projectDir =
         file("python-multiplatform-gradle-plugin/fixtures/$name")
 }
+
+// The consumer-side compiler plugin the bindings plugin applies to Kotlin/Native compilations
+// (`docs/design/klib-composable-and-defaults.md` B3, owner decision 2026-11-19 on #191). A root-build
+// project for the reason the fixtures above are: the included plugin build compiles on Gradle's
+// embedded Kotlin, and a compiler plugin has to be compiled against the consumer's compiler.
+include(":python-multiplatform-compiler-plugin")
+project(":python-multiplatform-compiler-plugin").projectDir =
+    file("python-multiplatform-gradle-plugin/compiler-plugin")
 
 // The Compose host's consumers: `python-multiplatform-compose/fixtures/*`.
 // The composable half of the same claim, and the one module in this build that applies the Compose

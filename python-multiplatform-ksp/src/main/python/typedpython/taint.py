@@ -17,6 +17,16 @@ Conservative rules (decision 2026-10-25): whatever the pass cannot reproduce exa
     fill of a local array (the object stored or passed would have to be the numpy scalar),
   * a comparison of an I64 with an F64 where one side is tainted (numpy converts the int to double,
     CPython compares exactly), `And` / `Or` of values that are not all plain.
+  * a `for` target over an object (ForObj) that has a flag: unreachable (a ForObj target is an OBJ
+    local, and only scalars have flags), refused as a guard (#428),
+  * a parameter or local whose name ends in `__np`: it would be taken for a flag (#426).
+The flags are exact: every binding of a flagged local is an Assign, followed by the Assign of its
+flag, or the binding of a `for ... in range` variable, followed by `Assign(<var>__np, False)` as the
+first statement of the loop body (#428: the loop binds an int at each iteration; a loop that runs zero
+times binds nothing and leaves value and flag as they were; `_reset_loop_flags` is the mutation
+point). `flags` gives them to cgen, which boxes a live local for a continuation (an OSR-style or
+statement exit, cgen `_osr_value`) the way `Box.np` does (#426, #428; agent proposal, not
+owner-confirmed).
 What this cannot find: a numpy semantic not listed above that the front end lowers to an IR node
 (there is none today for + - * unary, compares, math.*, len, index); the tests pin each.
 """
@@ -37,6 +47,38 @@ TRUE = ir.Const(Type.BOOL, True)
 
 def flag_name(name: str) -> str:
     return f"{name}__np"
+
+
+def flags(f: ir.Function) -> dict[str, str]:
+    """Flagged scalar local or parameter of a lowered `f` -> its shadow flag local. Empty for a
+    function without a numpy buffer parameter. Exact because `apply` refuses a function that already
+    has a name ending in `__np`: a BOOL local of that name is a flag."""
+    if not any(isinstance(p, ir.ArrayParam) and p.buffer == "numpy" for p in f.params):
+        return {}
+    names = set(f.locals) | {p.name for p in f.params if not isinstance(p, ir.ArrayParam)}
+    return {n: flag_name(n) for n in names if f.locals.get(flag_name(n)) is Type.BOOL}
+
+
+def _reset_loop_flags() -> bool:
+    """#428: the single mutation point of the loop variable resets (`_Pass.rewrite`, ForRange). False
+    leaves the flag of a `for ... in range` variable as the last Assign set it (the stale flag #426
+    refused); tests set it to see the type comparisons fail. Always True in a build."""
+    return True
+
+
+def _obj_targets(x, out: set[str]) -> set[str]:
+    """Names a loop over an object binds (ForObj.targets): bound without an Assign."""
+    if isinstance(x, (tuple, list)):
+        for y in x:
+            _obj_targets(y, out)
+    elif isinstance(x, ir.Stmt):
+        if isinstance(x, ir.ForObj):
+            out.update(x.targets)
+        for f in dataclasses.fields(x):
+            v = getattr(x, f.name)
+            if isinstance(v, tuple):
+                _obj_targets(v, out)
+    return out
 
 
 def _or(a: ir.Expr | None, b: ir.Expr | None) -> ir.Expr | None:
@@ -130,9 +172,18 @@ class _Pass:
             stmt = dataclasses.replace(x, value=value)
             if x.target in self.flagged:
                 t = self.taint(x.value)
+                # the flag belongs to the same source statement (ir.Stmt.stmt, #390 item 5)
                 return [stmt, ir.Assign(flag_name(x.target), t if t is not None
-                                        else ir.Const(Type.BOOL, False))]
+                                        else ir.Const(Type.BOOL, False), stmt=x.stmt)]
             return stmt
+        if isinstance(x, ir.ForRange) and x.var in self.flagged and _reset_loop_flags():
+            # #428: each iteration binds `var` to an int (never a numpy scalar), before any statement
+            # of the body runs: its flag is false from there. Same source statement as the `for`, so
+            # statement positions stay in order (resume._attribution_ok); a Const has no exit node.
+            loop = dataclasses.replace(x, start=self.rewrite(x.start), stop=self.rewrite(x.stop),
+                                       body=self.rewrite(x.body))
+            reset = ir.Assign(flag_name(x.var), ir.Const(Type.BOOL, False), stmt=x.stmt)
+            return dataclasses.replace(loop, body=(reset,) + loop.body)
         if isinstance(x, ir.Box) and x.operand.type in ir.SCALARS:
             return dataclasses.replace(x, operand=self.rewrite(x.operand), np=self.taint(x.operand))
         if isinstance(x, ir.BinOp) and x.type in ir.SCALARS and x.left.type in (Type.F64, Type.I64):
@@ -166,11 +217,21 @@ class _Pass:
 
 
 def apply(body: tuple, numpy: set[str], pure: bool,
-          scalar_params: frozenset[str] = frozenset()) -> tuple[tuple, dict[str, Type], bool]:
+          scalar_params: frozenset[str] = frozenset(),
+          names: frozenset[str] = frozenset()) -> tuple[tuple, dict[str, Type], bool]:
     """Rewrite a lowered body: shadow flags and `Box.np` / `BinOp.np`. Returns the new body and the
-    new locals (the flags, BOOL) and whether the body now can deopt. Raises Refuse."""
+    new locals (the flags, BOOL) and whether the body now can deopt. `names`: every parameter and
+    local of the function before the rewrite. Raises Refuse."""
+    taken = sorted(n for n in names if n.endswith("__np"))
+    if taken:
+        raise Refuse(f"the name `{taken[0]}` ends in `__np`, which is reserved for the numpy flags of "
+                     "a function with a numpy array parameter")
     p = _Pass(numpy, pure)
     p.discover(body)
+    stale = sorted(p.flagged & _obj_targets(body, set()))
+    if stale:
+        raise Refuse(f"loop target `{stale[0]}` of a loop over an object is also assigned a value "
+                     "derived from a numpy element (its numpy flag would not follow the item)")
     new = p.rewrite(body)
     # a parameter that is reassigned from a numpy element: its flag starts False
     first = tuple(ir.Assign(flag_name(n), ir.Const(Type.BOOL, False))
