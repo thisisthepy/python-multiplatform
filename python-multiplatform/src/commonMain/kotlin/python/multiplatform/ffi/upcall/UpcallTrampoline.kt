@@ -2,6 +2,7 @@ package python.multiplatform.ffi.upcall
 
 import python.multiplatform.ffi.PyLong_Check
 import python.multiplatform.ffi.PyObject
+import python.multiplatform.ffi.exceptions.PyException
 import python.multiplatform.ffi.getThreadGILState
 import python.multiplatform.ffi.types.basic.PyNone
 import python.multiplatform.reflection.CallableHandle
@@ -10,20 +11,26 @@ import python.multiplatform.reflection.HandleTable
 import python.multiplatform.reflection.ObjectReference
 import python.multiplatform.reflection.TypeTag
 import python.multiplatform.reflection.UpcallTable
+import kotlin.coroutines.cancellation.CancellationException
 import python.native.ffi.NativePointer
 import python.native.ffi.PyBool_FromLong
 import python.native.ffi.PyBytes_FromObject
 import python.native.ffi.PyDict_GetItemString
 import python.native.ffi.PyErr_Clear
 import python.native.ffi.PyErr_Occurred
+import python.native.ffi.PyErr_SetRaisedException
 import python.native.ffi.PyErr_SetString
 import python.native.ffi.PyEval_GetBuiltins
+import python.native.ffi.PyException_SetCause
 import python.native.ffi.PyFloat_AsDouble
 import python.native.ffi.PyGILState_Ensure
 import python.native.ffi.PyGILState_Release
 import python.native.ffi.PyFloat_FromDouble
+import python.native.ffi.PyImport_ImportModule
 import python.native.ffi.PyLong_AsLongLong
 import python.native.ffi.PyLong_FromLongLong
+import python.native.ffi.PyObject_CallObject
+import python.native.ffi.PyObject_GetAttrString
 import python.native.ffi.PyObject_GetItem
 import python.native.ffi.PyObject_IsTrue
 import python.native.ffi.PyObject_Size
@@ -379,8 +386,13 @@ object UpcallTrampoline {
     private fun raiseInPython(t: Throwable) {
         try {
             if (PyErr_Occurred() != null) return
-            val message = t.message ?: t::class.simpleName ?: "upcall failed"
-            PyErr_SetString(runtimeErrorType, message)
+            val excPtr = buildPythonExceptionPointer(t)
+            if (excPtr != null) {
+                PyErr_SetRaisedException(excPtr)
+            } else {
+                val message = t.message ?: t::class.simpleName ?: "upcall failed"
+                PyErr_SetString(runtimeErrorType, message)
+            }
         } catch (_: Throwable) {
             // Reporting the failure failed. Returning NULL with no indicator set is still a
             // Python-level error ("SystemError: returned NULL without setting an exception"),
@@ -388,10 +400,159 @@ object UpcallTrampoline {
         }
     }
 
+    /**
+     * Builds a **new** reference to the Python `BaseException` instance [t] maps to (SPEC U-2, U-5;
+     * issue #164). Caller must hold the GIL.
+     *
+     * - A [PyException] with a live [PyException.value] returns an incremented reference to that
+     *   original Python exception instance.
+     * - A Kotlin [CancellationException] whose [Throwable.cause] is a [PyException] with
+     *   [PyException.isCancelledError] and a live value returns an incremented reference to that
+     *   original Python `CancelledError`.
+     * - Any other Kotlin [CancellationException] builds an `asyncio.CancelledError`
+     *   (`concurrent.futures.CancelledError`), attaching any non-null [Throwable.cause] as
+     *   `__cause__`.
+     * - Any other Kotlin [Throwable] builds a `RuntimeError(message)` and attaches a cause chain
+     *   representing [t] (and its nested [Throwable.cause] chain) onto `__cause__`.
+     */
+    internal fun buildPythonExceptionPointer(t: Throwable): NativePointer? {
+        if (t is PyException) {
+            val liveValue = t.value
+            if (liveValue != null) {
+                Py_IncRef(liveValue.pointer)
+                return liveValue.pointer
+            }
+        }
+        if (t is CancellationException) {
+            val pyCause = t.cause as? PyException
+            if (pyCause != null && pyCause.isCancelledError()) {
+                val liveValue = pyCause.value
+                if (liveValue != null) {
+                    Py_IncRef(liveValue.pointer)
+                    return liveValue.pointer
+                }
+            }
+            val message = t.message ?: t::class.simpleName ?: "the Kotlin call was cancelled"
+            val cancelledType = resolveCancelledErrorType()
+            val excType = cancelledType ?: runtimeErrorType
+            val excPtr = instantiateException(excType, message)
+            if (cancelledType != null) Py_DecRef(cancelledType)
+            if (excPtr == null) return null
+            val kotlinCause = t.cause
+            if (kotlinCause != null) {
+                val causePtr = buildKotlinCausePointer(kotlinCause, depth = 0)
+                if (causePtr != null) {
+                    PyException_SetCause(excPtr, causePtr)
+                }
+            }
+            return excPtr
+        }
+        val message = t.message ?: t::class.simpleName ?: "upcall failed"
+        val excPtr = instantiateException(runtimeErrorType, message) ?: return null
+        val causePtr = buildKotlinCausePointer(t, depth = 0)
+        if (causePtr != null) {
+            PyException_SetCause(excPtr, causePtr)
+        }
+        return excPtr
+    }
+
+    /**
+     * Wraps [buildPythonExceptionPointer] as an owned [PyObject] for [AsyncUpcall]'s
+     * `Future.set_exception`, falling back to `RuntimeError(message)` if construction fails.
+     */
+    internal fun pythonExceptionObjectFor(t: Throwable): PyObject {
+        val ptr = buildPythonExceptionPointer(t)
+        if (ptr != null) return PyObject(ptr, borrowed = false)
+        val message = t.message ?: t::class.simpleName ?: "the exposed suspending function failed"
+        return runtimeErrorClass().invoke(python.multiplatform.ffi.types.basic.PyString.from(message))
+    }
+
+    /**
+     * Builds a **new** reference to the `BaseException` placed on `__cause__` for a Kotlin
+     * [Throwable] (SPEC U-2, issue #164).
+     */
+    private fun buildKotlinCausePointer(t: Throwable, depth: Int): NativePointer? {
+        if (depth >= MAX_CAUSE_DEPTH) return null
+        if (t is PyException) {
+            val liveValue = t.value
+            if (liveValue != null) {
+                Py_IncRef(liveValue.pointer)
+                return liveValue.pointer
+            }
+        }
+        val className = t::class.simpleName ?: "Throwable"
+        val msg = t.message
+        val summary = if (msg.isNullOrEmpty()) className else "$className: $msg"
+        val causePtr = instantiateException(runtimeErrorType, summary) ?: return null
+        val nested = t.cause
+        if (nested != null && nested !== t) {
+            val nestedPtr = buildKotlinCausePointer(nested, depth + 1)
+            if (nestedPtr != null) {
+                PyException_SetCause(causePtr, nestedPtr)
+            }
+        }
+        return causePtr
+    }
+
+    /** Calls `excType(message)` and returns the new exception reference, clearing any error on failure. */
+    private fun instantiateException(excType: NativePointer, message: String): NativePointer? {
+        val msgPtr = PyUnicode_FromString(message) ?: run {
+            PyErr_Clear()
+            return null
+        }
+        val tuple = PyTuple_New(1) ?: run {
+            Py_DecRef(msgPtr)
+            PyErr_Clear()
+            return null
+        }
+        // PyTuple_SetItem steals msgPtr.
+        PyTuple_SetItem(tuple, 0, msgPtr)
+        val instance = try {
+            PyObject_CallObject(excType, tuple)
+        } finally {
+            Py_DecRef(tuple)
+        }
+        if (instance == null) {
+            PyErr_Clear()
+        }
+        return instance
+    }
+
+    /**
+     * Resolves Python's `CancelledError` type as a **new** reference by importing
+     * `concurrent.futures._base` (pure Python, does not load `selectors`, so it is safe on every
+     * target including `wasmJs`; in CPython 3.8+, `asyncio.CancelledError` is
+     * `concurrent.futures.CancelledError`). Caller must `Py_DecRef` the returned non-null pointer.
+     */
+    private fun resolveCancelledErrorType(): NativePointer? {
+        val mod = PyImport_ImportModule("concurrent.futures._base")
+            ?: run {
+                PyErr_Clear()
+                PyImport_ImportModule("asyncio.exceptions")
+            }
+            ?: run {
+                PyErr_Clear()
+                return null
+            }
+        return try {
+            val attr = PyObject_GetAttrString(mod, "CancelledError")
+            if (attr == null) {
+                PyErr_Clear()
+                null
+            } else {
+                attr
+            }
+        } finally {
+            Py_DecRef(mod)
+        }
+    }
+
+    private const val MAX_CAUSE_DEPTH = 16
+
     /** Raises whatever Python already put on the indicator as a Kotlin exception, or a fallback. */
     private fun failFromPython(what: String): Nothing {
-        val pending = python.multiplatform.ffi.exceptions.PyException.fromCurrentError()
-        throw pending ?: IllegalArgumentException(what)
+        val pending = PyException.fromCurrentError()
+        throw pending?.toKotlinException() ?: IllegalArgumentException(what)
     }
 
     /**
@@ -400,9 +561,9 @@ object UpcallTrampoline {
      */
     private fun checkPythonError(what: String) {
         if (PyErr_Occurred() == null) return
-        val pending = python.multiplatform.ffi.exceptions.PyException.fromCurrentError()
+        val pending = PyException.fromCurrentError()
         PyErr_Clear()
-        throw pending ?: IllegalArgumentException(what)
+        throw pending?.toKotlinException() ?: IllegalArgumentException(what)
     }
 
     // ---------------------------------------------------------------------------------------

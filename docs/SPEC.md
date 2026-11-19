@@ -222,6 +222,10 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 - **O-2** `PyType`: name, bases, MRO, `isSubtypeOf`, `isInstance`, construct by call, `cast` refuses an
   incompatible object. `Status: implemented`, `PyTypeTest.kt`.
 - **O-3** `PyException` is a Kotlin `Throwable` carrying the Python exception type and message.
+  `PyException.isCancelledError()` is `true` when the underlying Python exception is an instance of
+  `asyncio.CancelledError` (`concurrent.futures.CancelledError`), and `PyException.toKotlinException()`
+  returns a `kotlin.coroutines.cancellation.CancellationException` with `this` as its `cause` for a
+  cancelled error and `this` otherwise (#164).
   `Status: implemented`, `PyExceptionTest.kt`.
 - **O-4** Basic types `PyInt`, `PyFloat`, `PyBool`, `PyString`, `PyNone`, bytes round-trip with Kotlin
   values. `Status: implemented`, `PyBasicTypesTest.kt`, `PyValueBytesConversionTest.kt`.
@@ -265,6 +269,19 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `python-multiplatform-ksp/fixtures/app/src/desktopTest/.../GeneratedTableTest.kt`, `python-multiplatform-ksp/src/test/.../SourceRenderingTest.kt`.
 - **U-2** One entry point per platform marshals arguments (int, float, bool, str, bytes with NUL,
   objects), turns a Kotlin exception into a Python exception and a `Unit` return into `None`.
+  Exception mapping across the upcall boundary (#164):
+  - a `PyException` with a live Python exception value (`value != null`), or a Kotlin
+    `CancellationException` whose `cause` is a `PyException` with `isCancelledError() == true` and a live
+    `value`, restores that original Python exception unchanged;
+  - a Kotlin `kotlin.coroutines.cancellation.CancellationException` maps to Python's
+    `asyncio.CancelledError` (leaving any exception Python already raised on the indicator untouched; on a
+    target where `asyncio` cannot be imported, it falls back to `RuntimeError`);
+  - any other Kotlin `Throwable` maps to `RuntimeError(message)` with `__cause__` set to a `BaseException`
+    representing the original Kotlin throwable (`"<KotlinSimpleClassName>: <message>"`, recursively chaining
+    Kotlin `cause` onto `__cause__`, or restoring a nested `PyException` cause's live `value` as `__cause__`).
+  When Python raises `asyncio.CancelledError` inside a callback or C API call invoked by `UpcallTrampoline`,
+  `UpcallTrampoline` throws `kotlin.coroutines.cancellation.CancellationException` with the `PyException` as
+  its `cause` into Kotlin.
   `Status: implemented`, `PM/commonTest/.../UpcallEntryTest.kt`, `UpcallTrampolineTest.kt`,
   `PM/nativeTest/.../UpcallRawEntryPointTest.kt`.
 - **U-3** Generated Python proxies let Python write ordinary Python against Kotlin: construct a class,
@@ -308,6 +325,11 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `python-multiplatform-compose/fixtures/compose/.../ProxyClassArgumentRenderTest.kt`.
 - **U-5** `suspend` functions are awaitable from Python (`await g.greetNow(1)`); a function that never
   suspends completes without a Future; cancelling the Python future cancels the Kotlin coroutine.
+  A failure in a `suspend` function (before or after suspension) applies U-2's exception mapping (#164):
+  a Kotlin `CancellationException` thrown by the coroutine when the Python `Future` is not already settled
+  delivers `asyncio.CancelledError` (with any Kotlin `cause` attached as `__cause__`) to the awaiting
+  coroutine, while any other Kotlin `Throwable` delivers `RuntimeError(message)` with the original Kotlin
+  throwable attached as `__cause__`.
   `Status: implemented` on desktop and Kotlin/Native, `PM/desktopTest/.../upcall/AsyncUpcallDeliveryTest.kt`,
   `AsyncUpcallCancellationTest.kt`, `AsyncUpcallEarlyCancellationTest.kt`, `PM/nativeTest/.../AsyncUpcallNative*Test.kt`,
   `python-multiplatform-ksp/fixtures/app/.../GeneratedSuspendTest.kt`; `planned` on wasm (no threads).
