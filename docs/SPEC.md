@@ -444,6 +444,23 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
       the result back to the target `asyncio` loop.
   `Status: implemented` on desktop, `PM/commonTest/.../upcall/PendingCallTest.kt`,
   `PM/desktopTest/.../upcall/CoroutineContextUpcallTest.kt`.
+- **U-5c** (`suspend` SAM `fun interface` parameters, #164 item 3, leader decision 2026-11-20):
+  A parameter whose declared type is a Kotlin `fun interface` (including generic `fun interface`s such as
+  `kotlinx.coroutines.flow.FlowCollector<in T>`) whose single abstract method is `suspend` (arity `0..5`)
+  binds as a SAM slot accepting both a Kotlin handle of that interface and a Python callable (`async def`
+  or callable returning an awaitable or plain value).
+  - **Table metadata:** KSP and the artifact walker record the slot's type name as
+    `<Interface>|kotlin.coroutines.SuspendFunctionN(Arg1,...)->Ret` (using the same `|` separator as #216
+    regular SAM slots).
+  - **Generated adapter:** The generated read expression checks `if (v is kotlin.Function(N+1)<*, ...>)`
+    and wraps `v` in a SAM lambda (`Interface<Args> { p0, ... -> (v as (suspend (...) -> Ret)).invoke(p0, ...) }`),
+    otherwise casts `v as Interface<Args>`.
+  - **Lifetime:** `PythonxAdapter` routes the `|`-separated `SuspendFunctionN` target through
+    `_make_suspend_function` (`PythonCallables.newSuspendFunction`), so the exact same lifetime rules as
+    U-5a apply (an active `PythonCallableScope` is required; in-flight invocations hold their own extra
+    `PyObject` reference).
+  `Status: implemented` on desktop, `GP/artifact/SamParameterBindingTest.kt`,
+  `PM/desktopTest/.../pythonx/FlowCollectUpcallTest.kt`.
 - **U-6** Upcalls work in a GraalVM native image (desktop). `Status: implemented` with manual
   verification, procedure and record in `docs/platforms/graal-native-image-verification.md`
   (`:sample:nativeCompile`, Liberica NIK), guarded automatically by `ReachabilityMetadataTest.kt` (C-2).

@@ -38,3 +38,10 @@ fun produce(producer: Producer): Int = producer.make()
 fun drain(sink: Sink<String>) = sink.take("item")
 
 fun keep(handle: NotFunctional) = handle.first()
+
+/** Generic `fun interface` whose single abstract method is `suspend` (SPEC U-5c, like `FlowCollector<in T>`). */
+fun interface AsyncCollector<in T> {
+    suspend fun emit(value: T)
+}
+
+fun acceptCollector(collector: AsyncCollector<Any?>) = collector.hashCode()

@@ -1,10 +1,13 @@
 package python.multiplatform.ksp
 
 import com.google.devtools.ksp.getAllSuperTypes
+import com.google.devtools.ksp.symbol.ClassKind
 import com.google.devtools.ksp.symbol.KSClassDeclaration
+import com.google.devtools.ksp.symbol.KSFunctionDeclaration
 import com.google.devtools.ksp.symbol.KSType
 import com.google.devtools.ksp.symbol.KSTypeAlias
 import com.google.devtools.ksp.symbol.KSTypeReference
+import com.google.devtools.ksp.symbol.Modifier
 import com.google.devtools.ksp.symbol.Variance
 
 private const val PY_OBJECT_QUALIFIED_NAME = "python.multiplatform.ffi.PyObject"
@@ -43,7 +46,51 @@ fun KSType.toShape(allowTopLevelSuspendFunction: Boolean = false): TypeShape {
         }
     }
     val qualifiedName = declaration.qualifiedName?.asString() ?: "kotlin.Any"
+    if (allowTopLevelSuspendFunction) {
+        suspendSamShapeOrNull(expanded, isMarkedNullable || expanded.isMarkedNullable)?.let { return it }
+    }
     return TypeShape(qualifiedName, isMarkedNullable, rendered = renderWithArguments(qualifiedName))
+}
+
+private fun suspendSamShapeOrNull(expanded: KSType, nullable: Boolean): TypeShape? {
+    val cls = expanded.declaration as? KSClassDeclaration ?: return null
+    if (cls.classKind != ClassKind.INTERFACE || Modifier.FUN !in cls.modifiers) return null
+    val abstractMethods = cls.declarations.filterIsInstance<KSFunctionDeclaration>()
+        .filter { it.isAbstract }
+        .toList()
+    val method = abstractMethods.singleOrNull() ?: return null
+    if (Modifier.SUSPEND !in method.modifiers) return null
+    val arity = method.parameters.size
+    if (arity !in 0..MAX_SUSPEND_FUNCTION_ARITY) return null
+    val qualified = cls.qualifiedName?.asString() ?: return null
+    val interfaceType = expanded.renderWithArguments(qualified)
+    val typeArgMap = cls.typeParameters.mapIndexed { idx, tp ->
+        tp.name.asString() to expanded.arguments.getOrNull(idx)?.type?.resolve()
+    }.toMap()
+    fun resolveSamType(ref: KSTypeReference?): Pair<String, String> {
+        val resolved = ref?.resolve() ?: return "kotlin.Unit" to "kotlin.Unit"
+        val substituted = typeArgMap[resolved.declaration.simpleName.asString()] ?: resolved
+        val qName = expandTypeAlias(substituted).declaration.qualifiedName?.asString() ?: "kotlin.Any"
+        val rendered = substituted.renderWithArguments(qName) + if (substituted.isMarkedNullable) "?" else ""
+        return qName to rendered
+    }
+    val params = method.parameters.map { resolveSamType(it.type) }
+    val (retName, retRendered) = resolveSamType(method.returnType)
+    val slotName = "$qualified|kotlin.coroutines.SuspendFunction$arity(" +
+        params.joinToString(",") { it.first } + ")->" + retName
+    val suspendFnType = "(suspend (${params.joinToString(", ") { it.second }}) -> $retRendered)"
+    val fnCheck = "kotlin.Function${arity + 1}<" + List(arity + 2) { "*" }.joinToString(", ") + ">"
+    val names = (0 until arity).map { "p$it" }
+    val arrow = if (arity == 0) "" else names.joinToString(", ", postfix = " -> ")
+    val convert = "v -> if (v is $fnCheck) $interfaceType { $arrow(v as $suspendFnType).invoke(${names.joinToString(", ")}) } else v as $interfaceType"
+    val readTemplate = if (nullable) "((%s)?.let { $convert })" else "((%s).let { $convert })"
+    return TypeShape(
+        qualifiedName = qualified,
+        nullable = nullable,
+        rendered = interfaceType,
+        slotTypeName = slotName,
+        customReadTemplate = readTemplate,
+    )
 }
 
 private const val MAX_SUSPEND_FUNCTION_ARITY = 5

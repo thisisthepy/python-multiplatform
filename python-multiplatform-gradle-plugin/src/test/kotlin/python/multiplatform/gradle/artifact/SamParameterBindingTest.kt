@@ -93,4 +93,15 @@ class SamParameterBindingTest {
         assertEquals(listOf("$pkg.NotFunctional"), keep.paramTypeNames)
         assertTrue("as $pkg.NotFunctional" in keep.lambdaBody, keep.lambdaBody)
     }
+
+    @Test
+    fun aGenericSuspendFunctionalInterfaceBindsAsSuspendSamSlot() {
+        val accept = callables().single { it.name == "$pkg.acceptCollector" }
+        assertEquals(
+            listOf("$pkg.AsyncCollector|kotlin.coroutines.SuspendFunction1(kotlin.Any)->kotlin.Unit"),
+            accept.paramTypeNames,
+        )
+        assertTrue("if (v is kotlin.Function2<*, *, *>)" in accept.lambdaBody, accept.lambdaBody)
+        assertTrue("$pkg.AsyncCollector<kotlin.Any?>" in accept.lambdaBody, accept.lambdaBody)
+    }
 }
