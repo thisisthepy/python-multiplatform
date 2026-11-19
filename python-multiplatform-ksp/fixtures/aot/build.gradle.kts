@@ -169,6 +169,9 @@ tasks.named<Test>("desktopTest") {
     )
     jvmArgs("--enable-preview", "-Djava.library.path=.")
     environment("PYTHONDONTWRITEBYTECODE", "1")
+    // The thread tests assert with a message that names the slot and the value read; Gradle's short format drops it
+    // and left issue #472 with only a line number. The full format keeps it in the CI log.
+    testLogging.exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
     val reason = skipReason
     if (reason == null) {
         // The library builds link C, so they are a dependency of the test task and of nothing that compiles.

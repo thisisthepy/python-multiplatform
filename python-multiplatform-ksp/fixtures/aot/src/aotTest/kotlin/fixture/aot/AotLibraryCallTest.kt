@@ -434,13 +434,24 @@ class AotLibraryCallTest {
      * proposal, not owner-confirmed; design note section 7). The writer alternates `fill_factorials`, which stores 1! to
      * 25! (21! and beyond are big objects), with `set` of small values into the slots 20 to 24. Without the lock inside
      * the list a read of a slot that is being overwritten could use a freed big object. Only memory-safe outcomes are
-     * asserted: a slot below 20 always reads its factorial (every writer stores that same value there), a slot from 20
-     * on reads 0 (the start), a small value some writer stored, or the documented overflow error; and the list closes.
+     * asserted, and the allowed set is exactly what the program can produce: the list starts as 25 zeros, and nothing
+     * orders the writer's first `fill_factorials` before the reader's first read (both threads leave the same latch), so
+     * every slot reads 0 until the reader has seen a value a writer stored there (issue #472: the first version of this
+     * test allowed that 0 only from slot 20 on, and on a loaded runner the reader twice got to a slot below 20 first).
+     * From then on a slot below 20 reads exactly its factorial (every round stores that same value), and a slot from 20
+     * on reads a small value some writer stored or raises the documented overflow error, never 0 again; the list closes.
      */
     @Test
     fun oneIntListWrittenByOneThreadAndReadByAnotherStaysMemorySafe() {
         val expected = factorials(20)
-        fun allowed(i: Int, v: Long) = if (i < 20) v == expected[i] else v == 0L || v == 1000L + i
+        // Owned by the reader thread: whether slot i has been seen holding something a writer stored. Before that the
+        // slot may still read its initial 0; after it, 0 is a value no writer stored.
+        val written = BooleanArray(25)
+        fun allowed(i: Int, v: Long): Boolean {
+            val stored = if (i < 20) v == expected[i] else v == 1000L + i
+            if (stored) written[i] = true
+            return stored || (v == 0L && !written[i])
+        }
         IntList(25).use { l ->
             val pool = Executors.newFixedThreadPool(2)
             val start = CountDownLatch(1)
@@ -468,6 +479,7 @@ class AotLibraryCallTest {
                             } catch (e: BigsException) {
                                 assertTrue(i >= 20, "l[$i] raised ${e.className}, but only a big slot may")
                                 assertOverflowElement(e)
+                                written[i] = true       // a big value a writer stored: the slot is past its initial 0
                             }
                             reads++
                         }
