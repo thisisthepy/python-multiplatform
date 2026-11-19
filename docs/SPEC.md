@@ -330,6 +330,34 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   delivers `asyncio.CancelledError` (with any Kotlin `cause` attached as `__cause__`) to the awaiting
   coroutine, while any other Kotlin `Throwable` delivers `RuntimeError(message)` with the original Kotlin
   throwable attached as `__cause__`.
+  **Named delivery loop when the calling thread has no running loop** (#164, item 10):
+  When an exposed `suspend` function suspends (`PendingCall.isDone` is `false`), `AsyncUpcall` resolves the
+  target `asyncio` event loop in priority order:
+  1. `asyncio.get_running_loop()` on the calling thread, when a loop is currently running there (a running
+     loop on the calling thread always wins so an `await` inside that loop never receives a `Future` bound
+     to another loop);
+  2. the task-scoped loop set by `with python_multiplatform.use_delivery_loop(loop):`, stored in a
+     `contextvars.ContextVar` so a coroutine stepped across threads inside `contextvars.Context.run` keeps
+     its target loop;
+  3. the process-wide fallback loop set by `python_multiplatform.set_delivery_loop(loop)` (`None` clears it
+     and returns the previous value; `python_multiplatform.get_delivery_loop()` returns the configured loop
+     from (2) or (3), or `None`).
+  A non-`None` argument to `use_delivery_loop` or `set_delivery_loop` must expose callable `create_future`,
+  `call_soon_threadsafe` and `is_closed` attributes, or `TypeError` is raised when configuring it. If no
+  loop is running on the calling thread and no loop is configured (or the configured loop's `is_closed()` is
+  `True`), `AsyncUpcall.deliver` cancels the already-started `PendingCall` (`call.cancel()`) before raising
+  `RuntimeError` (`"no running event loop"` / `"delivery event loop is closed"`), so a cooperating Kotlin
+  body stops at its next `ensureActive()` checkpoint.
+  When the call resolves its loop from (2) or (3) on a thread where that loop is not running, the `Future`
+  and its `_pm_watch` cancellation callback are created on the target loop via
+  `target_loop.call_soon_threadsafe` and waited for while releasing the GIL (`withoutGIL`), so
+  `loop.create_future()` and `Future.add_done_callback` run only on the target loop's own thread. In Python
+  `coro.send(None)` (as in `pythonx-concurrent` S7.9's Kotlin-mode driver), `await _pm_r` inside the
+  generated `async def` proxy calls `_pm_r.__await__()`, which yields that `asyncio.Future` bound to the
+  target loop out of `coro.send()`; the driver (or a task scheduled on the target loop) subscribes or awaits
+  it on that loop, and Kotlin's completion resolves it via `target_loop.call_soon_threadsafe(_pm_settle, ...)`.
+  The fast path (`PendingCall.isDone` is `true` before `deliver` returns) never consults `get_running_loop()`
+  or the configured delivery loop and builds no `Future`.
   `Status: implemented` on desktop and Kotlin/Native, `PM/desktopTest/.../upcall/AsyncUpcallDeliveryTest.kt`,
   `AsyncUpcallCancellationTest.kt`, `AsyncUpcallEarlyCancellationTest.kt`, `PM/nativeTest/.../AsyncUpcallNative*Test.kt`,
   `python-multiplatform-ksp/fixtures/app/.../GeneratedSuspendTest.kt`; `planned` on wasm (no threads).
