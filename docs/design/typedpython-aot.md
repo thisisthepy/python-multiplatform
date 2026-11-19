@@ -339,6 +339,74 @@ and baseline memory work against the aim).
 CPython also frees such objects by reference count. That equivalence does not hold for objects in
 regions or for elided counts, so a class with `__del__` is always reference counted with exact counts.
 
+### 6.3.1 Tier O step 1 (PR-O1): headerless classes, reference counting, and acyclicity
+
+Design for PR-O1 (`binary_trees.py`, before virtual objects and scope regions arrive in PR-O2; leader
+review 2026-11-20, not owner-confirmed).
+
+- **Struct layout.** Each compiled class `C` lowers to a plain C `struct tpa_cls_<C>` with no `PyObject`
+  header and no class-id word (no inheritance or dynamic `isinstance` in PR-O1):
+  - `tpa_rc_t rc` first (`int64_t` in an executable; `_Atomic int64_t` under `TPA_THREADS`).
+  - Fields in declaration order: `float` as `double`, `bool` as `uint8_t`, `int` as `int64_t` (RAW) or
+    `tpa_int` (TAGGED, owned), native lists as counted handles (owned), `D` as `tpa_cls_<D> *` (non-null,
+    owned), and `D | None` as `tpa_cls_<D> *` (`NULL` represents `None`, owned).
+  - Allocation sets `rc = 1` (failing with `MemoryError` on `NULL`). If `__init__` raises after setting
+    some reference fields, the constructor releases those initialized fields and frees the struct.
+  - Release decrements `rc`; at zero it releases owned reference fields and frees the struct. To avoid
+    C stack overflow when freeing deep self-referential chains, the last self-referential field is
+    released via a tail loop (`while (p != NULL)`).
+- **Single immutability analysis (shared source of truth).** One whole-program pass classifies each
+  field `(C, field)` as **immutable-after-init** if and only if no statement outside `C.__init__`
+  anywhere in the program assigns to that field, and `C.__init__` does not store `self` into any field
+  or let `self` escape into another call. A class `C` is **immutable-after-init** when every reference
+  field of `C` is immutable-after-init. Both the acyclicity proof and the reference-counting elision
+  rules below read this exact same analysis result so the two cannot disagree.
+- **Cycle-freedom proof (PR-O1).** Because PR-O1 has no cycle collector yet, a class `C` is accepted
+  only if it is proved acyclic by at least one of:
+  1. *Type-graph acyclicity*: in the directed graph where `C -> D` if `C` has a field of type `D` or
+     `D | None`, `C`'s strongly connected component has no cycle.
+  2. *Immutable-after-init*: `C` (and every class reachable in its SCC) is proved immutable-after-init by
+     the shared analysis above (so every reference points strictly to an already-constructed object,
+     forming a causal DAG, as in `binary_trees.py`'s `Node`).
+  Any class that fails both conditions is a compile error (`aot/cycle-possible`, naming the class and
+  the mutating field store outside `__init__`) until PR-O2 adds the small cycle collector.
+- **Reference counting and elision rules.** Ownership follows the same convention as native lists and
+  `tpa_int`: parameters are **borrowed**; locals, return values and struct fields are **owned**.
+  Elision is permitted only under the following statically proved conditions, and every other site emits
+  explicit `retain` / `release`:
+  1. *Borrowed parameter reads*: reading or forwarding a borrowed parameter directly does not retain or
+     release it.
+  2. *Single-consumption move*: an owned temporary (constructor or call result) consumed once as a local
+     initializer, `return` value, or field/constructor initializer transfers ownership with no extra
+     `retain` / `release`.
+  3. *Field read into a local*: a local initialized from `x.field` may be treated as borrowed (no
+     `retain` / `release`) **only if** `(C, field)` is proved immutable-after-init program-wide by the
+     shared analysis above (and `x` itself outlives the local, e.g. `x` is a borrowed parameter or an
+     unrebound local). "No field write in this function" is **not** sufficient because a callee or an
+     alias can mutate `x.field` and free the old object; any mutable field read must `retain`.
+  4. *Field passed as a borrowed argument*: passing `x.field` directly to `f(x.field)` may pass it as
+     borrowed **only if** `(C, field)` is proved immutable-after-init program-wide (and `x` outlives the
+     call). If `(C, field)` is mutable, the caller must `retain` the value into a temporary before the
+     call and `release` it after the call, so `f` mutating `x.field` (directly or through an alias)
+     cannot free its own argument.
+- **Library mode (`TPA_THREADS`) restriction before Tier T.** Under `TPA_THREADS`, a concurrent writer
+  to a mutable reference field could release the old object between another thread's load and `retain`
+  (the same race `tpa_int_list` solves with a per-list lock). Until Tier T adds shared-object locking,
+  an `aot-lib` export whose parameter or return type is a class with any mutable field (not
+  immutable-after-init) is a compile error (`aot/library-mutable-class`). Immutable-after-init classes
+  are safe to share across threads with atomic `rc` and are allowed.
+- **Verification plan (PR-O1 tests).**
+  - Differential tests against CPython 3.15t for scalar/list/class/`C | None` fields, methods, `is None`
+    / `is`, and `benchmarks/typedpython/py/binary_trees.py`.
+  - Adversarial lifetime tests under ASan/UBSan (`typedpython.yml` `sanitizers` job) specifically
+    exercising: (a) a local read from a mutable field whose owner is mutated through an alias or callee
+    before the local is read again, (b) `f(x.field)` where `f` mutates `x.field` while using its
+    parameter, (c) partial `__init__` failure cleanup, and (d) deep tree deallocation.
+  - Acyclicity acceptance/rejection tests (type-graph acyclic mutable class accepted; immutable-after-init
+    self-referential `Node` accepted; mutable self-referential class rejected with `aot/cycle-possible`;
+    `__init__` `self` escape rejected; `aot-lib` mutable class rejected with `aot/library-mutable-class`).
+  - `aot-check` sync: `binary_trees.py` reports 0 blocking findings.
+
 ### 6.4 Exceptions
 
 A function returns a status, as the generated C does today; the current exception (class id, message
