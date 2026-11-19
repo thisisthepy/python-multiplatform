@@ -334,3 +334,213 @@ def test_binary_trees_explain_alloc_and_cli(tmp_path: Path, capsys):
     assert rc == 0
     captured = capsys.readouterr()
     assert captured.out == report
+
+
+def test_virtual_owned_fields_early_return_exception_and_loop_rebind(tmp_path: Path):
+    src = """
+    class Payload:
+        __slots__ = ("val",)
+        val: int
+
+        def __init__(self, val: int) -> None:
+            self.val = val
+
+
+    class Wrapper:
+        __slots__ = ("items", "big", "inner")
+        items: list[int]
+        big: int
+        inner: Payload
+
+        def __init__(self, items: list[int], big: int, inner: Payload) -> None:
+            self.items = items
+            self.big = big
+            self.inner = inner
+
+
+    def early_return(flag: int) -> int:
+        if flag < 0:
+            return -1
+        xs: list[int] = [10, 20, 30]
+        p: Payload = Payload(42)
+        w: Wrapper = Wrapper(xs, 1 << 70, p)
+        inner: Payload = w.inner
+        if flag == 1:
+            return inner.val + (w.big >> 68)
+        items: list[int] = w.items
+        return items[2] + inner.val
+
+
+    def loop_rebind(n: int) -> int:
+        xs: list[int] = [0, 1]
+        p: Payload = Payload(0)
+        w: Wrapper = Wrapper(xs, 1 << 65, p)
+        acc: int = 0
+        for i in range(n):
+            new_xs: list[int] = [i, i + 1, i + 2]
+            w.inner = Payload(i * 2)
+            w.big = 1 << (60 + (i % 10))
+            w.items = new_xs
+            inner: Payload = w.inner
+            items: list[int] = w.items
+            acc += inner.val + items[2] + (w.big >> 58)
+        return acc
+
+
+    def loop_create(n: int) -> int:
+        acc: int = 0
+        for i in range(n):
+            xs: list[int] = [i, i + 1]
+            v: Wrapper = Wrapper(xs, 1 << (64 + (i % 8)), Payload(i + 5))
+            inner: Payload = v.inner
+            items: list[int] = v.items
+            acc += inner.val + items[1] + (v.big >> 62)
+        return acc
+
+
+    if __name__ == "__main__":
+        print(early_return(-1))
+        print(early_return(1))
+        print(early_return(2))
+        print(loop_rebind(15))
+        print(loop_create(15))
+    """
+    p = _write(tmp_path, src, "ok.py")
+    report = aot.explain_alloc(p)
+    assert "early_return:" in report
+    assert "w = Wrapper(...) -> virtual (scalar-replaced (no escape))" in report
+    assert "loop_rebind:" in report
+    assert "loop_create:" in report
+    assert "v = Wrapper(...) -> virtual (scalar-replaced (no escape))" in report
+
+    c_text = aot.generate(p)
+    for fn in ("early_return", "loop_rebind", "loop_create"):
+        assert "tpa_cls_Wrapper_new" not in _func_body_c(c_text, fn)
+
+    cp, aot_res = _run_both(tmp_path, src, name="ok.py")
+    assert cp.returncode == 0
+    assert aot_res.returncode == 0
+    assert aot_res.stdout == cp.stdout
+
+    # Exception path (1 // 0) after creating a virtual object with owned fields:
+    # tp_cleanup must release every owned virtual field local once (verified under ASan).
+    exc_src = """
+    class Payload:
+        __slots__ = ("val",)
+        val: int
+
+        def __init__(self, val: int) -> None:
+            self.val = val
+
+
+    class Wrapper:
+        __slots__ = ("items", "big", "inner")
+        items: list[int]
+        big: int
+        inner: Payload
+
+        def __init__(self, items: list[int], big: int, inner: Payload) -> None:
+            self.items = items
+            self.big = big
+            self.inner = inner
+
+
+    def boom(d: int) -> int:
+        xs: list[int] = [1, 2, 3]
+        p: Payload = Payload(99)
+        w: Wrapper = Wrapper(xs, 1 << 72, p)
+        q: int = 1 // d
+        inner: Payload = w.inner
+        items: list[int] = w.items
+        return q + inner.val + (w.big >> 70) + items[0]
+
+
+    if __name__ == "__main__":
+        print(boom(0))
+    """
+    pe = _write(tmp_path, exc_src, "exc.py")
+    exc_report = aot.explain_alloc(pe)
+    assert "w = Wrapper(...) -> virtual (scalar-replaced (no escape))" in exc_report
+    assert "tpa_cls_Wrapper_new" not in _func_body_c(aot.generate(pe), "boom")
+
+    cp_e, aot_e = _run_both(tmp_path, exc_src, name="exc.py")
+    assert cp_e.returncode != 0
+    assert aot_e.returncode != 0
+
+
+def test_virtual_object_and_field_stored_in_heap_object(tmp_path: Path):
+    src = """
+    class Payload:
+        __slots__ = ("val",)
+        val: int
+
+        def __init__(self, val: int) -> None:
+            self.val = val
+
+
+    class Wrapper:
+        __slots__ = ("items", "big", "item")
+        items: list[int]
+        big: int
+        item: Payload
+
+        def __init__(self, items: list[int], big: int, item: Payload) -> None:
+            self.items = items
+            self.big = big
+            self.item = item
+
+
+    class Holder:
+        __slots__ = ("w", "items", "big", "item")
+        w: Wrapper
+        items: list[int]
+        big: int
+        item: Payload
+
+        def __init__(self, w: Wrapper, items: list[int], big: int, item: Payload) -> None:
+            self.w = w
+            self.items = items
+            self.big = big
+            self.item = item
+
+
+    def store_object_itself(h: Holder) -> None:
+        xs: list[int] = [1, 2]
+        v_esc: Wrapper = Wrapper(xs, 1 << 66, Payload(11))
+        h.w = v_esc
+
+
+    def store_fields_only(h: Holder) -> None:
+        xs: list[int] = [7, 8, 9]
+        v_virt: Wrapper = Wrapper(xs, 1 << 70, Payload(77))
+        h.item = v_virt.item
+        h.big = v_virt.big
+        h.items = v_virt.items
+
+
+    if __name__ == "__main__":
+        xs0: list[int] = [0]
+        xs1: list[int] = [0]
+        init_w: Wrapper = Wrapper(xs0, 1 << 64, Payload(1))
+        h: Holder = Holder(init_w, xs1, 1 << 64, Payload(2))
+        store_object_itself(h)
+        store_fields_only(h)
+        hw: Wrapper = h.w
+        hw_item: Payload = hw.item
+        h_item: Payload = h.item
+        h_items: list[int] = h.items
+        print(hw_item.val, h_item.val, h_items[2], h.big >> 68)
+    """
+    p = _write(tmp_path, src)
+    report = aot.explain_alloc(p)
+    assert "v_esc = Wrapper(...) -> heap-rc (escapes into object field)" in report
+    assert "v_virt = Wrapper(...) -> virtual (scalar-replaced (no escape))" in report
+
+    c_text = aot.generate(p)
+    assert "tpa_cls_Wrapper_new" in _func_body_c(c_text, "store_object_itself")
+    assert "tpa_cls_Wrapper_new" not in _func_body_c(c_text, "store_fields_only")
+
+    cp, aot_res = _run_both(tmp_path, src)
+    assert cp.returncode == 0
+    assert aot_res.returncode == 0
+    assert aot_res.stdout == cp.stdout
