@@ -1072,25 +1072,22 @@ object PythonxAdapter {
                 try:
                     if fut.cancelled():
                         exc = _asyncio.CancelledError()
-                        invoke_fn(complete_handle, (pending_handle, False, (exc,)))
+                        invoke_fn(complete_handle, (pending_handle, False, exc))
                         return
                     exc = fut.exception()
                     if exc is not None:
-                        invoke_fn(complete_handle, (pending_handle, False, (exc,)))
+                        invoke_fn(complete_handle, (pending_handle, False, exc))
                         return
-                    # Wrap the result in a 1-tuple so `UpcallTrampoline.toKotlinObject` never
-                    # misinterprets a Python `int` result (e.g. `42`, `99`) as a `HandleTable`
-                    # handle integer.
-                    invoke_fn(complete_handle, (pending_handle, True, (fut.result(),)))
+                    invoke_fn(complete_handle, (pending_handle, True, fut.result()))
                 except BaseException as err:
-                    invoke_fn(complete_handle, (pending_handle, False, (err,)))
+                    invoke_fn(complete_handle, (pending_handle, False, err))
 
             def _schedule():
                 try:
                     fut = _asyncio.ensure_future(awaitable, loop=loop)
                     fut.add_done_callback(_on_done)
                 except BaseException as err:
-                    invoke_fn(complete_handle, (pending_handle, False, (err,)))
+                    invoke_fn(complete_handle, (pending_handle, False, err))
 
             # Always schedule via `call_soon_threadsafe` / `call_soon` rather than calling
             # `ensure_future` inline while the upcall frame is still running: on `is_running_here`,

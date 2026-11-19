@@ -269,6 +269,9 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `python-multiplatform-ksp/fixtures/app/src/desktopTest/.../GeneratedTableTest.kt`, `python-multiplatform-ksp/src/test/.../SourceRenderingTest.kt`.
 - **U-2** One entry point per platform marshals arguments (int, float, bool, str, bytes with NUL,
   objects), turns a Kotlin exception into a Python exception and a `Unit` return into `None`.
+  When an `OBJECT` parameter declares `python.multiplatform.ffi.PyObject` in `paramTypeNames`,
+  `UpcallTrampoline` passes the Python object itself (including `int` and `bool`) as a `PyObject`
+  without consulting `HandleTable` (#480).
   Exception mapping across the upcall boundary (#164):
   - a `PyException` with a live Python exception value (`value != null`), or a Kotlin
     `CancellationException` whose `cause` is a `PyException` with `isCancelledError() == true` and a live

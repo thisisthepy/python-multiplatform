@@ -230,7 +230,8 @@ object UpcallTrampoline {
         val offset = if (entry.kind.hasReceiver) 1 else 0
         if (offset == 1) args[0] = toKotlinObject(item(tuple!!, 0))
         for (i in entry.paramTypes.indices) {
-            args[offset + i] = toKotlin(entry.paramTypes[i], item(tuple!!, (offset + i).toLong()))
+            val declaredType = entry.paramTypeNames.getOrNull(i)
+            args[offset + i] = toKotlin(entry.paramTypes[i], item(tuple!!, (offset + i).toLong()), declaredType)
         }
         return args
     }
@@ -239,7 +240,7 @@ object UpcallTrampoline {
     private fun item(tuple: NativePointer, index: Long): NativePointer =
         PyTuple_GetItem(tuple, index) ?: failFromPython("argument $index is missing")
 
-    private fun toKotlin(tag: TypeTag, value: NativePointer): Any? {
+    private fun toKotlin(tag: TypeTag, value: NativePointer, declaredTypeName: String? = null): Any? {
         // `None` is how Python spells a null argument, whatever the tag says it should have been.
         if (value.toRawValue() == noneAddress) return null
         return when (tag) {
@@ -249,9 +250,15 @@ object UpcallTrampoline {
             TypeTag.STRING -> PyUnicode_AsUTF8(value) ?: failFromPython("expected a str")
             TypeTag.BYTES -> toByteArray(value)
             TypeTag.UNIT -> null
-            TypeTag.OBJECT -> toKotlinObject(value)
+            TypeTag.OBJECT -> if (declaredTypeName == PY_OBJECT_TYPE_NAME) {
+                PyObject(value, borrowed = true)
+            } else {
+                toKotlinObject(value)
+            }
         }
     }
+
+    private const val PY_OBJECT_TYPE_NAME = "python.multiplatform.ffi.PyObject"
 
     /**
      * The one tag that is two things at once, resolved by what Python actually sent.

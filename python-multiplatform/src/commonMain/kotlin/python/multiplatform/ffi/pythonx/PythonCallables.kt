@@ -347,23 +347,11 @@ object PythonCallables {
     internal fun completeSuspendCall(
         pendingHandle: Long,
         ok: Boolean,
-        payloadBox: PyObject?,
+        payload: PyObject?,
     ) {
         val pending = HandleTable.resolveRaw(pendingHandle) as? PendingSuspendInvocation ?: return
         HandleTable.release(ObjectReference(pendingHandle))
-        // `payloadBox` is a 1-tuple `(value,)` so a Python `int` result is never misinterpreted
-        // by `UpcallTrampoline.toKotlinObject` as a `HandleTable` handle.
-        val payload = if (payloadBox != null) {
-            val itemPtr = python.native.ffi.PyTuple_GetItem(payloadBox.pointer, 0)
-            if (itemPtr != null) PyObject(itemPtr, borrowed = true) else null
-        } else {
-            null
-        }
-        try {
-            pending.complete(ok, payload)
-        } finally {
-            payload?.close()
-        }
+        pending.complete(ok, payload)
     }
 
     /** How many of a lowered composable lambda's compiled arguments are the compiler's rather than
