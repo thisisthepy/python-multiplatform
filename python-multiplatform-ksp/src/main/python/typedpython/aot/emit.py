@@ -1338,47 +1338,64 @@ class _Fn:
         init_map = self.g.alloc_plan.init_maps.get(cls, ())
         eval_args: list[tuple[str, bool, str | None]] = []
         if init_fn is not None:
+            ok = True
             for p, a in zip(init_fn.params[1:], e.args):
                 if isinstance(p, ir.ArrayParam):
-                    kind = self.g.array_kind(init_fn.name, p.name, p.type)
-                    self.bind_kind = kind
-                    try:
-                        val, owned = self.list_value(a, p.type)
-                    finally:
-                        self.bind_kind = None
-                    eval_args.append((val, owned, kind))
-                elif isinstance(p, ir.Param) and self.g.tagged_param(init_fn, p):
-                    eval_args.append((self.tagged(a), False, None))
+                    if not (isinstance(a, ir.Local) and a.type is p.type and a.name in self.types):
+                        ok = False
+                        self.bad("aot/type", init_fn.name, f"the argument for list parameter `{p.name}` of "
+                                 f"`{init_fn.name}` is not a list of its type")
+                    elif self.kind(a.name) != self.g.array_kind(init_fn.name, p.name, p.type):
+                        ok = False
+                        self.bad("aot/type", init_fn.name, f"the list `{a.name}` and the parameter `{p.name}` of "
+                                 f"`{init_fn.name}` are lists of different kinds")
+                    else:
+                        eval_args.append((f"v_{mangle(a.name)}", False, self.kind(a.name)))
+                elif a.type is Type.I64 and self.rep(a) == TAGGED:
+                    eval_args.append((self.tagged(a), True, None))
                 else:
                     eval_args.append((self.ev(a), False, None))
+            if not ok:
+                return
         for fname, src in init_map:
             fd = self.g.cls_analysis.field_map.get((cls, fname))
             if fd is None:
                 continue
             vf = self.vfield(target, fname)
-            if isinstance(src, int):
-                val, owned, arg_kind = eval_args[src]
-            else:
-                if fd.type is Type.I64 and self.g.reps.field(cls, fname) == TAGGED:
-                    val, owned, arg_kind = self.tagged(src), False, None
-                else:
-                    val, owned, arg_kind = self.ev(src), False, None
             if fd.type in (Type.F64, Type.BOOL):
+                val = eval_args[src][0] if isinstance(src, int) else self.ev(src)
                 self.emit(f"{vf} = {val};")
             elif fd.type is Type.I64:
                 if self.g.reps.field(cls, fname) == TAGGED:
-                    self.emit(f"tpa_int_set(&{vf}, {val});")
+                    if isinstance(src, int):
+                        val, is_tagged, _ = eval_args[src]
+                        tval = val if is_tagged else self.fallible_int(f"tpa_int_from_i64({val}, @)")
+                    else:
+                        tval = self.tagged(src)
+                    self.emit(f"tpa_int_set(&{vf}, {tval});")
                 else:
+                    if isinstance(src, int):
+                        val, is_tagged, _ = eval_args[src]
+                        if is_tagged:
+                            assert init_fn is not None
+                            p = init_fn.params[1 + src]
+                            self.bad("aot/type", init_fn.name, f"a TAGGED int is passed for the RAW parameter "
+                                     f"`{p.name}` of `{init_fn.name}` (the representation did not converge)")
+                            continue
+                    else:
+                        val = self.ev(src)
                     self.emit(f"{vf} = {val};")
             elif fd.type in LIST:
+                assert isinstance(src, int)
+                val, _, arg_kind = eval_args[src]
                 kind = arg_kind or ("f64" if fd.type is Type.F64_ARRAY else (
                     "int" if self.g.reps.field_list_big(cls, fname) else "i64"))
-                if not owned:
-                    self.emit(f"{lfn(kind, 'retain')}({val});")
+                self.emit(f"{lfn(kind, 'retain')}({val});")
                 self.emit(f"{lfn(kind, 'release')}({vf});")
                 self.emit(f"{vf} = {val};")
             else:
                 assert fd.cls is not None
+                val = eval_args[src][0] if isinstance(src, int) else self.ev(src)
                 mc = mangle(fd.cls)
                 tmp = self.tmp(self.g.cls_ptr(fd.cls), "NULL")
                 self.emit(f"{tmp} = {val};")

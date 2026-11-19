@@ -23,6 +23,8 @@ import sys
 import textwrap
 from pathlib import Path
 
+import pytest
+
 from typedpython import aot
 from typedpython.__main__ import main as cli_main
 
@@ -544,3 +546,169 @@ def test_virtual_object_and_field_stored_in_heap_object(tmp_path: Path):
     assert cp.returncode == 0
     assert aot_res.returncode == 0
     assert aot_res.stdout == cp.stdout
+
+
+def test_virtual_object_with_print_and_unpack_in_same_function(tmp_path: Path):
+    print_src = """
+    class Point:
+        __slots__ = ("x", "y")
+        x: int
+        y: int
+
+        def __init__(self, x: int, y: int) -> None:
+            self.x = x
+            self.y = y
+
+
+    def run(a: int) -> int:
+        p: Point = Point(a, a + 1)
+        print(p.x)
+        return p.x + p.y
+
+
+    if __name__ == "__main__":
+        print(run(3))
+    """
+    p1 = _write(tmp_path, print_src, "with_print.py")
+    r1 = aot.explain_alloc(p1)
+    assert "p = Point(...) -> virtual (scalar-replaced (no escape))" in r1
+    assert "tpa_cls_Point_new" not in _func_body_c(aot.generate(p1), "run")
+    cp1, aot1 = _run_both(tmp_path, print_src, name="with_print.py")
+    assert cp1.returncode == 0
+    assert aot1.returncode == 0
+    assert aot1.stdout == cp1.stdout
+
+    unpack_src = """
+    class Point:
+        __slots__ = ("x", "y")
+        x: int
+        y: int
+
+        def __init__(self, x: int, y: int) -> None:
+            self.x = x
+            self.y = y
+
+
+    def pair(a: int) -> tuple[int, int]:
+        return a, a + 1
+
+
+    def run(a: int) -> int:
+        p: Point = Point(a, a + 1)
+        u, v = pair(p.x)
+        return u + v + p.y
+
+
+    if __name__ == "__main__":
+        print(run(3))
+    """
+    p2 = _write(tmp_path, unpack_src, "with_unpack.py")
+    r2 = aot.explain_alloc(p2)
+    assert "p = Point(...) -> virtual (scalar-replaced (no escape))" in r2
+    assert "tpa_cls_Point_new" not in _func_body_c(aot.generate(p2), "run")
+    cp2, aot2 = _run_both(tmp_path, unpack_src, name="with_unpack.py")
+    assert cp2.returncode == 0
+    assert aot2.returncode == 0
+    assert aot2.stdout == cp2.stdout
+
+
+def test_virtual_object_raw_int_arg_into_tagged_field(tmp_path: Path):
+    src = """
+    class Acc:
+        __slots__ = ("total", "n")
+        total: int
+        n: int
+
+        def __init__(self, total: int, n: int) -> None:
+            self.total = total
+            self.n = n
+
+
+    def grow(a: Acc, k: int) -> None:
+        a.total = a.total * k * k * k * k
+
+
+    def run(seed: int) -> int:
+        a: Acc = Acc(seed, 1)
+        b: Acc = Acc(seed, 2)
+        grow(b, seed)
+        return a.total + a.n + b.n
+
+
+    if __name__ == "__main__":
+        print(run(1000000007))
+        print(run(1000000008))
+    """
+    p = _write(tmp_path, src)
+    report = aot.explain_alloc(p)
+    assert "a = Acc(...) -> virtual (scalar-replaced (no escape))" in report
+    assert "b = Acc(...) -> heap-rc (escapes via call to grow)" in report
+
+    c_text = aot.generate(p)
+    body = _func_body_c(c_text, "run")
+    assert "tpa_int_from_i64" in body
+
+    cp, aot_res = _run_both(tmp_path, src)
+    assert cp.returncode == 0
+    assert aot_res.returncode == 0
+    assert aot_res.stdout == cp.stdout
+
+
+def test_virtual_object_owned_list_arg_rejected_like_heap_path(tmp_path: Path):
+    pair_src = """
+    class Pair:
+        __slots__ = ("a", "b")
+        a: list[int]
+        b: list[int]
+
+        def __init__(self, xs: list[int]) -> None:
+            self.a = xs
+            self.b = xs
+
+
+    def make(n: int) -> list[int]:
+        out: list[int] = [0] * n
+        return out
+
+
+    def run(n: int) -> int:
+        p: Pair = Pair(make(n))
+        xa: list[int] = p.a
+        xb: list[int] = p.b
+        return len(xa) + len(xb)
+
+
+    if __name__ == "__main__":
+        print(run(3))
+    """
+    p1 = _write(tmp_path, pair_src, "pair.py")
+    with pytest.raises(aot.AotError) as exc1:
+        aot.generate(p1)
+    assert "aot/type" in str(exc1.value)
+
+    holder_src = """
+    class Holder:
+        __slots__ = ("n",)
+        n: int
+
+        def __init__(self, xs: list[int], n: int) -> None:
+            self.n = n
+
+
+    def make(n: int) -> list[int]:
+        out: list[int] = [0] * n
+        return out
+
+
+    def run(n: int) -> int:
+        h: Holder = Holder(make(n), n)
+        return h.n
+
+
+    if __name__ == "__main__":
+        print(run(3))
+    """
+    p2 = _write(tmp_path, holder_src, "holder.py")
+    with pytest.raises(aot.AotError) as exc2:
+        aot.generate(p2)
+    assert "aot/type" in str(exc2.value)

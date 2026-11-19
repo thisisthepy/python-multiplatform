@@ -9,7 +9,8 @@ Implements PR-O2a (docs/design/typedpython-aot.md 6.3.2 items 1 and 4):
       2. `cls` has no `__del__` method and its `__init__` is a simple
          field-initializing constructor (`self.<field> = <param>` or `<const>`).
       3. Every use of `v` in the function is exclusively `ir.FieldGet(Local(v), ...)`
-         or `ir.FieldSet(Local(v), ..., val)` (with `v` not referenced in `val`).
+         or `ir.FieldSet(Local(v), ..., val)` (where `val` may only reference `v`
+         through `ir.FieldGet(Local(v), ...)`).
   - Otherwise falls back to `"heap-rc"` and records the exact escape/fallback reason
     for `--explain-alloc`.
 """
@@ -73,6 +74,9 @@ def _simple_init_map(
     param_idx = {p.name: i for i, p in enumerate(init_fn.params[1:])}
     mapping: list[tuple[str, int | ir.Const]] = []
     for s in init_fn.body:
+        if isinstance(s, ir.ExprStmt) and isinstance(s.value, ir.Const) and isinstance(s.value.value, str):
+            # Ignore a docstring in __init__
+            continue
         if isinstance(s, ir.Return):
             if s.value is None or (isinstance(s.value, ir.Const) and s.value.type is ir.Type.NONE):
                 continue
@@ -124,8 +128,12 @@ def _find_escape_reason(fn: ir.Function, var_name: str, cls_name: str) -> str | 
             if isinstance(expr.obj, ir.Local) and expr.obj.name == var_name:
                 return None
             return _check_expr(expr.obj)
-        if isinstance(expr, (ir.Is, ir.IsExact)):
+        if isinstance(expr, ir.Is):
             if _expr_uses(expr.left, var_name) or _expr_uses(expr.right, var_name):
+                return "used in identity comparison (is)"
+            return None
+        if isinstance(expr, ir.IsExact):
+            if _expr_uses(expr.obj, var_name):
                 return "used in identity comparison (is)"
             return None
         if isinstance(expr, ir.Call):
@@ -205,6 +213,13 @@ def _find_escape_reason(fn: ir.Function, var_name: str, cls_name: str) -> str | 
                 res = _check_expr(e)
                 if res is not None:
                     return res
+        elif isinstance(stmt, ir.StoreItem):
+            if isinstance(stmt.value, ir.Local) and stmt.value.name == var_name:
+                return "escapes into container"
+            for e in (stmt.obj, stmt.index, stmt.value):
+                res = _check_expr(e)
+                if res is not None:
+                    return res
         elif isinstance(stmt, ir.Return):
             if stmt.value is not None:
                 if isinstance(stmt.value, ir.Local) and stmt.value.name == var_name:
@@ -224,7 +239,7 @@ def _find_escape_reason(fn: ir.Function, var_name: str, cls_name: str) -> str | 
             if res is not None:
                 return res
         elif isinstance(stmt, ir.Print):
-            for v in stmt.values:
+            for v in stmt.args:
                 res = _check_expr(v)
                 if res is not None:
                     return res
@@ -243,7 +258,7 @@ def _find_escape_reason(fn: ir.Function, var_name: str, cls_name: str) -> str | 
                     if res is not None:
                         return res
         elif isinstance(stmt, ir.ForObj):
-            res = _check_expr(stmt.iterable)
+            res = _check_expr(stmt.iter)
             if res is not None:
                 return res
         elif isinstance(stmt, ir.TimeSleep):
@@ -256,7 +271,7 @@ def _find_escape_reason(fn: ir.Function, var_name: str, cls_name: str) -> str | 
                 if res is not None:
                     return res
         elif isinstance(stmt, ir.Unpack):
-            res = _check_expr(stmt.value)
+            res = _check_expr(stmt.call)
             if res is not None:
                 return res
     return None
@@ -294,8 +309,7 @@ def analyze_alloc(module: ir.Module, class_analysis: ClassAnalysis) -> AllocPlan
             elif isinstance(s, ir.ForRange):
                 assign_counts[s.var] = assign_counts.get(s.var, 0) + 1
             elif isinstance(s, ir.ForObj):
-                t = getattr(s, "target", None) or getattr(s, "var", None)
-                if isinstance(t, str):
+                for t in s.targets:
                     assign_counts[t] = assign_counts.get(t, 0) + 1
 
         for s in all_stmts:
@@ -313,8 +327,10 @@ def analyze_alloc(module: ir.Module, class_analysis: ClassAnalysis) -> AllocPlan
                             ))
                 # Evaluate promotion criteria for `v = ir.New(cls_name, args)`
                 reason: str | None = None
-                if v in param_names or v not in fn.local_classes:
+                if v in param_names:
                     reason = "reassigned or branch-merged"
+                elif v not in fn.local_classes:
+                    reason = "not a typed class local"
                 elif assign_counts.get(v, 0) != 1:
                     reason = "reassigned or branch-merged"
                 elif cls_name not in class_analysis.classes:
@@ -328,6 +344,12 @@ def analyze_alloc(module: ir.Module, class_analysis: ClassAnalysis) -> AllocPlan
                     expected_argc = (len(init_fn.params) - 1) if init_fn is not None else 0
                     if len(s.value.args) != expected_argc:
                         reason = "complex __init__"
+                    elif init_fn is not None and any(
+                        isinstance(p, ir.ArrayParam) and not isinstance(a, ir.Local)
+                        for p, a in zip(init_fn.params[1:], s.value.args)
+                    ):
+                        # Keep heap-rc so ev_New enforces the exact same aot/type check
+                        reason = "non-local list argument"
                     else:
                         reason = _find_escape_reason(fn, v, cls_name)
 
@@ -344,11 +366,11 @@ def analyze_alloc(module: ir.Module, class_analysis: ClassAnalysis) -> AllocPlan
             else:
                 # Any other statement: collect any temporary `ir.New` expressions
                 exprs: list[ir.Expr] = []
-                for attr in ("value", "obj", "index", "cond", "start", "stop", "step", "iterable", "seconds", "code"):
+                for attr in ("value", "obj", "index", "cond", "start", "stop", "step", "iter", "seconds", "code", "call"):
                     e = getattr(s, attr, None)
                     if isinstance(e, ir.Expr):
                         exprs.append(e)
-                for attr in ("values",):
+                for attr in ("values", "args"):
                     es = getattr(s, attr, None)
                     if isinstance(es, tuple):
                         exprs.extend(e for e in es if isinstance(e, ir.Expr))
