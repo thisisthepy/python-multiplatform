@@ -34,11 +34,10 @@ def _build_and_compare(tmp_path: Path, source: str, argv_cases: list[list[str]])
     src = tmp_path / "prog.py"
     src.write_text(textwrap.dedent(source).lstrip(), encoding="utf-8")
     exe = tmp_path / ("prog.exe" if sys.platform == "win32" else "prog")
-    res = aot.build(src, exe)
-    assert res.ok, f"aot.build failed: {res.findings}"
+    built = aot.build(src, exe)
     for args in argv_cases:
         py = subprocess.run([sys.executable, str(src), *args], capture_output=True, text=True)
-        nat = subprocess.run([str(exe), *args], capture_output=True, text=True)
+        nat = subprocess.run([str(built), *args], capture_output=True, text=True)
         assert nat.returncode == py.returncode, f"args={args}: rc {nat.returncode} != {py.returncode}\nstderr={nat.stderr}"
         assert nat.stdout == py.stdout, f"args={args}: stdout mismatch\nAOT: {nat.stdout!r}\nPY : {py.stdout!r}"
         if py.returncode != 0:
@@ -180,9 +179,8 @@ def test_tier_k5_time_module(tmp_path: Path) -> None:
             print(t1 >= t0, m1 >= m0, w0 > 1000000000.0)
     """).lstrip(), encoding="utf-8")
     exe = tmp_path / ("t.exe" if sys.platform == "win32" else "t")
-    res = aot.build(src, exe)
-    assert res.ok, f"aot.build failed: {res.findings}"
-    out = subprocess.run([str(exe)], capture_output=True, text=True, check=True)
+    built = aot.build(src, exe)
+    out = subprocess.run([str(built)], capture_output=True, text=True, check=True)
     assert out.stdout.strip() == "True True True"
 
 
