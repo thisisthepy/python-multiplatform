@@ -380,7 +380,14 @@ class _Checker:
             if (isinstance(e.value, ast.Name) and e.value.id == "math" and e.attr in MATH_CONSTANTS
                     and self.has_math and "math" not in self.shadow):
                 return
-            if self.class_names and isinstance(e.value, ast.Name):
+            is_stdlib_mod = (
+                isinstance(e.value, ast.Name)
+                and e.value.id not in self.shadow
+                and ((e.value.id == "math" and self.has_math)
+                     or (e.value.id == "sys" and self.has_sys)
+                     or (e.value.id == "time" and self.has_time))
+            )
+            if self.class_names and isinstance(e.value, ast.Name) and not is_stdlib_mod:
                 return
             self.rep.error(e, "aot/attribute", e.attr, f"the attribute access `{ast.unparse(e)}` is outside the AOT mode "
                            "(`sys.argv`, `sys.maxsize`, `math` constants, and compiled class fields only)")
@@ -522,7 +529,9 @@ class _Checker:
                                f"({', '.join(TIME_FUNCTIONS)})")
             elif len(c.args) != TIME_FUNCTIONS[f.attr]:
                 self.rep.error(c, "aot/time", f"time.{f.attr}", f"`time.{f.attr}` takes {TIME_FUNCTIONS[f.attr]} argument(s)")
-        elif self.class_names and isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name):
+        elif (self.class_names and isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
+              and f.value.id not in {"math", "sys", "time"}
+              and f.attr not in {"append", "pop", "extend", "insert", "remove", "clear", "reverse", "sort", "copy", "count", "index"}):
             pass
         else:
             self.rep.error(f, "aot/call", ast.unparse(f), f"the call of `{ast.unparse(f)}` is outside the first AOT step")
