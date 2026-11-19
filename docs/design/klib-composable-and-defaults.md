@@ -2,7 +2,7 @@
 
 Status:
 - **Step 1 (A3) & Step 2 (A1 `.knm` metadata reader) & Step 3 (B1 pure-source `@Composable` for `<= 6` defaults):** Implemented (`KlibScanner.kt`, `KlibKnmScanner.kt`, `ArtifactRendering.kt`; leader decision 2026-11-15: "B1(순수 소스 생성, 기본값 6개 이하)만 진행하세요. 새 의존성·플러그인 없이 기존 생성 경로 안에서 끝나므로 제가 결정합니다.").
-- **Step 3 (B3 consumer `IrGenerationExtension` for `@Composable` with `> 6` defaults):** **Agent proposal, not confirmed** (owner decision required before introducing a compiler plugin artefact, per AGENTS.md §7).
+- **Step 3 (B3 consumer `IrGenerationExtension` for `@Composable` with `> 6` defaults):** **Owner decision 2026-11-19** (python-multiplatform#191 comment; asked "PMP #191(fork의 Kotlin/Native 데스크톱 경로)에서, 기본값 인자가 6개를 넘는 @Composable(Text, Button, TextField)을 바인딩하는 방법을 무엇으로 할까요?", the owner chose "컴파일러 플러그인 (추천)"). The decision approves this means and the new compiler-plugin artefact for this purpose only. Skeleton implemented and compile-checked (section 3.6); not yet run. The implementation details in section 3.6 are the agent's, not the owner's.
 
 Related issue: `thisisthepy/python-multiplatform#191` (Phase B: Kotlin/Native and Wasm `.klib` artifact scanner parity with JVM `.jar` artifacts), `thisisthepy/pythonx-compose#110` (Compose Multiplatform on Kotlin/Native and GraalVM native image).
 
@@ -128,7 +128,9 @@ Analogous to how `ComposableThunks.kt` generates a JVM `.jar`/`.class` with lowe
 - **Limitations:**
   - Constructing valid KLIB IR (`IrFile`, `IrSimpleFunction`, `IrCall`, serialized protobuf IR tables, signatures, and target-specific Konan manifest properties) across Kotlin versions (`2.0.20` in the Gradle plugin vs `2.4.20-Beta2` in the consumer build) is brittle: KLIB IR binary format versions change between minor Kotlin releases (`2.0` -> `2.4`), so a KLIB serialized by `kotlin-compiler-embeddable:2.0.20` will be rejected by a `2.4.20-Beta2` `konanc` compiler with an ABI version mismatch.
 
-#### Candidate B3: `@Composable` Source Stub + Minimal `KotlinCompilerPluginSupportPlugin` (`IrGenerationExtension`) in Consumer Build (Recommended Proposal)
+#### Candidate B3: `@Composable` Source Stub + Minimal `KotlinCompilerPluginSupportPlugin` (`IrGenerationExtension`) in Consumer Build (Chosen: owner decision 2026-11-19, python-multiplatform#191)
+
+The text below is the proposal as it was written before the decision. Section 3.6 records what was built.
 
 Instead of generating a `.class` file (JVM) or serializing KLIB IR across Kotlin versions (B2), we combine source generation with a tiny `IrGenerationExtension` registered on the consumer compilation after the Compose compiler plugin's IR lowering phase (or we emit a source intrinsic call that the IR extension rewrites):
 
@@ -171,4 +173,35 @@ Let's check how Kotlin compiles default arguments when calling a function from K
 2. **Step 2 (A1, implemented):** `KlibKnmScanner` reads `.knm` (`linkdata/`) `ProtoBuf.PackageFragment` metadata using `parseModuleHeader`/`parsePackageFragment` (already in `kotlin-compiler-embeddable:2.0.20`) to recover parameter names, default-argument omission (`<= 6` defaults), extension functions and properties (`Modifier.*`), value-class underlying types (`Dp`, `Color`, `TextUnit`), `PUBLIC` vs `PROTECTED` visibility, and `COMPANION_OBJECT` kind.
 3. **Step 3 (Blocker B):**
    - **Stage 1 (B1, implemented; leader decision 2026-11-15):** Pure-source `@Composable` lambda cast in `KlibKnmScanner.kt` + `ArtifactRendering.kt` binds `@Composable` top-level and `object` functions with `<= 6` defaulted parameters (`Column`, `Row`, `Box`, `BoxWithConstraints`, `Spacer`, `HorizontalDivider`, `MaterialTheme`, etc.), and declines `@Composable` functions with `> 6` defaulted parameters with a clear reason (`"more than 6 defaulted parameters on a klib @Composable: requires an IR lowering bridge"`).
-   - **Stage 2 (B3, Agent proposal, not confirmed; awaiting owner decision per AGENTS.md §7):** Introduce a consumer `IrGenerationExtension` so `@Composable` functions with `> 6` defaulted parameters (`Text`, `Button`, `Scaffold`, `TextField`) invoke their lowered `$default` IR symbol directly on Kotlin/Native, matching JVM's `ComposableThunks` 1:1.
+   - **Stage 2 (B3, owner decision 2026-11-19 on python-multiplatform#191):** A consumer `IrGenerationExtension` so `@Composable` functions with `> 6` defaulted parameters (`Text`, `Button`, `Scaffold`, `TextField`) invoke their lowered `$default` IR symbol directly on Kotlin/Native. Skeleton in place, see section 3.6. The `> 6` decline of Stage 1 is replaced by this path.
+
+### 3.6 B3 as built (2026-11-19; agent implementation of the owner's decision, compile-checked only)
+
+**Kotlin version coupling (checked first).** The Gradle plugin compiles on Gradle's embedded Kotlin 2.0.20 and the consumer compiles with 2.4.20-Beta2. The two never meet:
+
+- The compiler plugin is its own module, `python-multiplatform-gradle-plugin/compiler-plugin` (root-build project `:python-multiplatform-compiler-plugin`, published as `org.thisisthepy:python-multiplatform-compiler-plugin`). It is compiled by the root build's Kotlin (`libs.versions.kotlin`) against `kotlin-compiler-embeddable` of that same version, `compileOnly`.
+- The Gradle plugin does not link against it or against the Kotlin Gradle Plugin. It adds the coordinate, by name, to the configuration `kotlinNativeCompilerPluginClasspath` (the name is present in `kotlin-gradle-plugin-2.4.20-Beta2`, checked in the jar), and the compiler finds the registrar through `META-INF/services`. No `KotlinCompilerPluginSupportPlugin`, no plugin options.
+- The coupling that remains is between the published compiler-plugin jar and the consumer's compiler: the IR API it uses (`IrCall.arguments`, `IrFunction.parameters`, `IrParameterKind`) is the 2.4.20-Beta2 one and is not stable across Kotlin releases. One jar serves one Kotlin version. A consumer on another Kotlin version is not supported by this jar (agent note, not an owner decision: whether to publish per-Kotlin-version jars is open).
+
+**Generated source (`KlibKnmScanner.composableCandidateOrNull`, `ArtifactRendering.kt`).** For a klib `@Composable` with more than 6 defaulted parameters the body is one call that writes every argument, wrapped in a marker, inside the same `@Composable` lambda cast B1 uses:
+
+```kotlin
+{ args -> val __m0: kotlin.Int = (args[18] as Long).toInt() or (if (args[1] == null) 2 else 0) /* ... */;
+    run { val block: @androidx.compose.runtime.Composable () -> kotlin.Unit = {
+        __pympDefaultCall(androidx.compose.material3.Text((args[0] as String),
+            (if ((__m0 and 2) != 0) __pympOmitted() else (args[1] as androidx.compose.ui.Modifier)) /* ... */), __m0)
+    }; (block as kotlin.Function2<androidx.compose.runtime.Composer?, kotlin.Int, kotlin.Unit>).invoke(/* composer, changed */) } }
+```
+
+`__pympDefaultCall` and `__pympOmitted` are private functions appended to each fragment file that uses them. Both throw, so a build the compiler plugin did not reach fails at the first such call. No declaration is added to the `python-multiplatform` library. Every declared default is reported omittable (`paramHasDefault`), as on the JVM thunk path. A function with more than 124 parameters (4 mask ints) is declined.
+
+**IR rewrite (`PythonDefaultCallPlugin.kt`).** After Compose's lowering the wrapped call is `Text(..., $composer, $changed, $changed1, $default = 0)`. The extension sets each `$default*` argument of that call to the marker's mask, replaces the marker call by the wrapped call, and replaces each `__pympOmitted<T>()` by the zero value of `T` (`null` for a nullable type, the zero constant for a primitive, the primary constructor over the underlying zero value for a value class, which is what Compose passes for an ignored argument on non-JVM targets).
+
+**Automatic application (`PythonBindingsPlugin.applyDefaultCallCompilerPlugin`).** Applied whenever the artefact walker is configured (`artifactIncludePackages`), to the Kotlin/Native compiler-plugin classpath. An in-repo consumer points `pythonBindings.compilerPlugin` at the project, as `processor` does.
+
+**Not verified, open (agent notes):**
+
+1. **Plugin order.** The rewrite needs Compose's `IrGenerationExtension` to have run first, and the compiler offers no ordering API. The extension does not assume: a marker whose wrapped callee has no `$default` parameter stops the compilation with a message naming the cause. Which order the two plugins get in a real Kotlin/Native compilation has not been observed.
+2. **No run.** Nothing here has been executed: no unit test of the IR rewrite, no klib with `Text` compiled through it, no device or CI run. The modules compile (`:python-multiplatform-compiler-plugin:compileKotlin`, the Gradle plugin's `compileKotlin` and `compileTestKotlin`).
+3. **Which configuration konanc reads.** `kotlinNativeCompilerPluginClasspath` is assumed to be the one Kotlin/Native compilations use in KGP 2.4.20-Beta2; only the name's presence in the jar was checked.
+4. **Type inference of `__pympOmitted()`** against an overloaded or generic callee has not been compiled against a real Compose klib.

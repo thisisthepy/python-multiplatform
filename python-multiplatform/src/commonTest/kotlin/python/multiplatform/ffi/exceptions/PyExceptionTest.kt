@@ -4,10 +4,14 @@ import python.multiplatform.ffi.Python3
 import python.multiplatform.ffi.PythonTestFixture
 import python.multiplatform.ffi.exceptions.errors.PyTypeError
 import python.multiplatform.ffi.exceptions.errors.PyValueError
+import kotlin.coroutines.cancellation.CancellationException
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertSame
+import kotlin.test.assertTrue
 
 /**
  * Functional tests establishing that a Python-level error surfaces as a Kotlin
@@ -67,5 +71,30 @@ class PyExceptionTest {
     @Test
     fun valueErrorHasTheExpectedPythonTypeName() {
         assertEquals("ValueError", PyValueError.PYTHON_TYPE_NAME)
+    }
+
+    @Test
+    fun isCancelledErrorRecognisesConcurrentFuturesCancelledErrorAndToKotlinExceptionMapsItToCancellationException() =
+        PythonTestFixture.withInterpreter {
+            val thrown = assertFailsWith<PyException> {
+                Python3.exec("import concurrent.futures; raise concurrent.futures.CancelledError('stop now')")
+            }
+            assertTrue(thrown.isCancelledError(), "CancelledError must be recognised by isCancelledError()")
+            val mapped = thrown.toKotlinException()
+            assertTrue(
+                mapped is CancellationException,
+                "toKotlinException() on a CancelledError must return a Kotlin CancellationException, got $mapped",
+            )
+            assertEquals("stop now", mapped.message)
+            assertSame(thrown, mapped.cause, "the mapped CancellationException must keep the PyException as its cause")
+        }
+
+    @Test
+    fun nonCancelledPyExceptionToKotlinExceptionReturnsItself() = PythonTestFixture.withInterpreter {
+        val thrown = assertFailsWith<PyException> {
+            Python3.exec("raise ValueError('bad input')")
+        }
+        assertFalse(thrown.isCancelledError(), "ValueError must not be treated as a CancelledError")
+        assertSame(thrown, thrown.toKotlinException())
     }
 }

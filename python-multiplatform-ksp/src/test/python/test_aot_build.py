@@ -25,9 +25,12 @@ Under the CI sanitizer job (TP_SANITIZE=1) every executable is built with ASan a
 Everything here is an agent proposal, not owner-confirmed.
 """
 import io
+import math
 import os
+import random
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import textwrap
@@ -40,7 +43,7 @@ import pytest
 from typedpython import aot, cbuild
 from typedpython.__main__ import main
 from typedpython.aot import cc
-from aot_text_check import cpython_api_uses
+from aot_text_check import code_only, cpython_api_uses
 
 HEADER = cc.RUNTIME_DIR / "tp_aot.h"
 BENCH = Path(__file__).resolve().parents[4] / "benchmarks" / "typedpython" / "py"
@@ -658,6 +661,7 @@ CASES = {
             print(f"{zero:.9f} {zero:.0f} {zero} {-1e-7:.3f} {1e-7:.9f}")
             print(f"{1e22:.2f} {123456.789:.1f} {2.675:.2f} {0.3:.20f} {1.0 / 3.0:.17f}")
             print(f"{1e300:.2f}")
+            print(f"{1.7976931348623157e308:.2f} {5e-324:.20f} {0.03125:.4f} {0.09375:.4f}")
             print(f"{a * 2.0:.3f} {n < 3} {n * 2}")
             l = [1.5, 2.25]
             print(f"{l[0]:.1f} {l[1]:.1f} {len(l)}")
@@ -788,6 +792,146 @@ def test_case_matches_cpython(merged, name):
 
 def test_float_repr_corpus_is_large_enough(merged):
     assert len(merged.theirs_cases["float_repr_corpus"].splitlines()) > 300
+
+
+# --- exact float formatting harness (#450) ----------------------------------------------------------------
+
+FLOAT_HARNESS = r'''
+#include "tp_aot.h"
+
+int main(void)
+{
+    char line[256];
+    char buf[512];
+    while (fgets(line, sizeof line, stdin) != NULL) {
+        if (line[0] == 'R') {
+            uint64_t bits = (uint64_t)strtoull(line + 2, NULL, 16);
+            double x;
+            int n;
+            memcpy(&x, &bits, sizeof x);
+            n = tpa_repr_f64(x, buf);
+            if (n < 0 || buf[n] != '\0' || (size_t)n != strlen(buf)) {
+                return 2;
+            }
+            fwrite(buf, 1, (size_t)n, stdout);
+            putchar('\n');
+        }
+        else if (line[0] == 'F' || line[0] == 'P') {
+            char *end;
+            int prec = (int)strtol(line + 2, &end, 10);
+            uint64_t bits = (uint64_t)strtoull(end, NULL, 16);
+            double x;
+            memcpy(&x, &bits, sizeof x);
+            if (line[0] == 'F') {
+                int n = tpa_format_f64_fixed(x, prec, buf);
+                if (n < 0 || buf[n] != '\0' || (size_t)n != strlen(buf)) {
+                    return 3;
+                }
+                fwrite(buf, 1, (size_t)n, stdout);
+                putchar('\n');
+            }
+            else {
+                tpa_print_f64_fixed(x, prec);
+                putchar('\n');
+            }
+        }
+    }
+    fflush(stdout);
+    return 0;
+}
+'''
+
+
+@pytest.fixture(scope="module")
+def float_harness(tmp_path_factory):
+    need_cc()
+    tmp = tmp_path_factory.mktemp("float_harness")
+    return cc.compile_executable(FLOAT_HARNESS, tmp / "float_harness")
+
+
+def _f64_hex(x: float) -> str:
+    return f"{struct.unpack('>Q', struct.pack('>d', x))[0]:016x}"
+
+
+def _run_float_harness(exe, lines: list[str]) -> list[str]:
+    run = subprocess.run([str(exe)], input=("\n".join(lines) + "\n").encode("ascii"),
+                         capture_output=True, env=exe_env(), timeout=120)
+    assert run.returncode == 0, text(run.stderr)[-2000:]
+    out = text(run.stdout).split("\n")
+    assert out.pop() == ""
+    assert len(out) == len(lines), (len(out), len(lines))
+    return out
+
+
+def test_float_repr_differential(float_harness):
+    """#450: tpa_repr_f64 matches CPython repr(float) across special values, powers of 2 and 10
+    (with neighbours), known tie cases, and 20,000 random bit patterns."""
+    vals = [
+        0.0, -0.0, float("inf"), float("-inf"), float("nan"), -float("nan"),
+        struct.unpack(">d", struct.pack(">Q", 0x7FF8000000000001))[0],
+        struct.unpack(">d", struct.pack(">Q", 0xFFF8000000000001))[0],
+        struct.unpack(">d", struct.pack(">Q", 0x7FF0000000000001))[0],
+        0.1 + 0.2, 1.0 / 3.0, 2.0 / 3.0, 4.35, 2.675, 1e23, 1e22, 1e21, 5e-324,
+        2.2250738585072014e-308, 2.225073858507201e-308, 1.7976931348623157e308,
+        9007199254740992.0, 9007199254740993.0, 4503599627370496.5,
+    ]
+    for bexp in range(0, 2047):
+        for mant in (0, 1, 2, (1 << 52) - 2, (1 << 52) - 1):
+            x = struct.unpack(">d", struct.pack(">Q", (bexp << 52) | mant))[0]
+            vals.append(x)
+            vals.append(-x)
+    for e in range(-324, 309):
+        for pfx in ("1", "9.999999999999999", "9.999999999999998", "5", "2.5", "1.25", "1.5"):
+            try:
+                x = float(f"{pfx}e{e}")
+                vals.append(x)
+                vals.append(math.nextafter(x, 0.0))
+                vals.append(math.nextafter(x, math.inf))
+            except OverflowError:
+                pass
+    rng = random.Random(20261119)
+    for _ in range(20000):
+        vals.append(struct.unpack(">d", struct.pack(">Q", rng.getrandbits(64)))[0])
+
+    got = _run_float_harness(float_harness, [f"R {_f64_hex(x)}" for x in vals])
+    bad = [(x, g, repr(x)) for x, g in zip(vals, got) if g != repr(x)]
+    assert not bad, f"{len(bad)} of {len(vals)} differ, first: {bad[0]!r}"
+
+
+def test_float_fixed_differential(float_harness):
+    """#450: tpa_format_f64_fixed and tpa_print_f64_fixed match CPython format(x, '.Nf') across
+    special values, dyadic halfways for prec 0..20, extreme exponents, and random floats."""
+    vals = [
+        0.0, -0.0, float("inf"), float("-inf"), float("nan"), -float("nan"),
+        0.5, 1.5, 2.5, 3.5, 4.5, 0.25, 0.75, 0.125, 0.375, 0.625, 0.875,
+        2.675, 4.35, 0.3, 1.0 / 3.0, 0.03125, 0.09375, 1e22, 1e300,
+        1.7976931348623157e308, 5e-324, 2.2250738585072014e-308, 2.225073858507201e-308,
+        9007199254740992.0, 9007199254740993.0, 4503599627370496.5,
+    ]
+    for p in range(21):
+        for m_num in (1, 2, 3, 4, 5, 7, 9, 15, (1 << 52) + 1, (1 << 52) + 3, (1 << 53) - 1):
+            vals.append(math.ldexp(float(m_num), -p - 1))
+            vals.append(math.ldexp(float(m_num), -p - 2))
+            vals.append(math.ldexp(float(m_num), -p))
+            vals.append(-math.ldexp(float(m_num), -p - 1))
+    rng = random.Random(20261120)
+    for _ in range(500):
+        vals.append(struct.unpack(">d", struct.pack(">Q", rng.getrandbits(64)))[0])
+
+    pairs = [(x, p) for x in vals for p in (0, 1, 2, 3, 6, 15, 17, 20)]
+    for x in vals[:100]:
+        for p in range(21):
+            pairs.append((x, p))
+
+    got = _run_float_harness(float_harness, [f"F {p} {_f64_hex(x)}" for x, p in pairs])
+    bad = [(x, p, g, f"{x:.{p}f}") for (x, p), g in zip(pairs, got) if g != f"{x:.{p}f}"]
+    assert not bad, f"{len(bad)} of {len(pairs)} differ, first: {bad[0]!r}"
+
+    # Also exercise tpa_print_f64_fixed directly
+    print_pairs = [(x, p) for x in vals[:32] for p in (0, 1, 2, 3, 17, 20)]
+    got_p = _run_float_harness(float_harness, [f"P {p} {_f64_hex(x)}" for x, p in print_pairs])
+    bad_p = [(x, p, g, f"{x:.{p}f}") for (x, p), g in zip(print_pairs, got_p) if g != f"{x:.{p}f}"]
+    assert not bad_p, f"{len(bad_p)} of {len(print_pairs)} differ in print, first: {bad_p[0]!r}"
 
 
 # --- big integers through compiled code: one program, one build (#462) ----------------------------------------
@@ -2841,10 +2985,81 @@ def test_generated_c_contains_no_cpython(tmp_path):
                        "stdatomic.h", "intrin.h", "sched.h", "stddef.h", "tp_aot_int.h"}, inc
 
 
+def test_tp_aot_has_no_clib_float_formatting():
+    """#450: tp_aot.h does its own exact binary64 decimal formatting without strtod, atof, or
+    printf float conversion specifiers."""
+    header = HEADER.read_text(encoding="utf-8")
+    assert "\u2014" not in header
+    code = code_only(header)
+    for fn in ("strtod", "strtof", "strtold", "atof", "__int128"):
+        assert not re.search(rf"\b{fn}\b", code), fn
+    no_comments = re.sub(r"/\*.*?\*/|//[^\n]*", "", header, flags=re.S)
+    for lit in re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"', no_comments):
+        assert not re.search(r"%[0-9.*+\-# ']*[efgEFGaA]", lit), lit
+
+
 def test_generated_c_uses_the_default_modes_float_flags():
     assert "-ffp-contract=off" in cc.FLAGS and "-fno-fast-math" in cc.FLAGS
     assert cbuild.DEFAULT_FLAGS == cc.FLAGS[:len(cbuild.DEFAULT_FLAGS)]
     assert "/fp:precise" in cbuild._msvc_flags(list(cc.FLAGS))
+
+
+def test_generated_c_and_header_switch_fp_contraction_off_in_source(tmp_path):
+    """#464: floating-point contraction is turned off in tp_aot.h and in the generated C itself (not only
+    by compiler flags), and -ffast-math / /fp:fast is rejected at compile time."""
+    c = aot.generate(write(tmp_path, """
+        def fma_like(a: float, b: float, c: float) -> float:
+            return a * b + c
+
+        if __name__ == "__main__":
+            x = 1.0 + 1.0 / 134217728.0
+            print(fma_like(x, x, -1.0))
+        """))
+    header = HEADER.read_text(encoding="utf-8")
+    for body in (header, c):
+        for pragma in ("#pragma STDC FP_CONTRACT OFF", '#pragma GCC optimize("fp-contract=off")',
+                       "#pragma float_control(precise, on)", "#pragma fp_contract(off)"):
+            assert pragma in body, pragma
+    assert "#if defined(__FAST_MATH__) || defined(_M_FP_FAST)" in header
+    assert "#error " in header
+    assert header.index("#pragma STDC FP_CONTRACT OFF") < header.index("tpa_truediv_f64")
+    assert c.index("#pragma STDC FP_CONTRACT OFF") < c.index("tpf_fma_like")
+
+
+def test_generated_c_without_fp_flags_matches_cpython_and_rejects_fast_math(tmp_path):
+    """#464: compiling the generated C without `-ffp-contract=off` / `/fp:precise` (even with `-ffp-contract=on`
+    on GCC/Clang) still computes CPython's double-rounded float result, and `-ffast-math` / `/fp:fast` fails
+    the build at compile time."""
+    need_cc()
+    src = write(tmp_path, """
+        def fma_exact(a: float, b: float, c: float) -> float:
+            return a * b + c
+
+        if __name__ == "__main__":
+            x = 1.0 + 1.0 / 134217728.0
+            print(fma_exact(x, x, -1.0))
+        """)
+    c_file = tmp_path / "fp.c"
+    c_file.write_text(aot.generate(src), encoding="utf-8")
+    exe = exe_path(tmp_path / "fp")
+    cmd, env = cc.command(c_file, exe, obj_dir=tmp_path)
+    idx = cmd.index(str(c_file))
+    no_flag_cmd = [t for t in cmd[:idx] if t not in ("-ffp-contract=off", "-fno-fast-math", "/fp:precise")]
+    if not cbuild._is_msvc():
+        no_flag_cmd += ["-ffp-contract=on", "-Werror=pragmas"]
+    no_flag_cmd += cmd[idx:]
+    res = subprocess.run(no_flag_cmd, capture_output=True, env=env, timeout=60)
+    assert res.returncode == 0, text(res.stderr) + text(res.stdout)
+    assert_same(run_exe(exe), run_py(src))
+
+    if cbuild._is_msvc():
+        fast_cmd = [cbuild._msvc_cl(env), "/nologo", "/Zs", "/O2", "/fp:fast", f"/I{cc.RUNTIME_DIR}", str(c_file)]
+    else:
+        fast_cmd = ([t for t in cmd[:idx] if t not in ("-ffp-contract=off", "-fno-fast-math")]
+                    + ["-fsyntax-only", "-ffast-math", str(c_file)])
+    chk = subprocess.run(fast_cmd, capture_output=True, env=env, timeout=60)
+    assert chk.returncode != 0
+    assert "requires precise IEEE 754 floating-point semantics" in text(chk.stderr) + text(chk.stdout)
 
 
 def test_cli_reports_each_finding_on_one_line(tmp_path, capsys):

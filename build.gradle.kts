@@ -42,6 +42,7 @@ tasks.register("publishAllToMavenLocal") {
         "python-multiplatform-gradle-plugin (including its plugin-marker publication) to mavenLocal()."
     dependsOn(":python-multiplatform:publishToMavenLocal")
     dependsOn(":python-multiplatform-ksp:publishToMavenLocal")
+    dependsOn(":python-multiplatform-compiler-plugin:publishToMavenLocal")
     dependsOn(":python-multiplatform-compose:publishToMavenLocal")
     dependsOn(gradle.includedBuild("python-multiplatform-gradle-plugin").task(":publishToMavenLocal"))
 }
@@ -57,6 +58,7 @@ tasks.register("publishAllToCentralStaging") {
         "python-multiplatform-gradle-plugin (with its plugin marker) to build/central-staging."
     dependsOn(":python-multiplatform:publishAllToCentralStaging")
     dependsOn(":python-multiplatform-ksp:publishAllToCentralStaging")
+    dependsOn(":python-multiplatform-compiler-plugin:publishAllToCentralStaging")
     dependsOn(":python-multiplatform-compose:publishAllToCentralStaging")
     dependsOn(gradle.includedBuild("python-multiplatform-gradle-plugin").task(":publishAllToCentralStaging"))
 }

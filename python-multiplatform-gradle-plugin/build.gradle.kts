@@ -253,6 +253,7 @@ val generateCoordinates = tasks.register("generateCoordinates") {
     // reads as if it were project-scoped. Qualifying both is what makes the generated coordinates
     // name this build's actual group instead of the literal string "null".
     val coordinates = "${project.group}:python-multiplatform-ksp:${project.version}"
+    val compilerPluginCoordinates = "${project.group}:python-multiplatform-compiler-plugin:${project.version}"
 
     // The CPython distribution the *library* was built against, read from the root build's own
     // `gradle.properties` rather than restated here. `StagePythonHomeTask` stages this exact
@@ -291,6 +292,7 @@ val generateCoordinates = tasks.register("generateCoordinates") {
         )
 
     inputs.property("coordinates", coordinates)
+    inputs.property("compilerPluginCoordinates", compilerPluginCoordinates)
     inputs.property("klibWorkerCoordinates", klibWorkerValue)
     inputs.property("pythonVersion", pythonVersionValue)
     inputs.property("pbsRelease", pbsReleaseValue)
@@ -308,6 +310,9 @@ val generateCoordinates = tasks.register("generateCoordinates") {
             package python.multiplatform.gradle
 
             internal const val DEFAULT_PROCESSOR_COORDINATES: String = "$coordinates"
+
+            /** The consumer-side compiler plugin (klib-composable-and-defaults.md B3), published beside the processor. */
+            internal const val DEFAULT_COMPILER_PLUGIN_COORDINATES: String = "$compilerPluginCoordinates"
 
             /** The CPython release the `libpython` bundled in `desktopJar` was taken from. */
             internal const val DEFAULT_PYTHON_VERSION: String = "$pythonVersionValue"
