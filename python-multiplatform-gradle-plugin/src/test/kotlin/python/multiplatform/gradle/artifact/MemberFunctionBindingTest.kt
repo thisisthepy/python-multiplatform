@@ -86,10 +86,16 @@ class MemberFunctionBindingTest {
     }
 
     @Test
-    fun aSuspendMemberIsDeclinedWithItsReason() {
-        val later = declarations().single { it.simpleName == "later" }
-        assertNull(later.bindingName)
-        assertEquals("suspend", later.declineReason)
+    fun aSuspendMemberIsBoundWithPendingCall() {
+        val laterDecl = declarations().single { it.simpleName == "later" }
+        assertEquals("$counter.later", laterDecl.bindingName)
+        assertTrue(laterDecl.isSuspend)
+        val later = callables().single { it.name == "$counter.later" }
+        assertEquals("METHOD", later.kind)
+        assertTrue(later.isSuspend)
+        assertTrue("PendingCall.start" in later.lambdaBody, later.lambdaBody)
+        val rendered = renderArtifactFragmentSource(ArtifactFragment("SuspendMemberFragment", "fixture:artifactmember:1.0", listOf(later)))
+        assertTrue("isSuspend = true" in rendered, rendered)
     }
 
     @Test

@@ -63,10 +63,14 @@ class KlibMemberFunctionTest {
     }
 
     @Test
-    fun aSuspendMemberIsDeclinedWithItsReason() {
-        val join = declarations.single { it.owner == job && it.simpleName == "join" }
-        assertNull(join.bindingName)
-        assertEquals("suspend", join.declineReason)
+    fun aSuspendMemberIsBoundWithPendingCall() {
+        val joinDecl = declarations.single { it.owner == job && it.simpleName == "join" }
+        assertEquals("$job.join", joinDecl.bindingName)
+        assertTrue(joinDecl.isSuspend)
+        val join = entries.single { it.name == "$job.join" }
+        assertEquals("METHOD", join.kind)
+        assertTrue(join.isSuspend)
+        assertTrue("PendingCall.start" in join.lambdaBody, join.lambdaBody)
     }
 
     @Test

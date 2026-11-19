@@ -1033,7 +1033,6 @@ internal object ArtifactScanner {
                 declinedCandidate(owner, true, function, classpath, reason, composable)
                     ?.let { it.copy(declaration = member.restate(it.declaration)) }
             when {
-                function.isSuspend -> return@mapNotNull declined("suspend")
                 function.hasReifiedTypeParameter ->
                     return@mapNotNull declined("a reified type parameter: its type argument is read at run time, so kotlin.Any? cannot stand for it")
                 method == null || !method.access.hasFlag(Opcodes.ACC_PUBLIC) -> return@mapNotNull null
@@ -1045,7 +1044,15 @@ internal object ArtifactScanner {
                     return@mapNotNull declined("shares its name with a property of the class, which keeps the attribute")
                 receiverDecline != null -> return@mapNotNull declined(receiverDecline)
             }
-            val (paramDescriptors, _) = splitMethodDescriptor(method!!.desc)
+            val (rawParamDescriptors, _) = splitMethodDescriptor(method!!.desc)
+            val paramDescriptors = if (
+                function.isSuspend &&
+                rawParamDescriptors.lastOrNull() == "Lkotlin/coroutines/Continuation;"
+            ) {
+                rawParamDescriptors.dropLast(1)
+            } else {
+                rawParamDescriptors
+            }
             if (function.allParameterTypes.size != paramDescriptors.size) {
                 return@mapNotNull declined(
                     "the JVM signature carries ${paramDescriptors.size - function.allParameterTypes.size} " +
@@ -2508,14 +2515,20 @@ internal object ArtifactScanner {
         // property of a package that one file does not see (this object's KDoc, and
         // `docs/design/kotlin-extensions-in-python.md` §2.5's 11 split pairs). [applyDefaultOmission] runs
         // over the finished walk and fills this in.
+        val wrappedCall = returnType.wrapReturn(call)
+        val bodyExpr = if (function.isSuspend) {
+            "python.multiplatform.ffi.upcall.PendingCall.start { $wrappedCall }"
+        } else {
+            wrappedCall
+        }
         val callable = ArtifactCallable(
             name = qualifiedName,
             arity = arity,
             paramTags = resolvedParams.map { it.tag },
             returnTag = returnType.tag,
             // A member reads its receiver out of `args[0]` even with no declared parameter.
-            lambdaBody = if (arity == 0 && member == null) "{ ${returnType.wrapReturn(call)} }"
-            else "{ args -> ${returnType.wrapReturn(call)} }",
+            lambdaBody = if (arity == 0 && member == null) "{ $bodyExpr }"
+            else "{ args -> $bodyExpr }",
             imports = imports,
             receiverTypeName = member?.owner ?: function.receiverType?.let { kotlinClassifierNameOf(it) },
             paramNames = function.allParameterNames,
@@ -2526,6 +2539,7 @@ internal object ArtifactScanner {
             // statement about **this body**, and this body passes everything.
             paramHasDefault = List(resolvedParams.size) { false },
             kind = if (member != null) METHOD_KIND else "FUNCTION",
+            isSuspend = function.isSuspend,
         )
         // A member's defaults are not omittable yet (issue #215): no plan, so Python passes every
         // argument and the stub says so.

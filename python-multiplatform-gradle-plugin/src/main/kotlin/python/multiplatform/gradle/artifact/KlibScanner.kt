@@ -833,7 +833,6 @@ internal object KlibScanner {
         ) ?: return null
         val declined = { reason: String -> Candidate(null, model.copy(declineReason = reason)) }
         when {
-            function.isSuspend -> return declined("suspend")
             generic -> return declined("a member of a generic class: not bound yet")
             unbindable != null -> return declined(unbindable)
             function.hasAnnotation(DEPRECATED) ->
@@ -860,7 +859,12 @@ internal object KlibScanner {
 
         val key = "$owner.$name"
         val argumentExpressions = boundaryTypes.mapIndexed { index, type -> type.read("args[${index + 1}]") }
-        val body = returnType.wrapReturn("(args[0] as $owner).$name(${argumentExpressions.joinToString(", ")})")
+        val rawBody = returnType.wrapReturn("(args[0] as $owner).$name(${argumentExpressions.joinToString(", ")})")
+        val body = if (function.isSuspend) {
+            "python.multiplatform.ffi.upcall.PendingCall.start { $rawBody }"
+        } else {
+            rawBody
+        }
         val supertypes = if (returnType.tag == OBJECT_TAG) supertypesOf(model.returnType.qualifiedName, classes) else emptyList()
         val callable = ArtifactCallable(
             name = key,
@@ -876,6 +880,7 @@ internal object KlibScanner {
             // Every argument is passed, as for a top-level klib entry (see [candidateOrNull]).
             paramHasDefault = List(boundaryTypes.size) { false },
             kind = ArtifactScanner.METHOD_KIND,
+            isSuspend = function.isSuspend,
         )
         return Candidate(
             callable = callable,
