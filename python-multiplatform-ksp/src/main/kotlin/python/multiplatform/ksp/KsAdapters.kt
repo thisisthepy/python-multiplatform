@@ -4,6 +4,7 @@ import com.google.devtools.ksp.getAllSuperTypes
 import com.google.devtools.ksp.symbol.KSClassDeclaration
 import com.google.devtools.ksp.symbol.KSType
 import com.google.devtools.ksp.symbol.KSTypeAlias
+import com.google.devtools.ksp.symbol.KSTypeParameter
 import com.google.devtools.ksp.symbol.KSTypeReference
 import com.google.devtools.ksp.symbol.Variance
 
@@ -16,23 +17,38 @@ private const val PY_OBJECT_QUALIFIED_NAME = "python.multiplatform.ffi.PyObject"
  * SPEC U-5a, #164 item 7), a `suspend` function type is rendered as a `suspend (...) -> ...` cast
  * target and carries `kotlin.coroutines.SuspendFunctionN(Arg1,...)->Ret` as its slot metadata name.
  */
-fun KSType.toShape(allowTopLevelSuspendFunction: Boolean = false): TypeShape {
+fun KSType.toShape(
+    allowTopLevelSuspendFunction: Boolean = false,
+    typeParameters: Map<String, KSType?> = emptyMap(),
+): TypeShape {
     val expanded = expandTypeAlias(this)
+    val ownParam = expanded.declaration as? KSTypeParameter
+    if (ownParam != null) {
+        val name = ownParam.name.asString()
+        if (name in typeParameters) {
+            val bound = typeParameters[name]
+            if (bound == null) {
+                return TypeShape("kotlin.Any", nullable = true, rendered = "kotlin.Any")
+            }
+            val boundShape = bound.toShape(allowTopLevelSuspendFunction = false)
+            return boundShape.copy(nullable = boundShape.nullable || isMarkedNullable || expanded.isMarkedNullable)
+        }
+    }
     if (allowTopLevelSuspendFunction && expanded.isSuspendFunctionType) {
         val arity = expanded.arguments.size - 1
         val argTypes = expanded.arguments.dropLast(1).mapNotNull { it.type?.resolve() }
         val retType = expanded.arguments.lastOrNull()?.type?.resolve()
         if (arity in 0..MAX_SUSPEND_FUNCTION_ARITY && argTypes.size == arity && retType != null) {
-            val argNames = argTypes.map { expandTypeAlias(it).declaration.qualifiedName?.asString() ?: "kotlin.Any" }
-            val retName = expandTypeAlias(retType).declaration.qualifiedName?.asString() ?: "kotlin.Any"
+            val argShapes = argTypes.map { it.toShape(allowTopLevelSuspendFunction = false, typeParameters = typeParameters) }
+            val retShape = retType.toShape(allowTopLevelSuspendFunction = false, typeParameters = typeParameters)
+            val argNames = argShapes.map { it.qualifiedName }
+            val retName = retShape.qualifiedName
             val slotName = "kotlin.coroutines.SuspendFunction$arity(" +
                 argNames.joinToString(",") + ")->" + retName
-            val renderedArgs = argTypes.joinToString(", ") { t ->
-                val inner = t.declaration.qualifiedName?.asString() ?: "kotlin.Any"
-                t.renderWithArguments(inner) + if (t.isMarkedNullable) "?" else ""
+            val renderedArgs = argShapes.joinToString(", ") { s ->
+                s.rendered + if (s.nullable) "?" else ""
             }
-            val retInner = retType.declaration.qualifiedName?.asString() ?: "kotlin.Any"
-            val renderedRet = retType.renderWithArguments(retInner) + if (retType.isMarkedNullable) "?" else ""
+            val renderedRet = retShape.rendered + if (retShape.nullable) "?" else ""
             val castType = "(suspend ($renderedArgs) -> $renderedRet)"
             return TypeShape(
                 qualifiedName = castType,
@@ -43,7 +59,15 @@ fun KSType.toShape(allowTopLevelSuspendFunction: Boolean = false): TypeShape {
         }
     }
     val qualifiedName = declaration.qualifiedName?.asString() ?: "kotlin.Any"
-    return TypeShape(qualifiedName, isMarkedNullable, rendered = renderWithArguments(qualifiedName))
+    return TypeShape(qualifiedName, isMarkedNullable, rendered = renderWithArguments(qualifiedName, typeParameters))
+}
+
+internal fun KSType.mentionsTypeParameter(): Boolean {
+    val expanded = expandTypeAlias(this)
+    if (expanded.declaration is KSTypeParameter) return true
+    return expanded.arguments.any { arg ->
+        arg.type?.resolve()?.mentionsTypeParameter() == true
+    }
 }
 
 private const val MAX_SUSPEND_FUNCTION_ARITY = 5
@@ -64,20 +88,29 @@ private tailrec fun expandTypeAlias(type: KSType): KSType {
  * [BindingPolicy] rejects every declaration that can produce one before this is reached, and the
  * fallbacks to `*` here are the belt to that pair of braces.
  */
-private fun KSType.renderWithArguments(qualifiedName: String): String {
+private fun KSType.renderWithArguments(
+    qualifiedName: String,
+    typeParameters: Map<String, KSType?> = emptyMap(),
+): String {
     if (arguments.isEmpty()) return qualifiedName
     val renderedArguments = arguments.joinToString(", ") { argument ->
         if (argument.variance == Variance.STAR) return@joinToString "*"
         val argumentType = argument.type?.resolve() ?: return@joinToString "*"
+        if (argumentType.declaration is KSTypeParameter) {
+            val shape = argumentType.toShape(allowTopLevelSuspendFunction = false, typeParameters = typeParameters)
+            return@joinToString shape.rendered + if (shape.nullable) "?" else ""
+        }
         if (argumentType.declaration !is KSClassDeclaration) return@joinToString "*"
         val inner = argumentType.declaration.qualifiedName?.asString() ?: return@joinToString "*"
-        argumentType.renderWithArguments(inner) + if (argumentType.isMarkedNullable) "?" else ""
+        argumentType.renderWithArguments(inner, typeParameters) + if (argumentType.isMarkedNullable) "?" else ""
     }
     return "$qualifiedName<$renderedArguments>"
 }
 
-fun KSTypeReference.toShape(allowTopLevelSuspendFunction: Boolean = false): TypeShape =
-    resolve().toShape(allowTopLevelSuspendFunction)
+fun KSTypeReference.toShape(
+    allowTopLevelSuspendFunction: Boolean = false,
+    typeParameters: Map<String, KSType?> = emptyMap(),
+): TypeShape = resolve().toShape(allowTopLevelSuspendFunction, typeParameters)
 
 /**
  * Whether [type] can be named in generated source as a classifier Python can actually reach a

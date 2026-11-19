@@ -218,6 +218,26 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
         val qualifiedName = classDeclaration.qualifiedName!!.asString()
         val isObject = classDeclaration.classKind == ClassKind.OBJECT
         val isEnum = classDeclaration.classKind == ClassKind.ENUM_CLASS
+        val classTypeParams = BindingPolicy.substitutableClassTypeParameters(classDeclaration) ?: emptyMap()
+        val readReceiverType = if (classDeclaration.typeParameters.isEmpty()) {
+            qualifiedName
+        } else {
+            "$qualifiedName<${List(classDeclaration.typeParameters.size) { "*" }.joinToString(", ")}>"
+        }
+        val writeReceiverType = if (classDeclaration.typeParameters.isEmpty()) {
+            qualifiedName
+        } else {
+            val renderedArgs = classDeclaration.typeParameters.map { tp ->
+                val bound = classTypeParams[tp.name.asString()]
+                if (bound == null) {
+                    "kotlin.Any?"
+                } else {
+                    val shape = bound.toShape()
+                    shape.rendered + if (shape.nullable) "?" else ""
+                }
+            }
+            "$qualifiedName<${renderedArgs.joinToString(", ")}>"
+        }
         val entries = mutableListOf<CallableEntryModel>()
 
         if (BindingPolicy.isConstructible(classDeclaration)) {
@@ -243,7 +263,7 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
                 entries += if (isObject) {
                     staticFunctionEntry(qualifiedName, qualifiedName, function)
                 } else {
-                    memberFunctionEntry(qualifiedName, function)
+                    memberFunctionEntry(qualifiedName, writeReceiverType, classTypeParams, function)
                 }
             }
 
@@ -256,7 +276,7 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
             entries += if (isObject) {
                 staticPropertyEntries(qualifiedName, qualifiedName, property)
             } else {
-                memberPropertyEntries(qualifiedName, property)
+                memberPropertyEntries(qualifiedName, readReceiverType, writeReceiverType, classTypeParams, property)
             }
         }
 
@@ -266,7 +286,7 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
         // private `PyObject` field is as invisible to `tp_traverse` as it is to Python, and
         // emitting a read of one produced source that did not compile.
         val pyObjectFields = properties.filter { isPyObjectType(it.type.resolve()) }
-        val traverseBody = if (pyObjectFields.isEmpty()) null else traverseBody(qualifiedName, pyObjectFields)
+        val traverseBody = if (pyObjectFields.isEmpty()) null else traverseBody(readReceiverType, pyObjectFields)
 
         val deduped = entries.distinctByName()
         val model = ClassModel(
@@ -411,12 +431,19 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
         )
     }
 
-    private fun memberFunctionEntry(classQualifiedName: String, function: KSFunctionDeclaration): CallableEntryModel {
-        val paramShapes = function.parameters.map { it.type.toShape(allowTopLevelSuspendFunction = true) }
-        val returnShape = function.returnType?.toShape() ?: TypeShape("kotlin.Unit", false)
+    private fun memberFunctionEntry(
+        classQualifiedName: String,
+        receiverCastType: String,
+        classTypeParams: Map<String, com.google.devtools.ksp.symbol.KSType?>,
+        function: KSFunctionDeclaration,
+    ): CallableEntryModel {
+        val paramShapes = function.parameters.map {
+            it.type.toShape(allowTopLevelSuspendFunction = true, typeParameters = classTypeParams)
+        }
+        val returnShape = function.returnType?.toShape(typeParameters = classTypeParams) ?: TypeShape("kotlin.Unit", false)
         // args[0] is the receiver; declared parameters start at args[1].
         val argExprs = paramShapes.mapIndexed { i, shape -> castExpression(shape, "args[${i + 1}]") }
-        val receiver = "(args[0] as $classQualifiedName)"
+        val receiver = "(args[0] as $receiverCastType)"
         val callExpr = "$receiver.${function.simpleName.asString()}(${argExprs.joinToString(", ")})"
         return CallableEntryModel(
             name = "$classQualifiedName.${function.simpleName.asString()}",
@@ -468,19 +495,23 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
 
     private fun memberPropertyEntries(
         classQualifiedName: String,
+        readReceiverType: String,
+        writeReceiverType: String,
+        classTypeParams: Map<String, com.google.devtools.ksp.symbol.KSType?>,
         property: KSPropertyDeclaration,
     ): List<CallableEntryModel> {
-        val propShape = property.type.toShape()
+        val propShape = property.type.toShape(typeParameters = classTypeParams)
         val propTag = tagFor(propShape)
         val propName = property.simpleName.asString()
-        val receiver = "(args[0] as $classQualifiedName)"
+        val readReceiver = "(args[0] as $readReceiverType)"
+        val writeReceiver = "(args[0] as $writeReceiverType)"
         val getter = CallableEntryModel(
             name = "$classQualifiedName.$propName",
             arity = 0,
             paramTags = emptyList(),
             returnTag = propTag,
             kind = "GETTER",
-            lambdaBody = "{ args -> ${wrapReturnExpression(propShape, "$receiver.$propName")} }",
+            lambdaBody = "{ args -> ${wrapReturnExpression(propShape, "$readReceiver.$propName")} }",
             returnTypeName = propShape.rendered,
         )
         if (!BindingPolicy.isExposedSetter(property)) return listOf(getter)
@@ -490,7 +521,7 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
             paramTags = listOf(propTag),
             returnTag = Tag.UNIT,
             kind = "SETTER",
-            lambdaBody = "{ args -> $receiver.$propName = ${castExpression(propShape, "args[1]")} }",
+            lambdaBody = "{ args -> $writeReceiver.$propName = ${castExpression(propShape, "args[1]")} }",
             // KSP synthesises a setter node even for a `var` with no written accessor body, and
             // its parameter's name is "value" in that case -- but a caller who wrote `set(newValue)
             // { ... }` gets to keep that name here rather than a hardcoded "value" that would be

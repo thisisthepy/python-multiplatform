@@ -17,6 +17,7 @@ import kotlin.metadata.isSuspend
 import kotlin.metadata.isValue
 import kotlin.metadata.jvm.JvmMethodSignature
 import kotlin.metadata.jvm.KotlinClassMetadata
+import kotlin.metadata.jvm.annotations
 import kotlin.metadata.jvm.signature
 import kotlin.metadata.visibility
 import org.objectweb.asm.tree.AnnotationNode
@@ -492,7 +493,7 @@ private fun objectBoundaryTypeOrNull(type: KmType, classpath: ArtifactClasspath)
  * exists for, and one that surfaces as a compile failure of the *generated* file rather than as
  * anything the generator could notice.
  */
-private fun renderKotlinTypeName(type: KmType, classpath: ArtifactClasspath, isArgument: Boolean = false): String? {
+internal fun renderKotlinTypeName(type: KmType, classpath: ArtifactClasspath, isArgument: Boolean = false): String? {
     val classifier = type.classifier as? KmClassifier.Class ?: return null
     // A type *argument* may be `kotlin.Any` -- which is what an unbounded type parameter becomes
     // (issue #38): `mutableStateOf`'s `policy: SnapshotMutationPolicy<T>` is written
@@ -580,6 +581,71 @@ internal fun substitutableTypeParameterIds(parameters: List<KmTypeParameter>): S
  * copied. A replaced type keeps its own nullability, `suspend`-ness and arguments; a definitely-non-null
  * `T & Any` is declined, since `Any?` is exactly what it excludes.
  */
+/**
+ * Maps each class type parameter in [parameters] to its substitution type (`kotlin.Any?` when
+ * unbounded, or its single non-recursive upper bound) for SPEC U-4a, or returns `null` if any
+ * parameter is reified, has multiple upper bounds, or has a bound that mentions a type parameter
+ * (such as F-bounded `T : Comparable<T>`).
+ */
+internal fun substitutableClassTypeParameterMap(parameters: List<KmTypeParameter>): Map<Int, KmType>? {
+    val map = LinkedHashMap<Int, KmType>(parameters.size)
+    for (parameter in parameters) {
+        if (parameter.isReified) return null
+        when (parameter.upperBounds.size) {
+            0 -> map[parameter.id] = nullableAnyType()
+            1 -> {
+                val bound = parameter.upperBounds[0]
+                if (bound.mentionsTypeParameter()) return null
+                map[parameter.id] = bound
+            }
+            else -> return null
+        }
+    }
+    return map
+}
+
+/**
+ * [this] with every type parameter in [substitutions] replaced by its mapped [KmType], or `null`
+ * when it mentions a type parameter outside [substitutions].
+ */
+internal fun KmType.substituteTypeParameters(substitutions: Map<Int, KmType>): KmType? {
+    if (!mentionsTypeParameter()) return this
+    val own = classifier
+    if (own is KmClassifier.TypeParameter) {
+        val bound = substitutions[own.id] ?: return null
+        if (isDefinitelyNonNull && bound.isNullable) {
+            return bound.copyWithNullability(false)
+        }
+        if (isNullable && !bound.isNullable) {
+            return bound.copyWithNullability(true)
+        }
+        return bound
+    }
+    if (outerType != null) return null
+    val copy = KmType()
+    copy.classifier = own
+    copy.isNullable = isNullable
+    copy.isSuspend = isSuspend
+    copy.annotations += annotations
+    for (projection in arguments) {
+        val argument = projection.type
+        copy.arguments += if (argument == null) {
+            projection
+        } else {
+            KmTypeProjection(projection.variance, argument.substituteTypeParameters(substitutions) ?: return null)
+        }
+    }
+    return copy
+}
+
+private fun KmType.copyWithNullability(nullable: Boolean): KmType = KmType().also { copy ->
+    copy.classifier = classifier
+    copy.isNullable = nullable
+    copy.isSuspend = isSuspend
+    copy.annotations += annotations
+    copy.arguments += arguments
+}
+
 internal fun KmType.substituteAnyFor(ids: Set<Int>): KmType? {
     if (!mentionsTypeParameter()) return this
     val own = classifier
@@ -797,22 +863,37 @@ internal fun kotlinPackageNameOverrideOf(node: ClassNode): String? {
 internal fun kotlinClassifierNameOf(type: KmType): String? =
     (type.classifier as? KmClassifier.Class)?.name?.replace('/', '.')
 
-internal fun functionsOf(container: KmDeclarationContainer): List<ResolvedFunction> =
-    container.functions.mapNotNull { function -> resolvedFunctionOrNull(function) }
+internal fun functionsOf(
+    container: KmDeclarationContainer,
+    classTypeParameters: Map<Int, KmType> = emptyMap(),
+): List<ResolvedFunction> =
+    container.functions.mapNotNull { function -> resolvedFunctionOrNull(function, classTypeParameters) }
 
-private fun resolvedFunctionOrNull(function: KmFunction): ResolvedFunction? {
+private fun resolvedFunctionOrNull(
+    function: KmFunction,
+    classTypeParameters: Map<Int, KmType> = emptyMap(),
+): ResolvedFunction? {
     if (function.visibility != Visibility.PUBLIC) return null
     val signature = function.signature ?: return null
     val declaredReceiver = function.receiverParameterType
     val declaredParams = listOfNotNull(declaredReceiver) + function.valueParameters.map { it.type }
-    // Issue #38: an unbounded, non-reified type parameter is read as `kotlin.Any?`, and the call
-    // names it (`typeArgumentCount`). A declaration that cannot be substituted keeps its type
-    // parameters, and `declarationModelOf` declines it as it always did -- nothing changes for it.
-    val substitutable = substitutableTypeParameterIds(function.typeParameters)
-    val substituted = substitutable?.let { ids ->
-        val params = declaredParams.map { it.substituteAnyFor(ids) ?: return@let null }
-        val returns = function.returnType.substituteAnyFor(ids) ?: return@let null
-        params to returns
+    // Issue #38 & U-4a: unbounded, non-reified function type parameters are read as `kotlin.Any?`,
+    // and class type parameters are substituted using [classTypeParameters]. A declaration whose
+    // own type parameters cannot be substituted keeps them and is declined downstream.
+    val ownSubstitutable = substitutableTypeParameterIds(function.typeParameters)
+    val substituted = ownSubstitutable?.let { ids ->
+        val combined = if (ids.isEmpty()) {
+            classTypeParameters
+        } else {
+            classTypeParameters + ids.associateWith { nullableAnyType() }
+        }
+        if (combined.isEmpty()) {
+            declaredParams to function.returnType
+        } else {
+            val params = declaredParams.map { it.substituteTypeParameters(combined) ?: return@let null }
+            val returns = function.returnType.substituteTypeParameters(combined) ?: return@let null
+            params to returns
+        }
     }
     val allParams = substituted?.first ?: declaredParams
     val receiver = if (declaredReceiver != null) allParams.first() else null
@@ -829,7 +910,7 @@ private fun resolvedFunctionOrNull(function: KmFunction): ResolvedFunction? {
             function.valueParameters.map { it.declaresDefaultValue },
         isSuspend = function.isSuspend,
         typeArgumentCount = if (substituted != null) function.typeParameters.size else 0,
-        hasUnsubstitutableTypeParameters = function.typeParameters.isNotEmpty() && substituted == null,
+        hasUnsubstitutableTypeParameters = function.typeParameters.isNotEmpty() && ownSubstitutable == null,
         hasReifiedTypeParameter = function.typeParameters.any { it.isReified },
     )
 }

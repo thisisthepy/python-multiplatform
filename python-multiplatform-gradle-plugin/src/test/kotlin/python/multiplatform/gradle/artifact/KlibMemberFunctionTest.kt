@@ -79,11 +79,13 @@ class KlibMemberFunctionTest {
     }
 
     @Test
-    fun aMemberOfAGenericClassIsDeclinedWithItsReason() {
-        val await = declarations.filter { it.owner == "kotlinx.coroutines.Deferred" }
-        assertTrue(await.isNotEmpty())
-        assertTrue(await.all { it.bindingName == null })
-        assertTrue(await.any { it.declineReason?.contains("generic") == true }, await.map { it.declineReason }.toString())
+    fun aNonSuspendMemberOfAGenericInterfaceIsBound() {
+        val getCompleted = entries.single { it.name == "kotlinx.coroutines.Deferred.getCompleted" }
+        assertEquals("METHOD", getCompleted.kind)
+        assertTrue("kotlinx.coroutines.Deferred<kotlin.Any?>" in getCompleted.lambdaBody, getCompleted.lambdaBody)
+        val await = declarations.single { it.owner == "kotlinx.coroutines.Deferred" && it.simpleName == "await" }
+        assertNull(await.bindingName)
+        assertEquals("suspend", await.declineReason)
     }
 
     @Test
