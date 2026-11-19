@@ -25,15 +25,25 @@ from typedpython import frontend
 from typedpython.aotcheck import Finding
 
 I64_MIN, I64_MAX = -2**63, 2**63 - 1
-MATH_FUNCTIONS = {"sqrt": 1, "exp": 1, "log": 1, "sin": 1, "cos": 1, "tan": 1, "fabs": 1, "atan2": 2, "hypot": 2}
+MATH_FUNCTIONS = {
+    "sqrt": 1, "exp": 1, "log": 1, "log2": 1, "log10": 1,
+    "sin": 1, "cos": 1, "tan": 1, "asin": 1, "acos": 1, "atan": 1, "atan2": 2,
+    "sinh": 1, "cosh": 1, "tanh": 1, "fabs": 1, "hypot": 2,
+    "pow": 2, "copysign": 2, "fmod": 2,
+    "isnan": 1, "isinf": 1, "isfinite": 1,
+    "floor": 1, "ceil": 1, "trunc": 1,
+}
+MATH_CONSTANTS = frozenset({"pi", "e", "inf", "nan", "tau"})
+TIME_FUNCTIONS = {"perf_counter": 0, "monotonic": 0, "time": 0, "sleep": 1}
 SCALAR_NAMES = ("int", "float", "bool")
 LIST_ELEMENTS = ("int", "float")             # `list[int]` and `list[float]` are the native lists
 # builtin names a program must not rebind: the AOT mode compiles a call of each of these as the builtin
-BUILTINS_USED = frozenset({"print", "float", "range", "len", "abs", "min", "max", "int", "list"})
+BUILTINS_USED = frozenset({"print", "float", "range", "len", "abs", "min", "max", "int", "bool", "list"})
 RESERVED_PREFIX = "__tp_"
 MAIN = frontend.AOT_ENTRY
 
-_BIN_OPS = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod)
+_BIN_OPS = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod,
+            ast.BitAnd, ast.BitOr, ast.BitXor, ast.LShift, ast.RShift, ast.Pow)
 _CMP_OPS = (ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE)
 _STATEMENT_NAMES = {
     "ClassDef": "class", "Try": "try", "TryStar": "try", "With": "with", "AsyncWith": "async with",
@@ -96,12 +106,14 @@ def _bound_names(fn: ast.AST) -> set[str]:
 
 class _Checker:
     def __init__(self, program: Program, rep: _Report, arity: dict[str, int], has_math: bool,
-                 has_sys: bool = False) -> None:
+                 has_sys: bool = False, has_time: bool = False, library: bool = False) -> None:
         self.p = program
         self.rep = rep
         self.arity = arity
         self.has_math = has_math
         self.has_sys = has_sys
+        self.has_time = has_time
+        self.library = library
         self.consts = program.consts
         self.shadow: set[str] = set()
 
@@ -322,8 +334,9 @@ class _Checker:
             self.expr(e.left)
             self.expr(e.right)
         elif isinstance(e, ast.UnaryOp):
-            if not isinstance(e.op, (ast.USub, ast.UAdd, ast.Not)):
-                self.rep.error(e, "aot/operator", "~", "the operator `~` is outside the first AOT step")
+            if not isinstance(e.op, (ast.USub, ast.UAdd, ast.Not, ast.Invert)):
+                self.rep.error(e, "aot/operator", type(e.op).__name__,
+                               f"the unary operator `{type(e.op).__name__}` is outside the AOT mode")
             self.expr(e.operand)
         elif isinstance(e, ast.BoolOp):
             for v in e.values:
@@ -340,8 +353,14 @@ class _Checker:
             self.rep.error(e, "aot/f-string", "f-string", "an f-string is only supported as an argument of print "
                            "(strings arrive in a later step)")
         elif isinstance(e, ast.Attribute):
-            self.rep.error(e, "aot/attribute", e.attr, f"the attribute access `{ast.unparse(e)}` is outside the first AOT step "
-                           "(`sys.argv` only inside `int(sys.argv[i])` and `len(sys.argv)`)")
+            if (isinstance(e.value, ast.Name) and e.value.id == "sys" and e.attr == "maxsize"
+                    and self.has_sys and "sys" not in self.shadow):
+                return
+            if (isinstance(e.value, ast.Name) and e.value.id == "math" and e.attr in MATH_CONSTANTS
+                    and self.has_math and "math" not in self.shadow):
+                return
+            self.rep.error(e, "aot/attribute", e.attr, f"the attribute access `{ast.unparse(e)}` is outside the AOT mode "
+                           "(`sys.argv`, `sys.maxsize`, `math` constants only)")
         elif isinstance(e, ast.IfExp):
             self.expr(e.test)
             self.expr(e.body)
@@ -420,11 +439,22 @@ class _Checker:
                 if len(c.args) != 2:
                     self.rep.error(c, "aot/call", n, f"{n}() of other than two arguments is outside the AOT mode")
             elif n == "int":
-                if (len(c.args) == 1 and isinstance(c.args[0], ast.Subscript) and self.sys_argv(c.args[0].value)
+                if len(c.args) != 1:
+                    self.rep.error(c, "aot/builtin", n, "`int()` takes one argument in the AOT mode")
+                    return
+                if (isinstance(c.args[0], ast.Subscript) and self.sys_argv(c.args[0].value)
                         and not isinstance(c.args[0].slice, ast.Slice)):
                     self.expr(c.args[0].slice)
                     return
-                self.rep.error(c, "aot/builtin", n, "`int()` is only supported as `int(sys.argv[i])` in the AOT mode")
+                if isinstance(c.args[0], ast.Constant) and isinstance(c.args[0].value, str):
+                    return
+                self.expr(c.args[0])
+                return
+            elif n == "bool":
+                if len(c.args) != 1:
+                    self.rep.error(c, "aot/builtin", n, "`bool()` takes one argument in the AOT mode")
+                    return
+                self.expr(c.args[0])
                 return
             elif n == "list":
                 a = c.args[0] if len(c.args) == 1 else None
@@ -446,10 +476,26 @@ class _Checker:
         elif (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.value.id == "math"
               and self.has_math and "math" not in self.shadow):
             if f.attr not in MATH_FUNCTIONS:
-                self.rep.error(f, "aot/math", f"math.{f.attr}", f"`math.{f.attr}` is not provided in the first AOT step "
+                self.rep.error(f, "aot/math", f"math.{f.attr}", f"`math.{f.attr}` is not provided in the AOT mode "
                                f"({', '.join(MATH_FUNCTIONS)})")
             elif len(c.args) != MATH_FUNCTIONS[f.attr]:
                 self.rep.error(c, "aot/math", f"math.{f.attr}", f"`math.{f.attr}` takes {MATH_FUNCTIONS[f.attr]} argument(s)")
+        elif (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.value.id == "sys"
+              and f.attr == "exit" and self.has_sys and "sys" not in self.shadow):
+            if self.library:
+                self.rep.error(c, "aot/library-exit", "sys.exit",
+                               "`sys.exit` is not allowed in a library build (`aot-lib`)")
+            elif len(c.args) > 1:
+                self.rep.error(c, "aot/call", "sys.exit", "`sys.exit` takes at most one argument")
+            elif len(c.args) == 1 and isinstance(c.args[0], ast.Constant) and c.args[0].value is None:
+                return
+        elif (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.value.id == "time"
+              and self.has_time and "time" not in self.shadow):
+            if f.attr not in TIME_FUNCTIONS:
+                self.rep.error(f, "aot/time", f"time.{f.attr}", f"`time.{f.attr}` is not provided in the AOT mode "
+                               f"({', '.join(TIME_FUNCTIONS)})")
+            elif len(c.args) != TIME_FUNCTIONS[f.attr]:
+                self.rep.error(c, "aot/time", f"time.{f.attr}", f"`time.{f.attr}` takes {TIME_FUNCTIONS[f.attr]} argument(s)")
         else:
             self.rep.error(f, "aot/call", ast.unparse(f), f"the call of `{ast.unparse(f)}` is outside the first AOT step")
         for a in c.args:
@@ -509,6 +555,7 @@ def analyze(entry: Path, *, library: bool = False) -> Program:
     # -- module level
     has_math = False
     has_sys = False
+    has_time = False
     main_guards: list[ast.If] = []
     seen_names: dict[str, int] = {}
     for i, s in enumerate(tree.body):
@@ -520,11 +567,13 @@ def analyze(entry: Path, *, library: bool = False) -> Program:
                 has_math = True
             elif only is not None and only.name == "sys" and not has_sys:
                 has_sys = True
+            elif only is not None and only.name == "time" and not has_time:
+                has_time = True
             else:
                 rep.error(s, "aot/import", ", ".join(a.name for a in s.names),
-                          "only a single `import math` and a single `import sys` are supported in the AOT mode")
+                          "only a single `import math`, `import sys` and `import time` are supported in the AOT mode")
         elif isinstance(s, ast.ImportFrom):
-            rep.error(s, "aot/import", s.module or ".", "only a single `import math` and a single `import sys` are "
+            rep.error(s, "aot/import", s.module or ".", "only a single `import math`, `import sys` and `import time` are "
                       "supported in the AOT mode")
         elif isinstance(s, ast.FunctionDef):
             program.functions.append(s)
@@ -575,7 +624,7 @@ def analyze(entry: Path, *, library: bool = False) -> Program:
         if n.startswith(RESERVED_PREFIX):
             rep.error(line, "aot/reserved", n, f"names starting with `{RESERVED_PREFIX}` are reserved")
     for n in (*names, *program.consts):
-        if n in BUILTINS_USED | {"math", "sys"}:
+        if n in BUILTINS_USED | {"math", "sys", "time"}:
             rep.error(seen_names[n], "aot/rebinding", n, f"`{n}` is rebound by the program, which the first AOT step does not support")
     for n in ast.walk(tree):
         bound = None
@@ -588,7 +637,8 @@ def analyze(entry: Path, *, library: bool = False) -> Program:
 
     # -- the entry block must not bind a module name (it would rebind a constant or a function that
     # other functions read; as a function body its names would be locals)
-    module_names = names | set(program.consts) | ({"math"} if has_math else set()) | ({"sys"} if has_sys else set())
+    module_names = (names | set(program.consts) | ({"math"} if has_math else set())
+                    | ({"sys"} if has_sys else set()) | ({"time"} if has_time else set()))
     if program.main is not None:
         for s in program.main.body:
             for n in ast.walk(s):
@@ -598,7 +648,7 @@ def analyze(entry: Path, *, library: bool = False) -> Program:
 
     # -- functions
     arity = {f.name: len(f.args.args) for f in program.functions}
-    checker = _Checker(program, rep, arity, has_math, has_sys)
+    checker = _Checker(program, rep, arity, has_math, has_sys, has_time, library)
     for f in program.functions:
         checker.function(f.name, f, f.body)
     if program.main is not None:

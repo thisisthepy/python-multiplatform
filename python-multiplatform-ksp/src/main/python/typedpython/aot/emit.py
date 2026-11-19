@@ -594,6 +594,10 @@ class _Fn:
             if e.proven:
                 return f"tpa_pneg_i64({v})"
             return self.unproven(e, "aot/int-unproven", "-", ast.USub, "")
+        if e.op is ir.UnaryOpKind.INVERT and t is Type.I64:
+            if self.rep(e) == TAGGED:
+                return self.fallible_int(f"tpa_int_invert({self.tagged(e.operand)}, @)")
+            return f"(~({self.ev(e.operand)}))"
         return self.bad("aot/operator", e.op.value, f"the unary `{e.op.value}` on a {t.value} is outside the first AOT step")
 
     def ev_Compare(self, e: ir.Compare) -> str:
@@ -644,7 +648,12 @@ class _Fn:
             a, b = self.float_args((e.left, e.right))
             if k in (ir.BinOpKind.ADD, ir.BinOpKind.SUB, ir.BinOpKind.MUL):
                 return f"({a} {k.value} {b})"
-            fn = {ir.BinOpKind.TRUEDIV: "truediv", ir.BinOpKind.FLOORDIV: "floordiv", ir.BinOpKind.MOD: "mod"}.get(k)
+            fn = {
+                ir.BinOpKind.TRUEDIV: "truediv",
+                ir.BinOpKind.FLOORDIV: "floordiv",
+                ir.BinOpKind.MOD: "mod",
+                ir.BinOpKind.POW: "pow",
+            }.get(k)
             if fn is None:
                 return self.bad("aot/operator", k.value, f"the float operator `{k.value}` is outside the first AOT step")
             return self.fallible("double", f"tpa_{fn}_f64({a}, {b}, @)")
@@ -676,9 +685,12 @@ class _Fn:
                             "operands inside plus or minus 2**53, where the C division equals CPython's correctly "
                             "rounded quotient; big integers arrive in a later step")
         if self.rep(e) == TAGGED:
-            if k in (ir.BinOpKind.ADD, ir.BinOpKind.SUB, ir.BinOpKind.MUL, ir.BinOpKind.FLOORDIV, ir.BinOpKind.MOD):
+            fn = {
+                "+": "add", "-": "sub", "*": "mul", "//": "floordiv", "%": "mod",
+                "&": "and", "|": "or", "^": "xor", "<<": "lshift", ">>": "rshift", "**": "pow",
+            }.get(sym)
+            if fn is not None:
                 a, b = self.tagged(e.left), self.tagged(e.right)
-                fn = {"+": "add", "-": "sub", "*": "mul", "//": "floordiv", "%": "mod"}[sym]
                 return self.fallible_int(f"tpa_int_{fn}({a}, {b}, @)")
             return self.bad("aot/operator", sym, f"the int operator `{sym}` is outside the first AOT step")
         if k in (ir.BinOpKind.ADD, ir.BinOpKind.SUB, ir.BinOpKind.MUL):
@@ -687,6 +699,16 @@ class _Fn:
                 return self.unproven(e, "aot/int-unproven", sym, _AST_OP[k], "")
             name = {"+": "add", "-": "sub", "*": "mul"}[sym]
             return f"tpa_p{name}_i64({a}, {b})"
+        if k in (ir.BinOpKind.AND, ir.BinOpKind.OR, ir.BinOpKind.XOR):
+            a, b = self.ev(e.left), self.ev(e.right)
+            return f"({a} {sym} {b})"
+        if k is ir.BinOpKind.RSHIFT:
+            return self.fallible("int64_t", f"tpa_rshift_i64({self.ev(e.left)}, {self.ev(e.right)}, @)")
+        if k is ir.BinOpKind.LSHIFT:
+            a, b = self.ev(e.left), self.ev(e.right)
+            if not e.proven:
+                return self.unproven(e, "aot/int-unproven", "<<", ast.LShift, "")
+            return self.fallible("int64_t", f"tpa_plshift_i64({a}, {b}, @)")
         if k is ir.BinOpKind.MOD:
             # the result lies between 0 and the divisor, so it always fits in 64 bits (not marked `proven`)
             return self.fallible("int64_t", f"tpa_mod_i64({self.ev(e.left)}, {self.ev(e.right)}, @)")
@@ -704,6 +726,10 @@ class _Fn:
         args = self.float_args(e.args)
         if any(a.type is not Type.F64 for a in e.args):
             return self.bad("aot/type", e.func.value, "a math function takes floats")
+        if e.func in (ir.MathFunc.ISNAN, ir.MathFunc.ISINF, ir.MathFunc.ISFINITE):
+            return f"tpa_math_{e.func.value}({args[0]})"
+        if e.func in (ir.MathFunc.FLOOR, ir.MathFunc.CEIL, ir.MathFunc.TRUNC):
+            return self.fallible_int(f"tpa_math_{e.func.value}({args[0]}, @)")
         return self.fallible("double", f"tpa_math_{e.func.value}({', '.join(args)}, @)")
 
     # -- lists
@@ -913,6 +939,33 @@ class _Fn:
 
     def ev_ArgvLen(self, e: ir.ArgvLen) -> str:
         return "((int64_t)tpa_argc)"
+
+    def ev_FloatToInt(self, e: ir.FloatToInt) -> str:
+        return self.fallible_int(f"tpa_int_from_f64({self.ev(e.operand)}, @)")
+
+    def ev_BoolToInt(self, e: ir.BoolToInt) -> str:
+        return f"((int64_t)({self.ev(e.operand)}))"
+
+    def ev_StrToInt(self, e: ir.StrToInt) -> str:
+        lit, n = _c_string(e.text)
+        return self.fallible_int(f"tpa_int_parse_literal({lit}, {n}U, @)")
+
+    def ev_TimeCall(self, e: ir.TimeCall) -> str:
+        return f"tpa_time_{e.func.value}()"
+
+    def st_TimeSleep(self, s: ir.TimeSleep) -> None:
+        v = self.ev(s.seconds)
+        self.emit(f"if (tpa_time_sleep({v}) != 0) {{ {self.fail()} }}")
+
+    def st_SysExit(self, s: ir.SysExit) -> None:
+        if s.code is None:
+            self.emit("tpa_exit_i64(0);")
+        elif self.rep(s.code) == TAGGED:
+            v = self.ev(s.code)
+            self.emit(f"tpa_exit_int({v});")
+        else:
+            v = self.ev(s.code)
+            self.emit(f"tpa_exit_i64({v});")
 
     # -- statements
 

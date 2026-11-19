@@ -360,7 +360,10 @@ from .ir import (
     Local, MathCall, MathFunc, Module, NewArray, ObjToFloat, Or, Param, Return, StoreIndex, ToFloat,
     ToInt, Truth, Tuple, Type, Unbox, UnaryOp, UnaryOpKind, While,
 )
-from .ir import ArgvInt, ArgvLen, Cond, FormatField, FString, ListDisplay, Print, ReturnTuple, Unpack
+from .ir import (
+    ArgvInt, ArgvLen, BoolToInt, Cond, FloatToInt, FormatField, FString, ListDisplay, Print,
+    ReturnTuple, StrToInt, SysExit, TimeCall, TimeFunc, TimeSleep, Unpack,
+)
 from .ir import CheckExact, CheckMethod, ClassDecl, FieldGet, FieldSet, Is, IsExact, New
 from .ir import BuildString, Contains, ForObj, Format, GetItem, NewDict, NewList, StoreItem
 from .ir import ParInfo
@@ -419,8 +422,8 @@ _STMTS = frozenset({Assign, StoreIndex, ExprStmt, If, While, ForRange, Return, B
                     FieldSet, StoreItem, ForObj})
 # The statements and expressions only the AOT mode (`verify(m, aot=True)`) accepts. (An `FString` and its
 # `FormatField`s are checked by `s_Print`, which is the only place one may stand.)
-_AOT_STMTS = frozenset({Print, ReturnTuple, Unpack})
-_AOT_EXPRS = frozenset({ListDisplay, Cond, ArgvInt, ArgvLen})
+_AOT_STMTS = frozenset({Print, ReturnTuple, Unpack, TimeSleep, SysExit})
+_AOT_EXPRS = frozenset({ListDisplay, Cond, ArgvInt, ArgvLen, FloatToInt, BoolToInt, StrToInt, TimeCall})
 # Nodes whose OBJ result is a new reference (ir.py "ownership": Box, Global, GetAttr, CallObject,
 # OBJ BinOp, Tuple), plus reads of an OBJ local (the local owns its reference; the back end increfs or
 # borrows under that rule) and Calls of a compiled function returning OBJ (which returns a new
@@ -439,9 +442,14 @@ _INT_OPS = frozenset({BinOpKind.ADD, BinOpKind.SUB, BinOpKind.MUL, BinOpKind.FLO
                       BinOpKind.OR, BinOpKind.XOR})
 _BITWISE_OPS = frozenset({BinOpKind.AND, BinOpKind.OR, BinOpKind.XOR})   # SPEC N-16
 _ELEMENT = {Type.F64_ARRAY: Type.F64, Type.I64_ARRAY: Type.I64, Type.BOOL_ARRAY: Type.BOOL}
-_MATH_ARITY = {MathFunc.ATAN2: 2, MathFunc.HYPOT: 2}            # every other MathFunc: 1
+_MATH_ARITY = {
+    MathFunc.ATAN2: 2, MathFunc.HYPOT: 2, MathFunc.POW: 2, MathFunc.COPYSIGN: 2, MathFunc.FMOD: 2,
+}            # every other MathFunc: 1
+_MATH_BOOL_FUNCS = frozenset({MathFunc.ISNAN, MathFunc.ISINF, MathFunc.ISFINITE})
+_MATH_INT_FUNCS = frozenset({MathFunc.FLOOR, MathFunc.CEIL, MathFunc.TRUNC})
 _I64_DEOPT_OPS = frozenset({BinOpKind.ADD, BinOpKind.SUB, BinOpKind.MUL, BinOpKind.FLOORDIV,
-                            BinOpKind.MOD, BinOpKind.TRUEDIV, BinOpKind.LSHIFT, BinOpKind.RSHIFT})
+                            BinOpKind.MOD, BinOpKind.TRUEDIV, BinOpKind.LSHIFT, BinOpKind.RSHIFT,
+                            BinOpKind.POW})
 _I64_MIN, _I64_MAX = -2 ** 63, 2 ** 63 - 1
 _FULL = (_I64_MIN, _I64_MAX)
 _LEN_MAX = 2 ** 62
@@ -914,6 +922,8 @@ class _Checker:
             return _FULL if self.sound.raw_element(self.fn.name, e.array) else _WIDE
         if cls is ArgvLen:
             return _FULL                    # argc is an int64
+        if cls is BoolToInt:
+            return (0, 1)
         if cls is Call:
             return _FULL if self.sound.raw_return(e.function) else _WIDE
         if cls is Cond:
@@ -1229,8 +1239,13 @@ class _Checker:
             self.error(TYPE, f"math.{e.func.value} takes {arity} argument(s), got {len(args)}")
         for k, a in enumerate(args):
             self.slot(a, Type.F64, f"argument {k + 1} of math.{e.func.value}")
-        if e.type is not Type.F64:
-            self.error(TYPE, f"math.{e.func.value} gives f64, node says {e.type.value}")
+        want = Type.F64
+        if self.aot and e.func in _MATH_BOOL_FUNCS:
+            want = Type.BOOL
+        elif self.aot and e.func in _MATH_INT_FUNCS:
+            want = Type.I64
+        if e.type is not want:
+            self.error(TYPE, f"math.{e.func.value} gives {want.value}, node says {e.type.value}")
         return dataclasses.replace(e, args=args)
 
     def args(self, args: object, state: _State, what: str) -> tuple[ir.Expr, ...]:
@@ -1646,6 +1661,42 @@ class _Checker:
     def e_ArgvLen(self, e: ArgvLen, state: _State) -> ir.Expr:
         self.result(e, Type.I64)
         return e
+
+    def e_FloatToInt(self, e: FloatToInt, state: _State) -> ir.Expr:
+        op = self.expr(e.operand, state)
+        self.slot(op, Type.F64, "operand of int(float)")
+        self.result(e, Type.I64)
+        return dataclasses.replace(e, operand=op)
+
+    def e_BoolToInt(self, e: BoolToInt, state: _State) -> ir.Expr:
+        op = self.expr(e.operand, state)
+        self.slot(op, Type.BOOL, "operand of int(bool)")
+        self.result(e, Type.I64)
+        return dataclasses.replace(e, operand=op)
+
+    def e_StrToInt(self, e: StrToInt, state: _State) -> ir.Expr:
+        if not isinstance(e.text, str):
+            self.error(STRUCTURE, f"StrToInt text {e.text!r} is not a str")
+        self.result(e, Type.I64)
+        return e
+
+    def e_TimeCall(self, e: TimeCall, state: _State) -> ir.Expr:
+        if type(e.func) is not TimeFunc:
+            self.error(UNKNOWN, f"TimeCall func {e.func!r} is not a TimeFunc")
+        self.result(e, Type.F64)
+        return e
+
+    def s_TimeSleep(self, s: TimeSleep, state: _State):
+        secs = self.expr(s.seconds, state)
+        self.slot(secs, Type.F64, "argument of time.sleep")
+        return dataclasses.replace(s, seconds=secs), state
+
+    def s_SysExit(self, s: SysExit, state: _State):
+        if s.code is None:
+            return s, state
+        code = self.expr(s.code, state)
+        self.slot(code, Type.I64, "argument of sys.exit")
+        return dataclasses.replace(s, code=code), state
 
     def stray(self, e: NewArray | CopyArray, state: _State) -> ir.Expr:
         self.error(ESCAPE, f"{type(e).__name__} is only legal as the value of an Assign to a local "

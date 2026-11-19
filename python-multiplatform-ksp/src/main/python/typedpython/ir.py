@@ -98,6 +98,20 @@ class Const(Expr):
     # which never sets it, sees the node it always saw.
     name: str | None = field(default=None, kw_only=True, compare=False, repr=False)
 
+    def __eq__(self, other: object) -> bool:
+        if type(self) is not type(other):
+            return NotImplemented
+        if self.type != other.type:
+            return False
+        if (isinstance(self.value, float) and isinstance(other.value, float)
+                and self.value != self.value and other.value != other.value):
+            return True
+        return self.value == other.value
+
+    def __hash__(self) -> int:
+        v = "nan" if isinstance(self.value, float) and self.value != self.value else self.value
+        return hash((self.type, v))
+
 
 @dataclass(frozen=True)
 class Local(Expr):
@@ -118,6 +132,7 @@ class BinOpKind(Enum):
     AND = "&"              # SPEC N-16: I64, INT and OBJ operands
     OR = "|"
     XOR = "^"
+    POW = "**"             # AOT mode (Tier K PR5): I64 and F64 operands
 
 
 @dataclass(frozen=True)
@@ -284,12 +299,29 @@ class MathFunc(Enum):
     SQRT = "sqrt"
     EXP = "exp"
     LOG = "log"
+    LOG2 = "log2"
+    LOG10 = "log10"
     SIN = "sin"
     COS = "cos"
     TAN = "tan"
+    ASIN = "asin"
+    ACOS = "acos"
+    ATAN = "atan"
     ATAN2 = "atan2"
+    SINH = "sinh"
+    COSH = "cosh"
+    TANH = "tanh"
     FABS = "fabs"
     HYPOT = "hypot"
+    POW = "pow"
+    COPYSIGN = "copysign"
+    FMOD = "fmod"
+    ISNAN = "isnan"
+    ISINF = "isinf"
+    ISFINITE = "isfinite"
+    FLOOR = "floor"
+    CEIL = "ceil"
+    TRUNC = "trunc"
 
 
 @dataclass(frozen=True)
@@ -714,6 +746,54 @@ class ArgvInt(Expr):
 @dataclass(frozen=True)
 class ArgvLen(Expr):
     """`len(sys.argv)` (type I64)."""
+
+
+@dataclass(frozen=True)
+class FloatToInt(Expr):
+    """`int(float_expr)` (type I64, AOT mode): truncates toward zero, big-int capable (TAGGED)."""
+
+    operand: Expr
+
+
+@dataclass(frozen=True)
+class BoolToInt(Expr):
+    """`int(bool_expr)` (type I64, AOT mode): 0 or 1."""
+
+    operand: Expr
+
+
+@dataclass(frozen=True)
+class StrToInt(Expr):
+    """`int("literal")` (type I64, AOT mode): parsed at runtime with Python's base-10 int parser (TAGGED)."""
+
+    text: str
+
+
+class TimeFunc(Enum):
+    PERF_COUNTER = "perf_counter"
+    MONOTONIC = "monotonic"
+    TIME = "time"
+
+
+@dataclass(frozen=True)
+class TimeCall(Expr):
+    """`time.<func>()` (type F64, AOT mode)."""
+
+    func: TimeFunc
+
+
+@dataclass(frozen=True)
+class TimeSleep(Stmt):
+    """`time.sleep(seconds)` (AOT mode). `seconds` is F64."""
+
+    seconds: Expr
+
+
+@dataclass(frozen=True)
+class SysExit(Stmt):
+    """`sys.exit([code])` (AOT executable mode only; refused in `aot-lib`). `code` is I64 or None."""
+
+    code: Expr | None = None
 
 
 @dataclass(frozen=True)

@@ -148,9 +148,27 @@ COMPARE = {
     ast.LtE: ir.CompareKind.LE, ast.Gt: ir.CompareKind.GT, ast.GtE: ir.CompareKind.GE,
 }
 MATH_ARITY = {
-    ir.MathFunc.SQRT: 1, ir.MathFunc.EXP: 1, ir.MathFunc.LOG: 1, ir.MathFunc.SIN: 1,
-    ir.MathFunc.COS: 1, ir.MathFunc.TAN: 1, ir.MathFunc.FABS: 1, ir.MathFunc.ATAN2: 2,
-    ir.MathFunc.HYPOT: 2,
+    ir.MathFunc.SQRT: 1, ir.MathFunc.EXP: 1, ir.MathFunc.LOG: 1, ir.MathFunc.LOG2: 1,
+    ir.MathFunc.LOG10: 1, ir.MathFunc.SIN: 1, ir.MathFunc.COS: 1, ir.MathFunc.TAN: 1,
+    ir.MathFunc.ASIN: 1, ir.MathFunc.ACOS: 1, ir.MathFunc.ATAN: 1, ir.MathFunc.ATAN2: 2,
+    ir.MathFunc.SINH: 1, ir.MathFunc.COSH: 1, ir.MathFunc.TANH: 1, ir.MathFunc.FABS: 1,
+    ir.MathFunc.HYPOT: 2, ir.MathFunc.POW: 2, ir.MathFunc.COPYSIGN: 2, ir.MathFunc.FMOD: 2,
+    ir.MathFunc.ISNAN: 1, ir.MathFunc.ISINF: 1, ir.MathFunc.ISFINITE: 1,
+    ir.MathFunc.FLOOR: 1, ir.MathFunc.CEIL: 1, ir.MathFunc.TRUNC: 1,
+}
+_DEFAULT_MATH_FUNCS = frozenset({
+    ir.MathFunc.SQRT, ir.MathFunc.EXP, ir.MathFunc.LOG, ir.MathFunc.SIN,
+    ir.MathFunc.COS, ir.MathFunc.TAN, ir.MathFunc.FABS, ir.MathFunc.ATAN2,
+    ir.MathFunc.HYPOT,
+})
+_MATH_BOOL_FUNCS = frozenset({ir.MathFunc.ISNAN, ir.MathFunc.ISINF, ir.MathFunc.ISFINITE})
+_MATH_INT_FUNCS = frozenset({ir.MathFunc.FLOOR, ir.MathFunc.CEIL, ir.MathFunc.TRUNC})
+_MATH_CONSTS = {
+    "pi": 3.141592653589793,
+    "e": 2.718281828459045,
+    "tau": 6.283185307179586,
+    "inf": float("inf"),
+    "nan": float("nan"),
 }
 
 UNSUPPORTED = {
@@ -205,6 +223,7 @@ class _ModuleInfo:
     # AOT mode: `import sys` is the one plain import of `sys` (only `sys.argv` is used, see `_Lowerer.call`),
     # and the functions that return a fixed tuple of scalars (name -> element types).
     aot_sys: bool = False
+    aot_time: bool = False
     aot_tuples: dict[str, tuple[Type, ...]] = field(default_factory=dict)
 
     def bound(self, name: str) -> bool:
@@ -245,6 +264,8 @@ def lower(path: Path, *, aot: bool = False) -> ir.Module:
         info.aot_consts = aot_constants(tree, info.bindings)
         sys_bound = info.bindings.get("sys", [])
         info.aot_sys = len(sys_bound) == 1 and info.imports.get("sys") == "sys"
+        time_bound = info.bindings.get("time", [])
+        info.aot_time = len(time_bound) == 1 and info.imports.get("time") == "time"
 
     skipped: dict[str, str] = {}
     class_decls, class_skips = _classes(tree, source, info)
@@ -1521,6 +1542,15 @@ class _Lowerer:
                 return []  # a docstring or a bare literal: no effect
             if self.info.aot and _is_print_call(node.value) and self.builtin("print"):
                 return self.print_stmt(node.value)
+            if self.info.aot and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute) \
+                    and isinstance(node.value.func.value, ast.Name) and not node.value.keywords \
+                    and not any(isinstance(a, ast.Starred) for a in node.value.args):
+                mod = node.value.func.value.id
+                attr = node.value.func.attr
+                if mod == "sys" and attr == "exit" and self.info.aot_sys and not self.is_local("sys"):
+                    return self.aot_sys_exit(node.value)
+                if mod == "time" and attr == "sleep" and self.info.aot_time and not self.is_local("time"):
+                    return self.aot_time_sleep(node.value)
             value = self.sub(node.value)
             return self.take() + [ir.ExprStmt(value)]
         if isinstance(node, ast.Assign):
@@ -2237,9 +2267,14 @@ class _Lowerer:
             if isinstance(node.value, ast.Name) and node.value.id in self.arrays:
                 raise self.array_misuse(node.value.id, node)
             if self.info.aot and isinstance(node.value, ast.Name) and node.value.id == "sys" \
-                    and not self.is_local("sys"):
-                raise Skip(line, f"`{_src(node)}` is not supported in an AOT program (only `int(sys.argv[i])` and "
-                                 "`len(sys.argv)`)")
+                    and self.info.aot_sys and not self.is_local("sys"):
+                if node.attr == "maxsize":
+                    return ir.Const(Type.I64, I64_MAX)
+                raise Skip(line, f"`{_src(node)}` is not supported in an AOT program (only `sys.argv`, `sys.maxsize` and "
+                                 "`sys.exit`)")
+            if self.info.aot and isinstance(node.value, ast.Name) and node.value.id == "math" \
+                    and self.info.stdlib_math and not self.is_local("math") and node.attr in _MATH_CONSTS:
+                return ir.Const(Type.F64, _MATH_CONSTS[node.attr])
             field_get = self.field_get(node)
             if field_get is not None:
                 return field_get
@@ -2359,6 +2394,8 @@ class _Lowerer:
         return e
 
     def binop_kind(self, op: ast.operator, node: ast.AST) -> ir.BinOpKind:
+        if isinstance(op, ast.Pow) and self.info.aot:
+            return ir.BinOpKind.POW
         kind = BINOP.get(type(op))
         if kind is None:
             raise Skip(node.lineno, f"operator `{_src(node)}` is not supported")
@@ -2378,6 +2415,17 @@ class _Lowerer:
     def _arith(self, op: ir.BinOpKind, left: ir.Expr, right: ir.Expr, node: ast.AST,
                inplace: bool = False) -> ir.Expr:
         lt, rt = left.type, right.type
+        if self.info.aot and Type.BOOL in (lt, rt) and Type.NONE not in (lt, rt):
+            if op in BITWISE and lt == Type.BOOL and rt == Type.BOOL:
+                res = ir.BinOp(Type.I64, op, ir.BoolToInt(Type.I64, left), ir.BoolToInt(Type.I64, right))
+                return ir.Compare(Type.BOOL, ir.CompareKind.NE, res, ir.Const(Type.I64, 0))
+            if op in BITWISE or op in (ir.BinOpKind.LSHIFT, ir.BinOpKind.RSHIFT):
+                if lt == Type.BOOL:
+                    left = ir.BoolToInt(Type.I64, left)
+                    lt = Type.I64
+                if rt == Type.BOOL:
+                    right = ir.BoolToInt(Type.I64, right)
+                    rt = Type.I64
         if Type.BOOL in (lt, rt) or Type.NONE in (lt, rt):
             raise Skip(node.lineno, f"arithmetic on {TYPE_NAME[Type.BOOL if Type.BOOL in (lt, rt) else Type.NONE]} "
                                     f"in `{_src(node)}` is not supported")
@@ -2397,6 +2445,17 @@ class _Lowerer:
                 return ir.BinOp(Type.INT, op, self.to_int(left), self.to_int(right))
             self.deopts = True          # SPEC N-16: an overflow or a negative count deopts
             return ir.BinOp(Type.I64, op, left, right)
+        if op == ir.BinOpKind.POW:
+            if lt == Type.I64 and rt == Type.I64:
+                if isinstance(right, ir.Const) and isinstance(right.value, int) and right.value < 0:
+                    return ir.BinOp(Type.F64, op, ir.ToFloat(Type.F64, left), ir.ToFloat(Type.F64, right))
+                self.deopts = True
+                return ir.BinOp(Type.I64, op, left, right)
+            if lt == Type.I64:
+                left = ir.ToFloat(Type.F64, left)
+            if rt == Type.I64:
+                right = ir.ToFloat(Type.F64, right)
+            return ir.BinOp(Type.F64, op, left, right)
         if lt == Type.I64 and rt == Type.I64:
             result = Type.F64 if op == ir.BinOpKind.TRUEDIV else Type.I64
             e = ir.BinOp(result, op, left, right)
@@ -2435,6 +2494,8 @@ class _Lowerer:
                 if isinstance(operand, ir.Const):
                     return ir.Const(Type.I64, ~operand.value)
                 return ir.UnaryOp(Type.I64, ir.UnaryOpKind.INVERT, operand)
+            if self.info.aot and operand.type == Type.BOOL:
+                return ir.UnaryOp(Type.I64, ir.UnaryOpKind.INVERT, ir.BoolToInt(Type.I64, operand))
             raise Skip(node.lineno, f"unary `{_src(node)}` on {TYPE_NAME[operand.type]} is not "
                                     "supported")
         kind = ir.UnaryOpKind.NEG if isinstance(node.op, ast.USub) else ir.UnaryOpKind.POS
@@ -2591,6 +2652,12 @@ class _Lowerer:
             if math is not None:
                 return math
 
+        if self.info.aot and isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) \
+                and func.value.id == "time" and self.info.aot_time \
+                and not self.is_local("time") and plain:
+            if func.attr in ("perf_counter", "monotonic", "time") and not node.args:
+                return ir.TimeCall(Type.F64, ir.TimeFunc(func.attr))
+
         if isinstance(func, ast.Attribute) and plain:
             direct = self.method_call(func, node)
             if direct is not None:
@@ -2666,7 +2733,25 @@ class _Lowerer:
                     raise Skip(line, f"the index `{_src(lit)}` of `sys.argv` is {TYPE_NAME[index.type]}, not a native "
                                      "int")
                 return ir.ArgvInt(Type.I64, index)
-            raise Skip(line, f"`{_src(node)}`: `int()` is only supported as `int(sys.argv[i])` in an AOT program")
+            if len(args) == 1 and isinstance(args[0], ast.Constant) and isinstance(args[0].value, str):
+                return ir.StrToInt(Type.I64, args[0].value)
+            if len(args) == 1:
+                x = self.value(args[0])
+                if x.type == Type.I64:
+                    return x
+                if x.type == Type.F64:
+                    return ir.FloatToInt(Type.I64, x)
+                if x.type == Type.BOOL:
+                    return ir.BoolToInt(Type.I64, x)
+                raise Skip(line, f"int() of a {TYPE_NAME[x.type]} is not supported in an AOT program")
+            raise Skip(line, f"`{_src(node)}`: `int()` takes one argument in an AOT program")
+        if name == "bool" and self.builtin("bool"):
+            if len(args) != 1:
+                raise Skip(line, "bool() takes one argument in an AOT program")
+            if isinstance(args[0], ast.Name) and args[0].id in self.arrays:
+                return ir.Compare(Type.BOOL, ir.CompareKind.NE, ir.Len(Type.I64, args[0].id), ir.Const(Type.I64, 0))
+            x = self.value(args[0])
+            return self.truth(x, args[0])
         if name == "abs" and self.builtin("abs"):
             if len(args) != 1:
                 raise Skip(line, "abs() takes one argument")
@@ -2809,15 +2894,55 @@ class _Lowerer:
                       for p, e, a in zip(callee.params, args, [func] + list(node.args)))
         return ir.Call(callee.returns, f"{cls}.{func.attr}", typed)
 
+    def aot_sys_exit(self, node: ast.Call) -> list[ir.Stmt]:
+        line = node.lineno
+        if not node.args:
+            return [ir.SysExit(None)]
+        if len(node.args) != 1:
+            raise Skip(line, "sys.exit() takes at most one argument")
+        arg = node.args[0]
+        if isinstance(arg, ast.Constant) and arg.value is None:
+            return [ir.SysExit(None)]
+        val = self.value(arg)
+        if val.type == Type.BOOL:
+            val = ir.BoolToInt(Type.I64, val)
+        if val.type != Type.I64:
+            raise Skip(line, f"sys.exit() expects an int or None, not {TYPE_NAME[val.type]}")
+        return self.take() + [ir.SysExit(val)]
+
+    def aot_time_sleep(self, node: ast.Call) -> list[ir.Stmt]:
+        line = node.lineno
+        if len(node.args) != 1:
+            raise Skip(line, "time.sleep() takes one argument")
+        val = self.value(node.args[0])
+        if val.type == Type.I64:
+            val = ir.ToFloat(Type.F64, val)
+        elif val.type == Type.BOOL:
+            val = ir.ToFloat(Type.F64, ir.BoolToInt(Type.I64, val))
+        if val.type != Type.F64:
+            raise Skip(line, f"time.sleep() expects a float or int, not {TYPE_NAME[val.type]}")
+        return self.take() + [ir.TimeSleep(val)]
+
     def math_call(self, attr: str, node: ast.Call) -> ir.Expr | None:
         try:
             func = ir.MathFunc(attr)
         except ValueError:
             return None
+        if not self.info.aot and func not in _DEFAULT_MATH_FUNCS:
+            return None
         if len(node.args) != MATH_ARITY[func]:
             return None
         self.hoist_ok = False
         args = [self.value(a) for a in node.args]
+        if self.info.aot and func in _MATH_INT_FUNCS:
+            if args[0].type == Type.I64:
+                return args[0]
+            if args[0].type == Type.F64:
+                return ir.MathCall(Type.I64, func, (args[0],))
+        if self.info.aot and func in _MATH_BOOL_FUNCS:
+            if args[0].type in (Type.I64, Type.F64):
+                farg = ir.ToFloat(Type.F64, args[0]) if args[0].type == Type.I64 else args[0]
+                return ir.MathCall(Type.BOOL, func, (farg,))
         if all(e.type in (Type.I64, Type.F64) for e in args):
             return ir.MathCall(Type.F64, func, tuple(
                 ir.ToFloat(Type.F64, e) if e.type == Type.I64 else e for e in args))
