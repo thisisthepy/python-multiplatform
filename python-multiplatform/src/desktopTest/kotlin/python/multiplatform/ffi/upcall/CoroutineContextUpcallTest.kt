@@ -13,6 +13,7 @@ import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.Continuation
 import kotlin.coroutines.ContinuationInterceptor
 import kotlin.coroutines.CoroutineContext
+import kotlin.coroutines.EmptyCoroutineContext
 import kotlin.coroutines.coroutineContext
 import kotlin.coroutines.suspendCoroutine
 import kotlin.test.AfterTest
@@ -135,6 +136,129 @@ class CoroutineContextUpcallTest {
                 executor.shutdownNow()
             }
         }
+
+    @Test
+    fun immediateInterceptorStressTestNeverLosesCompletion() =
+        PythonTestFixture.withInterpreter {
+            assertTrue(bindUpcallOrNull("ctxtest.dispatchAndReportThread"))
+            val executor = Executors.newSingleThreadExecutor { runnable ->
+                Thread(runnable, "kotlin-stress-worker").apply { isDaemon = true }
+            }
+            val combined: CoroutineContext = ExecutorInterceptor(executor) + TestJobElement("stress-job")
+            val ctxRef = HandleTable.register(combined)
+            val ctxHandle = ctxRef.raw
+            try {
+                Python3.exec(
+                    """
+                    import asyncio
+                    import python_multiplatform as _pm
+
+                    _stress_loop = asyncio.new_event_loop()
+                    _stress_count = 0
+
+                    async def _run_stress():
+                        global _stress_count
+                        with _pm.use_coroutine_context($ctxHandle):
+                            for _ in range(2000):
+                                r = _pm_bound()
+                                val = await asyncio.wait_for(r, 1.0)
+                                assert val.startswith("kotlin-stress-worker|stress-job"), val
+                                _stress_count += 1
+
+                    _stress_loop.run_until_complete(_run_stress())
+                    """.trimIndent(),
+                )
+                assertEquals("2000", PythonTestFixture.eval("_stress_count").toString())
+            } finally {
+                Python3.exec("_stress_loop.close()")
+                executor.shutdownNow()
+                HandleTable.release(ctxRef)
+            }
+        }
+
+    @Test
+    fun cancelAndOnCancelledRaceRunsListenerExactlyOnceWithoutCme() {
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            repeat(500) {
+                var parked: Continuation<Any?>? = null
+                val call = PendingCall.start(EmptyCoroutineContext) {
+                    suspendCoroutine<Any?> { c -> parked = c }
+                }
+                val startLatch = java.util.concurrent.CountDownLatch(1)
+                val invocations = java.util.concurrent.atomic.AtomicInteger(0)
+                val f1 = pool.submit {
+                    startLatch.await()
+                    call.cancel()
+                }
+                val f2 = pool.submit {
+                    startLatch.await()
+                    call.onCancelled { invocations.incrementAndGet() }
+                }
+                startLatch.countDown()
+                f1.get()
+                f2.get()
+                assertEquals(1, invocations.get(), "onCancelled listener must run exactly once")
+                assertEquals(null, call.cancellationFailure)
+                // Clean up the suspended coroutine.
+                parked?.resumeWith(Result.success(Unit))
+            }
+        } finally {
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun concurrentCancelCallsRunOnCancelledListenersExactlyOnce() {
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            repeat(500) {
+                var parked: Continuation<Any?>? = null
+                val call = PendingCall.start(EmptyCoroutineContext) {
+                    suspendCoroutine<Any?> { c -> parked = c }
+                }
+                val invocations = java.util.concurrent.atomic.AtomicInteger(0)
+                call.onCancelled { invocations.incrementAndGet() }
+                val startLatch = java.util.concurrent.CountDownLatch(1)
+                val f1 = pool.submit<Boolean> {
+                    startLatch.await()
+                    call.cancel()
+                }
+                val f2 = pool.submit<Boolean> {
+                    startLatch.await()
+                    call.cancel()
+                }
+                startLatch.countDown()
+                val r1 = f1.get()
+                val r2 = f2.get()
+                assertTrue(r1 != r2, "exactly one concurrent cancel() must return true")
+                assertEquals(1, invocations.get(), "listener must run exactly once across concurrent cancels")
+                parked?.resumeWith(Result.success(Unit))
+            }
+        } finally {
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun zeroArgStartInsideWithoutGilDoesNotTouchPythonAndGetsEmptyContext() =
+        PythonTestFixture.withInterpreter {
+            val element = TestJobElement("process-wide-job")
+            val ctxRef = HandleTable.register(element)
+            val ctxHandle = ctxRef.raw
+            try {
+                Python3.exec("import python_multiplatform as _pm; _pm.set_coroutine_context($ctxHandle)")
+                val seenLabel = python.multiplatform.ffi.withoutGIL {
+                    val call = PendingCall.start { coroutineContext[TestJobElement]?.label ?: "<empty>" }
+                    assertTrue(call.isDone)
+                    call.value as String
+                }
+                assertEquals("<empty>", seenLabel)
+            } finally {
+                Python3.exec("_pm.set_coroutine_context(None)")
+                HandleTable.release(ctxRef)
+            }
+        }
 }
 
 private class TestJobElement(val label: String) : AbstractCoroutineContextElement(Key) {
@@ -160,8 +284,7 @@ private object CoroutineContextTestFragment : FunctionTableFragment {
         coroutineContext[TestJobElement]?.label ?: "<none>"
 
     private suspend fun dispatchAndReportThread(): String {
-        // Yield once through the ContinuationInterceptor so we land on the executor's thread.
-        suspendCoroutine<Unit> { c -> c.resumeWith(Result.success(Unit)) }
+        // `startCoroutine` already dispatches the first slice onto the executor's thread.
         val threadName = Thread.currentThread().name
         val jobLabel = coroutineContext[TestJobElement]?.label ?: "<none>"
         return "$threadName|$jobLabel"

@@ -408,33 +408,40 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
       and every element in `context` is visible to `block` and its callees). Direct Kotlin callers outside an
       active Python upcall use this overload with an explicit `context` (never consulting Python's
       `ContextVar`).
-    - `PendingCall.start(block: suspend () -> Any?): PendingCall` (the zero-context overload emitted by KSP
-      and the artifact walker, which always runs inside an upcall frame holding the GIL) merges the ambient
+    - `PendingCall.start(block: suspend () -> Any?): PendingCall` (the zero-context overload emitted by KSP,
+      which runs inside an `UpcallTrampoline.attached` frame holding the GIL) merges the ambient
       Python `CoroutineContext` configured via `use_coroutine_context` / `set_coroutine_context` when
-      `UpcallTrampoline` is currently attached and Python is initialized, and falls back to
-      `EmptyCoroutineContext` when called from pure Kotlin with no interpreter or no ambient context.
+      `UpcallTrampoline.attached` is active on the current thread (and not inside `withoutGIL`), and falls back
+      to `EmptyCoroutineContext` when called from pure Kotlin with no interpreter, outside an upcall, or inside
+      `withoutGIL`.
     - `PendingCall.onCancelled(action: () -> Unit)` registers a cancellation listener invoked once when
-      `PendingCall.cancel()` transitions the call to cancelled (or inline if already cancelled).
+      `PendingCall.cancel()` transitions the call to cancelled (or inline if already cancelled). Calling
+      `onCancelled` after `isDone` is already `true` (and not cancelled) is a no-op. All four state
+      transitions (`complete`, `onCompleted`, `cancel`, `onCancelled`) are synchronised under `PlatformMutex`,
+      with listeners invoked outside the lock.
       **Threading, GIL and exception contract for `onCancelled`:** the listener runs synchronously on
       whichever thread calls `PendingCall.cancel()` (for Python `Future.cancel()`, that is the asyncio loop
       thread inside `_pm_cancel` with the GIL held), so the listener **must be non-blocking** (for example
       calling `job.cancel()` or setting a flag) and must never wait on another thread that needs the GIL. Any
       exception thrown by a cancellation listener is caught and recorded in `PendingCall.cancellationFailure`
-      rather than escaping into C or aborting remaining listeners.
+      (same pattern as `PendingCall.deliveryFailure`, recorded on the call rather than propagated into C or
+      aborting remaining listeners).
   - **Python API (`python_multiplatform` root module, mirroring `use_delivery_loop` / `set_delivery_loop`):**
     - `python_multiplatform.use_coroutine_context(ctx)`: context manager (`contextvars.ContextVar`) binding a
       Kotlin `CoroutineContext` proxy (or `None` for `EmptyCoroutineContext`) for the current task/context.
     - `python_multiplatform.set_coroutine_context(ctx)` / `get_coroutine_context()`: process-wide fallback
       and reader (`use_coroutine_context` takes precedence over `set_coroutine_context`).
     - Passing a non-`None` object that does not carry a live Kotlin `CoroutineContext` handle (`_pm_handle`
-      or integer handle) raises `TypeError`.
+      or integer handle) raises `TypeError` at set time; a stale or released handle surfaces as an exception
+      at the upcall site.
   - **Fast path and GIL discipline:**
     - When `context` is `EmptyCoroutineContext` (default) and no Python `CoroutineContext` is set, no
-      `ContinuationInterceptor` is present and the fast path is untouched.
-    - When `context` carries a `ContinuationInterceptor` that dispatches to another thread, `PendingCall.start`
-      suspends immediately and returns a `Future` on the slow path; the intercepted continuation resumes on
-      the interceptor's thread and `AsyncUpcall.resolve` acquires `withGIL` to deliver the result back to
-      the target `asyncio` loop.
+      `ContinuationInterceptor` is present and a body that never suspends completes inline on the fast path.
+    - When `context` carries a `ContinuationInterceptor` that dispatches to another thread, `startCoroutine`
+      dispatches even the first slice onto the interceptor's thread **without the GIL from its first
+      instruction** (so the fast path is skipped, any body touching raw `PyObject`s must take `withGIL` itself,
+      and `PendingCall.complete` runs on that thread too). `AsyncUpcall.resolve` acquires `withGIL` to deliver
+      the result back to the target `asyncio` loop.
   `Status: implemented` on desktop, `PM/commonTest/.../upcall/PendingCallTest.kt`,
   `PM/desktopTest/.../upcall/CoroutineContextUpcallTest.kt`.
 - **U-6** Upcalls work in a GraalVM native image (desktop). `Status: implemented` with manual
