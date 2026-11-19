@@ -112,7 +112,12 @@ def _bound_names(fn: ast.AST) -> set[str]:
 class _Checker:
     def __init__(self, program: Program, rep: _Report, arity: dict[str, int], has_math: bool,
                  has_sys: bool = False, has_time: bool = False, library: bool = False,
-                 class_names: set[str] | None = None, class_arity: dict[str, int] | None = None) -> None:
+                 class_names: set[str] | None = None, class_arity: dict[str, int] | None = None,
+                 class_fields: dict[str, set[str]] | None = None,
+                 class_methods: dict[str, set[str]] | None = None,
+                 func_return_class: dict[str, str] | None = None,
+                 method_return_class: dict[tuple[str, str], str] | None = None,
+                 field_class: dict[tuple[str, str], str] | None = None) -> None:
         self.p = program
         self.rep = rep
         self.arity = arity
@@ -122,24 +127,59 @@ class _Checker:
         self.library = library
         self.class_names: set[str] = class_names or set()
         self.class_arity: dict[str, int] = class_arity or {}
+        self.class_fields: dict[str, set[str]] = class_fields or {}
+        self.class_methods: dict[str, set[str]] = class_methods or {}
+        self.func_return_class: dict[str, str] = func_return_class or {}
+        self.method_return_class: dict[tuple[str, str], str] = method_return_class or {}
+        self.field_class: dict[tuple[str, str], str] = field_class or {}
         self.consts = program.consts
         self.shadow: set[str] = set()
+        self.var_classes: dict[str, str] = {}
 
     # -- one function (a def, or the entry block)
 
     def function(self, name: str, node: ast.FunctionDef | None, body: list[ast.stmt],
-                 is_method: bool = False) -> None:
+                 is_method: bool = False, owner_class: str | None = None) -> None:
         self.rep.function = name
+        self.var_classes = {}
         if node is not None:
             self.signature(node, is_method=is_method)
             self.shadow = _bound_names(node)
+            for idx, arg in enumerate(node.args.args):
+                if is_method and idx == 0 and owner_class is not None:
+                    self.var_classes[arg.arg] = owner_class
+                else:
+                    cls = _extract_class_name(arg.annotation, self.class_names)
+                    if cls is not None:
+                        self.var_classes[arg.arg] = cls
         else:
             self.shadow = set()
             for s in body:
                 self.shadow |= _bound_names(s)
         for s in body:
             self.stmt(s)
+        self.var_classes = {}
         self.rep.function = None
+
+    def _infer_expr_class(self, e: ast.expr) -> str | None:
+        if isinstance(e, ast.Name):
+            return self.var_classes.get(e.id)
+        if isinstance(e, ast.Call):
+            if isinstance(e.func, ast.Name):
+                if e.func.id in self.class_names:
+                    return e.func.id
+                return self.func_return_class.get(e.func.id)
+            if isinstance(e.func, ast.Attribute) and isinstance(e.func.value, ast.Name):
+                recv_cls = self.var_classes.get(e.func.value.id)
+                if recv_cls is not None:
+                    return self.method_return_class.get((recv_cls, e.func.attr))
+        if isinstance(e, ast.Attribute) and isinstance(e.value, ast.Name):
+            recv_cls = self.var_classes.get(e.value.id)
+            if recv_cls is not None:
+                return self.field_class.get((recv_cls, e.attr))
+        if isinstance(e, ast.IfExp):
+            return self._infer_expr_class(e.body) or self._infer_expr_class(e.orelse)
+        return None
 
     def annotation(self, ann: ast.expr | None, what: str, node: ast.AST, allow_none: bool = False,
                    allow_tuple: bool = False) -> None:
@@ -197,11 +237,22 @@ class _Checker:
             elif isinstance(s.targets[0], ast.Subscript):
                 self.expr(s.targets[0].slice)
             self.expr(s.value)
+            if len(s.targets) == 1 and isinstance(s.targets[0], ast.Name):
+                cls = self._infer_expr_class(s.value)
+                if cls is not None:
+                    self.var_classes[s.targets[0].id] = cls
+                elif not (isinstance(s.value, ast.Constant) and s.value.value is None):
+                    self.var_classes.pop(s.targets[0].id, None)
         elif isinstance(s, ast.AnnAssign):
             if not isinstance(s.target, ast.Name) or s.value is None:
                 self.rep.error(s, "aot/assign", "assignment", "only `name: type = value` is supported")
             else:
                 self.annotation(s.annotation, f"`{s.target.id}`", s)
+                cls = _extract_class_name(s.annotation, self.class_names)
+                if cls is not None:
+                    self.var_classes[s.target.id] = cls
+                else:
+                    self.var_classes.pop(s.target.id, None)
             if s.value is not None:
                 self.expr(s.value)
         elif isinstance(s, ast.AugAssign):
@@ -242,7 +293,10 @@ class _Checker:
 
     def attribute_target(self, t: ast.expr) -> bool:
         """`name.field`: a store into a compiled class field."""
-        return bool(self.class_names) and isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name)
+        if not (isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name)):
+            return False
+        cls = self.var_classes.get(t.value.id)
+        return cls is not None and t.attr in self.class_fields.get(cls, ())
 
     def target_ok(self, t: ast.expr) -> bool:
         if isinstance(t, ast.Name) or self.subscript_target(t) or self.attribute_target(t):
@@ -380,15 +434,10 @@ class _Checker:
             if (isinstance(e.value, ast.Name) and e.value.id == "math" and e.attr in MATH_CONSTANTS
                     and self.has_math and "math" not in self.shadow):
                 return
-            is_stdlib_mod = (
-                isinstance(e.value, ast.Name)
-                and e.value.id not in self.shadow
-                and ((e.value.id == "math" and self.has_math)
-                     or (e.value.id == "sys" and self.has_sys)
-                     or (e.value.id == "time" and self.has_time))
-            )
-            if self.class_names and isinstance(e.value, ast.Name) and not is_stdlib_mod:
-                return
+            if isinstance(e.value, ast.Name):
+                cls = self.var_classes.get(e.value.id)
+                if cls is not None and e.attr in self.class_fields.get(cls, ()):
+                    return
             self.rep.error(e, "aot/attribute", e.attr, f"the attribute access `{ast.unparse(e)}` is outside the AOT mode "
                            "(`sys.argv`, `sys.maxsize`, `math` constants, and compiled class fields only)")
         elif isinstance(e, ast.IfExp):
@@ -529,9 +578,9 @@ class _Checker:
                                f"({', '.join(TIME_FUNCTIONS)})")
             elif len(c.args) != TIME_FUNCTIONS[f.attr]:
                 self.rep.error(c, "aot/time", f"time.{f.attr}", f"`time.{f.attr}` takes {TIME_FUNCTIONS[f.attr]} argument(s)")
-        elif (self.class_names and isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
-              and f.value.id not in {"math", "sys", "time"}
-              and f.attr not in {"append", "pop", "extend", "insert", "remove", "clear", "reverse", "sort", "copy", "count", "index"}):
+        elif (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
+              and f.value.id in self.var_classes
+              and f.attr in self.class_methods.get(self.var_classes[f.value.id], ())):
             pass
         else:
             self.rep.error(f, "aot/call", ast.unparse(f), f"the call of `{ast.unparse(f)}` is outside the first AOT step")
@@ -539,28 +588,33 @@ class _Checker:
             self.expr(a)
 
 
-def _is_class_annotation(ann: ast.expr, class_names: set[str]) -> bool:
-    """`C`, `C | None`, `None | C`, `Optional[C]`, or string forward ref `\"C | None\"`."""
-    if not class_names:
-        return False
+def _extract_class_name(ann: ast.expr | None, class_names: set[str]) -> str | None:
+    """Extract `C` from `C`, `C | None`, `None | C`, `Optional[C]`, or string forward ref `\"C | None\"`."""
+    if ann is None or not class_names:
+        return None
     if isinstance(ann, ast.Constant) and isinstance(ann.value, str):
         try:
             ann = ast.parse(ann.value, mode="eval").body
         except SyntaxError:
-            return False
+            return None
     if isinstance(ann, ast.Name):
-        return ann.id in class_names
+        return ann.id if ann.id in class_names else None
     if isinstance(ann, ast.BinOp) and isinstance(ann.op, ast.BitOr):
         left, right = ann.left, ann.right
         if isinstance(left, ast.Constant) and left.value is None:
-            return _is_class_annotation(right, class_names)
+            return _extract_class_name(right, class_names)
         if isinstance(right, ast.Constant) and right.value is None:
-            return _is_class_annotation(left, class_names)
+            return _extract_class_name(left, class_names)
     if (isinstance(ann, ast.Subscript)
             and ((isinstance(ann.value, ast.Name) and ann.value.id == "Optional")
                  or (isinstance(ann.value, ast.Attribute) and ann.value.attr == "Optional"))):
-        return _is_class_annotation(ann.slice, class_names)
-    return False
+        return _extract_class_name(ann.slice, class_names)
+    return None
+
+
+def _is_class_annotation(ann: ast.expr, class_names: set[str]) -> bool:
+    """`C`, `C | None`, `None | C`, `Optional[C]`, or string forward ref `\"C | None\"`."""
+    return _extract_class_name(ann, class_names) is not None
 
 
 def _is_list_annotation(ann: ast.expr) -> bool:
@@ -724,21 +778,63 @@ def analyze(entry: Path, *, library: bool = False) -> Program:
     # -- classes and functions
     class_names = {c.name for c in program.classes}
     class_arity: dict[str, int] = {}
+    class_fields: dict[str, set[str]] = {}
+    class_methods: dict[str, set[str]] = {}
+    method_return_class: dict[tuple[str, str], str] = {}
+    field_class: dict[tuple[str, str], str] = {}
     for c in program.classes:
+        fields: set[str] = set()
+        methods: set[str] = set()
+        for st in c.body:
+            if isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name):
+                fields.add(st.target.id)
+                fcls = _extract_class_name(st.annotation, class_names)
+                if fcls is not None:
+                    field_class[(c.name, st.target.id)] = fcls
+            elif isinstance(st, ast.FunctionDef):
+                if st.name != "__init__":
+                    methods.add(st.name)
+                    rcls = _extract_class_name(st.returns, class_names)
+                    if rcls is not None:
+                        method_return_class[(c.name, st.name)] = rcls
         init_fn = next((st for st in c.body if isinstance(st, ast.FunctionDef) and st.name == "__init__"), None)
         if init_fn is not None:
             class_arity[c.name] = max(0, len(init_fn.args.args) - 1)
+            self_name = init_fn.args.args[0].arg if init_fn.args.args else "self"
+            for node in ast.walk(init_fn):
+                if isinstance(node, ast.Assign):
+                    for t in node.targets:
+                        if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name) and t.value.id == self_name:
+                            fields.add(t.attr)
+                elif isinstance(node, ast.AnnAssign):
+                    t = node.target
+                    if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name) and t.value.id == self_name:
+                        fields.add(t.attr)
+                        fcls = _extract_class_name(node.annotation, class_names)
+                        if fcls is not None:
+                            field_class.setdefault((c.name, t.attr), fcls)
         else:
             class_arity[c.name] = sum(1 for st in c.body if isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name))
+        class_fields[c.name] = fields
+        class_methods[c.name] = methods
+    func_return_class: dict[str, str] = {}
+    for f in program.functions:
+        rcls = _extract_class_name(f.returns, class_names)
+        if rcls is not None:
+            func_return_class[f.name] = rcls
     arity = {f.name: len(f.args.args) for f in program.functions}
     checker = _Checker(program, rep, arity, has_math, has_sys, has_time, library,
-                       class_names=class_names, class_arity=class_arity)
+                       class_names=class_names, class_arity=class_arity,
+                       class_fields=class_fields, class_methods=class_methods,
+                       func_return_class=func_return_class,
+                       method_return_class=method_return_class,
+                       field_class=field_class)
     for c in program.classes:
         for st in c.body:
             if isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name) and st.value is None:
                 checker.annotation(st.annotation, f"field `{c.name}.{st.target.id}`", st)
             elif isinstance(st, ast.FunctionDef):
-                checker.function(f"{c.name}.{st.name}", st, st.body, is_method=True)
+                checker.function(f"{c.name}.{st.name}", st, st.body, is_method=True, owner_class=c.name)
     for f in program.functions:
         checker.function(f.name, f, f.body)
     if program.main is not None:

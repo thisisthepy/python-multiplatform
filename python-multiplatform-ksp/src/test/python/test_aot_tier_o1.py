@@ -480,3 +480,113 @@ def test_library_transitively_mutable_class_rejected(tmp_path: Path):
     with pytest.raises(aot.AotError) as exc:
         aot.generate_library(p, exports=["mutate"], prefix="mylib")
     assert any(f.rule == "aot/library-mutable-class" and f.name == "Outer" for f in exc.value.findings)
+
+
+def test_non_class_attribute_and_method_rejected_when_class_exists(tmp_path: Path):
+    """When a module defines a compiled class, non-class attributes/methods and undeclared
+    class attributes are still rejected by the allowlist check."""
+    cases = [
+        (
+            "int_attr.py",
+            """
+            class Box:
+                __slots__ = ("v",)
+                v: int
+
+                def __init__(self, v: int) -> None:
+                    self.v = v
+
+            def f(x: int) -> int:
+                return x.real
+
+            if __name__ == "__main__":
+                print(f(1))
+            """,
+            "aot/attribute",
+        ),
+        (
+            "list_method.py",
+            """
+            class Box:
+                __slots__ = ("v",)
+                v: int
+
+                def __init__(self, v: int) -> None:
+                    self.v = v
+
+            def f(xs: list[float]) -> None:
+                xs.append(1.0)
+
+            if __name__ == "__main__":
+                xs: list[float] = [1.0]
+                f(xs)
+            """,
+            "aot/call",
+        ),
+        (
+            "math_unknown.py",
+            """
+            import math
+
+            class Box:
+                __slots__ = ("v",)
+                v: int
+
+                def __init__(self, v: int) -> None:
+                    self.v = v
+
+            def f() -> float:
+                return math.foo
+
+            if __name__ == "__main__":
+                print(f())
+            """,
+            "aot/attribute",
+        ),
+        (
+            "sys_unknown.py",
+            """
+            import sys
+
+            class Box:
+                __slots__ = ("v",)
+                v: int
+
+                def __init__(self, v: int) -> None:
+                    self.v = v
+
+            def f() -> int:
+                return sys.version
+
+            if __name__ == "__main__":
+                print(f())
+            """,
+            "aot/attribute",
+        ),
+        (
+            "box_missing.py",
+            """
+            class Box:
+                __slots__ = ("v",)
+                v: int
+
+                def __init__(self, v: int) -> None:
+                    self.v = v
+
+            def f(b: Box) -> int:
+                return b.missing
+
+            if __name__ == "__main__":
+                b: Box = Box(1)
+                print(f(b))
+            """,
+            "aot/attribute",
+        ),
+    ]
+    for name, src, expected_rule in cases:
+        p = _write(tmp_path, src, name=name)
+        with pytest.raises(aot.AotError) as exc:
+            aot.generate(p)
+        assert any(f.rule == expected_rule for f in exc.value.findings), (
+            f"{name}: expected {expected_rule}, got {exc.value.findings}"
+        )
