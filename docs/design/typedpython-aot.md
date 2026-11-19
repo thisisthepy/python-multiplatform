@@ -407,6 +407,73 @@ review 2026-11-20, not owner-confirmed).
     `__init__` `self` escape rejected; `aot-lib` mutable class rejected with `aot/library-mutable-class`).
   - `aot-check` sync: `binary_trees.py` reports 0 blocking findings.
 
+### 6.3.2 Tier O step 2 (PR-O2): virtual objects, scope regions, cycle collector, and acyclic `__del__`
+
+Design for PR-O2 (`binary_trees_region.py`, `binary_trees.py` region allocation, mutable cyclic classes,
+and acyclic `__del__`; agent proposal, leader review 2026-11-20, not owner-confirmed).
+
+Each allocation site (`New`) is classified statically in the following order. A class that defines
+`__del__` skips steps 1 and 2 and always uses step 3 with exact reference counting so destructor timing
+matches CPython.
+
+1. **Virtual objects (N-12a, scalar replacement).**
+   - *Conditions*: the instance never escapes its creating function (not returned, not stored in any
+     field or container, not passed to another function), is not compared with `is` / `is not`, is not
+     merged with another instance across a branch join (phi), and defines no `__del__`.
+   - *Method calls*: a method call on a candidate virtual object is allowed **only if** the method is
+     non-recursive and inlined at the call site; any non-inlined method call or recursion disqualifies
+     the site and falls back to heap allocation (step 2 or 3).
+   - *Layout*: no heap allocation and no C struct; each field is a plain C local variable, with owned
+     fields following normal local cleanup.
+2. **Scope bump regions (N-12b/c).**
+   - *Layout*: region-allocated instances use a distinct C type `struct tpa_reg_<C>` with **no `rc`
+     header** (zero reference counting). A region (`tpa_region`) owns a linked list of bump-allocated
+     chunks and frees every chunk at once when its owning scope exits. Because `struct tpa_reg_<C> *`
+     and `struct tpa_cls_<C> *` are incompatible C pointer types, mixing them is a compile-time error.
+   - *Lifetime and non-escape invariants (dangling pointer prevention)*: an allocation site is promoted
+     to a scope region `R` only when all five rules hold; violating any rule falls back to heap RC:
+     - **(R1) No return escape**: the function owning `R` cannot return any pointer into `R` (or any
+       struct/tuple containing one).
+     - **(R2) No outliving store**: a pointer into `R` cannot be stored into any heap object, global
+       slot, container, or **any other region (including an enclosing/outer region)** whose lifetime
+       exceeds `R`. Storing an outer-region pointer into an inner-region object is safe and permitted,
+       because the outer region outlives the inner region; the reverse direction is forbidden.
+     - **(R3) Callee restriction**: a pointer into `R` may only be passed to non-escaping region
+       specializations (e.g. `check__reg(tpa_reg_Node *n)`) that themselves satisfy (R1) and (R2).
+     - **(R4) Destructor-free fields**: every field of a region-allocated class must be a scalar
+       (`int64_t`, `double`, `bool`) or a pointer to a class in the same region `R` (or an enclosing
+       region), so freeing `R`'s chunks requires zero per-object destructors and cannot leak heap
+       references.
+     - **(R5) Library boundary**: `aot-lib` exports never expose region pointers; a library may use a
+       region only for a closed scope created and destroyed entirely inside an exported call.
+   - *Exception safety*: every region-owning function frees `R` exactly once in its single `tp_cleanup:`
+     exit block, covering both normal return and error (`rc != 0`) paths. Exceptions in AOT carry only
+     `(class_id, message_string)` in the thread-local error record (`tpa_exc`), with no traceback frame
+     objects (owner decision D4), so a region pointer can never be retained by an exception or traceback.
+3. **Reference counting + small cycle collector (D2) + acyclic `__del__`.**
+   - *Pay only for what the program uses*: classes proved acyclic by the shared `aot/classes.py`
+     analysis (PR-O1) keep zero GC overhead and do not link `runtime/tp_aot_gc.h`. Only when a program
+     contains at least one potentially cyclic mutable class is `tp_aot_gc.h` included, and only those
+     cyclic-capable classes carry the GC list header (`prev`, `next`, `gc_refs`).
+   - *Safepoint invariant (borrowed references and RC elision)*: the trial-deletion collector requires
+     that every live cyclic-capable object has at least one counted reference (`rc > 0`) at the moment
+     collection runs. Collection is triggered **only at allocation safepoints** (entry to
+     `tpa_cls_<C>_new` of a cyclic-capable class, after all constructor arguments have been retained as
+     owned temporaries or are held by owned locals/fields in callers). Because every cyclic-capable
+     class is mutable (not `immutable-after-init`), PR-O1's RC elision rules (3) and (4) are
+     automatically disabled for every field of such a class: every field read into a local and every
+     mutable field passed as a call argument is `retain`ed by the caller before any call. Therefore,
+     at every allocation safepoint, no cyclic-capable object is kept alive solely by an uncounted
+     borrowed reference.
+   - *`__del__`*: permitted only on acyclic classes (always exact RC, no virtual/region/elision). A
+     `__del__` on a cyclic-capable class is a compile error (`aot/cycle-del`).
+4. **Diagnostics (`--explain-alloc` / `aot-check`).**
+   - Every allocation site's chosen strategy (`virtual`, `region`, `heap-rc`, `heap-gc`) and the
+     concrete reason for any fallback from `virtual` or `region` to `heap` (e.g. non-inlined method,
+     R1 return escape, R2 outer-region/heap store, R4 heap-owned field, `__del__`) are reported via
+     `python -m typedpython aot-build ENTRY.py --explain-alloc` (and surfaced in `aot-check`), so
+     measurement runs can verify why an allocation did or did not stay off the heap.
+
 ### 6.4 Exceptions
 
 A function returns a status, as the generated C does today; the current exception (class id, message
