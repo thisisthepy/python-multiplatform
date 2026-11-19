@@ -664,6 +664,30 @@ machine and are run by the coordinating session alone, as AGENTS.md requires for
 fixed in this note: the first recorded numbers are the Rust and default-mode columns, and "near Rust"
 is the owner's phrase.
 
+### 9.1 First recorded Tier K measurements (PR-M1, shared CI runner)
+
+Recorded from CI run `44599101214` (artifact `typedpython-aot-measure-ubuntu`, `#479` / PR `#483`),
+on a **shared GitHub Actions runner** (ratios to Rust only; no absolute-time conclusion is drawn from
+shared-runner runs):
+
+- **Commit**: `497765876cde1c3a9520f478955eb7e21693f057`
+- **Runner image**: `ubuntu26 20261116.202.1`
+- **CPU**: `INTEL(R) XEON(R) PLATINUM 8573C`
+- **Toolchains**: `Python 3.15.2`, `rustc 1.100.0 (0ef1bc386 2026-11-09)` (`--release`, LTO, stripped), `repeat=3`
+
+| Benchmark | Size | AOT stripped | Rust stripped | Size ratio (AOT/Rust) | RSS ratio (AOT/Rust) | CPU ratio (AOT/Rust) | Wall ratio (AOT/Rust) |
+|---|---|---|---|---|---|---|---|
+| `empty` | - | 14,464 B | 287,664 B | 0.050x | 1.000x | 0.733x | 0.788x |
+| `hello` | - | 14,464 B | 290,912 B | 0.050x | 1.000x | 0.834x | 0.816x |
+| `nbody` | 200000 | 47,304 B | 317,800 B | 0.149x | 1.000x | 3.324x | 3.311x |
+| `spectral-norm` | 400 | 55,496 B | 317,384 B | 0.175x | 1.000x | 11.849x | 11.719x |
+| `fannkuch-redux` | 9 | 35,016 B | 295,848 B | 0.118x | 1.000x | 3.284x | 3.279x |
+
+Note on `max_rss_bytes` in this run: every child reported 38,531,072 B (37,628 KiB), which is the
+parent Python process's own resident set inherited across `fork` before `exec` under Linux
+`os.wait4(..., ru_maxrss)`. A follow-up should measure child RSS via `/usr/bin/time -f %M` or
+`posix_spawn` so the child's own RSS is isolated from the harness process.
+
 ## 10. Decisions
 
 The first draft of this note listed ten choices as options. They were answered on 2026-11-16 (relayed
