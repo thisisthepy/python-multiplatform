@@ -2853,4 +2853,5 @@ tasks.named<Test>("desktopTest") {
     
     val pythonHome = File(extractedDir, "$platform$desktopFlavourSuffix/python").absolutePath
     environment("PYTHONHOME", pythonHome)
+    testLogging.exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
 }

@@ -361,6 +361,40 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `Status: implemented` on desktop and Kotlin/Native, `PM/desktopTest/.../upcall/AsyncUpcallDeliveryTest.kt`,
   `AsyncUpcallCancellationTest.kt`, `AsyncUpcallEarlyCancellationTest.kt`, `PM/nativeTest/.../AsyncUpcallNative*Test.kt`,
   `python-multiplatform-ksp/fixtures/app/.../GeneratedSuspendTest.kt`; `planned` on wasm (no threads).
+- **U-5a** (`suspend` function-typed parameters, #164 item 7):
+  An exposed Kotlin function, method or constructor may declare a top-level parameter of a `suspend`
+  function type (`suspend () -> R`, `suspend (A1, ..., AN) -> R`, nullable forms and `typealias`es thereof,
+  for arities `0..5`, matching `PythonCallables.newFunction`). Return types, properties, and `suspend`
+  function types nested inside generic type arguments (`List<suspend () -> Unit>`) remain unexposed with a
+  KSP warning.
+  - **Table metadata:** KSP and the artifact walker record the parameter's declared type name as
+    `kotlin.coroutines.SuspendFunctionN(Arg1,...)->Ret` (with `TypeTag.OBJECT`), and the generated Kotlin
+    thunk casts `args[i]` to the declared `suspend` function type.
+  - **Python surface and lifetime:** Inside an active `PythonCallableScope` (the same scope requirement as
+    ordinary function slots), passing a Python callable (`async def` or a callable returning an awaitable or
+    plain value) into a `SuspendFunctionN` slot wraps it through `PythonCallables.newSuspendFunction` into a
+    Kotlin `suspend` lambda of matching arity, owned and interned by that scope. An invocation that has
+    already started acquires its own extra `PyObject` reference to the callable (and releases it when the
+    invocation finishes), so closing the `PythonCallableScope` while an `await` is still in flight is safe.
+  - **Invocation, return unmarshalling, and GIL discipline:** When Kotlin invokes the wrapped `suspend`
+    lambda:
+    1. Under `withGIL`, arguments are marshalled to Python and the Python callable is called.
+    2. If the return value is not awaitable (`!hasattr(r, '__await__')`), it is unmarshalled according to
+       `Ret` (`kotlin.Unit`, `kotlin.Boolean`, `kotlin.Int`, `kotlin.Long`, `kotlin.Float`, `kotlin.Double`,
+       `kotlin.String`, or `PyObject`/handle for `OBJECT`) and returned immediately without suspending (fast
+       path).
+    3. If the return value is awaitable, it is submitted to the target `asyncio` loop resolved by U-5's
+       delivery-loop order (`get_running_loop` → `use_delivery_loop` → `set_delivery_loop`, failing with
+       `IllegalStateException` if no open loop is available), a done callback is attached, and the `withGIL`
+       scope exits **before** the Kotlin coroutine suspends (`kotlin.coroutines.suspendCoroutine`) so the
+       GIL is never held across suspension.
+    4. When the Python task/future finishes, the callback unmarshals the result (or converts a Python
+       exception via `PyException.toKotlinException()`, mapping `asyncio.CancelledError` to
+       `CancellationException`) and resumes the Kotlin `Continuation`.
+  - **Out of scope here:** `python-multiplatform` keeps no `kotlinx.coroutines` dependency (uses stdlib
+    `suspendCoroutine` only). Propagating Kotlin `Job` cancellation back to `Task.cancel()` belongs to the
+    `kotlinx.coroutines`-aware await wrapper (#164 item 2).
+  `Status: implemented` on desktop, `PM/desktopTest/.../pythonx/SuspendFunctionParameterTest.kt`.
 - **U-6** Upcalls work in a GraalVM native image (desktop). `Status: implemented` with manual
   verification, procedure and record in `docs/platforms/graal-native-image-verification.md`
   (`:sample:nativeCompile`, Liberica NIK), guarded automatically by `ReachabilityMetadataTest.kt` (C-2).
