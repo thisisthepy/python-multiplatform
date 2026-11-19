@@ -501,10 +501,11 @@ class AotLibraryCallTest {
 
     @Test
     fun noClassOfTheCPythonEmbeddingLibraryIsOnTheClasspath() {
+        val classLoader = javaClass.classLoader ?: ClassLoader.getSystemClassLoader()
         for (name in listOf("python.multiplatform.ffi.PyObject", "python.multiplatform.ffi.Python3", "python.native.ffi.Panama")) {
             assertFailsWith<ClassNotFoundException>("$name must not be loadable") { Class.forName(name) }
             assertFalse(
-                javaClass.classLoader.getResources(name.replace('.', '/') + ".class").hasMoreElements(),
+                classLoader.getResources(name.replace('.', '/') + ".class").hasMoreElements(),
                 "$name is on the classpath",
             )
         }
@@ -527,6 +528,87 @@ class AotLibraryCallTest {
         assertTrue(images.contains("nbody"), "the listing does not show the library loaded by this test, so it proves nothing")
         assertFalse(images.contains("libpython", ignoreCase = true), "a libpython is loaded in the test JVM")
         assertFalse(images.contains("Python.framework"), "a Python framework is loaded in the test JVM")
+    }
+
+    // --- native-image reachability metadata (#456) --------------------------------------------------------
+
+    private data class ForeignDescriptor(val returnType: String, val parameterTypes: List<String>)
+
+    private fun parseDowncalls(json: String): Set<ForeignDescriptor> {
+        val start = json.indexOf("\"downcalls\": [")
+        assertTrue(start >= 0, "reachability metadata has no `downcalls` array")
+        var depth = 0
+        var end = -1
+        for (i in json.indexOf('[', start) until json.length) {
+            if (json[i] == '[') depth++
+            if (json[i] == ']') {
+                depth--
+                if (depth == 0) {
+                    end = i
+                    break
+                }
+            }
+        }
+        assertTrue(end > start, "reachability metadata's `downcalls` array is not closed")
+        val body = json.substring(start, end)
+        return Regex("""\{\s*"returnType"\s*:\s*"([^"]+)"\s*,\s*"parameterTypes"\s*:\s*\[([^]]*)]\s*}""")
+            .findAll(body)
+            .mapTo(LinkedHashSet()) { match ->
+                ForeignDescriptor(
+                    match.groupValues[1],
+                    match.groupValues[2].split(',').map { it.trim().trim('"') }.filter { it.isNotEmpty() },
+                )
+            }
+    }
+
+    /** GraalVM's canonical layout name for a carrier (`Linker.nativeLinker().canonicalLayouts()`), as the metadata spells it. */
+    private fun carrierName(cls: Class<*>): String = when (cls) {
+        Void.TYPE -> "void"
+        java.lang.Long.TYPE -> "long long"
+        Integer.TYPE -> "int"
+        java.lang.Double.TYPE -> "double"
+        java.lang.Byte.TYPE -> "char"
+        else -> fail("unexpected MethodHandle carrier type $cls")
+    }
+
+    private fun java.lang.invoke.MethodType.toForeignDescriptor(): ForeignDescriptor =
+        ForeignDescriptor(carrierName(returnType()), parameterList().map(::carrierName))
+
+    /**
+     * Checks that every `MethodHandle` actually linked by `Nbody`, `Errors` and `Bigints` has its descriptor
+     * declared in the generated `META-INF/native-image/<package>/<prefix>/reachability-metadata.json` (on the JVM),
+     * and reads `handles()` with zero reflection so the check also runs inside a GraalVM native image.
+     */
+    @Test
+    fun everyBoundMethodHandleDescriptorIsDeclaredInTheGeneratedReachabilityMetadata() {
+        val libraries: List<Pair<String, Map<String, java.lang.invoke.MethodHandle>>> = listOf(
+            "nbody" to Nbody.native().handles(),
+            "errors" to Errors.native().handles(),
+            "bigints" to Bigints.native().handles(),
+        )
+        val inNativeImage = System.getProperty("org.graalvm.nativeimage.imagecode") != null
+        for ((prefix, handles) in libraries) {
+            assertTrue(handles.isNotEmpty(), "$prefix has no bound MethodHandles")
+            val actual = handles.mapValues { (_, handle) -> handle.type().toForeignDescriptor() }
+            if (!inNativeImage) {
+                val resourcePath = "/META-INF/native-image/fixture.aot.$prefix/$prefix/reachability-metadata.json"
+                val json = javaClass.getResourceAsStream(resourcePath)?.bufferedReader()?.readText()
+                    ?: fail("$resourcePath is not on the test runtime classpath")
+                val declared = parseDowncalls(json)
+                val missing = actual.filterValues { it !in declared }
+                assertTrue(
+                    missing.isEmpty(),
+                    "$prefix reachability metadata is missing downcall descriptor(s): $missing",
+                )
+                for (used in actual.values.toSet()) {
+                    val withoutOne = declared - used
+                    assertTrue(
+                        actual.values.any { it !in withoutOne },
+                        "$prefix check stayed green after dropping $used",
+                    )
+                }
+            }
+        }
     }
 
     /** The mapped files of this process: /proc/self/maps on Linux; on macOS `vmmap -w <pid>`, else `lsof -p <pid>`; null if none worked. */

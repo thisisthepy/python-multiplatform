@@ -77,17 +77,49 @@ internal class AotFfmRuntime {
     /** Native memory that the garbage collector frees once its thread is gone; `keep` holds it reachable. */
     private class Scratch(val keep: Any, val address: Long)
 
+    private class ForeignTypes(
+        val memorySegment: Class<*>,
+        val arena: Class<*>,
+        val linker: Class<*>,
+        val symbolLookup: Class<*>,
+        val functionDescriptor: Class<*>,
+        val valueLayout: Class<*>,
+        val memoryLayout: Class<*>,
+        val option: Class<*>,
+        val ofLong: Class<*>,
+        val ofDouble: Class<*>,
+        val ofByte: Class<*>,
+    )
+
     private val scratchLocal: ThreadLocal<Scratch>
 
     init {
-        val memorySegmentClass = foreign("MemorySegment")
-        val arenaClass = foreign("Arena")
-        val linkerClass = foreign("Linker")
-        val symbolLookupClass = foreign("SymbolLookup")
-        val functionDescriptorClass = foreign("FunctionDescriptor")
-        val valueLayoutClass = foreign("ValueLayout")
-        memoryLayoutClass = foreign("MemoryLayout")
-        val optionClass = foreign("Linker\$Option")
+        val ft = withForeign {
+            ForeignTypes(
+                memorySegment = Class.forName("java.lang.foreign.MemorySegment"),
+                arena = Class.forName("java.lang.foreign.Arena"),
+                linker = Class.forName("java.lang.foreign.Linker"),
+                symbolLookup = Class.forName("java.lang.foreign.SymbolLookup"),
+                functionDescriptor = Class.forName("java.lang.foreign.FunctionDescriptor"),
+                valueLayout = Class.forName("java.lang.foreign.ValueLayout"),
+                memoryLayout = Class.forName("java.lang.foreign.MemoryLayout"),
+                option = Class.forName("java.lang.foreign.Linker\$Option"),
+                ofLong = Class.forName("java.lang.foreign.ValueLayout\$OfLong"),
+                ofDouble = Class.forName("java.lang.foreign.ValueLayout\$OfDouble"),
+                ofByte = Class.forName("java.lang.foreign.ValueLayout\$OfByte"),
+            )
+        }
+        val memorySegmentClass = ft.memorySegment
+        val arenaClass = ft.arena
+        val linkerClass = ft.linker
+        val symbolLookupClass = ft.symbolLookup
+        val functionDescriptorClass = ft.functionDescriptor
+        val valueLayoutClass = ft.valueLayout
+        memoryLayoutClass = ft.memoryLayout
+        val optionClass = ft.option
+        val ofLongClass = ft.ofLong
+        val ofDoubleClass = ft.ofDouble
+        val ofByteClass = ft.ofByte
         val lookup = MethodHandles.lookup()
         val longType = Long::class.javaPrimitiveType!!
 
@@ -111,24 +143,20 @@ internal class AotFfmRuntime {
         // receiver, so that an access is a handle of type (long) -> T or (long, T) -> void.
         val everything = memorySegmentClass.getMethod("reinterpret", longType)
             .invoke(memorySegmentClass.getField("NULL").get(null), Long.MAX_VALUE)
-        fun reader(layout: Any, ofName: String): MethodHandle {
-            val ofClass = foreign("ValueLayout\$" + ofName)
-            return MethodHandles.insertArguments(
+        fun reader(layout: Any, ofClass: Class<*>): MethodHandle =
+            MethodHandles.insertArguments(
                 lookup.unreflect(memorySegmentClass.getMethod("get", ofClass, longType)), 0, everything, layout,
             )
-        }
-        fun writer(layout: Any, ofName: String, valueType: Class<*>): MethodHandle {
-            val ofClass = foreign("ValueLayout\$" + ofName)
-            return MethodHandles.insertArguments(
+        fun writer(layout: Any, ofClass: Class<*>, valueType: Class<*>): MethodHandle =
+            MethodHandles.insertArguments(
                 lookup.unreflect(memorySegmentClass.getMethod("set", ofClass, longType, valueType)), 0, everything, layout,
             )
-        }
-        getLong = reader(layoutLong, "OfLong")
-        getDouble = reader(layoutDouble, "OfDouble")
-        getByte = reader(layoutByte, "OfByte")
-        putLong = writer(layoutLong, "OfLong", longType)
-        putDouble = writer(layoutDouble, "OfDouble", Double::class.javaPrimitiveType!!)
-        putByte = writer(layoutByte, "OfByte", Byte::class.javaPrimitiveType!!)
+        getLong = reader(layoutLong, ofLongClass)
+        getDouble = reader(layoutDouble, ofDoubleClass)
+        getByte = reader(layoutByte, ofByteClass)
+        putLong = writer(layoutLong, ofLongClass, longType)
+        putDouble = writer(layoutDouble, ofDoubleClass, Double::class.javaPrimitiveType!!)
+        putByte = writer(layoutByte, ofByteClass, Byte::class.javaPrimitiveType!!)
 
         val autoArena = arenaClass.getMethod("ofAuto").invoke(null)
         allocateExact = MethodHandles.insertArguments(
@@ -142,8 +170,8 @@ internal class AotFfmRuntime {
         }
     }
 
-    private fun foreign(simpleName: String): Class<*> = try {
-        Class.forName("java.lang.foreign." + simpleName)
+    private inline fun <T> withForeign(block: () -> T): T = try {
+        block()
     } catch (e: ClassNotFoundException) {
         throw UnsupportedOperationException(
             "java.lang.foreign is not available: the generated wrappers need JDK 21 with --enable-preview, or JDK 22 and later",
