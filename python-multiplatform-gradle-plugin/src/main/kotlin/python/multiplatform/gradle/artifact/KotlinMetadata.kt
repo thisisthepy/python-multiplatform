@@ -269,6 +269,10 @@ internal fun resolveKotlinBoundary(
         // here has asked for it and `None` would then be a value the declaration refuses.
         if (classifier.name == KOTLIN_ANY) return ResolvedBoundary(NULLABLE_ANY_BOUNDARY, carrier = null)
     }
+    if (classifier.name == KOTLIN_NUMBER) {
+        val cast = "kotlin.Number" + if (type.isNullable) "?" else ""
+        return ResolvedBoundary(BoundaryType("OBJECT", "(%s as $cast)", "(%s)"), carrier = null)
+    }
 
     val info = if (type.isNullable) null else classpath.valueClassInfo(classifier.name)
     if (info != null) {
@@ -500,6 +504,7 @@ internal fun renderKotlinTypeName(type: KmType, classpath: ArtifactClasspath, is
     // `SnapshotMutationPolicy<kotlin.Any?>`. Only as an argument: at the top level a `kotlin.Any`
     // slot is [resolveKotlinBoundary]'s own decision, and it opens the nullable one only.
     if (isArgument && classifier.name == KOTLIN_ANY) return "kotlin.Any" + if (type.isNullable) "?" else ""
+    if (classifier.name == KOTLIN_NUMBER) return "kotlin.Number" + if (type.isNullable) "?" else ""
     if (!classpath.isNameablePublicClass(classifier.name)) return null
     val base = classifier.name.replace('/', '.')
     if (type.arguments.isEmpty()) return base + if (type.isNullable) "?" else ""
@@ -514,6 +519,9 @@ internal fun renderKotlinTypeName(type: KmType, classpath: ArtifactClasspath, is
 
 /** `kotlin.Any`, as `KmClassifier.Class` spells it. */
 internal const val KOTLIN_ANY = "kotlin/Any"
+
+/** `kotlin.Number`, as `KmClassifier.Class` spells it. A built-in mapped to `java.lang.Number` on JVM. */
+internal const val KOTLIN_NUMBER = "kotlin/Number"
 
 /** `kotlin.CharSequence`, as `KmClassifier.Class` spells it. A built-in: it has no class file. */
 internal const val KOTLIN_CHAR_SEQUENCE = "kotlin/CharSequence"
