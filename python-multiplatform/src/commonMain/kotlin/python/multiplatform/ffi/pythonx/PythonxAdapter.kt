@@ -1092,6 +1092,11 @@ object PythonxAdapter {
             if is_running_here:
                 _schedule()
             else:
+                # On a foreign thread, schedule `_schedule()` onto the target loop's thread via
+                # `call_soon_threadsafe`. Keep a strong reference to `awaitable` inside `_schedule`
+                # so the Kotlin caller can release its temporary wrapper immediately after
+                # `submitAwaitableToLoop` returns without closing the coroutine before `_schedule`
+                # runs.
                 loop.call_soon_threadsafe(_schedule)
 
 

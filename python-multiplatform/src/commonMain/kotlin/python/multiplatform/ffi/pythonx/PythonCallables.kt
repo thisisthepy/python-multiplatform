@@ -995,17 +995,22 @@ internal class PythonSuspendFunction(
             return suspendCoroutine { cont ->
                 val pending = PendingSuspendInvocation(cont, held, returnTypeName)
                 val pendingHandle = HandleTable.register(pending)
+                // Mark handedOff BEFORE submitting: if `_schedule()` runs inline on the same
+                // thread and finishes synchronously, or if `_submit_suspend_awaitable` fails and
+                // we release `pendingHandle` in the catch block below, ownership of `held` is
+                // accounted for in exactly one place.
+                handedOff = true
                 try {
                     withGIL {
                         try {
                             submitAwaitableToLoop(awaitable, pendingHandle.raw)
-                            handedOff = true
                         } finally {
                             awaitable.close()
                         }
                     }
                 } catch (t: Throwable) {
                     HandleTable.release(pendingHandle)
+                    held.close()
                     val mapped = if (t is PyException) t.toKotlinException() else t
                     cont.resumeWithException(mapped)
                 }

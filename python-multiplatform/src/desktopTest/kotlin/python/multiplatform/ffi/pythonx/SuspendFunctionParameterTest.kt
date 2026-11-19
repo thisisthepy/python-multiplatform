@@ -112,8 +112,16 @@ class SuspendFunctionParameterTest {
                     _sf_async['value'] = _sf_loop.run_until_complete(_driver())
                 """.trimIndent(),
             )
-            PythonCallables.withScope(scope) {
-                Python3.exec("_run()")
+            try {
+                PythonCallables.withScope(scope) {
+                    Python3.exec("_run()")
+                }
+            } catch (e: PyException) {
+                throw AssertionError(
+                    "anAsyncDefPythonCallableIsAwaitedByKotlinAndReturnsItsValue failed with " +
+                        "${e.type?.name}: ${e.errMsg}",
+                    e,
+                )
             }
             assertEquals("42", PythonTestFixture.eval("_sf_async['value']").toString())
         } finally {
@@ -244,14 +252,22 @@ class SuspendFunctionParameterTest {
                 Python3.exec("_sf_loop.call_soon_threadsafe(_sf_gate.set_result, 99)")
                 assertTrue(doneLatch.await(10, java.util.concurrent.TimeUnit.SECONDS), "in-flight await did not resume")
                 assertEquals(99L, result?.getOrThrow())
+            } catch (e: PyException) {
+                throw AssertionError(
+                    "closingTheCallableScopeWhileAnAwaitIsInFlightStillCompletesSafely failed with " +
+                        "${e.type?.name}: ${e.errMsg}",
+                    e,
+                )
             } finally {
                 Python3.exec(
                     """
                     import python_multiplatform as _pm
                     _pm.set_delivery_loop(None)
-                    _sf_loop.call_soon_threadsafe(_sf_loop.stop)
-                    _sf_thread.join(timeout=5.0)
-                    _sf_loop.close()
+                    if '_sf_loop' in globals() and not _sf_loop.is_closed():
+                        _sf_loop.call_soon_threadsafe(_sf_loop.stop)
+                        if '_sf_thread' in globals():
+                            _sf_thread.join(timeout=5.0)
+                        _sf_loop.close()
                     """.trimIndent(),
                 )
                 scope.close()
