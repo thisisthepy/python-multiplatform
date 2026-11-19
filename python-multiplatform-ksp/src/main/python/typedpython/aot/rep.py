@@ -194,6 +194,7 @@ class Representation:
         self.strict = strict
         self.fns = {f.name: f for f in module.functions}
         self.reps = {f.name: FunctionReps(name=f.name) for f in module.functions}
+        self.field_reps: dict[tuple[str, str], str] = {}
         # the sound re-proof (module docstring): id of a node of `module` -> proved under intervals of unbounded ints
         self.proofs: dict[int, bool] = {}
         # the groups of `list[int]` names (module docstring "Lists of ints")
@@ -215,6 +216,19 @@ class Representation:
 
     def returns(self, fn: str) -> str:
         return self.reps[fn].returns
+
+    def field(self, cls: str, fname: str) -> str:
+        if self.strict:
+            return RAW
+        return self.field_reps.get((cls, fname), RAW)
+
+    def field_list_big(self, cls: str, fname: str) -> bool:
+        if self.strict:
+            return False
+        key = (f"<class:{cls}>", fname)
+        if key not in self._parent:
+            return False
+        return self.find(key) in self._big
 
     def element(self, fn: str, i: int) -> str:
         r = self.reps[fn].tuple_elements
@@ -472,8 +486,23 @@ class Representation:
             return RAW
         if isinstance(e, ir.Index):
             return TAGGED if self.list_big(r.name, e.array) else RAW
+        if isinstance(e, ir.FieldGet):
+            return self.field_reps.get((e.cls, e.field), RAW)
         if isinstance(e, (ir.ArgvInt, ir.FloatToInt, ir.StrToInt, ir.MathCall)):
             return TAGGED
+        if isinstance(e, ir.New):
+            init_name = f"{e.cls}.__init__"
+            callee = self.fns.get(init_name)
+            if callee is not None:
+                cr = self.reps[init_name]
+                for a, p in zip(e.args, callee.params[1:]):
+                    if isinstance(p, ir.Param) and p.type is Type.I64 and self._of(r, a) == TAGGED:
+                        if cr.names.get(p.name, RAW) != TAGGED:
+                            cr.names[p.name] = TAGGED
+                            changed = True
+            for a in e.args:
+                changed |= self._expr_calls(r, a)
+            return changed
         if isinstance(e, ir.Call):
             callee = self.reps.get(e.function)
             return callee.returns if callee is not None else TAGGED
@@ -567,6 +596,11 @@ class Representation:
                         changed |= self.raise_(r.names, n.target, self._of(r, n.value))
                     elif n.value.type is Type.I64_ARRAY:
                         changed |= self.creation((f.name, n.target), n.value, r, cur)
+                elif isinstance(n, ir.FieldSet):
+                    if n.value.type is Type.I64 and self._of(r, n.value) == TAGGED:
+                        if self.field_reps.get((n.cls, n.field), RAW) != TAGGED:
+                            self.field_reps[(n.cls, n.field)] = TAGGED
+                            changed = True
                 elif isinstance(n, ir.StoreIndex):
                     if (f.name, n.array) in self._parent and n.value.type is Type.I64 \
                             and self._of(r, n.value) == TAGGED:

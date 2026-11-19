@@ -44,7 +44,7 @@ MAIN = frontend.AOT_ENTRY
 
 _BIN_OPS = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod,
             ast.BitAnd, ast.BitOr, ast.BitXor, ast.LShift, ast.RShift, ast.Pow)
-_CMP_OPS = (ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE)
+_CMP_OPS = (ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.Is, ast.IsNot)
 _STATEMENT_NAMES = {
     "ClassDef": "class", "Try": "try", "TryStar": "try", "With": "with", "AsyncWith": "async with",
     "Raise": "raise", "Assert": "assert", "Delete": "del", "AsyncFor": "async for",
@@ -65,6 +65,7 @@ class Program:
     source: str
     tree: ast.Module
     functions: list[ast.FunctionDef] = field(default_factory=list)
+    classes: list[ast.ClassDef] = field(default_factory=list)
     main: ast.If | None = None
     consts: dict[str, int | float | bool] = field(default_factory=dict)
     findings: list[Finding] = field(default_factory=list)
@@ -73,6 +74,10 @@ class Program:
         """IR function name -> an object with `.body` (the function's own statements, original nodes)
         and `.lineno`, for the statement numbers of `resume.statements`."""
         out: dict[str, object] = {f.name: f for f in self.functions}
+        for c in self.classes:
+            for st in c.body:
+                if isinstance(st, ast.FunctionDef):
+                    out[f"{c.name}.{st.name}"] = st
         if self.main is not None:
             out[MAIN] = SimpleNamespace(body=self.main.body, lineno=self.main.lineno)
         return out
@@ -106,7 +111,8 @@ def _bound_names(fn: ast.AST) -> set[str]:
 
 class _Checker:
     def __init__(self, program: Program, rep: _Report, arity: dict[str, int], has_math: bool,
-                 has_sys: bool = False, has_time: bool = False, library: bool = False) -> None:
+                 has_sys: bool = False, has_time: bool = False, library: bool = False,
+                 class_names: set[str] | None = None, class_arity: dict[str, int] | None = None) -> None:
         self.p = program
         self.rep = rep
         self.arity = arity
@@ -114,15 +120,18 @@ class _Checker:
         self.has_sys = has_sys
         self.has_time = has_time
         self.library = library
+        self.class_names: set[str] = class_names or set()
+        self.class_arity: dict[str, int] = class_arity or {}
         self.consts = program.consts
         self.shadow: set[str] = set()
 
     # -- one function (a def, or the entry block)
 
-    def function(self, name: str, node: ast.FunctionDef | None, body: list[ast.stmt]) -> None:
+    def function(self, name: str, node: ast.FunctionDef | None, body: list[ast.stmt],
+                 is_method: bool = False) -> None:
         self.rep.function = name
         if node is not None:
-            self.signature(node)
+            self.signature(node, is_method=is_method)
             self.shadow = _bound_names(node)
         else:
             self.shadow = set()
@@ -143,14 +152,16 @@ class _Checker:
             return
         elif _is_list_annotation(ann):
             return
+        elif _is_class_annotation(ann, self.class_names):
+            return
         elif allow_tuple and _is_tuple_annotation(ann):
             return
         else:
             more = ", and a tuple of those as a return type" if allow_tuple else ""
             self.rep.error(ann, "aot/type", ast.unparse(ann), f"the type `{ast.unparse(ann)}` is outside the "
-                           f"AOT mode (int, float, bool, list[int], list[float]{more}, and None as a return type)")
+                           f"AOT mode (int, float, bool, list[int], list[float], compiled classes{more}, and None as a return type)")
 
-    def signature(self, fn: ast.FunctionDef) -> None:
+    def signature(self, fn: ast.FunctionDef, is_method: bool = False) -> None:
         a = fn.args
         for d in fn.decorator_list:
             self.rep.error(d, "aot/decorator", ast.unparse(d), f"the decorator `@{ast.unparse(d)}` is outside "
@@ -159,7 +170,11 @@ class _Checker:
             self.rep.error(fn, "aot/parameters", fn.name, "only plain positional parameters are supported")
         if a.defaults or any(d is not None for d in a.kw_defaults):
             self.rep.error(fn, "aot/parameters", fn.name, "default parameter values are outside the first AOT step")
-        for arg in a.args:
+        for idx, arg in enumerate(a.args):
+            if is_method and idx == 0:
+                if arg.annotation is not None:
+                    self.annotation(arg.annotation, f"parameter `{arg.arg}`", arg)
+                continue
             self.annotation(arg.annotation, f"parameter `{arg.arg}`", arg)
         self.annotation(fn.returns, f"the return of `{fn.name}`", fn, allow_none=True, allow_tuple=True)
 
@@ -225,8 +240,12 @@ class _Checker:
         return isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and not isinstance(t.slice, ast.Slice) \
             and t.value.id not in {"sys"}
 
+    def attribute_target(self, t: ast.expr) -> bool:
+        """`name.field`: a store into a compiled class field."""
+        return bool(self.class_names) and isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name)
+
     def target_ok(self, t: ast.expr) -> bool:
-        if isinstance(t, ast.Name) or self.subscript_target(t):
+        if isinstance(t, ast.Name) or self.subscript_target(t) or self.attribute_target(t):
             return True
         return isinstance(t, (ast.Tuple, ast.List)) and bool(t.elts) and all(isinstance(e, ast.Name) for e in t.elts)
 
@@ -314,7 +333,9 @@ class _Checker:
                     self.rep.error(e, "aot/int-literal", str(v), f"the int literal {v} is outside 64 bits "
                                    "(big integers arrive in a later step)")
                 return
-            kind = "None" if v is None else type(v).__name__
+            if v is None:
+                return
+            kind = type(v).__name__
             if isinstance(v, str):
                 self.rep.error(e, "aot/str", "str", "a string is only supported as a literal argument of print "
                                "(strings arrive in a later step)")
@@ -359,8 +380,10 @@ class _Checker:
             if (isinstance(e.value, ast.Name) and e.value.id == "math" and e.attr in MATH_CONSTANTS
                     and self.has_math and "math" not in self.shadow):
                 return
+            if self.class_names and isinstance(e.value, ast.Name):
+                return
             self.rep.error(e, "aot/attribute", e.attr, f"the attribute access `{ast.unparse(e)}` is outside the AOT mode "
-                           "(`sys.argv`, `sys.maxsize`, `math` constants only)")
+                           "(`sys.argv`, `sys.maxsize`, `math` constants, and compiled class fields only)")
         elif isinstance(e, ast.IfExp):
             self.expr(e.test)
             self.expr(e.body)
@@ -424,6 +447,9 @@ class _Checker:
             elif n in self.arity:
                 if len(c.args) != self.arity[n]:
                     self.rep.error(c, "aot/call", n, f"`{n}` takes {self.arity[n]} argument(s) but {len(c.args)} are given")
+            elif n in self.class_arity:
+                if len(c.args) != self.class_arity[n]:
+                    self.rep.error(c, "aot/call", n, f"`{n}` takes {self.class_arity[n]} argument(s) but {len(c.args)} are given")
             elif n == "float":
                 if len(c.args) != 1:
                     self.rep.error(c, "aot/call", n, "float() with other than one argument is outside the first AOT step")
@@ -496,10 +522,36 @@ class _Checker:
                                f"({', '.join(TIME_FUNCTIONS)})")
             elif len(c.args) != TIME_FUNCTIONS[f.attr]:
                 self.rep.error(c, "aot/time", f"time.{f.attr}", f"`time.{f.attr}` takes {TIME_FUNCTIONS[f.attr]} argument(s)")
+        elif self.class_names and isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name):
+            pass
         else:
             self.rep.error(f, "aot/call", ast.unparse(f), f"the call of `{ast.unparse(f)}` is outside the first AOT step")
         for a in c.args:
             self.expr(a)
+
+
+def _is_class_annotation(ann: ast.expr, class_names: set[str]) -> bool:
+    """`C`, `C | None`, `None | C`, `Optional[C]`, or string forward ref `\"C | None\"`."""
+    if not class_names:
+        return False
+    if isinstance(ann, ast.Constant) and isinstance(ann.value, str):
+        try:
+            ann = ast.parse(ann.value, mode="eval").body
+        except SyntaxError:
+            return False
+    if isinstance(ann, ast.Name):
+        return ann.id in class_names
+    if isinstance(ann, ast.BinOp) and isinstance(ann.op, ast.BitOr):
+        left, right = ann.left, ann.right
+        if isinstance(left, ast.Constant) and left.value is None:
+            return _is_class_annotation(right, class_names)
+        if isinstance(right, ast.Constant) and right.value is None:
+            return _is_class_annotation(left, class_names)
+    if (isinstance(ann, ast.Subscript)
+            and ((isinstance(ann.value, ast.Name) and ann.value.id == "Optional")
+                 or (isinstance(ann.value, ast.Attribute) and ann.value.attr == "Optional"))):
+        return _is_class_annotation(ann.slice, class_names)
+    return False
 
 
 def _is_list_annotation(ann: ast.expr) -> bool:
@@ -580,6 +632,20 @@ def analyze(entry: Path, *, library: bool = False) -> Program:
             if s.name in seen_names:
                 rep.error(s, "aot/redefinition", s.name, f"`{s.name}` is defined twice (first at line {seen_names[s.name]})")
             seen_names.setdefault(s.name, s.lineno)
+        elif isinstance(s, ast.ClassDef):
+            program.classes.append(s)
+            if s.name in seen_names:
+                rep.error(s, "aot/redefinition", s.name, f"`{s.name}` is defined twice (first at line {seen_names[s.name]})")
+            seen_names.setdefault(s.name, s.lineno)
+            for d in s.decorator_list:
+                rep.error(d, "aot/decorator", ast.unparse(d), f"the decorator `@{ast.unparse(d)}` on class `{s.name}` "
+                          "is outside the AOT mode")
+            if s.keywords:
+                rep.error(s, "aot/class", s.name, f"class `{s.name}` has a metaclass or class keyword")
+            bases = [b for b in s.bases if not (isinstance(b, ast.Name) and b.id == "object")]
+            if bases:
+                rep.error(s, "aot/class", s.name, f"class `{s.name}` has a base class `{ast.unparse(bases[0])}` "
+                          "(inheritance is outside PR-O1)")
         elif ((isinstance(s, ast.Assign) and len(s.targets) == 1 and isinstance(s.targets[0], ast.Name))
               or (isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name))):
             name = s.targets[0].id if isinstance(s, ast.Assign) else s.target.id      # type: ignore[union-attr]
@@ -646,9 +712,24 @@ def analyze(entry: Path, *, library: bool = False) -> Program:
                     rep.error(n, "aot/main-rebinds", n.id, f"the `__main__` block assigns `{n.id}`, a name the module "
                               "defines; the first AOT step keeps the block's names local")
 
-    # -- functions
+    # -- classes and functions
+    class_names = {c.name for c in program.classes}
+    class_arity: dict[str, int] = {}
+    for c in program.classes:
+        init_fn = next((st for st in c.body if isinstance(st, ast.FunctionDef) and st.name == "__init__"), None)
+        if init_fn is not None:
+            class_arity[c.name] = max(0, len(init_fn.args.args) - 1)
+        else:
+            class_arity[c.name] = sum(1 for st in c.body if isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name))
     arity = {f.name: len(f.args.args) for f in program.functions}
-    checker = _Checker(program, rep, arity, has_math, has_sys, has_time, library)
+    checker = _Checker(program, rep, arity, has_math, has_sys, has_time, library,
+                       class_names=class_names, class_arity=class_arity)
+    for c in program.classes:
+        for st in c.body:
+            if isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name) and st.value is None:
+                checker.annotation(st.annotation, f"field `{c.name}.{st.target.id}`", st)
+            elif isinstance(st, ast.FunctionDef):
+                checker.function(f"{c.name}.{st.name}", st, st.body, is_method=True)
     for f in program.functions:
         checker.function(f.name, f, f.body)
     if program.main is not None:

@@ -1422,6 +1422,12 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     constants (`floor`, `ceil`, `trunc`, `pow`, `log2`, `log10`, `asin`, `acos`, `atan`, `sinh`, `cosh`,
     `tanh`, `isnan`, `isinf`, `isfinite`, `copysign`, `fmod`; `pi`, `e`, `inf`, `nan`, `tau`), and the
     `time` module (`perf_counter`, `monotonic`, `time`, `sleep`).
+  - **Tier O PR-O1 (#486)** (leader review 2026-11-20, not owner-confirmed): adds headerless compiled
+    classes (`struct tpa_cls_<C>` with `tpa_rc_t rc` and typed fields), `C | None`, `is` / `is not`,
+    `__init__` and instance methods, tail-loop release for self-referential fields, a single
+    whole-program immutability analysis shared by the cycle-freedom proof (`aot/cycle-possible`),
+    reference-counting elision rules, and library-mode safety (`aot/library-mutable-class`), compiling
+    `benchmarks/typedpython/py/binary_trees.py` with 0 `aot-check` findings.
 
 ---
 

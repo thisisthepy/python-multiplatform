@@ -1277,7 +1277,7 @@ class _Checker:
             if callee.returns in ir.ARRAYS and not here:
                 self.error(ESCAPE, f"the list '{e.function}' returns is used as a value (a returned list may only be "
                                    f"assigned to a list local or returned)")
-            if callee.returns is Type.OBJ and not self.unpacking:
+            if callee.returns is Type.OBJ and callee.return_cls is None and not self.unpacking:
                 self.error(TYPE, f"'{e.function}' returns a tuple, which only an Unpack may use")
         if callee is None:
             self.error(UNRESOLVED, f"call of '{e.function}', which is not a compiled function of "
@@ -1579,6 +1579,15 @@ class _Checker:
 
     def e_FieldGet(self, e: FieldGet, state: _State) -> ir.Expr:
         obj = self.obj_operand(e.obj, state, f"object of .{e.field}")
+        if self.aot:
+            expected = Type.OBJ
+            if self.known_field(e.cls, e.field, f"FieldGet .{e.field}"):
+                decl = self.classes[e.cls]
+                fd = next((f for f in decl.field_decls if f.name == e.field), None)
+                if fd is not None:
+                    expected = fd.type
+            self.result(e, expected)
+            return dataclasses.replace(e, obj=obj)
         self.result(e, Type.OBJ)
         if self.known_field(e.cls, e.field, f"FieldGet .{e.field}"):
             self.proved(obj, e.cls, f"FieldGet {e.cls}.{e.field}")
@@ -1589,6 +1598,28 @@ class _Checker:
         return dataclasses.replace(e, obj=obj)
 
     def e_New(self, e: New, state: _State) -> ir.Expr:
+        if self.aot:
+            args = self.args(e.args, state, f"New {e.cls}")
+            self.result(e, Type.OBJ)
+            if self.known_class(e.cls, "New"):
+                decl = self.classes[e.cls]
+                init_sig = self.sigs.get(f"{e.cls}.__init__")
+                if init_sig is not None:
+                    expected_params = init_sig.params[1:]
+                    if len(args) != len(expected_params):
+                        self.error(CLASS, f"New of '{e.cls}' has {len(args)} argument(s) for "
+                                          f"{len(expected_params)} parameter(s)")
+                    else:
+                        for k, (a, p) in enumerate(zip(args, expected_params)):
+                            self.slot(a, p.type, f"argument {k + 1} of New {e.cls}")
+                else:
+                    if len(args) != len(decl.field_decls):
+                        self.error(CLASS, f"New of '{e.cls}' has {len(args)} argument(s) for "
+                                          f"{len(decl.field_decls)} field(s)")
+                    else:
+                        for k, (a, fd) in enumerate(zip(args, decl.field_decls)):
+                            self.slot(a, fd.type, f"argument {k + 1} of New {e.cls}")
+            return dataclasses.replace(e, args=args)
         self.slow_user.append(f"New {e.cls} (calls the class after a class change)")
         self.shared.append(f"the class global of New {e.cls}")
         args = self.args(e.args, state, f"New {e.cls}")
@@ -1977,6 +2008,16 @@ class _Checker:
     def s_FieldSet(self, s: FieldSet, state: _State):
         obj = self.obj_operand(s.obj, state, f"object of .{s.field} =")
         value = self.expr(s.value, state)
+        if self.aot:
+            expected = Type.OBJ
+            if self.known_field(s.cls, s.field, f"FieldSet .{s.field}"):
+                decl = self.classes[s.cls]
+                fd = next((f for f in decl.field_decls if f.name == s.field), None)
+                if fd is not None:
+                    expected = fd.type
+            self.slot(value, expected, f"value stored into .{s.field}")
+            self.effects.append(f"FieldSet .{s.field} (a store)")
+            return dataclasses.replace(s, obj=obj, value=value), state
         self.slot(value, Type.OBJ, f"value stored into .{s.field}")
         if self.known_field(s.cls, s.field, f"FieldSet .{s.field}"):
             self.proved(obj, s.cls, f"FieldSet {s.cls}.{s.field}")

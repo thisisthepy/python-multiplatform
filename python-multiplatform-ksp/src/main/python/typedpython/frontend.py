@@ -240,6 +240,8 @@ class _Signature:
     tuple_ellipsis: bool = False   # `tuple[int, ...]`: a variable length
     return_annotation: str = ""
     owner: str | None = None       # the compiled class this is a method of (ir.Function.owner)
+    return_cls: str | None = None
+    return_optional: bool = False
 
     @property
     def qname(self) -> str:
@@ -268,7 +270,7 @@ def lower(path: Path, *, aot: bool = False) -> ir.Module:
         info.aot_time = len(time_bound) == 1 and info.imports.get("time") == "time"
 
     skipped: dict[str, str] = {}
-    class_decls, class_skips = _classes(tree, source, info)
+    class_decls, class_skips = _classes(tree, source, info, aot)
     info.classes = class_decls
     skipped.update(class_skips)
     signatures: dict[str, _Signature] = {}
@@ -288,7 +290,7 @@ def lower(path: Path, *, aot: bool = False) -> ir.Module:
                 marked.add(node.name)
             if fastmath:
                 fastmath_marked.add(node.name)
-    for owner, node, reason in _method_targets(tree, info):
+    for owner, node, reason in _method_targets(tree, info, aot):
         q = f"{owner}.{node.name}"
         if reason is not None:
             skipped[q] = reason
@@ -309,7 +311,8 @@ def lower(path: Path, *, aot: bool = False) -> ir.Module:
     # (purity is the greatest fixpoint through calls, may_deopt the least).
     env: dict[str, ir.Function] = {
         name: ir.Function(name=name, params=s.params, returns=s.returns, locals={}, body=(), pure=True,
-                    may_deopt=False, source_line=s.node.lineno, owner=s.owner)
+                    may_deopt=False, source_line=s.node.lineno, owner=s.owner,
+                    return_cls=s.return_cls, return_optional=s.return_optional)
         for name, s in signatures.items()
     }
     results: dict[str, ir.Function | str] = {}
@@ -686,17 +689,22 @@ def is_opted_in(path: Path) -> bool:
 
 
 def _classes(
-    tree: ast.Module, source: str, info: _ModuleInfo,
+    tree: ast.Module, source: str, info: _ModuleInfo, aot: bool = False,
 ) -> tuple[dict[str, ir.ClassDecl], dict[str, str]]:
     decls: dict[str, ir.ClassDecl] = {}
     skipped: dict[str, str] = {}
+    known_names = {
+        node.name for node in tree.body
+        if isinstance(node, ast.ClassDef)
+        and (aot or any(isinstance(d, ast.Name) and d.id == "compiled" for d in node.decorator_list))
+    }
     for node in tree.body:
         if not isinstance(node, ast.ClassDef):
             continue
         marked = any(isinstance(d, ast.Name) and d.id == "compiled" for d in node.decorator_list)
-        if not marked:
+        if not marked and not aot:
             continue
-        result = _class_decl(node, tree, info)
+        result = _class_decl(node, tree, info, aot=aot, known_names=known_names)
         if isinstance(result, str):
             skipped[node.name] = result
         else:
@@ -704,7 +712,31 @@ def _classes(
     return decls, skipped
 
 
-def _class_decl(node: ast.ClassDef, tree: ast.Module, info: _ModuleInfo) -> ir.ClassDecl | str:
+def _aot_field_decl(fname: str, ann: ast.expr, known_names: set[str]) -> ir.FieldDecl | None:
+    """Resolve an AOT class field annotation to an `ir.FieldDecl`."""
+    kind = _annotation_kind(ann)
+    if kind in SCALAR_KIND:
+        return ir.FieldDecl(fname, SCALAR_KIND[kind])
+    if kind in ARRAY_KIND:
+        return ir.FieldDecl(fname, ARRAY_KIND[kind])
+    # class or class | None (including string forward references)
+    stripped = kind.strip("'\"")
+    optional = False
+    for prefix in ("Optional[", "typing.Optional["):
+        if stripped.startswith(prefix) and stripped.endswith("]"):
+            stripped, optional = stripped[len(prefix):-1].strip(), True
+    parts = [p.strip().strip("'\"") for p in stripped.split("|")]
+    named = [p for p in parts if p != "None"]
+    if len(named) == 1 and named[0] in known_names:
+        optional = optional or ("None" in parts)
+        return ir.FieldDecl(fname, Type.OBJ, cls=named[0], optional=optional)
+    return None
+
+
+def _class_decl(
+    node: ast.ClassDef, tree: ast.Module, info: _ModuleInfo,
+    aot: bool = False, known_names: set[str] | None = None,
+) -> ir.ClassDecl | str:
     """The `ClassDecl` of a class whose layout is fixed in CPython too, else why it is not one."""
     name, at = node.name, f"line {node.lineno}: class `{node.name}`"
     other = [d for d in node.decorator_list if not (isinstance(d, ast.Name) and d.id == "compiled")]
@@ -740,6 +772,7 @@ def _class_decl(node: ast.ClassDef, tree: ast.Module, info: _ModuleInfo) -> ir.C
 
     slots: ast.expr | None = None
     annotated: list[str] = []
+    annotated_anns: dict[str, ast.expr] = {}
     init: ast.FunctionDef | None = None
     has_del = False
     for st in node.body:
@@ -753,6 +786,7 @@ def _class_decl(node: ast.ClassDef, tree: ast.Module, info: _ModuleInfo) -> ir.C
             slots = st.value
         elif isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name) and st.value is None:
             annotated.append(st.target.id)
+            annotated_anns[st.target.id] = st.annotation
         elif isinstance(st, ast.FunctionDef):
             if st.name in SLOT_ACCESS_DUNDERS:
                 return f"{at}: defines `{st.name}`, which runs user code on slot access"
@@ -764,18 +798,31 @@ def _class_decl(node: ast.ClassDef, tree: ast.Module, info: _ModuleInfo) -> ir.C
             return (f"{at}: class body statement `{_src(st).splitlines()[0]}` (line {st.lineno}) "
                     "is not supported (only `__slots__`, bare field annotations and methods)")
     if slots is None:
-        return f"{at}: has no `__slots__`"
-    if not (isinstance(slots, (ast.Tuple, ast.List)) and all(
-            isinstance(e, ast.Constant) and isinstance(e.value, str) for e in slots.elts)):
-        return f"{at}: `__slots__` is not a literal tuple or list of strings"
-    fields = tuple(e.value for e in slots.elts)  # type: ignore[attr-defined]
-    twice = next((f for f in fields if fields.count(f) > 1), None)
-    if twice is not None:
-        return f"{at}: `__slots__` lists `{twice}` twice"
-    if set(fields) != set(annotated):
-        return (f"{at}: `__slots__` {fields} does not equal its annotated fields "
-                f"{tuple(dict.fromkeys(annotated))}")
-    return ir.ClassDecl(name, fields, init is not None and _trivial_init(init, fields), has_del)
+        if not aot:
+            return f"{at}: has no `__slots__`"
+        fields = tuple(dict.fromkeys(annotated))
+    else:
+        if not (isinstance(slots, (ast.Tuple, ast.List)) and all(
+                isinstance(e, ast.Constant) and isinstance(e.value, str) for e in slots.elts)):
+            return f"{at}: `__slots__` is not a literal tuple or list of strings"
+        fields = tuple(e.value for e in slots.elts)  # type: ignore[attr-defined]
+        twice = next((f for f in fields if fields.count(f) > 1), None)
+        if twice is not None:
+            return f"{at}: `__slots__` lists `{twice}` twice"
+        if set(fields) != set(annotated):
+            return (f"{at}: `__slots__` {fields} does not equal its annotated fields "
+                    f"{tuple(dict.fromkeys(annotated))}")
+    field_decls: tuple[ir.FieldDecl, ...] = ()
+    if aot:
+        decls_list: list[ir.FieldDecl] = []
+        names_set = known_names if known_names is not None else {name}
+        for f in fields:
+            fd = _aot_field_decl(f, annotated_anns[f], names_set)
+            if fd is None:
+                return f"{at}: field `{f}` has unsupported AOT type `{_src(annotated_anns[f])}`"
+            decls_list.append(fd)
+        field_decls = tuple(decls_list)
+    return ir.ClassDecl(name, fields, init is not None and _trivial_init(init, fields), has_del, field_decls)
 
 
 def _assigned_attributes(n: ast.AST) -> list[ast.Attribute]:
@@ -877,7 +924,7 @@ def _targets(
 
 
 def _method_targets(
-    tree: ast.Module, info: _ModuleInfo,
+    tree: ast.Module, info: _ModuleInfo, aot: bool = False,
 ) -> list[tuple[str, ast.FunctionDef, str | None]]:
     """(class, def, reason it stays interpreted or None) for every `def` in the body of a class that
     is a `ClassDecl` (SPEC N-11, #155). Only a plain instance method is a candidate: no decorator,
@@ -904,7 +951,7 @@ def _method_targets(
             if st.decorator_list:
                 reason = (f"{at}: decorator `@{_src(st.decorator_list[0])}` on a method is not "
                           "supported (a plain instance method only)")
-            elif st.name.startswith("__"):
+            elif st.name.startswith("__") and not (aot and st.name == "__init__"):
                 reason = (f"{at}: `{st.name}` is a dunder or name-mangled method; it stays "
                           "interpreted (the interpreter runs it)")
             elif counts[st.name] > 1:
@@ -971,7 +1018,13 @@ def _signature(fn: ast.FunctionDef, classes: dict[str, ir.ClassDecl] | None = No
                 isinstance(p, ir.ArrayParam) and p.buffer == "numpy" for p in params):
             returns = Type.OBJ      # #220: the interpreter returns np.float64 / np.int64 / np.bool
     elements, ellipsis = _tuple_annotation(fn.returns)
-    return _Signature(fn, tuple(params), returns, elements, ellipsis, _src(fn.returns), owner)
+    ret_cls, ret_opt = None, False
+    if returns == Type.OBJ and classes:
+        rc = _class_of(_annotation_kind(fn.returns), classes)
+        if rc is not None:
+            ret_cls, ret_opt = rc
+    return _Signature(fn, tuple(params), returns, elements, ellipsis, _src(fn.returns), owner,
+                      return_cls=ret_cls, return_optional=ret_opt)
 
 
 def _tuple_annotation(annotation: ast.expr) -> tuple[tuple[Type, ...] | None, bool]:
@@ -1323,11 +1376,27 @@ class _Lowerer:
                                            "cannot be read once at entry (#255)")
             if pure:
                 self.deopts = True
+        local_classes: dict[str, tuple[str, bool]] = {}
+        if self.info.aot:
+            for name, ltype in locals_.items():
+                if ltype == Type.OBJ:
+                    cls, _ = self.cls_of_name(name)
+                    if cls is not None:
+                        kinds = list(self.annotations.get(name, []))
+                        if name not in self.annotations:
+                            kinds += self.inferred.get(name, [])
+                        opt = False
+                        for _, k in kinds:
+                            c = _class_of(k, self.info.classes)
+                            if c is not None and c[1]:
+                                opt = True
+                        local_classes[name] = (cls, opt)
         fn = ir.Function(
             name=self.sig.qname, params=params, returns=self.sig.returns, locals=locals_, body=body,
             pure=pure, may_deopt=self.deopts, source_line=self.fn.lineno,
             entry_globals=tuple(ir.Param(n, t) for n, t in self.entry_used.items()),
-            owner=self.sig.owner)
+            owner=self.sig.owner, return_cls=self.sig.return_cls,
+            return_optional=self.sig.return_optional, local_classes=local_classes)
         if self.info.aot:
             return fn       # nothing is redone in an interpreter, so there is no continuation to write
         # SPEC N-8 (#152): a snapshot holder gets a Python continuation per loop (OSR-style exit).
@@ -1845,9 +1914,16 @@ class _Lowerer:
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
             return None
         decl = self.info.classes.get(node.func.id)
-        if decl is None or not decl.trivial_init or self.is_local(decl.name) \
-                or node.keywords or any(isinstance(a, ast.Starred) for a in node.args) \
-                or len(node.args) != len(decl.fields):
+        if decl is None or self.is_local(decl.name) \
+                or node.keywords or any(isinstance(a, ast.Starred) for a in node.args):
+            return None
+        if self.info.aot:
+            init_fn = self.env.get(f"{decl.name}.__init__")
+            expected = len(init_fn.params) - 1 if init_fn is not None else len(decl.fields)
+            if len(node.args) != expected:
+                return None
+            return decl.name
+        if not decl.trivial_init or len(node.args) != len(decl.fields):
             return None
         return decl.name
 
@@ -1886,6 +1962,8 @@ class _Lowerer:
         if name in self.params:
             p = self.params[name]
             if isinstance(p, ir.Param) and p.cls is not None:
+                if self.info.aot:
+                    return p.cls, True
                 rebound = any(b.how != "annotation" for b in self.bindings.get(name, []))
                 return p.cls, not p.optional and not rebound
             return None, False
@@ -1897,7 +1975,7 @@ class _Lowerer:
                 kinds += self.inferred.get(name, [])
             found = {_class_of(k, classes) for _, k in kinds}
             if len(found) == 1 and None not in found:
-                return next(iter(found))[0], False  # type: ignore[index]
+                return next(iter(found))[0], self.info.aot  # type: ignore[index]
         return None, False
 
     def field_target(self, node: ast.Attribute) -> tuple[ir.Local, str, bool] | None:
@@ -1914,6 +1992,11 @@ class _Lowerer:
         if found is None:
             return None
         obj, cls, exact = found
+        if self.info.aot:
+            decl = self.info.classes[cls]
+            fd = next((f for f in decl.field_decls if f.name == node.attr), None)
+            ftype = fd.type if fd is not None else Type.OBJ
+            return ir.FieldGet(ftype, obj, cls, node.attr)
         if not exact:
             if self.impure_mode:
                 raise Skip(node.lineno, f"`{_src(node)}`: the exact type of `{obj.name}` is not "
@@ -1928,6 +2011,14 @@ class _Lowerer:
         if found is None:
             return None
         obj, cls, exact = found
+        if self.info.aot:
+            decl = self.info.classes[cls]
+            fd = next((f for f in decl.field_decls if f.name == target.attr), None)
+            value = self.value(value_node)
+            if fd is not None and fd.type == Type.F64 and value.type == Type.I64:
+                value = ir.ToFloat(Type.F64, value)
+            self.impure = True
+            return self.take() + [ir.FieldSet(obj, cls, target.attr, value)]
         if not exact:
             raise Skip(target.lineno, f"`{_src(target)} = ...`: the exact type of `{obj.name}` is "
                                       f"not proved to be `{cls}`, and a store cannot be guarded by "
@@ -2638,6 +2729,8 @@ class _Lowerer:
             new_cls = self.new_class(node)
             if new_cls is not None:
                 self.hoist_ok = False
+                if self.info.aot:
+                    return ir.New(Type.OBJ, new_cls, tuple(self.value(a) for a in node.args))
                 return ir.New(Type.OBJ, new_cls,
                               tuple(self.boxed(self.value(a), a) for a in node.args))
             if not self.is_local(name) and name in self.env:
@@ -2847,7 +2940,9 @@ class _Lowerer:
                 args.append(ir.Local(p.type, a.id))
             else:
                 args.append(self.value(a))
-        direct = all(isinstance(p, ir.ArrayParam) or (p.type != Type.OBJ and e.type == p.type)
+        direct = all(isinstance(p, ir.ArrayParam)
+                     or (p.type != Type.OBJ and e.type == p.type)
+                     or (isinstance(p, ir.Param) and p.cls is not None and e.type == Type.OBJ)
                      for p, e in zip(callee.params, args))
         if not direct and any(isinstance(p, ir.ArrayParam) for p in callee.params):
             raise Skip(node.lineno, f"the arguments of `{name}` do not match its parameter types, so the call is not a "
@@ -2870,16 +2965,25 @@ class _Lowerer:
         (`CallObject(GetAttr(obj, m), args)`, CPython's own lookup, which finds the descriptor the
         module installed) lowers the call, decided before any argument is lowered. A callee with
         entry globals is left to the generic path too (its guard reads would need the caller's)."""
-        if self.impure_mode or not (isinstance(func.value, ast.Name) and self.is_local(func.value.id)):
+        if (self.impure_mode and not self.info.aot) \
+                or not (isinstance(func.value, ast.Name) and self.is_local(func.value.id)):
             return None
         cls, _ = self.cls_of_name(func.value.id)
         callee = self.env.get(f"{cls}.{func.attr}") if cls is not None else None
-        if callee is None or callee.owner != cls or not callee.pure or callee.entry_globals \
+        if callee is None or callee.owner != cls \
+                or (not self.info.aot and (not callee.pure or callee.entry_globals)) \
                 or len(node.args) != len(callee.params) - 1 \
-                or any(isinstance(p, ir.ArrayParam) for p in callee.params) \
+                or (not self.info.aot and any(isinstance(p, ir.ArrayParam) for p in callee.params)) \
                 or self.local_type(func.value.id, node.lineno) != Type.OBJ:
             return None
         assert cls is not None
+        if self.info.aot:
+            recv: ir.Expr = ir.Local(Type.OBJ, func.value.id)
+            self.hoist_ok = False
+            args = [recv] + [self.value(a) for a in node.args]
+            if not callee.pure:
+                self.impure = True
+            return ir.Call(callee.returns, f"{cls}.{func.attr}", tuple(args))
         recv = ir.CheckMethod(Type.OBJ, ir.Local(Type.OBJ, func.value.id), cls, func.attr)
         self.hoist_ok = False
         args = [recv] + [self.value(a) for a in node.args]

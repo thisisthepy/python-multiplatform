@@ -94,7 +94,7 @@ from typedpython import ir, resume
 from typedpython.aot import AotError, LibraryFiles, _lower
 from typedpython.aot import emit as emit_mod
 from typedpython.aot.emit import CTYPE, LIST, mangle
-from typedpython.aot.program import analyze
+from typedpython.aot.program import _is_class_annotation, analyze
 from typedpython.aotcheck import Finding
 from typedpython.ir import Type
 
@@ -193,11 +193,14 @@ def export_findings(program, exports: list[str]) -> tuple[list[Finding], dict[st
             continue
         problems = []
         a = fn.args
+        class_names = {c.name for c in getattr(program, "classes", ())}
         for arg in a.args:
-            if _scalar_or_list(arg.annotation) is None:
+            if _scalar_or_list(arg.annotation) is None and not (
+                    arg.annotation is not None and _is_class_annotation(arg.annotation, class_names)):
                 shown = ast.unparse(arg.annotation) if arg.annotation is not None else "no annotation"
                 problems.append(f"parameter `{arg.arg}` ({shown})")
-        if _return_types(fn.returns) is None:
+        if _return_types(fn.returns) is None and not (
+                fn.returns is not None and _is_class_annotation(fn.returns, class_names)):
             shown = ast.unparse(fn.returns) if fn.returns is not None else "no annotation"
             problems.append(f"the return ({shown})")
         if problems:
@@ -848,6 +851,23 @@ class _Plan:
             fn = g.fns.get(name)
             if fn is None:
                 continue                    # not proved: `_lower` reports it
+            mut_cls = [
+                q.cls for q in fn.params
+                if isinstance(q, ir.Param) and q.type is Type.OBJ and q.cls is not None
+                and not g.cls_analysis.class_immutable_for_library(q.cls)
+            ]
+            if (fn.returns is Type.OBJ and fn.return_cls is not None
+                    and not g.cls_analysis.class_immutable_for_library(fn.return_cls)):
+                mut_cls.append(fn.return_cls)
+            if mut_cls:
+                for cname in dict.fromkeys(mut_cls):
+                    found.append(_finding(
+                        rel, node.lineno, "aot/library-mutable-class", cname,
+                        f"`{name}` cannot export mutable class `{cname}` in a library build (TPA_THREADS "
+                        "requires immutable-after-init classes until Tier T adds per-object locking)",
+                        name,
+                    ))
+                continue
             kinds = g.tuple_kinds(fn)
             ok = (all((isinstance(q, ir.Param) and q.type in CTYPE and q.cls is None)
                       or (isinstance(q, ir.ArrayParam) and q.type in LIST and q.buffer is None) for q in fn.params)

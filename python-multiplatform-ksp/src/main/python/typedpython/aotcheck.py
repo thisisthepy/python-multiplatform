@@ -414,8 +414,6 @@ class _Pass(ast.NodeVisitor):
                            f"the decorator `@{ast.unparse(d)}` is outside the AOT subset (only `@compiled`)")
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        self.pending("O", "aot/class", node.name, node,
-                     f"class `{node.name}` is tier O (objects), not compiled without CPython yet")
         self.decorators(node)
         for b in node.bases:
             if not (isinstance(b, ast.Name) and b.id == "object"):
