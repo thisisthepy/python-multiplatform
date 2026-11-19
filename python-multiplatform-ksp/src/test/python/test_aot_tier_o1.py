@@ -284,6 +284,32 @@ def test_cycle_possible_init_self_escape_rejected(tmp_path: Path):
     assert any(f.rule == "aot/cycle-possible" and f.name == "EscNode" for f in exc.value.findings)
 
 
+def test_cycle_possible_init_self_alias_store_conservatively_rejected(tmp_path: Path):
+    """Assigning through `alias = self; alias.nxt = ...` inside `__init__` is conservatively
+    classified as a mutating store (only direct `self.<field> = ...` is exempted)."""
+    p = _write(tmp_path, """
+    class AliasNode:
+        __slots__ = ("nxt",)
+        nxt: "AliasNode | None"
+
+        def __init__(self, nxt: "AliasNode | None") -> None:
+            alias: AliasNode = self
+            alias.nxt = nxt
+
+
+    def main() -> None:
+        a: AliasNode = AliasNode(None)
+        print(a is a)
+
+
+    if __name__ == "__main__":
+        main()
+    """)
+    with pytest.raises(aot.AotError) as exc:
+        aot.generate(p)
+    assert any(f.rule == "aot/cycle-possible" and f.name == "AliasNode" for f in exc.value.findings)
+
+
 def test_library_mutable_class_rejected(tmp_path: Path):
     p = _write(tmp_path, """
     class Counter:
