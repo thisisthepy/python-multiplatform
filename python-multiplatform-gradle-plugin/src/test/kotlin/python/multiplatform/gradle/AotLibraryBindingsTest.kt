@@ -1,5 +1,6 @@
 package python.multiplatform.gradle
 
+import groovy.json.JsonSlurper
 import org.gradle.api.GradleException
 import org.gradle.testfixtures.ProjectBuilder
 import kotlin.test.Test
@@ -385,5 +386,114 @@ class AotLibraryBindingsTest {
 
         json.writeText(description(abi = 1))
         assertFailsWith<GradleException> { task.generate() }
+    }
+
+    // --- GraalVM native-image reachability metadata (#456) -----------------------------------------------
+
+    private fun parseDowncallsFromMetadata(json: String): Set<AotForeignDescriptor> {
+        val start = json.indexOf("\"downcalls\": [")
+        assertTrue(start >= 0, "reachability metadata has no `downcalls` array:\n$json")
+        var depth = 0
+        var end = -1
+        for (i in json.indexOf('[', start) until json.length) {
+            if (json[i] == '[') depth++
+            if (json[i] == ']') {
+                depth--
+                if (depth == 0) {
+                    end = i
+                    break
+                }
+            }
+        }
+        assertTrue(end > start, "reachability metadata's `downcalls` array is not closed")
+        val body = json.substring(start, end)
+        return Regex("""\{\s*"returnType"\s*:\s*"(\w+)"\s*,\s*"parameterTypes"\s*:\s*\[([^]]*)]\s*}""")
+            .findAll(body)
+            .mapTo(LinkedHashSet()) { match ->
+                AotForeignDescriptor(
+                    match.groupValues[1],
+                    match.groupValues[2].split(',').map { it.trim().trim('"') }.filter { it.isNotEmpty() },
+                )
+            }
+    }
+
+    @Test
+    fun theReachabilityMetadataDeclaresEveryDowncallDescriptorOfTheGeneratedHandles() {
+        for (json in listOf(description(), withIntList())) {
+            val desc = parseAotLibraryDescription(json)
+            val kit = render(json = json).getValue("Kit.kt")
+            val handleDescriptors = Regex("""rt\.downcall\("[^"]+",\s*"([^"]+)"\)""")
+                .findAll(kit)
+                .mapTo(LinkedHashSet()) { aotParseDescriptorSignature(it.groupValues[1]) }
+            assertTrue(handleDescriptors.isNotEmpty(), "no downcall handles found in Kit.kt")
+
+            val metadata = renderAotReachabilityMetadata(desc)
+            val metadataDescriptors = parseDowncallsFromMetadata(metadata)
+            assertEquals(handleDescriptors, metadataDescriptors)
+
+            // Negative control (AGENTS.md 8): dropping any one descriptor leaves a handle unmatched.
+            for (dropped in metadataDescriptors) {
+                val withoutOne = metadataDescriptors - dropped
+                assertTrue(
+                    handleDescriptors.any { it !in withoutOne },
+                    "check stayed green after dropping $dropped",
+                )
+            }
+        }
+    }
+
+    @Test
+    fun theReachabilityMetadataRegistersTheForeignReflectionSurface() {
+        val ffm = render().getValue("AotFfm.kt")
+        assertFalse(ffm.contains("foreign(\""), "AotFfm must use Class.forName string literals for native-image analysis")
+        val classLiterals = Regex("""Class\.forName\("([^"]+)"\)""")
+            .findAll(ffm)
+            .mapTo(LinkedHashSet()) { it.groupValues[1] }
+        assertEquals(11, classLiterals.size, "expected 11 java.lang.foreign Class.forName literals: $classLiterals")
+
+        val metadata = renderAotReachabilityMetadata(parseAotLibraryDescription(description()))
+        @Suppress("UNCHECKED_CAST")
+        val parsed = JsonSlurper().parseText(metadata) as Map<String, Any?>
+        @Suppress("UNCHECKED_CAST")
+        val reflection = (parsed["reflection"] as List<Map<String, Any?>>).associateBy { it["type"] as String }
+
+        for (cls in classLiterals) {
+            val entry = reflection[cls]
+            assertTrue(entry != null, "reflection metadata is missing $cls")
+            assertEquals(true, entry["allPublicMethods"], "$cls should set allPublicMethods=true")
+        }
+        assertEquals(true, reflection["java.lang.foreign.MemorySegment"]?.get("allPublicFields"))
+        assertEquals(true, reflection["java.lang.foreign.ValueLayout"]?.get("allPublicFields"))
+        assertTrue("java.lang.foreign.Linker\$Option[]" in reflection, "array type for ReflectArray.newInstance missing")
+        assertTrue("java.lang.foreign.MemoryLayout[]" in reflection, "array type for ReflectArray.newInstance missing")
+    }
+
+    @Test
+    fun theTaskWritesReachabilityMetadataIntoResourceOutputDirectoryWhenConfigured() {
+        val project = ProjectBuilder.builder().build()
+        val json = project.file("kit.json").apply { writeText(withIntList()) }
+        val srcOut = project.layout.buildDirectory.dir("generated/aot/kit")
+        val resOut = project.layout.buildDirectory.dir("generated/aot-resources/kit")
+        val task = project.tasks.register("generateKitWithMetadata", GenerateAotLibraryBindingsTask::class.java) {
+            descriptionFile.set(json)
+            packageName.set("fixture.kit")
+            objectName.set("Kit")
+            outputDirectory.set(srcOut)
+            resourceOutputDirectory.set(resOut)
+        }.get()
+        task.generate()
+
+        val metadataFile = resOut.get().asFile.resolve("META-INF/native-image/fixture.kit/kit/reachability-metadata.json")
+        assertTrue(metadataFile.isFile, "expected $metadataFile to be generated")
+        val metadata = metadataFile.readText(Charsets.UTF_8)
+        assertEquals(
+            aotDowncallDescriptors(parseAotLibraryDescription(withIntList())).toSet(),
+            parseDowncallsFromMetadata(metadata),
+        )
+
+        val stale = resOut.get().asFile.resolve("stale.txt").apply { writeText("old") }
+        task.generate()
+        assertFalse(stale.exists(), "stale resource file should be cleaned on re-run")
+        assertTrue(metadataFile.isFile)
     }
 }

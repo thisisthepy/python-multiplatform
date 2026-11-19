@@ -517,17 +517,21 @@ The helper and the list classes have fixed names, so each library takes its own 
 **How the fixture uses it.** `python-multiplatform-ksp/fixtures/aot` declares the bindings plugin with
 `apply false` and registers the task class itself, so no KSP, no `PYTHONHOME` staging and no dependency
 on `python-multiplatform` come with it. A front-end-only Python step writes the JSON, the task
-generates Kotlin from it into the test source set, and `python -m typedpython aot-lib` links the
-library as a dependency of the test task only. The test (`fixture.aot.AotLibraryCallTest`) calls
-the `nbody` kernels and a small library of failures and list functions, compares floats bit for bit
-with CPython, checks exception classes and messages, runs two threads, and asserts that no class of
-the CPython-embedding library is on the classpath and that the process loads no libpython (Linux: the
-process's maps; macOS: `vmmap` when it can examine the JVM, otherwise the classpath check only).
+generates Kotlin from it into the test source set (and, via `resourceOutputDirectory`, writes
+`META-INF/native-image/<packageName>/<prefix>/reachability-metadata.json` with every foreign downcall
+descriptor and the `java.lang.foreign` reflection surface for GraalVM native-image without a tracing
+agent), and `python -m typedpython aot-lib` links the library as a dependency of the test task only. The
+test (`fixture.aot.AotLibraryCallTest`) calls the `nbody` kernels and a small library of failures and
+list functions, compares floats bit for bit with CPython, checks exception classes and messages, runs two
+threads, checks that every bound `MethodHandle` descriptor matches the generated metadata, and asserts
+that no class of the CPython-embedding library is on the classpath and that the process loads no
+libpython (Linux: the process's maps; macOS: `vmmap` when it can examine the JVM, otherwise the
+classpath check only). The same 25 scenarios are also compiled by `aotNativeCompile` into a standalone
+GraalVM native image (`AotNativeImageMainKt`, verified by `aotNativeRun` in `.github/workflows/typedpython.yml`
+with `JAVA_HOME` and `PYTHONHOME` removed, #456).
 
 **Not done.** Other platforms (Android `RegisterNatives`, Kotlin/Native cinterop, wasm); packaging of
-the library and the generated Kotlin into an app (waits for the owner decision of #25 step 3); the
-GraalVM native image (#456: the descriptors are not yet declared for native-image registration, so the
-generated wrappers are not shown to work there, and tier K stays open until they are, AGENTS.md 13).
+the library and the generated Kotlin into an app (waits for the owner decision of #25 step 3).
 
 ### 8.4 Python calling Kotlin (the upcall)
 

@@ -171,6 +171,99 @@ internal fun aotCarrier(type: String): Char = when (type) {
 internal fun aotDescriptor(f: AotFunction): String =
     "(" + f.params.joinToString("") { aotCarrier(it.type).toString() } + "J".repeat(f.returns.size) + ")I"
 
+/** A GraalVM foreign downcall descriptor in carrier names (`long`, `double`, `byte`, `int`, `void`). */
+data class AotForeignDescriptor(val returnType: String, val parameterTypes: List<String>)
+
+private fun carrierName(code: Char): String = when (code) {
+    'J' -> "long"
+    'D' -> "double"
+    'B' -> "byte"
+    'I' -> "int"
+    'V' -> "void"
+    else -> fail("unknown carrier type `$code`")
+}
+
+internal fun aotParseDescriptorSignature(signature: String): AotForeignDescriptor {
+    val close = signature.indexOf(')')
+    require(signature.startsWith("(") && close > 0 && close == signature.length - 2) {
+        "malformed descriptor signature `$signature`"
+    }
+    val params = signature.substring(1, close).map(::carrierName)
+    return AotForeignDescriptor(carrierName(signature[close + 1]), params)
+}
+
+/**
+ * Every distinct foreign downcall descriptor the generated `Handles` class of [d] binds, sorted deterministically
+ * (matching `GenerateReachabilityMetadata` in `python-multiplatform`).
+ */
+fun aotDowncallDescriptors(d: AotLibraryDescription): List<AotForeignDescriptor> {
+    val signatures = LinkedHashSet<String>()
+    signatures += "()I"      // init
+    signatures += "(JJ)I"    // last_error
+    signatures += "(J)J"     // f64_list / i64_list _new, _len, _data; int_list _new, _len
+    signatures += "(J)V"     // f64_list / i64_list / int_list _retain, _release
+    if (d.intList != null) {
+        signatures += "(JJJ)I" // int_list _get, _set
+    }
+    for (f in d.functions) {
+        signatures += aotDescriptor(f)
+    }
+    return signatures
+        .map(::aotParseDescriptorSignature)
+        .distinct()
+        .sortedWith(
+            compareBy<AotForeignDescriptor>(
+                { it.parameterTypes.size },
+                { it.returnType },
+                { it.parameterTypes.joinToString(",") },
+            ),
+        )
+}
+
+/** Classpath location where GraalVM native-image reads per-library reachability metadata automatically. */
+fun aotReachabilityMetadataPath(packageName: String, prefix: String): String =
+    "META-INF/native-image/$packageName/$prefix/reachability-metadata.json"
+
+/**
+ * GraalVM `reachability-metadata.json` for [d]: every foreign downcall descriptor bound by `Handles` and every
+ * `java.lang.foreign` reflection entry used once at link time by `AotFfmRuntime`.
+ */
+fun renderAotReachabilityMetadata(d: AotLibraryDescription): String = buildString {
+    val downcalls = aotDowncallDescriptors(d)
+    append("{\n")
+    append("  \"foreign\": {\n")
+    append("    \"downcalls\": [\n")
+    downcalls.forEachIndexed { index, desc ->
+        val params = desc.parameterTypes.joinToString(", ") { "\"$it\"" }
+        val comma = if (index < downcalls.lastIndex) "," else ""
+        append("      { \"returnType\": \"${desc.returnType}\", \"parameterTypes\": [$params] }$comma\n")
+    }
+    append("    ]\n")
+    append("  },\n")
+    append("  \"reflection\": [\n")
+    val entries = listOf(
+        """    { "type": "java.lang.foreign.MemorySegment", "allPublicMethods": true, "allPublicFields": true }""",
+        """    { "type": "java.lang.foreign.Arena", "allPublicMethods": true }""",
+        """    { "type": "java.lang.foreign.Linker", "allPublicMethods": true }""",
+        """    { "type": "java.lang.foreign.Linker${'$'}Option", "allPublicMethods": true }""",
+        """    { "type": "java.lang.foreign.Linker${'$'}Option[]" }""",
+        """    { "type": "java.lang.foreign.SymbolLookup", "allPublicMethods": true }""",
+        """    { "type": "java.lang.foreign.FunctionDescriptor", "allPublicMethods": true }""",
+        """    { "type": "java.lang.foreign.ValueLayout", "allPublicMethods": true, "allPublicFields": true }""",
+        """    { "type": "java.lang.foreign.ValueLayout${'$'}OfLong", "allPublicMethods": true }""",
+        """    { "type": "java.lang.foreign.ValueLayout${'$'}OfDouble", "allPublicMethods": true }""",
+        """    { "type": "java.lang.foreign.ValueLayout${'$'}OfByte", "allPublicMethods": true }""",
+        """    { "type": "java.lang.foreign.MemoryLayout", "allPublicMethods": true }""",
+        """    { "type": "java.lang.foreign.MemoryLayout[]" }""",
+    )
+    entries.forEachIndexed { index, entry ->
+        val comma = if (index < entries.lastIndex) "," else ""
+        append(entry).append(comma).append('\n')
+    }
+    append("  ]\n")
+    append("}\n")
+}
+
 internal fun aotResultClassName(functionName: String): String =
     functionName.split('_').filter { it.isNotEmpty() }.joinToString("") { it.replaceFirstChar(Char::uppercaseChar) } + "Result"
 
@@ -312,6 +405,24 @@ private fun renderAotObject(d: AotLibraryDescription, packageName: String, objec
     for (f in d.functions) {
         line("        val f_${f.name}: MethodHandle = rt.downcall(\"${f.symbol}\", \"${aotDescriptor(f)}\")")
     }
+    line()
+    line("        fun handles(): Map<String, MethodHandle> = linkedMapOf(")
+    line("            \"aotInit\" to aotInit,")
+    line("            \"lastError\" to lastError,")
+    for (prefix in listOf("f64", "i64")) {
+        for (op in listOf("New", "Len", "Data", "Retain", "Release")) {
+            line("            \"${prefix}List$op\" to ${prefix}List$op,")
+        }
+    }
+    if (d.intList != null) {
+        for (op in listOf("New", "Len", "Get", "Set", "Retain", "Release")) {
+            line("            \"intList$op\" to intList$op,")
+        }
+    }
+    for (f in d.functions) {
+        line("            \"f_${f.name}\" to f_${f.name},")
+    }
+    line("        )")
     line("    }")
     for (f in d.functions) {
         line()
