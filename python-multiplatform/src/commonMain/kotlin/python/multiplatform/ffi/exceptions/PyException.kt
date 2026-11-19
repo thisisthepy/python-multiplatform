@@ -3,6 +3,7 @@ package python.multiplatform.ffi.exceptions
 import python.multiplatform.ffi.PyObject
 import python.multiplatform.ffi.PyType
 import python.multiplatform.ffi.adoptingNewReference
+import kotlin.coroutines.cancellation.CancellationException
 import python.native.ffi.NativePointer
 import python.native.ffi.PyErr_Clear
 import python.native.ffi.PyErr_GetRaisedException
@@ -204,4 +205,30 @@ open class PyException(
             // meaningful error indicator to set.
         }
     }
+
+    /**
+     * `true` when this exception represents Python's `asyncio.CancelledError`
+     * (`concurrent.futures.CancelledError`, which `asyncio.CancelledError` aliases in CPython).
+     *
+     * Checked along [type]'s MRO so subclasses of `CancelledError` are recognised too; when no
+     * live [type] is attached, returns `false`.
+     */
+    fun isCancelledError(): Boolean {
+        val liveType = type ?: return false
+        return try {
+            liveType.name == CANCELLED_ERROR_NAME || liveType.mro.any { it.name == CANCELLED_ERROR_NAME }
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * Maps a Python `CancelledError` ([isCancelledError]) to a Kotlin [CancellationException]
+     * carrying `this` as its [Throwable.cause], leaving every other [PyException] as itself
+     * (SPEC O-3, U-2; issue #164).
+     */
+    fun toKotlinException(): Exception =
+        if (isCancelledError()) CancellationException(errMsg, this) else this
 }
+
+private const val CANCELLED_ERROR_NAME = "CancelledError"

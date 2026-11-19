@@ -26,9 +26,8 @@ import kotlin.test.assertTrue
  * 4. Exact `PUBLIC` vs `PROTECTED` visibility on `open` and `abstract` classes (where
  *    `LibraryAbiReader` declined all members of non-final classes because its binary ABI dump
  *    merges `PROTECTED` into `PUBLIC`).
- * 5. Pure-source `@Composable` binding with `<= 6` defaulted parameters and explicit decline with
- *    `"more than 6 defaulted parameters on a klib @Composable: requires an IR lowering bridge"`
- *    above 6 defaulted parameters.
+ * 5. Pure-source `@Composable` binding with `<= 6` defaulted parameters, and above 6 the marker call
+ *    (`__pympDefaultCall`, `__pympOmitted`) the consumer-side compiler plugin rewrites (B3).
  * 6. Kotlin 2.1+ `.klib` (`org.thisisthepy.compose.designsystem:designsystem-breeze-macosarm64:1.11.1-ext.4`)
  *    where `LibraryAbiReader.readAbiInfo` in `kotlin-compiler-embeddable:2.0.20` fails to deserialize
  *    `ir/` while `KlibKnmScanner` reads `linkdata/` (`.knm`) and binds its theme declarations.
@@ -441,7 +440,7 @@ class KlibKnmScannerTest {
         assertTrue("(block as kotlin.Function2<androidx.compose.runtime.Composer?, kotlin.Int, kotlin.Unit>).invoke(" in callable.lambdaBody)
         assertTrue("content = (args[1] as @androidx.compose.runtime.Composable () -> kotlin.Unit)" in callable.lambdaBody)
 
-        // A @Composable with 7 defaulted parameters (> MAX_OMITTABLE_PARAMETERS = 6) is declined cleanly.
+        // A @Composable with 7 defaulted parameters (> MAX_OMITTABLE_PARAMETERS = 6) binds through the B3 marker call.
         val tooManyFnBuilder = ProtoBuf.Function.newBuilder()
             .setFlags(publicFlags or Flags.MEMBER_KIND.toFlags(ProtoBuf.MemberKind.DECLARATION))
             .setName(3)
@@ -466,11 +465,15 @@ class KlibKnmScannerTest {
                 classes = classes,
             ),
         )
-        assertNull(declinedCandidate.callable)
-        assertEquals(
-            "more than 6 defaulted parameters on a klib @Composable: requires an IR lowering bridge",
-            declinedCandidate.declaration.declineReason,
-        )
+        // B3 (owner decision 2026-11-19, python-multiplatform#191): past 6 defaults the body is one
+        // all-arguments call inside the marker the consumer-side compiler plugin rewrites, and every
+        // declared default is omittable.
+        assertNull(declinedCandidate.declaration.declineReason)
+        val markerBody = assertNotNull(declinedCandidate.callable).lambdaBody
+        assertTrue("__pympDefaultCall(" in markerBody, markerBody)
+        assertTrue("__pympOmitted()" in markerBody, markerBody)
+        assertTrue(", __m0)" in markerBody, markerBody)
+        assertEquals(7, declinedCandidate.callable!!.paramHasDefault.count { it })
     }
 
     @Test

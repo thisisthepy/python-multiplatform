@@ -33,6 +33,31 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Issue #464: an AOT build must compute the floats CPython computes, even when a caller compiles the
+ * generated C (--emit-c, or a packaging step outside aot/cc.py) without our compiler flags. Contraction
+ * (replacing a * b + c with a single-rounding fma) is turned off in the source for every compiler family:
+ *   Clang: #pragma STDC FP_CONTRACT OFF (standard C99 pragma, honoured by Clang on every target including arm64).
+ *   GCC: ignores #pragma STDC FP_CONTRACT, so `#pragma GCC optimize("fp-contract=off")` turns contraction off
+ *     for every function defined after this header, even if the command line omitted -ffp-contract=off.
+ *   MSVC (cl.exe): `#pragma float_control(precise, on)` and `#pragma fp_contract(off)` turn precise semantics on
+ *     and contraction off even if the command line omitted /fp:precise.
+ * Fast-math (-ffast-math on GCC/Clang, /fp:fast on MSVC) breaks NaN and signed-zero rules and is rejected
+ * at compile time via __FAST_MATH__ (GCC/Clang) and _M_FP_FAST (MSVC). */
+#if defined(__FAST_MATH__) || defined(_M_FP_FAST)
+#error "tp_aot.h requires precise IEEE 754 floating-point semantics: do not compile with -ffast-math or /fp:fast"
+#endif
+#if defined(__clang__)
+#pragma STDC FP_CONTRACT OFF
+#elif defined(__GNUC__)
+#pragma STDC FP_CONTRACT OFF
+#pragma GCC optimize("fp-contract=off")
+#elif defined(_MSC_VER)
+#pragma float_control(precise, on)
+#pragma fp_contract(off)
+#else
+#pragma STDC FP_CONTRACT OFF
+#endif
+
 #if defined(__GNUC__) || defined(__clang__)
 #define TPA_UNUSED __attribute__((unused))
 #else
@@ -269,7 +294,7 @@ static inline int tpa_truediv_small_i64(int64_t a, int64_t b, double *out)
 }
 
 /* ------------------------------------------------------------------------------------------
- * Floats (double): IEEE, no fast-math, no contraction (the build passes -ffp-contract=off, /fp:precise).
+ * Floats (double): IEEE, no fast-math, no contraction (enforced above in source and by build flags).
  * ------------------------------------------------------------------------------------------ */
 
 /* tp_runtime.h lines 413 to 421, tp_truediv_f64 */

@@ -14,12 +14,14 @@ import python.multiplatform.ffi.withGIL
 import python.native.ffi.Py_DecRef
 import python.native.ffi.toNativePointer
 import python.native.ffi.toRawValue
+import kotlin.coroutines.cancellation.CancellationException
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -120,6 +122,32 @@ object TrampolineFragment : FunctionTableFragment {
             paramTypes = emptyList(),
             returnType = TypeTag.INT,
         ) { error("deliberate Kotlin failure") },
+        ExposedCallable(
+            name = "trampoline.explodeWithCause",
+            arity = 0,
+            paramTypes = emptyList(),
+            returnType = TypeTag.INT,
+        ) { throw IllegalStateException("outer failure", IllegalArgumentException("inner cause")) },
+        ExposedCallable(
+            name = "trampoline.cancel",
+            arity = 0,
+            paramTypes = emptyList(),
+            returnType = TypeTag.INT,
+        ) { throw CancellationException("kotlin cancelled") },
+        ExposedCallable(
+            name = "trampoline.callPythonAndRethrowMapped",
+            arity = 1,
+            paramTypes = listOf(TypeTag.OBJECT),
+            returnType = TypeTag.INT,
+        ) { args ->
+            val fn = args[0] as PyObject
+            try {
+                fn.invoke()
+                0L
+            } catch (e: python.multiplatform.ffi.exceptions.PyException) {
+                throw e.toKotlinException()
+            }
+        },
     )
 
     override fun classes(): List<ReflectedClass> = listOf(
@@ -307,11 +335,73 @@ class UpcallTrampolineTest {
             // upcall stub. The only channel out is NULL plus a set error indicator.
             val resultRaw = UpcallTrampoline.invoke(UpcallTable.resolve("trampoline.explode").raw, tuple("()"))
             assertEquals(0L, resultRaw)
-            val message = python.multiplatform.ffi.exceptions.PyException.fromCurrentError()?.message
+            val raised = python.multiplatform.ffi.exceptions.PyException.fromCurrentError()
+            assertNotNull(raised)
+            assertEquals("RuntimeError", raised.type?.name)
             assertTrue(
-                message?.contains("deliberate Kotlin failure") == true,
-                "the Kotlin failure did not reach Python's error indicator: $message",
+                raised.message?.contains("deliberate Kotlin failure") == true,
+                "the Kotlin failure did not reach Python's error indicator: ${raised.message}",
             )
+            // SPEC U-2 (#164): the original Kotlin throwable is preserved on __cause__.
+            val cause = raised.cause
+            assertNotNull(cause, "expected the Python RuntimeError to carry the Kotlin throwable as __cause__")
+            assertTrue(
+                cause.message?.contains("IllegalStateException: deliberate Kotlin failure") == true,
+                "expected __cause__ to carry the Kotlin exception class and message, got: ${cause.message}",
+            )
+        }
+
+    @Test
+    fun aKotlinExceptionChainPreservesItsNestedCauseChainInPython() =
+        PythonTestFixture.withInterpreter {
+            val resultRaw = UpcallTrampoline.invoke(UpcallTable.resolve("trampoline.explodeWithCause").raw, tuple("()"))
+            assertEquals(0L, resultRaw)
+            val raised = python.multiplatform.ffi.exceptions.PyException.fromCurrentError()
+            assertNotNull(raised)
+            assertEquals("RuntimeError", raised.type?.name)
+            assertEquals("outer failure", raised.message)
+            val kotlinCause = raised.cause
+            assertNotNull(kotlinCause, "expected __cause__ for the outer Kotlin throwable")
+            assertEquals("IllegalStateException: outer failure", kotlinCause.message)
+            val nestedCause = kotlinCause.cause
+            assertNotNull(nestedCause, "expected __cause__.__cause__ for the nested Kotlin cause")
+            assertEquals("IllegalArgumentException: inner cause", nestedCause.message)
+        }
+
+    @Test
+    fun aKotlinCancellationExceptionBecomesAPythonCancelledError() =
+        PythonTestFixture.withInterpreter {
+            val resultRaw = UpcallTrampoline.invoke(UpcallTable.resolve("trampoline.cancel").raw, tuple("()"))
+            assertEquals(0L, resultRaw)
+            val raised = python.multiplatform.ffi.exceptions.PyException.fromCurrentError()
+            assertNotNull(raised)
+            assertEquals("CancelledError", raised.type?.name)
+            assertEquals("kotlin cancelled", raised.message)
+            assertTrue(raised.isCancelledError(), "a mapped Kotlin CancellationException must be a Python CancelledError")
+        }
+
+    @Test
+    fun aPythonCancelledErrorMappedToKotlinCancellationExceptionRestoresItsOriginalInstanceOnReturnToPython() =
+        PythonTestFixture.withInterpreter {
+            python.multiplatform.ffi.Python3.exec(
+                """
+                import concurrent.futures
+                _pm_orig_cancelled = concurrent.futures.CancelledError('round-trip cancel')
+                def _pm_raise_cancelled():
+                    raise _pm_orig_cancelled
+                """.trimIndent(),
+            )
+            val resultRaw = UpcallTrampoline.invoke(
+                UpcallTable.resolve("trampoline.callPythonAndRethrowMapped").raw,
+                tuple("(_pm_raise_cancelled,)"),
+            )
+            assertEquals(0L, resultRaw)
+            val raised = python.multiplatform.ffi.exceptions.PyException.fromCurrentError()
+            assertNotNull(raised)
+            assertEquals("CancelledError", raised.type?.name)
+            assertEquals("round-trip cancel", raised.message)
+            val original = PythonTestFixture.eval("_pm_orig_cancelled")
+            assertEquals(original, raised.value, "the original Python CancelledError instance must be restored unchanged")
         }
 
     @Test

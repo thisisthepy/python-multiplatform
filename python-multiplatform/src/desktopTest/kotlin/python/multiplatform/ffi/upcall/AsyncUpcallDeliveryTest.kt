@@ -15,6 +15,7 @@ import python.native.ffi.toNativePointer
 import python.native.ffi.toRawValue
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.cancellation.CancellationException
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
@@ -182,6 +183,29 @@ class AsyncUpcallDeliveryTest {
                 outcome.error,
                 "a Kotlin failure after suspension has to reach the awaiting coroutine as a raise",
             )
+            assertEquals(
+                "RuntimeError: IllegalStateException: late boom",
+                outcome.cause,
+                "a Kotlin failure after suspension must preserve the Kotlin throwable as __cause__",
+            )
+        }
+
+    @Test
+    fun aKotlinCancellationExceptionThrownAfterSuspensionSurfacesAsCancelledErrorAtTheAwait() =
+        PythonTestFixture.withInterpreter {
+            assertTrue(bindUpcallOrNull("async.cancelLater"))
+            installPythonHarness()
+
+            val outcome = runAwaitOnTheLoopThread("_await_kotlin()")
+
+            assertNull(outcome.completerFailure)
+            assertTrue(outcome.sawLoopRunning)
+            assertEquals("Future", outcome.returned)
+            assertEquals(
+                "CancelledError: late cancel",
+                outcome.error,
+                "a Kotlin CancellationException after suspension has to reach the awaiting coroutine as CancelledError",
+            )
         }
 
     @Test
@@ -226,6 +250,7 @@ class AsyncUpcallDeliveryTest {
     private class AwaitOutcome(
         val value: String,
         val error: String,
+        val cause: String,
         /** `type(...).__name__` of what the boundary actually handed back, before any `await`. */
         val returned: String,
         val sawLoopRunning: Boolean,
@@ -264,10 +289,13 @@ class AsyncUpcallDeliveryTest {
                 loop = _r['loop']
                 _r['value'] = None
                 _r['error'] = None
+                _r['cause'] = None
                 try:
                     _r['value'] = loop.run_until_complete(coro)
                 except BaseException as e:
                     _r['error'] = type(e).__name__ + ': ' + str(e)
+                    if e.__cause__ is not None:
+                        _r['cause'] = type(e.__cause__).__name__ + ': ' + str(e.__cause__)
             """.trimIndent(),
         )
     }
@@ -335,6 +363,7 @@ class AsyncUpcallDeliveryTest {
         return AwaitOutcome(
             value = PythonTestFixture.eval("_r['value']").toString(),
             error = PythonTestFixture.eval("_r['error']").toString(),
+            cause = PythonTestFixture.eval("_r['cause']").toString(),
             returned = PythonTestFixture.eval("_r['returned']").toString(),
             sawLoopRunning = sawLoopRunning,
             completerFailure = completerFailure,
@@ -374,6 +403,9 @@ object AsyncTrampolineFragment : FunctionTableFragment {
 
     private suspend fun failLater(): Long =
         suspendCoroutine { c -> parked.put { c.resumeWithException(IllegalStateException("late boom")) } }
+
+    private suspend fun cancelLater(): Long =
+        suspendCoroutine { c -> parked.put { c.resumeWithException(CancellationException("late cancel")) } }
 
     /** Reaches no suspension point at all, so it is complete before `start` returns. */
     private suspend fun doubleNow(x: Long): Long = x * 2
@@ -424,6 +456,13 @@ object AsyncTrampolineFragment : FunctionTableFragment {
             returnType = TypeTag.INT,
             isSuspend = true,
         ) { PendingCall.start { failLater() } },
+        ExposedCallable(
+            name = "async.cancelLater",
+            arity = 0,
+            paramTypes = emptyList(),
+            returnType = TypeTag.INT,
+            isSuspend = true,
+        ) { PendingCall.start { cancelLater() } },
         ExposedCallable(
             name = "async.doubleNow",
             arity = 1,
