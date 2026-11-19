@@ -229,9 +229,17 @@ class GeneratedSuspendTest {
     // (`grep "has a type with no exposable classifier" build output`) rather than the old silence.
 
     @Test
-    fun aSuspendingFunctionTypeHasNoEntryAsATopLevelPropertyParameterOrReturn() {
+    fun aSuspendingFunctionTypeIsExposedAsAParameterAndRejectedAsPropertyOrReturn() {
+        // SPEC U-5a (#164 item 7): top-level `suspend` function-typed parameters (arities 0..5)
+        // are now exposed with `kotlin.coroutines.SuspendFunctionN(Args)->Ret` metadata, while
+        // properties and return types remain excluded with a KSP warning.
         assertFalse(UpcallTable.resolve("fixture.library.suspendingHandler").isValid)
-        assertFalse(UpcallTable.resolve("fixture.library.runsHandler").isValid)
+        assertTrue(UpcallTable.resolve("fixture.library.runsHandler").isValid)
+        val entry = UpcallTable.callable(UpcallTable.resolve("fixture.library.runsHandler"))
+        assertEquals(
+            "kotlin.coroutines.SuspendFunction1(kotlin.Long)->kotlin.Long",
+            entry.paramTypeNames[0],
+        )
         assertFalse(UpcallTable.resolve("fixture.library.makeHandler").isValid)
     }
 
@@ -247,27 +255,25 @@ class GeneratedSuspendTest {
     }
 
     @Test
-    fun aNullableSuspendingFunctionTypeHasNoEntry() {
+    fun aNullableSuspendingFunctionTypeHasNoEntryAsProperty() {
         assertFalse(UpcallTable.resolve("fixture.library.nullableHandler").isValid)
     }
 
     @Test
-    fun aTypealiasForASuspendingFunctionTypeHasNoEntryEitherSideOfTheAlias() {
-        // Measured, not assumed: `KSType.isSuspendFunctionType` answers `false` for the
-        // alias-typed `KSType` itself (`KSType.declaration` is the `KSTypeAlias`, not the
-        // expansion), so `isExposableType` has to expand one level of `typealias` before asking.
-        // Without that expansion, `runsAliasedHandler`'s cast would target
-        // `fixture.library.LongHandler` -- a real, source-declared classifier this time, since the
-        // `typealias` is itself a declaration in this compilation -- and it would have passed
-        // every check while remaining exactly as uncallable underneath.
+    fun aTypealiasForASuspendingFunctionTypeIsExposedAsAParameterAndRejectedAsAProperty() {
         assertFalse(UpcallTable.resolve("fixture.library.aliasedHandler").isValid)
-        assertFalse(UpcallTable.resolve("fixture.library.runsAliasedHandler").isValid)
+        assertTrue(UpcallTable.resolve("fixture.library.runsAliasedHandler").isValid)
+        val entry = UpcallTable.callable(UpcallTable.resolve("fixture.library.runsAliasedHandler"))
+        assertEquals(
+            "kotlin.coroutines.SuspendFunction1(kotlin.Long)->kotlin.Long",
+            entry.paramTypeNames[0],
+        )
     }
 
     @Test
-    fun aSuspendingFunctionTypeHasNoEntryAsAMemberPropertyParameterOrReturn() {
+    fun aSuspendingFunctionTypeIsExposedAsAMemberParameterAndRejectedAsPropertyOrReturn() {
         assertFalse(UpcallTable.resolve("fixture.library.SuspendingService.handler").isValid)
-        assertFalse(UpcallTable.resolve("fixture.library.SuspendingService.runsHandlerMember").isValid)
+        assertTrue(UpcallTable.resolve("fixture.library.SuspendingService.runsHandlerMember").isValid)
         assertFalse(UpcallTable.resolve("fixture.library.SuspendingService.makesHandlerMember").isValid)
     }
 
@@ -280,13 +286,8 @@ class GeneratedSuspendTest {
     }
 
     @Test
-    fun aSuspendingFunctionTypeHasNoEntryAsAPrimaryConstructorParameter() {
-        // The primary constructor does not route through
-        // `BindingPolicy.isExposedMemberFunction`/`isExposedTopLevelFunction` the way every other
-        // function entry does -- `FragmentScanner` selects it directly -- so this is the one
-        // location that needed its own, separate call to `hasExposableTypes` rather than
-        // inheriting the check through a shared gate.
-        assertFalse(UpcallTable.resolve("fixture.library.ValueHandler.<init>").isValid)
+    fun aSuspendingFunctionTypeIsExposedAsAPrimaryConstructorParameterWhileItsPropertyStaysExcluded() {
+        assertTrue(UpcallTable.resolve("fixture.library.ValueHandler.<init>").isValid)
         assertFalse(UpcallTable.resolve("fixture.library.ValueHandler.f").isValid)
     }
 

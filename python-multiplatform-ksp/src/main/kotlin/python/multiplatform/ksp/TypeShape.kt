@@ -24,6 +24,12 @@ data class TypeShape(
      * failure of the *generated* file rather than as anything the processor could notice.
      */
     val rendered: String = qualifiedName,
+    /**
+     * Metadata type name published into `ExposedCallable.paramTypeNames` when it differs from
+     * [rendered] (for example `kotlin.coroutines.SuspendFunction1(kotlin.Long)->kotlin.Long` for a
+     * `suspend` function parameter whose Kotlin cast syntax is `(suspend (kotlin.Long) -> kotlin.Long)`).
+     */
+    val slotTypeName: String = rendered,
 )
 
 /** Which [Tag] a Kotlin type is marshalled as. Anything not one of the seven primitives crosses

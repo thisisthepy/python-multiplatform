@@ -1930,10 +1930,7 @@ internal object ArtifactScanner {
         val declared = kotlinClassifierNameOf(type) ?: return null
         if (!declared.startsWith(KOTLIN_FUNCTION_PREFIX)) return null
         if (type.isSuspend) {
-            return FunctionSlot(
-                declineReason = "a suspend function-typed parameter ($declared): its compiled shape takes a " +
-                    "Continuation and answers COROUTINE_SUSPENDED, which no Python callable can do",
-            )
+            return suspendFunctionSlot(type, declared, classpath)
         }
         val name = functionSlotTypeName(type, declared, descriptor)
             ?: return FunctionSlot(
@@ -1959,6 +1956,60 @@ internal object ArtifactScanner {
         // fragment's file-level `@Suppress("UNCHECKED_CAST")` already covers.
         return FunctionSlot(typeName = name, boundary = BoundaryType("OBJECT", "(%s as $rendered)", "(%s)"))
     }
+
+    /**
+     * A `suspend` function-typed parameter (SPEC U-5a; #164 item 7): Kotlin metadata records
+     * `suspend (A1, ..., AN) -> R` as `kotlin.FunctionN<A1, ..., AN, R>` with `type.isSuspend == true`
+     * (and compiled JVM descriptor `Lkotlin/jvm/functions/Function(N+1);` taking a `Continuation`).
+     *
+     * Supported for arities `0..5` (matching `PythonCallables.newSuspendFunction`). Emits the
+     * `kotlin.coroutines.SuspendFunctionN(Arg1,...)->Ret` slot name and a Kotlin `suspend (...) -> ...`
+     * cast target.
+     */
+    private fun suspendFunctionSlot(type: KmType, declared: String, classpath: ArtifactClasspath): FunctionSlot {
+        val declaredArity = declared.removePrefix(KOTLIN_FUNCTION_PREFIX).toIntOrNull()
+        if (declaredArity == null || declaredArity !in 0..MAX_SUSPEND_FUNCTION_ARITY) {
+            return FunctionSlot(
+                declineReason = "a suspend function-typed parameter ($declared): only arities 0..$MAX_SUSPEND_FUNCTION_ARITY are supported",
+            )
+        }
+        val arguments = type.arguments
+        if (arguments.size != declaredArity + 1) {
+            return FunctionSlot(
+                declineReason = "a suspend function-typed parameter ($declared): unexpected type argument count ${arguments.size}",
+            )
+        }
+        val classifierNames = arguments.map { projection ->
+            val argType = projection.type ?: return FunctionSlot(
+                declineReason = "a suspend function-typed parameter ($declared): a type argument is a star projection",
+            )
+            kotlinClassifierNameOf(argType) ?: return FunctionSlot(
+                declineReason = "a suspend function-typed parameter ($declared): a type argument has no name a proxy could be built over",
+            )
+        }
+        val renderedTypes = arguments.map { projection ->
+            if (projection.variance != KmVariance.INVARIANT) {
+                return FunctionSlot(
+                    declineReason = "a suspend function-typed parameter ($declared): use-site variance is not supported",
+                )
+            }
+            val argType = projection.type ?: return FunctionSlot(
+                declineReason = "a suspend function-typed parameter ($declared): a type argument is a star projection",
+            )
+            renderKotlinSourceType(argType, classpath, depth = 1) ?: return FunctionSlot(
+                declineReason = "a suspend function-typed parameter ($declared): some part of its signature is not a nameable public type",
+            )
+        }
+        val slotName = "kotlin.coroutines.SuspendFunction$declaredArity(" +
+            classifierNames.dropLast(1).joinToString(",") + ")" + FUNCTION_RETURNS + classifierNames.last()
+        val renderedArgs = renderedTypes.dropLast(1).joinToString(", ")
+        val renderedRet = renderedTypes.last()
+        val nullableSuffix = if (type.isNullable) "?" else ""
+        val castTarget = "(suspend ($renderedArgs) -> $renderedRet)$nullableSuffix"
+        return FunctionSlot(typeName = slotName, boundary = BoundaryType("OBJECT", "(%s as $castTarget)", "(%s)"))
+    }
+
+    private const val MAX_SUSPEND_FUNCTION_ARITY = 5
 
     /**
      * A parameter typed as a **functional interface** (issue #216): a Java interface with one abstract

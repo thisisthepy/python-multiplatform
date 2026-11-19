@@ -389,7 +389,7 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
     }
 
     private fun constructorEntry(classQualifiedName: String, ctor: KSFunctionDeclaration): CallableEntryModel {
-        val paramShapes = ctor.parameters.map { it.type.toShape() }
+        val paramShapes = ctor.parameters.map { it.type.toShape(allowTopLevelSuspendFunction = true) }
         val argExprs = paramShapes.mapIndexed { i, shape -> castExpression(shape, "args[$i]") }
         return CallableEntryModel(
             name = "$classQualifiedName.<init>",
@@ -399,7 +399,7 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
             kind = "CONSTRUCTOR",
             lambdaBody = "{ args -> $classQualifiedName(${argExprs.joinToString(", ")}) }",
             paramNames = paramNamesOf(ctor.parameters),
-            paramTypeNames = paramShapes.map { it.rendered },
+            paramTypeNames = paramShapes.map { it.slotTypeName },
             // The class being built, not a `TypeShape` -- there is no return-type usage to derive
             // one from. `PythonProxySource.renderClass`'s own comment records that a CONSTRUCTOR
             // result is never wrapped by this gate anyway (`self._pm_handle` is set directly), so
@@ -412,7 +412,7 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
     }
 
     private fun memberFunctionEntry(classQualifiedName: String, function: KSFunctionDeclaration): CallableEntryModel {
-        val paramShapes = function.parameters.map { it.type.toShape() }
+        val paramShapes = function.parameters.map { it.type.toShape(allowTopLevelSuspendFunction = true) }
         val returnShape = function.returnType?.toShape() ?: TypeShape("kotlin.Unit", false)
         // args[0] is the receiver; declared parameters start at args[1].
         val argExprs = paramShapes.mapIndexed { i, shape -> castExpression(shape, "args[${i + 1}]") }
@@ -431,7 +431,7 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
             // a `<receiver>` slot the way an [python.multiplatform.reflection.ExposedCallable
             // .isExtension] entry would.
             paramNames = paramNamesOf(function.parameters),
-            paramTypeNames = paramShapes.map { it.rendered },
+            paramTypeNames = paramShapes.map { it.slotTypeName },
             returnTypeName = returnShape.rendered,
             paramHasDefault = paramHasDefaultOf(function.parameters),
         )
@@ -447,7 +447,7 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
         callPrefix: String,
         function: KSFunctionDeclaration,
     ): CallableEntryModel {
-        val paramShapes = function.parameters.map { it.type.toShape() }
+        val paramShapes = function.parameters.map { it.type.toShape(allowTopLevelSuspendFunction = true) }
         val returnShape = function.returnType?.toShape() ?: TypeShape("kotlin.Unit", false)
         val argExprs = paramShapes.mapIndexed { i, shape -> castExpression(shape, "args[$i]") }
         val callExpr = "$callPrefix.${function.simpleName.asString()}(${argExprs.joinToString(", ")})"
@@ -460,7 +460,7 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
             lambdaBody = functionBody(function, wrapReturnExpression(returnShape, callExpr)),
             isSuspend = BindingPolicy.isSuspending(function),
             paramNames = paramNamesOf(function.parameters),
-            paramTypeNames = paramShapes.map { it.rendered },
+            paramTypeNames = paramShapes.map { it.slotTypeName },
             returnTypeName = returnShape.rendered,
             paramHasDefault = paramHasDefaultOf(function.parameters),
         )
