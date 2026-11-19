@@ -599,6 +599,8 @@ def _c_text(g, bodies: list[list[str]], exports: list[_Export], p: str) -> str:
         "#endif",
         '#include "tp_aot.h"',
         "@INT@",
+        *emit_mod.FP_CONTRACT_PRAGMA,
+        "",
         f"typedef tpa_f64_list {p}_f64_list;",
         f"typedef tpa_i64_list {p}_i64_list;",
         "@INTLIST@",
