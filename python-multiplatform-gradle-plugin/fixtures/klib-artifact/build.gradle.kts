@@ -119,4 +119,8 @@ pythonBindings {
     // its output was actually built rather than only unit-tested -- `KlibScanWorkAction`'s KDoc has
     // the story. See that file's own KDoc for what the walker declines and why.
     artifactIncludePackages.set(listOf("kotlinx.coroutines"))
+    // In-repo consumer: the compiler plugin of klib-composable-and-defaults.md B3 is a project here
+    // rather than published coordinates. This walk has no klib @Composable, so the plugin has nothing
+    // to rewrite; what this fixture checks is that a native compilation loads it.
+    compilerPlugin.set(project(":python-multiplatform-compiler-plugin"))
 }

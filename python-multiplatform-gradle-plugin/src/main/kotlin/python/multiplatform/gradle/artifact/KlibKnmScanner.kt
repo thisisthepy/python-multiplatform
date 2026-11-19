@@ -47,12 +47,22 @@ import java.io.File
  *    `object` functions with at most [ArtifactScanner.MAX_OMITTABLE_PARAMETERS] (6) defaulted
  *    parameters, emits a `@androidx.compose.runtime.Composable () -> ReturnType` lambda cast to
  *    `kotlin.Function2<androidx.compose.runtime.Composer?, kotlin.Int, ReturnType>` so the consumer's
- *    Compose compiler plugin lowers the call site without JVM `.class` thunks. Declarations with more
- *    than 6 defaulted parameters are declined explicitly until an IR lowering bridge (B3) is approved.
+ *    Compose compiler plugin lowers the call site without JVM `.class` thunks. 
+ * 4. **Marker calls for `@Composable` with `> 6` defaults (B3, owner decision 2026-11-19 on
+ *    python-multiplatform#191):** past that cap the body wraps one all-arguments call in
+ *    [DEFAULT_CALL_MARKER], with [OMITTED_MARKER] standing for each argument the mask omits. The
+ *    consumer-side compiler plugin (`python-multiplatform-gradle-plugin/compiler-plugin`) rewrites
+ *    both after Compose's lowering, so the lowered `$default` parameter receives the mask itself.
  */
 internal object KlibKnmScanner {
 
     private const val COMPOSABLE_ANNOTATION = "androidx/compose/runtime/Composable"
+
+    /** Compose packs 31 default bits into each `$default` int (`ComposableShape.defaultCountFor`). */
+    private const val DEFAULT_BITS_PER_MASK = 31
+
+    /** How many mask parameters [DEFAULT_CALL_MARKER]'s generated declaration has. */
+    internal const val MAX_DEFAULT_MASKS = 4
     private const val DEPRECATED_ANNOTATION = "kotlin/Deprecated"
     private const val PUBLISHED_API_ANNOTATION = "kotlin/PublishedApi"
     private const val KOTLIN_FUNCTION_PREFIX = "kotlin.Function"
@@ -1326,10 +1336,8 @@ internal object KlibKnmScanner {
         declined: (String) -> Candidate,
     ): Candidate {
         val defaultedIndices = allDeclaredDefaults.indices.filter { it >= receiverIndex && allDeclaredDefaults[it] }
-        if (defaultedIndices.size > ArtifactScanner.MAX_OMITTABLE_PARAMETERS) {
-            return declined("more than ${ArtifactScanner.MAX_OMITTABLE_PARAMETERS} defaulted parameters on a klib @Composable: requires an IR lowering bridge")
-        }
-        if (defaultedIndices.isNotEmpty() && allParamNames.drop(receiverIndex).any { !ArtifactScanner.isWritableParameterName(it) }) {
+        val viaCompilerPlugin = defaultedIndices.size > ArtifactScanner.MAX_OMITTABLE_PARAMETERS
+        if (!viaCompilerPlugin && defaultedIndices.isNotEmpty() && allParamNames.drop(receiverIndex).any { !ArtifactScanner.isWritableParameterName(it) }) {
             return declined("a parameter name on a defaulted klib @Composable is not writable in Kotlin source")
         }
         val renderedReturnType = renderKotlinSourceType(returnModel, classes, depth = 0)
@@ -1352,10 +1360,62 @@ internal object KlibKnmScanner {
 
         val composerRead = "(args[${shape.composerIndex}] as androidx.compose.runtime.Composer?)"
         val changedRead = "(args[${shape.firstChangedIndex}] as Long).toInt()"
-        fun wrapComposableBlock(innerCall: String): String {
-            val blockExpr = "run { val block: @androidx.compose.runtime.Composable () -> $renderedReturnType = { $innerCall }; " +
+        fun composableBlock(innerCall: String): String =
+            "run { val block: @androidx.compose.runtime.Composable () -> $renderedReturnType = { $innerCall }; " +
                 "(block as kotlin.Function2<androidx.compose.runtime.Composer?, kotlin.Int, $renderedReturnType>).invoke($composerRead, $changedRead) }"
-            return "{ args -> ${returnType.wrapReturn(blockExpr)} }"
+        fun wrapComposableBlock(innerCall: String): String =
+            "{ args -> ${returnType.wrapReturn(composableBlock(innerCall))} }"
+
+        if (viaCompilerPlugin) {
+            // B3 (owner decision 2026-11-19, python-multiplatform#191): one call that writes every
+            // argument, wrapped in [DEFAULT_CALL_MARKER]. Source cannot say "use the default" at run
+            // time, so the consumer-side compiler plugin does it in IR after Compose's lowering: the
+            // marker's masks become the callee's `$default` arguments and each [OMITTED_MARKER] call
+            // becomes the zero value Compose itself passes for an ignored argument.
+            if (defaultCount > MAX_DEFAULT_MASKS) {
+                return declined("more than ${MAX_DEFAULT_MASKS * DEFAULT_BITS_PER_MASK} parameters on a defaulted klib @Composable")
+            }
+            fun word(index: Int) = (index - receiverIndex) / DEFAULT_BITS_PER_MASK
+            fun bit(index: Int) = 1 shl ((index - receiverIndex) % DEFAULT_BITS_PER_MASK)
+            // `pythonx._bind` sets bit `valueIndex` in the `$default` slots; a `null` argument counts
+            // as omitted too, as in [klibComposableBranchedCall], for callers that pass `$default = 0`.
+            val maskLocals = (0 until defaultCount).map { "__m$it" }
+            val maskDeclarations = (0 until defaultCount).joinToString("") { w ->
+                val implied = defaultedIndices.filter { word(it) == w }
+                    .joinToString("") { " or (if (args[$it] == null) ${bit(it)} else 0)" }
+                "val __m$w: kotlin.Int = (args[${shape.firstDefaultIndex + w}] as Long).toInt()$implied; "
+            }
+            val defaulted = defaultedIndices.toSet()
+            val guarded = argumentExpressions.mapIndexed { index, read ->
+                if (index in defaulted) "(if ((__m${word(index)} and ${bit(index)}) != 0) $OMITTED_MARKER() else $read)" else read
+            }
+            val markerCall = "$DEFAULT_CALL_MARKER(${callTarget(guarded.drop(receiverIndex).joinToString(", "))}, ${maskLocals.joinToString(", ")})"
+            return Candidate(
+                callable = ArtifactCallable(
+                    name = qualifiedName,
+                    arity = fullArity,
+                    paramTags = fullParamTags,
+                    returnTag = returnType.tag,
+                    lambdaBody = "{ args -> $maskDeclarations${returnType.wrapReturn(composableBlock(markerCall))} }",
+                    imports = imports,
+                    receiverTypeName = receiverModel?.qualifiedName,
+                    paramNames = fullParamNames,
+                    paramTypeNames = fullParamTypeNames,
+                    returnTypeName = returnModel.qualifiedName,
+                    returnSupertypes = supertypes,
+                    // The declaration's own answer, as on the JVM thunk path: the mask reaches every
+                    // default, with no cap and no branch to decline.
+                    paramHasDefault = allDeclaredDefaults + List(syntheticNames.size) { false },
+                    kind = "FUNCTION",
+                ),
+                declaration = model.copy(
+                    bindingName = qualifiedName,
+                    returnBoundaryTag = returnType.tag,
+                    receiverBoundaryTag = receiverBoundary?.tag,
+                    returnSupertypes = supertypes,
+                    parameters = modelParameters,
+                ),
+            )
         }
 
         val callable = ArtifactCallable(

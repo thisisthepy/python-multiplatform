@@ -515,7 +515,13 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   handle. A `@Composable` top-level or `object` function with at most 6 defaulted parameters binds in
   pure Kotlin source (`@androidx.compose.runtime.Composable () -> R` cast to
   `kotlin.Function2<androidx.compose.runtime.Composer?, kotlin.Int, R>`, B1); a `@Composable` function
-  with more than 6 defaulted parameters is declined with that reason pending an IR lowering bridge (B3).
+  with more than 6 defaulted parameters binds through a marker call
+  (`__pympDefaultCall(f(...), mask...)`, with `__pympOmitted()` for each omitted argument) that the
+  consumer-side compiler plugin `python-multiplatform-compiler-plugin` rewrites, after Compose's
+  lowering, into the call of the lowered function with the mask as its `$default` argument; every
+  declared default is omittable, and the bindings plugin puts the compiler plugin on the module's
+  Kotlin/Native compilations whenever the artefact walker is configured (B3; owner decision
+  2026-11-19, python-multiplatform#191; compiled, not yet run on a device or in CI).
   Also declined, with reasons: members of a generic class, `suspend`, `@Deprecated`, `@PublishedApi`
   (including declarations inside an `@PublishedApi internal` class), a `@Composable` member function or
   getter, member extensions and context receivers, a member named like a property, data-class

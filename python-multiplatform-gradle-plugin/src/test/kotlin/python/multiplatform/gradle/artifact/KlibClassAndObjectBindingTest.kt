@@ -558,11 +558,15 @@ class KlibClassAndObjectBindingTest {
                 classes = classes,
             ),
         )
-        assertNull(declinedCandidate.callable)
-        assertEquals(
-            "more than 6 defaulted parameters on a klib @Composable: requires an IR lowering bridge",
-            declinedCandidate.declaration.declineReason,
-        )
+        // B3 (owner decision 2026-11-19, python-multiplatform#191): past 6 defaults the body is one
+        // all-arguments call inside the marker the consumer-side compiler plugin rewrites, and every
+        // declared default is omittable.
+        assertNull(declinedCandidate.declaration.declineReason)
+        val markerBody = assertNotNull(declinedCandidate.callable).lambdaBody
+        assertTrue("__pympDefaultCall(" in markerBody, markerBody)
+        assertTrue("__pympOmitted()" in markerBody, markerBody)
+        assertTrue(", __m0)" in markerBody, markerBody)
+        assertEquals(7, declinedCandidate.callable!!.paramHasDefault.count { it })
     }
 }
 
