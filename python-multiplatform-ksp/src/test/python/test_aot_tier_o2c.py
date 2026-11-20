@@ -250,7 +250,9 @@ if __name__ == "__main__":
     assert out == subprocess.run([sys.executable, str(p), "300"], capture_output=True, text=True).stdout
     assert collections >= 600
     assert remaining == 0
-    assert freed + exit_freed == 3 * 2 * 300 + 2 + 5         # churn three times, main's pair, through_a_field's five
+    # churn's cycles three times, main's pair and through_a_field's first pair are the collector's; through_a_field's
+    # root and its two replacement nodes are freed by their counts when the frame returns, so they are not counted
+    assert freed + exit_freed == 3 * 2 * 300 + 2 + 2
 
 
 def test_cycle_owning_lists_big_ints_and_acyclic_objects_is_freed(tmp_path: Path):
@@ -315,8 +317,8 @@ if __name__ == "__main__":
     _syntax_check(c_text, tmp_path, "owning")
     clear = c_text[c_text.index("static void tpa_cls_Holder_gc_clear(") :]
     clear = clear[: clear.index("\n}\n")]
-    for call in ("tpa_i64_release(", "tpa_f64_release(", "tpa_int_clear(", "tpa_cls_Payload_release(",
-                 "tpa_cls_Holder_release("):
+    for call in ("tpa_int_list_release(", "tpa_f64_release(", "tpa_int_clear(", "tpa_cls_Payload_release(",
+                 "tpa_cls_Holder_release("):          # `list[int]` is the big-int-capable `tpa_int_list`
         assert call in clear, call
     traverse = c_text[c_text.index("static void tpa_cls_Holder_gc_traverse(") :]
     traverse = traverse[: traverse.index("\n}\n")]
@@ -442,7 +444,7 @@ def test_acyclic_programs_generate_no_collector(tmp_path: Path):
     assert "tpa_gc" not in c_text and "tp_aot_gc.h" not in c_text
     assert "struct tpa_cls_Node {\n    tpa_rc_t rc;\n" in c_text
     main = c_text[c_text.index("int main("):]
-    assert "rc = tpf___main__();" in main and "tpa_gc" not in main
+    assert "rc = tpf___tp_main();" in main and "tpa_gc" not in main       # the entry since #451
 
     acyclic_mutation = """
 class Leaf:

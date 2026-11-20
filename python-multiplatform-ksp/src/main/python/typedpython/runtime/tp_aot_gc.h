@@ -85,7 +85,9 @@ typedef struct tpa_gc_state {
     int64_t threshold;          /* a collection runs when count reaches it */
     int64_t live;               /* tracked objects alive */
     int64_t collections;        /* statistics (TPA_GC_STATS): collections at safepoints ... */
-    int64_t freed;              /* ... and the objects they freed */
+    int64_t freed;              /* ... and the tracked objects they freed: the fall of `live` across each
+                                 * collection, which counts the objects a garbage object's clear freed through
+                                 * the generated release as well as the ones step 4 frees itself */
 } tpa_gc_state;
 
 #if defined(TPA_THREADS)
@@ -194,11 +196,12 @@ static void tpa_gc_collect(void)
     tpa_gc__lists lists;
     tpa_gc_head *h;
     tpa_gc_head *next;
-    int64_t freed = 0;
+    int64_t live_before;
     if (g->collecting) {
         return;
     }
     g->collecting = 1;
+    live_before = g->live;
     unreachable.gc_prev = &unreachable;
     unreachable.gc_next = &unreachable;
     unreachable.gc_refs = 0;
@@ -227,7 +230,9 @@ static void tpa_gc_collect(void)
         }
         h = next;
     }
-    /* 4. the garbage: clear each object while holding it, then let it go */
+    /* 4. the garbage: clear each object while holding it, then let it go. A clear releases the fields, so the
+     * generated release frees (and untracks) every garbage object whose last count was held by the object
+     * being cleared: in a two-object cycle, clearing the first frees the second. */
     while (unreachable.gc_next != &unreachable) {
         h = unreachable.gc_next;
         TPA_RC_INC(TPA_GC_OBJ(h));
@@ -235,7 +240,6 @@ static void tpa_gc_collect(void)
         if (TPA_RC_DEC_IS_ZERO(TPA_GC_OBJ(h))) {
             tpa_gc_untrack(h);              /* its fields are empty: nothing else to release */
             free(h);
-            freed += 1;
         } else if (unreachable.gc_next == h) {
             /* still held by garbage not yet cleared: it is freed when that garbage is cleared */
             tpa_gc__unlink(h);
@@ -244,7 +248,7 @@ static void tpa_gc_collect(void)
         }
     }
     g->collections += 1;
-    g->freed += freed;
+    g->freed += live_before - g->live;      /* every untrack during the collection is a free */
     g->count = 0;
     g->threshold = g->live > TPA_GC_THRESHOLD ? g->live : TPA_GC_THRESHOLD;
     g->collecting = 0;
