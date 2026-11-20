@@ -266,4 +266,60 @@ class PendingCallTest {
         assertFalse(HandleTable.release(ref), "a double release is a no-op")
         assertFalse(ObjectReference.NONE.isValid)
     }
+
+    // --------------------------------------------------------- CoroutineContext & onCancelled (U-5b)
+
+    private class FakeJobElement(val id: String) : kotlin.coroutines.AbstractCoroutineContextElement(Key) {
+        companion object Key : kotlin.coroutines.CoroutineContext.Key<FakeJobElement>
+    }
+
+    @Test
+    fun startWithExplicitContextExposesContextElementsAlongsidePendingCall() {
+        val jobElement = FakeJobElement("parent-job-1")
+        var seenJob: FakeJobElement? = null
+        var seenCall: PendingCall? = null
+        val call = PendingCall.start(jobElement) {
+            seenJob = kotlin.coroutines.coroutineContext[FakeJobElement]
+            seenCall = currentPendingCall()
+            42L
+        }
+        assertTrue(call.isDone)
+        assertEquals(42L, call.value)
+        assertSame(jobElement, seenJob, "coroutineContext[Job] must expose the supplied context element")
+        assertSame(call, seenCall, "coroutineContext[PendingCall] must still be the PendingCall")
+    }
+
+    @Test
+    fun onCancelledRunsOnceOnCancelOrInlineIfAlreadyCancelledAndCapturesListenerExceptions() {
+        var captured: Continuation<Unit>? = null
+        var firstCalls = 0
+        var secondCalls = 0
+        val call = PendingCall.start {
+            suspendCoroutine { c -> captured = c }
+            1L
+        }
+        call.onCancelled {
+            firstCalls++
+            throw IllegalStateException("listener boom")
+        }
+        call.onCancelled {
+            secondCalls++
+        }
+
+        assertTrue(call.cancel())
+        assertEquals(1, firstCalls)
+        assertEquals(1, secondCalls, "a throwing listener must not abort subsequent listeners")
+        assertEquals("listener boom", call.cancellationFailure?.message)
+
+        // Registering after cancellation fires inline immediately.
+        var lateCalls = 0
+        call.onCancelled { lateCalls++ }
+        assertEquals(1, lateCalls)
+
+        // A second cancel is a no-op and does not re-fire listeners.
+        assertFalse(call.cancel())
+        assertEquals(1, firstCalls)
+        assertEquals(1, secondCalls)
+        captured!!.resume(Unit)
+    }
 }

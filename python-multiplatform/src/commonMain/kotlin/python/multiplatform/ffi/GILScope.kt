@@ -14,6 +14,13 @@ public class ThreadGILState(var state: Int = 0, var depth: Int = 0) {
     public var checkpointCountdown: Int = 0
 
     /**
+     * True while this thread is executing inside an `UpcallTrampoline.attached` frame with the
+     * GIL held (cleared temporarily by [withoutGIL]). Used by `PendingCall.start` to distinguish
+     * an active Python upcall from a direct Kotlin caller.
+     */
+    public var inUpcall: Boolean = false
+
+    /**
      * Set while this thread must not take a checkpoint: inside one already, or on a cleaner
      * running [python.multiplatform.ffi.ReleaseCounter]-counted release actions. Running Python
      * from a cleaner is what ROADMAP §1 turned into a deadlock and §9 explicitly rules out as a
@@ -132,6 +139,9 @@ internal inline fun <T> gilScope(crossinline block: () -> T): T {
  * state, and any C API call made without one is undefined behaviour.
  */
 public inline fun <T> withoutGIL(block: () -> T): T {
+    val threadState = getThreadGILState()
+    val wasInUpcall = threadState.inUpcall
+    threadState.inUpcall = false
     val save = PyEval_SaveThread()
     try {
         return block()
@@ -139,5 +149,6 @@ public inline fun <T> withoutGIL(block: () -> T): T {
         if (save != null) {
             PyEval_RestoreThread(save)
         }
+        threadState.inUpcall = wasInUpcall
     }
 }

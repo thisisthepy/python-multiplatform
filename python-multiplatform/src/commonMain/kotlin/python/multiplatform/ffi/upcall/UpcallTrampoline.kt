@@ -2,15 +2,20 @@ package python.multiplatform.ffi.upcall
 
 import python.multiplatform.ffi.PyLong_Check
 import python.multiplatform.ffi.PyObject
+import python.multiplatform.ffi.Python3
 import python.multiplatform.ffi.exceptions.PyException
+import python.multiplatform.ffi.exceptions.isNoneObject
 import python.multiplatform.ffi.getThreadGILState
 import python.multiplatform.ffi.types.basic.PyNone
+import python.multiplatform.ffi.types.basic.PyString
 import python.multiplatform.reflection.CallableHandle
 import python.multiplatform.reflection.ExposedCallable
 import python.multiplatform.reflection.HandleTable
 import python.multiplatform.reflection.ObjectReference
 import python.multiplatform.reflection.TypeTag
 import python.multiplatform.reflection.UpcallTable
+import kotlin.coroutines.CoroutineContext
+import kotlin.coroutines.EmptyCoroutineContext
 import kotlin.coroutines.cancellation.CancellationException
 import python.native.ffi.NativePointer
 import python.native.ffi.PyBool_FromLong
@@ -138,6 +143,50 @@ object UpcallTrampoline {
         }
     }
 
+    init {
+        PendingCall.ambientContextProvider = ::readAmbientCoroutineContext
+    }
+
+    /**
+     * Reads the ambient Kotlin [CoroutineContext] configured via Python's
+     * `python_multiplatform.use_coroutine_context` / `set_coroutine_context` while this thread is
+     * inside an [attached] upcall frame (SPEC U-5b). Direct Kotlin callers outside an upcall or
+     * inside `withoutGIL` get [EmptyCoroutineContext] without touching CPython.
+     */
+    private fun readAmbientCoroutineContext(): CoroutineContext {
+        if (!getThreadGILState().inUpcall) return EmptyCoroutineContext
+        return Python3.import("sys").use { sysMod ->
+            sysMod.getAttr("modules").use { sysModules ->
+                sysModules.getAttr("get").use { getFn ->
+                    PyString.from(KotlinSurface.MODULE_NAME).use { modName ->
+                        getFn.invoke(modName).use { pmMod ->
+                            if (pmMod.pointer.isNoneObject()) return EmptyCoroutineContext
+                            val getCtx = pmMod.getAttrOrNull("get_coroutine_context")
+                                ?: return EmptyCoroutineContext
+                            getCtx.use { fn ->
+                                fn.invoke().use { ctxObj ->
+                                    if (ctxObj.pointer.isNoneObject()) return EmptyCoroutineContext
+                                    val handleObj = ctxObj.getAttrOrNull("_pm_handle")
+                                    val raw = if (handleObj != null) {
+                                        handleObj.use { it.toString().toLongOrNull() }
+                                    } else {
+                                        ctxObj.toString().toLongOrNull()
+                                    } ?: throw IllegalStateException(
+                                        "python_multiplatform coroutine context has no valid handle",
+                                    )
+                                    HandleTable.resolveRaw(raw) as? CoroutineContext
+                                        ?: throw IllegalStateException(
+                                            "stale or invalid Kotlin CoroutineContext handle: $raw",
+                                        )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /**
      * Attaches this thread for the duration of [block], **without** consulting the nesting depth.
      *
@@ -149,12 +198,15 @@ object UpcallTrampoline {
         val threadState = getThreadGILState()
         val outerState = threadState.state
         val outerDepth = threadState.depth
+        val outerInUpcall = threadState.inUpcall
         val gilState = PyGILState_Ensure()
         threadState.state = gilState
         threadState.depth = 1
+        threadState.inUpcall = true
         try {
             return block()
         } finally {
+            threadState.inUpcall = outerInUpcall
             threadState.depth = outerDepth
             threadState.state = outerState
             PyGILState_Release(gilState)
