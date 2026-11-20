@@ -5,9 +5,17 @@ Single source of truth for PR-O1 (docs/design/typedpython-aot.md 6.3.1):
      anywhere in the program assigns to `field` on an instance of `C`, and `C.__init__` does not
      store `self` into any field or let `self` escape into any call.
   2. Proves cycle-freedom for every compiled class `C` by either type-graph acyclicity (Tarjan SCC)
-     or `immutable_after_init` for every class in `C`'s SCC; otherwise emits `aot/cycle-possible`.
-  3. Provides the same `immutable_after_init` result to reference-counting elision (`aot/emit.py`)
-     and library-mode safety (`aot/library.py`: `aot/library-mutable-class`).
+     or `immutable_after_init` for every class in `C`'s SCC. A class proved by neither is *cyclic-capable*
+     (`cyclic_classes`, with the reason in `cycle_reasons`): until PR-O2c that was the finding
+     `aot/cycle-possible`; since PR-O2c (6.3.2 item 3, "Step 3 as implemented") such a class is compiled and
+     tracked by the cycle collector of `runtime/tp_aot_gc.h`. Every class of the strongly connected component
+     is cyclic-capable, not only its mutable members: trial deletion subtracts only the references between
+     tracked objects, so an untracked class on a cycle would be a root that keeps the cycle forever.
+     A `__del__` on a cyclic-capable class is `aot/cycle-del`.
+  3. Provides the same `immutable_after_init` result to reference-counting elision (`aot/emit.py`, through
+     `field_elidable`, which is off for every field of a cyclic-capable class: the safepoint invariant of
+     the collector needs every reference to a tracked object counted) and library-mode safety
+     (`aot/library.py`: `aot/library-mutable-class`).
 """
 from __future__ import annotations
 
@@ -180,10 +188,22 @@ class ClassAnalysis:
     self_escapes: dict[str, str] = field(default_factory=dict)
     mutating_stores: dict[tuple[str, str], tuple[str, int]] = field(default_factory=dict)
     tail_field: dict[str, str | None] = field(default_factory=dict)
+    cyclic_classes: frozenset[str] = field(default_factory=frozenset)      # PR-O2c: tracked by the collector
+    cycle_reasons: dict[str, str] = field(default_factory=dict)           # why each of them may form a cycle
     findings: list[Finding] = field(default_factory=list)
 
     def field_immutable(self, cls: str, fname: str) -> bool:
         return (cls, fname) in self.immutable_fields
+
+    def field_elidable(self, cls: str, fname: str) -> bool:
+        """PR-O1's elision rules (3) and (4) may skip the retain of a read of `cls.fname`: the field is
+        immutable-after-init and `cls` is not cyclic-capable (PR-O2c: at a collector safepoint no tracked
+        object may be kept alive solely by an uncounted reference, so a tracked class's fields are always
+        retained when read, immutable or not)."""
+        return cls not in self.cyclic_classes and (cls, fname) in self.immutable_fields
+
+    def is_cyclic(self, cls: str) -> bool:
+        return cls in self.cyclic_classes
 
     def class_immutable_for_library(self, cls: str) -> bool:
         seen: set[str] = set()
@@ -278,6 +298,8 @@ def analyze_classes(module: ir.Module, rel: str, class_lines: dict[str, int] | N
 
     sccs = _tarjan_scc(list(classes.keys()), edges)
     findings: list[Finding] = []
+    cyclic_classes: set[str] = set()
+    cycle_reasons: dict[str, str] = {}
     for comp in sccs:
         has_cycle = len(comp) > 1 or (len(comp) == 1 and comp[0] in edges[comp[0]])
         if not has_cycle:
@@ -303,12 +325,17 @@ def analyze_classes(module: ir.Module, rel: str, class_lines: dict[str, int] | N
                         reason = f"field `{fname}` is mutated outside `__init__` in `{where_fn}` (line {where_line})"
                 else:
                     reason = f"class `{culprit}` is not immutable after `__init__`"
-            findings.append(Finding(
-                rel, lines.get(cname, 1), "error", None, "aot/cycle-possible", cname,
-                f"class `{cname}` may form a reference cycle ({reason}); PR-O1 requires either "
-                "an acyclic class graph or immutable-after-init reference fields",
-                None,
-            ))
+            # PR-O2c: the class is compiled, tracked by the cycle collector (it was `aot/cycle-possible`)
+            cyclic_classes.add(cname)
+            cycle_reasons[cname] = reason
+            if classes[cname].has_del:
+                findings.append(Finding(
+                    rel, lines.get(cname, 1), "error", None, "aot/cycle-del", cname,
+                    f"class `{cname}` defines `__del__` but may form a reference cycle ({reason}); a finalizer "
+                    "is permitted only on a class proved acyclic (an acyclic class graph or immutable-after-init "
+                    "reference fields), because the collector that frees a cycle runs no user code",
+                    None,
+                ))
 
     # 5. Last self-referential field for tail-loop release
     tail_field: dict[str, str | None] = {}
@@ -328,5 +355,7 @@ def analyze_classes(module: ir.Module, rel: str, class_lines: dict[str, int] | N
         self_escapes=self_escapes,
         mutating_stores=mutating_stores,
         tail_field=tail_field,
+        cyclic_classes=frozenset(cyclic_classes),
+        cycle_reasons=cycle_reasons,
         findings=findings,
     )
