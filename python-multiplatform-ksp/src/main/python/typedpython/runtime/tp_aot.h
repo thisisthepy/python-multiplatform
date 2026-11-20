@@ -1790,6 +1790,99 @@ static inline int tpa_time_sleep(double secs)
     return 0;
 }
 
+/* ------------------------------------------------------------------------------------------
+ * Scope regions (SPEC N-17, N-12b/c step 2, design 6.3.2 item 2; agent proposal, not owner-confirmed).
+ * A region is a list of bump-allocated chunks owned by one C local of a generated function: the
+ * function's body, or one iteration of one of its loops, owns it. The objects in it (`struct
+ * tpa_reg_<F>__<C>`, no reference count) are freed together, at the function's one cleanup point, or
+ * released and reset at the top of every iteration. One region holds objects of ONE type (the generated
+ * code gives each (function, class) its own region), so the generated per-class walk that releases the
+ * owned heap references the objects hold (lists, big ints, heap-rc objects) steps through a chunk in
+ * units of that type's size: `used` is an exact multiple of it. A chunk's data starts 16-byte aligned
+ * (the header is 32 bytes on a 64-bit target and malloc's result is at least 16-byte aligned), and
+ * sizeof(T) is a multiple of alignof(T), so every object is aligned. An allocation is zeroed, so a field
+ * the generated constructor did not reach (its argument conversion failed) releases as nothing: a NULL
+ * list or object; big-int fields are set to TPA_INT_ZERO by the constructor before anything can fail
+ * (the word 0 is not a tpa_int value). A failed chunk allocation raises MemoryError and returns NULL;
+ * the generated site leaves through `tp_cleanup:`, which frees the region.
+ * ------------------------------------------------------------------------------------------ */
+#define TPA_REGION_FIRST_CHUNK ((size_t)4096)          /* bytes of objects in the first chunk */
+#define TPA_REGION_MAX_CHUNK ((size_t)1 << 20)         /* each later chunk doubles, up to this */
+
+typedef struct tpa_region_chunk {
+    struct tpa_region_chunk *next;      /* the previous chunk (the head is the newest) */
+    size_t cap;
+    size_t used;
+    size_t pad_;                        /* keeps the header at 32 bytes: the objects start 16-byte aligned */
+} tpa_region_chunk;
+
+typedef struct tpa_region {
+    tpa_region_chunk *head;
+} tpa_region;
+
+#define TPA_REGION_INIT { NULL }
+
+static inline void *tpa_region_alloc(tpa_region *r, size_t size)
+{
+    tpa_region_chunk *c = r->head;
+    char *p;
+    if (c == NULL || c->cap - c->used < size) {
+        size_t cap = c == NULL ? TPA_REGION_FIRST_CHUNK : (c->cap < TPA_REGION_MAX_CHUNK ? c->cap * 2 : c->cap);
+        tpa_region_chunk *n;
+        if (cap < size) {
+            cap = size;
+        }
+        n = (tpa_region_chunk *)malloc(sizeof(tpa_region_chunk) + cap);
+        if (n == NULL) {
+            tpa_raise(TPA_MemoryError, "");
+            return NULL;
+        }
+        n->next = c;
+        n->cap = cap;
+        n->used = 0;
+        n->pad_ = 0;
+        r->head = n;
+        c = n;
+    }
+    p = (char *)(c + 1) + c->used;
+    c->used += size;
+    memset(p, 0, size);
+    return p;
+}
+
+/* Every chunk freed; the region is empty again (a function frees each of its regions once, at its cleanup point). */
+static inline void tpa_region_free(tpa_region *r)
+{
+    tpa_region_chunk *c = r->head;
+    while (c != NULL) {
+        tpa_region_chunk *next = c->next;
+        free(c);
+        c = next;
+    }
+    r->head = NULL;
+}
+
+/* The start of an iteration: the newest (largest) chunk is kept and emptied, the older ones are freed, so a
+ * loop whose iterations allocate the same amount reuses one chunk and calls malloc no more. */
+static inline void tpa_region_reset(tpa_region *r)
+{
+    tpa_region_chunk *c = r->head;
+    if (c == NULL) {
+        return;
+    }
+    tpa_region_free(&(tpa_region){ c->next });
+    c->next = NULL;
+    c->used = 0;
+}
+
+/* The objects of a region of one type: `TPA_REGION_FOREACH(T, obj, region) { ... }` runs the statement for every
+ * object the region holds, in allocation order inside a chunk (the chunks newest first). The generated
+ * `tpa_reg_<F>__<C>_drop` uses it to release the owned heap references of every object before a free or a reset. */
+#define TPA_REGION_FOREACH(T, obj, region)                                                       \
+    for (tpa_region_chunk *tpa__c = (region)->head; tpa__c != NULL; tpa__c = tpa__c->next)        \
+        for (size_t tpa__off = 0; tpa__off + sizeof(T) <= tpa__c->used; tpa__off += sizeof(T))   \
+            for (T *obj = (T *)((char *)(tpa__c + 1) + tpa__off); obj != NULL; obj = NULL)
+
 #if !defined(TPA_LIBRARY)
 static inline void tpa_exit_i64(int64_t code)
 {

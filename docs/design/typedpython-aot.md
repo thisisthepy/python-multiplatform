@@ -450,6 +450,22 @@ matches CPython.
      exit block, covering both normal return and error (`rc != 0`) paths. Exceptions in AOT carry only
      `(class_id, message_string)` in the thread-local error record (`tpa_exc`), with no traceback frame
      objects (owner decision D4), so a region pointer can never be retained by an exception or traceback.
+   - *Step 2 as implemented (PR-O2b, N-12b/c; agent proposal, not owner-confirmed)*: regions are
+     intraprocedural. The unit of the decision is `(F, C)`: every non-virtual site of `C` in `F` and every
+     local of `C` in `F` are region-typed together (`struct tpa_reg_<F>__<C>`, one region per `(F, C)`),
+     or none is, so a local has one C type. R1 and R2 as written (a store into a virtual object counts as
+     a heap store); R3 in its strict form, no callee at all (region specialisations such as `check__reg`
+     are a later step, so `binary_trees.py` stays heap-rc with the reason reported); R4 relaxed: a region
+     object's field of class `K` is a region pointer when `(F, K)` is region and an owned heap pointer
+     otherwise, and lists and big ints are owned heap references; a generated per-class walk releases
+     them when the region is freed or reset, which keeps "no heap object points into a region" and adds
+     "a region object's heap references are released". The scope is the function body or one iteration of
+     one loop (the innermost loop whose body holds every use of `C`, in which every local of `C` is
+     definitely assigned before it is read, widened to the loop of any region object that holds pointers
+     of `C`); a per-iteration region is reset at the top of each iteration and freed at `tp_cleanup:`,
+     so `break`, `continue`, `return` and a failing operation need no path-specific code. Heap pointers of
+     `C` flowing into `F` (a parameter, a call result, a field of a heap or virtual object) assigned to a
+     local of `C`, or compared with `is` against a region pointer, make `(F, C)` heap-rc.
 3. **Reference counting + small cycle collector (D2) + acyclic `__del__`.**
    - *Pay only for what the program uses*: classes proved acyclic by the shared `aot/classes.py`
      analysis (PR-O1) keep zero GC overhead and do not link `runtime/tp_aot_gc.h`. Only when a program
