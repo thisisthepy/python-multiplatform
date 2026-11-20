@@ -45,3 +45,10 @@ fun interface AsyncCollector<in T> {
 }
 
 fun acceptCollector(collector: AsyncCollector<Any?>) = collector.hashCode()
+
+/** The interface's type parameter nested in the method's parameter type: substituted by id at any depth. */
+fun interface BatchCollector<T> {
+    suspend fun take(batch: List<T>)
+}
+
+fun acceptBatches(collector: BatchCollector<String>) = collector.hashCode()

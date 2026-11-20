@@ -1,6 +1,7 @@
 package fixture.app
 
 import fixture.library.AsyncSink
+import fixture.library.Batches
 import fixture.library.SuspendingService
 import fixture.library.ValueHandler
 import python.multiplatform.ffi.upcall.PendingCall
@@ -277,6 +278,29 @@ class GeneratedSuspendTest {
         val control = entry("fixture.library.drainSync")
         assertFalse(control.isSuspend)
         assertEquals("fixture.library.SyncSink|kotlin.Function1(kotlin.Long)->kotlin.Unit", control.paramTypeNames[0])
+    }
+
+    @Test
+    fun aSuspendSamWhoseTypeParameterIsNestedInItsMethodSignatureIsSubstitutedAtAnyDepth() {
+        // Review finding on #497: `fun interface BatchSink<T> { suspend fun take(batch: List<T>) }`
+        // used as `BatchSink<E>` from `class Batches<E>`. The SAM lambda's parameter must be the
+        // interface's `List<kotlin.Any?>`, not `List<kotlin.Any>` from an unbound `T` in the
+        // enclosing map. Before the fix this fixture's generated fragment did not compile, so
+        // every test in this module was red, not only this one.
+        val entry = entry("fixture.library.Batches.drainBatches")
+        assertTrue(entry.isSuspend)
+        assertEquals(
+            "fixture.library.BatchSink|kotlin.coroutines.SuspendFunction1(kotlin.collections.List)->kotlin.Unit",
+            entry.paramTypeNames[0],
+        )
+
+        val taken = mutableListOf<List<Any?>>()
+        val lambda: suspend (List<Any?>) -> Unit = { taken += it }
+        val viaLambda = startCall("fixture.library.Batches.drainBatches", Batches(listOf(1L, 2L, 3L)), lambda)
+        assertTrue(viaLambda.isDone, "nothing here suspends, so the call completes on the calling thread")
+        assertNull(viaLambda.failure, "the adapted lambda failed: ${viaLambda.failure}")
+        assertEquals(3L, viaLambda.value)
+        assertEquals(listOf(listOf<Any?>(1L, 2L, 3L)), taken)
     }
 
     @Test

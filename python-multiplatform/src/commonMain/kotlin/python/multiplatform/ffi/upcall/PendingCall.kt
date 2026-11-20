@@ -9,6 +9,9 @@ import kotlin.coroutines.cancellation.CancellationException
 import kotlin.coroutines.coroutineContext
 import kotlin.coroutines.startCoroutine
 
+/** What [PendingCall.onCancelled] returns when there is nothing to unregister. */
+private val NO_OP_DISPOSER: () -> Unit = {}
+
 /**
  * One Kotlin coroutine started from a frame that had to return without it, and the place its
  * outcome waits until something asks for it.
@@ -112,7 +115,14 @@ class PendingCall private constructor() : CoroutineContext.Element {
 
     private var listener: ((PendingCall) -> Unit)? = null
 
-    private var cancelListeners: MutableList<() -> Unit>? = null
+    /**
+     * One [onCancelled] registration. A node rather than the bare action so the disposer removes
+     * exactly the registration it was returned for, by identity, even when the same lambda
+     * instance was registered twice.
+     */
+    private class CancelListener(val action: () -> Unit)
+
+    private var cancelListeners: MutableList<CancelListener>? = null
 
     /**
      * Records that whoever was waiting for this call has stopped, and returns whether that was news.
@@ -165,7 +175,7 @@ class PendingCall private constructor() : CoroutineContext.Element {
      */
     fun cancel(): Boolean {
         var transitioned = false
-        val toNotify: List<() -> Unit>? = mutex.withLock {
+        val toNotify: List<CancelListener>? = mutex.withLock {
             if (done || cancelled) {
                 null
             } else {
@@ -178,8 +188,8 @@ class PendingCall private constructor() : CoroutineContext.Element {
         }
         if (!transitioned) return false
         if (toNotify != null) {
-            for (action in toNotify) {
-                invokeCancelListener(action)
+            for (registration in toNotify) {
+                invokeCancelListener(registration.action)
             }
         }
         return true
@@ -191,6 +201,14 @@ class PendingCall private constructor() : CoroutineContext.Element {
      * If [isDone] is already `true` (and not cancelled), registration is a no-op and [action] is
      * dropped without running.
      *
+     * @return a disposer that unregisters [action] again. Calling it after [cancel] ran, after the
+     *   call completed, more than once, or for a registration that ran inline is a no-op. A
+     *   registration whose reason has passed should be disposed: the call keeps every live
+     *   registration until it completes or is cancelled, and a long-running body that registers
+     *   one per step (an in-flight [python.multiplatform.ffi.pythonx.PythonSuspendFunction]
+     *   invocation per emission of a collect, say) would otherwise accumulate them for its whole
+     *   life and run every stale one on [cancel].
+     *
      * ### Threading, GIL and exception contract
      *
      * [action] runs synchronously on whichever thread calls [cancel] (for Python `Future.cancel()`,
@@ -198,21 +216,30 @@ class PendingCall private constructor() : CoroutineContext.Element {
      * Therefore [action] **must be non-blocking** (e.g. calling `job.cancel()` or setting a flag)
      * and must never wait on another thread that needs the GIL. Any exception thrown by [action]
      * is caught and recorded in [cancellationFailure] rather than escaping into C or aborting
-     * remaining listeners.
+     * remaining listeners. The disposer only takes [mutex] and may be called from any thread; a
+     * disposer called while [cancel] is already running its snapshot of the listeners does not
+     * stop [action] from running that one time.
      */
-    fun onCancelled(action: () -> Unit) {
-        val runNow = mutex.withLock {
-            if (cancelled) {
-                true
-            } else if (done) {
-                false
-            } else {
-                val list = cancelListeners ?: mutableListOf<() -> Unit>().also { cancelListeners = it }
-                list.add(action)
-                false
+    fun onCancelled(action: () -> Unit): () -> Unit {
+        var runNow = false
+        val registration: CancelListener? = mutex.withLock {
+            when {
+                cancelled -> {
+                    runNow = true
+                    null
+                }
+                done -> null
+                else -> {
+                    val list = cancelListeners ?: mutableListOf<CancelListener>().also { cancelListeners = it }
+                    CancelListener(action).also { list.add(it) }
+                }
             }
         }
         if (runNow) invokeCancelListener(action)
+        if (registration == null) return NO_OP_DISPOSER
+        return {
+            mutex.withLock { cancelListeners?.remove(registration) }
+        }
     }
 
     private fun invokeCancelListener(action: () -> Unit) {

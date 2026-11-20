@@ -85,8 +85,13 @@ internal fun KSType.mentionsTypeParameter(): Boolean {
  * [typeParameters] is the enclosing declaration's substitution map (SPEC U-11, #492): a generic
  * member's `FlowCollector<T>` renders `T` through it exactly as every other parameter of that
  * member does, so the cast target and the SAM lambda's parameter agree with the receiver cast.
- * The interface's own type parameters are substituted from the use site's arguments first; a
- * star projection there reads as `kotlin.Any?`.
+ * The interface's own type parameters are substituted from the use site's arguments wherever
+ * they occur in the method's signature, nested (`take(batch: List<T>)`) or at the top, and the
+ * use-site argument is itself resolved through [typeParameters]. Resolving a nested occurrence
+ * through the enclosing map instead bound the interface's `T` only when the enclosing declaration
+ * happened to use the same name, and rendered it `kotlin.Any` beside an interface cast of
+ * `Sink<kotlin.Any?>` otherwise, which does not compile. A star projection at the use site reads
+ * as `kotlin.Any?`.
  */
 private fun suspendSamShapeOrNull(
     expanded: KSType,
@@ -104,20 +109,46 @@ private fun suspendSamShapeOrNull(
     if (arity !in 0..MAX_SUSPEND_FUNCTION_ARITY) return null
     val qualified = cls.qualifiedName?.asString() ?: return null
     val interfaceType = expanded.renderWithArguments(qualified, typeParameters)
+    // The interface's own type parameters, bound to what the use site says (`null` is a star
+    // projection or a missing argument: unbounded, `kotlin.Any?`). The abstract method of a
+    // `fun interface` has no type parameters of its own, so these are the only ones its
+    // signature can mention.
     val typeArgMap: Map<String, KSType?> = cls.typeParameters.mapIndexed { idx, tp ->
-        tp.name.asString() to expanded.arguments.getOrNull(idx)?.type?.resolve()
+        val argument = expanded.arguments.getOrNull(idx)
+        tp.name.asString() to if (argument == null || argument.variance == Variance.STAR) null else argument.type?.resolve()
     }.toMap()
+    // Substitutes the interface's type parameters at any depth (`take(batch: List<T>)`), each
+    // through its use-site argument and that through [typeParameters], the way the artifact
+    // walker's `substituteKmTypeParams` recurses by id. A flat map could not do this: the
+    // use-site argument may itself mention an enclosing type parameter (`Sink<List<E>>`), and
+    // the enclosing declaration may reuse the interface's name for a different parameter.
+    fun renderSamType(type: KSType): TypeShape {
+        val expandedType = expandTypeAlias(type)
+        val nullable = type.isMarkedNullable || expandedType.isMarkedNullable
+        val ownParam = expandedType.declaration as? KSTypeParameter
+        if (ownParam != null) {
+            val name = ownParam.name.asString()
+            if (name !in typeArgMap) return TypeShape("kotlin.Any", nullable, rendered = "kotlin.Any")
+            val useSite = typeArgMap[name] ?: return TypeShape("kotlin.Any", nullable = true, rendered = "kotlin.Any")
+            val shape = useSite.toShape(allowTopLevelSuspendFunction = false, typeParameters = typeParameters)
+            return shape.copy(nullable = shape.nullable || nullable)
+        }
+        val classDeclaration = expandedType.declaration as? KSClassDeclaration
+            ?: return expandedType.toShape(allowTopLevelSuspendFunction = false, typeParameters = typeParameters)
+        val name = classDeclaration.qualifiedName?.asString() ?: "kotlin.Any"
+        if (expandedType.arguments.isEmpty()) return TypeShape(name, nullable, rendered = name)
+        val renderedArguments = expandedType.arguments.joinToString(", ") { argument ->
+            if (argument.variance == Variance.STAR) return@joinToString "*"
+            val argumentType = argument.type?.resolve() ?: return@joinToString "*"
+            val shape = renderSamType(argumentType)
+            shape.rendered + if (shape.nullable) "?" else ""
+        }
+        return TypeShape(name, nullable, rendered = "$name<$renderedArguments>")
+    }
     fun resolveSamType(ref: KSTypeReference?): Pair<String, String> {
         val resolved = ref?.resolve() ?: return "kotlin.Unit" to "kotlin.Unit"
-        val own = (expandTypeAlias(resolved).declaration as? KSTypeParameter)?.name?.asString()
-        val shape = if (own != null && own in typeArgMap) {
-            val bound = typeArgMap[own] ?: return "kotlin.Any" to "kotlin.Any?"
-            bound.toShape(allowTopLevelSuspendFunction = false, typeParameters = typeParameters)
-        } else {
-            resolved.toShape(allowTopLevelSuspendFunction = false, typeParameters = typeParameters)
-        }
-        val isNullable = shape.nullable || resolved.isMarkedNullable
-        return shape.qualifiedName to shape.rendered + if (isNullable) "?" else ""
+        val shape = renderSamType(resolved)
+        return shape.qualifiedName to shape.rendered + if (shape.nullable) "?" else ""
     }
     val params = method.parameters.map { resolveSamType(it.type) }
     val (retName, retRendered) = resolveSamType(method.returnType)

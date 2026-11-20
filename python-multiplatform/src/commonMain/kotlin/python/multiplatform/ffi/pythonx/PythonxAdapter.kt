@@ -1045,36 +1045,51 @@ object PythonxAdapter {
             )
 
 
-        # In-flight suspend invocations (SPEC U-5a): pending handle -> (loop, task) once the task
-        # exists; a handle submitted but not yet scheduled sits in `_SUSPEND_UNSCHEDULED`, and a
-        # cancellation that arrives in that window is parked in `_SUSPEND_CANCELLED` for `_schedule`
-        # to apply. Entries leave on the task's done callback, so a finished invocation costs nothing.
+        # In-flight suspend invocations (SPEC U-5a): pending handle -> the delivery loop, from
+        # submission until the task's done callback, and pending handle -> the task, from
+        # `_schedule` until the same callback. Both are written on the loop thread only; the one
+        # read off it (`_cancel_suspend_awaitable`) takes nothing but the loop. A finished
+        # invocation costs nothing.
+        _SUSPEND_LOOPS = {}
         _SUSPEND_TASKS = {}
-        _SUSPEND_UNSCHEDULED = set()
-        _SUSPEND_CANCELLED = set()
 
 
         def _cancel_suspend_awaitable(pending_handle):
-            '''Cancels the task running the awaitable of [pending_handle], if it is still running
-            (SPEC U-5a; the Kotlin side calls this from `PendingCall.onCancelled` when the outer
-            call's `Future` was cancelled). Returns whether there was anything to cancel.
+            '''Asks the loop to cancel the task running the awaitable of [pending_handle], if the
+            invocation is still in flight (SPEC U-5a; the Kotlin side calls this from
+            `PendingCall.onCancelled` when the outer call's `Future` was cancelled). Returns whether
+            the invocation was in flight.
 
-            `call_soon_threadsafe` rather than `cancel()` directly: the caller may be on any thread
-            (`PendingCall.cancel` runs its listeners on the cancelling thread), and this must not
-            block. The task's done callback then resumes the Kotlin continuation with
-            `CancelledError`, which crosses as `CancellationException`.
+            Everything that touches the task runs on the loop thread, through
+            `call_soon_threadsafe`: the caller may be on any thread (`PendingCall.cancel` runs its
+            listeners on the cancelling thread, and on a free-threaded build nothing serialises it
+            against the loop), and this must not block. `call_soon` and `call_soon_threadsafe`
+            share one FIFO, and `_submit_suspend_awaitable` queued `_schedule` before the listener
+            calling this could exist, so `_cancel_suspend_on_loop` always runs after the task was
+            created: a cancel that lands before `_schedule` has run is applied, not lost. (A
+            check-then-act on module state from the calling thread could lose it when `_schedule`
+            ran on the loop in between.) The task's done callback then resumes the Kotlin
+            continuation with `CancelledError`, which crosses as `CancellationException`.
             '''
-            if pending_handle in _SUSPEND_UNSCHEDULED:
-                _SUSPEND_CANCELLED.add(pending_handle)
-                return True
-            entry = _SUSPEND_TASKS.get(pending_handle)
-            if entry is None:
+            loop = _SUSPEND_LOOPS.get(pending_handle)
+            if loop is None or loop.is_closed():
                 return False
-            loop, task = entry
-            if loop.is_closed():
+            try:
+                loop.call_soon_threadsafe(_cancel_suspend_on_loop, pending_handle)
+            except RuntimeError:
+                # Closed between the check and the call. Nothing on that loop runs again, the
+                # done callback included; there is no task left to cancel.
                 return False
-            loop.call_soon_threadsafe(task.cancel)
             return True
+
+
+        def _cancel_suspend_on_loop(pending_handle):
+            '''The loop-thread half of `_cancel_suspend_awaitable`. Runs after `_schedule` (FIFO);
+            a task that already finished has left `_SUSPEND_TASKS`, and cancelling one that did not
+            start yet makes its first step raise `CancelledError`.'''
+            task = _SUSPEND_TASKS.get(pending_handle)
+            if task is not None:
+                task.cancel()
 
 
         def _submit_suspend_awaitable(awaitable, pending_handle):
@@ -1102,6 +1117,7 @@ object PythonxAdapter {
 
             def _on_done(fut):
                 _SUSPEND_TASKS.pop(pending_handle, None)
+                _SUSPEND_LOOPS.pop(pending_handle, None)
                 try:
                     if fut.cancelled():
                         exc = _asyncio.CancelledError()
@@ -1116,30 +1132,35 @@ object PythonxAdapter {
                     invoke_fn(complete_handle, (pending_handle, False, err))
 
             def _schedule():
-                _SUSPEND_UNSCHEDULED.discard(pending_handle)
                 try:
                     fut = _asyncio.ensure_future(awaitable, loop=loop)
-                    _SUSPEND_TASKS[pending_handle] = (loop, fut)
+                    _SUSPEND_TASKS[pending_handle] = fut
                     fut.add_done_callback(_on_done)
-                    if pending_handle in _SUSPEND_CANCELLED:
-                        _SUSPEND_CANCELLED.discard(pending_handle)
-                        fut.cancel()
                 except BaseException as err:
                     _SUSPEND_TASKS.pop(pending_handle, None)
-                    _SUSPEND_CANCELLED.discard(pending_handle)
+                    _SUSPEND_LOOPS.pop(pending_handle, None)
                     invoke_fn(complete_handle, (pending_handle, False, err))
 
-            _SUSPEND_UNSCHEDULED.add(pending_handle)
+            # Registered before `_schedule` is queued, so a cancel that reaches
+            # `_cancel_suspend_awaitable` from the moment this returns finds the loop.
+            _SUSPEND_LOOPS[pending_handle] = loop
 
             # Always schedule via `call_soon_threadsafe` / `call_soon` rather than calling
             # `ensure_future` inline while the upcall frame is still running: on `is_running_here`,
             # `PendingCall.start` is still inside the synchronous upcall frame, and `call_soon`
             # defers starting the Python task until the loop's next turn (after `AsyncUpcall.deliver`
             # has created the outer `Future` and returned it to the caller).
-            if is_running_here:
-                loop.call_soon(_schedule)
-            else:
-                loop.call_soon_threadsafe(_schedule)
+            try:
+                if is_running_here:
+                    loop.call_soon(_schedule)
+                else:
+                    loop.call_soon_threadsafe(_schedule)
+            except BaseException:
+                # The loop closed between `is_closed()` above and here. The Kotlin side releases
+                # the pending handle and its held reference in its catch; the entry must not
+                # outlive them (the handle slot is reused).
+                _SUSPEND_LOOPS.pop(pending_handle, None)
+                raise
 
 
         def _is_value_class_over_primitive(tag, type_name):

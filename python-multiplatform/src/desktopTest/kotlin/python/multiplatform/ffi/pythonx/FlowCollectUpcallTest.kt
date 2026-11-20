@@ -2,6 +2,7 @@ package python.multiplatform.ffi.pythonx
 
 import kotlinx.coroutines.CompletableJob
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -23,6 +24,7 @@ import python.multiplatform.reflection.ReflectedClassKind
 import python.multiplatform.reflection.TypeTag
 import python.multiplatform.reflection.UpcallTable
 import python.native.ffi.bindUpcallOrNull
+import java.util.concurrent.Executors
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
@@ -69,6 +71,13 @@ import kotlin.test.assertTrue
  * collect keeps waiting while Python has already moved on. Every run is forced through the
  * suspended path: the `asyncio.Future` is cancelled before Kotlin completes, and the Kotlin-side
  * outcome is read only after the loop has finished.
+ *
+ * Two more, from the review of #497: an invocation that completed must leave no cancellation
+ * listener on the call (counted by wrapping `_cancel_suspend_awaitable`: every call to it on
+ * cancel is one listener the adapter still held), and the same in-flight cancellation under a
+ * `ContinuationInterceptor` (SPEC U-5b), where the collect body, the submission of the awaitable
+ * and the unwind all run on the dispatcher thread while the task, the cancel and the done
+ * callback run on the loop thread.
  */
 class FlowCollectUpcallTest {
 
@@ -339,6 +348,204 @@ class FlowCollectUpcallTest {
             Python3.exec("import gc; _ic_gate = None; _ic.clear(); gc.collect()")
             assertEquals(handlesBefore, HandleTable.liveCount, "a cancelled in-flight collect left a rooted handle behind")
         }
+
+    @Test
+    fun aCompletedSuspendedEmissionLeavesNoCancelListenerOnTheCollect() = PythonTestFixture.withInterpreter {
+        // Three emissions whose suspended invocations complete, then one that stays in flight,
+        // then `Future.cancel()`. `_cancel_suspend_awaitable` is wrapped to count its calls: each
+        // is one `PendingCall.onCancelled` listener the adapter still held. Exactly one must be
+        // left, the in-flight invocation's. Before the fix (listeners were never unregistered)
+        // the count is 4: the three completed emissions' listeners ran too, each a Python call
+        // that found nothing to cancel.
+        val scope = PythonCallableScope()
+        try {
+            Python3.exec(
+                """
+                import asyncio
+                import flowtest
+                import python_multiplatform.binding as _pmb
+
+                _nl = {'cancel_calls': 0, 'emissions': 0}
+                _nl_loop = asyncio.new_event_loop()
+                _nl_items = []
+                _nl_gate = None
+                _nl_orig_cancel = _pmb._cancel_suspend_awaitable
+
+                def _nl_counting_cancel(handle):
+                    _nl['cancel_calls'] += 1
+                    return _nl_orig_cancel(handle)
+
+                async def _nl_run():
+                    global _nl_gate
+                    shared = flowtest.makeSharedFlow()
+                    async def on_item(x):
+                        global _nl_gate
+                        _nl['emissions'] += 1
+                        if _nl['emissions'] <= 3:
+                            await asyncio.sleep(0)
+                            _nl_items.append(x)
+                            return
+                        _nl_gate = _nl_loop.create_future()
+                        await _nl_gate
+                    task = asyncio.ensure_future(shared.collect(on_item))
+                    for x in (1, 2, 3, 4):
+                        assert shared.tryEmit(x), 'tryEmit found no collector'
+                        for _ in range(10):
+                            await asyncio.sleep(0)
+                    _nl['items'] = list(_nl_items)
+                    _nl['in_flight'] = _nl_gate is not None and not _nl_gate.done()
+                    _pmb._cancel_suspend_awaitable = _nl_counting_cancel
+                    try:
+                        _nl['cancelled'] = task.cancel()
+                        for _ in range(20):
+                            await asyncio.sleep(0)
+                        try:
+                            await task
+                            _nl['awaited'] = 'returned'
+                        except asyncio.CancelledError:
+                            _nl['awaited'] = 'CancelledError'
+                    finally:
+                        _pmb._cancel_suspend_awaitable = _nl_orig_cancel
+
+                def _nl_main():
+                    _nl_loop.run_until_complete(_nl_run())
+                """.trimIndent(),
+            )
+            try {
+                PythonCallables.withScope(scope) {
+                    Python3.exec("_nl_main()")
+                }
+            } catch (e: PyException) {
+                throw AssertionError("the listener-count run failed with ${e.type?.name}: ${e.errMsg}", e)
+            }
+            assertEquals("[1, 2, 3]", PythonTestFixture.eval("_nl['items']").toString())
+            assertEquals("True", PythonTestFixture.eval("_nl['in_flight']").toString(), "the fourth emission was not in flight when cancelled")
+            assertEquals("True", PythonTestFixture.eval("_nl['cancelled']").toString())
+            assertEquals("CancelledError", PythonTestFixture.eval("_nl['awaited']").toString())
+            assertEquals(
+                "1",
+                PythonTestFixture.eval("_nl['cancel_calls']").toString(),
+                "completed emissions left their cancellation listeners on the call",
+            )
+
+            val call = assertNotNull(FlowCollectTestFragment.lastCall)
+            assertTrue(call.isCancelled)
+            assertTrue(call.isDone, "the Kotlin collect is still parked after the in-flight collector was cancelled")
+            assertIs<CancellationException>(call.failure, "the collect ended with ${call.failure ?: "a value"}")
+            assertEquals(1, FlowCollectTestFragment.collectEnded)
+            assertNull(call.cancellationFailure, "an onCancelled listener threw")
+            assertNull(call.deliveryFailure)
+        } finally {
+            Python3.exec("_nl_loop.close()")
+            scope.close()
+        }
+    }
+
+    @Test
+    fun cancellingTheFutureWhileADispatchedCollectorIsAwaitingEndsTheCollectOnTheDispatcherThread() =
+        PythonTestFixture.withInterpreter {
+            // The in-flight cancellation of test 4 under a `ContinuationInterceptor` (SPEC U-5b):
+            // the collect body, `emit`, the submission of the awaitable (`call_soon_threadsafe`
+            // through the fallback delivery loop, since the dispatcher thread runs no loop) and
+            // the unwind run on the dispatcher thread; the task, `_pm_cancel`, the adapter's
+            // cancel listener and the done callback run on the loop thread. The Python side
+            // finishes as soon as its Future is cancelled, so the Kotlin outcome is awaited here
+            // with a deadline rather than read right away.
+            val scope = PythonCallableScope()
+            val executor = Executors.newSingleThreadExecutor { r -> Thread(r, "flow-collect-dispatcher") }
+            val dispatcher = executor.asCoroutineDispatcher()
+            val dispatcherRef = HandleTable.register(dispatcher)
+            try {
+                Python3.exec(
+                    """
+                    import asyncio
+                    import flowtest
+                    import python_multiplatform as _pm
+
+                    _dc = {}
+                    _dc_loop = asyncio.new_event_loop()
+                    _dc_gate = None
+
+                    async def _dc_run():
+                        global _dc_gate
+                        shared = flowtest.makeSharedFlow()
+                        async def on_item(x):
+                            global _dc_gate
+                            _dc_gate = _dc_loop.create_future()
+                            try:
+                                await _dc_gate
+                            except asyncio.CancelledError:
+                                _dc['collector_cancelled'] = True
+                                raise
+                        with _pm.use_coroutine_context(${dispatcherRef.raw}):
+                            task = asyncio.ensure_future(shared.collect(on_item))
+                        _dc['returned'] = type(task).__name__
+                        _dc['emitted'] = shared.tryEmit(7)
+                        # The emission is handed to the dispatcher thread, which submits the
+                        # collector back to this loop; wait for it to be mid-await.
+                        deadline = _dc_loop.time() + 10.0
+                        while _dc_gate is None and _dc_loop.time() < deadline:
+                            await asyncio.sleep(0.005)
+                        _dc['gate_open'] = _dc_gate is not None and not _dc_gate.done()
+                        _dc['cancelled'] = task.cancel()
+                        for _ in range(20):
+                            await asyncio.sleep(0)
+                        try:
+                            await task
+                            _dc['awaited'] = 'returned'
+                        except asyncio.CancelledError:
+                            _dc['awaited'] = 'CancelledError'
+                        deadline = _dc_loop.time() + 10.0
+                        while _dc_gate is not None and not _dc_gate.done() and _dc_loop.time() < deadline:
+                            await asyncio.sleep(0.005)
+                        _dc['gate_cancelled'] = _dc_gate is not None and _dc_gate.cancelled()
+
+                    def _dc_main():
+                        previous = _pm.set_delivery_loop(_dc_loop)
+                        try:
+                            _dc_loop.run_until_complete(_dc_run())
+                        finally:
+                            _pm.set_delivery_loop(previous)
+                    """.trimIndent(),
+                )
+                try {
+                    PythonCallables.withScope(scope) {
+                        Python3.exec("_dc_main()")
+                    }
+                } catch (e: PyException) {
+                    throw AssertionError("the dispatched in-flight cancellation run failed with ${e.type?.name}: ${e.errMsg}", e)
+                }
+                assertEquals("Future", PythonTestFixture.eval("_dc['returned']").toString())
+                assertEquals("True", PythonTestFixture.eval("_dc['emitted']").toString(), "tryEmit found no collector")
+                assertEquals("True", PythonTestFixture.eval("_dc['gate_open']").toString(), "the dispatched collector was not mid-await when cancelled")
+                assertEquals("True", PythonTestFixture.eval("_dc['cancelled']").toString())
+                assertEquals("CancelledError", PythonTestFixture.eval("_dc['awaited']").toString())
+                assertEquals(
+                    "True",
+                    PythonTestFixture.eval("_dc.get('collector_cancelled', False)").toString(),
+                    "the collector's asyncio task was not cancelled when the Future was",
+                )
+                assertEquals("True", PythonTestFixture.eval("_dc['gate_cancelled']").toString())
+
+                val call = assertNotNull(FlowCollectTestFragment.lastCall, "the collect never started a PendingCall")
+                val job = assertNotNull(FlowCollectTestFragment.lastJob)
+                val deadline = System.nanoTime() + 10_000_000_000L
+                while (!call.isDone && System.nanoTime() < deadline) Thread.sleep(1)
+                assertEquals("flow-collect-dispatcher", FlowCollectTestFragment.bodyThreadName, "the collect body did not run on the dispatcher")
+                assertTrue(call.isCancelled, "Future.cancel() did not reach PendingCall.cancel()")
+                assertTrue(job.isCancelled)
+                assertTrue(call.isDone, "the dispatched collect is still parked 10 s after the collector's task was cancelled")
+                assertIs<CancellationException>(call.failure, "the collect ended with ${call.failure ?: "a value"}")
+                assertEquals(1, FlowCollectTestFragment.collectEnded)
+                assertNull(call.cancellationFailure, "an onCancelled listener threw")
+                assertNull(call.deliveryFailure)
+            } finally {
+                Python3.exec("_dc_loop.close()")
+                scope.close()
+                executor.shutdownNow()
+                HandleTable.release(dispatcherRef)
+            }
+        }
 }
 
 /** A Kotlin `FlowCollector` handed to Python as a handle; counts what it was given. */
@@ -360,7 +567,11 @@ private object FlowCollectTestFragment : FunctionTableFragment {
         lastJob = null
         lastCall = null
         collectEnded = 0
+        bodyThreadName = null
     }
+
+    /** The thread the collect body started on: the caller's, or the dispatcher's under U-5b. */
+    @Volatile var bodyThreadName: String? = null
 
     /**
      * What an exposed `suspend fun` that owns a `kotlinx` `Job` does with `PendingCall`'s
@@ -369,6 +580,7 @@ private object FlowCollectTestFragment : FunctionTableFragment {
      * with `CancellationException`, inline on the cancelling thread (there is no dispatcher).
      */
     private suspend fun collectUnderJob(flow: Flow<Any?>, collector: FlowCollector<Any?>) {
+        bodyThreadName = Thread.currentThread().name
         val job = Job()
         lastJob = job
         val call = currentPendingCall()

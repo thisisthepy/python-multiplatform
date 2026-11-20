@@ -104,4 +104,22 @@ class SamParameterBindingTest {
         assertTrue("if (v is kotlin.Function2<*, *, *>)" in accept.lambdaBody, accept.lambdaBody)
         assertTrue("$pkg.AsyncCollector<kotlin.Any?>" in accept.lambdaBody, accept.lambdaBody)
     }
+
+    @Test
+    fun aSuspendSamTypeParameterNestedInTheMethodSignatureIsSubstitutedAtAnyDepth() {
+        // The same shape the KSP fixture `fixture.library.BatchSink` pins (review finding on #497):
+        // the walker substitutes `T` inside `List<T>` from the use site, so the SAM lambda's
+        // parameter type and the interface cast agree. Passes before and after that fix; it is
+        // here so the two generators are checked against one shape.
+        val accept = callables().single { it.name == "$pkg.acceptBatches" }
+        assertEquals(
+            listOf("$pkg.BatchCollector|kotlin.coroutines.SuspendFunction1(kotlin.collections.List)->kotlin.Unit"),
+            accept.paramTypeNames,
+        )
+        assertTrue("$pkg.BatchCollector<kotlin.String>" in accept.lambdaBody, accept.lambdaBody)
+        assertTrue(
+            "(suspend (kotlin.collections.List<kotlin.String>) -> kotlin.Unit)" in accept.lambdaBody,
+            accept.lambdaBody,
+        )
+    }
 }
