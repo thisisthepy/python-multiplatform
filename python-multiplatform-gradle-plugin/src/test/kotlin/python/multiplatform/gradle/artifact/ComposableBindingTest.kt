@@ -482,8 +482,13 @@ class ComposableBindingTest {
      */
     @Test
     fun theContentSlotIsMarkedComposableAndAnOnClickIsNot() {
-        val layout = jarUnder("org.jetbrains.compose.foundation", "foundation-layout-desktop") ?: return
-        val material3 = jarUnder("org.jetbrains.compose.material3", "material3-desktop") ?: return
+        val layout = jarUnder("org.jetbrains.compose.foundation", "foundation-layout-desktop")
+        val material3 = jarUnder("org.jetbrains.compose.material3", "material3-desktop")
+        if (layout == null || material3 == null) {
+            System.err.println("SKIPPED: material3-desktop or foundation-layout-desktop jar not in the Gradle cache")
+            org.junit.jupiter.api.Assumptions.assumeTrue(false, "material3-desktop / foundation-layout-desktop jar not in the Gradle cache")
+            return
+        }
         val classpath = composeClasspath()
 
         val column = ArtifactScanner.scanJar(layout, listOf("androidx.compose.foundation.layout"), classpath)
@@ -500,7 +505,14 @@ class ComposableBindingTest {
         assertEquals(false, column.paramHasDefault[3], "content declares no default, so it must be fillable")
 
         val button = ArtifactScanner.scanJar(material3, listOf("androidx.compose.material3"), classpath)
-            .single { it.name.substringAfterLast('.') == "Button" }
+            .filter {
+                it.name == "androidx.compose.material3.Button" ||
+                    it.name.startsWith("androidx.compose.material3.Button__")
+            }
+            // Button has two overloads (disambiguateOverloads suffixes both): the classic one takes a
+            // `shape: Shape`, the newer one a `shapes: ButtonShapes`. Both lead with onClick and carry a
+            // content slot; the classic one is selected by its `shape` parameter.
+            .single { it.paramNames.first() == "onClick" && "content" in it.paramNames && "shape" in it.paramNames }
         assertEquals("onClick", button.paramNames.first())
         assertEquals("kotlin.Function0()->kotlin.Unit", button.paramTypeNames[0], "Button.onClick is not lowered")
         assertEquals(

@@ -1010,15 +1010,40 @@ internal object ArtifactScanner {
     ): List<Candidate> {
         if (kmClass.visibility != Visibility.PUBLIC) return emptyList()
         if (kmClass.kind !in PROPERTY_OWNER_KINDS) return emptyList()
+        val typeParameterCount = kmClass.typeParameters.size
+        if (typeParameterCount > 0 && kmClass.isValue) return emptyList()
+        val classSubstitutions = if (typeParameterCount == 0) {
+            emptyMap()
+        } else {
+            substitutableClassTypeParameterMap(kmClass.typeParameters)
+        }
+        val classTypeArgs = if (typeParameterCount == 0) {
+            emptyList()
+        } else {
+            classSubstitutions?.let { map ->
+                kmClass.typeParameters.map { param ->
+                    renderKotlinTypeName(map[param.id] ?: return@let null, classpath, isArgument = true)
+                        ?: return@let null
+                }
+            }
+        }
         val synthesized = kmClass.functions.filter { it.kind == MemberKind.SYNTHESIZED }.mapTo(HashSet()) { it.name }
-        val functions = functionsOf(kmClass).filter { !it.isExtension && it.kotlinName !in synthesized }
+        val functions = functionsOf(kmClass, classSubstitutions ?: emptyMap())
+            .filter { !it.isExtension && it.kotlinName !in synthesized }
         if (functions.isEmpty()) return emptyList()
         val owner = binaryNameToQualified(ownerNode.name)
         val ownerType = KmType().apply { classifier = KmClassifier.Class(ownerNode.name) }
         val receiverBoundary = resolveKotlinBoundary(ownerType, classpath, BoundaryDirection.PARAMETER) ?: return emptyList()
         if (receiverBoundary.boundary.tag != OBJECT_TAG) return emptyList()
         val receiverModel = kotlinTypeModelOf(ownerType, classpath) ?: return emptyList()
-        val member = MemberReceiver(owner, receiverBoundary.boundary.read("args[0]"), receiverModel)
+        val receiverRead = if (typeParameterCount == 0) {
+            receiverBoundary.boundary.read("args[0]")
+        } else if (classTypeArgs != null) {
+            "(args[0] as $owner${classTypeArgs.joinToString(", ", "<", ">")})"
+        } else {
+            receiverBoundary.boundary.read("args[0]")
+        }
+        val member = MemberReceiver(owner, receiverRead, receiverModel)
         val receiverDecline = classpath.unreachableSupertypeOf(ownerNode.name)
             ?.let { missing -> unreachableReceiverReason(missing, owner) }
         val propertyNames = kmClass.properties.mapTo(HashSet()) { it.name }
@@ -1039,7 +1064,8 @@ internal object ArtifactScanner {
                 method.access.hasFlag(Opcodes.ACC_STATIC) || method.access.hasFlag(Opcodes.ACC_SYNTHETIC) ||
                     method.access.hasFlag(Opcodes.ACC_BRIDGE) -> return@mapNotNull null
                 composable -> return@mapNotNull declined("a @Composable member function: not bound on a proxy")
-                kmClass.typeParameters.isNotEmpty() -> return@mapNotNull declined("a member of a generic class: not bound yet")
+                typeParameterCount > 0 && classTypeArgs == null ->
+                    return@mapNotNull declined("a member of a generic class whose type parameter has an unsupported bound")
                 function.kotlinName in propertyNames ->
                     return@mapNotNull declined("shares its name with a property of the class, which keeps the attribute")
                 receiverDecline != null -> return@mapNotNull declined(receiverDecline)
@@ -1140,19 +1166,36 @@ internal object ArtifactScanner {
         // own read expression (a bare class name) cannot do. A generic value class would need both,
         // and nothing measured is one.
         if (typeParameterCount > 0 && kmClass.isValue) return emptyList()
-        val unbounded = substitutableTypeParameterIds(kmClass.typeParameters)
+        val classSubstitutions = if (typeParameterCount == 0) {
+            emptyMap()
+        } else {
+            substitutableClassTypeParameterMap(kmClass.typeParameters)
+        }
+        val classTypeArgs = if (typeParameterCount == 0) {
+            emptyList()
+        } else {
+            classSubstitutions?.let { map ->
+                kmClass.typeParameters.map { param ->
+                    renderKotlinTypeName(map[param.id] ?: return@let null, classpath, isArgument = true)
+                        ?: return@let null
+                }
+            }
+        }
         val readReceiver = if (typeParameterCount == 0) receiverBoundary.boundary.read("args[0]")
         else "(args[0] as $owner${List(typeParameterCount) { "*" }.joinToString(", ", "<", ">")})"
         val writeReceiver = when {
             typeParameterCount == 0 -> receiverBoundary.boundary.read("args[0]")
-            unbounded == null -> null
-            else -> "(args[0] as $owner${List(typeParameterCount) { "kotlin.Any?" }.joinToString(", ", "<", ">")})"
+            classTypeArgs == null -> null
+            else -> "(args[0] as $owner${classTypeArgs.joinToString(", ", "<", ">")})"
         }
-        // Each class type parameter that may be read as `Any?`; a bounded one stays a type parameter,
-        // and a property mentioning it is declined by [substituteAnyFor] answering `null`.
-        val readableIds = kmClass.typeParameters.filter { parameter ->
-            substitutableTypeParameterIds(listOf(parameter)) != null
-        }.mapTo(HashSet()) { it.id }
+        val readableSubstitutions = kmClass.typeParameters.mapNotNull { parameter ->
+            val single = substitutableClassTypeParameterMap(listOf(parameter))?.get(parameter.id)
+            if (single != null && renderKotlinTypeName(single, classpath, isArgument = true) != null) {
+                parameter.id to single
+            } else {
+                null
+            }
+        }.toMap()
         // Every property is read through `(args[0] as Owner)`, which needs all of `Owner`'s
         // supertypes on the consumer's compile classpath ([unreachableSupertypeOf]).
         val receiverDecline = classpath.unreachableSupertypeOf(ownerNode.name)
@@ -1171,7 +1214,7 @@ internal object ArtifactScanner {
                 ownerIsClass = true,
                 receiverTypeName = owner,
                 receiverModel = receiverModel,
-                typeIds = readableIds,
+                typeSubstitutions = readableSubstitutions,
                 readAccess = { "$readReceiver.${writeParameterName(property.name)}" },
                 writeAccess = writeReceiver?.let { receiver -> { "$receiver.${writeParameterName(property.name)}" } },
                 imports = emptyList(),
@@ -1252,7 +1295,7 @@ internal object ArtifactScanner {
             ownerIsClass = false,
             receiverTypeName = kotlinClassifierNameOf(receiver) ?: return@flatMap emptyList(),
             receiverModel = receiverModel,
-            typeIds = emptySet(),
+            typeSubstitutions = emptyMap(),
             readAccess = { "${receiverBoundary.boundary.read("args[0]")}.$alias" },
             writeAccess = null,
             imports = listOf("import $owner.${property.name} as $alias"),
@@ -1280,14 +1323,14 @@ internal object ArtifactScanner {
         ownerIsClass: Boolean,
         receiverTypeName: String,
         receiverModel: KotlinTypeModel,
-        typeIds: Set<Int>,
+        typeSubstitutions: Map<Int, KmType>,
         readAccess: () -> String,
         writeAccess: (() -> String)?,
         imports: List<String>,
         receiverDecline: String? = null,
     ): List<Candidate> {
         if (!isWritableParameterName(property.name)) return emptyList()
-        val type = property.returnType.substituteAnyFor(typeIds) ?: return emptyList()
+        val type = property.returnType.substituteTypeParameters(typeSubstitutions) ?: return emptyList()
         val typeModel = kotlinTypeModelOf(type, classpath) ?: return emptyList()
         val getterModel = DeclarationModel(
             simpleName = property.name,

@@ -8,6 +8,7 @@ import com.google.devtools.ksp.symbol.KSClassDeclaration
 import com.google.devtools.ksp.symbol.KSDeclaration
 import com.google.devtools.ksp.symbol.KSFunctionDeclaration
 import com.google.devtools.ksp.symbol.KSPropertyDeclaration
+import com.google.devtools.ksp.symbol.KSType
 import com.google.devtools.ksp.symbol.Modifier
 import com.google.devtools.ksp.symbol.Visibility
 
@@ -68,8 +69,35 @@ object BindingPolicy {
         if (hasPythonInternal(classDeclaration)) return false
         if (Modifier.EXPECT in classDeclaration.modifiers) return false
         if (classDeclaration.isCompanionObject) return false
-        if (!hasRenderableSignature(classDeclaration)) return false
+        if (substitutableClassTypeParameters(classDeclaration) == null) return false
         return classDeclaration.classKind in EXPOSED_CLASS_KINDS
+    }
+
+    /**
+     * Maps each class type parameter of [classDeclaration] to its substitution upper bound (`null`
+     * means unbounded `kotlin.Any?`) for SPEC U-4a, or returns `null` if any parameter is reified,
+     * has multiple upper bounds, has a recursive bound mentioning a type parameter, or has an
+     * unexposable bound.
+     */
+    fun substitutableClassTypeParameters(classDeclaration: KSClassDeclaration): Map<String, KSType?>? {
+        if (classDeclaration.typeParameters.isEmpty()) return emptyMap()
+        val map = LinkedHashMap<String, KSType?>(classDeclaration.typeParameters.size)
+        for (parameter in classDeclaration.typeParameters) {
+            if (parameter.isReified) return null
+            val bounds = parameter.bounds.toList()
+            when (bounds.size) {
+                0 -> map[parameter.name.asString()] = null
+                1 -> {
+                    val boundType = bounds[0].resolve()
+                    if (boundType.mentionsTypeParameter() || !isExposableType(boundType)) return null
+                    val isUnboundedAny =
+                        boundType.declaration.qualifiedName?.asString() == "kotlin.Any" && boundType.isMarkedNullable
+                    map[parameter.name.asString()] = if (isUnboundedAny) null else boundType
+                }
+                else -> return null
+            }
+        }
+        return map
     }
 
     /**
@@ -86,6 +114,7 @@ object BindingPolicy {
         if (Modifier.ABSTRACT in classDeclaration.modifiers) return false
         if (Modifier.SEALED in classDeclaration.modifiers) return false
         if (Modifier.INNER in classDeclaration.modifiers) return false
+        if (classDeclaration.typeParameters.isNotEmpty()) return false
         return true
     }
 

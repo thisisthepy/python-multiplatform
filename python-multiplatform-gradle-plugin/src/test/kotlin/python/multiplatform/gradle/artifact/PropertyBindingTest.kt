@@ -124,12 +124,26 @@ class PropertyBindingTest {
         assertEquals("GETTER", entry("fixture.artifactproperty.Holder.held").kind, "an interface's abstract val")
     }
 
+    /** SPEC U-4a: a single bindable bound stands for `T`; reads go through `Owner<*>`, writes through `Owner<Bound>`. */
     @Test
-    fun aBoundedClassTypeParameterDeclinesWhatMentionsItAndEverySetter() {
+    fun aSingleBoundedClassTypeParameterIsReadAsItsBoundAndWrittenThroughIt() {
+        val item = entry("fixture.artifactproperty.Bounded.item")
+        assertEquals("kotlin.Number", item.returnTypeName)
+        assertEquals("{ args -> ((args[0] as fixture.artifactproperty.Bounded<*>).item) }", item.lambdaBody)
+        val setter = entry("fixture.artifactproperty.Bounded.item=")
+        assertEquals("SETTER", setter.kind)
+        assertTrue("(args[0] as fixture.artifactproperty.Bounded<kotlin.Number>).item = (args[1] as kotlin.Number)" in setter.lambdaBody, setter.lambdaBody)
+        assertTrue("fixture.artifactproperty.Bounded.plain=" in entries.map { it.name })
+    }
+
+    /** SPEC U-4a, "still declined": an F-bounded parameter has no single stand-in, so what mentions it and every setter stay out. */
+    @Test
+    fun anFBoundedClassTypeParameterDeclinesWhatMentionsItAndEverySetter() {
         val names = entries.map { it.name }
-        assertTrue("fixture.artifactproperty.Bounded.item" !in names, names.toString())
-        assertTrue("fixture.artifactproperty.Bounded.plain" in names, names.toString())
-        assertTrue("fixture.artifactproperty.Bounded.plain=" !in names, names.toString())
+        assertTrue("fixture.artifactproperty.FBounded.item" !in names, names.toString())
+        assertTrue("fixture.artifactproperty.FBounded.plain" in names, names.toString())
+        assertTrue("fixture.artifactproperty.FBounded.plain=" !in names, names.toString())
+        assertTrue("fixture.artifactproperty.FBounded.item=" !in names, names.toString())
     }
 
     @Test

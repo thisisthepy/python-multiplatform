@@ -52,8 +52,10 @@ import dataclasses
 import re
 
 from typedpython import ir, resume
+from typedpython.aot import alloc as alloc_mod
 from typedpython.aot import classes as classes_mod
 from typedpython.aot import rep as rep_mod
+from typedpython.aot.alloc import AllocPlan
 from typedpython.aot.program import MAIN, Program
 from typedpython.aot.rep import RAW, TAGGED
 from typedpython.aotcheck import Finding
@@ -207,7 +209,8 @@ def needs_int_runtime(text: str) -> bool:
 
 
 class _Gen:
-    def __init__(self, module: ir.Module, program: Program, strict: bool = False) -> None:
+    def __init__(self, module: ir.Module, program: Program, strict: bool = False,
+                 alloc_plan: AllocPlan | None = None) -> None:
         self.module = module
         self.program = program
         self.strict = strict
@@ -221,6 +224,7 @@ class _Gen:
         class_lines = {c.name: c.lineno for c in program.classes}
         self.cls_analysis = classes_mod.analyze_classes(module, program.rel, class_lines, tagged_fields)
         self.findings.extend(self.cls_analysis.findings)
+        self.alloc_plan = alloc_plan if alloc_plan is not None else alloc_mod.analyze_alloc(module, self.cls_analysis)
 
     def cls_ptr(self, cls: str) -> str:
         return f"tpa_cls_{mangle(cls)} *"
@@ -460,6 +464,12 @@ class _Fn:
         self.obj_slots.append((cls, t))
         return t
 
+    def is_virtual(self, name: str) -> bool:
+        return self.g.alloc_plan.is_virtual(self.f.name, name)
+
+    def vfield(self, name: str, fname: str) -> str:
+        return f"v_{mangle(name)}__f_{mangle(fname)}"
+
     # -- representation
 
     def rep(self, e: ir.Expr) -> str:
@@ -671,10 +681,32 @@ class _Fn:
         return f"({left} != {right})" if e.negate else f"({left} == {right})"
 
     def ev_FieldGet(self, e: ir.FieldGet) -> str:
-        obj = self.ev(e.obj)
         fd = self.g.cls_analysis.field_map.get((e.cls, e.field))
         if fd is None:
             return self.bad("aot/type", e.field, f"unknown field `{e.cls}.{e.field}`")
+        if isinstance(e.obj, ir.Local) and self.is_virtual(e.obj.name):
+            vf = self.vfield(e.obj.name, e.field)
+            if fd.type in (Type.F64, Type.BOOL):
+                return vf
+            if fd.type is Type.I64:
+                if self.g.reps.field(e.cls, e.field) == TAGGED:
+                    t = self.tslot()
+                    self.emit(f"tpa_int_set(&{t}, {vf});")
+                    return t
+                return vf
+            if fd.type in LIST:
+                kind = "f64" if fd.type is Type.F64_ARRAY else (
+                    "int" if self.g.reps.field_list_big(e.cls, e.field) else "i64")
+                t = self.tmp(list_ptr(kind), "NULL")
+                self.list_slots.append((kind, t))
+                self.emit(f"{lfn(kind, 'release')}({t}); {t} = {vf}; {lfn(kind, 'retain')}({t});")
+                return t
+            assert fd.cls is not None
+            t = self.oslot(fd.cls)
+            mc = mangle(fd.cls)
+            self.emit(f"tpa_cls_{mc}_release({t}); {t} = {vf}; tpa_cls_{mc}_retain({t});")
+            return t
+        obj = self.ev(e.obj)
         mf = mangle(e.field)
         if fd.type in (Type.F64, Type.BOOL):
             return f"({obj}->f_{mf})"
@@ -1270,6 +1302,9 @@ class _Fn:
             return
         if want is Type.OBJ and s.target in self.f.local_classes:
             cls = self.f.local_classes[s.target][0]
+            if self.is_virtual(s.target) and isinstance(s.value, ir.New):
+                self._emit_virtual_init(s.target, cls, s.value)
+                return
             val = self.ev(s.value)
             if s.target in self.borrowed_locals:
                 self.emit(f"v_{mangle(s.target)} = {val};")
@@ -1297,23 +1332,97 @@ class _Fn:
             return
         self.emit(f"v_{mangle(s.target)} = {v};")
 
+    def _emit_virtual_init(self, target: str, cls: str, e: ir.New) -> None:
+        """Scalar-replaced constructor: evaluate args in order and assign directly to virtual field locals."""
+        init_fn = self.g.fns.get(f"{cls}.__init__")
+        init_map = self.g.alloc_plan.init_maps.get(cls, ())
+        eval_args: list[tuple[str, bool, str | None]] = []
+        if init_fn is not None:
+            ok = True
+            for p, a in zip(init_fn.params[1:], e.args):
+                if isinstance(p, ir.ArrayParam):
+                    if not (isinstance(a, ir.Local) and a.type is p.type and a.name in self.types):
+                        ok = False
+                        self.bad("aot/type", init_fn.name, f"the argument for list parameter `{p.name}` of "
+                                 f"`{init_fn.name}` is not a list of its type")
+                    elif self.kind(a.name) != self.g.array_kind(init_fn.name, p.name, p.type):
+                        ok = False
+                        self.bad("aot/type", init_fn.name, f"the list `{a.name}` and the parameter `{p.name}` of "
+                                 f"`{init_fn.name}` are lists of different kinds")
+                    else:
+                        eval_args.append((f"v_{mangle(a.name)}", False, self.kind(a.name)))
+                elif a.type is Type.I64 and self.rep(a) == TAGGED:
+                    eval_args.append((self.tagged(a), True, None))
+                else:
+                    eval_args.append((self.ev(a), False, None))
+            if not ok:
+                return
+        for fname, src in init_map:
+            fd = self.g.cls_analysis.field_map.get((cls, fname))
+            if fd is None:
+                continue
+            vf = self.vfield(target, fname)
+            if fd.type in (Type.F64, Type.BOOL):
+                val = eval_args[src][0] if isinstance(src, int) else self.ev(src)
+                self.emit(f"{vf} = {val};")
+            elif fd.type is Type.I64:
+                if self.g.reps.field(cls, fname) == TAGGED:
+                    if isinstance(src, int):
+                        val, is_tagged, _ = eval_args[src]
+                        tval = val if is_tagged else self.fallible_int(f"tpa_int_from_i64({val}, @)")
+                    else:
+                        tval = self.tagged(src)
+                    self.emit(f"tpa_int_set(&{vf}, {tval});")
+                else:
+                    if isinstance(src, int):
+                        val, is_tagged, _ = eval_args[src]
+                        if is_tagged:
+                            assert init_fn is not None
+                            p = init_fn.params[1 + src]
+                            self.bad("aot/type", init_fn.name, f"a TAGGED int is passed for the RAW parameter "
+                                     f"`{p.name}` of `{init_fn.name}` (the representation did not converge)")
+                            continue
+                    else:
+                        val = self.ev(src)
+                    self.emit(f"{vf} = {val};")
+            elif fd.type in LIST:
+                assert isinstance(src, int)
+                val, _, arg_kind = eval_args[src]
+                kind = arg_kind or ("f64" if fd.type is Type.F64_ARRAY else (
+                    "int" if self.g.reps.field_list_big(cls, fname) else "i64"))
+                self.emit(f"{lfn(kind, 'retain')}({val});")
+                self.emit(f"{lfn(kind, 'release')}({vf});")
+                self.emit(f"{vf} = {val};")
+            else:
+                assert fd.cls is not None
+                val = eval_args[src][0] if isinstance(src, int) else self.ev(src)
+                mc = mangle(fd.cls)
+                tmp = self.tmp(self.g.cls_ptr(fd.cls), "NULL")
+                self.emit(f"{tmp} = {val};")
+                self.emit(f"tpa_cls_{mc}_retain({tmp});")
+                self.emit(f"tpa_cls_{mc}_release({vf});")
+                self.emit(f"{vf} = {tmp};")
+
     def st_FieldSet(self, s: ir.FieldSet) -> None:
-        obj = self.ev(s.obj)
         fd = self.g.cls_analysis.field_map.get((s.cls, s.field))
         if fd is None:
             self.bad("aot/type", s.field, f"unknown field `{s.cls}.{s.field}`")
             return
-        mf = mangle(s.field)
+        if isinstance(s.obj, ir.Local) and self.is_virtual(s.obj.name):
+            lval = self.vfield(s.obj.name, s.field)
+        else:
+            obj = self.ev(s.obj)
+            lval = f"{obj}->f_{mangle(s.field)}"
         if fd.type in (Type.F64, Type.BOOL):
             val = self.ev(s.value)
-            self.emit(f"{obj}->f_{mf} = {val};")
+            self.emit(f"{lval} = {val};")
         elif fd.type is Type.I64:
             if self.g.reps.field(s.cls, s.field) == TAGGED:
                 val = self.tagged(s.value)
-                self.emit(f"tpa_int_set(&{obj}->f_{mf}, {val});")
+                self.emit(f"tpa_int_set(&{lval}, {val});")
             else:
                 val = self.ev(s.value)
-                self.emit(f"{obj}->f_{mf} = {val};")
+                self.emit(f"{lval} = {val};")
         elif fd.type in LIST:
             kind = "f64" if fd.type is Type.F64_ARRAY else (
                 "int" if self.g.reps.field_list_big(s.cls, s.field) else "i64")
@@ -1324,8 +1433,8 @@ class _Fn:
                 self.bind_kind = None
             if not owned:
                 self.emit(f"{lfn(kind, 'retain')}({val});")
-            self.emit(f"{lfn(kind, 'release')}({obj}->f_{mf});")
-            self.emit(f"{obj}->f_{mf} = {val};")
+            self.emit(f"{lfn(kind, 'release')}({lval});")
+            self.emit(f"{lval} = {val};")
         else:
             assert fd.cls is not None
             mc = mangle(fd.cls)
@@ -1333,8 +1442,8 @@ class _Fn:
             tmp = self.tmp(self.g.cls_ptr(fd.cls), "NULL")
             self.emit(f"{tmp} = {val};")
             self.emit(f"tpa_cls_{mc}_retain({tmp});")
-            self.emit(f"tpa_cls_{mc}_release({obj}->f_{mf});")
-            self.emit(f"{obj}->f_{mf} = {tmp};")
+            self.emit(f"tpa_cls_{mc}_release({lval});")
+            self.emit(f"{lval} = {tmp};")
 
     def st_StoreIndex(self, s: ir.StoreIndex) -> None:
         """`a[i] = v`: CPython evaluates the value, then the list, then the index; an out-of-range index
@@ -1700,10 +1809,34 @@ class _Fn:
                 releases.append(f"    {lfn(kind, 'release')}(v_{mangle(name)});")
             elif t is Type.OBJ and name in f.local_classes:
                 cls = f.local_classes[name][0]
-                mc = mangle(cls)
-                decls.append(f"    tpa_cls_{mc} *v_{mangle(name)} TPA_UNUSED = NULL;")
-                if name not in self.borrowed_locals:
-                    releases.append(f"    tpa_cls_{mc}_release(v_{mangle(name)});")
+                if self.is_virtual(name):
+                    decl = self.g.cls_analysis.classes.get(cls)
+                    if decl is not None:
+                        for fd in decl.field_decls:
+                            vf = self.vfield(name, fd.name)
+                            if fd.type in (Type.F64, Type.BOOL):
+                                decls.append(f"    {CTYPE[fd.type]} {vf} TPA_UNUSED = 0;")
+                            elif fd.type is Type.I64:
+                                if self.g.reps.field(cls, fd.name) == TAGGED:
+                                    decls.append(f"    tpa_int {vf} TPA_UNUSED = TPA_INT_ZERO;")
+                                    releases.append(f"    tpa_int_release({vf});")
+                                else:
+                                    decls.append(f"    int64_t {vf} TPA_UNUSED = 0;")
+                            elif fd.type in LIST:
+                                kind = "f64" if fd.type is Type.F64_ARRAY else (
+                                    "int" if self.g.reps.field_list_big(cls, fd.name) else "i64")
+                                decls.append(f"    {list_ptr(kind)}{vf} TPA_UNUSED = NULL;")
+                                releases.append(f"    {lfn(kind, 'release')}({vf});")
+                            else:
+                                assert fd.cls is not None
+                                fmc = mangle(fd.cls)
+                                decls.append(f"    tpa_cls_{fmc} *{vf} TPA_UNUSED = NULL;")
+                                releases.append(f"    tpa_cls_{fmc}_release({vf});")
+                else:
+                    mc = mangle(cls)
+                    decls.append(f"    tpa_cls_{mc} *v_{mangle(name)} TPA_UNUSED = NULL;")
+                    if name not in self.borrowed_locals:
+                        releases.append(f"    tpa_cls_{mc}_release(v_{mangle(name)});")
             elif self.tagged_name(name):
                 decls.append(f"    tpa_int v_{mangle(name)} TPA_UNUSED = TPA_INT_ZERO;")
                 releases.append(f"    tpa_int_release(v_{mangle(name)});")
@@ -1742,10 +1875,11 @@ FP_CONTRACT_PRAGMA: tuple[str, ...] = (
 )
 
 
-def emit(module: ir.Module, program: Program, *, strict_int: bool = False) -> tuple[str | None, list[Finding]]:
+def emit(module: ir.Module, program: Program, *, strict_int: bool = False,
+         alloc_plan: AllocPlan | None = None) -> tuple[str | None, list[Finding]]:
     """The C text of the module and no findings, or None and the findings (every finding of every
     function). `strict_int`: no TAGGED int, an operation that is not proved is the finding `aot/int-unproven`."""
-    g = _Gen(module, program, strict_int)
+    g = _Gen(module, program, strict_int, alloc_plan=alloc_plan)
     bodies: list[list[str]] = []
     for f in g.fns.values():
         fn = _Fn(g, f)
