@@ -39,7 +39,8 @@ def format_finding(f: Finding) -> str:
 _LINE = re.compile(r"\bline (\d+)")
 
 
-def _lower(program, library=None, strict_int: bool = False, explain: list | None = None
+def _lower(program, library=None, strict_int: bool = False, explain: list | None = None,
+           explain_alloc_out: list | None = None
            ) -> tuple[str | None, list[Finding]]:
     """Run the front end and the verifier in their AOT mode on the program's file; emit C or return
     the findings. Every line number is the file's own. `explain` (a list, #465): instead of emitting C, the text of
@@ -92,6 +93,22 @@ def _lower(program, library=None, strict_int: bool = False, explain: list | None
             module = proved if keep is None else dataclasses.replace(
                 proved, functions=tuple(f for f in proved.functions if f.name in keep))
             explain.append(rep_mod.infer(module, strict=strict_int).explain(program, exports=shown))
+            return "", []
+    elif explain_alloc_out is not None:
+        from typedpython.aot import alloc as alloc_mod
+        from typedpython.aot import classes as classes_mod
+        from typedpython.aot import rep as rep_mod
+        from typedpython.aot.rep import TAGGED
+
+        def emit_fn(proved, program):
+            reps = rep_mod.infer(proved, strict=strict_int)
+            tagged_fields = {k for k, v in reps.field_reps.items() if v == TAGGED}
+            class_lines = {c.name: c.lineno for c in program.classes}
+            cls_analysis = classes_mod.analyze_classes(proved, program.rel, class_lines, tagged_fields)
+            if cls_analysis.findings:
+                return None, cls_analysis.findings
+            plan = alloc_mod.analyze_alloc(proved, cls_analysis)
+            explain_alloc_out.append(plan.explain())
             return "", []
     proved_names = {f.name for f in proved.functions}
     found: list[Finding] = []
@@ -150,6 +167,22 @@ def explain_lists(entry: Path, *, exports: list[str] | None = None, prefix: str 
         raise AotError(program.findings)
     out: list[str] = []
     _, findings = _lower(program, strict_int=strict_int, explain=out)
+    if findings or not out:
+        raise AotError(findings)
+    return out[0]
+
+
+def explain_alloc(entry: Path, *, strict_int: bool = False) -> str:
+    """The diagnostic of `--explain-alloc` (SPEC N-17, #493): every class allocation site in the
+    program with its chosen strategy (`virtual` or `heap-rc`) and reason. Nothing is generated;
+    raises AotError as `generate` does."""
+    from typedpython.aot import program as program_mod
+
+    program = program_mod.analyze(Path(entry))
+    if program.findings:
+        raise AotError(program.findings)
+    out: list[str] = []
+    _, findings = _lower(program, strict_int=strict_int, explain_alloc_out=out)
     if findings or not out:
         raise AotError(findings)
     return out[0]

@@ -1428,6 +1428,13 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     whole-program immutability analysis shared by the cycle-freedom proof (`aot/cycle-possible`),
     reference-counting elision rules, and library-mode safety (`aot/library-mutable-class`), compiling
     `benchmarks/typedpython/py/binary_trees.py` with 0 `aot-check` findings.
+  - **Tier O PR-O2a (#493)** (leader review 2026-11-20, not owner-confirmed): adds virtual objects /
+    scalar replacement (`aot/alloc.py`) promoting non-escaping single-assignment class locals with
+    simple `__init__` and no `__del__` to per-field C locals (zero heap allocation, owned fields
+    released at `tp_cleanup:`), falling back to `heap-rc` with an explicit reason for every escape
+    (return, call, non-inlined method call, identity `is`, alias, reassignment/branch merge, or
+    temporary), plus `typedpython.aot.explain_alloc(...)` and `python -m typedpython aot-build
+    --explain-alloc`.
 
 ---
 
