@@ -93,8 +93,26 @@ class MemberFunctionBindingTest {
     }
 
     @Test
-    fun aMemberOfAGenericClassIsDeclinedWithItsReason() {
-        val describe = declarations().single { it.simpleName == "describe" }
+    fun aMemberOfAnUnboundedOrBoundedGenericClassIsBound() {
+        val describe = declarations().single { it.owner == "fixture.artifactmember.Box" && it.simpleName == "describe" }
+        assertEquals("fixture.artifactmember.Box.describe", describe.bindingName)
+        val swap = callables().single { it.name == "fixture.artifactmember.Box.swap" }
+        assertEquals("METHOD", swap.kind)
+        assertTrue("fixture.artifactmember.Box<kotlin.Any?>" in swap.lambdaBody, swap.lambdaBody)
+
+        val replace = callables().single { it.name == "fixture.artifactmember.NumberBox.replace" }
+        assertEquals("METHOD", replace.kind)
+        assertTrue("fixture.artifactmember.NumberBox<kotlin.Number>" in replace.lambdaBody, replace.lambdaBody)
+        assertTrue("(args[1] as kotlin.Number)" in replace.lambdaBody, replace.lambdaBody)
+
+        val numberSetter = callables().single { it.name == "fixture.artifactmember.NumberBox.value=" }
+        assertEquals("SETTER", numberSetter.kind)
+        assertTrue("fixture.artifactmember.NumberBox<kotlin.Number>" in numberSetter.lambdaBody, numberSetter.lambdaBody)
+    }
+
+    @Test
+    fun aMemberOfAGenericClassWithAnUnsupportedBoundIsDeclinedWithItsReason() {
+        val describe = declarations().single { it.simpleName == "describeComparable" }
         assertNull(describe.bindingName)
         assertNotNull(describe.declineReason)
         assertTrue("generic" in describe.declineReason!!, describe.declineReason)

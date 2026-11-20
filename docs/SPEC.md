@@ -306,8 +306,24 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   (androidNative) and `python-multiplatform-ksp/fixtures/android/.../GeneratedAndroidTableTest.kt` run outside desktop.
 - **U-4** Declaration kinds: objects, companions, interfaces (not constructible), enum entries as
   statics, abstract classes (no constructor), nested classes. Not exposed: annotation classes,
-  generic declarations, data-class synthetics. `Status: implemented` on desktop,
+  generic constructors and generic top-level/extension declarations with bounded or reified type
+  parameters, data-class synthetics. `Status: implemented` on desktop,
   `GeneratedDeclarationKindsTest.kt`.
+  - **U-4a** **Generic class members** (#164, item 3; leader decision 2026-11-20): a public generic
+    `class` or `interface` whose type parameters are all non-reified and each has either no upper
+    bound (`Any?`) or a single bindable, non-recursive upper bound (`T : Bound`, such as `T : Number`
+    or `T : Any`) exposes its public member properties (getters and setters) and public member
+    functions across KSP, the jar walker (B-1), and the klib walker (B-2). Each class type parameter
+    is substituted with its upper bound (or `kotlin.Any?` when unbounded) in member signatures.
+    Read-only property access casts the receiver with star projections (`Owner<*, ...>`); write
+    positions (`var` setters and member functions on generic classes) cast the receiver to
+    `Owner<BoundOrAny, ...>` (covered by file-level `@Suppress("UNCHECKED_CAST")`). When a type
+    parameter has an explicit upper bound `Bound`, the value slot is checked against `Bound`; when
+    unbounded (`kotlin.Any?`), Python's dynamic typing and Kotlin type erasure mean passing a value
+    of the wrong runtime type may surface as `ClassCastException` at the Kotlin consumption site.
+    Still declined: generic constructors, `reified` type parameters, F-bounded or mutually recursive
+    upper bounds (`T : Comparable<T>`), multiple upper bounds, and unbindable upper bounds.
+    `Status: draft`.
   **A companion object is a value** (#322): the public companion object of a public class is the value
   `Owner.Companion` (`Owner.<CompanionName>` for a named companion), read as an attribute of the owner's
   proxy class or of its module. When the companion lists the owner as a direct supertype in its Kotlin
@@ -596,7 +612,8 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   (supertypes included), ahead of an extension of the same name, because Kotlin resolves a member
   first, and never as a module attribute; they take no part in a constructor's name check. Overloads
   within one class are told apart as functions are (`Owner.add__Int`). Declined, each with its reason:
-  a `suspend` member, a `@Composable` member, a member of a generic class (not yet), and a member that
+  a `suspend` member, a `@Composable` member, a member of a generic class whose type parameter has
+  an unsupported bound (U-4a), and a member that
   shares its name with a property of the class (the property is kept). `Any`'s members, statics and
   synthetic methods are not bound. A member's default arguments are not omittable yet: Python passes
   every argument. A member's stub is a method of the receiver's stub class whose docstring carries

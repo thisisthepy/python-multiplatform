@@ -790,13 +790,39 @@ internal object KlibKnmScanner {
         val owner = cls.dottedName
         val ownerType = classTypeModel(owner, classes) ?: KotlinTypeModel(owner)
         val generic = cls.proto.typeParameterCount > 0
+        // A generic owner is held to the rule `handleClassOrNull` applies to a plain one, which it cannot
+        // apply itself (it refuses type parameters): public, not `@PublishedApi`, not `@Deprecated`, and
+        // not a value class (a boxed `ChannelResult<T>` is not what a handle holds; SPEC U-4a).
+        if (generic && (cls.visibility != ProtoBuf.Visibility.PUBLIC || cls.isPublishedApi || cls.isDeprecated || cls.isValue ||
+                cls.proto.hasInlineClassUnderlyingPropertyName() || cls.proto.hasInlineClassUnderlyingType())
+        ) {
+            return emptyList()
+        }
         if (!generic && handleClassOrNull(ownerType, classes) == null) return emptyList()
 
+        val classSubstIds = if (generic) {
+            substitutableTypeParameterIds(cls.proto.typeParameterList, cls.nameResolver, cls.typeTable)
+        } else {
+            emptySet()
+        }
         val unbindable = when {
-            generic -> "a member of a generic class: not bound yet"
+            generic && classSubstIds == null ->
+                "a member of a generic class whose type parameter has an unsupported bound"
             else -> unreachableSupertypeOf(owner, classes)?.let { missing ->
                 ArtifactScanner.unreachableReceiverReason(missing, owner)
             }
+        }
+        val readReceiver = if (!generic) {
+            "(args[0] as $owner)"
+        } else {
+            "(args[0] as $owner${List(cls.proto.typeParameterCount) { "*" }.joinToString(", ", "<", ">")})"
+        }
+        val writeReceiver = if (!generic) {
+            "(args[0] as $owner)"
+        } else if (classSubstIds != null) {
+            "(args[0] as $owner${List(cls.proto.typeParameterCount) { "kotlin.Any?" }.joinToString(", ", "<", ">")})"
+        } else {
+            null
         }
         val isEnum = cls.kind == ProtoBuf.Class.Kind.ENUM_CLASS
         return cls.proto.propertyList
@@ -804,7 +830,17 @@ internal object KlibKnmScanner {
             .filter { Flags.MEMBER_KIND.get(it.flags) == ProtoBuf.MemberKind.DECLARATION }
             .filter { !(isEnum && cls.nameResolver.getString(it.name) in ENUM_STATICS) }
             .flatMap { prop ->
-                memberPropertyCandidatesFor(prop, cls, owner, ownerType, unbindable, classes)
+                memberPropertyCandidatesFor(
+                    prop = prop,
+                    cls = cls,
+                    owner = owner,
+                    ownerType = ownerType,
+                    readReceiver = readReceiver,
+                    writeReceiver = writeReceiver,
+                    classSubstIds = classSubstIds.orEmpty(),
+                    unbindable = unbindable,
+                    classes = classes,
+                )
             }
     }
 
@@ -813,6 +849,9 @@ internal object KlibKnmScanner {
         cls: KnmClassRecord,
         owner: String,
         ownerType: KotlinTypeModel,
+        readReceiver: String,
+        writeReceiver: String?,
+        classSubstIds: Set<Int>,
         unbindable: String?,
         classes: Map<String, KnmClassRecord>,
     ): List<Candidate> {
@@ -821,7 +860,7 @@ internal object KlibKnmScanner {
         val propName = nr.getString(prop.name)
         if (!ArtifactScanner.isWritableParameterName(propName)) return emptyList()
         val returnProto = prop.returnType(tt)
-        val typeModel = typeModelOf(returnProto, nr, tt, classes) ?: return emptyList()
+        val typeModel = typeModelOf(returnProto, nr, tt, classes, classSubstIds) ?: return emptyList()
         val getterModel = DeclarationModel(
             simpleName = propName,
             owner = owner,
@@ -853,12 +892,15 @@ internal object KlibKnmScanner {
                 return declined("${maxOf(prop.contextReceiverTypeCount, prop.contextReceiverTypeIdCount)} context receiver(s)")
             prop.hasGetterFlags() && Flags.VISIBILITY.get(prop.getterFlags) != ProtoBuf.Visibility.PUBLIC ->
                 return declined("its getter is not a public, non-synthetic method (hidden or deprecated)")
+            cls.proto.typeParameterCount > 0 && typeModel.arguments.isNotEmpty() ->
+                return declined(GENERIC_OWNER_PARAMETERIZED_REASON)
         }
 
-        val returns = klibBoundaryTypeOf(typeModel, classes, BoundaryDirection.RETURN)
+        val returns = classMemberBoundaryTypeOf(typeModel, returnProto, classSubstIds, classes, BoundaryDirection.RETURN)
             ?: return declined("no boundary type for property type ${typeModel.render()}")
         val key = "$owner.$propName"
-        val readExpr = "(args[0] as $owner).${ArtifactScanner.writeParameterName(propName)}"
+        val readExpr = "$readReceiver.${ArtifactScanner.writeParameterName(propName)}"
+        val writeExpr = writeReceiver?.let { "$it.${ArtifactScanner.writeParameterName(propName)}" }
         val supertypes = if (returns.tag == OBJECT_TAG) supertypesOf(typeModel.qualifiedName, classes) else emptyList()
         val getterCandidate = Candidate(
             callable = ArtifactCallable(
@@ -884,13 +926,15 @@ internal object KlibKnmScanner {
 
         val setterAnnotations = prop.getExtension(KlibMetadataProtoBuf.propertySetterAnnotation).map { nr.getQualifiedClassName(it.id) }
         val setterCandidate = if (
+            writeExpr != null &&
             Flags.IS_VAR.get(prop.flags) &&
             (!prop.hasSetterFlags() || Flags.VISIBILITY.get(prop.setterFlags) == ProtoBuf.Visibility.PUBLIC) &&
             DEPRECATED_ANNOTATION !in setterAnnotations &&
             PUBLISHED_API_ANNOTATION !in setterAnnotations &&
             COMPOSABLE_ANNOTATION !in setterAnnotations
         ) {
-            val valueBoundary = klibBoundaryTypeOf(typeModel, classes, BoundaryDirection.PARAMETER)?.takeIf { !it.isReturnOnly }
+            val valueBoundary = classMemberBoundaryTypeOf(typeModel, returnProto, classSubstIds, classes, BoundaryDirection.PARAMETER)
+                ?.takeIf { !it.isReturnOnly }
             if (valueBoundary != null) {
                 val setterKey = "$key="
                 val paramName = if (prop.hasSetterValueParameter()) {
@@ -904,7 +948,7 @@ internal object KlibKnmScanner {
                         arity = 1,
                         paramTags = listOf(valueBoundary.tag),
                         returnTag = "UNIT",
-                        lambdaBody = "{ args -> $readExpr = ${valueBoundary.read("args[1]")}; Unit }",
+                        lambdaBody = "{ args -> $writeExpr = ${valueBoundary.read("args[1]")}; Unit }",
                         receiverTypeName = owner,
                         paramNames = listOf(paramName),
                         paramTypeNames = listOf(typeModel.qualifiedName),
@@ -940,12 +984,36 @@ internal object KlibKnmScanner {
         val owner = cls.dottedName
         val ownerType = classTypeModel(owner, classes) ?: KotlinTypeModel(owner)
         val generic = cls.proto.typeParameterCount > 0
+        // A generic owner is held to the rule `handleClassOrNull` applies to a plain one, which it cannot
+        // apply itself (it refuses type parameters): public, not `@PublishedApi`, not `@Deprecated`, and
+        // not a value class (a boxed `ChannelResult<T>` is not what a handle holds; SPEC U-4a).
+        if (generic && (cls.visibility != ProtoBuf.Visibility.PUBLIC || cls.isPublishedApi || cls.isDeprecated || cls.isValue ||
+                cls.proto.hasInlineClassUnderlyingPropertyName() || cls.proto.hasInlineClassUnderlyingType())
+        ) {
+            return emptyList()
+        }
         if (!generic && handleClassOrNull(ownerType, classes) == null) return emptyList()
 
         val nr = cls.nameResolver
         val propertyNames = cls.proto.propertyList.mapTo(HashSet()) { nr.getString(it.name) }
-        val unbindable = unreachableSupertypeOf(owner, classes)?.let { missing ->
-            ArtifactScanner.unreachableReceiverReason(missing, owner)
+        val classSubstIds = if (generic) {
+            substitutableTypeParameterIds(cls.proto.typeParameterList, nr, cls.typeTable)
+        } else {
+            emptySet()
+        }
+        val receiverExpr = if (!generic) {
+            "(args[0] as $owner)"
+        } else if (classSubstIds != null) {
+            "(args[0] as $owner${List(cls.proto.typeParameterCount) { "kotlin.Any?" }.joinToString(", ", "<", ">")})"
+        } else {
+            "(args[0] as $owner)"
+        }
+        val unbindable = when {
+            generic && classSubstIds == null ->
+                "a member of a generic class whose type parameter has an unsupported bound"
+            else -> unreachableSupertypeOf(owner, classes)?.let { missing ->
+                ArtifactScanner.unreachableReceiverReason(missing, owner)
+            }
         }
         val isEnum = cls.kind == ProtoBuf.Class.Kind.ENUM_CLASS
         return cls.proto.functionList
@@ -953,7 +1021,17 @@ internal object KlibKnmScanner {
             .filter { Flags.MEMBER_KIND.get(it.flags) == ProtoBuf.MemberKind.DECLARATION }
             .filter { fn -> !isAnyMember(fn, nr) && !(isEnum && nr.getString(fn.name) in ENUM_STATICS) }
             .mapNotNull { fn ->
-                memberCandidateOrNull(fn, cls, owner, ownerType, generic, unbindable, propertyNames, classes)
+                memberCandidateOrNull(
+                    fn = fn,
+                    cls = cls,
+                    owner = owner,
+                    ownerType = ownerType,
+                    receiverExpr = receiverExpr,
+                    classSubstIds = classSubstIds.orEmpty(),
+                    unbindable = unbindable,
+                    propertyNames = propertyNames,
+                    classes = classes,
+                )
             }
     }
 
@@ -962,7 +1040,8 @@ internal object KlibKnmScanner {
         cls: KnmClassRecord,
         owner: String,
         ownerType: KotlinTypeModel,
-        generic: Boolean,
+        receiverExpr: String,
+        classSubstIds: Set<Int>,
         unbindable: String?,
         propertyNames: Set<String>,
         classes: Map<String, KnmClassRecord>,
@@ -978,13 +1057,14 @@ internal object KlibKnmScanner {
         // and functional interfaces (`Runnable(block: () -> Unit)`) are not substituted or synthesized
         // on non-composable KLIB functions unless the function is `@Composable`.
         val substitutableIds = if (isComposable) substitutableTypeParameterIds(fn.typeParameterList, nr, tt) else emptySet()
+        val combinedSubstIds = classSubstIds + substitutableIds.orEmpty()
         val hasReified = fn.typeParameterList.any { it.reified }
         val hasUnsubstitutable = fn.typeParameterCount > 0 && (!isComposable || substitutableIds == null)
 
         val valueParams = fn.valueParameterList
         val parameters = valueParams.map { vp ->
             val rawType = vp.type(tt)
-            val model = typeModelOf(rawType, nr, tt, classes, substitutableIds.orEmpty()) ?: return null
+            val model = typeModelOf(rawType, nr, tt, classes, combinedSubstIds) ?: return null
             DeclaredParameter(
                 name = nr.getString(vp.name),
                 type = model,
@@ -992,7 +1072,7 @@ internal object KlibKnmScanner {
             )
         }
         val returnProto = fn.returnType(tt)
-        val returnModel = typeModelOf(returnProto, nr, tt, classes, substitutableIds.orEmpty()) ?: return null
+        val returnModel = typeModelOf(returnProto, nr, tt, classes, combinedSubstIds) ?: return null
 
         val model = DeclarationModel(
             simpleName = name,
@@ -1013,8 +1093,10 @@ internal object KlibKnmScanner {
             isSuspend -> return declined("suspend")
             hasReified -> return declined("a reified type parameter: its type argument is read at run time, so kotlin.Any? cannot stand for it")
             hasUnsubstitutable -> return declined("a bounded or reified type parameter: kotlin.Any? cannot stand for it")
-            generic -> return declined("a member of a generic class: not bound yet")
             unbindable != null -> return declined(unbindable)
+            cls.proto.typeParameterCount > 0 &&
+                (returnModel.arguments.isNotEmpty() || parameters.any { it.type.arguments.isNotEmpty() }) ->
+                return declined(GENERIC_OWNER_PARAMETERIZED_REASON)
             DEPRECATED_ANNOTATION in annotations ->
                 return declined("@Deprecated: its level is not in this klib ABI, and a HIDDEN one cannot be called from source")
             PUBLISHED_API_ANNOTATION in annotations ->
@@ -1036,11 +1118,17 @@ internal object KlibKnmScanner {
         }
         functionSlots.firstNotNullOfOrNull { it?.declineReason }?.let { return declined(it) }
 
-        val returnType = klibBoundaryTypeOf(returnModel, classes, BoundaryDirection.RETURN)
+        val returnType = classMemberBoundaryTypeOf(returnModel, returnProto, classSubstIds, classes, BoundaryDirection.RETURN)
             ?: return declined("no boundary type for return ${returnModel.render()}")
         val boundaryTypes = parameters.mapIndexed { index, parameter ->
             functionSlots[index]?.boundary
-                ?: klibBoundaryTypeOf(parameter.type, classes, BoundaryDirection.PARAMETER)
+                ?: classMemberBoundaryTypeOf(
+                    parameter.type,
+                    valueParams[index].type(tt),
+                    classSubstIds,
+                    classes,
+                    BoundaryDirection.PARAMETER,
+                )
                 ?: return declined("no boundary type for parameter ${parameter.type.render()}")
         }
         if (boundaryTypes.any { it.isReturnOnly }) return declined("a parameter of a return-only boundary type")
@@ -1048,7 +1136,7 @@ internal object KlibKnmScanner {
         val key = "$owner.$name"
         val typeArgs = if (fn.typeParameterCount == 0) "" else List(fn.typeParameterCount) { "kotlin.Any?" }.joinToString(", ", "<", ">")
         val argumentExpressions = boundaryTypes.mapIndexed { index, type -> type.read("args[${index + 1}]") }
-        val body = returnType.wrapReturn("(args[0] as $owner).$name$typeArgs(${argumentExpressions.joinToString(", ")})")
+        val body = returnType.wrapReturn("$receiverExpr.$name$typeArgs(${argumentExpressions.joinToString(", ")})")
         val supertypes = if (returnType.tag == OBJECT_TAG) supertypesOf(returnModel.qualifiedName, classes) else emptyList()
         val paramNames = parameters.map { it.name!! }
         val paramTypeNames = parameters.mapIndexed { index, parameter ->
@@ -1853,6 +1941,31 @@ internal object KlibKnmScanner {
             constructorIsPublic = info.constructorIsPublic,
             propertyIsPublic = info.propertyIsPublic,
         )
+    }
+
+    /** Why a member of a generic class whose signature names a parameterized type is not bound (SPEC U-4a). */
+    private const val GENERIC_OWNER_PARAMETERIZED_REASON =
+        "a member of a generic class whose signature names a parameterized type: not bound yet"
+
+    /**
+     * [klibBoundaryTypeOf] for the slot of a class member (SPEC U-4a). A slot whose declared type **is**
+     * one of the owner's substituted type parameters (`Deferred<T>.getCompleted(): T`) was read as
+     * `kotlin.Any?`, and crosses as an object handle cast to nothing narrower, the way the jar walker's
+     * `NULLABLE_ANY_BOUNDARY` does. A `kotlin.Any?` the declaration wrote itself stays declined here, as
+     * it always was: only the substitution asked for it.
+     */
+    private fun classMemberBoundaryTypeOf(
+        model: KotlinTypeModel,
+        declared: ProtoBuf.Type?,
+        classSubstIds: Set<Int>,
+        classes: Map<String, KnmClassRecord>,
+        direction: BoundaryDirection,
+    ): BoundaryType? {
+        val isClassTypeParameter = declared != null && declared.hasTypeParameter() && declared.typeParameter in classSubstIds
+        if (isClassTypeParameter && model.qualifiedName == "kotlin.Any" && model.isNullable) {
+            return BoundaryType(OBJECT_TAG, "(%s as kotlin.Any?)", "(%s)")
+        }
+        return klibBoundaryTypeOf(model, classes, direction)
     }
 
     private fun klibBoundaryTypeOf(

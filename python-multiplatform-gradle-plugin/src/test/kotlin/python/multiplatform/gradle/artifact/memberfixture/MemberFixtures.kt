@@ -50,9 +50,28 @@ class Sized {
     fun size(extra: Int): Int = size + extra
 }
 
-/** Generic: its members are not bound yet. */
-class Box<T>(val item: T) {
+/** Unbounded generic: its members bind with `kotlin.Any?` substitution (SPEC U-4a). */
+class Box<T>(var item: T) {
     fun describe(): String = "box"
+    fun swap(next: T): T {
+        val prev = item
+        item = next
+        return prev
+    }
+}
+
+/** Single bindable upper bound: its members bind with `kotlin.Number` substitution (SPEC U-4a). */
+class NumberBox<T : Number>(var value: T) {
+    fun replace(next: T): T {
+        val prev = value
+        value = next
+        return prev
+    }
+}
+
+/** F-bounded generic: recursive upper bound is still declined (SPEC U-4a). */
+class ComparableBox<T : Comparable<T>>(val item: T) {
+    fun describeComparable(): String = item.toString()
 }
 
 /** An `object`'s members are #53's and stay bound as statics under the object's name. */
