@@ -147,11 +147,21 @@ class KlibScannerTest {
         // of its interfaces and classes, and since #191 Phase B (A1) `.knm` metadata adds top-level
         // constants, extension functions/properties on handle receivers, and public members of open
         // and abstract classes while declining `@Deprecated(level = ERROR)` types (`ChildHandle`,
-        // `ChildJob`).
+        // `ChildJob`). Since SPEC U-4a (#164) the members of a public generic class or interface with
+        // unbounded type parameters bind too, each read as `kotlin.Any?` (`Deferred.getCompleted`,
+        // `MutableStateFlow.value`, `CancellableContinuation.isActive`); a member whose signature names a
+        // parameterized type (`Deferred.onAwait: SelectClause1<T>`) and a member of a generic value class
+        // (`ChannelResult<T>.isSuccess`) stay declined.
         val entries = KlibScanner.scanKlib(coroutinesKlib, includePrefixes = emptyList())
         assertEquals(
             listOf(
+                "kotlinx.coroutines.AbstractCoroutine.isActive",
+                "kotlinx.coroutines.CancellableContinuation.initCancellability",
+                "kotlinx.coroutines.CancellableContinuation.isActive",
+                "kotlinx.coroutines.CancellableContinuation.isCancelled",
+                "kotlinx.coroutines.CancellableContinuation.isCompleted",
                 "kotlinx.coroutines.CloseableCoroutineDispatcher.close",
+                "kotlinx.coroutines.CompletableDeferred.complete",
                 "kotlinx.coroutines.CompletableJob.complete",
                 "kotlinx.coroutines.CoroutineDispatcher.Key",
                 "kotlinx.coroutines.CoroutineDispatcher.limitedParallelism",
@@ -160,6 +170,7 @@ class KlibScannerTest {
                 "kotlinx.coroutines.CoroutineName.Key",
                 "kotlinx.coroutines.CoroutineName.name",
                 "kotlinx.coroutines.CoroutineStart.isLazy",
+                "kotlinx.coroutines.Deferred.getCompleted",
                 "kotlinx.coroutines.Dispatchers.Default",
                 "kotlinx.coroutines.Dispatchers.Main",
                 "kotlinx.coroutines.Dispatchers.Unconfined",
@@ -187,18 +198,29 @@ class KlibScannerTest {
                 "kotlinx.coroutines.channels.Channel.Factory.DEFAULT_BUFFER_PROPERTY_NAME",
                 "kotlinx.coroutines.channels.Channel.Factory.RENDEZVOUS",
                 "kotlinx.coroutines.channels.Channel.Factory.UNLIMITED",
+                "kotlinx.coroutines.channels.ChannelIterator.next",
                 "kotlinx.coroutines.channels.ChannelResult.Companion",
+                "kotlinx.coroutines.channels.ReceiveChannel.isClosedForReceive",
+                "kotlinx.coroutines.channels.ReceiveChannel.isEmpty",
+                "kotlinx.coroutines.channels.SendChannel.isClosedForSend",
                 "kotlinx.coroutines.ensureActive__CoroutineScope",
                 "kotlinx.coroutines.ensureActive__Job",
                 "kotlinx.coroutines.flow.DEFAULT_CONCURRENCY",
                 "kotlinx.coroutines.flow.DEFAULT_CONCURRENCY_PROPERTY_NAME",
+                "kotlinx.coroutines.flow.MutableSharedFlow.resetReplayCache",
+                "kotlinx.coroutines.flow.MutableSharedFlow.tryEmit",
+                "kotlinx.coroutines.flow.MutableStateFlow.compareAndSet",
+                "kotlinx.coroutines.flow.MutableStateFlow.value",
+                "kotlinx.coroutines.flow.MutableStateFlow.value=",
                 "kotlinx.coroutines.flow.SharingStarted.Companion",
                 "kotlinx.coroutines.flow.SharingStarted.Eagerly",
                 "kotlinx.coroutines.flow.SharingStarted.Lazily",
                 "kotlinx.coroutines.flow.SharingStarted.WhileSubscribed",
+                "kotlinx.coroutines.flow.StateFlow.value",
                 "kotlinx.coroutines.isActive",
                 "kotlinx.coroutines.newFixedThreadPoolContext",
                 "kotlinx.coroutines.newSingleThreadContext",
+                "kotlinx.coroutines.selects.SelectInstance.disposeOnCompletion",
                 "kotlinx.coroutines.sync.Mutex",
                 "kotlinx.coroutines.sync.Mutex.isLocked",
                 "kotlinx.coroutines.sync.Semaphore",
