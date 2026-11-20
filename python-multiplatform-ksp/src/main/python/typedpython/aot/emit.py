@@ -243,6 +243,73 @@ class _Gen:
         assert fd.cls is not None
         return self.cls_ptr(fd.cls)
 
+    # -- PR-O2b scope regions (docs/design/typedpython-aot.md 6.3.2 item 2, "Step 2 as implemented")
+
+    def region_struct(self, fn_name: str, cls: str) -> str:
+        """The C type of the region objects of class `cls` in function `fn_name`: no count, and a field of a
+        class that is region in the same function is a region pointer (so the field types are per function)."""
+        return f"tpa_reg_{mangle(fn_name)}__{mangle(cls)}"
+
+    def reg_field_ctype(self, fn_name: str, cls: str, fd: ir.FieldDecl) -> str:
+        if fd.type is Type.OBJ:
+            assert fd.cls is not None
+            if self.alloc_plan.is_region(fn_name, fd.cls):
+                return f"{self.region_struct(fn_name, fd.cls)} *"
+            return self.cls_ptr(fd.cls)
+        return self.field_ctype(cls, fd)
+
+    def emit_region_decls(self) -> list[str]:
+        """One struct per region (function, class), after the heap structs (a heap-typed field names one), and
+        its `_free` / `_reset`: a class whose region objects own heap references (lists, big ints, heap-rc
+        objects) first releases them with a walk over every object of the region (`_drop`); a region pointer
+        field is never released (the object it names is freed with its own region)."""
+        keys = sorted(self.alloc_plan.regions)
+        if not keys:
+            return []
+        out: list[str] = []
+        for fn_name, cls in keys:
+            rs = self.region_struct(fn_name, cls)
+            out.append(f"typedef struct {rs} {rs};")
+        out.append("")
+        for fn_name, cls in keys:
+            rs = self.region_struct(fn_name, cls)
+            decl = self.cls_analysis.classes[cls]
+            out.append(f"struct {rs} {{")
+            for fd in decl.field_decls:
+                ft = self.reg_field_ctype(fn_name, cls, fd)
+                sep = "" if ft.endswith("*") else " "
+                out.append(f"    {ft}{sep}f_{mangle(fd.name)};")
+            out.append("};")
+        out.append("")
+        for fn_name, cls in keys:
+            rs = self.region_struct(fn_name, cls)
+            decl = self.cls_analysis.classes[cls]
+            owned: list[str] = []
+            for fd in decl.field_decls:
+                if fd.type is Type.OBJ:
+                    if fd.cls is not None and not self.alloc_plan.is_region(fn_name, fd.cls):
+                        owned.append(f"        tpa_cls_{mangle(fd.cls)}_release(p->f_{mangle(fd.name)});")
+                else:
+                    self._emit_field_release(owned, "        ", cls, fd)
+            if owned:
+                out.append(f"static void {rs}_drop(tpa_region *r) TPA_UNUSED;")
+                out.append(f"static void {rs}_drop(tpa_region *r)")
+                out.append("{")
+                out.append(f"    TPA_REGION_FOREACH({rs}, p, r) {{")
+                out += owned
+                out.append("    }")
+                out.append("}")
+            for op in ("free", "reset"):
+                out.append(f"static void {rs}_{op}(tpa_region *r) TPA_UNUSED;")
+                out.append(f"static void {rs}_{op}(tpa_region *r)")
+                out.append("{")
+                if owned:
+                    out.append(f"    {rs}_drop(r);")
+                out.append(f"    tpa_region_{op}(r);")
+                out.append("}")
+        out.append("")
+        return out
+
     def emit_class_decls(self) -> list[str]:
         """Headerless struct definitions, retain/release helpers (PR-O1, docs/design/typedpython-aot.md 6.3.1)."""
         if not self.module.classes:
@@ -437,6 +504,7 @@ class _Fn:
         self.obj_slots: list[tuple[str, str]] = []   # (cls, slot_name) class temporaries: released at cleanup
         self.list_slots: list[tuple[str, str]] = []  # (kind, slot_name) retained mutable list field reads
         self.assigned: set[str] = assigned_names(f)
+        self.regions = g.alloc_plan.fn_regions(f.name)      # PR-O2b: class -> its region in this function
         self.borrowed_locals: set[str] = self._find_borrowed_locals(f)
 
     def _find_borrowed_locals(self, f: ir.Function) -> set[str]:
@@ -451,13 +519,63 @@ class _Fn:
                     counts[n.target] = counts.get(n.target, 0) + 1
         out: set[str] = set()
         for s in f.body:
-            if isinstance(s, ir.Assign) and s.target in f.local_classes and counts.get(s.target, 0) == 1:
+            if isinstance(s, ir.Assign) and s.target in f.local_classes and counts.get(s.target, 0) == 1 \
+                    and not self.is_region_local(s.target):
                 v = s.value
                 if (isinstance(v, ir.FieldGet) and v.type is Type.OBJ
                         and self.g.cls_analysis.field_immutable(v.cls, v.field)
-                        and isinstance(v.obj, ir.Local) and v.obj.name not in self.assigned):
+                        and isinstance(v.obj, ir.Local) and v.obj.name not in self.assigned
+                        and not self.is_region_local(v.obj.name)):
                     out.add(s.target)
         return out
+
+    # -- PR-O2b scope regions
+
+    def is_region_local(self, name: str) -> bool:
+        """A local of a class that is region in this function (never a parameter, never a virtual local): its
+        C type is the region pointer, it is never counted and never released."""
+        return (name in self.f.local_classes and not self.is_virtual(name)
+                and self.f.local_classes[name][0] in self.regions)
+
+    def expr_region_cls(self, e: ir.Expr) -> str | None:
+        """The class of `e` when `e` is a region pointer (the emitter's twin of `alloc._RegionAnalysis.region_valued`)."""
+        if isinstance(e, ir.Local):
+            return self.f.local_classes[e.name][0] if self.is_region_local(e.name) else None
+        if isinstance(e, ir.FieldGet):
+            if self.expr_region_cls(e.obj) is None:
+                return None
+            fd = self.g.cls_analysis.field_map.get((e.cls, e.field))
+            return fd.cls if fd is not None and fd.cls is not None and fd.cls in self.regions else None
+        if isinstance(e, ir.New):
+            return e.cls if e.cls in self.regions else None
+        return None
+
+    def reg_ptr(self, cls: str) -> str:
+        return f"{self.g.region_struct(self.f.name, cls)} *"
+
+    def region_var(self, cls: str) -> str:
+        return f"rg_{mangle(cls)}"
+
+    def no_region(self, e: ir.Expr, what: str) -> bool:
+        """The analysis keeps region pointers away from `what`; a slip is a finding, never wrong C."""
+        if self.expr_region_cls(e) is not None:
+            self.bad("aot/region", what, f"a region pointer reaches {what}, which the region analysis must prevent")
+            return False
+        return True
+
+    def region_value_ok(self, e: ir.Expr, cls: str, what: str) -> bool:
+        """`e`, stored into a region pointer of class `cls` (a region local or a region object's field), is a region
+        pointer of that class or None."""
+        if (isinstance(e, ir.Const) and e.value is None) or self.expr_region_cls(e) == cls:
+            return True
+        self.bad("aot/region", what, f"a heap pointer reaches {what}, which the region analysis must prevent")
+        return False
+
+    def loop_prologue(self, loop: ir.Stmt) -> None:
+        """The top of an iteration of `loop`: every region this iteration owns is released and reset."""
+        for cls, info in self.regions.items():
+            if info.loop is loop:
+                self.emit(f"{self.g.region_struct(self.f.name, cls)}_reset(&{self.region_var(cls)});")
 
     def oslot(self, cls: str) -> str:
         t = self.tmp(self.g.cls_ptr(cls), "NULL")
@@ -706,6 +824,7 @@ class _Fn:
             mc = mangle(fd.cls)
             self.emit(f"tpa_cls_{mc}_release({t}); {t} = {vf}; tpa_cls_{mc}_retain({t});")
             return t
+        region_obj = self.expr_region_cls(e.obj) is not None      # PR-O2b: the object lives in a region
         obj = self.ev(e.obj)
         mf = mangle(e.field)
         if fd.type in (Type.F64, Type.BOOL):
@@ -719,7 +838,7 @@ class _Fn:
         if fd.type in LIST:
             kind = "f64" if fd.type is Type.F64_ARRAY else (
                 "int" if self.g.reps.field_list_big(e.cls, e.field) else "i64")
-            if (self.g.cls_analysis.field_immutable(e.cls, e.field)
+            if (not region_obj and self.g.cls_analysis.field_immutable(e.cls, e.field)
                     and isinstance(e.obj, ir.Local) and e.obj.name not in self.assigned):
                 return f"({obj}->f_{mf})"
             t = self.tmp(list_ptr(kind), "NULL")
@@ -727,6 +846,14 @@ class _Fn:
             self.emit(f"{lfn(kind, 'release')}({t}); {t} = {obj}->f_{mf}; {lfn(kind, 'retain')}({t});")
             return t
         assert fd.cls is not None
+        if region_obj:
+            if fd.cls in self.regions:
+                return f"({obj}->f_{mf})"          # a region pointer: no count, nothing to retain
+            # an owned heap object held by a region object: a mutable field, retained into a temporary
+            t = self.oslot(fd.cls)
+            mc = mangle(fd.cls)
+            self.emit(f"tpa_cls_{mc}_release({t}); {t} = {obj}->f_{mf}; tpa_cls_{mc}_retain({t});")
+            return t
         if (self.g.cls_analysis.field_immutable(e.cls, e.field)
                 and isinstance(e.obj, ir.Local) and e.obj.name not in self.assigned):
             return f"({obj}->f_{mf})"
@@ -737,6 +864,8 @@ class _Fn:
         return t
 
     def ev_New(self, e: ir.New) -> str:
+        if e.cls in self.regions:
+            return self._emit_region_new(e)
         init_fn = self.g.fns.get(f"{e.cls}.__init__")
         args: list[str] = []
         if init_fn is not None:
@@ -756,6 +885,8 @@ class _Fn:
                 elif isinstance(p, ir.Param) and self.g.tagged_param(init_fn, p):
                     args.append(self.tagged(a))
                 else:
+                    if not self.no_region(a, f"the {e.cls} constructor (a heap object)"):
+                        ok = False
                     args.append(self.ev(a))
                     if a.type is Type.I64 and self.rep(a) == TAGGED:
                         ok = False
@@ -765,6 +896,8 @@ class _Fn:
                 return "NULL"
         else:
             for a in e.args:
+                if not self.no_region(a, f"the {e.cls} constructor (a heap object)"):
+                    return "NULL"
                 args.append(self.ev(a))
         t = self.oslot(e.cls)
         mc = mangle(e.cls)
@@ -1145,6 +1278,8 @@ class _Fn:
         out: list[str] = []
         ok = True
         for p, a in zip(callee.params, e.args):
+            if not self.no_region(a, f"the call of {e.function}"):
+                ok = False
             if isinstance(p, ir.ArrayParam):
                 if not (isinstance(a, ir.Local) and a.type is p.type and a.name in self.types):
                     ok = False
@@ -1306,6 +1441,13 @@ class _Fn:
                 self._emit_virtual_init(s.target, cls, s.value)
                 return
             val = self.ev(s.value)
+            if self.is_region_local(s.target):
+                # a region pointer: a plain assignment, nothing is counted (PR-O2b)
+                if self.region_value_ok(s.value, cls, f"the region local `{s.target}`"):
+                    self.emit(f"v_{mangle(s.target)} = {val};")
+                return
+            if not self.no_region(s.value, f"the heap local `{s.target}`"):
+                return
             if s.target in self.borrowed_locals:
                 self.emit(f"v_{mangle(s.target)} = {val};")
             else:
@@ -1332,36 +1474,45 @@ class _Fn:
             return
         self.emit(f"v_{mangle(s.target)} = {v};")
 
-    def _emit_virtual_init(self, target: str, cls: str, e: ir.New) -> None:
-        """Scalar-replaced constructor: evaluate args in order and assign directly to virtual field locals."""
-        init_fn = self.g.fns.get(f"{cls}.__init__")
-        init_map = self.g.alloc_plan.init_maps.get(cls, ())
+    def _eval_new_args(self, cls: str, e: ir.New, init_fn: ir.Function | None
+                       ) -> list[tuple[str, bool, str | None]] | None:
+        """The arguments of a site with a simple `__init__` (virtual or region), evaluated in order:
+        (C value, whether it is TAGGED, the kind of a list argument). None after a finding."""
         eval_args: list[tuple[str, bool, str | None]] = []
-        if init_fn is not None:
-            ok = True
-            for p, a in zip(init_fn.params[1:], e.args):
-                if isinstance(p, ir.ArrayParam):
-                    if not (isinstance(a, ir.Local) and a.type is p.type and a.name in self.types):
-                        ok = False
-                        self.bad("aot/type", init_fn.name, f"the argument for list parameter `{p.name}` of "
-                                 f"`{init_fn.name}` is not a list of its type")
-                    elif self.kind(a.name) != self.g.array_kind(init_fn.name, p.name, p.type):
-                        ok = False
-                        self.bad("aot/type", init_fn.name, f"the list `{a.name}` and the parameter `{p.name}` of "
-                                 f"`{init_fn.name}` are lists of different kinds")
-                    else:
-                        eval_args.append((f"v_{mangle(a.name)}", False, self.kind(a.name)))
-                elif a.type is Type.I64 and self.rep(a) == TAGGED:
-                    eval_args.append((self.tagged(a), True, None))
+        if init_fn is None:
+            return eval_args
+        ok = True
+        for p, a in zip(init_fn.params[1:], e.args):
+            if isinstance(p, ir.ArrayParam):
+                if not (isinstance(a, ir.Local) and a.type is p.type and a.name in self.types):
+                    ok = False
+                    self.bad("aot/type", init_fn.name, f"the argument for list parameter `{p.name}` of "
+                             f"`{init_fn.name}` is not a list of its type")
+                elif self.kind(a.name) != self.g.array_kind(init_fn.name, p.name, p.type):
+                    ok = False
+                    self.bad("aot/type", init_fn.name, f"the list `{a.name}` and the parameter `{p.name}` of "
+                             f"`{init_fn.name}` are lists of different kinds")
                 else:
-                    eval_args.append((self.ev(a), False, None))
-            if not ok:
-                return
+                    eval_args.append((f"v_{mangle(a.name)}", False, self.kind(a.name)))
+            elif a.type is Type.I64 and self.rep(a) == TAGGED:
+                eval_args.append((self.tagged(a), True, None))
+            else:
+                eval_args.append((self.ev(a), False, None))
+        return eval_args if ok else None
+
+    def _emit_init_stores(self, cls: str, e: ir.New, init_fn: ir.Function | None,
+                          eval_args: list[tuple[str, bool, str | None]], lval, region_obj: bool) -> None:
+        """The field stores of a simple `__init__`, in its order, into `lval(field)`: the per-field locals of a
+        virtual object or the fields of a fresh region object. A class field of a region object whose class is
+        region in this function takes the region pointer as it is; every other class field, list field and big
+        int field takes an owned reference (the fresh object held nothing, so the release of the old value is a
+        no-op that keeps one code shape)."""
+        init_map = self.g.alloc_plan.init_maps.get(cls, ())
         for fname, src in init_map:
             fd = self.g.cls_analysis.field_map.get((cls, fname))
             if fd is None:
                 continue
-            vf = self.vfield(target, fname)
+            vf = lval(fname)
             if fd.type in (Type.F64, Type.BOOL):
                 val = eval_args[src][0] if isinstance(src, int) else self.ev(src)
                 self.emit(f"{vf} = {val};")
@@ -1395,7 +1546,14 @@ class _Fn:
                 self.emit(f"{vf} = {val};")
             else:
                 assert fd.cls is not None
+                arg = e.args[src] if isinstance(src, int) else src
                 val = eval_args[src][0] if isinstance(src, int) else self.ev(src)
+                if region_obj and fd.cls in self.regions:
+                    if self.region_value_ok(arg, fd.cls, f"the field `{cls}.{fname}`"):
+                        self.emit(f"{vf} = {val};")
+                    continue
+                if not self.no_region(arg, f"the field `{cls}.{fname}`"):
+                    continue
                 mc = mangle(fd.cls)
                 tmp = self.tmp(self.g.cls_ptr(fd.cls), "NULL")
                 self.emit(f"{tmp} = {val};")
@@ -1403,11 +1561,42 @@ class _Fn:
                 self.emit(f"tpa_cls_{mc}_release({vf});")
                 self.emit(f"{vf} = {tmp};")
 
+    def _emit_virtual_init(self, target: str, cls: str, e: ir.New) -> None:
+        """Scalar-replaced constructor: evaluate args in order and assign directly to virtual field locals."""
+        init_fn = self.g.fns.get(f"{cls}.__init__")
+        eval_args = self._eval_new_args(cls, e, init_fn)
+        if eval_args is None:
+            return
+        self._emit_init_stores(cls, e, init_fn, eval_args, lambda fname: self.vfield(target, fname), False)
+
+    def _emit_region_new(self, e: ir.New) -> str:
+        """A site of a region class (PR-O2b): the arguments are evaluated first, in order (a failing one leaves
+        before anything is allocated), then the object is bump-allocated, zeroed, in the region of its class;
+        its big-int fields are set to the small int 0 before any store can fail (the word 0 is not a value), so
+        a conversion that fails between two stores leaves an object whose unset fields release as nothing. The
+        result is a region pointer in a temporary that nothing counts or releases."""
+        cls = e.cls
+        init_fn = self.g.fns.get(f"{cls}.__init__")
+        eval_args = self._eval_new_args(cls, e, init_fn)
+        if eval_args is None:
+            return "NULL"
+        rs = self.g.region_struct(self.f.name, cls)
+        t = self.tmp(f"{rs} *", "NULL")
+        self.emit(f"if (({t} = ({rs} *)tpa_region_alloc(&{self.region_var(cls)}, sizeof({rs}))) == NULL) "
+                  f"{self.fail()}")
+        decl = self.g.cls_analysis.classes[cls]
+        for fd in decl.field_decls:
+            if fd.type is Type.I64 and self.g.reps.field(cls, fd.name) == TAGGED:
+                self.emit(f"{t}->f_{mangle(fd.name)} = TPA_INT_ZERO;")
+        self._emit_init_stores(cls, e, init_fn, eval_args, lambda fname: f"{t}->f_{mangle(fname)}", True)
+        return t
+
     def st_FieldSet(self, s: ir.FieldSet) -> None:
         fd = self.g.cls_analysis.field_map.get((s.cls, s.field))
         if fd is None:
             self.bad("aot/type", s.field, f"unknown field `{s.cls}.{s.field}`")
             return
+        region_obj = self.expr_region_cls(s.obj) is not None      # as ev_FieldGet: a region object, however it is named
         if isinstance(s.obj, ir.Local) and self.is_virtual(s.obj.name):
             lval = self.vfield(s.obj.name, s.field)
         else:
@@ -1439,6 +1628,13 @@ class _Fn:
             assert fd.cls is not None
             mc = mangle(fd.cls)
             val = self.ev(s.value)
+            if region_obj and fd.cls in self.regions:
+                # a region pointer field of a region object: a plain store (PR-O2b)
+                if self.region_value_ok(s.value, fd.cls, f"the field `{s.cls}.{s.field}`"):
+                    self.emit(f"{lval} = {val};")
+                return
+            if not self.no_region(s.value, f"the field `{s.cls}.{s.field}`"):
+                return
             tmp = self.tmp(self.g.cls_ptr(fd.cls), "NULL")
             self.emit(f"{tmp} = {val};")
             self.emit(f"tpa_cls_{mc}_retain({tmp});")
@@ -1566,7 +1762,10 @@ class _Fn:
             self.emit("for (;;) {")
             self.lines.extend(pre)
             self.emit(f"    if (!({_unwrap(c)})) break;")
-        self.block(s.body)
+        self.depth += 1
+        self.loop_prologue(s)
+        self.stmts(s.body)
+        self.depth -= 1
         self.emit("}")
 
     def st_ForRange(self, s: ir.ForRange) -> None:
@@ -1599,6 +1798,7 @@ class _Fn:
         else:
             self.emit(f"        v_{mangle(s.var)} = {value};")
         self.depth += 2
+        self.loop_prologue(s)
         self.stmts(s.body)
         self.depth -= 2
         self.emit("    }")
@@ -1639,6 +1839,7 @@ class _Fn:
         self.emit(f"    if (!(tpa_int_cmp({cur}, {end}) {test} 0)) break;")
         self.emit(f"    tpa_int_set(&v_{mangle(s.var)}, {cur});")
         self.depth += 1
+        self.loop_prologue(s)
         self.stmts(s.body)
         self.depth -= 1
         self.emit("}")
@@ -1654,6 +1855,8 @@ class _Fn:
             cls = self.f.return_cls
             mc = mangle(cls)
             val = self.ev(s.value)
+            if not self.no_region(s.value, "a return"):
+                return
             tmp = self.tmp(self.g.cls_ptr(cls), "NULL")
             self.emit(f"{tmp} = {val};")
             self.emit(f"tpa_cls_{mc}_retain({tmp});")
@@ -1832,6 +2035,8 @@ class _Fn:
                                 fmc = mangle(fd.cls)
                                 decls.append(f"    tpa_cls_{fmc} *{vf} TPA_UNUSED = NULL;")
                                 releases.append(f"    tpa_cls_{fmc}_release({vf});")
+                elif self.is_region_local(name):
+                    decls.append(f"    {self.reg_ptr(cls)}v_{mangle(name)} TPA_UNUSED = NULL;")     # never counted
                 else:
                     mc = mangle(cls)
                     decls.append(f"    tpa_cls_{mc} *v_{mangle(name)} TPA_UNUSED = NULL;")
@@ -1852,6 +2057,12 @@ class _Fn:
             releases.append(f"    tpa_cls_{mangle(cls)}_release({n});")
         for kind, n in self.list_slots:
             releases.append(f"    {lfn(kind, 'release')}({n});")
+        for cls in sorted(self.regions):
+            # PR-O2b: one region per (function, class), freed once here on every exit (the heap references its
+            # objects own are released first, by the class's walk); a per-iteration region is also reset at the
+            # top of each iteration of its loop (`loop_prologue`)
+            decls.append(f"    tpa_region {self.region_var(cls)} TPA_UNUSED = TPA_REGION_INIT;")
+            releases.append(f"    {self.g.region_struct(f.name, cls)}_free(&{self.region_var(cls)});")
         tail = ["tp_cleanup:"] if self.cleanup_used else []
         return [self.g.signature(f), "{", "    int rc = 0;", *decls, *self.lines, *tail, *releases, "    return rc;", "}"]
 
@@ -1892,7 +2103,7 @@ def emit(module: ir.Module, program: Program, *, strict_int: bool = False,
                                             "the `__main__` block was not compiled", None)]
     if g.findings:
         return None, g.findings
-    class_decls = g.emit_class_decls()
+    class_decls = g.emit_class_decls() + g.emit_region_decls()
     class_ctors = g.emit_class_ctors()
     prototypes = [g.prototype(f) for f in g.fns.values()]
     body_text = "\n".join(class_decls + prototypes + class_ctors + [line for b in bodies for line in b])

@@ -1501,6 +1501,33 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     (return, call, non-inlined method call, identity `is`, alias, reassignment/branch merge, or
     temporary), plus `typedpython.aot.explain_alloc(...)` and `python -m typedpython aot-build
     --explain-alloc`.
+  - **Tier O PR-O2b (N-12b/c step 2, scope regions)** (agent proposal, not owner-confirmed): adds scope
+    bump regions (`aot/alloc.py` region analysis, `tpa_region` in `runtime/tp_aot.h`). In a function `F`,
+    every allocation site of a class `C` that is not virtual, where `C` has a simple `__init__`, no
+    `__del__` and at least one field (a class with no fields stays heap-rc: a zero-size region object
+    would give every object one address, and `is` must tell them apart), is region-allocated (a distinct C type `struct tpa_reg_<F>__<C>` with no reference count,
+    bump-allocated in one region per `(F, C)` that `F`'s body owns, or one iteration of one loop of `F`
+    owns, and freed together at `tp_cleanup:` on every exit: the end of the body, an early `return`, a
+    failing operation; a per-iteration region is released and reset at the top of every iteration) if and
+    only if, in `F`: no region pointer of `C` is returned (R1), stored into a heap object, a virtual
+    object, a container or a region object whose region outlives `C`'s (R2), or passed to any call, a
+    method call included (R3); no heap pointer of `C` (a parameter, a call result, a field of a heap or
+    virtual object) is assigned to a local of `C` or stored into a region object's field of class `C`
+    (so a local of `C` has exactly one C type); and `is` never compares a region pointer with a heap
+    pointer. A region object's field of class `K` is a region pointer when `(F, K)` is region, else an
+    owned heap reference; owned heap references held by region objects (lists, big ints, heap-rc objects)
+    are released by a per-class walk when the region is freed or reset (R4 relaxed to that; a region
+    pointer is never stored where a heap object could reach it). The scope is the innermost loop whose
+    body holds every use of `C` in `F` and in which every local of `C` is definitely assigned before it
+    is read, widened to the loop of any region object that holds `C` pointers, else the function body.
+    Region pointers never reach a library export (R5 holds by R1 and R3). `--explain-alloc` reports
+    `region (function scope)` or `region (per-iteration scope of the <for|while> loop, depth <k>)` for a
+    region site and, after a heap-rc site's reason, `[region: R1 ...]`. The escape rules see every
+    sub-expression of a statement, the length and fill of a `[v] * n` and the callee and arguments of
+    an object call included.
+    Not in this step: region specialisations of callees (R3 with `make__reg` / `check__reg`), so
+    `benchmarks/typedpython/py/binary_trees.py` stays heap-rc (`[region: R1: escapes via return]`), and
+    the cycle collector (step 3).
 
 ---
 

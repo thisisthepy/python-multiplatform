@@ -11,8 +11,8 @@ Covers:
       - escapes via return
       - escapes via function call
       - non-inlined method call
-      - identity comparison (`is`)
-      - reassigned / branch-merged (`if`/`else`)
+      - identity comparison (`is`) and reassigned / branch-merged (`if`/`else`): since PR-O2b these two
+        programs are region-allocated (`region (function scope) [not virtual: ...]`, test_aot_tier_o2b.py)
   - `benchmarks/typedpython/py/binary_trees.py` passes `explain_alloc` and builds cleanly.
   - CLI `python -m typedpython aot-build <entry> --explain-alloc`.
 """
@@ -285,7 +285,8 @@ def test_fallback_identity_comparison(tmp_path: Path):
     """
     p = _write(tmp_path, src)
     report = aot.explain_alloc(p)
-    assert "p = Point(...) -> heap-rc (used in identity comparison (is))" in report
+    # PR-O2b: a site the virtual tier refuses for `is` is region-allocated; the report keeps the virtual reason
+    assert "p = Point(...) -> region (function scope) [not virtual: used in identity comparison (is)]" in report
 
     cp, aot_res = _run_both(tmp_path, src)
     assert cp.returncode == 0
@@ -318,7 +319,8 @@ def test_fallback_reassigned_branch_merged(tmp_path: Path):
     """
     p = _write(tmp_path, src)
     report = aot.explain_alloc(p)
-    assert "p = Point(...) -> heap-rc (reassigned or branch-merged)" in report
+    # PR-O2b: a rebound local is fine in a region (a plain pointer); the report keeps the virtual reason
+    assert "p = Point(...) -> region (function scope) [not virtual: reassigned or branch-merged]" in report
 
     cp, aot_res = _run_both(tmp_path, src)
     assert cp.returncode == 0
