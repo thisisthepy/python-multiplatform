@@ -24,18 +24,7 @@ import kotlin.test.assertTrue
  */
 class ComposableBindingTest {
 
-    private val caches: File? = listOf(
-        File(System.getProperty("user.home"), ".gradle/caches/modules-2/files-2.1"),
-        File("/Volumes/macMini/caches/.gradle/caches/modules-2/files-2.1"),
-    ).firstOrNull { it.isDirectory }
-
-    private fun jarUnder(group: String, artifact: String): File? = listOf(
-        group,
-        group.replaceFirst("org.jetbrains.compose", "org.thisisthepy.compose"),
-    ).firstNotNullOfOrNull { g ->
-        caches?.resolve(g)?.resolve(artifact)
-            ?.walkTopDown()?.firstOrNull { it.isFile && it.name.endsWith(".jar") && "sources" !in it.name }
-    }
+    private fun jarUnder(group: String, artifact: String): File? = ExternalArtifacts.jarUnder(group, artifact)
 
     private val kotlinStdlibJar: File
         get() = File(Class.forName("kotlin.text.Regex").protectionDomain.codeSource.location.toURI())
@@ -79,7 +68,7 @@ class ComposableBindingTest {
             jarUnder("org.jetbrains.compose.foundation", "foundation-layout-desktop"),
             jarUnder("org.jetbrains.compose.material", "material-desktop"),
         )
-        if (jars.isEmpty()) return // no local Gradle cache with Compose in it
+        if (jars.isEmpty()) ExternalArtifacts.skip("no Compose jar in the Gradle cache")
         val classpath = composeClasspath()
 
         var checked = 0
@@ -116,7 +105,7 @@ class ComposableBindingTest {
      */
     @Test
     fun composablesAreBoundWithTheirSyntheticParametersExposed() {
-        val material3 = jarUnder("org.jetbrains.compose.material3", "material3-desktop") ?: return
+        val material3 = jarUnder("org.jetbrains.compose.material3", "material3-desktop") ?: ExternalArtifacts.skip("material3-desktop jar not in the Gradle cache")
         val entries = ArtifactScanner.scanJar(
             material3,
             includePrefixes = listOf("androidx.compose.material3"),
@@ -169,7 +158,7 @@ class ComposableBindingTest {
      */
     @Test
     fun aComposableBindingCallsAGeneratedThunkRatherThanNamingTheDeclaration() {
-        val material3 = jarUnder("org.jetbrains.compose.material3", "material3-desktop") ?: return
+        val material3 = jarUnder("org.jetbrains.compose.material3", "material3-desktop") ?: ExternalArtifacts.skip("material3-desktop jar not in the Gradle cache")
         val entries = ArtifactScanner.scanJar(
             material3,
             includePrefixes = listOf("androidx.compose.material3"),
@@ -222,7 +211,7 @@ class ComposableBindingTest {
      */
     @Test
     fun aComposableMemberOfAnObjectBindsThroughAnInstanceThunkAndReturnsAValue() {
-        val material3 = jarUnder("org.jetbrains.compose.material3", "material3-desktop") ?: return
+        val material3 = jarUnder("org.jetbrains.compose.material3", "material3-desktop") ?: ExternalArtifacts.skip("material3-desktop jar not in the Gradle cache")
         val entries = ArtifactScanner.scanJar(
             material3,
             includePrefixes = listOf("androidx.compose.material3"),
@@ -332,7 +321,7 @@ class ComposableBindingTest {
             jarUnder("org.jetbrains.compose.foundation", "foundation-layout-desktop"),
             jarUnder("org.jetbrains.compose.material", "material-desktop"),
         )
-        if (jars.isEmpty()) return
+        if (jars.isEmpty()) ExternalArtifacts.skip("no Compose jar in the Gradle cache")
         var plain = 0
         var lowered = 0
         val wrong = mutableListOf<String>()
@@ -384,7 +373,7 @@ class ComposableBindingTest {
             jarUnder("org.jetbrains.compose.foundation", "foundation-layout-desktop"),
             jarUnder("org.jetbrains.compose.material", "material-desktop"),
         )
-        if (jars.isEmpty()) return
+        if (jars.isEmpty()) ExternalArtifacts.skip("no Compose jar in the Gradle cache")
         var described = 0
         var undescribed = 0
         var withArguments = 0
@@ -452,7 +441,7 @@ class ComposableBindingTest {
      */
     @Test
     fun aValueCallbackSlotNamesTheTypeItsArgumentArrivesAs() {
-        val material3 = jarUnder("org.jetbrains.compose.material3", "material3-desktop") ?: return
+        val material3 = jarUnder("org.jetbrains.compose.material3", "material3-desktop") ?: ExternalArtifacts.skip("material3-desktop jar not in the Gradle cache")
         val entries = ArtifactScanner.scanJar(material3, listOf("androidx.compose.material3"), composeClasspath())
 
         fun slotOf(declaration: String, parameter: String): String? = entries
@@ -552,7 +541,7 @@ class ComposableBindingTest {
      */
     @Test
     fun theDefaultBitOfAnExtensionComposableNumbersValueParametersAndNotSlots() {
-        val material3 = jarUnder("org.jetbrains.compose.material3", "material3-desktop") ?: return
+        val material3 = jarUnder("org.jetbrains.compose.material3", "material3-desktop") ?: ExternalArtifacts.skip("material3-desktop jar not in the Gradle cache")
 
         // No receiver: the case the existing arithmetic was measured on.
         val text = defaultBitsOf(material3, "androidx/compose/material3/TextKt") { it.startsWith("Text") }
@@ -706,7 +695,7 @@ class ComposableBindingTest {
      */
     @Test
     fun anExtensionComposablesParametersAreTaggedByTheirOwnType() {
-        val material3 = jarUnder("org.jetbrains.compose.material3", "material3-desktop") ?: return
+        val material3 = jarUnder("org.jetbrains.compose.material3", "material3-desktop") ?: ExternalArtifacts.skip("material3-desktop jar not in the Gradle cache")
         val items = ArtifactScanner.scanDeclarations(
             material3,
             includePrefixes = listOf("androidx.compose.material3"),

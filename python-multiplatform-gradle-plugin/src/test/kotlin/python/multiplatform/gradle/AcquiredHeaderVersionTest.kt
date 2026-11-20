@@ -60,8 +60,7 @@ class AcquiredHeaderVersionTest {
         val pinned = gradleProps.first { it.startsWith("pythonVersion=") }.substringAfter('=').trim()
         val root = File("../python-multiplatform/build/python-standalone/extracted/$pinned")
         if (!root.isDirectory) {
-            println("SKIPPED: nothing acquired under $root; run :python-multiplatform:downloadAllPythonBuilds")
-            return
+            python.multiplatform.gradle.artifact.ExternalArtifacts.skip("nothing acquired under $root; run :python-multiplatform:downloadAllPythonBuilds")
         }
         val present = CPythonIncludeLayout.allTargets.filter { AcquiredHeaderVersion.patchlevelFile(root, it, pinned).isFile }
         assertTrue("ios-arm64" in present, "iOS headers missing under $root")
