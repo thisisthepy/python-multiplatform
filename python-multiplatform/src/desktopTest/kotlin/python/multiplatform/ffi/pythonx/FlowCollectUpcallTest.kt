@@ -50,6 +50,15 @@ import kotlin.test.assertTrue
  * the read expression checks `v is kotlin.Function2<*, *, *>` and wraps `v` in a `FlowCollector`
  * lambda, otherwise casts, and the `suspend` member starts its body in a `PendingCall`.
  *
+ * Two separators appear in the type names, and they are not interchangeable. A *parameter* slot
+ * that takes a handle or a callable is `Interface|FunctionType` (`ArtifactScanner.SAM_SEPARATOR`,
+ * `PythonxAdapter._SAM_SEPARATOR`). A *return* type carries its ancestry as `Type<:Super<:...`
+ * (`ArtifactRendering.SUPERTYPE_SEPARATOR`, `PythonxAdapter._split_supertypes`), which is what
+ * lets a `MutableSharedFlow` proxy find `collect` declared on `Flow` and a `CountingCollector`
+ * handle fill the `FlowCollector` slot. The first CI run of this test (44690216556) wrote `|` in
+ * the return types: nothing splits `|` there, so the proxy class was named
+ * `flowtest.MutableStateFlow|flowtest.Flow` and `value` was "no Kotlin extension" on it.
+ *
  * ### Cancellation (SPEC U-5b, #490; this test's second half)
  *
  * `Flow.collect` on a `SharedFlow` or `StateFlow` never returns on its own, so cancelling the
@@ -188,6 +197,10 @@ class FlowCollectUpcallTest {
     fun cancellingTheFutureWhileCollectWaitsForTheNextEmissionCancelsTheJobAndEndsTheCollect() =
         PythonTestFixture.withInterpreter {
             val scope = PythonCallableScope()
+            // Set once the body's assertions passed: the `finally` below asserts on the scope only
+            // then. An assertion thrown from `finally` replaces the exception that got there, and
+            // in CI run 44690216556 it hid the AttributeError this run really failed with.
+            var bodyPassed = false
             try {
                 Python3.exec(
                     """
@@ -253,10 +266,14 @@ class FlowCollectUpcallTest {
                 assertNull(call.cancellationFailure, "an onCancelled listener threw")
                 assertNull(call.deliveryFailure, "delivering the cancelled outcome threw")
                 assertEquals(1, scope.liveCount)
+                bodyPassed = true
             } finally {
                 Python3.exec("_sh_loop.close()")
-                assertEquals(1, scope.close(), "the scope released a different number of callables than it held")
-                assertEquals(0, scope.liveCount)
+                val released = scope.close()
+                if (bodyPassed) {
+                    assertEquals(1, released, "the scope released a different number of callables than it held")
+                    assertEquals(0, scope.liveCount)
+                }
             }
         }
 
@@ -637,7 +654,7 @@ private object FlowCollectTestFragment : FunctionTableFragment {
             returnType = TypeTag.OBJECT,
             paramNames = listOf("initial"),
             paramTypeNames = listOf("kotlin.Any"),
-            returnTypeName = "flowtest.MutableStateFlow|flowtest.Flow",
+            returnTypeName = "flowtest.MutableStateFlow<:flowtest.Flow",
         ) { args ->
             MutableStateFlow<Any?>(args[0])
         },
@@ -646,7 +663,7 @@ private object FlowCollectTestFragment : FunctionTableFragment {
             arity = 0,
             paramTypes = emptyList(),
             returnType = TypeTag.OBJECT,
-            returnTypeName = "flowtest.MutableSharedFlow|flowtest.Flow",
+            returnTypeName = "flowtest.MutableSharedFlow<:flowtest.Flow",
         ) {
             // A buffer, so `tryEmit` from Python succeeds against a suspending collector and
             // resumes it inline instead of answering false.
@@ -657,7 +674,7 @@ private object FlowCollectTestFragment : FunctionTableFragment {
             arity = 0,
             paramTypes = emptyList(),
             returnType = TypeTag.OBJECT,
-            returnTypeName = "flowtest.CountingCollector|flowtest.FlowCollector",
+            returnTypeName = "flowtest.CountingCollector<:flowtest.FlowCollector",
         ) {
             CountingCollector()
         },

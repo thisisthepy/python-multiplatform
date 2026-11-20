@@ -274,10 +274,15 @@ class GeneratedSuspendTest {
         assertNull(viaHandle.failure)
         assertEquals(listOf(1L, 2L), handleTaken)
 
-        // The control: a non-suspending `fun interface` is the #216 slot, not this one.
+        // The control: a non-suspending `fun interface` does not take this path. The KSP
+        // processor has no #216 slot (SPEC B-5 is the artifact walker's; `KsAdapters` renders a
+        // non-`suspend` `fun interface` as the bare interface, a handle-only parameter), so the
+        // control is the plain interface name and the function is not `suspend`. CI run
+        // 44690216556 showed the walker's `SyncSink|kotlin.Function1(kotlin.Long)->kotlin.Unit`
+        // asserted here, which KSP never produced.
         val control = entry("fixture.library.drainSync")
         assertFalse(control.isSuspend)
-        assertEquals("fixture.library.SyncSink|kotlin.Function1(kotlin.Long)->kotlin.Unit", control.paramTypeNames[0])
+        assertEquals("fixture.library.SyncSink", control.paramTypeNames[0])
     }
 
     @Test

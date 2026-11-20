@@ -790,7 +790,11 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   and casts anything else, with no reflection. A JDK interface is read from the JDK the build runs
   on, any other from the consumer's jars. The stub shows the slot as a `Callable`. A functional
   interface whose method returns a value, or a generic one, is left as it was: a handle parameter
-  (Compose's `Alignment` is one). `Status: implemented` on desktop, `GP/artifact/SamParameterBindingTest.kt`,
+  (Compose's `Alignment` is one). The artifact walker is the one producer of this slot: the KSP
+  processor renders a non-`suspend` `fun interface` parameter as the bare interface, a handle-only
+  slot (observed 2026-11-20, CI run 44690216556 on #497; the control in
+  `KSP/fixtures/app/.../GeneratedSuspendTest.kt` asserts the bare name). Only the `suspend` case of
+  U-5c is produced by both generators. `Status: implemented` on desktop (walker), `GP/artifact/SamParameterBindingTest.kt`,
   `python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactSamParameterTest.kt`.
 - **B-5a** The ambient pythonx callable scope (`PythonCallables.withScope`) is per thread (#301). A
   Python callable crossing into Kotlin on a thread with no open scope gets the "no pythonx callable
