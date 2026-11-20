@@ -298,8 +298,9 @@ def run(n: int) -> int:
         other: Holder | None = a.nxt
         if other is not None:
             items: list[int] = other.items
+            fl: list[float] = other.fl
             pay: Payload = other.pay
-            acc += items[2] + pay.val + (other.big >> 68) + (a.big >> 64) + int(other.fl[1])
+            acc += items[2] + pay.val + (other.big >> 68) + (a.big >> 64) + int(fl[1])
     return acc
 
 
