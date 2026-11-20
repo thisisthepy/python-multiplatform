@@ -174,8 +174,8 @@ def explain_lists(entry: Path, *, exports: list[str] | None = None, prefix: str 
 
 def explain_alloc(entry: Path, *, strict_int: bool = False) -> str:
     """The diagnostic of `--explain-alloc` (SPEC N-17, #493): every class allocation site in the
-    program with its chosen strategy (`virtual` or `heap-rc`) and reason. Nothing is generated;
-    raises AotError as `generate` does."""
+    program with its chosen strategy (`virtual`, `region`, `heap-rc` or `heap-gc`) and reason. Nothing is
+    generated; raises AotError as `generate` does."""
     from typedpython.aot import program as program_mod
 
     program = program_mod.analyze(Path(entry))
@@ -188,9 +188,11 @@ def explain_alloc(entry: Path, *, strict_int: bool = False) -> str:
     return out[0]
 
 
-def build(entry: Path, out: Path, *, emit_c: Path | None = None, strict_int: bool = False) -> Path:
+def build(entry: Path, out: Path, *, emit_c: Path | None = None, strict_int: bool = False,
+          defines: tuple[str, ...] = ()) -> Path:
     """Compile `entry` to the executable `out` (on Windows `.exe` is added when missing); returns its
-    path. `emit_c` also keeps the generated C there."""
+    path. `emit_c` also keeps the generated C there. `defines` (PR-O2c): preprocessor symbols for the runtime
+    (`TPA_GC_STRESS`, `TPA_GC_STATS`, `TPA_GC_THRESHOLD=n`: the cycle collector's test switches); none by default."""
     from typedpython.aot import cc
 
     c_text = generate(entry, strict_int=strict_int)
@@ -198,7 +200,7 @@ def build(entry: Path, out: Path, *, emit_c: Path | None = None, strict_int: boo
         emit_c = Path(emit_c)
         emit_c.parent.mkdir(parents=True, exist_ok=True)
         emit_c.write_text(c_text, encoding="utf-8")
-    return cc.compile_executable(c_text, Path(out), keep=emit_c)
+    return cc.compile_executable(c_text, Path(out), keep=emit_c, defines=tuple(defines))
 
 
 @dataclass(frozen=True)

@@ -31,6 +31,12 @@ scope regions, decided per `(function, class)` after the virtual sites are known
     into; otherwise the function body.
   - `--explain-alloc`: `region (function scope)`, `region (per-iteration scope of the <for|while> loop,
     depth <k>)`, or for a heap-rc site `[region: <reason>]` after the virtual reason.
+
+PR-O2c (tier O step 3, design 6.3.2 item 3 "Step 3 as implemented"; agent proposal, not owner-confirmed): a heap
+site of a cyclic-capable class (`ClassAnalysis.cyclic_classes`) is `heap-gc`, the object tracked by the cycle
+collector, reported with `[gc: <why the class may form a cycle>]` after the region reason. The virtual and
+region decisions are unchanged for such a class: a virtual object is no object, and a cycle inside a region is
+freed with the region (a region pointer never reaches the heap, R2).
 """
 from __future__ import annotations
 
@@ -49,10 +55,11 @@ class AllocSite:
     line: int
     target_name: str | None
     cls_name: str
-    strategy: str       # "virtual", "region" or "heap-rc"
+    strategy: str       # "virtual", "region", "heap-rc" or "heap-gc" (PR-O2c: a heap site of a cyclic-capable class)
     reason: str
-    region_reason: str | None = None     # a heap-rc site: why `(fn, cls)` is not region
+    region_reason: str | None = None     # a heap site: why `(fn, cls)` is not region
     virtual_reason: str | None = None    # a region site: why it is not virtual (the better tier)
+    gc_reason: str | None = None         # a heap-gc site: why the class may form a cycle (it is tracked)
 
 
 @dataclass(frozen=True)
@@ -102,6 +109,8 @@ class AllocPlan:
             text = f"{shown_fn}:{s.line} {target} = {s.cls_name}(...) -> {s.strategy} ({s.reason})"
             if s.region_reason is not None:
                 text += f" [region: {s.region_reason}]"
+            if s.gc_reason is not None:
+                text += f" [gc: {s.gc_reason}]"
             if s.virtual_reason is not None:
                 text += f" [not virtual: {s.virtual_reason}]"
             lines.append(text)
@@ -442,6 +451,11 @@ def analyze_alloc(module: ir.Module, class_analysis: ClassAnalysis) -> AllocPlan
         if key in plan.regions:
             rewritten.append(AllocSite(s.fn_name, s.line, s.target_name, s.cls_name, "region",
                                        plan.regions[key].describe(), virtual_reason=s.reason))
+        elif class_analysis.is_cyclic(s.cls_name):
+            # PR-O2c: a heap object of a cyclic-capable class is tracked by the cycle collector
+            rewritten.append(AllocSite(s.fn_name, s.line, s.target_name, s.cls_name, "heap-gc", s.reason,
+                                       plan.region_reasons.get(key, "no region analysis"),
+                                       gc_reason=class_analysis.cycle_reasons.get(s.cls_name, "may form a cycle")))
         else:
             rewritten.append(AllocSite(s.fn_name, s.line, s.target_name, s.cls_name, "heap-rc", s.reason,
                                        plan.region_reasons.get(key, "no region analysis")))

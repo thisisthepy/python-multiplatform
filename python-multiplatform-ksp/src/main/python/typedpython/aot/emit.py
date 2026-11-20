@@ -310,8 +310,16 @@ class _Gen:
         out.append("")
         return out
 
+    def gc_class(self, cls: str) -> bool:
+        """PR-O2c: `cls` is cyclic-capable, its heap objects are tracked by the cycle collector."""
+        return self.cls_analysis.is_cyclic(cls)
+
     def emit_class_decls(self) -> list[str]:
-        """Headerless struct definitions, retain/release helpers (PR-O1, docs/design/typedpython-aot.md 6.3.1)."""
+        """Headerless struct definitions, retain/release helpers (PR-O1, docs/design/typedpython-aot.md 6.3.1).
+        PR-O2c: the struct of a cyclic-capable class starts with the collector's header (`tpa_gc_head gc;`
+        before `rc`, the layout `tp_aot_gc.h` reads the count through), its release untracks the object when
+        the count reaches zero, and the class gets its `_gc_traverse` (the fields of cyclic-capable classes,
+        the collector's edges), `_gc_clear` (every owned field emptied and released) and `_gc_type`."""
         if not self.module.classes:
             return []
         out: list[str] = []
@@ -322,6 +330,8 @@ class _Gen:
         for decl in self.module.classes:
             mc = mangle(decl.name)
             out.append(f"struct tpa_cls_{mc} {{")
+            if self.gc_class(decl.name):
+                out.append("    tpa_gc_head gc;")
             out.append("    tpa_rc_t rc;")
             for fd in decl.field_decls:
                 ft = self.field_ctype(decl.name, fd)
@@ -343,6 +353,8 @@ class _Gen:
             if tf is not None:
                 out.append("    while (p != NULL) {")
                 out.append("        if (!TPA_RC_DEC_IS_ZERO(p)) return;")
+                if self.gc_class(decl.name):
+                    out.append("        tpa_gc_untrack(&p->gc);")
                 out.append(f"        tpa_cls_{mc} *next = p->f_{mangle(tf)};")
                 for fd in decl.field_decls:
                     if fd.name == tf:
@@ -354,12 +366,71 @@ class _Gen:
             else:
                 out.append("    if (p == NULL) return;")
                 out.append("    if (!TPA_RC_DEC_IS_ZERO(p)) return;")
+                if self.gc_class(decl.name):
+                    out.append("    tpa_gc_untrack(&p->gc);")
                 for fd in decl.field_decls:
                     self._emit_field_release(out, "    ", decl.name, fd)
                 out.append("    free(p);")
             out.append("}")
         out.append("")
+        for decl in self.module.classes:
+            if self.gc_class(decl.name):
+                out += self._emit_gc_functions(decl)
         return out
+
+    def _emit_gc_functions(self, decl: ir.ClassDecl) -> list[str]:
+        """PR-O2c, one cyclic-capable class: `traverse` visits every field that holds a tracked object (a field
+        of a cyclic-capable class; NULL skipped), `clear` empties every owned field before releasing what it held
+        (so a release that reaches this object again finds nothing), and the type record the collector calls."""
+        mc = mangle(decl.name)
+        out: list[str] = []
+        out.append(f"static void tpa_cls_{mc}_gc_traverse(tpa_gc_head *h, tpa_gc_visit visit, void *arg) TPA_UNUSED;")
+        out.append(f"static void tpa_cls_{mc}_gc_traverse(tpa_gc_head *h, tpa_gc_visit visit, void *arg)")
+        out.append("{")
+        out.append(f"    tpa_cls_{mc} *p = (tpa_cls_{mc} *)h;")
+        edges = [fd for fd in decl.field_decls if fd.type is Type.OBJ and fd.cls is not None and self.gc_class(fd.cls)]
+        for fd in edges:
+            mf = mangle(fd.name)
+            out.append(f"    if (p->f_{mf} != NULL) visit(&p->f_{mf}->gc, arg);")
+        if not edges:
+            out.append("    (void)p; (void)visit; (void)arg;")
+        out.append("}")
+        out.append(f"static void tpa_cls_{mc}_gc_clear(tpa_gc_head *h) TPA_UNUSED;")
+        out.append(f"static void tpa_cls_{mc}_gc_clear(tpa_gc_head *h)")
+        out.append("{")
+        out.append(f"    tpa_cls_{mc} *p = (tpa_cls_{mc} *)h;")
+        cleared = 0
+        for fd in decl.field_decls:
+            cleared += self._emit_field_clear(out, "    ", decl.name, fd)
+        if not cleared:
+            out.append("    (void)p;")
+        out.append("}")
+        out.append(f"static const tpa_gc_type tpa_cls_{mc}_gc_type = {{ tpa_cls_{mc}_gc_traverse, tpa_cls_{mc}_gc_clear }};")
+        out.append("")
+        return out
+
+    def _emit_field_clear(self, out: list[str], ind: str, cls: str, fd: ir.FieldDecl) -> int:
+        """`clear` of one field: the slot is emptied first, then what it held is released. Returns 1 for an
+        owned field, 0 for a scalar."""
+        mf = mangle(fd.name)
+        if fd.type is Type.OBJ and fd.cls is not None:
+            ptr, rel = self.cls_ptr(fd.cls), f"tpa_cls_{mangle(fd.cls)}_release"
+        elif fd.type is Type.F64_ARRAY:
+            ptr, rel = "tpa_f64_list *", "tpa_f64_release"
+        elif fd.type is Type.I64_ARRAY:
+            big = self.reps.field_list_big(cls, fd.name)
+            ptr, rel = ("tpa_int_list *", "tpa_int_list_release") if big else ("tpa_i64_list *", "tpa_i64_release")
+        elif fd.type is Type.I64 and self.reps.field(cls, fd.name) == TAGGED:
+            out.append(f"{ind}tpa_int_clear(&p->f_{mf});")
+            return 1
+        else:
+            return 0
+        out.append(f"{ind}{{")
+        out.append(f"{ind}    {ptr}f = p->f_{mf};")
+        out.append(f"{ind}    p->f_{mf} = NULL;")
+        out.append(f"{ind}    {rel}(f);")
+        out.append(f"{ind}}}")
+        return 1
 
     def _emit_field_release(self, out: list[str], ind: str, cls: str, fd: ir.FieldDecl) -> None:
         mf = mangle(fd.name)
@@ -397,12 +468,22 @@ class _Gen:
             out.append(f"static int tpa_cls_{mc}_new({', '.join(c_params)}) TPA_UNUSED;")
             out.append(f"static int tpa_cls_{mc}_new({', '.join(c_params)})")
             out.append("{")
-            out.append(f"    tpa_cls_{mc} *obj = (tpa_cls_{mc} *)calloc(1, sizeof(tpa_cls_{mc}));")
+            if self.gc_class(decl.name):
+                # PR-O2c: the collector's safepoint, before the allocation: every argument is held by the caller
+                # (an owned temporary, an owned local, a borrowed parameter its caller holds, a field of a live
+                # object) and `__init__` has not started
+                out.append(f"    tpa_cls_{mc} *obj;")
+                out.append("    tpa_gc_safepoint();")
+                out.append(f"    obj = (tpa_cls_{mc} *)calloc(1, sizeof(tpa_cls_{mc}));")
+            else:
+                out.append(f"    tpa_cls_{mc} *obj = (tpa_cls_{mc} *)calloc(1, sizeof(tpa_cls_{mc}));")
             out.append("    if (obj == NULL) {")
             out.append('        tpa_raise(TPA_MemoryError, "");')
             out.append("        return -1;")
             out.append("    }")
             out.append("    obj->rc = 1;")
+            if self.gc_class(decl.name):
+                out.append(f"    tpa_gc_track(&obj->gc, &tpa_cls_{mc}_gc_type);")
             for fd in decl.field_decls:
                 if fd.type is Type.I64 and self.reps.field(decl.name, fd.name) == TAGGED:
                     out.append(f"    obj->f_{mangle(fd.name)} = TPA_INT_ZERO;")
@@ -523,7 +604,7 @@ class _Fn:
                     and not self.is_region_local(s.target):
                 v = s.value
                 if (isinstance(v, ir.FieldGet) and v.type is Type.OBJ
-                        and self.g.cls_analysis.field_immutable(v.cls, v.field)
+                        and self.g.cls_analysis.field_elidable(v.cls, v.field)
                         and isinstance(v.obj, ir.Local) and v.obj.name not in self.assigned
                         and not self.is_region_local(v.obj.name)):
                     out.add(s.target)
@@ -838,7 +919,7 @@ class _Fn:
         if fd.type in LIST:
             kind = "f64" if fd.type is Type.F64_ARRAY else (
                 "int" if self.g.reps.field_list_big(e.cls, e.field) else "i64")
-            if (not region_obj and self.g.cls_analysis.field_immutable(e.cls, e.field)
+            if (not region_obj and self.g.cls_analysis.field_elidable(e.cls, e.field)
                     and isinstance(e.obj, ir.Local) and e.obj.name not in self.assigned):
                 return f"({obj}->f_{mf})"
             t = self.tmp(list_ptr(kind), "NULL")
@@ -854,10 +935,11 @@ class _Fn:
             mc = mangle(fd.cls)
             self.emit(f"tpa_cls_{mc}_release({t}); {t} = {obj}->f_{mf}; tpa_cls_{mc}_retain({t});")
             return t
-        if (self.g.cls_analysis.field_immutable(e.cls, e.field)
+        if (self.g.cls_analysis.field_elidable(e.cls, e.field)
                 and isinstance(e.obj, ir.Local) and e.obj.name not in self.assigned):
             return f"({obj}->f_{mf})"
-        # Mutable class field read: MUST retain into a temporary (elision conditions 3 and 4).
+        # Mutable class field read, or any field of a cyclic-capable class (PR-O2c): MUST retain into a
+        # temporary (elision conditions 3 and 4).
         t = self.oslot(fd.cls)
         mc = mangle(fd.cls)
         self.emit(f"tpa_cls_{mc}_release({t}); {t} = {obj}->f_{mf}; tpa_cls_{mc}_retain({t});")
@@ -2113,6 +2195,9 @@ def emit(module: ir.Module, program: Program, *, strict_int: bool = False,
     ]
     if needs_int_runtime(body_text):
         out.append('#include "tp_aot_int.h"')
+    gc = bool(g.cls_analysis.cyclic_classes)
+    if gc:
+        out.append('#include "tp_aot_gc.h"')      # PR-O2c: only a program with a cyclic-capable class links the collector
     out += ["", *FP_CONTRACT_PRAGMA, ""]
     out += class_decls
     out += prototypes
@@ -2154,6 +2239,10 @@ def emit(module: ir.Module, program: Program, *, strict_int: bool = False,
     out += [
         "    setvbuf(stdout, NULL, _IOFBF, 1 << 16);",
         f"    rc = tpf_{mangle(MAIN)}();",
+    ]
+    if gc:
+        out.append("    tpa_gc_exit();")          # every frame has released its locals: the cycles that remain are freed
+    out += [
         "    if (rc != 0) {",
         "        return tpa_report_uncaught();",
         "    }",

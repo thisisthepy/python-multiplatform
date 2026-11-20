@@ -103,16 +103,19 @@
 typedef int64_t tpa_rc_t;
 #define TPA_RC_INC(l) ((void)_InterlockedIncrement64((volatile __int64 *)&(l)->rc))
 #define TPA_RC_DEC_IS_ZERO(l) (_InterlockedDecrement64((volatile __int64 *)&(l)->rc) == 0)
+#define TPA_RC_LOAD(l) ((int64_t)_InterlockedOr64((volatile __int64 *)&(l)->rc, 0))
 #else
 #include <stdatomic.h>
 typedef _Atomic int64_t tpa_rc_t;
 #define TPA_RC_INC(l) ((void)atomic_fetch_add_explicit(&(l)->rc, 1, memory_order_relaxed))
 #define TPA_RC_DEC_IS_ZERO(l) (atomic_fetch_sub_explicit(&(l)->rc, 1, memory_order_acq_rel) == 1)
+#define TPA_RC_LOAD(l) (atomic_load_explicit(&(l)->rc, memory_order_relaxed))
 #endif
 #else
 typedef int64_t tpa_rc_t;
 #define TPA_RC_INC(l) ((l)->rc += 1)
 #define TPA_RC_DEC_IS_ZERO(l) (--(l)->rc == 0)
+#define TPA_RC_LOAD(l) ((l)->rc)
 #endif
 
 #if defined(TPA_LIBRARY)

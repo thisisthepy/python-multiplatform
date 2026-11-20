@@ -1528,6 +1528,36 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     Not in this step: region specialisations of callees (R3 with `make__reg` / `check__reg`), so
     `benchmarks/typedpython/py/binary_trees.py` stays heap-rc (`[region: R1: escapes via return]`), and
     the cycle collector (step 3).
+  - **Tier O PR-O2c (step 3, the cycle collector at a safepoint)** (agent proposal, not owner-confirmed;
+    design 6.3.2 item 3, leader decision D2 for a small collector): a class that PR-O1 refused with
+    `aot/cycle-possible` now compiles. The shared analysis of `aot/classes.py` marks as *cyclic-capable*
+    every class of a strongly connected component of the type graph that has a cycle and a member that is
+    not immutable-after-init (the whole component, so that every class on a possible cycle is tracked).
+    A program with no cyclic-capable class generates the C it generated before (no `runtime/tp_aot_gc.h`,
+    no header word, the same `main`). A cyclic-capable class's heap struct starts with the collector's
+    header (`gc_prev`, `gc_next`, `gc_refs`, the class's traverse and clear functions) before `rc`; its
+    region struct (PR-O2b) and its virtual form (PR-O2a) are unchanged, and a cycle inside a region is
+    freed with the region. The collector is CPython's trial deletion over the list of every tracked
+    object alive: `gc_refs = rc` less one per reference from a tracked object's field to a tracked
+    object; an object with `gc_refs > 0` is a root and what it reaches is kept; the rest is cleared (every
+    owned field released, lists and big ints included) and freed. It runs only at a safepoint: inside
+    `tpa_cls_<C>_new` of a cyclic-capable class, before the allocation, when every constructor argument is
+    held by the caller, and once after `__main__` returns, when no frame holds anything. At a safepoint
+    no cyclic-capable object is kept alive solely by an uncounted reference: PR-O1's elision rules (3) and
+    (4) are off for every field of a cyclic-capable class (`field_elidable`), and references from region
+    objects, virtual objects, untracked objects, locals and temporaries are counted and never
+    subtracted. A collection runs when the tracked allocations net of tracked frees since the last one
+    reach `max(TPA_GC_THRESHOLD, live tracked objects after the last collection)` (2000 by default), so
+    the amortised cost is linear; `-DTPA_GC_STRESS` collects at every safepoint and `-DTPA_GC_STATS`
+    prints the counts to stderr at exit (build-time switches for the tests; no program output changes
+    without them; `typedpython.aot.build(..., defines=...)` passes them). Under `TPA_THREADS` the
+    collector's state is thread-local and the `rc` read is atomic; a cyclic-capable object never crosses
+    a thread today (`aot/library-mutable-class`, no mutable globals). A `__del__` on a cyclic-capable
+    class is `aot/cycle-del` (beside the front end's refusal of `__del__`, which AOT does not compile
+    yet). `--explain-alloc` reports `heap-gc` for a heap site of a cyclic-capable class, with the reason
+    the class may form a cycle after the virtual and region reasons. The tests are
+    `test_aot_tier_o2c.py`, in the ASan/UBSan job with the leak checker on for the built programs.
+    Not in this step: acyclic `__del__`, classes in the library output (never emitted there), generations.
 
 ---
 
