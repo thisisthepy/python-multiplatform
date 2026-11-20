@@ -310,6 +310,7 @@ class PyAwaitTest {
                             await _aw_loop.create_future()
                         except asyncio.CancelledError:
                             _aw['cancelled'] += 1
+                            _aw['cancelling'] = asyncio.current_task().cancelling()
                             raise
                     """.trimIndent(),
                 )
@@ -345,8 +346,101 @@ class PyAwaitTest {
                 val failure = assertIs<CancellationException>(outcome?.exceptionOrNull())
                 assertEquals("CancelledError", assertIs<PyException>(failure.cause).type?.name)
                 assertEquals("1", PythonTestFixture.eval("_aw['cancelled']").toString(), "Task.cancel() reached the coroutine exactly once")
+                assertEquals("1", PythonTestFixture.eval("_aw['cancelling']").toString(), "one Task.cancel() request, not two")
                 assertEquals("0", PythonTestFixture.eval("len(_aw_binding._SUSPEND_TASKS) + len(_aw_binding._SUSPEND_LOOPS)").toString())
             } finally {
+                stopDeliveryLoopThread()
+            }
+        }
+
+    @Test
+    fun aSecondCancelWhileTheTaskIsStillCancellingHandsNothingToTheLoop() =
+        PythonTestFixture.withInterpreter {
+            startDeliveryLoopThread()
+            try {
+                Python3.exec(
+                    """
+                    _aw['started'] = False
+                    _aw_hold = threading.Event()
+                    async def _aw_slow_cancel():
+                        _aw['started'] = True
+                        try:
+                            await _aw_loop.create_future()
+                        except asyncio.CancelledError:
+                            # Park the loop thread inside the handler: the task is cancelling, not done.
+                            _aw_hold.wait(10.0)
+                            _aw['cancelling'] = asyncio.current_task().cancelling()
+                            raise
+                    """.trimIndent(),
+                )
+                val coro = PythonTestFixture.eval("_aw_slow_cancel()")
+                val reported = CountDownLatch(1)
+                val pyAwait = PyAwait.submit(coro) { reported.countDown() }
+                waitUntil("the Python task never started") {
+                    PythonTestFixture.eval("_aw.get('started', False)").toString() == "True"
+                }
+                assertTrue(pyAwait.cancel(), "the first cancel is handed to the loop")
+                assertFalse(pyAwait.cancel(), "a second cancel, loop still open, hands nothing on")
+                assertFalse(pyAwait.cancel(), "and neither does a third")
+                Python3.exec("_aw_hold.set()")
+                assertTrue(reported.await(10, TimeUnit.SECONDS), "the await never ended")
+                assertEquals("1", PythonTestFixture.eval("_aw['cancelling']").toString(), "Task.cancel() was requested once")
+            } finally {
+                Python3.exec("if '_aw_hold' in globals(): _aw_hold.set()")
+                stopDeliveryLoopThread()
+            }
+        }
+
+    @Test
+    fun aCancelOnAnAwaitWhoseLoopClosedBeforeAnyCancelEndsItWithCancellationException() =
+        PythonTestFixture.withInterpreter {
+            startDeliveryLoopThread()
+            try {
+                parkAndStopLoop()
+                val coro = PythonTestFixture.eval("_aw_stranded_coro")
+                val baseline = HandleTable.liveCount
+                var outcome: Result<PyObject>? = null
+                val reported = CountDownLatch(1)
+                val pyAwait = PyAwait.submit(coro) { outcome = it; reported.countDown() }
+                assertFalse(pyAwait.isDone)
+                closeParkedLoop()
+
+                assertTrue(pyAwait.cancel(), "a cancel on a closed loop ends the await locally")
+                assertTrue(reported.await(10, TimeUnit.SECONDS), "the stranded continuation was never resumed")
+                assertStrandedEnd(outcome, pyAwait, baseline)
+            } finally {
+                Python3.exec("_aw_stranded_coro.close()")
+                stopDeliveryLoopThread()
+            }
+        }
+
+    @Test
+    fun aCancelQueuedBeforeTheLoopClosedStillResumesTheContinuationExactlyOnce() =
+        PythonTestFixture.withInterpreter {
+            startDeliveryLoopThread()
+            try {
+                parkAndStopLoop()
+                val coro = PythonTestFixture.eval("_aw_stranded_coro")
+                val baseline = HandleTable.liveCount
+                val results = java.util.concurrent.CopyOnWriteArrayList<Result<PyObject>>()
+                val reported = CountDownLatch(1)
+                val pyAwait = PyAwait.submit(coro) { results += it; reported.countDown() }
+                // The loop is still open (parked): the cancel is queued with call_soon_threadsafe,
+                // behind the submit's `_schedule`, and neither can run before the loop exits.
+                assertTrue(pyAwait.cancel(), "the first cancel is handed to the open loop")
+                assertFalse(pyAwait.isDone)
+                // Now the loop exits (stopped from inside the parked callback) and is closed;
+                // `close()` drops the queued `_schedule` and cancel, so the done callback never runs.
+                closeParkedLoop()
+                assertFalse(pyAwait.isDone, "nothing on the closed loop can end the await by itself")
+
+                assertTrue(pyAwait.cancel(), "a later cancel finds the loop closed and ends the await")
+                assertTrue(reported.await(10, TimeUnit.SECONDS), "the stranded continuation was never resumed")
+                assertFalse(pyAwait.cancel(), "the await is over; nothing resumes twice")
+                assertEquals(1, results.size, "the continuation must be resumed exactly once")
+                assertStrandedEnd(results.single(), pyAwait, baseline)
+            } finally {
+                Python3.exec("_aw_stranded_coro.close()")
                 stopDeliveryLoopThread()
             }
         }
@@ -408,11 +502,60 @@ class PyAwaitTest {
         )
     }
 
+    /**
+     * Parks the loop thread inside a callback that has already asked the loop to stop, and returns
+     * once it is parked. Whatever is queued from now on (the submit's `_schedule`, a cancel) is not in
+     * that iteration's snapshot, so it stays queued when `run_forever` returns: the order the
+     * `BaseEventLoop.close()` race needs, with no timing in it. [closeParkedLoop] ends it.
+     */
+    private fun parkAndStopLoop() {
+        Python3.exec(
+            """
+            _aw_block = threading.Event()
+            _aw_parked = threading.Event()
+            def _aw_park():
+                _aw_loop.stop()
+                _aw_parked.set()
+                _aw_block.wait(10.0)
+            _aw_loop.call_soon_threadsafe(_aw_park)
+            if not _aw_parked.wait(10.0):
+                raise RuntimeError('the loop thread never parked')
+            async def _aw_stranded():
+                await _aw_loop.create_future()
+            _aw_stranded_coro = _aw_stranded()
+            """.trimIndent(),
+        )
+    }
+
+    /** Lets the parked loop thread return from `run_forever`, then closes the loop (drops what was queued). */
+    private fun closeParkedLoop() {
+        Python3.exec(
+            """
+            _aw_block.set()
+            _aw_thread.join(10.0)
+            if _aw_thread.is_alive():
+                raise RuntimeError('the loop thread did not exit')
+            _aw_loop.close()
+            """.trimIndent(),
+        )
+    }
+
+    private fun assertStrandedEnd(outcome: Result<PyObject>?, pyAwait: PyAwait, baseline: Int) {
+        val failure = assertIs<CancellationException>(outcome?.exceptionOrNull())
+        assertEquals("the delivery loop is closed", failure.message)
+        assertEquals(null, failure.cause, "a closed loop has no Python CancelledError to blame")
+        assertTrue(pyAwait.isDone)
+        assertEquals(baseline, HandleTable.liveCount, "the pending handle was not released")
+        assertEquals("0", PythonTestFixture.eval("len(_aw_binding._SUSPEND_TASKS) + len(_aw_binding._SUSPEND_LOOPS)").toString())
+    }
+
     private fun stopDeliveryLoopThread() {
         Python3.exec(
             """
             import python_multiplatform as _pm
             _pm.set_delivery_loop(None)
+            if '_aw_block' in globals():
+                _aw_block.set()
             if '_aw_loop' in globals() and not _aw_loop.is_closed():
                 _aw_loop.call_soon_threadsafe(_aw_loop.stop)
                 _aw_thread.join(timeout=5.0)

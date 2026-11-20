@@ -43,56 +43,88 @@ import kotlin.coroutines.suspendCoroutine
  * [finish] is the single way out: a `done` flag under [lock] lets the first caller through, whether
  * that is the done callback or the closed-loop branch of [cancel], and the handle release that
  * follows is generational, so the release [PythonCallables.completeSuspendCall] already performed
- * is a no-op rather than someone else's slot. [cancel] flips `cancelRequested` under the same lock
- * before touching Python, so the loop is handed at most one cancel per await.
+ * is a no-op rather than someone else's slot. [cancel] moves `cancelState` under the same lock
+ * before touching Python, so the loop is handed at most one cancel per await; every later call
+ * only asks whether the loop has closed since.
  */
 class PyAwait private constructor(
     private val onComplete: (Result<PyObject>) -> Unit,
 ) {
+    /**
+     * How far [cancel] got: nothing asked for; a `Task.cancel()` on its way to the loop (the Python
+     * call is in progress on some thread); handed to the loop. A hand-on that throws before the
+     * loop answered goes back to [NONE], so the next [cancel] may try again.
+     */
+    private enum class CancelState { NONE, HANDING_ON, HANDED_ON }
+
     private val lock = PlatformMutex()
     private var done = false
-    private var cancelRequested = false
+    private var cancelState = CancelState.NONE
     private var handle: ObjectReference = ObjectReference.NONE
     private var cancelDisposer: (() -> Unit)? = null
 
     /** True once [onComplete] has run (or is running): the task finished, or the loop was closed. */
     val isDone: Boolean get() = lock.withLock { done }
 
-    /** True once [cancel] has been asked for, whether or not the task has reacted yet. */
-    val isCancellationRequested: Boolean get() = lock.withLock { cancelRequested }
+    /**
+     * True once [cancel] handed a `Task.cancel()` to the loop (or is doing so), whether or not the
+     * task has reacted yet. Stays false when the loop answered that the await was already over.
+     */
+    val isCancellationRequested: Boolean get() = lock.withLock { cancelState != CancelState.NONE }
 
     /**
-     * Asks the loop to cancel the task, at most once.
+     * Asks the loop to cancel the task, at most once, and on every later call asks only whether
+     * the loop has closed since.
      *
      * Non-blocking: the Python side only queues `_cancel_suspend_on_loop` with
      * `call_soon_threadsafe`, after the `_schedule` the submit queued (one FIFO), so a cancel that
      * lands before the task exists cancels the task the loop is about to create. The task's done
      * callback then resumes with [CancellationException] (or with a value, if the coroutine caught
-     * `CancelledError` and returned one). When the target loop is already closed nothing on it
-     * will run again, so this completes the await itself with [CancellationException], on the
-     * calling thread.
+     * `CancelledError` and returned one).
+     *
+     * When the target loop is closed nothing on it will run again, the done callback included, so
+     * this completes the await itself with [CancellationException] (no Python cause), inline on
+     * the calling thread: [onComplete], and with [await] the continuation and whatever follows the
+     * `await()` in the body, run before this returns, inside a [PendingCall.onCancelled] listener
+     * when that is where the cancel came from. The closed check runs on the first call and on
+     * every later one while the await is in flight, because a loop can close after it took the
+     * first call's cancel and before it ran it (`BaseEventLoop.close()` drops the callbacks it had
+     * not run); a later call never hands a second `Task.cancel()` to the loop.
      *
      * Takes [withGIL] (an attach on any thread; re-entrant on one that holds it, which every
-     * [PendingCall.cancel] path does). May be called from any thread.
+     * [PendingCall.cancel] path does). May be called from any thread. If the Python call throws
+     * before the loop answered (the binding module gone, say), the throw propagates, nothing was
+     * handed on, and the next call tries again.
      *
-     * @return `true` if this call was in flight and the cancel was handed on (or applied locally
-     *   because the loop is closed); `false` if the await is already done, or a cancel was already
-     *   requested.
+     * @return `true` if this call handed the cancel to the loop, or ended the await locally because
+     *   its loop is closed; `false` if the await is already done (the done callback has run or is
+     *   running), a cancel was already handed on and the loop is still open, or another thread is
+     *   handing one on right now.
      */
     fun cancel(): Boolean {
-        val raw = lock.withLock {
-            if (done || cancelRequested) return false
-            cancelRequested = true
-            handle.raw
+        val (raw, first) = lock.withLock {
+            if (done || cancelState == CancelState.HANDING_ON) return false
+            val first = cancelState == CancelState.NONE
+            if (first) cancelState = CancelState.HANDING_ON
+            handle.raw to first
         }
-        val verdict = withGIL { cancelOnLoop(raw) }
-        when (verdict) {
-            CANCEL_QUEUED -> return true
-            CANCEL_LOOP_CLOSED -> {
-                finish(Result.failure(CancellationException("the delivery loop is closed")))
-                return true
+        val answer = try {
+            withGIL { if (first) cancelOnLoop(raw) else probeLoop(raw) }
+        } catch (t: Throwable) {
+            // Nothing reached the loop; let the next call try again.
+            if (first) lock.withLock { cancelState = CancelState.NONE }
+            throw t
+        }
+        if (first) {
+            // `OVER` on the first call: nothing was handed on, the done callback is already running.
+            lock.withLock {
+                cancelState = if (answer == SUSPEND_OVER) CancelState.NONE else CancelState.HANDED_ON
             }
-            else -> return false
+        }
+        return when (answer) {
+            SUSPEND_IN_FLIGHT -> first
+            SUSPEND_LOOP_CLOSED -> finish(Result.failure(CancellationException("the delivery loop is closed")))
+            else -> false
         }
     }
 
@@ -141,9 +173,10 @@ class PyAwait private constructor(
         finish(result)
     }
 
-    private fun finish(result: Result<PyObject>) {
+    /** Ends the await with [result] if nothing ended it before; returns whether this call did. */
+    private fun finish(result: Result<PyObject>): Boolean {
         val (dispose, raw) = lock.withLock {
-            if (done) return
+            if (done) return false
             done = true
             val d = cancelDisposer
             cancelDisposer = null
@@ -155,13 +188,14 @@ class PyAwait private constructor(
         // for an await that is over has nothing left to cancel.
         dispose?.invoke()
         onComplete(result)
+        return true
     }
 
     companion object {
-        /** `_cancel_suspend_awaitable`'s answers. */
-        private const val CANCEL_QUEUED = 1L
-        private const val CANCEL_NOT_IN_FLIGHT = 0L
-        private const val CANCEL_LOOP_CLOSED = -1L
+        /** The answers of `_cancel_suspend_awaitable` and `_suspend_loop_closed`. */
+        private const val SUSPEND_IN_FLIGHT = 1L
+        private const val SUSPEND_OVER = 0L
+        private const val SUSPEND_LOOP_CLOSED = -1L
 
         /**
          * Submits [awaitable] to the delivery loop and returns once its first step is queued there.
@@ -220,11 +254,16 @@ class PyAwait private constructor(
         }
 
         /** `_cancel_suspend_awaitable(handle)`; caller holds the GIL. Only queues; never cancels on the calling thread. */
-        private fun cancelOnLoop(raw: Long): Long {
+        private fun cancelOnLoop(raw: Long): Long = ask("_cancel_suspend_awaitable", raw)
+
+        /** `_suspend_loop_closed(handle)`; caller holds the GIL. Touches no task. */
+        private fun probeLoop(raw: Long): Long = ask("_suspend_loop_closed", raw)
+
+        private fun ask(function: String, raw: Long): Long {
             val binding = Python3.import(PythonxAdapter.MODULE_NAME)
-            val answer = binding.getAttr("_cancel_suspend_awaitable").invoke(PyInt.from(raw))
+            val answer = binding.getAttr(function).invoke(PyInt.from(raw))
             return try {
-                answer.toString().toLongOrNull() ?: CANCEL_NOT_IN_FLIGHT
+                answer.toString().toLongOrNull() ?: SUSPEND_OVER
             } finally {
                 answer.close()
             }
