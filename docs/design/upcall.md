@@ -960,6 +960,45 @@ adds that `pmp_attach` runs on that path too; a `java.lang.Thread` is already kn
 
 ---
 
+### 5.9 The other direction: Kotlin awaiting a Python awaitable (SPEC U-5d)
+
+`suspend fun PyObject.await(): PyObject` (`pythonx/PyAwait.kt`) is U-5a's adapter turned around: the
+same Python submit path (`_submit_suspend_awaitable`, one `_schedule` callback on the loop's FIFO,
+`ensure_future` on the loop thread only), the same completion entry (`PythonCallables.completeSuspendCall`,
+which now resolves either a `PendingSuspendInvocation` or a `PyAwait`), and the same loop order as §5.5.
+What is new is the shape of the Kotlin half and where cancellation comes from.
+
+**Two layers, so the stdlib rule holds and a `Job` can still reach the task.** `PyAwait.submit(awaitable)
+{ result -> }` is a public callback primitive: it submits once, reports once (on the loop thread, inside the
+done callback's upcall frame), and `cancel()` hands one `Task.cancel()` to the loop. `await()` is the
+stdlib `suspendCoroutine` over it. A wrapper that has `kotlinx.coroutines` (pythonx-concurrent) writes
+`suspendCancellableCoroutine { c -> val a = PyAwait.submit(obj) { c.resumeWith(it) }; c.invokeOnCancellation { a.cancel() } }`
+and gets `Job` cancellation to `Task.cancel()` without this library depending on `kotlinx`. The
+stdlib `await()` has one cancellation source, `coroutineContext[PendingCall]`, registered with
+`onCancelled` after a successful submit and disposed at completion (§5.6's seam, U-5a's pattern).
+
+**Exactly once, both ways.** The done callback is the single resume path; `PyAwait.finish` guards it with a
+`done` flag under `PlatformMutex`, releases the handle (generational, so the entry's own release before it
+is a no-op) and only then resumes. `cancel()` flips a `cancelRequested` flag under the same lock before
+touching Python, so the loop receives at most one `_cancel_suspend_on_loop` per await. The FIFO argument of
+U-5a covers a cancel that lands before the task exists (`PyAwaitTest.aCancelThatLandsBeforeTheTaskExists...`
+forces it by parking the loop thread in a callback while the submit and the cancel are queued behind it).
+One case U-5a left parked is closed here: when `_cancel_suspend_awaitable` finds the target loop already
+closed it answers `-1` and drops its map entries, and `PyAwait` completes the await itself with
+`CancellationException`, because nothing on a closed loop runs again. (U-5a's adapter ignores the
+answer and keeps its continuation parked, as before; unchanged in this step.)
+
+**Inside an upcall on the loop thread** nothing blocks: the body suspends, `AsyncUpcall.deliver` returns a
+`Future`, the loop runs the task after the frame returns, the done callback resumes the body on the loop
+thread, and the body's completion settles the `Future` through `call_soon_threadsafe`
+(`PyAwaitTest.awaitingFromInsideAnUpcallOnTheLoopThread...` asserts the `Future` crossed and the value
+arrived). The one way to deadlock, blocking the loop thread until the result is in, is the thing `await()`
+exists to avoid.
+
+**Where the continuation runs.** On the loop thread, holding the GIL, inside a Python callback: the code
+after `await()` blocks the loop while it runs. A `ContinuationInterceptor` in the context moves it off
+(`suspendCoroutine` intercepts; `theContinuationIsDispatchedThroughTheCallersInterceptor...`).
+
 ## 6. Cycle collection is part of the table's job
 
 A Python proxy holding a Kotlin object that holds a Python object forms a cycle neither collector can break
@@ -1314,7 +1353,9 @@ Only what is really open; each with what proves the done part.
    `import asyncio` works (`WasmSelectorsImportTest`); the default event loop cannot be built (§5.8). Open
    decision: whether the library ships a selector-free loop. SPEC U-5 `planned` on wasm.
 2. **Kotlin-side forced cancellation.** Structurally impossible without `kotlinx.coroutines`' `Job` tree; only
-   cooperative `ensureActive()` exists (§5.6). Not planned unless that dependency is taken.
+   cooperative `ensureActive()` exists (§5.6). Not planned unless that dependency is taken. The one suspension
+   point this library owns, `PyObject.await()` (§5.9), is the exception: `PendingCall.cancel()` reaches it
+   through `onCancelled` and ends it with `CancellationException` once the task is cancelled.
 3. **A handle left by a dead loop.** The Kotlin `finally` release is meant to cover a loop that stopped before
    its done callback ran; that case was never constructed and observed (unverified).
 4. **Silent exclusions without a KSP warning.** A `suspend` function *type* warns (§5.3); a `suspend fun` with

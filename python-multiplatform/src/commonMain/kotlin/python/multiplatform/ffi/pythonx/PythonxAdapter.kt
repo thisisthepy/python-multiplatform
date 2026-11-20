@@ -1045,20 +1045,31 @@ object PythonxAdapter {
             )
 
 
-        # In-flight suspend invocations (SPEC U-5a): pending handle -> the delivery loop, from
-        # submission until the task's done callback, and pending handle -> the task, from
-        # `_schedule` until the same callback. Both are written on the loop thread only; the one
-        # read off it (`_cancel_suspend_awaitable`) takes nothing but the loop. A finished
-        # invocation costs nothing.
+        # In-flight suspend invocations (SPEC U-5a) and awaits (SPEC U-5d): pending handle -> the
+        # delivery loop, from submission until the task's done callback, and pending handle -> the
+        # task, from `_schedule` until the same callback. Both are written on the loop thread only,
+        # except that `_cancel_suspend_awaitable` drops the entries of a loop it found closed (no
+        # callback of that loop runs again, so nothing else will). The one other read off the loop
+        # thread takes nothing but the loop. A finished invocation costs nothing.
         _SUSPEND_LOOPS = {}
         _SUSPEND_TASKS = {}
+
+        # `_cancel_suspend_awaitable`'s answers, read as a number by `PyAwait.cancel`.
+        _CANCEL_QUEUED = 1
+        _CANCEL_NOT_IN_FLIGHT = 0
+        _CANCEL_LOOP_CLOSED = -1
 
 
         def _cancel_suspend_awaitable(pending_handle):
             '''Asks the loop to cancel the task running the awaitable of [pending_handle], if the
-            invocation is still in flight (SPEC U-5a; the Kotlin side calls this from
-            `PendingCall.onCancelled` when the outer call's `Future` was cancelled). Returns whether
-            the invocation was in flight.
+            invocation is still in flight (SPEC U-5a: the Kotlin side calls this from
+            `PendingCall.onCancelled` when the outer call's `Future` was cancelled; SPEC U-5d:
+            `PyAwait.cancel`, at most once per await). Answers `_CANCEL_QUEUED` when the cancel was
+            handed to the loop, `_CANCEL_NOT_IN_FLIGHT` when the invocation is over (its done
+            callback has run or is running), and `_CANCEL_LOOP_CLOSED` when the loop it was
+            submitted to is closed: nothing on that loop runs again, the done callback included, so
+            the entries are dropped here and the Kotlin side decides what to do with a continuation
+            nobody will resume (`PyAwait` ends it with `CancellationException`).
 
             Everything that touches the task runs on the loop thread, through
             `call_soon_threadsafe`: the caller may be on any thread (`PendingCall.cancel` runs its
@@ -1072,15 +1083,20 @@ object PythonxAdapter {
             continuation with `CancelledError`, which crosses as `CancellationException`.
             '''
             loop = _SUSPEND_LOOPS.get(pending_handle)
-            if loop is None or loop.is_closed():
-                return False
+            if loop is None:
+                return _CANCEL_NOT_IN_FLIGHT
+            if loop.is_closed():
+                _SUSPEND_TASKS.pop(pending_handle, None)
+                _SUSPEND_LOOPS.pop(pending_handle, None)
+                return _CANCEL_LOOP_CLOSED
             try:
                 loop.call_soon_threadsafe(_cancel_suspend_on_loop, pending_handle)
             except RuntimeError:
-                # Closed between the check and the call. Nothing on that loop runs again, the
-                # done callback included; there is no task left to cancel.
-                return False
-            return True
+                # Closed between the check and the call; the same situation as above.
+                _SUSPEND_TASKS.pop(pending_handle, None)
+                _SUSPEND_LOOPS.pop(pending_handle, None)
+                return _CANCEL_LOOP_CLOSED
+            return _CANCEL_QUEUED
 
 
         def _cancel_suspend_on_loop(pending_handle):
@@ -1093,9 +1109,10 @@ object PythonxAdapter {
 
 
         def _submit_suspend_awaitable(awaitable, pending_handle):
-            '''Submits a Python awaitable returned by a `PythonSuspendFunction` to the resolved
-            asyncio delivery loop (SPEC U-5, U-5a) and wires its done callback to
-            `PythonCallables.completeSuspendCall`.
+            '''Submits a Python awaitable, one returned by a `PythonSuspendFunction` (SPEC U-5a) or
+            one a Kotlin coroutine awaits through `PyObject.await()` (SPEC U-5d), to the resolved
+            asyncio delivery loop (SPEC U-5) and wires its done callback to
+            `PythonCallables.completeSuspendCall`, which resolves [pending_handle] to either.
             '''
             import asyncio as _asyncio
             import python_multiplatform as _pm
