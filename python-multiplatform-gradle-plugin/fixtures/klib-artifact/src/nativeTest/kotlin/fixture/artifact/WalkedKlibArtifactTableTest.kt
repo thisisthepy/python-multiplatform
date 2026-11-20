@@ -58,7 +58,9 @@ class WalkedKlibArtifactTableTest {
      * The fixed text: everything `KlibScanner` bound out of the whole `kotlinx-coroutines-core` klib
      * under the `kotlinx.coroutines` namespace. Zero before issue #234, when no Kotlin object could
      * cross the klib boundary; since then the factories whose types are the klib's own classes, and
-     * since #237 the members of its interfaces and final classes.
+     * since #237 the members of its interfaces and final classes, and since SPEC U-4a and B-1 (#164) the
+     * members of its generic classes and interfaces (read with `kotlin.Any?` for the type parameter) and
+     * its `suspend` members (`Job.join`, `SendChannel.send`, `Semaphore.acquire`, ...).
      * `KlibScannerTest.aRealThirdPartyKlibIsScannedWithoutCrashingAndBindsItsHandleFactoriesAndMembers` pins the
      * same list walking the klib directly; if the two disagree, the wiring between `KlibScanner` and
      * this generated table is what broke.
@@ -68,7 +70,13 @@ class WalkedKlibArtifactTableTest {
         ArtifactTable.registerInto()
         assertEquals(
             listOf(
+                "kotlinx.coroutines.AbstractCoroutine.isActive",
+                "kotlinx.coroutines.CancellableContinuation.initCancellability",
+                "kotlinx.coroutines.CancellableContinuation.isActive",
+                "kotlinx.coroutines.CancellableContinuation.isCancelled",
+                "kotlinx.coroutines.CancellableContinuation.isCompleted",
                 "kotlinx.coroutines.CloseableCoroutineDispatcher.close",
+                "kotlinx.coroutines.CompletableDeferred.complete",
                 "kotlinx.coroutines.CompletableJob.complete",
                 "kotlinx.coroutines.CoroutineDispatcher.Key",
                 "kotlinx.coroutines.CoroutineDispatcher.limitedParallelism",
@@ -77,6 +85,8 @@ class WalkedKlibArtifactTableTest {
                 "kotlinx.coroutines.CoroutineName.Key",
                 "kotlinx.coroutines.CoroutineName.name",
                 "kotlinx.coroutines.CoroutineStart.isLazy",
+                "kotlinx.coroutines.Deferred.await",
+                "kotlinx.coroutines.Deferred.getCompleted",
                 "kotlinx.coroutines.Dispatchers.Default",
                 "kotlinx.coroutines.Dispatchers.Main",
                 "kotlinx.coroutines.Dispatchers.Unconfined",
@@ -87,6 +97,7 @@ class WalkedKlibArtifactTableTest {
                 "kotlinx.coroutines.Job.isActive",
                 "kotlinx.coroutines.Job.isCancelled",
                 "kotlinx.coroutines.Job.isCompleted",
+                "kotlinx.coroutines.Job.join",
                 "kotlinx.coroutines.Job.onJoin",
                 "kotlinx.coroutines.Job.parent",
                 "kotlinx.coroutines.Job.start",
@@ -104,21 +115,38 @@ class WalkedKlibArtifactTableTest {
                 "kotlinx.coroutines.channels.Channel.Factory.DEFAULT_BUFFER_PROPERTY_NAME",
                 "kotlinx.coroutines.channels.Channel.Factory.RENDEZVOUS",
                 "kotlinx.coroutines.channels.Channel.Factory.UNLIMITED",
+                "kotlinx.coroutines.channels.ChannelIterator.hasNext",
+                "kotlinx.coroutines.channels.ChannelIterator.next",
                 "kotlinx.coroutines.channels.ChannelResult.Companion",
+                "kotlinx.coroutines.channels.ReceiveChannel.isClosedForReceive",
+                "kotlinx.coroutines.channels.ReceiveChannel.isEmpty",
+                "kotlinx.coroutines.channels.ReceiveChannel.receive",
+                "kotlinx.coroutines.channels.SendChannel.isClosedForSend",
+                "kotlinx.coroutines.channels.SendChannel.send",
                 "kotlinx.coroutines.ensureActive__CoroutineScope",
                 "kotlinx.coroutines.ensureActive__Job",
                 "kotlinx.coroutines.flow.DEFAULT_CONCURRENCY",
                 "kotlinx.coroutines.flow.DEFAULT_CONCURRENCY_PROPERTY_NAME",
+                "kotlinx.coroutines.flow.FlowCollector.emit",
+                "kotlinx.coroutines.flow.MutableSharedFlow.emit",
+                "kotlinx.coroutines.flow.MutableSharedFlow.resetReplayCache",
+                "kotlinx.coroutines.flow.MutableSharedFlow.tryEmit",
+                "kotlinx.coroutines.flow.MutableStateFlow.compareAndSet",
+                "kotlinx.coroutines.flow.MutableStateFlow.value",
+                "kotlinx.coroutines.flow.MutableStateFlow.value=",
                 "kotlinx.coroutines.flow.SharingStarted.Companion",
                 "kotlinx.coroutines.flow.SharingStarted.Eagerly",
                 "kotlinx.coroutines.flow.SharingStarted.Lazily",
                 "kotlinx.coroutines.flow.SharingStarted.WhileSubscribed",
+                "kotlinx.coroutines.flow.StateFlow.value",
                 "kotlinx.coroutines.isActive",
                 "kotlinx.coroutines.newFixedThreadPoolContext",
                 "kotlinx.coroutines.newSingleThreadContext",
+                "kotlinx.coroutines.selects.SelectInstance.disposeOnCompletion",
                 "kotlinx.coroutines.sync.Mutex",
                 "kotlinx.coroutines.sync.Mutex.isLocked",
                 "kotlinx.coroutines.sync.Semaphore",
+                "kotlinx.coroutines.sync.Semaphore.acquire",
                 "kotlinx.coroutines.sync.Semaphore.availablePermits",
                 "kotlinx.coroutines.sync.Semaphore.release",
                 "kotlinx.coroutines.sync.Semaphore.tryAcquire",
