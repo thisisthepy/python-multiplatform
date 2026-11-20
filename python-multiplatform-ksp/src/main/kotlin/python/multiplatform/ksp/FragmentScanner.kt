@@ -195,7 +195,7 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
 
     private fun topLevelFunctionEntry(function: KSFunctionDeclaration): CallableEntryModel {
         val qualifiedName = function.qualifiedName!!.asString()
-        val paramShapes = function.parameters.map { it.type.toShape() }
+        val paramShapes = function.parameters.map { it.type.toShape(allowTopLevelSuspendFunction = true) }
         val returnShape = function.returnType?.toShape() ?: TypeShape("kotlin.Unit", false)
         val argExprs = paramShapes.mapIndexed { i, shape -> castExpression(shape, "args[$i]") }
         val callExpr = "$qualifiedName(${argExprs.joinToString(", ")})"
@@ -208,7 +208,7 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
             lambdaBody = functionBody(function, wrapReturnExpression(returnShape, callExpr)),
             isSuspend = BindingPolicy.isSuspending(function),
             paramNames = paramNamesOf(function.parameters),
-            paramTypeNames = paramShapes.map { it.rendered },
+            paramTypeNames = paramShapes.map { it.slotTypeName },
             returnTypeName = returnShape.rendered,
             paramHasDefault = paramHasDefaultOf(function.parameters),
         )
