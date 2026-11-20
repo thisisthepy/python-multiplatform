@@ -8,7 +8,9 @@ import python.multiplatform.reflection.HandleTable
 import python.multiplatform.reflection.TypeTag
 import python.multiplatform.reflection.UpcallTable
 import python.native.ffi.bindUpcallOrNull
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.Continuation
 import kotlin.coroutines.ContinuationInterceptor
@@ -101,9 +103,22 @@ class CoroutineContextUpcallTest {
     @Test
     fun aContinuationInterceptorDispatchesToAnotherThreadAndDeliversResultWithGil() =
         PythonTestFixture.withInterpreter {
-            assertTrue(bindUpcallOrNull("ctxtest.dispatchAndReportThread"))
+            // Deterministic cross-thread path: the dispatched first slice waits on `gate`, which the
+            // Python side opens only after the upcall returned. The call therefore cannot complete
+            // inline before PendingCall.start returns (the SPEC U-5 fast path), so it must be a Future.
+            val gate = CountDownLatch(1)
+            CoroutineContextTestFragment.gate = gate
             val executor = Executors.newSingleThreadExecutor { r -> Thread(r, "kotlin-dispatcher-worker") }
-            val interceptor = ExecutorInterceptor(executor)
+            val interceptor = ExecutorInterceptor { task ->
+                executor.execute {
+                    check(gate.await(10, TimeUnit.SECONDS)) { "the test never opened the gate" }
+                    task.run()
+                }
+            }
+            assertTrue(bindUpcallOrNull("ctxtest.releaseGate"))
+            Python3.exec("_pm_open_gate = _pm_bound")
+            assertTrue(bindUpcallOrNull("ctxtest.dispatchAndReportThread"))
+            Python3.exec("_pm_dispatch = _pm_bound")
             val ctxHandle = HandleTable.register(interceptor + TestJobElement("dispatched-job")).raw
             val callerThreadName = Thread.currentThread().name
             try {
@@ -115,8 +130,9 @@ class CoroutineContextUpcallTest {
 
                     async def _run_disp():
                         with _pm.use_coroutine_context($ctxHandle):
-                            r = _pm_bound()
+                            r = _pm_dispatch()
                             _disp['returned'] = type(r).__name__
+                            _pm_open_gate()
                             if hasattr(r, '__await__'):
                                 return await asyncio.wait_for(r, 10.0)
                             return r
@@ -132,8 +148,10 @@ class CoroutineContextUpcallTest {
                 )
                 assertNotEquals(callerThreadName, result.substringBefore('|'))
             } finally {
+                gate.countDown()
                 Python3.exec("_disp_loop.close()")
                 executor.shutdownNow()
+                CoroutineContextTestFragment.gate = null
             }
         }
 
@@ -293,6 +311,10 @@ private class ExecutorInterceptor(
 private object CoroutineContextTestFragment : FunctionTableFragment {
     override val moduleName: String = "test_coroutine_context"
 
+    /** Opened by the test through `ctxtest.releaseGate`; null outside the gated test. */
+    @Volatile
+    var gate: CountDownLatch? = null
+
     private suspend fun readElement(): String =
         coroutineContext[TestJobElement]?.label ?: "<none>"
 
@@ -318,6 +340,15 @@ private object CoroutineContextTestFragment : FunctionTableFragment {
             returnType = TypeTag.STRING,
             isSuspend = true,
         ) { PendingCall.start { dispatchAndReportThread() } },
+        ExposedCallable(
+            name = "ctxtest.releaseGate",
+            arity = 0,
+            paramTypes = emptyList(),
+            returnType = TypeTag.STRING,
+        ) {
+            gate?.countDown()
+            "released"
+        },
         ExposedCallable(
             name = "ctxtest.readInsideAndOutsideWithoutGil",
             arity = 0,

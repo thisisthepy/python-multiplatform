@@ -108,17 +108,19 @@ class SamParameterBindingTest {
     @Test
     fun aSuspendSamTypeParameterNestedInTheMethodSignatureIsSubstitutedAtAnyDepth() {
         // The same shape the KSP fixture `fixture.library.BatchSink` pins (review finding on #497):
-        // the walker substitutes `T` inside `List<T>` from the use site, so the SAM lambda's
-        // parameter type and the interface cast agree. Passes before and after that fix; it is
-        // here so the two generators are checked against one shape.
+        // the walker substitutes `T` inside `Batch<T>` from the use site, so the SAM lambda's
+        // parameter type and the interface cast agree. The nested type is a fixture class rather
+        // than `List<T>`: the walker never writes a mapped Kotlin collection into generated source
+        // (`renderKotlinSourceType` needs a class file), so `List<T>` declines the whole slot.
+        // Passes before and after that fix; it is here so the two generators are checked against one shape.
         val accept = callables().single { it.name == "$pkg.acceptBatches" }
         assertEquals(
-            listOf("$pkg.BatchCollector|kotlin.coroutines.SuspendFunction1(kotlin.collections.List)->kotlin.Unit"),
+            listOf("$pkg.BatchCollector|kotlin.coroutines.SuspendFunction1($pkg.Batch)->kotlin.Unit"),
             accept.paramTypeNames,
         )
         assertTrue("$pkg.BatchCollector<kotlin.String>" in accept.lambdaBody, accept.lambdaBody)
         assertTrue(
-            "(suspend (kotlin.collections.List<kotlin.String>) -> kotlin.Unit)" in accept.lambdaBody,
+            "(suspend ($pkg.Batch<kotlin.String>) -> kotlin.Unit)" in accept.lambdaBody,
             accept.lambdaBody,
         )
     }
