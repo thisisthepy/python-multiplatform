@@ -57,6 +57,7 @@ import java.io.File
 internal object KlibKnmScanner {
 
     private const val COMPOSABLE_ANNOTATION = "androidx/compose/runtime/Composable"
+    private const val RESTRICTS_SUSPENSION_ANNOTATION = "kotlin/coroutines/RestrictsSuspension"
 
     /** Compose packs 31 default bits into each `$default` int (`ComposableShape.defaultCountFor`). */
     private const val DEFAULT_BITS_PER_MASK = 31
@@ -1016,6 +1017,10 @@ internal object KlibKnmScanner {
             }
         }
         val isEnum = cls.kind == ProtoBuf.Class.Kind.ENUM_CLASS
+        // `@RestrictsSuspension` is BINARY-retained and the klib metadata keeps it on the class, as it keeps `@Composable`.
+        val restrictedScope = (listOf(owner) + supertypesOf(owner, classes)).any { name ->
+            name == "kotlin.sequences.SequenceScope" || classes[name]?.annotations?.contains(RESTRICTS_SUSPENSION_ANNOTATION) == true
+        }
         return cls.proto.functionList
             .filter { Flags.VISIBILITY.get(it.flags) == ProtoBuf.Visibility.PUBLIC }
             .filter { Flags.MEMBER_KIND.get(it.flags) == ProtoBuf.MemberKind.DECLARATION }
@@ -1029,6 +1034,7 @@ internal object KlibKnmScanner {
                     receiverExpr = receiverExpr,
                     classSubstIds = classSubstIds.orEmpty(),
                     unbindable = unbindable,
+                    restrictedScope = restrictedScope,
                     propertyNames = propertyNames,
                     classes = classes,
                 )
@@ -1043,6 +1049,7 @@ internal object KlibKnmScanner {
         receiverExpr: String,
         classSubstIds: Set<Int>,
         unbindable: String?,
+        restrictedScope: Boolean,
         propertyNames: Set<String>,
         classes: Map<String, KnmClassRecord>,
     ): Candidate? {
@@ -1093,6 +1100,7 @@ internal object KlibKnmScanner {
             hasReified -> return declined("a reified type parameter: its type argument is read at run time, so kotlin.Any? cannot stand for it")
             hasUnsubstitutable -> return declined("a bounded or reified type parameter: kotlin.Any? cannot stand for it")
             unbindable != null -> return declined(unbindable)
+            isSuspend && restrictedScope -> return declined(RESTRICTED_SUSPEND_REASON)
             cls.proto.typeParameterCount > 0 &&
                 (returnModel.arguments.isNotEmpty() || parameters.any { it.type.arguments.isNotEmpty() }) ->
                 return declined(GENERIC_OWNER_PARAMETERIZED_REASON)

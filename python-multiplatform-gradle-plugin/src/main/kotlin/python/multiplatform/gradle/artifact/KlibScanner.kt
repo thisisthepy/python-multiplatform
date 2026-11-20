@@ -151,6 +151,7 @@ internal object KlibScanner {
      * (`kotlin-stdlib`, `kotlinx-coroutines-core`) contains a composable, so what is proved here is
      * that reading it is free and cannot mis-bind, not that it returns `true` on a real Compose klib.
      */
+    private val RESTRICTS_SUSPENSION = AbiQualifiedName(AbiCompoundName("kotlin.coroutines"), AbiCompoundName("RestrictsSuspension"))
     private val COMPOSABLE = AbiQualifiedName(AbiCompoundName("androidx.compose.runtime"), AbiCompoundName("Composable"))
 
     /**
@@ -846,6 +847,10 @@ internal object KlibScanner {
             else -> null
         }
         val enum = cls.kind == AbiClassKind.ENUM_CLASS
+        // `@RestrictsSuspension` is BINARY-retained and the klib ABI keeps it on the class, as it keeps `@Composable`.
+        val restrictedScope = (listOf(owner) + supertypesOf(owner, classes)).any { name ->
+            name == "kotlin.sequences.SequenceScope" || classes[name]?.hasAnnotation(RESTRICTS_SUSPENSION) == true
+        }
         return cls.declarations.filterIsInstance<AbiFunction>()
             .filter { !it.isConstructor }
             // `Any`'s members are not the class's API, as on the jar side; an enum class's
@@ -860,6 +865,7 @@ internal object KlibScanner {
                     receiverExpr = receiverExpr,
                     typeParameters = classSubstitutions ?: emptyMap(),
                     unbindable = unbindable,
+                    restrictedScope = restrictedScope,
                     propertyNames = propertyNames,
                     classes = classes,
                 )
@@ -873,6 +879,7 @@ internal object KlibScanner {
         receiverExpr: String,
         typeParameters: Map<String, KotlinTypeModel>,
         unbindable: String?,
+        restrictedScope: Boolean,
         propertyNames: Set<String>,
         classes: Map<String, AbiClass>,
     ): Candidate? {
@@ -888,6 +895,7 @@ internal object KlibScanner {
         val declined = { reason: String -> Candidate(null, model.copy(declineReason = reason)) }
         when {
             unbindable != null -> return declined(unbindable)
+            function.isSuspend && restrictedScope -> return declined(RESTRICTED_SUSPEND_REASON)
             function.hasAnnotation(DEPRECATED) ->
                 return declined("@Deprecated: its level is not in this klib ABI, and a HIDDEN one cannot be called from source")
             function.hasAnnotation(PUBLISHED_API) ->

@@ -429,6 +429,40 @@ internal fun ArtifactClasspath.unreachableSupertypeOf(binaryName: String): Strin
     return null
 }
 
+/**
+ * The first type among [binaryName] and its supertypes (nearest first) annotated
+ * `@kotlin.coroutines.RestrictsSuspension`, as a qualified name; `null` when none is.
+ *
+ * A suspend member of such a type may be called only from a suspend lambda whose receiver is that
+ * very scope, so a generated `PendingCall.start { receiver.member() }` cannot compile ("Restricted
+ * suspending functions can invoke member or extension suspending functions only on their restricted
+ * coroutine scope"). The annotation has `BINARY` retention, so ASM reports it in
+ * `invisibleAnnotations`; both lists are read, as [ArtifactScanner]'s composable check does.
+ * The standard library's own `SequenceScope` is not on a fixture classpath, so it is named here.
+ */
+internal fun ArtifactClasspath.restrictsSuspensionTypeOf(binaryName: String): String? {
+    val visited = HashSet<String>()
+    val pending = ArrayDeque<String>()
+    pending.addLast(binaryName)
+    while (pending.isNotEmpty()) {
+        val name = pending.removeFirst()
+        if (!visited.add(name)) continue
+        if (name == "kotlin/sequences/SequenceScope") return name.replace('/', '.')
+        val node = classNode(name) ?: continue
+        val annotated = sequenceOf(node.visibleAnnotations, node.invisibleAnnotations).filterNotNull()
+            .any { list -> list.any { it.desc == RESTRICTS_SUSPENSION_DESCRIPTOR } }
+        if (annotated) return name.replace('/', '.').replace('$', '.')
+        listOfNotNull(node.superName).plus(node.interfaces.orEmpty()).forEach { pending.addLast(it) }
+    }
+    return null
+}
+
+private const val RESTRICTS_SUSPENSION_DESCRIPTOR = "Lkotlin/coroutines/RestrictsSuspension;"
+
+/** The decline reason for a suspend member of a restricted type. */
+internal const val RESTRICTED_SUSPEND_REASON =
+    "a suspend member of a @RestrictsSuspension type: callable only inside its own scope"
+
 private val ALWAYS_ON_A_KOTLIN_COMPILE_CLASSPATH = listOf("java/", "javax/", "jdk/", "sun/", "kotlin/")
 
 /**

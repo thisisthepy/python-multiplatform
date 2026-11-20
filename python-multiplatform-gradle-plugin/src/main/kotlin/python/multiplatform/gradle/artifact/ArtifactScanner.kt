@@ -1048,6 +1048,7 @@ internal object ArtifactScanner {
             ?.let { missing -> unreachableReceiverReason(missing, owner) }
         val propertyNames = kmClass.properties.mapTo(HashSet()) { it.name }
         val methods = ownerNode.methods.associateBy { it.name to it.desc }
+        val restrictedScope = classpath.restrictsSuspensionTypeOf(ownerNode.name)
 
         return functions.mapNotNull { function ->
             val signature = function.jvmSignature.name to function.jvmSignature.descriptor
@@ -1063,6 +1064,7 @@ internal object ArtifactScanner {
                 method == null || !method.access.hasFlag(Opcodes.ACC_PUBLIC) -> return@mapNotNull null
                 method.access.hasFlag(Opcodes.ACC_STATIC) || method.access.hasFlag(Opcodes.ACC_SYNTHETIC) ||
                     method.access.hasFlag(Opcodes.ACC_BRIDGE) -> return@mapNotNull null
+                function.isSuspend && restrictedScope != null -> return@mapNotNull declined(RESTRICTED_SUSPEND_REASON)
                 composable -> return@mapNotNull declined("a @Composable member function: not bound on a proxy")
                 typeParameterCount > 0 && classTypeArgs == null ->
                     return@mapNotNull declined("a member of a generic class whose type parameter has an unsupported bound")

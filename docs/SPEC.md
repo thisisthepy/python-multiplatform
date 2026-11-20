@@ -616,7 +616,8 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   within one class are told apart as functions are (`Owner.add__Int`). Declined, each with its reason:
   a `@Composable` member, a member of a generic class whose type parameter has
   an unsupported bound (U-4a), and a member that
-  shares its name with a property of the class (the property is kept). `Any`'s members, statics and
+  shares its name with a property of the class (the property is kept). A `suspend` member of a type annotated
+  `@kotlin.coroutines.RestrictsSuspension`, or of one with such a supertype, is declined too, in every walker (it is callable only inside its own scope, so `PendingCall.start { receiver.member() }` cannot compile). `Any`'s members, statics and
   synthetic methods are not bound. A member's default arguments are not omittable yet: Python passes
   every argument. A member's stub is a method of the receiver's stub class whose docstring carries
   `Kotlin member: <key>` (or a comment with that marker where the class has no stub). Klibs bind no
