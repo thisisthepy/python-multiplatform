@@ -1,5 +1,7 @@
 package fixture.app
 
+import fixture.library.AsyncSink
+import fixture.library.Batches
 import fixture.library.SuspendingService
 import fixture.library.ValueHandler
 import python.multiplatform.ffi.upcall.PendingCall
@@ -241,6 +243,69 @@ class GeneratedSuspendTest {
             entry.paramTypeNames[0],
         )
         assertFalse(UpcallTable.resolve("fixture.library.makeHandler").isValid)
+    }
+
+    @Test
+    fun aSuspendSamFunInterfaceParameterBindsAsASlotTakingALambdaOrAHandle() {
+        // SPEC U-5c (#164 item 3): `fun interface AsyncSink { suspend fun take(value: Long) }` as a
+        // parameter is the `<Interface>|SuspendFunctionN(...)->Ret` slot, and the generated read
+        // wraps a `suspend (Long) -> Unit` (a `kotlin.Function2` at run time) in a SAM lambda or
+        // casts a handle. Before #497 the parameter was a plain object handle: the slot name was
+        // the bare interface and a lambda failed the cast with ClassCastException.
+        val entry = entry("fixture.library.drainAsync")
+        assertTrue(entry.isSuspend)
+        assertEquals(
+            "fixture.library.AsyncSink|kotlin.coroutines.SuspendFunction1(kotlin.Long)->kotlin.Unit",
+            entry.paramTypeNames[0],
+        )
+
+        val taken = mutableListOf<Long>()
+        val lambda: suspend (Long) -> Unit = { taken += it }
+        val viaLambda = startCall("fixture.library.drainAsync", lambda)
+        assertTrue(viaLambda.isDone, "nothing here suspends, so the call completes on the calling thread")
+        assertNull(viaLambda.failure, "the adapted lambda failed: ${viaLambda.failure}")
+        assertEquals(2L, viaLambda.value)
+        assertEquals(listOf(1L, 2L), taken)
+
+        val handleTaken = mutableListOf<Long>()
+        val handle = AsyncSink { handleTaken += it }
+        val viaHandle = startCall("fixture.library.drainAsync", handle)
+        assertTrue(viaHandle.isDone)
+        assertNull(viaHandle.failure)
+        assertEquals(listOf(1L, 2L), handleTaken)
+
+        // The control: a non-suspending `fun interface` does not take this path. The KSP
+        // processor has no #216 slot (SPEC B-5 is the artifact walker's; `KsAdapters` renders a
+        // non-`suspend` `fun interface` as the bare interface, a handle-only parameter), so the
+        // control is the plain interface name and the function is not `suspend`. CI run
+        // 44690216556 showed the walker's `SyncSink|kotlin.Function1(kotlin.Long)->kotlin.Unit`
+        // asserted here, which KSP never produced.
+        val control = entry("fixture.library.drainSync")
+        assertFalse(control.isSuspend)
+        assertEquals("fixture.library.SyncSink", control.paramTypeNames[0])
+    }
+
+    @Test
+    fun aSuspendSamWhoseTypeParameterIsNestedInItsMethodSignatureIsSubstitutedAtAnyDepth() {
+        // Review finding on #497: `fun interface BatchSink<T> { suspend fun take(batch: List<T>) }`
+        // used as `BatchSink<E>` from `class Batches<E>`. The SAM lambda's parameter must be the
+        // interface's `List<kotlin.Any?>`, not `List<kotlin.Any>` from an unbound `T` in the
+        // enclosing map. Before the fix this fixture's generated fragment did not compile, so
+        // every test in this module was red, not only this one.
+        val entry = entry("fixture.library.Batches.drainBatches")
+        assertTrue(entry.isSuspend)
+        assertEquals(
+            "fixture.library.BatchSink|kotlin.coroutines.SuspendFunction1(kotlin.collections.List)->kotlin.Unit",
+            entry.paramTypeNames[0],
+        )
+
+        val taken = mutableListOf<List<Any?>>()
+        val lambda: suspend (List<Any?>) -> Unit = { taken += it }
+        val viaLambda = startCall("fixture.library.Batches.drainBatches", Batches(listOf(1L, 2L, 3L)), lambda)
+        assertTrue(viaLambda.isDone, "nothing here suspends, so the call completes on the calling thread")
+        assertNull(viaLambda.failure, "the adapted lambda failed: ${viaLambda.failure}")
+        assertEquals(3L, viaLambda.value)
+        assertEquals(listOf(listOf<Any?>(1L, 2L, 3L)), taken)
     }
 
     @Test

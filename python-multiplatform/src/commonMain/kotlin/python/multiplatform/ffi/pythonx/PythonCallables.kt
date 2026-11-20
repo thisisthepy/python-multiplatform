@@ -10,15 +10,17 @@ import python.multiplatform.ffi.types.basic.PyInt
 import python.multiplatform.ffi.types.basic.PyNone
 import python.multiplatform.ffi.types.basic.PyString
 import python.multiplatform.ffi.upcall.KotlinSurface
+import python.multiplatform.ffi.upcall.PendingCall
 import python.multiplatform.reflection.ExposedCallable
 import python.multiplatform.reflection.FunctionTableFragment
 import python.multiplatform.ffi.withGIL
 import python.multiplatform.reflection.HandleTable
-import python.multiplatform.reflection.PlatformMutex
-import python.multiplatform.reflection.withLock
 import python.multiplatform.reflection.ObjectReference
+import python.multiplatform.reflection.PlatformMutex
 import python.multiplatform.reflection.TypeTag
+import python.multiplatform.reflection.withLock
 import kotlin.coroutines.Continuation
+import kotlin.coroutines.coroutineContext
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
@@ -898,7 +900,40 @@ internal class PendingSuspendInvocation(
     private val heldBody: PyObject,
     private val returnTypeName: String,
 ) {
+    private val lock = PlatformMutex()
+    private var completed = false
+    private var disposeCancelListener: (() -> Unit)? = null
+
+    /**
+     * Keeps the disposer of the [PendingCall.onCancelled] registration made for this invocation
+     * and runs it as soon as [complete] has run, or right away if it already has.
+     *
+     * The registration is made after the awaitable was submitted, on the submitting thread;
+     * [complete] runs on the loop thread, and under a `ContinuationInterceptor` the two are
+     * different threads, so the task can finish before the disposer arrives here. Whichever comes
+     * second runs it, under [lock], so a completed invocation never leaves its listener on the
+     * call (a collect registers one per suspended emission for as long as it runs).
+     */
+    fun attachCancelListenerDisposer(dispose: () -> Unit) {
+        val runNow = lock.withLock {
+            if (completed) {
+                true
+            } else {
+                disposeCancelListener = dispose
+                false
+            }
+        }
+        if (runNow) dispose()
+    }
+
     fun complete(ok: Boolean, payload: PyObject?) {
+        val dispose = lock.withLock {
+            completed = true
+            disposeCancelListener.also { disposeCancelListener = null }
+        }
+        // Before resuming: the continuation may complete or cancel the call inline, and the
+        // listener for an invocation that is over has nothing left to cancel.
+        dispose?.invoke()
         try {
             if (ok) {
                 val value = unmarshalSuspendReturn(returnTypeName, payload)
@@ -954,6 +989,9 @@ internal class PythonSuspendFunction(
     }
 
     private suspend fun invokeSuspend(args: Array<Any?>): Any? {
+        // The call this invocation belongs to, read before any suspension: its cancellation is
+        // forwarded to the Python awaitable below (SPEC U-5a, in-flight cancellation).
+        val call = coroutineContext[PendingCall]
         // Acquire our own extra reference to `body` under the scope lock before invoking Python.
         // If `scope.close()` runs while this invocation is suspended awaiting Python, `held` keeps
         // the callable alive until `PendingSuspendInvocation.complete` (or the fast-path finally)
@@ -1000,7 +1038,7 @@ internal class PythonSuspendFunction(
                 // we release `pendingHandle` in the catch block below, ownership of `held` is
                 // accounted for in exactly one place.
                 handedOff = true
-                try {
+                val submitted = try {
                     withGIL {
                         try {
                             submitAwaitableToLoop(awaitable, pendingHandle.raw)
@@ -1008,11 +1046,37 @@ internal class PythonSuspendFunction(
                             awaitable.close()
                         }
                     }
+                    true
                 } catch (t: Throwable) {
                     HandleTable.release(pendingHandle)
                     held.close()
                     val mapped = if (t is PyException) t.toKotlinException() else t
                     cont.resumeWithException(mapped)
+                    false
+                }
+                // The Python side cancelled the outer call (`Future.cancel()` -> `_pm_cancel` ->
+                // `PendingCall.cancel`, SPEC U-5b): cancel the awaitable's task too, so the done
+                // callback resumes this continuation with `CancellationException` instead of
+                // leaving the Kotlin coroutine parked here for as long as the Python `await`
+                // lasts, with `held` kept alive. A `Job` cannot reach this suspension point
+                // (`suspendCoroutine`, no `kotlinx`), so the seam is the call's own listener.
+                // Runs on the cancelling thread, which holds the GIL on every path that cancels
+                // (`_pm_cancel`, `AsyncUpcall.deliver`, `AsyncUpcall.resolve`); `withGIL` is
+                // re-entrant there and takes the GIL for a direct Kotlin caller. Non-blocking: the
+                // Python side only hands the cancel to the loop with `call_soon_threadsafe`, and
+                // the loop's FIFO puts it after the `_schedule` the submission queued, so a cancel
+                // from any thread, even one that lands before the task exists, is applied on the
+                // loop and never lost. An invocation that is already done is a no-op on the
+                // Python side (its handle is gone from the map). Registered after a successful
+                // submission only; a call that is already cancelled runs the action inline, which
+                // cancels the task the loop is about to start. The registration is disposed when
+                // this invocation completes (`PendingSuspendInvocation.complete`), so a collect
+                // that suspends on every emission does not accumulate one listener per emission.
+                if (submitted) {
+                    val dispose = call?.onCancelled {
+                        withGIL { cancelAwaitableOnLoop(pendingHandle.raw) }
+                    }
+                    if (dispose != null) pending.attachCancelListenerDisposer(dispose)
                 }
             }
         } finally {
@@ -1026,6 +1090,15 @@ internal class PythonSuspendFunction(
         val binding = Python3.import(PythonxAdapter.MODULE_NAME)
         val submit = binding.getAttr("_submit_suspend_awaitable")
         submit.invoke(awaitable, PyInt.from(pendingHandleRaw))
+    }
+
+    /** `_cancel_suspend_awaitable(handle)`: hands the loop the awaitable of [pendingHandleRaw] runs
+     * on a `Task.cancel` for it, if the invocation is still in flight; nothing otherwise. Caller
+     * holds the GIL. Never cancels on the calling thread. */
+    private fun cancelAwaitableOnLoop(pendingHandleRaw: Long) {
+        val binding = Python3.import(PythonxAdapter.MODULE_NAME)
+        val cancel = binding.getAttr("_cancel_suspend_awaitable")
+        cancel.invoke(PyInt.from(pendingHandleRaw))
     }
 
     private fun marshalSuspendArg(tag: String, value: Any?): PyObject {

@@ -2113,11 +2113,9 @@ internal object ArtifactScanner {
         val classifier = type.classifier as? KmClassifier.Class ?: return null
         val internal = classifier.name
         if (internal.startsWith(KOTLIN_FUNCTION_INTERNAL_PREFIX)) return null
-        if (type.arguments.isNotEmpty()) return null
         val binary = internal.replace('.', '$')
         val node = classpath.classNode(binary) ?: jdkClassNode(binary) ?: return null
         if (!node.access.hasFlag(Opcodes.ACC_INTERFACE) || !node.access.hasFlag(Opcodes.ACC_PUBLIC)) return null
-        if (node.signature?.startsWith("<") == true) return null
         val kmClass = when (val metadata = kotlinClassMetadataOf(node)) {
             null -> null
             is KotlinClassMetadata.Class -> metadata.kmClass.takeIf { it.isFunInterface } ?: return null
@@ -2125,6 +2123,19 @@ internal object ArtifactScanner {
         }
         val method = abstractMethodsOf(node, classpath)?.singleOrNull() ?: return null
         val (descriptors, returns) = splitMethodDescriptor(method.desc)
+        val qualified = internal.replace('/', '.')
+
+        // SPEC U-5c (#164 item 3): Kotlin `fun interface` whose single abstract method is `suspend`
+        // (including generic ones like `kotlinx.coroutines.flow.FlowCollector<in T>`).
+        if (kmClass != null) {
+            val declared = kmClass.functions.singleOrNull { it.name == method.name }
+            if (declared != null && declared.isSuspend) {
+                return suspendSamSlotOrNull(type, kmClass, declared, qualified, classpath)
+            }
+        }
+
+        if (type.arguments.isNotEmpty()) return null
+        if (node.signature?.startsWith("<") == true) return null
         if (returns != "V") return null
         // A Kotlin `fun interface` says each parameter's nullability; a Java one does not, so an object
         // parameter is taken as nullable there -- Java may pass `null`, and a non-null type would throw.
@@ -2138,7 +2149,6 @@ internal object ArtifactScanner {
         } else {
             descriptors.map { descriptor -> javaParameterTypeOf(descriptor, classpath) ?: return null }
         }
-        val qualified = internal.replace('/', '.')
         val arity = parameterTypes.size
         val functionType = "kotlin.Function$arity<" + (parameterTypes.map { it.second } + UNIT_TYPE_NAME).joinToString(", ") + ">"
         val star = "kotlin.Function$arity<" + List(arity + 1) { "*" }.joinToString(", ") + ">"
@@ -2156,6 +2166,85 @@ internal object ArtifactScanner {
                 arguments = parameterTypes.map { KotlinTypeModel(it.first) } + KotlinTypeModel(UNIT_TYPE_NAME),
             ),
         )
+    }
+
+    /**
+     * Builds a SAM slot for a Kotlin `fun interface` whose single abstract method is `suspend`
+     * (SPEC U-5c, #164 item 3), such as `kotlinx.coroutines.flow.FlowCollector<in T>`.
+     */
+    private fun suspendSamSlotOrNull(
+        type: KmType,
+        kmClass: kotlin.metadata.KmClass,
+        declared: kotlin.metadata.KmFunction,
+        qualified: String,
+        classpath: ArtifactClasspath,
+    ): FunctionSlot? {
+        val arity = declared.valueParameters.size
+        if (arity !in 0..MAX_SUSPEND_FUNCTION_ARITY) return null
+        if (type.arguments.size != kmClass.typeParameters.size) return null
+        val typeParamSubst = LinkedHashMap<Int, KmType>(kmClass.typeParameters.size)
+        val renderedInterfaceArgs = ArrayList<String>(kmClass.typeParameters.size)
+        for (i in kmClass.typeParameters.indices) {
+            val argType = type.arguments[i].type ?: nullableAnyType()
+            typeParamSubst[kmClass.typeParameters[i].id] = argType
+            renderedInterfaceArgs += renderKotlinSourceType(argType, classpath, depth = 0) ?: return null
+        }
+        val parameterTypes = declared.valueParameters.map { parameter ->
+            val resolved = substituteKmTypeParams(parameter.type, typeParamSubst) ?: return null
+            val name = kotlinClassifierNameOf(resolved) ?: return null
+            val source = renderKotlinSourceType(resolved, classpath, depth = 0) ?: return null
+            name to source
+        }
+        val resolvedReturn = substituteKmTypeParams(declared.returnType, typeParamSubst) ?: return null
+        val returnName = kotlinClassifierNameOf(resolvedReturn) ?: return null
+        val returnSource = renderKotlinSourceType(resolvedReturn, classpath, depth = 0) ?: return null
+
+        val interfaceType = if (renderedInterfaceArgs.isEmpty()) {
+            qualified
+        } else {
+            "$qualified<${renderedInterfaceArgs.joinToString(", ")}>"
+        }
+        val suspendFnType = "(suspend (${parameterTypes.joinToString(", ") { it.second }}) -> $returnSource)"
+        val fnCheck = "kotlin.Function${arity + 1}<" + List(arity + 2) { "*" }.joinToString(", ") + ">"
+        val names = (0 until arity).map { "p$it" }
+        val arrow = if (arity == 0) "" else names.joinToString(", ", postfix = " -> ")
+        val convert = "v -> if (v is $fnCheck) $interfaceType { $arrow(v as $suspendFnType).invoke(${names.joinToString(", ")}) } else v as $interfaceType"
+        val read = if (type.isNullable) "((%s)?.let { $convert })" else "((%s).let { $convert })"
+        return FunctionSlot(
+            typeName = qualified + SAM_SEPARATOR + "kotlin.coroutines.SuspendFunction" + arity +
+                "(" + parameterTypes.joinToString(",") { it.first } + ")" + FUNCTION_RETURNS + returnName,
+            boundary = BoundaryType("OBJECT", read, "(%s)"),
+            modelType = KotlinTypeModel(
+                "kotlin.coroutines.SuspendFunction$arity",
+                isNullable = type.isNullable,
+                arguments = parameterTypes.map { KotlinTypeModel(it.first) } + KotlinTypeModel(returnName),
+            ),
+        )
+    }
+
+    private fun substituteKmTypeParams(type: KmType, substitutions: Map<Int, KmType>): KmType? {
+        if (substitutions.isEmpty()) return type
+        val own = type.classifier
+        if (own is KmClassifier.TypeParameter) {
+            return substitutions[own.id]
+        }
+        if (type.arguments.isEmpty()) return type
+        val copy = KmType()
+        copy.classifier = own
+        copy.isNullable = type.isNullable
+        copy.isSuspend = type.isSuspend
+        for (projection in type.arguments) {
+            val arg = projection.type
+            copy.arguments += if (arg == null) {
+                projection
+            } else {
+                kotlin.metadata.KmTypeProjection(
+                    projection.variance,
+                    substituteKmTypeParams(arg, substitutions) ?: return null,
+                )
+            }
+        }
+        return copy
     }
 
     /** Separates a functional-interface slot's interface from the function type a callable fills it as

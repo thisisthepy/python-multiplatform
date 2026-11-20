@@ -30,6 +30,11 @@ data class TypeShape(
      * `suspend` function parameter whose Kotlin cast syntax is `(suspend (kotlin.Long) -> kotlin.Long)`).
      */
     val slotTypeName: String = rendered,
+    /**
+     * Optional read-expression template using `%s` for the argument expression (used by SPEC U-5c
+     * `suspend` SAM `fun interface` adapters).
+     */
+    val customReadTemplate: String? = null,
 )
 
 /** Which [Tag] a Kotlin type is marshalled as. Anything not one of the seven primitives crosses
@@ -56,6 +61,7 @@ fun tagFor(shape: TypeShape): Tag = when (shape.qualifiedName) {
  * `fun scale(by: Int)` needs it.
  */
 fun castExpression(shape: TypeShape, argsExpr: String): String {
+    shape.customReadTemplate?.let { return it.replace("%s", argsExpr) }
     val q = if (shape.nullable) "?" else ""
     return when (shape.qualifiedName) {
         "kotlin.Long" -> "$argsExpr as Long$q"

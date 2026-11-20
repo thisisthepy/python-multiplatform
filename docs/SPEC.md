@@ -413,6 +413,18 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   - **Out of scope here:** `python-multiplatform` keeps no `kotlinx.coroutines` dependency (uses stdlib
     `suspendCoroutine` only). Propagating Kotlin `Job` cancellation back to `Task.cancel()` belongs to the
     `kotlinx.coroutines`-aware await wrapper (#164 item 2).
+  - **In-flight cancellation (leader's task 2026-11-20, agent proposal, not owner-confirmed):** when
+    the `PendingCall` a `SuspendFunctionN` invocation runs under is cancelled (U-5b) while the Python
+    awaitable is still running, the adapter cancels the awaitable's asyncio task
+    (`_cancel_suspend_awaitable`, scheduled with `call_soon_threadsafe` from the call's `onCancelled`
+    listener), and the task's done callback resumes the Kotlin continuation with `CancellationException`
+    and releases the in-flight `PyObject` reference. Before this, the Kotlin coroutine stayed parked for
+    as long as the Python `await` lasted, since no `Job` reaches a `suspendCoroutine` suspension. The
+    listener only hands the cancel to the loop (`call_soon_threadsafe`); the task is cancelled on the
+    loop thread, after the callback that created it (one FIFO), so a cancel from any thread, including
+    one that lands before the task exists, is applied and never lost. The listener is unregistered
+    when the invocation completes (`PendingCall.onCancelled`'s disposer), so a collect holds one per
+    emission *in flight*, not one per emission it ever saw.
   `Status: implemented` on desktop, `PM/desktopTest/.../pythonx/SuspendFunctionParameterTest.kt`.
 - **U-5b** (`CoroutineContext` for exposed `suspend` calls, #164 item 1):
   An exposed `suspend` function may run with a caller-supplied `kotlin.coroutines.CoroutineContext` (such as
@@ -430,11 +442,15 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
       `UpcallTrampoline.attached` is active on the current thread (and not inside `withoutGIL`), and falls back
       to `EmptyCoroutineContext` when called from pure Kotlin with no interpreter, outside an upcall, or inside
       `withoutGIL`.
-    - `PendingCall.onCancelled(action: () -> Unit)` registers a cancellation listener invoked once when
-      `PendingCall.cancel()` transitions the call to cancelled (or inline if already cancelled). Calling
-      `onCancelled` after `isDone` is already `true` (and not cancelled) is a no-op. All four state
-      transitions (`complete`, `onCompleted`, `cancel`, `onCancelled`) are synchronised under `PlatformMutex`,
-      with listeners invoked outside the lock.
+    - `PendingCall.onCancelled(action: () -> Unit): () -> Unit` registers a cancellation listener invoked
+      once when `PendingCall.cancel()` transitions the call to cancelled (or inline if already cancelled),
+      and returns a disposer that unregisters that one registration (a no-op after `cancel()`, after
+      completion, when called twice, or for a registration that ran inline). Calling `onCancelled` after
+      `isDone` is already `true` (and not cancelled) is a no-op. All four state transitions (`complete`,
+      `onCompleted`, `cancel`, `onCancelled`) and the disposer are synchronised under `PlatformMutex`,
+      with listeners invoked outside the lock. A body that registers one listener per step disposes
+      each when its step is over (U-5a's in-flight invocations do), since the call keeps every live
+      registration until it completes or is cancelled.
       **Threading, GIL and exception contract for `onCancelled`:** the listener runs synchronously on
       whichever thread calls `PendingCall.cancel()` (for Python `Future.cancel()`, that is the asyncio loop
       thread inside `_pm_cancel` with the GIL held), so the listener **must be non-blocking** (for example
@@ -460,6 +476,47 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
       the result back to the target `asyncio` loop.
   `Status: implemented` on desktop, `PM/commonTest/.../upcall/PendingCallTest.kt`,
   `PM/desktopTest/.../upcall/CoroutineContextUpcallTest.kt`.
+- **U-5c** (`suspend` SAM `fun interface` parameters, #164 item 3, leader decision 2026-11-20):
+  A parameter whose declared type is a Kotlin `fun interface` (including generic `fun interface`s such as
+  `kotlinx.coroutines.flow.FlowCollector<in T>`) whose single abstract method is `suspend` (arity `0..5`)
+  binds as a SAM slot accepting both a Kotlin handle of that interface and a Python callable (`async def`
+  or callable returning an awaitable or plain value).
+  - **Table metadata:** KSP and the artifact walker record the slot's type name as
+    `<Interface>|kotlin.coroutines.SuspendFunctionN(Arg1,...)->Ret` (using the same `|` separator as #216
+    regular SAM slots). The interface's type parameters are substituted from the use site at any depth
+    of the method's signature (`take(batch: List<T>)` as `BatchSink<E>` reads as
+    `List<kotlin.Any?>` with `E` unbounded), in both generators. The abstract method must be declared
+    on the `fun interface` itself: one inherited from a super-interface (`fun interface Child : Parent`
+    with `Parent`'s `suspend fun`) is seen by neither generator (KSP reads the declaring class's own
+    declarations, the walker the declaring `KmClass`'s functions), and such a parameter stays a plain
+    handle slot.
+  - **Generated adapter:** The generated read expression checks `if (v is kotlin.Function(N+1)<*, ...>)`
+    and wraps `v` in a SAM lambda (`Interface<Args> { p0, ... -> (v as (suspend (...) -> Ret)).invoke(p0, ...) }`),
+    otherwise casts `v as Interface<Args>`.
+  - **Lifetime:** `PythonxAdapter` routes the `|`-separated `SuspendFunctionN` target through
+    `_make_suspend_function` (`PythonCallables.newSuspendFunction`), so the exact same lifetime rules as
+    U-5a apply (an active `PythonCallableScope` is required; in-flight invocations hold their own extra
+    `PyObject` reference).
+  - **Cancellation (U-5b applied to a collect; leader's task 2026-11-20, agent proposal, not
+    owner-confirmed):** an exposed `suspend fun` that collects a `kotlinx` flow forwards
+    `PendingCall`'s cancellation to its `Job` (`currentPendingCall()?.onCancelled { job.cancel() }`);
+    cancelling the `asyncio.Future` from Python then ends the collect with `CancellationException`
+    whether the Kotlin coroutine is parked inside `collect` or inside the adapter while the Python
+    collector is itself awaiting (U-5a's in-flight cancellation). The library takes no `kotlinx`
+    dependency for this: `kotlinx-coroutines-core` is a `desktopTest`-only dependency of
+    `python-multiplatform`, for the end-to-end test alone.
+  `Status: implemented` on desktop; written and compile-checked, run in CI (the first version of the
+  end-to-end test called a `pythonx.callable_scope()` that exists in no repository and never ran).
+  `GP/artifact/SamParameterBindingTest.kt`, `KSP/fixtures/app/.../GeneratedSuspendTest.kt`
+  (`aSuspendSamFunInterfaceParameterBindsAsASlotTakingALambdaOrAHandle`,
+  `aSuspendSamWhoseTypeParameterIsNestedInItsMethodSignatureIsSubstitutedAtAnyDepth`),
+  `PM/desktopTest/.../pythonx/FlowCollectUpcallTest.kt`
+  (`pythonAsyncCollectorCollectsAColdFlowAndStateFlowReadsAndWrites`,
+  `passingAPythonCollectorOutsideAScopeRefusesByName`,
+  `cancellingTheFutureWhileCollectWaitsForTheNextEmissionCancelsTheJobAndEndsTheCollect`,
+  `cancellingTheFutureWhileThePythonCollectorIsAwaitingCancelsTheCollectorTaskAndEndsTheCollect`,
+  `aCompletedSuspendedEmissionLeavesNoCancelListenerOnTheCollect`,
+  `cancellingTheFutureWhileADispatchedCollectorIsAwaitingEndsTheCollectOnTheDispatcherThread`).
 - **U-6** Upcalls work in a GraalVM native image (desktop). `Status: implemented` with manual
   verification, procedure and record in `docs/platforms/graal-native-image-verification.md`
   (`:sample:nativeCompile`, Liberica NIK), guarded automatically by `ReachabilityMetadataTest.kt` (C-2).
@@ -733,7 +790,11 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   and casts anything else, with no reflection. A JDK interface is read from the JDK the build runs
   on, any other from the consumer's jars. The stub shows the slot as a `Callable`. A functional
   interface whose method returns a value, or a generic one, is left as it was: a handle parameter
-  (Compose's `Alignment` is one). `Status: implemented` on desktop, `GP/artifact/SamParameterBindingTest.kt`,
+  (Compose's `Alignment` is one). The artifact walker is the one producer of this slot: the KSP
+  processor renders a non-`suspend` `fun interface` parameter as the bare interface, a handle-only
+  slot (observed 2026-11-20, CI run 44690216556 on #497; the control in
+  `KSP/fixtures/app/.../GeneratedSuspendTest.kt` asserts the bare name). Only the `suspend` case of
+  U-5c is produced by both generators. `Status: implemented` on desktop (walker), `GP/artifact/SamParameterBindingTest.kt`,
   `python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactSamParameterTest.kt`.
 - **B-5a** The ambient pythonx callable scope (`PythonCallables.withScope`) is per thread (#301). A
   Python callable crossing into Kotlin on a thread with no open scope gets the "no pythonx callable
