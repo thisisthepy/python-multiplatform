@@ -6,6 +6,7 @@ import com.google.devtools.ksp.symbol.KSClassDeclaration
 import com.google.devtools.ksp.symbol.KSFunctionDeclaration
 import com.google.devtools.ksp.symbol.KSType
 import com.google.devtools.ksp.symbol.KSTypeAlias
+import com.google.devtools.ksp.symbol.KSTypeParameter
 import com.google.devtools.ksp.symbol.KSTypeReference
 import com.google.devtools.ksp.symbol.Modifier
 import com.google.devtools.ksp.symbol.Variance
@@ -19,23 +20,38 @@ private const val PY_OBJECT_QUALIFIED_NAME = "python.multiplatform.ffi.PyObject"
  * SPEC U-5a, #164 item 7), a `suspend` function type is rendered as a `suspend (...) -> ...` cast
  * target and carries `kotlin.coroutines.SuspendFunctionN(Arg1,...)->Ret` as its slot metadata name.
  */
-fun KSType.toShape(allowTopLevelSuspendFunction: Boolean = false): TypeShape {
+fun KSType.toShape(
+    allowTopLevelSuspendFunction: Boolean = false,
+    typeParameters: Map<String, KSType?> = emptyMap(),
+): TypeShape {
     val expanded = expandTypeAlias(this)
+    val ownParam = expanded.declaration as? KSTypeParameter
+    if (ownParam != null) {
+        val name = ownParam.name.asString()
+        if (name in typeParameters) {
+            val bound = typeParameters[name]
+            if (bound == null) {
+                return TypeShape("kotlin.Any", nullable = true, rendered = "kotlin.Any")
+            }
+            val boundShape = bound.toShape(allowTopLevelSuspendFunction = false)
+            return boundShape.copy(nullable = boundShape.nullable || isMarkedNullable || expanded.isMarkedNullable)
+        }
+    }
     if (allowTopLevelSuspendFunction && expanded.isSuspendFunctionType) {
         val arity = expanded.arguments.size - 1
         val argTypes = expanded.arguments.dropLast(1).mapNotNull { it.type?.resolve() }
         val retType = expanded.arguments.lastOrNull()?.type?.resolve()
         if (arity in 0..MAX_SUSPEND_FUNCTION_ARITY && argTypes.size == arity && retType != null) {
-            val argNames = argTypes.map { expandTypeAlias(it).declaration.qualifiedName?.asString() ?: "kotlin.Any" }
-            val retName = expandTypeAlias(retType).declaration.qualifiedName?.asString() ?: "kotlin.Any"
+            val argShapes = argTypes.map { it.toShape(allowTopLevelSuspendFunction = false, typeParameters = typeParameters) }
+            val retShape = retType.toShape(allowTopLevelSuspendFunction = false, typeParameters = typeParameters)
+            val argNames = argShapes.map { it.qualifiedName }
+            val retName = retShape.qualifiedName
             val slotName = "kotlin.coroutines.SuspendFunction$arity(" +
                 argNames.joinToString(",") + ")->" + retName
-            val renderedArgs = argTypes.joinToString(", ") { t ->
-                val inner = t.declaration.qualifiedName?.asString() ?: "kotlin.Any"
-                t.renderWithArguments(inner) + if (t.isMarkedNullable) "?" else ""
+            val renderedArgs = argShapes.joinToString(", ") { s ->
+                s.rendered + if (s.nullable) "?" else ""
             }
-            val retInner = retType.declaration.qualifiedName?.asString() ?: "kotlin.Any"
-            val renderedRet = retType.renderWithArguments(retInner) + if (retType.isMarkedNullable) "?" else ""
+            val renderedRet = retShape.rendered + if (retShape.nullable) "?" else ""
             val castType = "(suspend ($renderedArgs) -> $renderedRet)"
             return TypeShape(
                 qualifiedName = castType,
@@ -47,12 +63,36 @@ fun KSType.toShape(allowTopLevelSuspendFunction: Boolean = false): TypeShape {
     }
     val qualifiedName = declaration.qualifiedName?.asString() ?: "kotlin.Any"
     if (allowTopLevelSuspendFunction) {
-        suspendSamShapeOrNull(expanded, isMarkedNullable || expanded.isMarkedNullable)?.let { return it }
+        suspendSamShapeOrNull(expanded, isMarkedNullable || expanded.isMarkedNullable, typeParameters)?.let { return it }
     }
-    return TypeShape(qualifiedName, isMarkedNullable, rendered = renderWithArguments(qualifiedName))
+    return TypeShape(qualifiedName, isMarkedNullable, rendered = renderWithArguments(qualifiedName, typeParameters))
 }
 
-private fun suspendSamShapeOrNull(expanded: KSType, nullable: Boolean): TypeShape? {
+internal fun KSType.mentionsTypeParameter(): Boolean {
+    val expanded = expandTypeAlias(this)
+    if (expanded.declaration is KSTypeParameter) return true
+    return expanded.arguments.any { arg ->
+        arg.type?.resolve()?.mentionsTypeParameter() == true
+    }
+}
+
+/**
+ * A `fun interface` whose single abstract method is `suspend` (SPEC U-5c, #164 item 3), as a slot
+ * that takes both a Kotlin handle of the interface and a Python callable: the read expression
+ * checks `v is kotlin.Function(N+1)<*, ...>` (what a `suspend (...) -> R` value is at run time) and
+ * wraps it in a SAM lambda, otherwise casts to the interface.
+ *
+ * [typeParameters] is the enclosing declaration's substitution map (SPEC U-11, #492): a generic
+ * member's `FlowCollector<T>` renders `T` through it exactly as every other parameter of that
+ * member does, so the cast target and the SAM lambda's parameter agree with the receiver cast.
+ * The interface's own type parameters are substituted from the use site's arguments first; a
+ * star projection there reads as `kotlin.Any?`.
+ */
+private fun suspendSamShapeOrNull(
+    expanded: KSType,
+    nullable: Boolean,
+    typeParameters: Map<String, KSType?>,
+): TypeShape? {
     val cls = expanded.declaration as? KSClassDeclaration ?: return null
     if (cls.classKind != ClassKind.INTERFACE || Modifier.FUN !in cls.modifiers) return null
     val abstractMethods = cls.declarations.filterIsInstance<KSFunctionDeclaration>()
@@ -63,16 +103,21 @@ private fun suspendSamShapeOrNull(expanded: KSType, nullable: Boolean): TypeShap
     val arity = method.parameters.size
     if (arity !in 0..MAX_SUSPEND_FUNCTION_ARITY) return null
     val qualified = cls.qualifiedName?.asString() ?: return null
-    val interfaceType = expanded.renderWithArguments(qualified)
-    val typeArgMap = cls.typeParameters.mapIndexed { idx, tp ->
+    val interfaceType = expanded.renderWithArguments(qualified, typeParameters)
+    val typeArgMap: Map<String, KSType?> = cls.typeParameters.mapIndexed { idx, tp ->
         tp.name.asString() to expanded.arguments.getOrNull(idx)?.type?.resolve()
     }.toMap()
     fun resolveSamType(ref: KSTypeReference?): Pair<String, String> {
         val resolved = ref?.resolve() ?: return "kotlin.Unit" to "kotlin.Unit"
-        val substituted = typeArgMap[resolved.declaration.simpleName.asString()] ?: resolved
-        val qName = expandTypeAlias(substituted).declaration.qualifiedName?.asString() ?: "kotlin.Any"
-        val rendered = substituted.renderWithArguments(qName) + if (substituted.isMarkedNullable) "?" else ""
-        return qName to rendered
+        val own = (expandTypeAlias(resolved).declaration as? KSTypeParameter)?.name?.asString()
+        val shape = if (own != null && own in typeArgMap) {
+            val bound = typeArgMap[own] ?: return "kotlin.Any" to "kotlin.Any?"
+            bound.toShape(allowTopLevelSuspendFunction = false, typeParameters = typeParameters)
+        } else {
+            resolved.toShape(allowTopLevelSuspendFunction = false, typeParameters = typeParameters)
+        }
+        val isNullable = shape.nullable || resolved.isMarkedNullable
+        return shape.qualifiedName to shape.rendered + if (isNullable) "?" else ""
     }
     val params = method.parameters.map { resolveSamType(it.type) }
     val (retName, retRendered) = resolveSamType(method.returnType)
@@ -111,20 +156,29 @@ private tailrec fun expandTypeAlias(type: KSType): KSType {
  * [BindingPolicy] rejects every declaration that can produce one before this is reached, and the
  * fallbacks to `*` here are the belt to that pair of braces.
  */
-private fun KSType.renderWithArguments(qualifiedName: String): String {
+private fun KSType.renderWithArguments(
+    qualifiedName: String,
+    typeParameters: Map<String, KSType?> = emptyMap(),
+): String {
     if (arguments.isEmpty()) return qualifiedName
     val renderedArguments = arguments.joinToString(", ") { argument ->
         if (argument.variance == Variance.STAR) return@joinToString "*"
         val argumentType = argument.type?.resolve() ?: return@joinToString "*"
+        if (argumentType.declaration is KSTypeParameter) {
+            val shape = argumentType.toShape(allowTopLevelSuspendFunction = false, typeParameters = typeParameters)
+            return@joinToString shape.rendered + if (shape.nullable) "?" else ""
+        }
         if (argumentType.declaration !is KSClassDeclaration) return@joinToString "*"
         val inner = argumentType.declaration.qualifiedName?.asString() ?: return@joinToString "*"
-        argumentType.renderWithArguments(inner) + if (argumentType.isMarkedNullable) "?" else ""
+        argumentType.renderWithArguments(inner, typeParameters) + if (argumentType.isMarkedNullable) "?" else ""
     }
     return "$qualifiedName<$renderedArguments>"
 }
 
-fun KSTypeReference.toShape(allowTopLevelSuspendFunction: Boolean = false): TypeShape =
-    resolve().toShape(allowTopLevelSuspendFunction)
+fun KSTypeReference.toShape(
+    allowTopLevelSuspendFunction: Boolean = false,
+    typeParameters: Map<String, KSType?> = emptyMap(),
+): TypeShape = resolve().toShape(allowTopLevelSuspendFunction, typeParameters)
 
 /**
  * Whether [type] can be named in generated source as a classifier Python can actually reach a

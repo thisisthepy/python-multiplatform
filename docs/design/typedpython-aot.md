@@ -392,9 +392,9 @@ review 2026-11-20, not owner-confirmed).
 - **Library mode (`TPA_THREADS`) restriction before Tier T.** Under `TPA_THREADS`, a concurrent writer
   to a mutable reference field could release the old object between another thread's load and `retain`
   (the same race `tpa_int_list` solves with a per-list lock). Until Tier T adds shared-object locking,
-  an `aot-lib` export whose parameter or return type is a class with any mutable field (not
-  immutable-after-init) is a compile error (`aot/library-mutable-class`). Immutable-after-init classes
-  are safe to share across threads with atomic `rc` and are allowed.
+  C-ABI class handles are not yet exported in PR-O1, and an `aot-lib` export whose parameter or return
+  type is a class that is not transitively immutable-after-init (checking every class reachable from
+  its fields) is a compile error (`aot/library-mutable-class`).
 - **Verification plan (PR-O1 tests).**
   - Differential tests against CPython 3.15t for scalar/list/class/`C | None` fields, methods, `is None`
     / `is`, and `benchmarks/typedpython/py/binary_trees.py`.

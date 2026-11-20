@@ -151,6 +151,7 @@ class CoroutineContextUpcallTest {
                 Python3.exec(
                     """
                     import asyncio
+                    import inspect
                     import python_multiplatform as _pm
 
                     _stress_loop = asyncio.new_event_loop()
@@ -161,7 +162,10 @@ class CoroutineContextUpcallTest {
                         with _pm.use_coroutine_context($ctxHandle):
                             for _ in range(2000):
                                 r = _pm_bound()
-                                val = await asyncio.wait_for(r, 1.0)
+                                # The worker can finish before start() returns; the
+                                # call then completes inline and hands back the value
+                                # itself (SPEC U-5), not a Future.
+                                val = await asyncio.wait_for(r, 1.0) if inspect.isawaitable(r) else r
                                 assert val.startswith("kotlin-stress-worker|stress-job"), val
                                 _stress_count += 1
 
@@ -241,21 +245,30 @@ class CoroutineContextUpcallTest {
     }
 
     @Test
-    fun zeroArgStartInsideWithoutGilDoesNotTouchPythonAndGetsEmptyContext() =
+    fun zeroArgStartInsideWithoutGilInAnUpcallGetsEmptyContextWhilePlainStartSeesAmbient() =
         PythonTestFixture.withInterpreter {
-            val element = TestJobElement("process-wide-job")
-            val ctxRef = HandleTable.register(element)
+            assertTrue(bindUpcallOrNull("ctxtest.readInsideAndOutsideWithoutGil"))
+            val ctxRef = HandleTable.register(TestJobElement("process-wide-job"))
             val ctxHandle = ctxRef.raw
             try {
-                Python3.exec("import python_multiplatform as _pm; _pm.set_coroutine_context($ctxHandle)")
-                val seenLabel = python.multiplatform.ffi.withoutGIL {
-                    val call = PendingCall.start { coroutineContext[TestJobElement]?.label ?: "<empty>" }
-                    assertTrue(call.isDone)
-                    call.value as String
-                }
-                assertEquals("<empty>", seenLabel)
+                // The nested start runs inside an upcall (thread attached by UpcallTrampoline.attached),
+                // so PyEval_SaveThread in withoutGIL is legal. The old depth-based guard would still
+                // read the Python context here (depth > 0) and call into CPython without a thread state.
+                Python3.exec(
+                    """
+                    import python_multiplatform as _pm
+                    _pm.set_coroutine_context($ctxHandle)
+                    try:
+                        _seen_both = _pm_bound()
+                    finally:
+                        _pm.set_coroutine_context(None)
+                    """.trimIndent(),
+                )
+                assertEquals(
+                    "outside=process-wide-job;inside=<empty>",
+                    PythonTestFixture.eval("_seen_both").toString(),
+                )
             } finally {
-                Python3.exec("_pm.set_coroutine_context(None)")
                 HandleTable.release(ctxRef)
             }
         }
@@ -305,5 +318,19 @@ private object CoroutineContextTestFragment : FunctionTableFragment {
             returnType = TypeTag.STRING,
             isSuspend = true,
         ) { PendingCall.start { dispatchAndReportThread() } },
+        ExposedCallable(
+            name = "ctxtest.readInsideAndOutsideWithoutGil",
+            arity = 0,
+            paramTypes = emptyList(),
+            returnType = TypeTag.STRING,
+        ) {
+            // Synchronous entry: runs on the upcall thread with inUpcall == true.
+            val outside = PendingCall.start { coroutineContext[TestJobElement]?.label ?: "<empty>" }
+            val inside = python.multiplatform.ffi.withoutGIL {
+                PendingCall.start { coroutineContext[TestJobElement]?.label ?: "<empty>" }
+            }
+            check(outside.isDone && inside.isDone)
+            "outside=${outside.value};inside=${inside.value}"
+        },
     )
 }

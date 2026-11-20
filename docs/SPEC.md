@@ -306,8 +306,24 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   (androidNative) and `python-multiplatform-ksp/fixtures/android/.../GeneratedAndroidTableTest.kt` run outside desktop.
 - **U-4** Declaration kinds: objects, companions, interfaces (not constructible), enum entries as
   statics, abstract classes (no constructor), nested classes. Not exposed: annotation classes,
-  generic declarations, data-class synthetics. `Status: implemented` on desktop,
+  generic constructors and generic top-level/extension declarations with bounded or reified type
+  parameters, data-class synthetics. `Status: implemented` on desktop,
   `GeneratedDeclarationKindsTest.kt`.
+  - **U-4a** **Generic class members** (#164, item 3; leader decision 2026-11-20): a public generic
+    `class` or `interface` whose type parameters are all non-reified and each has either no upper
+    bound (`Any?`) or a single bindable, non-recursive upper bound (`T : Bound`, such as `T : Number`
+    or `T : Any`) exposes its public member properties (getters and setters) and public member
+    functions across KSP, the jar walker (B-1), and the klib walker (B-2). Each class type parameter
+    is substituted with its upper bound (or `kotlin.Any?` when unbounded) in member signatures.
+    Read-only property access casts the receiver with star projections (`Owner<*, ...>`); write
+    positions (`var` setters and member functions on generic classes) cast the receiver to
+    `Owner<BoundOrAny, ...>` (covered by file-level `@Suppress("UNCHECKED_CAST")`). When a type
+    parameter has an explicit upper bound `Bound`, the value slot is checked against `Bound`; when
+    unbounded (`kotlin.Any?`), Python's dynamic typing and Kotlin type erasure mean passing a value
+    of the wrong runtime type may surface as `ClassCastException` at the Kotlin consumption site.
+    Still declined: generic constructors, `reified` type parameters, F-bounded or mutually recursive
+    upper bounds (`T : Comparable<T>`), multiple upper bounds, and unbindable upper bounds.
+    `Status: draft`.
   **A companion object is a value** (#322): the public companion object of a public class is the value
   `Owner.Companion` (`Owner.<CompanionName>` for a named companion), read as an attribute of the owner's
   proxy class or of its module. When the companion lists the owner as a direct supertype in its Kotlin
@@ -606,15 +622,19 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   synthetic `$composer`/`$changed`/`$default` slots included, through a generated thunk that loads the
   object's `INSTANCE` and calls the member with `INVOKEVIRTUAL` (the name and descriptor are copied from
   the walked method, never looked up); its return value crosses as any other. `Status: implemented`, `GP/artifact/ObjectMemberBindingTest.kt`.
-  The public, non-suspend **member functions** of a Kotlin-public `class`, `interface` or `enum class`
+  The public **member functions** (including `suspend` members, #164 item 3) of a Kotlin-public
+  `class`, `interface` or `enum class`
   that crosses as an object handle bind as `METHOD` entries `Owner.name` (#215), the shape KSP's
   members already have: `args[0]` is the receiver, uncounted in `arity`, and the generated call is
-  `(args[0] as Owner).name(...)`. The binding layer serves them as methods of the receiver's proxy
+  `(args[0] as Owner).name(...)` (wrapped in `PendingCall.start { ... }` with `isSuspend = true` for
+  `suspend` members, matching U-5, across both the jar walker and the klib walker). The binding layer serves them as methods of the receiver's proxy
   (supertypes included), ahead of an extension of the same name, because Kotlin resolves a member
   first, and never as a module attribute; they take no part in a constructor's name check. Overloads
   within one class are told apart as functions are (`Owner.add__Int`). Declined, each with its reason:
-  a `suspend` member, a `@Composable` member, a member of a generic class (not yet), and a member that
-  shares its name with a property of the class (the property is kept). `Any`'s members, statics and
+  a `@Composable` member, a member of a generic class whose type parameter has
+  an unsupported bound (U-4a), and a member that
+  shares its name with a property of the class (the property is kept). A `suspend` member of a type annotated
+  `@kotlin.coroutines.RestrictsSuspension`, or of one with such a supertype, is declined too, in every walker (it is callable only inside its own scope, so `PendingCall.start { receiver.member() }` cannot compile). `Any`'s members, statics and
   synthetic methods are not bound. A member's default arguments are not omittable yet: Python passes
   every argument. A member's stub is a method of the receiver's stub class whose docstring carries
   `Kotlin member: <key>` (or a comment with that marker where the class has no stub). Klibs bind no
@@ -1485,6 +1505,19 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     constants (`floor`, `ceil`, `trunc`, `pow`, `log2`, `log10`, `asin`, `acos`, `atan`, `sinh`, `cosh`,
     `tanh`, `isnan`, `isinf`, `isfinite`, `copysign`, `fmod`; `pi`, `e`, `inf`, `nan`, `tau`), and the
     `time` module (`perf_counter`, `monotonic`, `time`, `sleep`).
+  - **Tier O PR-O1 (#486)** (leader review 2026-11-20, not owner-confirmed): adds headerless compiled
+    classes (`struct tpa_cls_<C>` with `tpa_rc_t rc` and typed fields), `C | None`, `is` / `is not`,
+    `__init__` and instance methods, tail-loop release for self-referential fields, a single
+    whole-program immutability analysis shared by the cycle-freedom proof (`aot/cycle-possible`),
+    reference-counting elision rules, and library-mode safety (`aot/library-mutable-class`), compiling
+    `benchmarks/typedpython/py/binary_trees.py` with 0 `aot-check` findings.
+  - **Tier O PR-O2a (#493)** (leader review 2026-11-20, not owner-confirmed): adds virtual objects /
+    scalar replacement (`aot/alloc.py`) promoting non-escaping single-assignment class locals with
+    simple `__init__` and no `__del__` to per-field C locals (zero heap allocation, owned fields
+    released at `tp_cleanup:`), falling back to `heap-rc` with an explicit reason for every escape
+    (return, call, non-inlined method call, identity `is`, alias, reassignment/branch merge, or
+    temporary), plus `typedpython.aot.explain_alloc(...)` and `python -m typedpython aot-build
+    --explain-alloc`.
 
 ---
 

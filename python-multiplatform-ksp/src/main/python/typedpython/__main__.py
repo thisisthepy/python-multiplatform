@@ -65,6 +65,8 @@ def main(argv: list[str]) -> int:
     aot_build.add_argument("-o", "--output", type=Path, default=None, help="the executable to write")
     aot_build.add_argument("--explain-lists", action="store_true",
                            help="build nothing; print the groups of list[int] names, their class and why")
+    aot_build.add_argument("--explain-alloc", action="store_true",
+                           help="build nothing; print every class allocation site, its strategy (virtual/heap-rc) and why")
     aot_build.add_argument("--emit-c", type=Path, default=None, help="also keep the generated C here")
     aot_build.add_argument("--strict-int", action="store_true",
                            help="an int operation not proved to stay inside 64 bits is a compile error (no big integers)")
@@ -83,13 +85,16 @@ def main(argv: list[str]) -> int:
                          help="an int operation not proved to stay inside 64 bits is a compile error (no big integers)")
     args = parser.parse_args(argv)
 
-    if args.command in ("aot-lib", "aot-build") and args.output is None and not args.explain_lists:
+    if args.command in ("aot-lib", "aot-build") and args.output is None and not args.explain_lists \
+            and not getattr(args, "explain_alloc", False):
         parser.error("the following arguments are required: -o/--output")
     if args.command == "aot-lib" and args.explain_lists:
         return _aot_explain(args.module, [n.strip() for n in args.export.split(",") if n.strip()], args.prefix,
                             args.strict_int)
     if args.command == "aot-build" and args.explain_lists:
         return _aot_explain(args.entry, None, None, args.strict_int)
+    if args.command == "aot-build" and args.explain_alloc:
+        return _aot_explain_alloc(args.entry, args.strict_int)
     if args.command == "aot-lib":
         return _aot_lib(args.module, [n.strip() for n in args.export.split(",") if n.strip()], args.prefix,
                         args.output, args.emit_c, args.strict_int)
@@ -145,6 +150,27 @@ def _aot_explain(module: Path, exports: list[str] | None, prefix: str | None, st
         return EXIT_FAILURE
     try:
         text = aot.explain_lists(module, exports=exports, prefix=prefix, strict_int=strict_int)
+    except aot.AotError as e:
+        for f in e.findings:
+            print(aot.format_finding(f), file=sys.stderr)
+        return EXIT_ERRORS
+    except PyreflyError as e:
+        print(f"typedpython: {e}", file=sys.stderr)
+        return EXIT_FAILURE
+    sys.stdout.write(text)
+    return EXIT_CLEAN
+
+
+def _aot_explain_alloc(entry: Path, strict_int: bool) -> int:
+    """`--explain-alloc` (#493): every class allocation site on standard output, nothing built
+    (exit 0; 1 with findings on standard error; 2 when it could not run)."""
+    from typedpython import aot
+
+    if not entry.is_file():
+        print(f"typedpython: {entry} is not a file", file=sys.stderr)
+        return EXIT_FAILURE
+    try:
+        text = aot.explain_alloc(entry, strict_int=strict_int)
     except aot.AotError as e:
         for f in e.findings:
             print(aot.format_finding(f), file=sys.stderr)
