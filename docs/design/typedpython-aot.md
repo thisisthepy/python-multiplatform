@@ -368,8 +368,9 @@ review 2026-11-20, not owner-confirmed).
   2. *Immutable-after-init*: `C` (and every class reachable in its SCC) is proved immutable-after-init by
      the shared analysis above (so every reference points strictly to an already-constructed object,
      forming a causal DAG, as in `binary_trees.py`'s `Node`).
-  Any class that fails both conditions is a compile error (`aot/cycle-possible`, naming the class and
-  the mutating field store outside `__init__`) until PR-O2 adds the small cycle collector.
+  Any class that fails both conditions was a compile error (`aot/cycle-possible`, naming the class and
+  the mutating field store outside `__init__`) until PR-O2c added the small cycle collector (6.3.2 item
+  3, "Step 3 as implemented"): such a class now compiles, tracked by the collector.
 - **Reference counting and elision rules.** Ownership follows the same convention as native lists and
   `tpa_int`: parameters are **borrowed**; locals, return values and struct fields are **owned**.
   Elision is permitted only under the following statically proved conditions, and every other site emits
@@ -489,12 +490,56 @@ matches CPython.
      borrowed reference.
    - *`__del__`*: permitted only on acyclic classes (always exact RC, no virtual/region/elision). A
      `__del__` on a cyclic-capable class is a compile error (`aot/cycle-del`).
+   - *Step 3 as implemented (PR-O2c; agent proposal, not owner-confirmed)*: the cyclic-capable classes
+     are every class of a strongly connected component of the type graph (edges `C -> D` for a field of
+     type `D` or `D | None`) that has a cycle and at least one member not immutable-after-init: the
+     whole component, not only its mutable members, because trial deletion subtracts only the references
+     between tracked objects, and an untracked class on a cycle would hold a reference that is never
+     subtracted (a root), so the cycle would never be found. An untracked class cannot be on a cycle (its
+     component has none, or is immutable-after-init throughout); its reference to a tracked object is a
+     root while it lives, and it is freed by its count. The header is `tpa_gc_head` (`runtime/tp_aot_gc.h`:
+     `gc_prev`, `gc_next`, `gc_refs`, and `gc_type`, the class's traverse and clear functions, one word the
+     list above did not have), the first member of `struct tpa_cls_<C>` before `rc`, so the collector reads
+     the count through the common prefix `tpa_gc_object`. A region struct `tpa_reg_<F>__<C>` and a virtual
+     object of a cyclic-capable class are unchanged: a region pointer is never counted and never reaches
+     the heap (R2), so a cycle inside a region is freed with the region, and a region object's or virtual
+     object's heap fields are counted (PR-O2a/b), so they are roots. The collector is CPython's one
+     generation of trial deletion over the list of every tracked object alive: `gc_refs = rc` (an atomic
+     load under `TPA_THREADS`); for every tracked object, `traverse` visits its fields of cyclic-capable
+     classes and decrements each referent's `gc_refs`; an object left with `gc_refs > 0` is a root
+     (something outside the tracked set holds it) and the objects it reaches are moved back to the live
+     list; the rest are garbage: each is held by one extra count while its `clear` releases every owned
+     field (tracked objects, acyclic objects, lists, big ints; the slot is emptied before the release) and is
+     freed when its count reaches zero (at once, or when the garbage that still held it is cleared). No
+     user code runs during a collection (no `__del__` in AOT), so it cannot re-enter; a flag guards it
+     anyway. The safepoint is `tpa_cls_<C>_new` of a cyclic-capable class, before `calloc`: every
+     constructor argument is then an owned temporary, an owned local, a borrowed parameter whose caller
+     holds it, or a field of a live object, and `__init__` has not started; `__init__` allocating another
+     tracked object sees the half-initialised object as a root (held by `_new`'s own local, fields NULL or
+     owned). The elision rules (3) and (4) are off for every field of a cyclic-capable class
+     (`ClassAnalysis.field_elidable`), and `aot/cycle-del` is reported beside the front end's refusal of
+     `__del__`. Trigger: tracked allocations net of tracked frees since the last collection reach
+     `max(TPA_GC_THRESHOLD, live tracked objects after the last collection)` (2000 by default, CPython's
+     first-generation threshold), which bounds the memory held by garbage to one more live set and keeps
+     the amortised cost per allocation constant; `-DTPA_GC_STRESS` collects at every safepoint and
+     `-DTPA_GC_STATS` prints the counts at exit (tests only). One more collection runs after `__main__`
+     returns, when every frame has released its locals and only cycles can remain (CPython's shutdown
+     collection; it keeps LeakSanitizer quiet). Under `TPA_THREADS` the collector's state is thread-local:
+     a tracked object is touched only by the thread that created it (`aot/library-mutable-class` keeps
+     mutable classes, transitively, out of the library boundary; AOT has no mutable globals), so one
+     thread's collection never sees another thread's objects. Tier T's shared objects (section 7) must add
+     the shared-object locking before a tracked object may be shared; this collector is not a
+     stop-the-world collector. The library output never emitted class structs (before this step), so the
+     collector is linked by executables only today; the runtime compiles in both builds.
 4. **Diagnostics (`--explain-alloc` / `aot-check`).**
    - Every allocation site's chosen strategy (`virtual`, `region`, `heap-rc`, `heap-gc`) and the
      concrete reason for any fallback from `virtual` or `region` to `heap` (e.g. non-inlined method,
      R1 return escape, R2 outer-region/heap store, R4 heap-owned field, `__del__`) are reported via
      `python -m typedpython aot-build ENTRY.py --explain-alloc` (and surfaced in `aot-check`), so
      measurement runs can verify why an allocation did or did not stay off the heap.
+   - PR-O2c: a heap site of a cyclic-capable class is reported as `heap-gc` with, after the virtual and
+     region reasons, `[gc: <why the class may form a cycle>]` (the mutating store outside `__init__`, or
+     the `self` escape in `__init__`, as `aot/cycle-possible` named it).
 
 ### 6.4 Exceptions
 

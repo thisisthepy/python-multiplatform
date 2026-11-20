@@ -11,8 +11,9 @@ Covers:
   - Acyclicity proof and immutability analysis:
       - type-graph acyclic mutable class accepted;
       - immutable-after-init self-referential Node accepted;
-      - mutable self-referential class rejected with aot/cycle-possible;
-      - __init__ self escape rejected with aot/cycle-possible;
+      - a mutable self-referential class, an `__init__` `self` escape, an alias store in `__init__` and a
+        mutation of another instance in `__init__` were rejected with aot/cycle-possible until PR-O2c; since
+        the cycle collector (test_aot_tier_o2c.py) they compile as `heap-gc` and run as CPython does;
       - aot-lib export of mutable class rejected with aot/library-mutable-class.
 """
 from __future__ import annotations
@@ -233,8 +234,22 @@ def test_adversarial_deep_chain_deallocation(tmp_path: Path):
     assert aot_res.stdout == cp.stdout
 
 
-def test_cycle_possible_mutable_self_ref_rejected(tmp_path: Path):
-    p = _write(tmp_path, """
+def _tracked(tmp_path: Path, src: str, cls: str, expect_stdout: str) -> None:
+    """PR-O2c: a class PR-O1 refused with `aot/cycle-possible` compiles, tracked by the cycle collector
+    (its struct carries `tpa_gc_head gc;`), and runs as CPython does."""
+    p = _write(tmp_path, src)
+    c_text = aot.generate(p)
+    assert '#include "tp_aot_gc.h"' in c_text
+    assert f"struct tpa_cls_{cls} {{\n    tpa_gc_head gc;\n    tpa_rc_t rc;\n" in c_text
+    cp, aot_res = _run_both(tmp_path, src)
+    assert cp.returncode == 0
+    assert aot_res.returncode == 0, aot_res.stderr
+    assert aot_res.stdout == cp.stdout == expect_stdout
+
+
+def test_mutable_self_ref_class_is_tracked_by_the_collector(tmp_path: Path):
+    """Was `test_cycle_possible_mutable_self_ref_rejected` (aot/cycle-possible) until PR-O2c."""
+    _tracked(tmp_path, """
     class MutNode:
         __slots__ = ("nxt",)
         nxt: "MutNode | None"
@@ -251,18 +266,20 @@ def test_cycle_possible_mutable_self_ref_rejected(tmp_path: Path):
         a: MutNode = MutNode(None)
         b: MutNode = MutNode(None)
         link(a, b)
+        link(b, a)
+        c: MutNode | None = a.nxt
+        print(c is b, c is not None)
 
 
     if __name__ == "__main__":
         main()
-    """)
-    with pytest.raises(aot.AotError) as exc:
-        aot.generate(p)
-    assert any(f.rule == "aot/cycle-possible" and f.name == "MutNode" for f in exc.value.findings)
+    """, "MutNode", "True True\n")
 
 
-def test_cycle_possible_init_self_escape_rejected(tmp_path: Path):
-    p = _write(tmp_path, """
+def test_init_self_escape_class_is_tracked_by_the_collector(tmp_path: Path):
+    """Was `test_cycle_possible_init_self_escape_rejected` until PR-O2c: `self.nxt = self` in `__init__` makes
+    the class not immutable-after-init; the one-object cycle is the collector's."""
+    _tracked(tmp_path, """
     class EscNode:
         __slots__ = ("nxt",)
         nxt: "EscNode | None"
@@ -273,21 +290,20 @@ def test_cycle_possible_init_self_escape_rejected(tmp_path: Path):
 
     def main() -> None:
         a: EscNode = EscNode()
-        print(a is a)
+        b: EscNode | None = a.nxt
+        print(a is a, b is a)
 
 
     if __name__ == "__main__":
         main()
-    """)
-    with pytest.raises(aot.AotError) as exc:
-        aot.generate(p)
-    assert any(f.rule == "aot/cycle-possible" and f.name == "EscNode" for f in exc.value.findings)
+    """, "EscNode", "True True\n")
 
 
-def test_cycle_possible_init_self_alias_store_conservatively_rejected(tmp_path: Path):
-    """Assigning through `alias = self; alias.nxt = ...` inside `__init__` is conservatively
-    classified as a mutating store (only direct `self.<field> = ...` is exempted)."""
-    p = _write(tmp_path, """
+def test_init_self_alias_store_class_is_tracked_by_the_collector(tmp_path: Path):
+    """Was `test_cycle_possible_init_self_alias_store_conservatively_rejected` until PR-O2c. Assigning through
+    `alias = self; alias.nxt = ...` inside `__init__` is still conservatively a mutating store (only direct
+    `self.<field> = ...` is exempted), so the class is cyclic-capable and tracked."""
+    _tracked(tmp_path, """
     class AliasNode:
         __slots__ = ("nxt",)
         nxt: "AliasNode | None"
@@ -304,10 +320,7 @@ def test_cycle_possible_init_self_alias_store_conservatively_rejected(tmp_path: 
 
     if __name__ == "__main__":
         main()
-    """)
-    with pytest.raises(aot.AotError) as exc:
-        aot.generate(p)
-    assert any(f.rule == "aot/cycle-possible" and f.name == "AliasNode" for f in exc.value.findings)
+    """, "AliasNode", "True\n")
 
 
 def test_library_mutable_class_rejected(tmp_path: Path):
@@ -368,9 +381,10 @@ def test_adversarial_init_mutating_other_instance_retains_local(tmp_path: Path):
     assert aot_res.stdout == cp.stdout
 
 
-def test_cycle_possible_init_mutating_other_instance_rejected(tmp_path: Path):
-    """Reproducer 2 (Acyclicity bypass): Node.__init__ mutating prev.nxt on another Node is rejected."""
-    p = _write(tmp_path, """
+def test_init_mutating_other_instance_class_is_tracked_by_the_collector(tmp_path: Path):
+    """Reproducer 2 (acyclicity bypass): Node.__init__ mutating prev.nxt on another Node makes the class not
+    immutable-after-init. Rejected with aot/cycle-possible until PR-O2c; now tracked by the collector."""
+    _tracked(tmp_path, """
     class Node:
         __slots__ = ("v", "nxt")
         v: int
@@ -385,16 +399,18 @@ def test_cycle_possible_init_mutating_other_instance_rejected(tmp_path: Path):
 
     def main() -> None:
         a: Node = Node(1, None, None)
-        b: Node = Node(2, a, None)
-        print(b.v)
+        b: Node = Node(2, a, b_of(a))
+        c: Node | None = a.nxt
+        print(b.v, c is b)
+
+
+    def b_of(a: Node) -> Node:
+        return a
 
 
     if __name__ == "__main__":
         main()
-    """)
-    with pytest.raises(aot.AotError) as exc:
-        aot.generate(p)
-    assert any(f.rule == "aot/cycle-possible" and f.name == "Node" for f in exc.value.findings)
+    """, "Node", "2 False\n")
 
 
 def test_tagged_int_field_normal_and_partial_init(tmp_path: Path):
