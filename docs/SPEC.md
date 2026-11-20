@@ -605,16 +605,19 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   synthetic `$composer`/`$changed`/`$default` slots included, through a generated thunk that loads the
   object's `INSTANCE` and calls the member with `INVOKEVIRTUAL` (the name and descriptor are copied from
   the walked method, never looked up); its return value crosses as any other. `Status: implemented`, `GP/artifact/ObjectMemberBindingTest.kt`.
-  The public, non-suspend **member functions** of a Kotlin-public `class`, `interface` or `enum class`
+  The public **member functions** (including `suspend` members, #164 item 3) of a Kotlin-public
+  `class`, `interface` or `enum class`
   that crosses as an object handle bind as `METHOD` entries `Owner.name` (#215), the shape KSP's
   members already have: `args[0]` is the receiver, uncounted in `arity`, and the generated call is
-  `(args[0] as Owner).name(...)`. The binding layer serves them as methods of the receiver's proxy
+  `(args[0] as Owner).name(...)` (wrapped in `PendingCall.start { ... }` with `isSuspend = true` for
+  `suspend` members, matching U-5, across both the jar walker and the klib walker). The binding layer serves them as methods of the receiver's proxy
   (supertypes included), ahead of an extension of the same name, because Kotlin resolves a member
   first, and never as a module attribute; they take no part in a constructor's name check. Overloads
   within one class are told apart as functions are (`Owner.add__Int`). Declined, each with its reason:
-  a `suspend` member, a `@Composable` member, a member of a generic class whose type parameter has
+  a `@Composable` member, a member of a generic class whose type parameter has
   an unsupported bound (U-4a), and a member that
-  shares its name with a property of the class (the property is kept). `Any`'s members, statics and
+  shares its name with a property of the class (the property is kept). A `suspend` member of a type annotated
+  `@kotlin.coroutines.RestrictsSuspension`, or of one with such a supertype, is declined too, in every walker (it is callable only inside its own scope, so `PendingCall.start { receiver.member() }` cannot compile). `Any`'s members, statics and
   synthetic methods are not bound. A member's default arguments are not omittable yet: Python passes
   every argument. A member's stub is a method of the receiver's stub class whose docstring carries
   `Kotlin member: <key>` (or a comment with that marker where the class has no stub). Klibs bind no

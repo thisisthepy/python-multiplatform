@@ -63,10 +63,14 @@ class KlibMemberFunctionTest {
     }
 
     @Test
-    fun aSuspendMemberIsDeclinedWithItsReason() {
-        val join = declarations.single { it.owner == job && it.simpleName == "join" }
-        assertNull(join.bindingName)
-        assertEquals("suspend", join.declineReason)
+    fun aSuspendMemberIsBoundWithPendingCall() {
+        val joinDecl = declarations.single { it.owner == job && it.simpleName == "join" }
+        assertEquals("$job.join", joinDecl.bindingName)
+        assertTrue(joinDecl.isSuspend)
+        val join = entries.single { it.name == "$job.join" }
+        assertEquals("METHOD", join.kind)
+        assertTrue(join.isSuspend)
+        assertTrue("PendingCall.start" in join.lambdaBody, join.lambdaBody)
     }
 
     @Test
@@ -84,8 +88,9 @@ class KlibMemberFunctionTest {
         assertEquals("METHOD", getCompleted.kind)
         assertTrue("kotlinx.coroutines.Deferred<kotlin.Any?>" in getCompleted.lambdaBody, getCompleted.lambdaBody)
         val await = declarations.single { it.owner == "kotlinx.coroutines.Deferred" && it.simpleName == "await" }
-        assertNull(await.bindingName)
-        assertEquals("suspend", await.declineReason)
+        assertEquals("kotlinx.coroutines.Deferred.await", await.bindingName)
+        assertTrue(await.isSuspend)
+        assertNull(await.declineReason)
     }
 
     @Test

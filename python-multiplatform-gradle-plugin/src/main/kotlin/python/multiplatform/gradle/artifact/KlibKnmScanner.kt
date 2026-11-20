@@ -57,6 +57,7 @@ import java.io.File
 internal object KlibKnmScanner {
 
     private const val COMPOSABLE_ANNOTATION = "androidx/compose/runtime/Composable"
+    private const val RESTRICTS_SUSPENSION_ANNOTATION = "kotlin/coroutines/RestrictsSuspension"
 
     /** Compose packs 31 default bits into each `$default` int (`ComposableShape.defaultCountFor`). */
     private const val DEFAULT_BITS_PER_MASK = 31
@@ -1016,6 +1017,10 @@ internal object KlibKnmScanner {
             }
         }
         val isEnum = cls.kind == ProtoBuf.Class.Kind.ENUM_CLASS
+        // `@RestrictsSuspension` is BINARY-retained and the klib metadata keeps it on the class, as it keeps `@Composable`.
+        val restrictedScope = (listOf(owner) + supertypesOf(owner, classes)).any { name ->
+            name == "kotlin.sequences.SequenceScope" || classes[name]?.annotations?.contains(RESTRICTS_SUSPENSION_ANNOTATION) == true
+        }
         return cls.proto.functionList
             .filter { Flags.VISIBILITY.get(it.flags) == ProtoBuf.Visibility.PUBLIC }
             .filter { Flags.MEMBER_KIND.get(it.flags) == ProtoBuf.MemberKind.DECLARATION }
@@ -1029,6 +1034,7 @@ internal object KlibKnmScanner {
                     receiverExpr = receiverExpr,
                     classSubstIds = classSubstIds.orEmpty(),
                     unbindable = unbindable,
+                    restrictedScope = restrictedScope,
                     propertyNames = propertyNames,
                     classes = classes,
                 )
@@ -1043,6 +1049,7 @@ internal object KlibKnmScanner {
         receiverExpr: String,
         classSubstIds: Set<Int>,
         unbindable: String?,
+        restrictedScope: Boolean,
         propertyNames: Set<String>,
         classes: Map<String, KnmClassRecord>,
     ): Candidate? {
@@ -1090,10 +1097,10 @@ internal object KlibKnmScanner {
         val declined = { reason: String -> Candidate(null, model.copy(declineReason = reason)) }
 
         when {
-            isSuspend -> return declined("suspend")
             hasReified -> return declined("a reified type parameter: its type argument is read at run time, so kotlin.Any? cannot stand for it")
             hasUnsubstitutable -> return declined("a bounded or reified type parameter: kotlin.Any? cannot stand for it")
             unbindable != null -> return declined(unbindable)
+            isSuspend && restrictedScope -> return declined(RESTRICTED_SUSPEND_REASON)
             cls.proto.typeParameterCount > 0 &&
                 (returnModel.arguments.isNotEmpty() || parameters.any { it.type.arguments.isNotEmpty() }) ->
                 return declined(GENERIC_OWNER_PARAMETERIZED_REASON)
@@ -1136,7 +1143,9 @@ internal object KlibKnmScanner {
         val key = "$owner.$name"
         val typeArgs = if (fn.typeParameterCount == 0) "" else List(fn.typeParameterCount) { "kotlin.Any?" }.joinToString(", ", "<", ">")
         val argumentExpressions = boundaryTypes.mapIndexed { index, type -> type.read("args[${index + 1}]") }
-        val body = returnType.wrapReturn("$receiverExpr.$name$typeArgs(${argumentExpressions.joinToString(", ")})")
+        val rawBody = returnType.wrapReturn("$receiverExpr.$name$typeArgs(${argumentExpressions.joinToString(", ")})")
+        // A `suspend` member runs under PendingCall.start and the binding is marked `isSuspend` (SPEC B-1/U-5).
+        val body = if (isSuspend) "python.multiplatform.ffi.upcall.PendingCall.start { $rawBody }" else rawBody
         val supertypes = if (returnType.tag == OBJECT_TAG) supertypesOf(returnModel.qualifiedName, classes) else emptyList()
         val paramNames = parameters.map { it.name!! }
         val paramTypeNames = parameters.mapIndexed { index, parameter ->
@@ -1156,6 +1165,7 @@ internal object KlibKnmScanner {
             returnSupertypes = supertypes,
             paramHasDefault = List(boundaryTypes.size) { false },
             kind = ArtifactScanner.METHOD_KIND,
+            isSuspend = isSuspend,
         )
         val modelParameters = parameters.mapIndexed { index, parameter ->
             parameter.copy(boundaryTag = boundaryTypes[index].tag, declaresDefault = false)
