@@ -34,18 +34,7 @@ import kotlin.test.assertTrue
  */
 class ReturnSupertypeTest {
 
-    private val caches: File? = listOf(
-        File(System.getProperty("user.home"), ".gradle/caches/modules-2/files-2.1"),
-        File("/Volumes/macMini/caches/.gradle/caches/modules-2/files-2.1"),
-    ).firstOrNull { it.isDirectory }
-
-    private fun jarUnder(group: String, artifact: String): File? = listOf(
-        group,
-        group.replaceFirst("org.jetbrains.compose", "org.thisisthepy.compose"),
-    ).firstNotNullOfOrNull { g ->
-        caches?.resolve(g)?.resolve(artifact)
-            ?.walkTopDown()?.firstOrNull { it.isFile && it.name.endsWith(".jar") && "sources" !in it.name }
-    }
+    private fun jarUnder(group: String, artifact: String): File? = ExternalArtifacts.jarUnder(group, artifact)
 
     private val kotlinStdlibJar: File
         get() = File(Class.forName("kotlin.text.Regex").protectionDomain.codeSource.location.toURI())
@@ -77,7 +66,7 @@ class ReturnSupertypeTest {
      */
     @Test
     fun aBoundDeclarationCarriesWhatItsReturnTypeIsA() {
-        val graphics = jarUnder("org.jetbrains.compose.ui", "ui-graphics-desktop") ?: return
+        val graphics = jarUnder("org.jetbrains.compose.ui", "ui-graphics-desktop") ?: ExternalArtifacts.skip("ui-graphics-desktop jar not in the Gradle cache")
         val entries = ArtifactScanner.scanJar(
             graphics,
             includePrefixes = listOf("androidx.compose.ui.graphics"),
@@ -104,7 +93,7 @@ class ReturnSupertypeTest {
      */
     @Test
     fun theDeclarationModelCarriesTheSameAncestryAsTheBinding() {
-        val graphics = jarUnder("org.jetbrains.compose.ui", "ui-graphics-desktop") ?: return
+        val graphics = jarUnder("org.jetbrains.compose.ui", "ui-graphics-desktop") ?: ExternalArtifacts.skip("ui-graphics-desktop jar not in the Gradle cache")
         val declarations = ArtifactScanner.scanDeclarations(
             graphics,
             includePrefixes = listOf("androidx.compose.ui.graphics"),
@@ -121,7 +110,7 @@ class ReturnSupertypeTest {
      */
     @Test
     fun aReturnThatIsNotAHandleCarriesNoAncestry() {
-        val unit = jarUnder("org.jetbrains.compose.ui", "ui-unit-desktop") ?: return
+        val unit = jarUnder("org.jetbrains.compose.ui", "ui-unit-desktop") ?: ExternalArtifacts.skip("ui-unit-desktop jar not in the Gradle cache")
         val entries = ArtifactScanner.scanJar(
             unit,
             includePrefixes = listOf("androidx.compose.ui.unit"),
@@ -152,7 +141,7 @@ class ReturnSupertypeTest {
             jarUnder("org.jetbrains.compose.foundation", "foundation-layout-desktop"),
             jarUnder("org.jetbrains.compose.ui", "ui-graphics-desktop"),
         )
-        if (jars.size < 3) return
+        if (jars.size < 3) ExternalArtifacts.skip("material3, foundation-layout or ui-graphics jar not in the Gradle cache")
         val classpath = composeClasspath()
         val entries = jars.flatMap { jar ->
             ArtifactScanner.scanJar(
@@ -209,7 +198,7 @@ class ReturnSupertypeTest {
         assertEquals(null, renderedReturnTypeName(plain.copy(returnTypeName = null)))
         // No Kotlin fully-qualified name can contain either character, so the grammar cannot be
         // ambiguous -- checked against every name this walk produced rather than argued.
-        val graphics = jarUnder("org.jetbrains.compose.ui", "ui-graphics-desktop") ?: return
+        val graphics = jarUnder("org.jetbrains.compose.ui", "ui-graphics-desktop") ?: ExternalArtifacts.skip("ui-graphics-desktop jar not in the Gradle cache")
         val names = ArtifactScanner.scanJar(
             graphics,
             includePrefixes = listOf("androidx.compose.ui.graphics"),

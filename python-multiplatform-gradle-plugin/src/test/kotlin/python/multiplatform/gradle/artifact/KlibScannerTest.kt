@@ -68,8 +68,7 @@ class KlibScannerTest {
     @Test
     fun aPackageAnIncludePrefixNamesExactlyIsMatchedNotOnlyItsSubPackages() {
         if (!konanStdlibKlib.isDirectory) {
-            println("skipped: no .konan cache at $konanStdlibKlib")
-            return
+            ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         val entries = KlibScanner.scanKlib(konanStdlibKlib, includePrefixes = listOf("kotlin.math"))
         assertTrue(entries.isNotEmpty(), "kotlin.math yielded nothing; the package-prefix match regressed")
@@ -89,8 +88,7 @@ class KlibScannerTest {
     @Test
     fun overloadedNamesAreSuffixedNotDropped() {
         if (!konanStdlibKlib.isDirectory) {
-            println("skipped: no .konan cache at $konanStdlibKlib")
-            return
+            ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         val names = KlibScanner.scanKlib(konanStdlibKlib, includePrefixes = listOf("kotlin.math")).map { it.name }
         assertEquals(
@@ -108,8 +106,7 @@ class KlibScannerTest {
     @Test
     fun anEntryCarriesTheTagsItsDeclarationImplies() {
         if (!konanStdlibKlib.isDirectory) {
-            println("skipped: no .konan cache at $konanStdlibKlib")
-            return
+            ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         val entries = KlibScanner.scanKlib(konanStdlibKlib, includePrefixes = listOf("kotlin.math"))
         val absInt = entries.single { it.name == "kotlin.math.abs__Int" }
@@ -264,8 +261,7 @@ class KlibScannerTest {
     @Test
     fun anIncludePrefixIsANamespaceNotATextPrefix() {
         if (!konanStdlibKlib.isDirectory) {
-            println("skipped: no .konan cache at $konanStdlibKlib")
-            return
+            ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         val entries = KlibScanner.scanKlib(konanStdlibKlib, includePrefixes = listOf("kotlin.co"))
         assertEquals(emptyList(), entries, "\"kotlin.co\" is a text prefix of real packages but not their namespace")
@@ -285,8 +281,7 @@ class KlibScannerTest {
     @Test
     fun aDeclinedDeclarationIsRecordedWithItsReasonRatherThanVanishing() {
         if (!konanStdlibKlib.isDirectory) {
-            println("skipped: no .konan cache at $konanStdlibKlib")
-            return
+            ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         val declarations = KlibScanner.scanKlibDeclarations(konanStdlibKlib, includePrefixes = listOf("kotlin.math"))
         val bound = declarations.filter { it.bindingName != null }
@@ -317,8 +312,7 @@ class KlibScannerTest {
     @Test
     fun theModelAndTheBindingsAgreeBecauseTheyComeFromTheSameWalk() {
         if (!konanStdlibKlib.isDirectory) {
-            println("skipped: no .konan cache at $konanStdlibKlib")
-            return
+            ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         val bound = KlibScanner.scanKlib(konanStdlibKlib, includePrefixes = listOf("kotlin.math")).map { it.name }
         val modelled = KlibScanner.scanKlibDeclarations(konanStdlibKlib, includePrefixes = listOf("kotlin.math"))
@@ -336,8 +330,7 @@ class KlibScannerTest {
     @Test
     fun theSharedOverloadRuleReachesTheModelsBindingName() {
         if (!konanStdlibKlib.isDirectory) {
-            println("skipped: no .konan cache at $konanStdlibKlib")
-            return
+            ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         val max = KlibScanner.scanKlibDeclarations(konanStdlibKlib, includePrefixes = listOf("kotlin.math"))
             .filter { it.simpleName == "max" && it.bindingName != null }
@@ -363,8 +356,7 @@ class KlibScannerTest {
     @Test
     fun aKlibSuppliesTypesAndDefaultsAndParameterNamesViaKnm() {
         if (!konanStdlibKlib.isDirectory) {
-            println("skipped: no .konan cache at $konanStdlibKlib")
-            return
+            ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         val absInt = KlibScanner.scanKlibDeclarations(konanStdlibKlib, includePrefixes = listOf("kotlin.math"))
             .single { it.bindingName == "kotlin.math.abs__Int" }
@@ -391,8 +383,7 @@ class KlibScannerTest {
     @Test
     fun aNullablePrimitiveIsDeclinedTheWayTheJvmProducerDeclinesOne() {
         if (!konanStdlibKlib.isDirectory) {
-            println("skipped: no .konan cache at $konanStdlibKlib")
-            return
+            ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         val declarations = KlibScanner.scanKlibDeclarations(konanStdlibKlib, includePrefixes = NULLABLE_PROBE_PACKAGES)
         val nullablePrimitiveTyped = declarations.filter { declaration ->
@@ -428,8 +419,7 @@ class KlibScannerTest {
     @Test
     fun boundDeclarationsWithDefaultsOccurInRealKlibsViaKnm() {
         if (!konanStdlibKlib.isDirectory) {
-            println("skipped: no .konan cache at $konanStdlibKlib")
-            return
+            ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         val declarations = KlibScanner.scanKlibDeclarations(konanStdlibKlib, includePrefixes = emptyList())
         val boundWithDefault = declarations.filter { it.bindingName != null && it.parameters.any { p -> p.declaresDefault } }

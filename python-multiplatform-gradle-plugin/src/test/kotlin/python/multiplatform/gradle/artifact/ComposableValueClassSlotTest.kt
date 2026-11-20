@@ -46,18 +46,7 @@ import kotlin.test.assertTrue
  */
 class ComposableValueClassSlotTest {
 
-    private val caches: File? = listOf(
-        File(System.getProperty("user.home"), ".gradle/caches/modules-2/files-2.1"),
-        File("/Volumes/macMini/caches/.gradle/caches/modules-2/files-2.1"),
-    ).firstOrNull { it.isDirectory }
-
-    private fun jarUnder(group: String, artifact: String): File? = listOf(
-        group,
-        group.replaceFirst("org.jetbrains.compose", "org.thisisthepy.compose"),
-    ).firstNotNullOfOrNull { g ->
-        caches?.resolve(g)?.resolve(artifact)
-            ?.walkTopDown()?.firstOrNull { it.isFile && it.name.endsWith(".jar") && "sources" !in it.name }
-    }
+    private fun jarUnder(group: String, artifact: String): File? = ExternalArtifacts.jarUnder(group, artifact)
 
     private val kotlinStdlibJar: File
         get() = File(Class.forName("kotlin.text.Regex").protectionDomain.codeSource.location.toURI())
@@ -92,7 +81,7 @@ class ComposableValueClassSlotTest {
      */
     @Test
     fun aComposablesValueClassSlotIsTypedFromMetadataAndNotFromItsErasedDescriptor() {
-        val material3 = jarUnder("org.jetbrains.compose.material3", "material3-desktop") ?: return
+        val material3 = jarUnder("org.jetbrains.compose.material3", "material3-desktop") ?: ExternalArtifacts.skip("material3-desktop jar not in the Gradle cache")
         val entries = ArtifactScanner.scanJar(
             material3,
             includePrefixes = listOf("androidx.compose.material3"),
@@ -138,7 +127,7 @@ class ComposableValueClassSlotTest {
      */
     @Test
     fun aValueClassTheWalkerCanOpenStaysAPrimitiveSlot() {
-        val layout = jarUnder("org.jetbrains.compose.foundation", "foundation-layout-desktop") ?: return
+        val layout = jarUnder("org.jetbrains.compose.foundation", "foundation-layout-desktop") ?: ExternalArtifacts.skip("foundation-layout-desktop jar not in the Gradle cache")
         val entries = ArtifactScanner.scanJar(
             layout,
             includePrefixes = listOf("androidx.compose.foundation.layout"),
@@ -171,7 +160,7 @@ class ComposableValueClassSlotTest {
      */
     @Test
     fun theThunkUnwrapsTheValueClassBoxTheBoundaryCarries() {
-        val material3 = jarUnder("org.jetbrains.compose.material3", "material3-desktop") ?: return
+        val material3 = jarUnder("org.jetbrains.compose.material3", "material3-desktop") ?: ExternalArtifacts.skip("material3-desktop jar not in the Gradle cache")
         val entries = ArtifactScanner.scanJar(
             material3,
             includePrefixes = listOf("androidx.compose.material3"),
@@ -202,7 +191,7 @@ class ComposableValueClassSlotTest {
     @Test
     fun everyComposableSlotAgreesBetweenMetadataAndDescriptorWhenPairedInOrder() {
         val jars = composeJars()
-        if (jars.isEmpty()) return
+        if (jars.isEmpty()) ExternalArtifacts.skip("no Compose jar in the Gradle cache")
         val counts = agreementCounts(jars, shift = 0)
         println(
             "composable slots paired in order: ${counts.agreed} agree " +
@@ -220,7 +209,7 @@ class ComposableValueClassSlotTest {
     @Test
     fun aDeliberatelyShiftedPairingIsCaughtRatherThanBoundToTheWrongType() {
         val jars = composeJars()
-        if (jars.isEmpty()) return
+        if (jars.isEmpty()) ExternalArtifacts.skip("no Compose jar in the Gradle cache")
         val shifted = agreementCounts(jars, shift = 1)
         println("composable slots paired one off: ${shifted.agreed} agree, ${shifted.disagreed} disagree")
         assertTrue(

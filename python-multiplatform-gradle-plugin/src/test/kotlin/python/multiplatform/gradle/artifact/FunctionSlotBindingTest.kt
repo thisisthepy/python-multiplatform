@@ -57,18 +57,7 @@ import kotlin.test.assertTrue
  */
 class FunctionSlotBindingTest {
 
-    private val caches: File? = listOf(
-        File(System.getProperty("user.home"), ".gradle/caches/modules-2/files-2.1"),
-        File("/Volumes/macMini/caches/.gradle/caches/modules-2/files-2.1"),
-    ).firstOrNull { it.isDirectory }
-
-    private fun jarUnder(group: String, artifact: String): File? = listOf(
-        group,
-        group.replaceFirst("org.jetbrains.compose", "org.thisisthepy.compose"),
-    ).firstNotNullOfOrNull { g ->
-        caches?.resolve(g)?.resolve(artifact)
-            ?.walkTopDown()?.firstOrNull { it.isFile && it.name.endsWith(".jar") && "sources" !in it.name }
-    }
+    private fun jarUnder(group: String, artifact: String): File? = ExternalArtifacts.jarUnder(group, artifact)
 
     private val kotlinStdlibJar: File
         get() = File(Class.forName("kotlin.text.Regex").protectionDomain.codeSource.location.toURI())
@@ -106,7 +95,7 @@ class FunctionSlotBindingTest {
      */
     @Test
     fun clickableIsBoundAndItsOnClickCarriesTheSlotGrammar() {
-        val foundation = jarUnder("org.jetbrains.compose.foundation", "foundation-desktop") ?: return
+        val foundation = jarUnder("org.jetbrains.compose.foundation", "foundation-desktop") ?: ExternalArtifacts.skip("foundation-desktop jar not in the Gradle cache")
         val entries = ArtifactScanner.scanJar(foundation, listOf("androidx.compose.foundation"), composeClasspath())
 
         val clickable = entries.filter { it.name.substringAfterLast('.').substringBefore("__") == "clickable" }
@@ -144,7 +133,7 @@ class FunctionSlotBindingTest {
      */
     @Test
     fun aForwardedArgumentKeepsItsDeclaredNullabilityInTheCast() {
-        val ui = jarUnder("org.jetbrains.compose.ui", "ui-desktop") ?: return
+        val ui = jarUnder("org.jetbrains.compose.ui", "ui-desktop") ?: ExternalArtifacts.skip("ui-desktop jar not in the Gradle cache")
         val entries = ArtifactScanner.scanJar(ui, listOf("androidx.compose.ui"), composeClasspath())
 
         val positioned = entries.single { it.name == "androidx.compose.ui.layout.onGloballyPositioned" }
@@ -157,7 +146,7 @@ class FunctionSlotBindingTest {
             positioned.lambdaBody,
         )
 
-        val foundation = jarUnder("org.jetbrains.compose.foundation", "foundation-desktop") ?: return
+        val foundation = jarUnder("org.jetbrains.compose.foundation", "foundation-desktop") ?: ExternalArtifacts.skip("foundation-desktop jar not in the Gradle cache")
         val focused = ArtifactScanner
             .scanJar(foundation, listOf("androidx.compose.foundation"), composeClasspath())
             .singleOrNull { it.name == "androidx.compose.foundation.onFocusedBoundsChanged" }
@@ -180,8 +169,8 @@ class FunctionSlotBindingTest {
      */
     @Test
     fun suspendComposableAndUnnameableFunctionSlotsAreDeclinedWithAReason() {
-        val ui = jarUnder("org.jetbrains.compose.ui", "ui-desktop") ?: return
-        val material = jarUnder("org.jetbrains.compose.material", "material-desktop") ?: return
+        val ui = jarUnder("org.jetbrains.compose.ui", "ui-desktop") ?: ExternalArtifacts.skip("ui-desktop jar not in the Gradle cache")
+        val material = jarUnder("org.jetbrains.compose.material", "material-desktop") ?: ExternalArtifacts.skip("material-desktop jar not in the Gradle cache")
         val classpath = composeClasspath()
 
         val uiDeclarations = ArtifactScanner.scanDeclarations(ui, listOf("androidx.compose.ui"), classpath)
@@ -240,7 +229,7 @@ class FunctionSlotBindingTest {
      */
     @Test
     fun theComposablePathStillBindsThroughAThunkAndKeepsItsMark() {
-        val layout = jarUnder("org.jetbrains.compose.foundation", "foundation-layout-desktop") ?: return
+        val layout = jarUnder("org.jetbrains.compose.foundation", "foundation-layout-desktop") ?: ExternalArtifacts.skip("foundation-layout-desktop jar not in the Gradle cache")
         val column = ArtifactScanner
             .scanJar(layout, listOf("androidx.compose.foundation.layout"), composeClasspath())
             .single { it.name == "androidx.compose.foundation.layout.Column" }
@@ -295,7 +284,7 @@ class FunctionSlotBindingTest {
             jarUnder("org.jetbrains.compose.material", "material-desktop"),
             jarUnder("org.jetbrains.compose.material3", "material3-desktop"),
         )
-        if (walked.size < 6) return
+        if (walked.size < 6) ExternalArtifacts.skip("one of the six Compose desktop jars is not in the Gradle cache")
         val classpath = composeClasspath()
 
         val declarations = walked.flatMap {
