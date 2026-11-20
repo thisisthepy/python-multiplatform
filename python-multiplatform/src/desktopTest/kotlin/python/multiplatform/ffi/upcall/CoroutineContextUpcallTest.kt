@@ -103,22 +103,35 @@ class CoroutineContextUpcallTest {
     @Test
     fun aContinuationInterceptorDispatchesToAnotherThreadAndDeliversResultWithGil() =
         PythonTestFixture.withInterpreter {
-            // Deterministic cross-thread path: the dispatched first slice waits on `gate`, which the
-            // Python side opens only after the upcall returned. The call therefore cannot complete
-            // inline before PendingCall.start returns (the SPEC U-5 fast path), so it must be a Future.
+            // Deterministic cross-thread path. Who waits on what:
+            // 1. the Python thread, inside the `_pm_dispatch()` upcall (attached, GIL held), starts
+            //    the coroutine; the interceptor hands its first slice to the worker, which parks on
+            //    `gate` (a Kotlin latch, no GIL) and `PendingCall.start` returns with `isDone` false,
+            //    so `AsyncUpcall` builds a Future on the running loop (the SPEC U-5 fast path cannot
+            //    fire: the body has not run);
+            // 2. the Python thread records the Future's type, then opens the gate through the sync
+            //    upcall `ctxtest.releaseGate` and goes into `await`, where the loop's `select`
+            //    releases the GIL;
+            // 3. the worker runs the body without the GIL, completes the call, and `AsyncUpcall.resolve`
+            //    takes the GIL (`PyGILState_Ensure`, a thread CPython never saw) to hand the value to
+            //    the loop with `call_soon_threadsafe`; nobody holds the GIL while waiting for the
+            //    worker, so neither GIL build nor 3.15t can deadlock here.
+            // A gate that never opens rejects the Future with a named error instead of leaving it
+            // pending (`ExecutorInterceptor.gate`), so a failure reads as that error, not as the
+            // empty-message `TimeoutError` of `wait_for`.
             val gate = CountDownLatch(1)
             CoroutineContextTestFragment.gate = gate
             val executor = Executors.newSingleThreadExecutor { r -> Thread(r, "kotlin-dispatcher-worker") }
-            val interceptor = ExecutorInterceptor { task ->
-                executor.execute {
-                    check(gate.await(10, TimeUnit.SECONDS)) { "the test never opened the gate" }
-                    task.run()
-                }
-            }
+            val interceptor = ExecutorInterceptor(executor, gate)
+            // `bindUpcallOrNull` leaves behind `lambda *a: _pm_invoke(_pm_h, a)`, which reads the
+            // *global* `_pm_h` at call time: aliasing `_pm_bound` and binding a second name silently
+            // repoints the first alias to the second entry (CI run 44703123197: `_pm_open_gate()`
+            // started a second dispatched call instead of opening the gate, and `wait_for` timed
+            // out). Each alias captures its own handle, as `AsyncUpcallCancellationTest` does.
             assertTrue(bindUpcallOrNull("ctxtest.releaseGate"))
-            Python3.exec("_pm_open_gate = _pm_bound")
+            Python3.exec("_pm_open_gate = lambda *a, _h=_pm_h: _pm_invoke(_h, a)")
             assertTrue(bindUpcallOrNull("ctxtest.dispatchAndReportThread"))
-            Python3.exec("_pm_dispatch = _pm_bound")
+            Python3.exec("_pm_dispatch = lambda *a, _h=_pm_h: _pm_invoke(_h, a)")
             val ctxHandle = HandleTable.register(interceptor + TestJobElement("dispatched-job")).raw
             val callerThreadName = Thread.currentThread().name
             try {
@@ -132,15 +145,19 @@ class CoroutineContextUpcallTest {
                         with _pm.use_coroutine_context($ctxHandle):
                             r = _pm_dispatch()
                             _disp['returned'] = type(r).__name__
-                            _pm_open_gate()
-                            if hasattr(r, '__await__'):
+                            _disp['opened'] = _pm_open_gate()
+                            if not hasattr(r, '__await__'):
+                                return r
+                            try:
                                 return await asyncio.wait_for(r, 10.0)
-                            return r
+                            except asyncio.TimeoutError:
+                                raise RuntimeError('the dispatched call did not resolve within 10 s: %r' % (_disp,)) from None
 
                     _disp['result'] = _disp_loop.run_until_complete(_run_disp())
                     """.trimIndent(),
                 )
                 assertEquals("Future", PythonTestFixture.eval("_disp['returned']").toString())
+                assertEquals("released", PythonTestFixture.eval("_disp['opened']").toString(), "the gate alias did not reach ctxtest.releaseGate")
                 val result = PythonTestFixture.eval("_disp['result']").toString()
                 assertTrue(
                     result.startsWith("kotlin-dispatcher-worker|dispatched-job"),
@@ -296,14 +313,30 @@ private class TestJobElement(val label: String) : AbstractCoroutineContextElemen
     companion object Key : CoroutineContext.Key<TestJobElement>
 }
 
+/**
+ * Dispatches every resumption onto [executor]. With a [gate], each dispatched resumption first
+ * waits for the latch; one that is not opened within [gateTimeoutSeconds] resumes the continuation
+ * with an [IllegalStateException] instead, so the call completes with a named failure that
+ * `AsyncUpcall` delivers as a `RuntimeError`, rather than never completing.
+ */
 private class ExecutorInterceptor(
     private val executor: java.util.concurrent.Executor,
+    private val gate: CountDownLatch? = null,
+    private val gateTimeoutSeconds: Long = 30,
 ) : AbstractCoroutineContextElement(ContinuationInterceptor), ContinuationInterceptor {
     override fun <T> interceptContinuation(continuation: Continuation<T>): Continuation<T> =
         object : Continuation<T> {
             override val context: CoroutineContext = continuation.context
             override fun resumeWith(result: Result<T>) {
-                executor.execute { continuation.resumeWith(result) }
+                executor.execute {
+                    if (gate == null || gate.await(gateTimeoutSeconds, TimeUnit.SECONDS)) {
+                        continuation.resumeWith(result)
+                    } else {
+                        continuation.resumeWith(
+                            Result.failure(IllegalStateException("the test never opened the dispatch gate")),
+                        )
+                    }
+                }
             }
         }
 }

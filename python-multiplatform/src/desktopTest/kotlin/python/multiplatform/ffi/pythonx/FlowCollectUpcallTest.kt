@@ -468,6 +468,12 @@ class FlowCollectUpcallTest {
             // cancel listener and the done callback run on the loop thread. The Python side
             // finishes as soon as its Future is cancelled, so the Kotlin outcome is awaited here
             // with a deadline rather than read right away.
+            //
+            // Unlike test 4, `collect()` returns before the collector is subscribed: the body's
+            // first slice runs on the dispatcher thread, and a value `tryEmit` hands a
+            // `MutableSharedFlow` with no replay and no subscriber is dropped (and `tryEmit` still
+            // answers true), so the collector never runs and the gate never opens (CI run
+            // 44703123197). The emission therefore waits for `subscriptionCount` first.
             val scope = PythonCallableScope()
             val executor = Executors.newSingleThreadExecutor { r -> Thread(r, "flow-collect-dispatcher") }
             val dispatcher = executor.asCoroutineDispatcher()
@@ -497,6 +503,11 @@ class FlowCollectUpcallTest {
                         with _pm.use_coroutine_context(${dispatcherRef.raw}):
                             task = asyncio.ensure_future(shared.collect(on_item))
                         _dc['returned'] = type(task).__name__
+                        # The subscription is made on the dispatcher thread; emit only once it exists.
+                        deadline = _dc_loop.time() + 10.0
+                        while shared.subscriptionCount == 0 and _dc_loop.time() < deadline:
+                            await asyncio.sleep(0.005)
+                        _dc['subscribed'] = shared.subscriptionCount
                         _dc['emitted'] = shared.tryEmit(7)
                         # The emission is handed to the dispatcher thread, which submits the
                         # collector back to this loop; wait for it to be mid-await.
@@ -533,6 +544,7 @@ class FlowCollectUpcallTest {
                     throw AssertionError("the dispatched in-flight cancellation run failed with ${e.type?.name}: ${e.errMsg}", e)
                 }
                 assertEquals("Future", PythonTestFixture.eval("_dc['returned']").toString())
+                assertEquals("1", PythonTestFixture.eval("_dc['subscribed']").toString(), "the dispatched collect did not subscribe within 10 s")
                 assertEquals("True", PythonTestFixture.eval("_dc['emitted']").toString(), "tryEmit found no collector")
                 assertEquals("True", PythonTestFixture.eval("_dc['gate_open']").toString(), "the dispatched collector was not mid-await when cancelled")
                 assertEquals("True", PythonTestFixture.eval("_dc['cancelled']").toString())
@@ -628,7 +640,7 @@ private object FlowCollectTestFragment : FunctionTableFragment {
         ),
         ReflectedClass(
             name = "flowtest.MutableSharedFlow",
-            memberNames = listOf("flowtest.MutableSharedFlow.tryEmit"),
+            memberNames = listOf("flowtest.MutableSharedFlow.tryEmit", "flowtest.MutableSharedFlow.subscriptionCount"),
         ),
         ReflectedClass(
             name = "flowtest.CountingCollector",
@@ -716,6 +728,19 @@ private object FlowCollectTestFragment : FunctionTableFragment {
             returnTypeName = "kotlin.Boolean",
         ) { args ->
             (args[0] as MutableSharedFlow<Any?>).tryEmit(args[1] as Long)
+        },
+        // `subscriptionCount.value`: how many collectors are subscribed right now, so a test can
+        // wait for a collect that started on another thread before it emits.
+        ExposedCallable(
+            name = "flowtest.MutableSharedFlow.subscriptionCount",
+            arity = 0,
+            paramTypes = emptyList(),
+            returnType = TypeTag.INT,
+            kind = CallableKind.GETTER,
+            receiverTypeName = "flowtest.MutableSharedFlow",
+            returnTypeName = "kotlin.Long",
+        ) { args ->
+            (args[0] as MutableSharedFlow<Any?>).subscriptionCount.value.toLong()
         },
         // Suspend member function with a suspend SAM fun interface parameter (SPEC U-5c), in the
         // shape `KsAdapters.suspendSamShapeOrNull` renders:
