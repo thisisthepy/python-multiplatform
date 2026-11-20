@@ -17,8 +17,9 @@ Implements PR-O2a (docs/design/typedpython-aot.md 6.3.2 items 1 and 4):
 PR-O2b (N-12b/c step 2, design 6.3.2 item 2 "Step 2 as implemented"; agent proposal, not owner-confirmed):
 scope regions, decided per `(function, class)` after the virtual sites are known.
   - `(F, C)` is region when every site of `C` in `F` that is not virtual, and every local of `C` in `F`
-    that is not virtual, can be region-typed together (one C type per local): `C` has no `__del__` and a
-    simple `__init__` (the same `init_maps`), a list argument of a site is a list name, and in `F` no
+    that is not virtual, can be region-typed together (one C type per local): `C` has no `__del__`, a
+    simple `__init__` (the same `init_maps`) and at least one field (a zero-size region object would give
+    every object one address), a list argument of a site is a list name, and in `F` no
     region pointer of `C` is returned (R1), stored into a heap object, a virtual object, a container
     (R2) or passed to a call, a method call included (R3), no heap pointer of `C` (a parameter, a call
     result, a field of a heap or virtual object) flows into a local of `C`, a region object's field of
@@ -36,7 +37,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from typedpython import ir
-from typedpython.aot.classes import ClassAnalysis, _walk_stmts
+from typedpython.aot.classes import EXPR_CHILD_ATTRS, EXPR_CHILD_SEQS, ClassAnalysis, _walk_stmts
 from typedpython.aot.program import MAIN
 
 
@@ -147,11 +148,11 @@ def _simple_init_map(
 def _walk_exprs_in_expr(expr: ir.Expr):
     """Yield every sub-expression of `expr` (including `expr` itself)."""
     yield expr
-    for attr in ("left", "right", "operand", "value", "obj", "index", "cond", "then", "orelse"):
+    for attr in EXPR_CHILD_ATTRS:
         sub = getattr(expr, attr, None)
         if isinstance(sub, ir.Expr):
             yield from _walk_exprs_in_expr(sub)
-    for attr in ("args", "elements", "parts"):
+    for attr in EXPR_CHILD_SEQS:
         subs = getattr(expr, attr, None)
         if isinstance(subs, tuple):
             for s in subs:
@@ -218,13 +219,13 @@ def _find_escape_reason(fn: ir.Function, var_name: str, cls_name: str) -> str | 
                             return "escapes into container"
                         return sub
             return None
-        for attr in ("left", "right", "operand", "value", "obj", "index", "cond", "then", "orelse"):
+        for attr in EXPR_CHILD_ATTRS:
             sub_e = getattr(expr, attr, None)
             if isinstance(sub_e, ir.Expr):
                 res = _check_expr(sub_e)
                 if res is not None:
                     return res
-        for attr in ("args", "elements", "parts"):
+        for attr in EXPR_CHILD_SEQS:
             subs = getattr(expr, attr, None)
             if isinstance(subs, tuple):
                 for s in subs:
@@ -563,6 +564,10 @@ class _RegionAnalysis:
             return "class defines __del__"
         if cls not in self.plan.init_maps:
             return "complex __init__"
+        if not self.ca.classes[cls].field_decls:
+            # a zero-size region object: every `tpa_region_alloc` would return one address and `is` could
+            # not tell two objects apart (and MSVC rejects an empty struct); heap-rc is correct
+            return "class has no fields"
         init_fn = self.funcs.get(f"{cls}.__init__")
         expected_argc = (len(init_fn.params) - 1) if init_fn is not None else 0
         for s in self.stmts:
@@ -605,6 +610,12 @@ class _RegionAnalysis:
                 if r is not None:
                     return r
             return None
+        if isinstance(e, ir.CallObject):
+            for a in (e.callee,) + e.args:
+                r = self.visit(a, cls, False, "R3: escapes via an object call")
+                if r is not None:
+                    return r
+            return None
         if isinstance(e, ir.FieldGet):
             return self.visit(e.obj, cls, True, "")
         if isinstance(e, ir.Is):
@@ -621,13 +632,13 @@ class _RegionAnalysis:
                 if r is not None:
                     return r
             return None
-        for attr in ("left", "right", "operand", "value", "obj", "index", "cond", "then", "orelse"):
+        for attr in EXPR_CHILD_ATTRS:
             sub = getattr(e, attr, None)
             if isinstance(sub, ir.Expr):
                 r = self.visit(sub, cls, False, "escapes via expression")
                 if r is not None:
                     return r
-        for attr in ("args", "elements", "parts"):
+        for attr in EXPR_CHILD_SEQS:
             subs = getattr(e, attr, None)
             if isinstance(subs, tuple):
                 for sub in subs:

@@ -885,6 +885,8 @@ class _Fn:
                 elif isinstance(p, ir.Param) and self.g.tagged_param(init_fn, p):
                     args.append(self.tagged(a))
                 else:
+                    if not self.no_region(a, f"the {e.cls} constructor (a heap object)"):
+                        ok = False
                     args.append(self.ev(a))
                     if a.type is Type.I64 and self.rep(a) == TAGGED:
                         ok = False
@@ -894,6 +896,8 @@ class _Fn:
                 return "NULL"
         else:
             for a in e.args:
+                if not self.no_region(a, f"the {e.cls} constructor (a heap object)"):
+                    return "NULL"
                 args.append(self.ev(a))
         t = self.oslot(e.cls)
         mc = mangle(e.cls)
@@ -1592,7 +1596,7 @@ class _Fn:
         if fd is None:
             self.bad("aot/type", s.field, f"unknown field `{s.cls}.{s.field}`")
             return
-        region_obj = isinstance(s.obj, ir.Local) and self.is_region_local(s.obj.name)
+        region_obj = self.expr_region_cls(s.obj) is not None      # as ev_FieldGet: a region object, however it is named
         if isinstance(s.obj, ir.Local) and self.is_virtual(s.obj.name):
             lval = self.vfield(s.obj.name, s.field)
         else:

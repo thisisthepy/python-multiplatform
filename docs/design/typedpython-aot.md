@@ -465,7 +465,13 @@ matches CPython.
      of `C`); a per-iteration region is reset at the top of each iteration and freed at `tp_cleanup:`,
      so `break`, `continue`, `return` and a failing operation need no path-specific code. Heap pointers of
      `C` flowing into `F` (a parameter, a call result, a field of a heap or virtual object) assigned to a
-     local of `C`, or compared with `is` against a region pointer, make `(F, C)` heap-rc.
+     local of `C`, or compared with `is` against a region pointer, make `(F, C)` heap-rc. A class with
+     no fields is never region (review of #501): its region struct would be empty, every
+     `tpa_region_alloc` of size 0 returns the same address, so `a is b` would be true for two objects
+     (and MSVC rejects an empty struct); heap-rc is correct and costs nothing anyone measures. The
+     expression walkers of `aot/alloc.py` and `aot/classes.py` share one list of child attributes
+     (`EXPR_CHILD_ATTRS` / `EXPR_CHILD_SEQS`), so a node such as `NewArray` (`length`, `fill`) or
+     `CallObject` (`callee`) cannot be skipped by one walker and seen by another.
 3. **Reference counting + small cycle collector (D2) + acyclic `__del__`.**
    - *Pay only for what the program uses*: classes proved acyclic by the shared `aot/classes.py`
      analysis (PR-O1) keep zero GC overhead and do not link `runtime/tp_aot_gc.h`. Only when a program

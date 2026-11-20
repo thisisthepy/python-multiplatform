@@ -500,3 +500,130 @@ def test_binary_trees_stays_heap_rc_with_region_reason(tmp_path: Path):
     cp = subprocess.run([sys.executable, str(bench), "6"], capture_output=True, text=True, check=True)
     aot_res = subprocess.run([str(exe), "6"], capture_output=True, text=True, check=True)
     assert aot_res.stdout == cp.stdout
+
+
+def test_region_refuses_a_class_with_no_fields(tmp_path: Path):
+    """Review of #501, finding 1: a class with no fields must stay heap-rc. A region struct for it is empty,
+    `tpa_region_alloc` of size 0 returns the same address every time, and `a is b` would be true for two
+    distinct objects (CPython prints 0 here). Red before the fix: the report said
+    `-> region (per-iteration scope of the for loop, depth 1)`, the C held `struct tpa_reg_run__Empty { };`
+    and two `tpa_region_alloc(` calls, and the binary printed 3."""
+    src = """
+class Empty:
+    __slots__ = ()
+
+    def __init__(self) -> None:
+        pass
+
+
+def run(n: int) -> int:
+    acc: int = 0
+    for i in range(n):
+        a: Empty = Empty()
+        b: Empty = Empty()
+        if a is b:
+            acc += 1
+    return acc
+
+
+if __name__ == "__main__":
+    print(run(3))
+"""
+    p = _write(tmp_path, src)
+    report = aot.explain_alloc(p)
+    assert ("a = Empty(...) -> heap-rc (used in identity comparison (is)) "
+            "[region: class has no fields]") in report
+    assert ("b = Empty(...) -> heap-rc (used in identity comparison (is)) "
+            "[region: class has no fields]") in report
+    assert "-> region (" not in report
+
+    c_text = aot.generate(p)
+    _syntax_check(c_text, tmp_path, "empty_class")
+    assert "tpa_region_alloc(" not in c_text
+    assert "tpa_reg_run__Empty" not in c_text
+
+    cp, aot_res = _run_both(tmp_path, src)
+    assert cp.returncode == 0
+    assert aot_res.returncode == 0
+    assert aot_res.stdout == cp.stdout == "0\n"
+
+
+NODE_N = """
+class Node:
+    __slots__ = ("n",)
+    n: int
+
+    def __init__(self, n: int) -> None:
+        self.n = n
+
+
+def size(p: Node) -> int:
+    return p.n + 1
+"""
+
+
+def test_region_rules_see_the_length_of_a_list_repeat(tmp_path: Path):
+    """Review of #501, finding 2: `[0] * size(p)` keeps `size(p)` inline as `NewArray.length`, and the
+    expression walkers skipped `length` and `fill`, so a pointer passed to a call there broke no rule.
+    Red before the fix: with the alias `q = p` the analysis made `(run, Node)` region and the emitter's
+    guard refused the program (`aot/region: a region pointer reaches the call of size`); without the alias
+    `p` was scalar-replaced and the C called `tpf_size(v_p, ...)` with `v_p` undeclared (#495's twin)."""
+    with_alias = NODE_N + """
+
+def run(k: int) -> int:
+    p: Node = Node(k)
+    q: Node = p
+    xs: list[int] = [0] * size(p)
+    return len(xs) + p.n + q.n
+
+
+if __name__ == "__main__":
+    print(run(5))
+"""
+    p = _write(tmp_path, with_alias, "alias.py")
+    report = aot.explain_alloc(p)
+    assert ("p = Node(...) -> heap-rc (escapes via alias assignment) "
+            "[region: R3: escapes via call to size]") in report
+    assert "-> region (" not in report
+    c_text = aot.generate(p)
+    _syntax_check(c_text, tmp_path, "alias")
+    assert "tpa_region_alloc(" not in c_text
+    cp, aot_res = _run_both(tmp_path, with_alias, name="alias.py")
+    assert cp.returncode == 0
+    assert aot_res.returncode == 0
+    assert aot_res.stdout == cp.stdout == "16\n"
+
+    no_alias = NODE_N + """
+
+def run(k: int) -> int:
+    p: Node = Node(k)
+    xs: list[int] = [0] * size(p)
+    return len(xs) + p.n
+
+
+if __name__ == "__main__":
+    print(run(5))
+"""
+    p = _write(tmp_path, no_alias, "noalias.py")
+    report = aot.explain_alloc(p)
+    assert ("p = Node(...) -> heap-rc (escapes via call to size) "
+            "[region: R3: escapes via call to size]") in report
+    c_text = aot.generate(p)
+    _syntax_check(c_text, tmp_path, "noalias")
+    assert "v_p" in _func_body_c(c_text, "run")
+    cp, aot_res = _run_both(tmp_path, no_alias, name="noalias.py")
+    assert cp.returncode == 0
+    assert aot_res.returncode == 0
+    assert aot_res.stdout == cp.stdout == "11\n"
+
+    # The walker itself, for the shapes no program reaches today (a read inside `NewArray.length` in the
+    # per-iteration safety check, a region pointer as the callee or an argument of an object call).
+    from typedpython import ir
+    from typedpython.aot.alloc import _walk_exprs_in_expr
+
+    arr = ir.NewArray(ir.Type.I64_ARRAY, ir.Local(ir.Type.I64, "n"), ir.Local(ir.Type.I64, "v"))
+    assert {e.name for e in _walk_exprs_in_expr(arr) if isinstance(e, ir.Local)} == {"n", "v"}
+    call = ir.CallObject(ir.Type.OBJ, ir.Local(ir.Type.OBJ, "cb"), (ir.Local(ir.Type.OBJ, "p"),))
+    assert {e.name for e in _walk_exprs_in_expr(call) if isinstance(e, ir.Local)} == {"cb", "p"}
+    box = ir.Box(ir.Type.OBJ, ir.Local(ir.Type.I64, "x"), ir.Local(ir.Type.BOOL, "x_np"))
+    assert {e.name for e in _walk_exprs_in_expr(box) if isinstance(e, ir.Local)} == {"x", "x_np"}

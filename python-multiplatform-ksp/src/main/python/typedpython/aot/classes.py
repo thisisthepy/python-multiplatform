@@ -18,15 +18,26 @@ from typedpython.aotcheck import Finding
 from typedpython.ir import Type
 
 
+# The child expressions of every `ir.Expr` node, by attribute name: a single child (`EXPR_CHILD_ATTRS`,
+# an `Expr` or None) and a tuple of children (`EXPR_CHILD_SEQS`). Every expression walker of the AOT
+# analyses (`_expr_uses_any`, `_check_init_escape` here, `aot/alloc.py`) reads these two tuples, so a node
+# is never visible to one walker and invisible to another (review of #501: `NewArray.length` / `.fill` and
+# `CallObject.callee` were missing from four hand-written copies). When a node with a new child attribute
+# is added to `typedpython.ir`, add the attribute here.
+EXPR_CHILD_ATTRS = ("left", "right", "operand", "value", "obj", "index", "cond", "then", "orelse",
+                    "length", "fill", "callee", "np")
+EXPR_CHILD_SEQS = ("args", "elements", "parts")
+
+
 def _expr_uses_any(expr: ir.Expr, names: set[str]) -> bool:
     """True if `expr` references any local in `names`."""
     if isinstance(expr, ir.Local):
         return expr.name in names
-    for attr in ("left", "right", "operand", "value", "obj", "index", "cond", "then", "orelse"):
+    for attr in EXPR_CHILD_ATTRS:
         sub = getattr(expr, attr, None)
         if isinstance(sub, ir.Expr) and _expr_uses_any(sub, names):
             return True
-    for attr in ("args", "elements", "parts"):
+    for attr in EXPR_CHILD_SEQS:
         subs = getattr(expr, attr, None)
         if isinstance(subs, tuple):
             for s in subs:
@@ -63,23 +74,38 @@ def _check_init_escape(fn: ir.Function) -> str | None:
                     changed = True
 
     def _expr_escapes(e: ir.Expr) -> str | None:
-        if isinstance(e, (ir.Call, ir.New)):
-            for a in e.args:
+        if isinstance(e, (ir.Call, ir.New, ir.CallObject)):
+            # an object call: `self` as the callee (a bound method) escapes like an argument
+            operands = ((e.callee,) if isinstance(e, ir.CallObject) else ()) + e.args
+            for a in operands:
                 if _expr_uses_any(a, aliases):
                     return f"`self` escapes into a call in `{fn.name}`"
                 sub = _expr_escapes(a)
                 if sub is not None:
                     return sub
-        elif isinstance(e, ir.ListDisplay):
+            return None
+        if isinstance(e, ir.ListDisplay):
             for a in e.elements:
                 if _expr_uses_any(a, aliases):
                     return f"`self` escapes into a list in `{fn.name}`"
-        for attr in ("left", "right", "operand", "value", "obj", "index", "cond", "then", "orelse"):
+                sub = _expr_escapes(a)
+                if sub is not None:
+                    return sub
+            return None
+        for attr in EXPR_CHILD_ATTRS:
             sub_e = getattr(e, attr, None)
             if isinstance(sub_e, ir.Expr):
                 res = _expr_escapes(sub_e)
                 if res is not None:
                     return res
+        for attr in EXPR_CHILD_SEQS:
+            subs = getattr(e, attr, None)
+            if isinstance(subs, tuple):
+                for sub_e in subs:
+                    if isinstance(sub_e, ir.Expr):
+                        res = _expr_escapes(sub_e)
+                        if res is not None:
+                            return res
         return None
 
     for s in all_stmts:
