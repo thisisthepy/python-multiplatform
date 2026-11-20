@@ -413,6 +413,14 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   - **Out of scope here:** `python-multiplatform` keeps no `kotlinx.coroutines` dependency (uses stdlib
     `suspendCoroutine` only). Propagating Kotlin `Job` cancellation back to `Task.cancel()` belongs to the
     `kotlinx.coroutines`-aware await wrapper (#164 item 2).
+  - **In-flight cancellation (leader's task 2026-11-20, agent proposal, not owner-confirmed):** when
+    the `PendingCall` a `SuspendFunctionN` invocation runs under is cancelled (U-5b) while the Python
+    awaitable is still running, the adapter cancels the awaitable's asyncio task
+    (`_cancel_suspend_awaitable`, scheduled with `call_soon_threadsafe` from the call's `onCancelled`
+    listener), and the task's done callback resumes the Kotlin continuation with `CancellationException`
+    and releases the in-flight `PyObject` reference. Before this, the Kotlin coroutine stayed parked for
+    as long as the Python `await` lasted, since no `Job` reaches a `suspendCoroutine` suspension. One
+    listener per in-flight invocation is held by the `PendingCall` until it completes or is cancelled.
   `Status: implemented` on desktop, `PM/desktopTest/.../pythonx/SuspendFunctionParameterTest.kt`.
 - **U-5b** (`CoroutineContext` for exposed `suspend` calls, #164 item 1):
   An exposed `suspend` function may run with a caller-supplied `kotlin.coroutines.CoroutineContext` (such as
@@ -475,8 +483,21 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     `_make_suspend_function` (`PythonCallables.newSuspendFunction`), so the exact same lifetime rules as
     U-5a apply (an active `PythonCallableScope` is required; in-flight invocations hold their own extra
     `PyObject` reference).
-  `Status: implemented` on desktop, `GP/artifact/SamParameterBindingTest.kt`,
-  `PM/desktopTest/.../pythonx/FlowCollectUpcallTest.kt`.
+  - **Cancellation (U-5b applied to a collect; leader's task 2026-11-20, agent proposal, not
+    owner-confirmed):** an exposed `suspend fun` that collects a `kotlinx` flow forwards
+    `PendingCall`'s cancellation to its `Job` (`currentPendingCall()?.onCancelled { job.cancel() }`);
+    cancelling the `asyncio.Future` from Python then ends the collect with `CancellationException`
+    whether the Kotlin coroutine is parked inside `collect` or inside the adapter while the Python
+    collector is itself awaiting (U-5a's in-flight cancellation). The library takes no `kotlinx`
+    dependency for this: `kotlinx-coroutines-core` is a `desktopTest`-only dependency of
+    `python-multiplatform`, for the end-to-end test alone.
+  `Status: implemented` on desktop; written and compile-checked, run in CI (the first version of the
+  end-to-end test called a `pythonx.callable_scope()` that exists in no repository and never ran).
+  `GP/artifact/SamParameterBindingTest.kt`, `PM/desktopTest/.../pythonx/FlowCollectUpcallTest.kt`
+  (`pythonAsyncCollectorCollectsAColdFlowAndStateFlowReadsAndWrites`,
+  `passingAPythonCollectorOutsideAScopeRefusesByName`,
+  `cancellingTheFutureWhileCollectWaitsForTheNextEmissionCancelsTheJobAndEndsTheCollect`,
+  `cancellingTheFutureWhileThePythonCollectorIsAwaitingCancelsTheCollectorTaskAndEndsTheCollect`).
 - **U-6** Upcalls work in a GraalVM native image (desktop). `Status: implemented` with manual
   verification, procedure and record in `docs/platforms/graal-native-image-verification.md`
   (`:sample:nativeCompile`, Liberica NIK), guarded automatically by `ReachabilityMetadataTest.kt` (C-2).

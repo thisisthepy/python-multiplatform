@@ -1045,6 +1045,38 @@ object PythonxAdapter {
             )
 
 
+        # In-flight suspend invocations (SPEC U-5a): pending handle -> (loop, task) once the task
+        # exists; a handle submitted but not yet scheduled sits in `_SUSPEND_UNSCHEDULED`, and a
+        # cancellation that arrives in that window is parked in `_SUSPEND_CANCELLED` for `_schedule`
+        # to apply. Entries leave on the task's done callback, so a finished invocation costs nothing.
+        _SUSPEND_TASKS = {}
+        _SUSPEND_UNSCHEDULED = set()
+        _SUSPEND_CANCELLED = set()
+
+
+        def _cancel_suspend_awaitable(pending_handle):
+            '''Cancels the task running the awaitable of [pending_handle], if it is still running
+            (SPEC U-5a; the Kotlin side calls this from `PendingCall.onCancelled` when the outer
+            call's `Future` was cancelled). Returns whether there was anything to cancel.
+
+            `call_soon_threadsafe` rather than `cancel()` directly: the caller may be on any thread
+            (`PendingCall.cancel` runs its listeners on the cancelling thread), and this must not
+            block. The task's done callback then resumes the Kotlin continuation with
+            `CancelledError`, which crosses as `CancellationException`.
+            '''
+            if pending_handle in _SUSPEND_UNSCHEDULED:
+                _SUSPEND_CANCELLED.add(pending_handle)
+                return True
+            entry = _SUSPEND_TASKS.get(pending_handle)
+            if entry is None:
+                return False
+            loop, task = entry
+            if loop.is_closed():
+                return False
+            loop.call_soon_threadsafe(task.cancel)
+            return True
+
+
         def _submit_suspend_awaitable(awaitable, pending_handle):
             '''Submits a Python awaitable returned by a `PythonSuspendFunction` to the resolved
             asyncio delivery loop (SPEC U-5, U-5a) and wires its done callback to
@@ -1069,6 +1101,7 @@ object PythonxAdapter {
             invoke_fn = _boundary()['invoke']
 
             def _on_done(fut):
+                _SUSPEND_TASKS.pop(pending_handle, None)
                 try:
                     if fut.cancelled():
                         exc = _asyncio.CancelledError()
@@ -1083,11 +1116,20 @@ object PythonxAdapter {
                     invoke_fn(complete_handle, (pending_handle, False, err))
 
             def _schedule():
+                _SUSPEND_UNSCHEDULED.discard(pending_handle)
                 try:
                     fut = _asyncio.ensure_future(awaitable, loop=loop)
+                    _SUSPEND_TASKS[pending_handle] = (loop, fut)
                     fut.add_done_callback(_on_done)
+                    if pending_handle in _SUSPEND_CANCELLED:
+                        _SUSPEND_CANCELLED.discard(pending_handle)
+                        fut.cancel()
                 except BaseException as err:
+                    _SUSPEND_TASKS.pop(pending_handle, None)
+                    _SUSPEND_CANCELLED.discard(pending_handle)
                     invoke_fn(complete_handle, (pending_handle, False, err))
+
+            _SUSPEND_UNSCHEDULED.add(pending_handle)
 
             # Always schedule via `call_soon_threadsafe` / `call_soon` rather than calling
             # `ensure_future` inline while the upcall frame is still running: on `is_running_here`,

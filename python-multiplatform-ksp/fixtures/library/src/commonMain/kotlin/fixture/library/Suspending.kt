@@ -74,6 +74,35 @@ object SuspendingRegistry {
     fun pingBlocking(): String = "pong"
 }
 
+// ------------------------------------------------------------- suspend SAM fun interfaces (U-5c)
+
+/**
+ * A `fun interface` whose single abstract method is `suspend` (SPEC U-5c, #164 item 3): the shape
+ * of `kotlinx.coroutines.flow.FlowCollector<in T>`, without the dependency. A parameter of this
+ * type binds as a slot that takes a Kotlin handle of the interface or a Python callable; the
+ * generated read wraps a `suspend (Long) -> Unit` in a SAM lambda and casts anything else.
+ */
+fun interface AsyncSink {
+    suspend fun take(value: Long)
+}
+
+/** Feeds [sink] two values and answers how many; the test calls it with a lambda and with a handle. */
+suspend fun drainAsync(sink: AsyncSink): Long {
+    sink.take(1L)
+    sink.take(2L)
+    return 2L
+}
+
+/** The control: the same interface shape with a non-suspending method is the #216 SAM slot. */
+fun interface SyncSink {
+    fun take(value: Long)
+}
+
+fun drainSync(sink: SyncSink): Long {
+    sink.take(1L)
+    return 1L
+}
+
 // ------------------------------------------------------- suspending *types*, not suspending funs
 //
 // None of the declarations below carry `Modifier.SUSPEND` -- `BindingPolicy.isSuspending` reads

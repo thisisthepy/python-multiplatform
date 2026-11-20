@@ -1403,7 +1403,16 @@ kotlin {
             // native-image classpath at META-INF/native-image/...
             resources.srcDir(generateDesktopReachabilityMetadata.flatMap { it.outputDirectory })
         }
-        val desktopTest by getting
+        val desktopTest by getting {
+            dependencies {
+                // SPEC U-5c's end-to-end test (`FlowCollectUpcallTest`) collects a real
+                // `kotlinx.coroutines.flow.Flow` from Python. Test scope only: the library has no
+                // coroutines dependency and must not grow one (docs/design/upcall.md section 5.4,
+                // `PendingCall`'s KDoc); the `suspend fun` being exposed is the user's, and its
+                // dispatcher is already on the user's classpath.
+                implementation(libs.kotlinx.coroutines.core)
+            }
+        }
         desktopTest.dependsOn(jvmTest)
         val androidMain by getting
         jvmMain.dependsOn(commonMain)

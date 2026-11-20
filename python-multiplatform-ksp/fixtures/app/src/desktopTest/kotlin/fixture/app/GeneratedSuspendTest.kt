@@ -1,5 +1,6 @@
 package fixture.app
 
+import fixture.library.AsyncSink
 import fixture.library.SuspendingService
 import fixture.library.ValueHandler
 import python.multiplatform.ffi.upcall.PendingCall
@@ -241,6 +242,41 @@ class GeneratedSuspendTest {
             entry.paramTypeNames[0],
         )
         assertFalse(UpcallTable.resolve("fixture.library.makeHandler").isValid)
+    }
+
+    @Test
+    fun aSuspendSamFunInterfaceParameterBindsAsASlotTakingALambdaOrAHandle() {
+        // SPEC U-5c (#164 item 3): `fun interface AsyncSink { suspend fun take(value: Long) }` as a
+        // parameter is the `<Interface>|SuspendFunctionN(...)->Ret` slot, and the generated read
+        // wraps a `suspend (Long) -> Unit` (a `kotlin.Function2` at run time) in a SAM lambda or
+        // casts a handle. Before #497 the parameter was a plain object handle: the slot name was
+        // the bare interface and a lambda failed the cast with ClassCastException.
+        val entry = entry("fixture.library.drainAsync")
+        assertTrue(entry.isSuspend)
+        assertEquals(
+            "fixture.library.AsyncSink|kotlin.coroutines.SuspendFunction1(kotlin.Long)->kotlin.Unit",
+            entry.paramTypeNames[0],
+        )
+
+        val taken = mutableListOf<Long>()
+        val lambda: suspend (Long) -> Unit = { taken += it }
+        val viaLambda = startCall("fixture.library.drainAsync", lambda)
+        assertTrue(viaLambda.isDone, "nothing here suspends, so the call completes on the calling thread")
+        assertNull(viaLambda.failure, "the adapted lambda failed: ${viaLambda.failure}")
+        assertEquals(2L, viaLambda.value)
+        assertEquals(listOf(1L, 2L), taken)
+
+        val handleTaken = mutableListOf<Long>()
+        val handle = AsyncSink { handleTaken += it }
+        val viaHandle = startCall("fixture.library.drainAsync", handle)
+        assertTrue(viaHandle.isDone)
+        assertNull(viaHandle.failure)
+        assertEquals(listOf(1L, 2L), handleTaken)
+
+        // The control: a non-suspending `fun interface` is the #216 slot, not this one.
+        val control = entry("fixture.library.drainSync")
+        assertFalse(control.isSuspend)
+        assertEquals("fixture.library.SyncSink|kotlin.Function1(kotlin.Long)->kotlin.Unit", control.paramTypeNames[0])
     }
 
     @Test

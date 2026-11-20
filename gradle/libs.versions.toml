@@ -37,6 +37,8 @@ androidx-activity-compose = { module = "androidx.activity:activity-compose", ver
 androidx-lifecycle-viewmodel = { group = "org.thisisthepy.compose.androidx.lifecycle", name = "lifecycle-viewmodel", version.ref = "compose-libraries" }
 androidx-lifecycle-runtime-compose = { group = "org.thisisthepy.compose.androidx.lifecycle", name = "lifecycle-runtime-compose", version.ref = "compose-libraries" }
 kotlinx-coroutines-swing = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-swing", version.ref = "kotlinx-coroutines" }
+# Test-only in python-multiplatform (desktopTest): the library itself has no coroutines dependency (docs/design/upcall.md 5.4).
+kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "kotlinx-coroutines" }
 kotlinx-browser = { group = "org.jetbrains.kotlinx", name = "kotlinx-browser", version.ref = "kotlinx-browser" }
 # The fork's design systems (compose-multiplatform-core-extended `extended/design-systems`, issue #408).
 designsystem = { group = "org.thisisthepy.compose.designsystem", name = "designsystem", version.ref = "compose-libraries" }
