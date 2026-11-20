@@ -1045,20 +1045,59 @@ object PythonxAdapter {
             )
 
 
-        # In-flight suspend invocations (SPEC U-5a): pending handle -> the delivery loop, from
-        # submission until the task's done callback, and pending handle -> the task, from
-        # `_schedule` until the same callback. Both are written on the loop thread only; the one
-        # read off it (`_cancel_suspend_awaitable`) takes nothing but the loop. A finished
+        # In-flight suspend invocations (SPEC U-5a) and awaits (SPEC U-5d): pending handle -> the
+        # delivery loop, from submission until the task's done callback, and pending handle -> the
+        # task, from `_schedule` until the same callback. The loop entry is written by the
+        # submitting thread (any thread, for U-5d) and read by the cancelling thread (any thread);
+        # the task entry is written and read on the loop thread only. Both are dropped on the loop
+        # thread by the done callback, and off it by `_drop_suspend_entries` when the loop was found
+        # closed (no callback of that loop runs again, so nothing else will). On a free-threaded
+        # build a dict operation takes the dict's own lock, so none of this needs more. A finished
         # invocation costs nothing.
         _SUSPEND_LOOPS = {}
         _SUSPEND_TASKS = {}
 
+        # The answers of `_cancel_suspend_awaitable` and `_suspend_loop_closed`, read as a number by
+        # `PyAwait.cancel`: the await is in flight on an open loop (and the cancel, if one was asked
+        # for, was handed to it); the await is over (its done callback has run or is running); the
+        # await is stranded on a closed loop (its entries were dropped on the way out).
+        _SUSPEND_IN_FLIGHT = 1
+        _SUSPEND_OVER = 0
+        _SUSPEND_LOOP_CLOSED = -1
+
+
+        def _drop_suspend_entries(pending_handle):
+            _SUSPEND_TASKS.pop(pending_handle, None)
+            _SUSPEND_LOOPS.pop(pending_handle, None)
+
+
+        def _suspend_loop_closed(pending_handle):
+            '''Answers whether the await of [pending_handle] is stranded on a closed loop, without
+            touching its task (SPEC U-5d: `PyAwait.cancel` on an await whose cancel was already
+            handed to the loop; the loop may have closed since, and `BaseEventLoop.close()` drops
+            the callbacks it had not run, the queued cancel among them). `_SUSPEND_LOOP_CLOSED`
+            drops the entries here, as `_cancel_suspend_awaitable` does; `_SUSPEND_IN_FLIGHT` means
+            the loop is open and nothing was queued.
+            '''
+            loop = _SUSPEND_LOOPS.get(pending_handle)
+            if loop is None:
+                return _SUSPEND_OVER
+            if loop.is_closed():
+                _drop_suspend_entries(pending_handle)
+                return _SUSPEND_LOOP_CLOSED
+            return _SUSPEND_IN_FLIGHT
+
 
         def _cancel_suspend_awaitable(pending_handle):
             '''Asks the loop to cancel the task running the awaitable of [pending_handle], if the
-            invocation is still in flight (SPEC U-5a; the Kotlin side calls this from
-            `PendingCall.onCancelled` when the outer call's `Future` was cancelled). Returns whether
-            the invocation was in flight.
+            invocation is still in flight (SPEC U-5a: the Kotlin side calls this from
+            `PendingCall.onCancelled` when the outer call's `Future` was cancelled; SPEC U-5d:
+            `PyAwait.cancel`, at most once per await). Answers `_SUSPEND_IN_FLIGHT` when the cancel
+            was handed to the loop, `_SUSPEND_OVER` when the invocation is over (its done callback
+            has run or is running), and `_SUSPEND_LOOP_CLOSED` when the loop it was submitted to is
+            closed: nothing on that loop runs again, the done callback included, so the entries are
+            dropped here and the Kotlin side decides what to do with a continuation nobody will
+            resume (`PyAwait` ends it with `CancellationException`).
 
             Everything that touches the task runs on the loop thread, through
             `call_soon_threadsafe`: the caller may be on any thread (`PendingCall.cancel` runs its
@@ -1072,15 +1111,18 @@ object PythonxAdapter {
             continuation with `CancelledError`, which crosses as `CancellationException`.
             '''
             loop = _SUSPEND_LOOPS.get(pending_handle)
-            if loop is None or loop.is_closed():
-                return False
+            if loop is None:
+                return _SUSPEND_OVER
+            if loop.is_closed():
+                _drop_suspend_entries(pending_handle)
+                return _SUSPEND_LOOP_CLOSED
             try:
                 loop.call_soon_threadsafe(_cancel_suspend_on_loop, pending_handle)
             except RuntimeError:
-                # Closed between the check and the call. Nothing on that loop runs again, the
-                # done callback included; there is no task left to cancel.
-                return False
-            return True
+                # Closed between the check and the call; the same situation as above.
+                _drop_suspend_entries(pending_handle)
+                return _SUSPEND_LOOP_CLOSED
+            return _SUSPEND_IN_FLIGHT
 
 
         def _cancel_suspend_on_loop(pending_handle):
@@ -1093,9 +1135,10 @@ object PythonxAdapter {
 
 
         def _submit_suspend_awaitable(awaitable, pending_handle):
-            '''Submits a Python awaitable returned by a `PythonSuspendFunction` to the resolved
-            asyncio delivery loop (SPEC U-5, U-5a) and wires its done callback to
-            `PythonCallables.completeSuspendCall`.
+            '''Submits a Python awaitable, one returned by a `PythonSuspendFunction` (SPEC U-5a) or
+            one a Kotlin coroutine awaits through `PyObject.await()` (SPEC U-5d), to the resolved
+            asyncio delivery loop (SPEC U-5) and wires its done callback to
+            `PythonCallables.completeSuspendCall`, which resolves [pending_handle] to either.
             '''
             import asyncio as _asyncio
             import python_multiplatform as _pm
@@ -1116,8 +1159,7 @@ object PythonxAdapter {
             invoke_fn = _boundary()['invoke']
 
             def _on_done(fut):
-                _SUSPEND_TASKS.pop(pending_handle, None)
-                _SUSPEND_LOOPS.pop(pending_handle, None)
+                _drop_suspend_entries(pending_handle)
                 try:
                     if fut.cancelled():
                         exc = _asyncio.CancelledError()
@@ -1137,12 +1179,11 @@ object PythonxAdapter {
                     _SUSPEND_TASKS[pending_handle] = fut
                     fut.add_done_callback(_on_done)
                 except BaseException as err:
-                    _SUSPEND_TASKS.pop(pending_handle, None)
-                    _SUSPEND_LOOPS.pop(pending_handle, None)
+                    _drop_suspend_entries(pending_handle)
                     invoke_fn(complete_handle, (pending_handle, False, err))
 
-            # Registered before `_schedule` is queued, so a cancel that reaches
-            # `_cancel_suspend_awaitable` from the moment this returns finds the loop.
+            # Registered before `_schedule` is queued, and on the submitting thread, so a cancel
+            # that reaches `_cancel_suspend_awaitable` from the moment this returns finds the loop.
             _SUSPEND_LOOPS[pending_handle] = loop
 
             # Always schedule via `call_soon_threadsafe` / `call_soon` rather than calling

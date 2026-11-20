@@ -340,20 +340,30 @@ object PythonCallables {
     }
 
     /**
-     * Resumes a parked [PythonSuspendFunction] continuation from Python's asyncio done callback.
+     * Resumes a parked [PythonSuspendFunction] continuation (SPEC U-5a) or a [PyAwait] (SPEC U-5d)
+     * from Python's asyncio done callback.
      *
-     * Runs on the target asyncio loop thread with the GIL held. Releases the [HandleTable] root
-     * and the in-flight [PyObject] reference, unmarshals [result] (or maps [error] via
-     * [PyException.toKotlinException]), and resumes the Kotlin [Continuation].
+     * Runs on the target asyncio loop thread with the GIL held. Releases the [HandleTable] root,
+     * then hands [ok] and [payload] (the result, or the exception instance) to the pending object,
+     * which unmarshals or maps it (`PyException.toKotlinException`) and resumes its continuation.
+     * A handle that resolves to neither (already released, or never one of these) is ignored.
      */
     internal fun completeSuspendCall(
         pendingHandle: Long,
         ok: Boolean,
         payload: PyObject?,
     ) {
-        val pending = HandleTable.resolveRaw(pendingHandle) as? PendingSuspendInvocation ?: return
-        HandleTable.release(ObjectReference(pendingHandle))
-        pending.complete(ok, payload)
+        when (val pending = HandleTable.resolveRaw(pendingHandle)) {
+            is PendingSuspendInvocation -> {
+                HandleTable.release(ObjectReference(pendingHandle))
+                pending.complete(ok, payload)
+            }
+            is PyAwait -> {
+                HandleTable.release(ObjectReference(pendingHandle))
+                pending.complete(ok, payload)
+            }
+            else -> return
+        }
     }
 
     /** How many of a lowered composable lambda's compiled arguments are the compiler's rather than

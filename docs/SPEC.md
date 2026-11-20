@@ -411,8 +411,9 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
        exception via `PyException.toKotlinException()`, mapping `asyncio.CancelledError` to
        `CancellationException`) and resumes the Kotlin `Continuation`.
   - **Out of scope here:** `python-multiplatform` keeps no `kotlinx.coroutines` dependency (uses stdlib
-    `suspendCoroutine` only). Propagating Kotlin `Job` cancellation back to `Task.cancel()` belongs to the
-    `kotlinx.coroutines`-aware await wrapper (#164 item 2).
+    `suspendCoroutine` only). Propagating Kotlin `Job` cancellation back to `Task.cancel()` goes through
+    the `PyAwait.submit` primitive of U-5d (#164 item 2), over which a `kotlinx.coroutines`-aware wrapper
+    is written outside this library.
   - **In-flight cancellation (leader's task 2026-11-20, agent proposal, not owner-confirmed):** when
     the `PendingCall` a `SuspendFunctionN` invocation runs under is cancelled (U-5b) while the Python
     awaitable is still running, the adapter cancels the awaitable's asyncio task
@@ -517,6 +518,86 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `cancellingTheFutureWhileThePythonCollectorIsAwaitingCancelsTheCollectorTaskAndEndsTheCollect`,
   `aCompletedSuspendedEmissionLeavesNoCancelListenerOnTheCollect`,
   `cancellingTheFutureWhileADispatchedCollectorIsAwaitingEndsTheCollectOnTheDispatcherThread`).
+- **U-5d** (a Python awaitable awaited from Kotlin, #164 item 2; leader's task 2026-11-20, agent
+  proposal, not owner-confirmed):
+  `suspend fun PyObject.await(): PyObject` (package `python.multiplatform.ffi.pythonx`) suspends the
+  calling Kotlin coroutine until the receiver, any object with `__await__` (a coroutine, an
+  `asyncio.Future` or `Task`, any awaitable), has run to completion on an `asyncio` loop, and returns
+  its result as a new owned `PyObject`. It is built on `PyAwait.submit(awaitable, onComplete)`, a public
+  callback primitive that submits once and reports once, with `PyAwait.cancel()`, so that a wrapper
+  which does depend on `kotlinx.coroutines` (pythonx-concurrent) can forward `Job` cancellation to the
+  task through `suspendCancellableCoroutine` + `invokeOnCancellation { pyAwait.cancel() }`.
+  `python-multiplatform` itself keeps no `kotlinx` dependency (`kotlin.coroutines.suspendCoroutine`).
+  - **Requires the binding module.** The completion crosses Python → Kotlin through the upcall table
+    (`PythonCallables.completeSuspendCall`, the entry U-5a already uses), so `PythonxAdapter.install()`
+    must have run. Without it `await()` throws `IllegalStateException` naming the module before
+    submitting anything, and a receiver without `__await__` throws `IllegalArgumentException` likewise;
+    in both cases nothing was scheduled, no handle was registered and the receiver is untouched.
+  - **Which loop.** The same order as U-5 (#164 item 10): the loop running on the calling thread
+    (`asyncio.get_running_loop()`), else the task-scoped `python_multiplatform.use_delivery_loop(loop)`
+    (a `contextvars.ContextVar`, so it reaches a Kotlin thread only inside an upcall made from within
+    that scope), else the process-wide `set_delivery_loop(loop)`. No loop, or a closed one, is
+    `IllegalStateException` thrown out of `await()` before it suspends (`"no running event loop and no
+    configured delivery loop"` / `"delivery event loop is closed"`); a caller started by `PendingCall`
+    sees that call fail with it.
+  - **Submission, from any thread.** Under `withGIL` (attachment, not exclusion on 3.15t) the
+    receiver and a `HandleTable` handle on the pending await are handed to
+    `python_multiplatform.binding._submit_suspend_awaitable`, which queues one `_schedule` callback on
+    the target loop (`call_soon` when that loop runs on the calling thread, `call_soon_threadsafe`
+    otherwise) and returns. The task is created on the loop thread only (`asyncio.ensure_future(awaitable,
+    loop=loop)` inside `_schedule`), never off it. The `withGIL` scope exits before `suspendCoroutine`
+    parks: the GIL is never held across the suspension. Python's closure holds the receiver from the
+    submit on and the task holds it after `_schedule`, so the Kotlin wrapper takes no extra reference
+    and the caller keeps ownership of its own.
+  - **Resumption, on the loop thread.** The task's done callback resumes the Kotlin continuation on
+    the loop thread, inside an upcall frame (`UpcallTrampoline.attached`, so the GIL is held and the
+    thread is attached), exactly once: it releases the handle, then resumes with the result (a new
+    reference taken on that thread; the caller owns the returned `PyObject`), with the `PyException`
+    the task raised (type, value, traceback, `__cause__` and `__context__` captured as for any Python
+    exception crossing into Kotlin), or, for a cancelled task, with `CancellationException` whose
+    `cause` is the `PyException` of the `asyncio.CancelledError` (`PyException.toKotlinException()`,
+    U-5a's mapping). The code after `await()` therefore runs on the loop thread and blocks the loop
+    for as long as it runs; a `ContinuationInterceptor` in the coroutine's context moves it off (the
+    resumption is dispatched through the interceptor, as `suspendCoroutine` intercepts its
+    continuation).
+  - **Cancellation, to `Task.cancel()`, exactly once.** `PyAwait.cancel()` hands the cancel to the loop
+    at most once (`call_soon_threadsafe(_cancel_suspend_on_loop)`); the first call returns `true` when the
+    await is still in flight, every later call, and any call after completion, returns `false` and does
+    nothing. `_schedule` and the cancel share the loop's FIFO, so a cancel that lands before the task
+    exists cancels the task the loop is about to create (its body never runs); a cancel after the task
+    finished finds nothing. The task's done callback then resumes the continuation with
+    `CancellationException` (above), or with the value if the coroutine caught `CancelledError` and
+    returned one, which is `asyncio`'s own contract. When the target loop is already closed at
+    `cancel()`, nothing on it will ever run again, so the await completes itself with
+    `CancellationException("the delivery loop is closed")` on the cancelling thread, under the same
+    exactly-once guard. `await()` registers `coroutineContext[PendingCall]?.onCancelled { pyAwait.cancel() }`
+    after a successful submit and disposes it on completion: cancelling the Python `Future` of an
+    exposed `suspend fun` that is awaiting (U-5b), or `PendingCall.cancel()` from Kotlin on a call
+    started with `PendingCall.start`, cancels the task. A coroutine with no `PendingCall` and no
+    kotlinx wrapper has no cancellation source and waits for the task.
+  - **Awaiting inside an upcall on the loop thread never deadlocks, by construction.** An exposed
+    `suspend fun` called from a coroutine on loop `L` that calls `pyObject.await()` resolves `L` as the
+    running loop, queues `_schedule` with `call_soon`, exits `withGIL` and suspends; `PendingCall.start`
+    returns with `isDone == false`, `AsyncUpcall.deliver` hands the Python caller an `asyncio.Future`
+    and the upcall frame returns. The loop then runs the task, its done callback resumes the Kotlin
+    body on `L`'s thread, and the body's completion settles the outer `Future` through
+    `call_soon_threadsafe(_pm_settle)`. No thread ever waits for another: the Python caller observes a
+    `Future`, not a value, exactly as for any suspending upcall (the fast path cannot apply, since
+    `await()` always suspends).
+  - **What is not covered.** A loop that stops (not closes) with the task pending strands the
+    continuation, as it strands every Python coroutine awaiting on that loop; nothing resumes it until
+    the loop runs again. An awaitable bound to a different loop than the resolved one fails inside
+    `_schedule` (`ValueError`, delivered as the `PyException`). `wasmJs` has no threads and no default
+    loop: `planned` there.
+  `Status: implemented` on desktop, `PM/desktopTest/.../pythonx/PyAwaitTest.kt`
+  (`aPythonCoroutineIsAwaitedFromAKotlinCoroutineStartedOnANonPythonThread`,
+  `cancellingThePendingCallFromKotlinCancelsTheAsyncioTaskExactlyOnce`,
+  `aCancelThatLandsBeforeTheTaskExistsCancelsTheTaskTheLoopIsAboutToCreate`,
+  `aPythonExceptionResumesTheKotlinCoroutineWithThePyException`,
+  `awaitingFromInsideAnUpcallOnTheLoopThreadHandsPythonAFutureAndDoesNotDeadlock`,
+  `theContinuationIsDispatchedThroughTheCallersInterceptorNotRunOnTheLoopThread`,
+  `aKotlinxJobCancellationReachesTaskCancelThroughTheSubmitPrimitive`,
+  `aReceiverWithoutAwaitOrNoLoopFailsBeforeAnythingIsScheduled`).
 - **U-6** Upcalls work in a GraalVM native image (desktop). `Status: implemented` with manual
   verification, procedure and record in `docs/platforms/graal-native-image-verification.md`
   (`:sample:nativeCompile`, Liberica NIK), guarded automatically by `ReachabilityMetadataTest.kt` (C-2).
