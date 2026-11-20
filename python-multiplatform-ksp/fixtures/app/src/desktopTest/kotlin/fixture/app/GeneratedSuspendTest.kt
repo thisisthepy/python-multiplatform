@@ -292,24 +292,27 @@ class GeneratedSuspendTest {
     }
 
     @Test
-    fun aClassWhoseOnlyMembersAreUnexposableStaysExposedWithAnEmptySurface() {
-        // `ValueHandler`'s constructor and its one property are both this shape, so nothing of it
-        // is left in the table -- but the class declaration itself is unaffected: it is still a
-        // renderable classifier (`runsValueHandler` casts a parameter to it below), the same way a
-        // class with only `suspend fun` members stayed exposed before this task
+    fun aClassWhoseOnlyPropertyIsUnexposableKeepsItsConstructorAsTheWholeSurface() {
+        // `ValueHandler`'s constructor takes a top-level `suspend` function-typed parameter, which
+        // SPEC U-5a exposes, while its one property `f` is of that type and stays excluded. So the
+        // constructor is the whole advertised surface: the class is still a renderable classifier
+        // (`runsValueHandler` casts a parameter to it below), exactly as a class with only
+        // `suspend fun` members stays exposed
         // (`aSuspendingMemberKeepsItsReceiverSlotAndItsClassStaysConstructible`).
         val cls = ClassLookup.require("fixture.library.ValueHandler")
-        assertTrue(cls.memberNames.isEmpty())
+        assertEquals(listOf("fixture.library.ValueHandler.<init>"), cls.memberNames.toList())
     }
 
     @Test
-    fun everyMemberOfSuspendingServiceThatIsThisShapeIsMissingFromItsAdvertisedSurface() {
+    fun everyPropertyOrReturnOfSuspendingFunctionTypeIsMissingFromSuspendingServiceAdvertisedSurface() {
         // The negative counterpart to `everySuspendingMemberIsAdvertisedOnItsClassAndResolves`:
         // an excluded member must not leak into `ReflectedClass.memberNames` either, or a Python
         // mirror built from that list would still advertise a name with no entry behind it.
         val members = ClassLookup.require("fixture.library.SuspendingService").memberNames
         assertFalse(members.contains("fixture.library.SuspendingService.handler"))
-        assertFalse(members.contains("fixture.library.SuspendingService.runsHandlerMember"))
+        // `runsHandlerMember` takes a `suspend` function-typed parameter, which SPEC U-5a exposes,
+        // so it is advertised; only the property and the return-typed member stay excluded.
+        assertTrue(members.contains("fixture.library.SuspendingService.runsHandlerMember"))
         assertFalse(members.contains("fixture.library.SuspendingService.makesHandlerMember"))
         assertFalse(members.contains("fixture.library.SuspendingService.companionHandler"))
         // and the members that survive are still exactly the ones earlier tests in this file

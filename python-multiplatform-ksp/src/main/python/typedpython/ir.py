@@ -1043,6 +1043,10 @@ class Function:
     # After the loop entries, a function with an effect that holds list copies has one statement
     # entry (`Resume.stmt` set) per source statement holding a Call (#390 item 5, statement exits).
     resumes: tuple["Resume", ...] = ()
+    # AOT mode (SPEC N-17, #486): return class (C or C | None) and local variable classes.
+    return_cls: str | None = None
+    return_optional: bool = False
+    local_classes: dict[str, tuple[str, bool]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -1073,6 +1077,16 @@ class Resume:
 
 
 @dataclass(frozen=True)
+class FieldDecl:
+    """One typed field of a compiled class (AOT mode, SPEC N-17, #486)."""
+
+    name: str
+    type: Type
+    cls: str | None = None
+    optional: bool = False
+
+
+@dataclass(frozen=True)
 class ClassDecl:
     """A compiled fixed-layout class (SPEC N-11): `__slots__` written by the user equal to its
     annotated fields, base object, no metaclass, no decorator but @compiled. The module init checks
@@ -1085,6 +1099,7 @@ class ClassDecl:
     # The class defines `__del__` (a finalizer): its objects are never placed in a region (SPEC N-12b),
     # freeing a region would skip the finalizer.
     has_del: bool = False
+    field_decls: tuple[FieldDecl, ...] = ()
 
 
 @dataclass(frozen=True)
