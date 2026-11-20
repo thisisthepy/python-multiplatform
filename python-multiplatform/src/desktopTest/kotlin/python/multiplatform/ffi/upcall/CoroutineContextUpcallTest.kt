@@ -151,6 +151,7 @@ class CoroutineContextUpcallTest {
                 Python3.exec(
                     """
                     import asyncio
+                    import inspect
                     import python_multiplatform as _pm
 
                     _stress_loop = asyncio.new_event_loop()
@@ -161,7 +162,10 @@ class CoroutineContextUpcallTest {
                         with _pm.use_coroutine_context($ctxHandle):
                             for _ in range(2000):
                                 r = _pm_bound()
-                                val = await asyncio.wait_for(r, 1.0)
+                                # The worker can finish before start() returns; the
+                                # call then completes inline and hands back the value
+                                # itself (SPEC U-5), not a Future.
+                                val = await asyncio.wait_for(r, 1.0) if inspect.isawaitable(r) else r
                                 assert val.startswith("kotlin-stress-worker|stress-job"), val
                                 _stress_count += 1
 
