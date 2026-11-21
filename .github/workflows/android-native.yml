@@ -32,3 +32,83 @@ jobs:
       - name: Compile Android Native Arm64
         # Compile Android Native which includes commonMain + nativeMain + artMain
         run: ./gradlew :python-multiplatform:compileKotlinAndroidNativeArm64 --console=plain
+
+  # #328: the library's instrumented tests on an x86_64 emulator, on the free-threaded 3.15t build
+  # the AAR carries (the plugin stages nothing for Android, SPEC T-2; libpython and the stdlib travel
+  # inside the AAR). Owner approval for this job and its emulator action: 2026-11-21 ("CI에 추가").
+  # The benchmark classes are left out: timings on a shared CI emulator mean nothing (AGENTS.md 8).
+  emulator:
+    name: Android x86_64 emulator on 3.15t (instrumented tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'zulu'
+          cache: 'gradle'
+
+      - name: Cache Konan
+        uses: actions/cache@v4
+        with:
+          path: ~/.konan
+          key: ${{ runner.os }}-konan-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-konan-
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Build the test APK before the emulator starts
+        run: ./gradlew :python-multiplatform:assembleDebugAndroidTest --console=plain
+
+      - name: Instrumented tests on the emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot
+          script: >-
+            rm -rf python-multiplatform/build/outputs/androidTest-results &&
+            ./gradlew :python-multiplatform:connectedDebugAndroidTest --console=plain
+            -Pandroid.testInstrumentationRunnerArguments.notClass=python.native.ffi.CompositionBenchmark,python.native.ffi.JniOverheadBenchmark,python.native.ffi.UpcallOverheadTest
+
+      - name: Count the tests
+        if: always()
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import glob, xml.etree.ElementTree as ET
+          files = glob.glob("python-multiplatform/build/outputs/androidTest-results/connected/**/*.xml", recursive=True)
+          total = failed = skipped = 0
+          classes = set()
+          for f in files:
+              root = ET.parse(f).getroot()
+              suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
+              for s in suites:
+                  total += int(s.get("tests", 0))
+                  failed += int(s.get("failures", 0)) + int(s.get("errors", 0))
+                  skipped += int(s.get("skipped", 0))
+                  classes.update(tc.get("classname", "") for tc in s.iter("testcase"))
+          print(f"Android emulator (x86_64, 3.15t): {total} tests, {total - failed - skipped} passed, {failed} failed, {skipped} skipped ({len(files)} files)")
+          print("AndroidFreeThreadedBuildTest ran" if "python.multiplatform.AndroidFreeThreadedBuildTest" in classes else "AndroidFreeThreadedBuildTest DID NOT RUN")
+          PY
+          cat "$GITHUB_STEP_SUMMARY"
+          grep -q "AndroidFreeThreadedBuildTest ran" "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-emulator-reports
+          path: |
+            python-multiplatform/build/reports/androidTests
+            python-multiplatform/build/outputs/androidTest-results

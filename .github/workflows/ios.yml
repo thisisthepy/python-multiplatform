@@ -84,3 +84,107 @@ jobs:
           path: |
             python-multiplatform-gradle-plugin/fixtures/klib-artifact/build/reports/tests/iosSimulatorArm64Test
             python-multiplatform-gradle-plugin/fixtures/klib-artifact/build/test-results/iosSimulatorArm64Test
+
+  # #328: the free-threaded 3.15t build on the iOS simulator. Two separate Gradle invocations: the
+  # library's own simulator suite (IosFreeThreadedBuildTest among it), then an app built only from
+  # what the bindings plugin provides (python-multiplatform-gradle-plugin/fixtures/ios-consumer,
+  # README.md there), whose probe line must report the staged stdlib, an extension module, the
+  # payload and the free-threaded build.
+  ios-consumer:
+    name: iOS simulator on 3.15t (library suite, plugin-staged app)
+    runs-on: macos-latest
+    timeout-minutes: 150
+    env:
+      FX: ':python-multiplatform-gradle-plugin-fixtures:ios-consumer'
+      FXDIR: python-multiplatform-gradle-plugin/fixtures/ios-consumer
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'zulu'
+          cache: 'gradle'
+
+      - name: Cache Konan
+        uses: actions/cache@v4
+        with:
+          path: ~/.konan
+          key: ${{ runner.os }}-konan-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-konan-
+
+      - name: Library suite on the simulator
+        run: |
+          rm -rf python-multiplatform/build/test-results/iosSimulatorArm64Test
+          ./gradlew :python-multiplatform:iosSimulatorArm64Test --rerun --console=plain
+
+      - name: Count the library tests
+        if: always()
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import glob, xml.etree.ElementTree as ET
+          files = glob.glob("python-multiplatform/build/test-results/iosSimulatorArm64Test/*.xml")
+          total = failed = skipped = 0
+          for f in files:
+              suite = ET.parse(f).getroot()
+              total += int(suite.get("tests", 0))
+              failed += int(suite.get("failures", 0)) + int(suite.get("errors", 0))
+              skipped += int(suite.get("skipped", 0))
+          names = " ".join(sorted(ET.parse(f).getroot().get("name", "") for f in files))
+          print(f"Library (iOS simulator, 3.15t): {total} tests, {total - failed - skipped} passed, {failed} failed, {skipped} skipped ({len(files)} suites)")
+          print("IosFreeThreadedBuildTest ran" if "IosFreeThreadedBuildTest" in names else "IosFreeThreadedBuildTest DID NOT RUN")
+          PY
+          cat "$GITHUB_STEP_SUMMARY"
+          grep -q "IosFreeThreadedBuildTest ran" "$GITHUB_STEP_SUMMARY"
+
+      - name: Link the consumer framework (plugin acquires and stages the 3.15t framework)
+        run: ./gradlew "$FX:linkDebugFrameworkIosSimulatorArm64" --console=plain
+
+      - name: Stage the stdlib and install the Xcode script (plugin tasks only)
+        run: |
+          EFFECTIVE_PLATFORM_NAME=-iphonesimulator ARCHS=arm64 ./gradlew -q "$FX:stageIosPythonHomeForXcode"
+          ./gradlew "$FX:installPythonXcodeScript" --console=plain
+
+      - name: Build the app
+        run: |
+          xcodebuild -project "$FXDIR/xcode/app.xcodeproj" \
+            -target app -configuration Debug -sdk iphonesimulator ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
+            SYMROOT="$PWD/$FXDIR/build/xcode-app" \
+            CODE_SIGN_IDENTITY="-" CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM="" build
+
+      - name: Launch on a simulator and read the probe line
+        run: |
+          APP="$FXDIR/build/xcode-app/Debug-iphonesimulator/IosConsumer.app"
+          UDID=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          devs = json.load(sys.stdin)["devices"]
+          print(next(d["udid"] for rt, ds in sorted(devs.items(), reverse=True) if "iOS" in rt for d in ds if d["name"].startswith("iPhone")))')
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl install "$UDID" "$APP"
+          LOG="$RUNNER_TEMP/launch.log"
+          # No SIMCTL_CHILD_* variable: everything the app needs is inside the bundle.
+          xcrun simctl launch --console-pty --terminate-running-process "$UDID" \
+            org.thisisthepy.python.multiplatform.iosconsumer > "$LOG" 2>&1 &
+          LAUNCH=$!
+          for i in $(seq 1 120); do
+            grep -q "IOS_CONSUMER_PROBE" "$LOG" && break
+            sleep 1
+          done
+          kill "$LAUNCH" 2>/dev/null || true
+          cat "$LOG"
+          LINE=$(grep -o "IOS_CONSUMER_PROBE.*" "$LOG" | head -n 1 | tr -d '\r')
+          echo "probe: $LINE" >> "$GITHUB_STEP_SUMMARY"
+          test "$LINE" = "IOS_CONSUMER_PROBE stdlib=ok ext=ok payload=ok ft=ok"
+
+      - name: Upload the library test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-consumer-reports
+          path: |
+            python-multiplatform/build/reports/tests/iosSimulatorArm64Test
+            python-multiplatform/build/test-results/iosSimulatorArm64Test
