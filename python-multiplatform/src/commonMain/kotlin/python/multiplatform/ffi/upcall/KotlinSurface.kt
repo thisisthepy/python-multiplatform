@@ -193,6 +193,7 @@ object KotlinSurface {
         # `python_multiplatform` -- the binder's root module. Kotlin-named modules carry Kotlin's own
         # surface; this module describes it, so that a Pythonic package can be built on top by rule.
 
+        import contextvars as _contextvars
         import inspect as _inspect
         import keyword as _keyword
         import re as _re
@@ -207,6 +208,132 @@ object KotlinSurface {
         # stamps it). The binding layer carries its own (`_registered_epoch`); see `kotlin_function`
         # for how the two decide which layer answers a call.
         _proxy_epoch = -1
+
+        # Delivery event loop configuration when the calling thread has no running asyncio loop
+        # (SPEC U-5; issue #164, item 10).
+        _delivery_loop_var = _contextvars.ContextVar('python_multiplatform.delivery_loop', default=None)
+        _default_delivery_loop = None
+        _REQUIRED_LOOP_ATTRS = ('create_future', 'call_soon_threadsafe', 'is_closed')
+
+
+        def _validate_delivery_loop(loop):
+            if loop is None:
+                return
+            for attr in _REQUIRED_LOOP_ATTRS:
+                if not callable(getattr(loop, attr, None)):
+                    raise TypeError(
+                        'delivery loop must provide callable ' + ', '.join(_REQUIRED_LOOP_ATTRS) +
+                        '; missing or non-callable ' + repr(attr)
+                    )
+
+
+        def set_delivery_loop(loop):
+            '''Sets the process-wide fallback asyncio loop for `suspend` upcalls on threads with no
+            running event loop, and returns the previous fallback loop (`None` clears it).
+            '''
+            global _default_delivery_loop
+            _validate_delivery_loop(loop)
+            previous = _default_delivery_loop
+            _default_delivery_loop = loop
+            return previous
+
+
+        def get_delivery_loop():
+            '''Returns the task-scoped delivery loop (`use_delivery_loop`) if set in the current
+            `contextvars.Context`, otherwise the process-wide fallback (`set_delivery_loop`), or `None`.
+            '''
+            loop = _delivery_loop_var.get()
+            return loop if loop is not None else _default_delivery_loop
+
+
+        class _DeliveryLoopScope:
+            __slots__ = ('_loop', '_token')
+
+            def __init__(self, loop):
+                _validate_delivery_loop(loop)
+                self._loop = loop
+                self._token = None
+
+            def __enter__(self):
+                self._token = _delivery_loop_var.set(self._loop)
+                return self._loop
+
+            def __exit__(self, _exc_type, _exc_val, _exc_tb):
+                if self._token is not None:
+                    _delivery_loop_var.reset(self._token)
+                    self._token = None
+                return False
+
+
+        def use_delivery_loop(loop):
+            '''Context manager that binds [loop] as the delivery loop in the current `contextvars.Context`.'''
+            return _DeliveryLoopScope(loop)
+
+
+        # Ambient Kotlin `CoroutineContext` configuration for exposed `suspend` calls
+        # (SPEC U-5b; issue #164, item 1).
+        _coroutine_context_var = _contextvars.ContextVar('python_multiplatform.coroutine_context', default=None)
+        _default_coroutine_context = None
+
+
+        def _validate_coroutine_context(ctx):
+            if ctx is None:
+                return
+            if isinstance(ctx, int) and not isinstance(ctx, bool):
+                return
+            handle = getattr(ctx, '_pm_handle', None)
+            if isinstance(handle, int) and not isinstance(handle, bool):
+                return
+            raise TypeError(
+                'coroutine context must be None, a Kotlin CoroutineContext proxy, or a raw handle int; '
+                'got ' + type(ctx).__name__
+            )
+
+
+        def set_coroutine_context(ctx):
+            '''Sets the process-wide fallback Kotlin `CoroutineContext` for exposed `suspend` upcalls
+            and returns the previous fallback (`None` clears it).
+            '''
+            global _default_coroutine_context
+            _validate_coroutine_context(ctx)
+            previous = _default_coroutine_context
+            _default_coroutine_context = ctx
+            return previous
+
+
+        def get_coroutine_context():
+            '''Returns the task-scoped Kotlin `CoroutineContext` (`use_coroutine_context`) if set in
+            the current `contextvars.Context`, otherwise the process-wide fallback
+            (`set_coroutine_context`), or `None`.
+            '''
+            ctx = _coroutine_context_var.get()
+            return ctx if ctx is not None else _default_coroutine_context
+
+
+        class _CoroutineContextScope:
+            __slots__ = ('_ctx', '_token')
+
+            def __init__(self, ctx):
+                _validate_coroutine_context(ctx)
+                self._ctx = ctx
+                self._token = None
+
+            def __enter__(self):
+                self._token = _coroutine_context_var.set(self._ctx)
+                return self._ctx
+
+            def __exit__(self, _exc_type, _exc_val, _exc_tb):
+                if self._token is not None:
+                    _coroutine_context_var.reset(self._token)
+                    self._token = None
+                return False
+
+
+        def use_coroutine_context(ctx):
+            '''Context manager that binds [ctx] as the Kotlin `CoroutineContext` in the current
+            `contextvars.Context`.
+            '''
+            return _CoroutineContextScope(ctx)
 
 
         class _KotlinDefault:

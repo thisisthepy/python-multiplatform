@@ -200,10 +200,12 @@ class GeneratedDeclarationKindsTest {
     }
 
     @Test
-    fun genericDeclarationsAreNotExposedBecauseTheGeneratedCastHasNoTypeToName() {
-        assertNull(ClassLookup.find("fixture.library.Box"))
+    fun genericClassMembersAreExposedWhileGenericConstructorsAndTopLevelGenericsStayHidden() {
+        // SPEC U-4a (#164 item 3): an unbounded generic class exposes its members with `Any?`
+        // substitution, while generic constructors and generic top-level functions remain hidden.
+        assertNotNull(ClassLookup.find("fixture.library.Box"))
         assertFalse(UpcallTable.resolve("fixture.library.Box.<init>").isValid)
-        assertFalse(UpcallTable.resolve("fixture.library.Box.value").isValid)
+        assertTrue(UpcallTable.resolve("fixture.library.Box.value").isValid)
         assertFalse(UpcallTable.resolve("fixture.library.identity").isValid)
     }
 

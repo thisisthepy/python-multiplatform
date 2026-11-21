@@ -434,13 +434,24 @@ class AotLibraryCallTest {
      * proposal, not owner-confirmed; design note section 7). The writer alternates `fill_factorials`, which stores 1! to
      * 25! (21! and beyond are big objects), with `set` of small values into the slots 20 to 24. Without the lock inside
      * the list a read of a slot that is being overwritten could use a freed big object. Only memory-safe outcomes are
-     * asserted: a slot below 20 always reads its factorial (every writer stores that same value there), a slot from 20
-     * on reads 0 (the start), a small value some writer stored, or the documented overflow error; and the list closes.
+     * asserted, and the allowed set is exactly what the program can produce: the list starts as 25 zeros, and nothing
+     * orders the writer's first `fill_factorials` before the reader's first read (both threads leave the same latch), so
+     * every slot reads 0 until the reader has seen a value a writer stored there (issue #472: the first version of this
+     * test allowed that 0 only from slot 20 on, and on a loaded runner the reader twice got to a slot below 20 first).
+     * From then on a slot below 20 reads exactly its factorial (every round stores that same value), and a slot from 20
+     * on reads a small value some writer stored or raises the documented overflow error, never 0 again; the list closes.
      */
     @Test
     fun oneIntListWrittenByOneThreadAndReadByAnotherStaysMemorySafe() {
         val expected = factorials(20)
-        fun allowed(i: Int, v: Long) = if (i < 20) v == expected[i] else v == 0L || v == 1000L + i
+        // Owned by the reader thread: whether slot i has been seen holding something a writer stored. Before that the
+        // slot may still read its initial 0; after it, 0 is a value no writer stored.
+        val written = BooleanArray(25)
+        fun allowed(i: Int, v: Long): Boolean {
+            val stored = if (i < 20) v == expected[i] else v == 1000L + i
+            if (stored) written[i] = true
+            return stored || (v == 0L && !written[i])
+        }
         IntList(25).use { l ->
             val pool = Executors.newFixedThreadPool(2)
             val start = CountDownLatch(1)
@@ -468,6 +479,7 @@ class AotLibraryCallTest {
                             } catch (e: BigsException) {
                                 assertTrue(i >= 20, "l[$i] raised ${e.className}, but only a big slot may")
                                 assertOverflowElement(e)
+                                written[i] = true       // a big value a writer stored: the slot is past its initial 0
                             }
                             reads++
                         }
@@ -489,10 +501,11 @@ class AotLibraryCallTest {
 
     @Test
     fun noClassOfTheCPythonEmbeddingLibraryIsOnTheClasspath() {
+        val classLoader = javaClass.classLoader ?: ClassLoader.getSystemClassLoader()
         for (name in listOf("python.multiplatform.ffi.PyObject", "python.multiplatform.ffi.Python3", "python.native.ffi.Panama")) {
             assertFailsWith<ClassNotFoundException>("$name must not be loadable") { Class.forName(name) }
             assertFalse(
-                javaClass.classLoader.getResources(name.replace('.', '/') + ".class").hasMoreElements(),
+                classLoader.getResources(name.replace('.', '/') + ".class").hasMoreElements(),
                 "$name is on the classpath",
             )
         }
@@ -515,6 +528,87 @@ class AotLibraryCallTest {
         assertTrue(images.contains("nbody"), "the listing does not show the library loaded by this test, so it proves nothing")
         assertFalse(images.contains("libpython", ignoreCase = true), "a libpython is loaded in the test JVM")
         assertFalse(images.contains("Python.framework"), "a Python framework is loaded in the test JVM")
+    }
+
+    // --- native-image reachability metadata (#456) --------------------------------------------------------
+
+    private data class ForeignDescriptor(val returnType: String, val parameterTypes: List<String>)
+
+    private fun parseDowncalls(json: String): Set<ForeignDescriptor> {
+        val start = json.indexOf("\"downcalls\": [")
+        assertTrue(start >= 0, "reachability metadata has no `downcalls` array")
+        var depth = 0
+        var end = -1
+        for (i in json.indexOf('[', start) until json.length) {
+            if (json[i] == '[') depth++
+            if (json[i] == ']') {
+                depth--
+                if (depth == 0) {
+                    end = i
+                    break
+                }
+            }
+        }
+        assertTrue(end > start, "reachability metadata's `downcalls` array is not closed")
+        val body = json.substring(start, end)
+        return Regex("""\{\s*"returnType"\s*:\s*"([^"]+)"\s*,\s*"parameterTypes"\s*:\s*\[([^]]*)]\s*}""")
+            .findAll(body)
+            .mapTo(LinkedHashSet()) { match ->
+                ForeignDescriptor(
+                    match.groupValues[1],
+                    match.groupValues[2].split(',').map { it.trim().trim('"') }.filter { it.isNotEmpty() },
+                )
+            }
+    }
+
+    /** GraalVM's canonical layout name for a carrier (`Linker.nativeLinker().canonicalLayouts()`), as the metadata spells it. */
+    private fun carrierName(cls: Class<*>): String = when (cls) {
+        Void.TYPE -> "void"
+        java.lang.Long.TYPE -> "long long"
+        Integer.TYPE -> "int"
+        java.lang.Double.TYPE -> "double"
+        java.lang.Byte.TYPE -> "char"
+        else -> fail("unexpected MethodHandle carrier type $cls")
+    }
+
+    private fun java.lang.invoke.MethodType.toForeignDescriptor(): ForeignDescriptor =
+        ForeignDescriptor(carrierName(returnType()), parameterList().map(::carrierName))
+
+    /**
+     * Checks that every `MethodHandle` actually linked by `Nbody`, `Errors` and `Bigints` has its descriptor
+     * declared in the generated `META-INF/native-image/<package>/<prefix>/reachability-metadata.json` (on the JVM),
+     * and reads `handles()` with zero reflection so the check also runs inside a GraalVM native image.
+     */
+    @Test
+    fun everyBoundMethodHandleDescriptorIsDeclaredInTheGeneratedReachabilityMetadata() {
+        val libraries: List<Pair<String, Map<String, java.lang.invoke.MethodHandle>>> = listOf(
+            "nbody" to Nbody.native().handles(),
+            "errors" to Errors.native().handles(),
+            "bigints" to Bigints.native().handles(),
+        )
+        val inNativeImage = System.getProperty("org.graalvm.nativeimage.imagecode") != null
+        for ((prefix, handles) in libraries) {
+            assertTrue(handles.isNotEmpty(), "$prefix has no bound MethodHandles")
+            val actual = handles.mapValues { (_, handle) -> handle.type().toForeignDescriptor() }
+            if (!inNativeImage) {
+                val resourcePath = "/META-INF/native-image/fixture.aot.$prefix/$prefix/reachability-metadata.json"
+                val json = javaClass.getResourceAsStream(resourcePath)?.bufferedReader()?.readText()
+                    ?: fail("$resourcePath is not on the test runtime classpath")
+                val declared = parseDowncalls(json)
+                val missing = actual.filterValues { it !in declared }
+                assertTrue(
+                    missing.isEmpty(),
+                    "$prefix reachability metadata is missing downcall descriptor(s): $missing",
+                )
+                for (used in actual.values.toSet()) {
+                    val withoutOne = declared - used
+                    assertTrue(
+                        actual.values.any { it !in withoutOne },
+                        "$prefix check stayed green after dropping $used",
+                    )
+                }
+            }
+        }
     }
 
     /** The mapped files of this process: /proc/self/maps on Linux; on macOS `vmmap -w <pid>`, else `lsof -p <pid>`; null if none worked. */

@@ -194,6 +194,7 @@ class Representation:
         self.strict = strict
         self.fns = {f.name: f for f in module.functions}
         self.reps = {f.name: FunctionReps(name=f.name) for f in module.functions}
+        self.field_reps: dict[tuple[str, str], str] = {}
         # the sound re-proof (module docstring): id of a node of `module` -> proved under intervals of unbounded ints
         self.proofs: dict[int, bool] = {}
         # the groups of `list[int]` names (module docstring "Lists of ints")
@@ -215,6 +216,19 @@ class Representation:
 
     def returns(self, fn: str) -> str:
         return self.reps[fn].returns
+
+    def field(self, cls: str, fname: str) -> str:
+        if self.strict:
+            return RAW
+        return self.field_reps.get((cls, fname), RAW)
+
+    def field_list_big(self, cls: str, fname: str) -> bool:
+        if self.strict:
+            return False
+        key = (f"<class:{cls}>", fname)
+        if key not in self._parent:
+            return False
+        return self.find(key) in self._big
 
     def element(self, fn: str, i: int) -> str:
         r = self.reps[fn].tuple_elements
@@ -320,15 +334,32 @@ class Representation:
                     self.node((f.name, name), UNSET)
             if f.returns is Type.I64_ARRAY:
                 self.node((f.name, RETURN))
+        for c in self.module.classes:
+            for fd in c.field_decls:
+                if fd.type is Type.I64_ARRAY:
+                    self.node((f"<class:{c.name}>", fd.name))
         for f in self.module.functions:
             for s in f.body:
                 for n, cur in walk_stmts(s):
                     if isinstance(n, ir.Assign) and (f.name, n.target) in self._parent:
                         self.bind((f.name, n.target), n.value, f, cur, "assignment")
+                    elif isinstance(n, ir.FieldSet) and (f"<class:{n.cls}>", n.field) in self._parent:
+                        self.bind((f"<class:{n.cls}>", n.field), n.value, f, cur, "field assignment")
                     elif isinstance(n, ir.Return) and f.returns is Type.I64_ARRAY and n.value is not None:
                         self.bind((f.name, RETURN), n.value, f, cur, "return")
                     elif isinstance(n, ir.Call):
                         self.bind_call(n, f, cur)
+                    elif isinstance(n, ir.New):
+                        init_fn = self.fns.get(f"{n.cls}.__init__")
+                        if init_fn is not None:
+                            for p, a in zip(init_fn.params[1:], n.args):
+                                if isinstance(p, ir.ArrayParam) and p.type is Type.I64_ARRAY:
+                                    if isinstance(a, ir.Local) and a.type is Type.I64_ARRAY:
+                                        self.union((f.name, a.name), (init_fn.name, p.name), f.name, cur,
+                                                   f"the argument and the parameter `{p.name}` of `{init_fn.name}`")
+                                    else:
+                                        self.mark_big((init_fn.name, p.name), f.name, cur,
+                                                      f"an argument of `{init_fn.name}` that is not a list name")
 
     def bind(self, target: Key, value: ir.Expr, f: ir.Function, cur: int | None, how: str) -> None:
         """`target` takes the list `value`: a name (one group), a call result (one group with the callee's returned
@@ -353,6 +384,12 @@ class Representation:
                 self._copies.append((src, target, f.name, cur))
             elif self.types_of(f).get(value.src) is Type.I64_ARRAY:
                 self.mark_big(target, f.name, cur, f"a copy of `{value.src}`, which is not a list of this function")
+        elif isinstance(value, ir.FieldGet):
+            fkey = (f"<class:{value.cls}>", value.field)
+            if fkey in self._parent:
+                self.union(target, fkey, f.name, cur, f"reads list field `{value.cls}.{value.field}`")
+            else:
+                self.mark_big(target, f.name, cur, f"reads unknown list field `{value.cls}.{value.field}`")
         elif not isinstance(value, (ir.NewArray, ir.ListDisplay)):
             self.mark_big(target, f.name, cur, f"{how} of an expression that is not understood")
 
@@ -468,11 +505,13 @@ class Representation:
             return RAW
         if isinstance(e, ir.Local):
             return r.names.get(e.name, RAW)
-        if isinstance(e, (ir.Len, ir.ArgvLen)):
+        if isinstance(e, (ir.Len, ir.ArgvLen, ir.BoolToInt)):
             return RAW
         if isinstance(e, ir.Index):
             return TAGGED if self.list_big(r.name, e.array) else RAW
-        if isinstance(e, ir.ArgvInt):
+        if isinstance(e, ir.FieldGet):
+            return self.field_reps.get((e.cls, e.field), RAW)
+        if isinstance(e, (ir.ArgvInt, ir.FloatToInt, ir.StrToInt, ir.MathCall)):
             return TAGGED
         if isinstance(e, ir.Call):
             callee = self.reps.get(e.function)
@@ -480,7 +519,7 @@ class Representation:
         if isinstance(e, ir.Cond):
             return join(self._of(r, e.then), self._of(r, e.orelse))
         if isinstance(e, ir.UnaryOp):
-            if e.op is ir.UnaryOpKind.POS:
+            if e.op in (ir.UnaryOpKind.POS, ir.UnaryOpKind.INVERT):
                 return self._of(r, e.operand)
             if e.op is ir.UnaryOpKind.NEG:
                 return RAW if self.proved(e) and self._of(r, e.operand) == RAW else TAGGED
@@ -490,9 +529,9 @@ class Representation:
             if a == TAGGED or b == TAGGED:
                 return TAGGED
             k = e.op
-            if k in (ir.BinOpKind.ADD, ir.BinOpKind.SUB, ir.BinOpKind.MUL):
+            if k in (ir.BinOpKind.ADD, ir.BinOpKind.SUB, ir.BinOpKind.MUL, ir.BinOpKind.LSHIFT):
                 return RAW if self.proved(e) else TAGGED
-            if k is ir.BinOpKind.MOD:
+            if k in (ir.BinOpKind.MOD, ir.BinOpKind.AND, ir.BinOpKind.OR, ir.BinOpKind.XOR, ir.BinOpKind.RSHIFT):
                 return RAW
             if k is ir.BinOpKind.FLOORDIV:
                 if isinstance(e.right, ir.Const) and e.right.value != -1:
@@ -567,6 +606,11 @@ class Representation:
                         changed |= self.raise_(r.names, n.target, self._of(r, n.value))
                     elif n.value.type is Type.I64_ARRAY:
                         changed |= self.creation((f.name, n.target), n.value, r, cur)
+                elif isinstance(n, ir.FieldSet):
+                    if n.value.type is Type.I64 and self._of(r, n.value) == TAGGED:
+                        if self.field_reps.get((n.cls, n.field), RAW) != TAGGED:
+                            self.field_reps[(n.cls, n.field)] = TAGGED
+                            changed = True
                 elif isinstance(n, ir.StoreIndex):
                     if (f.name, n.array) in self._parent and n.value.type is Type.I64 \
                             and self._of(r, n.value) == TAGGED:
@@ -601,6 +645,14 @@ class Representation:
                     callee = self.reps.get(n.function)
                     if callee_fn is not None and callee is not None:
                         for p, a in zip(callee_fn.params, n.args):
+                            if isinstance(p, ir.Param) and p.type is Type.I64:
+                                changed |= self.raise_(callee.names, p.name, self._of(r, a))
+                elif isinstance(n, ir.New):
+                    init_name = f"{n.cls}.__init__"
+                    callee_fn = self.fns.get(init_name)
+                    callee = self.reps.get(init_name)
+                    if callee_fn is not None and callee is not None:
+                        for p, a in zip(callee_fn.params[1:], n.args):
                             if isinstance(p, ir.Param) and p.type is Type.I64:
                                 changed |= self.raise_(callee.names, p.name, self._of(r, a))
         return changed

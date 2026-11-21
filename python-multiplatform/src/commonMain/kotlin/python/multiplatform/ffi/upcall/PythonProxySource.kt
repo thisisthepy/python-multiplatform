@@ -266,6 +266,9 @@ object PythonProxySource {
     /** The name [AsyncUpcall] resolves out of `__main__` to arm a `Future`'s cancellation notice. */
     internal const val WATCH_FUNCTION = "_pm_watch"
 
+    /** The name [AsyncUpcall] resolves out of `__main__` to create a `Future` on a non-running configured delivery loop. */
+    internal const val CREATE_REMOTE_FUTURE_FUNCTION = "_pm_create_remote_future"
+
     /** The `(long) -> int` entry point `_pm_watch` routes a cancellation to; per-platform. */
     internal const val CANCEL_ENTRY_POINT = "_pm_cancel"
 
@@ -345,6 +348,27 @@ object PythonProxySource {
                     # no-op rather than a slot handed to somebody else.
                     _pm_release(_h)
             _fut.add_done_callback(_pm_done)
+
+
+        def _pm_create_remote_future(_loop, _handle):
+            # Creates an `asyncio.Future` (and, when [_handle] is non-None, arms `_pm_watch`) on
+            # [_loop]'s own thread via `call_soon_threadsafe`, waiting on a `concurrent.futures.Future`
+            # carrier so CPython releases the GIL while waiting and `create_future()` /
+            # `add_done_callback` never run off-thread (SPEC U-5; issue #164, item 10).
+            import concurrent.futures as _pm_cf
+            if _loop.is_closed():
+                raise RuntimeError('delivery event loop is closed')
+            _carrier = _pm_cf.Future()
+            def _make():
+                try:
+                    _f = _loop.create_future()
+                    if _handle is not None:
+                        _pm_watch(_f, _handle)
+                    _carrier.set_result(_f)
+                except BaseException as _e:
+                    _carrier.set_exception(_e)
+            _loop.call_soon_threadsafe(_make)
+            return _carrier.result()
 
 
         def _pm_module(_name):
@@ -713,6 +737,14 @@ object PythonProxySource {
         main.getAttrOrNull(WATCH_FUNCTION)?.let { return it }
         Python3.exec(support)
         return main.getAttrOrNull(WATCH_FUNCTION)
+    }
+
+    /** Makes sure `_pm_create_remote_future` exists in `__main__` and hands it back. */
+    internal fun createRemoteFutureFunction(): PyObject {
+        val main = Python3.import("__main__")
+        main.getAttrOrNull(CREATE_REMOTE_FUTURE_FUNCTION)?.let { return it }
+        Python3.exec(support)
+        return main.getAttr(CREATE_REMOTE_FUTURE_FUNCTION)
     }
 
     // ------------------------------------------------------------------------------- rendering

@@ -144,6 +144,115 @@ start early. Tier names are for this note only.
   CPython objects). Calls to Kotlin are typed direct calls, not object calls (section 8).
 - Enough for: wordfreq.
 
+#### 4.3.1 Tier S step 1 (PR-S1): strings
+
+Design for PR-S1 (agent proposal, written 2026-11-21 after the leader's order K5, M1, O1, O2, S1, S2, S3, T1 and the
+1.0 scope answer of the same day, "Start S1 right after the 1.0 items if time remains"; not owner-confirmed, leader
+review pending). Tier S is after 1.0; this step changes nothing in a program that has no `str` value.
+
+**What a program can do with a `str` (the accepted subset of this step).**
+
+- Values: literals, `+`, `+=`, `*` by an int, `==` `!=` `<` `<=` `>` `>=` (code point order, as CPython), `len`,
+  indexing (`s[i]`, negative included), slicing (`s[a:b]`, `s[a:b:c]`, CPython's index adjustment), `in` / `not in`
+  (substring), iteration (`for ch in s`), the conditional expression, `str` locals, parameters, results, fields of a
+  class (an owned field, acyclic) and module constants.
+- Producers: `str(x)` and `repr(x)` of `int`, `float`, `bool` and `str` (the int and float formatters the kernel already
+  has). `repr` of a `str`, also what `{s!r}` uses: single quotes unless the string holds `'` and no `"`; escapes
+  `\\`, `\n`, `\r`, `\t`, the quote in use, and for a code point that is not printable (`str.isprintable`, from
+  the table below) `\xNN` below U+0100, `\uNNNN` below U+10000, `\UNNNNNNNN` above (observed:
+  `repr("\x7f\u00ad\U0001F600\n") == "'\\x7f\\xad\U0001F600\\n'"` with the emoji printed as itself); `chr`, `sys.argv[i]` (decoded as CPython decodes it: UTF-8 with `surrogateescape` on
+  POSIX, the UTF-16 `wmain` arguments on Windows, which the int parser already reads), f-strings anywhere (not only in
+  `print`), with `{s}`, `{s!r}`, `{x!r}` and the existing `{e}` / `{e:.Nf}`.
+- Consumers: `print` of a `str` (also with other values, `sep` and `end`), `sys.stdout.write` and `sys.stderr.write`
+  (their int result is the length, as CPython's text stream returns), `ord`, `int(s)` for any `str` (the parser of
+  `int(sys.argv[i])`, with the reference's `repr` of the string in the error message).
+- Methods (the list of section 4.3; any other is the compile error `aot/str-method`): `split()` / `split(sep)` /
+  `split(sep, maxsplit)`, `join`, `strip()` / `lstrip()` / `rstrip()` with and without a `chars` argument, `lower`,
+  `upper`, `startswith` / `endswith` (a `str` or a tuple of `str`, no `start` / `end` yet), `find` (no `start` / `end`
+  yet), `replace` (with and without `count`), `isalpha`, `isdigit`. `encode` waits for `bytes` (S2).
+- `list[str]` only as far as `split` and `join` need it, as the same runtime list type S2 generalises (a counted list
+  of owned `tpa_str *`, the shape of `tpa_i64_list`), so nothing is thrown away: a list display of `str`, `split`'s result, indexing, `len`,
+  iteration, `join`'s argument, a local or parameter. Growth (`append`, ...) is S2 with the other containers; a growing
+  use is `aot/container` (pending, tier S), as today.
+- Compile errors that stay: `is` / `is not` between two `str` operands (`aot/str-identity`: CPython's answer
+  depends on interning and constant folding, so a program that relies on it has no defined result to reproduce;
+  `s is None` / `s is not None` on a `str | None` stays accepted), `%` formatting and `str.format`
+  (`aot/str-format`, pending S2), a `str` argument or result of an `aot-lib` export (`aot/library-str`; the C-ABI
+  string kind is a later step with its own ABI version), and every method outside the list.
+
+**Representation (`runtime/tp_aot_str.h`, linked only by a program that has a `str` value).**
+
+- `struct tpa_str { tpa_rc_t rc; uint8_t kind; int64_t len; int64_t hash; <data> }`: CPython's PEP 393 layout without
+  the object header. `kind` is 1, 2 or 4 bytes per code point and is always the narrowest kind that holds the largest
+  code point (every constructor normalises), so two equal strings have equal kinds and `==` compares `kind`, `len` and
+  then the bytes. Indexing and slicing are O(1) per element, as in CPython. A lone surrogate (from `surrogateescape`
+  or from `chr(0xDC80)`) is an ordinary 2-byte code point, as in CPython; UTF-8 storage cannot hold it, which is why
+  this layout and not UTF-8.
+- `hash` is reserved for S2's `dict` / `set` (`-1` until computed); nothing in S1 reads it.
+- Reference counting as the O1 objects (`tpa_str_retain` / `tpa_str_release`, `TPA_RC_*` macros, atomic under
+  `TPA_THREADS`). A `str` holds no reference, so it is acyclic and never tracked by the collector. Literals and module
+  constants are static objects with an immortal count (`TPA_RC_IMMORTAL`, retain and release skip it), so the library
+  build's threads may share them with no write.
+- Not a region or virtual object in S1 (the allocation classifier reports `heap-rc (str)`); a region object's `str`
+  field is an owned heap reference released by the region walk, as a list field is (PR-O2b's R4 relaxation).
+- `s += t` resizes `s` in place only when the local `s` **owns** its reference (it is not an elided borrow: not a
+  parameter under PR-O1 elision rule 1, not a local read from an immutable-after-init field under rule 3, and not
+  the source of a single-consumption move that is still live) **and** the count is 1 and not immortal; otherwise
+  it copies. Ownership is the condition, not the count: a borrowed `s` can show a count of 1 that belongs to the
+  caller's local or to the field, and resizing it would rewrite the caller's string (review of #510, F1). CPython's
+  interpreter does the same through `unicode_concatenate`, which requires the frame's own local and a count of 1;
+  unobservable, since nothing else holds `s`.
+
+**Unicode data.** `lower`, `upper`, `isalpha`, `isdigit`, the whitespace of `split()` / `strip()` and `repr`'s
+printable test depend on CPython's Unicode database. The AOT compiler runs on the reference CPython (3.15t), so it
+generates the tables the program needs from that interpreter, at build time: for each code point, the full mapping of
+`chr(c).lower()` and `chr(c).upper()` (one to three code points: `'ß'.upper() == 'SS'`, `'İ'.lower()` is two code
+points), and bit sets for `str.isalpha`, `str.isdigit`, `str.isspace` and `str.isprintable`, compressed as two-level
+tables. Only the tables the program uses are emitted; the generated C records `unicodedata.unidata_version`, and the build refuses to combine tables (or, in S2, string
+hashes) generated by a different reference interpreter than the one the rest of the build used, so an incremental
+rebuild cannot mix two Unicode versions (review of #510, F5). Final
+sigma: `lower` applies CPython's `handle_capital_sigma` rule (U+03A3 becomes U+03C2 at the end of a word), in the
+runtime, since it depends on context. The tables therefore match the interpreter that built the program bit for bit;
+a program built by a different CPython minor version gets that version's tables, which is what that version prints.
+
+**Output.** CPython 3.15 runs in UTF-8 mode by default (observed on the reference 3.15.0rc1t:
+`sys.flags.utf8_mode == 1`, `sys.stdout.errors == "surrogateescape"`, `sys.stderr.errors == "backslashreplace"`).
+`print` and `sys.stdout.write` therefore encode to UTF-8 from the kind array into the existing buffered `stdout`, a
+code point U+DC80..U+DCFF (what `surrogateescape` decoded from a non-UTF-8 argument byte) is written back as that
+raw byte, and any other surrogate raises `UnicodeEncodeError: 'utf-8' codec can't encode character '\ud800' in
+position N: surrogates not allowed` (observed). `print` encodes and writes its arguments one at a time, so the
+arguments before the failing one are written, followed by the separator `print` writes before each argument after
+the first, and the failing one writes nothing (observed: `print("a", "x\ud800")` writes `a ` and raises), as
+CPython's `TextIOWrapper` does.
+`sys.stderr.write` and the uncaught-exception line use `backslashreplace`. What the Windows console path needs
+(CPython writes a console through its own console I/O) is decided in S1a with a test on the Windows job; the kernel
+tier's output is ASCII, so the question did not arise before.
+
+**Exact messages (each one in the differential tests).** `IndexError: string index out of range`;
+`ValueError: empty separator`; `ValueError: chr() arg not in range(0x110000)` (also for an int outside 64 bits,
+`chr(2**70)`, observed on 3.15.0rc1t);
+`TypeError: ord() expected a character, but string of length N found`; `int()`'s
+`ValueError: invalid literal for int() with base 10: <repr>` (already exact for `sys.argv`); `OverflowError: repeated
+string is too long` / `MemoryError` for `*` past the size limit (D4 accepts the memory-exhaustion behaviour, not the
+size check, which is reproduced).
+
+**Free threading.** Strings are immutable after construction and constants are immortal; the in-place `+=` applies
+only to a count of 1 (no other holder on any thread). Nothing in S1 shares a mutable string between threads.
+
+**Tests (PR-S1, `test_aot_tier_s1.py`).** Every operation and method differential-tested against CPython over a corpus
+of ASCII, Latin-1, BMP, astral and lone-surrogate strings and the empty string, including each error message above;
+exhaustive table tests (`lower`, `upper`, `isalpha`, `isdigit`, `isspace`, `repr` over every code point
+0..0x10FFFF, printed in chunks and compared with the interpreter); `sys.argv` with non-UTF-8 bytes; the in-place
+`+=` with a second holder, on a parameter whose caller still holds the string, and on a local read from an
+immutable field (each must copy, and the caller's or the field's string must be unchanged); `print` of U+DC80 (the raw byte) and of U+D800 (the arguments before it written, the error line, status 1); leaks
+under LeakSanitizer and use after free under ASan for strings in class fields, lists of strings and region objects;
+a mutant per table (one wrong entry must fail its exhaustive test); the acyclic and string-free programs generate the
+C they generated before (no `tp_aot_str.h`).
+
+**Order.** S1a: representation, literals, operators, `len`, indexing, slicing, `in`, iteration, `print`, f-strings,
+`str()` / `repr()`, `ord`, `chr`, `sys.argv[i]`, `int(s)`, `sys.std*.write`. S1b: the methods, the generated Unicode
+tables and the minimal `list[str]`. Each is one PR with its CI run.
+
 ### 4.4 Tier T, threads
 
 Section 7.
@@ -339,6 +448,232 @@ and baseline memory work against the aim).
 CPython also frees such objects by reference count. That equivalence does not hold for objects in
 regions or for elided counts, so a class with `__del__` is always reference counted with exact counts.
 
+### 6.3.1 Tier O step 1 (PR-O1): headerless classes, reference counting, and acyclicity
+
+Design for PR-O1 (`binary_trees.py`, before virtual objects and scope regions arrive in PR-O2; leader
+review 2026-11-20, not owner-confirmed).
+
+- **Struct layout.** Each compiled class `C` lowers to a plain C `struct tpa_cls_<C>` with no `PyObject`
+  header and no class-id word (no inheritance or dynamic `isinstance` in PR-O1):
+  - `tpa_rc_t rc` first (`int64_t` in an executable; `_Atomic int64_t` under `TPA_THREADS`).
+  - Fields in declaration order: `float` as `double`, `bool` as `uint8_t`, `int` as `int64_t` (RAW) or
+    `tpa_int` (TAGGED, owned), native lists as counted handles (owned), `D` as `tpa_cls_<D> *` (non-null,
+    owned), and `D | None` as `tpa_cls_<D> *` (`NULL` represents `None`, owned).
+  - Allocation sets `rc = 1` (failing with `MemoryError` on `NULL`). If `__init__` raises after setting
+    some reference fields, the constructor releases those initialized fields and frees the struct.
+  - Release decrements `rc`; at zero it releases owned reference fields and frees the struct. To avoid
+    C stack overflow when freeing deep self-referential chains, the last self-referential field is
+    released via a tail loop (`while (p != NULL)`). Every other field of a class type is released by a
+    call, which nests; so the release of a class that has such a field counts its nesting depth on a
+    thread-local counter, and past `TPA_TRASH_LIMIT` (1000) it parks the object (count zero, untracked)
+    with the class's `_drop` function on a thread-local list that the outermost release drains (review of
+    #508, F1; CPython's trashcan). A chain of any length through any field, or alternating between
+    classes, is then freed with bounded C stack depth; only the order of frees beyond the limit changes,
+    which nothing observes (AOT compiles no `__del__`, a freed object is unreachable). A class with no
+    field of a class type keeps its release unchanged. Tests: `test_aot_release_depth.py` (500k chains,
+    a mutant without the bound).
+- **Single immutability analysis (shared source of truth).** One whole-program pass classifies each
+  field `(C, field)` as **immutable-after-init** if and only if no statement outside `C.__init__`
+  anywhere in the program assigns to that field, and `C.__init__` does not store `self` into any field
+  or let `self` escape into another call. A class `C` is **immutable-after-init** when every reference
+  field of `C` is immutable-after-init. Both the acyclicity proof and the reference-counting elision
+  rules below read this exact same analysis result so the two cannot disagree.
+- **Cycle-freedom proof (PR-O1).** Because PR-O1 has no cycle collector yet, a class `C` is accepted
+  only if it is proved acyclic by at least one of:
+  1. *Type-graph acyclicity*: in the directed graph where `C -> D` if `C` has a field of type `D` or
+     `D | None`, `C`'s strongly connected component has no cycle.
+  2. *Immutable-after-init*: `C` (and every class reachable in its SCC) is proved immutable-after-init by
+     the shared analysis above (so every reference points strictly to an already-constructed object,
+     forming a causal DAG, as in `binary_trees.py`'s `Node`).
+  Any class that fails both conditions was a compile error (`aot/cycle-possible`, naming the class and
+  the mutating field store outside `__init__`) until PR-O2c added the small cycle collector (6.3.2 item
+  3, "Step 3 as implemented"): such a class now compiles, tracked by the collector.
+- **Reference counting and elision rules.** Ownership follows the same convention as native lists and
+  `tpa_int`: parameters are **borrowed**; locals, return values and struct fields are **owned**.
+  Elision is permitted only under the following statically proved conditions, and every other site emits
+  explicit `retain` / `release`:
+  1. *Borrowed parameter reads*: reading or forwarding a borrowed parameter directly does not retain or
+     release it.
+  2. *Single-consumption move*: an owned temporary (constructor or call result) consumed once as a local
+     initializer, `return` value, or field/constructor initializer transfers ownership with no extra
+     `retain` / `release`.
+  3. *Field read into a local*: a local initialized from `x.field` may be treated as borrowed (no
+     `retain` / `release`) **only if** `(C, field)` is proved immutable-after-init program-wide by the
+     shared analysis above (and `x` itself outlives the local, e.g. `x` is a borrowed parameter or an
+     unrebound local). "No field write in this function" is **not** sufficient because a callee or an
+     alias can mutate `x.field` and free the old object; any mutable field read must `retain`.
+  4. *Field passed as a borrowed argument*: passing `x.field` directly to `f(x.field)` may pass it as
+     borrowed **only if** `(C, field)` is proved immutable-after-init program-wide (and `x` outlives the
+     call). If `(C, field)` is mutable, the caller must `retain` the value into a temporary before the
+     call and `release` it after the call, so `f` mutating `x.field` (directly or through an alias)
+     cannot free its own argument.
+- **Library mode (`TPA_THREADS`) restriction before Tier T.** Under `TPA_THREADS`, a concurrent writer
+  to a mutable reference field could release the old object between another thread's load and `retain`
+  (the same race `tpa_int_list` solves with a per-list lock). Until Tier T adds shared-object locking,
+  C-ABI class handles are not yet exported in PR-O1, and an `aot-lib` export whose parameter or return
+  type is a class that is not transitively immutable-after-init (checking every class reachable from
+  its fields) is a compile error (`aot/library-mutable-class`).
+- **Verification plan (PR-O1 tests).**
+  - Differential tests against CPython 3.15t for scalar/list/class/`C | None` fields, methods, `is None`
+    / `is`, and `benchmarks/typedpython/py/binary_trees.py`.
+  - Adversarial lifetime tests under ASan/UBSan (`typedpython.yml` `sanitizers` job) specifically
+    exercising: (a) a local read from a mutable field whose owner is mutated through an alias or callee
+    before the local is read again, (b) `f(x.field)` where `f` mutates `x.field` while using its
+    parameter, (c) partial `__init__` failure cleanup, and (d) deep tree deallocation.
+  - Acyclicity acceptance/rejection tests (type-graph acyclic mutable class accepted; immutable-after-init
+    self-referential `Node` accepted; mutable self-referential class rejected with `aot/cycle-possible`;
+    `__init__` `self` escape rejected; `aot-lib` mutable class rejected with `aot/library-mutable-class`).
+  - `aot-check` sync: `binary_trees.py` reports 0 blocking findings.
+
+### 6.3.2 Tier O step 2 (PR-O2): virtual objects, scope regions, cycle collector, and acyclic `__del__`
+
+Design for PR-O2 (`binary_trees_region.py`, `binary_trees.py` region allocation, mutable cyclic classes,
+and acyclic `__del__`; agent proposal, leader review 2026-11-20, not owner-confirmed).
+
+Each allocation site (`New`) is classified statically in the following order. A class that defines
+`__del__` skips steps 1 and 2 and always uses step 3 with exact reference counting so destructor timing
+matches CPython.
+
+1. **Virtual objects (N-12a, scalar replacement).**
+   - *Conditions*: the instance never escapes its creating function (not returned, not stored in any
+     field or container, not passed to another function), is not compared with `is` / `is not`, is not
+     merged with another instance across a branch join (phi), and defines no `__del__`.
+   - *Method calls*: a method call on a candidate virtual object is allowed **only if** the method is
+     non-recursive and inlined at the call site; any non-inlined method call or recursion disqualifies
+     the site and falls back to heap allocation (step 2 or 3).
+   - *Layout*: no heap allocation and no C struct; each field is a plain C local variable, with owned
+     fields following normal local cleanup.
+2. **Scope bump regions (N-12b/c).**
+   - *Layout*: region-allocated instances use a distinct C type `struct tpa_reg_<C>` with **no `rc`
+     header** (zero reference counting). A region (`tpa_region`) owns a linked list of bump-allocated
+     chunks and frees every chunk at once when its owning scope exits. Because `struct tpa_reg_<C> *`
+     and `struct tpa_cls_<C> *` are incompatible C pointer types, mixing them is a compile-time error.
+   - *Lifetime and non-escape invariants (dangling pointer prevention)*: an allocation site is promoted
+     to a scope region `R` only when all five rules hold; violating any rule falls back to heap RC:
+     - **(R1) No return escape**: the function owning `R` cannot return any pointer into `R` (or any
+       struct/tuple containing one).
+     - **(R2) No outliving store**: a pointer into `R` cannot be stored into any heap object, global
+       slot, container, or **any other region (including an enclosing/outer region)** whose lifetime
+       exceeds `R`. Storing an outer-region pointer into an inner-region object is safe and permitted,
+       because the outer region outlives the inner region; the reverse direction is forbidden.
+     - **(R3) Callee restriction**: a pointer into `R` may only be passed to non-escaping region
+       specializations (e.g. `check__reg(tpa_reg_Node *n)`) that themselves satisfy (R1) and (R2).
+     - **(R4) Destructor-free fields**: every field of a region-allocated class must be a scalar
+       (`int64_t`, `double`, `bool`) or a pointer to a class in the same region `R` (or an enclosing
+       region), so freeing `R`'s chunks requires zero per-object destructors and cannot leak heap
+       references.
+     - **(R5) Library boundary**: `aot-lib` exports never expose region pointers; a library may use a
+       region only for a closed scope created and destroyed entirely inside an exported call.
+   - *Exception safety*: every region-owning function frees `R` exactly once in its single `tp_cleanup:`
+     exit block, covering both normal return and error (`rc != 0`) paths. Exceptions in AOT carry only
+     `(class_id, message_string)` in the thread-local error record (`tpa_exc`), with no traceback frame
+     objects (owner decision D4), so a region pointer can never be retained by an exception or traceback.
+   - *Step 2 as implemented (PR-O2b, N-12b/c; agent proposal, not owner-confirmed)*: regions are
+     intraprocedural. The unit of the decision is `(F, C)`: every non-virtual site of `C` in `F` and every
+     local of `C` in `F` are region-typed together (`struct tpa_reg_<F>__<C>`, one region per `(F, C)`),
+     or none is, so a local has one C type. R1 and R2 as written (a store into a virtual object counts as
+     a heap store); R3 in its strict form, no callee at all (region specialisations such as `check__reg`
+     are a later step, so `binary_trees.py` stays heap-rc with the reason reported); R4 relaxed: a region
+     object's field of class `K` is a region pointer when `(F, K)` is region and an owned heap pointer
+     otherwise, and lists and big ints are owned heap references; a generated per-class walk releases
+     them when the region is freed or reset, which keeps "no heap object points into a region" and adds
+     "a region object's heap references are released". The scope is the function body or one iteration of
+     one loop (the innermost loop whose body holds every use of `C`, in which every local of `C` is
+     definitely assigned before it is read, widened to the loop of any region object that holds pointers
+     of `C`); a per-iteration region is reset at the top of each iteration and freed at `tp_cleanup:`,
+     so `break`, `continue`, `return` and a failing operation need no path-specific code. Heap pointers of
+     `C` flowing into `F` (a parameter, a call result, a field of a heap or virtual object) assigned to a
+     local of `C`, or compared with `is` against a region pointer, make `(F, C)` heap-rc. A class with
+     no fields is never region (review of #501): its region struct would be empty, every
+     `tpa_region_alloc` of size 0 returns the same address, so `a is b` would be true for two objects
+     (and MSVC rejects an empty struct); heap-rc is correct and costs nothing anyone measures. The
+     expression walkers of `aot/alloc.py` and `aot/classes.py` share one list of child attributes
+     (`EXPR_CHILD_ATTRS` / `EXPR_CHILD_SEQS`), so a node such as `NewArray` (`length`, `fill`) or
+     `CallObject` (`callee`) cannot be skipped by one walker and seen by another.
+3. **Reference counting + small cycle collector (D2) + acyclic `__del__`.**
+   - *Pay only for what the program uses*: classes proved acyclic by the shared `aot/classes.py`
+     analysis (PR-O1) keep zero GC overhead and do not link `runtime/tp_aot_gc.h`. Only when a program
+     contains at least one potentially cyclic mutable class is `tp_aot_gc.h` included, and only those
+     cyclic-capable classes carry the GC list header (`prev`, `next`, `gc_refs`).
+   - *Safepoint invariant (borrowed references and RC elision)*: the trial-deletion collector requires
+     that every live cyclic-capable object has at least one counted reference (`rc > 0`) at the moment
+     collection runs. Collection is triggered **only at allocation safepoints** (entry to
+     `tpa_cls_<C>_new` of a cyclic-capable class, after all constructor arguments have been retained as
+     owned temporaries or are held by owned locals/fields in callers). Because every cyclic-capable
+     class is mutable (not `immutable-after-init`), PR-O1's RC elision rules (3) and (4) are
+     automatically disabled for every field of such a class: every field read into a local and every
+     mutable field passed as a call argument is `retain`ed by the caller before any call. Therefore,
+     at every allocation safepoint, no cyclic-capable object is kept alive solely by an uncounted
+     borrowed reference.
+   - *`__del__`*: permitted only on acyclic classes (always exact RC, no virtual/region/elision). A
+     `__del__` on a cyclic-capable class is a compile error (`aot/cycle-del`).
+   - *Step 3 as implemented (PR-O2c; agent proposal, not owner-confirmed)*: the cyclic-capable classes
+     are every class of a strongly connected component of the type graph (edges `C -> D` for a field of
+     type `D` or `D | None`) that has a cycle and at least one member not immutable-after-init: the
+     whole component, not only its mutable members, because trial deletion subtracts only the references
+     between tracked objects, and an untracked class on a cycle would hold a reference that is never
+     subtracted (a root), so the cycle would never be found. An untracked class cannot be on a cycle (its
+     component has none, or is immutable-after-init throughout); its reference to a tracked object is a
+     root while it lives, and it is freed by its count. The header is `tpa_gc_head` (`runtime/tp_aot_gc.h`:
+     `gc_prev`, `gc_next`, `gc_refs`, and `gc_type`, the class's traverse and clear functions, one word the
+     list above did not have), the first member of `struct tpa_cls_<C>` before `rc`, so the collector reads
+     the count through the common prefix `tpa_gc_object`. A region struct `tpa_reg_<F>__<C>` and a virtual
+     object of a cyclic-capable class are unchanged: a region pointer is never counted and never reaches
+     the heap (R2), so a cycle inside a region is freed with the region, and a region object's or virtual
+     object's heap fields are counted (PR-O2a/b), so they are roots. The collector is CPython's one
+     generation of trial deletion over the list of every tracked object alive: `gc_refs = rc` (an atomic
+     load under `TPA_THREADS`); for every tracked object, `traverse` visits its fields of cyclic-capable
+     classes and decrements each referent's `gc_refs`; an object left with `gc_refs > 0` is a root
+     (something outside the tracked set holds it) and the objects it reaches are moved back to the live
+     list; the rest are garbage: each is held by one extra count while its `clear` releases every owned
+     field (tracked objects, acyclic objects, lists, big ints; the slot is emptied before the release) and is
+     freed when its count reaches zero (at once, or when the garbage that still held it is cleared). The
+     pass repeats while it freed something (it ends with a pass that frees nothing): an untracked object
+     that garbage owns is freed by its holder's `clear` and releases the tracked objects it held, a
+     reference that was a root in the pass that freed it, so a cycle held only through such an object
+     (`A -> U -> B1`, `B1 <-> B2`, `U` untracked) is garbage only for the next pass; the repeat is cheaper than
+     tracking every class that reaches a cyclic-capable one, at the price of one extra pass over the
+     tracked list whenever a collection frees anything. No user code runs during a collection (no `__del__` in AOT), so it cannot re-enter; a flag guards it
+     anyway. The safepoint is `tpa_cls_<C>_new` of a cyclic-capable class, before `calloc`: every
+     constructor argument is then an owned temporary, an owned local, a borrowed parameter whose caller
+     holds it, or a field of a live object, and `__init__` has not started; `__init__` allocating another
+     tracked object sees the half-initialised object as a root (held by `_new`'s own local, fields NULL or
+     owned). The elision rules (3) and (4) are off for every field of a cyclic-capable class
+     (`ClassAnalysis.field_elidable`), and `aot/cycle-del` is reported beside the front end's refusal of
+     `__del__`. Trigger: tracked allocations net of tracked frees since the last collection reach
+     `max(TPA_GC_THRESHOLD, live tracked objects after the last collection)` (2000 by default, CPython's
+     first-generation threshold), which bounds the memory held by garbage to one more live set and keeps
+     the amortised cost per allocation constant; `-DTPA_GC_STRESS` collects at every safepoint and
+     `-DTPA_GC_STATS` prints the counts at exit (tests only). One more collection runs after `__main__`
+     returns, when every frame has released its locals and only cycles can remain (CPython's shutdown
+     collection; it keeps LeakSanitizer quiet), and the same collection runs on the `sys.exit` path:
+     `tpa_exit_status` (`runtime/tp_aot.h`) calls `tpa_exit_hook` once before `exit()`, and the generated
+     `main` of a program that links the collector sets it to `tpa_gc_exit` (review of #503, note 2). There
+     the frames still hold their locals; those are counted, so they are roots and stay, and nothing reads
+     an object afterwards; `tpa_exit_int` reads the status before the hook runs. Step 4 holds every garbage
+     object by one extra count before it clears any of them, then drops the extra counts (review of #503,
+     note 3): a clear's release of a garbage referent then only decrements it, so no release cascades from
+     one garbage object into the next and a long garbage chain through a field that is not the release
+     loop's tail field is cleared in constant C stack depth (CPython's `delete_garbage` uses the trashcan
+     for the same reason). A garbage object is referenced only by garbage (a reference from an untracked or
+     reachable object makes it a root), so after every clear its count is the extra one alone and the
+     drop frees it; `-DTP_CHECK_PROVEN` turns the opposite case into a fatal error. Under `TPA_THREADS` the collector's state is thread-local:
+     a tracked object is touched only by the thread that created it (`aot/library-mutable-class` keeps
+     mutable classes, transitively, out of the library boundary; AOT has no mutable globals), so one
+     thread's collection never sees another thread's objects. Tier T's shared objects (section 7) must add
+     the shared-object locking before a tracked object may be shared; this collector is not a
+     stop-the-world collector. The library output never emitted class structs (before this step), so the
+     collector is linked by executables only today; the runtime compiles in both builds.
+4. **Diagnostics (`--explain-alloc` / `aot-check`).**
+   - Every allocation site's chosen strategy (`virtual`, `region`, `heap-rc`, `heap-gc`) and the
+     concrete reason for any fallback from `virtual` or `region` to `heap` (e.g. non-inlined method,
+     R1 return escape, R2 outer-region/heap store, R4 heap-owned field, `__del__`) are reported via
+     `python -m typedpython aot-build ENTRY.py --explain-alloc` (and surfaced in `aot-check`), so
+     measurement runs can verify why an allocation did or did not stay off the heap.
+   - PR-O2c: a heap site of a cyclic-capable class is reported as `heap-gc` with, after the virtual and
+     region reasons, `[gc: <why the class may form a cycle>]` (the mutating store outside `__init__`, or
+     the `self` escape in `__init__`, as `aot/cycle-possible` named it).
+
 ### 6.4 Exceptions
 
 A function returns a status, as the generated C does today; the current exception (class id, message
@@ -517,17 +852,21 @@ The helper and the list classes have fixed names, so each library takes its own 
 **How the fixture uses it.** `python-multiplatform-ksp/fixtures/aot` declares the bindings plugin with
 `apply false` and registers the task class itself, so no KSP, no `PYTHONHOME` staging and no dependency
 on `python-multiplatform` come with it. A front-end-only Python step writes the JSON, the task
-generates Kotlin from it into the test source set, and `python -m typedpython aot-lib` links the
-library as a dependency of the test task only. The test (`fixture.aot.AotLibraryCallTest`) calls
-the `nbody` kernels and a small library of failures and list functions, compares floats bit for bit
-with CPython, checks exception classes and messages, runs two threads, and asserts that no class of
-the CPython-embedding library is on the classpath and that the process loads no libpython (Linux: the
-process's maps; macOS: `vmmap` when it can examine the JVM, otherwise the classpath check only).
+generates Kotlin from it into the test source set (and, via `resourceOutputDirectory`, writes
+`META-INF/native-image/<packageName>/<prefix>/reachability-metadata.json` with every foreign downcall
+descriptor and the `java.lang.foreign` reflection surface for GraalVM native-image without a tracing
+agent), and `python -m typedpython aot-lib` links the library as a dependency of the test task only. The
+test (`fixture.aot.AotLibraryCallTest`) calls the `nbody` kernels and a small library of failures and
+list functions, compares floats bit for bit with CPython, checks exception classes and messages, runs two
+threads, checks that every bound `MethodHandle` descriptor matches the generated metadata, and asserts
+that no class of the CPython-embedding library is on the classpath and that the process loads no
+libpython (Linux: the process's maps; macOS: `vmmap` when it can examine the JVM, otherwise the
+classpath check only). The same 25 scenarios are also compiled by `aotNativeCompile` into a standalone
+GraalVM native image (`AotNativeImageMainKt`, verified by `aotNativeRun` in `.github/workflows/typedpython.yml`
+with `JAVA_HOME` and `PYTHONHOME` removed, #456).
 
 **Not done.** Other platforms (Android `RegisterNatives`, Kotlin/Native cinterop, wasm); packaging of
-the library and the generated Kotlin into an app (waits for the owner decision of #25 step 3); the
-GraalVM native image (#456: the descriptors are not yet declared for native-image registration, so the
-generated wrappers are not shown to work there, and tier K stays open until they are, AGENTS.md 13).
+the library and the generated Kotlin into an app (waits for the owner decision of #25 step 3).
 
 ### 8.4 Python calling Kotlin (the upcall)
 
@@ -591,6 +930,30 @@ machine and are run by the coordinating session alone, as AGENTS.md requires for
 **Targets** are recorded as ratios to Rust per metric and benchmark (leader decision D9). No ratio is
 fixed in this note: the first recorded numbers are the Rust and default-mode columns, and "near Rust"
 is the owner's phrase.
+
+### 9.1 First recorded Tier K measurements (PR-M1, shared CI runner)
+
+Recorded from CI run `44599101214` (artifact `typedpython-aot-measure-ubuntu`, `#479` / PR `#483`),
+on a **shared GitHub Actions runner** (ratios to Rust only; no absolute-time conclusion is drawn from
+shared-runner runs):
+
+- **Commit**: `497765876cde1c3a9520f478955eb7e21693f057`
+- **Runner image**: `ubuntu26 20261116.202.1`
+- **CPU**: `INTEL(R) XEON(R) PLATINUM 8573C`
+- **Toolchains**: `Python 3.15.2`, `rustc 1.100.0 (0ef1bc386 2026-11-09)` (`--release`, LTO, stripped), `repeat=3`
+
+| Benchmark | Size | AOT stripped | Rust stripped | Size ratio (AOT/Rust) | RSS ratio (AOT/Rust) | CPU ratio (AOT/Rust) | Wall ratio (AOT/Rust) |
+|---|---|---|---|---|---|---|---|
+| `empty` | - | 14,464 B | 287,664 B | 0.050x | 1.000x | 0.733x | 0.788x |
+| `hello` | - | 14,464 B | 290,912 B | 0.050x | 1.000x | 0.834x | 0.816x |
+| `nbody` | 200000 | 47,304 B | 317,800 B | 0.149x | 1.000x | 3.324x | 3.311x |
+| `spectral-norm` | 400 | 55,496 B | 317,384 B | 0.175x | 1.000x | 11.849x | 11.719x |
+| `fannkuch-redux` | 9 | 35,016 B | 295,848 B | 0.118x | 1.000x | 3.284x | 3.279x |
+
+Note on `max_rss_bytes` in this run: every child reported 38,531,072 B (37,628 KiB), which is the
+parent Python process's own resident set inherited across `fork` before `exec` under Linux
+`os.wait4(..., ru_maxrss)`. A follow-up should measure child RSS via `/usr/bin/time -f %M` or
+`posix_spawn` so the child's own RSS is isolated from the harness process.
 
 ## 10. Decisions
 

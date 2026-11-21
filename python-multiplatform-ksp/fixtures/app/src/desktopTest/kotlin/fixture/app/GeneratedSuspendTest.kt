@@ -1,5 +1,7 @@
 package fixture.app
 
+import fixture.library.AsyncSink
+import fixture.library.Batches
 import fixture.library.SuspendingService
 import fixture.library.ValueHandler
 import python.multiplatform.ffi.upcall.PendingCall
@@ -229,10 +231,81 @@ class GeneratedSuspendTest {
     // (`grep "has a type with no exposable classifier" build output`) rather than the old silence.
 
     @Test
-    fun aSuspendingFunctionTypeHasNoEntryAsATopLevelPropertyParameterOrReturn() {
+    fun aSuspendingFunctionTypeIsExposedAsAParameterAndRejectedAsPropertyOrReturn() {
+        // SPEC U-5a (#164 item 7): top-level `suspend` function-typed parameters (arities 0..5)
+        // are now exposed with `kotlin.coroutines.SuspendFunctionN(Args)->Ret` metadata, while
+        // properties and return types remain excluded with a KSP warning.
         assertFalse(UpcallTable.resolve("fixture.library.suspendingHandler").isValid)
-        assertFalse(UpcallTable.resolve("fixture.library.runsHandler").isValid)
+        assertTrue(UpcallTable.resolve("fixture.library.runsHandler").isValid)
+        val entry = UpcallTable.callable(UpcallTable.resolve("fixture.library.runsHandler"))
+        assertEquals(
+            "kotlin.coroutines.SuspendFunction1(kotlin.Long)->kotlin.Long",
+            entry.paramTypeNames[0],
+        )
         assertFalse(UpcallTable.resolve("fixture.library.makeHandler").isValid)
+    }
+
+    @Test
+    fun aSuspendSamFunInterfaceParameterBindsAsASlotTakingALambdaOrAHandle() {
+        // SPEC U-5c (#164 item 3): `fun interface AsyncSink { suspend fun take(value: Long) }` as a
+        // parameter is the `<Interface>|SuspendFunctionN(...)->Ret` slot, and the generated read
+        // wraps a `suspend (Long) -> Unit` (a `kotlin.Function2` at run time) in a SAM lambda or
+        // casts a handle. Before #497 the parameter was a plain object handle: the slot name was
+        // the bare interface and a lambda failed the cast with ClassCastException.
+        val entry = entry("fixture.library.drainAsync")
+        assertTrue(entry.isSuspend)
+        assertEquals(
+            "fixture.library.AsyncSink|kotlin.coroutines.SuspendFunction1(kotlin.Long)->kotlin.Unit",
+            entry.paramTypeNames[0],
+        )
+
+        val taken = mutableListOf<Long>()
+        val lambda: suspend (Long) -> Unit = { taken += it }
+        val viaLambda = startCall("fixture.library.drainAsync", lambda)
+        assertTrue(viaLambda.isDone, "nothing here suspends, so the call completes on the calling thread")
+        assertNull(viaLambda.failure, "the adapted lambda failed: ${viaLambda.failure}")
+        assertEquals(2L, viaLambda.value)
+        assertEquals(listOf(1L, 2L), taken)
+
+        val handleTaken = mutableListOf<Long>()
+        val handle = AsyncSink { handleTaken += it }
+        val viaHandle = startCall("fixture.library.drainAsync", handle)
+        assertTrue(viaHandle.isDone)
+        assertNull(viaHandle.failure)
+        assertEquals(listOf(1L, 2L), handleTaken)
+
+        // The control: a non-suspending `fun interface` does not take this path. The KSP
+        // processor has no #216 slot (SPEC B-5 is the artifact walker's; `KsAdapters` renders a
+        // non-`suspend` `fun interface` as the bare interface, a handle-only parameter), so the
+        // control is the plain interface name and the function is not `suspend`. CI run
+        // 44690216556 showed the walker's `SyncSink|kotlin.Function1(kotlin.Long)->kotlin.Unit`
+        // asserted here, which KSP never produced.
+        val control = entry("fixture.library.drainSync")
+        assertFalse(control.isSuspend)
+        assertEquals("fixture.library.SyncSink", control.paramTypeNames[0])
+    }
+
+    @Test
+    fun aSuspendSamWhoseTypeParameterIsNestedInItsMethodSignatureIsSubstitutedAtAnyDepth() {
+        // Review finding on #497: `fun interface BatchSink<T> { suspend fun take(batch: List<T>) }`
+        // used as `BatchSink<E>` from `class Batches<E>`. The SAM lambda's parameter must be the
+        // interface's `List<kotlin.Any?>`, not `List<kotlin.Any>` from an unbound `T` in the
+        // enclosing map. Before the fix this fixture's generated fragment did not compile, so
+        // every test in this module was red, not only this one.
+        val entry = entry("fixture.library.Batches.drainBatches")
+        assertTrue(entry.isSuspend)
+        assertEquals(
+            "fixture.library.BatchSink|kotlin.coroutines.SuspendFunction1(kotlin.collections.List)->kotlin.Unit",
+            entry.paramTypeNames[0],
+        )
+
+        val taken = mutableListOf<List<Any?>>()
+        val lambda: suspend (List<Any?>) -> Unit = { taken += it }
+        val viaLambda = startCall("fixture.library.Batches.drainBatches", Batches(listOf(1L, 2L, 3L)), lambda)
+        assertTrue(viaLambda.isDone, "nothing here suspends, so the call completes on the calling thread")
+        assertNull(viaLambda.failure, "the adapted lambda failed: ${viaLambda.failure}")
+        assertEquals(3L, viaLambda.value)
+        assertEquals(listOf(listOf<Any?>(1L, 2L, 3L)), taken)
     }
 
     @Test
@@ -247,27 +320,25 @@ class GeneratedSuspendTest {
     }
 
     @Test
-    fun aNullableSuspendingFunctionTypeHasNoEntry() {
+    fun aNullableSuspendingFunctionTypeHasNoEntryAsProperty() {
         assertFalse(UpcallTable.resolve("fixture.library.nullableHandler").isValid)
     }
 
     @Test
-    fun aTypealiasForASuspendingFunctionTypeHasNoEntryEitherSideOfTheAlias() {
-        // Measured, not assumed: `KSType.isSuspendFunctionType` answers `false` for the
-        // alias-typed `KSType` itself (`KSType.declaration` is the `KSTypeAlias`, not the
-        // expansion), so `isExposableType` has to expand one level of `typealias` before asking.
-        // Without that expansion, `runsAliasedHandler`'s cast would target
-        // `fixture.library.LongHandler` -- a real, source-declared classifier this time, since the
-        // `typealias` is itself a declaration in this compilation -- and it would have passed
-        // every check while remaining exactly as uncallable underneath.
+    fun aTypealiasForASuspendingFunctionTypeIsExposedAsAParameterAndRejectedAsAProperty() {
         assertFalse(UpcallTable.resolve("fixture.library.aliasedHandler").isValid)
-        assertFalse(UpcallTable.resolve("fixture.library.runsAliasedHandler").isValid)
+        assertTrue(UpcallTable.resolve("fixture.library.runsAliasedHandler").isValid)
+        val entry = UpcallTable.callable(UpcallTable.resolve("fixture.library.runsAliasedHandler"))
+        assertEquals(
+            "kotlin.coroutines.SuspendFunction1(kotlin.Long)->kotlin.Long",
+            entry.paramTypeNames[0],
+        )
     }
 
     @Test
-    fun aSuspendingFunctionTypeHasNoEntryAsAMemberPropertyParameterOrReturn() {
+    fun aSuspendingFunctionTypeIsExposedAsAMemberParameterAndRejectedAsPropertyOrReturn() {
         assertFalse(UpcallTable.resolve("fixture.library.SuspendingService.handler").isValid)
-        assertFalse(UpcallTable.resolve("fixture.library.SuspendingService.runsHandlerMember").isValid)
+        assertTrue(UpcallTable.resolve("fixture.library.SuspendingService.runsHandlerMember").isValid)
         assertFalse(UpcallTable.resolve("fixture.library.SuspendingService.makesHandlerMember").isValid)
     }
 
@@ -280,35 +351,33 @@ class GeneratedSuspendTest {
     }
 
     @Test
-    fun aSuspendingFunctionTypeHasNoEntryAsAPrimaryConstructorParameter() {
-        // The primary constructor does not route through
-        // `BindingPolicy.isExposedMemberFunction`/`isExposedTopLevelFunction` the way every other
-        // function entry does -- `FragmentScanner` selects it directly -- so this is the one
-        // location that needed its own, separate call to `hasExposableTypes` rather than
-        // inheriting the check through a shared gate.
-        assertFalse(UpcallTable.resolve("fixture.library.ValueHandler.<init>").isValid)
+    fun aSuspendingFunctionTypeIsExposedAsAPrimaryConstructorParameterWhileItsPropertyStaysExcluded() {
+        assertTrue(UpcallTable.resolve("fixture.library.ValueHandler.<init>").isValid)
         assertFalse(UpcallTable.resolve("fixture.library.ValueHandler.f").isValid)
     }
 
     @Test
-    fun aClassWhoseOnlyMembersAreUnexposableStaysExposedWithAnEmptySurface() {
-        // `ValueHandler`'s constructor and its one property are both this shape, so nothing of it
-        // is left in the table -- but the class declaration itself is unaffected: it is still a
-        // renderable classifier (`runsValueHandler` casts a parameter to it below), the same way a
-        // class with only `suspend fun` members stayed exposed before this task
+    fun aClassWhoseOnlyPropertyIsUnexposableKeepsItsConstructorAsTheWholeSurface() {
+        // `ValueHandler`'s constructor takes a top-level `suspend` function-typed parameter, which
+        // SPEC U-5a exposes, while its one property `f` is of that type and stays excluded. So the
+        // constructor is the whole advertised surface: the class is still a renderable classifier
+        // (`runsValueHandler` casts a parameter to it below), exactly as a class with only
+        // `suspend fun` members stays exposed
         // (`aSuspendingMemberKeepsItsReceiverSlotAndItsClassStaysConstructible`).
         val cls = ClassLookup.require("fixture.library.ValueHandler")
-        assertTrue(cls.memberNames.isEmpty())
+        assertEquals(listOf("fixture.library.ValueHandler.<init>"), cls.memberNames.toList())
     }
 
     @Test
-    fun everyMemberOfSuspendingServiceThatIsThisShapeIsMissingFromItsAdvertisedSurface() {
+    fun everyPropertyOrReturnOfSuspendingFunctionTypeIsMissingFromSuspendingServiceAdvertisedSurface() {
         // The negative counterpart to `everySuspendingMemberIsAdvertisedOnItsClassAndResolves`:
         // an excluded member must not leak into `ReflectedClass.memberNames` either, or a Python
         // mirror built from that list would still advertise a name with no entry behind it.
         val members = ClassLookup.require("fixture.library.SuspendingService").memberNames
         assertFalse(members.contains("fixture.library.SuspendingService.handler"))
-        assertFalse(members.contains("fixture.library.SuspendingService.runsHandlerMember"))
+        // `runsHandlerMember` takes a `suspend` function-typed parameter, which SPEC U-5a exposes,
+        // so it is advertised; only the property and the return-typed member stay excluded.
+        assertTrue(members.contains("fixture.library.SuspendingService.runsHandlerMember"))
         assertFalse(members.contains("fixture.library.SuspendingService.makesHandlerMember"))
         assertFalse(members.contains("fixture.library.SuspendingService.companionHandler"))
         // and the members that survive are still exactly the ones earlier tests in this file

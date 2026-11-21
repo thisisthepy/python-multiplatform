@@ -360,7 +360,10 @@ from .ir import (
     Local, MathCall, MathFunc, Module, NewArray, ObjToFloat, Or, Param, Return, StoreIndex, ToFloat,
     ToInt, Truth, Tuple, Type, Unbox, UnaryOp, UnaryOpKind, While,
 )
-from .ir import ArgvInt, ArgvLen, Cond, FormatField, FString, ListDisplay, Print, ReturnTuple, Unpack
+from .ir import (
+    ArgvInt, ArgvLen, BoolToInt, Cond, FloatToInt, FormatField, FString, ListDisplay, Print,
+    ReturnTuple, StrToInt, SysExit, TimeCall, TimeFunc, TimeSleep, Unpack,
+)
 from .ir import CheckExact, CheckMethod, ClassDecl, FieldGet, FieldSet, Is, IsExact, New
 from .ir import BuildString, Contains, ForObj, Format, GetItem, NewDict, NewList, StoreItem
 from .ir import ParInfo
@@ -419,8 +422,8 @@ _STMTS = frozenset({Assign, StoreIndex, ExprStmt, If, While, ForRange, Return, B
                     FieldSet, StoreItem, ForObj})
 # The statements and expressions only the AOT mode (`verify(m, aot=True)`) accepts. (An `FString` and its
 # `FormatField`s are checked by `s_Print`, which is the only place one may stand.)
-_AOT_STMTS = frozenset({Print, ReturnTuple, Unpack})
-_AOT_EXPRS = frozenset({ListDisplay, Cond, ArgvInt, ArgvLen})
+_AOT_STMTS = frozenset({Print, ReturnTuple, Unpack, TimeSleep, SysExit})
+_AOT_EXPRS = frozenset({ListDisplay, Cond, ArgvInt, ArgvLen, FloatToInt, BoolToInt, StrToInt, TimeCall})
 # Nodes whose OBJ result is a new reference (ir.py "ownership": Box, Global, GetAttr, CallObject,
 # OBJ BinOp, Tuple), plus reads of an OBJ local (the local owns its reference; the back end increfs or
 # borrows under that rule) and Calls of a compiled function returning OBJ (which returns a new
@@ -439,9 +442,14 @@ _INT_OPS = frozenset({BinOpKind.ADD, BinOpKind.SUB, BinOpKind.MUL, BinOpKind.FLO
                       BinOpKind.OR, BinOpKind.XOR})
 _BITWISE_OPS = frozenset({BinOpKind.AND, BinOpKind.OR, BinOpKind.XOR})   # SPEC N-16
 _ELEMENT = {Type.F64_ARRAY: Type.F64, Type.I64_ARRAY: Type.I64, Type.BOOL_ARRAY: Type.BOOL}
-_MATH_ARITY = {MathFunc.ATAN2: 2, MathFunc.HYPOT: 2}            # every other MathFunc: 1
+_MATH_ARITY = {
+    MathFunc.ATAN2: 2, MathFunc.HYPOT: 2, MathFunc.POW: 2, MathFunc.COPYSIGN: 2, MathFunc.FMOD: 2,
+}            # every other MathFunc: 1
+_MATH_BOOL_FUNCS = frozenset({MathFunc.ISNAN, MathFunc.ISINF, MathFunc.ISFINITE})
+_MATH_INT_FUNCS = frozenset({MathFunc.FLOOR, MathFunc.CEIL, MathFunc.TRUNC})
 _I64_DEOPT_OPS = frozenset({BinOpKind.ADD, BinOpKind.SUB, BinOpKind.MUL, BinOpKind.FLOORDIV,
-                            BinOpKind.MOD, BinOpKind.TRUEDIV, BinOpKind.LSHIFT, BinOpKind.RSHIFT})
+                            BinOpKind.MOD, BinOpKind.TRUEDIV, BinOpKind.LSHIFT, BinOpKind.RSHIFT,
+                            BinOpKind.POW})
 _I64_MIN, _I64_MAX = -2 ** 63, 2 ** 63 - 1
 _FULL = (_I64_MIN, _I64_MAX)
 _LEN_MAX = 2 ** 62
@@ -914,6 +922,8 @@ class _Checker:
             return _FULL if self.sound.raw_element(self.fn.name, e.array) else _WIDE
         if cls is ArgvLen:
             return _FULL                    # argc is an int64
+        if cls is BoolToInt:
+            return (0, 1)
         if cls is Call:
             return _FULL if self.sound.raw_return(e.function) else _WIDE
         if cls is Cond:
@@ -1229,8 +1239,13 @@ class _Checker:
             self.error(TYPE, f"math.{e.func.value} takes {arity} argument(s), got {len(args)}")
         for k, a in enumerate(args):
             self.slot(a, Type.F64, f"argument {k + 1} of math.{e.func.value}")
-        if e.type is not Type.F64:
-            self.error(TYPE, f"math.{e.func.value} gives f64, node says {e.type.value}")
+        want = Type.F64
+        if self.aot and e.func in _MATH_BOOL_FUNCS:
+            want = Type.BOOL
+        elif self.aot and e.func in _MATH_INT_FUNCS:
+            want = Type.I64
+        if e.type is not want:
+            self.error(TYPE, f"math.{e.func.value} gives {want.value}, node says {e.type.value}")
         return dataclasses.replace(e, args=args)
 
     def args(self, args: object, state: _State, what: str) -> tuple[ir.Expr, ...]:
@@ -1262,7 +1277,7 @@ class _Checker:
             if callee.returns in ir.ARRAYS and not here:
                 self.error(ESCAPE, f"the list '{e.function}' returns is used as a value (a returned list may only be "
                                    f"assigned to a list local or returned)")
-            if callee.returns is Type.OBJ and not self.unpacking:
+            if callee.returns is Type.OBJ and callee.return_cls is None and not self.unpacking:
                 self.error(TYPE, f"'{e.function}' returns a tuple, which only an Unpack may use")
         if callee is None:
             self.error(UNRESOLVED, f"call of '{e.function}', which is not a compiled function of "
@@ -1314,7 +1329,7 @@ class _Checker:
                                  f"(the redone value may be a big int)")
             else:
                 redo = True
-        if not redo:
+        if not redo and not self.aot:
             for p in callee.params:
                 # The callee's entry guard `type(x) is C` may fail, even for an argument that is a
                 # just-allocated `New(C)` local: on free-threaded CPython another thread can find
@@ -1564,6 +1579,15 @@ class _Checker:
 
     def e_FieldGet(self, e: FieldGet, state: _State) -> ir.Expr:
         obj = self.obj_operand(e.obj, state, f"object of .{e.field}")
+        if self.aot:
+            expected = Type.OBJ
+            if self.known_field(e.cls, e.field, f"FieldGet .{e.field}"):
+                decl = self.classes[e.cls]
+                fd = next((f for f in decl.field_decls if f.name == e.field), None)
+                if fd is not None:
+                    expected = fd.type
+            self.result(e, expected)
+            return dataclasses.replace(e, obj=obj)
         self.result(e, Type.OBJ)
         if self.known_field(e.cls, e.field, f"FieldGet .{e.field}"):
             self.proved(obj, e.cls, f"FieldGet {e.cls}.{e.field}")
@@ -1574,6 +1598,35 @@ class _Checker:
         return dataclasses.replace(e, obj=obj)
 
     def e_New(self, e: New, state: _State) -> ir.Expr:
+        if self.aot:
+            expected_types: list[Type] = []
+            if self.known_class(e.cls, "New"):
+                decl = self.classes[e.cls]
+                init_sig = self.sigs.get(f"{e.cls}.__init__")
+                if init_sig is not None:
+                    expected_types = [p.type for p in init_sig.params[1:]]
+                else:
+                    expected_types = [fd.type for fd in decl.field_decls]
+            if not isinstance(e.args, tuple):
+                self.error(SHAPE, f"New {e.cls} args {e.args!r} is not a tuple")
+                args: tuple[ir.Expr, ...] = ()
+            else:
+                checked: list[ir.Expr] = []
+                for k, a in enumerate(e.args):
+                    if k < len(expected_types) and expected_types[k] in ir.ARRAYS:
+                        checked.append(self.array_value(a, state))
+                    else:
+                        checked.append(self.expr(a, state))
+                args = tuple(checked)
+            self.result(e, Type.OBJ)
+            if e.cls in self.classes:
+                if len(args) != len(expected_types):
+                    self.error(CLASS, f"New of '{e.cls}' has {len(args)} argument(s) for "
+                                      f"{len(expected_types)} parameter(s)")
+                else:
+                    for k, (a, et) in enumerate(zip(args, expected_types)):
+                        self.slot(a, et, f"argument {k + 1} of New {e.cls}")
+            return dataclasses.replace(e, args=args)
         self.slow_user.append(f"New {e.cls} (calls the class after a class change)")
         self.shared.append(f"the class global of New {e.cls}")
         args = self.args(e.args, state, f"New {e.cls}")
@@ -1646,6 +1699,42 @@ class _Checker:
     def e_ArgvLen(self, e: ArgvLen, state: _State) -> ir.Expr:
         self.result(e, Type.I64)
         return e
+
+    def e_FloatToInt(self, e: FloatToInt, state: _State) -> ir.Expr:
+        op = self.expr(e.operand, state)
+        self.slot(op, Type.F64, "operand of int(float)")
+        self.result(e, Type.I64)
+        return dataclasses.replace(e, operand=op)
+
+    def e_BoolToInt(self, e: BoolToInt, state: _State) -> ir.Expr:
+        op = self.expr(e.operand, state)
+        self.slot(op, Type.BOOL, "operand of int(bool)")
+        self.result(e, Type.I64)
+        return dataclasses.replace(e, operand=op)
+
+    def e_StrToInt(self, e: StrToInt, state: _State) -> ir.Expr:
+        if not isinstance(e.text, str):
+            self.error(STRUCTURE, f"StrToInt text {e.text!r} is not a str")
+        self.result(e, Type.I64)
+        return e
+
+    def e_TimeCall(self, e: TimeCall, state: _State) -> ir.Expr:
+        if type(e.func) is not TimeFunc:
+            self.error(UNKNOWN, f"TimeCall func {e.func!r} is not a TimeFunc")
+        self.result(e, Type.F64)
+        return e
+
+    def s_TimeSleep(self, s: TimeSleep, state: _State):
+        secs = self.expr(s.seconds, state)
+        self.slot(secs, Type.F64, "argument of time.sleep")
+        return dataclasses.replace(s, seconds=secs), state
+
+    def s_SysExit(self, s: SysExit, state: _State):
+        if s.code is None:
+            return s, state
+        code = self.expr(s.code, state)
+        self.slot(code, Type.I64, "argument of sys.exit")
+        return dataclasses.replace(s, code=code), state
 
     def stray(self, e: NewArray | CopyArray, state: _State) -> ir.Expr:
         self.error(ESCAPE, f"{type(e).__name__} is only legal as the value of an Assign to a local "
@@ -1752,8 +1841,8 @@ class _Checker:
             # AOT mode: also another list's name (both names then mean the one list) or a call that
             # returns a list
             value = self.array_value(s.value, state)
-            if type(value) not in (Local, Call):
-                self.error(ESCAPE, f"local array '{target}' may be assigned a creation, a list name or a call, "
+            if type(value) not in (Local, Call, FieldGet):
+                self.error(ESCAPE, f"local array '{target}' may be assigned a creation, a list name, a call or a field, "
                                    f"not {type(value).__name__}")
             elif getattr(value, "type", None) is not self.larrays[target]:
                 self.error(TYPE, f"local array '{target}' is {self.larrays[target].value} but is assigned "
@@ -1925,6 +2014,17 @@ class _Checker:
 
     def s_FieldSet(self, s: FieldSet, state: _State):
         obj = self.obj_operand(s.obj, state, f"object of .{s.field} =")
+        if self.aot:
+            expected = Type.OBJ
+            if self.known_field(s.cls, s.field, f"FieldSet .{s.field}"):
+                decl = self.classes[s.cls]
+                fd = next((f for f in decl.field_decls if f.name == s.field), None)
+                if fd is not None:
+                    expected = fd.type
+            value = self.array_value(s.value, state) if expected in ir.ARRAYS else self.expr(s.value, state)
+            self.slot(value, expected, f"value stored into .{s.field}")
+            self.effects.append(f"FieldSet .{s.field} (a store)")
+            return dataclasses.replace(s, obj=obj, value=value), state
         value = self.expr(s.value, state)
         self.slot(value, Type.OBJ, f"value stored into .{s.field}")
         if self.known_field(s.cls, s.field, f"FieldSet .{s.field}"):

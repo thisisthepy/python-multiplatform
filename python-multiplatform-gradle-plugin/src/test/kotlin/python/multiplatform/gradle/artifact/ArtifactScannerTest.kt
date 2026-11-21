@@ -552,22 +552,10 @@ class ArtifactScannerTest {
      */
     @Test
     fun composeModifierExtensionsSurviveBothGates() {
-        val gradleCaches = listOf(
-            File(System.getProperty("user.home"), ".gradle/caches/modules-2/files-2.1"),
-            File("/Volumes/macMini/caches/.gradle/caches/modules-2/files-2.1"),
-        ).firstOrNull { it.isDirectory }
-        if (gradleCaches == null) return // no local Gradle cache found at either known location
+        fun jarUnder(group: String, artifact: String): File? = ExternalArtifacts.jarUnder(group, artifact)
 
-        fun jarUnder(group: String, artifact: String): File? = listOf(
-            group,
-            group.replaceFirst("org.jetbrains.compose", "org.thisisthepy.compose"),
-        ).firstNotNullOfOrNull { g ->
-            gradleCaches.resolve(g).resolve(artifact)
-                .walkTopDown().firstOrNull { it.isFile && it.name.endsWith(".jar") && "sources" !in it.name }
-        }
-
-        val layoutJar = jarUnder("org.jetbrains.compose.foundation", "foundation-layout-desktop") ?: return
-        val unitJar = jarUnder("org.jetbrains.compose.ui", "ui-unit-desktop") ?: return
+        val layoutJar = jarUnder("org.jetbrains.compose.foundation", "foundation-layout-desktop") ?: ExternalArtifacts.skip("foundation-layout-desktop jar not in the Gradle cache")
+        val unitJar = jarUnder("org.jetbrains.compose.ui", "ui-unit-desktop") ?: ExternalArtifacts.skip("ui-unit-desktop jar not in the Gradle cache")
         val walked = listOfNotNull(
             layoutJar,
             unitJar,
@@ -700,22 +688,15 @@ class ArtifactScannerTest {
      */
     @Test
     fun aTypographyOrShapesConstructorBindsButATextStyleConstructorDoesNot() {
-        val gradleCaches = listOf(
-            File(System.getProperty("user.home"), ".gradle/caches/modules-2/files-2.1"),
-            File("/Volumes/macMini/caches/.gradle/caches/modules-2/files-2.1"),
-        ).firstOrNull { it.isDirectory }
-        if (gradleCaches == null) return // no local Gradle cache found at either known location
+        fun jarUnder(group: String, artifact: String): File? = ExternalArtifacts.jarUnder(group, artifact)
 
-        fun jarUnder(group: String, artifact: String): File? = listOf(
-            group,
-            group.replaceFirst("org.jetbrains.compose", "org.thisisthepy.compose"),
-        ).firstNotNullOfOrNull { g ->
-            gradleCaches.resolve(g).resolve(artifact)
-                .walkTopDown().firstOrNull { it.isFile && it.name.endsWith(".jar") && "sources" !in it.name }
+        val material3Jar = jarUnder("org.jetbrains.compose.material3", "material3-desktop")
+        val uiTextJar = jarUnder("org.jetbrains.compose.ui", "ui-text-desktop")
+        if (material3Jar == null || uiTextJar == null) {
+            System.err.println("SKIPPED: material3-desktop or ui-text-desktop jar not in the Gradle cache")
+            org.junit.jupiter.api.Assumptions.assumeTrue(false, "material3-desktop / ui-text-desktop jar not in the Gradle cache")
+            return
         }
-
-        val material3Jar = jarUnder("org.jetbrains.compose.material3", "material3-desktop") ?: return
-        val uiTextJar = jarUnder("org.jetbrains.compose.ui", "ui-text-desktop") ?: return
         val classpath = listOfNotNull(
             material3Jar,
             uiTextJar,
@@ -733,12 +714,16 @@ class ArtifactScannerTest {
         )
 
         val material3Names = ArtifactScanner.scanJar(material3Jar, classpath = classpath).map { it.name }
+        // The scanner suffixes every overloaded group with `__<types>` (disambiguateOverloads), and
+        // Typography and Shapes each have more than one constructor, so none binds under the bare name.
+        fun bindsAConstructor(bare: String) =
+            material3Names.any { it == bare || it.startsWith(bare + "__") }
         assertTrue(
-            "androidx.compose.material3.Typography" in material3Names,
+            bindsAConstructor("androidx.compose.material3.Typography"),
             "Typography's own constructor should bind: ${material3Names.filter { "Typography" in it }}",
         )
         assertTrue(
-            "androidx.compose.material3.Shapes" in material3Names,
+            bindsAConstructor("androidx.compose.material3.Shapes"),
             "Shapes' own constructor should bind: ${material3Names.filter { "Shapes" in it }}",
         )
 
@@ -762,21 +747,9 @@ class ArtifactScannerTest {
      */
     @Test
     fun aFocusRequesterConstructorIsDroppedBecauseItWouldShadowFocusRequesterDefault() {
-        val gradleCaches = listOf(
-            File(System.getProperty("user.home"), ".gradle/caches/modules-2/files-2.1"),
-            File("/Volumes/macMini/caches/.gradle/caches/modules-2/files-2.1"),
-        ).firstOrNull { it.isDirectory }
-        if (gradleCaches == null) return // no local Gradle cache found at either known location
+        fun jarUnder(group: String, artifact: String): File? = ExternalArtifacts.jarUnder(group, artifact)
 
-        fun jarUnder(group: String, artifact: String): File? = listOf(
-            group,
-            group.replaceFirst("org.jetbrains.compose", "org.thisisthepy.compose"),
-        ).firstNotNullOfOrNull { g ->
-            gradleCaches.resolve(g).resolve(artifact)
-                .walkTopDown().firstOrNull { it.isFile && it.name.endsWith(".jar") && "sources" !in it.name }
-        }
-
-        val uiJar = jarUnder("org.jetbrains.compose.ui", "ui-desktop") ?: return
+        val uiJar = jarUnder("org.jetbrains.compose.ui", "ui-desktop") ?: ExternalArtifacts.skip("ui-desktop jar not in the Gradle cache")
         val classpath = listOfNotNull(
             uiJar,
             jarUnder("org.jetbrains.compose.ui", "ui-geometry-desktop"),

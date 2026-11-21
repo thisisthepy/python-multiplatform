@@ -74,6 +74,57 @@ object SuspendingRegistry {
     fun pingBlocking(): String = "pong"
 }
 
+// ------------------------------------------------------------- suspend SAM fun interfaces (U-5c)
+
+/**
+ * A `fun interface` whose single abstract method is `suspend` (SPEC U-5c, #164 item 3): the shape
+ * of `kotlinx.coroutines.flow.FlowCollector<in T>`, without the dependency. A parameter of this
+ * type binds as a slot that takes a Kotlin handle of the interface or a Python callable; the
+ * generated read wraps a `suspend (Long) -> Unit` in a SAM lambda and casts anything else.
+ */
+fun interface AsyncSink {
+    suspend fun take(value: Long)
+}
+
+/** Feeds [sink] two values and answers how many; the test calls it with a lambda and with a handle. */
+suspend fun drainAsync(sink: AsyncSink): Long {
+    sink.take(1L)
+    sink.take(2L)
+    return 2L
+}
+
+/** The control: the same interface shape with a non-suspending method is the #216 SAM slot. */
+fun interface SyncSink {
+    fun take(value: Long)
+}
+
+fun drainSync(sink: SyncSink): Long {
+    sink.take(1L)
+    return 1L
+}
+
+/**
+ * The interface's type parameter *nested* in the method's parameter type (`List<T>`), used from a
+ * generic class whose own parameter has a different name (review finding on #497): KSP's
+ * suspend-SAM path resolved the nested `T` through the enclosing class's map, where it was
+ * unbound and read `kotlin.Any`, beside an interface cast of `BatchSink<kotlin.Any?>`, and the
+ * generated fragment did not compile (`List<Any?>` is not a `List<Any>`). A name that coincides
+ * with the enclosing one (`Box<T>` with `Sink<T>`) rendered by accident. The artifact walker
+ * substitutes by id at any depth and never had this.
+ */
+fun interface BatchSink<T> {
+    suspend fun take(batch: List<T>)
+}
+
+/** Generic class (SPEC U-4a): members are exposed with `Any?` substitution, so `sink` is read as
+ * `BatchSink<kotlin.Any?>` and its `take` as `suspend (List<kotlin.Any?>) -> Unit`. */
+class Batches<E>(val items: List<E>) {
+    suspend fun drainBatches(sink: BatchSink<E>): Long {
+        sink.take(items)
+        return items.size.toLong()
+    }
+}
+
 // ------------------------------------------------------- suspending *types*, not suspending funs
 //
 // None of the declarations below carry `Modifier.SUSPEND` -- `BindingPolicy.isSuspending` reads

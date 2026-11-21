@@ -109,6 +109,14 @@ object TrampolineFragment : FunctionTableFragment {
             paramTypes = listOf(TypeTag.OBJECT),
             returnType = TypeTag.STRING,
         ) { args -> if (args[0] == null) "None" else (args[0] as PyObject).toString() },
+        /** A Kotlin function declaring `python.multiplatform.ffi.PyObject` in `paramTypeNames` (#480). */
+        ExposedCallable(
+            name = "trampoline.describePyObject",
+            arity = 1,
+            paramTypes = listOf(TypeTag.OBJECT),
+            returnType = TypeTag.STRING,
+            paramTypeNames = listOf("python.multiplatform.ffi.PyObject"),
+        ) { args -> if (args[0] == null) "None" else (args[0] as PyObject).toString() },
         /** Hands back [shared], so the return path's new-reference rule can be measured alone. */
         ExposedCallable(
             name = "trampoline.shared",
@@ -266,6 +274,14 @@ class UpcallTrampolineTest {
     fun aPythonObjectArgumentReachesKotlinAsAPyObjectWrapper() = PythonTestFixture.withInterpreter {
         assertEquals("[1, 2, 3]", callToString("trampoline.describe", "([1, 2, 3],)"))
     }
+
+    @Test
+    fun aPythonIntAndBoolReachADeclaredPyObjectSlotWithoutConsultingHandleTable() =
+        PythonTestFixture.withInterpreter {
+            assertEquals("42", callToString("trampoline.describePyObject", "(42,)"))
+            assertEquals("True", callToString("trampoline.describePyObject", "(True,)"))
+            assertEquals("None", callToString("trampoline.describePyObject", "(None,)"))
+        }
 
     @Test
     fun noneCrossesAsKotlinNull() = PythonTestFixture.withInterpreter {

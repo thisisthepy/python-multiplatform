@@ -68,8 +68,7 @@ class KlibScannerTest {
     @Test
     fun aPackageAnIncludePrefixNamesExactlyIsMatchedNotOnlyItsSubPackages() {
         if (!konanStdlibKlib.isDirectory) {
-            println("skipped: no .konan cache at $konanStdlibKlib")
-            return
+            ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         val entries = KlibScanner.scanKlib(konanStdlibKlib, includePrefixes = listOf("kotlin.math"))
         assertTrue(entries.isNotEmpty(), "kotlin.math yielded nothing; the package-prefix match regressed")
@@ -89,8 +88,7 @@ class KlibScannerTest {
     @Test
     fun overloadedNamesAreSuffixedNotDropped() {
         if (!konanStdlibKlib.isDirectory) {
-            println("skipped: no .konan cache at $konanStdlibKlib")
-            return
+            ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         val names = KlibScanner.scanKlib(konanStdlibKlib, includePrefixes = listOf("kotlin.math")).map { it.name }
         assertEquals(
@@ -108,8 +106,7 @@ class KlibScannerTest {
     @Test
     fun anEntryCarriesTheTagsItsDeclarationImplies() {
         if (!konanStdlibKlib.isDirectory) {
-            println("skipped: no .konan cache at $konanStdlibKlib")
-            return
+            ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         val entries = KlibScanner.scanKlib(konanStdlibKlib, includePrefixes = listOf("kotlin.math"))
         val absInt = entries.single { it.name == "kotlin.math.abs__Int" }
@@ -147,11 +144,21 @@ class KlibScannerTest {
         // of its interfaces and classes, and since #191 Phase B (A1) `.knm` metadata adds top-level
         // constants, extension functions/properties on handle receivers, and public members of open
         // and abstract classes while declining `@Deprecated(level = ERROR)` types (`ChildHandle`,
-        // `ChildJob`).
+        // `ChildJob`). Since SPEC U-4a (#164) the members of a public generic class or interface with
+        // unbounded type parameters bind too, each read as `kotlin.Any?` (`Deferred.getCompleted`,
+        // `MutableStateFlow.value`, `CancellableContinuation.isActive`); a member whose signature names a
+        // parameterized type (`Deferred.onAwait: SelectClause1<T>`) and a member of a generic value class
+        // (`ChannelResult<T>.isSuccess`) stay declined.
         val entries = KlibScanner.scanKlib(coroutinesKlib, includePrefixes = emptyList())
         assertEquals(
             listOf(
+                "kotlinx.coroutines.AbstractCoroutine.isActive",
+                "kotlinx.coroutines.CancellableContinuation.initCancellability",
+                "kotlinx.coroutines.CancellableContinuation.isActive",
+                "kotlinx.coroutines.CancellableContinuation.isCancelled",
+                "kotlinx.coroutines.CancellableContinuation.isCompleted",
                 "kotlinx.coroutines.CloseableCoroutineDispatcher.close",
+                "kotlinx.coroutines.CompletableDeferred.complete",
                 "kotlinx.coroutines.CompletableJob.complete",
                 "kotlinx.coroutines.CoroutineDispatcher.Key",
                 "kotlinx.coroutines.CoroutineDispatcher.limitedParallelism",
@@ -160,6 +167,8 @@ class KlibScannerTest {
                 "kotlinx.coroutines.CoroutineName.Key",
                 "kotlinx.coroutines.CoroutineName.name",
                 "kotlinx.coroutines.CoroutineStart.isLazy",
+                "kotlinx.coroutines.Deferred.await",
+                "kotlinx.coroutines.Deferred.getCompleted",
                 "kotlinx.coroutines.Dispatchers.Default",
                 "kotlinx.coroutines.Dispatchers.Main",
                 "kotlinx.coroutines.Dispatchers.Unconfined",
@@ -170,6 +179,7 @@ class KlibScannerTest {
                 "kotlinx.coroutines.Job.isActive",
                 "kotlinx.coroutines.Job.isCancelled",
                 "kotlinx.coroutines.Job.isCompleted",
+                "kotlinx.coroutines.Job.join",
                 "kotlinx.coroutines.Job.onJoin",
                 "kotlinx.coroutines.Job.parent",
                 "kotlinx.coroutines.Job.start",
@@ -187,21 +197,38 @@ class KlibScannerTest {
                 "kotlinx.coroutines.channels.Channel.Factory.DEFAULT_BUFFER_PROPERTY_NAME",
                 "kotlinx.coroutines.channels.Channel.Factory.RENDEZVOUS",
                 "kotlinx.coroutines.channels.Channel.Factory.UNLIMITED",
+                "kotlinx.coroutines.channels.ChannelIterator.hasNext",
+                "kotlinx.coroutines.channels.ChannelIterator.next",
                 "kotlinx.coroutines.channels.ChannelResult.Companion",
+                "kotlinx.coroutines.channels.ReceiveChannel.isClosedForReceive",
+                "kotlinx.coroutines.channels.ReceiveChannel.isEmpty",
+                "kotlinx.coroutines.channels.ReceiveChannel.receive",
+                "kotlinx.coroutines.channels.SendChannel.isClosedForSend",
+                "kotlinx.coroutines.channels.SendChannel.send",
                 "kotlinx.coroutines.ensureActive__CoroutineScope",
                 "kotlinx.coroutines.ensureActive__Job",
                 "kotlinx.coroutines.flow.DEFAULT_CONCURRENCY",
                 "kotlinx.coroutines.flow.DEFAULT_CONCURRENCY_PROPERTY_NAME",
+                "kotlinx.coroutines.flow.FlowCollector.emit",
+                "kotlinx.coroutines.flow.MutableSharedFlow.emit",
+                "kotlinx.coroutines.flow.MutableSharedFlow.resetReplayCache",
+                "kotlinx.coroutines.flow.MutableSharedFlow.tryEmit",
+                "kotlinx.coroutines.flow.MutableStateFlow.compareAndSet",
+                "kotlinx.coroutines.flow.MutableStateFlow.value",
+                "kotlinx.coroutines.flow.MutableStateFlow.value=",
                 "kotlinx.coroutines.flow.SharingStarted.Companion",
                 "kotlinx.coroutines.flow.SharingStarted.Eagerly",
                 "kotlinx.coroutines.flow.SharingStarted.Lazily",
                 "kotlinx.coroutines.flow.SharingStarted.WhileSubscribed",
+                "kotlinx.coroutines.flow.StateFlow.value",
                 "kotlinx.coroutines.isActive",
                 "kotlinx.coroutines.newFixedThreadPoolContext",
                 "kotlinx.coroutines.newSingleThreadContext",
+                "kotlinx.coroutines.selects.SelectInstance.disposeOnCompletion",
                 "kotlinx.coroutines.sync.Mutex",
                 "kotlinx.coroutines.sync.Mutex.isLocked",
                 "kotlinx.coroutines.sync.Semaphore",
+                "kotlinx.coroutines.sync.Semaphore.acquire",
                 "kotlinx.coroutines.sync.Semaphore.availablePermits",
                 "kotlinx.coroutines.sync.Semaphore.release",
                 "kotlinx.coroutines.sync.Semaphore.tryAcquire",
@@ -234,8 +261,7 @@ class KlibScannerTest {
     @Test
     fun anIncludePrefixIsANamespaceNotATextPrefix() {
         if (!konanStdlibKlib.isDirectory) {
-            println("skipped: no .konan cache at $konanStdlibKlib")
-            return
+            ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         val entries = KlibScanner.scanKlib(konanStdlibKlib, includePrefixes = listOf("kotlin.co"))
         assertEquals(emptyList(), entries, "\"kotlin.co\" is a text prefix of real packages but not their namespace")
@@ -255,8 +281,7 @@ class KlibScannerTest {
     @Test
     fun aDeclinedDeclarationIsRecordedWithItsReasonRatherThanVanishing() {
         if (!konanStdlibKlib.isDirectory) {
-            println("skipped: no .konan cache at $konanStdlibKlib")
-            return
+            ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         val declarations = KlibScanner.scanKlibDeclarations(konanStdlibKlib, includePrefixes = listOf("kotlin.math"))
         val bound = declarations.filter { it.bindingName != null }
@@ -287,8 +312,7 @@ class KlibScannerTest {
     @Test
     fun theModelAndTheBindingsAgreeBecauseTheyComeFromTheSameWalk() {
         if (!konanStdlibKlib.isDirectory) {
-            println("skipped: no .konan cache at $konanStdlibKlib")
-            return
+            ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         val bound = KlibScanner.scanKlib(konanStdlibKlib, includePrefixes = listOf("kotlin.math")).map { it.name }
         val modelled = KlibScanner.scanKlibDeclarations(konanStdlibKlib, includePrefixes = listOf("kotlin.math"))
@@ -306,8 +330,7 @@ class KlibScannerTest {
     @Test
     fun theSharedOverloadRuleReachesTheModelsBindingName() {
         if (!konanStdlibKlib.isDirectory) {
-            println("skipped: no .konan cache at $konanStdlibKlib")
-            return
+            ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         val max = KlibScanner.scanKlibDeclarations(konanStdlibKlib, includePrefixes = listOf("kotlin.math"))
             .filter { it.simpleName == "max" && it.bindingName != null }
@@ -333,8 +356,7 @@ class KlibScannerTest {
     @Test
     fun aKlibSuppliesTypesAndDefaultsAndParameterNamesViaKnm() {
         if (!konanStdlibKlib.isDirectory) {
-            println("skipped: no .konan cache at $konanStdlibKlib")
-            return
+            ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         val absInt = KlibScanner.scanKlibDeclarations(konanStdlibKlib, includePrefixes = listOf("kotlin.math"))
             .single { it.bindingName == "kotlin.math.abs__Int" }
@@ -361,8 +383,7 @@ class KlibScannerTest {
     @Test
     fun aNullablePrimitiveIsDeclinedTheWayTheJvmProducerDeclinesOne() {
         if (!konanStdlibKlib.isDirectory) {
-            println("skipped: no .konan cache at $konanStdlibKlib")
-            return
+            ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         val declarations = KlibScanner.scanKlibDeclarations(konanStdlibKlib, includePrefixes = NULLABLE_PROBE_PACKAGES)
         val nullablePrimitiveTyped = declarations.filter { declaration ->
@@ -398,8 +419,7 @@ class KlibScannerTest {
     @Test
     fun boundDeclarationsWithDefaultsOccurInRealKlibsViaKnm() {
         if (!konanStdlibKlib.isDirectory) {
-            println("skipped: no .konan cache at $konanStdlibKlib")
-            return
+            ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         val declarations = KlibScanner.scanKlibDeclarations(konanStdlibKlib, includePrefixes = emptyList())
         val boundWithDefault = declarations.filter { it.bindingName != null && it.parameters.any { p -> p.declaresDefault } }

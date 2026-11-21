@@ -52,7 +52,10 @@ import dataclasses
 import re
 
 from typedpython import ir, resume
+from typedpython.aot import alloc as alloc_mod
+from typedpython.aot import classes as classes_mod
 from typedpython.aot import rep as rep_mod
+from typedpython.aot.alloc import AllocPlan
 from typedpython.aot.program import MAIN, Program
 from typedpython.aot.rep import RAW, TAGGED
 from typedpython.aotcheck import Finding
@@ -206,7 +209,8 @@ def needs_int_runtime(text: str) -> bool:
 
 
 class _Gen:
-    def __init__(self, module: ir.Module, program: Program, strict: bool = False) -> None:
+    def __init__(self, module: ir.Module, program: Program, strict: bool = False,
+                 alloc_plan: AllocPlan | None = None) -> None:
         self.module = module
         self.program = program
         self.strict = strict
@@ -216,6 +220,313 @@ class _Gen:
         self.findings: list[Finding] = []
         self.chunks: list[str] = []
         self.argv_int = False           # some function reads `int(sys.argv[i])`: the entry point must keep the arguments whole
+        tagged_fields = {k for k, v in self.reps.field_reps.items() if v == TAGGED}
+        class_lines = {c.name: c.lineno for c in program.classes}
+        self.cls_analysis = classes_mod.analyze_classes(module, program.rel, class_lines, tagged_fields)
+        self.findings.extend(self.cls_analysis.findings)
+        self.alloc_plan = alloc_plan if alloc_plan is not None else alloc_mod.analyze_alloc(module, self.cls_analysis)
+
+    def cls_ptr(self, cls: str) -> str:
+        return f"tpa_cls_{mangle(cls)} *"
+
+    def field_ctype(self, cls: str, fd: ir.FieldDecl) -> str:
+        if fd.type is Type.F64:
+            return "double"
+        if fd.type is Type.BOOL:
+            return "uint8_t"
+        if fd.type is Type.I64:
+            return "tpa_int" if self.reps.field(cls, fd.name) == TAGGED else "int64_t"
+        if fd.type is Type.F64_ARRAY:
+            return "tpa_f64_list *"
+        if fd.type is Type.I64_ARRAY:
+            return "tpa_int_list *" if self.reps.field_list_big(cls, fd.name) else "tpa_i64_list *"
+        assert fd.cls is not None
+        return self.cls_ptr(fd.cls)
+
+    # -- PR-O2b scope regions (docs/design/typedpython-aot.md 6.3.2 item 2, "Step 2 as implemented")
+
+    def region_struct(self, fn_name: str, cls: str) -> str:
+        """The C type of the region objects of class `cls` in function `fn_name`: no count, and a field of a
+        class that is region in the same function is a region pointer (so the field types are per function)."""
+        return f"tpa_reg_{mangle(fn_name)}__{mangle(cls)}"
+
+    def reg_field_ctype(self, fn_name: str, cls: str, fd: ir.FieldDecl) -> str:
+        if fd.type is Type.OBJ:
+            assert fd.cls is not None
+            if self.alloc_plan.is_region(fn_name, fd.cls):
+                return f"{self.region_struct(fn_name, fd.cls)} *"
+            return self.cls_ptr(fd.cls)
+        return self.field_ctype(cls, fd)
+
+    def emit_region_decls(self) -> list[str]:
+        """One struct per region (function, class), after the heap structs (a heap-typed field names one), and
+        its `_free` / `_reset`: a class whose region objects own heap references (lists, big ints, heap-rc
+        objects) first releases them with a walk over every object of the region (`_drop`); a region pointer
+        field is never released (the object it names is freed with its own region)."""
+        keys = sorted(self.alloc_plan.regions)
+        if not keys:
+            return []
+        out: list[str] = []
+        for fn_name, cls in keys:
+            rs = self.region_struct(fn_name, cls)
+            out.append(f"typedef struct {rs} {rs};")
+        out.append("")
+        for fn_name, cls in keys:
+            rs = self.region_struct(fn_name, cls)
+            decl = self.cls_analysis.classes[cls]
+            out.append(f"struct {rs} {{")
+            for fd in decl.field_decls:
+                ft = self.reg_field_ctype(fn_name, cls, fd)
+                sep = "" if ft.endswith("*") else " "
+                out.append(f"    {ft}{sep}f_{mangle(fd.name)};")
+            out.append("};")
+        out.append("")
+        for fn_name, cls in keys:
+            rs = self.region_struct(fn_name, cls)
+            decl = self.cls_analysis.classes[cls]
+            owned: list[str] = []
+            for fd in decl.field_decls:
+                if fd.type is Type.OBJ:
+                    if fd.cls is not None and not self.alloc_plan.is_region(fn_name, fd.cls):
+                        owned.append(f"        tpa_cls_{mangle(fd.cls)}_release(p->f_{mangle(fd.name)});")
+                else:
+                    self._emit_field_release(owned, "        ", cls, fd)
+            if owned:
+                out.append(f"static void {rs}_drop(tpa_region *r) TPA_UNUSED;")
+                out.append(f"static void {rs}_drop(tpa_region *r)")
+                out.append("{")
+                out.append(f"    TPA_REGION_FOREACH({rs}, p, r) {{")
+                out += owned
+                out.append("    }")
+                out.append("}")
+            for op in ("free", "reset"):
+                out.append(f"static void {rs}_{op}(tpa_region *r) TPA_UNUSED;")
+                out.append(f"static void {rs}_{op}(tpa_region *r)")
+                out.append("{")
+                if owned:
+                    out.append(f"    {rs}_drop(r);")
+                out.append(f"    tpa_region_{op}(r);")
+                out.append("}")
+        out.append("")
+        return out
+
+    def gc_class(self, cls: str) -> bool:
+        """PR-O2c: `cls` is cyclic-capable, its heap objects are tracked by the cycle collector."""
+        return self.cls_analysis.is_cyclic(cls)
+
+    def emit_class_decls(self) -> list[str]:
+        """Headerless struct definitions, retain/release helpers (PR-O1, docs/design/typedpython-aot.md 6.3.1).
+        PR-O2c: the struct of a cyclic-capable class starts with the collector's header (`tpa_gc_head gc;`
+        before `rc`, the layout `tp_aot_gc.h` reads the count through), its release untracks the object when
+        the count reaches zero, and the class gets its `_gc_traverse` (the fields of cyclic-capable classes,
+        the collector's edges), `_gc_clear` (every owned field emptied and released) and `_gc_type`."""
+        if not self.module.classes:
+            return []
+        out: list[str] = []
+        for decl in self.module.classes:
+            mc = mangle(decl.name)
+            out.append(f"typedef struct tpa_cls_{mc} tpa_cls_{mc};")
+        out.append("")
+        for decl in self.module.classes:
+            mc = mangle(decl.name)
+            out.append(f"struct tpa_cls_{mc} {{")
+            if self.gc_class(decl.name):
+                out.append("    tpa_gc_head gc;")
+            out.append("    tpa_rc_t rc;")
+            for fd in decl.field_decls:
+                ft = self.field_ctype(decl.name, fd)
+                sep = "" if ft.endswith("*") else " "
+                out.append(f"    {ft}{sep}f_{mangle(fd.name)};")
+            out.append("};")
+        out.append("")
+        for decl in self.module.classes:
+            mc = mangle(decl.name)
+            out.append(f"static inline void tpa_cls_{mc}_retain(tpa_cls_{mc} *p) TPA_UNUSED;")
+            out.append(f"static inline void tpa_cls_{mc}_retain(tpa_cls_{mc} *p) {{ if (p != NULL) {{ TPA_RC_INC(p); }} }}")
+            out.append(f"static void tpa_cls_{mc}_release(tpa_cls_{mc} *p) TPA_UNUSED;")
+        out.append("")
+        for decl in self.module.classes:
+            mc = mangle(decl.name)
+            tf = self.cls_analysis.tail_field.get(decl.name)
+            # review of #508, F1: a class with a field of a class type releases it by a call, which nests; its
+            # release counts the depth and parks the object past TPA_TRASH_LIMIT (`tpa_trash_*`, tp_aot.h), the
+            # parked object freed later by `_drop`. A class with no such field cannot nest and is unchanged.
+            trash = any(fd.type is Type.OBJ and fd.cls is not None for fd in decl.field_decls)
+            if trash:
+                out.append(f"static void tpa_cls_{mc}_drop(void *v);")
+            out.append(f"static void tpa_cls_{mc}_release(tpa_cls_{mc} *p)")
+            out.append("{")
+            if tf is not None:
+                out.append("    while (p != NULL) {")
+                out.append("        if (!TPA_RC_DEC_IS_ZERO(p)) return;")
+                if self.gc_class(decl.name):
+                    out.append("        tpa_gc_untrack(&p->gc);")
+                if trash:
+                    out.append(f"        if (!tpa_trash_enter(p, tpa_cls_{mc}_drop)) return;")
+                out.append(f"        tpa_cls_{mc} *next = p->f_{mangle(tf)};")
+                for fd in decl.field_decls:
+                    if fd.name == tf:
+                        continue
+                    self._emit_field_release(out, "        ", decl.name, fd)
+                out.append("        free(p);")
+                if trash:
+                    out.append("        tpa_trash_leave();")
+                out.append("        p = next;")
+                out.append("    }")
+            else:
+                out.append("    if (p == NULL) return;")
+                out.append("    if (!TPA_RC_DEC_IS_ZERO(p)) return;")
+                if self.gc_class(decl.name):
+                    out.append("    tpa_gc_untrack(&p->gc);")
+                if trash:
+                    out.append(f"    if (!tpa_trash_enter(p, tpa_cls_{mc}_drop)) return;")
+                for fd in decl.field_decls:
+                    self._emit_field_release(out, "    ", decl.name, fd)
+                out.append("    free(p);")
+                if trash:
+                    out.append("    tpa_trash_leave();")
+            out.append("}")
+            if trash:
+                # a parked object: its count is zero and it is untracked; free its fields and itself (and continue
+                # down the tail field as the release loop would)
+                out.append(f"static void tpa_cls_{mc}_drop(void *v)")
+                out.append("{")
+                out.append(f"    tpa_cls_{mc} *p = (tpa_cls_{mc} *)v;")
+                if tf is not None:
+                    out.append(f"    tpa_cls_{mc} *next = p->f_{mangle(tf)};")
+                for fd in decl.field_decls:
+                    if fd.name == tf:
+                        continue
+                    self._emit_field_release(out, "    ", decl.name, fd)
+                out.append("    free(p);")
+                if tf is not None:
+                    out.append(f"    tpa_cls_{mc}_release(next);")
+                out.append("}")
+        out.append("")
+        for decl in self.module.classes:
+            if self.gc_class(decl.name):
+                out += self._emit_gc_functions(decl)
+        return out
+
+    def _emit_gc_functions(self, decl: ir.ClassDecl) -> list[str]:
+        """PR-O2c, one cyclic-capable class: `traverse` visits every field that holds a tracked object (a field
+        of a cyclic-capable class; NULL skipped), `clear` empties every owned field before releasing what it held
+        (so a release that reaches this object again finds nothing), and the type record the collector calls."""
+        mc = mangle(decl.name)
+        out: list[str] = []
+        out.append(f"static void tpa_cls_{mc}_gc_traverse(tpa_gc_head *h, tpa_gc_visit visit, void *arg) TPA_UNUSED;")
+        out.append(f"static void tpa_cls_{mc}_gc_traverse(tpa_gc_head *h, tpa_gc_visit visit, void *arg)")
+        out.append("{")
+        out.append(f"    tpa_cls_{mc} *p = (tpa_cls_{mc} *)h;")
+        edges = [fd for fd in decl.field_decls if fd.type is Type.OBJ and fd.cls is not None and self.gc_class(fd.cls)]
+        for fd in edges:
+            mf = mangle(fd.name)
+            out.append(f"    if (p->f_{mf} != NULL) visit(&p->f_{mf}->gc, arg);")
+        if not edges:
+            out.append("    (void)p; (void)visit; (void)arg;")
+        out.append("}")
+        out.append(f"static void tpa_cls_{mc}_gc_clear(tpa_gc_head *h) TPA_UNUSED;")
+        out.append(f"static void tpa_cls_{mc}_gc_clear(tpa_gc_head *h)")
+        out.append("{")
+        out.append(f"    tpa_cls_{mc} *p = (tpa_cls_{mc} *)h;")
+        cleared = 0
+        for fd in decl.field_decls:
+            cleared += self._emit_field_clear(out, "    ", decl.name, fd)
+        if not cleared:
+            out.append("    (void)p;")
+        out.append("}")
+        out.append(f"static const tpa_gc_type tpa_cls_{mc}_gc_type = {{ tpa_cls_{mc}_gc_traverse, tpa_cls_{mc}_gc_clear }};")
+        out.append("")
+        return out
+
+    def _emit_field_clear(self, out: list[str], ind: str, cls: str, fd: ir.FieldDecl) -> int:
+        """`clear` of one field: the slot is emptied first, then what it held is released. Returns 1 for an
+        owned field, 0 for a scalar."""
+        mf = mangle(fd.name)
+        if fd.type is Type.OBJ and fd.cls is not None:
+            ptr, rel = self.cls_ptr(fd.cls), f"tpa_cls_{mangle(fd.cls)}_release"
+        elif fd.type is Type.F64_ARRAY:
+            ptr, rel = "tpa_f64_list *", "tpa_f64_release"
+        elif fd.type is Type.I64_ARRAY:
+            big = self.reps.field_list_big(cls, fd.name)
+            ptr, rel = ("tpa_int_list *", "tpa_int_list_release") if big else ("tpa_i64_list *", "tpa_i64_release")
+        elif fd.type is Type.I64 and self.reps.field(cls, fd.name) == TAGGED:
+            out.append(f"{ind}tpa_int_clear(&p->f_{mf});")
+            return 1
+        else:
+            return 0
+        out.append(f"{ind}{{")
+        out.append(f"{ind}    {ptr}f = p->f_{mf};")
+        out.append(f"{ind}    p->f_{mf} = NULL;")
+        out.append(f"{ind}    {rel}(f);")
+        out.append(f"{ind}}}")
+        return 1
+
+    def _emit_field_release(self, out: list[str], ind: str, cls: str, fd: ir.FieldDecl) -> None:
+        mf = mangle(fd.name)
+        if fd.type is Type.OBJ and fd.cls is not None:
+            out.append(f"{ind}tpa_cls_{mangle(fd.cls)}_release(p->f_{mf});")
+        elif fd.type is Type.F64_ARRAY:
+            out.append(f"{ind}tpa_f64_release(p->f_{mf});")
+        elif fd.type is Type.I64_ARRAY:
+            fn = "tpa_int_list_release" if self.reps.field_list_big(cls, fd.name) else "tpa_i64_release"
+            out.append(f"{ind}{fn}(p->f_{mf});")
+        elif fd.type is Type.I64 and self.reps.field(cls, fd.name) == TAGGED:
+            out.append(f"{ind}tpa_int_release(p->f_{mf});")
+
+    def emit_class_ctors(self) -> list[str]:
+        """Constructor wrappers `tpa_cls_<C>_new(...)` (after function prototypes so they can call `__init__`)."""
+        if not self.module.classes:
+            return []
+        out: list[str] = []
+        for decl in self.module.classes:
+            mc = mangle(decl.name)
+            init_fn = self.fns.get(f"{decl.name}.__init__")
+            c_params: list[str] = []
+            call_args: list[str] = ["obj"]
+            if init_fn is not None:
+                for p in init_fn.params[1:]:
+                    if isinstance(p, ir.ArrayParam) and p.type in LIST:
+                        c_params.append(f"{list_ptr(self.array_kind(init_fn.name, p.name, p.type))}a_{mangle(p.name)}")
+                    elif isinstance(p, ir.Param) and p.type is Type.OBJ and p.cls is not None:
+                        c_params.append(f"{self.cls_ptr(p.cls)}a_{mangle(p.name)}")
+                    elif isinstance(p, ir.Param) and p.type in CTYPE:
+                        ct = "tpa_int" if self.tagged_param(init_fn, p) else CTYPE[p.type]
+                        c_params.append(f"{ct} a_{mangle(p.name)}")
+                    call_args.append(f"a_{mangle(p.name)}")
+            c_params.append(f"tpa_cls_{mc} **out")
+            out.append(f"static int tpa_cls_{mc}_new({', '.join(c_params)}) TPA_UNUSED;")
+            out.append(f"static int tpa_cls_{mc}_new({', '.join(c_params)})")
+            out.append("{")
+            if self.gc_class(decl.name):
+                # PR-O2c: the collector's safepoint, before the allocation: every argument is held by the caller
+                # (an owned temporary, an owned local, a borrowed parameter its caller holds, a field of a live
+                # object) and `__init__` has not started
+                out.append(f"    tpa_cls_{mc} *obj;")
+                out.append("    tpa_gc_safepoint();")
+                out.append(f"    obj = (tpa_cls_{mc} *)calloc(1, sizeof(tpa_cls_{mc}));")
+            else:
+                out.append(f"    tpa_cls_{mc} *obj = (tpa_cls_{mc} *)calloc(1, sizeof(tpa_cls_{mc}));")
+            out.append("    if (obj == NULL) {")
+            out.append('        tpa_raise(TPA_MemoryError, "");')
+            out.append("        return -1;")
+            out.append("    }")
+            out.append("    obj->rc = 1;")
+            if self.gc_class(decl.name):
+                out.append(f"    tpa_gc_track(&obj->gc, &tpa_cls_{mc}_gc_type);")
+            for fd in decl.field_decls:
+                if fd.type is Type.I64 and self.reps.field(decl.name, fd.name) == TAGGED:
+                    out.append(f"    obj->f_{mangle(fd.name)} = TPA_INT_ZERO;")
+            if init_fn is not None:
+                out.append(f"    if (tpf_{mangle(init_fn.name)}({', '.join(call_args)}) != 0) {{")
+                out.append(f"        tpa_cls_{mc}_release(obj);")
+                out.append("        return -1;")
+                out.append("    }")
+            out.append("    *out = obj;")
+            out.append("    return 0;")
+            out.append("}")
+        out.append("")
+        return out
 
     def tuple_kinds(self, f: ir.Function) -> tuple[Type, ...] | None:
         """The element types of the tuple `f` returns, when it does and they are scalars."""
@@ -240,8 +551,12 @@ class _Gen:
         return isinstance(p, ir.Param) and p.type is Type.I64 and self.reps.name(f.name, p.name) == TAGGED
 
     def owned_param(self, f: ir.Function, p: object) -> bool:
-        """A TAGGED parameter the body assigns: the caller's value is borrowed, so the body works on an owned copy."""
-        return self.tagged_param(f, p) and p.name in assigned_names(f)           # type: ignore[attr-defined]
+        """A TAGGED or class parameter the body assigns: the caller's value is borrowed, so the body works on an owned copy."""
+        if self.tagged_param(f, p):
+            return p.name in assigned_names(f)                                   # type: ignore[attr-defined]
+        if isinstance(p, ir.Param) and p.type is Type.OBJ and p.cls is not None:
+            return p.name in assigned_names(f)
+        return False
 
     def param_c(self, f: ir.Function, p: object) -> str:
         """The C name of a parameter (`pv_` for the borrowed original of an owned one)."""
@@ -255,6 +570,8 @@ class _Gen:
         for p in f.params:
             if isinstance(p, ir.ArrayParam) and p.type in LIST:
                 params.append(f"{list_ptr(self.array_kind(f.name, p.name, p.type))}v_{mangle(p.name)} TPA_UNUSED")
+            elif isinstance(p, ir.Param) and p.type is Type.OBJ and p.cls is not None:
+                params.append(f"{self.cls_ptr(p.cls)}{self.param_c(f, p)} TPA_UNUSED")
             elif isinstance(p, ir.Param) and p.type in CTYPE:
                 ct = "tpa_int" if self.tagged_param(f, p) else CTYPE[p.type]
                 params.append(f"{ct} {self.param_c(f, p)} TPA_UNUSED")
@@ -263,6 +580,8 @@ class _Gen:
         kinds = self.tuple_kinds(f)
         if f.returns in LIST:
             params.append(f"{list_ptr(self.ret_kind(f))}*out")
+        elif f.returns is Type.OBJ and f.return_cls is not None:
+            params.append(f"{self.cls_ptr(f.return_cls)}*out")
         elif kinds is not None:
             params += [f"{self.out_ctype(f, k, self.reps.element(f.name, i))} *out{i}" for i, k in enumerate(kinds)]
         elif f.returns in CTYPE:
@@ -293,6 +612,92 @@ class _Fn:
         self.types.update(f.locals)
         self.tagged_slots: list[str] = []        # TAGGED temporaries: released at the cleanup point
         self.str_slots: list[str] = []           # `char *` temporaries (a formatted TAGGED int): freed there too
+        self.obj_slots: list[tuple[str, str]] = []   # (cls, slot_name) class temporaries: released at cleanup
+        self.list_slots: list[tuple[str, str]] = []  # (kind, slot_name) retained mutable list field reads
+        self.assigned: set[str] = assigned_names(f)
+        self.regions = g.alloc_plan.fn_regions(f.name)      # PR-O2b: class -> its region in this function
+        self.borrowed_locals: set[str] = self._find_borrowed_locals(f)
+
+    def _find_borrowed_locals(self, f: ir.Function) -> set[str]:
+        """Elision condition 3: a class local initialized once at top level from an immutable field of
+        an unrebound owner (param or local) may be borrowed with no retain/release."""
+        if not f.local_classes:
+            return set()
+        counts: dict[str, int] = {}
+        for s in f.body:
+            for n in rep_mod.walk(s):
+                if isinstance(n, ir.Assign):
+                    counts[n.target] = counts.get(n.target, 0) + 1
+        out: set[str] = set()
+        for s in f.body:
+            if isinstance(s, ir.Assign) and s.target in f.local_classes and counts.get(s.target, 0) == 1 \
+                    and not self.is_region_local(s.target):
+                v = s.value
+                if (isinstance(v, ir.FieldGet) and v.type is Type.OBJ
+                        and self.g.cls_analysis.field_elidable(v.cls, v.field)
+                        and isinstance(v.obj, ir.Local) and v.obj.name not in self.assigned
+                        and not self.is_region_local(v.obj.name)):
+                    out.add(s.target)
+        return out
+
+    # -- PR-O2b scope regions
+
+    def is_region_local(self, name: str) -> bool:
+        """A local of a class that is region in this function (never a parameter, never a virtual local): its
+        C type is the region pointer, it is never counted and never released."""
+        return (name in self.f.local_classes and not self.is_virtual(name)
+                and self.f.local_classes[name][0] in self.regions)
+
+    def expr_region_cls(self, e: ir.Expr) -> str | None:
+        """The class of `e` when `e` is a region pointer (the emitter's twin of `alloc._RegionAnalysis.region_valued`)."""
+        if isinstance(e, ir.Local):
+            return self.f.local_classes[e.name][0] if self.is_region_local(e.name) else None
+        if isinstance(e, ir.FieldGet):
+            if self.expr_region_cls(e.obj) is None:
+                return None
+            fd = self.g.cls_analysis.field_map.get((e.cls, e.field))
+            return fd.cls if fd is not None and fd.cls is not None and fd.cls in self.regions else None
+        if isinstance(e, ir.New):
+            return e.cls if e.cls in self.regions else None
+        return None
+
+    def reg_ptr(self, cls: str) -> str:
+        return f"{self.g.region_struct(self.f.name, cls)} *"
+
+    def region_var(self, cls: str) -> str:
+        return f"rg_{mangle(cls)}"
+
+    def no_region(self, e: ir.Expr, what: str) -> bool:
+        """The analysis keeps region pointers away from `what`; a slip is a finding, never wrong C."""
+        if self.expr_region_cls(e) is not None:
+            self.bad("aot/region", what, f"a region pointer reaches {what}, which the region analysis must prevent")
+            return False
+        return True
+
+    def region_value_ok(self, e: ir.Expr, cls: str, what: str) -> bool:
+        """`e`, stored into a region pointer of class `cls` (a region local or a region object's field), is a region
+        pointer of that class or None."""
+        if (isinstance(e, ir.Const) and e.value is None) or self.expr_region_cls(e) == cls:
+            return True
+        self.bad("aot/region", what, f"a heap pointer reaches {what}, which the region analysis must prevent")
+        return False
+
+    def loop_prologue(self, loop: ir.Stmt) -> None:
+        """The top of an iteration of `loop`: every region this iteration owns is released and reset."""
+        for cls, info in self.regions.items():
+            if info.loop is loop:
+                self.emit(f"{self.g.region_struct(self.f.name, cls)}_reset(&{self.region_var(cls)});")
+
+    def oslot(self, cls: str) -> str:
+        t = self.tmp(self.g.cls_ptr(cls), "NULL")
+        self.obj_slots.append((cls, t))
+        return t
+
+    def is_virtual(self, name: str) -> bool:
+        return self.g.alloc_plan.is_virtual(self.f.name, name)
+
+    def vfield(self, name: str, fname: str) -> str:
+        return f"v_{mangle(name)}__f_{mangle(fname)}"
 
     # -- representation
 
@@ -494,11 +899,131 @@ class _Fn:
             return "1" if e.value else "0"
         if e.type is Type.NONE:
             return "0"
+        if e.type is Type.OBJ and e.value is None:
+            return "NULL"
         return self.bad("aot/str", "str", "a string value is only supported as a literal argument of print "
                         "(strings arrive in a later step)")
 
+    def ev_Is(self, e: ir.Is) -> str:
+        left = self.ev(e.left)
+        right = self.ev(e.right)
+        return f"({left} != {right})" if e.negate else f"({left} == {right})"
+
+    def ev_FieldGet(self, e: ir.FieldGet) -> str:
+        fd = self.g.cls_analysis.field_map.get((e.cls, e.field))
+        if fd is None:
+            return self.bad("aot/type", e.field, f"unknown field `{e.cls}.{e.field}`")
+        if isinstance(e.obj, ir.Local) and self.is_virtual(e.obj.name):
+            vf = self.vfield(e.obj.name, e.field)
+            if fd.type in (Type.F64, Type.BOOL):
+                return vf
+            if fd.type is Type.I64:
+                if self.g.reps.field(e.cls, e.field) == TAGGED:
+                    t = self.tslot()
+                    self.emit(f"tpa_int_set(&{t}, {vf});")
+                    return t
+                return vf
+            if fd.type in LIST:
+                kind = "f64" if fd.type is Type.F64_ARRAY else (
+                    "int" if self.g.reps.field_list_big(e.cls, e.field) else "i64")
+                t = self.tmp(list_ptr(kind), "NULL")
+                self.list_slots.append((kind, t))
+                self.emit(f"{lfn(kind, 'release')}({t}); {t} = {vf}; {lfn(kind, 'retain')}({t});")
+                return t
+            assert fd.cls is not None
+            t = self.oslot(fd.cls)
+            mc = mangle(fd.cls)
+            self.emit(f"tpa_cls_{mc}_release({t}); {t} = {vf}; tpa_cls_{mc}_retain({t});")
+            return t
+        region_obj = self.expr_region_cls(e.obj) is not None      # PR-O2b: the object lives in a region
+        obj = self.ev(e.obj)
+        mf = mangle(e.field)
+        if fd.type in (Type.F64, Type.BOOL):
+            return f"({obj}->f_{mf})"
+        if fd.type is Type.I64:
+            if self.g.reps.field(e.cls, e.field) == TAGGED:
+                t = self.tslot()
+                self.emit(f"tpa_int_set(&{t}, {obj}->f_{mf});")
+                return t
+            return f"({obj}->f_{mf})"
+        if fd.type in LIST:
+            kind = "f64" if fd.type is Type.F64_ARRAY else (
+                "int" if self.g.reps.field_list_big(e.cls, e.field) else "i64")
+            if (not region_obj and self.g.cls_analysis.field_elidable(e.cls, e.field)
+                    and isinstance(e.obj, ir.Local) and e.obj.name not in self.assigned):
+                return f"({obj}->f_{mf})"
+            t = self.tmp(list_ptr(kind), "NULL")
+            self.list_slots.append((kind, t))
+            self.emit(f"{lfn(kind, 'release')}({t}); {t} = {obj}->f_{mf}; {lfn(kind, 'retain')}({t});")
+            return t
+        assert fd.cls is not None
+        if region_obj:
+            if fd.cls in self.regions:
+                return f"({obj}->f_{mf})"          # a region pointer: no count, nothing to retain
+            # an owned heap object held by a region object: a mutable field, retained into a temporary
+            t = self.oslot(fd.cls)
+            mc = mangle(fd.cls)
+            self.emit(f"tpa_cls_{mc}_release({t}); {t} = {obj}->f_{mf}; tpa_cls_{mc}_retain({t});")
+            return t
+        if (self.g.cls_analysis.field_elidable(e.cls, e.field)
+                and isinstance(e.obj, ir.Local) and e.obj.name not in self.assigned):
+            return f"({obj}->f_{mf})"
+        # Mutable class field read, or any field of a cyclic-capable class (PR-O2c): MUST retain into a
+        # temporary (elision conditions 3 and 4).
+        t = self.oslot(fd.cls)
+        mc = mangle(fd.cls)
+        self.emit(f"tpa_cls_{mc}_release({t}); {t} = {obj}->f_{mf}; tpa_cls_{mc}_retain({t});")
+        return t
+
+    def ev_New(self, e: ir.New) -> str:
+        if e.cls in self.regions:
+            return self._emit_region_new(e)
+        init_fn = self.g.fns.get(f"{e.cls}.__init__")
+        args: list[str] = []
+        if init_fn is not None:
+            ok = True
+            for p, a in zip(init_fn.params[1:], e.args):
+                if isinstance(p, ir.ArrayParam):
+                    if not (isinstance(a, ir.Local) and a.type is p.type and a.name in self.types):
+                        ok = False
+                        self.bad("aot/type", init_fn.name, f"the argument for list parameter `{p.name}` of "
+                                 f"`{init_fn.name}` is not a list of its type")
+                    elif self.kind(a.name) != self.g.array_kind(init_fn.name, p.name, p.type):
+                        ok = False
+                        self.bad("aot/type", init_fn.name, f"the list `{a.name}` and the parameter `{p.name}` of "
+                                 f"`{init_fn.name}` are lists of different kinds")
+                    else:
+                        args.append(f"v_{mangle(a.name)}")
+                elif isinstance(p, ir.Param) and self.g.tagged_param(init_fn, p):
+                    args.append(self.tagged(a))
+                else:
+                    if not self.no_region(a, f"the {e.cls} constructor (a heap object)"):
+                        ok = False
+                    args.append(self.ev(a))
+                    if a.type is Type.I64 and self.rep(a) == TAGGED:
+                        ok = False
+                        self.bad("aot/type", init_fn.name, f"a TAGGED int is passed for the RAW parameter "
+                                 f"`{p.name}` of `{init_fn.name}` (the representation did not converge)")
+            if not ok:
+                return "NULL"
+        else:
+            for a in e.args:
+                if not self.no_region(a, f"the {e.cls} constructor (a heap object)"):
+                    return "NULL"
+                args.append(self.ev(a))
+        t = self.oslot(e.cls)
+        mc = mangle(e.cls)
+        self.emit(f"tpa_cls_{mc}_release({t}); {t} = NULL;")
+        self.emit(f"if (tpa_cls_{mc}_new({', '.join(args + ['&' + t])})) {self.fail()}")
+        return t
+
+    def _is_class_local(self, name: str) -> bool:
+        if name in self.f.local_classes:
+            return True
+        return any(isinstance(p, ir.Param) and p.name == name and p.cls is not None for p in self.f.params)
+
     def ev_Local(self, e: ir.Local) -> str:
-        if e.type not in CTYPE and e.type not in LIST:
+        if e.type not in CTYPE and e.type not in LIST and not (e.type is Type.OBJ and self._is_class_local(e.name)):
             self.ctype(e.type, e.name)
         return f"v_{mangle(e.name)}"
 
@@ -594,6 +1119,10 @@ class _Fn:
             if e.proven:
                 return f"tpa_pneg_i64({v})"
             return self.unproven(e, "aot/int-unproven", "-", ast.USub, "")
+        if e.op is ir.UnaryOpKind.INVERT and t is Type.I64:
+            if self.rep(e) == TAGGED:
+                return self.fallible_int(f"tpa_int_invert({self.tagged(e.operand)}, @)")
+            return f"(~({self.ev(e.operand)}))"
         return self.bad("aot/operator", e.op.value, f"the unary `{e.op.value}` on a {t.value} is outside the first AOT step")
 
     def ev_Compare(self, e: ir.Compare) -> str:
@@ -644,7 +1173,12 @@ class _Fn:
             a, b = self.float_args((e.left, e.right))
             if k in (ir.BinOpKind.ADD, ir.BinOpKind.SUB, ir.BinOpKind.MUL):
                 return f"({a} {k.value} {b})"
-            fn = {ir.BinOpKind.TRUEDIV: "truediv", ir.BinOpKind.FLOORDIV: "floordiv", ir.BinOpKind.MOD: "mod"}.get(k)
+            fn = {
+                ir.BinOpKind.TRUEDIV: "truediv",
+                ir.BinOpKind.FLOORDIV: "floordiv",
+                ir.BinOpKind.MOD: "mod",
+                ir.BinOpKind.POW: "pow",
+            }.get(k)
             if fn is None:
                 return self.bad("aot/operator", k.value, f"the float operator `{k.value}` is outside the first AOT step")
             return self.fallible("double", f"tpa_{fn}_f64({a}, {b}, @)")
@@ -676,9 +1210,12 @@ class _Fn:
                             "operands inside plus or minus 2**53, where the C division equals CPython's correctly "
                             "rounded quotient; big integers arrive in a later step")
         if self.rep(e) == TAGGED:
-            if k in (ir.BinOpKind.ADD, ir.BinOpKind.SUB, ir.BinOpKind.MUL, ir.BinOpKind.FLOORDIV, ir.BinOpKind.MOD):
+            fn = {
+                "+": "add", "-": "sub", "*": "mul", "//": "floordiv", "%": "mod",
+                "&": "and", "|": "or", "^": "xor", "<<": "lshift", ">>": "rshift", "**": "pow",
+            }.get(sym)
+            if fn is not None:
                 a, b = self.tagged(e.left), self.tagged(e.right)
-                fn = {"+": "add", "-": "sub", "*": "mul", "//": "floordiv", "%": "mod"}[sym]
                 return self.fallible_int(f"tpa_int_{fn}({a}, {b}, @)")
             return self.bad("aot/operator", sym, f"the int operator `{sym}` is outside the first AOT step")
         if k in (ir.BinOpKind.ADD, ir.BinOpKind.SUB, ir.BinOpKind.MUL):
@@ -687,6 +1224,16 @@ class _Fn:
                 return self.unproven(e, "aot/int-unproven", sym, _AST_OP[k], "")
             name = {"+": "add", "-": "sub", "*": "mul"}[sym]
             return f"tpa_p{name}_i64({a}, {b})"
+        if k in (ir.BinOpKind.AND, ir.BinOpKind.OR, ir.BinOpKind.XOR):
+            a, b = self.ev(e.left), self.ev(e.right)
+            return f"({a} {sym} {b})"
+        if k is ir.BinOpKind.RSHIFT:
+            return self.fallible("int64_t", f"tpa_rshift_i64({self.ev(e.left)}, {self.ev(e.right)}, @)")
+        if k is ir.BinOpKind.LSHIFT:
+            a, b = self.ev(e.left), self.ev(e.right)
+            if not e.proven:
+                return self.unproven(e, "aot/int-unproven", "<<", ast.LShift, "")
+            return self.fallible("int64_t", f"tpa_plshift_i64({a}, {b}, @)")
         if k is ir.BinOpKind.MOD:
             # the result lies between 0 and the divisor, so it always fits in 64 bits (not marked `proven`)
             return self.fallible("int64_t", f"tpa_mod_i64({self.ev(e.left)}, {self.ev(e.right)}, @)")
@@ -704,6 +1251,10 @@ class _Fn:
         args = self.float_args(e.args)
         if any(a.type is not Type.F64 for a in e.args):
             return self.bad("aot/type", e.func.value, "a math function takes floats")
+        if e.func in (ir.MathFunc.ISNAN, ir.MathFunc.ISINF, ir.MathFunc.ISFINITE):
+            return f"tpa_math_{e.func.value}({args[0]})"
+        if e.func in (ir.MathFunc.FLOOR, ir.MathFunc.CEIL, ir.MathFunc.TRUNC):
+            return self.fallible_int(f"tpa_math_{e.func.value}({args[0]}, @)")
         return self.fallible("double", f"tpa_math_{e.func.value}({', '.join(args)}, @)")
 
     # -- lists
@@ -839,6 +1390,8 @@ class _Fn:
         out: list[str] = []
         ok = True
         for p, a in zip(callee.params, e.args):
+            if not self.no_region(a, f"the call of {e.function}"):
+                ok = False
             if isinstance(p, ir.ArrayParam):
                 if not (isinstance(a, ir.Local) and a.type is p.type and a.name in self.types):
                     ok = False
@@ -879,6 +1432,12 @@ class _Fn:
             t = self.list_tmp(self.g.ret_kind(callee))
             self.emit(f"if ({name}({', '.join(args + ['&' + t])})) {self.fail()}")
             return t                                       # a new reference: the receiver owns it
+        if callee.returns is Type.OBJ and callee.return_cls is not None:
+            mc = mangle(callee.return_cls)
+            t = self.oslot(callee.return_cls)
+            self.emit(f"tpa_cls_{mc}_release({t}); {t} = NULL;")
+            self.emit(f"if ({name}({', '.join(args + ['&' + t])})) {self.fail()}")
+            return t
         if callee.returns in CTYPE:
             if callee.returns is Type.I64 and self.g.reps.returns(callee.name) == TAGGED:
                 t = self.tslot()                           # the callee writes a new reference; the slot owns it
@@ -914,6 +1473,33 @@ class _Fn:
     def ev_ArgvLen(self, e: ir.ArgvLen) -> str:
         return "((int64_t)tpa_argc)"
 
+    def ev_FloatToInt(self, e: ir.FloatToInt) -> str:
+        return self.fallible_int(f"tpa_int_from_f64({self.ev(e.operand)}, @)")
+
+    def ev_BoolToInt(self, e: ir.BoolToInt) -> str:
+        return f"((int64_t)({self.ev(e.operand)}))"
+
+    def ev_StrToInt(self, e: ir.StrToInt) -> str:
+        lit, n = _c_string(e.text)
+        return self.fallible_int(f"tpa_int_parse_literal({lit}, {n}U, @)")
+
+    def ev_TimeCall(self, e: ir.TimeCall) -> str:
+        return f"tpa_time_{e.func.value}()"
+
+    def st_TimeSleep(self, s: ir.TimeSleep) -> None:
+        v = self.ev(s.seconds)
+        self.emit(f"if (tpa_time_sleep({v}) != 0) {{ {self.fail()} }}")
+
+    def st_SysExit(self, s: ir.SysExit) -> None:
+        if s.code is None:
+            self.emit("tpa_exit_i64(0);")
+        elif self.rep(s.code) == TAGGED:
+            v = self.ev(s.code)
+            self.emit(f"tpa_exit_int({v});")
+        else:
+            v = self.ev(s.code)
+            self.emit(f"tpa_exit_i64({v});")
+
     # -- statements
 
     def stmts(self, ss) -> None:
@@ -941,8 +1527,8 @@ class _Fn:
         if e.type is not want or want not in LIST:
             self.bad("aot/type", "list", f"a {getattr(e.type, 'value', '?')} is used where a {want.value} list is needed")
             return "NULL", True
-        if isinstance(e, ir.Local):
-            return self.ev_Local(e), False
+        if isinstance(e, (ir.Local, ir.FieldGet)):
+            return self.ev(e), False
         return self.ev(e), True
 
     def st_Assign(self, s: ir.Assign) -> None:
@@ -961,6 +1547,29 @@ class _Fn:
             self.emit(f"{lfn(x, 'release')}(v_{mangle(s.target)});")   # the old binding, after the new one is held
             self.emit(f"v_{mangle(s.target)} = {val};")
             return
+        if want is Type.OBJ and s.target in self.f.local_classes:
+            cls = self.f.local_classes[s.target][0]
+            if self.is_virtual(s.target) and isinstance(s.value, ir.New):
+                self._emit_virtual_init(s.target, cls, s.value)
+                return
+            val = self.ev(s.value)
+            if self.is_region_local(s.target):
+                # a region pointer: a plain assignment, nothing is counted (PR-O2b)
+                if self.region_value_ok(s.value, cls, f"the region local `{s.target}`"):
+                    self.emit(f"v_{mangle(s.target)} = {val};")
+                return
+            if not self.no_region(s.value, f"the heap local `{s.target}`"):
+                return
+            if s.target in self.borrowed_locals:
+                self.emit(f"v_{mangle(s.target)} = {val};")
+            else:
+                mc = mangle(cls)
+                tmp = self.tmp(self.g.cls_ptr(cls), "NULL")
+                self.emit(f"{tmp} = {val};")
+                self.emit(f"tpa_cls_{mc}_retain({tmp});")
+                self.emit(f"tpa_cls_{mc}_release(v_{mangle(s.target)});")
+                self.emit(f"v_{mangle(s.target)} = {tmp};")
+            return
         if want is None or want is not s.value.type:
             self.bad("aot/type", s.target, f"`{s.target}` is assigned a {s.value.type.value} but is a "
                      f"{want.value if want else 'name the front end did not type'}")
@@ -976,6 +1585,173 @@ class _Fn:
                      "did not converge)")
             return
         self.emit(f"v_{mangle(s.target)} = {v};")
+
+    def _eval_new_args(self, cls: str, e: ir.New, init_fn: ir.Function | None
+                       ) -> list[tuple[str, bool, str | None]] | None:
+        """The arguments of a site with a simple `__init__` (virtual or region), evaluated in order:
+        (C value, whether it is TAGGED, the kind of a list argument). None after a finding."""
+        eval_args: list[tuple[str, bool, str | None]] = []
+        if init_fn is None:
+            return eval_args
+        ok = True
+        for p, a in zip(init_fn.params[1:], e.args):
+            if isinstance(p, ir.ArrayParam):
+                if not (isinstance(a, ir.Local) and a.type is p.type and a.name in self.types):
+                    ok = False
+                    self.bad("aot/type", init_fn.name, f"the argument for list parameter `{p.name}` of "
+                             f"`{init_fn.name}` is not a list of its type")
+                elif self.kind(a.name) != self.g.array_kind(init_fn.name, p.name, p.type):
+                    ok = False
+                    self.bad("aot/type", init_fn.name, f"the list `{a.name}` and the parameter `{p.name}` of "
+                             f"`{init_fn.name}` are lists of different kinds")
+                else:
+                    eval_args.append((f"v_{mangle(a.name)}", False, self.kind(a.name)))
+            elif a.type is Type.I64 and self.rep(a) == TAGGED:
+                eval_args.append((self.tagged(a), True, None))
+            else:
+                eval_args.append((self.ev(a), False, None))
+        return eval_args if ok else None
+
+    def _emit_init_stores(self, cls: str, e: ir.New, init_fn: ir.Function | None,
+                          eval_args: list[tuple[str, bool, str | None]], lval, region_obj: bool) -> None:
+        """The field stores of a simple `__init__`, in its order, into `lval(field)`: the per-field locals of a
+        virtual object or the fields of a fresh region object. A class field of a region object whose class is
+        region in this function takes the region pointer as it is; every other class field, list field and big
+        int field takes an owned reference (the fresh object held nothing, so the release of the old value is a
+        no-op that keeps one code shape)."""
+        init_map = self.g.alloc_plan.init_maps.get(cls, ())
+        for fname, src in init_map:
+            fd = self.g.cls_analysis.field_map.get((cls, fname))
+            if fd is None:
+                continue
+            vf = lval(fname)
+            if fd.type in (Type.F64, Type.BOOL):
+                val = eval_args[src][0] if isinstance(src, int) else self.ev(src)
+                self.emit(f"{vf} = {val};")
+            elif fd.type is Type.I64:
+                if self.g.reps.field(cls, fname) == TAGGED:
+                    if isinstance(src, int):
+                        val, is_tagged, _ = eval_args[src]
+                        tval = val if is_tagged else self.fallible_int(f"tpa_int_from_i64({val}, @)")
+                    else:
+                        tval = self.tagged(src)
+                    self.emit(f"tpa_int_set(&{vf}, {tval});")
+                else:
+                    if isinstance(src, int):
+                        val, is_tagged, _ = eval_args[src]
+                        if is_tagged:
+                            assert init_fn is not None
+                            p = init_fn.params[1 + src]
+                            self.bad("aot/type", init_fn.name, f"a TAGGED int is passed for the RAW parameter "
+                                     f"`{p.name}` of `{init_fn.name}` (the representation did not converge)")
+                            continue
+                    else:
+                        val = self.ev(src)
+                    self.emit(f"{vf} = {val};")
+            elif fd.type in LIST:
+                assert isinstance(src, int)
+                val, _, arg_kind = eval_args[src]
+                kind = arg_kind or ("f64" if fd.type is Type.F64_ARRAY else (
+                    "int" if self.g.reps.field_list_big(cls, fname) else "i64"))
+                self.emit(f"{lfn(kind, 'retain')}({val});")
+                self.emit(f"{lfn(kind, 'release')}({vf});")
+                self.emit(f"{vf} = {val};")
+            else:
+                assert fd.cls is not None
+                arg = e.args[src] if isinstance(src, int) else src
+                val = eval_args[src][0] if isinstance(src, int) else self.ev(src)
+                if region_obj and fd.cls in self.regions:
+                    if self.region_value_ok(arg, fd.cls, f"the field `{cls}.{fname}`"):
+                        self.emit(f"{vf} = {val};")
+                    continue
+                if not self.no_region(arg, f"the field `{cls}.{fname}`"):
+                    continue
+                mc = mangle(fd.cls)
+                tmp = self.tmp(self.g.cls_ptr(fd.cls), "NULL")
+                self.emit(f"{tmp} = {val};")
+                self.emit(f"tpa_cls_{mc}_retain({tmp});")
+                self.emit(f"tpa_cls_{mc}_release({vf});")
+                self.emit(f"{vf} = {tmp};")
+
+    def _emit_virtual_init(self, target: str, cls: str, e: ir.New) -> None:
+        """Scalar-replaced constructor: evaluate args in order and assign directly to virtual field locals."""
+        init_fn = self.g.fns.get(f"{cls}.__init__")
+        eval_args = self._eval_new_args(cls, e, init_fn)
+        if eval_args is None:
+            return
+        self._emit_init_stores(cls, e, init_fn, eval_args, lambda fname: self.vfield(target, fname), False)
+
+    def _emit_region_new(self, e: ir.New) -> str:
+        """A site of a region class (PR-O2b): the arguments are evaluated first, in order (a failing one leaves
+        before anything is allocated), then the object is bump-allocated, zeroed, in the region of its class;
+        its big-int fields are set to the small int 0 before any store can fail (the word 0 is not a value), so
+        a conversion that fails between two stores leaves an object whose unset fields release as nothing. The
+        result is a region pointer in a temporary that nothing counts or releases."""
+        cls = e.cls
+        init_fn = self.g.fns.get(f"{cls}.__init__")
+        eval_args = self._eval_new_args(cls, e, init_fn)
+        if eval_args is None:
+            return "NULL"
+        rs = self.g.region_struct(self.f.name, cls)
+        t = self.tmp(f"{rs} *", "NULL")
+        self.emit(f"if (({t} = ({rs} *)tpa_region_alloc(&{self.region_var(cls)}, sizeof({rs}))) == NULL) "
+                  f"{self.fail()}")
+        decl = self.g.cls_analysis.classes[cls]
+        for fd in decl.field_decls:
+            if fd.type is Type.I64 and self.g.reps.field(cls, fd.name) == TAGGED:
+                self.emit(f"{t}->f_{mangle(fd.name)} = TPA_INT_ZERO;")
+        self._emit_init_stores(cls, e, init_fn, eval_args, lambda fname: f"{t}->f_{mangle(fname)}", True)
+        return t
+
+    def st_FieldSet(self, s: ir.FieldSet) -> None:
+        fd = self.g.cls_analysis.field_map.get((s.cls, s.field))
+        if fd is None:
+            self.bad("aot/type", s.field, f"unknown field `{s.cls}.{s.field}`")
+            return
+        region_obj = self.expr_region_cls(s.obj) is not None      # as ev_FieldGet: a region object, however it is named
+        if isinstance(s.obj, ir.Local) and self.is_virtual(s.obj.name):
+            lval = self.vfield(s.obj.name, s.field)
+        else:
+            obj = self.ev(s.obj)
+            lval = f"{obj}->f_{mangle(s.field)}"
+        if fd.type in (Type.F64, Type.BOOL):
+            val = self.ev(s.value)
+            self.emit(f"{lval} = {val};")
+        elif fd.type is Type.I64:
+            if self.g.reps.field(s.cls, s.field) == TAGGED:
+                val = self.tagged(s.value)
+                self.emit(f"tpa_int_set(&{lval}, {val});")
+            else:
+                val = self.ev(s.value)
+                self.emit(f"{lval} = {val};")
+        elif fd.type in LIST:
+            kind = "f64" if fd.type is Type.F64_ARRAY else (
+                "int" if self.g.reps.field_list_big(s.cls, s.field) else "i64")
+            self.bind_kind = kind
+            try:
+                val, owned = self.list_value(s.value, fd.type)
+            finally:
+                self.bind_kind = None
+            if not owned:
+                self.emit(f"{lfn(kind, 'retain')}({val});")
+            self.emit(f"{lfn(kind, 'release')}({lval});")
+            self.emit(f"{lval} = {val};")
+        else:
+            assert fd.cls is not None
+            mc = mangle(fd.cls)
+            val = self.ev(s.value)
+            if region_obj and fd.cls in self.regions:
+                # a region pointer field of a region object: a plain store (PR-O2b)
+                if self.region_value_ok(s.value, fd.cls, f"the field `{s.cls}.{s.field}`"):
+                    self.emit(f"{lval} = {val};")
+                return
+            if not self.no_region(s.value, f"the field `{s.cls}.{s.field}`"):
+                return
+            tmp = self.tmp(self.g.cls_ptr(fd.cls), "NULL")
+            self.emit(f"{tmp} = {val};")
+            self.emit(f"tpa_cls_{mc}_retain({tmp});")
+            self.emit(f"tpa_cls_{mc}_release({lval});")
+            self.emit(f"{lval} = {tmp};")
 
     def st_StoreIndex(self, s: ir.StoreIndex) -> None:
         """`a[i] = v`: CPython evaluates the value, then the list, then the index; an out-of-range index
@@ -1098,7 +1874,10 @@ class _Fn:
             self.emit("for (;;) {")
             self.lines.extend(pre)
             self.emit(f"    if (!({_unwrap(c)})) break;")
-        self.block(s.body)
+        self.depth += 1
+        self.loop_prologue(s)
+        self.stmts(s.body)
+        self.depth -= 1
         self.emit("}")
 
     def st_ForRange(self, s: ir.ForRange) -> None:
@@ -1131,6 +1910,7 @@ class _Fn:
         else:
             self.emit(f"        v_{mangle(s.var)} = {value};")
         self.depth += 2
+        self.loop_prologue(s)
         self.stmts(s.body)
         self.depth -= 2
         self.emit("    }")
@@ -1171,6 +1951,7 @@ class _Fn:
         self.emit(f"    if (!(tpa_int_cmp({cur}, {end}) {test} 0)) break;")
         self.emit(f"    tpa_int_set(&v_{mangle(s.var)}, {cur});")
         self.depth += 1
+        self.loop_prologue(s)
         self.stmts(s.body)
         self.depth -= 1
         self.emit("}")
@@ -1180,6 +1961,18 @@ class _Fn:
         if s.value is None:
             if returns is not Type.NONE:
                 self.bad("aot/type", "return", "a bare return in a function that returns a value")
+            self.leave()
+            return
+        if returns is Type.OBJ and self.f.return_cls is not None:
+            cls = self.f.return_cls
+            mc = mangle(cls)
+            val = self.ev(s.value)
+            if not self.no_region(s.value, "a return"):
+                return
+            tmp = self.tmp(self.g.cls_ptr(cls), "NULL")
+            self.emit(f"{tmp} = {val};")
+            self.emit(f"tpa_cls_{mc}_retain({tmp});")
+            self.emit(f"*out = {tmp};")
             self.leave()
             return
         if returns in LIST:
@@ -1288,35 +2081,79 @@ class _Fn:
         f = self.f
         for p in f.params:
             ok = ((isinstance(p, ir.Param) and p.type in CTYPE and p.cls is None)
+                  or (isinstance(p, ir.Param) and p.type is Type.OBJ and p.cls is not None)
                   or (isinstance(p, ir.ArrayParam) and p.type in LIST and p.buffer is None))
             if not ok:
                 self.bad("aot/type", getattr(p, "name", "?"), f"the parameter `{getattr(p, 'name', '?')}` is not an "
-                         "int, float, bool, list[float] or list[int]")
+                         "int, float, bool, list[float], list[int] or compiled class")
         if f.returns not in CTYPE and f.returns not in LIST and f.returns is not Type.NONE \
+                and not (f.returns is Type.OBJ and f.return_cls is not None) \
                 and self.g.tuple_kinds(f) is None:
             self.bad("aot/type", f.name, f"the return type {f.returns.value} is outside the AOT mode (int, float, "
-                     "bool, None, list[float], list[int] and a tuple of ints, floats and bools)")
+                     "bool, None, list[float], list[int], compiled class and a tuple of ints, floats and bools)")
         for p in f.entry_globals:
             self.bad("aot/global", p.name, f"the module global `{p.name}` is read at entry, which has no AOT form")
         for name, t in f.locals.items():
-            if t not in LIST:
+            if t not in LIST and not (t is Type.OBJ and name in f.local_classes):
                 self.ctype(t, name)
         owned = [p for p in f.params if self.g.owned_param(f, p)]
-        for p in owned:                      # a TAGGED parameter the body assigns: work on an owned copy of the borrowed one
-            self.emit(f"tpa_int_set(&v_{mangle(p.name)}, pv_{mangle(p.name)});")     # type: ignore[union-attr]
+        for p in owned:                      # a TAGGED or class parameter the body assigns: work on an owned copy
+            if isinstance(p, ir.Param) and p.type is Type.OBJ and p.cls is not None:
+                mc = mangle(p.cls)
+                self.emit(f"v_{mangle(p.name)} = pv_{mangle(p.name)};")
+                self.emit(f"tpa_cls_{mc}_retain(v_{mangle(p.name)});")
+            else:
+                self.emit(f"tpa_int_set(&v_{mangle(p.name)}, pv_{mangle(p.name)});")     # type: ignore[union-attr]
         self.stmts(f.body)
         if self.found:
             return None
         decls = []
         releases = []
         for p in owned:
-            decls.append(f"    tpa_int v_{mangle(p.name)} TPA_UNUSED = TPA_INT_ZERO;")        # type: ignore[union-attr]
-            releases.append(f"    tpa_int_release(v_{mangle(p.name)});")                       # type: ignore[union-attr]
+            if isinstance(p, ir.Param) and p.type is Type.OBJ and p.cls is not None:
+                mc = mangle(p.cls)
+                decls.append(f"    tpa_cls_{mc} *v_{mangle(p.name)} TPA_UNUSED = NULL;")
+                releases.append(f"    tpa_cls_{mc}_release(v_{mangle(p.name)});")
+            else:
+                decls.append(f"    tpa_int v_{mangle(p.name)} TPA_UNUSED = TPA_INT_ZERO;")        # type: ignore[union-attr]
+                releases.append(f"    tpa_int_release(v_{mangle(p.name)});")                       # type: ignore[union-attr]
         for name, t in f.locals.items():
             if t in LIST:
                 kind = self.kind(name)
                 decls.append(f"    {list_ptr(kind)}v_{mangle(name)} TPA_UNUSED = NULL;")
                 releases.append(f"    {lfn(kind, 'release')}(v_{mangle(name)});")
+            elif t is Type.OBJ and name in f.local_classes:
+                cls = f.local_classes[name][0]
+                if self.is_virtual(name):
+                    decl = self.g.cls_analysis.classes.get(cls)
+                    if decl is not None:
+                        for fd in decl.field_decls:
+                            vf = self.vfield(name, fd.name)
+                            if fd.type in (Type.F64, Type.BOOL):
+                                decls.append(f"    {CTYPE[fd.type]} {vf} TPA_UNUSED = 0;")
+                            elif fd.type is Type.I64:
+                                if self.g.reps.field(cls, fd.name) == TAGGED:
+                                    decls.append(f"    tpa_int {vf} TPA_UNUSED = TPA_INT_ZERO;")
+                                    releases.append(f"    tpa_int_release({vf});")
+                                else:
+                                    decls.append(f"    int64_t {vf} TPA_UNUSED = 0;")
+                            elif fd.type in LIST:
+                                kind = "f64" if fd.type is Type.F64_ARRAY else (
+                                    "int" if self.g.reps.field_list_big(cls, fd.name) else "i64")
+                                decls.append(f"    {list_ptr(kind)}{vf} TPA_UNUSED = NULL;")
+                                releases.append(f"    {lfn(kind, 'release')}({vf});")
+                            else:
+                                assert fd.cls is not None
+                                fmc = mangle(fd.cls)
+                                decls.append(f"    tpa_cls_{fmc} *{vf} TPA_UNUSED = NULL;")
+                                releases.append(f"    tpa_cls_{fmc}_release({vf});")
+                elif self.is_region_local(name):
+                    decls.append(f"    {self.reg_ptr(cls)}v_{mangle(name)} TPA_UNUSED = NULL;")     # never counted
+                else:
+                    mc = mangle(cls)
+                    decls.append(f"    tpa_cls_{mc} *v_{mangle(name)} TPA_UNUSED = NULL;")
+                    if name not in self.borrowed_locals:
+                        releases.append(f"    tpa_cls_{mc}_release(v_{mangle(name)});")
             elif self.tagged_name(name):
                 decls.append(f"    tpa_int v_{mangle(name)} TPA_UNUSED = TPA_INT_ZERO;")
                 releases.append(f"    tpa_int_release(v_{mangle(name)});")
@@ -1328,6 +2165,16 @@ class _Fn:
             releases.append(f"    tpa_int_release({n});")
         for n in self.str_slots:
             releases.append(f"    free({n});")
+        for cls, n in self.obj_slots:
+            releases.append(f"    tpa_cls_{mangle(cls)}_release({n});")
+        for kind, n in self.list_slots:
+            releases.append(f"    {lfn(kind, 'release')}({n});")
+        for cls in sorted(self.regions):
+            # PR-O2b: one region per (function, class), freed once here on every exit (the heap references its
+            # objects own are released first, by the class's walk); a per-iteration region is also reset at the
+            # top of each iteration of its loop (`loop_prologue`)
+            decls.append(f"    tpa_region {self.region_var(cls)} TPA_UNUSED = TPA_REGION_INIT;")
+            releases.append(f"    {self.g.region_struct(f.name, cls)}_free(&{self.region_var(cls)});")
         tail = ["tp_cleanup:"] if self.cleanup_used else []
         return [self.g.signature(f), "{", "    int rc = 0;", *decls, *self.lines, *tail, *releases, "    return rc;", "}"]
 
@@ -1351,10 +2198,11 @@ FP_CONTRACT_PRAGMA: tuple[str, ...] = (
 )
 
 
-def emit(module: ir.Module, program: Program, *, strict_int: bool = False) -> tuple[str | None, list[Finding]]:
+def emit(module: ir.Module, program: Program, *, strict_int: bool = False,
+         alloc_plan: AllocPlan | None = None) -> tuple[str | None, list[Finding]]:
     """The C text of the module and no findings, or None and the findings (every finding of every
     function). `strict_int`: no TAGGED int, an operation that is not proved is the finding `aot/int-unproven`."""
-    g = _Gen(module, program, strict_int)
+    g = _Gen(module, program, strict_int, alloc_plan=alloc_plan)
     bodies: list[list[str]] = []
     for f in g.fns.values():
         fn = _Fn(g, f)
@@ -1367,17 +2215,24 @@ def emit(module: ir.Module, program: Program, *, strict_int: bool = False) -> tu
                                             "the `__main__` block was not compiled", None)]
     if g.findings:
         return None, g.findings
+    class_decls = g.emit_class_decls() + g.emit_region_decls()
+    class_ctors = g.emit_class_ctors()
     prototypes = [g.prototype(f) for f in g.fns.values()]
-    body_text = "\n".join(prototypes + [line for b in bodies for line in b])
+    body_text = "\n".join(class_decls + prototypes + class_ctors + [line for b in bodies for line in b])
     out = [
         "/* Generated by typedpython.aot (SPEC N-17, #448). No interpreter header, no interpreter API. */",
         '#include "tp_aot.h"',
     ]
     if needs_int_runtime(body_text):
         out.append('#include "tp_aot_int.h"')
+    gc = bool(g.cls_analysis.cyclic_classes)
+    if gc:
+        out.append('#include "tp_aot_gc.h"')      # PR-O2c: only a program with a cyclic-capable class links the collector
     out += ["", *FP_CONTRACT_PRAGMA, ""]
+    out += class_decls
     out += prototypes
     out.append("")
+    out += class_ctors
     for b in bodies:
         out += [*b, ""]
     if g.argv_int:
@@ -1413,7 +2268,15 @@ def emit(module: ir.Module, program: Program, *, strict_int: bool = False) -> tu
     out += head
     out += [
         "    setvbuf(stdout, NULL, _IOFBF, 1 << 16);",
+    ]
+    if gc:
+        out.append("    tpa_exit_hook = tpa_gc_exit;")  # sys.exit collects the cycles alive too (REVIEW-503 note 2)
+    out += [
         f"    rc = tpf_{mangle(MAIN)}();",
+    ]
+    if gc:
+        out.append("    tpa_gc_exit();")          # every frame has released its locals: the cycles that remain are freed
+    out += [
         "    if (rc != 0) {",
         "        return tpa_report_uncaught();",
         "    }",

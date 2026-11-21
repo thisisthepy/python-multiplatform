@@ -106,13 +106,19 @@ class KlibKnmScannerTest {
         assertEquals("kotlinx.coroutines.Dispatchers", dispatchersIo.receiverTypeName)
         assertEquals("OBJECT", dispatchersIo.returnTag)
 
-        if (konanStdlibKlib.isDirectory) {
-            val mathEntries = KlibScanner.scanKlib(konanStdlibKlib, includePrefixes = listOf("kotlin.math"))
-            val powDouble = mathEntries.single { it.name == "kotlin.math.pow__Double_Double" }
-            assertEquals("kotlin.Double", powDouble.receiverTypeName)
-            assertEquals(listOf(RECEIVER_PARAMETER_NAME, "x"), powDouble.paramNames)
-            assertEquals(listOf("import kotlin.math.pow as artifact_ext_kotlin_math_pow"), powDouble.imports)
+    }
+
+    /** Split out of the coroutines test above so that a machine without a `.konan` cache reports a skip, not a pass. */
+    @Test
+    fun knmRecoversAnExtensionReceiverOnTheKonanStdlib() {
+        if (!konanStdlibKlib.isDirectory) {
+            python.multiplatform.gradle.artifact.ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
+        val mathEntries = KlibScanner.scanKlib(konanStdlibKlib, includePrefixes = listOf("kotlin.math"))
+        val powDouble = mathEntries.single { it.name == "kotlin.math.pow__Double_Double" }
+        assertEquals("kotlin.Double", powDouble.receiverTypeName)
+        assertEquals(listOf(RECEIVER_PARAMETER_NAME, "x"), powDouble.paramNames)
+        assertEquals(listOf("import kotlin.math.pow as artifact_ext_kotlin_math_pow"), powDouble.imports)
     }
 
     @Test

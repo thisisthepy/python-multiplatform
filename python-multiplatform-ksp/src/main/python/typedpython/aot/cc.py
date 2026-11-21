@@ -47,33 +47,39 @@ def _sanitized(cmd: list[str]) -> list[str]:
     return [*cmd, *extra]
 
 
-def compile_executable(c_text: str, out: Path, keep: Path | None = None) -> Path:
-    """Compile `c_text` to the executable `out` and return its path."""
+def compile_executable(c_text: str, out: Path, keep: Path | None = None,
+                       defines: tuple[str, ...] = ()) -> Path:
+    """Compile `c_text` to the executable `out` and return its path. `defines` (PR-O2c): preprocessor symbols
+    (`NAME` or `NAME=value`) the runtime reads, such as the cycle collector's `TPA_GC_STRESS`, `TPA_GC_STATS` and
+    `TPA_GC_THRESHOLD=n` (tests); none by default."""
     out = Path(out)
     if sys.platform == "win32" and out.suffix.lower() != ".exe":
         out = out.with_name(out.name + ".exe")
     out.parent.mkdir(parents=True, exist_ok=True)
     if keep is not None:
-        return _compile(Path(keep), out)
+        return _compile(Path(keep), out, defines=defines)
     with tempfile.TemporaryDirectory(prefix="typedpython-aot-cc-") as work:
         c_file = Path(work) / "program.c"
         c_file.write_text(c_text, encoding="utf-8")
-        return _compile(c_file, out, obj_dir=Path(work))
+        return _compile(c_file, out, obj_dir=Path(work), defines=defines)
 
 
-def command(c_file: Path, out: Path, obj_dir: Path | None = None) -> tuple[list[str], dict[str, str] | None]:
-    """The compiler command line (and the environment to run it in)."""
+def command(c_file: Path, out: Path, obj_dir: Path | None = None,
+            defines: tuple[str, ...] = ()) -> tuple[list[str], dict[str, str] | None]:
+    """The compiler command line (and the environment to run it in). `defines`: as `compile_executable`
+    (`-D` flags, which the MSVC translation turns into `/D`)."""
+    extra = [f"-D{d}" for d in defines]
     if cbuild._is_msvc():
         env = cbuild.msvc_env()
         obj = (obj_dir or c_file.parent) / (c_file.stem + ".obj")
-        flags = list(FLAGS) + (["-DTP_CHECK_PROVEN"] if sanitizing() else [])       # (cl.exe has no -fsanitize here)
+        flags = list(FLAGS) + (["-DTP_CHECK_PROVEN"] if sanitizing() else []) + extra   # (cl.exe has no -fsanitize here)
         cmd = ([cbuild._msvc_cl(env), "/nologo"] + cbuild._msvc_flags(flags)
                + [f"/I{RUNTIME_DIR}", str(c_file), f"/Fo{obj}", f"/Fe{out}"])
         return cmd, env
     cc = cbuild.compiler()
     if sanitizing():
         cc = _sanitized(cc)
-    return (cc + list(FLAGS) + [f"-I{RUNTIME_DIR}", str(c_file), "-o", str(out), "-lm"]), None
+    return (cc + list(FLAGS) + extra + [f"-I{RUNTIME_DIR}", str(c_file), "-o", str(out), "-lm"]), None
 
 
 def library_command(c_file: Path, out: Path, obj_dir: Path | None = None) -> tuple[list[str], dict[str, str] | None]:
@@ -129,8 +135,8 @@ def compile_library(c_text: str, out_dir: Path, file_name: str, keep: Path | Non
     return out
 
 
-def _compile(c_file: Path, out: Path, obj_dir: Path | None = None) -> Path:
-    cmd, env = command(c_file, out, obj_dir)
+def _compile(c_file: Path, out: Path, obj_dir: Path | None = None, defines: tuple[str, ...] = ()) -> Path:
+    cmd, env = command(c_file, out, obj_dir, defines=defines)
     # cl.exe writes in the console code page (cbuild.build does the same)
     run = subprocess.run(cmd, capture_output=True, encoding="oem" if sys.platform == "win32" else None,
                          text=sys.platform != "win32", errors="replace", env=env)

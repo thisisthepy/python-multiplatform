@@ -1,19 +1,29 @@
 package python.multiplatform.ffi.pythonx
 
 import python.multiplatform.ffi.PyObject
+import python.multiplatform.ffi.Python3
+import python.multiplatform.ffi.exceptions.PyException
+import python.multiplatform.ffi.exceptions.isNoneObject
 import python.multiplatform.ffi.types.basic.PyBool
 import python.multiplatform.ffi.types.basic.PyFloat
 import python.multiplatform.ffi.types.basic.PyInt
 import python.multiplatform.ffi.types.basic.PyNone
 import python.multiplatform.ffi.types.basic.PyString
+import python.multiplatform.ffi.upcall.KotlinSurface
+import python.multiplatform.ffi.upcall.PendingCall
 import python.multiplatform.reflection.ExposedCallable
 import python.multiplatform.reflection.FunctionTableFragment
 import python.multiplatform.ffi.withGIL
 import python.multiplatform.reflection.HandleTable
-import python.multiplatform.reflection.PlatformMutex
-import python.multiplatform.reflection.withLock
 import python.multiplatform.reflection.ObjectReference
+import python.multiplatform.reflection.PlatformMutex
 import python.multiplatform.reflection.TypeTag
+import python.multiplatform.reflection.withLock
+import kotlin.coroutines.Continuation
+import kotlin.coroutines.coroutineContext
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+import kotlin.coroutines.suspendCoroutine
 
 /**
  * The other direction: **a Python callable arriving at a Kotlin function-typed parameter.**
@@ -281,6 +291,81 @@ object PythonCallables {
         return scope.add(body, erased, internKey)
     }
 
+    /**
+     * Wraps a Python callable [body] as a Kotlin `suspend` function (`SuspendFunctionN`) of
+     * [arity] (0..5) inside the open [PythonCallableScope] (SPEC U-5a; issue #164, item 7).
+     *
+     * Lifecycle and interning follow [newFunction]: [scope] owns [body] and the [HandleTable] root.
+     * Each invocation acquires its own extra [PyObject] reference to [body] under the scope lock
+     * and releases it when the invocation finishes, so closing [scope] while an `await` is in
+     * flight is safe.
+     */
+    internal fun newSuspendFunction(
+        body: PyObject,
+        arity: Int,
+        argTags: String,
+        returnTypeName: String,
+        internKey: String,
+    ): Long {
+        val scope = current ?: run {
+            body.close()
+            throw IllegalStateException(
+                "no pythonx callable scope is open, so a Python callable has nowhere to live: a " +
+                    "callable can only cross into Kotlin from inside a composition (or an explicit " +
+                    "PythonCallables.withScope), because Compose keeps calling it after the call " +
+                    "that passed it has returned",
+            )
+        }
+        val cached = scope.reuse(internKey)
+        if (cached != ObjectReference.NONE_RAW) {
+            body.close()
+            return cached
+        }
+        val tags = if (argTags.isEmpty()) emptyList() else argTags.split(',')
+        if (tags.size != arity) {
+            body.close()
+            throw IllegalArgumentException(
+                "a Kotlin suspend function type of arity $arity forwards $arity argument(s), " +
+                    "but ${tags.size} marshalling tag(s) were given: '$argTags'",
+            )
+        }
+        val function = PythonSuspendFunction(scope, body, tags, returnTypeName)
+        val erased = try {
+            function.erasedAs(arity)
+        } catch (t: Throwable) {
+            body.close()
+            throw t
+        }
+        return scope.add(body, erased, internKey)
+    }
+
+    /**
+     * Resumes a parked [PythonSuspendFunction] continuation (SPEC U-5a) or a [PyAwait] (SPEC U-5d)
+     * from Python's asyncio done callback.
+     *
+     * Runs on the target asyncio loop thread with the GIL held. Releases the [HandleTable] root,
+     * then hands [ok] and [payload] (the result, or the exception instance) to the pending object,
+     * which unmarshals or maps it (`PyException.toKotlinException`) and resumes its continuation.
+     * A handle that resolves to neither (already released, or never one of these) is ignored.
+     */
+    internal fun completeSuspendCall(
+        pendingHandle: Long,
+        ok: Boolean,
+        payload: PyObject?,
+    ) {
+        when (val pending = HandleTable.resolveRaw(pendingHandle)) {
+            is PendingSuspendInvocation -> {
+                HandleTable.release(ObjectReference(pendingHandle))
+                pending.complete(ok, payload)
+            }
+            is PyAwait -> {
+                HandleTable.release(ObjectReference(pendingHandle))
+                pending.complete(ok, payload)
+            }
+            else -> return
+        }
+    }
+
     /** How many of a lowered composable lambda's compiled arguments are the compiler's rather than
      * the declaration's: the `$composer` and the one `$changed`. Mirrors
      * `ArtifactScanner.COMPOSABLE_LOWERED_SLOTS`, and the two are checked against each other by the
@@ -345,6 +430,43 @@ object PythonCallables {
                 paramTypeNames = listOf("kotlin.String"),
                 paramHasDefault = listOf(false),
                 callable = { args -> findFunction(args[0] as String) },
+            ),
+            ExposedCallable(
+                name = NEW_SUSPEND_FUNCTION,
+                arity = 5,
+                paramTypes = listOf(TypeTag.OBJECT, TypeTag.INT, TypeTag.STRING, TypeTag.STRING, TypeTag.STRING),
+                returnType = TypeTag.INT,
+                paramNames = listOf("body", "arity", "argTags", "returnTypeName", "internKey"),
+                paramTypeNames = listOf(
+                    "python.multiplatform.ffi.PyObject", "kotlin.Int", "kotlin.String", "kotlin.String",
+                    "kotlin.String",
+                ),
+                paramHasDefault = listOf(false, false, false, false, false),
+                callable = { args ->
+                    newSuspendFunction(
+                        args[0] as PyObject,
+                        (args[1] as Long).toInt(),
+                        args[2] as String,
+                        args[3] as String,
+                        args[4] as String,
+                    )
+                },
+            ),
+            ExposedCallable(
+                name = COMPLETE_SUSPEND_CALL,
+                arity = 3,
+                paramTypes = listOf(TypeTag.INT, TypeTag.BOOLEAN, TypeTag.OBJECT),
+                returnType = TypeTag.UNIT,
+                paramNames = listOf("pendingHandle", "ok", "payload"),
+                paramTypeNames = listOf("kotlin.Long", "kotlin.Boolean", "python.multiplatform.ffi.PyObject"),
+                paramHasDefault = listOf(false, false, false),
+                callable = { args ->
+                    completeSuspendCall(
+                        args[0] as Long,
+                        args[1] as Boolean,
+                        args[2] as PyObject?,
+                    )
+                },
             ),
             // Issue #69: a Python scalar written into a `kotlin.Any` slot, boxed as the Kotlin type
             // `PythonxAdapter._box_scalar` chose. Each takes the primitive tag that already carries
@@ -459,6 +581,12 @@ object PythonCallables {
 
     /** @see findFunction */
     internal const val FIND_FUNCTION: String = "python.multiplatform.ffi.pythonx.PythonCallables.findFunction"
+
+    /** @see newSuspendFunction */
+    internal const val NEW_SUSPEND_FUNCTION: String = "python.multiplatform.ffi.pythonx.PythonCallables.newSuspendFunction"
+
+    /** @see completeSuspendCall */
+    internal const val COMPLETE_SUSPEND_CALL: String = "python.multiplatform.ffi.pythonx.PythonCallables.completeSuspendCall"
 
     /** @see boxScalar */
     internal const val BOX_INT: String = "python.multiplatform.ffi.pythonx.PythonCallables.boxInt"
@@ -765,6 +893,266 @@ internal class PythonFunction(
             else -> throw IllegalArgumentException(
                 "a Kotlin function type argument tagged '$tag' has no marshalling rule",
             )
+        }
+    }
+}
+
+/**
+ * Tracks one in-flight suspended invocation of a [PythonSuspendFunction] while the Python
+ * awaitable runs on its asyncio loop.
+ *
+ * Holds [heldBody] (an extra [PyObject] reference acquired from the [PythonCallableScope] when the
+ * invocation started) so that closing the scope while the await is still in flight does not free
+ * the callable before [complete] finishes.
+ */
+internal class PendingSuspendInvocation(
+    private val continuation: Continuation<Any?>,
+    private val heldBody: PyObject,
+    private val returnTypeName: String,
+) {
+    private val lock = PlatformMutex()
+    private var completed = false
+    private var disposeCancelListener: (() -> Unit)? = null
+
+    /**
+     * Keeps the disposer of the [PendingCall.onCancelled] registration made for this invocation
+     * and runs it as soon as [complete] has run, or right away if it already has.
+     *
+     * The registration is made after the awaitable was submitted, on the submitting thread;
+     * [complete] runs on the loop thread, and under a `ContinuationInterceptor` the two are
+     * different threads, so the task can finish before the disposer arrives here. Whichever comes
+     * second runs it, under [lock], so a completed invocation never leaves its listener on the
+     * call (a collect registers one per suspended emission for as long as it runs).
+     */
+    fun attachCancelListenerDisposer(dispose: () -> Unit) {
+        val runNow = lock.withLock {
+            if (completed) {
+                true
+            } else {
+                disposeCancelListener = dispose
+                false
+            }
+        }
+        if (runNow) dispose()
+    }
+
+    fun complete(ok: Boolean, payload: PyObject?) {
+        val dispose = lock.withLock {
+            completed = true
+            disposeCancelListener.also { disposeCancelListener = null }
+        }
+        // Before resuming: the continuation may complete or cancel the call inline, and the
+        // listener for an invocation that is over has nothing left to cancel.
+        dispose?.invoke()
+        try {
+            if (ok) {
+                val value = unmarshalSuspendReturn(returnTypeName, payload)
+                continuation.resume(value)
+            } else {
+                val err = if (payload != null) {
+                    val pyExc = try {
+                        // Raise-and-capture through PyException.fromCurrentError() so type, value,
+                        // traceback, cause and context are populated identically to any other
+                        // Python exception crossing into Kotlin.
+                        python.native.ffi.Py_IncRef(payload.pointer)
+                        python.native.ffi.PyErr_SetRaisedException(payload.pointer)
+                        PyException.fromCurrentError() ?: PyException(payload.toString())
+                    } catch (_: Throwable) {
+                        PyException(payload.toString())
+                    }
+                    pyExc.toKotlinException()
+                } else {
+                    IllegalStateException("Python suspend callable failed without an exception")
+                }
+                continuation.resumeWithException(err)
+            }
+        } catch (t: Throwable) {
+            continuation.resumeWithException(t)
+        } finally {
+            heldBody.close()
+        }
+    }
+}
+
+/**
+ * One Python callable wrapped as a Kotlin `suspend` function (`SuspendFunctionN`, arity 0..5)
+ * (SPEC U-5a; issue #164, item 7).
+ */
+internal class PythonSuspendFunction(
+    private val scope: PythonCallableScope,
+    internal val body: PyObject,
+    private val argTags: List<String>,
+    private val returnTypeName: String,
+) {
+    fun erasedAs(arity: Int): Any {
+        when (arity) {
+            0 -> return suspend { invokeSuspend(emptyArray()) }
+            1 -> return suspend { a: Any? -> invokeSuspend(arrayOf(a)) }
+            2 -> return suspend { a: Any?, b: Any? -> invokeSuspend(arrayOf(a, b)) }
+            3 -> return suspend { a: Any?, b: Any?, c: Any? -> invokeSuspend(arrayOf(a, b, c)) }
+            4 -> return suspend { a: Any?, b: Any?, c: Any?, d: Any? -> invokeSuspend(arrayOf(a, b, c, d)) }
+            5 -> return suspend { a: Any?, b: Any?, c: Any?, d: Any?, e: Any? -> invokeSuspend(arrayOf(a, b, c, d, e)) }
+        }
+        throw IllegalArgumentException(
+            "a Kotlin suspend function type of arity $arity is not bound (supported arities: 0..5)",
+        )
+    }
+
+    private suspend fun invokeSuspend(args: Array<Any?>): Any? {
+        // The call this invocation belongs to, read before any suspension: its cancellation is
+        // forwarded to the Python awaitable below (SPEC U-5a, in-flight cancellation).
+        val call = coroutineContext[PendingCall]
+        // Acquire our own extra reference to `body` under the scope lock before invoking Python.
+        // If `scope.close()` runs while this invocation is suspended awaiting Python, `held` keeps
+        // the callable alive until `PendingSuspendInvocation.complete` (or the fast-path finally)
+        // closes it.
+        val held = withGIL { scope.acquire(body) }
+        var handedOff = false
+        try {
+            val fastOrAwaitable: Pair<Boolean, Any?> = withGIL {
+                val marshalled = ArrayList<PyObject>(argTags.size)
+                val returned = try {
+                    for (i in argTags.indices) marshalled += marshalSuspendArg(argTags[i], args[i])
+                    try {
+                        held(*marshalled.toTypedArray())
+                    } catch (e: PyException) {
+                        throw e.toKotlinException()
+                    }
+                } finally {
+                    for (value in marshalled) value.close()
+                }
+                val isAwaitable = returned.getAttrOrNull("__await__") != null
+                if (!isAwaitable) {
+                    val unmarshalled = try {
+                        unmarshalSuspendReturn(returnTypeName, returned)
+                    } finally {
+                        returned.close()
+                    }
+                    true to unmarshalled
+                } else {
+                    false to returned
+                }
+            }
+            if (fastOrAwaitable.first) {
+                return fastOrAwaitable.second
+            }
+            val awaitable = fastOrAwaitable.second as PyObject
+            // Suspend the Kotlin coroutine without holding the GIL: `withGIL` inside
+            // `suspendCoroutine` submits `awaitable` to the resolved delivery loop and attaches
+            // the done callback, then exits `withGIL` before `suspendCoroutine` parks.
+            return suspendCoroutine { cont ->
+                val pending = PendingSuspendInvocation(cont, held, returnTypeName)
+                val pendingHandle = HandleTable.register(pending)
+                // Mark handedOff BEFORE submitting: if `_schedule()` runs inline on the same
+                // thread and finishes synchronously, or if `_submit_suspend_awaitable` fails and
+                // we release `pendingHandle` in the catch block below, ownership of `held` is
+                // accounted for in exactly one place.
+                handedOff = true
+                val submitted = try {
+                    withGIL {
+                        try {
+                            submitAwaitableToLoop(awaitable, pendingHandle.raw)
+                        } finally {
+                            awaitable.close()
+                        }
+                    }
+                    true
+                } catch (t: Throwable) {
+                    HandleTable.release(pendingHandle)
+                    held.close()
+                    val mapped = if (t is PyException) t.toKotlinException() else t
+                    cont.resumeWithException(mapped)
+                    false
+                }
+                // The Python side cancelled the outer call (`Future.cancel()` -> `_pm_cancel` ->
+                // `PendingCall.cancel`, SPEC U-5b): cancel the awaitable's task too, so the done
+                // callback resumes this continuation with `CancellationException` instead of
+                // leaving the Kotlin coroutine parked here for as long as the Python `await`
+                // lasts, with `held` kept alive. A `Job` cannot reach this suspension point
+                // (`suspendCoroutine`, no `kotlinx`), so the seam is the call's own listener.
+                // Runs on the cancelling thread, which holds the GIL on every path that cancels
+                // (`_pm_cancel`, `AsyncUpcall.deliver`, `AsyncUpcall.resolve`); `withGIL` is
+                // re-entrant there and takes the GIL for a direct Kotlin caller. Non-blocking: the
+                // Python side only hands the cancel to the loop with `call_soon_threadsafe`, and
+                // the loop's FIFO puts it after the `_schedule` the submission queued, so a cancel
+                // from any thread, even one that lands before the task exists, is applied on the
+                // loop and never lost. An invocation that is already done is a no-op on the
+                // Python side (its handle is gone from the map). Registered after a successful
+                // submission only; a call that is already cancelled runs the action inline, which
+                // cancels the task the loop is about to start. The registration is disposed when
+                // this invocation completes (`PendingSuspendInvocation.complete`), so a collect
+                // that suspends on every emission does not accumulate one listener per emission.
+                if (submitted) {
+                    val dispose = call?.onCancelled {
+                        withGIL { cancelAwaitableOnLoop(pendingHandle.raw) }
+                    }
+                    if (dispose != null) pending.attachCancelListenerDisposer(dispose)
+                }
+            }
+        } finally {
+            if (!handedOff) {
+                held.close()
+            }
+        }
+    }
+
+    private fun submitAwaitableToLoop(awaitable: PyObject, pendingHandleRaw: Long) {
+        val binding = Python3.import(PythonxAdapter.MODULE_NAME)
+        val submit = binding.getAttr("_submit_suspend_awaitable")
+        submit.invoke(awaitable, PyInt.from(pendingHandleRaw))
+    }
+
+    /** `_cancel_suspend_awaitable(handle)`: hands the loop the awaitable of [pendingHandleRaw] runs
+     * on a `Task.cancel` for it, if the invocation is still in flight; nothing otherwise. Caller
+     * holds the GIL. Never cancels on the calling thread. */
+    private fun cancelAwaitableOnLoop(pendingHandleRaw: Long) {
+        val binding = Python3.import(PythonxAdapter.MODULE_NAME)
+        val cancel = binding.getAttr("_cancel_suspend_awaitable")
+        cancel.invoke(PyInt.from(pendingHandleRaw))
+    }
+
+    private fun marshalSuspendArg(tag: String, value: Any?): PyObject {
+        if (value == null) return PyObject(PyNone.get().pointer, borrowed = true)
+        return when (tag) {
+            "INT" -> PyInt.from((value as Number).toLong())
+            "FLOAT" -> PyFloat.from((value as Number).toDouble())
+            "BOOLEAN" -> PyBool.from(value as Boolean)
+            "STRING" -> PyString.from(value as String)
+            "OBJECT" -> PyInt.from(HandleTable.register(value).raw)
+            else -> throw IllegalArgumentException(
+                "a Kotlin suspend function type argument tagged '$tag' has no marshalling rule",
+            )
+        }
+    }
+}
+
+/**
+ * Unmarshals a Python result returned by a [PythonSuspendFunction] into the Kotlin type named by
+ * [returnTypeName]. Caller must hold the GIL.
+ */
+internal fun unmarshalSuspendReturn(returnTypeName: String, value: PyObject?): Any? {
+    if (returnTypeName == "kotlin.Unit") return Unit
+    if (value == null || value.pointer.isNoneObject()) return null
+    return when (returnTypeName) {
+        "kotlin.Boolean" -> value.isTruthy
+        "kotlin.Byte" -> value.toString().toLong().toByte()
+        "kotlin.Short" -> value.toString().toLong().toShort()
+        "kotlin.Int" -> value.toString().toLong().toInt()
+        "kotlin.Long" -> value.toString().toLong()
+        "kotlin.Float" -> value.toString().toDouble().toFloat()
+        "kotlin.Double" -> value.toString().toDouble()
+        "kotlin.String" -> value.toString()
+        "kotlin.Char" -> value.toString().single()
+        else -> {
+            // If Python returned a Kotlin proxy (with `_pm_handle`), resolve the Kotlin object;
+            // otherwise return a new owned PyObject wrapper.
+            val handleAttr = value.getAttrOrNull("_pm_handle")
+            if (handleAttr != null && !handleAttr.pointer.isNoneObject()) {
+                val raw = handleAttr.toString().toLong()
+                HandleTable.resolveRaw(raw)
+            } else {
+                PyObject(value.pointer, borrowed = true)
+            }
         }
     }
 }

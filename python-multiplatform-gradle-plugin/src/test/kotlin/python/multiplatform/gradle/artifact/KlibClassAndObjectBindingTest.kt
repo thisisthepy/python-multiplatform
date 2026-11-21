@@ -248,8 +248,7 @@ class KlibClassAndObjectBindingTest {
     @Test
     fun crossKlibClasspathResolvesHandleTypesFromDependencyKlibs() {
         if (!konanStdlibKlib.isDirectory) {
-            println("skipped: no .konan cache at $konanStdlibKlib")
-            return
+            ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         // Without stdlib on the klib classpath, `CoroutineScope(context: CoroutineContext)` is declined
         // because `kotlin.coroutines.CoroutineContext` is in the stdlib klib rather than coroutinesKlib.

@@ -3,8 +3,10 @@ package python.multiplatform.ffi.upcall
 import python.multiplatform.ffi.PyObject
 import python.multiplatform.ffi.Python3
 import python.multiplatform.ffi.exceptions.PyException
+import python.multiplatform.ffi.exceptions.isNoneObject
 import python.multiplatform.ffi.types.basic.PyBool
 import python.multiplatform.ffi.types.basic.PyInt
+import python.multiplatform.ffi.types.basic.PyNone
 import python.multiplatform.ffi.types.basic.PyString
 import python.multiplatform.ffi.withGIL
 import python.multiplatform.reflection.ExposedCallable
@@ -113,35 +115,83 @@ internal object AsyncUpcall {
             return UpcallTrampoline.marshalResult(entry.returnType, call.value)
         }
 
-        val loop = runningLoop()
-        val future = loop.getAttr("create_future").invoke()
-        val tag = entry.returnType
-        // Resolved here, on the upcall thread, rather than inside the completion: the completing
-        // thread may be one CPython has never seen, and this keeps its GIL scope down to the calls
-        // that have to be there. `PythonProxySource` installs it if nothing else has.
-        val settle = PythonProxySource.settleFunction()
-        val handle = armCancellationNotice(call, future)
-        // Registering after the future exists: a completion that lands between the isDone check
-        // above and this line fires the listener inline, on this thread, with the GIL already held
-        // -- which is exactly what the listener is written to tolerate.
-        call.onCompleted { completed -> resolve(loop, future, settle, tag, completed, handle) }
+        return try {
+            // Resolved first, on the upcall thread, so `python_multiplatform` and `__main__`'s
+            // support functions exist before we consult `get_delivery_loop()`.
+            val settle = PythonProxySource.settleFunction()
+            val (loop, isRunningOnCallingThread) = resolveDeliveryLoop()
+            val tag = entry.returnType
+            val (future, handle) = if (isRunningOnCallingThread) {
+                val created = loop.getAttr("create_future").invoke()
+                val armed = armCancellationNotice(call, created)
+                created to armed
+            } else {
+                createFutureOnConfiguredLoop(call, loop)
+            }
+            // Registering after the future exists: a completion that lands between the isDone check
+            // above and this line fires the listener inline, on this thread, with the GIL already
+            // held -- which is exactly what the listener is written to tolerate.
+            call.onCompleted { completed -> resolve(loop, future, settle, tag, completed, handle) }
 
-        // The trampoline's contract: the result is a new reference. The wrapper keeps its own,
-        // because the completion still needs it.
-        Py_IncRef(future.pointer)
-        return future.pointer.toRawValue()
+            // The trampoline's contract: the result is a new reference. The wrapper keeps its own,
+            // because the completion still needs it.
+            Py_IncRef(future.pointer)
+            future.pointer.toRawValue()
+        } catch (t: Throwable) {
+            // SPEC U-5 (#164, item 10): if resolving or creating the Future on the target loop
+            // fails (for example, no running loop and no configured delivery loop, or a closed
+            // delivery loop), cancel the already-started PendingCall so a cooperating Kotlin body
+            // stops at its next ensureActive() checkpoint rather than running on as an orphan.
+            call.cancel()
+            throw t
+        }
     }
 
     /**
-     * `asyncio.get_running_loop()` -- the loop belonging to the coroutine this upcall came out of.
+     * Resolves the target `asyncio` loop for a suspended call in SPEC U-5 priority order (#164,
+     * item 10):
+     * 1. `asyncio.get_running_loop()` on the calling thread, when a loop is currently running
+     *    there (`second == true`);
+     * 2. `python_multiplatform.get_delivery_loop()` (`use_delivery_loop` `ContextVar` first, then
+     *    `set_delivery_loop` fallback; `second == false`).
      *
-     * Not `get_event_loop()`: that one will happily create or return a loop nobody is running,
-     * which would queue the completion somewhere no one ever drains. Not cached either, because the
-     * module object would outlive an interpreter that gets finalized and this is the slow path by
-     * construction -- a call that genuinely suspended is not counting attribute lookups.
+     * When neither is present, rethrows the `RuntimeError("no running event loop")` from
+     * `get_running_loop()`.
      */
-    private fun runningLoop(): PyObject =
-        Python3.import("asyncio").getAttr("get_running_loop").invoke()
+    private fun resolveDeliveryLoop(): Pair<PyObject, Boolean> {
+        val runningError: Throwable = try {
+            return Python3.import("asyncio").getAttr("get_running_loop").invoke() to true
+        } catch (t: Throwable) {
+            t
+        }
+        val configured = Python3.import(KotlinSurface.MODULE_NAME).getAttr("get_delivery_loop").invoke()
+        if (!configured.pointer.isNoneObject()) {
+            if (configured.getAttr("is_closed").invoke().toString() == "True") {
+                throw IllegalStateException("delivery event loop is closed")
+            }
+            return configured to false
+        }
+        throw runningError
+    }
+
+    /**
+     * Creates an `asyncio.Future` (and arms `_pm_watch` when available) on [loop]'s own thread via
+     * `_pm_create_remote_future`, so neither `loop.create_future()` nor `Future.add_done_callback`
+     * runs off-thread when the calling thread has no running loop.
+     */
+    private fun createFutureOnConfiguredLoop(call: PendingCall, loop: PyObject): Pair<PyObject, ObjectReference?> {
+        val createRemote = PythonProxySource.createRemoteFutureFunction()
+        val hasWatch = PythonProxySource.watchFunctionOrNull() != null
+        val handle = if (hasWatch) HandleTable.register(call) else null
+        return try {
+            val handleArg: PyObject = if (handle != null) PyInt.from(handle.raw) else PyNone.get()
+            val future = createRemote.invoke(loop, handleArg)
+            future to handle
+        } catch (t: Throwable) {
+            if (handle != null) HandleTable.release(handle)
+            throw t
+        }
+    }
 
     /**
      * Gives Python a way to tell [call] it has been abandoned, and returns the handle that costs.

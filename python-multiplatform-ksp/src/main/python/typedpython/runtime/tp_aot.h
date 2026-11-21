@@ -32,6 +32,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 /* Issue #464: an AOT build must compute the floats CPython computes, even when a caller compiles the
  * generated C (--emit-c, or a packaging step outside aot/cc.py) without our compiler flags. Contraction
@@ -96,16 +103,19 @@
 typedef int64_t tpa_rc_t;
 #define TPA_RC_INC(l) ((void)_InterlockedIncrement64((volatile __int64 *)&(l)->rc))
 #define TPA_RC_DEC_IS_ZERO(l) (_InterlockedDecrement64((volatile __int64 *)&(l)->rc) == 0)
+#define TPA_RC_LOAD(l) ((int64_t)_InterlockedOr64((volatile __int64 *)&(l)->rc, 0))
 #else
 #include <stdatomic.h>
 typedef _Atomic int64_t tpa_rc_t;
 #define TPA_RC_INC(l) ((void)atomic_fetch_add_explicit(&(l)->rc, 1, memory_order_relaxed))
 #define TPA_RC_DEC_IS_ZERO(l) (atomic_fetch_sub_explicit(&(l)->rc, 1, memory_order_acq_rel) == 1)
+#define TPA_RC_LOAD(l) (atomic_load_explicit(&(l)->rc, memory_order_relaxed))
 #endif
 #else
 typedef int64_t tpa_rc_t;
 #define TPA_RC_INC(l) ((l)->rc += 1)
 #define TPA_RC_DEC_IS_ZERO(l) (--(l)->rc == 0)
+#define TPA_RC_LOAD(l) ((l)->rc)
 #endif
 
 #if defined(TPA_LIBRARY)
@@ -422,142 +432,492 @@ static inline int tpa_cmp_f64_i64(double a, int64_t b, int op)
 }
 
 /* ------------------------------------------------------------------------------------------
- * repr(float): the shortest decimal string that parses back to the same double, laid out as
- * CPython's float_repr (format_float_short with mode 'r'): exponent notation when the decimal
- * exponent of the first digit is below -4 or at least 16, else positional with `.0` when there is no
- * fractional part. nan, inf and -inf as CPython writes them.
+ * Exact binary64 decimal formatting (issue #450): no dependence on the C library's snprintf or
+ * strtod rounding. Both `tpa_repr_f64` (shortest round-trip, Burger-Dybvig / Dragon4 with
+ * CPython's round-half-to-even tie-breaking) and `tpa_format_f64_fixed` (exact fixed-point
+ * rounding `format(v, '.<prec>f')`) operate directly on IEEE-754 bits using fixed-capacity
+ * 32-bit little-endian unsigned big integers (pure C99, uint64_t intermediates, no 128-bit integer).
  *
- * The digits: the smallest precision p in 1..17 for which the correctly rounded p-digit decimal
- * (`%.*e`) parses back to x. Where x is a power of two the interval that rounds to x is asymmetric
- * (half as wide below as above), so the nearest p-digit decimal can fall outside it while the next one
- * up is inside; CPython's David Gay conversion finds that one, so the two neighbours of the nearest
- * decimal are tried too. (A scripted port of exactly this procedure matched repr() on 600000 random
- * doubles and on every power-of-two neighbourhood; the corpus test compares this C with CPython.)
+ * Limb bound: in `tpa_repr_f64`, |k + 1| <= 324, so 5^|k+1| <= 5^324 (< 753 bits) and the
+ * scaled values stay within 780 bits (25 limbs). In `tpa_format_f64_fixed`, exact integer values
+ * m * 2^e2 fit in 1024 bits (32 limbs), and for e2 < 0 with prec <= 20, m * 5^prec fits in 100
+ * bits (4 limbs). 36 limbs (1152 bits) give comfortable headroom for both.
  * ------------------------------------------------------------------------------------------ */
+#define TPA__F64_MAX_LIMBS 36
 
-/* p digits of x > 0 into digs (no point), the decimal exponent of the first digit in *e */
-static inline void tpa__digits(double x, int p, char *digs, int *e)
+typedef struct {
+    int n;
+    uint32_t d[TPA__F64_MAX_LIMBS];
+} tpa__f64_bu;
+
+static inline void tpa__f64_bu_trim(tpa__f64_bu *a)
 {
-    char buf[48];
-    const char *s = buf;
+    while (a->n > 0 && a->d[a->n - 1] == 0) {
+        a->n--;
+    }
+}
+
+static inline void tpa__f64_bu_from_u64(tpa__f64_bu *a, uint64_t v)
+{
+    if (v == 0) {
+        a->n = 0;
+        return;
+    }
+    a->d[0] = (uint32_t)v;
+    if ((v >> 32) != 0) {
+        a->d[1] = (uint32_t)(v >> 32);
+        a->n = 2;
+    }
+    else {
+        a->n = 1;
+    }
+}
+
+static inline int tpa__f64_u64_bitlen(uint64_t v)
+{
     int n = 0;
-    snprintf(buf, sizeof buf, "%.*e", p - 1, x);
-    digs[n++] = *s++;
-    if (*s == '.') {
-        s++;
-        while (*s >= '0' && *s <= '9') {
-            digs[n++] = *s++;
-        }
+    while (v != 0) {
+        n++;
+        v >>= 1;
     }
-    *e = atoi(s + 1);                /* s is at the 'e'; atoi reads the sign and the digits */
-    digs[n] = '\0';
+    return n;
 }
 
-static inline int tpa__roundtrips(const char *digs, int p, int e, double x)
+static inline int tpa__f64_bu_bitlen(const tpa__f64_bu *a)
 {
-    char buf[64];
-    int n = 0, i;
-    buf[n++] = digs[0];
-    if (p > 1) {
-        buf[n++] = '.';
-        for (i = 1; i < p; i++) {
-            buf[n++] = digs[i];
-        }
+    int bl;
+    uint32_t w;
+    if (a->n == 0) {
+        return 0;
     }
-    snprintf(buf + n, sizeof buf - (size_t)n, "e%d", e);
-    return strtod(buf, NULL) == x;
+    bl = (a->n - 1) * 32;
+    w = a->d[a->n - 1];
+    while (w != 0) {
+        bl++;
+        w >>= 1;
+    }
+    return bl;
 }
 
-/* the p-digit decimal one unit in the last place above (d > 0) or below (d < 0) digs; 0 if there is none */
-static inline int tpa__bump(char *digs, int p, int *e, int d)
+static inline int tpa__f64_bu_cmp(const tpa__f64_bu *a, const tpa__f64_bu *b)
 {
     int i;
-    if (d > 0) {
-        for (i = p - 1; i >= 0; i--) {
-            if (digs[i] == '9') {
-                digs[i] = '0';
-            }
-            else {
-                digs[i]++;
-                return 1;
-            }
-        }
-        digs[0] = '1';               /* 99..9 + 1 = 100..0, one exponent up */
-        (*e)++;
-        return 1;
+    if (a->n != b->n) {
+        return a->n < b->n ? -1 : 1;
     }
-    for (i = p - 1; i >= 0; i--) {
-        if (digs[i] == '0') {
-            digs[i] = '9';
-        }
-        else {
-            digs[i]--;
-            if (i == 0 && digs[0] == '0') {
-                int j;               /* 100..0 - 1 = 99..9 with p-1 digits: p digits are 99..90, one exponent down */
-                if (p == 1) {
-                    return 0;
-                }
-                for (j = 0; j < p - 1; j++) {
-                    digs[j] = '9';
-                }
-                digs[p - 1] = '0';
-                (*e)--;
-            }
-            return 1;
+    for (i = a->n - 1; i >= 0; i--) {
+        if (a->d[i] != b->d[i]) {
+            return a->d[i] < b->d[i] ? -1 : 1;
         }
     }
     return 0;
 }
 
+static inline void tpa__f64_bu_add(tpa__f64_bu *dst, const tpa__f64_bu *a, const tpa__f64_bu *b)
+{
+    int n = a->n > b->n ? a->n : b->n;
+    uint64_t carry = 0;
+    int i;
+    for (i = 0; i < n; i++) {
+        uint64_t s = carry + (i < a->n ? (uint64_t)a->d[i] : 0) + (i < b->n ? (uint64_t)b->d[i] : 0);
+        dst->d[i] = (uint32_t)s;
+        carry = s >> 32;
+    }
+    if (carry != 0 && n < TPA__F64_MAX_LIMBS) {
+        dst->d[n++] = (uint32_t)carry;
+    }
+    dst->n = n;
+    tpa__f64_bu_trim(dst);
+}
+
+static inline void tpa__f64_bu_sub(tpa__f64_bu *a, const tpa__f64_bu *b)
+{
+    uint64_t borrow = 0;
+    int i;
+    for (i = 0; i < a->n; i++) {
+        uint64_t ai = (uint64_t)a->d[i];
+        uint64_t bi = (i < b->n ? (uint64_t)b->d[i] : 0) + borrow;
+        if (ai < bi) {
+            a->d[i] = (uint32_t)((ai + (UINT64_C(1) << 32)) - bi);
+            borrow = 1;
+        }
+        else {
+            a->d[i] = (uint32_t)(ai - bi);
+            borrow = 0;
+        }
+    }
+    tpa__f64_bu_trim(a);
+}
+
+static inline void tpa__f64_bu_mul_u32(tpa__f64_bu *a, uint32_t k)
+{
+    uint64_t carry = 0;
+    int i;
+    if (a->n == 0 || k == 0) {
+        a->n = 0;
+        return;
+    }
+    for (i = 0; i < a->n; i++) {
+        uint64_t p = (uint64_t)a->d[i] * (uint64_t)k + carry;
+        a->d[i] = (uint32_t)p;
+        carry = p >> 32;
+    }
+    if (carry != 0 && a->n < TPA__F64_MAX_LIMBS) {
+        a->d[a->n++] = (uint32_t)carry;
+    }
+}
+
+static inline void tpa__f64_bu_mul_pow5(tpa__f64_bu *a, int n)
+{
+    static const uint32_t p5[14] = {
+        1U, 5U, 25U, 125U, 625U, 3125U, 15625U, 78125U,
+        390625U, 1953125U, 9765625U, 48828125U, 244140625U, 1220703125U
+    };
+    while (n >= 13) {
+        tpa__f64_bu_mul_u32(a, p5[13]);
+        n -= 13;
+    }
+    if (n > 0) {
+        tpa__f64_bu_mul_u32(a, p5[n]);
+    }
+}
+
+static inline void tpa__f64_bu_shl(tpa__f64_bu *a, int shift)
+{
+    int ws, bs, i;
+    if (a->n == 0 || shift <= 0) {
+        return;
+    }
+    ws = shift >> 5;
+    bs = shift & 31;
+    if (bs == 0) {
+        for (i = a->n - 1; i >= 0; i--) {
+            if (i + ws < TPA__F64_MAX_LIMBS) {
+                a->d[i + ws] = a->d[i];
+            }
+        }
+        for (i = 0; i < ws && i < TPA__F64_MAX_LIMBS; i++) {
+            a->d[i] = 0;
+        }
+        a->n = (a->n + ws <= TPA__F64_MAX_LIMBS) ? a->n + ws : TPA__F64_MAX_LIMBS;
+    }
+    else {
+        uint32_t top = a->d[a->n - 1] >> (32 - bs);
+        if (top != 0 && a->n + ws < TPA__F64_MAX_LIMBS) {
+            a->d[a->n + ws] = top;
+        }
+        for (i = a->n - 1; i >= 1; i--) {
+            if (i + ws < TPA__F64_MAX_LIMBS) {
+                a->d[i + ws] = (a->d[i] << bs) | (a->d[i - 1] >> (32 - bs));
+            }
+        }
+        if (ws < TPA__F64_MAX_LIMBS) {
+            a->d[ws] = a->d[0] << bs;
+        }
+        for (i = 0; i < ws && i < TPA__F64_MAX_LIMBS; i++) {
+            a->d[i] = 0;
+        }
+        a->n += ws + (top != 0 ? 1 : 0);
+        if (a->n > TPA__F64_MAX_LIMBS) {
+            a->n = TPA__F64_MAX_LIMBS;
+        }
+    }
+    tpa__f64_bu_trim(a);
+}
+
+/* round_half_to_even(a / 2^shift) for shift > 0 */
+static inline void tpa__f64_bu_shr_round_even(tpa__f64_bu *a, int shift)
+{
+    int bl = tpa__f64_bu_bitlen(a);
+    int hw, hb, half_set, sticky = 0, ws, bs, new_n, i;
+    uint32_t mask;
+    if (bl < shift) {
+        a->n = 0;
+        return;
+    }
+    hw = (shift - 1) >> 5;
+    hb = (shift - 1) & 31;
+    mask = (UINT32_C(1) << hb) - 1U;
+    if (bl == shift) {
+        sticky = (a->d[hw] & mask) != 0;
+        for (i = 0; i < hw && !sticky; i++) {
+            if (a->d[i] != 0) {
+                sticky = 1;
+            }
+        }
+        if (sticky) {
+            a->n = 1;
+            a->d[0] = 1U;
+        }
+        else {
+            a->n = 0;
+        }
+        return;
+    }
+    half_set = ((a->d[hw] >> hb) & 1U) != 0;
+    if (half_set) {
+        sticky = (a->d[hw] & mask) != 0;
+        for (i = 0; i < hw && !sticky; i++) {
+            if (a->d[i] != 0) {
+                sticky = 1;
+            }
+        }
+    }
+    ws = shift >> 5;
+    bs = shift & 31;
+    new_n = a->n - ws;
+    if (bs == 0) {
+        for (i = 0; i < new_n; i++) {
+            a->d[i] = a->d[i + ws];
+        }
+    }
+    else {
+        for (i = 0; i < new_n - 1; i++) {
+            a->d[i] = (a->d[i + ws] >> bs) | (a->d[i + ws + 1] << (32 - bs));
+        }
+        a->d[new_n - 1] = a->d[a->n - 1] >> bs;
+    }
+    a->n = new_n;
+    tpa__f64_bu_trim(a);
+    if (half_set && (sticky || (a->n > 0 && (a->d[0] & 1U) != 0))) {
+        uint64_t carry = 1;
+        for (i = 0; i < a->n && carry != 0; i++) {
+            uint64_t s = (uint64_t)a->d[i] + carry;
+            a->d[i] = (uint32_t)s;
+            carry = s >> 32;
+        }
+        if (carry != 0 && a->n < TPA__F64_MAX_LIMBS) {
+            a->d[a->n++] = (uint32_t)carry;
+        }
+    }
+}
+
+static inline uint32_t tpa__f64_bu_divmod_u32(tpa__f64_bu *a, uint32_t k)
+{
+    uint64_t rem = 0;
+    int i;
+    for (i = a->n - 1; i >= 0; i--) {
+        uint64_t cur = (rem << 32) | (uint64_t)a->d[i];
+        a->d[i] = (uint32_t)(cur / k);
+        rem = cur % k;
+    }
+    tpa__f64_bu_trim(a);
+    return (uint32_t)rem;
+}
+
+static inline int tpa__f64_bu_to_dec(tpa__f64_bu *a, char *digs)
+{
+    uint32_t chunks[40];
+    int nchunks = 0, n = 0, i, j;
+    if (a->n == 0) {
+        digs[0] = '0';
+        return 1;
+    }
+    while (a->n > 0) {
+        chunks[nchunks++] = tpa__f64_bu_divmod_u32(a, 1000000000U);
+    }
+    {
+        uint32_t top = chunks[nchunks - 1];
+        char tmp[10];
+        int m = 0;
+        while (top > 0) {
+            tmp[m++] = (char)('0' + (top % 10U));
+            top /= 10U;
+        }
+        for (j = m - 1; j >= 0; j--) {
+            digs[n++] = tmp[j];
+        }
+    }
+    for (i = nchunks - 2; i >= 0; i--) {
+        uint32_t c = chunks[i];
+        for (j = 8; j >= 0; j--) {
+            digs[n + j] = (char)('0' + (c % 10U));
+            c /= 10U;
+        }
+        n += 9;
+    }
+    return n;
+}
+
+/* ------------------------------------------------------------------------------------------
+ * repr(float): the shortest decimal string that parses back to the same double, laid out as
+ * CPython's float_repr (format_float_short with mode 'r'): exponent notation when the decimal
+ * exponent of the first digit is below -4 or at least 16, else positional with `.0` when there is no
+ * fractional part. nan, inf and -inf as CPython writes them.
+ * ------------------------------------------------------------------------------------------ */
+
 /* writes repr(x) into buf (at least 40 bytes) and returns its length */
 static inline int tpa_repr_f64(double x, char *buf)
 {
-    char digs[24], alt[24];
-    int p, e = 0, n = 0, i, ndig, found = 0, ae, d;
-    if (x != x) {
-        memcpy(buf, "nan", 4);
-        return 3;
-    }
-    if (x == HUGE_VAL) {
+    uint64_t bits, mant, m, c;
+    int sign, bexp, e2, even, q, m_minus, m_plus, log2_floor, e, p5, e2_rel;
+    int32_t prod;
+    tpa__f64_bu r, s, mm, mp, tmp;
+    char digs[24];
+    int p = 0, n = 0, i, ndig, ae;
+
+    memcpy(&bits, &x, sizeof bits);
+    sign = (int)(bits >> 63);
+    bexp = (int)((bits >> 52) & 0x7FFU);
+    mant = bits & ((UINT64_C(1) << 52) - 1U);
+
+    if (bexp == 0x7FF) {
+        if (mant != 0) {
+            memcpy(buf, "nan", 4);
+            return 3;
+        }
+        if (sign) {
+            memcpy(buf, "-inf", 5);
+            return 4;
+        }
         memcpy(buf, "inf", 4);
         return 3;
     }
-    if (x == -HUGE_VAL) {
-        memcpy(buf, "-inf", 5);
-        return 4;
-    }
-    if (signbit(x)) {
+    if (sign) {
         buf[n++] = '-';
-        x = -x;
     }
-    if (x == 0.0) {
+    if (bexp == 0 && mant == 0) {
         memcpy(buf + n, "0.0", 4);
         return n + 3;
     }
-    for (p = 1; p <= 17 && !found; p++) {
-        tpa__digits(x, p, digs, &e);
-        if (tpa__roundtrips(digs, p, e, x)) {
-            found = 1;
+
+    if (bexp > 0) {
+        m = (UINT64_C(1) << 52) | mant;
+        e2 = bexp - 1075;
+    }
+    else {
+        m = mant;
+        e2 = -1074;
+    }
+    even = (m & 1U) == 0;
+
+    if (mant == 0 && bexp > 1) {
+        c = m << 2;
+        m_minus = 1;
+        m_plus = 2;
+        q = e2 - 2;
+    }
+    else {
+        c = m << 1;
+        m_minus = 1;
+        m_plus = 1;
+        q = e2 - 1;
+    }
+
+    log2_floor = (tpa__f64_u64_bitlen(c) - 1) + q;
+    prod = (int32_t)log2_floor * (int32_t)315653;
+    if (prod >= 0) {
+        e = (int)((uint32_t)prod >> 20);
+    }
+    else {
+        e = -(int)(((uint32_t)(-prod) + 0xFFFFFU) >> 20);
+    }
+
+    p5 = e + 1;
+    e2_rel = q - p5;
+
+    if (p5 >= 0) {
+        tpa__f64_bu_from_u64(&r, c);
+        tpa__f64_bu_from_u64(&mm, (uint64_t)m_minus);
+        tpa__f64_bu_from_u64(&mp, (uint64_t)m_plus);
+        tpa__f64_bu_from_u64(&s, 1U);
+        tpa__f64_bu_mul_pow5(&s, p5);
+    }
+    else {
+        tpa__f64_bu_from_u64(&r, c);
+        tpa__f64_bu_mul_pow5(&r, -p5);
+        tpa__f64_bu_from_u64(&mm, (uint64_t)m_minus);
+        tpa__f64_bu_mul_pow5(&mm, -p5);
+        tpa__f64_bu_from_u64(&mp, (uint64_t)m_plus);
+        tpa__f64_bu_mul_pow5(&mp, -p5);
+        tpa__f64_bu_from_u64(&s, 1U);
+    }
+
+    if (e2_rel >= 0) {
+        tpa__f64_bu_shl(&r, e2_rel);
+        tpa__f64_bu_shl(&mm, e2_rel);
+        tpa__f64_bu_shl(&mp, e2_rel);
+    }
+    else {
+        tpa__f64_bu_shl(&s, -e2_rel);
+    }
+
+    for (;;) {
+        tmp = r;
+        tpa__f64_bu_mul_u32(&tmp, 10U);
+        if (tpa__f64_bu_cmp(&tmp, &s) >= 0) {
             break;
         }
-        for (d = 1; d >= -1; d -= 2) {
-            int e2 = e;
-            memcpy(alt, digs, (size_t)p + 1);
-            if (tpa__bump(alt, p, &e2, d) && tpa__roundtrips(alt, p, e2, x)) {
-                memcpy(digs, alt, (size_t)p + 1);
-                e = e2;
-                found = 1;
-                break;
+        r = tmp;
+        tpa__f64_bu_mul_u32(&mm, 10U);
+        tpa__f64_bu_mul_u32(&mp, 10U);
+        e--;
+    }
+
+    for (;;) {
+        int cmp;
+        tpa__f64_bu_add(&tmp, &r, &mp);
+        cmp = tpa__f64_bu_cmp(&tmp, &s);
+        if (cmp > 0 || (even && cmp == 0)) {
+            tpa__f64_bu_mul_u32(&s, 10U);
+            e++;
+        }
+        else {
+            break;
+        }
+    }
+
+    for (;;) {
+        int d = 0, cmp_low, cmp_high, low, high;
+        tpa__f64_bu_mul_u32(&r, 10U);
+        while (tpa__f64_bu_cmp(&r, &s) >= 0) {
+            tpa__f64_bu_sub(&r, &s);
+            d++;
+        }
+        tpa__f64_bu_mul_u32(&mm, 10U);
+        tpa__f64_bu_mul_u32(&mp, 10U);
+
+        cmp_low = tpa__f64_bu_cmp(&r, &mm);
+        tpa__f64_bu_add(&tmp, &r, &mp);
+        cmp_high = tpa__f64_bu_cmp(&tmp, &s);
+        if (even) {
+            low = cmp_low <= 0;
+            high = cmp_high >= 0;
+        }
+        else {
+            low = cmp_low < 0;
+            high = cmp_high > 0;
+        }
+
+        if (!low && !high) {
+            digs[p++] = (char)('0' + d);
+        }
+        else if (low && !high) {
+            digs[p++] = (char)('0' + d);
+            break;
+        }
+        else if (high && !low) {
+            digs[p++] = (char)('0' + d + 1);
+            break;
+        }
+        else {
+            int cmp2;
+            tmp = r;
+            tpa__f64_bu_shl(&tmp, 1);
+            cmp2 = tpa__f64_bu_cmp(&tmp, &s);
+            if (cmp2 < 0) {
+                digs[p++] = (char)('0' + d);
             }
-        }
-        if (found) {
+            else if (cmp2 > 0) {
+                digs[p++] = (char)('0' + d + 1);
+            }
+            else {
+                digs[p++] = (char)('0' + ((d & 1) == 0 ? d : d + 1));
+            }
             break;
         }
     }
-    if (!found) {
-        tpa__digits(x, 17, digs, &e);   /* cannot happen: 17 digits always round-trip */
-        p = 17;
-    }
+
     ndig = p;
     while (ndig > 1 && digs[ndig - 1] == '0') {
         ndig--;
@@ -991,32 +1351,680 @@ static inline void tpa_print_str(const char *s, size_t n)
     fwrite(s, 1, n, stdout);
 }
 
-/* format(x, '.<prec>f') of a float: nan and the infinities as CPython writes them (never `-nan`), the
- * rest through printf("%.*f"), whose result is the correctly rounded decimal expansion on glibc, musl, the
- * Apple C library and UCRT (the same digits as CPython's own conversion; the dependence on the C
- * library's exact rounding is issue #450, which the differential tests exercise on every target). */
-static inline void tpa_print_f64_fixed(double v, int prec)
+/* format(x, '.<prec>f') of a float (issue #450): exact round-half-to-even from the IEEE-754 bits
+ * with no dependence on the C library's printf rounding. `buf` must hold at least 320 + prec bytes
+ * (valid for 0 <= prec <= 300; the AOT compiler caps prec at AOT_MAX_PRECISION = 20). */
+static inline int tpa_format_f64_fixed(double v, int prec, char *buf)
 {
-    char buf[400];
-    int n;
-    if (v != v) {
-        fwrite("nan", 1, 3, stdout);
-        return;
+    uint64_t bits, mant, m;
+    int sign, bexp, e2, n = 0;
+    if (prec < 0) {
+        prec = 0;
     }
-    if (v == HUGE_VAL || v == -HUGE_VAL) {
-        if (v > 0) {
-            fwrite("inf", 1, 3, stdout);
+    memcpy(&bits, &v, sizeof bits);
+    sign = (int)(bits >> 63);
+    bexp = (int)((bits >> 52) & 0x7FFU);
+    mant = bits & ((UINT64_C(1) << 52) - 1U);
+
+    if (bexp == 0x7FF) {
+        if (mant != 0) {
+            memcpy(buf, "nan", 4);
+            return 3;
+        }
+        if (sign) {
+            memcpy(buf, "-inf", 5);
+            return 4;
+        }
+        memcpy(buf, "inf", 4);
+        return 3;
+    }
+    if (sign) {
+        buf[n++] = '-';
+    }
+    if (bexp == 0 && mant == 0) {
+        buf[n++] = '0';
+        if (prec > 0) {
+            buf[n++] = '.';
+            memset(buf + n, '0', (size_t)prec);
+            n += prec;
+        }
+        buf[n] = '\0';
+        return n;
+    }
+    if (bexp > 0) {
+        m = (UINT64_C(1) << 52) | mant;
+        e2 = bexp - 1075;
+    }
+    else {
+        m = mant;
+        e2 = -1074;
+    }
+    if (e2 >= 0) {
+        tpa__f64_bu val;
+        tpa__f64_bu_from_u64(&val, m);
+        tpa__f64_bu_shl(&val, e2);
+        n += tpa__f64_bu_to_dec(&val, buf + n);
+        if (prec > 0) {
+            buf[n++] = '.';
+            memset(buf + n, '0', (size_t)prec);
+            n += prec;
+        }
+        buf[n] = '\0';
+        return n;
+    }
+    {
+        int s_exp = e2 + prec;
+        tpa__f64_bu val;
+        char digs[360];
+        int ndig;
+        if (s_exp >= 0) {
+            tpa__f64_bu_from_u64(&val, m);
+            tpa__f64_bu_mul_pow5(&val, prec);
+            tpa__f64_bu_shl(&val, s_exp);
         }
         else {
-            fwrite("-inf", 1, 4, stdout);
+            int shift = -s_exp;
+            if (shift > 54 + 3 * prec) {
+                val.n = 0;
+            }
+            else {
+                tpa__f64_bu_from_u64(&val, m);
+                tpa__f64_bu_mul_pow5(&val, prec);
+                tpa__f64_bu_shr_round_even(&val, shift);
+            }
         }
-        return;
+        ndig = tpa__f64_bu_to_dec(&val, digs);
+        if (prec == 0) {
+            memcpy(buf + n, digs, (size_t)ndig);
+            n += ndig;
+        }
+        else if (ndig <= prec) {
+            buf[n++] = '0';
+            buf[n++] = '.';
+            memset(buf + n, '0', (size_t)(prec - ndig));
+            n += prec - ndig;
+            memcpy(buf + n, digs, (size_t)ndig);
+            n += ndig;
+        }
+        else {
+            int ip = ndig - prec;
+            memcpy(buf + n, digs, (size_t)ip);
+            n += ip;
+            buf[n++] = '.';
+            memcpy(buf + n, digs + ip, (size_t)prec);
+            n += prec;
+        }
+        buf[n] = '\0';
+        return n;
     }
-    n = snprintf(buf, sizeof buf, "%.*f", prec, v);
+}
+
+static inline void tpa_print_f64_fixed(double v, int prec)
+{
+    char stack_buf[400];
+    char *buf = stack_buf;
+    int n;
+    if (prec < 0) {
+        prec = 0;
+    }
+    if (prec > 60) {
+        buf = (char *)malloc((size_t)prec + 320U);
+        if (buf == NULL) {
+            return;
+        }
+    }
+    n = tpa_format_f64_fixed(v, prec, buf);
     fwrite(buf, 1, (size_t)n, stdout);
+    if (buf != stack_buf) {
+        free(buf);
+    }
 }
 
 static inline void tpa_print_sep(void) { fputc(' ', stdout); }
 static inline void tpa_print_end(void) { fputc('\n', stdout); }
+
+/* ------------------------------------------------------------------------------------------
+ * Integer shifts (RAW int64_t), float power, additional math, time, and sys.exit (Tier K PR5)
+ * ------------------------------------------------------------------------------------------ */
+
+static inline int tpa_rshift_i64(int64_t a, int64_t b, int64_t *out)
+{
+    if (b < 0) {
+        tpa_raise(TPA_ValueError, "negative shift count");
+        return -1;
+    }
+    if (b >= 64) {
+        *out = (a < 0) ? -1 : 0;
+        return 0;
+    }
+    if (a >= 0) {
+        *out = (int64_t)((uint64_t)a >> (unsigned)b);
+    }
+    else {
+        *out = (int64_t)(~((~(uint64_t)a) >> (unsigned)b));
+    }
+    return 0;
+}
+
+static inline int tpa_plshift_i64(int64_t a, int64_t b, int64_t *out)
+{
+    if (b < 0) {
+        tpa_raise(TPA_ValueError, "negative shift count");
+        return -1;
+    }
+    if (b >= 64) {
+        *out = 0;
+        return 0;
+    }
+    *out = (int64_t)((uint64_t)a << (unsigned)b);
+    return 0;
+}
+
+static inline int tpa__f64_is_odd_integer(double x)
+{
+    return isfinite(x) && floor(x) == x && fmod(fabs(x), 2.0) == 1.0;
+}
+
+/* CPython Objects/floatobject.c float_pow semantics (float ** float). */
+static inline int tpa_pow_f64(double iv, double iw, double *out)
+{
+    double r;
+    int negate_result = 0;
+    if (iw == 0.0) {
+        *out = 1.0;
+        return 0;
+    }
+    if (isnan(iv) || isnan(iw)) {
+        *out = (iv == 1.0) ? 1.0 : NAN;
+        return 0;
+    }
+    if (isinf(iw)) {
+        iv = fabs(iv);
+        if (iv == 1.0) {
+            *out = 1.0;
+            return 0;
+        }
+        else if ((iw > 0.0) == (iv > 1.0)) {
+            *out = fabs(iw);
+            return 0;
+        }
+        else {
+            *out = 0.0;
+            return 0;
+        }
+    }
+    if (isinf(iv)) {
+        int odd = tpa__f64_is_odd_integer(iw);
+        if (iw > 0.0) {
+            *out = odd ? iv : fabs(iv);
+        }
+        else {
+            *out = odd ? copysign(0.0, iv) : 0.0;
+        }
+        return 0;
+    }
+    if (iv == 0.0) {
+        if (iw < 0.0) {
+            tpa_raise(TPA_ZeroDivisionError, "zero to a negative power");
+            return -1;
+        }
+        *out = tpa__f64_is_odd_integer(iw) ? iv : 0.0;
+        return 0;
+    }
+    if (iv < 0.0) {
+        if (iw != floor(iw)) {
+            tpa_raise(TPA_ValueError, "negative number cannot be raised to a fractional power");
+            return -1;
+        }
+        iv = -iv;
+        negate_result = tpa__f64_is_odd_integer(iw);
+    }
+    errno = 0;
+    r = pow(iv, iw);
+    if (errno == ERANGE && isinf(r)) {
+        tpa_raise(TPA_OverflowError, "(34, 'Numerical result out of range')");
+        return -1;
+    }
+    if (isinf(r)) {
+        tpa_raise(TPA_OverflowError, "(34, 'Numerical result out of range')");
+        return -1;
+    }
+    *out = negate_result ? -r : r;
+    return 0;
+}
+
+#define TPA_MATH_MSG_UNIT "expected a number in range from -1 up to 1, got "
+
+static inline double tpa__m_log2(double x)
+{
+    if (isfinite(x)) {
+        if (x > 0.0) return log2(x);
+        errno = EDOM;
+        if (x == 0.0) return -HUGE_VAL;
+        return NAN;
+    }
+    else if (isnan(x)) return x;
+    else if (x > 0.0) return x;
+    errno = EDOM;
+    return NAN;
+}
+
+static inline double tpa__m_log10(double x)
+{
+    if (isfinite(x)) {
+        if (x > 0.0) return log10(x);
+        errno = EDOM;
+        if (x == 0.0) return -HUGE_VAL;
+        return NAN;
+    }
+    else if (isnan(x)) return x;
+    else if (x > 0.0) return x;
+    errno = EDOM;
+    return NAN;
+}
+
+#define TPA__DEF_MATH1_K5(NAME, CALL, CAN_OVERFLOW, MSG)                                       \
+    static inline int tpa_math_##NAME(double x, double *out)                                   \
+    {                                                                                          \
+        double r;                                                                              \
+        errno = 0;                                                                             \
+        r = CALL;                                                                              \
+        return tpa__math_1_finish(x, r, CAN_OVERFLOW, MSG, out);                               \
+    }
+TPA__DEF_MATH1_K5(log2, tpa__m_log2(x), 0, TPA_MATH_MSG_POSITIVE)
+TPA__DEF_MATH1_K5(log10, tpa__m_log10(x), 0, TPA_MATH_MSG_POSITIVE)
+TPA__DEF_MATH1_K5(asin, asin(x), 0, TPA_MATH_MSG_UNIT)
+TPA__DEF_MATH1_K5(acos, acos(x), 0, TPA_MATH_MSG_UNIT)
+TPA__DEF_MATH1_K5(atan, atan(x), 0, NULL)
+TPA__DEF_MATH1_K5(sinh, sinh(x), 1, NULL)
+TPA__DEF_MATH1_K5(cosh, cosh(x), 1, NULL)
+TPA__DEF_MATH1_K5(tanh, tanh(x), 0, NULL)
+#undef TPA__DEF_MATH1_K5
+
+static inline int tpa_math_pow(double x, double y, double *out)
+{
+    double r;
+    if (y == 0.0 || x == 1.0) {
+        *out = 1.0;
+        return 0;
+    }
+    if (isnan(x) || isnan(y)) {
+        *out = NAN;
+        return 0;
+    }
+    if (x == 0.0 && y < 0.0) {
+        tpa_raise(TPA_ValueError, "math domain error");
+        return -1;
+    }
+    if (isfinite(x) && x < 0.0 && isfinite(y) && floor(y) != y) {
+        tpa_raise(TPA_ValueError, "math domain error");
+        return -1;
+    }
+    errno = 0;
+    r = pow(x, y);
+    if (isnan(r) && !isnan(x) && !isnan(y)) {
+        tpa_raise(TPA_ValueError, "math domain error");
+        return -1;
+    }
+    if (isinf(r) && isfinite(x) && isfinite(y)) {
+        tpa_raise(TPA_OverflowError, "math range error");
+        return -1;
+    }
+    if (isfinite(r) && errno && tpa__math_is_error(r)) {
+        return -1;
+    }
+    *out = r;
+    return 0;
+}
+
+static inline int tpa_math_copysign(double x, double y, double *out)
+{
+    *out = copysign(x, y);
+    return 0;
+}
+
+static inline int tpa_math_fmod(double x, double y, double *out)
+{
+    double r;
+    if (isnan(x) || isnan(y)) {
+        *out = NAN;
+        return 0;
+    }
+    if (y == 0.0 || isinf(x)) {
+        tpa_raise(TPA_ValueError, "math domain error");
+        return -1;
+    }
+    if (isinf(y)) {
+        *out = x;
+        return 0;
+    }
+    errno = 0;
+    r = fmod(x, y);
+    if (isnan(r)) {
+        tpa_raise(TPA_ValueError, "math domain error");
+        return -1;
+    }
+    *out = r;
+    return 0;
+}
+
+static inline int tpa_math_isnan(double x) { return isnan(x) ? 1 : 0; }
+static inline int tpa_math_isinf(double x) { return isinf(x) ? 1 : 0; }
+static inline int tpa_math_isfinite(double x) { return isfinite(x) ? 1 : 0; }
+
+/* Portable time helpers */
+static inline double tpa_time_perf_counter(void)
+{
+#if defined(_WIN32)
+    LARGE_INTEGER freq, counter;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&counter);
+    return (double)counter.QuadPart / (double)freq.QuadPart;
+#elif defined(CLOCK_MONOTONIC)
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+#else
+    return (double)clock() / (double)CLOCKS_PER_SEC;
+#endif
+}
+
+static inline double tpa_time_monotonic(void)
+{
+#if defined(_WIN32)
+    return (double)GetTickCount64() * 1e-3;
+#elif defined(CLOCK_MONOTONIC)
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+#else
+    return (double)clock() / (double)CLOCKS_PER_SEC;
+#endif
+}
+
+static inline double tpa_time_time(void)
+{
+#if defined(_WIN32)
+    FILETIME ft;
+    ULARGE_INTEGER uli;
+    GetSystemTimeAsFileTime(&ft);
+    uli.LowPart = ft.dwLowDateTime;
+    uli.HighPart = ft.dwHighDateTime;
+    return (double)(uli.QuadPart - 116444736000000000ULL) * 1e-7;
+#elif defined(CLOCK_REALTIME)
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+#else
+    return (double)time(NULL);
+#endif
+}
+
+static inline int tpa_time_sleep(double secs)
+{
+    if (isnan(secs) || secs < 0.0) {
+        tpa_raise(TPA_ValueError, "sleep length must be non-negative");
+        return -1;
+    }
+    if (secs == 0.0) {
+        return 0;
+    }
+#if defined(_WIN32)
+    {
+        double ms = secs * 1000.0;
+        DWORD d = (ms >= (double)0xFFFFFFFEu) ? (DWORD)0xFFFFFFFEu : (DWORD)ms;
+        Sleep(d);
+    }
+#else
+    {
+        struct timespec req, rem;
+        req.tv_sec = (time_t)secs;
+        req.tv_nsec = (long)((secs - (double)req.tv_sec) * 1e9);
+        if (req.tv_nsec < 0) req.tv_nsec = 0;
+        if (req.tv_nsec >= 1000000000L) {
+            req.tv_sec += 1;
+            req.tv_nsec -= 1000000000L;
+        }
+        while (nanosleep(&req, &rem) == -1 && errno == EINTR) {
+            req = rem;
+        }
+    }
+#endif
+    return 0;
+}
+
+/* ------------------------------------------------------------------------------------------
+ * Scope regions (SPEC N-17, N-12b/c step 2, design 6.3.2 item 2; agent proposal, not owner-confirmed).
+ * A region is a list of bump-allocated chunks owned by one C local of a generated function: the
+ * function's body, or one iteration of one of its loops, owns it. The objects in it (`struct
+ * tpa_reg_<F>__<C>`, no reference count) are freed together, at the function's one cleanup point, or
+ * released and reset at the top of every iteration. One region holds objects of ONE type (the generated
+ * code gives each (function, class) its own region), so the generated per-class walk that releases the
+ * owned heap references the objects hold (lists, big ints, heap-rc objects) steps through a chunk in
+ * units of that type's size: `used` is an exact multiple of it. A chunk's data starts 16-byte aligned
+ * (the header is 32 bytes on a 64-bit target and malloc's result is at least 16-byte aligned), and
+ * sizeof(T) is a multiple of alignof(T), so every object is aligned. An allocation is zeroed, so a field
+ * the generated constructor did not reach (its argument conversion failed) releases as nothing: a NULL
+ * list or object; big-int fields are set to TPA_INT_ZERO by the constructor before anything can fail
+ * (the word 0 is not a tpa_int value). A failed chunk allocation raises MemoryError and returns NULL;
+ * the generated site leaves through `tp_cleanup:`, which frees the region.
+ * ------------------------------------------------------------------------------------------ */
+#define TPA_REGION_FIRST_CHUNK ((size_t)4096)          /* bytes of objects in the first chunk */
+#define TPA_REGION_MAX_CHUNK ((size_t)1 << 20)         /* each later chunk doubles, up to this */
+
+typedef struct tpa_region_chunk {
+    struct tpa_region_chunk *next;      /* the previous chunk (the head is the newest) */
+    size_t cap;
+    size_t used;
+    size_t pad_;                        /* keeps the header at 32 bytes: the objects start 16-byte aligned */
+} tpa_region_chunk;
+
+typedef struct tpa_region {
+    tpa_region_chunk *head;
+} tpa_region;
+
+#define TPA_REGION_INIT { NULL }
+
+static inline void *tpa_region_alloc(tpa_region *r, size_t size)
+{
+    tpa_region_chunk *c = r->head;
+    char *p;
+    if (c == NULL || c->cap - c->used < size) {
+        size_t cap = c == NULL ? TPA_REGION_FIRST_CHUNK : (c->cap < TPA_REGION_MAX_CHUNK ? c->cap * 2 : c->cap);
+        tpa_region_chunk *n;
+        if (cap < size) {
+            cap = size;
+        }
+        n = (tpa_region_chunk *)malloc(sizeof(tpa_region_chunk) + cap);
+        if (n == NULL) {
+            tpa_raise(TPA_MemoryError, "");
+            return NULL;
+        }
+        n->next = c;
+        n->cap = cap;
+        n->used = 0;
+        n->pad_ = 0;
+        r->head = n;
+        c = n;
+    }
+    p = (char *)(c + 1) + c->used;
+    c->used += size;
+    memset(p, 0, size);
+    return p;
+}
+
+/* Every chunk freed; the region is empty again (a function frees each of its regions once, at its cleanup point). */
+static inline void tpa_region_free(tpa_region *r)
+{
+    tpa_region_chunk *c = r->head;
+    while (c != NULL) {
+        tpa_region_chunk *next = c->next;
+        free(c);
+        c = next;
+    }
+    r->head = NULL;
+}
+
+/* The start of an iteration: the newest (largest) chunk is kept and emptied, the older ones are freed, so a
+ * loop whose iterations allocate the same amount reuses one chunk and calls malloc no more. */
+static inline void tpa_region_reset(tpa_region *r)
+{
+    tpa_region_chunk *c = r->head;
+    if (c == NULL) {
+        return;
+    }
+    tpa_region_free(&(tpa_region){ c->next });
+    c->next = NULL;
+    c->used = 0;
+}
+
+/* Deferred frees of the generated class releases (review of #508, F1; CPython's trashcan has the same job). A
+ * release that frees an object releases its fields, and a field of a class type is released by a call: a chain of
+ * n objects through a field that is not the release loop's tail field recursed n deep and overflowed the C stack
+ * (a 500k-node chain). Every release of a class that has a field of a class type now counts its nesting depth:
+ * below TPA_TRASH_LIMIT it frees at once, exactly as before; at the limit it parks the object (its count already
+ * zero, already untracked) with the class's drop function on a thread-local list, and the outermost release
+ * drains the list when its depth returns to zero, each drop starting again from depth 1. So no release nests more
+ * than TPA_TRASH_LIMIT deep, whatever the shape of the chain or the classes it alternates between. Only the order
+ * of frees changes, beyond the limit; AOT compiles no `__del__` and a freed object is unreachable, so the order is
+ * not observable. When the list cannot grow (out of memory) the object is freed at once, as before. */
+#ifndef TPA_TRASH_LIMIT
+#define TPA_TRASH_LIMIT 1000
+#endif
+
+typedef void (*tpa_trash_fn)(void *obj);
+
+typedef struct tpa_trash_item {
+    void *obj;
+    tpa_trash_fn drop;
+} tpa_trash_item;
+
+typedef struct tpa_trash_state {
+    int64_t depth;                  /* releases of trash-aware classes in flight on this thread */
+    tpa_trash_item *items;          /* parked objects, LIFO */
+    size_t len;
+    size_t cap;
+#if defined(TPA_TRASH_STATS)
+    int64_t max_depth;              /* tests only: the deepest nesting reached, and the objects parked */
+    int64_t parked;
+    int registered;
+#endif
+} tpa_trash_state;
+
+#if defined(TPA_THREADS)
+static TPA_THREAD_LOCAL tpa_trash_state tpa_trash;
+#else
+static tpa_trash_state tpa_trash;
+#endif
+
+#if defined(TPA_TRASH_STATS)
+/* Tests only (-DTPA_TRASH_STATS): the nesting the bound allowed, printed at exit, so a test checks the depth itself
+ * instead of relying on a stack overflow, whose size differs between platforms (review of #513's first CI run). */
+static void tpa_trash__report(void)
+{
+    fflush(stdout);
+    fprintf(stderr, "tpa_trash: max_depth=%lld parked=%lld\n", (long long)tpa_trash.max_depth,
+            (long long)tpa_trash.parked);
+    fflush(stderr);
+}
+#endif
+
+/* Called by a release once the count reached zero: 1 to free now (the caller frees the fields and the object,
+ * then calls tpa_trash_leave), 0 when the object was parked (the caller returns at once). */
+static inline int tpa_trash_enter(void *obj, tpa_trash_fn drop) TPA_UNUSED;
+static inline int tpa_trash_enter(void *obj, tpa_trash_fn drop)
+{
+    tpa_trash_state *t = &tpa_trash;
+#if defined(TPA_TRASH_STATS)
+    if (!t->registered) {
+        t->registered = 1;
+        atexit(tpa_trash__report);
+    }
+#endif
+    if (t->depth >= TPA_TRASH_LIMIT) {
+        if (t->len == t->cap) {
+            size_t cap = t->cap != 0 ? t->cap * 2 : 64;
+            tpa_trash_item *items = (tpa_trash_item *)realloc(t->items, cap * sizeof *items);
+            if (items != NULL) {
+                t->items = items;
+                t->cap = cap;
+            }
+        }
+        if (t->len < t->cap) {
+            t->items[t->len].obj = obj;
+            t->items[t->len].drop = drop;
+            t->len += 1;
+#if defined(TPA_TRASH_STATS)
+            t->parked += 1;
+#endif
+            return 0;
+        }
+    }
+    t->depth += 1;
+#if defined(TPA_TRASH_STATS)
+    if (t->depth > t->max_depth) {
+        t->max_depth = t->depth;
+    }
+#endif
+    return 1;
+}
+
+static void tpa_trash__drain(tpa_trash_state *t) TPA_UNUSED;
+static void tpa_trash__drain(tpa_trash_state *t)
+{
+    t->depth = 1;                   /* a drop's own releases nest from here; none of them drains again */
+    while (t->len > 0) {
+        tpa_trash_item it = t->items[--t->len];
+        it.drop(it.obj);
+    }
+    t->depth = 0;
+    free(t->items);
+    t->items = NULL;
+    t->cap = 0;
+}
+
+static inline void tpa_trash_leave(void) TPA_UNUSED;
+static inline void tpa_trash_leave(void)
+{
+    tpa_trash_state *t = &tpa_trash;
+    t->depth -= 1;
+    if (t->depth == 0 && t->len > 0) {
+        tpa_trash__drain(t);
+    }
+}
+
+/* The objects of a region of one type: `TPA_REGION_FOREACH(T, obj, region) { ... }` runs the statement for every
+ * object the region holds, in allocation order inside a chunk (the chunks newest first). The generated
+ * `tpa_reg_<F>__<C>_drop` uses it to release the owned heap references of every object before a free or a reset. */
+#define TPA_REGION_FOREACH(T, obj, region)                                                       \
+    for (tpa_region_chunk *tpa__c = (region)->head; tpa__c != NULL; tpa__c = tpa__c->next)        \
+        for (size_t tpa__off = 0; tpa__off + sizeof(T) <= tpa__c->used; tpa__off += sizeof(T))   \
+            for (T *obj = (T *)((char *)(tpa__c + 1) + tpa__off); obj != NULL; obj = NULL)
+
+#if !defined(TPA_LIBRARY)
+/* Run once by `sys.exit` before `exit()` (REVIEW-503 note 2): the generated `main` sets it to `tpa_gc_exit` when
+ * the program links the cycle collector, so the cycles alive at `sys.exit` are collected as they are when
+ * `__main__` returns (CPython collects at shutdown on both paths). NULL in every other program. Read and
+ * cleared without synchronisation: `sys.exit` runs only on the main thread today (AOT has no parallel loops and
+ * the library build refuses `sys.exit`; review of #508, F4). */
+static void (*tpa_exit_hook)(void);
+
+static inline void tpa_exit_status(int status)
+{
+    void (*hook)(void) = tpa_exit_hook;
+    tpa_exit_hook = NULL;
+    if (hook != NULL) {
+        hook();
+    }
+    fflush(stdout);
+    fflush(stderr);
+    exit(status);
+}
+
+static inline void tpa_exit_i64(int64_t code)
+{
+    tpa_exit_status((int)(code & 0xff));
+}
+#endif
 
 #endif

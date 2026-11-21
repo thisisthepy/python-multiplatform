@@ -98,6 +98,8 @@ internal data class ArtifactCallable(
     /** Which `t<i>` of its fragment's thunk class [thunk] is, so that the generated `.kt` and the
      * generated `.class` cannot disagree about the index. `-1` when [thunk] is `null`. */
     val thunkIndex: Int = -1,
+    /** Whether this callable is a Kotlin `suspend` function whose body returns a `PendingCall`. */
+    val isSuspend: Boolean = false,
 ) : Serializable
 
 /** One artefact's worth of bindings: what becomes a single `FunctionTableFragment` object. */
@@ -187,6 +189,7 @@ private fun renderEntry(entry: ArtifactCallable): String {
     val paramNames = entry.paramNames.joinToString(", ") { it.quoted() }
     val paramTypeNames = entry.paramTypeNames.joinToString(", ") { it.quoted() }
     val paramHasDefault = omittableSlotsOf(entry).joinToString(", ")
+    val suspendLine = if (entry.isSuspend) "\n        |    isSuspend = true," else ""
     return """
         |$EXPOSED_CALLABLE(
         |    name = ${entry.name.quoted()},
@@ -199,7 +202,7 @@ private fun renderEntry(entry: ArtifactCallable): String {
         |    returnTypeName = ${renderedReturnTypeName(entry)?.quoted() ?: "null"},
         |    isExtension = ${entry.receiverTypeName != null && entry.kind == "FUNCTION"},
         |    receiverTypeName = ${entry.receiverTypeName?.quoted() ?: "null"},
-        |    paramHasDefault = listOf($paramHasDefault),
+        |    paramHasDefault = listOf($paramHasDefault),$suspendLine
         |    callable = ${entry.lambdaBody},
         |)
     """.trimMargin()

@@ -12,7 +12,7 @@
 set -euo pipefail
 out="$(mkdir -p "${1:?usage: assemble-desktop-release.sh <out-dir>}" && cd "$1" && pwd)"
 root="$(pwd)"
-version="$(sed -nE 's/^pythonVersion=(.*)$/\1/p' gradle.properties)-$(sed -nE 's/^libraryVersionSuffix=(.*)$/\1/p' gradle.properties)"
+version="$(sed -nE 's/^pythonVersion=(.*)$/\1/p' gradle.properties)$(sed -nE 's/^libraryVersionSuffix=(.+)$/-\1/p' gradle.properties)"
 repo="$out/maven-repo"
 rm -rf "$repo"
 mkdir -p "$repo"

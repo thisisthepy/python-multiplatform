@@ -266,4 +266,117 @@ class PendingCallTest {
         assertFalse(HandleTable.release(ref), "a double release is a no-op")
         assertFalse(ObjectReference.NONE.isValid)
     }
+
+    // --------------------------------------------------------- CoroutineContext & onCancelled (U-5b)
+
+    private class FakeJobElement(val id: String) : kotlin.coroutines.AbstractCoroutineContextElement(Key) {
+        companion object Key : kotlin.coroutines.CoroutineContext.Key<FakeJobElement>
+    }
+
+    @Test
+    fun startWithExplicitContextExposesContextElementsAlongsidePendingCall() {
+        val jobElement = FakeJobElement("parent-job-1")
+        var seenJob: FakeJobElement? = null
+        var seenCall: PendingCall? = null
+        val call = PendingCall.start(jobElement) {
+            seenJob = kotlin.coroutines.coroutineContext[FakeJobElement]
+            seenCall = currentPendingCall()
+            42L
+        }
+        assertTrue(call.isDone)
+        assertEquals(42L, call.value)
+        assertSame(jobElement, seenJob, "coroutineContext[Job] must expose the supplied context element")
+        assertSame(call, seenCall, "coroutineContext[PendingCall] must still be the PendingCall")
+    }
+
+    @Test
+    fun onCancelledRunsOnceOnCancelOrInlineIfAlreadyCancelledAndCapturesListenerExceptions() {
+        var captured: Continuation<Unit>? = null
+        var firstCalls = 0
+        var secondCalls = 0
+        val call = PendingCall.start {
+            suspendCoroutine { c -> captured = c }
+            1L
+        }
+        call.onCancelled {
+            firstCalls++
+            throw IllegalStateException("listener boom")
+        }
+        call.onCancelled {
+            secondCalls++
+        }
+
+        assertTrue(call.cancel())
+        assertEquals(1, firstCalls)
+        assertEquals(1, secondCalls, "a throwing listener must not abort subsequent listeners")
+        assertEquals("listener boom", call.cancellationFailure?.message)
+
+        // Registering after cancellation fires inline immediately.
+        var lateCalls = 0
+        call.onCancelled { lateCalls++ }
+        assertEquals(1, lateCalls)
+
+        // A second cancel is a no-op and does not re-fire listeners.
+        assertFalse(call.cancel())
+        assertEquals(1, firstCalls)
+        assertEquals(1, secondCalls)
+        captured!!.resume(Unit)
+    }
+
+    @Test
+    fun onCancelledReturnsADisposerThatUnregistersThatListenerAlone() {
+        // Review finding on #497: a listener whose reason has passed (an in-flight suspend
+        // invocation that completed) must be removable, or a long-running body accumulates one
+        // per step and runs every stale one on cancel. Before the fix `onCancelled` returned
+        // Unit, so `dispose()` below does not compile.
+        var captured: Continuation<Unit>? = null
+        var disposedCalls = 0
+        var keptCalls = 0
+        val call = PendingCall.start {
+            suspendCoroutine { c -> captured = c }
+            1L
+        }
+        val dispose = call.onCancelled { disposedCalls++ }
+        val keep = call.onCancelled { keptCalls++ }
+        dispose()
+        dispose() // twice is a no-op
+
+        assertTrue(call.cancel())
+        assertEquals(0, disposedCalls, "a disposed listener ran on cancel")
+        assertEquals(1, keptCalls, "disposing one registration must not touch another")
+        keep() // after cancel: nothing to remove, no failure
+        assertNull(call.cancellationFailure)
+
+        // A registration made after cancellation ran inline; its disposer has nothing to do.
+        var lateCalls = 0
+        val lateDispose = call.onCancelled { lateCalls++ }
+        assertEquals(1, lateCalls)
+        lateDispose()
+        assertEquals(1, lateCalls)
+        captured!!.resume(Unit)
+
+        // A done call drops the registration; its disposer is a no-op as well.
+        val done = PendingCall.start { 2L }
+        assertTrue(done.isDone)
+        var neverCalls = 0
+        val doneDispose = done.onCancelled { neverCalls++ }
+        doneDispose()
+        assertFalse(done.cancel())
+        assertEquals(0, neverCalls)
+
+        // The same lambda instance registered twice: disposing one registration leaves the other.
+        var twiceCalls = 0
+        var parked: Continuation<Unit>? = null
+        val twice = PendingCall.start {
+            suspendCoroutine { c -> parked = c }
+            3L
+        }
+        val action: () -> Unit = { twiceCalls++ }
+        val first = twice.onCancelled(action)
+        twice.onCancelled(action)
+        first()
+        assertTrue(twice.cancel())
+        assertEquals(1, twiceCalls, "the registration that was not disposed must run exactly once")
+        parked!!.resume(Unit)
+    }
 }

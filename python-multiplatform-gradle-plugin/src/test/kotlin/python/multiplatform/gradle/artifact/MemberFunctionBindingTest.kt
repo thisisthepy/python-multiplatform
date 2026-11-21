@@ -86,15 +86,39 @@ class MemberFunctionBindingTest {
     }
 
     @Test
-    fun aSuspendMemberIsDeclinedWithItsReason() {
-        val later = declarations().single { it.simpleName == "later" }
-        assertNull(later.bindingName)
-        assertEquals("suspend", later.declineReason)
+    fun aSuspendMemberIsBoundWithPendingCall() {
+        val laterDecl = declarations().single { it.simpleName == "later" }
+        assertEquals("$counter.later", laterDecl.bindingName)
+        assertTrue(laterDecl.isSuspend)
+        val later = callables().single { it.name == "$counter.later" }
+        assertEquals("METHOD", later.kind)
+        assertTrue(later.isSuspend)
+        assertTrue("PendingCall.start" in later.lambdaBody, later.lambdaBody)
+        val rendered = renderArtifactFragmentSource(ArtifactFragment("SuspendMemberFragment", "fixture:artifactmember:1.0", listOf(later)))
+        assertTrue("isSuspend = true" in rendered, rendered)
     }
 
     @Test
-    fun aMemberOfAGenericClassIsDeclinedWithItsReason() {
-        val describe = declarations().single { it.simpleName == "describe" }
+    fun aMemberOfAnUnboundedOrBoundedGenericClassIsBound() {
+        val describe = declarations().single { it.owner == "fixture.artifactmember.Box" && it.simpleName == "describe" }
+        assertEquals("fixture.artifactmember.Box.describe", describe.bindingName)
+        val swap = callables().single { it.name == "fixture.artifactmember.Box.swap" }
+        assertEquals("METHOD", swap.kind)
+        assertTrue("fixture.artifactmember.Box<kotlin.Any?>" in swap.lambdaBody, swap.lambdaBody)
+
+        val replace = callables().single { it.name == "fixture.artifactmember.NumberBox.replace" }
+        assertEquals("METHOD", replace.kind)
+        assertTrue("fixture.artifactmember.NumberBox<kotlin.Number>" in replace.lambdaBody, replace.lambdaBody)
+        assertTrue("(args[1] as kotlin.Number)" in replace.lambdaBody, replace.lambdaBody)
+
+        val numberSetter = callables().single { it.name == "fixture.artifactmember.NumberBox.value=" }
+        assertEquals("SETTER", numberSetter.kind)
+        assertTrue("fixture.artifactmember.NumberBox<kotlin.Number>" in numberSetter.lambdaBody, numberSetter.lambdaBody)
+    }
+
+    @Test
+    fun aMemberOfAGenericClassWithAnUnsupportedBoundIsDeclinedWithItsReason() {
+        val describe = declarations().single { it.simpleName == "describeComparable" }
         assertNull(describe.bindingName)
         assertNotNull(describe.declineReason)
         assertTrue("generic" in describe.declineReason!!, describe.declineReason)

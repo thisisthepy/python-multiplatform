@@ -134,6 +134,15 @@ pythonBindings {
             // `Modifier` is an interface whose companion is itself a `Modifier` (issue #322): the
             // companion handle `Modifier.Companion` is what `WalkedArtifactCompanionHandleTest` reads.
             "androidx.compose.ui.Modifier",
+            // #164 items 4 and 5 (pythonx-concurrent SPEC S12): a real `CoroutineDispatcher` and
+            // `Job` held in Python as opaque handles and passed back to Kotlin, and a Python callable
+            // handed to `CoroutineDispatcher.dispatch` as the `Runnable` a dispatcher thread runs.
+            // kotlinx-coroutines-core is already on this classpath through Compose.
+            "kotlinx.coroutines.Dispatchers",
+            "kotlinx.coroutines.CoroutineDispatcher",
+            "kotlinx.coroutines.Job",
+            "kotlinx.coroutines.JobKt",
+            "kotlin.coroutines.EmptyCoroutineContext",
         ),
     )
 }

@@ -1,10 +1,16 @@
 package python.multiplatform.ffi.upcall
 
+import python.multiplatform.reflection.PlatformMutex
+import python.multiplatform.reflection.withLock
 import kotlin.coroutines.Continuation
 import kotlin.coroutines.CoroutineContext
+import kotlin.coroutines.EmptyCoroutineContext
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.coroutines.coroutineContext
 import kotlin.coroutines.startCoroutine
+
+/** What [PendingCall.onCancelled] returns when there is nothing to unregister. */
+private val NO_OP_DISPOSER: () -> Unit = {}
 
 /**
  * One Kotlin coroutine started from a frame that had to return without it, and the place its
@@ -33,28 +39,24 @@ import kotlin.coroutines.startCoroutine
  * exposed is the *user's*, and whatever dispatcher it uses is already on their classpath. Starting
  * it takes nothing more than the stdlib.
  *
- * ### No dispatcher, and the fast path that falls out of it
+ * ### Dispatcher and fast path
  *
- * The coroutine's context is this object and nothing else -- no dispatcher, no [Continuation]
- * interceptor of any kind (see [cancel] for why the context is not simply empty). So the body runs
- * on the calling thread until it actually suspends. So a
- * `suspend fun` that never reaches a real suspension point -- which is most of them, most of the
- * time -- is **already complete when [start] returns**, and the boundary can hand Python the real
- * value with no async convention involved at all. `PendingCallTest` pins that.
- *
- * The converse is the cost: the body's first slice runs inside the C frame, holding the GIL, so an
- * exposed `suspend fun` that does its blocking work *before* its first suspension point blocks the
- * interpreter exactly as a non-suspending one would. `suspend` is a signature, not a promise.
+ * When no `ContinuationInterceptor` is present in the caller-supplied [CoroutineContext], the
+ * body runs on the calling thread until it actually suspends: a `suspend fun` that never reaches
+ * a real suspension point is **already complete when [start] returns**, and the boundary hands
+ * Python the real value with no async convention involved. When a `ContinuationInterceptor` is
+ * supplied (SPEC U-5b), `startCoroutine` dispatches even the first slice onto the interceptor's
+ * thread without the GIL, so [start] returns with [isDone] false and [complete] runs on that
+ * thread.
  *
  * ### Threading
  *
- * Not synchronised, and it does not need to be **provided the rule the rest of the boundary
- * already lives under is kept**: every mutation happens on a thread holding the GIL
- * (`commonMain/README.md`, and [python.multiplatform.reflection.HandleTable]'s own threading
- * note). That is not an extra burden here -- a completion that wants to reach Python has to take
- * the GIL to do anything at all, so the scope it needs for that already covers this. What is *not*
- * safe is resuming an exposed call's continuation without one and expecting the fields below to be
- * visible to the next upcall; the GIL is the barrier.
+ * All four state transitions ([complete], [onCompleted], [cancel], [onCancelled]) and every
+ * state read are synchronised under [PlatformMutex]. Inside the lock, each transition atomically
+ * decides whether to deliver inline or register a listener; listeners are always invoked outside
+ * the lock so they cannot deadlock with re-entrant calls or concurrent threads. This holds both
+ * when a `ContinuationInterceptor` resumes on a non-GIL thread and on free-threaded (3.15t)
+ * builds where `withGIL` is not mutual exclusion.
  *
  * Nothing here allocates a handle. A `PendingCall` is an ordinary Kotlin object, so
  * [python.multiplatform.reflection.HandleTable] already gives it a generational handle and
@@ -69,17 +71,23 @@ class PendingCall private constructor() : CoroutineContext.Element {
      */
     override val key: CoroutineContext.Key<PendingCall> get() = PendingCall
 
+    private val mutex = PlatformMutex()
+
+    private var done: Boolean = false
+    private var resultValue: Any? = null
+    private var resultFailure: Throwable? = null
+    private var deliveryErr: Throwable? = null
+    private var cancellationErr: Throwable? = null
+    private var cancelled: Boolean = false
+
     /** True once the coroutine has finished, whether with a value or with a [failure]. */
-    var isDone: Boolean = false
-        private set
+    val isDone: Boolean get() = mutex.withLock { done }
 
     /** The result, or `null` -- which is also a legitimate result. Read [isDone] first. */
-    var value: Any? = null
-        private set
+    val value: Any? get() = mutex.withLock { resultValue }
 
     /** What the coroutine threw, or `null`. Never rethrown from here; see [start]. */
-    var failure: Throwable? = null
-        private set
+    val failure: Throwable? get() = mutex.withLock { resultFailure }
 
     /**
      * What the [onCompleted] listener threw, if it threw.
@@ -88,8 +96,14 @@ class PendingCall private constructor() : CoroutineContext.Element {
      * completing thread, which on the delivery path has C above it, and a Kotlin exception
      * crossing that frame terminates the process. A convention that cares can read this.
      */
-    var deliveryFailure: Throwable? = null
-        private set
+    val deliveryFailure: Throwable? get() = mutex.withLock { deliveryErr }
+
+    /**
+     * First exception thrown by an [onCancelled] listener, if any (SPEC U-5b; #164 item 1).
+     * Recorded here rather than propagated so a throwing cancellation listener never escapes into
+     * C or prevents remaining listeners from running.
+     */
+    val cancellationFailure: Throwable? get() = mutex.withLock { cancellationErr }
 
     /**
      * True once someone on the Python side has stopped waiting for this -- see [cancel].
@@ -97,10 +111,18 @@ class PendingCall private constructor() : CoroutineContext.Element {
      * Independent of [isDone]: a cancelled call is normally still running, and a call that
      * completes after being cancelled is both done and cancelled.
      */
-    var isCancelled: Boolean = false
-        private set
+    val isCancelled: Boolean get() = mutex.withLock { cancelled }
 
     private var listener: ((PendingCall) -> Unit)? = null
+
+    /**
+     * One [onCancelled] registration. A node rather than the bare action so the disposer removes
+     * exactly the registration it was returned for, by identity, even when the same lambda
+     * instance was registered twice.
+     */
+    private class CancelListener(val action: () -> Unit)
+
+    private var cancelListeners: MutableList<CancelListener>? = null
 
     /**
      * Records that whoever was waiting for this call has stopped, and returns whether that was news.
@@ -152,9 +174,82 @@ class PendingCall private constructor() : CoroutineContext.Element {
      *   completed (there was nothing left to stop) or was already cancelled.
      */
     fun cancel(): Boolean {
-        if (isDone || isCancelled) return false
-        isCancelled = true
+        var transitioned = false
+        val toNotify: List<CancelListener>? = mutex.withLock {
+            if (done || cancelled) {
+                null
+            } else {
+                cancelled = true
+                transitioned = true
+                val list = cancelListeners
+                cancelListeners = null
+                list
+            }
+        }
+        if (!transitioned) return false
+        if (toNotify != null) {
+            for (registration in toNotify) {
+                invokeCancelListener(registration.action)
+            }
+        }
         return true
+    }
+
+    /**
+     * Registers [action] to be called once when [cancel] transitions this call to cancelled, or
+     * immediately inline if [isCancelled] is already `true` (SPEC U-5b; #164 item 1).
+     * If [isDone] is already `true` (and not cancelled), registration is a no-op and [action] is
+     * dropped without running.
+     *
+     * @return a disposer that unregisters [action] again. Calling it after [cancel] ran, after the
+     *   call completed, more than once, or for a registration that ran inline is a no-op. A
+     *   registration whose reason has passed should be disposed: the call keeps every live
+     *   registration until it completes or is cancelled, and a long-running body that registers
+     *   one per step (an in-flight [python.multiplatform.ffi.pythonx.PythonSuspendFunction]
+     *   invocation per emission of a collect, say) would otherwise accumulate them for its whole
+     *   life and run every stale one on [cancel].
+     *
+     * ### Threading, GIL and exception contract
+     *
+     * [action] runs synchronously on whichever thread calls [cancel] (for Python `Future.cancel()`,
+     * that is the asyncio loop thread inside `_pm_cancel` with the GIL held), outside [mutex].
+     * Therefore [action] **must be non-blocking** (e.g. calling `job.cancel()` or setting a flag)
+     * and must never wait on another thread that needs the GIL. Any exception thrown by [action]
+     * is caught and recorded in [cancellationFailure] rather than escaping into C or aborting
+     * remaining listeners. The disposer only takes [mutex] and may be called from any thread; a
+     * disposer called while [cancel] is already running its snapshot of the listeners does not
+     * stop [action] from running that one time.
+     */
+    fun onCancelled(action: () -> Unit): () -> Unit {
+        var runNow = false
+        val registration: CancelListener? = mutex.withLock {
+            when {
+                cancelled -> {
+                    runNow = true
+                    null
+                }
+                done -> null
+                else -> {
+                    val list = cancelListeners ?: mutableListOf<CancelListener>().also { cancelListeners = it }
+                    CancelListener(action).also { list.add(it) }
+                }
+            }
+        }
+        if (runNow) invokeCancelListener(action)
+        if (registration == null) return NO_OP_DISPOSER
+        return {
+            mutex.withLock { cancelListeners?.remove(registration) }
+        }
+    }
+
+    private fun invokeCancelListener(action: () -> Unit) {
+        try {
+            action()
+        } catch (t: Throwable) {
+            mutex.withLock {
+                if (cancellationErr == null) cancellationErr = t
+            }
+        }
     }
 
     /**
@@ -168,22 +263,33 @@ class PendingCall private constructor() : CoroutineContext.Element {
      *   would strand it forever.
      */
     fun onCompleted(action: (PendingCall) -> Unit) {
-        if (isDone) {
-            deliver(action)
-            return
+        val runNow = mutex.withLock {
+            if (done) {
+                true
+            } else {
+                check(listener == null) { "this PendingCall already has a completion listener" }
+                listener = action
+                false
+            }
         }
-        check(listener == null) { "this PendingCall already has a completion listener" }
-        listener = action
+        if (runNow) deliver(action)
     }
 
     private fun complete(result: Result<Any?>) {
         // A Continuation cannot legitimately be resumed twice, but a second completion must not
         // overwrite the first one's outcome if a generator ever gets it wrong.
-        if (isDone) return
-        result.fold({ value = it }, { failure = it })
-        isDone = true
-        val waiting = listener
-        listener = null
+        val waiting: ((PendingCall) -> Unit)? = mutex.withLock {
+            if (done) {
+                null
+            } else {
+                result.fold({ resultValue = it }, { resultFailure = it })
+                done = true
+                cancelListeners = null
+                val w = listener
+                listener = null
+                w
+            }
+        }
         if (waiting != null) deliver(waiting)
     }
 
@@ -191,7 +297,7 @@ class PendingCall private constructor() : CoroutineContext.Element {
         try {
             action(this)
         } catch (t: Throwable) {
-            deliveryFailure = t
+            mutex.withLock { deliveryErr = t }
         }
     }
 
@@ -205,20 +311,34 @@ class PendingCall private constructor() : CoroutineContext.Element {
     companion object : CoroutineContext.Key<PendingCall> {
 
         /**
+         * Hook installed by [UpcallTrampoline] to read Python's ambient `CoroutineContext` while
+         * inside an attached upcall frame. Kept as a hook so [PendingCall] stays pure Kotlin with
+         * no dependency on `Python3` initialization.
+         */
+        internal var ambientContextProvider: (() -> CoroutineContext)? = null
+
+        /**
          * Starts [block] and returns immediately, complete or not.
          *
          * Nothing is thrown out of here. [block]'s own failure is parked in [failure] the same way
          * its value would be parked in [value], because the caller is a C frame with no unwinding
          * above it -- the same rule [UpcallTrampoline] states for itself.
          *
-         * The coroutine's context is the [PendingCall] itself rather than `EmptyCoroutineContext`,
-         * which is what makes [ensureActive] reachable from inside [block]. It adds no dispatcher
-         * and intercepts nothing, so the fast path this class exists for is untouched: an element
-         * that is not a `ContinuationInterceptor` cannot change where the body runs.
+         * When called inside an attached upcall frame (`UpcallTrampoline`), this overload reads
+         * Python's ambient `CoroutineContext` via [ambientContextProvider]; direct Kotlin callers
+         * outside an upcall (or inside `withoutGIL`) receive [EmptyCoroutineContext] and should
+         * pass an explicit context to the two-argument overload when needed.
          */
-        fun start(block: suspend () -> Any?): PendingCall {
+        fun start(block: suspend () -> Any?): PendingCall =
+            start(ambientContextProvider?.invoke() ?: EmptyCoroutineContext, block)
+
+        /**
+         * Starts [block] with `context + call` as its [CoroutineContext] and returns immediately,
+         * complete or not (SPEC U-5b; #164 item 1).
+         */
+        fun start(context: CoroutineContext, block: suspend () -> Any?): PendingCall {
             val call = PendingCall()
-            val completion = Continuation<Any?>(call) { result -> call.complete(result) }
+            val completion = Continuation<Any?>(context + call) { result -> call.complete(result) }
             try {
                 block.startCoroutine(completion)
             } catch (t: Throwable) {

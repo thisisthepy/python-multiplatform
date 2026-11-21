@@ -2399,4 +2399,404 @@ static inline int tpa_int_list_set_i64(tpa_int_list *l, int64_t i, int64_t v)
     return 0;
 }
 
+/* ------------------------------------------------------------------------------------------
+ * Bitwise, shift, power, float-to-int, math.floor/ceil/trunc, string literal int (Tier K PR5)
+ * ------------------------------------------------------------------------------------------ */
+
+static inline int tpa_int_invert(tpa_int a, tpa_int *out)
+{
+    tpa_int tmp = TPA_INT_ZERO;
+    if (tpa_int_is_small(a)) {
+        *out = tpa_int_small(~tpa_int_small_value(a));
+        return 0;
+    }
+    if (tpa_int_add(a, tpa_int_small(1), &tmp) != 0) {
+        return -1;
+    }
+    if (tpa_int_neg(tmp, out) != 0) {
+        tpa_int_release(tmp);
+        return -1;
+    }
+    tpa_int_release(tmp);
+    return 0;
+}
+
+/* Extract magnitude limbs and sign for any tpa_int into a caller-supplied 2-word scratch if small. */
+static inline const uint32_t *tpa_int__limbs(tpa_int a, uint32_t scratch[2], size_t *n_out, int *neg_out)
+{
+    if (tpa_int_is_small(a)) {
+        int64_t v = tpa_int_small_value(a);
+        uint64_t m;
+        if (v == 0) {
+            *n_out = 0;
+            *neg_out = 0;
+            return scratch;
+        }
+        *neg_out = v < 0 ? 1 : 0;
+        m = v < 0 ? 0 - (uint64_t)v : (uint64_t)v;
+        scratch[0] = (uint32_t)m;
+        scratch[1] = (uint32_t)(m >> 32);
+        *n_out = scratch[1] != 0 ? 2 : 1;
+        return scratch;
+    }
+    else {
+        tpa_big *b = tpa_int__big(a);
+        *n_out = b->n;
+        *neg_out = b->neg ? 1 : 0;
+        return b->d;
+    }
+}
+
+static TPA_UNUSED int tpa_int_lshift(tpa_int a, tpa_int b, tpa_int *out)
+{
+    uint32_t ascr[2];
+    size_t an, word_shift, new_n, i;
+    int aneg;
+    const uint32_t *ad;
+    int64_t shift_i64;
+    uint64_t shift;
+    unsigned bit_shift;
+    tpa_big *res;
+
+    if (tpa_int_cmp_i64(b, 0) < 0) {
+        return tpa_raise(TPA_ValueError, "negative shift count");
+    }
+    if (a == TPA_INT_ZERO) {
+        *out = TPA_INT_ZERO;
+        return 0;
+    }
+    if (b == TPA_INT_ZERO) {
+        tpa_int_retain(a);
+        *out = a;
+        return 0;
+    }
+    if (tpa_int_to_i64(b, &shift_i64) != 0 || shift_i64 < 0) {
+        return tpa_raise(TPA_OverflowError, "Python int too large to convert to C ssize_t");
+    }
+    shift = (uint64_t)shift_i64;
+    if (tpa_int_is_small(a) && shift < 62) {
+        int64_t va = tpa_int_small_value(a);
+        uint64_t mag = va < 0 ? 0 - (uint64_t)va : (uint64_t)va;
+        if (mag <= (0x3FFFFFFFFFFFFFFFULL >> shift)) {
+            uint64_t sm = mag << shift;
+            *out = tpa_int_small(va < 0 ? (int64_t)(0 - sm) : (int64_t)sm);
+            return 0;
+        }
+    }
+    ad = tpa_int__limbs(a, ascr, &an, &aneg);
+    if (shift / 32 > TPA_INT__MAX_LIMBS) {
+        return tpa_raise(TPA_MemoryError, "");
+    }
+    word_shift = (size_t)(shift / 32);
+    bit_shift = (unsigned)(shift % 32);
+    if (an > TPA_INT__MAX_LIMBS - word_shift - (bit_shift ? 1u : 0u)) {
+        return tpa_raise(TPA_MemoryError, "");
+    }
+    new_n = an + word_shift + (bit_shift ? 1u : 0u);
+    res = tpa_int__alloc(new_n);
+    if (res == NULL) {
+        return -1;
+    }
+    for (i = 0; i < word_shift; i++) {
+        res->d[i] = 0;
+    }
+    if (bit_shift == 0) {
+        for (i = 0; i < an; i++) {
+            res->d[word_shift + i] = ad[i];
+        }
+    }
+    else {
+        uint32_t carry = 0;
+        for (i = 0; i < an; i++) {
+            uint64_t w = ((uint64_t)ad[i] << bit_shift) | carry;
+            res->d[word_shift + i] = (uint32_t)w;
+            carry = (uint32_t)(w >> 32);
+        }
+        res->d[word_shift + an] = carry;
+    }
+    *out = tpa_int__finish(res, aneg);
+    return 0;
+}
+
+static TPA_UNUSED int tpa_int_rshift(tpa_int a, tpa_int b, tpa_int *out)
+{
+    uint32_t ascr[2];
+    size_t an, word_shift, new_n, i;
+    int aneg;
+    const uint32_t *ad;
+    int64_t shift_i64;
+    uint64_t shift;
+    unsigned bit_shift;
+    tpa_big *res;
+
+    if (tpa_int_cmp_i64(b, 0) < 0) {
+        return tpa_raise(TPA_ValueError, "negative shift count");
+    }
+    if (a == TPA_INT_ZERO) {
+        *out = TPA_INT_ZERO;
+        return 0;
+    }
+    if (b == TPA_INT_ZERO) {
+        tpa_int_retain(a);
+        *out = a;
+        return 0;
+    }
+    if (tpa_int_to_i64(b, &shift_i64) != 0 || shift_i64 < 0) {
+        *out = tpa_int_small(tpa_int_cmp_i64(a, 0) < 0 ? -1 : 0);
+        return 0;
+    }
+    shift = (uint64_t)shift_i64;
+    if (tpa_int_is_small(a)) {
+        int64_t va = tpa_int_small_value(a);
+        if (shift >= 64) {
+            *out = tpa_int_small(va < 0 ? -1 : 0);
+        }
+        else if (va >= 0) {
+            *out = tpa_int_small((int64_t)((uint64_t)va >> (unsigned)shift));
+        }
+        else {
+            *out = tpa_int_small((int64_t)(~((~(uint64_t)va) >> (unsigned)shift)));
+        }
+        return 0;
+    }
+    /* Negative big int: a >> b == ~((~a) >> b) */
+    if (tpa_int__big(a)->neg) {
+        tpa_int na = TPA_INT_ZERO, sr = TPA_INT_ZERO;
+        if (tpa_int_invert(a, &na) != 0) {
+            return -1;
+        }
+        if (tpa_int_rshift(na, b, &sr) != 0) {
+            tpa_int_release(na);
+            return -1;
+        }
+        tpa_int_release(na);
+        if (tpa_int_invert(sr, out) != 0) {
+            tpa_int_release(sr);
+            return -1;
+        }
+        tpa_int_release(sr);
+        return 0;
+    }
+    ad = tpa_int__limbs(a, ascr, &an, &aneg);
+    if (shift / 32 >= an) {
+        *out = TPA_INT_ZERO;
+        return 0;
+    }
+    word_shift = (size_t)(shift / 32);
+    bit_shift = (unsigned)(shift % 32);
+    new_n = an - word_shift;
+    res = tpa_int__alloc(new_n);
+    if (res == NULL) {
+        return -1;
+    }
+    if (bit_shift == 0) {
+        for (i = 0; i < new_n; i++) {
+            res->d[i] = ad[word_shift + i];
+        }
+    }
+    else {
+        for (i = 0; i < new_n; i++) {
+            uint32_t lo = ad[word_shift + i] >> bit_shift;
+            uint32_t hi = (word_shift + i + 1 < an) ? (ad[word_shift + i + 1] << (32 - bit_shift)) : 0;
+            res->d[i] = lo | hi;
+        }
+    }
+    *out = tpa_int__finish(res, 0);
+    return 0;
+}
+
+/* op: 0 = &, 1 = |, 2 = ^ */
+static TPA_UNUSED int tpa_int__bitwise(tpa_int a, tpa_int b, int op, tpa_int *out)
+{
+    uint32_t ascr[2], bscr[2];
+    size_t an, bn, n, i;
+    int aneg, bneg, rneg;
+    const uint32_t *ad, *bd;
+    uint32_t acarry, bcarry, rcarry;
+    tpa_big *res;
+
+    if (tpa_int_is_small(a) && tpa_int_is_small(b)) {
+        int64_t va = tpa_int_small_value(a);
+        int64_t vb = tpa_int_small_value(b);
+        int64_t vr = (op == 0) ? (va & vb) : (op == 1 ? (va | vb) : (va ^ vb));
+        *out = tpa_int_small(vr);
+        return 0;
+    }
+    ad = tpa_int__limbs(a, ascr, &an, &aneg);
+    bd = tpa_int__limbs(b, bscr, &bn, &bneg);
+    n = an > bn ? an : bn;
+    rneg = (op == 0) ? (aneg & bneg) : (op == 1 ? (aneg | bneg) : (aneg ^ bneg));
+    res = tpa_int__alloc(n + 1);
+    if (res == NULL) {
+        return -1;
+    }
+    acarry = aneg ? 1u : 0u;
+    bcarry = bneg ? 1u : 0u;
+    rcarry = rneg ? 1u : 0u;
+    for (i = 0; i < n; i++) {
+        uint32_t aw = i < an ? ad[i] : 0u;
+        uint32_t bw = i < bn ? bd[i] : 0u;
+        uint32_t rw;
+        if (aneg) {
+            uint64_t t = (uint64_t)(~aw) + acarry;
+            aw = (uint32_t)t;
+            acarry = (uint32_t)(t >> 32);
+        }
+        if (bneg) {
+            uint64_t t = (uint64_t)(~bw) + bcarry;
+            bw = (uint32_t)t;
+            bcarry = (uint32_t)(t >> 32);
+        }
+        rw = (op == 0) ? (aw & bw) : (op == 1 ? (aw | bw) : (aw ^ bw));
+        if (rneg) {
+            uint64_t t = (uint64_t)(~rw) + rcarry;
+            rw = (uint32_t)t;
+            rcarry = (uint32_t)(t >> 32);
+        }
+        res->d[i] = rw;
+    }
+    res->d[n] = rneg ? rcarry : 0u;
+    *out = tpa_int__finish(res, rneg);
+    return 0;
+}
+
+static inline int tpa_int_and(tpa_int a, tpa_int b, tpa_int *out) { return tpa_int__bitwise(a, b, 0, out); }
+static inline int tpa_int_or(tpa_int a, tpa_int b, tpa_int *out) { return tpa_int__bitwise(a, b, 1, out); }
+static inline int tpa_int_xor(tpa_int a, tpa_int b, tpa_int *out) { return tpa_int__bitwise(a, b, 2, out); }
+
+static TPA_UNUSED int tpa_int_pow(tpa_int a, tpa_int b, tpa_int *out)
+{
+    int64_t exp_i64;
+    uint64_t e;
+    tpa_int base = TPA_INT_ZERO, acc = TPA_INT_ZERO;
+
+    if (tpa_int_cmp_i64(b, 0) < 0) {
+        if (a == TPA_INT_ZERO) {
+            return tpa_raise(TPA_ZeroDivisionError, "0.0 cannot be raised to a negative power");
+        }
+        return tpa_raise(TPA_ValueError, "negative exponent in integer power");
+    }
+    if (b == TPA_INT_ZERO || tpa_int_cmp_i64(a, 1) == 0) {
+        *out = tpa_int_small(1);
+        return 0;
+    }
+    if (a == TPA_INT_ZERO) {
+        *out = TPA_INT_ZERO;
+        return 0;
+    }
+    if (tpa_int_cmp_i64(a, -1) == 0) {
+        uint32_t bscr[2];
+        size_t bn;
+        int bneg;
+        const uint32_t *bd = tpa_int__limbs(b, bscr, &bn, &bneg);
+        *out = tpa_int_small((bn > 0 && (bd[0] & 1u)) ? -1 : 1);
+        return 0;
+    }
+    if (tpa_int_to_i64(b, &exp_i64) != 0 || exp_i64 < 0) {
+        return tpa_raise(TPA_MemoryError, "");
+    }
+    e = (uint64_t)exp_i64;
+    tpa_int_retain(a);
+    base = a;
+    acc = tpa_int_small(1);
+    while (e > 0) {
+        if (e & 1u) {
+            tpa_int next = TPA_INT_ZERO;
+            if (tpa_int_mul(acc, base, &next) != 0) {
+                tpa_int_release(acc);
+                tpa_int_release(base);
+                return -1;
+            }
+            tpa_int_release(acc);
+            acc = next;
+        }
+        e >>= 1;
+        if (e > 0) {
+            tpa_int sq = TPA_INT_ZERO;
+            if (tpa_int_mul(base, base, &sq) != 0) {
+                tpa_int_release(acc);
+                tpa_int_release(base);
+                return -1;
+            }
+            tpa_int_release(base);
+            base = sq;
+        }
+    }
+    tpa_int_release(base);
+    *out = acc;
+    return 0;
+}
+
+/* Exact IEEE-754 double to tpa_int (truncates toward zero, matching CPython PyLong_FromDouble). */
+static TPA_UNUSED int tpa_int_from_f64(double x, tpa_int *out)
+{
+    double t, m;
+    int exp, neg;
+    uint64_t sig;
+    tpa_int s = TPA_INT_ZERO, sh = TPA_INT_ZERO;
+
+    if (isnan(x)) {
+        return tpa_raise(TPA_ValueError, "cannot convert float NaN to integer");
+    }
+    if (isinf(x)) {
+        return tpa_raise(TPA_OverflowError, "cannot convert float infinity to integer");
+    }
+    t = trunc(x);
+    if (t >= -4611686018427387904.0 && t < 4611686018427387904.0) {
+        *out = tpa_int_small((int64_t)t);
+        return 0;
+    }
+    neg = t < 0.0;
+    m = frexp(fabs(t), &exp);
+    sig = (uint64_t)ldexp(m, 53);
+    if (tpa_int__from_mag64(sig, neg, &s) != 0) {
+        return -1;
+    }
+    if (exp <= 53) {
+        *out = s;
+        return 0;
+    }
+    sh = tpa_int_small((int64_t)(exp - 53));
+    if (tpa_int_lshift(s, sh, out) != 0) {
+        tpa_int_release(s);
+        return -1;
+    }
+    tpa_int_release(s);
+    return 0;
+}
+
+static inline int tpa_math_floor(double x, tpa_int *out) { return tpa_int_from_f64(floor(x), out); }
+static inline int tpa_math_ceil(double x, tpa_int *out) { return tpa_int_from_f64(ceil(x), out); }
+static inline int tpa_math_trunc(double x, tpa_int *out) { return tpa_int_from_f64(trunc(x), out); }
+
+/* Parse a UTF-8 string literal as a Python base-10 int (matching int("...")). */
+static TPA_UNUSED int tpa_int_parse_literal(const char *bytes, size_t n, tpa_int *out)
+{
+    int rc = tpa_int_from_str(bytes, n, out);
+    if (rc == TPA_INT_NOT_HANDLED) {
+        uint32_t *cps = (uint32_t *)malloc((n + 1) * sizeof(uint32_t));
+        size_t m;
+        if (cps == NULL) {
+            return tpa_raise(TPA_MemoryError, "");
+        }
+        m = tpa_int__argv_decode(bytes, n, cps);
+        rc = tpa_int__raise_invalid(cps, m);
+        free(cps);
+        return rc;
+    }
+    return rc;
+}
+
+#if !defined(TPA_LIBRARY)
+static inline void tpa_exit_int(tpa_int code)
+{
+    /* the status is read before the exit hook runs a collection, which may free what `code` borrows from */
+    int64_t v = 0;
+    if (tpa_int_to_i64(code, &v) == 0) {
+        tpa_exit_status((int)(v & 0xff));
+    }
+    tpa_exit_status(255);
+}
+#endif
+
 #endif /* TP_AOT_INT_H */
