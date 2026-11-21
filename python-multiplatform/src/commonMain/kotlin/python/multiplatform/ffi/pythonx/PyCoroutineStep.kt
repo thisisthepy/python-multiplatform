@@ -131,7 +131,13 @@ internal object PyCoroutineStepper {
         }
     }
 
-    /** `builtins.StopIteration`, a new reference kept like [contextType]. First read under the GIL, from [run]. */
+    /**
+     * `builtins.StopIteration`, a new reference kept like [contextType]. First read under the GIL,
+     * from [run], and read there **before** the coroutine is called: the first resolution imports
+     * `builtins`, and an import with the error indicator set (the `StopIteration` the step just
+     * produced) fails and surfaces that very exception as a [PyException]. Run 44894364653 showed
+     * exactly that: every first `Returned` outcome in a process reported as `PyException: <value>`.
+     */
     private val stopIterationType: NativePointer by lazy {
         val module = PyImport_ImportModule("builtins") ?: throw pyErrorOrGeneric("builtins is unreachable")
         try {
@@ -142,6 +148,10 @@ internal object PyCoroutineStepper {
     }
 
     fun run(target: PyObject, method: String, argument: PyObject?, context: PyObject?): PyStep = withGIL {
+        // Both cached types are resolved here, with the indicator clear, never after the call
+        // (see [stopIterationType]).
+        val contextTypePointer = contextType
+        val stopIterationTypePointer = stopIterationType
         // Refusals first, with nothing of the coroutine's touched. The attribute lookup is the test
         // for "has this method": a coroutine, a generator and an async generator all answer it, and
         // the error a missing one leaves is cleared here, not reported.
@@ -152,7 +162,7 @@ internal object PyCoroutineStepper {
             )
         }
         try {
-            if (context != null && PyObject_IsInstance(context.pointer, contextType) != 1) {
+            if (context != null && PyObject_IsInstance(context.pointer, contextTypePointer) != 1) {
                 PyErr_Clear()
                 throw IllegalArgumentException(
                     "the context of a step must be a contextvars.Context, not ${context.Type.name}",
@@ -175,7 +185,7 @@ internal object PyCoroutineStepper {
 
             // StopIteration: the coroutine returned. The instance comes off the indicator as a new
             // reference, its `value` is read as another, and the instance itself is released here.
-            if (PyErr_ExceptionMatches(stopIterationType) != 0) {
+            if (PyErr_ExceptionMatches(stopIterationTypePointer) != 0) {
                 val stop = PyErr_GetRaisedException()
                     ?: return@withGIL PyStep.Returned(PyObject(PyNone.get().pointer, borrowed = true))
                 try {
