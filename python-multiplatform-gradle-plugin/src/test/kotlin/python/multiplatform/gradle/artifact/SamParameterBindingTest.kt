@@ -124,4 +124,23 @@ class SamParameterBindingTest {
             accept.lambdaBody,
         )
     }
+    /**
+     * #164 item 4: a `java.*` parameter type is nameable although no walked jar holds its class file;
+     * it is read from the JDK running the walk. Red before: `cancelWith` was declined ("not nameable"),
+     * which is how `kotlinx.coroutines.Job.cancel` was missing from Python.
+     */
+    @Test
+    fun aJdkClassParameterSpelledThroughATypealiasIsBound() {
+        val cancel = callables().single { it.name == "$pkg.cancelWith" }
+        assertEquals(listOf("java.util.concurrent.CancellationException"), cancel.paramTypeNames)
+        assertTrue("as java.util.concurrent.CancellationException?" in cancel.lambdaBody, cancel.lambdaBody)
+    }
+
+    /** The JDK fallback is `java/` only: a `javax.*` parameter is still declined. Passes before and after. */
+    @Test
+    fun aJavaxClassParameterStaysDeclined() {
+        assertTrue(callables().none { it.name == "$pkg.takeJavaxName" })
+        val declined = declarations().single { it.simpleName == "takeJavaxName" }
+        assertTrue(declined.declineReason != null, "takeJavaxName should be declined")
+    }
 }

@@ -1,0 +1,115 @@
+package fixture.artifact
+
+import python.multiplatform.ffi.Python3
+import python.multiplatform.ffi.pythonx.PythonCallables
+import python.multiplatform.ffi.pythonx.PythonxAdapter
+import python.multiplatform.ffi.upcall.PythonProxySource
+import python.multiplatform.ffi.upcall.UpcallBootstrap
+import python.multiplatform.generated.FunctionTable
+import python.multiplatform.generated.artifacts.ArtifactTable
+import python.multiplatform.reflection.UpcallTable
+import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
+import kotlin.test.Test
+
+/**
+ * #164 items 4 and 5 (pythonx-concurrent SPEC S12), end to end on the real `kotlinx-coroutines-core`
+ * jar walked by the artefact walker (this fixture's `artifactIncludePackages`), with no hand-written
+ * table:
+ *
+ * - item 4, opaque Kotlin objects as arguments: a `CoroutineDispatcher` and `Job`s are held in Python
+ *   as handles and passed back into Kotlin parameters (`Job(parent)`, `dispatch(context, ...)`,
+ *   `isDispatchNeeded(context)`), and `Job.cancel()` reaches the same Kotlin object;
+ * - item 5, a Python callable as a Kotlin `Runnable` invoked from any Kotlin thread: a Python
+ *   callable fills `CoroutineDispatcher.dispatch`'s `block: Runnable`, and the dispatcher's own
+ *   worker threads run it after `dispatch` has returned, with the binder attaching each thread
+ *   (`PythonFunction.invoke` runs under `withGIL`). The callable is held by the open
+ *   [PythonCallables] scope (SPEC U-5a's lifetime rule), so each test keeps its scope open until every
+ *   callback has run.
+ *
+ * Red before: `Job.cancel` did not exist (the walker declined `cancel(cause: CancellationException? =
+ * null)` because `java.util.concurrent.CancellationException` is in no walked jar), and before this
+ * fixture walked `kotlinx.coroutines` none of these names existed in Python.
+ */
+class WalkedArtifactCoroutinesTest {
+
+    @BeforeTest
+    fun installBothProducers() {
+        Python3.initialize(silent = true)
+        UpcallTable.clear()
+        UpcallTable.install(FunctionTable.fragments + ArtifactTable.fragments)
+        check(UpcallBootstrap.publishToGlobals()) { "UpcallBootstrap.publishToGlobals() failed" }
+        PythonProxySource.install()
+        PythonxAdapter.install(PYTHONX_RAW_VALUE_CLASSES)
+    }
+
+    @AfterTest
+    fun cleanup() {
+        UpcallTable.clear()
+    }
+
+    @Test
+    fun aDispatcherAndJobsCrossBackIntoKotlinAsTheSameObjects() {
+        Python3.exec(
+            """
+            from kotlinx.coroutines import Dispatchers, Job
+            _parent = Job()
+            _child = Job(_parent)
+            assert _child.parent == _parent, 'Job(parent) did not receive the parent handle: ' + repr(_child.parent)
+            assert Dispatchers.Default.isDispatchNeeded(_parent) is True
+            assert not _child.isCancelled
+            _parent.cancel()
+            assert _parent.isCancelled, 'Job.cancel() did not reach the Kotlin Job'
+            assert _child.isCancelled, 'cancelling the parent handle did not cancel the child made from it'
+            """.trimIndent(),
+        )
+    }
+
+    @Test
+    fun aPythonCallableRunsAsTheRunnableOfADispatcherWorkerThread() {
+        PythonCallables.withScope(PythonCallables.newScope()) {
+            Python3.exec(
+                """
+                import threading
+                from kotlinx.coroutines import Dispatchers, Job
+                _done = threading.Event()
+                _seen = []
+                def _body():
+                    _seen.append(threading.get_ident())
+                    _done.set()
+                Dispatchers.Default.dispatch(Job(), _body)
+                assert _done.wait(30), 'the dispatcher never ran the Python callable'
+                assert _seen[0] != threading.get_ident(), 'the callable ran on the calling thread, not a worker'
+                """.trimIndent(),
+            )
+        }
+    }
+
+    @Test
+    fun manyPythonCallablesRunConcurrentlyOnDefaultAndIoWorkers() {
+        PythonCallables.withScope(PythonCallables.newScope()) {
+            Python3.exec(
+                """
+                import threading
+                from kotlinx.coroutines import Dispatchers, Job
+                _n = 400
+                _lock = threading.Lock()
+                _all = threading.Event()
+                _count = [0]
+                _threads = set()
+                def _body():
+                    with _lock:
+                        _count[0] += 1
+                        _threads.add(threading.get_ident())
+                        if _count[0] == _n:
+                            _all.set()
+                _ctx = Job()
+                for i in range(_n):
+                    (Dispatchers.Default if i % 2 == 0 else Dispatchers.IO).dispatch(_ctx, _body)
+                assert _all.wait(60), 'only %d of %d callables ran' % (_count[0], _n)
+                assert threading.get_ident() not in _threads
+                """.trimIndent(),
+            )
+        }
+    }
+}

@@ -887,6 +887,22 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `PM/desktopTest/.../pythonx/PythonCallablesConcurrencyTest.kt`
   (`twoThreadsOpeningScopesConcurrentlyKeepTheirOwnStacks`, `aThreadWithNoScopeSeesNoneWhileAnotherHasOneOpen`,
   `concurrentAddAndReuseAgainstCloseReleasesEveryRootOnce`).
+- **B-5b** (#164 items 4 and 5, pythonx-concurrent SPEC S12) Opaque Kotlin objects and dispatcher
+  callbacks. A Kotlin object a walked declaration returns (a `kotlinx.coroutines.CoroutineDispatcher`
+  such as `Dispatchers.Default`, a `Job`) is a handle in Python and fills any parameter of its type or a
+  supertype (`Job(parent)`, `dispatch(context, block)` with a `Job` as the `CoroutineContext`), reaching
+  the same Kotlin object (`Job.cancel()` from Python cancels it and its children). A parameter type
+  that expands to a `java.*` class (through a typealias, as `kotlinx.coroutines.CancellationException`
+  does in `Job.cancel(cause: CancellationException? = null)`) is nameable: the class file is read from
+  the JDK the walk runs on, since no walked jar holds it; `javax.*`, `jdk.*` and `sun.*` stay declined.
+  A Python callable passed as the `Runnable` of `CoroutineDispatcher.dispatch` runs on the
+  dispatcher's own threads after `dispatch` returns; the binder attaches each thread for the call
+  (B-5a's scope rule applies: the callable lives while its scope is open). Not provided: a plain Kotlin
+  `object` (such as `kotlin.coroutines.EmptyCoroutineContext`) as a value; only companions are values
+  (U-4), so a caller passes a `Job` or a dispatcher where a `CoroutineContext` is needed.
+  `Status: draft` (until its CI run) on desktop (walker), `GP/artifact/SamParameterBindingTest.kt`
+  (`aJdkClassParameterSpelledThroughATypealiasIsBound`, `aJavaxClassParameterStaysDeclined`),
+  `python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactCoroutinesTest.kt`.
 - **B-6** `@Composable` functions are callable from Python inside a composition; a Python click reaches
   a Kotlin callback and the redraw shows it. `Status: implemented` on desktop,
   `python-multiplatform-compose/fixtures/compose/src/desktopTest/` (`ComposableRenderTest.kt`, `M3ProofRenderTest.kt`,
