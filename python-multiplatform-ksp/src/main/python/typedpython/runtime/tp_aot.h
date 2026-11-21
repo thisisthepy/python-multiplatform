@@ -1878,6 +1878,121 @@ static inline void tpa_region_reset(tpa_region *r)
     c->used = 0;
 }
 
+/* Deferred frees of the generated class releases (review of #508, F1; CPython's trashcan has the same job). A
+ * release that frees an object releases its fields, and a field of a class type is released by a call: a chain of
+ * n objects through a field that is not the release loop's tail field recursed n deep and overflowed the C stack
+ * (a 500k-node chain). Every release of a class that has a field of a class type now counts its nesting depth:
+ * below TPA_TRASH_LIMIT it frees at once, exactly as before; at the limit it parks the object (its count already
+ * zero, already untracked) with the class's drop function on a thread-local list, and the outermost release
+ * drains the list when its depth returns to zero, each drop starting again from depth 1. So no release nests more
+ * than TPA_TRASH_LIMIT deep, whatever the shape of the chain or the classes it alternates between. Only the order
+ * of frees changes, beyond the limit; AOT compiles no `__del__` and a freed object is unreachable, so the order is
+ * not observable. When the list cannot grow (out of memory) the object is freed at once, as before. */
+#ifndef TPA_TRASH_LIMIT
+#define TPA_TRASH_LIMIT 1000
+#endif
+
+typedef void (*tpa_trash_fn)(void *obj);
+
+typedef struct tpa_trash_item {
+    void *obj;
+    tpa_trash_fn drop;
+} tpa_trash_item;
+
+typedef struct tpa_trash_state {
+    int64_t depth;                  /* releases of trash-aware classes in flight on this thread */
+    tpa_trash_item *items;          /* parked objects, LIFO */
+    size_t len;
+    size_t cap;
+#if defined(TPA_TRASH_STATS)
+    int64_t max_depth;              /* tests only: the deepest nesting reached, and the objects parked */
+    int64_t parked;
+    int registered;
+#endif
+} tpa_trash_state;
+
+#if defined(TPA_THREADS)
+static TPA_THREAD_LOCAL tpa_trash_state tpa_trash;
+#else
+static tpa_trash_state tpa_trash;
+#endif
+
+#if defined(TPA_TRASH_STATS)
+/* Tests only (-DTPA_TRASH_STATS): the nesting the bound allowed, printed at exit, so a test checks the depth itself
+ * instead of relying on a stack overflow, whose size differs between platforms (review of #513's first CI run). */
+static void tpa_trash__report(void)
+{
+    fflush(stdout);
+    fprintf(stderr, "tpa_trash: max_depth=%lld parked=%lld\n", (long long)tpa_trash.max_depth,
+            (long long)tpa_trash.parked);
+    fflush(stderr);
+}
+#endif
+
+/* Called by a release once the count reached zero: 1 to free now (the caller frees the fields and the object,
+ * then calls tpa_trash_leave), 0 when the object was parked (the caller returns at once). */
+static inline int tpa_trash_enter(void *obj, tpa_trash_fn drop) TPA_UNUSED;
+static inline int tpa_trash_enter(void *obj, tpa_trash_fn drop)
+{
+    tpa_trash_state *t = &tpa_trash;
+#if defined(TPA_TRASH_STATS)
+    if (!t->registered) {
+        t->registered = 1;
+        atexit(tpa_trash__report);
+    }
+#endif
+    if (t->depth >= TPA_TRASH_LIMIT) {
+        if (t->len == t->cap) {
+            size_t cap = t->cap != 0 ? t->cap * 2 : 64;
+            tpa_trash_item *items = (tpa_trash_item *)realloc(t->items, cap * sizeof *items);
+            if (items != NULL) {
+                t->items = items;
+                t->cap = cap;
+            }
+        }
+        if (t->len < t->cap) {
+            t->items[t->len].obj = obj;
+            t->items[t->len].drop = drop;
+            t->len += 1;
+#if defined(TPA_TRASH_STATS)
+            t->parked += 1;
+#endif
+            return 0;
+        }
+    }
+    t->depth += 1;
+#if defined(TPA_TRASH_STATS)
+    if (t->depth > t->max_depth) {
+        t->max_depth = t->depth;
+    }
+#endif
+    return 1;
+}
+
+static void tpa_trash__drain(tpa_trash_state *t) TPA_UNUSED;
+static void tpa_trash__drain(tpa_trash_state *t)
+{
+    t->depth = 1;                   /* a drop's own releases nest from here; none of them drains again */
+    while (t->len > 0) {
+        tpa_trash_item it = t->items[--t->len];
+        it.drop(it.obj);
+    }
+    t->depth = 0;
+    free(t->items);
+    t->items = NULL;
+    t->cap = 0;
+}
+
+static inline void tpa_trash_leave(void) TPA_UNUSED;
+static inline void tpa_trash_leave(void)
+{
+    tpa_trash_state *t = &tpa_trash;
+    t->depth -= 1;
+    if (t->depth == 0 && t->len > 0) {
+        tpa_trash__drain(t);
+    }
+}
+
 /* The objects of a region of one type: `TPA_REGION_FOREACH(T, obj, region) { ... }` runs the statement for every
  * object the region holds, in allocation order inside a chunk (the chunks newest first). The generated
  * `tpa_reg_<F>__<C>_drop` uses it to release the owned heap references of every object before a free or a reset. */
@@ -1889,7 +2004,9 @@ static inline void tpa_region_reset(tpa_region *r)
 #if !defined(TPA_LIBRARY)
 /* Run once by `sys.exit` before `exit()` (REVIEW-503 note 2): the generated `main` sets it to `tpa_gc_exit` when
  * the program links the cycle collector, so the cycles alive at `sys.exit` are collected as they are when
- * `__main__` returns (CPython collects at shutdown on both paths). NULL in every other program. */
+ * `__main__` returns (CPython collects at shutdown on both paths). NULL in every other program. Read and
+ * cleared without synchronisation: `sys.exit` runs only on the main thread today (AOT has no parallel loops and
+ * the library build refuses `sys.exit`; review of #508, F4). */
 static void (*tpa_exit_hook)(void);
 
 static inline void tpa_exit_status(int status)
