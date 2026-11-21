@@ -622,7 +622,18 @@ matches CPython.
      the amortised cost per allocation constant; `-DTPA_GC_STRESS` collects at every safepoint and
      `-DTPA_GC_STATS` prints the counts at exit (tests only). One more collection runs after `__main__`
      returns, when every frame has released its locals and only cycles can remain (CPython's shutdown
-     collection; it keeps LeakSanitizer quiet). Under `TPA_THREADS` the collector's state is thread-local:
+     collection; it keeps LeakSanitizer quiet), and the same collection runs on the `sys.exit` path:
+     `tpa_exit_status` (`runtime/tp_aot.h`) calls `tpa_exit_hook` once before `exit()`, and the generated
+     `main` of a program that links the collector sets it to `tpa_gc_exit` (review of #503, note 2). There
+     the frames still hold their locals; those are counted, so they are roots and stay, and nothing reads
+     an object afterwards; `tpa_exit_int` reads the status before the hook runs. Step 4 holds every garbage
+     object by one extra count before it clears any of them, then drops the extra counts (review of #503,
+     note 3): a clear's release of a garbage referent then only decrements it, so no release cascades from
+     one garbage object into the next and a long garbage chain through a field that is not the release
+     loop's tail field is cleared in constant C stack depth (CPython's `delete_garbage` uses the trashcan
+     for the same reason). A garbage object is referenced only by garbage (a reference from an untracked or
+     reachable object makes it a root), so after every clear its count is the extra one alone and the
+     drop frees it; `-DTP_CHECK_PROVEN` turns the opposite case into a fatal error. Under `TPA_THREADS` the collector's state is thread-local:
      a tracked object is touched only by the thread that created it (`aot/library-mutable-class` keeps
      mutable classes, transitively, out of the library boundary; AOT has no mutable globals), so one
      thread's collection never sees another thread's objects. Tier T's shared objects (section 7) must add

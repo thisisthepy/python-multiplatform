@@ -3197,8 +3197,16 @@ static Py_ssize_t tp_trace_frame_reads_count = 0;
 #define TP_TRACE_FRAME_READ() ((void)0)
 #endif
 
-/* Python frame depth of the running thread: public API only. The walk is O(depth), so it is
- * cached by the identity of the top frame (kept alive while compiled frames are in flight). */
+/* Python frame depth of the running thread: public API only. The walk is O(depth), so it is cached
+ * by the identity of a frame. Only a measurement with no compiled frame in flight (`count == 0`: the
+ * first check of the outermost compiled call) stores the cache: its top frame is below every compiled
+ * frame, so it outlives the cache, which tp_leave_call / tp_depth_done drop when `count` is 0 again,
+ * and holding it never makes a frame object outlive its frame. A measurement with compiled frames in
+ * flight (a nested compiled call from a callback g) walks from the top down to the cached frame and
+ * stores nothing: caching g's frame object would keep it alive after g returned, and then the frame
+ * object takes g's locals (`take_ownership`, Python/frame.c) and they die late (#125, design 4.3.3b,
+ * difference (2), fixed). The walk stops at the cached frame, so its length is the Python frames above
+ * the outermost compiled call, not the whole stack; with no cached frame it walks to the bottom. */
 static inline Py_ssize_t tp_python_depth(PyThreadState *ts, tp_tls *t)
 {
     TP_TRACE_FRAME_READ();
@@ -3210,19 +3218,30 @@ static inline Py_ssize_t tp_python_depth(PyThreadState *ts, tp_tls *t)
         Py_DECREF(top);
         return t->depth.pydepth;
     }
+    int outermost = t->depth.count == 0;
+    PyObject *anchor = outermost ? NULL : t->depth.frame;
     Py_ssize_t depth = 0;
     PyFrameObject *cur = top;
-    Py_INCREF(cur);
+    if (outermost) {
+        Py_INCREF(cur);                     /* the reference from GetFrame goes to the cache */
+    }
     while (cur != NULL) {
+        if ((PyObject *)cur == anchor) {
+            depth += t->depth.pydepth;
+            Py_DECREF(cur);
+            break;
+        }
         depth++;
         PyFrameObject *back = PyFrame_GetBack(cur);
         Py_DECREF(cur);
         cur = back;
     }
-    PyObject *old = t->depth.frame;
-    t->depth.frame = (PyObject *)top;       /* takes the reference from GetFrame */
-    t->depth.pydepth = depth;
-    Py_XDECREF(old);
+    if (outermost) {
+        PyObject *old = t->depth.frame;
+        t->depth.frame = (PyObject *)top;
+        t->depth.pydepth = depth;
+        Py_XDECREF(old);
+    }
     return depth;
 }
 
@@ -3236,8 +3255,7 @@ static inline Py_ssize_t tp_python_depth(PyThreadState *ts, tp_tls *t)
  * return there, with the frame cache in exactly the state it would leave. The wrapper resets `seg`
  * right before its impl call (a nested wrapper must not take the outer segment's depth) and right
  * after it (the outer segment then measures again at its next check, where it measured before
- * segments existed: the cached frame, and so the lifetime of a returned callee's frame object, is
- * unchanged). Not moved, per frame as before: Py_GetRecursionLimit (a __del__ or a callback can call
+ * segments existed). Not moved, per frame as before: Py_GetRecursionLimit (a __del__ or a callback can call
  * sys.setrecursionlimit between two frames) and Py_EnterRecursiveCall (the C-stack guard compares
  * this frame's stack address). Thread-local like `count`; both assume calls nest in LIFO order on a
  * thread's C stack. */
@@ -3252,13 +3270,26 @@ static inline Py_ssize_t tp_seg_depth(PyThreadState *ts, tp_tls *t)
 static inline void tp_depth_seg_begin(tp_tls *t) { t->depth.seg = -1; }
 static inline void tp_depth_seg_end(tp_tls *t) { t->depth.seg = -1; }
 
+/* A refused entry counts nothing, so no tp_leave_call follows it: the outermost one (count 0) drops the
+ * frame its check cached, which would otherwise keep the caller's frame object (and, after the caller
+ * returns, its locals) alive until a later compiled call on this thread (#125). The caller is still
+ * running, so this decref frees nothing. */
+static inline void tp_enter_failed(tp_tls *t)
+{
+    if (t->depth.count == 0) {
+        Py_CLEAR(t->depth.frame);
+    }
+}
+
 static inline int tp_enter_call(PyThreadState *ts, tp_tls *t)
 {
     if (tp_seg_depth(ts, t) + t->depth.count + 1 > Py_GetRecursionLimit()) {
         PyErr_SetString(PyExc_RecursionError, "maximum recursion depth exceeded");
+        tp_enter_failed(t);
         return -1;
     }
     if (Py_EnterRecursiveCall(" in compiled code")) {
+        tp_enter_failed(t);
         return -1;
     }
     t->depth.count++;

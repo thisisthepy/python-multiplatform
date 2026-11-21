@@ -1169,7 +1169,15 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   (direct and mutual recursion) are compiled: every compiled function counts its frame (`tp_enter_call` /
   `tp_leave_call`, added to the Python frame depth and compared with `sys.getrecursionlimit()`), so recursion
   past the limit raises `RecursionError('maximum recursion depth exceeded')` where CPython does, and a C-stack
-  guard keeps the process alive at any limit (#57). Compiled loops check the eval breaker so signals
+  guard keeps the process alive at any limit (#57). The depth check holds a strong reference only to the
+  Python frame below the outermost compiled call (which outlives it), never to a callback's frame, so no
+  frame's locals outlive its return (#125). **Known difference** (#125, recorded with the leader's OK of
+  2026-11-21, not owner-confirmed): a pure-Python frame running above compiled frames (a callback, or code
+  it calls) is checked by the interpreter's own counter, which does not count the compiled frames below
+  it, so a recursion of Python frames from a callback reaches `RecursionError` up to that many frames later
+  than in the interpreter. CPython 3.15 has no public API that adds frames to the interpreter's counter
+  (`py_recursion_remaining` is a private field of the thread state), so this cannot be fixed with the
+  public API only. Compiled loops check the eval breaker so signals
   (`KeyboardInterrupt`), pending calls and GIL hand-off reach Python during long compiled work (#141): a
   `while` loop counts down once per iteration; a `for ... in range(...)` loop, whose trip count is known,
   runs in chunks of `TP_POLL_INTERVAL` iterations and polls once per chunk (#206), with `break`,
@@ -1682,13 +1690,18 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     freed with the region. The collector is CPython's trial deletion over the list of every tracked
     object alive: `gc_refs = rc` less one per reference from a tracked object's field to a tracked
     object; an object with `gc_refs > 0` is a root and what it reaches is kept; the rest is cleared (every
-    owned field released, lists and big ints included) and freed; the pass repeats while it freed
+    owned field released, lists and big ints included) and freed, every garbage object held by one extra
+    count until all of them are cleared, so a clear never frees another garbage object and the C stack
+    depth of a collection does not grow with the length of a garbage chain (a 500k-node ring linked
+    through a field the release loop does not follow; review of #503, note 3); the pass repeats while it freed
     something, because a reference from an untracked object that garbage owns is a root in the pass that
     frees that object, and the tracked cycle it held is garbage only for the next pass (a cycle held
     through an untracked object is reclaimed by the same collection, and the exit collection leaves
     nothing). It runs only at a safepoint: inside
     `tpa_cls_<C>_new` of a cyclic-capable class, before the allocation, when every constructor argument is
-    held by the caller, and once after `__main__` returns, when no frame holds anything. At a safepoint
+    held by the caller, and once at the end of the program: after `__main__` returns, when no frame holds
+    anything, and on the `sys.exit` path before `exit()` (the frames' counted locals stay alive; the
+    status is unchanged; review of #503, note 2). At a safepoint
     no cyclic-capable object is kept alive solely by an uncounted reference: PR-O1's elision rules (3) and
     (4) are off for every field of a cyclic-capable class (`field_elidable`), and references from region
     objects, virtual objects, untracked objects, locals and temporaries are counted and never
