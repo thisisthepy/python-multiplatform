@@ -1076,9 +1076,13 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `Versions.abiFlags` (`t` or empty) and every name derived from it (`libpython3.15t`, `lib/python3.15t/`,
   `libmultiplatform_python3.15t.so`) follow it. On the GIL platform Kotlin threads attach a thread state
   and serialise on the GIL.
-  `Status: partial` (desktop observed; Android, androidNative and iOS are compiled against 3.15t but
-  have not been run on an emulator, device or simulator in this revision; CI jobs for that, owner-approved
-  2026-11-21, await their first run: `android-native.yml` `emulator` (x86_64, API 34) and `ios.yml` `ios-consumer`, #328),
+  `Status: implemented` on desktop, Android and iOS (CI run 44889681538, 2026-11-21: the Android x86_64
+  emulator, API 34, ran the instrumented suite on 3.15t, 539 tests, 0 failed, `AndroidFreeThreadedBuildTest`
+  among them; the iOS simulator ran the library suite on 3.15t, 513 tests, 0 failed, `IosFreeThreadedBuildTest`
+  among them, and the plugin-staged `ios-consumer` app printed `IOS_CONSUMER_PROBE stdlib=ok ext=ok payload=ok
+  ft=ok`; jobs `android-native.yml` `emulator` and `ios.yml` `ios-consumer`, owner-approved 2026-11-21, #328);
+  `partial` on androidNative (compiled against 3.15t, its `artTest` not run on a device or emulator) and
+  wasm (GIL build until #175),
   `PM/desktopTest/.../DesktopFreeThreadedBuildTest.kt` (ABI flags, `Py_GIL_DISABLED` of the loaded
   interpreter, checkpoint default), `PM/desktopNativeTest/.../DesktopNativeFreeThreadedBuildTest.kt`,
   `PM/androidInstrumentedTest/.../AndroidFreeThreadedBuildTest.kt` (ABI flags, stdlib path, the AAR's
@@ -1114,7 +1118,8 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `libpython3.15t.so` and `assets/<abi>/lib/python3.15t/` into the AAR for arm64-v8a and x86_64; iOS
   compiles and links against the 3.15t `Python.xcframework` and gives the simulator test binary
   `lib/python3.15t/`. python.org's and BeeWare's GIL mobile archives are no longer acquired.
-  `Status: partial` (compiled; not run on an emulator, device or simulator in this revision).
+  `Status: implemented` for Android (x86_64 emulator) and iOS (simulator), CI run 44889681538 (see T-1);
+  arm64-v8a and androidNative are compiled and packaged but not run on a device in CI.
 - **T-2a** Free-threaded CPython on mobile through the Gradle plugin (#328 step 1; owner decision #158 of
   2026-10-04, "Free-threaded is the default and the only build", baseline 3.15t; leader decision of
   2026-11-13 on #328: no opt-in `pythonBindings.ios.freeThreaded` flag, 3.15t is the only build). There
