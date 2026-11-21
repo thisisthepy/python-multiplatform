@@ -279,7 +279,7 @@ internal object ArtifactScanner {
         val (properties, rest) = entries.partition { it.declaration.kind in PROPERTY_KINDS }
         val (methods, functions) = rest.partition { it.declaration.kind == METHOD_KIND }
         val settledFunctions = assignThunkIndices(disambiguateOverloads(applyDefaultOmission(dropCollidingConstructors(functions))))
-        val settledMethods = settleMethodNames(disambiguateOverloads(methods), settledFunctions)
+        val settledMethods = settleMethodNames(disambiguateOverloads(applyDefaultOmission(methods)), settledFunctions)
         return (settledFunctions + settledMethods + settlePropertyNames(properties, settledFunctions + settledMethods))
             // The ancestry the binding carries is the model's too (issue #31): copied at the end, from the
             // callable that was actually bound, so the two cannot be read differently.
@@ -969,6 +969,14 @@ internal object ArtifactScanner {
         /** The receiver as generated source reads it out of `args[0]`. */
         val read: String,
         private val model: KotlinTypeModel,
+        /**
+         * Every method name the class's supertypes declare, on the walk's classpath. A member whose
+         * name is among them gets no default omission: a call that leaves arguments out could resolve
+         * against an inherited overload too (`Overload resolution ambiguity`), which the sibling test of
+         * [applyDefaultOmission] cannot see, since it compares members of one receiver only. An
+         * override is among them too, and it declares no default of its own anyway.
+         */
+        val inheritedMethodNames: Set<String>,
     ) {
         /** [declaration] as a `METHOD`: read off a receiver of [owner], every argument passed. */
         fun restate(declaration: DeclarationModel): DeclarationModel = declaration.copy(
@@ -1003,6 +1011,24 @@ internal object ArtifactScanner {
      * shares its name with a property of the class, because Python has one attribute for both and the
      * property (#38) keeps it.
      */
+    /** The method names declared by every supertype of [node] the classpath has, `java.lang.Object` excluded. */
+    private fun inheritedMethodNamesOf(node: ClassNode, classpath: ArtifactClasspath): Set<String> {
+        val names = HashSet<String>()
+        val seen = HashSet<String>()
+        val pending = ArrayDeque<ClassNode>()
+        pending.addLast(node)
+        while (pending.isNotEmpty()) {
+            val current = pending.removeFirst()
+            (listOfNotNull(current.superName) + current.interfaces.orEmpty()).forEach { parentName ->
+                if (parentName == "java/lang/Object" || !seen.add(parentName)) return@forEach
+                val parent = classpath.classNode(parentName) ?: return@forEach
+                parent.methods.orEmpty().mapTo(names) { it.name }
+                pending.addLast(parent)
+            }
+        }
+        return names
+    }
+
     private fun memberFunctionCandidates(
         kmClass: kotlin.metadata.KmClass,
         ownerNode: ClassNode,
@@ -1043,7 +1069,7 @@ internal object ArtifactScanner {
         } else {
             receiverBoundary.boundary.read("args[0]")
         }
-        val member = MemberReceiver(owner, receiverRead, receiverModel)
+        val member = MemberReceiver(owner, receiverRead, receiverModel, inheritedMethodNamesOf(ownerNode, classpath))
         val receiverDecline = classpath.unreachableSupertypeOf(ownerNode.name)
             ?.let { missing -> unreachableReceiverReason(missing, owner) }
         val propertyNames = kmClass.properties.mapTo(HashSet()) { it.name }
@@ -2675,9 +2701,13 @@ internal object ArtifactScanner {
             kind = if (member != null) METHOD_KIND else "FUNCTION",
             isSuspend = function.isSuspend,
         )
-        // A member's defaults are not omittable yet (issue #215): no plan, so Python passes every
-        // argument and the stub says so.
-        val omittable = if (member != null) emptySet() else omittableParameterIndices(function, receiverIndex)
+        // A member's defaults are omittable like a function's (#164 item 4: `Job.cancel()`), unless a
+        // supertype declares a method of the same name (see `MemberReceiver.inheritedMethodNames`).
+        val omittable = if (member != null && function.kotlinName in member.inheritedMethodNames) {
+            emptySet()
+        } else {
+            omittableParameterIndices(function, receiverIndex)
+        }
         val modelParameters = model.parameters.mapIndexed { index, parameter ->
             functionSlots[index + receiverIndex]?.modelType?.let { parameter.copy(type = it) } ?: parameter
         }
@@ -2699,6 +2729,7 @@ internal object ArtifactScanner {
                     val branched = presenceBranchedCall(
                         function, owner, alias, argumentExpressions, receiverIndex,
                         qualifiedName, omittable.sorted(), call, allowed,
+                        memberRead = member?.read, argumentOffset = firstArgument,
                     )
                     "{ args -> ${returnType.wrapReturn(branched)} }"
                 },
@@ -2876,7 +2907,7 @@ internal object ArtifactScanner {
      * applicability. `ArtifactCallable.paramHasDefault` is the binding's view and is not it -- at
      * this point in the walk it is still all `false` for everyone. */
     private fun DefaultOmissionPlan.siblingDeclares(sibling: Candidate, index: Int): Boolean {
-        val receiverIndex = if (sibling.callable?.receiverTypeName != null) 1 else 0
+        val receiverIndex = if (sibling.callable?.receiverTypeName != null && sibling.callable?.kind == "FUNCTION") 1 else 0
         return sibling.declaration.parameters.getOrNull(index - receiverIndex)?.declaresDefault ?: false
     }
 
@@ -2906,10 +2937,14 @@ internal object ArtifactScanner {
         ordered: List<Int>,
         allPresentCall: String,
         allowed: Set<Set<Int>>,
+        /** A member's receiver read (`(args[0] as Owner)`), or `null` for a function. */
+        memberRead: String? = null,
+        /** Where parameter 0 sits in `args`: 1 for a member, whose receiver is `args[0]`. */
+        argumentOffset: Int = 0,
     ): String {
         val names = function.allParameterNames
         val subject = ordered.mapIndexed { bit, index ->
-            "(if (args[$index] == null) ${1 shl bit} else 0)"
+            "(if (args[${index + argumentOffset}] == null) ${1 shl bit} else 0)"
         }.joinToString(" + ")
 
         fun callOmitting(omitted: Set<Int>): String {
@@ -2917,8 +2952,11 @@ internal object ArtifactScanner {
                 .filter { it >= receiverIndex && it !in omitted }
                 .joinToString(", ") { "${writeParameterName(names[it])} = ${argumentExpressions[it]}" }
             val typeArguments = typeArgumentsOf(function)
-            return if (function.isExtension) "${argumentExpressions.first()}.$alias$typeArguments($arguments)"
-            else "$owner.${function.kotlinName}$typeArguments($arguments)"
+            return when {
+                memberRead != null -> "$memberRead.${function.kotlinName}$typeArguments($arguments)"
+                function.isExtension -> "${argumentExpressions.first()}.$alias$typeArguments($arguments)"
+                else -> "$owner.${function.kotlinName}$typeArguments($arguments)"
+            }
         }
 
         val last = (1 shl ordered.size) - 1

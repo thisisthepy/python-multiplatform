@@ -78,11 +78,36 @@ class MemberFunctionBindingTest {
         assertEquals(listOf("$counter.add__Int", "$counter.add__Int_String"), bound)
     }
 
+    /**
+     * A member's default is omittable as a function's is (SPEC B-5b, #164 item 4: `Job.cancel()`).
+     * Red before: `memberFunctionCandidates` built no omission plan for a member, so `paramHasDefault`
+     * was `[false]` and Python's `job.cancel()` failed with "no value for cause".
+     */
     @Test
-    fun aMembersDefaultIsNotOmittableYet() {
+    fun aMembersDefaultIsOmittable() {
         val scaled = callables().single { it.name == "$counter.scaled" }
-        assertEquals(listOf(false), scaled.paramHasDefault)
-        assertFalse(declarations().single { it.bindingName == "$counter.scaled" }.parameters.single().declaresDefault)
+        assertEquals(listOf(true), scaled.paramHasDefault)
+        assertTrue(declarations().single { it.bindingName == "$counter.scaled" }.parameters.single().declaresDefault)
+        // The sentinel test reads the argument's slot, which follows the receiver's `args[0]`.
+        assertTrue("args[1] == null" in scaled.lambdaBody, scaled.lambdaBody)
+        assertTrue("(args[0] as $counter).scaled()" in scaled.lambdaBody, scaled.lambdaBody)
+    }
+
+    @Test
+    fun anInterfaceMembersDefaultIsOmittable() {
+        val stop = callables().single { it.name == "fixture.artifactmember.Stoppable.stop" }
+        assertEquals(listOf(true), stop.paramHasDefault)
+        assertTrue("(args[0] as fixture.artifactmember.Stoppable).stop()" in stop.lambdaBody, stop.lambdaBody)
+    }
+
+    /** A call leaving `label` out could resolve against the inherited `ping(times = 1)` as well. */
+    @Test
+    fun aMemberWhoseNameASupertypeDeclaresKeepsEveryArgument() {
+        val derived = callables().single { it.name == "fixture.artifactmember.DerivedPing.ping" }
+        assertEquals(listOf(false), derived.paramHasDefault)
+        assertFalse("== null" in derived.lambdaBody, derived.lambdaBody)
+        val base = callables().single { it.name == "fixture.artifactmember.BasePing.ping" }
+        assertEquals(listOf(true), base.paramHasDefault, "the base class's own member has no inherited twin")
     }
 
     @Test

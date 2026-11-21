@@ -62,10 +62,9 @@ class WalkedArtifactCoroutinesTest {
             assert _child.parent == _parent, 'Job(parent) did not receive the parent handle: ' + repr(_child.parent)
             assert Dispatchers.Default.isDispatchNeeded(_parent) is True
             assert not _child.isCancelled
-            # `cause` is written: a member function's defaults are not omittable yet (#215), so
-            # `cancel()` with no argument is refused with "no value for cause".
-            _parent.cancel(None)
-            assert _parent.isCancelled, 'Job.cancel(None) did not reach the Kotlin Job'
+            # `cancel(cause: CancellationException? = null)`: a member's default is omittable (B-5b).
+            _parent.cancel()
+            assert _parent.isCancelled, 'Job.cancel() did not reach the Kotlin Job'
             assert _child.isCancelled, 'cancelling the parent handle did not cancel the child made from it'
             """.trimIndent(),
         )
