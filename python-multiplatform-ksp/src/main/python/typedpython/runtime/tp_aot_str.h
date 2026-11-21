@@ -766,4 +766,529 @@ static TPA_UNUSED void tpa_str_write_err(tpa_str *s)
     tpa_str__write(s, stderr, 0);
 }
 
+
+/* Is c one of the code points of `set`? (strip's `chars`) */
+static TPA_UNUSED int tpa_str__has(tpa_str *set, uint32_t c)
+{
+    int64_t i;
+    for (i = 0; i < set->len; i++) {
+        if (tpa_str_at(set, i) == c) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* ------------------------------------------------------------------------------------------
+ * Tier S1b: the minimal list of str (what `split` and `join` need: a display, indexing, len, iteration, repr). A
+ * counted object that owns one reference to each element; it never changes length in S1b (growth is tier S2,
+ * which generalises this type). Same header order as tpa_i64_list: the count, then the length.
+ * ------------------------------------------------------------------------------------------ */
+typedef struct tpa_str_list {
+    tpa_rc_t rc;
+    int64_t len;
+    tpa_str *d[];
+} tpa_str_list;
+
+static TPA_UNUSED int tpa_str_list__alloc(int64_t n, tpa_str_list **out)
+{
+    tpa_str_list *l;
+    if (n < 0 || n > (INT64_MAX - (int64_t)sizeof(tpa_str_list)) / (int64_t)sizeof(tpa_str *)) {
+        return tpa_raise(TPA_MemoryError, "");
+    }
+    l = (tpa_str_list *)calloc(1, sizeof(tpa_str_list) + (size_t)n * sizeof(tpa_str *));
+    if (l == NULL) {
+        return tpa_raise(TPA_MemoryError, "");
+    }
+    l->rc = 1;
+    l->len = n;
+    *out = l;
+    return 0;
+}
+
+static inline void tpa_str_list_retain(tpa_str_list *l)
+{
+    if (l != NULL) {
+        TPA_RC_INC(l);
+    }
+}
+
+static TPA_UNUSED void tpa_str_list_release(tpa_str_list *l)
+{
+    int64_t i;
+    if (l != NULL && TPA_RC_DEC_IS_ZERO(l)) {
+        for (i = 0; i < l->len; i++) {
+            tpa_str_release(l->d[i]);
+        }
+        free(l);
+    }
+}
+
+static inline void tpa_str_list_set(tpa_str_list **slot, tpa_str_list *v)
+{
+    tpa_str_list_retain(v);
+    tpa_str_list_release(*slot);
+    *slot = v;
+}
+
+static inline void tpa_str_list_clear(tpa_str_list **slot)
+{
+    tpa_str_list_release(*slot);
+    *slot = NULL;
+}
+
+/* [parts[0], ..., parts[n-1]] (borrowed parts: each is retained). */
+static TPA_UNUSED int tpa_str_list_from(tpa_str *const *parts, int64_t n, tpa_str_list **out)
+{
+    int64_t i;
+    if (tpa_str_list__alloc(n, out)) {
+        return -1;
+    }
+    for (i = 0; i < n; i++) {
+        tpa_str_retain(parts[i]);
+        (*out)->d[i] = parts[i];
+    }
+    return 0;
+}
+
+/* l[i]: a new reference (list semantics: negative from the end, IndexError("list index out of range")). */
+static TPA_UNUSED int tpa_str_list_get(tpa_str_list *l, int64_t i, tpa_str **out)
+{
+    int64_t slot;
+    if (tpa_slot(l->len, i, 0, &slot)) {
+        return -1;
+    }
+    tpa_str_retain(l->d[slot]);
+    *out = l->d[slot];
+    return 0;
+}
+
+/* A growing list while split builds its result (a private buffer, not a value). */
+typedef struct {
+    tpa_str **d;
+    int64_t n, cap;
+} tpa_str__acc;
+
+static int tpa_str__acc_push(tpa_str__acc *a, tpa_str *s)       /* takes the reference s */
+{
+    if (a->n == a->cap) {
+        int64_t cap = a->cap ? a->cap * 2 : 8;
+        tpa_str **d = (tpa_str **)realloc(a->d, (size_t)cap * sizeof(tpa_str *));
+        if (d == NULL) {
+            tpa_str_release(s);
+            return tpa_raise(TPA_MemoryError, "");
+        }
+        a->d = d;
+        a->cap = cap;
+    }
+    a->d[a->n++] = s;
+    return 0;
+}
+
+static int tpa_str__acc_slice(tpa_str__acc *a, tpa_str *s, int64_t lo, int64_t hi)
+{
+    tpa_str *piece = NULL;
+    if (tpa_str_slice(s, lo, hi, 1, TPA_SLICE_START | TPA_SLICE_STOP, &piece)) {
+        return -1;
+    }
+    return tpa_str__acc_push(a, piece);
+}
+
+static int tpa_str__acc_finish(tpa_str__acc *a, int rc, tpa_str_list **out)
+{
+    int64_t i;
+    if (rc == 0 && tpa_str_list__alloc(a->n, out) == 0) {
+        for (i = 0; i < a->n; i++) {
+            (*out)->d[i] = a->d[i];             /* the list takes each reference */
+        }
+        free(a->d);
+        return 0;
+    }
+    for (i = 0; i < a->n; i++) {
+        tpa_str_release(a->d[i]);
+    }
+    free(a->d);
+    return -1;
+}
+
+/* repr(l): "['a', 'b']", each element's repr. */
+static TPA_UNUSED int tpa_str_list_repr(tpa_str_list *l, tpa_str **out)
+{
+    int64_t i, k = 0, n = l->len == 0 ? 1 : 2 * l->len + 1;
+    tpa_str **parts = (tpa_str **)calloc((size_t)n + 1, sizeof(tpa_str *));
+    int rc = 0;
+    if (parts == NULL) {
+        return tpa_raise(TPA_MemoryError, "");
+    }
+    parts[k++] = &tpa_str__latin1['['].h;
+    for (i = 0; i < l->len && rc == 0; i++) {
+        if (i > 0) {
+            rc = tpa_str_from_ascii(", ", 2, &parts[k++]);
+        }
+        if (rc == 0) {
+            rc = tpa_str_repr(l->d[i], &parts[k++]);
+        }
+    }
+    parts[k++] = &tpa_str__latin1[']'].h;
+    if (rc == 0) {
+        rc = tpa_str_join(parts, (size_t)k, out);
+    }
+    for (i = 0; i < k; i++) {
+        tpa_str_release(parts[i]);
+    }
+    free(parts);
+    return rc;
+}
+
+/* sep.join(l). */
+static TPA_UNUSED int tpa_str_join_list(tpa_str *sep, tpa_str_list *l, tpa_str **out)
+{
+    int64_t i, k = 0;
+    int rc;
+    tpa_str **parts;
+    if (l->len == 0) {
+        *out = &tpa_str__empty;
+        return 0;
+    }
+    if (l->len == 1) {
+        tpa_str_retain(l->d[0]);
+        *out = l->d[0];
+        return 0;
+    }
+    parts = (tpa_str **)malloc((size_t)(2 * l->len) * sizeof(tpa_str *));
+    if (parts == NULL) {
+        return tpa_raise(TPA_MemoryError, "");
+    }
+    for (i = 0; i < l->len; i++) {
+        if (i > 0) {
+            parts[k++] = sep;
+        }
+        parts[k++] = l->d[i];
+    }
+    rc = tpa_str_join(parts, (size_t)k, out);
+    free(parts);
+    return rc;
+}
+
+/* s.split(sep[, maxsplit]) with a str separator (stringlib split): ValueError("empty separator"). */
+static TPA_UNUSED int tpa_str_split_sep(tpa_str *s, tpa_str *sep, int64_t maxsplit, tpa_str_list **out)
+{
+    tpa_str__acc a = {NULL, 0, 0};
+    int64_t i = 0, rc = 0;
+    if (sep->len == 0) {
+        return tpa_raise(TPA_ValueError, "empty separator");
+    }
+    if (maxsplit < 0) {
+        maxsplit = INT64_MAX;
+    }
+    while (maxsplit-- > 0 && rc == 0) {
+        int64_t pos = -1, j, m;
+        for (j = i; j + sep->len <= s->len; j++) {
+            for (m = 0; m < sep->len && tpa_str_at(s, j + m) == tpa_str_at(sep, m); m++) {
+            }
+            if (m == sep->len) {
+                pos = j;
+                break;
+            }
+        }
+        if (pos < 0) {
+            break;
+        }
+        rc = tpa_str__acc_slice(&a, s, i, pos);
+        i = pos + sep->len;
+    }
+    if (rc == 0) {
+        rc = tpa_str__acc_slice(&a, s, i, s->len);
+    }
+    return tpa_str__acc_finish(&a, (int)rc, out);
+}
+
+#if defined(TPA_UCD_SPACE)
+static inline int tpa_str__space(uint32_t c) { return tpa_ucd_isspace(c); }
+
+/* s.split() / s.split(None, maxsplit) (stringlib split_whitespace). */
+static TPA_UNUSED int tpa_str_split_ws(tpa_str *s, int64_t maxsplit, tpa_str_list **out)
+{
+    tpa_str__acc a = {NULL, 0, 0};
+    int64_t i = 0, j, len = s->len;
+    int rc = 0;
+    if (maxsplit < 0) {
+        maxsplit = INT64_MAX;
+    }
+    while (maxsplit-- > 0 && rc == 0) {
+        while (i < len && tpa_str__space(tpa_str_at(s, i))) {
+            i++;
+        }
+        if (i == len) {
+            break;
+        }
+        j = i;
+        i++;
+        while (i < len && !tpa_str__space(tpa_str_at(s, i))) {
+            i++;
+        }
+        rc = tpa_str__acc_slice(&a, s, j, i);
+    }
+    if (rc == 0 && i < len) {
+        while (i < len && tpa_str__space(tpa_str_at(s, i))) {
+            i++;
+        }
+        if (i != len) {
+            rc = tpa_str__acc_slice(&a, s, i, len);
+        }
+    }
+    return tpa_str__acc_finish(&a, rc, out);
+}
+#endif
+
+/* strip / lstrip / rstrip of the code points of `chars` (`how`: 1 left, 2 right, 3 both). */
+static TPA_UNUSED int tpa_str_strip(tpa_str *s, tpa_str *chars, int how, tpa_str **out)
+{
+    int64_t lo = 0, hi = s->len;
+#define TPA__STRIPPED(c) tpa_str__has(chars, (c))
+    if (how & 1) {
+        while (lo < hi && TPA__STRIPPED(tpa_str_at(s, lo))) {
+            lo++;
+        }
+    }
+    if (how & 2) {
+        while (hi > lo && TPA__STRIPPED(tpa_str_at(s, hi - 1))) {
+            hi--;
+        }
+    }
+#undef TPA__STRIPPED
+    return tpa_str_slice(s, lo, hi, 1, TPA_SLICE_START | TPA_SLICE_STOP, out);
+}
+
+#if defined(TPA_UCD_SPACE)
+/* strip() / lstrip() / rstrip() (and with chars None): the whitespace of str.isspace. */
+static TPA_UNUSED int tpa_str_strip_ws(tpa_str *s, int how, tpa_str **out)
+{
+    int64_t lo = 0, hi = s->len;
+    if (how & 1) {
+        while (lo < hi && tpa_ucd_isspace(tpa_str_at(s, lo))) {
+            lo++;
+        }
+    }
+    if (how & 2) {
+        while (hi > lo && tpa_ucd_isspace(tpa_str_at(s, hi - 1))) {
+            hi--;
+        }
+    }
+    return tpa_str_slice(s, lo, hi, 1, TPA_SLICE_START | TPA_SLICE_STOP, out);
+}
+#endif
+
+static TPA_UNUSED int tpa_str_startswith(tpa_str *s, tpa_str *p)
+{
+    int64_t i;
+    if (p->len > s->len) {
+        return 0;
+    }
+    for (i = 0; i < p->len; i++) {
+        if (tpa_str_at(s, i) != tpa_str_at(p, i)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static TPA_UNUSED int tpa_str_endswith(tpa_str *s, tpa_str *p)
+{
+    int64_t i, off = s->len - p->len;
+    if (off < 0) {
+        return 0;
+    }
+    for (i = 0; i < p->len; i++) {
+        if (tpa_str_at(s, off + i) != tpa_str_at(p, i)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* A code point buffer while a result is built (replace, lower, upper); tpa_str_from_cps normalises the kind. */
+typedef struct {
+    uint32_t *d;
+    int64_t n, cap;
+} tpa_str__cps;
+
+static int tpa_str__cps_put(tpa_str__cps *b, uint32_t c)
+{
+    if (b->n == b->cap) {
+        int64_t cap = b->cap ? b->cap * 2 : 64;
+        uint32_t *d = (uint32_t *)realloc(b->d, (size_t)cap * sizeof(uint32_t));
+        if (d == NULL) {
+            return tpa_raise(TPA_MemoryError, "");
+        }
+        b->d = d;
+        b->cap = cap;
+    }
+    b->d[b->n++] = c;
+    return 0;
+}
+
+static int tpa_str__cps_str(tpa_str__cps *b, tpa_str *s, int64_t lo, int64_t hi)
+{
+    int64_t i;
+    for (i = lo; i < hi; i++) {
+        if (tpa_str__cps_put(b, tpa_str_at(s, i))) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int tpa_str__cps_done(tpa_str__cps *b, int rc, tpa_str **out)
+{
+    if (rc == 0) {
+        rc = tpa_str_from_cps(b->d, (size_t)b->n, out);
+    }
+    free(b->d);
+    return rc;
+}
+
+/* s.replace(old, new[, count]) (CPython's replace: an empty `old` inserts `new` before every code point and at the
+ * end, up to `count` times; a negative count is no limit; a count of 0 is s). */
+static TPA_UNUSED int tpa_str_replace(tpa_str *s, tpa_str *old, tpa_str *new_, int64_t count, tpa_str **out)
+{
+    tpa_str__cps b = {NULL, 0, 0};
+    int64_t i = 0, done = 0;
+    int rc = 0;
+    if (count < 0) {
+        count = INT64_MAX;
+    }
+    if (count == 0) {
+        tpa_str_retain(s);
+        *out = s;
+        return 0;
+    }
+    if (old->len == 0) {
+        for (i = 0; i <= s->len && rc == 0; i++) {
+            if (done < count) {
+                rc = tpa_str__cps_str(&b, new_, 0, new_->len);
+                done++;
+            }
+            if (rc == 0 && i < s->len) {
+                rc = tpa_str__cps_put(&b, tpa_str_at(s, i));
+            }
+        }
+        return tpa_str__cps_done(&b, rc, out);
+    }
+    while (i < s->len && rc == 0) {
+        int64_t m = 0;
+        if (done < count && i + old->len <= s->len) {
+            for (m = 0; m < old->len && tpa_str_at(s, i + m) == tpa_str_at(old, m); m++) {
+            }
+        }
+        if (done < count && m == old->len && old->len > 0 && i + old->len <= s->len) {
+            rc = tpa_str__cps_str(&b, new_, 0, new_->len);
+            i += old->len;
+            done++;
+        }
+        else {
+            rc = tpa_str__cps_put(&b, tpa_str_at(s, i));
+            i++;
+        }
+    }
+    if (done == 0 && rc == 0) {
+        free(b.d);
+        tpa_str_retain(s);
+        *out = s;
+        return 0;
+    }
+    return tpa_str__cps_done(&b, rc, out);
+}
+
+#if defined(TPA_UCD_ALPHA)
+static TPA_UNUSED int tpa_str_isalpha(tpa_str *s)
+{
+    int64_t i;
+    for (i = 0; i < s->len; i++) {
+        if (!tpa_ucd_isalpha(tpa_str_at(s, i))) {
+            return 0;
+        }
+    }
+    return s->len > 0;
+}
+#endif
+
+#if defined(TPA_UCD_DIGIT)
+static TPA_UNUSED int tpa_str_isdigit(tpa_str *s)
+{
+    int64_t i;
+    for (i = 0; i < s->len; i++) {
+        if (!tpa_ucd_isdigit(tpa_str_at(s, i))) {
+            return 0;
+        }
+    }
+    return s->len > 0;
+}
+#endif
+
+#if defined(TPA_UCD_UPPER)
+static TPA_UNUSED int tpa_str_upper(tpa_str *s, tpa_str **out)
+{
+    tpa_str__cps b = {NULL, 0, 0};
+    uint32_t m[3];
+    int64_t i;
+    int k, n, rc = 0;
+    for (i = 0; i < s->len && rc == 0; i++) {
+        n = tpa_ucd_upper(tpa_str_at(s, i), m);
+        for (k = 0; k < n && rc == 0; k++) {
+            rc = tpa_str__cps_put(&b, m[k]);
+        }
+    }
+    return tpa_str__cps_done(&b, rc, out);
+}
+#endif
+
+#if defined(TPA_UCD_LOWER)
+/* CPython's handle_capital_sigma: U+03A3 lowers to the final sigma U+03C2 when a cased code point precedes it
+ * (case-ignorable ones skipped) and none follows it (the same), else to U+03C3. */
+static uint32_t tpa_str__sigma(tpa_str *s, int64_t i)
+{
+    int64_t j;
+    uint32_t c = 0;
+    int final_sigma;
+    for (j = i - 1; j >= 0; j--) {
+        c = tpa_str_at(s, j);
+        if (!tpa_ucd_isignorable(c)) {
+            break;
+        }
+    }
+    final_sigma = j >= 0 && tpa_ucd_iscased(c);
+    if (final_sigma && i + 1 < s->len) {
+        for (j = i + 1; j < s->len; j++) {
+            c = tpa_str_at(s, j);
+            if (!tpa_ucd_isignorable(c)) {
+                break;
+            }
+        }
+        final_sigma = j == s->len || !tpa_ucd_iscased(c);
+    }
+    return final_sigma ? 0x3C2u : 0x3C3u;
+}
+
+static TPA_UNUSED int tpa_str_lower(tpa_str *s, tpa_str **out)
+{
+    tpa_str__cps b = {NULL, 0, 0};
+    uint32_t m[3];
+    int64_t i;
+    int k, n, rc = 0;
+    for (i = 0; i < s->len && rc == 0; i++) {
+        uint32_t c = tpa_str_at(s, i);
+        if (c == 0x3A3u) {
+            rc = tpa_str__cps_put(&b, tpa_str__sigma(s, i));
+            continue;
+        }
+        n = tpa_ucd_lower(c, m);
+        for (k = 0; k < n && rc == 0; k++) {
+            rc = tpa_str__cps_put(&b, m[k]);
+        }
+    }
+    return tpa_str__cps_done(&b, rc, out);
+}
+#endif
+
 #endif /* TP_AOT_STR_H */
