@@ -44,6 +44,57 @@ jobs:
         # Using --console=plain so logs are readable in GitHub Actions
         run: ./gradlew :python-multiplatform:desktopTest --console=plain
 
+  artifact-fixture:
+    # The artifact walker's consumer suite (AGENTS.md section 15: plugin unit tests cannot see what the
+    # generated table does at run time). It had no CI step, so SPEC B-5b/B-5c (#164 items 4 and 5,
+    # the walked kotlinx-coroutines dispatcher path) had no run to point at.
+    name: Artifact walker fixture (desktop)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'zulu'
+          cache: 'gradle'
+
+      - name: Run the artifact fixture's desktop tests
+        # --rerun and a deleted result directory: never read an earlier result as this run's (AGENTS.md rule 8).
+        run: |
+          rm -rf python-multiplatform-gradle-plugin/fixtures/artifact/build/test-results/desktopTest
+          ./gradlew :python-multiplatform-gradle-plugin-fixtures:artifact:desktopTest --rerun --console=plain
+
+      - name: Count the tests (the coroutines suite must have run)
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import glob, os, sys, xml.etree.ElementTree as ET
+          total = failed = skipped = 0
+          classes = set()
+          for f in glob.glob("python-multiplatform-gradle-plugin/fixtures/artifact/build/test-results/desktopTest/*.xml"):
+              for c in ET.parse(f).getroot().iter("testcase"):
+                  total += 1
+                  classes.add(c.get("classname"))
+                  failed += c.find("failure") is not None or c.find("error") is not None
+                  skipped += c.find("skipped") is not None
+          line = f"artifact fixture: {total} tests, {failed} failed, {skipped} skipped"
+          print(line)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as s:
+              s.write(line + "\n")
+          if "fixture.artifact.WalkedArtifactCoroutinesTest" not in classes or failed or skipped:
+              sys.exit("WalkedArtifactCoroutinesTest did not run, or a test failed or skipped")
+          PY
+
+      - name: Upload the test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifact-fixture-reports
+          path: python-multiplatform-gradle-plugin/fixtures/artifact/build/reports/tests/desktopTest
+
   plugin-unit:
     # The Gradle plugin's own unit tests (#403). Only its fixtures ran in CI before, so plugin
     # unit tests were never executed (leader decision 2026-11-13). Linux: the tests use fake

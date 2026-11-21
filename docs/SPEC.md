@@ -879,7 +879,8 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactSamParameterTest.kt`.
 - **B-5a** The ambient pythonx callable scope (`PythonCallables.withScope`) is per thread (#301). A
   Python callable crossing into Kotlin on a thread with no open scope gets the "no pythonx callable
-  scope is open" error, even while another thread has a scope open, and `PythonCallables.current`
+  scope is open" error (except a `Runnable` / `() -> Unit` slot, which becomes B-5c's one-shot), even
+  while another thread has a scope open, and `PythonCallables.current`
   answers `null` there. One scope may be added to, reused, invoked and closed from different
   threads: `close()` releases every root and body exactly once, a callable added after the close is
   rejected (`IllegalStateException`, its body released), and an invocation holds a reference of its
@@ -897,12 +898,40 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   the JDK the walk runs on, since no walked jar holds it; `javax.*`, `jdk.*` and `sun.*` stay declined.
   A Python callable passed as the `Runnable` of `CoroutineDispatcher.dispatch` runs on the
   dispatcher's own threads after `dispatch` returns; the binder attaches each thread for the call
-  (B-5a's scope rule applies: the callable lives while its scope is open). Not provided: a plain Kotlin
+  (inside an open scope it lives while the scope is open, B-5a; with no scope open it is B-5c's
+  one-shot). Not provided: a plain Kotlin
   `object` (such as `kotlin.coroutines.EmptyCoroutineContext`) as a value; only companions are values
   (U-4), so a caller passes a `Job` or a dispatcher where a `CoroutineContext` is needed.
   `Status: draft` (until its CI run) on desktop (walker), `GP/artifact/SamParameterBindingTest.kt`
   (`aJdkClassParameterSpelledThroughATypealiasIsBound`, `aJavaxClassParameterStaysDeclined`),
   `python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactCoroutinesTest.kt`.
+- **B-5c** (#164 item 5, a callback posted from outside any scope) A Python callable crossing into a
+  slot of compiled arity 0 that is not composable (a `Runnable`, a `() -> Unit`) on a thread with no
+  open scope becomes a **one-shot**: the wrapper holds its own reference to the callable and its own
+  `HandleTable` root, and gives both back after its first invocation, whether the callable returns or
+  raises (the exception reaches whoever invoked it, for a dispatcher worker its uncaught-exception
+  handler). Exactly once under concurrent invocations: one invocation runs the callable, and every
+  other one, concurrent or later, raises `IllegalStateException` saying the one-shot already ran,
+  without touching the released callable. A one-shot invocation opens no scope, so a `Runnable` the
+  callable posts in turn is a one-shot too. Inside an open scope nothing changes (B-5a), and with no
+  scope open every other slot (one that takes arguments, a composable lambda, a `suspend` function of
+  U-5a) is still refused.
+  Why re-running raises: nothing tells the binder that Kotlin dropped a `Runnable` it was given, so the
+  first run is the only release point there is. A `Runnable` handed to a dispatcher runs exactly once,
+  which is the case this serves (pythonx-concurrent `KotlinEventLoop` posting `call_soon` callbacks from
+  threads with no composition). A Kotlin API that keeps a callback and runs it again (a listener, a
+  repeating timer) needs the crossing made inside a scope (`PythonCallables.withScope`, or a
+  composition). Not provided: a one-shot that is never invoked holds its callable for the life of the
+  process (no release by the Kotlin garbage collector).
+  Source: leader decision 2026-11-21 18:30 (team report `fable-pmp.md`, "## Leader answer (2026-11-21
+  18:30)", item 2): "Item 5 lifetime: (b) approved (leader decision): a one-shot RunOnce wrapper for
+  Runnable / () -> Unit slots that cross outside a PythonCallableScope, releasing its body after the
+  first invocation; record the rule in SPEC with this line as the source."
+  `Status: draft` (until its CI run), `PM/desktopTest/.../pythonx/PythonRunOnceTest.kt`,
+  `python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactCoroutinesTest.kt`
+  (`aCallablePostedWithNoScopeOpenRunsOnceAndReleasesEverything`,
+  `aCallableThatRaisesOnTheWorkerLeavesTheDispatcherWorking`),
+  `.../WalkedArtifactCallbackTest.kt` (`aUnitCallableWithNoScopeOpenRunsOnceAndRootsNothingAfter`).
 - **B-6** `@Composable` functions are callable from Python inside a composition; a Python click reaches
   a Kotlin callback and the redraw shows it. `Status: implemented` on desktop,
   `python-multiplatform-compose/fixtures/compose/src/desktopTest/` (`ComposableRenderTest.kt`, `M3ProofRenderTest.kt`,
