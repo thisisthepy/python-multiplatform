@@ -35,7 +35,7 @@ xcrun simctl launch --console-pty --terminate-running-process "$UDID" \
 # once the line appears: kill %1; grep IOS_CONSUMER_PROBE .tmp/launch.log
 ```
 
-Pass: `IOS_CONSUMER_PROBE stdlib=ok ext=ok payload=ok`. The Xcode project was adapted from
+Pass: `IOS_CONSUMER_PROBE stdlib=ok ext=ok payload=ok ft=ok` (`ft`: the staged build is free-threaded 3.15t, #328). CI runs these steps in `ios.yml` (job `ios-consumer`). The Xcode project was adapted from
 `sample/src/iosMain/app.xcodeproj` (not opened in Xcode when written; if `xcodebuild` rejects it, the
 phases to recreate are: Compile Kotlin Framework running `$FX:embedAndSignAppleFrameworkForXcode`; and, after
 Resources and before Embed Frameworks, a phase running `$FX:installPythonXcodeScript` and then

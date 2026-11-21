@@ -1032,7 +1032,8 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `libmultiplatform_python3.15t.so`) follow it. On the GIL platform Kotlin threads attach a thread state
   and serialise on the GIL.
   `Status: partial` (desktop observed; Android, androidNative and iOS are compiled against 3.15t but
-  have not been run on an emulator, device or simulator in this revision),
+  have not been run on an emulator, device or simulator in this revision; CI jobs for that, owner-approved
+  2026-11-21, await their first run: `android-native.yml` `emulator` (x86_64, API 34) and `ios.yml` `ios-consumer`, #328),
   `PM/desktopTest/.../DesktopFreeThreadedBuildTest.kt` (ABI flags, `Py_GIL_DISABLED` of the loaded
   interpreter, checkpoint default), `PM/desktopNativeTest/.../DesktopNativeFreeThreadedBuildTest.kt`,
   `PM/androidInstrumentedTest/.../AndroidFreeThreadedBuildTest.kt` (ABI flags, stdlib path, the AAR's
@@ -1083,8 +1084,10 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   staged. The library's own iOS klib is built against the same 3.15t framework (T-2, #328 step 2), so a
   consumer never pairs a GIL klib with a 3.15t framework. Android: the plugin stages nothing for Android
   (libpython and the stdlib travel inside the library's AAR, L-5); the library acquires both Android
-  archives itself (T-2). `Status: partial` (unit tests only, `GP/IosConsumerWiringTest.kt`,
-  `GP/IosPythonHomeLayoutTest.kt`; no simulator run).
+  archives itself (T-2). `Status: partial` (unit tests, `GP/IosConsumerWiringTest.kt`, and the simulator run of
+  `python-multiplatform-gradle-plugin/fixtures/ios-consumer` in `ios.yml` `ios-consumer`, whose probe line also
+  checks the staged build is 3.15t (#328), pending its first run;
+  `GP/IosPythonHomeLayoutTest.kt`).
 - **T-3** `python-multiplatform` publishes per-target, per-flavour CPython include directories as
   `Provider<Directory>` carrying the extraction task (`cpythonIncludeDirectories` extension; see
   `docs/platforms/python-version-acquisition.md` §7). The default flavour of every accessor is the one
@@ -1110,6 +1113,16 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   extraction is stamped with its lock key so bumping the pinned archive discards the old tree.
   `Status: implemented`, `GP/AcquiredHeaderVersionTest.kt` (the real-tree case needs the trees from
   `downloadAllPythonBuilds`; it skips when nothing was acquired).
+- **T-6** One published version for the library, the KSP processor, the Compose host and the Gradle
+  plugin (#70): `$pythonVersion-$libraryVersionSuffix`, or `$pythonVersion` alone when the suffix is
+  empty. The version names the CPython the library embeds. Owner decision (2026-11-21, asked through
+  the leader, answer "3.15.0 (추천)"): the stable release is plain `3.15.0`; the path is `3.15.0-alpha03`
+  (first Maven Central upload, #377), then `3.15.0-rc1`, then `3.15.0`; a library-only follow-up on the
+  same CPython is `3.15.0-1`, `3.15.0-2` (Maven orders them after `3.15.0`); a CPython patch release
+  is `3.15.1`. The release tag is `v` plus that version. `Status: implemented` for the derivation
+  (root `build.gradle.kts`, the plugin build, `python-multiplatform/build.gradle.kts`, and the sed
+  form `libraryVersionSuffix=(.+)` in `maven-central.yml`, `desktop-release.yml`, `central-bundle.sh`,
+  `assemble-desktop-release.sh`), `GP/PublishedVersionTest.kt`; no release has used an empty suffix yet.
 
 ## 8. Measurement
 

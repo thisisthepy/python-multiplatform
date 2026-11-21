@@ -79,7 +79,8 @@ if (project.findProperty("pythonFreeThreaded") != null) {
 val pbsRelease = project.findProperty("pythonBuildStandaloneRelease")?.toString() ?: "20261013"
 
 val pythonVersion = configuredPythonVersion
-val libraryVersion = "$pythonVersion-${project.property("libraryVersionSuffix")}"   // the root's publishedVersion (#70)
+val libraryVersion = listOf(pythonVersion, project.property("libraryVersionSuffix").toString())
+    .filter { it.isNotEmpty() }.joinToString("-")   // the root's publishedVersion (#70); empty suffix = stable
 version = libraryVersion
 
 buildkonfig {

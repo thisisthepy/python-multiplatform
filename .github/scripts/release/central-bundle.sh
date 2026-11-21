@@ -11,7 +11,7 @@ out="${1:?usage: central-bundle.sh <out.zip> [--throwaway-key]}"
 mode="${2:-}"
 root="$(pwd)"
 staging="$root/build/central-staging"
-version="$(sed -nE 's/^pythonVersion=(.*)$/\1/p' gradle.properties)-$(sed -nE 's/^libraryVersionSuffix=(.*)$/\1/p' gradle.properties)"
+version="$(sed -nE 's/^pythonVersion=(.*)$/\1/p' gradle.properties)$(sed -nE 's/^libraryVersionSuffix=(.+)$/-\1/p' gradle.properties)"
 
 # Not under the repository: gpg-agent's socket path must stay under about 100 characters.
 verify_home="$(mktemp -d)"
