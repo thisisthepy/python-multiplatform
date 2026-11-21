@@ -321,8 +321,10 @@ so a compiled call and its C-to-C callees do no further thread-state lookup. Lik
 
 `tp_enter_call` makes compiled recursion fail where interpreted recursion fails. It counts, per thread,
 the compiled frames in flight (they have no Python frame), adds the current Python frame depth
-(`PyThreadState_GetFrame` / `PyFrame_GetBack`, public API only; cached while the top frame is the same
-object, so a pure compiled recursion pays O(1) per call) and compares the total with
+(`PyThreadState_GetFrame` / `PyFrame_GetBack`, public API only; the outermost compiled call caches its
+top frame, which is below every compiled frame, so a pure compiled recursion pays O(1) per call; a nested
+compiled call from a callback walks only down to that cached frame and caches nothing, so no frame object
+outlives its frame, #125) and compares the total with
 `Py_GetRecursionLimit()`. Over it: `RecursionError("maximum recursion depth exceeded")`, the text
 CPython's own Python-frame check uses. It then calls `Py_EnterRecursiveCall(" in compiled code")`, the
 C-stack guard: a raised recursion limit can never let compiled C overflow the stack. Counters are
@@ -340,7 +342,7 @@ compiled frames cannot change while they run: Python code started from compiled 
 `__del__`, signal handler, redo) pops every frame it pushed before it returns. The wrapper's two
 resets make a nested wrapper measure its own depth and make the outer segment measure again at its
 next check after a nested wrapper returned, which is where `tp_python_depth` would have found a
-different top frame before; the frame cache therefore changes at exactly the same points.
+different top frame before.
 `Py_GetRecursionLimit()` and `Py_EnterRecursiveCall` stay per frame (a `__del__` can change the limit
 between two frames; the C-stack guard compares each frame's stack address). `-DTP_TRACE_DEPTH`
 (tests only) adds `__tp_trace_frame_reads__()`: the number of top-frame reads.

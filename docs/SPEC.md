@@ -1169,7 +1169,15 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   (direct and mutual recursion) are compiled: every compiled function counts its frame (`tp_enter_call` /
   `tp_leave_call`, added to the Python frame depth and compared with `sys.getrecursionlimit()`), so recursion
   past the limit raises `RecursionError('maximum recursion depth exceeded')` where CPython does, and a C-stack
-  guard keeps the process alive at any limit (#57). Compiled loops check the eval breaker so signals
+  guard keeps the process alive at any limit (#57). The depth check holds a strong reference only to the
+  Python frame below the outermost compiled call (which outlives it), never to a callback's frame, so no
+  frame's locals outlive its return (#125). **Known difference** (#125, recorded with the leader's OK of
+  2026-11-21, not owner-confirmed): a pure-Python frame running above compiled frames (a callback, or code
+  it calls) is checked by the interpreter's own counter, which does not count the compiled frames below
+  it, so a recursion of Python frames from a callback reaches `RecursionError` up to that many frames later
+  than in the interpreter. CPython 3.15 has no public API that adds frames to the interpreter's counter
+  (`py_recursion_remaining` is a private field of the thread state), so this cannot be fixed with the
+  public API only. Compiled loops check the eval breaker so signals
   (`KeyboardInterrupt`), pending calls and GIL hand-off reach Python during long compiled work (#141): a
   `while` loop counts down once per iteration; a `for ... in range(...)` loop, whose trip count is known,
   runs in chunks of `TP_POLL_INTERVAL` iterations and polls once per chunk (#206), with `break`,
