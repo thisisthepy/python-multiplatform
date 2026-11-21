@@ -2790,13 +2790,12 @@ static TPA_UNUSED int tpa_int_parse_literal(const char *bytes, size_t n, tpa_int
 #if !defined(TPA_LIBRARY)
 static inline void tpa_exit_int(tpa_int code)
 {
+    /* the status is read before the exit hook runs a collection, which may free what `code` borrows from */
     int64_t v = 0;
-    fflush(stdout);
-    fflush(stderr);
     if (tpa_int_to_i64(code, &v) == 0) {
-        exit((int)(v & 0xff));
+        tpa_exit_status((int)(v & 0xff));
     }
-    exit(255);
+    tpa_exit_status(255);
 }
 #endif
 

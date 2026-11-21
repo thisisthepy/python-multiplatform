@@ -15,9 +15,10 @@
  *      set (locals, temporaries, borrowed parameters whose callers hold them, fields of untracked objects,
  *      of region objects and of virtual objects; all of them counted, see the safepoint invariant below).
  *   3. an object with `gc_refs > 0` is a root; what it reaches is reachable; the rest is garbage.
- *   4. each garbage object is held by one extra count while its generated `clear` empties and releases
- *      every owned field (tracked and untracked objects, lists, big ints), then let go: it is freed at once
- *      when nothing else held it, or when the garbage that still held it is cleared in turn.
+ *   4. every garbage object is held by one extra count, then each one's generated `clear` empties and
+ *      releases every owned field (tracked and untracked objects, lists, big ints), then the extra counts are
+ *      dropped and each object is freed; a clear never frees another garbage object, so the C stack depth of
+ *      a collection does not grow with the length of a garbage chain.
  *   5. the pass repeats while it freed something: an untracked object that garbage owned is freed by step 4
  *      and releases the tracked objects it held, which can be garbage only now (a cycle held through it).
  * No user code runs during a collection (AOT compiles no `__del__`), so a collection cannot re-enter; a flag
@@ -26,7 +27,8 @@
  * The safepoint: `tpa_gc_safepoint()` is called by `tpa_cls_<C>_new` of a cyclic-capable class before the
  * allocation, when every constructor argument is held by the caller and `__init__` has not started, and once
  * by `main` after `__main__` returned (`tpa_gc_exit`), when every frame has released its locals and only cycles
- * can remain. The invariant the generated code keeps for it: at a safepoint no tracked object is kept alive
+ * can remain, or by `sys.exit` through `tpa_exit_hook` (the frames still hold their locals, counted, so those
+ * stay; the program ends right after, so nothing reads an object afterwards). The invariant the generated code keeps for it: at a safepoint no tracked object is kept alive
  * solely by an uncounted reference (the elision rules of PR-O1 are off for every field of a cyclic-capable
  * class, `aot/classes.py` `field_elidable`).
  *
@@ -227,18 +229,30 @@ static void tpa_gc__pass(void)
         }
         h = next;
     }
-    /* 4. the garbage: clear each object while holding it, then let it go. A clear releases the fields, so the
-     * generated release frees (and untracks) every garbage object whose last count was held by the object
-     * being cleared: in a two-object cycle, clearing the first frees the second. */
+    /* 4. the garbage. Every garbage object first gets one extra count, then every one is cleared, then the extra
+     * counts are dropped. While the extra counts are held, a clear's release of a garbage referent only
+     * decrements it, so no release cascades from one garbage object into another: a long garbage chain through a
+     * field that is not the generated release's tail field (a ring linked through `l` of a class with `l` and `r`)
+     * is cleared in constant C stack depth instead of one frame per object (REVIEW-503 note 3; CPython's
+     * `delete_garbage` uses the trashcan for the same reason). A garbage object is referenced only by garbage (a
+     * reference from an untracked or reachable object makes it a root in step 3), so once every garbage object
+     * is cleared its count is the extra one alone and dropping it frees the object, whose fields are empty. */
+    for (h = unreachable.gc_next; h != &unreachable; h = h->gc_next) {
+        TPA_RC_INC(TPA_GC_OBJ(h));
+    }
+    for (h = unreachable.gc_next; h != &unreachable; h = h->gc_next) {
+        h->gc_type->clear(h);
+    }
     while (unreachable.gc_next != &unreachable) {
         h = unreachable.gc_next;
-        TPA_RC_INC(TPA_GC_OBJ(h));
-        h->gc_type->clear(h);
         if (TPA_RC_DEC_IS_ZERO(TPA_GC_OBJ(h))) {
             tpa_gc_untrack(h);              /* its fields are empty: nothing else to release */
             free(h);
-        } else if (unreachable.gc_next == h) {
-            /* still held by garbage not yet cleared: it is freed when that garbage is cleared */
+        } else {
+#if defined(TP_CHECK_PROVEN)
+            tpa_gc__fatal("a garbage object is still counted after every garbage object was cleared");
+#endif
+            /* not reached (see above); kept alive, cleared, on the tracked list rather than freed while counted */
             tpa_gc__unlink(h);
             tpa_gc__append(&g->tracked, h);
             h->gc_refs = 0;

@@ -1887,11 +1887,26 @@ static inline void tpa_region_reset(tpa_region *r)
             for (T *obj = (T *)((char *)(tpa__c + 1) + tpa__off); obj != NULL; obj = NULL)
 
 #if !defined(TPA_LIBRARY)
-static inline void tpa_exit_i64(int64_t code)
+/* Run once by `sys.exit` before `exit()` (REVIEW-503 note 2): the generated `main` sets it to `tpa_gc_exit` when
+ * the program links the cycle collector, so the cycles alive at `sys.exit` are collected as they are when
+ * `__main__` returns (CPython collects at shutdown on both paths). NULL in every other program. */
+static void (*tpa_exit_hook)(void);
+
+static inline void tpa_exit_status(int status)
 {
+    void (*hook)(void) = tpa_exit_hook;
+    tpa_exit_hook = NULL;
+    if (hook != NULL) {
+        hook();
+    }
     fflush(stdout);
     fflush(stderr);
-    exit((int)(code & 0xff));
+    exit(status);
+}
+
+static inline void tpa_exit_i64(int64_t code)
+{
+    tpa_exit_status((int)(code & 0xff));
 }
 #endif
 
