@@ -2238,6 +2238,10 @@ def emit(module: ir.Module, program: Program, *, strict_int: bool = False,
     out += head
     out += [
         "    setvbuf(stdout, NULL, _IOFBF, 1 << 16);",
+    ]
+    if gc:
+        out.append("    tpa_exit_hook = tpa_gc_exit;")  # sys.exit collects the cycles alive too (REVIEW-503 note 2)
+    out += [
         f"    rc = tpf_{mangle(MAIN)}();",
     ]
     if gc:

@@ -415,6 +415,104 @@ if __name__ == "__main__":
         assert remaining == 0, (args, stress)
 
 
+def test_sys_exit_collects_the_cycles_alive(tmp_path: Path):
+    """Post-merge review of #503, note 2. `sys.exit` ended the program through `exit()` before `main`'s exit
+    collection, so a cycle alive at that point was never freed (CPython collects at shutdown on that path too; in
+    the sanitizer job it was a LeakSanitizer report and a nonzero status). The generated `main` now sets
+    `tpa_exit_hook`, which `sys.exit` runs once before `exit()`; the status is kept, also for a nonzero code."""
+    src = MUT + """
+
+def churn(n: int) -> int:
+    total: int = 0
+    for i in range(n):
+        a: MutNode = MutNode(i, None)
+        b: MutNode = MutNode(i + 1, None)
+        link(a, b)
+        link(b, a)
+        total += b.v
+    return total
+
+
+if __name__ == "__main__":
+    print(churn(int(sys.argv[1])))
+    sys.exit(int(sys.argv[2]))
+    print("not reached")
+"""
+    p = _write(tmp_path, src)
+    c_text = aot.generate(p)
+    _syntax_check(c_text, tmp_path, "sysexit")
+    main = c_text[c_text.index("int main("):]
+    assert main.index("tpa_exit_hook = tpa_gc_exit;") < main.index("rc = tpf_")
+    for code in ("0", "3"):
+        args = ["1", code]
+        cp, res = _run_both(tmp_path, p, args)
+        assert cp.returncode == int(code)
+        assert res.returncode == int(code), res.stderr
+        assert res.stdout == cp.stdout
+        assert res.stderr == cp.stderr == ""
+    exe = aot.build(p, tmp_path / "sysexit_stats", defines=("TPA_GC_STATS",))
+    for args, n in ((["1", "0"], 1), (["1", "5"], 1), (["700", "0"], 700)):
+        r = _run_aot(exe, args)
+        assert r.returncode == int(args[1]), r.stderr
+        m = STATS.search(r.stderr)
+        assert m is not None, r.stderr               # the exit collection ran on the sys.exit path
+        collections, freed, exit_freed, remaining = (int(x) for x in m.groups())
+        assert freed + exit_freed == 2 * n
+        assert exit_freed == 2 * n                   # below the trigger: every cycle is left to the exit collection
+        assert remaining == 0
+
+
+def test_long_garbage_chain_through_a_non_tail_field_is_cleared_without_deep_recursion(tmp_path: Path):
+    """Post-merge review of #503, note 3. `Ring` has two self-typed fields; the generated release loops over the
+    tail field `r` only. A garbage ring linked through `l` was cleared by releasing `l`, which freed the next node
+    and recursed through its `l`: C stack depth n, a stack overflow for 500k nodes. Step 4 now gives every garbage
+    object an extra count before any clear, so no release cascades from one garbage object into another."""
+    src = """
+import sys
+
+
+class Ring:
+    __slots__ = ("v", "l", "r")
+    v: int
+    l: "Ring | None"
+    r: "Ring | None"
+
+    def __init__(self, v: int, l: "Ring | None", r: "Ring | None") -> None:
+        self.v = v
+        self.l = l
+        self.r = r
+
+
+def close(a: Ring, b: Ring) -> None:
+    a.l = b
+
+
+def ring(n: int) -> int:
+    first: Ring = Ring(0, None, None)
+    prev: Ring = first
+    for i in range(1, n):
+        prev = Ring(i, prev, None)
+    close(first, prev)
+    return prev.v
+
+
+if __name__ == "__main__":
+    print(ring(int(sys.argv[1])))
+"""
+    p = _write(tmp_path, src)
+    c_text = aot.generate(p)
+    _syntax_check(c_text, tmp_path, "ring")
+    release = c_text[c_text.index("static void tpa_cls_Ring_release(tpa_cls_Ring *p)\n{") :]
+    release = release[: release.index("\n}\n")]
+    assert "tpa_cls_Ring *next = p->f_r;" in release      # the premise: the tail loop follows `r`, not `l`
+    n = 500000
+    cp = subprocess.run([sys.executable, str(p), str(n)], capture_output=True, text=True)
+    out, (collections, freed, exit_freed, remaining) = _stats(tmp_path, p, [str(n)], stress=False)
+    assert out == cp.stdout
+    assert freed + exit_freed == n
+    assert remaining == 0
+
+
 def test_region_and_virtual_objects_holding_a_cycle(tmp_path: Path):
     src = MUT + """
 

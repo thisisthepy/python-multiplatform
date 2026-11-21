@@ -9,7 +9,8 @@ of a segment measures the Python depth (`tp_python_depth`, one `PyThreadState_Ge
 later check of the segment reuses it. The wrapper resets the measurement before and after its impl
 call, so a nested wrapper never sees the outer segment's depth and the outer segment measures again
 after a nested wrapper returned (exactly where it measured before this change, so the cached frame
-object and every frame's lifetime stay the same).
+object stays the same; since the later fix of difference (2), design 4.3.3b, only the outermost
+compiled call's measurement is cached, so no frame object outlives its frame).
 
 What must NOT move, and stays per frame: `Py_GetRecursionLimit()` (a `__del__` or a callback can call
 `sys.setrecursionlimit` between two compiled frames) and `Py_EnterRecursiveCall` (the C-stack guard:
@@ -21,7 +22,8 @@ it compares this frame's stack address).
   * green before and after (they pin what must not change): every differential test against the
     interpreter (depth at every Python depth and recursion depth around the limit, a nested compiled
     call from a callback, the limit changed by a `__del__` and by a callback mid-recursion, threads),
-    the frame-lifetime test and the `sys._getframe` test;
+    the `sys._getframe` test; the frame-lifetime test (red on develop since it compares with the
+    interpreter: a callback's locals and a refused call's caller's locals died late);
   * mutants: a wrapper that does not reset before its impl, one that does not reset after it, and a
     limit read once per call instead of per frame must each be caught.
 
@@ -359,6 +361,32 @@ for d in (0, 7, 40):
     at(d, lambda: plain.around(cb, 5))
     at(d, lambda: plain.around(cb_nested_plain, 5))
 out["chains"] = seen
+
+def at_limit(mod, d):
+    # d Python frames down, a frame whose local logs its death, and a compiled call the limit may refuse
+    # at its first frame (tp_enter_call fails with nothing counted)
+    if d > 0:
+        return at_limit(mod, d - 1)
+    x = Obj()
+    try:
+        mod.down(2)
+        events.append("ok")
+    except RecursionError:
+        events.append("rec")
+
+rows = []
+for d in range(LIMIT - 40, LIMIT + 5):
+    row = []
+    for mod in (comp, plain):
+        del events[:]
+        try:
+            at_limit(mod, d)
+        except RecursionError:
+            events.append("deep")
+        events.append("after")
+        row.append(list(events))
+    rows.append(row)
+out["refused"] = rows
 print(json.dumps(out))
 """
 
@@ -448,22 +476,30 @@ def test_threads_each_see_their_own_depth(plain_build, plain_src):
     assert sorted(r["kinds"]) == [f"thread{t}" for t in range(4)], r["kinds"]
 
 
-def test_frame_lifetimes_and_getframe_are_unchanged(plain_build, plain_src):
-    """Pins develop's behaviour (green before and after the change).
+def assert_lifetimes(r):
+    """A callback's locals die when it returns, and the caller of a refused compiled call keeps nothing
+    alive after it returns, as in the interpreter (#125, design 4.3.3b difference (2), fixed)."""
+    assert r["interpreted"] == ["del", "probe", "probe"], r
+    assert r["compiled"] == r["interpreted"], r
+    rows = r["refused"]
+    assert all(c == p for c, p in rows), [row for row in rows if row[0] != row[1]][:5]
+    assert any(c[:3] == ["rec", "del", "after"] for c, _ in rows), rows         # the boundary was crossed
+    assert any(c[0] == "ok" for c, _ in rows), rows
 
-    Lifetime: inside `seq`, the nested `down(1)` called from the Python callback g measures the depth
-    with g's frame on top, so the depth cache holds g's frame object; when g returns, that frame
-    object takes g's locals (`take_ownership`, Python/frame.c), and `x` dies when the outer segment
-    next measures, at its `down(m)`, not at g's return as in the interpreter. That difference from the
-    interpreter exists on develop (see the design note); this test only pins that the change keeps
-    the same moment: a wrapper that kept the inner segment's depth after it returned would never
-    re-measure and `x` would live until `seq` returns (["probe", "probe", "del"]).
+
+def test_frame_lifetimes_and_getframe_match_the_interpreter(plain_build, plain_src):
+    """Lifetime: inside `seq`, the nested `down(1)` called from the Python callback g measures the depth
+    with g's frame on top. On develop the depth cache then held g's frame object, which took g's locals
+    when g returned (`take_ownership`, Python/frame.c), so `x` died at the outer segment's next measure
+    (["probe", "del", "probe"]) instead of at g's return as in the interpreter. Now only the outermost
+    compiled call's measurement is cached (its frame is below every compiled frame), so `x` dies at g's
+    return. The `refused` rows: an outermost compiled call refused by the recursion limit counts nothing,
+    and its cached frame (the caller's) is dropped at once, so the caller's locals die when it returns.
 
     sys._getframe: the frames a callee sees are the Python frames only (compiled frames have none),
     the same at every depth and after a nested compiled call."""
     r = run_child(CHILD_FRAMES, plain_build[2], plain_src)
-    assert r["interpreted"] == ["del", "probe", "probe"], r
-    assert r["compiled"] == ["probe", "del", "probe"], r
+    assert_lifetimes(r)
     chains = r["chains"]
     assert len(chains) == 15
     for i in range(3):
@@ -528,8 +564,31 @@ def test_a_wrapper_that_does_not_reset_after_its_impl_is_caught(tmp_path, plain_
     so = build(tmp_path / "bad", runtime_dir=rt)[2]
     with pytest.raises(AssertionError):
         assert_nested(run_child(CHILD_NESTED, so, plain_src))
+
+
+def test_a_nested_measurement_that_caches_its_frame_is_caught(tmp_path, plain_src):
+    """Mutation (develop's cache): every measurement stores its top frame, a callback's included; the
+    callback's locals then outlive its return."""
+    rt = mutant_runtime(tmp_path, ("int outermost = t->depth.count == 0;", "int outermost = 1;"))
+    (tmp_path / "bad").mkdir()
+    so = build(tmp_path / "bad", runtime_dir=rt)[2]
     r = run_child(CHILD_FRAMES, so, plain_src)
-    assert r["compiled"] == ["probe", "probe", "del"], r               # and x lives longer
+    assert r["compiled"] == ["probe", "del", "probe"], r
+    with pytest.raises(AssertionError):
+        assert_lifetimes(r)
+
+
+def test_a_refused_entry_that_keeps_its_cached_frame_is_caught(tmp_path, plain_src):
+    """Mutation: a refused outermost entry leaves the caller's frame in the cache."""
+    rt = mutant_runtime(tmp_path, ("    if (t->depth.count == 0) {\n        Py_CLEAR(t->depth.frame);\n    }\n}\n\n"
+                                   "static inline int tp_enter_call(",
+                                   "    (void)t;\n}\n\nstatic inline int tp_enter_call("))
+    (tmp_path / "bad").mkdir()
+    so = build(tmp_path / "bad", runtime_dir=rt)[2]
+    r = run_child(CHILD_FRAMES, so, plain_src)
+    assert r["compiled"] == r["interpreted"], r                       # the callback part still holds
+    with pytest.raises(AssertionError):
+        assert_lifetimes(r)
 
 
 def test_a_limit_read_once_per_call_is_caught(tmp_path, plain_src):
