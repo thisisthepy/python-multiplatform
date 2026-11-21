@@ -348,6 +348,12 @@ class _Gen:
         for decl in self.module.classes:
             mc = mangle(decl.name)
             tf = self.cls_analysis.tail_field.get(decl.name)
+            # review of #508, F1: a class with a field of a class type releases it by a call, which nests; its
+            # release counts the depth and parks the object past TPA_TRASH_LIMIT (`tpa_trash_*`, tp_aot.h), the
+            # parked object freed later by `_drop`. A class with no such field cannot nest and is unchanged.
+            trash = any(fd.type is Type.OBJ and fd.cls is not None for fd in decl.field_decls)
+            if trash:
+                out.append(f"static void tpa_cls_{mc}_drop(void *v);")
             out.append(f"static void tpa_cls_{mc}_release(tpa_cls_{mc} *p)")
             out.append("{")
             if tf is not None:
@@ -355,12 +361,16 @@ class _Gen:
                 out.append("        if (!TPA_RC_DEC_IS_ZERO(p)) return;")
                 if self.gc_class(decl.name):
                     out.append("        tpa_gc_untrack(&p->gc);")
+                if trash:
+                    out.append(f"        if (!tpa_trash_enter(p, tpa_cls_{mc}_drop)) return;")
                 out.append(f"        tpa_cls_{mc} *next = p->f_{mangle(tf)};")
                 for fd in decl.field_decls:
                     if fd.name == tf:
                         continue
                     self._emit_field_release(out, "        ", decl.name, fd)
                 out.append("        free(p);")
+                if trash:
+                    out.append("        tpa_trash_leave();")
                 out.append("        p = next;")
                 out.append("    }")
             else:
@@ -368,10 +378,30 @@ class _Gen:
                 out.append("    if (!TPA_RC_DEC_IS_ZERO(p)) return;")
                 if self.gc_class(decl.name):
                     out.append("    tpa_gc_untrack(&p->gc);")
+                if trash:
+                    out.append(f"    if (!tpa_trash_enter(p, tpa_cls_{mc}_drop)) return;")
                 for fd in decl.field_decls:
                     self._emit_field_release(out, "    ", decl.name, fd)
                 out.append("    free(p);")
+                if trash:
+                    out.append("    tpa_trash_leave();")
             out.append("}")
+            if trash:
+                # a parked object: its count is zero and it is untracked; free its fields and itself (and continue
+                # down the tail field as the release loop would)
+                out.append(f"static void tpa_cls_{mc}_drop(void *v)")
+                out.append("{")
+                out.append(f"    tpa_cls_{mc} *p = (tpa_cls_{mc} *)v;")
+                if tf is not None:
+                    out.append(f"    tpa_cls_{mc} *next = p->f_{mangle(tf)};")
+                for fd in decl.field_decls:
+                    if fd.name == tf:
+                        continue
+                    self._emit_field_release(out, "    ", decl.name, fd)
+                out.append("    free(p);")
+                if tf is not None:
+                    out.append(f"    tpa_cls_{mc}_release(next);")
+                out.append("}")
         out.append("")
         for decl in self.module.classes:
             if self.gc_class(decl.name):

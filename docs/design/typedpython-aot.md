@@ -354,7 +354,15 @@ review 2026-11-20, not owner-confirmed).
     some reference fields, the constructor releases those initialized fields and frees the struct.
   - Release decrements `rc`; at zero it releases owned reference fields and frees the struct. To avoid
     C stack overflow when freeing deep self-referential chains, the last self-referential field is
-    released via a tail loop (`while (p != NULL)`).
+    released via a tail loop (`while (p != NULL)`). Every other field of a class type is released by a
+    call, which nests; so the release of a class that has such a field counts its nesting depth on a
+    thread-local counter, and past `TPA_TRASH_LIMIT` (1000) it parks the object (count zero, untracked)
+    with the class's `_drop` function on a thread-local list that the outermost release drains (review of
+    #508, F1; CPython's trashcan). A chain of any length through any field, or alternating between
+    classes, is then freed with bounded C stack depth; only the order of frees beyond the limit changes,
+    which nothing observes (AOT compiles no `__del__`, a freed object is unreachable). A class with no
+    field of a class type keeps its release unchanged. Tests: `test_aot_release_depth.py` (500k chains,
+    a mutant without the bound).
 - **Single immutability analysis (shared source of truth).** One whole-program pass classifies each
   field `(C, field)` as **immutable-after-init** if and only if no statement outside `C.__init__`
   anywhere in the program assigns to that field, and `C.__init__` does not store `self` into any field

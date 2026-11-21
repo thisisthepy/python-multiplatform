@@ -1171,7 +1171,8 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   past the limit raises `RecursionError('maximum recursion depth exceeded')` where CPython does, and a C-stack
   guard keeps the process alive at any limit (#57). The depth check holds a strong reference only to the
   Python frame below the outermost compiled call (which outlives it), never to a callback's frame, so no
-  frame's locals outlive its return (#125). **Known difference** (#125, recorded with the leader's OK of
+  frame's locals outlive its return (#125; a continuation's frame on the #426 exit path is held until the
+  compiled frame's epilogue right after the continuation returns, with no Python code in between). **Known difference** (#125, recorded with the leader's OK of
   2026-11-21, not owner-confirmed): a pure-Python frame running above compiled frames (a callback, or code
   it calls) is checked by the interpreter's own counter, which does not count the compiled frames below
   it, so a recursion of Python frames from a callback reaches `RecursionError` up to that many frames later
@@ -1640,7 +1641,9 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     `time` module (`perf_counter`, `monotonic`, `time`, `sleep`).
   - **Tier O PR-O1 (#486)** (leader review 2026-11-20, not owner-confirmed): adds headerless compiled
     classes (`struct tpa_cls_<C>` with `tpa_rc_t rc` and typed fields), `C | None`, `is` / `is not`,
-    `__init__` and instance methods, tail-loop release for self-referential fields, a single
+    `__init__` and instance methods, tail-loop release for self-referential fields (and, since the
+    review of #508, a release whose nesting depth is bounded for every other class-typed field, the
+    deeper frees deferred to the outermost release, so a chain of any length and shape is freed), a single
     whole-program immutability analysis shared by the cycle-freedom proof (`aot/cycle-possible`),
     reference-counting elision rules, and library-mode safety (`aot/library-mutable-class`), compiling
     `benchmarks/typedpython/py/binary_trees.py` with 0 `aot-check` findings.
@@ -1701,7 +1704,11 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     `tpa_cls_<C>_new` of a cyclic-capable class, before the allocation, when every constructor argument is
     held by the caller, and once at the end of the program: after `__main__` returns, when no frame holds
     anything, and on the `sys.exit` path before `exit()` (the frames' counted locals stay alive; the
-    status is unchanged; review of #503, note 2). At a safepoint
+    status is unchanged; review of #503, note 2). `sys.exit` does not unwind the frames between the call
+    and `__main__` (CPython raises `SystemExit`, which does); nothing observes the difference today, since
+    AOT compiles no `__del__` and no `finally`, and tier S's exceptions (S3) must lower `sys.exit` as the
+    `SystemExit` it is before `finally` is accepted (review of #508, F3). `sys.exit` runs only on the
+    main thread today (no parallel loops in AOT, `sys.exit` refused in the library). At a safepoint
     no cyclic-capable object is kept alive solely by an uncounted reference: PR-O1's elision rules (3) and
     (4) are off for every field of a cyclic-capable class (`field_elidable`), and references from region
     objects, virtual objects, untracked objects, locals and temporaries are counted and never

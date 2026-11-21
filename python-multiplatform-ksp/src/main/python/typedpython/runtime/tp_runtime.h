@@ -3206,7 +3206,12 @@ static Py_ssize_t tp_trace_frame_reads_count = 0;
  * stores nothing: caching g's frame object would keep it alive after g returned, and then the frame
  * object takes g's locals (`take_ownership`, Python/frame.c) and they die late (#125, design 4.3.3b,
  * difference (2), fixed). The walk stops at the cached frame, so its length is the Python frames above
- * the outermost compiled call, not the whole stack; with no cached frame it walks to the bottom. */
+ * the outermost compiled call, not the whole stack; with no cached frame it walks to the bottom.
+ * One exception to "no compiled frame in flight" (review of #508, F2): an exit of the outermost counted
+ * frame to its continuation (#426) lowers `count` to 0 around the continuation call, so a compiled call
+ * made from the continuation caches the continuation's frame; `tp_depth_py_end(-1)` and the frame's own
+ * `tp_leave_call` drop it right after the continuation returns, with no Python code in between, so that
+ * frame object outlives its frame only by that epilogue (as on develop before #125). */
 static inline Py_ssize_t tp_python_depth(PyThreadState *ts, tp_tls *t)
 {
     TP_TRACE_FRAME_READ();
