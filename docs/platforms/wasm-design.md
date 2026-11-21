@@ -17,7 +17,7 @@ has a browser wasm target. `wasmWasi` is not a target (when last assessed it was
 | Decision | Choice | Why |
 |---|---|---|
 | How Kotlin reaches CPython | Raw Stable ABI symbols as `@WasmImport`s against the Emscripten module's own wasm exports, **no JS in the call path** | Preserves the exact object model (`NativePointer`, `PyObject`) of every other target; a high-level Pyodide-style JS API (`pyodide.runPython`, `PyProxy`) would replace the whole object model with `JsAny` wrappers and covers almost none of the ~330 C functions |
-| Memory | **One shared linear memory.** Kotlin imports Emscripten's `Module.wasmMemory` as its `intrinsics.memory` | Needs Kotlin ≥ 2.4.20-Beta2, whose `wasmJs` modules **import** `intrinsics.memory` (`min=0, max=none`). Releases up to 2.4.10 exported an unbounded memory, which Emscripten cannot import, the earlier plan to patch the `.wasm` memory section (and a YouTrack issue) is obsolete ([`../archive/wasm-youtrack-issue.md`](../archive/wasm-youtrack-issue.md)) |
+| Memory | **One linear memory, CPython's.** Kotlin imports Emscripten's `Module.wasmMemory` as its `intrinsics.memory` | Needs Kotlin ≥ 2.4.20-Beta2, whose `wasmJs` modules **import** `intrinsics.memory` (`min=0, max=none`); releases up to 2.4.10 exported an unbounded memory, which Emscripten cannot import ([`../archive/wasm-youtrack-issue.md`](../archive/wasm-youtrack-issue.md)). The free-threaded pthreads build's memory is **shared**, which that non-shared import cannot take, so the build rewrites the import after the link (SPEC T-7, below) |
 | Where CPython comes from | **Our own Emscripten build**, `python-multiplatform/scripts/wasm/build-cpython.sh`: CPython **3.14.2**, Emscripten **5.0.3**, matched to the `pyemscripten_2026_0` platform of PEP 783 | No distributor ships a `python.wasm` exporting `wasmExports,wasmMemory`. The version is deliberately not the 3.14.x pinned for native targets (`pythonVersion` in `gradle.properties`); see `docs/design/ecosystem.md` |
 | C shim / composition | **None** | The hops that composition amortised are gone; measured gain ≤ 2.9 ns per operation (below). It also removes a second build pipeline |
 | `EXPORTED_FUNCTIONS` list | **Not needed** | `-sMAIN_MODULE` is `LINKABLE`, so the whole Stable ABI is exported (all 310 C symbols `EmbedAPI.kt` declared at the time were found in the build's 8287 exports). The build adds `wasmExports,wasmMemory` to `-sEXPORTED_RUNTIME_METHODS`, which is not ABI-sensitive |
@@ -47,6 +47,17 @@ has a browser wasm target. `wasmWasi` is not a target (when last assessed it was
   `exports._start()`). An application must also declare the three `@WasmExport` trampolines itself,
   `@WasmExport` is honoured only in the compilation that produces the `.wasm` (`ProxyTypeExportNames`;
   generating that file from the Gradle plugin is not done).
+- **The memory import is rewritten to shared after the link (SPEC T-7, #175).** Owner decision
+  2026-11-21, via the leader (team report `pmp-binder.md`, "## Owner decision (2026-11-21, via the
+  leader): #175 is back in 1.0"): "빌드 뒤에 .wasm을 고치기 >> 이걸로 가자". Kotlin/Wasm hardcodes the
+  import as non-shared with no maximum (`WasmCompiledModuleFragment.createAndExportMemory`, no compiler
+  option, checked 2026-11-14), and #411's probe showed that import fails with `LinkError` against a
+  shared memory while a shared import with a maximum links. `WasmSharedMemoryImport` (Gradle plugin)
+  rewrites only that import's limits to shared, minimum 0, maximum 65536 pages, when the staged
+  `python.wasm` has a shared memory; it runs from the same three places as the `.mjs` substitutions.
+  The shape check runs on every link: a module whose memory is not exactly Kotlin's import (or the
+  rewritten one) fails the build, so a Kotlin upgrade that changes it is caught. Removing it once Kotlin
+  has an option is deleting that object and its calls.
 - **JSPI must not reach the embedding.** `cpython.mjs` deletes `WebAssembly.promising` /
   `WebAssembly.Suspending`; with JSPI live the first blocking syscall (`select.poll().poll(0)`, which
   `selectors.py` does at import) fails with `SuspendError` and surfaces as `RuntimeError: unreachable`.
