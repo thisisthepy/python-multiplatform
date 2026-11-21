@@ -272,6 +272,90 @@ tables from the reference interpreter. The Windows console (a console, not a pip
 CPython writes a console through WriteConsoleW, and this step writes UTF-8 bytes through the C runtime, which a
 pipe (every test) receives exactly as CPython's; S2 settles the console with a test on the Windows job.
 
+#### 4.3.2 Tier S step 2 (PR-S2a, S2b, S2c): str | None, containers that change, dict, set, tuple, bytes
+
+Design for S2 (agent proposal, written 2026-11-22; not owner-confirmed, leader review pending). In 1.0 (owner,
+2026-11-21 21:55). Three PRs, one CI group with S3 (leader, 2026-11-21): **S2a** `str | None`, the Windows console,
+lists that change and tuple values; **S2b** `dict`, `set` and the hash they need; **S2c** comprehensions, the
+iteration builtins, `sorted` / `list.sort`, and `bytes`. Every operation is differential-tested against the reference
+with CPython's exact results and messages, as S1; a program without these constructs generates the C it generated
+before.
+
+**`str | None` (S2a).** `Type.STR_OPT`, the same `tpa_str *` with NULL for None (so a STR flows into a STR_OPT slot
+as it is). Accepted: assignment of a str or None, `x is None` / `x is not None`, `==` / `!=` with a str or None,
+passing and returning, `print` / `str` / `repr` / f-string fields (`None` or the string), fields of classes. Every
+other use needs a str and is accepted only where the front end proves `x` is not None: inside `if x is not None:`,
+after `if x is None:` whose branch leaves (return, break, continue, `sys.exit`, raise from S3), in `a if x is not None
+else b`, and in `if x:` / `while x is not None:`, as long as `x` is not assigned in the guarded region. The read is
+then `StrNarrow(x)` (no runtime work; under `-DTP_CHECK_PROVEN` it aborts on NULL, so the sanitizer job checks every
+proof). An unproved use is the finding `aot/optional`, naming the line: Pyrefly reports the same program as a type
+error, so a checked program never hits it. The same narrowing serves `C | None` class values, which today are read
+without a check (a None there crashes instead of raising AttributeError; fixed here: an unproved field read of an
+optional class value becomes `aot/optional` too).
+
+**Windows console (S2a).** When standard output or error is a console (`GetConsoleMode` succeeds on its handle),
+the text is written as UTF-16 with `WriteConsoleW`, as CPython's `_WindowsConsoleIO` does; the encoded UTF-8 is
+decoded first, so a raw surrogateescape byte becomes U+FFFD, as it does in CPython. A pipe or a file gets the UTF-8
+bytes as now. The three functions are declared, not taken from `windows.h` (no macro reaches the generated names).
+Test: the Windows job runs a program under a pseudo-console where the runner allows it; elsewhere the decision rests
+on the pipe tests and the code review.
+
+**Lists that change (S2a).** Every list becomes one runtime layout `{count, length, capacity, kind, items *}`: the
+items live in a separate block, so `append` / `insert` / `extend` / `pop` / slice assignment can move them while
+every name of the list keeps the same handle (CPython's aliasing: `a = b; b.append(1)` changes `a`). `kind` says
+what an item slot holds: an IEEE double, an int64 (RAW group), a `tpa_int` (big-capable group, owned), a str, a
+class instance, a list, a tuple (owned references). The tier K lists (`list[float]`, `list[int]` of both groups)
+take this layout; their element access becomes `items[i]`, with the same bounds rule. Growth by CPython's
+over-allocation formula (`list_resize`), so `sys.getsizeof` would agree (not exposed; the formula only sets the
+amortised cost). Operations: `append`, `pop()` / `pop(i)` (`IndexError: pop from empty list`, `pop index out of
+range`), `insert` (CPython's clamping), `extend` of a list, `remove` (`ValueError: list.remove(x): x not in list`),
+`index` (`ValueError: <repr> is not in list`), `count`, `clear`, `reverse`, `copy`, `+`, `*`, `+=` (extends in place:
+the same object), `==` / `!=` / `<` ... (element-wise, CPython's rich comparison order), `in`, slicing and slice
+assignment (`ValueError: attempt to assign sequence of size N to extended slice of size M`), `del l[i]` and
+`del l[a:b]`, `list(xs)` copy, `print` / `repr`. Iteration follows CPython's list iterator: index and length read at
+each step, so appending inside the loop is seen. Element types: int, float, bool, str, `str | None`, compiled classes,
+lists, tuples, dicts and sets (S2b). A list of lists is a list whose items are lists (owned references); a cycle
+through lists is possible (`a.append(a)`), so a list that can hold a list or a class is tracked by the cycle
+collector of tier O, like a cyclic-capable class (6.3.2 step 3). Library ABI: the list handles stay opaque; `_data`
+returns the item block, valid until the next call that may resize the list; ABI version 2.
+
+**Tuples (S2a).** A tuple value of a fixed shape `tuple[int, str, ...]` (the shape in the type; no `tuple[T, ...]` of
+variable length until S2c) is an immutable counted object with one slot per element and the slot kinds known
+statically. Construction, indexing by a constant or a variable (bounds checked, `IndexError: tuple index out of
+range`), unpacking, `len`, `==` / ordering, `in`, hashing (S2b), `print` / `repr` (`(1,)` for one element). The fixed
+tuple returns of tier K stay as they are (an unboxed multi-value return), and become values only where a tuple is
+stored, passed or compared.
+
+**dict and set (S2b).** `dict[K, V]` with K int, str, bool or a tuple of those; V any S2 type. The layout is CPython's
+compact dict (an index table of slots and an entry array in insertion order, open addressing with CPython's
+perturbation probe), so iteration order is insertion order, as CPython guarantees. The hash function is not CPython's:
+the str hash is seeded per process in CPython and so is unobservable (`hash()` stays `aot/identity`), and the int
+hash only decides slot positions, never an order the program sees; equality is CPython's (`1 == True`, so a
+`dict[int, ...]` keyed by `True` finds `1`, and the stored key keeps the type it was first inserted with, as CPython
+keeps the first key object). Operations: `d[k]` (`KeyError: <repr of k>`), `d[k] = v`, `del d[k]`, `in`, `get`
+(with default), `setdefault`, `pop` (with default), `keys` / `values` / `items` in loops and comprehensions,
+`len`, `update` from a dict, `==`, `print` / `repr`, iteration (`RuntimeError: dictionary changed size during
+iteration` exactly where CPython raises it). `set[K]`: `add`, `discard`, `remove` (`KeyError`), `in`, `len`, `|`
+`&` `-` `^` into new sets, `==`; iterating a set, or printing it, depends on CPython's hash table and seed, so it is
+`aot/set-order` except through `sorted(...)`, as section 4.3 says.
+
+**S2c.** List, dict and set comprehensions (a hidden local per comprehension variable, Python 3 scoping, the
+accumulator built in place), `enumerate`, `zip` (shortest), `reversed`, `range` objects as iterables, in `for` loops
+and comprehensions; `sum`, `any`, `all`, `min` / `max` of an iterable (`ValueError: min() iterable argument is
+empty`); `sorted(xs, key=..., reverse=...)` and `list.sort(...)` with a key that is a compiled function or a
+lambda written in place: CPython's own algorithm (timsort, `listsort` in Objects/listobject.c, ported as it is), so
+the order of equal and of unordered elements (NaN) is CPython's, not merely some stable order. `bytes`: an immutable
+byte array; literals, `s.encode()` / `encode("utf-8")` (strict: a surrogate raises CPython's UnicodeEncodeError),
+`b.decode()` (strict UTF-8, CPython's UnicodeDecodeError message), `len`, indexing (an int), slicing, `+`, `*`, `==`,
+`in`, iteration (ints), `print` / `repr` (`b'...'` with CPython's escapes), `bytes(n)` and `bytes(list[int])`
+(`ValueError: bytes must be in range(0, 256)`).
+
+**Tests.** `test_aot_tier_s2a.py`, `_s2b.py`, `_s2c.py`: differential over generated cases (random operation
+sequences on lists and dicts checked against the reference, every error message), aliasing (two names of one list,
+a list in a class field, a list in a list), the in-loop mutation rules, the cycle collector on list cycles under
+`TPA_GC_STRESS`, LeakSanitizer on everything, the library ABI v2 fixture, and a timsort mutant (one changed
+`MIN_GALLOP` must change the order of a NaN-holding list).
+
 ### 4.4 Tier T, threads
 
 Section 7.
