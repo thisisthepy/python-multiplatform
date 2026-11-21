@@ -44,6 +44,22 @@ jobs:
         # Using --console=plain so logs are readable in GitHub Actions
         run: ./gradlew :python-multiplatform:desktopTest --console=plain
 
+      # SPEC L-9c (#191): a macosArm64 consumer linked and packaged only by the bindings plugin. The test
+      # task runs with the staged PYTHONHOME; the release executable then runs with none, from another
+      # directory, so python-multiplatform-home beside it is the only prefix it can find.
+      - name: Desktop native consumer (macosArm64), host test
+        run: ./gradlew :python-multiplatform-gradle-plugin-fixtures:desktop-native-consumer:macosArm64Test --rerun --console=plain
+
+      - name: Desktop native consumer (macosArm64), packaged executable
+        run: |
+          set -euo pipefail
+          ./gradlew :python-multiplatform-gradle-plugin-fixtures:desktop-native-consumer:linkReleaseExecutableMacosArm64 --console=plain
+          DIR=python-multiplatform-gradle-plugin/fixtures/desktop-native-consumer/build/bin/macosArm64/releaseExecutable
+          test -d "$DIR/python-multiplatform-home" || { echo "::error::no python-multiplatform-home beside the executable"; exit 1; }
+          LINE=$(cd "$RUNNER_TEMP" && env -u PYTHONHOME "$GITHUB_WORKSPACE/$DIR/desktop-native-consumer.kexe" | grep DESKTOP_NATIVE_PROBE)
+          echo "$LINE"
+          test "$LINE" = "DESKTOP_NATIVE_PROBE stdlib=ok ext=ok ft=ok"
+
   plugin-unit:
     # The Gradle plugin's own unit tests (#403). Only its fixtures ran in CI before, so plugin
     # unit tests were never executed (leader decision 2026-11-13). Linux: the tests use fake
@@ -116,6 +132,22 @@ jobs:
 
       - name: Run Linux x86_64 Kotlin/Native Tests
         run: ./gradlew :python-multiplatform:linuxX64Test --rerun --console=plain
+
+      # SPEC L-9c (#191): a linuxX64 consumer linked and packaged only by the bindings plugin. The test
+      # task runs with the staged PYTHONHOME; the release executable then runs with none, from another
+      # directory, so python-multiplatform-home beside it is the only prefix it can find.
+      - name: Desktop native consumer (linuxX64), host test
+        run: ./gradlew :python-multiplatform-gradle-plugin-fixtures:desktop-native-consumer:linuxX64Test --rerun --console=plain
+
+      - name: Desktop native consumer (linuxX64), packaged executable
+        run: |
+          set -euo pipefail
+          ./gradlew :python-multiplatform-gradle-plugin-fixtures:desktop-native-consumer:linkReleaseExecutableLinuxX64 --console=plain
+          DIR=python-multiplatform-gradle-plugin/fixtures/desktop-native-consumer/build/bin/linuxX64/releaseExecutable
+          test -d "$DIR/python-multiplatform-home" || { echo "::error::no python-multiplatform-home beside the executable"; exit 1; }
+          LINE=$(cd "$RUNNER_TEMP" && env -u PYTHONHOME "$GITHUB_WORKSPACE/$DIR/desktop-native-consumer.kexe" | grep DESKTOP_NATIVE_PROBE)
+          echo "$LINE"
+          test "$LINE" = "DESKTOP_NATIVE_PROBE stdlib=ok ext=ok ft=ok"
 
       # The Compose host's linuxX64 target (#386): compiled here, since only the fork publishes the
       # Compose UI klibs for linuxX64.
