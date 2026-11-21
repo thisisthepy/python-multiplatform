@@ -76,6 +76,26 @@ class PythonRunOnceTest {
         return Python3.eval("_ro_weak() is None").toString() == "True"
     }
 
+    private fun probeFreedAfterJvmCollection(): Boolean {
+        repeat(100) {
+            System.gc()
+            Thread.sleep(20)
+            if (probeFreed()) return true
+        }
+        return false
+    }
+
+    /** Runs [run] expecting a failure, and keeps only its message: the exception object itself must not
+     * stay reachable from this frame, or the JVM would never collect it. */
+    private fun errorMessageOf(run: () -> Unit): String = try {
+        run()
+        throw AssertionError("expected the one-shot's run to fail")
+    } catch (e: AssertionError) {
+        throw e
+    } catch (t: Throwable) {
+        t.message ?: t.toString()
+    }
+
     private fun calls(): Int = Python3.eval("_ro_weak().calls if _ro_weak() is not None else -1").toString().toInt()
 
     @Test
@@ -145,17 +165,17 @@ class PythonRunOnceTest {
         val baseline = HandleTable.liveCount
         val run = crossProbe(fail = true)
         Python3.exec("_ro_keep = _ro_weak()")
-        val error = assertFails { run() }
-        assertTrue(
-            error.message?.contains("raised on purpose") == true,
-            "the invoker must get the Python error, got: $error",
-        )
+        val message = errorMessageOf(run)
+        assertTrue(message.contains("raised on purpose"), "the invoker must get the Python error, got: $message")
         assertEquals(1, calls())
         val again = assertFailsWith<IllegalStateException> { run() }
         assertTrue(again.message?.contains("one-shot") == true, "a raised run still counts as the one run")
         assertEquals(1, calls())
         Python3.exec("_ro_keep = None")
-        assertTrue(probeFreed(), "a callable that raised was not released")
+        // The one-shot released its reference in `finally`, but the raised exception's traceback holds
+        // `__call__`'s frame, and through `self` the probe, until the Kotlin `PyException` is collected
+        // and its cleaner drops the exception. So this waits for the JVM's collection too.
+        assertTrue(probeFreedAfterJvmCollection(), "a callable that raised was not released")
         assertEquals(baseline, HandleTable.liveCount, "a callable that raised kept its root")
     }
 
@@ -186,14 +206,4 @@ class PythonRunOnceTest {
         assertEquals(1, scope.close())
         Python3.exec("_ro_keep = None\n_ro_probe = None")
     }
-
-    private inline fun assertFails(block: () -> Unit): Throwable =
-        try {
-            block()
-            throw AssertionError("expected a failure")
-        } catch (e: AssertionError) {
-            throw e
-        } catch (t: Throwable) {
-            t
-        }
 }

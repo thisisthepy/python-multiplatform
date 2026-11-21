@@ -244,7 +244,10 @@ class WalkedArtifactStubTest {
                 Regex("""Kotlin member: ([^\s"]+)""").findAll(stub(path)).map { it.groupValues[1] }.toList()
             }
             .toSet()
-        val memberKeys = UpcallTable.entries().filter { it.kind.name == "METHOD" }.map { it.name }.toSet()
+        // Not `suspend` ones: a suspend function is bound and awaitable but not stubbed, a documented
+        // limit (`docs/design/pyi-generation-design.md` §3.5, `renderKotlinFqnStubs` filters `isSuspend`).
+        // `kotlinx.coroutines.Job.join` is the first suspend member this fixture walks (#509).
+        val memberKeys = UpcallTable.entries().filter { it.kind.name == "METHOD" && !it.isSuspend }.map { it.name }.toSet()
         assertTrue("fixture.valueclass.member.Tally.reset" in memberKeys, "no member function was bound: $memberKeys")
         assertEquals(emptySet(), members - memberKeys, "a member stub names no member key")
         assertEquals(emptySet(), memberKeys - members, "a member key has no stub")

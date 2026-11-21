@@ -62,8 +62,10 @@ class WalkedArtifactCoroutinesTest {
             assert _child.parent == _parent, 'Job(parent) did not receive the parent handle: ' + repr(_child.parent)
             assert Dispatchers.Default.isDispatchNeeded(_parent) is True
             assert not _child.isCancelled
-            _parent.cancel()
-            assert _parent.isCancelled, 'Job.cancel() did not reach the Kotlin Job'
+            # `cause` is written: a member function's defaults are not omittable yet (#215), so
+            # `cancel()` with no argument is refused with "no value for cause".
+            _parent.cancel(None)
+            assert _parent.isCancelled, 'Job.cancel(None) did not reach the Kotlin Job'
             assert _child.isCancelled, 'cancelling the parent handle did not cancel the child made from it'
             """.trimIndent(),
         )
@@ -189,13 +191,20 @@ class WalkedArtifactCoroutinesTest {
             _good = threading.Event()
             Dispatchers.Default.dispatch(Job(), lambda: _good.set())
             assert _good.wait(30), 'the dispatcher stopped running callables after ones that raised'
-            _deadline = time.monotonic() + 30
-            while any(w() is not None for w in _bad_weak) and time.monotonic() < _deadline:
-                gc.collect()
-                time.sleep(0.01)
-            assert all(w() is None for w in _bad_weak), 'a one-shot that raised kept its callable'
             """.trimIndent(),
         )
+        // The one-shot gives its reference back in `finally` (B-5c), but each raised exception's
+        // traceback holds the thunk's frames, and through them the callable, until the Kotlin
+        // `PyException` the worker handed to its uncaught-exception handler is collected (its cleaner
+        // drops the exception). So the check waits for the JVM's collection as well as Python's.
+        val deadline = System.nanoTime() + 30_000_000_000L
+        while (System.nanoTime() < deadline) {
+            System.gc()
+            Thread.sleep(20)
+            Python3.exec("gc.collect()\n_bad_left = sum(w() is not None for w in _bad_weak)")
+            if (Python3.eval("_bad_left").toString() == "0") return
+        }
+        throw AssertionError("one-shots that raised kept ${Python3.eval("_bad_left")} of 64 callables after the JVM collected their exceptions")
     }
 
     /** [HandleTable.liveCount] with Python's garbage (proxies whose `__del__` releases a root) collected. */

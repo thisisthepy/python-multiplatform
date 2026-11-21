@@ -892,7 +892,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   callbacks. A Kotlin object a walked declaration returns (a `kotlinx.coroutines.CoroutineDispatcher`
   such as `Dispatchers.Default`, a `Job`) is a handle in Python and fills any parameter of its type or a
   supertype (`Job(parent)`, `dispatch(context, block)` with a `Job` as the `CoroutineContext`), reaching
-  the same Kotlin object (`Job.cancel()` from Python cancels it and its children). A parameter type
+  the same Kotlin object (`Job.cancel(None)` from Python cancels it and its children; `cause` is written because a member function's defaults are not omittable yet, #215). A parameter type
   that expands to a `java.*` class (through a typealias, as `kotlinx.coroutines.CancellationException`
   does in `Job.cancel(cause: CancellationException? = null)`) is nameable: the class file is read from
   the JDK the walk runs on, since no walked jar holds it; `javax.*`, `jdk.*` and `sun.*` stay declined.
@@ -910,7 +910,8 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   open scope becomes a **one-shot**: the wrapper holds its own reference to the callable and its own
   `HandleTable` root, and gives both back after its first invocation, whether the callable returns or
   raises (the exception reaches whoever invoked it, for a dispatcher worker its uncaught-exception
-  handler). Exactly once under concurrent invocations: one invocation runs the callable, and every
+  handler; that exception's traceback can hold the callable through its frames until the exception
+  itself is released, for a Kotlin `PyException` when the JVM collects it). Exactly once under concurrent invocations: one invocation runs the callable, and every
   other one, concurrent or later, raises `IllegalStateException` saying the one-shot already ran,
   without touching the released callable. A one-shot invocation opens no scope, so a `Runnable` the
   callable posts in turn is a one-shot too. Inside an open scope nothing changes (B-5a), and with no
