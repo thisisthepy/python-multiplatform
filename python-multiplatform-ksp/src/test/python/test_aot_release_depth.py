@@ -7,15 +7,19 @@ fields of two classes that alternate, therefore recursed n deep and overflowed t
 develop: the program dies by a signal, or ASan reports a stack overflow in the sanitizer job). CPython frees the same
 chains (its trashcan). Now a release past TPA_TRASH_LIMIT parks the object and the outermost release frees it.
 
-  * red before the fix: both 500k programs crash;
-  * mutant: the same program built with the limit out of reach (`-DTPA_TRASH_LIMIT=...` above n) crashes again,
-    so the depth bound is what frees the chain;
+  * the depth itself is checked, not a crash (the stack size differs between platforms: ubuntu's runner freed
+    the unbounded chain in #513's first CI run): a build with `-DTPA_TRASH_STATS` prints the deepest release
+    nesting at exit, which must stay at or below TPA_TRASH_LIMIT with objects parked; red before the fix (no
+    such line, and the nesting was n);
+  * mutant: the same program built with the limit out of reach (`-DTPA_TRASH_LIMIT=...` above n) nests n deep,
+    so the bound is what keeps the depth down;
   * a class with no field of a class type generates the release it generated before (no `tpa_trash_`);
   * every program also runs with LeakSanitizer on in the sanitizer job: the parked objects are all freed.
 """
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import textwrap
@@ -25,6 +29,9 @@ from typedpython import aot
 from typedpython.aot import cc as cc_mod
 
 N = 500000
+N_MUT = 5000                    # the mutant's chain: deep enough to pass the limit, shallow enough for any stack
+LIMIT = 1000                    # TPA_TRASH_LIMIT's default
+TRASH = re.compile(r"^tpa_trash: max_depth=(\d+) parked=(\d+)$", re.M)
 
 CHAIN = """
 import sys
@@ -138,6 +145,12 @@ def _run(exe: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run([str(exe), *args], capture_output=True, text=True, env=env)
 
 
+def _trash_stats(r: subprocess.CompletedProcess[str]) -> tuple[int, int]:
+    m = TRASH.search(r.stderr)
+    assert m is not None, r.stderr[-2000:]
+    return int(m.group(1)), int(m.group(2))
+
+
 def _check_chain(tmp_path: Path, src: str, name: str, cls: str) -> Path:
     p = _write(tmp_path, src, name)
     report = aot.explain_alloc(p)
@@ -153,6 +166,11 @@ def _check_chain(tmp_path: Path, src: str, name: str, cls: str) -> Path:
     assert r.returncode == 0, (r.returncode, r.stderr[-2000:])
     assert r.stdout == cp.stdout
     assert r.stderr == ""
+    stats = _run(aot.build(p, tmp_path / (p.stem + "_stats"), defines=("TPA_TRASH_STATS",)), [str(N)])
+    assert stats.returncode == 0 and stats.stdout == cp.stdout, stats.stderr[-2000:]
+    max_depth, parked = _trash_stats(stats)
+    assert max_depth <= LIMIT, max_depth
+    assert parked > 0, parked                   # the chain went past the limit: the deferral did the work
     return p
 
 
@@ -167,12 +185,17 @@ def test_a_long_chain_alternating_between_two_classes_is_freed(tmp_path: Path):
     assert "tpa_trash_enter(p, tpa_cls_B_drop)" in aot.generate(p)
 
 
-def test_without_the_depth_bound_the_chain_overflows(tmp_path: Path):
-    """Mutant: the limit above the chain's length, so every release nests as on develop."""
+def test_without_the_depth_bound_the_release_nests_once_per_object(tmp_path: Path):
+    """Mutant: the limit above the chain's length, so every release nests as on develop: the depth reaches the
+    chain's length and nothing is parked. Measured, not crashed, so the control is the same on every platform."""
     p = _write(tmp_path, CHAIN, "chain_mut.py")
-    exe = aot.build(p, tmp_path / "chain_mut_bin", defines=(f"TPA_TRASH_LIMIT={10 * N}",))
-    r = _run(exe, [str(N)])
-    assert r.returncode != 0, "the chain was freed without the depth bound: the test proves nothing"
+    exe = aot.build(p, tmp_path / "chain_mut_bin", defines=("TPA_TRASH_STATS", f"TPA_TRASH_LIMIT={10 * N}"))
+    r = _run(exe, [str(N_MUT)])
+    assert r.returncode == 0, r.stderr[-2000:]
+    max_depth, parked = _trash_stats(r)
+    assert max_depth >= N_MUT - 1 and parked == 0, (max_depth, parked)
+    ok = _run(aot.build(p, tmp_path / "chain_ok_bin", defines=("TPA_TRASH_STATS",)), [str(N_MUT)])
+    assert _trash_stats(ok)[0] <= LIMIT                  # the same chain with the bound
 
 
 def test_a_class_without_object_fields_keeps_its_release(tmp_path: Path):

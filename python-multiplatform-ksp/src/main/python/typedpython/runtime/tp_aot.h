@@ -1904,6 +1904,11 @@ typedef struct tpa_trash_state {
     tpa_trash_item *items;          /* parked objects, LIFO */
     size_t len;
     size_t cap;
+#if defined(TPA_TRASH_STATS)
+    int64_t max_depth;              /* tests only: the deepest nesting reached, and the objects parked */
+    int64_t parked;
+    int registered;
+#endif
 } tpa_trash_state;
 
 #if defined(TPA_THREADS)
@@ -1912,12 +1917,30 @@ static TPA_THREAD_LOCAL tpa_trash_state tpa_trash;
 static tpa_trash_state tpa_trash;
 #endif
 
+#if defined(TPA_TRASH_STATS)
+/* Tests only (-DTPA_TRASH_STATS): the nesting the bound allowed, printed at exit, so a test checks the depth itself
+ * instead of relying on a stack overflow, whose size differs between platforms (review of #513's first CI run). */
+static void tpa_trash__report(void)
+{
+    fflush(stdout);
+    fprintf(stderr, "tpa_trash: max_depth=%lld parked=%lld\n", (long long)tpa_trash.max_depth,
+            (long long)tpa_trash.parked);
+    fflush(stderr);
+}
+#endif
+
 /* Called by a release once the count reached zero: 1 to free now (the caller frees the fields and the object,
  * then calls tpa_trash_leave), 0 when the object was parked (the caller returns at once). */
 static inline int tpa_trash_enter(void *obj, tpa_trash_fn drop) TPA_UNUSED;
 static inline int tpa_trash_enter(void *obj, tpa_trash_fn drop)
 {
     tpa_trash_state *t = &tpa_trash;
+#if defined(TPA_TRASH_STATS)
+    if (!t->registered) {
+        t->registered = 1;
+        atexit(tpa_trash__report);
+    }
+#endif
     if (t->depth >= TPA_TRASH_LIMIT) {
         if (t->len == t->cap) {
             size_t cap = t->cap != 0 ? t->cap * 2 : 64;
@@ -1931,10 +1954,18 @@ static inline int tpa_trash_enter(void *obj, tpa_trash_fn drop)
             t->items[t->len].obj = obj;
             t->items[t->len].drop = drop;
             t->len += 1;
+#if defined(TPA_TRASH_STATS)
+            t->parked += 1;
+#endif
             return 0;
         }
     }
     t->depth += 1;
+#if defined(TPA_TRASH_STATS)
+    if (t->depth > t->max_depth) {
+        t->max_depth = t->depth;
+    }
+#endif
     return 1;
 }
 
