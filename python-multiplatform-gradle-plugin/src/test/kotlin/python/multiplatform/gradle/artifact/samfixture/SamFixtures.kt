@@ -55,3 +55,15 @@ fun interface BatchCollector<T> {
 }
 
 fun acceptBatches(collector: BatchCollector<String>) = collector.hashCode()
+
+/**
+ * #164 item 4: a parameter whose type is a `java.*` class, spelled through a Kotlin typealias the way
+ * `kotlinx.coroutines.Job.cancel(cause: CancellationException? = null)` spells it. The JDK class is in
+ * no walked jar; it must still be nameable.
+ */
+typealias JdkCancellation = java.util.concurrent.CancellationException
+
+fun cancelWith(cause: JdkCancellation? = null): String = cause?.message ?: "none"
+
+/** A `javax.*` class stays outside what the walker names (only `java/` is read from the JDK). */
+fun takeJavaxName(name: javax.naming.Name): Int = name.size()

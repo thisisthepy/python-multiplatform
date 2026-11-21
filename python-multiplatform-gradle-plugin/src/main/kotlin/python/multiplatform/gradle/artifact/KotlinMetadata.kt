@@ -74,9 +74,27 @@ internal class ArtifactClasspath(roots: List<File>) {
 
     /** @param binaryName e.g. `androidx/compose/ui/unit/Dp` -- no `.class` suffix. */
     fun classNode(binaryName: String): ClassNode? = nodeCache.getOrPut(binaryName) {
-        val root = locationsByBinaryName[binaryName] ?: return@getOrPut null
+        val root = locationsByBinaryName[binaryName] ?: return@getOrPut jdkClassNodeOrNull(binaryName)
         val bytes = readBytes(root, binaryName) ?: return@getOrPut null
         readClassNodeOrNull(bytes)
+    }
+
+    /**
+     * A `java.*` class is in no jar a build resolves: it is the JDK's. Without this, every Kotlin
+     * declaration whose type expands to one was declined as "not nameable", which is how
+     * `kotlinx.coroutines.Job.cancel(cause: CancellationException? = null)` went missing:
+     * `kotlinx.coroutines.CancellationException` is a typealias of
+     * `java.util.concurrent.CancellationException` (#164 item 4). Only `java/` is read, the
+     * public, stable API every desktop JDK carries; `sun.*`, `jdk.*` and `javax.*` stay declined.
+     * The bytes come from the JDK running the walk, through the platform class loader's resources.
+     */
+    private fun jdkClassNodeOrNull(binaryName: String): ClassNode? {
+        if (!binaryName.startsWith("java/")) return null
+        val bytes = ClassLoader.getPlatformClassLoader().getResourceAsStream("$binaryName.class")
+            ?.use { it.readBytes() }
+            ?: ClassLoader.getSystemResourceAsStream("$binaryName.class")?.use { it.readBytes() }
+            ?: return null
+        return readClassNodeOrNull(bytes)
     }
 
     private fun readBytes(root: File, binaryName: String): ByteArray? = if (root.isDirectory) {
