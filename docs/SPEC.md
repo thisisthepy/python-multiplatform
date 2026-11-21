@@ -148,6 +148,10 @@ fail, then implement.
      already set (L-9's rule);
   4. after linking each executable, copies the packaged prefix (L-9's includes and excludes) to
      `<the executable's output directory>/python-multiplatform-home`, unless `packagePythonHome` is false.
+  On Windows (`mingwX64`, SPEC P-1a) the rule differs where the loader does: binaries link the import library
+  `<prefix>/libs/python3XYt.lib` and carry no search path; packaging puts the prefix's `*.dll` (the interpreter
+  and the MSVC runtime) beside the executable, where Windows looks, and `Lib/` and `DLLs/` into
+  `python-multiplatform-home`; `mingwX64Test` also gets the staged prefix on `PATH`.
   The library's own klib carries no libpython link option; a consumer that does not apply the plugin links it
   itself. `Status: draft` (#191), `GP/DesktopNativeConsumerWiringTest.kt`.
 - **L-10** Desktop: the library uses no JDK module beyond `java.base`, so it runs on a `jlink`ed

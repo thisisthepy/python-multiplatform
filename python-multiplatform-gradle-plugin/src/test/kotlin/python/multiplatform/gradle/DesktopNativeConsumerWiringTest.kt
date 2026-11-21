@@ -68,4 +68,36 @@ class DesktopNativeConsumerWiringTest {
         assertEquals("stagePythonHomeMacosArm64", desktopNativeStageTaskName("macosArm64"))
         assertEquals("stagePythonHomeLinuxX64", desktopNativeStageTaskName("linuxX64"))
     }
+
+    // ---- SPEC L-9c, Windows (mingwX64, SPEC P-1a) ----
+
+    @Test
+    fun windowsStagesTheWindowsPrefix() {
+        assertEquals("windows-x86_64", desktopNativePlatformFor("mingw_x64"))
+    }
+
+    /** No rpath on Windows: the import library is linked, and the DLL is found beside the executable. */
+    @Test
+    fun windowsLinksTheImportLibraryAndCarriesNoSearchPath() {
+        assertEquals(
+            listOf("/cache/python/libs/python315t.lib"),
+            desktopNativeLinkerOpts("mingw_x64", "/cache/python", "python3.15t", debug = true),
+        )
+        assertEquals(
+            listOf("/cache/python/libs/python315t.lib"),
+            desktopNativeLinkerOpts("mingw_x64", "/cache/python", "python3.15t", debug = false),
+        )
+    }
+
+    /** The loader looks beside the executable, not in a subdirectory: the DLLs go there; the stdlib stays in the home. */
+    @Test
+    fun windowsPutsTheDllsBesideTheExecutable() {
+        assertEquals(listOf("*.dll"), desktopNativeExecutableDirIncludes(windows = true))
+        assertEquals(emptyList(), desktopNativeExecutableDirIncludes(windows = false))
+        assertEquals(listOf("Lib/**", "DLLs/**"), desktopNativeHomeIncludes("3.15.0", freeThreaded = true, windows = true))
+        assertEquals(
+            listOf("lib/python3.15t/**", "lib/libpython3.15t.*"),
+            desktopNativeHomeIncludes("3.15.0", freeThreaded = true, windows = false),
+        )
+    }
 }
