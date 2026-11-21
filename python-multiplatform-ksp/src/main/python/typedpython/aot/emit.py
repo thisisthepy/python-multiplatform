@@ -278,6 +278,9 @@ class _Gen:
             return "tpa_f64_list *"
         if fd.type is Type.I64_ARRAY:
             return "tpa_int_list *" if self.reps.field_list_big(cls, fd.name) else "tpa_i64_list *"
+        if fd.type is Type.STR:
+            self.uses_str = True
+            return "tpa_str *"
         assert fd.cls is not None
         return self.cls_ptr(fd.cls)
 
@@ -485,6 +488,8 @@ class _Gen:
             ptr, rel = self.cls_ptr(fd.cls), f"tpa_cls_{mangle(fd.cls)}_release"
         elif fd.type is Type.F64_ARRAY:
             ptr, rel = "tpa_f64_list *", "tpa_f64_release"
+        elif fd.type is Type.STR:
+            ptr, rel = "tpa_str *", "tpa_str_release"
         elif fd.type is Type.I64_ARRAY:
             big = self.reps.field_list_big(cls, fd.name)
             ptr, rel = ("tpa_int_list *", "tpa_int_list_release") if big else ("tpa_i64_list *", "tpa_i64_release")
@@ -506,6 +511,8 @@ class _Gen:
             out.append(f"{ind}tpa_cls_{mangle(fd.cls)}_release(p->f_{mf});")
         elif fd.type is Type.F64_ARRAY:
             out.append(f"{ind}tpa_f64_release(p->f_{mf});")
+        elif fd.type is Type.STR:
+            out.append(f"{ind}tpa_str_release(p->f_{mf});")
         elif fd.type is Type.I64_ARRAY:
             fn = "tpa_int_list_release" if self.reps.field_list_big(cls, fd.name) else "tpa_i64_release"
             out.append(f"{ind}{fn}(p->f_{mf});")
@@ -528,6 +535,10 @@ class _Gen:
                         c_params.append(f"{list_ptr(self.array_kind(init_fn.name, p.name, p.type))}a_{mangle(p.name)}")
                     elif isinstance(p, ir.Param) and p.type is Type.OBJ and p.cls is not None:
                         c_params.append(f"{self.cls_ptr(p.cls)}a_{mangle(p.name)}")
+                    elif isinstance(p, ir.Param) and p.type is Type.STR:
+                        c_params.append(f"tpa_str *a_{mangle(p.name)}")          # borrowed, as `__init__` takes it
+                    elif isinstance(p, ir.Param) and p.type is Type.STR_LIST:
+                        c_params.append(f"tpa_str_list *a_{mangle(p.name)}")
                     elif isinstance(p, ir.Param) and p.type in CTYPE:
                         ct = "tpa_int" if self.tagged_param(init_fn, p) else CTYPE[p.type]
                         c_params.append(f"{ct} a_{mangle(p.name)}")
@@ -1242,6 +1253,10 @@ class _Fn:
                 self.list_slots.append((kind, t))
                 self.emit(f"{lfn(kind, 'release')}({t}); {t} = {vf}; {lfn(kind, 'retain')}({t});")
                 return t
+            if fd.type is Type.STR:
+                t = self.pslot()
+                self.emit(f"tpa_str_set(&{t}, {vf});")
+                return t
             assert fd.cls is not None
             t = self.oslot(fd.cls)
             mc = mangle(fd.cls)
@@ -1258,6 +1273,15 @@ class _Fn:
                 self.emit(f"tpa_int_set(&{t}, {obj}->f_{mf});")
                 return t
             return f"({obj}->f_{mf})"
+        if fd.type is Type.STR:
+            # a field that may be rebound while the value is in use is held by a slot; an immutable field of an
+            # object the function cannot drop is borrowed (as a list field, PR-O1 elision rule 3)
+            if (not region_obj and self.g.cls_analysis.field_elidable(e.cls, e.field)
+                    and isinstance(e.obj, ir.Local) and e.obj.name not in self.assigned):
+                return f"({obj}->f_{mf})"
+            t = self.pslot()
+            self.emit(f"tpa_str_set(&{t}, {obj}->f_{mf});")
+            return t
         if fd.type in LIST:
             kind = "f64" if fd.type is Type.F64_ARRAY else (
                 "int" if self.g.reps.field_list_big(e.cls, e.field) else "i64")
@@ -2001,6 +2025,9 @@ class _Fn:
                     else:
                         val = self.ev(src)
                     self.emit(f"{vf} = {val};")
+            elif fd.type is Type.STR:
+                val = eval_args[src][0] if isinstance(src, int) else self.ev(src)
+                self.emit(f"tpa_str_set(&{vf}, {val});")
             elif fd.type in LIST:
                 assert isinstance(src, int)
                 val, _, arg_kind = eval_args[src]
@@ -2053,6 +2080,8 @@ class _Fn:
         for fd in decl.field_decls:
             if fd.type is Type.I64 and self.g.reps.field(cls, fd.name) == TAGGED:
                 self.emit(f"{t}->f_{mangle(fd.name)} = TPA_INT_ZERO;")
+            elif fd.type is Type.STR:
+                self.emit(f"{t}->f_{mangle(fd.name)} = NULL;")      # (region memory is not zeroed)
         self._emit_init_stores(cls, e, init_fn, eval_args, lambda fname: f"{t}->f_{mangle(fname)}", True)
         return t
 
@@ -2077,6 +2106,9 @@ class _Fn:
             else:
                 val = self.ev(s.value)
                 self.emit(f"{lval} = {val};")
+        elif fd.type is Type.STR:
+            val = self.str_value(s.value, f"the value stored into .{s.field}")
+            self.emit(f"tpa_str_set(&{lval}, {val});")         # the new reference is held before the old is released
         elif fd.type in LIST:
             kind = "f64" if fd.type is Type.F64_ARRAY else (
                 "int" if self.g.reps.field_list_big(s.cls, s.field) else "i64")
@@ -2586,6 +2618,9 @@ class _Fn:
                                     "int" if self.g.reps.field_list_big(cls, fd.name) else "i64")
                                 decls.append(f"    {list_ptr(kind)}{vf} TPA_UNUSED = NULL;")
                                 releases.append(f"    {lfn(kind, 'release')}({vf});")
+                            elif fd.type is Type.STR:
+                                decls.append(f"    tpa_str *{vf} TPA_UNUSED = NULL;")
+                                releases.append(f"    tpa_str_release({vf});")
                             else:
                                 assert fd.cls is not None
                                 fmc = mangle(fd.cls)

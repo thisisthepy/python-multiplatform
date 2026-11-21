@@ -735,6 +735,8 @@ def _aot_field_decl(fname: str, ann: ast.expr, known_names: set[str]) -> ir.Fiel
     kind = _annotation_kind(ann)
     if kind in SCALAR_KIND:
         return ir.FieldDecl(fname, SCALAR_KIND[kind])
+    if kind.strip("'\"") == "str":
+        return ir.FieldDecl(fname, Type.STR)            # tier S1b: an owned str (acyclic: a str holds nothing)
     if kind in ARRAY_KIND:
         return ir.FieldDecl(fname, ARRAY_KIND[kind])
     # class or class | None (including string forward references)
@@ -886,6 +888,19 @@ def _trivial_init(init: ast.FunctionDef, fields: tuple[str, ...]) -> bool:
             return False
         stored[field_name] = st.value.id
     return all(stored.get(f) == p for f, p in zip(fields, params))
+
+
+def _aot_unqualified(kind: str, classes: dict[str, ir.ClassDecl]) -> str:
+    """AOT mode: Pyrefly spells an inferred class with its module (`prog.Node`, `prog.Node | None`). An AOT program
+    imports no module that defines a class (only math, sys and time), so a qualified name whose last part is a class of
+    the program is that class (a local bound from a call result otherwise lost its class)."""
+    parts = []
+    for p in kind.split("|"):
+        q = p.strip()
+        if "." in q and q.rsplit(".", 1)[1] in classes:
+            q = q.rsplit(".", 1)[1]
+        parts.append(q)
+    return " | ".join(parts)
 
 
 def _class_of(kind: str, classes: dict[str, ir.ClassDecl]) -> tuple[str, bool] | None:
@@ -2202,7 +2217,7 @@ class _Lowerer:
             kinds = list(self.annotations.get(name, []))
             if name not in self.annotations:
                 kinds += self.inferred.get(name, [])
-            found = {_class_of(k, classes) for _, k in kinds}
+            found = {_class_of(_aot_unqualified(k, classes) if self.info.aot else k, classes) for _, k in kinds}
             if len(found) == 1 and None not in found:
                 return next(iter(found))[0], self.info.aot  # type: ignore[index]
         return None, False

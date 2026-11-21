@@ -273,7 +273,7 @@ def analyze_classes(module: ir.Module, rel: str, class_lines: dict[str, int] | N
     def _is_ref_field(cname: str, fd: ir.FieldDecl) -> bool:
         if fd.type == Type.OBJ:
             return True
-        if fd.type in ir.ARRAYS:
+        if fd.type in ir.ARRAYS or fd.type is Type.STR:     # (STR: tier S1b, an owned reference)
             return True
         if fd.type == Type.I64 and (cname, fd.name) in tagged:
             return True
