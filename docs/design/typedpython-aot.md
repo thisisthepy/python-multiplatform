@@ -144,6 +144,99 @@ start early. Tier names are for this note only.
   CPython objects). Calls to Kotlin are typed direct calls, not object calls (section 8).
 - Enough for: wordfreq.
 
+#### 4.3.1 Tier S step 1 (PR-S1): strings
+
+Design for PR-S1 (agent proposal, written 2026-11-21 after the leader's order K5, M1, O1, O2, S1, S2, S3, T1 and the
+1.0 scope answer of the same day, "Start S1 right after the 1.0 items if time remains"; not owner-confirmed, leader
+review pending). Tier S is after 1.0; this step changes nothing in a program that has no `str` value.
+
+**What a program can do with a `str` (the accepted subset of this step).**
+
+- Values: literals, `+`, `+=`, `*` by an int, `==` `!=` `<` `<=` `>` `>=` (code point order, as CPython), `len`,
+  indexing (`s[i]`, negative included), slicing (`s[a:b]`, `s[a:b:c]`, CPython's index adjustment), `in` / `not in`
+  (substring), iteration (`for ch in s`), the conditional expression, `str` locals, parameters, results, fields of a
+  class (an owned field, acyclic) and module constants.
+- Producers: `str(x)` and `repr(x)` of `int`, `float`, `bool` and `str` (the int and float formatters the kernel already
+  has; `repr` of a `str` below), `chr`, `sys.argv[i]` (decoded as CPython decodes it: UTF-8 with `surrogateescape` on
+  POSIX, the UTF-16 `wmain` arguments on Windows, which the int parser already reads), f-strings anywhere (not only in
+  `print`), with `{s}`, `{s!r}`, `{x!r}` and the existing `{e}` / `{e:.Nf}`.
+- Consumers: `print` of a `str` (also with other values, `sep` and `end`), `sys.stdout.write` and `sys.stderr.write`
+  (their int result is the length, as CPython's text stream returns), `ord`, `int(s)` for any `str` (the parser of
+  `int(sys.argv[i])`, with the reference's `repr` of the string in the error message).
+- Methods (the list of section 4.3; any other is the compile error `aot/str-method`): `split()` / `split(sep)` /
+  `split(sep, maxsplit)`, `join`, `strip()` / `lstrip()` / `rstrip()` with and without a `chars` argument, `lower`,
+  `upper`, `startswith` / `endswith` (a `str` or a tuple of `str`, no `start` / `end` yet), `find` (no `start` / `end`
+  yet), `replace` (with and without `count`), `isalpha`, `isdigit`. `encode` waits for `bytes` (S2).
+- `list[str]` only as far as `split` and `join` need it: a list display of `str`, `split`'s result, indexing, `len`,
+  iteration, `join`'s argument, a local or parameter. Growth (`append`, ...) is S2 with the other containers; a growing
+  use is `aot/container` (pending, tier S), as today.
+- Compile errors that stay: `is` / `is not` with a `str` operand (`aot/str-identity`: CPython's answer depends on
+  interning, so a program that relies on it has no defined result to reproduce), `%` formatting and `str.format`
+  (`aot/str-format`, pending S2), a `str` argument or result of an `aot-lib` export (`aot/library-str`; the C-ABI
+  string kind is a later step with its own ABI version), and every method outside the list.
+
+**Representation (`runtime/tp_aot_str.h`, linked only by a program that has a `str` value).**
+
+- `struct tpa_str { tpa_rc_t rc; uint8_t kind; int64_t len; int64_t hash; <data> }`: CPython's PEP 393 layout without
+  the object header. `kind` is 1, 2 or 4 bytes per code point and is always the narrowest kind that holds the largest
+  code point (every constructor normalises), so two equal strings have equal kinds and `==` compares `kind`, `len` and
+  then the bytes. Indexing and slicing are O(1) per element, as in CPython. A lone surrogate (from `surrogateescape`
+  or from `chr(0xDC80)`) is an ordinary 2-byte code point, as in CPython; UTF-8 storage cannot hold it, which is why
+  this layout and not UTF-8.
+- `hash` is reserved for S2's `dict` / `set` (`-1` until computed); nothing in S1 reads it.
+- Reference counting as the O1 objects (`tpa_str_retain` / `tpa_str_release`, `TPA_RC_*` macros, atomic under
+  `TPA_THREADS`). A `str` holds no reference, so it is acyclic and never tracked by the collector. Literals and module
+  constants are static objects with an immortal count (`TPA_RC_IMMORTAL`, retain and release skip it), so the library
+  build's threads may share them with no write.
+- Not a region or virtual object in S1 (the allocation classifier reports `heap-rc (str)`); a region object's `str`
+  field is an owned heap reference released by the region walk, as a list field is (PR-O2b's R4 relaxation).
+- `s += t` where `s` is a local whose count is 1 and not immortal resizes `s` in place (CPython's interpreter does the
+  same through `unicode_concatenate`); unobservable, since nothing else holds `s`.
+
+**Unicode data.** `lower`, `upper`, `isalpha`, `isdigit`, the whitespace of `split()` / `strip()` and `repr`'s
+printable test depend on CPython's Unicode database. The AOT compiler runs on the reference CPython (3.15t), so it
+generates the tables the program needs from that interpreter, at build time: for each code point, the full mapping of
+`chr(c).lower()` and `chr(c).upper()` (one to three code points: `'ß'.upper() == 'SS'`, `'İ'.lower()` is two code
+points), and bit sets for `str.isalpha`, `str.isdigit`, `str.isspace` and `str.isprintable`, compressed as two-level
+tables. Only the tables the program uses are emitted; the generated C records `unicodedata.unidata_version`. Final
+sigma: `lower` applies CPython's `handle_capital_sigma` rule (U+03A3 becomes U+03C2 at the end of a word), in the
+runtime, since it depends on context. The tables therefore match the interpreter that built the program bit for bit;
+a program built by a different CPython minor version gets that version's tables, which is what that version prints.
+
+**Output.** CPython 3.15 runs in UTF-8 mode by default (observed on the reference 3.15.0rc1t:
+`sys.flags.utf8_mode == 1`, `sys.stdout.errors == "surrogateescape"`, `sys.stderr.errors == "backslashreplace"`).
+`print` and `sys.stdout.write` therefore encode to UTF-8 from the kind array into the existing buffered `stdout`, a
+code point U+DC80..U+DCFF (what `surrogateescape` decoded from a non-UTF-8 argument byte) is written back as that
+raw byte, and any other surrogate raises `UnicodeEncodeError: 'utf-8' codec can't encode character '\ud800' in
+position N: surrogates not allowed` (observed). `print` encodes and writes its arguments one at a time, so the
+arguments before the failing one are written and the failing one writes nothing, as CPython's `TextIOWrapper` does.
+`sys.stderr.write` and the uncaught-exception line use `backslashreplace`. What the Windows console path needs
+(CPython writes a console through its own console I/O) is decided in S1a with a test on the Windows job; the kernel
+tier's output is ASCII, so the question did not arise before.
+
+**Exact messages (each one in the differential tests).** `IndexError: string index out of range`;
+`ValueError: empty separator`; `ValueError: chr() arg not in range(0x110000)`;
+`TypeError: ord() expected a character, but string of length N found`; `int()`'s
+`ValueError: invalid literal for int() with base 10: <repr>` (already exact for `sys.argv`); `OverflowError: repeated
+string is too long` / `MemoryError` for `*` past the size limit (D4 accepts the memory-exhaustion behaviour, not the
+size check, which is reproduced).
+
+**Free threading.** Strings are immutable after construction and constants are immortal; the in-place `+=` applies
+only to a count of 1 (no other holder on any thread). Nothing in S1 shares a mutable string between threads.
+
+**Tests (PR-S1, `test_aot_tier_s1.py`).** Every operation and method differential-tested against CPython over a corpus
+of ASCII, Latin-1, BMP, astral and lone-surrogate strings and the empty string, including each error message above;
+exhaustive table tests (`lower`, `upper`, `isalpha`, `isdigit`, `isspace`, `repr` over every code point
+0..0x10FFFF, printed in chunks and compared with the interpreter); `sys.argv` with non-UTF-8 bytes; the in-place
+`+=` with a second holder (must copy); `print` of U+DC80 (the raw byte) and of U+D800 (the arguments before it written, the error line, status 1); leaks
+under LeakSanitizer and use after free under ASan for strings in class fields, lists of strings and region objects;
+a mutant per table (one wrong entry must fail its exhaustive test); the acyclic and string-free programs generate the
+C they generated before (no `tp_aot_str.h`).
+
+**Order.** S1a: representation, literals, operators, `len`, indexing, slicing, `in`, iteration, `print`, f-strings,
+`str()` / `repr()`, `ord`, `chr`, `sys.argv[i]`, `int(s)`, `sys.std*.write`. S1b: the methods, the generated Unicode
+tables and the minimal `list[str]`. Each is one PR with its CI run.
+
 ### 4.4 Tier T, threads
 
 Section 7.
