@@ -505,13 +505,13 @@ class Representation:
             return RAW
         if isinstance(e, ir.Local):
             return r.names.get(e.name, RAW)
-        if isinstance(e, (ir.Len, ir.ArgvLen, ir.BoolToInt)):
+        if isinstance(e, (ir.Len, ir.ArgvLen, ir.BoolToInt, ir.StrLen, ir.StrOrd, ir.StrWrite)):
             return RAW
         if isinstance(e, ir.Index):
             return TAGGED if self.list_big(r.name, e.array) else RAW
         if isinstance(e, ir.FieldGet):
             return self.field_reps.get((e.cls, e.field), RAW)
-        if isinstance(e, (ir.ArgvInt, ir.FloatToInt, ir.StrToInt, ir.MathCall)):
+        if isinstance(e, (ir.ArgvInt, ir.FloatToInt, ir.StrToInt, ir.MathCall, ir.StrParseInt)):
             return TAGGED
         if isinstance(e, ir.Call):
             callee = self.reps.get(e.function)

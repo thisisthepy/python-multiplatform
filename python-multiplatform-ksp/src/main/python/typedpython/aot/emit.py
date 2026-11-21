@@ -122,6 +122,12 @@ def _f64(v: float) -> str:
     return f"({v!r})"
 
 
+def _plain_text(text: str) -> bool:
+    """Tier S1: may `text` be written as its UTF-8 bytes (`tpa_print_str`)? Unless it holds a surrogate, which
+    must go through the str runtime's encoder (surrogateescape or CPython's UnicodeEncodeError)."""
+    return not any(0xD800 <= ord(c) <= 0xDFFF for c in text)
+
+
 def _c_string(text: str) -> tuple[str, int]:
     """A C string literal for the UTF-8 bytes of `text` and their count. Printable ASCII is written as it
     is, anything else (and `"`, `\\`, `?` against trigraphs) as a three-digit octal escape."""
@@ -192,7 +198,7 @@ def assigned_names(f: ir.Function) -> set[str]:
         for n in rep_mod.walk(s):
             if isinstance(n, ir.Assign):
                 out.add(n.target)
-            elif isinstance(n, ir.ForRange):
+            elif isinstance(n, (ir.ForRange, ir.ForStr)):
                 out.add(n.var)
             elif isinstance(n, ir.Unpack):
                 out.update(n.targets)
@@ -220,6 +226,8 @@ class _Gen:
         self.findings: list[Finding] = []
         self.chunks: list[str] = []
         self.argv_int = False           # some function reads `int(sys.argv[i])`: the entry point must keep the arguments whole
+        self.uses_str = False           # tier S1: some function has a str value (links tp_aot_str.h)
+        self.str_lits: dict[str, str] = {}      # tier S1: literal text -> the name of its static object
         tagged_fields = {k for k, v in self.reps.field_reps.items() if v == TAGGED}
         class_lines = {c.name: c.lineno for c in program.classes}
         self.cls_analysis = classes_mod.analyze_classes(module, program.rel, class_lines, tagged_fields)
@@ -228,6 +236,34 @@ class _Gen:
 
     def cls_ptr(self, cls: str) -> str:
         return f"tpa_cls_{mangle(cls)} *"
+
+    # -- tier S1 (PR-S1a): str literals
+
+    def str_lit(self, text: str) -> str:
+        """The C expression of the immortal static string `text` (runtime/tp_aot_str.h)."""
+        self.uses_str = True
+        if text == "":
+            return "(&tpa_str__empty)"
+        if len(text) == 1 and ord(text) < 0x100:
+            return f"(&tpa_str__latin1[{ord(text)}].h)"
+        name = self.str_lits.get(text)
+        if name is None:
+            name = self.str_lits[text] = f"tps_{len(self.str_lits)}"
+        return f"(&{name}.h)"
+
+    def emit_str_lits(self) -> list[str]:
+        """The static objects of the literals, in first-use order: the code points of each in the narrowest kind."""
+        out = []
+        for text, name in self.str_lits.items():
+            cps = [ord(c) for c in text]
+            kind = 1 if max(cps) < 0x100 else 2 if max(cps) < 0x10000 else 4
+            ct = {1: "uint8_t", 2: "uint16_t", 4: "uint32_t"}[kind]
+            out.append(f"static TPA_UNUSED struct {{ tpa_str h; {ct} d[{len(cps)}]; }} {name} = "
+                       f"{{ TPA_STR_HEAD({len(cps)}, {kind}), {{")
+            for i in range(0, len(cps), 16):
+                out.append("    " + ", ".join(f"0x{c:x}" for c in cps[i:i + 16]) + ",")
+            out.append("} };")
+        return out
 
     def field_ctype(self, cls: str, fd: ir.FieldDecl) -> str:
         if fd.type is Type.F64:
@@ -556,6 +592,8 @@ class _Gen:
             return p.name in assigned_names(f)                                   # type: ignore[attr-defined]
         if isinstance(p, ir.Param) and p.type is Type.OBJ and p.cls is not None:
             return p.name in assigned_names(f)
+        if isinstance(p, ir.Param) and p.type is Type.STR:             # tier S1
+            return p.name in assigned_names(f)
         return False
 
     def param_c(self, f: ir.Function, p: object) -> str:
@@ -572,6 +610,9 @@ class _Gen:
                 params.append(f"{list_ptr(self.array_kind(f.name, p.name, p.type))}v_{mangle(p.name)} TPA_UNUSED")
             elif isinstance(p, ir.Param) and p.type is Type.OBJ and p.cls is not None:
                 params.append(f"{self.cls_ptr(p.cls)}{self.param_c(f, p)} TPA_UNUSED")
+            elif isinstance(p, ir.Param) and p.type is Type.STR:
+                self.uses_str = True
+                params.append(f"tpa_str *{self.param_c(f, p)} TPA_UNUSED")     # borrowed from the caller
             elif isinstance(p, ir.Param) and p.type in CTYPE:
                 ct = "tpa_int" if self.tagged_param(f, p) else CTYPE[p.type]
                 params.append(f"{ct} {self.param_c(f, p)} TPA_UNUSED")
@@ -582,6 +623,9 @@ class _Gen:
             params.append(f"{list_ptr(self.ret_kind(f))}*out")
         elif f.returns is Type.OBJ and f.return_cls is not None:
             params.append(f"{self.cls_ptr(f.return_cls)}*out")
+        elif f.returns is Type.STR:
+            self.uses_str = True
+            params.append("tpa_str **out")                                    # a new reference the caller owns
         elif kinds is not None:
             params += [f"{self.out_ctype(f, k, self.reps.element(f.name, i))} *out{i}" for i, k in enumerate(kinds)]
         elif f.returns in CTYPE:
@@ -614,6 +658,7 @@ class _Fn:
         self.str_slots: list[str] = []           # `char *` temporaries (a formatted TAGGED int): freed there too
         self.obj_slots: list[tuple[str, str]] = []   # (cls, slot_name) class temporaries: released at cleanup
         self.list_slots: list[tuple[str, str]] = []  # (kind, slot_name) retained mutable list field reads
+        self.pystr_slots: list[str] = []         # tier S1: `tpa_str *` temporaries, each owns its value; released at cleanup
         self.assigned: set[str] = assigned_names(f)
         self.regions = g.alloc_plan.fn_regions(f.name)      # PR-O2b: class -> its region in this function
         self.borrowed_locals: set[str] = self._find_borrowed_locals(f)
@@ -721,6 +766,166 @@ class _Fn:
         t = self.tmp("char *", "NULL")
         self.str_slots.append(t)
         return t
+
+    # -- tier S1 (PR-S1a): str values. `ev` of a STR node is a borrowed `tpa_str *`: a name, a literal, or a slot that
+    # owns the value until the slot is next written or the function leaves.
+
+    def pslot(self) -> str:
+        """A str temporary, emptied now; an operation writes it only on success (`@` in `pstr`)."""
+        self.g.uses_str = True
+        t = self.tmp("tpa_str *", "NULL")
+        self.pystr_slots.append(t)
+        self.emit(f"tpa_str_clear(&{t});")
+        return t
+
+    def pstr(self, call: str) -> str:
+        t = self.pslot()
+        self.emit(f"if ({call.replace('@', '&' + t)}) {self.fail()}")
+        return t
+
+    def str_value(self, e: ir.Expr, what: str) -> str:
+        if e.type is not Type.STR:
+            return self.bad("aot/type", what, f"{what} is a {getattr(e.type, 'value', '?')}, not a str")
+        return self.ev(e)
+
+    def clamp(self, e: ir.Expr) -> str:
+        """A slice bound or step: an int64 as it is, an int outside 64 bits clamped (CPython's _PyEval_SliceIndex)."""
+        v = self.ev(e)
+        return v if self.rep(e) == RAW else f"tpa_int_clamp_index({v})"
+
+    def str_of(self, x: ir.Expr, repr_: bool) -> str:
+        """`str(x)` / `repr(x)` of an int, float, bool or str as a borrowed str."""
+        if x.type is Type.STR:
+            v = self.ev(x)
+            return self.pstr(f"tpa_str_repr({v}, @)") if repr_ else v
+        v = self.ev(x)
+        if x.type is Type.I64:
+            if self.rep(x) == TAGGED:
+                return self.pstr(f"tpa_str_from_int({v}, @)")
+            return self.pstr(f"tpa_str_from_i64({v}, @)")
+        if x.type is Type.F64:
+            return self.pstr(f"tpa_str_from_f64({v}, @)")
+        if x.type is Type.BOOL:
+            return self.pstr(f"tpa_str_from_bool({v}, @)")
+        return self.bad("aot/type", "str", f"str() of a {getattr(x.type, 'value', '?')} has no AOT form")
+
+    def ev_StrConcat(self, e: ir.StrConcat) -> str:
+        a = self.str_value(e.left, "the left operand of +")
+        b = self.str_value(e.right, "the right operand of +")
+        return self.pstr(f"tpa_str_concat({a}, {b}, @)")
+
+    def ev_StrRepeat(self, e: ir.StrRepeat) -> str:
+        if e.count_first:
+            n_val = self.ev(e.count)
+            s = self.str_value(e.value, "the str operand of *")
+        else:
+            s = self.str_value(e.value, "the str operand of *")
+            n_val = self.ev(e.count)
+        if self.rep(e.count) == TAGGED:            # CPython's OverflowError for a count outside 64 bits
+            n = self.tmp("int64_t")
+            self.emit(f"if (tpa_int_to_count({n_val}, &{n})) {self.fail()}")
+        else:
+            n = n_val
+        return self.pstr(f"tpa_str_repeat({s}, {n}, @)")
+
+    def ev_StrCompare(self, e: ir.StrCompare) -> str:
+        a = self.str_value(e.left, "a str comparison")
+        b = self.str_value(e.right, "a str comparison")
+        if e.op is ir.CompareKind.EQ:
+            return f"tpa_str_eq({a}, {b})"
+        if e.op is ir.CompareKind.NE:
+            return f"(!tpa_str_eq({a}, {b}))"
+        return f"(tpa_str_cmp({a}, {b}) {e.op.value} 0)"
+
+    def ev_StrContains(self, e: ir.StrContains) -> str:
+        needle = self.str_value(e.needle, "the left operand of `in`")
+        hay = self.str_value(e.hay, "the right operand of `in`")
+        return f"({'!' if e.negate else ''}tpa_str_contains({hay}, {needle}))"
+
+    def ev_StrLen(self, e: ir.StrLen) -> str:
+        return f"(({self.str_value(e.value, 'the argument of len()')})->len)"
+
+    def ev_StrIndex(self, e: ir.StrIndex) -> str:
+        s = self.str_value(e.value, "the indexed str")
+        i = self.raw_index(e.index)                # an int outside 64 bits: CPython's IndexError
+        return self.pstr(f"tpa_str_index({s}, {i}, @)")
+
+    def ev_StrSlice(self, e: ir.StrSlice) -> str:
+        s = self.str_value(e.value, "the sliced str")
+        vals, has = [], []
+        for b, flag in ((e.start, "TPA_SLICE_START"), (e.stop, "TPA_SLICE_STOP"), (e.step, "TPA_SLICE_STEP")):
+            if b is None:
+                vals.append("0")
+            else:
+                vals.append(self.clamp(b))
+                has.append(flag)
+        return self.pstr(f"tpa_str_slice({s}, {vals[0]}, {vals[1]}, {vals[2]}, {' | '.join(has) or '0'}, @)")
+
+    def ev_StrOf(self, e: ir.StrOf) -> str:
+        return self.str_of(e.value, e.repr)
+
+    def ev_StrOrd(self, e: ir.StrOrd) -> str:
+        s = self.str_value(e.value, "the argument of ord()")
+        return self.fallible("int64_t", f"tpa_str_ord({s}, @)")
+
+    def ev_StrChr(self, e: ir.StrChr) -> str:
+        v = self.ev(e.value)
+        if self.rep(e.value) == TAGGED:
+            return self.pstr(f"tpa_str_chr_int({v}, @)")
+        return self.pstr(f"tpa_str_chr_i64({v}, @)")
+
+    def ev_ArgvStr(self, e: ir.ArgvStr) -> str:
+        self.g.argv_int = True                      # the entry keeps the arguments whole (UTF-16 on Windows)
+        i = self.raw_index(e.index)
+        return self.pstr(f"tpa_str_argv({i}, @)")
+
+    def ev_StrParseInt(self, e: ir.StrParseInt) -> str:
+        s = self.str_value(e.value, "the argument of int()")
+        return self.fallible_int(f"tpa_str_to_int({s}, @)")
+
+    def ev_StrWrite(self, e: ir.StrWrite) -> str:
+        s = self.str_value(e.value, "the argument of write()")
+        if e.err:
+            self.emit(f"tpa_str_write_err({s});")
+        else:
+            self.emit(f"if (tpa_str_print({s})) {self.fail()}")
+        return f"(({s})->len)"
+
+    def fstring_parts(self, f: ir.FString) -> list[str] | None:
+        """Every part of an f-string as a borrowed str, evaluated in order (all of them before anything is built)."""
+        parts = []
+        for part in f.parts:
+            if isinstance(part, ir.Const) and isinstance(part.value, str):
+                parts.append(self.g.str_lit(part.value))
+            elif isinstance(part, ir.FormatField):
+                if part.precision is not None:
+                    v = self.ev(part.value)
+                    parts.append(self.pstr(f"tpa_str_format_f64_fixed({v}, {part.precision}, @)"))
+                else:
+                    parts.append(self.str_of(part.value, part.repr))
+            else:
+                self.bad("aot/f-string", "f-string", "an f-string part has a form the AOT mode does not know")
+                return None
+        return parts
+
+    def join(self, parts: list[str]) -> str:
+        if not parts:
+            return self.g.str_lit("")
+        if len(parts) == 1:
+            return parts[0]
+        self.emit("{")
+        self.emit(f"    tpa_str *parts_[{len(parts)}];")
+        for i, v in enumerate(parts):
+            self.emit(f"    parts_[{i}] = {v};")
+        t = self.pslot()
+        self.emit(f"    if (tpa_str_join(parts_, {len(parts)}, &{t})) {self.fail()}")
+        self.emit("}")
+        return t
+
+    def ev_FString(self, e: ir.FString) -> str:
+        """An f-string that is a str value: every field is evaluated, in order, then the string is made."""
+        parts = self.fstring_parts(e)
+        return "NULL" if parts is None else self.join(parts)
 
     def fallible_int(self, call: str) -> str:
         """A TAGGED result: the slot is emptied, then written only by a successful call (`@` is its address)."""
@@ -901,8 +1106,9 @@ class _Fn:
             return "0"
         if e.type is Type.OBJ and e.value is None:
             return "NULL"
-        return self.bad("aot/str", "str", "a string value is only supported as a literal argument of print "
-                        "(strings arrive in a later step)")
+        if e.type is Type.STR and isinstance(e.value, str):
+            return self.g.str_lit(e.value)
+        return self.bad("aot/str", "str", "a string object other than a str value has no AOT form")
 
     def ev_Is(self, e: ir.Is) -> str:
         left = self.ev(e.left)
@@ -1023,7 +1229,8 @@ class _Fn:
         return any(isinstance(p, ir.Param) and p.name == name and p.cls is not None for p in self.f.params)
 
     def ev_Local(self, e: ir.Local) -> str:
-        if e.type not in CTYPE and e.type not in LIST and not (e.type is Type.OBJ and self._is_class_local(e.name)):
+        if e.type not in CTYPE and e.type not in LIST and e.type is not Type.STR \
+                and not (e.type is Type.OBJ and self._is_class_local(e.name)):
             self.ctype(e.type, e.name)
         return f"v_{mangle(e.name)}"
 
@@ -1075,6 +1282,19 @@ class _Fn:
     def ev_Cond(self, e: ir.Cond) -> str:
         """`then if cond else orelse`: only the chosen branch runs (a branch that emits statements, an element
         read or a fallible operation, makes this an `if` statement into a temporary)."""
+        if e.type is Type.STR:
+            c = self.ev(e.cond)
+            a, pre_a = self.capture(lambda: self.ev(e.then))
+            b, pre_b = self.capture(lambda: self.ev(e.orelse))
+            t = self.tmp("tpa_str *", "NULL")          # borrows the chosen branch's value for this statement
+            self.emit(f"if ({_unwrap(c)}) {{")
+            self.lines.extend(pre_a)
+            self.emit(f"    {t} = {a};")
+            self.emit("} else {")
+            self.lines.extend(pre_b)
+            self.emit(f"    {t} = {b};")
+            self.emit("}")
+            return t
         if e.type not in CTYPE:
             return self.ctype(e.type, "conditional expression") and "0"
         c = self.ev(e.cond)
@@ -1432,6 +1652,10 @@ class _Fn:
             t = self.list_tmp(self.g.ret_kind(callee))
             self.emit(f"if ({name}({', '.join(args + ['&' + t])})) {self.fail()}")
             return t                                       # a new reference: the receiver owns it
+        if callee.returns is Type.STR:
+            t = self.pslot()
+            self.emit(f"if ({name}({', '.join(args + ['&' + t])})) {self.fail()}")
+            return t                                       # the slot owns the new reference
         if callee.returns is Type.OBJ and callee.return_cls is not None:
             mc = mangle(callee.return_cls)
             t = self.oslot(callee.return_cls)
@@ -1533,6 +1757,19 @@ class _Fn:
 
     def st_Assign(self, s: ir.Assign) -> None:
         want = self.types.get(s.target)
+        if want is Type.STR:
+            target = f"v_{mangle(s.target)}"
+            v = s.value
+            if isinstance(v, ir.StrConcat) and isinstance(v.left, ir.Local) and v.left.name == s.target:
+                # `s += t` (or `s = s + t`): the name owns its reference (every str name does: a parameter the body
+                # assigns works on an owned copy), so a count of 1 means nothing else holds the string and it grows
+                # in place (design 4.3.1; review of #510, F1)
+                b = self.str_value(v.right, "the right operand of +")
+                self.emit(f"if (tpa_str_iadd(&{target}, {b})) {self.fail()}")
+                return
+            val = self.str_value(v, s.target)
+            self.emit(f"tpa_str_set(&{target}, {val});")       # the new reference is held before the old is released
+            return
         if want in LIST:
             x = self.kind(s.target)
             if not self.kinds_agree(s.value, x, s.target):
@@ -1784,6 +2021,8 @@ class _Fn:
             put(slot)
 
     def st_ExprStmt(self, s: ir.ExprStmt) -> None:
+        if isinstance(s.value, ir.Const):
+            return                # a docstring or another constant: nothing to evaluate
         v = self.ev(s.value)      # a fallible operation or a call has been emitted; what remains has no effect
         if s.value.type in LIST:
             callee = self.g.fns.get(s.value.function) if isinstance(s.value, ir.Call) else None
@@ -1793,15 +2032,19 @@ class _Fn:
             self.emit(f"{lfn(self.g.ret_kind(callee), 'release')}({v});")      # a returned list nobody binds
 
     def st_Print(self, s: ir.Print) -> None:
-        """`print(...)`: every argument (every field of an f-string) is evaluated first, in order (a fallible
-        one may leave), then the text is written. A TAGGED int is formatted where CPython formats it: a field of an
-        f-string when the f-string is built (so nothing of the call is written if it raises), a plain argument when
-        `print` writes it (so the arguments before it are already written when the digit limit raises)."""
+        """`print(...)`: every argument (every field of an f-string), then `sep` and `end`, is evaluated first, in
+        order (a fallible one may leave), then the text is written. A TAGGED int is formatted where CPython formats it:
+        a field of an f-string when the f-string is built (so nothing of the call is written if it raises), a plain
+        argument when `print` writes it (so the arguments before it are already written when the digit limit
+        raises). A str is encoded when it is written (tier S1): the arguments before one that cannot be encoded are
+        written, with the separator, and it writes nothing, as CPython's text stream does."""
         args: list[list[tuple[str, object]]] = []
         for a in s.args:
             if isinstance(a, ir.Const) and a.type is Type.OBJ and isinstance(a.value, str):
                 args.append([("str", a.value)])
-            elif isinstance(a, ir.FString):
+            elif isinstance(a, ir.Const) and a.type is Type.STR and isinstance(a.value, str) and _plain_text(a.value):
+                args.append([("str", a.value)])                         # ASCII-safe text: written as its UTF-8
+            elif isinstance(a, ir.FString) and self.fstring_by_parts(a):
                 items: list[tuple[str, object]] = []
                 for part in a.parts:
                     if isinstance(part, ir.Const) and isinstance(part.value, str):
@@ -1821,6 +2064,14 @@ class _Fn:
                         self.bad("aot/f-string", "f-string", "an f-string field has a form the AOT mode does not know")
                         return
                 args.append(items)
+            elif isinstance(a, ir.FString):
+                # a str field, `!r`, or text that is not plain: the whole f-string is made first, as CPython makes it
+                parts = self.fstring_parts(a)
+                if parts is None:
+                    return
+                args.append([("pystr", self.join(parts))])
+            elif a.type is Type.STR:
+                args.append([("pystr", self.ev(a))])
             elif a.type in CTYPE:
                 v = self.ev(a)
                 if a.type is Type.I64 and self.rep(a) == TAGGED:
@@ -1831,15 +2082,22 @@ class _Fn:
                 known = len(self.found)
                 self.ev(a)                 # names the operation that made the object, when it can
                 if len(self.found) == known:
-                    self.bad("aot/print-arg", "print", "print takes ints, floats, bools and string literals only")
+                    self.bad("aot/print-arg", "print", "print takes ints, floats, bools and strs only")
                 return
+        sep = None if s.sep is None else self.str_value(s.sep, "print's sep")
+        end = None if s.end is None else self.str_value(s.end, "print's end")
         for i, items in enumerate(args):
             if i:
-                self.emit("tpa_print_sep();")
+                if sep is None:
+                    self.emit("tpa_print_sep();")
+                else:
+                    self.emit(f"if (tpa_str_print({sep})) {self.fail()}")
             for kind, val in items:
                 if kind == "str":
                     lit, n = _c_string(val)                              # type: ignore[arg-type]
                     self.emit(f"tpa_print_str({lit}, {n});")
+                elif kind == "pystr":
+                    self.emit(f"if (tpa_str_print({val})) {self.fail()}")
                 elif kind == "int64_t":
                     self.emit(f"tpa_print_i64({val});")
                 elif kind == "double":
@@ -1856,7 +2114,39 @@ class _Fn:
                     self.emit(f"{buf} = NULL;")
                 else:
                     self.emit(f"tpa_print_bool({val});")
-        self.emit("tpa_print_end();")
+        if end is None:
+            self.emit("tpa_print_end();")
+        else:
+            self.emit(f"if (tpa_str_print({end})) {self.fail()}")
+
+    def fstring_by_parts(self, f: ir.FString) -> bool:
+        """May `print` write this f-string piece by piece (the form before tier S1)? Only when every part is plain
+        text or a number or bool field without `!r`: then nothing in it can fail to encode."""
+        for part in f.parts:
+            if isinstance(part, ir.Const):
+                if not (isinstance(part.value, str) and _plain_text(part.value)):
+                    return False
+            elif not (isinstance(part, ir.FormatField) and part.value.type in CTYPE and not part.repr):
+                return False
+        return True
+
+    def st_ForStr(self, s: ir.ForStr) -> None:
+        """`for var in value` over a str: the string is held for the loop, `var` takes each character in turn."""
+        held = self.tmp("tpa_str *", "NULL")
+        self.pystr_slots.append(held)
+        v = self.str_value(s.value, "the iterable")
+        self.emit(f"tpa_str_set(&{held}, {v});")
+        k = self.tmp("int64_t")
+        ch = self.tmp("tpa_str *", "NULL")
+        self.emit(f"for ({k} = 0; {k} < {held}->len; {k}++) {{")
+        self.depth += 1
+        self.emit(f"if (tpa_str_index({held}, {k}, &{ch})) {self.fail()}")
+        self.emit(f"tpa_str_release(v_{mangle(s.var)});")
+        self.emit(f"v_{mangle(s.var)} = {ch};")
+        self.loop_prologue(s)
+        self.stmts(s.body)
+        self.depth -= 1
+        self.emit("}")
 
     def st_If(self, s: ir.If) -> None:
         self.emit(f"if ({_unwrap(self.ev(s.cond))}) {{")
@@ -1989,6 +2279,12 @@ class _Fn:
             self.emit(f"*out = {val};")
             self.leave()
             return
+        if returns is Type.STR:
+            v = self.str_value(s.value, "the return value")
+            self.emit(f"tpa_str_retain({v});")                         # the caller gets its own reference
+            self.emit(f"*out = {v};")
+            self.leave()
+            return
         if s.value.type is Type.NONE or returns is Type.NONE:
             self.ev(s.value)
             self.leave()
@@ -2081,12 +2377,14 @@ class _Fn:
         f = self.f
         for p in f.params:
             ok = ((isinstance(p, ir.Param) and p.type in CTYPE and p.cls is None)
+                  or (isinstance(p, ir.Param) and p.type is Type.STR)
                   or (isinstance(p, ir.Param) and p.type is Type.OBJ and p.cls is not None)
                   or (isinstance(p, ir.ArrayParam) and p.type in LIST and p.buffer is None))
             if not ok:
                 self.bad("aot/type", getattr(p, "name", "?"), f"the parameter `{getattr(p, 'name', '?')}` is not an "
                          "int, float, bool, list[float], list[int] or compiled class")
         if f.returns not in CTYPE and f.returns not in LIST and f.returns is not Type.NONE \
+                and f.returns is not Type.STR \
                 and not (f.returns is Type.OBJ and f.return_cls is not None) \
                 and self.g.tuple_kinds(f) is None:
             self.bad("aot/type", f.name, f"the return type {f.returns.value} is outside the AOT mode (int, float, "
@@ -2094,11 +2392,15 @@ class _Fn:
         for p in f.entry_globals:
             self.bad("aot/global", p.name, f"the module global `{p.name}` is read at entry, which has no AOT form")
         for name, t in f.locals.items():
-            if t not in LIST and not (t is Type.OBJ and name in f.local_classes):
+            if t is Type.STR:
+                self.g.uses_str = True
+            elif t not in LIST and not (t is Type.OBJ and name in f.local_classes):
                 self.ctype(t, name)
         owned = [p for p in f.params if self.g.owned_param(f, p)]
-        for p in owned:                      # a TAGGED or class parameter the body assigns: work on an owned copy
-            if isinstance(p, ir.Param) and p.type is Type.OBJ and p.cls is not None:
+        for p in owned:                      # a TAGGED, class or str parameter the body assigns: work on an owned copy
+            if isinstance(p, ir.Param) and p.type is Type.STR:
+                self.emit(f"tpa_str_set(&v_{mangle(p.name)}, pv_{mangle(p.name)});")
+            elif isinstance(p, ir.Param) and p.type is Type.OBJ and p.cls is not None:
                 mc = mangle(p.cls)
                 self.emit(f"v_{mangle(p.name)} = pv_{mangle(p.name)};")
                 self.emit(f"tpa_cls_{mc}_retain(v_{mangle(p.name)});")
@@ -2110,7 +2412,10 @@ class _Fn:
         decls = []
         releases = []
         for p in owned:
-            if isinstance(p, ir.Param) and p.type is Type.OBJ and p.cls is not None:
+            if isinstance(p, ir.Param) and p.type is Type.STR:
+                decls.append(f"    tpa_str *v_{mangle(p.name)} TPA_UNUSED = NULL;")
+                releases.append(f"    tpa_str_release(v_{mangle(p.name)});")
+            elif isinstance(p, ir.Param) and p.type is Type.OBJ and p.cls is not None:
                 mc = mangle(p.cls)
                 decls.append(f"    tpa_cls_{mc} *v_{mangle(p.name)} TPA_UNUSED = NULL;")
                 releases.append(f"    tpa_cls_{mc}_release(v_{mangle(p.name)});")
@@ -2118,6 +2423,10 @@ class _Fn:
                 decls.append(f"    tpa_int v_{mangle(p.name)} TPA_UNUSED = TPA_INT_ZERO;")        # type: ignore[union-attr]
                 releases.append(f"    tpa_int_release(v_{mangle(p.name)});")                       # type: ignore[union-attr]
         for name, t in f.locals.items():
+            if t is Type.STR:
+                decls.append(f"    tpa_str *v_{mangle(name)} TPA_UNUSED = NULL;")
+                releases.append(f"    tpa_str_release(v_{mangle(name)});")
+                continue
             if t in LIST:
                 kind = self.kind(name)
                 decls.append(f"    {list_ptr(kind)}v_{mangle(name)} TPA_UNUSED = NULL;")
@@ -2165,6 +2474,8 @@ class _Fn:
             releases.append(f"    tpa_int_release({n});")
         for n in self.str_slots:
             releases.append(f"    free({n});")
+        for n in self.pystr_slots:
+            releases.append(f"    tpa_str_release({n});")
         for cls, n in self.obj_slots:
             releases.append(f"    tpa_cls_{mangle(cls)}_release({n});")
         for kind, n in self.list_slots:
@@ -2223,12 +2534,15 @@ def emit(module: ir.Module, program: Program, *, strict_int: bool = False,
         "/* Generated by typedpython.aot (SPEC N-17, #448). No interpreter header, no interpreter API. */",
         '#include "tp_aot.h"',
     ]
-    if needs_int_runtime(body_text):
+    if needs_int_runtime(body_text) or g.uses_str:
         out.append('#include "tp_aot_int.h"')
+    if g.uses_str:
+        out.append('#include "tp_aot_str.h"')        # tier S1: only a program with a str value links the str runtime
     gc = bool(g.cls_analysis.cyclic_classes)
     if gc:
         out.append('#include "tp_aot_gc.h"')      # PR-O2c: only a program with a cyclic-capable class links the collector
     out += ["", *FP_CONTRACT_PRAGMA, ""]
+    out += g.emit_str_lits()
     out += class_decls
     out += prototypes
     out.append("")

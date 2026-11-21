@@ -62,9 +62,10 @@ _DYNAMIC_CALLS = frozenset({"eval", "exec", "compile", "__import__", "globals", 
 _INTROSPECTION_CALLS = frozenset({"getattr", "setattr", "delattr", "hasattr"})
 _INTROSPECTION_ATTRS = frozenset({"__dict__", "__class__", "__slots__", "__bases__", "__mro__"})
 _KERNEL_BUILTINS = frozenset()
-_SET_BUILTINS_S = frozenset({"sorted", "sum", "any", "all", "enumerate", "zip", "reversed", "ord", "chr", "repr", "str", "format"})
+_SET_BUILTINS_S = frozenset({"sorted", "sum", "any", "all", "enumerate", "zip", "reversed", "format"})
 _CONTAINER_CALLS = frozenset({"dict", "set", "tuple", "bytes"})
-_SUPPORTED_CALLS = frozenset({"len", "range", "float", "bool", "isinstance", "type", "list", "print", "int", "abs", "min", "max"})
+_SUPPORTED_CALLS = frozenset({"len", "range", "float", "bool", "isinstance", "type", "list", "print", "int", "abs", "min", "max",
+                              "ord", "chr", "repr", "str"})     # (ord ... str: tier S1, PR-S1a)
 _SIGNAL_EXCEPTIONS = frozenset({"KeyboardInterrupt", "RecursionError"})
 _COMPILED = "compiled"
 
@@ -561,8 +562,7 @@ class _Pass(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_JoinedStr(self, node: ast.JoinedStr) -> None:
-        if id(node) not in self.print_fstrings:
-            self.pending("S", "aot/str", "f-string", node, "an f-string outside `print()` is tier S (strings), not compiled yet")
+        # tier S1 (PR-S1a): an f-string is a str value anywhere; its fields are checked as any expression
         self.generic_visit(node)
 
     def visit_FormattedValue(self, node: ast.FormattedValue) -> None:
@@ -600,8 +600,8 @@ class _Pass(ast.NodeVisitor):
         elif isinstance(f, ast.Attribute):
             if (isinstance(f.value, ast.Constant) and isinstance(f.value.value, str)) or (
                     isinstance(f.value, ast.Name) and self.kinds.get(f.value.id) == "str"):
-                self.pending("S", "aot/str", f.attr, node, f"the string method `{f.attr}` is tier S (strings), not compiled yet "
-                                                          "(syntactic: a str literal or a name annotated `str`)")
+                self.pending("S", "aot/str", f.attr, node, f"the string method `{f.attr}` is tier S1b (strings), not compiled "
+                                                          "yet (syntactic: a str literal or a name annotated `str`)")
         self.generic_visit(node)
 
     def builtin_call(self, n: str, node: ast.Call) -> None:

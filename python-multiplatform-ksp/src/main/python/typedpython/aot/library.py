@@ -193,6 +193,14 @@ def export_findings(program, exports: list[str]) -> tuple[list[Finding], dict[st
             continue
         problems = []
         a = fn.args
+        str_at = [x for x in [*(arg.annotation for arg in a.args), fn.returns]
+                  if isinstance(x, ast.Name) and x.id == "str"]
+        if str_at:
+            # design 4.3.1: the C-ABI string kind is a later step with its own ABI version
+            found.append(_finding(rel, fn.lineno, "aot/library-str", name,
+                                  f"`{name}` cannot be exported: a str parameter or result has no C-ABI form yet "
+                                  "(the library's string kind comes with its own ABI version)", name))
+            continue
         class_names = {c.name for c in getattr(program, "classes", ())}
         for arg in a.args:
             if _scalar_or_list(arg.annotation) is None and not (
@@ -608,6 +616,7 @@ def _c_text(g, bodies: list[list[str]], exports: list[_Export], p: str) -> str:
         f"typedef tpa_i64_list {p}_i64_list;",
         "@INTLIST@",
     ]
+    out += g.emit_str_lits()            # tier S1: the immortal literals of the functions' str values
     out += [g.prototype(f) for f in g.fns.values()]
     out.append("")
     for b in bodies:
@@ -638,6 +647,8 @@ def _c_text(g, bodies: list[list[str]], exports: list[_Export], p: str) -> str:
     # (the typedef of the `int_list` kind, `@INTLIST@`, is a line of its own only in a library that uses the kind)
     text = text.replace("@INTLIST@\n", f"typedef tpa_int_list {p}_int_list;\n\n" if any(e.uses_int_list for e in exports)
                         else "\n")
+    if g.uses_str:                      # tier S1: the str runtime needs the int runtime's parser and formatter
+        return text.replace("@INT@", '#include "tp_aot_int.h"\n#include "tp_aot_str.h"\n')
     if emit_mod.needs_int_runtime(text.replace("@INT@", "")):
         return text.replace("@INT@", '#include "tp_aot_int.h"\n')
     return text.replace("@INT@", "")

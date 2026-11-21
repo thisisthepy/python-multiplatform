@@ -148,7 +148,8 @@ start early. Tier names are for this note only.
 
 Design for PR-S1 (agent proposal, written 2026-11-21 after the leader's order K5, M1, O1, O2, S1, S2, S3, T1 and the
 1.0 scope answer of the same day, "Start S1 right after the 1.0 items if time remains"; not owner-confirmed, leader
-review pending). Tier S is after 1.0; this step changes nothing in a program that has no `str` value.
+review pending). Tier S is in 1.0 (owner, 2026-11-21 21:55: "191, 443, 175 전부 1.0에 넣어", relayed by the leader;
+the earlier "after 1.0" is withdrawn). This step changes nothing in a program that has no `str` value.
 
 **What a program can do with a `str` (the accepted subset of this step).**
 
@@ -251,7 +252,23 @@ C they generated before (no `tp_aot_str.h`).
 
 **Order.** S1a: representation, literals, operators, `len`, indexing, slicing, `in`, iteration, `print`, f-strings,
 `str()` / `repr()`, `ord`, `chr`, `sys.argv[i]`, `int(s)`, `sys.std*.write`. S1b: the methods, the generated Unicode
-tables and the minimal `list[str]`. Each is one PR with its CI run.
+tables, the minimal `list[str]`, `str` fields of classes and `str | None` (the containers of a str: they share the
+owned-field and region-walk work). Each is one PR with its CI run.
+
+**As implemented in S1a (agent proposal, not owner-confirmed).** A STR value is `ir.Type.STR` (AOT mode only; the
+default mode never produces it) and every operation is its own IR node (`StrConcat`, `StrRepeat`, `StrCompare`,
+`StrContains`, `StrLen`, `StrIndex`, `StrSlice`, `StrOf`, `StrOrd`, `StrChr`, `ArgvStr`, `StrParseInt`,
+`StrWrite`, `ForStr`, and an `FString` of type STR). The emitter follows the TAGGED ints: a str name and each str
+temporary own one reference, an operation writes an emptied temporary only on success, and the cleanup point
+releases them; a parameter is borrowed, and one the body assigns works on an owned copy, so every name owns its
+reference and `+=` may grow in place exactly when the count is 1. Indexing and iteration of Latin-1 text allocate
+nothing (256 immortal one-character strings, as CPython caches them). `print` writes a literal without a surrogate as
+its UTF-8 bytes, as before, and an f-string of numbers piece by piece, as before; an f-string with a str field,
+`!r`, or text with a surrogate is made in full first, as CPython makes it, so nothing of it is written when it
+cannot be encoded. `repr` uses the printable table tp_aot_int.h already has (`int()`'s message); S1b generates the
+tables from the reference interpreter. The Windows console (a console, not a pipe) is the one open output question:
+CPython writes a console through WriteConsoleW, and this step writes UTF-8 bytes through the C runtime, which a
+pipe (every test) receives exactly as CPython's; S1b settles the console with a test on the Windows job.
 
 ### 4.4 Tier T, threads
 

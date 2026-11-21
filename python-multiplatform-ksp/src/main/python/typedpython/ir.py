@@ -69,6 +69,7 @@ class Type(Enum):
     F64_ARRAY = "f64[]"    # a list[float] parameter (ArrayParam) or a local array (NewArray/CopyArray)
     I64_ARRAY = "i64[]"    # a list[int] parameter (ArrayParam) or a local array (NewArray/CopyArray)
     BOOL_ARRAY = "bool[]"  # a numpy np.bool_ buffer parameter only (1-byte items, #261)
+    STR = "str"            # AOT mode only (tier S1, PR-S1a): a Python str, a counted `tpa_str` (runtime/tp_aot_str.h)
 
 
 SCALARS = (Type.I64, Type.F64, Type.BOOL)
@@ -704,6 +705,10 @@ class Print(Stmt):
     call) and the verifier rejects it unless asked for AOT mode (`verify.verify(m, aot=True)`)."""
 
     args: tuple[Expr, ...]
+    # Tier S1 (PR-S1a): `sep=` and `end=` (STR expressions, evaluated after the positional arguments, in source
+    # order, as CPython evaluates a call's arguments); None: a space and a newline. An argument may be STR.
+    sep: Expr | None = None
+    end: Expr | None = None
 
 
 # --- AOT-only nodes (SPEC N-17, #451; agent proposal, not owner-confirmed) -----------------------------
@@ -804,15 +809,143 @@ class FormatField(Expr):
 
     value: Expr
     precision: int | None = None
+    # Tier S1 (PR-S1a): `{x!r}` (True: `repr(value)`); `value` may then also be STR, and a STR value without it
+    # is the string itself (`{s}`).
+    repr: bool = False
 
 
 @dataclass(frozen=True)
 class FString(Expr):
-    """A formatted string argument of `Print` (type OBJ; nowhere else, it is not a string value):
-    `parts` are `Const` OBJ strs and `FormatField`s, written one after another with nothing between.
-    Every field is evaluated, in order, before any part is written."""
+    """A formatted string: as an argument of `Print`, type OBJ (written part by part, or made in full first when a
+    part can fail to encode); anywhere else (tier S1), type STR, the string the parts make. `parts` are str `Const`s
+    and `FormatField`s, one after another with nothing between. Every field is evaluated, in order, before any part
+    is written or the string is made."""
 
     parts: tuple[Expr, ...]
+
+
+# --- Tier S1 (PR-S1a) string nodes (AOT mode only; docs/design/typedpython-aot.md 4.3.1) -------------------
+#
+# A STR value is a counted `tpa_str`. Each node below evaluates its operands left to right, as CPython does, and
+# raises CPython's exception with its message where CPython raises one. An `FString` of type STR (anywhere but a
+# `Print` argument, where it stays OBJ and is written piece by piece) is the string its parts make.
+
+@dataclass(frozen=True)
+class StrConcat(Expr):
+    """`left + right` of two STR (type STR). `s += t` on a STR name is `Assign(s, StrConcat(Local s, t))`; the back
+    end grows the name's string in place when nothing else holds it (design 4.3.1, the ownership rule)."""
+
+    left: Expr
+    right: Expr
+
+
+@dataclass(frozen=True)
+class StrRepeat(Expr):
+    """`value * count` or `count * value` (type STR); `value` STR, `count` I64. `count_first`: the int was the
+    left operand (it is evaluated first)."""
+
+    value: Expr
+    count: Expr
+    count_first: bool = False
+
+
+@dataclass(frozen=True)
+class StrCompare(Expr):
+    """`left <op> right` of two STR (type BOOL): equality by content, order by code point."""
+
+    op: CompareKind
+    left: Expr
+    right: Expr
+
+
+@dataclass(frozen=True)
+class StrContains(Expr):
+    """`needle in hay` (`negate`: `not in`) of two STR (type BOOL); `needle` is evaluated first."""
+
+    needle: Expr
+    hay: Expr
+    negate: bool = False
+
+
+@dataclass(frozen=True)
+class StrLen(Expr):
+    """`len(value)` of a STR (type I64, in [0, 2**62])."""
+
+    value: Expr
+
+
+@dataclass(frozen=True)
+class StrIndex(Expr):
+    """`value[index]` (type STR); `index` I64 (an int outside 64 bits is CPython's IndexError)."""
+
+    value: Expr
+    index: Expr
+
+
+@dataclass(frozen=True)
+class StrSlice(Expr):
+    """`value[start:stop:step]` (type STR); each bound I64 or None (absent), evaluated in that order."""
+
+    value: Expr
+    start: Expr | None
+    stop: Expr | None
+    step: Expr | None
+
+
+@dataclass(frozen=True)
+class StrOf(Expr):
+    """`str(value)` or (`repr`) `repr(value)` of an I64, F64, BOOL or STR (type STR)."""
+
+    value: Expr
+    repr: bool = False
+
+
+@dataclass(frozen=True)
+class StrOrd(Expr):
+    """`ord(value)` of a STR (type I64, in [0, 0x10FFFF])."""
+
+    value: Expr
+
+
+@dataclass(frozen=True)
+class StrChr(Expr):
+    """`chr(value)` of an I64 (type STR)."""
+
+    value: Expr
+
+
+@dataclass(frozen=True)
+class ArgvStr(Expr):
+    """`sys.argv[index]` (type STR), `index` I64: the argument as CPython decodes it."""
+
+    index: Expr
+
+
+@dataclass(frozen=True)
+class StrParseInt(Expr):
+    """`int(value)` of a STR (type I64, TAGGED: any int CPython parses)."""
+
+    value: Expr
+
+
+@dataclass(frozen=True)
+class StrWrite(Expr):
+    """`sys.stdout.write(value)` or (`err`) `sys.stderr.write(value)` of a STR (type I64: `len(value)`, as the text
+    stream returns)."""
+
+    value: Expr
+    err: bool = False
+
+
+@dataclass(frozen=True)
+class ForStr(Stmt):
+    """`for var in value:` over a STR: `value` is evaluated once and held for the loop (rebinding its name in the body
+    does not change what is iterated); `var` (a STR local) takes each one-character string in turn. After the loop
+    `var` keeps its last value."""
+
+    var: str
+    value: Expr
+    body: tuple[Stmt, ...]
 
 
 @dataclass(frozen=True)

@@ -364,6 +364,10 @@ from .ir import (
     ArgvInt, ArgvLen, BoolToInt, Cond, FloatToInt, FormatField, FString, ListDisplay, Print,
     ReturnTuple, StrToInt, SysExit, TimeCall, TimeFunc, TimeSleep, Unpack,
 )
+from .ir import (
+    ArgvStr, ForStr, StrChr, StrCompare, StrConcat, StrContains, StrIndex, StrLen, StrOf, StrOrd, StrParseInt,
+    StrRepeat, StrSlice, StrWrite,
+)
 from .ir import CheckExact, CheckMethod, ClassDecl, FieldGet, FieldSet, Is, IsExact, New
 from .ir import BuildString, Contains, ForObj, Format, GetItem, NewDict, NewList, StoreItem
 from .ir import ParInfo
@@ -422,8 +426,11 @@ _STMTS = frozenset({Assign, StoreIndex, ExprStmt, If, While, ForRange, Return, B
                     FieldSet, StoreItem, ForObj})
 # The statements and expressions only the AOT mode (`verify(m, aot=True)`) accepts. (An `FString` and its
 # `FormatField`s are checked by `s_Print`, which is the only place one may stand.)
-_AOT_STMTS = frozenset({Print, ReturnTuple, Unpack, TimeSleep, SysExit})
-_AOT_EXPRS = frozenset({ListDisplay, Cond, ArgvInt, ArgvLen, FloatToInt, BoolToInt, StrToInt, TimeCall})
+_AOT_STMTS = frozenset({Print, ReturnTuple, Unpack, TimeSleep, SysExit, ForStr})
+_AOT_EXPRS = frozenset({ListDisplay, Cond, ArgvInt, ArgvLen, FloatToInt, BoolToInt, StrToInt, TimeCall,
+                        # tier S1 (PR-S1a): the STR nodes, and an f-string that is a str value
+                        StrConcat, StrRepeat, StrCompare, StrContains, StrLen, StrIndex, StrSlice, StrOf, StrOrd,
+                        StrChr, ArgvStr, StrParseInt, StrWrite, FString})
 # Nodes whose OBJ result is a new reference (ir.py "ownership": Box, Global, GetAttr, CallObject,
 # OBJ BinOp, Tuple), plus reads of an OBJ local (the local owns its reference; the back end increfs or
 # borrows under that rule) and Calls of a compiled function returning OBJ (which returns a new
@@ -571,7 +578,7 @@ class _Checker:
                     if p.buffer:
                         self.buffers.add(p.name)
             elif type(p) is Param:
-                if p.type not in _VALUE_TYPES:
+                if p.type not in _VALUE_TYPES and not (self.aot and p.type is Type.STR):
                     self.error(TYPE, f"parameter '{p.name}' has type {p.type}; arrays must be "
                                      f"ArrayParam")
                 else:
@@ -634,14 +641,15 @@ class _Checker:
                     self.error(TYPE, f"local array '{name}' collides with a scalar parameter")
                 else:
                     self.larrays[name] = t
-            elif t not in _LOCAL_TYPES:
+            elif t not in _LOCAL_TYPES and not (self.aot and t is Type.STR):
                 self.error(TYPE, f"local '{name}' has type {t}")
             elif name in self.scalars and self.scalars[name] is not t:
                 self.error(TYPE, f"local '{name}' declared {t} but parameter is "
                                  f"{self.scalars[name]}")
             else:
                 self.scalars[name] = t
-        if fn.returns not in _RETURN_TYPES and not (self.aot and fn.returns in (Type.F64_ARRAY, Type.I64_ARRAY)):
+        if fn.returns not in _RETURN_TYPES and not (self.aot and fn.returns in (Type.F64_ARRAY, Type.I64_ARRAY,
+                                                                               Type.STR)):
             self.error(TYPE, f"return type {fn.returns} is not a value type")
         for flag in ("pure", "may_deopt"):
             if not isinstance(getattr(fn, flag), bool):
@@ -805,6 +813,8 @@ class _Checker:
               or (t is Type.NONE and v is None))
         if t is Type.OBJ:
             ok = v is None or _plain_str(v)   # None, or a str the C source can carry exactly
+        if t is Type.STR:
+            ok = self.aot and type(v) is str  # tier S1: any text (the back end embeds its code points)
         if not ok:
             self.error(TYPE, f"constant {v!r} does not match type {t.value}")
         return e
@@ -862,6 +872,10 @@ class _Checker:
                 elif self.fixing:
                     self.bottom = True
             return _meet_interval(base, self.refine.get(e.name))
+        if cls in (StrLen, StrWrite):
+            return (0, _LEN_MAX)            # tier S1: a length
+        if cls is StrOrd:
+            return (0, 0x10FFFF)
         if cls is Len:
             return self.lens.get(e.array, (0, _LEN_MAX))
         if cls is Cond:          # AOT mode: either branch
@@ -915,6 +929,10 @@ class _Checker:
                             self.bottom = True
             iv = _meet_interval(iv, self.refine.get(e.name))
             return _meet_interval(iv, _FULL) if raw else iv
+        if cls in (StrLen, StrWrite):
+            return (0, _LEN_MAX)            # tier S1: a length
+        if cls is StrOrd:
+            return (0, 0x10FFFF)
         if cls is Len:
             return self.lens.get(e.array, (0, _LEN_MAX))
         if cls is Index:
@@ -1683,8 +1701,8 @@ class _Checker:
         orelse = self.expr(e.orelse, state)
         self.dead -= dead
         self.refine, self.facts = entry, base
-        if e.type not in ir.SCALARS:
-            self.error(TYPE, f"a conditional expression is a scalar, node says {getattr(e.type, 'value', e.type)}")
+        if e.type not in ir.SCALARS and e.type is not Type.STR:
+            self.error(TYPE, f"a conditional expression is a scalar or a str, node says {getattr(e.type, 'value', e.type)}")
         else:
             self.slot(then, e.type, "the value of a conditional expression")
             self.slot(orelse, e.type, "the else value of a conditional expression")
@@ -1717,6 +1735,140 @@ class _Checker:
             self.error(STRUCTURE, f"StrToInt text {e.text!r} is not a str")
         self.result(e, Type.I64)
         return e
+
+    # --- tier S1 (PR-S1a): str nodes ---
+
+    def e_FString(self, e: FString, state: _State) -> ir.Expr:
+        """An f-string that is a str value (anywhere but a Print argument, which `s_Print` checks)."""
+        if e.type is not Type.STR:
+            self.error(TYPE, "an FString outside a Print argument is a str")
+        return self.fstring(e, state)
+
+    def str_operand(self, x: ir.Expr, state: _State, what: str) -> ir.Expr:
+        x = self.expr(x, state)
+        self.slot(x, Type.STR, what)
+        return x
+
+    def int_operand(self, x: ir.Expr, state: _State, what: str) -> ir.Expr:
+        x = self.expr(x, state)
+        self.slot(x, Type.I64, what)
+        return x
+
+    def e_StrConcat(self, e: StrConcat, state: _State) -> ir.Expr:
+        left = self.str_operand(e.left, state, "left operand of str +")
+        right = self.str_operand(e.right, state, "right operand of str +")
+        self.result(e, Type.STR)
+        return dataclasses.replace(e, left=left, right=right)
+
+    def e_StrRepeat(self, e: StrRepeat, state: _State) -> ir.Expr:
+        if type(e.count_first) is not bool:
+            self.error(TYPE, "StrRepeat `count_first` is not a bool")
+        if e.count_first:
+            count = self.int_operand(e.count, state, "count of str *")
+            value = self.str_operand(e.value, state, "str operand of *")
+        else:
+            value = self.str_operand(e.value, state, "str operand of *")
+            count = self.int_operand(e.count, state, "count of str *")
+        self.result(e, Type.STR)
+        return dataclasses.replace(e, value=value, count=count)
+
+    def e_StrCompare(self, e: StrCompare, state: _State) -> ir.Expr:
+        if type(e.op) is not CompareKind:
+            self.error(UNKNOWN, f"StrCompare op {e.op!r} is not a CompareKind")
+        left = self.str_operand(e.left, state, "left operand of a str comparison")
+        right = self.str_operand(e.right, state, "right operand of a str comparison")
+        self.result(e, Type.BOOL)
+        return dataclasses.replace(e, left=left, right=right)
+
+    def e_StrContains(self, e: StrContains, state: _State) -> ir.Expr:
+        if type(e.negate) is not bool:
+            self.error(TYPE, "StrContains `negate` is not a bool")
+        needle = self.str_operand(e.needle, state, "left operand of `in`")
+        hay = self.str_operand(e.hay, state, "right operand of `in`")
+        self.result(e, Type.BOOL)
+        return dataclasses.replace(e, needle=needle, hay=hay)
+
+    def e_StrLen(self, e: StrLen, state: _State) -> ir.Expr:
+        value = self.str_operand(e.value, state, "argument of len()")
+        self.result(e, Type.I64)
+        return dataclasses.replace(e, value=value)
+
+    def e_StrIndex(self, e: StrIndex, state: _State) -> ir.Expr:
+        value = self.str_operand(e.value, state, "indexed str")
+        index = self.int_operand(e.index, state, "index of a str")
+        self.result(e, Type.STR)
+        return dataclasses.replace(e, value=value, index=index)
+
+    def e_StrSlice(self, e: StrSlice, state: _State) -> ir.Expr:
+        value = self.str_operand(e.value, state, "sliced str")
+        bounds = [None if b is None else self.int_operand(b, state, "bound of a str slice")
+                  for b in (e.start, e.stop, e.step)]
+        self.result(e, Type.STR)
+        return dataclasses.replace(e, value=value, start=bounds[0], stop=bounds[1], step=bounds[2])
+
+    def e_StrOf(self, e: StrOf, state: _State) -> ir.Expr:
+        if type(e.repr) is not bool:
+            self.error(TYPE, "StrOf `repr` is not a bool")
+        value = self.expr(e.value, state)
+        if getattr(value, "type", None) not in ir.SCALARS and getattr(value, "type", None) is not Type.STR:
+            self.error(TYPE, "str() and repr() take an i64, f64, bool or str")
+        self.result(e, Type.STR)
+        return dataclasses.replace(e, value=value)
+
+    def e_StrOrd(self, e: StrOrd, state: _State) -> ir.Expr:
+        value = self.str_operand(e.value, state, "argument of ord()")
+        self.result(e, Type.I64)
+        return dataclasses.replace(e, value=value)
+
+    def e_StrChr(self, e: StrChr, state: _State) -> ir.Expr:
+        value = self.int_operand(e.value, state, "argument of chr()")
+        self.result(e, Type.STR)
+        return dataclasses.replace(e, value=value)
+
+    def e_ArgvStr(self, e: ArgvStr, state: _State) -> ir.Expr:
+        index = self.int_operand(e.index, state, "index of sys.argv")
+        self.result(e, Type.STR)
+        return dataclasses.replace(e, index=index)
+
+    def e_StrParseInt(self, e: StrParseInt, state: _State) -> ir.Expr:
+        value = self.str_operand(e.value, state, "argument of int()")
+        self.result(e, Type.I64)
+        return dataclasses.replace(e, value=value)
+
+    def e_StrWrite(self, e: StrWrite, state: _State) -> ir.Expr:
+        if type(e.err) is not bool:
+            self.error(TYPE, "StrWrite `err` is not a bool")
+        value = self.str_operand(e.value, state, "argument of write()")
+        self.result(e, Type.I64)
+        return dataclasses.replace(e, value=value)
+
+    def s_ForStr(self, s: ForStr, state: _State):
+        """`for var in value` over a str (AOT mode): `var` is a declared str local; zero iterations leave it as it
+        was, so the state after the loop is the entry state met with every break state."""
+        value = self.str_operand(s.value, state, "iterable of ForStr")
+        var = s.var
+        if not isinstance(var, str) or self.scalars.get(var) is not Type.STR:
+            self.error(TYPE, f"ForStr target {var!r} must be a declared str local")
+        if var in self.entry:
+            self.error(STRUCTURE, f"entry global '{var}' is assigned by the loop")
+        for outer in self.loops:
+            if outer.var == var:
+                self.error(STRUCTURE, f"loop variable '{var}' is assigned in its loop body (by an inner loop)")
+        loop = _Loop(None, None)
+        self.loops.append(loop)
+        head = self.loop_facts(s.body, (var,))
+        self.facts = dict(head)
+        killed = _assigned_names(s.body) | {var}
+        head_refine = {k: v for k, v in self.refine.items() if k not in killed}
+        self.refine = head_refine
+        body, _ = self.block(s.body, None if state is None else state | {var})
+        self.loops.pop()
+        self.refine = dict(head_refine)
+        self.facts = dict(head)
+        after: _State = state
+        for br in loop.breaks:
+            after = _meet(after, br)
+        return dataclasses.replace(s, value=value, body=body), after
 
     def e_TimeCall(self, e: TimeCall, state: _State) -> ir.Expr:
         if type(e.func) is not TimeFunc:
@@ -1918,28 +2070,42 @@ class _Checker:
                 continue
             a2 = self.expr(a, state)
             t = getattr(a2, "type", None)
-            if t not in ir.SCALARS and t is not Type.OBJ:
+            if t not in ir.SCALARS and t is not Type.OBJ and t is not Type.STR:
                 self.error(TYPE, f"argument {k + 1} of Print is {getattr(t, 'value', t)}, not an i64, "
-                                 f"f64, bool or obj")
+                                 f"f64, bool, str or obj")
             args.append(a2)
-        return dataclasses.replace(s, args=tuple(args)), state
+        extra = {}
+        for key in ("sep", "end"):
+            v = getattr(s, key, None)
+            if v is not None:
+                v = self.expr(v, state)
+                self.slot(v, Type.STR, f"`{key}` of Print")
+            extra[key] = v
+        return dataclasses.replace(s, args=tuple(args), **extra), state
 
     def fstring(self, f: FString, state: _State) -> ir.Expr:
         """An f-string argument of Print (AOT mode): constant text and fields, each field an I64, F64 or BOOL
         value (printed as `str` of it) or an F64 with a precision from 0 to 20 (`format(x, '.Nf')`)."""
-        if f.type is not Type.OBJ or not isinstance(f.parts, tuple):
-            self.error(STRUCTURE, "FString is an obj with a tuple of parts")
+        if f.type not in (Type.OBJ, Type.STR) or not isinstance(f.parts, tuple):
+            self.error(STRUCTURE, "FString is an obj (a print argument) or a str with a tuple of parts")
             return f
         parts = []
         for k, part in enumerate(f.parts):
             if type(part) is Const and part.type is Type.OBJ and _plain_str(part.value):
                 parts.append(part)
+            elif type(part) is Const and part.type is Type.STR and type(part.value) is str:
+                parts.append(part)
             elif type(part) is FormatField and part.type is Type.OBJ:
                 value = self.expr(part.value, state)
                 t = getattr(value, "type", None)
                 p = part.precision
-                if t not in ir.SCALARS:
-                    self.error(TYPE, f"field {k + 1} of an f-string is {getattr(t, 'value', t)}, not an i64, f64 or bool")
+                if type(getattr(part, "repr", False)) is not bool:
+                    self.error(TYPE, f"field {k + 1} of an f-string has a non-bool `repr`")
+                if t not in ir.SCALARS and t is not Type.STR:
+                    self.error(TYPE, f"field {k + 1} of an f-string is {getattr(t, 'value', t)}, not an i64, f64, "
+                                     "bool or str")
+                elif p is not None and part.repr:
+                    self.error(TYPE, f"field {k + 1} of an f-string has both a precision and `!r`")
                 elif p is not None:
                     if type(p) is not int or isinstance(p, bool) or not 0 <= p <= 20:
                         self.error(TYPE, f"field {k + 1} of an f-string has the precision {p!r}, not an int from 0 to 20")

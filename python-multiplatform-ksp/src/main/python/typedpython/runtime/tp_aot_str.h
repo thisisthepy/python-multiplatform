@@ -551,6 +551,42 @@ static TPA_UNUSED int tpa_str_repr(tpa_str *s, tpa_str **out)
     return 0;
 }
 
+/* format(v, '.<prec>f') of a float (an f-string field `{v:.Nf}`), as tp_aot.h's print of it. */
+static TPA_UNUSED int tpa_str_format_f64_fixed(double v, int prec, tpa_str **out)
+{
+    char buf[400];
+    int n = tpa_format_f64_fixed(v, prec, buf);
+    return tpa_str_from_ascii(buf, (size_t)n, out);
+}
+
+/* The concatenation of `n` strings at once (an f-string's parts): one allocation of the widest kind. */
+static TPA_UNUSED int tpa_str_join(tpa_str *const *parts, size_t n, tpa_str **out)
+{
+    int64_t len = 0, kind = 1, at = 0;
+    size_t i;
+    tpa_str *r;
+    for (i = 0; i < n; i++) {
+        if (parts[i]->len > INT64_MAX - len) {
+            return tpa_raise(TPA_OverflowError, "join() result is too long for a Python string");
+        }
+        len += parts[i]->len;
+        kind = parts[i]->kind > kind ? parts[i]->kind : kind;
+    }
+    if (len == 0) {
+        *out = &tpa_str__empty;
+        return 0;
+    }
+    if (tpa_str__alloc(len, kind, &r)) {
+        return -1;
+    }
+    for (i = 0; i < n; i++) {
+        tpa_str__copy(r, at, parts[i], 0, parts[i]->len);
+        at += parts[i]->len;
+    }
+    *out = r;
+    return 0;
+}
+
 /* ------------------------------------------------------------------------------------------
  * Consumers: ord, chr, int(s), sys.argv[i]
  * ------------------------------------------------------------------------------------------ */

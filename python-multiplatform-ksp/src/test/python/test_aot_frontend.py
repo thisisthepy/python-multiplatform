@@ -451,8 +451,8 @@ def test_an_fstring_is_a_formatted_print_argument(tmp_path):
 
 
 @pytest.mark.parametrize("fragment, text", [
-    ("{x!r}", "conversion"),
-    ("{x=}", "conversion"),
+    ("{x!a}", "conversion `!a`"),
+    ("{x!r:.2f}", "with no conversion"),
     ("{x:8.2f}", "format spec `8.2f`"),
     ("{x:e}", "format spec `e`"),
     ("{x:.21f}", "format spec `.21f`"),
@@ -464,9 +464,19 @@ def test_an_fstring_field_outside_the_two_forms_is_a_skip(tmp_path, fragment, te
     assert not m.functions and text in m.skipped["f"], m.skipped
 
 
-def test_an_fstring_anywhere_but_print_is_a_skip(tmp_path):
-    m = aot_ir(tmp_path, "def f(x: float) -> None:\n    s = f'{x}'\n")
-    assert "only supported as an argument of print" in m.skipped["f"]
+def test_an_fstring_outside_print_is_a_str_value(tmp_path):
+    """Tier S1 (PR-S1a): an f-string anywhere but a print argument is a STR `FString`; `{x!r}` and `{x=}` (text, then
+    the repr) are fields with `repr`. Red before S1a: the function was skipped ("only supported as an argument of
+    print")."""
+    m = aot_ir(tmp_path, "def f(x: float, s: str) -> str:\n    return f'{x=} {s!r}'\n")
+    assert not m.skipped, m.skipped
+    [r] = [n for n in walk(function(m, "f").body) if isinstance(n, ir.Return)]
+    fs = r.value
+    assert isinstance(fs, ir.FString) and fs.type is Type.STR
+    fields = [x for x in fs.parts if isinstance(x, ir.FormatField)]
+    assert [(x.value.type, x.repr) for x in fields] == [(Type.F64, True), (Type.STR, True)]
+    proved, diagnostics = verify.verify(m, aot=True)
+    assert not diagnostics and proved.functions
 
 
 # --- the conditional expression, abs, min, max ---------------------------------------------------------

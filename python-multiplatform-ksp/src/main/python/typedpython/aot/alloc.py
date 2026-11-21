@@ -318,6 +318,10 @@ def _find_escape_reason(fn: ir.Function, var_name: str, cls_name: str) -> str | 
             res = _check_expr(stmt.iter)
             if res is not None:
                 return res
+        elif isinstance(stmt, ir.ForStr):
+            res = _check_expr(stmt.value)
+            if res is not None:
+                return res
         elif isinstance(stmt, ir.TimeSleep):
             res = _check_expr(stmt.seconds)
             if res is not None:
@@ -368,6 +372,8 @@ def analyze_alloc(module: ir.Module, class_analysis: ClassAnalysis) -> AllocPlan
             elif isinstance(s, ir.ForObj):
                 for t in s.targets:
                     assign_counts[t] = assign_counts.get(t, 0) + 1
+            elif isinstance(s, ir.ForStr):
+                assign_counts[s.var] = assign_counts.get(s.var, 0) + 1
 
         for s in all_stmts:
             line = fn.source_line
@@ -484,7 +490,7 @@ def _stmt_exprs(s: ir.Stmt) -> list[ir.Expr]:
 
 
 def _is_loop(s: ir.Stmt) -> bool:
-    return isinstance(s, (ir.ForRange, ir.While, ir.ForObj))
+    return isinstance(s, (ir.ForRange, ir.While, ir.ForObj, ir.ForStr))
 
 
 def _walk_scoped(stmts: tuple[ir.Stmt, ...], stack: tuple[ir.Stmt, ...] = ()):

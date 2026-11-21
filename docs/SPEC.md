@@ -1753,6 +1753,33 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     the class may form a cycle after the virtual and region reasons. The tests are
     `test_aot_tier_o2c.py`, in the ASan/UBSan job with the leak checker on for the built programs.
     Not in this step: acyclic `__del__`, classes in the library output (never emitted there), generations.
+  - **Tier S PR-S1a (#443, the `str` value)** (agent proposal, not owner-confirmed; tier S is in 1.0, owner
+    2026-11-21 21:55: "191, 443, 175 전부 1.0에 넣어"; design typedpython-aot.md 4.3.1): a `str` is a counted
+    PEP 393 string without the object header (`runtime/tp_aot_str.h`, linked only by a program that has a
+    `str` value; a program without one generates the C it generated before). Compiled: `str` locals,
+    parameters, results and module constants (`NAME = "..."`, `NAME: str = ...`, folded with Python's own
+    operators), literals (any text, NUL and lone surrogates included: immortal static objects), `+`, `+=`
+    (in place when the name owns the string and nothing else holds it), `*` by an int on either side,
+    `== != < <= > >=` (code point order), `in` / `not in`, `len`, indexing, slicing with any bounds and step,
+    `for ch in s`, truth value, the conditional expression, `min` / `max` of two strs, `str()` / `repr()`
+    of an int (any size), float, bool or str, `ord`, `chr`, `sys.argv[i]` (decoded as CPython decodes it),
+    `int(s)`, f-strings anywhere with `{e}`, `{e!s}`, `{e!r}`, `{e=}` and `{e:.Nf}`, `print` of strs with
+    `sep=` and `end=`, `sys.stdout.write` and `sys.stderr.write` (their value is the length). Output is
+    CPython 3.15's UTF-8 mode: standard output encodes with surrogateescape (U+DC80..U+DCFF become their raw
+    byte; any other surrogate raises CPython's `UnicodeEncodeError` with its message, after the arguments
+    before it and the separator are written), standard error with backslashreplace. Every exception is
+    CPython's, with its message: `IndexError: string index out of range`, `IndexError: cannot fit 'int' into
+    an index-sized integer`, `ValueError: slice step cannot be zero`, `TypeError: ord() expected a
+    character, but string of length N found`, `ValueError: chr() arg not in range(0x110000)` (also for an
+    int outside 64 bits), `OverflowError: cannot fit 'int' into an index-sized integer` and `OverflowError:
+    repeated string is too long` for `*`, `int()`'s invalid-literal message. Compile errors that stay:
+    `is` / `is not` on a str (`aot/str-identity`, a front-end finding: CPython's answer depends on
+    interning), `%` formatting (`aot/str-format`, S2), the f-string conversion `!a`, a comparison of a str
+    with another type, and a str parameter or result of an `aot-lib` export (`aot/library-str`). The tests
+    are `test_aot_tier_s1.py` (differential against the reference, bytes of stdout compared), in every job
+    of the typedpython group, the ASan/UBSan job with the leak checker on.
+    Not in this step (S1b, the next PR): the str methods, the Unicode tables generated from the reference
+    interpreter, `list[str]`, `str` fields of classes and `str | None`.
 
 ---
 

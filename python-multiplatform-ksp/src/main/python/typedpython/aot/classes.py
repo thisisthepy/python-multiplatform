@@ -61,7 +61,7 @@ def _walk_stmts(stmts: tuple[ir.Stmt, ...]):
         if isinstance(s, ir.If):
             yield from _walk_stmts(s.then)
             yield from _walk_stmts(s.orelse)
-        elif isinstance(s, (ir.ForRange, ir.While, ir.ForObj)):
+        elif isinstance(s, (ir.ForRange, ir.While, ir.ForObj, ir.ForStr)):
             yield from _walk_stmts(s.body)
 
 

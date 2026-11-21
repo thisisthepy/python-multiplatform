@@ -38,13 +38,14 @@ TIME_FUNCTIONS = {"perf_counter": 0, "monotonic": 0, "time": 0, "sleep": 1}
 SCALAR_NAMES = ("int", "float", "bool")
 LIST_ELEMENTS = ("int", "float")             # `list[int]` and `list[float]` are the native lists
 # builtin names a program must not rebind: the AOT mode compiles a call of each of these as the builtin
-BUILTINS_USED = frozenset({"print", "float", "range", "len", "abs", "min", "max", "int", "bool", "list"})
+BUILTINS_USED = frozenset({"print", "float", "range", "len", "abs", "min", "max", "int", "bool", "list",
+                           "str", "repr", "ord", "chr"})        # (str ... chr: tier S1)
 RESERVED_PREFIX = "__tp_"
 MAIN = frontend.AOT_ENTRY
 
 _BIN_OPS = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod,
             ast.BitAnd, ast.BitOr, ast.BitXor, ast.LShift, ast.RShift, ast.Pow)
-_CMP_OPS = (ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.Is, ast.IsNot)
+_CMP_OPS = (ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.Is, ast.IsNot, ast.In, ast.NotIn)
 _STATEMENT_NAMES = {
     "ClassDef": "class", "Try": "try", "TryStar": "try", "With": "with", "AsyncWith": "async with",
     "Raise": "raise", "Assert": "assert", "Delete": "del", "AsyncFor": "async for",
@@ -67,7 +68,7 @@ class Program:
     functions: list[ast.FunctionDef] = field(default_factory=list)
     classes: list[ast.ClassDef] = field(default_factory=list)
     main: ast.If | None = None
-    consts: dict[str, int | float | bool] = field(default_factory=dict)
+    consts: dict[str, int | float | bool | str] = field(default_factory=dict)
     findings: list[Finding] = field(default_factory=list)
 
     def bodies(self) -> dict[str, object]:
@@ -186,7 +187,7 @@ class _Checker:
         if ann is None:
             self.rep.error(node, "aot/annotation", what, f"{what} has no type annotation (a program is checked "
                            "by its annotations)")
-        elif isinstance(ann, ast.Name) and ann.id in SCALAR_NAMES:
+        elif isinstance(ann, ast.Name) and (ann.id in SCALAR_NAMES or ann.id == "str"):     # str: tier S1
             return
         elif allow_none and isinstance(ann, ast.Constant) and ann.value is None:
             return
@@ -199,7 +200,7 @@ class _Checker:
         else:
             more = ", and a tuple of those as a return type" if allow_tuple else ""
             self.rep.error(ann, "aot/type", ast.unparse(ann), f"the type `{ast.unparse(ann)}` is outside the "
-                           f"AOT mode (int, float, bool, list[int], list[float], compiled classes{more}, and None as a return type)")
+                           f"AOT mode (int, float, bool, str, list[int], list[float], compiled classes{more}, and None as a return type)")
 
     def signature(self, fn: ast.FunctionDef, is_method: bool = False) -> None:
         a = fn.args
@@ -305,12 +306,13 @@ class _Checker:
 
     def for_stmt(self, s: ast.For) -> None:
         it = s.iter
-        if not (isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id == "range"
-                and 1 <= len(it.args) <= 3 and not it.keywords):
-            self.rep.error(s, "aot/statement", "for", "only `for name in range(...)` is supported")
-        else:
+        if isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id == "range":
+            if not (1 <= len(it.args) <= 3 and not it.keywords):
+                self.rep.error(s, "aot/statement", "for", "range() takes one to three positional arguments")
             for a in it.args:
                 self.expr(a)
+        else:
+            self.expr(it)               # tier S1: a str (the front end checks the type)
         if not isinstance(s.target, ast.Name):
             self.rep.error(s, "aot/statement", "for", "the loop target must be one name")
         if s.orelse:
@@ -331,16 +333,18 @@ class _Checker:
 
     def print_stmt(self, s: ast.Expr, call: ast.Call) -> None:
         for k in call.keywords:
-            self.rep.error(k.value, "aot/print-keyword", k.arg or "**",
-                           f"print(..., {k.arg or '**'}=...) is outside the first AOT step "
-                           "(positional arguments only; no sep, end, file or flush)")
+            if k.arg in ("sep", "end"):
+                if not (isinstance(k.value, ast.Constant) and k.value.value is None):
+                    self.expr(k.value)
+            else:
+                self.rep.error(k.value, "aot/print-keyword", k.arg or "**",
+                               f"print(..., {k.arg or '**'}=...) is outside the AOT mode "
+                               "(positional arguments, sep and end; no file or flush)")
         for a in call.args:
             if isinstance(a, ast.Starred):
                 self.rep.error(a, "aot/print-arg", "*", "a starred argument of print is outside the first AOT step")
             elif isinstance(a, ast.Constant) and isinstance(a.value, str):
-                if "\x00" in a.value or any(0xD800 <= ord(c) <= 0xDFFF for c in a.value):
-                    self.rep.error(a, "aot/print-arg", "str", "a string literal with a NUL or a lone surrogate is "
-                                   "outside the first AOT step")
+                pass                                                # tier S1: any text
             elif isinstance(a, ast.Constant) and a.value is None:
                 self.rep.error(a, "aot/print-arg", "None", "print(None) is outside the first AOT step "
                                "(int, float, bool and string literals only)")
@@ -350,18 +354,14 @@ class _Checker:
                 self.expr(a)
 
     def fstring(self, a: ast.JoinedStr) -> None:
-        """An f-string argument of print: text, `{e}` and `{e:.Nf}` (N from 0 to 20); nothing else."""
+        """An f-string (tier S1: anywhere): text, `{e}`, `{e!s}`, `{e!r}` and `{e:.Nf}` (N from 0 to 20); nothing else."""
         for piece in a.values:
             if isinstance(piece, ast.Constant):
-                if isinstance(piece.value, str) and ("\x00" in piece.value
-                                                     or any(0xD800 <= ord(c) <= 0xDFFF for c in piece.value)):
-                    self.rep.error(piece, "aot/print-arg", "str", "a string literal with a NUL or a lone surrogate is "
-                                   "outside the first AOT step")
                 continue
             assert isinstance(piece, ast.FormattedValue)
-            if piece.conversion != -1:
-                self.rep.error(piece, "aot/f-string", "conversion", "an f-string conversion (`!r`, `!s`, `!a`) or `=` is "
-                               "outside the AOT mode (`{e}` and `{e:.Nf}` only)")
+            if piece.conversion not in (-1, 115, 114):
+                self.rep.error(piece, "aot/f-string", "conversion", "the f-string conversion `!a` is outside the AOT "
+                               "mode (`{e}`, `{e!s}`, `{e!r}` and `{e:.Nf}`)")
             if piece.format_spec is not None:
                 texts = piece.format_spec.values                       # type: ignore[attr-defined]
                 if not all(isinstance(t, ast.Constant) and isinstance(t.value, str) for t in texts):
@@ -391,10 +391,8 @@ class _Checker:
                 return
             kind = type(v).__name__
             if isinstance(v, str):
-                self.rep.error(e, "aot/str", "str", "a string is only supported as a literal argument of print "
-                               "(strings arrive in a later step)")
-            else:
-                self.rep.error(e, "aot/literal", kind, f"a `{kind}` literal is outside the first AOT step")
+                return                                              # tier S1
+            self.rep.error(e, "aot/literal", kind, f"a `{kind}` literal is outside the first AOT step")
         elif isinstance(e, ast.Name):
             if e.id in self.consts and e.id not in self.shadow:
                 v = self.consts[e.id]
@@ -425,8 +423,7 @@ class _Checker:
         elif isinstance(e, ast.Call):
             self.call(e)
         elif isinstance(e, ast.JoinedStr):
-            self.rep.error(e, "aot/f-string", "f-string", "an f-string is only supported as an argument of print "
-                           "(strings arrive in a later step)")
+            self.fstring(e)                                         # tier S1: an f-string is a str value
         elif isinstance(e, ast.Attribute):
             if (isinstance(e.value, ast.Name) and e.value.id == "sys" and e.attr == "maxsize"
                     and self.has_sys and "sys" not in self.shadow):
@@ -471,19 +468,19 @@ class _Checker:
     def subscript(self, e: ast.Subscript) -> None:
         """`a[i]` of a list, and `a[:]` (the whole list, a copy). Any other slice, a subscript of anything but a
         name, is outside the AOT mode."""
+        if isinstance(e.value, ast.Name) and e.value.id == "sys":
+            self.rep.error(e, "aot/attribute", "sys", "`sys` may only be used as `sys.argv[i]`, `len(sys.argv)` and "
+                           "`sys.exit`")
+        elif not (isinstance(e.value, ast.Name) or self.sys_argv(e.value)):
+            self.expr(e.value)              # tier S1: a str value (the front end checks the type)
         if isinstance(e.slice, ast.Slice):
-            sl = e.slice
-            if not (sl.lower is None and sl.upper is None and sl.step is None):
-                self.rep.error(e, "aot/container", "slice", f"the slice `{ast.unparse(e)}` is outside the AOT mode "
-                               "(only the whole-list copy `a[:]`)")
-        elif not isinstance(e.value, ast.Name):
-            self.rep.error(e, "aot/container", "subscript", f"the subscript `{ast.unparse(e)}` is outside the AOT mode "
-                           "(a list name indexed by an int)")
+            for b in (e.slice.lower, e.slice.upper, e.slice.step):
+                if b is not None:
+                    self.expr(b)            # a list takes only `a[:]`, which the front end checks; a str any slice
         else:
-            if e.value.id == "sys":
-                self.rep.error(e, "aot/attribute", "sys", "`sys` may only be used as `int(sys.argv[i])` and `len(sys.argv)`")
             self.expr(e.slice)
-        if isinstance(e.value, ast.Name) and e.value.id in self.p.consts and e.value.id not in self.shadow:
+        if isinstance(e.value, ast.Name) and e.value.id in self.p.consts and e.value.id not in self.shadow \
+                and not isinstance(self.p.consts[e.value.id], str):
             self.rep.error(e, "aot/container", "subscript", f"`{e.value.id}` is a constant, not a list")
 
     def sys_argv(self, e: ast.expr) -> bool:
@@ -512,8 +509,11 @@ class _Checker:
             elif n == "len":
                 if len(c.args) == 1 and self.sys_argv(c.args[0]):
                     return
-                if len(c.args) != 1 or not isinstance(c.args[0], ast.Name):
-                    self.rep.error(c, "aot/call", n, "len() is only supported of a list name and of `sys.argv`")
+                if len(c.args) != 1:
+                    self.rep.error(c, "aot/call", n, "len() takes one argument")
+            elif n in ("str", "repr", "ord", "chr"):                 # tier S1
+                if len(c.args) != 1 and not (n == "str" and not c.args):
+                    self.rep.error(c, "aot/builtin", n, f"`{n}()` takes one argument in the AOT mode")
             elif n == "abs":
                 if len(c.args) != 1:
                     self.rep.error(c, "aot/call", n, "abs() takes one argument")
@@ -571,6 +571,11 @@ class _Checker:
                 self.rep.error(c, "aot/call", "sys.exit", "`sys.exit` takes at most one argument")
             elif len(c.args) == 1 and isinstance(c.args[0], ast.Constant) and c.args[0].value is None:
                 return
+        elif (isinstance(f, ast.Attribute) and f.attr == "write" and isinstance(f.value, ast.Attribute)
+              and f.value.attr in ("stdout", "stderr") and isinstance(f.value.value, ast.Name)
+              and f.value.value.id == "sys" and self.has_sys and "sys" not in self.shadow):
+            if len(c.args) != 1:                                    # tier S1
+                self.rep.error(c, "aot/call", f"sys.{f.value.attr}.write", "the write of a text stream takes one argument")
         elif (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.value.id == "time"
               and self.has_time and "time" not in self.shadow):
             if f.attr not in TIME_FUNCTIONS:
