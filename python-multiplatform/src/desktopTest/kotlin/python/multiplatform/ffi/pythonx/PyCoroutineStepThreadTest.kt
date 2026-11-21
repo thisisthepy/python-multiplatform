@@ -5,6 +5,8 @@ import python.multiplatform.ffi.Python3
 import python.multiplatform.ffi.PythonTestFixture
 import python.multiplatform.ffi.getThreadGILState
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
@@ -47,6 +49,12 @@ class PyCoroutineStepThreadTest {
         assertEquals(0, depths.last(), "the stepping thread must be detached after the step")
     }
 
+    /**
+     * The three threads stay alive (parked on [release]) until the ids are compared: `threading.get_ident()`
+     * is `pthread_self`, and the OS gives a finished thread's id to the next one started, so three fresh
+     * threads run one after the other can share an id (run 44901179235 saw two ids for three threads).
+     * Each thread still steps alone: the next starts only after the previous one's step has completed.
+     */
     @Test
     fun eachStepMayRunOnADifferentThreadCPythonNeverSawAndLeavesItDetached() = PythonTestFixture.withInterpreter {
         defineCoroutine("coro")
@@ -54,27 +62,43 @@ class PyCoroutineStepThreadTest {
         val results = CopyOnWriteArrayList<PyStep>()
         val depths = CopyOnWriteArrayList<Int>()
         val failures = CopyOnWriteArrayList<Throwable>()
-        repeat(3) { i ->
-            val t = Thread({
-                try {
-                    results += coro.step()
-                    depths += getThreadGILState().depth
-                } catch (t: Throwable) {
-                    failures += t
-                }
-            }, "step-thread-cpython-never-saw-$i")
-            stepOn(t, coro, results, depths, failures)
-        }
-        assertIs<PyStep.Yielded>(results[0]).value.close()
-        assertIs<PyStep.Yielded>(results[1]).value.close()
-        val done = assertIs<PyStep.Returned>(results[2])
-        assertEquals("7", done.value.toString())
-        done.value.close()
+        val release = CountDownLatch(1)
+        val threads = ArrayList<Thread>()
+        try {
+            repeat(3) { i ->
+                val stepped = CountDownLatch(1)
+                val t = Thread({
+                    try {
+                        results += coro.step()
+                        depths += getThreadGILState().depth
+                    } catch (t: Throwable) {
+                        failures += t
+                    } finally {
+                        stepped.countDown()
+                    }
+                    // Detached by now (depth recorded above); parked so the id stays this thread's.
+                    release.await()
+                }, "step-thread-cpython-never-saw-$i")
+                threads += t
+                t.start()
+                assertTrue(stepped.await(30, TimeUnit.SECONDS), "the stepping thread ${t.name} did not finish its step")
+                failures.firstOrNull()?.let { throw AssertionError("a step failed on ${t.name}: $it", it) }
+                assertEquals(0, depths.last(), "the stepping thread ${t.name} must be detached after the step")
+            }
+            assertIs<PyStep.Yielded>(results[0]).value.close()
+            assertIs<PyStep.Yielded>(results[1]).value.close()
+            val done = assertIs<PyStep.Returned>(results[2])
+            assertEquals("7", done.value.toString())
+            done.value.close()
 
-        val tids = PythonTestFixture.eval("sorted(set(_stt['tids']))").toString()
-        assertEquals(3, PythonTestFixture.eval("len(set(_stt['tids']))").toString().toInt(), "three steps on three threads: $tids")
-        val testThread = PythonTestFixture.eval("threading.get_ident()").toString()
-        assertEquals("False", PythonTestFixture.eval("$testThread in _stt['tids']").toString(), "no step ran on the test thread")
+            val tids = PythonTestFixture.eval("sorted(set(_stt['tids']))").toString()
+            assertEquals(3, PythonTestFixture.eval("len(set(_stt['tids']))").toString().toInt(), "three steps on three threads: $tids")
+            val testThread = PythonTestFixture.eval("threading.get_ident()").toString()
+            assertEquals("False", PythonTestFixture.eval("$testThread in _stt['tids']").toString(), "no step ran on the test thread")
+        } finally {
+            release.countDown()
+            for (t in threads) t.join(30_000)
+        }
     }
 
     @Test
