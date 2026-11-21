@@ -292,10 +292,12 @@ trampolines exist. GraalVM native image upcalls are verified by hand
 - **13.2 Native-image upcall verification as an automated test, open.** SPEC U-6/N-5: the procedure
   is manual (`:sample:nativeCompile`, Liberica NIK); only the reachability metadata is guarded
   automatically.
-- **13.3 iOS sample section 7, slow path, open (sample only).** "not wired on iOS": resuming a parked
-  continuation needs a Kotlin/Native worker the sample does not start
-  (`sample/src/iosMain/.../bindings/ProxyDemo.ios.kt`). The library itself does it
-  (`PM/nativeTest/.../AsyncUpcallNative*Test.kt`).
+- **13.3 iOS sample section 7, slow path, closed (2026-11-21, #164 item 11).** The sample resumes the
+  parked continuation from a Kotlin/Native `Worker` (`sample/src/iosMain/.../bindings/ProxyDemo.ios.kt`),
+  the rule is written in SPEC U-5 ("Resuming from a Kotlin/Native thread") and `PM/iosMain/README.md`,
+  and the library proves it for a `Worker` as well as for a bare pthread
+  (`PM/nativeTest/.../AsyncUpcallWorkerDeliveryTest.kt`, `AsyncUpcallNative*Test.kt`). The sample's
+  simulator run itself is still by hand (the ios job builds the ios-consumer fixture, not the sample).
 - **13.4 Targets compiled but never tested, open.** `iosArm64`, `iosX64`, `androidNativeX64` (SPEC
   P-1). For `iosX64`, `extractIosSimulatorStdlib` hardcodes `lib-arm64`
   (`python-multiplatform/build.gradle.kts`, the `…/ios-arm64_x86_64-simulator/lib-arm64/python$libVersion`
