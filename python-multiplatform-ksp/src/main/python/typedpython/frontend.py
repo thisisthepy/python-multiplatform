@@ -131,12 +131,22 @@ Interval = tuple[int, int] | None  # None: no value at all (not yet known to be 
 
 TYPE_NAME = {
     Type.I64: "int", Type.F64: "float", Type.BOOL: "bool", Type.NONE: "None", Type.OBJ: "object",
-    Type.INT: "int", Type.STR: "str",
+    Type.INT: "int", Type.STR: "str", Type.STR_LIST: "list[str]",
     Type.F64_ARRAY: "list[float]", Type.I64_ARRAY: "list[int]", Type.BOOL_ARRAY: "NDArray[np.bool_]",
 }
 SCALAR_KIND = {"int": Type.I64, "float": Type.F64, "bool": Type.BOOL}
 # AOT mode (tier S1, PR-S1a): what an annotation names beside the scalars. The default mode never reads it.
-AOT_KIND = {**SCALAR_KIND, "str": Type.STR}
+AOT_KIND = {**SCALAR_KIND, "str": Type.STR, "list[str]": Type.STR_LIST}
+# AOT mode, tier S1b: the str methods (design 4.3.1): name -> (parameter names in order, the result type)
+STR_METHODS = {
+    "split": (("sep", "maxsplit"), Type.STR_LIST), "join": (("iterable",), Type.STR),
+    "strip": (("chars",), Type.STR), "lstrip": (("chars",), Type.STR), "rstrip": (("chars",), Type.STR),
+    "lower": ((), Type.STR), "upper": ((), Type.STR),
+    "startswith": (("prefix", "start", "end"), Type.BOOL), "endswith": (("prefix", "start", "end"), Type.BOOL),
+    "find": (("sub", "start", "end"), Type.I64), "replace": (("old", "new", "count"), Type.STR),
+    "isalpha": ((), Type.BOOL), "isdigit": ((), Type.BOOL),
+}
+STR_METHOD_KEYWORDS = {"split": ("sep", "maxsplit"), "replace": ("count",)}
 ARRAY_KIND = {"list[float]": Type.F64_ARRAY, "list[int]": Type.I64_ARRAY}
 
 BINOP = {
@@ -1495,6 +1505,8 @@ class _Lowerer:
                 kinds += self.inferred.get(name, [])
             if not any(k.startswith("list") for _, k in kinds):
                 continue
+            if all(k == "list[str]" for _, k in kinds):
+                continue        # tier S1b: a list of str is a STR_LIST value, not a native array
             distinct = sorted({k for _, k in kinds})
             if len(distinct) > 1:
                 where = next(line for line, k in kinds if k != kinds[0][1])
@@ -1714,7 +1726,7 @@ class _Lowerer:
                 args.append(self.aot_fstring(a))
                 continue
             e = self.value(a)
-            if e.type not in ir.SCALARS and e.type not in (Type.OBJ, Type.STR):
+            if e.type not in ir.SCALARS and e.type not in (Type.OBJ, Type.STR, Type.STR_LIST):
                 raise Skip(a.lineno, f"print of `{_src(a)}` ({TYPE_NAME[e.type]}) is not supported in an "
                                      "AOT program (int, float, bool and str values)")
             # (an OBJ argument, say a call that is not direct, stays: it has no AOT form and the back
@@ -1962,6 +1974,11 @@ class _Lowerer:
                                  "str arrives with tier S1b)")
             return ir.ArgvStr(Type.STR, self.str_int(self.value(node.slice), node.slice, "the index"))
         value = self.sub(node.value)
+        if value.type is Type.STR_LIST:
+            if isinstance(node.slice, ast.Slice):
+                raise Skip(line, f"the slice `{_src(node)}` of a list of str is tier S2 (lists that change and new "
+                                 "lists from old ones)")
+            return ir.StrListIndex(Type.STR, value, self.str_int(self.value(node.slice), node.slice, "the index"))
         if value.type is not Type.STR:
             raise Skip(line, f"the subscript `{_src(node)}` of a {TYPE_NAME.get(value.type, value.type.value)} has no "
                              "form in an AOT program")
@@ -2019,9 +2036,9 @@ class _Lowerer:
             if len(args) != 1:
                 raise Skip(line, f"{name}() takes one argument in an AOT program")
             x = self.value(args[0])
-            if x.type not in ir.SCALARS and x.type is not Type.STR:
+            if x.type not in ir.SCALARS and x.type not in (Type.STR, Type.STR_LIST):
                 raise Skip(line, f"{name}() of a {TYPE_NAME.get(x.type, x.type.value)} is not supported in an AOT "
-                                 "program (int, float, bool and str)")
+                                 "program (int, float, bool, str and list[str])")
             return ir.StrOf(Type.STR, x, repr=name == "repr")
         if name == "ord" and self.builtin("ord"):
             if len(args) != 1:
@@ -2039,8 +2056,70 @@ class _Lowerer:
             x = self.value(args[0])
             if x.type is Type.STR:
                 return ir.StrLen(Type.I64, x)
+            if x.type is Type.STR_LIST:
+                return ir.StrListLen(Type.I64, x)
             raise Skip(line, f"len() of a {TYPE_NAME.get(x.type, x.type.value)} is not supported in an AOT program")
         return None
+
+    def str_receiver(self, node: ast.expr) -> bool:
+        """Is `node` (the receiver of a method call) a str value rather than a module or an instance of a compiled
+        class? (A module name or a class local keeps the paths it had.)"""
+        if isinstance(node, ast.Name):
+            if not self.is_local(node.id):
+                return node.id in self.info.aot_consts and self.info.aot_consts[node.id].type is Type.STR
+            return node.id not in self.arrays and self.local_type(node.id, node.lineno) is Type.STR
+        return not isinstance(node, ast.Attribute)
+
+    def str_method(self, func: ast.Attribute, node: ast.Call) -> ir.Expr:
+        """`s.<method>(...)` of tier S1b (design 4.3.1), keyword arguments mapped to their places."""
+        line = node.lineno
+        name = func.attr
+        recv = self.sub(func.value)
+        if recv.type is not Type.STR:
+            raise Skip(line, f"`{_src(func)}`: `.{name}` of a {TYPE_NAME.get(recv.type, recv.type.value)} has no form "
+                             "in an AOT program")
+        params, result = STR_METHODS[name]
+        if len(node.args) > len(params):
+            raise Skip(line, f"str.{name}() takes at most {len(params)} argument(s)")
+        given: list[ast.expr | None] = list(node.args) + [None] * (len(params) - len(node.args))
+        for k in node.keywords:
+            # CPython: only split's sep / maxsplit and replace's count may be given by keyword (TypeError otherwise)
+            if k.arg not in STR_METHOD_KEYWORDS.get(name, ()) or given[params.index(k.arg)] is not None:
+                raise Skip(line, f"str.{name}() takes no keyword argument `{k.arg}` (CPython raises TypeError)")
+            given[params.index(k.arg)] = k.value
+        while given and given[-1] is None:
+            given.pop()
+        args: list[ir.Expr | None] = []
+        prefixes: list[ir.Expr] = []
+        any_of = False
+        for pname, a in zip(params, given):
+            if a is None or (isinstance(a, ast.Constant) and a.value is None):
+                if pname in ("sub", "old", "new", "iterable") or (pname == "prefix"):
+                    raise Skip(line, f"str.{name}() needs `{pname}`")
+                args.append(None)
+                continue
+            if pname == "prefix":
+                elts = [self.value(x) for x in a.elts] if isinstance(a, ast.Tuple) else [self.value(a)]
+                if any(x.type is not Type.STR for x in elts):
+                    raise Skip(line, f"str.{name}() takes a str or a tuple of str")
+                prefixes = elts
+                any_of = isinstance(a, ast.Tuple)
+                continue
+            v = self.value(a)
+            if pname == "iterable" and isinstance(v, ir.NewList):
+                v = ir.StrListDisplay(Type.STR_LIST, ())              # `sep.join([])`
+            want = Type.STR_LIST if pname == "iterable" else (
+                Type.I64 if pname in ("maxsplit", "count", "start", "end") else Type.STR)
+            if want is Type.I64:
+                v = self.str_int(v, a, f"`{pname}` of str.{name}()")
+            elif v.type is not want:
+                raise Skip(line, f"`{pname}` of str.{name}() is {TYPE_NAME.get(v.type, v.type.value)}, not "
+                                 f"{TYPE_NAME[want]}")
+            args.append(v)
+        if name in ("startswith", "endswith"):
+            # layout: start, end (None when absent), then every prefix (a tuple's elements, evaluated first, in order)
+            args = (args + [None, None])[:2] + list(prefixes)
+        return ir.StrMethod(result, recv, name, tuple(args), any_of)
 
     def std_write(self, func: ast.Attribute, node: ast.Call) -> ir.Expr | None:
         """`sys.stdout.write(s)` / `sys.stderr.write(s)` (AOT mode, tier S1); None: not one of these."""
@@ -2315,9 +2394,9 @@ class _Lowerer:
         if var in self.arrays or var in self.params and self.params[var].type is not Type.STR:
             raise Skip(line, f"loop variable `{var}` is not a str name")
         it = self.value(node.iter)
-        if it.type is not Type.STR:
-            raise Skip(line, f"`for {var} in {_src(node.iter)}`: an AOT program iterates only `range(...)` and a str "
-                             "(containers arrive with tier S2)")
+        if it.type not in (Type.STR, Type.STR_LIST):
+            raise Skip(line, f"`for {var} in {_src(node.iter)}`: an AOT program iterates `range(...)`, a str and a list "
+                             "of str (the other containers arrive with tier S2)")
         t = self.types.get(var) or (self.params[var].type if var in self.params else None)
         if t is None:
             t = self.local_type(var, line)
@@ -2496,6 +2575,8 @@ class _Lowerer:
             return ir.Compare(Type.BOOL, ir.CompareKind.NE, e, ir.Const(Type.F64, 0.0))
         if e.type == Type.STR:      # AOT mode, tier S1: a str is true when it is not empty
             return ir.Compare(Type.BOOL, ir.CompareKind.NE, ir.StrLen(Type.I64, e), ir.Const(Type.I64, 0))
+        if e.type == Type.STR_LIST:
+            return ir.Compare(Type.BOOL, ir.CompareKind.NE, ir.StrListLen(Type.I64, e), ir.Const(Type.I64, 0))
         if e.type == Type.INT:
             return ir.Compare(Type.BOOL, ir.CompareKind.NE, e,
                               ir.ToInt(Type.INT, ir.Const(Type.I64, 0)))
@@ -2576,6 +2657,13 @@ class _Lowerer:
             return ir.GetItem(Type.OBJ, obj, key)
         if isinstance(node, ast.Dict) and not node.keys:
             return ir.NewDict(Type.OBJ)
+        if self.info.aot and isinstance(node, ast.List) and node.elts and isinstance(node.ctx, ast.Load) \
+                and not any(isinstance(e, ast.Starred) for e in node.elts):
+            elts = tuple(self.value(e) for e in node.elts)
+            if all(e.type is Type.STR for e in elts):
+                return ir.StrListDisplay(Type.STR_LIST, elts)      # tier S1b
+            raise Skip(line, f"the list display `{_src(node)}` is not a list of str; a native list of floats or ints "
+                             "is created by assigning it to a list name")
         if isinstance(node, ast.List) and not node.elts and isinstance(node.ctx, ast.Load):
             return ir.NewList(Type.OBJ)
         if isinstance(node, ast.JoinedStr):
@@ -2947,6 +3035,8 @@ class _Lowerer:
             write = self.std_write(func, node)
             if write is not None:
                 return write
+            if func.attr in STR_METHODS and self.str_receiver(func.value):
+                return self.str_method(func, node)
 
         if self.info.aot and isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) \
                 and func.value.id == "time" and self.info.aot_time \
@@ -3275,6 +3365,8 @@ class _Lowerer:
     def coerce(self, value: ir.Expr, target: Type, node: ast.AST, what: str) -> ir.Expr:
         if value.type == target:
             return value
+        if target is Type.STR_LIST and isinstance(value, ir.NewList) and self.info.aot:
+            return ir.StrListDisplay(Type.STR_LIST, ())          # tier S1b: `x: list[str] = []`
         if target == Type.OBJ and (value.type in ir.SCALARS or value.type == Type.INT):
             return ir.Box(Type.OBJ, value)
         if target == Type.INT and value.type == Type.I64:

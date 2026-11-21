@@ -93,6 +93,7 @@ from pathlib import Path
 from typedpython import ir, resume
 from typedpython.aot import AotError, LibraryFiles, _lower
 from typedpython.aot import emit as emit_mod
+from typedpython.aot import unicode as unicode_mod
 from typedpython.aot.emit import CTYPE, LIST, mangle
 from typedpython.aot.program import _is_class_annotation, analyze
 from typedpython.aotcheck import Finding
@@ -648,7 +649,8 @@ def _c_text(g, bodies: list[list[str]], exports: list[_Export], p: str) -> str:
     text = text.replace("@INTLIST@\n", f"typedef tpa_int_list {p}_int_list;\n\n" if any(e.uses_int_list for e in exports)
                         else "\n")
     if g.uses_str:                      # tier S1: the str runtime needs the int runtime's parser and formatter
-        return text.replace("@INT@", '#include "tp_aot_int.h"\n#include "tp_aot_str.h"\n')
+        tables = "".join(line + "\n" for line in unicode_mod.tables_c(g.ucd))     # tier S1b
+        return text.replace("@INT@", '#include "tp_aot_int.h"\n' + tables + '#include "tp_aot_str.h"\n')
     if emit_mod.needs_int_runtime(text.replace("@INT@", "")):
         return text.replace("@INT@", '#include "tp_aot_int.h"\n')
     return text.replace("@INT@", "")

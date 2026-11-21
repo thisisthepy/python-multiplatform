@@ -70,6 +70,7 @@ class Type(Enum):
     I64_ARRAY = "i64[]"    # a list[int] parameter (ArrayParam) or a local array (NewArray/CopyArray)
     BOOL_ARRAY = "bool[]"  # a numpy np.bool_ buffer parameter only (1-byte items, #261)
     STR = "str"            # AOT mode only (tier S1, PR-S1a): a Python str, a counted `tpa_str` (runtime/tp_aot_str.h)
+    STR_LIST = "list[str]"  # AOT mode only (tier S1b): a list of str, a counted `tpa_str_list` (fixed length until S2)
 
 
 SCALARS = (Type.I64, Type.F64, Type.BOOL)
@@ -935,6 +936,44 @@ class StrWrite(Expr):
 
     value: Expr
     err: bool = False
+
+
+@dataclass(frozen=True)
+class StrMethod(Expr):
+    """`recv.<name>(args)` of a STR receiver (tier S1b): split, join, strip, lstrip, rstrip, lower, upper,
+    startswith, endswith, find, replace, isalpha, isdigit (design 4.3.1). `args` are the arguments in order, None for
+    a `None` argument (`split(None, 2)`, `strip(None)`); `startswith` / `endswith` given a tuple have each element
+    as an argument and `any_of` True. The receiver is evaluated first, then the arguments in source order: for
+    startswith / endswith the layout is (start, end, prefix...), and the prefixes (the source's first argument) are
+    evaluated before start and end."""
+
+    recv: Expr
+    name: str
+    args: tuple[Expr | None, ...]
+    any_of: bool = False
+
+
+@dataclass(frozen=True)
+class StrListDisplay(Expr):
+    """`[s0, s1, ...]` of STR expressions (type STR_LIST, tier S1b); empty only where a list of str is expected
+    (`x: list[str] = []`, `sep.join([])`)."""
+
+    elts: tuple[Expr, ...]
+
+
+@dataclass(frozen=True)
+class StrListLen(Expr):
+    """`len(value)` of a STR_LIST (type I64)."""
+
+    value: Expr
+
+
+@dataclass(frozen=True)
+class StrListIndex(Expr):
+    """`value[index]` of a STR_LIST (type STR); list semantics and IndexError("list index out of range")."""
+
+    value: Expr
+    index: Expr
 
 
 @dataclass(frozen=True)

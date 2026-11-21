@@ -366,7 +366,7 @@ from .ir import (
 )
 from .ir import (
     ArgvStr, ForStr, StrChr, StrCompare, StrConcat, StrContains, StrIndex, StrLen, StrOf, StrOrd, StrParseInt,
-    StrRepeat, StrSlice, StrWrite,
+    StrRepeat, StrSlice, StrWrite, StrMethod, StrListDisplay, StrListLen, StrListIndex,
 )
 from .ir import CheckExact, CheckMethod, ClassDecl, FieldGet, FieldSet, Is, IsExact, New
 from .ir import BuildString, Contains, ForObj, Format, GetItem, NewDict, NewList, StoreItem
@@ -430,7 +430,9 @@ _AOT_STMTS = frozenset({Print, ReturnTuple, Unpack, TimeSleep, SysExit, ForStr})
 _AOT_EXPRS = frozenset({ListDisplay, Cond, ArgvInt, ArgvLen, FloatToInt, BoolToInt, StrToInt, TimeCall,
                         # tier S1 (PR-S1a): the STR nodes, and an f-string that is a str value
                         StrConcat, StrRepeat, StrCompare, StrContains, StrLen, StrIndex, StrSlice, StrOf, StrOrd,
-                        StrChr, ArgvStr, StrParseInt, StrWrite, FString})
+                        StrChr, ArgvStr, StrParseInt, StrWrite, FString,
+                        # tier S1b
+                        StrMethod, StrListDisplay, StrListLen, StrListIndex})
 # Nodes whose OBJ result is a new reference (ir.py "ownership": Box, Global, GetAttr, CallObject,
 # OBJ BinOp, Tuple), plus reads of an OBJ local (the local owns its reference; the back end increfs or
 # borrows under that rule) and Calls of a compiled function returning OBJ (which returns a new
@@ -578,7 +580,7 @@ class _Checker:
                     if p.buffer:
                         self.buffers.add(p.name)
             elif type(p) is Param:
-                if p.type not in _VALUE_TYPES and not (self.aot and p.type is Type.STR):
+                if p.type not in _VALUE_TYPES and not (self.aot and p.type in (Type.STR, Type.STR_LIST)):
                     self.error(TYPE, f"parameter '{p.name}' has type {p.type}; arrays must be "
                                      f"ArrayParam")
                 else:
@@ -641,7 +643,7 @@ class _Checker:
                     self.error(TYPE, f"local array '{name}' collides with a scalar parameter")
                 else:
                     self.larrays[name] = t
-            elif t not in _LOCAL_TYPES and not (self.aot and t is Type.STR):
+            elif t not in _LOCAL_TYPES and not (self.aot and t in (Type.STR, Type.STR_LIST)):
                 self.error(TYPE, f"local '{name}' has type {t}")
             elif name in self.scalars and self.scalars[name] is not t:
                 self.error(TYPE, f"local '{name}' declared {t} but parameter is "
@@ -649,7 +651,7 @@ class _Checker:
             else:
                 self.scalars[name] = t
         if fn.returns not in _RETURN_TYPES and not (self.aot and fn.returns in (Type.F64_ARRAY, Type.I64_ARRAY,
-                                                                               Type.STR)):
+                                                                               Type.STR, Type.STR_LIST)):
             self.error(TYPE, f"return type {fn.returns} is not a value type")
         for flag in ("pure", "may_deopt"):
             if not isinstance(getattr(fn, flag), bool):
@@ -872,7 +874,7 @@ class _Checker:
                 elif self.fixing:
                     self.bottom = True
             return _meet_interval(base, self.refine.get(e.name))
-        if cls in (StrLen, StrWrite):
+        if cls in (StrLen, StrWrite, StrListLen):
             return (0, _LEN_MAX)            # tier S1: a length
         if cls is StrOrd:
             return (0, 0x10FFFF)
@@ -929,7 +931,7 @@ class _Checker:
                             self.bottom = True
             iv = _meet_interval(iv, self.refine.get(e.name))
             return _meet_interval(iv, _FULL) if raw else iv
-        if cls in (StrLen, StrWrite):
+        if cls in (StrLen, StrWrite, StrListLen):
             return (0, _LEN_MAX)            # tier S1: a length
         if cls is StrOrd:
             return (0, 0x10FFFF)
@@ -1810,8 +1812,9 @@ class _Checker:
         if type(e.repr) is not bool:
             self.error(TYPE, "StrOf `repr` is not a bool")
         value = self.expr(e.value, state)
-        if getattr(value, "type", None) not in ir.SCALARS and getattr(value, "type", None) is not Type.STR:
-            self.error(TYPE, "str() and repr() take an i64, f64, bool or str")
+        if getattr(value, "type", None) not in ir.SCALARS and getattr(value, "type", None) not in (Type.STR,
+                                                                                                    Type.STR_LIST):
+            self.error(TYPE, "str() and repr() take an i64, f64, bool, str or list[str]")
         self.result(e, Type.STR)
         return dataclasses.replace(e, value=value)
 
@@ -1842,10 +1845,74 @@ class _Checker:
         self.result(e, Type.I64)
         return dataclasses.replace(e, value=value)
 
+    # tier S1b
+    _METHOD_ARGS = {      # name -> the types of its arguments in IR order (None: may be absent / None), the result
+        "split": ((Type.STR, Type.I64), Type.STR_LIST), "join": ((Type.STR_LIST,), Type.STR),
+        "strip": ((Type.STR,), Type.STR), "lstrip": ((Type.STR,), Type.STR), "rstrip": ((Type.STR,), Type.STR),
+        "lower": ((), Type.STR), "upper": ((), Type.STR), "find": ((Type.STR, Type.I64, Type.I64), Type.I64),
+        "replace": ((Type.STR, Type.STR, Type.I64), Type.STR), "isalpha": ((), Type.BOOL),
+        "isdigit": ((), Type.BOOL), "startswith": (None, Type.BOOL), "endswith": (None, Type.BOOL),
+    }
+
+    def e_StrMethod(self, e: StrMethod, state: _State) -> ir.Expr:
+        spec = self._METHOD_ARGS.get(e.name)
+        recv = self.str_operand(e.recv, state, f"receiver of str.{e.name}")
+        if spec is None or not isinstance(e.args, tuple) or type(e.any_of) is not bool:
+            self.error(STRUCTURE, f"StrMethod {e.name!r} is not one of the str methods of tier S1")
+            return e
+        params, result = spec
+        if params is None:                  # startswith / endswith: start, end, then at least one prefix
+            params = (Type.I64, Type.I64) + (Type.STR,) * max(1, len(e.args) - 2)
+            if len(e.args) < 3 or any(a is None for a in e.args[2:]):
+                self.error(STRUCTURE, f"str.{e.name} needs a prefix")
+        if len(e.args) > len(params):
+            self.error(STRUCTURE, f"str.{e.name} takes at most {len(params)} arguments")
+        args = []
+        order = list(range(len(e.args)))
+        if e.name in ("startswith", "endswith"):
+            order = order[2:] + order[:2]   # the prefixes are evaluated first
+        checked: dict[int, object] = {}
+        for i in order:
+            a = e.args[i]
+            if a is None:
+                checked[i] = None
+                continue
+            x = self.expr(a, state)
+            self.slot(x, params[i] if i < len(params) else Type.STR, f"argument {i + 1} of str.{e.name}")
+            checked[i] = x
+        args = [checked[i] for i in range(len(e.args))]
+        if e.name in ("join", "replace") and any(a is None for a in e.args[:1 if e.name == "join" else 2]):
+            self.error(STRUCTURE, f"str.{e.name} needs its leading arguments")
+        self.result(e, result)
+        return dataclasses.replace(e, recv=recv, args=tuple(args))
+
+    def e_StrListDisplay(self, e: StrListDisplay, state: _State) -> ir.Expr:
+        if not isinstance(e.elts, tuple):
+            self.error(STRUCTURE, "StrListDisplay elements are a tuple")
+            return e
+        elts = tuple(self.str_operand(x, state, "element of a list of str") for x in e.elts)
+        self.result(e, Type.STR_LIST)
+        return dataclasses.replace(e, elts=elts)
+
+    def e_StrListLen(self, e: StrListLen, state: _State) -> ir.Expr:
+        value = self.expr(e.value, state)
+        self.slot(value, Type.STR_LIST, "argument of len()")
+        self.result(e, Type.I64)
+        return dataclasses.replace(e, value=value)
+
+    def e_StrListIndex(self, e: StrListIndex, state: _State) -> ir.Expr:
+        value = self.expr(e.value, state)
+        self.slot(value, Type.STR_LIST, "indexed list of str")
+        index = self.int_operand(e.index, state, "index of a list of str")
+        self.result(e, Type.STR)
+        return dataclasses.replace(e, value=value, index=index)
+
     def s_ForStr(self, s: ForStr, state: _State):
         """`for var in value` over a str (AOT mode): `var` is a declared str local; zero iterations leave it as it
         was, so the state after the loop is the entry state met with every break state."""
-        value = self.str_operand(s.value, state, "iterable of ForStr")
+        value = self.expr(s.value, state)
+        if getattr(value, "type", None) not in (Type.STR, Type.STR_LIST):
+            self.error(TYPE, "ForStr iterates a str or a list of str")
         var = s.var
         if not isinstance(var, str) or self.scalars.get(var) is not Type.STR:
             self.error(TYPE, f"ForStr target {var!r} must be a declared str local")
@@ -2070,9 +2137,9 @@ class _Checker:
                 continue
             a2 = self.expr(a, state)
             t = getattr(a2, "type", None)
-            if t not in ir.SCALARS and t is not Type.OBJ and t is not Type.STR:
+            if t not in ir.SCALARS and t not in (Type.OBJ, Type.STR, Type.STR_LIST):
                 self.error(TYPE, f"argument {k + 1} of Print is {getattr(t, 'value', t)}, not an i64, "
-                                 f"f64, bool, str or obj")
+                                 f"f64, bool, str, list[str] or obj")
             args.append(a2)
         extra = {}
         for key in ("sep", "end"):

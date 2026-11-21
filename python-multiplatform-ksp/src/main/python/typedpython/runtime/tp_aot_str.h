@@ -1291,4 +1291,83 @@ static TPA_UNUSED int tpa_str_lower(tpa_str *s, tpa_str **out)
 }
 #endif
 
+
+/* An int argument that CPython converts to Py_ssize_t (split's maxsplit, replace's count). */
+static TPA_UNUSED int tpa_int_to_ssize(tpa_int a, int64_t *out)
+{
+    if (tpa_int_to_i64(a, out) == 0) {
+        return 0;
+    }
+    return tpa_raise(TPA_OverflowError, "Python int too large to convert to C ssize_t");
+}
+
+/* CPython's ADJUST_INDICES of find / startswith / endswith (`has`: TPA_SLICE_START | TPA_SLICE_STOP for given bounds;
+ * a bound outside 64 bits is clamped first). start is never clamped upward. */
+static void tpa_str__adjust(int64_t len, int64_t *start, int64_t *end, int has)
+{
+    if (!(has & TPA_SLICE_START)) {
+        *start = 0;
+    }
+    if (!(has & TPA_SLICE_STOP)) {
+        *end = INT64_MAX;
+    }
+    if (*end > len) {
+        *end = len;
+    }
+    else if (*end < 0) {
+        *end += len;
+        if (*end < 0) {
+            *end = 0;
+        }
+    }
+    if (*start < 0) {
+        *start += len;
+        if (*start < 0) {
+            *start = 0;
+        }
+    }
+}
+
+/* s.find(sub, start, end). */
+static TPA_UNUSED int64_t tpa_str_find_range(tpa_str *s, tpa_str *sub, int64_t start, int64_t end, int has)
+{
+    int64_t i, m;
+    tpa_str__adjust(s->len, &start, &end, has);
+    if (end - start < sub->len) {
+        return -1;
+    }
+    if (sub->len == 0) {
+        return start;
+    }
+    for (i = start; i + sub->len <= end; i++) {
+        for (m = 0; m < sub->len && tpa_str_at(s, i + m) == tpa_str_at(sub, m); m++) {
+        }
+        if (m == sub->len) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* s.startswith(p, start, end) / (`suffix`) s.endswith(p, start, end): CPython's tailmatch. */
+static TPA_UNUSED int tpa_str_tailmatch(tpa_str *s, tpa_str *p, int64_t start, int64_t end, int has, int suffix)
+{
+    int64_t off, i;
+    tpa_str__adjust(s->len, &start, &end, has);
+    end -= p->len;
+    if (end < start) {
+        return 0;
+    }
+    if (p->len == 0) {
+        return 1;
+    }
+    off = suffix ? end : start;
+    for (i = 0; i < p->len; i++) {
+        if (tpa_str_at(s, off + i) != tpa_str_at(p, i)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 #endif /* TP_AOT_STR_H */

@@ -191,7 +191,7 @@ class _Checker:
             return
         elif allow_none and isinstance(ann, ast.Constant) and ann.value is None:
             return
-        elif _is_list_annotation(ann):
+        elif _is_list_annotation(ann) or _is_str_list_annotation(ann):
             return
         elif _is_class_annotation(ann, self.class_names):
             return
@@ -254,8 +254,9 @@ class _Checker:
                     self.var_classes[s.target.id] = cls
                 else:
                     self.var_classes.pop(s.target.id, None)
-            if s.value is not None:
-                self.expr(s.value)
+            if s.value is not None and not (isinstance(s.value, ast.List) and not s.value.elts
+                                            and _is_str_list_annotation(s.annotation)):
+                self.expr(s.value)          # (`x: list[str] = []`: an empty list of str, tier S1b)
         elif isinstance(s, ast.AugAssign):
             if not (isinstance(s.target, ast.Name) or self.subscript_target(s.target)) \
                     or not isinstance(s.op, _BIN_OPS):
@@ -489,7 +490,11 @@ class _Checker:
 
     def call(self, c: ast.Call) -> None:
         f = c.func
+        str_kw = frontend.STR_METHOD_KEYWORDS.get(f.attr, ()) if isinstance(f, ast.Attribute) else ()
         for k in c.keywords:
+            if k.arg in str_kw:             # tier S1b: split(sep=, maxsplit=), replace(count=)
+                self.expr(k.value)
+                continue
             self.rep.error(k.value, "aot/keyword", k.arg or "**", "keyword arguments are outside the first AOT step")
         if any(isinstance(a, ast.Starred) for a in c.args):
             self.rep.error(c, "aot/keyword", "*", "a starred argument is outside the first AOT step")
@@ -587,6 +592,19 @@ class _Checker:
               and f.value.id in self.var_classes
               and f.attr in self.class_methods.get(self.var_classes[f.value.id], ())):
             pass
+        elif isinstance(f, ast.Attribute) and f.attr in frontend.STR_METHODS and not (
+                isinstance(f.value, ast.Name) and f.value.id in ("sys", "math", "time") and f.value.id not in self.shadow):
+            if not isinstance(f.value, ast.Name):
+                self.expr(f.value)          # tier S1b: a str method (the front end checks the receiver is a str)
+            for a in c.args:
+                if f.attr == "join" and isinstance(a, ast.List) and not a.elts:
+                    continue                # `sep.join([])`: an empty list of str
+                if isinstance(a, ast.Tuple):  # startswith / endswith of a tuple of str
+                    for x in a.elts:
+                        self.expr(x)
+                elif not (isinstance(a, ast.Constant) and a.value is None):
+                    self.expr(a)
+            return
         else:
             self.rep.error(f, "aot/call", ast.unparse(f), f"the call of `{ast.unparse(f)}` is outside the first AOT step")
         for a in c.args:
@@ -626,6 +644,12 @@ def _is_list_annotation(ann: ast.expr) -> bool:
     """`list[float]` or `list[int]`."""
     return (isinstance(ann, ast.Subscript) and isinstance(ann.value, ast.Name) and ann.value.id == "list"
             and isinstance(ann.slice, ast.Name) and ann.slice.id in LIST_ELEMENTS)
+
+
+def _is_str_list_annotation(ann: ast.expr) -> bool:
+    """`list[str]` (tier S1b)."""
+    return (isinstance(ann, ast.Subscript) and isinstance(ann.value, ast.Name) and ann.value.id == "list"
+            and isinstance(ann.slice, ast.Name) and ann.slice.id == "str")
 
 
 def _is_tuple_annotation(ann: ast.expr) -> bool:
