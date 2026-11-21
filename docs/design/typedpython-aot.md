@@ -510,8 +510,13 @@ matches CPython.
      (something outside the tracked set holds it) and the objects it reaches are moved back to the live
      list; the rest are garbage: each is held by one extra count while its `clear` releases every owned
      field (tracked objects, acyclic objects, lists, big ints; the slot is emptied before the release) and is
-     freed when its count reaches zero (at once, or when the garbage that still held it is cleared). No
-     user code runs during a collection (no `__del__` in AOT), so it cannot re-enter; a flag guards it
+     freed when its count reaches zero (at once, or when the garbage that still held it is cleared). The
+     pass repeats while it freed something (it ends with a pass that frees nothing): an untracked object
+     that garbage owns is freed by its holder's `clear` and releases the tracked objects it held, a
+     reference that was a root in the pass that freed it, so a cycle held only through such an object
+     (`A -> U -> B1`, `B1 <-> B2`, `U` untracked) is garbage only for the next pass; the repeat is cheaper than
+     tracking every class that reaches a cyclic-capable one, at the price of one extra pass over the
+     tracked list whenever a collection frees anything. No user code runs during a collection (no `__del__` in AOT), so it cannot re-enter; a flag guards it
      anyway. The safepoint is `tpa_cls_<C>_new` of a cyclic-capable class, before `calloc`: every
      constructor argument is then an owned temporary, an owned local, a borrowed parameter whose caller
      holds it, or a field of a live object, and `__init__` has not started; `__init__` allocating another

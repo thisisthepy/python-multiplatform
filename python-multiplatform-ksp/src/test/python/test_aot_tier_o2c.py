@@ -335,6 +335,86 @@ if __name__ == "__main__":
     assert remaining == 0
 
 
+def test_cycle_held_through_an_untracked_object_owned_by_garbage_is_collected(tmp_path: Path):
+    """Post-merge review of #503, finding 1. `U` is acyclic and holds a `B`, so it is untracked and its
+    reference to `b1` is a root in the pass that frees the `A` cycle (traverse visits no edge through `U`).
+    Clearing `a1` frees `U`, which releases `b1`; `b1 <-> b2` is garbage only after that. On develop one pass
+    left the pair alive (`remaining == 2` for n = 1: a leak at exit, a LeakSanitizer report in the sanitizer
+    job); the collection must repeat while a pass frees something."""
+    src = """
+import sys
+
+
+class B:
+    __slots__ = ("v", "nxt")
+    v: int
+    nxt: "B | None"
+
+    def __init__(self, v: int, nxt: "B | None") -> None:
+        self.v = v
+        self.nxt = nxt
+
+
+class U:
+    __slots__ = ("b",)
+    b: B
+
+    def __init__(self, b: B) -> None:
+        self.b = b
+
+
+class A:
+    __slots__ = ("u", "nxt")
+    u: U | None
+    nxt: "A | None"
+
+    def __init__(self, u: U | None, nxt: "A | None") -> None:
+        self.u = u
+        self.nxt = nxt
+
+
+def tie_b(x: B, y: B) -> None:
+    x.nxt = y
+
+
+def tie_a(x: A, y: A) -> None:
+    x.nxt = y
+
+
+def make(n: int) -> int:
+    total: int = 0
+    for i in range(n):
+        b1: B = B(i, None)
+        b2: B = B(i + 1, None)
+        tie_b(b1, b2)
+        tie_b(b2, b1)
+        a1: A = A(U(b1), None)
+        a2: A = A(None, None)
+        tie_a(a1, a2)
+        tie_a(a2, a1)
+        total += b2.v
+    return total
+
+
+if __name__ == "__main__":
+    print(make(int(sys.argv[1])))
+"""
+    p = _write(tmp_path, src)
+    report = aot.explain_alloc(p)
+    for local in ("b1 = B(...) -> heap-gc", "a1 = A(...) -> heap-gc"):
+        assert local in report, report
+    c_text = aot.generate(p)
+    _syntax_check(c_text, tmp_path, "bridge")
+    traverse = c_text[c_text.index("static void tpa_cls_A_gc_traverse(") :]
+    traverse = traverse[: traverse.index("\n}\n")]
+    assert "f_nxt" in traverse and "f_u" not in traverse         # no edge through the untracked U: the premise
+    for args, stress in ((["1"], False), (["3000"], False), (["300"], True)):
+        out, (collections, freed, exit_freed, remaining) = _stats(tmp_path, p, args, stress=stress)
+        assert out == subprocess.run([sys.executable, str(p), *args], capture_output=True, text=True).stdout
+        assert freed + exit_freed == 4 * int(args[0])            # b1, b2, a1, a2 of every iteration
+        assert remaining == 0, (args, stress)
+
+
 def test_region_and_virtual_objects_holding_a_cycle(tmp_path: Path):
     src = MUT + """
 

@@ -18,6 +18,8 @@
  *   4. each garbage object is held by one extra count while its generated `clear` empties and releases
  *      every owned field (tracked and untracked objects, lists, big ints), then let go: it is freed at once
  *      when nothing else held it, or when the garbage that still held it is cleared in turn.
+ *   5. the pass repeats while it freed something: an untracked object that garbage owned is freed by step 4
+ *      and releases the tracked objects it held, which can be garbage only now (a cycle held through it).
  * No user code runs during a collection (AOT compiles no `__del__`), so a collection cannot re-enter; a flag
  * guards it anyway.
  *
@@ -188,20 +190,15 @@ static void tpa_gc__visit_reachable(tpa_gc_head *q, void *arg)
     }
 }
 
-/* One collection: every tracked object in a cycle that nothing outside the tracked set reaches is freed. */
-static void tpa_gc_collect(void)
+/* One pass of trial deletion (steps 1 to 4 above): every tracked object in a cycle that nothing outside the
+ * tracked set reaches is freed. */
+static void tpa_gc__pass(void)
 {
     tpa_gc_state *g = tpa_gc__state();
     tpa_gc_head unreachable;
     tpa_gc__lists lists;
     tpa_gc_head *h;
     tpa_gc_head *next;
-    int64_t live_before;
-    if (g->collecting) {
-        return;
-    }
-    g->collecting = 1;
-    live_before = g->live;
     unreachable.gc_prev = &unreachable;
     unreachable.gc_next = &unreachable;
     unreachable.gc_refs = 0;
@@ -247,6 +244,28 @@ static void tpa_gc_collect(void)
             h->gc_refs = 0;
         }
     }
+}
+
+/* One collection: passes repeat while a pass frees something. A reference from an UNTRACKED object (an
+ * acyclic class that holds a cyclic-capable one) is not an edge `traverse` visits, so it counts as a root;
+ * when garbage owns such an object, the clear that frees it releases that reference, and the tracked object
+ * it held can turn into garbage only for the next pass (a cycle held through an untracked object, SPEC N-17).
+ * The loop ends because a repeated pass needs `live` to have fallen, and a pass that frees nothing is the
+ * last; the acyclic programs never include this header. */
+static void tpa_gc_collect(void)
+{
+    tpa_gc_state *g = tpa_gc__state();
+    int64_t live_before;
+    int64_t live_pass;
+    if (g->collecting) {
+        return;
+    }
+    g->collecting = 1;
+    live_before = g->live;
+    do {
+        live_pass = g->live;
+        tpa_gc__pass();
+    } while (g->live < live_pass && g->live > 0);
     g->collections += 1;
     g->freed += live_before - g->live;      /* every untrack during the collection is a free */
     g->count = 0;

@@ -1682,7 +1682,11 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     freed with the region. The collector is CPython's trial deletion over the list of every tracked
     object alive: `gc_refs = rc` less one per reference from a tracked object's field to a tracked
     object; an object with `gc_refs > 0` is a root and what it reaches is kept; the rest is cleared (every
-    owned field released, lists and big ints included) and freed. It runs only at a safepoint: inside
+    owned field released, lists and big ints included) and freed; the pass repeats while it freed
+    something, because a reference from an untracked object that garbage owns is a root in the pass that
+    frees that object, and the tracked cycle it held is garbage only for the next pass (a cycle held
+    through an untracked object is reclaimed by the same collection, and the exit collection leaves
+    nothing). It runs only at a safepoint: inside
     `tpa_cls_<C>_new` of a cyclic-capable class, before the allocation, when every constructor argument is
     held by the caller, and once after `__main__` returns, when no frame holds anything. At a safepoint
     no cyclic-capable object is kept alive solely by an uncounted reference: PR-O1's elision rules (3) and
