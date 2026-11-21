@@ -167,4 +167,24 @@ tasks.named<Test>("desktopTest") {
     // but AWT still initialises, and on a CI box without one that is the difference between a
     // headless surface and a crash.
     systemProperty("java.awt.headless", "true")
+    // A real window needs a display; those tests run in `desktopWindowTest` below.
+    filter.excludeTestsMatching("fixture.compose.window.*")
+}
+
+/**
+ * #191 (from #172 item 5): the tests that open a real desktop window (`fixture.compose.window`), e.g.
+ * input-method composition decoded by Compose's AWT layer. Same classes and JVM as `desktopTest`, but
+ * not headless, so it needs a display: CI runs it on macOS, which has one.
+ */
+val desktopWindowTest by tasks.registering(Test::class) {
+    group = "verification"
+    description = "Runs the fixture's real-window tests (needs a display)."
+    val unit = tasks.named<Test>("desktopTest").get()
+    testClassesDirs = unit.testClassesDirs
+    classpath = unit.classpath
+    javaLauncher.set(unit.javaLauncher)
+    jvmArgs("--enable-preview", "-Djava.library.path=.")
+    systemProperty("java.awt.headless", "false")
+    filter.includeTestsMatching("fixture.compose.window.*")
+    filter.isFailOnNoMatchingTests = true
 }

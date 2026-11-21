@@ -44,6 +44,18 @@ jobs:
         # Using --console=plain so logs are readable in GitHub Actions
         run: ./gradlew :python-multiplatform:desktopTest --console=plain
 
+      # SPEC B-6b (#191, from #172 item 5): input-method composition decoded by Compose's AWT layer, in a
+      # real window. The macOS runner has a display; the task fails if no window test matched.
+      - name: Real-window input method test (Compose host fixture)
+        run: ./gradlew :python-multiplatform-compose:fixtures:compose:desktopWindowTest --rerun --console=plain
+
+      - name: Upload the real-window test report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-window-test-reports
+          path: python-multiplatform-compose/fixtures/compose/build/reports/tests/desktopWindowTest
+
   plugin-unit:
     # The Gradle plugin's own unit tests (#403). Only its fixtures ran in CI before, so plugin
     # unit tests were never executed (leader decision 2026-11-13). Linux: the tests use fake
