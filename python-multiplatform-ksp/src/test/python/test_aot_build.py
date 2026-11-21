@@ -2507,7 +2507,7 @@ REJECTED = {
     "import twice": ("import sys\nimport sys\n", ("aot/import", 2, "sys")),
     "from import": ("from math import sqrt\n", ("aot/import", 1, "math")),
     "empty list display": ("def f() -> int:\n    x = []\n    return 0\n", ("aot/container", 2, "list display")),
-    "str method (tier S1b)": ("def f(s: str) -> str:\n    return s.upper()\n", ("aot/call", 2, "s.upper")),
+    "str method outside the S1 list": ("def f(s: str) -> str:\n    return s.title()\n", ("aot/call", 2, "s.title")),
     "printf-style str formatting": ("def f(x: int) -> str:\n    return '%d' % x\n", ("aot/front-end", 2, "f")),
     "print keyword": ("def f() -> None:\n    print(1, file=None)\n", ("aot/print-keyword", 2, "file")),
     "print as a value": ("def f() -> None:\n    x = print(1)\n", ("aot/print-use", 2, "print")),

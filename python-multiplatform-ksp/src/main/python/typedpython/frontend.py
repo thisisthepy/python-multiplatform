@@ -2083,7 +2083,10 @@ class _Lowerer:
             if not self.is_local(node.id):
                 return node.id in self.info.aot_consts and self.info.aot_consts[node.id].type is Type.STR
             return node.id not in self.arrays and self.local_type(node.id, node.lineno) is Type.STR
-        return not isinstance(node, ast.Attribute)
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) \
+                and node.value.id in ("sys", "math", "time") and not self.is_local(node.value.id):
+            return False                                    # a module's attribute (sys.stdout.write, ...)
+        return True
 
     def str_method(self, func: ast.Attribute, node: ast.Call) -> ir.Expr:
         """`s.<method>(...)` of tier S1b (design 4.3.1), keyword arguments mapped to their places."""
@@ -3255,7 +3258,10 @@ class _Lowerer:
                                          f"`{name}` is {TYPE_NAME[p.type]}")
                 args.append(ir.Local(p.type, a.id))
             else:
-                args.append(self.value(a))
+                v = self.value(a)
+                if isinstance(p, ir.Param) and p.type is Type.STR_LIST and isinstance(v, ir.NewList):
+                    v = ir.StrListDisplay(Type.STR_LIST, ())        # tier S1b: `f([])` for a list[str] parameter
+                args.append(v)
         direct = all(isinstance(p, ir.ArrayParam)
                      or (p.type != Type.OBJ and e.type == p.type)
                      or (isinstance(p, ir.Param) and p.cls is not None and e.type == Type.OBJ)

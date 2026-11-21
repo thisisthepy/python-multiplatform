@@ -608,6 +608,8 @@ class _Checker:
         else:
             self.rep.error(f, "aot/call", ast.unparse(f), f"the call of `{ast.unparse(f)}` is outside the first AOT step")
         for a in c.args:
+            if isinstance(a, ast.List) and not a.elts:
+                continue                    # `f([])`: an empty list for a list[str] parameter (the front end checks)
             self.expr(a)
 
 

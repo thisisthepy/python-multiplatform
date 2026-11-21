@@ -104,9 +104,9 @@ TABLE = [
     ("aot/builtin", "x = 1\nfor i in range(3):\n    pass\n", (PEND, "K", "For", 2)),
     # aot/class-shape (kept above)
     # aot/str, aot/container, aot/exception, aot/builtin (pending S)
-    ("aot/str", "def f() -> str:\n    return 'a b'.upper()\n", (PEND, "S", "upper", 2)),
-    ("aot/str", "def f(s: str) -> int:\n    return s.find('a')\n", (PEND, "S", "find", 2)),
-    ("aot/str", "def f(s: str) -> str:\n    return s.strip()\n", (PEND, "S", "strip", 2)),
+    ("aot/str", "def f() -> str:\n    return 'a b'.title()\n", (PEND, "S", "title", 2)),
+    ("aot/str", "def f(s: str) -> int:\n    return s.count('a')\n", (PEND, "S", "count", 2)),
+    ("aot/str", "def f(s: str) -> str:\n    return s.casefold()\n", (PEND, "S", "casefold", 2)),
     ("aot/container", "def f() -> int:\n    d = {1: 2}\n    return 0\n", (PEND, "S", "dict display", 2)),
     ("aot/container", "def f(n: int) -> int:\n    return len([i for i in range(n)])\n", (PEND, "S", "list comprehension", 2)),
     ("aot/exception", "def f() -> None:\n    raise ValueError('x')\n", (PEND, "S", "raise", 2)),

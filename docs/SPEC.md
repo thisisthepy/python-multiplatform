@@ -1780,6 +1780,24 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     of the typedpython group, the ASan/UBSan job with the leak checker on.
     Not in this step (S1b, the next PR): the str methods, the Unicode tables generated from the reference
     interpreter, `list[str]`, `str` fields of classes and `str | None`.
+  - **Tier S PR-S1b (#443)** (agent proposal, not owner-confirmed): the str methods `split()` / `split(sep)` /
+    `split(sep, maxsplit)` (keywords `sep`, `maxsplit`), `join`, `strip` / `lstrip` / `rstrip` with and without
+    `chars`, `lower` (with CPython's final-sigma rule), `upper` (full mappings: `'ß'.upper() == 'SS'`),
+    `startswith` / `endswith` (a str or a tuple of str, with `start` / `end`), `find` (with `start` / `end`),
+    `replace` (with `count`, keyword too), `isalpha`, `isdigit`, with CPython's results and errors
+    (`ValueError: empty separator`, `OverflowError: Python int too large to convert to C ssize_t` for a count
+    outside 64 bits). The Unicode tables they read (`aot/unicode.py`) are generated from the interpreter that
+    builds the program, only those the program uses, with `TPA_UNIDATA_VERSION` in the C; the Cased and
+    Case_Ignorable properties of the final-sigma rule are read through `lower()` itself. `list[str]` (a
+    counted list of owned strs, fixed length until S2): locals, parameters, results, displays (`[]` where a
+    list of str is expected), `split`'s result, indexing, `len`, truth value, `for s in xs`, `join`'s
+    argument, `print` / `str` / `repr` (the list's repr). `str` fields of compiled classes (heap, region and
+    virtual objects; a field that may be rebound is read into an owned temporary). A method outside the list
+    stays a finding (`aot/call`). Two defects fixed on the way: Pyrefly reports positions in UTF-8 bytes, and
+    the rebinding probe counted characters, so a local assigned on a line with non-ASCII text was untyped
+    (both modes); an inferred class comes back module-qualified (`prog.Node`), which the AOT front end did not
+    resolve. Tests: `test_aot_tier_s1b.py`, `test_rebinding.py`. Moved to S2 (in 1.0): `str | None` (needs the
+    front end's `is not None` narrowing) and the Windows console output (WriteConsoleW).
 
 ---
 

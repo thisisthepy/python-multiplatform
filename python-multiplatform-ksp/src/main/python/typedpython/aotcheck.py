@@ -598,8 +598,9 @@ class _Pass(ast.NodeVisitor):
                         self.print_fstrings.add(id(a))
             self.builtin_call(f.id, node)
         elif isinstance(f, ast.Attribute):
-            if (isinstance(f.value, ast.Constant) and isinstance(f.value.value, str)) or (
-                    isinstance(f.value, ast.Name) and self.kinds.get(f.value.id) == "str"):
+            if ((isinstance(f.value, ast.Constant) and isinstance(f.value.value, str)) or (
+                    isinstance(f.value, ast.Name) and self.kinds.get(f.value.id) == "str")) \
+                    and f.attr not in frontend.STR_METHODS:          # (the methods of tier S1b compile)
                 self.pending("S", "aot/str", f.attr, node, f"the string method `{f.attr}` is tier S1b (strings), not compiled "
                                                           "yet (syntactic: a str literal or a name annotated `str`)")
         self.generic_visit(node)

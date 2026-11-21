@@ -252,8 +252,10 @@ C they generated before (no `tp_aot_str.h`).
 
 **Order.** S1a: representation, literals, operators, `len`, indexing, slicing, `in`, iteration, `print`, f-strings,
 `str()` / `repr()`, `ord`, `chr`, `sys.argv[i]`, `int(s)`, `sys.std*.write`. S1b: the methods, the generated Unicode
-tables, the minimal `list[str]`, `str` fields of classes and `str | None` (the containers of a str: they share the
-owned-field and region-walk work). Each is one PR with its CI run.
+tables, the minimal `list[str]` and `str` fields of classes (the containers of a str: they share the owned-field and
+region-walk work). S2 starts with `str | None` (it needs `is not None` narrowing in the front end, which S2's optional
+containers need too) and the Windows console. Each step is one PR; CI runs per group (S1a+S1b, S2+S3, `__del__`+T1;
+leader, 2026-11-21).
 
 **As implemented in S1a (agent proposal, not owner-confirmed).** A STR value is `ir.Type.STR` (AOT mode only; the
 default mode never produces it) and every operation is its own IR node (`StrConcat`, `StrRepeat`, `StrCompare`,
@@ -268,7 +270,7 @@ its UTF-8 bytes, as before, and an f-string of numbers piece by piece, as before
 cannot be encoded. `repr` uses the printable table tp_aot_int.h already has (`int()`'s message); S1b generates the
 tables from the reference interpreter. The Windows console (a console, not a pipe) is the one open output question:
 CPython writes a console through WriteConsoleW, and this step writes UTF-8 bytes through the C runtime, which a
-pipe (every test) receives exactly as CPython's; S1b settles the console with a test on the Windows job.
+pipe (every test) receives exactly as CPython's; S2 settles the console with a test on the Windows job.
 
 ### 4.4 Tier T, threads
 
