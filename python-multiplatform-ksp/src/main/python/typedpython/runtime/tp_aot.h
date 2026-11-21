@@ -134,7 +134,8 @@ typedef int64_t tpa_rc_t;
 #define TPA_OverflowError 3
 #define TPA_IndexError 4
 #define TPA_MemoryError 5
-#define TPA_TypeError 6          /* library build: a NULL list handle (an ABI-level check, no counterpart in the source language) */
+#define TPA_TypeError 6          /* library build: a NULL list handle; tier S1: ord() of a string that is not one character (an ABI-level check, no counterpart in the source language) */
+#define TPA_UnicodeEncodeError 7 /* tier S1: a lone surrogate written to standard output (tp_aot_str.h) */
 
 typedef struct {
     int kind;
@@ -152,6 +153,7 @@ static inline const char *tpa_exc_name(int kind)
     case TPA_IndexError: return "IndexError";
     case TPA_MemoryError: return "MemoryError";
     case TPA_TypeError: return "TypeError";
+    case TPA_UnicodeEncodeError: return "UnicodeEncodeError";
     }
     return "SystemError";
 }
