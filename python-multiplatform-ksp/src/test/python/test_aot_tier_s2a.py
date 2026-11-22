@@ -919,12 +919,60 @@ def test_tuple_values(tmp_path: Path):
     _compare(tmp_path, TUPLES, [["0"], ["3"], ["-7"]])
 
 
+TUPLE_INDEX = """
+import sys
+
+
+def pick(i: int) -> int:
+    t = (10, 20, 30)
+    return t[i]
+
+
+def word(i: int) -> str:
+    t: tuple[str, str] = ("ab", "c\u00e9")
+    return t[i] + "!"
+
+
+def half(i: int) -> float:
+    t = (1.5, 2.5)
+    return t[i - 1]
+
+
+def big(i: int) -> int:
+    t = (2 ** 70, 3)
+    return t[i] * 2
+
+
+def flag(t: tuple[bool, bool, bool], i: int) -> bool:
+    return t[i]
+
+
+def main() -> None:
+    n = int(sys.argv[1])
+    print(pick(n % 3), pick(-1 - n % 3), word(n % 2), half(n % 2), big(n % 2), flag((True, False, True), n % 3))
+    t = (5, 6)
+    print(t[n == 0], t[-2], t[True])
+    print(pick(n))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_a_tuple_indexed_by_a_variable(tmp_path: Path):
+    """`t[i]` of a tuple whose elements share a type (int, a big int, float, bool, str): CPython's tuple index rules,
+    a negative index from the end, a bool index, and `IndexError: tuple index out of range` (the last line of the
+    cases 3, -4 and 7)."""
+    _compare(tmp_path, TUPLE_INDEX, [["0"], ["2"], ["-3"], ["3"], ["-4"], ["7"]])
+
+
 TUPLE_MAIN = '\n\ndef main() -> None:\n    print(f(1))\n\n\nif __name__ == "__main__":\n    main()\n'
 
 
 @pytest.mark.parametrize("body, words", [
-    ("def f(i: int) -> int:\n    t = (1, 2)\n    return t[i]\n", "indexed by a constant"),
-    ("def f(i: int) -> int:\n    t = (1, 2)\n    return t[5]\n", "indexed by a constant"),
+    ("def f(i: int) -> int:\n    t = (i, 'a')\n    return len(str(t[i]))\n", "differ in type"),
+    ("def f(i: int) -> int:\n    t = (1, 2)\n    return len(t[i:])\n", "a slice of a tuple"),
     ("def f(i: int) -> bool:\n    t = (1, 2)\n    return t is t\n", "no tuple object yet"),
     ("def f(i: int) -> int:\n    t = (1, 2)\n    x = [t]\n    return 0\n", "no tuple object yet"),
     ("def f(i: int) -> bool:\n    t = (i * 0.5, 1)\n    return t == t\n", "(aot/identity)"),
@@ -933,8 +981,8 @@ TUPLE_MAIN = '\n\ndef main() -> None:\n    print(f(1))\n\n\nif __name__ == "__ma
     ("def f(i: int) -> bool:\n    t = (1, 2)\n    return i + 1 in t\n", "bind the value to a name first"),
 ])
 def test_a_tuple_use_with_no_aot_form_is_named(tmp_path: Path, body: str, words: str):
-    """What needs a tuple object (identity, a container holding one), a variable index, or CPython's identity test on a
-    float item leaves the function uncompiled with the reason, never a guess."""
+    """What needs a tuple object (identity, a container holding one, a slice), a variable index into a tuple of mixed
+    element types (a union), or CPython's identity test on a float item leaves the function uncompiled with the reason, never a guess."""
     with pytest.raises(aot.AotError) as raised:
         aot.generate(_write(tmp_path, body + TUPLE_MAIN))
     assert words in str(raised.value)

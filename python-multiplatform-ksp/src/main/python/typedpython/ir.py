@@ -897,6 +897,17 @@ class Cond(Expr):
 
 
 @dataclass(frozen=True)
+class TupleIndex(Expr):
+    """`t[i]` of a split tuple (AOT mode, tier S2a, `typedpython/tuples.py`): the index, then the element chosen from
+    `elements` (reads of the element locals, all of the node's type: a scalar or a str), with CPython's tuple rules: a
+    negative index counts from the end; out of range -> IndexError("tuple index out of range"). Only the chosen
+    element is read."""
+
+    index: Expr                # I64
+    elements: tuple[Expr, ...]
+
+
+@dataclass(frozen=True)
 class ArgvInt(Expr):
     """`int(sys.argv[index])` (type I64), `index` I64. CPython's `int()` of a string can be any int, so the AOT
     back end holds its value as a big-integer-capable (TAGGED) int (`aot/rep.py`, #462); under `--strict-int` it

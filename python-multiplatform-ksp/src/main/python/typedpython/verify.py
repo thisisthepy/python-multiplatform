@@ -302,8 +302,8 @@ nothing else (with the flag off every rule above is exactly as it was):
     end cannot compute exactly, is the back end's own business (since #462 an unproved int is a big-integer-capable
     value; under `--strict-int` it is the finding `aot/int-unproven`; `aot/call`, ...);
   * the AOT-only nodes are defined (`ir.py` "AOT-only nodes"): `ReturnTuple`, `Unpack`, `ListDisplay`, `Cond`
-    (checked under the guard facts of its test, as the branches of an `If`), `ArgvInt`, `ArgvLen`, and the
-    `FString` argument of a `Print`;
+    (checked under the guard facts of its test, as the branches of an `If`), `TupleIndex` (an int index and elements
+    of the node's type, tier S2a), `ArgvInt`, `ArgvLen`, and the `FString` argument of a `Print`;
   * a list is a value where `array_value` allows one: the right-hand side of an assignment to a list local
     (a list name or a call that returns a list; the creations go through `allocation`), a `Return` of a
     list-returning function, an argument for a list parameter (a list name of the parameter's type). A
@@ -373,7 +373,7 @@ from .ir import BuildString, Contains, ForObj, Format, GetItem, NewDict, NewList
 from .ir import ParInfo
 from .ir import ListAppend, ListClear, ListExtend, ListInsert, ListPop, ListRemove, ListReverse, ListSearch, ListStr
 from .ir import ListCompare, ListConcat, ListRepeat, ListSlice, ListDelete, ListSetSlice
-from .ir import ForObjList, ObjListDisplay, ObjListIndex, ObjListLen, ObjListStore
+from .ir import ForObjList, ObjListDisplay, ObjListIndex, ObjListLen, ObjListStore, TupleIndex
 
 DA = "verify/definite-assignment"
 MISSING_RETURN = "verify/missing-return"
@@ -439,7 +439,7 @@ _AOT_EXPRS = frozenset({ListDisplay, Cond, ArgvInt, ArgvLen, FloatToInt, BoolToI
                         # tier S1b
                         StrMethod, StrListDisplay, StrListLen, StrListIndex,
                         StrNarrow, ListPop, ListSearch, ListStr, ListCompare, ListConcat, ListRepeat, ListSlice,
-                        ObjListDisplay, ObjListLen, ObjListIndex})  # tier S2a
+                        ObjListDisplay, ObjListLen, ObjListIndex, TupleIndex})  # tier S2a
 # Nodes whose OBJ result is a new reference (ir.py "ownership": Box, Global, GetAttr, CallObject,
 # OBJ BinOp, Tuple), plus reads of an OBJ local (the local owns its reference; the back end increfs or
 # borrows under that rule) and Calls of a compiled function returning OBJ (which returns a new
@@ -922,6 +922,9 @@ class _Checker:
         if cls is Cond:          # AOT mode: either branch
             a, b = self.interval(e.then), self.interval(e.orelse)
             return (min(a[0], b[0]), max(a[1], b[1]))
+        if cls is TupleIndex:    # AOT mode: any element
+            ivs = [self.interval(x) for x in e.elements]
+            return (min(iv[0] for iv in ivs), max(iv[1] for iv in ivs))
         if cls is BinOp and e.op in _PROVABLE_OPS:
             lo, hi = _exact(e.op, self.interval(e.left), self.interval(e.right))
             return (max(lo, _I64_MIN), min(hi, _I64_MAX))
@@ -988,6 +991,9 @@ class _Checker:
         if cls is Cond:
             a, b = self.interval(e.then), self.interval(e.orelse)
             return (min(a[0], b[0]), max(a[1], b[1]))
+        if cls is TupleIndex:
+            ivs = [self.interval(x) for x in e.elements]
+            return (min(iv[0] for iv in ivs), max(iv[1] for iv in ivs))
         if cls is BinOp and e.op in _PROVABLE_OPS:
             return _sound_cap(_exact_sound(e.op, self.interval(e.left), self.interval(e.right)))
         if cls is BinOp and e.op in _POW2_OPS:
@@ -1733,6 +1739,22 @@ class _Checker:
         return self.stray(e, state)
 
     # --- AOT-only expressions (module docstring "AOT mode") --------------------------------------
+
+    def e_TupleIndex(self, e: TupleIndex, state: _State) -> ir.Expr:
+        """`t[i]` of a split tuple: an int index, then elements of the node's type (a scalar or a str)."""
+        index = self.int_operand(e.index, state, "index of a tuple")
+        if not isinstance(e.elements, tuple) or not e.elements:
+            self.error(STRUCTURE, "TupleIndex has a non-empty tuple of elements")
+            return e
+        elements = tuple(self.expr(x, state) for x in e.elements)
+        if e.type not in ir.SCALARS and e.type is not Type.STR:
+            self.error(TYPE, f"a tuple element read by index is a scalar or a str, node says "
+                             f"{getattr(e.type, 'value', e.type)}")
+        else:
+            for x in elements:
+                self.slot(x, e.type, "an element of an indexed tuple")
+        self.result(e, e.type)
+        return dataclasses.replace(e, index=index, elements=elements)
 
     def e_Cond(self, e: Cond, state: _State) -> ir.Expr:
         """`then if cond else orelse`: scalars of the node's type. Each branch is checked under the guard
