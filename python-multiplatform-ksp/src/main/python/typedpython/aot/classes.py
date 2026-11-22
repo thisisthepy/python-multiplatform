@@ -33,7 +33,8 @@ from typedpython.ir import Type
 # `CallObject.callee` were missing from four hand-written copies). When a node with a new child attribute
 # is added to `typedpython.ir`, add the attribute here.
 EXPR_CHILD_ATTRS = ("left", "right", "operand", "value", "obj", "index", "cond", "then", "orelse",
-                    "length", "fill", "callee", "np")
+                    "length", "fill", "callee", "np",
+                    "count", "start", "stop", "step")       # (tier S2a: ListRepeat.count, ListSlice bounds)
 EXPR_CHILD_SEQS = ("args", "elements", "parts")
 
 

@@ -335,6 +335,16 @@ def _find_escape_reason(fn: ir.Function, var_name: str, cls_name: str) -> str | 
             res = _check_expr(stmt.call)
             if res is not None:
                 return res
+        elif not isinstance(stmt, (ir.Break, ir.Continue, ir.ForRange)):
+            # Any other statement (tier S2a: ListAppend, ListInsert, ListSetSlice, ...): the object itself among its
+            # expressions is an escape (into a container, or somewhere this analysis does not follow); a statement
+            # it does not know never lets a virtual object through unseen.
+            for e in _stmt_exprs(stmt):
+                if isinstance(e, ir.Local) and e.name == var_name:
+                    return "escapes into container"
+                res = _check_expr(e)
+                if res is not None:
+                    return res
     return None
 
 
