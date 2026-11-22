@@ -823,6 +823,113 @@ def test_a_class_with_a_list_field_is_never_virtual_or_region(tmp_path: Path):
     assert "class holds a list" in report and "-> virtual" not in report and "-> region" not in report
 
 
+
+ITEMS_OF_A_LIST = """
+import sys
+
+
+class P:
+    v: int
+
+    def __init__(self, v: int) -> None:
+        self.v = v
+
+
+def main() -> None:
+    n = int(sys.argv[1])
+    a = P(n)
+    xs = [a]
+    b = P(n + 1)
+    xs.append(b)
+    c = P(n + 2)
+    xs[0] = c
+    d = P(n + 3)
+    xs.insert(0, d)
+    e = P(n + 4)
+    f = xs[0]
+    g = P(n + 5)
+    k = P(n + 6)
+    ys = [P(0)]
+    for y in ys:
+        xs.append(g)
+        k = y
+    print(len(xs), f.v, e.v, k.v)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_an_instance_put_into_a_list_is_a_heap_object(tmp_path: Path):
+    """An instance placed in a list by a display, `append`, `xs[0] = c` or `insert` outlives the expression that made
+    it, so it is a counted heap object, never virtual (scalar-replaced) or in a region (the fable-pmp review of #526,
+    S1: a wrong choice would still print the right numbers and fail only under ASan). The statements of a `for` loop
+    over a list of instances count too: `g`, appended inside one, and `k`, rebound inside one, are heap objects (they
+    were made virtual while those bodies went unread, and the C did not compile). `e`, which no list holds, is the
+    control: the analysis does make an instance virtual here."""
+    report = aot.explain_alloc(_write(tmp_path, ITEMS_OF_A_LIST))
+    kinds = {line.split()[1]: line.split("-> ")[1].split()[0] for line in report.splitlines()
+             if " = P(" in line and "<temp>" not in line}
+    assert kinds == {"a": "heap-rc", "b": "heap-rc", "c": "heap-rc", "d": "heap-rc", "e": "virtual", "g": "heap-rc",
+                     "k": "heap-rc"}, report
+
+
+CLEARED_WHILE_ITERATING = """
+import sys
+
+
+class P:
+    v: int
+
+    def __init__(self, v: int) -> None:
+        self.v = v
+
+
+class Box:
+    items: list[P]
+
+    def __init__(self, n: int) -> None:
+        self.items = [P(n), P(n + 1), P(n + 2)]
+
+
+def main() -> None:
+    n = int(sys.argv[1])
+    kept = P(-1)
+    xs = [P(n), P(n * 2)]
+    for c in xs:
+        xs.clear()
+        print(c.v, len(xs))
+        kept = c
+    print(kept.v)
+    box = Box(n)
+    for q in box.items:
+        box.items = []
+        print(q.v, len(box.items))
+        kept = q
+    print(kept.v)
+    ys = [P(n + 7)]
+    for r in ys:
+        ys.pop()
+        ys.append(P(r.v + 1))
+        kept = r
+        if r.v > n + 9:
+            break
+    last = ys[0]
+    print(kept.v, last.v)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_the_loop_item_outlives_a_clear_of_its_list(tmp_path: Path):
+    """`for c in xs: xs.clear()` and a rebinding of the iterated field leave `c` valid (the loop holds the list, and
+    its own reference to each item), as CPython's list iterator and its item reference do; read in the body and,
+    through another name, after the loop (the fable-pmp review of #526, N3; the ASan job sees a use after free)."""
+    _compare(tmp_path, CLEARED_WHILE_ITERATING, [["0"], ["3"]])
+
 TUPLES = """
 import sys
 
@@ -1051,6 +1158,58 @@ def test_a_list_of_tuples(tmp_path: Path):
     _compare(tmp_path, LIST_OF_TUPLES, [["0"], ["2"], ["3"], ["-4"]])
 
 
+LIST_OF_TUPLES_SEARCH = """
+import sys
+
+
+def main() -> None:
+    n = int(sys.argv[1])
+    ps: list[tuple[int, str]] = [(1, "a"), (2, "b"), (n, "c"), (2, "b")]
+    qs = list(ps)
+    t = (2, "b")
+    k = 5
+    print((n, "c") in ps, (k, "c") not in ps, t in ps, ps.count(t), ps.count((k, "z")), ps.index((n, "c")))
+    print(ps == qs, ps != qs, ps < qs, ps <= qs, ps == qs[:2] + qs[2:])
+    qs.append((0, "x"))
+    print(ps == qs, ps < qs, qs > ps)
+    qs[1] = (2, "a")
+    print(ps < qs, ps > qs, ps >= qs)
+    e: list[tuple[int, int]] = []
+    f: list[tuple[int, int]] = []
+    print(e == f, e < f, e <= f, (1, 2) in e, e.count((1, 1)))
+    f.append((n, 0))
+    e.append((1, n))
+    print(e < f, e > f, e <= f, e >= f, e == f)
+    i = 0
+    while i < 3:
+        e.append((i, i))
+        found = (i, i) in e
+        print(found, e.count((i, i)), e.index((i, i)))
+        i += 1
+    ps.remove(t)
+    print(ps, len(ps))
+    if n > 0 and (k, "q") in ps:
+        print("never")
+    m = (n, n)
+    if n == 3:
+        e.remove(m)
+    print(e)
+    print(ps.index((k, "c")))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_a_list_of_tuples_searched_and_compared(tmp_path: Path):
+    """`in`, `not in`, `count`, `index` and `remove` of a list of tuples (CPython's item `==`, element by element), and
+    `==`, `!=`, `<`, `<=`, `>`, `>=` of two lists of tuples (lengths, then the first items that differ, as tuples);
+    `ValueError: list.index(x): x not in list` (cases 0, 2 and -1, last line) and `ValueError: list.remove(x): x not in
+    list` (case 3)."""
+    _compare(tmp_path, LIST_OF_TUPLES_SEARCH, [["0"], ["2"], ["3"], ["5"], ["-1"]])
+
+
 LIST_STORE_AND_EMPTY = """
 import sys
 
@@ -1098,7 +1257,14 @@ TUPLE_MAIN = '\n\ndef main() -> None:\n    print(f(1))\n\n\nif __name__ == "__ma
     ("def f(i: int) -> bool:\n    t = (i * 0.5, 1)\n    return 1.0 in t\n", "(aot/identity)"),
     ("def f(i: int) -> int:\n    t = (i, 'a')\n    for v in t:\n        pass\n    return 0\n", "different types"),
     ("def f(i: int) -> bool:\n    t = (1, 2)\n    return i + 1 in t\n", "bind the value to a name first"),
-    ("def f(i: int) -> bool:\n    ps = [(i, 'a')]\n    return (i, 'a') in ps\n", "come with tuple objects"),
+    ("def f(i: int) -> int:\n    ps = [(i, 'a')]\n    return ps\n", "returning one are not in this step"),
+    ("def f(i: int) -> bool:\n    ps = [(i * 0.5, 1)]\n    return (1.0, 1) in ps\n", "(aot/identity)"),
+    ("def f(i: int) -> bool:\n    ps = [(i * 0.5, 1)]\n    return ps == ps\n", "(aot/identity)"),
+    ("def f(i: int) -> int:\n    ps = [(i, 1)]\n    while (i, 1) in ps:\n        ps.pop()\n    return 0\n",
+     "would be computed once"),
+    ("def f(i: int) -> int:\n    ps = [(i, 1)]\n    return ps.count((i, i + 1))\n", "bind the values to names first"),
+    ("def f(i: int) -> int:\n    ps = [(i, 1)]\n    return ps.count((i, 1)) + f(i - 1)\n", "bind the call's value"),
+    ("def f(i: int) -> bool:\n    ps = [(i, 1)]\n    qs = [(i, 'a')]\n    return ps == qs\n", "of its shape"),
     ("def f(i: int) -> int:\n    ps = [(i, 'a')]\n    ps.sort()\n    return 0\n", "`ps.sort` is outside"),
     ("def f(i: int) -> int:\n    ps: list[tuple[int, bool]] = []\n    return 0\n", "no list of bool yet"),
     ("def f(i: int) -> int:\n    ps = [(i, 'a')]\n    print(ps, f(i - 1))\n    return 0\n", "bind the call's value"),

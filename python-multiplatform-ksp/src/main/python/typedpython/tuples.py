@@ -42,7 +42,9 @@ a display of tuple names or displays, `[]`, another such list, `+`, `*`, a slice
 L[a:b]`, `L += M`; `len(L)`, `L[i]` bound, unpacked, indexed by a constant (`L[i][0]` is `L__0[i]`), printed or compared
 when `i` is a name or a constant; `for t in L` / `for a, b in L` (CPython's list iterator: the length is read at each
 step); `print(L)` / `str` / `repr` / f-strings (the repr is built in a loop before the statement, so the statement may
-call nothing else); passing to a `list[tuple[...]]` parameter of a module function.
+call nothing else); passing to a `list[tuple[...]]` parameter of a module function; `t in L`, `L.count(t)`,
+`L.index(t)`, `L.remove(t)` and `==` / `<` ... of two such lists with no float element (a search or an ordering is a loop
+before the statement too; `index` / `remove` raise CPython's ValueError through the same method of an empty list[int]).
 
 Anything else that reads or binds a tuple name leaves the function uncompiled with a finding naming it (`problems`),
 never a guess. Methods keep their parameters (a tuple parameter of a method is not split in this step)."""
@@ -377,13 +379,15 @@ class _Function:
         for s in body:
             saved, self.pre = self.pre, []
             calls = [n for n in ast.walk(s) if isinstance(n, ast.Call) and not (
-                isinstance(n.func, ast.Name) and n.func.id in ("print", "str", "repr", "len"))]
+                isinstance(n.func, ast.Name) and n.func.id in ("print", "str", "repr", "len")) and not (
+                isinstance(n.func, ast.Attribute) and n.func.attr in ("index", "count", "remove")
+                and isinstance(n.func.value, ast.Name) and n.func.value.id in self.lists)]
             new = self.stmt(s)
             if self.pre:
                 if calls:
-                    raise _Problem(s.lineno, f"`{ast.unparse(calls[0])}` is called in a statement that prints a list "
-                                             "of tuples; its repr is built before the statement, so bind the call's "
-                                             "value to a name first")
+                    raise _Problem(s.lineno, f"`{ast.unparse(calls[0])}` is called in a statement that prints, "
+                                             "searches or orders a list of tuples, which is done before the "
+                                             "statement, so bind the call's value to a name first")
                 new = self.pre + new
             self.pre = saved
             for n in new:
@@ -400,9 +404,9 @@ class _Function:
                 raise _Problem(getattr(n, "lineno", s.lineno),
                                f"the list of tuples `{n.id}` is used where this step has no form for it (a list of "
                                "tuples is built, appended to, inserted into, extended, popped, cleared, reversed, "
-                               "indexed, stored into, deleted from, iterated, printed, measured with len, or passed to "
-                               "a module function; `in`, `index`, `count`, `remove`, `==`, sorting and returning one "
-                               "come with tuple objects)")
+                               "indexed, stored into, deleted from, iterated, printed, measured with len, searched "
+                               "(`in`, `index`, `count`, `remove`), compared, or passed to a module function; sorting "
+                               "one and returning one are not in this step)")
             if isinstance(n, ast.Name) and n.id in self.tuples:
                 raise _Problem(getattr(n, "lineno", s.lineno),
                                f"the tuple `{n.id}` is used where an AOT program has no tuple object yet (a tuple is "
@@ -468,7 +472,12 @@ class _Function:
             s.orelse = self.block(s.orelse)
             return [s]
         if isinstance(s, ast.While):
+            before = len(self.pre)
             s.test = self.expr(s.test)
+            if len(self.pre) != before:
+                raise _Problem(line, f"`while {ast.unparse(s.test)}`: the condition prints or searches a list of "
+                                     "tuples, which is computed before a statement and so would be computed once; "
+                                     "bind it to a name inside the loop")
             s.body = self.block(s.body)
             s.orelse = self.block(s.orelse)
             return [s]
@@ -593,6 +602,15 @@ class _Function:
                 return e.id
             return None
 
+        if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
+            for side in ("left", "right"):                  # (`a[:2] + b * 2`: each list expression bound first)
+                x = getattr(value, side)
+                if not isinstance(x, (ast.Name, ast.List)) and self.list_operand(x) is not None:
+                    saved, self.pre = self.pre, []
+                    made = self.as_list(x, line)
+                    out += self.pre
+                    self.pre = saved
+                    setattr(value, side, _name(made))       # type: ignore[arg-type]
         cols: list[ast.expr]
         if isinstance(value, ast.List):
             rows = [self.values_once(e, shape, line, out, f"an item of the list `{name}`") for e in value.elts]
@@ -626,6 +644,9 @@ class _Function:
             raise _Problem(line, f"the list of tuples `{name}` is bound to `{ast.unparse(value)}`; it comes from a list "
                                  "display of tuples, another list of tuples, `+`, `*`, a slice or `list(...)` in this "
                                  "step")
+        for t, k in zip(targets, shape):        # (an annotated binding is not probed: its kinds are written here)
+            if self.kind_of(t, line) is None:
+                self.kinds.setdefault(t, []).append((line, f"list[{k}]"))
         return out + [ast.Assign(targets=[_name(t, ast.Store())], value=c) for t, c in zip(targets, cols)]
 
     def columns(self, e: ast.expr, shape: tuple[str, ...], line: int, out: list[ast.stmt],
@@ -715,6 +736,12 @@ class _Function:
             if m == "pop" and len(call.args) <= 1:
                 k = self.index_temp(call.args[0], line, out) if call.args else None
                 return out + each("pop", [[copy.deepcopy(k)] if k is not None else [] for _ in shape])
+            if m == "remove" and len(call.args) == 1:
+                saved, self.pre = self.pre, []
+                at = self.list_find(name, call.args[0], line, "remove", call)
+                found, self.pre = self.pre, saved
+                return found + [ast.Delete(targets=[ast.Subscript(value=c, slice=copy.deepcopy(at), ctx=ast.Del())])
+                                for c in self.comps(name)]
             return None
         if isinstance(s, ast.For) and isinstance(s.iter, ast.Name) and s.iter.id in self.lists:
             return self.for_list(s)
@@ -795,6 +822,68 @@ class _Function:
             self.kinds.setdefault(self.elem(name, i), []).append((line, f"list[{k}]"))
         self.pre += self.list_value(name, e, line)
         return name
+
+    def list_find(self, name: str, x: ast.expr, line: int, mode: str, src: ast.AST) -> ast.expr:
+        """`x in L` (mode "in"), `L.count(x)` ("count"), `L.index(x)` ("index"), the position for `L.remove(x)`
+        ("remove"), for a list of tuples `L`: a loop over the element lists run before the statement (`pre`), comparing
+        each item with `x` element by element (CPython's tuple `==`; no float element, whose NaN would need object
+        identity). `index` and `remove` raise CPython's ValueError by calling the same method of an empty list[int]."""
+        shape = self.lists[name]
+        if "float" in shape:
+            raise _Problem(line, f"`{ast.unparse(src)}`: searching a list of tuples with a float element tests each "
+                                 "pair by identity first in CPython (a NaN equals itself there), which an AOT program "
+                                 "does not have (aot/identity)")
+        els = _Exprs(self).tuple_elements(x)
+        if els is None:
+            raise _Problem(line, f"`{ast.unparse(src)}`: a list of tuples is searched for a tuple name or a tuple display")
+        if not all(_pure(e) for e in els):
+            raise _Problem(line, f"`{ast.unparse(src)}`: an AOT program searches a list of tuples for a tuple of names "
+                                 "and constants (bind the values to names first)")
+        if any((isinstance(e, ast.Constant) and isinstance(e.value, float))
+               or (isinstance(e, ast.Name) and any(k == "float" for _, k in self.kinds.get(e.id, []))) for e in els):
+            raise _Problem(line, f"`{ast.unparse(src)}`: searching with a float element depends on object identity "
+                                 "for NaN in CPython, which an AOT program does not have (aot/identity)")
+        idx = self.temp("int", line)
+        cell = [ast.Subscript(value=c, slice=_name(idx), ctx=ast.Load()) for c in self.comps(name)]
+        tests: list[ast.expr] = [ast.Compare(left=c, ops=[ast.Eq()], comparators=[copy.deepcopy(e)])
+                                 for c, e in zip(cell, els)]
+        match: ast.expr = (ast.Constant(False) if len(els) != len(shape)
+                           else tests[0] if len(tests) == 1 else ast.BoolOp(op=ast.And(), values=tests))
+        if mode == "in":
+            res, kind, start, hit = self.temp("bool", line), "bool", ast.Constant(False), ast.Constant(True)
+        elif mode == "count":
+            res, kind, start, hit = self.temp("int", line), "int", ast.Constant(0), None
+        else:
+            res, kind, start, hit = self.temp("int", line), "int", ast.Constant(-1), _name(idx)
+        on_hit: list[ast.stmt] = (
+            [ast.AugAssign(target=_name(res, ast.Store()), op=ast.Add(), value=ast.Constant(1))] if hit is None
+            else [ast.Assign(targets=[_name(res, ast.Store())], value=hit), ast.Break()])
+        loop = ast.While(
+            test=ast.Compare(left=_name(idx), ops=[ast.Lt()], comparators=[
+                ast.Call(func=_name("len"), args=[self.comps(name)[0]], keywords=[])]),
+            body=[ast.If(test=match, body=on_hit, orelse=[]),
+                  ast.AugAssign(target=_name(idx, ast.Store()), op=ast.Add(), value=ast.Constant(1))],
+            orelse=[])
+        self.pre += [ast.Assign(targets=[_name(res, ast.Store())], value=start),
+                     ast.Assign(targets=[_name(idx, ast.Store())], value=ast.Constant(0)), loop]
+        if mode in ("in", "count"):
+            return _name(res)
+        # (no raise statement in an AOT program yet: an empty list[int] raises CPython's own ValueError and message,
+        # `list.index(x): x not in list` / `list.remove(x): x not in list`; it holds one 0 when the item was found)
+        w = self.temp("list[int]", line)
+        self.pre += [ast.AnnAssign(target=_name(w, ast.Store()), annotation=ast.Subscript(
+                         value=_name("list"), slice=_name("int"), ctx=ast.Load()),
+                         value=ast.List(elts=[], ctx=ast.Load()), simple=1),
+                     ast.If(test=ast.Compare(left=_name(res), ops=[ast.GtE()], comparators=[ast.Constant(0)]),
+                            body=[ast.Expr(value=ast.Call(func=ast.Attribute(value=_name(w), attr="append",
+                                                                             ctx=ast.Load()),
+                                                          args=[ast.Constant(0)], keywords=[]))], orelse=[])]
+        if mode == "remove":
+            self.pre.append(ast.Expr(value=ast.Call(func=ast.Attribute(value=_name(w), attr="remove", ctx=ast.Load()),
+                                                    args=[ast.Constant(0)], keywords=[])))
+            return _name(res)
+        return ast.BinOp(left=ast.Call(func=ast.Attribute(value=_name(w), attr="index", ctx=ast.Load()),
+                                       args=[ast.Constant(0)], keywords=[]), op=ast.Add(), right=_name(res))
 
     def list_repr(self, name: str, line: int) -> ast.expr:
         """The repr of the list of tuples `name`, built by statements run before the current statement (`pre`)."""
@@ -919,6 +1008,9 @@ class _Exprs(ast.NodeTransformer):
 
     def visit_Call(self, node: ast.Call) -> ast.expr:
         f = node.func
+        if isinstance(f, ast.Attribute) and f.attr in ("index", "count") and self.list_name(f.value) is not None \
+                and len(node.args) == 1 and not node.keywords:
+            return self.f.list_find(f.value.id, node.args[0], node.lineno, f.attr, node)   # type: ignore[attr-defined]
         if isinstance(f, ast.Name) and f.id not in self.f.locals and len(node.args) == 1 and not node.keywords:
             lst = self.list_name(node.args[0])
             if lst is not None and f.id == "len":
@@ -988,11 +1080,63 @@ class _Exprs(ast.NodeTransformer):
         node.values = values
         return node
 
+    def list_compare(self, node: ast.Compare) -> ast.expr:
+        """`A == B`, `A != B`, `A < B` ... of two lists of tuples of one shape (no float element): `==` is `==` of each
+        element list (CPython's list `==` compares lengths then items, a tuple item by its elements); an ordering finds
+        the first index where the items differ in a loop run before the statement (`pre`), then compares the lengths
+        there, or the two items as tuples."""
+        op, line = node.ops[0], node.lineno
+        a, b = (self.f.as_list(x, line) for x in (node.left, node.comparators[0]))
+        if a is None or b is None or self.f.lists[a] != self.f.lists[b]:
+            raise _Problem(line, f"`{ast.unparse(node)}` compares a list of tuples with something that is not a list of "
+                                 "tuples of its shape")
+        shape = self.f.lists[a]
+        if "float" in shape:
+            raise _Problem(line, f"`{ast.unparse(node)}`: comparing lists of tuples with a float element tests each pair "
+                                 "by identity first in CPython (a NaN equals itself there), which an AOT program does not "
+                                 "have (aot/identity)")
+        ca, cb = self.f.comps(a), self.f.comps(b)
+        if isinstance(op, (ast.Eq, ast.NotEq)):
+            cmp = ast.Eq if isinstance(op, ast.Eq) else ast.NotEq
+            parts: list[ast.expr] = [ast.Compare(left=x, ops=[cmp()], comparators=[y]) for x, y in zip(ca, cb)]
+            if len(parts) == 1:
+                return parts[0]
+            return ast.BoolOp(op=ast.And() if isinstance(op, ast.Eq) else ast.Or(), values=parts)
+        if not isinstance(op, (ast.Lt, ast.LtE, ast.Gt, ast.GtE)):
+            raise _Problem(line, f"`{ast.unparse(node)}`: `is` and `in` of lists of tuples are not in this step")
+        idx = self.f.temp("int", line)
+
+        def at(c: ast.expr) -> ast.expr:
+            return ast.Subscript(value=copy.deepcopy(c), slice=_name(idx), ctx=ast.Load())
+
+        def length(c: ast.expr) -> ast.expr:
+            return ast.Call(func=_name("len"), args=[copy.deepcopy(c)], keywords=[])
+
+        inside = [ast.Compare(left=_name(idx), ops=[ast.Lt()], comparators=[length(c[0])]) for c in (ca, cb)]
+        same = [ast.Compare(left=at(x), ops=[ast.Eq()], comparators=[at(y)]) for x, y in zip(ca, cb)]
+        self.f.pre += [ast.Assign(targets=[_name(idx, ast.Store())], value=ast.Constant(0)),
+                       ast.While(test=ast.BoolOp(op=ast.And(), values=inside + same),
+                                 body=[ast.AugAssign(target=_name(idx, ast.Store()), op=ast.Add(),
+                                                     value=ast.Constant(1))], orelse=[])]
+        result: ast.expr = ast.Constant(isinstance(op, (ast.LtE, ast.GtE)))     # (never reached: the items differ)
+        for x, y in reversed(list(zip(ca, cb))):
+            result = ast.IfExp(test=ast.Compare(left=at(x), ops=[ast.NotEq()], comparators=[at(y)]),
+                               body=ast.Compare(left=at(x), ops=[type(op)()], comparators=[at(y)]), orelse=result)
+        ended = ast.BoolOp(op=ast.Or(), values=[
+            ast.Compare(left=_name(idx), ops=[ast.GtE()], comparators=[length(c[0])]) for c in (ca, cb)])
+        return ast.IfExp(test=ended, body=ast.Compare(left=length(ca[0]), ops=[type(op)()], comparators=[length(cb[0])]),
+                         orelse=result)
+
     def visit_Compare(self, node: ast.Compare) -> ast.expr:
         if len(node.ops) != 1:
             return self.generic_visit(node)
         op, left, right = node.ops[0], node.left, node.comparators[0]
         line = node.lineno
+        if isinstance(op, (ast.In, ast.NotIn)) and self.list_name(right) is not None:
+            found = self.f.list_find(right.id, left, line, "in", node)                    # type: ignore[attr-defined]
+            return ast.UnaryOp(op=ast.Not(), operand=found) if isinstance(op, ast.NotIn) else found
+        if self.f.list_operand(left) is not None or self.f.list_operand(right) is not None:
+            return self.list_compare(node)
         if isinstance(op, (ast.In, ast.NotIn)):
             els = self.tuple_elements(right)
             if els is None:

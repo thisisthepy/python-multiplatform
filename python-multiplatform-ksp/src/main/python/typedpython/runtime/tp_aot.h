@@ -1313,7 +1313,9 @@ static TPA_UNUSED void *tpa__list_realloc(void *old, size_t size, size_t keep)
  * growth policy is CPython's list_resize (Objects/listobject.c, 3.15): keep the block while the new length is
  * within [cap/2, cap], else allocate (n + n/8 + 6) & ~3 slots, or (n + 3) & ~3 when the jump is larger than that
  * over-allocation, and nothing for an empty list. The policy is not observable (sys.getsizeof is not exposed); it
- * sets the amortised cost of append. A failed resize leaves the list as it was. */
+ * sets the amortised cost of append. A failed resize leaves the list as it was, except a failed shrink, which keeps
+ * the old block (it holds the n items), sets the length and returns 1 with nothing recorded in `tpa_exc` (a shrink
+ * only fails to give memory back, and the caller goes on as if it had succeeded). */
 #define TPA__DEF_LIST_ALLOC_GROW(NAME, CT)                                                        \
     static inline int tpa_##NAME##__resize(tpa_##NAME##_list *l, int64_t n)                       \
     {                                                                                             \
@@ -1341,6 +1343,10 @@ static TPA_UNUSED void *tpa__list_realloc(void *old, size_t size, size_t keep)
             d = (CT *)tpa__list_realloc(l->d, (size_t)want * sizeof(CT),                          \
                                         (size_t)(l->len < n ? l->len : n) * sizeof(CT));          \
             if (d == NULL) {                                                                      \
+                if (n < l->len) {           /* (a shrink: no record, see above) */                \
+                    l->len = n;                                                                   \
+                    return 1;                                                                     \
+                }                                                                                 \
                 return tpa_raise(TPA_MemoryError, "");                                            \
             }                                                                                     \
         }                                                                                         \
@@ -1447,9 +1453,9 @@ static TPA_UNUSED void *tpa__list_realloc(void *old, size_t size, size_t keep)
         }                                                                                         \
         v = l->d[i];                                                                              \
         memmove(l->d + i, l->d + i + 1, (size_t)(n - i - 1) * sizeof(CT));                        \
-        if (tpa_##NAME##__resize(l, n - 1)) {   /* a shrink only fails to give memory back: the */ \
-            l->len = n - 1;                     /* list is one shorter all the same (the record   */ \
-        }                                       /* of the failure is never read: no -1 follows)   */ \
+        if (tpa_##NAME##__resize(l, n - 1)) {   /* a shrink only fails to give memory back:    */ \
+            l->len = n - 1;                     /* the list is one shorter all the same, and   */ \
+        }                                       /* nothing is recorded in tpa_exc (resize)     */ \
         *out = v;                                                                                 \
         return 0;                                                                                 \
     }
@@ -1869,6 +1875,10 @@ static TPA_UNUSED int tpa_obj_list__resize(tpa_obj_list *l, int64_t n)
         d = (void **)tpa__list_realloc(l->d, (size_t)want * sizeof(void *),
                                        (size_t)(l->len < n ? l->len : n) * sizeof(void *));
         if (d == NULL) {
+            if (n < l->len) {           /* a shrink keeps the old block, which holds n items: no record */
+                l->len = n;
+                return 1;
+            }
             return tpa_raise(TPA_MemoryError, "");
         }
     }
@@ -1908,9 +1918,12 @@ static TPA_UNUSED void tpa_obj_list_release(tpa_obj_list *l)
         tpa_obj_fn rel = l->rel;                /* (read before the list object is freed) */
         l->d = NULL;
         l->len = 0;
-        l->free_self(l);                        /* (a tracked list leaves the collector's list first) */
-        for (i = 0; i < n; i++) {               /* the list object is gone before its items are released, */
-            if (d[i] != NULL) {                 /* so a release that reaches it again cannot (it is counted 0) */
+        /* The order is not what keeps this safe: nothing reaches a list whose count is 0, and a release runs no
+         * user code. Its effect is that a tracked list leaves the collector's list, and its block is freed, before
+         * the item releases below cascade (they may free other tracked objects and their lists). */
+        l->free_self(l);
+        for (i = 0; i < n; i++) {
+            if (d[i] != NULL) {
                 rel(d[i]);
             }
         }
