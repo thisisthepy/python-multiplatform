@@ -2532,8 +2532,6 @@ REJECTED = {
     "list method": ("def f(a: list[float]) -> None:\n    a.sort()\n", ("aot/call", 2, "a.sort")),   # (append: S2a; sort: S2c)
     "list slice": ("def f(a: list[float]) -> int:\n    b = a[1:]\n    return 0\n", ("aot/front-end", 2, "f")),
     "list comparison": ("def f(a: list[float], b: list[float]) -> bool:\n    return a == b\n", ("aot/front-end", 2, "f")),
-    "list printed": ("def f(a: list[float]) -> None:\n    print(a)\n", ("aot/front-end", 2, "f")),
-    "list in an f-string": ("def f(a: list[float]) -> None:\n    print(f'{a}')\n", ("aot/front-end", 2, "f")),
     "list module constant": ("A = [1.0]\n", ("aot/constant", 1, "A")),
     "list addition": ("def f(a: list[float]) -> int:\n    b = a + a\n    return 0\n", ("aot/front-end", 2, "f")),
     "list passed as an expression": (

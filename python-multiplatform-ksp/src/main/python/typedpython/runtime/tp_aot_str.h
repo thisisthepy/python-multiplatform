@@ -940,6 +940,97 @@ static TPA_UNUSED int tpa_str_list_repr(tpa_str_list *l, tpa_str **out)
     return rc;
 }
 
+/* Tier S2a: repr(l) of a list of float / int: "[1.5, -0.0, 3]", each item's repr (all ASCII), built in one byte
+ * buffer. An int past the digit limit raises CPython's ValueError, as repr of the list does. */
+typedef struct tpa__abuf { char *p; size_t n, cap; } tpa__abuf;
+
+static int tpa__abuf_put(tpa__abuf *b, const char *s, size_t n)
+{
+    if (b->n + n + 1 > b->cap) {
+        size_t cap = b->cap ? b->cap : 64;
+        char *p;
+        while (cap < b->n + n + 1) {
+            if (cap > SIZE_MAX / 2) {
+                return tpa_raise(TPA_MemoryError, "");
+            }
+            cap *= 2;
+        }
+        p = (char *)realloc(b->p, cap);
+        if (p == NULL) {
+            return tpa_raise(TPA_MemoryError, "");
+        }
+        b->p = p;
+        b->cap = cap;
+    }
+    memcpy(b->p + b->n, s, n);
+    b->n += n;
+    return 0;
+}
+
+static int tpa__abuf_done(tpa__abuf *b, int rc, tpa_str **out)
+{
+    if (rc == 0) {
+        rc = tpa__abuf_put(b, "]", 1);
+    }
+    if (rc == 0) {
+        rc = tpa_str_from_ascii(b->p, b->n, out);
+    }
+    free(b->p);
+    return rc;
+}
+
+static TPA_UNUSED int tpa_f64_list_repr(const tpa_f64_list *l, tpa_str **out)
+{
+    tpa__abuf b = {NULL, 0, 0};
+    char buf[48];
+    int64_t i;
+    int rc = tpa__abuf_put(&b, "[", 1);
+    for (i = 0; i < l->len && rc == 0; i++) {
+        int n = tpa_repr_f64(l->d[i], buf);
+        rc = (i > 0 ? tpa__abuf_put(&b, ", ", 2) : 0);
+        if (rc == 0) {
+            rc = tpa__abuf_put(&b, buf, (size_t)n);
+        }
+    }
+    return tpa__abuf_done(&b, rc, out);
+}
+
+static TPA_UNUSED int tpa_i64_list_repr(const tpa_i64_list *l, tpa_str **out)
+{
+    tpa__abuf b = {NULL, 0, 0};
+    char buf[32];
+    int64_t i;
+    int rc = tpa__abuf_put(&b, "[", 1);
+    for (i = 0; i < l->len && rc == 0; i++) {
+        int n = snprintf(buf, sizeof buf, "%lld", (long long)l->d[i]);
+        rc = (i > 0 ? tpa__abuf_put(&b, ", ", 2) : 0);
+        if (rc == 0) {
+            rc = tpa__abuf_put(&b, buf, (size_t)n);
+        }
+    }
+    return tpa__abuf_done(&b, rc, out);
+}
+
+static TPA_UNUSED int tpa_int_list_repr(const tpa_int_list *l, tpa_str **out)
+{
+    tpa__abuf b = {NULL, 0, 0};
+    int64_t i;
+    int rc = tpa__abuf_put(&b, "[", 1);
+    for (i = 0; i < l->len && rc == 0; i++) {
+        char *digits = NULL;
+        size_t n = 0;
+        rc = (i > 0 ? tpa__abuf_put(&b, ", ", 2) : 0);
+        if (rc == 0) {
+            rc = tpa_int_to_str(l->d[i], &digits, &n);
+        }
+        if (rc == 0) {
+            rc = tpa__abuf_put(&b, digits, n);
+            free(digits);
+        }
+    }
+    return tpa__abuf_done(&b, rc, out);
+}
+
 /* sep.join(l). */
 static TPA_UNUSED int tpa_str_join_list(tpa_str *sep, tpa_str_list *l, tpa_str **out)
 {

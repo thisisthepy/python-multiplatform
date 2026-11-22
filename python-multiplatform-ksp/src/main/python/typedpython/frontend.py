@@ -1786,6 +1786,10 @@ class _Lowerer:
             if isinstance(a, ast.JoinedStr):
                 args.append(self.aot_fstring(a))
                 continue
+            listed = self.list_str(a)                  # tier S2a: a list is printed as its repr
+            if listed is not None:
+                args.append(listed)
+                continue
             e = self.value(a)
             if e.type not in ir.SCALARS and e.type not in (Type.OBJ, Type.STR, Type.STR_LIST, Type.STR_OPT):
                 raise Skip(a.lineno, f"print of `{_src(a)}` ({TYPE_NAME[e.type]}) is not supported in an "
@@ -2006,7 +2010,11 @@ class _Lowerer:
                                              f"program (only `.Nf` with N from 0 to {AOT_MAX_PRECISION}, on a float "
                                              "with no conversion)")
                 precision = int(m.group(1))
-            v = self.value(piece.value)
+            listed = self.list_str(piece.value)
+            v = listed if listed is not None else self.value(piece.value)
+            if listed is not None and precision is None:
+                parts.append(ir.FormatField(Type.OBJ, v, None, repr=False))   # a list's str is its repr (tier S2a)
+                continue
             if precision is None and v.type not in ir.SCALARS and v.type not in (Type.STR, Type.STR_OPT):
                 raise Skip(piece.lineno, f"`{_src(piece.value)}` in an f-string is {TYPE_NAME[v.type]}, not an "
                                          "int, float, bool or str")
@@ -2118,6 +2126,9 @@ class _Lowerer:
                 return ir.Const(Type.STR, "")
             if len(args) != 1:
                 raise Skip(line, f"{name}() takes one argument in an AOT program")
+            listed = self.list_str(args[0])
+            if listed is not None:
+                return listed                           # tier S2a: str(a) and repr(a) of a list are its repr
             x = self.value(args[0])
             if x.type not in ir.SCALARS and x.type not in (Type.STR, Type.STR_LIST, Type.STR_OPT):
                 raise Skip(line, f"{name}() of a {TYPE_NAME.get(x.type, x.type.value)} is not supported in an AOT "
@@ -2147,6 +2158,13 @@ class _Lowerer:
         return None
 
     # --- AOT mode, tier S2a: the methods of a list[float] / list[int] (design 4.3.2) ---
+
+    def list_str(self, node: ast.expr) -> ir.Expr | None:
+        """`a` (a list[float] / list[int] name) where its str is wanted: print, str(), repr(), an f-string field; the
+        str and the repr of a list are the same text (tier S2a). None for anything else."""
+        if self.info.aot and isinstance(node, ast.Name) and node.id in self.arrays:
+            return ir.ListStr(Type.STR, node.id)
+        return None
 
     def list_elem(self, array: str) -> Type:
         return Type.F64 if self.arrays[array] == Type.F64_ARRAY else Type.I64

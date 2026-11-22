@@ -723,6 +723,13 @@ class ListRemove(Stmt):
     value: Expr
 
 
+@dataclass(frozen=True)
+class ListStr(Expr):
+    """`str(array)` / `repr(array)` (the same text for a list), also for print and an f-string field. Type STR."""
+
+    array: str
+
+
 LIST_GROW_NODES = (ListAppend, ListInsert, ListExtend)
 LIST_SHRINK_NODES = (ListPop, ListClear, ListRemove)
 

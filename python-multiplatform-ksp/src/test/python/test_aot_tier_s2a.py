@@ -358,3 +358,28 @@ def test_a_list_type_the_program_shrinks_keeps_every_bounds_check(tmp_path: Path
     body = c[c.index("static int tpf_f(tpa_f64_list *v_a TPA_UNUSED, double *out)\n{"):]
     body = body[:body.index("\n}\n")]
     assert ("tpa_slot(" in body) == kept, body
+
+
+def test_print_str_and_repr_of_lists(tmp_path: Path):
+    """A list of float / int (RAW and big-capable) printed, in str() / repr() and in f-string fields: its repr, each
+    item's repr (design 4.3.2)."""
+    _compare(tmp_path, """
+import sys
+
+
+def main() -> None:
+    k = int(sys.argv[1])
+    f = [1.5, -0.0, 1e300 * 1e10, 0.1, 1e16, 2.5e-7]
+    i = [1, -2, k]
+    b = [2 ** 70, k]
+    e = [0] * 0
+    print(f, i, b, e)
+    print(str(f), repr(i), f"{b} and {e!r} {i!s}")
+    s = str(i) + "!"
+    f.append(-1.0)
+    print(s, len(repr(f)), f)
+
+
+if __name__ == "__main__":
+    main()
+""", [["0"], ["-7"], [str(2 ** 63 - 1)]])

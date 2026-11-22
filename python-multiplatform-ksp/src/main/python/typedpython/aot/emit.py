@@ -2293,6 +2293,15 @@ class _Fn:
         self.emit(f"if ({lfn(kind, 'pop')}({found[0]}, {has}, {idx}, &{t})) {self.fail()}")
         return t
 
+    def ev_ListStr(self, e: ir.ListStr) -> str:
+        """repr of a list[float] / list[int], a new str held by a slot (borrowed by the expression that reads it)."""
+        found = self.list_of(e.array, "str()")
+        if found is None:
+            return "NULL"
+        self.g.uses_str = True
+        return self.pstr(f"{lfn(self.kind(e.array), 'list_repr') if self.kind(e.array) != 'int' else 'tpa_int_list_repr'}"
+                         f"({found[0]}, @)")
+
     def ev_ListSearch(self, e: ir.ListSearch) -> str:
         found = self.list_of(e.array, f"list.{e.op}")
         if found is None:

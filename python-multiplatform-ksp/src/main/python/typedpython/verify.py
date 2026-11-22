@@ -371,7 +371,7 @@ from .ir import (
 from .ir import CheckExact, CheckMethod, ClassDecl, FieldGet, FieldSet, Is, IsExact, New
 from .ir import BuildString, Contains, ForObj, Format, GetItem, NewDict, NewList, StoreItem
 from .ir import ParInfo
-from .ir import ListAppend, ListClear, ListExtend, ListInsert, ListPop, ListRemove, ListReverse, ListSearch
+from .ir import ListAppend, ListClear, ListExtend, ListInsert, ListPop, ListRemove, ListReverse, ListSearch, ListStr
 
 DA = "verify/definite-assignment"
 MISSING_RETURN = "verify/missing-return"
@@ -435,7 +435,7 @@ _AOT_EXPRS = frozenset({ListDisplay, Cond, ArgvInt, ArgvLen, FloatToInt, BoolToI
                         StrChr, ArgvStr, StrParseInt, StrWrite, FString,
                         # tier S1b
                         StrMethod, StrListDisplay, StrListLen, StrListIndex,
-                        StrNarrow, ListPop, ListSearch})                 # tier S2a
+                        StrNarrow, ListPop, ListSearch, ListStr})                 # tier S2a
 # Nodes whose OBJ result is a new reference (ir.py "ownership": Box, Global, GetAttr, CallObject,
 # OBJ BinOp, Tuple), plus reads of an OBJ local (the local owns its reference; the back end increfs or
 # borrows under that rule) and Calls of a compiled function returning OBJ (which returns a new
@@ -2225,6 +2225,14 @@ class _Checker:
         if at is not None and e.type is not _ELEMENT[at]:
             self.error(TYPE, f"pop of '{e.array}' gives {_ELEMENT[at].value}, node says {e.type.value}")
         return dataclasses.replace(e, index=idx)
+
+    def e_ListStr(self, e: ListStr, state: _State) -> ir.Expr:
+        if not self.aot:
+            self.error(UNKNOWN, "ListStr is an AOT-mode node")
+        self.array(e.array, "str", state)
+        if e.type is not Type.STR:
+            self.error(TYPE, f"str of a list gives str, node says {getattr(e.type, 'value', e.type)}")
+        return e
 
     def e_ListSearch(self, e: ListSearch, state: _State) -> ir.Expr:
         if not self.aot:
