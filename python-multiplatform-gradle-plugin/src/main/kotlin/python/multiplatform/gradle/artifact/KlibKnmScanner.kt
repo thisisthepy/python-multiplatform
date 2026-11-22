@@ -1204,16 +1204,23 @@ internal object KlibKnmScanner {
         val hasReified = fn.typeParameterList.any { it.reified }
         val hasUnsubstitutable = fn.typeParameterCount > 0 && (!isComposable || substitutableIds == null)
 
+        // A type this walk cannot model used to drop the whole declaration with no trace (material3's
+        // `Text` was missing from both the table and the stubs on K/N, #191). It is now declined by
+        // name: the slot gets a placeholder model naming the classifier, and the reason says which.
+        val unmodelled = ArrayList<String>()
+        fun modelOrPlaceholder(type: ProtoBuf.Type, slot: String): KotlinTypeModel =
+            typeModelOf(type, nr, tt, classes, substitutableIds.orEmpty()) ?: run {
+                val classifier = if (type.hasClassName()) nr.getQualifiedClassName(type.className).replace('/', '.') else "a type parameter"
+                unmodelled += "$slot: $classifier"
+                KotlinTypeModel(qualifiedName = classifier, isNullable = type.nullable)
+            }
+
         val receiverProto = fn.receiverType(tt)
-        val receiverModel = if (receiverProto != null) {
-            typeModelOf(receiverProto, nr, tt, classes, substitutableIds.orEmpty()) ?: return null
-        } else {
-            null
-        }
+        val receiverModel = if (receiverProto != null) modelOrPlaceholder(receiverProto, "receiver") else null
         val valueParams = fn.valueParameterList
         val parameters = valueParams.map { vp ->
             val pType = vp.type(tt)
-            val model = typeModelOf(pType, nr, tt, classes, substitutableIds.orEmpty()) ?: return null
+            val model = modelOrPlaceholder(pType, nr.getString(vp.name))
             DeclaredParameter(
                 name = nr.getString(vp.name),
                 type = model,
@@ -1221,7 +1228,7 @@ internal object KlibKnmScanner {
             )
         }
         val returnProto = fn.returnType(tt)
-        val returnModel = typeModelOf(returnProto, nr, tt, classes, substitutableIds.orEmpty()) ?: return null
+        val returnModel = modelOrPlaceholder(returnProto, "return")
 
         val model = DeclarationModel(
             simpleName = name,
@@ -1237,6 +1244,12 @@ internal object KlibKnmScanner {
         )
         val declined = { reason: String -> Candidate(null, model.copy(declineReason = reason)) }
 
+        if (unmodelled.isNotEmpty()) {
+            return declined(
+                "a type this walk cannot model (${unmodelled.joinToString()}): its klib is not among the walked " +
+                    "configuration's, or it is a construct the model has no shape for",
+            )
+        }
         if (isSuspend) return declined("suspend")
         if (hasReified) {
             return declined("a reified type parameter: its type argument is read at run time, so kotlin.Any? cannot stand for it")
@@ -2024,10 +2037,31 @@ internal object KlibKnmScanner {
                 return BoundaryType(OBJECT_TAG, "(%s as ${type.qualifiedName})", "(%s)")
             }
         } else {
-            // A nullable value class boxes on Kotlin/Native and JVM alike, so it stays declined;
-            // only a non-value handle class may cross as a nullable OBJECT handle.
+            // A nullable value class as a parameter (#191: `Text(fontStyle: FontStyle? = null)`, which
+            // declined every material3 `Text` on Kotlin/Native): Python passes the underlying primitive,
+            // as it does for the non-null value class, or `None`, which arrives as `null` and is passed
+            // as `null`. The value is boxed by the Kotlin compiler when the call is written. A nullable
+            // value class as a return still declines (its `null` and its value would need two shapes).
+            if (direction == BoundaryDirection.PARAMETER) {
+                val info = valueClassInfoOf(type.qualifiedName, classes, depth)
+                if (info != null && info.constructorIsPublic && info.propertyIsPublic && !info.underlyingModel.isNullable) {
+                    val underlying = klibBoundaryTypeOf(info.underlyingModel, classes, direction, depth + 1)
+                    if (underlying != null && !underlying.isReturnOnly && underlying.tag != OBJECT_TAG) {
+                        return BoundaryType(
+                            tag = underlying.tag,
+                            readFn = { slot -> "(($slot)?.let { present -> ${info.qualifiedName}(${underlying.read("present")}) })" },
+                            wrapFn = { error("a nullable value class is parameter-only") },
+                            isReturnOnly = false,
+                        )
+                    }
+                }
+            }
+            // A value class Python cannot build from a primitive (`TextAlign`, whose constructor is
+            // internal) crosses as the boxed handle Python already holds for it (`TextAlign.Center`),
+            // exactly as its non-null form does; `None` is `null`. Any other nullable handle class
+            // crosses as a nullable OBJECT handle too.
             val handleCls = handleClassOrNull(type, classes)
-            if (handleCls != null && !handleCls.isValue) {
+            if (handleCls != null && (!handleCls.isValue || direction == BoundaryDirection.PARAMETER)) {
                 return BoundaryType(OBJECT_TAG, "(%s as ${type.qualifiedName}?)", "(%s)")
             }
         }
