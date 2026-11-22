@@ -1128,6 +1128,21 @@ static TPA_UNUSED int tpa_str_list_remove(tpa_str_list *l, tpa_str *v)
 }
 #endif
 
+/* Tier S2a: a op b of two lists of str (as tpa_i64_cmp; items by str == and code-point order) */
+static TPA_UNUSED int tpa_str_list_cmp(const tpa_str_list *a, const tpa_str_list *b, int op)
+{
+    int64_t i, n = a->len < b->len ? a->len : b->len;
+    for (i = 0; i < n; i++) {
+        if (!tpa_str_eq(a->d[i], b->d[i])) {
+            if (op <= 1) {
+                return op == 1;
+            }
+            return tpa__cmp_outcome(op, tpa_str_cmp(a->d[i], b->d[i]));
+        }
+    }
+    return tpa__cmp_outcome(op, a->len < b->len ? -1 : a->len > b->len ? 1 : 0);
+}
+
 static TPA_UNUSED void tpa_str_list_reverse(tpa_str_list *l)
 {
     int64_t i, j;

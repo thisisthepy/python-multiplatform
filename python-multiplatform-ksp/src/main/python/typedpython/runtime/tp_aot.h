@@ -1535,6 +1535,35 @@ static inline TPA_UNUSED int tpa_i64_contains(const tpa_i64_list *l, int64_t v)
     return 0;
 }
 
+/* Tier S2a: the outcome of a list comparison (Objects/listobject.c list_richcompare) once the first differing pair,
+ * or the lengths, give `c` (<0, 0, >0); `op` 0..5 is == != < <= > >=. */
+static inline int tpa__cmp_outcome(int op, int c)
+{
+    switch (op) {
+    case 0: return c == 0;
+    case 1: return c != 0;
+    case 2: return c < 0;
+    case 3: return c <= 0;
+    case 4: return c > 0;
+    default: return c >= 0;
+    }
+}
+
+/* a op b of two raw int lists: the first index where the items differ decides; with none, the lengths. */
+static inline TPA_UNUSED int tpa_i64_cmp(const tpa_i64_list *a, const tpa_i64_list *b, int op)
+{
+    int64_t i, n = a->len < b->len ? a->len : b->len;
+    for (i = 0; i < n; i++) {
+        if (a->d[i] != b->d[i]) {
+            if (op <= 1) {
+                return op == 1;
+            }
+            return tpa__cmp_outcome(op, a->d[i] < b->d[i] ? -1 : 1);
+        }
+    }
+    return tpa__cmp_outcome(op, a->len < b->len ? -1 : a->len > b->len ? 1 : 0);
+}
+
 #if defined(TPA_GROW_I64)
 /* list.remove(v): the first equal item, else ValueError("list.remove(x): x not in list") */
 static inline TPA_UNUSED int tpa_i64_remove(tpa_i64_list *l, int64_t v)

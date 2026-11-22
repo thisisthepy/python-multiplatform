@@ -354,6 +354,11 @@ class Representation:
                         # tier S2a: the items of `other` move into `array` (a copy of each item, so one group)
                         self.union((f.name, n.array), (f.name, n.other), f.name, cur,
                                    f"`{n.array}.extend({n.other})`")
+                    elif isinstance(n, ir.ListCompare) and (f.name, n.left) in self._parent \
+                            and (f.name, n.right) in self._parent:
+                        # tier S2a: two compared lists share one kind, so the comparison reads both alike
+                        self.union((f.name, n.left), (f.name, n.right), f.name, cur,
+                                   f"`{n.left}` compared with `{n.right}`")
                     elif isinstance(n, ir.New):
                         init_fn = self.fns.get(f"{n.cls}.__init__")
                         if init_fn is not None:

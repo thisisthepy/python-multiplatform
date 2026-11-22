@@ -2318,6 +2318,20 @@ class _Fn:
         self.emit(f"if ({self.lop(kind, 'pop')}({found[0]}, {has}, {idx}, &{t})) {self.fail()}")
         return t
 
+    def ev_ListCompare(self, e: ir.ListCompare) -> str:
+        a = self.grow_list(e.left, "a comparison")
+        b = self.grow_list(e.right, "a comparison")
+        if a is None or b is None:
+            return "0"
+        if a[1] != b[1] or a[1] not in ("i64", "int", "str"):
+            self.bad("aot/type", e.left, f"`{e.left}` and `{e.right}` are lists of two kinds (the list classification "
+                     "did not merge them)")
+            return "0"
+        op = ["EQ", "NE", "LT", "LE", "GT", "GE"].index(e.op.name)
+        t = self.tmp("int")
+        self.emit(f"if (({t} = {self.lop(a[1], 'cmp')}({a[0]}, {b[0]}, {op})) < 0) {self.fail()}")
+        return t
+
     def ev_ListStr(self, e: ir.ListStr) -> str:
         """repr of a list[float] / list[int], a new str held by a slot (borrowed by the expression that reads it)."""
         found = self.list_of(e.array, "str()")

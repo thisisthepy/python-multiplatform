@@ -2429,6 +2429,21 @@ static TPA_UNUSED int tpa_int_list_contains(const tpa_int_list *l, tpa_int v)
     return 0;
 }
 
+/* Tier S2a: a op b of two big-capable lists (as tpa_i64_cmp) */
+static TPA_UNUSED int tpa_int_list_cmp(const tpa_int_list *a, const tpa_int_list *b, int op)
+{
+    int64_t i, n = a->len < b->len ? a->len : b->len;
+    for (i = 0; i < n; i++) {
+        if (!tpa_int_eq(a->d[i], b->d[i])) {
+            if (op <= 1) {
+                return op == 1;
+            }
+            return tpa__cmp_outcome(op, tpa_int_cmp(a->d[i], b->d[i]));
+        }
+    }
+    return tpa__cmp_outcome(op, a->len < b->len ? -1 : a->len > b->len ? 1 : 0);
+}
+
 #if defined(TPA_GROW_INT)
 /* CPython's list_resize, as tp_aot.h's growable lists; the slots past the length hold nothing owned. */
 static inline int tpa_int_list__resize(tpa_int_list *l, int64_t n)

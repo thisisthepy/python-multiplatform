@@ -3183,6 +3183,17 @@ class _Lowerer:
         # A chain is an And of its links: as a condition (2) that And is the condition; as an
         # operand of the condition's And/Or (1) it would be nested, so only a single link there.
         obj_ok = cond == 2 or (cond == 1 and len(node.ops) == 1)
+        if self.info.aot and len(node.ops) == 1 and type(node.ops[0]) in COMPARE \
+                and all(isinstance(x, ast.Name) and self.is_list_name(x.id) for x in (node.left, node.comparators[0])):
+            # tier S2a: `a == b`, `a < b` ... of two list names
+            a, b = node.left.id, node.comparators[0].id                      # type: ignore[attr-defined]
+            if self.list_type(a) != self.list_type(b):
+                raise Skip(node.lineno, f"`{_src(node)}` compares lists of two types, which an AOT program does not do")
+            if self.list_type(a) == Type.F64_ARRAY:
+                raise Skip(node.lineno, f"`{_src(node)}`: comparing lists of float tests each pair by identity first in "
+                                        "CPython (a NaN equals itself there), which an AOT program does not have "
+                                        "(aot/identity)")
+            return ir.ListCompare(Type.BOOL, COMPARE[type(node.ops[0])], a, b)
         if self.info.aot and len(node.ops) == 1 and isinstance(node.ops[0], (ast.In, ast.NotIn)) \
                 and isinstance(node.comparators[0], ast.Name) and self.is_list_name(node.comparators[0].id):
             # tier S2a: `v in a` / `v not in a` of a list[int] / list[str] (a list of float: aot/identity)

@@ -724,6 +724,17 @@ class ListRemove(Stmt):
 
 
 @dataclass(frozen=True)
+class ListCompare(Expr):
+    """`left op right` of two lists of one type, list[int] or list[str] (a list of float compares items by identity
+    first in CPython: aot/identity). Objects/listobject.c list_richcompare: the first index where the items differ
+    decides (`==` false, `!=` true, else that pair compared by `op`); with none, the lengths are compared. Type BOOL."""
+
+    op: CompareKind
+    left: str
+    right: str
+
+
+@dataclass(frozen=True)
 class ListStr(Expr):
     """`str(array)` / `repr(array)` (the same text for a list), also for print and an f-string field. Type STR."""
 

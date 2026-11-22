@@ -505,3 +505,34 @@ def test_in_on_a_float_list_is_refused(tmp_path: Path):
     with pytest.raises(aot.AotError) as raised:
         aot.generate(_write(tmp_path, src))
     assert "aot/identity" in str(raised.value)
+
+
+COMPARISONS = """
+import sys
+
+
+def main() -> None:
+    k = int(sys.argv[1])
+    a = [1, 2, k]
+    b = [1, 2, 3]
+    c = a
+    print(a == b, a != b, a < b, a <= b, a > b, a >= b, a == c)
+    big = [2 ** 70, k]
+    big2 = [2 ** 70]
+    print(big > big2, big2 < big, big == big2)
+    s = sys.argv[2].split()
+    t = "b a".split()
+    print(s == t, s < t, s > t, s <= s)
+    e = [0] * 0
+    print(e < b, e == e, b > e)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_list_comparisons(tmp_path: Path):
+    """== != < <= > >= of list[int] (RAW and big-capable) and list[str]: the first differing pair decides, else the
+    lengths (list_richcompare); a list of float is refused like a search (design 4.3.2, N1)."""
+    _compare(tmp_path, COMPARISONS, [["3", "b a"], ["4", "a b"], ["-1", "b"], ["3", "b a c"]])
