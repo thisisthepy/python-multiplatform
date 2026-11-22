@@ -193,19 +193,35 @@ open class PyException(
      * classes, so one Kotlin class cannot extend both as `python_for_kotlin_binding.mermaid` draws it.
      *
      * - A Python exception that reached Kotlin answers the original instance, [value] itself.
-     * - A `PyException` made in Kotlin answers `type(message)`, or `RuntimeError(message)` when it has
-     *   no [type]. Built on the first call and the same object afterwards, so identity holds across
-     *   calls; it carries no traceback, as an exception that was never raised has none.
+     * - A `PyException` made in Kotlin answers `type(message)`; with no [type], the built-in class its
+     *   Kotlin class mirrors (`PyTypeError("x")` gives `TypeError('x')`, agent proposal), or
+     *   `RuntimeError(message)`. Built on the first call and the same object afterwards, so identity
+     *   holds across calls; it carries no traceback, as an exception that was never raised has none.
      */
     fun toPyObject(): PyObject {
         value?.let { return it }
         synthesized?.let { return it }
         val made = python.multiplatform.ffi.Python3.withPython {
-            val callable: PyObject = type ?: python.multiplatform.ffi.upcall.UpcallTrampoline.runtimeErrorClass()
-            callable.invoke(python.multiplatform.ffi.types.basic.PyString.from(errMsg))
+            withOwnPythonClass { cls ->
+                (cls ?: python.multiplatform.ffi.upcall.UpcallTrampoline.runtimeErrorClass()).use {
+                    it.invoke(python.multiplatform.ffi.types.basic.PyString.from(errMsg))
+                }
+            }
         }
         synthesized = made
         return made
+    }
+
+    /**
+     * Calls [block] with the Python class this exception is raised as when it has no live [value]:
+     * [type], else the built-in class its Kotlin class mirrors, else `null`. The class handed over is
+     * [block]'s to close (a [type] is handed over as a new wrapper of its own, since the type cache
+     * owns [type] itself).
+     */
+    internal fun <R> withOwnPythonClass(block: (PyObject?) -> R): R {
+        val own: PyObject? = type?.let { PyObject(it.pointer, borrowed = true) }
+            ?: python.multiplatform.ffi.exceptions.errors.BuiltinExceptions.mirroredClass(this)
+        return block(own)
     }
 
     /**

@@ -486,6 +486,10 @@ object UpcallTrampoline {
                 Py_IncRef(liveValue.pointer)
                 return liveValue.pointer
             }
+            // Made in Kotlin: raised as its own Python class, its `type` or the built-in class its
+            // Kotlin class mirrors (`PyTypeError` raises `TypeError`; SPEC U-2, agent proposal). A
+            // plain `PyException` with neither falls through to `RuntimeError` below.
+            raisedAsItsOwnClass(t)?.let { return it }
         }
         if (t is CancellationException) {
             val pyCause = t.cause as? PyException
@@ -560,6 +564,25 @@ object UpcallTrampoline {
             }
         }
         return causePtr
+    }
+
+    /**
+     * A **new** reference to `cls(errMsg)` for a [PyException] with no live value whose class is
+     * known ([PyException.withOwnPythonClass]), with its Kotlin `cause` on `__cause__`; `null` when it
+     * has no such class or the instance cannot be built (the caller then builds a `RuntimeError`).
+     */
+    private fun raisedAsItsOwnClass(t: PyException): NativePointer? {
+        val excPtr = try {
+            t.withOwnPythonClass { cls -> cls?.use { instantiateException(it.pointer, t.errMsg) } }
+        } catch (_: Throwable) {
+            PyErr_Clear()
+            null
+        } ?: return null
+        val kotlinCause = t.cause
+        if (kotlinCause != null && kotlinCause !== t) {
+            buildKotlinCausePointer(kotlinCause, depth = 0)?.let { PyException_SetCause(excPtr, it) }
+        }
+        return excPtr
     }
 
     /** Calls `excType(message)` and returns the new exception reference, clearing any error on failure. */

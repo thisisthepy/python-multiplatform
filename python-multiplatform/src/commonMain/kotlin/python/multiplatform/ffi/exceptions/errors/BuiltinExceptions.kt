@@ -94,6 +94,26 @@ internal object BuiltinExceptions {
     val names: Set<String> get() = factories.keys
 
     /**
+     * The Kotlin class of each mirror, by Python name. Built once from [factories] (one throwaway
+     * instance per entry) so the names are not listed a second time; a Kotlin class is compared
+     * rather than its qualified name, which Kotlin/Wasm does not provide.
+     */
+    private val mirrorClasses: Map<String, kotlin.reflect.KClass<out PyException>> by lazy {
+        factories.mapValues { (_, factory) -> factory("", null, null, null, null, null)::class }
+    }
+
+    /**
+     * A new reference to the built-in Python class [exception]'s Kotlin class mirrors
+     * (`PyTypeError` gives `TypeError`), or `null` when its class is not one of the mirrors (a plain
+     * [PyException], or a Kotlin subclass of a mirror). Agent proposal (#524), SPEC O-3 and U-2.
+     */
+    fun mirroredClass(exception: PyException): PyObject? {
+        val name = exception::class.simpleName?.removePrefix("Py") ?: return null
+        if (mirrorClasses[name] != exception::class) return null
+        return python.multiplatform.ffi.Python3.import("builtins").use { it.getAttr(name) }
+    }
+
+    /**
      * The exception [PyException.fromCurrentError] returns for a raised object of [type]: the class of
      * the first built-in entry of `type.__mro__` that has one, or [PyException].
      */
