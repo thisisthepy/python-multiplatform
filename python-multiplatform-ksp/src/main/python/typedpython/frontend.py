@@ -894,13 +894,14 @@ def _aot_unqualified(kind: str, classes: dict[str, ir.ClassDecl]) -> str:
     """AOT mode: Pyrefly spells an inferred class with its module (`prog.Node`, `prog.Node | None`). An AOT program
     imports no module that defines a class (only math, sys and time), so a qualified name whose last part is a class of
     the program is that class (a local bound from a call result otherwise lost its class)."""
-    parts = []
+    parts, changed = [], False
     for p in kind.split("|"):
         q = p.strip()
         if "." in q and q.rsplit(".", 1)[1] in classes:
-            q = q.rsplit(".", 1)[1]
+            q, changed = q.rsplit(".", 1)[1], True
         parts.append(q)
-    return " | ".join(parts)
+    # unchanged spelling unless a part was qualified; `_class_of` splits on a bare `|` without stripping blanks
+    return "|".join(parts) if changed else kind
 
 
 def _class_of(kind: str, classes: dict[str, ir.ClassDecl]) -> tuple[str, bool] | None:
