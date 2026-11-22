@@ -75,6 +75,6 @@ open class PyGenerator(pointer: NativePointer, borrowed: Boolean) : PyObject(poi
     fun iterator(): PyIterator {
         val iterPointer = Python3.withPython { PyObject_GetIter(pointer) }
             ?: throw pyErrorOrGeneric("Failed to iterate over this generator")
-        return PyIterator(iterPointer, borrowed = false)
+        return PyIteratorObject(iterPointer, borrowed = false)
     }
 }

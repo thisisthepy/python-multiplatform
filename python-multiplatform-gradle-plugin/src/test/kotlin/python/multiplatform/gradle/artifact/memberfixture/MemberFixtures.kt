@@ -78,3 +78,37 @@ class ComparableBox<T : Comparable<T>>(val item: T) {
 object Registry {
     fun lookup(key: String): Int = key.length
 }
+
+/** The `Job.cancel(cause: CancellationException? = null)` shape: an interface member with a default. */
+interface Stoppable {
+    fun stop(reason: String? = null): String
+}
+
+fun newStoppable(): Stoppable = object : Stoppable {
+    override fun stop(reason: String?): String = reason ?: "none"
+}
+
+/** A member whose name a supertype also declares: leaving its argument out could resolve against either. */
+open class BasePing {
+    fun ping(times: Int = 1): Int = times
+}
+
+class DerivedPing : BasePing() {
+    fun ping(label: String = "x"): String = label
+}
+
+/** The `CornerBasedShape.copy` shape: an override inherits the defaults of the declaration it overrides. */
+abstract class Outline {
+    abstract fun reshape(start: Int = 0, end: Int = 0): Outline
+
+    fun reshape(all: Int): Outline = reshape(all, all)
+}
+
+class Square : Outline() {
+    override fun reshape(start: Int, end: Int): Square = this
+}
+
+/** A suspend member with a default: its partial calls still run inside the pending call (SPEC U-5). */
+class Waiter {
+    suspend fun pause(times: Int = 1): Int = times
+}

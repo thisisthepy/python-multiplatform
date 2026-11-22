@@ -1,18 +1,22 @@
 package python.multiplatform.ffi.types.iteration
 
-import python.multiplatform.ffi.PyObject
-
 /**
- * Base contract for wrapper types around Python objects that support the
- * iterable protocol (`__iter__`, i.e. `PyObject_GetIter`).
+ * A Python object Kotlin can iterate, as a read-only Kotlin [Collection] (issue #524 item 3).
  *
- * The mermaid sketch models this after `java.lang.Iterable`
- * (`forEach(Consumer)`, `spliterator()`), but this is a Kotlin Multiplatform
- * `commonMain` type -- `java.util.function.Consumer` and
- * `java.util.Spliterator` are JVM-only and not available here. Kotlin's own
- * [Iterable] already provides `forEach` as a common extension function built
- * purely on top of [iterator], so nothing is lost by not redeclaring it.
+ * Source: the owner's `python_for_kotlin_binding.mermaid`: `Collection <|.. PyIterable`,
+ * `PyIterable <|-- PyMutableIterable`, `PyIterable <|.. PyTuple`, `PyIterator --o PyIterable`, and
+ * `+iterator() PyIterator`. Owner, 2026-11-22 (#524): restore the code shapes agents changed without
+ * approval, to the pre-agent baseline and the mermaid.
+ *
+ * Elements are declared `Any?`, as the mermaid's members take and return `Any` (#524 item 4): a write
+ * accepts any Kotlin value Python has a counterpart for, and a read answers the element as a
+ * [python.multiplatform.ffi.PyObject] (`None` included), which is an `Any`. [iterator] is a
+ * [PyIterator], whose `next()` answers a `PyObject`.
+ *
+ * The mermaid's `forEach(Consumer)` and `spliterator()` are `java.lang.Iterable` members, which a
+ * Kotlin Multiplatform common type cannot declare; Kotlin's common `forEach` is an extension built on
+ * [iterator], so it is available on every `PyIterable`.
  */
-interface PyIterable : Iterable<PyObject> {
+interface PyIterable : Collection<Any?> {
     override fun iterator(): PyIterator
 }

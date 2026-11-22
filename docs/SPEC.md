@@ -26,7 +26,7 @@ fail, then implement.
 | Platform | Kotlin target(s) | Downcall mechanism | Upcall entry | Test path |
 |---|---|---|---|---|
 | Desktop JVM (macOS; Linux/Windows wired, unverified) | `jvm("desktop")` | Panama FFM, `invokeExact` | FFM upcall stub | `desktopTest → jvmTest → commonTest` |
-| Desktop native (macOS Arm64, Linux x86_64) | `macosArm64`, `linuxX64` | cinterop | `@CName` symbol | `{macosArm64Test, linuxX64Test} → desktopNativeTest → nativeTest → commonTest` |
+| Desktop native (macOS Arm64, Linux x86_64, Windows x86_64) | `macosArm64`, `linuxX64`, `mingwX64` | cinterop | `@CName` symbol | `{macosArm64Test, linuxX64Test, mingwX64Test} → desktopNativeTest → nativeTest → commonTest` |
 | Android (ART) | `androidTarget` | JNI via `RegisterNatives` | JNI upcall | `androidInstrumentedTest → jvmTest → commonTest` (device) |
 | iOS | `iosArm64`, `iosSimulatorArm64`, `iosX64` | cinterop | `@CName` symbol | `iosSimulatorArm64Test → nativeTest → commonTest` |
 | Android native | `androidNativeArm64`, `androidNativeX64` | cinterop | `@CName` symbol | `androidNativeArm64Test → artTest → nativeTest → commonTest` (device, via adb) |
@@ -35,6 +35,16 @@ fail, then implement.
 - **P-1** The library compiles for every target above. `Status: implemented` for desktop, `macosArm64`, `linuxX64`, Android,
   iosSimulatorArm64, androidNativeArm64 and wasmJs (each has a test source set). `partial` for
   `iosArm64`, `iosX64`, `androidNativeX64` (compile-wired, no tests run there).
+- **P-1a** (#191) `mingwX64`, the Windows Kotlin/Native desktop target (owner, 2026-11-21: in 1.0, "mingwX64
+  is a core target", relayed by the leader in team report `pmp-binder.md`). It embeds python-build-standalone's
+  free-threaded `x86_64-pc-windows-msvc` prefix (the archive the desktop jar's Windows `libpython` comes from):
+  cinterop compiles `Python.h` with `-DPy_GIL_DISABLED=1`, because the Windows `pyconfig.h` serves both builds
+  and does not define it, and binaries link the import library `libs/python315t.lib`. At run time
+  `python315t.dll` is found beside the executable or on `PATH`, and the prefix is resolved as on the other
+  desktop native targets (L-9c), with the Windows stdlib layout `Lib/` (L-3). `mingwX64Main` and `mingwX64Test`
+  depend on `desktopNativeMain` / `desktopNativeTest`; `mingwX64Test` runs on a Windows host with `PYTHONHOME`
+  set to the prefix and the prefix on `PATH`. `Status: draft`, `PM/desktopNativeTest/.../DesktopNativeFreeThreadedBuildTest.kt`
+  (on `mingwX64Test`).
 - **P-2** Linux and Windows desktop: the build downloads and links the right CPython archive.
   `Status: partial`, the suite has never been observed running on either.
 - **P-3** The interpreter is not vendored: Gradle downloads, verifies and extracts CPython per
@@ -131,6 +141,29 @@ fail, then implement.
   old prefixes are re-extracted, and the packaged copy fails the build on any 0-byte `libpython*`.
   `Status: implemented` -- `PM/desktopTest/.../ffi/DesktopJarLibrariesTest.kt`, `ExtractLibraryCacheTest.kt`,
   `GP/StagedPrefixLinksTest.kt`.
+- **L-9c** (#191) Kotlin/Native desktop consumers (`macosArm64`, `linuxX64`). Leader decision 2026-10-25 on #191
+  (item 3): "K/N CPython: libpython is shipped beside the executable (dynamic)". At run time (in
+  `desktopNativeMain`, `DesktopNativePythonHome`), before `Py_Initialize`, a desktop native binary takes the first
+  of: `PYTHONHOME` from the environment (CPython reads it itself); `<directory of the executable>/python-multiplatform-home`
+  when that directory exists; `<directory of the executable>/../Resources/python-multiplatform-home` (a macOS `.app`).
+  For a consumer applying the Gradle plugin, for each such target the plugin:
+  1. registers `stagePythonHome<Target>` (L-9's staging, for that target's platform `macos-aarch64` or
+     `linux-x86_64`, whatever the host), in the same per-machine cache;
+  2. links every executable and test binary of the target against the staged `libpython<X.Y>t`
+     (`-L<prefix>/lib -lpython<X.Y>t`), with the run-time search path
+     `@executable_path/python-multiplatform-home/lib` (macOS) or `$ORIGIN/python-multiplatform-home/lib` (Linux), and,
+     for debug and test binaries only, also the staged prefix's own `lib` (so a build path never ends up in a
+     release binary); the link tasks depend on the staging;
+  3. gives the target's host test task (`<target>Test`) `PYTHONHOME=<staged prefix>`, unless `PYTHONHOME` is
+     already set (L-9's rule);
+  4. after linking each executable, copies the packaged prefix (L-9's includes and excludes) to
+     `<the executable's output directory>/python-multiplatform-home`, unless `packagePythonHome` is false.
+  On Windows (`mingwX64`, SPEC P-1a) the rule differs where the loader does: binaries link the import library
+  `<prefix>/libs/python3XYt.lib` and carry no search path; packaging puts the prefix's `*.dll` (the interpreter
+  and the MSVC runtime) beside the executable, where Windows looks, and `Lib/` and `DLLs/` into
+  `python-multiplatform-home`; `mingwX64Test` also gets the staged prefix on `PATH`.
+  The library's own klib carries no libpython link option; a consumer that does not apply the plugin links it
+  itself. `Status: draft` (#191), `GP/DesktopNativeConsumerWiringTest.kt`.
 - **L-10** Desktop: the library uses no JDK module beyond `java.base`, so it runs on a `jlink`ed
   runtime such as the one Compose Desktop's `createDistributable` bundles (issue #77). In particular
   native memory is reached through `java.lang.foreign`, never `sun.misc.Unsafe` (module
@@ -225,8 +258,10 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `PyException.isCancelledError()` is `true` when the underlying Python exception is an instance of
   `asyncio.CancelledError` (`concurrent.futures.CancelledError`), and `PyException.toKotlinException()`
   returns a `kotlin.coroutines.cancellation.CancellationException` with `this` as its `cause` for a
-  cancelled error and `this` otherwise (#164).
-  `Status: implemented`, `PyExceptionTest.kt`.
+  cancelled error and `this` otherwise (#164). `PyException.kotlinThrowable` is the original Kotlin
+  `Throwable` when the Python exception is a `python_multiplatform.KotlinThrowable` proxy (U-2), the same
+  instance, and `null` otherwise.
+  `Status: implemented`, `PyExceptionTest.kt`; `kotlinThrowable`: `draft`, `PM/commonTest/.../KotlinThrowableProxyTest.kt`.
 - **O-3a** (#524, owner 2026-11-22: restore the pre-agent object model and implement its skeleton
   types) A raised Python exception is the Kotlin class of its built-in Python class: every built-in
   exception of CPython 3.15 has a `Py<Name>` class under `ffi.exceptions.errors` whose Kotlin superclass
@@ -244,6 +279,27 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   views), `PyDict` (`MutableMap`), `PySet` (`MutableSet`, set algebra, frozenset), `PyTuple` (`List`),
   plus iterators. `Status: implemented`, `PyListTest.kt`, `PyDictTest.kt`, `PySetTest.kt`,
   `PyTupleTest.kt`, `PyIteratorTest.kt`.
+  **The hierarchy and element types are the owner's** (issue #524 items 3 and 4; owner, 2026-11-22: restore the code
+  shapes agents changed without approval to the pre-agent baseline f33bcef8 and `python_for_kotlin_binding.mermaid`).
+  `PyIterable` is an interface that is a Kotlin `Collection<Any?>` whose `iterator()` is a `PyIterator`;
+  `PyMutableIterable` is an abstract class extending `PyObject`, implementing `PyIterable` and `MutableCollection<Any?>`;
+  `PyList` (also `MutableList<Any?>`) and `PySet` (also `MutableSet<Any?>`) extend `PyMutableIterable`; `PyTuple`
+  (`List<Any?>`), `PyFrozenSet` (`Set<Any?>`, not in the mermaid) and `PyRange` are `PyObject`s implementing `PyIterable`;
+  `PyDict` is a `PyObject` and a `MutableMap<Any?, Any?>`. `PyIterator` is an interface (`hasNext`, `next(): PyObject`,
+  `remove`, a Kotlin `MutableIterator<Any?>`); a Python iterator object is a `PyIteratorObject`, whose `remove()` throws
+  `UnsupportedOperationException`, and a list's or set's iterator removes from the container. Elements are `Any?`
+  (the mermaid's members take and return `Any`): a write (`add`, `set`, `put`, `contains`, `indexOf`, `remove`,
+  `fromList` / `fromSet` / `fromMap`) stores a `PyObject` as itself, `null` as `None`, a Kotlin `Boolean`, integer,
+  floating-point number, `String` or `ByteArray` as the Python value, and a Kotlin `List` / `Set` / `Map` as a new
+  `list` / `set` / `dict` of converted elements, and refuses anything else with `PyTypeError`; a read (`get`, `removeAt`,
+  iteration, a dict's values) answers a `PyObject`. The recursive native projections are the mermaid's names again:
+  `PyList.toList()`, `PyTuple.toList()`, `PySet.toSet()`, `PyFrozenSet.toSet()`, `PyDict.toMap()` (members, so they win
+  over the standard library's `Iterable.toList()`; that rename to `toNativeList()` was an agent change). `PyDict` also has
+  the mermaid's `operator set(key, value)`. Agent proposals, not confirmed by the owner: `Any?` rather than `Any` (so
+  `null` can stand for `None`), reads answering `PyObject` rather than a converted value, the name `PyIteratorObject`,
+  and the container conversions. The mermaid's `forEach(Consumer)` and `spliterator()` are JVM-only and cannot be
+  declared in common code; Kotlin's common `forEach` covers the first. `draft` for this paragraph,
+  `PM/commonTest/.../types/collections/IterableHierarchyTest.kt`.
 - **O-6** Modules, builtins, callables (bound methods, class/static methods), utilities (range, slice,
   ellipsis), import and GC helpers. `Status: implemented`, `PyModuleTest.kt`, `BuiltinsTest.kt`,
   `PyCallablesTest.kt`, `PyUtilitiesTest.kt`, `PyImportTest.kt`, `PyGCTest.kt`.
@@ -304,8 +360,29 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     `asyncio.CancelledError` (leaving any exception Python already raised on the indicator untouched; on a
     target where `asyncio` cannot be imported, it falls back to `RuntimeError`);
   - any other Kotlin `Throwable` maps to `RuntimeError(message)` with `__cause__` set to a `BaseException`
-    representing the original Kotlin throwable (`"<KotlinSimpleClassName>: <message>"`, recursively chaining
-    Kotlin `cause` onto `__cause__`, or restoring a nested `PyException` cause's live `value` as `__cause__`).
+    representing the original Kotlin throwable (`str()` of it is `"<KotlinSimpleClassName>: <message>"`,
+    recursively chaining Kotlin `cause` onto `__cause__`, or restoring a nested `PyException` cause's live
+    `value` as `__cause__`).
+  - **The Kotlin throwable on `__cause__` is its proxy** (#164 item 6; owner decision 2026-11-22, relayed by the
+    leader: "a Kotlin Throwable seen from Python is a Python exception class that IS the proxy of the original
+    Throwable object (no copied kotlin_class/kotlin_message/kotlin_stack strings). Its message/cause/stackTrace
+    are read as ordinary members of the original Throwable through the normal proxy; returning it to Kotlin
+    yields the same Throwable instance (identity)"; it mirrors `PyException` in the owner's
+    `python_for_kotlin_binding.mermaid`, which implements Kotlin `Throwable` and extends `PyObject`). Each such
+    `__cause__` node is an instance of `python_multiplatform.KotlinThrowable`, a subclass of `RuntimeError`
+    that owns one `HandleTable` root over the original `Throwable` and releases it when the Python exception
+    dies. Nothing of the throwable is copied: `message` (a `str` or `None`), `cause` (the cause's proxy, the
+    original Python exception when the cause is a `PyException` with a live `value`, or `None`),
+    `stackTraceToString()` (also `stack_trace_to_string()`, rule 12.1's snake_case name) and `str()` ask the
+    original object at the time they are read. Passed to a Kotlin parameter, the proxy is unwrapped like any
+    other owner, so Kotlin receives the same `Throwable` instance; a `PyException` built from such a Python
+    exception answers that instance as `PyException.kotlinThrowable` (`null` for every other Python
+    exception). With the binding layer installed (`PythonxAdapter`), any other attribute is answered by the
+    ordinary proxy of the throwable's runtime class over the same object, so members a walked table declares
+    for that class are reachable too. Agent proposal, not confirmed by the owner: the class name
+    `KotlinThrowable`, the property name `kotlinThrowable`, and the fallback: when the upcall entry points are
+    not published in `__main__` (`UpcallBootstrap.publishToGlobals()` was never called), the node is the plain
+    `RuntimeError("<KotlinSimpleClassName>: <message>")` it was before, with no handle.
   When Python raises `asyncio.CancelledError` inside a callback or C API call invoked by `UpcallTrampoline`,
   `UpcallTrampoline` throws `kotlin.coroutines.cancellation.CancellationException` with the `PyException` as
   its `cause` into Kotlin.
@@ -963,7 +1040,8 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactSamParameterTest.kt`.
 - **B-5a** The ambient pythonx callable scope (`PythonCallables.withScope`) is per thread (#301). A
   Python callable crossing into Kotlin on a thread with no open scope gets the "no pythonx callable
-  scope is open" error, even while another thread has a scope open, and `PythonCallables.current`
+  scope is open" error (except a `Runnable` / `() -> Unit` slot, which becomes B-5c's one-shot), even
+  while another thread has a scope open, and `PythonCallables.current`
   answers `null` there. One scope may be added to, reused, invoked and closed from different
   threads: `close()` releases every root and body exactly once, a callable added after the close is
   rejected (`IllegalStateException`, its body released), and an invocation holds a reference of its
@@ -975,23 +1053,60 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   callbacks. A Kotlin object a walked declaration returns (a `kotlinx.coroutines.CoroutineDispatcher`
   such as `Dispatchers.Default`, a `Job`) is a handle in Python and fills any parameter of its type or a
   supertype (`Job(parent)`, `dispatch(context, block)` with a `Job` as the `CoroutineContext`), reaching
-  the same Kotlin object (`Job.cancel()` from Python cancels it and its children). A parameter type
+  the same Kotlin object (`Job.cancel()` from Python cancels it and its children). A member function's declared defaults may be left out from Python, as a top-level function's may (the walker's default omission, applied to members), An override takes the defaults of the declaration it overrides, as in Kotlin (`AbsoluteCutCornerShape.copy()` as `CornerBasedShape.copy()`), and an omission an inherited overload of the same name would also accept is refused, since the call could then resolve against either. A `suspend` member's omitting calls run inside its pending call (U-5). A parameter type
   that expands to a `java.*` class (through a typealias, as `kotlinx.coroutines.CancellationException`
   does in `Job.cancel(cause: CancellationException? = null)`) is nameable: the class file is read from
   the JDK the walk runs on, since no walked jar holds it; `javax.*`, `jdk.*` and `sun.*` stay declined.
   A Python callable passed as the `Runnable` of `CoroutineDispatcher.dispatch` runs on the
   dispatcher's own threads after `dispatch` returns; the binder attaches each thread for the call
-  (B-5a's scope rule applies: the callable lives while its scope is open). Not provided: a plain Kotlin
+  (inside an open scope it lives while the scope is open, B-5a; with no scope open it is B-5c's
+  one-shot). Not provided: a plain Kotlin
   `object` (such as `kotlin.coroutines.EmptyCoroutineContext`) as a value; only companions are values
   (U-4), so a caller passes a `Job` or a dispatcher where a `CoroutineContext` is needed.
   `Status: draft` (until its CI run) on desktop (walker), `GP/artifact/SamParameterBindingTest.kt`
   (`aJdkClassParameterSpelledThroughATypealiasIsBound`, `aJavaxClassParameterStaysDeclined`),
   `python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactCoroutinesTest.kt`.
+- **B-5c** (#164 item 5, a callback posted from outside any scope) A Python callable crossing into a
+  slot of compiled arity 0 that is not composable (a `Runnable`, a `() -> Unit`) on a thread with no
+  open scope becomes a **one-shot**: the wrapper holds its own reference to the callable and its own
+  `HandleTable` root, and gives both back after its first invocation, whether the callable returns or
+  raises (the exception reaches whoever invoked it, for a dispatcher worker its uncaught-exception
+  handler; that exception's traceback can hold the callable through its frames until the exception
+  itself is released, for a Kotlin `PyException` when the JVM collects it). Exactly once under concurrent invocations: one invocation runs the callable, and every
+  other one, concurrent or later, raises `IllegalStateException` saying the one-shot already ran,
+  without touching the released callable. A one-shot invocation opens no scope, so a `Runnable` the
+  callable posts in turn is a one-shot too. Inside an open scope nothing changes (B-5a), and with no
+  scope open every other slot (one that takes arguments, a composable lambda, a `suspend` function of
+  U-5a) is still refused.
+  Why re-running raises: nothing tells the binder that Kotlin dropped a `Runnable` it was given, so the
+  first run is the only release point there is. A `Runnable` handed to a dispatcher runs exactly once,
+  which is the case this serves (pythonx-concurrent `KotlinEventLoop` posting `call_soon` callbacks from
+  threads with no composition). A Kotlin API that keeps a callback and runs it again (a listener, a
+  repeating timer) needs the crossing made inside a scope (`PythonCallables.withScope`, or a
+  composition). Not provided: a one-shot that is never invoked holds its callable for the life of the
+  process (no release by the Kotlin garbage collector).
+  Source: leader decision 2026-11-21 18:30 (team report `fable-pmp.md`, "## Leader answer (2026-11-21
+  18:30)", item 2): "Item 5 lifetime: (b) approved (leader decision): a one-shot RunOnce wrapper for
+  Runnable / () -> Unit slots that cross outside a PythonCallableScope, releasing its body after the
+  first invocation; record the rule in SPEC with this line as the source."
+  `Status: draft` (until its CI run), `PM/desktopTest/.../pythonx/PythonRunOnceTest.kt`,
+  `python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactCoroutinesTest.kt`
+  (`aCallablePostedWithNoScopeOpenRunsOnceAndReleasesEverything`,
+  `aCallableThatRaisesOnTheWorkerLeavesTheDispatcherWorking`),
+  `.../WalkedArtifactCallbackTest.kt` (`aUnitCallableWithNoScopeOpenRunsOnceAndRootsNothingAfter`).
 - **B-6** `@Composable` functions are callable from Python inside a composition; a Python click reaches
   a Kotlin callback and the redraw shows it. `Status: implemented` on desktop,
   `python-multiplatform-compose/fixtures/compose/src/desktopTest/` (`ComposableRenderTest.kt`, `M3ProofRenderTest.kt`,
   `CallbackDrivenRenderTest.kt`, pointer/drag render tests), `GP/artifact/ComposableBindingTest.kt`;
   `planned` on Android, iOS and wasm.
+- **B-6b** (#191, from #172 item 5) Input-method composition reaches a Python `TextField(state=...)` through a real
+  desktop window: a Swing `JFrame` with a `ComposePanel`, where Compose's AWT layer decodes each
+  `java.awt.event.InputMethodEvent` (attributed text, committed-character count) into `commitText` /
+  `setComposingText`. A Hangul sequence (ㅎ, 하, 한 composing, 한 committed) leaves the Kotlin `TextFieldState`
+  Python created with each composing text and its range, then `한` with no composition, and Python reads `한`.
+  The offscreen half (the calls below the AWT layer) is `notebook-e2e`'s `InputMethodScene`. `Status: draft`,
+  `python-multiplatform-compose/fixtures/compose/.../window/RealWindowInputMethodTest.kt`, run by `desktopWindowTest`
+  (a display is required).
 - **B-8** A host draws a Python-declared application root with
   `python.multiplatform.compose.PythonAppView(modifier, module, attribute)` (or `PythonWidget(composableName, modifier, moduleName)` or `PythonWidget(root: PyObject)`, inside a `PythonLauncher { }` that starts the interpreter),
   from the `python-multiplatform-compose` module (`python-multiplatform` itself does not depend on
@@ -1131,9 +1246,13 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `Versions.abiFlags` (`t` or empty) and every name derived from it (`libpython3.15t`, `lib/python3.15t/`,
   `libmultiplatform_python3.15t.so`) follow it. On the GIL platform Kotlin threads attach a thread state
   and serialise on the GIL.
-  `Status: partial` (desktop observed; Android, androidNative and iOS are compiled against 3.15t but
-  have not been run on an emulator, device or simulator in this revision; CI jobs for that, owner-approved
-  2026-11-21, await their first run: `android-native.yml` `emulator` (x86_64, API 34) and `ios.yml` `ios-consumer`, #328),
+  `Status: implemented` on desktop, Android and iOS (CI run 44889681538, 2026-11-21: the Android x86_64
+  emulator, API 34, ran the instrumented suite on 3.15t, 539 tests, 0 failed, `AndroidFreeThreadedBuildTest`
+  among them; the iOS simulator ran the library suite on 3.15t, 513 tests, 0 failed, `IosFreeThreadedBuildTest`
+  among them, and the plugin-staged `ios-consumer` app printed `IOS_CONSUMER_PROBE stdlib=ok ext=ok payload=ok
+  ft=ok`; jobs `android-native.yml` `emulator` and `ios.yml` `ios-consumer`, owner-approved 2026-11-21, #328);
+  `partial` on androidNative (compiled against 3.15t, its `artTest` not run on a device or emulator) and
+  wasm (GIL build until #175),
   `PM/desktopTest/.../DesktopFreeThreadedBuildTest.kt` (ABI flags, `Py_GIL_DISABLED` of the loaded
   interpreter, checkpoint default), `PM/desktopNativeTest/.../DesktopNativeFreeThreadedBuildTest.kt`,
   `PM/androidInstrumentedTest/.../AndroidFreeThreadedBuildTest.kt` (ABI flags, stdlib path, the AAR's
@@ -1169,7 +1288,8 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `libpython3.15t.so` and `assets/<abi>/lib/python3.15t/` into the AAR for arm64-v8a and x86_64; iOS
   compiles and links against the 3.15t `Python.xcframework` and gives the simulator test binary
   `lib/python3.15t/`. python.org's and BeeWare's GIL mobile archives are no longer acquired.
-  `Status: partial` (compiled; not run on an emulator, device or simulator in this revision).
+  `Status: implemented` for Android (x86_64 emulator) and iOS (simulator), CI run 44889681538 (see T-1);
+  arm64-v8a and androidNative are compiled and packaged but not run on a device in CI.
 - **T-2a** Free-threaded CPython on mobile through the Gradle plugin (#328 step 1; owner decision #158 of
   2026-10-04, "Free-threaded is the default and the only build", baseline 3.15t; leader decision of
   2026-11-13 on #328: no opt-in `pythonBindings.ios.freeThreaded` flag, 3.15t is the only build). There
@@ -1837,6 +1957,51 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     the class may form a cycle after the virtual and region reasons. The tests are
     `test_aot_tier_o2c.py`, in the ASan/UBSan job with the leak checker on for the built programs.
     Not in this step: acyclic `__del__`, classes in the library output (never emitted there), generations.
+  - **Tier S PR-S1a (#443, the `str` value)** (agent proposal, not owner-confirmed; tier S is in 1.0, owner
+    2026-11-21 21:55: "191, 443, 175 전부 1.0에 넣어"; design typedpython-aot.md 4.3.1): a `str` is a counted
+    PEP 393 string without the object header (`runtime/tp_aot_str.h`, linked only by a program that has a
+    `str` value; a program without one generates the C it generated before). Compiled: `str` locals,
+    parameters, results and module constants (`NAME = "..."`, `NAME: str = ...`, folded with Python's own
+    operators), literals (any text, NUL and lone surrogates included: immortal static objects), `+`, `+=`
+    (in place when the name owns the string and nothing else holds it), `*` by an int on either side,
+    `== != < <= > >=` (code point order), `in` / `not in`, `len`, indexing, slicing with any bounds and step,
+    `for ch in s`, truth value, the conditional expression, `min` / `max` of two strs, `str()` / `repr()`
+    of an int (any size), float, bool or str, `ord`, `chr`, `sys.argv[i]` (decoded as CPython decodes it),
+    `int(s)`, f-strings anywhere with `{e}`, `{e!s}`, `{e!r}`, `{e=}` and `{e:.Nf}`, `print` of strs with
+    `sep=` and `end=`, `sys.stdout.write` and `sys.stderr.write` (their value is the length). Output is
+    CPython 3.15's UTF-8 mode: standard output encodes with surrogateescape (U+DC80..U+DCFF become their raw
+    byte; any other surrogate raises CPython's `UnicodeEncodeError` with its message, after the arguments
+    before it and the separator are written), standard error with backslashreplace. Every exception is
+    CPython's, with its message: `IndexError: string index out of range`, `IndexError: cannot fit 'int' into
+    an index-sized integer`, `ValueError: slice step cannot be zero`, `TypeError: ord() expected a
+    character, but string of length N found`, `ValueError: chr() arg not in range(0x110000)` (also for an
+    int outside 64 bits), `OverflowError: cannot fit 'int' into an index-sized integer` and `OverflowError:
+    repeated string is too long` for `*`, `int()`'s invalid-literal message. Compile errors that stay:
+    `is` / `is not` on a str (`aot/str-identity`, a front-end finding: CPython's answer depends on
+    interning), `%` formatting (`aot/str-format`, S2), the f-string conversion `!a`, a comparison of a str
+    with another type, and a str parameter or result of an `aot-lib` export (`aot/library-str`). The tests
+    are `test_aot_tier_s1.py` (differential against the reference, bytes of stdout compared), in every job
+    of the typedpython group, the ASan/UBSan job with the leak checker on.
+    Not in this step (S1b, the next PR): the str methods, the Unicode tables generated from the reference
+    interpreter, `list[str]`, `str` fields of classes and `str | None`.
+  - **Tier S PR-S1b (#443)** (agent proposal, not owner-confirmed): the str methods `split()` / `split(sep)` /
+    `split(sep, maxsplit)` (keywords `sep`, `maxsplit`), `join`, `strip` / `lstrip` / `rstrip` with and without
+    `chars`, `lower` (with CPython's final-sigma rule), `upper` (full mappings: `'ß'.upper() == 'SS'`),
+    `startswith` / `endswith` (a str or a tuple of str, with `start` / `end`), `find` (with `start` / `end`),
+    `replace` (with `count`, keyword too), `isalpha`, `isdigit`, with CPython's results and errors
+    (`ValueError: empty separator`, `OverflowError: Python int too large to convert to C ssize_t` for a count
+    outside 64 bits). The Unicode tables they read (`aot/unicode.py`) are generated from the interpreter that
+    builds the program, only those the program uses, with `TPA_UNIDATA_VERSION` in the C; the Cased and
+    Case_Ignorable properties of the final-sigma rule are read through `lower()` itself. `list[str]` (a
+    counted list of owned strs, fixed length until S2): locals, parameters, results, displays (`[]` where a
+    list of str is expected), `split`'s result, indexing, `len`, truth value, `for s in xs`, `join`'s
+    argument, `print` / `str` / `repr` (the list's repr). `str` fields of compiled classes (heap, region and
+    virtual objects; a field that may be rebound is read into an owned temporary). A method outside the list
+    stays a finding (`aot/call`). Two defects fixed on the way: Pyrefly reports positions in UTF-8 bytes, and
+    the rebinding probe counted characters, so a local assigned on a line with non-ASCII text was untyped
+    (both modes); an inferred class comes back module-qualified (`prog.Node`), which the AOT front end did not
+    resolve. Tests: `test_aot_tier_s1b.py`, `test_rebinding.py`. Moved to S2 (in 1.0): `str | None` (needs the
+    front end's `is not None` narrowing) and the Windows console output (WriteConsoleW).
 
 ---
 

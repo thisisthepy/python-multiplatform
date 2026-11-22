@@ -78,11 +78,64 @@ class MemberFunctionBindingTest {
         assertEquals(listOf("$counter.add__Int", "$counter.add__Int_String"), bound)
     }
 
+    /**
+     * A member's default is omittable as a function's is (SPEC B-5b, #164 item 4: `Job.cancel()`).
+     * Red before: `memberFunctionCandidates` built no omission plan for a member, so `paramHasDefault`
+     * was `[false]` and Python's `job.cancel()` failed with "no value for cause".
+     */
     @Test
-    fun aMembersDefaultIsNotOmittableYet() {
+    fun aMembersDefaultIsOmittable() {
         val scaled = callables().single { it.name == "$counter.scaled" }
-        assertEquals(listOf(false), scaled.paramHasDefault)
-        assertFalse(declarations().single { it.bindingName == "$counter.scaled" }.parameters.single().declaresDefault)
+        assertEquals(listOf(true), scaled.paramHasDefault)
+        assertTrue(declarations().single { it.bindingName == "$counter.scaled" }.parameters.single().declaresDefault)
+        // The sentinel test reads the argument's slot, which follows the receiver's `args[0]`.
+        assertTrue("args[1] == null" in scaled.lambdaBody, scaled.lambdaBody)
+        assertTrue("(args[0] as $counter).scaled()" in scaled.lambdaBody, scaled.lambdaBody)
+    }
+
+    @Test
+    fun anInterfaceMembersDefaultIsOmittable() {
+        val stop = callables().single { it.name == "fixture.artifactmember.Stoppable.stop" }
+        assertEquals(listOf(true), stop.paramHasDefault)
+        assertTrue("(args[0] as fixture.artifactmember.Stoppable).stop()" in stop.lambdaBody, stop.lambdaBody)
+    }
+
+    /** A call leaving `label` out could resolve against the inherited `ping(times = 1)` as well. */
+    @Test
+    fun aMemberThatAnInheritedOverloadWouldAlsoAcceptKeepsEveryArgument() {
+        val derived = callables().single { it.name == "fixture.artifactmember.DerivedPing.ping" }
+        assertEquals(listOf(false), derived.paramHasDefault)
+        assertFalse("== null" in derived.lambdaBody, derived.lambdaBody)
+        val base = callables().single { it.name == "fixture.artifactmember.BasePing.ping" }
+        assertEquals(listOf(true), base.paramHasDefault, "the base class's own member has no inherited twin")
+    }
+
+    /**
+     * Batch run 44945907475: `AbsoluteCutCornerShape.copy` required every argument while
+     * `CornerBasedShape.copy` offered `= ...`, and mypy rejected the override. Kotlin gives an override
+     * the overridden declaration's defaults; the inherited `reshape(all)` names no `start`/`end`, so it
+     * refuses no omission. Red before: `[false, false]`.
+     */
+    @Test
+    fun anOverrideTakesTheDefaultsOfTheDeclarationItOverrides() {
+        val square = callables().single { it.name == "fixture.artifactmember.Square.reshape" }
+        assertEquals(listOf(true, true), square.paramHasDefault)
+        assertTrue("(args[0] as fixture.artifactmember.Square).reshape()" in square.lambdaBody, square.lambdaBody)
+        val stub = declarations().single { it.owner == "fixture.artifactmember.Square" && it.simpleName == "reshape" }
+        assertEquals(listOf(true, true), stub.parameters.map { it.declaresDefault })
+    }
+
+    /**
+     * Batch run 44945907475: `SnackbarHostState.showSnackbar`'s partial calls were generated outside
+     * the pending call, so `kotlinc` refused a suspend call from a non-suspend lambda. Red before: the
+     * branched body had no `PendingCall.start`.
+     */
+    @Test
+    fun aSuspendMembersOmittingCallsRunInsideThePendingCall() {
+        val pause = callables().single { it.name == "fixture.artifactmember.Waiter.pause" }
+        assertEquals(listOf(true), pause.paramHasDefault)
+        assertTrue(pause.lambdaBody.startsWith("{ args -> python.multiplatform.ffi.upcall.PendingCall.start {"), pause.lambdaBody)
+        assertTrue("(args[0] as fixture.artifactmember.Waiter).pause()" in pause.lambdaBody, pause.lambdaBody)
     }
 
     @Test

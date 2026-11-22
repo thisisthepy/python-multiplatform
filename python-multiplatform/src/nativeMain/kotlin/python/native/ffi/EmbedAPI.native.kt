@@ -704,7 +704,9 @@ actual fun PyLong_GetInfo(): NativePointer? = python.native.ffi.bindings.PyLong_
 // Section 17
 @CName("${namePrefix}PyBool_1FromLong")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
-actual fun PyBool_FromLong(v: Int): NativePointer? = python.native.ffi.bindings.PyBool_FromLong(v.toLong()).toNativePointer()
+actual fun PyBool_FromLong(v: Int): NativePointer? =
+    // `convert()`: C `long` is 64-bit on LP64 targets and 32-bit on Windows (LLP64, SPEC P-1a).
+    python.native.ffi.bindings.PyBool_FromLong(v.convert()).toNativePointer()
 
 
 // Section 18
@@ -1167,17 +1169,16 @@ fun downcallIIIIII_I(fn: Long, a0: Long, a1: Long, a2: Long, a3: Long, a4: Long,
 // new. Caching is done on the JVM side (`ffiSymbol` in `jvmMain/.../ShapeDowncalls.kt`), so this
 // is deliberately an uncached, one-shot-per-call primitive.
 
-@OptIn(ExperimentalForeignApi::class)
-private val globalDlHandle: COpaquePointer? by lazy {
-    platform.posix.dlopen(null, platform.posix.RTLD_NOW)
-}
-
 @CName("${namePrefix}ffiSymbolRaw")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
-fun ffiSymbolRaw(name: String): Long {
-    val sym = platform.posix.dlsym(globalDlHandle, name)
-    return sym?.rawValue?.toLong() ?: 0L
-}
+fun ffiSymbolRaw(name: String): Long = processSymbolAddress(name)
+
+/**
+ * The address of the CPython symbol [name] in this process, or 0. `dlsym` over the global table on
+ * POSIX targets (`SymbolLookup.posix.kt`, one copy per POSIX leaf); `GetProcAddress` on the loaded
+ * `python3XYt.dll` on Windows (SPEC P-1a), which has no global symbol table.
+ */
+internal expect fun processSymbolAddress(name: String): Long
 
 
 //**************************************************

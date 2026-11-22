@@ -22,8 +22,10 @@ import python.native.ffi.PyTuple_Size
 import python.native.ffi.Py_DecRef
 
 /**
- * Wrapper around a Python `dict` object, adopting `MutableMap<PyObject, PyObject>`
- * per the mermaid sketch (`MutableMap <|.. PyDict`).
+ * Wrapper around a Python `dict` object as a Kotlin `MutableMap` (the owner's mermaid:
+ * `PyObject <|-- PyDict`, `MutableMap <|.. PyDict`, with `get(key Any) Any`, `set(key Any, value Any)`,
+ * `remove(key Any) Any`; issue #524 item 4). Keys and values are `Any?` on the way in, converted as
+ * [PyMutableIterable] describes, and [PyObject]s on the way out.
  *
  * Backed by `PyDict_New`/`PyDict_GetItem`/`PyDict_SetItem`/`PyDict_DelItem`/
  * `PyDict_Contains`/`PyDict_Keys`/`PyDict_Values`/`PyDict_Items`/`PyDict_Clear`/
@@ -35,7 +37,7 @@ import python.native.ffi.Py_DecRef
  * natural "fully native" projection of a dict.
  */
 open class PyDict(pointer: NativePointer, borrowed: Boolean) :
-    PyObject(pointer, borrowed), PyProxy<Map<Any?, Any?>>, MutableMap<PyObject, PyObject> {
+    PyObject(pointer, borrowed), PyProxy<Map<Any?, Any?>>, MutableMap<Any?, Any?> {
 
     companion object {
         /** The `PyType` for `dict` (`builtins.dict`). */
@@ -45,8 +47,11 @@ open class PyDict(pointer: NativePointer, borrowed: Boolean) :
             deriveTypeAndRelease(emptyDict)
         }
 
-        /** Builds a new Python `dict` from [map], preserving key/value object identity. */
-        fun fromMap(map: Map<PyObject, PyObject>): PyDict {
+        /**
+         * Builds a new Python `dict` from [map] (the mermaid's `+fromMap(map Map) PyDict$`); a [PyObject]
+         * key or value is stored as itself, any other value is converted as [PyMutableIterable] describes.
+         */
+        fun fromMap(map: Map<*, *>): PyDict {
             val dictPtr = python.multiplatform.ffi.Python3.withPython { PyDict_New() } ?: throw PyException.fromCurrentError() ?: PyException("Failed to allocate dict")
             // The dict is a bare pointer until the wrapper below adopts it, and populating it is
             // fallible -- an unhashable key is enough. Dropping it there would leak the dict and,
@@ -55,7 +60,10 @@ open class PyDict(pointer: NativePointer, borrowed: Boolean) :
             return dictPtr.adoptingNewReference {
                 for ((k, v) in map) {
                     // PyDict_SetItem does not steal references to either key or value.
-                    if (python.multiplatform.ffi.Python3.withPython { PyDict_SetItem(it, k.pointer, v.pointer) } != 0) {
+                    val rc = withPythonElement(k) { key ->
+                        withPythonElement(v) { value -> python.multiplatform.ffi.Python3.withPython { PyDict_SetItem(it, key, value) } }
+                    }
+                    if (rc != 0) {
                         throw PyException.fromCurrentError() ?: PyException("Failed to populate dict")
                     }
                 }
@@ -71,20 +79,20 @@ open class PyDict(pointer: NativePointer, borrowed: Boolean) :
      * A single `(key, value)` snapshot pair. Backs [entries]/[keys]/[values]
      * (which are computed, disconnected-from-the-live-dict-order snapshots
      * that write back through to `this` [PyDict] on mutation) as well as
-     * [toNativeMap].
+     * [toMap].
      */
     private class DictEntry(
         override val key: PyObject,
         initialValue: PyObject,
         private val owner: PyDict,
-    ) : MutableMap.MutableEntry<PyObject, PyObject> {
+    ) : MutableMap.MutableEntry<Any?, Any?> {
         override var value: PyObject = initialValue
             private set
 
-        override fun setValue(newValue: PyObject): PyObject {
+        override fun setValue(newValue: Any?): PyObject {
             val old = value
             owner.put(key, newValue)
-            value = newValue
+            value = owner.get(key) ?: throw IllegalStateException("the key vanished while its value was set")
             return old
         }
     }
@@ -113,8 +121,12 @@ open class PyDict(pointer: NativePointer, borrowed: Boolean) :
         }
     }
 
-    /** Snapshot conversion to a plain Kotlin map, recursively converting keys/values ([python.multiplatform.ffi.conversion.ConversionStrategy.NATIVE]). */
-    fun toNativeMap(): Map<Any?, Any?> {
+    /**
+     * Snapshot conversion to a plain Kotlin map, recursively converting keys/values
+     * ([python.multiplatform.ffi.conversion.ConversionStrategy.NATIVE]): the mermaid's `toMap()`
+     * (on `PyType`, `+toMap() Map`; issue #524 item 4).
+     */
+    fun toMap(): Map<Any?, Any?> {
         val result = LinkedHashMap<Any?, Any?>()
         for (e in snapshotEntries()) {
             result[pyObjectToNative(e.key)] = pyObjectToNative(e.value)
@@ -122,9 +134,9 @@ open class PyDict(pointer: NativePointer, borrowed: Boolean) :
         return result
     }
 
-    private inner class KeySnapshotSet(private val snapshot: List<PyObject>) : AbstractMutableSet<PyObject>() {
+    private inner class KeySnapshotSet(private val snapshot: List<PyObject>) : AbstractMutableSet<Any?>() {
         override val size: Int get() = snapshot.size
-        override fun iterator(): MutableIterator<PyObject> = object : MutableIterator<PyObject> {
+        override fun iterator(): MutableIterator<Any?> = object : MutableIterator<Any?> {
             var idx = 0
             override fun hasNext() = idx < snapshot.size
             override fun next(): PyObject = snapshot[idx++]
@@ -133,15 +145,15 @@ open class PyDict(pointer: NativePointer, borrowed: Boolean) :
                 this@PyDict.remove(snapshot[idx - 1])
             }
         }
-        override fun add(element: PyObject): Boolean = throw UnsupportedOperationException("Cannot add a key without a value")
+        override fun add(element: Any?): Boolean = throw UnsupportedOperationException("Cannot add a key without a value")
     }
 
     private inner class ValueSnapshotCollection(
         private val values: List<PyObject>,
         private val keys: List<PyObject>,
-    ) : AbstractMutableCollection<PyObject>() {
+    ) : AbstractMutableCollection<Any?>() {
         override val size: Int get() = values.size
-        override fun iterator(): MutableIterator<PyObject> = object : MutableIterator<PyObject> {
+        override fun iterator(): MutableIterator<Any?> = object : MutableIterator<Any?> {
             var idx = 0
             override fun hasNext() = idx < values.size
             override fun next(): PyObject = values[idx++]
@@ -150,32 +162,32 @@ open class PyDict(pointer: NativePointer, borrowed: Boolean) :
                 this@PyDict.remove(keys[idx - 1])
             }
         }
-        override fun add(element: PyObject): Boolean = throw UnsupportedOperationException("Cannot add to a dict's value view")
+        override fun add(element: Any?): Boolean = throw UnsupportedOperationException("Cannot add to a dict's value view")
     }
 
     private inner class EntrySnapshotSet(
-        private val snapshot: List<MutableMap.MutableEntry<PyObject, PyObject>>,
-    ) : AbstractMutableSet<MutableMap.MutableEntry<PyObject, PyObject>>() {
+        private val snapshot: List<MutableMap.MutableEntry<Any?, Any?>>,
+    ) : AbstractMutableSet<MutableMap.MutableEntry<Any?, Any?>>() {
         override val size: Int get() = snapshot.size
-        override fun iterator(): MutableIterator<MutableMap.MutableEntry<PyObject, PyObject>> =
-            object : MutableIterator<MutableMap.MutableEntry<PyObject, PyObject>> {
+        override fun iterator(): MutableIterator<MutableMap.MutableEntry<Any?, Any?>> =
+            object : MutableIterator<MutableMap.MutableEntry<Any?, Any?>> {
                 var idx = 0
                 override fun hasNext() = idx < snapshot.size
-                override fun next(): MutableMap.MutableEntry<PyObject, PyObject> = snapshot[idx++]
+                override fun next(): MutableMap.MutableEntry<Any?, Any?> = snapshot[idx++]
                 override fun remove() {
                     check(idx > 0) { "next() has not been called, or remove() already called" }
                     this@PyDict.remove(snapshot[idx - 1].key)
                 }
             }
-        override fun add(element: MutableMap.MutableEntry<PyObject, PyObject>): Boolean =
+        override fun add(element: MutableMap.MutableEntry<Any?, Any?>): Boolean =
             throw UnsupportedOperationException("Cannot add a raw entry; use PyDict.put")
     }
 
-    override val entries: MutableSet<MutableMap.MutableEntry<PyObject, PyObject>>
+    override val entries: MutableSet<MutableMap.MutableEntry<Any?, Any?>>
         get() = EntrySnapshotSet(snapshotEntries())
-    override val keys: MutableSet<PyObject>
+    override val keys: MutableSet<Any?>
         get() = KeySnapshotSet(snapshotEntries().map { it.key })
-    override val values: MutableCollection<PyObject>
+    override val values: MutableCollection<Any?>
         get() {
             val es = snapshotEntries()
             return ValueSnapshotCollection(es.map { it.value }, es.map { it.key })
@@ -188,45 +200,56 @@ open class PyDict(pointer: NativePointer, borrowed: Boolean) :
         python.multiplatform.ffi.Python3.withPython { PyDict_Clear(pointer) }
     }
 
-    override fun containsKey(key: PyObject): Boolean {
-        val result = python.multiplatform.ffi.Python3.withPython { PyDict_Contains(pointer, key.pointer) }
+    override fun containsKey(key: Any?): Boolean {
+        val result = withPythonElement(key) { k -> python.multiplatform.ffi.Python3.withPython { PyDict_Contains(pointer, k) } }
         if (result == -1) throw PyException.fromCurrentError() ?: PyException("Failed to check dict key membership")
         return result == 1
     }
 
-    override fun containsValue(value: PyObject): Boolean {
+    override fun containsValue(value: Any?): Boolean {
         val valuesPtr = python.multiplatform.ffi.Python3.withPython { PyDict_Values(pointer) }
             ?: throw PyException.fromCurrentError() ?: PyException("PyDict_Values failed")
-        val result = python.multiplatform.ffi.Python3.withPython { PySequence_Contains(valuesPtr, value.pointer) }
+        val result = try {
+            withPythonElement(value) { v -> python.multiplatform.ffi.Python3.withPython { PySequence_Contains(valuesPtr, v) } }
+        } catch (e: Throwable) {
+            python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(valuesPtr) }
+            throw e
+        }
         python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(valuesPtr) } // new reference to a list, no longer needed
         if (result == -1) throw PyException.fromCurrentError() ?: PyException("Failed to check dict value membership")
         return result == 1
     }
 
-    override fun get(key: PyObject): PyObject? {
+    override fun get(key: Any?): PyObject? = withPythonElement(key) { k ->
         // PyDict_GetItem returns a borrowed reference (and, unusually, suppresses errors --
-        // null unambiguously means "missing key" here, not "error").
-        val item = python.multiplatform.ffi.Python3.withPython { PyDict_GetItem(pointer, key.pointer) } ?: return null
-        return PyObject(item, true)
+        // null unambiguously means "missing key" here, not "error"). Wrapped (incref) before the
+        // temporary key, if any, is released.
+        val item = python.multiplatform.ffi.Python3.withPython { PyDict_GetItem(pointer, k) } ?: return@withPythonElement null
+        PyObject(item, true)
     }
 
     override fun isEmpty(): Boolean = size == 0
 
-    override fun put(key: PyObject, value: PyObject): PyObject? {
+    override fun put(key: Any?, value: Any?): PyObject? {
         val previous = get(key)
         // PyDict_SetItem does not steal references to either key or value.
-        val rc = python.multiplatform.ffi.Python3.withPython { PyDict_SetItem(pointer, key.pointer, value.pointer) }
+        val rc = withPythonElement(key) { k ->
+            withPythonElement(value) { v -> python.multiplatform.ffi.Python3.withPython { PyDict_SetItem(pointer, k, v) } }
+        }
         if (rc != 0) throw PyException.fromCurrentError() ?: PyException("Failed to set dict item")
         return previous
     }
 
-    override fun putAll(from: Map<out PyObject, PyObject>) {
+    /** `d[key] = value` (the mermaid's `+set(key Any, value Any) Any`): [put], answering the previous value. */
+    operator fun set(key: Any?, value: Any?): PyObject? = put(key, value)
+
+    override fun putAll(from: Map<out Any?, Any?>) {
         for ((k, v) in from) put(k, v)
     }
 
-    override fun remove(key: PyObject): PyObject? {
+    override fun remove(key: Any?): PyObject? {
         val previous = get(key) ?: return null
-        val rc = python.multiplatform.ffi.Python3.withPython { PyDict_DelItem(pointer, key.pointer) }
+        val rc = withPythonElement(key) { k -> python.multiplatform.ffi.Python3.withPython { PyDict_DelItem(pointer, k) } }
         if (rc != 0) throw PyException.fromCurrentError() ?: PyException("Failed to delete dict item")
         return previous
     }

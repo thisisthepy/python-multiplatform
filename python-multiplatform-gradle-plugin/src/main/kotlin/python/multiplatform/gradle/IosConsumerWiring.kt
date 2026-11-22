@@ -222,9 +222,9 @@ abstract class InstallPythonXcodeScriptTask : DefaultTask() {
     }
 }
 
-private fun classChain(type: Class<*>): Sequence<Class<*>> = generateSequence(type) { it.superclass }
+internal fun classChain(type: Class<*>): Sequence<Class<*>> = generateSequence(type) { it.superclass }
 
-private fun invokeNoArg(target: Any, getter: String): Any? =
+internal fun invokeNoArg(target: Any, getter: String): Any? =
     target.javaClass.methods.firstOrNull { it.name == getter && it.parameterCount == 0 }
         ?.also { it.isAccessible = true }
         ?.invoke(target)
