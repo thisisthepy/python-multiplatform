@@ -2267,6 +2267,45 @@ class _Fn:
                 return
             self.emit(f"if ({self.lop(found[1], 'extend')}({found[0]}, {other[0]})) {self.fail()}")
 
+    def slice_args(self, s) -> str:
+        vals, has = [], []
+        for b, flag in ((s.start, "TPA_SLICE_START"), (s.stop, "TPA_SLICE_STOP"), (s.step, "TPA_SLICE_STEP")):
+            if b is None:
+                vals.append("0")
+            else:
+                vals.append(self.clamp(b))
+                has.append(flag)
+        return ", ".join(vals) + ", " + (" | ".join(has) or "0")
+
+    def st_ListDelete(self, s: ir.ListDelete) -> None:
+        if s.is_slice:
+            args = self.slice_args(s)
+            found = self.grow_list(s.array, "a del")
+            if found is not None:
+                self.emit(f"if ({self.lop(found[1], 'delslice')}({found[0]}, {args})) {self.fail()}")
+            return
+        v = self.ev(s.index)
+        found = self.grow_list(s.array, "a del")
+        if found is None:
+            return
+        if self.rep(s.index) == TAGGED:            # an index outside int64: IndexError, as an element store's
+            slot = self.tmp("int64_t")
+            self.emit(f"if (tpa_slot_int({found[0]}->len, {v}, 1, &{slot})) {self.fail()}")
+            v = slot
+        self.emit(f"if ({self.lop(found[1], 'delitem')}({found[0]}, {v})) {self.fail()}")
+
+    def st_ListSetSlice(self, s: ir.ListSetSlice) -> None:
+        args = self.slice_args(s)
+        found = self.grow_list(s.array, "a slice assignment")
+        other = self.grow_list(s.other, "a slice assignment source")
+        if found is None or other is None:
+            return
+        if other[1] != found[1]:
+            self.bad("aot/type", s.array, f"`{s.array}[...] = {s.other}` joins lists of two kinds (the list "
+                     "classification did not merge them)")
+            return
+        self.emit(f"if ({self.lop(found[1], 'setslice')}({found[0]}, {args}, {other[0]})) {self.fail()}")
+
     def st_ListClear(self, s: ir.ListClear) -> None:
         found = self.grow_list(s.array, "a clear")
         if found is not None:

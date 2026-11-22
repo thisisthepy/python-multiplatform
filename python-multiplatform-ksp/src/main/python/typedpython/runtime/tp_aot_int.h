@@ -2638,6 +2638,10 @@ static TPA_UNUSED int tpa_int_list_pop(tpa_int_list *l, int has_index, int64_t i
     return 0;
 }
 
+#define TPA__INT_RET(x) tpa_int_retain(x)
+#define TPA__INT_REL(x) tpa_int_release(x)
+TPA__DEF_LIST_SPLICE(tpa_int_list_, tpa_int_list, tpa_int, TPA__INT_RET, TPA__INT_REL, tpa_int_list__resize)
+
 static TPA_UNUSED int tpa_int_list_remove(tpa_int_list *l, tpa_int v)
 {
     int64_t i;

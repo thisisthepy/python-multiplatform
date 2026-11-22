@@ -1715,6 +1715,8 @@ class _Lowerer:
             return self.assign(node.target, node.value, node)
         if isinstance(node, ast.AugAssign):
             return self.aug_assign(node)
+        if isinstance(node, ast.Delete) and self.info.aot:
+            return self.list_delete(node)                                  # tier S2a
         if isinstance(node, ast.If):
             cond = self.condition(node.test)
             pre = self.take()
@@ -1834,6 +1836,17 @@ class _Lowerer:
             value = self.coerce(value, t, value_node, f"local `{name}`")
             self.note_assign(name, value)
             return self.take() + [ir.Assign(name, value)]
+        if self.info.aot and isinstance(target, ast.Subscript) and isinstance(target.slice, ast.Slice) \
+                and isinstance(target.value, ast.Name) and self.is_list_name(target.value.id):
+            # tier S2a: `a[i:j:k] = b` (CPython evaluates the value, then the list, then the bounds)
+            array = target.value.id
+            if not (isinstance(value_node, ast.Name) and self.is_list_name(value_node.id)
+                    and self.list_type(value_node.id) == self.list_type(array)):
+                raise Skip(line, f"`{_src(node)}`: an AOT program assigns a slice from another list name of its type")
+            self.hoist_ok = False
+            self.list_effect(array)
+            b = self.slice_bounds(target.slice)
+            return self.take() + [ir.ListSetSlice(array, *b, value_node.id)]
         if isinstance(target, ast.Subscript) and not (
                 isinstance(target.value, ast.Name) and target.value.id in self.arrays):
             if isinstance(target.slice, ast.Slice):
@@ -2197,6 +2210,27 @@ class _Lowerer:
                 return ir.ListSlice(want, src, None, None, None)                  # type: ignore[arg-type]
             return ir.CopyArray(want, src)                                        # type: ignore[arg-type]
         return None
+
+    def slice_bounds(self, sl: ast.Slice) -> list[ir.Expr | None]:
+        return [None if b is None else self.list_index_arg(b, "a bound of a list slice")
+                for b in (sl.lower, sl.upper, sl.step)]
+
+    def list_delete(self, node: ast.Delete) -> list[ir.Stmt]:
+        """`del a[i]` / `del a[i:j:k]` of list names (tier S2a), one target after the other, as CPython deletes them."""
+        out: list[ir.Stmt] = []
+        for t in node.targets:
+            if not (isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and self.is_list_name(t.value.id)):
+                raise Skip(node.lineno, f"`del {_src(t)}` is outside the AOT mode (only `del a[i]` and `del a[i:j]` of "
+                                        "a list)")
+            array = t.value.id
+            self.hoist_ok = False
+            self.list_effect(array)
+            if isinstance(t.slice, ast.Slice):
+                d = ir.ListDelete(array, None, *self.slice_bounds(t.slice), is_slice=True)
+            else:
+                d = ir.ListDelete(array, self.list_index_arg(t.slice, f"the index deleted from `{array}`"))
+            out += self.take() + [d]
+        return out
 
     def list_str(self, node: ast.expr) -> ir.Expr | None:
         """`a` (a list[float] / list[int] name) where its str is wanted: print, str(), repr(), an f-string field; the

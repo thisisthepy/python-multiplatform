@@ -586,3 +586,64 @@ def test_concat_repeat_slices_and_list_copies(tmp_path: Path):
     bounds outside int64 clamped, step 0: ValueError) and list(a), on list[float], list[int] (RAW and big-capable)
     and list[str]; the copies are new lists (design 4.3.2)."""
     _compare(tmp_path, MAKING, [["0"], ["2"], ["-3"], ["7"], [str(2 ** 70)]])
+
+
+DELETES = """
+import sys
+
+
+def main() -> None:
+    mode = int(sys.argv[1])
+    a = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    del a[0]
+    del a[-1]
+    del a[1:3]
+    print(a)
+    del a[::2]
+    print(a)
+    b = [10, 20, 30]
+    a[1:2] = b
+    print(a)
+    a[0:4] = b
+    print(a)
+    a[1:1] = a
+    print(a)
+    r = a[::-2]
+    a[::-2] = r
+    c = [7, 8]
+    a[:] = a
+    print(a, c)
+    f = [1.5, 2.5, 3.5]
+    g = [9.5]
+    f[0:2] = g
+    del f[0]
+    print(f)
+    s = "p q r s".split()
+    t = s[1:3]
+    s[0:1] = t
+    del s[::3]
+    print(s)
+    big = [2 ** 70, 2, 3]
+    del big[0:1]
+    big[0:0] = big
+    print(big)
+    if mode == 1:
+        del a[100]
+    elif mode == 2:
+        a[::2] = c
+    elif mode == 3:
+        del a[2 ** 70]
+    elif mode == 4:
+        del a[::0]
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_del_and_slice_assignment(tmp_path: Path):
+    """del a[i] (negative, out of range, outside int64), del a[i:j] and extended slices, slice assignment that grows
+    and shrinks the list, an extended slice of another size (ValueError), a[1:1] = a and a[:] = a (the source copied
+    first), on all list types (design 4.3.2; the S2 review B1 self-referential cases)."""
+    _compare(tmp_path, DELETES, [["0"], ["1"], ["2"], ["3"], ["4"]])

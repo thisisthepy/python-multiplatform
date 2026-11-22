@@ -1658,6 +1658,135 @@ TPA__DEF_LIST_MAKE(f64, double)
 TPA__DEF_LIST_MAKE(i64, int64_t)
 #undef TPA__DEF_LIST_MAKE
 
+/* Tier S2a: `del l[i]`, `del l[a:b:c]` and `l[a:b:c] = o` of a growable list (Objects/listobject.c list_ass_subscript
+ * and list_ass_slice). `P` is the function prefix, `L` the list type, `CT` the item type, `RET` / `REL` retain and
+ * release an item (nothing for a list of numbers), `RESIZE` the list's resize. The list is left whole (its length and
+ * every slot) before any removed item is released, CPython's order (the S2 review, S3). */
+#define TPA__DEF_LIST_SPLICE(P, L, CT, RET, REL, RESIZE)                                           \
+    static TPA_UNUSED int P##delitem(L *l, int64_t i)                                             \
+    {                                                                                             \
+        int64_t slot, n = l->len;                                                                 \
+        CT gone;                                                                                  \
+        if (tpa_slot(n, i, 1, &slot)) {                                                           \
+            return -1;                                                                            \
+        }                                                                                         \
+        gone = l->d[slot];                                                                        \
+        memmove(l->d + slot, l->d + slot + 1, (size_t)(n - slot - 1) * sizeof(CT));               \
+        if (RESIZE(l, n - 1)) {                                                                   \
+            l->len = n - 1;             /* a shrink only fails to give memory back */             \
+        }                                                                                         \
+        REL(gone);                                                                                \
+        return 0;                                                                                 \
+    }                                                                                             \
+    static TPA_UNUSED int P##delslice(L *l, int64_t start, int64_t stop, int64_t step, int has)   \
+    {                                                                                             \
+        int64_t first, by, n, k, w, len = l->len;                                                 \
+        CT *gone;                                                                                 \
+        if (tpa__slice(len, start, stop, step, has, &first, &by, &n)) {                           \
+            return -1;                                                                            \
+        }                                                                                         \
+        if (n <= 0) {                                                                             \
+            return 0;                                                                             \
+        }                                                                                         \
+        if (by < 0) {                   /* the same items, in increasing order */                 \
+            first += (n - 1) * by;                                                                \
+            by = -by;                                                                             \
+        }                                                                                         \
+        gone = (CT *)malloc((size_t)n * sizeof(CT));                                              \
+        if (gone == NULL) {                                                                       \
+            return tpa_raise(TPA_MemoryError, "");                                                \
+        }                                                                                         \
+        for (k = 0, w = first; k < n; k++) {                                                      \
+            int64_t at = first + k * by, end = k + 1 < n ? at + by : len;                         \
+            gone[k] = l->d[at];                                                                   \
+            memmove(l->d + w, l->d + at + 1, (size_t)(end - at - 1) * sizeof(CT));                \
+            w += end - at - 1;                                                                    \
+        }                                                                                         \
+        if (RESIZE(l, len - n)) {                                                                 \
+            l->len = len - n;                                                                     \
+        }                                                                                         \
+        for (k = 0; k < n; k++) {                                                                 \
+            REL(gone[k]);                                                                         \
+        }                                                                                         \
+        free(gone);                                                                               \
+        return 0;                                                                                 \
+    }                                                                                             \
+    static TPA_UNUSED int P##setslice(L *l, int64_t start, int64_t stop, int64_t step, int has,   \
+                                      const L *o)                                                 \
+    {                                                                                             \
+        int64_t first, by, n, k, m = o->len, len = l->len;                                        \
+        CT *items;                      /* (one declarator each: CT may be a pointer type) */    \
+        CT *gone;                                                                                 \
+        if (tpa__slice(len, start, stop, step, has, &first, &by, &n)) {                           \
+            return -1;                                                                            \
+        }                                                                                         \
+        if (by != 1 && m != n) {                                                                  \
+            char msg[112];                                                                        \
+            snprintf(msg, sizeof msg, "attempt to assign sequence of size %lld to extended slice "  \
+                     "of size %lld", (long long)m, (long long)n);                                 \
+            return tpa_raise(TPA_ValueError, msg);                                                \
+        }                                                                                         \
+        /* the new items first (o may be l), each retained; the replaced ones kept for release */ \
+        items = (CT *)malloc((size_t)(m > 0 ? m : 1) * sizeof(CT));                               \
+        gone = (CT *)malloc((size_t)(n > 0 ? n : 1) * sizeof(CT));                                \
+        if (items == NULL || gone == NULL) {                                                      \
+            free(items);                                                                          \
+            free(gone);                                                                           \
+            return tpa_raise(TPA_MemoryError, "");                                                \
+        }                                                                                         \
+        for (k = 0; k < m; k++) {                                                                 \
+            items[k] = o->d[k];                                                                   \
+            RET(items[k]);                                                                        \
+        }                                                                                         \
+        if (by == 1) {                  /* list_ass_slice: replace n items at `first` by m */     \
+            if (n < 0) {                                                                          \
+                n = 0;                                                                            \
+            }                                                                                     \
+            for (k = 0; k < n; k++) {                                                             \
+                gone[k] = l->d[first + k];                                                        \
+            }                                                                                     \
+            if (m > n) {                                                                          \
+                if (RESIZE(l, len + m - n)) {                                                     \
+                    for (k = 0; k < m; k++) {                                                     \
+                        REL(items[k]);                                                            \
+                    }                                                                             \
+                    free(items);                                                                  \
+                    free(gone);                                                                   \
+                    return -1;                                                                    \
+                }                                                                                 \
+                memmove(l->d + first + m, l->d + first + n, (size_t)(len - first - n) * sizeof(CT)); \
+            }                                                                                     \
+            else if (m < n) {                                                                     \
+                memmove(l->d + first + m, l->d + first + n, (size_t)(len - first - n) * sizeof(CT)); \
+                if (RESIZE(l, len + m - n)) {                                                     \
+                    l->len = len + m - n;                                                         \
+                }                                                                                 \
+            }                                                                                     \
+            if (m > 0) {                                                                          \
+                memcpy(l->d + first, items, (size_t)m * sizeof(CT));                              \
+            }                                                                                     \
+        }                                                                                         \
+        else {                          /* an extended slice: one item for one item */            \
+            for (k = 0; k < n; k++) {                                                             \
+                gone[k] = l->d[first + k * by];                                                   \
+                l->d[first + k * by] = items[k];                                                  \
+            }                                                                                     \
+        }                                                                                         \
+        for (k = 0; k < n; k++) {                                                                 \
+            REL(gone[k]);                                                                         \
+        }                                                                                         \
+        free(items);                                                                              \
+        free(gone);                                                                               \
+        return 0;                                                                                 \
+    }
+#define TPA__NO_OWN(x) ((void)(x))
+#if defined(TPA_GROW_F64)
+TPA__DEF_LIST_SPLICE(tpa_f64_, tpa_f64_list, double, TPA__NO_OWN, TPA__NO_OWN, tpa_f64__resize)
+#endif
+#if defined(TPA_GROW_I64)
+TPA__DEF_LIST_SPLICE(tpa_i64_, tpa_i64_list, int64_t, TPA__NO_OWN, TPA__NO_OWN, tpa_i64__resize)
+#endif
+
 /* Tier S2a: the outcome of a list comparison (Objects/listobject.c list_richcompare) once the first differing pair,
  * or the lengths, give `c` (<0, 0, >0); `op` 0..5 is == != < <= > >=. */
 static inline int tpa__cmp_outcome(int op, int c)

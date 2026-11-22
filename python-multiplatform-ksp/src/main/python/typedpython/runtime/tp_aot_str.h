@@ -1115,6 +1115,10 @@ static TPA_UNUSED int tpa_str_list_pop(tpa_str_list *l, int has_index, int64_t i
     return 0;
 }
 
+#define TPA__STR_RET(x) tpa_str_retain(x)
+#define TPA__STR_REL(x) tpa_str_release(x)
+TPA__DEF_LIST_SPLICE(tpa_str_list_, tpa_str_list, tpa_str *, TPA__STR_RET, TPA__STR_REL, tpa_str_list__resize)
+
 static TPA_UNUSED int tpa_str_list_remove(tpa_str_list *l, tpa_str *v)
 {
     int64_t i;

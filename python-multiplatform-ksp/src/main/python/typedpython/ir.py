@@ -756,6 +756,32 @@ LIST_MAKERS = (ListConcat, ListRepeat, ListSlice)
 
 
 @dataclass(frozen=True)
+class ListDelete(Stmt):
+    """`del array[index]` (IndexError("list assignment index out of range")) or, with `is_slice`, `del
+    array[start:stop:step]` (a missing bound is None)."""
+
+    array: str
+    index: Expr | None
+    start: Expr | None = None
+    stop: Expr | None = None
+    step: Expr | None = None
+    is_slice: bool = False
+
+
+@dataclass(frozen=True)
+class ListSetSlice(Stmt):
+    """`array[start:stop:step] = other` (`other` a list name of the same type, possibly `array`: its items are copied
+    first). A step other than 1 needs equal sizes: ValueError("attempt to assign sequence of size N to extended slice
+    of size M")."""
+
+    array: str
+    start: Expr | None
+    stop: Expr | None
+    step: Expr | None
+    other: str
+
+
+@dataclass(frozen=True)
 class ListCompare(Expr):
     """`left op right` of two lists of one type, list[int] or list[str] (a list of float compares items by identity
     first in CPython: aot/identity). Objects/listobject.c list_richcompare: the first index where the items differ
@@ -773,8 +799,8 @@ class ListStr(Expr):
     array: str
 
 
-LIST_GROW_NODES = (ListAppend, ListInsert, ListExtend)
-LIST_SHRINK_NODES = (ListPop, ListClear, ListRemove)
+LIST_GROW_NODES = (ListAppend, ListInsert, ListExtend, ListSetSlice)
+LIST_SHRINK_NODES = (ListPop, ListClear, ListRemove, ListDelete, ListSetSlice)
 
 
 @dataclass(frozen=True)

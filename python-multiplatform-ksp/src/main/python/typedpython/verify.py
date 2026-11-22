@@ -372,7 +372,7 @@ from .ir import CheckExact, CheckMethod, ClassDecl, FieldGet, FieldSet, Is, IsEx
 from .ir import BuildString, Contains, ForObj, Format, GetItem, NewDict, NewList, StoreItem
 from .ir import ParInfo
 from .ir import ListAppend, ListClear, ListExtend, ListInsert, ListPop, ListRemove, ListReverse, ListSearch, ListStr
-from .ir import ListCompare, ListConcat, ListRepeat, ListSlice
+from .ir import ListCompare, ListConcat, ListRepeat, ListSlice, ListDelete, ListSetSlice
 
 DA = "verify/definite-assignment"
 MISSING_RETURN = "verify/missing-return"
@@ -429,7 +429,8 @@ _STMTS = frozenset({Assign, StoreIndex, ExprStmt, If, While, ForRange, Return, B
 # The statements and expressions only the AOT mode (`verify(m, aot=True)`) accepts. (An `FString` and its
 # `FormatField`s are checked by `s_Print`, which is the only place one may stand.)
 _AOT_STMTS = frozenset({Print, ReturnTuple, Unpack, TimeSleep, SysExit, ForStr,
-                        ListAppend, ListInsert, ListExtend, ListClear, ListReverse, ListRemove})     # tier S2a
+                        ListAppend, ListInsert, ListExtend, ListClear, ListReverse, ListRemove,
+                        ListDelete, ListSetSlice})     # tier S2a
 _AOT_EXPRS = frozenset({ListDisplay, Cond, ArgvInt, ArgvLen, FloatToInt, BoolToInt, StrToInt, TimeCall,
                         # tier S1 (PR-S1a): the STR nodes, and an f-string that is a str value
                         StrConcat, StrRepeat, StrCompare, StrContains, StrLen, StrIndex, StrSlice, StrOf, StrOrd,
@@ -2220,6 +2221,33 @@ class _Checker:
         if at is not None and other is not None and at is not other:
             self.error(TYPE, f"extend of '{s.array}' ({at.value}) by '{s.other}' ({other.value})")
         return s, state
+
+    def list_bounds(self, s, state: _State) -> dict:
+        out = {}
+        for k in ("start", "stop", "step"):
+            b = getattr(s, k)
+            if b is not None:
+                b = self.expr(b, state)
+                self.slot(b, Type.I64, f"{k} of a slice of '{s.array}'")
+            out[k] = b
+        return out
+
+    def s_ListDelete(self, s: ListDelete, state: _State):
+        self.list_changed(s.array, "del", state)
+        if type(s.is_slice) is not bool or (s.is_slice != (s.index is None)):
+            self.error(STRUCTURE, "ListDelete has an index or is a slice, not both")
+        if s.is_slice:
+            return dataclasses.replace(s, **self.list_bounds(s, state)), state
+        idx = self.expr(s.index, state)
+        self.slot(idx, Type.I64, f"index deleted from '{s.array}'")
+        return dataclasses.replace(s, index=idx), state
+
+    def s_ListSetSlice(self, s: ListSetSlice, state: _State):
+        at = self.list_changed(s.array, "slice assignment", state)
+        other = self.list_of(s.other, "slice assignment source", state)
+        if at is not None and other is not None and at is not other:
+            self.error(TYPE, f"slice of '{s.array}' ({at.value}) assigned from '{s.other}' ({other.value})")
+        return dataclasses.replace(s, **self.list_bounds(s, state)), state
 
     def s_ListClear(self, s: ListClear, state: _State):
         self.list_changed(s.array, "clear", state)

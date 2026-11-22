@@ -236,7 +236,7 @@ class _Checker:
                 self.rep.error(s, "aot/assign", "assignment", "only `name = value`, `a, b = f(...)` and "
                                "`list[i] = value` are supported (no chained assignment, no attribute or slice target)")
             elif isinstance(s.targets[0], ast.Subscript):
-                self.expr(s.targets[0].slice)
+                self.subscript_parts(s.targets[0])
             self.expr(s.value)
             if len(s.targets) == 1 and isinstance(s.targets[0], ast.Name):
                 cls = self._infer_expr_class(s.value)
@@ -279,6 +279,14 @@ class _Checker:
             self.for_stmt(s)
         elif isinstance(s, (ast.Break, ast.Continue, ast.Pass)):
             return
+        elif isinstance(s, ast.Delete):
+            # tier S2a: `del a[i]`, `del a[i:j:k]` of a list (the front end checks `a` is one)
+            for t in s.targets:
+                if self.subscript_target(t) or self.slice_target(t):
+                    self.subscript_parts(t)
+                else:
+                    self.rep.error(s, "aot/statement", "del", f"`del {ast.unparse(t)}` is outside the AOT mode (only "
+                                   "`del a[i]` and `del a[i:j]` of a list)")
         elif isinstance(s, ast.Expr):
             self.expr_stmt(s)
         elif isinstance(s, ast.FunctionDef):
@@ -293,6 +301,19 @@ class _Checker:
         return isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and not isinstance(t.slice, ast.Slice) \
             and t.value.id not in {"sys"}
 
+    def slice_target(self, t: ast.expr) -> bool:
+        """`name[i:j:k]`: a slice of a list (tier S2a: slice assignment and `del`)."""
+        return isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and isinstance(t.slice, ast.Slice) \
+            and t.value.id not in {"sys"}
+
+    def subscript_parts(self, t: ast.Subscript) -> None:
+        if isinstance(t.slice, ast.Slice):
+            for b in (t.slice.lower, t.slice.upper, t.slice.step):
+                if b is not None:
+                    self.expr(b)
+        else:
+            self.expr(t.slice)
+
     def attribute_target(self, t: ast.expr) -> bool:
         """`name.field`: a store into a compiled class field."""
         if not (isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name)):
@@ -301,7 +322,7 @@ class _Checker:
         return cls is not None and t.attr in self.class_fields.get(cls, ())
 
     def target_ok(self, t: ast.expr) -> bool:
-        if isinstance(t, ast.Name) or self.subscript_target(t) or self.attribute_target(t):
+        if isinstance(t, ast.Name) or self.subscript_target(t) or self.slice_target(t) or self.attribute_target(t):
             return True
         return isinstance(t, (ast.Tuple, ast.List)) and bool(t.elts) and all(isinstance(e, ast.Name) for e in t.elts)
 
