@@ -114,6 +114,17 @@ jobs:
       # klibs; Text and Button go through the B3 compiler plugin, whose unrewritten marker would throw.
       - name: Compose on Kotlin/Native (macosArm64), host test
         run: ./gradlew :python-multiplatform-compose:fixtures:compose-native:macosArm64Test --rerun --console=plain
+      # SPEC B-6b (#191, from #172 item 5): input-method composition decoded by Compose's AWT layer, in a
+      # real window. The macOS runner has a display; the task fails if no window test matched.
+      - name: Real-window input method test (Compose host fixture)
+        run: ./gradlew :python-multiplatform-compose:fixtures:compose:desktopWindowTest --rerun --console=plain
+
+      - name: Upload the real-window test report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-window-test-reports
+          path: python-multiplatform-compose/fixtures/compose/build/reports/tests/desktopWindowTest
 
   plugin-unit:
     # The Gradle plugin's own unit tests (#403). Only its fixtures ran in CI before, so plugin
