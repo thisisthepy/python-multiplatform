@@ -123,3 +123,7 @@ include(":python-multiplatform-compose:fixtures:compose")
 // drawn by `PythonContent`. A fixture and not `sample/`, which is user-authored spec material. Its
 // desktopTest needs `-PpythonxComposeWheel=<wheel>`; see its README.
 include(":python-multiplatform-compose:fixtures:notebook-e2e")
+// #191: the composable claim on Kotlin/Native desktop (macosArm64, linuxX64): the fork's Compose klibs
+// walked by `KlibScanner`, `Text` / `Button` (more than 6 defaults) bound through the B3 compiler
+// plugin, rendered from Python with `ImageComposeScene` in the host test.
+include(":python-multiplatform-compose:fixtures:compose-native")
