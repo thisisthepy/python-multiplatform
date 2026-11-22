@@ -154,6 +154,61 @@ jobs:
       - name: Compile the Compose host for Linux x86_64 Kotlin/Native
         run: ./gradlew :python-multiplatform-compose:compileKotlinLinuxX64 --rerun --console=plain
 
+  desktop-native-windows:
+    # SPEC P-1a (#191): the Windows Kotlin/Native desktop target. mingwX64Test links the free-threaded
+    # python315t.lib, finds python315t.dll on PATH and the stdlib through PYTHONHOME (both set by the
+    # library's own task configuration).
+    name: Desktop Kotlin/Native Tests (Windows x86_64)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # JDK 17 as well: the compiler plugin and KSP compile with a languageVersion=17 toolchain, and
+      # Gradle's auto-detection does not find the runner's preinstalled 17 on Windows (batch run
+      # 44945907475). setup-java exports JAVA_HOME_17_X64; the Gradle step names it. 21 stays the default.
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: |
+            17
+            21
+          distribution: 'zulu'
+          cache: 'gradle'
+
+      - name: Cache Konan
+        uses: actions/cache@v4
+        with:
+          path: ~/.konan
+          key: ${{ runner.os }}-konan-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-konan-
+
+      - name: Run Windows x86_64 Kotlin/Native Tests
+        shell: bash
+        run: ./gradlew :python-multiplatform:mingwX64Test --rerun --console=plain -Porg.gradle.java.installations.fromEnv=JAVA_HOME_17_X64
+
+      - name: Count the tests
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import glob, os, sys, xml.etree.ElementTree as ET
+          files = glob.glob("python-multiplatform/build/test-results/mingwX64Test/*.xml")
+          total = failed = skipped = 0
+          for f in files:
+              for c in ET.parse(f).getroot().iter("testcase"):
+                  total += 1
+                  failed += c.find("failure") is not None or c.find("error") is not None
+                  skipped += c.find("skipped") is not None
+          line = f"mingwX64Test: {total} tests, {failed} failed, {skipped} skipped ({len(files)} files)"
+          print(line)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as s:
+              s.write(line + "\n")
+          if not files or failed:
+              sys.exit("mingwX64Test did not run, or a test failed")
+          PY
+
   # The dev agent's protocol on the other desktop OSes (#238). Its socket options differ per platform
   # (SO_EXCLUSIVEADDRUSE on Windows, SO_REUSEADDR on POSIX), and the port-takeover and restart tests are
   # what check them. Stdlib only: no JDK, no Gradle.
