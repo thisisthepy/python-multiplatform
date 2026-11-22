@@ -722,6 +722,51 @@ static int tpa_str__check_utf8(tpa_str *s)
 
 /* Writes s to `f` as UTF-8; a surrogate becomes its raw byte (`escape`, surrogateescape: only U+DC80..U+DCFF reach
  * here, tpa_str__check_utf8 ran first) or its backslash escape (backslashreplace). */
+#if defined(_WIN32)
+/* Tier S2a (design 4.3.2, Windows console): when standard output or error is a console, CPython writes it through
+ * _WindowsConsoleIO, as UTF-16 (WriteConsoleW) decoded from the UTF-8 the text encoded to, so a raw surrogateescape
+ * byte shows as U+FFFD. A pipe or a file gets the UTF-8 bytes. Whether a stream is a console is asked once. stdio is
+ * flushed first, so the numbers and text written through it keep their order with this text. 1: written here. */
+static int tpa_str__console_write(FILE *f, const char *p, size_t n)
+{
+    static int is_console[2] = {-1, -1};
+    int which = f == stderr ? 1 : 0;
+    HANDLE h;
+    DWORD mode, done;
+    wchar_t w[4096];
+    int units;
+    if (f != stdout && f != stderr) {
+        return 0;
+    }
+    h = GetStdHandle(which ? STD_ERROR_HANDLE : STD_OUTPUT_HANDLE);
+    if (is_console[which] < 0) {
+        is_console[which] = (h != NULL && h != INVALID_HANDLE_VALUE && GetConsoleMode(h, &mode)) ? 1 : 0;
+    }
+    if (!is_console[which]) {
+        return 0;
+    }
+    fflush(f);
+    if (n == 0) {
+        return 1;
+    }
+    units = MultiByteToWideChar(CP_UTF8, 0, p, (int)n, w, (int)(sizeof w / sizeof w[0]));
+    if (units > 0) {
+        WriteConsoleW(h, w, (DWORD)units, &done, NULL);
+    }
+    return 1;
+}
+#endif
+
+static void tpa_str__flush_text(FILE *f, const char *p, size_t n)
+{
+#if defined(_WIN32)
+    if (tpa_str__console_write(f, p, n)) {
+        return;
+    }
+#endif
+    fwrite(p, 1, n, f);
+}
+
 static void tpa_str__write(tpa_str *s, FILE *f, int escape)
 {
     static const char hex[] = "0123456789abcdef";
@@ -731,7 +776,7 @@ static void tpa_str__write(tpa_str *s, FILE *f, int escape)
     for (i = 0; i < s->len; i++) {
         uint32_t c = tpa_str_at(s, i);
         if (n > sizeof buf - 8) {
-            fwrite(buf, 1, n, f);
+            tpa_str__flush_text(f, buf, n);
             n = 0;
         }
         if (!tpa_str__is_surrogate(c)) {
@@ -749,7 +794,7 @@ static void tpa_str__write(tpa_str *s, FILE *f, int escape)
             buf[n++] = hex[c & 15u];
         }
     }
-    fwrite(buf, 1, n, f);
+    tpa_str__flush_text(f, buf, n);
 }
 
 /* print's share of a str argument, and sys.stdout.write(s) (whose value is len(s)). */

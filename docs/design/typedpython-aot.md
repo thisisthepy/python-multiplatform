@@ -334,7 +334,7 @@ doubles do not have. The AOT mode refuses those operations on a float list or a 
 **Windows console (S2a).** When standard output or error is a console (`GetConsoleMode` succeeds on its handle),
 the text is written as UTF-16 with `WriteConsoleW`, as CPython's `_WindowsConsoleIO` does; the encoded UTF-8 is
 decoded first, so a raw surrogateescape byte becomes U+FFFD, as it does in CPython. A pipe or a file gets the UTF-8
-bytes as now. The three functions are declared, not taken from `windows.h` (no macro reaches the generated names).
+bytes as now. The runtime already includes `windows.h` on Windows (lean), so the console functions are the system's declarations; stdio is flushed before each console write, so text and numbers keep their order.
 Test: the Windows job runs a program under a pseudo-console where the runner allows it; elsewhere the decision rests
 on the pipe tests and the code review.
 
