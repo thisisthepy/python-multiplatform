@@ -34,6 +34,6 @@ rule that a missing wheel is a failure, not a skip, are notebook-e2e's. Linking 
 
 | Target | State |
 |---|---|
-| `macosArm64` | **blocked at link**: the scenarios compile (CI compiles them), but the only `material-icons-core` klib, JetBrains' 1.7.3 (ABI 1.8.0, Kotlin 1.9.24), is not linked by Kotlin/Native 2.4, so every icons symbol is undefined (batch run 44989836640). Unblocked by the fork publishing `material-icons-core` built with its toolchain. |
+| `macosArm64` | runs every scenario. JetBrains' `material-icons-core` 1.7.3 klib names upstream Compose (`org.jetbrains.compose.ui:ui`, ...) as its dependencies, which the fork's klibs replace under other unique names, so this module rewrites those names in the icons klib's manifest before linking (`build.gradle.kts`, batch run 44989836640). |
 | `linuxX64` | **blocked**: every scenario runs cell 5, which imports `DefaultIcons` (`Icons.Default`), and `material-icons-core` has no linuxX64 klib. JetBrains' last release (1.7.3) stops at macOS, iOS, JS and wasm, and the Compose fork publishes none. The target is added here once the fork publishes `material-icons-core` for linuxX64. |
 | `mingwX64` | blocked on the same klib (the scenes are offscreen, so the missing Windows window layer does not matter here); it also needs #521's mingwX64 library target |

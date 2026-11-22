@@ -1,4 +1,7 @@
 import org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeHostTest
+import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
+import java.util.zip.ZipOutputStream
 
 /**
  * #191: pythonx-compose's `UI.ipynb` scenarios end to end on Kotlin/Native desktop, the counterpart of
@@ -105,6 +108,68 @@ pythonBindings {
         ),
     )
     compilerPlugin.set(project(":python-multiplatform-compiler-plugin"))
+}
+
+// ---- material-icons-core against the fork's klibs ------------------------------------------------
+//
+// The only material-icons-core klib is JetBrains' 1.7.3. Its manifest names the libraries it was built
+// against by their unique names (`depends=... org.jetbrains.compose.ui\:ui ...`), and the fork's klibs
+// that replace them are named `org.thisisthepy.compose.ui:ui` and so on. Compiling reads the klibs
+// given on the command line, so it works; linking resolves each library's `depends` by unique name,
+// cannot place the icons library, and leaves every icon getter undefined (batch run 44989836640,
+// `linkDebugTestMacosArm64`). The same klib links on iOS in `sample/`, which uses upstream Compose.
+//
+// This transform rewrites only those names in the icons klib's manifest; its IR and metadata are left
+// as they are. Every other klib passes through unchanged. It goes away when the fork publishes
+// material-icons-core itself.
+
+/** The klib's manifest names the fork's Compose libraries instead of JetBrains'. */
+val forkUniqueNames: Attribute<Boolean> = Attribute.of("pmp.klib.forkUniqueNames", Boolean::class.javaObjectType)
+
+abstract class RenameComposeDependencies : TransformAction<TransformParameters.None> {
+    @get:InputArtifact
+    abstract val input: Provider<FileSystemLocation>
+
+    override fun transform(outputs: TransformOutputs) {
+        val klib = input.get().asFile
+        if (!klib.isFile || !klib.name.startsWith("material-icons-core")) {
+            if (klib.isDirectory) outputs.dir(klib) else outputs.file(klib)
+            return
+        }
+        val renamed = outputs.file(klib.name)
+        ZipFile(klib).use { zip ->
+            ZipOutputStream(renamed.outputStream().buffered()).use { out ->
+                for (entry in zip.entries()) {
+                    out.putNextEntry(ZipEntry(entry.name))
+                    if (!entry.isDirectory) {
+                        val bytes = zip.getInputStream(entry).use { it.readBytes() }
+                        if (entry.name.endsWith("/manifest")) {
+                            val text = bytes.toString(Charsets.UTF_8)
+                                .replace("org.jetbrains.compose.runtime\\:", "org.thisisthepy.compose.runtime\\:")
+                                .replace("org.jetbrains.compose.ui\\:", "org.thisisthepy.compose.ui\\:")
+                            out.write(text.toByteArray(Charsets.UTF_8))
+                        } else {
+                            out.write(bytes)
+                        }
+                    }
+                    out.closeEntry()
+                }
+            }
+        }
+    }
+}
+
+dependencies {
+    attributesSchema { attribute(forkUniqueNames) }
+    artifactTypes.maybeCreate("klib").attributes.attribute(forkUniqueNames, false)
+    registerTransform(RenameComposeDependencies::class) {
+        from.attribute(forkUniqueNames, false)
+        to.attribute(forkUniqueNames, true)
+    }
+}
+
+configurations.matching { it.isCanBeResolved && it.name.startsWith("macosArm64") }.configureEach {
+    attributes.attribute(forkUniqueNames, true)
 }
 
 // ---- The pythonx-compose wheel (notebook-e2e's rules) -------------------------------------------
