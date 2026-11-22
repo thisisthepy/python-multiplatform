@@ -258,8 +258,10 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `PyException.isCancelledError()` is `true` when the underlying Python exception is an instance of
   `asyncio.CancelledError` (`concurrent.futures.CancelledError`), and `PyException.toKotlinException()`
   returns a `kotlin.coroutines.cancellation.CancellationException` with `this` as its `cause` for a
-  cancelled error and `this` otherwise (#164).
-  `Status: implemented`, `PyExceptionTest.kt`.
+  cancelled error and `this` otherwise (#164). `PyException.kotlinThrowable` is the original Kotlin
+  `Throwable` when the Python exception is a `python_multiplatform.KotlinThrowable` proxy (U-2), the same
+  instance, and `null` otherwise.
+  `Status: implemented`, `PyExceptionTest.kt`; `kotlinThrowable`: `draft`, `PM/commonTest/.../KotlinThrowableProxyTest.kt`.
 - **O-4** Basic types `PyInt`, `PyFloat`, `PyBool`, `PyString`, `PyNone`, bytes round-trip with Kotlin
   values. `Status: implemented`, `PyBasicTypesTest.kt`, `PyValueBytesConversionTest.kt`.
 - **O-5** Collections implement the Kotlin collection interfaces: `PyList` (`MutableList`, `fromList`,
@@ -313,8 +315,29 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     `asyncio.CancelledError` (leaving any exception Python already raised on the indicator untouched; on a
     target where `asyncio` cannot be imported, it falls back to `RuntimeError`);
   - any other Kotlin `Throwable` maps to `RuntimeError(message)` with `__cause__` set to a `BaseException`
-    representing the original Kotlin throwable (`"<KotlinSimpleClassName>: <message>"`, recursively chaining
-    Kotlin `cause` onto `__cause__`, or restoring a nested `PyException` cause's live `value` as `__cause__`).
+    representing the original Kotlin throwable (`str()` of it is `"<KotlinSimpleClassName>: <message>"`,
+    recursively chaining Kotlin `cause` onto `__cause__`, or restoring a nested `PyException` cause's live
+    `value` as `__cause__`).
+  - **The Kotlin throwable on `__cause__` is its proxy** (#164 item 6; owner decision 2026-11-22, relayed by the
+    leader: "a Kotlin Throwable seen from Python is a Python exception class that IS the proxy of the original
+    Throwable object (no copied kotlin_class/kotlin_message/kotlin_stack strings). Its message/cause/stackTrace
+    are read as ordinary members of the original Throwable through the normal proxy; returning it to Kotlin
+    yields the same Throwable instance (identity)"; it mirrors `PyException` in the owner's
+    `python_for_kotlin_binding.mermaid`, which implements Kotlin `Throwable` and extends `PyObject`). Each such
+    `__cause__` node is an instance of `python_multiplatform.KotlinThrowable`, a subclass of `RuntimeError`
+    that owns one `HandleTable` root over the original `Throwable` and releases it when the Python exception
+    dies. Nothing of the throwable is copied: `message` (a `str` or `None`), `cause` (the cause's proxy, the
+    original Python exception when the cause is a `PyException` with a live `value`, or `None`),
+    `stackTraceToString()` (also `stack_trace_to_string()`, rule 12.1's snake_case name) and `str()` ask the
+    original object at the time they are read. Passed to a Kotlin parameter, the proxy is unwrapped like any
+    other owner, so Kotlin receives the same `Throwable` instance; a `PyException` built from such a Python
+    exception answers that instance as `PyException.kotlinThrowable` (`null` for every other Python
+    exception). With the binding layer installed (`PythonxAdapter`), any other attribute is answered by the
+    ordinary proxy of the throwable's runtime class over the same object, so members a walked table declares
+    for that class are reachable too. Agent proposal, not confirmed by the owner: the class name
+    `KotlinThrowable`, the property name `kotlinThrowable`, and the fallback: when the upcall entry points are
+    not published in `__main__` (`UpcallBootstrap.publishToGlobals()` was never called), the node is the plain
+    `RuntimeError("<KotlinSimpleClassName>: <message>")` it was before, with no handle.
   When Python raises `asyncio.CancelledError` inside a callback or C API call invoked by `UpcallTrampoline`,
   `UpcallTrampoline` throws `kotlin.coroutines.cancellation.CancellationException` with the `PyException` as
   its `cause` into Kotlin.

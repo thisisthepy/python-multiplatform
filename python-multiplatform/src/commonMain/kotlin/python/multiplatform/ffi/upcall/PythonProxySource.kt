@@ -613,6 +613,10 @@ object PythonProxySource {
             }
             appendLine(ENTRY_POINT_GUARD)
             appendLine()
+            // SPEC U-2 (#164 item 6): the exception class that is a Kotlin throwable's proxy, before
+            // `_pm_unwrap`, whose owner tuple names it so that it crosses back as its handle.
+            appendLine(KotlinThrowableProxy.SOURCE)
+            appendLine()
             appendLine(OWNED_HANDLE)
             appendLine()
             var index = 0
@@ -891,7 +895,13 @@ object PythonProxySource {
                 # and simply keeps not collecting a Kotlin-side cycle, same as before.
                 _PmGcObject = _PmObject
 
-            def _pm_unwrap(_pm_v, _pm_owners=(_PmObject, _PmGcObject)):
+            def _pm_unwrap(
+                _pm_v,
+                _pm_owners=(_PmObject, _PmGcObject) + (
+                    (globals()['${KotlinThrowableProxy.CLASS_GLOBAL}'],)
+                    if '${KotlinThrowableProxy.CLASS_GLOBAL}' in globals() else ()
+                ),
+            ):
                 # What an owner is worth on the wire: the handle inside it. Everything else is
                 # passed through untouched, which is what keeps a bare handle working for every
                 # caller written against the raw contract, and what lets an ordinary Python object
@@ -902,6 +912,9 @@ object PythonProxySource {
                 # a legitimate argument to a `PyObject` parameter *and* to a parameter declared as
                 # the Kotlin class it stands for, and only the declaration says which one this is.
                 # See `PythonProxySource.argValues`.
+                #
+                # A Kotlin throwable's proxy (`${KotlinThrowableProxy.CLASS_GLOBAL}`, SPEC U-2) is an owner
+                # too: an exception cannot share a layout with `_PmObject`, so it is named here.
                 #
                 # Both owners, because the decision is no longer made here. `_PmGcObject` is not an
                 # `_PmObject` -- CPython refuses two solid bases -- so testing the one name meant
