@@ -909,7 +909,8 @@ class _Plan:
             kinds = g.tuple_kinds(fn)
             ok = (all((isinstance(q, ir.Param) and q.type in CTYPE and q.cls is None)
                       or (isinstance(q, ir.ArrayParam) and q.type in LIST and q.buffer is None) for q in fn.params)
-                  and (fn.returns in CTYPE or fn.returns in LIST or fn.returns is Type.NONE or kinds is not None))
+                  and (fn.returns in CTYPE or fn.returns in LIST or fn.returns is Type.NONE
+                       or (kinds is not None and all(k in CTYPE for k in kinds))))     # (a str element: not exported yet)
             if not ok:
                 found.append(_finding(rel, node.lineno, "aot/export", name,
                                       f"`{name}` cannot be exported: its lowered signature is outside the library "

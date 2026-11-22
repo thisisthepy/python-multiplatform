@@ -382,8 +382,10 @@ the tier K multi-value return. Covered: displays, `t = u`, `t = f(...)`, `t[k]` 
 elements share a kind, `print` / `str` / `repr` / f-strings, passing a tuple name or display to a tuple parameter, and
 returning a tuple name or a tuple-returning call. Refused with the reason: a variable index or a slice, `is`, a tuple
 anywhere else as a value, a comparison or `in` with a float item (CPython tests identity first: NaN, `aot/identity`),
-a tuple parameter of a method, and a tuple parameter at the library boundary (`aot/export`). Still to come in S2a: str
-elements in a returned tuple, tuple objects where a tuple is stored (lists, fields; dict keys in S2b), a variable index.
+a tuple parameter of a method, and a tuple parameter at the library boundary (`aot/export`). A returned tuple may hold
+str elements (each a new reference the caller owns through its out slot); such a function is not exported from a
+library yet (the Kotlin result class holds scalars). Still to come in S2a: tuple objects where a tuple is stored
+(lists, fields; dict keys in S2b), a variable index.
 
 **dict and set (S2b).** `dict[K, V]` with K int, str, bool or a tuple of those; V any S2 type. The layout is CPython's
 compact dict (an index table of slots and an entry array in insertion order, open addressing with CPython's

@@ -843,6 +843,17 @@ def again(n: int) -> tuple[int, int, int]:
     return triple(n + 1)
 
 
+def label(n: int) -> tuple[str, int]:
+    return "n=" + str(n), n
+
+
+def relabel(n: int) -> tuple[str, int]:
+    t = label(n * 2)
+    if n > 1:
+        return t
+    return label(n - 1)
+
+
 def show(x: float, n: int) -> None:
     a = (x, True, n)
     b = ("sé",)
@@ -890,6 +901,9 @@ def main() -> None:
     r = again(n)
     print(s2, k2, r)
     order(n)
+    name, v = label(n)
+    lt = relabel(n)
+    print(name, v, lt, lt[0], lt == (name, v), len(lt[0]))
 
 
 if __name__ == "__main__":
@@ -928,7 +942,8 @@ def test_a_tuple_use_with_no_aot_form_is_named(tmp_path: Path, body: str, words:
 
 def test_a_library_does_not_export_a_tuple_parameter(tmp_path: Path):
     """Inside the program a tuple parameter is one parameter per element; the library boundary keeps the signature as
-    written, so exporting one is the named `aot/export` finding (an internal function may take one)."""
+    written, so exporting one is the named `aot/export` finding (an internal function may take one); a returned tuple
+    with a str element is not exported yet either (the Kotlin result class holds scalars)."""
     from typedpython.aot import library
     p = _write(tmp_path, """
 def inner(p: tuple[int, int]) -> int:
@@ -941,8 +956,13 @@ def take(p: tuple[int, int]) -> int:
 
 def total(n: int) -> int:
     return inner((n, n + 1))
+
+
+def named(n: int) -> tuple[str, int]:
+    return "n", n
 """, "lib.py")
-    with pytest.raises(aot.AotError) as raised:
-        library.generate_library(p, exports=["take"], prefix="p")
-    assert [(f.rule, f.name) for f in raised.value.findings] == [("aot/export", "take")]
+    for name in ("take", "named"):          # (a str element of a returned tuple: not across the boundary yet either)
+        with pytest.raises(aot.AotError) as raised:
+            library.generate_library(p, exports=[name], prefix="p")
+        assert [(f.rule, f.name) for f in raised.value.findings] == [("aot/export", name)]
     library.generate_library(p, exports=["total"], prefix="p")

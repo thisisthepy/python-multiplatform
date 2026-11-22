@@ -2496,9 +2496,9 @@ class _Checker:
             return s, None
         values = tuple(self.expr(v, state) for v in s.values)
         for k, v in enumerate(values):
-            if getattr(v, "type", None) not in ir.SCALARS:
+            if getattr(v, "type", None) not in ir.SCALARS and getattr(v, "type", None) is not Type.STR:
                 self.error(TYPE, f"value {k + 1} of ReturnTuple is {getattr(getattr(v, 'type', None), 'value', '?')}, "
-                                 "not an i64, f64 or bool")
+                                 "not an i64, f64, bool or str")
         if self.fn.returns is not Type.OBJ:
             self.error(TYPE, f"ReturnTuple in a function returning {getattr(self.fn.returns, 'value', self.fn.returns)}")
         first = ir.aot_tuple_kinds(self.fn)
@@ -2530,8 +2530,8 @@ class _Checker:
         for k, t in enumerate(targets):
             if t in self.arrays or t in self.larrays:
                 self.error(ARRAY_USE, f"Unpack target '{t}' is a list")
-            elif self.scalars.get(t) not in ir.SCALARS:
-                self.error(TYPE, f"Unpack target '{t}' is not a declared scalar local")
+            elif self.scalars.get(t) not in ir.SCALARS and self.scalars.get(t) is not Type.STR:
+                self.error(TYPE, f"Unpack target '{t}' is not a declared scalar or str local")
             elif kinds is not None and k < len(kinds) and self.scalars[t] is not kinds[k]:
                 self.error(TYPE, f"Unpack target '{t}' is {self.scalars[t].value} but '{s.call.function}' returns "
                                  f"{kinds[k].value} there")
