@@ -1,3 +1,5 @@
+import org.jetbrains.kotlin.gradle.plugin.KotlinPlatformType
+import org.jetbrains.kotlin.gradle.plugin.mpp.KotlinNativeTarget
 import org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeHostTest
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
@@ -37,6 +39,51 @@ plugins {
     id("org.thisisthepy.python.multiplatform.bindings")
 }
 
+/** JetBrains' material-icons-core klib for macosArm64, exactly as published. */
+val publishedIconsKlib: Configuration = configurations.detachedConfiguration(
+    libs.compose.material.icons.core.get().let { icons ->
+        dependencies.create("${icons.module.group}:${icons.module.name}-macosarm64:${icons.version}")
+    },
+).apply {
+    isTransitive = false
+    attributes {
+        attribute(Usage.USAGE_ATTRIBUTE, objects.named(Usage::class.java, "kotlin-api"))
+        attribute(Category.CATEGORY_ATTRIBUTE, objects.named(Category::class.java, Category.LIBRARY))
+        attribute(KotlinPlatformType.attribute, KotlinPlatformType.native)
+        attribute(KotlinNativeTarget.konanTargetAttribute, "macos_arm64")
+    }
+}
+
+/** [publishedIconsKlib] with its manifest naming the fork's Compose klibs (see the note further down). */
+val renameIconsKlibDependencies by tasks.registering {
+    val source = publishedIconsKlib
+    val renamed = layout.buildDirectory.file("material-icons-core/material-icons-core.klib")
+    inputs.files(source)
+    outputs.file(renamed)
+    doLast {
+        val target = renamed.get().asFile.apply { parentFile.mkdirs() }
+        ZipFile(source.singleFile).use { zip ->
+            ZipOutputStream(target.outputStream().buffered()).use { out ->
+                for (entry in zip.entries()) {
+                    out.putNextEntry(ZipEntry(entry.name))
+                    if (!entry.isDirectory) {
+                        val bytes = zip.getInputStream(entry).use { it.readBytes() }
+                        if (entry.name.endsWith("/manifest")) {
+                            val text = bytes.toString(Charsets.UTF_8)
+                                .replace("org.jetbrains.compose.runtime\\:", "org.thisisthepy.compose.runtime\\:")
+                                .replace("org.jetbrains.compose.ui\\:", "org.thisisthepy.compose.ui\\:")
+                            out.write(text.toByteArray(Charsets.UTF_8))
+                        } else {
+                            out.write(bytes)
+                        }
+                    }
+                    out.closeEntry()
+                }
+            }
+        }
+    }
+}
+
 kotlin {
     applyDefaultHierarchyTemplate()
 
@@ -51,12 +98,6 @@ kotlin {
                 implementation(compose.foundation)
                 implementation(compose.material3)
                 implementation(compose.ui)
-                // As in notebook-e2e: the icons were built against upstream Compose 1.7.3, whose ui
-                // modules the fork's replace.
-                implementation(libs.compose.material.icons.core.get().toString()) {
-                    exclude(group = "org.jetbrains.compose.runtime")
-                    exclude(group = "org.jetbrains.compose.ui")
-                }
                 implementation(libs.designsystem)
                 implementation(libs.designsystem.material3)
                 implementation(libs.designsystem.breeze)
@@ -65,6 +106,14 @@ kotlin {
                 implementation(libs.designsystem.fluent)
                 implementation(libs.designsystem.gnome)
                 implementation(libs.designsystem.liquid.glass)
+            }
+        }
+        val macosArm64Main by getting {
+            dependencies {
+                // As in notebook-e2e: the icons were built against upstream Compose 1.7.3, whose ui
+                // modules the fork's replace. Taken as the klib `renameIconsKlibDependencies` writes
+                // (below), not as the published module.
+                implementation(files(renameIconsKlibDependencies))
             }
         }
         val commonTest by getting {
@@ -119,58 +168,12 @@ pythonBindings {
 // cannot place the icons library, and leaves every icon getter undefined (batch run 44989836640,
 // `linkDebugTestMacosArm64`). The same klib links on iOS in `sample/`, which uses upstream Compose.
 //
-// This transform rewrites only those names in the icons klib's manifest; its IR and metadata are left
-// as they are. Every other klib passes through unchanged. It goes away when the fork publishes
-// material-icons-core itself.
-
-/** The klib's manifest names the fork's Compose libraries instead of JetBrains'. */
-val forkUniqueNames: Attribute<Boolean> = Attribute.of("pmp.klib.forkUniqueNames", Boolean::class.javaObjectType)
-
-abstract class RenameComposeDependencies : TransformAction<TransformParameters.None> {
-    @get:InputArtifact
-    abstract val input: Provider<FileSystemLocation>
-
-    override fun transform(outputs: TransformOutputs) {
-        val klib = input.get().asFile
-        if (!klib.isFile || !klib.name.startsWith("material-icons-core")) {
-            if (klib.isDirectory) outputs.dir(klib) else outputs.file(klib)
-            return
-        }
-        val renamed = outputs.file(klib.name)
-        ZipFile(klib).use { zip ->
-            ZipOutputStream(renamed.outputStream().buffered()).use { out ->
-                for (entry in zip.entries()) {
-                    out.putNextEntry(ZipEntry(entry.name))
-                    if (!entry.isDirectory) {
-                        val bytes = zip.getInputStream(entry).use { it.readBytes() }
-                        if (entry.name.endsWith("/manifest")) {
-                            val text = bytes.toString(Charsets.UTF_8)
-                                .replace("org.jetbrains.compose.runtime\\:", "org.thisisthepy.compose.runtime\\:")
-                                .replace("org.jetbrains.compose.ui\\:", "org.thisisthepy.compose.ui\\:")
-                            out.write(text.toByteArray(Charsets.UTF_8))
-                        } else {
-                            out.write(bytes)
-                        }
-                    }
-                    out.closeEntry()
-                }
-            }
-        }
-    }
-}
-
-dependencies {
-    attributesSchema { attribute(forkUniqueNames) }
-    artifactTypes.maybeCreate("klib").attributes.attribute(forkUniqueNames, false)
-    registerTransform(RenameComposeDependencies::class) {
-        from.attribute(forkUniqueNames, false)
-        to.attribute(forkUniqueNames, true)
-    }
-}
-
-configurations.matching { it.isCanBeResolved && it.name.startsWith("macosArm64") }.configureEach {
-    attributes.attribute(forkUniqueNames, true)
-}
+// `renameIconsKlibDependencies` rewrites only those names in the icons klib's manifest; its IR and
+// metadata are left as they are, and the module takes that file instead of the published klib. A
+// task and a file dependency rather than an artifact transform: the bindings plugin resolves
+// `macosArm64CompileKlibraries` while configuring, and a transform keyed on every klib also received
+// the project klibs, which do not exist yet on a clean checkout (batch run 45012671392). It goes away
+// when the fork publishes material-icons-core itself.
 
 // ---- The pythonx-compose wheel (notebook-e2e's rules) -------------------------------------------
 
