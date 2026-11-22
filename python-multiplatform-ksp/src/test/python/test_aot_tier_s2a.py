@@ -823,6 +823,113 @@ def test_a_class_with_a_list_field_is_never_virtual_or_region(tmp_path: Path):
     assert "class holds a list" in report and "-> virtual" not in report and "-> region" not in report
 
 
+
+ITEMS_OF_A_LIST = """
+import sys
+
+
+class P:
+    v: int
+
+    def __init__(self, v: int) -> None:
+        self.v = v
+
+
+def main() -> None:
+    n = int(sys.argv[1])
+    a = P(n)
+    xs = [a]
+    b = P(n + 1)
+    xs.append(b)
+    c = P(n + 2)
+    xs[0] = c
+    d = P(n + 3)
+    xs.insert(0, d)
+    e = P(n + 4)
+    f = xs[0]
+    g = P(n + 5)
+    k = P(n + 6)
+    ys = [P(0)]
+    for y in ys:
+        xs.append(g)
+        k = y
+    print(len(xs), f.v, e.v, k.v)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_an_instance_put_into_a_list_is_a_heap_object(tmp_path: Path):
+    """An instance placed in a list by a display, `append`, `xs[0] = c` or `insert` outlives the expression that made
+    it, so it is a counted heap object, never virtual (scalar-replaced) or in a region (the fable-pmp review of #526,
+    S1: a wrong choice would still print the right numbers and fail only under ASan). The statements of a `for` loop
+    over a list of instances count too: `g`, appended inside one, and `k`, rebound inside one, are heap objects (they
+    were made virtual while those bodies went unread, and the C did not compile). `e`, which no list holds, is the
+    control: the analysis does make an instance virtual here."""
+    report = aot.explain_alloc(_write(tmp_path, ITEMS_OF_A_LIST))
+    kinds = {line.split()[1]: line.split("-> ")[1].split()[0] for line in report.splitlines()
+             if " = P(" in line and "<temp>" not in line}
+    assert kinds == {"a": "heap-rc", "b": "heap-rc", "c": "heap-rc", "d": "heap-rc", "e": "virtual", "g": "heap-rc",
+                     "k": "heap-rc"}, report
+
+
+CLEARED_WHILE_ITERATING = """
+import sys
+
+
+class P:
+    v: int
+
+    def __init__(self, v: int) -> None:
+        self.v = v
+
+
+class Box:
+    items: list[P]
+
+    def __init__(self, n: int) -> None:
+        self.items = [P(n), P(n + 1), P(n + 2)]
+
+
+def main() -> None:
+    n = int(sys.argv[1])
+    kept = P(-1)
+    xs = [P(n), P(n * 2)]
+    for c in xs:
+        xs.clear()
+        print(c.v, len(xs))
+        kept = c
+    print(kept.v)
+    box = Box(n)
+    for q in box.items:
+        box.items = []
+        print(q.v, len(box.items))
+        kept = q
+    print(kept.v)
+    ys = [P(n + 7)]
+    for r in ys:
+        ys.pop()
+        ys.append(P(r.v + 1))
+        kept = r
+        if r.v > n + 9:
+            break
+    last = ys[0]
+    print(kept.v, last.v)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_the_loop_item_outlives_a_clear_of_its_list(tmp_path: Path):
+    """`for c in xs: xs.clear()` and a rebinding of the iterated field leave `c` valid (the loop holds the list, and
+    its own reference to each item), as CPython's list iterator and its item reference do; read in the body and,
+    through another name, after the loop (the fable-pmp review of #526, N3; the ASan job sees a use after free)."""
+    _compare(tmp_path, CLEARED_WHILE_ITERATING, [["0"], ["3"]])
+
 TUPLES = """
 import sys
 

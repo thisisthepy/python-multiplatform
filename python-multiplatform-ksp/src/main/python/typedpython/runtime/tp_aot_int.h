@@ -2516,6 +2516,10 @@ static inline int tpa_int_list__resize(tpa_int_list *l, int64_t n)
         d = (tpa_int *)tpa__list_realloc(l->d, (size_t)want * sizeof(tpa_int),
                                          (size_t)(l->len < n ? l->len : n) * sizeof(tpa_int));
         if (d == NULL) {
+            if (n < l->len) {           /* a shrink keeps the old block, which holds n items: no record */
+                l->len = n;
+                return 1;
+            }
             return tpa_raise(TPA_MemoryError, "");
         }
     }

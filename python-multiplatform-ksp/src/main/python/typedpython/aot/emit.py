@@ -200,7 +200,7 @@ def assigned_names(f: ir.Function) -> set[str]:
         for n in rep_mod.walk(s):
             if isinstance(n, ir.Assign):
                 out.add(n.target)
-            elif isinstance(n, (ir.ForRange, ir.ForStr)):
+            elif isinstance(n, (ir.ForRange, ir.ForStr, ir.ForObjList)):
                 out.add(n.var)
             elif isinstance(n, ir.Unpack):
                 out.update(n.targets)
