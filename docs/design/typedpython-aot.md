@@ -300,12 +300,18 @@ bytes as now. The three functions are declared, not taken from `windows.h` (no m
 Test: the Windows job runs a program under a pseudo-console where the runner allows it; elsewhere the decision rests
 on the pipe tests and the code review.
 
-**Lists that change (S2a).** Every list becomes one runtime layout `{count, length, capacity, kind, items *}`: the
-items live in a separate block, so `append` / `insert` / `extend` / `pop` / slice assignment can move them while
-every name of the list keeps the same handle (CPython's aliasing: `a = b; b.append(1)` changes `a`). `kind` says
-what an item slot holds: an IEEE double, an int64 (RAW group), a `tpa_int` (big-capable group, owned), a str, a
-class instance, a list, a tuple (owned references). The tier K lists (`list[float]`, `list[int]` of both groups)
-take this layout; their element access becomes `items[i]`, with the same bounds rule. Growth by CPython's
+**Lists that change (S2a).** A list that can change size has the runtime layout `{count, length, capacity, kind,
+items *}`: the items live in a separate block, so `append` / `insert` / `extend` / `pop` / slice assignment can move
+them while every name of the list keeps the same handle (CPython's aliasing: `a = b; b.append(1)` changes `a`). `kind`
+says what an item slot holds: an IEEE double, an int64 (RAW group), a `tpa_int` (big-capable group, owned), a str, a
+class instance, a list, a tuple (owned references). Which lists take this layout is decided per list group, the
+connected set of list names, parameters, fields and results that one list can flow through (the same groups that
+`aot/rep.py` already classifies as RAW or big-capable, #462): a group with any operation that changes a length takes
+the growable layout, with element access `items[i]` and the same bounds rule; every other group keeps the tier K
+layout (`{count, length, d[]}`, element access `d[i]`). So a program that never resizes a list generates the C it
+generated before, and the tier K loops (nbody, spectral_norm) keep one load per element. (Amendment 2026-11-22,
+agent proposal, not confirmed: the first text of this section moved every list to the new layout, which contradicted
+the "generates the C it generated before" rule above and added an indirection to the tier K loops.) Growth by CPython's
 over-allocation formula (`list_resize`), so `sys.getsizeof` would agree (not exposed; the formula only sets the
 amortised cost). Operations: `append`, `pop()` / `pop(i)` (`IndexError: pop from empty list`, `pop index out of
 range`), `insert` (CPython's clamping), `extend` of a list, `remove` (`ValueError: list.remove(x): x not in list`),
