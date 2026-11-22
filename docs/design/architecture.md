@@ -87,8 +87,12 @@ Kotlin 제약 때문에 다이어그램대로 갈 수 없던 지점들:
 - **`invoke` 오버로드 다발이 vararg 하나로 합쳐졌다.** Kotlin vararg 가 이미 그 역할을 한다.
 - **`RAW` 와 `UNMANAGED` 를 분리했다.** mermaid 는 `naiveConvert` 하나가 둘을 담당하지만 그러면 두
   enum 값이 행동상 구분되지 않는다. 원저자가 `Strategy.kt` 에 남긴 설계 노트가 근거다.
-- `toList()`/`toMap()` 은 `toNativeList()`/`toNativeMap()` 으로 이름을 바꿨다. Kotlin 표준 확장을
-  가린다.
+- (되돌림, #524 항목 4) `toList()`/`toMap()`/`toSet()` 을 `toNativeList()` 등으로 바꿨던 이름은 소유자
+  지시(2026-11-22, 에이전트 도입 이전 코드와 mermaid 기준으로 되돌릴 것)에 따라 mermaid 이름으로 되돌렸다.
+  멤버라서 Kotlin 표준 확장 `Iterable.toList()` 보다 우선한다.
+- (되돌림, #524 항목 3) `PyIterable` / `PyMutableIterable` 계층은 mermaid 대로 있다. `PyIterator` 를
+  `MutableIterator` 로 두면 `MutableCollection.iterator()` 와 `PyIterable.iterator()` 를 함께 만족하므로,
+  예전 문서가 말한 반환 타입 충돌은 없다.
 
 ### JVM 시그니처 충돌 주의
 
