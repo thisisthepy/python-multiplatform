@@ -967,6 +967,125 @@ def test_a_tuple_indexed_by_a_variable(tmp_path: Path):
     _compare(tmp_path, TUPLE_INDEX, [["0"], ["2"], ["-3"], ["3"], ["-4"], ["7"]])
 
 
+LIST_OF_TUPLES = """
+import sys
+
+
+def total(ps: list[tuple[int, str]]) -> int:
+    s = 0
+    for n, w in ps:
+        s += n * len(w)
+    return s
+
+
+def grow(ps: list[tuple[int, str]], n: int) -> None:
+    ps.append((n, "g"))
+
+
+def build(n: int) -> None:
+    ps: list[tuple[int, str]] = []
+    for i in range(n):
+        ps.append((i, "x" * i))
+    t = (n, "end")
+    ps.append(t)
+    ps.insert(0, (-1, "first"))
+    alias = ps
+    grow(alias, 99)
+    print(len(ps), total(ps))
+    print(ps)
+    a, b = ps[1]
+    q = ps[-1]
+    k = len(ps) - 2
+    print(a, b, q, ps[0][1], ps[k][0], f"<{ps}>", ps[k] == (n, "end"))
+    last = ps.pop()
+    w, m = ps.pop(0)
+    print(last, w, m, len(ps), str(ps))
+    ps[0] = (7, "seven")
+    del ps[1:2]
+    more = ps + [(9, "nine")]
+    more += [(10, "ten"), q]
+    print(repr(more), more[1:], more * 2)
+    seen = 0
+    for p in more:
+        seen += 1
+        if p[0] == 9:
+            continue
+        if seen > 6:
+            break
+        if seen == 1:
+            more.append((11, "added while iterating"))
+        print(seen, p[0], p)
+    ps.reverse()
+    copied = list(more)
+    copied.pop()
+    print(ps, len(copied), len(more))
+    ps.clear()
+    print(ps, len(ps))
+
+
+def main() -> None:
+    n = int(sys.argv[1])
+    build(n)
+    pts = [(1.5, 2), (0.25, -3)]
+    pts += [(3.0, 4)]
+    x, y = pts[n % 3]
+    print(pts, pts[n % 3][0], x, y)
+    for i in range(len(pts)):
+        pts[i] = (pts[i][0] * 2, pts[i][1] + 1)
+    print(pts)
+    print(pts[n])
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_a_list_of_tuples(tmp_path: Path):
+    """`list[tuple[int, str]]` and `list[tuple[float, int]]` (design 4.3.2, one list per element position): a display,
+    `[]`, append / insert / pop / pop(i) / clear / reverse, `L[i] = t`, `del L[a:b]`, `+`, `+=`, `*`, a slice,
+    `list(L)`, `L[i]` bound, unpacked, compared and indexed by a constant, `for t in L` and `for a, b in L` (CPython's
+    list iterator sees an item appended in the body; `break`, `continue`), print / str / repr / f-strings, a list of
+    tuples passed to a function that appends through its parameter (an alias), and `IndexError: list index out of
+    range` (the last line of the cases 3 and -4)."""
+    _compare(tmp_path, LIST_OF_TUPLES, [["0"], ["2"], ["3"], ["-4"]])
+
+
+LIST_STORE_AND_EMPTY = """
+import sys
+
+
+def main() -> None:
+    n = int(sys.argv[1])
+    words = ["a", "b", "c"]
+    words[n % 3] = "x" * n
+    words[-1] = words[0] + "!"
+    print(words)
+    xs: list[int] = []
+    ys: list[float] = []
+    for i in range(n):
+        xs.append(i * i)
+        ys.append(i / 2)
+    print(xs, ys, len(xs) + len(ys))
+    i = 0
+    while i < len(xs):
+        i += 1
+    print(i)
+    words[n] = "out"
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_a_store_into_a_list_of_str_and_empty_lists_of_numbers(tmp_path: Path):
+    """`words[i] = s` of a list of str (the new item is held, the old one released; `IndexError: list assignment index
+    out of range` ends the cases 3 and -4), and `xs: list[int] = []` / `list[float]` grown by append, then walked by
+    `while i < len(xs)` (the verifier once kept the created length 0 as the upper bound of a list that grows)."""
+    _compare(tmp_path, LIST_STORE_AND_EMPTY, [["0"], ["2"], ["3"], ["-4"]])
+
+
 TUPLE_MAIN = '\n\ndef main() -> None:\n    print(f(1))\n\n\nif __name__ == "__main__":\n    main()\n'
 
 
@@ -974,11 +1093,15 @@ TUPLE_MAIN = '\n\ndef main() -> None:\n    print(f(1))\n\n\nif __name__ == "__ma
     ("def f(i: int) -> int:\n    t = (i, 'a')\n    return len(str(t[i]))\n", "differ in type"),
     ("def f(i: int) -> int:\n    t = (1, 2)\n    return len(t[i:])\n", "a slice of a tuple"),
     ("def f(i: int) -> bool:\n    t = (1, 2)\n    return t is t\n", "no tuple object yet"),
-    ("def f(i: int) -> int:\n    t = (1, 2)\n    x = [t]\n    return 0\n", "no tuple object yet"),
+    ("def f(i: int) -> int:\n    t = (1, 2)\n    x = [[t]]\n    return 0\n", "no tuple object yet"),
     ("def f(i: int) -> bool:\n    t = (i * 0.5, 1)\n    return t == t\n", "(aot/identity)"),
     ("def f(i: int) -> bool:\n    t = (i * 0.5, 1)\n    return 1.0 in t\n", "(aot/identity)"),
     ("def f(i: int) -> int:\n    t = (i, 'a')\n    for v in t:\n        pass\n    return 0\n", "different types"),
     ("def f(i: int) -> bool:\n    t = (1, 2)\n    return i + 1 in t\n", "bind the value to a name first"),
+    ("def f(i: int) -> bool:\n    ps = [(i, 'a')]\n    return (i, 'a') in ps\n", "come with tuple objects"),
+    ("def f(i: int) -> int:\n    ps = [(i, 'a')]\n    ps.sort()\n    return 0\n", "`ps.sort` is outside"),
+    ("def f(i: int) -> int:\n    ps: list[tuple[int, bool]] = []\n    return 0\n", "no list of bool yet"),
+    ("def f(i: int) -> int:\n    ps = [(i, 'a')]\n    print(ps, f(i - 1))\n    return 0\n", "bind the call's value"),
 ])
 def test_a_tuple_use_with_no_aot_form_is_named(tmp_path: Path, body: str, words: str):
     """What needs a tuple object (identity, a container holding one, a slice), a variable index into a tuple of mixed

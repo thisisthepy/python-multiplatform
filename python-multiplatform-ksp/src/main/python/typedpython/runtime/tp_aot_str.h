@@ -939,6 +939,22 @@ static TPA_UNUSED int tpa_str_list_get(tpa_str_list *l, int64_t i, tpa_str **out
     return 0;
 }
 
+/* Tier S2a: l[i] = v (v borrowed): the new reference is held before the old one is released; IndexError("list
+ * assignment index out of range"). */
+static TPA_UNUSED int tpa_str_list_store(tpa_str_list *l, int64_t i, tpa_str *v)
+{
+    int64_t slot;
+    tpa_str *old;
+    if (tpa_slot(l->len, i, 1, &slot)) {
+        return -1;
+    }
+    tpa_str_retain(v);
+    old = l->d[slot];
+    l->d[slot] = v;
+    tpa_str_release(old);
+    return 0;
+}
+
 /* Tier S2a: searching a list of str (index / count / in), equality as str ==; the value is borrowed. index formats the
  * value: ValueError("list.index(x): x not in list") as CPython 3.14 and later. */
 static TPA_UNUSED int tpa_str_list_contains(const tpa_str_list *l, tpa_str *v)

@@ -229,8 +229,11 @@ class _Checker:
             return
         elif allow_tuple and _is_tuple_annotation(ann):
             return
+        elif allow_tuple and _is_tuple_list_annotation(ann):
+            return                          # tier S2a: one list per element (typedpython/tuples.py)
         else:
-            more = ", a fixed tuple of int, float, bool and str" if allow_tuple else ""
+            more = (", a fixed tuple of int, float, bool and str, a list of such tuples"
+                    if allow_tuple else "")
             self.rep.error(ann, "aot/type", ast.unparse(ann), f"the type `{ast.unparse(ann)}` is outside the "
                            f"AOT mode (int, float, bool, str, list[int], list[float], compiled classes{more}, and None as a return type)")
 
@@ -300,8 +303,11 @@ class _Checker:
                     self.list_classes[s.target.id] = lcls        # tier S2a
             if s.value is not None and not (isinstance(s.value, ast.List) and not s.value.elts
                                             and (_is_str_list_annotation(s.annotation)
+                                                 or _is_tuple_list_annotation(s.annotation)
+                                                 or _is_list_annotation(s.annotation)
                                                  or _list_class_name(s.annotation, self.class_names))):
-                self.expr(s.value)          # (`x: list[str] = []`: an empty list of str, tier S1b)
+                self.expr(s.value)          # (`x: list[str] = []`: an empty list of str, tier S1b; of int, float and
+                #                             tuples, tier S2a)
         elif isinstance(s, ast.AugAssign):
             if not (isinstance(s.target, ast.Name) or self.subscript_target(s.target)) \
                     or not isinstance(s.op, _BIN_OPS):
@@ -383,8 +389,11 @@ class _Checker:
             lcls = self._infer_list_class(it)
             if lcls is not None and isinstance(s.target, ast.Name):
                 self.var_classes[s.target.id] = lcls        # tier S2a: the variable of a loop over a list[C]
-        if not isinstance(s.target, ast.Name):
-            self.rep.error(s, "aot/statement", "for", "the loop target must be one name")
+        if not isinstance(s.target, ast.Name) and not (
+                isinstance(s.target, ast.Tuple) and s.target.elts and all(isinstance(x, ast.Name) for x in s.target.elts)):
+            # (tier S2a: names for the elements of a list of tuples, which typedpython/tuples.py checks)
+            self.rep.error(s, "aot/statement", "for", "the loop target must be one name, or names for the elements of "
+                           "a list of tuples")
         if s.orelse:
             self.rep.error(s.orelse[0], "aot/statement", "for-else", "`else` on a loop is outside the first AOT step")
         for b in s.body + s.orelse:
@@ -781,6 +790,13 @@ def _is_tuple_annotation(ann: ast.expr) -> bool:
         return False
     items = ann.slice.elts if isinstance(ann.slice, ast.Tuple) else [ann.slice]
     return bool(items) and all(isinstance(i, ast.Name) and (i.id in SCALAR_NAMES or i.id == "str") for i in items)
+
+
+def _is_tuple_list_annotation(ann: ast.expr) -> bool:
+    """`list[tuple[int, str, ...]]` (tier S2a; typedpython/tuples.py refuses a bool element, there is no list of bool
+    yet)."""
+    return (isinstance(ann, ast.Subscript) and isinstance(ann.value, ast.Name) and ann.value.id == "list"
+            and _is_tuple_annotation(ann.slice))
 
 
 def _op_symbol(op: ast.operator) -> str:

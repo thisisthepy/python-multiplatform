@@ -1906,6 +1906,20 @@ class _Lowerer:
             idx = self.list_index_arg(target.slice, "the index")
             self.list_effect(array)
             return self.take() + [ir.ObjListStore(array, idx, value)]
+        if self.info.aot and isinstance(target, ast.Subscript) and not isinstance(target.slice, ast.Slice) \
+                and isinstance(target.value, ast.Name) and self.is_local(target.value.id) \
+                and target.value.id not in self.arrays and self.local_type(target.value.id, line) is Type.STR_LIST:
+            # tier S2a: `xs[i] = s` of a list[str] (the value, then the index)
+            array = target.value.id
+            value = self.value(value_node)
+            if value.type is not Type.STR:
+                raise Skip(line, f"`{_src(node)}` stores {TYPE_NAME.get(value.type, value.type.value)} into a list of "
+                                 "str")
+            if not _trivial(value):
+                value = self.temp(value)
+            idx = self.list_index_arg(target.slice, "the index")
+            self.list_effect(array)
+            return self.take() + [ir.StrListStore(array, idx, value)]
         if self.info.aot and isinstance(target, ast.Subscript) and isinstance(target.slice, ast.Slice) \
                 and isinstance(target.value, ast.Name) and self.is_list_name(target.value.id):
             # tier S2a: `a[i:j:k] = b` (CPython evaluates the value, then the list, then the bounds)
@@ -2008,6 +2022,10 @@ class _Lowerer:
                 raise Skip(line, f"array length `{_src(count)}` is {TYPE_NAME[length.type]}, not a native int")
             return ir.NewArray(want, length, fill)
         if isinstance(node, ast.List):
+            if not node.elts and self.info.aot:
+                # tier S2a: `xs: list[int] = []` where the list's type is known (an annotation, a parameter, the
+                # inferred type), the empty creation `[v] * 0`
+                return ir.NewArray(want, ir.Const(Type.I64, 0), ir.Const(elem, 0.0 if elem == Type.F64 else 0))
             if not node.elts:
                 raise Skip(line, "an empty list display `[]` has no element type here (a native list holds only "
                                  "floats or only ints)")

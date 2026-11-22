@@ -906,6 +906,15 @@ class _Fn:
             idx = n
         self.emit(f"if (tpa_obj_list_store(v_{mangle(s.array)}, {idx}, {v})) {self.fail()}")
 
+    def st_StrListStore(self, s: ir.StrListStore) -> None:
+        v = self.ev(s.value)
+        idx = self.ev(s.index)
+        if self.rep(s.index) == TAGGED:
+            n = self.tmp("int64_t")
+            self.emit(f"if (tpa_slot_int(v_{mangle(s.array)}->len, {idx}, 1, &{n})) {self.fail()}")
+            idx = n
+        self.emit(f"if (tpa_str_list_store(v_{mangle(s.array)}, {idx}, {v})) {self.fail()}")
+
     def st_ForObjList(self, s: ir.ForObjList) -> None:
         """`for var in value` over a list of instances: the list is held for the loop, its length read at every step,
         `var` takes a new reference to each item in turn (CPython's list iterator)."""

@@ -373,7 +373,7 @@ from .ir import BuildString, Contains, ForObj, Format, GetItem, NewDict, NewList
 from .ir import ParInfo
 from .ir import ListAppend, ListClear, ListExtend, ListInsert, ListPop, ListRemove, ListReverse, ListSearch, ListStr
 from .ir import ListCompare, ListConcat, ListRepeat, ListSlice, ListDelete, ListSetSlice
-from .ir import ForObjList, ObjListDisplay, ObjListIndex, ObjListLen, ObjListStore, TupleIndex
+from .ir import ForObjList, ObjListDisplay, ObjListIndex, ObjListLen, ObjListStore, StrListStore, TupleIndex
 
 DA = "verify/definite-assignment"
 MISSING_RETURN = "verify/missing-return"
@@ -431,7 +431,7 @@ _STMTS = frozenset({Assign, StoreIndex, ExprStmt, If, While, ForRange, Return, B
 # `FormatField`s are checked by `s_Print`, which is the only place one may stand.)
 _AOT_STMTS = frozenset({Print, ReturnTuple, Unpack, TimeSleep, SysExit, ForStr,
                         ListAppend, ListInsert, ListExtend, ListClear, ListReverse, ListRemove,
-                        ListDelete, ListSetSlice, ObjListStore, ForObjList})     # tier S2a
+                        ListDelete, ListSetSlice, ObjListStore, StrListStore, ForObjList})     # tier S2a
 _AOT_EXPRS = frozenset({ListDisplay, Cond, ArgvInt, ArgvLen, FloatToInt, BoolToInt, StrToInt, TimeCall,
                         # tier S1 (PR-S1a): the STR nodes, and an f-string that is a str value
                         StrConcat, StrRepeat, StrCompare, StrContains, StrLen, StrIndex, StrSlice, StrOf, StrOrd,
@@ -495,8 +495,9 @@ _SOUND_CAP = 2 ** 128
 _State = frozenset[str] | None
 
 
-def _shrinking_list_types(functions) -> frozenset:
-    """AOT mode, tier S2a: the list types (F64_ARRAY, I64_ARRAY) some function shrinks (ir.LIST_SHRINK_NODES)."""
+def _shrinking_list_types(functions, nodes=ir.LIST_SHRINK_NODES) -> frozenset:
+    """AOT mode, tier S2a: the list types (F64_ARRAY, I64_ARRAY) some function shrinks (ir.LIST_SHRINK_NODES), or
+    with `nodes=ir.LIST_GROW_NODES` grows."""
     out = set()
     for f in functions:
         if type(f) is not Function:
@@ -504,7 +505,7 @@ def _shrinking_list_types(functions) -> frozenset:
         types = {p.name: p.type for p in f.params if type(p) is ArrayParam}
         types.update(f.locals if isinstance(f.locals, dict) else {})
         for n in _nodes(f.body):
-            if isinstance(n, ir.LIST_SHRINK_NODES):
+            if isinstance(n, nodes):
                 t = types.get(n.array)
                 if t is not None:
                     out.add(t)
@@ -564,6 +565,7 @@ class _Checker:
         # AOT mode, tier S2a: the list types some function of the program can shrink (pop, clear, remove), through
         # any alias; no length fact about a list of such a type outlives the statement that read it
         self.shrinking = _shrinking_list_types(signatures.values()) if aot else frozenset()
+        self.growing = _shrinking_list_types(signatures.values(), ir.LIST_GROW_NODES) if aot else frozenset()
         self.classes = classes or {}
         self.facts: dict[str, str] = {}      # local -> class it is proved exactly (see docstring)
         self.optional: dict[str, str] = {}   # optional-class parameter -> class
@@ -918,7 +920,7 @@ class _Checker:
         if cls is StrOrd:
             return (0, 0x10FFFF)
         if cls is Len:
-            return self.lens.get(e.array, (0, _LEN_MAX))
+            return self.len_interval(e.array)
         if cls is Cond:          # AOT mode: either branch
             a, b = self.interval(e.then), self.interval(e.orelse)
             return (min(a[0], b[0]), max(a[1], b[1]))
@@ -978,7 +980,7 @@ class _Checker:
         if cls is StrOrd:
             return (0, 0x10FFFF)
         if cls is Len:
-            return self.lens.get(e.array, (0, _LEN_MAX))
+            return self.len_interval(e.array)
         if cls is Index:
             # an element of a RAW list group is an int64; one of a big-capable group is any int (aot/rep.py "Lists of ints")
             return _FULL if self.sound.raw_element(self.fn.name, e.array) else _WIDE
@@ -1532,6 +1534,18 @@ class _Checker:
         self.sound_record(e, proven)
         return dataclasses.replace(e, index=idx, proven=proven)
 
+    def len_interval(self, array: str) -> tuple[int, int]:
+        """The length of the list `array`: as created, for a single-assignment local of a list type no function
+        changes; a type some function grows has no upper bound and one it shrinks no lower bound (tier S2a: append,
+        pop ... change a length with no assignment)."""
+        lo, hi = self.lens.get(array, (0, _LEN_MAX))
+        t = self.arrays.get(array) or self.larrays.get(array)
+        if t in self.growing:
+            hi = _LEN_MAX
+        if t in self.shrinking:
+            lo = 0
+        return (lo, hi)
+
     def in_bounds(self, array: str, idx: ir.Expr) -> bool:
         """0 <= idx < len(array): idx is the var of an enclosing ForRange over
         range(c >= 0, len(array), step > 0) (for a local array, one whose body never assigns it), or
@@ -2031,6 +2045,16 @@ class _Checker:
         self.slot(idx, Type.I64, f"index of a store into '{s.array}'")
         return dataclasses.replace(s, index=idx, value=value), state
 
+    def s_StrListStore(self, s: StrListStore, state: _State):
+        at = self.list_changed(s.array, "store", state)
+        if at is not None and at is not Type.STR_LIST:
+            self.error(TYPE, f"StrListStore into '{s.array}' ({at.value})")
+        value = self.expr(s.value, state)
+        self.slot(value, Type.STR, f"value stored into '{s.array}'")
+        idx = self.expr(s.index, state)
+        self.slot(idx, Type.I64, f"index of a store into '{s.array}'")
+        return dataclasses.replace(s, index=idx, value=value), state
+
     def s_ForObjList(self, s: ForObjList, state: _State):
         """`for var in value` over a list of class instances: as ForStr, `var` an OBJ local."""
         value = self.expr(s.value, state)
@@ -2170,7 +2194,7 @@ class _Checker:
     def length_of(self, e: NewArray | CopyArray) -> tuple[int, int]:
         """The interval of the length of the array `e` creates (the operands are checked)."""
         if type(e) is CopyArray:
-            return self.lens.get(e.src, (0, _LEN_MAX))
+            return self.len_interval(e.src)
         if type(e) is ListDisplay:
             return (len(e.elements), len(e.elements))
         if isinstance(e, ir.LIST_MAKERS):
