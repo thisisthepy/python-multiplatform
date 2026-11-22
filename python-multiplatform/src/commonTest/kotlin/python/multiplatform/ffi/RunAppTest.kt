@@ -240,10 +240,15 @@ class RunAppTest {
         val status = runApp(path, "arg1", "arg2")
 
         assertEquals(0, status)
+        // Compared in Python: `repr` doubles the backslashes of a Windows path, so a Kotlin template
+        // of the expected repr only matched on POSIX.
         assertEquals(
-            "['$path', 'arg1', 'arg2']",
-            PythonTestFixture.eval("repr(__import__('builtins').__pmp_runapp_script_argv__)").toString(),
-            "sys.argv[0] must be the script path exactly as given, matching CPython"
+            "True",
+            PythonTestFixture.eval(
+                "__import__('builtins').__pmp_runapp_script_argv__ == [${path.asPythonStringLiteral()}, 'arg1', 'arg2']"
+            ).toString(),
+            "sys.argv[0] must be the script path exactly as given, matching CPython; got " +
+                PythonTestFixture.eval("repr(__import__('builtins').__pmp_runapp_script_argv__)")
         )
         assertEquals(
             "'set-before-script'",
@@ -275,8 +280,11 @@ class RunAppTest {
 
         assertEquals(0, status)
         assertEquals(
-            "['$path', 'z']",
-            PythonTestFixture.eval("repr(__import__('builtins').__pmp_runapp_dashdash_argv__)").toString()
+            "True",
+            PythonTestFixture.eval(
+                "__import__('builtins').__pmp_runapp_dashdash_argv__ == [${path.asPythonStringLiteral()}, 'z']"
+            ).toString(),
+            "got " + PythonTestFixture.eval("repr(__import__('builtins').__pmp_runapp_dashdash_argv__)")
         )
         Python3.exec("import os; os.remove(${path.asPythonStringLiteral()})")
     }
