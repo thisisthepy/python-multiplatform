@@ -2530,9 +2530,6 @@ REJECTED = {
     # the constructs the AOT mode does not have yet, each named
     "list in a list": ("def f() -> int:\n    x = [[1.0]]\n    return 0\n", ("aot/front-end", 2, "f")),
     "list method": ("def f(a: list[float]) -> None:\n    a.append(1.0)\n", ("aot/call", 2, "a.append")),
-    "list iteration": (
-        "def f(a: list[float]) -> float:\n    s = 0.0\n    for v in a:\n        s += v\n    return s\n",
-        ("aot/front-end", 3, "f")),           # tier S1a: `for ch in s` passes the source check; a list waits for S2
     "list slice": ("def f(a: list[float]) -> int:\n    b = a[1:]\n    return 0\n", ("aot/front-end", 2, "f")),
     "list comparison": ("def f(a: list[float], b: list[float]) -> bool:\n    return a == b\n", ("aot/front-end", 2, "f")),
     "list printed": ("def f(a: list[float]) -> None:\n    print(a)\n", ("aot/front-end", 2, "f")),

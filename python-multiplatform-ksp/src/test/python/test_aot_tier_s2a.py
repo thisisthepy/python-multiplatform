@@ -189,3 +189,53 @@ def test_the_optional_finding_names_the_value_and_the_fix(tmp_path: Path):
     text = str(raised.value)
     assert "`n` is a `Node | None` value whose field or method is used" in text
     assert "`is not None`" in text
+
+
+ITERATION = """
+import sys
+
+
+def total(a: list[float]) -> float:
+    t = 0.0
+    for v in a:
+        if v < 0.0:
+            continue
+        if v > 100.0:
+            break
+        t += v
+    return t
+
+
+def isum(a: list[int]) -> int:
+    t = 0
+    for v in a:
+        t += v
+    return t
+
+
+def pairs(a: list[int], b: list[int]) -> int:
+    n = 0
+    for x in a:
+        for y in b:
+            if x == y:
+                n += 1
+    return n
+
+
+def main() -> None:
+    k = int(sys.argv[1])
+    xs = [1.5, -2.0, 3.25, 250.0, 4.0]
+    big = [2 ** 62, 2 ** 62, k]
+    small = list(range(k))
+    print(total(xs), isum(big), isum(small), pairs(small, small))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_for_over_lists(tmp_path: Path):
+    """`for v in a` over list[float] and list[int] (RAW and big-capable): CPython's list iterator, the length
+    read again before every step (design 4.3.2)."""
+    _compare(tmp_path, ITERATION, [["0"], ["1"], ["7"]])

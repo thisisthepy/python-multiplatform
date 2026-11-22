@@ -2520,11 +2520,48 @@ class _Lowerer:
         self.refined = dict(head)
         return pre + [ir.ForStr(var, it, body)]
 
+    def for_list(self, node: ast.For) -> list[ir.Stmt]:
+        """AOT mode, tier S2a: `for v in a` over a `list[float]` / `list[int]`, as CPython's list iterator runs it: a
+        hidden index, and the length read again before every step, so an item appended in the body is visited and
+        a list shortened in the body ends the loop (Objects/listobject.c, listiter_next). Lowered to
+        `i = 0; while i < len(a): v = a[i]; i += 1; body` (the index moves before the body, so `continue` keeps it)."""
+        line = node.lineno
+        assert isinstance(node.iter, ast.Name)
+        array = node.iter.id
+        if not isinstance(node.target, ast.Name):
+            raise Skip(line, f"loop target `{_src(node.target)}` is not supported (only a name)")
+        var = node.target.id
+        if var in self.arrays or var in self.params:
+            raise Skip(line, f"loop variable `{var}` is a list or a parameter")
+        elem = Type.F64 if self.arrays[array] == Type.F64_ARRAY else Type.I64
+        t = self.types.get(var) or self.local_type(var, line)
+        if t is Type.OBJ:       # nothing but the loop binds it (Pyrefly gives a loop target no type): the element's
+            self.types[var] = t = elem
+        if t != elem:
+            raise Skip(line, f"loop variable `{var}` is {TYPE_NAME.get(t, t.value)}, but a loop over the "
+                             f"{TYPE_NAME[self.arrays[array]]} `{array}` binds {TYPE_NAME[elem]}")
+        idx = self.temp(ir.Const(Type.I64, 0))
+        pre = self.take()
+        killed = _stored_names(node.body) | {var}
+        head = {k: v for k, v in self.refined.items() if k not in killed}
+        self.refined = head
+        self.not_none -= killed
+        step = [ir.Assign(var, ir.Index(elem, array, idx)),
+                # proven: the loop test gives index < len(a) <= LEN_MAX (the verifier proves it again)
+                ir.Assign(idx.name, ir.BinOp(Type.I64, ir.BinOpKind.ADD, idx, ir.Const(Type.I64, 1), proven=True))]
+        body = self.block(node.body)
+        self.refined = dict(head)
+        self.not_none -= killed
+        cond = ir.Compare(Type.BOOL, ir.CompareKind.LT, idx, ir.Len(Type.I64, array))
+        return pre + [ir.While(cond, (*step, *body))]
+
     def for_range(self, node: ast.For) -> list[ir.Stmt]:
         line = node.lineno
         if node.orelse:
             raise Skip(line, "`for ... else` is not supported")
         if isinstance(node.iter, ast.Name) and node.iter.id in self.arrays:
+            if self.info.aot:
+                return self.for_list(node)
             raise self.array_misuse(node.iter.id, node.iter)
         if not (_is_range_call(node.iter) and self.builtin("range")):
             if self.info.aot:
@@ -2852,8 +2889,8 @@ class _Lowerer:
         if self.info.aot:
             return Skip(node.lineno, f"the list `{name}` is used other than by indexing, len(), as a `[:]` source, as "
                                      f"an argument of a program function, as a return value or by binding it to a "
-                                     f"name (in `{_src(where)}`): the AOT mode has no iteration, comparison, "
-                                     "printing, slicing or method of a list yet")
+                                     f"name (in `{_src(where)}`): the AOT mode has no comparison, printing, "
+                                     "slicing or method of a list yet")
         if name in self.local_arrays:
             return Skip(node.lineno, f"local array `{name}` is used other than by indexing, len() "
                                      f"or as a `[:]` source (in `{_src(where)}`)")
