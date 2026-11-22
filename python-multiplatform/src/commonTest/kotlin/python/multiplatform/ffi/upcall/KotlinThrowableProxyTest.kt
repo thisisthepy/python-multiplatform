@@ -142,9 +142,16 @@ class KotlinThrowableProxyTest {
         val inner = IllegalArgumentException("inner")
         val failure = IllegalStateException("outer", inner)
         raiseIntoPython(failure)
-        // The handle is what an owner is worth on the wire (`_pm_unwrap`, the binding layer).
+        // The handle is what an owner is worth on the wire (`_pm_unwrap`, the binding layer). The
+        // proxy is kept in a name while its handle is sent: `.cause` builds a new proxy, and a
+        // temporary one would release its root before `_pm_invoke` reads the handle.
         assertEquals("True", py("_pm_invoke(_pm_resolve(b'throwproxy.same'), (_tp_e.__cause__._pm_handle,))"))
-        assertEquals("False", py("_pm_invoke(_pm_resolve(b'throwproxy.same'), (_tp_e.__cause__.cause._pm_handle,))"))
+        Python3.exec("_tp_inner = _tp_e.__cause__.cause")
+        try {
+            assertEquals("False", py("_pm_invoke(_pm_resolve(b'throwproxy.same'), (_tp_inner._pm_handle,))"))
+        } finally {
+            Python3.exec("del _tp_inner")
+        }
     }
 
     @Test
