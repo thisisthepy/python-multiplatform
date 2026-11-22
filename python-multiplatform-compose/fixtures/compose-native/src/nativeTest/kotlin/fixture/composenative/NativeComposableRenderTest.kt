@@ -4,6 +4,7 @@ import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.unit.Density
 import org.jetbrains.skia.Bitmap
 import python.multiplatform.ffi.Python3
+import python.multiplatform.ffi.exceptions.PyException
 import python.multiplatform.ffi.pythonx.PythonxAdapter
 import python.multiplatform.ffi.upcall.UpcallBootstrap
 import python.multiplatform.generated.artifacts.ArtifactTable
@@ -66,7 +67,12 @@ class NativeComposableRenderTest {
             PythonComposition(body)
         }
         try {
-            val bitmap = Bitmap.makeFromImage(scene.render())
+            val image = try {
+                scene.render()
+            } catch (e: PyException) {
+                throw AssertionError("Python raised ${e.type?.name}: ${e.message}, running:\n$body", e)
+            }
+            val bitmap = Bitmap.makeFromImage(image)
             var ink = 0
             for (y in 0 until bitmap.height) {
                 for (x in 0 until bitmap.width) {
