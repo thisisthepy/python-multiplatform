@@ -179,3 +179,14 @@ tasks.withType<KotlinNativeHostTest>().configureEach {
     }
     enabled = !notebookSkipped
 }
+
+// A failing scenario prints its whole exception, message and Python error included (Gradle's default
+// short format prints only the exception class).
+tasks.withType<AbstractTestTask>().configureEach {
+    testLogging {
+        events("failed")
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+        showCauses = true
+        showStackTraces = true
+    }
+}
