@@ -1234,6 +1234,20 @@ static inline void *tpa__list_alloc(int64_t n, size_t header, size_t elem, int64
     return p;
 }
 
+/* Tier S2a, `t[i]` of a split tuple of `len` elements (Objects/tupleobject.c tupleitem / tuplesubscript): a negative
+ * index counts from the end; out of range raises IndexError("tuple index out of range"). */
+static inline int tpa_tuple_slot(int64_t len, int64_t i, int64_t *slot)
+{
+    if (i < 0) {
+        i += len;
+    }
+    if (i < 0 || i >= len) {
+        return tpa_raise(TPA_IndexError, "tuple index out of range");
+    }
+    *slot = i;
+    return 0;
+}
+
 /* tp_runtime.h lines 1093 to 1108, tp__array_slot: a negative index counts from the end; out of range
  * raises IndexError with CPython's text, which differs for a store (line 1107). */
 static inline int tpa_slot(int64_t len, int64_t i, int store, int64_t *slot)

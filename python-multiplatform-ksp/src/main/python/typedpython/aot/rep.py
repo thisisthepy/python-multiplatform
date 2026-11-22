@@ -543,6 +543,11 @@ class Representation:
             return callee.returns if callee is not None else TAGGED
         if isinstance(e, ir.Cond):
             return join(self._of(r, e.then), self._of(r, e.orelse))
+        if isinstance(e, ir.TupleIndex):                   # tier S2a: any element of a split tuple
+            out = self._of(r, e.elements[0])
+            for x in e.elements[1:]:
+                out = join(out, self._of(r, x))
+            return out
         if isinstance(e, ir.UnaryOp):
             if e.op in (ir.UnaryOpKind.POS, ir.UnaryOpKind.INVERT):
                 return self._of(r, e.operand)

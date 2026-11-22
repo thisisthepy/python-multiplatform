@@ -1602,6 +1602,36 @@ class _Fn:
         self.emit("}")
         return t
 
+    def ev_TupleIndex(self, e: ir.TupleIndex) -> str:
+        """`t[i]` of a split tuple: the index, its slot (IndexError("tuple index out of range")), then the chosen
+        element local, read as `ev_Cond` reads a branch."""
+        i = self.raw_index(e.index)
+        k = self.tmp("int64_t")
+        self.emit(f"if (tpa_tuple_slot({len(e.elements)}, {i}, &{k})) {self.fail()}")
+        if e.type is Type.I64 and self.rep(e) == TAGGED:
+            t = self.tslot()
+            self.emit(f"switch ({k}) {{")
+            for n, x in enumerate(e.elements):
+                v, pre = self.capture(lambda x=x: self.tagged(x))
+                self.emit(f"case {n}:")
+                self.lines.extend(pre)
+                self.emit(f"    tpa_int_set(&{t}, {v});")
+                self.emit("    break;")
+            self.emit("}")
+            return t
+        if e.type is not Type.STR and e.type not in CTYPE:
+            return self.ctype(e.type, "tuple element") and "0"
+        t = self.tmp("tpa_str *", "NULL") if e.type is Type.STR else self.tmp(CTYPE[e.type])
+        self.emit(f"switch ({k}) {{")             # (a str element is borrowed from its local for this statement)
+        for n, x in enumerate(e.elements):
+            v, pre = self.capture(lambda x=x: self.ev(x))
+            self.emit(f"case {n}:")
+            self.lines.extend(pre)
+            self.emit(f"    {t} = {v};")
+            self.emit("    break;")
+        self.emit("}")
+        return t
+
     def ev_UnaryOp(self, e: ir.UnaryOp) -> str:
         t = e.operand.type
         if e.op is ir.UnaryOpKind.NOT and t is Type.BOOL:

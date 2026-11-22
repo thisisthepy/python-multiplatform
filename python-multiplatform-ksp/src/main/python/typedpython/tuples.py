@@ -15,6 +15,10 @@ What is rewritten, with CPython's meaning kept:
   (`t__0, t__1 = f(...)`, an `ir.Unpack`).
 * `t[k]` for a constant k inside the shape (negative counted from the end); `len(t)`; `a, b = t`; `a, b = x, y`
   (the swap idiom: every value first, then the names, left to right).
+* `t[i]` for any other int index, of a tuple whose elements share one kind: a call of the marker `TUPLE_INDEX`
+  with the index first and the element locals after it, which the lowering makes an `ir.TupleIndex` (CPython's
+  index rules: negative counted from the end, `IndexError: tuple index out of range`). A tuple whose element kinds
+  differ gives a union for a variable index, which the AOT mode does not type: refused.
 * `t == u`, `!=`, `<`, `<=`, `>`, `>=`: CPython's tuple rich comparison (Objects/tupleobject.c tuplerichcompare): the
   first index whose items differ decides with the operator, else the lengths do. Items are compared by `==` here, which
   for int, bool and str is what CPython's identity-or-equality test gives; a float item makes it depend on identity
@@ -37,6 +41,7 @@ import copy
 from dataclasses import dataclass, field
 
 ELEMENT_KINDS = ("int", "float", "bool", "str")
+TUPLE_INDEX = "__tp_tuple_index"   # `t[i]`: TUPLE_INDEX(i, t__0, t__1, ...), lowered to ir.TupleIndex
 _SEQ = "__"                     # element locals are `<name>__<i>`
 
 Kinds = dict[str, dict[str, list[tuple[int, str]]]]
@@ -254,7 +259,7 @@ class _Function:
             if isinstance(n, ast.Name) and n.id in self.tuples:
                 raise _Problem(getattr(n, "lineno", s.lineno),
                                f"the tuple `{n.id}` is used where an AOT program has no tuple object yet (a tuple is "
-                               "indexed by a constant, unpacked, compared, searched with `in`, printed, iterated, "
+                               "indexed, unpacked, compared, searched with `in`, printed, iterated, "
                                "passed to a parameter of a module function, returned, or copied to another name)")
 
     def stmt(self, s: ast.stmt) -> list[ast.stmt]:
@@ -439,9 +444,16 @@ class _Exprs(ast.NodeTransformer):
                 v = -k.operand.value
             if isinstance(v, int) and -len(shape) <= v < len(shape):
                 return _name(self.f.elem(node.value.id, v % len(shape)))
-            raise _Problem(node.lineno, f"`{ast.unparse(node)}`: a tuple is indexed by a constant inside its "
-                                        f"{len(shape)} elements in this step (a variable index or a slice of a tuple "
-                                        "is not in the AOT mode yet)")
+            if isinstance(k, ast.Slice):
+                raise _Problem(node.lineno, f"`{ast.unparse(node)}`: a slice of a tuple is a new tuple, which the AOT "
+                                            "mode does not build in this step")
+            if len(set(shape)) != 1:
+                raise _Problem(node.lineno, f"`{ast.unparse(node)}`: a variable index into a tuple whose elements "
+                                            f"differ in type (`tuple[{', '.join(shape)}]`) is a union, which the AOT "
+                                            "mode does not type (index it by a constant)")
+            index = self.visit(k)
+            call = ast.Call(func=_name(TUPLE_INDEX), args=[index, *self.f.elems(node.value.id)], keywords=[])
+            return ast.copy_location(call, node)
         return self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> ast.expr:

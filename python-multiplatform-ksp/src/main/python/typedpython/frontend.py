@@ -115,7 +115,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from typedpython import gate, ir, pyrefly, rebinding, resume, taint
+from typedpython import gate, ir, pyrefly, rebinding, resume, taint, tuples
 from typedpython.ir import Type
 
 I64_MIN, I64_MAX = -2**63, 2**63 - 1
@@ -317,7 +317,6 @@ def lower(path: Path, *, aot: bool = False) -> ir.Module:
     if aot:
         # tier S2a: every function's locals typed on the source as written, then each fixed-shape tuple split into
         # one local per element on the AST the lowering reads (typedpython/tuples.py, design 4.3.2 "Tuples")
-        from typedpython import tuples
         every = [(s.name, s) for s in tree.body if isinstance(s, ast.FunctionDef)]
         every += [(f"{c.name}.{m.name}", m) for c in tree.body if isinstance(c, ast.ClassDef)
                   for m in c.body if isinstance(m, ast.FunctionDef)]
@@ -2408,6 +2407,16 @@ class _Lowerer:
             return e
         return self.coerce(self.value(node), self.list_elem(array), node, what)
 
+    def tuple_index(self, node: ast.Call) -> ir.Expr:
+        """`t[i]` of a split tuple: the marker call `tuples.TUPLE_INDEX(i, t__0, t__1, ...)` the tuple pass wrote."""
+        index = self.list_index_arg(node.args[0], "the index")
+        elements = tuple(self.value(a) for a in node.args[1:])
+        kind = elements[0].type
+        if any(x.type != kind for x in elements) or (kind not in ir.SCALARS and kind is not Type.STR):
+            raise Skip(node.lineno, f"a variable index into a tuple of {TYPE_NAME.get(kind, kind.value)} elements has "
+                                    "no form in an AOT program")
+        return ir.TupleIndex(kind, index, elements)
+
     def list_index_arg(self, node: ast.expr, what: str) -> ir.Expr:
         e = self.value(node)
         if e.type is Type.BOOL:
@@ -3566,6 +3575,8 @@ class _Lowerer:
             if plain and len(node.args) == 1 and name == "len" and self.builtin("len") \
                     and isinstance(node.args[0], ast.Name) and node.args[0].id in self.arrays:
                 return ir.Len(Type.I64, node.args[0].id)
+            if self.info.aot and plain and name == tuples.TUPLE_INDEX and len(node.args) >= 2:
+                return self.tuple_index(node)
             if self.info.aot and plain:
                 found = self.aot_builtin_call(name, node)
                 if found is not None:
@@ -4014,6 +4025,11 @@ class _Lowerer:
             return (0, LEN_MAX)
         if isinstance(e, ir.Cond) and e.type == Type.I64:      # AOT mode: either branch
             return _join(self.interval(e.then), self.interval(e.orelse))
+        if isinstance(e, ir.TupleIndex) and e.type == Type.I64:    # AOT mode: any element
+            out = self.interval(e.elements[0])
+            for x in e.elements[1:]:
+                out = _join(out, self.interval(x))
+            return out
         if isinstance(e, (ir.BinOp, ir.UnaryOp)) and e.type == Type.I64:
             if isinstance(e, ir.BinOp) and e.op in (ir.BinOpKind.FLOORDIV, ir.BinOpKind.MOD):
                 a, b = self.interval(e.left), self.interval(e.right)
