@@ -312,6 +312,18 @@ def lower(path: Path, *, aot: bool = False) -> ir.Module:
         info.aot_time = len(time_bound) == 1 and info.imports.get("time") == "time"
 
     skipped: dict[str, str] = {}
+    early_kinds: dict[str, dict[str, list[tuple[int, str]]]] | None = None
+    tuple_problems: dict[str, str] = {}
+    if aot:
+        # tier S2a: every function's locals typed on the source as written, then each fixed-shape tuple split into
+        # one local per element on the AST the lowering reads (typedpython/tuples.py, design 4.3.2 "Tuples")
+        from typedpython import tuples
+        every = [(s.name, s) for s in tree.body if isinstance(s, ast.FunctionDef)]
+        every += [(f"{c.name}.{m.name}", m) for c in tree.body if isinstance(c, ast.ClassDef)
+                  for m in c.body if isinstance(m, ast.FunctionDef)]
+        early_kinds = _inferred_kinds(path, source, tree, every)
+        split = tuples.split(tree, early_kinds)
+        early_kinds, tuple_problems = split.kinds, split.problems
     class_decls, class_skips = _classes(tree, source, info, aot)
     info.classes = class_decls
     skipped.update(class_skips)
@@ -347,7 +359,12 @@ def lower(path: Path, *, aot: bool = False) -> ir.Module:
                            if s.tuple_returns is not None and all(t in ir.SCALARS for t in s.tuple_returns)
                            and s.returns == Type.OBJ}
 
-    kinds = _inferred_kinds(path, source, tree, [(q, s.node) for q, s in signatures.items()])
+    for q, reason in tuple_problems.items():
+        if q in signatures:
+            del signatures[q]
+            skipped[q] = reason
+    kinds = early_kinds if early_kinds is not None else _inferred_kinds(
+        path, source, tree, [(q, s.node) for q, s in signatures.items()])
 
     # Optimistic start: every candidate lowered, pure, not deopting; then iterate to a fixpoint
     # (purity is the greatest fixpoint through calls, may_deopt the least).
