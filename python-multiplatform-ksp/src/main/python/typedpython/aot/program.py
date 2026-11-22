@@ -191,7 +191,7 @@ class _Checker:
             return
         elif allow_none and isinstance(ann, ast.Constant) and ann.value is None:
             return
-        elif _is_list_annotation(ann) or _is_str_list_annotation(ann):
+        elif _is_list_annotation(ann) or _is_str_list_annotation(ann) or _is_optional_str_annotation(ann):
             return
         elif _is_class_annotation(ann, self.class_names):
             return
@@ -646,6 +646,17 @@ def _is_list_annotation(ann: ast.expr) -> bool:
     """`list[float]` or `list[int]`."""
     return (isinstance(ann, ast.Subscript) and isinstance(ann.value, ast.Name) and ann.value.id == "list"
             and isinstance(ann.slice, ast.Name) and ann.slice.id in LIST_ELEMENTS)
+
+
+def _is_optional_str_annotation(ann: ast.expr) -> bool:
+    """`str | None`, `None | str`, `Optional[str]` (tier S2a), also as a string."""
+    if isinstance(ann, ast.Constant) and isinstance(ann.value, str):
+        try:
+            ann = ast.parse(ann.value, mode="eval").body
+        except SyntaxError:
+            return False
+    text = ast.unparse(ann).replace(" ", "")
+    return text in ("str|None", "None|str", "Optional[str]", "typing.Optional[str]")
 
 
 def _is_str_list_annotation(ann: ast.expr) -> bool:

@@ -131,12 +131,22 @@ Interval = tuple[int, int] | None  # None: no value at all (not yet known to be 
 
 TYPE_NAME = {
     Type.I64: "int", Type.F64: "float", Type.BOOL: "bool", Type.NONE: "None", Type.OBJ: "object",
-    Type.INT: "int", Type.STR: "str", Type.STR_LIST: "list[str]",
+    Type.INT: "int", Type.STR: "str", Type.STR_LIST: "list[str]", Type.STR_OPT: "str | None",
     Type.F64_ARRAY: "list[float]", Type.I64_ARRAY: "list[int]", Type.BOOL_ARRAY: "NDArray[np.bool_]",
 }
 SCALAR_KIND = {"int": Type.I64, "float": Type.F64, "bool": Type.BOOL}
 # AOT mode (tier S1, PR-S1a): what an annotation names beside the scalars. The default mode never reads it.
-AOT_KIND = {**SCALAR_KIND, "str": Type.STR, "list[str]": Type.STR_LIST}
+AOT_KIND = {**SCALAR_KIND, "str": Type.STR, "list[str]": Type.STR_LIST,
+            # tier S2a: the spellings of `str | None`
+            "str | None": Type.STR_OPT, "None | str": Type.STR_OPT, "Optional[str]": Type.STR_OPT,
+            "typing.Optional[str]": Type.STR_OPT, "str|None": Type.STR_OPT, "None|str": Type.STR_OPT}
+
+
+def _aot_kind(kind: str) -> str:
+    """AOT mode: an annotation or an inferred type in the spelling AOT_KIND uses (quotes off; Pyrefly's
+    `LiteralString`, also inside a generic, is a str)."""
+    kind = kind.strip("'\"").replace("typing.LiteralString", "str").replace("LiteralString", "str")
+    return kind
 # AOT mode, tier S1b: the str methods (design 4.3.1): name -> (parameter names in order, the result type)
 STR_METHODS = {
     "split": (("sep", "maxsplit"), Type.STR_LIST), "join": (("iterable",), Type.STR),
@@ -737,6 +747,8 @@ def _aot_field_decl(fname: str, ann: ast.expr, known_names: set[str]) -> ir.Fiel
         return ir.FieldDecl(fname, SCALAR_KIND[kind])
     if kind.strip("'\"") == "str":
         return ir.FieldDecl(fname, Type.STR)            # tier S1b: an owned str (acyclic: a str holds nothing)
+    if AOT_KIND.get(_aot_kind(kind)) is Type.STR_OPT:
+        return ir.FieldDecl(fname, Type.STR_OPT)        # tier S2a
     if kind in ARRAY_KIND:
         return ir.FieldDecl(fname, ARRAY_KIND[kind])
     # class or class | None (including string forward references)
@@ -1038,13 +1050,14 @@ def _signature(fn: ast.FunctionDef, classes: dict[str, ir.ClassDecl] | None = No
         elif (c := _class_of(kind, classes or {})) is not None:
             params.append(ir.Param(a.arg, Type.OBJ, c[0], c[1]))
         else:
-            params.append(ir.Param(a.arg, kinds_map.get(kind, Type.OBJ)))
+            params.append(ir.Param(a.arg, kinds_map.get(_aot_kind(kind) if kinds_map is AOT_KIND else kind, Type.OBJ)))
     if fn.returns is None:
         raise Skip(line, "no return annotation")
     if isinstance(fn.returns, ast.Constant) and fn.returns.value is None:
         returns = Type.NONE
     else:
-        returns = kinds_map.get(_annotation_kind(fn.returns), Type.OBJ)
+        rk = _annotation_kind(fn.returns)
+        returns = kinds_map.get(_aot_kind(rk) if kinds_map is AOT_KIND else rk, Type.OBJ)
         if returns == Type.OBJ and info is not None and info.aot:
             # AOT mode: a returned list is a native array (a counted list the caller then owns)
             returns = ARRAY_KIND.get(_annotation_kind(fn.returns), returns)
@@ -1347,6 +1360,7 @@ class _Lowerer:
         }
         # Guard facts at this point (verify.py "Local variables and guards"): local -> interval.
         self.refined: dict[str, tuple[int, int]] = {}
+        self.not_none: set[str] = set()     # AOT mode, tier S2a: the STR_OPT locals proved not None here
         self.dead = 0   # >0: in code whose guard read a local with no interval yet in this round
         self.all_names = {n.id for n in ast.walk(self.fn) if isinstance(n, ast.Name)} \
             | set(self.params)
@@ -1520,7 +1534,7 @@ class _Lowerer:
                 kinds += self.inferred.get(name, [])
             if not any(k.startswith("list") for _, k in kinds):
                 continue
-            if all(k == "list[str]" for _, k in kinds):
+            if all((_aot_kind(k) if self.info.aot else k) == "list[str]" for _, k in kinds):
                 continue        # tier S1b: a list of str is a STR_LIST value, not a native array
             distinct = sorted({k for _, k in kinds})
             if len(distinct) > 1:
@@ -1578,7 +1592,7 @@ class _Lowerer:
             # value of another type, so nothing unchecked comes in.
             kinds = [(line, k[:-len(" | Unknown")] if k.endswith(" | Unknown") else k) for line, k in kinds]
             # (a str built from literals is spelled `LiteralString`: a str)
-            kinds = [(line, "str" if k in ("LiteralString", "typing.LiteralString") else k) for line, k in kinds]
+            kinds = [(line, _aot_kind(k)) for line, k in kinds]
         distinct = sorted({k for _, k in kinds})
         if not distinct and name in self.iter_vars:
             self.types[name] = Type.OBJ   # what a loop over an object binds: an object
@@ -1684,17 +1698,22 @@ class _Lowerer:
             cond = self.condition(node.test)
             pre = self.take()
             entry = self.refined
+            nn_entry = set(self.not_none)
             self.refined, dead = self.narrowed(cond, True, entry)
             self.dead += dead
+            self.not_none = nn_entry | _none_facts(cond, True)
             then = self.block(node.body)
             self.dead -= dead
-            then_refined = self.refined
+            then_refined, then_nn = self.refined, self.not_none
             self.refined, dead = self.narrowed(cond, False, entry)
             self.dead += dead
+            self.not_none = nn_entry | _none_facts(cond, False)
             orelse = self.block(node.orelse)
             self.dead -= dead
-            else_refined = self.refined
+            else_refined, else_nn = self.refined, self.not_none
             then_ends, else_ends = _diverges(then), _diverges(orelse)
+            self.not_none = (nn_entry if then_ends and else_ends else else_nn if then_ends
+                             else then_nn if else_ends else then_nn & else_nn)
             if then_ends and else_ends:
                 self.refined = entry
             elif then_ends:
@@ -1711,20 +1730,29 @@ class _Lowerer:
             killed = _stored_names(node.body)
             head = {k: v for k, v in self.refined.items() if k not in killed}
             self.refined = head
+            nn_head = self.not_none - killed
+            self.not_none = set(nn_head)
             cond = self.condition(node.test)
             pre = self.take()
             self.refined, dead = self.narrowed(cond, True, head)
             self.dead += dead
+            self.not_none = nn_head | _none_facts(cond, True)
             body = self.block(node.body)
             self.dead -= dead
             self.refined = dict(head)
+            self.not_none = set(nn_head)
             if not pre:
                 return [ir.While(cond, body)]
             # The condition needs statements (a chain's temporary): run them on every iteration.
             exit_ = ir.If(cond, (), (ir.Break(),))  # cond stays directly a condition
             return [ir.While(ir.Const(Type.BOOL, True), (*pre, exit_, *body))]
         if isinstance(node, ast.For):
-            return self.for_range(node)
+            # tier S2a: a name the loop assigns is not known to be not None at the head of any iteration, nor after
+            killed = _stored_names(node.body) | {n.id for n in ast.walk(node.target) if isinstance(n, ast.Name)}
+            self.not_none -= killed
+            out = self.for_range(node)
+            self.not_none -= killed
+            return out
         if isinstance(node, ast.Return):
             return self.return_(node)
         raise _unsupported(node)
@@ -1741,7 +1769,7 @@ class _Lowerer:
                 args.append(self.aot_fstring(a))
                 continue
             e = self.value(a)
-            if e.type not in ir.SCALARS and e.type not in (Type.OBJ, Type.STR, Type.STR_LIST):
+            if e.type not in ir.SCALARS and e.type not in (Type.OBJ, Type.STR, Type.STR_LIST, Type.STR_OPT):
                 raise Skip(a.lineno, f"print of `{_src(a)}` ({TYPE_NAME[e.type]}) is not supported in an "
                                      "AOT program (int, float, bool and str values)")
             # (an OBJ argument, say a call that is not direct, stays: it has no AOT form and the back
@@ -1961,7 +1989,7 @@ class _Lowerer:
                                              "with no conversion)")
                 precision = int(m.group(1))
             v = self.value(piece.value)
-            if precision is None and v.type not in ir.SCALARS and v.type is not Type.STR:
+            if precision is None and v.type not in ir.SCALARS and v.type not in (Type.STR, Type.STR_OPT):
                 raise Skip(piece.lineno, f"`{_src(piece.value)}` in an f-string is {TYPE_NAME[v.type]}, not an "
                                          "int, float, bool or str")
             if precision is not None and v.type != Type.F64:
@@ -2025,6 +2053,25 @@ class _Lowerer:
                                 f"{TYPE_NAME.get(rt, rt.value)} raises TypeError in CPython; an AOT program does not "
                                 "compile it")
 
+    def opt_link(self, op: ast.cmpop, left: ir.Expr, right: ir.Expr, node: ast.Compare) -> ir.Expr:
+        """A comparison with a `str | None` operand (tier S2a): `is None` / `is not None`, and `==` / `!=` with a
+        str, a `str | None` or None (None equals only None)."""
+        none = (lambda e: isinstance(e, ir.Const) and e.value is None)
+        if isinstance(op, (ast.Is, ast.IsNot)):
+            if none(left) or none(right):
+                x = right if none(left) else left
+                return ir.Is(Type.BOOL, x, ir.Const(Type.OBJ, None), isinstance(op, ast.IsNot))
+            raise Skip(node.lineno, f"`{_src(node)}`: `is` between two strs depends on interning in CPython "
+                                    "(aot/str-identity); use `==`")
+        if isinstance(op, (ast.Eq, ast.NotEq)):
+            if none(left) or none(right):
+                x = right if none(left) else left
+                return ir.Is(Type.BOOL, x, ir.Const(Type.OBJ, None), isinstance(op, ast.NotEq))
+            if {left.type, right.type} <= {Type.STR, Type.STR_OPT}:
+                return ir.StrCompare(Type.BOOL, COMPARE[type(op)], left, right)
+        raise Skip(node.lineno, f"`{_src(node)}`: a `str | None` value is used where a str is needed without a test "
+                                "that it is not None (aot/optional; `if x is not None:` proves it)")
+
     def str_link(self, op: ast.cmpop, left: ir.Expr, right: ir.Expr, node: ast.Compare) -> ir.Expr:
         """One comparison with a str operand (AOT mode)."""
         lt, rt = left.type, right.type
@@ -2051,7 +2098,7 @@ class _Lowerer:
             if len(args) != 1:
                 raise Skip(line, f"{name}() takes one argument in an AOT program")
             x = self.value(args[0])
-            if x.type not in ir.SCALARS and x.type not in (Type.STR, Type.STR_LIST):
+            if x.type not in ir.SCALARS and x.type not in (Type.STR, Type.STR_LIST, Type.STR_OPT):
                 raise Skip(line, f"{name}() of a {TYPE_NAME.get(x.type, x.type.value)} is not supported in an AOT "
                                  "program (int, float, bool, str and list[str])")
             return ir.StrOf(Type.STR, x, repr=name == "repr")
@@ -2082,7 +2129,8 @@ class _Lowerer:
         if isinstance(node, ast.Name):
             if not self.is_local(node.id):
                 return node.id in self.info.aot_consts and self.info.aot_consts[node.id].type is Type.STR
-            return node.id not in self.arrays and self.local_type(node.id, node.lineno) is Type.STR
+            t = self.local_type(node.id, node.lineno) if node.id not in self.arrays else None
+            return t is Type.STR or (t is Type.STR_OPT and node.id in self.not_none)
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) \
                 and node.value.id in ("sys", "math", "time") and not self.is_local(node.value.id):
             return False                                    # a module's attribute (sys.stdout.write, ...)
@@ -2518,6 +2566,8 @@ class _Lowerer:
         if node.value is None or (isinstance(node.value, ast.Constant) and node.value.value is None):
             if returns == Type.OBJ:
                 return [ir.Return(ir.Const(Type.OBJ, None))]
+            if returns == Type.STR_OPT:
+                return [ir.Return(ir.Const(Type.STR_OPT, None))]      # tier S2a
             if returns != Type.NONE:
                 raise Skip(node.lineno, f"returns None from a function declared to return "
                                         f"{TYPE_NAME[returns]}")
@@ -2595,6 +2645,10 @@ class _Lowerer:
             return ir.Compare(Type.BOOL, ir.CompareKind.NE, ir.StrLen(Type.I64, e), ir.Const(Type.I64, 0))
         if e.type == Type.STR_LIST:
             return ir.Compare(Type.BOOL, ir.CompareKind.NE, ir.StrListLen(Type.I64, e), ir.Const(Type.I64, 0))
+        if e.type == Type.STR_OPT:      # tier S2a: `if x:` is `x is not None and len(x) != 0`
+            return ir.And(Type.BOOL, ir.Is(Type.BOOL, e, ir.Const(Type.OBJ, None), True),
+                          ir.Compare(Type.BOOL, ir.CompareKind.NE, ir.StrLen(Type.I64, ir.StrNarrow(Type.STR, e)),
+                                     ir.Const(Type.I64, 0)))
         if e.type == Type.INT:
             return ir.Compare(Type.BOOL, ir.CompareKind.NE, e,
                               ir.ToInt(Type.INT, ir.Const(Type.I64, 0)))
@@ -2735,7 +2789,10 @@ class _Lowerer:
             if name not in self.params and name not in self.temps and all(
                     b.how == "annotation" for b in self.bindings[name]):
                 raise Skip(node.lineno, f"`{name}` is read but never assigned")
-            return ir.Local(self.local_type(name, node.lineno), name)
+            t = self.local_type(name, node.lineno)
+            if t is Type.STR_OPT and name in self.not_none:
+                return ir.StrNarrow(Type.STR, ir.Local(t, name))       # tier S2a: proved not None here
+            return ir.Local(t, name)
         if name in self.info.aot_consts:
             return self.info.aot_consts[name]       # AOT mode: a typed constant, never an object read
         if name in self.candidates and self.direct_write:
@@ -2940,6 +2997,10 @@ class _Lowerer:
 
     def link(self, op: ast.cmpop, left: ir.Expr, right: ir.Expr, obj_ok: bool,
              node: ast.Compare) -> ir.Expr:
+        if self.info.aot:
+            left, right = _unnarrow_against_none(left, right), _unnarrow_against_none(right, left)
+        if self.info.aot and Type.STR_OPT in (left.type, right.type):
+            return self.opt_link(op, left, right, node)
         if self.info.aot and Type.STR in (left.type, right.type):
             return self.str_link(op, left, right, node)
         if isinstance(op, (ast.Is, ast.IsNot)):
@@ -2976,6 +3037,7 @@ class _Lowerer:
     def boolop(self, node: ast.BoolOp, cond: int) -> ir.Expr:
         word = "and" if isinstance(node.op, ast.And) else "or"
         operands = []
+        nn_entry = set(self.not_none)
         for i, v in enumerate(node.values):
             if i > 0:
                 self.hoist_ok = False  # evaluated only if the earlier operands did not decide
@@ -2986,6 +3048,9 @@ class _Lowerer:
                 raise Skip(node.lineno, f"`{word}` on a non-bool operand `{_src(v)}` outside a "
                                         "condition (it returns the operand)")
             operands.append(e)
+            # tier S2a: `x is not None and len(x) > 0` (the later operands run only when the earlier decided so)
+            self.not_none |= _none_facts(e, word == "and")
+        self.not_none = nn_entry
         result = operands[0]
         for e in operands[1:]:
             result = (ir.And if word == "and" else ir.Or)(Type.BOOL, result, e)
@@ -3222,17 +3287,25 @@ class _Lowerer:
         its test gives, as an `if` statement's branches are (the verifier does the same)."""
         cond = self.truth(self.sub(node.test), node.test)
         entry = self.refined
+        nn_entry = set(self.not_none)
         self.hoist_ok = False                       # a branch runs only when its test says so
         self.refined, dead = self.narrowed(cond, True, entry)
         self.dead += dead
+        self.not_none = nn_entry | _none_facts(cond, True)
         then = self.sub(node.body)
         self.dead -= dead
         self.refined, dead = self.narrowed(cond, False, entry)
         self.dead += dead
+        self.not_none = nn_entry | _none_facts(cond, False)
         orelse = self.sub(node.orelse)
         self.dead -= dead
         self.refined = entry
-        if then.type != orelse.type or (then.type not in ir.SCALARS and then.type is not Type.STR):
+        self.not_none = nn_entry
+        if {then.type, orelse.type} <= {Type.STR, Type.STR_OPT} and then.type != orelse.type:
+            then = then if then.type is Type.STR_OPT else then      # (the node's type is the wider one)
+            return ir.Cond(Type.STR_OPT, cond, then, orelse)
+        if then.type != orelse.type or (then.type not in ir.SCALARS
+                                        and then.type not in (Type.STR, Type.STR_OPT)):
             raise Skip(node.lineno, f"the branches of `{_src(node)}` are {TYPE_NAME[then.type]} and "
                                     f"{TYPE_NAME[orelse.type]}; an AOT program needs two ints, two floats, two "
                                     "bools or two strs")
@@ -3261,6 +3334,8 @@ class _Lowerer:
                 v = self.value(a)
                 if isinstance(p, ir.Param) and p.type is Type.STR_LIST and isinstance(v, ir.NewList):
                     v = ir.StrListDisplay(Type.STR_LIST, ())        # tier S1b: `f([])` for a list[str] parameter
+                if isinstance(p, ir.Param) and p.type is Type.STR_OPT:
+                    v = self.coerce(v, Type.STR_OPT, a, f"parameter `{p.name}` of `{name}`")   # tier S2a
                 args.append(v)
         direct = all(isinstance(p, ir.ArrayParam)
                      or (p.type != Type.OBJ and e.type == p.type)
@@ -3386,6 +3461,10 @@ class _Lowerer:
     def coerce(self, value: ir.Expr, target: Type, node: ast.AST, what: str) -> ir.Expr:
         if value.type == target:
             return value
+        if target is Type.STR_OPT and self.info.aot and value.type is Type.STR:
+            return value                                        # tier S2a: a str is a `str | None`
+        if target is Type.STR_OPT and self.info.aot and isinstance(value, ir.Const) and value.value is None:
+            return ir.Const(Type.STR_OPT, None)
         if target is Type.STR_LIST and isinstance(value, ir.NewList) and self.info.aot:
             return ir.StrListDisplay(Type.STR_LIST, ())          # tier S1b: `x: list[str] = []`
         if target == Type.OBJ and (value.type in ir.SCALARS or value.type == Type.INT):
@@ -3441,6 +3520,9 @@ class _Lowerer:
             if iv is not None:
                 self.found_bounds[name] = _join(self.found_bounds.get(name), iv)
         self.refined.pop(name, None)
+        self.not_none.discard(name)
+        if value.type is Type.STR:
+            self.not_none.add(name)                 # tier S2a: a str assigned to a `str | None` local is not None
 
     def narrowed(self, cond: ir.Expr, truth: bool, base: dict[str, tuple[int, int]]
                  ) -> tuple[dict[str, tuple[int, int]], bool]:
@@ -3599,13 +3681,34 @@ def _at(s: ir.Stmt, k: int | None) -> ir.Stmt:
     return dataclasses.replace(s, **changes) if changes else s
 
 
+def _none_facts(cond: ir.Expr, truth: bool) -> set[str]:
+    """AOT mode, tier S2a: the `str | None` locals `cond` proves not None when it evaluates to `truth`."""
+    if isinstance(cond, ir.Is) and isinstance(cond.right, ir.Const) and cond.right.value is None \
+            and isinstance(cond.left, ir.Local) and cond.left.type is Type.STR_OPT:
+        return {cond.left.name} if cond.negate == truth else set()
+    if isinstance(cond, ir.And) and truth:
+        return _none_facts(cond.left, True) | _none_facts(cond.right, True)
+    if isinstance(cond, ir.Or) and not truth:
+        return _none_facts(cond.left, False) | _none_facts(cond.right, False)
+    if isinstance(cond, ir.UnaryOp) and cond.op is ir.UnaryOpKind.NOT:
+        return _none_facts(cond.operand, not truth)
+    return set()
+
+
+def _unnarrow_against_none(e: ir.Expr, other: ir.Expr) -> ir.Expr:
+    """`x is None` where x reads as proved (a StrNarrow): the comparison is of the `str | None` value itself."""
+    if isinstance(e, ir.StrNarrow) and isinstance(other, ir.Const) and other.value is None:
+        return e.value
+    return e
+
+
 def _diverges(body: tuple[ir.Stmt, ...]) -> bool:
     """Control never reaches the end of `body`: it ends in a return, break or continue, or in an
     `if` whose branches both do (verify.py reads these as unreachable states too)."""
     if not body:
         return False
     last = body[-1]
-    if isinstance(last, (ir.Return, ir.ReturnTuple, ir.Break, ir.Continue)):    # (ReturnTuple: AOT mode only)
+    if isinstance(last, (ir.Return, ir.ReturnTuple, ir.Break, ir.Continue, ir.SysExit)):  # (AOT: ReturnTuple, SysExit)
         return True
     if isinstance(last, ir.If):
         return _diverges(last.then) and _diverges(last.orelse)

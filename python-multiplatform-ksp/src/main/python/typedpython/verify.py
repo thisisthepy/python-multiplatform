@@ -366,7 +366,7 @@ from .ir import (
 )
 from .ir import (
     ArgvStr, ForStr, StrChr, StrCompare, StrConcat, StrContains, StrIndex, StrLen, StrOf, StrOrd, StrParseInt,
-    StrRepeat, StrSlice, StrWrite, StrMethod, StrListDisplay, StrListLen, StrListIndex,
+    StrRepeat, StrSlice, StrWrite, StrMethod, StrListDisplay, StrListLen, StrListIndex, StrNarrow,
 )
 from .ir import CheckExact, CheckMethod, ClassDecl, FieldGet, FieldSet, Is, IsExact, New
 from .ir import BuildString, Contains, ForObj, Format, GetItem, NewDict, NewList, StoreItem
@@ -432,7 +432,8 @@ _AOT_EXPRS = frozenset({ListDisplay, Cond, ArgvInt, ArgvLen, FloatToInt, BoolToI
                         StrConcat, StrRepeat, StrCompare, StrContains, StrLen, StrIndex, StrSlice, StrOf, StrOrd,
                         StrChr, ArgvStr, StrParseInt, StrWrite, FString,
                         # tier S1b
-                        StrMethod, StrListDisplay, StrListLen, StrListIndex})
+                        StrMethod, StrListDisplay, StrListLen, StrListIndex,
+                        StrNarrow})                 # tier S2a
 # Nodes whose OBJ result is a new reference (ir.py "ownership": Box, Global, GetAttr, CallObject,
 # OBJ BinOp, Tuple), plus reads of an OBJ local (the local owns its reference; the back end increfs or
 # borrows under that rule) and Calls of a compiled function returning OBJ (which returns a new
@@ -442,6 +443,7 @@ _OBJ_PRODUCERS = frozenset({Box, Global, GetAttr, CallObject, BinOp, Local, Call
                             GetItem, NewList, NewDict, Format, BuildString})
 _CONVERSIONS = (-1, 97, 114, 115)          # Format.conversion: none, !a, !r, !s
 _VALUE_TYPES = (Type.I64, Type.F64, Type.BOOL, Type.OBJ)        # what a local may hold
+_AOT_STR_TYPES = (Type.STR, Type.STR_LIST, Type.STR_OPT)         # AOT mode, tier S1/S2a: what a local may also hold
 _LOCAL_TYPES = _VALUE_TYPES + (Type.INT,)       # an INT lives only in a local or a temporary (SPEC N-13)
 _RETURN_TYPES = _VALUE_TYPES + (Type.NONE,)
 # The nodes that produce an INT (an owned tp_int: native, or a PyLong once promoted).
@@ -580,7 +582,7 @@ class _Checker:
                     if p.buffer:
                         self.buffers.add(p.name)
             elif type(p) is Param:
-                if p.type not in _VALUE_TYPES and not (self.aot and p.type in (Type.STR, Type.STR_LIST)):
+                if p.type not in _VALUE_TYPES and not (self.aot and p.type in _AOT_STR_TYPES):
                     self.error(TYPE, f"parameter '{p.name}' has type {p.type}; arrays must be "
                                      f"ArrayParam")
                 else:
@@ -643,7 +645,7 @@ class _Checker:
                     self.error(TYPE, f"local array '{name}' collides with a scalar parameter")
                 else:
                     self.larrays[name] = t
-            elif t not in _LOCAL_TYPES and not (self.aot and t in (Type.STR, Type.STR_LIST)):
+            elif t not in _LOCAL_TYPES and not (self.aot and t in _AOT_STR_TYPES):
                 self.error(TYPE, f"local '{name}' has type {t}")
             elif name in self.scalars and self.scalars[name] is not t:
                 self.error(TYPE, f"local '{name}' declared {t} but parameter is "
@@ -651,7 +653,7 @@ class _Checker:
             else:
                 self.scalars[name] = t
         if fn.returns not in _RETURN_TYPES and not (self.aot and fn.returns in (Type.F64_ARRAY, Type.I64_ARRAY,
-                                                                               Type.STR, Type.STR_LIST)):
+                                                                               *_AOT_STR_TYPES)):
             self.error(TYPE, f"return type {fn.returns} is not a value type")
         for flag in ("pure", "may_deopt"):
             if not isinstance(getattr(fn, flag), bool):
@@ -761,6 +763,10 @@ class _Checker:
         got = getattr(e, "type", None)
         if got is want:
             return
+        if got is Type.STR and want is Type.STR_OPT and self.aot:
+            return                              # tier S2a: the same pointer, never NULL
+        if want is Type.STR_OPT and self.aot and type(e) is Const and e.value is None:
+            return                              # None into a `str | None` (NULL)
         if got is Type.INT and want is Type.OBJ:
             self.error(OWNERSHIP, f"{what}: int flows into an OBJ slot without Box")
         elif want is Type.INT and got in (Type.I64, Type.OBJ):
@@ -817,6 +823,8 @@ class _Checker:
             ok = v is None or _plain_str(v)   # None, or a str the C source can carry exactly
         if t is Type.STR:
             ok = self.aot and type(v) is str  # tier S1: any text (the back end embeds its code points)
+        if t is Type.STR_OPT:
+            ok = self.aot and v is None       # tier S2a: None of a `str | None`
         if not ok:
             self.error(TYPE, f"constant {v!r} does not match type {t.value}")
         return e
@@ -1556,6 +1564,13 @@ class _Checker:
         return dataclasses.replace(e, elements=elements)
 
     def e_Is(self, e: Is, state: _State) -> ir.Expr:
+        if self.aot and getattr(e.left, "type", None) is Type.STR_OPT:     # tier S2a: `x is None`
+            left = self.expr(e.left, state)
+            right = self.expr(e.right, state)
+            if not (type(right) is Const and right.value is None):
+                self.error(TYPE, "a `str | None` is compared by identity with None only")
+            self.result(e, Type.BOOL)
+            return dataclasses.replace(e, left=left, right=right)
         left = self.obj_operand(e.left, state, "left operand of is")
         right = self.obj_operand(e.right, state, "right operand of is")
         if type(e.negate) is not bool:
@@ -1703,7 +1718,7 @@ class _Checker:
         orelse = self.expr(e.orelse, state)
         self.dead -= dead
         self.refine, self.facts = entry, base
-        if e.type not in ir.SCALARS and e.type is not Type.STR:
+        if e.type not in ir.SCALARS and e.type not in (Type.STR, Type.STR_OPT):
             self.error(TYPE, f"a conditional expression is a scalar or a str, node says {getattr(e.type, 'value', e.type)}")
         else:
             self.slot(then, e.type, "the value of a conditional expression")
@@ -1777,8 +1792,14 @@ class _Checker:
     def e_StrCompare(self, e: StrCompare, state: _State) -> ir.Expr:
         if type(e.op) is not CompareKind:
             self.error(UNKNOWN, f"StrCompare op {e.op!r} is not a CompareKind")
-        left = self.str_operand(e.left, state, "left operand of a str comparison")
-        right = self.str_operand(e.right, state, "right operand of a str comparison")
+        if e.op in (CompareKind.EQ, CompareKind.NE):     # tier S2a: equality also of a `str | None`
+            left, right = self.expr(e.left, state), self.expr(e.right, state)
+            for x in (left, right):
+                if getattr(x, "type", None) not in (Type.STR, Type.STR_OPT):
+                    self.error(TYPE, "a str equality compares two str or `str | None` values")
+        else:
+            left = self.str_operand(e.left, state, "left operand of a str comparison")
+            right = self.str_operand(e.right, state, "right operand of a str comparison")
         self.result(e, Type.BOOL)
         return dataclasses.replace(e, left=left, right=right)
 
@@ -1812,8 +1833,7 @@ class _Checker:
         if type(e.repr) is not bool:
             self.error(TYPE, "StrOf `repr` is not a bool")
         value = self.expr(e.value, state)
-        if getattr(value, "type", None) not in ir.SCALARS and getattr(value, "type", None) not in (Type.STR,
-                                                                                                    Type.STR_LIST):
+        if getattr(value, "type", None) not in ir.SCALARS and getattr(value, "type", None) not in _AOT_STR_TYPES:
             self.error(TYPE, "str() and repr() take an i64, f64, bool, str or list[str]")
         self.result(e, Type.STR)
         return dataclasses.replace(e, value=value)
@@ -1885,6 +1905,14 @@ class _Checker:
             self.error(STRUCTURE, f"str.{e.name} needs its leading arguments")
         self.result(e, result)
         return dataclasses.replace(e, recv=recv, args=tuple(args))
+
+    def e_StrNarrow(self, e: StrNarrow, state: _State) -> ir.Expr:
+        """A `str | None` read the front end proved not None (the proof is checked at run time under
+        TP_CHECK_PROVEN, not here)."""
+        value = self.expr(e.value, state)
+        self.slot(value, Type.STR_OPT, "operand of StrNarrow")
+        self.result(e, Type.STR)
+        return dataclasses.replace(e, value=value)
 
     def e_StrListDisplay(self, e: StrListDisplay, state: _State) -> ir.Expr:
         if not isinstance(e.elts, tuple):
@@ -2137,7 +2165,7 @@ class _Checker:
                 continue
             a2 = self.expr(a, state)
             t = getattr(a2, "type", None)
-            if t not in ir.SCALARS and t not in (Type.OBJ, Type.STR, Type.STR_LIST):
+            if t not in ir.SCALARS and t not in (Type.OBJ, *_AOT_STR_TYPES):
                 self.error(TYPE, f"argument {k + 1} of Print is {getattr(t, 'value', t)}, not an i64, "
                                  f"f64, bool, str, list[str] or obj")
             args.append(a2)
@@ -2168,7 +2196,7 @@ class _Checker:
                 p = part.precision
                 if type(getattr(part, "repr", False)) is not bool:
                     self.error(TYPE, f"field {k + 1} of an f-string has a non-bool `repr`")
-                if t not in ir.SCALARS and t is not Type.STR:
+                if t not in ir.SCALARS and t not in (Type.STR, Type.STR_OPT):
                     self.error(TYPE, f"field {k + 1} of an f-string is {getattr(t, 'value', t)}, not an i64, f64, "
                                      "bool or str")
                 elif p is not None and part.repr:

@@ -71,6 +71,7 @@ class Type(Enum):
     BOOL_ARRAY = "bool[]"  # a numpy np.bool_ buffer parameter only (1-byte items, #261)
     STR = "str"            # AOT mode only (tier S1, PR-S1a): a Python str, a counted `tpa_str` (runtime/tp_aot_str.h)
     STR_LIST = "list[str]"  # AOT mode only (tier S1b): a list of str, a counted `tpa_str_list` (fixed length until S2)
+    STR_OPT = "str | None"  # AOT mode only (tier S2a): a `tpa_str *` that is NULL for None
 
 
 SCALARS = (Type.I64, Type.F64, Type.BOOL)
@@ -951,6 +952,14 @@ class StrMethod(Expr):
     name: str
     args: tuple[Expr | None, ...]
     any_of: bool = False
+
+
+@dataclass(frozen=True)
+class StrNarrow(Expr):
+    """A read of a STR_OPT value the front end has proved is not None (tier S2a, design 4.3.2): type STR, no runtime
+    work (`-DTP_CHECK_PROVEN` aborts on None, so the sanitizer job checks every proof)."""
+
+    value: Expr
 
 
 @dataclass(frozen=True)

@@ -278,7 +278,7 @@ class _Gen:
             return "tpa_f64_list *"
         if fd.type is Type.I64_ARRAY:
             return "tpa_int_list *" if self.reps.field_list_big(cls, fd.name) else "tpa_i64_list *"
-        if fd.type is Type.STR:
+        if fd.type in (Type.STR, Type.STR_OPT):
             self.uses_str = True
             return "tpa_str *"
         assert fd.cls is not None
@@ -488,7 +488,7 @@ class _Gen:
             ptr, rel = self.cls_ptr(fd.cls), f"tpa_cls_{mangle(fd.cls)}_release"
         elif fd.type is Type.F64_ARRAY:
             ptr, rel = "tpa_f64_list *", "tpa_f64_release"
-        elif fd.type is Type.STR:
+        elif fd.type in (Type.STR, Type.STR_OPT):
             ptr, rel = "tpa_str *", "tpa_str_release"
         elif fd.type is Type.I64_ARRAY:
             big = self.reps.field_list_big(cls, fd.name)
@@ -511,7 +511,7 @@ class _Gen:
             out.append(f"{ind}tpa_cls_{mangle(fd.cls)}_release(p->f_{mf});")
         elif fd.type is Type.F64_ARRAY:
             out.append(f"{ind}tpa_f64_release(p->f_{mf});")
-        elif fd.type is Type.STR:
+        elif fd.type in (Type.STR, Type.STR_OPT):
             out.append(f"{ind}tpa_str_release(p->f_{mf});")
         elif fd.type is Type.I64_ARRAY:
             fn = "tpa_int_list_release" if self.reps.field_list_big(cls, fd.name) else "tpa_i64_release"
@@ -535,7 +535,7 @@ class _Gen:
                         c_params.append(f"{list_ptr(self.array_kind(init_fn.name, p.name, p.type))}a_{mangle(p.name)}")
                     elif isinstance(p, ir.Param) and p.type is Type.OBJ and p.cls is not None:
                         c_params.append(f"{self.cls_ptr(p.cls)}a_{mangle(p.name)}")
-                    elif isinstance(p, ir.Param) and p.type is Type.STR:
+                    elif isinstance(p, ir.Param) and p.type in (Type.STR, Type.STR_OPT):
                         c_params.append(f"tpa_str *a_{mangle(p.name)}")          # borrowed, as `__init__` takes it
                     elif isinstance(p, ir.Param) and p.type is Type.STR_LIST:
                         c_params.append(f"tpa_str_list *a_{mangle(p.name)}")
@@ -605,7 +605,7 @@ class _Gen:
             return p.name in assigned_names(f)                                   # type: ignore[attr-defined]
         if isinstance(p, ir.Param) and p.type is Type.OBJ and p.cls is not None:
             return p.name in assigned_names(f)
-        if isinstance(p, ir.Param) and p.type in (Type.STR, Type.STR_LIST):     # tier S1
+        if isinstance(p, ir.Param) and p.type in (Type.STR, Type.STR_LIST, Type.STR_OPT):     # tier S1
             return p.name in assigned_names(f)
         return False
 
@@ -623,7 +623,7 @@ class _Gen:
                 params.append(f"{list_ptr(self.array_kind(f.name, p.name, p.type))}v_{mangle(p.name)} TPA_UNUSED")
             elif isinstance(p, ir.Param) and p.type is Type.OBJ and p.cls is not None:
                 params.append(f"{self.cls_ptr(p.cls)}{self.param_c(f, p)} TPA_UNUSED")
-            elif isinstance(p, ir.Param) and p.type is Type.STR:
+            elif isinstance(p, ir.Param) and p.type in (Type.STR, Type.STR_OPT):
                 self.uses_str = True
                 params.append(f"tpa_str *{self.param_c(f, p)} TPA_UNUSED")     # borrowed from the caller
             elif isinstance(p, ir.Param) and p.type is Type.STR_LIST:
@@ -639,7 +639,7 @@ class _Gen:
             params.append(f"{list_ptr(self.ret_kind(f))}*out")
         elif f.returns is Type.OBJ and f.return_cls is not None:
             params.append(f"{self.cls_ptr(f.return_cls)}*out")
-        elif f.returns is Type.STR:
+        elif f.returns in (Type.STR, Type.STR_OPT):
             self.uses_str = True
             params.append("tpa_str **out")                                    # a new reference the caller owns
         elif f.returns is Type.STR_LIST:
@@ -912,6 +912,8 @@ class _Fn:
         """`str(x)` / `repr(x)` of an int, float, bool, str or list of str as a borrowed str."""
         if x.type is Type.STR_LIST:
             return self.pstr(f"tpa_str_list_repr({self.ev(x)}, @)")      # str() of a list is its repr
+        if x.type is Type.STR_OPT:
+            return self.pstr(f"tpa_str_of_opt({self.ev(x)}, {1 if repr_ else 0}, @)")
         if x.type is Type.STR:
             v = self.ev(x)
             return self.pstr(f"tpa_str_repr({v}, @)") if repr_ else v
@@ -925,6 +927,9 @@ class _Fn:
         if x.type is Type.BOOL:
             return self.pstr(f"tpa_str_from_bool({v}, @)")
         return self.bad("aot/type", "str", f"str() of a {getattr(x.type, 'value', '?')} has no AOT form")
+
+    def ev_StrNarrow(self, e: ir.StrNarrow) -> str:
+        return f"TPA_STR_NARROW({self.ev(e.value)})"
 
     def ev_StrConcat(self, e: ir.StrConcat) -> str:
         a = self.str_value(e.left, "the left operand of +")
@@ -946,6 +951,9 @@ class _Fn:
         return self.pstr(f"tpa_str_repeat({s}, {n}, @)")
 
     def ev_StrCompare(self, e: ir.StrCompare) -> str:
+        if Type.STR_OPT in (e.left.type, e.right.type):       # tier S2a: None equals only None
+            a, b = self.ev(e.left), self.ev(e.right)
+            return f"({'!' if e.op is ir.CompareKind.NE else ''}tpa_str_eq_opt({a}, {b}))"
         a = self.str_value(e.left, "a str comparison")
         b = self.str_value(e.right, "a str comparison")
         if e.op is ir.CompareKind.EQ:
@@ -1221,7 +1229,7 @@ class _Fn:
             return "1" if e.value else "0"
         if e.type is Type.NONE:
             return "0"
-        if e.type is Type.OBJ and e.value is None:
+        if e.type in (Type.OBJ, Type.STR_OPT) and e.value is None:
             return "NULL"
         if e.type is Type.STR and isinstance(e.value, str):
             return self.g.str_lit(e.value)
@@ -1253,7 +1261,7 @@ class _Fn:
                 self.list_slots.append((kind, t))
                 self.emit(f"{lfn(kind, 'release')}({t}); {t} = {vf}; {lfn(kind, 'retain')}({t});")
                 return t
-            if fd.type is Type.STR:
+            if fd.type in (Type.STR, Type.STR_OPT):
                 t = self.pslot()
                 self.emit(f"tpa_str_set(&{t}, {vf});")
                 return t
@@ -1273,7 +1281,7 @@ class _Fn:
                 self.emit(f"tpa_int_set(&{t}, {obj}->f_{mf});")
                 return t
             return f"({obj}->f_{mf})"
-        if fd.type is Type.STR:
+        if fd.type in (Type.STR, Type.STR_OPT):
             # a field that may be rebound while the value is in use is held by a slot; an immutable field of an
             # object the function cannot drop is borrowed (as a list field, PR-O1 elision rule 3)
             if (not region_obj and self.g.cls_analysis.field_elidable(e.cls, e.field)
@@ -1359,7 +1367,7 @@ class _Fn:
         return any(isinstance(p, ir.Param) and p.name == name and p.cls is not None for p in self.f.params)
 
     def ev_Local(self, e: ir.Local) -> str:
-        if e.type not in CTYPE and e.type not in LIST and e.type not in (Type.STR, Type.STR_LIST) \
+        if e.type not in CTYPE and e.type not in LIST and e.type not in (Type.STR, Type.STR_LIST, Type.STR_OPT) \
                 and not (e.type is Type.OBJ and self._is_class_local(e.name)):
             self.ctype(e.type, e.name)
         return f"v_{mangle(e.name)}"
@@ -1412,7 +1420,7 @@ class _Fn:
     def ev_Cond(self, e: ir.Cond) -> str:
         """`then if cond else orelse`: only the chosen branch runs (a branch that emits statements, an element
         read or a fallible operation, makes this an `if` statement into a temporary)."""
-        if e.type is Type.STR:
+        if e.type in (Type.STR, Type.STR_OPT):
             c = self.ev(e.cond)
             a, pre_a = self.capture(lambda: self.ev(e.then))
             b, pre_b = self.capture(lambda: self.ev(e.orelse))
@@ -1782,7 +1790,7 @@ class _Fn:
             t = self.list_tmp(self.g.ret_kind(callee))
             self.emit(f"if ({name}({', '.join(args + ['&' + t])})) {self.fail()}")
             return t                                       # a new reference: the receiver owns it
-        if callee.returns is Type.STR:
+        if callee.returns in (Type.STR, Type.STR_OPT):
             t = self.pslot()
             self.emit(f"if ({name}({', '.join(args + ['&' + t])})) {self.fail()}")
             return t                                       # the slot owns the new reference
@@ -1891,6 +1899,9 @@ class _Fn:
 
     def st_Assign(self, s: ir.Assign) -> None:
         want = self.types.get(s.target)
+        if want is Type.STR_OPT:                       # tier S2a: a str, None or another `str | None`
+            self.emit(f"tpa_str_set(&v_{mangle(s.target)}, {self.ev(s.value)});")
+            return
         if want is Type.STR_LIST:
             if s.value.type is not Type.STR_LIST:
                 self.bad("aot/type", s.target, f"`{s.target}` is a list of str but is assigned a {s.value.type.value}")
@@ -2025,7 +2036,7 @@ class _Fn:
                     else:
                         val = self.ev(src)
                     self.emit(f"{vf} = {val};")
-            elif fd.type is Type.STR:
+            elif fd.type in (Type.STR, Type.STR_OPT):
                 val = eval_args[src][0] if isinstance(src, int) else self.ev(src)
                 self.emit(f"tpa_str_set(&{vf}, {val});")
             elif fd.type in LIST:
@@ -2080,7 +2091,7 @@ class _Fn:
         for fd in decl.field_decls:
             if fd.type is Type.I64 and self.g.reps.field(cls, fd.name) == TAGGED:
                 self.emit(f"{t}->f_{mangle(fd.name)} = TPA_INT_ZERO;")
-            elif fd.type is Type.STR:
+            elif fd.type in (Type.STR, Type.STR_OPT):
                 self.emit(f"{t}->f_{mangle(fd.name)} = NULL;")      # (region memory is not zeroed)
         self._emit_init_stores(cls, e, init_fn, eval_args, lambda fname: f"{t}->f_{mangle(fname)}", True)
         return t
@@ -2106,8 +2117,8 @@ class _Fn:
             else:
                 val = self.ev(s.value)
                 self.emit(f"{lval} = {val};")
-        elif fd.type is Type.STR:
-            val = self.str_value(s.value, f"the value stored into .{s.field}")
+        elif fd.type in (Type.STR, Type.STR_OPT):
+            val = self.ev(s.value) if fd.type is Type.STR_OPT else self.str_value(s.value, f"the value stored into .{s.field}")
             self.emit(f"tpa_str_set(&{lval}, {val});")         # the new reference is held before the old is released
         elif fd.type in LIST:
             kind = "f64" if fd.type is Type.F64_ARRAY else (
@@ -2222,6 +2233,8 @@ class _Fn:
                 args.append([("pystr", self.ev(a))])
             elif a.type is Type.STR_LIST:
                 args.append([("pystr", self.str_of(a, True))])
+            elif a.type is Type.STR_OPT:
+                args.append([("pystr", self.str_of(a, False))])
             elif a.type in CTYPE:
                 v = self.ev(a)
                 if a.type is Type.I64 and self.rep(a) == TAGGED:
@@ -2437,8 +2450,8 @@ class _Fn:
             self.emit(f"*out = {v};")
             self.leave()
             return
-        if returns is Type.STR:
-            v = self.str_value(s.value, "the return value")
+        if returns in (Type.STR, Type.STR_OPT):
+            v = self.ev(s.value) if returns is Type.STR_OPT else self.str_value(s.value, "the return value")
             self.emit(f"tpa_str_retain({v});")                         # the caller gets its own reference
             self.emit(f"*out = {v};")
             self.leave()
@@ -2535,14 +2548,14 @@ class _Fn:
         f = self.f
         for p in f.params:
             ok = ((isinstance(p, ir.Param) and p.type in CTYPE and p.cls is None)
-                  or (isinstance(p, ir.Param) and p.type in (Type.STR, Type.STR_LIST))
+                  or (isinstance(p, ir.Param) and p.type in (Type.STR, Type.STR_LIST, Type.STR_OPT))
                   or (isinstance(p, ir.Param) and p.type is Type.OBJ and p.cls is not None)
                   or (isinstance(p, ir.ArrayParam) and p.type in LIST and p.buffer is None))
             if not ok:
                 self.bad("aot/type", getattr(p, "name", "?"), f"the parameter `{getattr(p, 'name', '?')}` is not an "
                          "int, float, bool, list[float], list[int] or compiled class")
         if f.returns not in CTYPE and f.returns not in LIST and f.returns is not Type.NONE \
-                and f.returns not in (Type.STR, Type.STR_LIST) \
+                and f.returns not in (Type.STR, Type.STR_LIST, Type.STR_OPT) \
                 and not (f.returns is Type.OBJ and f.return_cls is not None) \
                 and self.g.tuple_kinds(f) is None:
             self.bad("aot/type", f.name, f"the return type {f.returns.value} is outside the AOT mode (int, float, "
@@ -2550,13 +2563,13 @@ class _Fn:
         for p in f.entry_globals:
             self.bad("aot/global", p.name, f"the module global `{p.name}` is read at entry, which has no AOT form")
         for name, t in f.locals.items():
-            if t in (Type.STR, Type.STR_LIST):
+            if t in (Type.STR, Type.STR_LIST, Type.STR_OPT):
                 self.g.uses_str = True
             elif t not in LIST and not (t is Type.OBJ and name in f.local_classes):
                 self.ctype(t, name)
         owned = [p for p in f.params if self.g.owned_param(f, p)]
         for p in owned:                      # a TAGGED, class or str parameter the body assigns: work on an owned copy
-            if isinstance(p, ir.Param) and p.type is Type.STR:
+            if isinstance(p, ir.Param) and p.type in (Type.STR, Type.STR_OPT):
                 self.emit(f"tpa_str_set(&v_{mangle(p.name)}, pv_{mangle(p.name)});")
             elif isinstance(p, ir.Param) and p.type is Type.STR_LIST:
                 self.emit(f"tpa_str_list_set(&v_{mangle(p.name)}, pv_{mangle(p.name)});")
@@ -2572,7 +2585,7 @@ class _Fn:
         decls = []
         releases = []
         for p in owned:
-            if isinstance(p, ir.Param) and p.type is Type.STR:
+            if isinstance(p, ir.Param) and p.type in (Type.STR, Type.STR_OPT):
                 decls.append(f"    tpa_str *v_{mangle(p.name)} TPA_UNUSED = NULL;")
                 releases.append(f"    tpa_str_release(v_{mangle(p.name)});")
             elif isinstance(p, ir.Param) and p.type is Type.STR_LIST:
@@ -2586,7 +2599,7 @@ class _Fn:
                 decls.append(f"    tpa_int v_{mangle(p.name)} TPA_UNUSED = TPA_INT_ZERO;")        # type: ignore[union-attr]
                 releases.append(f"    tpa_int_release(v_{mangle(p.name)});")                       # type: ignore[union-attr]
         for name, t in f.locals.items():
-            if t is Type.STR:
+            if t in (Type.STR, Type.STR_OPT):
                 decls.append(f"    tpa_str *v_{mangle(name)} TPA_UNUSED = NULL;")
                 releases.append(f"    tpa_str_release(v_{mangle(name)});")
                 continue
@@ -2618,7 +2631,7 @@ class _Fn:
                                     "int" if self.g.reps.field_list_big(cls, fd.name) else "i64")
                                 decls.append(f"    {list_ptr(kind)}{vf} TPA_UNUSED = NULL;")
                                 releases.append(f"    {lfn(kind, 'release')}({vf});")
-                            elif fd.type is Type.STR:
+                            elif fd.type in (Type.STR, Type.STR_OPT):
                                 decls.append(f"    tpa_str *{vf} TPA_UNUSED = NULL;")
                                 releases.append(f"    tpa_str_release({vf});")
                             else:

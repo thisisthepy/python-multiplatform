@@ -1370,4 +1370,43 @@ static TPA_UNUSED int tpa_str_tailmatch(tpa_str *s, tpa_str *p, int64_t start, i
     return 1;
 }
 
+
+/* ------------------------------------------------------------------------------------------
+ * Tier S2a: `str | None`, a tpa_str * that is NULL for None.
+ * ------------------------------------------------------------------------------------------ */
+#if defined(TP_CHECK_PROVEN)
+static TPA_UNUSED void tpa_str__narrow_failed(void)
+{
+    fflush(stdout);
+    fprintf(stderr, "SystemError: a `str | None` value proved not None is None\n");
+    abort();
+}
+#define TPA_STR_NARROW(x) ((x) != NULL ? (x) : (tpa_str__narrow_failed(), (x)))
+#else
+#define TPA_STR_NARROW(x) (x)
+#endif
+
+/* == of two `str | None` values: None equals only None. */
+static TPA_UNUSED int tpa_str_eq_opt(tpa_str *a, tpa_str *b)
+{
+    if (a == NULL || b == NULL) {
+        return a == b;
+    }
+    return tpa_str_eq(a, b);
+}
+
+/* str(x) / repr(x) of a `str | None`: "None", or the string / its repr. */
+static TPA_UNUSED int tpa_str_of_opt(tpa_str *s, int repr, tpa_str **out)
+{
+    if (s == NULL) {
+        return tpa_str_from_ascii("None", 4, out);
+    }
+    if (repr) {
+        return tpa_str_repr(s, out);
+    }
+    tpa_str_retain(s);
+    *out = s;
+    return 0;
+}
+
 #endif /* TP_AOT_STR_H */
