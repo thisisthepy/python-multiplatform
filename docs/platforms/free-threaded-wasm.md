@@ -189,3 +189,50 @@ Kotlin-side memory import).
 - Staging this archive as a wasmJs runtime (it lacks `wasmExports,wasmMemory` in
   `-sEXPORTED_RUNTIME_METHODS` and the `pyemscripten` platform tag that `build-cpython.sh`
   adds).
+
+## Design: upcalls from Python threads (#175 step 2, agent proposal, not confirmed)
+
+The owner put threads calling Kotlin on wasm in 1.0 (owner rule of 2026-11-21 22:05: no scope
+reduction; pmp-binder report, "Correction" section). This is the proposed route; nothing below
+has run yet.
+
+**The problem.** A `PyCFunction`'s `ml_meth` is a table index. Today it is the index `Table.set`
+gave Kotlin's `@WasmExport` entry in the **main thread's** table. Every pthread Worker
+instantiates `python.wasm` with its own table, where that index holds nothing, so a Python thread
+calling a Kotlin callable traps. Kotlin/Wasm itself runs only on the main thread.
+
+**The route.**
+1. A built-in module compiled into our CPython build (`Modules/Setup.local`: `_pm_upcall
+   _pm_upcall.c`) defines `pm_upcall_dispatch(self, args)`. A static function has the **same**
+   table index in every Worker, because the static element segment is instantiated identically
+   in each one. `ml_meth` becomes that index instead of the Kotlin export's.
+2. On the main thread, `pm_upcall_dispatch` calls the Kotlin entry through the table index Kotlin
+   registered once at bootstrap (`pm_upcall_set_target(index)`), as today.
+3. On any other thread, it detaches its thread state (`PyEval_SaveThread`), runs the same call on
+   the main thread with `emscripten_sync_run_in_main_runtime_thread`, and re-attaches
+   (`PyEval_RestoreThread`). Detaching matters on a free-threaded build: a stop-the-world (a GC)
+   started while the main thread runs Kotlin would otherwise wait forever for the blocked thread.
+   The Kotlin entry already takes its own `PyGILState_Ensure`/`Release`, so the main thread
+   attaches its own thread state for the call.
+4. **The main thread must be able to service the call.** Emscripten's main thread runs queued
+   proxied calls while it blocks in a futex wait, which `pthread_join`, `thread.join()` and
+   CPython's locks use. A main thread that is busy in JS (not blocked, not returned to the event
+   loop) does not service it; such an upcall waits until it does.
+
+**What it changes.** The CPython build (one C file plus `Setup.local`, in
+`.github/scripts/ft-wasm/build-wasm.sh`), the wasm `UpcallEntry` (it binds the dispatcher's index
+and registers the Kotlin one), and `cpython.mjs` (nothing, if the dispatcher's index is read through
+an exported C function). No new dependency, workflow or kind of artefact.
+
+**Tests (CI, wasm job).**
+- A Python thread calls a Kotlin callable and gets its result.
+- Four threads do so at once.
+- The main thread blocks in `join` while the threads call Kotlin.
+- A `gc.collect()` runs in one thread while another is inside an upcall.
+- An exception raised in Kotlin reaches the Python thread.
+
+**Open.**
+- Whether `emscripten_sync_run_in_main_runtime_thread` is serviced inside the futex wait in Node
+  as well as in the browser. Its source says yes for both; to be shown by the tests.
+- It depends on step 1 (#515) and on the 3.15t runtime (Decision 6), to have a runtime to test
+  against.
