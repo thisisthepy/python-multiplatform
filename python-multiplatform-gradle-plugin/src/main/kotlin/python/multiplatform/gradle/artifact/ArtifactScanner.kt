@@ -2924,12 +2924,20 @@ internal object ArtifactScanner {
     internal fun applyDefaultOmission(candidates: List<Candidate>): List<Candidate> {
         if (candidates.none { it.plan != null }) return candidates
         val byName = candidates.filter { it.callable != null }.groupBy { it.callable!!.name }
+        // A declined overload is still one Kotlin resolves the generated call against
+        // (`PlatformInsets(getLeft: () -> Int = ..., ...)` beside the bound `PlatformInsets(left: Int = ...)`
+        // in Compose's ui klib, #191): it joins the test by its declaration.
+        val declinedByName = candidates.filter { it.callable == null }
+            .groupBy { "${it.declaration.owner}.${it.declaration.simpleName}" }
         return candidates.map { candidate ->
             val plan = candidate.plan ?: return@map candidate
             val callable = candidate.callable ?: return@map candidate
             val siblings = byName[callable.name].orEmpty().filter { it !== candidate }
             val allowed = plan.omittable.powerSet()
-                .filter { it.isNotEmpty() && it !in plan.refused && !anySiblingAlsoAccepts(candidate, plan, siblings, it) }
+                .filter {
+                    it.isNotEmpty() && it !in plan.refused && !anySiblingAlsoAccepts(candidate, plan, siblings, it) &&
+                        !anyDeclinedSiblingMayAccept(candidate, plan, declinedByName[callable.name].orEmpty(), it)
+                }
                 .toSet()
             if (allowed.isEmpty()) return@map candidate.copy(plan = null)
             val omittableNow = plan.omittable.filter { index -> allowed.any { index in it } }.toSet()
@@ -2975,6 +2983,29 @@ internal object ArtifactScanner {
             written.all { (name, type) -> otherValues.any { it.first == name && it.second == type } } &&
                 otherValues.filterNot { written.any { w -> w.first == it.first && w.second == it.second } }
                     .all { it.third }
+        }
+    }
+
+    /**
+     * [anySiblingAlsoAccepts] for overloads the walker declined, read from their declarations. Matched by
+     * parameter **name** only: a declined declaration's types are not always nameable (a function type,
+     * a type parameter), so a name match is taken as a possible match. That can only refuse a branch the
+     * exact test would have allowed, which costs a spelling, never a call that does not compile.
+     */
+    private fun anyDeclinedSiblingMayAccept(
+        candidate: Candidate,
+        plan: DefaultOmissionPlan,
+        declined: List<Candidate>,
+        omitted: Set<Int>,
+    ): Boolean {
+        val callable = candidate.callable ?: return false
+        val written = plan.valueIndices.filter { it !in omitted }.map { callable.paramNames[it] }
+        return declined.any { sibling ->
+            val declaration = sibling.declaration
+            if (declaration.receiver?.qualifiedName != callable.receiverTypeName) return@any false
+            val parameters = declaration.parameters
+            written.all { name -> parameters.any { it.name == name } } &&
+                parameters.filter { it.name !in written }.all { it.declaresDefault }
         }
     }
 
