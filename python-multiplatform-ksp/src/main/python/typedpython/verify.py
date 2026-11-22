@@ -454,7 +454,8 @@ _INT_OPS = frozenset({BinOpKind.ADD, BinOpKind.SUB, BinOpKind.MUL, BinOpKind.FLO
                       BinOpKind.MOD, BinOpKind.LSHIFT, BinOpKind.RSHIFT, BinOpKind.AND,
                       BinOpKind.OR, BinOpKind.XOR})
 _BITWISE_OPS = frozenset({BinOpKind.AND, BinOpKind.OR, BinOpKind.XOR})   # SPEC N-16
-_ELEMENT = {Type.F64_ARRAY: Type.F64, Type.I64_ARRAY: Type.I64, Type.BOOL_ARRAY: Type.BOOL}
+_ELEMENT = {Type.F64_ARRAY: Type.F64, Type.I64_ARRAY: Type.I64, Type.BOOL_ARRAY: Type.BOOL,
+            Type.STR_LIST: Type.STR}     # (STR_LIST: tier S2a, the items of a list[str] method)
 _MATH_ARITY = {
     MathFunc.ATAN2: 2, MathFunc.HYPOT: 2, MathFunc.POW: 2, MathFunc.COPYSIGN: 2, MathFunc.FMOD: 2,
 }            # every other MathFunc: 1
@@ -2170,12 +2171,24 @@ class _Checker:
 
     # --- AOT mode, tier S2a: lists that change length (ir.ListAppend ...) ---
 
+    def list_of(self, array: str, node: str, state: _State) -> Type | None:
+        """The list type of `array`: an array (list[float] / list[int]) or a list[str] local or parameter."""
+        if array in self.arrays or array in self.larrays:
+            return self.array(array, node, state)
+        if self.scalars.get(array) is Type.STR_LIST:
+            if state is not None and array not in state:
+                self.error(DA, f"list '{array}' may be used ({node}) before it is assigned")
+            return Type.STR_LIST
+        self.error(ARRAY_USE, f"{node} of '{array}', which is not a list")
+        return None
+
     def list_changed(self, array: str, node: str, state: _State) -> Type | None:
         if not self.aot:
             self.error(UNKNOWN, f"{node} is an AOT-mode node")
-        at = self.array(array, node, state)
-        if array not in self.larrays:      # a parameter's list is the caller's: an effect, as a store is
+        at = self.list_of(array, node, state)
+        if array in self.arrays:           # a parameter's list is the caller's: an effect, as a store is
             self.stored.add(array)
+        if array not in self.larrays:
             self.effects.append(f"{node} on '{array}'")
         return at
 
@@ -2197,7 +2210,7 @@ class _Checker:
 
     def s_ListExtend(self, s: ListExtend, state: _State):
         at = self.list_changed(s.array, "extend", state)
-        other = self.array(s.other, "extend source", state)
+        other = self.list_of(s.other, "extend source", state)
         if at is not None and other is not None and at is not other:
             self.error(TYPE, f"extend of '{s.array}' ({at.value}) by '{s.other}' ({other.value})")
         return s, state
@@ -2212,7 +2225,7 @@ class _Checker:
 
     def s_ListRemove(self, s: ListRemove, state: _State):
         at = self.list_changed(s.array, "remove", state)
-        if at is not Type.I64_ARRAY and at is not None:
+        if at not in (Type.I64_ARRAY, Type.STR_LIST) and at is not None:
             self.error(TYPE, f"remove from '{s.array}' ({at.value}): only a list of int is searched")
         return dataclasses.replace(s, value=self.list_item(s.value, at, "remove", s.array, state)), state
 
@@ -2237,14 +2250,14 @@ class _Checker:
     def e_ListSearch(self, e: ListSearch, state: _State) -> ir.Expr:
         if not self.aot:
             self.error(UNKNOWN, "ListSearch is an AOT-mode node")
-        at = self.array(e.array, e.op, state)
-        if at is not Type.I64_ARRAY and at is not None:
-            self.error(TYPE, f"{e.op} of '{e.array}' ({at.value}): only a list of int is searched")
+        at = self.list_of(e.array, e.op, state)
+        if at not in (Type.I64_ARRAY, Type.STR_LIST) and at is not None:
+            self.error(TYPE, f"{e.op} of '{e.array}' ({at.value}): only a list of int or of str is searched")
         want = Type.BOOL if e.op == "in" else Type.I64
         if e.op not in ("index", "count", "in") or e.type is not want:
             self.error(TYPE, f"ListSearch {e.op!r} gives {want.value}, node says {getattr(e.type, 'value', e.type)}")
         v = self.expr(e.value, state)
-        self.slot(v, Type.I64, f"value searched in '{e.array}'")
+        self.slot(v, _ELEMENT.get(at, Type.I64), f"value searched in '{e.array}'")
         return dataclasses.replace(e, value=v)
 
     def s_ExprStmt(self, s: ExprStmt, state: _State):

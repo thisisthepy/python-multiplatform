@@ -597,12 +597,15 @@ class _Gen:
             types.update(f.locals)
             for s in f.body:
                 for n in rep_mod.walk(s):
-                    if isinstance(n, ir.LIST_GROW_NODES + ir.LIST_SHRINK_NODES) and types.get(n.array) in LIST:
+                    if isinstance(n, ir.LIST_GROW_NODES + ir.LIST_SHRINK_NODES) \
+                            and (types.get(n.array) in LIST or types.get(n.array) is Type.STR_LIST):
                         kinds.add(self.array_kind(f.name, n.array, types[n.array]))
         return sorted(kinds)
 
     def array_kind(self, fn: str, name: str, t: Type) -> str:
         """The kind of the list `name` of function `fn` (of array type `t`)."""
+        if t is Type.STR_LIST:
+            return "str"                                     # tier S2a
         if t is Type.I64_ARRAY:
             return "int" if self.reps.list_big(fn, name) else "i64"
         return LIST[t][0]
@@ -842,7 +845,12 @@ class _Fn:
         return t
 
     def ev_StrListLen(self, e: ir.StrListLen) -> str:
-        return f"(({self.ev(e.value)})->len)"
+        v = self.ev(e.value)
+        if "str" in self.g.grown:            # tier S2a: a length that can change is read in evaluation order
+            t = self.tmp("int64_t")
+            self.emit(f"{t} = ({v})->len;")
+            return t
+        return f"(({v})->len)"
 
     def ev_StrListIndex(self, e: ir.StrListIndex) -> str:
         lst = self.ev(e.value)
@@ -2208,13 +2216,27 @@ class _Fn:
     # --- tier S2a: lists that change length (design 4.3.2) ---
 
     def grow_list(self, name: str, what: str) -> tuple[str, str] | None:
-        """(C name, kind) of the list `name` an append / insert / extend / pop / clear / reverse works on."""
+        """(C name, kind) of the list `name` an append / insert / extend / pop / clear / reverse works on: a
+        list[float] / list[int] or a list[str]."""
+        if self.types.get(name) is Type.STR_LIST:
+            self.g.uses_str = True
+            return f"v_{mangle(name)}", "str"
         found = self.list_of(name, what)
         return None if found is None else (found[0], self.kind(name))
+
+    @staticmethod
+    def lop(kind: str, op: str) -> str:
+        """The runtime function of the list method `op` for `kind` (a list of str: tpa_str_list_*, where `clear` is
+        `lclear`, tpa_str_list_clear being the slot helper)."""
+        if kind == "str":
+            return f"tpa_str_list_{'lclear' if op == 'clear' else op}"
+        return lfn(kind, op)
 
     def list_item_c(self, e: ir.Expr, name: str) -> str:
         """An item given to a list method: borrowed TAGGED for a big-capable list (the list takes its own reference),
         the native value for a raw or float list."""
+        if self.types.get(name) is Type.STR_LIST:
+            return self.str_value(e, f"the item given to a method of `{name}`")
         if self.types.get(name) in LIST and self.kind(name) == "int":
             return self.tagged(e)
         if e.type is Type.I64 and self.rep(e) == TAGGED:
@@ -2226,40 +2248,42 @@ class _Fn:
         v = self.list_item_c(s.value, s.array)
         found = self.grow_list(s.array, "an append")
         if found is not None:
-            self.emit(f"if ({lfn(found[1], 'append')}({found[0]}, {v})) {self.fail()}")
+            self.emit(f"if ({self.lop(found[1], 'append')}({found[0]}, {v})) {self.fail()}")
 
     def st_ListInsert(self, s: ir.ListInsert) -> None:
         idx = self.index_c(s.index)                         # CPython evaluates the index, then the item
         v = self.list_item_c(s.value, s.array)
         found = self.grow_list(s.array, "an insert")
         if found is not None:
-            self.emit(f"if ({lfn(found[1], 'insert')}({found[0]}, {idx}, {v})) {self.fail()}")
+            self.emit(f"if ({self.lop(found[1], 'insert')}({found[0]}, {idx}, {v})) {self.fail()}")
 
     def st_ListExtend(self, s: ir.ListExtend) -> None:
         found = self.grow_list(s.array, "an extend")
-        other = self.list_of(s.other, "an extend source")
+        other = self.grow_list(s.other, "an extend source")
         if found is not None and other is not None:
-            if self.kind(s.other) != found[1]:
+            if other[1] != found[1]:
                 self.bad("aot/type", s.array, f"`{s.array}.extend({s.other})` joins lists of two kinds (the list "
                          "classification did not merge them)")
                 return
-            self.emit(f"if ({lfn(found[1], 'extend')}({found[0]}, {other[0]})) {self.fail()}")
+            self.emit(f"if ({self.lop(found[1], 'extend')}({found[0]}, {other[0]})) {self.fail()}")
 
     def st_ListClear(self, s: ir.ListClear) -> None:
         found = self.grow_list(s.array, "a clear")
         if found is not None:
-            self.emit(f"{lfn(found[1], 'clear')}({found[0]});")
+            self.emit(f"{self.lop(found[1], 'clear')}({found[0]});")
 
     def st_ListReverse(self, s: ir.ListReverse) -> None:
         found = self.grow_list(s.array, "a reverse")
         if found is not None:
-            self.emit(f"{lfn(found[1], 'reverse')}({found[0]});")
+            self.emit(f"{self.lop(found[1], 'reverse')}({found[0]});")
 
     def search_value(self, value: ir.Expr, kind: str, name: str) -> str | None:
         """The searched value in the form the list's kind compares: TAGGED for a big-capable list, a RAW int64 for a
         raw one (a TAGGED value searched in a raw list is not in the AOT mode yet)."""
         if kind == "int":
             return self.tagged(value)
+        if kind == "str":
+            return self.str_value(value, f"the str searched in `{name}`")
         if kind == "i64" and not (value.type is Type.I64 and self.rep(value) == TAGGED):
             return self.ev(value)
         self.ev(value)
@@ -2273,7 +2297,7 @@ class _Fn:
             return
         v = self.search_value(s.value, found[1], s.array)
         if v is not None:
-            self.emit(f"if ({lfn(found[1], 'remove')}({found[0]}, {v})) {self.fail()}")
+            self.emit(f"if ({self.lop(found[1], 'remove')}({found[0]}, {v})) {self.fail()}")
 
     def index_c(self, e: ir.Expr) -> str:
         """An index argument of insert / pop as an int64."""
@@ -2288,9 +2312,10 @@ class _Fn:
         if found is None:
             return "0"
         kind = found[1]
-        t = self.tslot() if kind == "int" else self.tmp("double" if kind == "f64" else "int64_t")
+        t = (self.tslot() if kind == "int" else self.pslot() if kind == "str"
+             else self.tmp("double" if kind == "f64" else "int64_t"))
         has = 0 if e.index is None else 1
-        self.emit(f"if ({lfn(kind, 'pop')}({found[0]}, {has}, {idx}, &{t})) {self.fail()}")
+        self.emit(f"if ({self.lop(kind, 'pop')}({found[0]}, {has}, {idx}, &{t})) {self.fail()}")
         return t
 
     def ev_ListStr(self, e: ir.ListStr) -> str:
@@ -2303,19 +2328,19 @@ class _Fn:
                          f"({found[0]}, @)")
 
     def ev_ListSearch(self, e: ir.ListSearch) -> str:
-        found = self.list_of(e.array, f"list.{e.op}")
+        found = self.grow_list(e.array, f"list.{e.op}")
         if found is None:
             return "0"
-        kind = self.kind(e.array)
+        kind = found[1]
         v = self.search_value(e.value, kind, e.array)
         if v is None:
             return "0"
         if e.op == "count":
-            return f"{lfn(kind, 'count')}({found[0]}, {v})"
+            return f"{self.lop(kind, 'count')}({found[0]}, {v})"
         if e.op == "in":
-            return f"{lfn(kind, 'contains')}({found[0]}, {v})"
+            return f"{self.lop(kind, 'contains')}({found[0]}, {v})"
         t = self.tmp("int64_t")
-        self.emit(f"if ({lfn(kind, 'index')}({found[0]}, {v}, &{t})) {self.fail()}")
+        self.emit(f"if ({self.lop(kind, 'index')}({found[0]}, {v}, &{t})) {self.fail()}")
         return t
 
     def st_ExprStmt(self, s: ir.ExprStmt) -> None:

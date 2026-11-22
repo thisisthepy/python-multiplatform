@@ -149,6 +149,7 @@ def _aot_kind(kind: str) -> str:
     return kind
 # AOT mode, tier S2a: the list methods called as statements (they return None)
 LIST_STMT_METHODS = frozenset({"append", "insert", "extend", "clear", "reverse", "remove"})
+LIST_METHOD_NAMES = LIST_STMT_METHODS | {"pop", "index", "count"}
 # AOT mode, tier S1b: the str methods (design 4.3.1): name -> (parameter names in order, the result type)
 STR_METHODS = {
     "split": (("sep", "maxsplit"), Type.STR_LIST), "join": (("iterable",), Type.STR),
@@ -1696,7 +1697,7 @@ class _Lowerer:
                     return self.aot_sys_exit(node.value)
                 if mod == "time" and attr == "sleep" and self.info.aot_time and not self.is_local("time"):
                     return self.aot_time_sleep(node.value)
-                if mod in self.arrays and attr in LIST_STMT_METHODS:
+                if self.is_list_name(mod) and attr in LIST_STMT_METHODS:
                     return self.list_method_stmt(node.value)             # tier S2a
             value = self.sub(node.value)
             return self.take() + [ir.ExprStmt(value)]
@@ -2166,8 +2167,19 @@ class _Lowerer:
             return ir.ListStr(Type.STR, node.id)
         return None
 
+    def is_list_name(self, name: str) -> bool:
+        """AOT mode, tier S2a: `name` holds a list whose methods the AOT mode has: a list[float] / list[int] (an
+        array) or a list[str] local or parameter (a STR_LIST value)."""
+        if name in self.arrays:
+            return True
+        return self.info.aot and self.is_local(name) and self.local_type(name, 0) is Type.STR_LIST
+
+    def list_type(self, array: str) -> Type:
+        return self.arrays[array] if array in self.arrays else Type.STR_LIST
+
     def list_elem(self, array: str) -> Type:
-        return Type.F64 if self.arrays[array] == Type.F64_ARRAY else Type.I64
+        t = self.list_type(array)
+        return Type.F64 if t == Type.F64_ARRAY else Type.STR if t == Type.STR_LIST else Type.I64
 
     def list_item(self, array: str, node: ast.expr, what: str) -> ir.Expr:
         """An item stored into `array`: its element type exactly (an int stored into a list of float stays an int in
@@ -2191,7 +2203,7 @@ class _Lowerer:
         if node.keywords or len(args) != want:
             raise Skip(line, f"`{_src(node)}`: list.{m}() takes {want} positional argument(s) in an AOT program")
         self.hoist_ok = False
-        self.store_effect(array)
+        self.list_effect(array)
         what = f"the item given to `{array}.{m}`"
         if m == "append":
             out: ir.Stmt = ir.ListAppend(array, self.list_item(array, args[0], what))
@@ -2200,8 +2212,8 @@ class _Lowerer:
             out = ir.ListInsert(array, at, self.list_item(array, args[1], what))
         elif m == "extend":
             other = args[0]
-            if not (isinstance(other, ast.Name) and other.id in self.arrays
-                    and self.arrays[other.id] == self.arrays[array]):
+            if not (isinstance(other, ast.Name) and self.is_list_name(other.id)
+                    and self.list_type(other.id) == self.list_type(array)):
                 raise Skip(line, f"`{_src(node)}`: an AOT program extends a list by another list name of its type")
             out = ir.ListExtend(array, other.id)
         elif m == "clear":
@@ -2212,7 +2224,15 @@ class _Lowerer:
             out = ir.ListRemove(array, self.list_search_value(array, args[0], node))
         return self.take() + [out]
 
+    def list_effect(self, array: str) -> None:
+        if array in self.arrays:
+            self.store_effect(array)
+        else:
+            self.impure = True              # a list[str] changed through a name: an effect, as a store is
+
     def list_search_value(self, array: str, node: ast.expr, call: ast.AST) -> ir.Expr:
+        if self.list_type(array) == Type.STR_LIST:
+            return self.coerce(self.value(node), Type.STR, node, f"the str searched in `{array}`")
         if self.arrays[array] == Type.F64_ARRAY:
             raise Skip(call.lineno, f"`{_src(call)}`: searching a list of float depends on object identity for NaN in "
                                     "CPython (`x in a` is `y is x or y == x` for each item), which an AOT program does "
@@ -2235,7 +2255,7 @@ class _Lowerer:
             raise Skip(line, f"`{_src(node)}`: keyword arguments of list.{m}() are not supported")
         self.hoist_ok = False
         if m == "pop" and len(args) <= 1:
-            self.store_effect(array)
+            self.list_effect(array)
             at = self.list_index_arg(args[0], f"the index of `{array}.pop`") if args else None
             return ir.ListPop(self.list_elem(array), array, at)
         if m in ("index", "count") and len(args) == 1:
@@ -3298,7 +3318,7 @@ class _Lowerer:
                 return math
 
         if self.info.aot and isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) \
-                and func.value.id in self.arrays:
+                and self.is_list_name(func.value.id) and func.attr in LIST_METHOD_NAMES:
             return self.list_method_expr(func, node)                     # tier S2a
 
         if self.info.aot and isinstance(func, ast.Attribute):

@@ -784,11 +784,22 @@ static TPA_UNUSED int tpa_str__has(tpa_str *set, uint32_t c)
  * counted object that owns one reference to each element; it never changes length in S1b (growth is tier S2,
  * which generalises this type). Same header order as tpa_i64_list: the count, then the length.
  * ------------------------------------------------------------------------------------------ */
+#if defined(TPA_GROW_STR)
+/* Tier S2a: the growable layout of a list of str (tp_aot.h, "Native lists"), for a program that changes the length
+ * of one; a NULL-free block of owned references in [0, len). */
+typedef struct tpa_str_list {
+    tpa_rc_t rc;
+    int64_t len;
+    int64_t cap;
+    tpa_str **d;
+} tpa_str_list;
+#else
 typedef struct tpa_str_list {
     tpa_rc_t rc;
     int64_t len;
     tpa_str *d[];
 } tpa_str_list;
+#endif
 
 static TPA_UNUSED int tpa_str_list__alloc(int64_t n, tpa_str_list **out)
 {
@@ -796,10 +807,25 @@ static TPA_UNUSED int tpa_str_list__alloc(int64_t n, tpa_str_list **out)
     if (n < 0 || n > (INT64_MAX - (int64_t)sizeof(tpa_str_list)) / (int64_t)sizeof(tpa_str *)) {
         return tpa_raise(TPA_MemoryError, "");
     }
+#if defined(TPA_GROW_STR)
+    l = (tpa_str_list *)calloc(1, sizeof(tpa_str_list));
+    if (l == NULL) {
+        return tpa_raise(TPA_MemoryError, "");
+    }
+    if (n > 0) {
+        l->d = (tpa_str **)calloc((size_t)n, sizeof(tpa_str *));
+        if (l->d == NULL) {
+            free(l);
+            return tpa_raise(TPA_MemoryError, "");
+        }
+    }
+    l->cap = n;
+#else
     l = (tpa_str_list *)calloc(1, sizeof(tpa_str_list) + (size_t)n * sizeof(tpa_str *));
     if (l == NULL) {
         return tpa_raise(TPA_MemoryError, "");
     }
+#endif
     l->rc = 1;
     l->len = n;
     *out = l;
@@ -820,6 +846,9 @@ static TPA_UNUSED void tpa_str_list_release(tpa_str_list *l)
         for (i = 0; i < l->len; i++) {
             tpa_str_release(l->d[i]);
         }
+#if defined(TPA_GROW_STR)
+        free(l->d);
+#endif
         free(l);
     }
 }
@@ -861,6 +890,252 @@ static TPA_UNUSED int tpa_str_list_get(tpa_str_list *l, int64_t i, tpa_str **out
     tpa_str_retain(l->d[slot]);
     *out = l->d[slot];
     return 0;
+}
+
+/* Tier S2a: raise ValueError with the text of `m` (UTF-8 in the exception record, which tpa_report_uncaught writes to
+ * standard error as bytes; a lone surrogate is written as \udXXX, as the reference's stderr, backslashreplace, does). */
+static TPA_UNUSED int tpa_str_raise_value_error(tpa_str *m)
+{
+    char buf[sizeof tpa_exc.msg];
+    size_t k = 0;
+    int64_t i;
+    for (i = 0; i < m->len; i++) {
+        uint32_t c = tpa_str_at(m, i);
+        char e[12];
+        size_t n;
+        if (c < 0x80) {
+            e[0] = (char)c;
+            n = 1;
+        }
+        else if (c < 0x800) {
+            e[0] = (char)(0xC0 | (c >> 6));
+            e[1] = (char)(0x80 | (c & 0x3F));
+            n = 2;
+        }
+        else if (c >= 0xD800 && c <= 0xDFFF) {
+            n = (size_t)snprintf(e, sizeof e, "\\u%04x", (unsigned)c);
+        }
+        else if (c < 0x10000) {
+            e[0] = (char)(0xE0 | (c >> 12));
+            e[1] = (char)(0x80 | ((c >> 6) & 0x3F));
+            e[2] = (char)(0x80 | (c & 0x3F));
+            n = 3;
+        }
+        else {
+            e[0] = (char)(0xF0 | (c >> 18));
+            e[1] = (char)(0x80 | ((c >> 12) & 0x3F));
+            e[2] = (char)(0x80 | ((c >> 6) & 0x3F));
+            e[3] = (char)(0x80 | (c & 0x3F));
+            n = 4;
+        }
+        if (k + n >= sizeof buf) {
+            break;                          /* (a message past the record's size is cut, as every long message is) */
+        }
+        memcpy(buf + k, e, n);
+        k += n;
+    }
+    buf[k] = '\0';
+    return tpa_raise(TPA_ValueError, buf);
+}
+
+/* Tier S2a: searching a list of str (index / count / in), equality as str ==; the value is borrowed. index formats the
+ * value with its repr: ValueError("'x' is not in list"). */
+static TPA_UNUSED int tpa_str_list_contains(const tpa_str_list *l, tpa_str *v)
+{
+    int64_t i;
+    for (i = 0; i < l->len; i++) {
+        if (tpa_str_eq(l->d[i], v)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static TPA_UNUSED int64_t tpa_str_list_count(const tpa_str_list *l, tpa_str *v)
+{
+    int64_t i, k = 0;
+    for (i = 0; i < l->len; i++) {
+        k += tpa_str_eq(l->d[i], v) ? 1 : 0;
+    }
+    return k;
+}
+
+static TPA_UNUSED int tpa_str_list_index(const tpa_str_list *l, tpa_str *v, int64_t *out)
+{
+    int64_t i;
+    tpa_str *r = NULL, *m = NULL, *parts[2];
+    int rc;
+    for (i = 0; i < l->len; i++) {
+        if (tpa_str_eq(l->d[i], v)) {
+            *out = i;
+            return 0;
+        }
+    }
+    if (tpa_str_repr(v, &r)) {
+        return -1;
+    }
+    if (tpa_str_from_ascii(" is not in list", 15, &parts[1])) {
+        tpa_str_release(r);
+        return -1;
+    }
+    parts[0] = r;
+    rc = tpa_str_join(parts, 2, &m);
+    tpa_str_release(r);
+    tpa_str_release(parts[1]);
+    if (rc) {
+        return -1;
+    }
+    rc = tpa_str_raise_value_error(m);
+    tpa_str_release(m);
+    return rc;
+}
+
+#if defined(TPA_GROW_STR)
+static int tpa_str_list__resize(tpa_str_list *l, int64_t n)
+{
+    uint64_t want;
+    tpa_str **d;
+    if (TPA__RESIZE_IN_PLACE && l->cap >= n && n >= (l->cap >> 1)) {
+        l->len = n;
+        return 0;
+    }
+    want = ((uint64_t)n + ((uint64_t)n >> 3) + 6u) & ~(uint64_t)3;
+    if ((uint64_t)(n - l->len) > want - (uint64_t)n) {
+        want = ((uint64_t)n + 3u) & ~(uint64_t)3;
+    }
+    if (n == 0) {
+        want = 0;
+    }
+    if (want > (uint64_t)(SIZE_MAX / sizeof(tpa_str *)) || want > (uint64_t)INT64_MAX) {
+        return tpa_raise(TPA_MemoryError, "");
+    }
+    if (want == 0) {
+        free(l->d);
+        d = NULL;
+    }
+    else {
+        d = (tpa_str **)tpa__list_realloc(l->d, (size_t)want * sizeof(tpa_str *),
+                                          (size_t)(l->len < n ? l->len : n) * sizeof(tpa_str *));
+        if (d == NULL) {
+            return tpa_raise(TPA_MemoryError, "");
+        }
+    }
+    l->d = d;
+    l->cap = (int64_t)want;
+    l->len = n;
+    return 0;
+}
+
+static TPA_UNUSED int tpa_str_list_append(tpa_str_list *l, tpa_str *v)
+{
+    if (tpa_str_list__resize(l, l->len + 1)) {
+        return -1;
+    }
+    tpa_str_retain(v);
+    l->d[l->len - 1] = v;
+    return 0;
+}
+
+static TPA_UNUSED int tpa_str_list_insert(tpa_str_list *l, int64_t i, tpa_str *v)
+{
+    int64_t n = l->len;
+    if (i < 0) {
+        i += n;
+        if (i < 0) {
+            i = 0;
+        }
+    }
+    if (i > n) {
+        i = n;
+    }
+    if (tpa_str_list__resize(l, n + 1)) {
+        return -1;
+    }
+    memmove(l->d + i + 1, l->d + i, (size_t)(n - i) * sizeof(tpa_str *));
+    tpa_str_retain(v);
+    l->d[i] = v;
+    return 0;
+}
+
+static TPA_UNUSED int tpa_str_list_extend(tpa_str_list *l, const tpa_str_list *o)
+{
+    int64_t n = l->len, m = o->len, k;
+    if (m == 0) {
+        return 0;
+    }
+    if (tpa_str_list__resize(l, n + m)) {
+        return -1;
+    }
+    for (k = 0; k < m; k++) {
+        tpa_str_retain(o->d[k]);
+        l->d[n + k] = o->d[k];
+    }
+    return 0;
+}
+
+/* list.clear() (tpa_str_list_clear is the slot helper above) */
+static TPA_UNUSED void tpa_str_list_lclear(tpa_str_list *l)
+{
+    int64_t i, n = l->len;
+    tpa_str **d = l->d;
+    l->d = NULL;
+    l->len = 0;
+    l->cap = 0;
+    for (i = 0; i < n; i++) {
+        tpa_str_release(d[i]);
+    }
+    free(d);
+}
+
+static TPA_UNUSED int tpa_str_list_pop(tpa_str_list *l, int has_index, int64_t i, tpa_str **out)
+{
+    int64_t n = l->len;
+    tpa_str *v;
+    if (n == 0) {
+        return tpa_raise(TPA_IndexError, "pop from empty list");
+    }
+    if (!has_index) {
+        i = n - 1;
+    }
+    if (i < 0) {
+        i += n;
+    }
+    if (i < 0 || i >= n) {
+        return tpa_raise(TPA_IndexError, "pop index out of range");
+    }
+    v = l->d[i];
+    memmove(l->d + i, l->d + i + 1, (size_t)(n - i - 1) * sizeof(tpa_str *));
+    if (tpa_str_list__resize(l, n - 1)) {
+        l->len = n - 1;
+    }
+    tpa_str_release(*out);
+    *out = v;                               /* the reference moves out of the list */
+    return 0;
+}
+
+static TPA_UNUSED int tpa_str_list_remove(tpa_str_list *l, tpa_str *v)
+{
+    int64_t i;
+    tpa_str *got = NULL;
+    for (i = 0; i < l->len; i++) {
+        if (tpa_str_eq(l->d[i], v)) {
+            tpa_str_list_pop(l, 1, i, &got);
+            tpa_str_release(got);
+            return 0;
+        }
+    }
+    return tpa_raise(TPA_ValueError, "list.remove(x): x not in list");
+}
+#endif
+
+static TPA_UNUSED void tpa_str_list_reverse(tpa_str_list *l)
+{
+    int64_t i, j;
+    for (i = 0, j = l->len - 1; i < j; i++, j--) {
+        tpa_str *t = l->d[i];
+        l->d[i] = l->d[j];
+        l->d[j] = t;
+    }
 }
 
 /* A growing list while split builds its result (a private buffer, not a value). */

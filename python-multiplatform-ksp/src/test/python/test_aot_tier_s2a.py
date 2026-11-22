@@ -421,3 +421,51 @@ def inner(n: int) -> int:
     assert [(f.rule, f.name) for f in raised.value.findings] == [("aot/library-resize", "grow")]
     c_text, _header, _desc = library.generate_library(p, exports=["inner"], prefix="p")
     assert "#define TPA_GROW_I64 1" in c_text
+
+
+STR_LISTS = """
+import sys
+
+
+def words(s: str) -> list[str]:
+    return s.split()
+
+
+def main() -> None:
+    mode = int(sys.argv[1])
+    xs = words("alpha beta gamma")
+    ys = xs
+    xs.append("delta")
+    xs.insert(0, "zero")
+    xs.insert(-100, sys.argv[2])
+    print(xs, len(ys), xs.count("beta"), xs.index("gamma"))
+    xs.extend(xs)
+    last = xs.pop()
+    first = xs.pop(0)
+    print(last, first, len(xs), xs)
+    xs.remove("beta")
+    xs.reverse()
+    print(xs)
+    for w in ys:
+        if len(ys) < 12:
+            ys.append(w.upper())
+    print(ys)
+    ys.clear()
+    print(ys, len(xs))
+    if mode == 1:
+        print(xs.index("été"))
+    elif mode == 2:
+        xs.remove("nope")
+    elif mode == 3:
+        print(xs.pop())
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_lists_of_str_that_change_length(tmp_path: Path):
+    """append / insert / extend (also of itself) / pop / remove / reverse / clear / index / count on list[str], through
+    an alias and inside a loop over the list; the index message carries the repr of a non-ASCII value (design 4.3.2)."""
+    _compare(tmp_path, STR_LISTS, [["0", "x"], ["0", "\u00e9"], ["1", "y"], ["2", "z"], ["3", "w"]])
