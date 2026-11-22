@@ -227,6 +227,17 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   returns a `kotlin.coroutines.cancellation.CancellationException` with `this` as its `cause` for a
   cancelled error and `this` otherwise (#164).
   `Status: implemented`, `PyExceptionTest.kt`.
+- **O-3a** (#524, owner 2026-11-22: restore the pre-agent object model and implement its skeleton
+  types) A raised Python exception is the Kotlin class of its built-in Python class: every built-in
+  exception of CPython 3.15 has a `Py<Name>` class under `ffi.exceptions.errors` whose Kotlin superclass
+  is its Python base (`PyKeyError : PyLookupError`), so `catch (e: PyLookupError)` catches a `KeyError`.
+  A Python subclass of a built-in exception becomes the nearest built-in class in its MRO; one derived
+  only from `Exception` stays a plain `PyException`. `BaseException` is `PyException` itself, and
+  `Exception` has no class of its own (single inheritance). `PyStopIteration.returnValue`,
+  `PySystemExit.code`, `PyOSError.errno` / `strerror` / `filename`, `PySyntaxError.filename` /
+  `lineNumber` / `offset` / `text`, `PyImportError.moduleName` / `path`, `PyNameError.name` and
+  `PyAttributeError.name` read the instance's attributes.
+  `Status: draft` (until its CI run), `BuiltinExceptionsTest.kt`.
 - **O-4** Basic types `PyInt`, `PyFloat`, `PyBool`, `PyString`, `PyNone`, bytes round-trip with Kotlin
   values. `Status: implemented`, `PyBasicTypesTest.kt`, `PyValueBytesConversionTest.kt`.
 - **O-5** Collections implement the Kotlin collection interfaces: `PyList` (`MutableList`, `fromList`,
@@ -236,6 +247,19 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 - **O-6** Modules, builtins, callables (bound methods, class/static methods), utilities (range, slice,
   ellipsis), import and GC helpers. `Status: implemented`, `PyModuleTest.kt`, `BuiltinsTest.kt`,
   `PyCallablesTest.kt`, `PyUtilitiesTest.kt`, `PyImportTest.kt`, `PyGCTest.kt`.
+- **O-6a** (#524, as O-3a) The baseline's skeleton types are implemented, each a `PyObject` with a
+  type-checked `from(PyObject)` that takes its own reference: `PyGenerator` (`send`, `next`,
+  `throwInto`, `finish` = `close()`, frame, code, running / suspended), `PyCoroutine` (the same over
+  `cr_*`, `awaiting`), `PyAsyncGenerator` (`next` / `send` / `throwInto` / `finish` return awaitables),
+  `PyCell` (`contents`, empty cell, `clear`, `of`), `PyCode` (`co_*`: names, argument counts, flags),
+  `PyFrame` (code, line, `back`, globals, locals, builtins), `PyWeakRef` (`of` with a callback, `get`
+  is `null` once the referent is gone, `proxy`), `PyMemberDescriptor` / `PyGetSetDescriptor` /
+  `PyProperty` (`get` / `set` / `delete` on an instance through `PyDescriptor`; a property's getter,
+  setter, deleter, `of`, `withSetter`) and `PyPackage` (`path`, `submodule`, `subpackage`). A
+  generator's or coroutine's end is `PyStopIteration` with its return value. With no Stable ABI
+  accessors for these types, each member reads the documented Python attribute or calls the Python
+  method. `Status: draft` (until its CI run), `PyGeneratorTest.kt`, `PyCodeTest.kt`, `PyWeakRefTest.kt`,
+  `PyDescriptorsTest.kt`, `PyPackageTest.kt`.
 - **O-7** Conversion: `PyValue` with selectable conversion strategies (`withContext`), lazily cached
   snapshots invalidated on demand; buffer-view types and types with no Kotlin counterpart are refused.
   `Status: implemented`, `ConversionTest.kt`, `PyValueLazyConversionTest.kt`.

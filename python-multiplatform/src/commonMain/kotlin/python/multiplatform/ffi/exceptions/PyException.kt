@@ -154,7 +154,8 @@ open class PyException(
                 else -> fromExceptionInstance(causePointer)
             }
 
-            return PyException(message, type, value, traceback, context, cause)
+            // The Kotlin class mirrors the nearest built-in exception class (#524).
+            return python.multiplatform.ffi.exceptions.errors.BuiltinExceptions.create(message, type, value, traceback, context, cause)
         }
 
         /** `str(excPointer)`, used as this [PyException]'s [errMsg]. */
