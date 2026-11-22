@@ -83,15 +83,17 @@ def probe(source: str, wanted: Iterable[Assignment] | None = None) -> tuple[str,
         head, tail = encoded[:end_byte].decode(), encoded[end_byte:].decode()
         inserted = ""
         added: list[Probe] = []
+        # A probe's column is in UTF-8 bytes, 1-based: the unit Pyrefly reports expression positions in (a line with
+        # a non-ASCII character before the probe otherwise looked its type up at the wrong place and got nothing).
         for a in by_position[(line_no, end_byte)]:
             inserted += "; "
-            added.append(Probe(a.name, line_no, len(head) + len(inserted) + 1, a))
+            added.append(Probe(a.name, line_no, end_byte + len(inserted.encode()) + 1, a))
             inserted += a.name
         lines[line_no - 1] = head + inserted + tail
         # Probes already placed further right on this line moved by what was just inserted.
         probes = [
-            Probe(q.name, q.line, q.column + len(inserted), q.assignment)
-            if q.line == line_no and q.column > len(head) else q
+            Probe(q.name, q.line, q.column + len(inserted.encode()), q.assignment)
+            if q.line == line_no and q.column > end_byte else q
             for q in probes
         ]
         probes += added

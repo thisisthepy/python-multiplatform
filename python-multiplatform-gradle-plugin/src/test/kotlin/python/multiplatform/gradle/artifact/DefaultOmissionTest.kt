@@ -277,4 +277,19 @@ class DefaultOmissionTest {
             "a hard keyword has to be written back with its backticks: $body",
         )
     }
+
+    /**
+     * #191: Compose's ui klib for macosArm64 failed to compile `PlatformInsets()` (the branch writing
+     * nothing) as ambiguous with a `PlatformInsets` overload the walker had declined, because the
+     * sibling test compared bound overloads only. Red before: `[true, true]` and a `gap()` call.
+     */
+    @Test
+    fun aBranchADeclinedOverloadWouldAlsoAcceptIsNotGenerated() {
+        val gap = entry("gap")
+        val body = gap.lambdaBody.flattened()
+        assertEquals(listOf(true, false), gap.paramHasDefault, body)
+        assertTrue("gap(top = (args[1] as Long).toInt())" in body, body)
+        assertFalse("gap()" in body, body)
+        assertFalse(Regex("""gap\(left = \(args\[0\] as Long\)\.toInt\(\)\)""").containsMatchIn(body), body)
+    }
 }

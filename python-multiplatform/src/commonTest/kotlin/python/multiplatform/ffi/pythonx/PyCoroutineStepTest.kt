@@ -154,7 +154,7 @@ class PyCoroutineStepTest {
                     try:
                         await _StPause('wait')
                     except _StCancelled as e:
-                        _st['caught'] = (type(e).__name__, str(e), type(e.__cause__).__name__, str(e.__cause__))
+                        _st['caught'] = (type(e).__name__, str(e), isinstance(e.__cause__, RuntimeError), str(e.__cause__))
                         raise ValueError('after cancel')
                 async def _st_key_body():
                     try:
@@ -176,6 +176,8 @@ class PyCoroutineStepTest {
                 """.trimIndent(),
             )
             // A Kotlin CancellationException arrives as CancelledError, its Kotlin cause on __cause__ (U-2).
+            // The cause is a RuntimeError: the throwable's proxy when the upcall entry points are
+            // published, a plain RuntimeError when they are not (KotlinThrowableProxyTest covers the proxy).
             val c1 = PythonTestFixture.eval("_st['c1']")
             assertIs<PyStep.Yielded>(c1.step()).value.close()
             val raised = assertIs<PyStep.Raised>(
@@ -186,7 +188,7 @@ class PyCoroutineStepTest {
             assertFalse(raised.exception.isCancelledError())
             assertEquals("CancelledError", raised.exception.context?.type?.name, "the CancelledError is the __context__ of what the coroutine raised")
             assertEquals(
-                "('CancelledError', 'stop now', 'RuntimeError', 'IllegalStateException: why')",
+                "('CancelledError', 'stop now', True, 'IllegalStateException: why')",
                 PythonTestFixture.eval("_st['caught']").toString(),
             )
             assertTrue(errorIndicatorIsClear())

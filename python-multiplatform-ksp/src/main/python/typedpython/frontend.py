@@ -123,6 +123,7 @@ TOP = (I64_MIN, I64_MAX)
 EXACT_INT_FLOAT = 2**53  # |n| <= this: int/int true division is exact-rounded in C (ir.BinOp)
 
 AOT_MAX_PRECISION = 20  # AOT mode: the largest N of an f-string field `{x:.Nf}`
+AOT_MAX_STR_CONSTANT = 1 << 24  # AOT mode: the longest str module constant (it is embedded in the C source)
 
 LEN_MAX = 2**62  # a native array is never longer (the verifier's Len interval is [0, 2**62])
 
@@ -130,10 +131,38 @@ Interval = tuple[int, int] | None  # None: no value at all (not yet known to be 
 
 TYPE_NAME = {
     Type.I64: "int", Type.F64: "float", Type.BOOL: "bool", Type.NONE: "None", Type.OBJ: "object",
-    Type.INT: "int",
+    Type.INT: "int", Type.STR: "str", Type.STR_LIST: "list[str]", Type.STR_OPT: "str | None",
+    Type.OBJ_LIST: "list of a compiled class",
     Type.F64_ARRAY: "list[float]", Type.I64_ARRAY: "list[int]", Type.BOOL_ARRAY: "NDArray[np.bool_]",
 }
 SCALAR_KIND = {"int": Type.I64, "float": Type.F64, "bool": Type.BOOL}
+# AOT mode (tier S1, PR-S1a): what an annotation names beside the scalars. The default mode never reads it.
+AOT_KIND = {**SCALAR_KIND, "str": Type.STR, "list[str]": Type.STR_LIST,
+            # tier S2a: the spellings of `str | None`
+            "str | None": Type.STR_OPT, "None | str": Type.STR_OPT, "Optional[str]": Type.STR_OPT,
+            "typing.Optional[str]": Type.STR_OPT, "str|None": Type.STR_OPT, "None|str": Type.STR_OPT}
+
+
+def _aot_kind(kind: str) -> str:
+    """AOT mode: an annotation or an inferred type in the spelling AOT_KIND uses (quotes off; Pyrefly's
+    `LiteralString`, also inside a generic, is a str)."""
+    kind = kind.strip("'\"").replace("typing.LiteralString", "str").replace("LiteralString", "str")
+    while "str | str" in kind:          # (`list[LiteralString | str]`, Pyrefly's type after `s += ...`: a list of str)
+        kind = kind.replace("str | str", "str")
+    return kind
+# AOT mode, tier S2a: the list methods called as statements (they return None)
+LIST_STMT_METHODS = frozenset({"append", "insert", "extend", "clear", "reverse", "remove"})
+LIST_METHOD_NAMES = LIST_STMT_METHODS | {"pop", "index", "count"}
+# AOT mode, tier S1b: the str methods (design 4.3.1): name -> (parameter names in order, the result type)
+STR_METHODS = {
+    "split": (("sep", "maxsplit"), Type.STR_LIST), "join": (("iterable",), Type.STR),
+    "strip": (("chars",), Type.STR), "lstrip": (("chars",), Type.STR), "rstrip": (("chars",), Type.STR),
+    "lower": ((), Type.STR), "upper": ((), Type.STR),
+    "startswith": (("prefix", "start", "end"), Type.BOOL), "endswith": (("prefix", "start", "end"), Type.BOOL),
+    "find": (("sub", "start", "end"), Type.I64), "replace": (("old", "new", "count"), Type.STR),
+    "isalpha": ((), Type.BOOL), "isdigit": ((), Type.BOOL),
+}
+STR_METHOD_KEYWORDS = {"split": ("sep", "maxsplit"), "replace": ("count",)}
 ARRAY_KIND = {"list[float]": Type.F64_ARRAY, "list[int]": Type.I64_ARRAY}
 
 BINOP = {
@@ -203,6 +232,19 @@ def _unsupported(node: ast.AST) -> Skip:
 
 def _src(node: ast.AST) -> str:
     return ast.unparse(node)
+
+
+OPTIONAL_MARK = "(aot/optional)"
+
+
+def _optional(line: int, node: ast.AST, cls: str | None = None) -> Skip:
+    """AOT mode, tier S2a: a `str | None` value used where a str is needed, or a `C | None` value whose field or
+    method is used, with no test before it that proves it is not None (design 4.3.2). The marker makes the finding
+    `aot/optional` (aot/__init__.py)."""
+    what = (f"a `{cls} | None` value whose field or method is used" if cls is not None
+            else "a `str | None` value used where a str is needed")
+    return Skip(line, f"`{_src(node)}` is {what}, and nothing before it proves it is not None {OPTIONAL_MARK}: test "
+                      "`is not None` first (`if x is not None:`, or an `if x is None:` branch that leaves)")
 
 
 # --- the module ----------------------------------------------------------------------------------
@@ -384,7 +426,7 @@ def fold_constant(node: ast.expr, known: dict[str, int | float | bool]) -> int |
     arithmetic on the folded values (so it is CPython's value, a float stays a float and an int an
     int). Raises ValueError with the reason otherwise."""
     if isinstance(node, ast.Constant):
-        if type(node.value) in (int, float, bool):
+        if type(node.value) in (int, float, bool, str):     # str: tier S1 (PR-S1a)
             return node.value
         raise ValueError(f"a {type(node.value).__name__} literal is not a numeric constant")
     if isinstance(node, ast.Name):
@@ -404,7 +446,7 @@ def fold_constant(node: ast.expr, known: dict[str, int | float | bool]) -> int |
             if isinstance(node.op, ast.Mult):
                 return a * b
             return a / b
-        except ArithmeticError as e:
+        except (ArithmeticError, TypeError, MemoryError) as e:
             raise ValueError(f"the expression raises {type(e).__name__}: {e}") from None
     raise ValueError(f"a `{type(node).__name__}` is not allowed in a constant expression "
                      "(only literals, unary minus and + - * / over earlier constants)")
@@ -429,10 +471,14 @@ def aot_constant(stmt: ast.stmt, known: dict[str, int | float | bool]) -> tuple[
     if type(v) is int and not I64_MIN <= v <= I64_MAX:
         raise ValueError(f"is not a constant expression: the int value {v} is outside 64 bits "
                          "(big integers arrive in a later step)")
+    if type(v) is str and len(v) > AOT_MAX_STR_CONSTANT:
+        raise ValueError(f"is a string of {len(v)} characters, more than the {AOT_MAX_STR_CONSTANT} a constant may "
+                         "have in the AOT mode (it is embedded in the program)")
     if annotation is not None:
-        kind = annotation.id if isinstance(annotation, ast.Name) and annotation.id in SCALAR_KIND else None
+        kind = (annotation.id if isinstance(annotation, ast.Name)
+                and (annotation.id in SCALAR_KIND or annotation.id == "str") else None)
         if kind is None:
-            raise ValueError(f"is annotated `{_src(annotation)}`, which is not int, float or bool")
+            raise ValueError(f"is annotated `{_src(annotation)}`, which is not int, float, bool or str")
         if type(v).__name__ != kind:
             hint = ("; write a float literal such as `1.0`" if kind == "float" and type(v) is int else "")
             raise ValueError(f"is annotated `{kind}` but its value is {_article(type(v).__name__)}, which "
@@ -464,7 +510,8 @@ def aot_constants(tree: ast.Module, bindings: dict[str, list[tuple[int, str]]]) 
         except ValueError:
             continue
         known[name] = v
-        t = Type.BOOL if type(v) is bool else Type.I64 if type(v) is int else Type.F64
+        t = (Type.BOOL if type(v) is bool else Type.I64 if type(v) is int else Type.STR if type(v) is str
+             else Type.F64)
         out[name] = ir.Const(t, v, name=name)
     return out
 
@@ -712,11 +759,30 @@ def _classes(
     return decls, skipped
 
 
+def _obj_list_class(kind: str, classes) -> str | None:
+    """AOT mode, tier S2a: the compiled class C of a `list[C]` annotation or inferred type (`list[prog.C]`, a quoted
+    forward reference), else None."""
+    k = kind.strip("'\"").replace(" ", "")
+    m = re.fullmatch(r"(?:typing\.)?(?:list|List)\[(.+)\]", k)
+    if m is None:
+        return None
+    inner = m.group(1).strip("'\"")
+    if "." in inner:
+        inner = inner.rsplit(".", 1)[1]
+    return inner if inner in classes else None
+
+
 def _aot_field_decl(fname: str, ann: ast.expr, known_names: set[str]) -> ir.FieldDecl | None:
     """Resolve an AOT class field annotation to an `ir.FieldDecl`."""
     kind = _annotation_kind(ann)
+    if (lc := _obj_list_class(kind, known_names)) is not None:
+        return ir.FieldDecl(fname, Type.OBJ_LIST, cls=lc)      # tier S2a: a list of instances of a compiled class
     if kind in SCALAR_KIND:
         return ir.FieldDecl(fname, SCALAR_KIND[kind])
+    if kind.strip("'\"") == "str":
+        return ir.FieldDecl(fname, Type.STR)            # tier S1b: an owned str (acyclic: a str holds nothing)
+    if AOT_KIND.get(_aot_kind(kind)) is Type.STR_OPT:
+        return ir.FieldDecl(fname, Type.STR_OPT)        # tier S2a
     if kind in ARRAY_KIND:
         return ir.FieldDecl(fname, ARRAY_KIND[kind])
     # class or class | None (including string forward references)
@@ -870,6 +936,20 @@ def _trivial_init(init: ast.FunctionDef, fields: tuple[str, ...]) -> bool:
     return all(stored.get(f) == p for f, p in zip(fields, params))
 
 
+def _aot_unqualified(kind: str, classes: dict[str, ir.ClassDecl]) -> str:
+    """AOT mode: Pyrefly spells an inferred class with its module (`prog.Node`, `prog.Node | None`). An AOT program
+    imports no module that defines a class (only math, sys and time), so a qualified name whose last part is a class of
+    the program is that class (a local bound from a call result otherwise lost its class)."""
+    parts, changed = [], False
+    for p in kind.split("|"):
+        q = p.strip()
+        if "." in q and q.rsplit(".", 1)[1] in classes:
+            q, changed = q.rsplit(".", 1)[1], True
+        parts.append(q)
+    # unchanged spelling unless a part was qualified; `_class_of` splits on a bare `|` without stripping blanks
+    return "|".join(parts) if changed else kind
+
+
 def _class_of(kind: str, classes: dict[str, ir.ClassDecl]) -> tuple[str, bool] | None:
     """`C`, `C | None`, `None | C`, `Optional[C]`, `"C | None"` (an annotation spelled by
     `_annotation_kind`) -> (C, optional) for a compiled class C, else None."""
@@ -983,6 +1063,7 @@ def _signature(fn: ast.FunctionDef, classes: dict[str, ir.ClassDecl] | None = No
     if args.defaults:
         raise Skip(line, "default parameter values are not supported")
     params: list[ir.Param | ir.ArrayParam] = []
+    kinds_map = AOT_KIND if info is not None and info.aot else SCALAR_KIND      # tier S1: `str` in AOT mode only
     for position, a in enumerate(args.args):
         if owner is not None and position == 0:
             # `self` (ir.Function.owner): unannotated, or annotated with the class itself
@@ -1003,14 +1084,17 @@ def _signature(fn: ast.FunctionDef, classes: dict[str, ir.ClassDecl] | None = No
             params.append(ir.ArrayParam(a.arg, ARRAY_KIND[kind], False))  # `stored` set later
         elif (c := _class_of(kind, classes or {})) is not None:
             params.append(ir.Param(a.arg, Type.OBJ, c[0], c[1]))
+        elif info is not None and info.aot and (lc := _obj_list_class(kind, classes or {})) is not None:
+            params.append(ir.Param(a.arg, Type.OBJ_LIST, lc))               # tier S2a: list[C]
         else:
-            params.append(ir.Param(a.arg, SCALAR_KIND.get(kind, Type.OBJ)))
+            params.append(ir.Param(a.arg, kinds_map.get(_aot_kind(kind) if kinds_map is AOT_KIND else kind, Type.OBJ)))
     if fn.returns is None:
         raise Skip(line, "no return annotation")
     if isinstance(fn.returns, ast.Constant) and fn.returns.value is None:
         returns = Type.NONE
     else:
-        returns = SCALAR_KIND.get(_annotation_kind(fn.returns), Type.OBJ)
+        rk = _annotation_kind(fn.returns)
+        returns = kinds_map.get(_aot_kind(rk) if kinds_map is AOT_KIND else rk, Type.OBJ)
         if returns == Type.OBJ and info is not None and info.aot:
             # AOT mode: a returned list is a native array (a counted list the caller then owns)
             returns = ARRAY_KIND.get(_annotation_kind(fn.returns), returns)
@@ -1023,6 +1107,8 @@ def _signature(fn: ast.FunctionDef, classes: dict[str, ir.ClassDecl] | None = No
         rc = _class_of(_annotation_kind(fn.returns), classes)
         if rc is not None:
             ret_cls, ret_opt = rc
+        elif info is not None and info.aot and (lc := _obj_list_class(_annotation_kind(fn.returns), classes)):
+            returns, ret_cls = Type.OBJ_LIST, lc                             # tier S2a: list[C]
     return _Signature(fn, tuple(params), returns, elements, ellipsis, _src(fn.returns), owner,
                       return_cls=ret_cls, return_optional=ret_opt)
 
@@ -1313,11 +1399,14 @@ class _Lowerer:
         }
         # Guard facts at this point (verify.py "Local variables and guards"): local -> interval.
         self.refined: dict[str, tuple[int, int]] = {}
+        self.not_none: set[str] = set()     # AOT mode, tier S2a: the STR_OPT locals proved not None here
         self.dead = 0   # >0: in code whose guard read a local with no interval yet in this round
         self.all_names = {n.id for n in ast.walk(self.fn) if isinstance(n, ast.Name)} \
             | set(self.params)
 
         self.types: dict[str, Type] = {}
+        self.list_cls: dict[str, str] = {}      # AOT mode, tier S2a: the element class of an OBJ_LIST local
+        self.loop_cls: dict[str, str] = {}      # ... and of the variable of a loop over one
         self.temps: dict[str, Type] = {}
         self.pre: list[ir.Stmt] = []
         self.hoist_ok = True
@@ -1396,7 +1485,8 @@ class _Lowerer:
             pure=pure, may_deopt=self.deopts, source_line=self.fn.lineno,
             entry_globals=tuple(ir.Param(n, t) for n, t in self.entry_used.items()),
             owner=self.sig.owner, return_cls=self.sig.return_cls,
-            return_optional=self.sig.return_optional, local_classes=local_classes)
+            return_optional=self.sig.return_optional, local_classes=local_classes,
+            list_classes={n: c for n, c in self.list_cls.items() if n in locals_})
         if self.info.aot:
             return fn       # nothing is redone in an interpreter, so there is no continuation to write
         # SPEC N-8 (#152): a snapshot holder gets a Python continuation per loop (OSR-style exit).
@@ -1486,6 +1576,10 @@ class _Lowerer:
                 kinds += self.inferred.get(name, [])
             if not any(k.startswith("list") for _, k in kinds):
                 continue
+            if all(_obj_list_class(k, self.info.classes) is not None for _, k in kinds):
+                continue        # tier S2a: a list of class instances is an OBJ_LIST value, not a native array
+            if all((_aot_kind(k) if self.info.aot else k) == "list[str]" for _, k in kinds):
+                continue        # tier S1b: a list of str is a STR_LIST value, not a native array
             distinct = sorted({k for _, k in kinds})
             if len(distinct) > 1:
                 where = next(line for line, k in kinds if k != kinds[0][1])
@@ -1536,6 +1630,13 @@ class _Lowerer:
         kinds += [(b.line, "int") for b in self.bindings.get(name, []) if b.how == "range"]
         if name not in self.annotations:
             kinds += self.inferred.get(name, [])
+        if self.info.aot:
+            # Pyrefly spells a result it only partly resolves `int | Unknown` (`sys.stdout.write`, typeshed's
+            # TextIO). The known part is the type: the lowered value is typed exactly, and `coerce` refuses a
+            # value of another type, so nothing unchecked comes in.
+            kinds = [(line, k[:-len(" | Unknown")] if k.endswith(" | Unknown") else k) for line, k in kinds]
+            # (a str built from literals is spelled `LiteralString`: a str)
+            kinds = [(line, _aot_kind(k)) for line, k in kinds]
         distinct = sorted({k for _, k in kinds})
         if not distinct and name in self.iter_vars:
             self.types[name] = Type.OBJ   # what a loop over an object binds: an object
@@ -1557,9 +1658,15 @@ class _Lowerer:
                 t = Type.OBJ        # a loop over an object binds objects; an int fed from an object stays one
             else:
                 t = Type.INT        # SPEC N-13: native, promoted in place on overflow
+        elif self.info.aot and (lc := _obj_list_class(kind, self.info.classes)) is not None:
+            t = Type.OBJ_LIST                       # tier S2a: list[C]
+            self.list_cls[name] = lc
+        elif self.info.aot:
+            t = AOT_KIND.get(kind, Type.OBJ)        # tier S1: `str` is STR
         else:
             t = SCALAR_KIND.get(kind, Type.OBJ)
-        if name in self.iter_vars and t != Type.OBJ:
+        if name in self.iter_vars and t != Type.OBJ and not (self.info.aot and t is Type.STR):
+            # (AOT mode: `for ch in s` over a str binds a STR, `ForStr`)
             raise Skip(self.bindings[name][0].line, f"loop variable `{name}` is bound by a loop over "
                                                     f"an object but is a native {TYPE_NAME[t]}")
         self.types[name] = t
@@ -1620,6 +1727,13 @@ class _Lowerer:
                     return self.aot_sys_exit(node.value)
                 if mod == "time" and attr == "sleep" and self.info.aot_time and not self.is_local("time"):
                     return self.aot_time_sleep(node.value)
+                if self.is_list_name(mod) and attr in LIST_STMT_METHODS:
+                    return self.list_method_stmt(node.value)             # tier S2a
+            if self.info.aot and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute) \
+                    and node.value.func.attr in LIST_STMT_METHODS:
+                held = self.field_list_receiver(node.value)
+                if held is not None:
+                    return self.list_method_stmt(held)                   # tier S2a: `self.items.append(x)`
             value = self.sub(node.value)
             return self.take() + [ir.ExprStmt(value)]
         if isinstance(node, ast.Assign):
@@ -1634,21 +1748,28 @@ class _Lowerer:
             return self.assign(node.target, node.value, node)
         if isinstance(node, ast.AugAssign):
             return self.aug_assign(node)
+        if isinstance(node, ast.Delete) and self.info.aot:
+            return self.list_delete(node)                                  # tier S2a
         if isinstance(node, ast.If):
             cond = self.condition(node.test)
             pre = self.take()
             entry = self.refined
+            nn_entry = set(self.not_none)
             self.refined, dead = self.narrowed(cond, True, entry)
             self.dead += dead
+            self.not_none = nn_entry | _none_facts(cond, True)
             then = self.block(node.body)
             self.dead -= dead
-            then_refined = self.refined
+            then_refined, then_nn = self.refined, self.not_none
             self.refined, dead = self.narrowed(cond, False, entry)
             self.dead += dead
+            self.not_none = nn_entry | _none_facts(cond, False)
             orelse = self.block(node.orelse)
             self.dead -= dead
-            else_refined = self.refined
+            else_refined, else_nn = self.refined, self.not_none
             then_ends, else_ends = _diverges(then), _diverges(orelse)
+            self.not_none = (nn_entry if then_ends and else_ends else else_nn if then_ends
+                             else then_nn if else_ends else then_nn & else_nn)
             if then_ends and else_ends:
                 self.refined = entry
             elif then_ends:
@@ -1665,50 +1786,71 @@ class _Lowerer:
             killed = _stored_names(node.body)
             head = {k: v for k, v in self.refined.items() if k not in killed}
             self.refined = head
+            nn_head = self.not_none - killed
+            self.not_none = set(nn_head)
             cond = self.condition(node.test)
             pre = self.take()
             self.refined, dead = self.narrowed(cond, True, head)
             self.dead += dead
+            self.not_none = nn_head | _none_facts(cond, True)
             body = self.block(node.body)
             self.dead -= dead
             self.refined = dict(head)
+            self.not_none = set(nn_head)
             if not pre:
                 return [ir.While(cond, body)]
             # The condition needs statements (a chain's temporary): run them on every iteration.
             exit_ = ir.If(cond, (), (ir.Break(),))  # cond stays directly a condition
             return [ir.While(ir.Const(Type.BOOL, True), (*pre, exit_, *body))]
         if isinstance(node, ast.For):
-            return self.for_range(node)
+            # tier S2a: a name the loop assigns is not known to be not None at the head of any iteration, nor after
+            killed = _stored_names(node.body) | {n.id for n in ast.walk(node.target) if isinstance(n, ast.Name)}
+            self.not_none -= killed
+            out = self.for_range(node)
+            self.not_none -= killed
+            return out
         if isinstance(node, ast.Return):
             return self.return_(node)
         raise _unsupported(node)
 
     def print_stmt(self, call: ast.Call) -> list[ir.Stmt]:
-        """AOT mode: `print(a, b, ...)` as `ir.Print`. The arguments are lowered in order; each must be
-        an int, float or bool value or a string literal. Not an effect: nothing here changes how the
-        function's ints are typed."""
-        if call.keywords:
-            k = call.keywords[0]
-            raise Skip(k.value.lineno, f"print(..., {k.arg or '**'}=...) is not supported in an AOT "
-                                       "program (positional arguments only)")
+        """AOT mode: `print(a, b, ..., sep=..., end=...)` as `ir.Print`. The arguments are lowered in order, then
+        `sep` and `end` in source order; each argument is an int, float, bool or str value (tier S1), `sep` and `end`
+        a str or None. Not an effect: nothing here changes how the function's ints are typed."""
         args: list[ir.Expr] = []
         for a in call.args:
             if isinstance(a, ast.Starred):
                 raise Skip(a.lineno, "a starred argument of print is not supported in an AOT program")
-            if isinstance(a, ast.Constant) and isinstance(a.value, str):
-                args.append(self.str_const(a.value, a))
-                continue
             if isinstance(a, ast.JoinedStr):
                 args.append(self.aot_fstring(a))
                 continue
+            listed = self.list_str(a)                  # tier S2a: a list is printed as its repr
+            if listed is not None:
+                args.append(listed)
+                continue
             e = self.value(a)
-            if e.type not in ir.SCALARS and e.type != Type.OBJ:
+            if e.type not in ir.SCALARS and e.type not in (Type.OBJ, Type.STR, Type.STR_LIST, Type.STR_OPT):
                 raise Skip(a.lineno, f"print of `{_src(a)}` ({TYPE_NAME[e.type]}) is not supported in an "
-                                     "AOT program (int, float, bool and string literals)")
+                                     "AOT program (int, float, bool and str values)")
             # (an OBJ argument, say a call that is not direct, stays: it has no AOT form and the back
             # end names the operation that made it)
             args.append(e)
-        return self.take() + [ir.Print(tuple(args))]
+        extra: dict[str, ir.Expr | None] = {}
+        for k in call.keywords:
+            if k.arg not in ("sep", "end"):
+                raise Skip(k.value.lineno, f"print(..., {k.arg or '**'}=...) is not supported in an AOT "
+                                           "program (positional arguments, `sep` and `end`)")
+            if k.arg in extra:
+                raise Skip(k.value.lineno, f"print() is given `{k.arg}` twice")
+            if isinstance(k.value, ast.Constant) and k.value.value is None:
+                extra[k.arg] = None                 # CPython: None means the default
+                continue
+            v = self.value(k.value)
+            if v.type is not Type.STR:
+                raise Skip(k.value.lineno, f"print's `{k.arg}` is {TYPE_NAME.get(v.type, v.type.value)}; it must "
+                                           "be a str or None")
+            extra[k.arg] = v
+        return self.take() + [ir.Print(tuple(args), sep=extra.get("sep"), end=extra.get("end"))]
 
     def assign(self, target: ast.expr, value_node: ast.expr, node: ast.stmt) -> list[ir.Stmt]:
         line = node.lineno
@@ -1720,6 +1862,11 @@ class _Lowerer:
                 return self.new_array(name, value_node, node)
             if name in self.arrays:
                 raise Skip(line, f"array parameter `{name}` is rebound")
+            if self.info.aot and isinstance(value_node, ast.List) and not value_node.elts \
+                    and self.local_type(name, line) is Type.OBJ_LIST:
+                cls = self.obj_list_cls(name)                           # tier S2a: `xs: list[C] = []`
+                self.note_assign(name, ir.ObjListDisplay(Type.OBJ_LIST, cls, ()))
+                return self.take() + [ir.Assign(name, ir.ObjListDisplay(Type.OBJ_LIST, cls, ()))]
             value = self.value(value_node)
             t = self.local_type(name, line)
             if t == Type.INT and value.type == Type.OBJ:
@@ -1727,6 +1874,28 @@ class _Lowerer:
             value = self.coerce(value, t, value_node, f"local `{name}`")
             self.note_assign(name, value)
             return self.take() + [ir.Assign(name, value)]
+        if self.info.aot and isinstance(target, ast.Subscript) and not isinstance(target.slice, ast.Slice) \
+                and isinstance(target.value, ast.Name) and self.is_local(target.value.id) \
+                and target.value.id not in self.arrays and self.local_type(target.value.id, line) is Type.OBJ_LIST:
+            # tier S2a: `xs[i] = c` of a list[C] (the value, then the index)
+            array = target.value.id
+            value = self.list_item(array, value_node, f"the item stored into `{array}`")
+            if not _trivial(value):
+                value = self.temp(value)
+            idx = self.list_index_arg(target.slice, "the index")
+            self.list_effect(array)
+            return self.take() + [ir.ObjListStore(array, idx, value)]
+        if self.info.aot and isinstance(target, ast.Subscript) and isinstance(target.slice, ast.Slice) \
+                and isinstance(target.value, ast.Name) and self.is_list_name(target.value.id):
+            # tier S2a: `a[i:j:k] = b` (CPython evaluates the value, then the list, then the bounds)
+            array = target.value.id
+            if not (isinstance(value_node, ast.Name) and self.is_list_name(value_node.id)
+                    and self.list_type(value_node.id) == self.list_type(array)):
+                raise Skip(line, f"`{_src(node)}`: an AOT program assigns a slice from another list name of its type")
+            self.hoist_ok = False
+            self.list_effect(array)
+            b = self.slice_bounds(target.slice)
+            return self.take() + [ir.ListSetSlice(array, *b, value_node.id)]
         if isinstance(target, ast.Subscript) and not (
                 isinstance(target.value, ast.Name) and target.value.id in self.arrays):
             if isinstance(target.slice, ast.Slice):
@@ -1834,6 +2003,9 @@ class _Lowerer:
                 return e
             if isinstance(e, ir.Call) and e.type in ir.ARRAYS:
                 raise Skip(line, f"`{_src(node)}` returns {TYPE_NAME[e.type]}, but {what} is {TYPE_NAME[want]}")
+        made = self.list_make(node, want)                                  # tier S2a
+        if made is not None:
+            return made
         if isinstance(node, ast.Attribute):
             fg = self.field_get(node)
             if fg is not None:
@@ -1879,19 +2051,20 @@ class _Lowerer:
             self.refined.pop(n, None)
         return self.take() + [ir.Unpack(tuple(names), call)]
 
-    def aot_fstring(self, node: ast.JoinedStr) -> ir.Expr:
-        """An f-string given to `print` (AOT mode): constant text, `{e}` of an int, float or bool, and `{e:.Nf}` of
-        a float. Anything else (a conversion, `=`, a width, another presentation type, a nested field) is
-        an error, not an approximation."""
+    def aot_fstring(self, node: ast.JoinedStr, value: bool = False) -> ir.Expr:
+        """An f-string (AOT mode): constant text, `{e}` and `{e!s}` of an int, float, bool or str, `{e!r}` of one of
+        those, and `{e:.Nf}` of a float. Given to `print` it is an OBJ `FString` written piece by piece; anywhere
+        else (`value`, tier S1) a STR `FString`, the string the parts make. Anything else (`!a`, `=`, a width,
+        another presentation type, a nested field) is an error, not an approximation."""
         parts: list[ir.Expr] = []
         for piece in node.values:
             if isinstance(piece, ast.Constant) and isinstance(piece.value, str):
-                parts.append(self.str_const(piece.value, piece))
+                parts.append(ir.Const(Type.STR, piece.value))
                 continue
             assert isinstance(piece, ast.FormattedValue)
-            if piece.conversion != -1:
-                raise Skip(piece.lineno, f"the conversion or `=` of `{_src(piece)}` in an f-string is not supported "
-                                         "in an AOT program (`{e}` and `{e:.Nf}` only)")
+            if piece.conversion not in (-1, 115, 114):
+                raise Skip(piece.lineno, f"the conversion `!a` of `{_src(piece)}` in an f-string is not supported "
+                                         "in an AOT program (`{e}`, `{e!s}`, `{e!r}` and `{e:.Nf}`)")
             precision = None
             if piece.format_spec is not None:
                 texts = piece.format_spec.values                   # type: ignore[attr-defined]
@@ -1900,19 +2073,481 @@ class _Lowerer:
                                              "supported")
                 spec = "".join(t.value for t in texts)             # type: ignore[attr-defined]
                 m = re.fullmatch(r"\.([0-9]{1,2})f", spec)
-                if m is None or int(m.group(1)) > AOT_MAX_PRECISION:
+                if m is None or int(m.group(1)) > AOT_MAX_PRECISION or piece.conversion != -1:
                     raise Skip(piece.lineno, f"the format spec `{spec}` in an f-string is not supported in an AOT "
-                                             f"program (only `.Nf` with N from 0 to {AOT_MAX_PRECISION})")
+                                             f"program (only `.Nf` with N from 0 to {AOT_MAX_PRECISION}, on a float "
+                                             "with no conversion)")
                 precision = int(m.group(1))
-            value = self.value(piece.value)
-            if precision is None and value.type not in ir.SCALARS:
-                raise Skip(piece.lineno, f"`{_src(piece.value)}` in an f-string is {TYPE_NAME[value.type]}, not an "
-                                         "int, float or bool")
-            if precision is not None and value.type != Type.F64:
-                raise Skip(piece.lineno, f"`{_src(piece.value)}:.{precision}f` formats a {TYPE_NAME[value.type]}; "
+            listed = self.list_str(piece.value)
+            v = listed if listed is not None else self.value(piece.value)
+            if listed is not None and precision is None:
+                parts.append(ir.FormatField(Type.OBJ, v, None, repr=False))   # a list's str is its repr (tier S2a)
+                continue
+            if precision is None and v.type not in ir.SCALARS and v.type not in (Type.STR, Type.STR_OPT):
+                raise Skip(piece.lineno, f"`{_src(piece.value)}` in an f-string is {TYPE_NAME[v.type]}, not an "
+                                         "int, float, bool or str")
+            if precision is not None and v.type != Type.F64:
+                raise Skip(piece.lineno, f"`{_src(piece.value)}:.{precision}f` formats a {TYPE_NAME[v.type]}; "
                                          "only a float takes `.Nf` in an AOT program")
-            parts.append(ir.FormatField(Type.OBJ, value, precision))
-        return ir.FString(Type.OBJ, tuple(parts))
+            parts.append(ir.FormatField(Type.OBJ, v, precision, repr=piece.conversion == 114))
+        return ir.FString(Type.STR if value else Type.OBJ, tuple(parts))
+
+    # --- tier S1 (PR-S1a): str operations, AOT mode only (docs/design/typedpython-aot.md 4.3.1) ---
+
+    def str_int(self, e: ir.Expr, node: ast.AST, what: str) -> ir.Expr:
+        """An int operand of a str operation (an index, a bound, a count): an int as it is, a bool as 0 or 1."""
+        if e.type == Type.I64:
+            return e
+        if e.type == Type.BOOL:
+            return ir.BoolToInt(Type.I64, e)
+        raise Skip(node.lineno, f"{what} `{_src(node)}` is {TYPE_NAME.get(e.type, e.type.value)}, not an int")
+
+    def aot_subscript(self, node: ast.Subscript) -> ir.Expr:
+        """`sys.argv[i]`, `s[i]` and `s[a:b:c]` of a str (AOT mode); a subscript of anything else has no AOT form."""
+        line = node.lineno
+        if self.is_sys_argv(node.value):
+            if isinstance(node.slice, ast.Slice):
+                raise Skip(line, f"the slice `{_src(node)}` of `sys.argv` is not supported in an AOT program (a list of "
+                                 "str arrives with tier S1b)")
+            return ir.ArgvStr(Type.STR, self.str_int(self.value(node.slice), node.slice, "the index"))
+        value = self.sub(node.value)
+        if value.type is Type.OBJ_LIST:                       # tier S2a: an element of a list[C]
+            if isinstance(node.slice, ast.Slice):
+                raise Skip(line, f"the slice `{_src(node)}` of a list of class instances is not in the AOT mode yet")
+            cls = self.list_cls_of(value, node.value)
+            return ir.ObjListIndex(Type.OBJ, value, self.list_index_arg(node.slice, "the index"), cls)
+        if value.type is Type.STR_LIST:
+            if isinstance(node.slice, ast.Slice):
+                raise Skip(line, f"the slice `{_src(node)}` of a list of str is tier S2 (lists that change and new "
+                                 "lists from old ones)")
+            return ir.StrListIndex(Type.STR, value, self.str_int(self.value(node.slice), node.slice, "the index"))
+        if value.type is not Type.STR:
+            raise Skip(line, f"the subscript `{_src(node)}` of a {TYPE_NAME.get(value.type, value.type.value)} has no "
+                             "form in an AOT program")
+        if isinstance(node.slice, ast.Slice):
+            sl = node.slice
+            bounds = []
+            for b, what in ((sl.lower, "the start"), (sl.upper, "the stop"), (sl.step, "the step")):
+                if b is None or (isinstance(b, ast.Constant) and b.value is None):
+                    bounds.append(None)
+                else:
+                    bounds.append(self.str_int(self.value(b), b, what))
+            return ir.StrSlice(Type.STR, value, bounds[0], bounds[1], bounds[2])
+        return ir.StrIndex(Type.STR, value, self.str_int(self.value(node.slice), node.slice, "the index"))
+
+    def str_arith(self, op: ir.BinOpKind, left: ir.Expr, right: ir.Expr, node: ast.AST) -> ir.Expr:
+        """`+` of two strs and `*` of a str and an int (AOT mode); `%` is printf-style formatting, which waits for
+        tier S2 (`aot/str-format`)."""
+        lt, rt = left.type, right.type
+        if Type.STR_OPT in (lt, rt):                                   # tier S2a: name the operand
+            side = getattr(node, "left" if lt is Type.STR_OPT else "right", node)
+            raise _optional(node.lineno, side)
+        if op is ir.BinOpKind.ADD and lt is Type.STR and rt is Type.STR:
+            return ir.StrConcat(Type.STR, left, right)
+        if op is ir.BinOpKind.MUL and lt is Type.STR and rt in (Type.I64, Type.BOOL):
+            return ir.StrRepeat(Type.STR, left, self.str_int(right, node, "the count"))
+        if op is ir.BinOpKind.MUL and rt is Type.STR and lt in (Type.I64, Type.BOOL):
+            return ir.StrRepeat(Type.STR, right, self.str_int(left, node, "the count"), count_first=True)
+        if op is ir.BinOpKind.MOD and lt is Type.STR:
+            raise Skip(node.lineno, f"`{_src(node)}`: printf-style `%` formatting of a str is tier S2 in an AOT program "
+                                    "(aot/str-format); an f-string formats the same values")
+        raise Skip(node.lineno, f"`{_src(node)}`: the operator `{op.value}` of a {TYPE_NAME.get(lt, lt.value)} and a "
+                                f"{TYPE_NAME.get(rt, rt.value)} raises TypeError in CPython; an AOT program does not "
+                                "compile it")
+
+    def opt_link(self, op: ast.cmpop, left: ir.Expr, right: ir.Expr, node: ast.Compare) -> ir.Expr:
+        """A comparison with a `str | None` operand (tier S2a): `is None` / `is not None`, and `==` / `!=` with a
+        str, a `str | None` or None (None equals only None)."""
+        none = (lambda e: isinstance(e, ir.Const) and e.value is None)
+        if isinstance(op, (ast.Is, ast.IsNot)):
+            if none(left) or none(right):
+                x = right if none(left) else left
+                return ir.Is(Type.BOOL, x, ir.Const(Type.OBJ, None), isinstance(op, ast.IsNot))
+            raise Skip(node.lineno, f"`{_src(node)}`: `is` between two strs depends on interning in CPython "
+                                    "(aot/str-identity); use `==`")
+        if isinstance(op, (ast.Eq, ast.NotEq)):
+            if none(left) or none(right):
+                x = right if none(left) else left
+                return ir.Is(Type.BOOL, x, ir.Const(Type.OBJ, None), isinstance(op, ast.NotEq))
+            if {left.type, right.type} <= {Type.STR, Type.STR_OPT}:
+                return ir.StrCompare(Type.BOOL, COMPARE[type(op)], left, right)
+        raise Skip(node.lineno, f"`{_src(node)}`: a `str | None` value is used where a str is needed without a test "
+                                "that it is not None (aot/optional; `if x is not None:` proves it)")
+
+    def str_link(self, op: ast.cmpop, left: ir.Expr, right: ir.Expr, node: ast.Compare) -> ir.Expr:
+        """One comparison with a str operand (AOT mode)."""
+        lt, rt = left.type, right.type
+        if isinstance(op, (ast.Is, ast.IsNot)):
+            raise Skip(node.lineno, f"`{_src(node)}`: `is` on a str depends on interning and constant folding in "
+                                    "CPython, so it has no defined result to reproduce (aot/str-identity); use `==`")
+        if lt is not Type.STR or rt is not Type.STR:
+            raise Skip(node.lineno, f"comparison `{_src(node)}` of a {TYPE_NAME.get(lt, lt.value)} with a "
+                                    f"{TYPE_NAME.get(rt, rt.value)} is not supported in an AOT program (two strs)")
+        if isinstance(op, (ast.In, ast.NotIn)):
+            return ir.StrContains(Type.BOOL, left, right, isinstance(op, ast.NotIn))
+        kind = COMPARE.get(type(op))
+        if kind is None:
+            raise Skip(node.lineno, f"comparison `{_src(node)}` is not supported")
+        return ir.StrCompare(Type.BOOL, kind, left, right)
+
+    def aot_str_builtin(self, name: str, node: ast.Call) -> ir.Expr | None:
+        """`len`, `str`, `repr`, `ord` and `chr` where a str is involved (AOT mode); None: not one of these."""
+        args = node.args
+        line = node.lineno
+        if name in ("str", "repr") and self.builtin(name):
+            if name == "str" and not args:
+                return ir.Const(Type.STR, "")
+            if len(args) != 1:
+                raise Skip(line, f"{name}() takes one argument in an AOT program")
+            listed = self.list_str(args[0])
+            if listed is not None:
+                return listed                           # tier S2a: str(a) and repr(a) of a list are its repr
+            x = self.value(args[0])
+            if x.type not in ir.SCALARS and x.type not in (Type.STR, Type.STR_LIST, Type.STR_OPT):
+                raise Skip(line, f"{name}() of a {TYPE_NAME.get(x.type, x.type.value)} is not supported in an AOT "
+                                 "program (int, float, bool, str and list[str])")
+            return ir.StrOf(Type.STR, x, repr=name == "repr")
+        if name == "ord" and self.builtin("ord"):
+            if len(args) != 1:
+                raise Skip(line, "ord() takes one argument")
+            x = self.value(args[0])
+            if x.type is not Type.STR:
+                raise Skip(line, f"ord() of a {TYPE_NAME.get(x.type, x.type.value)} is not supported in an AOT program")
+            return ir.StrOrd(Type.I64, x)
+        if name == "chr" and self.builtin("chr"):
+            if len(args) != 1:
+                raise Skip(line, "chr() takes one argument")
+            return ir.StrChr(Type.STR, self.str_int(self.value(args[0]), args[0], "the argument of chr()"))
+        if name == "len" and self.builtin("len") and len(args) == 1 \
+                and not (isinstance(args[0], ast.Name) and args[0].id in self.arrays):
+            x = self.value(args[0])
+            if x.type is Type.STR:
+                return ir.StrLen(Type.I64, x)
+            if x.type is Type.STR_LIST:
+                return ir.StrListLen(Type.I64, x)
+            if x.type is Type.OBJ_LIST:
+                return ir.ObjListLen(Type.I64, x)                      # tier S2a
+            if x.type is Type.STR_OPT:                                 # tier S2a
+                raise _optional(line, args[0])
+            raise Skip(line, f"len() of a {TYPE_NAME.get(x.type, x.type.value)} is not supported in an AOT program")
+        return None
+
+    # --- AOT mode, tier S2a: the methods of a list[float] / list[int] (design 4.3.2) ---
+
+    def field_list_receiver(self, call: ast.Call) -> ast.Call | None:
+        """AOT mode, tier S2a: `obj.field.m(...)` where `obj.field` is a list field: the list is held by a temporary
+        for the call (CPython's bound method holds it, so rebinding the field inside the call frees nothing in use),
+        and the call is rewritten to name that temporary. None when the receiver is not a list field."""
+        func = call.func
+        if not (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Attribute)):
+            return None
+        fg = self.field_get(func.value)
+        if fg is None or fg.type not in (Type.OBJ_LIST, Type.STR_LIST):
+            return None
+        held = self.temp(fg)
+        if fg.type is Type.OBJ_LIST:
+            self.list_cls[held.name] = self.list_cls_of(fg, func.value)
+        new_func = ast.copy_location(ast.Attribute(value=ast.copy_location(ast.Name(id=held.name, ctx=ast.Load()),
+                                                                           func.value), attr=func.attr, ctx=ast.Load()),
+                                     func)
+        return ast.copy_location(ast.Call(func=new_func, args=call.args, keywords=call.keywords), call)
+
+    def list_make(self, node: ast.expr, want: Type) -> ir.Expr | None:
+        """AOT mode, tier S2a: `a + b`, `a * n` / `n * a`, `a[i:j:k]` and `list(a)` of list names of type `want`, as a
+        new list (ir.ListConcat / ListRepeat / ListSlice; `list(a)` of a list[float] / list[int] is a CopyArray).
+        None when `node` is none of these."""
+        def lst(x: ast.expr) -> str | None:
+            return x.id if (isinstance(x, ast.Name) and self.is_list_name(x.id)
+                            and self.list_type(x.id) == want) else None
+
+        def an_int(x: ast.expr, what: str) -> ir.Expr:
+            return self.list_index_arg(x, what)
+
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add) and lst(node.left) and lst(node.right):
+            return ir.ListConcat(want, lst(node.left), lst(node.right))          # type: ignore[arg-type]
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+            if lst(node.left) and not isinstance(node.right, ast.List):
+                return ir.ListRepeat(want, lst(node.left), an_int(node.right, "the count of a list repeat"))  # type: ignore[arg-type]
+            if lst(node.right) and not isinstance(node.left, ast.List):
+                return ir.ListRepeat(want, lst(node.right), an_int(node.left, "the count of a list repeat"),   # type: ignore[arg-type]
+                                     count_first=True)
+        if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Slice) and lst(node.value):
+            sl = node.slice
+            if want != Type.STR_LIST and sl.lower is None and sl.upper is None and sl.step is None:
+                return None                                  # `a[:]` of an array: the CopyArray path
+            bounds = [None if b is None else an_int(b, "a bound of a list slice") for b in (sl.lower, sl.upper, sl.step)]
+            return ir.ListSlice(want, lst(node.value), *bounds)                  # type: ignore[arg-type]
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "list" \
+                and self.builtin("list") and not node.keywords and len(node.args) == 1 and lst(node.args[0]):
+            src = lst(node.args[0])
+            if want == Type.STR_LIST:
+                return ir.ListSlice(want, src, None, None, None)                  # type: ignore[arg-type]
+            return ir.CopyArray(want, src)                                        # type: ignore[arg-type]
+        return None
+
+    def slice_bounds(self, sl: ast.Slice) -> list[ir.Expr | None]:
+        return [None if b is None else self.list_index_arg(b, "a bound of a list slice")
+                for b in (sl.lower, sl.upper, sl.step)]
+
+    def list_delete(self, node: ast.Delete) -> list[ir.Stmt]:
+        """`del a[i]` / `del a[i:j:k]` of list names (tier S2a), one target after the other, as CPython deletes them."""
+        out: list[ir.Stmt] = []
+        for t in node.targets:
+            if not (isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and self.is_list_name(t.value.id)):
+                raise Skip(node.lineno, f"`del {_src(t)}` is outside the AOT mode (only `del a[i]` and `del a[i:j]` of "
+                                        "a list)")
+            array = t.value.id
+            self.hoist_ok = False
+            self.list_effect(array)
+            if isinstance(t.slice, ast.Slice):
+                d = ir.ListDelete(array, None, *self.slice_bounds(t.slice), is_slice=True)
+            else:
+                d = ir.ListDelete(array, self.list_index_arg(t.slice, f"the index deleted from `{array}`"))
+            out += self.take() + [d]
+        return out
+
+    def list_str(self, node: ast.expr) -> ir.Expr | None:
+        """`a` (a list[float] / list[int] name) where its str is wanted: print, str(), repr(), an f-string field; the
+        str and the repr of a list are the same text (tier S2a). None for anything else."""
+        if self.info.aot and isinstance(node, ast.Name) and node.id in self.arrays:
+            return ir.ListStr(Type.STR, node.id)
+        return None
+
+    def is_list_name(self, name: str) -> bool:
+        """AOT mode, tier S2a: `name` holds a list whose methods the AOT mode has: a list[float] / list[int] (an
+        array), a list[str] (a STR_LIST value) or a list[C] (an OBJ_LIST value) local or parameter."""
+        if name in self.arrays:
+            return True
+        return self.info.aot and self.is_local(name) and self.local_type(name, 0) in (Type.STR_LIST, Type.OBJ_LIST)
+
+    def list_type(self, array: str) -> Type:
+        if array in self.arrays:
+            return self.arrays[array]
+        return self.local_type(array, 0)
+
+    def list_elem(self, array: str) -> Type:
+        t = self.list_type(array)
+        return {Type.F64_ARRAY: Type.F64, Type.STR_LIST: Type.STR, Type.OBJ_LIST: Type.OBJ}.get(t, Type.I64)
+
+    def obj_list_cls(self, name: str) -> str | None:
+        """The element class of the list[C] local or parameter `name`."""
+        if name in self.params:
+            p = self.params[name]
+            return p.cls if isinstance(p, ir.Param) and p.type is Type.OBJ_LIST else None
+        if self.local_type(name, 0) is Type.OBJ_LIST:
+            return self.list_cls.get(name)
+        return None
+
+    def list_cls_of(self, e: ir.Expr, node: ast.AST) -> str:
+        """The element class of the list[C] value `e`."""
+        cls = None
+        if isinstance(e, ir.Local):
+            cls = self.obj_list_cls(e.name)
+        elif isinstance(e, ir.ObjListDisplay):
+            cls = e.cls
+        elif isinstance(e, ir.FieldGet):
+            fd = next((f for f in self.info.classes[e.cls].field_decls if f.name == e.field), None)
+            cls = fd.cls if fd is not None else None
+        elif isinstance(e, ir.Call):
+            callee = self.env.get(e.function)
+            cls = getattr(callee, "return_cls", None)
+        if cls is None:
+            raise Skip(getattr(node, "lineno", 0), f"the class of the items of `{_src(node)}` is not known")
+        return cls
+
+    def cls_of_expr(self, e: ir.Expr) -> str | None:
+        """AOT mode: the compiled class of the instance `e` (a class local, a new object, a field, a call result, an
+        element of a list[C]), or None."""
+        if isinstance(e, ir.Local) and e.type is Type.OBJ:
+            return self.cls_of_name(e.name)[0]
+        if isinstance(e, ir.New):
+            return e.cls
+        if isinstance(e, ir.ObjListIndex):
+            return e.cls
+        if isinstance(e, ir.ListPop) and e.type is Type.OBJ:
+            return self.obj_list_cls(e.array)
+        if isinstance(e, ir.FieldGet) and e.type is Type.OBJ:
+            fd = next((f for f in self.info.classes[e.cls].field_decls if f.name == e.field), None)
+            return fd.cls if fd is not None else None
+        if isinstance(e, ir.Call):
+            callee = self.env.get(e.function)
+            return getattr(callee, "return_cls", None)
+        return None
+
+    def list_item(self, array: str, node: ast.expr, what: str) -> ir.Expr:
+        """An item stored into `array`: its element type exactly (an int stored into a list of float stays an int in
+        CPython, so it has no AOT form, as for `a[i] = v`); for a list[C], an instance of C."""
+        if self.list_type(array) is Type.OBJ_LIST:
+            e = self.value(node)
+            want = self.obj_list_cls(array)
+            if e.type is not Type.OBJ or self.cls_of_expr(e) != want:
+                raise Skip(node.lineno, f"{what} `{_src(node)}` is not known to be a `{want}` instance (a list[{want}] "
+                                        "holds only those)")
+            return e
+        return self.coerce(self.value(node), self.list_elem(array), node, what)
+
+    def list_index_arg(self, node: ast.expr, what: str) -> ir.Expr:
+        e = self.value(node)
+        if e.type is Type.BOOL:
+            e = ir.BoolToInt(Type.I64, e)
+        if e.type is not Type.I64:
+            raise Skip(node.lineno, f"{what} `{_src(node)}` is {TYPE_NAME.get(e.type, e.type.value)}, not an int")
+        return e
+
+    def list_method_stmt(self, node: ast.Call) -> list[ir.Stmt]:
+        """`a.append(v)`, `a.insert(i, v)`, `a.extend(b)`, `a.clear()`, `a.reverse()`, `a.remove(v)` as statements."""
+        func = node.func
+        assert isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+        array, m, args, line = func.value.id, func.attr, node.args, node.lineno
+        want = {"append": 1, "insert": 2, "extend": 1, "clear": 0, "reverse": 0, "remove": 1}[m]
+        if node.keywords or len(args) != want:
+            raise Skip(line, f"`{_src(node)}`: list.{m}() takes {want} positional argument(s) in an AOT program")
+        self.hoist_ok = False
+        self.list_effect(array)
+        what = f"the item given to `{array}.{m}`"
+        if m == "append":
+            out: ir.Stmt = ir.ListAppend(array, self.list_item(array, args[0], what))
+        elif m == "insert":
+            at = self.list_index_arg(args[0], f"the index of `{array}.insert`")
+            out = ir.ListInsert(array, at, self.list_item(array, args[1], what))
+        elif m == "extend":
+            other = args[0]
+            if not (isinstance(other, ast.Name) and self.is_list_name(other.id)
+                    and self.list_type(other.id) == self.list_type(array)):
+                raise Skip(line, f"`{_src(node)}`: an AOT program extends a list by another list name of its type")
+            out = ir.ListExtend(array, other.id)
+        elif m == "clear":
+            out = ir.ListClear(array)
+        elif m == "reverse":
+            out = ir.ListReverse(array)
+        else:
+            out = ir.ListRemove(array, self.list_search_value(array, args[0], node))
+        return self.take() + [out]
+
+    def list_effect(self, array: str) -> None:
+        if array in self.arrays:
+            self.store_effect(array)
+        else:
+            self.impure = True              # a list[str] changed through a name: an effect, as a store is
+
+    def list_search_value(self, array: str, node: ast.expr, call: ast.AST) -> ir.Expr:
+        if self.list_type(array) == Type.OBJ_LIST:
+            cls = self.obj_list_cls(array)
+            if f"{cls}.__eq__" in self.env:
+                raise Skip(call.lineno, f"`{_src(call)}`: `{cls}` defines __eq__, which a search of a list of it would "
+                                        "call; an AOT program does not yet")
+            return self.list_item(array, node, f"the instance searched in `{array}`")     # identity, as object.__eq__
+        if self.list_type(array) == Type.STR_LIST:
+            return self.coerce(self.value(node), Type.STR, node, f"the str searched in `{array}`")
+        if self.arrays[array] == Type.F64_ARRAY:
+            raise Skip(call.lineno, f"`{_src(call)}`: searching a list of float depends on object identity for NaN in "
+                                    "CPython (`x in a` is `y is x or y == x` for each item), which an AOT program does "
+                                    "not have (aot/identity)")
+        e = self.value(node)
+        if e.type is Type.BOOL:
+            e = ir.BoolToInt(Type.I64, e)           # True == 1 in CPython
+        if e.type is not Type.I64:
+            raise Skip(call.lineno, f"`{_src(call)}`: the value searched for is "
+                                    f"{TYPE_NAME.get(e.type, e.type.value)}, not an int")
+        return e
+
+    def list_method_expr(self, func: ast.Attribute, node: ast.Call) -> ir.Expr:
+        """`a.pop()`, `a.pop(i)`, `a.index(v)`, `a.count(v)` as values; a method that returns None is refused here."""
+        assert isinstance(func.value, ast.Name)
+        array, m, args, line = func.value.id, func.attr, node.args, node.lineno
+        if m in LIST_STMT_METHODS:
+            raise Skip(line, f"`{_src(node)}` returns None; an AOT program calls list.{m}() as a statement")
+        if node.keywords:
+            raise Skip(line, f"`{_src(node)}`: keyword arguments of list.{m}() are not supported")
+        self.hoist_ok = False
+        if m == "pop" and len(args) <= 1:
+            self.list_effect(array)
+            at = self.list_index_arg(args[0], f"the index of `{array}.pop`") if args else None
+            return ir.ListPop(self.list_elem(array), array, at)
+        if m in ("index", "count") and len(args) == 1:
+            return ir.ListSearch(Type.I64, m, array, self.list_search_value(array, args[0], node))
+        raise Skip(line, f"`{_src(node)}`: list.{m}() is not supported in an AOT program yet")
+
+    def str_receiver(self, node: ast.expr) -> bool:
+        """Is `node` (the receiver of a method call) a str value rather than a module or an instance of a compiled
+        class? (A module name or a class local keeps the paths it had.)"""
+        if isinstance(node, ast.Name):
+            if not self.is_local(node.id):
+                return node.id in self.info.aot_consts and self.info.aot_consts[node.id].type is Type.STR
+            t = self.local_type(node.id, node.lineno) if node.id not in self.arrays else None
+            if t is Type.STR_OPT and node.id not in self.not_none:
+                raise _optional(node.lineno, node)                      # tier S2a: a method of a possible None
+            return t is Type.STR or t is Type.STR_OPT
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) \
+                and node.value.id in ("sys", "math", "time") and not self.is_local(node.value.id):
+            return False                                    # a module's attribute (sys.stdout.write, ...)
+        return True
+
+    def str_method(self, func: ast.Attribute, node: ast.Call) -> ir.Expr:
+        """`s.<method>(...)` of tier S1b (design 4.3.1), keyword arguments mapped to their places."""
+        line = node.lineno
+        name = func.attr
+        recv = self.sub(func.value)
+        if recv.type is not Type.STR:
+            raise Skip(line, f"`{_src(func)}`: `.{name}` of a {TYPE_NAME.get(recv.type, recv.type.value)} has no form "
+                             "in an AOT program")
+        params, result = STR_METHODS[name]
+        if len(node.args) > len(params):
+            raise Skip(line, f"str.{name}() takes at most {len(params)} argument(s)")
+        given: list[ast.expr | None] = list(node.args) + [None] * (len(params) - len(node.args))
+        for k in node.keywords:
+            # CPython: only split's sep / maxsplit and replace's count may be given by keyword (TypeError otherwise)
+            if k.arg not in STR_METHOD_KEYWORDS.get(name, ()) or given[params.index(k.arg)] is not None:
+                raise Skip(line, f"str.{name}() takes no keyword argument `{k.arg}` (CPython raises TypeError)")
+            given[params.index(k.arg)] = k.value
+        while given and given[-1] is None:
+            given.pop()
+        args: list[ir.Expr | None] = []
+        prefixes: list[ir.Expr] = []
+        any_of = False
+        for pname, a in zip(params, given):
+            if a is None or (isinstance(a, ast.Constant) and a.value is None):
+                if pname in ("sub", "old", "new", "iterable") or (pname == "prefix"):
+                    raise Skip(line, f"str.{name}() needs `{pname}`")
+                args.append(None)
+                continue
+            if pname == "prefix":
+                elts = [self.value(x) for x in a.elts] if isinstance(a, ast.Tuple) else [self.value(a)]
+                if any(x.type is not Type.STR for x in elts):
+                    raise Skip(line, f"str.{name}() takes a str or a tuple of str")
+                prefixes = elts
+                any_of = isinstance(a, ast.Tuple)
+                continue
+            v = self.value(a)
+            if pname == "iterable" and isinstance(v, ir.NewList):
+                v = ir.StrListDisplay(Type.STR_LIST, ())              # `sep.join([])`
+            want = Type.STR_LIST if pname == "iterable" else (
+                Type.I64 if pname in ("maxsplit", "count", "start", "end") else Type.STR)
+            if want is Type.I64:
+                v = self.str_int(v, a, f"`{pname}` of str.{name}()")
+            elif v.type is not want:
+                raise Skip(line, f"`{pname}` of str.{name}() is {TYPE_NAME.get(v.type, v.type.value)}, not "
+                                 f"{TYPE_NAME[want]}")
+            args.append(v)
+        if name in ("startswith", "endswith"):
+            # layout: start, end (None when absent), then every prefix (a tuple's elements, evaluated first, in order)
+            args = (args + [None, None])[:2] + list(prefixes)
+        return ir.StrMethod(result, recv, name, tuple(args), any_of)
+
+    def std_write(self, func: ast.Attribute, node: ast.Call) -> ir.Expr | None:
+        """`sys.stdout.write(s)` / `sys.stderr.write(s)` (AOT mode, tier S1); None: not one of these."""
+        v = func.value
+        if not (func.attr == "write" and isinstance(v, ast.Attribute) and v.attr in ("stdout", "stderr")
+                and isinstance(v.value, ast.Name) and v.value.id == "sys" and self.info.aot_sys
+                and not self.is_local("sys")):
+            return None
+        if node.keywords or len(node.args) != 1:
+            raise Skip(node.lineno, f"`sys.{v.attr}.write` takes one argument")
+        x = self.value(node.args[0])
+        if x.type is not Type.STR:
+            raise Skip(node.lineno, f"`sys.{v.attr}.write` of a {TYPE_NAME.get(x.type, x.type.value)}: the text stream "
+                                    "takes a str")
+        return ir.StrWrite(Type.I64, x, err=v.attr == "stderr")
 
     # --- fixed-layout classes ---
 
@@ -1966,6 +2601,8 @@ class _Lowerer:
     def cls_of_name(self, name: str) -> tuple[str | None, bool]:
         """(compiled class the name is declared to hold, whether its exact type is proved)."""
         classes = self.info.classes
+        if name in self.loop_cls:
+            return self.loop_cls[name], True        # tier S2a: the variable of a loop over a list[C]
         if name in self.params:
             p = self.params[name]
             if isinstance(p, ir.Param) and p.cls is not None:
@@ -1980,10 +2617,30 @@ class _Lowerer:
             kinds = list(self.annotations.get(name, []))
             if name not in self.annotations:
                 kinds += self.inferred.get(name, [])
-            found = {_class_of(k, classes) for _, k in kinds}
+            found = {_class_of(_aot_unqualified(k, classes) if self.info.aot else k, classes) for _, k in kinds}
             if len(found) == 1 and None not in found:
                 return next(iter(found))[0], self.info.aot  # type: ignore[index]
         return None, False
+
+    def cls_optional(self, name: str) -> bool:
+        """AOT mode, tier S2a: the class local or parameter `name` is declared `C | None` (so a field read or a
+        method call through it needs a proof that it is not None)."""
+        classes = self.info.classes
+        if name in self.params:
+            p = self.params[name]
+            return isinstance(p, ir.Param) and p.cls is not None and p.optional
+        if name in self.new_locals() or name not in self.bindings:
+            return False
+        kinds = list(self.annotations.get(name, []))
+        if name not in self.annotations:
+            kinds += self.inferred.get(name, [])
+        return any((c := _class_of(_aot_unqualified(k, classes), classes)) is not None and c[1] for _, k in kinds)
+
+    def check_not_none(self, name: str, cls: str, node: ast.AST) -> None:
+        """AOT mode, tier S2a: refuse a field or method use through a `C | None` name not proved not None here
+        (before S2a this read had no check, so a None crashed instead of raising AttributeError)."""
+        if self.info.aot and name not in self.not_none and self.cls_optional(name):
+            raise _optional(getattr(node, "lineno", 0), node, cls)
 
     def field_target(self, node: ast.Attribute) -> tuple[ir.Local, str, bool] | None:
         """(object, class, exact type proved) for `name.field` of a compiled class's field."""
@@ -1992,6 +2649,7 @@ class _Lowerer:
         cls, exact = self.cls_of_name(node.value.id)
         if cls is None or node.attr not in self.info.classes[cls].fields:
             return None
+        self.check_not_none(node.value.id, cls, node.value)
         return ir.Local(Type.OBJ, node.value.id), cls, exact
 
     def field_get(self, node: ast.Attribute) -> ir.Expr | None:
@@ -2023,6 +2681,9 @@ class _Lowerer:
             fd = next((f for f in decl.field_decls if f.name == target.attr), None)
             if fd is not None and fd.type in ir.ARRAYS:
                 value = self.array_expr(value_node, fd.type, f"field `{cls}.{target.attr}`")
+            elif fd is not None and fd.type is Type.OBJ_LIST and isinstance(value_node, ast.List) \
+                    and not value_node.elts:
+                value = ir.ObjListDisplay(Type.OBJ_LIST, fd.cls, ())       # tier S2a: `self.items = []`
             else:
                 value = self.value(value_node)
                 if fd is not None and fd.type == Type.F64 and value.type == Type.I64:
@@ -2097,8 +2758,18 @@ class _Lowerer:
 
     def aug_assign(self, node: ast.AugAssign) -> list[ir.Stmt]:
         line = node.lineno
-        op = self.binop_kind(node.op, node)
         target = node.target
+        if self.info.aot and isinstance(target, ast.Name) and self.is_list_name(target.id) \
+                and isinstance(node.op, ast.Add):
+            # tier S2a: `a += b` extends `a` in place (list.__iadd__: the same object, every alias sees it)
+            other = node.value
+            if not (isinstance(other, ast.Name) and self.is_list_name(other.id)
+                    and self.list_type(other.id) == self.list_type(target.id)):
+                raise Skip(line, f"`{_src(node)}`: an AOT program extends a list by another list name of its type")
+            self.hoist_ok = False
+            self.list_effect(target.id)
+            return self.take() + [ir.ListExtend(target.id, other.id)]
+        op = self.binop_kind(node.op, node)
         if isinstance(target, ast.Name):
             name = target.id
             if name in self.arrays:
@@ -2163,13 +2834,103 @@ class _Lowerer:
         self.refined = dict(head)
         return pre + [ir.ForObj(tuple(names), it, body, unpack)]
 
+    def for_str(self, node: ast.For) -> list[ir.Stmt]:
+        """AOT mode, tier S1: `for ch in s` over a str (`ir.ForStr`); the only iterable beside `range(...)`."""
+        line = node.lineno
+        if not isinstance(node.target, ast.Name):
+            raise Skip(line, f"loop target `{_src(node.target)}` is not supported (only a name)")
+        var = node.target.id
+        if var in self.arrays or var in self.params and self.params[var].type is not Type.STR:
+            raise Skip(line, f"loop variable `{var}` is not a str name")
+        it = self.value(node.iter)
+        if it.type is Type.OBJ_LIST:                                    # tier S2a: `for c in xs` of a list[C]
+            cls = self.list_cls_of(it, node.iter)
+            if var in self.arrays or var in self.params:
+                raise Skip(line, f"loop variable `{var}` is a list or a parameter")
+            t = self.types.get(var) or self.local_type(var, line)
+            if t is not Type.OBJ or self.cls_of_name(var)[0] not in (None, cls):
+                raise Skip(line, f"loop variable `{var}` is {TYPE_NAME.get(t, t.value)}, but a loop over a list of "
+                                 f"`{cls}` binds `{cls}` instances")
+            self.types[var] = Type.OBJ
+            self.loop_cls[var] = cls
+            pre = self.take()
+            killed = _stored_names(node.body) | {var}
+            head = {k: v for k, v in self.refined.items() if k not in killed}
+            self.refined = head
+            self.not_none -= killed
+            self.not_none.add(var)                                       # an item of a list[C] is never None
+            body = self.block(node.body)
+            self.refined = dict(head)
+            self.not_none -= killed
+            return pre + [ir.ForObjList(var, it, body)]
+        if it.type not in (Type.STR, Type.STR_LIST):
+            raise Skip(line, f"`for {var} in {_src(node.iter)}`: an AOT program iterates `range(...)`, a str and a list "
+                             "of str (the other containers arrive with tier S2)")
+        t = self.types.get(var) or (self.params[var].type if var in self.params else None)
+        if t is None:
+            t = self.local_type(var, line)
+            if t is Type.OBJ:       # nothing but the loop binds it: a loop over a str binds a str
+                self.types[var] = t = Type.STR
+        if t is not Type.STR:
+            raise Skip(line, f"loop variable `{var}` is {TYPE_NAME.get(t, t.value)}, but a loop over a str binds a str")
+        pre = self.take()
+        killed = _stored_names(node.body) | {var}
+        head = {k: v for k, v in self.refined.items() if k not in killed}
+        self.refined = head
+        body = self.block(node.body)
+        self.refined = dict(head)
+        return pre + [ir.ForStr(var, it, body)]
+
+    def for_list(self, node: ast.For) -> list[ir.Stmt]:
+        """AOT mode, tier S2a: `for v in a` over a `list[float]` / `list[int]`, as CPython's list iterator runs it: a
+        hidden index, and the length read again before every step, so an item appended in the body is visited and
+        a list shortened in the body ends the loop (Objects/listobject.c, listiter_next). Lowered to
+        `i = 0; while i < len(a): v = a[i]; i += 1; body` (the index moves before the body, so `continue` keeps it)."""
+        line = node.lineno
+        assert isinstance(node.iter, ast.Name)
+        array = node.iter.id
+        if not isinstance(node.target, ast.Name):
+            raise Skip(line, f"loop target `{_src(node.target)}` is not supported (only a name)")
+        var = node.target.id
+        if var in self.arrays or var in self.params:
+            raise Skip(line, f"loop variable `{var}` is a list or a parameter")
+        if array in _stored_names(node.body):
+            # CPython's iterator holds the list it started on; this lowering reads the name at every step
+            raise Skip(line, f"`for {var} in {array}` whose body rebinds `{array}`: CPython keeps iterating the "
+                             "first list, which an AOT program does not hold yet; iterate a copy or another name")
+        elem = Type.F64 if self.arrays[array] == Type.F64_ARRAY else Type.I64
+        t = self.types.get(var) or self.local_type(var, line)
+        if t is Type.OBJ:       # nothing but the loop binds it (Pyrefly gives a loop target no type): the element's
+            self.types[var] = t = elem
+        if t != elem:
+            raise Skip(line, f"loop variable `{var}` is {TYPE_NAME.get(t, t.value)}, but a loop over the "
+                             f"{TYPE_NAME[self.arrays[array]]} `{array}` binds {TYPE_NAME[elem]}")
+        idx = self.temp(ir.Const(Type.I64, 0))
+        pre = self.take()
+        killed = _stored_names(node.body) | {var}
+        head = {k: v for k, v in self.refined.items() if k not in killed}
+        self.refined = head
+        self.not_none -= killed
+        step = [ir.Assign(var, ir.Index(elem, array, idx)),
+                # proven: the loop test gives index < len(a) <= LEN_MAX (the verifier proves it again)
+                ir.Assign(idx.name, ir.BinOp(Type.I64, ir.BinOpKind.ADD, idx, ir.Const(Type.I64, 1), proven=True))]
+        body = self.block(node.body)
+        self.refined = dict(head)
+        self.not_none -= killed
+        cond = ir.Compare(Type.BOOL, ir.CompareKind.LT, idx, ir.Len(Type.I64, array))
+        return pre + [ir.While(cond, (*step, *body))]
+
     def for_range(self, node: ast.For) -> list[ir.Stmt]:
         line = node.lineno
         if node.orelse:
             raise Skip(line, "`for ... else` is not supported")
         if isinstance(node.iter, ast.Name) and node.iter.id in self.arrays:
+            if self.info.aot:
+                return self.for_list(node)
             raise self.array_misuse(node.iter.id, node.iter)
         if not (_is_range_call(node.iter) and self.builtin("range")):
+            if self.info.aot:
+                return self.for_str(node)
             return self.for_object(node)
         call = node.iter
         assert isinstance(call, ast.Call)
@@ -2249,6 +3010,8 @@ class _Lowerer:
         if node.value is None or (isinstance(node.value, ast.Constant) and node.value.value is None):
             if returns == Type.OBJ:
                 return [ir.Return(ir.Const(Type.OBJ, None))]
+            if returns == Type.STR_OPT:
+                return [ir.Return(ir.Const(Type.STR_OPT, None))]      # tier S2a
             if returns != Type.NONE:
                 raise Skip(node.lineno, f"returns None from a function declared to return "
                                         f"{TYPE_NAME[returns]}")
@@ -2322,6 +3085,14 @@ class _Lowerer:
             return ir.Compare(Type.BOOL, ir.CompareKind.NE, e, ir.Const(Type.I64, 0))
         if e.type == Type.F64:
             return ir.Compare(Type.BOOL, ir.CompareKind.NE, e, ir.Const(Type.F64, 0.0))
+        if e.type == Type.STR:      # AOT mode, tier S1: a str is true when it is not empty
+            return ir.Compare(Type.BOOL, ir.CompareKind.NE, ir.StrLen(Type.I64, e), ir.Const(Type.I64, 0))
+        if e.type == Type.STR_LIST:
+            return ir.Compare(Type.BOOL, ir.CompareKind.NE, ir.StrListLen(Type.I64, e), ir.Const(Type.I64, 0))
+        if e.type == Type.STR_OPT:      # tier S2a: `if x:` is `x is not None and len(x) != 0`
+            return ir.And(Type.BOOL, ir.Is(Type.BOOL, e, ir.Const(Type.OBJ, None), True),
+                          ir.Compare(Type.BOOL, ir.CompareKind.NE, ir.StrLen(Type.I64, ir.StrNarrow(Type.STR, e)),
+                                     ir.Const(Type.I64, 0)))
         if e.type == Type.INT:
             return ir.Compare(Type.BOOL, ir.CompareKind.NE, e,
                               ir.ToInt(Type.INT, ir.Const(Type.I64, 0)))
@@ -2346,11 +3117,17 @@ class _Lowerer:
                 return ir.Const(Type.F64, v)
             if v is None:
                 return ir.Const(Type.OBJ, None)
+            if isinstance(v, str) and self.info.aot:
+                return ir.Const(Type.STR, v)        # tier S1: any text (the back end embeds its code points)
             if isinstance(v, str):
                 return self.str_const(v, node)
             raise Skip(line, f"{type(v).__name__} constant `{_src(node)}` is not supported")
         if isinstance(node, ast.Name):
             return self.name(node)
+        if self.info.aot and isinstance(node, (ast.BinOp, ast.Subscript, ast.Call)):
+            made = self.list_make(node, Type.STR_LIST)                    # tier S2a: a new list[str]
+            if made is not None:
+                return made
         if isinstance(node, ast.BinOp):
             op = self.binop_kind(node.op, node)
             left = self.sub(node.left)
@@ -2390,6 +3167,8 @@ class _Lowerer:
                                      "right-hand side of an assignment is a native copy")
                 array, elem = self.array_of(node)
                 return ir.Index(elem, array, self.index(node.slice))
+            if self.info.aot:
+                return self.aot_subscript(node)
             if isinstance(node.slice, ast.Slice):
                 raise Skip(line, f"slice `{_src(node)}` is not supported")
             obj = self.boxed(self.sub(node.value), node.value)      # the container, then the index
@@ -2398,11 +3177,21 @@ class _Lowerer:
             return ir.GetItem(Type.OBJ, obj, key)
         if isinstance(node, ast.Dict) and not node.keys:
             return ir.NewDict(Type.OBJ)
+        if self.info.aot and isinstance(node, ast.List) and node.elts and isinstance(node.ctx, ast.Load) \
+                and not any(isinstance(e, ast.Starred) for e in node.elts):
+            elts = tuple(self.value(e) for e in node.elts)
+            if all(e.type is Type.STR for e in elts):
+                return ir.StrListDisplay(Type.STR_LIST, elts)      # tier S1b
+            classes = {self.cls_of_expr(e) for e in elts}
+            if all(e.type is Type.OBJ for e in elts) and len(classes) == 1 and None not in classes:
+                return ir.ObjListDisplay(Type.OBJ_LIST, next(iter(classes)), elts)    # tier S2a: list[C]
+            raise Skip(line, f"the list display `{_src(node)}` is not a list of str; a native list of floats or ints "
+                             "is created by assigning it to a list name")
         if isinstance(node, ast.List) and not node.elts and isinstance(node.ctx, ast.Load):
             return ir.NewList(Type.OBJ)
         if isinstance(node, ast.JoinedStr):
             if self.info.aot:
-                raise Skip(line, "an f-string is only supported as an argument of print in an AOT program")
+                return self.aot_fstring(node, value=True)
             return self.fstring(node)
         if isinstance(node, ast.IfExp) and self.info.aot:
             return self.aot_ifexp(node)
@@ -2451,7 +3240,10 @@ class _Lowerer:
             if name not in self.params and name not in self.temps and all(
                     b.how == "annotation" for b in self.bindings[name]):
                 raise Skip(node.lineno, f"`{name}` is read but never assigned")
-            return ir.Local(self.local_type(name, node.lineno), name)
+            t = self.local_type(name, node.lineno)
+            if t is Type.STR_OPT and name in self.not_none:
+                return ir.StrNarrow(Type.STR, ir.Local(t, name))       # tier S2a: proved not None here
+            return ir.Local(t, name)
         if name in self.info.aot_consts:
             return self.info.aot_consts[name]       # AOT mode: a typed constant, never an object read
         if name in self.candidates and self.direct_write:
@@ -2469,8 +3261,8 @@ class _Lowerer:
         if self.info.aot:
             return Skip(node.lineno, f"the list `{name}` is used other than by indexing, len(), as a `[:]` source, as "
                                      f"an argument of a program function, as a return value or by binding it to a "
-                                     f"name (in `{_src(where)}`): the AOT mode has no iteration, comparison, "
-                                     "printing, slicing or method of a list yet")
+                                     f"name (in `{_src(where)}`): the AOT mode has no comparison, printing, "
+                                     "slicing or method of a list yet")
         if name in self.local_arrays:
             return Skip(node.lineno, f"local array `{name}` is used other than by indexing, len() "
                                      f"or as a `[:]` source (in `{_src(where)}`)")
@@ -2508,6 +3300,8 @@ class _Lowerer:
 
     def arith(self, op: ir.BinOpKind, left: ir.Expr, right: ir.Expr, node: ast.AST,
               inplace: bool = False) -> ir.Expr:
+        if self.info.aot and Type.STR in (left.type, right.type):
+            return self.str_arith(op, left, right, node)
         e = self._arith(op, left, right, node, inplace)
         if isinstance(e, ir.BinOp) and e.type in ir.SCALARS and self.numpy:
             e = dataclasses.replace(e, line=node.lineno)      # the warning site (#220)
@@ -2625,6 +3419,25 @@ class _Lowerer:
         # A chain is an And of its links: as a condition (2) that And is the condition; as an
         # operand of the condition's And/Or (1) it would be nested, so only a single link there.
         obj_ok = cond == 2 or (cond == 1 and len(node.ops) == 1)
+        if self.info.aot and len(node.ops) == 1 and type(node.ops[0]) in COMPARE \
+                and all(isinstance(x, ast.Name) and self.is_list_name(x.id) for x in (node.left, node.comparators[0])):
+            # tier S2a: `a == b`, `a < b` ... of two list names
+            a, b = node.left.id, node.comparators[0].id                      # type: ignore[attr-defined]
+            if self.list_type(a) != self.list_type(b):
+                raise Skip(node.lineno, f"`{_src(node)}` compares lists of two types, which an AOT program does not do")
+            if self.list_type(a) == Type.F64_ARRAY:
+                raise Skip(node.lineno, f"`{_src(node)}`: comparing lists of float tests each pair by identity first in "
+                                        "CPython (a NaN equals itself there), which an AOT program does not have "
+                                        "(aot/identity)")
+            return ir.ListCompare(Type.BOOL, COMPARE[type(node.ops[0])], a, b)
+        if self.info.aot and len(node.ops) == 1 and isinstance(node.ops[0], (ast.In, ast.NotIn)) \
+                and isinstance(node.comparators[0], ast.Name) and self.is_list_name(node.comparators[0].id):
+            # tier S2a: `v in a` / `v not in a` of a list[int] / list[str] (a list of float: aot/identity)
+            name = node.comparators[0].id
+            found: ir.Expr = ir.ListSearch(Type.BOOL, "in", name, self.list_search_value(name, node.left, node))
+            if isinstance(node.ops[0], ast.NotIn):
+                found = ir.UnaryOp(Type.BOOL, ir.UnaryOpKind.NOT, found)
+            return found
         left = self.sub(node.left)
         links: list[ir.Expr] = []
         last = len(node.ops) - 1
@@ -2654,6 +3467,12 @@ class _Lowerer:
 
     def link(self, op: ast.cmpop, left: ir.Expr, right: ir.Expr, obj_ok: bool,
              node: ast.Compare) -> ir.Expr:
+        if self.info.aot:
+            left, right = _unnarrow_against_none(left, right), _unnarrow_against_none(right, left)
+        if self.info.aot and Type.STR_OPT in (left.type, right.type):
+            return self.opt_link(op, left, right, node)
+        if self.info.aot and Type.STR in (left.type, right.type):
+            return self.str_link(op, left, right, node)
         if isinstance(op, (ast.Is, ast.IsNot)):
             if left.type != Type.OBJ or right.type != Type.OBJ:
                 raise Skip(node.lineno, f"identity comparison `{_src(node)}` of a native "
@@ -2688,6 +3507,7 @@ class _Lowerer:
     def boolop(self, node: ast.BoolOp, cond: int) -> ir.Expr:
         word = "and" if isinstance(node.op, ast.And) else "or"
         operands = []
+        nn_entry = set(self.not_none)
         for i, v in enumerate(node.values):
             if i > 0:
                 self.hoist_ok = False  # evaluated only if the earlier operands did not decide
@@ -2698,6 +3518,9 @@ class _Lowerer:
                 raise Skip(node.lineno, f"`{word}` on a non-bool operand `{_src(v)}` outside a "
                                         "condition (it returns the operand)")
             operands.append(e)
+            # tier S2a: `x is not None and len(x) > 0` (the later operands run only when the earlier decided so)
+            self.not_none |= _none_facts(e, word == "and")
+        self.not_none = nn_entry
         result = operands[0]
         for e in operands[1:]:
             result = (ir.And if word == "and" else ir.Or)(Type.BOOL, result, e)
@@ -2760,6 +3583,23 @@ class _Lowerer:
             math = self.math_call(func.attr, node)
             if math is not None:
                 return math
+
+        if self.info.aot and isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) \
+                and self.is_list_name(func.value.id) and func.attr in LIST_METHOD_NAMES:
+            return self.list_method_expr(func, node)                     # tier S2a
+        if self.info.aot and isinstance(func, ast.Attribute) and func.attr in LIST_METHOD_NAMES \
+                and isinstance(func.value, ast.Attribute):
+            held = self.field_list_receiver(node)                       # tier S2a: `self.items.pop()`
+            if held is not None:
+                assert isinstance(held.func, ast.Attribute)
+                return self.list_method_expr(held.func, held)
+
+        if self.info.aot and isinstance(func, ast.Attribute):
+            write = self.std_write(func, node)
+            if write is not None:
+                return write
+            if func.attr in STR_METHODS and self.str_receiver(func.value):
+                return self.str_method(func, node)
 
         if self.info.aot and isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) \
                 and func.value.id == "time" and self.info.aot_time \
@@ -2833,6 +3673,9 @@ class _Lowerer:
         line = node.lineno
         if name == "len" and self.builtin("len") and len(args) == 1 and self.is_sys_argv(args[0]):
             return ir.ArgvLen(Type.I64)
+        found = self.aot_str_builtin(name, node)
+        if found is not None:
+            return found
         if name == "int" and self.builtin("int"):
             if len(args) == 1 and isinstance(args[0], ast.Subscript) and self.is_sys_argv(args[0].value) \
                     and not isinstance(args[0].slice, ast.Slice):
@@ -2846,6 +3689,8 @@ class _Lowerer:
                 return ir.StrToInt(Type.I64, args[0].value)
             if len(args) == 1:
                 x = self.value(args[0])
+                if x.type == Type.STR:
+                    return ir.StrParseInt(Type.I64, x)
                 if x.type == Type.I64:
                     return x
                 if x.type == Type.F64:
@@ -2890,6 +3735,9 @@ class _Lowerer:
             ok = self.hoist_ok
             a = self.once(self.value(args[0]), args[0], ok)
             b = self.once(self.value(args[1]), args[1], ok)
+            if a.type == b.type == Type.STR:
+                kind = ir.CompareKind.LT if name == "min" else ir.CompareKind.GT
+                return self.aot_cond(ir.StrCompare(Type.BOOL, kind, b, a), b, a, node)
             if a.type != b.type or a.type not in (Type.I64, Type.F64):
                 raise Skip(line, f"{name}() needs two ints or two floats in an AOT program, not "
                                  f"{TYPE_NAME[a.type]} and {TYPE_NAME[b.type]} (the result's type is that of the "
@@ -2919,20 +3767,33 @@ class _Lowerer:
         its test gives, as an `if` statement's branches are (the verifier does the same)."""
         cond = self.truth(self.sub(node.test), node.test)
         entry = self.refined
+        nn_entry = set(self.not_none)
         self.hoist_ok = False                       # a branch runs only when its test says so
         self.refined, dead = self.narrowed(cond, True, entry)
         self.dead += dead
+        self.not_none = nn_entry | _none_facts(cond, True)
         then = self.sub(node.body)
         self.dead -= dead
         self.refined, dead = self.narrowed(cond, False, entry)
         self.dead += dead
+        self.not_none = nn_entry | _none_facts(cond, False)
         orelse = self.sub(node.orelse)
         self.dead -= dead
         self.refined = entry
-        if then.type != orelse.type or then.type not in ir.SCALARS:
+        self.not_none = nn_entry
+        if self.info.aot:                                   # tier S2a: a str or None branch makes a `str | None`
+            none = (lambda e: isinstance(e, ir.Const) and e.value is None)
+            if none(then) and orelse.type in (Type.STR, Type.STR_OPT):
+                then = ir.Const(Type.STR_OPT, None)
+            if none(orelse) and then.type in (Type.STR, Type.STR_OPT):
+                orelse = ir.Const(Type.STR_OPT, None)
+        if {then.type, orelse.type} <= {Type.STR, Type.STR_OPT} and then.type != orelse.type:
+            return ir.Cond(Type.STR_OPT, cond, then, orelse)             # (the node's type is the wider one)
+        if then.type != orelse.type or (then.type not in ir.SCALARS
+                                        and then.type not in (Type.STR, Type.STR_OPT)):
             raise Skip(node.lineno, f"the branches of `{_src(node)}` are {TYPE_NAME[then.type]} and "
-                                    f"{TYPE_NAME[orelse.type]}; an AOT program needs two ints, two floats or two "
-                                    "bools")
+                                    f"{TYPE_NAME[orelse.type]}; an AOT program needs two ints, two floats, two "
+                                    "bools or two strs")
         return ir.Cond(then.type, cond, then, orelse)
 
     def aot_call(self, name: str, node: ast.Call, callee: ir.Function, tuple_ok: bool) -> ir.Expr:
@@ -2955,9 +3816,21 @@ class _Lowerer:
                                          f"`{name}` is {TYPE_NAME[p.type]}")
                 args.append(ir.Local(p.type, a.id))
             else:
-                args.append(self.value(a))
+                v = self.value(a)
+                if isinstance(p, ir.Param) and p.type is Type.STR_LIST and isinstance(v, ir.NewList):
+                    v = ir.StrListDisplay(Type.STR_LIST, ())        # tier S1b: `f([])` for a list[str] parameter
+                if isinstance(p, ir.Param) and p.type is Type.OBJ_LIST:
+                    if isinstance(v, ir.NewList):
+                        v = ir.ObjListDisplay(Type.OBJ_LIST, p.cls, ())     # tier S2a: `f([])` for a list[C]
+                    elif v.type is Type.OBJ_LIST and self.list_cls_of(v, a) != p.cls:
+                        raise Skip(a.lineno, f"`{_src(a)}` is a list of `{self.list_cls_of(v, a)}`, but parameter "
+                                             f"`{p.name}` of `{name}` is a list of `{p.cls}`")
+                if isinstance(p, ir.Param) and p.type is Type.STR_OPT:
+                    v = self.coerce(v, Type.STR_OPT, a, f"parameter `{p.name}` of `{name}`")   # tier S2a
+                args.append(v)
         direct = all(isinstance(p, ir.ArrayParam)
                      or (p.type != Type.OBJ and e.type == p.type)
+                     or (p.type is Type.STR_OPT and e.type is Type.STR)         # tier S2a: a str is a `str | None`
                      or (isinstance(p, ir.Param) and p.cls is not None and e.type == Type.OBJ)
                      for p, e in zip(callee.params, args))
         if not direct and any(isinstance(p, ir.ArrayParam) for p in callee.params):
@@ -2994,6 +3867,7 @@ class _Lowerer:
             return None
         assert cls is not None
         if self.info.aot:
+            self.check_not_none(func.value.id, cls, func.value)
             recv: ir.Expr = ir.Local(Type.OBJ, func.value.id)
             self.hoist_ok = False
             args = [recv] + [self.value(a) for a in node.args]
@@ -3080,6 +3954,14 @@ class _Lowerer:
     def coerce(self, value: ir.Expr, target: Type, node: ast.AST, what: str) -> ir.Expr:
         if value.type == target:
             return value
+        if target is Type.STR_OPT and self.info.aot and value.type is Type.STR:
+            return value                                        # tier S2a: a str is a `str | None`
+        if target is Type.STR_OPT and self.info.aot and isinstance(value, ir.Const) and value.value is None:
+            return ir.Const(Type.STR_OPT, None)
+        if target is Type.STR and self.info.aot and value.type is Type.STR_OPT:
+            raise _optional(getattr(node, "lineno", 0), node)            # tier S2a
+        if target is Type.STR_LIST and isinstance(value, ir.NewList) and self.info.aot:
+            return ir.StrListDisplay(Type.STR_LIST, ())          # tier S1b: `x: list[str] = []`
         if target == Type.OBJ and (value.type in ir.SCALARS or value.type == Type.INT):
             return ir.Box(Type.OBJ, value)
         if target == Type.INT and value.type == Type.I64:
@@ -3133,6 +4015,10 @@ class _Lowerer:
             if iv is not None:
                 self.found_bounds[name] = _join(self.found_bounds.get(name), iv)
         self.refined.pop(name, None)
+        self.not_none.discard(name)
+        if value.type is Type.STR or isinstance(value, ir.New) \
+                or (isinstance(value, ir.Local) and value.name in self.not_none):
+            self.not_none.add(name)                 # tier S2a: a str, a new object or a proved name is not None
 
     def narrowed(self, cond: ir.Expr, truth: bool, base: dict[str, tuple[int, int]]
                  ) -> tuple[dict[str, tuple[int, int]], bool]:
@@ -3291,13 +4177,36 @@ def _at(s: ir.Stmt, k: int | None) -> ir.Stmt:
     return dataclasses.replace(s, **changes) if changes else s
 
 
+def _none_facts(cond: ir.Expr, truth: bool) -> set[str]:
+    """AOT mode, tier S2a: the `str | None` locals `cond` proves not None when it evaluates to `truth`."""
+    if isinstance(cond, ir.Is) and isinstance(cond.left, ir.Const) and cond.left.value is None:
+        cond = dataclasses.replace(cond, left=cond.right, right=cond.left)          # `None is x`
+    if isinstance(cond, ir.Is) and isinstance(cond.right, ir.Const) and cond.right.value is None \
+            and isinstance(cond.left, ir.Local) and cond.left.type in (Type.STR_OPT, Type.OBJ):
+        return {cond.left.name} if cond.negate == truth else set()        # (OBJ: a `C | None` class local)
+    if isinstance(cond, ir.And) and truth:
+        return _none_facts(cond.left, True) | _none_facts(cond.right, True)
+    if isinstance(cond, ir.Or) and not truth:
+        return _none_facts(cond.left, False) | _none_facts(cond.right, False)
+    if isinstance(cond, ir.UnaryOp) and cond.op is ir.UnaryOpKind.NOT:
+        return _none_facts(cond.operand, not truth)
+    return set()
+
+
+def _unnarrow_against_none(e: ir.Expr, other: ir.Expr) -> ir.Expr:
+    """`x is None` where x reads as proved (a StrNarrow): the comparison is of the `str | None` value itself."""
+    if isinstance(e, ir.StrNarrow) and isinstance(other, ir.Const) and other.value is None:
+        return e.value
+    return e
+
+
 def _diverges(body: tuple[ir.Stmt, ...]) -> bool:
     """Control never reaches the end of `body`: it ends in a return, break or continue, or in an
     `if` whose branches both do (verify.py reads these as unreachable states too)."""
     if not body:
         return False
     last = body[-1]
-    if isinstance(last, (ir.Return, ir.ReturnTuple, ir.Break, ir.Continue)):    # (ReturnTuple: AOT mode only)
+    if isinstance(last, (ir.Return, ir.ReturnTuple, ir.Break, ir.Continue, ir.SysExit)):  # (AOT: ReturnTuple, SysExit)
         return True
     if isinstance(last, ir.If):
         return _diverges(last.then) and _diverges(last.orelse)

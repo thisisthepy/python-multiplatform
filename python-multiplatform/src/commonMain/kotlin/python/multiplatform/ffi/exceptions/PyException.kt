@@ -154,7 +154,8 @@ open class PyException(
                 else -> fromExceptionInstance(causePointer)
             }
 
-            return PyException(message, type, value, traceback, context, cause)
+            // The Kotlin class mirrors the nearest built-in exception class (#524).
+            return python.multiplatform.ffi.exceptions.errors.BuiltinExceptions.create(message, type, value, traceback, context, cause)
         }
 
         /** `str(excPointer)`, used as this [PyException]'s [errMsg]. */
@@ -206,6 +207,24 @@ open class PyException(
         synthesized = made
         return made
     }
+
+    /**
+     * The Kotlin [Throwable] this Python exception is the proxy of, the same instance, or `null`
+     * when it is any other Python exception (SPEC U-2 and O-3, #164 item 6).
+     *
+     * A Kotlin throwable that reached Python is a `python_multiplatform.KotlinThrowable` there, an
+     * exception that owns a handle on the original object (owner decision 2026-11-22: "returning it
+     * to Kotlin yields the same Throwable instance (identity)"). The property name is an agent
+     * proposal, not confirmed by the owner. Read while the Python exception is alive, which this
+     * [PyException] guarantees by holding [value].
+     */
+    val kotlinThrowable: Throwable?
+        get() {
+            val live = value ?: return null
+            return python.multiplatform.ffi.Python3.withPython {
+                python.multiplatform.ffi.upcall.KotlinThrowableProxy.throwableOf(live.pointer)
+            }
+        }
 
     /** Re-raises this exception into the current Python error indicator (`PyErr_Restore`/`PyErr_SetObject`). */
     fun restore() {

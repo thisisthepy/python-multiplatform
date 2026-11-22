@@ -206,9 +206,9 @@ actually returns, not from what the type looks like.
 | `int` | `PyLong_AsLongLong` | `Long` | no, a scalar copy (64-bit range only; wider ints do not round-trip) | yes |
 | `float` | `PyFloat_AsDouble` | `Double` | no, a scalar copy | yes |
 | `str` | `PyUnicode_AsUTF8` | `String` | **the C call returns a `const char*` owned by CPython**, but that pointer never leaves the binding: `EmbedAPI`'s `expect` returns `String?`, and each platform decodes at the boundary (`toKString()` on Kotlin/Native, `Panama.readUtf8String` on desktop, `Wasm.readUtf8String` on wasmJs). The `String` is a copy. | yes, the `String`, never the pointer |
-| `list`, `tuple` | `toNativeList()`, recursive | `List<Any?>` | no, every element is itself one of the rows above | yes, as a **snapshot** |
-| `dict` | `toNativeMap()`, recursive over a snapshot of the entries | `Map<Any?, Any?>` | no | yes, as a **snapshot** |
-| `set`, `frozenset` | `toNativeSet()`, recursive over `PySequence_Tuple` | `Set<Any?>` | no | yes, as a **snapshot** |
+| `list`, `tuple` | `toList()`, recursive | `List<Any?>` | no, every element is itself one of the rows above | yes, as a **snapshot** |
+| `dict` | `toMap()`, recursive over a snapshot of the entries | `Map<Any?, Any?>` | no | yes, as a **snapshot** |
+| `set`, `frozenset` | `toSet()`, recursive over `PySequence_Tuple` | `Set<Any?>` | no | yes, as a **snapshot** |
 | anything else *inside a container* | `pyObjectToNative`'s `else`: `str(obj)` | `String` | no, a copy, but lossy and one-way | yes |
 | `bytes`, `bytearray` | `bytes.hex()` across the boundary, decoded to bytes on this side | `ByteArray` | yes, a copy, and `bytearray` a **snapshot** | yes |
 | `memoryview` | **none, refused** | `null` / `PyTypeError` | the buffer protocol hands out a pointer *into* the object, and a copy would still not carry format, shape and strides | never |

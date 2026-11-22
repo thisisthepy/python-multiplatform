@@ -28,9 +28,11 @@ private const val PY_TP_FREE = 74
 /** `Py_tp_members` from CPython's `typeslots.h`. */
 private const val PY_TP_MEMBERS = 72
 
-/** `Py_T_LONG` from `descrobject.h` -- an 8-byte signed integer member, the same width as the
- *  handle slot [handleSlot] already reads and writes by hand. */
-private const val PY_T_LONG = 2
+/** `Py_T_LONGLONG` from `descrobject.h`: an 8-byte signed integer member on every target, the same
+ *  width as the handle slot [handleSlot] already reads and writes by hand. Not `Py_T_LONG`: C `long`
+ *  is 4 bytes on Windows (LLP64), so a handle written from Python reached only half the slot on
+ *  mingwX64 (batch run 44980924060, `CycleCollectionTest.aHandleWrittenFromPythonClosesACycleThroughAKotlinField`). */
+private const val PY_T_LONGLONG = 17
 
 /** `Py_RELATIVE_OFFSET` from `descrobject.h` (CPython 3.12+): the member's `offset` is relative to
  *  the type's own extra storage -- the same base [PyObject_GetTypeData] already computes for
@@ -90,7 +92,7 @@ internal fun allocPermanentCString(s: String): CPointer<ByteVar> {
  * `Py_tp_members` slot's pointer rather than copying it, the same reason [allocPermanentCString]
  * is permanent.
  *
- * The first entry is the handle slot itself: `_pm_handle`, [PY_T_LONG] (the same 8-byte width
+ * The first entry is the handle slot itself: `_pm_handle`, [PY_T_LONGLONG] (the same 8-byte width
  * [handleSlot] already reads and writes), `offset = 0` with [PY_RELATIVE_OFFSET] set -- the same
  * base [PyObject_GetTypeData] computes for [handleSlot] and [proxyTraverse] -- so a Python-level
  * `self._pm_handle = h` on an instance of this type, or of a further Python subclass, writes
@@ -105,7 +107,7 @@ internal fun allocPermanentCString(s: String): CPointer<ByteVar> {
 private fun allocHandleMemberDefs(): CPointer<PyMemberDef> {
     val members = nativeHeap.allocArray<PyMemberDef>(2)
     members[0].name = allocPermanentCString("_pm_handle")
-    members[0].type = PY_T_LONG
+    members[0].type = PY_T_LONGLONG
     members[0].offset = 0L
     members[0].flags = PY_RELATIVE_OFFSET
     members[0].doc = null

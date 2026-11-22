@@ -94,10 +94,13 @@ include(":python-multiplatform-gradle-plugin-fixtures:klib-artifact")
 // Issue #90: an iOS app from outside `:python-multiplatform`, using only the bindings plugin's own
 // iOS tasks (Python.xcframework, linker options, stdlib staging, the Xcode script). See its README.
 include(":python-multiplatform-gradle-plugin-fixtures:ios-consumer")
-// The container project for the three above (no build file, no plugins), then each fixture.
+// SPEC L-9c (#191): a macosArm64 / linuxX64 app from outside `:python-multiplatform`, linked and packaged
+// only by the bindings plugin (libpython, its run-time search path, PYTHONHOME, python-multiplatform-home).
+include(":python-multiplatform-gradle-plugin-fixtures:desktop-native-consumer")
+// The container project for the fixtures above (no build file, no plugins), then each fixture.
 project(":python-multiplatform-gradle-plugin-fixtures").projectDir =
     file("python-multiplatform-gradle-plugin/fixtures")
-for (name in listOf("artifact", "artifact-valueclass", "klib-artifact", "ios-consumer")) {
+for (name in listOf("artifact", "artifact-valueclass", "klib-artifact", "ios-consumer", "desktop-native-consumer")) {
     project(":python-multiplatform-gradle-plugin-fixtures:$name").projectDir =
         file("python-multiplatform-gradle-plugin/fixtures/$name")
 }
@@ -120,3 +123,10 @@ include(":python-multiplatform-compose:fixtures:compose")
 // drawn by `PythonContent`. A fixture and not `sample/`, which is user-authored spec material. Its
 // desktopTest needs `-PpythonxComposeWheel=<wheel>`; see its README.
 include(":python-multiplatform-compose:fixtures:notebook-e2e")
+// #191: the composable claim on Kotlin/Native desktop (macosArm64, linuxX64): the fork's Compose klibs
+// walked by `KlibScanner`, `Text` / `Button` (more than 6 defaults) bound through the B3 compiler
+// plugin, rendered from Python with `ImageComposeScene` in the host test.
+include(":python-multiplatform-compose:fixtures:compose-native")
+// #191: notebook-e2e's UI.ipynb scenarios on Kotlin/Native desktop (macosArm64): the same wheel, app
+// module and pixel comparisons, in a K/N test executable. Needs `-PpythonxComposeWheel=<wheel>`.
+include(":python-multiplatform-compose:fixtures:notebook-native")
