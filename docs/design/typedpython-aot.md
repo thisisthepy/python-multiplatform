@@ -401,12 +401,19 @@ unpacked), `clear`, `reverse`, `L[i] = t`, `del L[i]`, `del L[a:b]`; `len`, `L[i
 by a constant (`L[i][0]` is `L__0[i]`); `for t in L` and `for a, b in L` (CPython's list iterator: the length read at
 each step, an item appended in the body is visited); `print` / `str` / `repr` / f-strings (the repr is built in a loop
 before the statement, so such a statement may call nothing else); passing to a `list[tuple[...]]` parameter of a module
-function. Refused with the reason: a bool element (there is no list of bool yet), `in` / `index` / `count` / `remove` /
-`==` / sorting / returning such a list, and one in a field or a method parameter: these come with tuple objects.
+function; `t in L`, `not in`, `L.count(t)`, `L.index(t)`, `L.remove(t)` (a loop over the element lists comparing each
+item with `t` element by element, as CPython's tuple `==` does; the ValueError of `index` and `remove` is CPython's own,
+raised by the same method of an empty `list[int]`, since an AOT program has no `raise` yet), and `==`, `!=`, `<`, `<=`,
+`>`, `>=` of two such lists (`==` of each element list; an ordering finds the first index where the items differ, then
+compares the lengths there or the two items as tuples). A search or an ordering is computed before its statement like a
+repr, so the statement calls nothing else, a `while` condition may not hold one, and the tuple searched for is made of
+names and constants. Refused with the reason: a bool element (there is no list of bool yet), a float element in a search
+or a comparison (CPython tests each pair by identity first, a NaN equals itself there: `aot/identity`), sorting (S2c) or
+returning such a list, and one in a field or a method parameter: these come with tuple objects.
 The same change gives `xs: list[int] = []` and `list[float]` (the creation `[v] * 0`), and `words[i] = s` for a list of
 str (the new item held before the old one is released; `IndexError: list assignment index out of range`).
-Still to come in S2a: tuple objects (a tuple in a field, the refused list operations above; dict keys in S2b) and a
-slice of a tuple.
+Still to come in S2a: tuple objects (a tuple in a field, returning a list of tuples, one in a field or a method
+parameter; dict keys in S2b) and a slice of a tuple.
 
 **dict and set (S2b).** `dict[K, V]` with K int, str, bool or a tuple of those; V any S2 type. The layout is CPython's
 compact dict (an index table of slots and an entry array in insertion order, open addressing with CPython's

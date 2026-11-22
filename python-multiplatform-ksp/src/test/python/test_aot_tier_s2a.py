@@ -1051,6 +1051,58 @@ def test_a_list_of_tuples(tmp_path: Path):
     _compare(tmp_path, LIST_OF_TUPLES, [["0"], ["2"], ["3"], ["-4"]])
 
 
+LIST_OF_TUPLES_SEARCH = """
+import sys
+
+
+def main() -> None:
+    n = int(sys.argv[1])
+    ps: list[tuple[int, str]] = [(1, "a"), (2, "b"), (n, "c"), (2, "b")]
+    qs = list(ps)
+    t = (2, "b")
+    k = 5
+    print((n, "c") in ps, (k, "c") not in ps, t in ps, ps.count(t), ps.count((k, "z")), ps.index((n, "c")))
+    print(ps == qs, ps != qs, ps < qs, ps <= qs, ps == qs[:2] + qs[2:])
+    qs.append((0, "x"))
+    print(ps == qs, ps < qs, qs > ps)
+    qs[1] = (2, "a")
+    print(ps < qs, ps > qs, ps >= qs)
+    e: list[tuple[int, int]] = []
+    f: list[tuple[int, int]] = []
+    print(e == f, e < f, e <= f, (1, 2) in e, e.count((1, 1)))
+    f.append((n, 0))
+    e.append((1, n))
+    print(e < f, e > f, e <= f, e >= f, e == f)
+    i = 0
+    while i < 3:
+        e.append((i, i))
+        found = (i, i) in e
+        print(found, e.count((i, i)), e.index((i, i)))
+        i += 1
+    ps.remove(t)
+    print(ps, len(ps))
+    if n > 0 and (k, "q") in ps:
+        print("never")
+    m = (n, n)
+    if n == 3:
+        e.remove(m)
+    print(e)
+    print(ps.index((k, "c")))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_a_list_of_tuples_searched_and_compared(tmp_path: Path):
+    """`in`, `not in`, `count`, `index` and `remove` of a list of tuples (CPython's item `==`, element by element), and
+    `==`, `!=`, `<`, `<=`, `>`, `>=` of two lists of tuples (lengths, then the first items that differ, as tuples);
+    `ValueError: list.index(x): x not in list` (cases 0, 2 and -1, last line) and `ValueError: list.remove(x): x not in
+    list` (case 3)."""
+    _compare(tmp_path, LIST_OF_TUPLES_SEARCH, [["0"], ["2"], ["3"], ["5"], ["-1"]])
+
+
 LIST_STORE_AND_EMPTY = """
 import sys
 
@@ -1098,7 +1150,14 @@ TUPLE_MAIN = '\n\ndef main() -> None:\n    print(f(1))\n\n\nif __name__ == "__ma
     ("def f(i: int) -> bool:\n    t = (i * 0.5, 1)\n    return 1.0 in t\n", "(aot/identity)"),
     ("def f(i: int) -> int:\n    t = (i, 'a')\n    for v in t:\n        pass\n    return 0\n", "different types"),
     ("def f(i: int) -> bool:\n    t = (1, 2)\n    return i + 1 in t\n", "bind the value to a name first"),
-    ("def f(i: int) -> bool:\n    ps = [(i, 'a')]\n    return (i, 'a') in ps\n", "come with tuple objects"),
+    ("def f(i: int) -> int:\n    ps = [(i, 'a')]\n    return ps\n", "returning one are not in this step"),
+    ("def f(i: int) -> bool:\n    ps = [(i * 0.5, 1)]\n    return (1.0, 1) in ps\n", "(aot/identity)"),
+    ("def f(i: int) -> bool:\n    ps = [(i * 0.5, 1)]\n    return ps == ps\n", "(aot/identity)"),
+    ("def f(i: int) -> int:\n    ps = [(i, 1)]\n    while (i, 1) in ps:\n        ps.pop()\n    return 0\n",
+     "would be computed once"),
+    ("def f(i: int) -> int:\n    ps = [(i, 1)]\n    return ps.count((i, i + 1))\n", "bind the values to names first"),
+    ("def f(i: int) -> int:\n    ps = [(i, 1)]\n    return ps.count((i, 1)) + f(i - 1)\n", "bind the call's value"),
+    ("def f(i: int) -> bool:\n    ps = [(i, 1)]\n    qs = [(i, 'a')]\n    return ps == qs\n", "of its shape"),
     ("def f(i: int) -> int:\n    ps = [(i, 'a')]\n    ps.sort()\n    return 0\n", "`ps.sort` is outside"),
     ("def f(i: int) -> int:\n    ps: list[tuple[int, bool]] = []\n    return 0\n", "no list of bool yet"),
     ("def f(i: int) -> int:\n    ps = [(i, 'a')]\n    print(ps, f(i - 1))\n    return 0\n", "bind the call's value"),
