@@ -63,7 +63,8 @@ class WalkedKlibArtifactTableTest {
      * its `suspend` members (`Job.join`, `SendChannel.send`, `Semaphore.acquire`, ...), and since #191
      * the top-level functions with unbounded type parameters (`MutableStateFlow`, `flowOf`, `stateIn`)
      * the members taking a `kotlin.Any?` (`Mutex.lock(owner)`) and the declarations on a star-projected
-     * type (`CancellableContinuation<*>.disposeOnCancellation`), as the jar walker binds them (B-1).
+     * type (`CancellableContinuation<*>.disposeOnCancellation`) and the constructors taking a `String?`
+     * (`ClosedReceiveChannelException(message)`), as the jar walker binds them (B-1).
      * `KlibScannerTest.aRealThirdPartyKlibIsScannedWithoutCrashingAndBindsItsHandleFactoriesAndMembers` pins the
      * same list walking the klib directly; if the two disagree, the wiring between `KlibScanner` and
      * this generated table is what broke.
@@ -124,6 +125,8 @@ class WalkedKlibArtifactTableTest {
                 "kotlinx.coroutines.channels.ChannelIterator.hasNext",
                 "kotlinx.coroutines.channels.ChannelIterator.next",
                 "kotlinx.coroutines.channels.ChannelResult.Companion",
+                "kotlinx.coroutines.channels.ClosedReceiveChannelException",
+                "kotlinx.coroutines.channels.ClosedSendChannelException",
                 "kotlinx.coroutines.channels.ReceiveChannel.isClosedForReceive",
                 "kotlinx.coroutines.channels.ReceiveChannel.isEmpty",
                 "kotlinx.coroutines.channels.ReceiveChannel.receive",

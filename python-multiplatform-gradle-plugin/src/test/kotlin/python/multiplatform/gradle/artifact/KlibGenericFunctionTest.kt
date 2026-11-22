@@ -22,6 +22,11 @@ import kotlin.test.assertTrue
  *    `.klib` file, and is walked like one. Before, `PythonArtifactBindingsTask` skipped it, so
  *    `python.multiplatform.compose.rememberSaveableWrapper` was never bound on Kotlin/Native while the
  *    JVM fixture bound it from the project's jar.
+ * 4. A nullable `String` (and `ByteArray`) parameter crosses as the jar walker's
+ *    `nullablePrimitiveBoundaryTypeOf` carries it: a plain `as String?` cast, Python `None` arriving as
+ *    `null`. Before, the klib walker declined every nullable primitive, which declined all four
+ *    `androidx.compose.material3.Icon` overloads (`contentDescription: String?`) on Kotlin/Native
+ *    (batch run 45066724639: `cannot import name 'Icon'`). `Int?`/`Boolean?` stay declined, as on jars.
  */
 class KlibGenericFunctionTest {
 
@@ -77,5 +82,18 @@ class KlibGenericFunctionTest {
         } finally {
             unpacked.parentFile.deleteRecursively()
         }
+    }
+
+    @Test
+    fun aNullableStringParameterCrossesAsAString() {
+        val closed = "kotlinx.coroutines.channels.ClosedReceiveChannelException"
+        val entries = KlibScanner.scanKlib(coroutinesKlib, includePrefixes = listOf("kotlinx.coroutines.channels"))
+        val declined = KlibScanner.scanKlibDeclarations(coroutinesKlib, includePrefixes = listOf("kotlinx.coroutines.channels"))
+            .filter { "${it.owner}.${it.simpleName}" == closed || it.simpleName == closed }
+            .map { it.declineReason }
+        val constructor = entries.singleOrNull { it.name == closed }
+        assertNotNull(constructor, "$closed(message: String?) is not bound; declined: $declined")
+        assertEquals(listOf("STRING"), constructor.paramTags)
+        assertTrue("as String?)" in constructor.lambdaBody, constructor.lambdaBody)
     }
 }

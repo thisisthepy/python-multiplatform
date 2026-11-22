@@ -940,7 +940,9 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   dispatch and default-argument omission (`<= 6` defaults, B-3). As B-1 does on jars (#38), a top-level or
   `object` function whose type parameters are unbounded and not reified binds whether `@Composable` or
   not, each read as `kotlin.Any?` and written out at the call (`mutableStateOf<kotlin.Any?>(...)`), whether
-  the klib refers to the type parameter by id (K2) or by name (K1); a `kotlin.Any?` slot, and a handle
+  the klib refers to the type parameter by id (K2) or by name (K1); a nullable `String` or `ByteArray`
+  crosses as `STRING`/`BYTES` with `None` as `null` (a nullable number or `Boolean` stays declined), so
+  material3's `Icon(..., contentDescription: String?)` binds; a `kotlin.Any?` slot, and a handle
   type whose arguments are `kotlin.Any?` or star projections (`MutableState<*>`), cross as object handles;
   and a project dependency, which the Kotlin Gradle Plugin resolves to an unpacked klib
   directory (`<name>/default/manifest`) rather than a `.klib` file, is walked like one (#191, batch run

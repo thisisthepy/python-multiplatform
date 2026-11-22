@@ -2021,6 +2021,15 @@ internal object KlibKnmScanner {
         if (!type.isNullable) {
             primitiveBoundaryTypeOf(type.qualifiedName)?.let { return it }
         } else {
+            // A nullable `String` or `ByteArray` is a reference with nothing to narrow, so `null` reaches
+            // the declaration through a plain cast (the jar walker's `nullablePrimitiveBoundaryTypeOf`).
+            // Declining it declined all four material3 `Icon` overloads (`contentDescription: String?`)
+            // on Kotlin/Native (#191, batch run 45066724639). A nullable number or `Boolean` stays
+            // declined: its read narrows a `Long`/`Double`, and a `null` would throw inside the cast.
+            when (type.qualifiedName) {
+                "kotlin.String" -> return BoundaryType("STRING", "(%s as String?)", "(%s)")
+                "kotlin.ByteArray" -> return BoundaryType("BYTES", "(%s as ByteArray?)", "(%s)")
+            }
             if (primitiveBoundaryTypeOf(type.qualifiedName) != null) return null
             // A `kotlin.Any?` slot crosses as an object handle cast to nothing narrower, as the jar
             // walker's `NULLABLE_ANY_BOUNDARY` (B-1, #38): a substituted `T` (`mutableStateOf(value: T)`)
