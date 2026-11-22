@@ -469,3 +469,39 @@ def test_lists_of_str_that_change_length(tmp_path: Path):
     """append / insert / extend (also of itself) / pop / remove / reverse / clear / index / count on list[str], through
     an alias and inside a loop over the list; the index message carries the repr of a non-ASCII value (design 4.3.2)."""
     _compare(tmp_path, STR_LISTS, [["0", "x"], ["0", "\u00e9"], ["1", "y"], ["2", "z"], ["3", "w"]])
+
+
+MEMBERSHIP = """
+import sys
+
+
+def main() -> None:
+    k = int(sys.argv[1])
+    a = [1, 2, k]
+    b = a
+    a += a
+    print(3 in a, k not in a, 2 ** 70 in a, True in a, len(b))
+    s = "x y".split()
+    t = s
+    z = ["z"]
+    s += z
+    print("y" in s, sys.argv[2] not in t, len(t))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_in_and_in_place_extend(tmp_path: Path):
+    """`v in a` / `v not in a` on list[int] (a bool, a big int) and list[str]; `a += b` extends in place, so an alias
+    sees it, and `a += a` doubles the list (design 4.3.2)."""
+    _compare(tmp_path, MEMBERSHIP, [["0", "y"], ["3", "q"], [str(2 ** 70), "z"]])
+
+
+def test_in_on_a_float_list_is_refused(tmp_path: Path):
+    src = ("def f(a: list[float]) -> bool:\n    return 1.0 in a\n\n\ndef main() -> None:\n    a = [1.0]\n"
+           "    print(f(a))\n\n\nif __name__ == \"__main__\":\n    main()\n")
+    with pytest.raises(aot.AotError) as raised:
+        aot.generate(_write(tmp_path, src))
+    assert "aot/identity" in str(raised.value)

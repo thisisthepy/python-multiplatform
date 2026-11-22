@@ -146,6 +146,8 @@ def _aot_kind(kind: str) -> str:
     """AOT mode: an annotation or an inferred type in the spelling AOT_KIND uses (quotes off; Pyrefly's
     `LiteralString`, also inside a generic, is a str)."""
     kind = kind.strip("'\"").replace("typing.LiteralString", "str").replace("LiteralString", "str")
+    while "str | str" in kind:          # (`list[LiteralString | str]`, Pyrefly's type after `s += ...`: a list of str)
+        kind = kind.replace("str | str", "str")
     return kind
 # AOT mode, tier S2a: the list methods called as statements (they return None)
 LIST_STMT_METHODS = frozenset({"append", "insert", "extend", "clear", "reverse", "remove"})
@@ -2547,8 +2549,18 @@ class _Lowerer:
 
     def aug_assign(self, node: ast.AugAssign) -> list[ir.Stmt]:
         line = node.lineno
-        op = self.binop_kind(node.op, node)
         target = node.target
+        if self.info.aot and isinstance(target, ast.Name) and self.is_list_name(target.id) \
+                and isinstance(node.op, ast.Add):
+            # tier S2a: `a += b` extends `a` in place (list.__iadd__: the same object, every alias sees it)
+            other = node.value
+            if not (isinstance(other, ast.Name) and self.is_list_name(other.id)
+                    and self.list_type(other.id) == self.list_type(target.id)):
+                raise Skip(line, f"`{_src(node)}`: an AOT program extends a list by another list name of its type")
+            self.hoist_ok = False
+            self.list_effect(target.id)
+            return self.take() + [ir.ListExtend(target.id, other.id)]
+        op = self.binop_kind(node.op, node)
         if isinstance(target, ast.Name):
             name = target.id
             if name in self.arrays:
@@ -3171,6 +3183,14 @@ class _Lowerer:
         # A chain is an And of its links: as a condition (2) that And is the condition; as an
         # operand of the condition's And/Or (1) it would be nested, so only a single link there.
         obj_ok = cond == 2 or (cond == 1 and len(node.ops) == 1)
+        if self.info.aot and len(node.ops) == 1 and isinstance(node.ops[0], (ast.In, ast.NotIn)) \
+                and isinstance(node.comparators[0], ast.Name) and self.is_list_name(node.comparators[0].id):
+            # tier S2a: `v in a` / `v not in a` of a list[int] / list[str] (a list of float: aot/identity)
+            name = node.comparators[0].id
+            found: ir.Expr = ir.ListSearch(Type.BOOL, "in", name, self.list_search_value(name, node.left, node))
+            if isinstance(node.ops[0], ast.NotIn):
+                found = ir.UnaryOp(Type.BOOL, ir.UnaryOpKind.NOT, found)
+            return found
         left = self.sub(node.left)
         links: list[ir.Expr] = []
         last = len(node.ops) - 1
