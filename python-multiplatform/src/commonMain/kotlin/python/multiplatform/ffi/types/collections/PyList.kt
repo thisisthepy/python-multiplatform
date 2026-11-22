@@ -4,6 +4,7 @@ import python.multiplatform.ffi.PyObject
 import python.multiplatform.ffi.PyType
 import python.multiplatform.ffi.conversion.PyProxy
 import python.multiplatform.ffi.exceptions.PyException
+import python.multiplatform.ffi.types.iteration.PyIterator
 import python.native.ffi.NativePointer
 import python.native.ffi.PyList_Append
 import python.native.ffi.PyList_Insert
@@ -22,31 +23,21 @@ import python.native.ffi.Py_DecRef
 import python.native.ffi.Py_IncRef
 
 /**
- * Wrapper around a Python `list` object, adopting `MutableList<PyObject>` per
- * the mermaid sketch (`MutableList <|.. PyList`).
+ * Wrapper around a Python `list` object: a [PyMutableIterable] and a Kotlin `MutableList` (issue #524
+ * items 3 and 4; the owner's `python_for_kotlin_binding.mermaid`: `PyMutableIterable <|-- PyList`,
+ * `MutableList <|.. PyList`).
  *
- * The sketch also has a separate `PyIterable` in the hierarchy above
- * `PyMutableIterable <|-- PyList`, but Kotlin's `MutableList<T>` already
- * extends `Iterable<T>` (transitively via `MutableCollection`/`Collection`),
- * and its `iterator()` must return `MutableIterator<PyObject>` -- which
- * [python.multiplatform.ffi.types.iteration.PyIterator] does not implement
- * (it is a plain, read-only `Iterator`). Implementing both here would be a
- * genuine return-type conflict, so `PyIterable` is deliberately not mixed
- * into the collection types; it is reserved for wrappers around Python
- * objects that are iterable but are not already a Kotlin collection type.
+ * Elements are `Any?`: [add], [set], [contains], [indexOf], [remove] take any value
+ * [PyMutableIterable] describes; [get], [set], [removeAt] and iteration answer [PyObject]s.
  *
- * [size] and [add] (`list.insert`) are backed directly by `PyList_Size` and
- * `PyList_Insert`. Element access/mutation (`get`/`set`/`removeAt`) still
- * goes through the generic sequence/object protocol
+ * [size] and [add] (`list.insert`) are backed directly by `PyList_Size` and `PyList_Insert`. Element
+ * access/mutation (`get`/`set`/`removeAt`) goes through the generic sequence/object protocol
  * (`PyObject_GetItem`/`SetItem`/`DelItem` with an integer index) rather than
- * `PyList_GetItem`/`SetItem` -- those two are C-array-index-only (no
- * negative-index support) and `PyList_SetItem` steals the reference it is
- * given, which would need different reference-counting discipline here for
- * no behavioural gain, since every index this class ever passes is already
- * validated non-negative.
+ * `PyList_GetItem`/`SetItem`: those two are C-array-index-only and `PyList_SetItem` steals the
+ * reference it is given.
  */
 open class PyList(pointer: NativePointer, borrowed: Boolean) :
-    PyObject(pointer, borrowed), PyProxy<List<Any?>>, MutableList<PyObject> {
+    PyMutableIterable(pointer, borrowed), PyProxy<List<Any?>>, MutableList<Any?> {
 
     companion object {
         /** The `PyType` for `list` (`builtins.list`). */
@@ -59,18 +50,21 @@ open class PyList(pointer: NativePointer, borrowed: Boolean) :
             deriveTypeAndRelease(emptyList)
         }
 
-        /** Builds a new Python `list` containing (references to) [elements], in order. */
-        fun fromList(elements: List<PyObject>): PyList {
+        /**
+         * Builds a new Python `list` of [elements], in order (the mermaid's `+fromList(list List) PyList$`).
+         * A [PyObject] element is stored as itself (a reference to it); any other value is converted
+         * as [PyMutableIterable] describes.
+         */
+        fun fromList(elements: List<*>): PyList {
             val tuplePtr = python.multiplatform.ffi.Python3.withPython { PyTuple_New(elements.size.toLong()) }
                 ?: throw PyException.fromCurrentError() ?: PyException("Failed to allocate tuple() scratch buffer")
             // The scratch tuple is owned by nobody until it is released here, so the release
             // covers the fill loop as well as the conversion.
             val listPtr = try {
                 elements.forEachIndexed { i, el ->
-                    // PyTuple_SetItem steals the reference to its 3rd argument -- incref first so
-                    // `el`'s own, independently-managed reference stays valid afterwards.
-                    python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_IncRef(el.pointer) }
-                    python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(tuplePtr, i.toLong(), el.pointer) }
+                    // PyTuple_SetItem steals the reference to its 3rd argument: a new one is made for it.
+                    val item = newElementReference(el)
+                    python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(tuplePtr, i.toLong(), item) }
                 }
                 python.multiplatform.ffi.Python3.withPython { PySequence_List(tuplePtr) }
             } finally {
@@ -84,8 +78,13 @@ open class PyList(pointer: NativePointer, borrowed: Boolean) :
     override var cachedNativeValue: List<Any?>? = null
     override var cachedPyObjectValue: PyObject? = null
 
-    /** Snapshot conversion to a plain Kotlin list, recursively converting elements ([python.multiplatform.ffi.conversion.ConversionStrategy.NATIVE]). */
-    fun toNativeList(): List<Any?> = map { pyObjectToNative(it) }
+    /**
+     * Snapshot conversion to a plain Kotlin list, recursively converting elements
+     * ([python.multiplatform.ffi.conversion.ConversionStrategy.NATIVE]): the mermaid's `+toList() List`.
+     * A member, so it is what `pyList.toList()` calls (the standard library's `Iterable.toList()`, which
+     * would copy the `PyObject` elements, is reachable as `Iterable<Any?>.toList()` by a cast).
+     */
+    fun toList(): List<Any?> = indices.map { pyObjectToNative(get(it)) }
 
     /** `list.sort()`, backed by `PyList_Sort`. */
     fun sort() {
@@ -111,11 +110,11 @@ open class PyList(pointer: NativePointer, borrowed: Boolean) :
         return PyObject(item, false) // PyObject_GetItem ("o[key]") returns a new reference
     }
 
-    override fun set(index: Int, element: PyObject): PyObject {
+    override fun set(index: Int, element: Any?): PyObject {
         val previous = get(index)
         val key = indexKey(index)
         // PyObject_SetItem does not steal a reference to `element`.
-        val rc = python.multiplatform.ffi.Python3.withPython { PyObject_SetItem(pointer, key, element.pointer) }
+        val rc = withPythonElement(element) { item -> python.multiplatform.ffi.Python3.withPython { PyObject_SetItem(pointer, key, item) } }
         python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(key) }
         if (rc != 0) throw PyException.fromCurrentError() ?: PyException("Failed to set list index $index")
         return previous
@@ -130,29 +129,29 @@ open class PyList(pointer: NativePointer, borrowed: Boolean) :
         return previous
     }
 
-    override fun add(element: PyObject): Boolean {
+    override fun add(element: Any?): Boolean {
         // PyList_Append does not steal a reference to `item` (it increfs internally),
         // unlike PyList_SetItem/PyTuple_SetItem.
-        if (python.multiplatform.ffi.Python3.withPython { PyList_Append(pointer, element.pointer) } != 0) {
+        if (withPythonElement(element) { item -> python.multiplatform.ffi.Python3.withPython { PyList_Append(pointer, item) } } != 0) {
             throw PyException.fromCurrentError() ?: PyException("Failed to append to list")
         }
         return true
     }
 
-    override fun add(index: Int, element: PyObject) {
+    override fun add(index: Int, element: Any?) {
         // PyList_Insert does not steal a reference to `item`, same as PyList_Append.
-        if (python.multiplatform.ffi.Python3.withPython { PyList_Insert(pointer, index.toLong(), element.pointer) } != 0) {
+        if (withPythonElement(element) { item -> python.multiplatform.ffi.Python3.withPython { PyList_Insert(pointer, index.toLong(), item) } } != 0) {
             throw PyException.fromCurrentError() ?: PyException("list.insert($index, ...) failed")
         }
     }
 
-    override fun addAll(index: Int, elements: Collection<PyObject>): Boolean {
+    override fun addAll(index: Int, elements: Collection<Any?>): Boolean {
         if (elements.isEmpty()) return false
         elements.forEachIndexed { i, el -> add(index + i, el) }
         return true
     }
 
-    override fun addAll(elements: Collection<PyObject>): Boolean {
+    override fun addAll(elements: Collection<Any?>): Boolean {
         if (elements.isEmpty()) return false
         for (el in elements) add(el)
         return true
@@ -165,14 +164,14 @@ open class PyList(pointer: NativePointer, borrowed: Boolean) :
 
     override fun isEmpty(): Boolean = size == 0
 
-    override fun remove(element: PyObject): Boolean {
+    override fun remove(element: Any?): Boolean {
         val idx = indexOf(element)
         if (idx == -1) return false
         removeAt(idx)
         return true
     }
 
-    override fun removeAll(elements: Collection<PyObject>): Boolean {
+    override fun removeAll(elements: Collection<Any?>): Boolean {
         var changed = false
         for (e in elements) {
             while (remove(e)) changed = true
@@ -180,12 +179,12 @@ open class PyList(pointer: NativePointer, borrowed: Boolean) :
         return changed
     }
 
-    override fun retainAll(elements: Collection<PyObject>): Boolean {
+    override fun retainAll(elements: Collection<Any?>): Boolean {
         var changed = false
         var i = size - 1
         while (i >= 0) {
             val el = get(i)
-            if (elements.none { pyEquals(it.pointer, el.pointer) }) {
+            if (elements.none { other -> withPythonElement(other) { pyEquals(it, el.pointer) } }) {
                 removeAt(i)
                 changed = true
             }
@@ -194,26 +193,26 @@ open class PyList(pointer: NativePointer, borrowed: Boolean) :
         return changed
     }
 
-    override fun contains(element: PyObject): Boolean {
-        val result = python.multiplatform.ffi.Python3.withPython { PySequence_Contains(pointer, element.pointer) }
+    override fun contains(element: Any?): Boolean {
+        val result = withPythonElement(element) { item -> python.multiplatform.ffi.Python3.withPython { PySequence_Contains(pointer, item) } }
         if (result == -1) throw PyException.fromCurrentError() ?: PyException("Failed to check list membership")
         return result == 1
     }
 
-    override fun containsAll(elements: Collection<PyObject>): Boolean = elements.all { contains(it) }
+    override fun containsAll(elements: Collection<Any?>): Boolean = elements.all { contains(it) }
 
-    override fun indexOf(element: PyObject): Int {
+    override fun indexOf(element: Any?): Int = withPythonElement(element) { item ->
         for (i in 0 until size) {
-            if (pyEquals(get(i).pointer, element.pointer)) return i
+            if (pyEquals(get(i).pointer, item)) return@withPythonElement i
         }
-        return -1
+        -1
     }
 
-    override fun lastIndexOf(element: PyObject): Int {
+    override fun lastIndexOf(element: Any?): Int = withPythonElement(element) { item ->
         for (i in size - 1 downTo 0) {
-            if (pyEquals(get(i).pointer, element.pointer)) return i
+            if (pyEquals(get(i).pointer, item)) return@withPythonElement i
         }
-        return -1
+        -1
     }
 
     /**
@@ -223,7 +222,7 @@ open class PyList(pointer: NativePointer, borrowed: Boolean) :
      * (via `PyIter_Next` on a `list_iterator`) is undefined behaviour in
      * CPython, so `remove()`/`add()` here never touch one.
      */
-    private inner class ListItr(startIndex: Int) : MutableListIterator<PyObject> {
+    private inner class ListItr(startIndex: Int) : MutableListIterator<Any?>, PyIterator {
         private var cursor = startIndex
         private var lastReturned = -1
 
@@ -254,27 +253,27 @@ open class PyList(pointer: NativePointer, borrowed: Boolean) :
             lastReturned = -1
         }
 
-        override fun set(element: PyObject) {
+        override fun set(element: Any?) {
             check(lastReturned != -1) { "next()/previous() has not been called, or remove()/add() already called" }
             this@PyList.set(lastReturned, element)
         }
 
-        override fun add(element: PyObject) {
+        override fun add(element: Any?) {
             this@PyList.add(cursor, element)
             cursor++
             lastReturned = -1
         }
     }
 
-    override fun iterator(): MutableIterator<PyObject> = ListItr(0)
-    override fun listIterator(): MutableListIterator<PyObject> = ListItr(0)
-    override fun listIterator(index: Int): MutableListIterator<PyObject> = ListItr(index)
+    override fun iterator(): PyIterator = ListItr(0)
+    override fun listIterator(): MutableListIterator<Any?> = ListItr(0)
+    override fun listIterator(index: Int): MutableListIterator<Any?> = ListItr(index)
 
     private class PySubList(
-        private val list: MutableList<PyObject>,
+        private val list: PyList,
         private val fromIndex: Int,
         private var toIndex: Int
-    ) : AbstractMutableList<PyObject>() {
+    ) : AbstractMutableList<Any?>() {
         
         init {
             if (fromIndex < 0 || toIndex > list.size) {
@@ -293,12 +292,12 @@ open class PyList(pointer: NativePointer, borrowed: Boolean) :
             return list[fromIndex + index]
         }
 
-        override fun set(index: Int, element: PyObject): PyObject {
+        override fun set(index: Int, element: Any?): PyObject {
             if (index < 0 || index >= size) throw IndexOutOfBoundsException("index: $index, size: $size")
             return list.set(fromIndex + index, element)
         }
 
-        override fun add(index: Int, element: PyObject) {
+        override fun add(index: Int, element: Any?) {
             if (index < 0 || index > size) throw IndexOutOfBoundsException("index: $index, size: $size")
             list.add(fromIndex + index, element)
             toIndex++
@@ -312,7 +311,7 @@ open class PyList(pointer: NativePointer, borrowed: Boolean) :
         }
     }
 
-    override fun subList(fromIndex: Int, toIndex: Int): MutableList<PyObject> {
+    override fun subList(fromIndex: Int, toIndex: Int): MutableList<Any?> {
         return PySubList(this, fromIndex, toIndex)
     }
 }

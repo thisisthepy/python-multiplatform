@@ -1,5 +1,7 @@
 package python.multiplatform.ffi.types.collections
 
+import python.multiplatform.ffi.PyObject
+
 import python.multiplatform.ffi.PythonTestFixture
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -30,7 +32,7 @@ class PyListTest {
         )
         val list = PyList.fromList(elements)
         assertEquals(3, list.size)
-        assertEquals(listOf(1L, 2L, 3L), list.toNativeList())
+        assertEquals(listOf(1L, 2L, 3L), list.toList())
     }
 
     @Test
@@ -69,12 +71,12 @@ class PyListTest {
         val obj = PythonTestFixture.eval("[3, 1, 2]")
         val list = PyList(obj.pointer, true)
         list.sort()
-        assertEquals(listOf(1L, 2L, 3L), list.toNativeList())
+        assertEquals(listOf(1L, 2L, 3L), list.toList())
     }
 
     @Test
     fun isEmptyReflectsSize() = PythonTestFixture.withInterpreter {
-        val list = PyList.fromList(emptyList())
+        val list = PyList.fromList(emptyList<Any?>())
         assertTrue(list.isEmpty())
     }
 
@@ -86,15 +88,15 @@ class PyListTest {
         assertEquals(3, sub.size)
         
         sub[0] = PythonTestFixture.eval("9")
-        assertEquals(listOf(1L, 9L, 3L, 4L, 5L), list.toNativeList())
+        assertEquals(listOf(1L, 9L, 3L, 4L, 5L), list.toList())
         
         sub.add(PythonTestFixture.eval("10"))
         assertEquals(4, sub.size)
-        assertEquals(listOf(1L, 9L, 3L, 4L, 10L, 5L), list.toNativeList())
+        assertEquals(listOf(1L, 9L, 3L, 4L, 10L, 5L), list.toList())
 
         sub.removeAt(1)
         assertEquals(3, sub.size)
-        assertEquals(listOf(1L, 9L, 4L, 10L, 5L), list.toNativeList())
+        assertEquals(listOf(1L, 9L, 4L, 10L, 5L), list.toList())
     }
 
     @Test
@@ -104,7 +106,7 @@ class PyListTest {
         val sub = list.subList(1, 4) // [2, 3, 4]
         
         list[2] = PythonTestFixture.eval("9")
-        assertEquals(listOf(2L, 9L, 4L), sub.map { pyObjectToNative(it) })
+        assertEquals(listOf(2L, 9L, 4L), sub.map { pyObjectToNative(it as PyObject) })
         
         // Changing the size of the original list might cause undefined behavior in Kotlin's subList
         // but we should at least test that getting elements respects the current view if size didn't change
@@ -146,7 +148,7 @@ class PyListTest {
         
         sub.add(PythonTestFixture.eval("9"))
         assertEquals(1, sub.size)
-        assertEquals(listOf(1L, 9L, 2L, 3L), list.toNativeList())
+        assertEquals(listOf(1L, 9L, 2L, 3L), list.toList())
     }
 
     @Test
@@ -159,6 +161,6 @@ class PyListTest {
         assertEquals(2, sub2.size)
         sub2[0] = PythonTestFixture.eval("9")
         
-        assertEquals(listOf(1L, 2L, 9L, 4L, 5L), list.toNativeList())
+        assertEquals(listOf(1L, 2L, 9L, 4L, 5L), list.toList())
     }
 }
