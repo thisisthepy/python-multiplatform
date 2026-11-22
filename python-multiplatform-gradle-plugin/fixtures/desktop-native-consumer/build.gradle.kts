@@ -40,3 +40,14 @@ pythonBindings {
     role.set("app")
     processor.set(projects.pythonMultiplatformKsp)
 }
+
+// A failing host test prints its whole exception: Gradle's default short format hid the probe line
+// the assertion compared (batch run 44945907475).
+tasks.withType<AbstractTestTask>().configureEach {
+    testLogging {
+        events("failed")
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+        showCauses = true
+        showStackTraces = true
+    }
+}
