@@ -16,9 +16,9 @@ private const val PY_TP_FREE = 74
 /** `Py_tp_members` from `typeslots.h`. */
 private const val PY_TP_MEMBERS = 72
 
-/** `Py_T_LONG` from `descrobject.h` -- an 8-byte signed integer member, the same width as the
- *  handle slot [ProxyType.takeHandle] already reads and writes by hand. */
-private const val PY_T_LONG = 2
+/** `Py_T_LONGLONG` from `descrobject.h`: an 8-byte signed integer member on every OS. Not `Py_T_LONG`,
+ * which is C `long`, 4 bytes on Windows (LLP64); see the native factory. */
+private const val PY_T_LONGLONG = 17
 
 /** `Py_RELATIVE_OFFSET` from `descrobject.h` (CPython 3.12+): the member's `offset` is relative to
  *  the defining type's own extra storage rather than to byte 0 of the object, which is what makes
@@ -190,7 +190,7 @@ actual object ProxyTypeFactory {
         // (`Py_TPFLAGS_BASETYPE`, and `work/untrack`'s proof that a subclass survives deallocation).
         val membersAddr = nativeStruct(40 * 2) {
             putLong(0, Panama.allocateUtf8String("_pm_handle"))
-            putInt(8, PY_T_LONG)
+            putInt(8, PY_T_LONGLONG)
             putLong(16, 0L)
             putInt(24, PY_RELATIVE_OFFSET)
             putLong(32, 0L)
