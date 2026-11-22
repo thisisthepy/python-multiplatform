@@ -2532,8 +2532,8 @@ REJECTED = {
     "list method": ("def f(a: list[float]) -> None:\n    a.append(1.0)\n", ("aot/call", 2, "a.append")),
     "list iteration": (
         "def f(a: list[float]) -> float:\n    s = 0.0\n    for v in a:\n        s += v\n    return s\n",
-        ("aot/statement", 3, "for")),
-    "list slice": ("def f(a: list[float]) -> int:\n    b = a[1:]\n    return 0\n", ("aot/container", 2, "slice")),
+        ("aot/front-end", 3, "f")),           # tier S1a: `for ch in s` passes the source check; a list waits for S2
+    "list slice": ("def f(a: list[float]) -> int:\n    b = a[1:]\n    return 0\n", ("aot/front-end", 2, "f")),
     "list comparison": ("def f(a: list[float], b: list[float]) -> bool:\n    return a == b\n", ("aot/front-end", 2, "f")),
     "list printed": ("def f(a: list[float]) -> None:\n    print(a)\n", ("aot/front-end", 2, "f")),
     "list in an f-string": ("def f(a: list[float]) -> None:\n    print(f'{a}')\n", ("aot/front-end", 2, "f")),
@@ -2619,9 +2619,8 @@ SOURCE_LEVEL_ROWS = frozenset({
     "class with base",
     "decorator",
     "empty list display",
-    "f-string as a value",
-    "f-string conversion",
-    "f-string equals",
+    "f-string ascii conversion",
+    "f-string ascii conversion with equals",
     "f-string nested field",
     "f-string other type",
     "f-string precision too large",
@@ -2633,12 +2632,10 @@ SOURCE_LEVEL_ROWS = frozenset({
     "int literal outside 64 bits",
     "int with base",
     "list in a tuple return",
-    "list iteration",
     "list method",
     "list module constant",
     "list of bool annotation",
     "list of lists annotation",
-    "list slice",
     "math attribute",
     "math function",
     "matmul operator",
@@ -2651,9 +2648,7 @@ SOURCE_LEVEL_ROWS = frozenset({
     "print as a value",
     "print keyword",
     "second import",
-    "string variable",
-    "sys argv as a string",
-    "sys argv slice",
+    "str method outside the S1 list",
     "sys attribute",
     "tuple annotation of a parameter",
     "tuple display",
@@ -2716,6 +2711,13 @@ def rejection_groups() -> dict[str, list[str]]:
     return {"source": [n for n in rows if n in SOURCE_LEVEL_ROWS],
             "later": [n for n in rows if n not in SOURCE_LEVEL_ROWS and n not in STRICT_ROWS],
             "strict": [n for n in rows if n in STRICT_ROWS]}
+
+
+def test_every_grouped_row_name_is_a_row():
+    """A renamed row left in a group set silently moves the new row into the wrong merged program (S1b: two
+    source-level rows ran in the later program and hid every later finding)."""
+    for group in (SINGLE_ROWS, SOURCE_LEVEL_ROWS, STRICT_ROWS, IMPORT_ROWS):
+        assert group <= set(REJECTED), sorted(group - set(REJECTED))
 
 
 @pytest.fixture(scope="module")

@@ -149,7 +149,7 @@ def test_range_step_may_be_an_int_constant(tmp_path):
 @pytest.mark.parametrize("source, text", [
     ("X: float = 3\n", "annotated `float` but its value is an int"),
     ("X: int = True\n", "annotated `int` but its value is a bool"),
-    ("X: str = 3\n", "not int, float or bool"),
+    ("X: str = 3\n", "annotated `str` but its value is an int"),     # tier S1a: str is a constant type
     ("X: float\n", "needs a value"),
 ])
 def test_a_constant_whose_annotation_disagrees_is_an_error(tmp_path, source, text):
@@ -514,7 +514,7 @@ def test_a_conditional_expression_needs_two_values_of_one_type(tmp_path):
         def g(a: int, b: float) -> float:
             return min(a, b)
         """)
-    assert "the branches of" in m.skipped["f"] and "two ints, two floats or two bools" in m.skipped["f"]
+    assert "the branches of" in m.skipped["f"] and "two ints, two floats, two bools or two strs" in m.skipped["f"]
     assert "needs two ints or two floats" in m.skipped["g"]
 
 
@@ -577,7 +577,7 @@ def test_sys_argv_nodes(tmp_path):
 
 @pytest.mark.parametrize("source, text", [
     ("import sys\ndef f() -> int:\n    return sys.version\n", "only `sys.argv`, `sys.maxsize` and `sys.exit`"),
-    ("def f() -> int:\n    return int(sys.argv[1])\n", "int() of a object is not supported in an AOT program"),
+    ("def f() -> int:\n    return int(sys.argv[1])\n", "the subscript `sys.argv[1]` of a object has no form"),  # no import
 ])
 def test_sys_is_used_only_as_argv_in_int_and_len(tmp_path, source, text):
     m = aot_ir(tmp_path, source)
@@ -733,8 +733,8 @@ def test_an_fstring_field_is_checked():
     assert "verify/type" in rules_of(printing(ir.FormatField(Type.OBJ, n, 3)))         # `.3f` of an int
     assert "verify/type" in rules_of(printing(ir.FormatField(Type.OBJ, x, 21)))        # precision too large
     assert "verify/type" in rules_of(printing(ir.Const(Type.F64, 1.0)))                # not a part
-    # an FString is a Print argument only
-    assert "verify/unknown-node" in rules_of(hand([ir.ExprStmt(ir.FString(Type.OBJ, ()))]))
+    # outside a Print an FString is a str value (tier S1a), so one typed obj is refused
+    assert "verify/type" in rules_of(hand([ir.ExprStmt(ir.FString(Type.OBJ, ()))]))
 
 
 # --- which ints are RAW and which TAGGED (aot/rep.py, #462) ------------------------------------------------------

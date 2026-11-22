@@ -648,12 +648,13 @@ def _c_text(g, bodies: list[list[str]], exports: list[_Export], p: str) -> str:
     # (the typedef of the `int_list` kind, `@INTLIST@`, is a line of its own only in a library that uses the kind)
     text = text.replace("@INTLIST@\n", f"typedef tpa_int_list {p}_int_list;\n\n" if any(e.uses_int_list for e in exports)
                         else "\n")
+    if not g.uses_str and not emit_mod.needs_int_runtime(text.replace("@INT@", "")):
+        return text.replace("@INT@", "")
+    include = '#include "tp_aot_int.h"\n'
     if g.uses_str:                      # tier S1: the str runtime needs the int runtime's parser and formatter
         tables = "".join(line + "\n" for line in unicode_mod.tables_c(g.ucd))     # tier S1b
-        return text.replace("@INT@", '#include "tp_aot_int.h"\n' + tables + '#include "tp_aot_str.h"\n')
-    if emit_mod.needs_int_runtime(text.replace("@INT@", "")):
-        return text.replace("@INT@", '#include "tp_aot_int.h"\n')
-    return text.replace("@INT@", "")
+        include += tables + '#include "tp_aot_str.h"\n'
+    return text.replace("@INT@", include)
 
 
 _HEADER_TOP = """\
