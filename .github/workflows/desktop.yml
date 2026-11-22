@@ -132,10 +132,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # JDK 17 as well: the compiler plugin and KSP compile with a languageVersion=17 toolchain, and
+      # Gradle's auto-detection does not find the runner's preinstalled 17 on Windows (batch run
+      # 44945907475). setup-java exports JAVA_HOME_17_X64; the Gradle step names it. 21 stays the default.
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
-          java-version: '21'
+          java-version: |
+            17
+            21
           distribution: 'zulu'
           cache: 'gradle'
 
@@ -149,7 +154,7 @@ jobs:
 
       - name: Run Windows x86_64 Kotlin/Native Tests
         shell: bash
-        run: ./gradlew :python-multiplatform:mingwX64Test --rerun --console=plain
+        run: ./gradlew :python-multiplatform:mingwX64Test --rerun --console=plain -Porg.gradle.java.installations.fromEnv=JAVA_HOME_17_X64
 
       - name: Count the tests
         if: always()
