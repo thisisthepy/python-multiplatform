@@ -304,11 +304,13 @@ on the pipe tests and the code review.
 items *}`: the items live in a separate block, so `append` / `insert` / `extend` / `pop` / slice assignment can move
 them while every name of the list keeps the same handle (CPython's aliasing: `a = b; b.append(1)` changes `a`). `kind`
 says what an item slot holds: an IEEE double, an int64 (RAW group), a `tpa_int` (big-capable group, owned), a str, a
-class instance, a list, a tuple (owned references). Which lists take this layout is decided per list group, the
-connected set of list names, parameters, fields and results that one list can flow through (the same groups that
-`aot/rep.py` already classifies as RAW or big-capable, #462): a group with any operation that changes a length takes
-the growable layout, with element access `items[i]` and the same bounds rule; every other group keeps the tier K
-layout (`{count, length, d[]}`, element access `d[i]`). So a program that never resizes a list generates the C it
+class instance, a list, a tuple (owned references). Which lists take this layout is decided per list type for the
+whole program (a list can only flow into names of its own type, so every alias of a list has its layout): when any
+operation of the program changes the length of a `list[float]`, every `list[float]` takes the growable layout, with
+element access `items[i]` and the same bounds rule; likewise for `list[int]` (both the RAW and the big-capable kind),
+`list[str]` and each other list type. A list type the program never resizes keeps the tier K layout (`{count,
+length, d[]}`, element access `d[i]`). (Per list group, as `aot/rep.py` groups `list[int]` names, would be finer; it
+can replace this rule later without a visible change.) So a program that never resizes a list generates the C it
 generated before, and the tier K loops (nbody, spectral_norm) keep one load per element. (Amendment 2026-11-22,
 agent proposal, not confirmed: the first text of this section moved every list to the new layout, which contradicted
 the "generates the C it generated before" rule above and added an indirection to the tier K loops.) Growth by CPython's
