@@ -724,6 +724,38 @@ class ListRemove(Stmt):
 
 
 @dataclass(frozen=True)
+class ListConcat(Expr):
+    """`left + right` of two list names of one type: a new list (type: the list type)."""
+
+    left: str
+    right: str
+
+
+@dataclass(frozen=True)
+class ListRepeat(Expr):
+    """`src * count` (`count_first`: `count * src`, CPython evaluates the count first then): a new list; a count of
+    0 or less gives an empty list, a size past the largest list MemoryError."""
+
+    src: str
+    count: Expr
+    count_first: bool = False
+
+
+@dataclass(frozen=True)
+class ListSlice(Expr):
+    """`src[start:stop:step]` (a missing bound is None; all None is `list(src)` / `src[:]` of a list[str]): a new list,
+    PySlice_AdjustIndices; ValueError("slice step cannot be zero")."""
+
+    src: str
+    start: Expr | None
+    stop: Expr | None
+    step: Expr | None
+
+
+LIST_MAKERS = (ListConcat, ListRepeat, ListSlice)
+
+
+@dataclass(frozen=True)
 class ListCompare(Expr):
     """`left op right` of two lists of one type, list[int] or list[str] (a list of float compares items by identity
     first in CPython: aot/identity). Objects/listobject.c list_richcompare: the first index where the items differ

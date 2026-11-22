@@ -2299,12 +2299,15 @@ class _Fn:
         if v is not None:
             self.emit(f"if ({self.lop(found[1], 'remove')}({found[0]}, {v})) {self.fail()}")
 
-    def index_c(self, e: ir.Expr) -> str:
-        """An index argument of insert / pop as an int64."""
-        if self.rep(e) == TAGGED:
-            self.bad("aot/type", "index", "a list method's index that is not proved inside int64 is not in the AOT mode "
-                     "yet")
-        return self.ev(e)
+    def index_c(self, e: ir.Expr, convert: str = "tpa_int_to_ssize") -> str:
+        """An int argument of insert / pop (a Py_ssize_t parameter: OverflowError outside it) or a repeat count
+        (`convert` tpa_int_to_count) as an int64."""
+        v = self.ev(e)
+        if self.rep(e) != TAGGED:
+            return v
+        n = self.tmp("int64_t")
+        self.emit(f"if ({convert}({v}, &{n})) {self.fail()}")
+        return n
 
     def ev_ListPop(self, e: ir.ListPop) -> str:
         idx = self.index_c(e.index) if e.index is not None else "0"
@@ -2317,6 +2320,44 @@ class _Fn:
         has = 0 if e.index is None else 1
         self.emit(f"if ({self.lop(kind, 'pop')}({found[0]}, {has}, {idx}, &{t})) {self.fail()}")
         return t
+
+    def list_make_into(self, e: ir.Expr, names: tuple[str, ...], call: str) -> str:
+        """A new list made from the lists `names` (tier S2a): a list[str] into a list-of-str slot, a list[float] /
+        list[int] into a list temporary of the receiving name's kind (as a copy)."""
+        found = [self.grow_list(n, f"a {type(e).__name__}") for n in names]
+        if any(x is None for x in found):
+            return "NULL"
+        kinds = {x[1] for x in found}                                   # type: ignore[index]
+        if e.type is Type.STR_LIST:
+            return self.lpstr(call.format(*[x[0] for x in found], fn=self.lop("str", "")) )   # type: ignore[index]
+        dst = self.bind_kind
+        if dst is None:
+            return self.bad("aot/type", "list", "a list is made where no list name receives it")
+        if kinds != {dst}:
+            return self.bad("aot/type", names[0], f"a list of kind {sorted(kinds)} is made into one of kind {dst} (the "
+                            "list classification did not merge them)")
+        out = self.list_tmp(dst)
+        text = call.format(*[x[0] for x in found], fn=self.lop(dst, "")).replace("@", "&" + out)  # type: ignore[index]
+        self.emit(f"if ({text}) {self.fail()}")
+        return out
+
+    def ev_ListConcat(self, e: ir.ListConcat) -> str:
+        return self.list_make_into(e, (e.left, e.right), "{fn}concat({0}, {1}, @)")
+
+    def ev_ListRepeat(self, e: ir.ListRepeat) -> str:
+        n = self.index_c(e.count, "tpa_int_to_count")
+        return self.list_make_into(e, (e.src,), "{fn}repeat({0}, " + n + ", @)")
+
+    def ev_ListSlice(self, e: ir.ListSlice) -> str:
+        vals, has = [], []
+        for b, flag in ((e.start, "TPA_SLICE_START"), (e.stop, "TPA_SLICE_STOP"), (e.step, "TPA_SLICE_STEP")):
+            if b is None:
+                vals.append("0")
+            else:
+                vals.append(self.clamp(b))
+                has.append(flag)
+        return self.list_make_into(e, (e.src,), "{fn}slice({0}, " + ", ".join(vals) + ", "
+                                   + (" | ".join(has) or "0") + ", @)")
 
     def ev_ListCompare(self, e: ir.ListCompare) -> str:
         a = self.grow_list(e.left, "a comparison")

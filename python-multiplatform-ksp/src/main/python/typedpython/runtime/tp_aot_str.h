@@ -335,9 +335,11 @@ static TPA_UNUSED int64_t tpa_int_clamp_index(tpa_int a)
     return tpa_int__big(a)->neg ? INT64_MIN : INT64_MAX;
 }
 
+#ifndef TPA_SLICE_START                 /* (also defined by tp_aot.h for the list slices of tier S2a) */
 #define TPA_SLICE_START 1
 #define TPA_SLICE_STOP 2
 #define TPA_SLICE_STEP 4
+#endif
 
 /* s[start:stop:step] with the bounds `has` names (TPA_SLICE_*), as PySlice_Unpack and PySlice_AdjustIndices. */
 static TPA_UNUSED int tpa_str_slice(tpa_str *s, int64_t start, int64_t stop, int64_t step, int has, tpa_str **out)
@@ -1128,6 +1130,55 @@ static TPA_UNUSED int tpa_str_list_remove(tpa_str_list *l, tpa_str *v)
 }
 #endif
 
+#define TPA__OWN_STR(slot, v) ((slot) = (v))
+/* Tier S2a: a + b, a * n and a[start:stop:step] of lists of str: new lists, each item retained (the slots of a fresh list
+ * hold NULL until written, so a failure releases what was written). */
+static TPA_UNUSED int tpa_str_list_concat(const tpa_str_list *a, const tpa_str_list *b, tpa_str_list **out)
+{
+    int64_t i;
+    if (a->len > INT64_MAX - b->len) {
+        return tpa_raise(TPA_MemoryError, "");
+    }
+    if (tpa_str_list__alloc(a->len + b->len, out)) {
+        return -1;
+    }
+    for (i = 0; i < a->len; i++) {
+        tpa_str_retain(a->d[i]);
+        TPA__OWN_STR((*out)->d[i], a->d[i]);
+    }
+    for (i = 0; i < b->len; i++) {
+        tpa_str_retain(b->d[i]);
+        TPA__OWN_STR((*out)->d[a->len + i], b->d[i]);
+    }
+    return 0;
+}
+
+static TPA_UNUSED int tpa_str_list_repeat(const tpa_str_list *a, int64_t n, tpa_str_list **out)
+{
+    int64_t total, k;
+    if (tpa__repeat_size(a->len, n, &total) || tpa_str_list__alloc(total, out)) {
+        return -1;
+    }
+    for (k = 0; k < total; k++) {
+        tpa_str_retain(a->d[k % a->len]);
+        TPA__OWN_STR((*out)->d[k], a->d[k % a->len]);
+    }
+    return 0;
+}
+
+static TPA_UNUSED int tpa_str_list_slice(const tpa_str_list *a, int64_t start, int64_t stop, int64_t step, int has, tpa_str_list **out)
+{
+    int64_t first, by, n, k;
+    if (tpa__slice(a->len, start, stop, step, has, &first, &by, &n) || tpa_str_list__alloc(n, out)) {
+        return -1;
+    }
+    for (k = 0; k < n; k++) {
+        tpa_str_retain(a->d[first + k * by]);
+        TPA__OWN_STR((*out)->d[k], a->d[first + k * by]);
+    }
+    return 0;
+}
+
 /* Tier S2a: a op b of two lists of str (as tpa_i64_cmp; items by str == and code-point order) */
 static TPA_UNUSED int tpa_str_list_cmp(const tpa_str_list *a, const tpa_str_list *b, int op)
 {
@@ -1674,13 +1725,7 @@ static TPA_UNUSED int tpa_str_lower(tpa_str *s, tpa_str **out)
 
 
 /* An int argument that CPython converts to Py_ssize_t (split's maxsplit, replace's count). */
-static TPA_UNUSED int tpa_int_to_ssize(tpa_int a, int64_t *out)
-{
-    if (tpa_int_to_i64(a, out) == 0) {
-        return 0;
-    }
-    return tpa_raise(TPA_OverflowError, "Python int too large to convert to C ssize_t");
-}
+/* (tpa_int_to_ssize: tp_aot_int.h) */
 
 /* CPython's ADJUST_INDICES of find / startswith / endswith (`has`: TPA_SLICE_START | TPA_SLICE_STOP for given bounds;
  * a bound outside 64 bits is clamped first). start is never clamped upward. */

@@ -372,7 +372,7 @@ from .ir import CheckExact, CheckMethod, ClassDecl, FieldGet, FieldSet, Is, IsEx
 from .ir import BuildString, Contains, ForObj, Format, GetItem, NewDict, NewList, StoreItem
 from .ir import ParInfo
 from .ir import ListAppend, ListClear, ListExtend, ListInsert, ListPop, ListRemove, ListReverse, ListSearch, ListStr
-from .ir import ListCompare
+from .ir import ListCompare, ListConcat, ListRepeat, ListSlice
 
 DA = "verify/definite-assignment"
 MISSING_RETURN = "verify/missing-return"
@@ -436,7 +436,7 @@ _AOT_EXPRS = frozenset({ListDisplay, Cond, ArgvInt, ArgvLen, FloatToInt, BoolToI
                         StrChr, ArgvStr, StrParseInt, StrWrite, FString,
                         # tier S1b
                         StrMethod, StrListDisplay, StrListLen, StrListIndex,
-                        StrNarrow, ListPop, ListSearch, ListStr, ListCompare})                 # tier S2a
+                        StrNarrow, ListPop, ListSearch, ListStr, ListCompare, ListConcat, ListRepeat, ListSlice})  # tier S2a
 # Nodes whose OBJ result is a new reference (ir.py "ownership": Box, Global, GetAttr, CallObject,
 # OBJ BinOp, Tuple), plus reads of an OBJ local (the local owns its reference; the back end increfs or
 # borrows under that rule) and Calls of a compiled function returning OBJ (which returns a new
@@ -2026,6 +2026,8 @@ class _Checker:
             self.error(TYPE, f"{name} gives {e.type.value} but local array '{target}' is "
                              f"{want.value}")
         element = _ELEMENT.get(e.type)
+        if isinstance(e, ir.LIST_MAKERS):
+            return self.list_make(e, state)
         if type(e) is ListDisplay:
             if not (isinstance(e.elements, tuple) and e.elements):
                 self.error(STRUCTURE, "ListDisplay has no elements")
@@ -2074,6 +2076,8 @@ class _Checker:
             return self.lens.get(e.src, (0, _LEN_MAX))
         if type(e) is ListDisplay:
             return (len(e.elements), len(e.elements))
+        if isinstance(e, ir.LIST_MAKERS):
+            return (0, _LEN_MAX)                 # tier S2a: a + b, a * n, a[i:j] (no length proved)
         if getattr(e.length, "type", None) is not Type.I64:
             return (0, _LEN_MAX)
         lo, hi = self.interval(e.length)
@@ -2100,7 +2104,8 @@ class _Checker:
 
     def s_Assign(self, s: Assign, state: _State):
         target = s.target
-        alloc = type(s.value) in (NewArray, CopyArray) or (self.aot and type(s.value) is ListDisplay)
+        alloc = type(s.value) in (NewArray, CopyArray) or (self.aot and type(s.value) is ListDisplay) \
+            or (self.aot and isinstance(s.value, ir.LIST_MAKERS) and s.value.type in ir.ARRAYS)
         if alloc:
             if target in self.larrays:
                 value = self.allocation(s.value, target, state)
@@ -2239,6 +2244,46 @@ class _Checker:
         if at is not None and e.type is not _ELEMENT[at]:
             self.error(TYPE, f"pop of '{e.array}' gives {_ELEMENT[at].value}, node says {e.type.value}")
         return dataclasses.replace(e, index=idx)
+
+    def list_make(self, e, state: _State) -> ir.Expr:
+        """Tier S2a: the operands of ListConcat / ListRepeat / ListSlice: list names of the node's own type, an int
+        count, int bounds."""
+        if not self.aot:
+            self.error(UNKNOWN, f"{type(e).__name__} is an AOT-mode node")
+        names = (e.left, e.right) if type(e) is ListConcat else (e.src,)
+        for n in names:
+            t = self.list_of(n, type(e).__name__, state)
+            if t is not None and t is not e.type:
+                self.error(TYPE, f"{type(e).__name__} of '{n}' ({t.value}) gives {getattr(e.type, 'value', e.type)}")
+        if type(e) is ListRepeat:
+            count = self.expr(e.count, state)
+            self.slot(count, Type.I64, "count of a list repeat")
+            return dataclasses.replace(e, count=count)
+        if type(e) is ListSlice:
+            bounds = {}
+            for k in ("start", "stop", "step"):
+                b = getattr(e, k)
+                if b is not None:
+                    b = self.expr(b, state)
+                    self.slot(b, Type.I64, f"{k} of a list slice")
+                bounds[k] = b
+            return dataclasses.replace(e, **bounds)
+        return e
+
+    def e_ListConcat(self, e: ListConcat, state: _State) -> ir.Expr:
+        return self.list_value_make(e, state)
+
+    def e_ListRepeat(self, e: ListRepeat, state: _State) -> ir.Expr:
+        return self.list_value_make(e, state)
+
+    def e_ListSlice(self, e: ListSlice, state: _State) -> ir.Expr:
+        return self.list_value_make(e, state)
+
+    def list_value_make(self, e, state: _State) -> ir.Expr:
+        """A list[str] creation is a value; a list[float] / list[int] one stands only where `allocation` takes it."""
+        if e.type is Type.STR_LIST:
+            return self.list_make(e, state)
+        return self.stray(e, state)
 
     def e_ListCompare(self, e: ListCompare, state: _State) -> ir.Expr:
         if not self.aot:
@@ -2777,7 +2822,7 @@ class _Checker:
                                  f"{getattr(returns, 'value', returns)}")
             return s, None
         if self.aot and returns in (Type.F64_ARRAY, Type.I64_ARRAY):
-            if type(s.value) in (NewArray, CopyArray, ListDisplay):
+            if type(s.value) in (NewArray, CopyArray, ListDisplay) or isinstance(s.value, ir.LIST_MAKERS):
                 value = self.allocation(s.value, None, state)       # a fresh list, handed to the caller
             else:
                 value = self.array_value(s.value, state)             # a list name or a call that returns one

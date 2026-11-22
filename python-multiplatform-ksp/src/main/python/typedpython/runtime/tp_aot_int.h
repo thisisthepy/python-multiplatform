@@ -1604,6 +1604,16 @@ static inline int tpa_int_to_count(tpa_int a, int64_t *out)
     return tpa_raise(TPA_OverflowError, TPA_MSG_INT_TO_INDEX);
 }
 
+/* An int argument converted as a Py_ssize_t parameter (PyLong_AsSsize_t): the str methods' bounds, and the index of
+ * list.insert / list.pop (tier S2a). */
+static TPA_UNUSED int tpa_int_to_ssize(tpa_int a, int64_t *out)
+{
+    if (tpa_int_to_i64(a, out) == 0) {
+        return 0;
+    }
+    return tpa_raise(TPA_OverflowError, "Python int too large to convert to C ssize_t");
+}
+
 static inline int tpa_int_to_range_len(tpa_int a, int64_t *out)
 {
     if (tpa_int_to_i64(a, out) == 0) {
@@ -2425,6 +2435,55 @@ static TPA_UNUSED int tpa_int_list_contains(const tpa_int_list *l, tpa_int v)
         if (tpa_int_eq(l->d[i], v)) {
             return 1;
         }
+    }
+    return 0;
+}
+
+#define TPA__OWN_INT(slot, v) ((slot) = (v))   /* (the 0 a fresh slot holds is the immortal small int) */
+/* Tier S2a: a + b, a * n and a[start:stop:step] of big-capable lists: new lists, each item retained (the slots of a fresh list
+ * hold the small int 0 until written, so a failure releases what was written). */
+static TPA_UNUSED int tpa_int_list_concat(const tpa_int_list *a, const tpa_int_list *b, tpa_int_list **out)
+{
+    int64_t i;
+    if (a->len > INT64_MAX - b->len) {
+        return tpa_raise(TPA_MemoryError, "");
+    }
+    if (tpa_int_list_alloc(a->len + b->len, out)) {
+        return -1;
+    }
+    for (i = 0; i < a->len; i++) {
+        tpa_int_retain(a->d[i]);
+        TPA__OWN_INT((*out)->d[i], a->d[i]);
+    }
+    for (i = 0; i < b->len; i++) {
+        tpa_int_retain(b->d[i]);
+        TPA__OWN_INT((*out)->d[a->len + i], b->d[i]);
+    }
+    return 0;
+}
+
+static TPA_UNUSED int tpa_int_list_repeat(const tpa_int_list *a, int64_t n, tpa_int_list **out)
+{
+    int64_t total, k;
+    if (tpa__repeat_size(a->len, n, &total) || tpa_int_list_alloc(total, out)) {
+        return -1;
+    }
+    for (k = 0; k < total; k++) {
+        tpa_int_retain(a->d[k % a->len]);
+        TPA__OWN_INT((*out)->d[k], a->d[k % a->len]);
+    }
+    return 0;
+}
+
+static TPA_UNUSED int tpa_int_list_slice(const tpa_int_list *a, int64_t start, int64_t stop, int64_t step, int has, tpa_int_list **out)
+{
+    int64_t first, by, n, k;
+    if (tpa__slice(a->len, start, stop, step, has, &first, &by, &n) || tpa_int_list_alloc(n, out)) {
+        return -1;
+    }
+    for (k = 0; k < n; k++) {
+        tpa_int_retain(a->d[first + k * by]);
+        TPA__OWN_INT((*out)->d[k], a->d[first + k * by]);
     }
     return 0;
 }

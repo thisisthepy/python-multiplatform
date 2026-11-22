@@ -545,9 +545,12 @@ class _Checker:
                 return
             elif n == "list":
                 a = c.args[0] if len(c.args) == 1 else None
+                if isinstance(a, ast.Name) and not c.keywords:
+                    return                  # tier S2a: `list(xs)`, a copy (the front end checks xs is a list)
                 if not (isinstance(a, ast.Call) and isinstance(a.func, ast.Name) and a.func.id == "range"
                         and len(a.args) == 1 and not a.keywords and "range" not in self.shadow):
-                    self.rep.error(c, "aot/builtin", n, "`list()` is only supported as `list(range(n))` in the AOT mode")
+                    self.rep.error(c, "aot/builtin", n, "`list()` is only supported as `list(range(n))` and `list(xs)` "
+                                   "of a list in the AOT mode")
                     return
                 self.expr(a.args[0])
                 return

@@ -400,6 +400,14 @@ class Representation:
                 self.union(target, fkey, f.name, cur, f"reads list field `{value.cls}.{value.field}`")
             else:
                 self.mark_big(target, f.name, cur, f"reads unknown list field `{value.cls}.{value.field}`")
+        elif isinstance(value, ir.LIST_MAKERS):
+            # tier S2a: a + b, a * n, a[i:j]: the new list is one group with its sources (a merge, not a one-way
+            # copy, so the items never change representation on the way)
+            for src in ((value.left, value.right) if isinstance(value, ir.ListConcat) else (value.src,)):
+                if (f.name, src) in self._parent:
+                    self.union(target, (f.name, src), f.name, cur, f"{how} made from `{src}`")
+                else:
+                    self.mark_big(target, f.name, cur, f"{how} made from `{src}`, which is not a list of this function")
         elif not isinstance(value, (ir.NewArray, ir.ListDisplay)):
             self.mark_big(target, f.name, cur, f"{how} of an expression that is not understood")
 

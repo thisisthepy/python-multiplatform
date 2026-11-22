@@ -2530,10 +2530,8 @@ REJECTED = {
     # the constructs the AOT mode does not have yet, each named
     "list in a list": ("def f() -> int:\n    x = [[1.0]]\n    return 0\n", ("aot/front-end", 2, "f")),
     "list method": ("def f(a: list[float]) -> None:\n    a.sort()\n", ("aot/call", 2, "a.sort")),   # (append: S2a; sort: S2c)
-    "list slice": ("def f(a: list[float]) -> int:\n    b = a[1:]\n    return 0\n", ("aot/front-end", 2, "f")),
     "list comparison": ("def f(a: list[float], b: list[float]) -> bool:\n    return a == b\n", ("aot/front-end", 2, "f")),
     "list module constant": ("A = [1.0]\n", ("aot/constant", 1, "A")),
-    "list addition": ("def f(a: list[float]) -> int:\n    b = a + a\n    return 0\n", ("aot/front-end", 2, "f")),
     "list passed as an expression": (
         "def g(a: list[float]) -> int:\n    return 0\n\ndef f() -> int:\n    return g([1.0])\n",
         ("aot/front-end", 5, "f")),

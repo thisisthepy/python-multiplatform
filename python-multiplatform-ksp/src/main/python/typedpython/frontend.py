@@ -1941,6 +1941,9 @@ class _Lowerer:
                 return e
             if isinstance(e, ir.Call) and e.type in ir.ARRAYS:
                 raise Skip(line, f"`{_src(node)}` returns {TYPE_NAME[e.type]}, but {what} is {TYPE_NAME[want]}")
+        made = self.list_make(node, want)                                  # tier S2a
+        if made is not None:
+            return made
         if isinstance(node, ast.Attribute):
             fg = self.field_get(node)
             if fg is not None:
@@ -2161,6 +2164,39 @@ class _Lowerer:
         return None
 
     # --- AOT mode, tier S2a: the methods of a list[float] / list[int] (design 4.3.2) ---
+
+    def list_make(self, node: ast.expr, want: Type) -> ir.Expr | None:
+        """AOT mode, tier S2a: `a + b`, `a * n` / `n * a`, `a[i:j:k]` and `list(a)` of list names of type `want`, as a
+        new list (ir.ListConcat / ListRepeat / ListSlice; `list(a)` of a list[float] / list[int] is a CopyArray).
+        None when `node` is none of these."""
+        def lst(x: ast.expr) -> str | None:
+            return x.id if (isinstance(x, ast.Name) and self.is_list_name(x.id)
+                            and self.list_type(x.id) == want) else None
+
+        def an_int(x: ast.expr, what: str) -> ir.Expr:
+            return self.list_index_arg(x, what)
+
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add) and lst(node.left) and lst(node.right):
+            return ir.ListConcat(want, lst(node.left), lst(node.right))          # type: ignore[arg-type]
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+            if lst(node.left) and not isinstance(node.right, ast.List):
+                return ir.ListRepeat(want, lst(node.left), an_int(node.right, "the count of a list repeat"))  # type: ignore[arg-type]
+            if lst(node.right) and not isinstance(node.left, ast.List):
+                return ir.ListRepeat(want, lst(node.right), an_int(node.left, "the count of a list repeat"),   # type: ignore[arg-type]
+                                     count_first=True)
+        if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Slice) and lst(node.value):
+            sl = node.slice
+            if want != Type.STR_LIST and sl.lower is None and sl.upper is None and sl.step is None:
+                return None                                  # `a[:]` of an array: the CopyArray path
+            bounds = [None if b is None else an_int(b, "a bound of a list slice") for b in (sl.lower, sl.upper, sl.step)]
+            return ir.ListSlice(want, lst(node.value), *bounds)                  # type: ignore[arg-type]
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "list" \
+                and self.builtin("list") and not node.keywords and len(node.args) == 1 and lst(node.args[0]):
+            src = lst(node.args[0])
+            if want == Type.STR_LIST:
+                return ir.ListSlice(want, src, None, None, None)                  # type: ignore[arg-type]
+            return ir.CopyArray(want, src)                                        # type: ignore[arg-type]
+        return None
 
     def list_str(self, node: ast.expr) -> ir.Expr | None:
         """`a` (a list[float] / list[int] name) where its str is wanted: print, str(), repr(), an f-string field; the
@@ -2895,6 +2931,10 @@ class _Lowerer:
             raise Skip(line, f"{type(v).__name__} constant `{_src(node)}` is not supported")
         if isinstance(node, ast.Name):
             return self.name(node)
+        if self.info.aot and isinstance(node, (ast.BinOp, ast.Subscript, ast.Call)):
+            made = self.list_make(node, Type.STR_LIST)                    # tier S2a: a new list[str]
+            if made is not None:
+                return made
         if isinstance(node, ast.BinOp):
             op = self.binop_kind(node.op, node)
             left = self.sub(node.left)

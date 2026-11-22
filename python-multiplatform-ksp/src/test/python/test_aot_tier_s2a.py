@@ -536,3 +536,53 @@ def test_list_comparisons(tmp_path: Path):
     """== != < <= > >= of list[int] (RAW and big-capable) and list[str]: the first differing pair decides, else the
     lengths (list_richcompare); a list of float is refused like a search (design 4.3.2, N1)."""
     _compare(tmp_path, COMPARISONS, [["3", "b a"], ["4", "a b"], ["-1", "b"], ["3", "b a c"]])
+
+
+MAKING = """
+import sys
+
+
+def main() -> None:
+    k = int(sys.argv[1])
+    a = [1.5, 2.5, -0.0]
+    b = [4.0]
+    c = a + b
+    d = a * 2
+    e = k * b
+    f = c[1:]
+    g = c[::-1]
+    h = c[-2:k:1]
+    print(c, d, e, f, g, h)
+    i = [1, 2, 3, 4, 5]
+    j = i[k:]
+    m = i[1:4:2]
+    n = list(i)
+    n.append(9)
+    big = [2 ** 70, 1]
+    big2 = big + big
+    bs = big[2 ** 80:]
+    bt = big[-(2 ** 80):1]
+    print(j, m, n, i, big2, bs, bt)
+    s = "a b c d".split()
+    t = s[1:3]
+    u = s + t
+    v = s * 0
+    w = list(s)
+    w.append("z")
+    x = s[::-2]
+    print(t, u, v, w, s, x, 2 * t)
+    if k == 7:
+        z: list[int] = i[::0]
+        print(z)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_concat_repeat_slices_and_list_copies(tmp_path: Path):
+    """a + b, a * n / n * a (a count outside int64: OverflowError), slices with every bound form (negative step,
+    bounds outside int64 clamped, step 0: ValueError) and list(a), on list[float], list[int] (RAW and big-capable)
+    and list[str]; the copies are new lists (design 4.3.2)."""
+    _compare(tmp_path, MAKING, [["0"], ["2"], ["-3"], ["7"], [str(2 ** 70)]])

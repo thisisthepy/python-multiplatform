@@ -1535,6 +1535,129 @@ static inline TPA_UNUSED int tpa_i64_contains(const tpa_i64_list *l, int64_t v)
     return 0;
 }
 
+/* Tier S2a: list slices. The bounds `has` names (TPA_SLICE_*) adjusted to a list of `len` items as PySlice_Unpack and
+ * PySlice_AdjustIndices do (a bound outside int64 is clamped by the caller, as the str slice's are): the first index,
+ * the step and the number of items. ValueError("slice step cannot be zero"). */
+#ifndef TPA_SLICE_START
+#define TPA_SLICE_START 1
+#define TPA_SLICE_STOP 2
+#define TPA_SLICE_STEP 4
+#endif
+static inline int tpa__slice(int64_t len, int64_t start, int64_t stop, int64_t step, int has,
+                             int64_t *first, int64_t *by, int64_t *count)
+{
+    int64_t n = 0;
+    if (!(has & TPA_SLICE_STEP)) {
+        step = 1;
+    }
+    if (step == 0) {
+        return tpa_raise(TPA_ValueError, "slice step cannot be zero");
+    }
+    if (step < -INT64_MAX) {
+        step = -INT64_MAX;
+    }
+    if (!(has & TPA_SLICE_START)) {
+        start = step < 0 ? INT64_MAX : 0;
+    }
+    if (!(has & TPA_SLICE_STOP)) {
+        stop = step < 0 ? INT64_MIN : INT64_MAX;
+    }
+    if (start < 0) {
+        start += len;
+        if (start < 0) {
+            start = step < 0 ? -1 : 0;
+        }
+    }
+    else if (start >= len) {
+        start = step < 0 ? len - 1 : len;
+    }
+    if (stop < 0) {
+        stop += len;
+        if (stop < 0) {
+            stop = step < 0 ? -1 : 0;
+        }
+    }
+    else if (stop >= len) {
+        stop = step < 0 ? len - 1 : len;
+    }
+    if (step < 0) {
+        if (stop < start) {
+            n = (start - stop - 1) / (0 - step) + 1;
+        }
+    }
+    else if (start < stop) {
+        n = (stop - start - 1) / step + 1;
+    }
+    *first = start;
+    *by = step;
+    *count = n;
+    return 0;
+}
+
+/* `l * n` / `n * l`: the size check CPython's list_repeat makes (MemoryError past the largest list) */
+static inline int tpa__repeat_size(int64_t len, int64_t n, int64_t *total)
+{
+    if (n <= 0 || len == 0) {
+        *total = 0;
+        return 0;
+    }
+    if (len > INT64_MAX / n) {
+        return tpa_raise(TPA_MemoryError, "");
+    }
+    *total = len * n;
+    return 0;
+}
+
+#define TPA__DEF_LIST_MAKE(NAME, CT)                                                              \
+    /* a + b: a new list */                                                                       \
+    static inline TPA_UNUSED int tpa_##NAME##_concat(const tpa_##NAME##_list *a,                  \
+                                                     const tpa_##NAME##_list *b,                  \
+                                                     tpa_##NAME##_list **out)                     \
+    {                                                                                             \
+        if (a->len > INT64_MAX - b->len) {                                                        \
+            return tpa_raise(TPA_MemoryError, "");                                                \
+        }                                                                                         \
+        if (tpa_##NAME##_alloc(a->len + b->len, out)) {                                           \
+            return -1;                                                                            \
+        }                                                                                         \
+        if (a->len > 0) {                                                                         \
+            memcpy((*out)->d, a->d, (size_t)a->len * sizeof(CT));                                 \
+        }                                                                                         \
+        if (b->len > 0) {                                                                         \
+            memcpy((*out)->d + a->len, b->d, (size_t)b->len * sizeof(CT));                        \
+        }                                                                                         \
+        return 0;                                                                                 \
+    }                                                                                             \
+    static inline TPA_UNUSED int tpa_##NAME##_repeat(const tpa_##NAME##_list *a, int64_t n,       \
+                                                     tpa_##NAME##_list **out)                     \
+    {                                                                                             \
+        int64_t total, k;                                                                         \
+        if (tpa__repeat_size(a->len, n, &total) || tpa_##NAME##_alloc(total, out)) {              \
+            return -1;                                                                            \
+        }                                                                                         \
+        for (k = 0; k < total; k += a->len) {                                                     \
+            memcpy((*out)->d + k, a->d, (size_t)a->len * sizeof(CT));                             \
+        }                                                                                         \
+        return 0;                                                                                 \
+    }                                                                                             \
+    static inline TPA_UNUSED int tpa_##NAME##_slice(const tpa_##NAME##_list *a, int64_t start,    \
+                                                    int64_t stop, int64_t step, int has,          \
+                                                    tpa_##NAME##_list **out)                      \
+    {                                                                                             \
+        int64_t first, by, n, k;                                                                  \
+        if (tpa__slice(a->len, start, stop, step, has, &first, &by, &n)                           \
+                || tpa_##NAME##_alloc(n, out)) {                                                  \
+            return -1;                                                                            \
+        }                                                                                         \
+        for (k = 0; k < n; k++) {                                                                 \
+            (*out)->d[k] = a->d[first + k * by];                                                  \
+        }                                                                                         \
+        return 0;                                                                                 \
+    }
+TPA__DEF_LIST_MAKE(f64, double)
+TPA__DEF_LIST_MAKE(i64, int64_t)
+#undef TPA__DEF_LIST_MAKE
+
 /* Tier S2a: the outcome of a list comparison (Objects/listobject.c list_richcompare) once the first differing pair,
  * or the lengths, give `c` (<0, 0, >0); `op` 0..5 is == != < <= > >=. */
 static inline int tpa__cmp_outcome(int op, int c)
