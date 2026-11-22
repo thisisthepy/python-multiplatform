@@ -720,8 +720,6 @@ def test_lists_of_class_instances(tmp_path: Path):
 
 C_BASE = "class C:\n    v: int\n\n    def __init__(self, v: int) -> None:\n        self.v = v\n\n\n"
 C_MAIN = '\n\ndef main() -> None:\n    print(f([C(1)]))\n\n\nif __name__ == "__main__":\n    main()\n'
-C_HOLDER = ("class H:\n    items: list[C]\n\n    def __init__(self, items: list[C]) -> None:\n"
-            "        self.items = items\n\n\n")
 
 
 def test_index_of_an_instance_is_refused(tmp_path: Path):
@@ -732,10 +730,75 @@ def test_index_of_an_instance_is_refused(tmp_path: Path):
     assert "aot/identity" in str(raised.value)
 
 
-def test_a_list_field_waits_for_the_collector_step(tmp_path: Path):
-    """A list[C] field makes its class a node of the type graph (review B4); until the collector tracks lists it is
-    the named finding aot/class-list-field, not a miscompiled field."""
-    with pytest.raises(aot.AotError) as raised:
-        aot.generate(_write(tmp_path, C_BASE + C_HOLDER + "def f(xs: list[C]) -> int:\n    h = H(xs)\n"
-                            "    return len(xs)\n" + C_MAIN))
-    assert any(f.rule == "aot/class-list-field" for f in raised.value.findings)
+TREE = """
+import sys
+
+
+class Node:
+    val: int
+    children: list["Node"]
+
+    def __init__(self, val: int) -> None:
+        self.val = val
+        self.children = []
+
+    def add(self, c: "Node") -> None:
+        self.children.append(c)
+
+    def total(self) -> int:
+        t = self.val
+        for c in self.children:
+            t += c.total()
+        return t
+
+
+def build(depth: int, width: int, base: int) -> Node:
+    n = Node(base)
+    if depth > 0:
+        for i in range(width):
+            n.add(build(depth - 1, width, base * 10 + i))
+    return n
+
+
+def main() -> None:
+    d = int(sys.argv[1])
+    root = build(d, 2, 1)
+    print(root.total(), len(root.children))
+    loop = Node(7)
+    loop.add(loop)
+    other = Node(8)
+    other.add(loop)
+    loop.add(other)
+    print(len(loop.children), loop.total() if d < 0 else 0)
+    last = root
+    if len(root.children) > 0:
+        last = root.children.pop()
+    print(last.val, len(root.children))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_list_fields_and_cycles_through_lists(tmp_path: Path):
+    """A class with a list[C] field (`children: list["Node"]`): `self.children = []`, methods called on the field
+    (the list held for the call), loops and len over it; a cycle through the list (`loop.add(loop)`)."""
+    _compare(tmp_path, TREE, [["0"], ["3"], ["8"]])
+
+
+def test_cycles_through_lists_are_collected(tmp_path: Path):
+    """The S2 review, B4: a list of a cyclic-capable class is a tracked object, so the cycles `loop -> list -> loop`
+    and `loop -> list -> other -> list -> loop` are freed by the collector; under TPA_GC_STRESS (a collection at every
+    safepoint) with TP_CHECK_PROVEN in the sanitizer job, nothing tracked remains at exit."""
+    from test_aot_tier_o2c import _stats
+    src = _write(tmp_path, TREE)
+    for stress in (False, True):
+        out, (_collections, _freed, _exit_freed, remaining) = _stats(tmp_path, src, ["4"], stress=stress)
+        assert remaining == 0, (stress, out)
+
+
+def test_a_class_with_a_list_field_is_never_virtual_or_region(tmp_path: Path):
+    """Its fields stay counted references of a heap object (the list can change under any alias)."""
+    report = aot.explain_alloc(_write(tmp_path, TREE))
+    assert "class holds a list" in report and "-> virtual" not in report and "-> region" not in report

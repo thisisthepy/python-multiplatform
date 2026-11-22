@@ -283,6 +283,8 @@ class _Gen:
         if fd.type in (Type.STR, Type.STR_OPT):
             self.uses_str = True
             return "tpa_str *"
+        if fd.type is Type.OBJ_LIST:
+            return "tpa_obj_list *"                        # tier S2a: a list of instances (fd.cls their class)
         assert fd.cls is not None
         return self.cls_ptr(fd.cls)
 
@@ -394,7 +396,8 @@ class _Gen:
             # review of #508, F1: a class with a field of a class type releases it by a call, which nests; its
             # release counts the depth and parks the object past TPA_TRASH_LIMIT (`tpa_trash_*`, tp_aot.h), the
             # parked object freed later by `_drop`. A class with no such field cannot nest and is unchanged.
-            trash = any(fd.type is Type.OBJ and fd.cls is not None for fd in decl.field_decls)
+            # (tier S2a: a list of instances releases them by calls too, one list frame per level)
+            trash = any(fd.type in (Type.OBJ, Type.OBJ_LIST) and fd.cls is not None for fd in decl.field_decls)
             if trash:
                 out.append(f"static void tpa_cls_{mc}_drop(void *v);")
             out.append(f"static void tpa_cls_{mc}_release(tpa_cls_{mc} *p)")
@@ -461,10 +464,14 @@ class _Gen:
         out.append(f"static void tpa_cls_{mc}_gc_traverse(tpa_gc_head *h, tpa_gc_visit visit, void *arg)")
         out.append("{")
         out.append(f"    tpa_cls_{mc} *p = (tpa_cls_{mc} *)h;")
-        edges = [fd for fd in decl.field_decls if fd.type is Type.OBJ and fd.cls is not None and self.gc_class(fd.cls)]
+        edges = [fd for fd in decl.field_decls
+                 if fd.type in (Type.OBJ, Type.OBJ_LIST) and fd.cls is not None and self.gc_class(fd.cls)]
         for fd in edges:
             mf = mangle(fd.name)
-            out.append(f"    if (p->f_{mf} != NULL) visit(&p->f_{mf}->gc, arg);")
+            if fd.type is Type.OBJ_LIST:        # tier S2a: a list of a cyclic-capable class is tracked (tp_aot_gc.h)
+                out.append(f"    if (p->f_{mf} != NULL) visit(&TPA_GC_LIST_OF(p->f_{mf})->gc, arg);")
+            else:
+                out.append(f"    if (p->f_{mf} != NULL) visit(&p->f_{mf}->gc, arg);")
         if not edges:
             out.append("    (void)p; (void)visit; (void)arg;")
         out.append("}")
@@ -492,6 +499,8 @@ class _Gen:
             ptr, rel = "tpa_f64_list *", "tpa_f64_release"
         elif fd.type in (Type.STR, Type.STR_OPT):
             ptr, rel = "tpa_str *", "tpa_str_release"
+        elif fd.type is Type.OBJ_LIST:
+            ptr, rel = "tpa_obj_list *", "tpa_obj_list_release"
         elif fd.type is Type.I64_ARRAY:
             big = self.reps.field_list_big(cls, fd.name)
             ptr, rel = ("tpa_int_list *", "tpa_int_list_release") if big else ("tpa_i64_list *", "tpa_i64_release")
@@ -515,6 +524,8 @@ class _Gen:
             out.append(f"{ind}tpa_f64_release(p->f_{mf});")
         elif fd.type in (Type.STR, Type.STR_OPT):
             out.append(f"{ind}tpa_str_release(p->f_{mf});")
+        elif fd.type is Type.OBJ_LIST:
+            out.append(f"{ind}tpa_obj_list_release(p->f_{mf});")
         elif fd.type is Type.I64_ARRAY:
             fn = "tpa_int_list_release" if self.reps.field_list_big(cls, fd.name) else "tpa_i64_release"
             out.append(f"{ind}{fn}(p->f_{mf});")
@@ -541,6 +552,8 @@ class _Gen:
                         c_params.append(f"tpa_str *a_{mangle(p.name)}")          # borrowed, as `__init__` takes it
                     elif isinstance(p, ir.Param) and p.type is Type.STR_LIST:
                         c_params.append(f"tpa_str_list *a_{mangle(p.name)}")
+                    elif isinstance(p, ir.Param) and p.type is Type.OBJ_LIST:
+                        c_params.append(f"tpa_obj_list *a_{mangle(p.name)}")      # tier S2a, borrowed
                     elif isinstance(p, ir.Param) and p.type in CTYPE:
                         ct = "tpa_int" if self.tagged_param(init_fn, p) else CTYPE[p.type]
                         c_params.append(f"{ct} a_{mangle(p.name)}")
@@ -854,7 +867,8 @@ class _Fn:
     def ev_ObjListDisplay(self, e: ir.ObjListDisplay) -> str:
         vals = [self.ev(x) for x in e.elements]            # (each a borrowed instance, held by its own slot)
         t = self.olslot()
-        self.emit(f"if (tpa_obj_list_alloc({len(vals)}, {self.obj_fns(e.cls)}, &{t})) {self.fail()}")
+        alloc = "tpa_obj_list_alloc_gc" if self.g.gc_class(e.cls) else "tpa_obj_list_alloc"     # (review B4)
+        self.emit(f"if ({alloc}({len(vals)}, {self.obj_fns(e.cls)}, &{t})) {self.fail()}")
         for i, v in enumerate(vals):
             self.emit(f"tpa_cls_{mangle(e.cls)}_retain({v}); {t}->d[{i}] = {v};")
         return t
@@ -1377,6 +1391,10 @@ class _Fn:
                 t = self.pslot()
                 self.emit(f"tpa_str_set(&{t}, {vf});")
                 return t
+            if fd.type is Type.OBJ_LIST:                 # (not reached: a class with a list is never virtual)
+                t = self.olslot()
+                self.emit(f"tpa_obj_list_set(&{t}, {vf});")
+                return t
             assert fd.cls is not None
             t = self.oslot(fd.cls)
             mc = mangle(fd.cls)
@@ -1393,6 +1411,12 @@ class _Fn:
                 self.emit(f"tpa_int_set(&{t}, {obj}->f_{mf});")
                 return t
             return f"({obj}->f_{mf})"
+        if fd.type is Type.OBJ_LIST:
+            # tier S2a: a list field is never immutable (review B4/S1): the list is held by a counted slot while it is
+            # in use, so a call that rebinds the field cannot free it under the expression
+            t = self.olslot()
+            self.emit(f"tpa_obj_list_set(&{t}, {obj}->f_{mf});")
+            return t
         if fd.type in (Type.STR, Type.STR_OPT):
             # a field that may be rebound while the value is in use is held by a slot; an immutable field of an
             # object the function cannot drop is borrowed (as a list field, PR-O1 elision rule 3)
@@ -2172,6 +2196,9 @@ class _Fn:
             elif fd.type in (Type.STR, Type.STR_OPT):
                 val = eval_args[src][0] if isinstance(src, int) else self.ev(src)
                 self.emit(f"tpa_str_set(&{vf}, {val});")
+            elif fd.type is Type.OBJ_LIST:                                   # tier S2a: the field shares the list
+                val = eval_args[src][0] if isinstance(src, int) else self.ev(src)
+                self.emit(f"tpa_obj_list_set(&{vf}, {val});")
             elif fd.type in LIST:
                 assert isinstance(src, int)
                 val, _, arg_kind = eval_args[src]
@@ -2224,7 +2251,7 @@ class _Fn:
         for fd in decl.field_decls:
             if fd.type is Type.I64 and self.g.reps.field(cls, fd.name) == TAGGED:
                 self.emit(f"{t}->f_{mangle(fd.name)} = TPA_INT_ZERO;")
-            elif fd.type in (Type.STR, Type.STR_OPT):
+            elif fd.type in (Type.STR, Type.STR_OPT, Type.OBJ_LIST):
                 self.emit(f"{t}->f_{mangle(fd.name)} = NULL;")      # (region memory is not zeroed)
         self._emit_init_stores(cls, e, init_fn, eval_args, lambda fname: f"{t}->f_{mangle(fname)}", True)
         return t
@@ -2253,6 +2280,9 @@ class _Fn:
         elif fd.type in (Type.STR, Type.STR_OPT):
             val = self.ev(s.value) if fd.type is Type.STR_OPT else self.str_value(s.value, f"the value stored into .{s.field}")
             self.emit(f"tpa_str_set(&{lval}, {val});")         # the new reference is held before the old is released
+        elif fd.type is Type.OBJ_LIST:
+            val = self.ev(s.value)
+            self.emit(f"tpa_obj_list_set(&{lval}, {val});")    # tier S2a (the new reference first)
         elif fd.type in LIST:
             kind = "f64" if fd.type is Type.F64_ARRAY else (
                 "int" if self.g.reps.field_list_big(s.cls, s.field) else "i64")
@@ -3026,6 +3056,9 @@ class _Fn:
                             elif fd.type in (Type.STR, Type.STR_OPT):
                                 decls.append(f"    tpa_str *{vf} TPA_UNUSED = NULL;")
                                 releases.append(f"    tpa_str_release({vf});")
+                            elif fd.type is Type.OBJ_LIST:
+                                decls.append(f"    tpa_obj_list *{vf} TPA_UNUSED = NULL;")
+                                releases.append(f"    tpa_obj_list_release({vf});")
                             else:
                                 assert fd.cls is not None
                                 fmc = mangle(fd.cls)

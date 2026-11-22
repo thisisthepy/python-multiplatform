@@ -301,15 +301,6 @@ def analyze_classes(module: ir.Module, rel: str, class_lines: dict[str, int] | N
 
     sccs = _tarjan_scc(list(classes.keys()), edges)
     findings: list[Finding] = []
-    for cname, decl in classes.items():
-        for fd in decl.field_decls:
-            if fd.type is Type.OBJ_LIST:
-                # tier S2a, sequenced: a list field needs the emitter's field support and the collector's tracked
-                # list (review B4); lists of instances in locals and parameters come first
-                findings.append(Finding(
-                    rel, lines.get(cname, 1), "error", None, "aot/class-list-field", f"{cname}.{fd.name}",
-                    f"the field `{cname}.{fd.name}` is a list of `{fd.cls}` instances, which a compiled class does not "
-                    "hold yet (a local or parameter list of instances is compiled)", None))
     cyclic_classes: set[str] = set()
     cycle_reasons: dict[str, str] = {}
     for comp in sccs:

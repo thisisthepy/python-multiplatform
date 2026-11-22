@@ -1729,6 +1729,11 @@ class _Lowerer:
                     return self.aot_time_sleep(node.value)
                 if self.is_list_name(mod) and attr in LIST_STMT_METHODS:
                     return self.list_method_stmt(node.value)             # tier S2a
+            if self.info.aot and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute) \
+                    and node.value.func.attr in LIST_STMT_METHODS:
+                held = self.field_list_receiver(node.value)
+                if held is not None:
+                    return self.list_method_stmt(held)                   # tier S2a: `self.items.append(x)`
             value = self.sub(node.value)
             return self.take() + [ir.ExprStmt(value)]
         if isinstance(node, ast.Assign):
@@ -2229,6 +2234,24 @@ class _Lowerer:
 
     # --- AOT mode, tier S2a: the methods of a list[float] / list[int] (design 4.3.2) ---
 
+    def field_list_receiver(self, call: ast.Call) -> ast.Call | None:
+        """AOT mode, tier S2a: `obj.field.m(...)` where `obj.field` is a list field: the list is held by a temporary
+        for the call (CPython's bound method holds it, so rebinding the field inside the call frees nothing in use),
+        and the call is rewritten to name that temporary. None when the receiver is not a list field."""
+        func = call.func
+        if not (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Attribute)):
+            return None
+        fg = self.field_get(func.value)
+        if fg is None or fg.type not in (Type.OBJ_LIST, Type.STR_LIST):
+            return None
+        held = self.temp(fg)
+        if fg.type is Type.OBJ_LIST:
+            self.list_cls[held.name] = self.list_cls_of(fg, func.value)
+        new_func = ast.copy_location(ast.Attribute(value=ast.copy_location(ast.Name(id=held.name, ctx=ast.Load()),
+                                                                           func.value), attr=func.attr, ctx=ast.Load()),
+                                     func)
+        return ast.copy_location(ast.Call(func=new_func, args=call.args, keywords=call.keywords), call)
+
     def list_make(self, node: ast.expr, want: Type) -> ir.Expr | None:
         """AOT mode, tier S2a: `a + b`, `a * n` / `n * a`, `a[i:j:k]` and `list(a)` of list names of type `want`, as a
         new list (ir.ListConcat / ListRepeat / ListSlice; `list(a)` of a list[float] / list[int] is a CopyArray).
@@ -2661,6 +2684,9 @@ class _Lowerer:
             fd = next((f for f in decl.field_decls if f.name == target.attr), None)
             if fd is not None and fd.type in ir.ARRAYS:
                 value = self.array_expr(value_node, fd.type, f"field `{cls}.{target.attr}`")
+            elif fd is not None and fd.type is Type.OBJ_LIST and isinstance(value_node, ast.List) \
+                    and not value_node.elts:
+                value = ir.ObjListDisplay(Type.OBJ_LIST, fd.cls, ())       # tier S2a: `self.items = []`
             else:
                 value = self.value(value_node)
                 if fd is not None and fd.type == Type.F64 and value.type == Type.I64:
@@ -3564,6 +3590,12 @@ class _Lowerer:
         if self.info.aot and isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) \
                 and self.is_list_name(func.value.id) and func.attr in LIST_METHOD_NAMES:
             return self.list_method_expr(func, node)                     # tier S2a
+        if self.info.aot and isinstance(func, ast.Attribute) and func.attr in LIST_METHOD_NAMES \
+                and isinstance(func.value, ast.Attribute):
+            held = self.field_list_receiver(node)                       # tier S2a: `self.items.pop()`
+            if held is not None:
+                assert isinstance(held.func, ast.Attribute)
+                return self.list_method_expr(held.func, held)
 
         if self.info.aot and isinstance(func, ast.Attribute):
             write = self.std_write(func, node)

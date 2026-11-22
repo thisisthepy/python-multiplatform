@@ -1793,14 +1793,43 @@ TPA__DEF_LIST_SPLICE(tpa_i64_, tpa_i64_list, int64_t, TPA__NO_OWN, TPA__NO_OWN, 
  * item is never NULL (a list[C] holds instances). Equality of items is identity (object.__eq__; a class that defines
  * __eq__ is refused by the front end). Executables only: a list[C] never crosses a library boundary. */
 typedef void (*tpa_obj_fn)(void *);
-typedef struct tpa_obj_list {
+typedef struct tpa_obj_list tpa_obj_list;
+struct tpa_obj_list {
     tpa_rc_t rc;
     int64_t len;
     int64_t cap;
     void **d;
     tpa_obj_fn ret;
     tpa_obj_fn rel;
-} tpa_obj_list;
+    void (*free_self)(tpa_obj_list *l);     /* frees the list object once its items are gone: plain, or (a list of a
+                                             * cyclic-capable class, tp_aot_gc.h) untracked first */
+};
+
+static void tpa_obj_list__free_plain(tpa_obj_list *l)
+{
+    free(l);
+}
+
+/* A list object's fields once it is allocated (the items NULL, `n` slots). */
+static TPA_UNUSED int tpa_obj_list__init(tpa_obj_list *l, int64_t n, tpa_obj_fn ret, tpa_obj_fn rel)
+{
+    if (n > 0) {
+        if ((uint64_t)n > (uint64_t)(SIZE_MAX / sizeof(void *))) {
+            return tpa_raise(TPA_MemoryError, "");
+        }
+        l->d = (void **)calloc((size_t)n, sizeof(void *));
+        if (l->d == NULL) {
+            return tpa_raise(TPA_MemoryError, "");
+        }
+    }
+    l->rc = 1;
+    l->len = n > 0 ? n : 0;
+    l->cap = l->len;
+    l->ret = ret;
+    l->rel = rel;
+    l->free_self = tpa_obj_list__free_plain;
+    return 0;
+}
 
 static TPA_UNUSED int tpa_obj_list__resize(tpa_obj_list *l, int64_t n)
 {
@@ -1844,22 +1873,10 @@ static TPA_UNUSED int tpa_obj_list_alloc(int64_t n, tpa_obj_fn ret, tpa_obj_fn r
     if (l == NULL) {
         return tpa_raise(TPA_MemoryError, "");
     }
-    if (n > 0) {
-        if ((uint64_t)n > (uint64_t)(SIZE_MAX / sizeof(void *))) {
-            free(l);
-            return tpa_raise(TPA_MemoryError, "");
-        }
-        l->d = (void **)calloc((size_t)n, sizeof(void *));
-        if (l->d == NULL) {
-            free(l);
-            return tpa_raise(TPA_MemoryError, "");
-        }
+    if (tpa_obj_list__init(l, n, ret, rel)) {
+        free(l);
+        return -1;
     }
-    l->rc = 1;
-    l->len = n > 0 ? n : 0;
-    l->cap = l->len;
-    l->ret = ret;
-    l->rel = rel;
     *out = l;
     return 0;
 }
@@ -1876,15 +1893,16 @@ static TPA_UNUSED void tpa_obj_list_release(tpa_obj_list *l)
     if (l != NULL && TPA_RC_DEC_IS_ZERO(l)) {
         int64_t i, n = l->len;
         void **d = l->d;
+        tpa_obj_fn rel = l->rel;                /* (read before the list object is freed) */
         l->d = NULL;
         l->len = 0;
-        for (i = 0; i < n; i++) {
-            if (d[i] != NULL) {
-                l->rel(d[i]);
+        l->free_self(l);                        /* (a tracked list leaves the collector's list first) */
+        for (i = 0; i < n; i++) {               /* the list object is gone before its items are released, */
+            if (d[i] != NULL) {                 /* so a release that reaches it again cannot (it is counted 0) */
+                rel(d[i]);
             }
         }
         free(d);
-        free(l);
     }
 }
 

@@ -410,6 +410,8 @@ def analyze_alloc(module: ir.Module, class_analysis: ClassAnalysis) -> AllocPlan
                     reason = f"unknown class: {cls_name}"
                 elif f"{cls_name}.__del__" in funcs_by_name:
                     reason = "class defines __del__"
+                elif _has_list_field(class_analysis, cls_name):
+                    reason = "class holds a list (tier S2a: its fields stay counted references of a heap object)"
                 elif cls_name not in plan.init_maps:
                     reason = "complex __init__"
                 else:
@@ -483,6 +485,12 @@ def analyze_alloc(module: ir.Module, class_analysis: ClassAnalysis) -> AllocPlan
 
 _EXPR_ATTRS = ("value", "obj", "index", "cond", "start", "stop", "step", "iter", "seconds", "code", "call")
 _EXPRS_ATTRS = ("values", "args")
+
+
+def _has_list_field(ca: ClassAnalysis, cls: str) -> bool:
+    """Tier S2a: `cls` has a list[C] field (such an object is always a heap object: not virtual, not region)."""
+    decl = ca.classes.get(cls)
+    return decl is not None and any(fd.type is ir.Type.OBJ_LIST for fd in decl.field_decls)
 
 
 def _stmt_exprs(s: ir.Stmt) -> list[ir.Expr]:
@@ -592,6 +600,8 @@ class _RegionAnalysis:
             return f"unknown class: {cls}"
         if f"{cls}.__del__" in self.funcs:
             return "class defines __del__"
+        if _has_list_field(self.ca, cls):
+            return "class holds a list (tier S2a)"
         if cls not in self.plan.init_maps:
             return "complex __init__"
         if not self.ca.classes[cls].field_decls:

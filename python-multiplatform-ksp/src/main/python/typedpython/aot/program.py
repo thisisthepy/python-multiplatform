@@ -132,6 +132,7 @@ class _Checker:
         self.class_methods: dict[str, set[str]] = class_methods or {}
         self.func_return_class: dict[str, str] = func_return_class or {}
         self.func_return_list_class: dict[str, str] = {}   # tier S2a: set by check() after construction
+        self.field_list_class: dict[tuple[str, str], str] = {}     # tier S2a: (class, list field) -> element class
         self.list_classes: dict[str, str] = {}             # tier S2a: list[C] names of the function -> C
         self.method_return_class: dict[tuple[str, str], str] = method_return_class or {}
         self.field_class: dict[tuple[str, str], str] = field_class or {}
@@ -173,6 +174,10 @@ class _Checker:
         display of instances of one class)."""
         if isinstance(e, ast.Name):
             return self.list_classes.get(e.id)
+        if isinstance(e, ast.Attribute) and isinstance(e.value, ast.Name):
+            recv = self.var_classes.get(e.value.id)
+            if recv is not None:
+                return self.field_list_class.get((recv, e.attr))        # a list field
         if isinstance(e, ast.Call) and isinstance(e.func, ast.Name):
             return self.func_return_list_class.get(e.func.id)
         if isinstance(e, ast.List) and e.elts:
@@ -264,7 +269,13 @@ class _Checker:
                                "`list[i] = value` are supported (no chained assignment, no attribute or slice target)")
             elif isinstance(s.targets[0], ast.Subscript):
                 self.subscript_parts(s.targets[0])
-            self.expr(s.value)
+            t0 = s.targets[0]
+            if (isinstance(s.value, ast.List) and not s.value.elts and isinstance(t0, ast.Attribute)
+                    and isinstance(t0.value, ast.Name)
+                    and (self.var_classes.get(t0.value.id), t0.attr) in self.field_list_class):
+                pass                        # tier S2a: `self.items = []`, an empty list of the field's class
+            else:
+                self.expr(s.value)
             if len(s.targets) == 1 and isinstance(s.targets[0], ast.Name):
                 lcls = self._infer_list_class(s.value)
                 if lcls is not None:
@@ -669,6 +680,8 @@ class _Checker:
         elif isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.attr in LIST_METHODS \
                 and not (f.value.id in ("sys", "math", "time") and f.value.id not in self.shadow):
             pass                            # tier S2a: a list method (the front end checks the receiver is a list)
+        elif isinstance(f, ast.Attribute) and isinstance(f.value, ast.Attribute) and f.attr in LIST_METHODS:
+            self.expr(f.value)              # tier S2a: a method of a list field (`self.items.append(x)`)
         else:
             self.rep.error(f, "aot/call", ast.unparse(f), f"the call of `{ast.unparse(f)}` is outside the first AOT step")
         for a in c.args:
@@ -969,6 +982,12 @@ def analyze(entry: Path, *, library: bool = False) -> Program:
                        method_return_class=method_return_class,
                        field_class=field_class)
     checker.func_return_list_class = func_return_list_class      # tier S2a
+    for c in program.classes:
+        for st in c.body:
+            if isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name):
+                lc = _list_class_name(st.annotation, class_names)
+                if lc is not None:
+                    checker.field_list_class[(c.name, st.target.id)] = lc
     for c in program.classes:
         for st in c.body:
             if isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name) and st.value is None:
