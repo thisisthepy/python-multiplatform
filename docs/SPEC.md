@@ -377,8 +377,16 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   it on that loop, and Kotlin's completion resolves it via `target_loop.call_soon_threadsafe(_pm_settle, ...)`.
   The fast path (`PendingCall.isDone` is `true` before `deliver` returns) never consults `get_running_loop()`
   or the configured delivery loop and builds no `Future`.
+  **Resuming from a Kotlin/Native thread** (iOS and androidNative; #164 item 11, pythonx-concurrent S9.6;
+  leader decision 2026-11-21, in 1.0, not owner-confirmed): any thread may resume a parked continuation,
+  provided it holds `withGIL` while it resumes (`PendingCall`'s contract, since the resumption runs the
+  delivery listener inline): a bare `pthread` the runtime never attached, a Kotlin/Native `Worker`, or a
+  `kotlinx.coroutines` dispatcher thread, which is a `Worker` underneath. The thread attaches on entry to
+  the scope and is detached when it ends (depth back to 0); the sample's iOS section 7 does it with a
+  `Worker` (`sample/src/iosMain/.../ProxyDemo.ios.kt`).
   `Status: implemented` on desktop and Kotlin/Native, `PM/desktopTest/.../upcall/AsyncUpcallDeliveryTest.kt`,
   `AsyncUpcallCancellationTest.kt`, `AsyncUpcallEarlyCancellationTest.kt`, `PM/nativeTest/.../AsyncUpcallNative*Test.kt`,
+  `PM/nativeTest/.../AsyncUpcallWorkerDeliveryTest.kt` (the `Worker` rule),
   `python-multiplatform-ksp/fixtures/app/.../GeneratedSuspendTest.kt`; `planned` on wasm (no threads).
 - **U-5a** (`suspend` function-typed parameters, #164 item 7):
   An exposed Kotlin function, method or constructor may declare a top-level parameter of a `suspend`
@@ -598,6 +606,58 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `theContinuationIsDispatchedThroughTheCallersInterceptorNotRunOnTheLoopThread`,
   `aKotlinxJobCancellationReachesTaskCancelThroughTheSubmitPrimitive`,
   `aReceiverWithoutAwaitOrNoLoopFailsBeforeAnythingIsScheduled`).
+- **U-5e** (stepping a Python coroutine from Kotlin, #164 item 13, pythonx-concurrent S7.9/S7.10/S7.13;
+  fable-pmp's task 2026-11-21, agent proposal, not owner-confirmed):
+  `fun PyObject.step(value: PyObject? = null, context: PyObject? = null): PyStep` and
+  `fun PyObject.throwInto(exception: PyObject, context: PyObject? = null): PyStep` /
+  `throwInto(exception: Throwable, context)` (package `python.multiplatform.ffi.pythonx`) run **one step** of
+  the receiver, a coroutine, a generator or any object with the method used: `receiver.send(value)` (`None`
+  when `value` is null) or `receiver.throw(exception)`, inside `context.run(...)` when a
+  `contextvars.Context` is given, else in the calling thread's current context (a `ContextVar.set` inside
+  the coroutine then stays in that thread's context). They need nothing but the interpreter: no binding
+  module, no upcall table, no event loop; no loop is set running during a step (pythonx-concurrent §11
+  item 6 is that library's decision).
+  - **One attachment, no suspension.** The whole step is one `withGIL` scope on the calling thread,
+    whichever thread that is (a thread CPython never saw attaches for the call and is detached on return,
+    the nesting depth back to what it was). The library code inside the scope contains no suspension point
+    and runs no caller-supplied Kotlin code, so the GIL (attachment on 3.15t) is never held across a Kotlin
+    suspension and on a JVM virtual thread the step is one pinned call (#161). A Python upcall into Kotlin
+    from inside the coroutine runs under the step's frame as any upcall does.
+  - **The outcome is a sealed `PyStep`.** `Yielded(value)`: the object the coroutine suspended on (for an
+    `await` of an `asyncio` future, the future itself; for U-5's proxies, the `Future` the binder handed
+    out), a new owned reference the caller closes. `Returned(value)`: the coroutine returned; the
+    `StopIteration` value, owned by the caller (`None` for a bare return; an exhausted generator reports
+    `Returned(None)` again, as its `StopIteration` does). `Raised(exception)`: the step raised, with the
+    `PyException` (type, value, traceback, `__context__`, `__cause__`) and the error indicator cleared;
+    this includes `RuntimeError("cannot reuse already awaited coroutine")` for a finished coroutine,
+    `ValueError("coroutine already executing")` for a step that overlaps another, and
+    `RuntimeError("cannot enter context: ... is already entered")` when the given context is in use
+    (the coroutine untouched in that case). A `Raised` whose `exception.isCancelledError()` is the
+    cancellation signal; `exception.toKotlinException()` applies U-2's mapping.
+  - **Throwing in.** `throwInto(PyObject)` throws that exception instance (or class) into the coroutine at
+    its suspension point. `throwInto(Throwable)` builds the Python exception with U-2's mapping: a Kotlin
+    `CancellationException` arrives as `asyncio.CancelledError` with any Kotlin cause as `__cause__`, a
+    `PyException` as its original Python instance, any other throwable as `RuntimeError(message)` with
+    the Kotlin cause chain on `__cause__`.
+  - **Refusals before anything runs** (`IllegalArgumentException`, the receiver untouched): a receiver
+    without the method used (`send` / `throw`), a `context` that is not a `contextvars.Context`.
+  - **Threads.** Two steps of one coroutine never overlap: the driver sequences them (S7.11); each may
+    run on a different thread, and `threading.get_ident()` inside the coroutine changes with the thread
+    while `contextvars` stay with the `Context` the driver passes. Reference counting: the receiver and
+    the arguments are the caller's and are not retained beyond the call; the bound method, the argument
+    tuple and a `StopIteration` instance are released inside the scope; only the result is handed out.
+  `Status: implemented` on desktop and Kotlin/Native (commonTest, so every target compiles and runs the
+  thread-free part), `PM/commonTest/.../pythonx/PyCoroutineStepTest.kt`
+  (`aCoroutineIsSteppedWithSendValuesUntilItsReturnValueArrivesAndNothingLeaks`,
+  `eachStepRunsInsideTheGivenContextAndWritesStayInIt`,
+  `aKotlinThrowableThrownIntoTheCoroutineArrivesMappedAndTheOutcomeIsReported`,
+  `aFinishedCoroutineAnExhaustedGeneratorAndANonCoroutineAreReportedWithoutLeavingAnErrorIndicator`),
+  `PM/desktopTest/.../pythonx/PyCoroutineStepThreadTest.kt`
+  (`eachStepMayRunOnADifferentThreadCPythonNeverSawAndLeavesItDetached`,
+  `aStepOnAVirtualThreadCompletesAndLeavesTheCarrierDetached`),
+  `PM/nativeTest/.../pythonx/PyCoroutineStepNativeTest.kt`
+  (`aStepFromAThreadTheRuntimeNeverAttachedCompletesTheCoroutine`); `planned` on wasm for the thread
+  claims only (no threads there; the commonTest part runs).
 - **U-6** Upcalls work in a GraalVM native image (desktop). `Status: implemented` with manual
   verification, procedure and record in `docs/platforms/graal-native-image-verification.md`
   (`:sample:nativeCompile`, Liberica NIK), guarded automatically by `ReachabilityMetadataTest.kt` (C-2).
@@ -1235,7 +1295,8 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   past the limit raises `RecursionError('maximum recursion depth exceeded')` where CPython does, and a C-stack
   guard keeps the process alive at any limit (#57). The depth check holds a strong reference only to the
   Python frame below the outermost compiled call (which outlives it), never to a callback's frame, so no
-  frame's locals outlive its return (#125). **Known difference** (#125, recorded with the leader's OK of
+  frame's locals outlive its return (#125; a continuation's frame on the #426 exit path is held until the
+  compiled frame's epilogue right after the continuation returns, with no Python code in between). **Known difference** (#125, recorded with the leader's OK of
   2026-11-21, not owner-confirmed): a pure-Python frame running above compiled frames (a callback, or code
   it calls) is checked by the interpreter's own counter, which does not count the compiled frames below
   it, so a recursion of Python frames from a callback reaches `RecursionError` up to that many frames later
@@ -1704,7 +1765,9 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     `time` module (`perf_counter`, `monotonic`, `time`, `sleep`).
   - **Tier O PR-O1 (#486)** (leader review 2026-11-20, not owner-confirmed): adds headerless compiled
     classes (`struct tpa_cls_<C>` with `tpa_rc_t rc` and typed fields), `C | None`, `is` / `is not`,
-    `__init__` and instance methods, tail-loop release for self-referential fields, a single
+    `__init__` and instance methods, tail-loop release for self-referential fields (and, since the
+    review of #508, a release whose nesting depth is bounded for every other class-typed field, the
+    deeper frees deferred to the outermost release, so a chain of any length and shape is freed), a single
     whole-program immutability analysis shared by the cycle-freedom proof (`aot/cycle-possible`),
     reference-counting elision rules, and library-mode safety (`aot/library-mutable-class`), compiling
     `benchmarks/typedpython/py/binary_trees.py` with 0 `aot-check` findings.
@@ -1765,7 +1828,11 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     `tpa_cls_<C>_new` of a cyclic-capable class, before the allocation, when every constructor argument is
     held by the caller, and once at the end of the program: after `__main__` returns, when no frame holds
     anything, and on the `sys.exit` path before `exit()` (the frames' counted locals stay alive; the
-    status is unchanged; review of #503, note 2). At a safepoint
+    status is unchanged; review of #503, note 2). `sys.exit` does not unwind the frames between the call
+    and `__main__` (CPython raises `SystemExit`, which does); nothing observes the difference today, since
+    AOT compiles no `__del__` and no `finally`, and tier S's exceptions (S3) must lower `sys.exit` as the
+    `SystemExit` it is before `finally` is accepted (review of #508, F3). `sys.exit` runs only on the
+    main thread today (no parallel loops in AOT, `sys.exit` refused in the library). At a safepoint
     no cyclic-capable object is kept alive solely by an uncounted reference: PR-O1's elision rules (3) and
     (4) are off for every field of a cyclic-capable class (`field_elidable`), and references from region
     objects, virtual objects, untracked objects, locals and temporaries are counted and never
