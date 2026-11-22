@@ -180,6 +180,34 @@ open class PyException(
         }
     }
 
+    /** The Python exception [toPyObject] built for an exception that had no live [value]. */
+    private var synthesized: PyObject? = null
+
+    /**
+     * This exception as a Python object (issue #524 item 1).
+     *
+     * Source: owner answer 2026-11-22, relayed by the leader: "Exception + toPyObject()" (keep
+     * `: Exception`, the Python object reachable via `toPyObject()` as in the baseline sketch). The
+     * pre-agent `PyException` (f33bcef8) sketched exactly this: a `PyObject` held inside the
+     * exception and a `fun toPyObject(): PyObject`. `kotlin.Throwable` and [PyObject] are both
+     * classes, so one Kotlin class cannot extend both as `python_for_kotlin_binding.mermaid` draws it.
+     *
+     * - A Python exception that reached Kotlin answers the original instance, [value] itself.
+     * - A `PyException` made in Kotlin answers `type(message)`, or `RuntimeError(message)` when it has
+     *   no [type]. Built on the first call and the same object afterwards, so identity holds across
+     *   calls; it carries no traceback, as an exception that was never raised has none.
+     */
+    fun toPyObject(): PyObject {
+        value?.let { return it }
+        synthesized?.let { return it }
+        val made = python.multiplatform.ffi.Python3.withPython {
+            val callable: PyObject = type ?: python.multiplatform.ffi.upcall.UpcallTrampoline.runtimeErrorClass()
+            callable.invoke(python.multiplatform.ffi.types.basic.PyString.from(errMsg))
+        }
+        synthesized = made
+        return made
+    }
+
     /**
      * The Kotlin [Throwable] this Python exception is the proxy of, the same instance, or `null`
      * when it is any other Python exception (SPEC U-2 and O-3, #164 item 6).

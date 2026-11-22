@@ -71,7 +71,13 @@ fail, then implement.
   the interpreter again in the same process after it is not supported.
   `Status: implemented`, `PM/commonTest/.../ffi/Python3Test.kt`, `PM/desktopTest/.../ffi/InterpreterShutdownTest.kt`.
 - **L-2** `Python3.runMain` / `runApp` run a module or `-c` source with argv, map `sys.exit` status to
-  a return value, restore argv, and do not finalize the shared interpreter.
+  a return value, restore argv, and do not finalize the shared interpreter. `runApp(argc: Int, argv: Array<String>): Int`
+  has the owner's signature (`python_for_kotlin_binding.mermaid`; pre-agent code f33bcef8: `runApp(argv: Array<String>)`,
+  "Run Python script as an application (Automatically initializes Python)"; issue #524 item 7): `argv[0]` is the program
+  name and is not parsed, only the first `argc` elements are read (an `argc` outside `0..argv.size` is
+  `IllegalArgumentException`), and the interpreter is started first when it is not running. What follows the program
+  name is the reduced `python` command line documented on `runApp` (`-c`, `-m`, a script path, `--`); that grammar is
+  agent-designed, not the owner's.
   `Status: implemented`, `PM/commonTest/.../RunMainTest.kt`, `RunAppTest.kt`.
 - **L-3** Before `Py_Initialize`, a `PYTHONHOME` pre-flight check turns a missing or unusable stdlib
   into a catchable `IllegalStateException` naming the path and version, instead of CPython's process
@@ -258,10 +264,15 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `PyException.isCancelledError()` is `true` when the underlying Python exception is an instance of
   `asyncio.CancelledError` (`concurrent.futures.CancelledError`), and `PyException.toKotlinException()`
   returns a `kotlin.coroutines.cancellation.CancellationException` with `this` as its `cause` for a
-  cancelled error and `this` otherwise (#164). `PyException.kotlinThrowable` is the original Kotlin
+  cancelled error and `this` otherwise (#164). `PyException.toPyObject()` is the exception as a Python object
+  (issue #524 item 1; owner answer 2026-11-22, relayed by the leader: "Exception + toPyObject()", keep `: Exception`
+  with the Python object reachable via `toPyObject()` as in the pre-agent sketch at f33bcef8; `kotlin.Throwable` and
+  `PyObject` are both classes, so the mermaid's "implements Throwable and extends PyObject" cannot be one Kotlin
+  class): the original Python exception for one that came from Python, otherwise `type(message)` (or
+  `RuntimeError(message)` with no type), built once and the same object on every later call. `PyException.kotlinThrowable` is the original Kotlin
   `Throwable` when the Python exception is a `python_multiplatform.KotlinThrowable` proxy (U-2), the same
   instance, and `null` otherwise.
-  `Status: implemented`, `PyExceptionTest.kt`; `kotlinThrowable`: `draft`, `PM/commonTest/.../KotlinThrowableProxyTest.kt`.
+  `Status: implemented`, `PyExceptionTest.kt`; `toPyObject`: `draft`, `PyExceptionTest.kt`; `kotlinThrowable`: `draft`, `PM/commonTest/.../KotlinThrowableProxyTest.kt`.
 - **O-3a** (#524, owner 2026-11-22: restore the pre-agent object model and implement its skeleton
   types) A raised Python exception is the Kotlin class of its built-in Python class: every built-in
   exception of CPython 3.15 has a `Py<Name>` class under `ffi.exceptions.errors` whose Kotlin superclass
