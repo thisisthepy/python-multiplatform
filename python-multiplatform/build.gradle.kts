@@ -1259,6 +1259,12 @@ kotlin {
         macosArm64(), linuxX64(), mingwX64()
     ).forEach { nativeTarget ->
         nativeTarget.apply {
+            // gradle.properties asks every binary for libbacktrace source info, which the Kotlin/Native
+            // runtime provides on ELF targets only; a mingwX64 link then misses
+            // Kotlin_getSourceInfo_libbacktrace (batch run 44973431716). Windows binaries take none.
+            if (konanTarget == MINGW_X64) {
+                binaries.all { binaryOption("sourceInfoType", "noop") }
+            }
             val targetABI = when(konanTarget) {
                 ANDROID_ARM64 -> "arm64-v8a"
                 ANDROID_X64 -> "x86_64"
