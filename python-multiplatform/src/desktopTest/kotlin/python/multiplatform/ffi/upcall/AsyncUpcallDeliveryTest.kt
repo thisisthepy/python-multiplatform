@@ -184,7 +184,7 @@ class AsyncUpcallDeliveryTest {
                 "a Kotlin failure after suspension has to reach the awaiting coroutine as a raise",
             )
             assertEquals(
-                "RuntimeError: IllegalStateException: late boom",
+                "KotlinThrowable: IllegalStateException: late boom",
                 outcome.cause,
                 "a Kotlin failure after suspension must preserve the Kotlin throwable as __cause__",
             )

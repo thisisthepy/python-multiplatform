@@ -75,11 +75,12 @@ internal object KotlinThrowableProxy {
 
     /**
      * Defines [CLASS_GLOBAL] when the upcall entry points are published and it is not defined yet.
+     * Executed by [classPointer] when the first Kotlin throwable is raised into Python.
      *
      * Safe to `exec` any number of times: a second definition would build a second class, and an
      * exception raised before it would stop being an instance of the one `_pm_unwrap` and
-     * [throwableOf] test against. Emitted by [PythonProxySource] ahead of `_pm_unwrap` too, so the
-     * class exists before the owner tuple that names it.
+     * [throwableOf] test against. `_pm_unwrap` looks the class up when it is handed an exception, so
+     * it does not matter whether the proxy source was rendered before or after this ran.
      *
      * `_pm_invoke` and `_pm_release` are captured as default arguments, for the reason
      * `_pm_releaser` gives: a module's globals are `None` during interpreter finalisation and
@@ -101,13 +102,13 @@ internal object KotlinThrowableProxy {
                         self._pm_handle = _pm_h
 
                     def __del__(self, _pm_r=_pm_r):
-                        # Cleared before the release, as `_PmObject.__del__` does: a second call, or a
-                        # resurrection, cannot hand the same handle back twice.
-                        _pm_d = self.__dict__
-                        _pm_h = _pm_d.get('_pm_handle')
+                        # The owner's release policy, the same as `_PmObject.__del__` (which cannot be
+                        # inherited: an exception and `_PmObject` have conflicting layouts). Cleared
+                        # before the release, so a second call, or a resurrection, cannot hand the
+                        # same handle back twice.
+                        _pm_h = getattr(self, '_pm_handle', None)
                         if _pm_h is not None:
-                            _pm_d['_pm_handle'] = None
-                            _pm_d.pop('_pm_proxy', None)
+                            self._pm_handle = None
                             _pm_r(_pm_h)
 
                     def _pm_ask(self, _pm_op, _pm_i=_pm_i):

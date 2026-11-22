@@ -613,10 +613,6 @@ object PythonProxySource {
             }
             appendLine(ENTRY_POINT_GUARD)
             appendLine()
-            // SPEC U-2 (#164 item 6): the exception class that is a Kotlin throwable's proxy, before
-            // `_pm_unwrap`, whose owner tuple names it so that it crosses back as its handle.
-            appendLine(KotlinThrowableProxy.SOURCE)
-            appendLine()
             appendLine(OWNED_HANDLE)
             appendLine()
             var index = 0
@@ -895,13 +891,7 @@ object PythonProxySource {
                 # and simply keeps not collecting a Kotlin-side cycle, same as before.
                 _PmGcObject = _PmObject
 
-            def _pm_unwrap(
-                _pm_v,
-                _pm_owners=(_PmObject, _PmGcObject) + (
-                    (globals()['${KotlinThrowableProxy.CLASS_GLOBAL}'],)
-                    if '${KotlinThrowableProxy.CLASS_GLOBAL}' in globals() else ()
-                ),
-            ):
+            def _pm_unwrap(_pm_v, _pm_owners=(_PmObject, _PmGcObject, BaseException)):
                 # What an owner is worth on the wire: the handle inside it. Everything else is
                 # passed through untouched, which is what keeps a bare handle working for every
                 # caller written against the raw contract, and what lets an ordinary Python object
@@ -914,7 +904,9 @@ object PythonProxySource {
                 # See `PythonProxySource.argValues`.
                 #
                 # A Kotlin throwable's proxy (`${KotlinThrowableProxy.CLASS_GLOBAL}`, SPEC U-2) is an owner
-                # too: an exception cannot share a layout with `_PmObject`, so it is named here.
+                # too. An exception cannot share a layout with `_PmObject`, and the class is defined
+                # when the first Kotlin throwable is raised, which can be after this function, so
+                # `BaseException` is in the tuple and the class is looked up only for an exception.
                 #
                 # Both owners, because the decision is no longer made here. `_PmGcObject` is not an
                 # `_PmObject` -- CPython refuses two solid bases -- so testing the one name meant
@@ -927,6 +919,10 @@ object PythonProxySource {
                 # replaced for, at 551-587 ns a time. The owners are a default argument for the same
                 # reason `__del__` binds its releaser that way: one less global lookup per argument.
                 if isinstance(_pm_v, _pm_owners):
+                    if isinstance(_pm_v, BaseException):
+                        _pm_t = globals().get('${KotlinThrowableProxy.CLASS_GLOBAL}')
+                        if _pm_t is None or not isinstance(_pm_v, _pm_t):
+                            return _pm_v
                     _pm_h = _pm_v._pm_handle
                     if not _pm_h:
                         raise ValueError(
