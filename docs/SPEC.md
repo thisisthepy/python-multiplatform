@@ -1031,6 +1031,14 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `python-multiplatform-compose/fixtures/compose/src/desktopTest/` (`ComposableRenderTest.kt`, `M3ProofRenderTest.kt`,
   `CallbackDrivenRenderTest.kt`, pointer/drag render tests), `GP/artifact/ComposableBindingTest.kt`;
   `planned` on Android, iOS and wasm.
+- **B-6b** (#191, from #172 item 5) Input-method composition reaches a Python `TextField(state=...)` through a real
+  desktop window: a Swing `JFrame` with a `ComposePanel`, where Compose's AWT layer decodes each
+  `java.awt.event.InputMethodEvent` (attributed text, committed-character count) into `commitText` /
+  `setComposingText`. A Hangul sequence (ㅎ, 하, 한 composing, 한 committed) leaves the Kotlin `TextFieldState`
+  Python created with each composing text and its range, then `한` with no composition, and Python reads `한`.
+  The offscreen half (the calls below the AWT layer) is `notebook-e2e`'s `InputMethodScene`. `Status: draft`,
+  `python-multiplatform-compose/fixtures/compose/.../window/RealWindowInputMethodTest.kt`, run by `desktopWindowTest`
+  (a display is required).
 - **B-8** A host draws a Python-declared application root with
   `python.multiplatform.compose.PythonAppView(modifier, module, attribute)` (or `PythonWidget(composableName, modifier, moduleName)` or `PythonWidget(root: PyObject)`, inside a `PythonLauncher { }` that starts the interpreter),
   from the `python-multiplatform-compose` module (`python-multiplatform` itself does not depend on
