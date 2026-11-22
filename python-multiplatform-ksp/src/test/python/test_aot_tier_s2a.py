@@ -821,3 +821,148 @@ def test_a_class_with_a_list_field_is_never_virtual_or_region(tmp_path: Path):
     """Its fields stay counted references of a heap object (the list can change under any alias)."""
     report = aot.explain_alloc(_write(tmp_path, TREE))
     assert "class holds a list" in report and "-> virtual" not in report and "-> region" not in report
+
+
+TUPLES = """
+import sys
+
+
+def measure(p: tuple[int, str]) -> tuple[int, int]:
+    return len(p[1]), p[0]
+
+
+def pair(n: int) -> tuple[int, float]:
+    return n * 2, n / 4
+
+
+def triple(n: int) -> tuple[int, int, int]:
+    return n, n + 1, n + 2
+
+
+def again(n: int) -> tuple[int, int, int]:
+    return triple(n + 1)
+
+
+def label(n: int) -> tuple[str, int]:
+    return "n=" + str(n), n
+
+
+def relabel(n: int) -> tuple[str, int]:
+    t = label(n * 2)
+    if n > 1:
+        return t
+    return label(n - 1)
+
+
+def show(x: float, n: int) -> None:
+    a = (x, True, n)
+    b = ("sé",)
+    c = (1, 2, n)
+    d = a
+    for v in c:
+        print(v)
+    print(a, b, d, f"<{b}>", str(c), repr(b))
+    q = pair(n)
+    print(q[0], q[-1], len(q))
+    words = ("x", "", "été")
+    for w in words:
+        print(len(w), w)
+
+
+def order(n: int) -> None:
+    one = (n,)
+    two = (n, 0)
+    other = (n, -1)
+    print(one < two, two < one, one == two, two > other, two >= other, other <= other, (n, 1) == (n, 1))
+    s = ("b", "a")
+    t = ("a", "z")
+    print(s > t, s < t, s == ("b", "a"), s != t)
+    flags = (True, False)
+    print(flags, flags == (True, False), flags < (True, True))
+
+
+def main() -> None:
+    n = int(sys.argv[1])
+    t = (n, "a")
+    u: tuple[int, str] = (n + 1, "b")
+    s, k = measure(t)
+    print(t[0], t[1], len(t), s, k)
+    w = triple(n)
+    m = n + 5
+    print(t == u, t != u, t < u, t >= u, n in w, m not in w, "a" in t[1], t[1] in ("a", "b"))
+    print(t)
+    x, y = 1, 2
+    x, y = y, x
+    print(x, y)
+    t = (t[0] * 3, t[1] + "!")
+    print(t, u)
+    show(n * 1.5, n)
+    s2, k2 = measure((n, "xyz"))
+    r = again(n)
+    print(s2, k2, r)
+    order(n)
+    name, v = label(n)
+    lt = relabel(n)
+    print(name, v, lt, lt[0], lt == (name, v), len(lt[0]))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_tuple_values(tmp_path: Path):
+    """Fixed-shape tuples (design 4.3.2): displays, a tuple parameter, a tuple returned and bound to a name, `t[k]`
+    (negative too), len, unpacking (also the swap `x, y = y, x`), == / != / ordering (CPython's first differing item,
+    then the lengths), `in` (also of a display), loops over a tuple, print / str / repr / f-string (`('s',)` for one
+    element), a tuple rebound from its own elements."""
+    _compare(tmp_path, TUPLES, [["0"], ["3"], ["-7"]])
+
+
+TUPLE_MAIN = '\n\ndef main() -> None:\n    print(f(1))\n\n\nif __name__ == "__main__":\n    main()\n'
+
+
+@pytest.mark.parametrize("body, words", [
+    ("def f(i: int) -> int:\n    t = (1, 2)\n    return t[i]\n", "indexed by a constant"),
+    ("def f(i: int) -> int:\n    t = (1, 2)\n    return t[5]\n", "indexed by a constant"),
+    ("def f(i: int) -> bool:\n    t = (1, 2)\n    return t is t\n", "no tuple object yet"),
+    ("def f(i: int) -> int:\n    t = (1, 2)\n    x = [t]\n    return 0\n", "no tuple object yet"),
+    ("def f(i: int) -> bool:\n    t = (i * 0.5, 1)\n    return t == t\n", "(aot/identity)"),
+    ("def f(i: int) -> bool:\n    t = (i * 0.5, 1)\n    return 1.0 in t\n", "(aot/identity)"),
+    ("def f(i: int) -> int:\n    t = (i, 'a')\n    for v in t:\n        pass\n    return 0\n", "different types"),
+    ("def f(i: int) -> bool:\n    t = (1, 2)\n    return i + 1 in t\n", "bind the value to a name first"),
+])
+def test_a_tuple_use_with_no_aot_form_is_named(tmp_path: Path, body: str, words: str):
+    """What needs a tuple object (identity, a container holding one), a variable index, or CPython's identity test on a
+    float item leaves the function uncompiled with the reason, never a guess."""
+    with pytest.raises(aot.AotError) as raised:
+        aot.generate(_write(tmp_path, body + TUPLE_MAIN))
+    assert words in str(raised.value)
+
+
+def test_a_library_does_not_export_a_tuple_parameter(tmp_path: Path):
+    """Inside the program a tuple parameter is one parameter per element; the library boundary keeps the signature as
+    written, so exporting one is the named `aot/export` finding (an internal function may take one); a returned tuple
+    with a str element is not exported yet either (the Kotlin result class holds scalars)."""
+    from typedpython.aot import library
+    p = _write(tmp_path, """
+def inner(p: tuple[int, int]) -> int:
+    return p[0] + p[1]
+
+
+def take(p: tuple[int, int]) -> int:
+    return p[0]
+
+
+def total(n: int) -> int:
+    return inner((n, n + 1))
+
+
+def named(n: int) -> tuple[str, int]:
+    return "n", n
+""", "lib.py")
+    for name in ("take", "named"):          # (a str element of a returned tuple: not across the boundary yet either)
+        with pytest.raises(aot.AotError) as raised:
+            library.generate_library(p, exports=[name], prefix="p")
+        assert [(f.rule, f.name) for f in raised.value.findings] == [("aot/export", name)]
+    library.generate_library(p, exports=["total"], prefix="p")

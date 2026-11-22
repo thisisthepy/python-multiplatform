@@ -90,7 +90,7 @@ import re
 import sys
 from pathlib import Path
 
-from typedpython import ir, resume
+from typedpython import ir, resume, tuples
 from typedpython.aot import AotError, LibraryFiles, _lower
 from typedpython.aot import emit as emit_mod
 from typedpython.aot import unicode as unicode_mod
@@ -898,10 +898,19 @@ class _Plan:
                     "(append, insert, extend, pop, clear, remove): a list that crosses the boundary keeps its length "
                     "until tier T adds per-list locking (another thread or a `_data` pointer may be reading it)", name))
                 continue
+            split = [a.arg for a in node.args.args if tuples.annotation_shape(a.annotation) is not None]
+            if split:
+                # tier S2a: a tuple parameter is one parameter per element inside the program (typedpython/tuples.py);
+                # the library boundary keeps the signature as written, so it does not export one yet
+                found.append(_finding(rel, node.lineno, "aot/export", name,
+                                      f"`{name}` cannot be exported: its parameter `{split[0]}` is a tuple, which does "
+                                      "not cross the library boundary in tier S2a (pass the elements)", name))
+                continue
             kinds = g.tuple_kinds(fn)
             ok = (all((isinstance(q, ir.Param) and q.type in CTYPE and q.cls is None)
                       or (isinstance(q, ir.ArrayParam) and q.type in LIST and q.buffer is None) for q in fn.params)
-                  and (fn.returns in CTYPE or fn.returns in LIST or fn.returns is Type.NONE or kinds is not None))
+                  and (fn.returns in CTYPE or fn.returns in LIST or fn.returns is Type.NONE
+                       or (kinds is not None and all(k in CTYPE for k in kinds))))     # (a str element: not exported yet)
             if not ok:
                 found.append(_finding(rel, node.lineno, "aot/export", name,
                                       f"`{name}` cannot be exported: its lowered signature is outside the library "

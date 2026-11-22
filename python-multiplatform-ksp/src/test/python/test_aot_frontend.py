@@ -405,7 +405,9 @@ def test_a_tuple_is_returned_and_unpacked_into_names(tmp_path):
     assert not diagnostics and [f.name for f in proved.functions] == ["pair", "use"]
 
 
-def test_a_tuple_is_unpacked_only(tmp_path):
+def test_a_tuple_from_a_call_is_split_into_its_elements(tmp_path):
+    """Tier S2a (design 4.3.2): `t = pair(x)` binds one local per element (an Unpack into `t__0`, `t__1`) and `t[0]`
+    reads the element; unpacking into the wrong number of names is still the named skip."""
     m = aot_ir(tmp_path, """
         def pair(x: float) -> tuple[float, float]:
             return x, x
@@ -418,7 +420,11 @@ def test_a_tuple_is_unpacked_only(tmp_path):
             a, b, c = pair(x)
             return a
         """)
-    assert "returns a tuple, which an AOT program can only unpack" in m.skipped["whole"]
+    whole = function(m, "whole")
+    [u] = [n for n in walk(whole.body) if isinstance(n, ir.Unpack)]
+    assert u.targets == ("t__0", "t__1") and whole.locals["t__0"] is Type.F64 and whole.locals["t__1"] is Type.F64
+    [r] = [n for n in walk(whole.body) if isinstance(n, ir.Return)]
+    assert isinstance(r.value, ir.Local) and r.value.name == "t__0"
     assert "unpacks 3 names from the 2 values" in m.skipped["few"]
 
 

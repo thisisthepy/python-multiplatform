@@ -312,6 +312,18 @@ def lower(path: Path, *, aot: bool = False) -> ir.Module:
         info.aot_time = len(time_bound) == 1 and info.imports.get("time") == "time"
 
     skipped: dict[str, str] = {}
+    early_kinds: dict[str, dict[str, list[tuple[int, str]]]] | None = None
+    tuple_problems: dict[str, str] = {}
+    if aot:
+        # tier S2a: every function's locals typed on the source as written, then each fixed-shape tuple split into
+        # one local per element on the AST the lowering reads (typedpython/tuples.py, design 4.3.2 "Tuples")
+        from typedpython import tuples
+        every = [(s.name, s) for s in tree.body if isinstance(s, ast.FunctionDef)]
+        every += [(f"{c.name}.{m.name}", m) for c in tree.body if isinstance(c, ast.ClassDef)
+                  for m in c.body if isinstance(m, ast.FunctionDef)]
+        early_kinds = _inferred_kinds(path, source, tree, every)
+        split = tuples.split(tree, early_kinds)
+        early_kinds, tuple_problems = split.kinds, split.problems
     class_decls, class_skips = _classes(tree, source, info, aot)
     info.classes = class_decls
     skipped.update(class_skips)
@@ -344,10 +356,16 @@ def lower(path: Path, *, aot: bool = False) -> ir.Module:
 
     if aot:
         info.aot_tuples = {n: s.tuple_returns for n, s in signatures.items()
-                           if s.tuple_returns is not None and all(t in ir.SCALARS for t in s.tuple_returns)
+                           if s.tuple_returns is not None
+                           and all(t in ir.SCALARS or t is Type.STR for t in s.tuple_returns)     # (str: tier S2a)
                            and s.returns == Type.OBJ}
 
-    kinds = _inferred_kinds(path, source, tree, [(q, s.node) for q, s in signatures.items()])
+    for q, reason in tuple_problems.items():
+        if q in signatures:
+            del signatures[q]
+            skipped[q] = reason
+    kinds = early_kinds if early_kinds is not None else _inferred_kinds(
+        path, source, tree, [(q, s.node) for q, s in signatures.items()])
 
     # Optimistic start: every candidate lowered, pure, not deopting; then iterate to a fixpoint
     # (purity is the greatest fixpoint through calls, may_deopt the least).
@@ -1101,7 +1119,7 @@ def _signature(fn: ast.FunctionDef, classes: dict[str, ir.ClassDecl] | None = No
         if returns in ir.SCALARS and any(
                 isinstance(p, ir.ArrayParam) and p.buffer == "numpy" for p in params):
             returns = Type.OBJ      # #220: the interpreter returns np.float64 / np.int64 / np.bool
-    elements, ellipsis = _tuple_annotation(fn.returns)
+    elements, ellipsis = _tuple_annotation(fn.returns, aot=info is not None and info.aot)
     ret_cls, ret_opt = None, False
     if returns == Type.OBJ and classes:
         rc = _class_of(_annotation_kind(fn.returns), classes)
@@ -1113,8 +1131,9 @@ def _signature(fn: ast.FunctionDef, classes: dict[str, ir.ClassDecl] | None = No
                       return_cls=ret_cls, return_optional=ret_opt)
 
 
-def _tuple_annotation(annotation: ast.expr) -> tuple[tuple[Type, ...] | None, bool]:
-    """`tuple[int, float]` -> ((I64, F64), False); `tuple[int, ...]` -> (None, True)."""
+def _tuple_annotation(annotation: ast.expr, aot: bool = False) -> tuple[tuple[Type, ...] | None, bool]:
+    """`tuple[int, float]` -> ((I64, F64), False); `tuple[int, ...]` -> (None, True). AOT mode: a `str` element is
+    STR (tier S2a)."""
     if not (isinstance(annotation, ast.Subscript) and isinstance(annotation.value, ast.Name)
             and annotation.value.id == "tuple"):
         return None, False
@@ -1122,6 +1141,9 @@ def _tuple_annotation(annotation: ast.expr) -> tuple[tuple[Type, ...] | None, bo
     items = list(inner.elts) if isinstance(inner, ast.Tuple) else [inner]
     if any(isinstance(i, ast.Constant) and i.value is Ellipsis for i in items):
         return None, True
+    if aot:
+        return tuple(Type.STR if _annotation_kind(i) == "str" else SCALAR_KIND.get(_annotation_kind(i), Type.OBJ)
+                     for i in items), False
     return tuple(SCALAR_KIND.get(_annotation_kind(i), Type.OBJ) for i in items), False
 
 
@@ -2030,7 +2052,7 @@ class _Lowerer:
         if not (isinstance(value_node, ast.Call) and isinstance(value_node.func, ast.Name)
                 and value_node.func.id in self.info.aot_tuples and not self.is_local(value_node.func.id)):
             raise Skip(line, f"`{_src(node)}`: a tuple is only unpacked from a call of a program function that "
-                             "returns a fixed `tuple[...]` of ints, floats or bools")
+                             "returns a fixed `tuple[...]` of ints, floats, bools or strs, a tuple name or a display")
         fname = value_node.func.id
         if fname not in self.env:
             raise Skip(line, f"`{fname}` is not compiled (see its own finding)")
@@ -3048,10 +3070,10 @@ class _Lowerer:
                                           f"return type `{sig.return_annotation}` declares "
                                           f"{TYPE_NAME[kind]} there")
             if self.info.aot:
-                if e.type != kind or kind not in ir.SCALARS:
+                if e.type != kind or (kind not in ir.SCALARS and kind is not Type.STR):
                     raise Skip(e_node.lineno, f"`{_src(e_node)}` is {TYPE_NAME[e.type]}, but the return type "
                                               f"`{sig.return_annotation}` declares {TYPE_NAME.get(kind, 'something else')} "
-                                              "there (a tuple of ints, floats and bools only)")
+                                              "there (a tuple of ints, floats, bools and strs only)")
                 elements.append(e)
                 continue
             elements.append(self.boxed(e, e_node))

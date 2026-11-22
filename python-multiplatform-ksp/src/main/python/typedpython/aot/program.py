@@ -230,7 +230,7 @@ class _Checker:
         elif allow_tuple and _is_tuple_annotation(ann):
             return
         else:
-            more = ", and a tuple of those as a return type" if allow_tuple else ""
+            more = ", a fixed tuple of int, float, bool and str" if allow_tuple else ""
             self.rep.error(ann, "aot/type", ast.unparse(ann), f"the type `{ast.unparse(ann)}` is outside the "
                            f"AOT mode (int, float, bool, str, list[int], list[float], compiled classes{more}, and None as a return type)")
 
@@ -248,7 +248,7 @@ class _Checker:
                 if arg.annotation is not None:
                     self.annotation(arg.annotation, f"parameter `{arg.arg}`", arg)
                 continue
-            self.annotation(arg.annotation, f"parameter `{arg.arg}`", arg)
+            self.annotation(arg.annotation, f"parameter `{arg.arg}`", arg, allow_tuple=not is_method)
         self.annotation(fn.returns, f"the return of `{fn.name}`", fn, allow_none=True, allow_tuple=True)
 
     # -- statements
@@ -289,7 +289,7 @@ class _Checker:
             if not isinstance(s.target, ast.Name) or s.value is None:
                 self.rep.error(s, "aot/assign", "assignment", "only `name: type = value` is supported")
             else:
-                self.annotation(s.annotation, f"`{s.target.id}`", s)
+                self.annotation(s.annotation, f"`{s.target.id}`", s, allow_tuple=True)
                 cls = _extract_class_name(s.annotation, self.class_names)
                 if cls is not None:
                     self.var_classes[s.target.id] = cls
@@ -513,6 +513,9 @@ class _Checker:
             self.expr(e.orelse)
         elif isinstance(e, ast.List):
             self.list_display(e)
+        elif isinstance(e, ast.Tuple) and e.elts and not any(isinstance(x, ast.Starred) for x in e.elts):
+            for x in e.elts:                # tier S2a: a tuple display (the front end checks where it is used)
+                self.expr(x)
         elif isinstance(e, ast.Subscript):
             self.subscript(e)
         elif isinstance(e, ast.Lambda):
@@ -772,11 +775,12 @@ def _is_str_list_annotation(ann: ast.expr) -> bool:
 
 
 def _is_tuple_annotation(ann: ast.expr) -> bool:
-    """`tuple[int, float, ...]` of at least one int, float or bool (no `...`)."""
+    """`tuple[int, str, ...]` of at least one int, float, bool or str (no `...`; tier S2a adds str and the tuple as a
+    parameter or local type, design 4.3.2)."""
     if not (isinstance(ann, ast.Subscript) and isinstance(ann.value, ast.Name) and ann.value.id == "tuple"):
         return False
     items = ann.slice.elts if isinstance(ann.slice, ast.Tuple) else [ann.slice]
-    return bool(items) and all(isinstance(i, ast.Name) and i.id in SCALAR_NAMES for i in items)
+    return bool(items) and all(isinstance(i, ast.Name) and (i.id in SCALAR_NAMES or i.id == "str") for i in items)
 
 
 def _op_symbol(op: ast.operator) -> str:

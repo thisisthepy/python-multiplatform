@@ -2524,7 +2524,8 @@ REJECTED = {
     "missing annotation": ("def f(a) -> int:\n    return 1\n", ("aot/annotation", 1, "parameter `a`")),
     "list of bool annotation": ("def f(a: list[bool]) -> int:\n    return 1\n", ("aot/type", 1, "list[bool]")),
     "list of lists annotation": ("def f(a: list[list[int]]) -> int:\n    return 1\n", ("aot/type", 1, "list[list[int]]")),
-    "tuple annotation of a parameter": ("def f(a: tuple[int, int]) -> int:\n    return 1\n", ("aot/type", 1, "tuple[int, int]")),
+    "tuple of lists annotation": ("def f(a: tuple[list[int], int]) -> int:\n    return 1\n",
+                                  ("aot/type", 1, "tuple[list[int], int]")),        # (tier S2a: tuples of scalars and str)
     "list in a tuple return": ("def f(a: list[float]) -> tuple[list[float], int]:\n    return a, 1\n",
                                ("aot/type", 1, "tuple[list[float], int]")),
     # the constructs the AOT mode does not have yet, each named
@@ -2544,11 +2545,12 @@ REJECTED = {
     "list rebound to a scalar": ("def f() -> None:\n    a = [1.0]\n    a = 2.0\n", ("aot/front-end", 2, "f")),
     "list element arithmetic is strict": (
         "def f(a: list[int]) -> int:\n    return a[0] + 1\n", ("aot/int-unproven", 2, "+")),
-    "tuple display": ("def f() -> int:\n    t = (1, 2)\n    return 0\n", ("aot/container", 2, "tuple display")),
-    "tuple unpack of a display": ("def f() -> int:\n    a, b = 1, 2\n    return 0\n", ("aot/container", 2, "tuple display")),
-    "tuple used as a value": (
-        "def g(x: float) -> tuple[float, float]:\n    return x, x\n\ndef f() -> float:\n    t = g(1.0)\n    return t[0]\n",
-        ("aot/front-end", 5, "f")),
+    # (tier S2a: a tuple local is split into its elements; what has no form without a tuple object is named)
+    "tuple indexed by a variable": ("def f(i: int) -> int:\n    t = (1, 2)\n    return t[i]\n", ("aot/front-end", 3, "f")),
+    "tuple identity": ("def f() -> bool:\n    t = (1, 2)\n    return t is t\n", ("aot/front-end", 3, "f")),
+    "tuple stored in a list": ("def f() -> int:\n    t = (1, 2)\n    x = [t]\n    return 0\n", ("aot/front-end", 3, "f")),
+    "tuple comparison with a float element": (
+        "def f(a: float) -> bool:\n    t = (a, 1)\n    return t == t\n", ("aot/front-end", 3, "f")),
     "tuple unpacked into the wrong number": (
         "def g(x: float) -> tuple[float, float, float]:\n    return x, x, x\n\ndef f() -> float:\n"
         "    a, b = g(1.0)\n    return a\n", ("aot/front-end", 5, "f")),
@@ -2643,9 +2645,7 @@ SOURCE_LEVEL_ROWS = frozenset({
     "second import",
     "str method outside the S1 list",
     "sys attribute",
-    "tuple annotation of a parameter",
-    "tuple display",
-    "tuple unpack of a display",
+    "tuple of lists annotation",
     "unknown builtin",
 })
 # The rows that were refused for an int not proved inside 64 bits before #462. Without strict_int they are accepted

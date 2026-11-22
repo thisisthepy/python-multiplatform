@@ -597,7 +597,7 @@ class _Gen:
         if f.returns is not Type.OBJ:
             return None
         kinds = ir.aot_tuple_kinds(f)
-        return kinds if kinds is not None and all(k in CTYPE for k in kinds) else None
+        return kinds if kinds is not None and all(k in CTYPE or k is Type.STR for k in kinds) else None     # (str: S2a)
 
     def obj_list_wrappers(self) -> list[str]:
         """Tier S2a: the `void *` retain / release a list of each element class carries."""
@@ -658,6 +658,9 @@ class _Gen:
         return ("pv_" if self.owned_param(f, p) else "v_") + mangle(p.name)       # type: ignore[attr-defined]
 
     def out_ctype(self, f: ir.Function, kind: Type, rep: str) -> str:
+        if kind is Type.STR:
+            self.uses_str = True
+            return "tpa_str *"                      # tier S2a: a str element of a returned tuple, a new reference
         return "tpa_int" if kind is Type.I64 and rep == TAGGED else CTYPE[kind]
 
     def signature(self, f: ir.Function) -> str:
@@ -2899,12 +2902,16 @@ class _Fn:
         vals = []
         for i, v in enumerate(s.values):
             if v.type is Type.I64 and self.g.reps.element(self.f.name, i) == TAGGED:
-                vals.append((True, self.tagged(v)))
+                vals.append(("int", self.tagged(v)))
+            elif v.type is Type.STR:
+                vals.append(("str", self.str_value(v, f"element {i} of the returned tuple")))
             else:
-                vals.append((False, self.ev(v)))
-        for i, (is_tagged, v) in enumerate(vals):
-            if is_tagged:
+                vals.append(("", self.ev(v)))
+        for i, (held, v) in enumerate(vals):     # (every value evaluated first: nothing is written on a failure)
+            if held == "int":
                 self.emit(f"tpa_int_retain({v});")
+            elif held == "str":
+                self.emit(f"tpa_str_retain({v});")                         # the caller gets its own reference
             self.emit(f"*out{i} = {v};")
         self.leave()
 
@@ -2923,6 +2930,8 @@ class _Fn:
         for i, k in enumerate(kinds):
             if k is Type.I64 and self.g.reps.element(callee.name, i) == TAGGED:
                 outs.append((True, self.tslot()))
+            elif k is Type.STR:
+                outs.append((False, self.pslot()))      # tier S2a: owns the element the callee writes (emptied now)
             else:
                 outs.append((False, self.tmp(CTYPE[k])))
         for is_tagged, t in outs:
@@ -2944,6 +2953,8 @@ class _Fn:
             elif is_tagged:
                 self.bad("aot/type", target, f"a TAGGED int is unpacked into the RAW name `{target}` (the representation "
                          "did not converge)")
+            elif k is Type.STR:
+                self.emit(f"tpa_str_set(&v_{mangle(target)}, {t});")
             else:
                 self.emit(f"v_{mangle(target)} = {t};")
 

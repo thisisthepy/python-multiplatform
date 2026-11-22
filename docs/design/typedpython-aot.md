@@ -373,6 +373,20 @@ range`), unpacking, `len`, `==` / ordering, `in`, hashing (S2b), `print` / `repr
 tuple returns of tier K stay as they are (an unboxed multi-value return), and become values only where a tuple is
 stored, passed or compared.
 
+First step, as implemented (amendment 2026-11-22, agent proposal, not confirmed): a tuple of int, float, bool and str
+held by a local or a parameter of a module function has no observable identity in the accepted subset (no `is`, never
+in a container or a field), so the front end splits it into one local per element on the AST it lowers, after Pyrefly
+has typed the source (`typedpython/tuples.py`); the IR, the verifier and the back end see only the element locals and
+the tier K multi-value return. Covered: displays, `t = u`, `t = f(...)`, `t[k]` for a constant k, `len`, unpacking and
+`a, b = b, a`, `==` / `!=` / `<` ... (CPython's first differing item, then the lengths), `in`, `for v in t` when the
+elements share a kind, `print` / `str` / `repr` / f-strings, passing a tuple name or display to a tuple parameter, and
+returning a tuple name or a tuple-returning call. Refused with the reason: a variable index or a slice, `is`, a tuple
+anywhere else as a value, a comparison or `in` with a float item (CPython tests identity first: NaN, `aot/identity`),
+a tuple parameter of a method, and a tuple parameter at the library boundary (`aot/export`). A returned tuple may hold
+str elements (each a new reference the caller owns through its out slot); such a function is not exported from a
+library yet (the Kotlin result class holds scalars). Still to come in S2a: tuple objects where a tuple is stored
+(lists, fields; dict keys in S2b), a variable index.
+
 **dict and set (S2b).** `dict[K, V]` with K int, str, bool or a tuple of those; V any S2 type. The layout is CPython's
 compact dict (an index table of slots and an entry array in insertion order, open addressing with CPython's
 perturbation probe), so iteration order is insertion order, as CPython guarantees. The hash function is not CPython's:
