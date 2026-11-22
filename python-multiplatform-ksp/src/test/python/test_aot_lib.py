@@ -1574,7 +1574,13 @@ def test_the_big_list_elements_are_read_and_written_only_through_the_locking_hel
     assert store.index("tpa_int_list__lock(l);") < store.index("tpa_int_list__unlock(l);") < store.index("tpa_int_release(old);")
     assert store.index("tpa_int_retain(v);") < store.index("tpa_int_list__lock(l);"), "the new reference is taken before the lock"
     assert "#else\n    tpa_int_set(&l->d[slot], v);" in store
-    layout = runtime[runtime.index("typedef struct tpa_int_list {"):]
+    # (tier S2a: the first layout is the growable one, only for a program that resizes a big-capable list and never in
+    # a library, where TPA_THREADS stops the build; the layout a library uses is the fixed one after it)
+    grow = runtime[runtime.index("#if defined(TPA_GROW_INT)"):]
+    grow = grow[:grow.index("typedef struct tpa_int_list {")]
+    assert "#if defined(TPA_THREADS)\n#error" in grow, "a growable big-capable list never reaches a library build"
+    first = runtime.index("typedef struct tpa_int_list {")
+    layout = runtime[runtime.index("typedef struct tpa_int_list {", first + 1):]
     layout = layout[:layout.index("} tpa_int_list;")]
     assert "#if defined(TPA_THREADS)\n    tpa_int_list_lock_t lock;" in layout, "the lock field exists only with TPA_THREADS"
     assert "memory-safe for every list kind" in biglib.header

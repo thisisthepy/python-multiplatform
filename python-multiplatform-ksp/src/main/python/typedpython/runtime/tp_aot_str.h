@@ -939,54 +939,8 @@ static TPA_UNUSED int tpa_str_list_get(tpa_str_list *l, int64_t i, tpa_str **out
     return 0;
 }
 
-/* Tier S2a: raise ValueError with the text of `m` (UTF-8 in the exception record, which tpa_report_uncaught writes to
- * standard error as bytes; a lone surrogate is written as \udXXX, as the reference's stderr, backslashreplace, does). */
-static TPA_UNUSED int tpa_str_raise_value_error(tpa_str *m)
-{
-    char buf[sizeof tpa_exc.msg];
-    size_t k = 0;
-    int64_t i;
-    for (i = 0; i < m->len; i++) {
-        uint32_t c = tpa_str_at(m, i);
-        char e[12];
-        size_t n;
-        if (c < 0x80) {
-            e[0] = (char)c;
-            n = 1;
-        }
-        else if (c < 0x800) {
-            e[0] = (char)(0xC0 | (c >> 6));
-            e[1] = (char)(0x80 | (c & 0x3F));
-            n = 2;
-        }
-        else if (c >= 0xD800 && c <= 0xDFFF) {
-            n = (size_t)snprintf(e, sizeof e, "\\u%04x", (unsigned)c);
-        }
-        else if (c < 0x10000) {
-            e[0] = (char)(0xE0 | (c >> 12));
-            e[1] = (char)(0x80 | ((c >> 6) & 0x3F));
-            e[2] = (char)(0x80 | (c & 0x3F));
-            n = 3;
-        }
-        else {
-            e[0] = (char)(0xF0 | (c >> 18));
-            e[1] = (char)(0x80 | ((c >> 12) & 0x3F));
-            e[2] = (char)(0x80 | ((c >> 6) & 0x3F));
-            e[3] = (char)(0x80 | (c & 0x3F));
-            n = 4;
-        }
-        if (k + n >= sizeof buf) {
-            break;                          /* (a message past the record's size is cut, as every long message is) */
-        }
-        memcpy(buf + k, e, n);
-        k += n;
-    }
-    buf[k] = '\0';
-    return tpa_raise(TPA_ValueError, buf);
-}
-
 /* Tier S2a: searching a list of str (index / count / in), equality as str ==; the value is borrowed. index formats the
- * value with its repr: ValueError("'x' is not in list"). */
+ * value: ValueError("list.index(x): x not in list") as CPython 3.14 and later. */
 static TPA_UNUSED int tpa_str_list_contains(const tpa_str_list *l, tpa_str *v)
 {
     int64_t i;
@@ -1010,31 +964,13 @@ static TPA_UNUSED int64_t tpa_str_list_count(const tpa_str_list *l, tpa_str *v)
 static TPA_UNUSED int tpa_str_list_index(const tpa_str_list *l, tpa_str *v, int64_t *out)
 {
     int64_t i;
-    tpa_str *r = NULL, *m = NULL, *parts[2];
-    int rc;
     for (i = 0; i < l->len; i++) {
         if (tpa_str_eq(l->d[i], v)) {
             *out = i;
             return 0;
         }
     }
-    if (tpa_str_repr(v, &r)) {
-        return -1;
-    }
-    if (tpa_str_from_ascii(" is not in list", 15, &parts[1])) {
-        tpa_str_release(r);
-        return -1;
-    }
-    parts[0] = r;
-    rc = tpa_str_join(parts, 2, &m);
-    tpa_str_release(r);
-    tpa_str_release(parts[1]);
-    if (rc) {
-        return -1;
-    }
-    rc = tpa_str_raise_value_error(m);
-    tpa_str_release(m);
-    return rc;
+    return tpa_raise(TPA_ValueError, "list.index(x): x not in list");
 }
 
 #if defined(TPA_GROW_STR)

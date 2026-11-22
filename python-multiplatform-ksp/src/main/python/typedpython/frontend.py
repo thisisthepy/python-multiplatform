@@ -2464,9 +2464,6 @@ class _Lowerer:
             self.list_effect(array)
             at = self.list_index_arg(args[0], f"the index of `{array}.pop`") if args else None
             return ir.ListPop(self.list_elem(array), array, at)
-        if m == "index" and self.list_type(array) is Type.OBJ_LIST:
-            raise Skip(line, f"`{_src(node)}`: list.index() of a class instance reports its repr, which holds the "
-                             "object's address in CPython, so an AOT program does not compile it (aot/identity)")
         if m in ("index", "count") and len(args) == 1:
             return ir.ListSearch(Type.I64, m, array, self.list_search_value(array, args[0], node))
         raise Skip(line, f"`{_src(node)}`: list.{m}() is not supported in an AOT program yet")

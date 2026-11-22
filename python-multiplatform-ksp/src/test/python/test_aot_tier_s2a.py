@@ -718,16 +718,35 @@ def test_lists_of_class_instances(tmp_path: Path):
     _compare(tmp_path, INSTANCES, [["0"], ["1"], ["6"]])
 
 
-C_BASE = "class C:\n    v: int\n\n    def __init__(self, v: int) -> None:\n        self.v = v\n\n\n"
-C_MAIN = '\n\ndef main() -> None:\n    print(f([C(1)]))\n\n\nif __name__ == "__main__":\n    main()\n'
+INDEX_OF_INSTANCES = """
+import sys
 
 
-def test_index_of_an_instance_is_refused(tmp_path: Path):
-    """index() of an instance reports its repr, with the object's address in CPython (aot/identity)."""
-    with pytest.raises(aot.AotError) as raised:
-        aot.generate(_write(tmp_path, C_BASE + "def f(xs: list[C]) -> int:\n    c = xs[0]\n    return xs.index(c)\n"
-                            + C_MAIN))
-    assert "aot/identity" in str(raised.value)
+class C:
+    v: int
+
+    def __init__(self, v: int) -> None:
+        self.v = v
+
+
+def main() -> None:
+    a = C(1)
+    b = C(2)
+    xs = [a, b, a]
+    print(xs.index(a), xs.index(b))
+    if sys.argv[1] == "1":
+        print(xs.index(C(1)))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_index_of_an_instance(tmp_path: Path):
+    """index() of an instance is by identity; an absent one is `ValueError: list.index(x): x not in list` (CPython
+    3.14 and later do not format the value, so the instance's repr with its address never appears)."""
+    _compare(tmp_path, INDEX_OF_INSTANCES, [["0"], ["1"]])
 
 
 TREE = """

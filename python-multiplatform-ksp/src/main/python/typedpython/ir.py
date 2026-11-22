@@ -711,7 +711,7 @@ class ListPop(Expr):
 class ListSearch(Expr):
     """`array.index(value)` (I64), `array.count(value)` (I64), `value in array` (BOOL), on a `list[int]` only (a
     `list[float]` search depends on object identity for NaN in CPython, so it has no AOT form: `aot/identity`).
-    `index`: ValueError("<repr of value> is not in list") when absent."""
+    `index`: ValueError("list.index(x): x not in list") when absent (CPython 3.14 and later)."""
 
     op: str                    # "index" | "count" | "in"
     array: str

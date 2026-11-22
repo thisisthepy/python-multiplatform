@@ -334,6 +334,8 @@ def test_three_or_more_list_parameters_are_not_read_element_by_element(tmp_path)
 
 
 def test_a_list_used_in_any_other_way_is_a_skip_naming_it(tmp_path):
+    """Tier S2a compiles printing, iterating and str() of a list; comparing float lists is refused by its own rule
+    (NaN's identity, aot/identity); a use with no AOT form at all (hash, identity) is the skip naming the list."""
     m = aot_ir(tmp_path, """
         def f(a: list[float]) -> None:
             print(a)
@@ -346,11 +348,20 @@ def test_a_list_used_in_any_other_way_is_a_skip_naming_it(tmp_path):
             for v in a:
                 s += v
             return s
+
+        def k(a: list[float]) -> str:
+            return str(a)
+
+        def m(a: list[float]) -> int:
+            return hash(a)
+
+        def n(a: list[float]) -> bool:
+            return a is a
         """)
-    assert not m.functions
-    assert "the list `a` is used other than by indexing" in m.skipped["f"]
-    assert "the list `a` is used other than by indexing" in m.skipped["g"]
-    assert "the list `a` is used other than by indexing" in m.skipped["h"]
+    assert sorted(f.name for f in m.functions) == ["f", "h", "k"]
+    assert "(aot/identity)" in m.skipped["g"]
+    assert "the list `a` is used other than by indexing" in m.skipped["m"]
+    assert "the list `a` is used other than by indexing" in m.skipped["n"]
 
 
 def test_a_list_argument_must_be_a_name_of_the_parameters_type(tmp_path):

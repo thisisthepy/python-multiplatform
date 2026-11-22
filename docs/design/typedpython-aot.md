@@ -355,7 +355,8 @@ the "generates the C it generated before" rule above and added an indirection to
 over-allocation formula (`list_resize`), so `sys.getsizeof` would agree (not exposed; the formula only sets the
 amortised cost). Operations: `append`, `pop()` / `pop(i)` (`IndexError: pop from empty list`, `pop index out of
 range`), `insert` (CPython's clamping), `extend` of a list, `remove` (`ValueError: list.remove(x): x not in list`),
-`index` (`ValueError: <repr> is not in list`), `count`, `clear`, `reverse`, `copy`, `+`, `*`, `+=` (extends in place:
+`index` (`ValueError: list.index(x): x not in list`, the message of CPython 3.14 and later, which does not
+format the value; so `index` of a class instance needs no repr), `count`, `clear`, `reverse`, `copy`, `+`, `*`, `+=` (extends in place:
 the same object), `==` / `!=` / `<` ... (element-wise, CPython's rich comparison order), `in`, slicing and slice
 assignment (`ValueError: attempt to assign sequence of size N to extended slice of size M`), `del l[i]` and
 `del l[a:b]`, `list(xs)` copy, `print` / `repr`. Iteration follows CPython's list iterator: index and length read at

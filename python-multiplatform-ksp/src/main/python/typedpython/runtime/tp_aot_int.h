@@ -2395,28 +2395,13 @@ static inline int tpa_int_list_from_i64(const tpa_i64_list *src, tpa_int_list **
 static TPA_UNUSED int tpa_int_list_index(const tpa_int_list *l, tpa_int v, int64_t *out)
 {
     int64_t i;
-    char *digits = NULL, *m;
-    size_t n = 0;
     for (i = 0; i < l->len; i++) {
         if (tpa_int_eq(l->d[i], v)) {
             *out = i;
             return 0;
         }
     }
-    if (tpa_int_to_str(v, &digits, &n)) {
-        return -1;
-    }
-    m = (char *)malloc(n + 20);
-    if (m == NULL) {
-        free(digits);
-        return tpa_raise(TPA_MemoryError, "");
-    }
-    memcpy(m, digits, n);
-    memcpy(m + n, " is not in list", 16);
-    tpa_raise(TPA_ValueError, m);          /* (a message past the record's size is cut, as every long message is) */
-    free(m);
-    free(digits);
-    return -1;
+    return tpa_raise(TPA_ValueError, "list.index(x): x not in list");
 }
 
 static TPA_UNUSED int64_t tpa_int_list_count(const tpa_int_list *l, tpa_int v)

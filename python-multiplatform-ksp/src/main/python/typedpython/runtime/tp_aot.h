@@ -1499,20 +1499,18 @@ TPA__DEF_LIST(i64, int64_t)
 #undef TPA__DEF_LIST
 
 /* Tier S2a: searching a list[int] of the RAW kind (a list of float is never searched: NaN's identity, design 4.3.2).
- * list.index(v): the first position, else ValueError("<v> is not in list") (Objects/listobject.c list_index_impl
- * formats the value with %R, the decimal digits of an int); list.count(v); `v in l`. */
+ * list.index(v): the first position, else ValueError("list.index(x): x not in list") (Objects/listobject.c
+ * list_index_impl since CPython 3.14, the baseline; the value is not formatted); list.count(v); `v in l`. */
 static inline TPA_UNUSED int tpa_i64_index(const tpa_i64_list *l, int64_t v, int64_t *out)
 {
     int64_t i;
-    char m[48];
     for (i = 0; i < l->len; i++) {
         if (l->d[i] == v) {
             *out = i;
             return 0;
         }
     }
-    snprintf(m, sizeof m, "%lld is not in list", (long long)v);
-    return tpa_raise(TPA_ValueError, m);
+    return tpa_raise(TPA_ValueError, "list.index(x): x not in list");
 }
 
 static inline TPA_UNUSED int64_t tpa_i64_count(const tpa_i64_list *l, int64_t v)
@@ -2053,6 +2051,20 @@ static TPA_UNUSED int tpa_obj_list_contains(const tpa_obj_list *l, const void *v
         }
     }
     return 0;
+}
+
+/* list.index(v) by identity (the class has no __eq__, which the frontend checks); CPython 3.14 and later do not format
+ * the value in the message, so no repr (with its address) is needed. */
+static TPA_UNUSED int tpa_obj_list_index(const tpa_obj_list *l, const void *v, int64_t *out)
+{
+    int64_t i;
+    for (i = 0; i < l->len; i++) {
+        if (l->d[i] == v) {
+            *out = i;
+            return 0;
+        }
+    }
+    return tpa_raise(TPA_ValueError, "list.index(x): x not in list");
 }
 
 static TPA_UNUSED int64_t tpa_obj_list_count(const tpa_obj_list *l, const void *v)
