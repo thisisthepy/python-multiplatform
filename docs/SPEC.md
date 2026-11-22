@@ -268,8 +268,9 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   (issue #524 item 1; owner answer 2026-11-22, relayed by the leader: "Exception + toPyObject()", keep `: Exception`
   with the Python object reachable via `toPyObject()` as in the pre-agent sketch at f33bcef8; `kotlin.Throwable` and
   `PyObject` are both classes, so the mermaid's "implements Throwable and extends PyObject" cannot be one Kotlin
-  class): the original Python exception for one that came from Python, otherwise `type(message)` (or
-  `RuntimeError(message)` with no type), built once and the same object on every later call. `PyException.kotlinThrowable` is the original Kotlin
+  class): the original Python exception for one that came from Python, otherwise `type(message)`, or with no
+  type the built-in class its Kotlin class mirrors (`PyTypeError("x")` gives `TypeError('x')`, O-3a; agent
+  proposal), or `RuntimeError(message)`, built once and the same object on every later call. `PyException.kotlinThrowable` is the original Kotlin
   `Throwable` when the Python exception is a `python_multiplatform.KotlinThrowable` proxy (U-2), the same
   instance, and `null` otherwise.
   `Status: implemented`, `PyExceptionTest.kt`; `toPyObject`: `draft`, `PyExceptionTest.kt`; `kotlinThrowable`: `draft`, `PM/commonTest/.../KotlinThrowableProxyTest.kt`.
@@ -370,6 +371,11 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   - a Kotlin `kotlin.coroutines.cancellation.CancellationException` maps to Python's
     `asyncio.CancelledError` (leaving any exception Python already raised on the indicator untouched; on a
     target where `asyncio` cannot be imported, it falls back to `RuntimeError`);
+  - a `PyException` with no live value is raised as its own Python class: its `type` when it has one,
+    otherwise the built-in class its Kotlin class mirrors (`PyTypeError` raises `TypeError`, O-3a), with
+    `errMsg` as the message and its Kotlin `cause`, if any, on `__cause__`; a plain `PyException` with no
+    `type` falls through to the next rule (#524; agent proposal, not confirmed by the owner).
+    `Status: draft`, `PM/commonTest/.../upcall/KotlinRaisedPyExceptionTest.kt`.
   - any other Kotlin `Throwable` maps to `RuntimeError(message)` with `__cause__` set to a `BaseException`
     representing the original Kotlin throwable (`str()` of it is `"<KotlinSimpleClassName>: <message>"`,
     recursively chaining Kotlin `cause` onto `__cause__`, or restoring a nested `PyException` cause's live

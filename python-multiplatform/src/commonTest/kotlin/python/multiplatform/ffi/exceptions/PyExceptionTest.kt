@@ -124,4 +124,18 @@ class PyExceptionTest {
         val obj = PyException("missing", type = keyError).toPyObject()
         assertTrue(keyError.isInstance(obj), "expected an instance of KeyError, got ${obj.Type.name}")
     }
+
+    // ---- #524 O-3a: a mirror class made in Kotlin is its built-in Python class (agent proposal) ----
+
+    @Test
+    fun aMirrorClassMadeInKotlinBecomesTheBuiltinClassItMirrors() = PythonTestFixture.withInterpreter {
+        val typeError = PyTypeError("bad element").toPyObject()
+        assertEquals("TypeError", typeError.Type.name)
+        assertEquals("bad element", typeError.toString())
+        val keyError = python.multiplatform.ffi.exceptions.errors.PyKeyError("k").toPyObject()
+        assertEquals("KeyError", keyError.Type.name)
+        // The type of a LookupError instance: the LookupError class.
+        val lookupError = PythonTestFixture.eval("LookupError('probe')").Type
+        assertTrue(lookupError.isInstance(keyError), "a KeyError made in Kotlin is still a LookupError in Python")
+    }
 }
