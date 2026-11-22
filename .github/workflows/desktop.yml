@@ -219,6 +219,32 @@ jobs:
               sys.exit("mingwX64Test did not run, or a test failed")
           PY
 
+      # SPEC L-9c on Windows (#191): a mingwX64 consumer linked and packaged only by the bindings plugin
+      # (python315t.lib, the DLLs beside the executable, Lib/ and DLLs/ in python-multiplatform-home).
+      # The packaged executable then runs from another directory with no PYTHONHOME.
+      - name: Desktop native consumer (mingwX64), host test
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: ./gradlew :python-multiplatform-gradle-plugin-fixtures:desktop-native-consumer:mingwX64Test --rerun --console=plain -Porg.gradle.java.installations.fromEnv=JAVA_HOME_17_X64
+
+      - name: Desktop native consumer (mingwX64), packaged executable
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew :python-multiplatform-gradle-plugin-fixtures:desktop-native-consumer:linkReleaseExecutableMingwX64 --console=plain -Porg.gradle.java.installations.fromEnv=JAVA_HOME_17_X64
+          DIR=python-multiplatform-gradle-plugin/fixtures/desktop-native-consumer/build/bin/mingwX64/releaseExecutable
+          test -d "$DIR/python-multiplatform-home" || { echo "::error::no python-multiplatform-home beside the executable"; exit 1; }
+          LINE=$(cd "$RUNNER_TEMP" && env -u PYTHONHOME "$GITHUB_WORKSPACE/$DIR/desktop-native-consumer.exe" | tr -d '\r' | grep DESKTOP_NATIVE_PROBE)
+          echo "$LINE"
+          test "$LINE" = "DESKTOP_NATIVE_PROBE stdlib=ok ext=ok ft=ok"
+
+      # #191: Python draws material3 on Windows Kotlin/Native through the walked klibs and B3, as on Linux.
+      - name: Compose on Kotlin/Native (mingwX64), host test
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: ./gradlew :python-multiplatform-compose:fixtures:compose-native:mingwX64Test --rerun --console=plain -Porg.gradle.java.installations.fromEnv=JAVA_HOME_17_X64
+
   # The dev agent's protocol on the other desktop OSes (#238). Its socket options differ per platform
   # (SO_EXCLUSIVEADDRUSE on Windows, SO_REUSEADDR on POSIX), and the port-takeover and restart tests are
   # what check them. Stdlib only: no JDK, no Gradle.

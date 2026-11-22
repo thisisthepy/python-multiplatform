@@ -1,6 +1,6 @@
 /**
  * #191: the composable claim of `:python-multiplatform-compose:fixtures:compose`, on Kotlin/Native
- * desktop (macosArm64, linuxX64).
+ * desktop (macosArm64, linuxX64, mingwX64).
  *
  * The fork's Compose klibs are walked by `KlibScanner` (the walker's klib half) into the shared
  * `nativeMain`. `Text` and `Button` declare more than 6 defaulted parameters, so their bindings go
@@ -30,6 +30,9 @@ kotlin {
         binaries.all {
             linkerOpts("-L/usr/lib/x86_64-linux-gnu", "-l:libfontconfig.so.1", "--allow-shlib-undefined")
         }
+    }
+    mingwX64 {
+        binaries.all { binaryOption("sourceInfoType", "noop") }
     }
 
     sourceSets {
