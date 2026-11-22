@@ -72,6 +72,9 @@ class Type(Enum):
     STR = "str"            # AOT mode only (tier S1, PR-S1a): a Python str, a counted `tpa_str` (runtime/tp_aot_str.h)
     STR_LIST = "list[str]"  # AOT mode only (tier S1b): a list of str, a counted `tpa_str_list` (fixed length until S2)
     STR_OPT = "str | None"  # AOT mode only (tier S2a): a `tpa_str *` that is NULL for None
+    OBJ_LIST = "list[obj]"  # AOT mode only (tier S2a): a list of instances of one compiled class, a counted
+    #                         `tpa_obj_list`; the element class is the `cls` of the Param / FieldDecl / return, or
+    #                         `Function.list_classes[name]` for a local
 
 
 SCALARS = (Type.I64, Type.F64, Type.BOOL)
@@ -1139,6 +1142,51 @@ class StrListIndex(Expr):
 
 
 @dataclass(frozen=True)
+class ObjListDisplay(Expr):
+    """`[a, b, ...]` of instances of the compiled class `cls` (type OBJ_LIST, tier S2a); empty only where a list of
+    `cls` is expected (`x: list[C] = []`, an argument for a list[C] parameter)."""
+
+    cls: str
+    elements: tuple[Expr, ...]
+
+
+@dataclass(frozen=True)
+class ObjListLen(Expr):
+    """`len(value)` of an OBJ_LIST (type I64)."""
+
+    value: Expr
+
+
+@dataclass(frozen=True)
+class ObjListIndex(Expr):
+    """`value[index]` of an OBJ_LIST of `cls` (type OBJ, an instance of `cls`, a new reference); list semantics."""
+
+    value: Expr
+    index: Expr
+    cls: str
+
+
+@dataclass(frozen=True)
+class ObjListStore(Stmt):
+    """`array[index] = value` of an OBJ_LIST local or parameter: the value, then the index, as CPython evaluates
+    them; IndexError("list assignment index out of range")."""
+
+    array: str
+    index: Expr
+    value: Expr
+
+
+@dataclass(frozen=True)
+class ForObjList(Stmt):
+    """`for var in value:` over an OBJ_LIST: the list is held for the loop (CPython's iterator), its length read
+    before every step; `var` (an OBJ local of the element class) takes each item in turn."""
+
+    var: str
+    value: Expr
+    body: tuple[Stmt, ...]
+
+
+@dataclass(frozen=True)
 class ForStr(Stmt):
     """`for var in value:` over a STR: `value` is evaluated once and held for the loop (rebinding its name in the body
     does not change what is iterated); `var` (a STR local) takes each one-character string in turn. After the loop
@@ -1381,6 +1429,8 @@ class Function:
     return_cls: str | None = None
     return_optional: bool = False
     local_classes: dict[str, tuple[str, bool]] = field(default_factory=dict)
+    # AOT mode, tier S2a: the element class of every OBJ_LIST local (a list of instances of that class)
+    list_classes: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

@@ -219,6 +219,7 @@ def needs_int_runtime(text: str) -> bool:
 class _Gen:
     def __init__(self, module: ir.Module, program: Program, strict: bool = False,
                  alloc_plan: AllocPlan | None = None) -> None:
+        self.list_elem_classes: set[str] = set()      # tier S2a: element classes of the lists of instances made
         self.module = module
         self.program = program
         self.strict = strict
@@ -585,6 +586,15 @@ class _Gen:
         kinds = ir.aot_tuple_kinds(f)
         return kinds if kinds is not None and all(k in CTYPE for k in kinds) else None
 
+    def obj_list_wrappers(self) -> list[str]:
+        """Tier S2a: the `void *` retain / release a list of each element class carries."""
+        out = []
+        for cls in sorted(self.list_elem_classes):
+            mc = mangle(cls)
+            out.append(f"static void tpa_cls_{mc}__vret(void *p) {{ tpa_cls_{mc}_retain((tpa_cls_{mc} *)p); }}")
+            out.append(f"static void tpa_cls_{mc}__vrel(void *p) {{ tpa_cls_{mc}_release((tpa_cls_{mc} *)p); }}")
+        return out
+
     @functools.cached_property
     def grown(self) -> frozenset[str]:
         return frozenset(self.grown_kinds())
@@ -599,6 +609,7 @@ class _Gen:
                 for n in rep_mod.walk(s):
                     if isinstance(n, ir.LIST_GROW_NODES + ir.LIST_SHRINK_NODES) \
                             and (types.get(n.array) in LIST or types.get(n.array) is Type.STR_LIST):
+                        # (a list of class instances, OBJ_LIST, is always growable: no define)
                         kinds.add(self.array_kind(f.name, n.array, types[n.array]))
         return sorted(kinds)
 
@@ -625,7 +636,7 @@ class _Gen:
             return p.name in assigned_names(f)                                   # type: ignore[attr-defined]
         if isinstance(p, ir.Param) and p.type is Type.OBJ and p.cls is not None:
             return p.name in assigned_names(f)
-        if isinstance(p, ir.Param) and p.type in (Type.STR, Type.STR_LIST, Type.STR_OPT):     # tier S1
+        if isinstance(p, ir.Param) and p.type in (Type.STR, Type.STR_LIST, Type.STR_OPT, Type.OBJ_LIST):     # tier S1, S2a
             return p.name in assigned_names(f)
         return False
 
@@ -649,6 +660,8 @@ class _Gen:
             elif isinstance(p, ir.Param) and p.type is Type.STR_LIST:
                 self.uses_str = True
                 params.append(f"tpa_str_list *{self.param_c(f, p)} TPA_UNUSED")
+            elif isinstance(p, ir.Param) and p.type is Type.OBJ_LIST:
+                params.append(f"tpa_obj_list *{self.param_c(f, p)} TPA_UNUSED")      # tier S2a, borrowed
             elif isinstance(p, ir.Param) and p.type in CTYPE:
                 ct = "tpa_int" if self.tagged_param(f, p) else CTYPE[p.type]
                 params.append(f"{ct} {self.param_c(f, p)} TPA_UNUSED")
@@ -665,6 +678,8 @@ class _Gen:
         elif f.returns is Type.STR_LIST:
             self.uses_str = True
             params.append("tpa_str_list **out")
+        elif f.returns is Type.OBJ_LIST:
+            params.append("tpa_obj_list **out")                               # tier S2a, a new reference
         elif kinds is not None:
             params += [f"{self.out_ctype(f, k, self.reps.element(f.name, i))} *out{i}" for i, k in enumerate(kinds)]
         elif f.returns in CTYPE:
@@ -698,6 +713,7 @@ class _Fn:
         self.obj_slots: list[tuple[str, str]] = []   # (cls, slot_name) class temporaries: released at cleanup
         self.list_slots: list[tuple[str, str]] = []  # (kind, slot_name) retained mutable list field reads
         self.pystr_slots: list[str] = []         # tier S1: `tpa_str *` temporaries, each owns its value; released at cleanup
+        self.objlist_slots: list[str] = []       # tier S2a: `tpa_obj_list *` temporaries, released at cleanup
         self.strlist_slots: list[str] = []       # tier S1b: `tpa_str_list *` temporaries, the same
         self.assigned: set[str] = assigned_names(f)
         self.regions = g.alloc_plan.fn_regions(f.name)      # PR-O2b: class -> its region in this function
@@ -822,6 +838,77 @@ class _Fn:
         t = self.pslot()
         self.emit(f"if ({call.replace('@', '&' + t)}) {self.fail()}")
         return t
+
+    def olslot(self) -> str:
+        """A list-of-instances temporary, emptied now (tier S2a)."""
+        t = self.tmp("tpa_obj_list *", "NULL")
+        self.objlist_slots.append(t)
+        self.emit(f"tpa_obj_list_release({t}); {t} = NULL;")
+        return t
+
+    def obj_fns(self, cls: str) -> str:
+        """The retain and release a list of `cls` carries (generated `void *` wrappers, `_Gen.obj_list_wrappers`)."""
+        self.g.list_elem_classes.add(cls)
+        return f"tpa_cls_{mangle(cls)}__vret, tpa_cls_{mangle(cls)}__vrel"
+
+    def ev_ObjListDisplay(self, e: ir.ObjListDisplay) -> str:
+        vals = [self.ev(x) for x in e.elements]            # (each a borrowed instance, held by its own slot)
+        t = self.olslot()
+        self.emit(f"if (tpa_obj_list_alloc({len(vals)}, {self.obj_fns(e.cls)}, &{t})) {self.fail()}")
+        for i, v in enumerate(vals):
+            self.emit(f"tpa_cls_{mangle(e.cls)}_retain({v}); {t}->d[{i}] = {v};")
+        return t
+
+    def ev_ObjListLen(self, e: ir.ObjListLen) -> str:
+        v = self.ev(e.value)
+        t = self.tmp("int64_t")
+        self.emit(f"{t} = ({v})->len;")                     # read in evaluation order (the list can change length)
+        return t
+
+    def ev_ObjListIndex(self, e: ir.ObjListIndex) -> str:
+        lst = self.ev(e.value)
+        idx = self.index_c(e.index, "tpa_int_to_ssize") if self.rep(e.index) != TAGGED else None
+        if idx is None:                                     # an index outside int64: IndexError, as a list read's
+            v, n = self.ev(e.index), self.tmp("int64_t")
+            self.emit(f"if (tpa_slot_int(({lst})->len, {v}, 0, &{n})) {self.fail()}")
+            idx = n
+        t = self.oslot(e.cls)
+        self.emit("{")
+        self.emit("    void *tpa_v_ = NULL;")
+        self.emit(f"    if (tpa_obj_list_get({lst}, {idx}, &tpa_v_)) {self.fail()}")
+        self.emit(f"    tpa_cls_{mangle(e.cls)}_release({t}); {t} = ({self.g.cls_ptr(e.cls).strip()})tpa_v_;")
+        self.emit("}")
+        return t
+
+    def st_ObjListStore(self, s: ir.ObjListStore) -> None:
+        v = self.ev(s.value)
+        idx = self.ev(s.index)
+        if self.rep(s.index) == TAGGED:
+            n = self.tmp("int64_t")
+            self.emit(f"if (tpa_slot_int(v_{mangle(s.array)}->len, {idx}, 1, &{n})) {self.fail()}")
+            idx = n
+        self.emit(f"if (tpa_obj_list_store(v_{mangle(s.array)}, {idx}, {v})) {self.fail()}")
+
+    def st_ForObjList(self, s: ir.ForObjList) -> None:
+        """`for var in value` over a list of instances: the list is held for the loop, its length read at every step,
+        `var` takes a new reference to each item in turn (CPython's list iterator)."""
+        held = self.tmp("tpa_obj_list *", "NULL")
+        self.objlist_slots.append(held)
+        self.emit(f"tpa_obj_list_set(&{held}, {self.ev(s.value)});")
+        cls = self.f.local_classes.get(s.var, (None, False))[0]
+        if cls is None:
+            self.bad("aot/type", s.var, f"the class of the loop variable `{s.var}` is not known")
+            return
+        k = self.tmp("int64_t")
+        self.emit(f"for ({k} = 0; {k} < {held}->len; {k}++) {{")
+        self.depth += 1
+        self.emit(f"tpa_cls_{mangle(cls)}_retain(({self.g.cls_ptr(cls).strip()}){held}->d[{k}]);")
+        self.emit(f"tpa_cls_{mangle(cls)}_release(v_{mangle(s.var)});")
+        self.emit(f"v_{mangle(s.var)} = ({self.g.cls_ptr(cls).strip()}){held}->d[{k}];")
+        self.loop_prologue(s)
+        self.stmts(s.body)
+        self.depth -= 1
+        self.emit("}")
 
     def lslot(self) -> str:
         """A list-of-str temporary, emptied now (tier S1b)."""
@@ -1392,7 +1479,8 @@ class _Fn:
         return any(isinstance(p, ir.Param) and p.name == name and p.cls is not None for p in self.f.params)
 
     def ev_Local(self, e: ir.Local) -> str:
-        if e.type not in CTYPE and e.type not in LIST and e.type not in (Type.STR, Type.STR_LIST, Type.STR_OPT) \
+        if e.type not in CTYPE and e.type not in LIST and e.type not in (Type.STR, Type.STR_LIST, Type.STR_OPT,
+                                                                          Type.OBJ_LIST) \
                 and not (e.type is Type.OBJ and self._is_class_local(e.name)):
             self.ctype(e.type, e.name)
         return f"v_{mangle(e.name)}"
@@ -1832,6 +1920,10 @@ class _Fn:
             t = self.lslot()
             self.emit(f"if ({name}({', '.join(args + ['&' + t])})) {self.fail()}")
             return t
+        if callee.returns is Type.OBJ_LIST:
+            t = self.olslot()
+            self.emit(f"if ({name}({', '.join(args + ['&' + t])})) {self.fail()}")
+            return t
         if callee.returns is Type.OBJ and callee.return_cls is not None:
             mc = mangle(callee.return_cls)
             t = self.oslot(callee.return_cls)
@@ -1935,6 +2027,13 @@ class _Fn:
         want = self.types.get(s.target)
         if want is Type.STR_OPT:                       # tier S2a: a str, None or another `str | None`
             self.emit(f"tpa_str_set(&v_{mangle(s.target)}, {self.ev(s.value)});")
+            return
+        if want is Type.OBJ_LIST:                       # tier S2a: a list of class instances, shared by the name
+            if s.value.type is not Type.OBJ_LIST:
+                self.bad("aot/type", s.target, f"`{s.target}` is a list of class instances but is assigned a "
+                         f"{s.value.type.value}")
+                return
+            self.emit(f"tpa_obj_list_set(&v_{mangle(s.target)}, {self.ev(s.value)});")
             return
         if want is Type.STR_LIST:
             if s.value.type is not Type.STR_LIST:
@@ -2221,6 +2320,8 @@ class _Fn:
         if self.types.get(name) is Type.STR_LIST:
             self.g.uses_str = True
             return f"v_{mangle(name)}", "str"
+        if self.types.get(name) is Type.OBJ_LIST:
+            return f"v_{mangle(name)}", "obj"                    # tier S2a: a list of class instances
         found = self.list_of(name, what)
         return None if found is None else (found[0], self.kind(name))
 
@@ -2230,6 +2331,8 @@ class _Fn:
         `lclear`, tpa_str_list_clear being the slot helper)."""
         if kind == "str":
             return f"tpa_str_list_{'lclear' if op == 'clear' else op}"
+        if kind == "obj":
+            return f"tpa_obj_list_{op}"
         return lfn(kind, op)
 
     def list_item_c(self, e: ir.Expr, name: str) -> str:
@@ -2237,6 +2340,8 @@ class _Fn:
         the native value for a raw or float list."""
         if self.types.get(name) is Type.STR_LIST:
             return self.str_value(e, f"the item given to a method of `{name}`")
+        if self.types.get(name) is Type.OBJ_LIST:
+            return self.ev(e)                                     # an instance, borrowed (the list retains it)
         if self.types.get(name) in LIST and self.kind(name) == "int":
             return self.tagged(e)
         if e.type is Type.I64 and self.rep(e) == TAGGED:
@@ -2323,6 +2428,8 @@ class _Fn:
             return self.tagged(value)
         if kind == "str":
             return self.str_value(value, f"the str searched in `{name}`")
+        if kind == "obj":
+            return self.ev(value)
         if kind == "i64" and not (value.type is Type.I64 and self.rep(value) == TAGGED):
             return self.ev(value)
         self.ev(value)
@@ -2354,9 +2461,19 @@ class _Fn:
         if found is None:
             return "0"
         kind = found[1]
+        has = 0 if e.index is None else 1
+        if kind == "obj":                                         # tier S2a: the instance's reference moves out
+            cls = self.f.list_classes.get(e.array) or next(
+                (p.cls for p in self.f.params if isinstance(p, ir.Param) and p.name == e.array), None)
+            t = self.oslot(cls)
+            self.emit("{")
+            self.emit("    void *tpa_v_ = NULL;")
+            self.emit(f"    if (tpa_obj_list_pop({found[0]}, {has}, {idx}, &tpa_v_)) {self.fail()}")
+            self.emit(f"    tpa_cls_{mangle(cls)}_release({t}); {t} = ({self.g.cls_ptr(cls).strip()})tpa_v_;")
+            self.emit("}")
+            return t
         t = (self.tslot() if kind == "int" else self.pslot() if kind == "str"
              else self.tmp("double" if kind == "f64" else "int64_t"))
-        has = 0 if e.index is None else 1
         self.emit(f"if ({self.lop(kind, 'pop')}({found[0]}, {has}, {idx}, &{t})) {self.fail()}")
         return t
 
@@ -2702,6 +2819,12 @@ class _Fn:
             self.emit(f"*out = {val};")
             self.leave()
             return
+        if returns is Type.OBJ_LIST:
+            v = self.ev(s.value)
+            self.emit(f"tpa_obj_list_retain({v});")
+            self.emit(f"*out = {v};")
+            self.leave()
+            return
         if returns is Type.STR_LIST:
             v = self.ev(s.value)
             self.emit(f"tpa_str_list_retain({v});")
@@ -2806,14 +2929,14 @@ class _Fn:
         f = self.f
         for p in f.params:
             ok = ((isinstance(p, ir.Param) and p.type in CTYPE and p.cls is None)
-                  or (isinstance(p, ir.Param) and p.type in (Type.STR, Type.STR_LIST, Type.STR_OPT))
+                  or (isinstance(p, ir.Param) and p.type in (Type.STR, Type.STR_LIST, Type.STR_OPT, Type.OBJ_LIST))
                   or (isinstance(p, ir.Param) and p.type is Type.OBJ and p.cls is not None)
                   or (isinstance(p, ir.ArrayParam) and p.type in LIST and p.buffer is None))
             if not ok:
                 self.bad("aot/type", getattr(p, "name", "?"), f"the parameter `{getattr(p, 'name', '?')}` is not an "
                          "int, float, bool, list[float], list[int] or compiled class")
         if f.returns not in CTYPE and f.returns not in LIST and f.returns is not Type.NONE \
-                and f.returns not in (Type.STR, Type.STR_LIST, Type.STR_OPT) \
+                and f.returns not in (Type.STR, Type.STR_LIST, Type.STR_OPT, Type.OBJ_LIST) \
                 and not (f.returns is Type.OBJ and f.return_cls is not None) \
                 and self.g.tuple_kinds(f) is None:
             self.bad("aot/type", f.name, f"the return type {f.returns.value} is outside the AOT mode (int, float, "
@@ -2823,6 +2946,8 @@ class _Fn:
         for name, t in f.locals.items():
             if t in (Type.STR, Type.STR_LIST, Type.STR_OPT):
                 self.g.uses_str = True
+            elif t is Type.OBJ_LIST:
+                pass                                                     # tier S2a
             elif t not in LIST and not (t is Type.OBJ and name in f.local_classes):
                 self.ctype(t, name)
         owned = [p for p in f.params if self.g.owned_param(f, p)]
@@ -2831,6 +2956,8 @@ class _Fn:
                 self.emit(f"tpa_str_set(&v_{mangle(p.name)}, pv_{mangle(p.name)});")
             elif isinstance(p, ir.Param) and p.type is Type.STR_LIST:
                 self.emit(f"tpa_str_list_set(&v_{mangle(p.name)}, pv_{mangle(p.name)});")
+            elif isinstance(p, ir.Param) and p.type is Type.OBJ_LIST:
+                self.emit(f"tpa_obj_list_set(&v_{mangle(p.name)}, pv_{mangle(p.name)});")
             elif isinstance(p, ir.Param) and p.type is Type.OBJ and p.cls is not None:
                 mc = mangle(p.cls)
                 self.emit(f"v_{mangle(p.name)} = pv_{mangle(p.name)};")
@@ -2849,6 +2976,9 @@ class _Fn:
             elif isinstance(p, ir.Param) and p.type is Type.STR_LIST:
                 decls.append(f"    tpa_str_list *v_{mangle(p.name)} TPA_UNUSED = NULL;")
                 releases.append(f"    tpa_str_list_release(v_{mangle(p.name)});")
+            elif isinstance(p, ir.Param) and p.type is Type.OBJ_LIST:
+                decls.append(f"    tpa_obj_list *v_{mangle(p.name)} TPA_UNUSED = NULL;")
+                releases.append(f"    tpa_obj_list_release(v_{mangle(p.name)});")
             elif isinstance(p, ir.Param) and p.type is Type.OBJ and p.cls is not None:
                 mc = mangle(p.cls)
                 decls.append(f"    tpa_cls_{mc} *v_{mangle(p.name)} TPA_UNUSED = NULL;")
@@ -2864,6 +2994,10 @@ class _Fn:
             if t is Type.STR_LIST:
                 decls.append(f"    tpa_str_list *v_{mangle(name)} TPA_UNUSED = NULL;")
                 releases.append(f"    tpa_str_list_release(v_{mangle(name)});")
+                continue
+            if t is Type.OBJ_LIST:
+                decls.append(f"    tpa_obj_list *v_{mangle(name)} TPA_UNUSED = NULL;")
+                releases.append(f"    tpa_obj_list_release(v_{mangle(name)});")
                 continue
             if t in LIST:
                 kind = self.kind(name)
@@ -2919,6 +3053,8 @@ class _Fn:
             releases.append(f"    tpa_str_release({n});")
         for n in self.strlist_slots:
             releases.append(f"    tpa_str_list_release({n});")
+        for n in self.objlist_slots:
+            releases.append(f"    tpa_obj_list_release({n});")
         for cls, n in self.obj_slots:
             releases.append(f"    tpa_cls_{mangle(cls)}_release({n});")
         for kind, n in self.list_slots:
@@ -2969,7 +3105,7 @@ def emit(module: ir.Module, program: Program, *, strict_int: bool = False,
                                             "the `__main__` block was not compiled", None)]
     if g.findings:
         return None, g.findings
-    class_decls = g.emit_class_decls() + g.emit_region_decls()
+    class_decls = g.emit_class_decls() + g.emit_region_decls() + g.obj_list_wrappers()     # (wrappers: tier S2a)
     class_ctors = g.emit_class_ctors()
     prototypes = [g.prototype(f) for f in g.fns.values()]
     body_text = "\n".join(class_decls + prototypes + class_ctors + [line for b in bodies for line in b])

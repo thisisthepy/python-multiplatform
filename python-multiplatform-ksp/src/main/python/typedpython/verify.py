@@ -373,6 +373,7 @@ from .ir import BuildString, Contains, ForObj, Format, GetItem, NewDict, NewList
 from .ir import ParInfo
 from .ir import ListAppend, ListClear, ListExtend, ListInsert, ListPop, ListRemove, ListReverse, ListSearch, ListStr
 from .ir import ListCompare, ListConcat, ListRepeat, ListSlice, ListDelete, ListSetSlice
+from .ir import ForObjList, ObjListDisplay, ObjListIndex, ObjListLen, ObjListStore
 
 DA = "verify/definite-assignment"
 MISSING_RETURN = "verify/missing-return"
@@ -430,24 +431,27 @@ _STMTS = frozenset({Assign, StoreIndex, ExprStmt, If, While, ForRange, Return, B
 # `FormatField`s are checked by `s_Print`, which is the only place one may stand.)
 _AOT_STMTS = frozenset({Print, ReturnTuple, Unpack, TimeSleep, SysExit, ForStr,
                         ListAppend, ListInsert, ListExtend, ListClear, ListReverse, ListRemove,
-                        ListDelete, ListSetSlice})     # tier S2a
+                        ListDelete, ListSetSlice, ObjListStore, ForObjList})     # tier S2a
 _AOT_EXPRS = frozenset({ListDisplay, Cond, ArgvInt, ArgvLen, FloatToInt, BoolToInt, StrToInt, TimeCall,
                         # tier S1 (PR-S1a): the STR nodes, and an f-string that is a str value
                         StrConcat, StrRepeat, StrCompare, StrContains, StrLen, StrIndex, StrSlice, StrOf, StrOrd,
                         StrChr, ArgvStr, StrParseInt, StrWrite, FString,
                         # tier S1b
                         StrMethod, StrListDisplay, StrListLen, StrListIndex,
-                        StrNarrow, ListPop, ListSearch, ListStr, ListCompare, ListConcat, ListRepeat, ListSlice})  # tier S2a
+                        StrNarrow, ListPop, ListSearch, ListStr, ListCompare, ListConcat, ListRepeat, ListSlice,
+                        ObjListDisplay, ObjListLen, ObjListIndex})  # tier S2a
 # Nodes whose OBJ result is a new reference (ir.py "ownership": Box, Global, GetAttr, CallObject,
 # OBJ BinOp, Tuple), plus reads of an OBJ local (the local owns its reference; the back end increfs or
 # borrows under that rule) and Calls of a compiled function returning OBJ (which returns a new
 # reference by the same rule).
 _OBJ_PRODUCERS = frozenset({Box, Global, GetAttr, CallObject, BinOp, Local, Call, Tuple, New,
                             FieldGet, CheckExact, CheckMethod, Const,      # an OBJ Const is None or a str (e_Const)
-                            GetItem, NewList, NewDict, Format, BuildString})
+                            GetItem, NewList, NewDict, Format, BuildString,
+                            ObjListIndex, ListPop})      # (tier S2a: a new reference to an item of a list[C])
 _CONVERSIONS = (-1, 97, 114, 115)          # Format.conversion: none, !a, !r, !s
 _VALUE_TYPES = (Type.I64, Type.F64, Type.BOOL, Type.OBJ)        # what a local may hold
 _AOT_STR_TYPES = (Type.STR, Type.STR_LIST, Type.STR_OPT)         # AOT mode, tier S1/S2a: what a local may also hold
+_AOT_VALUE_TYPES = (*_AOT_STR_TYPES, Type.OBJ_LIST)                # ... and a list[C] (tier S2a)
 _LOCAL_TYPES = _VALUE_TYPES + (Type.INT,)       # an INT lives only in a local or a temporary (SPEC N-13)
 _RETURN_TYPES = _VALUE_TYPES + (Type.NONE,)
 # The nodes that produce an INT (an owned tp_int: native, or a PyLong once promoted).
@@ -457,7 +461,7 @@ _INT_OPS = frozenset({BinOpKind.ADD, BinOpKind.SUB, BinOpKind.MUL, BinOpKind.FLO
                       BinOpKind.OR, BinOpKind.XOR})
 _BITWISE_OPS = frozenset({BinOpKind.AND, BinOpKind.OR, BinOpKind.XOR})   # SPEC N-16
 _ELEMENT = {Type.F64_ARRAY: Type.F64, Type.I64_ARRAY: Type.I64, Type.BOOL_ARRAY: Type.BOOL,
-            Type.STR_LIST: Type.STR}     # (STR_LIST: tier S2a, the items of a list[str] method)
+            Type.STR_LIST: Type.STR, Type.OBJ_LIST: Type.OBJ}     # (STR_LIST: tier S2a, the items of a list[str] method)
 _MATH_ARITY = {
     MathFunc.ATAN2: 2, MathFunc.HYPOT: 2, MathFunc.POW: 2, MathFunc.COPYSIGN: 2, MathFunc.FMOD: 2,
 }            # every other MathFunc: 1
@@ -606,7 +610,7 @@ class _Checker:
                     if p.buffer:
                         self.buffers.add(p.name)
             elif type(p) is Param:
-                if p.type not in _VALUE_TYPES and not (self.aot and p.type in _AOT_STR_TYPES):
+                if p.type not in _VALUE_TYPES and not (self.aot and p.type in _AOT_VALUE_TYPES):
                     self.error(TYPE, f"parameter '{p.name}' has type {p.type}; arrays must be "
                                      f"ArrayParam")
                 else:
@@ -669,7 +673,7 @@ class _Checker:
                     self.error(TYPE, f"local array '{name}' collides with a scalar parameter")
                 else:
                     self.larrays[name] = t
-            elif t not in _LOCAL_TYPES and not (self.aot and t in _AOT_STR_TYPES):
+            elif t not in _LOCAL_TYPES and not (self.aot and t in _AOT_VALUE_TYPES):
                 self.error(TYPE, f"local '{name}' has type {t}")
             elif name in self.scalars and self.scalars[name] is not t:
                 self.error(TYPE, f"local '{name}' declared {t} but parameter is "
@@ -677,7 +681,7 @@ class _Checker:
             else:
                 self.scalars[name] = t
         if fn.returns not in _RETURN_TYPES and not (self.aot and fn.returns in (Type.F64_ARRAY, Type.I64_ARRAY,
-                                                                               *_AOT_STR_TYPES)):
+                                                                               *_AOT_VALUE_TYPES)):
             self.error(TYPE, f"return type {fn.returns} is not a value type")
         for flag in ("pure", "may_deopt"):
             if not isinstance(getattr(fn, flag), bool):
@@ -693,6 +697,9 @@ class _Checker:
         if p.cls is None:
             if p.optional:
                 self.error(TYPE, f"parameter '{p.name}' is optional but names no class")
+            return
+        if self.aot and p.type is Type.OBJ_LIST:
+            self.known_class(p.cls, f"parameter '{p.name}'")   # tier S2a: the element class of a list[C]
             return
         if p.type is not Type.OBJ:
             self.error(TYPE, f"parameter '{p.name}' names class {p.cls!r} but is "
@@ -1962,6 +1969,73 @@ class _Checker:
         self.result(e, Type.STR)
         return dataclasses.replace(e, value=value, index=index)
 
+    # --- AOT mode, tier S2a: lists of class instances (OBJ_LIST) ---
+
+    def e_ObjListDisplay(self, e: ObjListDisplay, state: _State) -> ir.Expr:
+        if not self.aot or not isinstance(e.elements, tuple):
+            self.error(UNKNOWN, "ObjListDisplay is an AOT-mode node with a tuple of elements")
+            return e
+        self.known_class(e.cls, "ObjListDisplay")
+        elements = tuple(self.expr(x, state) for x in e.elements)
+        for k, x in enumerate(elements):
+            if getattr(x, "type", None) is not Type.OBJ:
+                self.error(TYPE, f"element {k + 1} of a list of {e.cls} is not an instance")
+        self.result(e, Type.OBJ_LIST)
+        return dataclasses.replace(e, elements=elements)
+
+    def e_ObjListLen(self, e: ObjListLen, state: _State) -> ir.Expr:
+        value = self.expr(e.value, state)
+        self.slot(value, Type.OBJ_LIST, "argument of len()")
+        self.result(e, Type.I64)
+        return dataclasses.replace(e, value=value)
+
+    def e_ObjListIndex(self, e: ObjListIndex, state: _State) -> ir.Expr:
+        value = self.expr(e.value, state)
+        self.slot(value, Type.OBJ_LIST, "indexed list of class instances")
+        idx = self.expr(e.index, state)
+        self.slot(idx, Type.I64, "index of a list of class instances")
+        self.known_class(e.cls, "ObjListIndex")
+        self.result(e, Type.OBJ)
+        return dataclasses.replace(e, value=value, index=idx)
+
+    def s_ObjListStore(self, s: ObjListStore, state: _State):
+        at = self.list_changed(s.array, "store", state)
+        if at is not None and at is not Type.OBJ_LIST:
+            self.error(TYPE, f"ObjListStore into '{s.array}' ({at.value})")
+        value = self.expr(s.value, state)
+        if getattr(value, "type", None) is not Type.OBJ:
+            self.error(TYPE, f"value stored into '{s.array}' is not an instance")
+        idx = self.expr(s.index, state)
+        self.slot(idx, Type.I64, f"index of a store into '{s.array}'")
+        return dataclasses.replace(s, index=idx, value=value), state
+
+    def s_ForObjList(self, s: ForObjList, state: _State):
+        """`for var in value` over a list of class instances: as ForStr, `var` an OBJ local."""
+        value = self.expr(s.value, state)
+        if getattr(value, "type", None) is not Type.OBJ_LIST:
+            self.error(TYPE, "ForObjList iterates a list of class instances")
+        var = s.var
+        if not isinstance(var, str) or self.scalars.get(var) is not Type.OBJ:
+            self.error(TYPE, f"ForObjList target {var!r} must be a declared object local")
+        for outer in self.loops:
+            if outer.var == var:
+                self.error(STRUCTURE, f"loop variable '{var}' is assigned in its loop body (by an inner loop)")
+        loop = _Loop(None, None)
+        self.loops.append(loop)
+        head = self.loop_facts(s.body, (var,))
+        self.facts = dict(head)
+        killed = _assigned_names(s.body) | {var}
+        head_refine = {k: v for k, v in self.refine.items() if k not in killed}
+        self.refine = head_refine
+        body, _ = self.block(s.body, None if state is None else state | {var})
+        self.loops.pop()
+        self.refine = dict(head_refine)
+        self.facts = dict(head)
+        after: _State = state
+        for br in loop.breaks:
+            after = _meet(after, br)
+        return dataclasses.replace(s, value=value, body=body), after
+
     def s_ForStr(self, s: ForStr, state: _State):
         """`for var in value` over a str (AOT mode): `var` is a declared str local; zero iterations leave it as it
         was, so the state after the loop is the entry state met with every break state."""
@@ -2182,10 +2256,10 @@ class _Checker:
         """The list type of `array`: an array (list[float] / list[int]) or a list[str] local or parameter."""
         if array in self.arrays or array in self.larrays:
             return self.array(array, node, state)
-        if self.scalars.get(array) is Type.STR_LIST:
+        if self.scalars.get(array) in (Type.STR_LIST, Type.OBJ_LIST):
             if state is not None and array not in state:
                 self.error(DA, f"list '{array}' may be used ({node}) before it is assigned")
-            return Type.STR_LIST
+            return self.scalars[array]
         self.error(ARRAY_USE, f"{node} of '{array}', which is not a list")
         return None
 
@@ -2259,7 +2333,7 @@ class _Checker:
 
     def s_ListRemove(self, s: ListRemove, state: _State):
         at = self.list_changed(s.array, "remove", state)
-        if at not in (Type.I64_ARRAY, Type.STR_LIST) and at is not None:
+        if at not in (Type.I64_ARRAY, Type.STR_LIST, Type.OBJ_LIST) and at is not None:
             self.error(TYPE, f"remove from '{s.array}' ({at.value}): only a list of int is searched")
         return dataclasses.replace(s, value=self.list_item(s.value, at, "remove", s.array, state)), state
 
@@ -2337,7 +2411,7 @@ class _Checker:
         if not self.aot:
             self.error(UNKNOWN, "ListSearch is an AOT-mode node")
         at = self.list_of(e.array, e.op, state)
-        if at not in (Type.I64_ARRAY, Type.STR_LIST) and at is not None:
+        if at not in (Type.I64_ARRAY, Type.STR_LIST, Type.OBJ_LIST) and at is not None:
             self.error(TYPE, f"{e.op} of '{e.array}' ({at.value}): only a list of int or of str is searched")
         want = Type.BOOL if e.op == "in" else Type.I64
         if e.op not in ("index", "count", "in") or e.type is not want:

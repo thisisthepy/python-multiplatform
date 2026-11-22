@@ -1787,6 +1787,283 @@ TPA__DEF_LIST_SPLICE(tpa_f64_, tpa_f64_list, double, TPA__NO_OWN, TPA__NO_OWN, t
 TPA__DEF_LIST_SPLICE(tpa_i64_, tpa_i64_list, int64_t, TPA__NO_OWN, TPA__NO_OWN, tpa_i64__resize)
 #endif
 
+/* Tier S2a: a list of instances of one compiled class (`list[C]`, ir OBJ_LIST): owned references in a block that
+ * may move, the growable layout always (the type is new, so no earlier program's C changes). The element class's
+ * retain and release are carried by the list (generated `void *` wrappers of tpa_cls_<C>_retain / _release). An
+ * item is never NULL (a list[C] holds instances). Equality of items is identity (object.__eq__; a class that defines
+ * __eq__ is refused by the front end). Executables only: a list[C] never crosses a library boundary. */
+typedef void (*tpa_obj_fn)(void *);
+typedef struct tpa_obj_list {
+    tpa_rc_t rc;
+    int64_t len;
+    int64_t cap;
+    void **d;
+    tpa_obj_fn ret;
+    tpa_obj_fn rel;
+} tpa_obj_list;
+
+static TPA_UNUSED int tpa_obj_list__resize(tpa_obj_list *l, int64_t n)
+{
+    uint64_t want;
+    void **d;
+    if (TPA__RESIZE_IN_PLACE && l->cap >= n && n >= (l->cap >> 1)) {
+        l->len = n;
+        return 0;
+    }
+    want = ((uint64_t)n + ((uint64_t)n >> 3) + 6u) & ~(uint64_t)3;
+    if ((uint64_t)(n - l->len) > want - (uint64_t)n) {
+        want = ((uint64_t)n + 3u) & ~(uint64_t)3;
+    }
+    if (n == 0) {
+        want = 0;
+    }
+    if (want > (uint64_t)(SIZE_MAX / sizeof(void *)) || want > (uint64_t)INT64_MAX) {
+        return tpa_raise(TPA_MemoryError, "");
+    }
+    if (want == 0) {
+        free(l->d);
+        d = NULL;
+    }
+    else {
+        d = (void **)tpa__list_realloc(l->d, (size_t)want * sizeof(void *),
+                                       (size_t)(l->len < n ? l->len : n) * sizeof(void *));
+        if (d == NULL) {
+            return tpa_raise(TPA_MemoryError, "");
+        }
+    }
+    l->d = d;
+    l->cap = (int64_t)want;
+    l->len = n;
+    return 0;
+}
+
+/* A new list of `n` slots (NULL until the caller fills every one, before the list is seen). */
+static TPA_UNUSED int tpa_obj_list_alloc(int64_t n, tpa_obj_fn ret, tpa_obj_fn rel, tpa_obj_list **out)
+{
+    tpa_obj_list *l = (tpa_obj_list *)calloc(1, sizeof(tpa_obj_list));
+    if (l == NULL) {
+        return tpa_raise(TPA_MemoryError, "");
+    }
+    if (n > 0) {
+        if ((uint64_t)n > (uint64_t)(SIZE_MAX / sizeof(void *))) {
+            free(l);
+            return tpa_raise(TPA_MemoryError, "");
+        }
+        l->d = (void **)calloc((size_t)n, sizeof(void *));
+        if (l->d == NULL) {
+            free(l);
+            return tpa_raise(TPA_MemoryError, "");
+        }
+    }
+    l->rc = 1;
+    l->len = n > 0 ? n : 0;
+    l->cap = l->len;
+    l->ret = ret;
+    l->rel = rel;
+    *out = l;
+    return 0;
+}
+
+static inline TPA_UNUSED void tpa_obj_list_retain(tpa_obj_list *l)
+{
+    if (l != NULL) {
+        TPA_RC_INC(l);
+    }
+}
+
+static TPA_UNUSED void tpa_obj_list_release(tpa_obj_list *l)
+{
+    if (l != NULL && TPA_RC_DEC_IS_ZERO(l)) {
+        int64_t i, n = l->len;
+        void **d = l->d;
+        l->d = NULL;
+        l->len = 0;
+        for (i = 0; i < n; i++) {
+            if (d[i] != NULL) {
+                l->rel(d[i]);
+            }
+        }
+        free(d);
+        free(l);
+    }
+}
+
+static inline TPA_UNUSED void tpa_obj_list_set(tpa_obj_list **slot, tpa_obj_list *v)
+{
+    tpa_obj_list_retain(v);
+    tpa_obj_list_release(*slot);
+    *slot = v;
+}
+
+/* l[i] as a new reference in `*out` (which gives up the one it held); IndexError("list index out of range") */
+static TPA_UNUSED int tpa_obj_list_get(tpa_obj_list *l, int64_t i, void **out)
+{
+    int64_t slot;
+    void *v;
+    if (tpa_slot(l->len, i, 0, &slot)) {
+        return -1;
+    }
+    v = l->d[slot];
+    l->ret(v);
+    if (*out != NULL) {
+        l->rel(*out);
+    }
+    *out = v;
+    return 0;
+}
+
+/* l[i] = v (v borrowed): the new reference is held before the old one is released */
+static TPA_UNUSED int tpa_obj_list_store(tpa_obj_list *l, int64_t i, void *v)
+{
+    int64_t slot;
+    void *old;
+    if (tpa_slot(l->len, i, 1, &slot)) {
+        return -1;
+    }
+    l->ret(v);
+    old = l->d[slot];
+    l->d[slot] = v;
+    l->rel(old);
+    return 0;
+}
+
+static TPA_UNUSED int tpa_obj_list_append(tpa_obj_list *l, void *v)
+{
+    if (tpa_obj_list__resize(l, l->len + 1)) {
+        return -1;
+    }
+    l->ret(v);
+    l->d[l->len - 1] = v;
+    return 0;
+}
+
+static TPA_UNUSED int tpa_obj_list_insert(tpa_obj_list *l, int64_t i, void *v)
+{
+    int64_t n = l->len;
+    if (i < 0) {
+        i += n;
+        if (i < 0) {
+            i = 0;
+        }
+    }
+    if (i > n) {
+        i = n;
+    }
+    if (tpa_obj_list__resize(l, n + 1)) {
+        return -1;
+    }
+    memmove(l->d + i + 1, l->d + i, (size_t)(n - i) * sizeof(void *));
+    l->ret(v);
+    l->d[i] = v;
+    return 0;
+}
+
+static TPA_UNUSED int tpa_obj_list_extend(tpa_obj_list *l, const tpa_obj_list *o)
+{
+    int64_t n = l->len, m = o->len, k;
+    if (m == 0) {
+        return 0;
+    }
+    if (tpa_obj_list__resize(l, n + m)) {
+        return -1;
+    }
+    for (k = 0; k < m; k++) {
+        l->ret(o->d[k]);
+        l->d[n + k] = o->d[k];
+    }
+    return 0;
+}
+
+static TPA_UNUSED void tpa_obj_list_clear(tpa_obj_list *l)
+{
+    int64_t i, n = l->len;
+    void **d = l->d;
+    l->d = NULL;
+    l->len = 0;
+    l->cap = 0;
+    for (i = 0; i < n; i++) {
+        l->rel(d[i]);
+    }
+    free(d);
+}
+
+static TPA_UNUSED void tpa_obj_list_reverse(tpa_obj_list *l)
+{
+    int64_t i, j;
+    for (i = 0, j = l->len - 1; i < j; i++, j--) {
+        void *t = l->d[i];
+        l->d[i] = l->d[j];
+        l->d[j] = t;
+    }
+}
+
+/* pop: the item's reference moves to `*out` (which gives up the one it held) */
+static TPA_UNUSED int tpa_obj_list_pop(tpa_obj_list *l, int has_index, int64_t i, void **out)
+{
+    int64_t n = l->len;
+    void *v;
+    if (n == 0) {
+        return tpa_raise(TPA_IndexError, "pop from empty list");
+    }
+    if (!has_index) {
+        i = n - 1;
+    }
+    if (i < 0) {
+        i += n;
+    }
+    if (i < 0 || i >= n) {
+        return tpa_raise(TPA_IndexError, "pop index out of range");
+    }
+    v = l->d[i];
+    memmove(l->d + i, l->d + i + 1, (size_t)(n - i - 1) * sizeof(void *));
+    if (tpa_obj_list__resize(l, n - 1)) {
+        l->len = n - 1;
+    }
+    if (*out != NULL) {
+        l->rel(*out);
+    }
+    *out = v;
+    return 0;
+}
+
+static TPA_UNUSED int tpa_obj_list_contains(const tpa_obj_list *l, const void *v)
+{
+    int64_t i;
+    for (i = 0; i < l->len; i++) {
+        if (l->d[i] == v) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static TPA_UNUSED int64_t tpa_obj_list_count(const tpa_obj_list *l, const void *v)
+{
+    int64_t i, k = 0;
+    for (i = 0; i < l->len; i++) {
+        k += l->d[i] == v;
+    }
+    return k;
+}
+
+static TPA_UNUSED int tpa_obj_list_remove(tpa_obj_list *l, const void *v)
+{
+    int64_t i;
+    void *got = NULL;
+    for (i = 0; i < l->len; i++) {
+        if (l->d[i] == v) {
+            tpa_obj_list_pop(l, 1, i, &got);
+            l->rel(got);
+            return 0;
+        }
+    }
+    return tpa_raise(TPA_ValueError, "list.remove(x): x not in list");
+}
+
+#define TPA__OBJ_RET(x) l->ret(x)
+#define TPA__OBJ_REL(x) l->rel(x)
+TPA__DEF_LIST_SPLICE(tpa_obj_list_, tpa_obj_list, void *, TPA__OBJ_RET, TPA__OBJ_REL, tpa_obj_list__resize)
+
 /* Tier S2a: the outcome of a list comparison (Objects/listobject.c list_richcompare) once the first differing pair,
  * or the lengths, give `c` (<0, 0, >0); `op` 0..5 is == != < <= > >=. */
 static inline int tpa__cmp_outcome(int op, int c)

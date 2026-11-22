@@ -131,6 +131,8 @@ class _Checker:
         self.class_fields: dict[str, set[str]] = class_fields or {}
         self.class_methods: dict[str, set[str]] = class_methods or {}
         self.func_return_class: dict[str, str] = func_return_class or {}
+        self.func_return_list_class: dict[str, str] = {}   # tier S2a: set by check() after construction
+        self.list_classes: dict[str, str] = {}             # tier S2a: list[C] names of the function -> C
         self.method_return_class: dict[tuple[str, str], str] = method_return_class or {}
         self.field_class: dict[tuple[str, str], str] = field_class or {}
         self.consts = program.consts
@@ -143,6 +145,7 @@ class _Checker:
                  is_method: bool = False, owner_class: str | None = None) -> None:
         self.rep.function = name
         self.var_classes = {}
+        self.list_classes = {}
         if node is not None:
             self.signature(node, is_method=is_method)
             self.shadow = _bound_names(node)
@@ -153,6 +156,9 @@ class _Checker:
                     cls = _extract_class_name(arg.annotation, self.class_names)
                     if cls is not None:
                         self.var_classes[arg.arg] = cls
+                    lcls = _list_class_name(arg.annotation, self.class_names)
+                    if lcls is not None:
+                        self.list_classes[arg.arg] = lcls       # tier S2a
         else:
             self.shadow = set()
             for s in body:
@@ -162,7 +168,26 @@ class _Checker:
         self.var_classes = {}
         self.rep.function = None
 
+    def _infer_list_class(self, e: ast.expr) -> str | None:
+        """Tier S2a: the element class C of a list[C] expression (a name, a call of a function returning one, a
+        display of instances of one class)."""
+        if isinstance(e, ast.Name):
+            return self.list_classes.get(e.id)
+        if isinstance(e, ast.Call) and isinstance(e.func, ast.Name):
+            return self.func_return_list_class.get(e.func.id)
+        if isinstance(e, ast.List) and e.elts:
+            found = {self._infer_expr_class(x) for x in e.elts}
+            if len(found) == 1 and None not in found:
+                return next(iter(found))
+        return None
+
     def _infer_expr_class(self, e: ast.expr) -> str | None:
+        if isinstance(e, ast.Subscript) and not isinstance(e.slice, ast.Slice):
+            return self._infer_list_class(e.value)            # tier S2a: an element of a list[C]
+        if isinstance(e, ast.Call) and isinstance(e.func, ast.Attribute) and e.func.attr == "pop":
+            lc = self._infer_list_class(e.func.value)
+            if lc is not None:
+                return lc
         if isinstance(e, ast.Name):
             return self.var_classes.get(e.id)
         if isinstance(e, ast.Call):
@@ -193,6 +218,8 @@ class _Checker:
             return
         elif _is_list_annotation(ann) or _is_str_list_annotation(ann) or _is_optional_str_annotation(ann):
             return
+        elif _is_class_list_annotation(ann, self.class_names):
+            return                          # tier S2a: list[C] of a compiled class
         elif _is_class_annotation(ann, self.class_names):
             return
         elif allow_tuple and _is_tuple_annotation(ann):
@@ -239,6 +266,9 @@ class _Checker:
                 self.subscript_parts(s.targets[0])
             self.expr(s.value)
             if len(s.targets) == 1 and isinstance(s.targets[0], ast.Name):
+                lcls = self._infer_list_class(s.value)
+                if lcls is not None:
+                    self.list_classes[s.targets[0].id] = lcls       # tier S2a
                 cls = self._infer_expr_class(s.value)
                 if cls is not None:
                     self.var_classes[s.targets[0].id] = cls
@@ -254,8 +284,12 @@ class _Checker:
                     self.var_classes[s.target.id] = cls
                 else:
                     self.var_classes.pop(s.target.id, None)
+                lcls = _list_class_name(s.annotation, self.class_names)
+                if lcls is not None:
+                    self.list_classes[s.target.id] = lcls        # tier S2a
             if s.value is not None and not (isinstance(s.value, ast.List) and not s.value.elts
-                                            and _is_str_list_annotation(s.annotation)):
+                                            and (_is_str_list_annotation(s.annotation)
+                                                 or _list_class_name(s.annotation, self.class_names))):
                 self.expr(s.value)          # (`x: list[str] = []`: an empty list of str, tier S1b)
         elif isinstance(s, ast.AugAssign):
             if not (isinstance(s.target, ast.Name) or self.subscript_target(s.target)) \
@@ -335,6 +369,9 @@ class _Checker:
                 self.expr(a)
         else:
             self.expr(it)               # tier S1: a str (the front end checks the type)
+            lcls = self._infer_list_class(it)
+            if lcls is not None and isinstance(s.target, ast.Name):
+                self.var_classes[s.target.id] = lcls        # tier S2a: the variable of a loop over a list[C]
         if not isinstance(s.target, ast.Name):
             self.rep.error(s, "aot/statement", "for", "the loop target must be one name")
         if s.orelse:
@@ -679,6 +716,31 @@ def _is_list_annotation(ann: ast.expr) -> bool:
 LIST_METHODS = frozenset({"append", "insert", "extend", "clear", "reverse", "remove", "pop", "index", "count"})
 
 
+def _list_class_name(ann: ast.expr | None, class_names) -> str | None:
+    """Tier S2a: C of a `list[C]` annotation of a compiled class, else None."""
+    if ann is None or not _is_class_list_annotation(ann, class_names):
+        return None
+    if isinstance(ann, ast.Constant) and isinstance(ann.value, str):
+        ann = ast.parse(ann.value, mode="eval").body
+    inner = ann.slice                                         # type: ignore[attr-defined]
+    return inner.value if isinstance(inner, ast.Constant) else inner.id
+
+
+def _is_class_list_annotation(ann: ast.expr, class_names) -> bool:
+    """`list[C]` of a compiled class C (tier S2a), also with a quoted C or as a string."""
+    if isinstance(ann, ast.Constant) and isinstance(ann.value, str):
+        try:
+            ann = ast.parse(ann.value, mode="eval").body
+        except SyntaxError:
+            return False
+    if not (isinstance(ann, ast.Subscript) and isinstance(ann.value, ast.Name) and ann.value.id in ("list", "List")):
+        return False
+    inner = ann.slice
+    if isinstance(inner, ast.Constant) and isinstance(inner.value, str):
+        return inner.value in class_names
+    return isinstance(inner, ast.Name) and inner.id in class_names
+
+
 def _is_optional_str_annotation(ann: ast.expr) -> bool:
     """`str | None`, `None | str`, `Optional[str]` (tier S2a), also as a string."""
     if isinstance(ann, ast.Constant) and isinstance(ann.value, str):
@@ -891,10 +953,14 @@ def analyze(entry: Path, *, library: bool = False) -> Program:
         class_fields[c.name] = fields
         class_methods[c.name] = methods
     func_return_class: dict[str, str] = {}
+    func_return_list_class: dict[str, str] = {}
     for f in program.functions:
         rcls = _extract_class_name(f.returns, class_names)
         if rcls is not None:
             func_return_class[f.name] = rcls
+        lcls = _list_class_name(f.returns, class_names)
+        if lcls is not None:
+            func_return_list_class[f.name] = lcls          # tier S2a: a function returning list[C]
     arity = {f.name: len(f.args.args) for f in program.functions}
     checker = _Checker(program, rep, arity, has_math, has_sys, has_time, library,
                        class_names=class_names, class_arity=class_arity,
@@ -902,6 +968,7 @@ def analyze(entry: Path, *, library: bool = False) -> Program:
                        func_return_class=func_return_class,
                        method_return_class=method_return_class,
                        field_class=field_class)
+    checker.func_return_list_class = func_return_list_class      # tier S2a
     for c in program.classes:
         for st in c.body:
             if isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name) and st.value is None:

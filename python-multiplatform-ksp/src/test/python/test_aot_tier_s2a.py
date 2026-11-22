@@ -647,3 +647,95 @@ def test_del_and_slice_assignment(tmp_path: Path):
     and shrinks the list, an extended slice of another size (ValueError), a[1:1] = a and a[:] = a (the source copied
     first), on all list types (design 4.3.2; the S2 review B1 self-referential cases)."""
     _compare(tmp_path, DELETES, [["0"], ["1"], ["2"], ["3"], ["4"]])
+
+
+INSTANCES = """
+import sys
+
+
+class Item:
+    name: str
+    w: int
+
+    def __init__(self, name: str, w: int) -> None:
+        self.name = name
+        self.w = w
+
+
+def heaviest(xs: list[Item]) -> Item:
+    best = xs[0]
+    for it in xs:
+        if it.w > best.w:
+            best = it
+    return best
+
+
+def make(n: int) -> list[Item]:
+    out: list[Item] = []
+    for i in range(n):
+        out.append(Item("i" + str(i), (i * 7) % 5))
+    return out
+
+
+def main() -> None:
+    n = int(sys.argv[1])
+    xs = make(n)
+    ys = xs
+    a = Item("a", 9)
+    xs.insert(0, a)
+    xs.append(a)
+    h = heaviest(xs)
+    print(len(xs), xs.count(a), a in ys, h.name)
+    p = xs.pop()
+    q = xs.pop(0)
+    print(p is q, p.name, len(ys))
+    xs[0] = a
+    f0 = xs[0]
+    fl = xs[-1]
+    print(f0.name, fl.w)
+    zs = [a, Item("b", 1)]
+    xs.extend(zs)
+    xs.remove(a)
+    xs.reverse()
+    total = 0
+    for it in xs:
+        total += it.w
+    print(total, len(xs))
+    del xs[0]
+    xs.clear()
+    print(len(ys))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_lists_of_class_instances(tmp_path: Path):
+    """list[C] in locals, parameters and results: displays, `[]` with an annotation, element reads and stores,
+    append / insert / extend / pop / remove / reverse / del / clear, count and `in` by identity, a loop over the list,
+    an alias seeing every change (design 4.3.2)."""
+    _compare(tmp_path, INSTANCES, [["0"], ["1"], ["6"]])
+
+
+C_BASE = "class C:\n    v: int\n\n    def __init__(self, v: int) -> None:\n        self.v = v\n\n\n"
+C_MAIN = '\n\ndef main() -> None:\n    print(f([C(1)]))\n\n\nif __name__ == "__main__":\n    main()\n'
+C_HOLDER = ("class H:\n    items: list[C]\n\n    def __init__(self, items: list[C]) -> None:\n"
+            "        self.items = items\n\n\n")
+
+
+def test_index_of_an_instance_is_refused(tmp_path: Path):
+    """index() of an instance reports its repr, with the object's address in CPython (aot/identity)."""
+    with pytest.raises(aot.AotError) as raised:
+        aot.generate(_write(tmp_path, C_BASE + "def f(xs: list[C]) -> int:\n    c = xs[0]\n    return xs.index(c)\n"
+                            + C_MAIN))
+    assert "aot/identity" in str(raised.value)
+
+
+def test_a_list_field_waits_for_the_collector_step(tmp_path: Path):
+    """A list[C] field makes its class a node of the type graph (review B4); until the collector tracks lists it is
+    the named finding aot/class-list-field, not a miscompiled field."""
+    with pytest.raises(aot.AotError) as raised:
+        aot.generate(_write(tmp_path, C_BASE + C_HOLDER + "def f(xs: list[C]) -> int:\n    h = H(xs)\n"
+                            "    return len(xs)\n" + C_MAIN))
+    assert any(f.rule == "aot/class-list-field" for f in raised.value.findings)

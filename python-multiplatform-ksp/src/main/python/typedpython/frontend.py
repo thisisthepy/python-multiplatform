@@ -132,6 +132,7 @@ Interval = tuple[int, int] | None  # None: no value at all (not yet known to be 
 TYPE_NAME = {
     Type.I64: "int", Type.F64: "float", Type.BOOL: "bool", Type.NONE: "None", Type.OBJ: "object",
     Type.INT: "int", Type.STR: "str", Type.STR_LIST: "list[str]", Type.STR_OPT: "str | None",
+    Type.OBJ_LIST: "list of a compiled class",
     Type.F64_ARRAY: "list[float]", Type.I64_ARRAY: "list[int]", Type.BOOL_ARRAY: "NDArray[np.bool_]",
 }
 SCALAR_KIND = {"int": Type.I64, "float": Type.F64, "bool": Type.BOOL}
@@ -758,9 +759,24 @@ def _classes(
     return decls, skipped
 
 
+def _obj_list_class(kind: str, classes) -> str | None:
+    """AOT mode, tier S2a: the compiled class C of a `list[C]` annotation or inferred type (`list[prog.C]`, a quoted
+    forward reference), else None."""
+    k = kind.strip("'\"").replace(" ", "")
+    m = re.fullmatch(r"(?:typing\.)?(?:list|List)\[(.+)\]", k)
+    if m is None:
+        return None
+    inner = m.group(1).strip("'\"")
+    if "." in inner:
+        inner = inner.rsplit(".", 1)[1]
+    return inner if inner in classes else None
+
+
 def _aot_field_decl(fname: str, ann: ast.expr, known_names: set[str]) -> ir.FieldDecl | None:
     """Resolve an AOT class field annotation to an `ir.FieldDecl`."""
     kind = _annotation_kind(ann)
+    if (lc := _obj_list_class(kind, known_names)) is not None:
+        return ir.FieldDecl(fname, Type.OBJ_LIST, cls=lc)      # tier S2a: a list of instances of a compiled class
     if kind in SCALAR_KIND:
         return ir.FieldDecl(fname, SCALAR_KIND[kind])
     if kind.strip("'\"") == "str":
@@ -1068,6 +1084,8 @@ def _signature(fn: ast.FunctionDef, classes: dict[str, ir.ClassDecl] | None = No
             params.append(ir.ArrayParam(a.arg, ARRAY_KIND[kind], False))  # `stored` set later
         elif (c := _class_of(kind, classes or {})) is not None:
             params.append(ir.Param(a.arg, Type.OBJ, c[0], c[1]))
+        elif info is not None and info.aot and (lc := _obj_list_class(kind, classes or {})) is not None:
+            params.append(ir.Param(a.arg, Type.OBJ_LIST, lc))               # tier S2a: list[C]
         else:
             params.append(ir.Param(a.arg, kinds_map.get(_aot_kind(kind) if kinds_map is AOT_KIND else kind, Type.OBJ)))
     if fn.returns is None:
@@ -1089,6 +1107,8 @@ def _signature(fn: ast.FunctionDef, classes: dict[str, ir.ClassDecl] | None = No
         rc = _class_of(_annotation_kind(fn.returns), classes)
         if rc is not None:
             ret_cls, ret_opt = rc
+        elif info is not None and info.aot and (lc := _obj_list_class(_annotation_kind(fn.returns), classes)):
+            returns, ret_cls = Type.OBJ_LIST, lc                             # tier S2a: list[C]
     return _Signature(fn, tuple(params), returns, elements, ellipsis, _src(fn.returns), owner,
                       return_cls=ret_cls, return_optional=ret_opt)
 
@@ -1385,6 +1405,8 @@ class _Lowerer:
             | set(self.params)
 
         self.types: dict[str, Type] = {}
+        self.list_cls: dict[str, str] = {}      # AOT mode, tier S2a: the element class of an OBJ_LIST local
+        self.loop_cls: dict[str, str] = {}      # ... and of the variable of a loop over one
         self.temps: dict[str, Type] = {}
         self.pre: list[ir.Stmt] = []
         self.hoist_ok = True
@@ -1463,7 +1485,8 @@ class _Lowerer:
             pure=pure, may_deopt=self.deopts, source_line=self.fn.lineno,
             entry_globals=tuple(ir.Param(n, t) for n, t in self.entry_used.items()),
             owner=self.sig.owner, return_cls=self.sig.return_cls,
-            return_optional=self.sig.return_optional, local_classes=local_classes)
+            return_optional=self.sig.return_optional, local_classes=local_classes,
+            list_classes={n: c for n, c in self.list_cls.items() if n in locals_})
         if self.info.aot:
             return fn       # nothing is redone in an interpreter, so there is no continuation to write
         # SPEC N-8 (#152): a snapshot holder gets a Python continuation per loop (OSR-style exit).
@@ -1553,6 +1576,8 @@ class _Lowerer:
                 kinds += self.inferred.get(name, [])
             if not any(k.startswith("list") for _, k in kinds):
                 continue
+            if all(_obj_list_class(k, self.info.classes) is not None for _, k in kinds):
+                continue        # tier S2a: a list of class instances is an OBJ_LIST value, not a native array
             if all((_aot_kind(k) if self.info.aot else k) == "list[str]" for _, k in kinds):
                 continue        # tier S1b: a list of str is a STR_LIST value, not a native array
             distinct = sorted({k for _, k in kinds})
@@ -1633,6 +1658,9 @@ class _Lowerer:
                 t = Type.OBJ        # a loop over an object binds objects; an int fed from an object stays one
             else:
                 t = Type.INT        # SPEC N-13: native, promoted in place on overflow
+        elif self.info.aot and (lc := _obj_list_class(kind, self.info.classes)) is not None:
+            t = Type.OBJ_LIST                       # tier S2a: list[C]
+            self.list_cls[name] = lc
         elif self.info.aot:
             t = AOT_KIND.get(kind, Type.OBJ)        # tier S1: `str` is STR
         else:
@@ -1829,6 +1857,11 @@ class _Lowerer:
                 return self.new_array(name, value_node, node)
             if name in self.arrays:
                 raise Skip(line, f"array parameter `{name}` is rebound")
+            if self.info.aot and isinstance(value_node, ast.List) and not value_node.elts \
+                    and self.local_type(name, line) is Type.OBJ_LIST:
+                cls = self.obj_list_cls(name)                           # tier S2a: `xs: list[C] = []`
+                self.note_assign(name, ir.ObjListDisplay(Type.OBJ_LIST, cls, ()))
+                return self.take() + [ir.Assign(name, ir.ObjListDisplay(Type.OBJ_LIST, cls, ()))]
             value = self.value(value_node)
             t = self.local_type(name, line)
             if t == Type.INT and value.type == Type.OBJ:
@@ -1836,6 +1869,17 @@ class _Lowerer:
             value = self.coerce(value, t, value_node, f"local `{name}`")
             self.note_assign(name, value)
             return self.take() + [ir.Assign(name, value)]
+        if self.info.aot and isinstance(target, ast.Subscript) and not isinstance(target.slice, ast.Slice) \
+                and isinstance(target.value, ast.Name) and self.is_local(target.value.id) \
+                and target.value.id not in self.arrays and self.local_type(target.value.id, line) is Type.OBJ_LIST:
+            # tier S2a: `xs[i] = c` of a list[C] (the value, then the index)
+            array = target.value.id
+            value = self.list_item(array, value_node, f"the item stored into `{array}`")
+            if not _trivial(value):
+                value = self.temp(value)
+            idx = self.list_index_arg(target.slice, "the index")
+            self.list_effect(array)
+            return self.take() + [ir.ObjListStore(array, idx, value)]
         if self.info.aot and isinstance(target, ast.Subscript) and isinstance(target.slice, ast.Slice) \
                 and isinstance(target.value, ast.Name) and self.is_list_name(target.value.id):
             # tier S2a: `a[i:j:k] = b` (CPython evaluates the value, then the list, then the bounds)
@@ -2062,6 +2106,11 @@ class _Lowerer:
                                  "str arrives with tier S1b)")
             return ir.ArgvStr(Type.STR, self.str_int(self.value(node.slice), node.slice, "the index"))
         value = self.sub(node.value)
+        if value.type is Type.OBJ_LIST:                       # tier S2a: an element of a list[C]
+            if isinstance(node.slice, ast.Slice):
+                raise Skip(line, f"the slice `{_src(node)}` of a list of class instances is not in the AOT mode yet")
+            cls = self.list_cls_of(value, node.value)
+            return ir.ObjListIndex(Type.OBJ, value, self.list_index_arg(node.slice, "the index"), cls)
         if value.type is Type.STR_LIST:
             if isinstance(node.slice, ast.Slice):
                 raise Skip(line, f"the slice `{_src(node)}` of a list of str is tier S2 (lists that change and new "
@@ -2171,6 +2220,8 @@ class _Lowerer:
                 return ir.StrLen(Type.I64, x)
             if x.type is Type.STR_LIST:
                 return ir.StrListLen(Type.I64, x)
+            if x.type is Type.OBJ_LIST:
+                return ir.ObjListLen(Type.I64, x)                      # tier S2a
             if x.type is Type.STR_OPT:                                 # tier S2a
                 raise _optional(line, args[0])
             raise Skip(line, f"len() of a {TYPE_NAME.get(x.type, x.type.value)} is not supported in an AOT program")
@@ -2241,21 +2292,75 @@ class _Lowerer:
 
     def is_list_name(self, name: str) -> bool:
         """AOT mode, tier S2a: `name` holds a list whose methods the AOT mode has: a list[float] / list[int] (an
-        array) or a list[str] local or parameter (a STR_LIST value)."""
+        array), a list[str] (a STR_LIST value) or a list[C] (an OBJ_LIST value) local or parameter."""
         if name in self.arrays:
             return True
-        return self.info.aot and self.is_local(name) and self.local_type(name, 0) is Type.STR_LIST
+        return self.info.aot and self.is_local(name) and self.local_type(name, 0) in (Type.STR_LIST, Type.OBJ_LIST)
 
     def list_type(self, array: str) -> Type:
-        return self.arrays[array] if array in self.arrays else Type.STR_LIST
+        if array in self.arrays:
+            return self.arrays[array]
+        return self.local_type(array, 0)
 
     def list_elem(self, array: str) -> Type:
         t = self.list_type(array)
-        return Type.F64 if t == Type.F64_ARRAY else Type.STR if t == Type.STR_LIST else Type.I64
+        return {Type.F64_ARRAY: Type.F64, Type.STR_LIST: Type.STR, Type.OBJ_LIST: Type.OBJ}.get(t, Type.I64)
+
+    def obj_list_cls(self, name: str) -> str | None:
+        """The element class of the list[C] local or parameter `name`."""
+        if name in self.params:
+            p = self.params[name]
+            return p.cls if isinstance(p, ir.Param) and p.type is Type.OBJ_LIST else None
+        if self.local_type(name, 0) is Type.OBJ_LIST:
+            return self.list_cls.get(name)
+        return None
+
+    def list_cls_of(self, e: ir.Expr, node: ast.AST) -> str:
+        """The element class of the list[C] value `e`."""
+        cls = None
+        if isinstance(e, ir.Local):
+            cls = self.obj_list_cls(e.name)
+        elif isinstance(e, ir.ObjListDisplay):
+            cls = e.cls
+        elif isinstance(e, ir.FieldGet):
+            fd = next((f for f in self.info.classes[e.cls].field_decls if f.name == e.field), None)
+            cls = fd.cls if fd is not None else None
+        elif isinstance(e, ir.Call):
+            callee = self.env.get(e.function)
+            cls = getattr(callee, "return_cls", None)
+        if cls is None:
+            raise Skip(getattr(node, "lineno", 0), f"the class of the items of `{_src(node)}` is not known")
+        return cls
+
+    def cls_of_expr(self, e: ir.Expr) -> str | None:
+        """AOT mode: the compiled class of the instance `e` (a class local, a new object, a field, a call result, an
+        element of a list[C]), or None."""
+        if isinstance(e, ir.Local) and e.type is Type.OBJ:
+            return self.cls_of_name(e.name)[0]
+        if isinstance(e, ir.New):
+            return e.cls
+        if isinstance(e, ir.ObjListIndex):
+            return e.cls
+        if isinstance(e, ir.ListPop) and e.type is Type.OBJ:
+            return self.obj_list_cls(e.array)
+        if isinstance(e, ir.FieldGet) and e.type is Type.OBJ:
+            fd = next((f for f in self.info.classes[e.cls].field_decls if f.name == e.field), None)
+            return fd.cls if fd is not None else None
+        if isinstance(e, ir.Call):
+            callee = self.env.get(e.function)
+            return getattr(callee, "return_cls", None)
+        return None
 
     def list_item(self, array: str, node: ast.expr, what: str) -> ir.Expr:
         """An item stored into `array`: its element type exactly (an int stored into a list of float stays an int in
-        CPython, so it has no AOT form, as for `a[i] = v`)."""
+        CPython, so it has no AOT form, as for `a[i] = v`); for a list[C], an instance of C."""
+        if self.list_type(array) is Type.OBJ_LIST:
+            e = self.value(node)
+            want = self.obj_list_cls(array)
+            if e.type is not Type.OBJ or self.cls_of_expr(e) != want:
+                raise Skip(node.lineno, f"{what} `{_src(node)}` is not known to be a `{want}` instance (a list[{want}] "
+                                        "holds only those)")
+            return e
         return self.coerce(self.value(node), self.list_elem(array), node, what)
 
     def list_index_arg(self, node: ast.expr, what: str) -> ir.Expr:
@@ -2303,6 +2408,12 @@ class _Lowerer:
             self.impure = True              # a list[str] changed through a name: an effect, as a store is
 
     def list_search_value(self, array: str, node: ast.expr, call: ast.AST) -> ir.Expr:
+        if self.list_type(array) == Type.OBJ_LIST:
+            cls = self.obj_list_cls(array)
+            if f"{cls}.__eq__" in self.env:
+                raise Skip(call.lineno, f"`{_src(call)}`: `{cls}` defines __eq__, which a search of a list of it would "
+                                        "call; an AOT program does not yet")
+            return self.list_item(array, node, f"the instance searched in `{array}`")     # identity, as object.__eq__
         if self.list_type(array) == Type.STR_LIST:
             return self.coerce(self.value(node), Type.STR, node, f"the str searched in `{array}`")
         if self.arrays[array] == Type.F64_ARRAY:
@@ -2330,6 +2441,9 @@ class _Lowerer:
             self.list_effect(array)
             at = self.list_index_arg(args[0], f"the index of `{array}.pop`") if args else None
             return ir.ListPop(self.list_elem(array), array, at)
+        if m == "index" and self.list_type(array) is Type.OBJ_LIST:
+            raise Skip(line, f"`{_src(node)}`: list.index() of a class instance reports its repr, which holds the "
+                             "object's address in CPython, so an AOT program does not compile it (aot/identity)")
         if m in ("index", "count") and len(args) == 1:
             return ir.ListSearch(Type.I64, m, array, self.list_search_value(array, args[0], node))
         raise Skip(line, f"`{_src(node)}`: list.{m}() is not supported in an AOT program yet")
@@ -2467,6 +2581,8 @@ class _Lowerer:
     def cls_of_name(self, name: str) -> tuple[str | None, bool]:
         """(compiled class the name is declared to hold, whether its exact type is proved)."""
         classes = self.info.classes
+        if name in self.loop_cls:
+            return self.loop_cls[name], True        # tier S2a: the variable of a loop over a list[C]
         if name in self.params:
             p = self.params[name]
             if isinstance(p, ir.Param) and p.cls is not None:
@@ -2704,6 +2820,26 @@ class _Lowerer:
         if var in self.arrays or var in self.params and self.params[var].type is not Type.STR:
             raise Skip(line, f"loop variable `{var}` is not a str name")
         it = self.value(node.iter)
+        if it.type is Type.OBJ_LIST:                                    # tier S2a: `for c in xs` of a list[C]
+            cls = self.list_cls_of(it, node.iter)
+            if var in self.arrays or var in self.params:
+                raise Skip(line, f"loop variable `{var}` is a list or a parameter")
+            t = self.types.get(var) or self.local_type(var, line)
+            if t is not Type.OBJ or self.cls_of_name(var)[0] not in (None, cls):
+                raise Skip(line, f"loop variable `{var}` is {TYPE_NAME.get(t, t.value)}, but a loop over a list of "
+                                 f"`{cls}` binds `{cls}` instances")
+            self.types[var] = Type.OBJ
+            self.loop_cls[var] = cls
+            pre = self.take()
+            killed = _stored_names(node.body) | {var}
+            head = {k: v for k, v in self.refined.items() if k not in killed}
+            self.refined = head
+            self.not_none -= killed
+            self.not_none.add(var)                                       # an item of a list[C] is never None
+            body = self.block(node.body)
+            self.refined = dict(head)
+            self.not_none -= killed
+            return pre + [ir.ForObjList(var, it, body)]
         if it.type not in (Type.STR, Type.STR_LIST):
             raise Skip(line, f"`for {var} in {_src(node.iter)}`: an AOT program iterates `range(...)`, a str and a list "
                              "of str (the other containers arrive with tier S2)")
@@ -3023,6 +3159,9 @@ class _Lowerer:
             elts = tuple(self.value(e) for e in node.elts)
             if all(e.type is Type.STR for e in elts):
                 return ir.StrListDisplay(Type.STR_LIST, elts)      # tier S1b
+            classes = {self.cls_of_expr(e) for e in elts}
+            if all(e.type is Type.OBJ for e in elts) and len(classes) == 1 and None not in classes:
+                return ir.ObjListDisplay(Type.OBJ_LIST, next(iter(classes)), elts)    # tier S2a: list[C]
             raise Skip(line, f"the list display `{_src(node)}` is not a list of str; a native list of floats or ints "
                              "is created by assigning it to a list name")
         if isinstance(node, ast.List) and not node.elts and isinstance(node.ctx, ast.Load):
@@ -3651,6 +3790,12 @@ class _Lowerer:
                 v = self.value(a)
                 if isinstance(p, ir.Param) and p.type is Type.STR_LIST and isinstance(v, ir.NewList):
                     v = ir.StrListDisplay(Type.STR_LIST, ())        # tier S1b: `f([])` for a list[str] parameter
+                if isinstance(p, ir.Param) and p.type is Type.OBJ_LIST:
+                    if isinstance(v, ir.NewList):
+                        v = ir.ObjListDisplay(Type.OBJ_LIST, p.cls, ())     # tier S2a: `f([])` for a list[C]
+                    elif v.type is Type.OBJ_LIST and self.list_cls_of(v, a) != p.cls:
+                        raise Skip(a.lineno, f"`{_src(a)}` is a list of `{self.list_cls_of(v, a)}`, but parameter "
+                                             f"`{p.name}` of `{name}` is a list of `{p.cls}`")
                 if isinstance(p, ir.Param) and p.type is Type.STR_OPT:
                     v = self.coerce(v, Type.STR_OPT, a, f"parameter `{p.name}` of `{name}`")   # tier S2a
                 args.append(v)

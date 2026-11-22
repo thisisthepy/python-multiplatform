@@ -268,13 +268,15 @@ def analyze_classes(module: ir.Module, rel: str, class_lines: dict[str, int] | N
         if cname in self_escapes:
             continue
         for fd in decl.field_decls:
-            if (cname, fd.name) not in mutating_stores:
+            # (tier S2a, the S2 review B4: a list field is never immutable-after-init, the list changes without any
+            # field assignment)
+            if (cname, fd.name) not in mutating_stores and fd.type is not Type.OBJ_LIST:
                 immutable_fields.add((cname, fd.name))
 
     def _is_ref_field(cname: str, fd: ir.FieldDecl) -> bool:
         if fd.type == Type.OBJ:
             return True
-        if fd.type in ir.ARRAYS or fd.type in (Type.STR, Type.STR_OPT):     # (STR: tier S1b, an owned reference)
+        if fd.type in ir.ARRAYS or fd.type in (Type.STR, Type.STR_OPT, Type.OBJ_LIST):     # (STR: S1b; OBJ_LIST: S2a)
             return True
         if fd.type == Type.I64 and (cname, fd.name) in tagged:
             return True
@@ -294,11 +296,20 @@ def analyze_classes(module: ir.Module, rel: str, class_lines: dict[str, int] | N
     edges: dict[str, set[str]] = {c: set() for c in classes}
     for cname, decl in classes.items():
         for fd in decl.field_decls:
-            if fd.type == Type.OBJ and fd.cls is not None and fd.cls in classes:
-                edges[cname].add(fd.cls)
+            if fd.type in (Type.OBJ, Type.OBJ_LIST) and fd.cls is not None and fd.cls in classes:
+                edges[cname].add(fd.cls)        # (OBJ_LIST: the list's items, review B4: containers in the type graph)
 
     sccs = _tarjan_scc(list(classes.keys()), edges)
     findings: list[Finding] = []
+    for cname, decl in classes.items():
+        for fd in decl.field_decls:
+            if fd.type is Type.OBJ_LIST:
+                # tier S2a, sequenced: a list field needs the emitter's field support and the collector's tracked
+                # list (review B4); lists of instances in locals and parameters come first
+                findings.append(Finding(
+                    rel, lines.get(cname, 1), "error", None, "aot/class-list-field", f"{cname}.{fd.name}",
+                    f"the field `{cname}.{fd.name}` is a list of `{fd.cls}` instances, which a compiled class does not "
+                    "hold yet (a local or parameter list of instances is compiled)", None))
     cyclic_classes: set[str] = set()
     cycle_reasons: dict[str, str] = {}
     for comp in sccs:
