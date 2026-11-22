@@ -5,7 +5,9 @@ import python.multiplatform.ffi.PyType
 import python.multiplatform.ffi.adoptingNewReference
 import python.multiplatform.ffi.conversion.PyProxy
 import python.multiplatform.ffi.exceptions.PyException
+import python.multiplatform.ffi.types.iteration.PyIterable
 import python.multiplatform.ffi.types.iteration.PyIterator
+import python.multiplatform.ffi.types.iteration.PyIteratorObject
 import python.native.ffi.NativePointer
 import python.native.ffi.PyObject_GetIter
 import python.native.ffi.PySequence_Contains
@@ -17,9 +19,10 @@ import python.native.ffi.PyTuple_Size
 import python.native.ffi.Py_IncRef
 
 /**
- * Wrapper around a Python `tuple` object, adopting the read-only
- * `List<PyObject>` per the mermaid sketch (`List <|.. PyTuple`); tuples are
- * immutable in Python so `MutableList` would be misleading.
+ * Wrapper around a Python `tuple` object: a [PyIterable] and a read-only Kotlin `List` (issue #524
+ * items 3 and 4; the owner's mermaid: `PyObject <|-- PyTuple`, `PyIterable <|.. PyTuple`,
+ * `List <|.. PyTuple`). Elements are `Any?` on the way in ([contains], [indexOf]) and [PyObject]s on
+ * the way out.
  *
  * Backed directly by `PyTuple_New`/`PyTuple_GetItem`/`PyTuple_Size` --
  * unlike [PyList], the Stable ABI subset here does have dedicated
@@ -30,7 +33,7 @@ import python.native.ffi.Py_IncRef
  * not as a public mutator (tuples stay immutable from the outside).
  */
 open class PyTuple(pointer: NativePointer, borrowed: Boolean) :
-    PyObject(pointer, borrowed), PyProxy<List<Any?>>, List<PyObject> {
+    PyObject(pointer, borrowed), PyIterable, PyProxy<List<Any?>>, List<Any?> {
 
     companion object {
         /** The `PyType` for `tuple` (`builtins.tuple`). */
@@ -40,18 +43,21 @@ open class PyTuple(pointer: NativePointer, borrowed: Boolean) :
             deriveTypeAndRelease(emptyTuple)
         }
 
-        /** Builds a new Python `tuple` containing (references to) [elements], in order. */
-        fun fromList(elements: List<PyObject>): PyTuple {
+        /**
+         * Builds a new Python `tuple` of [elements], in order (the mermaid's `+fromList(list List) PyTuple$`);
+         * a [PyObject] element is stored as itself, any other value is converted as
+         * [PyMutableIterable] describes.
+         */
+        fun fromList(elements: List<*>): PyTuple {
             val ptr = python.multiplatform.ffi.Python3.withPython { PyTuple_New(elements.size.toLong()) }
                 ?: throw PyException.fromCurrentError() ?: PyException("Failed to allocate tuple")
             // Nothing owns the tuple until the wrapper on the last line adopts it, so an escape
             // from the fill loop has to release it here or it is lost for good.
             return ptr.adoptingNewReference {
                 elements.forEachIndexed { i, el ->
-                    // PyTuple_SetItem steals the reference to its 3rd argument -- incref first so
-                    // `el`'s own, independently-managed reference stays valid afterwards.
-                    python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_IncRef(el.pointer) }
-                    python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(it, i.toLong(), el.pointer) }
+                    // PyTuple_SetItem steals the reference to its 3rd argument: a new one is made for it.
+                    val item = newElementReference(el)
+                    python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(it, i.toLong(), item) }
                 }
                 PyTuple(it, false) // PyTuple_New already returned a new/owned reference
             }
@@ -61,8 +67,11 @@ open class PyTuple(pointer: NativePointer, borrowed: Boolean) :
     override var cachedNativeValue: List<Any?>? = null
     override var cachedPyObjectValue: PyObject? = null
 
-    /** Snapshot conversion to a plain Kotlin list, recursively converting elements ([python.multiplatform.ffi.conversion.ConversionStrategy.NATIVE]). */
-    fun toNativeList(): List<Any?> {
+    /**
+     * Snapshot conversion to a plain Kotlin list, recursively converting elements
+     * ([python.multiplatform.ffi.conversion.ConversionStrategy.NATIVE]): the mermaid's `+toList() List`.
+     */
+    fun toList(): List<Any?> {
         val count = python.multiplatform.ffi.Python3.withPython { PyTuple_Size(pointer) }
         val result = ArrayList<Any?>(count.toInt())
         for (i in 0 until count) {
@@ -86,39 +95,39 @@ open class PyTuple(pointer: NativePointer, borrowed: Boolean) :
 
     override fun isEmpty(): Boolean = size == 0
 
-    override fun iterator(): Iterator<PyObject> {
+    override fun iterator(): PyIterator {
         val iterPtr = python.multiplatform.ffi.Python3.withPython { PyObject_GetIter(pointer) }
             ?: throw PyException.fromCurrentError() ?: PyException("Failed to get iterator for tuple")
-        return PyIterator(iterPtr, false) // PyObject_GetIter returns a new reference
+        return PyIteratorObject(iterPtr, false) // PyObject_GetIter returns a new reference
     }
 
-    override fun contains(element: PyObject): Boolean {
-        val result = python.multiplatform.ffi.Python3.withPython { PySequence_Contains(pointer, element.pointer) }
+    override fun contains(element: Any?): Boolean {
+        val result = withPythonElement(element) { item -> python.multiplatform.ffi.Python3.withPython { PySequence_Contains(pointer, item) } }
         if (result == -1) throw PyException.fromCurrentError() ?: PyException("Failed to check tuple membership")
         return result == 1
     }
 
-    override fun containsAll(elements: Collection<PyObject>): Boolean = elements.all { contains(it) }
+    override fun containsAll(elements: Collection<Any?>): Boolean = elements.all { contains(it) }
 
-    override fun indexOf(element: PyObject): Int {
+    override fun indexOf(element: Any?): Int = withPythonElement(element) { wanted ->
         val count = python.multiplatform.ffi.Python3.withPython { PyTuple_Size(pointer) }
         for (i in 0 until count) {
             val itemPtr = python.multiplatform.ffi.Python3.withPython { PyTuple_GetItem(pointer, i) }!!
-            if (pyEquals(itemPtr, element.pointer)) return i.toInt()
+            if (pyEquals(itemPtr, wanted)) return@withPythonElement i.toInt()
         }
-        return -1
+        -1
     }
 
-    override fun lastIndexOf(element: PyObject): Int {
+    override fun lastIndexOf(element: Any?): Int = withPythonElement(element) { wanted ->
         val count = python.multiplatform.ffi.Python3.withPython { PyTuple_Size(pointer) }
         for (i in count - 1 downTo 0) {
             val itemPtr = python.multiplatform.ffi.Python3.withPython { PyTuple_GetItem(pointer, i) }!!
-            if (pyEquals(itemPtr, element.pointer)) return i.toInt()
+            if (pyEquals(itemPtr, wanted)) return@withPythonElement i.toInt()
         }
-        return -1
+        -1
     }
 
-    private inner class TupleIterator(startIndex: Int) : ListIterator<PyObject> {
+    private inner class TupleIterator(startIndex: Int) : ListIterator<Any?> {
         private var cursor = startIndex
         override fun hasNext(): Boolean = cursor < size
         override fun hasPrevious(): Boolean = cursor > 0
@@ -134,10 +143,10 @@ open class PyTuple(pointer: NativePointer, borrowed: Boolean) :
         }
     }
 
-    override fun listIterator(): ListIterator<PyObject> = TupleIterator(0)
-    override fun listIterator(index: Int): ListIterator<PyObject> = TupleIterator(index)
+    override fun listIterator(): ListIterator<Any?> = TupleIterator(0)
+    override fun listIterator(index: Int): ListIterator<Any?> = TupleIterator(index)
 
-    override fun subList(fromIndex: Int, toIndex: Int): List<PyObject> {
+    override fun subList(fromIndex: Int, toIndex: Int): List<Any?> {
         val slicePtr = python.multiplatform.ffi.Python3.withPython { PyTuple_GetSlice(pointer, fromIndex.toLong(), toIndex.toLong()) }
             ?: throw PyException.fromCurrentError() ?: PyException("Failed to slice tuple[$fromIndex:$toIndex]")
         return PyTuple(slicePtr, false) // PyTuple_GetSlice returns a new reference

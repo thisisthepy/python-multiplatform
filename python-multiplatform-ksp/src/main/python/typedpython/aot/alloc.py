@@ -318,6 +318,10 @@ def _find_escape_reason(fn: ir.Function, var_name: str, cls_name: str) -> str | 
             res = _check_expr(stmt.iter)
             if res is not None:
                 return res
+        elif isinstance(stmt, ir.ForStr):
+            res = _check_expr(stmt.value)
+            if res is not None:
+                return res
         elif isinstance(stmt, ir.TimeSleep):
             res = _check_expr(stmt.seconds)
             if res is not None:
@@ -331,6 +335,16 @@ def _find_escape_reason(fn: ir.Function, var_name: str, cls_name: str) -> str | 
             res = _check_expr(stmt.call)
             if res is not None:
                 return res
+        elif not isinstance(stmt, (ir.Break, ir.Continue, ir.ForRange)):
+            # Any other statement (tier S2a: ListAppend, ListInsert, ListSetSlice, ...): the object itself among its
+            # expressions is an escape (into a container, or somewhere this analysis does not follow); a statement
+            # it does not know never lets a virtual object through unseen.
+            for e in _stmt_exprs(stmt):
+                if isinstance(e, ir.Local) and e.name == var_name:
+                    return "escapes into container"
+                res = _check_expr(e)
+                if res is not None:
+                    return res
     return None
 
 
@@ -368,6 +382,8 @@ def analyze_alloc(module: ir.Module, class_analysis: ClassAnalysis) -> AllocPlan
             elif isinstance(s, ir.ForObj):
                 for t in s.targets:
                     assign_counts[t] = assign_counts.get(t, 0) + 1
+            elif isinstance(s, ir.ForStr):
+                assign_counts[s.var] = assign_counts.get(s.var, 0) + 1
 
         for s in all_stmts:
             line = fn.source_line
@@ -394,6 +410,8 @@ def analyze_alloc(module: ir.Module, class_analysis: ClassAnalysis) -> AllocPlan
                     reason = f"unknown class: {cls_name}"
                 elif f"{cls_name}.__del__" in funcs_by_name:
                     reason = "class defines __del__"
+                elif _has_list_field(class_analysis, cls_name):
+                    reason = "class holds a list (tier S2a: its fields stay counted references of a heap object)"
                 elif cls_name not in plan.init_maps:
                     reason = "complex __init__"
                 else:
@@ -469,6 +487,12 @@ _EXPR_ATTRS = ("value", "obj", "index", "cond", "start", "stop", "step", "iter",
 _EXPRS_ATTRS = ("values", "args")
 
 
+def _has_list_field(ca: ClassAnalysis, cls: str) -> bool:
+    """Tier S2a: `cls` has a list[C] field (such an object is always a heap object: not virtual, not region)."""
+    decl = ca.classes.get(cls)
+    return decl is not None and any(fd.type is ir.Type.OBJ_LIST for fd in decl.field_decls)
+
+
 def _stmt_exprs(s: ir.Stmt) -> list[ir.Expr]:
     """The expressions a statement itself evaluates (not those of the statements nested in it)."""
     out: list[ir.Expr] = []
@@ -484,7 +508,7 @@ def _stmt_exprs(s: ir.Stmt) -> list[ir.Expr]:
 
 
 def _is_loop(s: ir.Stmt) -> bool:
-    return isinstance(s, (ir.ForRange, ir.While, ir.ForObj))
+    return isinstance(s, (ir.ForRange, ir.While, ir.ForObj, ir.ForStr))
 
 
 def _walk_scoped(stmts: tuple[ir.Stmt, ...], stack: tuple[ir.Stmt, ...] = ()):
@@ -576,6 +600,8 @@ class _RegionAnalysis:
             return f"unknown class: {cls}"
         if f"{cls}.__del__" in self.funcs:
             return "class defines __del__"
+        if _has_list_field(self.ca, cls):
+            return "class holds a list (tier S2a)"
         if cls not in self.plan.init_maps:
             return "complex __init__"
         if not self.ca.classes[cls].field_decls:

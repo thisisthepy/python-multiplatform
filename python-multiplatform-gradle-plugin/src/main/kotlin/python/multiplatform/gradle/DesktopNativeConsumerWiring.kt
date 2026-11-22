@@ -6,7 +6,7 @@ import org.gradle.api.tasks.TaskProvider
 import java.io.File
 
 /**
- * SPEC L-9c (#191): a consumer's Kotlin/Native desktop targets (`macosArm64`, `linuxX64`) link the
+ * SPEC L-9c (#191): a consumer's Kotlin/Native desktop targets (`macosArm64`, `linuxX64`, `mingwX64`) link the
  * free-threaded `libpython` and ship it, with the standard library, beside the executable.
  *
  * Source: leader decision 2026-10-25 on #191, item 3: "K/N CPython: libpython is shipped beside the
@@ -21,6 +21,7 @@ import java.io.File
 internal fun desktopNativePlatformFor(konanName: String): String? = when (konanName) {
     "macos_arm64" -> "macos-aarch64"
     "linux_x64" -> "linux-x86_64"
+    "mingw_x64" -> "windows-x86_64"
     else -> null
 }
 
@@ -38,6 +39,9 @@ internal fun desktopNativeLibPythonName(pythonVersion: String, freeThreaded: Boo
  * build path.
  */
 internal fun desktopNativeLinkerOpts(konanName: String, prefix: String, libName: String, debug: Boolean): List<String> {
+    // Windows (SPEC P-1a): the MSVC import library, which lld links in MinGW mode. There is no
+    // run-time search path to set: the loader looks beside the executable, where packaging puts the DLL.
+    if (konanName.startsWith("mingw")) return listOf("$prefix/libs/${libName.replace(".", "")}.lib")
     val origin = if (konanName.startsWith("macos")) "@executable_path" else "\$ORIGIN"
     return buildList {
         add("-L$prefix/lib")
@@ -50,6 +54,14 @@ internal fun desktopNativeLinkerOpts(konanName: String, prefix: String, libName:
 /** Whether a binary of this KGP class (simple name) is linked into something that loads libpython. */
 internal fun isLinkedDesktopNativeBinary(binaryClassName: String): Boolean =
     binaryClassName in setOf("Executable", "TestExecutable", "SharedLibrary")
+
+/** What of the prefix goes beside the executable itself: on Windows the DLLs (the loader's own search), elsewhere nothing. */
+internal fun desktopNativeExecutableDirIncludes(windows: Boolean): List<String> =
+    if (windows) listOf("*.dll") else emptyList()
+
+/** What of the prefix goes into `python-multiplatform-home`: L-9's set, without Windows' DLLs (they sit beside the executable). */
+internal fun desktopNativeHomeIncludes(pythonVersion: String, freeThreaded: Boolean, windows: Boolean): List<String> =
+    if (windows) listOf("Lib/**", "DLLs/**") else packagedPrefixIncludes(pythonVersion, freeThreaded, windows = false)
 
 internal fun desktopNativeStageTaskName(targetName: String): String =
     "stagePythonHome" + targetName.replaceFirstChar { it.uppercase() }
@@ -70,6 +82,7 @@ internal fun PythonBindingsPlugin.configureDesktopNativeConsumer(project: Projec
     val packaging = project.provider { extension.packagePythonHome.getOrElse(true) }
 
     for ((target, konan, platform) in targets) {
+        val windows = platform.startsWith("windows")
         val targetName = invokeNoArg(target, "getName") as? String ?: continue
         val destination = File(cacheRoot, "$version+$release$flavour/$platform")
         val prefix = File(destination, "python")
@@ -108,10 +121,17 @@ internal fun PythonBindingsPlugin.configureDesktopNativeConsumer(project: Projec
                             project.delete(home)
                             project.copy {
                                 from(prefix) {
-                                    include(packagedPrefixIncludes(version, freeThreaded, windows = false))
+                                    include(desktopNativeHomeIncludes(version, freeThreaded, windows))
                                     exclude(PACKAGED_PREFIX_EXCLUDES)
                                 }
                                 into(home)
+                            }
+                            val besideExecutable = desktopNativeExecutableDirIncludes(windows)
+                            if (besideExecutable.isNotEmpty()) {
+                                project.copy {
+                                    from(prefix) { include(besideExecutable) }
+                                    into(outputDir)
+                                }
                             }
                             requireNoEmptyLibraries(home)
                         }
@@ -128,6 +148,11 @@ internal fun PythonBindingsPlugin.configureDesktopNativeConsumer(project: Projec
                     it.name == "environment" && it.parameterCount == 2
                 } ?: return@configureEach
                 environment.invoke(this, "PYTHONHOME", prefix.absolutePath)
+                // Windows finds the DLL a test executable imports on PATH (the executable sits in the build tree).
+                if (windows) {
+                    val path = project.providers.environmentVariable("PATH").orNull.orEmpty()
+                    environment.invoke(this, "PATH", prefix.absolutePath + File.pathSeparator + path)
+                }
             }
         }
     }

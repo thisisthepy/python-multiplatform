@@ -1604,6 +1604,16 @@ static inline int tpa_int_to_count(tpa_int a, int64_t *out)
     return tpa_raise(TPA_OverflowError, TPA_MSG_INT_TO_INDEX);
 }
 
+/* An int argument converted as a Py_ssize_t parameter (PyLong_AsSsize_t): the str methods' bounds, and the index of
+ * list.insert / list.pop (tier S2a). */
+static TPA_UNUSED int tpa_int_to_ssize(tpa_int a, int64_t *out)
+{
+    if (tpa_int_to_i64(a, out) == 0) {
+        return 0;
+    }
+    return tpa_raise(TPA_OverflowError, "Python int too large to convert to C ssize_t");
+}
+
 static inline int tpa_int_to_range_len(tpa_int a, int64_t *out)
 {
     if (tpa_int_to_i64(a, out) == 0) {
@@ -2167,6 +2177,19 @@ typedef _Atomic int tpa_int_list_lock_t;
 #endif
 #endif
 
+#if defined(TPA_GROW_INT)
+/* Tier S2a: the growable layout (tp_aot.h, "Native lists"): the items in their own block. A library build shares a
+ * list between threads (the lock above), and moving its items under a reader needs the library ABI step of S2a. */
+#if defined(TPA_THREADS)
+#error "a big-capable list that changes length is not in an AOT library build yet (design 4.3.2, library ABI v2)"
+#endif
+typedef struct tpa_int_list {
+    tpa_rc_t rc;
+    int64_t len;
+    int64_t cap;
+    tpa_int *d;
+} tpa_int_list;
+#else
 typedef struct tpa_int_list {
     tpa_rc_t rc;
     int64_t len;
@@ -2175,6 +2198,7 @@ typedef struct tpa_int_list {
 #endif
     tpa_int d[];
 } tpa_int_list;
+#endif
 
 #if defined(TPA_THREADS)
 static inline void tpa_int_list__lock(const tpa_int_list *l)
@@ -2265,6 +2289,9 @@ static inline void tpa_int_list_release(tpa_int_list *l)
         for (i = 0; i < l->len; i++) {
             tpa_int_release(l->d[i]);
         }
+#if defined(TPA_GROW_INT)
+        free(l->d);
+#endif
         free(l);
     }
 }
@@ -2273,10 +2300,30 @@ static inline void tpa_int_list_release(tpa_int_list *l)
 static inline int tpa_int_list_alloc(int64_t n, tpa_int_list **out)
 {
     int64_t len = 0, i;
+#if defined(TPA_GROW_INT)
+    tpa_int_list *l = (tpa_int_list *)calloc(1, sizeof(tpa_int_list));
+    if (l == NULL) {
+        return tpa_raise(TPA_MemoryError, "");
+    }
+    len = n < 0 ? 0 : n;
+    if (len > 0) {
+        if ((uint64_t)len > (uint64_t)(SIZE_MAX / sizeof(tpa_int))) {
+            free(l);
+            return tpa_raise(TPA_MemoryError, "");
+        }
+        l->d = (tpa_int *)malloc((size_t)len * sizeof(tpa_int));
+        if (l->d == NULL) {
+            free(l);
+            return tpa_raise(TPA_MemoryError, "");
+        }
+    }
+    l->cap = len;
+#else
     tpa_int_list *l = (tpa_int_list *)tpa__list_alloc(n, sizeof(tpa_int_list), sizeof(tpa_int), &len);
     if (l == NULL) {
         return -1;
     }
+#endif
     l->rc = 1;
     l->len = len;
 #if defined(TPA_THREADS)
@@ -2342,6 +2389,273 @@ static inline int tpa_int_list_from_i64(const tpa_i64_list *src, tpa_int_list **
     }
     return 0;
 }
+
+/* Tier S2a: searching a big-capable list (index / count / in), equality as CPython's int ==; the value is borrowed.
+ * list.index formats the value with %R, so a value past the digit limit raises that ValueError instead. */
+static TPA_UNUSED int tpa_int_list_index(const tpa_int_list *l, tpa_int v, int64_t *out)
+{
+    int64_t i;
+    char *digits = NULL, *m;
+    size_t n = 0;
+    for (i = 0; i < l->len; i++) {
+        if (tpa_int_eq(l->d[i], v)) {
+            *out = i;
+            return 0;
+        }
+    }
+    if (tpa_int_to_str(v, &digits, &n)) {
+        return -1;
+    }
+    m = (char *)malloc(n + 20);
+    if (m == NULL) {
+        free(digits);
+        return tpa_raise(TPA_MemoryError, "");
+    }
+    memcpy(m, digits, n);
+    memcpy(m + n, " is not in list", 16);
+    tpa_raise(TPA_ValueError, m);          /* (a message past the record's size is cut, as every long message is) */
+    free(m);
+    free(digits);
+    return -1;
+}
+
+static TPA_UNUSED int64_t tpa_int_list_count(const tpa_int_list *l, tpa_int v)
+{
+    int64_t i, k = 0;
+    for (i = 0; i < l->len; i++) {
+        k += tpa_int_eq(l->d[i], v) ? 1 : 0;
+    }
+    return k;
+}
+
+static TPA_UNUSED int tpa_int_list_contains(const tpa_int_list *l, tpa_int v)
+{
+    int64_t i;
+    for (i = 0; i < l->len; i++) {
+        if (tpa_int_eq(l->d[i], v)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+#define TPA__OWN_INT(slot, v) ((slot) = (v))   /* (the 0 a fresh slot holds is the immortal small int) */
+/* Tier S2a: a + b, a * n and a[start:stop:step] of big-capable lists: new lists, each item retained (the slots of a fresh list
+ * hold the small int 0 until written, so a failure releases what was written). */
+static TPA_UNUSED int tpa_int_list_concat(const tpa_int_list *a, const tpa_int_list *b, tpa_int_list **out)
+{
+    int64_t i;
+    if (a->len > INT64_MAX - b->len) {
+        return tpa_raise(TPA_MemoryError, "");
+    }
+    if (tpa_int_list_alloc(a->len + b->len, out)) {
+        return -1;
+    }
+    for (i = 0; i < a->len; i++) {
+        tpa_int_retain(a->d[i]);
+        TPA__OWN_INT((*out)->d[i], a->d[i]);
+    }
+    for (i = 0; i < b->len; i++) {
+        tpa_int_retain(b->d[i]);
+        TPA__OWN_INT((*out)->d[a->len + i], b->d[i]);
+    }
+    return 0;
+}
+
+static TPA_UNUSED int tpa_int_list_repeat(const tpa_int_list *a, int64_t n, tpa_int_list **out)
+{
+    int64_t total, k;
+    if (tpa__repeat_size(a->len, n, &total) || tpa_int_list_alloc(total, out)) {
+        return -1;
+    }
+    for (k = 0; k < total; k++) {
+        tpa_int_retain(a->d[k % a->len]);
+        TPA__OWN_INT((*out)->d[k], a->d[k % a->len]);
+    }
+    return 0;
+}
+
+static TPA_UNUSED int tpa_int_list_slice(const tpa_int_list *a, int64_t start, int64_t stop, int64_t step, int has, tpa_int_list **out)
+{
+    int64_t first, by, n, k;
+    if (tpa__slice(a->len, start, stop, step, has, &first, &by, &n) || tpa_int_list_alloc(n, out)) {
+        return -1;
+    }
+    for (k = 0; k < n; k++) {
+        tpa_int_retain(a->d[first + k * by]);
+        TPA__OWN_INT((*out)->d[k], a->d[first + k * by]);
+    }
+    return 0;
+}
+
+/* Tier S2a: a op b of two big-capable lists (as tpa_i64_cmp) */
+static TPA_UNUSED int tpa_int_list_cmp(const tpa_int_list *a, const tpa_int_list *b, int op)
+{
+    int64_t i, n = a->len < b->len ? a->len : b->len;
+    for (i = 0; i < n; i++) {
+        if (!tpa_int_eq(a->d[i], b->d[i])) {
+            if (op <= 1) {
+                return op == 1;
+            }
+            return tpa__cmp_outcome(op, tpa_int_cmp(a->d[i], b->d[i]));
+        }
+    }
+    return tpa__cmp_outcome(op, a->len < b->len ? -1 : a->len > b->len ? 1 : 0);
+}
+
+#if defined(TPA_GROW_INT)
+/* CPython's list_resize, as tp_aot.h's growable lists; the slots past the length hold nothing owned. */
+static inline int tpa_int_list__resize(tpa_int_list *l, int64_t n)
+{
+    uint64_t want;
+    tpa_int *d;
+    if (TPA__RESIZE_IN_PLACE && l->cap >= n && n >= (l->cap >> 1)) {
+        l->len = n;
+        return 0;
+    }
+    want = ((uint64_t)n + ((uint64_t)n >> 3) + 6u) & ~(uint64_t)3;
+    if ((uint64_t)(n - l->len) > want - (uint64_t)n) {
+        want = ((uint64_t)n + 3u) & ~(uint64_t)3;
+    }
+    if (n == 0) {
+        want = 0;
+    }
+    if (want > (uint64_t)(SIZE_MAX / sizeof(tpa_int)) || want > (uint64_t)INT64_MAX) {
+        return tpa_raise(TPA_MemoryError, "");
+    }
+    if (want == 0) {
+        free(l->d);
+        d = NULL;
+    }
+    else {
+        d = (tpa_int *)tpa__list_realloc(l->d, (size_t)want * sizeof(tpa_int),
+                                         (size_t)(l->len < n ? l->len : n) * sizeof(tpa_int));
+        if (d == NULL) {
+            return tpa_raise(TPA_MemoryError, "");
+        }
+    }
+    l->d = d;
+    l->cap = (int64_t)want;
+    l->len = n;
+    return 0;
+}
+
+/* append / insert: the list takes a new reference to the borrowed `v` */
+static TPA_UNUSED int tpa_int_list_append(tpa_int_list *l, tpa_int v)
+{
+    if (tpa_int_list__resize(l, l->len + 1)) {
+        return -1;
+    }
+    tpa_int_retain(v);
+    l->d[l->len - 1] = v;
+    return 0;
+}
+
+static TPA_UNUSED int tpa_int_list_insert(tpa_int_list *l, int64_t i, tpa_int v)
+{
+    int64_t n = l->len;
+    if (i < 0) {
+        i += n;
+        if (i < 0) {
+            i = 0;
+        }
+    }
+    if (i > n) {
+        i = n;
+    }
+    if (tpa_int_list__resize(l, n + 1)) {
+        return -1;
+    }
+    memmove(l->d + i + 1, l->d + i, (size_t)(n - i) * sizeof(tpa_int));
+    tpa_int_retain(v);
+    l->d[i] = v;
+    return 0;
+}
+
+static TPA_UNUSED int tpa_int_list_extend(tpa_int_list *l, const tpa_int_list *o)
+{
+    int64_t n = l->len, m = o->len, k;
+    if (m == 0) {
+        return 0;
+    }
+    if (tpa_int_list__resize(l, n + m)) {
+        return -1;
+    }
+    for (k = 0; k < m; k++) {               /* (o == l: o->d is the moved block, its first m slots are the items) */
+        tpa_int_retain(o->d[k]);
+        l->d[n + k] = o->d[k];
+    }
+    return 0;
+}
+
+static TPA_UNUSED void tpa_int_list_clear(tpa_int_list *l)
+{
+    int64_t i, n = l->len;
+    tpa_int *d = l->d;
+    l->d = NULL;                            /* detached first, as CPython's list_clear does */
+    l->len = 0;
+    l->cap = 0;
+    for (i = 0; i < n; i++) {
+        tpa_int_release(d[i]);
+    }
+    free(d);
+}
+
+static TPA_UNUSED void tpa_int_list_reverse(tpa_int_list *l)
+{
+    int64_t i, j;
+    for (i = 0, j = l->len - 1; i < j; i++, j--) {
+        tpa_int t = l->d[i];
+        l->d[i] = l->d[j];
+        l->d[j] = t;
+    }
+}
+
+/* list.pop: the element's reference moves to `*out` (which gives up the one it held) */
+static TPA_UNUSED int tpa_int_list_pop(tpa_int_list *l, int has_index, int64_t i, tpa_int *out)
+{
+    int64_t n = l->len;
+    tpa_int v;
+    if (n == 0) {
+        return tpa_raise(TPA_IndexError, "pop from empty list");
+    }
+    if (!has_index) {
+        i = n - 1;
+    }
+    if (i < 0) {
+        i += n;
+    }
+    if (i < 0 || i >= n) {
+        return tpa_raise(TPA_IndexError, "pop index out of range");
+    }
+    v = l->d[i];
+    memmove(l->d + i, l->d + i + 1, (size_t)(n - i - 1) * sizeof(tpa_int));
+    if (tpa_int_list__resize(l, n - 1)) {
+        l->len = n - 1;                     /* a shrink only fails to give memory back */
+    }
+    tpa_int_release(*out);
+    *out = v;
+    return 0;
+}
+
+#define TPA__INT_RET(x) tpa_int_retain(x)
+#define TPA__INT_REL(x) tpa_int_release(x)
+TPA__DEF_LIST_SPLICE(tpa_int_list_, tpa_int_list, tpa_int, TPA__INT_RET, TPA__INT_REL, tpa_int_list__resize)
+
+static TPA_UNUSED int tpa_int_list_remove(tpa_int_list *l, tpa_int v)
+{
+    int64_t i;
+    tpa_int got = TPA_INT_ZERO;
+    for (i = 0; i < l->len; i++) {
+        if (tpa_int_eq(l->d[i], v)) {
+            tpa_int_list_pop(l, 1, i, &got);
+            tpa_int_release(got);
+            return 0;
+        }
+    }
+    return tpa_raise(TPA_ValueError, "list.remove(x): x not in list");
+}
+#endif
 
 /* `list(range(n))` as a big-capable list: 0 .. n-1 (an empty list for n <= 0). */
 static inline int tpa_int_list_iota(int64_t n, tpa_int_list **out)

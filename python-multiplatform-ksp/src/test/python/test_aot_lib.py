@@ -1062,11 +1062,20 @@ def test_no_exports_and_a_twice_exported_function_are_refused(tmp_path):
     assert findings_of(tmp_path, REJECT_BASE, exports=["f", "f"], prefix="p")[0] == {("aot/export", 1, "f")}
 
 
-@pytest.mark.parametrize("name", ["takes_text", "gives_text", "takes_nested", "gives_tuple_with_list"])
+@pytest.mark.parametrize("name", ["takes_nested", "gives_tuple_with_list"])
 def test_an_unsupported_parameter_or_return_type_is_refused_naming_the_export(tmp_path, name):
     found, err = findings_of(tmp_path, REJECT_BASE, exports=[name], prefix="p")
     assert found == {("aot/export", line_of(REJECT_BASE, f"def {name}("), name)}
     assert "outside the library boundary" in str(err)
+
+
+@pytest.mark.parametrize("name", ["takes_text", "gives_text"])
+def test_a_str_parameter_or_result_is_refused_with_its_own_rule(tmp_path, name):
+    """Since tier S1a a str is a program type, but the C-ABI string kind comes later (SPEC N-17, design 4.3.1):
+    the export is refused with `aot/library-str`, naming the export."""
+    found, err = findings_of(tmp_path, REJECT_BASE, exports=[name], prefix="p")
+    assert found == {("aot/library-str", line_of(REJECT_BASE, f"def {name}("), name)}
+    assert "no C-ABI form yet" in str(err)
 
 
 def test_a_reserved_symbol_name_is_refused(tmp_path):

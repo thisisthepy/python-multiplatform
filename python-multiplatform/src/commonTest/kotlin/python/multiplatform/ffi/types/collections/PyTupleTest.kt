@@ -21,7 +21,7 @@ class PyTupleTest {
         )
         val tuple = PyTuple.fromList(elements)
         assertEquals(2, tuple.size)
-        assertEquals(listOf("a", "b"), tuple.toNativeList())
+        assertEquals(listOf("a", "b"), tuple.toList())
     }
 
     @Test

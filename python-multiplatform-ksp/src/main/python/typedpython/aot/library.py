@@ -93,6 +93,7 @@ from pathlib import Path
 from typedpython import ir, resume
 from typedpython.aot import AotError, LibraryFiles, _lower
 from typedpython.aot import emit as emit_mod
+from typedpython.aot import unicode as unicode_mod
 from typedpython.aot.emit import CTYPE, LIST, mangle
 from typedpython.aot.program import _is_class_annotation, analyze
 from typedpython.aotcheck import Finding
@@ -193,6 +194,14 @@ def export_findings(program, exports: list[str]) -> tuple[list[Finding], dict[st
             continue
         problems = []
         a = fn.args
+        str_at = [x for x in [*(arg.annotation for arg in a.args), fn.returns]
+                  if isinstance(x, ast.Name) and x.id == "str"]
+        if str_at:
+            # design 4.3.1: the C-ABI string kind is a later step with its own ABI version
+            found.append(_finding(rel, fn.lineno, "aot/library-str", name,
+                                  f"`{name}` cannot be exported: a str parameter or result has no C-ABI form yet "
+                                  "(the library's string kind comes with its own ABI version)", name))
+            continue
         class_names = {c.name for c in getattr(program, "classes", ())}
         for arg in a.args:
             if _scalar_or_list(arg.annotation) is None and not (
@@ -600,6 +609,8 @@ def _c_text(g, bodies: list[list[str]], exports: list[_Export], p: str) -> str:
         "#ifndef TPA_LIBRARY",
         "#define TPA_LIBRARY 1",
         "#endif",
+        # tier S2a: a list kind the library resizes internally (never one that crosses the boundary: aot/library-resize)
+        *[f"#define TPA_GROW_{k.upper()} 1" for k in g.grown_kinds()],
         '#include "tp_aot.h"',
         "@INT@",
         *emit_mod.FP_CONTRACT_PRAGMA,
@@ -608,6 +619,7 @@ def _c_text(g, bodies: list[list[str]], exports: list[_Export], p: str) -> str:
         f"typedef tpa_i64_list {p}_i64_list;",
         "@INTLIST@",
     ]
+    out += g.emit_str_lits()            # tier S1: the immortal literals of the functions' str values
     out += [g.prototype(f) for f in g.fns.values()]
     out.append("")
     for b in bodies:
@@ -638,9 +650,13 @@ def _c_text(g, bodies: list[list[str]], exports: list[_Export], p: str) -> str:
     # (the typedef of the `int_list` kind, `@INTLIST@`, is a line of its own only in a library that uses the kind)
     text = text.replace("@INTLIST@\n", f"typedef tpa_int_list {p}_int_list;\n\n" if any(e.uses_int_list for e in exports)
                         else "\n")
-    if emit_mod.needs_int_runtime(text.replace("@INT@", "")):
-        return text.replace("@INT@", '#include "tp_aot_int.h"\n')
-    return text.replace("@INT@", "")
+    if not g.uses_str and not emit_mod.needs_int_runtime(text.replace("@INT@", "")):
+        return text.replace("@INT@", "")
+    include = '#include "tp_aot_int.h"\n'
+    if g.uses_str:                      # tier S1: the str runtime needs the int runtime's parser and formatter
+        tables = "".join(line + "\n" for line in unicode_mod.tables_c(g.ucd))     # tier S1b
+        include += tables + '#include "tp_aot_str.h"\n'
+    return text.replace("@INT@", include)
 
 
 _HEADER_TOP = """\
@@ -867,6 +883,20 @@ class _Plan:
                         "requires immutable-after-init classes until Tier T adds per-object locking)",
                         name,
                     ))
+                continue
+            # tier S2a (design 4.3.2, option (a) of the S2 review B2): a list kind the program resizes cannot cross the
+            # boundary until tier T, since a resize frees the block another thread or a `_data` pointer is reading
+            boundary = {g.array_kind(fn.name, q.name, q.type) for q in fn.params
+                        if isinstance(q, ir.ArrayParam) and q.type in LIST}
+            if fn.returns in LIST:
+                boundary.add(g.ret_kind(fn))
+            resized = sorted(boundary & g.grown)
+            if resized:
+                found.append(_finding(
+                    rel, node.lineno, "aot/library-resize", name,
+                    f"`{name}` exports a list of the kind {', '.join(resized)} whose length the library changes "
+                    "(append, insert, extend, pop, clear, remove): a list that crosses the boundary keeps its length "
+                    "until tier T adds per-list locking (another thread or a `_data` pointer may be reading it)", name))
                 continue
             kinds = g.tuple_kinds(fn)
             ok = (all((isinstance(q, ir.Param) and q.type in CTYPE and q.cls is None)
