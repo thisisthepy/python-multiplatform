@@ -6,7 +6,8 @@ gate reads each target back through a probe load (see typedpython.rebinding).
 """
 import pytest
 
-from typedpython import gate, rebinding
+from typedpython import frontend, gate, rebinding
+from typedpython.ir import Type
 
 REBIND = "forbidden/rebinding"
 MIXED = "forbidden/mixed-container"
@@ -102,13 +103,22 @@ def test_not_mixed(write, source):
 
 
 def test_probe_keeps_every_line_number():
-    source = "def f() -> None:\n    x = 1  # one\n    x = 'a'\n    y, z = 1, 2\n"
+    """A probe's column is in UTF-8 bytes, the unit Pyrefly reports positions in (tier S1b found a local assigned on
+    a line with non-ASCII text typed `Unknown`: the column counted characters; red before the fix on the `s` line)."""
+    source = ("def f() -> None:\n    x = 1  # one\n    x = 'a'\n    y, z = 1, 2\n"
+              "    s = 'h\u00e9llo \U0001F600'; t = 's\u00df'\n")
     probed, probes = rebinding.probe(source)
     assert probed.count("\n") == source.count("\n")
-    assert {p.name for p in probes} >= {"x", "y", "z"}
+    assert {p.name for p in probes} >= {"x", "y", "z", "s", "t"}
     for p in probes:
-        line = probed.splitlines()[p.line - 1]
-        assert line[p.column - 1:].startswith(p.name), (p, line)
+        line = probed.splitlines()[p.line - 1].encode()
+        assert line[p.column - 1:].startswith(p.name.encode()), (p, line)
+
+
+def test_a_local_on_a_non_ascii_line_is_typed(write):
+    m = frontend.lower(write("u.py", "@compiled\ndef f() -> int:\n    s = 'h\u00e9llo'; n = 3\n    return n\n"))
+    [f] = m.functions
+    assert f.locals["n"] is Type.I64, f.locals         # red before the fix: Unknown, so an object
 
 
 def test_no_candidates_means_no_second_pyrefly_run(write, monkeypatch):

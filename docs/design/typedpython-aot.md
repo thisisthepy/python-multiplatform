@@ -148,7 +148,8 @@ start early. Tier names are for this note only.
 
 Design for PR-S1 (agent proposal, written 2026-11-21 after the leader's order K5, M1, O1, O2, S1, S2, S3, T1 and the
 1.0 scope answer of the same day, "Start S1 right after the 1.0 items if time remains"; not owner-confirmed, leader
-review pending). Tier S is after 1.0; this step changes nothing in a program that has no `str` value.
+review pending). Tier S is in 1.0 (owner, 2026-11-21 21:55: "191, 443, 175 전부 1.0에 넣어", relayed by the leader;
+the earlier "after 1.0" is withdrawn). This step changes nothing in a program that has no `str` value.
 
 **What a program can do with a `str` (the accepted subset of this step).**
 
@@ -251,7 +252,156 @@ C they generated before (no `tp_aot_str.h`).
 
 **Order.** S1a: representation, literals, operators, `len`, indexing, slicing, `in`, iteration, `print`, f-strings,
 `str()` / `repr()`, `ord`, `chr`, `sys.argv[i]`, `int(s)`, `sys.std*.write`. S1b: the methods, the generated Unicode
-tables and the minimal `list[str]`. Each is one PR with its CI run.
+tables, the minimal `list[str]` and `str` fields of classes (the containers of a str: they share the owned-field and
+region-walk work). S2 starts with `str | None` (it needs `is not None` narrowing in the front end, which S2's optional
+containers need too) and the Windows console. Each step is one PR; CI runs per group (S1a+S1b, S2+S3, `__del__`+T1;
+leader, 2026-11-21).
+
+**As implemented in S1a (agent proposal, not owner-confirmed).** A STR value is `ir.Type.STR` (AOT mode only; the
+default mode never produces it) and every operation is its own IR node (`StrConcat`, `StrRepeat`, `StrCompare`,
+`StrContains`, `StrLen`, `StrIndex`, `StrSlice`, `StrOf`, `StrOrd`, `StrChr`, `ArgvStr`, `StrParseInt`,
+`StrWrite`, `ForStr`, and an `FString` of type STR). The emitter follows the TAGGED ints: a str name and each str
+temporary own one reference, an operation writes an emptied temporary only on success, and the cleanup point
+releases them; a parameter is borrowed, and one the body assigns works on an owned copy, so every name owns its
+reference and `+=` may grow in place exactly when the count is 1. Indexing and iteration of Latin-1 text allocate
+nothing (256 immortal one-character strings, as CPython caches them). `print` writes a literal without a surrogate as
+its UTF-8 bytes, as before, and an f-string of numbers piece by piece, as before; an f-string with a str field,
+`!r`, or text with a surrogate is made in full first, as CPython makes it, so nothing of it is written when it
+cannot be encoded. `repr` uses the printable table tp_aot_int.h already has (`int()`'s message); S1b generates the
+tables from the reference interpreter. The Windows console (a console, not a pipe) is the one open output question:
+CPython writes a console through WriteConsoleW, and this step writes UTF-8 bytes through the C runtime, which a
+pipe (every test) receives exactly as CPython's; S2 settles the console with a test on the Windows job.
+
+#### 4.3.2 Tier S step 2 (PR-S2a, S2b, S2c): str | None, containers that change, dict, set, tuple, bytes
+
+Design for S2 (agent proposal, written 2026-11-22; not owner-confirmed, leader review pending). In 1.0 (owner,
+2026-11-21 21:55). Three PRs, one CI group with S3 (leader, 2026-11-21): **S2a** `str | None`, the Windows console,
+lists that change and tuple values; **S2b** `dict`, `set` and the hash they need; **S2c** comprehensions, the
+iteration builtins, `sorted` / `list.sort`, and `bytes`. Every operation is differential-tested against the reference
+with CPython's exact results and messages, as S1; a program without these constructs generates the C it generated
+before.
+
+**`str | None` (S2a).** `Type.STR_OPT`, the same `tpa_str *` with NULL for None (so a STR flows into a STR_OPT slot
+as it is). Accepted: assignment of a str or None, `x is None` / `x is not None`, `==` / `!=` with a str or None,
+passing and returning, `print` / `str` / `repr` / f-string fields (`None` or the string), fields of classes. Every
+other use needs a str and is accepted only where the front end proves `x` is not None: inside `if x is not None:`,
+after `if x is None:` whose branch leaves (return, break, continue, `sys.exit`, raise from S3), in `a if x is not None
+else b`, and in `if x:` / `while x is not None:`; the tests combine through `and`, `or` and `not`. Only a local or a
+parameter is narrowed, never a field expression `o.x` (CPython reads the field again, and a call between the test and
+the use can rebind it; a program copies the field to a local first). The kill rule as implemented: a narrowing ends at
+an assignment of the name (an assignment of a str or of a proved name makes it proved again), and a loop removes, at
+its head, every name its body assigns, so `while n is not None: ...; n = n.next` is accepted. `assert x is not None`
+is not a narrowing until S3 compiles `assert` (an `assert` is refused today). The read is
+then `StrNarrow(x)` (no runtime work; under `-DTP_CHECK_PROVEN` it aborts on NULL, so the sanitizer job checks every
+proof). An unproved use is the finding `aot/optional`, naming the line: Pyrefly reports the same program as a type
+error, so a checked program never hits it. The same narrowing serves `C | None` class values, which today are read
+without a check (a None there is a NULL read in the generated C, undefined behaviour; fixed here: an unproved field
+read or method call through an optional class value becomes `aot/optional` too). This refuses programs that compiled
+before (AGENTS brief rule 5): the guard is test_aot_tier_s2a.py (the finding, not a crash) and the benchmarks
+`binary_trees.py` / `binary_trees_region.py`, which test their locals and still generate the same C.
+
+**Answers to the S2 design review (fable-pmp, 2026-11-22; agent proposal, not confirmed).**
+*B1, lengths that change.* A list kind takes the growable layout only when some function changes the length of a list
+of that kind (above); the other kinds keep the tier K layout and every tier K proof and the measured kernels as they
+are. For a growable kind: (1) the back end never keeps a list's `d` pointer or length across statements (every element
+access reads `l->d` and checks `l->len` at its own point, and a `len()` of a growable kind is read in evaluation order);
+(2) the verifier proves no bound for a list kind that any function can shrink (pop, clear, remove, and later `del` and
+slice assignment), through any alias, so such an access keeps its check; growing keeps every proof, since a length only
+rises; (3) a store evaluates its value before the slot is checked (`l[i] = f()` raises `IndexError: list assignment
+index out of range` when `f()` popped); (4) the self-referential operations copy from the moved block
+(`l.extend(l)`, `l += l`, `l.append(l.pop())`, `l.insert(0, l[-1])`, and slice assignment `l[a:b] = l` when it comes),
+each with a named test; (5) under `-DTP_CHECK_PROVEN` (the sanitizer job) every resize allocates a new block and frees
+the old one, so a stale item pointer is a use after free AddressSanitizer reports every time. The AOT back end has no
+parallel loop (N-15 belongs to the default mode), so no partition by length exists to invalidate.
+*B2, the library's thread promise.* Option (a) of the review: a list kind the library resizes cannot cross the export
+boundary (`aot/library-resize`, at the export) until tier T adds per-list locking; a kind resized only inside the
+library takes the growable layout there and never reaches the host. The boundary layout and the header's promise
+("the list never changes length", `_data` valid while the handle is held) stay true, so the ABI version stays 2.
+*B3, tracked containers at the boundary.* A container type the cycle collector tracks (below, B4) is refused at the
+export boundary with `aot/library-mutable-class` until tier T, as a mutable class is: the collector's state is
+thread-local under `TPA_THREADS`. No parallel body exists in the AOT mode (B1).
+*B4, containers in the cycle analysis.* Containers become nodes of the type graph of 6.3.1 (`list[T] -> T`,
+`tuple[...] ->` each member, `dict[K, V] -> K, V`, a class `->` its field types); a list or dict node is never
+immutable-after-init (it changes without any field assignment); the cyclic-capable set is, as in 6.3.2, every member of
+a component that has a cycle and a mutable member. So `children: list[Node]` makes `Node` cyclic-capable, while
+`list[list[int]]` and `list[Leaf]` (scalar fields) are not tracked. An element of an owned kind (big int, str, class,
+list, tuple, dict) read out of any container is a new reference, whatever field holds the container (elision rules 3
+and 4 of 6.3.1 never apply through a container); `pop` moves its reference out.
+*N1, NaN.* CPython's `in`, `index`, `count`, `remove` and list `==` test identity before equality, which unboxed
+doubles do not have. The AOT mode refuses those operations on a float list or a container holding floats
+(`aot/identity`) instead of answering differently; ordering (`<`) and printing are unaffected.
+
+**Windows console (S2a).** When standard output or error is a console (`GetConsoleMode` succeeds on its handle),
+the text is written as UTF-16 with `WriteConsoleW`, as CPython's `_WindowsConsoleIO` does; the encoded UTF-8 is
+decoded first, so a raw surrogateescape byte becomes U+FFFD, as it does in CPython. A pipe or a file gets the UTF-8
+bytes as now. The runtime already includes `windows.h` on Windows (lean), so the console functions are the system's declarations; stdio is flushed before each console write, so text and numbers keep their order.
+Test: the Windows job runs a program under a pseudo-console where the runner allows it; elsewhere the decision rests
+on the pipe tests and the code review.
+
+**Lists that change (S2a).** A list that can change size has the runtime layout `{count, length, capacity, kind,
+items *}`: the items live in a separate block, so `append` / `insert` / `extend` / `pop` / slice assignment can move
+them while every name of the list keeps the same handle (CPython's aliasing: `a = b; b.append(1)` changes `a`). `kind`
+says what an item slot holds: an IEEE double, an int64 (RAW group), a `tpa_int` (big-capable group, owned), a str, a
+class instance, a list, a tuple (owned references). Which lists take this layout is decided per list type for the
+whole program (a list can only flow into names of its own type, so every alias of a list has its layout): when any
+operation of the program changes the length of a `list[float]`, every `list[float]` takes the growable layout, with
+element access `items[i]` and the same bounds rule; likewise for `list[int]` (both the RAW and the big-capable kind),
+`list[str]` and each other list type. A list type the program never resizes keeps the tier K layout (`{count,
+length, d[]}`, element access `d[i]`). (Per list group, as `aot/rep.py` groups `list[int]` names, would be finer; it
+can replace this rule later without a visible change.) So a program that never resizes a list generates the C it
+generated before, and the tier K loops (nbody, spectral_norm) keep one load per element. (Amendment 2026-11-22,
+agent proposal, not confirmed: the first text of this section moved every list to the new layout, which contradicted
+the "generates the C it generated before" rule above and added an indirection to the tier K loops.) Growth by CPython's
+over-allocation formula (`list_resize`), so `sys.getsizeof` would agree (not exposed; the formula only sets the
+amortised cost). Operations: `append`, `pop()` / `pop(i)` (`IndexError: pop from empty list`, `pop index out of
+range`), `insert` (CPython's clamping), `extend` of a list, `remove` (`ValueError: list.remove(x): x not in list`),
+`index` (`ValueError: list.index(x): x not in list`, the message of CPython 3.14 and later, which does not
+format the value; so `index` of a class instance needs no repr), `count`, `clear`, `reverse`, `copy`, `+`, `*`, `+=` (extends in place:
+the same object), `==` / `!=` / `<` ... (element-wise, CPython's rich comparison order), `in`, slicing and slice
+assignment (`ValueError: attempt to assign sequence of size N to extended slice of size M`), `del l[i]` and
+`del l[a:b]`, `list(xs)` copy, `print` / `repr`. Iteration follows CPython's list iterator: index and length read at
+each step, so appending inside the loop is seen. Element types: int, float, bool, str, `str | None`, compiled classes,
+lists, tuples, dicts and sets (S2b). A list of lists is a list whose items are lists (owned references); a cycle
+through lists is possible (`a.append(a)`), so a list that can hold a list or a class is tracked by the cycle
+collector of tier O, like a cyclic-capable class (6.3.2 step 3). Library ABI: the list handles stay opaque; `_data`
+returns the item block, valid until the next call that may resize the list; ABI version 2.
+
+**Tuples (S2a).** A tuple value of a fixed shape `tuple[int, str, ...]` (the shape in the type; no `tuple[T, ...]` of
+variable length until S2c) is an immutable counted object with one slot per element and the slot kinds known
+statically. Construction, indexing by a constant or a variable (bounds checked, `IndexError: tuple index out of
+range`), unpacking, `len`, `==` / ordering, `in`, hashing (S2b), `print` / `repr` (`(1,)` for one element). The fixed
+tuple returns of tier K stay as they are (an unboxed multi-value return), and become values only where a tuple is
+stored, passed or compared.
+
+**dict and set (S2b).** `dict[K, V]` with K int, str, bool or a tuple of those; V any S2 type. The layout is CPython's
+compact dict (an index table of slots and an entry array in insertion order, open addressing with CPython's
+perturbation probe), so iteration order is insertion order, as CPython guarantees. The hash function is not CPython's:
+the str hash is seeded per process in CPython and so is unobservable (`hash()` stays `aot/identity`), and the int
+hash only decides slot positions, never an order the program sees; equality is CPython's (`1 == True`, so a
+`dict[int, ...]` keyed by `True` finds `1`, and the stored key keeps the type it was first inserted with, as CPython
+keeps the first key object). Operations: `d[k]` (`KeyError: <repr of k>`), `d[k] = v`, `del d[k]`, `in`, `get`
+(with default), `setdefault`, `pop` (with default), `keys` / `values` / `items` in loops and comprehensions,
+`len`, `update` from a dict, `==`, `print` / `repr`, iteration (`RuntimeError: dictionary changed size during
+iteration` exactly where CPython raises it). `set[K]`: `add`, `discard`, `remove` (`KeyError`), `in`, `len`, `|`
+`&` `-` `^` into new sets, `==`; iterating a set, or printing it, depends on CPython's hash table and seed, so it is
+`aot/set-order` except through `sorted(...)`, as section 4.3 says.
+
+**S2c.** List, dict and set comprehensions (a hidden local per comprehension variable, Python 3 scoping, the
+accumulator built in place), `enumerate`, `zip` (shortest), `reversed`, `range` objects as iterables, in `for` loops
+and comprehensions; `sum`, `any`, `all`, `min` / `max` of an iterable (`ValueError: min() iterable argument is
+empty`); `sorted(xs, key=..., reverse=...)` and `list.sort(...)` with a key that is a compiled function or a
+lambda written in place: CPython's own algorithm (timsort, `listsort` in Objects/listobject.c, ported as it is), so
+the order of equal and of unordered elements (NaN) is CPython's, not merely some stable order. `bytes`: an immutable
+byte array; literals, `s.encode()` / `encode("utf-8")` (strict: a surrogate raises CPython's UnicodeEncodeError),
+`b.decode()` (strict UTF-8, CPython's UnicodeDecodeError message), `len`, indexing (an int), slicing, `+`, `*`, `==`,
+`in`, iteration (ints), `print` / `repr` (`b'...'` with CPython's escapes), `bytes(n)` and `bytes(list[int])`
+(`ValueError: bytes must be in range(0, 256)`).
+
+**Tests.** `test_aot_tier_s2a.py`, `_s2b.py`, `_s2c.py`: differential over generated cases (random operation
+sequences on lists and dicts checked against the reference, every error message), aliasing (two names of one list,
+a list in a class field, a list in a list), the in-loop mutation rules, the cycle collector on list cycles under
+`TPA_GC_STRESS`, LeakSanitizer on everything, the library ABI v2 fixture, and a timsort mutant (one changed
+`MIN_GALLOP` must change the order of a NaN-holding list).
 
 ### 4.4 Tier T, threads
 

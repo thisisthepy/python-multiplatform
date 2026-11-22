@@ -349,6 +349,20 @@ class Representation:
                         self.bind((f.name, RETURN), n.value, f, cur, "return")
                     elif isinstance(n, ir.Call):
                         self.bind_call(n, f, cur)
+                    elif isinstance(n, ir.ListExtend) and (f.name, n.array) in self._parent \
+                            and (f.name, n.other) in self._parent:
+                        # tier S2a: the items of `other` move into `array` (a copy of each item, so one group)
+                        self.union((f.name, n.array), (f.name, n.other), f.name, cur,
+                                   f"`{n.array}.extend({n.other})`")
+                    elif isinstance(n, ir.ListSetSlice) and (f.name, n.array) in self._parent \
+                            and (f.name, n.other) in self._parent:
+                        self.union((f.name, n.array), (f.name, n.other), f.name, cur,
+                                   f"`{n.array}[...] = {n.other}`")
+                    elif isinstance(n, ir.ListCompare) and (f.name, n.left) in self._parent \
+                            and (f.name, n.right) in self._parent:
+                        # tier S2a: two compared lists share one kind, so the comparison reads both alike
+                        self.union((f.name, n.left), (f.name, n.right), f.name, cur,
+                                   f"`{n.left}` compared with `{n.right}`")
                     elif isinstance(n, ir.New):
                         init_fn = self.fns.get(f"{n.cls}.__init__")
                         if init_fn is not None:
@@ -390,6 +404,14 @@ class Representation:
                 self.union(target, fkey, f.name, cur, f"reads list field `{value.cls}.{value.field}`")
             else:
                 self.mark_big(target, f.name, cur, f"reads unknown list field `{value.cls}.{value.field}`")
+        elif isinstance(value, ir.LIST_MAKERS):
+            # tier S2a: a + b, a * n, a[i:j]: the new list is one group with its sources (a merge, not a one-way
+            # copy, so the items never change representation on the way)
+            for src in ((value.left, value.right) if isinstance(value, ir.ListConcat) else (value.src,)):
+                if (f.name, src) in self._parent:
+                    self.union(target, (f.name, src), f.name, cur, f"{how} made from `{src}`")
+                else:
+                    self.mark_big(target, f.name, cur, f"{how} made from `{src}`, which is not a list of this function")
         elif not isinstance(value, (ir.NewArray, ir.ListDisplay)):
             self.mark_big(target, f.name, cur, f"{how} of an expression that is not understood")
 
@@ -505,13 +527,16 @@ class Representation:
             return RAW
         if isinstance(e, ir.Local):
             return r.names.get(e.name, RAW)
-        if isinstance(e, (ir.Len, ir.ArgvLen, ir.BoolToInt)):
+        if isinstance(e, (ir.Len, ir.ArgvLen, ir.BoolToInt, ir.StrLen, ir.StrOrd, ir.StrWrite, ir.StrListLen, ir.StrMethod,
+                          ir.ObjListLen)):
             return RAW
-        if isinstance(e, ir.Index):
+        if isinstance(e, (ir.Index, ir.ListPop)):          # (ListPop: tier S2a, an element as Index reads it)
             return TAGGED if self.list_big(r.name, e.array) else RAW
+        if isinstance(e, ir.ListSearch):
+            return RAW                                     # a position or a count: inside the length
         if isinstance(e, ir.FieldGet):
             return self.field_reps.get((e.cls, e.field), RAW)
-        if isinstance(e, (ir.ArgvInt, ir.FloatToInt, ir.StrToInt, ir.MathCall)):
+        if isinstance(e, (ir.ArgvInt, ir.FloatToInt, ir.StrToInt, ir.MathCall, ir.StrParseInt)):
             return TAGGED
         if isinstance(e, ir.Call):
             callee = self.reps.get(e.function)
@@ -611,7 +636,7 @@ class Representation:
                         if self.field_reps.get((n.cls, n.field), RAW) != TAGGED:
                             self.field_reps[(n.cls, n.field)] = TAGGED
                             changed = True
-                elif isinstance(n, ir.StoreIndex):
+                elif isinstance(n, (ir.StoreIndex, ir.ListAppend, ir.ListInsert)):     # (tier S2a: append, insert)
                     if (f.name, n.array) in self._parent and n.value.type is Type.I64 \
                             and self._of(r, n.value) == TAGGED:
                         changed |= self.mark_big((f.name, n.array), f.name, cur,

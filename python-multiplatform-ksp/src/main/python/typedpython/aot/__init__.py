@@ -124,7 +124,8 @@ def _lower(program, library=None, strict_int: bool = False, explain: list | None
         why = lowered.skipped.get(name) or proved.skipped.get(name) or "the front end did not lower it"
         m = _LINE.search(why)
         line = int(m.group(1)) if m else program.bodies()[name].lineno if name in program.bodies() else 1
-        found.append(finding(line, "aot/front-end", shown, f"the front end left `{shown}` uncompiled: {why}", shown))
+        rule = "aot/optional" if "(aot/optional)" in why else "aot/front-end"         # tier S2a (design 4.3.2)
+        found.append(finding(line, rule, shown, f"the front end left `{shown}` uncompiled: {why}", shown))
     if found:
         # The functions that did pass are still emitted, to report what the back end finds in them too: a
         # program's findings are all reported at once, not one function's at a time. (A function that calls
