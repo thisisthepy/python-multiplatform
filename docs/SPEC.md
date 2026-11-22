@@ -892,7 +892,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   callbacks. A Kotlin object a walked declaration returns (a `kotlinx.coroutines.CoroutineDispatcher`
   such as `Dispatchers.Default`, a `Job`) is a handle in Python and fills any parameter of its type or a
   supertype (`Job(parent)`, `dispatch(context, block)` with a `Job` as the `CoroutineContext`), reaching
-  the same Kotlin object (`Job.cancel()` from Python cancels it and its children). A member function's declared defaults may be left out from Python, as a top-level function's may (the walker's default omission, applied to members), except where a supertype declares a method of the same name, since a call leaving arguments out could then resolve against the inherited one. A parameter type
+  the same Kotlin object (`Job.cancel()` from Python cancels it and its children). A member function's declared defaults may be left out from Python, as a top-level function's may (the walker's default omission, applied to members), An override takes the defaults of the declaration it overrides, as in Kotlin (`AbsoluteCutCornerShape.copy()` as `CornerBasedShape.copy()`), and an omission an inherited overload of the same name would also accept is refused, since the call could then resolve against either. A `suspend` member's omitting calls run inside its pending call (U-5). A parameter type
   that expands to a `java.*` class (through a typealias, as `kotlinx.coroutines.CancellationException`
   does in `Job.cancel(cause: CancellationException? = null)`) is nameable: the class file is read from
   the JDK the walk runs on, since no walked jar holds it; `javax.*`, `jdk.*` and `sun.*` stay declined.

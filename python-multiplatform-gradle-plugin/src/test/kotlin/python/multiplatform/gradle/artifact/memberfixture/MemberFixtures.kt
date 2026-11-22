@@ -96,3 +96,19 @@ open class BasePing {
 class DerivedPing : BasePing() {
     fun ping(label: String = "x"): String = label
 }
+
+/** The `CornerBasedShape.copy` shape: an override inherits the defaults of the declaration it overrides. */
+abstract class Outline {
+    abstract fun reshape(start: Int = 0, end: Int = 0): Outline
+
+    fun reshape(all: Int): Outline = reshape(all, all)
+}
+
+class Square : Outline() {
+    override fun reshape(start: Int, end: Int): Square = this
+}
+
+/** A suspend member with a default: its partial calls still run inside the pending call (SPEC U-5). */
+class Waiter {
+    suspend fun pause(times: Int = 1): Int = times
+}
