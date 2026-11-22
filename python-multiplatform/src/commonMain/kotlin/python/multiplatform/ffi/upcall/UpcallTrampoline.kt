@@ -129,6 +129,11 @@ object UpcallTrampoline {
      */
     fun invoke(callableHandle: Long, argsTuple: Long): Long = attached {
         try {
+            // SPEC U-2 (#164 item 6): a member read on a Kotlin throwable's proxy. A reserved handle
+            // rather than a table row, so it needs no registration and survives a table reinstall.
+            if (callableHandle == KotlinThrowableProxy.OPERATION_HANDLE) {
+                return@attached KotlinThrowableProxy.dispatch(argsTuple)
+            }
             val entry = UpcallTable.callable(CallableHandle(callableHandle))
             val result = entry.callable(unmarshalArguments(entry, argsTuple))
             // A suspending entry's body hands back a PendingCall rather than the value, because
@@ -528,7 +533,9 @@ object UpcallTrampoline {
 
     /**
      * Builds a **new** reference to the `BaseException` placed on `__cause__` for a Kotlin
-     * [Throwable] (SPEC U-2, issue #164).
+     * [Throwable] (SPEC U-2, issue #164): its [KotlinThrowableProxy], with the nested
+     * [Throwable.cause] chain set on `__cause__` up to [MAX_CAUSE_DEPTH] so a Python traceback shows
+     * it without asking Kotlin.
      */
     private fun buildKotlinCausePointer(t: Throwable, depth: Int): NativePointer? {
         if (depth >= MAX_CAUSE_DEPTH) return null
@@ -539,10 +546,12 @@ object UpcallTrampoline {
                 return liveValue.pointer
             }
         }
-        val className = t::class.simpleName ?: "Throwable"
-        val msg = t.message
-        val summary = if (msg.isNullOrEmpty()) className else "$className: $msg"
-        val causePtr = instantiateException(runtimeErrorType, summary) ?: return null
+        // The proxy of [t] itself (owner decision 2026-11-22: the Python exception IS the proxy of the
+        // original Throwable). Where no proxy can exist (the entry points are not published), the
+        // summary it would print stands in, as before.
+        val causePtr = KotlinThrowableProxy.pointerFor(t)
+            ?: instantiateException(runtimeErrorType, KotlinThrowableProxy.summaryOf(t))
+            ?: return null
         val nested = t.cause
         if (nested != null && nested !== t) {
             val nestedPtr = buildKotlinCausePointer(nested, depth + 1)
