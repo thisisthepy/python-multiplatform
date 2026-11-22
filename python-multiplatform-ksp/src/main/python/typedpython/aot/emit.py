@@ -1761,7 +1761,8 @@ class _Fn:
                              f"`{e.function}` are lists of different kinds (the list classification did not merge them)")
                 else:
                     out.append(f"v_{mangle(a.name)}")
-            elif not isinstance(p, ir.Param) or p.type is not a.type:
+            elif not isinstance(p, ir.Param) or (p.type is not a.type
+                                                  and not (p.type is Type.STR_OPT and a.type is Type.STR)):
                 ok = False
                 self.ev(a)
                 self.bad("aot/type", e.function, f"the arguments of `{e.function}` do not match its parameter types")

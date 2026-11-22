@@ -228,6 +228,19 @@ def _src(node: ast.AST) -> str:
     return ast.unparse(node)
 
 
+OPTIONAL_MARK = "(aot/optional)"
+
+
+def _optional(line: int, node: ast.AST, cls: str | None = None) -> Skip:
+    """AOT mode, tier S2a: a `str | None` value used where a str is needed, or a `C | None` value whose field or
+    method is used, with no test before it that proves it is not None (design 4.3.2). The marker makes the finding
+    `aot/optional` (aot/__init__.py)."""
+    what = (f"a `{cls} | None` value whose field or method is used" if cls is not None
+            else "a `str | None` value used where a str is needed")
+    return Skip(line, f"`{_src(node)}` is {what}, and nothing before it proves it is not None {OPTIONAL_MARK}: test "
+                      "`is not None` first (`if x is not None:`, or an `if x is None:` branch that leaves)")
+
+
 # --- the module ----------------------------------------------------------------------------------
 
 @dataclass
@@ -2041,6 +2054,9 @@ class _Lowerer:
         """`+` of two strs and `*` of a str and an int (AOT mode); `%` is printf-style formatting, which waits for
         tier S2 (`aot/str-format`)."""
         lt, rt = left.type, right.type
+        if Type.STR_OPT in (lt, rt):                                   # tier S2a: name the operand
+            side = getattr(node, "left" if lt is Type.STR_OPT else "right", node)
+            raise _optional(node.lineno, side)
         if op is ir.BinOpKind.ADD and lt is Type.STR and rt is Type.STR:
             return ir.StrConcat(Type.STR, left, right)
         if op is ir.BinOpKind.MUL and lt is Type.STR and rt in (Type.I64, Type.BOOL):
@@ -2121,6 +2137,8 @@ class _Lowerer:
                 return ir.StrLen(Type.I64, x)
             if x.type is Type.STR_LIST:
                 return ir.StrListLen(Type.I64, x)
+            if x.type is Type.STR_OPT:                                 # tier S2a
+                raise _optional(line, args[0])
             raise Skip(line, f"len() of a {TYPE_NAME.get(x.type, x.type.value)} is not supported in an AOT program")
         return None
 
@@ -2131,7 +2149,9 @@ class _Lowerer:
             if not self.is_local(node.id):
                 return node.id in self.info.aot_consts and self.info.aot_consts[node.id].type is Type.STR
             t = self.local_type(node.id, node.lineno) if node.id not in self.arrays else None
-            return t is Type.STR or (t is Type.STR_OPT and node.id in self.not_none)
+            if t is Type.STR_OPT and node.id not in self.not_none:
+                raise _optional(node.lineno, node)                      # tier S2a: a method of a possible None
+            return t is Type.STR or t is Type.STR_OPT
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) \
                 and node.value.id in ("sys", "math", "time") and not self.is_local(node.value.id):
             return False                                    # a module's attribute (sys.stdout.write, ...)
@@ -2274,6 +2294,26 @@ class _Lowerer:
                 return next(iter(found))[0], self.info.aot  # type: ignore[index]
         return None, False
 
+    def cls_optional(self, name: str) -> bool:
+        """AOT mode, tier S2a: the class local or parameter `name` is declared `C | None` (so a field read or a
+        method call through it needs a proof that it is not None)."""
+        classes = self.info.classes
+        if name in self.params:
+            p = self.params[name]
+            return isinstance(p, ir.Param) and p.cls is not None and p.optional
+        if name in self.new_locals() or name not in self.bindings:
+            return False
+        kinds = list(self.annotations.get(name, []))
+        if name not in self.annotations:
+            kinds += self.inferred.get(name, [])
+        return any((c := _class_of(_aot_unqualified(k, classes), classes)) is not None and c[1] for _, k in kinds)
+
+    def check_not_none(self, name: str, cls: str, node: ast.AST) -> None:
+        """AOT mode, tier S2a: refuse a field or method use through a `C | None` name not proved not None here
+        (before S2a this read had no check, so a None crashed instead of raising AttributeError)."""
+        if self.info.aot and name not in self.not_none and self.cls_optional(name):
+            raise _optional(getattr(node, "lineno", 0), node, cls)
+
     def field_target(self, node: ast.Attribute) -> tuple[ir.Local, str, bool] | None:
         """(object, class, exact type proved) for `name.field` of a compiled class's field."""
         if not (isinstance(node.value, ast.Name) and self.is_local(node.value.id)):
@@ -2281,6 +2321,7 @@ class _Lowerer:
         cls, exact = self.cls_of_name(node.value.id)
         if cls is None or node.attr not in self.info.classes[cls].fields:
             return None
+        self.check_not_none(node.value.id, cls, node.value)
         return ir.Local(Type.OBJ, node.value.id), cls, exact
 
     def field_get(self, node: ast.Attribute) -> ir.Expr | None:
@@ -3340,6 +3381,7 @@ class _Lowerer:
                 args.append(v)
         direct = all(isinstance(p, ir.ArrayParam)
                      or (p.type != Type.OBJ and e.type == p.type)
+                     or (p.type is Type.STR_OPT and e.type is Type.STR)         # tier S2a: a str is a `str | None`
                      or (isinstance(p, ir.Param) and p.cls is not None and e.type == Type.OBJ)
                      for p, e in zip(callee.params, args))
         if not direct and any(isinstance(p, ir.ArrayParam) for p in callee.params):
@@ -3376,6 +3418,7 @@ class _Lowerer:
             return None
         assert cls is not None
         if self.info.aot:
+            self.check_not_none(func.value.id, cls, func.value)
             recv: ir.Expr = ir.Local(Type.OBJ, func.value.id)
             self.hoist_ok = False
             args = [recv] + [self.value(a) for a in node.args]
@@ -3466,6 +3509,8 @@ class _Lowerer:
             return value                                        # tier S2a: a str is a `str | None`
         if target is Type.STR_OPT and self.info.aot and isinstance(value, ir.Const) and value.value is None:
             return ir.Const(Type.STR_OPT, None)
+        if target is Type.STR and self.info.aot and value.type is Type.STR_OPT:
+            raise _optional(getattr(node, "lineno", 0), node)            # tier S2a
         if target is Type.STR_LIST and isinstance(value, ir.NewList) and self.info.aot:
             return ir.StrListDisplay(Type.STR_LIST, ())          # tier S1b: `x: list[str] = []`
         if target == Type.OBJ and (value.type in ir.SCALARS or value.type == Type.INT):
@@ -3522,8 +3567,9 @@ class _Lowerer:
                 self.found_bounds[name] = _join(self.found_bounds.get(name), iv)
         self.refined.pop(name, None)
         self.not_none.discard(name)
-        if value.type is Type.STR:
-            self.not_none.add(name)                 # tier S2a: a str assigned to a `str | None` local is not None
+        if value.type is Type.STR or isinstance(value, ir.New) \
+                or (isinstance(value, ir.Local) and value.name in self.not_none):
+            self.not_none.add(name)                 # tier S2a: a str, a new object or a proved name is not None
 
     def narrowed(self, cond: ir.Expr, truth: bool, base: dict[str, tuple[int, int]]
                  ) -> tuple[dict[str, tuple[int, int]], bool]:
@@ -3684,9 +3730,11 @@ def _at(s: ir.Stmt, k: int | None) -> ir.Stmt:
 
 def _none_facts(cond: ir.Expr, truth: bool) -> set[str]:
     """AOT mode, tier S2a: the `str | None` locals `cond` proves not None when it evaluates to `truth`."""
+    if isinstance(cond, ir.Is) and isinstance(cond.left, ir.Const) and cond.left.value is None:
+        cond = dataclasses.replace(cond, left=cond.right, right=cond.left)          # `None is x`
     if isinstance(cond, ir.Is) and isinstance(cond.right, ir.Const) and cond.right.value is None \
-            and isinstance(cond.left, ir.Local) and cond.left.type is Type.STR_OPT:
-        return {cond.left.name} if cond.negate == truth else set()
+            and isinstance(cond.left, ir.Local) and cond.left.type in (Type.STR_OPT, Type.OBJ):
+        return {cond.left.name} if cond.negate == truth else set()        # (OBJ: a `C | None` class local)
     if isinstance(cond, ir.And) and truth:
         return _none_facts(cond.left, True) | _none_facts(cond.right, True)
     if isinstance(cond, ir.Or) and not truth:
