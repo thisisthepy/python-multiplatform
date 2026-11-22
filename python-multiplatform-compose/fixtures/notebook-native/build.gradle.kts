@@ -130,7 +130,13 @@ pythonBindings {
 
     artifactConfiguration.set("macosArm64CompileKlibraries")
     artifactSourceSet.set("macosArm64Main")
-    // notebook-e2e's list (its build file says what each entry is for).
+    // notebook-e2e's list (its build file says what each entry is for), with one difference: a klib has
+    // no JVM file facade, so the walker matches a top-level function by its own dotted name
+    // (KlibKnmScanner.matchesInclude). notebook-e2e's `SnapshotStateKt`, `TextFieldStateKt` and
+    // `RememberSaveableKt` match nothing here; the three functions they stand for are named instead.
+    // With the facade names `pythonx.compose.runtime` found no `mutableStateOf` and every scenario
+    // failed (batch run 45027744672); the walker also had to learn to bind a non-composable generic
+    // function and to walk the project klib `rememberSaveableWrapper` lives in (SPEC B-2).
     artifactIncludePackages.set(
         listOf(
             "androidx.compose.material3",
@@ -140,12 +146,12 @@ pythonBindings {
             "androidx.compose.ui.res",
             "androidx.compose.ui",
             "androidx.compose.material.icons",
-            "androidx.compose.runtime.SnapshotStateKt",
+            "androidx.compose.runtime.mutableStateOf",
             "androidx.compose.runtime.State",
             "androidx.compose.runtime.MutableState",
             "androidx.compose.foundation.text.input.TextFieldState",
-            "androidx.compose.foundation.text.input.TextFieldStateKt",
-            "python.multiplatform.compose.RememberSaveableKt",
+            "androidx.compose.foundation.text.input.rememberTextFieldState",
+            "python.multiplatform.compose.rememberSaveableWrapper",
             "org.thisisthepy.compose.designsystem",
             "org.thisisthepy.compose.material3",
             "org.thisisthepy.compose.breeze",
