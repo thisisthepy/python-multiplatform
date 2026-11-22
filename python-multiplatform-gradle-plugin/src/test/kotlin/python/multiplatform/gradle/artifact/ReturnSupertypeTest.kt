@@ -55,6 +55,18 @@ class ReturnSupertypeTest {
         kotlinStdlibJar,
     )
 
+    /** Every supertype of [type] the JDK declares, transitively, without `java.lang.Object`. */
+    private fun jdkSupertypesOf(type: Class<*>): Set<String> {
+        val seen = linkedSetOf<String>()
+        val queue = ArrayDeque<Class<*>>(listOfNotNull(type.superclass) + type.interfaces)
+        while (queue.isNotEmpty()) {
+            val next = queue.removeFirst()
+            if (next == Any::class.java || !seen.add(next.name)) continue
+            queue.addAll(listOfNotNull(next.superclass) + next.interfaces)
+        }
+        return seen
+    }
+
     /**
      * The row the fixture's render test turns on: `BitmapPainter` **is a** `Painter`, taken out of
      * the jar rather than written down here.
@@ -133,6 +145,11 @@ class ReturnSupertypeTest {
      * Printed rather than pinned to a literal -- they are facts about a Compose version -- with
      * bounds loose enough to survive one and tight enough to catch the shape going wrong: a chain
      * that ran away, or an ancestry attached to everything.
+     *
+     * The length bound is for the walked libraries' own types. A JDK type's chain is the running
+     * JDK's hierarchy and grows with it (`java.util.ArrayList` gained `SequencedCollection` in JDK 21,
+     * nine supertypes; batch run 45003070139), so it is compared with that hierarchy, read from the
+     * class itself, instead of with a number.
      */
     @Test
     fun theAncestryTheTableCarriesIsMeasuredRatherThanAssumed() {
@@ -162,11 +179,14 @@ class ReturnSupertypeTest {
             entry.returnSupertypes.sumOf { it.length + SUPERTYPE_SEPARATOR.length }
         }
         val rendered = renderArtifactFragmentSource(ArtifactFragment("Measured", "artifact:measured", entries)).length
-        val longest = carrying.maxOfOrNull { it.returnSupertypes.size } ?: 0
+        val (jdkReturns, ownReturns) = carrying.partition { it.returnTypeName.orEmpty().startsWith("java.") }
+        val longestEntry = ownReturns.maxByOrNull { it.returnSupertypes.size }
+        val longest = longestEntry?.returnSupertypes?.size ?: 0
+        val longestChain = longestEntry?.let { "${it.name}: ${it.returnTypeName} <: ${it.returnSupertypes.joinToString(" <: ")}" }
         println(
             "return ancestry: ${carrying.size} of ${entries.size} entries carry one, " +
                 "+$addedChars characters against $rendered rendered " +
-                "(${"%.3f".format(100.0 * addedChars / rendered)}%), longest chain $longest",
+                "(${"%.3f".format(100.0 * addedChars / rendered)}%), longest chain $longest ($longestChain)",
         )
 
         assertTrue(carrying.isNotEmpty(), "nothing carries an ancestry, so this measures nothing")
@@ -174,7 +194,14 @@ class ReturnSupertypeTest {
             carrying.size * 4 < entries.size,
             "${carrying.size} of ${entries.size} entries carry an ancestry -- it is being asked too widely",
         )
-        assertTrue(longest in 1..8, "longest chain $longest")
+        assertTrue(longest in 1..8, "longest chain $longest: $longestChain")
+        for (entry in jdkReturns) {
+            assertEquals(
+                jdkSupertypesOf(Class.forName(entry.returnTypeName)),
+                entry.returnSupertypes.toSet(),
+                "${entry.name} returns ${entry.returnTypeName}; its ancestry should be the running JDK's",
+            )
+        }
         assertTrue(addedChars * 100 < rendered, "the ancestry added $addedChars characters to $rendered")
     }
 
