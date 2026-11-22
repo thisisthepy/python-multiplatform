@@ -1253,6 +1253,28 @@ out_of_range:
     return tpa_raise(TPA_IndexError, store ? "list assignment index out of range" : "list index out of range");
 }
 
+/* Tier S2a, the test hook of the S2 review (B1): under TP_CHECK_PROVEN (the sanitizer job) a resize never keeps or
+ * extends a block in place: it allocates a new one, copies the `keep` live bytes and frees the old one, so a stale
+ * pointer to the items is a use after free AddressSanitizer reports every time, not only when realloc moves. */
+#if defined(TP_CHECK_PROVEN)
+#define TPA__RESIZE_IN_PLACE 0
+static TPA_UNUSED void *tpa__list_realloc(void *old, size_t size, size_t keep)
+{
+    void *p = malloc(size);
+    if (p == NULL) {
+        return NULL;                        /* the old block stays, as realloc leaves it */
+    }
+    if (keep > 0) {
+        memcpy(p, old, keep < size ? keep : size);
+    }
+    free(old);
+    return p;
+}
+#else
+#define TPA__RESIZE_IN_PLACE 1
+#define tpa__list_realloc(old, size, keep) realloc((old), (size))
+#endif
+
 /* The fixed layout: one block, the items after the header. */
 #define TPA__DEF_LIST_ALLOC_FIXED(NAME, CT)                                                       \
     static inline int tpa_##NAME##_alloc(int64_t n, tpa_##NAME##_list **out)                      \
@@ -1283,7 +1305,7 @@ out_of_range:
     {                                                                                             \
         uint64_t want;                                                                            \
         CT *d;                                                                                    \
-        if (l->cap >= n && n >= (l->cap >> 1)) {                                                  \
+        if (TPA__RESIZE_IN_PLACE && l->cap >= n && n >= (l->cap >> 1)) {                         \
             l->len = n;                                                                           \
             return 0;                                                                             \
         }                                                                                         \
@@ -1302,7 +1324,8 @@ out_of_range:
             d = NULL;                                                                             \
         }                                                                                         \
         else {                                                                                    \
-            d = (CT *)realloc(l->d, (size_t)want * sizeof(CT));                                   \
+            d = (CT *)tpa__list_realloc(l->d, (size_t)want * sizeof(CT),                          \
+                                        (size_t)(l->len < n ? l->len : n) * sizeof(CT));          \
             if (d == NULL) {                                                                      \
                 return tpa_raise(TPA_MemoryError, "");                                            \
             }                                                                                     \

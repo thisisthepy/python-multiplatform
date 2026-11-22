@@ -609,6 +609,8 @@ def _c_text(g, bodies: list[list[str]], exports: list[_Export], p: str) -> str:
         "#ifndef TPA_LIBRARY",
         "#define TPA_LIBRARY 1",
         "#endif",
+        # tier S2a: a list kind the library resizes internally (never one that crosses the boundary: aot/library-resize)
+        *[f"#define TPA_GROW_{k.upper()} 1" for k in g.grown_kinds()],
         '#include "tp_aot.h"',
         "@INT@",
         *emit_mod.FP_CONTRACT_PRAGMA,
@@ -881,6 +883,20 @@ class _Plan:
                         "requires immutable-after-init classes until Tier T adds per-object locking)",
                         name,
                     ))
+                continue
+            # tier S2a (design 4.3.2, option (a) of the S2 review B2): a list kind the program resizes cannot cross the
+            # boundary until tier T, since a resize frees the block another thread or a `_data` pointer is reading
+            boundary = {g.array_kind(fn.name, q.name, q.type) for q in fn.params
+                        if isinstance(q, ir.ArrayParam) and q.type in LIST}
+            if fn.returns in LIST:
+                boundary.add(g.ret_kind(fn))
+            resized = sorted(boundary & g.grown)
+            if resized:
+                found.append(_finding(
+                    rel, node.lineno, "aot/library-resize", name,
+                    f"`{name}` exports a list of the kind {', '.join(resized)} whose length the library changes "
+                    "(append, insert, extend, pop, clear, remove): a list that crosses the boundary keeps its length "
+                    "until tier T adds per-list locking (another thread or a `_data` pointer may be reading it)", name))
                 continue
             kinds = g.tuple_kinds(fn)
             ok = (all((isinstance(q, ir.Param) and q.type in CTYPE and q.cls is None)

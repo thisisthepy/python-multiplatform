@@ -2435,7 +2435,7 @@ static inline int tpa_int_list__resize(tpa_int_list *l, int64_t n)
 {
     uint64_t want;
     tpa_int *d;
-    if (l->cap >= n && n >= (l->cap >> 1)) {
+    if (TPA__RESIZE_IN_PLACE && l->cap >= n && n >= (l->cap >> 1)) {
         l->len = n;
         return 0;
     }
@@ -2454,7 +2454,8 @@ static inline int tpa_int_list__resize(tpa_int_list *l, int64_t n)
         d = NULL;
     }
     else {
-        d = (tpa_int *)realloc(l->d, (size_t)want * sizeof(tpa_int));
+        d = (tpa_int *)tpa__list_realloc(l->d, (size_t)want * sizeof(tpa_int),
+                                         (size_t)(l->len < n ? l->len : n) * sizeof(tpa_int));
         if (d == NULL) {
             return tpa_raise(TPA_MemoryError, "");
         }

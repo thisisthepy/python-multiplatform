@@ -279,6 +279,10 @@ def main() -> None:
     print(xs.count(3), xs.index(100), len(xs), xs.pop())
     xs.extend(xs)
     print(len(xs), xs.count(-1))
+    xs.append(xs.pop(0))                        # (S2 review B1: the self-referential operations)
+    xs.insert(0, xs[-1])
+    xs.insert(len(xs), xs.pop())
+    print(xs[0], xs[1], xs[len(xs) - 1], len(xs))
     xs.remove(100)
     xs.reverse()
     print(xs[0], len(xs), xs.pop(), xs.pop(0), xs.pop(-2))
@@ -383,3 +387,37 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 """, [["0"], ["-7"], [str(2 ** 63 - 1)]])
+
+
+def test_a_loop_whose_body_rebinds_the_list_is_refused(tmp_path: Path):
+    """CPython's list iterator holds the list it started on; the AOT loop reads the name at every step, so a body that
+    rebinds the name is refused rather than iterating the new list (S2 review S1)."""
+    src = ("def f(a: list[float]) -> float:\n    t = 0.0\n    for v in a:\n        t += v\n        a = [9.0]\n"
+           "    return t\n\n\ndef main() -> None:\n    a = [1.0, 2.0]\n    print(f(a))\n\n\n"
+           'if __name__ == "__main__":\n    main()\n')
+    with pytest.raises(aot.AotError) as raised:
+        aot.generate(_write(tmp_path, src))
+    assert "CPython keeps iterating the first list" in str(raised.value)
+
+
+def test_a_library_does_not_resize_a_list_kind_that_crosses_its_boundary(tmp_path: Path):
+    """S2 review B2, option (a): a list kind the library resizes cannot be a parameter or result of an export
+    (`aot/library-resize`) until tier T; a kind resized only inside the library takes the growable layout there."""
+    from typedpython.aot import library
+    p = _write(tmp_path, """
+def grow(a: list[int]) -> int:
+    a.append(1)
+    return len(a)
+
+
+def inner(n: int) -> int:
+    b = [0] * 0
+    for i in range(n):
+        b.append(i)
+    return len(b)
+""", "lib.py")
+    with pytest.raises(aot.AotError) as raised:
+        library.generate_library(p, exports=["grow"], prefix="p")
+    assert [(f.rule, f.name) for f in raised.value.findings] == [("aot/library-resize", "grow")]
+    c_text, _header, _desc = library.generate_library(p, exports=["inner"], prefix="p")
+    assert "#define TPA_GROW_I64 1" in c_text

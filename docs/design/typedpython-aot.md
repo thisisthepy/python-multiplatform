@@ -286,12 +286,50 @@ as it is). Accepted: assignment of a str or None, `x is None` / `x is not None`,
 passing and returning, `print` / `str` / `repr` / f-string fields (`None` or the string), fields of classes. Every
 other use needs a str and is accepted only where the front end proves `x` is not None: inside `if x is not None:`,
 after `if x is None:` whose branch leaves (return, break, continue, `sys.exit`, raise from S3), in `a if x is not None
-else b`, and in `if x:` / `while x is not None:`, as long as `x` is not assigned in the guarded region. The read is
+else b`, and in `if x:` / `while x is not None:`; the tests combine through `and`, `or` and `not`. Only a local or a
+parameter is narrowed, never a field expression `o.x` (CPython reads the field again, and a call between the test and
+the use can rebind it; a program copies the field to a local first). The kill rule as implemented: a narrowing ends at
+an assignment of the name (an assignment of a str or of a proved name makes it proved again), and a loop removes, at
+its head, every name its body assigns, so `while n is not None: ...; n = n.next` is accepted. `assert x is not None`
+is not a narrowing until S3 compiles `assert` (an `assert` is refused today). The read is
 then `StrNarrow(x)` (no runtime work; under `-DTP_CHECK_PROVEN` it aborts on NULL, so the sanitizer job checks every
 proof). An unproved use is the finding `aot/optional`, naming the line: Pyrefly reports the same program as a type
 error, so a checked program never hits it. The same narrowing serves `C | None` class values, which today are read
-without a check (a None there crashes instead of raising AttributeError; fixed here: an unproved field read of an
-optional class value becomes `aot/optional` too).
+without a check (a None there is a NULL read in the generated C, undefined behaviour; fixed here: an unproved field
+read or method call through an optional class value becomes `aot/optional` too). This refuses programs that compiled
+before (AGENTS brief rule 5): the guard is test_aot_tier_s2a.py (the finding, not a crash) and the benchmarks
+`binary_trees.py` / `binary_trees_region.py`, which test their locals and still generate the same C.
+
+**Answers to the S2 design review (fable-pmp, 2026-11-22; agent proposal, not confirmed).**
+*B1, lengths that change.* A list kind takes the growable layout only when some function changes the length of a list
+of that kind (above); the other kinds keep the tier K layout and every tier K proof and the measured kernels as they
+are. For a growable kind: (1) the back end never keeps a list's `d` pointer or length across statements (every element
+access reads `l->d` and checks `l->len` at its own point, and a `len()` of a growable kind is read in evaluation order);
+(2) the verifier proves no bound for a list kind that any function can shrink (pop, clear, remove, and later `del` and
+slice assignment), through any alias, so such an access keeps its check; growing keeps every proof, since a length only
+rises; (3) a store evaluates its value before the slot is checked (`l[i] = f()` raises `IndexError: list assignment
+index out of range` when `f()` popped); (4) the self-referential operations copy from the moved block
+(`l.extend(l)`, `l += l`, `l.append(l.pop())`, `l.insert(0, l[-1])`, and slice assignment `l[a:b] = l` when it comes),
+each with a named test; (5) under `-DTP_CHECK_PROVEN` (the sanitizer job) every resize allocates a new block and frees
+the old one, so a stale item pointer is a use after free AddressSanitizer reports every time. The AOT back end has no
+parallel loop (N-15 belongs to the default mode), so no partition by length exists to invalidate.
+*B2, the library's thread promise.* Option (a) of the review: a list kind the library resizes cannot cross the export
+boundary (`aot/library-resize`, at the export) until tier T adds per-list locking; a kind resized only inside the
+library takes the growable layout there and never reaches the host. The boundary layout and the header's promise
+("the list never changes length", `_data` valid while the handle is held) stay true, so the ABI version stays 2.
+*B3, tracked containers at the boundary.* A container type the cycle collector tracks (below, B4) is refused at the
+export boundary with `aot/library-mutable-class` until tier T, as a mutable class is: the collector's state is
+thread-local under `TPA_THREADS`. No parallel body exists in the AOT mode (B1).
+*B4, containers in the cycle analysis.* Containers become nodes of the type graph of 6.3.1 (`list[T] -> T`,
+`tuple[...] ->` each member, `dict[K, V] -> K, V`, a class `->` its field types); a list or dict node is never
+immutable-after-init (it changes without any field assignment); the cyclic-capable set is, as in 6.3.2, every member of
+a component that has a cycle and a mutable member. So `children: list[Node]` makes `Node` cyclic-capable, while
+`list[list[int]]` and `list[Leaf]` (scalar fields) are not tracked. An element of an owned kind (big int, str, class,
+list, tuple, dict) read out of any container is a new reference, whatever field holds the container (elision rules 3
+and 4 of 6.3.1 never apply through a container); `pop` moves its reference out.
+*N1, NaN.* CPython's `in`, `index`, `count`, `remove` and list `==` test identity before equality, which unboxed
+doubles do not have. The AOT mode refuses those operations on a float list or a container holding floats
+(`aot/identity`) instead of answering differently; ordering (`<`) and printing are unaffected.
 
 **Windows console (S2a).** When standard output or error is a console (`GetConsoleMode` succeeds on its handle),
 the text is written as UTF-16 with `WriteConsoleW`, as CPython's `_WindowsConsoleIO` does; the encoded UTF-8 is

@@ -2633,6 +2633,10 @@ class _Lowerer:
         var = node.target.id
         if var in self.arrays or var in self.params:
             raise Skip(line, f"loop variable `{var}` is a list or a parameter")
+        if array in _stored_names(node.body):
+            # CPython's iterator holds the list it started on; this lowering reads the name at every step
+            raise Skip(line, f"`for {var} in {array}` whose body rebinds `{array}`: CPython keeps iterating the "
+                             "first list, which an AOT program does not hold yet; iterate a copy or another name")
         elem = Type.F64 if self.arrays[array] == Type.F64_ARRAY else Type.I64
         t = self.types.get(var) or self.local_type(var, line)
         if t is Type.OBJ:       # nothing but the loop binds it (Pyrefly gives a loop target no type): the element's
