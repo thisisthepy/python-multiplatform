@@ -131,6 +131,25 @@ fail, then implement.
   old prefixes are re-extracted, and the packaged copy fails the build on any 0-byte `libpython*`.
   `Status: implemented` -- `PM/desktopTest/.../ffi/DesktopJarLibrariesTest.kt`, `ExtractLibraryCacheTest.kt`,
   `GP/StagedPrefixLinksTest.kt`.
+- **L-9c** (#191) Kotlin/Native desktop consumers (`macosArm64`, `linuxX64`). Leader decision 2026-10-25 on #191
+  (item 3): "K/N CPython: libpython is shipped beside the executable (dynamic)". At run time (in
+  `desktopNativeMain`, `DesktopNativePythonHome`), before `Py_Initialize`, a desktop native binary takes the first
+  of: `PYTHONHOME` from the environment (CPython reads it itself); `<directory of the executable>/python-multiplatform-home`
+  when that directory exists; `<directory of the executable>/../Resources/python-multiplatform-home` (a macOS `.app`).
+  For a consumer applying the Gradle plugin, for each such target the plugin:
+  1. registers `stagePythonHome<Target>` (L-9's staging, for that target's platform `macos-aarch64` or
+     `linux-x86_64`, whatever the host), in the same per-machine cache;
+  2. links every executable and test binary of the target against the staged `libpython<X.Y>t`
+     (`-L<prefix>/lib -lpython<X.Y>t`), with the run-time search path
+     `@executable_path/python-multiplatform-home/lib` (macOS) or `$ORIGIN/python-multiplatform-home/lib` (Linux), and,
+     for debug and test binaries only, also the staged prefix's own `lib` (so a build path never ends up in a
+     release binary); the link tasks depend on the staging;
+  3. gives the target's host test task (`<target>Test`) `PYTHONHOME=<staged prefix>`, unless `PYTHONHOME` is
+     already set (L-9's rule);
+  4. after linking each executable, copies the packaged prefix (L-9's includes and excludes) to
+     `<the executable's output directory>/python-multiplatform-home`, unless `packagePythonHome` is false.
+  The library's own klib carries no libpython link option; a consumer that does not apply the plugin links it
+  itself. `Status: draft` (#191), `GP/DesktopNativeConsumerWiringTest.kt`.
 - **L-10** Desktop: the library uses no JDK module beyond `java.base`, so it runs on a `jlink`ed
   runtime such as the one Compose Desktop's `createDistributable` bundles (issue #77). In particular
   native memory is reached through `java.lang.foreign`, never `sun.misc.Unsafe` (module
