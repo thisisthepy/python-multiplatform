@@ -349,6 +349,11 @@ class Representation:
                         self.bind((f.name, RETURN), n.value, f, cur, "return")
                     elif isinstance(n, ir.Call):
                         self.bind_call(n, f, cur)
+                    elif isinstance(n, ir.ListExtend) and (f.name, n.array) in self._parent \
+                            and (f.name, n.other) in self._parent:
+                        # tier S2a: the items of `other` move into `array` (a copy of each item, so one group)
+                        self.union((f.name, n.array), (f.name, n.other), f.name, cur,
+                                   f"`{n.array}.extend({n.other})`")
                     elif isinstance(n, ir.New):
                         init_fn = self.fns.get(f"{n.cls}.__init__")
                         if init_fn is not None:
@@ -507,8 +512,10 @@ class Representation:
             return r.names.get(e.name, RAW)
         if isinstance(e, (ir.Len, ir.ArgvLen, ir.BoolToInt, ir.StrLen, ir.StrOrd, ir.StrWrite, ir.StrListLen, ir.StrMethod)):
             return RAW
-        if isinstance(e, ir.Index):
+        if isinstance(e, (ir.Index, ir.ListPop)):          # (ListPop: tier S2a, an element as Index reads it)
             return TAGGED if self.list_big(r.name, e.array) else RAW
+        if isinstance(e, ir.ListSearch):
+            return RAW                                     # a position or a count: inside the length
         if isinstance(e, ir.FieldGet):
             return self.field_reps.get((e.cls, e.field), RAW)
         if isinstance(e, (ir.ArgvInt, ir.FloatToInt, ir.StrToInt, ir.MathCall, ir.StrParseInt)):
@@ -611,7 +618,7 @@ class Representation:
                         if self.field_reps.get((n.cls, n.field), RAW) != TAGGED:
                             self.field_reps[(n.cls, n.field)] = TAGGED
                             changed = True
-                elif isinstance(n, ir.StoreIndex):
+                elif isinstance(n, (ir.StoreIndex, ir.ListAppend, ir.ListInsert)):     # (tier S2a: append, insert)
                     if (f.name, n.array) in self._parent and n.value.type is Type.I64 \
                             and self._of(r, n.value) == TAGGED:
                         changed |= self.mark_big((f.name, n.array), f.name, cur,

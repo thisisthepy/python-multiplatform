@@ -650,6 +650,83 @@ class StoreIndex(Stmt):
     proven: bool = False      # as in Index
 
 
+# --- AOT mode, tier S2a: lists that change length (design 4.3.2). `array` names a `list[float]` / `list[int]` local or
+# parameter (as Index); every alias of the list sees the change. A program with any of these on a list type gives that
+# type the growable layout (the emitter's `TPA_GROW_*` define).
+
+@dataclass(frozen=True)
+class ListAppend(Stmt):
+    """`array.append(value)`."""
+
+    array: str
+    value: Expr
+
+
+@dataclass(frozen=True)
+class ListInsert(Stmt):
+    """`array.insert(index, value)`: CPython's clamping (a negative index counts from the end, then 0 and len are the
+    limits; never an error)."""
+
+    array: str
+    index: Expr
+    value: Expr
+
+
+@dataclass(frozen=True)
+class ListExtend(Stmt):
+    """`array.extend(other)` and `array += other` (in place, the same object); `other` is a list name of the same type,
+    possibly `array` itself (CPython copies the items first, so the list doubles)."""
+
+    array: str
+    other: str
+
+
+@dataclass(frozen=True)
+class ListClear(Stmt):
+    """`array.clear()`."""
+
+    array: str
+
+
+@dataclass(frozen=True)
+class ListReverse(Stmt):
+    """`array.reverse()`."""
+
+    array: str
+
+
+@dataclass(frozen=True)
+class ListPop(Expr):
+    """`array.pop()` / `array.pop(index)`: the element, removed. IndexError("pop from empty list") on an empty list,
+    else IndexError("pop index out of range") for an index outside it (a negative index counts from the end)."""
+
+    array: str
+    index: Expr | None
+
+
+@dataclass(frozen=True)
+class ListSearch(Expr):
+    """`array.index(value)` (I64), `array.count(value)` (I64), `value in array` (BOOL), on a `list[int]` only (a
+    `list[float]` search depends on object identity for NaN in CPython, so it has no AOT form: `aot/identity`).
+    `index`: ValueError("<repr of value> is not in list") when absent."""
+
+    op: str                    # "index" | "count" | "in"
+    array: str
+    value: Expr
+
+
+@dataclass(frozen=True)
+class ListRemove(Stmt):
+    """`array.remove(value)` on a `list[int]`: the first equal element; ValueError("list.remove(x): x not in list")."""
+
+    array: str
+    value: Expr
+
+
+LIST_GROW_NODES = (ListAppend, ListInsert, ListExtend)
+LIST_SHRINK_NODES = (ListPop, ListClear, ListRemove)
+
+
 @dataclass(frozen=True)
 class FieldSet(Stmt):
     """`obj.field = value` on a proved-exact compiled class (as FieldGet). An effect, unless `obj` is

@@ -2529,7 +2529,7 @@ REJECTED = {
                                ("aot/type", 1, "tuple[list[float], int]")),
     # the constructs the AOT mode does not have yet, each named
     "list in a list": ("def f() -> int:\n    x = [[1.0]]\n    return 0\n", ("aot/front-end", 2, "f")),
-    "list method": ("def f(a: list[float]) -> None:\n    a.append(1.0)\n", ("aot/call", 2, "a.append")),
+    "list method": ("def f(a: list[float]) -> None:\n    a.sort()\n", ("aot/call", 2, "a.sort")),   # (append: S2a; sort: S2c)
     "list slice": ("def f(a: list[float]) -> int:\n    b = a[1:]\n    return 0\n", ("aot/front-end", 2, "f")),
     "list comparison": ("def f(a: list[float], b: list[float]) -> bool:\n    return a == b\n", ("aot/front-end", 2, "f")),
     "list printed": ("def f(a: list[float]) -> None:\n    print(a)\n", ("aot/front-end", 2, "f")),

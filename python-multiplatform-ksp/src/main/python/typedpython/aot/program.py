@@ -605,6 +605,9 @@ class _Checker:
                 elif not (isinstance(a, ast.Constant) and a.value is None):
                     self.expr(a)
             return
+        elif isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.attr in LIST_METHODS \
+                and not (f.value.id in ("sys", "math", "time") and f.value.id not in self.shadow):
+            pass                            # tier S2a: a list method (the front end checks the receiver is a list)
         else:
             self.rep.error(f, "aot/call", ast.unparse(f), f"the call of `{ast.unparse(f)}` is outside the first AOT step")
         for a in c.args:
@@ -646,6 +649,10 @@ def _is_list_annotation(ann: ast.expr) -> bool:
     """`list[float]` or `list[int]`."""
     return (isinstance(ann, ast.Subscript) and isinstance(ann.value, ast.Name) and ann.value.id == "list"
             and isinstance(ann.slice, ast.Name) and ann.slice.id in LIST_ELEMENTS)
+
+
+# tier S2a: the methods of a list (design 4.3.2)
+LIST_METHODS = frozenset({"append", "insert", "extend", "clear", "reverse", "remove", "pop", "index", "count"})
 
 
 def _is_optional_str_annotation(ann: ast.expr) -> bool:

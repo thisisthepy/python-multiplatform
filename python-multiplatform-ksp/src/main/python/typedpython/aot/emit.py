@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import functools
 import re
 
 from typedpython import ir, resume
@@ -583,6 +584,22 @@ class _Gen:
             return None
         kinds = ir.aot_tuple_kinds(f)
         return kinds if kinds is not None and all(k in CTYPE for k in kinds) else None
+
+    @functools.cached_property
+    def grown(self) -> frozenset[str]:
+        return frozenset(self.grown_kinds())
+
+    def grown_kinds(self) -> list[str]:
+        """Tier S2a: the list kinds ("f64", "i64", "int") some function changes the length of, sorted."""
+        kinds = set()
+        for f in self.fns.values():
+            types = {p.name: p.type for p in f.params if isinstance(p, ir.ArrayParam)}
+            types.update(f.locals)
+            for s in f.body:
+                for n in rep_mod.walk(s):
+                    if isinstance(n, ir.LIST_GROW_NODES + ir.LIST_SHRINK_NODES) and types.get(n.array) in LIST:
+                        kinds.add(self.array_kind(f.name, n.array, types[n.array]))
+        return sorted(kinds)
 
     def array_kind(self, fn: str, name: str, t: Type) -> str:
         """The kind of the list `name` of function `fn` (of array type `t`)."""
@@ -1626,7 +1643,15 @@ class _Fn:
 
     def ev_Len(self, e: ir.Len) -> str:
         found = self.list_of(e.array, "len()")
-        return f"({found[0]}->len)" if found else "0"
+        if not found:
+            return "0"
+        if self.kind(e.array) in self.g.grown:
+            # tier S2a: a length that can change is read here, in evaluation order (`print(len(a), a.pop())` prints
+            # the length before the pop), as an element read is
+            t = self.tmp("int64_t")
+            self.emit(f"{t} = {found[0]}->len;")
+            return t
+        return f"({found[0]}->len)"
 
     def ev_Index(self, e: ir.Index) -> str:
         """`a[i]`: the element is read into a temporary at this point, in order, so that a call evaluated
@@ -2180,6 +2205,110 @@ class _Fn:
             self.emit(f"if (tpa_slot({arr}->len, {idx}, 1, &{slot})) {self.fail()}")
             put(slot)
 
+    # --- tier S2a: lists that change length (design 4.3.2) ---
+
+    def grow_list(self, name: str, what: str) -> tuple[str, str] | None:
+        """(C name, kind) of the list `name` an append / insert / extend / pop / clear / reverse works on."""
+        found = self.list_of(name, what)
+        return None if found is None else (found[0], self.kind(name))
+
+    def list_item_c(self, e: ir.Expr, name: str) -> str:
+        """An item given to a list method: borrowed TAGGED for a big-capable list (the list takes its own reference),
+        the native value for a raw or float list."""
+        if self.types.get(name) in LIST and self.kind(name) == "int":
+            return self.tagged(e)
+        if e.type is Type.I64 and self.rep(e) == TAGGED:
+            self.bad("aot/type", name, f"a TAGGED value is stored into the raw list `{name}` (the list classification "
+                     "did not converge)")
+        return self.ev(e)
+
+    def st_ListAppend(self, s: ir.ListAppend) -> None:
+        v = self.list_item_c(s.value, s.array)
+        found = self.grow_list(s.array, "an append")
+        if found is not None:
+            self.emit(f"if ({lfn(found[1], 'append')}({found[0]}, {v})) {self.fail()}")
+
+    def st_ListInsert(self, s: ir.ListInsert) -> None:
+        idx = self.index_c(s.index)                         # CPython evaluates the index, then the item
+        v = self.list_item_c(s.value, s.array)
+        found = self.grow_list(s.array, "an insert")
+        if found is not None:
+            self.emit(f"if ({lfn(found[1], 'insert')}({found[0]}, {idx}, {v})) {self.fail()}")
+
+    def st_ListExtend(self, s: ir.ListExtend) -> None:
+        found = self.grow_list(s.array, "an extend")
+        other = self.list_of(s.other, "an extend source")
+        if found is not None and other is not None:
+            if self.kind(s.other) != found[1]:
+                self.bad("aot/type", s.array, f"`{s.array}.extend({s.other})` joins lists of two kinds (the list "
+                         "classification did not merge them)")
+                return
+            self.emit(f"if ({lfn(found[1], 'extend')}({found[0]}, {other[0]})) {self.fail()}")
+
+    def st_ListClear(self, s: ir.ListClear) -> None:
+        found = self.grow_list(s.array, "a clear")
+        if found is not None:
+            self.emit(f"{lfn(found[1], 'clear')}({found[0]});")
+
+    def st_ListReverse(self, s: ir.ListReverse) -> None:
+        found = self.grow_list(s.array, "a reverse")
+        if found is not None:
+            self.emit(f"{lfn(found[1], 'reverse')}({found[0]});")
+
+    def search_value(self, value: ir.Expr, kind: str, name: str) -> str | None:
+        """The searched value in the form the list's kind compares: TAGGED for a big-capable list, a RAW int64 for a
+        raw one (a TAGGED value searched in a raw list is not in the AOT mode yet)."""
+        if kind == "int":
+            return self.tagged(value)
+        if kind == "i64" and not (value.type is Type.I64 and self.rep(value) == TAGGED):
+            return self.ev(value)
+        self.ev(value)
+        self.bad("aot/type", name, f"the raw list `{name}` is searched for an int that is not proved inside int64 (not "
+                 "in the AOT mode yet)")
+        return None
+
+    def st_ListRemove(self, s: ir.ListRemove) -> None:
+        found = self.grow_list(s.array, "a remove")
+        if found is None:
+            return
+        v = self.search_value(s.value, found[1], s.array)
+        if v is not None:
+            self.emit(f"if ({lfn(found[1], 'remove')}({found[0]}, {v})) {self.fail()}")
+
+    def index_c(self, e: ir.Expr) -> str:
+        """An index argument of insert / pop as an int64."""
+        if self.rep(e) == TAGGED:
+            self.bad("aot/type", "index", "a list method's index that is not proved inside int64 is not in the AOT mode "
+                     "yet")
+        return self.ev(e)
+
+    def ev_ListPop(self, e: ir.ListPop) -> str:
+        idx = self.index_c(e.index) if e.index is not None else "0"
+        found = self.grow_list(e.array, "a pop")
+        if found is None:
+            return "0"
+        kind = found[1]
+        t = self.tslot() if kind == "int" else self.tmp("double" if kind == "f64" else "int64_t")
+        has = 0 if e.index is None else 1
+        self.emit(f"if ({lfn(kind, 'pop')}({found[0]}, {has}, {idx}, &{t})) {self.fail()}")
+        return t
+
+    def ev_ListSearch(self, e: ir.ListSearch) -> str:
+        found = self.list_of(e.array, f"list.{e.op}")
+        if found is None:
+            return "0"
+        kind = self.kind(e.array)
+        v = self.search_value(e.value, kind, e.array)
+        if v is None:
+            return "0"
+        if e.op == "count":
+            return f"{lfn(kind, 'count')}({found[0]}, {v})"
+        if e.op == "in":
+            return f"{lfn(kind, 'contains')}({found[0]}, {v})"
+        t = self.tmp("int64_t")
+        self.emit(f"if ({lfn(kind, 'index')}({found[0]}, {v}, &{t})) {self.fail()}")
+        return t
+
     def st_ExprStmt(self, s: ir.ExprStmt) -> None:
         if isinstance(s.value, ir.Const):
             return                # a docstring or another constant: nothing to evaluate
@@ -2718,6 +2847,8 @@ def emit(module: ir.Module, program: Program, *, strict_int: bool = False,
     body_text = "\n".join(class_decls + prototypes + class_ctors + [line for b in bodies for line in b])
     out = [
         "/* Generated by typedpython.aot (SPEC N-17, #448). No interpreter header, no interpreter API. */",
+        # tier S2a: a list kind whose length the program changes takes the growable layout (none: the C as before)
+        *[f"#define TPA_GROW_{k.upper()} 1" for k in g.grown_kinds()],
         '#include "tp_aot.h"',
     ]
     if needs_int_runtime(body_text) or g.uses_str:

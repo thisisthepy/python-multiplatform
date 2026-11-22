@@ -147,6 +147,8 @@ def _aot_kind(kind: str) -> str:
     `LiteralString`, also inside a generic, is a str)."""
     kind = kind.strip("'\"").replace("typing.LiteralString", "str").replace("LiteralString", "str")
     return kind
+# AOT mode, tier S2a: the list methods called as statements (they return None)
+LIST_STMT_METHODS = frozenset({"append", "insert", "extend", "clear", "reverse", "remove"})
 # AOT mode, tier S1b: the str methods (design 4.3.1): name -> (parameter names in order, the result type)
 STR_METHODS = {
     "split": (("sep", "maxsplit"), Type.STR_LIST), "join": (("iterable",), Type.STR),
@@ -1694,6 +1696,8 @@ class _Lowerer:
                     return self.aot_sys_exit(node.value)
                 if mod == "time" and attr == "sleep" and self.info.aot_time and not self.is_local("time"):
                     return self.aot_time_sleep(node.value)
+                if mod in self.arrays and attr in LIST_STMT_METHODS:
+                    return self.list_method_stmt(node.value)             # tier S2a
             value = self.sub(node.value)
             return self.take() + [ir.ExprStmt(value)]
         if isinstance(node, ast.Assign):
@@ -2141,6 +2145,84 @@ class _Lowerer:
                 raise _optional(line, args[0])
             raise Skip(line, f"len() of a {TYPE_NAME.get(x.type, x.type.value)} is not supported in an AOT program")
         return None
+
+    # --- AOT mode, tier S2a: the methods of a list[float] / list[int] (design 4.3.2) ---
+
+    def list_elem(self, array: str) -> Type:
+        return Type.F64 if self.arrays[array] == Type.F64_ARRAY else Type.I64
+
+    def list_item(self, array: str, node: ast.expr, what: str) -> ir.Expr:
+        """An item stored into `array`: its element type exactly (an int stored into a list of float stays an int in
+        CPython, so it has no AOT form, as for `a[i] = v`)."""
+        return self.coerce(self.value(node), self.list_elem(array), node, what)
+
+    def list_index_arg(self, node: ast.expr, what: str) -> ir.Expr:
+        e = self.value(node)
+        if e.type is Type.BOOL:
+            e = ir.BoolToInt(Type.I64, e)
+        if e.type is not Type.I64:
+            raise Skip(node.lineno, f"{what} `{_src(node)}` is {TYPE_NAME.get(e.type, e.type.value)}, not an int")
+        return e
+
+    def list_method_stmt(self, node: ast.Call) -> list[ir.Stmt]:
+        """`a.append(v)`, `a.insert(i, v)`, `a.extend(b)`, `a.clear()`, `a.reverse()`, `a.remove(v)` as statements."""
+        func = node.func
+        assert isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+        array, m, args, line = func.value.id, func.attr, node.args, node.lineno
+        want = {"append": 1, "insert": 2, "extend": 1, "clear": 0, "reverse": 0, "remove": 1}[m]
+        if node.keywords or len(args) != want:
+            raise Skip(line, f"`{_src(node)}`: list.{m}() takes {want} positional argument(s) in an AOT program")
+        self.hoist_ok = False
+        self.store_effect(array)
+        what = f"the item given to `{array}.{m}`"
+        if m == "append":
+            out: ir.Stmt = ir.ListAppend(array, self.list_item(array, args[0], what))
+        elif m == "insert":
+            at = self.list_index_arg(args[0], f"the index of `{array}.insert`")
+            out = ir.ListInsert(array, at, self.list_item(array, args[1], what))
+        elif m == "extend":
+            other = args[0]
+            if not (isinstance(other, ast.Name) and other.id in self.arrays
+                    and self.arrays[other.id] == self.arrays[array]):
+                raise Skip(line, f"`{_src(node)}`: an AOT program extends a list by another list name of its type")
+            out = ir.ListExtend(array, other.id)
+        elif m == "clear":
+            out = ir.ListClear(array)
+        elif m == "reverse":
+            out = ir.ListReverse(array)
+        else:
+            out = ir.ListRemove(array, self.list_search_value(array, args[0], node))
+        return self.take() + [out]
+
+    def list_search_value(self, array: str, node: ast.expr, call: ast.AST) -> ir.Expr:
+        if self.arrays[array] == Type.F64_ARRAY:
+            raise Skip(call.lineno, f"`{_src(call)}`: searching a list of float depends on object identity for NaN in "
+                                    "CPython (`x in a` is `y is x or y == x` for each item), which an AOT program does "
+                                    "not have (aot/identity)")
+        e = self.value(node)
+        if e.type is Type.BOOL:
+            e = ir.BoolToInt(Type.I64, e)           # True == 1 in CPython
+        if e.type is not Type.I64:
+            raise Skip(call.lineno, f"`{_src(call)}`: the value searched for is "
+                                    f"{TYPE_NAME.get(e.type, e.type.value)}, not an int")
+        return e
+
+    def list_method_expr(self, func: ast.Attribute, node: ast.Call) -> ir.Expr:
+        """`a.pop()`, `a.pop(i)`, `a.index(v)`, `a.count(v)` as values; a method that returns None is refused here."""
+        assert isinstance(func.value, ast.Name)
+        array, m, args, line = func.value.id, func.attr, node.args, node.lineno
+        if m in LIST_STMT_METHODS:
+            raise Skip(line, f"`{_src(node)}` returns None; an AOT program calls list.{m}() as a statement")
+        if node.keywords:
+            raise Skip(line, f"`{_src(node)}`: keyword arguments of list.{m}() are not supported")
+        self.hoist_ok = False
+        if m == "pop" and len(args) <= 1:
+            self.store_effect(array)
+            at = self.list_index_arg(args[0], f"the index of `{array}.pop`") if args else None
+            return ir.ListPop(self.list_elem(array), array, at)
+        if m in ("index", "count") and len(args) == 1:
+            return ir.ListSearch(Type.I64, m, array, self.list_search_value(array, args[0], node))
+        raise Skip(line, f"`{_src(node)}`: list.{m}() is not supported in an AOT program yet")
 
     def str_receiver(self, node: ast.expr) -> bool:
         """Is `node` (the receiver of a method call) a str value rather than a module or an instance of a compiled
@@ -3192,6 +3274,10 @@ class _Lowerer:
             math = self.math_call(func.attr, node)
             if math is not None:
                 return math
+
+        if self.info.aot and isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) \
+                and func.value.id in self.arrays:
+            return self.list_method_expr(func, node)                     # tier S2a
 
         if self.info.aot and isinstance(func, ast.Attribute):
             write = self.std_write(func, node)

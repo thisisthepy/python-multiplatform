@@ -371,6 +371,7 @@ from .ir import (
 from .ir import CheckExact, CheckMethod, ClassDecl, FieldGet, FieldSet, Is, IsExact, New
 from .ir import BuildString, Contains, ForObj, Format, GetItem, NewDict, NewList, StoreItem
 from .ir import ParInfo
+from .ir import ListAppend, ListClear, ListExtend, ListInsert, ListPop, ListRemove, ListReverse, ListSearch
 
 DA = "verify/definite-assignment"
 MISSING_RETURN = "verify/missing-return"
@@ -426,14 +427,15 @@ _STMTS = frozenset({Assign, StoreIndex, ExprStmt, If, While, ForRange, Return, B
                     FieldSet, StoreItem, ForObj})
 # The statements and expressions only the AOT mode (`verify(m, aot=True)`) accepts. (An `FString` and its
 # `FormatField`s are checked by `s_Print`, which is the only place one may stand.)
-_AOT_STMTS = frozenset({Print, ReturnTuple, Unpack, TimeSleep, SysExit, ForStr})
+_AOT_STMTS = frozenset({Print, ReturnTuple, Unpack, TimeSleep, SysExit, ForStr,
+                        ListAppend, ListInsert, ListExtend, ListClear, ListReverse, ListRemove})     # tier S2a
 _AOT_EXPRS = frozenset({ListDisplay, Cond, ArgvInt, ArgvLen, FloatToInt, BoolToInt, StrToInt, TimeCall,
                         # tier S1 (PR-S1a): the STR nodes, and an f-string that is a str value
                         StrConcat, StrRepeat, StrCompare, StrContains, StrLen, StrIndex, StrSlice, StrOf, StrOrd,
                         StrChr, ArgvStr, StrParseInt, StrWrite, FString,
                         # tier S1b
                         StrMethod, StrListDisplay, StrListLen, StrListIndex,
-                        StrNarrow})                 # tier S2a
+                        StrNarrow, ListPop, ListSearch})                 # tier S2a
 # Nodes whose OBJ result is a new reference (ir.py "ownership": Box, Global, GetAttr, CallObject,
 # OBJ BinOp, Tuple), plus reads of an OBJ local (the local owns its reference; the back end increfs or
 # borrows under that rule) and Calls of a compiled function returning OBJ (which returns a new
@@ -486,6 +488,22 @@ _SOUND_CAP = 2 ** 128
 _State = frozenset[str] | None
 
 
+def _shrinking_list_types(functions) -> frozenset:
+    """AOT mode, tier S2a: the list types (F64_ARRAY, I64_ARRAY) some function shrinks (ir.LIST_SHRINK_NODES)."""
+    out = set()
+    for f in functions:
+        if type(f) is not Function:
+            continue
+        types = {p.name: p.type for p in f.params if type(p) is ArrayParam}
+        types.update(f.locals if isinstance(f.locals, dict) else {})
+        for n in _nodes(f.body):
+            if isinstance(n, ir.LIST_SHRINK_NODES):
+                t = types.get(n.array)
+                if t is not None:
+                    out.add(t)
+    return frozenset(out)
+
+
 def _meet(a: _State, b: _State) -> _State:
     if a is None:
         return b
@@ -536,6 +554,9 @@ class _Checker:
         self.dead = 0                        # >0: inside code that is bottom in this round
         self.refine: dict[str, tuple[int, int]] = {}   # guard facts at this point
         self.sigs = signatures
+        # AOT mode, tier S2a: the list types some function of the program can shrink (pop, clear, remove), through
+        # any alias; no length fact about a list of such a type outlives the statement that read it
+        self.shrinking = _shrinking_list_types(signatures.values()) if aot else frozenset()
         self.classes = classes or {}
         self.facts: dict[str, str] = {}      # local -> class it is proved exactly (see docstring)
         self.optional: dict[str, str] = {}   # optional-class parameter -> class
@@ -1500,7 +1521,10 @@ class _Checker:
         range(c >= 0, len(array), step > 0) (for a local array, one whose body never assigns it), or
         -- for a local array of known length -- idx has an interval inside [0, minimum length - 1].
         The var is never assigned in the body (checked), the stop is evaluated once, and no IR node
-        changes an array's length."""
+        shrinks an array (AOT tier S2a: a list type the program can shrink anywhere proves nothing here; growing
+        keeps every fact, a length only rises)."""
+        if (self.arrays.get(array) or self.larrays.get(array)) in self.shrinking:
+            return False
         if array in self.lens and getattr(idx, "type", None) is Type.I64:
             lo, hi = self.interval(idx)
             if 0 <= lo and hi < self.lens[array][0]:
@@ -2143,6 +2167,77 @@ class _Checker:
             self.effects.append(f"stores into '{s.array}'")
         self.sound_record(s, proven)
         return dataclasses.replace(s, index=idx, value=value, proven=proven), state
+
+    # --- AOT mode, tier S2a: lists that change length (ir.ListAppend ...) ---
+
+    def list_changed(self, array: str, node: str, state: _State) -> Type | None:
+        if not self.aot:
+            self.error(UNKNOWN, f"{node} is an AOT-mode node")
+        at = self.array(array, node, state)
+        if array not in self.larrays:      # a parameter's list is the caller's: an effect, as a store is
+            self.stored.add(array)
+            self.effects.append(f"{node} on '{array}'")
+        return at
+
+    def list_item(self, value: object, at: Type | None, node: str, array: str, state: _State) -> ir.Expr:
+        v = self.expr(value, state)
+        if at is not None:
+            self.slot(v, _ELEMENT[at], f"item given to {node} of '{array}'")
+        return v
+
+    def s_ListAppend(self, s: ListAppend, state: _State):
+        at = self.list_changed(s.array, "append", state)
+        return dataclasses.replace(s, value=self.list_item(s.value, at, "append", s.array, state)), state
+
+    def s_ListInsert(self, s: ListInsert, state: _State):
+        at = self.list_changed(s.array, "insert", state)
+        idx = self.expr(s.index, state)
+        self.slot(idx, Type.I64, f"index of insert into '{s.array}'")
+        return dataclasses.replace(s, index=idx, value=self.list_item(s.value, at, "insert", s.array, state)), state
+
+    def s_ListExtend(self, s: ListExtend, state: _State):
+        at = self.list_changed(s.array, "extend", state)
+        other = self.array(s.other, "extend source", state)
+        if at is not None and other is not None and at is not other:
+            self.error(TYPE, f"extend of '{s.array}' ({at.value}) by '{s.other}' ({other.value})")
+        return s, state
+
+    def s_ListClear(self, s: ListClear, state: _State):
+        self.list_changed(s.array, "clear", state)
+        return s, state
+
+    def s_ListReverse(self, s: ListReverse, state: _State):
+        self.list_changed(s.array, "reverse", state)
+        return s, state
+
+    def s_ListRemove(self, s: ListRemove, state: _State):
+        at = self.list_changed(s.array, "remove", state)
+        if at is not Type.I64_ARRAY and at is not None:
+            self.error(TYPE, f"remove from '{s.array}' ({at.value}): only a list of int is searched")
+        return dataclasses.replace(s, value=self.list_item(s.value, at, "remove", s.array, state)), state
+
+    def e_ListPop(self, e: ListPop, state: _State) -> ir.Expr:
+        at = self.list_changed(e.array, "pop", state)
+        idx = None
+        if e.index is not None:
+            idx = self.expr(e.index, state)
+            self.slot(idx, Type.I64, f"index of pop from '{e.array}'")
+        if at is not None and e.type is not _ELEMENT[at]:
+            self.error(TYPE, f"pop of '{e.array}' gives {_ELEMENT[at].value}, node says {e.type.value}")
+        return dataclasses.replace(e, index=idx)
+
+    def e_ListSearch(self, e: ListSearch, state: _State) -> ir.Expr:
+        if not self.aot:
+            self.error(UNKNOWN, "ListSearch is an AOT-mode node")
+        at = self.array(e.array, e.op, state)
+        if at is not Type.I64_ARRAY and at is not None:
+            self.error(TYPE, f"{e.op} of '{e.array}' ({at.value}): only a list of int is searched")
+        want = Type.BOOL if e.op == "in" else Type.I64
+        if e.op not in ("index", "count", "in") or e.type is not want:
+            self.error(TYPE, f"ListSearch {e.op!r} gives {want.value}, node says {getattr(e.type, 'value', e.type)}")
+        v = self.expr(e.value, state)
+        self.slot(v, Type.I64, f"value searched in '{e.array}'")
+        return dataclasses.replace(e, value=v)
 
     def s_ExprStmt(self, s: ExprStmt, state: _State):
         if self.aot and type(s.value) is Call:

@@ -1198,8 +1198,20 @@ static inline int tpa_math_hypot(double x, double y, double *out)
  * parameter is borrowed: the caller keeps it alive for the call, and two parameters may be the same
  * list, as two names of one list are in the source language.
  * ------------------------------------------------------------------------------------------ */
+/* Tier S2a (design 4.3.2): a program that changes the length of a list of some kind defines TPA_GROW_<KIND> before
+ * this header, and that kind takes the growable layout: the items in their own block `d`, which append / insert /
+ * extend / pop / clear may move while the list object (every name of it) stays. The field names are the same, so an
+ * element access `l->d[i]` and a length read `l->len` are the same C text in both layouts. */
+#if defined(TPA_GROW_F64)
+typedef struct tpa_f64_list { tpa_rc_t rc; int64_t len; int64_t cap; double *d; } tpa_f64_list;
+#else
 typedef struct tpa_f64_list { tpa_rc_t rc; int64_t len; double d[]; } tpa_f64_list;
+#endif
+#if defined(TPA_GROW_I64)
+typedef struct tpa_i64_list { tpa_rc_t rc; int64_t len; int64_t cap; int64_t *d; } tpa_i64_list;
+#else
 typedef struct tpa_i64_list { tpa_rc_t rc; int64_t len; int64_t d[]; } tpa_i64_list;
+#endif
 
 /* tp_runtime.h lines 1583 to 1599, tp__local_alloc: a negative length is an empty list (CPython's
  * `[x] * -1 == []`), and a size that overflows is a MemoryError, never a wrapped small allocation. */
@@ -1241,7 +1253,8 @@ out_of_range:
     return tpa_raise(TPA_IndexError, store ? "list assignment index out of range" : "list index out of range");
 }
 
-#define TPA__DEF_LIST(NAME, CT)                                                                   \
+/* The fixed layout: one block, the items after the header. */
+#define TPA__DEF_LIST_ALLOC_FIXED(NAME, CT)                                                       \
     static inline int tpa_##NAME##_alloc(int64_t n, tpa_##NAME##_list **out)                      \
     {                                                                                             \
         int64_t len = 0;                                                                          \
@@ -1255,6 +1268,156 @@ out_of_range:
         *out = l;                                                                                 \
         return 0;                                                                                 \
     }                                                                                             \
+    static inline void tpa_##NAME##__free(tpa_##NAME##_list *l)                                   \
+    {                                                                                             \
+        free(l);                                                                                  \
+    }
+
+/* Tier S2a, the growable layout: the header, and the items in a block of `cap` slots (NULL while cap is 0). The
+ * growth policy is CPython's list_resize (Objects/listobject.c, 3.15): keep the block while the new length is
+ * within [cap/2, cap], else allocate (n + n/8 + 6) & ~3 slots, or (n + 3) & ~3 when the jump is larger than that
+ * over-allocation, and nothing for an empty list. The policy is not observable (sys.getsizeof is not exposed); it
+ * sets the amortised cost of append. A failed resize leaves the list as it was. */
+#define TPA__DEF_LIST_ALLOC_GROW(NAME, CT)                                                        \
+    static inline int tpa_##NAME##__resize(tpa_##NAME##_list *l, int64_t n)                       \
+    {                                                                                             \
+        uint64_t want;                                                                            \
+        CT *d;                                                                                    \
+        if (l->cap >= n && n >= (l->cap >> 1)) {                                                  \
+            l->len = n;                                                                           \
+            return 0;                                                                             \
+        }                                                                                         \
+        want = ((uint64_t)n + ((uint64_t)n >> 3) + 6u) & ~(uint64_t)3;                            \
+        if ((uint64_t)(n - l->len) > want - (uint64_t)n) {                                        \
+            want = ((uint64_t)n + 3u) & ~(uint64_t)3;                                             \
+        }                                                                                         \
+        if (n == 0) {                                                                             \
+            want = 0;                                                                             \
+        }                                                                                         \
+        if (want > (uint64_t)(SIZE_MAX / sizeof(CT)) || want > (uint64_t)INT64_MAX) {             \
+            return tpa_raise(TPA_MemoryError, "");                                                \
+        }                                                                                         \
+        if (want == 0) {                                                                          \
+            free(l->d);                                                                           \
+            d = NULL;                                                                             \
+        }                                                                                         \
+        else {                                                                                    \
+            d = (CT *)realloc(l->d, (size_t)want * sizeof(CT));                                   \
+            if (d == NULL) {                                                                      \
+                return tpa_raise(TPA_MemoryError, "");                                            \
+            }                                                                                     \
+        }                                                                                         \
+        l->d = d;                                                                                 \
+        l->cap = (int64_t)want;                                                                   \
+        l->len = n;                                                                               \
+        return 0;                                                                                 \
+    }                                                                                             \
+    static inline int tpa_##NAME##_alloc(int64_t n, tpa_##NAME##_list **out)                      \
+    {                                                                                             \
+        tpa_##NAME##_list *l = (tpa_##NAME##_list *)calloc(1, sizeof(tpa_##NAME##_list));         \
+        if (l == NULL) {                                                                          \
+            return tpa_raise(TPA_MemoryError, "");                                                \
+        }                                                                                         \
+        if (n < 0) {                                                                              \
+            n = 0;                      /* `[x] * -1 == []` */                                    \
+        }                                                                                         \
+        if (n > 0) {                                                                              \
+            if ((uint64_t)n > (uint64_t)(SIZE_MAX / sizeof(CT))) {                                \
+                free(l);                                                                          \
+                return tpa_raise(TPA_MemoryError, "");                                            \
+            }                                                                                     \
+            l->d = (CT *)malloc((size_t)n * sizeof(CT));                                          \
+            if (l->d == NULL) {                                                                   \
+                free(l);                                                                          \
+                return tpa_raise(TPA_MemoryError, "");                                            \
+            }                                                                                     \
+        }                                                                                         \
+        l->rc = 1;                                                                                \
+        l->len = n;                                                                               \
+        l->cap = n;                                                                               \
+        *out = l;                                                                                 \
+        return 0;                                                                                 \
+    }                                                                                             \
+    static inline void tpa_##NAME##__free(tpa_##NAME##_list *l)                                   \
+    {                                                                                             \
+        free(l->d);                                                                               \
+        free(l);                                                                                  \
+    }                                                                                             \
+    static inline int tpa_##NAME##_append(tpa_##NAME##_list *l, CT v)                             \
+    {                                                                                             \
+        if (tpa_##NAME##__resize(l, l->len + 1)) {                                                \
+            return -1;                                                                            \
+        }                                                                                         \
+        l->d[l->len - 1] = v;                                                                     \
+        return 0;                                                                                 \
+    }                                                                                             \
+    /* list.insert: CPython's clamping (ins1: a negative index counts from the end, then 0 .. len) */ \
+    static inline int tpa_##NAME##_insert(tpa_##NAME##_list *l, int64_t i, CT v)                  \
+    {                                                                                             \
+        int64_t n = l->len;                                                                       \
+        if (i < 0) {                                                                              \
+            i += n;                                                                               \
+            if (i < 0) {                                                                          \
+                i = 0;                                                                            \
+            }                                                                                     \
+        }                                                                                         \
+        if (i > n) {                                                                              \
+            i = n;                                                                                \
+        }                                                                                         \
+        if (tpa_##NAME##__resize(l, n + 1)) {                                                     \
+            return -1;                                                                            \
+        }                                                                                         \
+        memmove(l->d + i + 1, l->d + i, (size_t)(n - i) * sizeof(CT));                            \
+        l->d[i] = v;                                                                              \
+        return 0;                                                                                 \
+    }                                                                                             \
+    /* list.extend / `+=` of a list of the same kind, possibly `l` itself (the list doubles) */  \
+    static inline int tpa_##NAME##_extend(tpa_##NAME##_list *l, const tpa_##NAME##_list *o)       \
+    {                                                                                             \
+        int64_t n = l->len, m = o->len;                                                           \
+        if (m == 0) {                                                                             \
+            return 0;                                                                             \
+        }                                                                                         \
+        if (tpa_##NAME##__resize(l, n + m)) {                                                     \
+            return -1;                                                                            \
+        }                                                                                         \
+        memcpy(l->d + n, o->d, (size_t)m * sizeof(CT));   /* (o == l: o->d is the moved block) */ \
+        return 0;                                                                                 \
+    }                                                                                             \
+    static inline void tpa_##NAME##_clear(tpa_##NAME##_list *l)                                   \
+    {                                                                                             \
+        free(l->d);                                                                               \
+        l->d = NULL;                                                                              \
+        l->len = 0;                                                                               \
+        l->cap = 0;                                                                               \
+    }                                                                                             \
+    /* list.pop(): Objects/listobject.c list_pop_impl, the empty test first, then the index */    \
+    static inline int tpa_##NAME##_pop(tpa_##NAME##_list *l, int has_index, int64_t i, CT *out)   \
+    {                                                                                             \
+        int64_t n = l->len;                                                                       \
+        CT v;                                                                                     \
+        if (n == 0) {                                                                             \
+            return tpa_raise(TPA_IndexError, "pop from empty list");                              \
+        }                                                                                         \
+        if (!has_index) {                                                                         \
+            i = n - 1;                                                                            \
+        }                                                                                         \
+        if (i < 0) {                                                                              \
+            i += n;                                                                               \
+        }                                                                                         \
+        if (i < 0 || i >= n) {                                                                    \
+            return tpa_raise(TPA_IndexError, "pop index out of range");                           \
+        }                                                                                         \
+        v = l->d[i];                                                                              \
+        memmove(l->d + i, l->d + i + 1, (size_t)(n - i - 1) * sizeof(CT));                        \
+        if (tpa_##NAME##__resize(l, n - 1)) {   /* a shrink only fails to give memory back: the */ \
+            l->len = n - 1;                     /* list is one shorter all the same (the record   */ \
+        }                                       /* of the failure is never read: no -1 follows)   */ \
+        *out = v;                                                                                 \
+        return 0;                                                                                 \
+    }
+
+#define TPA__DEF_LIST(NAME, CT)                                                                   \
     static inline int tpa_##NAME##_fill(int64_t n, CT v, tpa_##NAME##_list **out)                 \
     {                                                                                             \
         int64_t i;                                                                                \
@@ -1285,12 +1448,83 @@ out_of_range:
     static inline void tpa_##NAME##_release(tpa_##NAME##_list *l)                                 \
     {                                                                                             \
         if (l != NULL && TPA_RC_DEC_IS_ZERO(l)) {                                                 \
-            free(l);                                                                              \
+            tpa_##NAME##__free(l);                                                                \
+        }                                                                                         \
+    }                                                                                             \
+    /* list.reverse() */                                                                          \
+    static inline TPA_UNUSED void tpa_##NAME##_reverse(tpa_##NAME##_list *l)                      \
+    {                                                                                             \
+        int64_t i, j;                                                                             \
+        for (i = 0, j = l->len - 1; i < j; i++, j--) {                                            \
+            CT t = l->d[i];                                                                       \
+            l->d[i] = l->d[j];                                                                    \
+            l->d[j] = t;                                                                          \
         }                                                                                         \
     }
+#if defined(TPA_GROW_F64)
+TPA__DEF_LIST_ALLOC_GROW(f64, double)
+#else
+TPA__DEF_LIST_ALLOC_FIXED(f64, double)
+#endif
+#if defined(TPA_GROW_I64)
+TPA__DEF_LIST_ALLOC_GROW(i64, int64_t)
+#else
+TPA__DEF_LIST_ALLOC_FIXED(i64, int64_t)
+#endif
 TPA__DEF_LIST(f64, double)
 TPA__DEF_LIST(i64, int64_t)
 #undef TPA__DEF_LIST
+
+/* Tier S2a: searching a list[int] of the RAW kind (a list of float is never searched: NaN's identity, design 4.3.2).
+ * list.index(v): the first position, else ValueError("<v> is not in list") (Objects/listobject.c list_index_impl
+ * formats the value with %R, the decimal digits of an int); list.count(v); `v in l`. */
+static inline TPA_UNUSED int tpa_i64_index(const tpa_i64_list *l, int64_t v, int64_t *out)
+{
+    int64_t i;
+    char m[48];
+    for (i = 0; i < l->len; i++) {
+        if (l->d[i] == v) {
+            *out = i;
+            return 0;
+        }
+    }
+    snprintf(m, sizeof m, "%lld is not in list", (long long)v);
+    return tpa_raise(TPA_ValueError, m);
+}
+
+static inline TPA_UNUSED int64_t tpa_i64_count(const tpa_i64_list *l, int64_t v)
+{
+    int64_t i, n = 0;
+    for (i = 0; i < l->len; i++) {
+        n += l->d[i] == v;
+    }
+    return n;
+}
+
+static inline TPA_UNUSED int tpa_i64_contains(const tpa_i64_list *l, int64_t v)
+{
+    int64_t i;
+    for (i = 0; i < l->len; i++) {
+        if (l->d[i] == v) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+#if defined(TPA_GROW_I64)
+/* list.remove(v): the first equal item, else ValueError("list.remove(x): x not in list") */
+static inline TPA_UNUSED int tpa_i64_remove(tpa_i64_list *l, int64_t v)
+{
+    int64_t i, dummy;
+    for (i = 0; i < l->len; i++) {
+        if (l->d[i] == v) {
+            return tpa_i64_pop(l, 1, i, &dummy);
+        }
+    }
+    return tpa_raise(TPA_ValueError, "list.remove(x): x not in list");
+}
+#endif
 
 /* `list(range(n))`: 0 .. n-1 (an empty list for n <= 0) */
 static inline int tpa_i64_iota(int64_t n, tpa_i64_list **out)
