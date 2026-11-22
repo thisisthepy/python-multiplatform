@@ -387,8 +387,26 @@ types differ (its type is a union, which the AOT mode does not type), a slice (a
 anywhere else as a value, a comparison or `in` with a float item (CPython tests identity first: NaN, `aot/identity`),
 a tuple parameter of a method, and a tuple parameter at the library boundary (`aot/export`). A returned tuple may hold
 str elements (each a new reference the caller owns through its out slot); such a function is not exported from a
-library yet (the Kotlin result class holds scalars). Still to come in S2a: tuple objects where a tuple is stored
-(lists, fields; dict keys in S2b) and a slice of a tuple.
+library yet (the Kotlin result class holds scalars).
+
+Second step, lists of tuples (amendment 2026-11-23, agent proposal, not confirmed): a `list[tuple[int, str]]` local or
+parameter of a module function whose elements are int, float or str is split the same way, into one list per element
+position (`L__0: list[int]`, `L__1: list[str]`). A tuple read out of the list is an immutable value with no identity in
+the accepted subset, so the parallel lists hold what CPython's list holds; every alias of the list (another name, a
+parameter) holds the same parallel list objects, so a change through one is seen through all. Each list operation is
+applied to every element list in turn, with the index and the values evaluated once, first, in CPython's order; one
+that fails (IndexError) fails on the first element list, before any changed. Covered: a display, `[]`, another such
+list, `+`, `+=`, `*`, a slice, `list(L)`; `append`, `insert`, `extend`, `pop` / `pop(i)` (a statement, bound or
+unpacked), `clear`, `reverse`, `L[i] = t`, `del L[i]`, `del L[a:b]`; `len`, `L[i]` bound, unpacked, compared and indexed
+by a constant (`L[i][0]` is `L__0[i]`); `for t in L` and `for a, b in L` (CPython's list iterator: the length read at
+each step, an item appended in the body is visited); `print` / `str` / `repr` / f-strings (the repr is built in a loop
+before the statement, so such a statement may call nothing else); passing to a `list[tuple[...]]` parameter of a module
+function. Refused with the reason: a bool element (there is no list of bool yet), `in` / `index` / `count` / `remove` /
+`==` / sorting / returning such a list, and one in a field or a method parameter: these come with tuple objects.
+The same change gives `xs: list[int] = []` and `list[float]` (the creation `[v] * 0`), and `words[i] = s` for a list of
+str (the new item held before the old one is released; `IndexError: list assignment index out of range`).
+Still to come in S2a: tuple objects (a tuple in a field, the refused list operations above; dict keys in S2b) and a
+slice of a tuple.
 
 **dict and set (S2b).** `dict[K, V]` with K int, str, bool or a tuple of those; V any S2 type. The layout is CPython's
 compact dict (an index table of slots and an entry array in insertion order, open addressing with CPython's

@@ -1188,6 +1188,17 @@ class ObjListStore(Stmt):
 
 
 @dataclass(frozen=True)
+class StrListStore(Stmt):
+    """`array[index] = value` of a STR_LIST local or parameter (tier S2a): the value, then the index, as CPython
+    evaluates them; IndexError("list assignment index out of range"). The list takes a new reference to the value and
+    releases the item it replaces."""
+
+    array: str
+    index: Expr
+    value: Expr
+
+
+@dataclass(frozen=True)
 class ForObjList(Stmt):
     """`for var in value:` over an OBJ_LIST: the list is held for the loop (CPython's iterator), its length read
     before every step; `var` (an OBJ local of the element class) takes each item in turn."""

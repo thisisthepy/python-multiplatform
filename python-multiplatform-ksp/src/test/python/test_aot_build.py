@@ -2549,7 +2549,8 @@ REJECTED = {
     "tuple of mixed types indexed by a variable": (
         "def f(i: int) -> int:\n    t = (i, 'a')\n    return len(str(t[i]))\n", ("aot/front-end", 3, "f")),
     "tuple identity": ("def f() -> bool:\n    t = (1, 2)\n    return t is t\n", ("aot/front-end", 3, "f")),
-    "tuple stored in a list": ("def f() -> int:\n    t = (1, 2)\n    x = [t]\n    return 0\n", ("aot/front-end", 3, "f")),
+    "tuple stored in a list of lists": (
+        "def f() -> int:\n    t = (1, 2)\n    x = [[t]]\n    return 0\n", ("aot/front-end", 3, "f")),
     "tuple comparison with a float element": (
         "def f(a: float) -> bool:\n    t = (a, 1)\n    return t == t\n", ("aot/front-end", 3, "f")),
     "tuple unpacked into the wrong number": (
