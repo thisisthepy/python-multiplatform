@@ -22,7 +22,15 @@ kotlin {
     applyDefaultHierarchyTemplate()
 
     macosArm64()
-    linuxX64()
+    linuxX64 {
+        // Skiko's linuxX64 klib uses Fontconfig but declares no linker option for it (its own native
+        // samples add these), so a test binary missed every Fc* symbol (batch run 44973431716). The
+        // host's libfontconfig is newer than Kotlin/Native's sysroot glibc, so its own undefined
+        // versioned references are left to the dynamic loader.
+        binaries.all {
+            linkerOpts("-L/usr/lib/x86_64-linux-gnu", "-l:libfontconfig.so.1", "--allow-shlib-undefined")
+        }
+    }
 
     sourceSets {
         val commonMain by getting {
@@ -59,4 +67,15 @@ pythonBindings {
         ),
     )
     compilerPlugin.set(project(":python-multiplatform-compiler-plugin"))
+}
+
+// A failing host test prints its whole exception, message and Python error included: Gradle's default
+// short format printed only "PyException at null:-1" (batch run 44973431716).
+tasks.withType<AbstractTestTask>().configureEach {
+    testLogging {
+        events("failed")
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+        showCauses = true
+        showStackTraces = true
+    }
 }
