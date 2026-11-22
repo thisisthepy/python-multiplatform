@@ -3343,9 +3343,14 @@ class _Lowerer:
         self.dead -= dead
         self.refined = entry
         self.not_none = nn_entry
+        if self.info.aot:                                   # tier S2a: a str or None branch makes a `str | None`
+            none = (lambda e: isinstance(e, ir.Const) and e.value is None)
+            if none(then) and orelse.type in (Type.STR, Type.STR_OPT):
+                then = ir.Const(Type.STR_OPT, None)
+            if none(orelse) and then.type in (Type.STR, Type.STR_OPT):
+                orelse = ir.Const(Type.STR_OPT, None)
         if {then.type, orelse.type} <= {Type.STR, Type.STR_OPT} and then.type != orelse.type:
-            then = then if then.type is Type.STR_OPT else then      # (the node's type is the wider one)
-            return ir.Cond(Type.STR_OPT, cond, then, orelse)
+            return ir.Cond(Type.STR_OPT, cond, then, orelse)             # (the node's type is the wider one)
         if then.type != orelse.type or (then.type not in ir.SCALARS
                                         and then.type not in (Type.STR, Type.STR_OPT)):
             raise Skip(node.lineno, f"the branches of `{_src(node)}` are {TYPE_NAME[then.type]} and "
