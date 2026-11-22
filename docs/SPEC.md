@@ -937,7 +937,15 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   (`from kotlinx.coroutines.channels.Channel.Factory import BUFFERED`,
   `sys.modules['kotlinx.coroutines.channels.Channel.Factory'].BUFFERED`). Parameter names (`parameterNamesKnown =
   true`) and default-value flags (`Flags.DECLARES_DEFAULT_VALUE`) come from `.knm`, enabling keyword
-  dispatch and default-argument omission (`<= 6` defaults, B-3). A `@JvmInline value class` whose single
+  dispatch and default-argument omission (`<= 6` defaults, B-3). As B-1 does on jars (#38), a top-level or
+  `object` function whose type parameters are unbounded and not reified binds whether `@Composable` or
+  not, each read as `kotlin.Any?` and written out at the call (`mutableStateOf<kotlin.Any?>(...)`), whether
+  the klib refers to the type parameter by id (K2) or by name (K1); a `kotlin.Any?` slot, and a handle
+  type whose arguments are `kotlin.Any?` or star projections (`MutableState<*>`), cross as object handles;
+  and a project dependency, which the Kotlin Gradle Plugin resolves to an unpacked klib
+  directory (`<name>/default/manifest`) rather than a `.klib` file, is walked like one (#191, batch run
+  45027744672: `mutableStateOf` and `rememberSaveableWrapper` were missing on Kotlin/Native);
+  `GP/artifact/KlibGenericFunctionTest.kt`. A `@JvmInline value class` whose single
   constructor and underlying property are both `public` (`Dp`) unboxes to its underlying boundary tag,
   while one with a non-public constructor (`Color`, `TextUnit`, `Duration`) crosses as an `OBJECT`
   handle. A `@Composable` top-level or `object` function with at most 6 defaulted parameters binds in
