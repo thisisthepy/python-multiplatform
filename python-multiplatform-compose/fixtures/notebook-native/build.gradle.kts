@@ -133,10 +133,13 @@ pythonBindings {
     // notebook-e2e's list (its build file says what each entry is for), with one difference: a klib has
     // no JVM file facade, so the walker matches a top-level function by its own dotted name
     // (KlibKnmScanner.matchesInclude). notebook-e2e's `SnapshotStateKt`, `TextFieldStateKt` and
-    // `RememberSaveableKt` match nothing here; the three functions they stand for are named instead.
-    // With the facade names `pythonx.compose.runtime` found no `mutableStateOf` and every scenario
-    // failed (batch run 45027744672); the walker also had to learn to bind a non-composable generic
-    // function and to walk the project klib `rememberSaveableWrapper` lives in (SPEC B-2).
+    // `RememberSaveableKt` match nothing here; the functions each facade carries on the JVM (the
+    // top-level functions of its source files, as notebook-e2e's generated table lists them) are named
+    // instead. With the facade names `pythonx.compose.runtime` found no `mutableStateOf` and every
+    // scenario failed (batch run 45027744672); the walker also had to learn to bind a non-composable
+    // generic function and to walk the project klib `rememberSaveableWrapper` lives in (SPEC B-2).
+    // Naming only `rememberTextFieldState` left out `setTextAndPlaceCursorAtEnd`, which the notebook's
+    // TextField cell calls (NotebookTextFieldTest cell32to33, local run at 99af48ce).
     artifactIncludePackages.set(
         listOf(
             "androidx.compose.material3",
@@ -146,11 +149,28 @@ pythonBindings {
             "androidx.compose.ui.res",
             "androidx.compose.ui",
             "androidx.compose.material.icons",
+            "androidx.compose.runtime.collectAsState",
+            "androidx.compose.runtime.derivedStateOf",
+            "androidx.compose.runtime.getValue",
+            "androidx.compose.runtime.mutableStateListOf",
+            "androidx.compose.runtime.mutableStateMapOf",
             "androidx.compose.runtime.mutableStateOf",
+            "androidx.compose.runtime.mutableStateSetOf",
+            "androidx.compose.runtime.neverEqualPolicy",
+            "androidx.compose.runtime.produceState",
+            "androidx.compose.runtime.referentialEqualityPolicy",
+            "androidx.compose.runtime.rememberUpdatedState",
+            "androidx.compose.runtime.setValue",
+            "androidx.compose.runtime.snapshotFlow",
+            "androidx.compose.runtime.structuralEqualityPolicy",
             "androidx.compose.runtime.State",
             "androidx.compose.runtime.MutableState",
             "androidx.compose.foundation.text.input.TextFieldState",
+            "androidx.compose.foundation.text.input.clearText",
             "androidx.compose.foundation.text.input.rememberTextFieldState",
+            "androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd",
+            "androidx.compose.foundation.text.input.setTextAndSelectAll",
+            "androidx.compose.foundation.text.input.toTextFieldBuffer",
             "python.multiplatform.compose.rememberSaveableWrapper",
             "org.thisisthepy.compose.designsystem",
             "org.thisisthepy.compose.material3",
