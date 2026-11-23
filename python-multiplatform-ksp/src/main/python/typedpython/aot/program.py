@@ -778,9 +778,9 @@ def _is_optional_str_annotation(ann: ast.expr) -> bool:
 
 
 def _is_str_list_annotation(ann: ast.expr) -> bool:
-    """`list[str]` (tier S1b)."""
+    """`list[str]` (tier S1b) and `list[str | None]` (tier S2a)."""
     return (isinstance(ann, ast.Subscript) and isinstance(ann.value, ast.Name) and ann.value.id == "list"
-            and isinstance(ann.slice, ast.Name) and ann.slice.id == "str")
+            and ((isinstance(ann.slice, ast.Name) and ann.slice.id == "str") or _is_optional_str_annotation(ann.slice)))
 
 
 def _is_tuple_annotation(ann: ast.expr) -> bool:

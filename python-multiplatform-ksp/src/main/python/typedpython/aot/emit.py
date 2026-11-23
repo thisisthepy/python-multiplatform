@@ -67,6 +67,7 @@ CTYPE = {Type.I64: "int64_t", Type.F64: "double", Type.BOOL: "int"}
 # a native list type -> (the runtime's name for it, its element's C type, its element type)
 LIST = {Type.F64_ARRAY: ("f64", "double", Type.F64), Type.I64_ARRAY: ("i64", "int64_t", Type.I64)}
 FAIL = "{ rc = -1; goto tp_cleanup; }"
+STR_LISTS = (Type.STR_LIST, Type.STR_OPT_LIST)     # the `tpa_str_list` types: list[str] (S1b), list[str | None] (S2a)
 
 
 # the kinds of list the runtime has: `f64`, `i64` (a raw `list[int]`) and `int` (a big-capable `list[int]`: tagged
@@ -550,7 +551,7 @@ class _Gen:
                         c_params.append(f"{self.cls_ptr(p.cls)}a_{mangle(p.name)}")
                     elif isinstance(p, ir.Param) and p.type in (Type.STR, Type.STR_OPT):
                         c_params.append(f"tpa_str *a_{mangle(p.name)}")          # borrowed, as `__init__` takes it
-                    elif isinstance(p, ir.Param) and p.type is Type.STR_LIST:
+                    elif isinstance(p, ir.Param) and p.type in STR_LISTS:
                         c_params.append(f"tpa_str_list *a_{mangle(p.name)}")
                     elif isinstance(p, ir.Param) and p.type is Type.OBJ_LIST:
                         c_params.append(f"tpa_obj_list *a_{mangle(p.name)}")      # tier S2a, borrowed
@@ -621,14 +622,14 @@ class _Gen:
             for s in f.body:
                 for n in rep_mod.walk(s):
                     if isinstance(n, ir.LIST_GROW_NODES + ir.LIST_SHRINK_NODES) \
-                            and (types.get(n.array) in LIST or types.get(n.array) is Type.STR_LIST):
+                            and (types.get(n.array) in LIST or types.get(n.array) in STR_LISTS):
                         # (a list of class instances, OBJ_LIST, is always growable: no define)
                         kinds.add(self.array_kind(f.name, n.array, types[n.array]))
         return sorted(kinds)
 
     def array_kind(self, fn: str, name: str, t: Type) -> str:
         """The kind of the list `name` of function `fn` (of array type `t`)."""
-        if t is Type.STR_LIST:
+        if t in STR_LISTS:
             return "str"                                     # tier S2a
         if t is Type.I64_ARRAY:
             return "int" if self.reps.list_big(fn, name) else "i64"
@@ -649,7 +650,7 @@ class _Gen:
             return p.name in assigned_names(f)                                   # type: ignore[attr-defined]
         if isinstance(p, ir.Param) and p.type is Type.OBJ and p.cls is not None:
             return p.name in assigned_names(f)
-        if isinstance(p, ir.Param) and p.type in (Type.STR, Type.STR_LIST, Type.STR_OPT, Type.OBJ_LIST):     # tier S1, S2a
+        if isinstance(p, ir.Param) and p.type in (Type.STR, *STR_LISTS, Type.STR_OPT, Type.OBJ_LIST):     # tier S1, S2a
             return p.name in assigned_names(f)
         return False
 
@@ -673,7 +674,7 @@ class _Gen:
             elif isinstance(p, ir.Param) and p.type in (Type.STR, Type.STR_OPT):
                 self.uses_str = True
                 params.append(f"tpa_str *{self.param_c(f, p)} TPA_UNUSED")     # borrowed from the caller
-            elif isinstance(p, ir.Param) and p.type is Type.STR_LIST:
+            elif isinstance(p, ir.Param) and p.type in STR_LISTS:
                 self.uses_str = True
                 params.append(f"tpa_str_list *{self.param_c(f, p)} TPA_UNUSED")
             elif isinstance(p, ir.Param) and p.type is Type.OBJ_LIST:
@@ -691,7 +692,7 @@ class _Gen:
         elif f.returns in (Type.STR, Type.STR_OPT):
             self.uses_str = True
             params.append("tpa_str **out")                                    # a new reference the caller owns
-        elif f.returns is Type.STR_LIST:
+        elif f.returns in STR_LISTS:
             self.uses_str = True
             params.append("tpa_str_list **out")
         elif f.returns is Type.OBJ_LIST:
@@ -945,7 +946,8 @@ class _Fn:
         return t
 
     def ev_StrListDisplay(self, e: ir.StrListDisplay) -> str:
-        parts = [self.str_value(x, "an element of a list of str") for x in e.elts]
+        parts = [self.opt_str_value(x, "an element of a list of str | None") if e.type is Type.STR_OPT_LIST
+                 else self.str_value(x, "an element of a list of str") for x in e.elts]
         if not parts:
             return self.lpstr("tpa_str_list__alloc(0, @)")
         t = self.lslot()
@@ -1041,6 +1043,12 @@ class _Fn:
             return self.bad("aot/type", what, f"{what} is a {getattr(e.type, 'value', '?')}, not a str")
         return self.ev(e)
 
+    def opt_str_value(self, e: ir.Expr, what: str) -> str:
+        """A `str | None` value (a str too): a borrowed `tpa_str *`, NULL for None (tier S2a)."""
+        if e.type not in (Type.STR, Type.STR_OPT):
+            return self.bad("aot/type", what, f"{what} is a {getattr(e.type, 'value', '?')}, not a str or None")
+        return self.ev(e)
+
     def clamp(self, e: ir.Expr) -> str:
         """A slice bound or step: an int64 as it is, an int outside 64 bits clamped (CPython's _PyEval_SliceIndex)."""
         v = self.ev(e)
@@ -1050,6 +1058,8 @@ class _Fn:
         """`str(x)` / `repr(x)` of an int, float, bool, str or list of str as a borrowed str."""
         if x.type is Type.STR_LIST:
             return self.pstr(f"tpa_str_list_repr({self.ev(x)}, @)")      # str() of a list is its repr
+        if x.type is Type.STR_OPT_LIST:
+            return self.pstr(f"tpa_str_opt_list_repr({self.ev(x)}, @)")  # tier S2a: None items print as None
         if x.type is Type.STR_OPT:
             return self.pstr(f"tpa_str_of_opt({self.ev(x)}, {1 if repr_ else 0}, @)")
         if x.type is Type.STR:
@@ -1515,7 +1525,7 @@ class _Fn:
         return any(isinstance(p, ir.Param) and p.name == name and p.cls is not None for p in self.f.params)
 
     def ev_Local(self, e: ir.Local) -> str:
-        if e.type not in CTYPE and e.type not in LIST and e.type not in (Type.STR, Type.STR_LIST, Type.STR_OPT,
+        if e.type not in CTYPE and e.type not in LIST and e.type not in (Type.STR, *STR_LISTS, Type.STR_OPT,
                                                                           Type.OBJ_LIST) \
                 and not (e.type is Type.OBJ and self._is_class_local(e.name)):
             self.ctype(e.type, e.name)
@@ -1982,7 +1992,7 @@ class _Fn:
             t = self.pslot()
             self.emit(f"if ({name}({', '.join(args + ['&' + t])})) {self.fail()}")
             return t                                       # the slot owns the new reference
-        if callee.returns is Type.STR_LIST:
+        if callee.returns in STR_LISTS:
             t = self.lslot()
             self.emit(f"if ({name}({', '.join(args + ['&' + t])})) {self.fail()}")
             return t
@@ -2101,9 +2111,9 @@ class _Fn:
                 return
             self.emit(f"tpa_obj_list_set(&v_{mangle(s.target)}, {self.ev(s.value)});")
             return
-        if want is Type.STR_LIST:
-            if s.value.type is not Type.STR_LIST:
-                self.bad("aot/type", s.target, f"`{s.target}` is a list of str but is assigned a {s.value.type.value}")
+        if want in STR_LISTS:
+            if s.value.type is not want:
+                self.bad("aot/type", s.target, f"`{s.target}` is a {want.value} but is assigned a {s.value.type.value}")
                 return
             self.emit(f"tpa_str_list_set(&v_{mangle(s.target)}, {self.ev(s.value)});")
             return
@@ -2389,7 +2399,7 @@ class _Fn:
     def grow_list(self, name: str, what: str) -> tuple[str, str] | None:
         """(C name, kind) of the list `name` an append / insert / extend / pop / clear / reverse works on: a
         list[float] / list[int] or a list[str]."""
-        if self.types.get(name) is Type.STR_LIST:
+        if self.types.get(name) in STR_LISTS:
             self.g.uses_str = True
             return f"v_{mangle(name)}", "str"
         if self.types.get(name) is Type.OBJ_LIST:
@@ -2412,6 +2422,8 @@ class _Fn:
         the native value for a raw or float list."""
         if self.types.get(name) is Type.STR_LIST:
             return self.str_value(e, f"the item given to a method of `{name}`")
+        if self.types.get(name) is Type.STR_OPT_LIST:
+            return self.opt_str_value(e, f"the item given to a method of `{name}`")
         if self.types.get(name) is Type.OBJ_LIST:
             return self.ev(e)                                     # an instance, borrowed (the list retains it)
         if self.types.get(name) in LIST and self.kind(name) == "int":
@@ -2498,6 +2510,8 @@ class _Fn:
         raw one (a TAGGED value searched in a raw list is not in the AOT mode yet)."""
         if kind == "int":
             return self.tagged(value)
+        if kind == "str" and self.types.get(name) is Type.STR_OPT_LIST:
+            return self.opt_str_value(value, f"the value searched in `{name}`")
         if kind == "str":
             return self.str_value(value, f"the str searched in `{name}`")
         if kind == "obj":
@@ -2515,7 +2529,8 @@ class _Fn:
             return
         v = self.search_value(s.value, found[1], s.array)
         if v is not None:
-            self.emit(f"if ({self.lop(found[1], 'remove')}({found[0]}, {v})) {self.fail()}")
+            fn = "tpa_str_opt_list_remove" if self.types.get(s.array) is Type.STR_OPT_LIST else self.lop(found[1], "remove")
+            self.emit(f"if ({fn}({found[0]}, {v})) {self.fail()}")
 
     def index_c(self, e: ir.Expr, convert: str = "tpa_int_to_ssize") -> str:
         """An int argument of insert / pop (a Py_ssize_t parameter: OverflowError outside it) or a repeat count
@@ -2556,7 +2571,7 @@ class _Fn:
         if any(x is None for x in found):
             return "NULL"
         kinds = {x[1] for x in found}                                   # type: ignore[index]
-        if e.type is Type.STR_LIST:
+        if e.type in STR_LISTS:
             return self.lpstr(call.format(*[x[0] for x in found], fn=self.lop("str", "")) )   # type: ignore[index]
         dst = self.bind_kind
         if dst is None:
@@ -2598,7 +2613,8 @@ class _Fn:
             return "0"
         op = ["EQ", "NE", "LT", "LE", "GT", "GE"].index(e.op.name)
         t = self.tmp("int")
-        self.emit(f"if (({t} = {self.lop(a[1], 'cmp')}({a[0]}, {b[0]}, {op})) < 0) {self.fail()}")
+        fn = "tpa_str_opt_list_cmp" if self.types.get(e.left) is Type.STR_OPT_LIST else self.lop(a[1], "cmp")
+        self.emit(f"if (({t} = {fn}({a[0]}, {b[0]}, {op})) < 0) {self.fail()}")
         return t
 
     def ev_ListStr(self, e: ir.ListStr) -> str:
@@ -2618,12 +2634,14 @@ class _Fn:
         v = self.search_value(e.value, kind, e.array)
         if v is None:
             return "0"
+        op = (lambda m: f"tpa_str_opt_list_{m}") if self.types.get(e.array) is Type.STR_OPT_LIST else (
+            lambda m: self.lop(kind, m))                         # tier S2a: None items compare as None
         if e.op == "count":
-            return f"{self.lop(kind, 'count')}({found[0]}, {v})"
+            return f"{op('count')}({found[0]}, {v})"
         if e.op == "in":
-            return f"{self.lop(kind, 'contains')}({found[0]}, {v})"
+            return f"{op('contains')}({found[0]}, {v})"
         t = self.tmp("int64_t")
-        self.emit(f"if ({self.lop(kind, 'index')}({found[0]}, {v}, &{t})) {self.fail()}")
+        self.emit(f"if ({op('index')}({found[0]}, {v}, &{t})) {self.fail()}")
         return t
 
     def st_ExprStmt(self, s: ir.ExprStmt) -> None:
@@ -2678,7 +2696,7 @@ class _Fn:
                 args.append([("pystr", self.join(parts))])
             elif a.type is Type.STR:
                 args.append([("pystr", self.ev(a))])
-            elif a.type is Type.STR_LIST:
+            elif a.type in STR_LISTS:
                 args.append([("pystr", self.str_of(a, True))])
             elif a.type is Type.STR_OPT:
                 args.append([("pystr", self.str_of(a, False))])
@@ -2742,7 +2760,7 @@ class _Fn:
 
     def st_ForStr(self, s: ir.ForStr) -> None:
         """`for var in value` over a str: the string is held for the loop, `var` takes each character in turn."""
-        is_list = s.value.type is Type.STR_LIST
+        is_list = s.value.type in STR_LISTS
         held = self.tmp("tpa_str_list *" if is_list else "tpa_str *", "NULL")
         (self.strlist_slots if is_list else self.pystr_slots).append(held)
         v = self.ev(s.value)
@@ -2897,7 +2915,7 @@ class _Fn:
             self.emit(f"*out = {v};")
             self.leave()
             return
-        if returns is Type.STR_LIST:
+        if returns in STR_LISTS:
             v = self.ev(s.value)
             self.emit(f"tpa_str_list_retain({v});")
             self.emit(f"*out = {v};")
@@ -3009,14 +3027,14 @@ class _Fn:
         f = self.f
         for p in f.params:
             ok = ((isinstance(p, ir.Param) and p.type in CTYPE and p.cls is None)
-                  or (isinstance(p, ir.Param) and p.type in (Type.STR, Type.STR_LIST, Type.STR_OPT, Type.OBJ_LIST))
+                  or (isinstance(p, ir.Param) and p.type in (Type.STR, *STR_LISTS, Type.STR_OPT, Type.OBJ_LIST))
                   or (isinstance(p, ir.Param) and p.type is Type.OBJ and p.cls is not None)
                   or (isinstance(p, ir.ArrayParam) and p.type in LIST and p.buffer is None))
             if not ok:
                 self.bad("aot/type", getattr(p, "name", "?"), f"the parameter `{getattr(p, 'name', '?')}` is not an "
                          "int, float, bool, list[float], list[int] or compiled class")
         if f.returns not in CTYPE and f.returns not in LIST and f.returns is not Type.NONE \
-                and f.returns not in (Type.STR, Type.STR_LIST, Type.STR_OPT, Type.OBJ_LIST) \
+                and f.returns not in (Type.STR, *STR_LISTS, Type.STR_OPT, Type.OBJ_LIST) \
                 and not (f.returns is Type.OBJ and f.return_cls is not None) \
                 and self.g.tuple_kinds(f) is None:
             self.bad("aot/type", f.name, f"the return type {f.returns.value} is outside the AOT mode (int, float, "
@@ -3024,7 +3042,7 @@ class _Fn:
         for p in f.entry_globals:
             self.bad("aot/global", p.name, f"the module global `{p.name}` is read at entry, which has no AOT form")
         for name, t in f.locals.items():
-            if t in (Type.STR, Type.STR_LIST, Type.STR_OPT):
+            if t in (Type.STR, *STR_LISTS, Type.STR_OPT):
                 self.g.uses_str = True
             elif t is Type.OBJ_LIST:
                 pass                                                     # tier S2a
@@ -3034,7 +3052,7 @@ class _Fn:
         for p in owned:                      # a TAGGED, class or str parameter the body assigns: work on an owned copy
             if isinstance(p, ir.Param) and p.type in (Type.STR, Type.STR_OPT):
                 self.emit(f"tpa_str_set(&v_{mangle(p.name)}, pv_{mangle(p.name)});")
-            elif isinstance(p, ir.Param) and p.type is Type.STR_LIST:
+            elif isinstance(p, ir.Param) and p.type in STR_LISTS:
                 self.emit(f"tpa_str_list_set(&v_{mangle(p.name)}, pv_{mangle(p.name)});")
             elif isinstance(p, ir.Param) and p.type is Type.OBJ_LIST:
                 self.emit(f"tpa_obj_list_set(&v_{mangle(p.name)}, pv_{mangle(p.name)});")
@@ -3053,7 +3071,7 @@ class _Fn:
             if isinstance(p, ir.Param) and p.type in (Type.STR, Type.STR_OPT):
                 decls.append(f"    tpa_str *v_{mangle(p.name)} TPA_UNUSED = NULL;")
                 releases.append(f"    tpa_str_release(v_{mangle(p.name)});")
-            elif isinstance(p, ir.Param) and p.type is Type.STR_LIST:
+            elif isinstance(p, ir.Param) and p.type in STR_LISTS:
                 decls.append(f"    tpa_str_list *v_{mangle(p.name)} TPA_UNUSED = NULL;")
                 releases.append(f"    tpa_str_list_release(v_{mangle(p.name)});")
             elif isinstance(p, ir.Param) and p.type is Type.OBJ_LIST:
@@ -3071,7 +3089,7 @@ class _Fn:
                 decls.append(f"    tpa_str *v_{mangle(name)} TPA_UNUSED = NULL;")
                 releases.append(f"    tpa_str_release(v_{mangle(name)});")
                 continue
-            if t is Type.STR_LIST:
+            if t in STR_LISTS:
                 decls.append(f"    tpa_str_list *v_{mangle(name)} TPA_UNUSED = NULL;")
                 releases.append(f"    tpa_str_list_release(v_{mangle(name)});")
                 continue

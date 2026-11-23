@@ -1210,6 +1210,120 @@ def test_a_list_of_tuples_searched_and_compared(tmp_path: Path):
     _compare(tmp_path, LIST_OF_TUPLES_SEARCH, [["0"], ["2"], ["3"], ["5"], ["-1"]])
 
 
+LIST_OF_OPTIONAL_STR = """
+import sys
+
+
+def first(xs: list[str | None]) -> str | None:
+    if len(xs) > 0:
+        return xs[0]
+    return None
+
+
+def fill(xs: list[str | None], n: int) -> None:
+    for i in range(n):
+        xs.append("v" + str(i) if i % 2 == 0 else None)
+
+
+def make(n: int) -> list[str | None]:
+    out: list[str | None] = []
+    for i in range(n):
+        out.append(None if i % 3 == 1 else str(i))
+    return out
+
+
+def main() -> None:
+    n = int(sys.argv[1])
+    k = int(sys.argv[2])
+    xs: list[str | None] = ["a", None, "b"]
+    ys: list[str | None] = []
+    fill(ys, n)
+    print(xs, ys, len(ys), f"<{ys}>", str(xs), repr(ys))
+    s = xs[1]
+    if s is None:
+        print("none at 1")
+    t = xs[0]
+    if t is not None:
+        print(t.upper())
+    xs[1] = "mid"
+    xs.append(None)
+    xs.insert(0, None)
+    print(xs, None in xs, "b" in xs, "z" not in xs, xs.count(None), xs.index("b"))
+    p = xs.pop()
+    print(p, xs.pop(0), xs)
+    xs.remove("mid")
+    zs = xs + ys
+    ws = xs + ys
+    print(zs, zs[1:], ys * 2, zs == ws, zs != xs, list(ys))
+    for v in zs:
+        if v is None:
+            print("-")
+        else:
+            print(v, len(v))
+    print(first(zs), first([]), first(["only"]), f"{zs[0]}!")
+    xs.extend(ys)
+    del xs[0]
+    xs.reverse()
+    print(xs, bool(xs))
+    a = make(n)
+    b = make(k)
+    print(a == b, a != b)
+    c: list[str | None] = ["x", None]
+    d: list[str | None] = ["x", "y"]
+    print(c == d, c != d)
+    a[0 if n > 0 else 0] = None if k > 2 else "z"
+    total = 0
+    for v in a:
+        if v is not None:
+            total += len(v)
+        else:
+            total += 100
+    print(a, total, a.count(None), None in b)
+    if k == 7:
+        print(c < d)
+    if k == 8:
+        print(d >= c)
+    print(a < b, a <= b, b > a)
+    print(xs.index(None))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_a_list_of_optional_str(tmp_path: Path):
+    """`list[str | None]` (design 4.3.2, the list[str] layout with NULL for None): a display of str and None, `[]`,
+    an item read as a `str | None` and narrowed, `xs[i] = None`, append / insert / pop / remove / extend / reverse /
+    del, `in` / `count` / `index` of None and of a str, `+`, `*`, a slice, `list(xs)`, `==` / `!=` / ordering,
+    `for v in xs`, print / str / repr / an f-string, a parameter appended to through an alias, a returned list.
+    CPython's errors end most cases: `IndexError: list assignment index out of range` (n 0: `a` is empty),
+    `TypeError: '<' not supported between instances of 'NoneType' and 'str'` (an ordering reaching a None item: k 7,
+    and the ordering line of 2 4 and 5 5), `'>=' ... 'str' and 'NoneType'` (k 8), `ValueError: list.index(x): x not
+    in list` (1 2, where no None is left); 4 2 runs to the end."""
+    _compare(tmp_path, LIST_OF_OPTIONAL_STR,
+             [["0", "0"], ["1", "7"], ["3", "8"], ["4", "2"], ["2", "4"], ["5", "5"], ["1", "2"]])
+
+
+@pytest.mark.parametrize("body, words", [
+    ("def f(i: int) -> int:\n    xs: list[str | None] = ['a', None]\n    return len(','.join(xs))\n",
+     "not list[str]"),
+    ("def g(xs: list[str | None]) -> int:\n    return len(xs)\n\n\ndef f(i: int) -> int:\n    ys: list[str] = ['a']\n"
+     "    return g(ys)\n", "lists are invariant"),
+    ("def f(i: int) -> int:\n    xs: list[str | None] = ['a', None]\n    ys: list[str] = ['a']\n"
+     "    return 1 if xs == ys else 0\n", "compares lists of two types"),
+    ("def f(i: int) -> int:\n    xs: list[str | None] = ['a', None]\n    s = xs[0]\n    return len(s)\n",
+     "(aot/optional)"),
+])
+def test_a_list_of_optional_str_use_with_no_aot_form_is_named(tmp_path: Path, body: str, words: str):
+    """`join` of items that may be None (CPython's TypeError would need the item's type), a list[str] passed where a
+    list[str | None] is wanted (the callee could store None into it), `==` of the two list types, and an item used as
+    a str without a None test are refused with the reason."""
+    with pytest.raises(aot.AotError) as raised:
+        aot.generate(_write(tmp_path, body + TUPLE_MAIN))
+    assert words in str(raised.value)
+
+
 LIST_STORE_AND_EMPTY = """
 import sys
 

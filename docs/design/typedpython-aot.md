@@ -412,6 +412,16 @@ or a comparison (CPython tests each pair by identity first, a NaN equals itself 
 returning such a list, and one in a field or a method parameter: these come with tuple objects.
 The same change gives `xs: list[int] = []` and `list[float]` (the creation `[v] * 0`), and `words[i] = s` for a list of
 str (the new item held before the old one is released; `IndexError: list assignment index out of range`).
+`list[str | None]` (amendment 2026-11-23, agent proposal, not confirmed): the list[str] layout (`tpa_str_list`) with
+NULL for a None item, a type of its own (`STR_OPT_LIST`) because lists are invariant: a list[str] name is never passed
+or bound where a list[str | None] is wanted, or the callee could store None into the caller's list of str (refused
+with that reason); a display of str and None, or of str only, bound to one is one. An item reads as a `str | None`
+(narrowed by `is None` / `is not None` as any other); stores, the list methods, `+`, `*`, slices, `list(xs)`, loops and
+`len` are the list[str] ones. What reads an item's value has its own runtime function: `in`, `count`, `index` and
+`remove` compare as `str | None` `==` does (None equals only None, CPython's identity-or-equality gives the same),
+`==` / `!=` likewise, an ordering that reaches a None item raises CPython's `TypeError: '<' not supported between
+instances of 'NoneType' and 'str'` (the operator and the two types in the order written), and `repr` prints `None`.
+`sep.join(xs)` stays refused (`list[str]` is what join takes), and so does a list[str | None] field.
 Still to come in S2a: tuple objects (a tuple in a field, returning a list of tuples, one in a field or a method
 parameter; dict keys in S2b) and a slice of a tuple.
 
