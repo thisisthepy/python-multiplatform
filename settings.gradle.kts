@@ -127,3 +127,6 @@ include(":python-multiplatform-compose:fixtures:notebook-e2e")
 // walked by `KlibScanner`, `Text` / `Button` (more than 6 defaults) bound through the B3 compiler
 // plugin, rendered from Python with `ImageComposeScene` in the host test.
 include(":python-multiplatform-compose:fixtures:compose-native")
+// #191: notebook-e2e's UI.ipynb scenarios on Kotlin/Native desktop (macosArm64): the same wheel, app
+// module and pixel comparisons, in a K/N test executable. Needs `-PpythonxComposeWheel=<wheel>`.
+include(":python-multiplatform-compose:fixtures:notebook-native")

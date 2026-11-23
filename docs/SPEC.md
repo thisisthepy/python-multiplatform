@@ -71,7 +71,13 @@ fail, then implement.
   the interpreter again in the same process after it is not supported.
   `Status: implemented`, `PM/commonTest/.../ffi/Python3Test.kt`, `PM/desktopTest/.../ffi/InterpreterShutdownTest.kt`.
 - **L-2** `Python3.runMain` / `runApp` run a module or `-c` source with argv, map `sys.exit` status to
-  a return value, restore argv, and do not finalize the shared interpreter.
+  a return value, restore argv, and do not finalize the shared interpreter. `runApp(argc: Int, argv: Array<String>): Int`
+  has the owner's signature (`python_for_kotlin_binding.mermaid`; pre-agent code f33bcef8: `runApp(argv: Array<String>)`,
+  "Run Python script as an application (Automatically initializes Python)"; issue #524 item 7): `argv[0]` is the program
+  name and is not parsed, only the first `argc` elements are read (an `argc` outside `0..argv.size` is
+  `IllegalArgumentException`), and the interpreter is started first when it is not running. What follows the program
+  name is the reduced `python` command line documented on `runApp` (`-c`, `-m`, a script path, `--`); that grammar is
+  agent-designed, not the owner's.
   `Status: implemented`, `PM/commonTest/.../RunMainTest.kt`, `RunAppTest.kt`.
 - **L-3** Before `Py_Initialize`, a `PYTHONHOME` pre-flight check turns a missing or unusable stdlib
   into a catchable `IllegalStateException` naming the path and version, instead of CPython's process
@@ -258,10 +264,27 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `PyException.isCancelledError()` is `true` when the underlying Python exception is an instance of
   `asyncio.CancelledError` (`concurrent.futures.CancelledError`), and `PyException.toKotlinException()`
   returns a `kotlin.coroutines.cancellation.CancellationException` with `this` as its `cause` for a
-  cancelled error and `this` otherwise (#164). `PyException.kotlinThrowable` is the original Kotlin
+  cancelled error and `this` otherwise (#164). `PyException.toPyObject()` is the exception as a Python object
+  (issue #524 item 1; owner answer 2026-11-22, relayed by the leader: "Exception + toPyObject()", keep `: Exception`
+  with the Python object reachable via `toPyObject()` as in the pre-agent sketch at f33bcef8; `kotlin.Throwable` and
+  `PyObject` are both classes, so the mermaid's "implements Throwable and extends PyObject" cannot be one Kotlin
+  class): the original Python exception for one that came from Python, otherwise `type(message)`, or with no
+  type the built-in class its Kotlin class mirrors (`PyTypeError("x")` gives `TypeError('x')`, O-3a; agent
+  proposal), or `RuntimeError(message)`, built once and the same object on every later call. `PyException.kotlinThrowable` is the original Kotlin
   `Throwable` when the Python exception is a `python_multiplatform.KotlinThrowable` proxy (U-2), the same
   instance, and `null` otherwise.
-  `Status: implemented`, `PyExceptionTest.kt`; `kotlinThrowable`: `draft`, `PM/commonTest/.../KotlinThrowableProxyTest.kt`.
+  `Status: implemented`, `PyExceptionTest.kt`; `toPyObject`: `draft`, `PyExceptionTest.kt`; `kotlinThrowable`: `draft`, `PM/commonTest/.../KotlinThrowableProxyTest.kt`.
+- **O-3a** (#524, owner 2026-11-22: restore the pre-agent object model and implement its skeleton
+  types) A raised Python exception is the Kotlin class of its built-in Python class: every built-in
+  exception of CPython 3.15 has a `Py<Name>` class under `ffi.exceptions.errors` whose Kotlin superclass
+  is its Python base (`PyKeyError : PyLookupError`), so `catch (e: PyLookupError)` catches a `KeyError`.
+  A Python subclass of a built-in exception becomes the nearest built-in class in its MRO; one derived
+  only from `Exception` stays a plain `PyException`. `BaseException` is `PyException` itself, and
+  `Exception` has no class of its own (single inheritance). `PyStopIteration.returnValue`,
+  `PySystemExit.code`, `PyOSError.errno` / `strerror` / `filename`, `PySyntaxError.filename` /
+  `lineNumber` / `offset` / `text`, `PyImportError.moduleName` / `path`, `PyNameError.name` and
+  `PyAttributeError.name` read the instance's attributes.
+  `Status: draft` (until its CI run), `BuiltinExceptionsTest.kt`.
 - **O-4** Basic types `PyInt`, `PyFloat`, `PyBool`, `PyString`, `PyNone`, bytes round-trip with Kotlin
   values. `Status: implemented`, `PyBasicTypesTest.kt`, `PyValueBytesConversionTest.kt`.
 - **O-5** Collections implement the Kotlin collection interfaces: `PyList` (`MutableList`, `fromList`,
@@ -292,6 +315,19 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 - **O-6** Modules, builtins, callables (bound methods, class/static methods), utilities (range, slice,
   ellipsis), import and GC helpers. `Status: implemented`, `PyModuleTest.kt`, `BuiltinsTest.kt`,
   `PyCallablesTest.kt`, `PyUtilitiesTest.kt`, `PyImportTest.kt`, `PyGCTest.kt`.
+- **O-6a** (#524, as O-3a) The baseline's skeleton types are implemented, each a `PyObject` with a
+  type-checked `from(PyObject)` that takes its own reference: `PyGenerator` (`send`, `next`,
+  `throwInto`, `finish` = `close()`, frame, code, running / suspended), `PyCoroutine` (the same over
+  `cr_*`, `awaiting`), `PyAsyncGenerator` (`next` / `send` / `throwInto` / `finish` return awaitables),
+  `PyCell` (`contents`, empty cell, `clear`, `of`), `PyCode` (`co_*`: names, argument counts, flags),
+  `PyFrame` (code, line, `back`, globals, locals, builtins), `PyWeakRef` (`of` with a callback, `get`
+  is `null` once the referent is gone, `proxy`), `PyMemberDescriptor` / `PyGetSetDescriptor` /
+  `PyProperty` (`get` / `set` / `delete` on an instance through `PyDescriptor`; a property's getter,
+  setter, deleter, `of`, `withSetter`) and `PyPackage` (`path`, `submodule`, `subpackage`). A
+  generator's or coroutine's end is `PyStopIteration` with its return value. With no Stable ABI
+  accessors for these types, each member reads the documented Python attribute or calls the Python
+  method. `Status: draft` (until its CI run), `PyGeneratorTest.kt`, `PyCodeTest.kt`, `PyWeakRefTest.kt`,
+  `PyDescriptorsTest.kt`, `PyPackageTest.kt`.
 - **O-7** Conversion: `PyValue` with selectable conversion strategies (`withContext`), lazily cached
   snapshots invalidated on demand; buffer-view types and types with no Kotlin counterpart are refused.
   `Status: implemented`, `ConversionTest.kt`, `PyValueLazyConversionTest.kt`.
@@ -335,6 +371,11 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   - a Kotlin `kotlin.coroutines.cancellation.CancellationException` maps to Python's
     `asyncio.CancelledError` (leaving any exception Python already raised on the indicator untouched; on a
     target where `asyncio` cannot be imported, it falls back to `RuntimeError`);
+  - a `PyException` with no live value is raised as its own Python class: its `type` when it has one,
+    otherwise the built-in class its Kotlin class mirrors (`PyTypeError` raises `TypeError`, O-3a), with
+    `errMsg` as the message and its Kotlin `cause`, if any, on `__cause__`; a plain `PyException` with no
+    `type` falls through to the next rule (#524; agent proposal, not confirmed by the owner).
+    `Status: draft`, `PM/commonTest/.../upcall/KotlinRaisedPyExceptionTest.kt`.
   - any other Kotlin `Throwable` maps to `RuntimeError(message)` with `__cause__` set to a `BaseException`
     representing the original Kotlin throwable (`str()` of it is `"<KotlinSimpleClassName>: <message>"`,
     recursively chaining Kotlin `cause` onto `__cause__`, or restoring a nested `PyException` cause's live
@@ -764,7 +805,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `PM/commonTest/.../pythonx/PythonxAdapterTest.kt` `anIntArgumentPicksTheOverloadItsKotlinLiteralWould`.
   `describe(module, name)` describes any bound name, a named constant (`STATIC_GETTER`) included,
   without evaluating it (#36). A module's `dir()` lists its direct child packages/objects and reading
-  one as an attribute imports it (#35) - Kotlin names only (the U-12 aliases are served, not listed).
+  one as an attribute imports it (#35) - Kotlin names only (the U-12 aliases are served, not listed). It lists nothing else: a type is listed where reading it serves its proxy class (an extension receiver), and a type with only members or properties, reached through a value's proxy, is not, so every listed name can be read (#191; agent proposal, not confirmed: pmp-binder 2026-11-23, after NotebookPracticeTest cell 36 on macosArm64, `PythonxMethodTest.aModuleListsOnlyTheNamesItServes`).
   No namespace is renamed; the binder creates no `pythonx` module and a real `pythonx` package
   on disk is what `import pythonx` loads. The answer is the same whichever installer
   (`PythonProxySource`, `PythonxAdapter`) ran first for a table. **A name that is both a function and a
@@ -937,7 +978,17 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   (`from kotlinx.coroutines.channels.Channel.Factory import BUFFERED`,
   `sys.modules['kotlinx.coroutines.channels.Channel.Factory'].BUFFERED`). Parameter names (`parameterNamesKnown =
   true`) and default-value flags (`Flags.DECLARES_DEFAULT_VALUE`) come from `.knm`, enabling keyword
-  dispatch and default-argument omission (`<= 6` defaults, B-3). A `@JvmInline value class` whose single
+  dispatch and default-argument omission (`<= 6` defaults, B-3). As B-1 does on jars (#38), a top-level or
+  `object` function whose type parameters are unbounded and not reified binds whether `@Composable` or
+  not, each read as `kotlin.Any?` and written out at the call (`mutableStateOf<kotlin.Any?>(...)`), whether
+  the klib refers to the type parameter by id (K2) or by name (K1); a nullable `String` or `ByteArray`
+  crosses as `STRING`/`BYTES` with `None` as `null` (a nullable number or `Boolean` stays declined), so
+  material3's `Icon(..., contentDescription: String?)` binds; a `kotlin.Any?` slot, and a handle
+  type whose arguments are `kotlin.Any?` or star projections (`MutableState<*>`), cross as object handles;
+  and a project dependency, which the Kotlin Gradle Plugin resolves to an unpacked klib
+  directory (`<name>/default/manifest`) rather than a `.klib` file, is walked like one (#191, batch run
+  45027744672: `mutableStateOf` and `rememberSaveableWrapper` were missing on Kotlin/Native);
+  `GP/artifact/KlibGenericFunctionTest.kt`. A `@JvmInline value class` whose single
   constructor and underlying property are both `public` (`Dp`) unboxes to its underlying boundary tag,
   while one with a non-public constructor (`Color`, `TextUnit`, `Duration`) crosses as an `OBJECT`
   handle. A `@Composable` top-level or `object` function with at most 6 defaulted parameters binds in
@@ -1016,7 +1067,8 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactSamParameterTest.kt`.
 - **B-5a** The ambient pythonx callable scope (`PythonCallables.withScope`) is per thread (#301). A
   Python callable crossing into Kotlin on a thread with no open scope gets the "no pythonx callable
-  scope is open" error, even while another thread has a scope open, and `PythonCallables.current`
+  scope is open" error (except a `Runnable` / `() -> Unit` slot, which becomes B-5c's one-shot), even
+  while another thread has a scope open, and `PythonCallables.current`
   answers `null` there. One scope may be added to, reused, invoked and closed from different
   threads: `close()` releases every root and body exactly once, a callable added after the close is
   rejected (`IllegalStateException`, its body released), and an invocation holds a reference of its
@@ -1028,23 +1080,60 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   callbacks. A Kotlin object a walked declaration returns (a `kotlinx.coroutines.CoroutineDispatcher`
   such as `Dispatchers.Default`, a `Job`) is a handle in Python and fills any parameter of its type or a
   supertype (`Job(parent)`, `dispatch(context, block)` with a `Job` as the `CoroutineContext`), reaching
-  the same Kotlin object (`Job.cancel()` from Python cancels it and its children). A parameter type
+  the same Kotlin object (`Job.cancel()` from Python cancels it and its children). A member function's declared defaults may be left out from Python, as a top-level function's may (the walker's default omission, applied to members), An override takes the defaults of the declaration it overrides, as in Kotlin (`AbsoluteCutCornerShape.copy()` as `CornerBasedShape.copy()`), and an omission an inherited overload of the same name would also accept is refused, since the call could then resolve against either. A `suspend` member's omitting calls run inside its pending call (U-5). A parameter type
   that expands to a `java.*` class (through a typealias, as `kotlinx.coroutines.CancellationException`
   does in `Job.cancel(cause: CancellationException? = null)`) is nameable: the class file is read from
   the JDK the walk runs on, since no walked jar holds it; `javax.*`, `jdk.*` and `sun.*` stay declined.
   A Python callable passed as the `Runnable` of `CoroutineDispatcher.dispatch` runs on the
   dispatcher's own threads after `dispatch` returns; the binder attaches each thread for the call
-  (B-5a's scope rule applies: the callable lives while its scope is open). Not provided: a plain Kotlin
+  (inside an open scope it lives while the scope is open, B-5a; with no scope open it is B-5c's
+  one-shot). Not provided: a plain Kotlin
   `object` (such as `kotlin.coroutines.EmptyCoroutineContext`) as a value; only companions are values
   (U-4), so a caller passes a `Job` or a dispatcher where a `CoroutineContext` is needed.
   `Status: draft` (until its CI run) on desktop (walker), `GP/artifact/SamParameterBindingTest.kt`
   (`aJdkClassParameterSpelledThroughATypealiasIsBound`, `aJavaxClassParameterStaysDeclined`),
   `python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactCoroutinesTest.kt`.
+- **B-5c** (#164 item 5, a callback posted from outside any scope) A Python callable crossing into a
+  slot of compiled arity 0 that is not composable (a `Runnable`, a `() -> Unit`) on a thread with no
+  open scope becomes a **one-shot**: the wrapper holds its own reference to the callable and its own
+  `HandleTable` root, and gives both back after its first invocation, whether the callable returns or
+  raises (the exception reaches whoever invoked it, for a dispatcher worker its uncaught-exception
+  handler; that exception's traceback can hold the callable through its frames until the exception
+  itself is released, for a Kotlin `PyException` when the JVM collects it). Exactly once under concurrent invocations: one invocation runs the callable, and every
+  other one, concurrent or later, raises `IllegalStateException` saying the one-shot already ran,
+  without touching the released callable. A one-shot invocation opens no scope, so a `Runnable` the
+  callable posts in turn is a one-shot too. Inside an open scope nothing changes (B-5a), and with no
+  scope open every other slot (one that takes arguments, a composable lambda, a `suspend` function of
+  U-5a) is still refused.
+  Why re-running raises: nothing tells the binder that Kotlin dropped a `Runnable` it was given, so the
+  first run is the only release point there is. A `Runnable` handed to a dispatcher runs exactly once,
+  which is the case this serves (pythonx-concurrent `KotlinEventLoop` posting `call_soon` callbacks from
+  threads with no composition). A Kotlin API that keeps a callback and runs it again (a listener, a
+  repeating timer) needs the crossing made inside a scope (`PythonCallables.withScope`, or a
+  composition). Not provided: a one-shot that is never invoked holds its callable for the life of the
+  process (no release by the Kotlin garbage collector).
+  Source: leader decision 2026-11-21 18:30 (team report `fable-pmp.md`, "## Leader answer (2026-11-21
+  18:30)", item 2): "Item 5 lifetime: (b) approved (leader decision): a one-shot RunOnce wrapper for
+  Runnable / () -> Unit slots that cross outside a PythonCallableScope, releasing its body after the
+  first invocation; record the rule in SPEC with this line as the source."
+  `Status: draft` (until its CI run), `PM/desktopTest/.../pythonx/PythonRunOnceTest.kt`,
+  `python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactCoroutinesTest.kt`
+  (`aCallablePostedWithNoScopeOpenRunsOnceAndReleasesEverything`,
+  `aCallableThatRaisesOnTheWorkerLeavesTheDispatcherWorking`),
+  `.../WalkedArtifactCallbackTest.kt` (`aUnitCallableWithNoScopeOpenRunsOnceAndRootsNothingAfter`).
 - **B-6** `@Composable` functions are callable from Python inside a composition; a Python click reaches
   a Kotlin callback and the redraw shows it. `Status: implemented` on desktop,
   `python-multiplatform-compose/fixtures/compose/src/desktopTest/` (`ComposableRenderTest.kt`, `M3ProofRenderTest.kt`,
   `CallbackDrivenRenderTest.kt`, pointer/drag render tests), `GP/artifact/ComposableBindingTest.kt`;
   `planned` on Android, iOS and wasm.
+- **B-6b** (#191, from #172 item 5) Input-method composition reaches a Python `TextField(state=...)` through a real
+  desktop window: a Swing `JFrame` with a `ComposePanel`, where Compose's AWT layer decodes each
+  `java.awt.event.InputMethodEvent` (attributed text, committed-character count) into `commitText` /
+  `setComposingText`. A Hangul sequence (ㅎ, 하, 한 composing, 한 committed) leaves the Kotlin `TextFieldState`
+  Python created with each composing text and its range, then `한` with no composition, and Python reads `한`.
+  The offscreen half (the calls below the AWT layer) is `notebook-e2e`'s `InputMethodScene`. `Status: draft`,
+  `python-multiplatform-compose/fixtures/compose/.../window/RealWindowInputMethodTest.kt`, run by `desktopWindowTest`
+  (a display is required).
 - **B-8** A host draws a Python-declared application root with
   `python.multiplatform.compose.PythonAppView(modifier, module, attribute)` (or `PythonWidget(composableName, modifier, moduleName)` or `PythonWidget(root: PyObject)`, inside a `PythonLauncher { }` that starts the interpreter),
   from the `python-multiplatform-compose` module (`python-multiplatform` itself does not depend on
@@ -1184,9 +1273,13 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `Versions.abiFlags` (`t` or empty) and every name derived from it (`libpython3.15t`, `lib/python3.15t/`,
   `libmultiplatform_python3.15t.so`) follow it. On the GIL platform Kotlin threads attach a thread state
   and serialise on the GIL.
-  `Status: partial` (desktop observed; Android, androidNative and iOS are compiled against 3.15t but
-  have not been run on an emulator, device or simulator in this revision; CI jobs for that, owner-approved
-  2026-11-21, await their first run: `android-native.yml` `emulator` (x86_64, API 34) and `ios.yml` `ios-consumer`, #328),
+  `Status: implemented` on desktop, Android and iOS (CI run 44889681538, 2026-11-21: the Android x86_64
+  emulator, API 34, ran the instrumented suite on 3.15t, 539 tests, 0 failed, `AndroidFreeThreadedBuildTest`
+  among them; the iOS simulator ran the library suite on 3.15t, 513 tests, 0 failed, `IosFreeThreadedBuildTest`
+  among them, and the plugin-staged `ios-consumer` app printed `IOS_CONSUMER_PROBE stdlib=ok ext=ok payload=ok
+  ft=ok`; jobs `android-native.yml` `emulator` and `ios.yml` `ios-consumer`, owner-approved 2026-11-21, #328);
+  `partial` on androidNative (compiled against 3.15t, its `artTest` not run on a device or emulator) and
+  wasm (GIL build until #175),
   `PM/desktopTest/.../DesktopFreeThreadedBuildTest.kt` (ABI flags, `Py_GIL_DISABLED` of the loaded
   interpreter, checkpoint default), `PM/desktopNativeTest/.../DesktopNativeFreeThreadedBuildTest.kt`,
   `PM/androidInstrumentedTest/.../AndroidFreeThreadedBuildTest.kt` (ABI flags, stdlib path, the AAR's
@@ -1222,7 +1315,8 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `libpython3.15t.so` and `assets/<abi>/lib/python3.15t/` into the AAR for arm64-v8a and x86_64; iOS
   compiles and links against the 3.15t `Python.xcframework` and gives the simulator test binary
   `lib/python3.15t/`. python.org's and BeeWare's GIL mobile archives are no longer acquired.
-  `Status: partial` (compiled; not run on an emulator, device or simulator in this revision).
+  `Status: implemented` for Android (x86_64 emulator) and iOS (simulator), CI run 44889681538 (see T-1);
+  arm64-v8a and androidNative are compiled and packaged but not run on a device in CI.
 - **T-2a** Free-threaded CPython on mobile through the Gradle plugin (#328 step 1; owner decision #158 of
   2026-10-04, "Free-threaded is the default and the only build", baseline 3.15t; leader decision of
   2026-11-13 on #328: no opt-in `pythonBindings.ios.freeThreaded` flag, 3.15t is the only build). There
@@ -1890,6 +1984,51 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     the class may form a cycle after the virtual and region reasons. The tests are
     `test_aot_tier_o2c.py`, in the ASan/UBSan job with the leak checker on for the built programs.
     Not in this step: acyclic `__del__`, classes in the library output (never emitted there), generations.
+  - **Tier S PR-S1a (#443, the `str` value)** (agent proposal, not owner-confirmed; tier S is in 1.0, owner
+    2026-11-21 21:55: "191, 443, 175 전부 1.0에 넣어"; design typedpython-aot.md 4.3.1): a `str` is a counted
+    PEP 393 string without the object header (`runtime/tp_aot_str.h`, linked only by a program that has a
+    `str` value; a program without one generates the C it generated before). Compiled: `str` locals,
+    parameters, results and module constants (`NAME = "..."`, `NAME: str = ...`, folded with Python's own
+    operators), literals (any text, NUL and lone surrogates included: immortal static objects), `+`, `+=`
+    (in place when the name owns the string and nothing else holds it), `*` by an int on either side,
+    `== != < <= > >=` (code point order), `in` / `not in`, `len`, indexing, slicing with any bounds and step,
+    `for ch in s`, truth value, the conditional expression, `min` / `max` of two strs, `str()` / `repr()`
+    of an int (any size), float, bool or str, `ord`, `chr`, `sys.argv[i]` (decoded as CPython decodes it),
+    `int(s)`, f-strings anywhere with `{e}`, `{e!s}`, `{e!r}`, `{e=}` and `{e:.Nf}`, `print` of strs with
+    `sep=` and `end=`, `sys.stdout.write` and `sys.stderr.write` (their value is the length). Output is
+    CPython 3.15's UTF-8 mode: standard output encodes with surrogateescape (U+DC80..U+DCFF become their raw
+    byte; any other surrogate raises CPython's `UnicodeEncodeError` with its message, after the arguments
+    before it and the separator are written), standard error with backslashreplace. Every exception is
+    CPython's, with its message: `IndexError: string index out of range`, `IndexError: cannot fit 'int' into
+    an index-sized integer`, `ValueError: slice step cannot be zero`, `TypeError: ord() expected a
+    character, but string of length N found`, `ValueError: chr() arg not in range(0x110000)` (also for an
+    int outside 64 bits), `OverflowError: cannot fit 'int' into an index-sized integer` and `OverflowError:
+    repeated string is too long` for `*`, `int()`'s invalid-literal message. Compile errors that stay:
+    `is` / `is not` on a str (`aot/str-identity`, a front-end finding: CPython's answer depends on
+    interning), `%` formatting (`aot/str-format`, S2), the f-string conversion `!a`, a comparison of a str
+    with another type, and a str parameter or result of an `aot-lib` export (`aot/library-str`). The tests
+    are `test_aot_tier_s1.py` (differential against the reference, bytes of stdout compared), in every job
+    of the typedpython group, the ASan/UBSan job with the leak checker on.
+    Not in this step (S1b, the next PR): the str methods, the Unicode tables generated from the reference
+    interpreter, `list[str]`, `str` fields of classes and `str | None`.
+  - **Tier S PR-S1b (#443)** (agent proposal, not owner-confirmed): the str methods `split()` / `split(sep)` /
+    `split(sep, maxsplit)` (keywords `sep`, `maxsplit`), `join`, `strip` / `lstrip` / `rstrip` with and without
+    `chars`, `lower` (with CPython's final-sigma rule), `upper` (full mappings: `'ß'.upper() == 'SS'`),
+    `startswith` / `endswith` (a str or a tuple of str, with `start` / `end`), `find` (with `start` / `end`),
+    `replace` (with `count`, keyword too), `isalpha`, `isdigit`, with CPython's results and errors
+    (`ValueError: empty separator`, `OverflowError: Python int too large to convert to C ssize_t` for a count
+    outside 64 bits). The Unicode tables they read (`aot/unicode.py`) are generated from the interpreter that
+    builds the program, only those the program uses, with `TPA_UNIDATA_VERSION` in the C; the Cased and
+    Case_Ignorable properties of the final-sigma rule are read through `lower()` itself. `list[str]` (a
+    counted list of owned strs, fixed length until S2): locals, parameters, results, displays (`[]` where a
+    list of str is expected), `split`'s result, indexing, `len`, truth value, `for s in xs`, `join`'s
+    argument, `print` / `str` / `repr` (the list's repr). `str` fields of compiled classes (heap, region and
+    virtual objects; a field that may be rebound is read into an owned temporary). A method outside the list
+    stays a finding (`aot/call`). Two defects fixed on the way: Pyrefly reports positions in UTF-8 bytes, and
+    the rebinding probe counted characters, so a local assigned on a line with non-ASCII text was untyped
+    (both modes); an inferred class comes back module-qualified (`prog.Node`), which the AOT front end did not
+    resolve. Tests: `test_aot_tier_s1b.py`, `test_rebinding.py`. Moved to S2 (in 1.0): `str | None` (needs the
+    front end's `is not None` narrowing) and the Windows console output (WriteConsoleW).
 
 ---
 

@@ -1,5 +1,5 @@
 /**
- * SPEC L-9c (#191): a Kotlin/Native desktop app (`macosArm64`, `linuxX64`) built only from the
+ * SPEC L-9c (#191): a Kotlin/Native desktop app (`macosArm64`, `linuxX64`, `mingwX64`) built only from the
  * published plugin and the library, from outside `:python-multiplatform`.
  *
  * This module declares no CPython download, no linker option and no PYTHONHOME. All of it comes
@@ -16,11 +16,14 @@ plugins {
 kotlin {
     applyDefaultHierarchyTemplate()
 
-    listOf(macosArm64(), linuxX64()).forEach { target ->
+    listOf(macosArm64(), linuxX64(), mingwX64()).forEach { target ->
         target.binaries.executable {
             entryPoint = "fixture.desktopnative.main"
         }
     }
+    // The repository's gradle.properties asks for libbacktrace source info, which K/N has on ELF targets
+    // only (the library's build says the same for its own mingwX64 binaries).
+    mingwX64().binaries.all { binaryOption("sourceInfoType", "noop") }
 
     sourceSets {
         val commonMain by getting {

@@ -81,6 +81,10 @@ import kotlin.coroutines.suspendCoroutine
  * `onForgotten` as "the one that fails silently and should be tested first"; the seam is here and the
  * test is there.
  *
+ * One exception has a holder of its own: a `Runnable` / `() -> Unit` crossing with no scope open is a
+ * [PythonRunOnce], released by its single run (SPEC B-5c), for callbacks posted to a dispatcher from
+ * outside any composition.
+ *
  * ### Interning, and what the holder costs without it
  *
  * The scope releases everything at once, which settles *whether* a callable comes back and says
@@ -242,6 +246,10 @@ object PythonCallables {
         internKey: String,
     ): Long {
         val scope = current ?: run {
+            // SPEC B-5c: a `Runnable` / `() -> Unit` with no scope open is a one-shot, its own holder,
+            // released after its single run. Source: leader decision 2026-11-21 18:30 (team report
+            // fable-pmp.md, "## Leader answer (2026-11-21 18:30)", item 2).
+            if (jvmArity == 0 && !composable) return newRunOnce(body, argTags)
             // Closed here rather than leaked: the trampoline already took a reference for this
             // wrapper and nothing downstream exists to give it back.
             body.close()
@@ -249,7 +257,8 @@ object PythonCallables {
                 "no pythonx callable scope is open, so a Python callable has nowhere to live: a " +
                     "callable can only cross into Kotlin from inside a composition (or an explicit " +
                     "PythonCallables.withScope), because Compose keeps calling it after the call " +
-                    "that passed it has returned",
+                    "that passed it has returned; only a Runnable / () -> Unit may cross without " +
+                    "one, as a one-shot (SPEC B-5c)",
             )
         }
         // Asked again even though `findFunction` was asked first: that call is an optimisation the
@@ -289,6 +298,29 @@ object PythonCallables {
             throw t
         }
         return scope.add(body, erased, internKey)
+    }
+
+    /**
+     * The no-scope crossing of a `Runnable` / `() -> Unit` (SPEC B-5c): [body] wrapped as a
+     * [PythonRunOnce], rooted under a [HandleTable] handle of its own, which the one-shot releases
+     * after its run. Not interned: a one-shot cannot be shared, since the first run releases it.
+     *
+     * Reference convention: takes ownership of [body]'s reference (the trampoline's), and closes it
+     * itself when it refuses.
+     */
+    private fun newRunOnce(body: PyObject, argTags: String): Long {
+        if (argTags.isNotEmpty()) {
+            body.close()
+            throw IllegalArgumentException(
+                "a Kotlin function type of compiled arity 0 forwards no argument, but marshalling " +
+                    "tags were given: '$argTags'",
+            )
+        }
+        val once = PythonRunOnce(body)
+        val erased: () -> Unit = { once.run() }
+        val root = HandleTable.register(erased)
+        once.rootedUnder(root)
+        return root.raw
     }
 
     /**
@@ -894,6 +926,76 @@ internal class PythonFunction(
                 "a Kotlin function type argument tagged '$tag' has no marshalling rule",
             )
         }
+    }
+}
+
+/**
+ * A Python callable that crossed into a `Runnable` / `() -> Unit` slot with no [PythonCallableScope]
+ * open (SPEC B-5c): its own holder, released by its single run.
+ *
+ * ### Why the first run is the release point
+ *
+ * A scope is released by whoever owns the composition; here nothing owns anything, and nothing tells
+ * the binder that Kotlin dropped the `Runnable` it was given. The one event the binder does see is
+ * the run. A `Runnable` handed to a dispatcher runs exactly once (pythonx-concurrent's
+ * `KotlinEventLoop` posts `call_soon` callbacks that way), so releasing there frees everything at the
+ * earliest point that is still safe. A Kotlin API that keeps a callback and runs it again gets a
+ * refusal by name from the second run on, never a call through a released `PyObject`; such a callback
+ * has to cross inside a scope. A one-shot that is never run keeps its callable for the life of the
+ * process.
+ *
+ * ### Exactly once
+ *
+ * [run] takes the body and the root out under [lock], so of any number of concurrent runs exactly one
+ * finds them; the rest refuse. The call and both releases happen after the lock is released, so the
+ * lock is never held while waiting for the GIL (the rule [PythonCallableScope] follows too).
+ *
+ * No scope is opened around the call: a `Runnable` the callable posts in turn is a one-shot too,
+ * which is what a callback scheduling the next callback needs.
+ */
+internal class PythonRunOnce(body: PyObject) {
+    private val lock = PlatformMutex()
+    private var body: PyObject? = body
+    private var root: ObjectReference? = null
+    private var ran = false
+
+    /** Records the [HandleTable] root the wrapper was registered under, which [run] releases. */
+    fun rootedUnder(root: ObjectReference) {
+        val releaseNow = lock.withLock {
+            if (ran) true else {
+                this.root = root
+                false
+            }
+        }
+        // Only reachable if the wrapper ran before its own handle was recorded; the run had no root
+        // to release, so this one is given back here.
+        if (releaseNow) HandleTable.release(root)
+    }
+
+    fun run() {
+        val taken = lock.withLock {
+            val held = body ?: throw IllegalStateException(ALREADY_RAN)
+            ran = true
+            body = null
+            val r = root
+            root = null
+            held to r
+        }
+        val (held, r) = taken
+        try {
+            held().close()
+        } finally {
+            if (r != null) HandleTable.release(r)
+            held.close()
+        }
+    }
+
+    private companion object {
+        const val ALREADY_RAN: String =
+            "this Python callable crossed into a Runnable / () -> Unit with no pythonx callable scope " +
+                "open, so it is a one-shot (SPEC B-5c) and already ran: its callable was released after " +
+                "that run. A Kotlin API that runs a callback more than once needs it passed inside " +
+                "PythonCallables.withScope (or a composition)"
     }
 }
 

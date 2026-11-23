@@ -1,0 +1,1305 @@
+"""TypedPython AOT, tier S step 2a (#443): `str | None` and the not-None proofs it needs, also for `C | None` class
+values (docs/design/typedpython-aot.md 4.3.2).
+
+Differential against the reference interpreter, as test_aot_tier_s1.py (stdout compared as bytes, the exit status, the
+last stderr line). Red before S2a: a `str | None` annotation is `aot/type` ("the type `str | None` is outside the AOT
+mode"), and a field read through a `C | None` parameter compiles with no None check (a None crashes the program
+instead of being refused at build time). The sanitizer job builds with -DTP_CHECK_PROVEN, where every read the front
+end proved not None aborts on a NULL, so a wrong proof fails there.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from test_aot_tier_s1 import _compare, _write
+from typedpython import aot
+
+OPTIONAL_STR = """
+import sys
+
+
+class Person:
+    name: str
+    nick: str | None
+
+    def __init__(self, name: str, nick: str | None) -> None:
+        self.name = name
+        self.nick = nick
+
+
+def find(words: list[str], prefix: str) -> str | None:
+    for w in words:
+        if w.startswith(prefix):
+            return w
+    return None
+
+
+def label(p: Person) -> str:
+    n = p.nick
+    if n is None:
+        return p.name
+    return n + " (" + p.name + ")"
+
+
+def describe(x: str | None) -> str:
+    if x:
+        return "text " + x.upper()
+    return "nothing" if x is None else "empty"
+
+
+def first_or(x: str | None, y: str) -> str:
+    if x is not None and len(x) > 0:
+        return x
+    return y
+
+
+def main() -> None:
+    words = ["alpha", "beta", "gamma", ""]
+    hit = find(words, sys.argv[1])
+    miss = find(words, "zz")
+    print(hit, miss, hit == "beta", miss == None, hit != miss, None == miss, hit is None, miss is not None)
+    print(f"{hit} {miss!r} {hit!r}", repr(miss), str(hit), str(miss))
+    print(describe(hit), describe(miss), describe(""), first_or(hit, "-"), first_or(miss, "-"))
+    ann = Person("Ann", None)
+    bob = Person("Bob", hit)
+    print(label(ann), label(bob), ann.nick, bob.nick)
+    bob.nick = None
+    ann.nick = "annie"
+    print(label(ann), label(bob))
+    y: str | None = None
+    if len(sys.argv) > 2:
+        y = sys.argv[2]
+    print(y, y is None, describe(y))
+    y = "set"
+    print(len(y), y.upper())
+    z = hit if len(sys.argv) > 2 else None
+    print(z)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_str_or_none_values(tmp_path: Path):
+    _compare(tmp_path, OPTIONAL_STR, [["be"], ["zz"], ["", "x"], ["al", ""], ["g", "\u00e9\u4e2d"]])
+
+
+def test_optional_class_values_read_after_a_proof(tmp_path: Path):
+    _compare(tmp_path, """
+import sys
+
+
+class Node:
+    val: int
+    nxt: "Node | None"
+
+    def __init__(self, val: int, nxt: "Node | None") -> None:
+        self.val = val
+        self.nxt = nxt
+
+    def twice(self) -> int:
+        return 2 * self.val
+
+
+def head_or(n: Node | None, d: int) -> int:
+    if n is None:
+        return d
+    return n.val + n.twice()
+
+
+def second(n: Node | None) -> int:
+    if n is not None:
+        m = n.nxt
+        if m is not None and m.val > 0:
+            return m.val
+    return -1
+
+
+def total(n: Node | None) -> int:
+    s = 0
+    cur = n
+    while cur is not None:
+        s += cur.val
+        cur = cur.nxt
+    return s
+
+
+def main() -> None:
+    k = int(sys.argv[1])
+    chain: Node | None = None
+    for i in range(k):
+        chain = Node(i + 1, chain)
+    print(head_or(chain, 99), second(chain), total(chain), head_or(None, 7), second(None))
+
+
+if __name__ == "__main__":
+    main()
+""", [["0"], ["1"], ["2"], ["10"]])
+
+
+def _rules(tmp_path: Path, source: str) -> set[tuple[str, int]]:
+    with pytest.raises(aot.AotError) as raised:
+        aot.generate(_write(tmp_path, source))
+    return {(f.rule, f.line) for f in raised.value.findings}
+
+
+MAIN = '\n\ndef main() -> None:\n    print(f("a"))\n\n\nif __name__ == "__main__":\n    main()\n'
+NODE = ('class Node:\n    val: int\n    nxt: "Node | None"\n\n'
+        '    def __init__(self, val: int, nxt: "Node | None") -> None:\n        self.val = val\n        self.nxt = nxt\n\n\n')
+NODE_MAIN = '\n\ndef main() -> None:\n    print(f(Node(1, None)))\n\n\nif __name__ == "__main__":\n    main()\n'
+
+
+@pytest.mark.parametrize("body, line", [
+    ("    return x.upper()\n", 2),
+    ("    return x + 'a'\n", 2),
+    ("    return 'a' + x\n", 2),
+    ("    return str(len(x))\n", 2),
+    ("    return x\n", 2),
+    ("    if x is None:\n        return ''\n    x = None\n    return x + '!'\n", 5),
+    ("    if x is not None:\n        pass\n    return x.lower()\n", 4),
+])
+def test_an_unproved_use_of_str_or_none_is_aot_optional(tmp_path: Path, body: str, line: int):
+    found = _rules(tmp_path, "def f(x: str | None) -> str:\n" + body + MAIN)
+    assert ("aot/optional", line) in found, found
+
+
+def test_a_reassignment_inside_a_loop_ends_the_proof(tmp_path: Path):
+    """Inside the loop body `x` is assigned, so the test at the top of an iteration is the only proof; this is
+    accepted (the read follows the test in the same iteration)."""
+    p = _write(tmp_path, "def f(x: str | None) -> str:\n    s = ''\n    for _ in range(2):\n"
+                         "        if x is not None:\n            s = s + x\n        x = None\n    return s\n" + MAIN)
+    assert "tpf_f" in aot.generate(p)
+
+
+@pytest.mark.parametrize("body, line", [
+    ("    return n.val\n", 11),
+    ("    if None is n:\n        return 0\n    n = n.nxt\n    return n.val\n", 14),
+])
+def test_an_unproved_field_read_of_an_optional_class_value_is_aot_optional(tmp_path: Path, body: str, line: int):
+    found = _rules(tmp_path, NODE + "def f(n: Node | None) -> int:\n" + body + NODE_MAIN)
+    assert ("aot/optional", line) in found, found
+
+
+def test_the_optional_finding_names_the_value_and_the_fix(tmp_path: Path):
+    with pytest.raises(aot.AotError) as raised:
+        aot.generate(_write(tmp_path, NODE + "def f(n: Node | None) -> int:\n    return n.val\n" + NODE_MAIN))
+    text = str(raised.value)
+    assert "`n` is a `Node | None` value whose field or method is used" in text
+    assert "`is not None`" in text
+
+
+ITERATION = """
+import sys
+
+
+def total(a: list[float]) -> float:
+    t = 0.0
+    for v in a:
+        if v < 0.0:
+            continue
+        if v > 100.0:
+            break
+        t += v
+    return t
+
+
+def isum(a: list[int]) -> int:
+    t = 0
+    for v in a:
+        t += v
+    return t
+
+
+def pairs(a: list[int], b: list[int]) -> int:
+    n = 0
+    for x in a:
+        for y in b:
+            if x == y:
+                n += 1
+    return n
+
+
+def main() -> None:
+    k = int(sys.argv[1])
+    xs = [1.5, -2.0, 3.25, 250.0, 4.0]
+    big = [2 ** 62, 2 ** 62, k]
+    small = list(range(k))
+    print(total(xs), isum(big), isum(small), pairs(small, small))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_for_over_lists(tmp_path: Path):
+    """`for v in a` over list[float] and list[int] (RAW and big-capable): CPython's list iterator, the length
+    read again before every step (design 4.3.2)."""
+    _compare(tmp_path, ITERATION, [["0"], ["1"], ["7"]])
+
+
+GROWTH = """
+import sys
+
+
+def build(n: int) -> list[int]:
+    out = [0] * 0
+    for i in range(n):
+        out.append(i * 3)
+    return out
+
+
+def fsum(a: list[float]) -> float:
+    t = 0.0
+    for v in a:
+        t += v
+    return t
+
+
+def drain(a: list[int]) -> int:
+    t = 0
+    while len(a) > 0:
+        t += a.pop()
+    return t
+
+
+def main() -> None:
+    n = int(sys.argv[1])
+    mode = int(sys.argv[2])
+    xs = build(n)
+    alias = xs
+    xs.append(100)
+    xs.insert(0, -1)
+    xs.insert(-100, -2)
+    xs.insert(1000, 999)
+    print(len(alias), xs[0], xs[1], xs[len(xs) - 1])
+    print(xs.count(3), xs.index(100), len(xs), xs.pop())
+    xs.extend(xs)
+    print(len(xs), xs.count(-1))
+    xs.append(xs.pop(0))                        # (S2 review B1: the self-referential operations)
+    xs.insert(0, xs[-1])
+    xs.insert(len(xs), xs.pop())
+    print(xs[0], xs[1], xs[len(xs) - 1], len(xs))
+    xs.remove(100)
+    xs.reverse()
+    print(xs[0], len(xs), xs.pop(), xs.pop(0), xs.pop(-2))
+    f = [1.5]
+    for v in f:
+        if len(f) < 6:
+            f.append(v * 2.0)
+    f.insert(1, -0.0)
+    print(fsum(f), len(f), f.pop(1), f[0], f[len(f) - 1])
+    big = [2 ** 70]
+    big.append(-(2 ** 70))
+    big.extend(big)
+    print(big.count(2 ** 70), big.pop(), len(big))
+    print(drain(xs), len(alias))
+    xs.clear()
+    print(len(xs), len(alias))
+    if mode == 1:
+        print(xs.pop())
+    elif mode == 2:
+        xs.append(5)
+        print(xs.pop(1))
+    elif mode == 3:
+        print(alias.index(7))
+    elif mode == 4:
+        alias.remove(7)
+    elif mode == 5:
+        print(big.index(2 ** 80))
+    elif mode == 6:
+        print(xs.pop(-1))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_lists_that_change_length(tmp_path: Path):
+    """append / insert (CPython's clamping) / extend (also of itself) / pop / clear / reverse / index / count /
+    remove on list[int] (RAW and big-capable) and list[float], seen through an alias; an append inside a loop over the
+    list is visited; every error message (design 4.3.2)."""
+    _compare(tmp_path, GROWTH, [["0", "0"], ["5", "0"], ["40", "0"], ["3", "1"], ["3", "2"], ["3", "3"],
+                                ["3", "4"], ["3", "5"], ["0", "6"]])
+
+
+def test_a_program_that_never_resizes_keeps_the_fixed_layout(tmp_path: Path):
+    """The growable layout is chosen per list kind, only where the program changes a length (design 4.3.2): a tier K
+    program has no TPA_GROW define, so its C is what it was."""
+    c = aot.generate(_write(tmp_path, ITERATION))
+    assert "TPA_GROW_" not in c
+    g = aot.generate(_write(tmp_path, GROWTH, "grow.py"))
+    assert "#define TPA_GROW_INT 1" in g and "#define TPA_GROW_F64 1" in g and "TPA_GROW_I64" not in g
+
+
+def test_a_float_list_is_not_searched(tmp_path: Path):
+    """`x in a` / index / count / remove on a list of float: CPython's answer for NaN depends on object identity
+    (`y is x or y == x`), so it is refused, never answered differently."""
+    for call in ("a.index(1.0)", "a.count(1.0)"):
+        src = f"def f(a: list[float]) -> int:\n    return {call}\n" + \
+              '\n\ndef main() -> None:\n    a = [1.0]\n    print(f(a))\n\n\nif __name__ == "__main__":\n    main()\n'
+        with pytest.raises(aot.AotError) as raised:
+            aot.generate(_write(tmp_path, src))
+        assert "aot/identity" in str(raised.value)
+
+
+@pytest.mark.parametrize("op, kept", [("a.pop()", True), ("g(a)", True), ("a.append(1.0)", False)])
+def test_a_list_type_the_program_shrinks_keeps_every_bounds_check(tmp_path: Path, op: str, kept: bool):
+    """The verifier drops the check of `a[i]` in `for i in range(len(a))` only while no function of the program can
+    shrink a list of that type (here directly, or through the alias in a callee); growing keeps the proof."""
+    src = ("def g(b: list[float]) -> None:\n    b.pop()\n\n\n"
+           "def f(a: list[float]) -> float:\n    t = 0.0\n    for i in range(len(a)):\n        t += a[i]\n"
+           f"        if t > 3.0:\n            {op}\n    return t\n\n\n"
+           "def main() -> None:\n    a = [1.0, 2.0, 3.0, 4.0]\n    print(f(a))\n    g(a)\n\n\n"
+           'if __name__ == "__main__":\n    main()\n')
+    if op == "a.append(1.0)":
+        src = src.replace("    b.pop()\n", "    b.append(0.5)\n")
+    c = aot.generate(_write(tmp_path, src))
+    body = c[c.index("static int tpf_f(tpa_f64_list *v_a TPA_UNUSED, double *out)\n{"):]
+    body = body[:body.index("\n}\n")]
+    assert ("tpa_slot(" in body) == kept, body
+
+
+def test_print_str_and_repr_of_lists(tmp_path: Path):
+    """A list of float / int (RAW and big-capable) printed, in str() / repr() and in f-string fields: its repr, each
+    item's repr (design 4.3.2)."""
+    _compare(tmp_path, """
+import sys
+
+
+def main() -> None:
+    k = int(sys.argv[1])
+    f = [1.5, -0.0, 1e300 * 1e10, 0.1, 1e16, 2.5e-7]
+    i = [1, -2, k]
+    b = [2 ** 70, k]
+    e = [0] * 0
+    print(f, i, b, e)
+    print(str(f), repr(i), f"{b} and {e!r} {i!s}")
+    s = str(i) + "!"
+    f.append(-1.0)
+    print(s, len(repr(f)), f)
+
+
+if __name__ == "__main__":
+    main()
+""", [["0"], ["-7"], [str(2 ** 63 - 1)]])
+
+
+def test_a_loop_whose_body_rebinds_the_list_is_refused(tmp_path: Path):
+    """CPython's list iterator holds the list it started on; the AOT loop reads the name at every step, so a body that
+    rebinds the name is refused rather than iterating the new list (S2 review S1)."""
+    src = ("def f(a: list[float]) -> float:\n    t = 0.0\n    for v in a:\n        t += v\n        a = [9.0]\n"
+           "    return t\n\n\ndef main() -> None:\n    a = [1.0, 2.0]\n    print(f(a))\n\n\n"
+           'if __name__ == "__main__":\n    main()\n')
+    with pytest.raises(aot.AotError) as raised:
+        aot.generate(_write(tmp_path, src))
+    assert "CPython keeps iterating the first list" in str(raised.value)
+
+
+def test_a_library_does_not_resize_a_list_kind_that_crosses_its_boundary(tmp_path: Path):
+    """S2 review B2, option (a): a list kind the library resizes cannot be a parameter or result of an export
+    (`aot/library-resize`) until tier T; a kind resized only inside the library takes the growable layout there."""
+    from typedpython.aot import library
+    p = _write(tmp_path, """
+def grow(a: list[int]) -> int:
+    a.append(1)
+    return len(a)
+
+
+def inner(n: int) -> int:
+    b = [0] * 0
+    for i in range(n):
+        b.append(i)
+    return len(b)
+""", "lib.py")
+    with pytest.raises(aot.AotError) as raised:
+        library.generate_library(p, exports=["grow"], prefix="p")
+    assert [(f.rule, f.name) for f in raised.value.findings] == [("aot/library-resize", "grow")]
+    c_text, _header, _desc = library.generate_library(p, exports=["inner"], prefix="p")
+    assert "#define TPA_GROW_I64 1" in c_text
+
+
+STR_LISTS = """
+import sys
+
+
+def words(s: str) -> list[str]:
+    return s.split()
+
+
+def main() -> None:
+    mode = int(sys.argv[1])
+    xs = words("alpha beta gamma")
+    ys = xs
+    xs.append("delta")
+    xs.insert(0, "zero")
+    xs.insert(-100, sys.argv[2])
+    print(xs, len(ys), xs.count("beta"), xs.index("gamma"))
+    xs.extend(xs)
+    last = xs.pop()
+    first = xs.pop(0)
+    print(last, first, len(xs), xs)
+    xs.remove("beta")
+    xs.reverse()
+    print(xs)
+    for w in ys:
+        if len(ys) < 12:
+            ys.append(w.upper())
+    print(ys)
+    ys.clear()
+    print(ys, len(xs))
+    if mode == 1:
+        print(xs.index("été"))
+    elif mode == 2:
+        xs.remove("nope")
+    elif mode == 3:
+        print(xs.pop())
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_lists_of_str_that_change_length(tmp_path: Path):
+    """append / insert / extend (also of itself) / pop / remove / reverse / clear / index / count on list[str], through
+    an alias and inside a loop over the list; the index message carries the repr of a non-ASCII value (design 4.3.2)."""
+    _compare(tmp_path, STR_LISTS, [["0", "x"], ["0", "\u00e9"], ["1", "y"], ["2", "z"], ["3", "w"]])
+
+
+MEMBERSHIP = """
+import sys
+
+
+def main() -> None:
+    k = int(sys.argv[1])
+    a = [1, 2, k]
+    b = a
+    a += a
+    print(3 in a, k not in a, 2 ** 70 in a, True in a, len(b))
+    s = "x y".split()
+    t = s
+    z = ["z"]
+    s += z
+    print("y" in s, sys.argv[2] not in t, len(t))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_in_and_in_place_extend(tmp_path: Path):
+    """`v in a` / `v not in a` on list[int] (a bool, a big int) and list[str]; `a += b` extends in place, so an alias
+    sees it, and `a += a` doubles the list (design 4.3.2)."""
+    _compare(tmp_path, MEMBERSHIP, [["0", "y"], ["3", "q"], [str(2 ** 70), "z"]])
+
+
+def test_in_on_a_float_list_is_refused(tmp_path: Path):
+    src = ("def f(a: list[float]) -> bool:\n    return 1.0 in a\n\n\ndef main() -> None:\n    a = [1.0]\n"
+           "    print(f(a))\n\n\nif __name__ == \"__main__\":\n    main()\n")
+    with pytest.raises(aot.AotError) as raised:
+        aot.generate(_write(tmp_path, src))
+    assert "aot/identity" in str(raised.value)
+
+
+COMPARISONS = """
+import sys
+
+
+def main() -> None:
+    k = int(sys.argv[1])
+    a = [1, 2, k]
+    b = [1, 2, 3]
+    c = a
+    print(a == b, a != b, a < b, a <= b, a > b, a >= b, a == c)
+    big = [2 ** 70, k]
+    big2 = [2 ** 70]
+    print(big > big2, big2 < big, big == big2)
+    s = sys.argv[2].split()
+    t = "b a".split()
+    print(s == t, s < t, s > t, s <= s)
+    e = [0] * 0
+    print(e < b, e == e, b > e)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_list_comparisons(tmp_path: Path):
+    """== != < <= > >= of list[int] (RAW and big-capable) and list[str]: the first differing pair decides, else the
+    lengths (list_richcompare); a list of float is refused like a search (design 4.3.2, N1)."""
+    _compare(tmp_path, COMPARISONS, [["3", "b a"], ["4", "a b"], ["-1", "b"], ["3", "b a c"]])
+
+
+MAKING = """
+import sys
+
+
+def main() -> None:
+    k = int(sys.argv[1])
+    a = [1.5, 2.5, -0.0]
+    b = [4.0]
+    c = a + b
+    d = a * 2
+    e = k * b
+    f = c[1:]
+    g = c[::-1]
+    h = c[-2:k:1]
+    print(c, d, e, f, g, h)
+    i = [1, 2, 3, 4, 5]
+    j = i[k:]
+    m = i[1:4:2]
+    n = list(i)
+    n.append(9)
+    big = [2 ** 70, 1]
+    big2 = big + big
+    bs = big[2 ** 80:]
+    bt = big[-(2 ** 80):1]
+    print(j, m, n, i, big2, bs, bt)
+    s = "a b c d".split()
+    t = s[1:3]
+    u = s + t
+    v = s * 0
+    w = list(s)
+    w.append("z")
+    x = s[::-2]
+    print(t, u, v, w, s, x, 2 * t)
+    if k == 7:
+        z: list[int] = i[::0]
+        print(z)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_concat_repeat_slices_and_list_copies(tmp_path: Path):
+    """a + b, a * n / n * a (a count outside int64: OverflowError), slices with every bound form (negative step,
+    bounds outside int64 clamped, step 0: ValueError) and list(a), on list[float], list[int] (RAW and big-capable)
+    and list[str]; the copies are new lists (design 4.3.2)."""
+    _compare(tmp_path, MAKING, [["0"], ["2"], ["-3"], ["7"], [str(2 ** 70)]])
+
+
+DELETES = """
+import sys
+
+
+def main() -> None:
+    mode = int(sys.argv[1])
+    a = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    del a[0]
+    del a[-1]
+    del a[1:3]
+    print(a)
+    del a[::2]
+    print(a)
+    b = [10, 20, 30]
+    a[1:2] = b
+    print(a)
+    a[0:4] = b
+    print(a)
+    a[1:1] = a
+    print(a)
+    r = a[::-2]
+    a[::-2] = r
+    c = [7, 8]
+    a[:] = a
+    print(a, c)
+    f = [1.5, 2.5, 3.5]
+    g = [9.5]
+    f[0:2] = g
+    del f[0]
+    print(f)
+    s = "p q r s".split()
+    t = s[1:3]
+    s[0:1] = t
+    del s[::3]
+    print(s)
+    big = [2 ** 70, 2, 3]
+    del big[0:1]
+    big[0:0] = big
+    print(big)
+    if mode == 1:
+        del a[100]
+    elif mode == 2:
+        a[::2] = c
+    elif mode == 3:
+        del a[2 ** 70]
+    elif mode == 4:
+        del a[::0]
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_del_and_slice_assignment(tmp_path: Path):
+    """del a[i] (negative, out of range, outside int64), del a[i:j] and extended slices, slice assignment that grows
+    and shrinks the list, an extended slice of another size (ValueError), a[1:1] = a and a[:] = a (the source copied
+    first), on all list types (design 4.3.2; the S2 review B1 self-referential cases)."""
+    _compare(tmp_path, DELETES, [["0"], ["1"], ["2"], ["3"], ["4"]])
+
+
+INSTANCES = """
+import sys
+
+
+class Item:
+    name: str
+    w: int
+
+    def __init__(self, name: str, w: int) -> None:
+        self.name = name
+        self.w = w
+
+
+def heaviest(xs: list[Item]) -> Item:
+    best = xs[0]
+    for it in xs:
+        if it.w > best.w:
+            best = it
+    return best
+
+
+def make(n: int) -> list[Item]:
+    out: list[Item] = []
+    for i in range(n):
+        out.append(Item("i" + str(i), (i * 7) % 5))
+    return out
+
+
+def main() -> None:
+    n = int(sys.argv[1])
+    xs = make(n)
+    ys = xs
+    a = Item("a", 9)
+    xs.insert(0, a)
+    xs.append(a)
+    h = heaviest(xs)
+    print(len(xs), xs.count(a), a in ys, h.name)
+    p = xs.pop()
+    q = xs.pop(0)
+    print(p is q, p.name, len(ys))
+    xs[0] = a
+    f0 = xs[0]
+    fl = xs[-1]
+    print(f0.name, fl.w)
+    zs = [a, Item("b", 1)]
+    xs.extend(zs)
+    xs.remove(a)
+    xs.reverse()
+    total = 0
+    for it in xs:
+        total += it.w
+    print(total, len(xs))
+    del xs[0]
+    xs.clear()
+    print(len(ys))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_lists_of_class_instances(tmp_path: Path):
+    """list[C] in locals, parameters and results: displays, `[]` with an annotation, element reads and stores,
+    append / insert / extend / pop / remove / reverse / del / clear, count and `in` by identity, a loop over the list,
+    an alias seeing every change (design 4.3.2)."""
+    _compare(tmp_path, INSTANCES, [["0"], ["1"], ["6"]])
+
+
+INDEX_OF_INSTANCES = """
+import sys
+
+
+class C:
+    v: int
+
+    def __init__(self, v: int) -> None:
+        self.v = v
+
+
+def main() -> None:
+    a = C(1)
+    b = C(2)
+    xs = [a, b, a]
+    print(xs.index(a), xs.index(b))
+    if sys.argv[1] == "1":
+        print(xs.index(C(1)))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_index_of_an_instance(tmp_path: Path):
+    """index() of an instance is by identity; an absent one is `ValueError: list.index(x): x not in list` (CPython
+    3.14 and later do not format the value, so the instance's repr with its address never appears)."""
+    _compare(tmp_path, INDEX_OF_INSTANCES, [["0"], ["1"]])
+
+
+TREE = """
+import sys
+
+
+class Node:
+    val: int
+    children: list["Node"]
+
+    def __init__(self, val: int) -> None:
+        self.val = val
+        self.children = []
+
+    def add(self, c: "Node") -> None:
+        self.children.append(c)
+
+    def total(self) -> int:
+        t = self.val
+        for c in self.children:
+            t += c.total()
+        return t
+
+
+def build(depth: int, width: int, base: int) -> Node:
+    n = Node(base)
+    if depth > 0:
+        for i in range(width):
+            n.add(build(depth - 1, width, base * 10 + i))
+    return n
+
+
+def main() -> None:
+    d = int(sys.argv[1])
+    root = build(d, 2, 1)
+    print(root.total(), len(root.children))
+    loop = Node(7)
+    loop.add(loop)
+    other = Node(8)
+    other.add(loop)
+    loop.add(other)
+    print(len(loop.children), loop.total() if d < 0 else 0)
+    last = root
+    if len(root.children) > 0:
+        last = root.children.pop()
+    print(last.val, len(root.children))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_list_fields_and_cycles_through_lists(tmp_path: Path):
+    """A class with a list[C] field (`children: list["Node"]`): `self.children = []`, methods called on the field
+    (the list held for the call), loops and len over it; a cycle through the list (`loop.add(loop)`)."""
+    _compare(tmp_path, TREE, [["0"], ["3"], ["8"]])
+
+
+def test_cycles_through_lists_are_collected(tmp_path: Path):
+    """The S2 review, B4: a list of a cyclic-capable class is a tracked object, so the cycles `loop -> list -> loop`
+    and `loop -> list -> other -> list -> loop` are freed by the collector; under TPA_GC_STRESS (a collection at every
+    safepoint) with TP_CHECK_PROVEN in the sanitizer job, nothing tracked remains at exit."""
+    from test_aot_tier_o2c import _stats
+    src = _write(tmp_path, TREE)
+    for stress in (False, True):
+        out, (_collections, _freed, _exit_freed, remaining) = _stats(tmp_path, src, ["4"], stress=stress)
+        assert remaining == 0, (stress, out)
+
+
+def test_a_class_with_a_list_field_is_never_virtual_or_region(tmp_path: Path):
+    """Its fields stay counted references of a heap object (the list can change under any alias)."""
+    report = aot.explain_alloc(_write(tmp_path, TREE))
+    assert "class holds a list" in report and "-> virtual" not in report and "-> region" not in report
+
+
+
+ITEMS_OF_A_LIST = """
+import sys
+
+
+class P:
+    v: int
+
+    def __init__(self, v: int) -> None:
+        self.v = v
+
+
+def main() -> None:
+    n = int(sys.argv[1])
+    a = P(n)
+    xs = [a]
+    b = P(n + 1)
+    xs.append(b)
+    c = P(n + 2)
+    xs[0] = c
+    d = P(n + 3)
+    xs.insert(0, d)
+    e = P(n + 4)
+    f = xs[0]
+    g = P(n + 5)
+    k = P(n + 6)
+    ys = [P(0)]
+    for y in ys:
+        xs.append(g)
+        k = y
+    print(len(xs), f.v, e.v, k.v)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_an_instance_put_into_a_list_is_a_heap_object(tmp_path: Path):
+    """An instance placed in a list by a display, `append`, `xs[0] = c` or `insert` outlives the expression that made
+    it, so it is a counted heap object, never virtual (scalar-replaced) or in a region (the fable-pmp review of #526,
+    S1: a wrong choice would still print the right numbers and fail only under ASan). The statements of a `for` loop
+    over a list of instances count too: `g`, appended inside one, and `k`, rebound inside one, are heap objects (they
+    were made virtual while those bodies went unread, and the C did not compile). `e`, which no list holds, is the
+    control: the analysis does make an instance virtual here."""
+    report = aot.explain_alloc(_write(tmp_path, ITEMS_OF_A_LIST))
+    kinds = {line.split()[1]: line.split("-> ")[1].split()[0] for line in report.splitlines()
+             if " = P(" in line and "<temp>" not in line}
+    assert kinds == {"a": "heap-rc", "b": "heap-rc", "c": "heap-rc", "d": "heap-rc", "e": "virtual", "g": "heap-rc",
+                     "k": "heap-rc"}, report
+
+
+CLEARED_WHILE_ITERATING = """
+import sys
+
+
+class P:
+    v: int
+
+    def __init__(self, v: int) -> None:
+        self.v = v
+
+
+class Box:
+    items: list[P]
+
+    def __init__(self, n: int) -> None:
+        self.items = [P(n), P(n + 1), P(n + 2)]
+
+
+def main() -> None:
+    n = int(sys.argv[1])
+    kept = P(-1)
+    xs = [P(n), P(n * 2)]
+    for c in xs:
+        xs.clear()
+        print(c.v, len(xs))
+        kept = c
+    print(kept.v)
+    box = Box(n)
+    for q in box.items:
+        box.items = []
+        print(q.v, len(box.items))
+        kept = q
+    print(kept.v)
+    ys = [P(n + 7)]
+    for r in ys:
+        ys.pop()
+        ys.append(P(r.v + 1))
+        kept = r
+        if r.v > n + 9:
+            break
+    last = ys[0]
+    print(kept.v, last.v)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_the_loop_item_outlives_a_clear_of_its_list(tmp_path: Path):
+    """`for c in xs: xs.clear()` and a rebinding of the iterated field leave `c` valid (the loop holds the list, and
+    its own reference to each item), as CPython's list iterator and its item reference do; read in the body and,
+    through another name, after the loop (the fable-pmp review of #526, N3; the ASan job sees a use after free)."""
+    _compare(tmp_path, CLEARED_WHILE_ITERATING, [["0"], ["3"]])
+
+TUPLES = """
+import sys
+
+
+def measure(p: tuple[int, str]) -> tuple[int, int]:
+    return len(p[1]), p[0]
+
+
+def pair(n: int) -> tuple[int, float]:
+    return n * 2, n / 4
+
+
+def triple(n: int) -> tuple[int, int, int]:
+    return n, n + 1, n + 2
+
+
+def again(n: int) -> tuple[int, int, int]:
+    return triple(n + 1)
+
+
+def label(n: int) -> tuple[str, int]:
+    return "n=" + str(n), n
+
+
+def relabel(n: int) -> tuple[str, int]:
+    t = label(n * 2)
+    if n > 1:
+        return t
+    return label(n - 1)
+
+
+def show(x: float, n: int) -> None:
+    a = (x, True, n)
+    b = ("sé",)
+    c = (1, 2, n)
+    d = a
+    for v in c:
+        print(v)
+    print(a, b, d, f"<{b}>", str(c), repr(b))
+    q = pair(n)
+    print(q[0], q[-1], len(q))
+    words = ("x", "", "été")
+    for w in words:
+        print(len(w), w)
+
+
+def order(n: int) -> None:
+    one = (n,)
+    two = (n, 0)
+    other = (n, -1)
+    print(one < two, two < one, one == two, two > other, two >= other, other <= other, (n, 1) == (n, 1))
+    s = ("b", "a")
+    t = ("a", "z")
+    print(s > t, s < t, s == ("b", "a"), s != t)
+    flags = (True, False)
+    print(flags, flags == (True, False), flags < (True, True))
+
+
+def main() -> None:
+    n = int(sys.argv[1])
+    t = (n, "a")
+    u: tuple[int, str] = (n + 1, "b")
+    s, k = measure(t)
+    print(t[0], t[1], len(t), s, k)
+    w = triple(n)
+    m = n + 5
+    print(t == u, t != u, t < u, t >= u, n in w, m not in w, "a" in t[1], t[1] in ("a", "b"))
+    print(t)
+    x, y = 1, 2
+    x, y = y, x
+    print(x, y)
+    t = (t[0] * 3, t[1] + "!")
+    print(t, u)
+    show(n * 1.5, n)
+    s2, k2 = measure((n, "xyz"))
+    r = again(n)
+    print(s2, k2, r)
+    order(n)
+    name, v = label(n)
+    lt = relabel(n)
+    print(name, v, lt, lt[0], lt == (name, v), len(lt[0]))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_tuple_values(tmp_path: Path):
+    """Fixed-shape tuples (design 4.3.2): displays, a tuple parameter, a tuple returned and bound to a name, `t[k]`
+    (negative too), len, unpacking (also the swap `x, y = y, x`), == / != / ordering (CPython's first differing item,
+    then the lengths), `in` (also of a display), loops over a tuple, print / str / repr / f-string (`('s',)` for one
+    element), a tuple rebound from its own elements."""
+    _compare(tmp_path, TUPLES, [["0"], ["3"], ["-7"]])
+
+
+TUPLE_INDEX = """
+import sys
+
+
+def pick(i: int) -> int:
+    t = (10, 20, 30)
+    return t[i]
+
+
+def word(i: int) -> str:
+    t: tuple[str, str] = ("ab", "c\u00e9")
+    return t[i] + "!"
+
+
+def half(i: int) -> float:
+    t = (1.5, 2.5)
+    return t[i - 1]
+
+
+def big(i: int) -> int:
+    t = (2 ** 70, 3)
+    return t[i] * 2
+
+
+def flag(t: tuple[bool, bool, bool], i: int) -> bool:
+    return t[i]
+
+
+def main() -> None:
+    n = int(sys.argv[1])
+    print(pick(n % 3), pick(-1 - n % 3), word(n % 2), half(n % 2), big(n % 2), flag((True, False, True), n % 3))
+    t = (5, 6)
+    print(t[n == 0], t[-2], t[True])
+    print(pick(n))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_a_tuple_indexed_by_a_variable(tmp_path: Path):
+    """`t[i]` of a tuple whose elements share a type (int, a big int, float, bool, str): CPython's tuple index rules,
+    a negative index from the end, a bool index, and `IndexError: tuple index out of range` (the last line of the
+    cases 3, -4 and 7)."""
+    _compare(tmp_path, TUPLE_INDEX, [["0"], ["2"], ["-3"], ["3"], ["-4"], ["7"]])
+
+
+LIST_OF_TUPLES = """
+import sys
+
+
+def total(ps: list[tuple[int, str]]) -> int:
+    s = 0
+    for n, w in ps:
+        s += n * len(w)
+    return s
+
+
+def grow(ps: list[tuple[int, str]], n: int) -> None:
+    ps.append((n, "g"))
+
+
+def build(n: int) -> None:
+    ps: list[tuple[int, str]] = []
+    for i in range(n):
+        ps.append((i, "x" * i))
+    t = (n, "end")
+    ps.append(t)
+    ps.insert(0, (-1, "first"))
+    alias = ps
+    grow(alias, 99)
+    print(len(ps), total(ps))
+    print(ps)
+    a, b = ps[1]
+    q = ps[-1]
+    k = len(ps) - 2
+    print(a, b, q, ps[0][1], ps[k][0], f"<{ps}>", ps[k] == (n, "end"))
+    last = ps.pop()
+    w, m = ps.pop(0)
+    print(last, w, m, len(ps), str(ps))
+    ps[0] = (7, "seven")
+    del ps[1:2]
+    more = ps + [(9, "nine")]
+    more += [(10, "ten"), q]
+    print(repr(more), more[1:], more * 2)
+    seen = 0
+    for p in more:
+        seen += 1
+        if p[0] == 9:
+            continue
+        if seen > 6:
+            break
+        if seen == 1:
+            more.append((11, "added while iterating"))
+        print(seen, p[0], p)
+    ps.reverse()
+    copied = list(more)
+    copied.pop()
+    print(ps, len(copied), len(more))
+    ps.clear()
+    print(ps, len(ps))
+
+
+def main() -> None:
+    n = int(sys.argv[1])
+    build(n)
+    pts = [(1.5, 2), (0.25, -3)]
+    pts += [(3.0, 4)]
+    x, y = pts[n % 3]
+    print(pts, pts[n % 3][0], x, y)
+    for i in range(len(pts)):
+        pts[i] = (pts[i][0] * 2, pts[i][1] + 1)
+    print(pts)
+    print(pts[n])
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_a_list_of_tuples(tmp_path: Path):
+    """`list[tuple[int, str]]` and `list[tuple[float, int]]` (design 4.3.2, one list per element position): a display,
+    `[]`, append / insert / pop / pop(i) / clear / reverse, `L[i] = t`, `del L[a:b]`, `+`, `+=`, `*`, a slice,
+    `list(L)`, `L[i]` bound, unpacked, compared and indexed by a constant, `for t in L` and `for a, b in L` (CPython's
+    list iterator sees an item appended in the body; `break`, `continue`), print / str / repr / f-strings, a list of
+    tuples passed to a function that appends through its parameter (an alias), and `IndexError: list index out of
+    range` (the last line of the cases 3 and -4)."""
+    _compare(tmp_path, LIST_OF_TUPLES, [["0"], ["2"], ["3"], ["-4"]])
+
+
+LIST_OF_TUPLES_SEARCH = """
+import sys
+
+
+def main() -> None:
+    n = int(sys.argv[1])
+    ps: list[tuple[int, str]] = [(1, "a"), (2, "b"), (n, "c"), (2, "b")]
+    qs = list(ps)
+    t = (2, "b")
+    k = 5
+    print((n, "c") in ps, (k, "c") not in ps, t in ps, ps.count(t), ps.count((k, "z")), ps.index((n, "c")))
+    print(ps == qs, ps != qs, ps < qs, ps <= qs, ps == qs[:2] + qs[2:])
+    qs.append((0, "x"))
+    print(ps == qs, ps < qs, qs > ps)
+    qs[1] = (2, "a")
+    print(ps < qs, ps > qs, ps >= qs)
+    e: list[tuple[int, int]] = []
+    f: list[tuple[int, int]] = []
+    print(e == f, e < f, e <= f, (1, 2) in e, e.count((1, 1)))
+    f.append((n, 0))
+    e.append((1, n))
+    print(e < f, e > f, e <= f, e >= f, e == f)
+    i = 0
+    while i < 3:
+        e.append((i, i))
+        found = (i, i) in e
+        print(found, e.count((i, i)), e.index((i, i)))
+        i += 1
+    ps.remove(t)
+    print(ps, len(ps))
+    if n > 0 and (k, "q") in ps:
+        print("never")
+    m = (n, n)
+    if n == 3:
+        e.remove(m)
+    print(e)
+    print(ps.index((k, "c")))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_a_list_of_tuples_searched_and_compared(tmp_path: Path):
+    """`in`, `not in`, `count`, `index` and `remove` of a list of tuples (CPython's item `==`, element by element), and
+    `==`, `!=`, `<`, `<=`, `>`, `>=` of two lists of tuples (lengths, then the first items that differ, as tuples);
+    `ValueError: list.index(x): x not in list` (cases 0, 2 and -1, last line) and `ValueError: list.remove(x): x not in
+    list` (case 3)."""
+    _compare(tmp_path, LIST_OF_TUPLES_SEARCH, [["0"], ["2"], ["3"], ["5"], ["-1"]])
+
+
+LIST_STORE_AND_EMPTY = """
+import sys
+
+
+def main() -> None:
+    n = int(sys.argv[1])
+    words = ["a", "b", "c"]
+    words[n % 3] = "x" * n
+    words[-1] = words[0] + "!"
+    print(words)
+    xs: list[int] = []
+    ys: list[float] = []
+    for i in range(n):
+        xs.append(i * i)
+        ys.append(i / 2)
+    print(xs, ys, len(xs) + len(ys))
+    i = 0
+    while i < len(xs):
+        i += 1
+    print(i)
+    words[n] = "out"
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_a_store_into_a_list_of_str_and_empty_lists_of_numbers(tmp_path: Path):
+    """`words[i] = s` of a list of str (the new item is held, the old one released; `IndexError: list assignment index
+    out of range` ends the cases 3 and -4), and `xs: list[int] = []` / `list[float]` grown by append, then walked by
+    `while i < len(xs)` (the verifier once kept the created length 0 as the upper bound of a list that grows)."""
+    _compare(tmp_path, LIST_STORE_AND_EMPTY, [["0"], ["2"], ["3"], ["-4"]])
+
+
+TUPLE_MAIN = '\n\ndef main() -> None:\n    print(f(1))\n\n\nif __name__ == "__main__":\n    main()\n'
+
+
+@pytest.mark.parametrize("body, words", [
+    ("def f(i: int) -> int:\n    t = (i, 'a')\n    return len(str(t[i]))\n", "differ in type"),
+    ("def f(i: int) -> int:\n    t = (1, 2)\n    return len(t[i:])\n", "a slice of a tuple"),
+    ("def f(i: int) -> bool:\n    t = (1, 2)\n    return t is t\n", "no tuple object yet"),
+    ("def f(i: int) -> int:\n    t = (1, 2)\n    x = [[t]]\n    return 0\n", "no tuple object yet"),
+    ("def f(i: int) -> bool:\n    t = (i * 0.5, 1)\n    return t == t\n", "(aot/identity)"),
+    ("def f(i: int) -> bool:\n    t = (i * 0.5, 1)\n    return 1.0 in t\n", "(aot/identity)"),
+    ("def f(i: int) -> int:\n    t = (i, 'a')\n    for v in t:\n        pass\n    return 0\n", "different types"),
+    ("def f(i: int) -> bool:\n    t = (1, 2)\n    return i + 1 in t\n", "bind the value to a name first"),
+    ("def f(i: int) -> int:\n    ps = [(i, 'a')]\n    return ps\n", "returning one are not in this step"),
+    ("def f(i: int) -> bool:\n    ps = [(i * 0.5, 1)]\n    return (1.0, 1) in ps\n", "(aot/identity)"),
+    ("def f(i: int) -> bool:\n    ps = [(i * 0.5, 1)]\n    return ps == ps\n", "(aot/identity)"),
+    ("def f(i: int) -> int:\n    ps = [(i, 1)]\n    while (i, 1) in ps:\n        ps.pop()\n    return 0\n",
+     "would be computed once"),
+    ("def f(i: int) -> int:\n    ps = [(i, 1)]\n    return ps.count((i, i + 1))\n", "bind the values to names first"),
+    ("def f(i: int) -> int:\n    ps = [(i, 1)]\n    return ps.count((i, 1)) + f(i - 1)\n", "bind the call's value"),
+    ("def f(i: int) -> bool:\n    ps = [(i, 1)]\n    qs = [(i, 'a')]\n    return ps == qs\n", "of its shape"),
+    ("def f(i: int) -> int:\n    ps = [(i, 'a')]\n    ps.sort()\n    return 0\n", "`ps.sort` is outside"),
+    ("def f(i: int) -> int:\n    ps: list[tuple[int, bool]] = []\n    return 0\n", "no list of bool yet"),
+    ("def f(i: int) -> int:\n    ps = [(i, 'a')]\n    print(ps, f(i - 1))\n    return 0\n", "bind the call's value"),
+])
+def test_a_tuple_use_with_no_aot_form_is_named(tmp_path: Path, body: str, words: str):
+    """What needs a tuple object (identity, a container holding one, a slice), a variable index into a tuple of mixed
+    element types (a union), or CPython's identity test on a float item leaves the function uncompiled with the reason, never a guess."""
+    with pytest.raises(aot.AotError) as raised:
+        aot.generate(_write(tmp_path, body + TUPLE_MAIN))
+    assert words in str(raised.value)
+
+
+def test_a_library_does_not_export_a_tuple_parameter(tmp_path: Path):
+    """Inside the program a tuple parameter is one parameter per element; the library boundary keeps the signature as
+    written, so exporting one is the named `aot/export` finding (an internal function may take one); a returned tuple
+    with a str element is not exported yet either (the Kotlin result class holds scalars)."""
+    from typedpython.aot import library
+    p = _write(tmp_path, """
+def inner(p: tuple[int, int]) -> int:
+    return p[0] + p[1]
+
+
+def take(p: tuple[int, int]) -> int:
+    return p[0]
+
+
+def total(n: int) -> int:
+    return inner((n, n + 1))
+
+
+def named(n: int) -> tuple[str, int]:
+    return "n", n
+""", "lib.py")
+    for name in ("take", "named"):          # (a str element of a returned tuple: not across the boundary yet either)
+        with pytest.raises(aot.AotError) as raised:
+            library.generate_library(p, exports=[name], prefix="p")
+        assert [(f.rule, f.name) for f in raised.value.findings] == [("aot/export", name)]
+    library.generate_library(p, exports=["total"], prefix="p")

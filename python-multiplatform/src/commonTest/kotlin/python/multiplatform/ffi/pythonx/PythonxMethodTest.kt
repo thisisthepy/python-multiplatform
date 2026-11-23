@@ -114,6 +114,30 @@ class PythonxMethodTest {
         assertEquals("False", eval("_pm['counter_is_a_package']"))
     }
 
+    /**
+     * SPEC U-9: `dir()` of a module lists what reading an attribute serves, and nothing else. A type
+     * whose only rows are members (`methshape.Base`: one `METHOD`, no extension, no package of its own)
+     * is reached through a value's proxy and is not an attribute of its package, so it is not listed.
+     * pythonx-compose turns `dir()` into its name table, and a listed name it cannot read hid
+     * `Alignment.Horizontal.End` (the notebook's grouped spelling) on Kotlin/Native, where the klib
+     * walker binds `Alignment.Horizontal.align` as a member (#191, NotebookPracticeTest cell 36).
+     * Red before: `['Base']`, `dir()` listing a name `getattr` refuses.
+     */
+    @Test
+    fun aModuleListsOnlyTheNamesItServes() = withAdapter {
+        Python3.exec(
+            """
+            import methshape
+            _pm = {
+                'unreadable': [_n for _n in dir(methshape) if not _n.startswith('_') and not hasattr(methshape, _n)],
+                'counter': 'Counter' in dir(methshape) and hasattr(methshape, 'Counter'),
+            }
+            """.trimIndent(),
+        )
+        assertEquals("[]", eval("repr(_pm['unreadable'])"), "dir() lists a name the module does not serve")
+        assertEquals("True", eval("_pm['counter']"), "a type with an extension is still listed and served")
+    }
+
     // ------------------------------------------------------------------------------- helpers
 
     private inline fun withAdapter(block: () -> Unit) = PythonTestFixture.withInterpreter {

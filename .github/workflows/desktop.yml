@@ -44,6 +44,56 @@ jobs:
         # Using --console=plain so logs are readable in GitHub Actions
         run: ./gradlew :python-multiplatform:desktopTest --console=plain
 
+  artifact-fixture:
+    # The artifact walker's consumer suite (AGENTS.md section 15: plugin unit tests cannot see what the
+    # generated table does at run time). It had no CI step, so SPEC B-5b/B-5c (#164 items 4 and 5,
+    # the walked kotlinx-coroutines dispatcher path) had no run to point at.
+    name: Artifact walker fixture (desktop)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'zulu'
+          cache: 'gradle'
+
+      - name: Run the artifact fixture's desktop tests
+        # --rerun and a deleted result directory: never read an earlier result as this run's (AGENTS.md rule 8).
+        run: |
+          rm -rf python-multiplatform-gradle-plugin/fixtures/artifact/build/test-results/desktopTest
+          ./gradlew :python-multiplatform-gradle-plugin-fixtures:artifact:desktopTest --rerun --console=plain
+
+      - name: Count the tests (the coroutines suite must have run)
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import glob, os, sys, xml.etree.ElementTree as ET
+          total = failed = skipped = 0
+          classes = set()
+          for f in glob.glob("python-multiplatform-gradle-plugin/fixtures/artifact/build/test-results/desktopTest/*.xml"):
+              for c in ET.parse(f).getroot().iter("testcase"):
+                  total += 1
+                  classes.add(c.get("classname"))
+                  failed += c.find("failure") is not None or c.find("error") is not None
+                  skipped += c.find("skipped") is not None
+          line = f"artifact fixture: {total} tests, {failed} failed, {skipped} skipped"
+          print(line)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as s:
+              s.write(line + "\n")
+          if "fixture.artifact.WalkedArtifactCoroutinesTest" not in classes or failed or skipped:
+              sys.exit("WalkedArtifactCoroutinesTest did not run, or a test failed or skipped")
+          PY
+
+      - name: Upload the test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifact-fixture-reports
+          path: python-multiplatform-gradle-plugin/fixtures/artifact/build/reports/tests/desktopTest
       # SPEC L-9c (#191): a macosArm64 consumer linked and packaged only by the bindings plugin. The test
       # task runs with the staged PYTHONHOME; the release executable then runs with none, from another
       # directory, so python-multiplatform-home beside it is the only prefix it can find.
@@ -64,6 +114,17 @@ jobs:
       # klibs; Text and Button go through the B3 compiler plugin, whose unrewritten marker would throw.
       - name: Compose on Kotlin/Native (macosArm64), host test
         run: ./gradlew :python-multiplatform-compose:fixtures:compose-native:macosArm64Test --rerun --console=plain
+      # SPEC B-6b (#191, from #172 item 5): input-method composition decoded by Compose's AWT layer, in a
+      # real window. The macOS runner has a display; the task fails if no window test matched.
+      - name: Real-window input method test (Compose host fixture)
+        run: ./gradlew :python-multiplatform-compose:fixtures:compose:desktopWindowTest --rerun --console=plain
+
+      - name: Upload the real-window test report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-window-test-reports
+          path: python-multiplatform-compose/fixtures/compose/build/reports/tests/desktopWindowTest
 
   plugin-unit:
     # The Gradle plugin's own unit tests (#403). Only its fixtures ran in CI before, so plugin
@@ -219,6 +280,36 @@ jobs:
               sys.exit("mingwX64Test did not run, or a test failed")
           PY
 
+      # SPEC L-9c on Windows (#191): a mingwX64 consumer linked and packaged only by the bindings plugin
+      # (python315t.lib, the DLLs beside the executable, Lib/ and DLLs/ in python-multiplatform-home).
+      # The packaged executable then runs from another directory with no PYTHONHOME.
+      - name: Desktop native consumer (mingwX64), host test
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: ./gradlew :python-multiplatform-gradle-plugin-fixtures:desktop-native-consumer:mingwX64Test --rerun --console=plain -Porg.gradle.java.installations.fromEnv=JAVA_HOME_17_X64
+
+      - name: Desktop native consumer (mingwX64), packaged executable
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew :python-multiplatform-gradle-plugin-fixtures:desktop-native-consumer:linkReleaseExecutableMingwX64 --console=plain -Porg.gradle.java.installations.fromEnv=JAVA_HOME_17_X64
+          DIR=python-multiplatform-gradle-plugin/fixtures/desktop-native-consumer/build/bin/mingwX64/releaseExecutable
+          test -d "$DIR/python-multiplatform-home" || { echo "::error::no python-multiplatform-home beside the executable"; exit 1; }
+          LINE=$(cd "$RUNNER_TEMP" && env -u PYTHONHOME "$GITHUB_WORKSPACE/$DIR/desktop-native-consumer.exe" | tr -d '\r' | grep DESKTOP_NATIVE_PROBE)
+          echo "$LINE"
+          test "$LINE" = "DESKTOP_NATIVE_PROBE stdlib=ok ext=ok ft=ok"
+
+      # #191: compose-native for mingwX64, compiled. Its test binary cannot link with Kotlin/Native's MinGW
+      # linker: the fork's skiko-mingwx64 klib carries no native code, and its Skia is MSVC-built static
+      # libraries in skiko-mingwx64-<version>-msvc.zip, which the fork links through its
+      # org.thisisthepy.kotlin.native.desktop plugin (link.exe). Adopting that plugin is open (batch run
+      # 44989836640: every org_jetbrains_skia_* symbol undefined).
+      - name: Compile Compose on Kotlin/Native (mingwX64)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: ./gradlew :python-multiplatform-compose:fixtures:compose-native:compileTestKotlinMingwX64 --console=plain -Porg.gradle.java.installations.fromEnv=JAVA_HOME_17_X64
+
   # The dev agent's protocol on the other desktop OSes (#238). Its socket options differ per platform
   # (SO_EXCLUSIVEADDRUSE on Windows, SO_REUSEADDR on POSIX), and the port-takeover and restart tests are
   # what check them. Stdlib only: no JDK, no Gradle.
@@ -310,6 +401,32 @@ jobs:
           PY
           cat "$GITHUB_STEP_SUMMARY"
 
+      # #191: the same scenarios, wheel and app module on Kotlin/Native desktop (macosArm64), through
+      # the fork's walked klibs and the B3 compiler plugin. Its own Gradle invocation, and it runs even
+      # when the JVM scenarios failed, so each path reports for itself.
+      - name: Run the notebook scenarios on Kotlin/Native (macosArm64)
+        if: ${{ !cancelled() }}
+        run: >
+          ./gradlew :python-multiplatform-compose:fixtures:notebook-native:macosArm64Test --rerun
+          -PpythonxComposeWheel="$WHEEL_DIR" --console=plain
+
+      - name: Count the Kotlin/Native scenarios
+        if: ${{ !cancelled() }}
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import glob, sys, xml.etree.ElementTree as ET
+          files = glob.glob("python-multiplatform-compose/fixtures/notebook-native/build/test-results/macosArm64Test/*.xml")
+          total = failed = skipped = 0
+          for f in files:
+              suite = ET.parse(f).getroot()
+              total += int(suite.get("tests", 0))
+              failed += int(suite.get("failures", 0)) + int(suite.get("errors", 0))
+              skipped += int(suite.get("skipped", 0))
+          print(f"Notebook E2E on Kotlin/Native (macosArm64): {total} tests, {total - failed - skipped} passed, {failed} failed, {skipped} skipped ({len(files)} suites)")
+          if not files:
+              sys.exit("the Kotlin/Native notebook scenarios did not run")
+          PY
+
       - name: Upload the test reports
         if: failure()
         uses: actions/upload-artifact@v4
@@ -318,6 +435,8 @@ jobs:
           path: |
             python-multiplatform-compose/fixtures/notebook-e2e/build/reports/tests/desktopTest
             python-multiplatform-compose/fixtures/notebook-e2e/build/test-results/desktopTest
+            python-multiplatform-compose/fixtures/notebook-native/build/reports/tests/macosArm64Test
+            python-multiplatform-compose/fixtures/notebook-native/build/test-results/macosArm64Test
 
   # The notebook E2E in a GraalVM native image on macOS (#249, #251). It takes the fork's Compose
   # (`org.thisisthepy.compose.*:1.11.1-ext.2`, `composeExtended.*` in `gradle.properties`) from

@@ -14,6 +14,7 @@ import org.gradle.api.tasks.PathSensitive
 import org.gradle.api.tasks.PathSensitivity
 import org.gradle.api.tasks.TaskAction
 import org.gradle.workers.WorkerExecutor
+import java.io.File
 import javax.inject.Inject
 
 /**
@@ -26,8 +27,8 @@ import javax.inject.Inject
  *
  * ### Only jars and klibs
  *
- * A resolved artefact that is not a `.jar` or `.klib` -- an `aar`, a project's classes directory -- is
- * skipped silently.
+ * A resolved artefact that is not a `.jar`, a `.klib` or an unpacked klib directory ([isKlibArtifact])
+ * -- an `aar`, a project's JVM classes directory -- is skipped silently.
  *
  * ### The klib branch runs behind a worker classloader boundary
  *
@@ -119,13 +120,13 @@ abstract class PythonArtifactBindingsTask : DefaultTask() {
         // `androidx.compose.foundation.layout`'s `Modifier.padding(Dp)` needs `Dp`, which is
         // `androidx.compose.ui.unit`'s. See `ArtifactScanner.scanJar`'s `classpath` parameter.
         val resolvedJars = artifacts.files.filter { it.isFile && it.name.endsWith(".jar") }
-        val resolvedKlibs = artifacts.files.filter { it.isFile && it.name.endsWith(".klib") }
+        val resolvedKlibs = artifacts.files.filter { isKlibArtifact(it) }
 
         artifacts.files
-            .filter { it.isFile && (it.name.endsWith(".jar") || it.name.endsWith(".klib")) }
+            .filter { (it.isFile && it.name.endsWith(".jar")) || isKlibArtifact(it) }
             .sortedBy { it.name }
             .forEach { file ->
-                val entries = if (file.name.endsWith(".jar")) {
+                val entries = if (file.isFile && file.name.endsWith(".jar")) {
                     ArtifactScanner.scanJar(file, includes, classpath = resolvedJars, excludePackages = excludes)
                 } else {
                     // Not a direct `KlibScanner.scanKlib` call: see this class's KDoc, "The klib
@@ -164,3 +165,12 @@ abstract class PythonArtifactBindingsTask : DefaultTask() {
         destination.resolve("ArtifactTable.kt").writeText(renderArtifactTableSource(objectNames))
     }
 }
+
+/**
+ * Whether [file] is a klib this task walks: a `.klib` file, or an unpacked klib directory
+ * (`<name>/default/manifest`), which is what the Kotlin Gradle Plugin resolves for a *project*
+ * dependency. Skipping the directory left `python.multiplatform.compose.rememberSaveableWrapper`
+ * unbound on Kotlin/Native while the JVM fixture bound it from the project's jar (#191).
+ */
+internal fun isKlibArtifact(file: File): Boolean =
+    (file.isFile && file.name.endsWith(".klib")) || (file.isDirectory && File(file, "default/manifest").isFile)

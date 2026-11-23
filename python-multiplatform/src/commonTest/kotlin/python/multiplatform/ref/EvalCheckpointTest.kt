@@ -44,6 +44,9 @@ class EvalCheckpointTest {
 
         /** Cap on the turns the drain may spend, so a host that never goes quiet still gets tested. */
         const val SETTLE_TURN_BUDGET = 40
+
+        /** Readings of the probe's own cost; the smallest is kept (see the wait loop). */
+        const val PROBE_COST_READINGS = 5
     }
 
     /**
@@ -182,10 +185,24 @@ class EvalCheckpointTest {
             )
 
             // Cost of the probe itself, in releases, so the wait loop below can tell the cleaner's
-            // work apart from its own.
-            val probeMark = ReleaseCounter.released
-            refCount(target)
-            val releasesPerProbe = ReleaseCounter.released - probeMark
+            // work apart from its own. It is a fixed number (the wrappers `refCount` closes), but
+            // reading it is not: a release the cleaner makes for the rest of the process while the
+            // probe runs lands in the same counter. CI run 45027744672 counted 800 of 1000 after 200
+            // attempts with the target back at its baseline and 25865 releases owed by the rest of
+            // the process: exactly what one reading taken here, before that backlog was flushed,
+            // gives when it comes out one too high. So the cost is read again once the backlog is
+            // quiet, and the
+            // smallest of several readings is kept, since the cleaner can only add to one.
+            fun probeCost(): Int {
+                var cost = Int.MAX_VALUE
+                repeat(PROBE_COST_READINGS) {
+                    val mark = ReleaseCounter.released
+                    refCount(target)
+                    cost = minOf(cost, ReleaseCounter.released - mark)
+                }
+                return cost
+            }
+            var releasesPerProbe = probeCost()
 
             // Phase 0 of the loop: what the rest of the process still owes the cleaner, flushed
             // before anything is counted. `held` is deliberately still holding this test's
@@ -224,6 +241,9 @@ class EvalCheckpointTest {
                     if (quietTurns >= QUIET_TURNS_TO_SETTLE || settleTurns >= SETTLE_TURN_BUDGET) {
                         backlogFlushed = ReleaseCounter.released - backlogStart
                         settling = false
+                        // `held` still holds this test's wrappers, so nothing of ours can land in
+                        // these readings either.
+                        releasesPerProbe = minOf(releasesPerProbe, probeCost())
                         // Only now does anything of this test's become collectable, and only now
                         // does the counter start meaning something about it.
                         held!!.clear()
@@ -249,6 +269,7 @@ class EvalCheckpointTest {
                 try {
                     val diagnosis =
                         "released by the cleaner: $cleanerReleases, attempts: $attempts, " +
+                            "releases per probe: $releasesPerProbe, " +
                             "backlog flushed before counting started: $backlogFlushed, " +
                             "target count now: $refNow (was $refBefore before the build, " +
                             "$refAfterBuild after it)"
