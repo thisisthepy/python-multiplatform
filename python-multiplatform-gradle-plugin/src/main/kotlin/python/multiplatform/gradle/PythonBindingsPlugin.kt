@@ -335,7 +335,11 @@ class PythonBindingsPlugin : Plugin<Project> {
         // After evaluation, because the targets and their framework binaries are declared in the
         // consumer's own `kotlin { }` block. A module without iOS targets gets no task.
         project.pluginManager.withPlugin("org.jetbrains.kotlin.multiplatform") {
-            project.afterEvaluate { configureIosConsumer(this, extension) }
+            project.afterEvaluate {
+                configureIosConsumer(this, extension)
+                // SPEC L-9c (#191): macosArm64 / linuxX64 executables link and ship libpython.
+                configureDesktopNativeConsumer(this, extension)
+            }
         }
         configureWasmBrowserRuntimeStaging(project, extension)
 
