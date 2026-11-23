@@ -26,7 +26,7 @@ fail, then implement.
 | Platform | Kotlin target(s) | Downcall mechanism | Upcall entry | Test path |
 |---|---|---|---|---|
 | Desktop JVM (macOS; Linux/Windows wired, unverified) | `jvm("desktop")` | Panama FFM, `invokeExact` | FFM upcall stub | `desktopTest → jvmTest → commonTest` |
-| Desktop native (macOS Arm64, Linux x86_64) | `macosArm64`, `linuxX64` | cinterop | `@CName` symbol | `{macosArm64Test, linuxX64Test} → desktopNativeTest → nativeTest → commonTest` |
+| Desktop native (macOS Arm64, Linux x86_64, Windows x86_64) | `macosArm64`, `linuxX64`, `mingwX64` | cinterop | `@CName` symbol | `{macosArm64Test, linuxX64Test, mingwX64Test} → desktopNativeTest → nativeTest → commonTest` |
 | Android (ART) | `androidTarget` | JNI via `RegisterNatives` | JNI upcall | `androidInstrumentedTest → jvmTest → commonTest` (device) |
 | iOS | `iosArm64`, `iosSimulatorArm64`, `iosX64` | cinterop | `@CName` symbol | `iosSimulatorArm64Test → nativeTest → commonTest` |
 | Android native | `androidNativeArm64`, `androidNativeX64` | cinterop | `@CName` symbol | `androidNativeArm64Test → artTest → nativeTest → commonTest` (device, via adb) |
@@ -35,6 +35,16 @@ fail, then implement.
 - **P-1** The library compiles for every target above. `Status: implemented` for desktop, `macosArm64`, `linuxX64`, Android,
   iosSimulatorArm64, androidNativeArm64 and wasmJs (each has a test source set). `partial` for
   `iosArm64`, `iosX64`, `androidNativeX64` (compile-wired, no tests run there).
+- **P-1a** (#191) `mingwX64`, the Windows Kotlin/Native desktop target (owner, 2026-11-21: in 1.0, "mingwX64
+  is a core target", relayed by the leader in team report `pmp-binder.md`). It embeds python-build-standalone's
+  free-threaded `x86_64-pc-windows-msvc` prefix (the archive the desktop jar's Windows `libpython` comes from):
+  cinterop compiles `Python.h` with `-DPy_GIL_DISABLED=1`, because the Windows `pyconfig.h` serves both builds
+  and does not define it, and binaries link the import library `libs/python315t.lib`. At run time
+  `python315t.dll` is found beside the executable or on `PATH`, and the prefix is resolved as on the other
+  desktop native targets (L-9c), with the Windows stdlib layout `Lib/` (L-3). `mingwX64Main` and `mingwX64Test`
+  depend on `desktopNativeMain` / `desktopNativeTest`; `mingwX64Test` runs on a Windows host with `PYTHONHOME`
+  set to the prefix and the prefix on `PATH`. `Status: draft`, `PM/desktopNativeTest/.../DesktopNativeFreeThreadedBuildTest.kt`
+  (on `mingwX64Test`).
 - **P-2** Linux and Windows desktop: the build downloads and links the right CPython archive.
   `Status: partial`, the suite has never been observed running on either.
 - **P-3** The interpreter is not vendored: Gradle downloads, verifies and extracts CPython per
