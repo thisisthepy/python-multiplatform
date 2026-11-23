@@ -258,6 +258,27 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   views), `PyDict` (`MutableMap`), `PySet` (`MutableSet`, set algebra, frozenset), `PyTuple` (`List`),
   plus iterators. `Status: implemented`, `PyListTest.kt`, `PyDictTest.kt`, `PySetTest.kt`,
   `PyTupleTest.kt`, `PyIteratorTest.kt`.
+  **The hierarchy and element types are the owner's** (issue #524 items 3 and 4; owner, 2026-11-22: restore the code
+  shapes agents changed without approval to the pre-agent baseline f33bcef8 and `python_for_kotlin_binding.mermaid`).
+  `PyIterable` is an interface that is a Kotlin `Collection<Any?>` whose `iterator()` is a `PyIterator`;
+  `PyMutableIterable` is an abstract class extending `PyObject`, implementing `PyIterable` and `MutableCollection<Any?>`;
+  `PyList` (also `MutableList<Any?>`) and `PySet` (also `MutableSet<Any?>`) extend `PyMutableIterable`; `PyTuple`
+  (`List<Any?>`), `PyFrozenSet` (`Set<Any?>`, not in the mermaid) and `PyRange` are `PyObject`s implementing `PyIterable`;
+  `PyDict` is a `PyObject` and a `MutableMap<Any?, Any?>`. `PyIterator` is an interface (`hasNext`, `next(): PyObject`,
+  `remove`, a Kotlin `MutableIterator<Any?>`); a Python iterator object is a `PyIteratorObject`, whose `remove()` throws
+  `UnsupportedOperationException`, and a list's or set's iterator removes from the container. Elements are `Any?`
+  (the mermaid's members take and return `Any`): a write (`add`, `set`, `put`, `contains`, `indexOf`, `remove`,
+  `fromList` / `fromSet` / `fromMap`) stores a `PyObject` as itself, `null` as `None`, a Kotlin `Boolean`, integer,
+  floating-point number, `String` or `ByteArray` as the Python value, and a Kotlin `List` / `Set` / `Map` as a new
+  `list` / `set` / `dict` of converted elements, and refuses anything else with `PyTypeError`; a read (`get`, `removeAt`,
+  iteration, a dict's values) answers a `PyObject`. The recursive native projections are the mermaid's names again:
+  `PyList.toList()`, `PyTuple.toList()`, `PySet.toSet()`, `PyFrozenSet.toSet()`, `PyDict.toMap()` (members, so they win
+  over the standard library's `Iterable.toList()`; that rename to `toNativeList()` was an agent change). `PyDict` also has
+  the mermaid's `operator set(key, value)`. Agent proposals, not confirmed by the owner: `Any?` rather than `Any` (so
+  `null` can stand for `None`), reads answering `PyObject` rather than a converted value, the name `PyIteratorObject`,
+  and the container conversions. The mermaid's `forEach(Consumer)` and `spliterator()` are JVM-only and cannot be
+  declared in common code; Kotlin's common `forEach` covers the first. `draft` for this paragraph,
+  `PM/commonTest/.../types/collections/IterableHierarchyTest.kt`.
 - **O-6** Modules, builtins, callables (bound methods, class/static methods), utilities (range, slice,
   ellipsis), import and GC helpers. `Status: implemented`, `PyModuleTest.kt`, `BuiltinsTest.kt`,
   `PyCallablesTest.kt`, `PyUtilitiesTest.kt`, `PyImportTest.kt`, `PyGCTest.kt`.
