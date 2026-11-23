@@ -891,7 +891,7 @@ object PythonProxySource {
                 # and simply keeps not collecting a Kotlin-side cycle, same as before.
                 _PmGcObject = _PmObject
 
-            def _pm_unwrap(_pm_v, _pm_owners=(_PmObject, _PmGcObject)):
+            def _pm_unwrap(_pm_v, _pm_owners=(_PmObject, _PmGcObject, BaseException)):
                 # What an owner is worth on the wire: the handle inside it. Everything else is
                 # passed through untouched, which is what keeps a bare handle working for every
                 # caller written against the raw contract, and what lets an ordinary Python object
@@ -902,6 +902,11 @@ object PythonProxySource {
                 # a legitimate argument to a `PyObject` parameter *and* to a parameter declared as
                 # the Kotlin class it stands for, and only the declaration says which one this is.
                 # See `PythonProxySource.argValues`.
+                #
+                # A Kotlin throwable's proxy (`${KotlinThrowableProxy.CLASS_GLOBAL}`, SPEC U-2) is an owner
+                # too. An exception cannot share a layout with `_PmObject`, and the class is defined
+                # when the first Kotlin throwable is raised, which can be after this function, so
+                # `BaseException` is in the tuple and the class is looked up only for an exception.
                 #
                 # Both owners, because the decision is no longer made here. `_PmGcObject` is not an
                 # `_PmObject` -- CPython refuses two solid bases -- so testing the one name meant
@@ -914,6 +919,10 @@ object PythonProxySource {
                 # replaced for, at 551-587 ns a time. The owners are a default argument for the same
                 # reason `__del__` binds its releaser that way: one less global lookup per argument.
                 if isinstance(_pm_v, _pm_owners):
+                    if isinstance(_pm_v, BaseException):
+                        _pm_t = globals().get('${KotlinThrowableProxy.CLASS_GLOBAL}')
+                        if _pm_t is None or not isinstance(_pm_v, _pm_t):
+                            return _pm_v
                     _pm_h = _pm_v._pm_handle
                     if not _pm_h:
                         raise ValueError(
