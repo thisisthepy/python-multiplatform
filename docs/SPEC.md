@@ -764,7 +764,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `PM/commonTest/.../pythonx/PythonxAdapterTest.kt` `anIntArgumentPicksTheOverloadItsKotlinLiteralWould`.
   `describe(module, name)` describes any bound name, a named constant (`STATIC_GETTER`) included,
   without evaluating it (#36). A module's `dir()` lists its direct child packages/objects and reading
-  one as an attribute imports it (#35) - Kotlin names only (the U-12 aliases are served, not listed).
+  one as an attribute imports it (#35) - Kotlin names only (the U-12 aliases are served, not listed). It lists nothing else: a type is listed where reading it serves its proxy class (an extension receiver), and a type with only members or properties, reached through a value's proxy, is not, so every listed name can be read (#191; agent proposal, not confirmed: pmp-binder 2026-11-23, after NotebookPracticeTest cell 36 on macosArm64, `PythonxMethodTest.aModuleListsOnlyTheNamesItServes`).
   No namespace is renamed; the binder creates no `pythonx` module and a real `pythonx` package
   on disk is what `import pythonx` loads. The answer is the same whichever installer
   (`PythonProxySource`, `PythonxAdapter`) ran first for a table. **A name that is both a function and a

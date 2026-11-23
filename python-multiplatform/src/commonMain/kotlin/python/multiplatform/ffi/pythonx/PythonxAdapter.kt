@@ -2504,11 +2504,17 @@ object PythonxAdapter {
             def __dir__():
                 names = set(_BY_PACKAGE.get(kotlin_package, {}))
                 names.update(_CHILDREN.get(kotlin_package, ()))
-                for served in (_BY_RECEIVER, _METHODS, _PROPERTIES):
-                    for type_name in served:
-                        package, _, leaf = type_name.rpartition('.')
-                        if package == kotlin_package:
-                            names.add(leaf)
+                # A type is listed only where `_adapt` serves it as an attribute: an extension
+                # receiver (its proxy class). A type that has only members or properties
+                # (`_METHODS`, `_PROPERTIES`) is reached through a value's proxy, never read off
+                # its package, so listing it would name something `getattr` refuses (SPEC U-9).
+                # pythonx-compose builds its name table from `dir()`, and such a name hid the
+                # grouped spelling `Alignment.Horizontal.End` once the klib walker bound
+                # `Alignment.Horizontal.align` (#191).
+                for type_name in _BY_RECEIVER:
+                    package, _, leaf = type_name.rpartition('.')
+                    if package == kotlin_package:
+                        names.add(leaf)
                 return sorted(names)
 
             return __dir__
