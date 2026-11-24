@@ -480,8 +480,9 @@ argument when it writes it, as CPython's print does. Refused with the reason: a 
 dict's (CPython keeps the object, so a bool in a `dict[str, int]` or an int in a `dict[str, float]` would print
 differently), a bool key inserted into a dict of int (a loop would give a bool where the program reads an int; a
 bool may look a key up), `==` of dicts of float values (CPython tests identity first: `aot/identity`), and a dict of
-other kinds passed where a dict is wanted (dicts are invariant). Still to come in S2b: dicts in fields, in lists, as
-method parameters and returns and as dict values; tuple keys; `popitem`; the view objects outside a `for` loop; a dict
+other kinds passed where a dict is wanted (dicts are invariant). Dict fields of classes, and dicts as method
+parameters and returns, follow (same day): a field read of a dict is held for the operation, as a list field's, and
+a class with a dict field is always a heap object. Still to come in S2b: dicts in lists and as dict values; tuple keys; `popitem`; the view objects outside a `for` loop; a dict
 across the library boundary; and `set`.
 
 **S2c.** List, dict and set comprehensions (a hidden local per comprehension variable, Python 3 scoping, the

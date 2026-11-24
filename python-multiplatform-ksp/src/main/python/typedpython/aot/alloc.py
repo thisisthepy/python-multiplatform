@@ -488,9 +488,10 @@ _EXPRS_ATTRS = ("values", "args")
 
 
 def _has_list_field(ca: ClassAnalysis, cls: str) -> bool:
-    """Tier S2a: `cls` has a list[C] field (such an object is always a heap object: not virtual, not region)."""
+    """Tier S2a: `cls` has a list[C] field, or (tier S2b) a dict field: such an object is always a heap object, not
+    virtual, not region (the container changes without a field store)."""
     decl = ca.classes.get(cls)
-    return decl is not None and any(fd.type is ir.Type.OBJ_LIST for fd in decl.field_decls)
+    return decl is not None and any(fd.type in (ir.Type.OBJ_LIST, ir.Type.DICT) for fd in decl.field_decls)
 
 
 def _stmt_exprs(s: ir.Stmt) -> list[ir.Expr]:

@@ -1647,6 +1647,7 @@ class FieldDecl:
     type: Type
     cls: str | None = None
     optional: bool = False
+    kinds: DictKinds | None = None      # tier S2b: the key and value types of a DICT field
 
 
 @dataclass(frozen=True)

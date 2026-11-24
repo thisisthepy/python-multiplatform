@@ -728,6 +728,10 @@ class _Checker:
             return e.kinds if self.good_kinds(e.kinds) else None
         if cls is Local:
             return self.fn.dict_kinds.get(e.name)
+        if cls is FieldGet:
+            decl = self.classes.get(e.cls)
+            fd = next((f for f in decl.field_decls if f.name == e.field), None) if decl is not None else None
+            return fd.kinds if fd is not None and self.good_kinds(fd.kinds) else None
         if cls is Call:
             callee = self.sigs.get(e.function)
             return callee.return_kinds if callee is not None else None
@@ -1795,6 +1799,10 @@ class _Checker:
                 else:
                     for k, (a, et) in enumerate(zip(args, expected_types)):
                         self.slot(a, et, f"argument {k + 1} of New {e.cls}")
+                        init_sig = self.sigs.get(f"{e.cls}.__init__")
+                        if et is Type.DICT and init_sig is not None and getattr(a, "type", None) is Type.DICT:
+                            self.dict_same(self.dict_kinds(a), init_sig.params[k + 1].kinds,
+                                           f"argument {k + 1} of New {e.cls}")
             return dataclasses.replace(e, args=args)
         self.slow_user.append(f"New {e.cls} (calls the class after a class change)")
         self.shared.append(f"the class global of New {e.cls}")
@@ -2856,6 +2864,9 @@ class _Checker:
                     expected = fd.type
             value = self.array_value(s.value, state) if expected in ir.ARRAYS else self.expr(s.value, state)
             self.slot(value, expected, f"value stored into .{s.field}")
+            if expected is Type.DICT and getattr(value, "type", None) is Type.DICT:       # tier S2b
+                fd = next((f for f in self.classes[s.cls].field_decls if f.name == s.field), None)
+                self.dict_same(self.dict_kinds(value), getattr(fd, "kinds", None), f"value stored into .{s.field}")
             self.effects.append(f"FieldSet .{s.field} (a store)")
             return dataclasses.replace(s, obj=obj, value=value), state
         value = self.expr(s.value, state)

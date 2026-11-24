@@ -352,6 +352,8 @@ class _Checker:
 
     def subscript_target(self, t: ast.expr) -> bool:
         """`name[index]` (not a slice): a store into a list."""
+        if isinstance(t, ast.Subscript) and self.attribute_target(t.value) and not isinstance(t.slice, ast.Slice):
+            return True                     # tier S2b: `obj.d[k] = v` of a dict field (the front end checks the type)
         return isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and not isinstance(t.slice, ast.Slice) \
             and t.value.id not in {"sys"}
 
@@ -707,8 +709,8 @@ class _Checker:
         elif isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.attr in LIST_METHODS | DICT_METHODS \
                 and not (f.value.id in ("sys", "math", "time") and f.value.id not in self.shadow):
             pass                            # tier S2a / S2b: a list or dict method (the front end checks the receiver)
-        elif isinstance(f, ast.Attribute) and isinstance(f.value, ast.Attribute) and f.attr in LIST_METHODS:
-            self.expr(f.value)              # tier S2a: a method of a list field (`self.items.append(x)`)
+        elif isinstance(f, ast.Attribute) and isinstance(f.value, ast.Attribute) and f.attr in LIST_METHODS | DICT_METHODS:
+            self.expr(f.value)              # tier S2a / S2b: a method of a list or dict field (`self.items.append(x)`)
         else:
             self.rep.error(f, "aot/call", ast.unparse(f), f"the call of `{ast.unparse(f)}` is outside the first AOT step")
         for a in c.args:

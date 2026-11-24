@@ -294,6 +294,9 @@ class _Gen:
             return "tpa_str *"
         if fd.type is Type.OBJ_LIST:
             return "tpa_obj_list *"                        # tier S2a: a list of instances (fd.cls their class)
+        if fd.type is Type.DICT:
+            self.uses_str = self.uses_dict = True
+            return "tpa_dict *"                            # tier S2b
         assert fd.cls is not None
         return self.cls_ptr(fd.cls)
 
@@ -510,6 +513,8 @@ class _Gen:
             ptr, rel = "tpa_str *", "tpa_str_release"
         elif fd.type is Type.OBJ_LIST:
             ptr, rel = "tpa_obj_list *", "tpa_obj_list_release"
+        elif fd.type is Type.DICT:
+            ptr, rel = "tpa_dict *", "tpa_dict_release"
         elif fd.type is Type.I64_ARRAY:
             big = self.reps.field_list_big(cls, fd.name)
             ptr, rel = ("tpa_int_list *", "tpa_int_list_release") if big else ("tpa_i64_list *", "tpa_i64_release")
@@ -535,6 +540,8 @@ class _Gen:
             out.append(f"{ind}tpa_str_release(p->f_{mf});")
         elif fd.type is Type.OBJ_LIST:
             out.append(f"{ind}tpa_obj_list_release(p->f_{mf});")
+        elif fd.type is Type.DICT:
+            out.append(f"{ind}tpa_dict_release(p->f_{mf});")
         elif fd.type is Type.I64_ARRAY:
             fn = "tpa_int_list_release" if self.reps.field_list_big(cls, fd.name) else "tpa_i64_release"
             out.append(f"{ind}{fn}(p->f_{mf});")
@@ -563,6 +570,8 @@ class _Gen:
                         c_params.append(f"tpa_str_list *a_{mangle(p.name)}")
                     elif isinstance(p, ir.Param) and p.type is Type.OBJ_LIST:
                         c_params.append(f"tpa_obj_list *a_{mangle(p.name)}")      # tier S2a, borrowed
+                    elif isinstance(p, ir.Param) and p.type is Type.DICT:
+                        c_params.append(f"tpa_dict *a_{mangle(p.name)}")          # tier S2b, borrowed
                     elif isinstance(p, ir.Param) and p.type in CTYPE:
                         ct = "tpa_int" if self.tagged_param(init_fn, p) else CTYPE[p.type]
                         c_params.append(f"{ct} a_{mangle(p.name)}")
@@ -970,6 +979,9 @@ class _Fn:
             return e.kinds
         if isinstance(e, ir.Local):
             return self.f.dict_kinds.get(e.name)
+        if isinstance(e, ir.FieldGet):
+            fd = self.g.cls_analysis.field_map.get((e.cls, e.field))
+            return fd.kinds if fd is not None else None
         if isinstance(e, ir.Call):
             callee = self.g.fns.get(e.function)
             return callee.return_kinds if callee is not None else None
@@ -1710,6 +1722,10 @@ class _Fn:
             # in use, so a call that rebinds the field cannot free it under the expression
             t = self.olslot()
             self.emit(f"tpa_obj_list_set(&{t}, {obj}->f_{mf});")
+            return t
+        if fd.type is Type.DICT:
+            t = self.dslot()                               # tier S2b: held as a list field is, for the same reason
+            self.emit(f"tpa_dict_set(&{t}, {obj}->f_{mf});")
             return t
         if fd.type in (Type.STR, Type.STR_OPT):
             # a field that may be rebound while the value is in use is held by a slot; an immutable field of an
@@ -2617,6 +2633,9 @@ class _Fn:
         elif fd.type is Type.OBJ_LIST:
             val = self.ev(s.value)
             self.emit(f"tpa_obj_list_set(&{lval}, {val});")    # tier S2a (the new reference first)
+        elif fd.type is Type.DICT:
+            val = self.ev(s.value)
+            self.emit(f"tpa_dict_set(&{lval}, {val});")        # tier S2b (the new reference first)
         elif fd.type in LIST:
             kind = "f64" if fd.type is Type.F64_ARRAY else (
                 "int" if self.g.reps.field_list_big(s.cls, s.field) else "i64")

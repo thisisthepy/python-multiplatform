@@ -833,6 +833,8 @@ def _aot_field_decl(fname: str, ann: ast.expr, known_names: set[str]) -> ir.Fiel
     kind = _annotation_kind(ann)
     if (lc := _obj_list_class(kind, known_names)) is not None:
         return ir.FieldDecl(fname, Type.OBJ_LIST, cls=lc)      # tier S2a: a list of instances of a compiled class
+    if (dk := _dict_kinds(kind)) is not None:
+        return ir.FieldDecl(fname, Type.DICT, kinds=dk)         # tier S2b: a dict (acyclic: it holds no instance)
     if kind in SCALAR_KIND:
         return ir.FieldDecl(fname, SCALAR_KIND[kind])
     if kind.strip("'\"") == "str":
@@ -1814,6 +1816,10 @@ class _Lowerer:
                 if self.is_list_name(mod) and attr in LIST_STMT_METHODS:
                     return self.list_method_stmt(node.value)             # tier S2a
             if self.info.aot and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute) \
+                    and node.value.func.attr in ("update", "clear") and isinstance(node.value.func.value, ast.Attribute) \
+                    and self.is_dict_name(node.value.func.value):
+                return self.dict_method_stmt(node.value)                 # tier S2b: `self.d.update(e)`
+            if self.info.aot and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute) \
                     and node.value.func.attr in LIST_STMT_METHODS:
                 held = self.field_list_receiver(node.value)
                 if held is not None:
@@ -1968,14 +1974,15 @@ class _Lowerer:
         if self.info.aot and isinstance(target, ast.Subscript) and not isinstance(target.slice, ast.Slice) \
                 and self.is_dict_name(target.value):
             # tier S2b: `d[k] = v` (the value, then the dict, then the key, as CPython's STORE_SUBSCR)
-            d = target.value.id                                         # type: ignore[attr-defined]
-            kt, vt = self.name_kinds(d)
-            value = self.dict_value(self.value(value_node), vt, value_node)
+            value = self.value(value_node)
             if not _trivial(value):
                 value = self.temp(value)
+            d = self.value(target.value)
+            kt, vt = self.kinds_of(d, target.value)
+            value = self.dict_value(value, vt, value_node)
             key = self.dict_key(self.value(target.slice), kt, target.slice, insert=True)
             self.impure = True
-            return self.take() + [ir.DictStore(ir.Local(Type.DICT, d), key, value)]
+            return self.take() + [ir.DictStore(d, key, value)]
         if self.info.aot and isinstance(target, ast.Subscript) and not isinstance(target.slice, ast.Slice) \
                 and isinstance(target.value, ast.Name) and self.is_local(target.value.id) \
                 and target.value.id not in self.arrays and self.local_type(target.value.id, line) is Type.OBJ_LIST:
@@ -2386,9 +2393,28 @@ class _Lowerer:
     # --- AOT mode, tier S2b: dict[K, V] (design 4.3.2 "dict and set") ---
 
     def is_dict_name(self, node: ast.expr) -> bool:
-        """`node` is the name of a dict local or parameter."""
+        """`node` is the name of a dict local or parameter, or `obj.field` of a dict field."""
+        if self.info.aot and isinstance(node, ast.Attribute):
+            fd = self.field_decl_of(node)
+            return fd is not None and fd.type is Type.DICT
         return (self.info.aot and isinstance(node, ast.Name) and self.is_local(node.id) and node.id not in self.arrays
                 and self.local_type(node.id, node.lineno) is Type.DICT)
+
+    def field_decl_of(self, node: ast.Attribute) -> ir.FieldDecl | None:
+        """The declaration of `name.field` of a compiled class (None for anything else; nothing is lowered)."""
+        if not (isinstance(node.value, ast.Name) and self.is_local(node.value.id)):
+            return None
+        cls, _ = self.cls_of_name(node.value.id)
+        if cls is None:
+            return None
+        return next((f for f in getattr(self.info.classes[cls], "field_decls", ()) if f.name == node.attr), None)
+
+    def dict_arg(self, p: object, a: ast.expr, callee: str) -> ir.Expr:
+        """The argument `a` for the parameter `p` of `callee` (a method or `__init__`): a dict takes the parameter's
+        kinds (dicts are invariant), anything else is its value."""
+        if isinstance(p, ir.Param) and p.type is Type.DICT and p.kinds is not None:
+            return self.dict_coerce(self.dict_operand(a, p.kinds), p.kinds, a, f"parameter `{p.name}` of `{callee}`")
+        return self.value(a)
 
     def is_dict_node(self, node: ast.expr) -> bool:
         """`node` is a dict, decided before it is lowered: a dict name, a display, `dict(d)`, `d.copy()`, a call of a
@@ -2397,7 +2423,7 @@ class _Lowerer:
             return False
         if isinstance(node, ast.Dict):
             return True
-        if isinstance(node, ast.Name):
+        if isinstance(node, (ast.Name, ast.Attribute)):
             return self.is_dict_name(node)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and not self.is_local(node.func.id):
             if node.func.id == "dict" and self.builtin("dict"):
@@ -2422,6 +2448,10 @@ class _Lowerer:
             return e.kinds
         if isinstance(e, ir.Local):
             return self.name_kinds(e.name)
+        if isinstance(e, ir.FieldGet):
+            fd = next((f for f in self.info.classes[e.cls].field_decls if f.name == e.field), None)
+            if fd is not None and fd.kinds is not None:
+                return fd.kinds
         if isinstance(e, ir.Call) and e.function in self.env and self.env[e.function].return_kinds is not None:
             return self.env[e.function].return_kinds                   # type: ignore[return-value]
         if isinstance(e, ir.Cond):
@@ -2713,11 +2743,11 @@ class _Lowerer:
         out: list[ir.Stmt] = []
         for t in node.targets:
             if isinstance(t, ast.Subscript) and not isinstance(t.slice, ast.Slice) and self.is_dict_name(t.value):
-                kt = self.name_kinds(t.value.id)[0]                     # type: ignore[attr-defined]
-                key = self.dict_key(self.value(t.slice), kt, t.slice, insert=False)
+                d = self.value(t.value)
+                key = self.dict_key(self.value(t.slice), self.kinds_of(d, t.value)[0], t.slice, insert=False)
                 self.impure = True                                      # tier S2b: `del d[k]`
                 self.hoist_ok = False
-                out += self.take() + [ir.DictDelete(ir.Local(Type.DICT, t.value.id), key)]  # type: ignore[attr-defined]
+                out += self.take() + [ir.DictDelete(d, key)]
                 continue
             if not (isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and self.is_list_name(t.value.id)):
                 raise Skip(node.lineno, f"`del {_src(t)}` is outside the AOT mode (only `del a[i]` and `del a[i:j]` of "
@@ -3123,6 +3153,10 @@ class _Lowerer:
             elif fd is not None and fd.type is Type.OBJ_LIST and isinstance(value_node, ast.List) \
                     and not value_node.elts:
                 value = ir.ObjListDisplay(Type.OBJ_LIST, fd.cls, ())       # tier S2a: `self.items = []`
+            elif fd is not None and fd.type is Type.DICT:                  # tier S2b: dicts are invariant
+                assert fd.kinds is not None
+                value = self.dict_coerce(self.dict_operand(value_node, fd.kinds), fd.kinds, value_node,
+                                         f"field `{cls}.{target.attr}`")
             else:
                 value = self.value(value_node)
                 if fd is not None and fd.type == Type.F64 and value.type == Type.I64:
@@ -4046,9 +4080,13 @@ class _Lowerer:
                 self.hoist_ok = False
                 if self.info.aot:
                     new_args = []
-                    for a in node.args:
+                    init = self.env.get(f"{new_cls}.__init__")
+                    init_params = list(init.params[1:]) if init is not None else []
+                    for k, a in enumerate(node.args):
                         if isinstance(a, ast.Name) and a.id in self.arrays:
                             new_args.append(ir.Local(self.arrays[a.id], a.id))
+                        elif k < len(init_params):
+                            new_args.append(self.dict_arg(init_params[k], a, f"{new_cls}.__init__"))  # tier S2b
                         else:
                             new_args.append(self.value(a))
                     return ir.New(Type.OBJ, new_cls, tuple(new_args))
@@ -4372,7 +4410,7 @@ class _Lowerer:
             self.check_not_none(func.value.id, cls, func.value)
             recv: ir.Expr = ir.Local(Type.OBJ, func.value.id)
             self.hoist_ok = False
-            args = [recv] + [self.value(a) for a in node.args]
+            args = [recv] + [self.dict_arg(p, a, f"{cls}.{func.attr}") for p, a in zip(callee.params[1:], node.args)]
             if not callee.pure:
                 self.impure = True
             if callee.may_deopt:

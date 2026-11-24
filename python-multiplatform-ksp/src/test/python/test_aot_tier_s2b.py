@@ -263,6 +263,68 @@ if __name__ == "__main__":
 """, [["a,b,c"], ["x"]])
 
 
+FIELDS_AND_METHODS = """
+import sys
+
+
+class Inventory:
+    stock: dict[str, int]
+    prices: dict[str, float]
+    name: str
+
+    def __init__(self, name: str, prices: dict[str, float]) -> None:
+        self.name = name
+        self.stock = {}
+        self.prices = prices
+
+    def add(self, item: str, n: int) -> None:
+        self.stock[item] = self.stock.get(item, 0) + n
+
+    def take(self, item: str) -> int:
+        return self.stock.pop(item)
+
+    def value(self) -> float:
+        total = 0.0
+        for item, n in self.stock.items():
+            total += n * self.prices.get(item, 0.0)
+        return total
+
+    def snapshot(self) -> dict[str, int]:
+        return self.stock.copy()
+
+    def merge(self, more: dict[str, int]) -> None:
+        for k, v in more.items():
+            self.add(k, v)
+
+
+def main() -> None:
+    inv = Inventory("shop", {"apple": 0.5, "pear": 0.75})
+    for w in sys.argv[1].split(","):
+        inv.add(w, len(w))
+    print(inv.name, inv.stock, inv.value(), len(inv.stock), "apple" in inv.stock)
+    snap = inv.snapshot()
+    inv.merge({"apple": 1, "fig": 2})
+    print(snap, inv.stock, snap == inv.stock)
+    inv.prices = {"fig": 2.0}
+    inv.prices["apple"] = 1.0
+    print(inv.value(), inv.prices)
+    d = inv.stock
+    d["kiwi"] = 9
+    print(inv.stock["kiwi"], inv.take(sys.argv[2]), inv.stock)
+    for k in inv.stock:
+        print(k, end=";")
+    print()
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_dict_fields_and_method_parameters_and_returns(tmp_path: Path):
+    _compare(tmp_path, FIELDS_AND_METHODS, [["apple,pear,apple", "pear"], ["fig", "nope"], ["\u00e9,apple", "apple"]])
+
+
 WORDFREQ = Path(__file__).resolve().parents[4] / "benchmarks" / "typedpython" / "py" / "wordfreq.py"
 
 
