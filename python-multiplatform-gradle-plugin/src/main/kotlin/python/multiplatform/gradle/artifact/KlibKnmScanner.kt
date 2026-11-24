@@ -1711,7 +1711,8 @@ internal object KlibKnmScanner {
     ): KlibFunctionSlot? {
         val declared = modelType.qualifiedName
         if (!declared.startsWith(KOTLIN_FUNCTION_PREFIX)) return null
-        if (!ownerIsComposable) return null
+        // SPEC B-5: a plain function-typed parameter takes a Python callable on any declaration, as on
+        // the jar walker; only a @Composable lambda needs a @Composable owner (checked below).
         if (Flags.SUSPEND_TYPE.get(protoType.flags)) {
             return KlibFunctionSlot(
                 declineReason = "a suspend function-typed parameter ($declared): its compiled shape takes a " +
@@ -1735,7 +1736,9 @@ internal object KlibKnmScanner {
                     "argument has no name a proxy could be built over",
             )
         }
-        if (protoType.argumentList.any { it.projection != ProtoBuf.Type.Argument.Projection.INV }) {
+        if (protoType.argumentList.any { it.projection != ProtoBuf.Type.Argument.Projection.INV } ||
+            protoType.argumentList.any { arg -> arg.type(tt)?.let { hasUseSiteVariance(it, tt, depth = 0) } == true }
+        ) {
             return KlibFunctionSlot(
                 declineReason = "a function-typed parameter generated Kotlin cannot spell ($declared): some " +
                     "part of its signature is not a nameable public type",
@@ -1761,6 +1764,23 @@ internal object KlibKnmScanner {
             typeName = slotTypeName,
             boundary = BoundaryType(OBJECT_TAG, cast, "(%s)"),
         )
+    }
+
+    /**
+     * Whether [type] names an `in`/`out` projection anywhere in its arguments. [KotlinTypeModel] keeps no
+     * variance, so such a type would be rendered invariant (`Range<Annotation>` for
+     * `Range<out Annotation>`) and the generated cast would not compile (`AnnotatedString.mapAnnotations`,
+     * notebook-native `compileKotlinMacosArm64`, #191). A star projection is rendered as written.
+     */
+    private fun hasUseSiteVariance(type: ProtoBuf.Type, tt: TypeTable, depth: Int): Boolean {
+        if (depth > 8) return true
+        return type.argumentList.any { arg ->
+            when (arg.projection) {
+                ProtoBuf.Type.Argument.Projection.IN, ProtoBuf.Type.Argument.Projection.OUT -> true
+                ProtoBuf.Type.Argument.Projection.STAR -> false
+                else -> arg.type(tt)?.let { hasUseSiteVariance(it, tt, depth + 1) } == true
+            }
+        }
     }
 
     private fun functionalInterfaceSlotOrNull(

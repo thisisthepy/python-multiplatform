@@ -72,6 +72,7 @@ class Type(Enum):
     STR = "str"            # AOT mode only (tier S1, PR-S1a): a Python str, a counted `tpa_str` (runtime/tp_aot_str.h)
     STR_LIST = "list[str]"  # AOT mode only (tier S1b): a list of str, a counted `tpa_str_list` (fixed length until S2)
     STR_OPT = "str | None"  # AOT mode only (tier S2a): a `tpa_str *` that is NULL for None
+    STR_OPT_LIST = "list[str | None]"  # AOT mode only (tier S2a): a `tpa_str_list` whose items may be NULL (None)
     OBJ_LIST = "list[obj]"  # AOT mode only (tier S2a): a list of instances of one compiled class, a counted
     #                         `tpa_obj_list`; the element class is the `cls` of the Param / FieldDecl / return, or
     #                         `Function.list_classes[name]` for a local
@@ -1131,7 +1132,8 @@ class StrNarrow(Expr):
 
 @dataclass(frozen=True)
 class StrListDisplay(Expr):
-    """`[s0, s1, ...]` of STR expressions (type STR_LIST, tier S1b); empty only where a list of str is expected
+    """`[s0, s1, ...]` of STR expressions (type STR_LIST, tier S1b), or of STR and STR_OPT ones (type STR_OPT_LIST, tier
+    S2a: a None item is NULL); empty only where a list of str is expected
     (`x: list[str] = []`, `sep.join([])`)."""
 
     elts: tuple[Expr, ...]

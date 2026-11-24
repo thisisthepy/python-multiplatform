@@ -1074,6 +1074,205 @@ def test_a_tuple_indexed_by_a_variable(tmp_path: Path):
     _compare(tmp_path, TUPLE_INDEX, [["0"], ["2"], ["-3"], ["3"], ["-4"], ["7"]])
 
 
+TUPLE_SLICE = """
+import sys
+
+
+def tail(t: tuple[int, str, int]) -> tuple[str, int]:
+    return t[1:]
+
+
+def first_two(t: tuple[int, str, int]) -> int:
+    a, b = t[:2]
+    return a + len(b)
+
+
+def weigh(p: tuple[int, int]) -> int:
+    return p[0] * 10 + p[1]
+
+
+def main() -> None:
+    n = int(sys.argv[1])
+    t = (n, "w" * (n % 4), n * 2)
+    u = t[1:]
+    print(u, t[::-1], t[::2], t[-2:], t[5:], t[:1], t[1:-1], t[-9:9], t[2:0:-1], t[1:1])
+    tl = tail(t)
+    print(len(t[1:]), len(t[3:]), n in t[::2], "w" in t[1:2], n not in t[3:], tl, first_two(t))
+    q = (n, n + 1, n + 2, n + 3)
+    print(weigh(q[1:3]), weigh(q[::3]), q[:2] == q[2:], q[:2] < q[2:], q[1:] > q[:3], q[:0] == q[4:])
+    q = q[::-1]
+    r: tuple[int, int] = q[-2:]
+    print(q, r, f"<{q[::2]}>", str(t[:2]), repr(t[2:]))
+    v = q[3:]
+    print(v, v == (n,))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_a_slice_of_a_tuple(tmp_path: Path):
+    """`t[a:b:c]` of a tuple with constant bounds (absent, negative, past either end, a negative step, empty): a tuple of
+    a static shape, bound, rebound from the same tuple, unpacked, passed, returned, measured, searched, compared and
+    printed (`()` when empty, `(x,)` for one element), compared with CPython on 4 inputs."""
+    _compare(tmp_path, TUPLE_SLICE, [["0"], ["1"], ["3"], ["-5"]])
+
+
+TUPLE_FIELDS = """
+import sys
+
+
+class Span:
+    __slots__ = ("name", "at", "tag")
+    name: str
+    at: tuple[int, int]
+    tag: tuple[str, bool]
+
+    def __init__(self, name: str, a: int, b: int) -> None:
+        self.name = name
+        self.at = (a, b)
+        self.tag = (name + "!", a < b)
+
+    def width(self) -> int:
+        lo, hi = self.at
+        return hi - lo
+
+    def flip(self) -> None:
+        self.at = (self.at[1], self.at[0])
+
+    def move(self, by: tuple[int, int], name: str) -> None:
+        self.at = (self.at[0] + by[0], self.at[1] + by[1])
+        self.name = name
+
+    def label(self) -> str:
+        return f"{self.name}{self.at}{self.tag}"
+
+
+class Box:
+    at: tuple[int, int]
+    inner: Span | None
+
+    def __init__(self, at: tuple[int, int], s: Span | None) -> None:
+        self.at = at
+        self.inner = s
+
+    def move(self, by: tuple[int, int], name: str) -> None:
+        self.at = by
+
+
+def corner(s: Span) -> tuple[int, int]:
+    return s.at
+
+
+def area(p: tuple[int, int]) -> int:
+    return p[0] * p[1]
+
+
+def main() -> None:
+    n = int(sys.argv[1])
+    s = Span("s" * (n % 3), n, n * 2 - 3)
+    k = n % 2
+    print(s.at, s.tag, s.width(), len(s.at), s.at[0], s.at[-1], s.at[k], s.label())
+    s.flip()
+    t = s.at
+    c = corner(s)
+    print(t, c, area(s.at), s.at == t, s.at < (n, 0), n in s.at, s.at[::-1], f"<{s.tag}>", str(s.at), repr(s.tag))
+    b = Box((1, 2), s)
+    print(b.at)
+    b.move(t, "x")
+    print(b.at)
+    s.move(b.at, "m")
+    s.move((n, -n), s.name + "+")
+    print(s.at, s.name)
+    b.at = s.at
+    s.at = (7, n)
+    inner = b.inner
+    if inner is not None:
+        print(b.at, inner.at, b.at == inner.at, b.at != inner.at)
+    a, z = b.at
+    b.at = t
+    print(a, z, b.at, s.tag[0] + "?", s.tag[1])
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_tuple_fields_and_method_tuple_parameters(tmp_path: Path):
+    """A tuple field (`at: tuple[int, int]`, `tag: tuple[str, bool]`, also listed in `__slots__`) is one field per
+    element: stored from a display, another field, a local, a parameter; read whole (bound, unpacked, passed, returned,
+    compared, searched, sliced, printed) and by an index. A method's or `__init__`'s tuple parameter is one parameter per
+    element, as a module function's (two classes declare `move` with the same parameter types). Compared with CPython on
+    4 inputs."""
+    _compare(tmp_path, TUPLE_FIELDS, [["0"], ["1"], ["4"], ["-2"]])
+
+
+METHOD_TUPLE_RETURNS = """
+import sys
+
+
+class P:
+    a: int
+    w: str
+
+    def __init__(self, a: int, w: str) -> None:
+        self.a = a
+        self.w = w
+
+    def pair(self) -> tuple[int, str]:
+        return self.a, self.w * (self.a % 3)
+
+    def again(self) -> tuple[int, str]:
+        t = self.pair()
+        return t
+
+    def via(self) -> tuple[int, str]:
+        return self.pair()
+
+    def rem(self) -> int:
+        return self.a % 3
+
+    def total(self) -> int:
+        n, s = self.pair()
+        return n + len(s)
+
+
+class Q:
+    b: float
+
+    def __init__(self, b: float) -> None:
+        self.b = b
+
+    def pair(self) -> tuple[int, str]:
+        return int(self.b), "q"
+
+
+def main() -> None:
+    n = int(sys.argv[1])
+    p = P(n, "ab")
+    x, y = p.pair()
+    t = p.again()
+    u = p.via()
+    q = Q(n * 1.5)
+    v = q.pair()
+    print(x, y, t, u, v, t == u, p.total(), len(v), v[1] + y, t[0] < v[0], p.rem())
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_a_method_returning_a_tuple(tmp_path: Path):
+    """`a, b = o.m()`, `t = o.m()` and `return o.m()` of a method declared `-> tuple[int, str]` (two classes declare
+    `pair` the same way), the elements in the callee's out slots as for a module function; and a call of a method whose
+    body may deopt (an unproved `%`), which once left every caller uncompiled (verify/flag-may-deopt). Compared with
+    CPython on 4 inputs."""
+    _compare(tmp_path, METHOD_TUPLE_RETURNS, [["0"], ["4"], ["-5"], ["11"]])
+
+
 LIST_OF_TUPLES = """
 import sys
 
@@ -1210,6 +1409,120 @@ def test_a_list_of_tuples_searched_and_compared(tmp_path: Path):
     _compare(tmp_path, LIST_OF_TUPLES_SEARCH, [["0"], ["2"], ["3"], ["5"], ["-1"]])
 
 
+LIST_OF_OPTIONAL_STR = """
+import sys
+
+
+def first(xs: list[str | None]) -> str | None:
+    if len(xs) > 0:
+        return xs[0]
+    return None
+
+
+def fill(xs: list[str | None], n: int) -> None:
+    for i in range(n):
+        xs.append("v" + str(i) if i % 2 == 0 else None)
+
+
+def make(n: int) -> list[str | None]:
+    out: list[str | None] = []
+    for i in range(n):
+        out.append(None if i % 3 == 1 else str(i))
+    return out
+
+
+def main() -> None:
+    n = int(sys.argv[1])
+    k = int(sys.argv[2])
+    xs: list[str | None] = ["a", None, "b"]
+    ys: list[str | None] = []
+    fill(ys, n)
+    print(xs, ys, len(ys), f"<{ys}>", str(xs), repr(ys))
+    s = xs[1]
+    if s is None:
+        print("none at 1")
+    t = xs[0]
+    if t is not None:
+        print(t.upper())
+    xs[1] = "mid"
+    xs.append(None)
+    xs.insert(0, None)
+    print(xs, None in xs, "b" in xs, "z" not in xs, xs.count(None), xs.index("b"))
+    p = xs.pop()
+    print(p, xs.pop(0), xs)
+    xs.remove("mid")
+    zs = xs + ys
+    ws = xs + ys
+    print(zs, zs[1:], ys * 2, zs == ws, zs != xs, list(ys))
+    for v in zs:
+        if v is None:
+            print("-")
+        else:
+            print(v, len(v))
+    print(first(zs), first([]), first(["only"]), f"{zs[0]}!")
+    xs.extend(ys)
+    del xs[0]
+    xs.reverse()
+    print(xs, bool(xs))
+    a = make(n)
+    b = make(k)
+    print(a == b, a != b)
+    c: list[str | None] = ["x", None]
+    d: list[str | None] = ["x", "y"]
+    print(c == d, c != d)
+    a[0 if n > 0 else 0] = None if k > 2 else "z"
+    total = 0
+    for v in a:
+        if v is not None:
+            total += len(v)
+        else:
+            total += 100
+    print(a, total, a.count(None), None in b)
+    if k == 7:
+        print(c < d)
+    if k == 8:
+        print(d >= c)
+    print(a < b, a <= b, b > a)
+    print(xs.index(None))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_a_list_of_optional_str(tmp_path: Path):
+    """`list[str | None]` (design 4.3.2, the list[str] layout with NULL for None): a display of str and None, `[]`,
+    an item read as a `str | None` and narrowed, `xs[i] = None`, append / insert / pop / remove / extend / reverse /
+    del, `in` / `count` / `index` of None and of a str, `+`, `*`, a slice, `list(xs)`, `==` / `!=` / ordering,
+    `for v in xs`, print / str / repr / an f-string, a parameter appended to through an alias, a returned list.
+    CPython's errors end most cases: `IndexError: list assignment index out of range` (n 0: `a` is empty),
+    `TypeError: '<' not supported between instances of 'NoneType' and 'str'` (an ordering reaching a None item: k 7,
+    and the ordering line of 2 4 and 5 5), `'>=' ... 'str' and 'NoneType'` (k 8), `ValueError: list.index(x): x not
+    in list` (1 2, where no None is left); 4 2 runs to the end."""
+    _compare(tmp_path, LIST_OF_OPTIONAL_STR,
+             [["0", "0"], ["1", "7"], ["3", "8"], ["4", "2"], ["2", "4"], ["5", "5"], ["1", "2"]])
+
+
+@pytest.mark.parametrize("body, words", [
+    ("def f(i: int) -> int:\n    xs: list[str | None] = ['a', None]\n    return len(','.join(xs))\n",
+     "not list[str]"),
+    ("def g(xs: list[str | None]) -> int:\n    return len(xs)\n\n\ndef f(i: int) -> int:\n    ys: list[str] = ['a']\n"
+     "    return g(ys)\n", "lists are invariant"),
+    ("def f(i: int) -> int:\n    xs: list[str | None] = ['a', None]\n    ys: list[str] = ['a']\n"
+     "    return 1 if xs == ys else 0\n", "compares lists of two types"),
+    ("def f(i: int) -> int:\n    xs: list[str | None] = ['a', None]\n    s = xs[0]\n    return len(s)\n",
+     "(aot/optional)"),
+])
+def test_a_list_of_optional_str_use_with_no_aot_form_is_named(tmp_path: Path, body: str, words: str):
+    """`join` of items that may be None (CPython's TypeError would need the item's type), a list[str] passed where a
+    list[str | None] is wanted (the callee could store None into it), `==` of the two list types, and an item used as
+    a str without a None test are refused with the reason."""
+    with pytest.raises(aot.AotError) as raised:
+        aot.generate(_write(tmp_path, body + TUPLE_MAIN))
+    assert words in str(raised.value)
+
+
 LIST_STORE_AND_EMPTY = """
 import sys
 
@@ -1251,6 +1564,20 @@ TUPLE_MAIN = '\n\ndef main() -> None:\n    print(f(1))\n\n\nif __name__ == "__ma
 @pytest.mark.parametrize("body, words", [
     ("def f(i: int) -> int:\n    t = (i, 'a')\n    return len(str(t[i]))\n", "differ in type"),
     ("def f(i: int) -> int:\n    t = (1, 2)\n    return len(t[i:])\n", "a slice of a tuple"),
+    ("def f(i: int) -> int:\n    t = (1, 2)\n    for v in t[1:]:\n        pass\n    return 0\n", "not here"),
+    ("def f(i: int) -> int:\n    t = (1, 2)\n    return len(t[::0])\n", "not int constants"),
+    ("class P:\n    at: tuple[int, int]\n\n    def __init__(self) -> None:\n        self.at = (1, 2)\n\n\n"
+     "def f(i: int) -> int:\n    p = P()\n    return p.at[i + 1]\n", "a tuple field is indexed by a name or a constant"),
+    ("class P:\n    at: tuple[int, int]\n\n    def __init__(self) -> None:\n        self.at = (1, 2)\n\n\n"
+     "def f(i: int) -> int:\n    p = P()\n    for v in p.at:\n        pass\n    return 0\n", "not here"),
+    ("class P:\n    def m(self, p: tuple[int, int]) -> int:\n        return p[0]\n\n\n"
+     "class Q:\n    def m(self, p: int) -> int:\n        return p\n\n\n"
+     "def f(i: int) -> int:\n    p = P()\n    return p.m((i, i))\n", "cannot be split by its name"),
+    ("class P:\n    def m(self) -> tuple[int, int]:\n        return 1, 2\n\n\n"
+     "class Q:\n    def m(self) -> tuple[int, str]:\n        return 1, 'a'\n\n\n"
+     "def f(i: int) -> int:\n    p = P()\n    t = p.m()\n    return t[0]\n", "a tuple value comes from"),
+    ("class P:\n    ps: list[tuple[int, int]]\n\n    def __init__(self) -> None:\n        self.ps = []\n\n\n"
+     "def f(i: int) -> int:\n    return len(P().ps)\n", "outside the AOT mode"),
     ("def f(i: int) -> bool:\n    t = (1, 2)\n    return t is t\n", "no tuple object yet"),
     ("def f(i: int) -> int:\n    t = (1, 2)\n    x = [[t]]\n    return 0\n", "no tuple object yet"),
     ("def f(i: int) -> bool:\n    t = (i * 0.5, 1)\n    return t == t\n", "(aot/identity)"),
