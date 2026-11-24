@@ -64,7 +64,10 @@ class WalkedKlibArtifactTableTest {
      * the top-level functions with unbounded type parameters (`MutableStateFlow`, `flowOf`, `stateIn`)
      * the members taking a `kotlin.Any?` (`Mutex.lock(owner)`) and the declarations on a star-projected
      * type (`CancellableContinuation<*>.disposeOnCancellation`) and the constructors taking a `String?`
-     * (`ClosedReceiveChannelException(message)`), as the jar walker binds them (B-1).
+     * (`ClosedReceiveChannelException(message)`), as the jar walker binds them (B-1), and since #191 (K/N
+ * parity, B-5) the functions with a function-typed parameter that are not `@Composable` (`Runnable`,
+ * `Channel(onUndeliveredElement)`, `update`, and both overloads of `debounce` and `distinctUntilChanged`
+ * under their base name).
      * `KlibScannerTest.aRealThirdPartyKlibIsScannedWithoutCrashingAndBindsItsHandleFactoriesAndMembers` pins the
      * same list walking the klib directly; if the two disagree, the wiring between `KlibScanner` and
      * this generated table is what broke.
@@ -113,9 +116,11 @@ class WalkedKlibArtifactTableTest {
                 "kotlinx.coroutines.MainScope",
                 "kotlinx.coroutines.NonDisposableHandle.dispose",
                 "kotlinx.coroutines.NonDisposableHandle.parent",
+                "kotlinx.coroutines.Runnable",
                 "kotlinx.coroutines.Runnable.run",
                 "kotlinx.coroutines.SupervisorJob",
                 "kotlinx.coroutines.TimeoutCancellationException.createCopy",
+                "kotlinx.coroutines.channels.Channel",
                 "kotlinx.coroutines.channels.Channel.Factory",
                 "kotlinx.coroutines.channels.Channel.Factory.BUFFERED",
                 "kotlinx.coroutines.channels.Channel.Factory.CONFLATED",
@@ -132,6 +137,7 @@ class WalkedKlibArtifactTableTest {
                 "kotlinx.coroutines.channels.ReceiveChannel.receive",
                 "kotlinx.coroutines.channels.SendChannel.isClosedForSend",
                 "kotlinx.coroutines.channels.SendChannel.send",
+                "kotlinx.coroutines.channels.consume",
                 "kotlinx.coroutines.disposeOnCancellation",
                 "kotlinx.coroutines.ensureActive__CoroutineScope",
                 "kotlinx.coroutines.ensureActive__Job",
@@ -157,11 +163,15 @@ class WalkedKlibArtifactTableTest {
                 "kotlinx.coroutines.flow.cancellable",
                 "kotlinx.coroutines.flow.conflate",
                 "kotlinx.coroutines.flow.consumeAsFlow",
-                "kotlinx.coroutines.flow.debounce",
-                "kotlinx.coroutines.flow.distinctUntilChanged",
+                "kotlinx.coroutines.flow.debounce__kotlinx_coroutines_flow_Flow_kotlin_Function1_kotlin_Any___kotlin_Long",
+                "kotlinx.coroutines.flow.debounce__kotlinx_coroutines_flow_Flow_kotlin_Long",
+                "kotlinx.coroutines.flow.distinctUntilChangedBy",
+                "kotlinx.coroutines.flow.distinctUntilChanged__0",
+                "kotlinx.coroutines.flow.distinctUntilChanged__Boolean",
                 "kotlinx.coroutines.flow.drop",
                 "kotlinx.coroutines.flow.emptyFlow",
                 "kotlinx.coroutines.flow.flowOf",
+                "kotlinx.coroutines.flow.getAndUpdate",
                 "kotlinx.coroutines.flow.launchIn",
                 "kotlinx.coroutines.flow.produceIn",
                 "kotlinx.coroutines.flow.receiveAsFlow",
@@ -169,6 +179,8 @@ class WalkedKlibArtifactTableTest {
                 "kotlinx.coroutines.flow.shareIn",
                 "kotlinx.coroutines.flow.stateIn",
                 "kotlinx.coroutines.flow.take",
+                "kotlinx.coroutines.flow.update",
+                "kotlinx.coroutines.flow.updateAndGet",
                 "kotlinx.coroutines.isActive",
                 "kotlinx.coroutines.newFixedThreadPoolContext",
                 "kotlinx.coroutines.newSingleThreadContext",
