@@ -482,8 +482,11 @@ differently), a bool key inserted into a dict of int (a loop would give a bool w
 bool may look a key up), `==` of dicts of float values (CPython tests identity first: `aot/identity`), and a dict of
 other kinds passed where a dict is wanted (dicts are invariant). Dict fields of classes, and dicts as method
 parameters and returns, follow (same day): a field read of a dict is held for the operation, as a list field's, and
-a class with a dict field is always a heap object. Still to come in S2b: dicts in lists and as dict values; tuple keys; `popitem`; the view objects outside a `for` loop; a dict
-across the library boundary; and `set`.
+a class with a dict field is always a heap object. `popitem()` follows: unpacked into two names (`k, v =
+d.popitem()`), bound to a tuple, returned from a function declared `-> tuple[K, V]`, or as a statement; it takes the
+last entry, truncates the entry count as CPython does, and raises `KeyError: 'popitem(): dictionary is empty'`. Still
+to come in S2b: dicts in lists and as dict values; tuple keys; the view objects outside a `for` loop; a dict across
+the library boundary; and `set`.
 
 **S2c.** List, dict and set comprehensions (a hidden local per comprehension variable, Python 3 scoping, the
 accumulator built in place), `enumerate`, `zip` (shortest), `reversed`, `range` objects as iterables, in `for` loops

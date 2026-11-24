@@ -325,6 +325,69 @@ def test_dict_fields_and_method_parameters_and_returns(tmp_path: Path):
     _compare(tmp_path, FIELDS_AND_METHODS, [["apple,pear,apple", "pear"], ["fig", "nope"], ["\u00e9,apple", "apple"]])
 
 
+POPITEM = """
+import sys
+
+
+def last(d: dict[str, int]) -> tuple[str, int]:
+    return d.popitem()
+
+
+class Stack:
+    seen: dict[int, str]
+
+    def __init__(self) -> None:
+        self.seen = {}
+
+    def push(self, k: int, v: str) -> None:
+        self.seen[k] = v
+
+    def drop(self) -> int:
+        k, v = self.seen.popitem()
+        print("drop", k, v)
+        return k
+
+
+def main() -> None:
+    d = {"a": 1, "b": 2, "c": 3}
+    k, v = d.popitem()
+    print(k, v, d)
+    t = d.popitem()
+    print(t, t[0], d)
+    d["x"] = 9
+    d.popitem()
+    d["y"] = 8
+    u = last(d)
+    print(d, u, d)
+    big = {int(sys.argv[1]) * 1000000000000: True}
+    n, b = big.popitem()
+    print(n, n + 1, b, big)
+    s = Stack()
+    for w in sys.argv[2].split(","):
+        s.push(len(s.seen) - 5, w)
+    while len(s.seen) > 1:
+        print(s.drop(), s.seen)
+    names: dict[str, str | None] = {"p": None}
+    a, z = names.popitem()
+    print(a, z, names)
+    e: dict[int, float] = {1: 0.5}
+    for i in range(int(sys.argv[3])):
+        q, r = e.popitem()
+        print(q, r)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_popitem_takes_the_last_entry_and_raises_on_an_empty_dict(tmp_path: Path):
+    """d.popitem(): unpacked, bound to a tuple, returned as a tuple, as a statement, of a field; the entry count is
+    truncated (a new key goes where the popped one was), and an empty dict raises KeyError('popitem(): dictionary is
+    empty')."""
+    _compare(tmp_path, POPITEM, [["3", "a,b,c", "1"], ["123456789", "x", "2"], ["-1", "\u00e9,\u00e8", "0"]])
+
+
 WORDFREQ = Path(__file__).resolve().parents[4] / "benchmarks" / "typedpython" / "py" / "wordfreq.py"
 
 
@@ -350,6 +413,10 @@ MAIN = '\n\ndef main() -> None:\n    f()\n\n\nif __name__ == "__main__":\n    ma
     # a bool inserted as a new key of a dict of int would come back from a loop as a bool
     ("    d: dict[int, int] = {}\n    d[True] = 1\n    print(d)\n", "a bool key"),
     ("    d = {1: 2}\n    print(d.setdefault(False, 3))\n", "a bool key"),
+    # popitem() gives a tuple: unpacked into two names of the key and value types, or bound to a tuple
+    ("    d = {1: 2}\n    print(d.popitem())\n", "returns a tuple"),
+    ("    d = {1: 2}\n    a, b, c = d.popitem()\n    print(a, b, c)\n", "into two names"),
+    ("    d = {1: 'x'}\n    a = 0\n    b = 0\n    a, b = d.popitem()\n    print(a, b)\n", "given values of types"),
 ])
 def test_what_a_dict_cannot_hold_yet_is_refused_with_the_reason(tmp_path: Path, body: str, reason: str):
     found = _rules(tmp_path, "def f() -> None:\n" + body + MAIN)

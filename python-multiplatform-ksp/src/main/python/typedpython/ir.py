@@ -1357,8 +1357,21 @@ class ForDict(Stmt):
     body: tuple[Stmt, ...]
 
 
+@dataclass(frozen=True)
+class DictPopItem(Stmt):
+    """`key_var, value_var = dict.popitem()` (both None: `dict.popitem()` as a statement): the last entry is removed
+    and its key and value bound, left to right; an empty dict raises KeyError('popitem(): dictionary is empty'). The
+    entry count is truncated to the removed entry, nothing becomes usable (CPython's dict_popitem_impl), so a key
+    inserted next takes its place. `kinds` are the dict's; the variables are locals of the key and of the value type."""
+
+    kinds: DictKinds
+    dict: Expr
+    key_var: str | None
+    value_var: str | None
+
+
 DICT_EXPRS = (DictDisplay, DictGet, DictContains, DictLen, DictPop, DictSetDefault, DictCopy, DictCompare, DictStr)
-DICT_STMTS = (DictStore, DictDelete, DictUpdate, DictClear, ForDict)
+DICT_STMTS = (DictStore, DictDelete, DictUpdate, DictClear, ForDict, DictPopItem)
 
 
 @dataclass(frozen=True)

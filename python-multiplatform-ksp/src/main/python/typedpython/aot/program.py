@@ -757,7 +757,7 @@ def _is_list_annotation(ann: ast.expr) -> bool:
 # tier S2a: the methods of a list (design 4.3.2)
 LIST_METHODS = frozenset({"append", "insert", "extend", "clear", "reverse", "remove", "pop", "index", "count"})
 # tier S2b: the dict methods (the front end checks the receiver is a dict)
-DICT_METHODS = frozenset({"get", "setdefault", "pop", "keys", "values", "items", "copy", "clear", "update"})
+DICT_METHODS = frozenset({"get", "setdefault", "pop", "popitem", "keys", "values", "items", "copy", "clear", "update"})
 
 
 def _list_class_name(ann: ast.expr | None, class_names) -> str | None:

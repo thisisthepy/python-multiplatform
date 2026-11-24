@@ -159,7 +159,8 @@ _OPT_STR_SPELLINGS = ("str|None", "None|str", "Optional[str]", "typing.Optional[
 # AOT mode, tier S2b: what a `dict[K, V]` may hold (ir.DICT_KEYS, ir.DICT_VALUES)
 _DICT_KEY_KIND = {"int": Type.I64, "str": Type.STR, "bool": Type.BOOL}
 _DICT_VALUE_KIND = {"int": Type.I64, "float": Type.F64, "bool": Type.BOOL, "str": Type.STR}
-DICT_METHOD_NAMES = frozenset({"get", "pop", "setdefault", "copy", "keys", "values", "items", "update", "clear"})
+DICT_METHOD_NAMES = frozenset({"get", "pop", "popitem", "setdefault", "copy", "keys", "values", "items", "update",
+                               "clear"})
 
 
 def _dict_kinds(kind: str) -> "ir.DictKinds | None":
@@ -1811,12 +1812,13 @@ class _Lowerer:
                     return self.aot_sys_exit(node.value)
                 if mod == "time" and attr == "sleep" and self.info.aot_time and not self.is_local("time"):
                     return self.aot_time_sleep(node.value)
-                if attr in ("update", "clear") and self.is_dict_name(node.value.func.value):
+                if attr in ("update", "clear", "popitem") and self.is_dict_name(node.value.func.value):
                     return self.dict_method_stmt(node.value)             # tier S2b
                 if self.is_list_name(mod) and attr in LIST_STMT_METHODS:
                     return self.list_method_stmt(node.value)             # tier S2a
             if self.info.aot and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute) \
-                    and node.value.func.attr in ("update", "clear") and isinstance(node.value.func.value, ast.Attribute) \
+                    and node.value.func.attr in ("update", "clear", "popitem") \
+                    and isinstance(node.value.func.value, ast.Attribute) \
                     and self.is_dict_name(node.value.func.value):
                 return self.dict_method_stmt(node.value)                 # tier S2b: `self.d.update(e)`
             if self.info.aot and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute) \
@@ -2047,6 +2049,9 @@ class _Lowerer:
                 return found
             raise Skip(line, f"assignment to attribute `{_src(target)}` is not supported")
         if isinstance(target, (ast.Tuple, ast.List)):
+            if self.info.aot and isinstance(value_node, ast.Call) and isinstance(value_node.func, ast.Attribute) \
+                    and value_node.func.attr == "popitem" and self.is_dict_name(value_node.func.value):
+                return self.dict_method_stmt(value_node, target)               # tier S2b
             if self.info.aot:
                 return self.aot_unpack(target, value_node, node)
             raise Skip(line, "tuple unpacking is not supported")
@@ -2585,6 +2590,10 @@ class _Lowerer:
                              "arrive later)")
         if m in ("update", "clear"):
             raise Skip(line, f"uses the result of `{_src(node)}`, which returns None")
+        if m == "popitem":
+            raise Skip(line, f"`{_src(node)}` returns a tuple, which an AOT program unpacks into two names "
+                             "(`k, v = d.popitem()`), binds to a tuple name or returns from a function declared "
+                             "`-> tuple[K, V]`")
         if m == "get":
             if len(args) not in (1, 2):
                 raise Skip(line, "get() takes one or two arguments")
@@ -2615,15 +2624,39 @@ class _Lowerer:
         self.hoist_ok = False
         return ir.DictSetDefault(vt, d, key, dflt)
 
-    def dict_method_stmt(self, call: ast.Call) -> list[ir.Stmt]:
-        """`d.update(other)` (a dict of the same kinds) and `d.clear()` as statements."""
+    def dict_method_stmt(self, call: ast.Call, target: ast.Tuple | ast.List | None = None) -> list[ir.Stmt]:
+        """`d.update(other)` (a dict of the same kinds), `d.clear()` and `d.popitem()` as statements, and
+        `k, v = d.popitem()` (`target`)."""
         func = call.func
         assert isinstance(func, ast.Attribute)
         line = call.lineno
+        names: list[str] = []
+        if target is not None:
+            if not (len(target.elts) == 2 and all(isinstance(e, ast.Name) for e in target.elts)):
+                raise Skip(line, f"`{_src(target)} = {_src(call)}`: an AOT program unpacks the item into two names "
+                                 "(`k, v = d.popitem()`)")
+            names = [e.id for e in target.elts]                              # type: ignore[attr-defined]
+            if names[0] == names[1]:
+                raise Skip(line, f"`{_src(target)} = {_src(call)}` binds one name twice")
         d = self.value(func.value)
         kinds = self.kinds_of(d, func.value)
         self.impure = True
         self.hoist_ok = False
+        if func.attr == "popitem":
+            if call.args or call.keywords:
+                raise Skip(line, "popitem() takes no argument")
+            for var, want in zip(names, kinds):
+                if var in self.arrays or var in self.params:
+                    raise Skip(line, f"`{var}` is a list or a parameter, but `{_src(call)}` binds a {TYPE_NAME[want]}")
+                t = self.local_type(var, line)
+                if t is not want:
+                    raise Skip(line, f"`{var}` is {TYPE_NAME.get(t, t.value)}, but `{_src(call)}` of a "
+                                     f"{_dict_name(kinds)} gives a {TYPE_NAME[want]} there")
+                if want is Type.I64 and var in self.acc_vars and not self.dead:
+                    self.found_bounds[var] = _join(self.found_bounds.get(var), TOP)
+                self.refined.pop(var, None)
+                self.not_none.discard(var)
+            return self.take() + [ir.DictPopItem(kinds, d, *(names or [None, None]))]
         if func.attr == "clear":
             if call.args:
                 raise Skip(line, "clear() takes no argument")

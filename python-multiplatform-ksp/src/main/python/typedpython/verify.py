@@ -376,7 +376,7 @@ from .ir import ListCompare, ListConcat, ListRepeat, ListSlice, ListDelete, List
 from .ir import ForObjList, ObjListDisplay, ObjListIndex, ObjListLen, ObjListStore, StrListStore, TupleIndex
 from .ir import (
     DictClear, DictCompare, DictContains, DictCopy, DictDelete, DictDisplay, DictGet, DictLen, DictPop, DictSetDefault,
-    DictStore, DictStr, DictUpdate, ForDict,
+    DictPopItem, DictStore, DictStr, DictUpdate, ForDict,
 )
 
 DA = "verify/definite-assignment"
@@ -2219,6 +2219,33 @@ class _Checker:
         self.effects.append("clears a dict")
         return dataclasses.replace(s, dict=d), state
 
+    def s_DictPopItem(self, s: DictPopItem, state: _State):
+        """`k, v = d.popitem()` (or no names): the variables declared locals of the dict's key and value types, assigned
+        after the dict is evaluated (no interval of their own, as an Unpack target)."""
+        d, kinds = self.dict_operand(s.dict, state, "the dict of popitem()")
+        if not self.good_kinds(s.kinds):
+            self.error(TYPE, f"DictPopItem has no valid key and value types ({s.kinds!r})")
+        else:
+            self.dict_same(kinds, s.kinds, "the dict of popitem()")
+        names = [v for v in (s.key_var, s.value_var) if v is not None]
+        if names and (len(names) != 2 or names[0] == names[1] or not all(isinstance(v, str) for v in names)):
+            self.error(STRUCTURE, "DictPopItem binds no name, or a key and a value to two distinct names")
+            names = []
+        if self.good_kinds(s.kinds):
+            for var, want in zip(names, s.kinds):
+                if var in self.arrays or var in self.larrays or self.scalars.get(var) is not want:
+                    self.error(TYPE, f"DictPopItem target {var!r} must be a declared {want.value} local")
+        for var in names:
+            if var in self.entry:
+                self.error(STRUCTURE, f"entry global '{var}' is assigned by popitem()")
+            for loop in self.loops:
+                if loop.var == var:
+                    self.error(STRUCTURE, f"loop variable '{var}' is assigned in its loop body")
+            self.refine.pop(var, None)
+            self.facts.pop(var, None)
+        self.effects.append("pops an item of a dict")
+        return dataclasses.replace(s, dict=d), (None if state is None else state | set(names))
+
     def s_ForDict(self, s: ForDict, state: _State):
         """`for k in d` / `for v in d.values()` / `for k, v in d.items()`: as ForStr, the variables declared locals of
         the dict's key and value types; zero iterations leave them as they were."""
@@ -3274,6 +3301,8 @@ class _Checker:
         loop_vars = _loop_vars(fn.body)
         unpacked = {t for vs in assigned.values() for v in vs if type(v) is Unpack for t in v.targets
                     if isinstance(v.targets, tuple)}
+        unpacked |= {t for vs in assigned.values() for v in vs if type(v) is DictPopItem
+                     for t in (v.key_var, v.value_var) if isinstance(t, str)}
         self.eligible = frozenset(
             n for n in assigned
             if self.scalars.get(n) is Type.I64 and n not in params and n not in loop_vars
@@ -3777,6 +3806,10 @@ def _assigned_values(body: object, out: dict[str, list[object]]) -> None:
                     if isinstance(t, str):
                         out.setdefault(t, []).append(st)    # bound by the loop: no interval of its own
                 _assigned_values(st.body, out)
+            elif cls is DictPopItem:
+                for t in (st.key_var, st.value_var):
+                    if isinstance(t, str):
+                        out.setdefault(t, []).append(st)    # an entry of the dict: no interval of its own
             elif cls is ForObj:
                 for t in st.targets if isinstance(st.targets, tuple) else ():
                     out.setdefault(t, []).append(st)   # not a New: ends form (e) for the target
@@ -3812,6 +3845,8 @@ def _assigned_names(body: object) -> set[str]:
                 out.add(st.target)
             elif cls is Unpack:
                 out |= set(st.targets) if isinstance(st.targets, tuple) else set()
+            elif cls is DictPopItem:
+                out |= {v for v in (st.key_var, st.value_var) if isinstance(v, str)}
             elif cls is If:
                 out |= _assigned_names(st.then) | _assigned_names(st.orelse)
             elif cls is While:

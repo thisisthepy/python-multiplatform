@@ -30,6 +30,8 @@ What is rewritten, with CPython's meaning kept:
 * `for v in t` over a tuple whose elements share one kind: a hidden index over `range(len(t))` and `v` the element.
 * `return t` in a function declared `-> tuple[...]`: the elements (`return t__0, t__1`); `return f(...)` of such a
   call: the elements through temporaries.
+* tier S2b: `t = x.popitem()` is `t__0, t__1 = x.popitem()`, and `return x.popitem()` goes through temporaries as a
+  call does; the lowering checks that `x` is a dict whose key and value types are the elements' (`ir.DictPopItem`).
 * a parameter `p: tuple[int, str]` of a module-level function is one parameter per element, and every call of that
   function passes a tuple name or a tuple display as the elements.
 
@@ -264,6 +266,12 @@ def _mentions_tuples(fn: ast.FunctionDef, fkinds: dict[str, list[tuple[int, str]
     return any(isinstance(n, ast.AnnAssign) and (annotation_shape(n.annotation) or annotation_list_shape(n.annotation))
                for n in ast.walk(fn)) \
         or any(isinstance(n, ast.Tuple) and isinstance(n.ctx, ast.Load) for n in ast.walk(fn))
+
+
+def _popitem(e: ast.expr) -> bool:
+    """`x.popitem()` (tier S2b: a dict's, which the lowering checks)."""
+    return isinstance(e, ast.Call) and isinstance(e.func, ast.Attribute) and e.func.attr == "popitem" \
+        and not e.args and not e.keywords
 
 
 def _name(id_: str, ctx: ast.expr_context | None = None) -> ast.Name:
@@ -648,7 +656,7 @@ class _Function:
                     raise _Problem(line, f"`return {ast.unparse(s.value)}` returns a `tuple[{', '.join(got_shape or ())}]` "
                                          f"from a function declared `tuple[{', '.join(shape)}]`")
                 return [ast.Return(value=ast.Tuple(elts=_Exprs(self).tuple_elements(s.value), ctx=ast.Load()))]
-            if shape is not None and self.tuple_call(s.value) is not None:
+            if shape is not None and (self.tuple_call(s.value) is not None or _popitem(s.value)):
                 call = self.expr(s.value)
                 temps = [self.temp(k, line) for k in shape]
                 return [ast.Assign(targets=[ast.Tuple(elts=[_name(t, ast.Store()) for t in temps], ctx=ast.Store())],
@@ -718,6 +726,11 @@ class _Function:
         if got is not None:
             out, vals = got
             return out + self.assign_all(targets, vals, line, kinds=shape, annotated=annotated)
+        if _popitem(value) and len(shape) == 2:
+            # tier S2b: `t = d.popitem()` is `t__0, t__1 = d.popitem()` (the lowering checks that the receiver is a
+            # dict and that its key and value types are the elements')
+            return [ast.Assign(targets=[ast.Tuple(elts=[_name(t, ast.Store()) for t in targets], ctx=ast.Store())],
+                               value=self.expr(value))]
         called = self.tuple_call(value)
         if called is not None:
             if called != shape:

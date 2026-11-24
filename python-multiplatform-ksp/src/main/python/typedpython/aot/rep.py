@@ -651,8 +651,9 @@ class Representation:
                 elif isinstance(n, ir.ForRange):
                     rep = join(self._of(r, n.start), self._of(r, n.stop))
                     changed |= self.raise_(r.names, n.var, rep)
-                elif isinstance(n, ir.ForDict):
-                    # tier S2b: a dict holds its ints tagged (any int), so what a loop over one binds is TAGGED
+                elif isinstance(n, (ir.ForDict, ir.DictPopItem)):
+                    # tier S2b: a dict holds its ints tagged (any int), so what a loop over one or popitem() binds is
+                    # TAGGED
                     for var, t in ((n.key_var, n.kinds[0]), (n.value_var, n.kinds[1])):
                         if var is not None and t is Type.I64:
                             changed |= self.raise_(r.names, var, TAGGED)

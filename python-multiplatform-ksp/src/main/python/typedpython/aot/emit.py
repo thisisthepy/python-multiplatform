@@ -208,7 +208,7 @@ def assigned_names(f: ir.Function) -> set[str]:
                 out.add(n.target)
             elif isinstance(n, (ir.ForRange, ir.ForStr, ir.ForObjList)):
                 out.add(n.var)
-            elif isinstance(n, ir.ForDict):
+            elif isinstance(n, (ir.ForDict, ir.DictPopItem)):
                 out.update(v for v in (n.key_var, n.value_var) if v is not None)
             elif isinstance(n, ir.Unpack):
                 out.update(n.targets)
@@ -1181,6 +1181,41 @@ class _Fn:
         if found is not None:
             self.emit(f"tpa_dict_clear({found[0]});")
 
+    def st_DictPopItem(self, s: ir.DictPopItem) -> None:
+        """`k, v = d.popitem()` / `d.popitem()`: the last entry's key and value come out as new references, each bound
+        to its variable (or released when there is none)."""
+        found = self.dict_of(s.dict, "the dict of popitem()")
+        if found is None:
+            return
+        d, (kt, vt) = found
+        kw, kb, vw = self.tmp("tpa_dw"), self.tmp("int"), self.tmp("tpa_dw")
+        self.emit(f"if (tpa_dict_popitem({d}, &{kw}, &{kb}, &{vw})) {self.fail()}")
+        for var, t, w in ((s.key_var, kt, kw), (s.value_var, vt, vw)):
+            if var is None:
+                if t is Type.I64:
+                    self.emit(f"tpa_int_release((tpa_int){w});")
+                elif t in (Type.STR, Type.STR_OPT):
+                    self.emit(f"tpa_str_release((tpa_str *)(uintptr_t){w});")
+                continue
+            if not self.bind_word(var, t, w):
+                return
+
+    def bind_word(self, var: str, t: Type, w: str) -> bool:
+        """`var` (a local of the type `t`) takes the dict word `w`, a new reference for an int or a str."""
+        v = f"v_{mangle(var)}"
+        if t is Type.I64:
+            if not self.tagged_name(var):
+                self.bad("aot/type", var, f"`{var}`, bound to an int of a dict, is not a TAGGED name")
+                return False
+            self.emit(f"tpa_int_release({v}); {v} = (tpa_int){w};")
+        elif t in (Type.STR, Type.STR_OPT):
+            self.emit(f"tpa_str_release({v}); {v} = (tpa_str *)(uintptr_t){w};")
+        elif t is Type.F64:
+            self.emit(f"{v} = tpa_dict_to_f64({w});")
+        else:
+            self.emit(f"{v} = (int){w};")
+        return True
+
     def st_ForDict(self, s: ir.ForDict) -> None:
         """`for k in d` / `for v in d.values()` / `for k, v in d.items()`: CPython's dict iterator (it holds the dict;
         each step raises CPython's RuntimeError when the dict changed size or produced more keys than it held); each
@@ -1202,20 +1237,8 @@ class _Fn:
         self.emit(f"if ({st} < 0) {self.fail()}")
         self.emit(f"if ({st} == 0) break;")
         for var, t, w in ((s.key_var, kt, kw), (s.value_var, vt, vw)):
-            if var is None:
-                continue
-            v = f"v_{mangle(var)}"
-            if t is Type.I64:
-                if not self.tagged_name(var):
-                    self.bad("aot/type", var, f"the loop variable `{var}` of a dict of int is not a TAGGED name")
-                    return
-                self.emit(f"tpa_int_release({v}); {v} = (tpa_int){w};")
-            elif t in (Type.STR, Type.STR_OPT):
-                self.emit(f"tpa_str_release({v}); {v} = (tpa_str *)(uintptr_t){w};")
-            elif t is Type.F64:
-                self.emit(f"{v} = tpa_dict_to_f64({w});")
-            else:
-                self.emit(f"{v} = (int){w};")
+            if var is not None and not self.bind_word(var, t, w):
+                return
         self.loop_prologue(s)
         self.stmts(s.body)
         self.depth -= 1
