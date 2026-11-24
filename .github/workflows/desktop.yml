@@ -44,6 +44,13 @@ jobs:
         # Using --console=plain so logs are readable in GitHub Actions
         run: ./gradlew :python-multiplatform:desktopTest --console=plain
 
+      # The shared desktop native source set (macosArm64, linuxX64, mingwX64) compiles against the
+      # commonized cinterop bindings only here and in publishing; the per-target compiles above do
+      # not. Without this step a binding the commonizer drops (one that takes `wchar_t`, #521)
+      # broke publishToMavenLocal for toolchain's CI while every job here stayed green.
+      - name: Compile the desktop native shared source set (metadata)
+        run: ./gradlew :python-multiplatform:compileDesktopNativeMainKotlinMetadata --rerun --console=plain
+
   artifact-fixture:
     # The artifact walker's consumer suite (AGENTS.md section 15: plugin unit tests cannot see what the
     # generated table does at run time). It had no CI step, so SPEC B-5b/B-5c (#164 items 4 and 5,
