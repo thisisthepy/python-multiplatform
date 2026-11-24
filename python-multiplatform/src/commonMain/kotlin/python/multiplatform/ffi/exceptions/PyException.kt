@@ -154,7 +154,8 @@ open class PyException(
                 else -> fromExceptionInstance(causePointer)
             }
 
-            return PyException(message, type, value, traceback, context, cause)
+            // The Kotlin class mirrors the nearest built-in exception class (#524).
+            return python.multiplatform.ffi.exceptions.errors.BuiltinExceptions.create(message, type, value, traceback, context, cause)
         }
 
         /** `str(excPointer)`, used as this [PyException]'s [errMsg]. */
@@ -178,6 +179,68 @@ open class PyException(
             return message ?: "<unprintable exception>"
         }
     }
+
+    /** The Python exception [toPyObject] built for an exception that had no live [value]. */
+    private var synthesized: PyObject? = null
+
+    /**
+     * This exception as a Python object (issue #524 item 1).
+     *
+     * Source: owner answer 2026-11-22, relayed by the leader: "Exception + toPyObject()" (keep
+     * `: Exception`, the Python object reachable via `toPyObject()` as in the baseline sketch). The
+     * pre-agent `PyException` (f33bcef8) sketched exactly this: a `PyObject` held inside the
+     * exception and a `fun toPyObject(): PyObject`. `kotlin.Throwable` and [PyObject] are both
+     * classes, so one Kotlin class cannot extend both as `python_for_kotlin_binding.mermaid` draws it.
+     *
+     * - A Python exception that reached Kotlin answers the original instance, [value] itself.
+     * - A `PyException` made in Kotlin answers `type(message)`; with no [type], the built-in class its
+     *   Kotlin class mirrors (`PyTypeError("x")` gives `TypeError('x')`, agent proposal), or
+     *   `RuntimeError(message)`. Built on the first call and the same object afterwards, so identity
+     *   holds across calls; it carries no traceback, as an exception that was never raised has none.
+     */
+    fun toPyObject(): PyObject {
+        value?.let { return it }
+        synthesized?.let { return it }
+        val made = python.multiplatform.ffi.Python3.withPython {
+            withOwnPythonClass { cls ->
+                (cls ?: python.multiplatform.ffi.upcall.UpcallTrampoline.runtimeErrorClass()).use {
+                    it.invoke(python.multiplatform.ffi.types.basic.PyString.from(errMsg))
+                }
+            }
+        }
+        synthesized = made
+        return made
+    }
+
+    /**
+     * Calls [block] with the Python class this exception is raised as when it has no live [value]:
+     * [type], else the built-in class its Kotlin class mirrors, else `null`. The class handed over is
+     * [block]'s to close (a [type] is handed over as a new wrapper of its own, since the type cache
+     * owns [type] itself).
+     */
+    internal fun <R> withOwnPythonClass(block: (PyObject?) -> R): R {
+        val own: PyObject? = type?.let { PyObject(it.pointer, borrowed = true) }
+            ?: python.multiplatform.ffi.exceptions.errors.BuiltinExceptions.mirroredClass(this)
+        return block(own)
+    }
+
+    /**
+     * The Kotlin [Throwable] this Python exception is the proxy of, the same instance, or `null`
+     * when it is any other Python exception (SPEC U-2 and O-3, #164 item 6).
+     *
+     * A Kotlin throwable that reached Python is a `python_multiplatform.KotlinThrowable` there, an
+     * exception that owns a handle on the original object (owner decision 2026-11-22: "returning it
+     * to Kotlin yields the same Throwable instance (identity)"). The property name is an agent
+     * proposal, not confirmed by the owner. Read while the Python exception is alive, which this
+     * [PyException] guarantees by holding [value].
+     */
+    val kotlinThrowable: Throwable?
+        get() {
+            val live = value ?: return null
+            return python.multiplatform.ffi.Python3.withPython {
+                python.multiplatform.ffi.upcall.KotlinThrowableProxy.throwableOf(live.pointer)
+            }
+        }
 
     /** Re-raises this exception into the current Python error indicator (`PyErr_Restore`/`PyErr_SetObject`). */
     fun restore() {

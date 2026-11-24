@@ -6,6 +6,7 @@ import kotlin.metadata.KmType
 import kotlin.metadata.KmVariance
 import kotlin.metadata.MemberKind
 import kotlin.metadata.Visibility
+import kotlin.metadata.declaresDefaultValue
 import kotlin.metadata.isFunInterface
 import kotlin.metadata.isNullable
 import kotlin.metadata.isSuspend
@@ -16,6 +17,7 @@ import kotlin.metadata.jvm.annotations
 import kotlin.metadata.jvm.fieldSignature
 import kotlin.metadata.jvm.getterSignature
 import kotlin.metadata.jvm.setterSignature
+import kotlin.metadata.jvm.signature
 import kotlin.metadata.kind
 import kotlin.metadata.visibility
 import org.objectweb.asm.Opcodes
@@ -279,7 +281,7 @@ internal object ArtifactScanner {
         val (properties, rest) = entries.partition { it.declaration.kind in PROPERTY_KINDS }
         val (methods, functions) = rest.partition { it.declaration.kind == METHOD_KIND }
         val settledFunctions = assignThunkIndices(disambiguateOverloads(applyDefaultOmission(dropCollidingConstructors(functions))))
-        val settledMethods = settleMethodNames(disambiguateOverloads(methods), settledFunctions)
+        val settledMethods = settleMethodNames(disambiguateOverloads(applyDefaultOmission(methods)), settledFunctions)
         return (settledFunctions + settledMethods + settlePropertyNames(properties, settledFunctions + settledMethods))
             // The ancestry the binding carries is the model's too (issue #31): copied at the end, from the
             // callable that was actually bound, so the two cannot be read differently.
@@ -969,6 +971,13 @@ internal object ArtifactScanner {
         /** The receiver as generated source reads it out of `args[0]`. */
         val read: String,
         private val model: KotlinTypeModel,
+        /**
+         * The public methods the class's supertypes declare on the walk's classpath, by name (see
+         * [inheritedOverloadsOf]). An override takes its defaults from the declaration it overrides,
+         * as Kotlin does; every other inherited method of the same name joins the sibling test of
+         * [applyDefaultOmission], which on its own compares members of one receiver only.
+         */
+        val inheritedOverloads: Map<String, List<InheritedOverload>>,
     ) {
         /** [declaration] as a `METHOD`: read off a receiver of [owner], every argument passed. */
         fun restate(declaration: DeclarationModel): DeclarationModel = declaration.copy(
@@ -1003,6 +1012,75 @@ internal object ArtifactScanner {
      * shares its name with a property of the class, because Python has one attribute for both and the
      * property (#38) keeps it.
      */
+    /**
+     * One public method a supertype declares, as overload resolution on a subclass sees it.
+     *
+     * [parameterDescriptors] is the JVM descriptor's parameter list (a `suspend` function's trailing
+     * `Continuation` included), which is how an override is matched to what it overrides. [names] and
+     * [defaults] are the Kotlin value parameters; a Java method has no names a Kotlin call can write
+     * (`""`) and no defaults.
+     */
+    internal class InheritedOverload(
+        val parameterDescriptors: List<String>,
+        val names: List<String>,
+        val defaults: List<Boolean>,
+    ) {
+        /** Whether a call naming exactly [written] (name to JVM descriptor) could resolve to this method. */
+        fun accepts(written: List<Pair<String, String>>): Boolean {
+            val declared = names.indices.map { Triple(names[it], parameterDescriptors.getOrNull(it), defaults.getOrElse(it) { false }) }
+            return written.all { (name, descriptor) -> declared.any { it.first == name && it.second == descriptor } } &&
+                declared.filterNot { d -> written.any { it.first == d.first && it.second == d.second } }.all { it.third }
+        }
+    }
+
+    /**
+     * Every public method the supertypes of [node] declare on the classpath, `java.lang.Object`
+     * excluded, grouped by name. Kotlin lets only the original declaration state a default and every
+     * override inherits it, so the defaults of one signature are the union over the hierarchy.
+     */
+    private fun inheritedOverloadsOf(node: ClassNode, classpath: ArtifactClasspath): Map<String, List<InheritedOverload>> {
+        val bySignature = LinkedHashMap<Pair<String, List<String>>, InheritedOverload>()
+        val seen = HashSet<String>()
+        val pending = ArrayDeque<ClassNode>()
+        pending.addLast(node)
+        while (pending.isNotEmpty()) {
+            val current = pending.removeFirst()
+            (listOfNotNull(current.superName) + current.interfaces.orEmpty()).forEach { parentName ->
+                if (parentName == "java/lang/Object" || !seen.add(parentName)) return@forEach
+                val parent = classpath.classNode(parentName) ?: return@forEach
+                val metadata = kotlinClassMetadataOf(parent) as? KotlinClassMetadata.Class
+                if (metadata != null) {
+                    metadata.kmClass.functions.forEach { function ->
+                        if (function.visibility != Visibility.PUBLIC || function.receiverParameterType != null) return@forEach
+                        val descriptors = splitMethodDescriptor(function.signature?.descriptor ?: return@forEach).first
+                        val key = function.name to descriptors
+                        val defaults = function.valueParameters.map { it.declaresDefaultValue }
+                        val previous = bySignature[key]
+                        bySignature[key] = InheritedOverload(
+                            descriptors,
+                            previous?.names ?: function.valueParameters.map { it.name },
+                            if (previous == null) defaults
+                            else previous.defaults.mapIndexed { index, it -> it || defaults.getOrElse(index) { false } },
+                        )
+                    }
+                } else {
+                    parent.methods.orEmpty().forEach { method ->
+                        if (!method.access.hasFlag(Opcodes.ACC_PUBLIC) || method.access.hasFlag(Opcodes.ACC_STATIC) ||
+                            method.access.hasFlag(Opcodes.ACC_SYNTHETIC) || method.name.startsWith("<")
+                        ) return@forEach
+                        val descriptors = splitMethodDescriptor(method.desc).first
+                        bySignature.putIfAbsent(
+                            method.name to descriptors,
+                            InheritedOverload(descriptors, List(descriptors.size) { "" }, List(descriptors.size) { false }),
+                        )
+                    }
+                }
+                pending.addLast(parent)
+            }
+        }
+        return bySignature.entries.groupBy({ it.key.first }, { it.value })
+    }
+
     private fun memberFunctionCandidates(
         kmClass: kotlin.metadata.KmClass,
         ownerNode: ClassNode,
@@ -1043,7 +1121,7 @@ internal object ArtifactScanner {
         } else {
             receiverBoundary.boundary.read("args[0]")
         }
-        val member = MemberReceiver(owner, receiverRead, receiverModel)
+        val member = MemberReceiver(owner, receiverRead, receiverModel, inheritedOverloadsOf(ownerNode, classpath))
         val receiverDecline = classpath.unreachableSupertypeOf(ownerNode.name)
             ?.let { missing -> unreachableReceiverReason(missing, owner) }
         val propertyNames = kmClass.properties.mapTo(HashSet()) { it.name }
@@ -1087,7 +1165,26 @@ internal object ArtifactScanner {
                         "parameter(s) metadata does not declare",
                 )
             }
-            candidateFromFunction(owner, true, function, classpath, paramDescriptors, isComposable = false, member = member)
+            // An override states no default of its own and inherits the overridden declaration's
+            // (`CornerBasedShape.copy` in `AbsoluteCutCornerShape`), so the stub and the binding of the
+            // override offer what the supertype's offer.
+            val inherited = member.inheritedOverloads[function.kotlinName].orEmpty()
+            val overridden = inherited.firstOrNull { it.parameterDescriptors == rawParamDescriptors }
+            val effective = if (overridden != null && overridden.defaults.size == function.allParameterDefaults.size) {
+                function.copy(allParameterDefaults = function.allParameterDefaults.zip(overridden.defaults) { own, base -> own || base })
+            } else {
+                function
+            }
+            // Every other inherited method of the name is an overload the generated call also sees.
+            val others = inherited.filter { it !== overridden }
+            val refused = if (others.isEmpty()) emptySet() else {
+                omittableParameterIndices(effective, 0).toList().powerSet().filter { omitted ->
+                    val written = effective.allParameterNames.indices.filter { it !in omitted }
+                        .map { effective.allParameterNames[it] to paramDescriptors[it] }
+                    omitted.isNotEmpty() && others.any { it.accepts(written) }
+                }.toSet()
+            }
+            candidateFromFunction(owner, true, effective, classpath, paramDescriptors, isComposable = false, member = member, inheritedRefusals = refused)
         }
     }
 
@@ -2566,6 +2663,8 @@ internal object ArtifactScanner {
         paramDescriptors: List<String>,
         isComposable: Boolean,
         member: MemberReceiver? = null,
+        /** Omission sets an inherited overload of a member would also accept (see [memberFunctionCandidates]). */
+        inheritedRefusals: Set<Set<Int>> = emptySet(),
     ): Candidate? {
         val model = declarationModelOf(owner, ownerIsClass, function, classpath, isComposable)
             ?.let { if (member != null) member.restate(it) else it }
@@ -2675,9 +2774,9 @@ internal object ArtifactScanner {
             kind = if (member != null) METHOD_KIND else "FUNCTION",
             isSuspend = function.isSuspend,
         )
-        // A member's defaults are not omittable yet (issue #215): no plan, so Python passes every
-        // argument and the stub says so.
-        val omittable = if (member != null) emptySet() else omittableParameterIndices(function, receiverIndex)
+        // A member's defaults are omittable like a function's (#164 item 4: `Job.cancel()`); an
+        // override's are the overridden declaration's, already folded into [function].
+        val omittable = omittableParameterIndices(function, receiverIndex)
         val modelParameters = model.parameters.mapIndexed { index, parameter ->
             functionSlots[index + receiverIndex]?.modelType?.let { parameter.copy(type = it) } ?: parameter
         }
@@ -2695,12 +2794,17 @@ internal object ArtifactScanner {
                 omittable = omittable.sorted(),
                 valueIndices = (receiverIndex until resolvedParams.size).toList(),
                 declaredDefaults = function.allParameterDefaults,
+                refused = inheritedRefusals,
                 buildBody = { allowed ->
                     val branched = presenceBranchedCall(
                         function, owner, alias, argumentExpressions, receiverIndex,
                         qualifiedName, omittable.sorted(), call, allowed,
+                        memberRead = member?.read, argumentOffset = firstArgument,
                     )
-                    "{ args -> ${returnType.wrapReturn(branched)} }"
+                    // A suspend declaration's branches run inside its pending call, like the all-present body.
+                    val wrapped = returnType.wrapReturn(branched)
+                    if (function.isSuspend) "{ args -> python.multiplatform.ffi.upcall.PendingCall.start { $wrapped } }"
+                    else "{ args -> $wrapped }"
                 },
             ),
         )
@@ -2731,6 +2835,8 @@ internal object ArtifactScanner {
         /** What the *declaration* says, as opposed to what the binding will offer -- the sibling test
          * needs Kotlin's own view, because Kotlin is what resolves the generated call. */
         val declaredDefaults: List<Boolean>,
+        /** Omission sets refused up front because an inherited overload of a member also accepts them. */
+        val refused: Set<Set<Int>> = emptySet(),
         /** @param allowed the omission sets to generate a call for. Everything else becomes a branch
          *   that refuses at run time; see [presenceBranchedCall]. */
         val buildBody: (allowed: Set<Set<Int>>) -> String,
@@ -2818,12 +2924,20 @@ internal object ArtifactScanner {
     internal fun applyDefaultOmission(candidates: List<Candidate>): List<Candidate> {
         if (candidates.none { it.plan != null }) return candidates
         val byName = candidates.filter { it.callable != null }.groupBy { it.callable!!.name }
+        // A declined overload is still one Kotlin resolves the generated call against
+        // (`PlatformInsets(getLeft: () -> Int = ..., ...)` beside the bound `PlatformInsets(left: Int = ...)`
+        // in Compose's ui klib, #191): it joins the test by its declaration.
+        val declinedByName = candidates.filter { it.callable == null }
+            .groupBy { "${it.declaration.owner}.${it.declaration.simpleName}" }
         return candidates.map { candidate ->
             val plan = candidate.plan ?: return@map candidate
             val callable = candidate.callable ?: return@map candidate
             val siblings = byName[callable.name].orEmpty().filter { it !== candidate }
             val allowed = plan.omittable.powerSet()
-                .filter { it.isNotEmpty() && !anySiblingAlsoAccepts(candidate, plan, siblings, it) }
+                .filter {
+                    it.isNotEmpty() && it !in plan.refused && !anySiblingAlsoAccepts(candidate, plan, siblings, it) &&
+                        !anyDeclinedSiblingMayAccept(candidate, plan, declinedByName[callable.name].orEmpty(), it)
+                }
                 .toSet()
             if (allowed.isEmpty()) return@map candidate.copy(plan = null)
             val omittableNow = plan.omittable.filter { index -> allowed.any { index in it } }.toSet()
@@ -2872,11 +2986,34 @@ internal object ArtifactScanner {
         }
     }
 
+    /**
+     * [anySiblingAlsoAccepts] for overloads the walker declined, read from their declarations. Matched by
+     * parameter **name** only: a declined declaration's types are not always nameable (a function type,
+     * a type parameter), so a name match is taken as a possible match. That can only refuse a branch the
+     * exact test would have allowed, which costs a spelling, never a call that does not compile.
+     */
+    private fun anyDeclinedSiblingMayAccept(
+        candidate: Candidate,
+        plan: DefaultOmissionPlan,
+        declined: List<Candidate>,
+        omitted: Set<Int>,
+    ): Boolean {
+        val callable = candidate.callable ?: return false
+        val written = plan.valueIndices.filter { it !in omitted }.map { callable.paramNames[it] }
+        return declined.any { sibling ->
+            val declaration = sibling.declaration
+            if (declaration.receiver?.qualifiedName != callable.receiverTypeName) return@any false
+            val parameters = declaration.parameters
+            written.all { name -> parameters.any { it.name == name } } &&
+                parameters.filter { it.name !in written }.all { it.declaresDefault }
+        }
+    }
+
     /** The sibling's *declared* defaults, which is Kotlin's view and therefore the one that decides
      * applicability. `ArtifactCallable.paramHasDefault` is the binding's view and is not it -- at
      * this point in the walk it is still all `false` for everyone. */
     private fun DefaultOmissionPlan.siblingDeclares(sibling: Candidate, index: Int): Boolean {
-        val receiverIndex = if (sibling.callable?.receiverTypeName != null) 1 else 0
+        val receiverIndex = if (sibling.callable?.receiverTypeName != null && sibling.callable?.kind == "FUNCTION") 1 else 0
         return sibling.declaration.parameters.getOrNull(index - receiverIndex)?.declaresDefault ?: false
     }
 
@@ -2906,10 +3043,14 @@ internal object ArtifactScanner {
         ordered: List<Int>,
         allPresentCall: String,
         allowed: Set<Set<Int>>,
+        /** A member's receiver read (`(args[0] as Owner)`), or `null` for a function. */
+        memberRead: String? = null,
+        /** Where parameter 0 sits in `args`: 1 for a member, whose receiver is `args[0]`. */
+        argumentOffset: Int = 0,
     ): String {
         val names = function.allParameterNames
         val subject = ordered.mapIndexed { bit, index ->
-            "(if (args[$index] == null) ${1 shl bit} else 0)"
+            "(if (args[${index + argumentOffset}] == null) ${1 shl bit} else 0)"
         }.joinToString(" + ")
 
         fun callOmitting(omitted: Set<Int>): String {
@@ -2917,8 +3058,11 @@ internal object ArtifactScanner {
                 .filter { it >= receiverIndex && it !in omitted }
                 .joinToString(", ") { "${writeParameterName(names[it])} = ${argumentExpressions[it]}" }
             val typeArguments = typeArgumentsOf(function)
-            return if (function.isExtension) "${argumentExpressions.first()}.$alias$typeArguments($arguments)"
-            else "$owner.${function.kotlinName}$typeArguments($arguments)"
+            return when {
+                memberRead != null -> "$memberRead.${function.kotlinName}$typeArguments($arguments)"
+                function.isExtension -> "${argumentExpressions.first()}.$alias$typeArguments($arguments)"
+                else -> "$owner.${function.kotlinName}$typeArguments($arguments)"
+            }
         }
 
         val last = (1 shl ordered.size) - 1

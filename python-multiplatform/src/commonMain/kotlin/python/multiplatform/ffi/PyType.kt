@@ -242,7 +242,7 @@ class PyType private constructor(pointer: NativePointer): PyObject(pointer, fals
         val instance = invoke()
         val iterPointer = python.multiplatform.ffi.Python3.withPython { PyObject_GetIter(instance.pointer) }
             ?: throw pyErrorOrGeneric("Instances of '$name' are not iterable")
-        return PyIterator(iterPointer, false)
+        return python.multiplatform.ffi.types.iteration.PyIteratorObject(iterPointer, false)
     }
 
     /**

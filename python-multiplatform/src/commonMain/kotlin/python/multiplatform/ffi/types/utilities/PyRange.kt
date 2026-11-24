@@ -8,6 +8,9 @@ import python.multiplatform.ffi.newIntsOrNone
 import python.multiplatform.ffi.pyErrorOrGeneric
 import python.multiplatform.ffi.types.iteration.PyIterable
 import python.multiplatform.ffi.types.iteration.PyIterator
+import python.multiplatform.ffi.types.iteration.PyIteratorObject
+import python.multiplatform.ffi.types.collections.withPythonElement
+import python.native.ffi.PySequence_Contains
 import python.native.ffi.NativePointer
 import python.native.ffi.PyObject_GetIter
 import python.native.ffi.PyObject_Length
@@ -49,7 +52,7 @@ open class PyRange(pointer: NativePointer, borrowed: Boolean) : PyObject(pointer
      * return type; `len()` on such a range raises `OverflowError` in Python
      * too, so the ceiling is not new here.
      */
-    val size: Int
+    override val size: Int
         get() {
             val length = Python3.withPython { PyObject_Length(pointer) }
             if (length < 0) throw pyErrorOrGeneric("Failed to compute len() of this range")
@@ -60,6 +63,17 @@ open class PyRange(pointer: NativePointer, borrowed: Boolean) : PyObject(pointer
         // PyObject_GetIter returns a new reference, which the PyIterator adopts.
         val iterPointer = Python3.withPython { PyObject_GetIter(pointer) }
             ?: throw pyErrorOrGeneric("Failed to obtain an iterator over this range")
-        return PyIterator(iterPointer, borrowed = false)
+        return PyIteratorObject(iterPointer, borrowed = false)
     }
+
+    override fun isEmpty(): Boolean = size == 0
+
+    /** `element in range(...)`, which `range` answers arithmetically for an int. */
+    override fun contains(element: Any?): Boolean {
+        val result = withPythonElement(element) { item -> Python3.withPython { PySequence_Contains(pointer, item) } }
+        if (result == -1) throw pyErrorOrGeneric("Failed to check range membership")
+        return result == 1
+    }
+
+    override fun containsAll(elements: Collection<Any?>): Boolean = elements.all { contains(it) }
 }

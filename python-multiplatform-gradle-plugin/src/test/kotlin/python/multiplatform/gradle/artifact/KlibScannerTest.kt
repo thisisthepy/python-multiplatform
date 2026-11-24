@@ -148,7 +148,12 @@ class KlibScannerTest {
         // unbounded type parameters bind too, each read as `kotlin.Any?` (`Deferred.getCompleted`,
         // `MutableStateFlow.value`, `CancellableContinuation.isActive`); a member whose signature names a
         // parameterized type (`Deferred.onAwait: SelectClause1<T>`) and a member of a generic value class
-        // (`ChannelResult<T>.isSuccess`) stay declined.
+        // (`ChannelResult<T>.isSuccess`) stay declined. Since #191 (batch run 45027744672) a top-level
+        // function with unbounded type parameters binds whether `@Composable` or not, each read as
+        // `kotlin.Any?` (`MutableStateFlow`, `CompletableDeferred`, `flowOf`, `stateIn`), and a
+        // `kotlin.Any?` slot crosses as a handle (`Mutex.lock(owner)`), and so does a star-projected handle
+        // type (`CancellableContinuation<*>.disposeOnCancellation`), and a `String?` parameter
+        // (`ClosedReceiveChannelException(message)`), all as on jars (B-1, #38).
         val entries = KlibScanner.scanKlib(coroutinesKlib, includePrefixes = emptyList())
         assertEquals(
             listOf(
@@ -157,8 +162,11 @@ class KlibScannerTest {
                 "kotlinx.coroutines.CancellableContinuation.isActive",
                 "kotlinx.coroutines.CancellableContinuation.isCancelled",
                 "kotlinx.coroutines.CancellableContinuation.isCompleted",
+                "kotlinx.coroutines.CancellableContinuation.tryResume",
                 "kotlinx.coroutines.CloseableCoroutineDispatcher.close",
                 "kotlinx.coroutines.CompletableDeferred.complete",
+                "kotlinx.coroutines.CompletableDeferred__Any",
+                "kotlinx.coroutines.CompletableDeferred__Job",
                 "kotlinx.coroutines.CompletableJob.complete",
                 "kotlinx.coroutines.CoroutineDispatcher.Key",
                 "kotlinx.coroutines.CoroutineDispatcher.limitedParallelism",
@@ -200,19 +208,24 @@ class KlibScannerTest {
                 "kotlinx.coroutines.channels.ChannelIterator.hasNext",
                 "kotlinx.coroutines.channels.ChannelIterator.next",
                 "kotlinx.coroutines.channels.ChannelResult.Companion",
+                "kotlinx.coroutines.channels.ClosedReceiveChannelException",
+                "kotlinx.coroutines.channels.ClosedSendChannelException",
                 "kotlinx.coroutines.channels.ReceiveChannel.isClosedForReceive",
                 "kotlinx.coroutines.channels.ReceiveChannel.isEmpty",
                 "kotlinx.coroutines.channels.ReceiveChannel.receive",
                 "kotlinx.coroutines.channels.SendChannel.isClosedForSend",
                 "kotlinx.coroutines.channels.SendChannel.send",
+                "kotlinx.coroutines.disposeOnCancellation",
                 "kotlinx.coroutines.ensureActive__CoroutineScope",
                 "kotlinx.coroutines.ensureActive__Job",
                 "kotlinx.coroutines.flow.DEFAULT_CONCURRENCY",
                 "kotlinx.coroutines.flow.DEFAULT_CONCURRENCY_PROPERTY_NAME",
                 "kotlinx.coroutines.flow.FlowCollector.emit",
+                "kotlinx.coroutines.flow.MutableSharedFlow",
                 "kotlinx.coroutines.flow.MutableSharedFlow.emit",
                 "kotlinx.coroutines.flow.MutableSharedFlow.resetReplayCache",
                 "kotlinx.coroutines.flow.MutableSharedFlow.tryEmit",
+                "kotlinx.coroutines.flow.MutableStateFlow",
                 "kotlinx.coroutines.flow.MutableStateFlow.compareAndSet",
                 "kotlinx.coroutines.flow.MutableStateFlow.value",
                 "kotlinx.coroutines.flow.MutableStateFlow.value=",
@@ -221,12 +234,34 @@ class KlibScannerTest {
                 "kotlinx.coroutines.flow.SharingStarted.Lazily",
                 "kotlinx.coroutines.flow.SharingStarted.WhileSubscribed",
                 "kotlinx.coroutines.flow.StateFlow.value",
+                "kotlinx.coroutines.flow.asSharedFlow",
+                "kotlinx.coroutines.flow.asStateFlow",
+                "kotlinx.coroutines.flow.buffer",
+                "kotlinx.coroutines.flow.cancellable",
+                "kotlinx.coroutines.flow.conflate",
+                "kotlinx.coroutines.flow.consumeAsFlow",
+                "kotlinx.coroutines.flow.debounce",
+                "kotlinx.coroutines.flow.distinctUntilChanged",
+                "kotlinx.coroutines.flow.drop",
+                "kotlinx.coroutines.flow.emptyFlow",
+                "kotlinx.coroutines.flow.flowOf",
+                "kotlinx.coroutines.flow.launchIn",
+                "kotlinx.coroutines.flow.produceIn",
+                "kotlinx.coroutines.flow.receiveAsFlow",
+                "kotlinx.coroutines.flow.sample",
+                "kotlinx.coroutines.flow.shareIn",
+                "kotlinx.coroutines.flow.stateIn",
+                "kotlinx.coroutines.flow.take",
                 "kotlinx.coroutines.isActive",
                 "kotlinx.coroutines.newFixedThreadPoolContext",
                 "kotlinx.coroutines.newSingleThreadContext",
                 "kotlinx.coroutines.selects.SelectInstance.disposeOnCompletion",
+                "kotlinx.coroutines.selects.SelectInstance.selectInRegistrationPhase",
                 "kotlinx.coroutines.sync.Mutex",
                 "kotlinx.coroutines.sync.Mutex.isLocked",
+                "kotlinx.coroutines.sync.Mutex.lock",
+                "kotlinx.coroutines.sync.Mutex.tryLock",
+                "kotlinx.coroutines.sync.Mutex.unlock",
                 "kotlinx.coroutines.sync.Semaphore",
                 "kotlinx.coroutines.sync.Semaphore.acquire",
                 "kotlinx.coroutines.sync.Semaphore.availablePermits",
@@ -371,32 +406,39 @@ class KlibScannerTest {
     }
 
     /**
-     * A nullable primitive is declined, the same rule `resolveKotlinType` applies to the JVM
+     * A nullable number or `Boolean` is declined, the same rule `resolveKotlinType` applies to the JVM
      * producer's `Int?` -- and for the same reason: `TypeTag.INT` carries a `Long` and the generated
      * read is `(args[0] as Long).toInt()`, so a Python `None` would fail inside the cast rather than
      * reach the declaration.
      *
      * This is not a rule the klib walker used to have. `AbiType.Simple.nullability` exists on 2.0.20
      * and the first version of this file never read it, so `String?` mapped to `STRING` and would have
-     * generated `(args[0] as String)` for a parameter that accepts null.
+     * generated `(args[0] as String)` for a parameter that accepts null. A nullable `String` or
+     * `ByteArray` now binds with `(args[0] as String?)`, as the jar walker's
+     * `nullablePrimitiveBoundaryTypeOf` does (#191: material3's `Icon(contentDescription: String?)`),
+     * so they are left out of this probe; `KlibGenericFunctionTest.aNullableStringParameterCrossesAsAString`
+     * pins the cast.
      */
     @Test
-    fun aNullablePrimitiveIsDeclinedTheWayTheJvmProducerDeclinesOne() {
+    fun aNullableNumberOrBooleanIsDeclinedTheWayTheJvmProducerDeclinesOne() {
         if (!konanStdlibKlib.isDirectory) {
             ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         val declarations = KlibScanner.scanKlibDeclarations(konanStdlibKlib, includePrefixes = NULLABLE_PROBE_PACKAGES)
         val nullablePrimitiveTyped = declarations.filter { declaration ->
-            declaration.parameters.any { it.type.isNullable && it.type.qualifiedName in KLIB_PRIMITIVE_NAMES }
+            declaration.parameters.any {
+                it.type.isNullable && it.type.qualifiedName in KLIB_PRIMITIVE_NAMES &&
+                    it.type.qualifiedName != "kotlin.String" && it.type.qualifiedName != "kotlin.ByteArray"
+            }
         }
         assertTrue(
             nullablePrimitiveTyped.isNotEmpty(),
-            "no declaration in $NULLABLE_PROBE_PACKAGES has a nullable primitive parameter; " +
+            "no declaration in $NULLABLE_PROBE_PACKAGES has a nullable number or Boolean parameter; " +
                 "this test's fixture assumption is wrong, not the rule",
         )
         assertTrue(
             nullablePrimitiveTyped.all { it.bindingName == null },
-            "bound with a nullable primitive: ${nullablePrimitiveTyped.filter { it.bindingName != null }.map { it.bindingName }}",
+            "bound with a nullable number or Boolean: ${nullablePrimitiveTyped.filter { it.bindingName != null }.map { it.bindingName }}",
         )
     }
 

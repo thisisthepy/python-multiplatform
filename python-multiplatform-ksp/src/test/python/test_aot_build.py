@@ -2507,9 +2507,9 @@ REJECTED = {
     "import twice": ("import sys\nimport sys\n", ("aot/import", 2, "sys")),
     "from import": ("from math import sqrt\n", ("aot/import", 1, "math")),
     "empty list display": ("def f() -> int:\n    x = []\n    return 0\n", ("aot/container", 2, "list display")),
-    "string variable": ("def f() -> None:\n    s = 'x'\n", ("aot/str", 2, "str")),
-    "f-string as a value": ("def f(x: int) -> None:\n    s = f'{x}'\n", ("aot/f-string", 2, "f-string")),
-    "print keyword": ("def f() -> None:\n    print(1, end='')\n", ("aot/print-keyword", 2, "end")),
+    "str method outside the S1 list": ("def f(s: str) -> str:\n    return s.title()\n", ("aot/call", 2, "s.title")),
+    "printf-style str formatting": ("def f(x: int) -> str:\n    return '%d' % x\n", ("aot/front-end", 2, "f")),
+    "print keyword": ("def f() -> None:\n    print(1, file=None)\n", ("aot/print-keyword", 2, "file")),
     "print as a value": ("def f() -> None:\n    x = print(1)\n", ("aot/print-use", 2, "print")),
     "class with base": ("class C(int):\n    pass\n", ("aot/class", 1, "C")),
     "unknown builtin": ("def f(x: float) -> int:\n    return round(x)\n", ("aot/builtin", 2, "round")),
@@ -2524,21 +2524,15 @@ REJECTED = {
     "missing annotation": ("def f(a) -> int:\n    return 1\n", ("aot/annotation", 1, "parameter `a`")),
     "list of bool annotation": ("def f(a: list[bool]) -> int:\n    return 1\n", ("aot/type", 1, "list[bool]")),
     "list of lists annotation": ("def f(a: list[list[int]]) -> int:\n    return 1\n", ("aot/type", 1, "list[list[int]]")),
-    "tuple annotation of a parameter": ("def f(a: tuple[int, int]) -> int:\n    return 1\n", ("aot/type", 1, "tuple[int, int]")),
+    "tuple of lists annotation": ("def f(a: tuple[list[int], int]) -> int:\n    return 1\n",
+                                  ("aot/type", 1, "tuple[list[int], int]")),        # (tier S2a: tuples of scalars and str)
     "list in a tuple return": ("def f(a: list[float]) -> tuple[list[float], int]:\n    return a, 1\n",
                                ("aot/type", 1, "tuple[list[float], int]")),
     # the constructs the AOT mode does not have yet, each named
     "list in a list": ("def f() -> int:\n    x = [[1.0]]\n    return 0\n", ("aot/front-end", 2, "f")),
-    "list method": ("def f(a: list[float]) -> None:\n    a.append(1.0)\n", ("aot/call", 2, "a.append")),
-    "list iteration": (
-        "def f(a: list[float]) -> float:\n    s = 0.0\n    for v in a:\n        s += v\n    return s\n",
-        ("aot/statement", 3, "for")),
-    "list slice": ("def f(a: list[float]) -> int:\n    b = a[1:]\n    return 0\n", ("aot/container", 2, "slice")),
+    "list method": ("def f(a: list[float]) -> None:\n    a.sort()\n", ("aot/call", 2, "a.sort")),   # (append: S2a; sort: S2c)
     "list comparison": ("def f(a: list[float], b: list[float]) -> bool:\n    return a == b\n", ("aot/front-end", 2, "f")),
-    "list printed": ("def f(a: list[float]) -> None:\n    print(a)\n", ("aot/front-end", 2, "f")),
-    "list in an f-string": ("def f(a: list[float]) -> None:\n    print(f'{a}')\n", ("aot/front-end", 2, "f")),
     "list module constant": ("A = [1.0]\n", ("aot/constant", 1, "A")),
-    "list addition": ("def f(a: list[float]) -> int:\n    b = a + a\n    return 0\n", ("aot/front-end", 2, "f")),
     "list passed as an expression": (
         "def g(a: list[float]) -> int:\n    return 0\n\ndef f() -> int:\n    return g([1.0])\n",
         ("aot/front-end", 5, "f")),
@@ -2551,11 +2545,14 @@ REJECTED = {
     "list rebound to a scalar": ("def f() -> None:\n    a = [1.0]\n    a = 2.0\n", ("aot/front-end", 2, "f")),
     "list element arithmetic is strict": (
         "def f(a: list[int]) -> int:\n    return a[0] + 1\n", ("aot/int-unproven", 2, "+")),
-    "tuple display": ("def f() -> int:\n    t = (1, 2)\n    return 0\n", ("aot/container", 2, "tuple display")),
-    "tuple unpack of a display": ("def f() -> int:\n    a, b = 1, 2\n    return 0\n", ("aot/container", 2, "tuple display")),
-    "tuple used as a value": (
-        "def g(x: float) -> tuple[float, float]:\n    return x, x\n\ndef f() -> float:\n    t = g(1.0)\n    return t[0]\n",
-        ("aot/front-end", 5, "f")),
+    # (tier S2a: a tuple local is split into its elements; what has no form without a tuple object is named)
+    "tuple of mixed types indexed by a variable": (
+        "def f(i: int) -> int:\n    t = (i, 'a')\n    return len(str(t[i]))\n", ("aot/front-end", 3, "f")),
+    "tuple identity": ("def f() -> bool:\n    t = (1, 2)\n    return t is t\n", ("aot/front-end", 3, "f")),
+    "tuple stored in a list of lists": (
+        "def f() -> int:\n    t = (1, 2)\n    x = [[t]]\n    return 0\n", ("aot/front-end", 3, "f")),
+    "tuple comparison with a float element": (
+        "def f(a: float) -> bool:\n    t = (a, 1)\n    return t == t\n", ("aot/front-end", 3, "f")),
     "tuple unpacked into the wrong number": (
         "def g(x: float) -> tuple[float, float, float]:\n    return x, x, x\n\ndef f() -> float:\n"
         "    a, b = g(1.0)\n    return a\n", ("aot/front-end", 5, "f")),
@@ -2567,17 +2564,18 @@ REJECTED = {
     "tuple return of the wrong shape": (
         "def f(x: float) -> tuple[float, int]:\n    return x, x\n", ("aot/front-end", 2, "f")),
     "sys attribute": ("import sys\ndef f() -> int:\n    return sys.version\n", ("aot/attribute", 3, "version")),
-    "sys argv slice": ("import sys\ndef f() -> int:\n    x = sys.argv[1:]\n    return 0\n", ("aot/container", 3, "slice")),
+    "sys argv slice": ("import sys\ndef f() -> int:\n    x = sys.argv[1:]\n    return 0\n", ("aot/front-end", 3, "f")),
     "int of an argument": ("import sys\ndef f() -> int:\n    return int(sys.argv[1])\n", ("aot/int-unproven", 3, "int")),
     "int of argument zero": ("import sys\ndef f() -> int:\n    return int(sys.argv[0])\n", ("aot/int-unproven", 3, "int")),
-    "sys argv as a string": ("import sys\ndef f() -> None:\n    x = sys.argv[1]\n", ("aot/container", 3, "subscript")),
+    "str identity": ("def f(s: str, t: str) -> bool:\n    return s is t\n", ("aot/front-end", 2, "f")),
     "sys argv with a float index": (
         "import sys\ndef f(x: float) -> int:\n    return int(sys.argv[x])\n", ("aot/front-end", 3, "f")),
     "min of three": ("def f(a: float) -> float:\n    return min(a, a, a)\n", ("aot/call", 2, "min")),
     "min of an int and a float": ("def f(a: int, b: float) -> float:\n    return min(a, b)\n", ("aot/front-end", 2, "f")),
     "abs of the most negative int": ("def f(a: int) -> int:\n    return abs(a)\n", ("aot/int-unproven", 2, "-")),
-    "f-string conversion": ("def f(x: float) -> None:\n    print(f'{x!r}')\n", ("aot/f-string", 2, "conversion")),
-    "f-string equals": ("def f(x: float) -> None:\n    print(f'{x=}')\n", ("aot/f-string", 2, "conversion")),
+    "f-string ascii conversion": ("def f(x: float) -> None:\n    print(f'{x!a}')\n", ("aot/f-string", 2, "conversion")),
+    "f-string ascii conversion with equals": ("def f(x: float) -> None:\n    print(f'{x=!a}')\n",
+                                              ("aot/f-string", 2, "conversion")),
     "f-string width": ("def f(x: float) -> None:\n    print(f'{x:8.2f}')\n", ("aot/f-string", 2, "8.2f")),
     "f-string other type": ("def f(x: float) -> None:\n    print(f'{x:e}')\n", ("aot/f-string", 2, "e")),
     "f-string nested field": ("def f(x: float, n: int) -> None:\n    print(f'{x:.{n}f}')\n", ("aot/f-string", 2, "nested field")),
@@ -2618,9 +2616,8 @@ SOURCE_LEVEL_ROWS = frozenset({
     "class with base",
     "decorator",
     "empty list display",
-    "f-string as a value",
-    "f-string conversion",
-    "f-string equals",
+    "f-string ascii conversion",
+    "f-string ascii conversion with equals",
     "f-string nested field",
     "f-string other type",
     "f-string precision too large",
@@ -2632,12 +2629,10 @@ SOURCE_LEVEL_ROWS = frozenset({
     "int literal outside 64 bits",
     "int with base",
     "list in a tuple return",
-    "list iteration",
     "list method",
     "list module constant",
     "list of bool annotation",
     "list of lists annotation",
-    "list slice",
     "math attribute",
     "math function",
     "matmul operator",
@@ -2650,13 +2645,9 @@ SOURCE_LEVEL_ROWS = frozenset({
     "print as a value",
     "print keyword",
     "second import",
-    "string variable",
-    "sys argv as a string",
-    "sys argv slice",
+    "str method outside the S1 list",
     "sys attribute",
-    "tuple annotation of a parameter",
-    "tuple display",
-    "tuple unpack of a display",
+    "tuple of lists annotation",
     "unknown builtin",
 })
 # The rows that were refused for an int not proved inside 64 bits before #462. Without strict_int they are accepted
@@ -2715,6 +2706,13 @@ def rejection_groups() -> dict[str, list[str]]:
     return {"source": [n for n in rows if n in SOURCE_LEVEL_ROWS],
             "later": [n for n in rows if n not in SOURCE_LEVEL_ROWS and n not in STRICT_ROWS],
             "strict": [n for n in rows if n in STRICT_ROWS]}
+
+
+def test_every_grouped_row_name_is_a_row():
+    """A renamed row left in a group set silently moves the new row into the wrong merged program (S1b: two
+    source-level rows ran in the later program and hid every later finding)."""
+    for group in (SINGLE_ROWS, SOURCE_LEVEL_ROWS, STRICT_ROWS, IMPORT_ROWS):
+        assert group <= set(REJECTED), sorted(group - set(REJECTED))
 
 
 @pytest.fixture(scope="module")

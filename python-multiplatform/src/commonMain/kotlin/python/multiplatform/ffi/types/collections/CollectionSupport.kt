@@ -6,6 +6,8 @@ import python.multiplatform.ffi.PyType
 import python.multiplatform.ffi.PyTypeChecks
 import python.multiplatform.ffi.adoptingNewReference
 import python.multiplatform.ffi.exceptions.PyException
+import python.multiplatform.ffi.exceptions.errors.PyTypeError
+import python.multiplatform.ffi.types.basic.asPyObject
 import python.multiplatform.ffi.types.basic.PyNone
 import python.multiplatform.ffi.types.basic.readBufferAsByteArray
 import python.native.ffi.HighOverheadNativeCall
@@ -131,13 +133,13 @@ internal fun pyObjectToNative(obj: PyObject): Any? {
             // see PyBytes's class doc for why the read goes through `hex()` and what it costs.
             // No wrapper is built on this path: readBufferAsByteArray takes the raw pointer.
             PyTypeChecks.bytesType, PyTypeChecks.bytearrayType -> readBufferAsByteArray(obj.pointer)
-            PyTypeChecks.listType -> PyList(obj.pointer, true).toNativeList()
-            PyTypeChecks.tupleType -> PyTuple(obj.pointer, true).toNativeList()
-            PyTypeChecks.dictType -> PyDict(obj.pointer, true).toNativeMap()
-            PyTypeChecks.setType -> PySet(obj.pointer, true).toNativeSet()
-            PyTypeChecks.frozensetType -> PyFrozenSet(obj.pointer, true).toNativeSet()
+            PyTypeChecks.listType -> PyList(obj.pointer, true).toList()
+            PyTypeChecks.tupleType -> PyTuple(obj.pointer, true).toList()
+            PyTypeChecks.dictType -> PyDict(obj.pointer, true).toMap()
+            PyTypeChecks.setType -> PySet(obj.pointer, true).toSet()
+            PyTypeChecks.frozensetType -> PyFrozenSet(obj.pointer, true).toSet()
             // TODO(open design question): what should NATIVE conversion of a user-defined object
-            // produce? `str(obj)` is lossy and one-way -- `toNativeMap()`/`toNativeList()` on a
+            // produce? `str(obj)` is lossy and one-way -- `toMap()`/`toList()` on a
             // container holding one silently turns it into its repr, which no caller can convert
             // back. Deferring to PyContext is *not* the answer that was once assumed here: it is
             // implemented now (ROADMAP §7b), and `proxyConvert` returns a `PyValue` wrapping a
@@ -162,3 +164,52 @@ internal fun pyObjectToNative(obj: PyObject): Any? {
         python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(typePtr) } // PyObject_Type: new reference, only needed for the dispatch above
     }
 }
+
+/**
+ * A collection element (`Any?`, issue #524 item 4) as a Python object.
+ *
+ * A [PyObject] is itself; `null` is `None`; a Kotlin scalar (`Boolean`, `Long`, `Int`, `Short`,
+ * `Byte`, `Double`, `Float`, `String`) or `ByteArray` is the Python value; a Kotlin `List`, `Set` or
+ * `Map` is a new `list`, `set` or `dict` of its converted elements. Anything else is a [PyTypeError].
+ *
+ * The result is a wrapper the caller owns only when [value] was not already a [PyObject] and not
+ * `null`; [withPythonElement] is the one place that decides, so call that instead.
+ */
+internal fun kotlinToPython(value: Any?): PyObject = when (value) {
+    is PyObject -> value
+    null -> PyNone.get()
+    is Boolean -> value.asPyObject()
+    is Long -> value.asPyObject()
+    is Int -> value.asPyObject()
+    is Short -> value.toLong().asPyObject()
+    is Byte -> value.toLong().asPyObject()
+    is Double -> value.asPyObject()
+    is Float -> value.toDouble().asPyObject()
+    is String -> value.asPyObject()
+    is ByteArray -> value.asPyObject()
+    is List<*> -> PyList.fromList(value)
+    is Set<*> -> PySet.fromSet(value)
+    is Map<*, *> -> PyDict.fromMap(value)
+    else -> throw PyTypeError("No Python counterpart for a Kotlin value of type '${value::class.simpleName}'")
+}
+
+/**
+ * Runs [block] with a **borrowed** pointer to [value] as a Python object ([kotlinToPython]); a wrapper
+ * built only for this call is released afterwards, a [PyObject] the caller passed is left alone.
+ */
+internal inline fun <R> withPythonElement(value: Any?, block: (NativePointer) -> R): R {
+    if (value is PyObject) return block(value.pointer)
+    val made = kotlinToPython(value)
+    try {
+        return block(made.pointer)
+    } finally {
+        if (value != null) made.close() // None is the shared singleton wrapper
+    }
+}
+
+/** A **new** reference to [value] as a Python object, for C calls that steal one (`PyTuple_SetItem`). */
+internal fun newElementReference(value: Any?): NativePointer = withPythonElement(value) { pointer ->
+    python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_IncRef(pointer) }
+    pointer
+}
+

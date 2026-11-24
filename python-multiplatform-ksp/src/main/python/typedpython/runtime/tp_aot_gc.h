@@ -49,6 +49,7 @@
 #define TP_AOT_GC_H
 
 #include "tp_aot.h"
+#include <stddef.h>                     /* offsetof (tier S2a, tracked lists) */
 
 #ifndef TPA_GC_THRESHOLD
 #define TPA_GC_THRESHOLD 2000
@@ -285,6 +286,61 @@ static void tpa_gc_collect(void)
     g->count = 0;
     g->threshold = g->live > TPA_GC_THRESHOLD ? g->live : TPA_GC_THRESHOLD;
     g->collecting = 0;
+}
+
+/* Tier S2a (the S2 review, B4): a list of instances of a cyclic-capable class is itself a tracked object, so a cycle
+ * through a list (`node.children.append(node)`) is found. The block is the collector's header followed by the list
+ * (`tpa_gc_head gc; tpa_obj_list l;`, whose first field is the count: the common prefix `tpa_gc_object`), and the
+ * program holds `&block->l` like any other list. `traverse` visits the items (each one an instance of a
+ * cyclic-capable class, whose struct starts with its header); `clear` empties the list (items released, the item
+ * block freed), after which step 4 frees the block with `free(h)` like a cleared class object. The list's release
+ * (count to zero outside a collection) untracks it and frees the block before it releases the items. */
+typedef struct tpa_gc_obj_list {
+    tpa_gc_head gc;
+    tpa_obj_list l;
+} tpa_gc_obj_list;
+
+#define TPA_GC_LIST_OF(lp) ((tpa_gc_obj_list *)(void *)((char *)(lp) - offsetof(tpa_gc_obj_list, l)))
+
+static void tpa_gc_obj_list__traverse(tpa_gc_head *h, tpa_gc_visit visit, void *arg)
+{
+    tpa_obj_list *l = &((tpa_gc_obj_list *)(void *)h)->l;
+    int64_t i;
+    for (i = 0; i < l->len; i++) {
+        if (l->d[i] != NULL) {
+            visit((tpa_gc_head *)l->d[i], arg);
+        }
+    }
+}
+
+static void tpa_gc_obj_list__clear(tpa_gc_head *h)
+{
+    tpa_obj_list_clear(&((tpa_gc_obj_list *)(void *)h)->l);
+}
+
+static const tpa_gc_type tpa_gc_obj_list__type = {tpa_gc_obj_list__traverse, tpa_gc_obj_list__clear};
+
+static void tpa_gc_obj_list__free(tpa_obj_list *l)
+{
+    tpa_gc_obj_list *b = TPA_GC_LIST_OF(l);
+    tpa_gc_untrack(&b->gc);
+    free(b);
+}
+
+static TPA_UNUSED int tpa_obj_list_alloc_gc(int64_t n, tpa_obj_fn ret, tpa_obj_fn rel, tpa_obj_list **out)
+{
+    tpa_gc_obj_list *b = (tpa_gc_obj_list *)calloc(1, sizeof(tpa_gc_obj_list));
+    if (b == NULL) {
+        return tpa_raise(TPA_MemoryError, "");
+    }
+    if (tpa_obj_list__init(&b->l, n, ret, rel)) {
+        free(b);
+        return -1;
+    }
+    b->l.free_self = tpa_gc_obj_list__free;
+    tpa_gc_track(&b->gc, &tpa_gc_obj_list__type);
+    *out = &b->l;
+    return 0;
 }
 
 /* The safepoint: called by the generated `tpa_cls_<C>_new` of a cyclic-capable class before it allocates. */
