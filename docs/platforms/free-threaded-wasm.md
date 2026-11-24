@@ -253,12 +253,35 @@ an exported C function). No new dependency, workflow or kind of artefact.
   as well as in the browser. Its source says yes for both; the smoke test shows it for Node.
 - The Kotlin-level tests (a Python thread calling a Kotlin callable through `UpcallEntry`) need the
   wasmJs suite to run on the 3.15t runtime, which waits on Decision 6.
-- `ProxyTypeFactory`'s type slots (`tp_dealloc`, `tp_traverse`, the proxy methods) are also
-  `pmpRegisterUpcall` indices, so a proxy object used from a Python thread still traps. They have
-  other C signatures, so each needs its own dispatcher entry; next step. `tp_traverse` cannot take
-  this route: a free-threaded collection calls it with the world stopped, on whichever thread
-  collects, and the main thread cannot attach to run it until the world restarts, so routing it
-  would deadlock. It has to run in the collecting thread without Kotlin (for example, a C
-  traverse over the proxy's handle slot only).
+- Whether a routed `tp_traverse` is safe inside a pause, below: the visit functions run on the
+  main thread for the collecting thread. If one of them reads the current thread's state rather
+  than its `arg`, the smoke test's collection shows it.
+- Whether a proxied `tp_clear` / `tp_dealloc` may attach the main thread's own thread state while
+  that thread is parked mid-attach for another pause. The method route of step 2 has the same
+  question; the smoke test's concurrent `gc.collect()` exercises it, but does not prove it.
+
+**Proxy type slots (2026-11-25, same branch, not yet run; agent proposal, not confirmed).**
+`ProxyTypeFactory`'s `tp_traverse`, `tp_clear` and `tp_dealloc` were `pmpRegisterUpcall` indices
+too, so a proxy traversed, cleared or freed on a Python thread trapped. `_pm_upcall.c` now has one
+dispatcher per C signature (`pm_tp_traverse`, `pm_tp_clear`, `pm_tp_dealloc`, with
+`pm_proxy_slot_index` / `pm_proxy_set_slot_target`), and `ProxyTypeFactory.slotIndex` puts them in
+the type when the runtime exports them (`cpython.mjs` `pmpProxySlotDispatchIndex` /
+`pmpProxySetSlotTarget`; without the module, the Kotlin entries as before).
+- `tp_clear` and `tp_dealloc` run attached; they detach, run on the main thread attached, and keep
+  the main thread's own pending exception untouched.
+- `tp_traverse`: **correction** of this section's earlier note, which said routing it would
+  deadlock because the main thread cannot attach during a stop-the-world pause. It does not need
+  to attach. `ProxyType.traverse` reads the proxy's handle slot and calls `visit`; it takes no
+  thread state. So inside a pause (the collector, attached, is the requester; checked with
+  `stoptheworld.world_stopped`) the collector waits for the main thread without detaching, and the
+  main thread, parked for the pause on a futex, services the call there. Outside a pause
+  (`gc.get_referents`) the caller detaches first, so a pause the main thread requests meanwhile
+  does not wait on it. This is reasoning from the sources, checked only by the smoke test below.
+- `smoke.py`: `_pm_upcall.Node`, a GC type whose three slots take the same routes with C targets
+  that count where they ran. Threads make 200 two-node cycles each with automatic collection off;
+  a Python thread runs `gc.collect()` while the main thread waits in `join()`, then calls
+  `gc.get_referents` outside a pause. Required: the collection returns, finds every node, the
+  referents include the node's `ref`, every traverse, clear and dealloc ran on the main thread, and
+  every node was freed.
 - It depends on step 1 (#515) and on the 3.15t runtime (Decision 6), to have a runtime to test
   against.

@@ -245,13 +245,15 @@ console.log(`python.wasm memory: ${mem.where} shared=${shared} min=${mem.min} ma
 process.exit(shared && mem.max !== null ? 0 : 1);
 NODE
 
-# The upcall dispatcher is a built-in module and its three functions are exported.
+# The upcall dispatcher is a built-in module and its functions (the method and proxy-slot
+# dispatchers) are exported.
 timeout 300 "$PWD/$hostdir/python.sh" -c 'import sys; assert "_pm_upcall" in sys.builtin_module_names, sys.builtin_module_names' \
     || die "_pm_upcall is not a built-in module (Setup.local not applied?)"
 node - "$hostdir/python.wasm" <<'NODE' || die "python.wasm does not export the _pm_upcall functions"
 const m = new WebAssembly.Module(require("fs").readFileSync(process.argv[2]));
 const names = new Set(WebAssembly.Module.exports(m).map((e) => e.name));
-const want = ["pm_upcall_dispatch", "pm_upcall_set_target", "pm_upcall_dispatch_index"];
+const want = ["pm_upcall_dispatch", "pm_upcall_set_target", "pm_upcall_dispatch_index",
+              "pm_tp_traverse", "pm_tp_clear", "pm_tp_dealloc", "pm_proxy_slot_index", "pm_proxy_set_slot_target"];
 const missing = want.filter((n) => !names.has(n));
 console.log(`python.wasm _pm_upcall exports: ${want.filter((n) => names.has(n)).join(",")}${missing.length ? " MISSING " + missing.join(",") : ""}`);
 process.exit(missing.length ? 1 : 0);

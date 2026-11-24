@@ -729,6 +729,17 @@ external fun pmpUpcallDispatchIndex(): Int
 @WasmImport(MODULE, "pmpUpcallSetTarget")
 external fun pmpUpcallSetTarget(index: Int)
 
+/**
+ * The table index of `_pm_upcall`'s dispatcher for proxy type slot [slot] (0 `tp_traverse`,
+ * 1 `tp_clear`, 2 `tp_dealloc`), the same in every Worker, or `-1` without the module (#175).
+ */
+@WasmImport(MODULE, "pmpProxySlotDispatchIndex")
+external fun pmpProxySlotDispatchIndex(slot: Int): Int
+
+/** Makes the function at table index [index] the target of slot [slot]'s dispatcher; no-op without `_pm_upcall`. */
+@WasmImport(MODULE, "pmpProxySetSlotTarget")
+external fun pmpProxySetSlotTarget(slot: Int, index: Int)
+
 /** `visit(obj, arg)`, where `visit` is the `visitproc` at table index [fp]. */
 @WasmImport(MODULE, "pmpCallVisit")
 external fun pmpCallVisit(fp: Int, obj: Int, arg: Int): Int

@@ -609,6 +609,15 @@ export function pmpUpcallSetTarget(index) {
     if (typeof E.pm_upcall_set_target === "function") E.pm_upcall_set_target(index);
 }
 
+// The proxy type's slot dispatchers (0 traverse, 1 clear, 2 dealloc), on the same terms.
+export function pmpProxySlotDispatchIndex(slot) {
+    return typeof E.pm_proxy_slot_index === "function" ? E.pm_proxy_slot_index(slot) : -1;
+}
+
+export function pmpProxySetSlotTarget(slot, index) {
+    if (typeof E.pm_proxy_set_slot_target === "function") E.pm_proxy_set_slot_target(slot, index);
+}
+
 export function pmpCallVisit(fp, obj, arg) {
     return upcallTable.get(fp)(obj, arg);
 }
