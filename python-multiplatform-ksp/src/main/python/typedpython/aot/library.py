@@ -656,6 +656,8 @@ def _c_text(g, bodies: list[list[str]], exports: list[_Export], p: str) -> str:
     if g.uses_str:                      # tier S1: the str runtime needs the int runtime's parser and formatter
         tables = "".join(line + "\n" for line in unicode_mod.tables_c(g.ucd))     # tier S1b
         include += tables + '#include "tp_aot_str.h"\n'
+    if g.uses_dict:                     # tier S2b: a dict inside the library (none crosses its boundary)
+        include += '#include "tp_aot_dict.h"\n'
     return text.replace("@INT@", include)
 
 

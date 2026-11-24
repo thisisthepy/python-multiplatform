@@ -7,7 +7,7 @@ modules it imports) and reports
 - **error**: a construct outside the AOT subset by design (`eval`, a generator, `id()`, an import
   outside the provided set, ...);
 - **pending**, with a tier K / O / S / T: a construct inside the designed subset that the compiler
-  cannot compile without CPython yet (`print`, a string method, a dict, ...);
+  cannot compile without CPython yet (a string method of tier S, a set, a comprehension, ...);
 
 and one status per function: `ready` when today's front end and verifier accept it and its IR needs
 no CPython object operation.
@@ -558,7 +558,10 @@ class _Pass(ast.NodeVisitor):
         self.comprehension(node, "dict comprehension")
 
     def visit_Dict(self, node: ast.Dict) -> None:
-        self.pending("S", "aot/container", "dict display", node, "a dict display is tier S (general containers), not compiled yet")
+        # tier S2b: a dict display compiles (the front end checks its key and value types); `**` in one does not yet
+        if any(k is None for k in node.keys):
+            self.pending("S", "aot/container", "dict display", node, "`**` in a dict display is tier S (general "
+                         "containers), not compiled yet")
         self.generic_visit(node)
 
     def visit_JoinedStr(self, node: ast.JoinedStr) -> None:
@@ -623,6 +626,8 @@ class _Pass(ast.NodeVisitor):
             self.pending("K", "aot/builtin", n, node, f"`{n}()` is not compiled without CPython yet (tier K)")
         elif n in _SET_BUILTINS_S:
             self.pending("S", "aot/builtin", n, node, f"`{n}()` is tier S, not compiled yet")
+        elif n == "dict" and len(node.args) == 1 and not node.keywords:
+            return                              # tier S2b: `dict(d)`, a copy of a dict (the front end checks it)
         elif n in _CONTAINER_CALLS:
             self.pending("S", "aot/container", n, node, f"`{n}()` is tier S (general containers), not compiled yet")
         elif n in _SUPPORTED_CALLS:

@@ -216,6 +216,7 @@ TPA_EXPORT int shim_dict_run(int keys_are_str, const int64_t *ops, int64_t n, ch
             tpa_dict *c = NULL;
             if (tpa_dict_copy(d, &c)) { put_error(&o); break; }
             tpa_dict_set(&d, c);   /* (a live iterator keeps the old dict) */
+            tpa_dict_release(c);
             put_repr(&o, "", d);
             break;
         }
@@ -223,6 +224,7 @@ TPA_EXPORT int shim_dict_run(int keys_are_str, const int64_t *ops, int64_t n, ch
             tpa_dict *c = NULL;
             if (tpa_dict_copy(d, &c)) { put_error(&o); break; }
             tpa_dict_set(&b, c);
+            tpa_dict_release(c);
             put(&o, "ok");
             break;
         }
@@ -265,6 +267,7 @@ TPA_EXPORT int shim_dict_run(int keys_are_str, const int64_t *ops, int64_t n, ch
                 if (rc) { put_error(&o); break; }
             }
             tpa_dict_set(&d, c);
+            tpa_dict_release(c);
             put(&o, "ok");
             break;
         }

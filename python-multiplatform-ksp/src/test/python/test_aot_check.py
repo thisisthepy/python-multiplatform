@@ -107,7 +107,7 @@ TABLE = [
     ("aot/str", "def f() -> str:\n    return 'a b'.title()\n", (PEND, "S", "title", 2)),
     ("aot/str", "def f(s: str) -> int:\n    return s.count('a')\n", (PEND, "S", "count", 2)),
     ("aot/str", "def f(s: str) -> str:\n    return s.casefold()\n", (PEND, "S", "casefold", 2)),
-    ("aot/container", "def f() -> int:\n    d = {1: 2}\n    return 0\n", (PEND, "S", "dict display", 2)),
+    ("aot/container", "def f(e: dict[str, int]) -> int:\n    d = {**e}\n    return 0\n", (PEND, "S", "dict display", 2)),
     ("aot/container", "def f(n: int) -> int:\n    return len([i for i in range(n)])\n", (PEND, "S", "list comprehension", 2)),
     ("aot/exception", "def f() -> None:\n    raise ValueError('x')\n", (PEND, "S", "raise", 2)),
     ("aot/exception", "def f() -> None:\n    try:\n        pass\n    finally:\n        pass\n", (PEND, "S", "try", 2)),
@@ -216,15 +216,13 @@ def test_tier_k_benchmarks_are_ready_and_free_of_findings(benchmark):
     assert all(s.ready for s in report.functions), [(s.name, s.reasons) for s in report.functions if not s.ready]
 
 
-def test_tier_o_and_s_benchmarks_still_report_pending_findings():
-    bt = aotcheck.check(BENCH / "binary_trees.py")
-    assert not bt.blocking, bt.lines()
-    assert not bt.findings, bt.lines()
-    assert all(s.ready for s in bt.functions), [(s.name, s.reasons) for s in bt.functions if not s.ready]
-
-    wf = aotcheck.check(BENCH / "wordfreq.py")
-    assert wf.blocking
-    assert any(f.kind == "pending" and f.tier == "S" for f in wf.findings), wf.lines()
+def test_tier_o_and_s_benchmarks_are_ready_and_free_of_findings():
+    # (wordfreq: a dict[str, int] and loops over its items, tier S2b)
+    for name in ("binary_trees", "wordfreq"):
+        report = aotcheck.check(BENCH / f"{name}.py")
+        assert not report.blocking, report.lines()
+        assert not report.findings, report.lines()
+        assert all(s.ready for s in report.functions), [(s.name, s.reasons) for s in report.functions if not s.ready]
 
 
 # --- a program of several modules -------------------------------------------------------------------

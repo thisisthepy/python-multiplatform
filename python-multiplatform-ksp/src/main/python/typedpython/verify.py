@@ -374,6 +374,10 @@ from .ir import ParInfo
 from .ir import ListAppend, ListClear, ListExtend, ListInsert, ListPop, ListRemove, ListReverse, ListSearch, ListStr
 from .ir import ListCompare, ListConcat, ListRepeat, ListSlice, ListDelete, ListSetSlice
 from .ir import ForObjList, ObjListDisplay, ObjListIndex, ObjListLen, ObjListStore, StrListStore, TupleIndex
+from .ir import (
+    DictClear, DictCompare, DictContains, DictCopy, DictDelete, DictDisplay, DictGet, DictLen, DictPop, DictSetDefault,
+    DictStore, DictStr, DictUpdate, ForDict,
+)
 
 DA = "verify/definite-assignment"
 MISSING_RETURN = "verify/missing-return"
@@ -431,7 +435,8 @@ _STMTS = frozenset({Assign, StoreIndex, ExprStmt, If, While, ForRange, Return, B
 # `FormatField`s are checked by `s_Print`, which is the only place one may stand.)
 _AOT_STMTS = frozenset({Print, ReturnTuple, Unpack, TimeSleep, SysExit, ForStr,
                         ListAppend, ListInsert, ListExtend, ListClear, ListReverse, ListRemove,
-                        ListDelete, ListSetSlice, ObjListStore, StrListStore, ForObjList})     # tier S2a
+                        ListDelete, ListSetSlice, ObjListStore, StrListStore, ForObjList,     # tier S2a
+                        *ir.DICT_STMTS})                                                      # tier S2b
 _AOT_EXPRS = frozenset({ListDisplay, Cond, ArgvInt, ArgvLen, FloatToInt, BoolToInt, StrToInt, TimeCall,
                         # tier S1 (PR-S1a): the STR nodes, and an f-string that is a str value
                         StrConcat, StrRepeat, StrCompare, StrContains, StrLen, StrIndex, StrSlice, StrOf, StrOrd,
@@ -439,7 +444,8 @@ _AOT_EXPRS = frozenset({ListDisplay, Cond, ArgvInt, ArgvLen, FloatToInt, BoolToI
                         # tier S1b
                         StrMethod, StrListDisplay, StrListLen, StrListIndex,
                         StrNarrow, ListPop, ListSearch, ListStr, ListCompare, ListConcat, ListRepeat, ListSlice,
-                        ObjListDisplay, ObjListLen, ObjListIndex, TupleIndex})  # tier S2a
+                        ObjListDisplay, ObjListLen, ObjListIndex, TupleIndex,  # tier S2a
+                        *ir.DICT_EXPRS})                                       # tier S2b
 # Nodes whose OBJ result is a new reference (ir.py "ownership": Box, Global, GetAttr, CallObject,
 # OBJ BinOp, Tuple), plus reads of an OBJ local (the local owns its reference; the back end increfs or
 # borrows under that rule) and Calls of a compiled function returning OBJ (which returns a new
@@ -453,7 +459,7 @@ _VALUE_TYPES = (Type.I64, Type.F64, Type.BOOL, Type.OBJ)        # what a local m
 _AOT_STR_TYPES = (Type.STR, Type.STR_LIST, Type.STR_OPT, Type.STR_OPT_LIST)    # AOT mode, tier S1/S2a: what a local
 #                                                                                   may also hold
 _STR_LISTS = (Type.STR_LIST, Type.STR_OPT_LIST)   # the two `tpa_str_list` types (list[str] S1b, list[str | None] S2a)
-_AOT_VALUE_TYPES = (*_AOT_STR_TYPES, Type.OBJ_LIST)                # ... and a list[C] (tier S2a)
+_AOT_VALUE_TYPES = (*_AOT_STR_TYPES, Type.OBJ_LIST, Type.DICT)    # ... and a list[C] (tier S2a), a dict (S2b)
 _LOCAL_TYPES = _VALUE_TYPES + (Type.INT,)       # an INT lives only in a local or a temporary (SPEC N-13)
 _RETURN_TYPES = _VALUE_TYPES + (Type.NONE,)
 # The nodes that produce an INT (an owned tp_int: native, or a PyLong once promoted).
@@ -693,6 +699,75 @@ class _Checker:
                 self.error(TYPE, f"`{flag}` is not a bool")
         return frozenset(params)
 
+    def dict_declarations(self) -> None:
+        """AOT mode, tier S2b: every DICT parameter and local has its key and value types in `Function.dict_kinds`
+        (a parameter's are its `Param.kinds`), each an allowed kind; a DICT return has `return_kinds`."""
+        fn = self.fn
+        kinds = getattr(fn, "dict_kinds", None)
+        if not isinstance(kinds, dict):
+            self.error(STRUCTURE, "dict_kinds is not a dict")
+            return
+        for p in fn.params:
+            if type(p) is Param and p.type is Type.DICT and p.kinds != kinds.get(p.name):
+                self.error(TYPE, f"dict parameter '{p.name}' has kinds {p.kinds!r} but dict_kinds says "
+                                 f"{kinds.get(p.name)!r}")
+        for name, t in self.scalars.items():
+            if t is Type.DICT and not self.good_kinds(kinds.get(name)):
+                self.error(TYPE, f"dict local '{name}' has no valid key and value types ({kinds.get(name)!r})")
+        if fn.returns is Type.DICT and not self.good_kinds(fn.return_kinds):
+            self.error(TYPE, f"'{fn.name}' returns a dict with no valid key and value types ({fn.return_kinds!r})")
+
+    @staticmethod
+    def good_kinds(k: object) -> bool:
+        return isinstance(k, tuple) and len(k) == 2 and k[0] in ir.DICT_KEYS and k[1] in ir.DICT_VALUES
+
+    def dict_kinds(self, e: object) -> ir.DictKinds | None:
+        """The key and value types of the DICT expression `e` (already checked), or None after an error."""
+        cls = type(e)
+        if cls in (DictDisplay, DictCopy):
+            return e.kinds if self.good_kinds(e.kinds) else None
+        if cls is Local:
+            return self.fn.dict_kinds.get(e.name)
+        if cls is Call:
+            callee = self.sigs.get(e.function)
+            return callee.return_kinds if callee is not None else None
+        if cls is Cond:
+            a, b = self.dict_kinds(e.then), self.dict_kinds(e.orelse)
+            if a != b:
+                self.error(TYPE, f"a conditional dict is a {a!r} or a {b!r}")
+            return a
+        self.error(TYPE, f"{cls.__name__} is not a dict value")
+        return None
+
+    def dict_operand(self, e: object, state: _State, what: str) -> tuple[ir.Expr, ir.DictKinds | None]:
+        value = self.expr(e, state)
+        if getattr(value, "type", None) is not Type.DICT:
+            self.error(TYPE, f"{what} is not a dict")
+            return value, None
+        return value, self.dict_kinds(value)
+
+    def dict_key(self, e: object, kinds: ir.DictKinds | None, state: _State, what: str, insert: bool) -> ir.Expr:
+        """A key of a dict of `kinds`: of the key type, or a bool for a dict of int when it only looks up (`insert`
+        False: CPython keeps a new key as it came, ir.ForDict)."""
+        key = self.expr(e, state)
+        if kinds is None:
+            return key
+        kt, got = kinds[0], getattr(key, "type", None)
+        if got is not kt and not (not insert and got is Type.BOOL and kt is Type.I64):
+            self.error(TYPE, f"{what}: a {getattr(got, 'value', got)} key of a dict whose keys are {kt.value}")
+        return key
+
+    def dict_value(self, e: object, kinds: ir.DictKinds | None, state: _State, what: str) -> ir.Expr:
+        value = self.expr(e, state)
+        if kinds is not None:
+            if kinds[1] is Type.STR_OPT or getattr(value, "type", None) is not kinds[1]:
+                self.slot(value, kinds[1], what)
+        return value
+
+    def dict_same(self, a: ir.DictKinds | None, b: ir.DictKinds | None, what: str) -> None:
+        if a is not None and b is not None and a != b:
+            self.error(TYPE, f"{what}: a dict of {a!r} where a dict of {b!r} is wanted")
+
     def param_class(self, p: Param) -> None:
         """`Param.cls`/`optional`: only on an OBJ parameter, naming a ClassDecl of the module. A
         non-optional one is an exact-C fact at entry (the entry guard); an optional one is C or None."""
@@ -918,8 +993,8 @@ class _Checker:
                 elif self.fixing:
                     self.bottom = True
             return _meet_interval(base, self.refine.get(e.name))
-        if cls in (StrLen, StrWrite, StrListLen):
-            return (0, _LEN_MAX)            # tier S1: a length
+        if cls in (StrLen, StrWrite, StrListLen, DictLen):
+            return (0, _LEN_MAX)            # tier S1: a length (tier S2b: a dict's)
         if cls is StrOrd:
             return (0, 0x10FFFF)
         if cls is Len:
@@ -978,8 +1053,8 @@ class _Checker:
                             self.bottom = True
             iv = _meet_interval(iv, self.refine.get(e.name))
             return _meet_interval(iv, _FULL) if raw else iv
-        if cls in (StrLen, StrWrite, StrListLen):
-            return (0, _LEN_MAX)            # tier S1: a length
+        if cls in (StrLen, StrWrite, StrListLen, DictLen):
+            return (0, _LEN_MAX)            # tier S1: a length (tier S2b: a dict's)
         if cls is StrOrd:
             return (0, 0x10FFFF)
         if cls is Len:
@@ -1375,6 +1450,8 @@ class _Checker:
                 pass        # SPEC N-13: a promoted INT does not fit the parameter: the callee's deopt, redone
             else:
                 self.slot(a, p.type, f"argument {k + 1} of '{e.function}'")
+                if self.aot and type(p) is Param and p.type is Type.DICT and getattr(a, "type", None) is Type.DICT:
+                    self.dict_same(self.dict_kinds(a), p.kinds, f"argument {k + 1} of '{e.function}'")
         # SPEC N-13: a redo Call of an i64-returning callee gives an INT (the redone value is any int)
         int_result = (redo_ok and callee.returns is Type.I64 and e.type is Type.INT)
         if e.type is not callee.returns and not int_result:
@@ -2016,6 +2093,164 @@ class _Checker:
         self.result(e, Type.STR_OPT if opt else Type.STR)
         return dataclasses.replace(e, value=value, index=index)
 
+    # --- AOT mode, tier S2b: dict[K, V] (ir.py "dict[K, V]") ---
+
+    def e_DictDisplay(self, e: DictDisplay, state: _State) -> ir.Expr:
+        if not (isinstance(e.keys, tuple) and isinstance(e.values, tuple) and len(e.keys) == len(e.values)):
+            self.error(STRUCTURE, "DictDisplay has two tuples of the same length")
+            return e
+        kinds = e.kinds if self.good_kinds(e.kinds) else None
+        if kinds is None:
+            self.error(TYPE, f"DictDisplay has no valid key and value types ({e.kinds!r})")
+        keys, values = [], []
+        for k, v in zip(e.keys, e.values):          # (k0, v0, k1, v1, ...: CPython's order)
+            keys.append(self.dict_key(k, kinds, state, "a key of a dict display", insert=True))
+            values.append(self.dict_value(v, kinds, state, "a value of a dict display"))
+        self.result(e, Type.DICT)
+        return dataclasses.replace(e, keys=tuple(keys), values=tuple(values))
+
+    def e_DictGet(self, e: DictGet, state: _State) -> ir.Expr:
+        d, kinds = self.dict_operand(e.dict, state, "the dict read")
+        key = self.dict_key(e.key, kinds, state, "the key read", insert=False)
+        default = None
+        if e.default is not None:
+            default = self.dict_value(e.default, kinds, state, "the default of get()")
+        if type(e.get) is not bool or (e.default is not None and not e.get):
+            self.error(STRUCTURE, "DictGet has a default only as get()")
+        if kinds is not None:
+            want = kinds[1]
+            if e.get and e.default is None:
+                if want not in (Type.STR, Type.STR_OPT):
+                    self.error(TYPE, "get() without a default of a dict whose values are not str")
+                want = Type.STR_OPT
+            self.result(e, want)
+        return dataclasses.replace(e, dict=d, key=key, default=default)
+
+    def e_DictContains(self, e: DictContains, state: _State) -> ir.Expr:
+        key = self.expr(e.key, state)                # (the key first, as CPython evaluates `a in b`)
+        d, kinds = self.dict_operand(e.dict, state, "the dict searched")
+        if kinds is not None:
+            kt, got = kinds[0], getattr(key, "type", None)
+            if got is not kt and not (got is Type.BOOL and kt is Type.I64):
+                self.error(TYPE, f"a {getattr(got, 'value', got)} searched in a dict whose keys are {kt.value}")
+        if type(e.negate) is not bool:
+            self.error(STRUCTURE, "DictContains.negate is a bool")
+        self.result(e, Type.BOOL)
+        return dataclasses.replace(e, key=key, dict=d)
+
+    def e_DictLen(self, e: DictLen, state: _State) -> ir.Expr:
+        d, _ = self.dict_operand(e.dict, state, "the argument of len()")
+        self.result(e, Type.I64)
+        return dataclasses.replace(e, dict=d)
+
+    def e_DictPop(self, e: DictPop, state: _State) -> ir.Expr:
+        d, kinds = self.dict_operand(e.dict, state, "the dict popped")
+        key = self.dict_key(e.key, kinds, state, "the key popped", insert=False)
+        default = None if e.default is None else self.dict_value(e.default, kinds, state, "the default of pop()")
+        self.effects.append("pops from a dict")
+        if kinds is not None:
+            self.result(e, kinds[1])
+        return dataclasses.replace(e, dict=d, key=key, default=default)
+
+    def e_DictSetDefault(self, e: DictSetDefault, state: _State) -> ir.Expr:
+        d, kinds = self.dict_operand(e.dict, state, "the dict of setdefault()")
+        key = self.dict_key(e.key, kinds, state, "the key of setdefault()", insert=True)
+        default = self.dict_value(e.default, kinds, state, "the default of setdefault()")
+        self.effects.append("inserts into a dict")
+        if kinds is not None:
+            self.result(e, kinds[1])
+        return dataclasses.replace(e, dict=d, key=key, default=default)
+
+    def e_DictCopy(self, e: DictCopy, state: _State) -> ir.Expr:
+        d, kinds = self.dict_operand(e.value, state, "the dict copied")
+        if not self.good_kinds(e.kinds):
+            self.error(TYPE, f"DictCopy has no valid key and value types ({e.kinds!r})")
+        else:
+            self.dict_same(kinds, e.kinds, "the dict copied")
+        self.result(e, Type.DICT)
+        return dataclasses.replace(e, value=d)
+
+    def e_DictCompare(self, e: DictCompare, state: _State) -> ir.Expr:
+        a, ka = self.dict_operand(e.left, state, "the left operand of a dict comparison")
+        b, kb = self.dict_operand(e.right, state, "the right operand of a dict comparison")
+        self.dict_same(kb, ka, "the right operand of a dict comparison")
+        if ka is not None and ka[1] is Type.F64:
+            self.error(TYPE, "a comparison of dicts of float (CPython tests the values by identity first)")
+        if type(e.negate) is not bool:
+            self.error(STRUCTURE, "DictCompare.negate is a bool")
+        self.result(e, Type.BOOL)
+        return dataclasses.replace(e, left=a, right=b)
+
+    def e_DictStr(self, e: DictStr, state: _State) -> ir.Expr:
+        d, _ = self.dict_operand(e.value, state, "the dict printed")
+        self.result(e, Type.STR)
+        return dataclasses.replace(e, value=d)
+
+    def s_DictStore(self, s: DictStore, state: _State):
+        d, kinds = self.dict_operand(s.dict, state, "the dict stored into")
+        value = self.dict_value(s.value, kinds, state, "the value stored into a dict")
+        key = self.dict_key(s.key, kinds, state, "the key stored", insert=True)
+        self.effects.append("stores into a dict")
+        return dataclasses.replace(s, dict=d, key=key, value=value), state
+
+    def s_DictDelete(self, s: DictDelete, state: _State):
+        d, kinds = self.dict_operand(s.dict, state, "the dict deleted from")
+        key = self.dict_key(s.key, kinds, state, "the key deleted", insert=False)
+        self.effects.append("deletes from a dict")
+        return dataclasses.replace(s, dict=d, key=key), state
+
+    def s_DictUpdate(self, s: DictUpdate, state: _State):
+        d, kinds = self.dict_operand(s.dict, state, "the dict updated")
+        other, ko = self.dict_operand(s.other, state, "the argument of update()")
+        self.dict_same(ko, kinds, "the argument of update()")
+        self.effects.append("updates a dict")
+        return dataclasses.replace(s, dict=d, other=other), state
+
+    def s_DictClear(self, s: DictClear, state: _State):
+        d, _ = self.dict_operand(s.dict, state, "the dict cleared")
+        self.effects.append("clears a dict")
+        return dataclasses.replace(s, dict=d), state
+
+    def s_ForDict(self, s: ForDict, state: _State):
+        """`for k in d` / `for v in d.values()` / `for k, v in d.items()`: as ForStr, the variables declared locals of
+        the dict's key and value types; zero iterations leave them as they were."""
+        value, kinds = self.dict_operand(s.value, state, "the iterable of ForDict")
+        if not self.good_kinds(s.kinds):
+            self.error(TYPE, f"ForDict has no valid key and value types ({s.kinds!r})")
+            kinds = None
+        else:
+            self.dict_same(kinds, s.kinds, "the iterable of ForDict")
+            kinds = s.kinds
+        names = [v for v in (s.key_var, s.value_var) if v is not None]
+        if not names or len(set(names)) != len(names) or not all(isinstance(v, str) for v in names):
+            self.error(STRUCTURE, "ForDict binds a key, a value or both, to distinct names")
+            names = [v for v in names if isinstance(v, str)]
+        if kinds is not None:
+            for var, want in ((s.key_var, kinds[0]), (s.value_var, kinds[1])):
+                if var is not None and self.scalars.get(var) is not want:
+                    self.error(TYPE, f"ForDict target {var!r} must be a declared {want.value} local")
+        for var in names:
+            if var in self.entry:
+                self.error(STRUCTURE, f"entry global '{var}' is assigned by the loop")
+            for outer in self.loops:
+                if outer.var == var:
+                    self.error(STRUCTURE, f"loop variable '{var}' is assigned in its loop body (by an inner loop)")
+        loop = _Loop(None, None)
+        self.loops.append(loop)
+        head = self.loop_facts(s.body, tuple(names))
+        self.facts = dict(head)
+        killed = _assigned_names(s.body) | set(names)
+        head_refine = {k: v for k, v in self.refine.items() if k not in killed}
+        self.refine = head_refine
+        body, _ = self.block(s.body, None if state is None else state | set(names))
+        self.loops.pop()
+        self.refine = dict(head_refine)
+        self.facts = dict(head)
+        after: _State = state
+        for br in loop.breaks:
+            after = _meet(after, br)
+        return dataclasses.replace(s, value=value, body=body), after
+
     # --- AOT mode, tier S2a: lists of class instances (OBJ_LIST) ---
 
     def e_ObjListDisplay(self, e: ObjListDisplay, state: _State) -> ir.Expr:
@@ -2274,6 +2509,8 @@ class _Checker:
             self.error(TYPE, f"assignment to undeclared local '{target}'")
         elif not alloc:
             self.slot(value, self.scalars[target], f"assignment to '{target}'")
+            if self.aot and self.scalars[target] is Type.DICT and getattr(value, "type", None) is Type.DICT:
+                self.dict_same(self.dict_kinds(value), self.fn.dict_kinds.get(target), f"assignment to '{target}'")
             if getattr(value, "type", None) is Type.NONE:
                 self.error(TYPE, f"None assigned to '{target}'")
         if target in self.entry:
@@ -2997,6 +3234,8 @@ class _Checker:
         value = self.expr(s.value, state)
         if isinstance(returns, Type):
             self.slot(value, returns, "return value")
+            if self.aot and returns is Type.DICT and getattr(value, "type", None) is Type.DICT:
+                self.dict_same(self.dict_kinds(value), self.fn.return_kinds, "the return value")
         if self.aot and getattr(value, "type", None) in ir.ARRAYS:
             self.error(TYPE, f"a list is returned from a function returning {getattr(returns, 'value', returns)}")
         return dataclasses.replace(s, value=value), None
@@ -3016,6 +3255,8 @@ class _Checker:
     def run(self) -> Function:
         fn = self.fn
         params = self.declarations()
+        if self.aot:
+            self.dict_declarations()
         self.reassigned = frozenset(_assigned_names(fn.body))
         assigned: dict[str, list[object]] = {}
         _assigned_values(fn.body, assigned)
@@ -3500,7 +3741,7 @@ def _assigned(body: object, counts: dict[str, int] | None = None) -> dict[str, i
             elif cls is If:
                 _assigned(st.then, counts)
                 _assigned(st.orelse, counts)
-            elif cls in (While, ForRange, ForObj):
+            elif cls in (While, ForRange, ForObj, ForStr, ForObjList, ForDict):
                 _assigned(st.body, counts)
     return counts
 
@@ -3518,7 +3759,12 @@ def _assigned_values(body: object, out: dict[str, list[object]]) -> None:
             elif cls is If:
                 _assigned_values(st.then, out)
                 _assigned_values(st.orelse, out)
-            elif cls in (While, ForRange):
+            elif cls in (While, ForRange, ForStr, ForObjList):
+                _assigned_values(st.body, out)
+            elif cls is ForDict:
+                for t in (st.key_var, st.value_var):
+                    if isinstance(t, str):
+                        out.setdefault(t, []).append(st)    # bound by the loop: no interval of its own
                 _assigned_values(st.body, out)
             elif cls is ForObj:
                 for t in st.targets if isinstance(st.targets, tuple) else ():
@@ -3533,7 +3779,11 @@ def _loop_vars(body: object) -> set[str]:
             cls = type(st)
             if cls is If:
                 out |= _loop_vars(st.then) | _loop_vars(st.orelse)
-            elif cls in (While, ForObj):
+            elif cls in (While, ForObj, ForObjList):
+                out |= _loop_vars(st.body)
+            elif cls in (ForStr, ForDict):
+                out |= {v for v in (getattr(st, "var", None), getattr(st, "key_var", None),
+                                    getattr(st, "value_var", None)) if isinstance(v, str)}
                 out |= _loop_vars(st.body)
             elif cls is ForRange:
                 out.add(st.var)
@@ -3542,7 +3792,7 @@ def _loop_vars(body: object) -> set[str]:
 
 
 def _assigned_names(body: object) -> set[str]:
-    """Every local assigned anywhere in `body` by an Assign or as a ForRange var."""
+    """Every local assigned anywhere in `body` by an Assign or as a loop variable."""
     out: set[str] = set()
     if isinstance(body, tuple):
         for st in body:
@@ -3560,6 +3810,10 @@ def _assigned_names(body: object) -> set[str]:
                 out |= _assigned_names(st.body)
             elif cls is ForRange:
                 out.add(st.var)
+                out |= _assigned_names(st.body)
+            elif cls in (ForStr, ForObjList, ForDict):     # AOT mode: the variables, and what the body assigns
+                out |= {v for v in (getattr(st, "var", None), getattr(st, "key_var", None),
+                                    getattr(st, "value_var", None)) if isinstance(v, str)}
                 out |= _assigned_names(st.body)
     return out
 

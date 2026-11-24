@@ -32,7 +32,9 @@ representation for the whole function. An expression is RAW only when it is one 
     the divisor); a `//` by -1 or by a variable is TAGGED (INT64_MIN // -1 is 2**63).
 
 Everything else is TAGGED: the result of an operation that is not proved, of any operation with a TAGGED operand,
-`int(sys.argv[i])`, and every name, parameter, return and tuple element such a value flows into. A name assigned
+`int(sys.argv[i])`, an int read from a dict or bound by a loop over one (tier S2b: a dict holds its ints as
+`tpa_int`, so a key or a value may be any int; agent proposal, not owner-confirmed), and every name, parameter,
+return and tuple element such a value flows into. A name assigned
 both RAW and TAGGED values is TAGGED (a RAW value is converted with `tpa_int_from_i64` where it is stored).
 
 The sound re-proof (why a proved flag is not enough). The front end and the verifier prove an operation from
@@ -528,7 +530,7 @@ class Representation:
         if isinstance(e, ir.Local):
             return r.names.get(e.name, RAW)
         if isinstance(e, (ir.Len, ir.ArgvLen, ir.BoolToInt, ir.StrLen, ir.StrOrd, ir.StrWrite, ir.StrListLen, ir.StrMethod,
-                          ir.ObjListLen)):
+                          ir.ObjListLen, ir.DictLen)):
             return RAW
         if isinstance(e, (ir.Index, ir.ListPop)):          # (ListPop: tier S2a, an element as Index reads it)
             return TAGGED if self.list_big(r.name, e.array) else RAW
@@ -649,6 +651,11 @@ class Representation:
                 elif isinstance(n, ir.ForRange):
                     rep = join(self._of(r, n.start), self._of(r, n.stop))
                     changed |= self.raise_(r.names, n.var, rep)
+                elif isinstance(n, ir.ForDict):
+                    # tier S2b: a dict holds its ints tagged (any int), so what a loop over one binds is TAGGED
+                    for var, t in ((n.key_var, n.kinds[0]), (n.value_var, n.kinds[1])):
+                        if var is not None and t is Type.I64:
+                            changed |= self.raise_(r.names, var, TAGGED)
                 elif isinstance(n, ir.Return):
                     if n.value is not None and n.value.type is Type.I64 and r.returns != TAGGED \
                             and self._of(r, n.value) == TAGGED:

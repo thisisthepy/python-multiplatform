@@ -229,13 +229,16 @@ class _Checker:
             return
         elif allow_tuple and _is_tuple_annotation(ann):
             return
+        elif _is_dict_annotation(ann):
+            return                          # tier S2b: dict[K, V]
         elif allow_tuple and _is_tuple_list_annotation(ann):
             return                          # tier S2a: one list per element (typedpython/tuples.py)
         else:
             more = (", a fixed tuple of int, float, bool and str, a list of such tuples"
                     if allow_tuple else "")
             self.rep.error(ann, "aot/type", ast.unparse(ann), f"the type `{ast.unparse(ann)}` is outside the "
-                           f"AOT mode (int, float, bool, str, list[int], list[float], compiled classes{more}, and None as a return type)")
+                           f"AOT mode (int, float, bool, str, list[int], list[float], compiled classes{more}, dict[K, V] of int, str or "
+                           "bool keys and int, float, bool, str or `str | None` values, and None as a return type)")
 
     def signature(self, fn: ast.FunctionDef, is_method: bool = False) -> None:
         a = fn.args
@@ -522,6 +525,13 @@ class _Checker:
             self.expr(e.orelse)
         elif isinstance(e, ast.List):
             self.list_display(e)
+        elif isinstance(e, ast.Dict):
+            for k, v in zip(e.keys, e.values):      # tier S2b: a dict display (the front end checks the types)
+                if k is None:
+                    self.rep.error(v, "aot/container", "dict display", "`**` in a dict display is outside the AOT mode")
+                else:
+                    self.expr(k)
+                self.expr(v)
         elif isinstance(e, ast.Tuple) and e.elts and not any(isinstance(x, ast.Starred) for x in e.elts):
             for x in e.elts:                # tier S2a: a tuple display (the front end checks where it is used)
                 self.expr(x)
@@ -635,6 +645,11 @@ class _Checker:
                     return
                 self.expr(a.args[0])
                 return
+            elif n == "dict":
+                if not (len(c.args) == 1 and isinstance(c.args[0], ast.Name) and not c.keywords):
+                    self.rep.error(c, "aot/builtin", n, "`dict()` is only supported as `dict(d)` of a dict in the AOT "
+                                   "mode")
+                return                      # tier S2b: `dict(d)`, a copy (the front end checks d is a dict)
             elif n == "print":
                 self.rep.error(c, "aot/print-use", "print", "print is only supported as a statement of its own")
             elif n == "range":
@@ -689,9 +704,9 @@ class _Checker:
                 elif not (isinstance(a, ast.Constant) and a.value is None):
                     self.expr(a)
             return
-        elif isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.attr in LIST_METHODS \
+        elif isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.attr in LIST_METHODS | DICT_METHODS \
                 and not (f.value.id in ("sys", "math", "time") and f.value.id not in self.shadow):
-            pass                            # tier S2a: a list method (the front end checks the receiver is a list)
+            pass                            # tier S2a / S2b: a list or dict method (the front end checks the receiver)
         elif isinstance(f, ast.Attribute) and isinstance(f.value, ast.Attribute) and f.attr in LIST_METHODS:
             self.expr(f.value)              # tier S2a: a method of a list field (`self.items.append(x)`)
         else:
@@ -739,6 +754,8 @@ def _is_list_annotation(ann: ast.expr) -> bool:
 
 # tier S2a: the methods of a list (design 4.3.2)
 LIST_METHODS = frozenset({"append", "insert", "extend", "clear", "reverse", "remove", "pop", "index", "count"})
+# tier S2b: the dict methods (the front end checks the receiver is a dict)
+DICT_METHODS = frozenset({"get", "setdefault", "pop", "keys", "values", "items", "copy", "clear", "update"})
 
 
 def _list_class_name(ann: ast.expr | None, class_names) -> str | None:
@@ -775,6 +792,21 @@ def _is_optional_str_annotation(ann: ast.expr) -> bool:
             return False
     text = ast.unparse(ann).replace(" ", "")
     return text in ("str|None", "None|str", "Optional[str]", "typing.Optional[str]")
+
+
+def _is_dict_annotation(ann: ast.expr) -> bool:
+    """`dict[K, V]` with K int, str or bool and V int, float, bool, str or `str | None` (tier S2b)."""
+    if isinstance(ann, ast.Constant) and isinstance(ann.value, str):
+        try:
+            ann = ast.parse(ann.value, mode="eval").body
+        except SyntaxError:
+            return False
+    if not (isinstance(ann, ast.Subscript) and isinstance(ann.value, ast.Name) and ann.value.id in ("dict", "Dict")
+            and isinstance(ann.slice, ast.Tuple) and len(ann.slice.elts) == 2):
+        return False
+    k, v = ann.slice.elts
+    return (isinstance(k, ast.Name) and k.id in ("int", "str", "bool")
+            and ((isinstance(v, ast.Name) and v.id in ("int", "float", "bool", "str")) or _is_optional_str_annotation(v)))
 
 
 def _is_str_list_annotation(ann: ast.expr) -> bool:

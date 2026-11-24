@@ -182,7 +182,9 @@ static void tpa_dict__value_release(const tpa_dict *d, tpa_dw v)
 static int tpa_dict__repr_word(int is_key, int kind, int kbool, tpa_dw w, tpa_str **out)
 {
     if (is_key ? kbool : kind == TPA_DV_BOOL) {
-        return w ? tpa_str_from_ascii("True", 4, out) : tpa_str_from_ascii("False", 5, out);
+        /* (a bool looking up a dict of TAGGED ints is the small int 0 or 1, whose word is not 0 or 1) */
+        int64_t b = is_key && kind == TPA_DK_INT ? tpa_int_small_value((tpa_int)w) : (int64_t)w;
+        return b ? tpa_str_from_ascii("True", 4, out) : tpa_str_from_ascii("False", 5, out);
     }
     if (is_key ? kind == TPA_DK_STR : kind == TPA_DV_STR) {
         tpa_str *s = (tpa_str *)(uintptr_t)w;
@@ -441,11 +443,36 @@ static TPA_UNUSED void tpa_dict_release(tpa_dict *d)
     }
 }
 
-/* `name = value` of a dict name: the new reference is held before the old one is released. */
+/* A float value's word and back (its bits). */
+static inline tpa_dw tpa_dict_f64(double x)
+{
+    tpa_dw w;
+    memcpy(&w, &x, sizeof w);
+    return w;
+}
+
+static inline double tpa_dict_to_f64(tpa_dw w)
+{
+    double x;
+    memcpy(&x, &w, sizeof x);
+    return x;
+}
+
+/* `name = value` of a dict name (borrows v, as tpa_str_list_set): the new reference is held before the old one is
+ * released. */
 static inline void tpa_dict_set(tpa_dict **slot, tpa_dict *v)
 {
     tpa_dict *old = *slot;
+    tpa_dict_retain(v);
     *slot = v;
+    tpa_dict_release(old);
+}
+
+/* Empties a dict slot (its reference released). */
+static inline void tpa_dict_drop(tpa_dict **slot)
+{
+    tpa_dict *old = *slot;
+    *slot = NULL;
     tpa_dict_release(old);
 }
 

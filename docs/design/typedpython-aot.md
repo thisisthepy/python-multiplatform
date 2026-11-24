@@ -461,6 +461,29 @@ iteration` exactly where CPython raises it). `set[K]`: `add`, `discard`, `remove
 `&` `-` `^` into new sets, `==`; iterating a set, or printing it, depends on CPython's hash table and seed, so it is
 `aot/set-order` except through `sorted(...)`, as section 4.3 says.
 
+First step of S2b, as implemented (amendment 2026-11-25, agent proposal, not confirmed). The runtime
+(`runtime/tp_aot_dict.h`) mirrors Objects/dictobject.c of CPython 3.14 and later rule for rule: the table sizes
+(`calculate_log2_keysize` is the smallest power of two of at least `max(minsize, 8)`; 3.13 rounded `minsize | 8`
+up, which gives other tables after a copy or an update), the presize of a display, the insertion resize, deleted
+entries left in place until a resize compacts them, `popitem` truncating the entry count, `clear`, the clone and
+merge paths of `copy` and `update`, and the iterator's two checks with CPython's messages. A test runs thousands of
+random operation scripts on the runtime and on CPython's dict and compares what each prints, live iterators
+included (`test_aot_dict_runtime.py`). The front end compiles `dict[K, V]` with K int, str or bool and V int, float,
+bool, str or `str | None`, as locals, parameters and returns of module functions: displays, `d[k]`, `d[k] = v`,
+`del d[k]`, `in` / `not in`, `get` (with a default; without one for str values), `setdefault`, `pop` (with and
+without a default), `len`, truth, `update` from a dict, `copy()` and `dict(d)`, `clear()`, `==` / `!=`, `print`,
+`str`, `repr` and f-strings, and `for` loops over the dict, `keys()`, `values()` and `items()`. A dict holds its
+ints as `tpa_int` (any int; aot/rep.py), so a big int is a key like any other. A display is built as CPython's
+bytecode builds it (chunks of 17 pairs; a chunk of at most 15 is presized, a longer one starts empty, later chunks
+are merged), so a loop that changes the dict sees CPython's layout. `print` makes the repr of a dict (and of a list)
+argument when it writes it, as CPython's print does. Refused with the reason: a value of another type than the
+dict's (CPython keeps the object, so a bool in a `dict[str, int]` or an int in a `dict[str, float]` would print
+differently), a bool key inserted into a dict of int (a loop would give a bool where the program reads an int; a
+bool may look a key up), `==` of dicts of float values (CPython tests identity first: `aot/identity`), and a dict of
+other kinds passed where a dict is wanted (dicts are invariant). Still to come in S2b: dicts in fields, in lists, as
+method parameters and returns and as dict values; tuple keys; `popitem`; the view objects outside a `for` loop; a dict
+across the library boundary; and `set`.
+
 **S2c.** List, dict and set comprehensions (a hidden local per comprehension variable, Python 3 scoping, the
 accumulator built in place), `enumerate`, `zip` (shortest), `reversed`, `range` objects as iterables, in `for` loops
 and comprehensions; `sum`, `any`, `all`, `min` / `max` of an iterable (`ValueError: min() iterable argument is
