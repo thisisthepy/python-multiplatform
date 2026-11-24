@@ -1074,6 +1074,141 @@ def test_a_tuple_indexed_by_a_variable(tmp_path: Path):
     _compare(tmp_path, TUPLE_INDEX, [["0"], ["2"], ["-3"], ["3"], ["-4"], ["7"]])
 
 
+TUPLE_SLICE = """
+import sys
+
+
+def tail(t: tuple[int, str, int]) -> tuple[str, int]:
+    return t[1:]
+
+
+def first_two(t: tuple[int, str, int]) -> int:
+    a, b = t[:2]
+    return a + len(b)
+
+
+def weigh(p: tuple[int, int]) -> int:
+    return p[0] * 10 + p[1]
+
+
+def main() -> None:
+    n = int(sys.argv[1])
+    t = (n, "w" * (n % 4), n * 2)
+    u = t[1:]
+    print(u, t[::-1], t[::2], t[-2:], t[5:], t[:1], t[1:-1], t[-9:9], t[2:0:-1], t[1:1])
+    tl = tail(t)
+    print(len(t[1:]), len(t[3:]), n in t[::2], "w" in t[1:2], n not in t[3:], tl, first_two(t))
+    q = (n, n + 1, n + 2, n + 3)
+    print(weigh(q[1:3]), weigh(q[::3]), q[:2] == q[2:], q[:2] < q[2:], q[1:] > q[:3], q[:0] == q[4:])
+    q = q[::-1]
+    r: tuple[int, int] = q[-2:]
+    print(q, r, f"<{q[::2]}>", str(t[:2]), repr(t[2:]))
+    v = q[3:]
+    print(v, v == (n,))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_a_slice_of_a_tuple(tmp_path: Path):
+    """`t[a:b:c]` of a tuple with constant bounds (absent, negative, past either end, a negative step, empty): a tuple of
+    a static shape, bound, rebound from the same tuple, unpacked, passed, returned, measured, searched, compared and
+    printed (`()` when empty, `(x,)` for one element), compared with CPython on 4 inputs."""
+    _compare(tmp_path, TUPLE_SLICE, [["0"], ["1"], ["3"], ["-5"]])
+
+
+TUPLE_FIELDS = """
+import sys
+
+
+class Span:
+    __slots__ = ("name", "at", "tag")
+    name: str
+    at: tuple[int, int]
+    tag: tuple[str, bool]
+
+    def __init__(self, name: str, a: int, b: int) -> None:
+        self.name = name
+        self.at = (a, b)
+        self.tag = (name + "!", a < b)
+
+    def width(self) -> int:
+        lo, hi = self.at
+        return hi - lo
+
+    def flip(self) -> None:
+        self.at = (self.at[1], self.at[0])
+
+    def move(self, by: tuple[int, int], name: str) -> None:
+        self.at = (self.at[0] + by[0], self.at[1] + by[1])
+        self.name = name
+
+    def label(self) -> str:
+        return f"{self.name}{self.at}{self.tag}"
+
+
+class Box:
+    at: tuple[int, int]
+    inner: Span | None
+
+    def __init__(self, at: tuple[int, int], s: Span | None) -> None:
+        self.at = at
+        self.inner = s
+
+    def move(self, by: tuple[int, int], name: str) -> None:
+        self.at = by
+
+
+def corner(s: Span) -> tuple[int, int]:
+    return s.at
+
+
+def area(p: tuple[int, int]) -> int:
+    return p[0] * p[1]
+
+
+def main() -> None:
+    n = int(sys.argv[1])
+    s = Span("s" * (n % 3), n, n * 2 - 3)
+    k = n % 2
+    print(s.at, s.tag, s.width(), len(s.at), s.at[0], s.at[-1], s.at[k], s.label())
+    s.flip()
+    t = s.at
+    c = corner(s)
+    print(t, c, area(s.at), s.at == t, s.at < (n, 0), n in s.at, s.at[::-1], f"<{s.tag}>", str(s.at), repr(s.tag))
+    b = Box((1, 2), s)
+    print(b.at)
+    b.move(t, "x")
+    print(b.at)
+    s.move(b.at, "m")
+    s.move((n, -n), s.name + "+")
+    print(s.at, s.name)
+    b.at = s.at
+    s.at = (7, n)
+    inner = b.inner
+    if inner is not None:
+        print(b.at, inner.at, b.at == inner.at, b.at != inner.at)
+    a, z = b.at
+    b.at = t
+    print(a, z, b.at, s.tag[0] + "?", s.tag[1])
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_tuple_fields_and_method_tuple_parameters(tmp_path: Path):
+    """A tuple field (`at: tuple[int, int]`, `tag: tuple[str, bool]`, also listed in `__slots__`) is one field per
+    element: stored from a display, another field, a local, a parameter; read whole (bound, unpacked, passed, returned,
+    compared, searched, sliced, printed) and by an index. A method's or `__init__`'s tuple parameter is one parameter per
+    element, as a module function's (two classes declare `move` with the same parameter types). Compared with CPython on
+    4 inputs."""
+    _compare(tmp_path, TUPLE_FIELDS, [["0"], ["1"], ["4"], ["-2"]])
+
+
 LIST_OF_TUPLES = """
 import sys
 
@@ -1365,6 +1500,17 @@ TUPLE_MAIN = '\n\ndef main() -> None:\n    print(f(1))\n\n\nif __name__ == "__ma
 @pytest.mark.parametrize("body, words", [
     ("def f(i: int) -> int:\n    t = (i, 'a')\n    return len(str(t[i]))\n", "differ in type"),
     ("def f(i: int) -> int:\n    t = (1, 2)\n    return len(t[i:])\n", "a slice of a tuple"),
+    ("def f(i: int) -> int:\n    t = (1, 2)\n    for v in t[1:]:\n        pass\n    return 0\n", "not here"),
+    ("def f(i: int) -> int:\n    t = (1, 2)\n    return len(t[::0])\n", "not int constants"),
+    ("class P:\n    at: tuple[int, int]\n\n    def __init__(self) -> None:\n        self.at = (1, 2)\n\n\n"
+     "def f(i: int) -> int:\n    p = P()\n    return p.at[i + 1]\n", "a tuple field is indexed by a name or a constant"),
+    ("class P:\n    at: tuple[int, int]\n\n    def __init__(self) -> None:\n        self.at = (1, 2)\n\n\n"
+     "def f(i: int) -> int:\n    p = P()\n    for v in p.at:\n        pass\n    return 0\n", "not here"),
+    ("class P:\n    def m(self, p: tuple[int, int]) -> int:\n        return p[0]\n\n\n"
+     "class Q:\n    def m(self, p: int) -> int:\n        return p\n\n\n"
+     "def f(i: int) -> int:\n    p = P()\n    return p.m((i, i))\n", "cannot be split by its name"),
+    ("class P:\n    ps: list[tuple[int, int]]\n\n    def __init__(self) -> None:\n        self.ps = []\n\n\n"
+     "def f(i: int) -> int:\n    return len(P().ps)\n", "outside the AOT mode"),
     ("def f(i: int) -> bool:\n    t = (1, 2)\n    return t is t\n", "no tuple object yet"),
     ("def f(i: int) -> int:\n    t = (1, 2)\n    x = [[t]]\n    return 0\n", "no tuple object yet"),
     ("def f(i: int) -> bool:\n    t = (i * 0.5, 1)\n    return t == t\n", "(aot/identity)"),

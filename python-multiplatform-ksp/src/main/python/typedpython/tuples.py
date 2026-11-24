@@ -15,6 +15,8 @@ What is rewritten, with CPython's meaning kept:
   (`t__0, t__1 = f(...)`, an `ir.Unpack`).
 * `t[k]` for a constant k inside the shape (negative counted from the end); `len(t)`; `a, b = t`; `a, b = x, y`
   (the swap idiom: every value first, then the names, left to right).
+* `t[a:b:c]` with every bound absent or an int constant: the tuple of the element locals it takes (Python's own slice
+  rules give the positions), wherever a tuple name is accepted; another bound, or a step of 0, is refused.
 * `t[i]` for any other int index, of a tuple whose elements share one kind: a call of the marker `TUPLE_INDEX`
   with the index first and the element locals after it, which the lowering makes an `ir.TupleIndex` (CPython's
   index rules: negative counted from the end, `IndexError: tuple index out of range`). A tuple whose element kinds
@@ -47,7 +49,12 @@ call nothing else); passing to a `list[tuple[...]]` parameter of a module functi
 before the statement too; `index` / `remove` raise CPython's ValueError through the same method of an empty list[int]).
 
 Anything else that reads or binds a tuple name leaves the function uncompiled with a finding naming it (`problems`),
-never a guess. Methods keep their parameters (a tuple parameter of a method is not split in this step)."""
+never a guess.
+
+A tuple field of a class (`p: tuple[int, str]`) is split into one field per element (`p__0`, `p__1`) and read or
+stored through a local name wherever a tuple name is accepted; a tuple parameter of a method or of `__init__` is split
+as a module function's, and so is every call of it (`o.m(...)`, `C(...)`). Both are rewritten by the name alone, so
+only a name every class declares the same way is split (`_split_fields`, `_split_methods`)."""
 
 from __future__ import annotations
 
@@ -67,6 +74,9 @@ def shape_of(kind: str | None) -> tuple[str, ...] | None:
     """`tuple[int, str]` -> ("int", "str"); None for anything else (a variable-length tuple, another element kind)."""
     if not kind:
         return None
+    # (Pyrefly spells a str built from literals `LiteralString`, also inside a tuple: a str, as frontend._aot_kind reads
+    # it for any other local)
+    kind = kind.replace("typing.LiteralString", "str").replace("LiteralString", "str")
     try:
         e = ast.parse(kind, mode="eval").body
     except SyntaxError:
@@ -114,20 +124,22 @@ def split(tree: ast.Module, kinds: Kinds) -> Split:
     """Rewrite every function of `tree` in place (module functions and methods) and return the element locals' kinds
     beside the others, and the functions this step cannot compile with the reason."""
     out = Split({q: {n: list(v) for n, v in d.items()} for q, d in kinds.items()})
+    fields = _split_fields(tree)
     functions: list[tuple[str, ast.FunctionDef, bool]] = []
     for s in tree.body:
         if isinstance(s, ast.FunctionDef):
             functions.append((s.name, s, True))
         elif isinstance(s, ast.ClassDef):
             functions += [(f"{s.name}.{m.name}", m, False) for m in s.body if isinstance(m, ast.FunctionDef)]
+    methods, inits = _split_methods(tree, fields)
     params = {q: [annotation_shape(a.annotation) for a in fn.args.args] for q, fn, top in functions if top}
     lparams = {q: [annotation_list_shape(a.annotation) for a in fn.args.args] for q, fn, top in functions if top}
     returns = {q: annotation_shape(fn.returns) for q, fn, _ in functions}
     for q, fn, top in functions:
         if not top and not any(annotation_shape(a.annotation) or annotation_list_shape(a.annotation)
-                               for a in fn.args.args) and not _mentions_tuples(fn, out.kinds.get(q, {})):
+                               for a in fn.args.args) and not _mentions_tuples(fn, out.kinds.get(q, {}), fields):
             continue
-        work = _Function(q, fn, top, out.kinds.setdefault(q, {}), params, returns, lparams)
+        work = _Function(q, fn, top, out.kinds.setdefault(q, {}), params, returns, lparams, fields, methods, inits)
         original = copy.deepcopy(fn)
         try:
             work.run()
@@ -138,8 +150,99 @@ def split(tree: ast.Module, kinds: Kinds) -> Split:
     return out
 
 
-def _mentions_tuples(fn: ast.FunctionDef, fkinds: dict[str, list[tuple[int, str]]]) -> bool:
+def _split_fields(tree: ast.Module) -> dict[str, tuple[str, ...]]:
+    """Split every tuple field of a class into one field per element (`p: tuple[int, str]` -> `p__0: int`, `p__1:
+    str`, also in `__slots__`) and return the attribute names split, with their shapes.
+
+    A tuple has no identity in the accepted subset, so the fields hold what CPython's one field holds. An attribute
+    `o.p` is rewritten by name alone, so a name is split only when every declaration of it in the program's classes
+    (a field or a method) is a tuple field of one shape: Pyrefly has checked that `o.p` names a declared attribute, and
+    then every `o.p` is such a field. Another tuple field is left as written (the class is then refused with the
+    field's type)."""
+    classes = [c for c in tree.body if isinstance(c, ast.ClassDef)]
+    decl: dict[str, set[object]] = {}
+    for c in classes:
+        for st in c.body:
+            if isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name):
+                decl.setdefault(st.target.id, set()).add(annotation_shape(st.annotation) or "other")
+            elif isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                decl.setdefault(st.name, set()).add("other")
+    found: dict[str, tuple[str, ...]] = {}
+    for attr, shapes in decl.items():
+        if len(shapes) != 1:
+            continue
+        [shape] = shapes
+        if isinstance(shape, tuple) and not any(f"{attr}{_SEQ}{i}" in decl for i in range(len(shape))):
+            found[attr] = shape
+    if not found:
+        return found
+    for c in classes:
+        body: list[ast.stmt] = []
+        for st in c.body:
+            if isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name) and st.target.id in found \
+                    and st.value is None:
+                attr = st.target.id
+                body += [ast.copy_location(ast.AnnAssign(target=_name(f"{attr}{_SEQ}{i}", ast.Store()),
+                                                         annotation=_name(k), value=None, simple=1), st)
+                         for i, k in enumerate(found[attr])]
+                continue
+            if isinstance(st, ast.Assign) and len(st.targets) == 1 and isinstance(st.targets[0], ast.Name) \
+                    and st.targets[0].id == "__slots__" and isinstance(st.value, (ast.Tuple, ast.List)):
+                elts: list[ast.expr] = []
+                for e in st.value.elts:
+                    if isinstance(e, ast.Constant) and isinstance(e.value, str) and e.value in found:
+                        elts += [ast.Constant(f"{e.value}{_SEQ}{i}") for i in range(len(found[e.value]))]
+                    else:
+                        elts.append(e)
+                st.value.elts = elts
+            body.append(st)
+        c.body = body
+    return found
+
+
+def _split_methods(tree: ast.Module, fields: dict[str, tuple[str, ...]]) -> tuple[
+        dict[str, list[tuple[str, ...] | None]], dict[str, list[tuple[str, ...] | None]]]:
+    """The methods whose tuple parameters are split, one parameter per element, as a module function's are: the method
+    names (a call `o.m(...)` is rewritten by the name alone, so every declaration of `m` in the program's classes is a
+    method with the same parameter types, as `_split_fields` requires of a field) and the classes whose `__init__` is
+    split (a call `C(...)` names its class). Each maps to the tuple shape of every parameter after `self` (None for
+    another type). A method with a list of tuples parameter is not split (refused with the reason)."""
+    seen: dict[str, list[object]] = {}
+    inits: dict[str, list[tuple[str, ...] | None]] = {}
+    for c in tree.body:
+        if not isinstance(c, ast.ClassDef):
+            continue
+        for st in c.body:
+            if isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name):
+                seen.setdefault(st.target.id, []).append("field")
+                continue
+            if not isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            args = st.args.args[1:]
+            shapes = [annotation_shape(a.annotation) for a in args]
+            ok = not any(annotation_list_shape(a.annotation) is not None for a in args)
+            if st.name == "__init__":
+                if ok and any(x is not None for x in shapes):
+                    inits[c.name] = shapes
+                continue
+            seen.setdefault(st.name, []).append(
+                (tuple(ast.unparse(a.annotation) if a.annotation is not None else "" for a in args), tuple(shapes))
+                if ok else "other")
+    methods: dict[str, list[tuple[str, ...] | None]] = {}
+    for name, decls in seen.items():
+        if name in fields or len(set(decls)) != 1 or not isinstance(decls[0], tuple):
+            continue
+        shapes = list(decls[0][1])
+        if any(x is not None for x in shapes):
+            methods[name] = shapes
+    return methods, inits
+
+
+def _mentions_tuples(fn: ast.FunctionDef, fkinds: dict[str, list[tuple[int, str]]],
+                     fields: dict[str, tuple[str, ...]] | None = None) -> bool:
     if any(shape_of(k) or list_shape_of(k) for v in fkinds.values() for _, k in v):
+        return True
+    if fields and any(isinstance(n, ast.Attribute) and n.attr in fields for n in ast.walk(fn)):
         return True
     return any(isinstance(n, ast.AnnAssign) and (annotation_shape(n.annotation) or annotation_list_shape(n.annotation))
                for n in ast.walk(fn)) \
@@ -164,10 +267,46 @@ def _item(e: ast.expr) -> bool:
         and _pure(e.slice)
 
 
+def _const_int(e: ast.expr | None) -> int | None:
+    """An int literal, or the negation of one; None for anything else."""
+    if isinstance(e, ast.Constant) and type(e.value) is int:
+        return e.value
+    if isinstance(e, ast.UnaryOp) and isinstance(e.op, ast.USub) and isinstance(e.operand, ast.Constant) \
+            and type(e.operand.value) is int:
+        return -e.operand.value
+    return None
+
+
+def slice_positions(n: int, sl: ast.Slice) -> list[int] | None:
+    """The element positions `t[a:b:c]` takes from a tuple of `n` elements when every bound is absent or an int
+    constant (CPython's slice rules, through Python's own); None when a bound is anything else (the new tuple's length
+    is then known only at run time) or the step is 0 (CPython's ValueError at run time, left to the refusal)."""
+    parts = []
+    for p in (sl.lower, sl.upper, sl.step):
+        if p is None:
+            parts.append(None)
+            continue
+        v = _const_int(p)
+        if v is None:
+            return None
+        parts.append(v)
+    if parts[2] == 0:
+        return None
+    return list(range(n))[slice(*parts)]
+
+
+def _field(e: ast.expr) -> bool:
+    """`o.p__k`: an element field of a split tuple field read through a local name. Reading it again reads the same
+    value as long as nothing runs in between (a comparison calls nothing)."""
+    return isinstance(e, ast.Attribute) and isinstance(e.value, ast.Name)
+
+
 def _same(x: ast.expr, y: ast.expr) -> bool:
     """`x` and `y` are one value (the same name, or equal constants of one type)."""
     if isinstance(x, ast.Name) and isinstance(y, ast.Name):
         return x.id == y.id
+    if isinstance(x, ast.Attribute) and isinstance(y, ast.Attribute):
+        return x.attr == y.attr and _same(x.value, y.value)
     if isinstance(x, ast.Constant) and isinstance(y, ast.Constant):
         return type(x.value) is type(y.value) and x.value == y.value
     return False
@@ -187,8 +326,17 @@ def _repr_pieces(elements: list[ast.expr]) -> list[ast.expr]:
 class _Function:
     def __init__(self, qname: str, fn: ast.FunctionDef, top: bool, kinds: dict[str, list[tuple[int, str]]],
                  params: dict[str, list[tuple[str, ...] | None]], returns: dict[str, tuple[str, ...] | None],
-                 lparams: dict[str, list[tuple[str, ...] | None]] | None = None) -> None:
+                 lparams: dict[str, list[tuple[str, ...] | None]] | None = None,
+                 fields: dict[str, tuple[str, ...]] | None = None,
+                 methods: dict[str, list[tuple[str, ...] | None]] | None = None,
+                 inits: dict[str, list[tuple[str, ...] | None]] | None = None) -> None:
         self.q, self.fn, self.top, self.kinds = qname, fn, top, kinds
+        self.fields = fields or {}                          # tuple fields split by _split_fields -> their shapes
+        self.methods = methods or {}                        # method names whose tuple parameters are split
+        self.inits = inits or {}                            # class names whose `__init__` tuple parameters are split
+        cls = qname.split(".", 1)[0]
+        self.split_params = top or (fn.name == "__init__" and cls in self.inits) or (
+            fn.name != "__init__" and fn.name in self.methods)
         self.params, self.returns, self.lparams = params, returns, lparams or {}
         self.names = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)} | {a.arg for a in fn.args.args}
         # (the names the function binds: a builtin or a program function of that name is shadowed)
@@ -202,7 +350,7 @@ class _Function:
     # -- which names are tuples
 
     def find(self) -> None:
-        if self.top:
+        if self.split_params:
             for a in self.fn.args.args:
                 s = annotation_shape(a.annotation)
                 if s is not None:
@@ -247,10 +395,15 @@ class _Function:
             self.claim(name, s, entries[0][0])
         if not self.top:
             for a in self.fn.args.args:
-                if annotation_shape(a.annotation) is not None or annotation_list_shape(a.annotation) is not None:
-                    raise _Problem(self.fn.lineno, f"parameter `{a.arg}` of the method `{self.q}` is a tuple or a "
-                                                   "list of tuples; such a parameter is split only for a "
-                                                   "module-level function in this step")
+                if annotation_list_shape(a.annotation) is not None:
+                    raise _Problem(self.fn.lineno, f"parameter `{a.arg}` of the method `{self.q}` is a list of tuples; "
+                                                   "such a parameter is split only for a module-level function in "
+                                                   "this step")
+                if annotation_shape(a.annotation) is not None and not self.split_params:
+                    raise _Problem(self.fn.lineno, f"parameter `{a.arg}` of the method `{self.q}` is a tuple, and "
+                                                   f"another declaration of `{self.fn.name}` in the program's classes "
+                                                   "differs (a field, or a method with other parameter types), so "
+                                                   "a call `o.{self.fn.name}(...)` cannot be split by its name")
 
     def claim(self, name: str, shape: tuple[str, ...], line: int) -> None:
         if name in self.tuples and self.tuples[name] != shape:
@@ -305,7 +458,8 @@ class _Function:
             k = self.index_temp(e.slice, line, out)
             return [ast.Subscript(value=c, slice=copy.deepcopy(k), ctx=ast.Load()) for c in self.comps(e.value.id)]
         els = _Exprs(self).tuple_elements(e)
-        if els is None or len(els) != len(shape) or (isinstance(e, ast.Name) and self.tuples[e.id] != shape):
+        given = _Exprs(self).kinds(e)
+        if els is None or len(els) != len(shape) or (given is not None and given != shape):
             raise _Problem(line, f"`{ast.unparse(e)}` is {what}, which takes a tuple name, a tuple display or a "
                                  f"tuple-returning call of the shape `tuple[{', '.join(shape)}]`")
         if all(_pure(x) for x in els):
@@ -345,7 +499,8 @@ class _Function:
 
     def run(self) -> None:
         self.find()
-        if not self.tuples and not self.lists and not any(isinstance(n, ast.Tuple) for n in ast.walk(self.fn)):
+        if not self.tuples and not self.lists and not any(isinstance(n, ast.Tuple) for n in ast.walk(self.fn)) \
+                and not any(isinstance(n, ast.Attribute) and n.attr in self.fields for n in ast.walk(self.fn)):
             return
         for name, shape in self.lists.items():            # every element list typed wherever the list is bound
             for line, k in self.kinds.get(name, []):
@@ -357,7 +512,7 @@ class _Function:
                 if shape_of(k) is not None:
                     for i, ek in enumerate(shape):
                         self.kinds.setdefault(self.elem(name, i), []).append((line, ek))
-        if self.top:
+        if self.split_params:
             args: list[ast.arg] = []
             for a in self.fn.args.args:
                 s = self.tuples.get(a.arg) if annotation_shape(a.annotation) is not None else None
@@ -423,6 +578,11 @@ class _Function:
             target = s.targets[0] if isinstance(s, ast.Assign) and len(s.targets) == 1 else (
                 s.target if isinstance(s, ast.AnnAssign) else None)
             value = s.value
+            if isinstance(target, ast.Attribute) and target.attr in self.fields:
+                return self.store_field(s, target)
+            if isinstance(s, ast.Assign) and any(isinstance(n, ast.Attribute) and n.attr in self.fields
+                                                 for t in s.targets for n in ast.walk(t)):
+                raise _Problem(line, f"`{ast.unparse(s)}`: a tuple field is stored by a single `o.p = value`")
             if isinstance(target, ast.Name) and target.id in self.tuples and value is not None:
                 return self.bind(target.id, value, line, annotated=isinstance(s, ast.AnnAssign))
             if isinstance(s, ast.Assign) and isinstance(target, (ast.Tuple, ast.List)) and value is not None \
@@ -438,6 +598,11 @@ class _Function:
                                              f"{len(shape)}")
                     return [ast.Assign(targets=[_name(n, ast.Store())], value=e)
                             for n, e in zip(names, self.elems(value.id))]
+                if self.static_tuple(value):
+                    els = _Exprs(self).tuple_elements(value) or []
+                    if len(els) != len(names):
+                        raise _Problem(line, f"`{ast.unparse(s)}` unpacks {len(names)} names from a tuple of {len(els)}")
+                    return self.assign_all(names, els, line, kinds=_Exprs(self).kinds(value))
                 got = self.list_read(value, None, line)
                 if got is not None:
                     out, vals = got
@@ -458,6 +623,12 @@ class _Function:
                     raise _Problem(line, f"`return {s.value.id}` returns a `tuple[{', '.join(self.tuples[s.value.id])}]` "
                                          f"from a function declared `tuple[{', '.join(shape)}]`")
                 return [ast.Return(value=ast.Tuple(elts=self.elems(s.value.id), ctx=ast.Load()))]
+            if shape is not None and self.static_tuple(s.value):
+                got_shape = _Exprs(self).kinds(s.value)
+                if got_shape != shape:
+                    raise _Problem(line, f"`return {ast.unparse(s.value)}` returns a `tuple[{', '.join(got_shape or ())}]` "
+                                         f"from a function declared `tuple[{', '.join(shape)}]`")
+                return [ast.Return(value=ast.Tuple(elts=_Exprs(self).tuple_elements(s.value), ctx=ast.Load()))]
             if shape is not None and self.tuple_call(s.value) is not None:
                 call = self.expr(s.value)
                 temps = [self.temp(k, line) for k in shape]
@@ -509,6 +680,13 @@ class _Function:
             if value.id == name:
                 return [ast.Pass()]
             return self.assign_all(targets, self.elems(value.id), line, kinds=shape, annotated=annotated)
+        if self.static_tuple(value):
+            got_shape = _Exprs(self).kinds(value)
+            if got_shape != shape:
+                raise _Problem(line, f"`{ast.unparse(value)}` is a `tuple[{', '.join(got_shape or ())}]`, but `{name}` "
+                                     f"is a `tuple[{', '.join(shape)}]`")
+            return self.assign_all(targets, _Exprs(self).tuple_elements(value) or [], line, kinds=shape,
+                                   annotated=annotated)
         if isinstance(value, ast.Tuple) and not any(isinstance(e, ast.Starred) for e in value.elts):
             if len(value.elts) != len(shape):
                 raise _Problem(line, f"`{name}` is a tuple of {len(shape)}, given a display of {len(value.elts)}")
@@ -527,6 +705,31 @@ class _Function:
                                value=self.expr(value))]
         raise _Problem(line, f"the tuple `{name}` is bound to `{ast.unparse(value)}`; a tuple value comes from a tuple "
                              "display, another tuple name or a call of a program function returning a fixed tuple")
+
+    def static_tuple(self, e: ast.expr) -> bool:
+        """`e` is a slice with constant bounds of a tuple name or field, or a split tuple field: its elements are
+        reads with nothing to evaluate first."""
+        return _Exprs(self).tuple_slice(e) is not None or (
+            isinstance(e, ast.Attribute) and e.attr in self.fields and isinstance(e.ctx, ast.Load))
+
+    def store_field(self, s: ast.Assign | ast.AnnAssign, target: ast.Attribute) -> list[ast.stmt]:
+        """`o.p = value` of a split tuple field: the value's elements evaluated first, in order (CPython builds the
+        tuple, then stores it), then each element field stored."""
+        line = s.lineno
+        if not isinstance(target.value, ast.Name):
+            raise _Problem(line, f"`{ast.unparse(s)}`: an AOT program stores a tuple field through a local name (bind "
+                                 "the object to a name first)")
+        if s.value is None:
+            raise _Problem(line, f"`{ast.unparse(s)}`: a tuple field is annotated in the class body")
+        shape = self.fields[target.attr]
+        out: list[ast.stmt] = []
+        vals = self.values_once(s.value, shape, line, out, f"stored into the field `{target.attr}`")
+        # (values_once leaves only names, constants and reads of a list of tuples as they are, and moves every other
+        # element, an element field read included, into a temporary first: storing the fields changes none of them)
+        for i, v in enumerate(vals):
+            out.append(ast.Assign(targets=[ast.Attribute(value=_name(target.value.id), attr=f"{target.attr}{_SEQ}{i}",
+                                                         ctx=ast.Store())], value=v))
+        return out
 
     def assign_all(self, targets: list[str], values: list[ast.expr], line: int,
                    kinds: tuple[str, ...] | None = None, annotated: bool = False) -> list[ast.stmt]:
@@ -944,8 +1147,14 @@ class _Exprs(ast.NodeTransformer):
 
     def tuple_elements(self, e: ast.expr) -> list[ast.expr] | None:
         """The elements of a tuple name or a tuple display (rewritten), else None."""
-        if isinstance(e, ast.Name) and e.id in self.f.tuples:
-            return self.f.elems(e.id)
+        src = self.tuple_source(e)
+        if src is not None:
+            return src[0]
+        at = self.tuple_slice(e)
+        if at is not None:
+            got = self.tuple_source(e.value)                                   # type: ignore[attr-defined]
+            assert got is not None
+            return [got[0][i] for i in at]
         if isinstance(e, ast.Tuple) and isinstance(e.ctx, ast.Load) and e.elts \
                 and not any(isinstance(x, ast.Starred) for x in e.elts):
             return [self.visit(x) for x in e.elts]
@@ -958,12 +1167,48 @@ class _Exprs(ast.NodeTransformer):
             return [ast.Subscript(value=c, slice=copy.deepcopy(k), ctx=ast.Load()) for c in self.f.comps(e.value.id)]
         return None
 
+    def tuple_source(self, e: ast.expr) -> tuple[list[ast.expr], tuple[str, ...]] | None:
+        """A tuple name (its element locals) or a split tuple field `o.p` read through a local name `o` (its element
+        fields `o.p__0`, ...): the element reads and the shape; else None."""
+        if isinstance(e, ast.Name) and e.id in self.f.tuples:
+            return self.f.elems(e.id), self.f.tuples[e.id]
+        if isinstance(e, ast.Attribute) and e.attr in self.f.fields and isinstance(e.ctx, ast.Load):
+            if not isinstance(e.value, ast.Name):
+                raise _Problem(e.lineno, f"`{ast.unparse(e)}`: an AOT program reads a tuple field through a local "
+                                         "name (bind the object to a name first)")
+            shape = self.f.fields[e.attr]
+            return [ast.Attribute(value=_name(e.value.id), attr=f"{e.attr}{_SEQ}{i}", ctx=ast.Load())
+                    for i in range(len(shape))], shape
+        return None
+
+    def tuple_slice(self, e: ast.expr) -> list[int] | None:
+        """`t[a:b:c]` of a tuple name or field with constant bounds: the positions it takes (a tuple of a static shape,
+        so its elements are elements of `t`), else None."""
+        if isinstance(e, ast.Subscript) and isinstance(e.slice, ast.Slice) and isinstance(e.ctx, ast.Load):
+            src = self.tuple_source(e.value)
+            if src is not None:
+                return slice_positions(len(src[1]), e.slice)
+        return None
+
+    def visit_Attribute(self, node: ast.Attribute) -> ast.expr:
+        if node.attr in self.f.fields:
+            raise _Problem(node.lineno, f"`{ast.unparse(node)}`: a tuple field is accepted where a tuple value is bound, "
+                                        "stored, unpacked, indexed, passed, returned, compared, searched, measured or "
+                                        "printed, not here")
+        return self.generic_visit(node)
+
     def list_name(self, e: ast.expr) -> str | None:
         return e.id if isinstance(e, ast.Name) and e.id in self.f.lists else None
 
     def kinds(self, e: ast.expr) -> tuple[str, ...] | None:
-        if isinstance(e, ast.Name) and e.id in self.f.tuples:
-            return self.f.tuples[e.id]
+        src = self.tuple_source(e)
+        if src is not None:
+            return src[1]
+        at = self.tuple_slice(e)
+        if at is not None:
+            got = self.tuple_source(e.value)                                   # type: ignore[attr-defined]
+            assert got is not None
+            return tuple(got[1][i] for i in at)
         if isinstance(e, ast.Subscript) and isinstance(e.value, ast.Name) and e.value.id in self.f.lists \
                 and not isinstance(e.slice, ast.Slice):
             return self.f.lists[e.value.id]
@@ -983,8 +1228,9 @@ class _Exprs(ast.NodeTransformer):
                                             f"constant inside its {len(shape)} elements in this step")
             return ast.copy_location(ast.Subscript(value=_name(self.f.elem(inner.value.id, v % len(shape))),
                                                    slice=self.visit(inner.slice), ctx=ast.Load()), node)
-        if isinstance(node.value, ast.Name) and node.value.id in self.f.tuples:
-            shape = self.f.tuples[node.value.id]
+        src = self.tuple_source(node.value) if isinstance(node.ctx, ast.Load) else None
+        if src is not None:
+            elements, shape = src
             k = node.slice
             v: object = None
             if isinstance(k, ast.Constant) and type(k.value) is int:
@@ -993,16 +1239,27 @@ class _Exprs(ast.NodeTransformer):
                     and type(k.operand.value) is int:
                 v = -k.operand.value
             if isinstance(v, int) and -len(shape) <= v < len(shape):
-                return _name(self.f.elem(node.value.id, v % len(shape)))
+                return elements[v % len(shape)]
             if isinstance(k, ast.Slice):
-                raise _Problem(node.lineno, f"`{ast.unparse(node)}`: a slice of a tuple is a new tuple, which the AOT "
-                                            "mode does not build in this step")
+                if slice_positions(len(shape), k) is None:
+                    raise _Problem(node.lineno, f"`{ast.unparse(node)}`: a slice of a tuple whose bounds are not int "
+                                                "constants (or whose step is 0) has a length known only at run time "
+                                                "(a `tuple[T, ...]`) or raises, which the AOT mode does not build in "
+                                                "this step")
+                raise _Problem(node.lineno, f"`{ast.unparse(node)}`: a slice of a tuple is accepted where a tuple value "
+                                            "is bound, unpacked, passed, returned, compared, searched, measured or "
+                                            "printed, not here")
             if len(set(shape)) != 1:
                 raise _Problem(node.lineno, f"`{ast.unparse(node)}`: a variable index into a tuple whose elements "
                                             f"differ in type (`tuple[{', '.join(shape)}]`) is a union, which the AOT "
                                             "mode does not type (index it by a constant)")
             index = self.visit(k)
-            call = ast.Call(func=_name(TUPLE_INDEX), args=[index, *self.f.elems(node.value.id)], keywords=[])
+            if isinstance(node.value, ast.Attribute) and not _pure(index):
+                # (TupleIndex evaluates the index before the elements; CPython reads the field first, and the index
+                # could rebind it)
+                raise _Problem(node.lineno, f"`{ast.unparse(node)}`: a tuple field is indexed by a name or a constant "
+                                            "(bind the index to a name first)")
+            call = ast.Call(func=_name(TUPLE_INDEX), args=[index, *elements], keywords=[])
             return ast.copy_location(call, node)
         return self.generic_visit(node)
 
@@ -1020,7 +1277,8 @@ class _Exprs(ast.NodeTransformer):
                 if made is not None:
                     return self.f.list_repr(made, node.lineno)
             els = self.tuple_elements(node.args[0])
-            if els is not None and f.id == "len" and isinstance(node.args[0], ast.Name):
+            if els is not None and f.id == "len" and (isinstance(node.args[0], (ast.Name, ast.Attribute))
+                                                      or self.tuple_slice(node.args[0]) is not None):
                 return ast.Constant(len(els))
             if els is not None and f.id in ("str", "repr"):
                 return ast.JoinedStr(values=_repr_pieces(els))
@@ -1040,28 +1298,42 @@ class _Exprs(ast.NodeTransformer):
                 and (any(s is not None for s in self.f.params[f.id])
                      or any(s is not None for s in self.f.lparams.get(f.id, ())))\
                 and len(node.args) == len(self.f.params[f.id]):
-            args = []
-            for a, s, ls in zip(node.args, self.f.params[f.id], self.f.lparams[f.id]):
-                if ls is not None:
-                    if self.list_name(a) is None or self.f.lists[a.id] != ls:          # type: ignore[attr-defined]
-                        raise _Problem(node.lineno, f"`{ast.unparse(a)}` is passed to a `list[tuple[{', '.join(ls)}]]` "
-                                                    f"parameter of `{f.id}`; an AOT program passes a list of tuples "
-                                                    "name of that shape")
-                    args += self.f.comps(a.id)                                   # type: ignore[attr-defined]
-                    continue
-                if s is None:
-                    args.append(self.visit(a))
-                    continue
-                els = self.tuple_elements(a)
-                given = self.kinds(a) or (tuple("?" for _ in els) if els is not None else None)
-                if els is None or len(els) != len(s) or (self.kinds(a) is not None and given != s):
-                    raise _Problem(node.lineno, f"`{ast.unparse(a)}` is passed to a `tuple[{', '.join(s)}]` parameter "
-                                                f"of `{f.id}`; an AOT program passes a tuple name or a tuple display of "
-                                                "that shape")
-                args += els
-            node.args = args
-            return node
+            return self.split_args(node, f.id, self.f.params[f.id], self.f.lparams[f.id])
+        if isinstance(f, ast.Name) and f.id in self.f.inits and f.id not in self.f.locals \
+                and len(node.args) == len(self.f.inits[f.id]) and not node.keywords:
+            return self.split_args(node, f.id, self.f.inits[f.id], [None] * len(node.args))
+        if isinstance(f, ast.Attribute) and f.attr in self.f.methods and len(node.args) == len(self.f.methods[f.attr]) \
+                and not node.keywords:
+            node.func = self.visit(f)
+            return self.split_args(node, f.attr, self.f.methods[f.attr], [None] * len(node.args))
         return self.generic_visit(node)
+
+    def split_args(self, node: ast.Call, fname: str, shapes: list[tuple[str, ...] | None],
+                   lshapes: list[tuple[str, ...] | None]) -> ast.Call:
+        """The arguments of a call of a function whose tuple and list of tuples parameters are split: one argument per
+        element, each tuple given as a tuple name, field, slice or display."""
+        f = fname
+        args = []
+        for a, s, ls in zip(node.args, shapes, lshapes):
+            if ls is not None:
+                if self.list_name(a) is None or self.f.lists[a.id] != ls:          # type: ignore[attr-defined]
+                    raise _Problem(node.lineno, f"`{ast.unparse(a)}` is passed to a `list[tuple[{', '.join(ls)}]]` "
+                                                f"parameter of `{f}`; an AOT program passes a list of tuples "
+                                                "name of that shape")
+                args += self.f.comps(a.id)                                   # type: ignore[attr-defined]
+                continue
+            if s is None:
+                args.append(self.visit(a))
+                continue
+            els = self.tuple_elements(a)
+            given = self.kinds(a) or (tuple("?" for _ in els) if els is not None else None)
+            if els is None or len(els) != len(s) or (self.kinds(a) is not None and given != s):
+                raise _Problem(node.lineno, f"`{ast.unparse(a)}` is passed to a `tuple[{', '.join(s)}]` parameter "
+                                            f"of `{f}`; an AOT program passes a tuple name or a tuple display of "
+                                            "that shape")
+            args += els
+        node.args = args
+        return node
 
     def visit_JoinedStr(self, node: ast.JoinedStr) -> ast.expr:
         values: list[ast.expr] = []
@@ -1152,14 +1424,15 @@ class _Exprs(ast.NodeTransformer):
                                      "for NaN in CPython (`x in t` is `y is x or y == x` for each item), which an AOT "
                                      "program does not have (aot/identity)")
             tests: list[ast.expr] = [ast.Compare(left=copy.deepcopy(x), ops=[ast.Eq()], comparators=[e]) for e in els]
-            found: ast.expr = tests[0] if len(tests) == 1 else ast.BoolOp(op=ast.Or(), values=tests)
+            found: ast.expr = ast.Constant(False) if not tests else tests[0] if len(tests) == 1 else ast.BoolOp(
+                op=ast.Or(), values=tests)
             return ast.UnaryOp(op=ast.Not(), operand=found) if isinstance(op, ast.NotIn) else found
         a, b = self.tuple_elements(left), self.tuple_elements(right)
         if a is None or b is None:
             if a is not None or b is not None:
                 raise _Problem(line, f"`{ast.unparse(node)}` compares a tuple with something that is not a tuple")
             return self.generic_visit(node)
-        if not all(_pure(e) or _item(e) for e in a + b):
+        if not all(_pure(e) or _item(e) or _field(e) for e in a + b):
             raise _Problem(line, f"`{ast.unparse(node)}`: an AOT program compares tuple names or displays of names and "
                                  "constants (bind the values to names first)")
         ka, kb = self.kinds(left), self.kinds(right)

@@ -251,7 +251,7 @@ class _Checker:
                 if arg.annotation is not None:
                     self.annotation(arg.annotation, f"parameter `{arg.arg}`", arg)
                 continue
-            self.annotation(arg.annotation, f"parameter `{arg.arg}`", arg, allow_tuple=not is_method)
+            self.annotation(arg.annotation, f"parameter `{arg.arg}`", arg, allow_tuple=True)
         self.annotation(fn.returns, f"the return of `{fn.name}`", fn, allow_none=True, allow_tuple=True)
 
     # -- statements
@@ -1011,6 +1011,8 @@ def analyze(entry: Path, *, library: bool = False) -> Program:
     for c in program.classes:
         for st in c.body:
             if isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name) and st.value is None:
+                if _is_tuple_annotation(st.annotation):
+                    continue                # tier S2a: one field per element (typedpython/tuples.py)
                 checker.annotation(st.annotation, f"field `{c.name}.{st.target.id}`", st)
             elif isinstance(st, ast.FunctionDef):
                 checker.function(f"{c.name}.{st.name}", st, st.body, is_method=True, owner_class=c.name)

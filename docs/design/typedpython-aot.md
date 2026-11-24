@@ -382,8 +382,13 @@ tier K multi-value return and one node, `TupleIndex`, for a variable index. Cove
 slot by CPython's rule with `IndexError: tuple index out of range`, then the chosen element local), `len`, unpacking and
 `a, b = b, a`, `==` / `!=` / `<` ... (CPython's first differing item, then the lengths), `in`, `for v in t` when the
 elements share a kind, `print` / `str` / `repr` / f-strings, passing a tuple name or display to a tuple parameter, and
-returning a tuple name or a tuple-returning call. Refused with the reason: a variable index into a tuple whose element
-types differ (its type is a union, which the AOT mode does not type), a slice (a new tuple), `is`, a tuple
+returning a tuple name or a tuple-returning call. A slice `t[a:b:c]` whose bounds are absent or int constants
+(amendment 2026-11-25, agent proposal, not confirmed) has a static shape, so it is the tuple of the element locals it
+takes (positions by Python's own slice rules: negative bounds, bounds past either end, a negative step, an empty
+result printed `()`), accepted wherever a tuple name is (bound, unpacked, passed, returned, compared, searched, `len`,
+printed). Refused with the reason: a variable index into a tuple whose element types differ (its type is a union,
+which the AOT mode does not type), a slice with a bound that is not an int constant (its length is known only at run
+time, a `tuple[T, ...]`, S2c) or a step of 0, `is`, a tuple
 anywhere else as a value, a comparison or `in` with a float item (CPython tests identity first: NaN, `aot/identity`),
 a tuple parameter of a method, and a tuple parameter at the library boundary (`aot/export`). A returned tuple may hold
 str elements (each a new reference the caller owns through its out slot); such a function is not exported from a
@@ -422,8 +427,24 @@ with that reason); a display of str and None, or of str only, bound to one is on
 `==` / `!=` likewise, an ordering that reaches a None item raises CPython's `TypeError: '<' not supported between
 instances of 'NoneType' and 'str'` (the operator and the two types in the order written), and `repr` prints `None`.
 `sep.join(xs)` stays refused (`list[str]` is what join takes), and so does a list[str | None] field.
-Still to come in S2a: tuple objects (a tuple in a field, returning a list of tuples, one in a field or a method
-parameter; dict keys in S2b) and a slice of a tuple.
+Tuple fields and method parameters (amendment 2026-11-25, agent proposal, not confirmed): a class field
+`p: tuple[int, str]` (elements int, float, bool, str; also named in `__slots__`) is split into one field per element,
+`p__0: int` and `p__1: str`, for the same reason (no identity in the accepted subset, so the fields hold what the one
+field holds). `o.p` is rewritten by the attribute name alone, so a name is split only when every declaration of it in
+the program's classes is a tuple field of one shape (Pyrefly has checked that `o.p` names a declared attribute); any
+other tuple field leaves its class refused with the field's type. A field is read through a local name (`o.p`, `self.p`)
+wherever a tuple name is accepted (bound, unpacked, passed, returned, compared, searched, sliced with constant bounds,
+`len`, printed, indexed by a constant, or by a variable when its elements share a type and the index is a name or a
+constant: `TupleIndex` evaluates the index before the elements, and CPython reads the field first, which an index
+expression with a call could rebind), and stored by `o.p = value` (every element of the value evaluated first, then
+each element field stored). A tuple parameter of a method is split as a module function's, and so is every argument
+of a call `o.m(...)`: by the method name alone, so only when every declaration of `m` in the program's classes is a
+method with the same parameter types; a tuple parameter of `__init__` likewise through the call `C(...)`. Refused with
+the reason: a tuple field used as a value anywhere else (`for v in o.p`), a method whose name is declared differently
+elsewhere, a list of tuples field or method parameter. Classes cross the library boundary as opaque handles with no
+field accessors, so a split field changes nothing there.
+Still to come in S2a: tuple objects where a tuple must be one value (returning a list of tuples, a list of tuples in a
+field or a method parameter, a method returning a tuple; dict keys in S2b).
 
 **dict and set (S2b).** `dict[K, V]` with K int, str, bool or a tuple of those; V any S2 type. The layout is CPython's
 compact dict (an index table of slots and an entry array in insertion order, open addressing with CPython's
