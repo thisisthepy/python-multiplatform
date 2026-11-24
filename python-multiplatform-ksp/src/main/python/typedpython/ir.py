@@ -84,10 +84,28 @@ class Type(Enum):
 SCALARS = (Type.I64, Type.F64, Type.BOOL)
 # AOT mode, tier S2b: what a dict holds. A key is an int (I64: always a tagged `tpa_int` in the table, so a big int is a
 # key like any other), a str, or a bool (an I64 key the table marks as a bool: `1 == True`, and the key keeps the type
-# it was first inserted with); a value is an int (tagged), a float, a bool, a str or `str | None` (NULL for None).
-DictKinds = tuple[Type, Type]
+# it was first inserted with); a value is an int (tagged), a float, a bool, a str or `str | None` (NULL for None), or a
+# dict, whose own kinds stand in the value's place: `dict[str, dict[int, int]]` is (STR, (I64, I64)). (A dict held by a
+# dict cannot hold that dict back, its type is a part of the outer type: no cycle, so plain reference counts free it.)
+DictKinds = tuple[Type, "Type | DictKinds"]
 DICT_KEYS = (Type.I64, Type.STR, Type.BOOL)
 DICT_VALUES = (Type.I64, Type.F64, Type.BOOL, Type.STR, Type.STR_OPT)
+
+
+def dict_vtype(v: "Type | DictKinds") -> Type:
+    """The type of a value of a dict whose values are `v` (DICT for a dict held as a value)."""
+    return Type.DICT if isinstance(v, tuple) else v
+
+
+def good_dict_kinds(k: object) -> bool:
+    """`k` is (key type, value type), the value type an allowed scalar or str type or good kinds of a dict."""
+    return (isinstance(k, tuple) and len(k) == 2 and k[0] in DICT_KEYS
+            and (k[1] in DICT_VALUES or good_dict_kinds(k[1])))
+
+
+def dict_has_float(k: "DictKinds") -> bool:
+    """A float is among the values of `k` or of the dicts it holds."""
+    return k[1] is Type.F64 or (isinstance(k[1], tuple) and dict_has_float(k[1]))
 # INT is not a scalar: it owns a reference when promoted. It is created only by `ToInt`, by arithmetic
 # on INTs, and by a redo `Call` of an i64-returning callee, and it becomes an object only through `Box`.
 ARRAYS = (Type.F64_ARRAY, Type.I64_ARRAY, Type.BOOL_ARRAY)

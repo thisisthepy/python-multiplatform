@@ -23,8 +23,11 @@
  * BORROWS the words it is given; a word it hands out (`get`, `pop`, an iterator step) is a NEW reference the caller
  * owns. Status codes as the rest of the runtime: 0 success, -1 with the exception recorded in `tpa_exc`.
  *
- * Not here yet (later in S2b, each its own named test): class instances and containers as values (they need the
- * cycle collector), set, a dict crossing a library boundary.
+ * A value may be a dict (TPA_DV_DICT, a `tpa_dict *`, owned): its type is a part of the outer dict's type, so it
+ * cannot hold the outer dict back, and reference counts free it (no cycle collector).
+ *
+ * Not here yet (later in S2b, each its own named test): class instances and lists as values (they need the cycle
+ * collector), set, a dict crossing a library boundary.
  */
 #ifndef TP_AOT_DICT_H
 #define TP_AOT_DICT_H
@@ -43,6 +46,7 @@
 #define TPA_DV_BOOL 2
 #define TPA_DV_INT 3     /* a TAGGED tpa_int, owned */
 #define TPA_DV_STR 4     /* a tpa_str *, owned; NULL is None (a `str | None` value) */
+#define TPA_DV_DICT 5    /* a tpa_dict *, owned (a dict held as a value) */
 
 typedef uint64_t tpa_dw;
 
@@ -71,6 +75,10 @@ typedef struct tpa_dict {
     int64_t *index;      /* 2**log2 slots */
     tpa_dict_entry *e;   /* USABLE_FRACTION(2**log2) entries */
 } tpa_dict;
+
+static TPA_UNUSED void tpa_dict_release(struct tpa_dict *d);
+static TPA_UNUSED int tpa_dict_eq(const struct tpa_dict *a, const struct tpa_dict *b);
+static TPA_UNUSED int tpa_dict_repr(const struct tpa_dict *d, tpa_str **out);
 
 /* ------------------------------------------------------------------------------------------
  * Words: hashing, equality, ownership, repr
@@ -166,6 +174,9 @@ static void tpa_dict__value_retain(const tpa_dict *d, tpa_dw v)
     else if (d->vk == TPA_DV_INT) {
         tpa_int_retain((tpa_int)v);
     }
+    else if (d->vk == TPA_DV_DICT) {
+        TPA_RC_INC((tpa_dict *)(uintptr_t)v);
+    }
 }
 
 static void tpa_dict__value_release(const tpa_dict *d, tpa_dw v)
@@ -175,6 +186,9 @@ static void tpa_dict__value_release(const tpa_dict *d, tpa_dw v)
     }
     else if (d->vk == TPA_DV_INT) {
         tpa_int_release((tpa_int)v);
+    }
+    else if (d->vk == TPA_DV_DICT) {
+        tpa_dict_release((tpa_dict *)(uintptr_t)v);
     }
 }
 
@@ -192,6 +206,9 @@ static int tpa_dict__repr_word(int is_key, int kind, int kbool, tpa_dw w, tpa_st
     }
     if (is_key ? kind == TPA_DK_INT : kind == TPA_DV_INT) {
         return tpa_str_from_int((tpa_int)w, out);
+    }
+    if (!is_key && kind == TPA_DV_DICT) {
+        return tpa_dict_repr((const tpa_dict *)(uintptr_t)w, out);
     }
     if (!is_key && kind == TPA_DV_F64) {
         double x;
@@ -808,6 +825,9 @@ static int tpa_dict__value_eq(int vk, tpa_dw a, tpa_dw b)
     }
     if (vk == TPA_DV_INT) {
         return tpa_int_eq((tpa_int)a, (tpa_int)b);
+    }
+    if (vk == TPA_DV_DICT) {             /* (RichCompareBool: the same dict is equal, else dict_equal) */
+        return tpa_dict_eq((const tpa_dict *)(uintptr_t)a, (const tpa_dict *)(uintptr_t)b);
     }
     return a == b;           /* (float values: the front end refuses `==`, CPython tests identity first; aot/identity) */
 }

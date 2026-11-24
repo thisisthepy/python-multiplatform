@@ -72,7 +72,7 @@ STR_LISTS = (Type.STR_LIST, Type.STR_OPT_LIST)     # the `tpa_str_list` types: l
 # dict holds the words 0 and 1, every key marked a bool.
 DICT_KK = {Type.I64: "TPA_DK_INT", Type.STR: "TPA_DK_STR", Type.BOOL: "TPA_DK_I64"}
 DICT_VK = {Type.I64: "TPA_DV_INT", Type.F64: "TPA_DV_F64", Type.BOOL: "TPA_DV_BOOL", Type.STR: "TPA_DV_STR",
-           Type.STR_OPT: "TPA_DV_STR"}
+           Type.STR_OPT: "TPA_DV_STR", Type.DICT: "TPA_DV_DICT"}
 
 
 # the kinds of list the runtime has: `f64`, `i64` (a raw `list[int]`) and `int` (a big-capable `list[int]`: tagged
@@ -987,6 +987,9 @@ class _Fn:
             return callee.return_kinds if callee is not None else None
         if isinstance(e, ir.Cond):
             return self.dict_kinds(e.then)
+        if isinstance(e, (ir.DictGet, ir.DictPop, ir.DictSetDefault)):     # a dict held as a value of a dict
+            outer = self.dict_kinds(e.dict)
+            return outer[1] if outer is not None and isinstance(outer[1], tuple) else None
         return None
 
     def dict_of(self, e: ir.Expr, what: str) -> tuple[str, ir.DictKinds] | None:
@@ -1016,8 +1019,11 @@ class _Fn:
             return self.word(f"(tpa_dw)tpa_int_small((int64_t)({self.ev(e)}))"), "1"
         return self.word(f"(tpa_dw)({self.tagged(e)})"), "0"
 
-    def value_word(self, e: ir.Expr, vt: Type) -> str:
+    def value_word(self, e: ir.Expr, vt: Type | ir.DictKinds) -> str:
         """The word of the value `e` of a dict whose values are `vt`, borrowed."""
+        if isinstance(vt, tuple):
+            found = self.dict_of(e, "a dict value")
+            return self.word(f"(tpa_dw)(uintptr_t)({found[0] if found is not None else 'NULL'})")
         if vt is Type.I64:
             return self.word(f"(tpa_dw)({self.tagged(e)})")
         if vt is Type.F64:
@@ -1040,6 +1046,9 @@ class _Fn:
         elif t is Type.F64:
             slot = self.tmp("double")
             conv = "tpa_dict_to_f64(w_)"
+        elif t is Type.DICT:                         # a dict held as a value: the slot owns the new reference
+            slot = self.dslot()
+            conv = "(tpa_dict *)(uintptr_t)w_"
         else:
             slot = self.tmp("int")
             conv = "(int)w_"
@@ -1056,7 +1065,7 @@ class _Fn:
         MAP_ADD / DICT_UPDATE of a display builds it: chunks of 17 pairs; a chunk of at most 15 is presized
         (BUILD_MAP n), a longer one starts empty (BUILD_MAP 0, MAP_ADD); every chunk after the first is merged into the
         first (DICT_UPDATE). So a later loop that changes the dict sees CPython's layout."""
-        kk, vk = DICT_KK[kinds[0]], DICT_VK[kinds[1]]
+        kk, vk = DICT_KK[kinds[0]], DICT_VK[ir.dict_vtype(kinds[1])]
         chunks = [words[i:i + 17] for i in range(0, len(words), 17)] or [[]]
         for ci, chunk in enumerate(chunks):
             into = target if ci == 0 else self.dslot()
@@ -1196,8 +1205,10 @@ class _Fn:
                     self.emit(f"tpa_int_release((tpa_int){w});")
                 elif t in (Type.STR, Type.STR_OPT):
                     self.emit(f"tpa_str_release((tpa_str *)(uintptr_t){w});")
+                elif isinstance(t, tuple):
+                    self.emit(f"tpa_dict_release((tpa_dict *)(uintptr_t){w});")
                 continue
-            if not self.bind_word(var, t, w):
+            if not self.bind_word(var, ir.dict_vtype(t), w):
                 return
 
     def bind_word(self, var: str, t: Type, w: str) -> bool:
@@ -1212,6 +1223,8 @@ class _Fn:
             self.emit(f"tpa_str_release({v}); {v} = (tpa_str *)(uintptr_t){w};")
         elif t is Type.F64:
             self.emit(f"{v} = tpa_dict_to_f64({w});")
+        elif t is Type.DICT:
+            self.emit(f"tpa_dict_release({v}); {v} = (tpa_dict *)(uintptr_t){w};")
         else:
             self.emit(f"{v} = (int){w};")
         return True
@@ -1237,7 +1250,7 @@ class _Fn:
         self.emit(f"if ({st} < 0) {self.fail()}")
         self.emit(f"if ({st} == 0) break;")
         for var, t, w in ((s.key_var, kt, kw), (s.value_var, vt, vw)):
-            if var is not None and not self.bind_word(var, t, w):
+            if var is not None and not self.bind_word(var, ir.dict_vtype(t), w):
                 return
         self.loop_prologue(s)
         self.stmts(s.body)

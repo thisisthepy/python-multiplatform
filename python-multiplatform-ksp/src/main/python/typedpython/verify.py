@@ -719,7 +719,7 @@ class _Checker:
 
     @staticmethod
     def good_kinds(k: object) -> bool:
-        return isinstance(k, tuple) and len(k) == 2 and k[0] in ir.DICT_KEYS and k[1] in ir.DICT_VALUES
+        return ir.good_dict_kinds(k)
 
     def dict_kinds(self, e: object) -> ir.DictKinds | None:
         """The key and value types of the DICT expression `e` (already checked), or None after an error."""
@@ -740,6 +740,10 @@ class _Checker:
             if a != b:
                 self.error(TYPE, f"a conditional dict is a {a!r} or a {b!r}")
             return a
+        if cls in (DictGet, DictPop, DictSetDefault):        # a dict held as a value of a dict
+            outer = self.dict_kinds(e.dict)
+            if outer is not None and isinstance(outer[1], tuple):
+                return outer[1]
         self.error(TYPE, f"{cls.__name__} is not a dict value")
         return None
 
@@ -763,10 +767,22 @@ class _Checker:
 
     def dict_value(self, e: object, kinds: ir.DictKinds | None, state: _State, what: str) -> ir.Expr:
         value = self.expr(e, state)
-        if kinds is not None:
+        if kinds is not None and isinstance(kinds[1], tuple):
+            if getattr(value, "type", None) is not Type.DICT:
+                self.error(TYPE, f"{what} is not a dict")
+            else:
+                self.dict_same(self.dict_kinds(value), kinds[1], what)
+        elif kinds is not None:
             if kinds[1] is Type.STR_OPT or getattr(value, "type", None) is not kinds[1]:
                 self.slot(value, kinds[1], what)
         return value
+
+    def bound_var(self, var: str, want: "Type | ir.DictKinds", what: str) -> None:
+        """`var` is a declared local that can hold a key or a value of the type `want`."""
+        if var in self.arrays or var in self.larrays or self.scalars.get(var) is not ir.dict_vtype(want) \
+                or (isinstance(want, tuple) and self.fn.dict_kinds.get(var) != want):
+            self.error(TYPE, f"{what} target {var!r} must be a declared {ir.dict_vtype(want).value} local"
+                             + (f" of kinds {want!r}" if isinstance(want, tuple) else ""))
 
     def dict_same(self, a: ir.DictKinds | None, b: ir.DictKinds | None, what: str) -> None:
         if a is not None and b is not None and a != b:
@@ -2126,7 +2142,7 @@ class _Checker:
         if type(e.get) is not bool or (e.default is not None and not e.get):
             self.error(STRUCTURE, "DictGet has a default only as get()")
         if kinds is not None:
-            want = kinds[1]
+            want = ir.dict_vtype(kinds[1])
             if e.get and e.default is None:
                 if want not in (Type.STR, Type.STR_OPT):
                     self.error(TYPE, "get() without a default of a dict whose values are not str")
@@ -2157,7 +2173,7 @@ class _Checker:
         default = None if e.default is None else self.dict_value(e.default, kinds, state, "the default of pop()")
         self.effects.append("pops from a dict")
         if kinds is not None:
-            self.result(e, kinds[1])
+            self.result(e, ir.dict_vtype(kinds[1]))
         return dataclasses.replace(e, dict=d, key=key, default=default)
 
     def e_DictSetDefault(self, e: DictSetDefault, state: _State) -> ir.Expr:
@@ -2166,7 +2182,7 @@ class _Checker:
         default = self.dict_value(e.default, kinds, state, "the default of setdefault()")
         self.effects.append("inserts into a dict")
         if kinds is not None:
-            self.result(e, kinds[1])
+            self.result(e, ir.dict_vtype(kinds[1]))
         return dataclasses.replace(e, dict=d, key=key, default=default)
 
     def e_DictCopy(self, e: DictCopy, state: _State) -> ir.Expr:
@@ -2182,7 +2198,7 @@ class _Checker:
         a, ka = self.dict_operand(e.left, state, "the left operand of a dict comparison")
         b, kb = self.dict_operand(e.right, state, "the right operand of a dict comparison")
         self.dict_same(kb, ka, "the right operand of a dict comparison")
-        if ka is not None and ka[1] is Type.F64:
+        if ka is not None and ir.dict_has_float(ka):
             self.error(TYPE, "a comparison of dicts of float (CPython tests the values by identity first)")
         if type(e.negate) is not bool:
             self.error(STRUCTURE, "DictCompare.negate is a bool")
@@ -2233,8 +2249,7 @@ class _Checker:
             names = []
         if self.good_kinds(s.kinds):
             for var, want in zip(names, s.kinds):
-                if var in self.arrays or var in self.larrays or self.scalars.get(var) is not want:
-                    self.error(TYPE, f"DictPopItem target {var!r} must be a declared {want.value} local")
+                self.bound_var(var, want, "DictPopItem")
         for var in names:
             if var in self.entry:
                 self.error(STRUCTURE, f"entry global '{var}' is assigned by popitem()")
@@ -2262,8 +2277,8 @@ class _Checker:
             names = [v for v in names if isinstance(v, str)]
         if kinds is not None:
             for var, want in ((s.key_var, kinds[0]), (s.value_var, kinds[1])):
-                if var is not None and self.scalars.get(var) is not want:
-                    self.error(TYPE, f"ForDict target {var!r} must be a declared {want.value} local")
+                if var is not None:
+                    self.bound_var(var, want, "ForDict")
         for var in names:
             if var in self.entry:
                 self.error(STRUCTURE, f"entry global '{var}' is assigned by the loop")

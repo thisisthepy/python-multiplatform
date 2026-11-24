@@ -388,6 +388,70 @@ def test_popitem_takes_the_last_entry_and_raises_on_an_empty_dict(tmp_path: Path
     _compare(tmp_path, POPITEM, [["3", "a,b,c", "1"], ["123456789", "x", "2"], ["-1", "\u00e9,\u00e8", "0"]])
 
 
+NESTED = """
+import sys
+
+
+def index(words: list[str]) -> dict[str, dict[int, int]]:
+    out: dict[str, dict[int, int]] = {}
+    for i in range(len(words)):
+        w = words[i]
+        if w not in out:
+            out[w] = {}
+        out[w][len(w)] = out[w].get(len(w), 0) + i
+        out[w][-1] = i
+    return out
+
+
+def total(t: dict[str, dict[int, int]]) -> int:
+    n = 0
+    for w, inner in t.items():
+        for k, v in inner.items():
+            n += k * v + len(w)
+    return n
+
+
+def main() -> None:
+    words = sys.argv[1].split(",")
+    t = index(words)
+    print(t, len(t), total(t))
+    first = t[words[0]]
+    first[100] = 7
+    print(t[words[0]], first == t[words[0]])
+    counts: dict[str, int] = {}
+    for w in words:
+        counts.setdefault(w, 0)
+        counts[w] += 1
+    print(counts)
+    g: dict[str, dict[str, float]] = {"a": {"x": 1.5}, "b": {}}
+    g["b"]["y"] = -0.0
+    g.setdefault("c", {})["z"] = 2.0
+    print(g, g.get("q", {"none": 0.0}), g.pop("a"), g)
+    h: dict[int, dict[str, str | None]] = {1: {"k": None}}
+    h[1]["j"] = "v"
+    for k in h[1]:
+        print(k, h[1][k])
+    u = {1: {"k": None, "j": "v"}}
+    print(h == u, h != u, h[1] == {"k": None})
+    c = t.copy()
+    del c[words[0]]
+    print(len(c), len(t), words[0] in c)
+    k2, inner2 = t.popitem()
+    print(k2, inner2)
+    print(t[sys.argv[2]][int(sys.argv[3])])
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_dicts_as_dict_values_and_augmented_stores(tmp_path: Path):
+    """dict[K, dict[K2, V]]: an inner dict is a value like another (stored, read, aliased, compared, printed, popped);
+    `d[k][j] = v`, `d.setdefault(k, {})[j] = v`, loops over an inner dict, and `d[k] += 1`."""
+    _compare(tmp_path, NESTED, [["a,b,a,cc", "a", "1"], ["x", "x", "-1"], ["a,b", "a", "1"], ["a,b", "zz", "1"]])
+
+
 WORDFREQ = Path(__file__).resolve().parents[4] / "benchmarks" / "typedpython" / "py" / "wordfreq.py"
 
 
@@ -417,6 +481,10 @@ MAIN = '\n\ndef main() -> None:\n    f()\n\n\nif __name__ == "__main__":\n    ma
     ("    d = {1: 2}\n    print(d.popitem())\n", "returns a tuple"),
     ("    d = {1: 2}\n    a, b, c = d.popitem()\n    print(a, b, c)\n", "into two names"),
     ("    d = {1: 'x'}\n    a = 0\n    b = 0\n    a, b = d.popitem()\n    print(a, b)\n", "given values of types"),
+    # a dict held by a dict: of its exact kinds; == of dicts with a float anywhere inside tests identity first
+    ("    d: dict[str, dict[str, int]] = {}\n    e = {'x': 'y'}\n    d['a'] = e\n    print(d)\n", "invariant"),
+    ("    d: dict[str, dict[str, float]] = {'a': {}}\n    print(d == {'a': {}})\n", "aot/identity"),
+    ("    d: dict[str, dict[str, int]] = {'a': {}}\n    d['a'] += 1\n    print(d)\n", "held by a dict"),
 ])
 def test_what_a_dict_cannot_hold_yet_is_refused_with_the_reason(tmp_path: Path, body: str, reason: str):
     found = _rules(tmp_path, "def f() -> None:\n" + body + MAIN)

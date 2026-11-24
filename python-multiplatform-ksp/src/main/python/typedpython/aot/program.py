@@ -238,7 +238,7 @@ class _Checker:
                     if allow_tuple else "")
             self.rep.error(ann, "aot/type", ast.unparse(ann), f"the type `{ast.unparse(ann)}` is outside the "
                            f"AOT mode (int, float, bool, str, list[int], list[float], compiled classes{more}, dict[K, V] of int, str or "
-                           "bool keys and int, float, bool, str or `str | None` values, and None as a return type)")
+                           "bool keys and int, float, bool, str, `str | None` or such dict values, and None as a return type)")
 
     def signature(self, fn: ast.FunctionDef, is_method: bool = False) -> None:
         a = fn.args
@@ -275,6 +275,7 @@ class _Checker:
                                "`list[i] = value` are supported (no chained assignment, no attribute or slice target)")
             elif isinstance(s.targets[0], ast.Subscript):
                 self.subscript_parts(s.targets[0])
+                self.inner_receiver(s.targets[0].value)
             t0 = s.targets[0]
             if (isinstance(s.value, ast.List) and not s.value.elts and isinstance(t0, ast.Attribute)
                     and isinstance(t0.value, ast.Name)
@@ -317,6 +318,7 @@ class _Checker:
                 self.rep.error(s, "aot/assign", "augmented assignment",
                                f"the augmented assignment `{ast.unparse(s)}` is outside the first AOT step")
             elif isinstance(s.target, ast.Subscript):
+                self.inner_receiver(s.target.value)
                 self.expr(s.target.slice)
             self.expr(s.value)
         elif isinstance(s, ast.If):
@@ -338,6 +340,7 @@ class _Checker:
             for t in s.targets:
                 if self.subscript_target(t) or self.slice_target(t):
                     self.subscript_parts(t)
+                    self.inner_receiver(t.value)        # type: ignore[attr-defined]
                 else:
                     self.rep.error(s, "aot/statement", "del", f"`del {ast.unparse(t)}` is outside the AOT mode (only "
                                    "`del a[i]` and `del a[i:j]` of a list)")
@@ -354,8 +357,22 @@ class _Checker:
         """`name[index]` (not a slice): a store into a list."""
         if isinstance(t, ast.Subscript) and self.attribute_target(t.value) and not isinstance(t.slice, ast.Slice):
             return True                     # tier S2b: `obj.d[k] = v` of a dict field (the front end checks the type)
+        if isinstance(t, ast.Subscript) and not isinstance(t.slice, ast.Slice) and self.inner_dict(t.value):
+            return True                     # tier S2b: `d[k][j] = v`, `d.setdefault(k, {})[j] = v`
         return isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and not isinstance(t.slice, ast.Slice) \
             and t.value.id not in {"sys"}
+
+    @staticmethod
+    def inner_dict(e: ast.expr) -> bool:
+        """Tier S2b: `d[k]` or `d.get(...)` / `d.setdefault(...)` / `d.pop(...)`, which may be a dict held as a value
+        of a dict (the front end checks the types)."""
+        return (isinstance(e, ast.Subscript) and not isinstance(e.slice, ast.Slice)) or (
+            isinstance(e, ast.Call) and isinstance(e.func, ast.Attribute) and e.func.attr in ("get", "setdefault", "pop"))
+
+    def inner_receiver(self, e: ast.expr) -> None:
+        """The dict of `e[k] = v` when it is not a name or a field (`d[k][j] = v`): checked as an expression."""
+        if self.inner_dict(e):
+            self.expr(e)
 
     def slice_target(self, t: ast.expr) -> bool:
         """`name[i:j:k]`: a slice of a list (tier S2a: slice assignment and `del`)."""
@@ -711,6 +728,8 @@ class _Checker:
             pass                            # tier S2a / S2b: a list or dict method (the front end checks the receiver)
         elif isinstance(f, ast.Attribute) and isinstance(f.value, ast.Attribute) and f.attr in LIST_METHODS | DICT_METHODS:
             self.expr(f.value)              # tier S2a / S2b: a method of a list or dict field (`self.items.append(x)`)
+        elif isinstance(f, ast.Attribute) and f.attr in DICT_METHODS and self.inner_dict(f.value):
+            self.expr(f.value)              # tier S2b: a method of a dict held by a dict (`d[k].get(j, 0)`)
         else:
             self.rep.error(f, "aot/call", ast.unparse(f), f"the call of `{ast.unparse(f)}` is outside the first AOT step")
         for a in c.args:
@@ -808,7 +827,8 @@ def _is_dict_annotation(ann: ast.expr) -> bool:
         return False
     k, v = ann.slice.elts
     return (isinstance(k, ast.Name) and k.id in ("int", "str", "bool")
-            and ((isinstance(v, ast.Name) and v.id in ("int", "float", "bool", "str")) or _is_optional_str_annotation(v)))
+            and ((isinstance(v, ast.Name) and v.id in ("int", "float", "bool", "str")) or _is_optional_str_annotation(v)
+                 or _is_dict_annotation(v)))         # (a dict as a value: tier S2b)
 
 
 def _is_str_list_annotation(ann: ast.expr) -> bool:

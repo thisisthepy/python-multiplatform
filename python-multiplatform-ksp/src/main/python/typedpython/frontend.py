@@ -182,12 +182,18 @@ def _dict_kinds(kind: str) -> "ir.DictKinds | None":
     else:
         return None
     kt = _DICT_KEY_KIND.get(key)
-    vt = _DICT_VALUE_KIND.get(val) or (Type.STR_OPT if val.replace(" ", "") in _OPT_STR_SPELLINGS else None)
+    vt = _DICT_VALUE_KIND.get(val) or (Type.STR_OPT if val.replace(" ", "") in _OPT_STR_SPELLINGS else None) \
+        or _dict_kinds(val)                                             # (a dict as a value)
     return (kt, vt) if kt is not None and vt is not None else None
 
 
 def _dict_name(kinds: "ir.DictKinds") -> str:
-    return f"dict[{TYPE_NAME[kinds[0]]}, {TYPE_NAME[kinds[1]]}]"
+    return f"dict[{TYPE_NAME[kinds[0]]}, {_vname(kinds[1])}]"
+
+
+def _vname(v: "Type | ir.DictKinds") -> str:
+    """The name of the value type `v` of a dict (a dict's own kinds for a dict held as a value)."""
+    return _dict_name(v) if isinstance(v, tuple) else TYPE_NAME[v]
 STR_LISTS = (Type.STR_LIST, Type.STR_OPT_LIST)      # AOT mode: the two `tpa_str_list` types (tier S1b, S2a)
 # AOT mode, tier S2a: the list methods called as statements (they return None)
 LIST_STMT_METHODS = frozenset({"append", "insert", "extend", "clear", "reverse", "remove"})
@@ -1818,9 +1824,8 @@ class _Lowerer:
                     return self.list_method_stmt(node.value)             # tier S2a
             if self.info.aot and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute) \
                     and node.value.func.attr in ("update", "clear", "popitem") \
-                    and isinstance(node.value.func.value, ast.Attribute) \
-                    and self.is_dict_name(node.value.func.value):
-                return self.dict_method_stmt(node.value)                 # tier S2b: `self.d.update(e)`
+                    and self.node_dict_kinds(node.value.func.value) is not None:
+                return self.dict_method_stmt(node.value)                 # tier S2b: `self.d.update(e)`, `d[k].clear()`
             if self.info.aot and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute) \
                     and node.value.func.attr in LIST_STMT_METHODS:
                 held = self.field_list_receiver(node.value)
@@ -1974,9 +1979,9 @@ class _Lowerer:
             self.note_assign(name, value)
             return self.take() + [ir.Assign(name, value)]
         if self.info.aot and isinstance(target, ast.Subscript) and not isinstance(target.slice, ast.Slice) \
-                and self.is_dict_name(target.value):
+                and self.node_dict_kinds(target.value) is not None:
             # tier S2b: `d[k] = v` (the value, then the dict, then the key, as CPython's STORE_SUBSCR)
-            value = self.value(value_node)
+            value = self.dict_operand(value_node, self.dict_value_kinds(self.node_dict_kinds(target.value)))
             if not _trivial(value):
                 value = self.temp(value)
             d = self.value(target.value)
@@ -2265,7 +2270,8 @@ class _Lowerer:
             if isinstance(node.slice, ast.Slice):
                 raise Skip(line, f"`{_src(node)}` slices a dict")
             kt, vt = self.kinds_of(value, node.value)
-            return ir.DictGet(vt, value, self.dict_key(self.value(node.slice), kt, node.slice, insert=False))
+            return ir.DictGet(ir.dict_vtype(vt), value, self.dict_key(self.value(node.slice), kt, node.slice,
+                                                                      insert=False))
         if value.type is Type.OBJ_LIST:                       # tier S2a: an element of a list[C]
             if isinstance(node.slice, ast.Slice):
                 raise Skip(line, f"the slice `{_src(node)}` of a list of class instances is not in the AOT mode yet")
@@ -2435,9 +2441,35 @@ class _Lowerer:
                 return True
             f = self.env.get(node.func.id)
             return f is not None and f.returns is Type.DICT
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "copy":
-            return self.is_dict_name(node.func.value)
-        return False
+        return self.node_dict_kinds(node) is not None
+
+    def node_dict_kinds(self, node: ast.expr) -> ir.DictKinds | None:
+        """The kinds of the dict `node`, decided before it is lowered (nothing is lowered): a dict name or field, `d[k]`
+        / `d.get(...)` / `d.setdefault(...)` / `d.pop(...)` of a dict whose values are dicts, `d.copy()`, a call of a
+        program function returning a dict; None for anything else."""
+        if not self.info.aot:
+            return None
+        if isinstance(node, ast.Name):
+            return self.name_kinds(node.id) if self.is_dict_name(node) else None
+        if isinstance(node, ast.Attribute):
+            fd = self.field_decl_of(node)
+            return fd.kinds if fd is not None and fd.type is Type.DICT else None
+        if isinstance(node, ast.Subscript) and not isinstance(node.slice, ast.Slice):
+            return self.dict_value_kinds(self.node_dict_kinds(node.value))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            outer = self.node_dict_kinds(node.func.value)
+            if outer is not None and node.func.attr == "copy":
+                return outer
+            return self.dict_value_kinds(outer) if node.func.attr in ("get", "setdefault", "pop") else None
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and not self.is_local(node.func.id):
+            f = self.env.get(node.func.id)
+            return f.return_kinds if f is not None and f.returns is Type.DICT else None
+        return None
+
+    @staticmethod
+    def dict_value_kinds(kinds: ir.DictKinds | None) -> ir.DictKinds | None:
+        """The kinds of the dicts held as the values of a dict of `kinds` (None when its values are not dicts)."""
+        return kinds[1] if kinds is not None and isinstance(kinds[1], tuple) else None
 
     def name_kinds(self, name: str) -> ir.DictKinds:
         if name in self.params:
@@ -2459,6 +2491,10 @@ class _Lowerer:
                 return fd.kinds
         if isinstance(e, ir.Call) and e.function in self.env and self.env[e.function].return_kinds is not None:
             return self.env[e.function].return_kinds                   # type: ignore[return-value]
+        if isinstance(e, (ir.DictGet, ir.DictPop, ir.DictSetDefault)):
+            inner = self.dict_value_kinds(self.kinds_of(e.dict, node))
+            if inner is not None:
+                return inner
         if isinstance(e, ir.Cond):
             a, b = self.kinds_of(e.then, node), self.kinds_of(e.orelse, node)
             if a != b:
@@ -2505,15 +2541,22 @@ class _Lowerer:
         raise Skip(node.lineno, f"`{_src(node)}` is {TYPE_NAME.get(e.type, e.type.value)}, but the keys of this dict "
                                 f"are {TYPE_NAME[kt]}")
 
-    def dict_value(self, e: ir.Expr, vt: Type, node: ast.expr) -> ir.Expr:
-        """`e` as a value of a dict whose values are `vt`: of that type exactly (a str is a `str | None`)."""
+    def dict_value(self, e: ir.Expr, vt: Type | ir.DictKinds, node: ast.expr) -> ir.Expr:
+        """`e` as a value of a dict whose values are `vt`: of that type exactly (a str is a `str | None`; a dict of the
+        exact kinds, dicts are invariant)."""
+        if isinstance(vt, tuple):
+            return self.dict_coerce(e, vt, node, "a value of this dict")
         if e.type is vt:
             return e
         if vt is Type.STR_OPT and (e.type is Type.STR or (isinstance(e, ir.Const) and e.value is None)):
             return self.coerce(e, Type.STR_OPT, node, "a value of this dict")
         raise Skip(node.lineno, f"`{_src(node)}` is {TYPE_NAME.get(e.type, e.type.value)}, but the values of this dict "
-                                f"are {TYPE_NAME[vt]}: CPython keeps the type of the value it stores (it does not "
+                                f"are {_vname(vt)}: CPython keeps the type of the value it stores (it does not "
                                 "convert it), which this dict cannot hold in an AOT program")
+
+    def dict_value_of(self, node: ast.expr, vt: Type | ir.DictKinds) -> ir.Expr:
+        """The value `node` lowered for a dict whose values are `vt` (a display there takes the kinds of the values)."""
+        return self.dict_value(self.dict_operand(node, vt if isinstance(vt, tuple) else None), vt, node)
 
     def dict_display(self, node: ast.Dict) -> ir.Expr:
         """`{k0: v0, ...}`: keys and values lowered in CPython's order (k0, v0, k1, v1, ...). Its kinds are the ones
@@ -2527,7 +2570,7 @@ class _Lowerer:
             if k is None:
                 raise Skip(line, "`**` in a dict display is not supported in an AOT program")
             keys.append(self.value(k))
-            values.append(self.value(v))
+            values.append(self.dict_operand(v, self.dict_value_kinds(want)))
         if not keys:
             return ir.DictDisplay(Type.DICT, want or (Type.I64, Type.I64), (), ())
         if want is None:
@@ -2535,15 +2578,18 @@ class _Lowerer:
             kt = next(iter(kts)) if len(kts) == 1 else Type.I64 if kts == {Type.I64, Type.BOOL} else None
             vts = {Type.STR_OPT if isinstance(e, ir.Const) and e.value is None else e.type for e in values}
             vt = (next(iter(vts)) if len(vts) == 1 else Type.STR_OPT if vts == {Type.STR, Type.STR_OPT} else None)
-            if kt not in ir.DICT_KEYS or vt not in ir.DICT_VALUES:
+            if vt is Type.DICT:                                         # dicts as values: all of one kinds
+                inner = {self.kinds_of(e, v) for e, v in zip(values, node.values)}
+                vt = next(iter(inner)) if len(inner) == 1 else None    # type: ignore[assignment]
+            if kt not in ir.DICT_KEYS or not (vt in ir.DICT_VALUES or isinstance(vt, tuple)):
                 raise Skip(line, f"`{_src(node)}` holds keys of type "
                                  + " and ".join(sorted(TYPE_NAME.get(t, t.value) for t in kts)) + " and values of type "
                                  + " and ".join(sorted(TYPE_NAME.get(t, t.value) for t in vts))
-                                 + ": an AOT dict has int, str or bool keys and int, float, bool, str or `str | None` "
-                                   "values, each of one type (CPython keeps every object as it is)")
+                                 + ": an AOT dict has int, str or bool keys and int, float, bool, str, `str | None` or "
+                                   "dict values, each of one type (CPython keeps every object as it is)")
             want = (kt, vt)
         keys = [self.dict_key(e, want[0], k, insert=True) for e, k in zip(keys, node.keys)]     # type: ignore[arg-type]
-        values = [self.dict_value(e, want[1], v) for e, v in zip(values, node.values)]
+        values = [self.dict_value(e, want[1], v) for e, v in zip(values, node.values)]   # type: ignore[arg-type]
         return ir.DictDisplay(Type.DICT, want, tuple(keys), tuple(values))
 
     def dict_compare(self, node: ast.Compare) -> ir.Expr:
@@ -2570,7 +2616,7 @@ class _Lowerer:
         if ka != kb:
             raise Skip(line, f"`{_src(node)}` compares a {_dict_name(ka)} with a {_dict_name(kb)}, which an AOT "
                              "program does not do")
-        if ka[1] is Type.F64:
+        if ir.dict_has_float(ka):
             raise Skip(line, f"`{_src(node)}`: comparing dicts of float tests each pair of values by identity first in "
                              "CPython (a NaN equals itself there), which an AOT program does not have (aot/identity)")
         return ir.DictCompare(Type.BOOL, a, b, isinstance(node.ops[0], ast.NotEq))
@@ -2599,30 +2645,30 @@ class _Lowerer:
                 raise Skip(line, "get() takes one or two arguments")
             key = self.dict_key(self.value(args[0]), kt, args[0], insert=False)
             if len(args) == 2:
-                return ir.DictGet(vt, d, key, self.dict_value(self.value(args[1]), vt, args[1]), get=True)
+                return ir.DictGet(ir.dict_vtype(vt), d, key, self.dict_value_of(args[1], vt), get=True)
             if vt not in (Type.STR, Type.STR_OPT):
                 raise Skip(line, f"`{_src(node)}` is None when the key is absent, and the values of this dict are "
-                                 f"{TYPE_NAME[vt]}: give a default (`.get(k, default)`)")
+                                 f"{_vname(vt)}: give a default (`.get(k, default)`)")
             return ir.DictGet(Type.STR_OPT, d, key, None, get=True)
         if m == "pop":
             if len(args) not in (1, 2):
                 raise Skip(line, "pop() takes one or two arguments")
             key = self.dict_key(self.value(args[0]), kt, args[0], insert=False)
-            dflt = self.dict_value(self.value(args[1]), vt, args[1]) if len(args) == 2 else None
+            dflt = self.dict_value_of(args[1], vt) if len(args) == 2 else None
             self.impure = True
             self.hoist_ok = False
-            return ir.DictPop(vt, d, key, dflt)
+            return ir.DictPop(ir.dict_vtype(vt), d, key, dflt)
         assert m == "setdefault"
         if len(args) == 1 and vt is Type.STR_OPT:
             args = [*args, ast.copy_location(ast.Constant(value=None), node)]
         if len(args) != 2:
             raise Skip(line, f"`{_src(node)}`: setdefault() takes a key and a default in an AOT program (the default "
-                             f"None is not a {TYPE_NAME[vt]})")
+                             f"None is not a {_vname(vt)})")
         key = self.dict_key(self.value(args[0]), kt, args[0], insert=True)
-        dflt = self.dict_value(self.value(args[1]), vt, args[1])
+        dflt = self.dict_value_of(args[1], vt)
         self.impure = True
         self.hoist_ok = False
-        return ir.DictSetDefault(vt, d, key, dflt)
+        return ir.DictSetDefault(ir.dict_vtype(vt), d, key, dflt)
 
     def dict_method_stmt(self, call: ast.Call, target: ast.Tuple | ast.List | None = None) -> list[ir.Stmt]:
         """`d.update(other)` (a dict of the same kinds), `d.clear()` and `d.popitem()` as statements, and
@@ -2647,11 +2693,9 @@ class _Lowerer:
                 raise Skip(line, "popitem() takes no argument")
             for var, want in zip(names, kinds):
                 if var in self.arrays or var in self.params:
-                    raise Skip(line, f"`{var}` is a list or a parameter, but `{_src(call)}` binds a {TYPE_NAME[want]}")
-                t = self.local_type(var, line)
-                if t is not want:
-                    raise Skip(line, f"`{var}` is {TYPE_NAME.get(t, t.value)}, but `{_src(call)}` of a "
-                                     f"{_dict_name(kinds)} gives a {TYPE_NAME[want]} there")
+                    raise Skip(line, f"`{var}` is a list or a parameter, but `{_src(call)}` binds a {_vname(want)}")
+                self.check_bound(var, self.local_type(var, line), want, f"`{_src(call)}` of a {_dict_name(kinds)}",
+                                 line)
                 if want is Type.I64 and var in self.acc_vars and not self.dead:
                     self.found_bounds[var] = _join(self.found_bounds.get(var), TOP)
                 self.refined.pop(var, None)
@@ -2666,13 +2710,19 @@ class _Lowerer:
         other = self.dict_coerce(self.dict_operand(call.args[0], kinds), kinds, call.args[0], "the argument of update()")
         return self.take() + [ir.DictUpdate(d, other)]
 
+    def check_bound(self, var: str, t: Type, want: Type | ir.DictKinds, what: str, line: int) -> None:
+        """`var`, a local of type `t`, is bound to a key or a value of the type `want` (a dict of those kinds)."""
+        if t is not ir.dict_vtype(want) or (isinstance(want, tuple) and self.name_kinds(var) != want):
+            got = _dict_name(self.name_kinds(var)) if t is Type.DICT else TYPE_NAME.get(t, t.value)
+            raise Skip(line, f"`{var}` is {got}, but {what} binds a {_vname(want)} there")
+
     def for_dict(self, node: ast.For) -> list[ir.Stmt] | None:
         """`for k in d`, `for k in d.keys()`, `for v in d.values()`, `for k, v in d.items()` (`ir.ForDict`); None when
         the loop is not over a dict."""
         it, line = node.iter, node.lineno
         view = "keys"
         if isinstance(it, ast.Call) and isinstance(it.func, ast.Attribute) and it.func.attr in ("keys", "values", "items") \
-                and self.is_dict_name(it.func.value):
+                and self.node_dict_kinds(it.func.value) is not None:
             if it.args or it.keywords:
                 raise Skip(line, f"{it.func.attr}() takes no argument")
             view, it = it.func.attr, it.func.value
@@ -2698,10 +2748,10 @@ class _Lowerer:
                 raise Skip(line, f"loop variable `{var}` is a list or a parameter")
             t = self.types.get(var) or self.local_type(var, line)
             if t is Type.OBJ:       # nothing but the loop binds it (Pyrefly gives a loop target no type)
-                self.types[var] = t = want
-            if t is not want:
-                raise Skip(line, f"loop variable `{var}` is {TYPE_NAME.get(t, t.value)}, but this loop over a "
-                                 f"{_dict_name(kinds)} binds {TYPE_NAME[want]}")
+                self.types[var] = t = ir.dict_vtype(want)
+                if isinstance(want, tuple):
+                    self.dict_locals[var] = want
+            self.check_bound(var, t, want, f"this loop over a {_dict_name(kinds)}", line)
         pre = self.take()
         killed = _stored_names(node.body) | set(names)
         head = {k: v for k, v in self.refined.items() if k not in killed}
@@ -2775,7 +2825,8 @@ class _Lowerer:
         """`del a[i]` / `del a[i:j:k]` of list names (tier S2a), one target after the other, as CPython deletes them."""
         out: list[ir.Stmt] = []
         for t in node.targets:
-            if isinstance(t, ast.Subscript) and not isinstance(t.slice, ast.Slice) and self.is_dict_name(t.value):
+            if isinstance(t, ast.Subscript) and not isinstance(t.slice, ast.Slice) \
+                    and self.node_dict_kinds(t.value) is not None:
                 d = self.value(t.value)
                 key = self.dict_key(self.value(t.slice), self.kinds_of(d, t.value)[0], t.slice, insert=False)
                 self.impure = True                                      # tier S2b: `del d[k]`
@@ -3290,6 +3341,25 @@ class _Lowerer:
             result = self.coerce(result, t, node, f"local `{name}`")
             self.note_assign(name, result)
             return self.take() + [ir.Assign(name, result)]
+        if self.info.aot and isinstance(target, ast.Subscript) and not isinstance(target.slice, ast.Slice) \
+                and self.node_dict_kinds(target.value) is not None:
+            # tier S2b: `d[k] op= v`: the dict and the key once, then d[k], v, the operation, and the store
+            d = self.value(target.value)
+            if not isinstance(d, ir.Local):
+                d = self.temp(d)
+            kt, vt = self.kinds_of(d, target.value)
+            if isinstance(vt, tuple):
+                raise Skip(line, f"`{_src(node)}`: an augmented assignment of a dict held by a dict is not in the AOT "
+                                 "mode (`|=` of dicts)")
+            key = self.dict_key(self.value(target.slice), kt, target.slice, insert=True)
+            if not _trivial(key):
+                key = self.temp(key)
+            self.impure = True
+            self.hoist_ok = False
+            load = self.temp(ir.DictGet(vt, d, key))       # (read before the value is evaluated, as BINARY_SUBSCR)
+            result = self.arith(op, load, self.sub(node.value), node, inplace=True)
+            result = self.dict_value(result, vt, node.value)
+            return self.take() + [ir.DictStore(d, key, result)]
         if isinstance(target, ast.Subscript):
             array, elem = self.array_of(target)
             index = self.index(target.slice)
@@ -4138,7 +4208,7 @@ class _Lowerer:
                 return math
 
         if self.info.aot and isinstance(func, ast.Attribute) and func.attr in DICT_METHOD_NAMES \
-                and self.is_dict_name(func.value):
+                and self.node_dict_kinds(func.value) is not None:
             return self.dict_method_expr(func, node)                     # tier S2b
         if self.info.aot and isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) \
                 and self.is_list_name(func.value.id) and func.attr in LIST_METHOD_NAMES:
