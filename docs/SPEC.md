@@ -1050,6 +1050,11 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `Status: partial`, `python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactCallbackTest.kt`; a value-returning slot
   (`() -> Float`) does not yet accept a Python callable (`M3ProofRenderTest.kt`
   `aValueReturningFunctionSlotDoesNotYetAcceptAPythonCallable`).
+  The klib walker (B-2) builds the same slot for a plain function-typed parameter of any declaration,
+  not only of a `@Composable` one, so `derivedStateOf`, `snapshotFlow` and
+  `CoroutineExceptionHandler(handler)` bind on Kotlin/Native as on the JVM (#191,
+  `GP/artifact/KlibFunctionSlotTest.kt`). A `@Composable` lambda still needs a `@Composable` owner,
+  and a `suspend` one is declined on both walkers.
   A parameter typed as a **functional interface** (a Java interface with one abstract method, such as
   `java.lang.Runnable`, or a Kotlin `fun interface`) whose method returns `Unit`/`void` and which is
   not generic takes a Python callable as well as a Kotlin handle (#216). Its slot type name is the
