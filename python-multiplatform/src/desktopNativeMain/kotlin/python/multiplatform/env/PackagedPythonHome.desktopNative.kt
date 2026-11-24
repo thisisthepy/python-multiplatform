@@ -77,13 +77,16 @@ internal object DesktopNativePythonHome {
 }
 
 /**
- * Hands a packaged prefix to CPython with `Py_SetPythonHome` before `Py_Initialize()`.
+ * Hands [path] to CPython with `Py_SetPythonHome` before `Py_Initialize()`.
  *
- * `Py_DecodeLocale` is documented by CPython as safe to call before initialisation and produces
- * storage that lives for the duration of the process, as `Py_SetPythonHome` requires.
+ * Per target, not here: `Py_DecodeLocale` and `Py_SetPythonHome` take `wchar_t`, which is 32 bits
+ * on macOS and Linux and 16 bits on MinGW. The cinterop commonizer therefore leaves both out of
+ * this shared source set's bindings, and its metadata compilation (which publishing runs) could
+ * not resolve them once `mingwX64Main` joined it (#521).
  */
-@OptIn(ExperimentalForeignApi::class)
-@Suppress("DEPRECATION")
+internal expect fun setPythonHome(path: String)
+
+/** Hands a packaged prefix to CPython (see [setPythonHome]) before `Py_Initialize()`. */
 internal actual fun applyPackagedPythonHome() {
     val home = DesktopNativePythonHome.resolve() ?: return
     try {
@@ -94,7 +97,5 @@ internal actual fun applyPackagedPythonHome() {
             e,
         )
     }
-    val wide = python.native.ffi.bindings.Py_DecodeLocale(home.path, null)
-        ?: throw IllegalStateException("Py_DecodeLocale could not decode the packaged Python home '${home.path}'.")
-    python.native.ffi.bindings.Py_SetPythonHome(wide)
+    setPythonHome(home.path)
 }
