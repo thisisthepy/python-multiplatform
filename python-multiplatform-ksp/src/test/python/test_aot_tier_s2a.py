@@ -1209,6 +1209,70 @@ def test_tuple_fields_and_method_tuple_parameters(tmp_path: Path):
     _compare(tmp_path, TUPLE_FIELDS, [["0"], ["1"], ["4"], ["-2"]])
 
 
+METHOD_TUPLE_RETURNS = """
+import sys
+
+
+class P:
+    a: int
+    w: str
+
+    def __init__(self, a: int, w: str) -> None:
+        self.a = a
+        self.w = w
+
+    def pair(self) -> tuple[int, str]:
+        return self.a, self.w * (self.a % 3)
+
+    def again(self) -> tuple[int, str]:
+        t = self.pair()
+        return t
+
+    def via(self) -> tuple[int, str]:
+        return self.pair()
+
+    def rem(self) -> int:
+        return self.a % 3
+
+    def total(self) -> int:
+        n, s = self.pair()
+        return n + len(s)
+
+
+class Q:
+    b: float
+
+    def __init__(self, b: float) -> None:
+        self.b = b
+
+    def pair(self) -> tuple[int, str]:
+        return int(self.b), "q"
+
+
+def main() -> None:
+    n = int(sys.argv[1])
+    p = P(n, "ab")
+    x, y = p.pair()
+    t = p.again()
+    u = p.via()
+    q = Q(n * 1.5)
+    v = q.pair()
+    print(x, y, t, u, v, t == u, p.total(), len(v), v[1] + y, t[0] < v[0], p.rem())
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_a_method_returning_a_tuple(tmp_path: Path):
+    """`a, b = o.m()`, `t = o.m()` and `return o.m()` of a method declared `-> tuple[int, str]` (two classes declare
+    `pair` the same way), the elements in the callee's out slots as for a module function; and a call of a method whose
+    body may deopt (an unproved `%`), which once left every caller uncompiled (verify/flag-may-deopt). Compared with
+    CPython on 4 inputs."""
+    _compare(tmp_path, METHOD_TUPLE_RETURNS, [["0"], ["4"], ["-5"], ["11"]])
+
+
 LIST_OF_TUPLES = """
 import sys
 
@@ -1509,6 +1573,9 @@ TUPLE_MAIN = '\n\ndef main() -> None:\n    print(f(1))\n\n\nif __name__ == "__ma
     ("class P:\n    def m(self, p: tuple[int, int]) -> int:\n        return p[0]\n\n\n"
      "class Q:\n    def m(self, p: int) -> int:\n        return p\n\n\n"
      "def f(i: int) -> int:\n    p = P()\n    return p.m((i, i))\n", "cannot be split by its name"),
+    ("class P:\n    def m(self) -> tuple[int, int]:\n        return 1, 2\n\n\n"
+     "class Q:\n    def m(self) -> tuple[int, str]:\n        return 1, 'a'\n\n\n"
+     "def f(i: int) -> int:\n    p = P()\n    t = p.m()\n    return t[0]\n", "a tuple value comes from"),
     ("class P:\n    ps: list[tuple[int, int]]\n\n    def __init__(self) -> None:\n        self.ps = []\n\n\n"
      "def f(i: int) -> int:\n    return len(P().ps)\n", "outside the AOT mode"),
     ("def f(i: int) -> bool:\n    t = (1, 2)\n    return t is t\n", "no tuple object yet"),

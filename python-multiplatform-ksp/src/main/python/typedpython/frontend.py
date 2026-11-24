@@ -2077,17 +2077,29 @@ class _Lowerer:
             names.append(e.id)
         if len(set(names)) != len(names):
             raise Skip(line, f"`{_src(target)}` binds a name twice")
-        if not (isinstance(value_node, ast.Call) and isinstance(value_node.func, ast.Name)
-                and value_node.func.id in self.info.aot_tuples and not self.is_local(value_node.func.id)):
-            raise Skip(line, f"`{_src(node)}`: a tuple is only unpacked from a call of a program function that "
-                             "returns a fixed `tuple[...]` of ints, floats, bools or strs, a tuple name or a display")
-        fname = value_node.func.id
+        method = None
+        if isinstance(value_node, ast.Call) and isinstance(value_node.func, ast.Attribute) \
+                and isinstance(value_node.func.value, ast.Name) and self.is_local(value_node.func.value.id):
+            # tier S2a: `a, b = o.m(...)` of a compiled method returning a fixed tuple, the same out slots
+            cls, _ = self.cls_of_name(value_node.func.value.id)
+            if cls is not None and f"{cls}.{value_node.func.attr}" in self.info.aot_tuples:
+                method = f"{cls}.{value_node.func.attr}"
+        if method is None and not (isinstance(value_node, ast.Call) and isinstance(value_node.func, ast.Name)
+                                   and value_node.func.id in self.info.aot_tuples
+                                   and not self.is_local(value_node.func.id)):
+            raise Skip(line, f"`{_src(node)}`: a tuple is only unpacked from a call of a program function or method "
+                             "that returns a fixed `tuple[...]` of ints, floats, bools or strs, a tuple name or a "
+                             "display")
+        fname = method or value_node.func.id                                    # type: ignore[union-attr]
         if fname not in self.env:
             raise Skip(line, f"`{fname}` is not compiled (see its own finding)")
         kinds = self.info.aot_tuples[fname]
         if len(names) != len(kinds):
             raise Skip(line, f"`{_src(node)}` unpacks {len(names)} names from the {len(kinds)} values `{fname}` returns")
-        call = self.direct_call(fname, value_node, tuple_ok=True)
+        if method is not None:
+            call = self.method_call(value_node.func, value_node)               # type: ignore[arg-type]
+        else:
+            call = self.direct_call(fname, value_node, tuple_ok=True)
         if not isinstance(call, ir.Call):
             raise Skip(line, f"the call `{_src(value_node)}` is not a direct call of a program function")
         for n, kind in zip(names, kinds):
@@ -3971,6 +3983,10 @@ class _Lowerer:
             args = [recv] + [self.value(a) for a in node.args]
             if not callee.pure:
                 self.impure = True
+            if callee.may_deopt:
+                # (as direct_call: the verifier counts a call of a may_deopt callee as a node that can deopt; without
+                # this a method with an unproved `%` left every caller uncompiled, verify/flag-may-deopt)
+                self.deopts = True
             return ir.Call(callee.returns, f"{cls}.{func.attr}", tuple(args))
         recv = ir.CheckMethod(Type.OBJ, ir.Local(Type.OBJ, func.value.id), cls, func.attr)
         self.hoist_ok = False

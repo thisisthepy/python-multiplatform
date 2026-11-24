@@ -132,6 +132,7 @@ def split(tree: ast.Module, kinds: Kinds) -> Split:
         elif isinstance(s, ast.ClassDef):
             functions += [(f"{s.name}.{m.name}", m, False) for m in s.body if isinstance(m, ast.FunctionDef)]
     methods, inits = _split_methods(tree, fields)
+    mreturns = _method_returns(tree, fields)
     params = {q: [annotation_shape(a.annotation) for a in fn.args.args] for q, fn, top in functions if top}
     lparams = {q: [annotation_list_shape(a.annotation) for a in fn.args.args] for q, fn, top in functions if top}
     returns = {q: annotation_shape(fn.returns) for q, fn, _ in functions}
@@ -139,7 +140,8 @@ def split(tree: ast.Module, kinds: Kinds) -> Split:
         if not top and not any(annotation_shape(a.annotation) or annotation_list_shape(a.annotation)
                                for a in fn.args.args) and not _mentions_tuples(fn, out.kinds.get(q, {}), fields):
             continue
-        work = _Function(q, fn, top, out.kinds.setdefault(q, {}), params, returns, lparams, fields, methods, inits)
+        work = _Function(q, fn, top, out.kinds.setdefault(q, {}), params, returns, lparams, fields, methods, inits,
+                         mreturns)
         original = copy.deepcopy(fn)
         try:
             work.run()
@@ -238,6 +240,21 @@ def _split_methods(tree: ast.Module, fields: dict[str, tuple[str, ...]]) -> tupl
     return methods, inits
 
 
+def _method_returns(tree: ast.Module, fields: dict[str, tuple[str, ...]]) -> dict[str, tuple[str, ...]]:
+    """The method names whose every declaration in the program's classes is a method returning a fixed tuple of one
+    shape: a call `o.m(...)` of one is then a tuple-returning call by its name alone (as `_split_methods`)."""
+    seen: dict[str, set[object]] = {}
+    for c in tree.body:
+        if isinstance(c, ast.ClassDef):
+            for st in c.body:
+                if isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name):
+                    seen.setdefault(st.target.id, set()).add("field")
+                elif isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    seen.setdefault(st.name, set()).add(annotation_shape(st.returns) or "other")
+    return {n: next(iter(v)) for n, v in seen.items()                          # type: ignore[misc]
+            if n not in fields and len(v) == 1 and isinstance(next(iter(v)), tuple)}
+
+
 def _mentions_tuples(fn: ast.FunctionDef, fkinds: dict[str, list[tuple[int, str]]],
                      fields: dict[str, tuple[str, ...]] | None = None) -> bool:
     if any(shape_of(k) or list_shape_of(k) for v in fkinds.values() for _, k in v):
@@ -329,11 +346,13 @@ class _Function:
                  lparams: dict[str, list[tuple[str, ...] | None]] | None = None,
                  fields: dict[str, tuple[str, ...]] | None = None,
                  methods: dict[str, list[tuple[str, ...] | None]] | None = None,
-                 inits: dict[str, list[tuple[str, ...] | None]] | None = None) -> None:
+                 inits: dict[str, list[tuple[str, ...] | None]] | None = None,
+                 mreturns: dict[str, tuple[str, ...]] | None = None) -> None:
         self.q, self.fn, self.top, self.kinds = qname, fn, top, kinds
         self.fields = fields or {}                          # tuple fields split by _split_fields -> their shapes
         self.methods = methods or {}                        # method names whose tuple parameters are split
         self.inits = inits or {}                            # class names whose `__init__` tuple parameters are split
+        self.mreturns = mreturns or {}                      # method names that return a fixed tuple -> its shape
         cls = qname.split(".", 1)[0]
         self.split_params = top or (fn.name == "__init__" and cls in self.inits) or (
             fn.name != "__init__" and fn.name in self.methods)
@@ -669,6 +688,9 @@ class _Function:
         if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id in self.returns \
                 and e.func.id not in self.locals:
             return self.returns[e.func.id]
+        if isinstance(e, ast.Call) and isinstance(e.func, ast.Attribute) and e.func.attr in self.mreturns \
+                and isinstance(e.func.value, ast.Name):
+            return self.mreturns[e.func.attr]        # `o.m(...)`: the lowering unpacks it (an ir.Unpack)
         return None
 
     def bind(self, name: str, value: ast.expr, line: int, annotated: bool) -> list[ast.stmt]:

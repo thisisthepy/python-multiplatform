@@ -443,8 +443,10 @@ method with the same parameter types; a tuple parameter of `__init__` likewise t
 the reason: a tuple field used as a value anywhere else (`for v in o.p`), a method whose name is declared differently
 elsewhere, a list of tuples field or method parameter. Classes cross the library boundary as opaque handles with no
 field accessors, so a split field changes nothing there.
+A method declared `-> tuple[...]` returns its elements through out slots as a module function does; `a, b = o.m()`,
+`t = o.m()` and `return o.m()` take them, by the method name alone when every class declares `m` with that return.
 Still to come in S2a: tuple objects where a tuple must be one value (returning a list of tuples, a list of tuples in a
-field or a method parameter, a method returning a tuple; dict keys in S2b).
+field or a method parameter; dict keys in S2b).
 
 **dict and set (S2b).** `dict[K, V]` with K int, str, bool or a tuple of those; V any S2 type. The layout is CPython's
 compact dict (an index table of slots and an entry array in insertion order, open addressing with CPython's
