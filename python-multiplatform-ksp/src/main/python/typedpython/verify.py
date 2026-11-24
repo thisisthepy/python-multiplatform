@@ -450,7 +450,9 @@ _OBJ_PRODUCERS = frozenset({Box, Global, GetAttr, CallObject, BinOp, Local, Call
                             ObjListIndex, ListPop})      # (tier S2a: a new reference to an item of a list[C])
 _CONVERSIONS = (-1, 97, 114, 115)          # Format.conversion: none, !a, !r, !s
 _VALUE_TYPES = (Type.I64, Type.F64, Type.BOOL, Type.OBJ)        # what a local may hold
-_AOT_STR_TYPES = (Type.STR, Type.STR_LIST, Type.STR_OPT)         # AOT mode, tier S1/S2a: what a local may also hold
+_AOT_STR_TYPES = (Type.STR, Type.STR_LIST, Type.STR_OPT, Type.STR_OPT_LIST)    # AOT mode, tier S1/S2a: what a local
+#                                                                                   may also hold
+_STR_LISTS = (Type.STR_LIST, Type.STR_OPT_LIST)   # the two `tpa_str_list` types (list[str] S1b, list[str | None] S2a)
 _AOT_VALUE_TYPES = (*_AOT_STR_TYPES, Type.OBJ_LIST)                # ... and a list[C] (tier S2a)
 _LOCAL_TYPES = _VALUE_TYPES + (Type.INT,)       # an INT lives only in a local or a temporary (SPEC N-13)
 _RETURN_TYPES = _VALUE_TYPES + (Type.NONE,)
@@ -461,7 +463,8 @@ _INT_OPS = frozenset({BinOpKind.ADD, BinOpKind.SUB, BinOpKind.MUL, BinOpKind.FLO
                       BinOpKind.OR, BinOpKind.XOR})
 _BITWISE_OPS = frozenset({BinOpKind.AND, BinOpKind.OR, BinOpKind.XOR})   # SPEC N-16
 _ELEMENT = {Type.F64_ARRAY: Type.F64, Type.I64_ARRAY: Type.I64, Type.BOOL_ARRAY: Type.BOOL,
-            Type.STR_LIST: Type.STR, Type.OBJ_LIST: Type.OBJ}     # (STR_LIST: tier S2a, the items of a list[str] method)
+            Type.STR_LIST: Type.STR, Type.OBJ_LIST: Type.OBJ,     # (STR_LIST: tier S2a, the items of a list[str] method)
+            Type.STR_OPT_LIST: Type.STR_OPT}
 _MATH_ARITY = {
     MathFunc.ATAN2: 2, MathFunc.HYPOT: 2, MathFunc.POW: 2, MathFunc.COPYSIGN: 2, MathFunc.FMOD: 2,
 }            # every other MathFunc: 1
@@ -1988,21 +1991,29 @@ class _Checker:
         if not isinstance(e.elts, tuple):
             self.error(STRUCTURE, "StrListDisplay elements are a tuple")
             return e
-        elts = tuple(self.str_operand(x, state, "element of a list of str") for x in e.elts)
-        self.result(e, Type.STR_LIST)
+        if e.type is Type.STR_OPT_LIST:                 # tier S2a: str and None items
+            elts = tuple(self.expr(x, state) for x in e.elts)
+            for x in elts:
+                self.slot(x, Type.STR_OPT, "element of a list of str | None")
+        else:
+            elts = tuple(self.str_operand(x, state, "element of a list of str") for x in e.elts)
+        self.result(e, e.type if e.type in _STR_LISTS else Type.STR_LIST)
         return dataclasses.replace(e, elts=elts)
 
     def e_StrListLen(self, e: StrListLen, state: _State) -> ir.Expr:
         value = self.expr(e.value, state)
-        self.slot(value, Type.STR_LIST, "argument of len()")
+        if getattr(value, "type", None) is not Type.STR_OPT_LIST:
+            self.slot(value, Type.STR_LIST, "argument of len()")
         self.result(e, Type.I64)
         return dataclasses.replace(e, value=value)
 
     def e_StrListIndex(self, e: StrListIndex, state: _State) -> ir.Expr:
         value = self.expr(e.value, state)
-        self.slot(value, Type.STR_LIST, "indexed list of str")
+        opt = getattr(value, "type", None) is Type.STR_OPT_LIST            # tier S2a: an item may be None
+        if not opt:
+            self.slot(value, Type.STR_LIST, "indexed list of str")
         index = self.int_operand(e.index, state, "index of a list of str")
-        self.result(e, Type.STR)
+        self.result(e, Type.STR_OPT if opt else Type.STR)
         return dataclasses.replace(e, value=value, index=index)
 
     # --- AOT mode, tier S2a: lists of class instances (OBJ_LIST) ---
@@ -2047,10 +2058,10 @@ class _Checker:
 
     def s_StrListStore(self, s: StrListStore, state: _State):
         at = self.list_changed(s.array, "store", state)
-        if at is not None and at is not Type.STR_LIST:
+        if at is not None and at not in _STR_LISTS:
             self.error(TYPE, f"StrListStore into '{s.array}' ({at.value})")
         value = self.expr(s.value, state)
-        self.slot(value, Type.STR, f"value stored into '{s.array}'")
+        self.slot(value, Type.STR_OPT if at is Type.STR_OPT_LIST else Type.STR, f"value stored into '{s.array}'")
         idx = self.expr(s.index, state)
         self.slot(idx, Type.I64, f"index of a store into '{s.array}'")
         return dataclasses.replace(s, index=idx, value=value), state
@@ -2086,11 +2097,13 @@ class _Checker:
         """`for var in value` over a str (AOT mode): `var` is a declared str local; zero iterations leave it as it
         was, so the state after the loop is the entry state met with every break state."""
         value = self.expr(s.value, state)
-        if getattr(value, "type", None) not in (Type.STR, Type.STR_LIST):
+        vt = getattr(value, "type", None)
+        if vt not in (Type.STR, *_STR_LISTS):
             self.error(TYPE, "ForStr iterates a str or a list of str")
         var = s.var
-        if not isinstance(var, str) or self.scalars.get(var) is not Type.STR:
-            self.error(TYPE, f"ForStr target {var!r} must be a declared str local")
+        want = Type.STR_OPT if vt is Type.STR_OPT_LIST else Type.STR     # tier S2a: the items of a list[str | None]
+        if not isinstance(var, str) or self.scalars.get(var) is not want:
+            self.error(TYPE, f"ForStr target {var!r} must be a declared {want.value} local")
         if var in self.entry:
             self.error(STRUCTURE, f"entry global '{var}' is assigned by the loop")
         for outer in self.loops:
@@ -2302,7 +2315,7 @@ class _Checker:
         """The list type of `array`: an array (list[float] / list[int]) or a list[str] local or parameter."""
         if array in self.arrays or array in self.larrays:
             return self.array(array, node, state)
-        if self.scalars.get(array) in (Type.STR_LIST, Type.OBJ_LIST):
+        if self.scalars.get(array) in (*_STR_LISTS, Type.OBJ_LIST):
             if state is not None and array not in state:
                 self.error(DA, f"list '{array}' may be used ({node}) before it is assigned")
             return self.scalars[array]
@@ -2379,7 +2392,7 @@ class _Checker:
 
     def s_ListRemove(self, s: ListRemove, state: _State):
         at = self.list_changed(s.array, "remove", state)
-        if at not in (Type.I64_ARRAY, Type.STR_LIST, Type.OBJ_LIST) and at is not None:
+        if at not in (Type.I64_ARRAY, *_STR_LISTS, Type.OBJ_LIST) and at is not None:
             self.error(TYPE, f"remove from '{s.array}' ({at.value}): only a list of int is searched")
         return dataclasses.replace(s, value=self.list_item(s.value, at, "remove", s.array, state)), state
 
@@ -2429,7 +2442,7 @@ class _Checker:
 
     def list_value_make(self, e, state: _State) -> ir.Expr:
         """A list[str] creation is a value; a list[float] / list[int] one stands only where `allocation` takes it."""
-        if e.type is Type.STR_LIST:
+        if e.type in _STR_LISTS:
             return self.list_make(e, state)
         return self.stray(e, state)
 
@@ -2438,7 +2451,7 @@ class _Checker:
             self.error(UNKNOWN, "ListCompare is an AOT-mode node")
         a = self.list_of(e.left, "comparison", state)
         b = self.list_of(e.right, "comparison", state)
-        if a is not None and b is not None and (a is not b or a not in (Type.I64_ARRAY, Type.STR_LIST)):
+        if a is not None and b is not None and (a is not b or a not in (Type.I64_ARRAY, *_STR_LISTS)):
             self.error(TYPE, f"comparison of '{e.left}' ({a.value}) and '{e.right}' ({b.value}): two lists of int or "
                              "two lists of str")
         if e.type is not Type.BOOL or type(e.op) is not CompareKind:
@@ -2457,7 +2470,7 @@ class _Checker:
         if not self.aot:
             self.error(UNKNOWN, "ListSearch is an AOT-mode node")
         at = self.list_of(e.array, e.op, state)
-        if at not in (Type.I64_ARRAY, Type.STR_LIST, Type.OBJ_LIST) and at is not None:
+        if at not in (Type.I64_ARRAY, *_STR_LISTS, Type.OBJ_LIST) and at is not None:
             self.error(TYPE, f"{e.op} of '{e.array}' ({at.value}): only a list of int or of str is searched")
         want = Type.BOOL if e.op == "in" else Type.I64
         if e.op not in ("index", "count", "in") or e.type is not want:
