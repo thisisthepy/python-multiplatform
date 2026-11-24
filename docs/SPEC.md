@@ -1244,6 +1244,21 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `libawt`, which links `libjvm`; the fork sends it to `Dispatchers.Main` when
   `compose.main.dispatcher=coroutines`, and the fixture supplies a single-thread one with no AWT.
   CI runs it on every push to `develop` (`desktop.yml`, job `notebook-e2e-native-image`, #251).
+- **B-10a** (#191, the Kotlin/Native desktop path; owner, 2026-11-21 21:55: "191, 443, 175 전부 1.0에
+  넣어", relayed by the leader. Using the fork's window module for this test is an agent proposal, not
+  confirmed.) On Kotlin/Native macOS the notebook's application runs in a real window: the fork's
+  AppKit and Metal window (`org.thisisthepy.compose.window:native-macos`, `MacosWindowPlatform`) hosts
+  `PythonAppView(module = "pythonx.compose.runtime", attribute = "app_root")` as its content. Read
+  through the window's own accessibility elements (what a screen reader is told; walked in process,
+  since a reader outside the process needs a trust a CI runner lacks), `import main` puts the initial
+  message in the window with the root composed once; cell 12's state write replaces it with no host
+  call and recomposes the root once; cell 15's `@app` redeclaration replaces the root; and every
+  presented frame was drawn at the window's size. Each new text is checked absent before the cell
+  that produces it. `Status: implemented` on macosArm64,
+  `python-multiplatform-compose/fixtures/notebook-native/src/macosArm64Test/.../NotebookWindowTest.kt`: passed
+  locally on 2026-11-25 (12 frames, none at another size), and failed with an empty reader when the window's
+  content was replaced by an empty composable. linuxX64 (`native-linux`) waits on the same icons klib as
+  the rest of notebook-native; mingwX64 has no fork window layer yet (`native-windows`).
 - **B-11** (#192) The artifact walker skips every declaration whose package has an `internal` segment
   (`*.internal` and `*.internal.*`, as in `androidx.compose.ui.internal`), on jars and on klibs. That is the
   Kotlin `.api` dump convention: a library that puts a declaration in such a package has declared it

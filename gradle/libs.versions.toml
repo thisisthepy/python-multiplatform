@@ -49,6 +49,9 @@ designsystem-deepin = { group = "org.thisisthepy.compose.designsystem", name = "
 designsystem-fluent = { group = "org.thisisthepy.compose.designsystem", name = "designsystem-fluent", version.ref = "compose-libraries" }
 designsystem-gnome = { group = "org.thisisthepy.compose.designsystem", name = "designsystem-gnome", version.ref = "compose-libraries" }
 designsystem-liquid-glass = { group = "org.thisisthepy.compose.designsystem", name = "designsystem-liquid-glass", version.ref = "compose-libraries" }
+# The fork's Kotlin/Native macOS window (compose-multiplatform-core-extended `extended/window`, AppKit and
+# Metal), for the K/N notebook app in a real window (#191, SPEC B-10a).
+compose-window-native-macos = { group = "org.thisisthepy.compose.window", name = "native-macos", version.ref = "compose-libraries" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
