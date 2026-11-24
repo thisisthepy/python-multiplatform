@@ -82,6 +82,14 @@ abstract class PythonArtifactBindingsTask : DefaultTask() {
     @get:Internal
     abstract val klibReaderClasspath: ConfigurableFileCollection
 
+    /**
+     * Klibs on the walk's classpath for **types only**, never walked for bindings: the Kotlin/Native
+     * stdlib ([kotlinNativeStdlibKlib], #191). Empty when it was not found.
+     */
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val klibTypeClasspath: ConfigurableFileCollection
+
     @get:OutputDirectory
     abstract val outputDirectory: DirectoryProperty
 
@@ -137,7 +145,7 @@ abstract class PythonArtifactBindingsTask : DefaultTask() {
                         excludes,
                         temporaryDir,
                         klibReaderClasspath.files,
-                        klibClasspath = resolvedKlibs,
+                        klibClasspath = resolvedKlibs + klibTypeClasspath.files.filter { isKlibArtifact(it) },
                     ).callables
                 }
                 // An artefact that contributed nothing gets no fragment: a fragment with no entries

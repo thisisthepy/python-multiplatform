@@ -1055,6 +1055,12 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `CoroutineExceptionHandler(handler)` bind on Kotlin/Native as on the JVM (#191,
   `GP/artifact/KlibFunctionSlotTest.kt`). A `@Composable` lambda still needs a `@Composable` owner,
   and a `suspend` one is declined on both walkers.
+  The klib walker also reads the Kotlin/Native stdlib for types only (the distribution's
+  `klib/common/stdlib`, found through `kotlin.native.home` or the konan data directory and the applied
+  Kotlin version), so a signature naming `CoroutineContext`, `KProperty<*>` or `Throwable` binds as the
+  jar walker binds it (`collectAsState`, `getValue`/`setValue`, `CoroutineExceptionHandler`; #191,
+  `GP/artifact/KotlinNativeStdlibTest.kt`, `klib-artifact` `WalkedKlibArtifactTableTest`). Agent proposal,
+  not confirmed by the owner: when the stdlib is not found, the walk proceeds without it, as before.
   A parameter typed as a **functional interface** (a Java interface with one abstract method, such as
   `java.lang.Runnable`, or a Kotlin `fun interface`) whose method returns `Unit`/`void` and which is
   not generic takes a Python callable as well as a Kotlin handle (#216). Its slot type name is the
