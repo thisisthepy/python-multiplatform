@@ -79,6 +79,9 @@ class Type(Enum):
     DICT = "dict"           # AOT mode only (tier S2b): a counted `tpa_dict` (runtime/tp_aot_dict.h); its key and value
     #                         types (`DictKinds`) are the `kinds` of the Param, `Function.return_kinds`, the display or
     #                         copy that makes it, or `Function.dict_kinds[name]` for a local
+    DICT_LIST = "list[dict]"  # AOT mode only (tier S2b): a list of dicts, a counted `tpa_obj_list` of `tpa_dict`; the
+    #                         dicts' kinds are kept where a DICT's are (the Param's / FieldDecl's `kinds`,
+    #                         `Function.return_kinds`, `Function.dict_kinds[name]`, the display's `kinds`)
 
 
 SCALARS = (Type.I64, Type.F64, Type.BOOL)
@@ -1322,7 +1325,8 @@ class DictCompare(Expr):
 
 @dataclass(frozen=True)
 class DictStr(Expr):
-    """`str(dict)` / `repr(dict)` / `{dict}` in an f-string / `print(dict)`: CPython's repr; type STR."""
+    """`str(dict)` / `repr(dict)` / `{dict}` in an f-string / `print(dict)`: CPython's repr; type STR. `value` is a DICT
+    or a DICT_LIST (a list of dicts, its list_repr)."""
 
     value: Expr
 
@@ -1388,8 +1392,55 @@ class DictPopItem(Stmt):
     value_var: str | None
 
 
-DICT_EXPRS = (DictDisplay, DictGet, DictContains, DictLen, DictPop, DictSetDefault, DictCopy, DictCompare, DictStr)
-DICT_STMTS = (DictStore, DictDelete, DictUpdate, DictClear, ForDict, DictPopItem)
+@dataclass(frozen=True)
+class DictListDisplay(Expr):
+    """`[d0, d1, ...]` of dicts of `kinds` (type DICT_LIST), each element evaluated in order; the list holds a new
+    reference to each (`[{}]`: a new dict; `[d]`: the dict `d` itself, shared). Empty only where a list of dicts of
+    `kinds` is wanted."""
+
+    kinds: DictKinds
+    elements: tuple[Expr, ...]
+
+
+@dataclass(frozen=True)
+class DictListLen(Expr):
+    """`len(value)` of a DICT_LIST (type I64)."""
+
+    value: Expr
+
+
+@dataclass(frozen=True)
+class DictListIndex(Expr):
+    """`value[index]` of a DICT_LIST (type DICT, the dict itself, a new reference); list semantics, IndexError("list
+    index out of range")."""
+
+    value: Expr
+    index: Expr
+
+
+@dataclass(frozen=True)
+class DictListStore(Stmt):
+    """`array[index] = value` of a DICT_LIST local or parameter: the value, then the index (CPython's order);
+    IndexError("list assignment index out of range")."""
+
+    array: str
+    index: Expr
+    value: Expr
+
+
+@dataclass(frozen=True)
+class ForDictList(Stmt):
+    """`for var in value:` over a DICT_LIST: the list is held for the loop, its length read before every step; `var` (a
+    DICT local of the list's kinds) takes each dict in turn."""
+
+    var: str
+    value: Expr
+    body: tuple[Stmt, ...]
+
+
+DICT_EXPRS = (DictDisplay, DictGet, DictContains, DictLen, DictPop, DictSetDefault, DictCopy, DictCompare, DictStr,
+              DictListDisplay, DictListLen, DictListIndex)
+DICT_STMTS = (DictStore, DictDelete, DictUpdate, DictClear, ForDict, DictPopItem, DictListStore, ForDictList)
 
 
 @dataclass(frozen=True)

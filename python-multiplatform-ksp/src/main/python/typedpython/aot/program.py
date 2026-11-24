@@ -133,6 +133,7 @@ class _Checker:
         self.func_return_class: dict[str, str] = func_return_class or {}
         self.func_return_list_class: dict[str, str] = {}   # tier S2a: set by check() after construction
         self.field_list_class: dict[tuple[str, str], str] = {}     # tier S2a: (class, list field) -> element class
+        self.field_dict_lists: set[tuple[str, str]] = set()         # tier S2b: (class, list-of-dicts field)
         self.list_classes: dict[str, str] = {}             # tier S2a: list[C] names of the function -> C
         self.method_return_class: dict[tuple[str, str], str] = method_return_class or {}
         self.field_class: dict[tuple[str, str], str] = field_class or {}
@@ -231,6 +232,8 @@ class _Checker:
             return
         elif _is_dict_annotation(ann):
             return                          # tier S2b: dict[K, V]
+        elif _is_dict_list_annotation(ann):
+            return                          # tier S2b: list[dict[K, V]]
         elif allow_tuple and _is_tuple_list_annotation(ann):
             return                          # tier S2a: one list per element (typedpython/tuples.py)
         else:
@@ -238,7 +241,8 @@ class _Checker:
                     if allow_tuple else "")
             self.rep.error(ann, "aot/type", ast.unparse(ann), f"the type `{ast.unparse(ann)}` is outside the "
                            f"AOT mode (int, float, bool, str, list[int], list[float], compiled classes{more}, dict[K, V] of int, str or "
-                           "bool keys and int, float, bool, str, `str | None` or such dict values, and None as a return type)")
+                           "bool keys and int, float, bool, str, `str | None` or such dict values, a list of such dicts, and None as a "
+                           "return type)")
 
     def signature(self, fn: ast.FunctionDef, is_method: bool = False) -> None:
         a = fn.args
@@ -279,8 +283,9 @@ class _Checker:
             t0 = s.targets[0]
             if (isinstance(s.value, ast.List) and not s.value.elts and isinstance(t0, ast.Attribute)
                     and isinstance(t0.value, ast.Name)
-                    and (self.var_classes.get(t0.value.id), t0.attr) in self.field_list_class):
-                pass                        # tier S2a: `self.items = []`, an empty list of the field's class
+                    and ((self.var_classes.get(t0.value.id), t0.attr) in self.field_list_class
+                         or (self.var_classes.get(t0.value.id), t0.attr) in self.field_dict_lists)):
+                pass                        # tier S2a: `self.items = []`, an empty list of the field's class (S2b: dicts)
             else:
                 self.expr(s.value)
             if len(s.targets) == 1 and isinstance(s.targets[0], ast.Name):
@@ -309,6 +314,7 @@ class _Checker:
                                             and (_is_str_list_annotation(s.annotation)
                                                  or _is_tuple_list_annotation(s.annotation)
                                                  or _is_list_annotation(s.annotation)
+                                                 or _is_dict_list_annotation(s.annotation)
                                                  or _list_class_name(s.annotation, self.class_names))):
                 self.expr(s.value)          # (`x: list[str] = []`: an empty list of str, tier S1b; of int, float and
                 #                             tuples, tier S2a)
@@ -831,6 +837,12 @@ def _is_dict_annotation(ann: ast.expr) -> bool:
                  or _is_dict_annotation(v)))         # (a dict as a value: tier S2b)
 
 
+def _is_dict_list_annotation(ann: ast.expr) -> bool:
+    """`list[dict[K, V]]` (tier S2b)."""
+    return (isinstance(ann, ast.Subscript) and isinstance(ann.value, ast.Name) and ann.value.id in ("list", "List")
+            and _is_dict_annotation(ann.slice))
+
+
 def _is_str_list_annotation(ann: ast.expr) -> bool:
     """`list[str]` (tier S1b) and `list[str | None]` (tier S2a)."""
     return (isinstance(ann, ast.Subscript) and isinstance(ann.value, ast.Name) and ann.value.id == "list"
@@ -1062,6 +1074,8 @@ def analyze(entry: Path, *, library: bool = False) -> Program:
                 lc = _list_class_name(st.annotation, class_names)
                 if lc is not None:
                     checker.field_list_class[(c.name, st.target.id)] = lc
+                if _is_dict_list_annotation(st.annotation):
+                    checker.field_dict_lists.add((c.name, st.target.id))
     for c in program.classes:
         for st in c.body:
             if isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name) and st.value is None:

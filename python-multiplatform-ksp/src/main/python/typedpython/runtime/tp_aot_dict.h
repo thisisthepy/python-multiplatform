@@ -892,4 +892,48 @@ static TPA_UNUSED int tpa_dict_repr(const tpa_dict *d, tpa_str **out)
     return rc;
 }
 
+/* ------------------------------------------------------------------------------------------
+ * A list of dicts (`list[dict[K, V]]`, ir DICT_LIST): a tpa_obj_list (tp_aot.h) whose items are dicts, each an owned
+ * reference, never NULL. A dict holds no list, so a list of dicts is acyclic: reference counts free it.
+ * ------------------------------------------------------------------------------------------ */
+
+static TPA_UNUSED void tpa_dict__vret(void *d)
+{
+    tpa_dict_retain((tpa_dict *)d);
+}
+
+static TPA_UNUSED void tpa_dict__vrel(void *d)
+{
+    tpa_dict_release((tpa_dict *)d);
+}
+
+/* repr(l) of a list of dicts: "[{'a': 1}, {}]", "[]" (list_repr). */
+static TPA_UNUSED int tpa_dict_list_repr(const tpa_obj_list *l, tpa_str **out)
+{
+    int64_t i, k = 0, n = l->len == 0 ? 2 : 2 * l->len + 1;
+    tpa_str **parts = (tpa_str **)calloc((size_t)n + 1, sizeof(tpa_str *));
+    int rc = 0;
+    if (parts == NULL) {
+        return tpa_raise(TPA_MemoryError, "");
+    }
+    parts[k++] = &tpa_str__latin1['['].h;
+    for (i = 0; i < l->len && rc == 0; i++) {
+        if (i > 0) {
+            rc = tpa_str_from_ascii(", ", 2, &parts[k++]);
+        }
+        if (rc == 0) {
+            rc = tpa_dict_repr((const tpa_dict *)l->d[i], &parts[k++]);
+        }
+    }
+    parts[k++] = &tpa_str__latin1[']'].h;
+    if (rc == 0) {
+        rc = tpa_str_join(parts, (size_t)k, out);
+    }
+    for (i = 0; i < k; i++) {
+        tpa_str_release(parts[i]);
+    }
+    free(parts);
+    return rc;
+}
+
 #endif /* TP_AOT_DICT_H */

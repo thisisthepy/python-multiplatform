@@ -488,8 +488,12 @@ last entry, truncates the entry count as CPython does, and raises `KeyError: 'po
 dict may then be a dict's value (`dict[str, dict[int, int]]`, any depth): `d[k][j] = v`, `d.setdefault(k, {})[j] = v`,
 methods and loops of `d[k]`, and an inner dict bound to a name is the same object (aliasing as in CPython). Its type is
 a part of the outer type, so it cannot hold the outer dict back: no cycle, and reference counts free it. `d[k] op= v`
-reads the dict and the key once, then `d[k]`, then the value, as CPython. Still to come in S2b: dicts in lists; tuple
-keys; the view objects outside a `for` loop; a dict across the library boundary; and `set`.
+reads the dict and the key once, then `d[k]`, then the value, as CPython. A `list[dict[K, V]]` follows: a list of
+counted dicts (the runtime's list of owned references), as a local, a parameter, a return and a field; displays (`[]`
+where the type is known), `append`, `insert`, `pop`, `extend`, `clear`, `reverse`, `xs[i]` (the dict itself) and
+`xs[i] = d`, `xs[i][k] = v`, `len`, `for d in xs` and the repr. Searching one (`in`, `index`, `count`, `remove`) compares
+dicts by value with an identity test first, and is refused until it is done; so is `==` of two lists of dicts. Still to
+come in S2b: tuple keys; the view objects outside a `for` loop; a dict across the library boundary; and `set`.
 
 **S2c.** List, dict and set comprehensions (a hidden local per comprehension variable, Python 3 scoping, the
 accumulator built in place), `enumerate`, `zip` (shortest), `reversed`, `range` objects as iterables, in `for` loops

@@ -452,6 +452,84 @@ def test_dicts_as_dict_values_and_augmented_stores(tmp_path: Path):
     _compare(tmp_path, NESTED, [["a,b,a,cc", "a", "1"], ["x", "x", "-1"], ["a,b", "a", "1"], ["a,b", "zz", "1"]])
 
 
+DICT_LISTS = """
+import sys
+
+
+def rows(text: str) -> list[dict[str, int]]:
+    out: list[dict[str, int]] = []
+    for line in text.split(";"):
+        row: dict[str, int] = {}
+        for cell in line.split(","):
+            if cell:
+                row[cell] = len(cell)
+        out.append(row)
+    return out
+
+
+def widest(table: list[dict[str, int]]) -> int:
+    best = 0
+    for row in table:
+        for k, v in row.items():
+            if v > best:
+                best = v
+    return best
+
+
+class Sheet:
+    pages: list[dict[int, str]]
+
+    def __init__(self) -> None:
+        self.pages = [{}]
+
+    def put(self, k: int, s: str) -> None:
+        self.pages[-1][k] = s
+        if len(self.pages[-1]) == 2:
+            self.pages.append({})
+
+
+def main() -> None:
+    t = rows(sys.argv[1])
+    print(t, len(t), widest(t))
+    first = t[0]
+    first["new"] = 99
+    print(t[0], t[-1])
+    t[0]["x"] = 1
+    t.insert(0, {"head": 0})
+    t.append(first)
+    last = t.pop()
+    last["popped"] = 1
+    print(t, last)
+    t[1] = {}
+    t.reverse()
+    print(t, len(t[0]))
+    u = [{"u": 1}]
+    u.extend(u)
+    u.extend(t)
+    u[0]["v"] = 2
+    print(u)
+    s = Sheet()
+    for w in sys.argv[2].split(","):
+        s.put(len(w), w)
+    print(s.pages)
+    for p in s.pages:
+        p.clear()
+    print(s.pages, f"{s.pages}", str(t))
+    t.clear()
+    print(t, t[int(sys.argv[3])])
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_lists_of_dicts(tmp_path: Path):
+    """list[dict[K, V]]: built, appended, inserted, popped, indexed (the dict read out is the same object), stored,
+    reversed, cleared, looped over, printed, as a field, a parameter and a return; IndexError as CPython's."""
+    _compare(tmp_path, DICT_LISTS, [["a,bb;ccc;", "x,yy,zzz", "0"], [";", "", "-1"]])
+
+
 WORDFREQ = Path(__file__).resolve().parents[4] / "benchmarks" / "typedpython" / "py" / "wordfreq.py"
 
 
@@ -485,6 +563,11 @@ MAIN = '\n\ndef main() -> None:\n    f()\n\n\nif __name__ == "__main__":\n    ma
     ("    d: dict[str, dict[str, int]] = {}\n    e = {'x': 'y'}\n    d['a'] = e\n    print(d)\n", "invariant"),
     ("    d: dict[str, dict[str, float]] = {'a': {}}\n    print(d == {'a': {}})\n", "aot/identity"),
     ("    d: dict[str, dict[str, int]] = {'a': {}}\n    d['a'] += 1\n    print(d)\n", "held by a dict"),
+    # a list of dicts: searched by value (identity first) is not in yet; lists are invariant
+    ("    ds = [{'a': 1}]\n    print(ds.index({'a': 1}))\n", "searching a list of dicts"),
+    ("    ds = [{'a': 1}]\n    print({'a': 1} in ds)\n", "searching a list of dicts"),
+    ("    ds = [{'a': 1}]\n    es: list[dict[str, float]] = ds\n    print(es)\n", "invariant"),
+    ("    ds = [{'a': 1}]\n    es = [{'b': 2}]\n    print(ds == es)\n", "comparing lists of dicts"),
 ])
 def test_what_a_dict_cannot_hold_yet_is_refused_with_the_reason(tmp_path: Path, body: str, reason: str):
     found = _rules(tmp_path, "def f() -> None:\n" + body + MAIN)
