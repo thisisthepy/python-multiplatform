@@ -231,8 +231,34 @@ an exported C function). No new dependency, workflow or kind of artefact.
 - A `gc.collect()` runs in one thread while another is inside an upcall.
 - An exception raised in Kotlin reaches the Python thread.
 
+**Implemented (2026-11-25, `feat/175-wasm-thread-upcalls`, not yet run).**
+- `.github/scripts/ft-wasm/_pm_upcall.c`, built into the 3.15t runtime by `build-wasm.sh` through
+  the build tree's `Modules/Setup.local`. It declares `Py_MOD_GIL_NOT_USED`, without which its
+  import would re-enable the GIL. Exports `pm_upcall_dispatch`, `pm_upcall_set_target`,
+  `pm_upcall_dispatch_index`; `build-wasm.sh` checks all three and that the module is built in.
+- An exception raised on the main thread is set on the main thread's thread state, so the
+  dispatcher takes it there (`PyErr_GetRaisedException`) and raises it again on the calling
+  thread (`PyErr_SetRaisedException`).
+- `cpython.mjs` `pmpUpcallDispatchIndex` / `pmpUpcallSetTarget` (optional: `-1` and a no-op on a
+  runtime without the module) and `UpcallEntry.entryIndex`: `ml_meth` is the dispatcher when it
+  exists, with the Kotlin entry as its target; otherwise the Kotlin entry, as before.
+- The C route is tested without Kotlin by `smoke.py` in the ft-wasm build job: a C self-test target
+  (`_pm_upcall.selftest`) reports the thread it ran on. Four threads make 50 calls each while the
+  main thread waits in `join()` and a fifth thread runs `gc.collect()`; every call must run on the
+  main thread, and `selftest("raise")` must raise the main thread's `ValueError` in the calling
+  thread.
+
 **Open.**
 - Whether `emscripten_sync_run_in_main_runtime_thread` is serviced inside the futex wait in Node
-  as well as in the browser. Its source says yes for both; to be shown by the tests.
+  as well as in the browser. Its source says yes for both; the smoke test shows it for Node.
+- The Kotlin-level tests (a Python thread calling a Kotlin callable through `UpcallEntry`) need the
+  wasmJs suite to run on the 3.15t runtime, which waits on Decision 6.
+- `ProxyTypeFactory`'s type slots (`tp_dealloc`, `tp_traverse`, the proxy methods) are also
+  `pmpRegisterUpcall` indices, so a proxy object used from a Python thread still traps. They have
+  other C signatures, so each needs its own dispatcher entry; next step. `tp_traverse` cannot take
+  this route: a free-threaded collection calls it with the world stopped, on whichever thread
+  collects, and the main thread cannot attach to run it until the world restarts, so routing it
+  would deadlock. It has to run in the collecting thread without Kotlin (for example, a C
+  traverse over the proxy's handle slot only).
 - It depends on step 1 (#515) and on the 3.15t runtime (Decision 6), to have a runtime to test
   against.

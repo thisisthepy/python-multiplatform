@@ -203,6 +203,16 @@ PATCH
 }
 patch_makefile_exports
 
+# ---- built-in module: upcalls from Python threads (#175 step 2) -----------
+# _pm_upcall.c (next to this script) routes a call made on a pthread to the main runtime
+# thread, where Kotlin/Wasm runs; see its header and docs/platforms/free-threaded-wasm.md.
+# Built in statically through the build tree's Modules/Setup.local (configure leaves an empty
+# one there; makesetup reads it and finds the source under $(srcdir)/Modules). Its exported
+# functions (EMSCRIPTEN_KEEPALIVE) are checked below; smoke.py tests the routing.
+cp "$here/_pm_upcall.c" Modules/_pm_upcall.c
+printf '*static*\n_pm_upcall _pm_upcall.c\n' >> "$hostdir/Modules/Setup.local"
+log "Setup.local: $(tr '\n' ' ' < "$hostdir/Modules/Setup.local")"
+
 # ---- host build -----------------------------------------------------------
 # make-host also runs `python.sh --version`, so a startup failure (for example the trampoline
 # instantiation above, with FT_WASM_TRAMPOLINE_PATCH=skip) fails this step.
@@ -234,6 +244,19 @@ const shared = (mem.flags & 2) !== 0;
 console.log(`python.wasm memory: ${mem.where} shared=${shared} min=${mem.min} max=${mem.max} pages`);
 process.exit(shared && mem.max !== null ? 0 : 1);
 NODE
+
+# The upcall dispatcher is a built-in module and its three functions are exported.
+timeout 300 "$PWD/$hostdir/python.sh" -c 'import sys; assert "_pm_upcall" in sys.builtin_module_names, sys.builtin_module_names' \
+    || die "_pm_upcall is not a built-in module (Setup.local not applied?)"
+node - "$hostdir/python.wasm" <<'NODE' || die "python.wasm does not export the _pm_upcall functions"
+const m = new WebAssembly.Module(require("fs").readFileSync(process.argv[2]));
+const names = new Set(WebAssembly.Module.exports(m).map((e) => e.name));
+const want = ["pm_upcall_dispatch", "pm_upcall_set_target", "pm_upcall_dispatch_index"];
+const missing = want.filter((n) => !names.has(n));
+console.log(`python.wasm _pm_upcall exports: ${want.filter((n) => names.has(n)).join(",")}${missing.length ? " MISSING " + missing.join(",") : ""}`);
+process.exit(missing.length ? 1 : 0);
+NODE
+log "ok: _pm_upcall built in and exported"
 
 # The interpreter itself: GIL off at run time, four real threads.
 run_smoke() {
@@ -276,6 +299,7 @@ cp "$hostdir/pyconfig.h" "$stage/include/$stdlib_name/"
     echo "LDFLAGS=$HOST_LDFLAGS"
     echo "trampoline patch: $TRAMPOLINE_PATCH"
     echo "link patch: wasmExports,wasmMemory,wasmTable in EXPORTED_RUNTIME_METHODS (embedding probe)"
+    echo "built-in module: _pm_upcall (upcalls from Python threads, #175 step 2)"
     echo "built from https://www.python.org/ftp/python/ (Python-$PY_VERSION.tgz)"
 } > "$stage/BUILD-INFO.txt"
 

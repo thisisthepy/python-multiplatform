@@ -687,7 +687,7 @@ external fun PyCFunction_NewEx(ml: Int, self: Int, module: Int): Int
 // -------------------------------------------------------------------------------------------------
 // The glue, and why it is here rather than in `python.wasm`
 //
-// These three are the *only* declarations in this file that are not CPython exports; they are
+// These are the *only* declarations in this file that are not CPython exports; they are
 // JavaScript functions in `src/wasmJsMain/resources/cpython.mjs`. Each exists because of something
 // Kotlin/Wasm cannot express, not because a JS hop was wanted:
 //
@@ -695,7 +695,10 @@ external fun PyCFunction_NewEx(ml: Int, self: Int, module: Int): Int
 //     CPython's `__indirect_function_table` has to happen from JS (`pmpRegisterUpcall`);
 //   * Kotlin/Wasm has no `call_indirect` primitive, so calling a C function *pointer* -- which is
 //     what `visitproc` and `tp_free` are -- has to go through `WebAssembly.Table.get`
-//     (`pmpCallVisit`, `pmpCallFree`).
+//     (`pmpCallVisit`, `pmpCallFree`);
+//   * a free-threaded runtime routes upcalls from Python threads through its `_pm_upcall`
+//     dispatcher, whose index and target only JS can read and set (`pmpUpcallDispatchIndex`,
+//     `pmpUpcallSetTarget`; #175 step 2).
 //
 // All three are cold: registration runs three times per process, and the other two run inside a
 // cyclic collection or a proxy's deallocation. Nothing on the ordinary downcall path touches
@@ -713,6 +716,18 @@ external fun PyCFunction_NewEx(ml: Int, self: Int, module: Int): Int
  */
 @WasmImport(MODULE, "pmpRegisterUpcall")
 external fun pmpRegisterUpcall(namePtr: Int): Int
+
+/**
+ * The table index of `_pm_upcall`'s `pm_upcall_dispatch`, or `-1` when the runtime has no such
+ * module (#175 step 2). That index is the same in every pthread Worker, unlike one from
+ * [pmpRegisterUpcall], which exists only in the main thread's table.
+ */
+@WasmImport(MODULE, "pmpUpcallDispatchIndex")
+external fun pmpUpcallDispatchIndex(): Int
+
+/** Makes the function at table index [index] the target `pm_upcall_dispatch` calls; no-op without `_pm_upcall`. */
+@WasmImport(MODULE, "pmpUpcallSetTarget")
+external fun pmpUpcallSetTarget(index: Int)
 
 /** `visit(obj, arg)`, where `visit` is the `visitproc` at table index [fp]. */
 @WasmImport(MODULE, "pmpCallVisit")

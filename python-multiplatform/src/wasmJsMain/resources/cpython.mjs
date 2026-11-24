@@ -597,6 +597,18 @@ export function pmpRegisterUpcall(namePtr) {
     }
 }
 
+// Upcalls from Python threads (#175 step 2). A free-threaded runtime built with the `_pm_upcall`
+// module (.github/scripts/ft-wasm/_pm_upcall.c) exports a dispatcher whose table index is the
+// same in every pthread Worker; an index from pmpRegisterUpcall exists only in the main thread's
+// table. Optional, so -1 (and a no-op) on a runtime without it, which keeps today's direct entry.
+export function pmpUpcallDispatchIndex() {
+    return typeof E.pm_upcall_dispatch_index === "function" ? E.pm_upcall_dispatch_index() : -1;
+}
+
+export function pmpUpcallSetTarget(index) {
+    if (typeof E.pm_upcall_set_target === "function") E.pm_upcall_set_target(index);
+}
+
 export function pmpCallVisit(fp, obj, arg) {
     return upcallTable.get(fp)(obj, arg);
 }
