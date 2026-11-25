@@ -29,11 +29,12 @@ driver has no install or package step for Emscripten, so the script assembles it
 
 These are agent proposals from the #175 investigation, not decisions:
 
-- **Emscripten**: the version CPython itself pins (`emscripten-version` in
-  `Platforms/emscripten/config.toml`, 4.0.19 for 3.15.0), not the 5.0.3 that
-  `build-cpython.sh` pins for `pyemscripten_2026_0`. Which version the library should use is
-  open. The dispatch input `emscripten_version` overrides it, so 5.0.3 can be tried without
-  editing the script.
+- **Emscripten**: 5.0.3, the version `build-cpython.sh` pins for `pyemscripten_2026_0`, not the
+  4.0.19 CPython 3.15.0 pins in `Platforms/emscripten/config.toml`. Leader 2026-11-26, Decision 10 (b) b1 in the team report pmp-binder.md: "b1 approved (one Emscripten 5.0.3 for PMP wasm and pypackpack #82)". Evidence:
+  build-ft-wasm run 45623531263 (5274e9e2) on 5.0.3 was green: the smoke test passed in both layouts
+  (`proxy-to-pthread` and `embedded`, 200 upcalls, slots traverse 3201 / clear 1600 / dealloc 1602),
+  the embedding probe passed `a` to `d`, and `python.wasm` imports a shared memory (min 320, max 32768
+  pages). The dispatch input `emscripten_version` still overrides it. Earlier runs used 4.0.19.
 - **Node**: 24, the version `config.toml` pins, passed as `--host-runner node`.
 - **Flags**:
 
@@ -170,8 +171,8 @@ Kotlin-side memory import).
 
 ## Not verified
 
-- The workflow has not run yet. Whether 3.15.0 configures, compiles and links with
-  `--disable-gil --enable-wasm-pthreads` on Emscripten 4.0.19 is unknown. The only real
+- (Superseded: 3.15.0 now configures, compiles and links with `--disable-gil
+  --enable-wasm-pthreads` on Emscripten 4.0.19 and 5.0.3, see above.) Before the first run the only real
   evidence is upstream's free-threaded build **without** pthreads (CPython gh-158997, on
   `main` with Emscripten 6.0.10) and Pyodide's **GIL** build with pthreads (3.14, Emscripten
   5.0.3). No project is known to have combined the two.
