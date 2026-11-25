@@ -4,15 +4,16 @@
 //
 // Reaches CPython the way python-multiplatform does: python.mjs is loaded as a module factory
 // with noInitialRun (main is never called), and everything goes through Module.wasmExports on the
-// JS main thread. Prints one line per check, "[x] PASS|FAIL: detail", and a final
-// FT-WASM-EMBED-PROBE-OK only when every check passed. A hang is not caught here; the caller
-// wraps this in `timeout` and reads the last "[x]" line it printed.
+// JS main thread. Step d runs smoke.py (beside this file) in that layout. Prints one line per
+// check, "[x] PASS|FAIL: detail", and a final FT-WASM-EMBED-PROBE-OK only when every check
+// passed. A hang is not caught here; the caller wraps this in `timeout` and reads the last "[x]"
+// line it printed.
 //
 // Node only. Node's main thread uses a real Atomics.wait; a browser's main thread busy-waits and
 // services proxied calls, so this probe says nothing about the browser.
 import fs from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = path.resolve(process.argv[2] ?? "");
 if (!process.argv[2] || !fs.existsSync(path.join(root, "python.mjs"))) {
@@ -163,5 +164,31 @@ try {
     pass("c3", "4 threads read os.py, joined, GIL stayed off, gc.collect() ran in a worker thread; PyGILState_Release returned");
 } catch (e) {
     fail("c", String(e && e.stack || e));
+}
+
+// ---- d. smoke.py with Python's main thread on the main runtime thread ---------------------------
+// The layout python-multiplatform embeds CPython in, which python.sh (-sPROXY_TO_PTHREAD) cannot
+// give: here the upcalls and the proxy type's slots are routed to a main thread that waits in
+// join(), and a main-thread upcall must run in place. smoke.py records the layout it saw in a
+// global, read back below, so a run that took the other branch fails here.
+if (!failed) {
+    try {
+        const smoke = path.join(path.dirname(fileURLToPath(import.meta.url)), "smoke.py");
+        if (!fs.existsSync(smoke)) throw new Error(`no ${smoke}`);
+        const gil = E.PyGILState_Ensure();
+        const code = cstr(
+            `__smoke = {"__name__": "__main__"}\n` +
+            `exec(compile(open(${JSON.stringify(smoke)}).read(), ${JSON.stringify(smoke)}, "exec"), __smoke)\n` +
+            `assert __smoke["layout"] == "embedded", f"smoke.py saw layout {__smoke['layout']!r}, expected 'embedded'"\n`,
+        );
+        console.log("    running smoke.py on the main runtime thread (a hang here is caught by the caller's timeout)");
+        const rc = E.PyRun_SimpleString(code);
+        E.free(code);
+        E.PyGILState_Release(gil);
+        if (rc !== 0) throw new Error(`smoke.py failed, PyRun_SimpleString returned ${rc} (Python traceback above)`);
+        pass("d", "smoke.py passed with layout=embedded: main-thread upcalls in place, thread upcalls and slots serviced while main waits in join()");
+    } catch (e) {
+        fail("d", String(e && e.stack || e));
+    }
 }
 finish();

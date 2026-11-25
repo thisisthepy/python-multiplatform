@@ -1,6 +1,11 @@
-# Smoke test for the free-threaded wasm32-emscripten build (#175), run by build-wasm.sh
-# under node. Prints one line starting with FT-WASM-SMOKE-OK, which the script greps for;
-# any failed assertion exits non-zero instead.
+# Smoke test for the free-threaded wasm32-emscripten build (#175). Prints one line starting with
+# FT-WASM-SMOKE-OK; any failed assertion raises instead. It runs twice, once per thread layout:
+#
+# - build-wasm.sh runs it with python.sh. CPython links with -sPROXY_TO_PTHREAD, so Python's main
+#   thread is a pthread and the main runtime thread sits in node's event loop.
+# - embed-probe.mjs runs it with Python's main thread on the main runtime thread, as
+#   python-multiplatform embeds CPython (main is never called). There the main thread waits in
+#   join() while other threads route calls to it.
 import sys
 import sysconfig
 import threading
@@ -46,7 +51,16 @@ import _pm_upcall
 
 assert sys._is_gil_enabled() is False, "importing _pm_upcall re-enabled the GIL"
 main_ident = threading.get_ident()
-assert _pm_upcall.selftest() == (main_ident, True), "a main-thread upcall did not run in place"
+embedded = _pm_upcall.is_main_runtime_thread()
+runtime_main = _pm_upcall.selftest()
+if embedded:
+    assert runtime_main == (main_ident, True), f"a main-thread upcall did not run in place: {runtime_main}"
+else:
+    # python.sh: the call from Python's main thread (a pthread) is itself routed.
+    assert runtime_main[1] is True and runtime_main[0] != main_ident, \
+        f"an upcall from Python's main pthread did not run on the main runtime thread: {runtime_main} (caller {main_ident})"
+runtime_main_ident = runtime_main[0]
+layout = "embedded" if embedded else "proxy-to-pthread"
 
 N_CALLS = 50
 upcall_results = [None] * N_THREADS
@@ -69,7 +83,8 @@ def collect_while_calling():
         gc.collect()
 
 
-# The main thread waits in join() while the threads call: it must service their calls there.
+# Embedded, the main runtime thread waits in join() while the threads call: it must service their
+# calls there. Under python.sh it services them from node's event loop.
 threads = [threading.Thread(target=call_kotlin_side, args=(i,)) for i in range(N_THREADS)]
 threads.append(threading.Thread(target=collect_while_calling))
 for t in threads:
@@ -81,16 +96,17 @@ assert not alive, f"upcall threads still running after join (a proxied call was 
 for i, r in enumerate(upcall_results):
     assert r is not None, f"upcall thread {i} did not finish"
     ident, seen = r
-    assert ident != main_ident, f"upcall thread {i} ran on the main thread"
-    assert seen == {(main_ident, True)}, f"upcall thread {i}: calls ran at {seen}, not on the main thread"
+    assert ident != runtime_main_ident, f"upcall thread {i} ran on the main runtime thread"
+    assert seen == {(runtime_main_ident, True)}, f"upcall thread {i}: calls ran at {seen}, not on the main runtime thread"
     assert upcall_errors[i] == "raised on the main thread", f"upcall thread {i}: exception was {upcall_errors[i]!r}"
 assert sys._is_gil_enabled() is False, "the GIL was re-enabled during the upcalls"
 
 # ---- the proxy type's slots from Python threads (#175) ----------------------------------------
 # _pm_upcall.Node's tp_traverse, tp_clear and tp_dealloc take the routes of the proxy type's
-# dispatchers, with C targets that count where they ran. Cycles of nodes are made on threads and
-# collected by a Python thread while the main thread waits in join(): the traverse then runs on
-# the main thread during the collector's stop-the-world pause, and clear and dealloc after it.
+# dispatchers, with C targets that count where they ran ("main" is the main runtime thread). Cycles
+# of nodes are made on threads and collected by a Python thread while Python's main thread waits in
+# join(): the traverse then runs on the main runtime thread during the collector's stop-the-world
+# pause, and clear and dealloc after it.
 # A deadlock shows as a thread still alive after join's timeout.
 N_CYCLES = 200
 gc.collect()
@@ -148,6 +164,6 @@ assert stats["dealloc"]["other"] == 0 and n_nodes <= stats["dealloc"]["main"] <=
     f"dealloc ran elsewhere or not for every node: {stats}"
 assert sys._is_gil_enabled() is False, "the GIL was re-enabled during the slot calls"
 
-print(f"FT-WASM-SMOKE-OK gil={sys._is_gil_enabled()} threads={N_THREADS} upcalls={N_THREADS * N_CALLS} "
+print(f"FT-WASM-SMOKE-OK layout={layout} gil={sys._is_gil_enabled()} threads={N_THREADS} upcalls={N_THREADS * N_CALLS} "
       f"slots=traverse:{stats['traverse']['main']},clear:{stats['clear']['main']},dealloc:{stats['dealloc']['main']} "
       f"abiflags={sys.abiflags} version={sys.version.split()[0]}")

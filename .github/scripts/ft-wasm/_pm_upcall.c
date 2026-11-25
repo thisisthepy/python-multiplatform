@@ -414,7 +414,19 @@ pm_reset_slot_stats(PyObject *module, PyObject *Py_UNUSED(ignored))
     Py_RETURN_NONE;
 }
 
+/* Where the calling thread is, without routing: True on the main runtime thread. Python's main
+ * thread is the main runtime thread when CPython is embedded (python-multiplatform calls it from
+ * the JS main thread, as embed-probe.mjs does), and a pthread under python.sh, which CPython links
+ * with -sPROXY_TO_PTHREAD. */
+static PyObject *
+pm_is_main_runtime_thread(PyObject *module, PyObject *Py_UNUSED(ignored))
+{
+    return PyBool_FromLong(emscripten_is_main_runtime_thread());
+}
+
 static PyMethodDef pm_methods[] = {
+    {"is_main_runtime_thread", pm_is_main_runtime_thread, METH_NOARGS,
+     "Whether the calling thread is the main runtime thread (not routed)."},
     {"selftest", pm_selftest, METH_VARARGS,
      "selftest([mode]) -> (thread ident, on main thread): runs on the main runtime thread "
      "through the upcall route; mode 'raise' raises ValueError there."},

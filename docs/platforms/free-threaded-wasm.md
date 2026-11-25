@@ -149,6 +149,10 @@ failure or hang does not lose the archive:
   and read `os.py`, joins them, asserts `sys._is_gil_enabled()` is False, and runs
   `gc.collect()` inside a worker thread. This exercises the main thread blocking in `join`
   while Workers need it to service proxied syscalls.
+- `d` (#175, 2026-11-25): `smoke.py` in the same interpreter, with Python's main thread on the
+  main runtime thread. It must report `layout=embedded`, so a main-thread upcall runs in place and
+  the routed upcalls and proxy slots are serviced while the main thread waits in `join()`. This is
+  the layout the library embeds CPython in; `python.sh` cannot give it (below).
 
 Node only. Node's main thread uses a real `Atomics.wait`; a browser's main thread busy-waits
 and services proxied calls, so a pass here does not show the browser works, and a Node deadlock
@@ -250,7 +254,9 @@ an exported C function). No new dependency, workflow or kind of artefact.
 
 **Open.**
 - Whether `emscripten_sync_run_in_main_runtime_thread` is serviced inside the futex wait in Node
-  as well as in the browser. Its source says yes for both; the smoke test shows it for Node.
+  as well as in the browser. Its source says yes for both; the embedding probe's step `d` shows
+  it for Node (under `python.sh` the main runtime thread is in Node's event loop instead, so the
+  smoke run there does not).
 - The Kotlin-level tests (a Python thread calling a Kotlin callable through `UpcallEntry`) need the
   wasmJs suite to run on the 3.15t runtime, which waits on Decision 6.
 - Whether a routed `tp_traverse` is safe inside a pause, below: the visit functions run on the
@@ -285,3 +291,17 @@ the type when the runtime exports them (`cpython.mjs` `pmpProxySlotDispatchIndex
   every node was freed.
 - It depends on step 1 (#515) and on the 3.15t runtime (Decision 6), to have a runtime to test
   against.
+
+**First run (2026-11-25, build-ft-wasm.yml run 45518065758).** The runtime built, and the export
+check found all eight `_pm_upcall` exports. `smoke.py` under `python.sh` then failed its first
+upcall check, "a main-thread upcall did not run in place". The cause is the test, not the route.
+CPython links `python.wasm` with `-sPROXY_TO_PTHREAD` (the link line in the log), so under
+`python.sh` Python's main thread is a pthread and the main runtime thread sits in Node's event loop.
+The call was routed to that thread and returned there, which `smoke.py` read as a failure because it
+took Python's main thread to be the main runtime thread. The embedding is the other layout: the
+library calls CPython from the JS main thread and never calls `main`. So `smoke.py` now asks
+`_pm_upcall.is_main_runtime_thread()` (not routed) and checks each layout as it is. Under
+`python.sh` the call from Python's main thread must be routed too, and every routed call must run on
+the one main runtime thread. In the embedded layout the main-thread call must run in place, and the
+embedding probe's step `d` runs `smoke.py` that way and requires `layout=embedded`. Nothing after
+the first check ran in that job, so the routes from threads and the proxy slots are still unrun.
