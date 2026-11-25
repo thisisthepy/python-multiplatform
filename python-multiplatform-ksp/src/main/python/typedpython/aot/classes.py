@@ -270,13 +270,13 @@ def analyze_classes(module: ir.Module, rel: str, class_lines: dict[str, int] | N
         for fd in decl.field_decls:
             # (tier S2a, the S2 review B4: a list field is never immutable-after-init, the list changes without any
             # field assignment)
-            if (cname, fd.name) not in mutating_stores and fd.type is not Type.OBJ_LIST:
+            if (cname, fd.name) not in mutating_stores and fd.type not in (Type.OBJ_LIST, Type.DICT):   # (S2b: a dict)
                 immutable_fields.add((cname, fd.name))
 
     def _is_ref_field(cname: str, fd: ir.FieldDecl) -> bool:
         if fd.type == Type.OBJ:
             return True
-        if fd.type in ir.ARRAYS or fd.type in (Type.STR, Type.STR_OPT, Type.OBJ_LIST):     # (STR: S1b; OBJ_LIST: S2a)
+        if fd.type in ir.ARRAYS or fd.type in (Type.STR, Type.STR_OPT, Type.OBJ_LIST, Type.DICT):   # (S1b; S2a; S2b)
             return True
         if fd.type == Type.I64 and (cname, fd.name) in tagged:
             return True

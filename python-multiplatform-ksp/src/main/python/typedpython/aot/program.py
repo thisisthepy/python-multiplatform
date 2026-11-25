@@ -133,6 +133,7 @@ class _Checker:
         self.func_return_class: dict[str, str] = func_return_class or {}
         self.func_return_list_class: dict[str, str] = {}   # tier S2a: set by check() after construction
         self.field_list_class: dict[tuple[str, str], str] = {}     # tier S2a: (class, list field) -> element class
+        self.field_dict_lists: set[tuple[str, str]] = set()         # tier S2b: (class, list-of-dicts field)
         self.list_classes: dict[str, str] = {}             # tier S2a: list[C] names of the function -> C
         self.method_return_class: dict[tuple[str, str], str] = method_return_class or {}
         self.field_class: dict[tuple[str, str], str] = field_class or {}
@@ -229,13 +230,21 @@ class _Checker:
             return
         elif allow_tuple and _is_tuple_annotation(ann):
             return
+        elif _is_dict_annotation(ann):
+            return                          # tier S2b: dict[K, V]
+        elif _is_set_annotation(ann):
+            return                          # tier S2b: set[T]
+        elif _is_dict_list_annotation(ann):
+            return                          # tier S2b: list[dict[K, V]]
         elif allow_tuple and _is_tuple_list_annotation(ann):
             return                          # tier S2a: one list per element (typedpython/tuples.py)
         else:
             more = (", a fixed tuple of int, float, bool and str, a list of such tuples"
                     if allow_tuple else "")
             self.rep.error(ann, "aot/type", ast.unparse(ann), f"the type `{ast.unparse(ann)}` is outside the "
-                           f"AOT mode (int, float, bool, str, list[int], list[float], compiled classes{more}, and None as a return type)")
+                           f"AOT mode (int, float, bool, str, list[int], list[float], compiled classes{more}, dict[K, V] of int, str or "
+                           "bool keys and int, float, bool, str, `str | None` or such dict values, a list of such dicts, set[T] of "
+                           "such keys, and None as a return type)")
 
     def signature(self, fn: ast.FunctionDef, is_method: bool = False) -> None:
         a = fn.args
@@ -272,11 +281,13 @@ class _Checker:
                                "`list[i] = value` are supported (no chained assignment, no attribute or slice target)")
             elif isinstance(s.targets[0], ast.Subscript):
                 self.subscript_parts(s.targets[0])
+                self.inner_receiver(s.targets[0].value)
             t0 = s.targets[0]
             if (isinstance(s.value, ast.List) and not s.value.elts and isinstance(t0, ast.Attribute)
                     and isinstance(t0.value, ast.Name)
-                    and (self.var_classes.get(t0.value.id), t0.attr) in self.field_list_class):
-                pass                        # tier S2a: `self.items = []`, an empty list of the field's class
+                    and ((self.var_classes.get(t0.value.id), t0.attr) in self.field_list_class
+                         or (self.var_classes.get(t0.value.id), t0.attr) in self.field_dict_lists)):
+                pass                        # tier S2a: `self.items = []`, an empty list of the field's class (S2b: dicts)
             else:
                 self.expr(s.value)
             if len(s.targets) == 1 and isinstance(s.targets[0], ast.Name):
@@ -305,6 +316,7 @@ class _Checker:
                                             and (_is_str_list_annotation(s.annotation)
                                                  or _is_tuple_list_annotation(s.annotation)
                                                  or _is_list_annotation(s.annotation)
+                                                 or _is_dict_list_annotation(s.annotation)
                                                  or _list_class_name(s.annotation, self.class_names))):
                 self.expr(s.value)          # (`x: list[str] = []`: an empty list of str, tier S1b; of int, float and
                 #                             tuples, tier S2a)
@@ -314,6 +326,7 @@ class _Checker:
                 self.rep.error(s, "aot/assign", "augmented assignment",
                                f"the augmented assignment `{ast.unparse(s)}` is outside the first AOT step")
             elif isinstance(s.target, ast.Subscript):
+                self.inner_receiver(s.target.value)
                 self.expr(s.target.slice)
             self.expr(s.value)
         elif isinstance(s, ast.If):
@@ -335,6 +348,7 @@ class _Checker:
             for t in s.targets:
                 if self.subscript_target(t) or self.slice_target(t):
                     self.subscript_parts(t)
+                    self.inner_receiver(t.value)        # type: ignore[attr-defined]
                 else:
                     self.rep.error(s, "aot/statement", "del", f"`del {ast.unparse(t)}` is outside the AOT mode (only "
                                    "`del a[i]` and `del a[i:j]` of a list)")
@@ -349,8 +363,24 @@ class _Checker:
 
     def subscript_target(self, t: ast.expr) -> bool:
         """`name[index]` (not a slice): a store into a list."""
+        if isinstance(t, ast.Subscript) and self.attribute_target(t.value) and not isinstance(t.slice, ast.Slice):
+            return True                     # tier S2b: `obj.d[k] = v` of a dict field (the front end checks the type)
+        if isinstance(t, ast.Subscript) and not isinstance(t.slice, ast.Slice) and self.inner_dict(t.value):
+            return True                     # tier S2b: `d[k][j] = v`, `d.setdefault(k, {})[j] = v`
         return isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and not isinstance(t.slice, ast.Slice) \
             and t.value.id not in {"sys"}
+
+    @staticmethod
+    def inner_dict(e: ast.expr) -> bool:
+        """Tier S2b: `d[k]` or `d.get(...)` / `d.setdefault(...)` / `d.pop(...)`, which may be a dict held as a value
+        of a dict (the front end checks the types)."""
+        return (isinstance(e, ast.Subscript) and not isinstance(e.slice, ast.Slice)) or (
+            isinstance(e, ast.Call) and isinstance(e.func, ast.Attribute) and e.func.attr in ("get", "setdefault", "pop"))
+
+    def inner_receiver(self, e: ast.expr) -> None:
+        """The dict of `e[k] = v` when it is not a name or a field (`d[k][j] = v`): checked as an expression."""
+        if self.inner_dict(e):
+            self.expr(e)
 
     def slice_target(self, t: ast.expr) -> bool:
         """`name[i:j:k]`: a slice of a list (tier S2a: slice assignment and `del`)."""
@@ -390,7 +420,11 @@ class _Checker:
             if lcls is not None and isinstance(s.target, ast.Name):
                 self.var_classes[s.target.id] = lcls        # tier S2a: the variable of a loop over a list[C]
         if not isinstance(s.target, ast.Name) and not (
-                isinstance(s.target, ast.Tuple) and s.target.elts and all(isinstance(x, ast.Name) for x in s.target.elts)):
+                isinstance(s.target, ast.Tuple) and s.target.elts and all(
+                    isinstance(x, ast.Name) or (isinstance(x, ast.Tuple) and x.elts and i == 0
+                                                and all(isinstance(y, ast.Name) for y in x.elts))
+                    for i, x in enumerate(s.target.elts))):
+            # (tier S2b: `for (a, b), v in d.items()`, a tuple key bound element by element)
             # (tier S2a: names for the elements of a list of tuples, which typedpython/tuples.py checks)
             self.rep.error(s, "aot/statement", "for", "the loop target must be one name, or names for the elements of "
                            "a list of tuples")
@@ -522,6 +556,16 @@ class _Checker:
             self.expr(e.orelse)
         elif isinstance(e, ast.List):
             self.list_display(e)
+        elif isinstance(e, ast.Set):
+            for x in e.elts:                        # tier S2b: a set display (the front end checks the types)
+                self.expr(x)
+        elif isinstance(e, ast.Dict):
+            for k, v in zip(e.keys, e.values):      # tier S2b: a dict display (the front end checks the types)
+                if k is None:
+                    self.rep.error(v, "aot/container", "dict display", "`**` in a dict display is outside the AOT mode")
+                else:
+                    self.expr(k)
+                self.expr(v)
         elif isinstance(e, ast.Tuple) and e.elts and not any(isinstance(x, ast.Starred) for x in e.elts):
             for x in e.elts:                # tier S2a: a tuple display (the front end checks where it is used)
                 self.expr(x)
@@ -635,6 +679,16 @@ class _Checker:
                     return
                 self.expr(a.args[0])
                 return
+            elif n == "set":
+                if c.keywords or len(c.args) > 1 or (c.args and not isinstance(c.args[0], ast.Name)):
+                    self.rep.error(c, "aot/builtin", n, "`set()` is only supported as `set()` and `set(s)` of a set in "
+                                   "the AOT mode")
+                return                      # tier S2b: an empty set, a copy (the front end checks s is a set)
+            elif n == "dict":
+                if not (len(c.args) == 1 and isinstance(c.args[0], ast.Name) and not c.keywords):
+                    self.rep.error(c, "aot/builtin", n, "`dict()` is only supported as `dict(d)` of a dict in the AOT "
+                                   "mode")
+                return                      # tier S2b: `dict(d)`, a copy (the front end checks d is a dict)
             elif n == "print":
                 self.rep.error(c, "aot/print-use", "print", "print is only supported as a statement of its own")
             elif n == "range":
@@ -689,11 +743,13 @@ class _Checker:
                 elif not (isinstance(a, ast.Constant) and a.value is None):
                     self.expr(a)
             return
-        elif isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.attr in LIST_METHODS \
+        elif isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.attr in LIST_METHODS | DICT_METHODS \
                 and not (f.value.id in ("sys", "math", "time") and f.value.id not in self.shadow):
-            pass                            # tier S2a: a list method (the front end checks the receiver is a list)
-        elif isinstance(f, ast.Attribute) and isinstance(f.value, ast.Attribute) and f.attr in LIST_METHODS:
-            self.expr(f.value)              # tier S2a: a method of a list field (`self.items.append(x)`)
+            pass                            # tier S2a / S2b: a list or dict method (the front end checks the receiver)
+        elif isinstance(f, ast.Attribute) and isinstance(f.value, ast.Attribute) and f.attr in LIST_METHODS | DICT_METHODS:
+            self.expr(f.value)              # tier S2a / S2b: a method of a list or dict field (`self.items.append(x)`)
+        elif isinstance(f, ast.Attribute) and f.attr in DICT_METHODS and self.inner_dict(f.value):
+            self.expr(f.value)              # tier S2b: a method of a dict held by a dict (`d[k].get(j, 0)`)
         else:
             self.rep.error(f, "aot/call", ast.unparse(f), f"the call of `{ast.unparse(f)}` is outside the first AOT step")
         for a in c.args:
@@ -739,6 +795,11 @@ def _is_list_annotation(ann: ast.expr) -> bool:
 
 # tier S2a: the methods of a list (design 4.3.2)
 LIST_METHODS = frozenset({"append", "insert", "extend", "clear", "reverse", "remove", "pop", "index", "count"})
+# tier S2b: the dict methods (the front end checks the receiver is a dict)
+DICT_METHODS = frozenset({"get", "setdefault", "pop", "popitem", "keys", "values", "items", "copy", "clear", "update",
+                          # (tier S2b: the set methods; the front end checks the receiver)
+                          "add", "discard", "remove", "union", "intersection", "difference", "symmetric_difference",
+                          "issubset", "issuperset", "isdisjoint"})
 
 
 def _list_class_name(ann: ast.expr | None, class_names) -> str | None:
@@ -775,6 +836,40 @@ def _is_optional_str_annotation(ann: ast.expr) -> bool:
             return False
     text = ast.unparse(ann).replace(" ", "")
     return text in ("str|None", "None|str", "Optional[str]", "typing.Optional[str]")
+
+
+def _is_dict_annotation(ann: ast.expr) -> bool:
+    """`dict[K, V]` with K int, str or bool and V int, float, bool, str or `str | None` (tier S2b)."""
+    if isinstance(ann, ast.Constant) and isinstance(ann.value, str):
+        try:
+            ann = ast.parse(ann.value, mode="eval").body
+        except SyntaxError:
+            return False
+    if not (isinstance(ann, ast.Subscript) and isinstance(ann.value, ast.Name) and ann.value.id in ("dict", "Dict")
+            and isinstance(ann.slice, ast.Tuple) and len(ann.slice.elts) == 2):
+        return False
+    k, v = ann.slice.elts
+    if isinstance(k, ast.Subscript) and isinstance(k.value, ast.Name) and k.value.id in ("tuple", "Tuple"):
+        items = k.slice.elts if isinstance(k.slice, ast.Tuple) else [k.slice]
+        if items and all(isinstance(x, ast.Name) and x.id in ("int", "str", "bool") for x in items):
+            k = ast.Name(id="int")                  # (tier S2b: a tuple key of ints, strs and bools)
+    return (isinstance(k, ast.Name) and k.id in ("int", "str", "bool")
+            and ((isinstance(v, ast.Name) and v.id in ("int", "float", "bool", "str")) or _is_optional_str_annotation(v)
+                 or _is_dict_annotation(v)))         # (a dict as a value: tier S2b)
+
+
+def _is_set_annotation(ann: ast.expr) -> bool:
+    """`set[T]`, T int, str, bool or a tuple of them (tier S2b)."""
+    if not (isinstance(ann, ast.Subscript) and isinstance(ann.value, ast.Name) and ann.value.id in ("set", "Set")):
+        return False
+    return _is_dict_annotation(ast.Subscript(value=ast.Name(id="dict"), slice=ast.Tuple(elts=[ann.slice,
+                                                                                             ast.Name(id="int")])))
+
+
+def _is_dict_list_annotation(ann: ast.expr) -> bool:
+    """`list[dict[K, V]]` (tier S2b)."""
+    return (isinstance(ann, ast.Subscript) and isinstance(ann.value, ast.Name) and ann.value.id in ("list", "List")
+            and _is_dict_annotation(ann.slice))
 
 
 def _is_str_list_annotation(ann: ast.expr) -> bool:
@@ -1008,6 +1103,8 @@ def analyze(entry: Path, *, library: bool = False) -> Program:
                 lc = _list_class_name(st.annotation, class_names)
                 if lc is not None:
                     checker.field_list_class[(c.name, st.target.id)] = lc
+                if _is_dict_list_annotation(st.annotation):
+                    checker.field_dict_lists.add((c.name, st.target.id))
     for c in program.classes:
         for st in c.body:
             if isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name) and st.value is None:

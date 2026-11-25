@@ -461,6 +461,50 @@ iteration` exactly where CPython raises it). `set[K]`: `add`, `discard`, `remove
 `&` `-` `^` into new sets, `==`; iterating a set, or printing it, depends on CPython's hash table and seed, so it is
 `aot/set-order` except through `sorted(...)`, as section 4.3 says.
 
+First step of S2b, as implemented (amendment 2026-11-25, agent proposal, not confirmed). The runtime
+(`runtime/tp_aot_dict.h`) mirrors Objects/dictobject.c of CPython 3.14 and later rule for rule: the table sizes
+(`calculate_log2_keysize` is the smallest power of two of at least `max(minsize, 8)`; 3.13 rounded `minsize | 8`
+up, which gives other tables after a copy or an update), the presize of a display, the insertion resize, deleted
+entries left in place until a resize compacts them, `popitem` truncating the entry count, `clear`, the clone and
+merge paths of `copy` and `update`, and the iterator's two checks with CPython's messages. A test runs thousands of
+random operation scripts on the runtime and on CPython's dict and compares what each prints, live iterators
+included (`test_aot_dict_runtime.py`). The front end compiles `dict[K, V]` with K int, str or bool and V int, float,
+bool, str or `str | None`, as locals, parameters and returns of module functions: displays, `d[k]`, `d[k] = v`,
+`del d[k]`, `in` / `not in`, `get` (with a default; without one for str values), `setdefault`, `pop` (with and
+without a default), `len`, truth, `update` from a dict, `copy()` and `dict(d)`, `clear()`, `==` / `!=`, `print`,
+`str`, `repr` and f-strings, and `for` loops over the dict, `keys()`, `values()` and `items()`. A dict holds its
+ints as `tpa_int` (any int; aot/rep.py), so a big int is a key like any other. A display is built as CPython's
+bytecode builds it (chunks of 17 pairs; a chunk of at most 15 is presized, a longer one starts empty, later chunks
+are merged), so a loop that changes the dict sees CPython's layout. `print` makes the repr of a dict (and of a list)
+argument when it writes it, as CPython's print does. Refused with the reason: a value of another type than the
+dict's (CPython keeps the object, so a bool in a `dict[str, int]` or an int in a `dict[str, float]` would print
+differently), a bool key inserted into a dict of int (a loop would give a bool where the program reads an int; a
+bool may look a key up), `==` of dicts of float values (CPython tests identity first: `aot/identity`), and a dict of
+other kinds passed where a dict is wanted (dicts are invariant). Dict fields of classes, and dicts as method
+parameters and returns, follow (same day): a field read of a dict is held for the operation, as a list field's, and
+a class with a dict field is always a heap object. `popitem()` follows: unpacked into two names (`k, v =
+d.popitem()`), bound to a tuple, returned from a function declared `-> tuple[K, V]`, or as a statement; it takes the
+last entry, truncates the entry count as CPython does, and raises `KeyError: 'popitem(): dictionary is empty'`. A
+dict may then be a dict's value (`dict[str, dict[int, int]]`, any depth): `d[k][j] = v`, `d.setdefault(k, {})[j] = v`,
+methods and loops of `d[k]`, and an inner dict bound to a name is the same object (aliasing as in CPython). Its type is
+a part of the outer type, so it cannot hold the outer dict back: no cycle, and reference counts free it. `d[k] op= v`
+reads the dict and the key once, then `d[k]`, then the value, as CPython. A `list[dict[K, V]]` follows: a list of
+counted dicts (the runtime's list of owned references), as a local, a parameter, a return and a field; displays (`[]`
+where the type is known), `append`, `insert`, `pop`, `extend`, `clear`, `reverse`, `xs[i]` (the dict itself) and
+`xs[i] = d`, `xs[i][k] = v`, `len`, `for d in xs` and the repr. Searching one (`in`, `index`, `count`, `remove`) compares
+dicts by value with an identity test first, and is refused until it is done; so is `==` of two lists of dicts. Tuple
+keys follow (`dict[tuple[int, str], V]`, elements int, str or bool): a key tuple is a counted runtime tuple made from
+its elements in order (`d[a, b]`, `d[t]`, `t in d`, `get` / `pop` / `setdefault`), with CPython's equality and repr
+(`(1, 'a')`, `KeyError: (5, 0)`); a loop or `popitem` binds the key to a tuple name (split into its element locals, as
+any tuple) or to one name per element (`for (i, j), v in d.items()`). An element of another type than the key's (a bool
+for an int) is refused: the tuple would keep it. `set[T]` follows (T int, str, bool or a tuple of them): a dict whose
+values are unused, as a local, a parameter, a return and a field; displays, `set()`, `set(s)`, `add`, `discard`,
+`remove` (`KeyError(x)`), `clear`, `copy`, `update`, `in`, `len`, truth, `==`, the subset tests (`<=`, `<`, `>=`, `>`,
+`issubset`, `issuperset`, `isdisjoint`) and `|`, `&`, `-`, `^` (and the one-set `union`, `intersection`, `difference`,
+`symmetric_difference`). What depends on the order of a set (a loop over one, its repr, `pop()`) follows CPython's set
+table, which this one is not: refused as aot/set-order. Still to come in S2b: the view objects outside a `for` loop; a
+dict across the library boundary; `set(xs)` of a list.
+
 **S2c.** List, dict and set comprehensions (a hidden local per comprehension variable, Python 3 scoping, the
 accumulator built in place), `enumerate`, `zip` (shortest), `reversed`, `range` objects as iterables, in `for` loops
 and comprehensions; `sum`, `any`, `all`, `min` / `max` of an iterable (`ValueError: min() iterable argument is
