@@ -131,6 +131,15 @@ has a `-sEXPORTED_FUNCTIONS=` list it also ensures `_malloc,_free,_Py_Version` a
 missing list is only logged: whether 3.15 still exports C symbols through `-sMAIN_MODULE`
 (as 3.14 does) is unverified, and the probe fails loudly if an export it needs is absent.
 
+The edit goes into both `Makefile` and `Makefile.pre`. Adding `_pm_upcall` to
+`Modules/Setup.local` makes make re-run makesetup, which regenerates `Makefile` from
+`Makefile.pre`; with only `Makefile` patched, the edit was silently lost and pmp17's probe failed
+at `a` with `Module.wasmMemory is undefined`. Reproduced locally (relinking with the regenerated
+Makefile: no `Module["wasmMemory"]=` in `python.mjs`, the same `[a] FAIL`), then fixed: with both
+files patched, the regenerated Makefile keeps the list and the probe passes `a` to `d`. After
+`make-host` the script now checks that `python.mjs` assigns `Module.wasmExports`, `wasmMemory`
+and `wasmTable`, so a lost edit fails the build instead of the probe.
+
 The workflow step `Embedding probe (no main)` runs after the archive upload, so a probe
 failure or hang does not lose the archive:
 `timeout 600 node .github/scripts/ft-wasm/embed-probe.mjs <unpacked archive>`. It prints one

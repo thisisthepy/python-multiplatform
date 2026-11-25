@@ -162,43 +162,42 @@ log "ok: host configured with --disable-gil --enable-wasm-pthreads, ABIFLAGS=t"
 # unverified, so _malloc,_free,_Py_Version are appended to that list when it exists (harmless if
 # MAIN_MODULE already exports everything); the probe then checks the exports it needs and
 # fails loudly if one is missing.
+# Both Makefile and Makefile.pre are patched: adding Modules/Setup.local (below) makes make
+# re-run makesetup, which regenerates Makefile from Makefile.pre, so a patch of Makefile alone
+# is silently dropped (pmp17: the probe found Module.wasmMemory undefined). The linked
+# python.mjs is checked after make-host.
 patch_makefile_exports() {
-    python3 - "$hostdir/Makefile" <<'PATCH'
+    python3 - "$hostdir/Makefile" "$hostdir/Makefile.pre" <<'PATCH'
 import re
 import sys
 from pathlib import Path
-p = Path(sys.argv[1]); t = p.read_text()
 
-def add_runtime_methods(m):
-    items = m.group(2).split(",")
-    for extra in ("wasmExports", "wasmMemory", "wasmTable"):
-        if extra not in items:
-            items.append(extra)
-    return m.group(1) + ",".join(items)
+RUNTIME = ("wasmExports", "wasmMemory", "wasmTable")
+FUNCTIONS = ("_malloc", "_free", "_Py_Version")
 
-t, n = re.subn(r"(-sEXPORTED_RUNTIME_METHODS=)(\S+)", add_runtime_methods, t)
-assert n >= 1, "no -sEXPORTED_RUNTIME_METHODS= in the host Makefile; the link line changed shape, re-check the patch"
-for m in re.finditer(r"-sEXPORTED_RUNTIME_METHODS=(\S+)", t):
-    methods = m.group(1).split(",")
-    assert all(x in methods for x in ("wasmExports", "wasmMemory", "wasmTable")), "wasmExports/wasmMemory/wasmTable missing after the patch: " + m.group(0)
-print(f"Makefile: wasmExports,wasmMemory,wasmTable added to {n} -sEXPORTED_RUNTIME_METHODS list(s)")
+def add_names(extras):
+    def sub(m):
+        items = m.group(2).split(",")
+        items += [x for x in extras if x not in items]
+        return m.group(1) + ",".join(items)
+    return sub
 
-def add_functions(m):
-    items = m.group(2).split(",")
-    for extra in ("_malloc", "_free", "_Py_Version"):
-        if extra not in items:
-            items.append(extra)
-    return m.group(1) + ",".join(items)
-
-t, k = re.subn(r"(-sEXPORTED_FUNCTIONS=)(\S+)", add_functions, t)
-if k:
-    print(f"Makefile: _malloc,_free,_Py_Version ensured in {k} -sEXPORTED_FUNCTIONS list(s)")
-else:
-    print("Makefile: NOTE no -sEXPORTED_FUNCTIONS= found; relying on the link exporting C symbols another way (the probe checks)")
-p.write_text(t)
-for line in t.splitlines():
-    if "-sEXPORTED_RUNTIME_METHODS" in line or "-sEXPORTED_FUNCTIONS" in line or "-sMAIN_MODULE" in line:
-        print("Makefile link line:", line.strip()[:2000])
+for arg in sys.argv[1:]:
+    p = Path(arg); t = p.read_text()
+    t, n = re.subn(r"(-sEXPORTED_RUNTIME_METHODS=)(\S+)", add_names(RUNTIME), t)
+    assert n >= 1, f"no -sEXPORTED_RUNTIME_METHODS= in {p.name}; the link line changed shape, re-check the patch"
+    for m in re.finditer(r"-sEXPORTED_RUNTIME_METHODS=(\S+)", t):
+        assert all(x in m.group(1).split(",") for x in RUNTIME), f"{p.name}: {RUNTIME} missing after the patch: " + m.group(0)
+    print(f"{p.name}: wasmExports,wasmMemory,wasmTable added to {n} -sEXPORTED_RUNTIME_METHODS list(s)")
+    t, k = re.subn(r"(-sEXPORTED_FUNCTIONS=)(\S+)", add_names(FUNCTIONS), t)
+    if k:
+        print(f"{p.name}: _malloc,_free,_Py_Version ensured in {k} -sEXPORTED_FUNCTIONS list(s)")
+    else:
+        print(f"{p.name}: NOTE no -sEXPORTED_FUNCTIONS= found; relying on the link exporting C symbols another way (the probe checks)")
+    p.write_text(t)
+    for line in t.splitlines():
+        if "-sEXPORTED_RUNTIME_METHODS" in line or "-sEXPORTED_FUNCTIONS" in line or "-sMAIN_MODULE" in line:
+            print(f"{p.name} link line:", line.strip()[:2000])
 PATCH
 }
 patch_makefile_exports
@@ -217,6 +216,13 @@ log "Setup.local: $(tr '\n' ' ' < "$hostdir/Modules/Setup.local")"
 # make-host also runs `python.sh --version`, so a startup failure (for example the trampoline
 # instantiation above, with FT_WASM_TRAMPOLINE_PATCH=skip) fails this step.
 python3 Platforms/emscripten make-host
+# The link must really export the runtime names (Emscripten writes Module["wasmMemory"]=wasmMemory
+# only for an exported name); a patch lost to a Makefile regeneration fails here.
+for name in wasmExports wasmMemory wasmTable; do
+    grep -q "Module\[\"$name\"\]=" "$hostdir/python.mjs" \
+        || die "python.mjs does not export Module.$name (the EXPORTED_RUNTIME_METHODS patch was lost)"
+done
+log "ok: python.mjs exports Module.wasmExports, wasmMemory, wasmTable"
 
 # ---- verification ---------------------------------------------------------
 # python.wasm must use shared memory with a declared maximum.
