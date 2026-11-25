@@ -254,14 +254,14 @@ an exported C function). No new dependency, workflow or kind of artefact.
 
 **Open.**
 - Whether `emscripten_sync_run_in_main_runtime_thread` is serviced inside the futex wait in Node
-  as well as in the browser. Its source says yes for both; the embedding probe's step `d` shows
-  it for Node (under `python.sh` the main runtime thread is in Node's event loop instead, so the
-  smoke run there does not).
+  as well as in the browser. Its source says yes for both. For Node it passed locally (second run,
+  below: probe step `d`, node 22 and 24); CI has not run it yet. Under `python.sh` the main
+  runtime thread is in Node's event loop instead, so the smoke run there does not show it.
 - The Kotlin-level tests (a Python thread calling a Kotlin callable through `UpcallEntry`) need the
   wasmJs suite to run on the 3.15t runtime, which waits on Decision 6.
-- Whether a routed `tp_traverse` is safe inside a pause, below: the visit functions run on the
-  main thread for the collecting thread. If one of them reads the current thread's state rather
-  than its `arg`, the smoke test's collection shows it.
+- Answered (second run, below): a routed `tp_traverse` run with no thread state is not safe. The
+  visit functions read the current thread state, and `gc.get_referents`' visit allocates through
+  it. The main thread now runs the traverse as the caller.
 - Whether a proxied `tp_clear` / `tp_dealloc` may attach the main thread's own thread state while
   that thread is parked mid-attach for another pause. The method route of step 2 has the same
   question; the smoke test's concurrent `gc.collect()` exercises it, but does not prove it.
@@ -277,12 +277,15 @@ the type when the runtime exports them (`cpython.mjs` `pmpProxySlotDispatchIndex
   the main thread's own pending exception untouched.
 - `tp_traverse`: **correction** of this section's earlier note, which said routing it would
   deadlock because the main thread cannot attach during a stop-the-world pause. It does not need
-  to attach. `ProxyType.traverse` reads the proxy's handle slot and calls `visit`; it takes no
-  thread state. So inside a pause (the collector, attached, is the requester; checked with
-  `stoptheworld.world_stopped`) the collector waits for the main thread without detaching, and the
-  main thread, parked for the pause on a futex, services the call there. Outside a pause
-  (`gc.get_referents`) the caller detaches first, so a pause the main thread requests meanwhile
-  does not wait on it. This is reasoning from the sources, checked only by the smoke test below.
+  to attach. The caller never detaches for a traverse: it stays attached and blocked, and the
+  main thread runs the traverse as the caller, with its thread-locals `_Py_tss_tstate` and
+  `_Py_tss_interp` set to the caller's for the call and its own put back afterwards. This holds
+  inside a pause, where the collector is the caller, and outside one (`gc.get_referents`). The
+  caller is blocked throughout, so its state has one user at a time. If the main thread itself
+  asks for a pause meanwhile, it waits on a futex, where it services the traverse. **Second
+  correction** (second run, below): the first version said the traverse takes no thread state
+  and ran it with none. `ProxyType.traverse` itself takes none, but the `visit` functions it calls
+  are CPython's, and they do.
 - `smoke.py`: `_pm_upcall.Node`, a GC type whose three slots take the same routes with C targets
   that count where they ran. Threads make 200 two-node cycles each with automatic collection off;
   a Python thread runs `gc.collect()` while the main thread waits in `join()`, then calls
@@ -305,3 +308,21 @@ library calls CPython from the JS main thread and never calls `main`. So `smoke.
 the one main runtime thread. In the embedded layout the main-thread call must run in place, and the
 embedding probe's step `d` runs `smoke.py` that way and requires `layout=embedded`. Nothing after
 the first check ran in that job, so the routes from threads and the proxy slots are still unrun.
+
+**Second run (2026-11-25, build-ft-wasm.yml run 45539962686), reproduced locally.** `smoke.py`
+under `python.sh` trapped with `RuntimeError: operation does not support unaligned accesses`. The
+same build was made locally with CI's Emscripten 4.0.19 and a function-name section
+(`--profiling-funcs`). It trapped at the same function indices, and the names gave the stack:
+`gc.get_referents` → `pm_traverse_on_main` → `pm_node_traverse_target` → `referentsvisit` →
+`PyList_Append` → `PyMem_Malloc` → `_mi_heap_delayed_free_partial`. The routed traverse ran
+CPython's visit function on the main thread with no thread state, and the free-threaded allocator
+takes its mimalloc heap from the current thread state. The atomic on that garbage heap is what
+trapped. Fixed as described under the proxy type slots above. Local results after the fix, on
+node 22.23 and on node 24.19:
+- `python.sh`: `FT-WASM-SMOKE-OK layout=proxy-to-pthread ... upcalls=200
+  slots=traverse:3201,clear:1600,dealloc:1602`.
+- The embedding probe passed `a`, `b`, `c1` to `c3`, and `d` with `layout=embedded`, and printed
+  the same counts. In `d` the main thread waits in `join()` while the routed calls and slots are
+  serviced.
+
+CI has not run the fix yet.

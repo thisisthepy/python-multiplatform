@@ -28,21 +28,25 @@
  * exports placed the same way, so they get the same kind of dispatcher, one per C signature
  * (pm_tp_*). tp_clear and tp_dealloc run attached and route like a method. tp_traverse is
  * different: a free-threaded collection calls it with the world stopped, on the collecting
- * thread, which cannot detach. The Kotlin traverse never attaches a thread state (it reads the
- * proxy's handle slot and calls `visit`), so the collector stays attached and waits while the
- * main thread, parked for the pause on a futex, runs it. Outside a pause (gc.get_referents) the
- * caller detaches first, as a method call does, so a pause the main thread asks for meanwhile
- * does not wait on it. smoke.py checks both with the self-test node type below.
+ * thread, which cannot detach. So the caller never detaches for a traverse: it stays attached
+ * and blocked, and the main thread runs the traverse *as the caller*, with its thread-local
+ * thread state and interpreter (_Py_tss_tstate, _Py_tss_interp) set to the caller's for the
+ * call and its own put back after. The visit functions need that: they run CPython code that
+ * reads the current thread state, and allocate through its mimalloc heap (gc.get_referents'
+ * visit appends to a list). The first version ran them with no thread state, which trapped in
+ * mimalloc (build-ft-wasm run 45539962686, "operation does not support unaligned accesses"
+ * in _mi_heap_delayed_free_partial under referentsvisit). The caller is blocked for the whole
+ * call, so its state has one user at a time. A pause the main thread itself asks for meanwhile
+ * waits on a futex, where the main thread services the traverse, so it does not wait forever.
+ * smoke.py checks both, inside a pause and outside one, with the self-test node type below.
  */
 /* Built into the interpreter (Setup.local *static*), so the internal headers are available; they
- * are needed for one thing, whether the world is stopped (pm_tp_traverse). */
+ * are needed for one thing, the thread-local current thread state (pm_tp_traverse). */
 #ifndef Py_BUILD_CORE_BUILTIN
 #  define Py_BUILD_CORE_BUILTIN 1
 #endif
 #include "Python.h"
-#include "pycore_interp.h"    /* PyInterpreterState.stoptheworld */
-#include "pycore_pystate.h"   /* _PyInterpreterState_GET */
-#include "pycore_runtime.h"   /* _PyRuntime.stoptheworld */
+#include "pycore_pystate.h"   /* _Py_tss_tstate, _Py_tss_interp */
 #include "structmember.h"     /* PyMemberDef for the self-test node */
 
 #include <emscripten.h>
@@ -146,6 +150,8 @@ typedef struct {
     visitproc visit;
     void *arg;
     int result;
+    PyThreadState *caller;          /* tp_traverse: the calling thread's state, attached */
+    PyInterpreterState *caller_interp;
 } pm_slot_call;
 
 /* tp_clear and tp_dealloc on the main thread, attached as CPython calls them. Whatever exception
@@ -165,20 +171,18 @@ pm_slot_on_main_attached(pm_slot_call *call)
     PyGILState_Release(state);
 }
 
-/* tp_traverse on the main thread, with no thread state attached: see the header comment. */
+/* tp_traverse on the main thread, as the calling thread: see the header comment. Whatever the
+ * main thread's own thread-locals hold (its own state, attached or not, or nothing) is put back. */
 static void
 pm_traverse_on_main(pm_slot_call *call)
 {
+    PyThreadState *own = _Py_tss_tstate;
+    PyInterpreterState *own_interp = _Py_tss_interp;
+    _Py_tss_tstate = call->caller;
+    _Py_tss_interp = call->caller_interp;
     call->result = ((pm_traverse_fn)call->fn)(call->self, call->visit, call->arg);
-}
-
-/* Whether this (attached) thread is inside a stop-the-world pause, which then is its own: every
- * other thread is parked, so an attached one is the requester. */
-static int
-pm_in_stopped_world(void)
-{
-    PyInterpreterState *interp = _PyInterpreterState_GET();
-    return interp->stoptheworld.world_stopped || _PyRuntime.stoptheworld.world_stopped;
+    _Py_tss_tstate = own;
+    _Py_tss_interp = own_interp;
 }
 
 static int
@@ -190,15 +194,9 @@ pm_route_traverse(uintptr_t fn, PyObject *self, visitproc visit, void *arg)
     if (emscripten_is_main_runtime_thread()) {
         return ((pm_traverse_fn)fn)(self, visit, arg);
     }
-    pm_slot_call call = {PM_SLOT_TRAVERSE, fn, self, visit, arg, 0};
-    if (pm_in_stopped_world()) {
-        emscripten_sync_run_in_main_runtime_thread(EM_FUNC_SIG_VI, pm_traverse_on_main, &call);
-    }
-    else {
-        Py_BEGIN_ALLOW_THREADS
-        emscripten_sync_run_in_main_runtime_thread(EM_FUNC_SIG_VI, pm_traverse_on_main, &call);
-        Py_END_ALLOW_THREADS
-    }
+    pm_slot_call call = {PM_SLOT_TRAVERSE, fn, self, visit, arg, 0, _Py_tss_tstate, _Py_tss_interp};
+    /* Not detached, inside a pause or outside one: the main thread runs it as this thread. */
+    emscripten_sync_run_in_main_runtime_thread(EM_FUNC_SIG_VI, pm_traverse_on_main, &call);
     return call.result;
 }
 
@@ -212,7 +210,7 @@ pm_route_attached(int slot, uintptr_t fn, PyObject *self)
         ((pm_dealloc_fn)fn)(self);
         return 0;
     }
-    pm_slot_call call = {slot, fn, self, NULL, NULL, 0};
+    pm_slot_call call = {slot, fn, self, NULL, NULL, 0, NULL, NULL};
     Py_BEGIN_ALLOW_THREADS
     emscripten_sync_run_in_main_runtime_thread(EM_FUNC_SIG_VI, pm_slot_on_main_attached, &call);
     Py_END_ALLOW_THREADS
