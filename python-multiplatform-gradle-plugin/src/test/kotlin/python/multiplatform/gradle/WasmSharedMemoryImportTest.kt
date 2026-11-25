@@ -43,17 +43,19 @@ class WasmSharedMemoryImportTest {
     }
 
     @Test
-    fun aPaddedSectionSizeKeepsItsWidthSoNoOffsetMoves() {
+    fun aPaddedSectionSizeKeepsItsWidthSoLaterOffsetsMoveOnlyByTheLimits() {
+        // The limits grow by 3 bytes whatever the size's width, so later offsets always move by at
+        // least 3; a padded size has room for the new size, so they move by exactly 3, not 3 + 1.
         val original = kotlinModule(kotlinLimits, sizeWidth = 5)
         val result = assertIs<WasmSharedMemoryImport.Rewritten>(WasmSharedMemoryImport.rewrite(original))
-        assertEquals(0, result.shift, "a padded size has room for three more bytes")
-        assertEquals(original.size, result.module.size)
+        assertEquals(3, result.shift, "only the 3 added limit bytes may move later offsets")
+        assertEquals(original.size + 3, result.module.size)
         assertContentEquals(kotlinModule(sharedLimits, sizeWidth = 5), result.module)
     }
 
     @Test
     fun aSizeThatCrossesALeb128WidthMovesLaterOffsetsByFour() {
-        // Content of 125 bytes takes one size byte; +3 makes 128, which takes two.
+        // Content of 125 bytes takes one size byte; +3 makes 128, which takes two: 3 + 1.
         val original = kotlinModule(kotlinLimits, padTo = 125)
         val result = assertIs<WasmSharedMemoryImport.Rewritten>(WasmSharedMemoryImport.rewrite(original))
         assertEquals(4, result.shift)

@@ -1151,8 +1151,8 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   the build rewrites that one import of the linked `.wasm` to shared, minimum 0, maximum 65536 pages (the
   wasm32 ceiling, so any runtime maximum fits); every other byte of the import section is copied, every
   other section is copied unchanged, and the section's size is re-encoded (in its original width when it
-  fits, so nothing moves; otherwise the module's later byte offsets move, and the generated source map's
-  offsets are moved with them). The check runs on every link whatever the runtime: the build fails unless
+  fits). The limits grow by 3 bytes, so the module's later byte offsets move by 3 (4 when the size needs
+  one more byte), and the generated source map's offsets are moved with them. The check runs on every link whatever the runtime: the build fails unless
   the module has exactly one memory, imported as `intrinsics.memory`, either in Kotlin's shape
   (non-shared, minimum 0, no maximum) or in the rewritten shape; anything else (a defined memory, a second
   memory, other limits, an import section that does not parse) fails with a message saying the rewrite may
