@@ -377,7 +377,7 @@ from .ir import ForObjList, ObjListDisplay, ObjListIndex, ObjListLen, ObjListSto
 from .ir import (
     DictClear, DictCompare, DictContains, DictCopy, DictDelete, DictDisplay, DictGet, DictLen, DictPop, DictSetDefault,
     DictPopItem, DictStore, DictStr, DictUpdate, ForDict, DictListDisplay, DictListIndex, DictListLen, DictListStore,
-    ForDictList,
+    ForDictList, KeyTuple,
 )
 
 DA = "verify/definite-assignment"
@@ -787,10 +787,27 @@ class _Checker:
         key = self.expr(e, state)
         if kinds is None:
             return key
-        kt, got = kinds[0], getattr(key, "type", None)
-        if got is not kt and not (not insert and got is Type.BOOL and kt is Type.I64):
-            self.error(TYPE, f"{what}: a {getattr(got, 'value', got)} key of a dict whose keys are {kt.value}")
+        self.key_fits(key, kinds[0], what, insert)
         return key
+
+    def key_fits(self, key: object, kt: object, what: str, insert: bool) -> None:
+        got = getattr(key, "type", None)
+        if isinstance(kt, tuple):                       # a tuple key: a KeyTuple of exactly the element types
+            if type(key) is not KeyTuple or tuple(getattr(x, "type", None) for x in key.elements) != kt:
+                self.error(TYPE, f"{what}: not a tuple of {[t.value for t in kt]} for a dict whose keys are tuples")
+        elif got is not kt and not (not insert and got is Type.BOOL and kt is Type.I64):
+            self.error(TYPE, f"{what}: a {getattr(got, 'value', got)} key of a dict whose keys are {kt.value}")
+
+    def e_KeyTuple(self, e: KeyTuple, state: _State) -> ir.Expr:
+        if not isinstance(e.elements, tuple) or not e.elements:
+            self.error(STRUCTURE, "KeyTuple has a tuple of elements")
+            return e
+        elements = tuple(self.expr(x, state) for x in e.elements)
+        for k, x in enumerate(elements):
+            if getattr(x, "type", None) not in ir.DICT_KEYS:
+                self.error(TYPE, f"element {k + 1} of a tuple key is not an int, a str or a bool")
+        self.result(e, Type.KEY_TUPLE)
+        return dataclasses.replace(e, elements=elements)
 
     def dict_value(self, e: object, kinds: ir.DictKinds | None, state: _State, what: str) -> ir.Expr:
         value = self.expr(e, state)
@@ -803,6 +820,14 @@ class _Checker:
             if kinds[1] is Type.STR_OPT or getattr(value, "type", None) is not kinds[1]:
                 self.slot(value, kinds[1], what)
         return value
+
+    @staticmethod
+    def key_names_fit(key_var: object, kinds: object) -> bool:
+        """A tuple key is bound to one name per element, any other key to one name (or none)."""
+        kt = kinds[0] if isinstance(kinds, tuple) and len(kinds) == 2 else None
+        if isinstance(key_var, tuple):
+            return isinstance(kt, tuple) and len(key_var) == len(kt)
+        return key_var is None or (isinstance(key_var, str) and not isinstance(kt, tuple))
 
     def bound_var(self, var: str, want: "Type | ir.DictKinds", what: str) -> None:
         """`var` is a declared local that can hold a key or a value of the type `want`."""
@@ -2183,9 +2208,7 @@ class _Checker:
         key = self.expr(e.key, state)                # (the key first, as CPython evaluates `a in b`)
         d, kinds = self.dict_operand(e.dict, state, "the dict searched")
         if kinds is not None:
-            kt, got = kinds[0], getattr(key, "type", None)
-            if got is not kt and not (got is Type.BOOL and kt is Type.I64):
-                self.error(TYPE, f"a {getattr(got, 'value', got)} searched in a dict whose keys are {kt.value}")
+            self.key_fits(key, kinds[0], "the key searched", insert=False)
         if type(e.negate) is not bool:
             self.error(STRUCTURE, "DictContains.negate is a bool")
         self.result(e, Type.BOOL)
@@ -2347,12 +2370,15 @@ class _Checker:
             self.error(TYPE, f"DictPopItem has no valid key and value types ({s.kinds!r})")
         else:
             self.dict_same(kinds, s.kinds, "the dict of popitem()")
-        names = [v for v in (s.key_var, s.value_var) if v is not None]
-        if names and (len(names) != 2 or names[0] == names[1] or not all(isinstance(v, str) for v in names)):
-            self.error(STRUCTURE, "DictPopItem binds no name, or a key and a value to two distinct names")
-            names = []
+        bound = ir.dict_bound(s)
+        names = [v for v, _ in bound]
+        if (s.key_var is None) != (s.value_var is None) or len(set(names)) != len(names) \
+                or not all(isinstance(v, str) for v in names) or not self.key_names_fit(s.key_var, s.kinds):
+            self.error(STRUCTURE, "DictPopItem binds no name, or a key (a name per element of a tuple key) and a value "
+                                  "to distinct names")
+            names, bound = [], []
         if self.good_kinds(s.kinds):
-            for var, want in zip(names, s.kinds):
+            for var, want in bound:
                 self.bound_var(var, want, "DictPopItem")
         for var in names:
             if var in self.entry:
@@ -2375,13 +2401,16 @@ class _Checker:
         else:
             self.dict_same(kinds, s.kinds, "the iterable of ForDict")
             kinds = s.kinds
-        names = [v for v in (s.key_var, s.value_var) if v is not None]
-        if not names or len(set(names)) != len(names) or not all(isinstance(v, str) for v in names):
-            self.error(STRUCTURE, "ForDict binds a key, a value or both, to distinct names")
+        bound = ir.dict_bound(s)
+        names = [v for v, _ in bound]
+        if not names or len(set(names)) != len(names) or not all(isinstance(v, str) for v in names) \
+                or not self.key_names_fit(s.key_var, s.kinds):
+            self.error(STRUCTURE, "ForDict binds a key (a name per element of a tuple key), a value or both, to "
+                                  "distinct names")
             names = [v for v in names if isinstance(v, str)]
         if kinds is not None:
-            for var, want in ((s.key_var, kinds[0]), (s.value_var, kinds[1])):
-                if var is not None:
+            for var, want in bound:
+                if isinstance(var, str):
                     self.bound_var(var, want, "ForDict")
         for var in names:
             if var in self.entry:
@@ -3424,7 +3453,7 @@ class _Checker:
         unpacked = {t for vs in assigned.values() for v in vs if type(v) is Unpack for t in v.targets
                     if isinstance(v.targets, tuple)}
         unpacked |= {t for vs in assigned.values() for v in vs if type(v) is DictPopItem
-                     for t in (v.key_var, v.value_var) if isinstance(t, str)}
+                     for t, _ in ir.dict_bound(v) if isinstance(t, str)}
         self.eligible = frozenset(
             n for n in assigned
             if self.scalars.get(n) is Type.I64 and n not in params and n not in loop_vars
@@ -3924,12 +3953,12 @@ def _assigned_values(body: object, out: dict[str, list[object]]) -> None:
             elif cls in (While, ForRange, ForStr, ForObjList, ForDictList):
                 _assigned_values(st.body, out)
             elif cls is ForDict:
-                for t in (st.key_var, st.value_var):
+                for t, _ in ir.dict_bound(st):
                     if isinstance(t, str):
                         out.setdefault(t, []).append(st)    # bound by the loop: no interval of its own
                 _assigned_values(st.body, out)
             elif cls is DictPopItem:
-                for t in (st.key_var, st.value_var):
+                for t, _ in ir.dict_bound(st):
                     if isinstance(t, str):
                         out.setdefault(t, []).append(st)    # an entry of the dict: no interval of its own
             elif cls is ForObj:
@@ -3952,6 +3981,8 @@ def _loop_vars(body: object) -> set[str]:
             elif cls in (ForStr, ForDict):
                 out |= {v for v in (getattr(st, "var", None), getattr(st, "key_var", None),
                                     getattr(st, "value_var", None)) if isinstance(v, str)}
+                if cls is ForDict:
+                    out |= {v for v, _ in ir.dict_bound(st) if isinstance(v, str)}
                 out |= _loop_vars(st.body)
             elif cls is ForRange:
                 out.add(st.var)
@@ -3970,7 +4001,7 @@ def _assigned_names(body: object) -> set[str]:
             elif cls is Unpack:
                 out |= set(st.targets) if isinstance(st.targets, tuple) else set()
             elif cls is DictPopItem:
-                out |= {v for v in (st.key_var, st.value_var) if isinstance(v, str)}
+                out |= {v for v, _ in ir.dict_bound(st) if isinstance(v, str)}
             elif cls is If:
                 out |= _assigned_names(st.then) | _assigned_names(st.orelse)
             elif cls is While:
@@ -3984,6 +4015,8 @@ def _assigned_names(body: object) -> set[str]:
             elif cls in (ForStr, ForObjList, ForDict, ForDictList):     # AOT mode: the variables, and what the body assigns
                 out |= {v for v in (getattr(st, "var", None), getattr(st, "key_var", None),
                                     getattr(st, "value_var", None)) if isinstance(v, str)}
+                if cls is ForDict:
+                    out |= {v for v, _ in ir.dict_bound(st) if isinstance(v, str)}
                 out |= _assigned_names(st.body)
     return out
 

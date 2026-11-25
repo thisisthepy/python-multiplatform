@@ -40,6 +40,7 @@
 #define TPA_DK_I64 0     /* an int64 of a RAW int group; a bool key is 0 or 1 with the entry's kbool set */
 #define TPA_DK_INT 1     /* a TAGGED tpa_int, owned */
 #define TPA_DK_STR 2     /* a tpa_str *, owned */
+#define TPA_DK_TUP 3     /* a tpa_dtup * (a tuple of ints, strs and bools), owned */
 /* Value kinds. */
 #define TPA_DV_I64 0
 #define TPA_DV_F64 1
@@ -75,6 +76,17 @@ typedef struct tpa_dict {
     int64_t *index;      /* 2**log2 slots */
     tpa_dict_entry *e;   /* USABLE_FRACTION(2**log2) entries */
 } tpa_dict;
+
+/* A tuple key (`dict[tuple[int, str], V]`): an immutable counted tuple of words whose kinds are a static string, one
+ * letter an element: 'i' a TAGGED tpa_int (owned), 's' a tpa_str * (owned), 'b' a bool (0 or 1). A dict's tuple keys
+ * all have its key type's kinds (the front end makes them so), so two tuples of one dict compare element by element. */
+typedef struct tpa_dtup {
+    tpa_rc_t rc;
+    int32_t n;
+    const char *kinds;
+    int64_t hash;        /* -1 until computed */
+    tpa_dw w[];
+} tpa_dtup;
 
 static TPA_UNUSED void tpa_dict_release(struct tpa_dict *d);
 static TPA_UNUSED int tpa_dict_eq(const struct tpa_dict *a, const struct tpa_dict *b);
@@ -113,10 +125,16 @@ static int64_t tpa_dict__hash_str(tpa_str *s)
     return (int64_t)h;
 }
 
+static int64_t tpa_dtup__hash(tpa_dtup *t);
+static int tpa_dtup__eq(const tpa_dtup *a, const tpa_dtup *b);
+
 /* Equal ints hash equal, whatever their representation (a TAGGED small and an int64 of the same value never meet in
  * one dict, but a small and a big never hold one value either: the tagged form is canonical). */
 static int64_t tpa_dict__hash(const tpa_dict *d, tpa_dw k)
 {
+    if (d->kk == TPA_DK_TUP) {
+        return tpa_dtup__hash((tpa_dtup *)(uintptr_t)k);
+    }
     if (d->kk == TPA_DK_STR) {
         return tpa_dict__hash_str((tpa_str *)(uintptr_t)k);
     }
@@ -137,6 +155,9 @@ static int64_t tpa_dict__hash(const tpa_dict *d, tpa_dw k)
 
 static int tpa_dict__key_eq(const tpa_dict *d, tpa_dw a, tpa_dw b)
 {
+    if (d->kk == TPA_DK_TUP) {
+        return tpa_dtup__eq((const tpa_dtup *)(uintptr_t)a, (const tpa_dtup *)(uintptr_t)b);
+    }
     if (d->kk == TPA_DK_STR) {
         return tpa_str_eq((tpa_str *)(uintptr_t)a, (tpa_str *)(uintptr_t)b);
     }
@@ -148,7 +169,10 @@ static int tpa_dict__key_eq(const tpa_dict *d, tpa_dw a, tpa_dw b)
 
 static void tpa_dict__key_retain(const tpa_dict *d, tpa_dw k)
 {
-    if (d->kk == TPA_DK_STR) {
+    if (d->kk == TPA_DK_TUP) {
+        TPA_RC_INC((tpa_dtup *)(uintptr_t)k);
+    }
+    else if (d->kk == TPA_DK_STR) {
         tpa_str_retain((tpa_str *)(uintptr_t)k);
     }
     else if (d->kk == TPA_DK_INT) {
@@ -156,9 +180,14 @@ static void tpa_dict__key_retain(const tpa_dict *d, tpa_dw k)
     }
 }
 
+static TPA_UNUSED void tpa_dtup_release(tpa_dtup *t);
+
 static void tpa_dict__key_release(const tpa_dict *d, tpa_dw k)
 {
-    if (d->kk == TPA_DK_STR) {
+    if (d->kk == TPA_DK_TUP) {
+        tpa_dtup_release((tpa_dtup *)(uintptr_t)k);
+    }
+    else if (d->kk == TPA_DK_STR) {
         tpa_str_release((tpa_str *)(uintptr_t)k);
     }
     else if (d->kk == TPA_DK_INT) {
@@ -192,9 +221,14 @@ static void tpa_dict__value_release(const tpa_dict *d, tpa_dw v)
     }
 }
 
+static TPA_UNUSED int tpa_dtup_repr(const tpa_dtup *t, tpa_str **out);
+
 /* repr of a key (`kbool`: the key is a bool) or of a value, as a new str. */
 static int tpa_dict__repr_word(int is_key, int kind, int kbool, tpa_dw w, tpa_str **out)
 {
+    if (is_key && kind == TPA_DK_TUP) {
+        return tpa_dtup_repr((const tpa_dtup *)(uintptr_t)w, out);
+    }
     if (is_key ? kbool : kind == TPA_DV_BOOL) {
         /* (a bool looking up a dict of TAGGED ints is the small int 0 or 1, whose word is not 0 or 1) */
         int64_t b = is_key && kind == TPA_DK_INT ? tpa_int_small_value((tpa_int)w) : (int64_t)w;
@@ -244,6 +278,130 @@ static int tpa_dict__key_error(const tpa_dict *d, tpa_dw k, int kbool)
     m[n] = '\0';
     tpa_str_release(r);
     return tpa_raise(TPA_KeyError, m);
+}
+
+/* ------------------------------------------------------------------------------------------
+ * Tuple keys
+ * ------------------------------------------------------------------------------------------ */
+
+/* A new tuple of the `n` words `w` (borrowed: each owned element is retained) whose kinds are `kinds`. */
+static TPA_UNUSED int tpa_dtup_new(const char *kinds, int32_t n, const tpa_dw *w, tpa_dtup **out)
+{
+    int32_t i;
+    tpa_dtup *t = (tpa_dtup *)malloc(sizeof(tpa_dtup) + (size_t)n * sizeof(tpa_dw));
+    if (t == NULL) {
+        return tpa_raise(TPA_MemoryError, "");
+    }
+    t->rc = 1;
+    t->n = n;
+    t->kinds = kinds;
+    t->hash = -1;
+    for (i = 0; i < n; i++) {
+        t->w[i] = w[i];
+        if (kinds[i] == 'i') {
+            tpa_int_retain((tpa_int)w[i]);
+        }
+        else if (kinds[i] == 's') {
+            tpa_str_retain((tpa_str *)(uintptr_t)w[i]);
+        }
+    }
+    *out = t;
+    return 0;
+}
+
+static TPA_UNUSED void tpa_dtup_release(tpa_dtup *t)
+{
+    if (t != NULL && TPA_RC_DEC_IS_ZERO(t)) {
+        int32_t i;
+        for (i = 0; i < t->n; i++) {            /* (tupledealloc releases the items last to first) */
+            int32_t j = t->n - 1 - i;
+            if (t->kinds[j] == 'i') {
+                tpa_int_release((tpa_int)t->w[j]);
+            }
+            else if (t->kinds[j] == 's') {
+                tpa_str_release((tpa_str *)(uintptr_t)t->w[j]);
+            }
+        }
+        free(t);
+    }
+}
+
+/* Element hashes as a key of that kind hashes (an int as an int key, a str as a str key, a bool as 0 or 1), mixed in
+ * order: equal tuples hash equal. (Not CPython's xxHash: no program sees a hash, CPython seeds str hashing.) */
+static int64_t tpa_dtup__hash(tpa_dtup *t)
+{
+    uint64_t h = 0x27d4eb2f165667c5ULL;
+    int32_t i;
+    if (t->hash != -1) {
+        return t->hash;
+    }
+    for (i = 0; i < t->n; i++) {
+        tpa_dict probe;
+        memset(&probe, 0, sizeof probe);
+        probe.kk = t->kinds[i] == 'i' ? TPA_DK_INT : t->kinds[i] == 's' ? TPA_DK_STR : TPA_DK_I64;
+        h = tpa_dict__mix(h ^ (uint64_t)tpa_dict__hash(&probe, t->w[i]) ^ (uint64_t)i);
+    }
+    t->hash = (int64_t)(h & 0x3fffffffffffffffULL);
+    return t->hash;
+}
+
+/* a == b of two tuples of the same kinds: element by element (tuplerichcompare; int, str and bool items compare by
+ * value, which is what the identity-or-equality test gives for them). */
+static int tpa_dtup__eq(const tpa_dtup *a, const tpa_dtup *b)
+{
+    int32_t i;
+    if (a == b) {
+        return 1;
+    }
+    if (a->n != b->n) {
+        return 0;
+    }
+    for (i = 0; i < a->n; i++) {
+        if (a->kinds[i] == 'i' ? !tpa_int_eq((tpa_int)a->w[i], (tpa_int)b->w[i])
+            : a->kinds[i] == 's' ? !tpa_str_eq((tpa_str *)(uintptr_t)a->w[i], (tpa_str *)(uintptr_t)b->w[i])
+            : a->w[i] != b->w[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* repr(t): "(1, 'a')", "(True,)" (tuplerepr). */
+static TPA_UNUSED int tpa_dtup_repr(const tpa_dtup *t, tpa_str **out)
+{
+    int32_t i;
+    int64_t k = 0;
+    tpa_str **parts = (tpa_str **)calloc((size_t)(2 * t->n + 2), sizeof(tpa_str *));
+    int rc = 0;
+    if (parts == NULL) {
+        return tpa_raise(TPA_MemoryError, "");
+    }
+    parts[k++] = &tpa_str__latin1['('].h;
+    for (i = 0; i < t->n && rc == 0; i++) {
+        if (i > 0) {
+            rc = tpa_str_from_ascii(", ", 2, &parts[k++]);
+        }
+        if (rc == 0) {
+            char c = t->kinds[i];
+            rc = c == 'i' ? tpa_str_from_int((tpa_int)t->w[i], &parts[k++])
+               : c == 's' ? tpa_str_repr((tpa_str *)(uintptr_t)t->w[i], &parts[k++])
+               : t->w[i] ? tpa_str_from_ascii("True", 4, &parts[k++]) : tpa_str_from_ascii("False", 5, &parts[k++]);
+        }
+    }
+    if (rc == 0) {
+        rc = t->n == 1 ? tpa_str_from_ascii(",)", 2, &parts[k++]) : 0;
+        if (t->n != 1) {
+            parts[k++] = &tpa_str__latin1[')'].h;
+        }
+    }
+    if (rc == 0) {
+        rc = tpa_str_join(parts, (size_t)k, out);
+    }
+    for (i = 0; i < (int32_t)k; i++) {
+        tpa_str_release(parts[i]);
+    }
+    free(parts);
+    return rc;
 }
 
 /* ------------------------------------------------------------------------------------------

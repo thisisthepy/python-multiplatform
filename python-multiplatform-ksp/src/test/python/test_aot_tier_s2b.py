@@ -530,6 +530,55 @@ def test_lists_of_dicts(tmp_path: Path):
     _compare(tmp_path, DICT_LISTS, [["a,bb;ccc;", "x,yy,zzz", "0"], [";", "", "-1"]])
 
 
+TUPLE_KEYS = """
+import sys
+
+
+def grid(n: int) -> dict[tuple[int, int], str]:
+    g: dict[tuple[int, int], str] = {}
+    for i in range(n):
+        for j in range(n):
+            if (i + j) % 2 == 0:
+                g[i, j] = "x" if i == j else "o"
+    return g
+
+
+def main() -> None:
+    n = int(sys.argv[1])
+    g = grid(n)
+    print(g, len(g))
+    p = (1, 1)
+    print(g.get(p, "-"), (0, 1) in g, p in g, g.get((n, n), "none"))
+    for (i, j), c in g.items():
+        if c == "x":
+            print(i, j, end="; ")
+    print()
+    for k in g:
+        print(k, k[0] + k[1], end=" ")
+    print()
+    names: dict[tuple[str, bool], int] = {("a", True): 1}
+    names["b", False] = 2
+    names[("a", True)] += 10
+    print(names, names[("b", False)], names.pop(("a", True)), names)
+    big = {(int(sys.argv[2]) * 10 ** 15, "k"): 1.5}
+    bk, bv = big.popitem()
+    print(bk, bv, bk[0] + 1, big)
+    q, v = g.popitem()
+    print(q, v)
+    print(g[(int(sys.argv[3]), 0)])
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_tuple_keys(tmp_path: Path):
+    """dict[tuple[...], V] of int, str and bool elements: d[a, b], d[t], t in d, get / pop / setdefault of a tuple,
+    loops binding the key as a tuple or as its elements, popitem, the repr `(1, 'a')`, KeyError((1, 2))."""
+    _compare(tmp_path, TUPLE_KEYS, [["3", "7", "0"], ["1", "-2", "5"]])
+
+
 WORDFREQ = Path(__file__).resolve().parents[4] / "benchmarks" / "typedpython" / "py" / "wordfreq.py"
 
 
@@ -568,6 +617,10 @@ MAIN = '\n\ndef main() -> None:\n    f()\n\n\nif __name__ == "__main__":\n    ma
     ("    ds = [{'a': 1}]\n    print({'a': 1} in ds)\n", "searching a list of dicts"),
     ("    ds = [{'a': 1}]\n    es: list[dict[str, float]] = ds\n    print(es)\n", "invariant"),
     ("    ds = [{'a': 1}]\n    es = [{'b': 2}]\n    print(ds == es)\n", "comparing lists of dicts"),
+    # a tuple key: exactly its elements' types (a tuple keeps a bool as it came), given as a tuple; no float element
+    ("    d: dict[tuple[int, int], str] = {}\n    d[True, 1] = 'x'\n    print(d)\n", "exactly its elements' types"),
+    ("    d: dict[tuple[int, int], str] = {(1, 2): 'x'}\n    print(d[3])\n", "gives a tuple key as a display"),
+    ("    d: dict[tuple[float, int], str] = {}\n    print(d)\n", "outside the AOT mode"),
 ])
 def test_what_a_dict_cannot_hold_yet_is_refused_with_the_reason(tmp_path: Path, body: str, reason: str):
     found = _rules(tmp_path, "def f() -> None:\n" + body + MAIN)

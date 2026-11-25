@@ -492,8 +492,13 @@ reads the dict and the key once, then `d[k]`, then the value, as CPython. A `lis
 counted dicts (the runtime's list of owned references), as a local, a parameter, a return and a field; displays (`[]`
 where the type is known), `append`, `insert`, `pop`, `extend`, `clear`, `reverse`, `xs[i]` (the dict itself) and
 `xs[i] = d`, `xs[i][k] = v`, `len`, `for d in xs` and the repr. Searching one (`in`, `index`, `count`, `remove`) compares
-dicts by value with an identity test first, and is refused until it is done; so is `==` of two lists of dicts. Still to
-come in S2b: tuple keys; the view objects outside a `for` loop; a dict across the library boundary; and `set`.
+dicts by value with an identity test first, and is refused until it is done; so is `==` of two lists of dicts. Tuple
+keys follow (`dict[tuple[int, str], V]`, elements int, str or bool): a key tuple is a counted runtime tuple made from
+its elements in order (`d[a, b]`, `d[t]`, `t in d`, `get` / `pop` / `setdefault`), with CPython's equality and repr
+(`(1, 'a')`, `KeyError: (5, 0)`); a loop or `popitem` binds the key to a tuple name (split into its element locals, as
+any tuple) or to one name per element (`for (i, j), v in d.items()`). An element of another type than the key's (a bool
+for an int) is refused: the tuple would keep it. Still to come in S2b: the view objects outside a `for` loop; a dict
+across the library boundary; and `set`.
 
 **S2c.** List, dict and set comprehensions (a hidden local per comprehension variable, Python 3 scoping, the
 accumulator built in place), `enumerate`, `zip` (shortest), `reversed`, `range` objects as iterables, in `for` loops

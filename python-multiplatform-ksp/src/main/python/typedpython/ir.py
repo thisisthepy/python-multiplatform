@@ -79,6 +79,8 @@ class Type(Enum):
     DICT = "dict"           # AOT mode only (tier S2b): a counted `tpa_dict` (runtime/tp_aot_dict.h); its key and value
     #                         types (`DictKinds`) are the `kinds` of the Param, `Function.return_kinds`, the display or
     #                         copy that makes it, or `Function.dict_kinds[name]` for a local
+    KEY_TUPLE = "tuple key"  # AOT mode only (tier S2b): a tuple made to be a dict key (`ir.KeyTuple`), a counted
+    #                         `tpa_dtup`; it exists only as the key operand of a dict node
     DICT_LIST = "list[dict]"  # AOT mode only (tier S2b): a list of dicts, a counted `tpa_obj_list` of `tpa_dict`; the
     #                         dicts' kinds are kept where a DICT's are (the Param's / FieldDecl's `kinds`,
     #                         `Function.return_kinds`, `Function.dict_kinds[name]`, the display's `kinds`)
@@ -101,8 +103,11 @@ def dict_vtype(v: "Type | DictKinds") -> Type:
 
 
 def good_dict_kinds(k: object) -> bool:
-    """`k` is (key type, value type), the value type an allowed scalar or str type or good kinds of a dict."""
-    return (isinstance(k, tuple) and len(k) == 2 and k[0] in DICT_KEYS
+    """`k` is (key type, value type), the value type an allowed scalar or str type or good kinds of a dict; the key
+    type an allowed key type or a tuple of them (a tuple key, `ir.KeyTuple`)."""
+    return (isinstance(k, tuple) and len(k) == 2
+            and (k[0] in DICT_KEYS or (isinstance(k[0], tuple) and len(k[0]) >= 1
+                                       and all(t in DICT_KEYS for t in k[0])))
             and (k[1] in DICT_VALUES or good_dict_kinds(k[1])))
 
 
@@ -1374,7 +1379,7 @@ class ForDict(Stmt):
 
     kinds: DictKinds
     value: Expr
-    key_var: str | None
+    key_var: "str | tuple[str, ...] | None"     # (a tuple of names: a tuple key, one name per element)
     value_var: str | None
     body: tuple[Stmt, ...]
 
@@ -1388,8 +1393,17 @@ class DictPopItem(Stmt):
 
     kinds: DictKinds
     dict: Expr
-    key_var: str | None
+    key_var: "str | tuple[str, ...] | None"     # (a tuple of names: a tuple key, one name per element)
     value_var: str | None
+
+
+@dataclass(frozen=True)
+class KeyTuple(Expr):
+    """`(a, b, ...)` as the key of a dict whose keys are tuples (type KEY_TUPLE): the elements evaluated in order, then
+    a new tuple of them. Only a dict node's key operand. (A tuple read out of such a dict is bound to one name per
+    element: `ForDict.key_var` / `DictPopItem.key_var` is then a tuple of names.)"""
+
+    elements: tuple[Expr, ...]
 
 
 @dataclass(frozen=True)
@@ -1438,8 +1452,23 @@ class ForDictList(Stmt):
     body: tuple[Stmt, ...]
 
 
+def dict_bound(s: "ForDict | DictPopItem") -> list[tuple[object, "Type | DictKinds"]]:
+    """The names a ForDict or a DictPopItem binds, each with the type it takes (a tuple key: one name per element, of
+    the element's type), keys first. Tolerates a malformed node (the verifier reports it)."""
+    out: list[tuple[object, Type | DictKinds]] = []
+    kinds = s.kinds if isinstance(s.kinds, tuple) and len(s.kinds) == 2 else (None, None)
+    kt, vt = kinds
+    if isinstance(s.key_var, tuple):
+        out += list(zip(s.key_var, kt if isinstance(kt, tuple) else ()))
+    elif s.key_var is not None:
+        out.append((s.key_var, kt))
+    if s.value_var is not None:
+        out.append((s.value_var, vt))
+    return out
+
+
 DICT_EXPRS = (DictDisplay, DictGet, DictContains, DictLen, DictPop, DictSetDefault, DictCopy, DictCompare, DictStr,
-              DictListDisplay, DictListLen, DictListIndex)
+              DictListDisplay, DictListLen, DictListIndex, KeyTuple)
 DICT_STMTS = (DictStore, DictDelete, DictUpdate, DictClear, ForDict, DictPopItem, DictListStore, ForDictList)
 
 

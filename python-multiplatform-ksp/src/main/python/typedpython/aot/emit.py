@@ -209,7 +209,7 @@ def assigned_names(f: ir.Function) -> set[str]:
             elif isinstance(n, (ir.ForRange, ir.ForStr, ir.ForObjList, ir.ForDictList)):
                 out.add(n.var)
             elif isinstance(n, (ir.ForDict, ir.DictPopItem)):
-                out.update(v for v in (n.key_var, n.value_var) if v is not None)
+                out.update(v for v, _ in ir.dict_bound(n))
             elif isinstance(n, ir.Unpack):
                 out.update(n.targets)
     return out
@@ -218,6 +218,11 @@ def assigned_names(f: ir.Function) -> set[str]:
 # the names of the big-integer runtime: a program whose generated text names none of them does not include it
 _INT_USE = re.compile(r"\b(?:tpa_int|tpa_argv_int|tpa_truediv_i64|tpa_cmp_int_f64|tpa_cmp_f64_int|tpa_slot_int|"
                       r"tpa_print_int|TPA_INT_)")
+
+
+def _tup_kinds(kt: tuple[Type, ...]) -> str:
+    """The runtime kinds string of a tuple key (tp_aot_dict.h tpa_dtup): 'i' int, 's' str, 'b' bool."""
+    return "".join({Type.I64: "i", Type.STR: "s", Type.BOOL: "b"}[t] for t in kt)
 
 
 def needs_int_runtime(text: str) -> bool:
@@ -773,6 +778,7 @@ class _Fn:
         self.strlist_slots: list[str] = []       # tier S1b: `tpa_str_list *` temporaries, the same
         self.dict_slots: list[str] = []          # tier S2b: `tpa_dict *` temporaries, the same
         self.dictiter_slots: list[str] = []      # ... and `tpa_dict_iter` loop iterators, ended there
+        self.dtup_slots: list[str] = []          # ... and `tpa_dtup *` tuple keys, released there
         self.assigned: set[str] = assigned_names(f)
         self.regions = g.alloc_plan.fn_regions(f.name)      # PR-O2b: class -> its region in this function
         self.borrowed_locals: set[str] = self._find_borrowed_locals(f)
@@ -1029,8 +1035,23 @@ class _Fn:
         self.emit(f"{t} = {c};")
         return t
 
-    def key_word(self, e: ir.Expr, kt: Type) -> tuple[str, str]:
+    def key_word(self, e: ir.Expr, kt: Type | tuple[Type, ...]) -> tuple[str, str]:
         """(the word of the key `e` of a dict whose keys are `kt`, its bool mark), the word borrowed."""
+        if isinstance(kt, tuple):                   # a tuple key: the elements in order, then a new tuple of them
+            if not isinstance(e, ir.KeyTuple) or len(e.elements) != len(kt):
+                self.bad("aot/type", "dict", "a key of a dict of tuples is not a tuple of its element types")
+                return "0", "0"
+            words = [self.key_word(x, t)[0] for x, t in zip(e.elements, kt)]
+            t = self.tmp("tpa_dtup *", "NULL")
+            self.dtup_slots.append(t)
+            self.emit(f"tpa_dtup_release({t}); {t} = NULL;")
+            self.emit("{")
+            self.emit(f"    tpa_dw w_[{len(words)}];")
+            for i, w in enumerate(words):
+                self.emit(f"    w_[{i}] = {w};")
+            self.emit(f'    if (tpa_dtup_new("{_tup_kinds(kt)}", {len(words)}, w_, &{t})) {self.fail()}')
+            self.emit("}")
+            return f"(tpa_dw)(uintptr_t){t}", "0"
         if kt is Type.STR:
             return self.word(f"(tpa_dw)(uintptr_t)({self.str_value(e, 'a dict key')})"), "0"
         if kt is Type.BOOL:
@@ -1087,7 +1108,8 @@ class _Fn:
         MAP_ADD / DICT_UPDATE of a display builds it: chunks of 17 pairs; a chunk of at most 15 is presized
         (BUILD_MAP n), a longer one starts empty (BUILD_MAP 0, MAP_ADD); every chunk after the first is merged into the
         first (DICT_UPDATE). So a later loop that changes the dict sees CPython's layout."""
-        kk, vk = DICT_KK[kinds[0]], DICT_VK[ir.dict_vtype(kinds[1])]
+        kk = "TPA_DK_TUP" if isinstance(kinds[0], tuple) else DICT_KK[kinds[0]]
+        vk = DICT_VK[ir.dict_vtype(kinds[1])]
         chunks = [words[i:i + 17] for i in range(0, len(words), 17)] or [[]]
         for ci, chunk in enumerate(chunks):
             into = target if ci == 0 else self.dslot()
@@ -1224,17 +1246,43 @@ class _Fn:
         d, (kt, vt) = found
         kw, kb, vw = self.tmp("tpa_dw"), self.tmp("int"), self.tmp("tpa_dw")
         self.emit(f"if (tpa_dict_popitem({d}, &{kw}, &{kb}, &{vw})) {self.fail()}")
-        for var, t, w in ((s.key_var, kt, kw), (s.value_var, vt, vw)):
-            if var is None:
-                if t is Type.I64:
-                    self.emit(f"tpa_int_release((tpa_int){w});")
-                elif t in (Type.STR, Type.STR_OPT):
-                    self.emit(f"tpa_str_release((tpa_str *)(uintptr_t){w});")
-                elif isinstance(t, tuple):
-                    self.emit(f"tpa_dict_release((tpa_dict *)(uintptr_t){w});")
-                continue
-            if not self.bind_word(var, ir.dict_vtype(t), w):
-                return
+        if s.key_var is None:
+            self.drop_word(kt, kw, True)
+            self.drop_word(vt, vw, False)
+            return
+        if self.bind_key(s.key_var, kt, kw):
+            self.bind_word(s.value_var, ir.dict_vtype(vt), vw)
+
+    def drop_word(self, t: object, w: str, is_key: bool) -> None:
+        """Release the word `w` (a new reference) of a key or a value of the type `t` that no name takes."""
+        if is_key and isinstance(t, tuple):
+            self.emit(f"tpa_dtup_release((tpa_dtup *)(uintptr_t){w});")
+        elif t is Type.I64:
+            self.emit(f"tpa_int_release((tpa_int){w});")
+        elif t in (Type.STR, Type.STR_OPT):
+            self.emit(f"tpa_str_release((tpa_str *)(uintptr_t){w});")
+        elif isinstance(t, tuple):
+            self.emit(f"tpa_dict_release((tpa_dict *)(uintptr_t){w});")
+
+    def bind_key(self, var: object, kt: object, w: str) -> bool:
+        """The key word `w` (a new reference) bound to `var`; a tuple key to one name per element, left to right, then
+        the tuple released."""
+        if not isinstance(kt, tuple):
+            return self.bind_word(var, kt, w)                       # type: ignore[arg-type]
+        if not isinstance(var, tuple) or len(var) != len(kt):
+            self.bad("aot/type", "dict", "a tuple key is not bound to one name per element")
+            return False
+        tw = f"((tpa_dtup *)(uintptr_t){w})"
+        for i, (name, et) in enumerate(zip(var, kt)):
+            ew = f"{tw}->w[{i}]"
+            if et is Type.I64:
+                self.emit(f"tpa_int_retain((tpa_int){ew});")
+            elif et is Type.STR:
+                self.emit(f"tpa_str_retain((tpa_str *)(uintptr_t){ew});")
+            if not self.bind_word(name, et, ew):
+                return False
+        self.emit(f"tpa_dtup_release({tw});")
+        return True
 
     def bind_word(self, var: str, t: Type, w: str) -> bool:
         """`var` (a local of the type `t`) takes the dict word `w`, a new reference for an int or a str."""
@@ -1274,9 +1322,10 @@ class _Fn:
         self.emit(f"{st} = tpa_dict_iter_next(&{it}, {', '.join(outs)});")
         self.emit(f"if ({st} < 0) {self.fail()}")
         self.emit(f"if ({st} == 0) break;")
-        for var, t, w in ((s.key_var, kt, kw), (s.value_var, vt, vw)):
-            if var is not None and not self.bind_word(var, ir.dict_vtype(t), w):
-                return
+        if s.key_var is not None and not self.bind_key(s.key_var, kt, kw):
+            return
+        if s.value_var is not None and not self.bind_word(s.value_var, ir.dict_vtype(vt), vw):
+            return
         self.loop_prologue(s)
         self.stmts(s.body)
         self.depth -= 1
@@ -3664,6 +3713,8 @@ class _Fn:
             releases.append(f"    tpa_dict_iter_end(&{n});")
         for n in self.dict_slots:
             releases.append(f"    tpa_dict_release({n});")
+        for n in self.dtup_slots:
+            releases.append(f"    tpa_dtup_release({n});")
         for cls, n in self.obj_slots:
             releases.append(f"    tpa_cls_{mangle(cls)}_release({n});")
         for kind, n in self.list_slots:

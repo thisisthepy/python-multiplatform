@@ -418,7 +418,11 @@ class _Checker:
             if lcls is not None and isinstance(s.target, ast.Name):
                 self.var_classes[s.target.id] = lcls        # tier S2a: the variable of a loop over a list[C]
         if not isinstance(s.target, ast.Name) and not (
-                isinstance(s.target, ast.Tuple) and s.target.elts and all(isinstance(x, ast.Name) for x in s.target.elts)):
+                isinstance(s.target, ast.Tuple) and s.target.elts and all(
+                    isinstance(x, ast.Name) or (isinstance(x, ast.Tuple) and x.elts and i == 0
+                                                and all(isinstance(y, ast.Name) for y in x.elts))
+                    for i, x in enumerate(s.target.elts))):
+            # (tier S2b: `for (a, b), v in d.items()`, a tuple key bound element by element)
             # (tier S2a: names for the elements of a list of tuples, which typedpython/tuples.py checks)
             self.rep.error(s, "aot/statement", "for", "the loop target must be one name, or names for the elements of "
                            "a list of tuples")
@@ -832,6 +836,10 @@ def _is_dict_annotation(ann: ast.expr) -> bool:
             and isinstance(ann.slice, ast.Tuple) and len(ann.slice.elts) == 2):
         return False
     k, v = ann.slice.elts
+    if isinstance(k, ast.Subscript) and isinstance(k.value, ast.Name) and k.value.id in ("tuple", "Tuple"):
+        items = k.slice.elts if isinstance(k.slice, ast.Tuple) else [k.slice]
+        if items and all(isinstance(x, ast.Name) and x.id in ("int", "str", "bool") for x in items):
+            k = ast.Name(id="int")                  # (tier S2b: a tuple key of ints, strs and bools)
     return (isinstance(k, ast.Name) and k.id in ("int", "str", "bool")
             and ((isinstance(v, ast.Name) and v.id in ("int", "float", "bool", "str")) or _is_optional_str_annotation(v)
                  or _is_dict_annotation(v)))         # (a dict as a value: tier S2b)
