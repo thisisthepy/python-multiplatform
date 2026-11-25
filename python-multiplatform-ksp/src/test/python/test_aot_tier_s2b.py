@@ -675,6 +675,83 @@ def test_views_outside_a_loop_and_a_set_of_a_list(tmp_path: Path):
     _compare(tmp_path, VIEWS, [["c,a,dd"], ["b"]])
 
 
+VIEW_VALUES = """
+import sys
+
+
+def main() -> None:
+    d = {"a": 1, "b": 2}
+    ks = d.keys()
+    vs = d.values()
+    its = d.items()
+    print(len(ks), len(vs), len(its), ks, vs, its)
+    for w in sys.argv[1].split(","):
+        d[w] = len(w)
+    print(len(ks), "a" in ks, "zz" not in ks, 2 in vs, 99 not in vs, ("a", 1) in its, ("a", 2) not in its)
+    print(ks, vs, its, str(ks), repr(vs), f"{its}!")
+    line = ""
+    for k in ks:
+        line += k + ";"
+    for v in vs:
+        line += str(v) + ";"
+    for k, v in its:
+        line += k + "=" + str(v) + ";"
+    print(line)
+    if ks:
+        print("not empty", bool(vs), not its)
+    old = ks
+    d = {"z": 26}
+    ks = d.keys()
+    print(old, ks, len(old), len(ks))
+    del d["z"]
+    print(ks, len(ks), bool(ks), not ks)
+    t: dict[tuple[int, str], dict[int, int]] = {(1, "x"): {2: 3}}
+    tk = t.keys()
+    tv = t.values()
+    print(tk, tv, (1, "x") in tk)
+    two = old
+    n = 0
+    for k in two:
+        n += 1
+    print(n, two)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_a_view_bound_to_a_name_is_live(tmp_path: Path):
+    """`ks = d.keys()` (and values(), items()) bound to a name: it shows the dict as it is when used (len, `in`, loops,
+    truth, the repr), and keeps the dict it was made from when the dict's name is bound again, as in CPython."""
+    _compare(tmp_path, VIEW_VALUES, [["c,a,dd"], ["b"]])
+
+
+VIEW_CHANGED = """
+import sys
+
+
+def main() -> None:
+    d = {1: 1, 2: 2}
+    ks = d.keys()
+    n = int(sys.argv[1])
+    for k in ks:
+        if n > 0:
+            d[k + 10] = k
+            n -= 1
+    print(d)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_a_loop_over_a_view_name_raises_where_cpython_raises(tmp_path: Path):
+    """The loop over a view name is CPython's dict iterator: a dict that changes size raises RuntimeError."""
+    _compare(tmp_path, VIEW_CHANGED, [["0"], ["1"]])
+
+
 WORDFREQ = Path(__file__).resolve().parents[4] / "benchmarks" / "typedpython" / "py" / "wordfreq.py"
 
 
@@ -724,8 +801,17 @@ MAIN = '\n\ndef main() -> None:\n    f()\n\n\nif __name__ == "__main__":\n    ma
     ("    s = {3, 1, 2}\n    print(s.pop())\n", "aot/set-order"),
     ("    s = {3, 1, 2}\n    s.add(True)\n    print(len(s))\n", "a bool key"),
     ("    s = {3, 1, 2}\n    print(s[0])\n", "not subscriptable"),
-    # a view is used at once (len, in, print); a search of float values tests identity first in CPython
-    ("    d = {1: 2}\n    k = d.keys()\n    print(k)\n", "a view is used at once"),
+    # a view bound to a name is used as a view: what a dict has and a view has not is refused; a search of float
+    # values tests identity first in CPython
+    ("    d = {1: 2}\n    k = d.keys()\n    print(k[1])\n", "is a view"),
+    ("    d = {1: 2}\n    k = d.keys()\n    print(k.get(1, 0))\n", "is a view"),
+    ("    d = {1: 2}\n    k = d.keys()\n    print(k == {1})\n", "is a view"),
+    ("    d = {1: 2}\n    k = d.keys()\n    print(k & {1})\n", "is a view"),
+    ("    d = {1: 2}\n    k = d.items()\n    e = dict(k)\n    print(e)\n", "is a view"),
+    ("    d = {1: 2}\n    k = d.keys()\n    print(list(k))\n", "is a view"),
+    ("    d = {1: 2}\n    k = d.keys()\n    xs = [k]\n    print(len(xs))\n", "dict_keys"),
+    ("    d = {1: 2}\n    k = d.values()\n    e = {0: k}\n    print(len(e))\n", "dict_values"),
+    ("    d = {1: 2.5}\n    k = d.values()\n    print(2.5 in k)\n", "aot/identity"),
     ("    d = {1: 2.5}\n    print(2.5 in d.values())\n", "aot/identity"),
     ("    xs = [1.5]\n    print(len(set(xs)))\n", "is used other than"),
 ])

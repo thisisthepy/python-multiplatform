@@ -479,6 +479,26 @@ def f(d: dict[int, int], k: int) -> int:
     assert [p["type"] for p in d["functions"][0]["params"]] == ["dict_i64_i64", "i64"]
 
 
+def test_a_view_of_the_dict_bound_to_a_name_is_not_a_write(tmp_path):
+    """`ks = d.keys()` holds the parameter's dict, but a view name is only read (len, `in`, loops, truth, the repr)."""
+    src = write(tmp_path, '''
+def f(d: dict[int, int], k: int) -> int:
+    ks = d.keys()
+    vs = d.values()
+    its = d.items()
+    n = len(ks)
+    for v in vs:
+        n += v
+    for a, b in its:
+        n += a * b
+    if k in ks and ks:
+        n += 1
+    return n
+''')
+    _c, _h, d = aot.generate_library(src, exports=["f"], prefix="w")
+    assert [p["type"] for p in d["functions"][0]["params"]] == ["dict_i64_i64", "i64"]
+
+
 OUTSIDE = {
     "str_key": "d: dict[str, int]) -> int:\n    return len(d)",
     "str_value": "d: dict[int, str]) -> int:\n    return len(d)",
