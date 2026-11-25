@@ -167,6 +167,9 @@ tasks.named("wasmJsProcessResources") { dependsOn(stageWasmBrowserRuntime) }
  * generated entry module's scope.
  */
 fun patchWasmOutputForCPython(dir: File, modulePrefix: String) {
+    // SPEC T-7 (#175): the memory import check and, with a shared-memory runtime, its rewrite; the
+    // plugin's tested code, which this module applies.
+    python.multiplatform.gradle.patchKotlinWasmMemoryImport(dir, modulePrefix, wasmBrowserRuntimeDir.get().asFile, logger)
     val importObject = dir.listFiles()?.firstOrNull { it.name.endsWith(".import-object.mjs") }
         ?: throw GradleException("No *.import-object.mjs in $dir -- the Kotlin/Wasm output layout changed.")
     val text = importObject.readText()

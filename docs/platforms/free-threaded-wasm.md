@@ -177,9 +177,9 @@ Kotlin-side memory import).
 ## Open: the Kotlin side (later steps of #175, not implemented)
 
 - Kotlin/Wasm imports `intrinsics.memory` as non-shared (`min=0, max=none`); a shared
-  memory cannot satisfy that import, so the library cannot instantiate this `python.wasm`
-  until the import is marked shared with a maximum. That would revive the binary patch
-  [`wasm-design.md`](wasm-design.md) calls obsolete.
+  memory cannot satisfy that import. The owner chose a post-link rewrite of that import
+  (2026-11-21, SPEC T-7, [`wasm-design.md`](wasm-design.md)); it is implemented and applies
+  once this build is the staged runtime (#175 step 2).
 - Kotlin calls CPython on the JS thread that loaded the module (`noInitialRun`, no `main`),
   so `-sPROXY_TO_PTHREAD` does not apply there; a first `Thread.start()` from Kotlin relies on
   the pre-created worker pool.
@@ -189,3 +189,99 @@ Kotlin-side memory import).
 - Staging this archive as a wasmJs runtime (it lacks `wasmExports,wasmMemory` in
   `-sEXPORTED_RUNTIME_METHODS` and the `pyemscripten` platform tag that `build-cpython.sh`
   adds).
+
+## Design: upcalls from Python threads (#175 step 2, agent proposal, not confirmed)
+
+The owner put threads calling Kotlin on wasm in 1.0 (owner rule of 2026-11-21 22:05: no scope
+reduction; pmp-binder report, "Correction" section). This is the proposed route; nothing below
+has run yet.
+
+**The problem.** A `PyCFunction`'s `ml_meth` is a table index. Today it is the index `Table.set`
+gave Kotlin's `@WasmExport` entry in the **main thread's** table. Every pthread Worker
+instantiates `python.wasm` with its own table, where that index holds nothing, so a Python thread
+calling a Kotlin callable traps. Kotlin/Wasm itself runs only on the main thread.
+
+**The route.**
+1. A built-in module compiled into our CPython build (`Modules/Setup.local`: `_pm_upcall
+   _pm_upcall.c`) defines `pm_upcall_dispatch(self, args)`. A static function has the **same**
+   table index in every Worker, because the static element segment is instantiated identically
+   in each one. `ml_meth` becomes that index instead of the Kotlin export's.
+2. On the main thread, `pm_upcall_dispatch` calls the Kotlin entry through the table index Kotlin
+   registered once at bootstrap (`pm_upcall_set_target(index)`), as today.
+3. On any other thread, it detaches its thread state (`PyEval_SaveThread`), runs the same call on
+   the main thread with `emscripten_sync_run_in_main_runtime_thread`, and re-attaches
+   (`PyEval_RestoreThread`). Detaching matters on a free-threaded build: a stop-the-world (a GC)
+   started while the main thread runs Kotlin would otherwise wait forever for the blocked thread.
+   The Kotlin entry already takes its own `PyGILState_Ensure`/`Release`, so the main thread
+   attaches its own thread state for the call.
+4. **The main thread must be able to service the call.** Emscripten's main thread runs queued
+   proxied calls while it blocks in a futex wait, which `pthread_join`, `thread.join()` and
+   CPython's locks use. A main thread that is busy in JS (not blocked, not returned to the event
+   loop) does not service it; such an upcall waits until it does.
+
+**What it changes.** The CPython build (one C file plus `Setup.local`, in
+`.github/scripts/ft-wasm/build-wasm.sh`), the wasm `UpcallEntry` (it binds the dispatcher's index
+and registers the Kotlin one), and `cpython.mjs` (nothing, if the dispatcher's index is read through
+an exported C function). No new dependency, workflow or kind of artefact.
+
+**Tests (CI, wasm job).**
+- A Python thread calls a Kotlin callable and gets its result.
+- Four threads do so at once.
+- The main thread blocks in `join` while the threads call Kotlin.
+- A `gc.collect()` runs in one thread while another is inside an upcall.
+- An exception raised in Kotlin reaches the Python thread.
+
+**Implemented (2026-11-25, `feat/175-wasm-thread-upcalls`, not yet run).**
+- `.github/scripts/ft-wasm/_pm_upcall.c`, built into the 3.15t runtime by `build-wasm.sh` through
+  the build tree's `Modules/Setup.local`. It declares `Py_MOD_GIL_NOT_USED`, without which its
+  import would re-enable the GIL. Exports `pm_upcall_dispatch`, `pm_upcall_set_target`,
+  `pm_upcall_dispatch_index`; `build-wasm.sh` checks all three and that the module is built in.
+- An exception raised on the main thread is set on the main thread's thread state, so the
+  dispatcher takes it there (`PyErr_GetRaisedException`) and raises it again on the calling
+  thread (`PyErr_SetRaisedException`).
+- `cpython.mjs` `pmpUpcallDispatchIndex` / `pmpUpcallSetTarget` (optional: `-1` and a no-op on a
+  runtime without the module) and `UpcallEntry.entryIndex`: `ml_meth` is the dispatcher when it
+  exists, with the Kotlin entry as its target; otherwise the Kotlin entry, as before.
+- The C route is tested without Kotlin by `smoke.py` in the ft-wasm build job: a C self-test target
+  (`_pm_upcall.selftest`) reports the thread it ran on. Four threads make 50 calls each while the
+  main thread waits in `join()` and a fifth thread runs `gc.collect()`; every call must run on the
+  main thread, and `selftest("raise")` must raise the main thread's `ValueError` in the calling
+  thread.
+
+**Open.**
+- Whether `emscripten_sync_run_in_main_runtime_thread` is serviced inside the futex wait in Node
+  as well as in the browser. Its source says yes for both; the smoke test shows it for Node.
+- The Kotlin-level tests (a Python thread calling a Kotlin callable through `UpcallEntry`) need the
+  wasmJs suite to run on the 3.15t runtime, which waits on Decision 6.
+- Whether a routed `tp_traverse` is safe inside a pause, below: the visit functions run on the
+  main thread for the collecting thread. If one of them reads the current thread's state rather
+  than its `arg`, the smoke test's collection shows it.
+- Whether a proxied `tp_clear` / `tp_dealloc` may attach the main thread's own thread state while
+  that thread is parked mid-attach for another pause. The method route of step 2 has the same
+  question; the smoke test's concurrent `gc.collect()` exercises it, but does not prove it.
+
+**Proxy type slots (2026-11-25, same branch, not yet run; agent proposal, not confirmed).**
+`ProxyTypeFactory`'s `tp_traverse`, `tp_clear` and `tp_dealloc` were `pmpRegisterUpcall` indices
+too, so a proxy traversed, cleared or freed on a Python thread trapped. `_pm_upcall.c` now has one
+dispatcher per C signature (`pm_tp_traverse`, `pm_tp_clear`, `pm_tp_dealloc`, with
+`pm_proxy_slot_index` / `pm_proxy_set_slot_target`), and `ProxyTypeFactory.slotIndex` puts them in
+the type when the runtime exports them (`cpython.mjs` `pmpProxySlotDispatchIndex` /
+`pmpProxySetSlotTarget`; without the module, the Kotlin entries as before).
+- `tp_clear` and `tp_dealloc` run attached; they detach, run on the main thread attached, and keep
+  the main thread's own pending exception untouched.
+- `tp_traverse`: **correction** of this section's earlier note, which said routing it would
+  deadlock because the main thread cannot attach during a stop-the-world pause. It does not need
+  to attach. `ProxyType.traverse` reads the proxy's handle slot and calls `visit`; it takes no
+  thread state. So inside a pause (the collector, attached, is the requester; checked with
+  `stoptheworld.world_stopped`) the collector waits for the main thread without detaching, and the
+  main thread, parked for the pause on a futex, services the call there. Outside a pause
+  (`gc.get_referents`) the caller detaches first, so a pause the main thread requests meanwhile
+  does not wait on it. This is reasoning from the sources, checked only by the smoke test below.
+- `smoke.py`: `_pm_upcall.Node`, a GC type whose three slots take the same routes with C targets
+  that count where they ran. Threads make 200 two-node cycles each with automatic collection off;
+  a Python thread runs `gc.collect()` while the main thread waits in `join()`, then calls
+  `gc.get_referents` outside a pause. Required: the collection returns, finds every node, the
+  referents include the node's `ref`, every traverse, clear and dealloc ran on the main thread, and
+  every node was freed.
+- It depends on step 1 (#515) and on the 3.15t runtime (Decision 6), to have a runtime to test
+  against.

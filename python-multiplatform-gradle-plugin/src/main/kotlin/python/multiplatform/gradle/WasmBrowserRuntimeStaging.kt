@@ -98,7 +98,7 @@ abstract class StageWasmBrowserRuntimeTask : DefaultTask() {
  * @param dir the compile-sync output webpack reads, `build/wasm/packages/<name>/kotlin`.
  * @param modulePrefix the generated module basename, which is `<root project>-<project>`.
  */
-internal fun patchWasmOutputForCPython(dir: File, modulePrefix: String, logger: Logger) {
+internal fun patchWasmOutputForCPython(dir: File, modulePrefix: String, logger: Logger, runtimeDir: File) {
     val importObject = dir.listFiles()?.firstOrNull { it.name.endsWith(".import-object.mjs") }
         ?: throw GradleException("No *.import-object.mjs in $dir -- the Kotlin/Wasm output layout changed.")
     val text = importObject.readText()
@@ -129,6 +129,8 @@ internal fun patchWasmOutputForCPython(dir: File, modulePrefix: String, logger: 
         )
     }
 
+    patchKotlinWasmMemoryImport(dir, modulePrefix, runtimeDir, logger)
+
     val entry = dir.listFiles()
         ?.firstOrNull {
             it.name.endsWith(".mjs") && !it.name.contains("import-object") &&
@@ -155,5 +157,29 @@ internal fun patchWasmOutputForCPython(dir: File, modulePrefix: String, logger: 
         }
         entry.writeText(note + "import { $handoff } from './cpython.mjs';\n\n" + body)
         logger.lifecycle("Handed ${entry.name}'s wasm exports to cpython.mjs for upcall registration")
+    }
+}
+
+/**
+ * SPEC T-7: checks the linked Kotlin/Wasm module `<modulePrefix>.wasm` in [dir] and, when the CPython
+ * runtime in [runtimeDir] has a shared memory (the free-threaded pthreads build), rewrites its
+ * `intrinsics.memory` import to shared (see [WasmSharedMemoryImport]). The check runs whatever the
+ * runtime, so a Kotlin upgrade that changes the import fails the build before the runtime changes too.
+ */
+fun patchKotlinWasmMemoryImport(dir: File, modulePrefix: String, runtimeDir: File, logger: Logger) {
+    // CPython's own python.wasm may sit in the same directory (the library's node test staging copies
+    // it there), so the Kotlin module is the one .wasm named after the module.
+    val candidates = dir.listFiles { f -> f.name.endsWith(".wasm") && f.name.startsWith(modulePrefix) && f.name != "python.wasm" }
+        .orEmpty()
+    val wasm = candidates.singleOrNull() ?: throw GradleException(
+        "Expected one Kotlin/Wasm module $modulePrefix*.wasm in $dir, found ${candidates.map { it.name }} " +
+            "-- the Kotlin/Wasm output layout changed (SPEC T-7).",
+    )
+    val python = File(runtimeDir, "python.wasm")
+    val shared = python.isFile && WasmSharedMemoryImport.hasSharedMemory(python.readBytes()) == true
+    try {
+        logger.lifecycle(WasmSharedMemoryImport.applyTo(wasm, runtimeHasSharedMemory = shared))
+    } catch (e: WasmSharedMemoryImport.ShapeException) {
+        throw GradleException(e.message ?: "SPEC T-7", e)
     }
 }
