@@ -58,3 +58,18 @@ stdlib's.
 Python and Kotlin share one binary. Downcalls are direct cinterop calls, and an upcall from
 Python into Kotlin is a plain function call. The composition and calling-convention work that
 shapes the Android and desktop designs has no counterpart here.
+
+## Resuming a parked continuation from a Kotlin/Native thread
+
+An exposed `suspend fun` that really suspends hands Python an `asyncio.Future`, and the value arrives
+later from whatever thread resumes the Kotlin continuation (`docs/design/upcall.md` §5.5). On this
+target that thread is a Kotlin/Native one, and the rule is the same as everywhere else (SPEC U-5,
+#164 item 11): **any thread may resume, provided it holds `withGIL` while it does.** The resumption runs
+the delivery listener inline, which is why the attachment must already be there; `withGIL` attaches a
+thread CPython never saw and detaches it when the scope ends.
+
+Proven with a bare `pthread_create` thread the runtime never attached
+(`nativeTest/.../AsyncUpcallNativeDeliveryTest.kt`, `PythonProxyNativeDeliveryTest.kt`) and with a
+Kotlin/Native `Worker` (`AsyncUpcallWorkerDeliveryTest.kt`); a `kotlinx.coroutines` dispatcher thread is
+a `Worker` underneath, so `Dispatchers.Default` works the same way. The sample's iOS section 7
+(`sample/src/iosMain/.../ProxyDemo.ios.kt`) is the application-side shape.

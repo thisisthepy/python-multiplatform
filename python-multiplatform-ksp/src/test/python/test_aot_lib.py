@@ -1062,11 +1062,20 @@ def test_no_exports_and_a_twice_exported_function_are_refused(tmp_path):
     assert findings_of(tmp_path, REJECT_BASE, exports=["f", "f"], prefix="p")[0] == {("aot/export", 1, "f")}
 
 
-@pytest.mark.parametrize("name", ["takes_text", "gives_text", "takes_nested", "gives_tuple_with_list"])
+@pytest.mark.parametrize("name", ["takes_nested", "gives_tuple_with_list"])
 def test_an_unsupported_parameter_or_return_type_is_refused_naming_the_export(tmp_path, name):
     found, err = findings_of(tmp_path, REJECT_BASE, exports=[name], prefix="p")
     assert found == {("aot/export", line_of(REJECT_BASE, f"def {name}("), name)}
     assert "outside the library boundary" in str(err)
+
+
+@pytest.mark.parametrize("name", ["takes_text", "gives_text"])
+def test_a_str_parameter_or_result_is_refused_with_its_own_rule(tmp_path, name):
+    """Since tier S1a a str is a program type, but the C-ABI string kind comes later (SPEC N-17, design 4.3.1):
+    the export is refused with `aot/library-str`, naming the export."""
+    found, err = findings_of(tmp_path, REJECT_BASE, exports=[name], prefix="p")
+    assert found == {("aot/library-str", line_of(REJECT_BASE, f"def {name}("), name)}
+    assert "no C-ABI form yet" in str(err)
 
 
 def test_a_reserved_symbol_name_is_refused(tmp_path):
@@ -1565,7 +1574,13 @@ def test_the_big_list_elements_are_read_and_written_only_through_the_locking_hel
     assert store.index("tpa_int_list__lock(l);") < store.index("tpa_int_list__unlock(l);") < store.index("tpa_int_release(old);")
     assert store.index("tpa_int_retain(v);") < store.index("tpa_int_list__lock(l);"), "the new reference is taken before the lock"
     assert "#else\n    tpa_int_set(&l->d[slot], v);" in store
-    layout = runtime[runtime.index("typedef struct tpa_int_list {"):]
+    # (tier S2a: the first layout is the growable one, only for a program that resizes a big-capable list and never in
+    # a library, where TPA_THREADS stops the build; the layout a library uses is the fixed one after it)
+    grow = runtime[runtime.index("#if defined(TPA_GROW_INT)"):]
+    grow = grow[:grow.index("typedef struct tpa_int_list {")]
+    assert "#if defined(TPA_THREADS)\n#error" in grow, "a growable big-capable list never reaches a library build"
+    first = runtime.index("typedef struct tpa_int_list {")
+    layout = runtime[runtime.index("typedef struct tpa_int_list {", first + 1):]
     layout = layout[:layout.index("} tpa_int_list;")]
     assert "#if defined(TPA_THREADS)\n    tpa_int_list_lock_t lock;" in layout, "the lock field exists only with TPA_THREADS"
     assert "memory-safe for every list kind" in biglib.header

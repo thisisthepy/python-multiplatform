@@ -705,7 +705,7 @@ extensions.add(
 val embeddedPythonVersion = EmbeddedPythonVersion(configuredPythonVersion, freeThreaded = true)
 // `android` covers the AAR's variants and androidNativeArm64/X64, `ios` iosArm64, iosX64 and
 // iosSimulatorArm64. Anything else that is not metadata (the wasmJs variants) is GIL.
-val freeThreadedVariantPrefixes = listOf("desktop", "macosArm64", "linuxX64", "android", "ios")
+val freeThreadedVariantPrefixes = listOf("desktop", "macosArm64", "linuxX64", "mingwX64", "android", "ios")
 embeddedPythonVersion.register(project) { configurationName ->
     when {
         freeThreadedVariantPrefixes.any { configurationName.startsWith(it) } -> true
@@ -1256,9 +1256,15 @@ kotlin {
     listOf(
         iosArm64(), iosSimulatorArm64(), iosX64(),
         androidNativeArm64(), androidNativeX64(),
-        macosArm64(), linuxX64()
+        macosArm64(), linuxX64(), mingwX64()
     ).forEach { nativeTarget ->
         nativeTarget.apply {
+            // gradle.properties asks every binary for libbacktrace source info, which the Kotlin/Native
+            // runtime provides on ELF targets only; a mingwX64 link then misses
+            // Kotlin_getSourceInfo_libbacktrace (batch run 44973431716). Windows binaries take none.
+            if (konanTarget == MINGW_X64) {
+                binaries.all { binaryOption("sourceInfoType", "noop") }
+            }
             val targetABI = when(konanTarget) {
                 ANDROID_ARM64 -> "arm64-v8a"
                 ANDROID_X64 -> "x86_64"
@@ -1267,18 +1273,21 @@ kotlin {
                 IOS_SIMULATOR_ARM64 -> "ios-arm64_x86_64-simulator"
                 MACOS_ARM64 -> "macos-aarch64"
                 LINUX_X64 -> "linux-x86_64"
+                MINGW_X64 -> "windows-x86_64"
                 else -> throw RuntimeException("Unsupported ABI: $konanTarget")
             }
             val targetExtractDir = when(konanTarget.family) {
                 Family.ANDROID -> "$extractedDir/android-${if (targetABI == "arm64-v8a") "aarch64" else "x86_64"}$mobileFlavourSuffix/prefix"
                 Family.IOS -> "$extractedDir/ios/Python.xcframework"
-                Family.OSX, Family.LINUX -> "$extractedDir/$targetABI$desktopFlavourSuffix/python"
+                Family.OSX, Family.LINUX, Family.MINGW -> "$extractedDir/$targetABI$desktopFlavourSuffix/python"
                 else -> throw RuntimeException("Unsupported target family: ${konanTarget.family}")
             }
             val targetIncludePath = when(konanTarget.family) {
                 Family.ANDROID -> "$targetExtractDir/include/python$mobileTag"
                 Family.IOS -> "$targetExtractDir/$targetABI/Python.framework/Headers"
                 Family.OSX, Family.LINUX -> "$targetExtractDir/include/python$libVersion$desktopAbiSuffix"
+                // The Windows prefix keeps its headers in `include/` with no version directory.
+                Family.MINGW -> "$targetExtractDir/include"
                 else -> throw RuntimeException("Unsupported target family: ${konanTarget.family}")
             }
 
@@ -1288,6 +1297,16 @@ kotlin {
                 includeDirs(targetIncludePath)
                 if (konanTarget.family == Family.IOS) {
                     compilerOpts("-framework", "Python", "-F$targetExtractDir/$targetABI", "-fno-common", "-fvisibility=hidden")
+                }
+                // SPEC P-1a: Windows ships one `pyconfig.h` for the GIL and the free-threaded build and
+                // leaves `Py_GIL_DISABLED` to the compiler command line; without it every object
+                // header would have the GIL build's layout against `python315t.dll`.
+                if (konanTarget.family == Family.MINGW) {
+                    // `-mcrc32`: the MinGW-w64 headers `Python.h` reaches declare an inline wrapper
+                    // over `__builtin_ia32_crc32qi`, and cinterop compiles a stub for every inline
+                    // function it sees; without the target feature that stub is an error. Nothing
+                    // here calls it.
+                    compilerOpts("-DPy_GIL_DISABLED=1", "-mcrc32")
                 }
             }
 
@@ -1362,6 +1381,12 @@ kotlin {
                         "-lpython$libVersion$desktopAbiSuffix",
                         "-Wl,-rpath,$targetExtractDir/lib"
                     ))
+                } else if (konanTarget.family == Family.MINGW) {
+                    // SPEC P-1a: the MSVC import library, which lld links in MinGW mode; the DLL is
+                    // found at run time beside the executable or on PATH (mingwX64Test sets PATH).
+                    getTest(NativeBuildType.DEBUG).linkerOpts.add(
+                        "$targetExtractDir/libs/python${libVersion.replace(".", "")}$desktopAbiSuffix.lib"
+                    )
                 } else if (konanTarget.family == Family.LINUX) {
                     // python-build-standalone ships libpythonX.Y.so as a symlink to libpythonX.Y.so.1.0,
                     // which Gradle's tarTree extracts as a 0-byte file; stageDesktopLibraries resolves
@@ -1487,9 +1512,12 @@ kotlin {
         }
         val macosArm64Main by getting
         val linuxX64Main by getting
+        val mingwX64Main by getting
         desktopNativeMain.dependsOn(nativeMain)
         macosArm64Main.dependsOn(desktopNativeMain)
         linuxX64Main.dependsOn(desktopNativeMain)
+        // SPEC P-1a (#191): Windows Kotlin/Native desktop.
+        mingwX64Main.dependsOn(desktopNativeMain)
 
         // `src/nativeTest` existed as a directory long before this line, and nothing pointed at
         // it -- so its `GCLeakTest.native.kt` was dead source, and the same file had been copied
@@ -1508,7 +1536,7 @@ kotlin {
             kotlin.srcDir("src/desktopNativeTest/kotlin")
         }
         desktopNativeTest.dependsOn(nativeTest)
-        listOf("macosArm64Test", "linuxX64Test")
+        listOf("macosArm64Test", "linuxX64Test", "mingwX64Test")
             .forEach { getByName(it).dependsOn(desktopNativeTest) }
 
         // ...and `artTest` completes the mirror for the other half: things true of androidNative
@@ -1528,6 +1556,15 @@ tasks.named<org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeHostTes
     dependsOn("downloadPython_macos_aarch64")
     val pythonHome = file("$extractedDir/macos-aarch64$desktopFlavourSuffix/python").absolutePath
     environment("PYTHONHOME", pythonHome)
+}
+
+// SPEC P-1a: the prefix is PYTHONHOME, and its root (python315t.dll, the MSVC runtime) goes on PATH,
+// which is where Windows looks for a DLL the test executable imports.
+tasks.named<org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeHostTest>("mingwX64Test") {
+    dependsOn("downloadPython_windows_x86_64")
+    val pythonHome = file("$extractedDir/windows-x86_64$desktopFlavourSuffix/python").absolutePath
+    environment("PYTHONHOME", pythonHome)
+    environment("PATH", pythonHome + File.pathSeparator + (System.getenv("PATH") ?: ""))
 }
 
 tasks.named<org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeHostTest>("linuxX64Test") {

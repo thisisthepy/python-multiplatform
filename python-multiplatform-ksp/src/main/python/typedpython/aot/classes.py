@@ -33,7 +33,8 @@ from typedpython.ir import Type
 # `CallObject.callee` were missing from four hand-written copies). When a node with a new child attribute
 # is added to `typedpython.ir`, add the attribute here.
 EXPR_CHILD_ATTRS = ("left", "right", "operand", "value", "obj", "index", "cond", "then", "orelse",
-                    "length", "fill", "callee", "np")
+                    "length", "fill", "callee", "np",
+                    "count", "start", "stop", "step")       # (tier S2a: ListRepeat.count, ListSlice bounds)
 EXPR_CHILD_SEQS = ("args", "elements", "parts")
 
 
@@ -61,7 +62,7 @@ def _walk_stmts(stmts: tuple[ir.Stmt, ...]):
         if isinstance(s, ir.If):
             yield from _walk_stmts(s.then)
             yield from _walk_stmts(s.orelse)
-        elif isinstance(s, (ir.ForRange, ir.While, ir.ForObj)):
+        elif isinstance(s, (ir.ForRange, ir.While, ir.ForObj, ir.ForStr, ir.ForObjList)):
             yield from _walk_stmts(s.body)
 
 
@@ -267,13 +268,15 @@ def analyze_classes(module: ir.Module, rel: str, class_lines: dict[str, int] | N
         if cname in self_escapes:
             continue
         for fd in decl.field_decls:
-            if (cname, fd.name) not in mutating_stores:
+            # (tier S2a, the S2 review B4: a list field is never immutable-after-init, the list changes without any
+            # field assignment)
+            if (cname, fd.name) not in mutating_stores and fd.type is not Type.OBJ_LIST:
                 immutable_fields.add((cname, fd.name))
 
     def _is_ref_field(cname: str, fd: ir.FieldDecl) -> bool:
         if fd.type == Type.OBJ:
             return True
-        if fd.type in ir.ARRAYS:
+        if fd.type in ir.ARRAYS or fd.type in (Type.STR, Type.STR_OPT, Type.OBJ_LIST):     # (STR: S1b; OBJ_LIST: S2a)
             return True
         if fd.type == Type.I64 and (cname, fd.name) in tagged:
             return True
@@ -293,8 +296,8 @@ def analyze_classes(module: ir.Module, rel: str, class_lines: dict[str, int] | N
     edges: dict[str, set[str]] = {c: set() for c in classes}
     for cname, decl in classes.items():
         for fd in decl.field_decls:
-            if fd.type == Type.OBJ and fd.cls is not None and fd.cls in classes:
-                edges[cname].add(fd.cls)
+            if fd.type in (Type.OBJ, Type.OBJ_LIST) and fd.cls is not None and fd.cls in classes:
+                edges[cname].add(fd.cls)        # (OBJ_LIST: the list's items, review B4: containers in the type graph)
 
     sccs = _tarjan_scc(list(classes.keys()), edges)
     findings: list[Finding] = []

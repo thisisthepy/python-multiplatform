@@ -698,7 +698,9 @@ class PythonProxySourceTest {
         val source = PythonProxySource.render(listOf(objectEntry("p.link", arity = 1)))
 
         assertContains(source, "isinstance(_pm_v, _pm_owners)")
-        assertContains(source, "_pm_owners=(_PmObject, _PmGcObject)")
+        // `BaseException` stands for the Kotlin throwable's proxy (SPEC U-2), whose class is defined
+        // when the first throwable is raised and is looked up only when an exception is passed.
+        assertContains(source, "_pm_owners=(_PmObject, _PmGcObject, BaseException)")
         assertTrue(
             source.indexOf("_PmGcObject") < source.indexOf("def _pm_unwrap("),
             "the owners tuple is bound as a default argument, so both names must already exist",

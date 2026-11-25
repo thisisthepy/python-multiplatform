@@ -262,33 +262,40 @@ class WalkedArtifactCallbackTest {
     }
 
     /**
-     * A callable cannot cross with no scope open, and the reference it was given is not leaked when
-     * it is refused.
+     * SPEC B-5c: a `() -> Unit` callable crossing with no scope open is a one-shot. It runs, and
+     * after that run it holds nothing: no root, no reference to the callable.
      *
-     * The refusal is the honest answer rather than an inconvenience: a wrapper with no holder would
-     * be invoked by Compose after the `PyObject` behind it had been collected, which on a target with
-     * no cleaner is never and on one with a cleaner is whenever.
+     * This test used to assert the refusal ("a callable crossed with nowhere to live"); the leader's
+     * decision of 2026-11-21 (B-5c) gave this one slot shape a holder of its own, the one-shot, whose
+     * release point is its single run. Other shapes are still refused with no scope (B-5c,
+     * `PythonRunOnceTest.withNoScopeASlotThatTakesArgumentsOrIsComposableIsStillRefused`).
      */
     @Test
-    fun aCallableWithNoScopeOpenIsRefusedRatherThanRooted() {
+    fun aUnitCallableWithNoScopeOpenRunsOnceAndRootsNothingAfter() {
         val baseline = settledBaseline()
         assertEquals(0, PythonCallables.openScopeCount, "no scope may be left open by an earlier test")
 
         Python3.exec(
             """
+            import gc, weakref
             from kotlin.system import measureTimeMillis
-            try:
-                measureTimeMillis(lambda: None)
-                raise AssertionError('a callable crossed with nowhere to live')
-            except AssertionError:
-                raise
-            except Exception as e:
-                assert 'scope' in str(e), 'unexpected refusal: ' + repr(e)
+            class _OneShotBody:
+                def __init__(self):
+                    self.calls = 0
+                def __call__(self):
+                    self.calls += 1
+            _oneshot = _OneShotBody()
+            _oneshot_weak = weakref.ref(_oneshot)
+            measureTimeMillis(_oneshot)
+            assert _oneshot.calls == 1, 'measureTimeMillis did not run the block once: ' + str(_oneshot.calls)
+            del _oneshot
+            gc.collect()
+            assert _oneshot_weak() is None, 'the one-shot kept the callable after its run'
             """.trimIndent(),
         )
         assertTrue(
-            HandleTable.liveCount <= baseline,
-            "a refused crossing must root nothing: ${HandleTable.liveCount} against $baseline",
+            settledBaseline() <= baseline,
+            "a one-shot that ran must root nothing: ${HandleTable.liveCount} against $baseline",
         )
     }
 

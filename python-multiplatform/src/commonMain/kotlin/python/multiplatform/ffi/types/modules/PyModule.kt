@@ -123,11 +123,11 @@ class Builtins(
     }
 
     /** `iter(obj)`. Uses `PyObject_GetIter` for the same reason [len] uses `PyObject_Length`. */
-    fun iter(obj: PyObject): PyIterator {
+    fun iter(obj: PyObject): python.multiplatform.ffi.types.iteration.PyIteratorObject {
         // PyObject_GetIter returns a new reference, which the PyIterator adopts.
         val iterPointer = python.multiplatform.ffi.Python3.withPython { PyObject_GetIter(obj.pointer) }
             ?: throw pyErrorOrGeneric("iter() failed")
-        return PyIterator(iterPointer, borrowed = false)
+        return python.multiplatform.ffi.types.iteration.PyIteratorObject(iterPointer, borrowed = false)
     }
 
     /**

@@ -1060,9 +1060,10 @@ internal object KlibKnmScanner {
         val isComposable = COMPOSABLE_ANNOTATION in annotations
         val isSuspend = Flags.IS_SUSPEND.get(fn.flags)
 
-        // Match KlibScanner's handle rule (`noBoundDeclarationCarriesAGenericType`): type parameters
-        // and functional interfaces (`Runnable(block: () -> Unit)`) are not substituted or synthesized
-        // on non-composable KLIB functions unless the function is `@Composable`.
+        // A member function's own type parameters and functional interfaces (`Runnable(block: () -> Unit)`)
+        // are substituted or synthesized only when it is `@Composable`; the class's type parameters are
+        // `classSubstIds` (SPEC U-4a). Top-level and object functions substitute their own unbounded
+        // type parameters whether `@Composable` or not (`functionCandidateOrNull`, SPEC B-2).
         val substitutableIds = if (isComposable) substitutableTypeParameterIds(fn.typeParameterList, nr, tt) else emptySet()
         val combinedSubstIds = classSubstIds + substitutableIds.orEmpty()
         val hasReified = fn.typeParameterList.any { it.reified }
@@ -1197,23 +1198,33 @@ internal object KlibKnmScanner {
         val isComposable = COMPOSABLE_ANNOTATION in annotations
         val isSuspend = Flags.IS_SUSPEND.get(fn.flags)
 
-        // Match KlibScanner's handle rule (`noBoundDeclarationCarriesAGenericType`): type parameters
-        // and functional interfaces (`Runnable(block: () -> Unit)`) are not substituted or synthesized
-        // on non-composable KLIB functions unless the function is `@Composable`.
-        val substitutableIds = if (isComposable) substitutableTypeParameterIds(fn.typeParameterList, nr, tt) else emptySet()
+        // SPEC B-2, as B-1 does on jars (#38): an unbounded, non-reified type parameter is read as
+        // `kotlin.Any?` and written out at the call (`mutableStateOf<kotlin.Any?>(...)`), `@Composable`
+        // or not. Only `@Composable` functions used to get this, so `mutableStateOf` was declined on
+        // Kotlin/Native and every notebook scenario failed there (#191, batch run 45027744672).
+        // Functional interfaces (`Runnable(block: () -> Unit)`) are still synthesized on `@Composable`
+        // functions only (see `functionSlots` below).
+        val substitutableIds = substitutableTypeParameterIds(fn.typeParameterList, nr, tt)
         val hasReified = fn.typeParameterList.any { it.reified }
-        val hasUnsubstitutable = fn.typeParameterCount > 0 && (!isComposable || substitutableIds == null)
+        val hasUnsubstitutable = fn.typeParameterCount > 0 && substitutableIds == null
+
+        // A type this walk cannot model used to drop the whole declaration with no trace (material3's
+        // `Text` was missing from both the table and the stubs on K/N, #191). It is now declined by
+        // name: the slot gets a placeholder model naming the classifier, and the reason says which.
+        val unmodelled = ArrayList<String>()
+        fun modelOrPlaceholder(type: ProtoBuf.Type, slot: String): KotlinTypeModel =
+            typeModelOf(type, nr, tt, classes, substitutableIds.orEmpty()) ?: run {
+                val classifier = if (type.hasClassName()) nr.getQualifiedClassName(type.className).replace('/', '.') else "a type parameter"
+                unmodelled += "$slot: $classifier"
+                KotlinTypeModel(qualifiedName = classifier, isNullable = type.nullable)
+            }
 
         val receiverProto = fn.receiverType(tt)
-        val receiverModel = if (receiverProto != null) {
-            typeModelOf(receiverProto, nr, tt, classes, substitutableIds.orEmpty()) ?: return null
-        } else {
-            null
-        }
+        val receiverModel = if (receiverProto != null) modelOrPlaceholder(receiverProto, "receiver") else null
         val valueParams = fn.valueParameterList
         val parameters = valueParams.map { vp ->
             val pType = vp.type(tt)
-            val model = typeModelOf(pType, nr, tt, classes, substitutableIds.orEmpty()) ?: return null
+            val model = modelOrPlaceholder(pType, nr.getString(vp.name))
             DeclaredParameter(
                 name = nr.getString(vp.name),
                 type = model,
@@ -1221,7 +1232,7 @@ internal object KlibKnmScanner {
             )
         }
         val returnProto = fn.returnType(tt)
-        val returnModel = typeModelOf(returnProto, nr, tt, classes, substitutableIds.orEmpty()) ?: return null
+        val returnModel = modelOrPlaceholder(returnProto, "return")
 
         val model = DeclarationModel(
             simpleName = name,
@@ -1237,6 +1248,12 @@ internal object KlibKnmScanner {
         )
         val declined = { reason: String -> Candidate(null, model.copy(declineReason = reason)) }
 
+        if (unmodelled.isNotEmpty()) {
+            return declined(
+                "a type this walk cannot model (${unmodelled.joinToString()}): its klib is not among the walked " +
+                    "configuration's, or it is a construct the model has no shape for",
+            )
+        }
         if (isSuspend) return declined("suspend")
         if (hasReified) {
             return declined("a reified type parameter: its type argument is read at run time, so kotlin.Any? cannot stand for it")
@@ -1694,7 +1711,8 @@ internal object KlibKnmScanner {
     ): KlibFunctionSlot? {
         val declared = modelType.qualifiedName
         if (!declared.startsWith(KOTLIN_FUNCTION_PREFIX)) return null
-        if (!ownerIsComposable) return null
+        // SPEC B-5: a plain function-typed parameter takes a Python callable on any declaration, as on
+        // the jar walker; only a @Composable lambda needs a @Composable owner (checked below).
         if (Flags.SUSPEND_TYPE.get(protoType.flags)) {
             return KlibFunctionSlot(
                 declineReason = "a suspend function-typed parameter ($declared): its compiled shape takes a " +
@@ -1718,7 +1736,9 @@ internal object KlibKnmScanner {
                     "argument has no name a proxy could be built over",
             )
         }
-        if (protoType.argumentList.any { it.projection != ProtoBuf.Type.Argument.Projection.INV }) {
+        if (protoType.argumentList.any { it.projection != ProtoBuf.Type.Argument.Projection.INV } ||
+            protoType.argumentList.any { arg -> arg.type(tt)?.let { hasUseSiteVariance(it, tt, depth = 0) } == true }
+        ) {
             return KlibFunctionSlot(
                 declineReason = "a function-typed parameter generated Kotlin cannot spell ($declared): some " +
                     "part of its signature is not a nameable public type",
@@ -1744,6 +1764,23 @@ internal object KlibKnmScanner {
             typeName = slotTypeName,
             boundary = BoundaryType(OBJECT_TAG, cast, "(%s)"),
         )
+    }
+
+    /**
+     * Whether [type] names an `in`/`out` projection anywhere in its arguments. [KotlinTypeModel] keeps no
+     * variance, so such a type would be rendered invariant (`Range<Annotation>` for
+     * `Range<out Annotation>`) and the generated cast would not compile (`AnnotatedString.mapAnnotations`,
+     * notebook-native `compileKotlinMacosArm64`, #191). A star projection is rendered as written.
+     */
+    private fun hasUseSiteVariance(type: ProtoBuf.Type, tt: TypeTable, depth: Int): Boolean {
+        if (depth > 8) return true
+        return type.argumentList.any { arg ->
+            when (arg.projection) {
+                ProtoBuf.Type.Argument.Projection.IN, ProtoBuf.Type.Argument.Projection.OUT -> true
+                ProtoBuf.Type.Argument.Projection.STAR -> false
+                else -> arg.type(tt)?.let { hasUseSiteVariance(it, tt, depth + 1) } == true
+            }
+        }
     }
 
     private fun functionalInterfaceSlotOrNull(
@@ -1827,8 +1864,7 @@ internal object KlibKnmScanner {
         val suffix = if (modelType.isNullable) "?" else ""
         if (modelType.arguments.isEmpty()) return base + suffix
         val renderedArgs = modelType.arguments.map { arg ->
-            arg ?: return null
-            renderKotlinSourceType(arg, classes, depth + 1) ?: return null
+            if (arg == null) "*" else renderKotlinSourceType(arg, classes, depth + 1) ?: return null
         }
         return "$base<${renderedArgs.joinToString(", ")}>$suffix"
     }
@@ -1856,9 +1892,18 @@ internal object KlibKnmScanner {
             }
             if (bounded) return null
             ids += tp.id
+            ids += typeParameterNameKey(tp.name)
         }
         return ids
     }
+
+    /**
+     * The key a type parameter referenced *by name* (`ProtoBuf.Type.typeParameterName`, a string index)
+     * has in a substitution set, beside the ids (`ProtoBuf.Type.typeParameter`). A K1-built klib refers
+     * to a function's own type parameter by name (`kotlinx-coroutines-core` 1.8.1's
+     * `MutableStateFlow(value: T)`); a K2-built one by id. Negative, so it never meets an id.
+     */
+    private fun typeParameterNameKey(nameIndex: Int): Int = -1 - nameIndex
 
     private fun typeModelOf(
         protoType: ProtoBuf.Type?,
@@ -1871,7 +1916,7 @@ internal object KlibKnmScanner {
         if (depth > 8) return null
         if (protoType == null) return KotlinTypeModel("kotlin.Unit")
         if (protoType.hasTypeParameter() || protoType.hasTypeParameterName()) {
-            val tpId = if (protoType.hasTypeParameter()) protoType.typeParameter else return null
+            val tpId = if (protoType.hasTypeParameter()) protoType.typeParameter else typeParameterNameKey(protoType.typeParameterName)
             if (tpId !in substitutableTypeParamIds) return null
             if ((protoType.flags and (1 shl 1)) != 0) return null
             return KotlinTypeModel("kotlin.Any", isNullable = true)
@@ -1996,9 +2041,21 @@ internal object KlibKnmScanner {
         if (!type.isNullable) {
             primitiveBoundaryTypeOf(type.qualifiedName)?.let { return it }
         } else {
+            // A nullable `String` or `ByteArray` is a reference with nothing to narrow, so `null` reaches
+            // the declaration through a plain cast (the jar walker's `nullablePrimitiveBoundaryTypeOf`).
+            // Declining it declined all four material3 `Icon` overloads (`contentDescription: String?`)
+            // on Kotlin/Native (#191, batch run 45066724639). A nullable number or `Boolean` stays
+            // declined: its read narrows a `Long`/`Double`, and a `null` would throw inside the cast.
+            when (type.qualifiedName) {
+                "kotlin.String" -> return BoundaryType("STRING", "(%s as String?)", "(%s)")
+                "kotlin.ByteArray" -> return BoundaryType("BYTES", "(%s as ByteArray?)", "(%s)")
+            }
             if (primitiveBoundaryTypeOf(type.qualifiedName) != null) return null
-            if (type.qualifiedName == "kotlin.Any") {
-                return null
+            // A `kotlin.Any?` slot crosses as an object handle cast to nothing narrower, as the jar
+            // walker's `NULLABLE_ANY_BOUNDARY` (B-1, #38): a substituted `T` (`mutableStateOf(value: T)`)
+            // is one. Non-null `kotlin.Any` stays declined, as on the JVM.
+            if (type.qualifiedName == "kotlin.Any" && type.arguments.isEmpty()) {
+                return BoundaryType(OBJECT_TAG, "(%s as kotlin.Any?)", "(%s)")
             }
         }
 
@@ -2024,10 +2081,31 @@ internal object KlibKnmScanner {
                 return BoundaryType(OBJECT_TAG, "(%s as ${type.qualifiedName})", "(%s)")
             }
         } else {
-            // A nullable value class boxes on Kotlin/Native and JVM alike, so it stays declined;
-            // only a non-value handle class may cross as a nullable OBJECT handle.
+            // A nullable value class as a parameter (#191: `Text(fontStyle: FontStyle? = null)`, which
+            // declined every material3 `Text` on Kotlin/Native): Python passes the underlying primitive,
+            // as it does for the non-null value class, or `None`, which arrives as `null` and is passed
+            // as `null`. The value is boxed by the Kotlin compiler when the call is written. A nullable
+            // value class as a return still declines (its `null` and its value would need two shapes).
+            if (direction == BoundaryDirection.PARAMETER) {
+                val info = valueClassInfoOf(type.qualifiedName, classes, depth)
+                if (info != null && info.constructorIsPublic && info.propertyIsPublic && !info.underlyingModel.isNullable) {
+                    val underlying = klibBoundaryTypeOf(info.underlyingModel, classes, direction, depth + 1)
+                    if (underlying != null && !underlying.isReturnOnly && underlying.tag != OBJECT_TAG) {
+                        return BoundaryType(
+                            tag = underlying.tag,
+                            readFn = { slot -> "(($slot)?.let { present -> ${info.qualifiedName}(${underlying.read("present")}) })" },
+                            wrapFn = { error("a nullable value class is parameter-only") },
+                            isReturnOnly = false,
+                        )
+                    }
+                }
+            }
+            // A value class Python cannot build from a primitive (`TextAlign`, whose constructor is
+            // internal) crosses as the boxed handle Python already holds for it (`TextAlign.Center`),
+            // exactly as its non-null form does; `None` is `null`. Any other nullable handle class
+            // crosses as a nullable OBJECT handle too.
             val handleCls = handleClassOrNull(type, classes)
-            if (handleCls != null && !handleCls.isValue) {
+            if (handleCls != null && (!handleCls.isValue || direction == BoundaryDirection.PARAMETER)) {
                 return BoundaryType(OBJECT_TAG, "(%s as ${type.qualifiedName}?)", "(%s)")
             }
         }
@@ -2047,7 +2125,9 @@ internal object KlibKnmScanner {
         val cls = classes[type.qualifiedName] ?: return false
         if (cls.visibility != ProtoBuf.Visibility.PUBLIC || cls.kind !in HANDLE_CLASS_KINDS) return false
         if (cls.isValue || cls.isPublishedApi || cls.isDeprecated) return false
-        return type.arguments.all { it != null && (it.qualifiedName == "kotlin.Any" && it.isNullable) }
+        // A star projection is spellable as-is, as the jar walker's `renderKotlinTypeName` writes it:
+        // `rememberSaveableWrapper(initial: Any?): MutableState<*>` (#191).
+        return type.arguments.all { it == null || (it.qualifiedName == "kotlin.Any" && it.isNullable) }
     }
 
     private fun handleClassOrNull(type: KotlinTypeModel, classes: Map<String, KnmClassRecord>): KnmClassRecord? {

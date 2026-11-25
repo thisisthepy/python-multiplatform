@@ -920,9 +920,10 @@ The sample app on both emulators showed:
 
 The last row resumes the parked continuation from a `java.lang.Thread`, as on desktop. (The original record
 adds that `pmp_attach` runs on that path too; a `java.lang.Thread` is already known to ART, so that is
-(unverified).) The iOS sample cannot yet show that row (a Kotlin/Native completion thread needs a
-`Worker` or memory-model decision in the sample; the library's `PythonProxyNativeDeliveryTest` does it with
-`pthread_create`).
+(unverified).) The iOS sample shows that row from a Kotlin/Native `Worker` since #164 item 11 (2026-11-21):
+any thread may resume the parked continuation as long as it holds `withGIL` while it does, and
+`AsyncUpcallWorkerDeliveryTest` proves it for a `Worker` as `PythonProxyNativeDeliveryTest` does for a bare
+`pthread_create` thread. A `kotlinx.coroutines` dispatcher thread is a `Worker` underneath.
 
 **wasmJs**, the synchronous proxy surface runs (10 of `PythonProxyInstallTest`'s 11); `await` does not yet:
 
@@ -998,6 +999,40 @@ exists to avoid.
 **Where the continuation runs.** On the loop thread, holding the GIL, inside a Python callback: the code
 after `await()` blocks the loop while it runs. A `ContinuationInterceptor` in the context moves it off
 (`suspendCoroutine` intercepts; `theContinuationIsDispatchedThroughTheCallersInterceptor...`).
+
+### 5.10 Stepping a Python coroutine from Kotlin (SPEC U-5e)
+
+`PyObject.step(value, context)` and `PyObject.throwInto(exception, context)` (`pythonx/PyCoroutineStep.kt`)
+are the primitive pythonx-concurrent's Kotlin mode (its S7.9) drives a Python coroutine with: one
+`coro.send(value)` or `coro.throw(exc)`, inside `contextvars.Context.run` when the driver names a context,
+as one call that attaches, runs, and detaches. Nothing here uses the table, the binding module or a loop; it
+is the object model plus one exception-mapping helper the trampoline already had.
+
+**Why `Context.run`, and why Kotlin code sits between `Ensure` and `Release` at all.** The request reads
+"no Kotlin code between Ensure and Release"; what it needs is that no *user* code and no suspension point
+sit there (S7.10), so a virtual thread stays pinned for exactly one native call and the GIL is never held
+across a park. `PyIter_Send` would be the single-call shape, but it cannot run under a `Context`, and
+`PyContext_Enter` / `PyContext_Exit` are outside the limited API this library binds. So the scope holds a
+handful of library calls: `GetAttrString(coro, "send")`, a one- or two-element tuple, `PyObject_CallObject`
+on `context.run` or on the bound method, and the classification of the outcome. None of them parks.
+
+**Outcome classification, and the references.** A non-`NULL` result is `Yielded`, a new reference the
+caller owns. `NULL` with `StopIteration` on the indicator is `Returned`: the instance is taken off the
+indicator (`PyErr_GetRaisedException`, new reference), its `value` attribute read (new reference, owned by
+the caller), the instance released. Any other `NULL` is `Raised`, built by `PyException.fromCurrentError`,
+which clears the indicator. The bound method, the `run` attribute and the argument tuple are released in
+`finally`; the argument is incref'd into the tuple (`PyTuple_SetItem` steals) and the caller keeps its own.
+`throwInto(Throwable)` builds the Python exception with `UpcallTrampoline.pythonExceptionObjectFor` (SPEC
+U-2's mapping, the same instance restoration for a `PyException`) and releases it after the step.
+
+**What a driver does with it.** A `Yielded` `asyncio.Future` is subscribed with `call_soon_threadsafe` on
+that future's loop and the Kotlin coroutine suspends on it (S7.9 case 2, the same crossing as S4.5); a
+`Yielded` object of the driver's own (a Kotlin `suspend` call, a channel operation) is awaited in Kotlin;
+anything else is thrown back in with `throwInto(RuntimeError(...))`. A `Raised` whose exception
+`isCancelledError()` is the cancellation signal (`toKotlinException()` gives the `CancellationException`).
+Steps of one coroutine are sequenced by the driver; nothing in the primitive stops a second thread from
+stepping the same coroutine, and CPython answers that with `ValueError: coroutine already executing`, which
+arrives as `Raised`.
 
 ## 6. Cycle collection is part of the table's job
 
@@ -1366,8 +1401,8 @@ Only what is really open; each with what proves the done part.
 6. **Kotlin calling a Python override.** Not implemented (§4.4).
 7. **Per-target gaps outside desktop.** U-3/U-4 are asserted on desktop, with smoke coverage elsewhere
    (`NativeSmokeTest`, `GeneratedAndroidTableTest`); the native async tests have no recorded per-test
-   androidNative result (§5.7); no proxy-cost rows for Android/androidNative (§7.5); the iOS sample cannot show
-   the really-suspending demo (§5.8).
+   androidNative result (§5.7); no proxy-cost rows for Android/androidNative (§7.5). The iOS sample now shows the
+   really-suspending demo from a `Worker` (§5.8, #164 item 11).
 8. **`BYTES` marshalling** is per item until `PyBytes_AsStringAndSize` is bound (§3.3).
 9. **Incremental KSP** needs per-file fragments (§2.7). **Transitive and published-artifact discovery** are
    unverified (§2.9).

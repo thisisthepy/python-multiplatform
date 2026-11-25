@@ -85,6 +85,19 @@ fun insets(left: Double = 0.0, right: Double = 0.0): String = "d:" + left + "," 
 
 fun insets(left: Int = 0, right: Int = 0): String = "i:" + left + "," + right
 
+/**
+ * A bound overload beside one the walker **declines** (a reified type parameter), the shape of
+ * Compose's `PlatformInsets(left: Int = ...)` beside `PlatformInsets(getLeft: () -> Int = ...)` (#191).
+ * Kotlin resolves the generated call against both, so a branch the declined one may also accept
+ * (`gap()`, and `gap(left = ...)` by name: a declined declaration is matched by parameter names only)
+ * must not be generated; `gap(top = ...)` names a parameter it lacks. (`Long` only because the JVM
+ * would otherwise give both the same signature.)
+ */
+fun gap(left: Int = 0, top: Int = 0): String = "g:" + left + "," + top
+
+@Suppress("UNUSED_TYPE_PARAMETER")
+inline fun <reified T : Any> gap(left: Long = 0, spacing: Long = 0): String = "r:" + left + "," + spacing
+
 /** No default anywhere: its generated body must stay byte-identical to what the walker emitted
  * before defaults existed, which is what keeps this change off the 43 of 70 `foundation-layout`
  * entries that declare none. */

@@ -24,7 +24,7 @@ class PyDictTest {
         )
         val dict = PyDict.fromMap(map)
         assertEquals(2, dict.size)
-        assertEquals(mapOf<Any?, Any?>("a" to 1L, "b" to 2L), dict.toNativeMap())
+        assertEquals(mapOf<Any?, Any?>("a" to 1L, "b" to 2L), dict.toMap())
     }
 
     @Test

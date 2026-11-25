@@ -3614,7 +3614,9 @@ static inline int tp_traced(PyObject *module, PyThreadState *ts, PyCodeObject *c
 #define TP_PAR_MAX_THREADS 8        /* default cap; TYPEDPYTHON_THREADS overrides, up to TP_PAR_HARD_CAP */
 #endif
 #define TP_PAR_HARD_CAP 64
+#ifndef TP_PAR_MIN_CHUNK                /* overridable like TP_PAR_MIN_WORK: benchmarks/typedpython/par_threshold.py (#278) */
 #define TP_PAR_MIN_CHUNK 1024u      /* fewest iterations worth a thread of their own (placeholder, #151) */
+#endif
 #define TP_PAR_ALIGN 8u             /* chunk starts are multiples of 8 iterations = one 64-byte line of doubles */
 
 #if !defined(TP_NO_THREADS) && (defined(__unix__) || defined(__APPLE__)) && !defined(__EMSCRIPTEN__)

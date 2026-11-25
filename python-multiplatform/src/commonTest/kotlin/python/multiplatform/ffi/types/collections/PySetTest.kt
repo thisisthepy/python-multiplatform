@@ -23,7 +23,7 @@ class PySetTest {
         )
         val set = PySet.fromSet(elements)
         assertEquals(2, set.size)
-        assertEquals(setOf(1L, 2L), set.toNativeSet())
+        assertEquals(setOf(1L, 2L), set.toSet())
     }
 
     @Test
@@ -46,21 +46,21 @@ class PySetTest {
         val a = PySet(PythonTestFixture.eval("{1, 2}").pointer, true)
         val b = PySet(PythonTestFixture.eval("{2, 3}").pointer, true)
         val union = a.union(b)
-        assertEquals(setOf(1L, 2L, 3L), union.toNativeSet())
+        assertEquals(setOf(1L, 2L, 3L), union.toSet())
     }
 
     @Test
     fun intersectionKeepsOnlyCommonElements() = PythonTestFixture.withInterpreter {
         val a = PySet(PythonTestFixture.eval("{1, 2, 3}").pointer, true)
         val b = PySet(PythonTestFixture.eval("{2, 3, 4}").pointer, true)
-        assertEquals(setOf(2L, 3L), a.intersection(b).toNativeSet())
+        assertEquals(setOf(2L, 3L), a.intersection(b).toSet())
     }
 
     @Test
     fun differenceRemovesElementsPresentInOther() = PythonTestFixture.withInterpreter {
         val a = PySet(PythonTestFixture.eval("{1, 2, 3}").pointer, true)
         val b = PySet(PythonTestFixture.eval("{2}").pointer, true)
-        assertEquals(setOf(1L, 3L), a.difference(b).toNativeSet())
+        assertEquals(setOf(1L, 3L), a.difference(b).toSet())
     }
 
     @Test
