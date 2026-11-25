@@ -1149,7 +1149,7 @@ list functions, compares floats bit for bit with CPython, checks exception class
 threads, checks that every bound `MethodHandle` descriptor matches the generated metadata, and asserts
 that no class of the CPython-embedding library is on the classpath and that the process loads no
 libpython (Linux: the process's maps; macOS: `vmmap` when it can examine the JVM, otherwise the
-classpath check only). The same 25 scenarios are also compiled by `aotNativeCompile` into a standalone
+classpath check only). The same 31 scenarios are also compiled by `aotNativeCompile` into a standalone
 GraalVM native image (`AotNativeImageMainKt`, verified by `aotNativeRun` in `.github/workflows/typedpython.yml`
 with `JAVA_HOME` and `PYTHONHOME` removed, #456).
 

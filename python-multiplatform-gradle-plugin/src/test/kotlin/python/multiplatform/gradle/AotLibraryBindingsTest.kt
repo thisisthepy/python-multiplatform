@@ -343,12 +343,16 @@ class AotLibraryBindingsTest {
          "params": [{"name": "d", "type": "dict_i64_bool"}], "returns": ["i64"]}
     """.trimIndent()
 
-    private fun withDicts(): String = description(extraFunction = dictFunctions).replace(
-        "\n  }\n}",
-        "\n  },\n  \"dicts\": {\n" + listOf(
+    // The last two braces close "lists" and the description. Anchored on them, not on their indentation: the
+    // interpolated functions change what trimIndent strips. A missed anchor is an error,
+    // never a description silently left without "dicts".
+    private fun withDicts(): String {
+        val plain = description(extraFunction = dictFunctions)
+        val end = Regex("""}\s*}\s*$""").find(plain) ?: error("the description does not end in two braces")
+        return plain.substring(0, end.range.first) + "},\n  \"dicts\": {\n" + listOf(
             dictEntry("dict_i64_i64", "i64"), dictEntry("dict_i64_f64", "f64"), dictEntry("dict_i64_bool", "bool"),
-        ).joinToString(",\n") + "\n  }\n}",
-    )
+        ).joinToString(",\n") + "\n  }\n}"
+    }
 
     @Test
     fun aDictIsAParameterAndAResultWithOneClassPerKind() {

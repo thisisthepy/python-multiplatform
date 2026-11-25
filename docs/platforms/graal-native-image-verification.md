@@ -247,7 +247,7 @@ separate native image under `:python-multiplatform-ksp:fixtures:aot` without run
     `native-image --no-fallback --enable-native-access=ALL-UNNAMED` and copies the built shared libraries and
     `<prefix>.json` files into `libs/<prefix>/` beside the binary.
   - `:python-multiplatform-ksp:fixtures:aot:aotNativeRun`: executes `aot-fixture` with `JAVA_HOME` and `PYTHONHOME`
-    unset, checks `AOT_NATIVE_IMAGE: 25 passed, 0 failed of 25`, and on macOS checks `otool -L` for neither `libjvm`
+    unset, checks `AOT_NATIVE_IMAGE: 31 passed, 0 failed of 31`, and on macOS checks `otool -L` for neither `libjvm`
     nor `libpython`.
 - **CI:** `.github/workflows/typedpython.yml` (`app-fixture` on `macos-latest`) runs `aotNativeRun` after
   `desktopTest` using `graalvm/setup-graalvm@v1` (`liberica`, Java 25).
