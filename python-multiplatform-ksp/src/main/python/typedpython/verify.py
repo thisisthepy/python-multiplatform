@@ -378,7 +378,7 @@ from .ir import (
     DictClear, DictCompare, DictContains, DictCopy, DictDelete, DictDisplay, DictGet, DictLen, DictPop, DictSetDefault,
     DictPopItem, DictStore, DictStr, DictUpdate, ForDict, DictListDisplay, DictListIndex, DictListLen, DictListStore,
     ForDictList, KeyTuple, SetAdd, SetCompare, SetDisplay, SetOp, SetRemove, DictHasValue, DictHasItem, DictViewStr,
-    SetFromList,
+    DictView, SetFromList,
 )
 
 DA = "verify/definite-assignment"
@@ -731,6 +731,8 @@ class _Checker:
             return e.kinds if self.good_kinds(e.kinds) else None
         if cls is SetOp:
             return self.dict_kinds(e.left)
+        if cls is DictView:
+            return self.dict_kinds(e.dict)
         if cls is Local:
             return self.fn.dict_kinds.get(e.name)
         if cls is FieldGet:
@@ -827,6 +829,14 @@ class _Checker:
         if e.view not in ("keys", "values", "items"):
             self.error(STRUCTURE, f"DictViewStr of {e.view!r}")
         self.result(e, Type.STR)
+        return dataclasses.replace(e, dict=d)
+
+    def e_DictView(self, e: DictView, state: _State) -> ir.Expr:
+        d, kinds = self.dict_operand(e.dict, state, "the dict of a view")
+        self.no_set(kinds, "DictView")
+        if e.view not in ("keys", "values", "items"):
+            self.error(STRUCTURE, f"DictView of {e.view!r}")
+        self.result(e, Type.DICT)
         return dataclasses.replace(e, dict=d)
 
     def e_SetFromList(self, e: SetFromList, state: _State) -> ir.Expr:

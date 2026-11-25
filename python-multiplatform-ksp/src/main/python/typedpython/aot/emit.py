@@ -1002,6 +1002,8 @@ class _Fn:
             return e.kinds
         if isinstance(e, ir.SetOp):
             return self.dict_kinds(e.left)
+        if isinstance(e, ir.DictView):
+            return self.dict_kinds(e.dict)
         if isinstance(e, ir.Local):
             return self.f.dict_kinds.get(e.name)
         if isinstance(e, ir.FieldGet):
@@ -1150,6 +1152,11 @@ class _Fn:
         t = self.tmp("int")
         self.emit(f"{t} = {'!' if e.negate else ''}tpa_dict_has_item({found[0]}, {kw}, {vw});")
         return t
+
+    def ev_DictView(self, e: ir.DictView) -> str:
+        """A view bound to a name is its dict (borrowed; the Assign takes the view local's own reference)."""
+        found = self.dict_of(e.dict, "the dict of a view")
+        return found[0] if found is not None else "NULL"
 
     def ev_DictViewStr(self, e: ir.DictViewStr) -> str:
         found = self.dict_of(e.dict, "the dict of a view")

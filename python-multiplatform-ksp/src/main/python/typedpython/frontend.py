@@ -218,6 +218,17 @@ def _dict_or_set_kinds(kind: str) -> "ir.DictKinds | None":
     return _dict_kinds(kind) or _set_kinds(kind)
 
 
+_VIEW_KIND = re.compile(r"(?:_collections_abc\.)?dict_(keys|values|items)\[(.+)\]")
+
+
+def _view_kinds(kind: str) -> "tuple[str, ir.DictKinds] | None":
+    """AOT mode, tier S2b: (the view, the kinds of its dict) of Pyrefly's type of a view bound to a name
+    (`_collections_abc.dict_keys[str, int]`), else None."""
+    m = _VIEW_KIND.fullmatch(_aot_kind(kind).strip())
+    kinds = _dict_kinds(f"dict[{m.group(2)}]") if m is not None else None
+    return (m.group(1), kinds) if kinds is not None else None
+
+
 def _dict_list_kinds(kind: str) -> "ir.DictKinds | None":
     """AOT mode, tier S2b: the kinds of the dicts of a `list[dict[K, V]]` annotation or inferred type, else None."""
     k = _aot_kind(kind).strip()
@@ -1540,6 +1551,7 @@ class _Lowerer:
         self.list_cls: dict[str, str] = {}      # AOT mode, tier S2a: the element class of an OBJ_LIST local
         self.loop_cls: dict[str, str] = {}      # ... and of the variable of a loop over one
         self.dict_locals: dict[str, ir.DictKinds] = {}     # AOT mode, tier S2b: the kinds of every DICT local
+        self.view_locals: dict[str, str] = {}   # ... and the view ("keys", ...) of a DICT local that is a view
         self.dict_want: ir.DictKinds | None = None         # ... and what a dict display being lowered must hold
         self.temps: dict[str, Type] = {}
         self.pre: list[ir.Stmt] = []
@@ -1809,6 +1821,9 @@ class _Lowerer:
         elif self.info.aot and (dk := _dict_list_kinds(kind)) is not None:
             t = Type.DICT_LIST                      # tier S2b: list[dict[K, V]]
             self.dict_locals[name] = dk
+        elif self.info.aot and (vk := _view_kinds(kind)) is not None:
+            t = Type.DICT                           # tier S2b: a view bound to a name holds its dict
+            self.view_locals[name], self.dict_locals[name] = vk
         elif self.info.aot and kind.startswith(("dict[", "Dict[", "typing.Dict[")):
             raise Skip(kinds[0][0], f"local `{name}: {kind}`: the type `{kind}` is outside the AOT mode (dict[K, V] of "
                                     "int, str or bool keys and int, float, bool, str or `str | None` values)")
@@ -2042,6 +2057,10 @@ class _Lowerer:
             if self.info.aot and self.local_type(name, line) is Type.DICT_LIST:
                 kinds = self.name_kinds(name)                           # tier S2b: a list of dicts
                 value = self.dict_list_value(value_node, kinds, f"local `{name}`")
+                self.note_assign(name, value)
+                return self.take() + [ir.Assign(name, value)]
+            if self.info.aot and self.local_type(name, line) is Type.DICT and name in self.view_locals:
+                value = self.view_value(name, value_node, line)          # tier S2b: a view bound to a name
                 self.note_assign(name, value)
                 return self.take() + [ir.Assign(name, value)]
             if self.info.aot and self.local_type(name, line) is Type.DICT:
@@ -2485,7 +2504,7 @@ class _Lowerer:
                 raise Skip(line, "chr() takes one argument")
             return ir.StrChr(Type.STR, self.str_int(self.value(args[0]), args[0], "the argument of chr()"))
         if name == "len" and self.builtin("len") and len(args) == 1 and self.view_of(args[0]) is not None:
-            return ir.DictLen(Type.I64, self.value(self.view_of(args[0])[1]))      # tier S2b: a view's len is the dict's
+            return ir.DictLen(Type.I64, self.view_dict(self.view_of(args[0])[1]))  # tier S2b: a view's len is the dict's
         if name == "len" and self.builtin("len") and len(args) == 1 \
                 and not (isinstance(args[0], ast.Name) and args[0].id in self.arrays):
             x = self.value(args[0])
@@ -2512,7 +2531,44 @@ class _Lowerer:
             fd = self.field_decl_of(node)
             return fd is not None and fd.type is Type.DICT
         return (self.info.aot and isinstance(node, ast.Name) and self.is_local(node.id) and node.id not in self.arrays
-                and self.local_type(node.id, node.lineno) is Type.DICT)
+                and self.local_type(node.id, node.lineno) is Type.DICT and node.id not in self.view_locals)
+
+    def view_name(self, node: ast.expr) -> str | None:
+        """The view ("keys", "values", "items") of the view local `node` (tier S2b), else None."""
+        if not (self.info.aot and isinstance(node, ast.Name) and self.is_local(node.id) and node.id not in self.arrays):
+            return None
+        self.local_type(node.id, node.lineno)
+        return self.view_locals.get(node.id)
+
+    def view_dict(self, dnode: ast.expr) -> ir.Expr:
+        """The dict of a view: the dict node of `d.keys()`, lowered, or the view local itself (it holds its dict)."""
+        if self.view_name(dnode) is not None:
+            assert isinstance(dnode, ast.Name)
+            return ir.Local(Type.DICT, dnode.id)
+        return self.value(dnode)
+
+    def view_value(self, name: str, value_node: ast.expr, line: int) -> ir.Expr:
+        """The value bound to the view local `name`: `d.keys()` (`values()`, `items()`) of a dict of its kinds, or
+        another view local of the same view and kinds (the two then hold the same dict, as CPython's names hold one
+        view object)."""
+        view, kinds = self.view_locals[name], self.dict_locals[name]
+        found = self.view_of(value_node)
+        if found is None:
+            raise Skip(line, f"`{name}` is a view ({_dict_name(kinds)}.{view}()) but is bound to `{_src(value_node)}`")
+        if found[0] != view or self.view_kinds(found[1]) != kinds:
+            got = f"{_dict_name(self.view_kinds(found[1]))}.{found[0]}()"
+            raise Skip(line, f"`{name}` is a view {_dict_name(kinds)}.{view}() but is bound to `{_src(value_node)}`, "
+                             f"a view {got}")
+        return ir.DictView(Type.DICT, view, self.view_dict(found[1]))
+
+    def view_kinds(self, dnode: ast.expr) -> ir.DictKinds:
+        """The kinds of the dict of a view (`dnode` as view_of gives it)."""
+        if self.view_name(dnode) is not None:
+            assert isinstance(dnode, ast.Name)
+            return self.dict_locals[dnode.id]
+        kinds = self.node_dict_kinds(dnode)
+        assert kinds is not None
+        return kinds
 
     def field_decl_of(self, node: ast.Attribute) -> ir.FieldDecl | None:
         """The declaration of `name.field` of a compiled class (None for anything else; nothing is lowered)."""
@@ -2643,6 +2699,8 @@ class _Lowerer:
             return e.kinds
         if isinstance(e, ir.SetOp):
             return self.kinds_of(e.left, node)
+        if isinstance(e, ir.DictView):
+            return self.kinds_of(e.dict, node)
         if isinstance(e, ir.Local):
             return self.name_kinds(e.name)
         if isinstance(e, ir.FieldGet):
@@ -2746,7 +2804,10 @@ class _Lowerer:
         return self.dict_value(self.dict_operand(node, vt if isinstance(vt, tuple) else None), vt, node)
 
     def view_of(self, node: ast.expr) -> tuple[str, ast.expr] | None:
-        """`d.keys()` / `d.values()` / `d.items()` of a dict (not a set): (the view, the dict's node); else None."""
+        """`d.keys()` / `d.values()` / `d.items()` of a dict (not a set): (the view, the dict's node); a view local:
+        (its view, the name itself, see view_dict); else None."""
+        if (view := self.view_name(node)) is not None:
+            return view, node
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
                 and node.func.attr in ("keys", "values", "items") and not node.args and not node.keywords:
             kinds = self.node_dict_kinds(node.func.value)
@@ -2757,7 +2818,7 @@ class _Lowerer:
     def view_repr(self, node: ast.expr) -> ir.Expr | None:
         """The repr of a view (`dict_keys([...])`), made where it is used (print, str, repr, an f-string); else None."""
         found = self.view_of(node)
-        return None if found is None else ir.DictViewStr(Type.STR, found[0], self.value(found[1]))
+        return None if found is None else ir.DictViewStr(Type.STR, found[0], self.view_dict(found[1]))
 
     def view_contains(self, node: ast.Compare) -> ir.Expr | None:
         """`x in d.keys()`, `x in d.values()`, `(k, v) in d.items()` (and `not in`), the left operand first; None when
@@ -2766,13 +2827,12 @@ class _Lowerer:
         if found is None:
             return None
         view, dnode = found
-        kinds = self.node_dict_kinds(dnode)
-        assert kinds is not None
+        kinds = self.view_kinds(dnode)
         negate = isinstance(node.ops[0], ast.NotIn)
         line = node.lineno
         if view == "keys":
             key = self.key_value(node.left, kinds[0])
-            d = self.value(dnode)
+            d = self.view_dict(dnode)
             return ir.DictContains(Type.BOOL, self.dict_key(key, kinds[0], node.left, insert=False), d, negate)
         vt = kinds[1]
         if vt is Type.F64 or (isinstance(vt, tuple) and ir.dict_has_float(vt)):
@@ -2780,7 +2840,7 @@ class _Lowerer:
                              "NaN equals itself there), which an AOT program does not have (aot/identity)")
         if view == "values":
             value = self.dict_value_of(node.left, vt)
-            return ir.DictHasValue(Type.BOOL, value, self.value(dnode), negate)
+            return ir.DictHasValue(Type.BOOL, value, self.view_dict(dnode), negate)
         if not (isinstance(node.left, ast.Tuple) and len(node.left.elts) == 2
                 and not any(isinstance(e, ast.Starred) for e in node.left.elts)):
             raise Skip(line, f"`{_src(node)}`: an AOT program searches the items of a dict for a pair `(k, v)` (a "
@@ -2788,7 +2848,7 @@ class _Lowerer:
         knode, vnode = node.left.elts
         key = self.dict_key(self.key_value(knode, kinds[0]), kinds[0], knode, insert=False)
         value = self.dict_value_of(vnode, vt)
-        return ir.DictHasItem(Type.BOOL, key, value, self.value(dnode), negate)
+        return ir.DictHasItem(Type.BOOL, key, value, self.view_dict(dnode), negate)
 
     def not_set(self, kinds: ir.DictKinds, node: ast.AST, what: str) -> None:
         """Refuse `what` of a set (what a dict has and a set has not, or what depends on the order of a set)."""
@@ -2956,7 +3016,8 @@ class _Lowerer:
             return ir.DictCopy(Type.DICT, (kt, vt), d)
         if m in ("keys", "values", "items"):
             raise Skip(line, f"`{_src(node)}`: a view is used at once in an AOT program (the iterable of a `for` loop, "
-                             "len(), `in`, print / str / repr / an f-string); bound to a name or passed it is not yet")
+                             "len(), `in`, its truth, print / str / repr / an f-string) or bound to a name; a view is "
+                             "passed or returned not yet")
         if m in ("update", "clear"):
             raise Skip(line, f"uses the result of `{_src(node)}`, which returns None")
         if m == "popitem":
@@ -3056,6 +3117,8 @@ class _Lowerer:
             if it.args or it.keywords:
                 raise Skip(line, f"{it.func.attr}() takes no argument")
             view, it = it.func.attr, it.func.value
+        elif (named := self.view_name(it)) is not None:
+            view = named                                            # tier S2b: `for k in ks` of a view local
         elif not self.is_dict_node(it):
             return None
         if view == "items":
@@ -3071,7 +3134,7 @@ class _Lowerer:
         else:
             raise Skip(line, f"loop target `{_src(node.target)}` is not supported (a name; a tuple key into a name per "
                              "element)")
-        d = self.value(it)
+        d = self.view_dict(it)
         kinds = self.kinds_of(d, it)
         self.not_set(kinds, node.iter, f"a loop over a set visits it in its table's order {SET_ORDER}")
         key_var, pairs = self.bind_targets(key_t, kinds[0], line) if key_t is not None else (None, [])
@@ -4063,7 +4126,13 @@ class _Lowerer:
         return e
 
     def condition(self, node: ast.expr) -> ir.Expr:
+        if self.view_name(node) is not None:
+            return self.view_truth(node)
         return self.truth(self.sub(node, cond=2), node)
+
+    def view_truth(self, node: ast.expr) -> ir.Expr:
+        """The truth of a view local: its dict is not empty (tier S2b)."""
+        return ir.Compare(Type.BOOL, ir.CompareKind.NE, ir.DictLen(Type.I64, self.view_dict(node)), ir.Const(Type.I64, 0))
 
     def truth(self, e: ir.Expr, node: ast.expr) -> ir.Expr:
         if e.type == Type.BOOL:
@@ -4245,6 +4314,12 @@ class _Lowerer:
                     b.how == "annotation" for b in self.bindings[name]):
                 raise Skip(node.lineno, f"`{name}` is read but never assigned")
             t = self.local_type(name, node.lineno)
+            if name in self.view_locals:
+                raise Skip(node.lineno, f"`{name}` is a view of a dict ({_dict_name(self.dict_locals[name])}."
+                                        f"{self.view_locals[name]}()): an AOT program uses a view by a `for` loop, "
+                                        "len(), `in`, its truth, print / str / repr / an f-string, or binds it to "
+                                        "another view name; what a view has beyond that (set operators, comparison, "
+                                        "list() or dict() of it) and passing or returning it are not yet")
             if t is Type.STR_OPT and name in self.not_none:
                 return ir.StrNarrow(Type.STR, ir.Local(t, name))       # tier S2a: proved not None here
             return ir.Local(t, name)
@@ -4381,7 +4456,8 @@ class _Lowerer:
 
     def unary(self, node: ast.UnaryOp) -> ir.Expr:
         if isinstance(node.op, ast.Not):
-            operand = self.truth(self.sub(node.operand), node.operand)
+            operand = self.view_truth(node.operand) if self.view_name(node.operand) is not None \
+                else self.truth(self.sub(node.operand), node.operand)
             return ir.UnaryOp(Type.BOOL, ir.UnaryOpKind.NOT, operand)
         if not isinstance(node.op, (ast.USub, ast.UAdd, ast.Invert)):
             raise Skip(node.lineno, f"operator `{_src(node)}` is not supported")
@@ -4542,7 +4618,10 @@ class _Lowerer:
         for i, v in enumerate(node.values):
             if i > 0:
                 self.hoist_ok = False  # evaluated only if the earlier operands did not decide
-            e = self.sub(v, 1 if cond else 0)
+            if cond and self.view_name(v) is not None:
+                e = self.view_truth(v)                              # tier S2b: `k in ks and ks`
+            else:
+                e = self.sub(v, 1 if cond else 0)
             if cond:
                 e = self.truth(e, v)
             elif e.type != Type.BOOL:
@@ -4779,6 +4858,8 @@ class _Lowerer:
                 raise Skip(line, "bool() takes one argument in an AOT program")
             if isinstance(args[0], ast.Name) and args[0].id in self.arrays:
                 return ir.Compare(Type.BOOL, ir.CompareKind.NE, ir.Len(Type.I64, args[0].id), ir.Const(Type.I64, 0))
+            if self.view_name(args[0]) is not None:
+                return self.view_truth(args[0])
             x = self.value(args[0])
             return self.truth(x, args[0])
         if name == "abs" and self.builtin("abs"):
