@@ -121,6 +121,12 @@ kotlin {
                 implementation(libs.kotlin.test)
             }
         }
+        val macosArm64Test by getting {
+            dependencies {
+                // The fork's AppKit window, for NotebookWindowTest (SPEC B-10a).
+                implementation(libs.compose.window.native.macos)
+            }
+        }
     }
 }
 

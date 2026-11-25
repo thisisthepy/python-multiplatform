@@ -13,6 +13,12 @@ Issue #191. The scenarios of [`notebook-e2e`](../notebook-e2e/README.md) (python
 - each screen is drawn offscreen and compared pixel for pixel with the same composables drawn from
   Kotlin, as on the JVM.
 
+One test has no JVM counterpart: `NotebookWindowTest` (macosArm64 only, SPEC B-10a) runs the app
+in a real window, the fork's AppKit and Metal window (`org.thisisthepy.compose.window:native-macos`),
+and reads what the window shows the way a screen reader does: the initial message, cell 12's write
+and cell 15's redeclared root, each checked absent before the cell that produces it. It opens a
+window on the desktop, so it needs a logged-in session (a GitHub-hosted macOS runner has one).
+
 The test sources are notebook-e2e's, with two changes in `NotebookHost`: its inputs arrive as
 environment variables set by the test task (`NOTEBOOK_E2E_*`) instead of JVM system properties,
 and the check that the wheel was unpacked runs in Python.
