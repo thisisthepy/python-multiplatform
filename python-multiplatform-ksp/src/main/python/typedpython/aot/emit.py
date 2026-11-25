@@ -68,6 +68,12 @@ CTYPE = {Type.I64: "int64_t", Type.F64: "double", Type.BOOL: "int"}
 LIST = {Type.F64_ARRAY: ("f64", "double", Type.F64), Type.I64_ARRAY: ("i64", "int64_t", Type.I64)}
 FAIL = "{ rc = -1; goto tp_cleanup; }"
 STR_LISTS = (Type.STR_LIST, Type.STR_OPT_LIST)     # the `tpa_str_list` types: list[str] (S1b), list[str | None] (S2a)
+# tier S2b: the runtime's key and value kinds of a dict (runtime/tp_aot_dict.h). An int is held TAGGED (any int); a bool
+# dict holds the words 0 and 1, every key marked a bool.
+DICT_KK = {Type.I64: "TPA_DK_INT", Type.STR: "TPA_DK_STR", Type.BOOL: "TPA_DK_I64"}
+DICT_VK = {Type.I64: "TPA_DV_INT", Type.F64: "TPA_DV_F64", Type.BOOL: "TPA_DV_BOOL", Type.STR: "TPA_DV_STR",
+           Type.STR_OPT: "TPA_DV_STR", Type.DICT: "TPA_DV_DICT", Type.NONE: "TPA_DV_BOOL"}   # (NONE: a set, every
+#                                                                                           value 1, never read)
 
 
 # the kinds of list the runtime has: `f64`, `i64` (a raw `list[int]`) and `int` (a big-capable `list[int]`: tagged
@@ -201,8 +207,10 @@ def assigned_names(f: ir.Function) -> set[str]:
         for n in rep_mod.walk(s):
             if isinstance(n, ir.Assign):
                 out.add(n.target)
-            elif isinstance(n, (ir.ForRange, ir.ForStr, ir.ForObjList)):
+            elif isinstance(n, (ir.ForRange, ir.ForStr, ir.ForObjList, ir.ForDictList)):
                 out.add(n.var)
+            elif isinstance(n, (ir.ForDict, ir.DictPopItem)):
+                out.update(v for v, _ in ir.dict_bound(n))
             elif isinstance(n, ir.Unpack):
                 out.update(n.targets)
     return out
@@ -211,6 +219,11 @@ def assigned_names(f: ir.Function) -> set[str]:
 # the names of the big-integer runtime: a program whose generated text names none of them does not include it
 _INT_USE = re.compile(r"\b(?:tpa_int|tpa_argv_int|tpa_truediv_i64|tpa_cmp_int_f64|tpa_cmp_f64_int|tpa_slot_int|"
                       r"tpa_print_int|TPA_INT_)")
+
+
+def _tup_kinds(kt: tuple[Type, ...]) -> str:
+    """The runtime kinds string of a tuple key (tp_aot_dict.h tpa_dtup): 'i' int, 's' str, 'b' bool."""
+    return "".join({Type.I64: "i", Type.STR: "s", Type.BOOL: "b"}[t] for t in kt)
 
 
 def needs_int_runtime(text: str) -> bool:
@@ -231,6 +244,7 @@ class _Gen:
         self.chunks: list[str] = []
         self.argv_int = False           # some function reads `int(sys.argv[i])`: the entry point must keep the arguments whole
         self.uses_str = False           # tier S1: some function has a str value (links tp_aot_str.h)
+        self.uses_dict = False          # tier S2b: some function has a dict (links tp_aot_dict.h, which needs the str runtime)
         self.str_lits: dict[str, str] = {}      # tier S1: literal text -> the name of its static object
         self.ucd: set[str] = set()              # tier S1b: the Unicode tables the program's str methods read (aot/unicode.py)
         tagged_fields = {k for k, v in self.reps.field_reps.items() if v == TAGGED}
@@ -286,6 +300,12 @@ class _Gen:
             return "tpa_str *"
         if fd.type is Type.OBJ_LIST:
             return "tpa_obj_list *"                        # tier S2a: a list of instances (fd.cls their class)
+        if fd.type is Type.DICT:
+            self.uses_str = self.uses_dict = True
+            return "tpa_dict *"                            # tier S2b
+        if fd.type is Type.DICT_LIST:
+            self.uses_str = self.uses_dict = True
+            return "tpa_obj_list *"                        # tier S2b: a list of dicts
         assert fd.cls is not None
         return self.cls_ptr(fd.cls)
 
@@ -502,6 +522,10 @@ class _Gen:
             ptr, rel = "tpa_str *", "tpa_str_release"
         elif fd.type is Type.OBJ_LIST:
             ptr, rel = "tpa_obj_list *", "tpa_obj_list_release"
+        elif fd.type is Type.DICT:
+            ptr, rel = "tpa_dict *", "tpa_dict_release"
+        elif fd.type is Type.DICT_LIST:
+            ptr, rel = "tpa_obj_list *", "tpa_obj_list_release"
         elif fd.type is Type.I64_ARRAY:
             big = self.reps.field_list_big(cls, fd.name)
             ptr, rel = ("tpa_int_list *", "tpa_int_list_release") if big else ("tpa_i64_list *", "tpa_i64_release")
@@ -526,6 +550,10 @@ class _Gen:
         elif fd.type in (Type.STR, Type.STR_OPT):
             out.append(f"{ind}tpa_str_release(p->f_{mf});")
         elif fd.type is Type.OBJ_LIST:
+            out.append(f"{ind}tpa_obj_list_release(p->f_{mf});")
+        elif fd.type is Type.DICT:
+            out.append(f"{ind}tpa_dict_release(p->f_{mf});")
+        elif fd.type is Type.DICT_LIST:
             out.append(f"{ind}tpa_obj_list_release(p->f_{mf});")
         elif fd.type is Type.I64_ARRAY:
             fn = "tpa_int_list_release" if self.reps.field_list_big(cls, fd.name) else "tpa_i64_release"
@@ -555,6 +583,10 @@ class _Gen:
                         c_params.append(f"tpa_str_list *a_{mangle(p.name)}")
                     elif isinstance(p, ir.Param) and p.type is Type.OBJ_LIST:
                         c_params.append(f"tpa_obj_list *a_{mangle(p.name)}")      # tier S2a, borrowed
+                    elif isinstance(p, ir.Param) and p.type is Type.DICT:
+                        c_params.append(f"tpa_dict *a_{mangle(p.name)}")          # tier S2b, borrowed
+                    elif isinstance(p, ir.Param) and p.type is Type.DICT_LIST:
+                        c_params.append(f"tpa_obj_list *a_{mangle(p.name)}")      # tier S2b, borrowed
                     elif isinstance(p, ir.Param) and p.type in CTYPE:
                         ct = "tpa_int" if self.tagged_param(init_fn, p) else CTYPE[p.type]
                         c_params.append(f"{ct} a_{mangle(p.name)}")
@@ -650,8 +682,9 @@ class _Gen:
             return p.name in assigned_names(f)                                   # type: ignore[attr-defined]
         if isinstance(p, ir.Param) and p.type is Type.OBJ and p.cls is not None:
             return p.name in assigned_names(f)
-        if isinstance(p, ir.Param) and p.type in (Type.STR, *STR_LISTS, Type.STR_OPT, Type.OBJ_LIST):     # tier S1, S2a
-            return p.name in assigned_names(f)
+        if isinstance(p, ir.Param) and p.type in (Type.STR, *STR_LISTS, Type.STR_OPT, Type.OBJ_LIST, Type.DICT,
+                                                  Type.DICT_LIST):
+            return p.name in assigned_names(f)                                   # tier S1, S2a, S2b
         return False
 
     def param_c(self, f: ir.Function, p: object) -> str:
@@ -679,6 +712,12 @@ class _Gen:
                 params.append(f"tpa_str_list *{self.param_c(f, p)} TPA_UNUSED")
             elif isinstance(p, ir.Param) and p.type is Type.OBJ_LIST:
                 params.append(f"tpa_obj_list *{self.param_c(f, p)} TPA_UNUSED")      # tier S2a, borrowed
+            elif isinstance(p, ir.Param) and p.type is Type.DICT:
+                self.uses_str = self.uses_dict = True
+                params.append(f"tpa_dict *{self.param_c(f, p)} TPA_UNUSED")          # tier S2b, borrowed
+            elif isinstance(p, ir.Param) and p.type is Type.DICT_LIST:
+                self.uses_str = self.uses_dict = True
+                params.append(f"tpa_obj_list *{self.param_c(f, p)} TPA_UNUSED")      # tier S2b, borrowed
             elif isinstance(p, ir.Param) and p.type in CTYPE:
                 ct = "tpa_int" if self.tagged_param(f, p) else CTYPE[p.type]
                 params.append(f"{ct} {self.param_c(f, p)} TPA_UNUSED")
@@ -697,6 +736,12 @@ class _Gen:
             params.append("tpa_str_list **out")
         elif f.returns is Type.OBJ_LIST:
             params.append("tpa_obj_list **out")                               # tier S2a, a new reference
+        elif f.returns is Type.DICT:
+            self.uses_str = self.uses_dict = True
+            params.append("tpa_dict **out")                                   # tier S2b, a new reference
+        elif f.returns is Type.DICT_LIST:
+            self.uses_str = self.uses_dict = True
+            params.append("tpa_obj_list **out")                               # tier S2b, a new reference
         elif kinds is not None:
             params += [f"{self.out_ctype(f, k, self.reps.element(f.name, i))} *out{i}" for i, k in enumerate(kinds)]
         elif f.returns in CTYPE:
@@ -732,6 +777,9 @@ class _Fn:
         self.pystr_slots: list[str] = []         # tier S1: `tpa_str *` temporaries, each owns its value; released at cleanup
         self.objlist_slots: list[str] = []       # tier S2a: `tpa_obj_list *` temporaries, released at cleanup
         self.strlist_slots: list[str] = []       # tier S1b: `tpa_str_list *` temporaries, the same
+        self.dict_slots: list[str] = []          # tier S2b: `tpa_dict *` temporaries, the same
+        self.dictiter_slots: list[str] = []      # ... and `tpa_dict_iter` loop iterators, ended there
+        self.dtup_slots: list[str] = []          # ... and `tpa_dtup *` tuple keys, released there
         self.assigned: set[str] = assigned_names(f)
         self.regions = g.alloc_plan.fn_regions(f.name)      # PR-O2b: class -> its region in this function
         self.borrowed_locals: set[str] = self._find_borrowed_locals(f)
@@ -932,6 +980,511 @@ class _Fn:
         self.emit(f"tpa_cls_{mangle(cls)}_retain(({self.g.cls_ptr(cls).strip()}){held}->d[{k}]);")
         self.emit(f"tpa_cls_{mangle(cls)}_release(v_{mangle(s.var)});")
         self.emit(f"v_{mangle(s.var)} = ({self.g.cls_ptr(cls).strip()}){held}->d[{k}];")
+        self.loop_prologue(s)
+        self.stmts(s.body)
+        self.depth -= 1
+        self.emit("}")
+
+    # -- tier S2b: dicts (runtime/tp_aot_dict.h). `ev` of a DICT node is a borrowed `tpa_dict *`: a name, or a slot that
+    # owns the dict until the slot is next written or the function leaves. A key or a value crosses the runtime as a
+    # word (`tpa_dict_dw`): an int TAGGED, a float's bits, a bool 0 or 1, a str pointer (NULL for None).
+
+    def dslot(self) -> str:
+        """A dict temporary, emptied now."""
+        self.g.uses_str = self.g.uses_dict = True
+        t = self.tmp("tpa_dict *", "NULL")
+        self.dict_slots.append(t)
+        self.emit(f"tpa_dict_drop(&{t});")
+        return t
+
+    def dict_kinds(self, e: ir.Expr) -> ir.DictKinds | None:
+        if isinstance(e, (ir.DictDisplay, ir.DictCopy, ir.SetDisplay, ir.SetFromList)):
+            return e.kinds
+        if isinstance(e, ir.SetOp):
+            return self.dict_kinds(e.left)
+        if isinstance(e, ir.Local):
+            return self.f.dict_kinds.get(e.name)
+        if isinstance(e, ir.FieldGet):
+            fd = self.g.cls_analysis.field_map.get((e.cls, e.field))
+            return fd.kinds if fd is not None else None
+        if isinstance(e, ir.Call):
+            callee = self.g.fns.get(e.function)
+            return callee.return_kinds if callee is not None else None
+        if isinstance(e, ir.Cond):
+            return self.dict_kinds(e.then)
+        if isinstance(e, (ir.DictGet, ir.DictPop, ir.DictSetDefault)):     # a dict held as a value of a dict
+            outer = self.dict_kinds(e.dict)
+            return outer[1] if outer is not None and isinstance(outer[1], tuple) else None
+        if isinstance(e, ir.DictListIndex):                                 # a dict of a list of dicts
+            return self.dict_kinds(e.value)
+        if isinstance(e, ir.ListPop):
+            return self.f.dict_kinds.get(e.array)
+        if isinstance(e, ir.DictListDisplay):
+            return e.kinds
+        return None
+
+    def dict_of(self, e: ir.Expr, what: str) -> tuple[str, ir.DictKinds] | None:
+        """The borrowed C expression of the dict `e` and its kinds; None after a finding."""
+        kinds = self.dict_kinds(e)
+        if e.type is not Type.DICT or kinds is None:
+            self.bad("aot/type", what, f"{what} is not a dict of known key and value types")
+            return None
+        self.g.uses_str = self.g.uses_dict = True
+        return self.ev(e), kinds
+
+    def word(self, c: str) -> str:
+        """`c` read now into a word temporary (a later operand may change what it reads)."""
+        t = self.tmp("tpa_dw")
+        self.emit(f"{t} = {c};")
+        return t
+
+    def key_word(self, e: ir.Expr, kt: Type | tuple[Type, ...]) -> tuple[str, str]:
+        """(the word of the key `e` of a dict whose keys are `kt`, its bool mark), the word borrowed."""
+        if isinstance(kt, tuple):                   # a tuple key: the elements in order, then a new tuple of them
+            if not isinstance(e, ir.KeyTuple) or len(e.elements) != len(kt):
+                self.bad("aot/type", "dict", "a key of a dict of tuples is not a tuple of its element types")
+                return "0", "0"
+            words = [self.key_word(x, t)[0] for x, t in zip(e.elements, kt)]
+            t = self.tmp("tpa_dtup *", "NULL")
+            self.dtup_slots.append(t)
+            self.emit(f"tpa_dtup_release({t}); {t} = NULL;")
+            self.emit("{")
+            self.emit(f"    tpa_dw w_[{len(words)}];")
+            for i, w in enumerate(words):
+                self.emit(f"    w_[{i}] = {w};")
+            self.emit(f'    if (tpa_dtup_new("{_tup_kinds(kt)}", {len(words)}, w_, &{t})) {self.fail()}')
+            self.emit("}")
+            return f"(tpa_dw)(uintptr_t){t}", "0"
+        if kt is Type.STR:
+            return self.word(f"(tpa_dw)(uintptr_t)({self.str_value(e, 'a dict key')})"), "0"
+        if kt is Type.BOOL:
+            if e.type is not Type.BOOL:
+                self.bad("aot/type", "dict", "a key of a dict of bool is not a bool")
+            return self.word(f"(tpa_dw)({self.ev(e)})"), "1"
+        if e.type is Type.BOOL:                     # a bool looking up a dict of int: the small int, marked
+            return self.word(f"(tpa_dw)tpa_int_small((int64_t)({self.ev(e)}))"), "1"
+        return self.word(f"(tpa_dw)({self.tagged(e)})"), "0"
+
+    def value_word(self, e: ir.Expr, vt: Type | ir.DictKinds) -> str:
+        """The word of the value `e` of a dict whose values are `vt`, borrowed."""
+        if isinstance(vt, tuple):
+            found = self.dict_of(e, "a dict value")
+            return self.word(f"(tpa_dw)(uintptr_t)({found[0] if found is not None else 'NULL'})")
+        if vt is Type.I64:
+            return self.word(f"(tpa_dw)({self.tagged(e)})")
+        if vt is Type.F64:
+            return self.word(f"tpa_dict_f64({self.ev(e)})")
+        if vt is Type.BOOL:
+            return self.word(f"(tpa_dw)({self.ev(e)})")
+        if vt is Type.STR:
+            return self.word(f"(tpa_dw)(uintptr_t)({self.str_value(e, 'a dict value')})")
+        return self.word(f"(tpa_dw)(uintptr_t)({self.opt_str_value(e, 'a dict value')})")
+
+    def dict_out(self, t: Type, call: str, fallible: bool = True) -> str:
+        """The value a dict call writes as a new reference to the word `@`, held by a slot of type `t`."""
+        if t is Type.I64:
+            slot = self.tslot()
+            self.emit(f"tpa_int_clear(&{slot});")
+            conv = "(tpa_int)w_"
+        elif t in (Type.STR, Type.STR_OPT):
+            slot = self.pslot()
+            conv = "(tpa_str *)(uintptr_t)w_"
+        elif t is Type.F64:
+            slot = self.tmp("double")
+            conv = "tpa_dict_to_f64(w_)"
+        elif t is Type.DICT:                         # a dict held as a value: the slot owns the new reference
+            slot = self.dslot()
+            conv = "(tpa_dict *)(uintptr_t)w_"
+        else:
+            slot = self.tmp("int")
+            conv = "(int)w_"
+        c = call.replace("@", "&w_")
+        self.emit("{")
+        self.emit("    tpa_dw w_ = 0;")
+        self.emit(f"    if ({c}) {self.fail()}" if fallible else f"    {c};")
+        self.emit(f"    {slot} = {conv};")
+        self.emit("}")
+        return slot
+
+    def dict_new(self, kinds: ir.DictKinds, words: list[tuple[str, str, str]], target: str) -> None:
+        """`target` (an emptied slot) := a dict of `words` (key, bool mark, value), built as CPython's BUILD_MAP /
+        MAP_ADD / DICT_UPDATE of a display builds it: chunks of 17 pairs; a chunk of at most 15 is presized
+        (BUILD_MAP n), a longer one starts empty (BUILD_MAP 0, MAP_ADD); every chunk after the first is merged into the
+        first (DICT_UPDATE). So a later loop that changes the dict sees CPython's layout."""
+        kk = "TPA_DK_TUP" if isinstance(kinds[0], tuple) else DICT_KK[kinds[0]]
+        vk = DICT_VK[ir.dict_vtype(kinds[1])]
+        chunks = [words[i:i + 17] for i in range(0, len(words), 17)] or [[]]
+        for ci, chunk in enumerate(chunks):
+            into = target if ci == 0 else self.dslot()
+            presize = len(chunk) if len(chunk) <= 15 else 0
+            self.emit(f"if (tpa_dict_new({kk}, {vk}, {presize}, &{into})) {self.fail()}")
+            for kw, kb, vw in chunk:
+                self.emit(f"if (tpa_dict_setitem({into}, {kw}, {kb}, {vw})) {self.fail()}")
+            if ci:
+                self.emit(f"if (tpa_dict_update({target}, {into})) {self.fail()}")
+                self.emit(f"tpa_dict_drop(&{into});")
+
+    # -- tier S2b: sets, dicts whose values are unused (runtime tpa_set_*)
+
+    def ev_DictHasValue(self, e: ir.DictHasValue) -> str:
+        kinds = self.dict_kinds(e.dict)
+        if kinds is None:
+            return self.bad("aot/type", "in", "`in` of the values of a dict of unknown kinds")
+        vw = self.value_word(e.value, kinds[1])             # the value first, then the dict (CPython's order)
+        found = self.dict_of(e.dict, "the dict whose values are searched")
+        if found is None:
+            return "0"
+        t = self.tmp("int")
+        self.emit(f"{t} = {'!' if e.negate else ''}tpa_dict_has_value({found[0]}, {vw});")
+        return t
+
+    def ev_DictHasItem(self, e: ir.DictHasItem) -> str:
+        kinds = self.dict_kinds(e.dict)
+        if kinds is None:
+            return self.bad("aot/type", "in", "`in` of the items of a dict of unknown kinds")
+        kw, _ = self.key_word(e.key, kinds[0])              # the key, the value, then the dict
+        vw = self.value_word(e.value, kinds[1])
+        found = self.dict_of(e.dict, "the dict whose items are searched")
+        if found is None:
+            return "0"
+        t = self.tmp("int")
+        self.emit(f"{t} = {'!' if e.negate else ''}tpa_dict_has_item({found[0]}, {kw}, {vw});")
+        return t
+
+    def ev_DictViewStr(self, e: ir.DictViewStr) -> str:
+        found = self.dict_of(e.dict, "the dict of a view")
+        if found is None:
+            return "NULL"
+        which = {"keys": 0, "values": 1, "items": 2}[e.view]
+        return self.pstr(f"tpa_dict_view_repr({found[0]}, {which}, @)")
+
+    def ev_SetFromList(self, e: ir.SetFromList) -> str:
+        found = self.grow_list(e.array, "set()")
+        if found is None:
+            return "NULL"
+        lst, kind = found
+        t = self.dslot()
+        call = {"str": f"tpa_set_from_strs({lst}, &{t})", "int": f"tpa_set_from_ints({lst}, &{t})"}.get(
+            kind, f"tpa_set_from_i64s({lst}->d, {lst}->len, &{t})")
+        self.emit(f"if ({call}) {self.fail()}")
+        return t
+
+    def ev_SetDisplay(self, e: ir.SetDisplay) -> str:
+        words = [self.key_word(x, e.kinds[0]) for x in e.elements]      # the elements in order
+        t = self.dslot()
+        kk = "TPA_DK_TUP" if isinstance(e.kinds[0], tuple) else DICT_KK[e.kinds[0]]
+        self.emit(f"if (tpa_dict_new({kk}, TPA_DV_BOOL, 0, &{t})) {self.fail()}")
+        for kw, kb in words:
+            self.emit(f"if (tpa_set_add({t}, {kw}, {kb})) {self.fail()}")
+        return t
+
+    def ev_SetOp(self, e: ir.SetOp) -> str:
+        a = self.dict_of(e.left, "the left operand of a set operator")
+        b = self.dict_of(e.right, "the right operand of a set operator")
+        if a is None or b is None:
+            return "NULL"
+        t = self.dslot()
+        call = {"|": f"tpa_set_or({a[0]}, {b[0]}, &{t})", "&": f"tpa_set_and({a[0]}, {b[0]}, &{t})",
+                "-": f"tpa_set_sub({a[0]}, {b[0]}, 0, &{t})", "^": f"tpa_set_sub({a[0]}, {b[0]}, 1, &{t})"}[e.op]
+        self.emit(f"if ({call}) {self.fail()}")
+        return t
+
+    def ev_SetCompare(self, e: ir.SetCompare) -> str:
+        a = self.dict_of(e.left, "the left operand of a set comparison")
+        b = self.dict_of(e.right, "the right operand of a set comparison")
+        if a is None or b is None:
+            return "0"
+        x, y = a[0], b[0]
+        t = self.tmp("int")
+        test = {"<=": f"tpa_set_within({x}, {y})", "<": f"({x}->used < {y}->used && tpa_set_within({x}, {y}))",
+                ">=": f"tpa_set_within({y}, {x})", ">": f"({y}->used < {x}->used && tpa_set_within({y}, {x}))",
+                "disjoint": f"tpa_set_disjoint({x}, {y})"}[e.op]
+        self.emit(f"{t} = {test};")
+        return t
+
+    def st_SetAdd(self, s: ir.SetAdd) -> None:
+        found = self.dict_of(s.set, "the set added to")
+        if found is None:
+            return
+        kw, kb = self.key_word(s.key, found[1][0])
+        self.emit(f"if (tpa_set_add({found[0]}, {kw}, {kb})) {self.fail()}")
+
+    def st_SetRemove(self, s: ir.SetRemove) -> None:
+        found = self.dict_of(s.set, "the set removed from")
+        if found is None:
+            return
+        kw, kb = self.key_word(s.key, found[1][0])
+        fn = "tpa_set_discard" if s.discard else "tpa_dict_delitem"       # (remove: KeyError(repr(x)), as del d[x])
+        self.emit(f"if ({fn}({found[0]}, {kw}, {kb})) {self.fail()}")
+
+    def ev_DictDisplay(self, e: ir.DictDisplay) -> str:
+        kt, vt = e.kinds
+        words = []
+        for k, v in zip(e.keys, e.values):          # k0, v0, k1, v1, ...: CPython's order
+            kw, kb = self.key_word(k, kt)
+            words.append((kw, kb, self.value_word(v, vt)))
+        t = self.dslot()
+        self.dict_new(e.kinds, words, t)
+        return t
+
+    def ev_DictGet(self, e: ir.DictGet) -> str:
+        found = self.dict_of(e.dict, "the dict read")
+        if found is None:
+            return "0"
+        d, (kt, vt) = found
+        kw, kb = self.key_word(e.key, kt)
+        if not e.get:
+            return self.dict_out(e.type, f"tpa_dict_getitem({d}, {kw}, {kb}, @)")
+        dflt = "0" if e.default is None else self.value_word(e.default, vt)      # (no default: None, a NULL str)
+        return self.dict_out(e.type, f"tpa_dict_get({d}, {kw}, {dflt}, @)", fallible=False)
+
+    def ev_DictContains(self, e: ir.DictContains) -> str:
+        kinds = self.dict_kinds(e.dict)
+        if kinds is None:
+            return self.bad("aot/type", "in", "`in` of a dict of unknown key and value types")
+        kw, _ = self.key_word(e.key, kinds[0])                 # the key, then the dict, as CPython evaluates `a in b`
+        found = self.dict_of(e.dict, "the dict searched")
+        if found is None:
+            return "0"
+        d = found[0]
+        t = self.tmp("int")
+        self.emit(f"{t} = {'!' if e.negate else ''}tpa_dict_contains({d}, {kw});")
+        return t
+
+    def ev_DictLen(self, e: ir.DictLen) -> str:
+        found = self.dict_of(e.dict, "the argument of len()")
+        if found is None:
+            return "0"
+        t = self.tmp("int64_t")
+        self.emit(f"{t} = tpa_dict_len({found[0]});")       # read in evaluation order (the dict can change)
+        return t
+
+    def ev_DictPop(self, e: ir.DictPop) -> str:
+        found = self.dict_of(e.dict, "the dict popped")
+        if found is None:
+            return "0"
+        d, (kt, vt) = found
+        kw, kb = self.key_word(e.key, kt)
+        if e.default is None:
+            return self.dict_out(e.type, f"tpa_dict_pop({d}, {kw}, {kb}, 0, 0, @)")
+        return self.dict_out(e.type, f"tpa_dict_pop({d}, {kw}, {kb}, 1, {self.value_word(e.default, vt)}, @)")
+
+    def ev_DictSetDefault(self, e: ir.DictSetDefault) -> str:
+        found = self.dict_of(e.dict, "the dict of setdefault()")
+        if found is None:
+            return "0"
+        d, (kt, vt) = found
+        kw, kb = self.key_word(e.key, kt)
+        return self.dict_out(e.type, f"tpa_dict_setdefault({d}, {kw}, {kb}, {self.value_word(e.default, vt)}, @)")
+
+    def ev_DictCopy(self, e: ir.DictCopy) -> str:
+        found = self.dict_of(e.value, "the dict copied")
+        if found is None:
+            return "NULL"
+        t = self.dslot()
+        self.emit(f"if (tpa_dict_copy({found[0]}, &{t})) {self.fail()}")
+        return t
+
+    def ev_DictCompare(self, e: ir.DictCompare) -> str:
+        a = self.dict_of(e.left, "the left operand of ==")
+        b = self.dict_of(e.right, "the right operand of ==")
+        if a is None or b is None:
+            return "0"
+        t = self.tmp("int")
+        self.emit(f"{t} = {'!' if e.negate else ''}tpa_dict_eq({a[0]}, {b[0]});")
+        return t
+
+    def ev_DictStr(self, e: ir.DictStr) -> str:
+        if e.value.type is Type.DICT_LIST:                  # a list of dicts: its list_repr
+            self.g.uses_str = self.g.uses_dict = True
+            return self.pstr(f"tpa_dict_list_repr({self.ev(e.value)}, @)")
+        found = self.dict_of(e.value, "the dict printed")
+        if found is None:
+            return "NULL"
+        return self.pstr(f"tpa_dict_repr({found[0]}, @)")
+
+    def st_DictStore(self, s: ir.DictStore) -> None:
+        kinds = self.dict_kinds(s.dict)
+        if kinds is None:
+            self.bad("aot/type", "dict", "a store into a dict of unknown key and value types")
+            return
+        vw = self.value_word(s.value, kinds[1])                # the value, then the dict, then the key
+        found = self.dict_of(s.dict, "the dict stored into")
+        if found is None:
+            return
+        kw, kb = self.key_word(s.key, kinds[0])
+        self.emit(f"if (tpa_dict_setitem({found[0]}, {kw}, {kb}, {vw})) {self.fail()}")
+
+    def st_DictDelete(self, s: ir.DictDelete) -> None:
+        found = self.dict_of(s.dict, "the dict deleted from")
+        if found is None:
+            return
+        kw, kb = self.key_word(s.key, found[1][0])
+        self.emit(f"if (tpa_dict_delitem({found[0]}, {kw}, {kb})) {self.fail()}")
+
+    def st_DictUpdate(self, s: ir.DictUpdate) -> None:
+        a = self.dict_of(s.dict, "the dict updated")
+        b = self.dict_of(s.other, "the argument of update()")
+        if a is not None and b is not None:
+            self.emit(f"if (tpa_dict_update({a[0]}, {b[0]})) {self.fail()}")
+
+    def st_DictClear(self, s: ir.DictClear) -> None:
+        found = self.dict_of(s.dict, "the dict cleared")
+        if found is not None:
+            self.emit(f"tpa_dict_clear({found[0]});")
+
+    def st_DictPopItem(self, s: ir.DictPopItem) -> None:
+        """`k, v = d.popitem()` / `d.popitem()`: the last entry's key and value come out as new references, each bound
+        to its variable (or released when there is none)."""
+        found = self.dict_of(s.dict, "the dict of popitem()")
+        if found is None:
+            return
+        d, (kt, vt) = found
+        kw, kb, vw = self.tmp("tpa_dw"), self.tmp("int"), self.tmp("tpa_dw")
+        self.emit(f"if (tpa_dict_popitem({d}, &{kw}, &{kb}, &{vw})) {self.fail()}")
+        if s.key_var is None:
+            self.drop_word(kt, kw, True)
+            self.drop_word(vt, vw, False)
+            return
+        if self.bind_key(s.key_var, kt, kw):
+            self.bind_word(s.value_var, ir.dict_vtype(vt), vw)
+
+    def drop_word(self, t: object, w: str, is_key: bool) -> None:
+        """Release the word `w` (a new reference) of a key or a value of the type `t` that no name takes."""
+        if is_key and isinstance(t, tuple):
+            self.emit(f"tpa_dtup_release((tpa_dtup *)(uintptr_t){w});")
+        elif t is Type.I64:
+            self.emit(f"tpa_int_release((tpa_int){w});")
+        elif t in (Type.STR, Type.STR_OPT):
+            self.emit(f"tpa_str_release((tpa_str *)(uintptr_t){w});")
+        elif isinstance(t, tuple):
+            self.emit(f"tpa_dict_release((tpa_dict *)(uintptr_t){w});")
+
+    def bind_key(self, var: object, kt: object, w: str) -> bool:
+        """The key word `w` (a new reference) bound to `var`; a tuple key to one name per element, left to right, then
+        the tuple released."""
+        if not isinstance(kt, tuple):
+            return self.bind_word(var, kt, w)                       # type: ignore[arg-type]
+        if not isinstance(var, tuple) or len(var) != len(kt):
+            self.bad("aot/type", "dict", "a tuple key is not bound to one name per element")
+            return False
+        tw = f"((tpa_dtup *)(uintptr_t){w})"
+        for i, (name, et) in enumerate(zip(var, kt)):
+            ew = f"{tw}->w[{i}]"
+            if et is Type.I64:
+                self.emit(f"tpa_int_retain((tpa_int){ew});")
+            elif et is Type.STR:
+                self.emit(f"tpa_str_retain((tpa_str *)(uintptr_t){ew});")
+            if not self.bind_word(name, et, ew):
+                return False
+        self.emit(f"tpa_dtup_release({tw});")
+        return True
+
+    def bind_word(self, var: str, t: Type, w: str) -> bool:
+        """`var` (a local of the type `t`) takes the dict word `w`, a new reference for an int or a str."""
+        v = f"v_{mangle(var)}"
+        if t is Type.I64:
+            if not self.tagged_name(var):
+                self.bad("aot/type", var, f"`{var}`, bound to an int of a dict, is not a TAGGED name")
+                return False
+            self.emit(f"tpa_int_release({v}); {v} = (tpa_int){w};")
+        elif t in (Type.STR, Type.STR_OPT):
+            self.emit(f"tpa_str_release({v}); {v} = (tpa_str *)(uintptr_t){w};")
+        elif t is Type.F64:
+            self.emit(f"{v} = tpa_dict_to_f64({w});")
+        elif t is Type.DICT:
+            self.emit(f"tpa_dict_release({v}); {v} = (tpa_dict *)(uintptr_t){w};")
+        else:
+            self.emit(f"{v} = (int){w};")
+        return True
+
+    def st_ForDict(self, s: ir.ForDict) -> None:
+        """`for k in d` / `for v in d.values()` / `for k, v in d.items()`: CPython's dict iterator (it holds the dict;
+        each step raises CPython's RuntimeError when the dict changed size or produced more keys than it held); each
+        variable takes a new reference to the entry's key or value."""
+        found = self.dict_of(s.value, "the iterable of the loop")
+        if found is None:
+            return
+        d, (kt, vt) = found
+        it = self.tmp("tpa_dict_iter", "{NULL, 0, 0, 0}")
+        self.dictiter_slots.append(it)
+        self.emit(f"tpa_dict_iter_end(&{it});")
+        self.emit(f"tpa_dict_iter_start(&{it}, {d});")
+        kw, kb, vw, st = self.tmp("tpa_dw"), self.tmp("int"), self.tmp("tpa_dw"), self.tmp("int")
+        outs = (f"&{kw}" if s.key_var is not None else "NULL", f"&{kb}",
+                f"&{vw}" if s.value_var is not None else "NULL")
+        self.emit("for (;;) {")
+        self.depth += 1
+        self.emit(f"{st} = tpa_dict_iter_next(&{it}, {', '.join(outs)});")
+        self.emit(f"if ({st} < 0) {self.fail()}")
+        self.emit(f"if ({st} == 0) break;")
+        if s.key_var is not None and not self.bind_key(s.key_var, kt, kw):
+            return
+        if s.value_var is not None and not self.bind_word(s.value_var, ir.dict_vtype(vt), vw):
+            return
+        self.loop_prologue(s)
+        self.stmts(s.body)
+        self.depth -= 1
+        self.emit("}")
+
+    # -- tier S2b: lists of dicts, a tpa_obj_list whose items are `tpa_dict *` (tpa_dict__vret / __vrel)
+
+    def ev_DictListDisplay(self, e: ir.DictListDisplay) -> str:
+        vals = []
+        for x in e.elements:                                # (each a borrowed dict, held by its own slot)
+            found = self.dict_of(x, "an item of a list of dicts")
+            vals.append(found[0] if found is not None else "NULL")
+        self.g.uses_str = self.g.uses_dict = True
+        t = self.olslot()
+        self.emit(f"if (tpa_obj_list_alloc({len(vals)}, tpa_dict__vret, tpa_dict__vrel, &{t})) {self.fail()}")
+        for i, v in enumerate(vals):
+            self.emit(f"tpa_dict_retain({v}); {t}->d[{i}] = {v};")
+        return t
+
+    def ev_DictListLen(self, e: ir.DictListLen) -> str:
+        v = self.ev(e.value)
+        t = self.tmp("int64_t")
+        self.emit(f"{t} = ({v})->len;")                     # read in evaluation order (the list can change length)
+        return t
+
+    def ev_DictListIndex(self, e: ir.DictListIndex) -> str:
+        lst = self.ev(e.value)
+        idx = self.index_c(e.index, "tpa_int_to_ssize") if self.rep(e.index) != TAGGED else None
+        if idx is None:                                     # an index outside int64: IndexError, as a list read's
+            v, n = self.ev(e.index), self.tmp("int64_t")
+            self.emit(f"if (tpa_slot_int(({lst})->len, {v}, 0, &{n})) {self.fail()}")
+            idx = n
+        t = self.dslot()
+        self.emit("{")
+        self.emit("    void *tpa_v_ = NULL;")
+        self.emit(f"    if (tpa_obj_list_get({lst}, {idx}, &tpa_v_)) {self.fail()}")
+        self.emit(f"    {t} = (tpa_dict *)tpa_v_;")
+        self.emit("}")
+        return t
+
+    def st_DictListStore(self, s: ir.DictListStore) -> None:
+        found = self.dict_of(s.value, "the dict stored into a list")
+        if found is None:
+            return
+        idx = self.ev(s.index)
+        if self.rep(s.index) == TAGGED:
+            n = self.tmp("int64_t")
+            self.emit(f"if (tpa_slot_int(v_{mangle(s.array)}->len, {idx}, 1, &{n})) {self.fail()}")
+            idx = n
+        self.emit(f"if (tpa_obj_list_store(v_{mangle(s.array)}, {idx}, {found[0]})) {self.fail()}")
+
+    def st_ForDictList(self, s: ir.ForDictList) -> None:
+        """`for d in ds` over a list of dicts: the list is held for the loop, its length read at every step, `d` takes
+        a new reference to each dict in turn (CPython's list iterator)."""
+        held = self.tmp("tpa_obj_list *", "NULL")
+        self.objlist_slots.append(held)
+        self.emit(f"tpa_obj_list_set(&{held}, {self.ev(s.value)});")
+        k = self.tmp("int64_t")
+        v = f"v_{mangle(s.var)}"
+        self.emit(f"for ({k} = 0; {k} < {held}->len; {k}++) {{")
+        self.depth += 1
+        self.emit(f"tpa_dict_retain((tpa_dict *){held}->d[{k}]);")
+        self.emit(f"tpa_dict_release({v}); {v} = (tpa_dict *){held}->d[{k}];")
         self.loop_prologue(s)
         self.stmts(s.body)
         self.depth -= 1
@@ -1439,6 +1992,14 @@ class _Fn:
             t = self.olslot()
             self.emit(f"tpa_obj_list_set(&{t}, {obj}->f_{mf});")
             return t
+        if fd.type is Type.DICT:
+            t = self.dslot()                               # tier S2b: held as a list field is, for the same reason
+            self.emit(f"tpa_dict_set(&{t}, {obj}->f_{mf});")
+            return t
+        if fd.type is Type.DICT_LIST:
+            t = self.olslot()                              # tier S2b: a list of dicts, held as a list field is
+            self.emit(f"tpa_obj_list_set(&{t}, {obj}->f_{mf});")
+            return t
         if fd.type in (Type.STR, Type.STR_OPT):
             # a field that may be rebound while the value is in use is held by a slot; an immutable field of an
             # object the function cannot drop is borrowed (as a list field, PR-O1 elision rule 3)
@@ -1526,7 +2087,7 @@ class _Fn:
 
     def ev_Local(self, e: ir.Local) -> str:
         if e.type not in CTYPE and e.type not in LIST and e.type not in (Type.STR, *STR_LISTS, Type.STR_OPT,
-                                                                          Type.OBJ_LIST) \
+                                                                          Type.OBJ_LIST, Type.DICT, Type.DICT_LIST) \
                 and not (e.type is Type.OBJ and self._is_class_local(e.name)):
             self.ctype(e.type, e.name)
         return f"v_{mangle(e.name)}"
@@ -2000,6 +2561,14 @@ class _Fn:
             t = self.olslot()
             self.emit(f"if ({name}({', '.join(args + ['&' + t])})) {self.fail()}")
             return t
+        if callee.returns is Type.DICT:
+            t = self.dslot()
+            self.emit(f"if ({name}({', '.join(args + ['&' + t])})) {self.fail()}")
+            return t
+        if callee.returns is Type.DICT_LIST:
+            t = self.olslot()
+            self.emit(f"if ({name}({', '.join(args + ['&' + t])})) {self.fail()}")
+            return t
         if callee.returns is Type.OBJ and callee.return_cls is not None:
             mc = mangle(callee.return_cls)
             t = self.oslot(callee.return_cls)
@@ -2103,6 +2672,18 @@ class _Fn:
         want = self.types.get(s.target)
         if want is Type.STR_OPT:                       # tier S2a: a str, None or another `str | None`
             self.emit(f"tpa_str_set(&v_{mangle(s.target)}, {self.ev(s.value)});")
+            return
+        if want is Type.DICT_LIST:                      # tier S2b: a list of dicts, shared by the name
+            if s.value.type is not Type.DICT_LIST:
+                self.bad("aot/type", s.target, f"`{s.target}` is a list of dicts but is assigned a {s.value.type.value}")
+                return
+            self.emit(f"tpa_obj_list_set(&v_{mangle(s.target)}, {self.ev(s.value)});")
+            return
+        if want is Type.DICT:                           # tier S2b: a dict, shared by the name
+            if s.value.type is not Type.DICT:
+                self.bad("aot/type", s.target, f"`{s.target}` is a dict but is assigned a {s.value.type.value}")
+                return
+            self.emit(f"tpa_dict_set(&v_{mangle(s.target)}, {self.ev(s.value)});")
             return
         if want is Type.OBJ_LIST:                       # tier S2a: a list of class instances, shared by the name
             if s.value.type is not Type.OBJ_LIST:
@@ -2335,6 +2916,12 @@ class _Fn:
         elif fd.type is Type.OBJ_LIST:
             val = self.ev(s.value)
             self.emit(f"tpa_obj_list_set(&{lval}, {val});")    # tier S2a (the new reference first)
+        elif fd.type is Type.DICT:
+            val = self.ev(s.value)
+            self.emit(f"tpa_dict_set(&{lval}, {val});")        # tier S2b (the new reference first)
+        elif fd.type is Type.DICT_LIST:
+            val = self.ev(s.value)
+            self.emit(f"tpa_obj_list_set(&{lval}, {val});")    # tier S2b (the new reference first)
         elif fd.type in LIST:
             kind = "f64" if fd.type is Type.F64_ARRAY else (
                 "int" if self.g.reps.field_list_big(s.cls, s.field) else "i64")
@@ -2404,6 +2991,9 @@ class _Fn:
             return f"v_{mangle(name)}", "str"
         if self.types.get(name) is Type.OBJ_LIST:
             return f"v_{mangle(name)}", "obj"                    # tier S2a: a list of class instances
+        if self.types.get(name) is Type.DICT_LIST:
+            self.g.uses_str = self.g.uses_dict = True
+            return f"v_{mangle(name)}", "dict"                   # tier S2b: a list of dicts (a tpa_obj_list)
         found = self.list_of(name, what)
         return None if found is None else (found[0], self.kind(name))
 
@@ -2413,7 +3003,7 @@ class _Fn:
         `lclear`, tpa_str_list_clear being the slot helper)."""
         if kind == "str":
             return f"tpa_str_list_{'lclear' if op == 'clear' else op}"
-        if kind == "obj":
+        if kind in ("obj", "dict"):
             return f"tpa_obj_list_{op}"
         return lfn(kind, op)
 
@@ -2424,8 +3014,8 @@ class _Fn:
             return self.str_value(e, f"the item given to a method of `{name}`")
         if self.types.get(name) is Type.STR_OPT_LIST:
             return self.opt_str_value(e, f"the item given to a method of `{name}`")
-        if self.types.get(name) is Type.OBJ_LIST:
-            return self.ev(e)                                     # an instance, borrowed (the list retains it)
+        if self.types.get(name) in (Type.OBJ_LIST, Type.DICT_LIST):
+            return self.ev(e)                                     # an instance or a dict, borrowed (the list retains it)
         if self.types.get(name) in LIST and self.kind(name) == "int":
             return self.tagged(e)
         if e.type is Type.I64 and self.rep(e) == TAGGED:
@@ -2549,6 +3139,14 @@ class _Fn:
             return "0"
         kind = found[1]
         has = 0 if e.index is None else 1
+        if kind == "dict":                                        # tier S2b: the dict's reference moves out
+            t = self.dslot()
+            self.emit("{")
+            self.emit("    void *tpa_v_ = NULL;")
+            self.emit(f"    if (tpa_obj_list_pop({found[0]}, {has}, {idx}, &tpa_v_)) {self.fail()}")
+            self.emit(f"    {t} = (tpa_dict *)tpa_v_;")
+            self.emit("}")
+            return t
         if kind == "obj":                                         # tier S2a: the instance's reference moves out
             cls = self.f.list_classes.get(e.array) or next(
                 (p.cls for p in self.f.params if isinstance(p, ir.Param) and p.name == e.array), None)
@@ -2661,7 +3259,8 @@ class _Fn:
         a field of an f-string when the f-string is built (so nothing of the call is written if it raises), a plain
         argument when `print` writes it (so the arguments before it are already written when the digit limit
         raises). A str is encoded when it is written (tier S1): the arguments before one that cannot be encoded are
-        written, with the separator, and it writes nothing, as CPython's text stream does."""
+        written, with the separator, and it writes nothing, as CPython's text stream does. The repr of a list or a dict
+        argument is made when it is written too, so a later argument that changes it shows (`print(d, d.pop(k))`)."""
         args: list[list[tuple[str, object]]] = []
         for a in s.args:
             if isinstance(a, ir.Const) and a.type is Type.OBJ and isinstance(a.value, str):
@@ -2694,10 +3293,29 @@ class _Fn:
                 if parts is None:
                     return
                 args.append([("pystr", self.join(parts))])
+            elif isinstance(a, ir.DictViewStr):
+                found = self.dict_of(a.dict, "the dict of a view printed")   # its repr made when print writes it
+                if found is None:
+                    return
+                which = {"keys": 0, "values": 1, "items": 2}[a.view]
+                args.append([("repr", f"tpa_dict_view_repr({found[0]}, {which}, @)")])
+            elif isinstance(a, ir.DictStr) and a.value.type is Type.DICT_LIST:
+                self.g.uses_str = self.g.uses_dict = True       # a list of dicts: evaluated here, its repr below
+                args.append([("repr", f"tpa_dict_list_repr({self.ev(a.value)}, @)")])
+            elif isinstance(a, ir.DictStr):
+                # a container's repr is made when print writes it (CPython's print converts each argument then, after
+                # every argument is evaluated): the dict is evaluated here, its repr below
+                found = self.dict_of(a.value, "the dict printed")
+                if found is None:
+                    return
+                args.append([("repr", f"tpa_dict_repr({found[0]}, @)")])
+            elif isinstance(a, ir.ListStr):
+                args.append([("liststr", a)])            # (a list name: nothing to evaluate before print writes it)
             elif a.type is Type.STR:
                 args.append([("pystr", self.ev(a))])
             elif a.type in STR_LISTS:
-                args.append([("pystr", self.str_of(a, True))])
+                fn = "tpa_str_opt_list_repr" if a.type is Type.STR_OPT_LIST else "tpa_str_list_repr"
+                args.append([("repr", f"{fn}({self.ev(a)}, @)")])
             elif a.type is Type.STR_OPT:
                 args.append([("pystr", self.str_of(a, False))])
             elif a.type in CTYPE:
@@ -2726,6 +3344,10 @@ class _Fn:
                     self.emit(f"tpa_print_str({lit}, {n});")
                 elif kind == "pystr":
                     self.emit(f"if (tpa_str_print({val})) {self.fail()}")
+                elif kind == "repr":
+                    self.emit(f"if (tpa_str_print({self.pstr(val)})) {self.fail()}")       # type: ignore[arg-type]
+                elif kind == "liststr":
+                    self.emit(f"if (tpa_str_print({self.ev(val)})) {self.fail()}")      # type: ignore[arg-type]
                 elif kind == "int64_t":
                     self.emit(f"tpa_print_i64({val});")
                 elif kind == "double":
@@ -2915,6 +3537,18 @@ class _Fn:
             self.emit(f"*out = {v};")
             self.leave()
             return
+        if returns is Type.DICT_LIST:
+            v = self.ev(s.value)
+            self.emit(f"tpa_obj_list_retain({v});")                    # the caller gets its own reference
+            self.emit(f"*out = {v};")
+            self.leave()
+            return
+        if returns is Type.DICT:
+            v = self.ev(s.value)
+            self.emit(f"tpa_dict_retain({v});")                        # the caller gets its own reference
+            self.emit(f"*out = {v};")
+            self.leave()
+            return
         if returns in STR_LISTS:
             v = self.ev(s.value)
             self.emit(f"tpa_str_list_retain({v});")
@@ -3027,14 +3661,15 @@ class _Fn:
         f = self.f
         for p in f.params:
             ok = ((isinstance(p, ir.Param) and p.type in CTYPE and p.cls is None)
-                  or (isinstance(p, ir.Param) and p.type in (Type.STR, *STR_LISTS, Type.STR_OPT, Type.OBJ_LIST))
+                  or (isinstance(p, ir.Param) and p.type in (Type.STR, *STR_LISTS, Type.STR_OPT, Type.OBJ_LIST,
+                                                             Type.DICT, Type.DICT_LIST))
                   or (isinstance(p, ir.Param) and p.type is Type.OBJ and p.cls is not None)
                   or (isinstance(p, ir.ArrayParam) and p.type in LIST and p.buffer is None))
             if not ok:
                 self.bad("aot/type", getattr(p, "name", "?"), f"the parameter `{getattr(p, 'name', '?')}` is not an "
                          "int, float, bool, list[float], list[int] or compiled class")
         if f.returns not in CTYPE and f.returns not in LIST and f.returns is not Type.NONE \
-                and f.returns not in (Type.STR, *STR_LISTS, Type.STR_OPT, Type.OBJ_LIST) \
+                and f.returns not in (Type.STR, *STR_LISTS, Type.STR_OPT, Type.OBJ_LIST, Type.DICT, Type.DICT_LIST) \
                 and not (f.returns is Type.OBJ and f.return_cls is not None) \
                 and self.g.tuple_kinds(f) is None:
             self.bad("aot/type", f.name, f"the return type {f.returns.value} is outside the AOT mode (int, float, "
@@ -3046,6 +3681,8 @@ class _Fn:
                 self.g.uses_str = True
             elif t is Type.OBJ_LIST:
                 pass                                                     # tier S2a
+            elif t in (Type.DICT, Type.DICT_LIST):
+                self.g.uses_str = self.g.uses_dict = True                # tier S2b
             elif t not in LIST and not (t is Type.OBJ and name in f.local_classes):
                 self.ctype(t, name)
         owned = [p for p in f.params if self.g.owned_param(f, p)]
@@ -3055,6 +3692,10 @@ class _Fn:
             elif isinstance(p, ir.Param) and p.type in STR_LISTS:
                 self.emit(f"tpa_str_list_set(&v_{mangle(p.name)}, pv_{mangle(p.name)});")
             elif isinstance(p, ir.Param) and p.type is Type.OBJ_LIST:
+                self.emit(f"tpa_obj_list_set(&v_{mangle(p.name)}, pv_{mangle(p.name)});")
+            elif isinstance(p, ir.Param) and p.type is Type.DICT:
+                self.emit(f"tpa_dict_set(&v_{mangle(p.name)}, pv_{mangle(p.name)});")
+            elif isinstance(p, ir.Param) and p.type is Type.DICT_LIST:
                 self.emit(f"tpa_obj_list_set(&v_{mangle(p.name)}, pv_{mangle(p.name)});")
             elif isinstance(p, ir.Param) and p.type is Type.OBJ and p.cls is not None:
                 mc = mangle(p.cls)
@@ -3077,6 +3718,12 @@ class _Fn:
             elif isinstance(p, ir.Param) and p.type is Type.OBJ_LIST:
                 decls.append(f"    tpa_obj_list *v_{mangle(p.name)} TPA_UNUSED = NULL;")
                 releases.append(f"    tpa_obj_list_release(v_{mangle(p.name)});")
+            elif isinstance(p, ir.Param) and p.type is Type.DICT:
+                decls.append(f"    tpa_dict *v_{mangle(p.name)} TPA_UNUSED = NULL;")
+                releases.append(f"    tpa_dict_release(v_{mangle(p.name)});")
+            elif isinstance(p, ir.Param) and p.type is Type.DICT_LIST:
+                decls.append(f"    tpa_obj_list *v_{mangle(p.name)} TPA_UNUSED = NULL;")
+                releases.append(f"    tpa_obj_list_release(v_{mangle(p.name)});")
             elif isinstance(p, ir.Param) and p.type is Type.OBJ and p.cls is not None:
                 mc = mangle(p.cls)
                 decls.append(f"    tpa_cls_{mc} *v_{mangle(p.name)} TPA_UNUSED = NULL;")
@@ -3094,6 +3741,14 @@ class _Fn:
                 releases.append(f"    tpa_str_list_release(v_{mangle(name)});")
                 continue
             if t is Type.OBJ_LIST:
+                decls.append(f"    tpa_obj_list *v_{mangle(name)} TPA_UNUSED = NULL;")
+                releases.append(f"    tpa_obj_list_release(v_{mangle(name)});")
+                continue
+            if t is Type.DICT:
+                decls.append(f"    tpa_dict *v_{mangle(name)} TPA_UNUSED = NULL;")
+                releases.append(f"    tpa_dict_release(v_{mangle(name)});")
+                continue
+            if t is Type.DICT_LIST:
                 decls.append(f"    tpa_obj_list *v_{mangle(name)} TPA_UNUSED = NULL;")
                 releases.append(f"    tpa_obj_list_release(v_{mangle(name)});")
                 continue
@@ -3156,6 +3811,12 @@ class _Fn:
             releases.append(f"    tpa_str_list_release({n});")
         for n in self.objlist_slots:
             releases.append(f"    tpa_obj_list_release({n});")
+        for n in self.dictiter_slots:
+            releases.append(f"    tpa_dict_iter_end(&{n});")
+        for n in self.dict_slots:
+            releases.append(f"    tpa_dict_release({n});")
+        for n in self.dtup_slots:
+            releases.append(f"    tpa_dtup_release({n});")
         for cls, n in self.obj_slots:
             releases.append(f"    tpa_cls_{mangle(cls)}_release({n});")
         for kind, n in self.list_slots:
@@ -3221,6 +3882,8 @@ def emit(module: ir.Module, program: Program, *, strict_int: bool = False,
     if g.uses_str:
         out += unicode_mod.tables_c(g.ucd)           # tier S1b: the tables the str methods read, from this interpreter
         out.append('#include "tp_aot_str.h"')        # tier S1: only a program with a str value links the str runtime
+    if g.uses_dict:
+        out.append('#include "tp_aot_dict.h"')       # tier S2b: only a program with a dict links the dict runtime
     gc = bool(g.cls_analysis.cyclic_classes)
     if gc:
         out.append('#include "tp_aot_gc.h"')      # PR-O2c: only a program with a cyclic-capable class links the collector

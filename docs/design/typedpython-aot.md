@@ -461,6 +461,56 @@ iteration` exactly where CPython raises it). `set[K]`: `add`, `discard`, `remove
 `&` `-` `^` into new sets, `==`; iterating a set, or printing it, depends on CPython's hash table and seed, so it is
 `aot/set-order` except through `sorted(...)`, as section 4.3 says.
 
+First step of S2b, as implemented (amendment 2026-11-25, agent proposal, not confirmed). The runtime
+(`runtime/tp_aot_dict.h`) mirrors Objects/dictobject.c of CPython 3.14 and later rule for rule: the table sizes
+(`calculate_log2_keysize` is the smallest power of two of at least `max(minsize, 8)`; 3.13 rounded `minsize | 8`
+up, which gives other tables after a copy or an update), the presize of a display, the insertion resize, deleted
+entries left in place until a resize compacts them, `popitem` truncating the entry count, `clear`, the clone and
+merge paths of `copy` and `update`, and the iterator's two checks with CPython's messages. A test runs thousands of
+random operation scripts on the runtime and on CPython's dict and compares what each prints, live iterators
+included (`test_aot_dict_runtime.py`). The front end compiles `dict[K, V]` with K int, str or bool and V int, float,
+bool, str or `str | None`, as locals, parameters and returns of module functions: displays, `d[k]`, `d[k] = v`,
+`del d[k]`, `in` / `not in`, `get` (with a default; without one for str values), `setdefault`, `pop` (with and
+without a default), `len`, truth, `update` from a dict, `copy()` and `dict(d)`, `clear()`, `==` / `!=`, `print`,
+`str`, `repr` and f-strings, and `for` loops over the dict, `keys()`, `values()` and `items()`. A dict holds its
+ints as `tpa_int` (any int; aot/rep.py), so a big int is a key like any other. A display is built as CPython's
+bytecode builds it (chunks of 17 pairs; a chunk of at most 15 is presized, a longer one starts empty, later chunks
+are merged), so a loop that changes the dict sees CPython's layout. `print` makes the repr of a dict (and of a list)
+argument when it writes it, as CPython's print does. Refused with the reason: a value of another type than the
+dict's (CPython keeps the object, so a bool in a `dict[str, int]` or an int in a `dict[str, float]` would print
+differently), a bool key inserted into a dict of int (a loop would give a bool where the program reads an int; a
+bool may look a key up), `==` of dicts of float values (CPython tests identity first: `aot/identity`), and a dict of
+other kinds passed where a dict is wanted (dicts are invariant). Dict fields of classes, and dicts as method
+parameters and returns, follow (same day): a field read of a dict is held for the operation, as a list field's, and
+a class with a dict field is always a heap object. `popitem()` follows: unpacked into two names (`k, v =
+d.popitem()`), bound to a tuple, returned from a function declared `-> tuple[K, V]`, or as a statement; it takes the
+last entry, truncates the entry count as CPython does, and raises `KeyError: 'popitem(): dictionary is empty'`. A
+dict may then be a dict's value (`dict[str, dict[int, int]]`, any depth): `d[k][j] = v`, `d.setdefault(k, {})[j] = v`,
+methods and loops of `d[k]`, and an inner dict bound to a name is the same object (aliasing as in CPython). Its type is
+a part of the outer type, so it cannot hold the outer dict back: no cycle, and reference counts free it. `d[k] op= v`
+reads the dict and the key once, then `d[k]`, then the value, as CPython. A `list[dict[K, V]]` follows: a list of
+counted dicts (the runtime's list of owned references), as a local, a parameter, a return and a field; displays (`[]`
+where the type is known), `append`, `insert`, `pop`, `extend`, `clear`, `reverse`, `xs[i]` (the dict itself) and
+`xs[i] = d`, `xs[i][k] = v`, `len`, `for d in xs` and the repr. Searching one (`in`, `index`, `count`, `remove`) compares
+dicts by value with an identity test first, and is refused until it is done; so is `==` of two lists of dicts. Tuple
+keys follow (`dict[tuple[int, str], V]`, elements int, str or bool): a key tuple is a counted runtime tuple made from
+its elements in order (`d[a, b]`, `d[t]`, `t in d`, `get` / `pop` / `setdefault`), with CPython's equality and repr
+(`(1, 'a')`, `KeyError: (5, 0)`); a loop or `popitem` binds the key to a tuple name (split into its element locals, as
+any tuple) or to one name per element (`for (i, j), v in d.items()`). An element of another type than the key's (a bool
+for an int) is refused: the tuple would keep it. `set[T]` follows (T int, str, bool or a tuple of them): a dict whose
+values are unused, as a local, a parameter, a return and a field; displays, `set()`, `set(s)`, `add`, `discard`,
+`remove` (`KeyError(x)`), `clear`, `copy`, `update`, `in`, `len`, truth, `==`, the subset tests (`<=`, `<`, `>=`, `>`,
+`issubset`, `issuperset`, `isdisjoint`) and `|`, `&`, `-`, `^` (and the one-set `union`, `intersection`, `difference`,
+`symmetric_difference`). What depends on the order of a set (a loop over one, its repr, `pop()`) follows CPython's set
+table, which this one is not: refused as aot/set-order. The view objects follow where they are used at once:
+`len(d.keys())`, `x in d.keys()`, `v in d.values()`, `(k, v) in d.items()` (CPython's dictitems_contains; float values
+refused, aot/identity) and the repr `dict_keys([...])` / `dict_values([...])` / `dict_items([...])`, made when print
+writes it; a view bound to a name or passed is not yet. `set(xs)` of a list[str] or list[int] name and `set([a, b])`
+follow too. A dict crosses the library boundary as `dict[int, int]`, `dict[int, float]` and `dict[int, bool]` (8.1 to
+8.3, ABI version 3): the library only reads a dict parameter of an export (aot/library-dict-write otherwise, through
+the callees it is passed to), so one handle may be shared by threads without the per-dict lock of tier T. Still to come
+in S2b: a view as a value.
+
 **S2c.** List, dict and set comprehensions (a hidden local per comprehension variable, Python 3 scoping, the
 accumulator built in place), `enumerate`, `zip` (shortest), `reversed`, `range` objects as iterables, in `for` loops
 and comprehensions; `sum`, `any`, `all`, `min` / `max` of an iterable (`ValueError: min() iterable argument is
@@ -976,7 +1026,11 @@ calling rules of AGENTS.md 16.
   decision 2026-11-16, not owner-confirmed): the type vocabulary gained `int_list` (8.2), and its `lists` section has an
   `int_list` entry only for a library whose signatures use that kind; a library with no big-capable list at its boundary
   has the C text, the header and the description it had under version 1, except that `abi_version` is 2 (and the comment
-  at the top of the C text says so).
+  at the top of the C text says so). It is 3 since #443 (tier S2b; agent proposal, not owner-confirmed, the leader
+  decides the shape): the vocabulary gained `dict_i64_i64`, `dict_i64_f64` and `dict_i64_bool` (8.2), and the
+  description a `dicts` object with one entry per dict kind a signature uses (`key`, `value` and the symbols `new`,
+  `set`, `get`, `contains`, `next`, `len`, `retain`, `release`); a library with no dict at its boundary has the C text,
+  the header and the description it had under version 2, except the `abi_version` number.
 
 ### 8.2 Types at the boundary
 
@@ -987,6 +1041,7 @@ calling rules of AGENTS.md 16.
 | `str` | pointer and length of UTF-8 bytes; an argument is borrowed for the call, a result is owned by the caller and released with `<prefix>_free` | `String`, copied at the boundary |
 | `list[float]` / `list[int]`, as an argument and as a result | an opaque counted handle (`<prefix>_f64_list`, `<prefix>_i64_list`) made and read through exported list functions (`_new`, `_len`, `_data`, `_retain`, `_release`); an argument is borrowed for the call, a returned handle is owned by the caller | a class holding the handle, with `DoubleArray` / `LongArray` copied from or to the `_data` address as the app needs |
 | a `list[int]` that the classification finds big-capable (#465), as an argument and as a result | the opaque counted handle `<prefix>_int_list`, with `_new` (n zeros), `_len`, `_retain`, `_release` as above and, because its elements are not `int64_t` in memory, `_get(l, i, &v)` and `_set(l, i, v)` instead of `_data`; both return 0 or -1 with the error record: an index out of range (a negative one counts from the end) is the source language's `IndexError` with its two messages, and `_get` of an element that does not fit `int64_t` fails with an `OverflowError` whose fixed message is "the element of the list does not fit in 64 bits" (nothing is written; after a `_set` of a smaller value the same element reads). Which kind a signature has follows from the classification: a list that crosses the boundary is one group with the outside, so the caller can only pass a handle of the kind the signature names, and a change in a helper that several exports share can change another export's list kind, so a header is regenerated and its callers rebuilt together. The two handle kinds are not interchangeable (a wrong one is memory corruption; only the C types prevent it). `_get` and `_set` take the list's own lock (section 7) | a class holding the handle with `get(i)` / `set(i, v)` (the generator's matching class is the next step) |
+| `dict[int, int]`, `dict[int, float]`, `dict[int, bool]` (#443, tier S2b), as an argument and as a result | the opaque counted handle `<prefix>_dict_i64_i64` / `_dict_i64_f64` / `_dict_i64_bool` (the runtime's `tpa_dict`; its int keys and values are always big-capable inside, so there is no raw / big split) with `_new()` (empty; clears the error record), `_set(d, key, v)`, `_get(d, key, &v)` (a missing key is the source language's `KeyError`, message the key), `_contains(d, key)` (1 or 0), `_next(d, &pos, &key, &v)` (the items in insertion order from `pos = 0`: 1, then 0 at the end), `_len`, `_retain`, `_release`; a key or value outside `int64_t` cannot be read (`OverflowError` "the key of the dict does not fit in 64 bits" / "the value of the dict does not fit in 64 bits", nothing written, `_next` past the item); a NULL handle is `TypeError` "argument 'd' is a null dict handle". The library never writes a dict parameter of an export (`aot/library-dict-write`: a store, `del`, a method that changes it, binding it to another name, holding it in a list, field or dict, or passing it to a callee parameter that is not read-only by the same rule; a callee that returns its parameter is not read-only, an export that returns it gives back the same handle), so one handle may be read and passed to calls from several threads at once; the caller builds a dict with `_new` and `_set` before sharing it (a `_set` racing a reader is the caller's to prevent). str, bool and tuple keys, str, dict and set values, sets and lists of dicts do not cross yet. Agent proposal, not owner-confirmed | `DictI64I64` / `DictI64F64` / `DictI64Bool`, read-only (8.3) |
 | an instance of a compiled class, or any other container | an opaque handle (a counted reference) with `<prefix>_release(handle)` | a Kotlin class holding the handle, released deterministically (`close`) with a cleaner as a safety net |
 | `None` result | `void` | `Unit` |
 
@@ -1030,10 +1085,11 @@ not depend on the CPython-embedding library) are leader decisions of 2026-11-16,
 Everything below about the shape of the generated API is an agent proposal, not owner-confirmed.
 
 **What exists (#458, desktop JVM).** `GenerateAotLibraryBindingsTask` in the Gradle plugin reads the
-`<prefix>.json` of 8.1 (`abi_version` must be 2, and every other value, 1 included, fails the task and
-names the supported version: there are no deployed version 1 libraries and the compiler here writes 2 only; a
-type outside the vocabulary, or `int_list` with no `lists.int_list` entry, fails the task and names the
-function) and writes four Kotlin files into one package, five when the library uses `int_list`:
+`<prefix>.json` of 8.1 (`abi_version` must be 3, and every other value, 1 and 2 included, fails the task and
+names the supported version: there are no deployed libraries of an earlier version and the compiler here writes 3
+only; a type outside the vocabulary, `int_list` with no `lists.int_list` entry, or a dict type with no entry under
+`dicts`, fails the task and names the function) and writes four Kotlin files into one package, plus `IntList.kt`
+when the library uses `int_list` and one file per dict kind it uses:
 
 - `AotFfm.kt`, the same text for every library: `TypedPythonAotException(className, message)` and a
   small runtime over `java.lang.foreign` (JDK 21 with `--enable-preview`, or JDK 22 and later). It
@@ -1068,6 +1124,13 @@ function) and writes four Kotlin files into one package, five when the library u
   except for the `abi_version` number in the comment of the object file. An `int` result that does not fit in
   64 bits is `OverflowError` "the int result of `<function>` does not fit in 64 bits", through the ordinary
   status check, with no special case in the generator.
+- `DictI64I64.kt`, `DictI64F64.kt`, `DictI64Bool.kt`, one per entry of `dicts` (#443, `abi_version` 3; agent
+  proposal, not owner-confirmed): the Kotlin side of a `dict[int, int | float | bool]`, read-only. It has `size`,
+  `get(key)` (null for a missing key, the library's `KeyError`), `containsKey(key)`, `toMap()` (a `LinkedHashMap` in
+  the insertion order), `of(Map)` (`_new`, then `_set` in the map's iteration order) and `close()` with the ownership
+  rules of the lists. There is no `set`: the library never writes a dict that crossed its boundary, and with no write
+  from Kotlin either, one object may be read and passed to calls from several threads at once. A key or value outside
+  64 bits is the library's `OverflowError`, from `get` and `toMap()`. Every access is one `invokeExact` call.
 
 Out pointers are per-thread scratch memory: one 128-byte block per thread, allocated on first use from
 an automatic arena that the garbage collector frees once the thread is gone. A call costs no
@@ -1086,7 +1149,7 @@ list functions, compares floats bit for bit with CPython, checks exception class
 threads, checks that every bound `MethodHandle` descriptor matches the generated metadata, and asserts
 that no class of the CPython-embedding library is on the classpath and that the process loads no
 libpython (Linux: the process's maps; macOS: `vmmap` when it can examine the JVM, otherwise the
-classpath check only). The same 25 scenarios are also compiled by `aotNativeCompile` into a standalone
+classpath check only). The same 31 scenarios are also compiled by `aotNativeCompile` into a standalone
 GraalVM native image (`AotNativeImageMainKt`, verified by `aotNativeRun` in `.github/workflows/typedpython.yml`
 with `JAVA_HOME` and `PYTHONHOME` removed, #456).
 
