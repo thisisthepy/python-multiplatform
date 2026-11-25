@@ -1275,7 +1275,7 @@ def error_of(exc: Exception) -> tuple[str, str]:
 
 def test_the_description_and_the_header_name_the_kind_a_signature_uses(biglib):
     d, h = biglib.description, biglib.header
-    assert d["abi_version"] == 2 and "int_list" in library.VOCABULARY
+    assert d["abi_version"] == 3 and "int_list" in library.VOCABULARY
     types = {f["name"]: ([p["type"] for p in f["params"]], f["returns"]) for f in d["functions"]}
     assert types["store_product"] == (["int_list", "i64", "i64", "i64"], [])
     assert types["make_big"] == (["i64", "i64"], ["int_list"]) and types["twice"] == (["i64", "i64"], ["int_list"])
@@ -1594,10 +1594,11 @@ def test_every_big_integer_of_the_big_list_tests_was_given_back(biglib):
 
 def test_a_library_with_no_big_capable_list_has_no_int_list_kind(generated):
     """The first library (`kit`) has lists only of the raw kind: no `int_list` in its C text, header or description, whose
-    `lists` are what they were (the one thing that differs from ABI version 1 is `abi_version`)."""
+    `lists` are what they were, and no `dicts` entry (the one thing that differs from ABI version 1 is `abi_version`)."""
     assert "int_list" not in generated.header and "int_list" not in generated.c
     assert set(generated.description["lists"]) == {"f64_list", "i64_list"}
-    assert "int_list" not in json.dumps(generated.description) and generated.description["abi_version"] == 2
+    assert "int_list" not in json.dumps(generated.description) and generated.description["abi_version"] == 3
+    assert "dicts" not in generated.description and "_dict_" not in generated.header
 
 
 def test_explain_lists_names_the_groups_and_the_boundary_of_a_library_and_builds_nothing(tmp_path, capsys):
@@ -1665,7 +1666,7 @@ def test_the_main_block_with_an_unsupported_construct_is_not_compiled(generated)
 
 def test_the_description_is_complete_and_in_the_vocabulary(generated):
     d = generated.description
-    assert d["prefix"] == PREFIX and d["abi_version"] == 2
+    assert d["prefix"] == PREFIX and d["abi_version"] == 3
     assert d["library"] == library.library_file_name(PREFIX)
     assert d["runtime"] == {"init": "kit_init", "shutdown": "kit_shutdown", "last_error": "kit_last_error"}
     assert [f["name"] for f in d["functions"]] == EXPORTS

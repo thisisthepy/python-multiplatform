@@ -26,8 +26,9 @@
  * A value may be a dict (TPA_DV_DICT, a `tpa_dict *`, owned): its type is a part of the outer dict's type, so it
  * cannot hold the outer dict back, and reference counts free it (no cycle collector).
  *
- * Not here yet (later in S2b, each its own named test): class instances and lists as values (they need the cycle
- * collector), set, a dict crossing a library boundary.
+ * A dict crosses a library boundary as `dict[int, int | float | bool]` (the TPA_LIBRARY block at the end).
+ *
+ * Not here yet (later, each its own named test): class instances and lists as values (they need the cycle collector).
  */
 #ifndef TP_AOT_DICT_H
 #define TP_AOT_DICT_H
@@ -1337,5 +1338,173 @@ static TPA_UNUSED int tpa_dict_list_repr(const tpa_obj_list *l, tpa_str **out)
     free(parts);
     return rc;
 }
+
+#if defined(TPA_LIBRARY)
+/* ------------------------------------------------------------------------------------------
+ * A dict across the library boundary (ABI version 3, #443; agent proposal, not owner-confirmed): the operations behind
+ * <p>_dict_i64_<v>_new / _set / _get / _contains / _next of the generated library, for `dict[int, V]` with V int (TPA_DV_INT),
+ * float (TPA_DV_F64) or bool (TPA_DV_BOOL). Keys are int64 at the boundary and TAGGED ints inside (TPA_DK_INT). Each takes
+ * the dict's value kind `vk`; an int64 / double / uint8_t value goes in and out through `void *`, as the kind says.
+ * Status codes as everywhere: 0 (or 1 for a present key / a next item), -1 with the exception in `tpa_exc`. On -1 nothing
+ * is written to an out pointer. These functions do not clear the error record; _new does, as the list _new does.
+ * Sharing: the library never writes a dict that crossed its boundary (aot/library-dict-write), so these reads may run on
+ * several threads at once; _set on a dict another thread uses is the caller's race (the generated header says so).
+ * ------------------------------------------------------------------------------------------ */
+
+/* A NULL dict handle: the ABI-level TypeError that names the argument (as tpa_lib_null_handle for a list). */
+static TPA_UNUSED int tpa_lib_null_dict(const char *arg)
+{
+    char m[256];
+    snprintf(m, sizeof m, "argument '%s' is a null dict handle", arg);
+    return tpa_raise(TPA_TypeError, m);
+}
+
+/* An empty dict of int keys and `vk` values; NULL with a MemoryError record. */
+static TPA_UNUSED tpa_dict *tpa_lib_dict_new(int vk)
+{
+    tpa_dict *d = NULL;
+    if (tpa_dict_new(TPA_DK_INT, vk, 0, &d) != 0) {
+        return NULL;
+    }
+    tpa_lib_clear_error();
+    return d;
+}
+
+/* The word of a boundary value (a TAGGED int for TPA_DV_INT: a new reference the caller releases). */
+static int tpa_lib_dict__word(int vk, const void *in, tpa_dw *out)
+{
+    tpa_int v;
+    switch (vk) {
+    case TPA_DV_INT:
+        if (tpa_int_from_i64(*(const int64_t *)in, &v) != 0) {
+            return -1;
+        }
+        *out = (tpa_dw)v;
+        return 0;
+    case TPA_DV_F64:
+        *out = tpa_dict_f64(*(const double *)in);
+        return 0;
+    default:
+        *out = (tpa_dw)(*(const uint8_t *)in != 0);
+        return 0;
+    }
+}
+
+/* A borrowed word as the boundary value; an int outside 64 bits is the ABI-level OverflowError `what` (nothing written). */
+static int tpa_lib_dict__value(int vk, tpa_dw w, void *out, const char *what)
+{
+    int64_t x;
+    switch (vk) {
+    case TPA_DV_INT:
+        if (tpa_int_to_i64((tpa_int)w, &x) != 0) {
+            return tpa_raise(TPA_OverflowError, what);
+        }
+        *(int64_t *)out = x;
+        return 0;
+    case TPA_DV_F64:
+        *(double *)out = tpa_dict_to_f64(w);
+        return 0;
+    default:
+        *(uint8_t *)out = (uint8_t)(w != 0);
+        return 0;
+    }
+}
+
+#define TPA_LIB_DICT_VALUE_FIT "the value of the dict does not fit in 64 bits"
+#define TPA_LIB_DICT_KEY_FIT "the key of the dict does not fit in 64 bits"
+
+/* d[key] = value: a new key goes last, an existing key keeps its place and gets the value (insertdict). */
+static TPA_UNUSED int tpa_lib_dict_set(tpa_dict *d, int64_t key, const void *value)
+{
+    tpa_int k;
+    tpa_dw v;
+    int rc;
+    if (d == NULL) {
+        return tpa_lib_null_dict("d");
+    }
+    if (tpa_int_from_i64(key, &k) != 0) {
+        return -1;
+    }
+    if (tpa_lib_dict__word(d->vk, value, &v) != 0) {
+        tpa_int_release(k);
+        return -1;
+    }
+    rc = tpa_dict_setitem(d, (tpa_dw)k, 0, v);           /* borrows both */
+    if (d->vk == TPA_DV_INT) {
+        tpa_int_release((tpa_int)v);
+    }
+    tpa_int_release(k);
+    return rc;
+}
+
+/* d[key] into *out: KeyError(key) when absent (CPython's message: the key's repr). */
+static TPA_UNUSED int tpa_lib_dict_get(const tpa_dict *d, int64_t key, void *out)
+{
+    tpa_int k;
+    tpa_dw w;
+    int rc;
+    if (d == NULL) {
+        return tpa_lib_null_dict("d");
+    }
+    if (tpa_int_from_i64(key, &k) != 0) {
+        return -1;
+    }
+    rc = tpa_dict_getitem(d, (tpa_dw)k, 0, &w);         /* a new reference in w */
+    tpa_int_release(k);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = tpa_lib_dict__value(d->vk, w, out, TPA_LIB_DICT_VALUE_FIT);
+    tpa_dict__value_release(d, w);
+    return rc;
+}
+
+/* key in d: 1 or 0. */
+static TPA_UNUSED int tpa_lib_dict_contains(const tpa_dict *d, int64_t key)
+{
+    tpa_int k;
+    int r;
+    if (d == NULL) {
+        return tpa_lib_null_dict("d");
+    }
+    if (tpa_int_from_i64(key, &k) != 0) {
+        return -1;
+    }
+    r = tpa_dict_contains(d, (tpa_dw)k);
+    tpa_int_release(k);
+    return r;
+}
+
+/* The items in insertion order: from entry *pos on, the next live entry; 1 with it and *pos past it, 0 at the end. A key
+ * or value outside 64 bits is -1 with the OverflowError of the header, *pos past that entry, so the next call goes on. */
+static TPA_UNUSED int tpa_lib_dict_next(const tpa_dict *d, int64_t *pos, int64_t *key, void *value)
+{
+    int64_t i, k;
+    union { int64_t i; double f; uint8_t b; } v;
+    if (d == NULL) {
+        return tpa_lib_null_dict("d");
+    }
+    for (i = *pos < 0 ? 0 : *pos; i < d->nentries; i++) {
+        if (d->e[i].live) {
+            *pos = i + 1;
+            if (tpa_int_to_i64((tpa_int)d->e[i].key, &k) != 0) {
+                return tpa_raise(TPA_OverflowError, TPA_LIB_DICT_KEY_FIT);
+            }
+            if (tpa_lib_dict__value(d->vk, d->e[i].value, &v, TPA_LIB_DICT_VALUE_FIT) != 0) {
+                return -1;
+            }
+            *key = k;
+            switch (d->vk) {
+            case TPA_DV_INT: *(int64_t *)value = v.i; break;
+            case TPA_DV_F64: *(double *)value = v.f; break;
+            default: *(uint8_t *)value = v.b; break;
+            }
+            return 1;
+        }
+    }
+    *pos = d->nentries;
+    return 0;
+}
+#endif /* TPA_LIBRARY */
 
 #endif /* TP_AOT_DICT_H */
