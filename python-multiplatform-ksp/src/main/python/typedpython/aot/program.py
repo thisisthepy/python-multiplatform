@@ -236,6 +236,8 @@ class _Checker:
             return                          # tier S2b: set[T]
         elif _is_dict_list_annotation(ann):
             return                          # tier S2b: list[dict[K, V]]
+        elif _is_view_annotation(ann):
+            return                          # tier S2b: KeysView[K], ValuesView[V], ItemsView[K, V]
         elif allow_tuple and _is_tuple_list_annotation(ann):
             return                          # tier S2a: one list per element (typedpython/tuples.py)
         else:
@@ -870,6 +872,23 @@ def _is_set_annotation(ann: ast.expr) -> bool:
                                                                                              ast.Name(id="int")])))
 
 
+VIEW_TYPES = ("KeysView", "ValuesView", "ItemsView")
+
+
+def _is_view_annotation(ann: ast.expr) -> bool:
+    """`KeysView[K]`, `ValuesView[V]` or `ItemsView[K, V]` of collections.abc, of the keys and values a dict holds (tier
+    S2b): a view passed to or returned from a function."""
+    if not (isinstance(ann, ast.Subscript) and isinstance(ann.value, ast.Name) and ann.value.id in VIEW_TYPES):
+        return False
+    if ann.value.id == "ItemsView":
+        pair = ann.slice
+    elif ann.value.id == "KeysView":
+        pair = ast.Tuple(elts=[ann.slice, ast.Name(id="int")])
+    else:
+        pair = ast.Tuple(elts=[ast.Name(id="int"), ann.slice])
+    return _is_dict_annotation(ast.Subscript(value=ast.Name(id="dict"), slice=pair))
+
+
 def _is_dict_list_annotation(ann: ast.expr) -> bool:
     """`list[dict[K, V]]` (tier S2b)."""
     return (isinstance(ann, ast.Subscript) and isinstance(ann.value, ast.Name) and ann.value.id in ("list", "List")
@@ -954,9 +973,12 @@ def analyze(entry: Path, *, library: bool = False) -> Program:
             else:
                 rep.error(s, "aot/import", ", ".join(a.name for a in s.names),
                           "only a single `import math`, `import sys` and `import time` are supported in the AOT mode")
+        elif (isinstance(s, ast.ImportFrom) and s.level == 0 and s.module == "collections.abc"
+              and all(a.name in VIEW_TYPES and a.asname is None for a in s.names)):
+            pass                                    # tier S2b: the view types, for annotations
         elif isinstance(s, ast.ImportFrom):
-            rep.error(s, "aot/import", s.module or ".", "only a single `import math`, `import sys` and `import time` are "
-                      "supported in the AOT mode")
+            rep.error(s, "aot/import", s.module or ".", "only a single `import math`, `import sys` and `import time`, and "
+                      "`from collections.abc import KeysView, ValuesView, ItemsView` are supported in the AOT mode")
         elif isinstance(s, ast.FunctionDef):
             program.functions.append(s)
             if s.name in seen_names:

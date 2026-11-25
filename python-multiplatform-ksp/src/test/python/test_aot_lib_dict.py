@@ -499,6 +499,38 @@ def f(d: dict[int, int], k: int) -> int:
     assert [p["type"] for p in d["functions"][0]["params"]] == ["dict_i64_i64", "i64"]
 
 
+
+def test_a_view_passed_to_a_helper_is_not_a_write(tmp_path):
+    """A KeysView parameter of a helper holds the caller's dict, and a view is only read, so passing `d.keys()` on
+    keeps the export read-only."""
+    src = write(tmp_path, '''
+from collections.abc import KeysView
+
+
+def count(ks: KeysView[int]) -> int:
+    n = 0
+    for k in ks:
+        n += k
+    return n + len(ks)
+
+
+def f(d: dict[int, int]) -> int:
+    return count(d.keys())
+''')
+    _c, _h, d = aot.generate_library(src, exports=["f"], prefix="w")
+    assert [p["type"] for p in d["functions"][0]["params"]] == ["dict_i64_i64"]
+
+
+@pytest.mark.parametrize("sig", ["k: KeysView[int]) -> int:\n    return len(k)",
+                                 "d: dict[int, int]) -> KeysView[int]:\n    return d.keys()"])
+def test_a_view_does_not_cross_the_library_boundary(tmp_path, sig):
+    """A view has no Kotlin type at the boundary: an export with a view parameter or result is refused."""
+    src = write(tmp_path, f"from collections.abc import KeysView\n\n\ndef f({sig}\n")
+    with pytest.raises(aot.AotError) as e:
+        aot.generate_library(src, exports=["f"], prefix="o")
+    found = [aot.format_finding(f) for f in e.value.findings]
+    assert {f.rule for f in e.value.findings} == {"aot/export"} and "(KeysView[int]) is outside" in found[0], found
+
 OUTSIDE = {
     "str_key": "d: dict[str, int]) -> int:\n    return len(d)",
     "str_value": "d: dict[int, str]) -> int:\n    return len(d)",

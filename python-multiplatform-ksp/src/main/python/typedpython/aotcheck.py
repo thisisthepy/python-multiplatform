@@ -351,6 +351,9 @@ class _Pass(ast.NodeVisitor):
                        "and the sibling modules it imports by name)")
             return
         name = node.module or ""
+        if (name == "collections.abc" and not self.depth
+                and all(a.name in ("KeysView", "ValuesView", "ItemsView") and a.asname is None for a in node.names)):
+            return                                              # tier S2b: the view types, for annotations
         if any(a.name == "*" for a in node.names):
             self.error("aot/import", name, node, f"`from {name} import *` binds names the checker cannot see")
         self.import_of(name, node, None)
@@ -372,7 +375,8 @@ class _Pass(ast.NodeVisitor):
             return
         elif not self.depth:
             self.error("aot/import", name, node, f"`{name}` is neither a module of this program nor one of the "
-                                                   "provided standard modules (math, sys, time)")
+                                                   "provided standard modules (math, sys, time; and KeysView, "
+                                                   "ValuesView, ItemsView of collections.abc)")
 
     # -- definitions
 

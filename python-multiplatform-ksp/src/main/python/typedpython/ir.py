@@ -119,6 +119,13 @@ def is_set(k: object) -> bool:
     return isinstance(k, tuple) and len(k) == 2 and k[1] is Type.NONE
 
 
+def view_match(view: str | None, a: "DictKinds", b: "DictKinds") -> bool:
+    """The views `view` ("keys", "values", "items"; None: the dicts themselves) of dicts of kinds `a` and `b` read the
+    same: the keys of a keys view, the values of a values view, both otherwise. A `KeysView[K]` does not say the
+    values of its dict, nor a `ValuesView[V]` its keys (tier S2b)."""
+    return a[0] == b[0] if view == "keys" else a[1] == b[1] if view == "values" else a == b
+
+
 def dict_has_float(k: "DictKinds") -> bool:
     """A float is among the values of `k` or of the dicts it holds."""
     return k[1] is Type.F64 or (isinstance(k[1], tuple) and dict_has_float(k[1]))
@@ -1699,6 +1706,7 @@ class Param:
     cls: str | None = None
     optional: bool = False
     kinds: DictKinds | None = None      # AOT mode, tier S2b: the key and value types of a DICT parameter
+    view: str | None = None             # ... and of a view parameter ("keys", "values", "items"): it holds the dict
 
 
 @dataclass(frozen=True)
@@ -1825,6 +1833,7 @@ class Function:
     # AOT mode, tier S2b: the key and value types of every DICT local and parameter, and of a DICT return
     dict_kinds: dict[str, DictKinds] = field(default_factory=dict)
     return_kinds: DictKinds | None = None
+    return_view: str | None = None      # a returned view ("keys", ...): the DICT returned is the view's dict
 
 
 @dataclass(frozen=True)

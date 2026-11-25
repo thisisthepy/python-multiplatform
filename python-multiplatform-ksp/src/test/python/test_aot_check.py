@@ -39,6 +39,8 @@ TABLE = [
     ("aot/import", "def f() -> None:\n    import math\n", (ERR, None, "math", 2)),
     ("aot/import", "from . import x\n", (ERR, None, ".", 1)),
     ("aot/import", "from math import *\n", (ERR, None, "math", 1)),
+    ("aot/import", "from collections.abc import Mapping\n", (ERR, None, "collections.abc", 1)),
+    ("aot/import", "from collections.abc import KeysView as K\n", (ERR, None, "collections.abc", 1)),
     # aot/identity
     ("aot/identity", "def f(x: int) -> int:\n    return id(x)\n", (ERR, None, "id", 2)),
     ("aot/identity", "def f(x: int) -> int:\n    return hash(x)\n", (ERR, None, "hash", 2)),
@@ -175,6 +177,22 @@ def test_sets_that_do_not_depend_on_their_order_are_not_reported(tmp_path):
             b = set(s)
             c = {1, 2} | a
             return len(b & c)
+    """)
+    report = aotcheck.check(path, front_end=False)
+    assert report.findings == [], report.lines()
+
+
+def test_the_view_types_of_collections_abc_are_not_reported(tmp_path):
+    """Tier S2b: `from collections.abc import KeysView, ValuesView, ItemsView` names the types of a view passed to or
+    returned from a function (the front end checks how the view is used)."""
+    path = write(tmp_path, """
+        from collections.abc import ItemsView, KeysView, ValuesView
+
+        def f(k: KeysView[str], v: ValuesView[int], i: ItemsView[str, int]) -> int:
+            return len(k) + len(v) + len(i)
+
+        def g(d: dict[str, int]) -> KeysView[str]:
+            return d.keys()
     """)
     report = aotcheck.check(path, front_end=False)
     assert report.findings == [], report.lines()

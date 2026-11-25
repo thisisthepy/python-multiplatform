@@ -511,13 +511,21 @@ when it is used and keeps that dict when the dict's name is bound again, as CPyt
 used as the views above are, and by a `for` loop (CPython's dict iterator, so a dict that changes size raises), its
 truth (`if ks`, `not ks`, `bool(ks)`), and binding it to another view name of the same view and kinds. Anything else of
 a view name (subscript, a dict method, `==`, the set operators, `list()` / `dict()` of it, putting it in a list or a
-dict, passing or returning it) is refused naming the view. In a library an export may bind views of its dict
+dict) is refused naming the view. A view is also passed to a function and returned from one (agent proposal, not
+confirmed): the parameter or result is annotated `KeysView[K]`, `ValuesView[V]` or `ItemsView[K, V]`, imported by
+`from collections.abc import KeysView, ValuesView, ItemsView` (the one `from` import of an AOT program, for annotations
+only), and it holds the view's dict as a view name does; a view of a dict made in the callee keeps that dict alive. A
+KeysView does not name the values of its dict, nor a ValuesView its keys, and the view reads only its half, so a
+`KeysView[str]` parameter takes the keys of a `dict[str, int]` and of a `dict[str, float]` alike (`ir.view_match`).
+The argument is a view of that half (`d.keys()`, a view name, a call of a function returning one); a dict or another
+view is refused naming both views. A call returning a view is used as a view is (a `for` loop, len(), `in`, its truth,
+the repr, binding it to a view name, passing it on). A method does not return a view yet, and a view does not cross the library
+boundary (aot/export). In a library an export may bind views of its dict
 parameter: a view name is only read, so it is no write (aot/library-dict-write). `set(xs)` of a list[str] or list[int] name and `set([a, b])`
 follow too. A dict crosses the library boundary as `dict[int, int]`, `dict[int, float]` and `dict[int, bool]` (8.1 to
 8.3, ABI version 3): the library only reads a dict parameter of an export (aot/library-dict-write otherwise, through
 the callees it is passed to), so one handle may be shared by threads without the per-dict lock of tier T. Still to come
-in S2b: a view passed to a function or returned from one (annotated `KeysView[K]`, `ValuesView[V]`, `ItemsView[K, V]`,
-which needs `from collections.abc import ...` in an AOT program).
+in S2b: a method that returns a view.
 
 **S2c.** List, dict and set comprehensions (a hidden local per comprehension variable, Python 3 scoping, the
 accumulator built in place), `enumerate`, `zip` (shortest), `reversed`, `range` objects as iterables, in `for` loops
