@@ -1396,6 +1396,28 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   (root `build.gradle.kts`, the plugin build, `python-multiplatform/build.gradle.kts`, and the sed
   form `libraryVersionSuffix=(.+)` in `maven-central.yml`, `desktop-release.yml`, `central-bundle.sh`,
   `assemble-desktop-release.sh`), `GP/PublishedVersionTest.kt`; no release has used an empty suffix yet.
+- **T-7** (#175 step 1) The Kotlin/Wasm module imports CPython's shared memory. Owner decision 2026-11-21, via
+  the leader (team report `pmp-binder.md`, "## Owner decision (2026-11-21, via the leader): #175 is back in
+  1.0"): "빌드 뒤에 .wasm을 고치기 >> 이걸로 가자", with the requirements relayed in that note: "the patch
+  is a small, tested binary rewrite of the import section only (a unit test on a fixture .wasm, and a check
+  that fails the build if the Kotlin output's memory section is not the shape the patch expects, so a Kotlin
+  upgrade that changes it is caught instead of silently mis-patched); keep it removable once Kotlin gains an
+  option". Kotlin/Wasm emits its memory import `intrinsics.memory` as non-shared with no maximum
+  (`WasmCompiledModuleFragment.createAndExportMemory`, checked 2026-11-14), which a shared memory cannot
+  satisfy (`LinkError`, #411's probe). So when the CPython runtime it is staged beside has a shared memory,
+  the build rewrites that one import of the linked `.wasm` to shared, minimum 0, maximum 65536 pages (the
+  wasm32 ceiling, so any runtime maximum fits); every other byte of the import section is copied, every
+  other section is copied unchanged, and the section's size is re-encoded (in its original width when it
+  fits). The limits grow by 3 bytes, so the module's later byte offsets move by 3 (4 when the size needs
+  one more byte), and the generated source map's offsets are moved with them. The check runs on every link whatever the runtime: the build fails unless
+  the module has exactly one memory, imported as `intrinsics.memory`, either in Kotlin's shape
+  (non-shared, minimum 0, no maximum) or in the rewritten shape; anything else (a defined memory, a second
+  memory, other limits, an import section that does not parse) fails with a message saying the rewrite may
+  no longer be needed. Applied in two places: the library's own `wasmJsNodeTest` / `wasmJsBrowserTest`
+  staging, and a consumer's `wasmJs*Webpack` through the Gradle plugin. Removing it, once Kotlin has an
+  option, is deleting `WasmSharedMemoryImport` and its two calls. `Status: draft` (unit tests on
+  hand-assembled modules, `GP/WasmSharedMemoryImportTest.kt`; no runtime with a shared memory is staged yet,
+  so the rewrite has not run on a real Kotlin link: that is #175 step 2).
 
 ## 8. Measurement
 

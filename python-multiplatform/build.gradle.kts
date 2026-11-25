@@ -2306,7 +2306,12 @@ val wasmBrowserRuntimeZip by tasks.registering(Zip::class) {
  * @param dir the compile-sync output webpack reads, `build/wasm/packages/<name>/kotlin`.
  * @param modulePrefix the generated module basename, which is `<root project>-<project>`.
  */
-fun patchKotlinWasmOutputForCPython(dir: File, modulePrefix: String, logger: org.gradle.api.logging.Logger) {
+fun patchKotlinWasmOutputForCPython(dir: File, modulePrefix: String, logger: org.gradle.api.logging.Logger, runtimeDir: File) {
+    // SPEC T-7 (#175): check the linked module's memory import, and make it shared when the CPython
+    // runtime's memory is (the 3.15t pthreads build). The plugin's tested code, on this build's classpath
+    // through `id("org.thisisthepy.python.multiplatform.bindings") apply false`.
+    python.multiplatform.gradle.patchKotlinWasmMemoryImport(dir, modulePrefix, runtimeDir, logger)
+
     val importObject = dir.listFiles()?.firstOrNull { it.name.endsWith(".import-object.mjs") }
         ?: throw GradleException("No *.import-object.mjs in $dir -- the Kotlin/Wasm output layout changed.")
     val text = importObject.readText()
@@ -2691,7 +2696,7 @@ tasks.withType<org.jetbrains.kotlin.gradle.targets.js.testing.KotlinJsTest>().co
 
         // The same two substitutions a consumer's browser bundle needs, and the reason they are a
         // shared function: see `patchKotlinWasmOutputForCPython`.
-        patchKotlinWasmOutputForCPython(dir, modulePrefix = rootProject.name, logger = logger)
+        patchKotlinWasmOutputForCPython(dir, modulePrefix = rootProject.name, logger = logger, runtimeDir = pythonDir)
     }
 }
 

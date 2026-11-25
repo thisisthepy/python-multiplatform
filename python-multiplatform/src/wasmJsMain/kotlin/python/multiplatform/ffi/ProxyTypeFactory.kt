@@ -247,9 +247,9 @@ actual object ProxyTypeFactory {
     actual fun createProxyType(): Long {
         if (ProxyType.proxyTypePtr != 0) return ProxyType.proxyTypePtr.toUInt().toLong()
 
-        val traverseFp = registerUpcall(ProxyTypeExportNames.TRAVERSE)
-        val clearFp = registerUpcall(ProxyTypeExportNames.CLEAR)
-        val deallocFp = registerUpcall(ProxyTypeExportNames.DEALLOC)
+        val traverseFp = slotIndex(SLOT_TRAVERSE, registerUpcall(ProxyTypeExportNames.TRAVERSE))
+        val clearFp = slotIndex(SLOT_CLEAR, registerUpcall(ProxyTypeExportNames.CLEAR))
+        val deallocFp = slotIndex(SLOT_DEALLOC, registerUpcall(ProxyTypeExportNames.DEALLOC))
 
         // Five slots: traverse, clear, dealloc, members, sentinel. Allocated through CPython's malloc and
         // never freed -- `PyType_FromSpec` copies the slots but keeps `spec->name`, so the name at
@@ -310,6 +310,39 @@ actual object ProxyTypeFactory {
             if (main == 0) return@withGIL false
             python.native.ffi.bindings.PyObject_SetAttrString(main, python.native.ffi.Wasm.internedUtf8("_pm_proxy_base"), type.toInt()) == 0
         }
+    }
+
+    private const val SLOT_TRAVERSE = 0
+    private const val SLOT_CLEAR = 1
+    private const val SLOT_DEALLOC = 2
+
+    private var slotsRouted = false
+
+    /**
+     * Whether the proxy type's slots go through `_pm_upcall`'s dispatchers, so a proxy may be
+     * traversed, cleared and freed from a Python thread (#175). `false` on a runtime without the
+     * module, where only the main thread may; read after [createProxyType].
+     */
+    val routesThreadSlots: Boolean get() = slotsRouted
+
+    /**
+     * What the type slot holds: [kotlinEntry] itself, or, on a free-threaded runtime built with
+     * `_pm_upcall`, that module's dispatcher for [slot] with [kotlinEntry] as its target.
+     *
+     * [kotlinEntry] exists only in the main thread's table, like the method entry's index
+     * (`UpcallEntry`); the dispatcher's index is the same in every Worker. On the main thread it
+     * calls [kotlinEntry] in place. Elsewhere `tp_clear` and `tp_dealloc` detach and run on the main
+     * thread attached; `tp_traverse` runs there with no thread state, which is what [ProxyType.traverse]
+     * needs (it reads the handle slot and calls `visit`, nothing else), and, inside a collection's
+     * stop-the-world pause, without the collecting thread detaching. [ProxyType]'s bodies are
+     * unchanged: they always run on the main thread.
+     */
+    private fun slotIndex(slot: Int, kotlinEntry: Int): Int {
+        val dispatcher = python.native.ffi.bindings.pmpProxySlotDispatchIndex(slot)
+        if (dispatcher <= 0) return kotlinEntry
+        python.native.ffi.bindings.pmpProxySetSlotTarget(slot, kotlinEntry)
+        slotsRouted = true
+        return dispatcher
     }
 
     /**
