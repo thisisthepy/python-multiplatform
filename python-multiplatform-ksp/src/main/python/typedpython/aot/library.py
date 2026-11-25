@@ -172,7 +172,7 @@ def _boundary_dict(kinds) -> bool:
 _DICT_READS = {
     (ir.DictGet, "dict"), (ir.DictContains, "dict"), (ir.DictLen, "dict"), (ir.DictCompare, "left"),
     (ir.DictCompare, "right"), (ir.DictStr, "value"), (ir.ForDict, "value"), (ir.DictHasValue, "dict"),
-    (ir.DictHasItem, "dict"), (ir.DictViewStr, "dict"), (ir.DictCopy, "value"), (ir.DictUpdate, "other"),
+    (ir.DictHasItem, "dict"), (ir.DictViewStr, "dict"), (ir.DictView, "dict"), (ir.DictCopy, "value"), (ir.DictUpdate, "other"),
 }
 _DICT_WRITE_WORDS = {
     ir.DictStore: "a store", ir.DictDelete: "del", ir.DictPop: "pop()", ir.DictPopItem: "popitem()",

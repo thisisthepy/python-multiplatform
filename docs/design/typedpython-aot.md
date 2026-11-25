@@ -505,11 +505,19 @@ values are unused, as a local, a parameter, a return and a field; displays, `set
 table, which this one is not: refused as aot/set-order. The view objects follow where they are used at once:
 `len(d.keys())`, `x in d.keys()`, `v in d.values()`, `(k, v) in d.items()` (CPython's dictitems_contains; float values
 refused, aot/identity) and the repr `dict_keys([...])` / `dict_values([...])` / `dict_items([...])`, made when print
-writes it; a view bound to a name or passed is not yet. `set(xs)` of a list[str] or list[int] name and `set([a, b])`
+writes it. A view may then be bound to a name (`ks = d.keys()`, and `values()`, `items()`; agent proposal, not
+confirmed): the name holds the dict itself (a counted reference, `ir.DictView`), so the view shows the dict as it is
+when it is used and keeps that dict when the dict's name is bound again, as CPython's view object does. A view name is
+used as the views above are, and by a `for` loop (CPython's dict iterator, so a dict that changes size raises), its
+truth (`if ks`, `not ks`, `bool(ks)`), and binding it to another view name of the same view and kinds. Anything else of
+a view name (subscript, a dict method, `==`, the set operators, `list()` / `dict()` of it, putting it in a list or a
+dict, passing or returning it) is refused naming the view. In a library an export may bind views of its dict
+parameter: a view name is only read, so it is no write (aot/library-dict-write). `set(xs)` of a list[str] or list[int] name and `set([a, b])`
 follow too. A dict crosses the library boundary as `dict[int, int]`, `dict[int, float]` and `dict[int, bool]` (8.1 to
 8.3, ABI version 3): the library only reads a dict parameter of an export (aot/library-dict-write otherwise, through
 the callees it is passed to), so one handle may be shared by threads without the per-dict lock of tier T. Still to come
-in S2b: a view as a value.
+in S2b: a view passed to a function or returned from one (annotated `KeysView[K]`, `ValuesView[V]`, `ItemsView[K, V]`,
+which needs `from collections.abc import ...` in an AOT program).
 
 **S2c.** List, dict and set comprehensions (a hidden local per comprehension variable, Python 3 scoping, the
 accumulator built in place), `enumerate`, `zip` (shortest), `reversed`, `range` objects as iterables, in `for` loops

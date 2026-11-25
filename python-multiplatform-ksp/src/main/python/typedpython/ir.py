@@ -1497,6 +1497,16 @@ class DictHasItem(Expr):
 
 
 @dataclass(frozen=True)
+class DictView(Expr):
+    """`d.keys()` / `d.values()` / `d.items()` (`view`) bound to a view name (type DICT): the view holds the dict
+    itself (a new reference), so it shows the dict as it is when it is used, and keeps that dict when the dict's name
+    is bound again (CPython's view objects). Only the value of an Assign to a view local (tier S2b)."""
+
+    view: str                      # "keys", "values", "items"
+    dict: Expr
+
+
+@dataclass(frozen=True)
 class DictViewStr(Expr):
     """The repr of `dict.keys()` / `.values()` / `.items()` (`view`), `dict_keys(['a'])` ... (type STR)."""
 
@@ -1561,7 +1571,7 @@ class SetRemove(Stmt):
 
 DICT_EXPRS = (DictDisplay, DictGet, DictContains, DictLen, DictPop, DictSetDefault, DictCopy, DictCompare, DictStr,
               DictListDisplay, DictListLen, DictListIndex, KeyTuple, SetDisplay, SetOp, SetCompare, DictHasValue,
-              DictHasItem, DictViewStr, SetFromList)
+              DictHasItem, DictViewStr, DictView, SetFromList)
 DICT_STMTS = (DictStore, DictDelete, DictUpdate, DictClear, ForDict, DictPopItem, DictListStore, ForDictList, SetAdd,
               SetRemove)
 
