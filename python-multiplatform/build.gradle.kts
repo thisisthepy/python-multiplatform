@@ -2110,7 +2110,7 @@ fun testWheelConfig(sitePackages: File?, wheelsDir: File, required: Boolean): St
 /**
  * The generated `cpython-config.mjs` that `cpython.mjs` imports.
  *
- * Both constants are generated unconditionally: a named export that is missing fails the *whole* ES
+ * Every constant is generated unconditionally: a named export that is missing fails the *whole* ES
  * import, not the branch that reads it, so the module's import list has to be the same in both
  * bundles.
  *
@@ -2129,7 +2129,22 @@ fun cpythonConfigModule(pythonDir: File, stdlibZipUrl: String?): String =
         "\n" +
         "// STDLIB_ZIP_URL is read by both hosts: neither MEMFS nor a browser has a stdlib until this\n" +
         "// zip is installed as `/lib/python3<minor>.zip` during preRun.\n" +
-        "export const STDLIB_ZIP_URL = ${groovy.json.JsonOutput.toJson(stdlibZipUrl)};\n"
+        "export const STDLIB_ZIP_URL = ${groovy.json.JsonOutput.toJson(stdlibZipUrl)};\n" +
+        "\n" +
+        "// SHARED_MEMORY: whether python.wasm's memory is shared (the free-threaded pthreads build),\n" +
+        "// read from its memory import at staging. cpython.mjs refuses to start in a browser page that\n" +
+        "// is not cross-origin isolated when it is true (SPEC T-8).\n" +
+        "export const SHARED_MEMORY = ${runtimeHasSharedMemory(pythonDir)};\n"
+
+/**
+ * SPEC T-8: whether the runtime in [pythonDir] has a shared memory, from its `python.wasm`'s memory
+ * import. A missing or unreadable `python.wasm` counts as not shared; staging fails on it elsewhere.
+ */
+fun runtimeHasSharedMemory(pythonDir: File): Boolean {
+    val module = pythonDir.resolve("python.wasm")
+    return module.isFile &&
+        python.multiplatform.gradle.WasmSharedMemoryImport.hasSharedMemory(module.readBytes()) == true
+}
 
 // =================================================================================================
 // ROADMAP §10 -- why a *missing* interpreter can be made a build failure on demand.

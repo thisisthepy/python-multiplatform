@@ -58,6 +58,14 @@ has a browser wasm target. `wasmWasi` is not a target (when last assessed it was
   The shape check runs on every link: a module whose memory is not exactly Kotlin's import (or the
   rewritten one) fails the build, so a Kotlin upgrade that changes it is caught. Removing it once Kotlin
   has an option is deleting that object and its calls.
+- **A shared-memory runtime refuses a page that is not cross-origin isolated (SPEC T-8, #175).** Owner
+  decision 2026-10-04 on #175: "The runtime checks crossOriginIsolated at start and fails with an
+  explanation if it is false." The staging writes `SHARED_MEMORY` into `cpython-config.mjs` from
+  `python.wasm`'s memory import, and `cpython.mjs` throws before the Emscripten factory runs when the host
+  is a browser, `SHARED_MEMORY` is true and `crossOriginIsolated` is not `true`, naming the COOP/COEP
+  headers and the service-worker fallback. Node and the GIL build are not checked. Once the staged runtime
+  is the 3.15t build, the library's own `wasmJsBrowserTest` (Karma) and `:sample`'s dev server need those
+  headers too; generating them is toolchain's part of the same decision.
 - **JSPI must not reach the embedding.** `cpython.mjs` deletes `WebAssembly.promising` /
   `WebAssembly.Suspending`; with JSPI live the first blocking syscall (`select.poll().poll(0)`, which
   `selectors.py` does at import) fails with `SuspendError` and surfaces as `RuntimeError: unreachable`.
