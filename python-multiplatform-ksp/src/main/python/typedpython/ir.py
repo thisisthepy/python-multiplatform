@@ -1476,6 +1476,44 @@ def dict_bound(s: "ForDict | DictPopItem") -> list[tuple[object, "Type | DictKin
 
 
 @dataclass(frozen=True)
+class DictHasValue(Expr):
+    """`value in dict.values()` / `not in` (negate), the value first (type BOOL): some value of the dict equals it
+    (identity first in CPython: never a float value here)."""
+
+    value: Expr
+    dict: Expr
+    negate: bool = False
+
+
+@dataclass(frozen=True)
+class DictHasItem(Expr):
+    """`(key, value) in dict.items()` / `not in` (negate): the key, the value, then the dict (type BOOL): the key is
+    found and its value equals `value` (never a float value here)."""
+
+    key: Expr
+    value: Expr
+    dict: Expr
+    negate: bool = False
+
+
+@dataclass(frozen=True)
+class DictViewStr(Expr):
+    """The repr of `dict.keys()` / `.values()` / `.items()` (`view`), `dict_keys(['a'])` ... (type STR)."""
+
+    view: str                      # "keys", "values", "items"
+    dict: Expr
+
+
+@dataclass(frozen=True)
+class SetFromList(Expr):
+    """`set(array)` of a list[str] or a list[int] local or parameter (type DICT, set kinds): each item added in the
+    list's order."""
+
+    kinds: DictKinds
+    array: str
+
+
+@dataclass(frozen=True)
 class SetDisplay(Expr):
     """`{e0, e1, ...}` / `set()` (type DICT, set kinds `(T, NONE)`): the elements evaluated in order, each added (an
     element equal to one already there is not: the first is kept)."""
@@ -1522,7 +1560,8 @@ class SetRemove(Stmt):
 
 
 DICT_EXPRS = (DictDisplay, DictGet, DictContains, DictLen, DictPop, DictSetDefault, DictCopy, DictCompare, DictStr,
-              DictListDisplay, DictListLen, DictListIndex, KeyTuple, SetDisplay, SetOp, SetCompare)
+              DictListDisplay, DictListLen, DictListIndex, KeyTuple, SetDisplay, SetOp, SetCompare, DictHasValue,
+              DictHasItem, DictViewStr, SetFromList)
 DICT_STMTS = (DictStore, DictDelete, DictUpdate, DictClear, ForDict, DictPopItem, DictListStore, ForDictList, SetAdd,
               SetRemove)
 

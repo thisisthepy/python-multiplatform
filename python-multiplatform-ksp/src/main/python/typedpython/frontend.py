@@ -1998,7 +1998,7 @@ class _Lowerer:
             if listed is not None:
                 args.append(listed)
                 continue
-            e = self.value(a)
+            e = self.view_repr(a) or self.value(a)    # (tier S2b: a view is printed as its repr)
             if e.type in (Type.DICT, Type.DICT_LIST):
                 e = self.repr_of(e, a)                 # tier S2b: a dict (a list of dicts) is printed as its repr
             if e.type not in ir.SCALARS and e.type not in (Type.OBJ, Type.STR, *STR_LISTS, Type.STR_OPT):
@@ -2320,7 +2320,8 @@ class _Lowerer:
                                              "with no conversion)")
                 precision = int(m.group(1))
             listed = self.list_str(piece.value)
-            v = listed if listed is not None else self.value(piece.value)
+            v = listed if listed is not None else (self.view_repr(piece.value) if precision is None else None) \
+                or self.value(piece.value)
             if listed is not None and precision is None:
                 parts.append(ir.FormatField(Type.OBJ, v, None, repr=False))   # a list's str is its repr (tier S2a)
                 continue
@@ -2462,6 +2463,9 @@ class _Lowerer:
             listed = self.list_str(args[0])
             if listed is not None:
                 return listed                           # tier S2a: str(a) and repr(a) of a list are its repr
+            view = self.view_repr(args[0])
+            if view is not None:
+                return view                             # tier S2b: str() and repr() of a view are its repr
             x = self.value(args[0])
             if x.type in (Type.DICT, Type.DICT_LIST):
                 return self.repr_of(x, args[0])         # tier S2b: str(d) and repr(d) are the dict's repr
@@ -2480,6 +2484,8 @@ class _Lowerer:
             if len(args) != 1:
                 raise Skip(line, "chr() takes one argument")
             return ir.StrChr(Type.STR, self.str_int(self.value(args[0]), args[0], "the argument of chr()"))
+        if name == "len" and self.builtin("len") and len(args) == 1 and self.view_of(args[0]) is not None:
+            return ir.DictLen(Type.I64, self.value(self.view_of(args[0])[1]))      # tier S2b: a view's len is the dict's
         if name == "len" and self.builtin("len") and len(args) == 1 \
                 and not (isinstance(args[0], ast.Name) and args[0].id in self.arrays):
             x = self.value(args[0])
@@ -2633,7 +2639,7 @@ class _Lowerer:
 
     def kinds_of(self, e: ir.Expr, node: ast.AST | None) -> ir.DictKinds:
         """The key and value types of the DICT expression `e`."""
-        if isinstance(e, (ir.DictDisplay, ir.DictCopy, ir.SetDisplay)):
+        if isinstance(e, (ir.DictDisplay, ir.DictCopy, ir.SetDisplay, ir.SetFromList)):
             return e.kinds
         if isinstance(e, ir.SetOp):
             return self.kinds_of(e.left, node)
@@ -2738,6 +2744,51 @@ class _Lowerer:
     def dict_value_of(self, node: ast.expr, vt: Type | ir.DictKinds) -> ir.Expr:
         """The value `node` lowered for a dict whose values are `vt` (a display there takes the kinds of the values)."""
         return self.dict_value(self.dict_operand(node, vt if isinstance(vt, tuple) else None), vt, node)
+
+    def view_of(self, node: ast.expr) -> tuple[str, ast.expr] | None:
+        """`d.keys()` / `d.values()` / `d.items()` of a dict (not a set): (the view, the dict's node); else None."""
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and node.func.attr in ("keys", "values", "items") and not node.args and not node.keywords:
+            kinds = self.node_dict_kinds(node.func.value)
+            if kinds is not None and not ir.is_set(kinds):
+                return node.func.attr, node.func.value
+        return None
+
+    def view_repr(self, node: ast.expr) -> ir.Expr | None:
+        """The repr of a view (`dict_keys([...])`), made where it is used (print, str, repr, an f-string); else None."""
+        found = self.view_of(node)
+        return None if found is None else ir.DictViewStr(Type.STR, found[0], self.value(found[1]))
+
+    def view_contains(self, node: ast.Compare) -> ir.Expr | None:
+        """`x in d.keys()`, `x in d.values()`, `(k, v) in d.items()` (and `not in`), the left operand first; None when
+        the right operand is not a view."""
+        found = self.view_of(node.comparators[0])
+        if found is None:
+            return None
+        view, dnode = found
+        kinds = self.node_dict_kinds(dnode)
+        assert kinds is not None
+        negate = isinstance(node.ops[0], ast.NotIn)
+        line = node.lineno
+        if view == "keys":
+            key = self.key_value(node.left, kinds[0])
+            d = self.value(dnode)
+            return ir.DictContains(Type.BOOL, self.dict_key(key, kinds[0], node.left, insert=False), d, negate)
+        vt = kinds[1]
+        if vt is Type.F64 or (isinstance(vt, tuple) and ir.dict_has_float(vt)):
+            raise Skip(line, f"`{_src(node)}`: searching values of float tests each by identity first in CPython (a "
+                             "NaN equals itself there), which an AOT program does not have (aot/identity)")
+        if view == "values":
+            value = self.dict_value_of(node.left, vt)
+            return ir.DictHasValue(Type.BOOL, value, self.value(dnode), negate)
+        if not (isinstance(node.left, ast.Tuple) and len(node.left.elts) == 2
+                and not any(isinstance(e, ast.Starred) for e in node.left.elts)):
+            raise Skip(line, f"`{_src(node)}`: an AOT program searches the items of a dict for a pair `(k, v)` (a "
+                             "display or a tuple name)")
+        knode, vnode = node.left.elts
+        key = self.dict_key(self.key_value(knode, kinds[0]), kinds[0], knode, insert=False)
+        value = self.dict_value_of(vnode, vt)
+        return ir.DictHasItem(Type.BOOL, key, value, self.value(dnode), negate)
 
     def not_set(self, kinds: ir.DictKinds, node: ast.AST, what: str) -> None:
         """Refuse `what` of a set (what a dict has and a set has not, or what depends on the order of a set)."""
@@ -2904,8 +2955,8 @@ class _Lowerer:
                 raise Skip(line, "copy() takes no argument")
             return ir.DictCopy(Type.DICT, (kt, vt), d)
         if m in ("keys", "values", "items"):
-            raise Skip(line, f"`{_src(node)}` is the iterable of a `for` loop in an AOT program (the view objects "
-                             "arrive later)")
+            raise Skip(line, f"`{_src(node)}`: a view is used at once in an AOT program (the iterable of a `for` loop, "
+                             "len(), `in`, print / str / repr / an f-string); bound to a name or passed it is not yet")
         if m in ("update", "clear"):
             raise Skip(line, f"uses the result of `{_src(node)}`, which returns None")
         if m == "popitem":
@@ -4395,6 +4446,9 @@ class _Lowerer:
                 found = ir.UnaryOp(Type.BOOL, ir.UnaryOpKind.NOT, found)
             return found
         if self.info.aot and len(node.ops) == 1 and isinstance(node.ops[0], (ast.In, ast.NotIn)) \
+                and self.view_of(node.comparators[0]) is not None:
+            return self.view_contains(node)                                 # tier S2b: a view searched
+        if self.info.aot and len(node.ops) == 1 and isinstance(node.ops[0], (ast.In, ast.NotIn)) \
                 and self.is_dict_node(node.comparators[0]):
             # tier S2b: `k in d` / `k not in d` (the key first, as CPython evaluates `a in b`)
             known = self.node_dict_kinds(node.comparators[0])
@@ -4671,6 +4725,16 @@ class _Lowerer:
                 return ir.SetDisplay(Type.DICT, want or (Type.I64, Type.NONE), ())
             if len(args) != 1:
                 raise Skip(line, "set() takes one set in an AOT program")
+            if isinstance(args[0], (ast.List, ast.Tuple)) and isinstance(args[0].ctx, ast.Load):
+                # `set([a, b])`: the elements in order, as a display adds them (the list itself is not observable)
+                self.dict_want = want
+                return self.set_display(ast.copy_location(ast.Set(elts=list(args[0].elts)), args[0]))
+            if isinstance(args[0], ast.Name) and self.is_list_name(args[0].id) \
+                    and self.list_type(args[0].id) in (Type.STR_LIST, Type.I64_ARRAY):
+                et = Type.STR if self.list_type(args[0].id) is Type.STR_LIST else Type.I64
+                if want is not None and want != (et, Type.NONE):
+                    raise Skip(line, f"`{_src(node)}` is a set[{TYPE_NAME[et]}], but a {_dict_name(want)} is wanted here")
+                return ir.SetFromList(Type.DICT, (et, Type.NONE), args[0].id)
             d = self.value(args[0])
             if d.type is not Type.DICT or not ir.is_set(self.kinds_of(d, args[0])):
                 raise Skip(line, f"`{_src(node)}`: set() of something that is not a set is not in the AOT mode yet")

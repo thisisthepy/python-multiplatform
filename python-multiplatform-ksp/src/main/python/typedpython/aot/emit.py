@@ -998,7 +998,7 @@ class _Fn:
         return t
 
     def dict_kinds(self, e: ir.Expr) -> ir.DictKinds | None:
-        if isinstance(e, (ir.DictDisplay, ir.DictCopy, ir.SetDisplay)):
+        if isinstance(e, (ir.DictDisplay, ir.DictCopy, ir.SetDisplay, ir.SetFromList)):
             return e.kinds
         if isinstance(e, ir.SetOp):
             return self.dict_kinds(e.left)
@@ -1125,6 +1125,49 @@ class _Fn:
                 self.emit(f"tpa_dict_drop(&{into});")
 
     # -- tier S2b: sets, dicts whose values are unused (runtime tpa_set_*)
+
+    def ev_DictHasValue(self, e: ir.DictHasValue) -> str:
+        kinds = self.dict_kinds(e.dict)
+        if kinds is None:
+            return self.bad("aot/type", "in", "`in` of the values of a dict of unknown kinds")
+        vw = self.value_word(e.value, kinds[1])             # the value first, then the dict (CPython's order)
+        found = self.dict_of(e.dict, "the dict whose values are searched")
+        if found is None:
+            return "0"
+        t = self.tmp("int")
+        self.emit(f"{t} = {'!' if e.negate else ''}tpa_dict_has_value({found[0]}, {vw});")
+        return t
+
+    def ev_DictHasItem(self, e: ir.DictHasItem) -> str:
+        kinds = self.dict_kinds(e.dict)
+        if kinds is None:
+            return self.bad("aot/type", "in", "`in` of the items of a dict of unknown kinds")
+        kw, _ = self.key_word(e.key, kinds[0])              # the key, the value, then the dict
+        vw = self.value_word(e.value, kinds[1])
+        found = self.dict_of(e.dict, "the dict whose items are searched")
+        if found is None:
+            return "0"
+        t = self.tmp("int")
+        self.emit(f"{t} = {'!' if e.negate else ''}tpa_dict_has_item({found[0]}, {kw}, {vw});")
+        return t
+
+    def ev_DictViewStr(self, e: ir.DictViewStr) -> str:
+        found = self.dict_of(e.dict, "the dict of a view")
+        if found is None:
+            return "NULL"
+        which = {"keys": 0, "values": 1, "items": 2}[e.view]
+        return self.pstr(f"tpa_dict_view_repr({found[0]}, {which}, @)")
+
+    def ev_SetFromList(self, e: ir.SetFromList) -> str:
+        found = self.grow_list(e.array, "set()")
+        if found is None:
+            return "NULL"
+        lst, kind = found
+        t = self.dslot()
+        call = {"str": f"tpa_set_from_strs({lst}, &{t})", "int": f"tpa_set_from_ints({lst}, &{t})"}.get(
+            kind, f"tpa_set_from_i64s({lst}->d, {lst}->len, &{t})")
+        self.emit(f"if ({call}) {self.fail()}")
+        return t
 
     def ev_SetDisplay(self, e: ir.SetDisplay) -> str:
         words = [self.key_word(x, e.kinds[0]) for x in e.elements]      # the elements in order
@@ -3250,6 +3293,12 @@ class _Fn:
                 if parts is None:
                     return
                 args.append([("pystr", self.join(parts))])
+            elif isinstance(a, ir.DictViewStr):
+                found = self.dict_of(a.dict, "the dict of a view printed")   # its repr made when print writes it
+                if found is None:
+                    return
+                which = {"keys": 0, "values": 1, "items": 2}[a.view]
+                args.append([("repr", f"tpa_dict_view_repr({found[0]}, {which}, @)")])
             elif isinstance(a, ir.DictStr) and a.value.type is Type.DICT_LIST:
                 self.g.uses_str = self.g.uses_dict = True       # a list of dicts: evaluated here, its repr below
                 args.append([("repr", f"tpa_dict_list_repr({self.ev(a.value)}, @)")])

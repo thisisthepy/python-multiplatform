@@ -1051,6 +1051,79 @@ static TPA_UNUSED int tpa_dict_repr(const tpa_dict *d, tpa_str **out)
 }
 
 /* ------------------------------------------------------------------------------------------
+ * The view objects, where they are used at once (`len`, `in`, the repr): the dict's own table
+ * ------------------------------------------------------------------------------------------ */
+
+/* `v in d.values()` (dictvalues contains: some value equal to v, identity first; the front end refuses float
+ * values, for which the identity test decides a NaN). */
+static TPA_UNUSED int tpa_dict_has_value(const tpa_dict *d, tpa_dw v)
+{
+    int64_t i;
+    for (i = 0; i < d->nentries; i++) {
+        if (d->e[i].live && tpa_dict__value_eq(d->vk, d->e[i].value, v)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* `(k, v) in d.items()` (dictitems_contains: the key looked up, then its value compared with v). */
+static TPA_UNUSED int tpa_dict_has_item(const tpa_dict *d, tpa_dw k, tpa_dw v)
+{
+    int64_t ix = tpa_dict__lookup(d, k, tpa_dict__hash(d, k));
+    return ix >= 0 && tpa_dict__value_eq(d->vk, d->e[ix].value, v);
+}
+
+/* repr(d.keys()) "dict_keys(['a', 'b'])", repr(d.values()) "dict_values([1, 2])", repr(d.items())
+ * "dict_items([('a', 1), ('b', 2)])" (`which` 0, 1, 2: dictview_repr, the list of the view's items). */
+static TPA_UNUSED int tpa_dict_view_repr(const tpa_dict *d, int which, tpa_str **out)
+{
+    static const char *heads[3] = {"dict_keys([", "dict_values([", "dict_items(["};
+    int64_t i, k = 0, n = 6 * d->used + 2;
+    tpa_str **parts = (tpa_str **)calloc((size_t)n + 1, sizeof(tpa_str *));
+    int rc;
+    if (parts == NULL) {
+        return tpa_raise(TPA_MemoryError, "");
+    }
+    rc = tpa_str_from_ascii(heads[which], strlen(heads[which]), &parts[k++]);
+    for (i = 0; i < d->nentries && rc == 0; i++) {
+        const tpa_dict_entry *ep = &d->e[i];
+        if (!ep->live) {
+            continue;
+        }
+        if (k > 1) {
+            rc = tpa_str_from_ascii(", ", 2, &parts[k++]);
+        }
+        if (rc == 0 && which == 2) {
+            rc = tpa_str_from_ascii("(", 1, &parts[k++]);
+        }
+        if (rc == 0 && which != 1) {
+            rc = tpa_dict__repr_word(1, d->kk, ep->kbool, ep->key, &parts[k++]);
+        }
+        if (rc == 0 && which == 2) {
+            rc = tpa_str_from_ascii(", ", 2, &parts[k++]);
+        }
+        if (rc == 0 && which != 0) {
+            rc = tpa_dict__repr_word(0, d->vk, 0, ep->value, &parts[k++]);
+        }
+        if (rc == 0 && which == 2) {
+            rc = tpa_str_from_ascii(")", 1, &parts[k++]);
+        }
+    }
+    if (rc == 0) {
+        rc = tpa_str_from_ascii("])", 2, &parts[k++]);
+    }
+    if (rc == 0) {
+        rc = tpa_str_join(parts, (size_t)k, out);
+    }
+    for (i = 0; i < k; i++) {
+        tpa_str_release(parts[i]);
+    }
+    free(parts);
+    return rc;
+}
+
+/* ------------------------------------------------------------------------------------------
  * Sets (`set[T]`): a dict whose values are unused (value kind TPA_DV_BOOL, each 1). Only what does not depend on the
  * order of a set is in the AOT mode (membership, size, equality, subsets, the operators that make a set): a loop over
  * one, its repr and pop() follow CPython's set table, which this table is not (the front end refuses them,
@@ -1158,6 +1231,67 @@ static TPA_UNUSED int tpa_set_disjoint(const tpa_dict *a, const tpa_dict *b)
         }
     }
     return 1;
+}
+
+/* set(xs) of a list[str] / of a raw list[int] (its `d` and `len`) / of a big-capable list[int]: each item added in
+ * the list's order (set_update_internal over the list's iterator; nothing runs between two items). */
+static TPA_UNUSED int tpa_set_from_strs(const tpa_str_list *l, tpa_dict **out)
+{
+    tpa_dict *r = NULL;
+    int64_t i;
+    if (tpa_dict_new(TPA_DK_STR, TPA_DV_BOOL, 0, &r)) {
+        return -1;
+    }
+    for (i = 0; i < l->len; i++) {
+        if (tpa_set_add(r, (tpa_dw)(uintptr_t)l->d[i], 0)) {
+            tpa_dict_release(r);
+            return -1;
+        }
+    }
+    *out = r;
+    return 0;
+}
+
+static TPA_UNUSED int tpa_set_from_i64s(const int64_t *d, int64_t n, tpa_dict **out)
+{
+    tpa_dict *r = NULL;
+    int64_t i;
+    if (tpa_dict_new(TPA_DK_INT, TPA_DV_BOOL, 0, &r)) {
+        return -1;
+    }
+    for (i = 0; i < n; i++) {
+        tpa_int x = 0;
+        int rc = tpa_int_from_i64(d[i], &x) || tpa_set_add(r, (tpa_dw)x, 0);
+        tpa_int_release(x);
+        if (rc) {
+            tpa_dict_release(r);
+            return -1;
+        }
+    }
+    *out = r;
+    return 0;
+}
+
+static TPA_UNUSED int tpa_set_from_ints(const tpa_int_list *l, tpa_dict **out)
+{
+    tpa_dict *r = NULL;
+    int64_t i;
+    if (tpa_dict_new(TPA_DK_INT, TPA_DV_BOOL, 0, &r)) {
+        return -1;
+    }
+    for (i = 0; i < l->len; i++) {
+        tpa_int x = tpa_int_small(0);
+        int rc;
+        tpa_int_list_load(l, i, &x);
+        rc = tpa_set_add(r, (tpa_dw)x, 0);
+        tpa_int_release(x);
+        if (rc) {
+            tpa_dict_release(r);
+            return -1;
+        }
+    }
+    *out = r;
+    return 0;
 }
 
 /* ------------------------------------------------------------------------------------------

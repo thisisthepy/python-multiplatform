@@ -642,6 +642,39 @@ def test_sets_without_their_order(tmp_path: Path):
     _compare(tmp_path, SETS, [["a,b,a", "10"], ["x", "20"], ["a,b,c,d", "5"]])
 
 
+VIEWS = """
+import sys
+
+
+def main() -> None:
+    d = {"a": 1, "b": 2}
+    for w in sys.argv[1].split(","):
+        d[w] = len(w)
+    print(len(d.keys()), len(d.values()), len(d.items()))
+    print("a" in d.keys(), "zz" not in d.keys(), 2 in d.values(), 99 in d.values(), ("a", 1) in d.items(),
+          ("a", 2) in d.items())
+    print(d.keys(), d.values(), d.items())
+    print(str(d.keys()), repr(d.items()), f"{d.values()}")
+    names = {1: "x", 2: None}
+    print(names.values(), None in names.values(), names.items())
+    e: dict[int, int] = {}
+    print(e.keys(), e.values(), e.items(), len(e.items()))
+    words = sys.argv[1].split(",")
+    s = set(words)
+    nums = set([3, 1, 3])
+    print(len(s), "a" in s, len(nums), 3 in nums, s == set(words))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_views_outside_a_loop_and_a_set_of_a_list(tmp_path: Path):
+    """d.keys() / d.values() / d.items() measured, searched and printed (`dict_keys(['a'])`); set(xs) of a list."""
+    _compare(tmp_path, VIEWS, [["c,a,dd"], ["b"]])
+
+
 WORDFREQ = Path(__file__).resolve().parents[4] / "benchmarks" / "typedpython" / "py" / "wordfreq.py"
 
 
@@ -691,6 +724,10 @@ MAIN = '\n\ndef main() -> None:\n    f()\n\n\nif __name__ == "__main__":\n    ma
     ("    s = {3, 1, 2}\n    print(s.pop())\n", "aot/set-order"),
     ("    s = {3, 1, 2}\n    s.add(True)\n    print(len(s))\n", "a bool key"),
     ("    s = {3, 1, 2}\n    print(s[0])\n", "not subscriptable"),
+    # a view is used at once (len, in, print); a search of float values tests identity first in CPython
+    ("    d = {1: 2}\n    k = d.keys()\n    print(k)\n", "a view is used at once"),
+    ("    d = {1: 2.5}\n    print(2.5 in d.values())\n", "aot/identity"),
+    ("    xs = [1.5]\n    print(len(set(xs)))\n", "is used other than"),
 ])
 def test_what_a_dict_cannot_hold_yet_is_refused_with_the_reason(tmp_path: Path, body: str, reason: str):
     found = _rules(tmp_path, "def f() -> None:\n" + body + MAIN)

@@ -680,10 +680,14 @@ class _Checker:
                 self.expr(a.args[0])
                 return
             elif n == "set":
-                if c.keywords or len(c.args) > 1 or (c.args and not isinstance(c.args[0], ast.Name)):
-                    self.rep.error(c, "aot/builtin", n, "`set()` is only supported as `set()` and `set(s)` of a set in "
-                                   "the AOT mode")
-                return                      # tier S2b: an empty set, a copy (the front end checks s is a set)
+                if c.keywords or len(c.args) > 1 or (c.args and not isinstance(c.args[0], (ast.Name, ast.List))):
+                    self.rep.error(c, "aot/builtin", n, "`set()` is only supported as `set()`, `set(s)` of a set or a "
+                                   "list and `set([a, b])` in the AOT mode")
+                    return
+                if c.args and isinstance(c.args[0], ast.List):
+                    for x in c.args[0].elts:
+                        self.expr(x)
+                return                      # tier S2b: an empty set, a copy (the front end checks the argument)
             elif n == "dict":
                 if not (len(c.args) == 1 and isinstance(c.args[0], ast.Name) and not c.keywords):
                     self.rep.error(c, "aot/builtin", n, "`dict()` is only supported as `dict(d)` of a dict in the AOT "

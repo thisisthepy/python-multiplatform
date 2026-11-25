@@ -502,8 +502,11 @@ values are unused, as a local, a parameter, a return and a field; displays, `set
 `remove` (`KeyError(x)`), `clear`, `copy`, `update`, `in`, `len`, truth, `==`, the subset tests (`<=`, `<`, `>=`, `>`,
 `issubset`, `issuperset`, `isdisjoint`) and `|`, `&`, `-`, `^` (and the one-set `union`, `intersection`, `difference`,
 `symmetric_difference`). What depends on the order of a set (a loop over one, its repr, `pop()`) follows CPython's set
-table, which this one is not: refused as aot/set-order. Still to come in S2b: the view objects outside a `for` loop; a
-dict across the library boundary; `set(xs)` of a list.
+table, which this one is not: refused as aot/set-order. The view objects follow where they are used at once:
+`len(d.keys())`, `x in d.keys()`, `v in d.values()`, `(k, v) in d.items()` (CPython's dictitems_contains; float values
+refused, aot/identity) and the repr `dict_keys([...])` / `dict_values([...])` / `dict_items([...])`, made when print
+writes it; a view bound to a name or passed is not yet. `set(xs)` of a list[str] or list[int] name and `set([a, b])`
+follow too. Still to come in S2b: a dict across the library boundary; a view as a value.
 
 **S2c.** List, dict and set comprehensions (a hidden local per comprehension variable, Python 3 scoping, the
 accumulator built in place), `enumerate`, `zip` (shortest), `reversed`, `range` objects as iterables, in `for` loops

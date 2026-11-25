@@ -377,7 +377,8 @@ from .ir import ForObjList, ObjListDisplay, ObjListIndex, ObjListLen, ObjListSto
 from .ir import (
     DictClear, DictCompare, DictContains, DictCopy, DictDelete, DictDisplay, DictGet, DictLen, DictPop, DictSetDefault,
     DictPopItem, DictStore, DictStr, DictUpdate, ForDict, DictListDisplay, DictListIndex, DictListLen, DictListStore,
-    ForDictList, KeyTuple, SetAdd, SetCompare, SetDisplay, SetOp, SetRemove,
+    ForDictList, KeyTuple, SetAdd, SetCompare, SetDisplay, SetOp, SetRemove, DictHasValue, DictHasItem, DictViewStr,
+    SetFromList,
 )
 
 DA = "verify/definite-assignment"
@@ -726,7 +727,7 @@ class _Checker:
     def dict_kinds(self, e: object) -> ir.DictKinds | None:
         """The key and value types of the DICT expression `e` (already checked), or None after an error."""
         cls = type(e)
-        if cls in (DictDisplay, DictCopy, SetDisplay):
+        if cls in (DictDisplay, DictCopy, SetDisplay, SetFromList):
             return e.kinds if self.good_kinds(e.kinds) else None
         if cls is SetOp:
             return self.dict_kinds(e.left)
@@ -787,6 +788,54 @@ class _Checker:
         """`what` is a dict operation a set does not have (or one that depends on the order of a set)."""
         if kinds is not None and ir.is_set(kinds):
             self.error(TYPE, f"{what} of a set")
+
+    def view_values(self, kinds: ir.DictKinds | None, what: str) -> None:
+        if kinds is not None and (kinds[1] is Type.F64 or (isinstance(kinds[1], tuple)
+                                                           and ir.dict_has_float(kinds[1]))):
+            self.error(TYPE, f"{what}: a search of float values (CPython tests identity first)")
+
+    def e_DictHasValue(self, e: DictHasValue, state: _State) -> ir.Expr:
+        value = self.expr(e.value, state)               # (the value first, as CPython evaluates `a in b`)
+        d, kinds = self.dict_operand(e.dict, state, "the dict of values() searched")
+        self.no_set(kinds, "DictHasValue")
+        self.view_values(kinds, "DictHasValue")
+        if kinds is not None and not isinstance(kinds[1], tuple):
+            self.slot(value, kinds[1], "the value searched in values()")
+        if type(e.negate) is not bool:
+            self.error(STRUCTURE, "DictHasValue.negate is a bool")
+        self.result(e, Type.BOOL)
+        return dataclasses.replace(e, value=value, dict=d)
+
+    def e_DictHasItem(self, e: DictHasItem, state: _State) -> ir.Expr:
+        key = self.expr(e.key, state)
+        value = self.expr(e.value, state)
+        d, kinds = self.dict_operand(e.dict, state, "the dict of items() searched")
+        self.no_set(kinds, "DictHasItem")
+        self.view_values(kinds, "DictHasItem")
+        if kinds is not None:
+            self.key_fits(key, kinds[0], "the key searched in items()", insert=False)
+            if not isinstance(kinds[1], tuple):
+                self.slot(value, kinds[1], "the value searched in items()")
+        if type(e.negate) is not bool:
+            self.error(STRUCTURE, "DictHasItem.negate is a bool")
+        self.result(e, Type.BOOL)
+        return dataclasses.replace(e, key=key, value=value, dict=d)
+
+    def e_DictViewStr(self, e: DictViewStr, state: _State) -> ir.Expr:
+        d, kinds = self.dict_operand(e.dict, state, "the dict of a view printed")
+        self.no_set(kinds, "DictViewStr")
+        if e.view not in ("keys", "values", "items"):
+            self.error(STRUCTURE, f"DictViewStr of {e.view!r}")
+        self.result(e, Type.STR)
+        return dataclasses.replace(e, dict=d)
+
+    def e_SetFromList(self, e: SetFromList, state: _State) -> ir.Expr:
+        at = self.list_of(e.array, "set()", state)
+        want = {Type.STR_LIST: Type.STR, Type.I64_ARRAY: Type.I64}.get(at)  # type: ignore[arg-type]
+        if want is None or e.kinds != (want, Type.NONE):
+            self.error(TYPE, f"SetFromList of '{e.array}' ({getattr(at, 'value', at)}) as {e.kinds!r}")
+        self.result(e, Type.DICT)
+        return e
 
     def e_SetDisplay(self, e: SetDisplay, state: _State) -> ir.Expr:
         if not isinstance(e.elements, tuple):
