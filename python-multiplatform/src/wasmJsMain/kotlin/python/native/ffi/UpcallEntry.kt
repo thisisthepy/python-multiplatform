@@ -261,7 +261,34 @@ object UpcallEntry {
      * Resolved once rather than per `PyMethodDef` because `Table.set` appends an entry: calling it
      * five times would grow the table by five for one function.
      */
-    private val invokeFp: Int by lazy { registerUpcall("pmp_invoke") }
+    private val invokeFp: Int by lazy { entryIndex(registerUpcall("pmp_invoke")) }
+
+    /**
+     * What `ml_meth` holds: [kotlinEntry] itself, or, on a free-threaded runtime built with
+     * `_pm_upcall` (#175 step 2), that module's dispatcher with [kotlinEntry] as its target.
+     *
+     * The Kotlin entry's index comes from `Table.grow` on the main thread, so it exists only in the
+     * main thread's table: a Python thread calling it would trap in its own Worker, and Kotlin/Wasm
+     * runs only on the main thread anyway. The dispatcher is part of `python.wasm`'s own element
+     * segment, so its index is the same in every Worker; on the main thread it calls
+     * [kotlinEntry] in place, elsewhere it detaches, runs the call on the main thread and carries
+     * a raised exception back. [invokeMethod] is unchanged: it always runs on the main thread.
+     */
+    private fun entryIndex(kotlinEntry: Int): Int {
+        val dispatcher = python.native.ffi.bindings.pmpUpcallDispatchIndex()
+        if (dispatcher <= 0) return kotlinEntry
+        python.native.ffi.bindings.pmpUpcallSetTarget(kotlinEntry)
+        routed = true
+        return dispatcher
+    }
+
+    private var routed = false
+
+    /**
+     * Whether upcalls go through `_pm_upcall`'s dispatcher, so Python threads may make them (#175).
+     * `false` on a runtime without the module, where only the main thread may.
+     */
+    val routesThreadUpcalls: Boolean get() = invokeFp.let { routed }
 
     /**
      * The `PyMethodDef *` every callable [bind] hands out points at, built once.
