@@ -177,9 +177,9 @@ Kotlin-side memory import).
 ## Open: the Kotlin side (later steps of #175, not implemented)
 
 - Kotlin/Wasm imports `intrinsics.memory` as non-shared (`min=0, max=none`); a shared
-  memory cannot satisfy that import, so the library cannot instantiate this `python.wasm`
-  until the import is marked shared with a maximum. That would revive the binary patch
-  [`wasm-design.md`](wasm-design.md) calls obsolete.
+  memory cannot satisfy that import. The owner chose a post-link rewrite of that import
+  (2026-11-21, SPEC T-7, [`wasm-design.md`](wasm-design.md)); it is implemented and applies
+  once this build is the staged runtime (#175 step 2).
 - Kotlin calls CPython on the JS thread that loaded the module (`noInitialRun`, no `main`),
   so `-sPROXY_TO_PTHREAD` does not apply there; a first `Thread.start()` from Kotlin relies on
   the pre-created worker pool.

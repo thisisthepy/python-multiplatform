@@ -886,7 +886,7 @@ class PythonBindingsPlugin : Plugin<Project> {
             val syncedDir = project.rootProject.layout.buildDirectory.dir("wasm/packages/$modulePrefix/kotlin")
             val log = project.logger
             doFirst {
-                patchWasmOutputForCPython(syncedDir.get().asFile, modulePrefix, log)
+                patchWasmOutputForCPython(syncedDir.get().asFile, modulePrefix, log, runtimeDir = destination.get().asFile)
             }
         }
     }
