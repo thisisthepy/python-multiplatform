@@ -1418,6 +1418,21 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   option, is deleting `WasmSharedMemoryImport` and its two calls. `Status: draft` (unit tests on
   hand-assembled modules, `GP/WasmSharedMemoryImportTest.kt`; no runtime with a shared memory is staged yet,
   so the rewrite has not run on a real Kotlin link: that is #175 step 2).
+- **T-8** (#175) A browser page that is not cross-origin isolated fails at start-up with an explanation,
+  when the staged runtime has a shared memory. Owner decision 2026-10-04 on #175: "The runtime checks
+  crossOriginIsolated at start and fails with an explanation if it is false." A shared memory needs
+  `SharedArrayBuffer`, which a browser grants only to a cross-origin isolated page (COOP `same-origin`
+  with COEP `require-corp` or `credentialless`); without the check the Emscripten glue fails later with an
+  error that does not name the cause. The staging that writes `cpython-config.mjs` records whether the
+  runtime's `python.wasm` has a shared memory (`SHARED_MEMORY`, read from its memory import with
+  `WasmSharedMemoryImport.hasSharedMemory`). Before the Emscripten factory runs, `cpython.mjs` throws when
+  the host is a browser, `SHARED_MEMORY` is true and `globalThis.crossOriginIsolated` is not `true`; the
+  message names `crossOriginIsolated`, the two headers and their values, and the service-worker fallback
+  for hosts that cannot set headers. Node is never checked (it has no such restriction), and a runtime
+  without a shared memory (the GIL build) is never checked, so a page that works today keeps working.
+  `Status: draft` (`WasmCrossOriginIsolationTest` covers the decision and that `SHARED_MEMORY` matches the
+  staged runtime; no browser with a shared-memory runtime has run it yet). Generating the headers and the
+  service-worker fallback is toolchain's part of the same decision.
 
 ## 8. Measurement
 
