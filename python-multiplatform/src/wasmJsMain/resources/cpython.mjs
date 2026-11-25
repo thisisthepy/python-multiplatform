@@ -11,7 +11,7 @@
 // with a missing named export fails the whole import, which would take out every call rather than
 // the one that is actually absent.
 
-import { PYTHON_DIR, STDLIB_ZIP_URL } from "./cpython-config.mjs";
+import { PYTHON_DIR, STDLIB_ZIP_URL, SHARED_MEMORY } from "./cpython-config.mjs";
 
 // Two hosts, and the difference is the *filesystem*, not the call path. Under Node the stdlib is
 // reached through NODEFS against the real build directory; in a browser there is no such thing, so
@@ -190,6 +190,26 @@ function browserSettings() {
         },
     };
 }
+
+// SPEC T-8: a runtime with a shared memory (the free-threaded pthreads build) needs
+// SharedArrayBuffer, which a browser grants only to a cross-origin isolated page. Without this check
+// the Emscripten glue fails later with an error that does not name the cause, so the start-up stops
+// here with one that does. Node has no such restriction, and a runtime without a shared memory (the
+// GIL build) never needs it, so neither is checked. Exported for WasmCrossOriginIsolationTest, which
+// runs under Node and so can reach the browser cases only through this function.
+export function crossOriginIsolationError(isNode, sharedMemory, isolated) {
+    if (isNode || !sharedMemory || isolated === true) return null;
+    return "python-multiplatform: this page is not cross-origin isolated (crossOriginIsolated is " +
+        String(isolated) + "), and the free-threaded CPython runtime needs a shared memory, which " +
+        "the browser grants only to an isolated page. Serve the page with the headers " +
+        "Cross-Origin-Opener-Policy: same-origin and Cross-Origin-Embedder-Policy: require-corp " +
+        "(or credentialless). A host that cannot set headers can use a service worker that adds them " +
+        "(the coi-serviceworker approach). Embedding in a third-party iframe, popup-based sign-in or " +
+        "payment, and cross-origin resources without CORP or CORS headers are limited by isolation.";
+}
+
+const coiError = crossOriginIsolationError(IS_NODE, SHARED_MEMORY, globalThis.crossOriginIsolated);
+if (coiError !== null) throw new Error(coiError);
 
 const M = await EmscriptenModule(IS_NODE ? await nodeSettings() : browserSettings());
 
