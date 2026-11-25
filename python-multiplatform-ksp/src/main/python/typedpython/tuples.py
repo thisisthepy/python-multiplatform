@@ -30,6 +30,8 @@ What is rewritten, with CPython's meaning kept:
 * `for v in t` over a tuple whose elements share one kind: a hidden index over `range(len(t))` and `v` the element.
 * `return t` in a function declared `-> tuple[...]`: the elements (`return t__0, t__1`); `return f(...)` of such a
   call: the elements through temporaries.
+* tier S2b: `t = x.popitem()` is `t__0, t__1 = x.popitem()`, and `return x.popitem()` goes through temporaries as a
+  call does; the lowering checks that `x` is a dict whose key and value types are the elements' (`ir.DictPopItem`).
 * a parameter `p: tuple[int, str]` of a module-level function is one parameter per element, and every call of that
   function passes a tuple name or a tuple display as the elements.
 
@@ -90,6 +92,21 @@ def shape_of(kind: str | None) -> tuple[str, ...] | None:
             return None
         out.append(i.id)
     return tuple(out) or None
+
+
+def _dict_key_shape(kind: str | None) -> tuple[str, ...] | None:
+    """Tier S2b: `dict[tuple[int, str], V]` -> ("int", "str"); None for anything else."""
+    if not kind:
+        return None
+    try:
+        e = ast.parse(kind.replace("typing.", ""), mode="eval").body
+    except SyntaxError:
+        return None
+    if not (isinstance(e, ast.Subscript) and isinstance(e.value, ast.Name) and e.value.id in ("dict", "Dict")
+            and isinstance(e.slice, ast.Tuple) and len(e.slice.elts) == 2):
+        return None
+    shape = shape_of(ast.unparse(e.slice.elts[0]))
+    return shape if shape is not None and "float" not in shape else None
 
 
 def annotation_shape(ann: ast.expr | None) -> tuple[str, ...] | None:
@@ -266,6 +283,12 @@ def _mentions_tuples(fn: ast.FunctionDef, fkinds: dict[str, list[tuple[int, str]
         or any(isinstance(n, ast.Tuple) and isinstance(n.ctx, ast.Load) for n in ast.walk(fn))
 
 
+def _popitem(e: ast.expr) -> bool:
+    """`x.popitem()` (tier S2b: a dict's, which the lowering checks)."""
+    return isinstance(e, ast.Call) and isinstance(e.func, ast.Attribute) and e.func.attr == "popitem" \
+        and not e.args and not e.keywords
+
+
 def _name(id_: str, ctx: ast.expr_context | None = None) -> ast.Name:
     return ast.Name(id=id_, ctx=ctx or ast.Load())
 
@@ -368,7 +391,31 @@ class _Function:
 
     # -- which names are tuples
 
+    def loop_keys(self) -> None:
+        """Tier S2b: the target of a loop over a dict with tuple keys (`for k in d`, `for k in d.keys()`, `for k, v in
+        d.items()`) is a tuple of the key's shape: Pyrefly gives a loop target no type, so it is typed here from the
+        dict's (a local's) type."""
+        for n in ast.walk(self.fn):
+            if not isinstance(n, ast.For):
+                continue
+            it, view = n.iter, "keys"
+            if isinstance(it, ast.Call) and isinstance(it.func, ast.Attribute) and it.func.attr in ("keys", "items") \
+                    and not it.args:
+                it, view = it.func.value, it.func.attr
+            if not isinstance(it, ast.Name):
+                continue
+            shapes = {_dict_key_shape(k) for _, k in self.kinds.get(it.id, [])}
+            if len(shapes) != 1 or None in shapes:
+                continue
+            [shape] = shapes
+            target = n.target
+            if view == "items":
+                target = target.elts[0] if isinstance(target, ast.Tuple) and len(target.elts) == 2 else None
+            if isinstance(target, ast.Name) and not self.kinds.get(target.id):
+                self.kinds[target.id] = [(n.lineno, f"tuple[{', '.join(shape)}]")]
+
     def find(self) -> None:
+        self.loop_keys()
         if self.split_params:
             for a in self.fn.args.args:
                 s = annotation_shape(a.annotation)
@@ -607,6 +654,11 @@ class _Function:
             if isinstance(s, ast.Assign) and isinstance(target, (ast.Tuple, ast.List)) and value is not None \
                     and all(isinstance(e, ast.Name) for e in target.elts):
                 names = [e.id for e in target.elts]                         # type: ignore[union-attr]
+                if any(n in self.tuples for n in names) and _popitem(value):
+                    # tier S2b: `k, v = d.popitem()` of a dict with tuple keys: `(k__0, k__1), v = d.popitem()`
+                    s.targets = [self.bind_elements(target)]
+                    s.value = self.expr(value)
+                    return [s]
                 if any(n in self.tuples for n in names):
                     raise _Problem(line, f"`{ast.unparse(s)}` unpacks into a tuple name (a tuple of tuples is not in "
                                          "this step)")
@@ -648,7 +700,7 @@ class _Function:
                     raise _Problem(line, f"`return {ast.unparse(s.value)}` returns a `tuple[{', '.join(got_shape or ())}]` "
                                          f"from a function declared `tuple[{', '.join(shape)}]`")
                 return [ast.Return(value=ast.Tuple(elts=_Exprs(self).tuple_elements(s.value), ctx=ast.Load()))]
-            if shape is not None and self.tuple_call(s.value) is not None:
+            if shape is not None and (self.tuple_call(s.value) is not None or _popitem(s.value)):
                 call = self.expr(s.value)
                 temps = [self.temp(k, line) for k in shape]
                 return [ast.Assign(targets=[ast.Tuple(elts=[_name(t, ast.Store()) for t in temps], ctx=ast.Store())],
@@ -673,10 +725,22 @@ class _Function:
             return [s]
         if isinstance(s, ast.For):
             s.iter = self.expr(s.iter)
+            s.target = self.bind_elements(s.target)     # (tier S2b: a tuple key of a dict, bound element by element)
             s.body = self.block(s.body)
             s.orelse = self.block(s.orelse)
             return [s]
         return [self.expr_stmt(s)]
+
+    def bind_elements(self, target: ast.expr) -> ast.expr:
+        """A binding target with each tuple name replaced by a tuple of its element locals (`k` -> `(k__0, k__1)`):
+        a tuple read out of a dict (a loop over its keys or items, `popitem`) is bound element by element."""
+        if isinstance(target, ast.Name) and target.id in self.tuples:
+            return ast.copy_location(ast.Tuple(elts=[_name(self.elem(target.id, i), ast.Store())
+                                                     for i in range(len(self.tuples[target.id]))], ctx=ast.Store()),
+                                     target)
+        if isinstance(target, (ast.Tuple, ast.List)):
+            target.elts = [self.bind_elements(e) for e in target.elts]
+        return target
 
     def expr_stmt(self, s: ast.stmt) -> ast.stmt:
         return _Exprs(self).visit(s)
@@ -718,6 +782,11 @@ class _Function:
         if got is not None:
             out, vals = got
             return out + self.assign_all(targets, vals, line, kinds=shape, annotated=annotated)
+        if _popitem(value) and len(shape) == 2:
+            # tier S2b: `t = d.popitem()` is `t__0, t__1 = d.popitem()` (the lowering checks that the receiver is a
+            # dict and that its key and value types are the elements')
+            return [ast.Assign(targets=[ast.Tuple(elts=[_name(t, ast.Store()) for t in targets], ctx=ast.Store())],
+                               value=self.expr(value))]
         called = self.tuple_call(value)
         if called is not None:
             if called != shape:
@@ -1250,6 +1319,12 @@ class _Exprs(ast.NodeTransformer):
                                             f"constant inside its {len(shape)} elements in this step")
             return ast.copy_location(ast.Subscript(value=_name(self.f.elem(inner.value.id, v % len(shape))),
                                                    slice=self.visit(inner.slice), ctx=ast.Load()), node)
+        key = self.tuple_source(node.slice)
+        if key is not None and self.tuple_source(node.value) is None:
+            # tier S2b: `d[t]` of a dict with tuple keys is `d[t__0, t__1]` (a tuple has no identity here)
+            node.value = self.visit(node.value)
+            node.slice = ast.copy_location(ast.Tuple(elts=key[0], ctx=ast.Load()), node.slice)
+            return node
         src = self.tuple_source(node.value) if isinstance(node.ctx, ast.Load) else None
         if src is not None:
             elements, shape = src
@@ -1324,6 +1399,15 @@ class _Exprs(ast.NodeTransformer):
         if isinstance(f, ast.Name) and f.id in self.f.inits and f.id not in self.f.locals \
                 and len(node.args) == len(self.f.inits[f.id]) and not node.keywords:
             return self.split_args(node, f.id, self.f.inits[f.id], [None] * len(node.args))
+        if isinstance(f, ast.Attribute) and f.attr in ("get", "pop", "setdefault") and f.attr not in self.f.methods \
+                and node.args and self.tuple_source(node.args[0]) is not None:
+            # tier S2b: a tuple name as the key of a dict method is its display
+            key = self.tuple_source(node.args[0])
+            assert key is not None
+            node.func = self.visit(f)
+            node.args = [ast.copy_location(ast.Tuple(elts=key[0], ctx=ast.Load()), node.args[0]),
+                         *[self.visit(a) for a in node.args[1:]]]
+            return node
         if isinstance(f, ast.Attribute) and f.attr in self.f.methods and len(node.args) == len(self.f.methods[f.attr]) \
                 and not node.keywords:
             node.func = self.visit(f)
@@ -1433,6 +1517,12 @@ class _Exprs(ast.NodeTransformer):
             return self.list_compare(node)
         if isinstance(op, (ast.In, ast.NotIn)):
             els = self.tuple_elements(right)
+            key = self.tuple_source(left)
+            if els is None and key is not None:
+                # tier S2b: `t in d` of a dict with tuple keys is `(t__0, t__1) in d`
+                node.left = ast.copy_location(ast.Tuple(elts=key[0], ctx=ast.Load()), left)
+                node.comparators = [self.visit(right)]
+                return node
             if els is None:
                 return self.generic_visit(node)
             kinds = self.kinds(right)

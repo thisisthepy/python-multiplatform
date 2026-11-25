@@ -4,7 +4,7 @@ import java.io.File
 import kotlin.system.exitProcess
 
 /**
- * The AOT library fixture as one executable (issue #456): the same 25 scenarios [AotLibraryCallTest] runs under
+ * The AOT library fixture as one executable (issue #456): the same 31 scenarios [AotLibraryCallTest] runs under
  * JUnit, called directly so they can run inside a GraalVM native image without JUnit or reflection.
  *
  * When the `aot.<prefix>.description` system properties are unset (the native binary started on its own without
@@ -14,6 +14,7 @@ fun main() {
     besideTheExecutable("aot.nbody.description", "libs/nbody/nbody.json")
     besideTheExecutable("aot.errors.description", "libs/errors/errors.json")
     besideTheExecutable("aot.bigints.description", "libs/bigints/bigints.json")
+    besideTheExecutable("aot.dicts.description", "libs/dicts/dicts.json")
 
     val scenarios: List<Pair<String, AotLibraryCallTest.() -> Unit>> = listOf(
         "nbodyEnergiesAndPositionsEqualCPythonBitForBit" to { nbodyEnergiesAndPositionsEqualCPythonBitForBit() },
@@ -58,6 +59,16 @@ fun main() {
         "oneIntListWrittenByOneThreadAndReadByAnotherStaysMemorySafe" to {
             oneIntListWrittenByOneThreadAndReadByAnotherStaysMemorySafe()
         },
+        "aDictTheLibraryReturnsHasTheItemsInCPythonsOrder" to { aDictTheLibraryReturnsHasTheItemsInCPythonsOrder() },
+        "aDictMadeInKotlinIsReadByTheLibraryAndAMissingKeyIsAKeyError" to {
+            aDictMadeInKotlinIsReadByTheLibraryAndAMissingKeyIsAKeyError()
+        },
+        "floatValuesKeepTheirBitsAndBoolValuesRoundTrip" to { floatValuesKeepTheirBitsAndBoolValuesRoundTrip() },
+        "aValueOutsideSixtyFourBitsIsTheDocumentedOverflowError" to { aValueOutsideSixtyFourBitsIsTheDocumentedOverflowError() },
+        "oneDictIsReadByCallsOnSeveralThreadsAtOnce" to { oneDictIsReadByCallsOnSeveralThreadsAtOnce() },
+        "aDictIsClosedOnceAndUseAfterCloseIsAnIllegalStateException" to {
+            aDictIsClosedOnceAndUseAfterCloseIsAnIllegalStateException()
+        },
         "noClassOfTheCPythonEmbeddingLibraryIsOnTheClasspath" to { noClassOfTheCPythonEmbeddingLibraryIsOnTheClasspath() },
         "noLibpythonImageIsLoadedInTheProcessLinuxProcMapsMacosVmmapOrLsof" to {
             noLibpythonImageIsLoadedInTheProcessLinuxProcMapsMacosVmmapOrLsof()
@@ -73,6 +84,7 @@ fun main() {
             val test = AotLibraryCallTest()
             test.load()
             test.loadBigints()
+            test.loadDicts()
             test.scenario()
             println("PASS $name")
         } catch (t: Throwable) {

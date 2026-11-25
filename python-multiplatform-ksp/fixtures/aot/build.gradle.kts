@@ -17,7 +17,7 @@ plugins {
 // TypedPython AOT libraries called from Kotlin with no CPython (SPEC N-17, #458)
 // ---------------------------------------------------------------------------------------------
 //
-// Task graph, per library `<p>` (nbody, errors, bigints):
+// Task graph, per library `<p>` (nbody, errors, bigints, dicts):
 //
 //   describe<P>Library   python describe_library.py: the front end and the generator only, writes <p>.json. No C
 //        |               compiler runs. Needs the host Python (pyrefly).
@@ -67,6 +67,12 @@ val aotLibraries = listOf(
         objectName = "Bigints",
         source = file("src/desktopTest/aot/bigints.py"),
         exports = "fill_factorials,make,total,total_of_factorials,raw_sum",
+    ),
+    AotLibrarySpec(
+        prefix = "dicts",
+        objectName = "Dicts",
+        source = file("src/desktopTest/aot/dicts.py"),
+        exports = "counts,total,lookup,scaled,evens,same,big",
     ),
 )
 
@@ -220,7 +226,7 @@ val aotNativeDir = layout.buildDirectory.dir("native/aot-fixture")
 
 tasks.register<JavaExec>("aotNativeJvm") {
     group = "verification"
-    description = "Runs AotNativeImageMain on JDK 25: the 25 scenarios outside JUnit, before a native image is built from it."
+    description = "Runs AotNativeImageMain on JDK 25: the 31 scenarios outside JUnit, before a native image is built from it."
     onlyIf("AOT library: ${skipReason ?: "enabled"}") { skipReason == null }
     dependsOn(
         aotTestCompilation.compileTaskProvider,
@@ -279,7 +285,7 @@ val aotNativeCompile by tasks.registering(Exec::class) {
 
 tasks.register<Exec>("aotNativeRun") {
     group = "verification"
-    description = "Runs the AOT native image on its own (no JAVA_HOME, no PYTHONHOME) and requires 25 of 25 scenarios to pass and no libjvm or libpython."
+    description = "Runs the AOT native image on its own (no JAVA_HOME, no PYTHONHOME) and requires 31 of 31 scenarios to pass and no libjvm or libpython."
     onlyIf("AOT library: ${skipReason ?: "enabled"}") { skipReason == null }
     dependsOn(aotNativeCompile)
     val dir = aotNativeDir
@@ -297,7 +303,7 @@ tasks.register<Exec>("aotNativeRun") {
         val out = captured.toString()
         val summary = out.lineSequence().lastOrNull { it.startsWith("AOT_NATIVE_IMAGE:") }
             ?: throw GradleException("the native image printed no AOT_NATIVE_IMAGE summary")
-        if (summary != "AOT_NATIVE_IMAGE: 25 passed, 0 failed of 25") {
+        if (summary != "AOT_NATIVE_IMAGE: 31 passed, 0 failed of 31") {
             throw GradleException("AOT fixture in the native image: $summary")
         }
         if ("mac" in System.getProperty("os.name").lowercase()) {
