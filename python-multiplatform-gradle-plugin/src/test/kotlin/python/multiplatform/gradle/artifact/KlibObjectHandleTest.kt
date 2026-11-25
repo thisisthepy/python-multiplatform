@@ -85,7 +85,12 @@ class KlibObjectHandleTest {
         }
         val generic = bound.filter { d -> (d.parameters.map { it.type } + d.returnType).any { it.arguments.isNotEmpty() } }
         assertTrue(generic.isNotEmpty(), "MutableStateFlow(value: T): MutableStateFlow<T> binds, so something here is generic")
-        val other = generic.filter { d -> !(d.parameters.map { it.type } + d.returnType).all(::onlyAnyNullable) }
+        // A function-typed parameter's arguments are its lambda's signature (SPEC B-5), not a generic
+        // handle's erased arguments: `Runnable(block: () -> Unit)` carries `kotlin.Unit` (#191).
+        fun isFunctionSlot(type: KotlinTypeModel) = type.qualifiedName.startsWith("kotlin.Function")
+        val other = generic.filter { d ->
+            !(d.parameters.map { it.type }.filterNot(::isFunctionSlot) + d.returnType).all(::onlyAnyNullable)
+        }
         assertEquals(emptyList(), other.map { it.bindingName })
     }
 }

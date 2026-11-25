@@ -22,9 +22,9 @@ import java.io.File
  *
  * The import section only: that one entry's limits go from `00 00` (min 0) to `03 00 80 80 04` (shared,
  * min 0, max 65536 pages). Every other byte of the section is copied, and every other section is copied
- * unchanged. The section's size is re-encoded in its original LEB128 width when the new size fits, so
- * nothing after it moves; otherwise every later byte offset moves by [Rewritten.shift], and
- * [shiftSourceMap] moves the source map's offsets with it.
+ * unchanged. The limits grow by 3 bytes, so every byte after the import section moves by
+ * [Rewritten.shift]: 3, or 4 when the section's size no longer fits its original LEB128 width (the size
+ * is re-encoded in that width when it fits). [shiftSourceMap] moves the source map's offsets with it.
  *
  * ### The shape check, and removing this
  *

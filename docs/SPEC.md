@@ -1050,6 +1050,17 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `Status: partial`, `python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactCallbackTest.kt`; a value-returning slot
   (`() -> Float`) does not yet accept a Python callable (`M3ProofRenderTest.kt`
   `aValueReturningFunctionSlotDoesNotYetAcceptAPythonCallable`).
+  The klib walker (B-2) builds the same slot for a plain function-typed parameter of any declaration,
+  not only of a `@Composable` one, so `derivedStateOf`, `snapshotFlow` and
+  `CoroutineExceptionHandler(handler)` bind on Kotlin/Native as on the JVM (#191,
+  `GP/artifact/KlibFunctionSlotTest.kt`). A `@Composable` lambda still needs a `@Composable` owner,
+  and a `suspend` one is declined on both walkers.
+  The klib walker also reads the Kotlin/Native stdlib for types only (the distribution's
+  `klib/common/stdlib`, found through `kotlin.native.home` or the konan data directory and the applied
+  Kotlin version), so a signature naming `CoroutineContext`, `KProperty<*>` or `Throwable` binds as the
+  jar walker binds it (`collectAsState`, `getValue`/`setValue`, `CoroutineExceptionHandler`; #191,
+  `GP/artifact/KotlinNativeStdlibTest.kt`, `klib-artifact` `WalkedKlibArtifactTableTest`). Agent proposal,
+  not confirmed by the owner: when the stdlib is not found, the walk proceeds without it, as before.
   A parameter typed as a **functional interface** (a Java interface with one abstract method, such as
   `java.lang.Runnable`, or a Kotlin `fun interface`) whose method returns `Unit`/`void` and which is
   not generic takes a Python callable as well as a Kotlin handle (#216). Its slot type name is the
@@ -1382,8 +1393,8 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   the build rewrites that one import of the linked `.wasm` to shared, minimum 0, maximum 65536 pages (the
   wasm32 ceiling, so any runtime maximum fits); every other byte of the import section is copied, every
   other section is copied unchanged, and the section's size is re-encoded (in its original width when it
-  fits, so nothing moves; otherwise the module's later byte offsets move, and the generated source map's
-  offsets are moved with them). The check runs on every link whatever the runtime: the build fails unless
+  fits). The limits grow by 3 bytes, so the module's later byte offsets move by 3 (4 when the size needs
+  one more byte), and the generated source map's offsets are moved with them. The check runs on every link whatever the runtime: the build fails unless
   the module has exactly one memory, imported as `intrinsics.memory`, either in Kotlin's shape
   (non-shared, minimum 0, no maximum) or in the rewritten shape; anything else (a defined memory, a second
   memory, other limits, an import section that does not parse) fails with a message saying the rewrite may

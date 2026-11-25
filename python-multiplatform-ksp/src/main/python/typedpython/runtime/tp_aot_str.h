@@ -1840,4 +1840,110 @@ static TPA_UNUSED int tpa_str_of_opt(tpa_str *s, int repr, tpa_str **out)
     return 0;
 }
 
+/* Tier S2a: a list[str | None] is a tpa_str_list whose None items are NULL. Every other list operation is the list[str]
+ * one (retain and release take NULL); these are the ones that read an item's value. */
+
+/* in / count / index / remove: an item equals the value as `str | None` == does (None equals only None; CPython's `y is
+ * x or y == x` gives the same, since a str equals itself and None is one object). */
+static TPA_UNUSED int tpa_str_opt_list_contains(const tpa_str_list *l, tpa_str *v)
+{
+    int64_t i;
+    for (i = 0; i < l->len; i++) {
+        if (tpa_str_eq_opt(l->d[i], v)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static TPA_UNUSED int64_t tpa_str_opt_list_count(const tpa_str_list *l, tpa_str *v)
+{
+    int64_t i, k = 0;
+    for (i = 0; i < l->len; i++) {
+        k += tpa_str_eq_opt(l->d[i], v) ? 1 : 0;
+    }
+    return k;
+}
+
+static TPA_UNUSED int tpa_str_opt_list_index(const tpa_str_list *l, tpa_str *v, int64_t *out)
+{
+    int64_t i;
+    for (i = 0; i < l->len; i++) {
+        if (tpa_str_eq_opt(l->d[i], v)) {
+            *out = i;
+            return 0;
+        }
+    }
+    return tpa_raise(TPA_ValueError, "list.index(x): x not in list");
+}
+
+#if defined(TPA_GROW_STR)
+static TPA_UNUSED int tpa_str_opt_list_remove(tpa_str_list *l, tpa_str *v)
+{
+    int64_t i;
+    tpa_str *got = NULL;
+    for (i = 0; i < l->len; i++) {
+        if (tpa_str_eq_opt(l->d[i], v)) {
+            tpa_str_list_pop(l, 1, i, &got);
+            tpa_str_release(got);
+            return 0;
+        }
+    }
+    return tpa_raise(TPA_ValueError, "list.remove(x): x not in list");
+}
+#endif
+
+/* a op b (op 0..5: == != < <= > >=): list_richcompare, the first pair of items that differ decides; an ordering of None
+ * with a str raises CPython's TypeError ("'<' not supported between instances of 'NoneType' and 'str'"); -1 then. */
+static TPA_UNUSED int tpa_str_opt_list_cmp(const tpa_str_list *a, const tpa_str_list *b, int op)
+{
+    static const char *const sym[] = {"==", "!=", "<", "<=", ">", ">="};
+    int64_t i, n = a->len < b->len ? a->len : b->len;
+    for (i = 0; i < n; i++) {
+        tpa_str *x = a->d[i], *y = b->d[i];
+        if (!tpa_str_eq_opt(x, y)) {
+            if (op <= 1) {
+                return op == 1;
+            }
+            if (x == NULL || y == NULL) {
+                char m[96];
+                snprintf(m, sizeof m, "'%s' not supported between instances of '%s' and '%s'", sym[op],
+                         x == NULL ? "NoneType" : "str", y == NULL ? "NoneType" : "str");
+                return tpa_raise(TPA_TypeError, m);
+            }
+            return tpa__cmp_outcome(op, tpa_str_cmp(x, y));
+        }
+    }
+    return tpa__cmp_outcome(op, a->len < b->len ? -1 : a->len > b->len ? 1 : 0);
+}
+
+/* repr(l): "['a', None]". */
+static TPA_UNUSED int tpa_str_opt_list_repr(tpa_str_list *l, tpa_str **out)
+{
+    int64_t i, k = 0, n = l->len == 0 ? 1 : 2 * l->len + 1;
+    tpa_str **parts = (tpa_str **)calloc((size_t)n + 1, sizeof(tpa_str *));
+    int rc = 0;
+    if (parts == NULL) {
+        return tpa_raise(TPA_MemoryError, "");
+    }
+    parts[k++] = &tpa_str__latin1['['].h;
+    for (i = 0; i < l->len && rc == 0; i++) {
+        if (i > 0) {
+            rc = tpa_str_from_ascii(", ", 2, &parts[k++]);
+        }
+        if (rc == 0) {
+            rc = tpa_str_of_opt(l->d[i], 1, &parts[k++]);
+        }
+    }
+    parts[k++] = &tpa_str__latin1[']'].h;
+    if (rc == 0) {
+        rc = tpa_str_join(parts, (size_t)k, out);
+    }
+    for (i = 0; i < k; i++) {
+        tpa_str_release(parts[i]);
+    }
+    free(parts);
+    return rc;
+}
+
 #endif /* TP_AOT_STR_H */

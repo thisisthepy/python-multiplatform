@@ -14,6 +14,7 @@ import org.gradle.api.tasks.PathSensitivity
 import org.gradle.api.tasks.TaskAction
 import org.gradle.workers.WorkerExecutor
 import python.multiplatform.gradle.artifact.ArtifactScanner
+import python.multiplatform.gradle.artifact.isKlibArtifact
 import python.multiplatform.gradle.artifact.scanKlibIsolated
 import javax.inject.Inject
 
@@ -79,6 +80,14 @@ abstract class PythonStubsTask : DefaultTask() {
     @get:Internal
     abstract val klibReaderClasspath: ConfigurableFileCollection
 
+    /**
+     * Klibs on the walk's classpath for **types only**, never walked for bindings: the Kotlin/Native
+     * stdlib ([python.multiplatform.gradle.artifact.kotlinNativeStdlibKlib], #191). Empty when it was not found.
+     */
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val klibTypeClasspath: ConfigurableFileCollection
+
     @get:OutputDirectory
     abstract val outputDirectory: DirectoryProperty
 
@@ -110,7 +119,7 @@ abstract class PythonStubsTask : DefaultTask() {
                 excludes,
                 temporaryDir,
                 klibReaderClasspath.files,
-                klibClasspath = klibs,
+                klibClasspath = klibs + klibTypeClasspath.files.filter { isKlibArtifact(it) },
             ).declarations
         }
 

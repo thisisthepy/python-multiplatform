@@ -153,7 +153,11 @@ class KlibScannerTest {
         // `kotlin.Any?` (`MutableStateFlow`, `CompletableDeferred`, `flowOf`, `stateIn`), and a
         // `kotlin.Any?` slot crosses as a handle (`Mutex.lock(owner)`), and so does a star-projected handle
         // type (`CancellableContinuation<*>.disposeOnCancellation`), and a `String?` parameter
-        // (`ClosedReceiveChannelException(message)`), all as on jars (B-1, #38).
+        // (`ClosedReceiveChannelException(message)`), all as on jars (B-1, #38). Since #191 (K/N parity) a
+        // function-typed parameter takes a Python callable on a non-`@Composable` declaration too (B-5):
+        // `Runnable(block)`, `Channel(onUndeliveredElement)`, `consume`, `update`, `getAndUpdate`, `updateAndGet`,
+        // `distinctUntilChangedBy`, and the lambda overloads of
+        // `debounce` and `distinctUntilChanged`, which now share their base name with a suffix (U-8).
         val entries = KlibScanner.scanKlib(coroutinesKlib, includePrefixes = emptyList())
         assertEquals(
             listOf(
@@ -196,9 +200,11 @@ class KlibScannerTest {
                 "kotlinx.coroutines.MainScope",
                 "kotlinx.coroutines.NonDisposableHandle.dispose",
                 "kotlinx.coroutines.NonDisposableHandle.parent",
+                "kotlinx.coroutines.Runnable",
                 "kotlinx.coroutines.Runnable.run",
                 "kotlinx.coroutines.SupervisorJob",
                 "kotlinx.coroutines.TimeoutCancellationException.createCopy",
+                "kotlinx.coroutines.channels.Channel",
                 "kotlinx.coroutines.channels.Channel.Factory",
                 "kotlinx.coroutines.channels.Channel.Factory.BUFFERED",
                 "kotlinx.coroutines.channels.Channel.Factory.CONFLATED",
@@ -215,6 +221,7 @@ class KlibScannerTest {
                 "kotlinx.coroutines.channels.ReceiveChannel.receive",
                 "kotlinx.coroutines.channels.SendChannel.isClosedForSend",
                 "kotlinx.coroutines.channels.SendChannel.send",
+                "kotlinx.coroutines.channels.consume",
                 "kotlinx.coroutines.disposeOnCancellation",
                 "kotlinx.coroutines.ensureActive__CoroutineScope",
                 "kotlinx.coroutines.ensureActive__Job",
@@ -240,11 +247,15 @@ class KlibScannerTest {
                 "kotlinx.coroutines.flow.cancellable",
                 "kotlinx.coroutines.flow.conflate",
                 "kotlinx.coroutines.flow.consumeAsFlow",
-                "kotlinx.coroutines.flow.debounce",
-                "kotlinx.coroutines.flow.distinctUntilChanged",
+                "kotlinx.coroutines.flow.debounce__kotlinx_coroutines_flow_Flow_kotlin_Function1_kotlin_Any___kotlin_Long",
+                "kotlinx.coroutines.flow.debounce__kotlinx_coroutines_flow_Flow_kotlin_Long",
+                "kotlinx.coroutines.flow.distinctUntilChangedBy",
+                "kotlinx.coroutines.flow.distinctUntilChanged__0",
+                "kotlinx.coroutines.flow.distinctUntilChanged__Boolean",
                 "kotlinx.coroutines.flow.drop",
                 "kotlinx.coroutines.flow.emptyFlow",
                 "kotlinx.coroutines.flow.flowOf",
+                "kotlinx.coroutines.flow.getAndUpdate",
                 "kotlinx.coroutines.flow.launchIn",
                 "kotlinx.coroutines.flow.produceIn",
                 "kotlinx.coroutines.flow.receiveAsFlow",
@@ -252,6 +263,8 @@ class KlibScannerTest {
                 "kotlinx.coroutines.flow.shareIn",
                 "kotlinx.coroutines.flow.stateIn",
                 "kotlinx.coroutines.flow.take",
+                "kotlinx.coroutines.flow.update",
+                "kotlinx.coroutines.flow.updateAndGet",
                 "kotlinx.coroutines.isActive",
                 "kotlinx.coroutines.newFixedThreadPoolContext",
                 "kotlinx.coroutines.newSingleThreadContext",
