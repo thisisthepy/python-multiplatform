@@ -102,13 +102,21 @@ def dict_vtype(v: "Type | DictKinds") -> Type:
     return Type.DICT if isinstance(v, tuple) else v
 
 
-def good_dict_kinds(k: object) -> bool:
-    """`k` is (key type, value type), the value type an allowed scalar or str type or good kinds of a dict; the key
-    type an allowed key type or a tuple of them (a tuple key, `ir.KeyTuple`)."""
+def good_dict_kinds(k: object, top: bool = True) -> bool:
+    """`k` is (key type, value type), the value type an allowed scalar or str type or good kinds of a dict (not a
+    set); the key type an allowed key type or a tuple of them (a tuple key, `ir.KeyTuple`). At the top, the value type
+    NONE is a set (`is_set`)."""
     return (isinstance(k, tuple) and len(k) == 2
             and (k[0] in DICT_KEYS or (isinstance(k[0], tuple) and len(k[0]) >= 1
                                        and all(t in DICT_KEYS for t in k[0])))
-            and (k[1] in DICT_VALUES or good_dict_kinds(k[1])))
+            and (k[1] in DICT_VALUES or (top and k[1] is Type.NONE)
+                 or (isinstance(k[1], tuple) and good_dict_kinds(k[1], top=False))))
+
+
+def is_set(k: object) -> bool:
+    """AOT mode, tier S2b: the kinds `k` of a DICT are those of a set (`set[T]`: the elements are the keys, the value
+    type is NONE, no value is ever read)."""
+    return isinstance(k, tuple) and len(k) == 2 and k[1] is Type.NONE
 
 
 def dict_has_float(k: "DictKinds") -> bool:
@@ -1467,9 +1475,56 @@ def dict_bound(s: "ForDict | DictPopItem") -> list[tuple[object, "Type | DictKin
     return out
 
 
+@dataclass(frozen=True)
+class SetDisplay(Expr):
+    """`{e0, e1, ...}` / `set()` (type DICT, set kinds `(T, NONE)`): the elements evaluated in order, each added (an
+    element equal to one already there is not: the first is kept)."""
+
+    kinds: DictKinds
+    elements: tuple[Expr, ...]
+
+
+@dataclass(frozen=True)
+class SetOp(Expr):
+    """`left | right`, `&`, `-`, `^` (and union / intersection / difference / symmetric_difference of one set) of two
+    sets of the same kinds: a new set (type DICT)."""
+
+    op: str                        # "|", "&", "-", "^"
+    left: Expr
+    right: Expr
+
+
+@dataclass(frozen=True)
+class SetCompare(Expr):
+    """`left <= right`, `<`, `>=`, `>` (issubset / issuperset) and `left.isdisjoint(right)` ("disjoint") of two sets of
+    the same kinds (type BOOL)."""
+
+    op: str                        # "<=", "<", ">=", ">", "disjoint"
+    left: Expr
+    right: Expr
+
+
+@dataclass(frozen=True)
+class SetAdd(Stmt):
+    """`set.add(key)`: the set, then the key (a bool is never added to a set of int, as for a dict key)."""
+
+    set: Expr
+    key: Expr
+
+
+@dataclass(frozen=True)
+class SetRemove(Stmt):
+    """`set.remove(key)` (KeyError(repr(key)) when absent) / `set.discard(key)` (`discard`: nothing when absent)."""
+
+    set: Expr
+    key: Expr
+    discard: bool
+
+
 DICT_EXPRS = (DictDisplay, DictGet, DictContains, DictLen, DictPop, DictSetDefault, DictCopy, DictCompare, DictStr,
-              DictListDisplay, DictListLen, DictListIndex, KeyTuple)
-DICT_STMTS = (DictStore, DictDelete, DictUpdate, DictClear, ForDict, DictPopItem, DictListStore, ForDictList)
+              DictListDisplay, DictListLen, DictListIndex, KeyTuple, SetDisplay, SetOp, SetCompare)
+DICT_STMTS = (DictStore, DictDelete, DictUpdate, DictClear, ForDict, DictPopItem, DictListStore, ForDictList, SetAdd,
+              SetRemove)
 
 
 @dataclass(frozen=True)

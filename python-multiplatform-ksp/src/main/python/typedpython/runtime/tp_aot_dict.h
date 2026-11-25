@@ -1051,6 +1051,116 @@ static TPA_UNUSED int tpa_dict_repr(const tpa_dict *d, tpa_str **out)
 }
 
 /* ------------------------------------------------------------------------------------------
+ * Sets (`set[T]`): a dict whose values are unused (value kind TPA_DV_BOOL, each 1). Only what does not depend on the
+ * order of a set is in the AOT mode (membership, size, equality, subsets, the operators that make a set): a loop over
+ * one, its repr and pop() follow CPython's set table, which this table is not (the front end refuses them,
+ * aot/set-order). An element kept is the one first added, as CPython keeps it.
+ * ------------------------------------------------------------------------------------------ */
+
+static TPA_UNUSED int tpa_set_add(tpa_dict *s, tpa_dw k, int kbool)
+{
+    return tpa_dict_contains(s, k) ? 0 : tpa_dict_setitem(s, k, kbool, 1);
+}
+
+/* s.discard(x): no error when x is absent. */
+static TPA_UNUSED int tpa_set_discard(tpa_dict *s, tpa_dw k, int kbool)
+{
+    return tpa_dict_contains(s, k) ? tpa_dict_delitem(s, k, kbool) : 0;
+}
+
+/* A new empty set of the kinds of `a`. */
+static int tpa_set__new_like(const tpa_dict *a, tpa_dict **out)
+{
+    return tpa_dict_new(a->kk, a->vk, 0, out);
+}
+
+/* `a | b`: a copy of a, then b's elements added (set_or: copy, then update). */
+static TPA_UNUSED int tpa_set_or(const tpa_dict *a, const tpa_dict *b, tpa_dict **out)
+{
+    tpa_dict *r = NULL;
+    if (tpa_dict_copy(a, &r) || tpa_dict_update(r, b)) {
+        tpa_dict_release(r);
+        return -1;
+    }
+    *out = r;
+    return 0;
+}
+
+/* `a & b`: the elements of the smaller set (b when the sizes are equal) found in the other (set_intersection). */
+static TPA_UNUSED int tpa_set_and(const tpa_dict *a, const tpa_dict *b, tpa_dict **out)
+{
+    const tpa_dict *small = a->used < b->used ? a : b, *big = small == a ? b : a;
+    tpa_dict *r = NULL;
+    int64_t i;
+    if (tpa_set__new_like(a, &r)) {
+        return -1;
+    }
+    for (i = 0; i < small->nentries; i++) {
+        const tpa_dict_entry *ep = &small->e[i];
+        if (ep->live && tpa_dict__lookup(big, ep->key, ep->hash) >= 0
+            && tpa_set_add(r, ep->key, ep->kbool)) {
+            tpa_dict_release(r);
+            return -1;
+        }
+    }
+    *out = r;
+    return 0;
+}
+
+/* The elements of `a` not in `b`, added to `r`. */
+static int tpa_set__add_missing(tpa_dict *r, const tpa_dict *a, const tpa_dict *b)
+{
+    int64_t i;
+    for (i = 0; i < a->nentries; i++) {
+        const tpa_dict_entry *ep = &a->e[i];
+        if (ep->live && tpa_dict__lookup(b, ep->key, ep->hash) < 0 && tpa_set_add(r, ep->key, ep->kbool)) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* `a - b` (set_difference) and `a ^ b` (set_symmetric_difference: a - b, then b - a). */
+static TPA_UNUSED int tpa_set_sub(const tpa_dict *a, const tpa_dict *b, int symmetric, tpa_dict **out)
+{
+    tpa_dict *r = NULL;
+    if (tpa_set__new_like(a, &r) || tpa_set__add_missing(r, a, b) || (symmetric && tpa_set__add_missing(r, b, a))) {
+        tpa_dict_release(r);
+        return -1;
+    }
+    *out = r;
+    return 0;
+}
+
+/* Every element of `a` is in `b`. */
+static TPA_UNUSED int tpa_set_within(const tpa_dict *a, const tpa_dict *b)
+{
+    int64_t i;
+    if (a->used > b->used) {
+        return 0;
+    }
+    for (i = 0; i < a->nentries; i++) {
+        if (a->e[i].live && tpa_dict__lookup(b, a->e[i].key, a->e[i].hash) < 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* a.isdisjoint(b): no element of the smaller set is in the other. */
+static TPA_UNUSED int tpa_set_disjoint(const tpa_dict *a, const tpa_dict *b)
+{
+    const tpa_dict *small = a->used < b->used ? a : b, *big = small == a ? b : a;
+    int64_t i;
+    for (i = 0; i < small->nentries; i++) {
+        if (small->e[i].live && tpa_dict__lookup(big, small->e[i].key, small->e[i].hash) >= 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* ------------------------------------------------------------------------------------------
  * A list of dicts (`list[dict[K, V]]`, ir DICT_LIST): a tpa_obj_list (tp_aot.h) whose items are dicts, each an owned
  * reference, never NULL. A dict holds no list, so a list of dicts is acyclic: reference counts free it.
  * ------------------------------------------------------------------------------------------ */

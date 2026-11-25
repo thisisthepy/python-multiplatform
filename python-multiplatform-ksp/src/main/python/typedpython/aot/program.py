@@ -232,6 +232,8 @@ class _Checker:
             return
         elif _is_dict_annotation(ann):
             return                          # tier S2b: dict[K, V]
+        elif _is_set_annotation(ann):
+            return                          # tier S2b: set[T]
         elif _is_dict_list_annotation(ann):
             return                          # tier S2b: list[dict[K, V]]
         elif allow_tuple and _is_tuple_list_annotation(ann):
@@ -241,8 +243,8 @@ class _Checker:
                     if allow_tuple else "")
             self.rep.error(ann, "aot/type", ast.unparse(ann), f"the type `{ast.unparse(ann)}` is outside the "
                            f"AOT mode (int, float, bool, str, list[int], list[float], compiled classes{more}, dict[K, V] of int, str or "
-                           "bool keys and int, float, bool, str, `str | None` or such dict values, a list of such dicts, and None as a "
-                           "return type)")
+                           "bool keys and int, float, bool, str, `str | None` or such dict values, a list of such dicts, set[T] of "
+                           "such keys, and None as a return type)")
 
     def signature(self, fn: ast.FunctionDef, is_method: bool = False) -> None:
         a = fn.args
@@ -554,6 +556,9 @@ class _Checker:
             self.expr(e.orelse)
         elif isinstance(e, ast.List):
             self.list_display(e)
+        elif isinstance(e, ast.Set):
+            for x in e.elts:                        # tier S2b: a set display (the front end checks the types)
+                self.expr(x)
         elif isinstance(e, ast.Dict):
             for k, v in zip(e.keys, e.values):      # tier S2b: a dict display (the front end checks the types)
                 if k is None:
@@ -674,6 +679,11 @@ class _Checker:
                     return
                 self.expr(a.args[0])
                 return
+            elif n == "set":
+                if c.keywords or len(c.args) > 1 or (c.args and not isinstance(c.args[0], ast.Name)):
+                    self.rep.error(c, "aot/builtin", n, "`set()` is only supported as `set()` and `set(s)` of a set in "
+                                   "the AOT mode")
+                return                      # tier S2b: an empty set, a copy (the front end checks s is a set)
             elif n == "dict":
                 if not (len(c.args) == 1 and isinstance(c.args[0], ast.Name) and not c.keywords):
                     self.rep.error(c, "aot/builtin", n, "`dict()` is only supported as `dict(d)` of a dict in the AOT "
@@ -786,7 +796,10 @@ def _is_list_annotation(ann: ast.expr) -> bool:
 # tier S2a: the methods of a list (design 4.3.2)
 LIST_METHODS = frozenset({"append", "insert", "extend", "clear", "reverse", "remove", "pop", "index", "count"})
 # tier S2b: the dict methods (the front end checks the receiver is a dict)
-DICT_METHODS = frozenset({"get", "setdefault", "pop", "popitem", "keys", "values", "items", "copy", "clear", "update"})
+DICT_METHODS = frozenset({"get", "setdefault", "pop", "popitem", "keys", "values", "items", "copy", "clear", "update",
+                          # (tier S2b: the set methods; the front end checks the receiver)
+                          "add", "discard", "remove", "union", "intersection", "difference", "symmetric_difference",
+                          "issubset", "issuperset", "isdisjoint"})
 
 
 def _list_class_name(ann: ast.expr | None, class_names) -> str | None:
@@ -843,6 +856,14 @@ def _is_dict_annotation(ann: ast.expr) -> bool:
     return (isinstance(k, ast.Name) and k.id in ("int", "str", "bool")
             and ((isinstance(v, ast.Name) and v.id in ("int", "float", "bool", "str")) or _is_optional_str_annotation(v)
                  or _is_dict_annotation(v)))         # (a dict as a value: tier S2b)
+
+
+def _is_set_annotation(ann: ast.expr) -> bool:
+    """`set[T]`, T int, str, bool or a tuple of them (tier S2b)."""
+    if not (isinstance(ann, ast.Subscript) and isinstance(ann.value, ast.Name) and ann.value.id in ("set", "Set")):
+        return False
+    return _is_dict_annotation(ast.Subscript(value=ast.Name(id="dict"), slice=ast.Tuple(elts=[ann.slice,
+                                                                                             ast.Name(id="int")])))
 
 
 def _is_dict_list_annotation(ann: ast.expr) -> bool:

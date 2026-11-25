@@ -7,7 +7,7 @@ modules it imports) and reports
 - **error**: a construct outside the AOT subset by design (`eval`, a generator, `id()`, an import
   outside the provided set, ...);
 - **pending**, with a tier K / O / S / T: a construct inside the designed subset that the compiler
-  cannot compile without CPython yet (a string method of tier S, a set, a comprehension, ...);
+  cannot compile without CPython yet (a string method of tier S, a comprehension, ...);
 
 and one status per function: `ready` when today's front end and verifier accept it and its IR needs
 no CPython object operation.
@@ -628,6 +628,8 @@ class _Pass(ast.NodeVisitor):
             self.pending("S", "aot/builtin", n, node, f"`{n}()` is tier S, not compiled yet")
         elif n == "dict" and len(node.args) == 1 and not node.keywords:
             return                              # tier S2b: `dict(d)`, a copy of a dict (the front end checks it)
+        elif n == "set" and len(node.args) <= 1 and not node.keywords:
+            return                              # tier S2b: `set()`, `set(s)` (the front end checks s is a set)
         elif n in _CONTAINER_CALLS:
             self.pending("S", "aot/container", n, node, f"`{n}()` is tier S (general containers), not compiled yet")
         elif n in _SUPPORTED_CALLS:

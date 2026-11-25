@@ -377,7 +377,7 @@ from .ir import ForObjList, ObjListDisplay, ObjListIndex, ObjListLen, ObjListSto
 from .ir import (
     DictClear, DictCompare, DictContains, DictCopy, DictDelete, DictDisplay, DictGet, DictLen, DictPop, DictSetDefault,
     DictPopItem, DictStore, DictStr, DictUpdate, ForDict, DictListDisplay, DictListIndex, DictListLen, DictListStore,
-    ForDictList, KeyTuple,
+    ForDictList, KeyTuple, SetAdd, SetCompare, SetDisplay, SetOp, SetRemove,
 )
 
 DA = "verify/definite-assignment"
@@ -726,8 +726,10 @@ class _Checker:
     def dict_kinds(self, e: object) -> ir.DictKinds | None:
         """The key and value types of the DICT expression `e` (already checked), or None after an error."""
         cls = type(e)
-        if cls in (DictDisplay, DictCopy):
+        if cls in (DictDisplay, DictCopy, SetDisplay):
             return e.kinds if self.good_kinds(e.kinds) else None
+        if cls is SetOp:
+            return self.dict_kinds(e.left)
         if cls is Local:
             return self.fn.dict_kinds.get(e.name)
         if cls is FieldGet:
@@ -773,6 +775,62 @@ class _Checker:
     def kinds_any(self, e: object) -> ir.DictKinds | None:
         """The kinds of a DICT or of the dicts of a DICT_LIST expression."""
         return self.list_kinds(e) if getattr(e, "type", None) is Type.DICT_LIST else self.dict_kinds(e)
+
+    def set_operand(self, e: object, state: _State, what: str) -> tuple[ir.Expr, ir.DictKinds | None]:
+        """A DICT operand that is a set (kinds `(T, NONE)`)."""
+        value, kinds = self.dict_operand(e, state, what)
+        if kinds is not None and not ir.is_set(kinds):
+            self.error(TYPE, f"{what} is a dict, not a set")
+        return value, kinds
+
+    def no_set(self, kinds: ir.DictKinds | None, what: str) -> None:
+        """`what` is a dict operation a set does not have (or one that depends on the order of a set)."""
+        if kinds is not None and ir.is_set(kinds):
+            self.error(TYPE, f"{what} of a set")
+
+    def e_SetDisplay(self, e: SetDisplay, state: _State) -> ir.Expr:
+        if not isinstance(e.elements, tuple):
+            self.error(STRUCTURE, "SetDisplay has a tuple of elements")
+            return e
+        kinds = e.kinds if self.good_kinds(e.kinds) and ir.is_set(e.kinds) else None
+        if kinds is None:
+            self.error(TYPE, f"SetDisplay has no valid set kinds ({e.kinds!r})")
+        elements = tuple(self.dict_key(x, kinds, state, "an element of a set display", insert=True)
+                         for x in e.elements)
+        self.result(e, Type.DICT)
+        return dataclasses.replace(e, elements=elements)
+
+    def e_SetOp(self, e: SetOp, state: _State) -> ir.Expr:
+        a, ka = self.set_operand(e.left, state, "the left operand of a set operator")
+        b, kb = self.set_operand(e.right, state, "the right operand of a set operator")
+        self.dict_same(kb, ka, "the right operand of a set operator")
+        if e.op not in ("|", "&", "-", "^"):
+            self.error(STRUCTURE, f"SetOp {e.op!r}")
+        self.result(e, Type.DICT)
+        return dataclasses.replace(e, left=a, right=b)
+
+    def e_SetCompare(self, e: SetCompare, state: _State) -> ir.Expr:
+        a, ka = self.set_operand(e.left, state, "the left operand of a set comparison")
+        b, kb = self.set_operand(e.right, state, "the right operand of a set comparison")
+        self.dict_same(kb, ka, "the right operand of a set comparison")
+        if e.op not in ("<=", "<", ">=", ">", "disjoint"):
+            self.error(STRUCTURE, f"SetCompare {e.op!r}")
+        self.result(e, Type.BOOL)
+        return dataclasses.replace(e, left=a, right=b)
+
+    def s_SetAdd(self, s: SetAdd, state: _State):
+        d, kinds = self.set_operand(s.set, state, "the set added to")
+        key = self.dict_key(s.key, kinds, state, "the element added", insert=True)
+        self.effects.append("adds to a set")
+        return dataclasses.replace(s, set=d, key=key), state
+
+    def s_SetRemove(self, s: SetRemove, state: _State):
+        d, kinds = self.set_operand(s.set, state, "the set removed from")
+        key = self.dict_key(s.key, kinds, state, "the element removed", insert=False)
+        if type(s.discard) is not bool:
+            self.error(STRUCTURE, "SetRemove.discard is a bool")
+        self.effects.append("removes from a set")
+        return dataclasses.replace(s, set=d, key=key), state
 
     def dict_operand(self, e: object, state: _State, what: str) -> tuple[ir.Expr, ir.DictKinds | None]:
         value = self.expr(e, state)
@@ -2177,9 +2235,9 @@ class _Checker:
         if not (isinstance(e.keys, tuple) and isinstance(e.values, tuple) and len(e.keys) == len(e.values)):
             self.error(STRUCTURE, "DictDisplay has two tuples of the same length")
             return e
-        kinds = e.kinds if self.good_kinds(e.kinds) else None
+        kinds = e.kinds if self.good_kinds(e.kinds) and not ir.is_set(e.kinds) else None
         if kinds is None:
-            self.error(TYPE, f"DictDisplay has no valid key and value types ({e.kinds!r})")
+            self.error(TYPE, f"DictDisplay has no valid key and value types ({e.kinds!r}; a set is a SetDisplay)")
         keys, values = [], []
         for k, v in zip(e.keys, e.values):          # (k0, v0, k1, v1, ...: CPython's order)
             keys.append(self.dict_key(k, kinds, state, "a key of a dict display", insert=True))
@@ -2189,6 +2247,7 @@ class _Checker:
 
     def e_DictGet(self, e: DictGet, state: _State) -> ir.Expr:
         d, kinds = self.dict_operand(e.dict, state, "the dict read")
+        self.no_set(kinds, "DictGet")
         key = self.dict_key(e.key, kinds, state, "the key read", insert=False)
         default = None
         if e.default is not None:
@@ -2221,6 +2280,7 @@ class _Checker:
 
     def e_DictPop(self, e: DictPop, state: _State) -> ir.Expr:
         d, kinds = self.dict_operand(e.dict, state, "the dict popped")
+        self.no_set(kinds, "DictPop")
         key = self.dict_key(e.key, kinds, state, "the key popped", insert=False)
         default = None if e.default is None else self.dict_value(e.default, kinds, state, "the default of pop()")
         self.effects.append("pops from a dict")
@@ -2230,6 +2290,7 @@ class _Checker:
 
     def e_DictSetDefault(self, e: DictSetDefault, state: _State) -> ir.Expr:
         d, kinds = self.dict_operand(e.dict, state, "the dict of setdefault()")
+        self.no_set(kinds, "DictSetDefault")
         key = self.dict_key(e.key, kinds, state, "the key of setdefault()", insert=True)
         default = self.dict_value(e.default, kinds, state, "the default of setdefault()")
         self.effects.append("inserts into a dict")
@@ -2261,7 +2322,8 @@ class _Checker:
         if self.aot and getattr(e.value, "type", None) is Type.DICT_LIST:
             d = self.expr(e.value, state)                       # a list of dicts: its list_repr
         else:
-            d, _ = self.dict_operand(e.value, state, "the dict printed")
+            d, kinds = self.dict_operand(e.value, state, "the dict printed")
+            self.no_set(kinds, "DictStr (the repr lists the set's table order)")
         self.result(e, Type.STR)
         return dataclasses.replace(e, value=d)
 
@@ -2339,6 +2401,7 @@ class _Checker:
 
     def s_DictStore(self, s: DictStore, state: _State):
         d, kinds = self.dict_operand(s.dict, state, "the dict stored into")
+        self.no_set(kinds, "DictStore")
         value = self.dict_value(s.value, kinds, state, "the value stored into a dict")
         key = self.dict_key(s.key, kinds, state, "the key stored", insert=True)
         self.effects.append("stores into a dict")
@@ -2346,6 +2409,7 @@ class _Checker:
 
     def s_DictDelete(self, s: DictDelete, state: _State):
         d, kinds = self.dict_operand(s.dict, state, "the dict deleted from")
+        self.no_set(kinds, "DictDelete")
         key = self.dict_key(s.key, kinds, state, "the key deleted", insert=False)
         self.effects.append("deletes from a dict")
         return dataclasses.replace(s, dict=d, key=key), state
@@ -2366,6 +2430,7 @@ class _Checker:
         """`k, v = d.popitem()` (or no names): the variables declared locals of the dict's key and value types, assigned
         after the dict is evaluated (no interval of their own, as an Unpack target)."""
         d, kinds = self.dict_operand(s.dict, state, "the dict of popitem()")
+        self.no_set(kinds, "DictPopItem")
         if not self.good_kinds(s.kinds):
             self.error(TYPE, f"DictPopItem has no valid key and value types ({s.kinds!r})")
         else:
@@ -2395,6 +2460,7 @@ class _Checker:
         """`for k in d` / `for v in d.values()` / `for k, v in d.items()`: as ForStr, the variables declared locals of
         the dict's key and value types; zero iterations leave them as they were."""
         value, kinds = self.dict_operand(s.value, state, "the iterable of ForDict")
+        self.no_set(kinds, "ForDict (a loop in the order of the set's table)")
         if not self.good_kinds(s.kinds):
             self.error(TYPE, f"ForDict has no valid key and value types ({s.kinds!r})")
             kinds = None

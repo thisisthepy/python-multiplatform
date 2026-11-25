@@ -203,6 +203,21 @@ def _names_target(t: ast.expr) -> bool:
                                        and all(isinstance(e, ast.Name) for e in t.elts))
 
 
+def _set_kinds(kind: str) -> "ir.DictKinds | None":
+    """AOT mode, tier S2b: `set[T]` (T int, str, bool or a tuple of them) as the kinds of a DICT that is a set,
+    `(T, NONE)`; else None."""
+    k = _aot_kind(kind).strip()
+    m = re.fullmatch(r"(?:typing\.)?(?:set|Set)\[(.+)\]", k)
+    if m is None:
+        return None
+    kt = _DICT_KEY_KIND.get(m.group(1).strip()) or _tuple_key_kinds(m.group(1))
+    return (kt, Type.NONE) if kt is not None else None
+
+
+def _dict_or_set_kinds(kind: str) -> "ir.DictKinds | None":
+    return _dict_kinds(kind) or _set_kinds(kind)
+
+
 def _dict_list_kinds(kind: str) -> "ir.DictKinds | None":
     """AOT mode, tier S2b: the kinds of the dicts of a `list[dict[K, V]]` annotation or inferred type, else None."""
     k = _aot_kind(kind).strip()
@@ -211,6 +226,8 @@ def _dict_list_kinds(kind: str) -> "ir.DictKinds | None":
 
 
 def _dict_name(kinds: "ir.DictKinds") -> str:
+    if ir.is_set(kinds):
+        return f"set[{_kname(kinds[0])}]"
     return f"dict[{_kname(kinds[0])}, {_vname(kinds[1])}]"
 
 
@@ -225,6 +242,11 @@ def _vname(v: "Type | ir.DictKinds") -> str:
 STR_LISTS = (Type.STR_LIST, Type.STR_OPT_LIST)      # AOT mode: the two `tpa_str_list` types (tier S1b, S2a)
 # AOT mode, tier S2a: the list methods called as statements (they return None)
 LIST_STMT_METHODS = frozenset({"append", "insert", "extend", "clear", "reverse", "remove"})
+# AOT mode, tier S2b: the set methods called as statements (they return None), and every set method name
+SET_STMT_METHODS = frozenset({"add", "discard", "remove", "clear", "update"})
+SET_METHOD_NAMES = SET_STMT_METHODS | {"copy", "pop", "union", "intersection", "difference", "symmetric_difference",
+                                       "issubset", "issuperset", "isdisjoint"}
+SET_ORDER = "(aot/set-order: the order of a set is CPython's set table, which an AOT program does not have)"
 LIST_METHOD_NAMES = LIST_STMT_METHODS | {"pop", "index", "count"}
 # AOT mode, tier S1b: the str methods (design 4.3.1): name -> (parameter names in order, the result type)
 STR_METHODS = {
@@ -868,8 +890,8 @@ def _aot_field_decl(fname: str, ann: ast.expr, known_names: set[str]) -> ir.Fiel
     kind = _annotation_kind(ann)
     if (lc := _obj_list_class(kind, known_names)) is not None:
         return ir.FieldDecl(fname, Type.OBJ_LIST, cls=lc)      # tier S2a: a list of instances of a compiled class
-    if (dk := _dict_kinds(kind)) is not None:
-        return ir.FieldDecl(fname, Type.DICT, kinds=dk)         # tier S2b: a dict (acyclic: it holds no instance)
+    if (dk := _dict_or_set_kinds(kind)) is not None:
+        return ir.FieldDecl(fname, Type.DICT, kinds=dk)         # tier S2b: a dict or a set (acyclic)
     if (dk := _dict_list_kinds(kind)) is not None:
         return ir.FieldDecl(fname, Type.DICT_LIST, kinds=dk)    # tier S2b: a list of dicts (acyclic)
     if kind in SCALAR_KIND:
@@ -1181,8 +1203,8 @@ def _signature(fn: ast.FunctionDef, classes: dict[str, ir.ClassDecl] | None = No
             params.append(ir.Param(a.arg, Type.OBJ, c[0], c[1]))
         elif info is not None and info.aot and (lc := _obj_list_class(kind, classes or {})) is not None:
             params.append(ir.Param(a.arg, Type.OBJ_LIST, lc))               # tier S2a: list[C]
-        elif info is not None and info.aot and (dk := _dict_kinds(kind)) is not None:
-            params.append(ir.Param(a.arg, Type.DICT, kinds=dk))             # tier S2b: dict[K, V]
+        elif info is not None and info.aot and (dk := _dict_or_set_kinds(kind)) is not None:
+            params.append(ir.Param(a.arg, Type.DICT, kinds=dk))             # tier S2b: dict[K, V], set[T]
         elif info is not None and info.aot and (dk := _dict_list_kinds(kind)) is not None:
             params.append(ir.Param(a.arg, Type.DICT_LIST, kinds=dk))        # tier S2b: list[dict[K, V]]
         else:
@@ -1204,7 +1226,7 @@ def _signature(fn: ast.FunctionDef, classes: dict[str, ir.ClassDecl] | None = No
     ret_cls, ret_opt = None, False
     ret_kinds = None
     if info is not None and info.aot and not (isinstance(fn.returns, ast.Constant) and fn.returns.value is None):
-        ret_kinds = _dict_kinds(_annotation_kind(fn.returns))
+        ret_kinds = _dict_or_set_kinds(_annotation_kind(fn.returns))
         if ret_kinds is not None:
             returns = Type.DICT                                             # tier S2b: dict[K, V]
         elif (ret_kinds := _dict_list_kinds(_annotation_kind(fn.returns))) is not None:
@@ -1781,8 +1803,8 @@ class _Lowerer:
         elif self.info.aot and (lc := _obj_list_class(kind, self.info.classes)) is not None:
             t = Type.OBJ_LIST                       # tier S2a: list[C]
             self.list_cls[name] = lc
-        elif self.info.aot and (dk := _dict_kinds(kind)) is not None:
-            t = Type.DICT                           # tier S2b: dict[K, V]
+        elif self.info.aot and (dk := _dict_or_set_kinds(kind)) is not None:
+            t = Type.DICT                           # tier S2b: dict[K, V], set[T]
             self.dict_locals[name] = dk
         elif self.info.aot and (dk := _dict_list_kinds(kind)) is not None:
             t = Type.DICT_LIST                      # tier S2b: list[dict[K, V]]
@@ -1863,10 +1885,16 @@ class _Lowerer:
                     return self.aot_sys_exit(node.value)
                 if mod == "time" and attr == "sleep" and self.info.aot_time and not self.is_local("time"):
                     return self.aot_time_sleep(node.value)
+                if attr in SET_STMT_METHODS and ir.is_set(self.node_dict_kinds(node.value.func.value)):
+                    return self.set_method_stmt(node.value, self.node_dict_kinds(node.value.func.value))
                 if attr in ("update", "clear", "popitem") and self.is_dict_name(node.value.func.value):
                     return self.dict_method_stmt(node.value)             # tier S2b
                 if self.is_list_name(mod) and attr in LIST_STMT_METHODS:
                     return self.list_method_stmt(node.value)             # tier S2a
+            if self.info.aot and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute) \
+                    and node.value.func.attr in SET_STMT_METHODS \
+                    and ir.is_set(self.node_dict_kinds(node.value.func.value)):
+                return self.set_method_stmt(node.value, self.node_dict_kinds(node.value.func.value))  # `self.s.add(x)`
             if self.info.aot and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute) \
                     and node.value.func.attr in ("update", "clear", "popitem") \
                     and self.node_dict_kinds(node.value.func.value) is not None:
@@ -1972,7 +2000,7 @@ class _Lowerer:
                 continue
             e = self.value(a)
             if e.type in (Type.DICT, Type.DICT_LIST):
-                e = ir.DictStr(Type.STR, e)            # tier S2b: a dict (a list of dicts) is printed as its repr
+                e = self.repr_of(e, a)                 # tier S2b: a dict (a list of dicts) is printed as its repr
             if e.type not in ir.SCALARS and e.type not in (Type.OBJ, Type.STR, *STR_LISTS, Type.STR_OPT):
                 raise Skip(a.lineno, f"print of `{_src(a)}` ({TYPE_NAME[e.type]}) is not supported in an "
                                      "AOT program (int, float, bool and str values)")
@@ -2036,6 +2064,7 @@ class _Lowerer:
                 value = self.temp(value)
             d = self.value(target.value)
             kt, vt = self.kinds_of(d, target.value)
+            self.not_set((kt, vt), target, "a set does not support item assignment (TypeError in CPython)")
             value = self.dict_value(value, vt, value_node)
             key = self.dict_key(self.key_value(target.slice, kt), kt, target.slice, insert=True)
             self.impure = True
@@ -2298,7 +2327,7 @@ class _Lowerer:
             if precision is None and v.type in STR_LISTS:
                 v = ir.StrOf(Type.STR, v, repr=True)        # tier S2a: a list's str is its repr (`!r` the same)
             if precision is None and v.type in (Type.DICT, Type.DICT_LIST):
-                v = ir.DictStr(Type.STR, v)                 # tier S2b: a dict's str is its repr (`!r` the same)
+                v = self.repr_of(v, piece.value)            # tier S2b: a dict's str is its repr (`!r` the same)
             if precision is None and v.type not in ir.SCALARS and v.type not in (Type.STR, Type.STR_OPT):
                 raise Skip(piece.lineno, f"`{_src(piece.value)}` in an f-string is {TYPE_NAME[v.type]}, not an "
                                          "int, float, bool or str")
@@ -2331,6 +2360,7 @@ class _Lowerer:
             if isinstance(node.slice, ast.Slice):
                 raise Skip(line, f"`{_src(node)}` slices a dict")
             kt, vt = self.kinds_of(value, node.value)
+            self.not_set((kt, vt), node, "a set is not subscriptable (TypeError in CPython)")
             return ir.DictGet(ir.dict_vtype(vt), value, self.dict_key(self.key_value(node.slice, kt), kt, node.slice,
                                                                       insert=False))
         if value.type is Type.DICT_LIST:                      # tier S2b: a dict of a list of dicts
@@ -2434,7 +2464,7 @@ class _Lowerer:
                 return listed                           # tier S2a: str(a) and repr(a) of a list are its repr
             x = self.value(args[0])
             if x.type in (Type.DICT, Type.DICT_LIST):
-                return ir.DictStr(Type.STR, x)          # tier S2b: str(d) and repr(d) are the dict's repr
+                return self.repr_of(x, args[0])         # tier S2b: str(d) and repr(d) are the dict's repr
             if x.type not in ir.SCALARS and x.type not in (Type.STR, *STR_LISTS, Type.STR_OPT):
                 raise Skip(line, f"{name}() of a {TYPE_NAME.get(x.type, x.type.value)} is not supported in an AOT "
                                  "program (int, float, bool, str and list[str])")
@@ -2505,8 +2535,10 @@ class _Lowerer:
             return True
         if isinstance(node, (ast.Name, ast.Attribute)):
             return self.is_dict_name(node)
+        if isinstance(node, ast.Set):
+            return True
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and not self.is_local(node.func.id):
-            if node.func.id == "dict" and self.builtin("dict"):
+            if node.func.id in ("dict", "set") and self.builtin(node.func.id):
                 return True
             f = self.env.get(node.func.id)
             return f is not None and f.returns is Type.DICT
@@ -2601,8 +2633,10 @@ class _Lowerer:
 
     def kinds_of(self, e: ir.Expr, node: ast.AST | None) -> ir.DictKinds:
         """The key and value types of the DICT expression `e`."""
-        if isinstance(e, (ir.DictDisplay, ir.DictCopy)):
+        if isinstance(e, (ir.DictDisplay, ir.DictCopy, ir.SetDisplay)):
             return e.kinds
+        if isinstance(e, ir.SetOp):
+            return self.kinds_of(e.left, node)
         if isinstance(e, ir.Local):
             return self.name_kinds(e.name)
         if isinstance(e, ir.FieldGet):
@@ -2627,8 +2661,10 @@ class _Lowerer:
         raise Skip(getattr(node, "lineno", 0), f"`{_src(node)}` is a dict whose key and value types are not known here")
 
     def dict_operand(self, node: ast.expr, kinds: ir.DictKinds | None) -> ir.Expr:
-        """The dict `node` where a dict of `kinds` is wanted: a display there is made of those kinds."""
-        if isinstance(node, ast.Dict):
+        """The dict `node` where a dict of `kinds` is wanted: a display there is made of those kinds (a set display and
+        `set()` too)."""
+        if isinstance(node, (ast.Dict, ast.Set)) or (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                                                     and node.func.id == "set" and not node.args):
             self.dict_want = kinds
         try:
             return self.value(node)
@@ -2702,6 +2738,93 @@ class _Lowerer:
     def dict_value_of(self, node: ast.expr, vt: Type | ir.DictKinds) -> ir.Expr:
         """The value `node` lowered for a dict whose values are `vt` (a display there takes the kinds of the values)."""
         return self.dict_value(self.dict_operand(node, vt if isinstance(vt, tuple) else None), vt, node)
+
+    def not_set(self, kinds: ir.DictKinds, node: ast.AST, what: str) -> None:
+        """Refuse `what` of a set (what a dict has and a set has not, or what depends on the order of a set)."""
+        if ir.is_set(kinds):
+            raise Skip(getattr(node, "lineno", 0), f"`{_src(node)}`: {what}")
+
+    def repr_of(self, e: ir.Expr, node: ast.AST) -> ir.Expr:
+        """The repr of a dict or a list of dicts (`ir.DictStr`); a set's is refused (its order is its table's)."""
+        if e.type is Type.DICT:
+            self.not_set(self.kinds_of(e, node), node, f"the repr of a set lists it in its table's order {SET_ORDER}")
+        return ir.DictStr(Type.STR, e)
+
+    def set_display(self, node: ast.Set) -> ir.Expr:
+        """`{e0, e1, ...}`: the elements in order; the kinds wanted where it stands, else those of its elements."""
+        want, self.dict_want = self.dict_want, None
+        line = node.lineno
+        if any(isinstance(e, ast.Starred) for e in node.elts):
+            raise Skip(line, "`*` in a set display is not supported in an AOT program")
+        if want is not None and not ir.is_set(want):
+            raise Skip(line, f"`{_src(node)}` is a set, but a {_dict_name(want)} is wanted here")
+        elements = [self.key_value(e, want[0] if want is not None else None) for e in node.elts]
+        if want is None:
+            kts = {e.type for e in elements}
+            kt = next(iter(kts)) if len(kts) == 1 else Type.I64 if kts == {Type.I64, Type.BOOL} else None
+            if kt is Type.KEY_TUPLE:
+                shapes = {tuple(x.type for x in e.elements) for e in elements}      # type: ignore[attr-defined]
+                kt = next(iter(shapes)) if len(shapes) == 1 else None             # type: ignore[assignment]
+            if not (kt in ir.DICT_KEYS or isinstance(kt, tuple)):
+                raise Skip(line, f"`{_src(node)}`: an AOT set holds ints, strs, bools or tuples of them, of one type")
+            want = (kt, Type.NONE)
+        elements = [self.dict_key(e, want[0], x, insert=True) for e, x in zip(elements, node.elts)]
+        return ir.SetDisplay(Type.DICT, want, tuple(elements))
+
+    def set_binop(self, node: ast.BinOp) -> ir.Expr:
+        """`a | b`, `a & b`, `a - b`, `a ^ b` of two sets of the same kinds (left, then right)."""
+        op = {ast.BitOr: "|", ast.BitAnd: "&", ast.Sub: "-", ast.BitXor: "^"}.get(type(node.op))
+        a = self.value(node.left)
+        ka = self.kinds_of(a, node.left) if a.type is Type.DICT else None
+        if op is None or ka is None or not ir.is_set(ka):
+            raise Skip(node.lineno, f"`{_src(node)}` has no form in an AOT program (`|`, `&`, `-`, `^` of two sets)")
+        b = self.dict_coerce(self.dict_operand(node.right, ka), ka, node.right, f"the right operand of `{op}`")
+        return ir.SetOp(Type.DICT, op, a, b)
+
+    def set_method_expr(self, func: ast.Attribute, node: ast.Call, kinds: ir.DictKinds) -> ir.Expr:
+        """`s.copy()`, `s.union(t)` / intersection / difference / symmetric_difference / issubset / issuperset /
+        isdisjoint of one set of the same kinds."""
+        line, m, args = node.lineno, func.attr, node.args
+        ops = {"union": "|", "intersection": "&", "difference": "-", "symmetric_difference": "^"}
+        tests = {"issubset": "<=", "issuperset": ">=", "isdisjoint": "disjoint"}
+        if m == "pop":
+            raise Skip(line, f"`{_src(node)}` removes the element the set's table gives first {SET_ORDER}")
+        if m in SET_STMT_METHODS:
+            raise Skip(line, f"uses the result of `{_src(node)}`, which returns None")
+        if node.keywords or (m == "copy" and args) or (m != "copy" and len(args) != 1) \
+                or m not in ("copy", *ops, *tests):
+            raise Skip(line, f"`{_src(node)}`: a set has {m}() only as copy() and the one-set forms of union, "
+                             "intersection, difference, symmetric_difference, issubset, issuperset and isdisjoint "
+                             "in an AOT program")
+        s = self.value(func.value)
+        if m == "copy":
+            return ir.DictCopy(Type.DICT, kinds, s)
+        t = self.dict_coerce(self.dict_operand(args[0], kinds), kinds, args[0], f"the argument of {m}()")
+        if m in ops:
+            return ir.SetOp(Type.DICT, ops[m], s, t)
+        return ir.SetCompare(Type.BOOL, tests[m], s, t)
+
+    def set_method_stmt(self, call: ast.Call, kinds: ir.DictKinds) -> list[ir.Stmt]:
+        """`s.add(x)`, `s.discard(x)`, `s.remove(x)`, `s.clear()`, `s.update(t)` as statements (the set, then the
+        argument)."""
+        func = call.func
+        assert isinstance(func, ast.Attribute)
+        line, m, args = call.lineno, func.attr, call.args
+        want = 0 if m == "clear" else 1
+        if call.keywords or len(args) != want:
+            raise Skip(line, f"set.{m}() takes {want} argument(s) in an AOT program")
+        s = self.value(func.value)
+        self.impure = True
+        self.hoist_ok = False
+        if m == "clear":
+            return self.take() + [ir.DictClear(s)]
+        if m == "update":
+            other = self.dict_coerce(self.dict_operand(args[0], kinds), kinds, args[0], "the argument of update()")
+            return self.take() + [ir.DictUpdate(s, other)]
+        key = self.dict_key(self.key_value(args[0], kinds[0]), kinds[0], args[0], insert=m == "add")
+        if m == "add":
+            return self.take() + [ir.SetAdd(s, key)]
+        return self.take() + [ir.SetRemove(s, key, m == "discard")]
 
     def dict_display(self, node: ast.Dict) -> ir.Expr:
         """`{k0: v0, ...}`: keys and values lowered in CPython's order (k0, v0, k1, v1, ...). Its kinds are the ones
@@ -2831,6 +2954,8 @@ class _Lowerer:
                              "(`k, v = d.popitem()`; a tuple key into a name per element)")
         d = self.value(func.value)
         kinds = self.kinds_of(d, func.value)
+        self.not_set(kinds, call, f"a set has no {func.attr}() here (`pop()` gives the first element of its table "
+                                  f"{SET_ORDER})")
         self.impure = True
         self.hoist_ok = False
         if func.attr == "popitem":
@@ -2897,6 +3022,7 @@ class _Lowerer:
                              "element)")
         d = self.value(it)
         kinds = self.kinds_of(d, it)
+        self.not_set(kinds, node.iter, f"a loop over a set visits it in its table's order {SET_ORDER}")
         key_var, pairs = self.bind_targets(key_t, kinds[0], line) if key_t is not None else (None, [])
         value_var = value_t.id if isinstance(value_t, ast.Name) else None
         if value_var is not None:
@@ -3002,6 +3128,7 @@ class _Lowerer:
             if isinstance(t, ast.Subscript) and not isinstance(t.slice, ast.Slice) \
                     and self.node_dict_kinds(t.value) is not None:
                 d = self.value(t.value)
+                self.not_set(self.kinds_of(d, t.value), t, "a set does not support item deletion (TypeError in CPython)")
                 kt = self.kinds_of(d, t.value)[0]
                 key = self.dict_key(self.key_value(t.slice, kt), kt, t.slice, insert=False)
                 self.impure = True                                      # tier S2b: `del d[k]`
@@ -3533,6 +3660,7 @@ class _Lowerer:
             if not isinstance(d, ir.Local):
                 d = self.temp(d)
             kt, vt = self.kinds_of(d, target.value)
+            self.not_set((kt, vt), target, "a set is not subscriptable (TypeError in CPython)")
             if isinstance(vt, tuple):
                 raise Skip(line, f"`{_src(node)}`: an augmented assignment of a dict held by a dict is not in the AOT "
                                  "mode (`|=` of dicts)")
@@ -3938,6 +4066,9 @@ class _Lowerer:
             made = self.list_make(node, Type.STR_LIST) or self.list_make(node, Type.STR_OPT_LIST)  # tier S2a
             if made is not None:
                 return made
+        if isinstance(node, ast.BinOp) and self.info.aot and self.is_dict_node(node.left) \
+                and isinstance(node.op, (ast.BitOr, ast.BitAnd, ast.Sub, ast.BitXor)):
+            return self.set_binop(node)                                     # tier S2b: a set operator
         if isinstance(node, ast.BinOp):
             op = self.binop_kind(node.op, node)
             left = self.sub(node.left)
@@ -3985,6 +4116,8 @@ class _Lowerer:
             key = self.boxed(self.sub(node.slice), node.slice)
             self.impure = True
             return ir.GetItem(Type.OBJ, obj, key)
+        if isinstance(node, ast.Set) and self.info.aot:
+            return self.set_display(node)                                   # tier S2b
         if isinstance(node, ast.Dict) and self.info.aot:
             return self.dict_display(node)                                  # tier S2b
         if isinstance(node, ast.Dict) and not node.keys:
@@ -4272,6 +4405,16 @@ class _Lowerer:
         if self.info.aot and len(node.ops) == 1 and isinstance(node.ops[0], (ast.Eq, ast.NotEq)) \
                 and (self.is_dict_node(node.left) or self.is_dict_node(node.comparators[0])):
             return self.dict_compare(node)                                  # tier S2b
+        if self.info.aot and len(node.ops) == 1 and isinstance(node.ops[0], (ast.Lt, ast.LtE, ast.Gt, ast.GtE)) \
+                and self.is_dict_node(node.left):
+            a = self.value(node.left)                                       # tier S2b: subset tests of two sets
+            ka = self.kinds_of(a, node.left) if a.type is Type.DICT else None
+            if ka is None or not ir.is_set(ka):
+                raise Skip(node.lineno, f"`{_src(node)}` orders dicts, which raises TypeError in CPython")
+            b = self.dict_coerce(self.dict_operand(node.comparators[0], ka), ka, node.comparators[0],
+                                 "the right operand of a set comparison")
+            op = {ast.Lt: "<", ast.LtE: "<=", ast.Gt: ">", ast.GtE: ">="}[type(node.ops[0])]
+            return ir.SetCompare(Type.BOOL, op, a, b)
         left = self.sub(node.left)
         links: list[ir.Expr] = []
         last = len(node.ops) - 1
@@ -4424,6 +4567,9 @@ class _Lowerer:
             if math is not None:
                 return math
 
+        if self.info.aot and isinstance(func, ast.Attribute) and func.attr in SET_METHOD_NAMES | DICT_METHOD_NAMES \
+                and ir.is_set(self.node_dict_kinds(func.value)):
+            return self.set_method_expr(func, node, self.node_dict_kinds(func.value))   # tier S2b: a set
         if self.info.aot and isinstance(func, ast.Attribute) and func.attr in DICT_METHOD_NAMES \
                 and self.node_dict_kinds(func.value) is not None:
             return self.dict_method_expr(func, node)                     # tier S2b
@@ -4516,10 +4662,25 @@ class _Lowerer:
         line = node.lineno
         if name == "len" and self.builtin("len") and len(args) == 1 and self.is_sys_argv(args[0]):
             return ir.ArgvLen(Type.I64)
+        if name == "set" and self.builtin("set"):                         # tier S2b: `set()`, `set(s)`
+            want, self.dict_want = self.dict_want, None
+            if not args:
+                if want is not None and not ir.is_set(want):
+                    raise Skip(line, f"`set()` is a set, but a {_dict_name(want)} is wanted here")
+                # (with nothing wanted, a set of int, as `{}` is a dict of int: it is only measured or compared)
+                return ir.SetDisplay(Type.DICT, want or (Type.I64, Type.NONE), ())
+            if len(args) != 1:
+                raise Skip(line, "set() takes one set in an AOT program")
+            d = self.value(args[0])
+            if d.type is not Type.DICT or not ir.is_set(self.kinds_of(d, args[0])):
+                raise Skip(line, f"`{_src(node)}`: set() of something that is not a set is not in the AOT mode yet")
+            return ir.DictCopy(Type.DICT, self.kinds_of(d, args[0]), d)
         if name == "dict" and self.builtin("dict"):                       # tier S2b: `dict(d)`, a copy
             if len(args) != 1:
                 raise Skip(line, "dict() takes one dict in an AOT program")
             d = self.value(args[0])
+            if d.type is Type.DICT and ir.is_set(self.kinds_of(d, args[0])):
+                raise Skip(line, f"`{_src(node)}`: dict() of a set raises TypeError in CPython")
             if d.type is not Type.DICT:
                 raise Skip(line, f"dict() of a {TYPE_NAME.get(d.type, d.type.value)} is not supported in an AOT program")
             return ir.DictCopy(Type.DICT, self.kinds_of(d, args[0]), d)

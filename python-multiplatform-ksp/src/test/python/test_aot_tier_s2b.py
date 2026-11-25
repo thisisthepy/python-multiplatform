@@ -579,6 +579,69 @@ def test_tuple_keys(tmp_path: Path):
     _compare(tmp_path, TUPLE_KEYS, [["3", "7", "0"], ["1", "-2", "5"]])
 
 
+SETS = """
+import sys
+
+
+def seen(words: list[str]) -> set[str]:
+    out: set[str] = set()
+    for w in words:
+        out.add(w)
+    return out
+
+
+class Bag:
+    items: set[int]
+
+    def __init__(self) -> None:
+        self.items = {1, 2}
+
+    def put(self, k: int) -> bool:
+        if k in self.items:
+            return False
+        self.items.add(k)
+        return True
+
+
+def main() -> None:
+    words = sys.argv[1].split(",")
+    s = seen(words)
+    print(len(s), "a" in s, "zz" not in s, bool(s), len(set()))
+    t = {"a", "b", "c"}
+    print(s == t, s != t, s <= t, s < t, s >= t, s > t, s.issubset(t), t.issuperset(s), s.isdisjoint({"q"}))
+    u = s | t
+    i = s & t
+    d = s - t
+    x = s ^ t
+    print(len(u), len(i), len(d), len(x), "a" in i, u == t | s, i == t & s)
+    u.discard("a")
+    u.discard("nope")
+    s.update(t)
+    c = s.copy()
+    c.clear()
+    print(len(u), "a" in u, len(s), len(c), c == set())
+    b = Bag()
+    print(b.put(3), b.put(3), b.put(1), len(b.items), 3 in b.items, True in b.items)
+    pairs: set[tuple[int, str]] = {(1, "a")}
+    pairs.add((2, "b"))
+    print((1, "a") in pairs, (2, "a") in pairs, len(pairs))
+    nums = {10, 20}
+    nums.remove(int(sys.argv[2]))
+    print(len(nums), 10 in nums)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_sets_without_their_order(tmp_path: Path):
+    """set[T] of int, str, bool and tuples: displays, set(), add, discard, remove (KeyError(x)), clear, copy, update,
+    in, len, truth, ==, subset tests, | & - ^, as a local, a parameter, a return and a field. Nothing here depends on
+    the order of a set (a loop over one, its repr, pop() are refused: aot/set-order)."""
+    _compare(tmp_path, SETS, [["a,b,a", "10"], ["x", "20"], ["a,b,c,d", "5"]])
+
+
 WORDFREQ = Path(__file__).resolve().parents[4] / "benchmarks" / "typedpython" / "py" / "wordfreq.py"
 
 
@@ -621,6 +684,13 @@ MAIN = '\n\ndef main() -> None:\n    f()\n\n\nif __name__ == "__main__":\n    ma
     ("    d: dict[tuple[int, int], str] = {}\n    d[True, 1] = 'x'\n    print(d)\n", "exactly its elements' types"),
     ("    d: dict[tuple[int, int], str] = {(1, 2): 'x'}\n    print(d[3])\n", "gives a tuple key as a display"),
     ("    d: dict[tuple[float, int], str] = {}\n    print(d)\n", "outside the AOT mode"),
+    # a set: what depends on the order of its table is refused (aot/set-order); a bool is not added to a set of int
+    ("    s = {3, 1, 2}\n    for x in s:\n        print(x)\n", "aot/set-order"),
+    ("    s = {3, 1, 2}\n    print(s)\n", "aot/set-order"),
+    ("    s = {'b', 'a'}\n    print(f'{s}')\n", "aot/set-order"),
+    ("    s = {3, 1, 2}\n    print(s.pop())\n", "aot/set-order"),
+    ("    s = {3, 1, 2}\n    s.add(True)\n    print(len(s))\n", "a bool key"),
+    ("    s = {3, 1, 2}\n    print(s[0])\n", "not subscriptable"),
 ])
 def test_what_a_dict_cannot_hold_yet_is_refused_with_the_reason(tmp_path: Path, body: str, reason: str):
     found = _rules(tmp_path, "def f() -> None:\n" + body + MAIN)

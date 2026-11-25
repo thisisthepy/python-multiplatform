@@ -166,6 +166,20 @@ def test_things_inside_the_subset_are_not_reported(tmp_path):
     assert report.findings == [], report.lines()
 
 
+def test_sets_that_do_not_depend_on_their_order_are_not_reported(tmp_path):
+    """Tier S2b: a set display, `set()` and `set(s)` compile (the front end checks the types); a loop over a set is
+    aot/set-order (the rows above)."""
+    path = write(tmp_path, """
+        def f(s: set[int]) -> int:
+            a: set[int] = set()
+            b = set(s)
+            c = {1, 2} | a
+            return len(b & c)
+    """)
+    report = aotcheck.check(path, front_end=False)
+    assert report.findings == [], report.lines()
+
+
 # --- several findings in one function ---------------------------------------------------------------
 
 def test_every_finding_of_a_function_is_reported(tmp_path):

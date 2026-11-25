@@ -497,8 +497,13 @@ keys follow (`dict[tuple[int, str], V]`, elements int, str or bool): a key tuple
 its elements in order (`d[a, b]`, `d[t]`, `t in d`, `get` / `pop` / `setdefault`), with CPython's equality and repr
 (`(1, 'a')`, `KeyError: (5, 0)`); a loop or `popitem` binds the key to a tuple name (split into its element locals, as
 any tuple) or to one name per element (`for (i, j), v in d.items()`). An element of another type than the key's (a bool
-for an int) is refused: the tuple would keep it. Still to come in S2b: the view objects outside a `for` loop; a dict
-across the library boundary; and `set`.
+for an int) is refused: the tuple would keep it. `set[T]` follows (T int, str, bool or a tuple of them): a dict whose
+values are unused, as a local, a parameter, a return and a field; displays, `set()`, `set(s)`, `add`, `discard`,
+`remove` (`KeyError(x)`), `clear`, `copy`, `update`, `in`, `len`, truth, `==`, the subset tests (`<=`, `<`, `>=`, `>`,
+`issubset`, `issuperset`, `isdisjoint`) and `|`, `&`, `-`, `^` (and the one-set `union`, `intersection`, `difference`,
+`symmetric_difference`). What depends on the order of a set (a loop over one, its repr, `pop()`) follows CPython's set
+table, which this one is not: refused as aot/set-order. Still to come in S2b: the view objects outside a `for` loop; a
+dict across the library boundary; `set(xs)` of a list.
 
 **S2c.** List, dict and set comprehensions (a hidden local per comprehension variable, Python 3 scoping, the
 accumulator built in place), `enumerate`, `zip` (shortest), `reversed`, `range` objects as iterables, in `for` loops

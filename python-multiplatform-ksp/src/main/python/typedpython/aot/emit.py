@@ -72,7 +72,8 @@ STR_LISTS = (Type.STR_LIST, Type.STR_OPT_LIST)     # the `tpa_str_list` types: l
 # dict holds the words 0 and 1, every key marked a bool.
 DICT_KK = {Type.I64: "TPA_DK_INT", Type.STR: "TPA_DK_STR", Type.BOOL: "TPA_DK_I64"}
 DICT_VK = {Type.I64: "TPA_DV_INT", Type.F64: "TPA_DV_F64", Type.BOOL: "TPA_DV_BOOL", Type.STR: "TPA_DV_STR",
-           Type.STR_OPT: "TPA_DV_STR", Type.DICT: "TPA_DV_DICT"}
+           Type.STR_OPT: "TPA_DV_STR", Type.DICT: "TPA_DV_DICT", Type.NONE: "TPA_DV_BOOL"}   # (NONE: a set, every
+#                                                                                           value 1, never read)
 
 
 # the kinds of list the runtime has: `f64`, `i64` (a raw `list[int]`) and `int` (a big-capable `list[int]`: tagged
@@ -997,8 +998,10 @@ class _Fn:
         return t
 
     def dict_kinds(self, e: ir.Expr) -> ir.DictKinds | None:
-        if isinstance(e, (ir.DictDisplay, ir.DictCopy)):
+        if isinstance(e, (ir.DictDisplay, ir.DictCopy, ir.SetDisplay)):
             return e.kinds
+        if isinstance(e, ir.SetOp):
+            return self.dict_kinds(e.left)
         if isinstance(e, ir.Local):
             return self.f.dict_kinds.get(e.name)
         if isinstance(e, ir.FieldGet):
@@ -1120,6 +1123,56 @@ class _Fn:
             if ci:
                 self.emit(f"if (tpa_dict_update({target}, {into})) {self.fail()}")
                 self.emit(f"tpa_dict_drop(&{into});")
+
+    # -- tier S2b: sets, dicts whose values are unused (runtime tpa_set_*)
+
+    def ev_SetDisplay(self, e: ir.SetDisplay) -> str:
+        words = [self.key_word(x, e.kinds[0]) for x in e.elements]      # the elements in order
+        t = self.dslot()
+        kk = "TPA_DK_TUP" if isinstance(e.kinds[0], tuple) else DICT_KK[e.kinds[0]]
+        self.emit(f"if (tpa_dict_new({kk}, TPA_DV_BOOL, 0, &{t})) {self.fail()}")
+        for kw, kb in words:
+            self.emit(f"if (tpa_set_add({t}, {kw}, {kb})) {self.fail()}")
+        return t
+
+    def ev_SetOp(self, e: ir.SetOp) -> str:
+        a = self.dict_of(e.left, "the left operand of a set operator")
+        b = self.dict_of(e.right, "the right operand of a set operator")
+        if a is None or b is None:
+            return "NULL"
+        t = self.dslot()
+        call = {"|": f"tpa_set_or({a[0]}, {b[0]}, &{t})", "&": f"tpa_set_and({a[0]}, {b[0]}, &{t})",
+                "-": f"tpa_set_sub({a[0]}, {b[0]}, 0, &{t})", "^": f"tpa_set_sub({a[0]}, {b[0]}, 1, &{t})"}[e.op]
+        self.emit(f"if ({call}) {self.fail()}")
+        return t
+
+    def ev_SetCompare(self, e: ir.SetCompare) -> str:
+        a = self.dict_of(e.left, "the left operand of a set comparison")
+        b = self.dict_of(e.right, "the right operand of a set comparison")
+        if a is None or b is None:
+            return "0"
+        x, y = a[0], b[0]
+        t = self.tmp("int")
+        test = {"<=": f"tpa_set_within({x}, {y})", "<": f"({x}->used < {y}->used && tpa_set_within({x}, {y}))",
+                ">=": f"tpa_set_within({y}, {x})", ">": f"({y}->used < {x}->used && tpa_set_within({y}, {x}))",
+                "disjoint": f"tpa_set_disjoint({x}, {y})"}[e.op]
+        self.emit(f"{t} = {test};")
+        return t
+
+    def st_SetAdd(self, s: ir.SetAdd) -> None:
+        found = self.dict_of(s.set, "the set added to")
+        if found is None:
+            return
+        kw, kb = self.key_word(s.key, found[1][0])
+        self.emit(f"if (tpa_set_add({found[0]}, {kw}, {kb})) {self.fail()}")
+
+    def st_SetRemove(self, s: ir.SetRemove) -> None:
+        found = self.dict_of(s.set, "the set removed from")
+        if found is None:
+            return
+        kw, kb = self.key_word(s.key, found[1][0])
+        fn = "tpa_set_discard" if s.discard else "tpa_dict_delitem"       # (remove: KeyError(repr(x)), as del d[x])
+        self.emit(f"if ({fn}({found[0]}, {kw}, {kb})) {self.fail()}")
 
     def ev_DictDisplay(self, e: ir.DictDisplay) -> str:
         kt, vt = e.kinds
