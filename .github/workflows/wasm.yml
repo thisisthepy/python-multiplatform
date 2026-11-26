@@ -141,6 +141,11 @@ jobs:
       # to repeat the original defect: if either task would skip -- no interpreter, or no
       # Chromium-family browser for karma -- the build fails naming what was missing, instead of
       # reporting success having run nothing.
+      #
+      # `--continue`: one suite's failure must not hide the other's result. Without it a red
+      # wasmJsNodeTest (run 45829018834: only WasmCompiledWheelTest, Decision 10 (c) c1) stopped Gradle
+      # before wasmJsBrowserTest ran, and the browser suite reported nothing. The step still fails
+      # when either suite does.
       - name: Run wasmJs tests
         run: |
           ./gradlew \
@@ -148,6 +153,7 @@ jobs:
             :python-multiplatform:wasmJsBrowserTest \
             -PwasmPythonDir="$WASM_RUNTIME_DIR" \
             -PrequireWasmRuntime=true \
+            --continue \
             --console=plain
 
       # Belt to the guard's braces, and it guards a different failure: a task that *runs* but
