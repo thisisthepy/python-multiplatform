@@ -82,7 +82,7 @@ jobs:
           [ -d "$root" ] || { echo "no unpacked archive under $FT_WORK/wasm-check"; exit 1; }
           log="$FT_WORK/embed-probe.log"
           set +e
-          timeout 600 node .github/scripts/ft-wasm/embed-probe.mjs "$root" > "$log" 2>&1
+          timeout 600 node python-multiplatform/scripts/wasm/embed-probe.mjs "$root" > "$log" 2>&1
           rc=$?
           set -e
           cat "$log"

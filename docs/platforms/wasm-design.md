@@ -18,7 +18,7 @@ has a browser wasm target. `wasmWasi` is not a target (when last assessed it was
 |---|---|---|
 | How Kotlin reaches CPython | Raw Stable ABI symbols as `@WasmImport`s against the Emscripten module's own wasm exports, **no JS in the call path** | Preserves the exact object model (`NativePointer`, `PyObject`) of every other target; a high-level Pyodide-style JS API (`pyodide.runPython`, `PyProxy`) would replace the whole object model with `JsAny` wrappers and covers almost none of the ~330 C functions |
 | Memory | **One linear memory, CPython's.** Kotlin imports Emscripten's `Module.wasmMemory` as its `intrinsics.memory` | Needs Kotlin ≥ 2.4.20-Beta2, whose `wasmJs` modules **import** `intrinsics.memory` (`min=0, max=none`); releases up to 2.4.10 exported an unbounded memory, which Emscripten cannot import ([`../archive/wasm-youtrack-issue.md`](../archive/wasm-youtrack-issue.md)). The free-threaded pthreads build's memory is **shared**, which that non-shared import cannot take, so the build rewrites the import after the link (SPEC T-7, below) |
-| Where CPython comes from | **Our own Emscripten build**, `python-multiplatform/scripts/wasm/build-cpython.sh`: CPython **3.14.2**, Emscripten **5.0.3**, matched to the `pyemscripten_2026_0` platform of PEP 783 | No distributor ships a `python.wasm` exporting `wasmExports,wasmMemory`. The version is deliberately not the 3.14.x pinned for native targets (`pythonVersion` in `gradle.properties`); see `docs/design/ecosystem.md` |
+| Where CPython comes from | **Our own Emscripten build**, `python-multiplatform/scripts/wasm/build-cpython.sh`: free-threaded CPython **3.15.0t** with pthreads, Emscripten **5.0.3**, matched to the `pyemscripten_2026_0` platform of PEP 783 (owner, #175, 2026-10-04: "The wasm interpreter is also 3.15t, built by us ... with pthreads"; leader, Decision 10 (a) a1 and (b) b1, 2026-11-26) | No distributor ships a free-threaded pthreads `python.wasm`, nor one exporting `wasmExports,wasmMemory`. A shared memory needs a cross-origin isolated page in a browser (SPEC T-8); see `docs/platforms/free-threaded-wasm.md` |
 | C shim / composition | **None** | The hops that composition amortised are gone; measured gain ≤ 2.9 ns per operation (below). It also removes a second build pipeline |
 | `EXPORTED_FUNCTIONS` list | **Not needed** | `-sMAIN_MODULE` is `LINKABLE`, so the whole Stable ABI is exported (all 310 C symbols `EmbedAPI.kt` declared at the time were found in the build's 8287 exports). The build adds `wasmExports,wasmMemory` to `-sEXPORTED_RUNTIME_METHODS`, which is not ABI-sensitive |
 | Upcalls (Python → Kotlin) | `@WasmExport` trampolines placed in CPython's `__indirect_function_table` with `WebAssembly.Table.set`; the table index is the C function pointer. Routing is by data (a handle in `self`/`closure`), through the generated table, as on every platform | A funcref is a funcref: `call_indirect` reaches the Kotlin export directly. Measured 3.1 ns vs 10.9 ns for the `addFunction` + JS-closure route |
@@ -105,21 +105,25 @@ Corrections that came out of measuring (they changed the design):
 
 ## The interpreter build and the platform tag
 
-`python-multiplatform/scripts/wasm/build-cpython.sh` builds CPython 3.14.2 with CPython's own `Tools/wasm/emscripten` driver
-plus the changes that make it claim `pyemscripten_2026_0` (PEP 783):
+`python-multiplatform/scripts/wasm/build-cpython.sh` builds free-threaded CPython 3.15.0 (`--disable-gil --enable-wasm-pthreads`)
+with CPython's own `Platforms/emscripten` driver plus the changes that make it claim `pyemscripten_2026_0`
+(PEP 783). The thread-specific changes (pthread flags, the JS call trampoline under a shared memory,
+the `_pm_upcall` module, `ac_cv_func_ppoll=no`) are listed in the script's header:
 
 | | stock Tier 3 build | this build |
 |---|---|---|
 | Unwinding ABI `-fwasm-exceptions -sSUPPORT_LONGJMP=wasm` at compile **and** link | absent | **present, this is the one that gates loading a compiled wheel** (the side module imports the `__cpp_exception` tag) |
-| `PYEMSCRIPTEN_PLATFORM_VERSION` | not defined anywhere in CPython 3.14.2 | defined via a patch to `sysconfig` (`_ALWAYS_STR`; otherwise `int('2026_0') == 20260` silently yields the tag `pyemscripten_20260_wasm32`) |
+| `PYEMSCRIPTEN_PLATFORM_VERSION` | not defined anywhere in CPython 3.15.0 (nor 3.14.2) | defined via a patch to `sysconfig` (`_ALWAYS_STR`; otherwise `int('2026_0') == 20260` silently yields the tag `pyemscripten_20260_wasm32`) |
 | `wasmExports,wasmMemory,wasmTable` in `-sEXPORTED_RUNTIME_METHODS` | no | yes (not ABI-sensitive) |
 | `lzma`, `zstd`, OpenSSL | missing | **still missing**, ABI-sensitive per Pyodide's flag list but they did not gate the wheel tested; costs `_lzma`, `_zstd`, `_hashlib`, `_ssl` |
 
-Evidence: a real PyPI wheel, `pydantic_core-2.48.0-cp314-cp314-pyemscripten_2026_0_wasm32.whl`, imports
-and runs on this build (`validate_python(42) -> 42`, a `ValidationError` raised and caught, the
+Evidence, from the 3.14.2 GIL build this replaced: a real PyPI wheel, `pydantic_core-2.48.0-cp314-cp314-pyemscripten_2026_0_wasm32.whl`, imported
+and ran on that build (`validate_python(42) -> 42`, a `ValidationError` raised and caught, the
 exception exercises the unwinding ABI), and fails with `tag import requires a WebAssembly.Tag` on the
 stock build. This is one wheel and one code path; it does not show that every compiled extension
-loads. `WasmCompiledWheelTest` runs it (`python-multiplatform/scripts/wasm/build-cpython.sh wheels` fetches the pinned wheels);
+loads. A cp314 wheel does not load in 3.15t, so `WasmCompiledWheelTest` now waits for a pypackpack-built
+cp315t wheel (leader, Decision 10 (c) c1, 2026-11-26; pypackpack #82) and until then reports a named
+skip that fails under `-PrequireWasmRuntime` (`python-multiplatform/scripts/wasm/build-cpython.sh wheels` pins none yet);
 `WasmInterpreterAbiTest` checks the claims, with `python-multiplatform/scripts/wasm/build-cpython.sh stock` as the negative
 control. Emscripten is pinned to 5.0.3 because that is what the platform specifies, and installing it
 replaces `~/emsdk/upstream` in place (a global setting).

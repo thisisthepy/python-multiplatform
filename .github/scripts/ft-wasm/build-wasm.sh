@@ -20,6 +20,9 @@
 # Emscripten 5.0.3. The flags below are the #175 investigation's proposal, not a decision.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
+# _pm_upcall.c, smoke.py and embed-probe.mjs live beside build-cpython.sh, which builds the same
+# runtime for the library (Decision 10 a1); this script is deleted once wasm.yml is green on it.
+wasm_scripts="$(cd "$here/../../../python-multiplatform/scripts/wasm" && pwd)"
 
 export FT_WORK="${FT_WORK:-$PWD/.tmp/ft-wasm}"
 export FT_OUT="${FT_OUT:-$PWD/.tmp/ft-wasm-out}"
@@ -213,7 +216,7 @@ patch_makefile_exports
 # Built in statically through the build tree's Modules/Setup.local (configure leaves an empty
 # one there; makesetup reads it and finds the source under $(srcdir)/Modules). Its exported
 # functions (EMSCRIPTEN_KEEPALIVE) are checked below; smoke.py tests the routing.
-cp "$here/_pm_upcall.c" Modules/_pm_upcall.c
+cp "$wasm_scripts/_pm_upcall.c" Modules/_pm_upcall.c
 printf '*static*\n_pm_upcall _pm_upcall.c\n' >> "$hostdir/Modules/Setup.local"
 log "Setup.local: $(tr '\n' ' ' < "$hostdir/Modules/Setup.local")"
 
@@ -276,7 +279,7 @@ run_smoke() {
     local label="$1"; shift
     local out="$FT_WORK/smoke-$label.log" rc
     set +e
-    timeout 600 "$@" "$here/smoke.py" > "$out" 2>&1
+    timeout 600 "$@" "$wasm_scripts/smoke.py" > "$out" 2>&1
     rc=$?
     set -e
     cat "$out"

@@ -20,7 +20,7 @@ import kotlin.test.assertTrue
  *
  * What this cannot find: what Android, androidNative, iOS and wasm embed. Their literal values are
  * pinned in their own test source sets (`AndroidFreeThreadedBuildTest`,
- * `AndroidNativeFreeThreadedBuildTest`, `IosFreeThreadedBuildTest`, `WasmGilBuildTest`).
+ * `AndroidNativeFreeThreadedBuildTest`, `IosFreeThreadedBuildTest`, `WasmFreeThreadedBuildTest`).
  */
 class DesktopFreeThreadedBuildTest {
 

@@ -21,6 +21,11 @@ import python.multiplatform.ffi.PythonTestFixture
  *
  *     LinkError: Import #204 "env" "__cpp_exception": tag import requires a WebAssembly.Tag
  *
+ * Decision 10 (c) c1 (leader, 2026-11-26): the runtime is now 3.15t, so the cp314 wheel below no longer
+ * loads; this test moves to a pypackpack-built cp315t wheel when pypackpack #82 produces one (the body is
+ * then rewritten for that wheel). Until then it reports a named skip, and fails under
+ * `-PrequireWasmRuntime=true`, never a silent pass.
+ *
  * The wheels are not in the repository. `python-multiplatform/scripts/wasm/build-cpython.sh wheels` downloads them by URL
  * with pinned sha256 into `.caches/wasm-wheels`, and the test task extracts them next to the test
  * bundle. Without them this test skips with that instruction, and under `-PrequireWasmRuntime=true`
@@ -38,9 +43,10 @@ class WasmCompiledWheelTest {
             )
         val site = PMP_TEST_SITE_PACKAGES?.toString()
         if (site == null) {
-            val message = "no pyemscripten_2026_0 wheels found in ${PMP_TEST_WHEELS_DIR?.toString()}. " +
-                "Run python-multiplatform/scripts/wasm/build-cpython.sh wheels -- it downloads the pinned pydantic-core and " +
-                "typing-extensions wheels there -- and re-run this task."
+            val message = "no cp315t pyemscripten_2026_0 wheel in ${PMP_TEST_WHEELS_DIR?.toString()}: " +
+                "waiting on a pypackpack-built cp315t wheel (pypackpack #82, Decision 10 c1, leader " +
+                "2026-11-26). The cp314 pydantic-core wheel the 3.14.2 runtime loaded cannot load into " +
+                "3.15t, and no cp315t wheel is pinned in build-cpython.sh's WHEELS yet."
             if (required.toBoolean()) {
                 fail("$message -PrequireWasmRuntime=true was passed, so this is a failure rather than a skip.")
             }

@@ -881,8 +881,9 @@ def __pmp_run_file__(path, argv):
      * released since the previous one, so a workload that never drops a wrapper never pays.
      *
      * Which build that is depends on the platform ([python.multiplatform.embedsFreeThreadedPython]):
-     * desktop, Android, androidNative and iOS embed 3.15t (issues #158, #328), so this defaults to
-     * on there; wasm embeds a GIL build until #175, so it defaults to off there.
+     * desktop, Android, androidNative, iOS and wasm embed 3.15t (issues #158, #328, #175), so this
+     * defaults to on everywhere the library ships today; the GIL branch below is kept for the
+     * `expect`'s other value.
      *
      * Defaults to on for free-threaded builds, where deferred release is the defect described on
      * [drainPendingReleases], a build with the global lock frees a *plain* reference the

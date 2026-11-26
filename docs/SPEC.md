@@ -1294,24 +1294,28 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   desktop JVM, `macosArm64` and `linuxX64` embed the free-threaded CPython 3.15t, with no GIL option
   (`-PpythonFreeThreaded` is removed and the build fails if it is passed); Android (ART on arm64-v8a
   and x86_64, and androidNative) and iOS embed the project's own free-threaded CPython 3.15t (T-2), with
-  no GIL option either; wasm embeds a GIL CPython until #175. The fact is per platform
-  (`embedsFreeThreadedPython`, an `expect`/`actual`, kept while wasm is the exception), and
+  no GIL option either; wasm (wasmJs) embeds the project's own free-threaded CPython 3.15t built with
+  pthreads by `python-multiplatform/scripts/wasm/build-cpython.sh` (#175; owner, 2026-10-04: "The wasm
+  interpreter is also 3.15t, built by us ... with pthreads"; leader, Decision 10 (a) a1, 2026-11-26), and
+  in a browser needs a cross-origin isolated page (T-8). The fact is per platform
+  (`embedsFreeThreadedPython`, an `expect`/`actual`), and
   `Versions.abiFlags` (`t` or empty) and every name derived from it (`libpython3.15t`, `lib/python3.15t/`,
-  `libmultiplatform_python3.15t.so`) follow it. On the GIL platform Kotlin threads attach a thread state
-  and serialise on the GIL.
+  `libmultiplatform_python3.15t.so`) follow it.
   `Status: implemented` on desktop, Android and iOS (CI run 44889681538, 2026-11-21: the Android x86_64
   emulator, API 34, ran the instrumented suite on 3.15t, 539 tests, 0 failed, `AndroidFreeThreadedBuildTest`
   among them; the iOS simulator ran the library suite on 3.15t, 513 tests, 0 failed, `IosFreeThreadedBuildTest`
   among them, and the plugin-staged `ios-consumer` app printed `IOS_CONSUMER_PROBE stdlib=ok ext=ok payload=ok
   ft=ok`; jobs `android-native.yml` `emulator` and `ios.yml` `ios-consumer`, owner-approved 2026-11-21, #328);
   `partial` on androidNative (compiled against 3.15t, its `artTest` not run on a device or emulator) and
-  wasm (GIL build until #175),
+  wasm (3.15t `wasmJsNodeTest` run locally only; `wasm.yml`'s test job, which builds the runtime itself,
+  has not run in CI yet, ROADMAP 10.1),
   `PM/desktopTest/.../DesktopFreeThreadedBuildTest.kt` (ABI flags, `Py_GIL_DISABLED` of the loaded
   interpreter, checkpoint default), `PM/desktopNativeTest/.../DesktopNativeFreeThreadedBuildTest.kt`,
   `PM/androidInstrumentedTest/.../AndroidFreeThreadedBuildTest.kt` (ABI flags, stdlib path, the AAR's
   `python.properties`, `Py_GIL_DISABLED` of the loaded interpreter, checkpoint default),
   `PM/artTest/.../AndroidNativeFreeThreadedBuildTest.kt`, `PM/iosSimulatorArm64Test/.../IosFreeThreadedBuildTest.kt`,
-  `PM/wasmJsTest/.../WasmGilBuildTest.kt`,
+  `PM/wasmJsTest/.../WasmFreeThreadedBuildTest.kt` (ABI flags, `Py_GIL_DISABLED` of the loaded
+  interpreter, `sys._is_gil_enabled()`),
   `PM/commonTest/.../VersionsTest.kt`; the release after initialisation is tested by `GilReleaseTest` /
   `GilReleaseNativeTest` (see C-4).
 - **T-1a** On desktop, Python may be entered from a JVM virtual thread (#161 option B, user decision):
