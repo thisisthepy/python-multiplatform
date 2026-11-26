@@ -519,13 +519,14 @@ KeysView does not name the values of its dict, nor a ValuesView its keys, and th
 `KeysView[str]` parameter takes the keys of a `dict[str, int]` and of a `dict[str, float]` alike (`ir.view_match`).
 The argument is a view of that half (`d.keys()`, a view name, a call of a function returning one); a dict or another
 view is refused naming both views. A call returning a view is used as a view is (a `for` loop, len(), `in`, its truth,
-the repr, binding it to a view name, passing it on). A method does not return a view yet, and a view does not cross the library
-boundary (aot/export). In a library an export may bind views of its dict
+the repr, binding it to a view name, passing it on). A method returns a view the same way (`def names(self) ->
+KeysView[str]: return self.items.keys()`, called as `obj.names()` on a local of the class, the call method_call
+makes directly); a view does not cross the library boundary (aot/export). In a library an export may bind views of its dict
 parameter: a view name is only read, so it is no write (aot/library-dict-write). `set(xs)` of a list[str] or list[int] name and `set([a, b])`
 follow too. A dict crosses the library boundary as `dict[int, int]`, `dict[int, float]` and `dict[int, bool]` (8.1 to
 8.3, ABI version 3): the library only reads a dict parameter of an export (aot/library-dict-write otherwise, through
-the callees it is passed to), so one handle may be shared by threads without the per-dict lock of tier T. Still to come
-in S2b: a method that returns a view.
+the callees it is passed to), so one handle may be shared by threads without the per-dict lock of tier T. What S2b
+listed is in place (agent proposal, not confirmed).
 
 **S2c.** List, dict and set comprehensions (a hidden local per comprehension variable, Python 3 scoping, the
 accumulator built in place). First step in (agent proposal, not confirmed): a comprehension that is the whole value

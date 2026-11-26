@@ -1282,9 +1282,6 @@ def _signature(fn: ast.FunctionDef, classes: dict[str, ir.ClassDecl] | None = No
         elif (ret_kinds := _dict_list_kinds(_annotation_kind(fn.returns))) is not None:
             returns = Type.DICT_LIST                                        # tier S2b: list[dict[K, V]]
         elif (vk := _view_kinds(_annotation_kind(fn.returns))) is not None:
-            if owner is not None:
-                raise Skip(line, f"method `{fn.name}` returns a view ({_src(fn.returns)}): a view is returned by a "
-                                 "module function, not yet by a method")
             returns = Type.DICT                                             # tier S2b: a view, its dict returned
             ret_view, ret_kinds = vk
     if returns == Type.OBJ and classes:
@@ -2610,13 +2607,20 @@ class _Lowerer:
         return self.value(dnode)
 
     def view_call(self, node: ast.expr) -> ir.Function | None:
-        """The program function `node` calls when it returns a view (`-> KeysView[K]`, ...), else None."""
-        if self.info.aot and isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
-                and not self.is_local(node.func.id):
+        """The program function or method `node` calls when it returns a view (`-> KeysView[K]`, ...), else None. A
+        method is the one method_call calls directly: `obj.m(...)` of a local `obj` of a compiled class."""
+        if not (self.info.aot and isinstance(node, ast.Call)):
+            return None
+        f: ir.Function | None = None
+        if isinstance(node.func, ast.Name) and not self.is_local(node.func.id):
             f = self.env.get(node.func.id)
-            if f is not None and f.return_view is not None:
-                return f
-        return None
+        elif isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) \
+                and self.is_local(node.func.value.id):
+            cls, _ = self.cls_of_name(node.func.value.id)
+            f = self.env.get(f"{cls}.{node.func.attr}") if cls is not None else None
+            if f is not None and f.owner != cls:
+                f = None
+        return f if f is not None and f.return_view is not None else None
 
     def view_arg(self, a: ast.expr, view: str, kinds: ir.DictKinds, what: str) -> ir.Expr:
         """The view `a` passed to (or returned as) `what`, a view `view` of a dict of `kinds`: the view's dict."""
@@ -5137,6 +5141,10 @@ class _Lowerer:
             return None
         assert cls is not None
         if self.info.aot:
+            if callee.return_view is not None and not self.view_call_ok:       # tier S2b: as aot_call
+                assert callee.return_kinds is not None
+                raise Skip(node.lineno, _view_misuse(f"`{_src(node)}`", callee.return_view, callee.return_kinds))
+            self.view_call_ok = False
             self.check_not_none(func.value.id, cls, func.value)
             recv: ir.Expr = ir.Local(Type.OBJ, func.value.id)
             self.hoist_ok = False
