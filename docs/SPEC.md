@@ -206,7 +206,12 @@ fail, then implement.
   (`src/commonMain/python/python_multiplatform_devagent.py`, generated into Kotlin by `generateDevAgentSource`)
   as the module `python_multiplatform_devagent` and it listens on 127.0.0.1 only. The marker is the build-time
   switch: this library is one artifact for debug and release, so the app's build decides, and toolchain stages
-  the marker into debug variants only. Without it the variable is ignored with a warning and no port opens. The
+  the marker into debug variants only. Without it the variable is ignored with a warning and no port opens. When
+  the variable is unset, the marker's content is the request, in the same grammar and with the same token check,
+  because an installed Android or iOS app is given no environment variable (toolchain #154, its Decision 15 (a),
+  toolchain team report 2026-11-25 relayed by the leader; #543). The variable wins when set, and an empty marker
+  means no agent. The default overlay is `tempfile.mkdtemp()`, which is writable on Android because
+  `PythonBootstrap` sets `TMPDIR` to the app's `cacheDir` (`PythonBootstrapTest.initializeLeavesTempfileUsable`). The
   token must be at least 43 characters (`secrets.token_urlsafe(32)`), or the agent refuses to start. The listening
   socket cannot be bound by another socket while it listens: `SO_EXCLUSIVEADDRUSE` on Windows; on POSIX,
   `SO_REUSEADDR` only so that a restarted app can rebind the launcher's port past TIME_WAIT. A connection's first
@@ -218,12 +223,14 @@ fail, then implement.
   and does not stop the app. `Status: partial`: desktop
   (`PM/desktopTest/.../env/PythonDevAgentTest.kt`: the embedded agent answers over loopback; a child JVM with the
   marker and the variable has an agent on that port, one without the variable has none, one without the marker
-  (a release build) opens no port with the variable set, and a short token opens no port; the protocol, token
+  (a release build) opens no port with the variable set, and a short token opens no port; with the variable unset,
+  one whose marker holds the request has an agent on that port, the variable wins over the marker, and a marker
+  with a short token opens no port; the protocol, token
   length, port takeover and restart: `python-multiplatform/src/test/python/test_devagent.py`, CI `Dev agent
   protocol tests` on macOS and the `dev-agent` job on ubuntu and windows (#238; with `SO_EXCLUSIVEADDRUSE`
   removed, the Windows takeover test fails, checked once); toolchain stages the marker for `enableHotReload`
-  builds and passes the variable to the desktop run tasks (toolchain#105), but nothing sets the variable on
-  Android or iOS yet (toolchain's M2, M3); no interrupt; `execute` runs on the agent's thread (no main-thread dispatch yet).
+  builds and passes the variable to the desktop run tasks (toolchain#105), but nothing writes the
+  request into an Android or iOS marker in develop yet (toolchain #154, M2; M3); no interrupt; `execute` runs on the agent's thread (no main-thread dispatch yet).
 
 ## 2. Low-level C API (downcall surface)
 

@@ -110,6 +110,58 @@ class PythonDevAgentTest {
         }
     }
 
+    /**
+     * Android and iOS cannot give an installed app an environment variable, so toolchain writes the request into
+     * the marker of a debug staging (toolchain #154, Decision 15 (a)). With the variable unset, the marker's
+     * content is the request.
+     */
+    @Test
+    fun `with the variable unset, the marker's content is the request`() {
+        val port = ServerSocket(0).use { it.localPort }
+        val fromMarker = launchProbe(request = false, debugBuild = true, port = port, marker = "port=$port;token=$token\n")
+        try {
+            fromMarker.awaitLine("python-multiplatform dev agent: listening on 127.0.0.1:$port")
+            Socket("127.0.0.1", port).use { socket ->
+                socket.soTimeout = 10_000
+                val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
+                socket.getOutputStream().apply {
+                    write("{\"id\": 1, \"op\": \"hello\", \"token\": \"$token\"}\n".toByteArray())
+                    flush()
+                }
+                assertTrue("\"type\": \"hello\"" in reader.readLine())
+            }
+        } finally {
+            fromMarker.process.destroyForcibly()
+        }
+    }
+
+    /** The variable wins over the marker: the agent listens on the variable's port, not the marker's. */
+    @Test
+    fun `the variable wins over the marker`() {
+        val markerPort = ServerSocket(0).use { it.localPort }
+        val both = launchProbe(request = true, debugBuild = true, marker = "port=$markerPort;token=$token")
+        try {
+            both.awaitLine("python-multiplatform dev agent: listening on 127.0.0.1:${both.port}")
+            assertFailsWith<ConnectException> { Socket("127.0.0.1", markerPort).close() }
+        } finally {
+            both.process.destroyForcibly()
+        }
+    }
+
+    /** A marker that holds a malformed request or a short token opens no port, and says why. */
+    @Test
+    fun `a marker with a short token opens no port`() {
+        val port = ServerSocket(0).use { it.localPort }
+        val short = launchProbe(request = false, debugBuild = true, port = port, marker = "port=$port;token=short-token")
+        try {
+            short.awaitLine(DevAgentProbe.READY)
+            assertFailsWith<ConnectException> { Socket("127.0.0.1", port).close() }
+            assertTrue(short.log.readText().contains("refusing to start"), short.log.readText())
+        } finally {
+            short.process.destroyForcibly()
+        }
+    }
+
     /** A token shorter than the agent's minimum is refused before anything listens. */
     @Test
     fun `a debug build refuses a short token and opens no port`() {
@@ -139,13 +191,18 @@ class PythonDevAgentTest {
      * [debugBuild] stages a payload as toolchain does for a debug variant: a `python/` root on the class path
      * with a module and the marker. A release variant's payload is the same without the marker.
      */
-    private fun launchProbe(request: Boolean, debugBuild: Boolean, token: String = this.token): Probe {
-        val port = ServerSocket(0).use { it.localPort }
+    private fun launchProbe(
+        request: Boolean,
+        debugBuild: Boolean,
+        token: String = this.token,
+        port: Int = ServerSocket(0).use { it.localPort },
+        marker: String = "",
+    ): Probe {
         val workDir = Files.createTempDirectory("pmp-devagent-probe").toFile()
         val log = File(workDir, "probe.log")
         val payload = File(workDir, "classes/${PythonPayload.PAYLOAD_ROOT}").apply { mkdirs() }
         File(payload, "devagent_probe_app.py").writeText("VALUE = 1\n")
-        if (debugBuild) File(payload, PythonDevAgent.ENABLE_MARKER).writeText("")
+        if (debugBuild) File(payload, PythonDevAgent.ENABLE_MARKER).writeText(marker)
         val command = listOf(
             File(System.getProperty("java.home"), "bin/java").path,
             "--enable-preview",
