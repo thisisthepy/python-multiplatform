@@ -62,7 +62,9 @@
 #                     -sEXPORTED_RUNTIME_METHODS. Not ABI-sensitive; needed so Kotlin can bind.
 #   7. no ppoll       ac_cv_func_ppoll=no: 3.15's select.poll() prefers ppoll(), which Emscripten links
 #                     as an ENOSYS stub, so poll() always raised and selectors fell back to select().
-#   8. NOT DONE       lzma, zstd and OpenSSL are still missing (as in the 3.14.2 build this replaces).
+#   8. JSPI I/O       Python/emscripten_syscalls.c takes its JSPI fd_read/poll path only under the
+#                     promising main(); in a pthread or an embedder it threw SuspendError on node 24.
+#   9. NOT DONE       lzma, zstd and OpenSSL are still missing (as in the 3.14.2 build this replaces).
 #
 # TRAP: the driver hardcodes CFLAGS=-DPY_CALL_TRAMPOLINE -sUSE_BZIP2 in its configure argv and
 # appends user args AFTER; autoconf takes the last assignment, so the full string must be repeated or
@@ -193,6 +195,35 @@ if marker not in t:
 PATCH
 }
 
+# CPython's Python/emscripten_syscalls.c routes fd_read and poll through JSPI (a promise and
+# WebAssembly.Suspending) whenever the engine has WebAssembly.promising, which node 24 has by default.
+# Suspending works only below the promising wrapper CPython puts around main(). A pthread is not below
+# it, and neither is an embedder that never calls main(), so there the first poll() threw
+# "SuspendError: trying to suspend without WebAssembly.promising" (#542 CI run 45742320989, node
+# 24.22.3: smoke.py's select.poll() in its pthread main; node 22 has no JSPI and passed). The patch
+# marks the promising main in this JS context and takes the async path only under it; everywhere else
+# fd_read and poll go to Emscripten's synchronous implementations.
+patch_syscalls() {
+  python3 - "$CHECKOUT/Python/emscripten_syscalls.c" <<'PATCH'
+import sys
+from pathlib import Path
+p = Path(sys.argv[1]); t = p.read_text()
+marker = "pmp-542: JSPI only under the promising main"
+if marker not in t:
+    guard = "    if (!WebAssembly.promising) {\n        return null;\n    }\n"
+    assert t.count(guard) == 2, "the fd_read/poll JSPI guards changed shape; re-check the patch"
+    t = t.replace(guard,
+                  "    // " + marker + " (pthreads and embedders are not below it).\n"
+                  "    if (!WebAssembly.promising || !Module.__pmPromisingMain) {\n"
+                  "        return null;\n    }\n")
+    old = "            orig.sym = (...args) => {\n"
+    assert t.count(old) == 1, "the promising main wrapper changed shape; re-check the patch"
+    t = t.replace(old, old + "                Module.__pmPromisingMain = true; // " + marker + "\n")
+    p.write_text(t)
+    print("patched Python/emscripten_syscalls.c (JSPI fd_read/poll only under the promising main)")
+PATCH
+}
+
 # --- the native build Python, libffi and mpdec ---------------------------------------------------------
 # The build Python is free-threaded too. libffi and mpdec get -pthread through EMCC_CFLAGS (emcc appends
 # it to every invocation), checked by the archives' target_features section ("+", 7, "atomics").
@@ -275,6 +306,7 @@ do_build() {
   ensure_emsdk
   ensure_checkout
   patch_trampoline
+  patch_syscalls
   ensure_prerequisites
   patch_sysconfig
   ( cd "$CHECKOUT" &&
