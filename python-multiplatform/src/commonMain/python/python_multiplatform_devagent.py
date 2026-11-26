@@ -5,7 +5,8 @@ python-multiplatform SPEC L-12, issue #233; the design is toolchain's docs/desig
 The runtime starts it from `Python3.initialize()` only when the launcher sets the environment variable
 `PYTHON_MULTIPLATFORM_DEV_AGENT` to `port=<n>;token=<t>[;overlay=<dir>]` (a debug launch does; a release
 build never does), and only in a build that staged the enabling marker (the runtime checks that; see
-`PythonDevAgent.kt`). It listens on 127.0.0.1 only. The token must be at least `MIN_TOKEN_LENGTH` characters
+`PythonDevAgent.kt`). When the variable is unset, the marker's content is the request, in the same grammar
+(an installed Android or iOS app gets no environment variable); an empty marker means no agent. It listens on 127.0.0.1 only. The token must be at least `MIN_TOKEN_LENGTH` characters
 (`secrets.token_urlsafe(32)`), or the agent refuses to start. A connection's first message must be `hello`
 with the token; anything else closes the connection.
 
@@ -64,9 +65,28 @@ def parse_request(value):
     return {"port": port, "token": token, "overlay": fields.get("overlay") or None}
 
 
-def start_from_env():
-    """Start an agent when the launcher asked for one; return it, or None when it did not."""
-    value = os.environ.get(ENVIRONMENT_VARIABLE)
+def request_text(environ_value, marker_path):
+    """The request: the variable when it is set, else the enabling marker's content; None for neither.
+
+    An installed Android or iOS app cannot be given an environment variable, so toolchain writes the request
+    into the marker of a debug staging (SPEC L-12). An empty marker is the switch alone and means no agent.
+    """
+    if environ_value:
+        return environ_value
+    if not marker_path:
+        return None
+    try:
+        with open(marker_path, encoding="utf-8") as f:
+            text = f.read().strip()
+    except OSError:
+        return None
+    return text or None
+
+
+def start_from_env(marker_path=None):
+    """Start an agent when the launcher asked for one (the variable, else the marker at `marker_path`);
+    return it, or None when it did not."""
+    value = request_text(os.environ.get(ENVIRONMENT_VARIABLE), marker_path)
     if not value:
         return None
     request = parse_request(value)
