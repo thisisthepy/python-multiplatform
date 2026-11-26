@@ -202,7 +202,7 @@ Honest summary, see the [roadmap](docs/roadmap/ROADMAP.md) for what is left to d
 | Binding prebuilt jars, Compose from Python | ✅ desktop · ⏳ Android / iOS / wasm |
 | Binding Kotlin/Native klibs | 🟡 scanner only |
 | `.pyi` stub generation | 🟡 partial |
-| Free-threaded CPython 3.15t (the only build on desktop since #158 and on Android / iOS since #328; wasm GIL until #175) | 🟡 desktop · 🟡 Android / iOS (compiled, not yet run on emulator or simulator) · ⏳ wasm |
+| Free-threaded CPython 3.15t (the only build on desktop since #158, on Android / iOS since #328 and on wasm since #175) | 🟡 desktop · 🟡 Android / iOS (compiled, not yet run on emulator or simulator) · ⏳ wasm |
 
 ## 🧱 The ecosystem
 

@@ -14,7 +14,7 @@ the build differs by platform (SPEC T-1):
 |---|---|---|
 | Desktop JVM, `macosArm64`, `linuxX64` | `python3.15t` (free-threaded), the only desktop build | Each Kotlin thread talks to its own free-running Python thread |
 | Android (ART, androidNative; arm64-v8a and x86_64), iOS | `python3.15t` (free-threaded), the project's own build, the only mobile build since #328 | Each Kotlin thread talks to its own free-running Python thread (not yet run on an emulator or simulator) |
-| wasmJs | GIL until #175 | single-threaded |
+| wasmJs | `python3.15t` (free-threaded) with pthreads, the project's own build (`scripts/wasm/build-cpython.sh`, #175) | Kotlin runs on the main runtime thread only; Python threads are pthreads (Web Workers), and their upcalls and proxy slots are routed to the main thread by the `_pm_upcall` module. A browser page must be cross-origin isolated (SPEC T-8) |
 
 The per-platform fact is `embedsFreeThreadedPython` (commonMain `EmbeddedPythonBuild.kt`, an
 `expect`/`actual`); `-PpythonFreeThreaded` is removed. The interpreter version is pinned by

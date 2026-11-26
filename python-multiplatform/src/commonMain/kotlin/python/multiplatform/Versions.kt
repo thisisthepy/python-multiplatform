@@ -52,7 +52,7 @@ class Versions private constructor(val versionString: String) {
      *
      * This is a property of the *build*, not of the version -- 3.15 ships in both flavours out of
      * the same source tree -- and of the *platform*: desktop (JVM and Kotlin/Native), Android,
-     * androidNative and iOS embed 3.15t (issues #158, #328), wasm a GIL build until #175. So it
+     * androidNative, iOS and wasm embed 3.15t (issues #158, #328, #175). So it
      * comes from the per-platform [embedsFreeThreadedPython] rather than from [versionString].
      */
     val abiFlags: String

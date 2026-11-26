@@ -95,7 +95,8 @@ class WasmBrowserRuntimeTest {
                     """
                     import sys, json, os
                     assert sys.prefix == '/', 'sys.prefix is ' + sys.prefix
-                    zip_name = '/lib/python%d%d.zip' % sys.version_info[:2]
+                    # getpath's landmark carries the ABI flags: /lib/python315t.zip on 3.15t.
+                    zip_name = '/lib/python%d%d%s.zip' % (*sys.version_info[:2], sys.abiflags)
                     assert os.path.exists(zip_name), zip_name + ' is not in the filesystem'
                     assert json.__file__.startswith(zip_name), json.__file__
                     """.trimIndent()

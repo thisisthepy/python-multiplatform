@@ -182,7 +182,8 @@ free-threaded ones, are pinned in `python-checksums.properties`.
 
 - **9.1 `autoDrainInterval`'s default on the GIL build, open (decision).** Today
   `if (embedsFreeThreadedPython) 32 else 0` (`Python3.kt`), so on by default on desktop, Android and
-  iOS (#328) and off only on wasm until #175; once wasm is free-threaded this question closes. Off means a pure C-API embedder never
+  iOS (#328), and on wasm since #175 flipped `embedsFreeThreadedPython` there; with no GIL platform
+  left this question closes when that lands in develop. Off means a pure C-API embedder never
   runs the cyclic collector: 20 000+ cyclic objects left with the automatic path off against ~1 970
   with it on (`docs/investigations/gc-scheduling-investigation.md` §6–§7). On means a `__del__` or
   weakref callback can run at a `withGIL` exit the caller did not ask to yield from. The checkpoint
@@ -197,7 +198,8 @@ free-threaded ones, are pinned in `python-checksums.properties`.
   `freeThreaded=true`; the python.org and BeeWare GIL mobile archives and their pins are gone. Left:
   an Android emulator run (`AndroidFreeThreadedBuildTest`, the instrumented suite, the androidNative
   suite) and an iOS simulator run (`IosFreeThreadedBuildTest`, the ios-consumer fixture, sample DEMO
-  1/8) with `Py_GIL_DISABLED` observed at run time; then wasm (#175). SPEC N-1.
+  1/8) with `Py_GIL_DISABLED` observed at run time; then wasm (#175: `embedsFreeThreadedPython` is
+  true on wasmJs and `build-cpython.sh` builds 3.15t with pthreads; CI evidence is 10.1). SPEC N-1.
 
 ## 10. WASM
 
@@ -210,12 +212,13 @@ cycles, interning and `Py_ssize_t` are closed (`PM/wasmJsTest/`: `WasmFinalizati
 (`docs/platforms/wasm-design.md`). Old §10c/§10d (browser test, CI split) are closed; their open
 remainder is 10.1.
 
-- **10.1 The wasm test suite does not run in CI, open.** `.github/workflows/wasm.yml` runs the
-  `test` job only when the repository variable `WASM_RUNTIME_URL` is set. It is not set (observed
-  2026-10-03: `gh variable list` empty; the latest `develop` run shows "WasmJS Node + browser tests:
-  skipped", compile job green). What closes it is uploading the
-  `python-multiplatform-wasm-runtime` zip (7.0 MB) somewhere a runner can fetch and setting the
-  variable; see also 15.1.
+- **10.1 The wasm test suite does not run in CI, in progress (#175).** `.github/workflows/wasm.yml`
+  ran the `test` job only when the repository variable `WASM_RUNTIME_URL` was set, and it never was
+  (observed 2026-10-03: `gh variable list` empty; "WasmJS Node + browser tests: skipped"). Leader,
+  Decision 11 (a), 2026-11-26: "wasm.yml's test job runs build-cpython.sh itself, output in
+  actions/cache keyed on the script and _pm_upcall.c hashes. No release asset." The job now does
+  that; it closes when a dispatched `ci.yml` shows the job green. Until pypackpack #82 ships a cp315t
+  wheel, `WasmCompiledWheelTest` fails it by name (Decision 10 (c) c1).
 - **10.2 `suspend` upcalls and `asyncio` on wasm, open.** SPEC U-5 is `planned` on wasm (no threads),
   and `import asyncio` traps the instance (`asyncio.run` wants `socketpair`); the sample skips
   section 7 there (`sample/src/wasmJsMain/.../bindings/ProxyDemo.wasmJs.kt`).

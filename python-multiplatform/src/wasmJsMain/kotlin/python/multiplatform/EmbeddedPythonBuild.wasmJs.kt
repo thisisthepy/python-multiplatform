@@ -1,4 +1,7 @@
 package python.multiplatform
 
-/** wasmJs runs a GIL CPython built for wasm32-emscripten until #175. See the `expect` in commonMain. */
-internal actual val embedsFreeThreadedPython: Boolean = false
+/**
+ * wasmJs embeds free-threaded CPython 3.15t built for wasm32-emscripten with pthreads
+ * (`scripts/wasm/build-cpython.sh`, #175). See the `expect` in commonMain.
+ */
+internal actual val embedsFreeThreadedPython: Boolean = true

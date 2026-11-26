@@ -68,8 +68,10 @@ val configuredPythonVersion = project.property("pythonVersion").toString()
 // `-PpythonFreeThreaded` switch that used to choose it is gone. Android (arm64-v8a, x86_64),
 // androidNative and iOS embed the project's own 3.15t builds from the GitHub release
 // `cpython-<version>t-mobile` (#328; leader 2026-11-13: no opt-in flag on mobile, 3.15t is the
-// only build). Only wasm still embeds a GIL build, until #175. Which build each platform embeds is
-// the `embedsFreeThreadedPython` expect/actual in the library, not a build-wide flag.
+// only build). wasm embeds the project's own 3.15t with pthreads, built by
+// `python-multiplatform/scripts/wasm/build-cpython.sh` (#175; leader, Decision 10 (a) a1, 2026-11-26).
+// Which build each platform embeds is the `embedsFreeThreadedPython` expect/actual in the library,
+// not a build-wide flag.
 if (project.findProperty("pythonFreeThreaded") != null) {
     throw GradleException(
         "-PpythonFreeThreaded was removed (issue #158): desktop always embeds the free-threaded " +
@@ -695,22 +697,20 @@ extensions.add(
  * `docs/platforms/python-version-acquisition.md` "Published version".
  *
  * Per platform since #158: the desktop jar, the AAR and every Kotlin/Native klib (macosArm64,
- * linuxX64, iOS, androidNative) embed 3.15t (#158, #328); only wasm still embeds a GIL build, until
- * #175. So the free-threaded attribute is decided per published variant (false on the wasm ones),
- * and the jar and the AAR each get their own resource. Shared metadata variants carry no CPython and
+ * linuxX64, iOS, androidNative) embed 3.15t (#158, #328), and so do the wasmJs ones since #175. The
+ * free-threaded attribute is still decided per published variant (true on every one that carries a
+ * CPython), and the jar and the AAR each get their own resource. Shared metadata variants carry no CPython and
  * get no free-threaded attribute. The `pythonMultiplatform` extension holds one value, the
- * free-threaded one every non-wasm platform embeds, and the per-variant attributes are the
+ * free-threaded one every platform embeds, and the per-variant attributes are the
  * per-platform truth. (Extension and metadata rules: agent proposal, not confirmed.)
  */
 val embeddedPythonVersion = EmbeddedPythonVersion(configuredPythonVersion, freeThreaded = true)
-// `android` covers the AAR's variants and androidNativeArm64/X64, `ios` iosArm64, iosX64 and
-// iosSimulatorArm64. Anything else that is not metadata (the wasmJs variants) is GIL.
-val freeThreadedVariantPrefixes = listOf("desktop", "macosArm64", "linuxX64", "mingwX64", "android", "ios")
+// Every variant that carries a CPython is free-threaded since #175 made wasmJs 3.15t (the last GIL
+// one); metadata variants carry none and get no attribute.
 embeddedPythonVersion.register(project) { configurationName ->
     when {
-        freeThreadedVariantPrefixes.any { configurationName.startsWith(it) } -> true
         configurationName.startsWith("metadata") || "Metadata" in configurationName -> null
-        else -> false
+        else -> true
     }
 }
 
@@ -2048,7 +2048,8 @@ listOf("Arm64" to "arm64-v8a", "X64" to "x86_64").forEach { (targetSuffix, abi) 
 // top-level `await`, so Emscripten is fully instantiated before the import object is built.
 //
 // The CPython build itself is produced by `python-multiplatform/scripts/wasm/build-cpython.sh` (also reachable as the
-// `buildWasmPython` task below) -- CPython 3.14.2 matched to `pyemscripten_2026_0` (PEP 783),
+// `buildWasmPython` task below) -- free-threaded CPython 3.15.0 (3.15t) with pthreads, on Emscripten
+// 5.0.3, matched to `pyemscripten_2026_0` (PEP 783),
 // relinked with `wasmExports,wasmMemory` added to `-sEXPORTED_RUNTIME_METHODS`. Without those two the
 // 8287 wasm exports are present in the binary but unreachable from JS, so there is nothing to hand
 // `@WasmImport`; neither appears in PEP 783's ABI-sensitive list. Unlike every other platform's
@@ -2067,12 +2068,12 @@ val wasmPythonDir: String = (project.findProperty("wasmPythonDir")?.toString()
 /**
  * Builds the CPython Emscripten runtime into `.caches/` and stages it at the default
  * [wasmPythonDir]. Long (a full CPython cross build) and needs network the first time (emsdk 5.0.3
- * and the CPython 3.14.2 checkout), so nothing depends on it: the wasm tasks keep their
+ * and the CPython 3.15.0 checkout), so nothing depends on it: the wasm tasks keep their
  * skip-with-a-message contract when it has not been run.
  */
 val buildWasmPython by tasks.registering(Exec::class) {
     group = "python"
-    description = "Builds CPython 3.14.2 for wasm32-emscripten (pyemscripten_2026_0) into .caches/"
+    description = "Builds free-threaded CPython 3.15t with pthreads for wasm32-emscripten (pyemscripten_2026_0) into .caches/"
     val script = rootProject.layout.projectDirectory.file("python-multiplatform/scripts/wasm/build-cpython.sh").asFile
     commandLine("bash", script.absolutePath, "all")
 }
@@ -2263,7 +2264,7 @@ val stageWasmBrowserRuntime by tasks.registering {
         // second place to keep in step, and `cpython.mjs` already reads the version out of the
         // running interpreter to decide where in MEMFS it goes.
         val stdlibZip = pythonDir.listFiles()
-            ?.firstOrNull { it.name.matches(Regex("""python\d+\.\d+\.zip""")) }
+            ?.firstOrNull { it.name.matches(Regex("""python\d+\.\d+t?\.zip""")) }
             ?: throw GradleException(
                 "no python<major>.<minor>.zip in $pythonDir. A browser has no NODEFS, so the " +
                     "standard library has to travel as the zip CPython's own web example fetches; " +
@@ -2675,7 +2676,7 @@ tasks.withType<org.jetbrains.kotlin.gradle.targets.js.testing.KotlinJsTest>().co
         // silently made every wasm test depend on a CPython **source checkout** sitting next to the
         // build directory; staging it here is what lets `wasmPythonDir` be an unpacked
         // `python-multiplatform-wasm-runtime` artefact, which is the only form CI can obtain.
-        val stdlibZip = pythonDir.listFiles()?.firstOrNull { it.name.matches(Regex("""python\d+\.\d+\.zip""")) }
+        val stdlibZip = pythonDir.listFiles()?.firstOrNull { it.name.matches(Regex("""python\d+\.\d+t?\.zip""")) }
         copy {
             from(pythonDir) { include("python.mjs", "python.wasm") }
             if (stdlibZip != null) from(stdlibZip)

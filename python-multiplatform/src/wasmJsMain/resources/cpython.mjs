@@ -1,4 +1,4 @@
-// Boots the CPython 3.14.2 Emscripten build and re-exports its raw wasm functions as ES module
+// Boots the free-threaded CPython 3.15.0 Emscripten build (3.15t with pthreads, #175) and re-exports its raw wasm functions as ES module
 // bindings, which is the shape `@WasmImport(module, name)` resolves against.
 //
 // Two settings in CPython's link line make this possible, neither of them in PEP 783's
@@ -95,10 +95,14 @@ function installStdlibZip(Module, bytes) {
     const versionInt = Module.HEAPU32[Module._Py_Version >>> 2];
     const major = (versionInt >>> 24) & 0xff;
     const minor = (versionInt >>> 16) & 0xff;
+    // getpath's landmark carries the ABI thread flag: lib/python315t.zip and lib/python3.15t for the
+    // free-threaded build, lib/python315.zip for a GIL one. Py_Version does not say which, so the
+    // flag is read off the staged zip's name (python3.15t.zip), which the build names after it.
+    const abiThread = /t\.zip$/.test(String(STDLIB_ZIP_URL)) ? "t" : "";
     // Without this, getpath complains that it cannot find exec-prefix. It is a marker directory
     // only; this build has no dynamically loaded stdlib extensions.
-    Module.FS.mkdirTree(`/lib/python${major}.${minor}/lib-dynload/`);
-    Module.FS.writeFile(`/lib/python${major}${minor}.zip`, new Uint8Array(bytes), { canOwn: true });
+    Module.FS.mkdirTree(`/lib/python${major}.${minor}${abiThread}/lib-dynload/`);
+    Module.FS.writeFile(`/lib/python${major}${minor}${abiThread}.zip`, new Uint8Array(bytes), { canOwn: true });
 }
 
 // The Node settings. NODEFS still mounts the real filesystem -- tests reach host paths through it --
@@ -597,7 +601,10 @@ function readCString(ptr) {
     const heap = new Uint8Array(M.wasmMemory.buffer);
     let end = ptr;
     while (heap[end] !== 0) end++;
-    return decoder.decode(heap.subarray(ptr, end));
+    // slice, not subarray: the memory is a SharedArrayBuffer on the 3.15t pthreads build, and a
+    // browser's TextDecoder rejects a view of shared memory ("must not be shared"); node accepts it,
+    // so only wasmJsBrowserTest saw this. The copy is the length of one C name.
+    return decoder.decode(heap.slice(ptr, end));
 }
 
 export function pmpRegisterUpcall(namePtr) {
@@ -618,7 +625,7 @@ export function pmpRegisterUpcall(namePtr) {
 }
 
 // Upcalls from Python threads (#175 step 2). A free-threaded runtime built with the `_pm_upcall`
-// module (.github/scripts/ft-wasm/_pm_upcall.c) exports a dispatcher whose table index is the
+// module (python-multiplatform/scripts/wasm/_pm_upcall.c) exports a dispatcher whose table index is the
 // same in every pthread Worker; an index from pmpRegisterUpcall exists only in the main thread's
 // table. Optional, so -1 (and a no-op) on a runtime without it, which keeps today's direct entry.
 export function pmpUpcallDispatchIndex() {
