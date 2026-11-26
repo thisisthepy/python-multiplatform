@@ -33,9 +33,11 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from typedpython import frontend, ir, resume, verify
+from typedpython import comprehensions, frontend, ir, resume, verify
 
 PROVIDED_MODULES = frozenset({"math", "sys", "time"})
+_UNPLACED = ("a {} comprehension is compiled as the value of an assignment to a name or of a `return` (tier S2c); "
+             "elsewhere it is not compiled yet")
 
 # The IR nodes that are generic C-API object operations today: each needs a CPython object, so a
 # function containing one is not ready for a build without CPython. BinOp / UnaryOp / Compare whose
@@ -293,6 +295,10 @@ class _Pass(ast.NodeVisitor):
         self.locals: set[str] = set()
         self.print_fstrings: set[int] = set()
         self.kinds: dict[str, str] = {}     # annotated str / set names of the enclosing top-level def
+        # tier S2c: the comprehensions that are the whole value of an assignment to a name or of a return, which the
+        # front end compiles (typedpython/comprehensions.py); any other is pending
+        self.placed = {id(c) for s in ast.walk(module.tree) if (c := comprehensions._comp_of(s)) is not None} \
+            if isinstance(module.tree, ast.Module) else set()
 
     # -- helpers
 
@@ -550,15 +556,18 @@ class _Pass(ast.NodeVisitor):
         self.comprehension(node, "generator expression")
 
     def visit_ListComp(self, node: ast.ListComp) -> None:
-        self.pending("S", "aot/container", "list comprehension", node, "a list comprehension is tier S (general containers), not compiled yet")
+        if id(node) not in self.placed:
+            self.pending("S", "aot/container", "list comprehension", node, _UNPLACED.format("list"))
         self.comprehension(node, "list comprehension")
 
     def visit_SetComp(self, node: ast.SetComp) -> None:
-        self.pending("S", "aot/container", "set comprehension", node, "a set comprehension is tier S (general containers), not compiled yet")
+        if id(node) not in self.placed:
+            self.pending("S", "aot/container", "set comprehension", node, _UNPLACED.format("set"))
         self.comprehension(node, "set comprehension")
 
     def visit_DictComp(self, node: ast.DictComp) -> None:
-        self.pending("S", "aot/container", "dict comprehension", node, "a dict comprehension is tier S (general containers), not compiled yet")
+        if id(node) not in self.placed:
+            self.pending("S", "aot/container", "dict comprehension", node, _UNPLACED.format("dict"))
         self.comprehension(node, "dict comprehension")
 
     def visit_Dict(self, node: ast.Dict) -> None:

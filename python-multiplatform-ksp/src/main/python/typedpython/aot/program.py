@@ -575,6 +575,13 @@ class _Checker:
             self.subscript(e)
         elif isinstance(e, ast.Lambda):
             self.rep.error(e, "aot/expression", "lambda", "a lambda is outside the first AOT step")
+        elif isinstance(e, (ast.ListComp, ast.SetComp, ast.DictComp)):
+            for g in e.generators:          # tier S2c: each clause is the loop it means (the front end checks the rest)
+                self.for_stmt(ast.copy_location(ast.For(target=g.target, iter=g.iter, body=[], orelse=[]), e))
+                for c in g.ifs:
+                    self.expr(c)
+            for x in ((e.key, e.value) if isinstance(e, ast.DictComp) else (e.elt,)):
+                self.expr(x)
         elif type(e).__name__ in _CONTAINER_NAMES:
             kind = _CONTAINER_NAMES[type(e).__name__]
             self.rep.error(e, "aot/container", kind, f"a {kind} is outside the first AOT step (containers arrive in a later step)")

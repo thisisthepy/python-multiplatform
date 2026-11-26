@@ -182,6 +182,20 @@ def test_sets_that_do_not_depend_on_their_order_are_not_reported(tmp_path):
     assert report.findings == [], report.lines()
 
 
+def test_a_comprehension_bound_to_a_name_or_returned_is_not_reported(tmp_path):
+    """Tier S2c: such a comprehension is the loop it means (typedpython/comprehensions.py); as an operand it is still
+    pending (the table row above)."""
+    path = write(tmp_path, """
+        def f(xs: list[int]) -> list[int]:
+            ys = [x + 1 for x in xs if x]
+            s: set[int] = {x for x in ys}
+            d = {x: x * 2 for x in range(3)}
+            return [y for y in ys]
+    """)
+    report = aotcheck.check(path, front_end=False)
+    assert report.findings == [], report.lines()
+
+
 def test_the_view_types_of_collections_abc_are_not_reported(tmp_path):
     """Tier S2b: `from collections.abc import KeysView, ValuesView, ItemsView` names the types of a view passed to or
     returned from a function (the front end checks how the view is used)."""

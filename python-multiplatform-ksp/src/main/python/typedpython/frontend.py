@@ -115,7 +115,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from typedpython import gate, ir, pyrefly, rebinding, resume, taint, tuples
+from typedpython import comprehensions, gate, ir, pyrefly, rebinding, resume, taint, tuples
 from typedpython.ir import Type
 
 I64_MIN, I64_MAX = -2**63, 2**63 - 1
@@ -457,9 +457,14 @@ def lower(path: Path, *, aot: bool = False) -> ir.Module:
         every = [(s.name, s) for s in tree.body if isinstance(s, ast.FunctionDef)]
         every += [(f"{c.name}.{m.name}", m) for c in tree.body if isinstance(c, ast.ClassDef)
                   for m in c.body if isinstance(m, ast.FunctionDef)]
-        early_kinds = _inferred_kinds(path, source, tree, every)
-        split = tuples.split(tree, early_kinds)
-        early_kinds, tuple_problems = split.kinds, split.problems
+        # tier S2c: a comprehension bound to a name or returned is the loop it means (typedpython/comprehensions.py),
+        # its variables typed at a probe; rewritten before the tuples are split (a loop over a list of tuples)
+        comp_sites = comprehensions.sites(every)
+        comp_types: dict[tuple[int, str], str] = {}
+        early_kinds = _inferred_kinds(path, source, tree, every, comp_sites, comp_types)
+        rewritten = comprehensions.rewrite(comp_sites, every, early_kinds, comp_types)
+        split = tuples.split(tree, rewritten.kinds)
+        early_kinds, tuple_problems = split.kinds, {**split.problems, **rewritten.problems}
     class_decls, class_skips = _classes(tree, source, info, aot)
     info.classes = class_decls
     skipped.update(class_skips)
@@ -1318,15 +1323,20 @@ def _annotation_kind(annotation: ast.expr) -> str:
 
 def _inferred_kinds(
     path: Path, source: str, tree: ast.Module, functions: list[tuple[str, ast.FunctionDef]],
+    comp_sites: "list[comprehensions.Site] | None" = None, comp_types: dict[tuple[int, str], str] | None = None,
 ) -> dict[str, dict[str, list[tuple[int, str]]]]:
-    """IR function name -> local -> [(line, base type)] for every unannotated assignment (Pyrefly)."""
+    """IR function name -> local -> [(line, base type)] for every unannotated assignment (Pyrefly). AOT mode, tier
+    S2c: with `comp_sites`, also the type of each comprehension variable at its probe, into `comp_types`."""
     scopes = rebinding._scopes(tree)
     keys = {id(fn): q for q, fn in functions}
     wanted_scopes = {scopes.index(fn) for _, fn in functions}
     wanted = [a for a in rebinding.assignments(tree) if a.scope in wanted_scopes]
-    if not wanted:
+    if not wanted and not comp_sites:
         return {}
     probed, probes = rebinding.probe(source, wanted)
+    placed: dict[tuple[int, str], tuple[int, int]] = {}
+    if comp_sites:
+        probed, probes, placed = comprehensions.probe(probed, probes, wanted, comp_sites)
     with tempfile.TemporaryDirectory(prefix="typedpython-frontend-") as work:
         copies = gate._mirror(Path(work), {str(path): probed})
         [copy] = copies
@@ -1334,6 +1344,10 @@ def _inferred_kinds(
         report = pyrefly.run([Path(copy)], [Path(work) / "0", Path(copy).parent, *roots])
         types = report.expression_types.get(copy, {})
 
+    if comp_types is not None:
+        for key, at in placed.items():
+            if at in types:
+                comp_types[key] = rebinding._base(types[at])
     found: dict[str, dict[str, list[tuple[int, str]]]] = {}
     for p in probes:
         a = p.assignment
@@ -4349,6 +4363,9 @@ class _Lowerer:
             return self.fstring(node)
         if isinstance(node, ast.IfExp) and self.info.aot:
             return self.aot_ifexp(node)
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp)) and self.info.aot:
+            raise Skip(line, f"`{_src(node)}`: an AOT program compiles a {UNSUPPORTED[type(node).__name__]} as the "
+                             "value of an assignment to a name or of a `return` (tier S2c): bind it to a name first")
         raise _unsupported(node)
 
     def str_const(self, v: str, node: ast.AST) -> ir.Expr:

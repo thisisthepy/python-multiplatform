@@ -528,7 +528,15 @@ the callees it is passed to), so one handle may be shared by threads without the
 in S2b: a method that returns a view.
 
 **S2c.** List, dict and set comprehensions (a hidden local per comprehension variable, Python 3 scoping, the
-accumulator built in place), `enumerate`, `zip` (shortest), `reversed`, `range` objects as iterables, in `for` loops
+accumulator built in place). First step in (agent proposal, not confirmed): a comprehension that is the whole value
+of an assignment to a name or of a `return` is rewritten into the loop it means before lowering
+(typedpython/comprehensions.py). Each variable becomes a hidden local typed by Pyrefly at a probe (a
+`[(x, y,) for x in xs for y in ys]` put before the statement in the copy Pyrefly types, the clauses without their
+conditions, so a variable has its declared type). The accumulator is hidden and typed as its target, so the target is
+bound once the comprehension is complete and `xs = [x + 1 for x in xs]` iterates the old list. The first iterable is
+evaluated first, and a dict comprehension's key before its value (through a temporary of the key type). A
+comprehension anywhere else (an operand, an argument) is refused as "bind it to a name first", and so are `:=` and a
+comprehension, generator or lambda inside one. Then `enumerate`, `zip` (shortest), `reversed`, `range` objects as iterables, in `for` loops
 and comprehensions; `sum`, `any`, `all`, `min` / `max` of an iterable (`ValueError: min() iterable argument is
 empty`); `sorted(xs, key=..., reverse=...)` and `list.sort(...)` with a key that is a compiled function or a
 lambda written in place: CPython's own algorithm (timsort, `listsort` in Objects/listobject.c, ported as it is), so
