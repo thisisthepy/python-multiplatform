@@ -65,7 +65,7 @@ _INTROSPECTION_CALLS = frozenset({"getattr", "setattr", "delattr", "hasattr"})
 _INTROSPECTION_ATTRS = frozenset({"__dict__", "__class__", "__slots__", "__bases__", "__mro__"})
 _KERNEL_BUILTINS = frozenset()
 _SET_BUILTINS_S = frozenset({"sorted", "sum", "any", "all", "enumerate", "zip", "reversed", "format"})
-_CONTAINER_CALLS = frozenset({"dict", "set", "tuple", "bytes"})
+_CONTAINER_CALLS = frozenset({"dict", "set", "tuple"})
 _SUPPORTED_CALLS = frozenset({"len", "range", "float", "bool", "isinstance", "type", "list", "print", "int", "abs", "min", "max",
                               "ord", "chr", "repr", "str"})     # (ord ... str: tier S1, PR-S1a)
 _SIGNAL_EXCEPTIONS = frozenset({"KeyboardInterrupt", "RecursionError"})
@@ -629,7 +629,8 @@ class _Pass(ast.NodeVisitor):
         elif isinstance(f, ast.Attribute):
             if ((isinstance(f.value, ast.Constant) and isinstance(f.value.value, str)) or (
                     isinstance(f.value, ast.Name) and self.kinds.get(f.value.id) == "str")) \
-                    and f.attr not in frontend.STR_METHODS:          # (the methods of tier S1b compile)
+                    and f.attr not in frontend.STR_METHODS and f.attr != "encode":   # (the methods of tier S1b
+                #                                                                      compile; encode: tier S2c)
                 self.pending("S", "aot/str", f.attr, node, f"the string method `{f.attr}` is tier S1b (strings), not compiled "
                                                           "yet (syntactic: a str literal or a name annotated `str`)")
         self.generic_visit(node)
@@ -660,6 +661,8 @@ class _Pass(ast.NodeVisitor):
             return                              # tier S2b: `dict(d)`, a copy of a dict (the front end checks it)
         elif n == "set" and len(node.args) <= 1 and not node.keywords:
             return                              # tier S2b: `set()`, `set(s)` (the front end checks s is a set)
+        elif n == "bytes" and len(node.args) <= 1 and not node.keywords:
+            return                              # tier S2c: `bytes()`, `bytes(n)`, `bytes(xs)` (the front end checks it)
         elif n in _CONTAINER_CALLS:
             self.pending("S", "aot/container", n, node, f"`{n}()` is tier S (general containers), not compiled yet")
         elif n in _SUPPORTED_CALLS:

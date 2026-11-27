@@ -571,11 +571,21 @@ are CPython's own algorithm (timsort, `listsort` in Objects/listobject.c of 3.15
 as it is in tp_aot.h as `TPA__DEF_SORT`; 3.15 takes a minrun per run, `minrun_next`, where 3.14 took one for the
 list, which orders NaN differently), so the order of equal and of unordered elements (NaN) is CPython's, not
 merely some stable order. A fuzz of the port against CPython 3.15.0rc1's sorted() over lists of floats with NaN
-(lengths 0 to 3000) found no difference. `bytes`: an immutable
-byte array; literals, `s.encode()` / `encode("utf-8")` (strict: a surrogate raises CPython's UnicodeEncodeError),
-`b.decode()` (strict UTF-8, CPython's UnicodeDecodeError message), `len`, indexing (an int), slicing, `+`, `*`, `==`,
-`in`, iteration (ints), `print` / `repr` (`b'...'` with CPython's escapes), `bytes(n)` and `bytes(list[int])`
-(`ValueError: bytes must be in range(0, 256)`).
+(lengths 0 to 3000) found no difference. `bytes` is in (agent proposal, not confirmed): `Type.BYTES`, an immutable
+byte array held as a `tpa_str` of kind 1 whose code points are the bytes, so ownership, `+`, `*`, slicing,
+comparison (by unsigned byte), `in` of a bytes and `len` are the str nodes and functions (a bytes literal is the
+static Latin-1 str literal of the same bytes); a local, a parameter or a return value. Literals,
+`s.encode()` / `encode("utf-8")` (strict: a surrogate raises CPython's UnicodeEncodeError, its range the run of
+surrogates), `b.decode()` / `decode("utf-8")` (strict UTF-8, a port of stringlib's `utf8_decode` of 3.15.0rc1:
+CPython's UnicodeDecodeError with its reason, invalid start byte, invalid continuation byte or unexpected end of
+data, and its range), indexing (an int; `IndexError: index out of range`), `int in b` (`ValueError: byte must be in
+range(0, 256)`), iteration (ints: the bytes held, an index loop), truth, `print` / `str` / `repr` / an f-string field
+(`b'...'`, PyBytes_Repr's smart quotes and escapes), `bytes()`, `bytes(n)` (`ValueError: negative count`),
+`bytes(xs)` of a list[int] and `bytes([...])` (`ValueError: bytes must be in range(0, 256)`). A fuzz of the C
+decoder, encoder and repr against CPython 3.15.0rc1 (60,004 byte strings of up to 8 bytes) found no difference.
+Refused, each with its reason: a bytes in a list, a dict, a class field or across the library boundary, `bytes ==
+str` (never equal in CPython), an encoding other than utf-8, `errors=`, the other bytes methods, `bytes(s, enc)`
+and `%` formatting.
 
 **Tests.** `test_aot_tier_s2a.py`, `_s2b.py`, `_s2c.py`: differential over generated cases (random operation
 sequences on lists and dicts checked against the reference, every error message), aliasing (two names of one list,

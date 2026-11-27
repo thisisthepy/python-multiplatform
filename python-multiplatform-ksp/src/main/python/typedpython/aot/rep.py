@@ -529,7 +529,7 @@ class Representation:
             return RAW
         if isinstance(e, ir.Local):
             return r.names.get(e.name, RAW)
-        if isinstance(e, (ir.Len, ir.ArgvLen, ir.BoolToInt, ir.StrLen, ir.StrOrd, ir.StrWrite, ir.StrListLen, ir.StrMethod,
+        if isinstance(e, (ir.Len, ir.ArgvLen, ir.BoolToInt, ir.StrLen, ir.StrOrd, ir.BytesIndex, ir.StrWrite, ir.StrListLen, ir.StrMethod,
                           ir.ObjListLen, ir.DictLen, ir.DictListLen)):
             return RAW
         if isinstance(e, (ir.Index, ir.ListPop)):          # (ListPop: tier S2a, an element as Index reads it)

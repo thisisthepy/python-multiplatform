@@ -138,6 +138,7 @@ typedef int64_t tpa_rc_t;
 #define TPA_UnicodeEncodeError 7 /* tier S1: a lone surrogate written to standard output (tp_aot_str.h) */
 #define TPA_KeyError 8           /* tier S2b: a missing dict key (the message is the key's repr), an empty popitem */
 #define TPA_RuntimeError 9       /* tier S2b: a dict changed size during iteration (tp_aot_dict.h) */
+#define TPA_UnicodeDecodeError 10 /* tier S2c: bytes.decode() of bytes that are not UTF-8 (tp_aot_str.h) */
 
 typedef struct {
     int kind;
@@ -158,6 +159,7 @@ static inline const char *tpa_exc_name(int kind)
     case TPA_UnicodeEncodeError: return "UnicodeEncodeError";
     case TPA_KeyError: return "KeyError";
     case TPA_RuntimeError: return "RuntimeError";
+    case TPA_UnicodeDecodeError: return "UnicodeDecodeError";
     }
     return "SystemError";
 }

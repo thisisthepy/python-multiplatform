@@ -227,6 +227,19 @@ def test_enumerate_and_zip_as_the_iterable_of_a_loop_are_not_reported(tmp_path):
     assert {"zip", "enumerate", "reversed", "sum", "all", "sorted"} <= names, names
 
 
+def test_bytes_are_not_reported(tmp_path):
+    """Tier S2c: bytes literals, `bytes()`, `bytes(n)`, `bytes(xs)`, `s.encode()` and `b.decode()` compile; a string
+    method that is not compiled is still pending."""
+    path = write(tmp_path, """
+        def f(s: str, xs: list[int]) -> str:
+            b = s.encode()
+            c = b"ab" + bytes(2) + bytes(xs) + bytes()
+            return c.decode("utf-8") + "x".encode().decode()
+    """)
+    report = aotcheck.check(path, front_end=False)
+    assert report.findings == [], report.lines()
+
+
 def test_the_view_types_of_collections_abc_are_not_reported(tmp_path):
     """Tier S2b: `from collections.abc import KeysView, ValuesView, ItemsView` names the types of a view passed to or
     returned from a function (the front end checks how the view is used)."""

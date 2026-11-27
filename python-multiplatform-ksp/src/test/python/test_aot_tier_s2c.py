@@ -472,3 +472,146 @@ MAIN = '\n\ndef main() -> None:\n    f()\n\n\nif __name__ == "__main__":\n    ma
 def test_what_a_comprehension_cannot_do_yet_is_refused_with_the_reason(tmp_path: Path, body: str, reason: str):
     found = _rules(tmp_path, "def f() -> None:\n" + body + MAIN)
     assert any(reason in r or reason in m for r, m in found), found
+
+
+BYTES = """
+import sys
+
+
+def tail(b: bytes, n: int) -> bytes:
+    return b[len(b) - n:]
+
+
+def strip_a(b: bytes) -> bytes:
+    while b and b[0] == 97:
+        b = b[1:]
+    return b
+
+
+def count_in(b: bytes, x: int) -> int:
+    n = 0
+    for c in b:
+        if c == x:
+            n += 1
+    return n
+
+
+def main() -> None:
+    mode = sys.argv[1]
+    text = sys.argv[2]
+    raw = text.encode()
+    print(raw, len(raw), repr(raw), str(raw))
+    lit = b"a'b\\"\\t\\n\\r\\x00\\x1f\\x7f\\x80\\xff\\\\"
+    print(lit, len(lit))
+    print(b"it's", b'say "hi"', b"both ' and \\"")
+    e = b""
+    print(e, len(e), e == b"")
+    u = "d\\u00e9j\\u00e0 \\u4e16 \\U0001F600".encode("utf-8")
+    back = u.decode()
+    print(u, len(u), back, u.decode("utf-8") == "d\\u00e9j\\u00e0 \\u4e16 \\U0001F600", len(back))
+    print(raw[0] if raw else -1, raw[-1] if raw else -1, u[1], u[-1])
+    print(u[1:3], u[::-1], u[::2], u[-3:], u[5:1:-1], raw[:0])
+    cat = raw + b"|" + lit
+    rep = b"ab" * 3
+    rep2 = 2 * b"xy"
+    zero = b"q" * -1
+    print(cat, rep, rep2, zero)
+    print(raw == text.encode(), raw != lit, b"abc" < b"abd", b"ab" < b"abc", b"\\xff" > b"a", b"b" >= b"b",
+          b"a" <= b"")
+    print(b"bc" in b"abcd", b"x" not in b"abcd", b"" in e, 98 in b"abc", 0 in lit, 255 not in lit)
+    codes = [c for c in u]
+    print(codes, count_in(raw, 97), tail(u, 4), strip_a(b"aaab"), strip_a(b"aaa"))
+    total = sum(raw)
+    hi = max(u)
+    print(total, hi)
+    print(bytes(3), bytes(0), bytes([104, 105, 0, 255]), bytes(codes) == u)
+    print(f"{raw} {lit!r} {u}")
+    s = b"loop"
+    while s:
+        s = s[1:]
+        print(s)
+    if mode == "encode":
+        bad = "x" + chr(0xDC80) + "y"
+        print(bad.encode())
+    if mode == "encode2":
+        bad2 = "ab" + chr(0xD800) + chr(0xDFFF) + "c"
+        print(bad2.encode("utf-8"))
+    if mode == "start":
+        print(b"ab\\x80c".decode())
+    if mode == "cont":
+        print(b"a\\xe2\\x28\\xa1".decode())
+    if mode == "cont3":
+        print(b"\\xf0\\x9f\\x98(".decode())
+    if mode == "end":
+        print(b"ok\\xe4\\xb8".decode())
+    if mode == "surrogate":
+        print(b"\\xed\\xa0\\x80".decode())
+    if mode == "index":
+        print(raw[len(raw)])
+    if mode == "range":
+        print(bytes([1, 256]))
+    if mode == "negative":
+        print(bytes(-len(raw)))
+    if mode == "contains":
+        print(300 in raw)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_bytes_are_cpythons_immutable_byte_arrays(tmp_path: Path):
+    """`bytes` (design 4.3.2, S2c): literals with CPython's escapes in repr, `str.encode()` and `bytes.decode()`
+    (strict UTF-8, each of CPython's UnicodeEncodeError and UnicodeDecodeError messages: invalid start byte, invalid
+    continuation byte after one and after three bytes, unexpected end of data, an encoded surrogate), len, indexing
+    (an int), slicing, `+`, `*`, comparisons, `in` (a bytes or an int), iteration (ints, also in a comprehension, sum()
+    and max()), `bytes(n)` and `bytes(list[int])`, a parameter the function rebinds, as CPython. Agent proposal, not
+    owner-confirmed."""
+    _compare(tmp_path, BYTES, [["ok", "héllo w"], ["ok", ""], ["encode", "x"], ["encode2", "y"],
+                               ["start", "a"], ["cont", "a"], ["cont3", "a"], ["end", "a"], ["surrogate", "a"],
+                               ["index", "abc"], ["range", "a"], ["negative", "ab"], ["contains", "a"]])
+
+
+@pytest.mark.parametrize("body, reason", [
+    # bytes stay out of containers, fields and the library boundary in this step
+    ("    xs = [b'a']\n    print(len(xs))\n", "bytes"),
+    ("    d = {b'a': 1}\n    print(len(d))\n", "bytes"),
+    # bytes and str never compare equal in CPython; an AOT program does not compile the comparison
+    ("    b = b'a'\n    print(b == 'a')\n", "bytes"),
+    # only strict UTF-8
+    ("    b = b'a'\n    print(b.decode('latin-1'))\n", "utf-8"),
+    ("    s = 'a'\n    print(s.encode(errors='ignore'))\n", "errors"),
+    ("    b = b'a'\n    print(b.hex())\n", "hex"),
+    ("    print(bytes('a', 'utf-8'))\n", "bytes("),
+    ("    print(b'%d' % 1)\n", "%"),
+])
+def test_what_bytes_cannot_do_yet_is_refused_with_the_reason(tmp_path: Path, body: str, reason: str):
+    found = _rules(tmp_path, "def f() -> None:\n" + body + MAIN)
+    assert any(reason in r or reason in m for r, m in found), found
+
+
+FSTRING_REPR = """
+import sys
+
+
+def words() -> list[str]:
+    return sys.argv[1].split(",")
+
+
+def main() -> None:
+    d = {"k": len(sys.argv)}
+    s = f"{d!r}|{words()!r}|{d}|{words()}"
+    print(s)
+    print(f"{d!r} {words()!r}")
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_an_fstring_repr_conversion_of_a_dict_or_list_value_is_one_repr(tmp_path: Path):
+    """`{d!r}` of a dict and `{f()!r}` of a list a call returns are the repr, as `{d}` is (found while adding bytes:
+    the repr text was given to repr() again, so it printed quoted)."""
+    _compare(tmp_path, FSTRING_REPR, [["a,b"], ["x"]])

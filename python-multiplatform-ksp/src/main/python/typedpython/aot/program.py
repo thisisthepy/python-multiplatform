@@ -226,8 +226,8 @@ class _Checker:
         if ann is None:
             self.rep.error(node, "aot/annotation", what, f"{what} has no type annotation (a program is checked "
                            "by its annotations)")
-        elif isinstance(ann, ast.Name) and (ann.id in SCALAR_NAMES or ann.id == "str"):     # str: tier S1
-            return
+        elif isinstance(ann, ast.Name) and (ann.id in SCALAR_NAMES or ann.id in ("str", "bytes")):
+            return                          # (str: tier S1; bytes: tier S2c)
         elif allow_none and isinstance(ann, ast.Constant) and ann.value is None:
             return
         elif _is_list_annotation(ann) or _is_str_list_annotation(ann) or _is_optional_str_annotation(ann):
@@ -573,8 +573,8 @@ class _Checker:
             if v is None:
                 return
             kind = type(v).__name__
-            if isinstance(v, str):
-                return                                              # tier S1
+            if isinstance(v, (str, bytes)):
+                return                                              # tier S1 (bytes: tier S2c)
             self.rep.error(e, "aot/literal", kind, f"a `{kind}` literal is outside the first AOT step")
         elif isinstance(e, ast.Name):
             if e.id in self.consts and e.id not in self.shadow:
@@ -708,6 +708,13 @@ class _Checker:
                 else:
                     self.expr(k.value)
                 continue
+            if isinstance(f, ast.Attribute) and f.attr in ("encode", "decode") and k.arg in ("encoding", "errors"):
+                if k.arg == "errors":         # tier S2c: strict UTF-8 only
+                    self.rep.error(k.value, "aot/keyword", "errors", f"{f.attr}() takes no errors= in an AOT program "
+                                                                     "(strict UTF-8)")
+                else:
+                    self.expr(k.value)        # (the front end checks it is "utf-8")
+                continue
             if isinstance(f, ast.Name) and f.id in ("min", "max") and f.id not in self.shadow:
                 self.rep.error(k.value, "aot/keyword", k.arg or "**", f"{f.id}() takes no key= or default= in an AOT "
                                                                       "program yet")
@@ -785,6 +792,14 @@ class _Checker:
                     for x in c.args[0].elts:
                         self.expr(x)
                 return                      # tier S2b: an empty set, a copy (the front end checks the argument)
+            elif n == "bytes":
+                for a in c.args:            # tier S2c: bytes(), bytes(n), bytes(xs) (the front end checks the argument)
+                    if isinstance(a, ast.List):
+                        for x in a.elts:
+                            self.expr(x)
+                    elif not (isinstance(a, ast.Name) and a.id in self.p.consts) and not isinstance(a, ast.Name):
+                        self.expr(a)
+                return
             elif n == "dict":
                 if not (len(c.args) == 1 and isinstance(c.args[0], ast.Name) and not c.keywords):
                     self.rep.error(c, "aot/builtin", n, "`dict()` is only supported as `dict(d)` of a dict in the AOT "
@@ -844,6 +859,13 @@ class _Checker:
               and f.value.id in self.var_classes
               and f.attr in self.class_methods.get(self.var_classes[f.value.id], ())):
             pass
+        elif isinstance(f, ast.Attribute) and f.attr in ("encode", "decode") and not (
+                isinstance(f.value, ast.Name) and f.value.id in ("sys", "math", "time") and f.value.id not in self.shadow):
+            if not isinstance(f.value, ast.Name):
+                self.expr(f.value)          # tier S2c: str.encode() / bytes.decode() (the front end checks the rest)
+            for a in c.args:
+                self.expr(a)
+            return
         elif isinstance(f, ast.Attribute) and f.attr in frontend.STR_METHODS and not (
                 isinstance(f.value, ast.Name) and f.value.id in ("sys", "math", "time") and f.value.id not in self.shadow):
             if not isinstance(f.value, ast.Name):
