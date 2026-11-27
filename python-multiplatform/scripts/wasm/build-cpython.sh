@@ -9,7 +9,6 @@
 #   python-multiplatform/scripts/wasm/build-cpython.sh smoke      run smoke.py (threads, upcalls, proxy slots) under the build tree's python.sh
 #   python-multiplatform/scripts/wasm/build-cpython.sh stage      copy python.wasm, python.mjs and the zip to the runtime dir
 #   python-multiplatform/scripts/wasm/build-cpython.sh probe      run embed-probe.mjs against the staged runtime (Python without main, as the library runs it)
-#   python-multiplatform/scripts/wasm/build-cpython.sh wheels     download the pinned compiled wheels the wasm suite loads (none yet, see below)
 #   python-multiplatform/scripts/wasm/build-cpython.sh stock      build a STOCK interpreter (CPython's own driver defaults) as a negative control
 #
 # Which CPython, and why. Owner, 2026-10-04, on #175: "The wasm interpreter is also 3.15t, built by us
@@ -27,7 +26,6 @@
 #   .caches/emsdk                   emsdk, pinned to 5.0.3            (override: EMSDK)
 #   .caches/wasm-build/cpython315t  CPython checkout + cross build    (override: CPYTHON_CHECKOUT)
 #   .caches/wasm-runtime            the three files the library needs (override: WASM_RUNTIME_DIR)
-#   .caches/wasm-wheels             pinned wheels                     (override: WASM_WHEELS_DIR)
 #   .caches/wasm-build/cpython315-stock, .caches/wasm-runtime-stock   the `stock` control
 #
 # `.caches/wasm-runtime` is the default `wasmPythonDir` in python-multiplatform/build.gradle.kts, so
@@ -104,15 +102,6 @@ ZIP="${STDLIB_ZIP:-$BUILD/$ZIP_NAME}"
 ABI_FLAGS="-fwasm-exceptions -sSUPPORT_LONGJMP=wasm"
 HOST_CFLAGS="-DPY_CALL_TRAMPOLINE -sUSE_BZIP2 $ABI_FLAGS -pthread"
 HOST_LDFLAGS="$ABI_FLAGS -pthread -sPTHREAD_POOL_SIZE=8 -sMAXIMUM_MEMORY=2GB"
-
-# --- the wheels the suite loads -----------------------------------------------------------------------
-# `wasmJsTest/.../WasmCompiledWheelTest` imports a real compiled wheel and calls into it. Decision 10
-# (c) c1 (leader, 2026-11-26): it moves to a pypackpack-built cp315t wheel when pypackpack #82 produces
-# one; until then the list is empty and the test reports a named skip, which fails under
-# -PrequireWasmRuntime (never a silent pass). The cp314 pydantic-core wheel pinned for the 3.14.2 build
-# cannot load into 3.15t. Format: "<file name> <url> <sha256>", one per line.
-WHEELS_DIR="${WASM_WHEELS_DIR:-$CACHES/wasm-wheels}"
-WHEELS=()
 
 die() { echo "build-cpython: $*" >&2; exit 1; }
 
@@ -492,38 +481,6 @@ do_stage() {
   echo "staged into $RUNTIME_DIR"
 }
 
-# --- wheels ------------------------------------------------------------------------------------------
-sha256_of() {
-  if command -v sha256sum > /dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
-  else shasum -a 256 "$1" | cut -d' ' -f1; fi
-}
-
-do_wheels() {
-  mkdir -p "$WHEELS_DIR"
-  local entry name url sha dest got
-  if [ "${#WHEELS[@]}" -eq 0 ]; then
-    echo "no wasm wheels pinned: WasmCompiledWheelTest waits on a pypackpack-built cp315t wheel (pypackpack #82, Decision 10 c1)"
-    return 0
-  fi
-  for entry in "${WHEELS[@]}"; do
-    read -r name url sha <<< "$entry"
-    dest="$WHEELS_DIR/$name"
-    if [ -f "$dest" ] && [ "$(sha256_of "$dest")" = "$sha" ]; then
-      echo "wheel present: $name"
-      continue
-    fi
-    rm -f "$dest.part"
-    curl -fsSL --retry 3 "$url" -o "$dest.part"
-    got="$(sha256_of "$dest.part")"
-    if [ "$got" != "$sha" ]; then
-      rm -f "$dest.part"
-      die "$name: downloaded sha256 $got, pinned $sha -- refusing it"
-    fi
-    mv "$dest.part" "$dest"
-    echo "fetched $name"
-  done
-}
-
 # --- stock: the negative control ---------------------------------------------------------------------
 # CPython 3.15.0 built by its own driver's defaults (GIL, no pthreads), with exactly one addition: the
 # runtime methods the library binds through (patch_makefile_reachability). No unwinding ABI, no
@@ -568,14 +525,13 @@ do_stock() {
 }
 
 case "${1:-all}" in
-  all)    do_build; do_zip; do_verify; do_smoke; do_stage; do_probe; do_wheels ;;
+  all)    do_build; do_zip; do_verify; do_smoke; do_stage; do_probe ;;
   build)  do_build ;;
   zip)    do_zip ;;
   verify) do_verify ;;
   smoke)  do_smoke ;;
   stage)  do_stage ;;
   probe)  do_probe ;;
-  wheels) do_wheels ;;
   stock)  do_stock ;;
-  *) die "unknown command '$1' (all | build | zip | verify | smoke | stage | probe | wheels | stock)" ;;
+  *) die "unknown command '$1' (all | build | zip | verify | smoke | stage | probe | stock)" ;;
 esac

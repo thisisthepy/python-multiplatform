@@ -121,9 +121,9 @@ Evidence, from the 3.14.2 GIL build this replaced: a real PyPI wheel, `pydantic_
 and ran on that build (`validate_python(42) -> 42`, a `ValidationError` raised and caught, the
 exception exercises the unwinding ABI), and fails with `tag import requires a WebAssembly.Tag` on the
 stock build. This is one wheel and one code path; it does not show that every compiled extension
-loads. A cp314 wheel does not load in 3.15t, so `WasmCompiledWheelTest` now waits for a pypackpack-built
-cp315t wheel (leader, Decision 10 (c) c1, 2026-11-26; pypackpack #82) and until then reports a named
-skip that fails under `-PrequireWasmRuntime` (`python-multiplatform/scripts/wasm/build-cpython.sh wheels` pins none yet);
+loads. A cp314 wheel does not load in 3.15t, so `WasmCompiledWheelTest` now loads pypackpack-built
+cp315t wheels (leader, Decision 10 (c) c1, 2026-11-26; pypackpack #82), checked in as test fixtures
+under `python-multiplatform/src/wasmJsTest/resources/wheels/` with their provenance (leader, 2026-11-27);
 `WasmInterpreterAbiTest` checks the claims, with `python-multiplatform/scripts/wasm/build-cpython.sh stock` as the negative
 control. Emscripten is pinned to 5.0.3 because that is what the platform specifies, and installing it
 replaces `~/emsdk/upstream` in place (a global setting).

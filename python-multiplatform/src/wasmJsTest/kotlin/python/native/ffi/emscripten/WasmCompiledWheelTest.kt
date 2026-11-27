@@ -24,11 +24,11 @@ import python.multiplatform.ffi.PythonTestFixture
  * does not exercise `__cpp_exception`. This replaces the cp314 pydantic-core wheel the 3.14.2 runtime
  * loaded (Decision 10 (c) c1, leader 2026-11-26).
  *
- * The wheels are not in the repository. `python-multiplatform/scripts/wasm/build-cpython.sh wheels`
- * downloads the pinned ones with their sha256 into `.caches/wasm-wheels` (or `-PwasmWheelsDir`), and
- * the test task extracts them next to the test bundle. Without them this test skips with that
- * instruction, and under `-PrequireWasmRuntime=true` it fails instead -- the same contract every
- * other wasm prerequisite has.
+ * The wheels are test fixtures checked in under `python-multiplatform/src/wasmJsTest/resources/wheels/`
+ * (leader, 2026-11-27), whose README records how each was built; [PINNED_WHEELS] pins their sha256 and
+ * [theCheckedInWheelsAreTheOnesTheReadmeDescribes] checks it. The test task extracts them next to the
+ * test bundle (`-PwasmWheelsDir` overrides the directory). Without them this test skips, and under
+ * `-PrequireWasmRuntime=true` it fails instead -- the same contract every other wasm prerequisite has.
  */
 class WasmCompiledWheelTest {
 
@@ -43,8 +43,7 @@ class WasmCompiledWheelTest {
         val site = PMP_TEST_SITE_PACKAGES?.toString()
         if (site == null) {
             val message = "no cp315t pyemscripten_2026_0 wheel in ${PMP_TEST_WHEELS_DIR?.toString()}: " +
-                "fetch the pinned wasmdemo wheel with python-multiplatform/scripts/wasm/build-cpython.sh wheels " +
-                "(or point -PwasmWheelsDir at a directory holding it; pypackpack #82)."
+                "the fixtures live in python-multiplatform/src/wasmJsTest/resources/wheels (pypackpack #82)."
             if (required.toBoolean()) {
                 fail("$message -PrequireWasmRuntime=true was passed, so this is a failure rather than a skip.")
             }
@@ -83,6 +82,45 @@ class WasmCompiledWheelTest {
         }
     }
 
+    /**
+     * The fixtures are what their README says they are: every pinned wheel is present with its
+     * sha256, and nothing unpinned sits beside them. A rebuilt wheel (new emsdk or ABI) changes the
+     * hash, so this fails until the README and [PINNED_WHEELS] are updated with the new provenance.
+     */
+    @Test
+    fun theCheckedInWheelsAreTheOnesTheReadmeDescribes() {
+        val dir = PMP_TEST_WHEELS_DIR?.toString() ?: fail("the test bundle's cpython-config.mjs carries no PMP_TEST_WHEELS_DIR")
+        PythonTestFixture.withInterpreter {
+            Python3.withPython {
+                assertEquals(
+                    0,
+                    runInMain(
+                        "import hashlib as _pmp_h, os as _pmp_os\n" +
+                            "_pmp_d = ${pyStr(dir)}\n" +
+                            "_pmp_found = sorted(n + ' ' + _pmp_h.sha256(open(_pmp_os.path.join(_pmp_d, n), 'rb').read()).hexdigest()\n" +
+                            "    for n in _pmp_os.listdir(_pmp_d) if n.endswith('.whl'))\n",
+                    ),
+                )
+                val found = evalToString("'\\n'.join(_pmp_found)")
+                runInMain("del _pmp_h, _pmp_os, _pmp_d, _pmp_found")
+                assertEquals(
+                    PINNED_WHEELS.entries.sortedBy { it.key }.joinToString("\n") { "${it.key} ${it.value}" },
+                    found,
+                    "the wheels in $dir are not the pinned fixtures; update resources/wheels/README.md and " +
+                        "PINNED_WHEELS together when a fixture is rebuilt",
+                )
+            }
+        }
+    }
+
     private fun pyStr(value: String): String =
         "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+    private companion object {
+        /** File name to sha256; the same values as `resources/wheels/README.md`. */
+        val PINNED_WHEELS = mapOf(
+            "wasmdemo-0.1.0-cp315-cp315t-pyemscripten_2026_0_wasm32.whl" to
+                "df57a28e3a61f4eb8bc5fe84e4a09bdc76e8e720bd6c348345c3fb86c772298a",
+        )
+    }
 }

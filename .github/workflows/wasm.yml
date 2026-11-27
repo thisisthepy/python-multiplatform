@@ -129,14 +129,6 @@ jobs:
           done
           ls -l "$WASM_RUNTIME_DIR"
 
-      # `WasmCompiledWheelTest` imports a real compiled pyemscripten_2026_0 wheel. Under
-      # `-PrequireWasmRuntime` a missing wheel is a failure, not a skip, so fetch them first: by URL,
-      # each accepted only against the sha256 the script pins. The script pins none today: the
-      # wheel has to be a pypackpack-built cp315t one (leader, Decision 10 (c) c1, 2026-11-26), and
-      # until pypackpack #82 produces it this job fails on that one test, by name, by design.
-      - name: Fetch the pinned wasm wheels
-        run: bash python-multiplatform/scripts/wasm/build-cpython.sh wheels
-
       # `-PrequireWasmRuntime` is the second half of the guard, and it is what makes this job unable
       # to repeat the original defect: if either task would skip -- no interpreter, or no
       # Chromium-family browser for karma -- the build fails naming what was missing, instead of
