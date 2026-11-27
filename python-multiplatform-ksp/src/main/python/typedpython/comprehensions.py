@@ -29,7 +29,8 @@ cannot hold) and adds with CPython's compensated summation (Neumaier: `cs_add` a
 Python/bltinmodule.c, each item through float() as `PyLong_AsDouble` takes an int); any() and all() stop at the first
 true or false item, through every clause's loop; min() and max() keep the first item and replace it by one that
 compares strictly smaller (larger), as `min_max` does, and of an empty iterable raise CPython's ValueError (an
-`ir.Raise`, through a `raise` statement this pass marks). A generator expression is not accepted (design: no generators in
+`ir.Raise`, through a `raise` statement this pass marks); `sorted(it, reverse=r)` is the list built by the loop,
+then sorted in place by CPython's listsort (`list.sort`, tp_aot.h), `r` a bool constant or a name. A generator expression is not accepted (design: no generators in
 any tier), so `sum(x * 2 for x in xs)` stays refused.
 
 Not rewritten, left for the lowering to refuse naming the reason: a comprehension anywhere else (an operand, an
@@ -44,7 +45,7 @@ from dataclasses import dataclass, field
 from typedpython import rebinding
 
 COMPS = (ast.ListComp, ast.SetComp, ast.DictComp)
-REDUCERS = ("sum", "any", "all", "min", "max")
+REDUCERS = ("sum", "any", "all", "min", "max", "sorted")
 Kinds = dict[str, dict[str, list[tuple[int, str]]]]
 
 
@@ -89,7 +90,7 @@ def _reducer_of(s: ast.stmt) -> ast.Call | None:
     value = _value_of(s)
     if isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id in REDUCERS \
             and value.args and not isinstance(value.args[0], (ast.GeneratorExp, ast.Starred)) \
-            and not (value.func.id in ("min", "max") and len(value.args) != 1):    # (min(a, b) is an expression)
+            and not (value.func.id in ("min", "max", "sorted") and len(value.args) != 1):  # (min(a, b): an expression)
         return value
     return None
 
@@ -262,6 +263,16 @@ def _rewrite_site(site: Site, fn: ast.FunctionDef, kinds: dict[str, list[tuple[i
             if len(call.args) + len(call.keywords) > 2 or any(k.arg != "start" for k in call.keywords) \
                     or (len(call.args) == 2 and call.keywords):
                 raise _Problem(line, "sum() takes an iterable and a start in an AOT program")
+        elif call.func.id == "sorted":                                      # type: ignore[attr-defined]
+            for k in call.keywords:
+                if k.arg == "key":
+                    raise _Problem(line, f"`{ast.unparse(call)}`: sorted(key=...) is not in the AOT mode yet")
+                if k.arg != "reverse":
+                    raise _Problem(line, f"`{ast.unparse(call)}`: sorted() takes no keyword `{k.arg}`")
+                if not (isinstance(k.value, ast.Name) or (isinstance(k.value, ast.Constant)
+                                                          and isinstance(k.value.value, bool))):
+                    raise _Problem(line, f"`{ast.unparse(call)}`: the reverse= of sorted() is a bool constant or a name "
+                                         "in an AOT program (CPython evaluates it before it reads the iterable)")
         elif call.func.id in ("min", "max") and call.keywords:              # type: ignore[attr-defined]
             raise _Problem(line, f"{call.func.id}() of an iterable takes no key= or default= in an AOT program yet")  # type: ignore[attr-defined]
         elif len(call.args) != 1 or call.keywords:
@@ -358,6 +369,10 @@ def _reduced_type(call: ast.Call, spelled: str, line: int) -> ast.expr:
     name = call.func.id                                                     # type: ignore[attr-defined]
     if name in ("any", "all"):
         return ast.Name(id="bool", ctx=ast.Load())
+    if name == "sorted":
+        if spelled in ("list[int]", "list[float]", "list[str]"):
+            return _annotation_of(spelled, line)
+        raise _Problem(line, f"`{ast.unparse(call)}` is a {spelled}: an AOT program sorts int, float or str items")
     if name in ("min", "max"):
         import re
         parts = {"int" if re.fullmatch(r"(typing\.)?Literal\[-?\d+\]", p.strip()) else p.strip()
@@ -399,7 +414,15 @@ def _reduce(site: Site, call: ast.Call, annotation: ast.expr, acc: str,
     head: list[ast.stmt] = []
     tail: list[ast.stmt] = []
     stop: ast.expr | None = None
-    if name in ("min", "max"):
+    if name == "sorted":
+        reverse = next((k.value for k in call.keywords if k.arg == "reverse"), ast.Constant(False))
+        head = [ast.AnnAssign(target=store(acc), annotation=annotation, value=ast.List(elts=[], ctx=ast.Load()),
+                              simple=1)]
+        inner = [ast.Expr(value=ast.Call(func=ast.Attribute(value=load(acc), attr="append", ctx=ast.Load()),
+                                         args=[item], keywords=[]))]
+        tail = [ast.Expr(value=ast.Call(func=ast.Attribute(value=load(acc), attr="sort", ctx=ast.Load()), args=[],
+                                        keywords=[ast.keyword(arg="reverse", value=copy.deepcopy(reverse))]))]
+    elif name in ("min", "max"):
         assert isinstance(annotation, ast.Name)
         seen = _fresh("seen", taken, counter, site.qname)
         head = [ast.AnnAssign(target=store(seen), annotation=ast.Name(id="bool", ctx=ast.Load()),

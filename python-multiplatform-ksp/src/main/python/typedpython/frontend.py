@@ -1962,6 +1962,10 @@ class _Lowerer:
             if self.info.aot and _is_print_call(node.value) and self.builtin("print"):
                 return self.print_stmt(node.value)
             if self.info.aot and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute) \
+                    and node.value.func.attr == "sort" and isinstance(node.value.func.value, ast.Name) \
+                    and self.is_list_name(node.value.func.value.id):
+                return self.list_sort_stmt(node.value)                  # tier S2c
+            if self.info.aot and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute) \
                     and isinstance(node.value.func.value, ast.Name) and not node.value.keywords \
                     and not any(isinstance(a, ast.Starred) for a in node.value.args):
                 mod = node.value.func.value.id
@@ -3476,6 +3480,32 @@ class _Lowerer:
             raise Skip(node.lineno, f"{what} `{_src(node)}` is {TYPE_NAME.get(e.type, e.type.value)}, not an int")
         return e
 
+    def list_sort_stmt(self, node: ast.Call) -> list[ir.Stmt]:
+        """`a.sort()`, `a.sort(reverse=r)` (tier S2c): CPython's listsort of a list of int, float or str; the reverse
+        value is evaluated first, as an argument is."""
+        func = node.func
+        assert isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+        array, line = func.value.id, node.lineno
+        if node.args:
+            raise Skip(line, f"`{_src(node)}`: list.sort() takes no positional argument")
+        reverse: ir.Expr = ir.Const(Type.BOOL, False)
+        for k in node.keywords:
+            if k.arg == "key":
+                raise Skip(line, f"`{_src(node)}`: list.sort(key=...) is not in the AOT mode yet")
+            if k.arg != "reverse":
+                raise Skip(line, f"`{_src(node)}`: list.sort() takes no keyword `{k.arg}`")
+            reverse = self.value(k.value)
+            if reverse.type is not Type.BOOL:
+                raise Skip(line, f"`{_src(node)}`: reverse= is a bool in an AOT program, not "
+                                 f"{TYPE_NAME.get(reverse.type, reverse.type.value)}")
+        t = self.list_type(array)
+        if t not in (Type.I64_ARRAY, Type.F64_ARRAY, Type.STR_LIST):
+            raise Skip(line, f"`{_src(node)}`: `{array}` is a {TYPE_NAME.get(t, t.value)}; an AOT program sorts a list "
+                             "of int, float or str (a None item, or a class instance, has no order in CPython)")
+        self.hoist_ok = False
+        self.list_effect(array)
+        return self.take() + [ir.ListSort(array, reverse)]
+
     def list_method_stmt(self, node: ast.Call) -> list[ir.Stmt]:
         """`a.append(v)`, `a.insert(i, v)`, `a.extend(b)`, `a.clear()`, `a.reverse()`, `a.remove(v)` as statements."""
         func = node.func
@@ -4915,7 +4945,7 @@ class _Lowerer:
         `abs(x)`, `min(a, b)` and `max(a, b)` (two numbers of one type). None: not one of these."""
         args = node.args
         line = node.lineno
-        if name in ("sum", "any", "all") and self.builtin(name):           # tier S2c (typedpython/comprehensions.py)
+        if name in ("sum", "any", "all", "sorted") and self.builtin(name):  # tier S2c (typedpython/comprehensions.py)
             raise Skip(line, f"`{_src(node)}`: an AOT program compiles {name}() as the value of an assignment to a "
                              "name or of a `return` (tier S2c): bind it to a name first")
         if name == "len" and self.builtin("len") and len(args) == 1 and self.is_sys_argv(args[0]):

@@ -3102,6 +3102,16 @@ class _Fn:
         if found is not None:
             self.emit(f"{self.lop(found[1], 'clear')}({found[0]});")
 
+    def st_ListSort(self, s: ir.ListSort) -> None:
+        rev = self.ev(s.reverse)
+        found = self.grow_list(s.array, "a sort")
+        if found is None:
+            return
+        if found[1] in ("obj", "dict") or self.types.get(s.array) is Type.STR_OPT_LIST:
+            self.bad("aot/ir-node", "ListSort", f"the sort of `{s.array}`: only a list of int, float or str is sorted")
+            return
+        self.emit(f"if ({self.lop(found[1], 'sort')}({found[0]}, {rev})) {self.fail()}")
+
     def st_ListReverse(self, s: ir.ListReverse) -> None:
         found = self.grow_list(s.array, "a reverse")
         if found is not None:

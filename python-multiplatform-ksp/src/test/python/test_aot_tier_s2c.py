@@ -346,6 +346,68 @@ def test_min_and_max_of_an_iterable_are_the_loops_they_mean(tmp_path: Path):
     _compare(tmp_path, MINMAX, [["3,1,4", "b,a,c"], ["7", "z"], ["", "q"]])
 
 
+SORTS = """
+import sys
+
+
+def lcg(x: int) -> int:
+    return (x * 1103515245 + 12345) % 2147483648
+
+
+def main() -> None:
+    seed = int(sys.argv[1])
+    n = int(sys.argv[2])
+    xs = [0] * n
+    for i in range(n):
+        seed = lcg(seed)
+        xs[i] = seed % 50
+    ys = sorted(xs)
+    zs = sorted(xs, reverse=True)
+    print(ys)
+    print(zs)
+    inf = 1e308 * 10.0
+    nan = inf - inf
+    fl = [0.0] * n
+    for i in range(n):
+        seed = lcg(seed)
+        k = seed % 20
+        fl[i] = nan if k == 0 else k / 4 - 2
+    fr = sorted(fl, reverse=True)
+    fl.sort()
+    print(fl)
+    print(fr)
+    runs = [0] * n
+    for i in range(n):
+        runs[i] = (i % 37) // 3 if (i // 37) % 2 == 0 else 20 - (i % 37) // 4
+    runs.sort()
+    print(runs)
+    big = [v * 1000000000000000000 - 7 for v in xs]
+    big.sort(reverse=True)
+    if n > 0:
+        print(big[0], big[n // 2], big[n - 1])
+    words = sys.argv[3].split(",")
+    words.sort(reverse=True)
+    d = {"b": 1, "a": 2, "c": 0}
+    ks = sorted(d)
+    vs = sorted(d.values(), reverse=True)
+    flag = n > 10
+    ws = sorted(words, reverse=flag)
+    print(words, ks, vs, ws)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_sorted_and_list_sort_are_cpythons_listsort(tmp_path: Path):
+    """`xs.sort(reverse=...)` of a list of int, float or str, and `sorted(it, reverse=...)` bound to a name or returned,
+    are CPython's own listsort (Objects/listobject.c, ported in tp_aot.h: binary insertion, count_run with its
+    reversal of equal runs, galloping, the powersort merge order), so where the NaN of a list of float end up is
+    CPython's, for short lists and for lists long enough to merge and gallop. Agent proposal, not owner-confirmed."""
+    _compare(tmp_path, SORTS, [["1", "0", "a"], ["7", "65", "b,a,c"], ["42", "700", "x,y,x,z"], ["5", "2000", "q"]])
+
+
 def _rules(tmp_path: Path, source: str) -> set[tuple[str, str]]:
     with pytest.raises(aot.AotError) as raised:
         aot.generate(_write(tmp_path, source))
@@ -399,6 +461,11 @@ MAIN = '\n\ndef main() -> None:\n    f()\n\n\nif __name__ == "__main__":\n    ma
     ("    xs = [1, 2]\n    print(min(xs))\n", "bind it to a name"),
     ("    xs = [1, 2]\n    m = min(xs, key=abs)\n    print(m)\n", "key"),
     ("    xs = [1, 2]\n    m = max(xs, default=0)\n    print(m)\n", "default"),
+    # sorted() and list.sort() without a key yet; sorted() bound to a name or returned
+    ("    xs = [1, 2]\n    xs.sort(key=abs)\n    print(xs)\n", "key"),
+    ("    xs = [1, 2]\n    ys = sorted(xs, key=abs)\n    print(ys)\n", "key"),
+    ("    xs = [1, 2]\n    print(sorted(xs))\n", "bind it to a name"),
+    ("    xs = [1, 2]\n    ys = sorted(xs, reverse=len(xs) > 1)\n    print(ys)\n", "reverse"),
     # (found here: a comprehension over a list[float] was refused, and float() of a str reached the verifier)
     ("    w = '1.5'\n    x = float(w)\n    print(x)\n", "float() of a str"),
 ])

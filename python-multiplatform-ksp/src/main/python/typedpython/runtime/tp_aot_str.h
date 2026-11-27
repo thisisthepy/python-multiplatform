@@ -1209,6 +1209,14 @@ static TPA_UNUSED void tpa_str_list_reverse(tpa_str_list *l)
     }
 }
 
+/* Tier S2c: list.sort() of a list[str], CPython's listsort (TPA__DEF_SORT in tp_aot.h) in code point order */
+#define TPA__LT_STR(a, b) (tpa_str_cmp((a), (b)) < 0)
+TPA__DEF_SORT(tpa_sort_str, tpa_str *, TPA__LT_STR)
+static TPA_UNUSED int tpa_str_list_sort(tpa_str_list *l, int reverse)
+{
+    return tpa_sort_str__listsort(l->d, l->len, reverse);
+}
+
 /* A growing list while split builds its result (a private buffer, not a value). */
 typedef struct {
     tpa_str **d;

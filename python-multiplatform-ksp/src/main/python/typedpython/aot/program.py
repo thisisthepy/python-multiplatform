@@ -41,7 +41,7 @@ LIST_ELEMENTS = ("int", "float")             # `list[int]` and `list[float]` are
 BUILTINS_USED = frozenset({"print", "float", "range", "len", "abs", "min", "max", "int", "bool", "list",
                            "str", "repr", "ord", "chr",        # (str ... chr: tier S1)
                            "enumerate", "zip", "reversed",      # (tier S2c: the iterable of a loop)
-                           "sum", "any", "all"})                # (tier S2c: the loop over an iterable)
+                           "sum", "any", "all", "sorted"})      # (tier S2c: the loop over an iterable)
 RESERVED_PREFIX = "__tp_"
 MAIN = frontend.AOT_ENTRY
 
@@ -700,6 +700,14 @@ class _Checker:
             if isinstance(f, ast.Name) and f.id == "sum" and k.arg == "start" and "sum" not in self.shadow:
                 self.expr(k.value)          # tier S2c: sum(xs, start=...)
                 continue
+            if ((isinstance(f, ast.Name) and f.id == "sorted" and "sorted" not in self.shadow)
+                    or (isinstance(f, ast.Attribute) and f.attr == "sort")) and k.arg in ("reverse", "key"):
+                if k.arg == "key":            # tier S2c: sorted() / list.sort() without a key yet
+                    self.rep.error(k.value, "aot/keyword", "key", "sorted() and list.sort() take no key= in an AOT "
+                                                                 "program yet")
+                else:
+                    self.expr(k.value)
+                continue
             if isinstance(f, ast.Name) and f.id in ("min", "max") and f.id not in self.shadow:
                 self.rep.error(k.value, "aot/keyword", k.arg or "**", f"{f.id}() takes no key= or default= in an AOT "
                                                                       "program yet")
@@ -786,7 +794,7 @@ class _Checker:
                 self.rep.error(c, "aot/print-use", "print", "print is only supported as a statement of its own")
             elif n == "range":
                 self.rep.error(c, "aot/call", "range", "range is only supported as the iterable of a `for` loop")
-            elif n in ("sum", "any", "all"):
+            elif n in ("sum", "any", "all", "sorted"):
                 # tier S2c: the loop over the iterable (typedpython/comprehensions.py; the front end checks the place)
                 if not c.args:
                     self.rep.error(c, "aot/call", n, f"{n}() takes an iterable")
@@ -900,7 +908,8 @@ def _is_list_annotation(ann: ast.expr) -> bool:
 
 
 # tier S2a: the methods of a list (design 4.3.2)
-LIST_METHODS = frozenset({"append", "insert", "extend", "clear", "reverse", "remove", "pop", "index", "count"})
+LIST_METHODS = frozenset({"append", "insert", "extend", "clear", "reverse", "remove", "pop", "index", "count",
+                          "sort"})                              # (sort: tier S2c)
 # tier S2b: the dict methods (the front end checks the receiver is a dict)
 DICT_METHODS = frozenset({"get", "setdefault", "pop", "popitem", "keys", "values", "items", "copy", "clear", "update",
                           # (tier S2b: the set methods; the front end checks the receiver)

@@ -743,6 +743,15 @@ class ListClear(Stmt):
 
 
 @dataclass(frozen=True)
+class ListSort(Stmt):
+    """`array.sort(reverse=...)` (tier S2c): CPython's listsort without a key (tp_aot.h `TPA__DEF_SORT`), of a list of
+    int, float or str. `reverse` is BOOL, evaluated before the sort."""
+
+    array: str
+    reverse: Expr
+
+
+@dataclass(frozen=True)
 class ListReverse(Stmt):
     """`array.reverse()`."""
 

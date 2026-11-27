@@ -114,7 +114,8 @@ TABLE = [
     ("aot/exception", "def f() -> None:\n    raise ValueError('x')\n", (PEND, "S", "raise", 2)),
     ("aot/exception", "def f() -> None:\n    try:\n        pass\n    finally:\n        pass\n", (PEND, "S", "try", 2)),
     ("aot/exception", "def f(x: int) -> None:\n    assert x\n", (PEND, "S", "assert", 2)),
-    ("aot/builtin", "def f(a: list[int]) -> list[int]:\n    return sorted(a)\n", (PEND, "S", "sorted", 2)),
+    # (tier S2c: `return sorted(a)` compiles; sorted() anywhere else is pending)
+    ("aot/builtin", "def f(a: list[int]) -> int:\n    return len(sorted(a))\n", (PEND, "S", "sorted", 2)),
     ("aot/builtin", "def f(x: int) -> str:\n    return format(x)\n", (PEND, "S", "format", 2)),
     # aot/threading (pending T)
     ("aot/threading", "import threading\n", (PEND, "T", "threading", 1)),
@@ -210,6 +211,8 @@ def test_enumerate_and_zip_as_the_iterable_of_a_loop_are_not_reported(tmp_path):
             for i, x in enumerate(reversed(xs)):
                 print(i, x)
             t = sum(xs)
+            v = sorted(xs, reverse=True)
+            v.sort()
             u = any(range(t))
             print(u)
             return [i * x for i, x in enumerate(xs)]
@@ -218,10 +221,10 @@ def test_enumerate_and_zip_as_the_iterable_of_a_loop_are_not_reported(tmp_path):
     assert report.findings == [], report.lines()
     path = write(tmp_path, """
         def f(xs: list[int]) -> int:
-            return len(list(zip(xs, xs))) + sum(1 for _ in enumerate(xs)) + len(list(reversed(xs))) + int(all(xs))
+            return len(list(zip(xs, xs))) + sum(1 for _ in enumerate(xs)) + len(list(reversed(xs))) + int(all(xs)) + len(sorted(xs))
     """)
     names = {f.name for f in aotcheck.check(path, front_end=False).findings}
-    assert {"zip", "enumerate", "reversed", "sum", "all"} <= names, names
+    assert {"zip", "enumerate", "reversed", "sum", "all", "sorted"} <= names, names
 
 
 def test_the_view_types_of_collections_abc_are_not_reported(tmp_path):

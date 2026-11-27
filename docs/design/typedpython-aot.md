@@ -564,9 +564,14 @@ iterable raise CPython's `ValueError: min() iterable argument is empty` (an `ir.
 this rewrite: a `raise` of the program stays refused); key= and default= are not in yet. A generator
 expression argument stays refused (generators are outside every tier, section 4). Then `zip` and `reversed` of
 other iterables, range objects passed and indexed, in `for` loops and comprehensions; `min` / `max` with key=
-and default=; `sorted(xs, key=..., reverse=...)` and `list.sort(...)` with a key that is a compiled function or a
-lambda written in place: CPython's own algorithm (timsort, `listsort` in Objects/listobject.c, ported as it is), so
-the order of equal and of unordered elements (NaN) is CPython's, not merely some stable order. `bytes`: an immutable
+and default=; `sorted(xs, key=...)` and `list.sort(key=...)` with a key that is a compiled function or a lambda
+written in place. Without a key it is in (agent proposal, not confirmed): `xs.sort(reverse=r)` of a list of int,
+float or str, and `sorted(it, reverse=r)` bound to a name or returned (the list built by the loop, then sorted),
+are CPython's own algorithm (timsort, `listsort` in Objects/listobject.c of 3.15.0rc1, the embedded version, ported
+as it is in tp_aot.h as `TPA__DEF_SORT`; 3.15 takes a minrun per run, `minrun_next`, where 3.14 took one for the
+list, which orders NaN differently), so the order of equal and of unordered elements (NaN) is CPython's, not
+merely some stable order. A fuzz of the port against CPython 3.15.0rc1's sorted() over lists of floats with NaN
+(lengths 0 to 3000) found no difference. `bytes`: an immutable
 byte array; literals, `s.encode()` / `encode("utf-8")` (strict: a surrogate raises CPython's UnicodeEncodeError),
 `b.decode()` (strict UTF-8, CPython's UnicodeDecodeError message), `len`, indexing (an int), slicing, `+`, `*`, `==`,
 `in`, iteration (ints), `print` / `repr` (`b'...'` with CPython's escapes), `bytes(n)` and `bytes(list[int])`
