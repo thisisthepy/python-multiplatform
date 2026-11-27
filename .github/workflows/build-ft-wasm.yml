@@ -50,10 +50,10 @@ jobs:
       FT_WASM_EMSDK_VERSION: ${{ inputs.emscripten_version || '' }}
       FT_WASM_TRAMPOLINE_PATCH: ${{ inputs.trampoline_patch || 'apply' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # CPython 3.15.0 pins node 24 (Platforms/emscripten/config.toml, node-version).
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
 
@@ -66,7 +66,7 @@ jobs:
       - name: Build and verify
         run: .github/scripts/ft-wasm/build-wasm.sh "${{ inputs.python_version || '3.15.0' }}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: python-${{ inputs.python_version || '3.15.0' }}t-wasm32-emscripten
           path: ${{ env.FT_OUT }}/*.tar.gz
