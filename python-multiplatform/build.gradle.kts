@@ -16,6 +16,7 @@ import java.lang.reflect.InvocationTargetException
 import java.io.FileOutputStream
 import java.security.MessageDigest
 import java.util.Properties
+import java.util.zip.ZipFile
 import java.io.File
 import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
@@ -2811,9 +2812,43 @@ fun resolveChromiumFamilyBrowser(): String? {
     return candidates.firstOrNull { File(it).canExecute() }
 }
 
+// Issue #546: every file `copyAndroidPythonAssets` stages must reach the AAR. AGP's default
+// `ignoreAssetsPattern` (`<dir>_*` in particular) silently dropped every stdlib directory whose name
+// starts with `_` (`zipfile/_path`, `_pyrepl`, `compression/_common`, ...), and `importlib.metadata`
+// then failed on the device with "No module named 'zipfile._path'" (torchnative, 2026-11-27).
+// This compares the staged tree with the AAR's entries, so a filter that drops anything fails here.
+val verifyAarStdlib by tasks.registering {
+    group = "verification"
+    description = "Fails when the release AAR lacks a file staged under build/android/assets (#546)."
+    dependsOn("bundleReleaseAar")
+    val stagedRoot = file("$androidBuildDir/assets")
+    val aar = layout.buildDirectory.file("outputs/aar/${project.name}-release.aar")
+    doLast {
+        val staged = stagedRoot.walkTopDown().filter { it.isFile }
+            .map { "assets/" + it.relativeTo(stagedRoot).invariantSeparatorsPath }.toSet()
+        check(staged.isNotEmpty()) { "nothing is staged under $stagedRoot" }
+        val entries = ZipFile(aar.get().asFile).use { zip ->
+            zip.entries().asSequence().map { it.name }.toSet()
+        }
+        val missing = (staged - entries).sorted()
+        check(missing.isEmpty()) {
+            "the AAR lacks ${missing.size} of ${staged.size} staged asset files (#546), for example:\n" +
+                missing.take(20).joinToString("\n")
+        }
+        logger.lifecycle("verifyAarStdlib: all ${staged.size} staged asset files are in the AAR")
+    }
+}
+
 android {
     namespace = "python.multiplatform"
     compileSdk = libs.versions.android.compileSdk.get().toInt()
+
+    // AGP's default ignoreAssetsPattern minus `<dir>_*`, which dropped every stdlib directory whose
+    // name starts with `_` (`zipfile/_path`, `_pyrepl`, ...) from the AAR (#546; checked by
+    // verifyAarStdlib). An app merging this AAR applies its own pattern too (toolchain #166).
+    androidResources {
+        ignoreAssetsPattern = "!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~"
+    }
 
     sourceSets["main"].assets.srcDirs("src/androidMain/assets", "$androidBuildDir/assets")
     // KMP androidMain resources do not reach the AAR's classes.jar; AGP's main resources do.
