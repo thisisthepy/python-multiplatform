@@ -88,6 +88,7 @@ object PythonBootstrap {
             val cache = context.cacheDir.also { it.mkdirs() }
             Os.setenv(TMPDIR, cache.absolutePath, true)
         }
+        provideCaCertificates(context)
         // Unpacked and *registered* here, put on sys.path by Python3.initialize below. The split
         // is not a preference: reading assets needs this Context and sys.path does not exist until
         // Py_Initialize() has run, so the two halves cannot happen at the same moment. See
@@ -380,6 +381,59 @@ object PythonBootstrap {
         return "python-multiplatform ${Versions.currentVersion} $abi $code $updated"
     }
 
+    /**
+     * SPEC L-5b (#548): points `SSL_CERT_FILE` at a PEM bundle of the device's CA certificates,
+     * unless the app already set it.
+     *
+     * The embedded CPython has no CA store of its own, so `ssl.create_default_context()` loaded
+     * nothing and every HTTPS request failed with `CERTIFICATE_VERIFY_FAILED`. `SSL_CERT_DIR` cannot
+     * name the system store directly: Android names those files by OpenSSL's old (MD5) subject
+     * hash, and OpenSSL's directory lookup uses the new one. A single file has no such lookup.
+     *
+     * Rebuilt on every call rather than stamped, because the APEX store is updated outside app
+     * upgrades (a removed CA must disappear here too); it is about 150 small files.
+     */
+    private fun provideCaCertificates(context: Context) {
+        if (!Os.getenv(SSL_CERT_FILE).isNullOrEmpty()) return
+        val target = File(context.cacheDir.also { it.mkdirs() }, CA_BUNDLE_NAME)
+        try {
+            if (writeCaCertificateBundle(CA_STORES.map(::File), target) != null) {
+                Os.setenv(SSL_CERT_FILE, target.absolutePath, true)
+            }
+        } catch (e: IOException) {
+            // Without a bundle `ssl` behaves as before this existed; starting Python matters more.
+            System.err.println("python-multiplatform: no CA bundle for ssl ($e)")
+        }
+    }
+
+    /**
+     * Writes the PEM certificates of the first store in [stores] that holds any into [target] and
+     * returns how many there are, or null (and writes nothing) when no store holds one.
+     *
+     * Only the first such store is used: the stores are not merged, because the APEX store is the
+     * updatable one and a CA removed from it must stay removed. Only the PEM blocks are copied;
+     * Android's store files also carry `openssl x509 -text` output after the block. The file is
+     * written beside [target] and renamed over it, so a process reading the old bundle never sees
+     * half of the new one.
+     */
+    internal fun writeCaCertificateBundle(stores: List<File>, target: File): Int? {
+        for (store in stores) {
+            val files = store.listFiles()?.filter { it.isFile }?.sortedBy { it.name } ?: continue
+            val blocks = files.flatMap { file ->
+                PEM_BLOCK.findAll(file.readText(Charsets.US_ASCII)).map { it.value + "\n" }.toList()
+            }
+            if (blocks.isEmpty()) continue
+            val partial = File(target.parentFile, target.name + ".partial")
+            partial.writeText(blocks.joinToString(""), Charsets.US_ASCII)
+            if (!partial.renameTo(target)) {
+                partial.delete()
+                throw IOException("cannot rename $partial to $target")
+            }
+            return blocks.size
+        }
+        return null
+    }
+
     private fun elapsedMillis(startedNanos: Long) = (System.nanoTime() - startedNanos) / 1_000_000
 
     private class Counter {
@@ -389,6 +443,12 @@ object PythonBootstrap {
 
     private const val PYTHONHOME = "PYTHONHOME"
     private const val TMPDIR = "TMPDIR"
+    private const val SSL_CERT_FILE = "SSL_CERT_FILE"
+    private const val CA_BUNDLE_NAME = "python-multiplatform-cacerts.pem"
+
+    /** In order of preference: the updatable APEX store (Android 14+), then the system image's. */
+    private val CA_STORES = listOf("/apex/com.android.conscrypt/cacerts", "/system/etc/security/cacerts")
+    private val PEM_BLOCK = Regex("-----BEGIN CERTIFICATE-----[A-Za-z0-9+/=\\s]+?-----END CERTIFICATE-----")
     private const val STAMP_NAME = ".python-multiplatform-stdlib"
     private const val PAYLOAD_STAMP_NAME = ".python-multiplatform-payload"
 
