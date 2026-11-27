@@ -213,10 +213,10 @@ fun materialiseLibraryStubs(extracted: File) {
         .forEach { real ->
             val stub = File(real.parentFile, versioned.find(real.name)!!.groupValues[1])
             val stubPath = stub.toPath()
-            if (java.nio.file.Files.isSymbolicLink(stubPath) || !stub.exists() || stub.length() != 0L) return@forEach
+            if (Files.isSymbolicLink(stubPath) || !stub.exists() || stub.length() != 0L) return@forEach
             stub.delete()
             try {
-                java.nio.file.Files.createSymbolicLink(stubPath, java.nio.file.Paths.get(real.name))
+                Files.createSymbolicLink(stubPath, Path.of(real.name))
             } catch (_: Exception) {
                 real.copyTo(stub, overwrite = true)
             }
