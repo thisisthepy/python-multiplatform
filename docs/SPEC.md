@@ -102,6 +102,18 @@ fail, then implement.
   to app-private storage once (a stamp written last decides re-unpacking, including after APK
   upgrades), sets `PYTHONHOME` and starts the interpreter. `Status: implemented` (needs a device),
   `PM/androidInstrumentedTest/.../env/PythonBootstrapTest.kt`, `PythonPayloadStagingTest.kt`.
+- **L-5b** Android: `PythonBootstrap.initialize(context)` gives `ssl` the device's CA certificates, so
+  `ssl.create_default_context()` verifies HTTPS servers. The embedded CPython has no CA store of its own,
+  and every HTTPS request failed with `CERTIFICATE_VERIFY_FAILED` (torchnative on a Galaxy Z Flip4,
+  2026-11-27, #548). `SSL_CERT_DIR` cannot point at the system store, because Android names those files by
+  OpenSSL's old subject hash and OpenSSL looks them up by the new one (torchnative tried it on the device).
+  So the bootstrap writes the PEM certificates of one store into `<cacheDir>/python-multiplatform-cacerts.pem`
+  and sets `SSL_CERT_FILE` to it. The store is `/apex/com.android.conscrypt/cacerts` when it holds
+  certificates (Android 14+), otherwise `/system/etc/security/cacerts`. The two are not merged, because
+  the APEX store is the updatable one and a CA removed from it must stay removed (leader approval,
+  2026-11-27, of the proposal and this reason). User-installed CAs are not included (apps cannot read them). An app that already set
+  `SSL_CERT_FILE` keeps its value. `Status: implemented` (needs a device),
+  `PythonBootstrapTest.initializeGivesSslTheDeviceCaCertificates` and `CaCertificateBundleTest.kt`.
 - **L-6** A consumer's Python payload (jar resource on desktop, APK asset on Android) is extracted once
   and put on `sys.path` before the first import. `Status: implemented` on desktop
   (`PM/desktopTest/.../env/PythonPayloadTest.kt`) and Android (`PythonPayloadStagingTest.kt`).
