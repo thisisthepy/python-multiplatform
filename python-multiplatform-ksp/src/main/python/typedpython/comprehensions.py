@@ -29,7 +29,8 @@ cannot hold) and adds with CPython's compensated summation (Neumaier: `cs_add` a
 Python/bltinmodule.c, each item through float() as `PyLong_AsDouble` takes an int); any() and all() stop at the first
 true or false item, through every clause's loop; min() and max() keep the first item and replace it by one that
 compares strictly smaller (larger), as `min_max` does, and of an empty iterable raise CPython's ValueError (an
-`ir.Raise`, through a `raise` statement this pass marks); `sorted(it, reverse=r)` is the list built by the loop,
+`ir.Raise`, through a `raise` statement this pass marks) or, given `default=d`, are `d` (a constant or a name, of the
+items' type: the rewrite reads it before the loop reads the iterable, which only a constant or a name allows); `sorted(it, reverse=r)` is the list built by the loop,
 then sorted in place by CPython's listsort (`list.sort`, tp_aot.h), `r` a bool constant or a name. A generator expression is not accepted (design: no generators in
 any tier), so `sum(x * 2 for x in xs)` stays refused.
 
@@ -274,7 +275,16 @@ def _rewrite_site(site: Site, fn: ast.FunctionDef, kinds: dict[str, list[tuple[i
                     raise _Problem(line, f"`{ast.unparse(call)}`: the reverse= of sorted() is a bool constant or a name "
                                          "in an AOT program (CPython evaluates it before it reads the iterable)")
         elif call.func.id in ("min", "max") and call.keywords:              # type: ignore[attr-defined]
-            raise _Problem(line, f"{call.func.id}() of an iterable takes no key= or default= in an AOT program yet")  # type: ignore[attr-defined]
+            for k in call.keywords:
+                if k.arg != "default":
+                    raise _Problem(line, f"{call.func.id}() of an iterable takes no {k.arg}= in an AOT program yet")  # type: ignore[attr-defined]
+                d = k.value.operand if isinstance(k.value, ast.UnaryOp) and isinstance(k.value.op, ast.USub) \
+                    and isinstance(k.value.operand, ast.Constant) and type(k.value.operand.value) in (int, float) \
+                    else k.value                                            # (a negative number is a constant too)
+                if not (isinstance(d, ast.Name) or (isinstance(d, ast.Constant)
+                                                    and type(d.value) in (int, float, str, bool))):
+                    raise _Problem(line, f"`{ast.unparse(call)}`: the default= of {call.func.id}() is a constant or a "  # type: ignore[attr-defined]
+                                         "name in an AOT program (the loop reads it before the iterable)")
         elif len(call.args) != 1 or call.keywords:
             raise _Problem(line, f"{call.func.id}() takes one argument")      # type: ignore[attr-defined]
     # the accumulator's type
@@ -379,6 +389,9 @@ def _reduced_type(call: ast.Call, spelled: str, line: int) -> ast.expr:
                  for p in spelled.split("|")}
         if len(parts) == 1 and next(iter(parts)) in _ZERO:
             return ast.Name(id=next(iter(parts)), ctx=ast.Load())
+        if any(k.arg == "default" for k in call.keywords):
+            raise _Problem(line, f"`{ast.unparse(call)}` is a {spelled}: the default= of {name}() has the items' type "
+                                 "in an AOT program (int, float, str or bool)")
         raise _Problem(line, f"`{ast.unparse(call)}` is a {spelled}: an AOT program compiles {name}() of int, float, "
                              "str or bool items")
     start = call.args[1] if len(call.args) == 2 else next((k.value for k in call.keywords if k.arg == "start"), None)
@@ -425,9 +438,11 @@ def _reduce(site: Site, call: ast.Call, annotation: ast.expr, acc: str,
     elif name in ("min", "max"):
         assert isinstance(annotation, ast.Name)
         seen = _fresh("seen", taken, counter, site.qname)
+        default = next((k.value for k in call.keywords if k.arg == "default"), None)
         head = [ast.AnnAssign(target=store(seen), annotation=ast.Name(id="bool", ctx=ast.Load()),
                               value=ast.Constant(False), simple=1),
-                ast.AnnAssign(target=store(acc), annotation=annotation, value=ast.Constant(_ZERO[annotation.id]),
+                ast.AnnAssign(target=store(acc), annotation=annotation,
+                              value=copy.deepcopy(default) if default is not None else ast.Constant(_ZERO[annotation.id]),
                               simple=1)]
         better = ast.Compare(left=item, ops=[ast.Lt() if name == "min" else ast.Gt()], comparators=[load(acc)])
         inner = [ast.If(test=ast.UnaryOp(op=ast.Not(), operand=load(seen)),
@@ -435,7 +450,8 @@ def _reduce(site: Site, call: ast.Call, annotation: ast.expr, acc: str,
                         orelse=[ast.If(test=better, body=[assign(acc, copy.deepcopy(item))], orelse=[])])]
         empty = ast.Raise(exc=None, cause=None)
         empty.tp_builtin_raise = ("ValueError", f"{name}() iterable argument is empty")     # type: ignore[attr-defined]
-        tail = [ast.If(test=ast.UnaryOp(op=ast.Not(), operand=load(seen)), body=[empty], orelse=[])]
+        tail = [] if default is not None else [ast.If(test=ast.UnaryOp(op=ast.Not(), operand=load(seen)), body=[empty],
+                                                      orelse=[])]
     elif name in ("any", "all"):
         found = name == "any"
         head = [ast.AnnAssign(target=store(acc), annotation=annotation, value=ast.Constant(not found), simple=1)]

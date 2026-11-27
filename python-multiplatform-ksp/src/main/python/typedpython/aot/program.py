@@ -716,8 +716,11 @@ class _Checker:
                     self.expr(k.value)        # (the front end checks it is "utf-8")
                 continue
             if isinstance(f, ast.Name) and f.id in ("min", "max") and f.id not in self.shadow:
-                self.rep.error(k.value, "aot/keyword", k.arg or "**", f"{f.id}() takes no key= or default= in an AOT "
-                                                                      "program yet")
+                if k.arg == "default" and len(c.args) == 1:
+                    self.expr(k.value)        # tier S2c: min(it, default=d) (comprehensions.py checks d)
+                else:
+                    self.rep.error(k.value, "aot/keyword", k.arg or "**", f"{f.id}() takes no {k.arg}= in an AOT "
+                                                                          "program yet")
                 continue
             self.rep.error(k.value, "aot/keyword", k.arg or "**", "keyword arguments are outside the first AOT step")
         if any(isinstance(a, ast.Starred) for a in c.args):

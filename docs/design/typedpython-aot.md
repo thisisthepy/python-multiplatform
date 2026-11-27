@@ -561,10 +561,11 @@ with CPython's compensated summation (Neumaier, `cs_add` / `cs_to_double` in Pyt
 `sum([0.1] * 10, 0.0) == 1.0` as in CPython; any() and all() stop at the first true or false item; `min(it)` and `max(it)` keep the first item and replace it by
 one that compares strictly smaller (larger), as CPython's `min_max` does (a NaN first stays), and of an empty
 iterable raise CPython's `ValueError: min() iterable argument is empty` (an `ir.Raise` statement, made only by
-this rewrite: a `raise` of the program stays refused); key= and default= are not in yet. A generator
+this rewrite: a `raise` of the program stays refused); with `default=d` an empty iterable gives `d` instead (agent
+proposal, not confirmed; `d` a constant or a name of the items' type, since the loop reads it before the iterable);
+key= is not in yet. A generator
 expression argument stays refused (generators are outside every tier, section 4). Then `zip` and `reversed` of
-other iterables, range objects passed and indexed, in `for` loops and comprehensions; `min` / `max` with key=
-and default=; `sorted(xs, key=...)` and `list.sort(key=...)` with a key that is a compiled function or a lambda
+other iterables, range objects passed and indexed, in `for` loops and comprehensions; `min` / `max` with key=; `sorted(xs, key=...)` and `list.sort(key=...)` with a key that is a compiled function or a lambda
 written in place. Without a key it is in (agent proposal, not confirmed): `xs.sort(reverse=r)` of a list of int,
 float or str, and `sorted(it, reverse=r)` bound to a name or returned (the list built by the loop, then sorted),
 are CPython's own algorithm (timsort, `listsort` in Objects/listobject.c of 3.15.0rc1, the embedded version, ported

@@ -457,10 +457,13 @@ MAIN = '\n\ndef main() -> None:\n    f()\n\n\nif __name__ == "__main__":\n    ma
     ("    xs = [1.5, 2.5]\n    s: float = sum(xs)\n    print(s)\n", "sum(xs, 0.0)"),
     ("    xs = [1, 2]\n    s = any(xs, xs)\n    print(s)\n", "one argument"),
     ("    xs = [1, 2]\n    s = sum(x * 2 for x in xs)\n    print(s)\n", "generator expression"),
-    # min() and max() of an iterable are bound to a name or returned; no key= or default= yet
+    # min() and max() of an iterable are bound to a name or returned; no key= yet; default= is a constant or a name
+    # of the items' type
     ("    xs = [1, 2]\n    print(min(xs))\n", "bind it to a name"),
     ("    xs = [1, 2]\n    m = min(xs, key=abs)\n    print(m)\n", "key"),
-    ("    xs = [1, 2]\n    m = max(xs, default=0)\n    print(m)\n", "default"),
+    ("    xs = [1, 2]\n    m = max(xs, default=None)\n    print(m)\n", "default"),
+    ("    xs = [1, 2]\n    m = max(xs, default=len(xs))\n    print(m)\n", "default"),
+    ("    xs = [1.5]\n    m = min(xs, default=0)\n    print(m)\n", "default"),
     # sorted() and list.sort() without a key yet; sorted() bound to a name or returned
     ("    xs = [1, 2]\n    xs.sort(key=abs)\n    print(xs)\n", "key"),
     ("    xs = [1, 2]\n    ys = sorted(xs, key=abs)\n    print(ys)\n", "key"),
@@ -615,3 +618,35 @@ def test_an_fstring_repr_conversion_of_a_dict_or_list_value_is_one_repr(tmp_path
     """`{d!r}` of a dict and `{f()!r}` of a list a call returns are the repr, as `{d}` is (found while adding bytes:
     the repr text was given to repr() again, so it printed quoted)."""
     _compare(tmp_path, FSTRING_REPR, [["a,b"], ["x"]])
+
+
+MINMAX_DEFAULT = """
+import sys
+
+
+def lowest(xs: list[int], d: int) -> int:
+    return min(xs, default=d)
+
+
+def main() -> None:
+    xs = [int(t) for t in sys.argv[1].split(",") if t]
+    ws = [w for w in sys.argv[2].split(",") if w]
+    fl = [x / 2 for x in xs]
+    a = min(xs, default=-1)
+    b = max(xs, default=99)
+    c = max(ws, default="none")
+    e = min(fl, default=0.5)
+    none: list[int] = []
+    print(a, b, c, e, lowest(xs, 7), lowest(none, 7))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_min_and_max_with_a_default_give_it_for_an_empty_iterable(tmp_path: Path):
+    """`min(it, default=d)` / `max(it, default=d)` (design 4.3.2, S2c): the loop of min(it), and `d` instead of the
+    ValueError when the iterable is empty; `d` a constant or a name of the items' type. Agent proposal, not
+    owner-confirmed."""
+    _compare(tmp_path, MINMAX_DEFAULT, [["3,1,4", "b,a,c"], ["", ""], ["7", "z"]])
