@@ -212,14 +212,16 @@ cycles, interning and `Py_ssize_t` are closed (`PM/wasmJsTest/`: `WasmFinalizati
 (`docs/platforms/wasm-design.md`). Old §10c/§10d (browser test, CI split) are closed; their open
 remainder is 10.1.
 
-- **10.1 The wasm test suite does not run in CI, in progress (#175).** `.github/workflows/wasm.yml`
+- **10.1 The wasm test suite does not run in CI, closed by #542 (#175).** The batch run 45848955214
+  (2026-11-26) ran it: `wasmJsNodeTest` 599 tests, the one failure the expected
+  `WasmCompiledWheelTest`, and `wasmJsBrowserTest` 10 tests, 0 failures. Before that: `.github/workflows/wasm.yml`
   ran the `test` job only when the repository variable `WASM_RUNTIME_URL` was set, and it never was
   (observed 2026-10-03: `gh variable list` empty; "WasmJS Node + browser tests: skipped"). Leader,
   Decision 11 (a), 2026-11-26: "wasm.yml's test job runs build-cpython.sh itself, output in
   actions/cache keyed on the script and _pm_upcall.c hashes. No release asset." The job now does
   that; it closes when a dispatched `ci.yml` shows the job green. Until pypackpack #82 ships a cp315t
   wheel, `WasmCompiledWheelTest` fails it by name (Decision 10 (c) c1).
-- **10.2 `suspend` upcalls and `asyncio` on wasm, open.** SPEC U-5 is `planned` on wasm (no threads),
+- **10.2 `suspend` upcalls and `asyncio` on wasm, open.** SPEC U-5 is `planned` on wasm (the runtime has pthreads since #542; the suspend path is not built there),
   and `import asyncio` traps the instance (`asyncio.run` wants `socketpair`); the sample skips
   section 7 there (`sample/src/wasmJsMain/.../bindings/ProxyDemo.wasmJs.kt`).
 - **10.3 A wasm consumer must hand-write the `pmp_invoke` export, open.** `@WasmExport` is honoured
