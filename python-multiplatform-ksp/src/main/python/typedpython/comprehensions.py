@@ -21,6 +21,15 @@ A comprehension that is the whole value of an assignment to a name (`xs = [...]`
   conditions, so a variable has its declared type, not a narrowed one), and each variable's type is the type of its
   load in that probe. The hidden local gets that type as an injected `kinds` entry.
 
+`sum(it[, start])`, `any(it)` and `all(it)` that are the whole value of such a statement are the loops they mean too:
+the iterable is any iterable a `for` loop takes (the site is the comprehension `(v for v in it)` with a hidden `v`,
+typed at its probe as a comprehension variable is). An int sum adds as CPython's int fast path does (`acc = acc + v`);
+a float sum takes a float constant start (an empty float sum with the default int start is the int 0, which a float
+cannot hold) and adds with CPython's compensated summation (Neumaier: `cs_add` and `cs_to_double` in
+Python/bltinmodule.c, each item through float() as `PyLong_AsDouble` takes an int); any() and all() stop at the first
+true or false item, through every clause's loop. A generator expression is not accepted (design: no generators in
+any tier), so `sum(x * 2 for x in xs)` stays refused.
+
 Not rewritten, left for the lowering to refuse naming the reason: a comprehension anywhere else (an operand, an
 argument), a generator expression (aot/generator), an async comprehension; and refused here: `:=` inside one (it binds
 a name of the enclosing function in CPython), a nested comprehension inside one.
@@ -33,6 +42,7 @@ from dataclasses import dataclass, field
 from typedpython import rebinding
 
 COMPS = (ast.ListComp, ast.SetComp, ast.DictComp)
+REDUCERS = ("sum", "any", "all")
 Kinds = dict[str, dict[str, list[tuple[int, str]]]]
 
 
@@ -41,7 +51,8 @@ class Site:
     """A statement whose whole value is a comprehension, in the function `qname`."""
     qname: str
     stmt: ast.stmt
-    comp: ast.ListComp | ast.SetComp | ast.DictComp
+    comp: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp
+    call: ast.Call | None = None          # sum() / any() / all(): the call, `comp` its iterable as `(v for v in it)`
 
 
 @dataclass
@@ -60,14 +71,29 @@ def _own_statements(fn: ast.FunctionDef) -> list[ast.stmt]:
     return [s for s in rebinding._own_statements(fn) if s is not fn]
 
 
-def _comp_of(s: ast.stmt) -> ast.ListComp | ast.SetComp | ast.DictComp | None:
+def _value_of(s: ast.stmt) -> ast.expr | None:
     if isinstance(s, ast.Assign) and len(s.targets) == 1 and isinstance(s.targets[0], ast.Name):
-        value = s.value
-    elif isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name) and s.value is not None:
-        value = s.value
-    elif isinstance(s, ast.Return) and s.value is not None:
-        value = s.value
-    else:
+        return s.value
+    if isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name) and s.value is not None:
+        return s.value
+    if isinstance(s, ast.Return) and s.value is not None:
+        return s.value
+    return None
+
+
+def _reducer_of(s: ast.stmt) -> ast.Call | None:
+    """The sum() / any() / all() call that is the whole value of `s` (a name assignment or a return), of an iterable
+    that is not a generator expression."""
+    value = _value_of(s)
+    if isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id in REDUCERS \
+            and value.args and not isinstance(value.args[0], (ast.GeneratorExp, ast.Starred)):
+        return value
+    return None
+
+
+def _comp_of(s: ast.stmt) -> ast.ListComp | ast.SetComp | ast.DictComp | None:
+    value = _value_of(s)
+    if value is None:
         return None
     if isinstance(value, COMPS) and not any(g.is_async for g in value.generators):
         return value
@@ -75,11 +101,29 @@ def _comp_of(s: ast.stmt) -> ast.ListComp | ast.SetComp | ast.DictComp | None:
 
 
 def sites(functions: list[tuple[str, ast.FunctionDef]]) -> list[Site]:
-    """Every statement of the functions whose value is a comprehension this pass rewrites."""
-    return [Site(q, s, c) for q, fn in functions for s in _own_statements(fn) if (c := _comp_of(s)) is not None]
+    """Every statement of the functions whose value is a comprehension, or a sum() / any() / all(), this pass
+    rewrites."""
+    out: list[Site] = []
+    for q, fn in functions:
+        taken = _names(fn)
+        k = 0
+        for s in _own_statements(fn):
+            if (c := _comp_of(s)) is not None:
+                out.append(Site(q, s, c))
+            elif (call := _reducer_of(s)) is not None:
+                while True:
+                    k += 1
+                    v = f"item__s{k}"
+                    if v not in taken:
+                        taken.add(v)
+                        break
+                gen = ast.GeneratorExp(elt=ast.Name(id=v, ctx=ast.Load()), generators=[ast.comprehension(
+                    target=ast.Name(id=v, ctx=ast.Store()), iter=call.args[0], ifs=[], is_async=0)])
+                out.append(Site(q, s, ast.copy_location(gen, call.args[0]), call))
+    return out
 
 
-def _variables(comp: ast.ListComp | ast.SetComp | ast.DictComp) -> list[str]:
+def _variables(comp: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp) -> list[str]:
     """The comprehension's variables, in the order their clauses bind them (each once)."""
     names: list[str] = []
     for g in comp.generators:
@@ -156,6 +200,12 @@ def _located(node: ast.AST, at: ast.stmt) -> ast.AST:
     return node
 
 
+def _float_constant(e: ast.expr | None) -> bool:
+    if isinstance(e, ast.UnaryOp) and isinstance(e.op, (ast.USub, ast.UAdd)):
+        e = e.operand
+    return isinstance(e, ast.Constant) and type(e.value) is float
+
+
 def _annotation_of(spelled: str, line: int) -> ast.expr:
     try:
         return ast.parse(spelled, mode="eval").body
@@ -203,6 +253,14 @@ def _rewrite_site(site: Site, fn: ast.FunctionDef, kinds: dict[str, list[tuple[i
         if n is not comp and isinstance(n, (*COMPS, ast.GeneratorExp, ast.Lambda)):
             raise _Problem(n.lineno, f"`{ast.unparse(n)}` inside the comprehension `{ast.unparse(comp)}`: a "
                                      "comprehension holds no comprehension, generator or lambda in an AOT program yet")
+    call = site.call
+    if call is not None:
+        if call.func.id == "sum":                                           # type: ignore[attr-defined]
+            if len(call.args) + len(call.keywords) > 2 or any(k.arg != "start" for k in call.keywords) \
+                    or (len(call.args) == 2 and call.keywords):
+                raise _Problem(line, "sum() takes an iterable and a start in an AOT program")
+        elif len(call.args) != 1 or call.keywords:
+            raise _Problem(line, f"{call.func.id}() takes one argument")      # type: ignore[attr-defined]
     # the accumulator's type
     if isinstance(s, ast.AnnAssign):
         annotation = s.annotation
@@ -212,11 +270,18 @@ def _rewrite_site(site: Site, fn: ast.FunctionDef, kinds: dict[str, list[tuple[i
         spelled = [k for ln, k in kinds.get(base, []) if ln == line]
         if not spelled:
             raise _Problem(line, f"no type is known for `{base}`, bound to a comprehension")
-        annotation = _annotation_of(spelled[0], line)
+        if call is not None:
+            annotation = _reduced_type(call, spelled[0], line)
+            # (the target is bound to the result, of that type: Pyrefly spells an int sum `Literal[0] | int`)
+            kinds[base] = [(ln, ast.unparse(annotation) if ln == line else k) for ln, k in kinds[base]]
+        else:
+            annotation = _annotation_of(spelled[0], line)
     else:
         if fn.returns is None:
             raise _Problem(line, "the function returning a comprehension has no return annotation")
         annotation, base = fn.returns, "result"
+    if call is not None and not isinstance(s, ast.Assign):
+        annotation = _reduced_type(call, ast.unparse(annotation), line)    # (an annotated target, a return)
     import copy
     annotation = copy.deepcopy(annotation)
     acc = _fresh(base, taken, counter, site.qname)
@@ -242,6 +307,8 @@ def _rewrite_site(site: Site, fn: ast.FunctionDef, kinds: dict[str, list[tuple[i
 
     # the innermost statement: add the element
     accn = lambda ctx: ast.Name(id=acc, ctx=ctx)    # noqa: E731
+    if call is not None:
+        return _reduce(site, call, annotation, acc, clauses, mapping, kinds, taken, counter)
     if isinstance(comp, ast.DictComp):
         key, value = _renamed(comp.key, mapping), _renamed(comp.value, mapping)
         inner: list[ast.stmt] = []
@@ -279,6 +346,96 @@ def _rewrite_site(site: Site, fn: ast.FunctionDef, kinds: dict[str, list[tuple[i
     else:
         final = ast.Assign(targets=s.targets, value=accn(ast.Load()))
     return [_located(x, s) for x in (init, *body, final)]               # type: ignore[misc]
+
+
+def _reduced_type(call: ast.Call, spelled: str, line: int) -> ast.expr:
+    """The type of the value of a sum() / any() / all() call (Pyrefly's `spelled`), as an annotation."""
+    name = call.func.id                                                     # type: ignore[attr-defined]
+    if name in ("any", "all"):
+        return ast.Name(id="bool", ctx=ast.Load())
+    start = call.args[1] if len(call.args) == 2 else next((k.value for k in call.keywords if k.arg == "start"), None)
+    import re
+    # the union's parts, a literal int (the default start `Literal[0]`) as int
+    parts = {"int" if re.fullmatch(r"(typing\.)?Literal\[-?\d+\]", p.strip()) else p.strip()
+             for p in spelled.split("|")}
+    if parts == {"int"}:
+        return ast.Name(id="int", ctx=ast.Load())
+    if "float" in parts and parts <= {"int", "float"}:
+        if parts != {"float"} or not _float_constant(start):
+            raise _Problem(line, f"`{ast.unparse(call)}`: a sum of floats with the int start 0 is the int 0 when it is "
+                                 "empty, which a float cannot hold in an AOT program: give it a float constant start, "
+                                 "`sum(xs, 0.0)`")
+        return ast.Name(id="float", ctx=ast.Load())
+    raise _Problem(line, f"`{ast.unparse(call)}` is a {spelled}: an AOT program compiles sum() of int, float or bool "
+                         "items")
+
+
+def _reduce(site: Site, call: ast.Call, annotation: ast.expr, acc: str,
+            clauses: list[tuple[ast.expr, ast.expr, list[ast.expr]]], mapping: dict[str, str],
+            kinds: dict[str, list[tuple[int, str]]], taken: set[str], counter: dict[str, int]) -> list[ast.stmt]:
+    """The statements of a sum() / any() / all() site (see the module docstring)."""
+    import copy
+    s, line, name = site.stmt, site.stmt.lineno, call.func.id              # type: ignore[attr-defined]
+    item = _renamed(site.comp.elt, mapping)                                 # type: ignore[union-attr]
+    load = lambda n: ast.Name(id=n, ctx=ast.Load())         # noqa: E731
+    store = lambda n: ast.Name(id=n, ctx=ast.Store())       # noqa: E731
+    assign = lambda n, v: ast.Assign(targets=[store(n)], value=v)   # noqa: E731
+    head: list[ast.stmt] = []
+    tail: list[ast.stmt] = []
+    stop: ast.expr | None = None
+    if name in ("any", "all"):
+        found = name == "any"
+        head = [ast.AnnAssign(target=store(acc), annotation=annotation, value=ast.Constant(not found), simple=1)]
+        test = item if found else ast.UnaryOp(op=ast.Not(), operand=item)
+        inner: list[ast.stmt] = [ast.If(test=test, body=[assign(acc, ast.Constant(found)), ast.Break()], orelse=[])]
+        stop = load(acc) if found else ast.UnaryOp(op=ast.Not(), operand=load(acc))
+    else:
+        start = call.args[1] if len(call.args) == 2 else next((k.value for k in call.keywords if k.arg == "start"),
+                                                               None)
+        if isinstance(annotation, ast.Name) and annotation.id == "float":
+            # CPython's compensated sum: hi the running sum, lo the lost low-order bits (cs_add, cs_to_double)
+            lo, t, x = (_fresh(b, taken, counter, site.qname) for b in ("lo", "t", "x"))
+            for n in (t, x):
+                kinds[n] = [(line, "float")]
+            head = [ast.AnnAssign(target=store(acc), annotation=annotation, value=copy.deepcopy(start), simple=1),
+                    ast.AnnAssign(target=store(lo), annotation=ast.Name(id="float", ctx=ast.Load()),
+                                  value=ast.Constant(0.0), simple=1)]
+            absolute = lambda e: ast.Call(func=load("abs"), args=[e], keywords=[])     # noqa: E731
+            plus = lambda a, b: ast.BinOp(left=a, op=ast.Add(), right=b)              # noqa: E731
+            minus = lambda a, b: ast.BinOp(left=a, op=ast.Sub(), right=b)             # noqa: E731
+            v = site.comp.elt.id                                            # type: ignore[union-attr]
+            spelled = [k for ln, k in kinds.get(mapping[v], []) if ln == line]
+            # (an int item is converted as PyLong_AsDouble converts it; a float item is taken as it is)
+            converted = item if spelled == ["float"] else ast.Call(func=load("float"), args=[item], keywords=[])
+            inner = [assign(x, converted),
+                     assign(t, plus(load(acc), load(x))),
+                     ast.If(test=ast.Compare(left=absolute(load(acc)), ops=[ast.GtE()],
+                                             comparators=[absolute(load(x))]),
+                            body=[assign(lo, plus(load(lo), plus(minus(load(acc), load(t)), load(x))))],
+                            orelse=[assign(lo, plus(load(lo), plus(minus(load(x), load(t)), load(acc))))]),
+                     assign(acc, load(t))]
+            finite = ast.Compare(left=minus(load(lo), load(lo)), ops=[ast.Eq()], comparators=[ast.Constant(0.0)])
+            nonzero = ast.Compare(left=load(lo), ops=[ast.NotEq()], comparators=[ast.Constant(0.0)])
+            tail = [ast.If(test=ast.BoolOp(op=ast.And(), values=[nonzero, finite]),
+                           body=[assign(acc, plus(load(acc), load(lo)))], orelse=[])]
+        else:
+            head = [ast.AnnAssign(target=store(acc), annotation=annotation,
+                                  value=copy.deepcopy(start) if start is not None else ast.Constant(0), simple=1)]
+            inner = [assign(acc, ast.BinOp(left=load(acc), op=ast.Add(), right=item))]
+    body = inner
+    for k, (target, it, ifs) in enumerate(reversed(clauses)):
+        if k > 0 and stop is not None:
+            body = body + [ast.If(test=copy.deepcopy(stop), body=[ast.Break()], orelse=[])]
+        for cond in reversed(ifs):
+            body = [ast.If(test=cond, body=body, orelse=[])]
+        body = [ast.For(target=target, iter=it, body=body, orelse=[])]
+    if isinstance(s, ast.Return):
+        final: ast.stmt = ast.Return(value=load(acc))
+    elif isinstance(s, ast.AnnAssign):
+        final = ast.AnnAssign(target=s.target, annotation=s.annotation, value=load(acc), simple=s.simple)
+    else:
+        final = ast.Assign(targets=s.targets, value=load(acc))
+    return [_located(x, s) for x in (*head, *body, *tail, final)]          # type: ignore[misc]
 
 
 def _replace(fn: ast.FunctionDef, old: ast.stmt, new: list[ast.stmt]) -> None:

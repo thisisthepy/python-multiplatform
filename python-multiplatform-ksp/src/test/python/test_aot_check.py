@@ -209,16 +209,19 @@ def test_enumerate_and_zip_as_the_iterable_of_a_loop_are_not_reported(tmp_path):
                 print(w)
             for i, x in enumerate(reversed(xs)):
                 print(i, x)
+            t = sum(xs)
+            u = any(range(t))
+            print(u)
             return [i * x for i, x in enumerate(xs)]
     """)
     report = aotcheck.check(path, front_end=False)
     assert report.findings == [], report.lines()
     path = write(tmp_path, """
         def f(xs: list[int]) -> int:
-            return len(list(zip(xs, xs))) + sum(1 for _ in enumerate(xs)) + len(list(reversed(xs)))
+            return len(list(zip(xs, xs))) + sum(1 for _ in enumerate(xs)) + len(list(reversed(xs))) + int(all(xs))
     """)
     names = {f.name for f in aotcheck.check(path, front_end=False).findings}
-    assert {"zip", "enumerate", "reversed"} <= names, names
+    assert {"zip", "enumerate", "reversed", "sum", "all"} <= names, names
 
 
 def test_the_view_types_of_collections_abc_are_not_reported(tmp_path):

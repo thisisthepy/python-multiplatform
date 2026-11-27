@@ -39,6 +39,8 @@ def main() -> None:
     counts = lengths(words)
     firsts = {w[0] for w in words if w}
     print(upper, pairs, halves, counts, len(firsts), "a" in firsts, "q" in firsts)
+    doubled = [h * 2 for h in halves if h != 0.5]
+    print(doubled)
     d = {"a": 1, "b": 2}
     inv = {v: k for k, v in d.items()}
     vals = [v + 1 for v in d.values()]
@@ -241,6 +243,63 @@ def test_a_range_object_is_its_bounds(tmp_path: Path):
     _compare(tmp_path, RANGES, [["5"], ["0"], ["1"], ["-3"]])
 
 
+SUMS = """
+import sys
+
+
+def total(xs: list[int]) -> int:
+    return sum(xs)
+
+
+def has(ws: list[str]) -> bool:
+    return any(ws)
+
+
+def main() -> None:
+    nums = [int(t) for t in sys.argv[1].split(",")]
+    fl = [int(t) / 10 for t in sys.argv[1].split(",")]
+    s = sum(nums)
+    s2 = sum(nums, 100)
+    s3 = sum(nums, start=-1)
+    print(s, s2, s3, total(nums))
+    f = sum(fl, 0.0)
+    neg = sum(fl, -0.0)
+    tiny = [0.1] * 10
+    t = sum(tiny, 0.0)
+    big = [1e100, 1.0, -1e100]
+    b = sum(big, 0.0)
+    huge = [1e308, 1e308, -1.0]
+    h = sum(huge, 0.0)
+    print(f, neg, t, t == 1.0, b, h)
+    d = {"a": 1, "b": 2}
+    sv = sum(d.values())
+    sr = sum(range(5))
+    print(sv, sr)
+    w = sys.argv[2].split(",")
+    a1 = any(nums)
+    a2 = all(nums)
+    a3 = any(w)
+    a4 = all(w)
+    e1 = any(range(0))
+    e2 = all(range(0))
+    print(a1, a2, a3, a4, e1, e2, has(w))
+    q = sum(range(100 // nums[0]))
+    print(q)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_sum_any_and_all_of_an_iterable_are_the_loops_they_mean(tmp_path: Path):
+    """`sum(it[, start])`, `any(it)` and `all(it)` bound to a name or returned are the loop each means over any
+    iterable a `for` loop takes: an int sum as CPython adds ints, a float sum (a float start) with CPython's compensated
+    summation (Neumaier, `cs_add` in Python/bltinmodule.c: `sum([1e100, 1.0, -1e100], 0.0)` is 1.0), any() and all()
+    stopping at the first true or false item. Agent proposal, not owner-confirmed."""
+    _compare(tmp_path, SUMS, [["1,2,5", "a,,b"], ["0", ""], ["-3,4", "x"]])
+
+
 def _rules(tmp_path: Path, source: str) -> set[tuple[str, str]]:
     with pytest.raises(aot.AotError) as raised:
         aot.generate(_write(tmp_path, source))
@@ -283,6 +342,15 @@ MAIN = '\n\ndef main() -> None:\n    f()\n\n\nif __name__ == "__main__":\n    ma
     ("    n = 2\n    r = range(0, 9, n)\n    print(len(r))\n", "step"),
     ("    r = range(1, 5, 0)\n    print(len(r))\n", "must not be zero"),
     ("    r = range(3)\n    xs = [1, 2]\n    for a, b in zip(r, xs):\n        print(a, b)\n", "a list or a str"),
+    # sum(), any(), all() of an iterable are bound to a name or returned; a float sum has a float start
+    ("    xs = [1, 2]\n    print(sum(xs))\n", "bind it to a name"),
+    ("    xs = [1.5, 2.5]\n    s = sum(xs)\n    print(s)\n", "sum(xs, 0.0)"),
+    ("    xs = ['a']\n    s = sum(xs)\n    print(s)\n", "sum() of"),
+    ("    xs = [1.5, 2.5]\n    s: float = sum(xs)\n    print(s)\n", "sum(xs, 0.0)"),
+    ("    xs = [1, 2]\n    s = any(xs, xs)\n    print(s)\n", "one argument"),
+    ("    xs = [1, 2]\n    s = sum(x * 2 for x in xs)\n    print(s)\n", "generator expression"),
+    # (found here: a comprehension over a list[float] was refused, and float() of a str reached the verifier)
+    ("    w = '1.5'\n    x = float(w)\n    print(x)\n", "float() of a str"),
 ])
 def test_what_a_comprehension_cannot_do_yet_is_refused_with_the_reason(tmp_path: Path, body: str, reason: str):
     found = _rules(tmp_path, "def f() -> None:\n" + body + MAIN)

@@ -554,8 +554,14 @@ constant step; a `for` loop over it (also in a comprehension or an enumerate()),
 repr (print, str, repr, an f-string) are rewritten into what CPython computes. A step that is not an int
 constant, a step of 0 (CPython's ValueError at run time, refused at compile time here), a name bound to a range
 and to anything else, and any other use (passing, returning, indexing, list(), zip(), reversed()) are refused.
-Then `zip` and `reversed` of other iterables, range objects passed and indexed, in `for` loops and comprehensions; `sum`, `any`, `all`, `min` / `max` of an iterable (`ValueError: min() iterable argument is
-empty`); `sorted(xs, key=..., reverse=...)` and `list.sort(...)` with a key that is a compiled function or a
+`sum(it[, start])`, `any(it)` and `all(it)` bound to a name or returned are the loop each means over any iterable a
+`for` loop takes (typedpython/comprehensions.py): an int sum adds as CPython's int path does; a float sum takes a
+float constant start (with the default int start an empty sum is the int 0, which a float cannot hold) and adds
+with CPython's compensated summation (Neumaier, `cs_add` / `cs_to_double` in Python/bltinmodule.c), so
+`sum([0.1] * 10, 0.0) == 1.0` as in CPython; any() and all() stop at the first true or false item. A generator
+expression argument stays refused (generators are outside every tier, section 4). Then `zip` and `reversed` of
+other iterables, range objects passed and indexed, in `for` loops and comprehensions; `min` / `max` of an
+iterable (`ValueError: min() iterable argument is empty`); `sorted(xs, key=..., reverse=...)` and `list.sort(...)` with a key that is a compiled function or a
 lambda written in place: CPython's own algorithm (timsort, `listsort` in Objects/listobject.c, ported as it is), so
 the order of equal and of unordered elements (NaN) is CPython's, not merely some stable order. `bytes`: an immutable
 byte array; literals, `s.encode()` / `encode("utf-8")` (strict: a surrogate raises CPython's UnicodeEncodeError),

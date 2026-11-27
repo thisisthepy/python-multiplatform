@@ -40,7 +40,8 @@ LIST_ELEMENTS = ("int", "float")             # `list[int]` and `list[float]` are
 # builtin names a program must not rebind: the AOT mode compiles a call of each of these as the builtin
 BUILTINS_USED = frozenset({"print", "float", "range", "len", "abs", "min", "max", "int", "bool", "list",
                            "str", "repr", "ord", "chr",        # (str ... chr: tier S1)
-                           "enumerate", "zip", "reversed"})     # (tier S2c: the iterable of a loop)
+                           "enumerate", "zip", "reversed",      # (tier S2c: the iterable of a loop)
+                           "sum", "any", "all"})                # (tier S2c: the loop over an iterable)
 RESERVED_PREFIX = "__tp_"
 MAIN = frontend.AOT_ENTRY
 
@@ -696,6 +697,9 @@ class _Checker:
             if k.arg in str_kw:             # tier S1b: split(sep=, maxsplit=), replace(count=)
                 self.expr(k.value)
                 continue
+            if isinstance(f, ast.Name) and f.id == "sum" and k.arg == "start" and "sum" not in self.shadow:
+                self.expr(k.value)          # tier S2c: sum(xs, start=...)
+                continue
             self.rep.error(k.value, "aot/keyword", k.arg or "**", "keyword arguments are outside the first AOT step")
         if any(isinstance(a, ast.Starred) for a in c.args):
             self.rep.error(c, "aot/keyword", "*", "a starred argument is outside the first AOT step")
@@ -773,6 +777,19 @@ class _Checker:
                 self.rep.error(c, "aot/print-use", "print", "print is only supported as a statement of its own")
             elif n == "range":
                 self.rep.error(c, "aot/call", "range", "range is only supported as the iterable of a `for` loop")
+            elif n in ("sum", "any", "all"):
+                # tier S2c: the loop over the iterable (typedpython/comprehensions.py; the front end checks the place)
+                if not c.args:
+                    self.rep.error(c, "aot/call", n, f"{n}() takes an iterable")
+                    return
+                if not isinstance(c.args[0], ast.GeneratorExp):
+                    self.for_stmt(ast.copy_location(ast.For(target=ast.Name(id="_", ctx=ast.Store()), iter=c.args[0],
+                                                            body=[], orelse=[]), c))
+                else:
+                    self.expr(c.args[0])
+                for a in c.args[1:]:
+                    self.expr(a)
+                return
             elif hasattr(builtins, n) or n not in self.consts:
                 self.rep.error(f, "aot/builtin", n, f"the call of `{n}` is not provided in the first AOT step "
                                "(the program's functions, float, math functions and print)")

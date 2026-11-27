@@ -1898,10 +1898,11 @@ class _Lowerer:
         else:
             t = SCALAR_KIND.get(kind, Type.OBJ)
         if name in self.iter_vars and t != Type.OBJ and not (self.info.aot and t in (Type.STR, Type.DICT, Type.I64,
-                                                                                    Type.BOOL)):
+                                                                                    Type.BOOL, Type.F64)):
             # (AOT mode: `for ch in s` over a str binds a STR, `ForStr`; a loop over a list of dicts binds a DICT; a
-            # loop over a dict with tuple keys binds the key's elements, typed by the tuple pass; each loop form
-            # checks the type of what it binds)
+            # loop over a dict with tuple keys binds the key's elements, typed by the tuple pass; tier S2c: a
+            # comprehension's hidden variable over a list[float] is typed F64 at its probe; each loop form checks the
+            # type of what it binds)
             raise Skip(self.bindings[name][0].line, f"loop variable `{name}` is bound by a loop over "
                                                     f"an object but is a native {TYPE_NAME[t]}")
         self.types[name] = t
@@ -4783,6 +4784,10 @@ class _Lowerer:
                     return ir.ToFloat(Type.F64, arg)
                 if arg.type == Type.F64:
                     return arg  # float(x) of an exact float is x itself
+                if self.info.aot:
+                    # (an AOT program has no object to convert: before, a str reached the verifier as one)
+                    raise Skip(node.lineno, f"`{_src(node)}`: float() of a {TYPE_NAME.get(arg.type, arg.type.value)} "
+                                            "is not in the AOT mode yet (float() of an int or a float)")
                 self.impure = True
                 return ir.ObjToFloat(Type.F64, _box(arg))
             new_cls = self.new_class(node)
@@ -4907,6 +4912,9 @@ class _Lowerer:
         `abs(x)`, `min(a, b)` and `max(a, b)` (two numbers of one type). None: not one of these."""
         args = node.args
         line = node.lineno
+        if name in comprehensions.REDUCERS and self.builtin(name):          # tier S2c (typedpython/comprehensions.py)
+            raise Skip(line, f"`{_src(node)}`: an AOT program compiles {name}() as the value of an assignment to a "
+                             "name or of a `return` (tier S2c): bind it to a name first")
         if name == "len" and self.builtin("len") and len(args) == 1 and self.is_sys_argv(args[0]):
             return ir.ArgvLen(Type.I64)
         if name == "set" and self.builtin("set"):                         # tier S2b: `set()`, `set(s)`

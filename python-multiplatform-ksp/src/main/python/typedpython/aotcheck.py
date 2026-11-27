@@ -307,6 +307,11 @@ class _Pass(ast.NodeVisitor):
         iters += [i.args[0] for i in iters if isinstance(i, ast.Call) and isinstance(i.func, ast.Name)
                   and i.func.id == "enumerate" and i.args]
         self.loop_iterables = {id(i) for i in iters}
+        self.reducers = {id(c) for s in ast.walk(module.tree) if (c := comprehensions._reducer_of(s)) is not None} \
+            if isinstance(module.tree, ast.Module) else set()
+        # (an iterable of such a call is the iterable of a loop too)
+        self.loop_iterables |= {id(c.args[0]) for s in ast.walk(module.tree) if (c := comprehensions._reducer_of(s))
+                                is not None} if isinstance(module.tree, ast.Module) else set()
 
     # -- helpers
 
@@ -645,6 +650,8 @@ class _Pass(ast.NodeVisitor):
                 self.error("aot/introspection", "type", node, "`type(name, bases, dict)` builds a class at run time")
         elif n in _KERNEL_BUILTINS:
             self.pending("K", "aot/builtin", n, node, f"`{n}()` is not compiled without CPython yet (tier K)")
+        elif n in comprehensions.REDUCERS and id(node) in self.reducers:
+            return                              # tier S2c: sum() / any() / all() bound to a name or returned
         elif n in ("enumerate", "zip", "reversed") and id(node) in self.loop_iterables:
             return                              # tier S2c (the front end checks the operands and the target)
         elif n in _SET_BUILTINS_S:
