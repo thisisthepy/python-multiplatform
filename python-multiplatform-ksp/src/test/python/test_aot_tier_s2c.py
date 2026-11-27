@@ -139,6 +139,62 @@ def test_enumerate_and_zip_are_the_loops_they_mean(tmp_path: Path):
     _compare(tmp_path, LOOPS, [["a,bb,ccc", "1,2,5"], ["b", "5,6"], ["x,y", "3,0"]])
 
 
+REVERSED = """
+import sys
+
+
+def last_first(ws: list[str]) -> str:
+    out = ""
+    for w in reversed(ws):
+        out += w
+    return out
+
+
+def main() -> None:
+    words = sys.argv[1].split(",")
+    nums = [int(t) for t in sys.argv[2].split(",")]
+    for w in reversed(words):
+        print(w)
+    for c in reversed("h\u00e9!"):
+        print(c, end="")
+    print()
+    print(last_first(words))
+    back = [n * 2 for n in reversed(nums) if n != 2]
+    print(back)
+    for i, n in enumerate(reversed(nums)):
+        print(i, n)
+    for w, n in zip(words, nums):
+        for c in reversed(w):
+            print(c * n, end=";")
+    print()
+    shrink = [1, 2, 3, 4]
+    for x in reversed(shrink):
+        print(x)
+        if x == 4:
+            shrink.pop()
+            shrink.pop()
+    print(shrink)
+    grow = [1, 2]
+    for x in reversed(grow):
+        grow.append(x)
+    print(grow)
+    for n in reversed(nums):
+        print(10 // n)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_reversed_is_the_loop_it_means(tmp_path: Path):
+    """`for x in reversed(xs)` of a list or a str reads it by index from its end, the index checked against the length
+    at every step as CPython's reversed list iterator checks it: a list that shrinks in the loop ends it early, one
+    that grows is not seen growing. In a `for` statement, in a comprehension and inside enumerate(). Agent proposal,
+    not owner-confirmed."""
+    _compare(tmp_path, REVERSED, [["a,bb,ccc", "1,2,5"], ["b", "5,6"], ["x,y", "3,0"]])
+
+
 def _rules(tmp_path: Path, source: str) -> set[tuple[str, str]]:
     with pytest.raises(aot.AotError) as raised:
         aot.generate(_write(tmp_path, source))
@@ -168,6 +224,12 @@ MAIN = '\n\ndef main() -> None:\n    f()\n\n\nif __name__ == "__main__":\n    ma
     ("    xs = [1, 2]\n    ys = [3]\n    for a, b in zip(xs, ys):\n        xs = ys\n        print(a, b)\n", "rebinds"),
     ("    d = {1: 2}\n    xs = [1, 2]\n    for a, b in zip(d, xs):\n        print(a, b)\n", "a list or a str"),
     ("    d = {1: 2}\n    xs = [1, 2]\n    ys = [a + b for a, b in zip(d, xs)]\n    print(ys)\n", "a dict or a set"),
+    # reversed() is the iterable of a loop, of a list or a str name the loop does not rebind
+    ("    d = {1: 2}\n    for k in reversed(d):\n        print(k)\n", "a list or a str"),
+    ("    d = {1: 2}\n    ks = [k for k in reversed(d)]\n    print(ks)\n", "a dict or a set"),
+    ("    xs = [1, 2]\n    r = reversed(xs)\n    print(r)\n", "reversed"),
+    ("    xs = [1, 2]\n    for x in reversed(xs):\n        xs = [3]\n        print(x)\n", "rebinds"),
+    ("    xs = [1, 2]\n    for x in reversed(xs + xs):\n        print(x)\n", "names"),
 ])
 def test_what_a_comprehension_cannot_do_yet_is_refused_with_the_reason(tmp_path: Path, body: str, reason: str):
     found = _rules(tmp_path, "def f() -> None:\n" + body + MAIN)

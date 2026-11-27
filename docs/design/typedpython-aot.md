@@ -546,7 +546,10 @@ it reads each by index while the index is below every length, the lengths read a
 list that grows in the loop is seen growing as CPython's list iterator sees it. zip's names are typed as the
 elements of the operands, from the type Pyrefly gives each operand in the `for` header. A dict or a set operand
 is refused (zip reads by index), and so are `strict=`, a single name as the target, and enumerate or zip anywhere
-else. Then `zip` of other iterables, `reversed`, `range` objects as iterables, in `for` loops and comprehensions; `sum`, `any`, `all`, `min` / `max` of an iterable (`ValueError: min() iterable argument is
+else. `for x in reversed(xs)` (also inside enumerate()) takes the same operands and reads from the end, the index
+checked against the length at every step as CPython's reversed list iterator checks it: a list that shrinks in the
+loop ends it early, one that grows is not seen growing. Then `zip` and `reversed` of other iterables, `range`
+objects as values, in `for` loops and comprehensions; `sum`, `any`, `all`, `min` / `max` of an iterable (`ValueError: min() iterable argument is
 empty`); `sorted(xs, key=..., reverse=...)` and `list.sort(...)` with a key that is a compiled function or a
 lambda written in place: CPython's own algorithm (timsort, `listsort` in Objects/listobject.c, ported as it is), so
 the order of equal and of unordered elements (NaN) is CPython's, not merely some stable order. `bytes`: an immutable

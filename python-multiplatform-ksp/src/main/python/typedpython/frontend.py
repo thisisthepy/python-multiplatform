@@ -2439,9 +2439,9 @@ class _Lowerer:
                                  "str arrives with tier S1b)")
             return ir.ArgvStr(Type.STR, self.str_int(self.value(node.slice), node.slice, "the index"))
         value = self.sub(node.value)
-        if value.type is Type.DICT and getattr(node, "tp_zip", False):     # tier S2c: an operand of zip()
-            raise Skip(line, f"`{_src(node.value)}` is a dict or a set: zip() reads each operand by index in an AOT "
-                             "program, so an operand is a list or a str")
+        if value.type is Type.DICT and getattr(node, "tp_indexed", False):     # tier S2c: of zip(), reversed()
+            raise Skip(line, f"`{_src(node.value)}` is a dict or a set: zip() and reversed() read their operands by "
+                             "index in an AOT program, so an operand is a list or a str")
         if value.type is Type.DICT:                           # tier S2b: `d[k]`
             if isinstance(node.slice, ast.Slice):
                 raise Skip(line, f"`{_src(node)}` slices a dict")

@@ -299,11 +299,14 @@ class _Pass(ast.NodeVisitor):
         # front end compiles (typedpython/comprehensions.py); any other is pending
         self.placed = {id(c) for s in ast.walk(module.tree) if (c := comprehensions._comp_of(s)) is not None} \
             if isinstance(module.tree, ast.Module) else set()
-        # ... and enumerate() / zip() as the iterable of a `for` statement or of a clause of such a comprehension, the
+        # ... and enumerate() / zip() / reversed() (reversed() also inside enumerate()) as the iterable of a `for` statement or of a clause of such a comprehension, the
         # loops they mean (typedpython/loops.py); anywhere else they are pending
-        self.loop_iterables = {id(f.iter) for f in ast.walk(module.tree) if isinstance(f, ast.For)} | {
-            id(g.iter) for c in ast.walk(module.tree) if id(c) in self.placed
-            for g in c.generators} if isinstance(module.tree, ast.Module) else set()   # type: ignore[attr-defined]
+        iters = [f.iter for f in ast.walk(module.tree) if isinstance(f, ast.For)] + [
+            g.iter for c in ast.walk(module.tree) if id(c) in self.placed
+            for g in c.generators] if isinstance(module.tree, ast.Module) else []    # type: ignore[attr-defined]
+        iters += [i.args[0] for i in iters if isinstance(i, ast.Call) and isinstance(i.func, ast.Name)
+                  and i.func.id == "enumerate" and i.args]
+        self.loop_iterables = {id(i) for i in iters}
 
     # -- helpers
 
@@ -642,7 +645,7 @@ class _Pass(ast.NodeVisitor):
                 self.error("aot/introspection", "type", node, "`type(name, bases, dict)` builds a class at run time")
         elif n in _KERNEL_BUILTINS:
             self.pending("K", "aot/builtin", n, node, f"`{n}()` is not compiled without CPython yet (tier K)")
-        elif n in ("enumerate", "zip") and id(node) in self.loop_iterables:
+        elif n in ("enumerate", "zip", "reversed") and id(node) in self.loop_iterables:
             return                              # tier S2c (the front end checks the operands and the target)
         elif n in _SET_BUILTINS_S:
             self.pending("S", "aot/builtin", n, node, f"`{n}()` is tier S, not compiled yet")

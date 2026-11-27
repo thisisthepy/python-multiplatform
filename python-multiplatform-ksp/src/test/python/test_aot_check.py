@@ -197,7 +197,7 @@ def test_a_comprehension_bound_to_a_name_or_returned_is_not_reported(tmp_path):
 
 
 def test_enumerate_and_zip_as_the_iterable_of_a_loop_are_not_reported(tmp_path):
-    """Tier S2c: `for i, x in enumerate(...)` and `for a, b in zip(...)`, in a `for` statement or a placed comprehension,
+    """Tier S2c: `for i, x in enumerate(...)`, `for a, b in zip(...)` and `for x in reversed(...)`, in a `for` statement or a placed comprehension,
     are the loops they mean (typedpython/loops.py); anywhere else they are still pending."""
     path = write(tmp_path, """
         def f(xs: list[int], ws: list[str]) -> list[int]:
@@ -205,16 +205,20 @@ def test_enumerate_and_zip_as_the_iterable_of_a_loop_are_not_reported(tmp_path):
                 print(i, x)
             for w, x in zip(ws, xs):
                 print(w, x)
+            for w in reversed(ws):
+                print(w)
+            for i, x in enumerate(reversed(xs)):
+                print(i, x)
             return [i * x for i, x in enumerate(xs)]
     """)
     report = aotcheck.check(path, front_end=False)
     assert report.findings == [], report.lines()
     path = write(tmp_path, """
         def f(xs: list[int]) -> int:
-            return len(list(zip(xs, xs))) + sum(1 for _ in enumerate(xs))
+            return len(list(zip(xs, xs))) + sum(1 for _ in enumerate(xs)) + len(list(reversed(xs)))
     """)
     names = {f.name for f in aotcheck.check(path, front_end=False).findings}
-    assert {"zip", "enumerate"} <= names, names
+    assert {"zip", "enumerate", "reversed"} <= names, names
 
 
 def test_the_view_types_of_collections_abc_are_not_reported(tmp_path):
