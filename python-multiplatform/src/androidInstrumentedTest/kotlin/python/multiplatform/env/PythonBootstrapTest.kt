@@ -304,6 +304,46 @@ class PythonBootstrapTest {
         }
     }
 
+    /**
+     * SPEC L-5b (#548). The embedded CPython has no CA store, so before the bootstrap set
+     * `SSL_CERT_FILE` the default context loaded no CA at all (`x509_ca` 0) and every HTTPS request
+     * failed with `CERTIFICATE_VERIFY_FAILED`. `cert_store_stats()` counts what
+     * `create_default_context()` loaded through `set_default_verify_paths()`, which reads
+     * `SSL_CERT_FILE` with getenv(3) when called, so this needs no network.
+     */
+    @Test
+    fun initializeGivesSslTheDeviceCaCertificates() {
+        PythonBootstrap.initialize(context, silent = true)
+
+        val bundle = File(assertNotNullEnv("SSL_CERT_FILE"))
+        assertTrue(bundle.isFile, "SSL_CERT_FILE names '$bundle', which is not a file")
+        assertTrue("-----BEGIN CERTIFICATE-----" in bundle.readText(), "'$bundle' holds no PEM certificate")
+
+        val globals = Python3.import("__main__").dict
+        val loaded = Python3.eval(
+            "__import__('ssl').create_default_context().cert_store_stats()['x509_ca']", 258, globals, globals,
+        ).toString().toInt()
+        assertTrue(loaded > 0, "ssl.create_default_context() loaded no CA certificate (#548)")
+    }
+
+    /** SPEC L-5b: an app that set `SSL_CERT_FILE` itself keeps it, like `TMPDIR`. */
+    @Test
+    fun aPresetSslCertFileIsKept() {
+        val before = System.getenv("SSL_CERT_FILE")
+        val own = File(scratch("own-ca"), "own.pem").apply { writeText("") }
+        try {
+            android.system.Os.setenv("SSL_CERT_FILE", own.absolutePath, true)
+            PythonBootstrap.initialize(context, silent = true)
+            assertEquals(own.absolutePath, System.getenv("SSL_CERT_FILE"))
+        } finally {
+            if (before == null) android.system.Os.unsetenv("SSL_CERT_FILE")
+            else android.system.Os.setenv("SSL_CERT_FILE", before, true)
+        }
+    }
+
+    private fun assertNotNullEnv(name: String): String =
+        System.getenv(name).also { assertTrue(!it.isNullOrEmpty(), "$name is not set (#548)") }!!
+
     private companion object {
         const val TAG = "PythonBootstrapTest"
     }

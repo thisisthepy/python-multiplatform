@@ -14,6 +14,11 @@ assert sys.platform == "emscripten", sys.platform
 assert sysconfig.get_config_var("Py_GIL_DISABLED") == 1, "not a free-threaded build"
 assert sys._is_gil_enabled() is False, "the GIL is enabled at run time"
 
+# select.poll() must reach Emscripten's poll(), not its ppoll() stub (ENOSYS); build-cpython.sh
+# configures with ac_cv_func_ppoll=no. selectors picks PollSelector only when this call works.
+import select
+assert select.poll().poll(0) == [], "select.poll().poll(0) did not return []"
+
 N_THREADS = 4
 N_ITER = 200_000
 results = [None] * N_THREADS

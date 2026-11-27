@@ -67,7 +67,8 @@ jobs:
           sudo udevadm trigger --name-match=kvm
 
       - name: Build the test APK before the emulator starts
-        run: ./gradlew :python-multiplatform:assembleDebugAndroidTest --console=plain
+        # verifyAarStdlib: every staged stdlib file must reach the release AAR (#546).
+        run: ./gradlew :python-multiplatform:assembleDebugAndroidTest :python-multiplatform:verifyAarStdlib --console=plain
 
       - name: Instrumented tests on the emulator
         uses: reactivecircus/android-emulator-runner@v2

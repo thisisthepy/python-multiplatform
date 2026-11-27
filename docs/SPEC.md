@@ -102,6 +102,18 @@ fail, then implement.
   to app-private storage once (a stamp written last decides re-unpacking, including after APK
   upgrades), sets `PYTHONHOME` and starts the interpreter. `Status: implemented` (needs a device),
   `PM/androidInstrumentedTest/.../env/PythonBootstrapTest.kt`, `PythonPayloadStagingTest.kt`.
+- **L-5b** Android: `PythonBootstrap.initialize(context)` gives `ssl` the device's CA certificates, so
+  `ssl.create_default_context()` verifies HTTPS servers. The embedded CPython has no CA store of its own,
+  and every HTTPS request failed with `CERTIFICATE_VERIFY_FAILED` (torchnative on a Galaxy Z Flip4,
+  2026-11-27, #548). `SSL_CERT_DIR` cannot point at the system store, because Android names those files by
+  OpenSSL's old subject hash and OpenSSL looks them up by the new one (torchnative tried it on the device).
+  So the bootstrap writes the PEM certificates of one store into `<cacheDir>/python-multiplatform-cacerts.pem`
+  and sets `SSL_CERT_FILE` to it. The store is `/apex/com.android.conscrypt/cacerts` when it holds
+  certificates (Android 14+), otherwise `/system/etc/security/cacerts`. The two are not merged, because
+  the APEX store is the updatable one and a CA removed from it must stay removed (leader approval,
+  2026-11-27, of the proposal and this reason). User-installed CAs are not included (apps cannot read them). An app that already set
+  `SSL_CERT_FILE` keeps its value. `Status: implemented` (needs a device),
+  `PythonBootstrapTest.initializeGivesSslTheDeviceCaCertificates` and `CaCertificateBundleTest.kt`.
 - **L-6** A consumer's Python payload (jar resource on desktop, APK asset on Android) is extracted once
   and put on `sys.path` before the first import. `Status: implemented` on desktop
   (`PM/desktopTest/.../env/PythonPayloadTest.kt`) and Android (`PythonPayloadStagingTest.kt`).
@@ -206,7 +218,12 @@ fail, then implement.
   (`src/commonMain/python/python_multiplatform_devagent.py`, generated into Kotlin by `generateDevAgentSource`)
   as the module `python_multiplatform_devagent` and it listens on 127.0.0.1 only. The marker is the build-time
   switch: this library is one artifact for debug and release, so the app's build decides, and toolchain stages
-  the marker into debug variants only. Without it the variable is ignored with a warning and no port opens. The
+  the marker into debug variants only. Without it the variable is ignored with a warning and no port opens. When
+  the variable is unset, the marker's content is the request, in the same grammar and with the same token check,
+  because an installed Android or iOS app is given no environment variable (toolchain #154, its Decision 15 (a),
+  toolchain team report 2026-11-25 relayed by the leader; #543). The variable wins when set, and an empty marker
+  means no agent. The default overlay is `tempfile.mkdtemp()`, which is writable on Android because
+  `PythonBootstrap` sets `TMPDIR` to the app's `cacheDir` (`PythonBootstrapTest.initializeLeavesTempfileUsable`). The
   token must be at least 43 characters (`secrets.token_urlsafe(32)`), or the agent refuses to start. The listening
   socket cannot be bound by another socket while it listens: `SO_EXCLUSIVEADDRUSE` on Windows; on POSIX,
   `SO_REUSEADDR` only so that a restarted app can rebind the launcher's port past TIME_WAIT. A connection's first
@@ -218,12 +235,14 @@ fail, then implement.
   and does not stop the app. `Status: partial`: desktop
   (`PM/desktopTest/.../env/PythonDevAgentTest.kt`: the embedded agent answers over loopback; a child JVM with the
   marker and the variable has an agent on that port, one without the variable has none, one without the marker
-  (a release build) opens no port with the variable set, and a short token opens no port; the protocol, token
+  (a release build) opens no port with the variable set, and a short token opens no port; with the variable unset,
+  one whose marker holds the request has an agent on that port, the variable wins over the marker, and a marker
+  with a short token opens no port; the protocol, token
   length, port takeover and restart: `python-multiplatform/src/test/python/test_devagent.py`, CI `Dev agent
   protocol tests` on macOS and the `dev-agent` job on ubuntu and windows (#238; with `SO_EXCLUSIVEADDRUSE`
   removed, the Windows takeover test fails, checked once); toolchain stages the marker for `enableHotReload`
-  builds and passes the variable to the desktop run tasks (toolchain#105), but nothing sets the variable on
-  Android or iOS yet (toolchain's M2, M3); no interrupt; `execute` runs on the agent's thread (no main-thread dispatch yet).
+  builds and passes the variable to the desktop run tasks (toolchain#105), but nothing writes the
+  request into an Android or iOS marker in develop yet (toolchain #154, M2; M3); no interrupt; `execute` runs on the agent's thread (no main-thread dispatch yet).
 
 ## 2. Low-level C API (downcall surface)
 
@@ -1294,24 +1313,29 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   desktop JVM, `macosArm64` and `linuxX64` embed the free-threaded CPython 3.15t, with no GIL option
   (`-PpythonFreeThreaded` is removed and the build fails if it is passed); Android (ART on arm64-v8a
   and x86_64, and androidNative) and iOS embed the project's own free-threaded CPython 3.15t (T-2), with
-  no GIL option either; wasm embeds a GIL CPython until #175. The fact is per platform
-  (`embedsFreeThreadedPython`, an `expect`/`actual`, kept while wasm is the exception), and
+  no GIL option either; wasm (wasmJs) embeds the project's own free-threaded CPython 3.15t built with
+  pthreads by `python-multiplatform/scripts/wasm/build-cpython.sh` (#175; owner, 2026-10-04: "The wasm
+  interpreter is also 3.15t, built by us ... with pthreads"; leader, Decision 10 (a) a1, 2026-11-26), and
+  in a browser needs a cross-origin isolated page (T-8). The fact is per platform
+  (`embedsFreeThreadedPython`, an `expect`/`actual`), and
   `Versions.abiFlags` (`t` or empty) and every name derived from it (`libpython3.15t`, `lib/python3.15t/`,
-  `libmultiplatform_python3.15t.so`) follow it. On the GIL platform Kotlin threads attach a thread state
-  and serialise on the GIL.
+  `libmultiplatform_python3.15t.so`) follow it.
   `Status: implemented` on desktop, Android and iOS (CI run 44889681538, 2026-11-21: the Android x86_64
   emulator, API 34, ran the instrumented suite on 3.15t, 539 tests, 0 failed, `AndroidFreeThreadedBuildTest`
   among them; the iOS simulator ran the library suite on 3.15t, 513 tests, 0 failed, `IosFreeThreadedBuildTest`
   among them, and the plugin-staged `ios-consumer` app printed `IOS_CONSUMER_PROBE stdlib=ok ext=ok payload=ok
   ft=ok`; jobs `android-native.yml` `emulator` and `ios.yml` `ios-consumer`, owner-approved 2026-11-21, #328);
-  `partial` on androidNative (compiled against 3.15t, its `artTest` not run on a device or emulator) and
-  wasm (GIL build until #175),
+  and on wasm (`ci.yml` batch run 45848955214, 2026-11-26, `wasm.yml`'s test job building the runtime itself:
+  `wasmJsNodeTest` 599 tests with `WasmFreeThreadedBuildTest` among them, the one failure the expected
+  `WasmCompiledWheelTest`, Decision 10 (c) c1; `wasmJsBrowserTest` 10 tests, 0 failures; #542);
+  `partial` on androidNative (compiled against 3.15t, its `artTest` not run on a device or emulator),
   `PM/desktopTest/.../DesktopFreeThreadedBuildTest.kt` (ABI flags, `Py_GIL_DISABLED` of the loaded
   interpreter, checkpoint default), `PM/desktopNativeTest/.../DesktopNativeFreeThreadedBuildTest.kt`,
   `PM/androidInstrumentedTest/.../AndroidFreeThreadedBuildTest.kt` (ABI flags, stdlib path, the AAR's
   `python.properties`, `Py_GIL_DISABLED` of the loaded interpreter, checkpoint default),
   `PM/artTest/.../AndroidNativeFreeThreadedBuildTest.kt`, `PM/iosSimulatorArm64Test/.../IosFreeThreadedBuildTest.kt`,
-  `PM/wasmJsTest/.../WasmGilBuildTest.kt`,
+  `PM/wasmJsTest/.../WasmFreeThreadedBuildTest.kt` (ABI flags, `Py_GIL_DISABLED` of the loaded
+  interpreter, `sys._is_gil_enabled()`),
   `PM/commonTest/.../VersionsTest.kt`; the release after initialisation is tested by `GilReleaseTest` /
   `GilReleaseNativeTest` (see C-4).
 - **T-1a** On desktop, Python may be entered from a JVM virtual thread (#161 option B, user decision):

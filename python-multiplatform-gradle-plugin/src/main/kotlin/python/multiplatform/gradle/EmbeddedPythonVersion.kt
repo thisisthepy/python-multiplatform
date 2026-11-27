@@ -12,7 +12,7 @@ import org.gradle.api.Project
  *  - as the classpath resource [RESOURCE_PATH] (read from the jar/AAR, no Gradle needed).
  *
  * One instance describes one build of CPython. A project whose platforms embed different builds
- * (issues #158, #328: desktop, Android and iOS 3.15t, wasm a GIL build until #175) passes a per-variant
+ * (issues #158, #328, #175: desktop, Android, iOS and wasm 3.15t) passes a per-variant
  * `freeThreadedFor` to [publishAttributes] / [register], so each published variant states the build
  * it really carries, and renders one resource per artefact.
  */

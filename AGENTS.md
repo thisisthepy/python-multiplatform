@@ -283,7 +283,8 @@ around one.
    GIL option since the leader's instruction of 2026-11-13 ("flip the desktop default to 3.15t now");
    Android (arm64-v8a and x86_64), androidNative and iOS embed the project's own 3.15t builds with no
    opt-in flag (#328; leader decision 2026-11-13, owner approval of the x86_64 build the same day);
-   wasm embeds a GIL build until #175. Which build a platform embeds is the per-platform
+   wasm (wasmJs) embeds 3.15t with pthreads and shared memory since #175 (#542, merged 2026-11-26).
+   Which build a platform embeds is the per-platform
    `embedsFreeThreadedPython`, never one build-wide flag (SPEC T-1, ROADMAP §9).
 9. **Do not add PanamaPort as a dependency** (licence and dependence on ART internals).
 

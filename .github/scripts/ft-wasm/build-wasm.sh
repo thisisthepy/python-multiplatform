@@ -6,8 +6,8 @@
 # Environment:
 #   FT_WORK                  scratch directory (default .tmp/ft-wasm)
 #   FT_OUT                   receives the archive the workflow uploads (default .tmp/ft-wasm-out)
-#   FT_WASM_EMSDK_VERSION    Emscripten to install; empty = the version CPython itself pins
-#                            (Platforms/emscripten/config.toml, 4.0.19 in 3.15.0)
+#   FT_WASM_EMSDK_VERSION    Emscripten to install; empty = 5.0.3 (DEFAULT_EMSDK_VERSION below),
+#                            not the 4.0.19 CPython 3.15.0 pins in Platforms/emscripten/config.toml
 #   FT_WASM_TRAMPOLINE_PATCH apply (default) | skip; see patch_trampoline below
 #
 # Needs: a C toolchain for the native build Python, git, curl, node on PATH
@@ -16,10 +16,13 @@
 # This is a separate script, not a mode of python-multiplatform/scripts/wasm/build-cpython.sh:
 # that script is pinned to CPython 3.14.2 / Emscripten 5.0.3 / pyemscripten_2026_0, clones a
 # pinned git commit, writes into .caches/ and stages the runtime the wasmJs suite runs against.
-# This job builds a different CPython (3.15.0 tarball) with a different Emscripten and must not
-# touch that runtime. The flags below are the #175 investigation's proposal, not a decision.
+# This job builds a different CPython (3.15.0 tarball) and must not touch that runtime. Both use
+# Emscripten 5.0.3. The flags below are the #175 investigation's proposal, not a decision.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
+# _pm_upcall.c, smoke.py and embed-probe.mjs live beside build-cpython.sh, which builds the same
+# runtime for the library (Decision 10 a1); this script is deleted once wasm.yml is green on it.
+wasm_scripts="$(cd "$here/../../../python-multiplatform/scripts/wasm" && pwd)"
 
 export FT_WORK="${FT_WORK:-$PWD/.tmp/ft-wasm}"
 export FT_OUT="${FT_OUT:-$PWD/.tmp/ft-wasm-out}"
@@ -57,7 +60,12 @@ cd "$src"
 # activated environment ("Build will use EMSDK from current environment").
 pinned="$(sed -n 's/^emscripten-version = "\(.*\)"$/\1/p' Platforms/emscripten/config.toml)"
 [ -n "$pinned" ] || die "no emscripten-version in Platforms/emscripten/config.toml"
-EMSDK_VERSION="${FT_WASM_EMSDK_VERSION:-$pinned}"
+# The default is 5.0.3, the version pyemscripten_2026_0 pins and build-cpython.sh uses, so PMP's
+# wasm runtime and pypackpack #82's wheels share one Emscripten. Leader 2026-11-26, Decision 10 (b) b1 in the team report pmp-binder.md: "b1 approved (one Emscripten 5.0.3 for PMP wasm and pypackpack #82)".
+# Evidence: build-ft-wasm run 45623531263 (5274e9e2) on 5.0.3, green: smoke OK in both layouts,
+# embedding probe a to d OK. CPython's own pin is still logged, so a divergence stays visible.
+DEFAULT_EMSDK_VERSION=5.0.3
+EMSDK_VERSION="${FT_WASM_EMSDK_VERSION:-$DEFAULT_EMSDK_VERSION}"
 log "Emscripten pinned by CPython $PY_VERSION: $pinned; using: $EMSDK_VERSION"
 emsdk="$FT_WORK/emsdk"
 if [ ! -x "$emsdk/emsdk" ]; then
@@ -208,7 +216,7 @@ patch_makefile_exports
 # Built in statically through the build tree's Modules/Setup.local (configure leaves an empty
 # one there; makesetup reads it and finds the source under $(srcdir)/Modules). Its exported
 # functions (EMSCRIPTEN_KEEPALIVE) are checked below; smoke.py tests the routing.
-cp "$here/_pm_upcall.c" Modules/_pm_upcall.c
+cp "$wasm_scripts/_pm_upcall.c" Modules/_pm_upcall.c
 printf '*static*\n_pm_upcall _pm_upcall.c\n' >> "$hostdir/Modules/Setup.local"
 log "Setup.local: $(tr '\n' ' ' < "$hostdir/Modules/Setup.local")"
 
@@ -271,7 +279,7 @@ run_smoke() {
     local label="$1"; shift
     local out="$FT_WORK/smoke-$label.log" rc
     set +e
-    timeout 600 "$@" "$here/smoke.py" > "$out" 2>&1
+    timeout 600 "$@" "$wasm_scripts/smoke.py" > "$out" 2>&1
     rc=$?
     set -e
     cat "$out"

@@ -1,17 +1,20 @@
 # Free-threaded CPython for wasm32-emscripten
 
-Status: build recipe written from the CPython 3.15.0 source; **not yet run in CI.** Nothing
-here has been compiled, linked or run. Tracking issue: #175 (this is its first step, the
-build experiment). The owner approved the CI job on 2026-11-13 ("#175 may add the new wasm
-3.15t CI build job").
+Status: the experiment this file records is done. `.github/workflows/build-ft-wasm.yml` built the
+3.15t pthreads interpreter in CI and passed its smoke test and embedding probe (run 45704188042 on
+Emscripten 5.0.3), and its flags and patches moved into
+`python-multiplatform/scripts/wasm/build-cpython.sh`, which now builds the runtime the wasmJs suite
+uses (leader, Decision 10 (a) a1, 2026-11-26) and which `wasm.yml`'s test job runs itself (leader,
+Decision 11 (a), 2026-11-26). The CI-only `.github/scripts/ft-wasm/` script and `build-ft-wasm.yml`
+are deleted once `wasm.yml` is green on `build-cpython.sh`. Tracking issue: #175. The owner approved
+the CI job on 2026-11-13 ("#175 may add the new wasm 3.15t CI build job").
 
 python-multiplatform gets its parallelism from free-threaded CPython (decision 8 in
-`AGENTS.md`). The wasmJs target today runs a GIL, no-threads CPython 3.14.2
+`AGENTS.md`). The wasmJs target embedded a GIL, no-threads CPython 3.14.2 until #175
 ([`wasm-design.md`](wasm-design.md)). No prebuilt free-threaded CPython with pthreads exists
-for Emscripten, so the workflow `.github/workflows/build-ft-wasm.yml` builds one with
-CPython's own driver and checks that it runs threads without the GIL under node. It does not
-change `wasm.yml`, `python-multiplatform/scripts/wasm/build-cpython.sh` or the runtime the
-wasmJs suite uses.
+for Emscripten, so this project builds one with CPython's own driver. The sections below describe
+the experiment's archive layout and the questions it was run to answer; the "Open" list is as it
+stood before the runs.
 
 ## What is built
 
@@ -29,11 +32,12 @@ driver has no install or package step for Emscripten, so the script assembles it
 
 These are agent proposals from the #175 investigation, not decisions:
 
-- **Emscripten**: the version CPython itself pins (`emscripten-version` in
-  `Platforms/emscripten/config.toml`, 4.0.19 for 3.15.0), not the 5.0.3 that
-  `build-cpython.sh` pins for `pyemscripten_2026_0`. Which version the library should use is
-  open. The dispatch input `emscripten_version` overrides it, so 5.0.3 can be tried without
-  editing the script.
+- **Emscripten**: 5.0.3, the version `build-cpython.sh` pins for `pyemscripten_2026_0`, not the
+  4.0.19 CPython 3.15.0 pins in `Platforms/emscripten/config.toml`. Leader 2026-11-26, Decision 10 (b) b1 in the team report pmp-binder.md: "b1 approved (one Emscripten 5.0.3 for PMP wasm and pypackpack #82)". Evidence:
+  build-ft-wasm run 45623531263 (5274e9e2) on 5.0.3 was green: the smoke test passed in both layouts
+  (`proxy-to-pthread` and `embedded`, 200 upcalls, slots traverse 3201 / clear 1600 / dealloc 1602),
+  the embedding probe passed `a` to `d`, and `python.wasm` imports a shared memory (min 320, max 32768
+  pages). The dispatch input `emscripten_version` still overrides it. Earlier runs used 4.0.19.
 - **Node**: 24, the version `config.toml` pins, passed as `--host-runner node`.
 - **Flags**:
 
@@ -142,7 +146,7 @@ and `wasmTable`, so a lost edit fails the build instead of the probe.
 
 The workflow step `Embedding probe (no main)` runs after the archive upload, so a probe
 failure or hang does not lose the archive:
-`timeout 600 node .github/scripts/ft-wasm/embed-probe.mjs <unpacked archive>`. It prints one
+`timeout 600 node python-multiplatform/scripts/wasm/embed-probe.mjs <unpacked archive>`. It prints one
 `[x] PASS|FAIL` line per check and `FT-WASM-EMBED-PROBE-OK` only if all pass; on a timeout
 (exit 124) the step reports the last check line printed.
 
@@ -170,15 +174,15 @@ Kotlin-side memory import).
 
 ## Not verified
 
-- The workflow has not run yet. Whether 3.15.0 configures, compiles and links with
-  `--disable-gil --enable-wasm-pthreads` on Emscripten 4.0.19 is unknown. The only real
+- (Superseded: 3.15.0 now configures, compiles and links with `--disable-gil
+  --enable-wasm-pthreads` on Emscripten 4.0.19 and 5.0.3, see above.) Before the first run the only real
   evidence is upstream's free-threaded build **without** pthreads (CPython gh-158997, on
   `main` with Emscripten 6.0.10) and Pyodide's **GIL** build with pthreads (3.14, Emscripten
   5.0.3). No project is known to have combined the two.
 - Whether `EMCC_CFLAGS=-pthread` is enough for libffi and mpdec, and whether the
   `-sUSE_BZIP2` port links into a shared-memory build, is a prediction.
 - Whether the JS trampoline fallback is enough, and what it costs per call compared with the
-  wasm-gc trampoline (`WasmCallTrampolineTest` covers only the current GIL build).
+  wasm-gc trampoline (`WasmCallTrampolineTest` was written against the GIL build).
 - Only node is exercised; no browser (which also needs cross-origin isolation for
   `SharedArrayBuffer`).
 - The smoke test checks that four threads run and join with the GIL off. It is not a
@@ -245,7 +249,7 @@ an exported C function). No new dependency, workflow or kind of artefact.
 - An exception raised in Kotlin reaches the Python thread.
 
 **Implemented (2026-11-25, `feat/175-wasm-thread-upcalls`, not yet run).**
-- `.github/scripts/ft-wasm/_pm_upcall.c`, built into the 3.15t runtime by `build-wasm.sh` through
+- `python-multiplatform/scripts/wasm/_pm_upcall.c`, built into the 3.15t runtime by `build-wasm.sh` through
   the build tree's `Modules/Setup.local`. It declares `Py_MOD_GIL_NOT_USED`, without which its
   import would re-enable the GIL. Exports `pm_upcall_dispatch`, `pm_upcall_set_target`,
   `pm_upcall_dispatch_index`; `build-wasm.sh` checks all three and that the module is built in.

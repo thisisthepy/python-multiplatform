@@ -1,8 +1,13 @@
 # wasmJsMain, rules
 
-Kotlin/Wasm reaching CPython 3.14 built for `wasm32-emscripten`, through `@WasmImport` against a
+Kotlin/Wasm reaching free-threaded CPython 3.15t built with pthreads for `wasm32-emscripten`
+(`python-multiplatform/scripts/wasm/build-cpython.sh`, #175), through `@WasmImport` against a
 **shared linear memory**. Not a JavaScript bridge: there is no JS frame in either the call path or
 the data path.
+
+That the loaded interpreter really is free-threaded (`t` ABI flags, `Py_GIL_DISABLED`,
+`sys._is_gil_enabled()` false) is `WasmFreeThreadedBuildTest`; that a shared-memory runtime refuses to
+boot in a page that is not cross-origin isolated (SPEC T-8) is `WasmCrossOriginIsolationTest`.
 
 Everything below is measured. The standalone `wasm-experiment/` that first took the measurements
 was retired into this source set and `python-multiplatform/scripts/wasm/` (it remains in git history: `git log --
