@@ -39,7 +39,8 @@ SCALAR_NAMES = ("int", "float", "bool")
 LIST_ELEMENTS = ("int", "float")             # `list[int]` and `list[float]` are the native lists
 # builtin names a program must not rebind: the AOT mode compiles a call of each of these as the builtin
 BUILTINS_USED = frozenset({"print", "float", "range", "len", "abs", "min", "max", "int", "bool", "list",
-                           "str", "repr", "ord", "chr"})        # (str ... chr: tier S1)
+                           "str", "repr", "ord", "chr",        # (str ... chr: tier S1)
+                           "enumerate", "zip", "reversed"})     # (tier S2c: the iterable of a loop)
 RESERVED_PREFIX = "__tp_"
 MAIN = frontend.AOT_ENTRY
 
@@ -98,6 +99,12 @@ class _Report:
 
 
 # --- the checks ----------------------------------------------------------------------------------
+
+def _int_constant(e: ast.expr) -> bool:
+    if isinstance(e, ast.UnaryOp) and isinstance(e.op, (ast.USub, ast.UAdd)):
+        e = e.operand
+    return isinstance(e, ast.Constant) and type(e.value) is int
+
 
 def _bound_names(fn: ast.AST) -> set[str]:
     """Every name a function binds anywhere inside it (parameters and assignment targets)."""
@@ -236,6 +243,8 @@ class _Checker:
             return                          # tier S2b: set[T]
         elif _is_dict_list_annotation(ann):
             return                          # tier S2b: list[dict[K, V]]
+        elif _is_view_annotation(ann):
+            return                          # tier S2b: KeysView[K], ValuesView[V], ItemsView[K, V]
         elif allow_tuple and _is_tuple_list_annotation(ann):
             return                          # tier S2a: one list per element (typedpython/tuples.py)
         else:
@@ -288,6 +297,13 @@ class _Checker:
                     and ((self.var_classes.get(t0.value.id), t0.attr) in self.field_list_class
                          or (self.var_classes.get(t0.value.id), t0.attr) in self.field_dict_lists)):
                 pass                        # tier S2a: `self.items = []`, an empty list of the field's class (S2b: dicts)
+            elif (isinstance(t0, ast.Name) and isinstance(s.value, ast.Call) and isinstance(s.value.func, ast.Name)
+                  and s.value.func.id == "range" and "range" not in self.shadow):
+                # tier S2c: a range object held in a name (typedpython/ranges.py checks its uses and its step)
+                if s.value.keywords or not 1 <= len(s.value.args) <= 3:
+                    self.rep.error(s.value, "aot/call", "range", "range() takes one to three positional arguments")
+                for a in s.value.args:
+                    self.expr(a)
             else:
                 self.expr(s.value)
             if len(s.targets) == 1 and isinstance(s.targets[0], ast.Name):
@@ -409,6 +425,10 @@ class _Checker:
 
     def for_stmt(self, s: ast.For) -> None:
         it = s.iter
+        if isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id in ("enumerate", "zip", "reversed") \
+                and it.func.id not in self.shadow:
+            self.counted_loop(s, it)                # tier S2c (typedpython/loops.py)
+            return
         if isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id == "range":
             if not (1 <= len(it.args) <= 3 and not it.keywords):
                 self.rep.error(s, "aot/statement", "for", "range() takes one to three positional arguments")
@@ -431,6 +451,55 @@ class _Checker:
         if s.orelse:
             self.rep.error(s.orelse[0], "aot/statement", "for-else", "`else` on a loop is outside the first AOT step")
         for b in s.body + s.orelse:
+            self.stmt(b)
+
+    def counted_loop(self, s: ast.For, it: ast.Call) -> None:
+        """Tier S2c: `for i, x in enumerate(it[, start])` (start an int constant) and `for a, b in zip(xs, ys, ...)` (names
+        of lists or strs, which the front end checks), each unpacked into names; `for x in reversed(xs)` (a name of a
+        list or a str)."""
+        n = it.func.id                                                  # type: ignore[attr-defined]
+        if it.keywords:
+            self.rep.error(it, "aot/call", n, f"{n}() takes no keyword argument in an AOT program")
+        if n == "enumerate":
+            if not 1 <= len(it.args) <= 2:
+                self.rep.error(it, "aot/call", n, "enumerate() takes an iterable and an optional start")
+                return
+            if len(it.args) == 2 and not _int_constant(it.args[1]):
+                self.rep.error(it.args[1], "aot/call", n, "the start of enumerate() is an int constant in an AOT program")
+            if not (isinstance(s.target, ast.Tuple) and len(s.target.elts) == 2
+                    and isinstance(s.target.elts[0], ast.Name)):
+                self.rep.error(s, "aot/statement", "for", "enumerate() is unpacked into two names in an AOT program "
+                                                         "(`for i, x in enumerate(xs)`)")
+                return
+            self.for_stmt(ast.copy_location(ast.For(target=s.target.elts[1], iter=it.args[0], body=s.body,
+                                                    orelse=s.orelse, type_comment=None), s))
+            return
+        if n == "reversed" and len(it.args) != 1:
+            self.rep.error(it, "aot/call", n, "reversed() takes one list or str")
+            return
+        if n == "reversed" and not isinstance(s.target, ast.Name):
+            self.rep.error(s, "aot/statement", "for", "a loop over reversed() binds one name in an AOT program")
+        if not it.args:
+            self.rep.error(it, "aot/call", n, "zip() takes one or more lists or strs")
+            return
+        for a in it.args:
+            if not (isinstance(a, ast.Name) or (isinstance(a, ast.Constant) and isinstance(a.value, str))):
+                self.rep.error(a, "aot/call", n, f"{n}() takes names of lists or strs (or a str constant) in an AOT "
+                                                 "program")
+            self.expr(a)
+        if n == "zip" and not (isinstance(s.target, ast.Tuple) and len(s.target.elts) == len(it.args)
+                and all(isinstance(e, ast.Name) for e in s.target.elts)):
+            self.rep.error(s, "aot/statement", "for", f"zip() of {len(it.args)} is unpacked into {len(it.args)} names "
+                                                     "in an AOT program (`for a, b in zip(xs, ys)`)")
+        bound = {x.id for b in s.body for x in ast.walk(b) if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Store)}
+        bound |= {e.id for e in ast.walk(s.target) if isinstance(e, ast.Name)}
+        for a in it.args:
+            if isinstance(a, ast.Name) and a.id in bound:
+                self.rep.error(a, "aot/statement", "for", f"the loop rebinds `{a.id}`, which {n}() reads: CPython's {n} "
+                                                         f"keeps the object it was given, an AOT {n} reads the name")
+        if s.orelse:
+            self.rep.error(s.orelse[0], "aot/statement", "for-else", "`else` on a loop is outside the first AOT step")
+        for b in s.body:
             self.stmt(b)
 
     def expr_stmt(self, s: ast.Expr) -> None:
@@ -573,6 +642,13 @@ class _Checker:
             self.subscript(e)
         elif isinstance(e, ast.Lambda):
             self.rep.error(e, "aot/expression", "lambda", "a lambda is outside the first AOT step")
+        elif isinstance(e, (ast.ListComp, ast.SetComp, ast.DictComp)):
+            for g in e.generators:          # tier S2c: each clause is the loop it means (the front end checks the rest)
+                self.for_stmt(ast.copy_location(ast.For(target=g.target, iter=g.iter, body=[], orelse=[]), e))
+                for c in g.ifs:
+                    self.expr(c)
+            for x in ((e.key, e.value) if isinstance(e, ast.DictComp) else (e.elt,)):
+                self.expr(x)
         elif type(e).__name__ in _CONTAINER_NAMES:
             kind = _CONTAINER_NAMES[type(e).__name__]
             self.rep.error(e, "aot/container", kind, f"a {kind} is outside the first AOT step (containers arrive in a later step)")
@@ -870,6 +946,23 @@ def _is_set_annotation(ann: ast.expr) -> bool:
                                                                                              ast.Name(id="int")])))
 
 
+VIEW_TYPES = ("KeysView", "ValuesView", "ItemsView")
+
+
+def _is_view_annotation(ann: ast.expr) -> bool:
+    """`KeysView[K]`, `ValuesView[V]` or `ItemsView[K, V]` of collections.abc, of the keys and values a dict holds (tier
+    S2b): a view passed to or returned from a function."""
+    if not (isinstance(ann, ast.Subscript) and isinstance(ann.value, ast.Name) and ann.value.id in VIEW_TYPES):
+        return False
+    if ann.value.id == "ItemsView":
+        pair = ann.slice
+    elif ann.value.id == "KeysView":
+        pair = ast.Tuple(elts=[ann.slice, ast.Name(id="int")])
+    else:
+        pair = ast.Tuple(elts=[ast.Name(id="int"), ann.slice])
+    return _is_dict_annotation(ast.Subscript(value=ast.Name(id="dict"), slice=pair))
+
+
 def _is_dict_list_annotation(ann: ast.expr) -> bool:
     """`list[dict[K, V]]` (tier S2b)."""
     return (isinstance(ann, ast.Subscript) and isinstance(ann.value, ast.Name) and ann.value.id in ("list", "List")
@@ -954,9 +1047,12 @@ def analyze(entry: Path, *, library: bool = False) -> Program:
             else:
                 rep.error(s, "aot/import", ", ".join(a.name for a in s.names),
                           "only a single `import math`, `import sys` and `import time` are supported in the AOT mode")
+        elif (isinstance(s, ast.ImportFrom) and s.level == 0 and s.module == "collections.abc"
+              and all(a.name in VIEW_TYPES and a.asname is None for a in s.names)):
+            pass                                    # tier S2b: the view types, for annotations
         elif isinstance(s, ast.ImportFrom):
-            rep.error(s, "aot/import", s.module or ".", "only a single `import math`, `import sys` and `import time` are "
-                      "supported in the AOT mode")
+            rep.error(s, "aot/import", s.module or ".", "only a single `import math`, `import sys` and `import time`, and "
+                      "`from collections.abc import KeysView, ValuesView, ItemsView` are supported in the AOT mode")
         elif isinstance(s, ast.FunctionDef):
             program.functions.append(s)
             if s.name in seen_names:

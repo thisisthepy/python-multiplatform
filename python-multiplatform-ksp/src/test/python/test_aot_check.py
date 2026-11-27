@@ -39,6 +39,8 @@ TABLE = [
     ("aot/import", "def f() -> None:\n    import math\n", (ERR, None, "math", 2)),
     ("aot/import", "from . import x\n", (ERR, None, ".", 1)),
     ("aot/import", "from math import *\n", (ERR, None, "math", 1)),
+    ("aot/import", "from collections.abc import Mapping\n", (ERR, None, "collections.abc", 1)),
+    ("aot/import", "from collections.abc import KeysView as K\n", (ERR, None, "collections.abc", 1)),
     # aot/identity
     ("aot/identity", "def f(x: int) -> int:\n    return id(x)\n", (ERR, None, "id", 2)),
     ("aot/identity", "def f(x: int) -> int:\n    return hash(x)\n", (ERR, None, "hash", 2)),
@@ -175,6 +177,61 @@ def test_sets_that_do_not_depend_on_their_order_are_not_reported(tmp_path):
             b = set(s)
             c = {1, 2} | a
             return len(b & c)
+    """)
+    report = aotcheck.check(path, front_end=False)
+    assert report.findings == [], report.lines()
+
+
+def test_a_comprehension_bound_to_a_name_or_returned_is_not_reported(tmp_path):
+    """Tier S2c: such a comprehension is the loop it means (typedpython/comprehensions.py); as an operand it is still
+    pending (the table row above)."""
+    path = write(tmp_path, """
+        def f(xs: list[int]) -> list[int]:
+            ys = [x + 1 for x in xs if x]
+            s: set[int] = {x for x in ys}
+            d = {x: x * 2 for x in range(3)}
+            return [y for y in ys]
+    """)
+    report = aotcheck.check(path, front_end=False)
+    assert report.findings == [], report.lines()
+
+
+def test_enumerate_and_zip_as_the_iterable_of_a_loop_are_not_reported(tmp_path):
+    """Tier S2c: `for i, x in enumerate(...)`, `for a, b in zip(...)` and `for x in reversed(...)`, in a `for` statement or a placed comprehension,
+    are the loops they mean (typedpython/loops.py); anywhere else they are still pending."""
+    path = write(tmp_path, """
+        def f(xs: list[int], ws: list[str]) -> list[int]:
+            for i, x in enumerate(xs, 1):
+                print(i, x)
+            for w, x in zip(ws, xs):
+                print(w, x)
+            for w in reversed(ws):
+                print(w)
+            for i, x in enumerate(reversed(xs)):
+                print(i, x)
+            return [i * x for i, x in enumerate(xs)]
+    """)
+    report = aotcheck.check(path, front_end=False)
+    assert report.findings == [], report.lines()
+    path = write(tmp_path, """
+        def f(xs: list[int]) -> int:
+            return len(list(zip(xs, xs))) + sum(1 for _ in enumerate(xs)) + len(list(reversed(xs)))
+    """)
+    names = {f.name for f in aotcheck.check(path, front_end=False).findings}
+    assert {"zip", "enumerate", "reversed"} <= names, names
+
+
+def test_the_view_types_of_collections_abc_are_not_reported(tmp_path):
+    """Tier S2b: `from collections.abc import KeysView, ValuesView, ItemsView` names the types of a view passed to or
+    returned from a function (the front end checks how the view is used)."""
+    path = write(tmp_path, """
+        from collections.abc import ItemsView, KeysView, ValuesView
+
+        def f(k: KeysView[str], v: ValuesView[int], i: ItemsView[str, int]) -> int:
+            return len(k) + len(v) + len(i)
+
+        def g(d: dict[str, int]) -> KeysView[str]:
+            return d.keys()
     """)
     report = aotcheck.check(path, front_end=False)
     assert report.findings == [], report.lines()

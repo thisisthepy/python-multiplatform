@@ -752,6 +752,145 @@ def test_a_loop_over_a_view_name_raises_where_cpython_raises(tmp_path: Path):
     _compare(tmp_path, VIEW_CHANGED, [["0"], ["1"]])
 
 
+VIEW_PASSED = """
+import sys
+from collections.abc import ItemsView, KeysView, ValuesView
+
+
+def count(ks: KeysView[str]) -> int:
+    n = 0
+    for k in ks:
+        n += len(k)
+    return n
+
+
+def show(vs: ValuesView[float], its: ItemsView[str, int]) -> str:
+    return f"{vs} {its} {len(vs)} {len(its)} {bool(vs)} {('zz', 1) not in its} {('a', 1) in its}"
+
+
+def keys_of(d: dict[str, int]) -> KeysView[str]:
+    return d.keys()
+
+
+def passed_on(ks: KeysView[str]) -> KeysView[str]:
+    return ks
+
+
+def fresh(n: int) -> ValuesView[int]:
+    d = {"m": n, "n": n + 1}
+    return d.values()
+
+
+def main() -> None:
+    d = {"a": 1, "b": 2}
+    f = {"x": 1.5}
+    ks = keys_of(d)
+    for w in sys.argv[1].split(","):
+        d[w] = len(w)
+    print(ks, len(ks), "a" in ks, count(ks), count(d.keys()))
+    g = {"q": 2.5, "rr": 0.5}
+    print(count(g.keys()))
+    print(show(f.values(), d.items()))
+    again = passed_on(ks)
+    d["new"] = 3
+    print(again, len(passed_on(d.keys())))
+    for k in keys_of(d):
+        print(k)
+    print(len(keys_of(d)), "zz" in keys_of(d), keys_of(d))
+    vs = fresh(len(d))
+    print(vs, 7 in vs, fresh(1))
+    total = 0
+    for v in fresh(2):
+        total += v
+    print(total)
+    e: dict[str, int] = {}
+    if keys_of(e) or not keys_of(d):
+        print("empty")
+    print(bool(keys_of(e)), not keys_of(e), bool(keys_of(d)) and "a" in keys_of(d))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_a_view_is_passed_to_and_returned_from_a_function(tmp_path: Path):
+    """A KeysView[K], ValuesView[V] or ItemsView[K, V] parameter or result (imported from collections.abc) is the
+    live view: it holds its dict, a KeysView[str] takes the keys of a dict of any values, and the view of a dict made
+    in the callee keeps that dict alive, as in CPython."""
+    _compare(tmp_path, VIEW_PASSED, [["c,a,dd"], ["b"]])
+
+
+VIEW_METHOD = """
+import sys
+from collections.abc import ItemsView, KeysView, ValuesView
+
+
+def count(ks: KeysView[str]) -> int:
+    n = 0
+    for k in ks:
+        n += len(k)
+    return n
+
+
+class Stock:
+    items: dict[str, int]
+
+    def __init__(self) -> None:
+        self.items = {}
+
+    def names(self) -> KeysView[str]:
+        return self.items.keys()
+
+    def amounts(self) -> ValuesView[int]:
+        return self.items.values()
+
+    def entries(self) -> ItemsView[str, int]:
+        return self.items.items()
+
+    def total(self) -> int:
+        t = 0
+        for v in self.amounts():
+            t += v
+        return t + count(self.names())
+
+
+def names_of(s: Stock) -> KeysView[str]:
+    return s.names()
+
+
+def main() -> None:
+    s = Stock()
+    ks = s.names()
+    print(ks, len(ks), bool(ks), not s.names())
+    for w in sys.argv[1].split(","):
+        s.items[w] = len(w)
+    print(ks, s.amounts(), s.entries(), len(s.names()), "a" in s.names(), 3 in s.amounts())
+    for k in s.names():
+        print(k, end=";")
+    print()
+    for k, v in s.entries():
+        print(k, v, end=";")
+    print()
+    print(s.total(), count(s.names()), names_of(s), ("a", 1) in s.entries())
+    vs = s.amounts()
+    s.items["zz"] = 7
+    print(vs, len(names_of(s)))
+    if s.names() and 7 in vs:
+        print("yes")
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_a_method_returns_a_view(tmp_path: Path):
+    """A method `-> KeysView[K]` (ValuesView, ItemsView) returns the live view of its object's dict, used as a view
+    returned by a module function is (a local, a loop, len, in, truth, passed on, returned)."""
+    _compare(tmp_path, VIEW_METHOD, [["c,a,dd"], ["b"]])
+
+
 WORDFREQ = Path(__file__).resolve().parents[4] / "benchmarks" / "typedpython" / "py" / "wordfreq.py"
 
 
@@ -818,3 +957,35 @@ MAIN = '\n\ndef main() -> None:\n    f()\n\n\nif __name__ == "__main__":\n    ma
 def test_what_a_dict_cannot_hold_yet_is_refused_with_the_reason(tmp_path: Path, body: str, reason: str):
     found = _rules(tmp_path, "def f() -> None:\n" + body + MAIN)
     assert any(reason in m for _, m in found), found
+
+
+ABC = "from collections.abc import ItemsView, KeysView, ValuesView\n\n\n"
+
+
+@pytest.mark.parametrize("source, reason", [
+    # only the three view types, by their own names
+    ("from collections.abc import Mapping\n\n\ndef f(m: Mapping[str, int]) -> int:\n    return len(m)\n",
+     "aot/import"),
+    ("from collections.abc import KeysView as K\n\n\ndef f(k: K[str]) -> int:\n    return len(k)\n", "aot/import"),
+    ("import collections.abc\n\n\ndef f() -> None:\n    pass\n", "aot/import"),
+    # a view parameter takes a view of that kind; a view result is a view of that kind
+    (ABC + "def f(k: KeysView[str]) -> int:\n    return len(k)\n\n\ndef g() -> None:\n    d = {'a': 1}\n"
+           "    print(f(d.values()))\n", "a view"),
+    (ABC + "def f(k: KeysView[str]) -> int:\n    return len(k)\n\n\ndef g() -> None:\n    d = {1: 1}\n"
+           "    print(f(d.keys()))\n", "a view"),
+    (ABC + "def f(k: KeysView[str]) -> int:\n    return len(k)\n\n\ndef g() -> None:\n    d = {'a': 1}\n"
+           "    print(f(d))\n", "a view"),
+    (ABC + "def f(d: dict[str, int]) -> KeysView[str]:\n    return d.values()\n", "a view"),
+    # a view parameter is used as a view
+    (ABC + "def f(k: KeysView[str]) -> bool:\n    return k == {'a'}\n", "is a view"),
+    (ABC + "def f(k: ItemsView[str, int]) -> None:\n    print(dict(k))\n", "is a view"),
+    (ABC + "def f(k: KeysView[float]) -> int:\n    return len(k)\n", "outside the AOT mode"),
+    # a method's view is used as a view too
+    (ABC + "class C:\n    d: dict[str, int]\n\n    def __init__(self) -> None:\n        self.d = {}\n\n    def ks(self) -> KeysView[str]:\n        return self.d.keys()\n\n\ndef g() -> None:\n    c = C()\n    print(c.ks() == {'a'})\n", "`c.ks()` is a view"),
+    (ABC + "class C:\n    d: dict[str, int]\n\n    def __init__(self) -> None:\n        self.d = {}\n\n    def ks(self) -> KeysView[str]:\n        return self.d.keys()\n\n\ndef h(d: dict[str, int]) -> int:\n    return len(d)\n\n\ndef g() -> None:\n    c = C()\n    print(h(c.ks()))\n", "`c.ks()` is a view"),
+    (ABC + "class C:\n    d: dict[str, int]\n\n    def __init__(self) -> None:\n        self.d = {}\n\n"
+           "    def ks(self) -> KeysView[str]:\n        return self.d.values()\n", "but the return value is a view"),
+])
+def test_what_a_view_parameter_or_result_cannot_do_is_refused(tmp_path: Path, source: str, reason: str):
+    found = _rules(tmp_path, source + "\n\n" + MAIN.replace("f()", "pass"))
+    assert any(reason in r or reason in m for r, m in found), found
