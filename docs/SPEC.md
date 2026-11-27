@@ -1313,9 +1313,10 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   among them; the iOS simulator ran the library suite on 3.15t, 513 tests, 0 failed, `IosFreeThreadedBuildTest`
   among them, and the plugin-staged `ios-consumer` app printed `IOS_CONSUMER_PROBE stdlib=ok ext=ok payload=ok
   ft=ok`; jobs `android-native.yml` `emulator` and `ios.yml` `ios-consumer`, owner-approved 2026-11-21, #328);
-  `partial` on androidNative (compiled against 3.15t, its `artTest` not run on a device or emulator) and
-  wasm (3.15t `wasmJsNodeTest` run locally only; `wasm.yml`'s test job, which builds the runtime itself,
-  has not run in CI yet, ROADMAP 10.1),
+  and on wasm (`ci.yml` batch run 45848955214, 2026-11-26, `wasm.yml`'s test job building the runtime itself:
+  `wasmJsNodeTest` 599 tests with `WasmFreeThreadedBuildTest` among them, the one failure the expected
+  `WasmCompiledWheelTest`, Decision 10 (c) c1; `wasmJsBrowserTest` 10 tests, 0 failures; #542);
+  `partial` on androidNative (compiled against 3.15t, its `artTest` not run on a device or emulator),
   `PM/desktopTest/.../DesktopFreeThreadedBuildTest.kt` (ABI flags, `Py_GIL_DISABLED` of the loaded
   interpreter, checkpoint default), `PM/desktopNativeTest/.../DesktopNativeFreeThreadedBuildTest.kt`,
   `PM/androidInstrumentedTest/.../AndroidFreeThreadedBuildTest.kt` (ABI flags, stdlib path, the AAR's
