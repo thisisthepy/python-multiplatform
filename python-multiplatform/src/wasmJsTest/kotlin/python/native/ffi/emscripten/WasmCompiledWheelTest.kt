@@ -20,8 +20,9 @@ import python.multiplatform.ffi.PythonTestFixture
  * repository's Emscripten 5.0.3 against the 3.15t headers, `-fwasm-exceptions -sSUPPORT_LONGJMP=wasm
  * -pthread -fPIC -sSIDE_MODULE=1`. Its C module `wasmdemo.wmod` has `answer()` (returns 42) and
  * `unwind()`, which returns 7 through `setjmp`/`longjmp` and so imports `python.wasm`'s `__c_longjmp`
- * tag: a runtime without the pyemscripten_2026_0 unwinding ABI fails it at link time. It is C, so it
- * does not exercise `__cpp_exception`. This replaces the cp314 pydantic-core wheel the 3.14.2 runtime
+ * tag: a runtime without the pyemscripten_2026_0 unwinding ABI fails it at link time. It is C, so
+ * `__cpp_exception` is covered by the second fixture, `wasmcpp` ([aCompiledCppWheelThrowsAndCatchesInsideTheInterpreter]).
+ * This replaces the cp314 pydantic-core wheel the 3.14.2 runtime
  * loaded (Decision 10 (c) c1, leader 2026-11-26).
  *
  * The wheels are test fixtures checked in under `python-multiplatform/src/wasmJsTest/resources/wheels/`
@@ -83,6 +84,55 @@ class WasmCompiledWheelTest {
     }
 
     /**
+     * The C++ fixture: `wasmcpp.wcpp.catch_it()` throws `std::runtime_error("boom 3")` inside the
+     * side module and returns the message it caught. That imports `python.wasm`'s `__cpp_exception`
+     * tag and libc++abi's `__cxa_throw` / `__cxa_allocate_exception`, which the C fixture above never
+     * touches: a runtime built without `-fwasm-exceptions`, or one whose tag the side module cannot
+     * link against, fails here (a LinkError at import, or an abort at the throw) while `wasmdemo`
+     * still passes. Built by toolchain with the same adapter and flags (pypackpack 2f3ddd0, 2026-11-27).
+     */
+    @Test
+    fun aCompiledCppWheelThrowsAndCatchesInsideTheInterpreter() {
+        val site = PMP_TEST_SITE_PACKAGES?.toString()
+        if (site == null) {
+            if (PMP_TEST_WHEELS_REQUIRED?.toBoolean() == true) {
+                fail("no wheels were staged although -PrequireWasmRuntime=true was passed")
+            }
+            println("SKIPPING aCompiledCppWheelThrowsAndCatchesInsideTheInterpreter: no wheels staged")
+            return
+        }
+        PythonTestFixture.withInterpreter {
+            Python3.withPython {
+                val status = runInMain(
+                    "import sys as _pmp_sys\n" +
+                        "_pmp_sys.path.insert(0, ${pyStr(site)})\n" +
+                        "try:\n" +
+                        "    import wasmcpp.wcpp as _pmp_m\n" +
+                        "    _pmp_wheel = [\n" +
+                        "        _pmp_m.__file__.rsplit('/', 1)[-1],\n" +
+                        "        _pmp_m.catch_it(),\n" +
+                        "        repr(_pmp_sys._is_gil_enabled()),\n" +
+                        "    ]\n" +
+                        "except BaseException as e:\n" +
+                        "    _pmp_wheel = ['FAILED ' + type(e).__name__ + ': ' + str(e)]\n" +
+                        "finally:\n" +
+                        "    _pmp_sys.path.remove(${pyStr(site)})\n",
+                )
+                assertEquals(0, status)
+                val result = evalToString("' | '.join(_pmp_wheel)")
+                runInMain("del _pmp_wheel, _pmp_sys")
+                assertEquals(
+                    "wcpp.cpython-315t-wasm32-emscripten.so | boom 3 | False",
+                    result,
+                    "importing the compiled wasmcpp wheel or catching its C++ exception failed. A LinkError " +
+                        "naming __cpp_exception means python.wasm does not export the C++ exception tag " +
+                        "(see WasmInterpreterAbiTest).",
+                )
+            }
+        }
+    }
+
+    /**
      * The fixtures are what their README says they are: every pinned wheel is present with its
      * sha256, and nothing unpinned sits beside them. A rebuilt wheel (new emsdk or ABI) changes the
      * hash, so this fails until the README and [PINNED_WHEELS] are updated with the new provenance.
@@ -121,6 +171,8 @@ class WasmCompiledWheelTest {
         val PINNED_WHEELS = mapOf(
             "wasmdemo-0.1.0-cp315-cp315t-pyemscripten_2026_0_wasm32.whl" to
                 "df57a28e3a61f4eb8bc5fe84e4a09bdc76e8e720bd6c348345c3fb86c772298a",
+            "wasmcpp-0.1.0-cp315-cp315t-pyemscripten_2026_0_wasm32.whl" to
+                "6a41eb2a1be0421fcf35c862aefeacb11bbdbfc80f34ac2881d739df9a3c96ef",
         )
     }
 }
