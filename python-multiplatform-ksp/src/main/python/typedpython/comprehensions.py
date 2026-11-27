@@ -21,13 +21,15 @@ A comprehension that is the whole value of an assignment to a name (`xs = [...]`
   conditions, so a variable has its declared type, not a narrowed one), and each variable's type is the type of its
   load in that probe. The hidden local gets that type as an injected `kinds` entry.
 
-`sum(it[, start])`, `any(it)` and `all(it)` that are the whole value of such a statement are the loops they mean too:
+`sum(it[, start])`, `any(it)`, `all(it)`, `min(it)` and `max(it)` that are the whole value of such a statement are the loops they mean too:
 the iterable is any iterable a `for` loop takes (the site is the comprehension `(v for v in it)` with a hidden `v`,
 typed at its probe as a comprehension variable is). An int sum adds as CPython's int fast path does (`acc = acc + v`);
 a float sum takes a float constant start (an empty float sum with the default int start is the int 0, which a float
 cannot hold) and adds with CPython's compensated summation (Neumaier: `cs_add` and `cs_to_double` in
 Python/bltinmodule.c, each item through float() as `PyLong_AsDouble` takes an int); any() and all() stop at the first
-true or false item, through every clause's loop. A generator expression is not accepted (design: no generators in
+true or false item, through every clause's loop; min() and max() keep the first item and replace it by one that
+compares strictly smaller (larger), as `min_max` does, and of an empty iterable raise CPython's ValueError (an
+`ir.Raise`, through a `raise` statement this pass marks). A generator expression is not accepted (design: no generators in
 any tier), so `sum(x * 2 for x in xs)` stays refused.
 
 Not rewritten, left for the lowering to refuse naming the reason: a comprehension anywhere else (an operand, an
@@ -42,7 +44,7 @@ from dataclasses import dataclass, field
 from typedpython import rebinding
 
 COMPS = (ast.ListComp, ast.SetComp, ast.DictComp)
-REDUCERS = ("sum", "any", "all")
+REDUCERS = ("sum", "any", "all", "min", "max")
 Kinds = dict[str, dict[str, list[tuple[int, str]]]]
 
 
@@ -86,7 +88,8 @@ def _reducer_of(s: ast.stmt) -> ast.Call | None:
     that is not a generator expression."""
     value = _value_of(s)
     if isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id in REDUCERS \
-            and value.args and not isinstance(value.args[0], (ast.GeneratorExp, ast.Starred)):
+            and value.args and not isinstance(value.args[0], (ast.GeneratorExp, ast.Starred)) \
+            and not (value.func.id in ("min", "max") and len(value.args) != 1):    # (min(a, b) is an expression)
         return value
     return None
 
@@ -259,6 +262,8 @@ def _rewrite_site(site: Site, fn: ast.FunctionDef, kinds: dict[str, list[tuple[i
             if len(call.args) + len(call.keywords) > 2 or any(k.arg != "start" for k in call.keywords) \
                     or (len(call.args) == 2 and call.keywords):
                 raise _Problem(line, "sum() takes an iterable and a start in an AOT program")
+        elif call.func.id in ("min", "max") and call.keywords:              # type: ignore[attr-defined]
+            raise _Problem(line, f"{call.func.id}() of an iterable takes no key= or default= in an AOT program yet")  # type: ignore[attr-defined]
         elif len(call.args) != 1 or call.keywords:
             raise _Problem(line, f"{call.func.id}() takes one argument")      # type: ignore[attr-defined]
     # the accumulator's type
@@ -353,6 +358,14 @@ def _reduced_type(call: ast.Call, spelled: str, line: int) -> ast.expr:
     name = call.func.id                                                     # type: ignore[attr-defined]
     if name in ("any", "all"):
         return ast.Name(id="bool", ctx=ast.Load())
+    if name in ("min", "max"):
+        import re
+        parts = {"int" if re.fullmatch(r"(typing\.)?Literal\[-?\d+\]", p.strip()) else p.strip()
+                 for p in spelled.split("|")}
+        if len(parts) == 1 and next(iter(parts)) in _ZERO:
+            return ast.Name(id=next(iter(parts)), ctx=ast.Load())
+        raise _Problem(line, f"`{ast.unparse(call)}` is a {spelled}: an AOT program compiles {name}() of int, float, "
+                             "str or bool items")
     start = call.args[1] if len(call.args) == 2 else next((k.value for k in call.keywords if k.arg == "start"), None)
     import re
     # the union's parts, a literal int (the default start `Literal[0]`) as int
@@ -370,6 +383,9 @@ def _reduced_type(call: ast.Call, spelled: str, line: int) -> ast.expr:
                          "items")
 
 
+_ZERO = {"int": 0, "float": 0.0, "str": "", "bool": False}     # a placeholder of each type min() / max() hold
+
+
 def _reduce(site: Site, call: ast.Call, annotation: ast.expr, acc: str,
             clauses: list[tuple[ast.expr, ast.expr, list[ast.expr]]], mapping: dict[str, str],
             kinds: dict[str, list[tuple[int, str]]], taken: set[str], counter: dict[str, int]) -> list[ast.stmt]:
@@ -383,7 +399,21 @@ def _reduce(site: Site, call: ast.Call, annotation: ast.expr, acc: str,
     head: list[ast.stmt] = []
     tail: list[ast.stmt] = []
     stop: ast.expr | None = None
-    if name in ("any", "all"):
+    if name in ("min", "max"):
+        assert isinstance(annotation, ast.Name)
+        seen = _fresh("seen", taken, counter, site.qname)
+        head = [ast.AnnAssign(target=store(seen), annotation=ast.Name(id="bool", ctx=ast.Load()),
+                              value=ast.Constant(False), simple=1),
+                ast.AnnAssign(target=store(acc), annotation=annotation, value=ast.Constant(_ZERO[annotation.id]),
+                              simple=1)]
+        better = ast.Compare(left=item, ops=[ast.Lt() if name == "min" else ast.Gt()], comparators=[load(acc)])
+        inner = [ast.If(test=ast.UnaryOp(op=ast.Not(), operand=load(seen)),
+                        body=[assign(acc, copy.deepcopy(item)), assign(seen, ast.Constant(True))],
+                        orelse=[ast.If(test=better, body=[assign(acc, copy.deepcopy(item))], orelse=[])])]
+        empty = ast.Raise(exc=None, cause=None)
+        empty.tp_builtin_raise = ("ValueError", f"{name}() iterable argument is empty")     # type: ignore[attr-defined]
+        tail = [ast.If(test=ast.UnaryOp(op=ast.Not(), operand=load(seen)), body=[empty], orelse=[])]
+    elif name in ("any", "all"):
         found = name == "any"
         head = [ast.AnnAssign(target=store(acc), annotation=annotation, value=ast.Constant(not found), simple=1)]
         test = item if found else ast.UnaryOp(op=ast.Not(), operand=item)

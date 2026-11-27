@@ -700,6 +700,10 @@ class _Checker:
             if isinstance(f, ast.Name) and f.id == "sum" and k.arg == "start" and "sum" not in self.shadow:
                 self.expr(k.value)          # tier S2c: sum(xs, start=...)
                 continue
+            if isinstance(f, ast.Name) and f.id in ("min", "max") and f.id not in self.shadow:
+                self.rep.error(k.value, "aot/keyword", k.arg or "**", f"{f.id}() takes no key= or default= in an AOT "
+                                                                      "program yet")
+                continue
             self.rep.error(k.value, "aot/keyword", k.arg or "**", "keyword arguments are outside the first AOT step")
         if any(isinstance(a, ast.Starred) for a in c.args):
             self.rep.error(c, "aot/keyword", "*", "a starred argument is outside the first AOT step")
@@ -727,6 +731,11 @@ class _Checker:
             elif n == "abs":
                 if len(c.args) != 1:
                     self.rep.error(c, "aot/call", n, "abs() takes one argument")
+            elif n in ("min", "max") and len(c.args) == 1 and not isinstance(c.args[0], ast.GeneratorExp):
+                # tier S2c: of an iterable (typedpython/comprehensions.py; the front end checks the place)
+                self.for_stmt(ast.copy_location(ast.For(target=ast.Name(id="_", ctx=ast.Store()), iter=c.args[0],
+                                                        body=[], orelse=[]), c))
+                return
             elif n in ("min", "max"):
                 if len(c.args) != 2:
                     self.rep.error(c, "aot/call", n, f"{n}() of other than two arguments is outside the AOT mode")

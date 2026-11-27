@@ -1015,6 +1015,16 @@ class TimeSleep(Stmt):
 
 
 @dataclass(frozen=True)
+class Raise(Stmt):
+    """AOT mode, tier S2c: raise the builtin exception `kind` (a `TPA_` kind of the runtime, "ValueError") with the
+    fixed message CPython gives it where a rewrite of the AST stands for a builtin that raises (`min()` of an empty
+    iterable: "min() iterable argument is empty"). Not a `raise` statement of the program, which stays refused."""
+
+    kind: str
+    message: str
+
+
+@dataclass(frozen=True)
 class SysExit(Stmt):
     """`sys.exit([code])` (AOT executable mode only; refused in `aot-lib`). `code` is I64 or None."""
 

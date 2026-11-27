@@ -326,6 +326,8 @@ def _find_escape_reason(fn: ir.Function, var_name: str, cls_name: str) -> str | 
             res = _check_expr(stmt.seconds)
             if res is not None:
                 return res
+        elif isinstance(stmt, ir.Raise):
+            pass                                        # (no expression)
         elif isinstance(stmt, ir.SysExit):
             if stmt.code is not None:
                 res = _check_expr(stmt.code)

@@ -2634,6 +2634,11 @@ class _Fn:
         v = self.ev(s.seconds)
         self.emit(f"if (tpa_time_sleep({v}) != 0) {{ {self.fail()} }}")
 
+    def st_Raise(self, s: ir.Raise) -> None:
+        msg = s.message.replace("\\", "\\\\").replace('"', '\\"')
+        self.emit(f'tpa_raise(TPA_{s.kind}, "{msg}");')
+        self.emit(self.fail())
+
     def st_SysExit(self, s: ir.SysExit) -> None:
         if s.code is None:
             self.emit("tpa_exit_i64(0);")

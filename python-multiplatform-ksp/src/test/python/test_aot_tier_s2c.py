@@ -300,6 +300,52 @@ def test_sum_any_and_all_of_an_iterable_are_the_loops_they_mean(tmp_path: Path):
     _compare(tmp_path, SUMS, [["1,2,5", "a,,b"], ["0", ""], ["-3,4", "x"]])
 
 
+MINMAX = """
+import sys
+
+
+def lowest(xs: list[int]) -> int:
+    return min(xs)
+
+
+def main() -> None:
+    words = sys.argv[2].split(",")
+    a = max(words)
+    b = min(words)
+    print(a, b)
+    d = {"x": 3, "y": -1}
+    k = max(d)
+    v = min(d.values())
+    r = max(range(3, 10, 4))
+    print(k, v, r)
+    inf = 1e308 * 10.0
+    first = [inf - inf, 1.0, 0.5]
+    later = [1.0, inf - inf, 0.5]
+    n1 = min(first)
+    n2 = min(later)
+    n3 = max(later)
+    print(n1, n2, n3)
+    fl = [int(t) / 4 for t in sys.argv[1].split(",") if t]
+    nums = [int(t) for t in sys.argv[1].split(",") if t]
+    m = max(nums)
+    print(m, lowest(nums))
+    c = min(fl)
+    e = max(fl)
+    print(c, e)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_min_and_max_of_an_iterable_are_the_loops_they_mean(tmp_path: Path):
+    """`min(it)` and `max(it)` bound to a name or returned keep the first item and replace it by an item that compares
+    strictly smaller (larger), as CPython's min_max does: a NaN first stays, a NaN later is skipped; of an empty
+    iterable CPython's ValueError ("max() iterable argument is empty"). Agent proposal, not owner-confirmed."""
+    _compare(tmp_path, MINMAX, [["3,1,4", "b,a,c"], ["7", "z"], ["", "q"]])
+
+
 def _rules(tmp_path: Path, source: str) -> set[tuple[str, str]]:
     with pytest.raises(aot.AotError) as raised:
         aot.generate(_write(tmp_path, source))
@@ -349,6 +395,10 @@ MAIN = '\n\ndef main() -> None:\n    f()\n\n\nif __name__ == "__main__":\n    ma
     ("    xs = [1.5, 2.5]\n    s: float = sum(xs)\n    print(s)\n", "sum(xs, 0.0)"),
     ("    xs = [1, 2]\n    s = any(xs, xs)\n    print(s)\n", "one argument"),
     ("    xs = [1, 2]\n    s = sum(x * 2 for x in xs)\n    print(s)\n", "generator expression"),
+    # min() and max() of an iterable are bound to a name or returned; no key= or default= yet
+    ("    xs = [1, 2]\n    print(min(xs))\n", "bind it to a name"),
+    ("    xs = [1, 2]\n    m = min(xs, key=abs)\n    print(m)\n", "key"),
+    ("    xs = [1, 2]\n    m = max(xs, default=0)\n    print(m)\n", "default"),
     # (found here: a comprehension over a list[float] was refused, and float() of a str reached the verifier)
     ("    w = '1.5'\n    x = float(w)\n    print(x)\n", "float() of a str"),
 ])

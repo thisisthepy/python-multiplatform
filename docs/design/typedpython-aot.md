@@ -558,10 +558,13 @@ and to anything else, and any other use (passing, returning, indexing, list(), z
 `for` loop takes (typedpython/comprehensions.py): an int sum adds as CPython's int path does; a float sum takes a
 float constant start (with the default int start an empty sum is the int 0, which a float cannot hold) and adds
 with CPython's compensated summation (Neumaier, `cs_add` / `cs_to_double` in Python/bltinmodule.c), so
-`sum([0.1] * 10, 0.0) == 1.0` as in CPython; any() and all() stop at the first true or false item. A generator
+`sum([0.1] * 10, 0.0) == 1.0` as in CPython; any() and all() stop at the first true or false item; `min(it)` and `max(it)` keep the first item and replace it by
+one that compares strictly smaller (larger), as CPython's `min_max` does (a NaN first stays), and of an empty
+iterable raise CPython's `ValueError: min() iterable argument is empty` (an `ir.Raise` statement, made only by
+this rewrite: a `raise` of the program stays refused); key= and default= are not in yet. A generator
 expression argument stays refused (generators are outside every tier, section 4). Then `zip` and `reversed` of
-other iterables, range objects passed and indexed, in `for` loops and comprehensions; `min` / `max` of an
-iterable (`ValueError: min() iterable argument is empty`); `sorted(xs, key=..., reverse=...)` and `list.sort(...)` with a key that is a compiled function or a
+other iterables, range objects passed and indexed, in `for` loops and comprehensions; `min` / `max` with key=
+and default=; `sorted(xs, key=..., reverse=...)` and `list.sort(...)` with a key that is a compiled function or a
 lambda written in place: CPython's own algorithm (timsort, `listsort` in Objects/listobject.c, ported as it is), so
 the order of equal and of unordered elements (NaN) is CPython's, not merely some stable order. `bytes`: an immutable
 byte array; literals, `s.encode()` / `encode("utf-8")` (strict: a surrogate raises CPython's UnicodeEncodeError),

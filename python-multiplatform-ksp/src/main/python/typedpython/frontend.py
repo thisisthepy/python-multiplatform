@@ -1953,6 +1953,9 @@ class _Lowerer:
             return [ir.Break()]
         if isinstance(node, ast.Continue):
             return [ir.Continue()]
+        if self.info.aot and isinstance(node, ast.Raise) and getattr(node, "tp_builtin_raise", None) is not None:
+            kind, message = node.tp_builtin_raise                           # type: ignore[attr-defined]
+            return [ir.Raise(kind, message)]   # tier S2c: the error a builtin raises, made by a rewrite of the AST
         if isinstance(node, ast.Expr):
             if isinstance(node.value, ast.Constant):
                 return []  # a docstring or a bare literal: no effect
@@ -4912,7 +4915,7 @@ class _Lowerer:
         `abs(x)`, `min(a, b)` and `max(a, b)` (two numbers of one type). None: not one of these."""
         args = node.args
         line = node.lineno
-        if name in comprehensions.REDUCERS and self.builtin(name):          # tier S2c (typedpython/comprehensions.py)
+        if name in ("sum", "any", "all") and self.builtin(name):           # tier S2c (typedpython/comprehensions.py)
             raise Skip(line, f"`{_src(node)}`: an AOT program compiles {name}() as the value of an assignment to a "
                              "name or of a `return` (tier S2c): bind it to a name first")
         if name == "len" and self.builtin("len") and len(args) == 1 and self.is_sys_argv(args[0]):
@@ -5007,6 +5010,9 @@ class _Lowerer:
                 self.refined = entry
                 return self.aot_cond(c, neg, x, node)
             raise Skip(line, f"abs() of a {TYPE_NAME[x.type]} is not supported in an AOT program (int and float only)")
+        if name in ("min", "max") and self.builtin(name) and len(args) == 1:      # tier S2c: of an iterable
+            raise Skip(line, f"`{_src(node)}`: an AOT program compiles {name}() of an iterable as the value of an "
+                             "assignment to a name or of a `return` (tier S2c): bind it to a name first")
         if name in ("min", "max") and self.builtin(name):
             if len(args) != 2:
                 raise Skip(line, f"{name}() of other than two arguments is not supported in an AOT program")
@@ -5521,7 +5527,7 @@ def _diverges(body: tuple[ir.Stmt, ...]) -> bool:
     if not body:
         return False
     last = body[-1]
-    if isinstance(last, (ir.Return, ir.ReturnTuple, ir.Break, ir.Continue, ir.SysExit)):  # (AOT: ReturnTuple, SysExit)
+    if isinstance(last, (ir.Return, ir.ReturnTuple, ir.Break, ir.Continue, ir.SysExit, ir.Raise)):  # (AOT: ...)
         return True
     if isinstance(last, ir.If):
         return _diverges(last.then) and _diverges(last.orelse)

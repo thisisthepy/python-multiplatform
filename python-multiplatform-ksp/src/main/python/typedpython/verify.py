@@ -362,7 +362,7 @@ from .ir import (
 )
 from .ir import (
     ArgvInt, ArgvLen, BoolToInt, Cond, FloatToInt, FormatField, FString, ListDisplay, Print,
-    ReturnTuple, StrToInt, SysExit, TimeCall, TimeFunc, TimeSleep, Unpack,
+    ReturnTuple, StrToInt, SysExit, TimeCall, TimeFunc, TimeSleep, Unpack, Raise,
 )
 from .ir import (
     ArgvStr, ForStr, StrChr, StrCompare, StrConcat, StrContains, StrIndex, StrLen, StrOf, StrOrd, StrParseInt,
@@ -433,9 +433,11 @@ _EXPRS = frozenset({Const, Local, BinOp, UnaryOp, Compare, And, Or, ToFloat, ToI
                     GetItem, Contains, NewList, NewDict, Format, BuildString})
 _STMTS = frozenset({Assign, StoreIndex, ExprStmt, If, While, ForRange, Return, Break, Continue,
                     FieldSet, StoreItem, ForObj})
+# The builtin exceptions an `ir.Raise` names (each a `TPA_` kind of the runtime)
+RAISE_KINDS = frozenset({"ValueError"})
 # The statements and expressions only the AOT mode (`verify(m, aot=True)`) accepts. (An `FString` and its
 # `FormatField`s are checked by `s_Print`, which is the only place one may stand.)
-_AOT_STMTS = frozenset({Print, ReturnTuple, Unpack, TimeSleep, SysExit, ForStr,
+_AOT_STMTS = frozenset({Print, ReturnTuple, Unpack, TimeSleep, SysExit, Raise, ForStr,
                         ListAppend, ListInsert, ListExtend, ListClear, ListReverse, ListRemove,
                         ListDelete, ListSetSlice, ObjListStore, StrListStore, ForObjList,     # tier S2a
                         *ir.DICT_STMTS})                                                      # tier S2b
@@ -2679,6 +2681,11 @@ class _Checker:
         secs = self.expr(s.seconds, state)
         self.slot(secs, Type.F64, "argument of time.sleep")
         return dataclasses.replace(s, seconds=secs), state
+
+    def s_Raise(self, s: Raise, state: _State):
+        if s.kind not in RAISE_KINDS:
+            self.error(TYPE, f"Raise of {s.kind!r}: the AOT runtime raises only {', '.join(sorted(RAISE_KINDS))}")
+        return s, state
 
     def s_SysExit(self, s: SysExit, state: _State):
         if s.code is None:
