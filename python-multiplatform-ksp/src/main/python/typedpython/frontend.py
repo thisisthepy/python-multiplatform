@@ -115,7 +115,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from typedpython import gate, ir, pyrefly, rebinding, resume, taint, tuples
+from typedpython import comprehensions, gate, ir, loops, pyrefly, ranges, rebinding, resume, taint, tuples
 from typedpython.ir import Type
 
 I64_MIN, I64_MAX = -2**63, 2**63 - 1
@@ -219,14 +219,43 @@ def _dict_or_set_kinds(kind: str) -> "ir.DictKinds | None":
 
 
 _VIEW_KIND = re.compile(r"(?:_collections_abc\.)?dict_(keys|values|items)\[(.+)\]")
+_ABC_VIEW_KIND = re.compile(r"(?:(?:_collections_abc|collections\.abc|typing)\.)?(Keys|Values|Items)View\[(.+)\]")
 
 
 def _view_kinds(kind: str) -> "tuple[str, ir.DictKinds] | None":
     """AOT mode, tier S2b: (the view, the kinds of its dict) of Pyrefly's type of a view bound to a name
-    (`_collections_abc.dict_keys[str, int]`), else None."""
-    m = _VIEW_KIND.fullmatch(_aot_kind(kind).strip())
-    kinds = _dict_kinds(f"dict[{m.group(2)}]") if m is not None else None
-    return (m.group(1), kinds) if kinds is not None else None
+    (`_collections_abc.dict_keys[str, int]`) or of a `KeysView[K]`, `ValuesView[V]` or `ItemsView[K, V]` annotation,
+    else None. A KeysView does not say the values of its dict, nor a ValuesView the keys: that half is int, and only
+    the half the view reads is compared (`_view_match`)."""
+    k = _aot_kind(kind).strip()
+    m = _VIEW_KIND.fullmatch(k)
+    if m is not None:
+        kinds = _dict_kinds(f"dict[{m.group(2)}]")
+        return (m.group(1), kinds) if kinds is not None else None
+    m = _ABC_VIEW_KIND.fullmatch(k)
+    if m is None:
+        return None
+    view = m.group(1).lower()
+    pair = {"keys": f"{m.group(2)}, int", "values": f"int, {m.group(2)}", "items": m.group(2)}[view]
+    kinds = _dict_kinds(f"dict[{pair}]")
+    return (view, kinds) if kinds is not None and not ir.is_set(kinds) else None
+
+
+def _view_type(view: str, kinds: "ir.DictKinds") -> str:
+    """The view `view` of a dict of `kinds` by the half it reads: `KeysView[str]`, `ValuesView[int]`,
+    `ItemsView[str, int]` (collections.abc)."""
+    return (f"KeysView[{_kname(kinds[0])}]" if view == "keys" else f"ValuesView[{_vname(kinds[1])}]" if view == "values"
+            else f"ItemsView[{_kname(kinds[0])}, {_vname(kinds[1])}]")
+
+
+def _view_misuse(what: str, view: str, kinds: "ir.DictKinds") -> str:
+    return (f"{what} is a view, a {_view_type(view, kinds)}: an AOT program uses a view by a `for` loop, "
+            "len(), `in`, its truth, print / str / repr / an f-string, binds it to another view name, passes it to a "
+            "view parameter or returns it as a view; what a view has beyond that (set operators, comparison, list() or "
+            "dict() of it) is not yet")
+
+
+_view_match = ir.view_match
 
 
 def _dict_list_kinds(kind: str) -> "ir.DictKinds | None":
@@ -391,6 +420,7 @@ class _Signature:
     return_cls: str | None = None
     return_optional: bool = False
     return_kinds: "ir.DictKinds | None" = None     # AOT mode, tier S2b: `-> dict[K, V]`
+    return_view: str | None = None                  # ... `-> KeysView[K]` (ValuesView, ItemsView): "keys", ...
 
     @property
     def qname(self) -> str:
@@ -427,9 +457,20 @@ def lower(path: Path, *, aot: bool = False) -> ir.Module:
         every = [(s.name, s) for s in tree.body if isinstance(s, ast.FunctionDef)]
         every += [(f"{c.name}.{m.name}", m) for c in tree.body if isinstance(c, ast.ClassDef)
                   for m in c.body if isinstance(m, ast.FunctionDef)]
-        early_kinds = _inferred_kinds(path, source, tree, every)
-        split = tuples.split(tree, early_kinds)
-        early_kinds, tuple_problems = split.kinds, split.problems
+        # tier S2c: a comprehension bound to a name or returned is the loop it means (typedpython/comprehensions.py),
+        # its variables typed at a probe; rewritten before the tuples are split (a loop over a list of tuples)
+        comp_sites = comprehensions.sites(every)
+        comp_types: dict[tuple[int, str], str] = {}
+        loop_types: dict[int, str] = {}
+        early_kinds = _inferred_kinds(path, source, tree, every, comp_sites, comp_types, loops.sites(every), loop_types)
+        rewritten = comprehensions.rewrite(comp_sites, every, early_kinds, comp_types)
+        # ... and a loop over enumerate() / zip() is the loop it means (typedpython/loops.py), comprehensions' included
+        rewritten.kinds, loop_problems = loops.rewrite(every, rewritten.kinds, loop_types)
+        # ... and a range object held in a name is its bounds (typedpython/ranges.py), after the loops that read it
+        rewritten.kinds, range_problems = ranges.rewrite(every, rewritten.kinds)
+        split = tuples.split(tree, rewritten.kinds)
+        early_kinds, tuple_problems = split.kinds, {**split.problems, **range_problems, **loop_problems,
+                                                    **rewritten.problems}
     class_decls, class_skips = _classes(tree, source, info, aot)
     info.classes = class_decls
     skipped.update(class_skips)
@@ -478,7 +519,8 @@ def lower(path: Path, *, aot: bool = False) -> ir.Module:
     env: dict[str, ir.Function] = {
         name: ir.Function(name=name, params=s.params, returns=s.returns, locals={}, body=(), pure=True,
                     may_deopt=False, source_line=s.node.lineno, owner=s.owner,
-                    return_cls=s.return_cls, return_optional=s.return_optional, return_kinds=s.return_kinds)
+                    return_cls=s.return_cls, return_optional=s.return_optional, return_kinds=s.return_kinds,
+                    return_view=s.return_view)
         for name, s in signatures.items()
     }
     results: dict[str, ir.Function | str] = {}
@@ -1218,6 +1260,8 @@ def _signature(fn: ast.FunctionDef, classes: dict[str, ir.ClassDecl] | None = No
             params.append(ir.Param(a.arg, Type.DICT, kinds=dk))             # tier S2b: dict[K, V], set[T]
         elif info is not None and info.aot and (dk := _dict_list_kinds(kind)) is not None:
             params.append(ir.Param(a.arg, Type.DICT_LIST, kinds=dk))        # tier S2b: list[dict[K, V]]
+        elif info is not None and info.aot and (vk := _view_kinds(kind)) is not None:
+            params.append(ir.Param(a.arg, Type.DICT, kinds=vk[1], view=vk[0]))  # tier S2b: a view holds its dict
         else:
             params.append(ir.Param(a.arg, kinds_map.get(_aot_kind(kind) if kinds_map is AOT_KIND else kind, Type.OBJ)))
     if fn.returns is None:
@@ -1236,12 +1280,16 @@ def _signature(fn: ast.FunctionDef, classes: dict[str, ir.ClassDecl] | None = No
     elements, ellipsis = _tuple_annotation(fn.returns, aot=info is not None and info.aot)
     ret_cls, ret_opt = None, False
     ret_kinds = None
+    ret_view = None
     if info is not None and info.aot and not (isinstance(fn.returns, ast.Constant) and fn.returns.value is None):
         ret_kinds = _dict_or_set_kinds(_annotation_kind(fn.returns))
         if ret_kinds is not None:
             returns = Type.DICT                                             # tier S2b: dict[K, V]
         elif (ret_kinds := _dict_list_kinds(_annotation_kind(fn.returns))) is not None:
             returns = Type.DICT_LIST                                        # tier S2b: list[dict[K, V]]
+        elif (vk := _view_kinds(_annotation_kind(fn.returns))) is not None:
+            returns = Type.DICT                                             # tier S2b: a view, its dict returned
+            ret_view, ret_kinds = vk
     if returns == Type.OBJ and classes:
         rc = _class_of(_annotation_kind(fn.returns), classes)
         if rc is not None:
@@ -1249,7 +1297,7 @@ def _signature(fn: ast.FunctionDef, classes: dict[str, ir.ClassDecl] | None = No
         elif info is not None and info.aot and (lc := _obj_list_class(_annotation_kind(fn.returns), classes)):
             returns, ret_cls = Type.OBJ_LIST, lc                             # tier S2a: list[C]
     return _Signature(fn, tuple(params), returns, elements, ellipsis, _src(fn.returns), owner,
-                      return_cls=ret_cls, return_optional=ret_opt, return_kinds=ret_kinds)
+                      return_cls=ret_cls, return_optional=ret_opt, return_kinds=ret_kinds, return_view=ret_view)
 
 
 def _tuple_annotation(annotation: ast.expr, aot: bool = False) -> tuple[tuple[Type, ...] | None, bool]:
@@ -1278,15 +1326,23 @@ def _annotation_kind(annotation: ast.expr) -> str:
 
 def _inferred_kinds(
     path: Path, source: str, tree: ast.Module, functions: list[tuple[str, ast.FunctionDef]],
+    comp_sites: "list[comprehensions.Site] | None" = None, comp_types: dict[tuple[int, str], str] | None = None,
+    loop_sites: list[ast.Name] | None = None, loop_types: dict[int, str] | None = None,
 ) -> dict[str, dict[str, list[tuple[int, str]]]]:
-    """IR function name -> local -> [(line, base type)] for every unannotated assignment (Pyrefly)."""
+    """IR function name -> local -> [(line, base type)] for every unannotated assignment (Pyrefly). AOT mode, tier
+    S2c: with `comp_sites`, also the type of each comprehension variable at its probe, into `comp_types`; with
+    `loop_sites`, the type of each zip() operand at its load in its `for` header, into `loop_types` (the probes insert
+    nothing before a `for` header on its line, so its columns are those of the source)."""
     scopes = rebinding._scopes(tree)
     keys = {id(fn): q for q, fn in functions}
     wanted_scopes = {scopes.index(fn) for _, fn in functions}
     wanted = [a for a in rebinding.assignments(tree) if a.scope in wanted_scopes]
-    if not wanted:
+    if not wanted and not comp_sites and not loop_sites:
         return {}
     probed, probes = rebinding.probe(source, wanted)
+    placed: dict[tuple[int, str], tuple[int, int]] = {}
+    if comp_sites:
+        probed, probes, placed = comprehensions.probe(probed, probes, wanted, comp_sites)
     with tempfile.TemporaryDirectory(prefix="typedpython-frontend-") as work:
         copies = gate._mirror(Path(work), {str(path): probed})
         [copy] = copies
@@ -1294,6 +1350,14 @@ def _inferred_kinds(
         report = pyrefly.run([Path(copy)], [Path(work) / "0", Path(copy).parent, *roots])
         types = report.expression_types.get(copy, {})
 
+    if loop_types is not None:
+        for a in loop_sites or []:
+            if (a.lineno, a.col_offset + 1) in types:
+                loop_types[id(a)] = rebinding._base(types[(a.lineno, a.col_offset + 1)])
+    if comp_types is not None:
+        for key, at in placed.items():
+            if at in types:
+                comp_types[key] = rebinding._base(types[at])
     found: dict[str, dict[str, list[tuple[int, str]]]] = {}
     for p in probes:
         a = p.assignment
@@ -1551,8 +1615,10 @@ class _Lowerer:
         self.list_cls: dict[str, str] = {}      # AOT mode, tier S2a: the element class of an OBJ_LIST local
         self.loop_cls: dict[str, str] = {}      # ... and of the variable of a loop over one
         self.dict_locals: dict[str, ir.DictKinds] = {}     # AOT mode, tier S2b: the kinds of every DICT local
-        self.view_locals: dict[str, str] = {}   # ... and the view ("keys", ...) of a DICT local that is a view
+        self.view_locals: dict[str, str] = {p.name: p.view for p in sig.params   # ... and the view ("keys", ...)
+                                            if isinstance(p, ir.Param) and p.view}  # of a DICT local that is one
         self.dict_want: ir.DictKinds | None = None         # ... and what a dict display being lowered must hold
+        self.view_call_ok = False   # ... a call of a function returning a view is lowered as the view's dict
         self.temps: dict[str, Type] = {}
         self.pre: list[ir.Stmt] = []
         self.hoist_ok = True
@@ -1636,7 +1702,7 @@ class _Lowerer:
             dict_kinds={**{n: k for n, k in self.dict_locals.items() if n in locals_},
                         **{p.name: p.kinds for p in params
                            if isinstance(p, ir.Param) and p.type in (Type.DICT, Type.DICT_LIST)}},
-            return_kinds=self.sig.return_kinds)
+            return_kinds=self.sig.return_kinds, return_view=self.sig.return_view)
         if self.info.aot:
             return fn       # nothing is redone in an interpreter, so there is no continuation to write
         # SPEC N-8 (#152): a snapshot holder gets a Python continuation per loop (OSR-style exit).
@@ -2376,6 +2442,9 @@ class _Lowerer:
                                  "str arrives with tier S1b)")
             return ir.ArgvStr(Type.STR, self.str_int(self.value(node.slice), node.slice, "the index"))
         value = self.sub(node.value)
+        if value.type is Type.DICT and getattr(node, "tp_indexed", False):     # tier S2c: of zip(), reversed()
+            raise Skip(line, f"`{_src(node.value)}` is a dict or a set: zip() and reversed() read their operands by "
+                             "index in an AOT program, so an operand is a list or a str")
         if value.type is Type.DICT:                           # tier S2b: `d[k]`
             if isinstance(node.slice, ast.Slice):
                 raise Skip(line, f"`{_src(node)}` slices a dict")
@@ -2545,27 +2614,61 @@ class _Lowerer:
         if self.view_name(dnode) is not None:
             assert isinstance(dnode, ast.Name)
             return ir.Local(Type.DICT, dnode.id)
+        if self.view_call(dnode) is not None:
+            self.view_call_ok = True
+            try:
+                return self.value(dnode)
+            finally:
+                self.view_call_ok = False
         return self.value(dnode)
+
+    def view_call(self, node: ast.expr) -> ir.Function | None:
+        """The program function or method `node` calls when it returns a view (`-> KeysView[K]`, ...), else None. A
+        method is the one method_call calls directly: `obj.m(...)` of a local `obj` of a compiled class."""
+        if not (self.info.aot and isinstance(node, ast.Call)):
+            return None
+        f: ir.Function | None = None
+        if isinstance(node.func, ast.Name) and not self.is_local(node.func.id):
+            f = self.env.get(node.func.id)
+        elif isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) \
+                and self.is_local(node.func.value.id):
+            cls, _ = self.cls_of_name(node.func.value.id)
+            f = self.env.get(f"{cls}.{node.func.attr}") if cls is not None else None
+            if f is not None and f.owner != cls:
+                f = None
+        return f if f is not None and f.return_view is not None else None
+
+    def view_arg(self, a: ast.expr, view: str, kinds: ir.DictKinds, what: str) -> ir.Expr:
+        """The view `a` passed to (or returned as) `what`, a view `view` of a dict of `kinds`: the view's dict."""
+        found = self.view_of(a)
+        if found is None or found[0] != view or not _view_match(view, self.view_kinds(found[1]), kinds):
+            got = "not a view" if found is None else f"a {_view_type(found[0], self.view_kinds(found[1]))}"
+            raise Skip(getattr(a, "lineno", 0), f"`{_src(a)}` is {got}, but {what} is a view, a "
+                                                f"{_view_type(view, kinds)}")
+        return self.view_dict(found[1])
 
     def view_value(self, name: str, value_node: ast.expr, line: int) -> ir.Expr:
         """The value bound to the view local `name`: `d.keys()` (`values()`, `items()`) of a dict of its kinds, or
         another view local of the same view and kinds (the two then hold the same dict, as CPython's names hold one
         view object)."""
-        view, kinds = self.view_locals[name], self.dict_locals[name]
+        view, kinds = self.view_locals[name], self.name_kinds(name)
         found = self.view_of(value_node)
         if found is None:
-            raise Skip(line, f"`{name}` is a view ({_dict_name(kinds)}.{view}()) but is bound to `{_src(value_node)}`")
-        if found[0] != view or self.view_kinds(found[1]) != kinds:
-            got = f"{_dict_name(self.view_kinds(found[1]))}.{found[0]}()"
-            raise Skip(line, f"`{name}` is a view {_dict_name(kinds)}.{view}() but is bound to `{_src(value_node)}`, "
-                             f"a view {got}")
+            raise Skip(line, f"`{name}` is a view, a {_view_type(view, kinds)}, but is bound to `{_src(value_node)}`")
+        if found[0] != view or not _view_match(view, self.view_kinds(found[1]), kinds):
+            got = _view_type(found[0], self.view_kinds(found[1]))
+            raise Skip(line, f"`{name}` is a view, a {_view_type(view, kinds)}, but is bound to `{_src(value_node)}`, "
+                             f"a {got}")
         return ir.DictView(Type.DICT, view, self.view_dict(found[1]))
 
     def view_kinds(self, dnode: ast.expr) -> ir.DictKinds:
         """The kinds of the dict of a view (`dnode` as view_of gives it)."""
         if self.view_name(dnode) is not None:
             assert isinstance(dnode, ast.Name)
-            return self.dict_locals[dnode.id]
+            return self.name_kinds(dnode.id)
+        if (f := self.view_call(dnode)) is not None:
+            assert f.return_kinds is not None
+            return f.return_kinds                                       # type: ignore[return-value]
         kinds = self.node_dict_kinds(dnode)
         assert kinds is not None
         return kinds
@@ -2582,6 +2685,8 @@ class _Lowerer:
     def dict_arg(self, p: object, a: ast.expr, callee: str) -> ir.Expr:
         """The argument `a` for the parameter `p` of `callee` (a method or `__init__`): a dict takes the parameter's
         kinds (dicts are invariant), anything else is its value."""
+        if isinstance(p, ir.Param) and p.view is not None and p.kinds is not None:
+            return self.view_arg(a, p.view, p.kinds, f"parameter `{p.name}` of `{callee}`")
         if isinstance(p, ir.Param) and p.type is Type.DICT and p.kinds is not None:
             return self.dict_coerce(self.dict_operand(a, p.kinds), p.kinds, a, f"parameter `{p.name}` of `{callee}`")
         if isinstance(p, ir.Param) and p.type is Type.DICT_LIST and p.kinds is not None:
@@ -2603,7 +2708,7 @@ class _Lowerer:
             if node.func.id in ("dict", "set") and self.builtin(node.func.id):
                 return True
             f = self.env.get(node.func.id)
-            return f is not None and f.returns is Type.DICT
+            return f is not None and f.returns is Type.DICT and f.return_view is None
         return self.node_dict_kinds(node) is not None
 
     def node_dict_kinds(self, node: ast.expr) -> ir.DictKinds | None:
@@ -2628,7 +2733,7 @@ class _Lowerer:
             return self.dict_value_kinds(outer) if node.func.attr in ("get", "setdefault", "pop") else None
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and not self.is_local(node.func.id):
             f = self.env.get(node.func.id)
-            return f.return_kinds if f is not None and f.returns is Type.DICT else None
+            return f.return_kinds if f is not None and f.returns is Type.DICT and f.return_view is None else None
         return None
 
     def node_list_kinds(self, node: ast.expr) -> ir.DictKinds | None:
@@ -2808,6 +2913,8 @@ class _Lowerer:
         (its view, the name itself, see view_dict); else None."""
         if (view := self.view_name(node)) is not None:
             return view, node
+        if (f := self.view_call(node)) is not None:
+            return f.return_view, node                                  # type: ignore[return-value]
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
                 and node.func.attr in ("keys", "values", "items") and not node.args and not node.keywords:
             kinds = self.node_dict_kinds(node.func.value)
@@ -3015,9 +3122,7 @@ class _Lowerer:
                 raise Skip(line, "copy() takes no argument")
             return ir.DictCopy(Type.DICT, (kt, vt), d)
         if m in ("keys", "values", "items"):
-            raise Skip(line, f"`{_src(node)}`: a view is used at once in an AOT program (the iterable of a `for` loop, "
-                             "len(), `in`, its truth, print / str / repr / an f-string) or bound to a name; a view is "
-                             "passed or returned not yet")
+            raise Skip(line, _view_misuse(f"`{_src(node)}`", m, (kt, vt)))
         if m in ("update", "clear"):
             raise Skip(line, f"uses the result of `{_src(node)}`, which returns None")
         if m == "popitem":
@@ -3119,6 +3224,8 @@ class _Lowerer:
             view, it = it.func.attr, it.func.value
         elif (named := self.view_name(it)) is not None:
             view = named                                            # tier S2b: `for k in ks` of a view local
+        elif (f := self.view_call(it)) is not None:
+            view = f.return_view or "keys"                          # ... and of a function that returns a view
         elif not self.is_dict_node(it):
             return None
         if view == "items":
@@ -4069,6 +4176,10 @@ class _Lowerer:
         if self.info.aot and returns is Type.DICT_LIST:                    # tier S2b: a list of dicts
             value = self.dict_list_value(node.value, self.sig.return_kinds, "the return value")
             return self.take() + [ir.Return(value)]
+        if self.info.aot and returns is Type.DICT and self.sig.return_view is not None:   # tier S2b: a view
+            assert self.sig.return_kinds is not None
+            value = self.view_arg(node.value, self.sig.return_view, self.sig.return_kinds, "the return value")
+            return self.take() + [ir.Return(value)]
         if self.info.aot and returns is Type.DICT:                         # tier S2b
             kinds = self.sig.return_kinds
             value = self.dict_coerce(self.dict_operand(node.value, kinds), kinds, node.value, "the return value")
@@ -4126,12 +4237,16 @@ class _Lowerer:
         return e
 
     def condition(self, node: ast.expr) -> ir.Expr:
-        if self.view_name(node) is not None:
+        if self.has_view_truth(node):
             return self.view_truth(node)
         return self.truth(self.sub(node, cond=2), node)
 
+    def has_view_truth(self, node: ast.expr) -> bool:
+        """`node` is a view local or a call of a function returning a view, whose truth is view_truth (tier S2b)."""
+        return self.view_name(node) is not None or self.view_call(node) is not None
+
     def view_truth(self, node: ast.expr) -> ir.Expr:
-        """The truth of a view local: its dict is not empty (tier S2b)."""
+        """The truth of a view local or of a call returning a view: its dict is not empty (tier S2b)."""
         return ir.Compare(Type.BOOL, ir.CompareKind.NE, ir.DictLen(Type.I64, self.view_dict(node)), ir.Const(Type.I64, 0))
 
     def truth(self, e: ir.Expr, node: ast.expr) -> ir.Expr:
@@ -4268,6 +4383,9 @@ class _Lowerer:
             return self.fstring(node)
         if isinstance(node, ast.IfExp) and self.info.aot:
             return self.aot_ifexp(node)
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp)) and self.info.aot:
+            raise Skip(line, f"`{_src(node)}`: an AOT program compiles a {UNSUPPORTED[type(node).__name__]} as the "
+                             "value of an assignment to a name or of a `return` (tier S2c): bind it to a name first")
         raise _unsupported(node)
 
     def str_const(self, v: str, node: ast.AST) -> ir.Expr:
@@ -4315,11 +4433,7 @@ class _Lowerer:
                 raise Skip(node.lineno, f"`{name}` is read but never assigned")
             t = self.local_type(name, node.lineno)
             if name in self.view_locals:
-                raise Skip(node.lineno, f"`{name}` is a view of a dict ({_dict_name(self.dict_locals[name])}."
-                                        f"{self.view_locals[name]}()): an AOT program uses a view by a `for` loop, "
-                                        "len(), `in`, its truth, print / str / repr / an f-string, or binds it to "
-                                        "another view name; what a view has beyond that (set operators, comparison, "
-                                        "list() or dict() of it) and passing or returning it are not yet")
+                raise Skip(node.lineno, _view_misuse(f"`{name}`", self.view_locals[name], self.name_kinds(name)))
             if t is Type.STR_OPT and name in self.not_none:
                 return ir.StrNarrow(Type.STR, ir.Local(t, name))       # tier S2a: proved not None here
             return ir.Local(t, name)
@@ -4456,7 +4570,7 @@ class _Lowerer:
 
     def unary(self, node: ast.UnaryOp) -> ir.Expr:
         if isinstance(node.op, ast.Not):
-            operand = self.view_truth(node.operand) if self.view_name(node.operand) is not None \
+            operand = self.view_truth(node.operand) if self.has_view_truth(node.operand) \
                 else self.truth(self.sub(node.operand), node.operand)
             return ir.UnaryOp(Type.BOOL, ir.UnaryOpKind.NOT, operand)
         if not isinstance(node.op, (ast.USub, ast.UAdd, ast.Invert)):
@@ -4618,7 +4732,7 @@ class _Lowerer:
         for i, v in enumerate(node.values):
             if i > 0:
                 self.hoist_ok = False  # evaluated only if the earlier operands did not decide
-            if cond and self.view_name(v) is not None:
+            if cond and self.has_view_truth(v):
                 e = self.view_truth(v)                              # tier S2b: `k in ks and ks`
             else:
                 e = self.sub(v, 1 if cond else 0)
@@ -4858,7 +4972,7 @@ class _Lowerer:
                 raise Skip(line, "bool() takes one argument in an AOT program")
             if isinstance(args[0], ast.Name) and args[0].id in self.arrays:
                 return ir.Compare(Type.BOOL, ir.CompareKind.NE, ir.Len(Type.I64, args[0].id), ir.Const(Type.I64, 0))
-            if self.view_name(args[0]) is not None:
+            if self.has_view_truth(args[0]):
                 return self.view_truth(args[0])
             x = self.value(args[0])
             return self.truth(x, args[0])
@@ -4960,9 +5074,17 @@ class _Lowerer:
         if name in self.info.aot_tuples and not tuple_ok:
             raise Skip(node.lineno, f"`{_src(node)}` returns a tuple, which an AOT program can only unpack into "
                                     f"names (`a, b = {name}(...)`)")
+        if callee.return_view is not None and not self.view_call_ok:
+            assert callee.return_kinds is not None
+            raise Skip(node.lineno, _view_misuse(f"`{_src(node)}`", callee.return_view, callee.return_kinds))
+        self.view_call_ok = False       # (an argument that calls a view function is its own use)
         self.hoist_ok = False
         args: list[ir.Expr] = []
         for p, a in zip(callee.params, node.args):
+            if isinstance(p, ir.Param) and p.view is not None:             # tier S2b: a view passed on
+                assert p.kinds is not None
+                args.append(self.view_arg(a, p.view, p.kinds, f"parameter `{p.name}` of `{name}`"))
+                continue
             if isinstance(p, ir.ArrayParam):
                 if not (isinstance(a, ast.Name) and a.id in self.arrays):
                     raise Skip(a.lineno, f"the argument `{_src(a)}` of `{name}` must be the name of a list (parameter "
@@ -5035,6 +5157,10 @@ class _Lowerer:
             return None
         assert cls is not None
         if self.info.aot:
+            if callee.return_view is not None and not self.view_call_ok:       # tier S2b: as aot_call
+                assert callee.return_kinds is not None
+                raise Skip(node.lineno, _view_misuse(f"`{_src(node)}`", callee.return_view, callee.return_kinds))
+            self.view_call_ok = False
             self.check_not_none(func.value.id, cls, func.value)
             recv: ir.Expr = ir.Local(Type.OBJ, func.value.id)
             self.hoist_ok = False
