@@ -537,8 +537,16 @@ conditions, so a variable has its declared type). The accumulator is hidden and 
 bound once the comprehension is complete and `xs = [x + 1 for x in xs]` iterates the old list. The first iterable is
 evaluated first, and a dict comprehension's key before its value (through a temporary of the key type). A
 comprehension anywhere else (an operand, an argument) is refused as "bind it to a name first", and so are `:=` and a
-comprehension, generator or lambda inside one. Then `enumerate`, `zip` (shortest), `reversed`, `range` objects as iterables, in `for` loops
-and comprehensions; `sum`, `any`, `all`, `min` / `max` of an iterable (`ValueError: min() iterable argument is
+comprehension, generator or lambda inside one. Second step in (agent proposal, not confirmed): `enumerate` and
+`zip` as the iterable of a `for` loop or of a comprehension clause (typedpython/loops.py), each unpacked into names.
+`for i, x in enumerate(it, start)` takes any iterable a loop takes and an int constant start; it is the loop over
+`it` with a hidden counter bound to `i` before the body, so a `continue` counts and `i` keeps its last value after
+the loop. `for a, b in zip(xs, ys)` takes names of lists or strs (or a str constant) that the loop does not rebind;
+it reads each by index while the index is below every length, the lengths read at each step left to right, so a
+list that grows in the loop is seen growing as CPython's list iterator sees it. zip's names are typed as the
+elements of the operands, from the type Pyrefly gives each operand in the `for` header. A dict or a set operand
+is refused (zip reads by index), and so are `strict=`, a single name as the target, and enumerate or zip anywhere
+else. Then `zip` of other iterables, `reversed`, `range` objects as iterables, in `for` loops and comprehensions; `sum`, `any`, `all`, `min` / `max` of an iterable (`ValueError: min() iterable argument is
 empty`); `sorted(xs, key=..., reverse=...)` and `list.sort(...)` with a key that is a compiled function or a
 lambda written in place: CPython's own algorithm (timsort, `listsort` in Objects/listobject.c, ported as it is), so
 the order of equal and of unordered elements (NaN) is CPython's, not merely some stable order. `bytes`: an immutable

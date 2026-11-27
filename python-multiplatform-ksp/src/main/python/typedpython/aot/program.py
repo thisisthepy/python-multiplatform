@@ -39,7 +39,8 @@ SCALAR_NAMES = ("int", "float", "bool")
 LIST_ELEMENTS = ("int", "float")             # `list[int]` and `list[float]` are the native lists
 # builtin names a program must not rebind: the AOT mode compiles a call of each of these as the builtin
 BUILTINS_USED = frozenset({"print", "float", "range", "len", "abs", "min", "max", "int", "bool", "list",
-                           "str", "repr", "ord", "chr"})        # (str ... chr: tier S1)
+                           "str", "repr", "ord", "chr",        # (str ... chr: tier S1)
+                           "enumerate", "zip"})                 # (tier S2c: the iterable of a loop)
 RESERVED_PREFIX = "__tp_"
 MAIN = frontend.AOT_ENTRY
 
@@ -98,6 +99,12 @@ class _Report:
 
 
 # --- the checks ----------------------------------------------------------------------------------
+
+def _int_constant(e: ast.expr) -> bool:
+    if isinstance(e, ast.UnaryOp) and isinstance(e.op, (ast.USub, ast.UAdd)):
+        e = e.operand
+    return isinstance(e, ast.Constant) and type(e.value) is int
+
 
 def _bound_names(fn: ast.AST) -> set[str]:
     """Every name a function binds anywhere inside it (parameters and assignment targets)."""
@@ -411,6 +418,10 @@ class _Checker:
 
     def for_stmt(self, s: ast.For) -> None:
         it = s.iter
+        if isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id in ("enumerate", "zip") \
+                and it.func.id not in self.shadow:
+            self.counted_loop(s, it)                # tier S2c (typedpython/loops.py)
+            return
         if isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id == "range":
             if not (1 <= len(it.args) <= 3 and not it.keywords):
                 self.rep.error(s, "aot/statement", "for", "range() takes one to three positional arguments")
@@ -433,6 +444,49 @@ class _Checker:
         if s.orelse:
             self.rep.error(s.orelse[0], "aot/statement", "for-else", "`else` on a loop is outside the first AOT step")
         for b in s.body + s.orelse:
+            self.stmt(b)
+
+    def counted_loop(self, s: ast.For, it: ast.Call) -> None:
+        """Tier S2c: `for i, x in enumerate(it[, start])` (start an int constant) and `for a, b in zip(xs, ys, ...)` (names
+        of lists or strs, which the front end checks), each unpacked into names."""
+        n = it.func.id                                                  # type: ignore[attr-defined]
+        if it.keywords:
+            self.rep.error(it, "aot/call", n, f"{n}() takes no keyword argument in an AOT program")
+        if n == "enumerate":
+            if not 1 <= len(it.args) <= 2:
+                self.rep.error(it, "aot/call", n, "enumerate() takes an iterable and an optional start")
+                return
+            if len(it.args) == 2 and not _int_constant(it.args[1]):
+                self.rep.error(it.args[1], "aot/call", n, "the start of enumerate() is an int constant in an AOT program")
+            if not (isinstance(s.target, ast.Tuple) and len(s.target.elts) == 2
+                    and isinstance(s.target.elts[0], ast.Name)):
+                self.rep.error(s, "aot/statement", "for", "enumerate() is unpacked into two names in an AOT program "
+                                                         "(`for i, x in enumerate(xs)`)")
+                return
+            self.for_stmt(ast.copy_location(ast.For(target=s.target.elts[1], iter=it.args[0], body=s.body,
+                                                    orelse=s.orelse, type_comment=None), s))
+            return
+        if not it.args:
+            self.rep.error(it, "aot/call", n, "zip() takes one or more lists or strs")
+            return
+        for a in it.args:
+            if not (isinstance(a, ast.Name) or (isinstance(a, ast.Constant) and isinstance(a.value, str))):
+                self.rep.error(a, "aot/call", n, "zip() takes names of lists or strs (or a str constant) in an AOT "
+                                                 "program")
+            self.expr(a)
+        if not (isinstance(s.target, ast.Tuple) and len(s.target.elts) == len(it.args)
+                and all(isinstance(e, ast.Name) for e in s.target.elts)):
+            self.rep.error(s, "aot/statement", "for", f"zip() of {len(it.args)} is unpacked into {len(it.args)} names "
+                                                     "in an AOT program (`for a, b in zip(xs, ys)`)")
+        bound = {x.id for b in s.body for x in ast.walk(b) if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Store)}
+        bound |= {e.id for e in ast.walk(s.target) if isinstance(e, ast.Name)}
+        for a in it.args:
+            if isinstance(a, ast.Name) and a.id in bound:
+                self.rep.error(a, "aot/statement", "for", f"the loop rebinds `{a.id}`, which zip() reads: CPython's zip "
+                                                         "keeps the object it was given, an AOT zip reads the name")
+        if s.orelse:
+            self.rep.error(s.orelse[0], "aot/statement", "for-else", "`else` on a loop is outside the first AOT step")
+        for b in s.body:
             self.stmt(b)
 
     def expr_stmt(self, s: ast.Expr) -> None:

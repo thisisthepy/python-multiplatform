@@ -71,6 +71,74 @@ def test_list_set_and_dict_comprehensions_are_the_loops_they_mean(tmp_path: Path
     _compare(tmp_path, COMPS, [["a,bb,ccc", "1,2,5"], ["b", "5"], ["x,y", "3,0"]])
 
 
+LOOPS = """
+import sys
+
+
+def weigh(words: list[str], nums: list[int]) -> int:
+    t = 0
+    for w, n in zip(words, nums):
+        t += len(w) * n
+    return t
+
+
+def main() -> None:
+    words = sys.argv[1].split(",")
+    nums = [int(t) for t in sys.argv[2].split(",")]
+    i = 99
+    for i, w in enumerate(words):
+        print(i, w)
+    print(i)
+    for i, w in enumerate(words, 1):
+        if i == 2:
+            continue
+        print(i, w, end=";")
+    print()
+    for i, c in enumerate("h\u00e9!", -1):
+        print(i, c)
+    d = {"a": 1, "b": 2}
+    for i, k in enumerate(d):
+        print(i, k)
+    for i, v in enumerate(d.values()):
+        print(i, v)
+    for i, (k, v) in enumerate(d.items()):
+        for j, w in enumerate(words):
+            print(i, k, v, j, w, end=";")
+    print()
+    for i, j in enumerate(range(3, 6)):
+        print(i * j)
+    for w, n in zip(words, nums):
+        print(w * n)
+    print(weigh(words, nums))
+    for a, b, c in zip(words, nums, "xyz"):
+        print(a, b, c)
+    idx = [i * 10 for i, w in enumerate(words) if w]
+    both = {w: n for w, n in zip(words, nums)}
+    print(idx, both)
+    grow = [1, 2]
+    for x, y in zip(grow, nums):
+        grow.append(x + y)
+        print(x, y)
+    print(grow)
+    for i, n in enumerate(nums):
+        if i > 5:
+            break
+        print(100 // n)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_enumerate_and_zip_are_the_loops_they_mean(tmp_path: Path):
+    """`for i, x in enumerate(it, start)` counts beside the loop over `it` (a list, a str, a dict, a view, a range), the
+    counter left at its last value as in CPython; `for a, b in zip(xs, ys)` reads each list or str by index up to the
+    shortest, the length read at every step (a list that grows in the loop is seen growing, as CPython's iterator sees
+    it); both in a `for` statement and in a comprehension. Agent proposal, not owner-confirmed."""
+    _compare(tmp_path, LOOPS, [["a,bb,ccc", "1,2,5"], ["b", "5,6"], ["x,y", "3,0"]])
+
+
 def _rules(tmp_path: Path, source: str) -> set[tuple[str, str]]:
     with pytest.raises(aot.AotError) as raised:
         aot.generate(_write(tmp_path, source))
@@ -90,6 +158,16 @@ MAIN = '\n\ndef main() -> None:\n    f()\n\n\nif __name__ == "__main__":\n    ma
     ("    xs = [1, 2]\n    ys = [x > 1 for x in xs]\n    print(ys)\n", "list[bool]"),
     # a name bound inside it (`:=`) leaks to the enclosing scope in CPython; `:=` is outside the AOT mode anyway
     ("    xs = [1, 2]\n    ys = [(y := x) for x in xs]\n    print(ys)\n", "NamedExpr"),
+    # enumerate and zip are the iterable of a loop, unpacked into names
+    ("    xs = [1, 2]\n    for t in enumerate(xs):\n        print(t)\n", "unpacked into"),
+    ("    xs = [1, 2]\n    e = enumerate(xs)\n    print(e)\n", "enumerate"),
+    ("    xs = [1, 2]\n    n = len(xs)\n    for i, x in enumerate(xs, n):\n        print(i, x)\n", "start"),
+    ("    xs = [1, 2]\n    for a, b in zip(xs, xs, strict=True):\n        print(a, b)\n", "keyword"),
+    ("    xs = [1, 2]\n    for a, b in zip(xs, [3]):\n        print(a, b)\n", "names"),
+    ("    xs = [1, 2]\n    for a in zip(xs, xs):\n        print(a)\n", "unpacked into"),
+    ("    xs = [1, 2]\n    ys = [3]\n    for a, b in zip(xs, ys):\n        xs = ys\n        print(a, b)\n", "rebinds"),
+    ("    d = {1: 2}\n    xs = [1, 2]\n    for a, b in zip(d, xs):\n        print(a, b)\n", "a list or a str"),
+    ("    d = {1: 2}\n    xs = [1, 2]\n    ys = [a + b for a, b in zip(d, xs)]\n    print(ys)\n", "a dict or a set"),
 ])
 def test_what_a_comprehension_cannot_do_yet_is_refused_with_the_reason(tmp_path: Path, body: str, reason: str):
     found = _rules(tmp_path, "def f() -> None:\n" + body + MAIN)

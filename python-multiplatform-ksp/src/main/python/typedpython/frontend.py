@@ -115,7 +115,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from typedpython import comprehensions, gate, ir, pyrefly, rebinding, resume, taint, tuples
+from typedpython import comprehensions, gate, ir, loops, pyrefly, rebinding, resume, taint, tuples
 from typedpython.ir import Type
 
 I64_MIN, I64_MAX = -2**63, 2**63 - 1
@@ -461,10 +461,13 @@ def lower(path: Path, *, aot: bool = False) -> ir.Module:
         # its variables typed at a probe; rewritten before the tuples are split (a loop over a list of tuples)
         comp_sites = comprehensions.sites(every)
         comp_types: dict[tuple[int, str], str] = {}
-        early_kinds = _inferred_kinds(path, source, tree, every, comp_sites, comp_types)
+        loop_types: dict[int, str] = {}
+        early_kinds = _inferred_kinds(path, source, tree, every, comp_sites, comp_types, loops.sites(every), loop_types)
         rewritten = comprehensions.rewrite(comp_sites, every, early_kinds, comp_types)
+        # ... and a loop over enumerate() / zip() is the loop it means (typedpython/loops.py), comprehensions' included
+        rewritten.kinds, loop_problems = loops.rewrite(every, rewritten.kinds, loop_types)
         split = tuples.split(tree, rewritten.kinds)
-        early_kinds, tuple_problems = split.kinds, {**split.problems, **rewritten.problems}
+        early_kinds, tuple_problems = split.kinds, {**split.problems, **loop_problems, **rewritten.problems}
     class_decls, class_skips = _classes(tree, source, info, aot)
     info.classes = class_decls
     skipped.update(class_skips)
@@ -1321,14 +1324,17 @@ def _annotation_kind(annotation: ast.expr) -> str:
 def _inferred_kinds(
     path: Path, source: str, tree: ast.Module, functions: list[tuple[str, ast.FunctionDef]],
     comp_sites: "list[comprehensions.Site] | None" = None, comp_types: dict[tuple[int, str], str] | None = None,
+    loop_sites: list[ast.Name] | None = None, loop_types: dict[int, str] | None = None,
 ) -> dict[str, dict[str, list[tuple[int, str]]]]:
     """IR function name -> local -> [(line, base type)] for every unannotated assignment (Pyrefly). AOT mode, tier
-    S2c: with `comp_sites`, also the type of each comprehension variable at its probe, into `comp_types`."""
+    S2c: with `comp_sites`, also the type of each comprehension variable at its probe, into `comp_types`; with
+    `loop_sites`, the type of each zip() operand at its load in its `for` header, into `loop_types` (the probes insert
+    nothing before a `for` header on its line, so its columns are those of the source)."""
     scopes = rebinding._scopes(tree)
     keys = {id(fn): q for q, fn in functions}
     wanted_scopes = {scopes.index(fn) for _, fn in functions}
     wanted = [a for a in rebinding.assignments(tree) if a.scope in wanted_scopes]
-    if not wanted and not comp_sites:
+    if not wanted and not comp_sites and not loop_sites:
         return {}
     probed, probes = rebinding.probe(source, wanted)
     placed: dict[tuple[int, str], tuple[int, int]] = {}
@@ -1341,6 +1347,10 @@ def _inferred_kinds(
         report = pyrefly.run([Path(copy)], [Path(work) / "0", Path(copy).parent, *roots])
         types = report.expression_types.get(copy, {})
 
+    if loop_types is not None:
+        for a in loop_sites or []:
+            if (a.lineno, a.col_offset + 1) in types:
+                loop_types[id(a)] = rebinding._base(types[(a.lineno, a.col_offset + 1)])
     if comp_types is not None:
         for key, at in placed.items():
             if at in types:
@@ -2429,6 +2439,9 @@ class _Lowerer:
                                  "str arrives with tier S1b)")
             return ir.ArgvStr(Type.STR, self.str_int(self.value(node.slice), node.slice, "the index"))
         value = self.sub(node.value)
+        if value.type is Type.DICT and getattr(node, "tp_zip", False):     # tier S2c: an operand of zip()
+            raise Skip(line, f"`{_src(node.value)}` is a dict or a set: zip() reads each operand by index in an AOT "
+                             "program, so an operand is a list or a str")
         if value.type is Type.DICT:                           # tier S2b: `d[k]`
             if isinstance(node.slice, ast.Slice):
                 raise Skip(line, f"`{_src(node)}` slices a dict")
