@@ -195,6 +195,52 @@ def test_reversed_is_the_loop_it_means(tmp_path: Path):
     _compare(tmp_path, REVERSED, [["a,bb,ccc", "1,2,5"], ["b", "5,6"], ["x,y", "3,0"]])
 
 
+RANGES = """
+import sys
+
+
+def main() -> None:
+    n = int(sys.argv[1])
+    r = range(n)
+    s = range(2, n + 3, 3)
+    t = range(n, -2, -2)
+    print(r, s, t, len(r), len(s), len(t))
+    print(f"{r}|{s!r}|{t} end", str(s), repr(t))
+    for x in s:
+        print(x, end=" ")
+    print()
+    total = 0
+    for x in t:
+        total += x
+    print(total)
+    k = 4
+    print(k in s, 5 in s, 3 in t, 2 in t, -1 not in t, n in r, 0 in r)
+    if r:
+        print("r has", len(r))
+    if not t:
+        print("t is empty")
+    print(bool(s), not r)
+    sq = [x * x for x in s if x != 5]
+    print(sq)
+    for i, x in enumerate(t):
+        print(i, x, end=";")
+    print()
+    r = range(1, n)
+    print(r, len(r), 1 in r, bool(r))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_a_range_object_is_its_bounds(tmp_path: Path):
+    """`r = range(a, b, STEP)` (a constant step) is held as its start and stop: a `for` loop over it, len(), `in`, its
+    truth and its repr (print, str, repr, an f-string) are CPython's, for a positive and a negative step and an empty
+    range. Agent proposal, not owner-confirmed."""
+    _compare(tmp_path, RANGES, [["5"], ["0"], ["1"], ["-3"]])
+
+
 def _rules(tmp_path: Path, source: str) -> set[tuple[str, str]]:
     with pytest.raises(aot.AotError) as raised:
         aot.generate(_write(tmp_path, source))
@@ -230,6 +276,13 @@ MAIN = '\n\ndef main() -> None:\n    f()\n\n\nif __name__ == "__main__":\n    ma
     ("    xs = [1, 2]\n    r = reversed(xs)\n    print(r)\n", "reversed"),
     ("    xs = [1, 2]\n    for x in reversed(xs):\n        xs = [3]\n        print(x)\n", "rebinds"),
     ("    xs = [1, 2]\n    for x in reversed(xs + xs):\n        print(x)\n", "names"),
+    # a range object is used by a loop, len(), `in`, its truth and its repr; its step is an int constant
+    ("    r = range(3)\n    print(list(r))\n", "a range object"),
+    ("    r = range(3)\n    print(r[0])\n", "a range object"),
+    ("    r = range(3)\n    r = 4\n    print(r)\n", "a range object"),
+    ("    n = 2\n    r = range(0, 9, n)\n    print(len(r))\n", "step"),
+    ("    r = range(1, 5, 0)\n    print(len(r))\n", "must not be zero"),
+    ("    r = range(3)\n    xs = [1, 2]\n    for a, b in zip(r, xs):\n        print(a, b)\n", "a list or a str"),
 ])
 def test_what_a_comprehension_cannot_do_yet_is_refused_with_the_reason(tmp_path: Path, body: str, reason: str):
     found = _rules(tmp_path, "def f() -> None:\n" + body + MAIN)

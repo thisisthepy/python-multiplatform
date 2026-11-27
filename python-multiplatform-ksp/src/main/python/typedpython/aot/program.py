@@ -297,6 +297,13 @@ class _Checker:
                     and ((self.var_classes.get(t0.value.id), t0.attr) in self.field_list_class
                          or (self.var_classes.get(t0.value.id), t0.attr) in self.field_dict_lists)):
                 pass                        # tier S2a: `self.items = []`, an empty list of the field's class (S2b: dicts)
+            elif (isinstance(t0, ast.Name) and isinstance(s.value, ast.Call) and isinstance(s.value.func, ast.Name)
+                  and s.value.func.id == "range" and "range" not in self.shadow):
+                # tier S2c: a range object held in a name (typedpython/ranges.py checks its uses and its step)
+                if s.value.keywords or not 1 <= len(s.value.args) <= 3:
+                    self.rep.error(s.value, "aot/call", "range", "range() takes one to three positional arguments")
+                for a in s.value.args:
+                    self.expr(a)
             else:
                 self.expr(s.value)
             if len(s.targets) == 1 and isinstance(s.targets[0], ast.Name):

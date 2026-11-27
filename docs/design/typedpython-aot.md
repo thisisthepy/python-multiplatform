@@ -548,8 +548,13 @@ elements of the operands, from the type Pyrefly gives each operand in the `for` 
 is refused (zip reads by index), and so are `strict=`, a single name as the target, and enumerate or zip anywhere
 else. `for x in reversed(xs)` (also inside enumerate()) takes the same operands and reads from the end, the index
 checked against the length at every step as CPython's reversed list iterator checks it: a list that shrinks in the
-loop ends it early, one that grows is not seen growing. Then `zip` and `reversed` of other iterables, `range`
-objects as values, in `for` loops and comprehensions; `sum`, `any`, `all`, `min` / `max` of an iterable (`ValueError: min() iterable argument is
+loop ends it early, one that grows is not seen growing. A range object held in a name (`r = range(a, b, STEP)`,
+typedpython/ranges.py) is its start and stop in hidden int locals, its length computed once per binding, and its
+constant step; a `for` loop over it (also in a comprehension or an enumerate()), len(), `in`, its truth and its
+repr (print, str, repr, an f-string) are rewritten into what CPython computes. A step that is not an int
+constant, a step of 0 (CPython's ValueError at run time, refused at compile time here), a name bound to a range
+and to anything else, and any other use (passing, returning, indexing, list(), zip(), reversed()) are refused.
+Then `zip` and `reversed` of other iterables, range objects passed and indexed, in `for` loops and comprehensions; `sum`, `any`, `all`, `min` / `max` of an iterable (`ValueError: min() iterable argument is
 empty`); `sorted(xs, key=..., reverse=...)` and `list.sort(...)` with a key that is a compiled function or a
 lambda written in place: CPython's own algorithm (timsort, `listsort` in Objects/listobject.c, ported as it is), so
 the order of equal and of unordered elements (NaN) is CPython's, not merely some stable order. `bytes`: an immutable

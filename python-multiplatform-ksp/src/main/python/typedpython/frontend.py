@@ -115,7 +115,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from typedpython import comprehensions, gate, ir, loops, pyrefly, rebinding, resume, taint, tuples
+from typedpython import comprehensions, gate, ir, loops, pyrefly, ranges, rebinding, resume, taint, tuples
 from typedpython.ir import Type
 
 I64_MIN, I64_MAX = -2**63, 2**63 - 1
@@ -466,8 +466,11 @@ def lower(path: Path, *, aot: bool = False) -> ir.Module:
         rewritten = comprehensions.rewrite(comp_sites, every, early_kinds, comp_types)
         # ... and a loop over enumerate() / zip() is the loop it means (typedpython/loops.py), comprehensions' included
         rewritten.kinds, loop_problems = loops.rewrite(every, rewritten.kinds, loop_types)
+        # ... and a range object held in a name is its bounds (typedpython/ranges.py), after the loops that read it
+        rewritten.kinds, range_problems = ranges.rewrite(every, rewritten.kinds)
         split = tuples.split(tree, rewritten.kinds)
-        early_kinds, tuple_problems = split.kinds, {**split.problems, **loop_problems, **rewritten.problems}
+        early_kinds, tuple_problems = split.kinds, {**split.problems, **range_problems, **loop_problems,
+                                                    **rewritten.problems}
     class_decls, class_skips = _classes(tree, source, info, aot)
     info.classes = class_decls
     skipped.update(class_skips)
