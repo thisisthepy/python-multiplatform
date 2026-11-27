@@ -110,8 +110,8 @@ fail, then implement.
   So the bootstrap writes the PEM certificates of one store into `<cacheDir>/python-multiplatform-cacerts.pem`
   and sets `SSL_CERT_FILE` to it. The store is `/apex/com.android.conscrypt/cacerts` when it holds
   certificates (Android 14+), otherwise `/system/etc/security/cacerts`. The two are not merged, because
-  the APEX store is the updatable one and a CA removed from it must stay removed (agent proposal, not
-  confirmed). User-installed CAs are not included (apps cannot read them). An app that already set
+  the APEX store is the updatable one and a CA removed from it must stay removed (leader approval,
+  2026-11-27, of the proposal and this reason). User-installed CAs are not included (apps cannot read them). An app that already set
   `SSL_CERT_FILE` keeps its value. `Status: implemented` (needs a device),
   `PythonBootstrapTest.initializeGivesSslTheDeviceCaCertificates` and `CaCertificateBundleTest.kt`.
 - **L-6** A consumer's Python payload (jar resource on desktop, APK asset on Android) is extracted once
