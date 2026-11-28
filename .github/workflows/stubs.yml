@@ -30,17 +30,17 @@ jobs:
       contents: write   # attaching the stubs to a tag's release
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           java-version: '21'
           distribution: 'zulu'
           cache: 'gradle'
 
       - name: Setup Python (for mypy)
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.13'
 
@@ -84,7 +84,7 @@ jobs:
           (cd build && zip -qr kotlin-stubs.zip kotlin-stubs)
 
       - name: Upload the stubs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: kotlin-stubs
           path: build/kotlin-stubs
@@ -107,17 +107,17 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           java-version: '21'
           distribution: 'zulu'
           cache: 'gradle'
 
       - name: Setup Python (for mypy)
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.13'
 

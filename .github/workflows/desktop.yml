@@ -23,14 +23,14 @@ jobs:
         shell: bash
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # JDK 17 as well: the compiler plugin and KSP compile with a languageVersion=17 toolchain, and
       # Gradle's auto-detection does not find the runner's preinstalled 17 on Windows (batch runs
       # 44945907475 and 45973628546). setup-java exports JAVA_HOME_17_X64; the Gradle step names it
       # on Windows. 21, listed last, stays the default.
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           java-version: |
             17
@@ -40,7 +40,7 @@ jobs:
           cache: 'gradle'
 
       - name: Cache Konan
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           # Cache Kotlin Native compiler and dependencies
           path: ~/.konan
@@ -84,10 +84,10 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           java-version: '21'
           distribution: 'zulu'
@@ -122,7 +122,7 @@ jobs:
 
       - name: Upload the test reports
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: artifact-fixture-reports
           path: python-multiplatform-gradle-plugin/fixtures/artifact/build/reports/tests/desktopTest
@@ -153,7 +153,7 @@ jobs:
 
       - name: Upload the real-window test report
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: desktop-window-test-reports
           path: python-multiplatform-compose/fixtures/compose/build/reports/tests/desktopWindowTest
@@ -166,10 +166,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           java-version: '21'
           distribution: 'zulu'
@@ -199,7 +199,7 @@ jobs:
 
       - name: Upload the test reports
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gradle-plugin-unit-reports
           path: |
@@ -211,17 +211,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           java-version: '21'
           distribution: 'zulu'
           cache: 'gradle'
 
       - name: Cache Konan
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.konan
           key: ${{ runner.os }}-konan-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
@@ -265,13 +265,13 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # JDK 17 as well: the compiler plugin and KSP compile with a languageVersion=17 toolchain, and
       # Gradle's auto-detection does not find the runner's preinstalled 17 on Windows (batch run
       # 44945907475). setup-java exports JAVA_HOME_17_X64; the Gradle step names it. 21 stays the default.
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           java-version: |
             17
@@ -280,7 +280,7 @@ jobs:
           cache: 'gradle'
 
       - name: Cache Konan
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.konan
           key: ${{ runner.os }}-konan-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
@@ -354,10 +354,10 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.x'
 
@@ -375,12 +375,12 @@ jobs:
       WHEEL_DIR: ${{ github.workspace }}/.tmp/pythonx-compose-dist
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Beside this repository, as on a developer machine; the wheel is built from it, not installed
       # from PyPI, so the scenarios follow pythonx-compose develop.
       - name: Checkout pythonx-compose develop
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: thisisthepy/pythonx-compose
           ref: develop
@@ -388,7 +388,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v10.4.0
 
       - name: Build the pythonx-compose wheel
         run: |
@@ -397,14 +397,14 @@ jobs:
           git -C .tmp/pythonx-compose log -1 --format='pythonx-compose %h %s'
 
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           java-version: '21'
           distribution: 'zulu'
           cache: 'gradle'
 
       - name: Cache Konan
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.konan
           key: ${{ runner.os }}-konan-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
@@ -461,7 +461,7 @@ jobs:
 
       - name: Upload the test reports
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: notebook-e2e-reports
           path: |
@@ -481,10 +481,10 @@ jobs:
       WHEEL_DIR: ${{ github.workspace }}/.tmp/pythonx-compose-dist
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Checkout pythonx-compose develop
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: thisisthepy/pythonx-compose
           ref: develop
@@ -492,13 +492,13 @@ jobs:
           fetch-depth: 1
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v10.4.0
 
       - name: Build the pythonx-compose wheel
         run: uv build --wheel --directory .tmp/pythonx-compose --out-dir "$WHEEL_DIR"
 
       - name: Setup Java 21 (Gradle)
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           java-version: '21'
           distribution: 'zulu'
