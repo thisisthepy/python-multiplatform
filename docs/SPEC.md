@@ -1350,11 +1350,14 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 - **T-2** The desktop build acquires python-build-standalone's free-threaded asset
   (`...-freethreaded-install_only_stripped`), unpacks it under `<target>-freethreaded`, links desktop
   Kotlin/Native against `libpython3.15t`, and the Gradle plugin stages a free-threaded `PYTHONHOME` by
-  default (`pythonBindings.pythonFreeThreaded` defaults to `true`). `Status: partial` (desktop only, per
-  T-1), `GP/PythonHomeStagingTest.kt`, `PM/desktopTest/.../FreeThreadedGCGateTest.kt`,
-  `PM/desktopTest/.../DesktopFreeThreadedBuildTest.kt`. When it was an opt-in, 3.14t ran the whole
-  desktop suite (236 tests, 0 failures; ROADMAP §9); the 3.15t default has not been observed running the
-  suite in this revision. `Py_LIMITED_API` is not defined, so `abi3t` is not a blocker.
+  default (`pythonBindings.pythonFreeThreaded` defaults to `true`). `Status: implemented` on macOS
+  (`ci.yml` batch run 45973628546, 2026-11-27: `desktop.yml` "Desktop Tests (macos-latest)" ran
+  `:python-multiplatform:desktopTest` on 3.15t green, and the Kotlin/Native desktop tests on Linux x86_64
+  and Windows x86_64 were green); `partial` for the desktop JVM on Linux and Windows, whose first runs in
+  the same batch failed (Linux: 782 tests, 2 failed, the `libpython3.15t.so` stub of #551; Windows: stopped
+  at configuration), tracked by #551 (P-2, N-4). `GP/PythonHomeStagingTest.kt`,
+  `PM/desktopTest/.../FreeThreadedGCGateTest.kt`, `PM/desktopTest/.../DesktopFreeThreadedBuildTest.kt`.
+  `Py_LIMITED_API` is not defined, so `abi3t` is not a blocker.
   The library's Android and iOS builds (#328 step 2) acquire the project's own free-threaded archives
   from the GitHub release `cpython-<version>t-mobile` (#163, `build-ft-mobile.yml`), each verified against
   its SHA-256 in `python-checksums.properties` (`android-aarch64-<version>-freethreaded`,
@@ -1365,8 +1368,11 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `libpython3.15t.so` and `assets/<abi>/lib/python3.15t/` into the AAR for arm64-v8a and x86_64; iOS
   compiles and links against the 3.15t `Python.xcframework` and gives the simulator test binary
   `lib/python3.15t/`. python.org's and BeeWare's GIL mobile archives are no longer acquired.
-  `Status: implemented` for Android (x86_64 emulator) and iOS (simulator), CI run 44889681538 (see T-1);
-  arm64-v8a and androidNative are compiled and packaged but not run on a device in CI.
+  `Status: implemented` for Android (x86_64 emulator) and iOS (simulator), CI run 44889681538 (see T-1),
+  observed again in batch run 45973628546 (2026-11-27: the x86_64 emulator ran 610 instrumented tests,
+  0 failed, `AndroidFreeThreadedBuildTest` among them; the iOS simulator ran 579 library tests, 0 failed,
+  `IosFreeThreadedBuildTest` among them); arm64-v8a and androidNative are compiled and packaged but not
+  run on a device in CI.
 - **T-2a** Free-threaded CPython on mobile through the Gradle plugin (#328 step 1; owner decision #158 of
   2026-10-04, "Free-threaded is the default and the only build", baseline 3.15t; leader decision of
   2026-11-13 on #328: no opt-in `pythonBindings.ios.freeThreaded` flag, 3.15t is the only build). There
@@ -1381,10 +1387,11 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   staged. The library's own iOS klib is built against the same 3.15t framework (T-2, #328 step 2), so a
   consumer never pairs a GIL klib with a 3.15t framework. Android: the plugin stages nothing for Android
   (libpython and the stdlib travel inside the library's AAR, L-5); the library acquires both Android
-  archives itself (T-2). `Status: partial` (unit tests, `GP/IosConsumerWiringTest.kt`, and the simulator run of
+  archives itself (T-2). `Status: implemented` (unit tests, `GP/IosConsumerWiringTest.kt` and
+  `GP/IosPythonHomeLayoutTest.kt`, and the simulator run of
   `python-multiplatform-gradle-plugin/fixtures/ios-consumer` in `ios.yml` `ios-consumer`, whose probe line also
-  checks the staged build is 3.15t (#328), pending its first run;
-  `GP/IosPythonHomeLayoutTest.kt`).
+  checks the staged build is 3.15t (#328): `IOS_CONSUMER_PROBE stdlib=ok ext=ok payload=ok ft=ok` in CI run
+  44889681538 and again in batch run 45973628546).
 - **T-3** `python-multiplatform` publishes per-target, per-flavour CPython include directories as
   `Provider<Directory>` carrying the extraction task (`cpythonIncludeDirectories` extension; see
   `docs/platforms/python-version-acquisition.md` §7). The default flavour of every accessor is the one
@@ -1402,8 +1409,8 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   carries the free-threaded value (the metadata and extension rules are agent proposals, not
   confirmed). `Status: partial`, `GP/EmbeddedPythonVersionTest.kt`
   (`freeThreadedIsDecidedPerVariant`), `PM/desktopTest/.../PublishedPythonVersionResourceTest.kt`,
-  `PM/androidInstrumentedTest/.../AndroidFreeThreadedBuildTest.kt` (`theAarSaysItIsFreeThreaded`, not
-  yet run on an emulator).
+  `PM/androidInstrumentedTest/.../AndroidFreeThreadedBuildTest.kt` (`theAarSaysItIsFreeThreaded`, run on
+  the x86_64 emulator in CI run 44889681538 and batch run 45973628546).
 - **T-5** Every acquired CPython reports the pinned version: `PY_VERSION` in each target's `patchlevel.h`
   equals `pythonVersion`, and a `downloadPython_*` task fails the build, naming the target and both
   versions, when it does not (issue #47: iOS shipped 3.14.6 under `pythonVersion=3.14.7`). The iOS
@@ -1471,8 +1478,9 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
 ## 9. Planned
 
 - **N-1** Sub-interpreter-free parallelism on free-threaded CPython on every platform (3.15t only on
-  desktop since #158, and on Android, androidNative and iOS since #328, compiled but not yet run on an
-  emulator or simulator; wasm under #175; see T-1, T-2 and ROADMAP §9). `Status: partial`.
+  desktop since #158, on Android, androidNative and iOS since #328, and on wasm since #175 (#542); run on
+  the x86_64 emulator and the iOS simulator, not on an arm64-v8a device or through androidNative's
+  `artTest`; see T-1, T-2 and ROADMAP §9). `Status: partial`.
 - **N-2** Compose through Python on Android, iOS and wasm. `Status: planned`.
 - **N-3** Binding Kotlin/Native klib declarations at run time (B-2). `Status: planned`.
 - **N-4** Linux and Windows desktop runs in CI (P-2). `Status: planned`.
